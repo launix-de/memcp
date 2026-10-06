@@ -17,8 +17,96 @@ Copyright (C) 2026  Carl-Philip Hänsch
 
 package scm
 
+import "sort"
 import "sync"
 import "unsafe"
+import "container/heap"
+
+// streamTopK holds only the best OFFSET+LIMIT complete values. The producer
+// may reuse a flat tuple after emit returns; copy retained tuples at admission.
+// All access, including the prepared comparator, belongs to the emit mutex.
+type streamTopKEntry struct {
+	value    Scmer
+	sequence uint64
+}
+
+type streamTopK struct {
+	entries []streamTopKEntry
+	compare SerialProc
+	args    [2]Scmer
+}
+
+func (h *streamTopK) before(a, b streamTopKEntry) bool {
+	h.args[0], h.args[1] = a.value, b.value
+	if ToBool(h.compare.Call(h.args[:])) {
+		return true
+	}
+	h.args[0], h.args[1] = b.value, a.value
+	if ToBool(h.compare.Call(h.args[:])) {
+		return false
+	}
+	return a.sequence < b.sequence
+}
+func (h *streamTopK) Len() int           { return len(h.entries) }
+func (h *streamTopK) Less(i, j int) bool { return h.before(h.entries[j], h.entries[i]) }
+func (h *streamTopK) Swap(i, j int)      { h.entries[i], h.entries[j] = h.entries[j], h.entries[i] }
+func (h *streamTopK) Push(v any)         { h.entries = append(h.entries, v.(streamTopKEntry)) }
+func (h *streamTopK) Pop() any {
+	i := len(h.entries) - 1
+	v := h.entries[i]
+	h.entries[i] = streamTopKEntry{}
+	h.entries = h.entries[:i]
+	return v
+}
+
+func streamWindowTopK(a []Scmer, offset, limit int) Scmer {
+	if limit < 0 {
+		panic("stream_window_reduce: ordered producer requires a finite limit")
+	}
+	if offset > int(^uint(0)>>1)-limit {
+		panic("stream_window_reduce: ordered window overflows")
+	}
+	result := a[3]
+	if limit == 0 {
+		return result
+	}
+	keep := offset + limit
+	h := streamTopK{compare: PrepareSerialProc(a[5])}
+	var mu sync.Mutex
+	var sequence uint64
+	emit := NewFunc(func(values ...Scmer) Scmer {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(values) != 1 {
+			panic("stream_window_reduce: emit expects exactly one complete value")
+		}
+		entry := streamTopKEntry{value: values[0], sequence: sequence}
+		sequence++
+		if len(h.entries) >= keep && !h.before(entry, h.entries[0]) {
+			return NewNil()
+		}
+		if entry.value.IsSlice() {
+			entry.value = NewSlice(append([]Scmer(nil), entry.value.Slice()...))
+		}
+		if len(h.entries) < keep {
+			heap.Push(&h, entry)
+		} else {
+			h.entries[0] = entry
+			heap.Fix(&h, 0)
+		}
+		return NewNil()
+	})
+	producer := PrepareSerialProc(a[4])
+	producer.Call([]Scmer{emit})
+	sort.Slice(h.entries, func(i, j int) bool { return h.before(h.entries[i], h.entries[j]) })
+	reducer := PrepareSerialProc(a[2])
+	var args [2]Scmer
+	for i := offset; i < len(h.entries); i++ {
+		args[0], args[1] = result, h.entries[i].value
+		result = reducer.Call(args[:])
+	}
+	return result
+}
 
 /*
  Sliding window helpers for LEAD/LAG window functions.
@@ -221,6 +309,9 @@ func init_window() {
 			if limit < -1 {
 				panic("stream_window_reduce: limit must be -1 or non-negative")
 			}
+			if len(a) == 6 && !a[5].IsNil() {
+				return streamWindowTopK(a, offset, limit)
+			}
 			result = a[3]
 			if limit == 0 {
 				return result
@@ -267,6 +358,7 @@ func init_window() {
 				{Kind: "func", Label: "reduce", Description: "serial accumulator over complete values", Params: []*TypeDescriptor{{Kind: "any", Label: "acc"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
 				{Kind: "any", Label: "neutral", Description: "initial accumulator"},
 				{Kind: "func", Label: "producer", Description: "nested streaming plan called with a one-value emit callback", Params: []*TypeDescriptor{{Kind: "func", Label: "emit", Description: "emits one complete value", Params: []*TypeDescriptor{{Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any", Label: "result"}}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "less", Description: "optional strict ordering for an unordered producer; retains only offset+limit values and requires a finite limit", Optional: true, Params: []*TypeDescriptor{{Kind: "any", Label: "left"}, {Kind: "any", Label: "right"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {

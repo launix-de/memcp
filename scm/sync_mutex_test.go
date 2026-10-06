@@ -19,6 +19,7 @@ package scm
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -210,4 +211,59 @@ func TestOrderedProducerMergeCancelledQueryJoinsWorkers(t *testing.T) {
 	if !finished.Load() {
 		t.Fatal("cancelled merge left its producer running")
 	}
+}
+
+func TestStreamWindowTopKOwnsBorrowedTuples(t *testing.T) {
+	borrowed := []Scmer{NewInt(0)}
+	producer := NewFunc(func(a ...Scmer) Scmer {
+		for _, v := range []int64{5, 3, 3, 1, 4, 2} {
+			borrowed[0] = NewInt(v)
+			Apply(a[0], NewSlice(borrowed))
+		}
+		borrowed[0] = NewInt(999)
+		return NewNil()
+	})
+	less := NewFunc(func(a ...Scmer) Scmer { return LessScm(a[0].Slice()[0], a[1].Slice()[0]) })
+	var got []int64
+	reduce := NewFunc(func(a ...Scmer) Scmer {
+		got = append(got, a[1].Slice()[0].Int())
+		return a[0]
+	})
+	Apply(Globalenv.Vars[Symbol("stream_window_reduce")], NewInt(1), NewInt(3), reduce, NewNil(), producer, less)
+	if len(got) != 3 || got[0] != 2 || got[1] != 3 || got[2] != 3 {
+		t.Fatalf("Top-K = %v", got)
+	}
+}
+
+func TestStreamWindowTopKSerializesParallelProducer(t *testing.T) {
+	producer := NewFunc(func(a ...Scmer) Scmer {
+		var wg sync.WaitGroup
+		for worker := 0; worker < 4; worker++ {
+			wg.Add(1)
+			go func(worker int) {
+				defer wg.Done()
+				for i := 0; i < 100; i++ {
+					Apply(a[0], NewInt(int64(worker*100+i)))
+				}
+			}(worker)
+		}
+		wg.Wait()
+		return NewNil()
+	})
+	var got []int64
+	reduce := NewFunc(func(a ...Scmer) Scmer { got = append(got, a[1].Int()); return a[0] })
+	Apply(Globalenv.Vars[Symbol("stream_window_reduce")], NewInt(397), NewInt(3), reduce, NewNil(), producer, NewFunc(GreaterScm))
+	if len(got) != 3 || got[0] != 2 || got[1] != 1 || got[2] != 0 {
+		t.Fatalf("parallel Top-K = %v", got)
+	}
+}
+
+func TestStreamWindowTopKRejectsUnboundedWindow(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("unbounded Top-K accepted")
+		}
+	}()
+	producer := NewFunc(func(_ ...Scmer) Scmer { t.Fatal("invalid producer ran"); return NewNil() })
+	Apply(Globalenv.Vars[Symbol("stream_window_reduce")], NewInt(0), NewInt(-1), NewFunc(LessScm), NewNil(), producer, NewFunc(LessScm))
 }

@@ -141,6 +141,151 @@ test_cases:
         - ".join-order:"
         - "(sort rows"
 
+  - name: Correlated joined Top-K merges equal prefixes with offset 0
+    setup:
+      - sql: INSERT INTO sq_order_vendor VALUES (40,100,'vendor a',200)
+      - sql: INSERT INTO sq_order_offer VALUES (1,40,40)
+    sql: |
+      SELECT v.balance, c.name AS country_name, v.name AS vendor_name, p.id
+      FROM sq_order_product p, sq_order_vendor v, sq_order_offer o,
+           sq_order_country c, sq_order_region r
+      WHERE p.id = o.product_id
+        AND v.id = o.vendor_id
+        AND v.country_id = c.id
+        AND c.region_id = r.id
+        AND p.size = 15
+        AND p.kind LIKE '%alloy'
+        AND r.name = 'north'
+        AND o.cost = (
+          SELECT MIN(o2.cost)
+          FROM sq_order_offer o2, sq_order_vendor v2,
+               sq_order_country c2, sq_order_region r2
+          WHERE p.id = o2.product_id
+            AND v2.id = o2.vendor_id
+            AND v2.country_id = c2.id
+            AND c2.region_id = r2.id
+            AND r2.name = 'north'
+        )
+      ORDER BY v.balance DESC, c.name, v.name, p.id
+      LIMIT 2 OFFSET 0
+    expect:
+      rows: 2
+      data:
+        - balance: 200
+          country_name: country a
+          vendor_name: vendor a
+          id: 1
+        - balance: 200
+          country_name: country a
+          vendor_name: vendor a
+          id: 2
+    cleanup:
+      - sql: DELETE FROM sq_order_offer WHERE vendor_id=40
+      - sql: DELETE FROM sq_order_vendor WHERE id=40
+
+  - name: Correlated joined Top-K merges equal prefixes with offset 1
+    setup:
+      - sql: INSERT INTO sq_order_vendor VALUES (40,100,'vendor a',200)
+      - sql: INSERT INTO sq_order_offer VALUES (1,40,40)
+    sql: |
+      SELECT v.balance, c.name AS country_name, v.name AS vendor_name, p.id
+      FROM sq_order_product p, sq_order_vendor v, sq_order_offer o,
+           sq_order_country c, sq_order_region r
+      WHERE p.id = o.product_id
+        AND v.id = o.vendor_id
+        AND v.country_id = c.id
+        AND c.region_id = r.id
+        AND p.size = 15
+        AND p.kind LIKE '%alloy'
+        AND r.name = 'north'
+        AND o.cost = (
+          SELECT MIN(o2.cost)
+          FROM sq_order_offer o2, sq_order_vendor v2,
+               sq_order_country c2, sq_order_region r2
+          WHERE p.id = o2.product_id
+            AND v2.id = o2.vendor_id
+            AND v2.country_id = c2.id
+            AND c2.region_id = r2.id
+            AND r2.name = 'north'
+        )
+      ORDER BY v.balance DESC, c.name, v.name, p.id
+      LIMIT 1 OFFSET 1
+    expect:
+      rows: 1
+      data:
+        - balance: 200
+          country_name: country a
+          vendor_name: vendor a
+          id: 2
+    cleanup:
+      - sql: DELETE FROM sq_order_offer WHERE vendor_id=40
+      - sql: DELETE FROM sq_order_vendor WHERE id=40
+
+  - name: Correlated joined Top-K retains no complete row collector
+    sql: |
+      EXPLAIN SELECT v.balance, c.name AS country_name, v.name AS vendor_name, p.id
+      FROM sq_order_product p, sq_order_vendor v, sq_order_offer o,
+           sq_order_country c, sq_order_region r
+      WHERE p.id = o.product_id
+        AND v.id = o.vendor_id
+        AND v.country_id = c.id
+        AND c.region_id = r.id
+        AND p.size = 15
+        AND p.kind LIKE '%alloy'
+        AND r.name = 'north'
+        AND o.cost = (
+          SELECT MIN(o2.cost)
+          FROM sq_order_offer o2, sq_order_vendor v2,
+               sq_order_country c2, sq_order_region r2
+          WHERE p.id = o2.product_id
+            AND v2.id = o2.vendor_id
+            AND v2.country_id = c2.id
+            AND c2.region_id = r2.id
+            AND r2.name = 'north'
+        )
+      ORDER BY v.balance DESC, c.name, v.name, p.id
+      LIMIT 100
+    expect:
+      rows: 1
+      result_contains:
+        - stream_window_reduce
+        - scan_order
+      result_not_contains:
+        - _collect_lock
+        - (sort rows
+
+  - name: Joined Top-K cache guards finite and unbounded LIMIT bindings
+    setup:
+      - sql: INSERT INTO sq_order_vendor VALUES (40,100,'vendor a',200)
+      - sql: INSERT INTO sq_order_offer VALUES (1,40,40)
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT v.balance, c.name AS country_name, v.name AS vendor_name, p.id\nFROM sq_order_product p, sq_order_vendor v, sq_order_offer o,\n     sq_order_country c, sq_order_region r\nWHERE p.id = o.product_id\n  AND v.id = o.vendor_id\n  AND v.country_id = c.id\n  AND c.region_id = r.id\n  AND p.size = 15\n  AND p.kind LIKE '%alloy'\n  AND r.name = 'north'\n  AND o.cost = (\n    SELECT MIN(o2.cost)\n    FROM sq_order_offer o2, sq_order_vendor v2,\n         sq_order_country c2, sq_order_region r2\n    WHERE p.id = o2.product_id\n      AND v2.id = o2.vendor_id\n      AND v2.country_id = c2.id\n      AND c2.region_id = r2.id\n      AND r2.name = 'north'\n  )\nORDER BY v.balance DESC, c.name, v.name, p.id\nLIMIT @window OFFSET 0\n")
+        (define rows (newsession))
+        (define run (lambda (window)
+          (begin
+            (sess "window" window)
+            (rows "ids" (list))
+            (sql_execute_formula sess nil
+              (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+              (lambda (row) (rows "ids" (append (rows "ids") (get_assoc row "id"))))
+              (lambda (_fields) nil))
+            (rows "ids"))))
+        (define actual (list (run 1) (run 2) (run 0) (run -1) (run 1)))
+        (if (equal? actual
+          (list (list 1) (list 1 2) (list) (list 1 2 1) (list 1))) true
+          (error (concat "cached joined window lost ordering or LIMIT binding: " (serialize actual)))))
+    expect:
+      data:
+        - true
+    cleanup:
+      - sql: DELETE FROM sq_order_offer WHERE vendor_id=40
+      - sql: DELETE FROM sq_order_vendor WHERE id=40
+
   - name: "Ordered join intermediate relation is query-local"
     sql: "SHOW TABLES"
     expect:

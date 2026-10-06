@@ -5863,13 +5863,6 @@ columns cannot change group cardinality because the primary key is unique. */
 				sources default_alias stages condition (cons src bound_sources) rest))
 		_ true)))
 
-(define ordered_join_native_limit_supported? (lambda (sources plan default_alias order_items stages final_condition)
-	(begin
-		(define ordered_sources (join_optimizer_sources_for_order sources
-			(join_optimizer_tree_aliases plan)))
-		(order_items_follow_join_tree?
-			ordered_sources default_alias order_items stages final_condition))))
-
 (define downstream_sources_at_most_one_driver_row? (lambda (sources default_alias final_condition stages)
 	(if (empty_list? sources)
 		true
@@ -8428,7 +8421,12 @@ until the caller has selected this physical alternative. */
 					(coalesceNil joined_rows legacy_probe_rows) 0.65))
 				/* Both alternatives are fully costed in the same generated cost domain.
 				Do not override a close comparison with an operator-specific preference. */
-				(define materialized_choice (if (planner_cost_better? scan_cost legacy_cost)
+				/* Nested ordered scans require distinguishing prefixes. The native
+				join operator orders complete tuples and does not need that proof. */
+				(define legacy_order_supported (order_items_follow_join_tree?
+					sources default_alias order_items stages final_condition))
+				(define materialized_choice (if (or (not legacy_order_supported)
+					(planner_cost_better? scan_cost legacy_cost))
 					"scan_join_order" "legacy_join_tree"))
 				(define materialized_cost (if (equal? materialized_choice "scan_join_order")
 					scan_cost legacy_cost))
@@ -8437,8 +8435,9 @@ until the caller has selected this physical alternative. */
 					"scan_join_order_batched_probe" materialized_choice))
 				(define decision_id (concat "scan_join_order:"
 					(stable_structural_hash (join_optimizer_tree_aliases plan) true)))
-				(define alternatives (list "legacy_join_tree" "scan_join_order"
-					"scan_join_order_batched_probe"))
+				(define alternatives (merge (list
+					(if legacy_order_supported (list "legacy_join_tree") '())
+					(list "scan_join_order" "scan_join_order_batched_probe"))))
 				(define physical_planning_session
 					(qassoc_get facts (quote physical_planning_session) nil))
 				(define chosen (planner_physical_choice decision_id normal_choice alternatives
@@ -8468,7 +8467,7 @@ until the caller has selected this physical alternative. */
 						(list "offset" (qassoc_get spec (quote offset) 0))))
 					(list "alternatives" (list
 						(list (list "plan" "legacy_join_tree")
-							(list "cost" (planner_cost_explain legacy_cost)))
+							(list "cost" (if legacy_order_supported (planner_cost_explain legacy_cost) nil)))
 						(list (list "plan" "scan_join_order")
 							(list "cost" (planner_cost_explain scan_cost)))
 						(list (list "plan" "scan_join_order_batched_probe")
@@ -11136,31 +11135,52 @@ physical decision and preserve its runtime recompile gate. */
 		(define emit (symbol (concat id "_emit")))
 		(define row (symbol (concat id "_row")))
 		(define collect_lock (symbol (concat id "_collect_lock")))
+		(define compiled_limit (planner_literal_value limit_value (planner_context_session facts)))
+		(define bounded (and (number? compiled_limit) (>= compiled_limit 0)))
+		(define driver (join_optimizer_source_by_alias sources (join_optimizer_tree_first_alias plan)))
+		/* Leading driver keys improve Top-K admission order, but never justify
+		braking: complete joined tuples, including tied prefixes, own the window. */
+		(define prefix (if bounded (car (split_order_items_for_join_driver
+			sources default_alias driver order_items stages final_condition '())) '()))
 		(define unordered (build_join_scan_rows schema sources plan default_alias needed_exprs
-			final_condition materialized_fields '() 0 -1 false stages facts))
-		(list (quote begin)
-			(list (quote define) rows (list (quote newsession)))
-			(list (quote define) collect_lock (list (quote mutex)))
-			(list rows "count" 0)
-			(list (quote define) emit (quote resultrow))
-			(list (quote set) (quote resultrow)
-				(list (quote lambda) (list row)
-					(list collect_lock (physical_query_tx_symbol)
-						(list (quote lambda) '() (list (quote begin)
-							(list rows (list rows "count") row)
-							(list rows "count" (list (quote +) (list rows "count") 1)))))))
-			unordered
-			(list (quote set) (quote resultrow) emit)
-			(list (quote map)
-				(build_materialized_order_window
-					(list (quote map) (list (quote produceN) (list rows "count"))
-						(list (quote lambda) (list (quote __join_materialized_index))
-							(list rows (quote __join_materialized_index))))
-					order_positions
-					(order_relations_default order_items)
-					(coalesceNil offset_value 0) (coalesceNil limit_value -1))
-				(list (quote lambda) (list row)
-					(list emit (list (quote materialized_visible_row) row visible_width))))))
+			final_condition materialized_fields prefix 0 -1 false stages facts))
+		(define finite_window
+			(list (quote stream_window_reduce) (coalesceNil offset_value 0) (coalesceNil limit_value -1)
+				(list (quote lambda) (list (quote _acc) row)
+					(list (quote begin)
+						(list (quote resultrow) (list (quote materialized_visible_row) row visible_width))
+						(quote _acc))) nil
+				(list (quote lambda) (list emit)
+					(list (quote begin)
+						(list (quote set) (quote resultrow) emit) unordered))
+				(list (quote lambda) (list (quote __union_left) (quote __union_right))
+					(union_materialized_compare_body order_positions (order_relations_default order_items)))))
+		/* Reading the compile binding records a parameter guard; another LIMIT
+		regime recompiles rather than retaining an incompatible finite window. */
+		(if bounded finite_window
+			(list (quote begin)
+				(list (quote define) rows (list (quote newsession)))
+				(list (quote define) collect_lock (list (quote mutex)))
+				(list rows "count" 0)
+				(list (quote define) emit (quote resultrow))
+				(list (quote set) (quote resultrow)
+					(list (quote lambda) (list row)
+						(list collect_lock (physical_query_tx_symbol)
+							(list (quote lambda) '() (list (quote begin)
+								(list rows (list rows "count") row)
+								(list rows "count" (list (quote +) (list rows "count") 1)))))))
+				unordered
+				(list (quote set) (quote resultrow) emit)
+				(list (quote map)
+					(build_materialized_order_window
+						(list (quote map) (list (quote produceN) (list rows "count"))
+							(list (quote lambda) (list (quote __join_materialized_index))
+								(list rows (quote __join_materialized_index))))
+						order_positions
+						(order_relations_default order_items)
+						(coalesceNil offset_value 0) (coalesceNil limit_value -1))
+					(list (quote lambda) (list row)
+						(list emit (list (quote materialized_visible_row) row visible_width)))))))
 ))
 
 (define lower_zero_source_query_block_as_dataset_reduce (lambda (block fields row_mapper reduce_expr neutral_expr)
@@ -11437,6 +11457,11 @@ physical decision and preserve its runtime recompile gate. */
 						(planner_context_session (qb_facts block))))))
 				(define hierarchical_order (and (not global_order_required)
 					(order_items_follow_join_tree? ordered_sources first_alias order_items stage_catalog final_condition)))
+				(define native_order_spec (if (and (not direct_order_safe) (not hierarchical_order)
+					(query_limit_active? (qb_offset block) (qb_limit block)))
+					(scan_join_order_spec scan_sources scan_plan first_alias
+						(extract_assoc fields (lambda (_title expr) expr)) final_condition order_items
+						(qb_offset block) (qb_limit block) stage_catalog (qb_facts block) false) nil))
 				(define needed_exprs (merge (list
 					(extract_assoc fields (lambda (_title expr) expr))
 					(list final_condition)
@@ -11453,27 +11478,23 @@ physical decision and preserve its runtime recompile gate. */
 						(qb_schema block) scan_sources scan_plan first_alias needed_exprs
 						final_condition fields order_items (qb_offset block) (qb_limit block)
 						direct_order_safe stage_catalog (qb_facts block))
-					(if hierarchical_order
-						(if (ordered_join_native_limit_supported?
-							scan_sources scan_plan first_alias order_items stage_catalog final_condition)
-							(join_ordered_streaming_limit_plan
-								(qb_schema block) scan_sources scan_plan first_alias
-								(extract_assoc fields (lambda (_title expr) expr)) needed_exprs
-								final_condition order_items (qb_offset block) (qb_limit block) stage_catalog
-								(qb_facts block)
-								(lambda (probe_work_rows scalar_probe)
-									(cons (quote list) (lower_join_result_fields
-										scan_sources first_alias
-										(if (nil? scalar_probe) fields
-											(rewrite_physical_scalar_probe_as_true scalar_probe fields))
-										probe_work_rows)))
-								(list (quote lambda) (list (quote _acc) (quote __ordered_join_row))
-									(list (quote begin)
-										(list (quote resultrow) (quote __ordered_join_row))
-										(quote _acc)))
-								nil)
-							(neumann_fail "build_queryplan"
-								"ordered variable-cardinality join requires a streaming consumer"))
+					(if (or hierarchical_order (not (nil? native_order_spec)))
+						(join_ordered_streaming_limit_plan
+							(qb_schema block) scan_sources scan_plan first_alias
+							(extract_assoc fields (lambda (_title expr) expr)) needed_exprs
+							final_condition order_items (qb_offset block) (qb_limit block) stage_catalog
+							(qb_facts block)
+							(lambda (probe_work_rows scalar_probe)
+								(cons (quote list) (lower_join_result_fields
+									scan_sources first_alias
+									(if (nil? scalar_probe) fields
+										(rewrite_physical_scalar_probe_as_true scalar_probe fields))
+									probe_work_rows)))
+							(list (quote lambda) (list (quote _acc) (quote __ordered_join_row))
+								(list (quote begin)
+									(list (quote resultrow) (quote __ordered_join_row))
+									(quote _acc)))
+							nil)
 						(if global_order_required
 							(lower_materialized_join_order
 								(qb_schema block) scan_sources scan_plan first_alias needed_exprs
