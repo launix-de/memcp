@@ -55336,11 +55336,26 @@ func init_list() {
 		Fn: func(a ...Scmer) Scmer {
 			var mergeFn func(Scmer, Scmer) Scmer
 			if len(a) > 3 {
-				mfn := PrepareSerialProc(a[3])
-				var mfnArgs [2]Scmer
+				// An association update calls its merger at most once. Preparing a
+				// serial callback tree here cannot amortize its construction.
+				merge := a[3]
 				mergeFn = func(oldV, newV Scmer) Scmer {
-					mfnArgs[0], mfnArgs[1] = oldV, newV
-					return mfn.Call(mfnArgs[:2])
+					if merge.GetTag() == tagFunc || (merge.IsProc() && merge.Proc().Compiled != nil) {
+						// Keep native argument ownership and authoritative
+						// compiled entry dispatch unchanged.
+						prepared := PrepareSerialProc(merge)
+						return prepared.Call([]Scmer{oldV, newV})
+					}
+					if merge.IsProc() {
+						return Apply(merge, oldV, newV)
+					}
+					// Keep the serial adapter's constant-result compatibility.
+					if merge.GetTag() == tagAny {
+						if fn, ok := merge.Any().(func(...Scmer) Scmer); ok {
+							return fn(oldV, newV)
+						}
+					}
+					return merge
 				}
 			}
 			slice, fd := asAssoc(a[0], "set_assoc")
@@ -148500,11 +148515,26 @@ func init_list() {
 		Fn: func(a ...Scmer) Scmer {
 			var mergeFn func(Scmer, Scmer) Scmer
 			if len(a) > 3 {
-				mfn := PrepareSerialProc(a[3])
-				var mfnArgs [2]Scmer
+				// An association update calls its merger at most once. Preparing a
+				// serial callback tree here cannot amortize its construction.
+				merge := a[3]
 				mergeFn = func(oldV, newV Scmer) Scmer {
-					mfnArgs[0], mfnArgs[1] = oldV, newV
-					return mfn.Call(mfnArgs[:2])
+					if merge.GetTag() == tagFunc || (merge.IsProc() && merge.Proc().Compiled != nil) {
+						// Keep native argument ownership and authoritative
+						// compiled entry dispatch unchanged.
+						prepared := PrepareSerialProc(merge)
+						return prepared.Call([]Scmer{oldV, newV})
+					}
+					if merge.IsProc() {
+						return Apply(merge, oldV, newV)
+					}
+					// Keep the serial adapter's constant-result compatibility.
+					if merge.GetTag() == tagAny {
+						if fn, ok := merge.Any().(func(...Scmer) Scmer); ok {
+							return fn(oldV, newV)
+						}
+					}
+					return merge
 				}
 			}
 			slice, fd := asAssoc(a[0], "set_assoc_mut")

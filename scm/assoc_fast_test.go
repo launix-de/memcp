@@ -255,3 +255,104 @@ func BenchmarkMergeAssocImmutable(b *testing.B) {
 		})
 	}
 }
+
+func TestAssocMergeOneShotCallbacks(t *testing.T) {
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		for _, fast := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/fast=%v", name, fast), func(t *testing.T) {
+				setter := Globalenv.Vars[Symbol(name)]
+				makeDictionary := func() Scmer {
+					if fast {
+						dict := NewFastDictValue(8)
+						dict.Set(NewInt(1), NewInt(11), nil)
+						return NewFastDict(dict)
+					}
+					return NewSlice([]Scmer{NewInt(1), NewInt(11)})
+				}
+				calls := 0
+				callback := NewFunc(func(args ...Scmer) Scmer {
+					calls++
+					if len(args) != 2 || args[0].Int() != 11 || args[1].Int() != 7 {
+						t.Fatalf("merger arguments = %v; want old=11, new=7", args)
+					}
+					return NewInt(4)
+				})
+				result := Apply(setter, makeDictionary(), NewFloat(1), NewInt(7), callback)
+				if calls != 1 || Apply(result, NewInt(1)).Int() != 4 {
+					t.Fatalf("duplicate numeric key: calls=%d, result=%v", calls, result)
+				}
+				result = Apply(setter, makeDictionary(), NewInt(2), NewInt(7), callback)
+				if calls != 1 || Apply(result, NewInt(2)).Int() != 7 {
+					t.Fatal("missing key invoked the merger or changed the new value")
+				}
+				factory := preparedTestProc(t, "(lambda (captured) (lambda (old new) (+ captured (* old 10) new)))")
+				captured := Apply(factory, NewInt(5))
+				result = Apply(setter, makeDictionary(), NewInt(1), NewInt(7), captured)
+				if got := Apply(result, NewInt(1)).Int(); got != 122 {
+					t.Fatalf("captured merger result=%d; want 122", got)
+				}
+				result = Apply(setter, makeDictionary(), NewInt(1), NewInt(7), Globalenv.Vars["list"])
+				pair := Apply(result, NewInt(1))
+				Apply(setter, makeDictionary(), NewInt(1), NewInt(9), Globalenv.Vars["list"])
+				if !Equal(pair, NewSlice([]Scmer{NewInt(11), NewInt(7)})) {
+					t.Fatal("native merger retained a borrowed argument frame")
+				}
+				result = Apply(setter, makeDictionary(), NewInt(1), NewInt(7), NewBool(false))
+				if got := Apply(result, NewInt(1)); !got.IsBool() || got.Bool() {
+					t.Fatal("constant-result merger compatibility changed")
+				}
+			})
+		}
+	}
+}
+
+func TestAssocMissingKeyDoesNotPrepareUnusedMerger(t *testing.T) {
+	merger := preparedTestProc(t, "(lambda (old new) (+ (* old 2) (* new 3) (* old new) (if (< old new) old new)))")
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		t.Run(name, func(t *testing.T) {
+			setter := Globalenv.Vars[Symbol(name)]
+			args := []Scmer{NewSlice(nil), NewString("missing"), NewInt(7), merger}
+			allocations := testing.AllocsPerRun(100, func() {
+				assocBenchmarkSink = Apply(setter, args...)
+			})
+			if allocations > 8 {
+				t.Fatalf("missing-key update allocated %.1f objects without invoking its merger", allocations)
+			}
+		})
+	}
+}
+
+func BenchmarkAssocMergeOneShot(b *testing.B) {
+	merger := preparedTestProc(b, "(lambda (old new) (+ (* old 2) (* new 3) (* old new) (if (< old new) old new)))")
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		for _, existing := range []bool{false, true} {
+			b.Run(fmt.Sprintf("%s/existing=%v", name, existing), func(b *testing.B) {
+				setter := Globalenv.Vars[Symbol(name)]
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					var dictionary Scmer
+					if existing {
+						dictionary = NewSlice([]Scmer{NewString("key"), NewInt(11)})
+					} else {
+						dictionary = NewSlice(nil)
+					}
+					assocBenchmarkSink = Apply(setter, dictionary, NewString("key"), NewInt(7), merger)
+				}
+			})
+		}
+	}
+}
+
+func TestAssocMergeKeepsCompiledEntryAuthoritative(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	merger := preparedTestProc(t, "(lambda (old new) 7)")
+	merger.Proc().Compiled = &JITEntryPoint{Native: func(...Scmer) Scmer { return NewInt(99) }}
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		result := Apply(Globalenv.Vars[Symbol(name)], NewSlice([]Scmer{NewString("key"), NewInt(11)}), NewString("key"), NewInt(7), merger)
+		if got := Apply(result, NewString("key")); !Equal(got, NewInt(99)) {
+			t.Fatalf("%s compiled merger result = %s, want 99", name, String(got))
+		}
+	}
+}
