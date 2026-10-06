@@ -5643,7 +5643,22 @@ even when the same stage is bound through more than one source alias. */
 				(list (list (quote tree) tree)
 					(list (quote cost_components) prior)) planning_session)))))
 
-(define join_optimizer_composite_presence_costs (lambda (stages changed basic promoted probe planning_session)
+(define join_optimizer_composite_presence_preparation_cost (lambda (stages changed planning_session)
+	(begin
+		(define producer_ids (merge_unique (map changed (lambda (src)
+			(list (stage_output_relation_id (source_relation src)))))))
+		(define estimates (map producer_ids (lambda (id)
+			(begin
+				(define stage (stage_by_id stages id))
+				(join_optimizer_stage_input_cost_guards (gs_input stage) planning_session)
+				(planner_stage_input_rows (gs_input stage))))))
+		/* Unknown producer cardinality must not make a candidate look free. */
+		(if (not (reduce estimates (lambda (known rows) (and known (number? rows))) true)) nil
+			(planner_cost 0 0 0 0 0
+				(* (planner_add_estimates estimates) planner_group_relation_build_row_ns)
+				0 0 0 0.7)))))
+
+(define join_optimizer_composite_presence_probe_cost (lambda (stages changed basic probe planning_session)
 	(begin
 		(define graph (extract_join_hypergraph basic))
 		(define sources (qb_sources basic))
@@ -5652,25 +5667,39 @@ even when the same stage is bound through more than one source alias. */
 		Multiply distinct relation domains, never individual key-column NDVs. */
 		(define probe_rows (reduce changed (lambda (total src)
 			(+ total (join_optimizer_composite_lookup_rows stages sources default_alias graph src planning_session))) 0))
-		(define producer_ids (merge_unique (map changed (lambda (src)
-			(list (stage_output_relation_id (source_relation src)))))))
-		(define preparation_rows (planner_add_estimates (map producer_ids (lambda (id)
-			(begin
-				(define stage (stage_by_id stages id))
-				(join_optimizer_stage_input_cost_guards (gs_input stage) planning_session)
-				(planner_stage_input_rows (gs_input stage)))))))
-		(define promoted_cost (join_optimizer_block_nested_scan_cost stages promoted planning_session))
 		(define probe_cost (join_optimizer_block_nested_scan_cost stages probe planning_session))
-		/* Missing producer cardinality is not evidence that preparation is free. */
-		(if (not (number? preparation_rows)) nil (list
-			(planner_cost_add promoted_cost
-				(planner_cost 0 0 0 0 0
-					(* preparation_rows planner_group_relation_build_row_ns) 0 0
-					(qassoc_get promoted_cost (quote expected_rows) 0) 0.7)
-				(qassoc_get promoted_cost (quote expected_rows) 0) 0.7)
-			(planner_cost_add probe_cost (planner_membership_direct_probe_cost probe_rows)
-				(qassoc_get probe_cost (quote expected_rows) 0)
-				(min 0.75 (qassoc_get probe_cost (quote confidence) 0.5))))))))
+		(planner_cost_add probe_cost (planner_membership_direct_probe_cost probe_rows)
+			(qassoc_get probe_cost (quote expected_rows) 0)
+			(min 0.75 (qassoc_get probe_cost (quote confidence) 0.5))))))
+
+/* The joined candidate always includes this preparation term in the existing
+cost model. Search the bound candidate first: when its confidence-adjusted upper
+cost is below preparation alone, no joined driver/order can beat it. This is a
+lower bound on the model, not a claim that a warm cache is rebuilt at execution.
+Overlapping/unknown bounds retain both complete searches and the usual choice. */
+(define join_optimizer_reorder_composite_presence (lambda (stages changed basic exposed planning_session tx)
+	(begin
+		(define probe (reorder_query_block_with_candidate_strategy_using stages basic planning_session tx))
+		(define preparation (join_optimizer_composite_presence_preparation_cost stages changed planning_session))
+		(define probe_cost (join_optimizer_composite_presence_probe_cost stages changed basic probe planning_session))
+		(define pruned (and (not (nil? preparation)) (planner_cost_clear_winner? probe_cost preparation)))
+		(if pruned
+			(query_block_with_reorder_facts probe
+				(list (list (quote composite_presence_costs) (list preparation probe_cost))
+					(list (quote composite_presence_choice) "bound_domain")
+					(list (quote composite_presence_joined_search) "pruned_by_preparation_lower_bound")))
+			(begin
+				(define promoted (reorder_query_block_with_candidate_strategy_using stages exposed planning_session tx))
+				(if (nil? preparation) promoted
+					(begin
+						(define promoted_cost (join_optimizer_block_nested_scan_cost stages promoted planning_session))
+						(define joined_cost (planner_cost_add promoted_cost preparation
+							(qassoc_get promoted_cost (quote expected_rows) 0) 0.7))
+						(define bound_domain_wins (planner_cost_clear_winner? probe_cost joined_cost))
+						(query_block_with_reorder_facts (if bound_domain_wins probe promoted)
+							(list (list (quote composite_presence_costs) (list joined_cost probe_cost))
+								(list (quote composite_presence_choice) (if bound_domain_wins "bound_domain" "joined_domain"))
+								(list (quote composite_presence_joined_search) "searched"))))))))))
 
 /* A null-rejected composite presence join has two legal implementations:
 an indexed lookup over the bound outer domain, or a reusable tuple relation.
@@ -5680,30 +5709,20 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 	(if (query_block? node)
 		(begin
 			(define exposed (expose_null_rejected_join_edges node true))
-			(define promoted (reorder_query_block_with_candidate_strategy_using stage_catalog exposed planning_session tx))
 			(define has_composite_presence (reduce (qb_sources node) (lambda (found src)
 				(or found (and (source_outer? src)
 					(and (not (source_outer? (join_optimizer_source_by_alias (qb_sources exposed) (source_alias src))))
 						(presence_stage_output_source? stage_catalog src))))) false))
-			(if (not has_composite_presence) promoted
+			(if (not has_composite_presence)
+				(reorder_query_block_with_candidate_strategy_using stage_catalog exposed planning_session tx)
 				(begin
 					(define basic (expose_null_rejected_join_edges node false))
 					(define changed (filter (qb_sources basic) (lambda (src)
 						(and (source_outer? src) (not (source_outer? (join_optimizer_source_by_alias (qb_sources exposed) (source_alias src))))))))
 					(if (or (empty_list? changed) (reduce changed (lambda (unsupported src)
 						(or unsupported (not (presence_stage_output_source? stage_catalog src)))) false))
-						promoted
-						(begin
-							(define probe (reorder_query_block_with_candidate_strategy_using stage_catalog basic planning_session tx))
-							(define costs (join_optimizer_composite_presence_costs stage_catalog changed basic promoted probe planning_session))
-							(if (nil? costs) promoted
-								(begin
-									(define bound_domain_wins (planner_cost_clear_winner? (cadr costs) (car costs)))
-									(query_block_with_reorder_facts
-										(if bound_domain_wins probe promoted)
-										(list (list (quote composite_presence_costs) costs)
-											(list (quote composite_presence_choice)
-												(if bound_domain_wins "bound_domain" "joined_domain")))))))))))
+						(reorder_query_block_with_candidate_strategy_using stage_catalog exposed planning_session tx)
+						(join_optimizer_reorder_composite_presence stage_catalog changed basic exposed planning_session tx)))))
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)

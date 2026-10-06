@@ -244,7 +244,7 @@ test_cases:
       WHERE a.id=1 AND b.id=1 AND EXISTS
         (SELECT 1 FROM trace_ref_dense f WHERE f.id=a.id AND f.asset_id=b.id)
     expect:
-      result_contains: ['composite_presence_costs', 'composite_presence_choice', 'bound_domain']
+      result_contains: ['composite_presence_costs', 'composite_presence_choice', 'bound_domain', 'pruned_by_preparation_lower_bound']
 
   - name: Broad composite presence retains the joined-domain alternative
     sql: |
@@ -252,7 +252,7 @@ test_cases:
       FROM trace_ref_dense a CROSS JOIN trace_ref_dense b
       WHERE EXISTS (SELECT 1 FROM trace_ref_dense f WHERE f.id=a.id AND f.asset_id=b.id)
     expect:
-      result_contains: ['composite_presence_costs', 'composite_presence_choice', 'joined_domain']
+      result_contains: ['composite_presence_costs', 'composite_presence_choice', 'joined_domain', 'searched']
 
   - name: Selective composite presence preserves its complete bound result
     sql: |
@@ -263,6 +263,40 @@ test_cases:
     expect:
       rows: 1
       data: [{left_id: 1, right_id: 1}]
+
+  - name: Preparation lower bound counts a shared producer once and guards its size
+    setup:
+    - sql: DROP TABLE IF EXISTS presence_preparation_fact
+    - sql: CREATE TABLE presence_preparation_fact (id INT) ENGINE=memory
+    - sql: INSERT INTO presence_preparation_fact VALUES (1),(2),(3)
+    scm: |
+      (begin
+        (define planning (sql_queryplan_compile_session (newsession) nil))
+        (define source '("f" "memcp-tests" "presence_preparation_fact" false nil))
+        (define stage (make_group_stage "producer" source '() '() '() nil '() '() nil nil '()))
+        (define first (list "p" "memcp-tests" (make_stage_output_relation "producer") true true))
+        (define second (list "q" "memcp-tests" (make_stage_output_relation "producer") true true))
+        (define cost (join_optimizer_composite_presence_preparation_cost
+          (list stage) (list first second) planning))
+        (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))
+        (define original (guard (newsession) nil nil nil))
+        (insert (table "memcp-tests" "presence_preparation_fact") '("id") (list (list 4)))
+        (define changed (guard (newsession) nil nil nil))
+        (if (and original (not changed)
+          (equal? (qassoc_get cost 'build_ns 0) (* 3 planner_group_relation_build_row_ns))) true
+          (error "shared producer lower bound lost its row-count guard or charged aliases twice")))
+    expect: {data: [true]}
+    cleanup:
+    - sql: DROP TABLE presence_preparation_fact
+
+  - name: Unknown producer size cannot justify pruning a joined search
+    scm: |
+      (begin
+        (define source (list "f" "memcp-tests" (make_stage_output_relation "unknown-input") false nil))
+        (define stage (make_group_stage "producer" source '() '() '() nil '() '() nil nil '()))
+        (define target (list "p" "memcp-tests" (make_stage_output_relation "producer") true true))
+        (nil? (join_optimizer_composite_presence_preparation_cost (list stage) (list target) nil)))
+    expect: {data: [true]}
 
   - name: Broad composite presence counts only populated key tuples
     sql: |
