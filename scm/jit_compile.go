@@ -3114,7 +3114,9 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 		}
 	}
 	inline := declaration.RetainsCallArgs
-	knownTypes, knownShapes, knownArgs := 0, 0, 0
+	knownTypes, knownShapes, knownArgs, narrowedTypes := 0, 0, 0, 0
+	hasVariadic := false
+	allNumericParams := len(args) > 0
 	hasVirtualArgs, hasUnhandledLambdaTemplate := false, false
 	knownCallback, hasCallback := false, false
 	for index, arg := range args {
@@ -3130,6 +3132,20 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 			knownArgs++
 		}
 		parameter := jitDeclarationParam(declaration, index)
+		if parameter != nil {
+			hasVariadic = hasVariadic || parameter.Variadic
+			switch parameter.Kind {
+			case "number", "number|nil", "int|float", "int|float|nil":
+				if arg.Type == tagInt || arg.Type == tagFloat || arg.Type == tagNil {
+					narrowedTypes++
+				}
+			case "int", "float", "nil":
+			default:
+				allNumericParams = false
+			}
+		} else {
+			allNumericParams = false
+		}
 		if parameter != nil && parameter.Kind == "func" {
 			hasCallback = true
 			if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
@@ -3160,6 +3176,13 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 		// generated body bounded even when every argument has a known type;
 		// larger bodies retain their native boundary inside the fused loop.
 		case len(args) > 0 && knownTypes == len(args) && cost <= 48:
+			inline = true
+
+		// A typed numeric storage value can remove branches even when a loop-carried
+		// accumulator remains dynamic. Keep the same small-body budget and
+		// require information beyond the declared parameter type; dynamic
+		// variadic loops retain their native boundary.
+		case allNumericParams && narrowedTypes > 0 && !hasVariadic && cost <= 48:
 			inline = true
 		case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
 			inline = true

@@ -840,3 +840,44 @@ func minimum(a ...Scmer) Scmer {
 		t.Fatal("branch materializes float comparison")
 	}
 }
+
+func TestScmerTagProofRequiresDominatingImmutableInput(t *testing.T) {
+	const declarations = `package sample
+ type Scmer struct{}
+ func (Scmer) IsInt() bool
+ func (Scmer) Int() int64
+ func NewInt(int64) Scmer
+ func opaque([]Scmer)
+ var output chan []Scmer
+ `
+	for _, test := range []struct {
+		name, body string
+		proven     int
+	}{
+		{"true edge", `if a[0].IsInt() { return a[0].Int() }; return 0`, 1},
+		{"false edge", `if a[0].IsInt() { return 0 }; return a[0].Int()`, 0},
+		{"merged edge", `if a[0].IsInt() { NewInt(1) }; return a[0].Int()`, 0},
+		{"different input", `if a[0].IsInt() { return a[1].Int() }; return 0`, 0},
+		{"mutated input", `if a[0].IsInt() { a[0] = NewInt(1); return a[0].Int() }; return 0`, 0},
+		{"opaque call", `if a[0].IsInt() { opaque(a); return a[0].Int() }; return 0`, 0},
+		{"published input", `if a[0].IsInt() { output <- a; return a[0].Int() }; return 0`, 0},
+		{"short circuit", `if a[0].IsInt() && a[1].IsInt() { return a[0].Int() + a[1].Int() }; return 0`, 2},
+		{"copied value", `x := a[0]; if x.IsInt() { opaque(a); return x.Int() }; return 0`, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fn := buildTestSSAFunction(t, declarations+"func sample(a ...Scmer) int64 {"+test.body+"}", "sample")
+			count := 0
+			for _, block := range fn.Blocks {
+				for _, instruction := range block.Instrs {
+					call, ok := instruction.(*ssa.Call)
+					if ok && call.Call.StaticCallee() != nil && call.Call.StaticCallee().Name() == "Int" && provenScmerTag(fn, call) == "tagInt" {
+						count++
+					}
+				}
+			}
+			if count != test.proven {
+				t.Fatalf("%d proven uses, want %d", count, test.proven)
+			}
+		})
+	}
+}

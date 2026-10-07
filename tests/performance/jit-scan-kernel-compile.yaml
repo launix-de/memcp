@@ -74,6 +74,28 @@ test_cases:
   timing_samples: 4
   timing_aggregation: total
   threshold_ms: 5000
+- name: 'Perf: typed SQL SUM reducer over one full column'
+  scm: |
+    (scan nil (table "memcp-tests" "kernel_values") '() '() '() (lambda () true)
+      '("value") (lambda (acc value) (sql_sum_reduce acc value)) nil sql_sum_reduce false)
+  expect: {result: 1799970000}
+  warmup: 0
+  timing_samples: 11
+  timing_aggregation: total
+  threshold_ms: 5000
+- name: 'Perf: sixteen typed SUM scan pipelines'
+  scm: |
+    (begin
+      (define values (table "memcp-tests" "kernel_values"))
+      (define sum (lambda (acc value) (sql_sum_reduce acc value)))
+      (reduce (produceN 16) (lambda (total period)
+        (+ total (scan nil values '() '() '() (lambda () true)
+          '("value") sum nil sql_sum_reduce false))) 0))
+  expect: {result: 28799520000}
+  warmup: 0
+  timing_samples: 11
+  timing_aggregation: total
+  threshold_ms: 5000
 - name: Reject missing scan column
   sql: SELECT SUM(missing_value) FROM kernel_values
   expect: {error: true}

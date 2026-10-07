@@ -54,6 +54,16 @@ func TestJITInlineAdmissionDependsOnCallShape(t *testing.T) {
 			[]JITValueDesc{{Type: tagInt, Loc: LocStack}}, false},
 		{"constant shape", Declaration{Type: &TypeDescriptor{JITInlineCost: 32}},
 			[]JITValueDesc{{Type: JITTypeUnknown, Loc: LocImm, Imm: NewInt(1)}}, true},
+		{"partially specialized numeric body", Declaration{Type: &TypeDescriptor{JITInlineCost: 40, Params: []*TypeDescriptor{{Kind: "number|nil"}, {Kind: "number|nil"}}}},
+			[]JITValueDesc{{Type: JITTypeUnknown, Loc: LocStackPair}, {Type: tagInt, Loc: LocStackPair}}, true},
+		{"partial type already declared", Declaration{Type: &TypeDescriptor{JITInlineCost: 40, Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "int"}}}},
+			[]JITValueDesc{{Type: JITTypeUnknown, Loc: LocStackPair}, {Type: tagInt, Loc: LocStackPair}}, false},
+		{"partial dynamic nonnumeric body", Declaration{Type: &TypeDescriptor{JITInlineCost: 40, Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}}}},
+			[]JITValueDesc{{Type: JITTypeUnknown, Loc: LocStackPair}, {Type: tagInt, Loc: LocStackPair}}, false},
+		{"partially specialized large body", Declaration{Type: &TypeDescriptor{JITInlineCost: 49, Params: []*TypeDescriptor{{Kind: "number|nil"}, {Kind: "number|nil"}}}},
+			[]JITValueDesc{{Type: JITTypeUnknown, Loc: LocStackPair}, {Type: tagInt, Loc: LocStackPair}}, false},
+		{"partial dynamic variadic body", Declaration{Type: &TypeDescriptor{JITInlineCost: 40, Params: []*TypeDescriptor{{Kind: "number|nil", Variadic: true}}}},
+			[]JITValueDesc{{Type: JITTypeUnknown, Loc: LocStackPair}, {Type: tagInt, Loc: LocStackPair}}, false},
 		{"unknown dynamic argument", Declaration{Type: &TypeDescriptor{JITInlineCost: 18}},
 			[]JITValueDesc{{Type: JITTypeUnknown, Loc: LocStackPair}}, false},
 		{"no generated body", Declaration{RetainsCallArgs: true, Type: &TypeDescriptor{JITInlineCost: 65535}},
@@ -75,6 +85,51 @@ func TestJITInlineAdmissionDependsOnCallShape(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestJITSQLSumBufferPreservesDynamicAccumulator(t *testing.T) {
+	proc := calibrationProcedure("(lambda (acc value) (sql_sum_reduce acc value))")
+	for _, valueType := range []uint8{tagInt, tagFloat} {
+		values := []Scmer{NewInt(3), NewInt(-2), NewInt(7)}
+		if valueType == tagFloat {
+			values = []Scmer{NewFloat(3.5), NewFloat(-2.25), NewFloat(7)}
+		}
+		kernel := CompileJITMapReduceBuffer(proc, []uint8{valueType})
+		if kernel == nil {
+			t.Fatal("SUM buffer did not compile")
+		}
+		for _, initial := range []Scmer{NewNil(), NewInt(0), NewFloat(0.5)} {
+			want := initial
+			for _, value := range values {
+				want = Apply(Globalenv.Vars[Symbol("sql_sum_reduce")], want, value)
+			}
+			if got := kernel(initial, values, len(values)); !Equal(got, want) || got.GetTag() != want.GetTag() {
+				t.Fatalf("SUM(%v,%v)=%v, want %v", initial, values, got, want)
+			}
+			if got := kernel(initial, nil, 0); !Equal(got, initial) || got.GetTag() != initial.GetTag() {
+				t.Fatal("empty SUM changed accumulator")
+			}
+		}
+	}
+}
+
+func BenchmarkJITSQLSumBuffer(b *testing.B) {
+	proc := calibrationProcedure("(lambda (acc value) (sql_sum_reduce acc value))")
+	kernel := CompileJITMapReduceBuffer(proc, []uint8{tagInt})
+	if kernel == nil {
+		b.Fatal("SUM buffer did not compile")
+	}
+	values := make([]Scmer, 60000)
+	for i := range values {
+		values[i] = NewInt(3)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if got := kernel(NewNil(), values, len(values)); got.Int() != 180000 {
+			b.Fatal("wrong SUM")
+		}
 	}
 }
 

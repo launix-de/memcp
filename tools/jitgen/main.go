@@ -3023,6 +3023,106 @@ func (g *codeGen) phiEdgeIndexForSucc(targetBBIdx int, succPos int) (int, bool) 
 	return 0, false
 }
 
+// scmerInputLoadsAreImmutable is deliberately conservative: a declaration
+// containing stores or opaque calls cannot reuse facts about repeated a[i]
+// loads. This analysis runs in jitgen, never in the runtime emitter.
+func scmerInputLoadsAreImmutable(fn *ssa.Function) bool {
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			switch v := instruction.(type) {
+			case *ssa.Store, *ssa.Go, *ssa.Defer, *ssa.Send:
+				return false
+			case *ssa.Call:
+				callee := v.Call.StaticCallee()
+				if callee == nil {
+					return false
+				}
+				switch callee.Name() {
+				case "NewInt", "NewFloat", "NewBool":
+					if !isScmerType(v.Type()) {
+						return false
+					}
+				case "IsNil", "IsInt", "IsFloat", "Int", "Float":
+					if callee.Signature.Recv() == nil || !isScmerType(callee.Signature.Recv().Type()) {
+						return false
+					}
+				default:
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func sameScmerInputLoad(a, b ssa.Value) bool {
+	if a == b {
+		return true
+	}
+	left, ok := a.(*ssa.UnOp)
+	if !ok || left.Op != token.MUL {
+		return false
+	}
+	right, ok := b.(*ssa.UnOp)
+	if !ok || right.Op != token.MUL {
+		return false
+	}
+	la, ok := left.X.(*ssa.IndexAddr)
+	if !ok {
+		return false
+	}
+	ra, ok := right.X.(*ssa.IndexAddr)
+	if !ok || la.X != ra.X {
+		return false
+	}
+	if _, ok := la.X.(*ssa.Parameter); !ok {
+		return false
+	}
+	li, lok := la.Index.(*ssa.Const)
+	ri, rok := ra.Index.(*ssa.Const)
+	return lok && rok && li.Value != nil && ri.Value != nil && constant.Compare(li.Value, token.EQL, ri.Value)
+}
+
+// A tag test refines only code dominated by its true edge. Joins, false
+// branches and callback boundaries retain their original dynamic descriptor.
+func provenScmerTag(fn *ssa.Function, use *ssa.Call) string {
+	immutableInputs := scmerInputLoadsAreImmutable(fn)
+	for _, block := range fn.Blocks {
+		if len(block.Instrs) == 0 {
+			continue
+		}
+		branch, ok := block.Instrs[len(block.Instrs)-1].(*ssa.If)
+		if !ok || len(block.Succs) != 2 {
+			continue
+		}
+		guard, ok := branch.Cond.(*ssa.Call)
+		if !ok || len(guard.Call.Args) != 1 {
+			continue
+		}
+		callee := guard.Call.StaticCallee()
+		if callee == nil || callee.Signature.Recv() == nil || !isScmerType(callee.Signature.Recv().Type()) {
+			continue
+		}
+		tag := ""
+		switch callee.Name() {
+		case "IsInt":
+			tag = "tagInt"
+		case "IsFloat":
+			tag = "tagFloat"
+		default:
+			continue
+		}
+		trueEdge := block.Succs[0]
+		if len(trueEdge.Preds) != 1 || trueEdge.Preds[0] != block || !trueEdge.Dominates(use.Block()) {
+			continue
+		}
+		if guard.Call.Args[0] == use.Call.Args[0] || (immutableInputs && sameScmerInputLoad(guard.Call.Args[0], use.Call.Args[0])) {
+			return tag
+		}
+	}
+	return ""
+}
+
 func isScmerType(t types.Type) bool {
 	named, ok := t.(*types.Named)
 	return ok && named.Obj() != nil && named.Obj().Name() == "Scmer"
@@ -7589,6 +7689,30 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// for full runtime semantics (float/string/bool/date conversions).
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
+			if provenScmerTag(g.fn, v) == "tagInt" {
+				tmp := g.allocDesc()
+				g.emit("%s := %s", tmp, arg.goVar)
+				g.emit("ctx.SyncDesc(&%s)", tmp)
+				g.emit("%s.ID = 0", tmp)
+				g.emit("%s.Type = tagInt", tmp)
+				g.emit("var %s JITValueDesc", dv)
+				g.emit("if %s.Loc == LocImm {", tmp)
+				g.emit("%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int())}", dv, tmp)
+				g.emit("} else {")
+				g.emit("ctx.EnsureDesc(&%s)", tmp)
+				g.emit("ctx.ProtectReg(%s.Reg)", tmp)
+				g.emit("if %s.Loc == LocRegPair { ctx.ProtectReg(%s.Reg2) }", tmp, tmp)
+				g.emit("%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: ctx.AllocReg()}", dv)
+				g.emit("if %s.Loc == LocRegPair {", tmp)
+				g.emit("ctx.EmitMovRegReg(%s.Reg, %s.Reg2)", dv, tmp)
+				g.emit("ctx.UnprotectReg(%s.Reg2)", tmp)
+				g.emit("} else { ctx.EmitMovRegReg(%s.Reg, %s.Reg) }", dv, tmp)
+				g.emit("ctx.UnprotectReg(%s.Reg)", tmp)
+				g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
+				g.emit("}")
+				g.vals[name] = genVal{goVar: dv, isDesc: true}
+				break
+			}
 			g.emit("var %s JITValueDesc", dv)
 			g.emit("if %s.Loc == LocImm {", arg.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int())}", dv, arg.goVar)
