@@ -127,6 +127,34 @@ test_cases:
       rows: 2
       data: [{grp: 1, n: 2, total: 300}, {grp: 2, n: 2, total: 700}]
 
+  - name: View expansion retains representative grouping semantics
+    setup:
+      - sql: DROP VIEW IF EXISTS group_projection_view
+      - sql: |
+          CREATE VIEW group_projection_view AS
+          SELECT f.grp, f.value,
+            (SELECT d.label FROM group_dimension d WHERE d.id = f.category LIMIT 1) AS label
+          FROM group_fact f
+    sql: |
+      SELECT grp, label, COUNT(*) AS n, SUM(value) AS total
+      FROM group_projection_view
+      GROUP BY grp ORDER BY grp
+    expect:
+      rows: 2
+      data: [{grp: 1, n: 2, total: 300}, {grp: 2, n: 2, total: 700}]
+    cleanup:
+      - sql: DROP VIEW group_projection_view
+
+  - name: Representative grouping consumes its frontend marker before lowering
+    sql: |
+      EXPLAIN IR SELECT f.grp, d.label, COUNT(*) AS n
+      FROM group_fact f LEFT JOIN group_dimension d ON d.id = f.category
+      GROUP BY f.grp
+    expect:
+      rows: 1
+      result_contains: ["query-block", "aggregate"]
+      result_not_contains: ["group_projection_mode"]
+
   - name: Derived joined output preserves groups and window percentages
     sql: |
       SELECT grp, label, COUNT(*) AS n, SUM(value) AS total,

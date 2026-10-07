@@ -1360,6 +1360,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(? (atom "FOR" true) (atom "UPDATE" true))
 	) (begin
 			(define projected_exprs (extract_assoc (merge cols) (lambda (_title expr) expr)))
+			(define sources (if (nil? from) '() (merge from)))
 			/* GROUP BY already makes the result unique when every grouping key is
 			projected. Preserve that explicit group instead of replacing it with the
 			DISTINCT projection (which may contain aggregate expressions). */
@@ -1368,13 +1369,17 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					(and (not (empty_list? group))
 						(reduce group (lambda (preserved expr)
 							(and preserved (contains? projected_exprs expr))) true)))))
-			(list (quote query-block) schema (if (nil? from) '() (merge from)) (merge cols) condition
+			(list (quote query-block) schema sources (merge cols) condition
 				(if (and distinct (not distinct_preserved_by_group)) projected_exprs group)
 				having order limit offset '() '()
 				(merge (list
-					/* Relaxed grouping is a MySQL semantic fact. Other frontends
-					must retain their rejection of ungrouped projections. */
-					(list (list (quote group_projection_mode) (quote representative)))
+					/* Relaxed grouping is relevant only to an aggregating block.
+					Source eligibility belongs to the logical phase after views expand. */
+					(if (or (not (empty_list? group))
+						(reduce projected_exprs (lambda (found expr)
+							(or found (expr_has_local_aggregates? expr))) false))
+						(list (list (quote group_projection_mode) (quote representative)))
+						'())
 					(if calc_found_rows (list (list (quote sql_calc_found_rows) true)) '())
 					(if distinct (list (list (quote select_distinct) true)) '())))))))
 	(define sql_select (parser (or
