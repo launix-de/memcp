@@ -5503,6 +5503,83 @@ carrier selection remains a later, per-stage cost decision. */
 				(merge (list (nth rewritten_src 4) (nth tail 4)))))
 		_ (list '() '() '() resolved '()))))
 
+/* MySQL permits a non-grouped output column to select a representative row.
+Joined aliases are local row bindings, not extra correlation dimensions. Turn
+such values into first-value aggregates while the complete logical source
+scope is available, before inlining can replace their projection references
+with correlated lookup outputs. Actual outer references remain external
+dependencies. Keep the existing rejection of loose base-row and scalar-stage
+outputs: this normalization covers joined and derived projection values. */
+(define group_representative_expr (lambda (sources alias key_index expr resolved)
+	(if (not (nil? (lookup_group_key_index key_index resolved)))
+		expr
+		(match expr
+			((symbol aggregate) _value _reduce _neutral) expr
+			((quote aggregate) _value _reduce _neutral) expr
+			((symbol aggregate) _value _reduce _neutral _finalize) expr
+			((quote aggregate) _value _reduce _neutral _finalize) expr
+			((symbol count_distinct) _value) expr
+			((quote count_distinct) _value) expr
+			((symbol group_concat_distinct) _value _separator) expr
+			((quote group_concat_distinct) _value _separator) expr
+			((quote quote) _value) expr
+			(cons (symbol inner_select) _query) expr
+			(cons (quote inner_select) _query) expr
+			((symbol get_column) tblvar _ col _) (if
+				(not (nil? (find sources (lambda (src)
+					(equal? (source_alias src) (resolve_column_alias tblvar alias))) nil)))
+				(list (quote aggregate) expr (scalar_once_reduce_first) nil)
+				expr)
+			((quote get_column) tblvar _ col _) (if
+				(not (nil? (find sources (lambda (src)
+					(equal? (source_alias src) (resolve_column_alias tblvar alias))) nil)))
+				(list (quote aggregate) expr (scalar_once_reduce_first) nil)
+				expr)
+			(cons head tail) (cons head (map (zip tail (cdr resolved)) (lambda (pair)
+				(group_representative_expr sources alias key_index (car pair) (cadr pair)))))
+			_ expr))))
+
+(define normalize_group_representatives (lambda (raw_block)
+	(if (not (equal? (qassoc_get (qb_facts raw_block) (quote group_projection_mode) nil)
+		(quote representative)))
+		raw_block
+		(begin
+			/* This phase owns the marker. Do not copy it into generated domains
+			or helper identities after its semantics have become aggregates. */
+			(define facts (filter (qb_facts raw_block) (lambda (entry)
+				(not (equal? (car entry) (quote group_projection_mode))))))
+			(define block (append (slice raw_block 0 12) facts))
+			(if (empty_list? (qb_sources block)) block (begin
+				(define alias (source_alias (car (qb_sources block))))
+				(define sources (filter (qb_sources block) (lambda (src)
+					(and (or (not (equal? (source_alias src) alias))
+						(query_block? (source_relation src)))
+						(not (source_is_stage_output? src))))))
+				/* A base-only aggregate has no eligible representative. Avoid
+				canonical trees and structural indexes on this common no-op path. */
+				(if (or (empty_list? sources)
+					(not (or (not (empty_list? (qb_group block)))
+						(query_block_has_local_aggregates? block)))) block (begin
+						(define canonical (lambda (expr) (canonical_column_expr_for_alias alias expr)))
+						(define fields (extract_assoc (qb_fields block) (lambda (title expr) (list title expr))))
+						(define hidden (extract_assoc (qb_hidden block) (lambda (title expr) (list title expr))))
+						(define field_roots (map fields (lambda (field) (canonical (cadr field)))))
+						(define hidden_roots (map hidden (lambda (field) (canonical (cadr field)))))
+						(define having_root (canonical (qb_having block)))
+						(define key_index (make_group_key_index (map (qb_group block) canonical)
+							(merge (list field_roots hidden_roots (list having_root)))))
+						(define rewrite_fields (lambda (original resolved)
+							(merge (map (zip original resolved) (lambda (pair)
+								(list (car (car pair)) (group_representative_expr sources alias key_index
+									(cadr (car pair)) (cadr pair))))))))
+						(make_query_block (qb_schema block) (qb_sources block)
+							(rewrite_fields fields field_roots)
+							(qb_where block) (qb_group block)
+							(group_representative_expr sources alias key_index (qb_having block) having_root)
+							(qb_order block) (qb_limit block) (qb_offset block)
+							(rewrite_fields hidden hidden_roots)
+							(qb_stages block) (qb_facts block))))))))))
+
 (define btw2025_decorrelate_query_block (lambda (block ctx)
 	(begin
 		(define bundled (btw2025_bundle_scalar_markers_in_block block))
@@ -6671,8 +6748,9 @@ names in projections, predicates, and correlated subqueries. */
 					(union_offset relation)
 					(union_facts relation)))))))
 
-(define untangle_query_block (lambda (block ctx)
+(define untangle_query_block (lambda (raw_block ctx)
 	(begin
+		(define block (normalize_group_representatives raw_block))
 		(define child_ctx (make_uctx ctx
 			(list
 				(list (quote compile-budget-ms) 1000)

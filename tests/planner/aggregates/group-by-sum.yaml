@@ -18,6 +18,13 @@ setup:
       (1, 1, NULL), (2, 1, NULL),
       (3, 2, NULL), (4, 2, 5), (5, 2, 7)
 
+  - sql: "DROP TABLE IF EXISTS group_fact"
+  - sql: "DROP TABLE IF EXISTS group_dimension"
+  - sql: "CREATE TABLE group_fact (id INT PRIMARY KEY, grp INT, category INT, value INT)"
+  - sql: "CREATE TABLE group_dimension (id INT PRIMARY KEY, label INT)"
+  - sql: "INSERT INTO group_fact VALUES (1, 1, 10, 100), (2, 1, 20, 200), (3, 2, 30, 300), (4, 2, 99, 400)"
+  - sql: "INSERT INTO group_dimension VALUES (10, 10), (20, 20), (30, 30)"
+
 test_cases:
   - name: "Group sum by a (exact query)"
     sql: "SELECT a, SUM(b) FROM tbl GROUP BY a"
@@ -108,7 +115,185 @@ test_cases:
           total: 12
           average: 6
 
+  # Non-grouped output values may choose a member of the group. They must
+  # never create additional groups; assertions deliberately do not pick a
+  # deterministic label where SQL leaves the representative unspecified.
+  - name: Joined output columns preserve explicit group cardinality
+    sql: |
+      SELECT f.grp, d.label, COUNT(*) AS n, SUM(f.value) AS total
+      FROM group_fact f LEFT JOIN group_dimension d ON d.id = f.category
+      GROUP BY f.grp ORDER BY f.grp
+    expect:
+      rows: 2
+      data: [{grp: 1, n: 2, total: 300}, {grp: 2, n: 2, total: 700}]
+
+  - name: View expansion retains representative grouping semantics
+    setup:
+      - sql: DROP VIEW IF EXISTS group_projection_view
+      - sql: |
+          CREATE VIEW group_projection_view AS
+          SELECT f.grp, f.value,
+            (SELECT d.label FROM group_dimension d WHERE d.id = f.category LIMIT 1) AS label
+          FROM group_fact f
+    sql: |
+      SELECT grp, label, COUNT(*) AS n, SUM(value) AS total
+      FROM group_projection_view
+      GROUP BY grp ORDER BY grp
+    expect:
+      rows: 2
+      data: [{grp: 1, n: 2, total: 300}, {grp: 2, n: 2, total: 700}]
+    cleanup:
+      - sql: DROP VIEW group_projection_view
+
+  - name: Representative grouping consumes its frontend marker before lowering
+    sql: |
+      EXPLAIN IR SELECT f.grp, d.label, COUNT(*) AS n
+      FROM group_fact f LEFT JOIN group_dimension d ON d.id = f.category
+      GROUP BY f.grp
+    expect:
+      rows: 1
+      result_contains: ["query-block", "aggregate"]
+      result_not_contains: ["group_projection_mode"]
+
+  - name: Derived joined output preserves groups and window percentages
+    sql: |
+      SELECT grp, label, COUNT(*) AS n, SUM(value) AS total,
+        COUNT(*) * 100 / GREATEST(SUM(COUNT(*)) OVER (), 1) AS percent
+      FROM (
+        SELECT f.grp, f.value, d.label
+        FROM group_fact f LEFT JOIN group_dimension d ON d.id = f.category
+      ) rows_with_label
+      GROUP BY grp ORDER BY grp LIMIT 2
+    expect:
+      rows: 2
+      data: [{grp: 1, n: 2, total: 300, percent: 50}, {grp: 2, n: 2, total: 700, percent: 50}]
+
+  - name: Derived scalar lookup output is a representative rather than a key
+    sql: |
+      SELECT grp, label, COUNT(*) AS n, SUM(value) AS total,
+        COUNT(*) * 100 / GREATEST(SUM(COUNT(*)) OVER (), 1) AS percent
+      FROM (
+        SELECT f.grp, f.value,
+          (SELECT d.label FROM group_dimension d WHERE d.id = f.category LIMIT 1) AS label
+        FROM group_fact f
+      ) rows_with_label
+      GROUP BY grp ORDER BY grp LIMIT 2
+    expect:
+      rows: 2
+      data: [{grp: 1, n: 2, total: 300, percent: 50}, {grp: 2, n: 2, total: 700, percent: 50}]
+
+  - name: Derived representative retains a computed explicit grouping key
+    sql: |
+      SELECT grp + 10 AS bucket, label, COUNT(*) AS n, SUM(value) AS total
+      FROM (
+        SELECT f.grp, f.value,
+          (SELECT d.label FROM group_dimension d WHERE d.id = f.category LIMIT 1) AS label
+        FROM group_fact f
+      ) rows_with_label
+      GROUP BY grp + 10 ORDER BY grp + 10
+    expect:
+      rows: 2
+      data: [{bucket: 11, n: 2, total: 300}, {bucket: 12, n: 2, total: 700}]
+
+  - name: Joined representative output does not move HAVING before grouping
+    sql: |
+      SELECT f.grp, d.label, COUNT(*) AS n, SUM(f.value) AS total
+      FROM group_fact f LEFT JOIN group_dimension d ON d.id = f.category
+      GROUP BY f.grp HAVING COUNT(*) > 1 ORDER BY f.grp LIMIT 1 OFFSET 1
+    expect:
+      rows: 1
+      data: [{grp: 2, n: 2, total: 700}]
+
+  - name: Joined output columns do not partition a global aggregate
+    sql: |
+      SELECT d.label, COUNT(*) AS n, SUM(f.value) AS total
+      FROM group_fact f LEFT JOIN group_dimension d ON d.id = f.category
+    expect:
+      rows: 1
+      data: [{n: 4, total: 1000}]
+
+  - name: Set first representative grouping session
+    session_id: group_representatives
+    sql: SELECT @cap := 4 AS cap
+    expect: {rows: 1, data: [{cap: 4}]}
+
+  - name: Session-filtered joined output preserves groups
+    session_id: group_representatives
+    sql: |
+      SELECT f.grp, d.label, COUNT(*) AS n, SUM(f.value) AS total
+      FROM group_fact f LEFT JOIN group_dimension d ON d.id = f.category
+      WHERE f.id <= @cap GROUP BY f.grp ORDER BY f.grp
+    expect:
+      rows: 2
+      data: [{grp: 1, n: 2, total: 300}, {grp: 2, n: 2, total: 700}]
+
+  - name: Change representative grouping session
+    session_id: group_representatives
+    sql: SELECT @cap := 2 AS cap
+    expect: {rows: 1, data: [{cap: 2}]}
+
+  - name: Session-filtered joined output respects changed bindings
+    session_id: group_representatives
+    sql: |
+      SELECT f.grp, d.label, COUNT(*) AS n, SUM(f.value) AS total
+      FROM group_fact f LEFT JOIN group_dimension d ON d.id = f.category
+      WHERE f.id <= @cap GROUP BY f.grp ORDER BY f.grp
+    expect:
+      rows: 1
+      data: [{grp: 1, n: 2, total: 300}]
+
+  - name: Representative joined values belong to their group
+    sql: |
+      SELECT grp, CASE WHEN grp = 1 THEN label IN (10, 20)
+        ELSE label = 30 OR label IS NULL END AS member, n
+      FROM (
+        SELECT f.grp, d.label, COUNT(*) AS n
+        FROM group_fact f LEFT JOIN group_dimension d ON d.id = f.category
+        GROUP BY f.grp
+      ) grouped_rows ORDER BY grp
+    expect:
+      rows: 2
+      data: [{grp: 1, member: 1, n: 2}, {grp: 2, member: 1, n: 2}]
+
+  - name: Compound grouped expressions keep keys and aggregate their local outputs
+    sql: |
+      SELECT f.grp + COUNT(*) AS combined, d.label + COUNT(*) AS representative,
+        COUNT(*) AS n
+      FROM group_fact f LEFT JOIN group_dimension d ON d.id = f.category
+      GROUP BY f.grp ORDER BY f.grp
+    expect:
+      rows: 2
+      data: [{combined: 3, n: 2}, {combined: 4, n: 2}]
+
+  - name: Explicit joined grouping keys remain distinct
+    sql: |
+      SELECT f.grp, d.label, COUNT(*) AS n
+      FROM group_fact f LEFT JOIN group_dimension d ON d.id = f.category
+      GROUP BY f.grp, d.label ORDER BY f.grp, d.label
+    expect:
+      rows: 4
+      data: [{grp: 1, label: 10, n: 1}, {grp: 1, label: 20, n: 1},
+        {grp: 2, label: null, n: 1}, {grp: 2, label: 30, n: 1}]
+
+  - name: Empty global join aggregate retains its neutral row
+    sql: |
+      SELECT d.label, COUNT(*) AS n, SUM(f.value) AS total
+      FROM group_fact f LEFT JOIN group_dimension d ON d.id = f.category
+      WHERE f.id < 0
+    expect:
+      rows: 1
+      data: [{label: null, n: 0, total: null}]
+
+  - name: Missing joined output columns remain errors
+    sql: |
+      SELECT f.grp, d.missing, COUNT(*) AS n
+      FROM group_fact f LEFT JOIN group_dimension d ON d.id = f.category
+      GROUP BY f.grp
+    expect: {error: true}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS tbl"
   - sql: "DROP TABLE IF EXISTS tbl_mix"
   - sql: "DROP TABLE IF EXISTS aggregate_identity"
+  - sql: "DROP TABLE IF EXISTS group_fact"
+  - sql: "DROP TABLE IF EXISTS group_dimension"

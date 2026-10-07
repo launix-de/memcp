@@ -32,6 +32,11 @@ test_cases:
     expect: {error: true}
 
   - name: "SPARQL 1.1 rejects projection of an ungrouped variable"
+    # A nonempty graph exercises projection lowering; an empty graph can
+    # reject the same syntax through unrelated missing-column validation.
+    ttl_data: |
+      <http://spec11-negative.example/a> <http://spec11-negative.example/p> "first" .
+      <http://spec11-negative.example/b> <http://spec11-negative.example/p> "second" .
     sparql: 'SELECT ?s (COUNT(*) AS ?count) WHERE { ?s ?p ?o }'
     expect: {error: true}
 
