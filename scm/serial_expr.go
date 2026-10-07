@@ -144,6 +144,17 @@ func prepareSerialExpr(proc *Proc, expression Scmer) serialExpr {
 					return result
 				}
 			}
+			operands := prepareSerialOperands(proc, items[1:])
+			return func(en *Env) Scmer {
+				// A nested lambda may retain this lexical scope. Keep it distinct
+				// from both other invocations and other begin nodes.
+				scope := &Env{Vars: make(Vars), VarsNumbered: en.VarsNumbered, Outer: en}
+				result := NewNil()
+				for _, operand := range operands {
+					result = operand(scope)
+				}
+				return result
+			}
 		case "!begin":
 			operands := prepareSerialOperands(proc, items[1:])
 			return func(en *Env) Scmer {
@@ -221,12 +232,22 @@ func prepareSerialExpr(proc *Proc, expression Scmer) serialExpr {
 		}
 	}
 
-	// Stable non-retaining natives can borrow a call-node-owned frame. A native
-	// such as list deliberately falls through to Eval, which supplies an owned
-	// frame because the result may retain it.
+	// Stable non-retaining natives can borrow a call-node-owned frame. Retaining
+	// natives need a fresh frame per invocation, even when structure is prepared.
 	native, ok := serialProcResolveNative(proc, items[0])
 	if ok {
 		declaration := DeclarationForValue(native)
+		if declaration != nil && declaration.RetainsCallArgs && proc.NumberedOnly {
+			fn := native.Func()
+			operands := prepareSerialOperands(proc, items[1:])
+			return func(en *Env) Scmer {
+				args := make([]Scmer, len(operands))
+				for i, operand := range operands {
+					args[i] = operand(en)
+				}
+				return fn(args...)
+			}
+		}
 		if declaration != nil && !declaration.RetainsCallArgs {
 			fn := native.Func()
 			operands := prepareSerialOperands(proc, items[1:])

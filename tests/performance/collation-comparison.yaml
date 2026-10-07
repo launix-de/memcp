@@ -1,0 +1,34 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Case-insensitive Unicode comparisons in ordered index construction and probes"
+  isolated: true
+  ci: false
+  perf_ci: true
+  performance_rows: 100000
+setup:
+  - sql: DROP TABLE IF EXISTS perf_ci_label
+  - sql: CREATE TABLE perf_ci_label (id INT PRIMARY KEY, label TEXT COLLATE utf8mb4_general_ci) ENGINE=memory
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "perf_ci_label") '("id" "label")
+          (map (produceN 100000) (lambda (i) (list i (concat "label-ÉCOLE-" (+ i 100000))))))
+        (rebuild)
+        100000)
+test_cases:
+  - name: "Unicode general_ci ordered range with index construction and ten reuses"
+    sql: SELECT id FROM perf_ci_label WHERE label > 'label-école-150000' AND label < 'label-école-160000' ORDER BY label LIMIT 4
+    expect:
+      rows: 4
+      data:
+        - {id: 50001}
+        - {id: 50002}
+        - {id: 50003}
+        - {id: 50004}
+    warmup: 0
+    timing_samples: 11
+    timing_aggregation: total
+    threshold_ms: 10000
+cleanup:
+  - sql: DROP TABLE IF EXISTS perf_ci_label

@@ -69,7 +69,16 @@ func prepareSerialInterpreter(val Scmer) func([]Scmer) Scmer {
 	}
 	p := *proc
 	if serialExprMayCaptureEnv(p.Body) {
-		return func(args []Scmer) Scmer { return ApplyEx(val, args, p.En) }
+		// Optimized numbered bodies can reuse prepared expression structure,
+		// while every invocation still owns the scope retained by its lambdas.
+		if !p.NumberedOnly {
+			return func(args []Scmer) Scmer { return ApplyEx(val, args, p.En) }
+		}
+		body := prepareSerialExpr(&p, p.Body)
+		return func(args []Scmer) Scmer {
+			en, _ := prepareProcCallWithArgs(&p, args)
+			return body(en)
+		}
 	}
 	numVars := p.NumVars
 	// Numbered-only optimized lambdas carry their complete frame size as the
@@ -323,11 +332,11 @@ func PrepareSerialProc(source Scmer) SerialProc {
 	return prepared
 }
 
-// callSerialProcOnce preserves the specialized and compiled callback dispatch,
+// ApplyOnce preserves the specialized and compiled callback dispatch,
 // but does not compile a general interpreted AST for one invocation. Apply
 // gives escaping closures their own lexical frame. Native callbacks keep the
 // same argument ownership as SerialProc.Call.
-func callSerialProcOnce(source Scmer, args []Scmer) Scmer {
+func ApplyOnce(source Scmer, args []Scmer) Scmer {
 	prepared := classifySerialProc(source)
 	if prepared.Kind == SerialProcGeneral {
 		if source.Proc().Compiled == nil {

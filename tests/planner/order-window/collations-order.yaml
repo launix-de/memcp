@@ -16,7 +16,20 @@ setup:
   - sql: DROP TABLE IF EXISTS coll_third
   - sql: CREATE TABLE coll_third (id INT PRIMARY KEY, link_id INT)
   - sql: INSERT INTO coll_third VALUES (1,1),(2,2),(3,3),(4,4)
+  - sql: DROP TABLE IF EXISTS coll_unicode_suffix
+  - sql: CREATE TABLE coll_unicode_suffix (id INT PRIMARY KEY, name TEXT COLLATE utf8mb4_general_ci)
+  - sql: INSERT INTO coll_unicode_suffix VALUES (1, 'label-École-3'), (2, 'label-école-1'), (3, 'label-ÉCOLE-2'), (4, 'label-K-4')
 test_cases:
+  - name: Unicode general_ci suffix keeps case-insensitive index order
+    sql: SELECT id FROM coll_unicode_suffix ORDER BY name
+    expect:
+      rows: 4
+      data: [{id: 4}, {id: 2}, {id: 3}, {id: 1}]
+  - name: Unicode general_ci suffix keeps descending index order
+    sql: SELECT id FROM coll_unicode_suffix ORDER BY name DESC
+    expect:
+      rows: 4
+      data: [{id: 1}, {id: 3}, {id: 2}, {id: 4}]
   - name: Three-table distinct retains name collation ASC
     sql: SELECT DISTINCT n.id AS name_id, l.id AS link_id FROM coll_names n JOIN coll_link l ON n.id=l.name_id JOIN coll_third z ON z.link_id=l.id ORDER
       BY n.name ASC, l.id ASC
@@ -332,6 +345,7 @@ test_cases:
         - {id: 3, c: 1}
         - {id: 2, c: 1}
 cleanup:
+  - sql: DROP TABLE IF EXISTS coll_unicode_suffix
   - sql: DROP TABLE IF EXISTS coll_third
   - sql: DROP TABLE IF EXISTS coll_t
   - sql: DROP TABLE IF EXISTS coll_link

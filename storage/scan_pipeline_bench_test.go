@@ -28,6 +28,7 @@ func optimizedScanProc(tb testing.TB, source string) scm.Scmer {
 }
 
 func TestScanPipelineSpecializationsPreserveMainAndDeltaResults(t *testing.T) {
+	Init(scm.Globalenv)
 	const dbName = "test_scan_pipeline_specializations"
 	databases.Remove(dbName)
 	CreateDatabase(dbName, true)
@@ -72,6 +73,7 @@ func TestScanPipelineSpecializationsPreserveMainAndDeltaResults(t *testing.T) {
 // BenchmarkScanPipelineOLTP records the physical callbacks emitted by the
 // planner, including reducers which an identity map can pass through directly.
 func BenchmarkScanPipelineOLTP(b *testing.B) {
+	Init(scm.Globalenv)
 	const rowsN = 60_000
 	dbName := "bench_scan_pipeline_oltp"
 	databases.Remove(dbName)
@@ -132,5 +134,40 @@ func BenchmarkScanPipelineOLTP(b *testing.B) {
 					benchmark.neutral, benchmark.combine, false)
 			}
 		})
+	}
+}
+
+func TestSingleShardCombineOwnsRetainedArgumentsAndCaptures(t *testing.T) {
+	tbl, cols := scanColumnCostTable(t, "single_combine_ownership", 1)
+	condition := optimizedScanProc(t, "(lambda () true)")
+	mapper := optimizedScanProc(t, "(lambda (acc value) value)")
+	access := newScanAccessSchema(scanAccessConsumerScan, nil, -1)
+	for _, combine := range []scm.Scmer{
+		optimizedScanProc(t, "(lambda (acc value) (list acc value))"),
+		scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return scm.NewSlice(args) }),
+	} {
+		first := tbl.scan(nil, access, nil, nil, condition, cols[:1], mapper, scm.NewInt(13), combine, false)
+		second := tbl.scan(nil, access, nil, nil, condition, cols[:1], mapper, scm.NewInt(20), combine, false)
+		if !scm.Equal(first, scm.NewSlice([]scm.Scmer{scm.NewInt(13), scm.NewInt(0)})) ||
+			!scm.Equal(second, scm.NewSlice([]scm.Scmer{scm.NewInt(20), scm.NewInt(0)})) {
+			t.Fatal("single-shard combine borrowed an invocation's argument frame")
+		}
+	}
+	combine := optimizedScanProc(t, "(lambda (acc value) (lambda () (+ acc value)))")
+	first := tbl.scan(nil, access, nil, nil, condition, cols[:1], mapper, scm.NewInt(13), combine, false)
+	second := tbl.scan(nil, access, nil, nil, condition, cols[:1], mapper, scm.NewInt(20), combine, false)
+	if scm.Apply(first).Int() != 13 || scm.Apply(second).Int() != 20 || scm.Apply(first).Int() != 13 {
+		t.Fatal("single-shard combine reused an escaping lexical scope")
+	}
+}
+
+func TestSingleShardEmptyResultDoesNotCallCombine(t *testing.T) {
+	tbl, _ := scanColumnCostTable(t, "single_combine_empty", 0)
+	combine := scm.NewFunc(func(...scm.Scmer) scm.Scmer { panic("empty shard called combine") })
+	got := tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil,
+		optimizedScanProc(t, "(lambda () true)"), nil,
+		optimizedScanProc(t, "(lambda (acc) 99)"), scm.NewInt(13), combine, false)
+	if got.Int() != 13 {
+		t.Fatalf("empty shard returned %s, want neutral 13", got.String())
 	}
 }

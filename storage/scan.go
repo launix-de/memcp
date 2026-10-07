@@ -371,6 +371,17 @@ func scanConditionAlwaysTrue(program *scm.SerialProc, parameterCount int) bool {
 	return parameterCount == 0 && scm.ToBool(program.Call(nil))
 }
 
+// prepareScanCondition consumes the same complete access proof as execution.
+// A covered read never calls its predicate, so do not build an interpreter/JIT
+// adapter for it. Mutations must still recheck the visible row after forwarding.
+func prepareScanCondition(conditionCols []string, condition scm.Scmer, access scanAccess, mutation bool) (scm.SerialProc, bool) {
+	if !mutation && len(conditionCols) > 0 && scanAccessProvesCondition(conditionCols, condition, access) {
+		return scm.SerialProc{}, true
+	}
+	program := scm.PrepareSerialProc(condition)
+	return program, scanConditionAlwaysTrue(&program, len(conditionCols)) || !mutation && scanAccessCoversResidual(access)
+}
+
 func scanParamColumn(expr scm.Scmer, params, columns []scm.Scmer) (string, bool) {
 	for i, param := range params {
 		if i >= len(columns) {
@@ -1638,9 +1649,8 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 			if msg.outCount > 0 {
 				hadValue = true
 				if !combine.IsNil() {
-					program := scm.PrepareSerialProc(combine)
 					args := [2]scm.Scmer{akkumulator, msg.res}
-					akkumulator = program.Call(args[:])
+					akkumulator = scm.ApplyOnce(combine, args[:])
 				}
 			}
 		}
@@ -1985,9 +1995,7 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
-	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := scanConditionAlwaysTrue(&conditionProgram, len(conditionCols)) ||
-		scanAccessProvesCondition(conditionCols, condition, access)
+	conditionProgram, conditionAlwaysTrue := prepareScanCondition(conditionCols, condition, access, false)
 
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
@@ -2159,8 +2167,6 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		ss = SessionStateFromTx(currentTx)
 	}
 
-	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := scanConditionAlwaysTrue(&conditionProgram, len(conditionCols))
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -2172,8 +2178,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	// forwards to a newer primary record whose predicate columns changed. A
 	// read may trust its exact access proof, but a mutation must recheck the
 	// visible row before applying update/delete pseudo-columns.
-	conditionAlwaysTrue = conditionAlwaysTrue || !hasMutationCallback &&
-		scanAccessProvesCondition(conditionCols, condition, access)
+	conditionProgram, conditionAlwaysTrue := prepareScanCondition(conditionCols, condition, access, hasMutationCallback)
 
 	// Ensure shard is loaded from disk before accessing columns.
 	// ensureLoaded() must run before getColumnStorageOrPanic so that COLD
@@ -2559,8 +2564,6 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 		ss = SessionStateFromTx(currentTx)
 	}
 
-	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := scanConditionAlwaysTrue(&conditionProgram, len(conditionCols))
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -2568,8 +2571,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 			break
 		}
 	}
-	conditionAlwaysTrue = conditionAlwaysTrue || !hasMutationCallback &&
-		scanAccessProvesCondition(conditionCols, condition, access)
+	conditionProgram, conditionAlwaysTrue := prepareScanCondition(conditionCols, condition, access, hasMutationCallback)
 
 	t.ensureLoaded()
 	ownsWrite := false

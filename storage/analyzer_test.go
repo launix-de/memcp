@@ -1336,3 +1336,34 @@ func TestComputedBoundaryMaterializesArrayAsData(t *testing.T) {
 		}
 	}
 }
+
+func TestPreparedCoveredPredicateStillChecksMutationsAndNulls(t *testing.T) {
+	falseCondition := buildProc([]string{"value"}, scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("<"), scm.NewSymbol("value"), scm.NewInt(4),
+	}))
+	falseCondition.Proc().En = &scm.Globalenv
+	covered := scanAccess{plannerFilterCovered: true}
+	_, readCovered := prepareScanCondition([]string{"ID"}, falseCondition, covered, false)
+	if !readCovered {
+		t.Fatal("complete read proof was not consumed")
+	}
+	mutation, mutationCovered := prepareScanCondition([]string{"ID"}, falseCondition, covered, true)
+	if mutationCovered || mutation.Call([]scm.Scmer{scm.NewInt(8)}).Bool() {
+		t.Fatal("a historical read proof suppressed the visible mutation predicate")
+	}
+	condition := buildProc([]string{"value"}, scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("equal??"), scm.NewSymbol("value"), scm.NewNil(),
+	}))
+	condition.Proc().En = &scm.Globalenv
+	access := runtimeScanAccess(extractBoundaries([]string{"ID"}, condition))
+	program, coveredNull := prepareScanCondition([]string{"ID"}, condition, access, false)
+	if coveredNull {
+		t.Fatal("a widened NULL bound suppressed its residual check")
+	}
+	for _, value := range []scm.Scmer{scm.NewNil(), scm.NewInt(0)} {
+		got, want := program.Call([]scm.Scmer{value}), scm.Apply(condition, value)
+		if !scm.Equal(got, want) {
+			t.Fatalf("residual NULL comparison returned %s, want %s", scm.String(got), scm.String(want))
+		}
+	}
+}

@@ -77,8 +77,8 @@ type collateCacheKey struct {
 // pointers, so equivalent plans must receive the same function instance.
 var collateCache sync.Map // map[collateCacheKey]Scmer
 
-// generalCIFoldCompare preserves the existing strings.ToLower ordering while
-// keeping the overwhelmingly common ASCII index path allocation-free.
+// generalCIFoldCompare preserves strings.ToLower ordering without creating
+// lowercase copies. The common ASCII prefix stays on the byte comparison path.
 func generalCIFoldCompare(left, right string) int {
 	limit := len(left)
 	if len(right) < limit {
@@ -86,7 +86,7 @@ func generalCIFoldCompare(left, right string) int {
 	}
 	for i := 0; i < limit; i++ {
 		if left[i] >= 0x80 || right[i] >= 0x80 {
-			return strings.Compare(strings.ToLower(left), strings.ToLower(right))
+			return generalCIUnicodeCompare(left[i:], right[i:])
 		}
 		l, r := asciiFoldByte(left[i]), asciiFoldByte(right[i])
 		if l < r {
@@ -101,6 +101,45 @@ func generalCIFoldCompare(left, right string) int {
 	}
 	if len(left) > len(right) {
 		return 1
+	}
+	return 0
+}
+
+// UTF-8 byte ordering agrees with rune ordering. Decode invalid bytes as
+// RuneError, exactly as strings.ToLower does, and fold one rune at a time.
+// Unicode simple lowercase mappings never expand into multiple runes.
+func generalCIUnicodeCompare(left, right string) int {
+	li, ri := 0, 0
+	for li < len(left) && ri < len(right) {
+		l, r := rune(left[li]), rune(right[ri])
+		li++
+		ri++
+		if l >= utf8.RuneSelf {
+			decoded, width := utf8.DecodeRuneInString(left[li-1:])
+			li += width - 1
+			l = unicode.ToLower(decoded)
+		} else {
+			l = rune(asciiFoldByte(byte(l)))
+		}
+		if r >= utf8.RuneSelf {
+			decoded, width := utf8.DecodeRuneInString(right[ri-1:])
+			ri += width - 1
+			r = unicode.ToLower(decoded)
+		} else {
+			r = rune(asciiFoldByte(byte(r)))
+		}
+		if l < r {
+			return -1
+		}
+		if l > r {
+			return 1
+		}
+	}
+	if li < len(left) {
+		return 1
+	}
+	if ri < len(right) {
+		return -1
 	}
 	return 0
 }
