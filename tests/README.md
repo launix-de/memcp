@@ -53,6 +53,13 @@ artifacts. There are no discarded warmups or adaptive repetition counts.
 
 Choose `n` before measuring, apply it identically to both revisions, and retain
 it across verification trials. The initial trade-off fixtures use `n = 10`.
+
+Short workloads also need enough measured work to resist fixed scheduling and
+collection noise. The front-cache cases in `in-list-template.yaml` sum 51
+requests, each creating a fresh cache and performing 40 lookups including cold
+compilation. Every result is checked; no sample is discarded. The A/B percentage
+gate and absolute budget stay unchanged. Its forced-compilation case already
+does enough work with five requests and keeps that configuration.
 The total may be at most 20% slower; no warmup bonus or fixed jitter allowance
 extends that limit. Suspect totals receive the usual complete isolated-fixture
 old/new verification, with medians taken across whole workload totals. Independent
