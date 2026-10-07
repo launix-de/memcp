@@ -242,6 +242,50 @@ func TestGeneralCIFoldCompare(t *testing.T) {
 	}
 }
 
+func TestGeneralCIFoldCompareUnicode(t *testing.T) {
+	values := []string{"", "A", "a", "École", "éCOLE", "Straße", "STRASSE", "İ", "i", "K", "K", "ſ", "S", "ẞ", "ß", "Ångström", "A\u030angström", "Σ", "σ", "ς", "中", "가", "😀", "𐐀", "𐐨", "\xff", "\xfe", "x\xc3", "x\ufffd", "ABC\xff", "abc\xfe"}
+	for _, left := range values {
+		for _, right := range values {
+			want := strings.Compare(strings.ToLower(left), strings.ToLower(right))
+			got := generalCIFoldCompare(left, right)
+			if got != want {
+				t.Fatalf("compare(%q,%q)=%d, want %d", left, right, got, want)
+			}
+		}
+	}
+	for _, pair := range [][2]string{{"École 123", "éCOLE 124"}, {"A\u030a", "Å"}, {"ABC\xff", "abc\ufffd"}, {strings.Repeat("ÉCOLE", 128), strings.Repeat("école", 128)}} {
+		allocations := testing.AllocsPerRun(1000, func() { generalCIFoldCompare(pair[0], pair[1]) })
+		if allocations != 0 {
+			t.Errorf("compare(%q,%q) allocated %.2f objects, want 0", pair[0][:min(12, len(pair[0]))], pair[1][:min(12, len(pair[1]))], allocations)
+		}
+	}
+}
+
+func FuzzGeneralCIFoldCompare(f *testing.F) {
+	for _, pair := range [][2]string{{"École", "éCOLE"}, {"ABC\xff", "abc\ufffd"}, {"K", "K"}, {"𐐀", "𐐨"}, {"ÉCOLE", "école"}} {
+		f.Add(pair[0], pair[1])
+	}
+	f.Fuzz(func(t *testing.T, left, right string) {
+		want := strings.Compare(strings.ToLower(left), strings.ToLower(right))
+		if got := generalCIFoldCompare(left, right); got != want {
+			t.Fatalf("compare(%q,%q)=%d, want %d", left, right, got, want)
+		}
+	})
+}
+
+func BenchmarkGeneralCIFoldCompare(b *testing.B) {
+	for _, pair := range [][2]string{{"account-123", "ACCOUNT-124"}, {"École 123", "éCOLE 124"}, {"𐐀-123", "𐐨-124"}, {strings.Repeat("ÉCOLE", 128) + "1", strings.Repeat("école", 128) + "2"}} {
+		b.Run(pair[0][:min(16, len(pair[0]))], func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				if generalCIFoldCompare(pair[0], pair[1]) >= 0 {
+					b.Fatal("unexpected ordering")
+				}
+			}
+		})
+	}
+}
+
 func TestComputeSizeBorrowedStrings(t *testing.T) {
 	original := os.Stdout
 	reader, writer, err := os.Pipe()
