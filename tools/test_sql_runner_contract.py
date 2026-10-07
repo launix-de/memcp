@@ -798,6 +798,23 @@ class PerformanceScaleContractTest(unittest.TestCase):
 
 
 class FailureAttributionContractTest(unittest.TestCase):
+    def test_denied_shutdown_is_measured_without_restarting(self):
+        runner = SQLTestRunner("http://localhost:1", performance_calibration={"scale": 1.0})
+        response = SimpleNamespace(status_code=500, text="Error: access denied", headers={})
+        case = {"name": "denied shutdown", "sql": "SHUTDOWN", "expect": {"error": True}}
+        output = io.StringIO()
+        clock = iter((0, 2_000_000))
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", False), \
+                mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
+                mock.patch.object(runner, "execute_sql", return_value=response) as execute, \
+                mock.patch.object(runner, "_restart_handler") as restart, \
+                redirect_stdout(output):
+            self.assertTrue(runner.run_test_case(case, "memcp-tests"))
+        execute.assert_called_once()
+        restart.assert_not_called()
+        self.assertIn("2.0ms", output.getvalue())
+        self.assertEqual(runner.failed_critical, 0)
+
     def run_timed_case(self, returned_value, *, performance=False, waived=False, duration_ns=6_000_000_000):
         runner = SQLTestRunner("http://localhost:1", performance_calibration={"scale": 1.0})
         response = SimpleNamespace(status_code=200, text=json.dumps({"n": returned_value}), headers={})

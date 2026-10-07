@@ -936,6 +936,8 @@ class SQLTestRunner:
             # Show CPU load as percentage of total capacity (100%/Ncores = one core)
             cpu_info = f", {cpu_pct:.0f}%/{NUM_CPUS*100}% CPU" if cpu_pct is not None else ""
             print(f"✅ {name} ({elapsed_ms:.1f}ms / {threshold_ms:.0f}ms{rows_info}{rate_info}{mem_info}{cpu_info})")
+        elif elapsed_ms is not None:
+            print(f"✅ {name} ({elapsed_ms:.1f}ms)")
         else:
             print(f"✅ {name}")
         if is_noncritical:
@@ -1721,12 +1723,16 @@ class SQLTestRunner:
             # A graceful shutdown may close this request before a response reaches
             # the client. Do not wait for that same process to become ready again;
             # the managed restart handler below owns process replacement.
+            start_ns = time.monotonic_ns()
             resp = self.execute_sql(
                 database, query, auth_header, active_syntax,
                 retry_on_connection_failure=False,
             )
             if resp is not None and resp.status_code >= 500:
                 response = resp
+                # A denied shutdown returns an ordinary expected error; it
+                # still needs a duration for successful result diagnostics.
+                elapsed_ms = (time.monotonic_ns() - start_ns) / 1_000_000
             else:
                 # Treat SHUTDOWN as successful regardless of response body, even if the connection closed.
                 if self._restart_handler is not None:
