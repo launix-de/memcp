@@ -608,3 +608,86 @@ func firstRecSetTargetForBenchmark(rows *recSet) recMapTarget {
 	}
 	return recMapTarget{}
 }
+
+func TestRecMapRangeFirstMapperBoundsAndTies(t *testing.T) {
+	database := "trecmap_range_bounds"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	target := recMapTestTable(t, database, "target", []string{"parent", "kind", "at", "value"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewInt(2), scm.NewInt(10), scm.NewInt(100)},
+		{scm.NewInt(1), scm.NewInt(2), scm.NewInt(20), scm.NewInt(200)},
+		{scm.NewInt(1), scm.NewInt(2), scm.NewInt(20), scm.NewInt(201)},
+		{scm.NewInt(1), scm.NewInt(2), scm.NewInt(30), scm.NewInt(300)},
+		{scm.NewInt(1), scm.NewInt(3), scm.NewInt(20), scm.NewInt(999)},
+		{scm.NewInt(2), scm.NewInt(2), scm.NewInt(20), scm.NewInt(999)},
+		{scm.NewNil(), scm.NewInt(2), scm.NewInt(20), scm.NewInt(999)},
+		{scm.NewInt(1), scm.NewInt(2), scm.NewNil(), scm.NewInt(999)},
+	})
+	// Unrebuilt rows preserve insertion order and exercise the delta reader.
+	for _, test := range []struct {
+		relation string
+		values   []int64
+	}{
+		{"<=", []int64{-1, 100, 201, 201, 300}},
+		{"<", []int64{-1, -1, 100, 201, 300}},
+		{">=", []int64{100, 100, 200, 300, -1}},
+		{">", []int64{100, 200, 300, 300, -1}},
+	} {
+		t.Run(test.relation, func(t *testing.T) {
+			mapper := newRecMapRangeFirstMapper(nil, target, []string{"parent", "kind"}, "at", test.relation, scm.NewNil())
+			inputs := make([]scm.Scmer, 0)
+			for _, bound := range []int64{0, 10, 20, 25, 40} {
+				inputs = append(inputs, scm.NewSlice([]scm.Scmer{scm.NewInt(1), scm.NewInt(2), scm.NewInt(bound)}))
+			}
+			inputs = append(inputs, scm.NewSlice([]scm.Scmer{scm.NewInt(0), scm.NewInt(2), scm.NewInt(20)}), scm.NewSlice([]scm.Scmer{scm.NewInt(3), scm.NewInt(2), scm.NewInt(20)}), scm.NewSlice([]scm.Scmer{scm.NewInt(1), scm.NewInt(2), scm.NewNil()}))
+			got := scm.Apply(mapper, scm.NewSlice(inputs)).Slice()
+			for i, ref := range got {
+				want := int64(-1)
+				if i < len(test.values) {
+					want = test.values[i]
+				}
+				if want < 0 {
+					if !ref.IsNil() {
+						t.Fatalf("input %d returned a row for a missing/NULL range", i)
+					}
+					continue
+				}
+				if ref.IsNil() {
+					t.Fatalf("input %d missed value %d", i, want)
+				}
+				if value := recMapTargetValue(recordRefFromScmer(ref), "value"); value.Int() != want {
+					t.Fatalf("input %d value %v, want %d", i, value, want)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkRecMapRangeFirstHistory(b *testing.B) {
+	for _, depth := range []int{2, 128, 1024} {
+		b.Run(fmt.Sprint(depth), func(b *testing.B) {
+			database := "brecmap_range_history"
+			databases.Remove(database)
+			b.Cleanup(func() { databases.Remove(database) })
+			CreateDatabase(database, true)
+			rows := make([][]scm.Scmer, 16*depth)
+			for i := range rows {
+				rows[i] = []scm.Scmer{scm.NewInt(int64(i / depth)), scm.NewInt(int64(i % depth)), scm.NewInt(int64(i))}
+			}
+			target := recMapTestTable(b, database, "target", []string{"parent", "at", "value"}, rows)
+			mapper := newRecMapRangeFirstMapper(nil, target, []string{"parent"}, "at", "<=", scm.NewNil())
+			inputs := make([]scm.Scmer, 1024)
+			for i := range inputs {
+				inputs[i] = scm.NewSlice([]scm.Scmer{scm.NewInt(int64(i % 16)), scm.NewInt(int64(depth * 3 / 4))})
+			}
+			batch := scm.NewSlice(inputs)
+			scm.Apply(mapper, batch)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				scm.Apply(mapper, batch)
+			}
+		})
+	}
+}
