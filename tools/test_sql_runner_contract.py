@@ -797,6 +797,56 @@ class PerformanceScaleContractTest(unittest.TestCase):
             self.assertEqual(load_performance_scale(), calibration)
 
 
+class FailureAttributionContractTest(unittest.TestCase):
+    def run_timed_case(self, returned_value, *, performance=False, waived=False):
+        runner = SQLTestRunner("http://localhost:1", performance_calibration={"scale": 1.0})
+        response = SimpleNamespace(status_code=200, text=json.dumps({"n": returned_value}), headers={})
+        case = {"name": "budget attribution", "sql": "SELECT 1 AS n",
+                "max_plan_size": 0, "expect": {"rows": 1, "data": [{"n": 1}]}}
+        if performance:
+            case.update(threshold_ms=1, repetitions=1, warmup=0)
+        if waived:
+            runner.perf_regression_waivers = {"?::budget attribution": "accepted latency only"}
+        output = io.StringIO()
+        clock = itertools.count(0, 6_000_000_000)
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", performance), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
+                mock.patch.object(runner, "execute_sql", return_value=response), \
+                redirect_stdout(output):
+            passed = runner.run_test_case(case, "memcp-tests")
+        return passed, output.getvalue(), runner
+
+    def test_slow_wrong_result_is_a_correctness_failure(self):
+        passed, output, runner = self.run_timed_case(2)
+        self.assertFalse(passed)
+        self.assertIn("Expectation mismatch", output)
+        self.assertIn("Failure class: result correctness", output)
+        self.assertNotIn("Too slow", output)
+        self.assertEqual(runner.failed_critical, 1)
+
+    def test_slow_correct_result_still_fails_unchanged_hard_limit(self):
+        passed, output, runner = self.run_timed_case(1)
+        self.assertFalse(passed)
+        self.assertIn("6000.0ms > 5000ms", output)
+        self.assertIn("Failure class: timing budget; result assertions passed", output)
+        self.assertEqual(runner.failed_critical, 1)
+
+    def test_performance_waiver_does_not_hide_slow_wrong_result(self):
+        passed, output, runner = self.run_timed_case(2, performance=True, waived=True)
+        self.assertFalse(passed)
+        self.assertIn("Expectation mismatch", output)
+        self.assertEqual(runner.waived_regressions, [])
+
+    def test_unwaived_performance_budget_still_fails(self):
+        passed, output, runner = self.run_timed_case(1, performance=True)
+        self.assertFalse(passed)
+        self.assertIn("Too slow:", output)
+        self.assertIn("result assertions passed", output)
+        self.assertEqual(runner.failed_critical, 1)
+
+
 class ErrorResponseContractTest(unittest.TestCase):
     def test_missing_response_is_not_a_sql_error(self) -> None:
         self.assertFalse(is_error_response(None))

@@ -953,6 +953,14 @@ class SQLTestRunner:
         time_info = f" ({elapsed_ms:.1f}ms / {threshold_ms:.0f}ms)" if elapsed_ms is not None else ""
         print(f"{'⚠️' if is_noncritical else '❌'} {name}{' (noncritical)' if is_noncritical else ''}{time_info}")
         print(f"    Reason: {reason}")
+        if reason.startswith("Too slow"):
+            print("    Failure class: timing budget; result assertions passed")
+        elif reason == "Expectation mismatch":
+            print("    Failure class: result correctness")
+        elif reason.startswith("Planner too slow"):
+            print("    Failure class: planner timing budget; result not yet checked")
+        elif reason.startswith("Query plan too large"):
+            print("    Failure class: plan size; result not yet checked")
         fail_comment = getattr(self._test_context, "fail_comment", None)
         if fail_comment:
             print(f"    Comment: {fail_comment}")
@@ -1961,6 +1969,15 @@ class SQLTestRunner:
 
         results = self.parse_jsonl_response(response)
 
+        # Correctness is independent of timing. A slow wrong result must be
+        # reported as a mismatch, not hidden behind an exceeded time budget.
+        expectation_matches = self.validate_expectation(test_case, response, results)
+        if not expectation_matches:
+            diag = self._run_on_fail(test_case, database)
+            return self._record_fail(name, "Expectation mismatch", query, response,
+                                     test_case.get("expect"), is_noncritical,
+                                     on_fail_diag=diag)
+
         # Check performance threshold
         if is_perf_test and PERF_AB_MODE == "compare" and baseline_time:
             # Shared runners have a small fixed scheduling/HTTP noise floor.
@@ -2008,31 +2025,27 @@ class SQLTestRunner:
                 return self._record_fail(name, f"Too slow (hard limit): {elapsed_ms:.1f}ms > {hard_limit_ms:.0f}ms", query, response,
                                          test_case.get("expect"), is_noncritical, elapsed_ms, hard_limit_ms, diag)
 
-        if self.validate_expectation(test_case, response, results):
-            if is_perf_test:
-                heap_mb = heap_bytes / (1024 * 1024) if heap_bytes else None
-                self._record_success(name, is_noncritical, elapsed_ms, threshold_ms, perf_rows, heap_mb, cpu_pct)
-                result = {
-                    "time_ms": elapsed_ms,
-                    "time_per_repetition_ms": elapsed_ms / len(samples_ns) if timing_aggregation == "total" else elapsed_ms,
-                    "timing_aggregation": timing_aggregation,
-                    "timing_group": test_case.get("timing_group"),
-                    "total_ms": total_ns / 1_000_000,
-                    "repetitions": len(samples_ns),
-                    "warmup": warmup_runs,
-                    "rows": perf_rows,
-                    "max_regression_pct": max_regression_pct,
-                    "workload_sha256": fingerprint,
-                }
-                if os.environ.get("PERF_FIXTURE_TRIAL"):
-                    result["samples_ns"] = samples_ns
-                self.perf_results[perf_key if PERF_AB_MODE else name] = result
-            else:
-                self._record_success(name, is_noncritical)
-            return True
+        if is_perf_test:
+            heap_mb = heap_bytes / (1024 * 1024) if heap_bytes else None
+            self._record_success(name, is_noncritical, elapsed_ms, threshold_ms, perf_rows, heap_mb, cpu_pct)
+            result = {
+                "time_ms": elapsed_ms,
+                "time_per_repetition_ms": elapsed_ms / len(samples_ns) if timing_aggregation == "total" else elapsed_ms,
+                "timing_aggregation": timing_aggregation,
+                "timing_group": test_case.get("timing_group"),
+                "total_ms": total_ns / 1_000_000,
+                "repetitions": len(samples_ns),
+                "warmup": warmup_runs,
+                "rows": perf_rows,
+                "max_regression_pct": max_regression_pct,
+                "workload_sha256": fingerprint,
+            }
+            if os.environ.get("PERF_FIXTURE_TRIAL"):
+                result["samples_ns"] = samples_ns
+            self.perf_results[perf_key if PERF_AB_MODE else name] = result
         else:
-            diag = self._run_on_fail(test_case, database)
-            return self._record_fail(name, "Expectation mismatch", query, response, test_case.get("expect"), is_noncritical, on_fail_diag=diag)
+            self._record_success(name, is_noncritical)
+        return True
 
     def validate_expectation(self, test_case: Dict, response: requests.Response, results: Optional[List[Dict]]) -> bool:
         expect = test_case.get("expect", {})

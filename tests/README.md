@@ -62,6 +62,29 @@ latency tests keep their existing median-per-request policy.
 - `performance/bulk-insert-compile.yaml`: Cold compilation of parameterized bulk INSERT rows.
 - `performance/jit-scan-kernel-compile.yaml`: Full column scans including per-invocation filter and reducer compilation; one cold request plus three repetitions.
 
+## Diagnose a red timing check
+
+The SQL runner validates the returned result before applying execution-time
+budgets. A timing failure reports `result assertions passed`; an expectation
+mismatch reports `result correctness` even when the query was also slow. A
+planner-time or plan-size failure occurs before query execution and reports that
+the result has not yet been checked. These distinctions do not waive any gate.
+
+An absolute `max_time` failure alone does not establish a regression relative to
+master. Compare the exact baseline revision and candidate on identical fixtures,
+including cold/warm phases, and retain all fixed verification trials. Check the
+baseline CI log too: a baseline which exceeds the same absolute budget is evidence
+of an existing budget problem, not proof that the candidate is harmless. Query
+errors, wrong results and timeouts still require investigation.
+
+Absolute limits are runaway backstops; the paired performance A/B job detects
+relative slowdowns. The pre-server SHA-256 machine calibration is independent of
+MemCP, but it is not a calibration of allocation, garbage collection or memory
+access costs. Before proposing a budget-policy change, collect repeated baseline
+measurements and describe the margin, measurement isolation and intended failure
+mode. Changes to protected calibration or policy code require the maintainer's
+policy-update procedure; do not hide a budget relaxation in an engine patch.
+
 ## Baseline queries that cannot execute
 
 In `--perf-ab`, a baseline query error or request timeout is recorded as
