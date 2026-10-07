@@ -198,9 +198,11 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 				shard.mu.RLock()
 				defer shard.mu.RUnlock()
 			}
+			frames := make([]scm.Scmer, len(positions)*len(columns))
 			for positionIndex := range positions {
 				position := &positions[positionIndex]
-				position.values = make([]scm.Scmer, len(columns))
+				start, end := positionIndex*len(columns), (positionIndex+1)*len(columns)
+				position.values = frames[start:end:end]
 				for i, column := range columns {
 					if position.target.recid < shard.main_count {
 						position.values[i] = storages[i].GetValue(position.target.recid)
@@ -272,6 +274,24 @@ type recMapBuildRows struct {
 	rows   []recMapSourceRow
 	mapper *scm.SerialProc
 	width  int
+	// Private to this serial shard builder. Completed keys own their
+	// disjoint slices; no mutable callback frame is retained.
+	tupleBuffer []scm.Scmer
+}
+
+func (b *recMapBuildRows) copyKey(values []scm.Scmer) []scm.Scmer {
+	width := len(values)
+	if width == 0 {
+		return nil
+	}
+	if len(b.tupleBuffer) < width {
+		tuples := min(recMapMapperBatchSize, max(1, len(b.rows)))
+		b.tupleBuffer = make([]scm.Scmer, tuples*width)
+	}
+	key := b.tupleBuffer[:width:width]
+	copy(key, values)
+	b.tupleBuffer = b.tupleBuffer[width:]
+	return key
 }
 
 // newRecMapEquiFirstMapper resolves each bounded source-shard batch in one
@@ -566,8 +586,8 @@ func newRecMapRangeFirstMapper(currentTx *TxContext, target *table, targetPointC
 			} else {
 				panic("recmap range-first mapper received an invalid shard accumulator")
 			}
-			key := append([]scm.Scmer(nil), args[2:]...)
-			if !recMapKeyHasNull(key) {
+			if !recMapKeyHasNull(args[2:]) {
+				key := rows.copyKey(args[2:])
 				rows.rows = append(rows.rows, recMapSourceRow{
 					target: recordRefFromScmer(args[1]), key: key,
 				})
@@ -815,7 +835,7 @@ func scanRecMap(currentTx *TxContext, source scm.Scmer, accessSchema scm.Scmer, 
 		}
 		sourceRef := recordRefFromScmer(args[1])
 		build.rows = append(build.rows, recMapSourceRow{shard: sourceRef.shard, recid: sourceRef.recid,
-			key: append([]scm.Scmer(nil), args[2:]...)})
+			key: build.copyKey(args[2:])})
 		return scm.NewCustom(TagRecMapBuild, unsafe.Pointer(build))
 	})
 	combine := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {

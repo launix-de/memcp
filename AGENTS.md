@@ -198,6 +198,11 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   retains no transaction, session, cancellation, or mutable shard containers and must never survive its
   query or be persisted: shard rebuilds may replace every referenced identity.
 
+- `recMapBuildRows.tupleBuffer` is private to one serial shard accumulator.
+  Completed tuple slices own disjoint portions of its buffers; callbacks may
+  reuse their input frames. Published mapper values retain immutable copied
+  frames and never borrow a mutable scan callback frame.
+
 - `OverlayBlob.ram` belongs to one immutable column generation. Admission
   metadata, decoded strings, and byte/benefit accounting have thread-safe ownership;
   `lastUsed` is atomic and updated once per read batch. Cache callbacks use

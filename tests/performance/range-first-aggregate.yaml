@@ -180,6 +180,24 @@ test_cases:
     timing_samples: 11
     threshold_ms: 10000
 
+  - name: "Range-first mapping materializes values without per-row key frames"
+    scm: |
+      (begin
+        (define source (table "memcp-tests" "rfa_account"))
+        (define target (table "memcp-tests" "rfa_event"))
+        (define mapping (scan_recmap nil source '() '() '() (lambda () true) '("id")
+          (recmap_range_first_mapper nil target '("account_id") "changed_at" "<="
+            (lambda (id) (list id 95))) target))
+        (define value (recmap_value_mapper nil mapping '("quantity")
+          (lambda (quantity) (+ quantity 1)) (lambda () 0)))
+        (scan nil source '() '() '() (lambda () true) '("$record_ref")
+          (lambda (total ref) (+ total (value ref))) 0 +))
+    expect: {data: [30000]}
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 11
+    threshold_ms: 10000
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS rfa_deep_account"
   - sql: "DROP TABLE IF EXISTS rfa_deep_event"
