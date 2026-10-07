@@ -68,7 +68,9 @@ The SQL runner validates the returned result before applying execution-time
 budgets. A timing failure reports `result assertions passed`; an expectation
 mismatch reports `result correctness` even when the query was also slow. A
 planner-time or plan-size failure occurs before query execution and reports that
-the result has not yet been checked. These distinctions do not waive any gate.
+the result has not yet been checked. Passing standard SQL queries also print their
+measured latency and applicable hard budget, so CI logs preserve the margin as
+well as failures. These distinctions do not waive any gate.
 
 An absolute `max_time` failure alone does not establish a regression relative to
 master. Compare the exact baseline revision and candidate on identical fixtures,

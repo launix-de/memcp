@@ -798,7 +798,7 @@ class PerformanceScaleContractTest(unittest.TestCase):
 
 
 class FailureAttributionContractTest(unittest.TestCase):
-    def run_timed_case(self, returned_value, *, performance=False, waived=False):
+    def run_timed_case(self, returned_value, *, performance=False, waived=False, duration_ns=6_000_000_000):
         runner = SQLTestRunner("http://localhost:1", performance_calibration={"scale": 1.0})
         response = SimpleNamespace(status_code=200, text=json.dumps({"n": returned_value}), headers={})
         case = {"name": "budget attribution", "sql": "SELECT 1 AS n",
@@ -808,7 +808,7 @@ class FailureAttributionContractTest(unittest.TestCase):
         if waived:
             runner.perf_regression_waivers = {"?::budget attribution": "accepted latency only"}
         output = io.StringIO()
-        clock = itertools.count(0, 6_000_000_000)
+        clock = itertools.count(0, duration_ns)
         with mock.patch("run_sql_tests.PERF_TEST_ENABLED", performance), \
                 mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
                 mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
@@ -838,6 +838,12 @@ class FailureAttributionContractTest(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("Expectation mismatch", output)
         self.assertEqual(runner.waived_regressions, [])
+
+    def test_passing_standard_query_keeps_latency_and_budget_visible(self):
+        passed, output, runner = self.run_timed_case(1, duration_ns=1_000_000_000)
+        self.assertTrue(passed)
+        self.assertIn("1000.0ms / 5000ms", output)
+        self.assertEqual(runner.failed_critical, 0)
 
     def test_unwaived_performance_budget_still_fails(self):
         passed, output, runner = self.run_timed_case(1, performance=True)

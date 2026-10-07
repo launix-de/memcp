@@ -2012,6 +2012,7 @@ class SQLTestRunner:
         # without an explicit `max_time` annotation must finish within
         # DEFAULT_MAX_TIME_SEC; slower queries must declare a higher limit so the
         # time budget stays explicit and visible in the test spec.
+        hard_limit_ms = None
         if (not is_perf_test and response.status_code == 200
                 and not self._expect_interrupted_ok(test_case.get("expect"))):
             # max_time is a reference-machine budget.  Only its wall-clock
@@ -2044,7 +2045,7 @@ class SQLTestRunner:
                 result["samples_ns"] = samples_ns
             self.perf_results[perf_key if PERF_AB_MODE else name] = result
         else:
-            self._record_success(name, is_noncritical)
+            self._record_success(name, is_noncritical, elapsed_ms, hard_limit_ms)
         return True
 
     def validate_expectation(self, test_case: Dict, response: requests.Response, results: Optional[List[Dict]]) -> bool:
