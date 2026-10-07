@@ -602,6 +602,7 @@ func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmit
 		AllRegs:                  allRegs,
 		RegisterBank:             registerBank,
 		StorageInputsInRegisters: registerInputs,
+		StorageLoop:              abi == jitMapReduceBufferABI || abi == jitFilterBufferABI,
 		SliceBase:                RegR12,
 		StackReg:                 RegRSP,
 		FrameReg:                 RegRBP,

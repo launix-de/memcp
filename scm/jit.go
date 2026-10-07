@@ -940,13 +940,17 @@ type JITContext struct {
 	// retries with rooted stack homes; a call-free getter keeps its incoming ABI
 	// values resident throughout the generated loop.
 	StorageInputsInRegisters bool
-	StackPhiTargets          bool
-	SelfSymbols              map[Symbol]struct{}
-	DefiningSymbol           Symbol
-	SelfLoopLabel            JITLabel
-	HasSelfLoop              bool
-	SelfParamCount           int
-	RegOwners                [64]*JITValueDesc // register → owner descriptor (nil = untracked)
+	// StorageLoop admits partial numeric specialization only in a fused row
+	// loop, where repeated execution amortizes the larger emitted body.
+	// Ordinary procedure compilation retains its existing complete-type rule.
+	StorageLoop     bool
+	StackPhiTargets bool
+	SelfSymbols     map[Symbol]struct{}
+	DefiningSymbol  Symbol
+	SelfLoopLabel   JITLabel
+	HasSelfLoop     bool
+	SelfParamCount  int
+	RegOwners       [64]*JITValueDesc // register → owner descriptor (nil = untracked)
 	// DeferredRegMoves is the physical half of descriptor-level lazy placement.
 	// A public register move changes the logical location immediately, but its
 	// bytes are held until a non-move instruction, control-flow boundary, or

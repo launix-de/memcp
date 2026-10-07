@@ -3182,7 +3182,7 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 		// accumulator remains dynamic. Keep the same small-body budget and
 		// require information beyond the declared parameter type; dynamic
 		// variadic loops retain their native boundary.
-		case allNumericParams && narrowedTypes > 0 && !hasVariadic && cost <= 48:
+		case ctx.StorageLoop && allNumericParams && narrowedTypes > 0 && !hasVariadic && cost <= 48:
 			inline = true
 		case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
 			inline = true

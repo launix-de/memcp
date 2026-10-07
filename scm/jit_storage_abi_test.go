@@ -39,7 +39,7 @@ func TestJITTypedInliningKeepsLargeNativeBoundaries(t *testing.T) {
 	}
 }
 
-// Identical call shapes must not change admission when unrelated earlier
+// Identical storage-loop call shapes must not change admission when unrelated earlier
 // code has claimed registers. The allocator still handles actual emission.
 func TestJITInlineAdmissionDependsOnCallShape(t *testing.T) {
 	for _, tc := range []struct {
@@ -78,7 +78,7 @@ func TestJITInlineAdmissionDependsOnCallShape(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, free := range []uint64{0, jitDefaultFreeGPRegs()} {
 				for _, protected := range []uint64{0, jitDefaultFreeGPRegs()} {
-					ctx := &JITContext{FreeRegs: free, ProtectedRegs: protected, AllRegs: jitDefaultFreeGPRegs()}
+					ctx := &JITContext{FreeRegs: free, ProtectedRegs: protected, AllRegs: jitDefaultFreeGPRegs(), StorageLoop: true}
 					if got := jitGeneratedEmitterInline(ctx, &tc.decl, tc.args); got != tc.want {
 						t.Fatalf("free=%x protected=%x: inline=%v, want %v", free, protected, got, tc.want)
 					}
@@ -1239,5 +1239,30 @@ func TestJITMultiplyMixedFloatPreservesExactWideIntegers(t *testing.T) {
 		if got := fn(1); !got.IsInt() || got.Int() != value {
 			t.Fatalf("exact wide integer rounded: got %v, want %d", got, value)
 		}
+	}
+}
+
+func TestJITPartialNumericInliningRequiresStorageLoop(t *testing.T) {
+	declaration := &Declaration{Type: &TypeDescriptor{
+		JITInlineCost: 48,
+		Params:        []*TypeDescriptor{{Kind: "number|nil"}, {Kind: "number|nil"}},
+	}}
+	args := []JITValueDesc{
+		{Loc: LocRegPair, Type: JITTypeUnknown},
+		{Loc: LocRegPair, Type: tagInt},
+	}
+	if jitGeneratedEmitterInline(&JITContext{}, declaration, args) {
+		t.Fatal("one narrowed operand expanded an ordinary procedure")
+	}
+	if !jitGeneratedEmitterInline(&JITContext{StorageLoop: true}, declaration, args) {
+		t.Fatal("typed storage value could not specialize the fused reducer")
+	}
+	args[1].Type = JITTypeUnknown
+	if jitGeneratedEmitterInline(&JITContext{StorageLoop: true}, declaration, args) {
+		t.Fatal("fully dynamic operands admitted a partial specialization")
+	}
+	args[0].Type, args[1].Type = tagInt, tagInt
+	if !jitGeneratedEmitterInline(&JITContext{}, declaration, args) {
+		t.Fatal("complete numeric specialization regressed outside storage loops")
 	}
 }
