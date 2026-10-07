@@ -323,11 +323,11 @@ func PrepareSerialProc(source Scmer) SerialProc {
 	return prepared
 }
 
-// callSerialProcOnce preserves the specialized and compiled callback dispatch,
+// ApplyOnce preserves the specialized and compiled callback dispatch,
 // but does not compile a general interpreted AST for one invocation. Apply
 // gives escaping closures their own lexical frame. Native callbacks keep the
 // same argument ownership as SerialProc.Call.
-func callSerialProcOnce(source Scmer, args []Scmer) Scmer {
+func ApplyOnce(source Scmer, args []Scmer) Scmer {
 	prepared := classifySerialProc(source)
 	if prepared.Kind == SerialProcGeneral {
 		if source.Proc().Compiled == nil {

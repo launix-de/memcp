@@ -1775,7 +1775,7 @@ func TestJITMetadataCallbacksPreparePublicAndHiddenArguments(t *testing.T) {
 			if got := prepared.CallOwned([]Scmer{values}); !Equal(got, want) {
 				t.Fatalf("owned frame %s", String(got))
 			}
-			if got := callSerialProcOnce(tc.source, []Scmer{values}); !Equal(got, want) {
+			if got := ApplyOnce(tc.source, []Scmer{values}); !Equal(got, want) {
 				t.Fatalf("one-shot frame %s", String(got))
 			}
 			rejected := false

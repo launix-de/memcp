@@ -30970,7 +30970,7 @@ func init_list() {
 				return NewSlice(result)
 			}
 			if len(list) == 1 {
-				result[0] = callSerialProcOnce(a[1], []Scmer{list[0]})
+				result[0] = ApplyOnce(a[1], []Scmer{list[0]})
 				return NewSlice(result)
 			}
 			fn := PrepareSerialProc(a[1])
@@ -32830,7 +32830,7 @@ func init_list() {
 				return result
 			}
 			if i+1 == len(list) {
-				return callSerialProcOnce(a[1], []Scmer{result, list[i]})
+				return ApplyOnce(a[1], []Scmer{result, list[i]})
 			}
 			fn := PrepareSerialProc(a[1])
 			var fnArgs [2]Scmer
@@ -139077,7 +139077,7 @@ func init_list() {
 				return NewSlice(result)
 			}
 			if len(input) == 1 {
-				result[1] = callSerialProcOnce(a[2], []Scmer{input[0]})
+				result[1] = ApplyOnce(a[2], []Scmer{input[0]})
 				return NewSlice(result)
 			}
 			mapper := PrepareSerialProc(a[2])
