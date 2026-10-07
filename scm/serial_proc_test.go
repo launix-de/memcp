@@ -380,3 +380,83 @@ func TestSingletonMapDoesNotMutateAnnotatedInput(t *testing.T) {
 		t.Fatalf("singleton native-forward result = %s, want 3", result.String())
 	}
 }
+
+func TestPreparedCapturingCallbacksOwnEveryInvocation(t *testing.T) {
+	for _, text := range []string{
+		"(lambda (value) (begin (define doubled (+ value value)) (lambda () (+ doubled 1))))",
+		"(lambda (value) (list (+ value 1) (lambda () value)))",
+		"(lambda (value) (begin (define captured value) (eval '(lambda () captured))))",
+	} {
+		source := preparedTestProc(t, text)
+		source.Proc().Compiled = nil
+		source.Proc().JITCode = 0
+		if text != "(lambda (value) (begin (define captured value) (eval '(lambda () captured))))" && !source.Proc().NumberedOnly {
+			t.Fatal("fixture did not exercise prepared numbered capture body")
+		}
+		prepared := PrepareSerialProc(source)
+		first := prepared.Call([]Scmer{NewInt(11)})
+		second := prepared.Call([]Scmer{NewInt(4)})
+		if first.IsSlice() {
+			if first.Slice()[0].Int() != 12 || second.Slice()[0].Int() != 5 {
+				t.Fatal("retained projection changed")
+			}
+			if Apply(first.Slice()[1]).Int() != 11 || Apply(second.Slice()[1]).Int() != 4 {
+				t.Fatal("list closure captured another call")
+			}
+		} else {
+			wantFirst, wantSecond := int64(23), int64(9)
+			if text == "(lambda (value) (begin (define captured value) (eval '(lambda () captured))))" {
+				wantFirst, wantSecond = 11, 4
+			}
+			if Apply(first).Int() != wantFirst || Apply(second).Int() != wantSecond || Apply(first).Int() != wantFirst {
+				t.Fatal("closure captured another invocation")
+			}
+		}
+	}
+}
+
+func TestPreparedRetainingNativeOwnsNestedResults(t *testing.T) {
+	source := preparedTestProc(t, "(lambda (value) (list (list (+ value 1)) (list value)))")
+	source.Proc().Compiled = nil
+	source.Proc().JITCode = 0
+	if !source.Proc().NumberedOnly {
+		t.Fatal("fixture must use numbered parameters")
+	}
+	prepared := PrepareSerialProc(source)
+	args := []Scmer{NewInt(11)}
+	first := prepared.Call(args)
+	args[0] = NewInt(4)
+	second := prepared.Call(args)
+	wantFirst := NewSlice([]Scmer{NewSlice([]Scmer{NewInt(12)}), NewSlice([]Scmer{NewInt(11)})})
+	wantSecond := NewSlice([]Scmer{NewSlice([]Scmer{NewInt(5)}), NewSlice([]Scmer{NewInt(4)})})
+	if !Equal(first, wantFirst) || !Equal(second, wantSecond) {
+		t.Fatal("prepared list results alias a reused native call frame")
+	}
+}
+
+func TestPreparedCapturingBeginsKeepSeparateScopes(t *testing.T) {
+	source := preparedTestProc(t, "(lambda (value) (list (begin (define local (+ value 1)) (lambda () local)) (begin (define local (+ value 2)) (lambda () local))))")
+	source.Proc().Compiled = nil
+	source.Proc().JITCode = 0
+	prepared := PrepareSerialProc(source)
+	first := prepared.Call([]Scmer{NewInt(11)})
+	second := prepared.Call([]Scmer{NewInt(4)})
+	for i := 0; i < 2; i++ {
+		if Apply(first.Slice()[i]).Int() != int64(12+i) || Apply(second.Slice()[i]).Int() != int64(5+i) {
+			t.Fatal("begin closure captured another lexical scope")
+		}
+	}
+}
+
+func TestPreparedCapturingUnknownCallStillFails(t *testing.T) {
+	source := preparedTestProc(t, "(lambda (value) (begin (define closure (lambda () value)) (missing_callback closure)))")
+	source.Proc().Compiled = nil
+	source.Proc().JITCode = 0
+	prepared := PrepareSerialProc(source)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("prepared capturing callback accepted an unknown function")
+		}
+	}()
+	prepared.Call([]Scmer{NewInt(11)})
+}
