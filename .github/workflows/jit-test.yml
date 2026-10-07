@@ -91,12 +91,15 @@ jobs:
           go env GOEXPERIMENT
 
       - name: Install test dependencies
+        timeout-minutes: 5
         run: |
-          pip install requests PyYAML
-          # Browser repositories are unrelated to these Ubuntu build dependencies.
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
-          sudo apt-get update
-          sudo apt-get install -y mariadb-client
+          pip install --timeout 30 --retries 3 requests PyYAML
+
+      - name: Install SQL client
+        timeout-minutes: 9
+        uses: ./.github/actions/setup-apt
+        with:
+          packages: mariadb-client
 
       - name: Run tests with JIT enabled
         timeout-minutes: 30

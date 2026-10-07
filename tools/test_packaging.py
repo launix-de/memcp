@@ -11,11 +11,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 
 
@@ -36,6 +39,120 @@ def run(*args: str, cwd: Path = ROOT, env: dict[str, str] | None = None) -> str:
 
 
 class ReleaseSourceTests(unittest.TestCase):
+	def apt_setup(self, scenario: str, packages: str = "mariadb-client rpm"):
+		# Execute the action's actual shell body against private source files and
+		# a fake privileged package client. GNU timeout still runs for real.
+		action = (ROOT / ".github/actions/setup-apt/action.yml").read_text()
+		body = textwrap.dedent(action.split("      run: |\n", 1)[1])
+		with tempfile.TemporaryDirectory(prefix="memcp-ci-apt-") as tmp:
+			root = Path(tmp)
+			sources = root / "sources"
+			(sources / "sources.list.d").mkdir(parents=True)
+			legacy = "deb http://azure.archive.ubuntu.com/ubuntu noble main\n"
+			deb822 = ("URIs: https://azure.archive.ubuntu.com/ubuntu\n"
+				"Suites: noble-updates\nComponents: main universe\n"
+				"Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n")
+			unrelated = "deb https://example.invalid/ubuntu noble main\n"
+			(sources / "sources.list").write_text(legacy)
+			(sources / "sources.list.d/ubuntu.sources").write_text(deb822)
+			(sources / "sources.list.d/other.list").write_text(unrelated)
+			fake = root / "sudo"
+			fake.write_text(f"#!{sys.executable}\n" + textwrap.dedent('''\
+				import json, os, pathlib, sys, time
+				root = pathlib.Path(os.environ['FAKE_APT_ROOT'])
+				args = sys.argv[1:]
+				if args[0] != 'apt-get':
+				    os.execvp(args[0], args)
+				with (root / 'calls.jsonl').open('a') as log:
+				    log.write(json.dumps(args) + '\\n')
+				scenario = os.environ['FAKE_APT_SCENARIO']
+				if 'update' in args:
+				    count = sum('update' in json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines())
+				    if scenario == 'hang' and count == 1:
+				        time.sleep(10)
+				    if scenario == 'persistent' or (scenario == 'transient' and count == 1):
+				        sys.exit(100)
+				elif scenario == 'install-hang':
+				    time.sleep(10)
+				elif scenario == 'install-fail':
+				    sys.exit(100)
+			'''))
+			fake.chmod(0o755)
+			env = os.environ.copy()
+			env.update(PATH=str(root) + os.pathsep + env['PATH'],
+				PACKAGES=packages, APT_SOURCES_DIRECTORY=str(sources),
+				INDEX_TIMEOUT_SECONDS="0.5" if scenario == "hang" else "2",
+				INSTALL_TIMEOUT_SECONDS="0.5" if scenario == "install-hang" else "2",
+				FAKE_APT_ROOT=str(root), FAKE_APT_SCENARIO=scenario)
+			result = subprocess.run(["bash", "-c", body], env=env, text=True,
+				stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5)
+			log = root / "calls.jsonl"
+			calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+			return result, calls, (sources / "sources.list").read_text(), \
+				(sources / "sources.list.d/ubuntu.sources").read_text(), \
+				(sources / "sources.list.d/other.list").read_text(), legacy, deb822, unrelated
+
+	def test_apt_success_preserves_sources_and_installs_every_requested_package(self):
+		result, calls, legacy, deb822, unrelated, old_legacy, old_deb822, old_unrelated = self.apt_setup("success")
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual((legacy, deb822, unrelated), (old_legacy, old_deb822, old_unrelated))
+		self.assertEqual(len(calls), 2)
+		self.assertEqual(calls[-1][-4:], ["install", "-y", "mariadb-client", "rpm"])
+		self.assertIn("--error-on=any", calls[0])
+		for args in calls:
+			self.assertIn("Acquire::Retries=3", args)
+			self.assertIn("Acquire::http::Timeout=30", args)
+			self.assertIn("Acquire::https::Timeout=30", args)
+
+	def test_apt_recovers_once_without_changing_repository_trust(self):
+		result, calls, legacy, deb822, unrelated, old_legacy, old_deb822, old_unrelated = self.apt_setup("transient")
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(len(calls), 3)
+		self.assertEqual(legacy, old_legacy.replace("http://azure.archive.ubuntu.com", "https://archive.ubuntu.com"))
+		self.assertEqual(deb822, old_deb822.replace("https://azure.archive.ubuntu.com", "https://archive.ubuntu.com"))
+		self.assertEqual(unrelated, old_unrelated)
+		self.assertIn("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", deb822)
+
+	def test_hung_apt_request_is_terminated_before_bounded_recovery(self):
+		result, calls, *_ = self.apt_setup("hang")
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(len(calls), 3)
+		self.assertIn("APT index download failed", result.stdout)
+
+	def test_persistent_apt_failure_stops_before_installation(self):
+		result, calls, *_ = self.apt_setup("persistent")
+		self.assertNotEqual(result.returncode, 0)
+		self.assertEqual(len(calls), 2)
+		self.assertTrue(all("update" in call for call in calls))
+		self.assertIn("INFRASTRUCTURE_FAILURE", result.stdout)
+
+	def test_failed_apt_install_is_not_accepted_or_retried(self):
+		result, calls, *_ = self.apt_setup("install-fail")
+		self.assertNotEqual(result.returncode, 0)
+		self.assertEqual(len(calls), 2)
+		self.assertIn("required package installation failed", result.stdout)
+
+	def test_empty_package_list_never_runs_apt(self):
+		result, calls, *_ = self.apt_setup("success", packages="")
+		self.assertNotEqual(result.returncode, 0)
+		self.assertEqual(calls, [])
+
+	def test_hung_apt_install_is_terminated_and_fails(self):
+		result, calls, *_ = self.apt_setup("install-hang")
+		self.assertNotEqual(result.returncode, 0)
+		self.assertEqual(len(calls), 2)
+		self.assertIn("required package installation failed", result.stdout)
+
+	def test_multiline_package_list_installs_every_package(self):
+		result, calls, *_ = self.apt_setup("success", packages="mariadb-client\nrpm")
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(calls[-1][-2:], ["mariadb-client", "rpm"])
+
+	def test_package_input_cannot_disable_authentication(self):
+		result, calls, *_ = self.apt_setup("success", packages="rpm --allow-unauthenticated")
+		self.assertNotEqual(result.returncode, 0)
+		self.assertEqual(calls, [])
+
 	def test_shell_scripts_parse(self) -> None:
 		scripts = [
 			"debian/postinst",

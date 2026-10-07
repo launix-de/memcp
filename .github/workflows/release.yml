@@ -51,9 +51,10 @@ jobs:
           printf 'VERSION=%s\n' "$version" >> "$GITHUB_ENV"
 
       - name: Install packaging tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y lintian rpm
+        timeout-minutes: 9
+        uses: ./.github/actions/setup-apt
+        with:
+          packages: lintian rpm
 
       - name: Run fast release checks
         run: python3 tools/test_packaging.py
