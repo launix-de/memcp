@@ -798,6 +798,57 @@ class PerformanceScaleContractTest(unittest.TestCase):
 
 
 class FailureAttributionContractTest(unittest.TestCase):
+    def run_multiple_responses(self, values, *, performance=False, warmup=0):
+        runner = SQLTestRunner("http://localhost:1", performance_calibration={"scale": 1.0})
+        responses = [SimpleNamespace(status_code=200, text=json.dumps({"n": value}), headers={})
+                     for value in values]
+        case = {"name": "all responses must match", "sql": "SELECT 1 AS n",
+                "max_plan_size": 0, "timing_samples": len(values) - warmup,
+                "expect": {"rows": 1, "data": [{"n": 1}]}}
+        if performance:
+            case.update(threshold_ms=1000, warmup=warmup)
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch("run_sql_tests.PERF_TEST_ENABLED", performance), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
+                mock.patch.object(runner, "execute_sql", side_effect=responses) as execute, \
+                redirect_stdout(output):
+            passed = runner.run_test_case(case, "memcp-tests")
+        return passed, output.getvalue(), execute.call_count, runner
+
+    def test_standard_repetitions_reject_an_earlier_wrong_result(self):
+        for values, calls in (([2, 1], 1), ([1, 2, 1], 2)):
+            with self.subTest(values=values):
+                passed, output, actual_calls, runner = self.run_multiple_responses(values)
+                self.assertFalse(passed)
+                self.assertEqual(actual_calls, calls)
+                self.assertIn("Expectation mismatch", output)
+                self.assertEqual(runner.failed_critical, 1)
+
+    def test_standalone_performance_rejects_an_earlier_wrong_result(self):
+        passed, output, calls, runner = self.run_multiple_responses([2, 1], performance=True)
+        self.assertFalse(passed)
+        self.assertEqual(calls, 1)
+        self.assertIn("Expectation mismatch", output)
+        self.assertEqual(runner.perf_results, {})
+
+    def test_standalone_performance_rejects_wrong_warmup(self):
+        passed, output, calls, runner = self.run_multiple_responses([2, 1, 1], performance=True, warmup=1)
+        self.assertFalse(passed)
+        self.assertEqual(calls, 1)
+        self.assertIn("Warmup failed", output)
+        self.assertEqual(runner.perf_results, {})
+
+    def test_successful_repetitions_still_execute_every_sample(self):
+        for performance in (False, True):
+            with self.subTest(performance=performance):
+                passed, _, calls, runner = self.run_multiple_responses([1, 1, 1], performance=performance)
+                self.assertTrue(passed)
+                self.assertEqual(calls, 3)
+                self.assertEqual(runner.failed_critical, 0)
+
     def test_denied_shutdown_is_measured_without_restarting(self):
         runner = SQLTestRunner("http://localhost:1", performance_calibration={"scale": 1.0})
         response = SimpleNamespace(status_code=500, text="Error: access denied", headers={})

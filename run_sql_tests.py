@@ -1883,8 +1883,8 @@ class SQLTestRunner:
             with gate:
                 for _ in range(warmup_runs):
                     warm_response = execute_sample()
-                    if (is_error_response(warm_response) or (fixture_trial and warm_response is None)
-                            or (fixture_trial and repeatable_query and not self.validate_expectation(
+                    if (is_error_response(warm_response) or warm_response is None
+                            or (repeatable_query and not self.validate_expectation(
                                 test_case, warm_response, self.parse_jsonl_response(warm_response)))):
                         if record_baseline_query_failure(warm_response, "warmup"):
                             return True
@@ -1916,19 +1916,27 @@ class SQLTestRunner:
                 )
                 if not repeatable_query:
                     repeat = 1
+                # Validate between timed requests, never inside their measured
+                # interval. A later good response cannot hide an earlier error.
+                validate_each_sample = fixture_trial or (repeatable_query and (repeat > 1 or adaptive_repetitions))
                 measured_total_ns = 0
-                for _ in range(repeat):
+                for sample_index in range(repeat):
                     start_ns = time.monotonic_ns()
                     response = execute_sample()
                     sample_ns = time.monotonic_ns() - start_ns
                     samples_ns.append(sample_ns)
                     measured_total_ns += sample_ns
-                    if fixture_trial and (response is None or not self.validate_expectation(
-                            test_case, response, self.parse_jsonl_response(response))):
+                    if validate_each_sample and ((fixture_trial and response is None)
+                            or (response is not None and not self.validate_expectation(
+                                test_case, response, self.parse_jsonl_response(response)))):
                         if record_baseline_query_failure(response, "measurement"):
                             return True
-                        return self._record_fail(name, "Measured sample failed", query, response,
-                                                 test_case.get("expect"), is_noncritical)
+                        print(f"    Invalid measured sample: {sample_index + 1}")
+                        reason = "Measured sample failed" if fixture_trial else "Expectation mismatch"
+                        diag = None if fixture_trial else self._run_on_fail(test_case, database)
+                        return self._record_fail(name, reason, query, response,
+                                                 test_case.get("expect"), is_noncritical,
+                                                 on_fail_diag=diag)
                     if response is None or response.status_code != 200:
                         break  # don't hammer a broken endpoint
                     if adaptive_repetitions and adaptive_measurement_complete(samples_ns):

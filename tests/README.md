@@ -67,7 +67,11 @@ latency tests keep their existing median-per-request policy.
 The SQL runner validates the returned result before applying execution-time
 budgets. A timing failure reports `result assertions passed`; an expectation
 mismatch reports `result correctness` even when the query was also slow. A
-planner-time or plan-size failure occurs before query execution and reports that
+repeated SELECT/SCM measurement checks every returned result, including warmup
+responses, in standalone and A/B runs. Validation occurs outside the timed
+request; the first mismatch stops the measurement before a later response can
+hide it. Existing interrupted-response and baseline-recovery rules remain active.
+An ordinary planner-time or plan-size failure occurs before query execution and reports that
 the result has not yet been checked. Passing standard SQL queries also print their
 measured latency and applicable hard budget, so CI logs preserve the margin as
 well as failures. These distinctions do not waive any gate.
