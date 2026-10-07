@@ -197,6 +197,10 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   source/target generations and visibility, as RecSet operations do. A RecMap
   retains no transaction, session, cancellation, or mutable shard containers and must never survive its
   query or be persisted: shard rebuilds may replace every referenced identity.
+  Row-bound RecMap probes cache a translated source part when maintenance
+  has replaced that shard, using the existing guarded rebuild translations.
+  The translated arrays belong to the query's accessor closure and remain
+  immutable; translation and allocation never occur in its steady probe loop.
 
 - `recMapBuildRows.tupleBuffer` is private to one serial shard accumulator.
   Completed tuple slices own disjoint portions of its buffers; callbacks may

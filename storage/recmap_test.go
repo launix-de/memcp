@@ -54,6 +54,57 @@ func recMapTargetValue(target recMapTarget, column string) scm.Scmer {
 	return target.shard.getDelta(int(target.recid-target.shard.main_count), column)
 }
 
+func TestRecMapCallPreservesMatchesAcrossSourceRebuild(t *testing.T) {
+	database := "trecmap_rebuild"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	source := recMapTestTable(t, database, "source", []string{"id", "target_id"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewInt(10)}, {scm.NewInt(2), scm.NewInt(20)},
+		{scm.NewInt(3), scm.NewInt(30)}, {scm.NewInt(4), scm.NewInt(99)},
+	})
+	target := recMapTestTable(t, database, "target", []string{"id", "value"}, [][]scm.Scmer{
+		{scm.NewInt(10), scm.NewInt(100)}, {scm.NewInt(20), scm.NewInt(200)},
+		{scm.NewInt(30), scm.NewInt(300)},
+	})
+	mapping := scanRecMap(nil, NewTableScmer(source), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
+		nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
+		[]string{"target_id"}, newRecMapEquiFirstMapper(nil, target, []string{"id"}, scm.NewNil()), target)
+	oldSource := mapping.shards[0].sourceShard
+	if result := GetDatabase(database).rebuild(true, false, true); len(result.errors) > 0 {
+		t.Fatalf("rebuild errors: %v", result.errors)
+	}
+	currentSource := source.ActiveShards()[0]
+	if oldSource == currentSource {
+		t.Fatal("fixture did not replace the source generation")
+	}
+	check := func(shard *storageShard, expected []scm.Scmer) {
+		t.Helper()
+		call := recMapCallClosure(shard, nil)
+		for pass := 0; pass < 2; pass++ {
+			for recid, want := range expected {
+				got := (*call)(uint32(recid), NewRecMapScmer(mapping), scm.NewSlice([]scm.Scmer{scm.NewString("value")}),
+					scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] }),
+					scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewNil() }))
+				if !scm.Equal(got, want) {
+					t.Fatalf("rebuilt source row %d returned %s, want %s", recid, scm.String(got), scm.String(want))
+				}
+			}
+		}
+	}
+	check(currentSource, []scm.Scmer{scm.NewInt(100), scm.NewInt(200), scm.NewInt(300), scm.NewNil()})
+	// Compact the first row to verify recid translation, not just a shard alias.
+	release := currentSource.GetExclusive()
+	currentSource.mu.Lock()
+	currentSource.deletions.Set(0, true)
+	currentSource.mu.Unlock()
+	release()
+	if result := GetDatabase(database).rebuild(true, false, true); len(result.errors) > 0 {
+		t.Fatalf("second rebuild errors: %v", result.errors)
+	}
+	check(source.ActiveShards()[0], []scm.Scmer{scm.NewInt(200), scm.NewInt(300), scm.NewNil()})
+}
+
 func TestRecMapPrunedDomainImageAndComposition(t *testing.T) {
 	database := "trecmap"
 	databases.Remove(database)

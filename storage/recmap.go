@@ -114,6 +114,51 @@ func (r *recMap) lookup(shard *storageShard, recid uint32) (recMapTarget, bool) 
 	return recMapTarget{}, false
 }
 
+// partForSourceShard preserves a query-local mapping when maintenance replaces
+// its source generation between construction and consumption. The normal path
+// borrows the immutable part; only a different generation needs translation.
+// A row-bound closure caches that translated part before its binary probes.
+func (r *recMap) partForSourceShard(shard *storageShard) *recMapShard {
+	for i := range r.shards {
+		if r.shards[i].sourceShard == shard {
+			return &r.shards[i]
+		}
+	}
+	type translatedRow struct {
+		recid  uint32
+		target recMapTarget
+	}
+	var rows []translatedRow
+	for _, part := range r.shards {
+		for i, recid := range part.sourceRecIDs {
+			current := part.sourceShard
+			for current != shard {
+				if next := current.loadNext(); next != nil && current.nextReady.Load() {
+					translated, found := current.translateNextRecid(recid)
+					if !found {
+						break
+					}
+					current, recid = next, translated
+					continue
+				}
+				break
+			}
+			if current == shard {
+				rows = append(rows, translatedRow{recid: recid, target: part.targets[i]})
+			}
+		}
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].recid < rows[j].recid })
+	part := &recMapShard{sourceShard: shard, sourceRecIDs: make([]uint32, len(rows)), targets: make([]recMapTarget, len(rows))}
+	for i, row := range rows {
+		part.sourceRecIDs[i], part.targets[i] = row.recid, row.target
+	}
+	return part
+}
+
 func recMapReadTarget(currentTx *TxContext, target recMapTarget, columns []string,
 	mapper, ifNull scm.Scmer) scm.Scmer {
 	if target.shard == nil {
@@ -243,13 +288,7 @@ func recMapCallClosure(shard *storageShard, currentTx *TxContext) *func(uint32, 
 		rm := RecMapFromScmer(args[0])
 		lookup := cached.Load()
 		if lookup == nil || lookup.mapping != rm {
-			lookup = &cachedLookup{mapping: rm}
-			for i := range rm.shards {
-				if rm.shards[i].sourceShard == shard {
-					lookup.part = &rm.shards[i]
-					break
-				}
-			}
+			lookup = &cachedLookup{mapping: rm, part: rm.partForSourceShard(shard)}
 			cached.Store(lookup)
 		}
 		if lookup.part == nil {
