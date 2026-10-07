@@ -1372,6 +1372,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(if (and distinct (not distinct_preserved_by_group)) projected_exprs group)
 				having order limit offset '() '()
 				(merge (list
+					/* Relaxed grouping is a MySQL semantic fact. Other frontends
+					must retain their rejection of ungrouped projections. */
+					(list (list (quote group_projection_mode) (quote representative)))
 					(if calc_found_rows (list (list (quote sql_calc_found_rows) true)) '())
 					(if distinct (list (list (quote select_distinct) true)) '())))))))
 	(define sql_select (parser (or

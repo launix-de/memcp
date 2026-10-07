@@ -5527,18 +5527,12 @@ outputs: this normalization covers joined and derived projection values. */
 			(cons (quote inner_select) _query) expr
 			((symbol get_column) tblvar _ col _) (if
 				(not (nil? (find sources (lambda (src)
-					(and (or (not (equal? (source_alias src) alias))
-						(query_block? (source_relation src)))
-						(not (source_is_stage_output? src))
-						(equal? (source_alias src) (resolve_column_alias tblvar alias)))) nil)))
+					(equal? (source_alias src) (resolve_column_alias tblvar alias))) nil)))
 				(list (quote aggregate) expr (scalar_once_reduce_first) nil)
 				expr)
 			((quote get_column) tblvar _ col _) (if
 				(not (nil? (find sources (lambda (src)
-					(and (or (not (equal? (source_alias src) alias))
-						(query_block? (source_relation src)))
-						(not (source_is_stage_output? src))
-						(equal? (source_alias src) (resolve_column_alias tblvar alias)))) nil)))
+					(equal? (source_alias src) (resolve_column_alias tblvar alias))) nil)))
 				(list (quote aggregate) expr (scalar_once_reduce_first) nil)
 				expr)
 			(cons head tail) (cons head (map (zip tail (cdr resolved)) (lambda (pair)
@@ -5546,31 +5540,39 @@ outputs: this normalization covers joined and derived projection values. */
 			_ expr))))
 
 (define normalize_group_representatives (lambda (block)
-	(if (or (empty_list? (qb_sources block))
+	(if (or (not (equal? (qassoc_get (qb_facts block) (quote group_projection_mode) nil)
+		(quote representative)))
+		(empty_list? (qb_sources block))
 		(not (or (not (empty_list? (qb_group block))) (query_block_has_local_aggregates? block))))
 		block
 		(begin
-			(define sources (qb_sources block))
-			(define alias (source_alias (car sources)))
-			(define canonical (lambda (expr) (canonical_column_expr_for_alias alias expr)))
-			(define fields (extract_assoc (qb_fields block) (lambda (title expr) (list title expr))))
-			(define hidden (extract_assoc (qb_hidden block) (lambda (title expr) (list title expr))))
-			(define field_roots (map fields (lambda (field) (canonical (cadr field)))))
-			(define hidden_roots (map hidden (lambda (field) (canonical (cadr field)))))
-			(define having_root (canonical (qb_having block)))
-			(define key_index (make_group_key_index (map (qb_group block) canonical)
-				(merge (list field_roots hidden_roots (list having_root)))))
-			(define rewrite_fields (lambda (original resolved)
-				(merge (map (zip original resolved) (lambda (pair)
-					(list (car (car pair)) (group_representative_expr sources alias key_index
-						(cadr (car pair)) (cadr pair))))))))
-			(make_query_block (qb_schema block) sources
-				(rewrite_fields fields field_roots)
-				(qb_where block) (qb_group block)
-				(group_representative_expr sources alias key_index (qb_having block) having_root)
-				(qb_order block) (qb_limit block) (qb_offset block)
-				(rewrite_fields hidden hidden_roots)
-				(qb_stages block) (qb_facts block))))))
+			(define alias (source_alias (car (qb_sources block))))
+			(define sources (filter (qb_sources block) (lambda (src)
+				(and (or (not (equal? (source_alias src) alias))
+					(query_block? (source_relation src)))
+					(not (source_is_stage_output? src))))))
+			/* A base-only aggregate has no eligible representative. Avoid
+			canonical trees and structural indexes on this common no-op path. */
+			(if (empty_list? sources) block (begin
+				(define canonical (lambda (expr) (canonical_column_expr_for_alias alias expr)))
+				(define fields (extract_assoc (qb_fields block) (lambda (title expr) (list title expr))))
+				(define hidden (extract_assoc (qb_hidden block) (lambda (title expr) (list title expr))))
+				(define field_roots (map fields (lambda (field) (canonical (cadr field)))))
+				(define hidden_roots (map hidden (lambda (field) (canonical (cadr field)))))
+				(define having_root (canonical (qb_having block)))
+				(define key_index (make_group_key_index (map (qb_group block) canonical)
+					(merge (list field_roots hidden_roots (list having_root)))))
+				(define rewrite_fields (lambda (original resolved)
+					(merge (map (zip original resolved) (lambda (pair)
+						(list (car (car pair)) (group_representative_expr sources alias key_index
+							(cadr (car pair)) (cadr pair))))))))
+				(make_query_block (qb_schema block) (qb_sources block)
+					(rewrite_fields fields field_roots)
+					(qb_where block) (qb_group block)
+					(group_representative_expr sources alias key_index (qb_having block) having_root)
+					(qb_order block) (qb_limit block) (qb_offset block)
+					(rewrite_fields hidden hidden_roots)
+					(qb_stages block) (qb_facts block))))))))
 
 (define btw2025_decorrelate_query_block (lambda (block ctx)
 	(begin
