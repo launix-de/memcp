@@ -76,6 +76,15 @@ type recMap struct {
 	target *table
 	shards []recMapShard
 	count  int64
+	// Query-local immutable source-domain projections, published after full
+	// generation translation. Original parts remain the allocation-free path.
+	translated atomic.Pointer[recMapSourceGeneration]
+}
+
+type recMapSourceGeneration struct {
+	shard *storageShard
+	part  *recMapShard
+	next  *recMapSourceGeneration
 }
 
 func NewRecMapScmer(rm *recMap) scm.Scmer {
@@ -95,23 +104,46 @@ func (r *recMap) String() string {
 }
 
 func (r *recMap) lookup(shard *storageShard, recid uint32) (recMapTarget, bool) {
-	if r == nil || shard == nil {
+	part := r.partForSourceShard(shard)
+	if part == nil {
 		return recMapTarget{}, false
 	}
-	for i := range r.shards {
-		part := &r.shards[i]
-		if part.sourceShard != shard {
-			continue
-		}
-		position := sort.Search(len(part.sourceRecIDs), func(i int) bool {
-			return part.sourceRecIDs[i] >= recid
-		})
-		if position == len(part.sourceRecIDs) || part.sourceRecIDs[position] != recid {
-			return recMapTarget{}, false
-		}
-		return part.targets[position], true
+	position := sort.Search(len(part.sourceRecIDs), func(i int) bool {
+		return part.sourceRecIDs[i] >= recid
+	})
+	if position == len(part.sourceRecIDs) || part.sourceRecIDs[position] != recid {
+		return recMapTarget{}, false
 	}
-	return recMapTarget{}, false
+	return part.targets[position], true
+}
+
+// visitSourceShard translates the source domain through published rebuild
+// generations. Both target probes and prepared value projections use this
+// identity translation; payloads remain in the original immutable mapping.
+// Translation metadata is read through the shard's synchronized helpers.
+func (r *recMap) visitSourceShard(shard *storageShard, visit func(uint32, int, int)) {
+	if r == nil || shard == nil {
+		return
+	}
+	for partIndex, part := range r.shards {
+		for rowIndex, recid := range part.sourceRecIDs {
+			current := part.sourceShard
+			for current != shard {
+				next := current.loadNext()
+				if next == nil || !current.nextReady.Load() {
+					break
+				}
+				translated, found := current.translateNextRecid(recid)
+				if !found {
+					break
+				}
+				current, recid = next, translated
+			}
+			if current == shard {
+				visit(recid, partIndex, rowIndex)
+			}
+		}
+	}
 }
 
 // partForSourceShard preserves a query-local mapping when maintenance replaces
@@ -119,9 +151,17 @@ func (r *recMap) lookup(shard *storageShard, recid uint32) (recMapTarget, bool) 
 // borrows the immutable part; only a different generation needs translation.
 // A row-bound closure caches that translated part before its binary probes.
 func (r *recMap) partForSourceShard(shard *storageShard) *recMapShard {
+	if r == nil || shard == nil {
+		return nil
+	}
 	for i := range r.shards {
 		if r.shards[i].sourceShard == shard {
 			return &r.shards[i]
+		}
+	}
+	for generation := r.translated.Load(); generation != nil; generation = generation.next {
+		if generation.shard == shard {
+			return generation.part
 		}
 	}
 	type translatedRow struct {
@@ -129,34 +169,27 @@ func (r *recMap) partForSourceShard(shard *storageShard) *recMapShard {
 		target recMapTarget
 	}
 	var rows []translatedRow
-	for _, part := range r.shards {
-		for i, recid := range part.sourceRecIDs {
-			current := part.sourceShard
-			for current != shard {
-				if next := current.loadNext(); next != nil && current.nextReady.Load() {
-					translated, found := current.translateNextRecid(recid)
-					if !found {
-						break
-					}
-					current, recid = next, translated
-					continue
-				}
-				break
-			}
-			if current == shard {
-				rows = append(rows, translatedRow{recid: recid, target: part.targets[i]})
-			}
-		}
-	}
-	if len(rows) == 0 {
-		return nil
-	}
+	r.visitSourceShard(shard, func(recid uint32, partIndex, rowIndex int) {
+		rows = append(rows, translatedRow{recid: recid, target: r.shards[partIndex].targets[rowIndex]})
+	})
 	sort.Slice(rows, func(i, j int) bool { return rows[i].recid < rows[j].recid })
 	part := &recMapShard{sourceShard: shard, sourceRecIDs: make([]uint32, len(rows)), targets: make([]recMapTarget, len(rows))}
 	for i, row := range rows {
 		part.sourceRecIDs[i], part.targets[i] = row.recid, row.target
 	}
-	return part
+	projection := &recMapSourceGeneration{shard: shard, part: part}
+	for {
+		head := r.translated.Load()
+		for generation := head; generation != nil; generation = generation.next {
+			if generation.shard == shard {
+				return generation.part
+			}
+		}
+		projection.next = head
+		if r.translated.CompareAndSwap(head, projection) {
+			return part
+		}
+	}
 }
 
 func recMapReadTarget(currentTx *TxContext, target recMapTarget, columns []string,
@@ -263,6 +296,46 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 			values[position.source] = prepared.Call(position.values)
 		}
 	}
+	// Original-generation probes keep their existing hash lookup. A replaced
+	// source shard gets one immutable value projection, published only after
+	// translating its complete domain. Readers never mutate a published map.
+	type valueGeneration struct {
+		shard  *storageShard
+		values map[uint32]scm.Scmer
+		next   *valueGeneration
+	}
+	var generations atomic.Pointer[valueGeneration]
+	lookupGeneration := func(source recMapTarget) scm.Scmer {
+		if mapping == nil {
+			return fallback
+		}
+		var projection *valueGeneration
+		for {
+			head := generations.Load()
+			for generation := head; generation != nil; generation = generation.next {
+				if generation.shard == source.shard {
+					if value, ok := generation.values[source.recid]; ok {
+						return value
+					}
+					return fallback
+				}
+			}
+			if projection == nil {
+				projection = &valueGeneration{shard: source.shard, values: make(map[uint32]scm.Scmer)}
+				mapping.visitSourceShard(source.shard, func(recid uint32, partIndex, rowIndex int) {
+					part := &mapping.shards[partIndex]
+					projection.values[recid] = values[recMapRecordKey{shard: part.sourceShard, recid: part.sourceRecIDs[rowIndex]}]
+				})
+			}
+			projection.next = head
+			if generations.CompareAndSwap(head, projection) {
+				if value, ok := projection.values[source.recid]; ok {
+					return value
+				}
+				return fallback
+			}
+		}
+	}
 	return scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
 		if len(args) != 1 {
 			panic("recmap value mapper expects one source record-ref")
@@ -271,7 +344,7 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 		if value, ok := values[recMapRecordKey{shard: source.shard, recid: source.recid}]; ok {
 			return value
 		}
-		return fallback
+		return lookupGeneration(source)
 	})
 }
 

@@ -127,6 +127,23 @@ test_cases:
           0 + false))
     expect: {result: 13}
 
+  - name: "Prepared RecMap values survive a source rebuild before output"
+    setup:
+      - sql: "INSERT INTO ssg_trips VALUES (4, 2, 10)"
+    scm: |
+      (begin
+        (define source (table "memcp-tests" "ssg_trips"))
+        (define target (table "memcp-tests" "ssg_drivers"))
+        (define mapping (scan_recmap nil source '() '() '() (lambda () true)
+          '("driver_id") (recmap_equi_first_mapper nil target '("ID") nil) target))
+        (define value_mapper (recmap_value_mapper nil mapping '("name")
+          (lambda (name) name) (lambda () "")))
+        (rebuild source true false)
+        (scan nil source '() '() '() (lambda () true) '("$record_ref")
+          (lambda (total source_row) (+ total (strlen (value_mapper source_row))))
+          0 + false))
+    expect: {result: 16}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS ssg_trips"
   - sql: "DROP TABLE IF EXISTS ssg_drivers"

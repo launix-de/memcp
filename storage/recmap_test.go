@@ -70,6 +70,9 @@ func TestRecMapCallPreservesMatchesAcrossSourceRebuild(t *testing.T) {
 	mapping := scanRecMap(nil, NewTableScmer(source), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 		nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
 		[]string{"target_id"}, newRecMapEquiFirstMapper(nil, target, []string{"id"}, scm.NewNil()), target)
+	valueMapper := newRecMapValueMapper(nil, mapping, []string{"value"},
+		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] }),
+		scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewNil() }))
 	oldSource := mapping.shards[0].sourceShard
 	if result := GetDatabase(database).rebuild(true, false, true); len(result.errors) > 0 {
 		t.Fatalf("rebuild errors: %v", result.errors)
@@ -78,11 +81,37 @@ func TestRecMapCallPreservesMatchesAcrossSourceRebuild(t *testing.T) {
 	if oldSource == currentSource {
 		t.Fatal("fixture did not replace the source generation")
 	}
-	check := func(shard *storageShard, expected []scm.Scmer) {
+	check := func(shard *storageShard, expected []scm.Scmer, domainRows int) {
 		t.Helper()
 		call := recMapCallClosure(shard, nil)
+		// Race the first prepared probes of a generation to exercise publication
+		// of complete immutable projections, rather than only warmed lookups.
+		results := make(chan bool, 8)
+		for worker := 0; worker < 8; worker++ {
+			go func() {
+				matches := true
+				for recid, want := range expected {
+					got := scm.Apply(valueMapper, newRecordRef(shard, uint32(recid)))
+					matches = matches && scm.Equal(got, want)
+				}
+				results <- matches
+			}()
+		}
+		for worker := 0; worker < 8; worker++ {
+			if !<-results {
+				t.Fatal("concurrent value projection lost a source-domain row")
+			}
+		}
 		for pass := 0; pass < 2; pass++ {
 			for recid, want := range expected {
+				gotValue := scm.Apply(valueMapper, newRecordRef(shard, uint32(recid)))
+				if !scm.Equal(gotValue, want) {
+					t.Fatalf("value mapper after rebuild: row %d returned %s, want %s", recid, scm.String(gotValue), scm.String(want))
+				}
+				target, found := mapping.lookup(shard, uint32(recid))
+				if found != (recid < domainRows) || !scm.Equal(recMapTargetValue(target, "value"), want) {
+					t.Fatalf("RecMap lookup after rebuild lost row %d", recid)
+				}
 				got := (*call)(uint32(recid), NewRecMapScmer(mapping), scm.NewSlice([]scm.Scmer{scm.NewString("value")}),
 					scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] }),
 					scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewNil() }))
@@ -92,7 +121,10 @@ func TestRecMapCallPreservesMatchesAcrossSourceRebuild(t *testing.T) {
 			}
 		}
 	}
-	check(currentSource, []scm.Scmer{scm.NewInt(100), scm.NewInt(200), scm.NewInt(300), scm.NewNil()})
+	check(currentSource, []scm.Scmer{scm.NewInt(100), scm.NewInt(200), scm.NewInt(300), scm.NewNil()}, 4)
+	// A newly inserted row is outside the mapping's original source domain,
+	// even when its target key matches an existing row.
+	source.Insert([]string{"id", "target_id"}, [][]scm.Scmer{{scm.NewInt(5), scm.NewInt(10)}}, nil, scm.NewNil(), false, nil)
 	// Compact the first row to verify recid translation, not just a shard alias.
 	release := currentSource.GetExclusive()
 	currentSource.mu.Lock()
@@ -102,7 +134,7 @@ func TestRecMapCallPreservesMatchesAcrossSourceRebuild(t *testing.T) {
 	if result := GetDatabase(database).rebuild(true, false, true); len(result.errors) > 0 {
 		t.Fatalf("second rebuild errors: %v", result.errors)
 	}
-	check(source.ActiveShards()[0], []scm.Scmer{scm.NewInt(200), scm.NewInt(300), scm.NewNil()})
+	check(source.ActiveShards()[0], []scm.Scmer{scm.NewInt(200), scm.NewInt(300), scm.NewNil(), scm.NewNil()}, 3)
 }
 
 func TestRecMapPrunedDomainImageAndComposition(t *testing.T) {
@@ -799,5 +831,31 @@ func TestRecMapTupleScratchOwnsFrames(t *testing.T) {
 	}
 	if builder.copyKey(nil) != nil {
 		t.Fatal("empty key should need no scratch")
+	}
+}
+
+// BenchmarkRecMapPreparedValueProbe isolates the callback used inside a scan;
+// construction, storage reads, and fixture rebuilding stay outside the timer.
+func BenchmarkRecMapPreparedValueProbe(b *testing.B) {
+	database := "brecmap_prepared_values"
+	databases.Remove(database)
+	b.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	source := recMapTestTable(b, database, "source", []string{"id", "target_id"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewInt(10)}})
+	target := recMapTestTable(b, database, "target", []string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(10), scm.NewInt(100)}})
+	mapping := scanRecMap(nil, NewTableScmer(source), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
+		nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
+		[]string{"target_id"}, newRecMapEquiFirstMapper(nil, target, []string{"id"}, scm.NewNil()), target)
+	mapper := newRecMapValueMapper(nil, mapping, []string{"value"},
+		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] }),
+		scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewNil() }))
+	args := []scm.Scmer{newRecordRef(mapping.shards[0].sourceShard, mapping.shards[0].sourceRecIDs[0])}
+	probe := mapper.Func()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if got := probe(args...); got.Int() != 100 {
+			b.Fatal("prepared value probe lost its source row")
+		}
 	}
 }
