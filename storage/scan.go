@@ -1457,7 +1457,7 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchem
 
 	values := scanResultCollector{channelSize: t.shardResultBufferSize()}
 	var found atomic.Bool
-	done := t.iterateShardsParallel(currentTx, executionAccess, func(s *storageShard, solo bool) {
+	done := t.iterateShardsParallel(currentTx, executionAccess, func(s *storageShard, solo bool, acquisitionFailure any) {
 		if found.Load() {
 			values.send(solo, scanResult{})
 			return
@@ -1467,8 +1467,11 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchem
 				values.send(solo, scanResult{err: scanError{r, string(debug.Stack())}})
 			}
 		}()
+		if acquisitionFailure != nil {
+			panic(acquisitionFailure)
+		}
 		// Cancellation contract: check only at the scheduling boundary, before entering
-		// the shard. Once entered, a shard runs atomically without cancellation checks.
+		// the shard. Row execution runs atomically without cancellation checks.
 		if ss != nil && ss.IsKilledSeq(querySeq) {
 			panic("query killed")
 		}
@@ -1502,13 +1505,13 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchem
 func runDirectSingleShardExists(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, access scanAccess, conditionCols []string, condition scm.Scmer, ss *scm.SessionState, querySeq uint64) (found bool, scanErr scanError) {
 	defer topology.releaseOperation()
 	defer shard.activeScanners.Add(-1)
-	release := shard.acquireReadForScan(currentTx)
-	defer release()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			scanErr = scanError{recovered, string(debug.Stack())}
 		}
 	}()
+	release := shard.acquireReadForScan(currentTx)
+	defer release()
 	if ss != nil && ss.IsKilledSeq(querySeq) {
 		panic("query killed")
 	}
@@ -1533,13 +1536,13 @@ func (t *table) scanWithBatch(currentTx *TxContext, accessSchema scm.Scmer, acce
 func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, ss *scm.SessionState, querySeq uint64) (result scanResult) {
 	defer topology.releaseOperation()
 	defer shard.activeScanners.Add(-1)
-	release := shard.acquireReadForScan(currentTx)
-	defer release()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			result = scanResult{err: scanError{recovered, string(debug.Stack())}}
 		}
 	}()
+	release := shard.acquireReadForScan(currentTx)
+	defer release()
 	if ss != nil && ss.IsKilledSeq(querySeq) {
 		panic("query killed")
 	}
@@ -1656,14 +1659,17 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 		}
 	} else {
 		values := scanResultCollector{channelSize: t.shardResultBufferSize()}
-		done := t.iterateShardsParallel(currentTx, executionAccess, func(s *storageShard, solo bool) {
+		done := t.iterateShardsParallel(currentTx, executionAccess, func(s *storageShard, solo bool, acquisitionFailure any) {
 			defer func() {
 				if r := recover(); r != nil {
 					values.send(solo, scanResult{err: scanError{r, string(debug.Stack())}})
 				}
 			}()
+			if acquisitionFailure != nil {
+				panic(acquisitionFailure)
+			}
 			// Cancellation contract: check only at the scheduling boundary, before entering
-			// the shard. Once entered, a shard runs atomically without cancellation checks.
+			// the shard. Row execution runs atomically without cancellation checks.
 			if ss != nil && ss.IsKilledSeq(querySeq) {
 				panic("query killed")
 			}
@@ -1999,7 +2005,7 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
-	t.ensureMainCount(skipShardReadLock)
+	t.ensureMainCount(skipShardReadLock, currentTx)
 	t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(access, t.t, conditionCols, condition)
 
@@ -2185,7 +2191,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	// shards have their column map populated by load(t) first.
 	// ensureMainCount then loads at least one column to initialize main_count.
 	t.ensureLoaded()
-	t.ensureMainCount(false)
+	t.ensureMainCount(false, currentTx)
 	t.ensureScanAccessColumns(access, false, currentTx)
 	// Most scans do not read an ordered computed column. Keep discovery on the
 	// caller's stack and inspect the two existing column slices directly, so the
@@ -2591,7 +2597,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 		}
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
-	t.ensureMainCount(skipShardReadLock)
+	t.ensureMainCount(skipShardReadLock, currentTx)
 	t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(access, t.t, conditionCols, condition)
 

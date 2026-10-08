@@ -1173,7 +1173,7 @@ func Init(en scm.Env) {
 					continue
 				}
 				estimate := func() filteredRowEstimate {
-					release := shard.GetRead()
+					release := shard.GetRead(currentTx)
 					defer release()
 					return shard.EstimateFilteredRows(conditionCols, condition, limit, currentTx, accessSchema, accessValues)
 				}()
@@ -3110,7 +3110,7 @@ func Init(en scm.Env) {
 					for _, s := range shards {
 						s.mu.Lock()
 						for _, col := range t.Columns {
-							s.ensureColumnLoaded(col.Name, true)
+							s.ensureColumnLoaded(col.Name, true, nil)
 						}
 						s.mu.Unlock()
 					}

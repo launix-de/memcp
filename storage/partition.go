@@ -240,25 +240,39 @@ func (t *table) shardResultBufferSize() int {
 	return size
 }
 
-func traceShardScanCallback(callback func(*storageShard, bool), shard *storageShard, solo bool) {
+func traceShardScanCallback(callback func(*storageShard, bool, any), shard *storageShard, solo bool, acquisitionFailure any) {
 	scm.Trace.Duration(fmt.Sprintf("%p", shard), "shard", func() {
-		callback(shard, solo)
+		callback(shard, solo, acquisitionFailure)
 	})
+}
+
+// Acquisition failures belong to the query's result/error collector, just like
+// scan failures. In particular, a cancelled load wait must never escape a
+// fanout worker before the callback has installed its recovery handler.
+func runAcquiredShardScan(currentTx *TxContext, shard *storageShard, solo bool, callback func(*storageShard, bool, any)) {
+	var release func()
+	var acquisitionFailure any
+	func() {
+		defer func() { acquisitionFailure = recover() }()
+		release = shard.acquireReadForScan(currentTx)
+	}()
+	if release != nil {
+		defer release()
+	}
+	if scm.Trace == nil {
+		callback(shard, solo, acquisitionFailure)
+	} else {
+		traceShardScanCallback(callback, shard, solo, acquisitionFailure)
+	}
 }
 
 // runSingleShardScan keeps panic-safe resource release outside the topology
 // retry loop. Defers inside that loop cannot be open-coded by Go and used to
 // allocate a separate closure for every ordinary one-shard scan.
-func runSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, callback func(*storageShard, bool)) {
+func runSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, callback func(*storageShard, bool, any)) {
 	defer topology.releaseOperation()
 	defer shard.activeScanners.Add(-1)
-	release := shard.acquireReadForScan(currentTx)
-	defer release()
-	if scm.Trace == nil {
-		callback(shard, true)
-	} else {
-		traceShardScanCallback(callback, shard, true)
-	}
+	runAcquiredShardScan(currentTx, shard, true, callback)
 }
 
 // pinSingleShardForScan returns a registered authoritative shard only when the
@@ -352,22 +366,16 @@ func countRelevantShards(schema []shardDimension, access scanAccess, shards []*s
 	}
 }
 
-func runParallelShardScans(currentTx *TxContext, shards []*storageShard, topology *tableShardTopology, callback func(*storageShard, bool)) <-chan struct{} {
+func runParallelShardScans(currentTx *TxContext, shards []*storageShard, topology *tableShardTopology, callback func(*storageShard, bool, any)) <-chan struct{} {
 	return runFanoutTasks(currentTx, len(shards), func(i int, _ bool) {
 		shard := shards[i]
 		defer topology.releaseOperation()
 		defer shard.activeScanners.Add(-1)
-		release := shard.acquireReadForScan(currentTx)
-		defer release()
-		if scm.Trace == nil {
-			callback(shard, false)
-		} else {
-			traceShardScanCallback(callback, shard, false)
-		}
+		runAcquiredShardScan(currentTx, shard, false, callback)
 	})
 }
 
-func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, callback func(*storageShard, bool)) <-chan struct{} {
+func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, callback func(*storageShard, bool, any)) <-chan struct{} {
 	// Keep shard acquisition outside physical scan callbacks. In clustered mode
 	// this is the orchestration point that can choose a local SHARED copy or send
 	// the whole shard-local scan pipeline to a remote holder; row readers must not
@@ -425,7 +433,7 @@ func (s *storageShard) acquireReadForScan(currentTx *TxContext) func() {
 	if s.hasWriteOwnerForTx(currentTx) {
 		return func() {}
 	}
-	return s.GetRead()
+	return s.GetRead(currentTx)
 }
 
 func collectRelevantShards(schema []shardDimension, access scanAccess, shards []*storageShard) []*storageShard {
@@ -800,15 +808,15 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 		s.mu.Lock()
 		for _, sd := range shardCandidates {
 			if _, ok := s.columns[sd.Column]; ok {
-				s.ensureColumnLoaded(sd.Column, true)
+				s.ensureColumnLoaded(sd.Column, true, nil)
 			}
 		}
 		for _, col := range t.Columns {
 			if _, ok := s.columns[col.Name]; ok {
-				s.ensureColumnLoaded(col.Name, true)
+				s.ensureColumnLoaded(col.Name, true, nil)
 			}
 		}
-		s.ensureMainCount(true)
+		s.ensureMainCount(true, nil)
 		s.mu.Unlock()
 	}
 
@@ -1344,7 +1352,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 	}
 	for _, shard := range newshards {
 		indexes := func() []*StorageIndex {
-			release := shard.GetRead()
+			release := shard.GetRead(nil)
 			defer release()
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()

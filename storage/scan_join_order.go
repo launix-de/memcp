@@ -17,6 +17,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
+import "sync"
 import "sort"
 import "runtime"
 import "container/heap"
@@ -1239,7 +1240,17 @@ func collectScanJoinOrderShardStreams(currentTx *TxContext, input *scanJoinOrder
 
 	values := make(chan *scanJoinOrderShardStream, input.table.shardResultBufferSize())
 	ss := SessionStateFromTx(currentTx)
-	done := input.table.iterateShardsParallel(currentTx, bounds, func(shard *storageShard, _ bool) {
+	var failureOnce sync.Once
+	var firstFailure any
+	done := input.table.iterateShardsParallel(currentTx, bounds, func(shard *storageShard, _ bool, acquisitionFailure any) {
+		defer func() {
+			if failure := recover(); failure != nil {
+				failureOnce.Do(func() { firstFailure = failure })
+			}
+		}()
+		if acquisitionFailure != nil {
+			panic(acquisitionFailure)
+		}
 		queue := shard.scan_order(bounds, input.filterCols, input.filter,
 			nil, scm.NewNil(),
 			sortcols, sortdirs, 0, 0, -1, input.readCols, currentTx, ss)
@@ -1257,6 +1268,9 @@ func collectScanJoinOrderShardStreams(currentTx *TxContext, input *scanJoinOrder
 		<-done
 	}
 	close(values)
+	if firstFailure != nil {
+		panic(firstFailure)
+	}
 	result := make([]*scanJoinOrderShardStream, 0)
 	for stream := range values {
 		if len(stream.records) > 0 {

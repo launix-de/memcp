@@ -538,7 +538,7 @@ func (u *storageShard) load(t *table) {
 				// WAL insert recids follow the persisted main rows. Resolve that
 				// boundary only when replay actually contains inserts: eager loading
 				// here would defeat cold-column loading for every empty WAL.
-				u.ensureMainCount(true)
+				u.ensureMainCount(true, nil)
 				firstRecid := u.main_count + uint32(len(u.inserts))
 				u.insertDatasetFromLog(l.cols, l.values)
 				if !isCommitted(l.txID) {
@@ -550,7 +550,7 @@ func (u *storageShard) load(t *table) {
 				// Hidden transactional inserts use the same RecID namespace. Without
 				// the persisted boundary they would tombstone committed main rows and
 				// expose uncommitted delta rows after a crash.
-				u.ensureMainCount(true)
+				u.ensureMainCount(true, nil)
 				firstRecid := u.main_count + uint32(len(u.inserts))
 				u.insertDatasetFromLog(l.cols, l.values)
 				for i := range l.values {
@@ -670,8 +670,9 @@ func (u *storageShard) needsRuntimeAttach(colName string, columnstorage ColumnSt
 // ensureColumnLoaded loads a single column storage when first accessed.
 // If alreadyLocked is true, the caller must hold u.mu.Lock() and no locks
 // are taken inside this function. Otherwise, it acquires the appropriate
-// locks internally.
-func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) ColumnStorage {
+// locks internally. Query read preflights pass currentTx for cancellable load
+// admission; mutation, recovery and maintenance loads pass nil.
+func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool, currentTx *TxContext) ColumnStorage {
 	// Shared critical path which assumes u.mu is held (write).
 	loadLocked := func() ColumnStorage {
 		cs, present := u.columns[colName]
@@ -691,7 +692,16 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) Co
 			}
 			return u.columns[colName]
 		}
-		release := acquireLoadSlot()
+		// Resolve cancellation only for a cold-load preflight. Recovery,
+		// maintenance and callers inside a shard mutation pass no transaction.
+		if alreadyLocked {
+			currentTx = nil
+		}
+		ss, seq := currentTx.QuerySessionState()
+		release, err := acquireLoadSlot(tableLockQueryContext(ss, seq))
+		if err != nil {
+			panic("query killed")
+		}
 		defer release()
 		f := u.t.schema.persistence.ReadColumn(u.uuid.String(), colName)
 		var magicbyte uint8
@@ -787,7 +797,7 @@ func (u *storageShard) getColumnStorageOrPanic(colName string, alreadyLocked boo
 			u.columns[colName] = cs
 			return cs
 		}
-		return u.ensureColumnLoaded(colName, true)
+		return u.ensureColumnLoaded(colName, true, nil)
 	}
 	u.mu.RLock()
 	cs, present := u.columns[colName]
@@ -818,11 +828,11 @@ func (u *storageShard) getColumnStorageOrPanic(colName string, alreadyLocked boo
 		u.columns[colName] = cs
 		return cs
 	}
-	return u.ensureColumnLoaded(colName, false)
+	return u.ensureColumnLoaded(colName, false, currentTx)
 }
 
 // ensureMainCount guarantees main_count is initialized by loading one column if needed.
-func (u *storageShard) ensureMainCount(alreadyLocked bool) {
+func (u *storageShard) ensureMainCount(alreadyLocked bool, currentTx *TxContext) {
 	if u.main_count != 0 {
 		return
 	}
@@ -831,7 +841,7 @@ func (u *storageShard) ensureMainCount(alreadyLocked bool) {
 		for _, c := range u.t.Columns {
 			cs, ok := u.columns[c.Name]
 			if ok && cs == nil {
-				u.ensureColumnLoaded(c.Name, true)
+				u.ensureColumnLoaded(c.Name, true, nil)
 				if u.main_count != 0 {
 					return
 				}
@@ -844,7 +854,7 @@ func (u *storageShard) ensureMainCount(alreadyLocked bool) {
 		cs, ok := u.columns[c.Name]
 		u.mu.RUnlock()
 		if ok && cs == nil {
-			u.ensureColumnLoaded(c.Name, false)
+			u.ensureColumnLoaded(c.Name, false, currentTx)
 			if u.main_count != 0 {
 				return
 			}
@@ -859,10 +869,10 @@ func (s *storageShard) state() SharedState { return SharedState(s.srState.Load()
 
 func (s *storageShard) setState(state SharedState) { s.srState.Store(uint32(state)) }
 
-func (s *storageShard) GetRead() func() {
+func (s *storageShard) GetRead(currentTx *TxContext) func() {
 	s.ensureLoaded()
 	// Ensure main_count is initialized by loading at least one column
-	s.ensureMainCount(false)
+	s.ensureMainCount(false, currentTx)
 	if s.state() == COLD {
 		s.setState(SHARED)
 	}
@@ -3220,7 +3230,7 @@ func releaseUniqueLookupScratch(scratch *uniqueLookupScratch, columns int) {
 
 func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxContext) (result uint32, present bool) {
 	// Preload main storages and establish main_count without holding any shard lock
-	t.ensureMainCount(false)
+	t.ensureMainCount(false, currentTx)
 	columns := access.len()
 	scratch := acquireUniqueLookupScratch()
 	defer releaseUniqueLookupScratch(scratch, columns)
@@ -3302,7 +3312,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 		limit = 1024
 	}
 	t.ensureLoaded()
-	t.ensureMainCount(false)
+	t.ensureMainCount(false, currentTx)
 	ccols := make([]ColumnStorage, len(conditionCols))
 	conditionGetters := make([]mapArgGetter, len(conditionCols))
 	bounds, compiled := scanAccessFromScheme(accessSchema, accessValues, nil)
@@ -3695,7 +3705,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				if len(nilCols) > 0 {
 					t.mu.Unlock()
 					for _, col := range nilCols {
-						t.ensureColumnLoaded(col, false)
+						t.ensureColumnLoaded(col, false, nil)
 					}
 					continue
 				}

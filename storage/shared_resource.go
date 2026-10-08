@@ -34,6 +34,6 @@ const (
 // from the current local lifetime tracking into a cluster reference release.
 type SharedResource interface {
 	GetState() SharedState
-	GetRead() func()      // acquire read access; returns release()
-	GetExclusive() func() // acquire exclusive access; returns release()
+	GetRead(currentTx *TxContext) func() // acquire read access; cold-load waits observe this query
+	GetExclusive() func()                // acquire exclusive access; returns release()
 }

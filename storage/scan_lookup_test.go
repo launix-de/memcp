@@ -55,7 +55,7 @@ func TestNullSafePointIndexDoesNotScanNonNullRows(t *testing.T) {
 	access := testNullSafeLookupAccess("key")
 	var buf [8]uint32
 	var candidates []uint32
-	release := shard.GetRead()
+	release := shard.GetRead(nil)
 	defer release()
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()

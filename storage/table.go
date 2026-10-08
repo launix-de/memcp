@@ -415,7 +415,7 @@ func (t *table) hasDuplicateUniqueValues(cols []string, currentTx *TxContext) bo
 		if shard == nil {
 			continue
 		}
-		release := shard.GetRead()
+		release := shard.GetRead(currentTx)
 		shard.mu.RLock()
 		limit := shard.main_count + uint32(len(shard.inserts))
 		for recid := uint32(0); recid < limit; recid++ {
@@ -1005,7 +1005,7 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 			continue
 		}
 		func() {
-			done := shard.GetRead()
+			done := shard.GetRead(nil)
 			defer done()
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
@@ -1403,7 +1403,7 @@ func (t *table) initializeLegacyPlannerRowEstimate() {
 			continue
 		}
 		func() {
-			release := shard.GetRead()
+			release := shard.GetRead(nil)
 			defer release()
 			rows += shard.statsSnapshot().rowCount()
 		}()
@@ -1471,7 +1471,7 @@ func (t *table) CountExact() (result uint) {
 			continue
 		}
 		func() {
-			unlock := shard.GetRead()
+			unlock := shard.GetRead(nil)
 			defer unlock()
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
@@ -3192,7 +3192,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 			}
 			for _, s := range shardlist2 {
 				// ensure shard is loaded for read during unique check
-				r := s.GetRead()
+				r := s.GetRead(currentTx)
 				uid, present := s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx)
 				if present {
 					// found a unique collision
