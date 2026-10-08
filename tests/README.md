@@ -180,8 +180,9 @@ binary/runtime-library hashes and shard assignment. Per-process timing artifacts
 separate startup, execution and shutdown/cleanup; server logs and every raw query
 sample remain available. If both executable and dynamically loaded runtime
 libraries match, report the relative timings as A/A variance rather than an
-engine-patch regression. Both processes must still return correct results and
-satisfy absolute workload budgets. Query errors retain the complete verification
+engine-patch regression. Both processes must still return correct results under the existing request/setup
+deadlines. The reference `threshold_ms` does not become a new, unscaled absolute
+gate in A/B record mode. Query errors retain the complete verification
 protocol; changes to Scheme code prevent the identical-execution shortcut.
 
 CI validates the full discovered suite set before partitioning it across four

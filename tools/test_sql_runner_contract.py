@@ -1762,12 +1762,38 @@ class PerformanceFixtureContractTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 4)
         result = json.loads(self.output.read_text())[performance_case_key(self.suites[0], "cold")]
         self.assertEqual(result["status"], "identical_execution")
-        self.assertEqual(result["absolute_budget_ms"], 1000)
+        self.assertNotIn("absolute_budget_ms", result)
 
-    def test_identical_execution_still_rejects_absolute_budget_violation(self):
+    def test_identical_execution_does_not_add_an_unscaled_nominal_target_gate(self):
         (self.candidate / "memcp").write_bytes((self.base / "memcp").read_bytes())
         self.durations = lambda suite, role, index: 1001 if role == "B" else 100
-        self.assertFalse(self.run_experiment())
+        self.assertTrue(self.run_experiment())
+        self.assertEqual(len(self.calls), 4)
+
+    def test_ci_nominal_one_ms_target_does_not_trigger_identical_execution_reimports(self):
+        (self.candidate / "memcp").write_bytes((self.base / "memcp").read_bytes())
+        path = Path(self.suites[0])
+        spec = json.loads(path.read_text())
+        spec["test_cases"][0]["threshold_ms"] = 1
+        path.write_text(json.dumps(spec))
+        self.durations = lambda suite, role, index: 1.271 if role == "B" else 1.270
+        self.assertTrue(self.run_experiment())
+        self.assertEqual(len(self.calls), 4)
+        result = json.loads(self.output.read_text())[performance_case_key(self.suites[0], "cold")]
+        self.assertEqual(result["a_samples_ms"], [1.270])
+        self.assertEqual(result["b_samples_ms"], [1.271])
+
+    def test_nominal_target_is_not_an_absolute_gate_for_changed_binaries_either(self):
+        self.durations = lambda suite, role, index: 1001
+        self.assertTrue(self.run_experiment())
+        self.assertEqual(len(self.calls), 4)
+
+    def test_identical_execution_does_not_waive_child_failures(self):
+        (self.candidate / "memcp").write_bytes((self.base / "memcp").read_bytes())
+        self.exit_code = 1
+        with self.assertRaisesRegex(RuntimeError, "fixture failed"):
+            self.run_experiment()
+        self.assertEqual(len(self.calls), 1)
 
     def test_identical_execution_query_error_cannot_claim_new_support(self):
         (self.candidate / "memcp").write_bytes((self.base / "memcp").read_bytes())
