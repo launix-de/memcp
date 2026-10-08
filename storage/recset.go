@@ -513,15 +513,18 @@ func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessV
 	}
 
 	values := make(chan recSetBuildResult, t.shardResultBufferSize())
-	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool) {
+	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool, acquisitionFailure any) {
 		withTxSession(currentTx, func() scm.Scmer {
 			defer func() {
 				if rec := recover(); rec != nil {
 					values <- recSetBuildResult{err: scanError{rec, string(debug.Stack())}}
 				}
 			}()
+			if acquisitionFailure != nil {
+				panic(acquisitionFailure)
+			}
 			// Cancellation contract: check only at the scheduling boundary, before entering
-			// the shard. Once entered, a shard runs atomically without cancellation checks.
+			// the shard. Row execution runs atomically without cancellation checks.
 			if ss != nil && ss.IsKilledSeq(querySeq) {
 				panic("query killed")
 			}
@@ -563,7 +566,7 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 		conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
-	t.ensureMainCount(skipShardReadLock)
+	t.ensureMainCount(skipShardReadLock, currentTx)
 	t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(access, t.t, conditionCols, condition)
 
@@ -874,7 +877,7 @@ func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []st
 				}
 			}()
 			// Cancellation contract: check only at the scheduling boundary, before entering
-			// the shard. Once entered, a shard runs atomically without cancellation checks.
+			// the shard. Row execution runs atomically without cancellation checks.
 			if ss != nil && ss.IsKilledSeq(querySeq) {
 				panic("query killed")
 			}
@@ -919,7 +922,7 @@ func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []st
 func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols []string, currentTx *TxContext, ss *scm.SessionState, dst []scm.Scmer) int {
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
-	t.ensureMainCount(skipShardReadLock)
+	t.ensureMainCount(skipShardReadLock, currentTx)
 
 	cols := make([]ColumnStorage, len(sourceKeyCols))
 	for i, col := range sourceKeyCols {
@@ -1024,15 +1027,18 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 		err  scanError
 	}
 	values := make(chan targetPartResult, t.shardResultBufferSize())
-	done := t.iterateShardsParallel(currentTx, scanAccess{}, func(shard *storageShard, solo bool) {
+	done := t.iterateShardsParallel(currentTx, scanAccess{}, func(shard *storageShard, solo bool, acquisitionFailure any) {
 		withTxSession(currentTx, func() scm.Scmer {
 			defer func() {
 				if rec := recover(); rec != nil {
 					values <- targetPartResult{err: scanError{rec, string(debug.Stack())}}
 				}
 			}()
+			if acquisitionFailure != nil {
+				panic(acquisitionFailure)
+			}
 			// Cancellation contract: check only at the scheduling boundary, before entering
-			// the shard. Once entered, a shard runs atomically without cancellation checks.
+			// the shard. Row execution runs atomically without cancellation checks.
 			if ss != nil && ss.IsKilledSeq(querySeq) {
 				panic("query killed")
 			}
@@ -1117,7 +1123,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 	}
 	skipShardReadLock := alreadyLocked || t.hasWriteOwnerForTx(currentTx)
 	if !alreadyLocked {
-		t.ensureMainCount(skipShardReadLock)
+		t.ensureMainCount(skipShardReadLock, currentTx)
 	}
 	targetCols := make([]ColumnStorage, len(targetKeyCols))
 	for i, col := range targetKeyCols {
@@ -1268,7 +1274,7 @@ func (r *recSet) scanExists(currentTx *TxContext, accessSchema scm.Scmer, access
 func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
-	t.ensureMainCount(skipShardReadLock)
+	t.ensureMainCount(skipShardReadLock, currentTx)
 
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
@@ -1355,7 +1361,7 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 	conditionFn := scm.PrepareSerialProc(condition)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
-	t.ensureMainCount(skipShardReadLock)
+	t.ensureMainCount(skipShardReadLock, currentTx)
 
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
@@ -1519,7 +1525,7 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 		conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
-	t.ensureMainCount(skipShardReadLock)
+	t.ensureMainCount(skipShardReadLock, currentTx)
 	t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	// Keep RecSet narrowing on the ordinary index-boundary path. The exact
 	// RecSet matcher and approximate hooks such as Bigram LIKE then prune the

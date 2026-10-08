@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2025  Carl-Philip Hänsch
+Copyright (C) 2025-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -16,7 +16,10 @@ Copyright (C) 2025  Carl-Philip Hänsch
 */
 package storage
 
-import "runtime"
+import (
+	"context"
+	"runtime"
+)
 
 // global semaphore to limit concurrent disk-backed load operations
 var loadSemaphore chan struct{}
@@ -33,8 +36,25 @@ func init() {
 	}
 }
 
-// acquireLoadSlot blocks until a load slot is available and returns a release func.
-func acquireLoadSlot() func() {
-	<-loadSemaphore
-	return func() { loadSemaphore <- struct{}{} }
+// acquireLoadSlot waits for a disk-load slot or query cancellation. A nil
+// context is used for recovery and maintenance, which must complete normally.
+func acquireLoadSlot(ctx context.Context) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-loadSemaphore:
+		// If both signals are ready, return the token and prefer cancellation
+		// before starting a disk load.
+		if err := ctx.Err(); err != nil {
+			loadSemaphore <- struct{}{}
+			return nil, err
+		}
+		return func() { loadSemaphore <- struct{}{} }, nil
+	}
 }

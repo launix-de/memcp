@@ -153,10 +153,10 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 					panic("query killed")
 				}
 				shard.activeScanners.Add(1)
-				release := shard.acquireReadForScan(currentTx)
 				queue := func() *shardqueue {
-					defer release()
 					defer shard.activeScanners.Add(-1)
+					release := shard.acquireReadForScan(currentTx)
+					defer release()
 					return shard.scan_order(runtimeScanAccess(bounds), nil, condition,
 						nil, scm.NewNil(), sortcols, sortdirs, 0, remainingOffset,
 						limit-len(records), nil, currentTx, sessionState)

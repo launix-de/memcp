@@ -27,7 +27,7 @@ func setupDeltaPrefixSeek(tb testing.TB) *storageShard {
 }
 
 func deltaPrefixSeek(shard *storageShard, parent int64, inclusive bool) []uint32 {
-	release := shard.GetRead()
+	release := shard.GetRead(nil)
 	defer release()
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
