@@ -116,8 +116,9 @@ jobs:
           path: |
             candidate/.third_party/go-jit/bin
             candidate/.third_party/go-jit/pkg
+            candidate/.third_party/go-jit/src/**/z*.go
             candidate/.third_party/go-jit/.memcp-built-revision
-          key: jit-go-${{ runner.os }}-${{ runner.arch }}-${{ steps.jit-cache-key.outputs.image }}-${{ steps.jit-cache-key.outputs.revision }}
+          key: jit-go-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.jit-cache-key.outputs.image }}-${{ steps.jit-cache-key.outputs.revision }}
 
       - name: Build JIT candidate and patched Go compiler
         run: make -C candidate jit
