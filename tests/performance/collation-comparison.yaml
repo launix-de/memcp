@@ -1,6 +1,8 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
+  reuse_fixture: true
+  restart_after_setup: true
   version: "1.0"
   description: "Case-insensitive Unicode comparisons in ordered index construction and probes"
   isolated: true
@@ -9,7 +11,7 @@ metadata:
   performance_rows: 100000
 setup:
   - sql: DROP TABLE IF EXISTS perf_ci_label
-  - sql: CREATE TABLE perf_ci_label (id INT PRIMARY KEY, label TEXT COLLATE utf8mb4_general_ci) ENGINE=memory
+  - sql: CREATE TABLE perf_ci_label (id INT PRIMARY KEY, label TEXT COLLATE utf8mb4_general_ci) ENGINE=sloppy
   - scm: |
       (begin
         (insert (table "memcp-tests" "perf_ci_label") '("id" "label")

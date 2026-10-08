@@ -25,12 +25,31 @@ jobs:
 
   jit-performance-ab:
     name: jit-performance-ab
+    needs: [changes, jit-performance-ab-shard]
+    if: ${{ always() && needs.changes.outputs.relevant == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every performance shard
+        env:
+          SHARD_RESULT: ${{ needs.jit-performance-ab-shard.result }}
+        run: test "$SHARD_RESULT" = success
+
+  jit-performance-ab-shard:
+    name: jit-performance-ab (${{ matrix.shard }}/4)
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
-    # Complete the fixed fresh-fixture verification after the full initial pass;
-    # query deadlines, sample counts and regression gates remain unchanged.
-    timeout-minutes: 90
+    # Cold toolchain builds have their own allowance. Measurement is capped
+    # separately at 15 minutes; a timed-out shard cannot pass the aggregate.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      PERF_SHARD_INDEX: ${{ matrix.shard }}
+      PERF_SHARD_COUNT: 4
 
     steps:
       - name: Check out JIT merge candidate
@@ -83,6 +102,24 @@ jobs:
 
       - uses: ./candidate/.github/actions/setup-php
 
+      - name: Identify patched compiler cache
+        id: jit-cache-key
+        shell: bash
+        run: |
+          echo "revision=$(git -C candidate/.third_party/go-jit rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          . /etc/os-release
+          echo "image=$ID-$VERSION_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Restore compiled patched Go
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            candidate/.third_party/go-jit/bin
+            candidate/.third_party/go-jit/pkg
+            candidate/.third_party/go-jit/src/**/z*.go
+            candidate/.third_party/go-jit/.memcp-built-revision
+          key: jit-go-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.jit-cache-key.outputs.image }}-${{ steps.jit-cache-key.outputs.revision }}
+
       - name: Build JIT candidate and patched Go compiler
         run: make -C candidate jit
 
@@ -114,6 +151,7 @@ jobs:
           mv base/memcp-php base/memcp
 
       - name: Measure JIT base and candidate with the SQL test runner
+        timeout-minutes: 15
         shell: bash
         run: |
           runner="$GITHUB_WORKSPACE/candidate/run_sql_tests.py"
@@ -123,8 +161,8 @@ jobs:
             seed="$GITHUB_WORKSPACE/candidate/tests/performance/ci-workloads.json"
           fi
 
-          # The reviewed runner interleaves both binaries on identical fresh
-          # fixtures. Only suspect timings get fixed ABBA verification trials,
+          # The reviewed runner measures old then new on independent
+          # fixtures. Only suspect timings get fixed old/new verification pairs,
           # after the complete initial pass; original samples stay included.
           (cd candidate && env \
             PERF_BASELINE_FILE="$baseline" \
@@ -140,7 +178,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: jit-performance-ab-baseline
+          name: jit-performance-ab-baseline-${{ matrix.shard }}
           path: |
             jit-perf-baseline.json
             jit-perf-baseline.trials/

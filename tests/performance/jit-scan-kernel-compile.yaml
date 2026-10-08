@@ -1,13 +1,15 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
+  reuse_fixture: true
+  restart_after_setup: true
   description: Scan-local typed filter and reducer compilation over full column scans
   isolated: true
   performance_rows: 60000
   max_regression_pct: 20
 setup:
 - sql: DROP TABLE IF EXISTS kernel_values
-- sql: CREATE TABLE kernel_values (value INT, weight INT) ENGINE=memory
+- sql: CREATE TABLE kernel_values (value INT, weight INT) ENGINE=sloppy
 - scm: |
     (begin
       (insert (table "memcp-tests" "kernel_values") '("value" "weight")

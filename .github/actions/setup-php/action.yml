@@ -5,7 +5,7 @@ description: Build the released embedded PHP runtime outside the repository
 runs:
   using: composite
   steps:
-  - name: Build external PHP ZTS runtime
+  - name: Install external PHP build and runtime dependencies
     env:
       PHP_VERSION: 8.5.10
       PHP_SHA256: 6a8bebaa4d5a979a38db29a9373e9851f60c6b11f72172c585947e78f3081957
@@ -23,6 +23,27 @@ runs:
         sudo apt-get update
         sudo apt-get install -y build-essential pkg-config bison re2c libsqlite3-dev libonig-dev libzip-dev libicu-dev libpng-dev libjpeg-dev libfreetype6-dev libwebp-dev libxml2-dev libcurl4-openssl-dev libssl-dev libgmp-dev libmagickwand-dev php-cli php-imap
       fi
+  - name: Identify PHP runtime ABI
+    id: php-abi
+    shell: bash
+    run: |
+      . /etc/os-release
+      echo "image=$ID-$VERSION_ID" >> "$GITHUB_OUTPUT"
+      source_hash=$(sha256sum "$GITHUB_ACTION_PATH/action.yml")
+      echo "source=${source_hash%% *}" >> "$GITHUB_OUTPUT"
+  - name: Restore external PHP ZTS runtime
+    id: php-cache
+    uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+    with:
+      path: ${{ runner.temp }}/php-zts
+      key: php-zts-${{ runner.os }}-${{ runner.arch }}-${{ steps.php-abi.outputs.image }}-${{ steps.php-abi.outputs.source }}
+  - name: Compile external PHP ZTS runtime
+    if: steps.php-cache.outputs.cache-hit != 'true'
+    env:
+      PHP_VERSION: 8.5.10
+      PHP_SHA256: 6a8bebaa4d5a979a38db29a9373e9851f60c6b11f72172c585947e78f3081957
+    shell: bash
+    run: |
       cd "$RUNNER_TEMP"
       curl -fsSL "https://www.php.net/distributions/php-${PHP_VERSION}.tar.xz" -o php.tar.xz
       echo "$PHP_SHA256  php.tar.xz" | sha256sum --check
@@ -55,4 +76,6 @@ runs:
       find . -type f \( -name LICENSE -o -name 'LICENSE.*' -o -name COPYING -o -name 'COPYING.*' -o -name NOTICE \) \
         -exec install -D -m 644 '{}' "$RUNNER_TEMP/php-zts/share/licenses/php/{}" \;
       install -D -m 644 "$RUNNER_TEMP/imagick-3.8.1/LICENSE" "$RUNNER_TEMP/php-zts/share/licenses/php/imagick/LICENSE"
-      echo "PHP_CONFIG=$RUNNER_TEMP/php-zts/bin/php-config" >> "$GITHUB_ENV"
+  - name: Export PHP runtime configuration
+    shell: bash
+    run: echo "PHP_CONFIG=$RUNNER_TEMP/php-zts/bin/php-config" >> "$GITHUB_ENV"

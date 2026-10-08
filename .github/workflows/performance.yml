@@ -20,13 +20,31 @@ jobs:
 
   performance-ab:
     name: performance-ab
+    needs: [changes, performance-ab-shard]
+    if: ${{ always() && needs.changes.outputs.relevant == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every performance shard
+        env:
+          SHARD_RESULT: ${{ needs.performance-ab-shard.result }}
+        run: test "$SHARD_RESULT" = success
+
+  performance-ab-shard:
+    name: performance-ab (${{ matrix.shard }}/4)
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
-    # Retain all seven fresh A/B fixtures when the initial pair needs
-    # verification. The rare-prefix workload can take ~40s per side alone;
-    # let the fixed protocol finish without changing any query or gate budget.
-    timeout-minutes: 90
+    # Cold toolchain builds have their own allowance. Measurement is capped
+    # separately at 15 minutes; a timed-out shard cannot pass the aggregate.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      PERF_SHARD_INDEX: ${{ matrix.shard }}
+      PERF_SHARD_COUNT: 4
 
     steps:
       - name: Check out merge candidate
@@ -63,10 +81,11 @@ jobs:
       - name: Build base and candidate
         shell: bash
         run: |
-          (cd base && go build -o memcp)
-          (cd candidate && go build -o memcp)
+          (cd base && go build -trimpath -buildvcs=false -o memcp)
+          (cd candidate && go build -trimpath -buildvcs=false -o memcp)
 
       - name: Measure base and candidate with the SQL test runner
+        timeout-minutes: 15
         shell: bash
         run: |
           # The candidate runner defines the A/B protocol under review (including
@@ -79,8 +98,8 @@ jobs:
             seed="$GITHUB_WORKSPACE/candidate/tests/performance/ci-workloads.json"
           fi
 
-          # The reviewed runner interleaves both binaries on identical fresh
-          # fixtures. Only suspect timings get fixed ABBA verification trials,
+          # The reviewed runner measures old then new on independent
+          # fixtures. Only suspect timings get fixed old/new verification pairs,
           # after the complete initial pass; original samples stay included.
           (cd candidate && env \
             PERF_BASELINE_FILE="$baseline" \
@@ -96,7 +115,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: performance-ab-baseline
+          name: performance-ab-baseline-${{ matrix.shard }}
           path: |
             perf-baseline.json
             perf-baseline.trials/
