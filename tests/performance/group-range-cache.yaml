@@ -6,6 +6,7 @@
 # (at your option) any later version.
 
 metadata:
+  performance_shard_weight: 2
   version: "1.0"
   description: "Cold construction plus repeated overlapping group range-cache probes"
   isolated: true

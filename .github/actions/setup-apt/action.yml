@@ -1,0 +1,19 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Install Ubuntu CI packages
+description: Bound package downloads and recover once from an unavailable Ubuntu mirror
+inputs:
+  packages:
+    description: Space-separated package names to install
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install required packages
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        APT_SOURCES_DIRECTORY: /etc/apt
+        INDEX_TIMEOUT_SECONDS: '120'
+        INSTALL_TIMEOUT_SECONDS: '240'
+      run: bash "$GITHUB_ACTION_PATH/install.sh"

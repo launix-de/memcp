@@ -2,6 +2,7 @@
 # Use the stable scan-plan AST contract for handwritten access in cross-version A/B runs.
 
 metadata:
+  performance_shard_weight: 3
   reuse_fixture: true
   version: "1.0"
   description: "Forum hierarchy lookup with per-forum child and thread aggregates"

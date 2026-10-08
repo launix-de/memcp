@@ -14,9 +14,13 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 metadata:
+  performance_shard_weight: 8
   version: "1.0"
   description: "Unselective scalar ORDER LIMIT late projection"
   isolated: true
+  # Prepare source data once; every A/B trial gets its own copy before case-local writes.
+  reuse_fixture: true
+  restart_after_setup: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS usol_item"
@@ -43,12 +47,12 @@ setup:
   - sql: "CREATE TABLE usol_file_multi (bucket INT, id INT, uploaded_at INT)"
   - sql: "CREATE TABLE usol_text_outer (id INT PRIMARY KEY, lookup_key TEXT COLLATE utf8mb4_general_ci)"
   - sql: "CREATE TABLE usol_text_inner (lookup_key TEXT COLLATE utf8mb4_general_ci, value INT)"
-  - sql: "CREATE TABLE usol_dataview_product (id INT PRIMARY KEY, selling_id INT, abo_type INT) ENGINE=memory"
-  - sql: "CREATE TABLE usol_dataview_selling (id INT PRIMARY KEY, old_key INT, sold_at INT, total INT, UNIQUE KEY usol_dataview_selling_old (old_key)) ENGINE=memory"
-  - sql: "CREATE TABLE usol_dataview_conversion (id INT PRIMARY KEY, selling_id INT, user_id INT, UNIQUE KEY usol_dataview_conversion_selling (selling_id)) ENGINE=memory"
-  - sql: "CREATE TABLE usol_dataview_import_user (id INT PRIMARY KEY, vu_id INT, customer_id INT, UNIQUE KEY usol_dataview_import_vu (vu_id)) ENGINE=memory"
-  - sql: "CREATE TABLE usol_dataview_customer (id INT PRIMARY KEY, description TEXT) ENGINE=memory"
-  - sql: "CREATE TABLE usol_dataview_abo (id INT PRIMARY KEY, user_id INT, beneficiary INT, abo_type INT, KEY usol_dataview_abo_user (abo_type, user_id), KEY usol_dataview_abo_beneficiary (abo_type, beneficiary)) ENGINE=memory"
+  - sql: "CREATE TABLE usol_dataview_product (id INT PRIMARY KEY, selling_id INT, abo_type INT) ENGINE=sloppy"
+  - sql: "CREATE TABLE usol_dataview_selling (id INT PRIMARY KEY, old_key INT, sold_at INT, total INT, UNIQUE KEY usol_dataview_selling_old (old_key)) ENGINE=sloppy"
+  - sql: "CREATE TABLE usol_dataview_conversion (id INT PRIMARY KEY, selling_id INT, user_id INT, UNIQUE KEY usol_dataview_conversion_selling (selling_id)) ENGINE=sloppy"
+  - sql: "CREATE TABLE usol_dataview_import_user (id INT PRIMARY KEY, vu_id INT, customer_id INT, UNIQUE KEY usol_dataview_import_vu (vu_id)) ENGINE=sloppy"
+  - sql: "CREATE TABLE usol_dataview_customer (id INT PRIMARY KEY, description TEXT) ENGINE=sloppy"
+  - sql: "CREATE TABLE usol_dataview_abo (id INT PRIMARY KEY, user_id INT, beneficiary INT, abo_type INT, KEY usol_dataview_abo_user (abo_type, user_id), KEY usol_dataview_abo_beneficiary (abo_type, beneficiary)) ENGINE=sloppy"
   - sql: "INSERT INTO usol_parent VALUES (1, 7, 10), (2, 8, 20)"
   - sql: "INSERT INTO usol_assignment VALUES (1, 10, 7), (2, 20, 8)"
   - sql: "INSERT INTO usol_item_multi VALUES (1, 1, 1), (2, 2, 1), (3, 1, 2), (4, 2, 2), (5, 3, 1)"
@@ -93,12 +97,12 @@ setup:
   - sql: DROP TABLE IF EXISTS usol_notice_grant
   - sql: DROP TABLE IF EXISTS usol_notice_seen
   - sql: CREATE TABLE usol_notice_item (ID INT, site_id INT, asset_id INT, year_id INT,
-      department_id INT, category_id INT) ENGINE=memory
-  - sql: CREATE TABLE usol_notice_asset (ID INT, uploaded_at INT) ENGINE=memory
-  - sql: CREATE TABLE usol_notice_site (ID INT, tenant_id INT) ENGINE=memory
-  - sql: CREATE TABLE usol_notice_tenant (ID INT) ENGINE=memory
-  - sql: CREATE TABLE usol_notice_grant (user INT, tenant_id INT, site_id INT) ENGINE=memory
-  - sql: CREATE TABLE usol_notice_seen (dv TEXT, user INT, id INT, channel TEXT) ENGINE=memory
+      department_id INT, category_id INT) ENGINE=sloppy
+  - sql: CREATE TABLE usol_notice_asset (ID INT, uploaded_at INT) ENGINE=sloppy
+  - sql: CREATE TABLE usol_notice_site (ID INT, tenant_id INT) ENGINE=sloppy
+  - sql: CREATE TABLE usol_notice_tenant (ID INT) ENGINE=sloppy
+  - sql: CREATE TABLE usol_notice_grant (user INT, tenant_id INT, site_id INT) ENGINE=sloppy
+  - sql: CREATE TABLE usol_notice_seen (dv TEXT, user INT, id INT, channel TEXT) ENGINE=sloppy
   - sql: INSERT INTO usol_notice_tenant VALUES (1)
   - sql: INSERT INTO usol_notice_grant VALUES (1,1,1),(2,NULL,NULL)
   - sql: INSERT INTO usol_notice_seen VALUES ('delivery',1,99901,'email')
@@ -109,6 +113,7 @@ setup:
         (map (produceN 100000) (lambda (i) (list (+ i 1) (+ (mod i 100) 1) (+ i 1) 1 1 1))))
        (insert (table "memcp-tests" "usol_notice_asset") '("ID" "uploaded_at")
         (map (produceN 100000) (lambda (i) (list (+ i 1) (+ i 1)))))
+       (rebuild)
        100000)
   - sql: INSERT INTO usol_notice_seen VALUES ('delivery',1,99900,'email'),('delivery',1,NULL,'email'),('delivery',2,42,'email')
 

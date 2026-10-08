@@ -2,6 +2,7 @@
 # Use the stable scan-plan AST contract for handwritten access in cross-version A/B runs.
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
+  performance_shard_weight: 3
   version: "1.0"
   description: "Warm ordered queries amid unrelated bound-predicate learning"
   isolated: true

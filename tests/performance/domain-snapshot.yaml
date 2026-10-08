@@ -1,6 +1,7 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
+  performance_shard_weight: 2
   version: "1.0"
   description: "Shared state aggregates across ordered parameter domains"
   isolated: true

@@ -3,6 +3,7 @@
 
 # Ten historical revisions per article reproduce a content-heavy search table.
 metadata:
+  performance_shard_weight: 4
   reuse_fixture: true
   version: '1.0'
   description: WordPress search excludes revision history before scanning article

@@ -3205,12 +3205,25 @@ def performance_library_digest(tree: Path) -> str:
 
 
 def performance_shard_paths(paths: List[Path]) -> List[Path]:
-    """Partition the fully validated suite set; every suite belongs to one shard."""
+    """Balance whole suites; keep every case and verification pair on one runner."""
     index = int(os.environ.get("PERF_SHARD_INDEX", "0"))
     count = int(os.environ.get("PERF_SHARD_COUNT", "1"))
     if count < 1 or not 0 <= index < count:
         raise ValueError("invalid performance shard index/count")
-    return sorted(paths)[index::count]
+    weighted = []
+    for path in paths:
+        spec = yaml.safe_load(path.read_text()) if path.is_file() else {}
+        weight = ((spec or {}).get("metadata") or {}).get("performance_shard_weight", 1)
+        if type(weight) is not int or weight < 1:
+            raise ValueError(f"invalid performance shard weight: {path}")
+        weighted.append((weight, path))
+    shards = [[] for _ in range(count)]
+    loads = [0] * count
+    for weight, path in sorted(weighted, key=lambda value: (-value[0], value[1])):
+        target = min(range(count), key=lambda shard: (loads[shard], shard))
+        shards[target].append(path)
+        loads[target] += weight
+    return sorted(shards[index])
 
 
 def validate_reusable_fixture(spec: Dict[str, Any]) -> None:
@@ -3306,6 +3319,7 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
         # with exactly the same setup share its import without sharing mutations.
         metadata = dict(spec.get("metadata", {}))
         metadata.pop("description", None)
+        metadata.pop("performance_shard_weight", None)
         identity = json.dumps({"setup": spec.get("setup", []), "metadata": metadata,
                                "seed": workload_seed}, sort_keys=True)
         key = hashlib.sha256(identity.encode()).hexdigest()

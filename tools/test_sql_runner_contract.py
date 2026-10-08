@@ -1831,8 +1831,31 @@ class PerformanceFixtureContractTests(unittest.TestCase):
             spec["setup"] = [{"sql": "CREATE TABLE fixture (id int) ENGINE=sloppy"}]
             path.write_text(json.dumps(spec))
 
+    def test_heavy_suites_are_isolated_without_losing_any_case_or_runner(self):
+        paths = []
+        for index in range(14):
+            path = self.root / f"weighted-{index:02d}.yaml"
+            path.write_text(json.dumps({"metadata": {"performance_shard_weight": 64 if index < 2 else 1}}))
+            paths.append(path)
+        shards = []
+        for index in range(4):
+            with mock.patch.dict(os.environ, {"PERF_SHARD_INDEX": str(index), "PERF_SHARD_COUNT": "4"}):
+                shards.append(performance_shard_paths(paths))
+        self.assertCountEqual([path for shard in shards for path in shard], paths)
+        self.assertEqual(shards[:2], [[paths[0]], [paths[1]]])
+        self.assertEqual([len(shard) for shard in shards[2:]], [6, 6])
+        for bad in (0, -1, True, 1.5, "64"):
+            paths[0].write_text(json.dumps({"metadata": {"performance_shard_weight": bad}}))
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                performance_shard_paths(paths)
+
     def test_reused_snapshot_deduplicates_setup_and_isolates_all_trials(self):
         self.enable_reuse()
+        for weight, suite in enumerate(self.suites, 1):
+            path = Path(suite)
+            spec = json.loads(path.read_text())
+            spec["metadata"]["performance_shard_weight"] = weight
+            path.write_text(json.dumps(spec))
         self.durations = lambda suite, role, index: 200 if suite == "cold" and role == "B" else 100
         self.assertFalse(self.run_experiment())
         self.assertEqual(len(self.preparations), 1)  # identical setup in both suites

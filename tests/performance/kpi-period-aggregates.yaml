@@ -20,31 +20,34 @@ metadata:
   version: '1.0'
   description: Twelve monthly and three yearly KPIs over large offer histories
   isolated: true
+  reuse_fixture: true
+  restart_after_setup: true
+  performance_shard_weight: 128
   ci: false
   perf_ci: true
   performance_rows: 10000
+setup:
+- sql: DROP TABLE IF EXISTS kpi_perf_item
+- sql: DROP TABLE IF EXISTS kpi_perf_offer
+- sql: CREATE TABLE kpi_perf_offer (id INT PRIMARY KEY, created BIGINT) ENGINE=sloppy
+- sql: CREATE TABLE kpi_perf_item (offer_id INT, quantity INT, unit_price INT) ENGINE=sloppy
+- scm: |
+    (begin
+      (map (produceN 36) (lambda (period)
+        (begin
+          (define start_time (nth '(1704067200 1706745600 1709251200 1711929600 1714521600 1717200000 1719792000 1722470400 1725148800 1727740800 1730419200 1733011200 1735689600 1738368000 1740787200 1743465600 1746057600 1748736000 1751328000 1754006400 1756684800 1759276800 1761955200 1764547200 1767225600 1769904000 1772323200 1775001600 1777593600 1780272000 1782864000 1785542400 1788220800 1790812800 1793491200 1796083200) period))
+          (insert (table "memcp-tests" "kpi_perf_offer") '("id" "created")
+            (map (produceN 10000) (lambda (i)
+              (list (+ 1 i (* period 10000)) (+ start_time (* i 60)))))))))
+      (map (produceN 36) (lambda (period)
+        (insert (table "memcp-tests" "kpi_perf_item") '("offer_id" "quantity" "unit_price")
+          (map (produceN (* 5 10000)) (lambda (i)
+            (list (+ 1 (floor (/ i 5)) (* period 10000))
+              (+ 1 (mod i 5)) (+ 1 (mod (floor (/ i 5)) 100))))))))
+      (rebuild)
+      (* 216 10000))
 test_cases:
 - name: Perf KPI 15 periods cold nested aggregates
-  setup:
-  - sql: DROP TABLE IF EXISTS kpi_perf_item
-  - sql: DROP TABLE IF EXISTS kpi_perf_offer
-  - sql: CREATE TABLE kpi_perf_offer (id INT PRIMARY KEY, created BIGINT) ENGINE=sloppy
-  - sql: CREATE TABLE kpi_perf_item (offer_id INT, quantity INT, unit_price INT) ENGINE=sloppy
-  - scm: |
-      (begin
-        (map (produceN 36) (lambda (period)
-          (begin
-            (define start_time (nth '(1704067200 1706745600 1709251200 1711929600 1714521600 1717200000 1719792000 1722470400 1725148800 1727740800 1730419200 1733011200 1735689600 1738368000 1740787200 1743465600 1746057600 1748736000 1751328000 1754006400 1756684800 1759276800 1761955200 1764547200 1767225600 1769904000 1772323200 1775001600 1777593600 1780272000 1782864000 1785542400 1788220800 1790812800 1793491200 1796083200) period))
-            (insert (table "{database}" "kpi_perf_offer") '("id" "created")
-              (map (produceN {rows}) (lambda (i)
-                (list (+ 1 i (* period {rows})) (+ start_time (* i 60)))))))))
-        (map (produceN 36) (lambda (period)
-          (insert (table "{database}" "kpi_perf_item") '("offer_id" "quantity" "unit_price")
-            (map (produceN (* 5 {rows})) (lambda (i)
-              (list (+ 1 (floor (/ i 5)) (* period {rows}))
-                (+ 1 (mod i 5)) (+ 1 (mod (floor (/ i 5)) 100))))))))
-        (rebuild)
-        (* 216 {rows}))
   warmup: false
   repetitions: 1
   timeout: 300
@@ -141,10 +144,10 @@ test_cases:
       offer_sum: 90900000
       offer_average: 757.5
 - name: Perf KPI 15 periods warm nested aggregates
-  # Allow the accepted general-plan cost to be measured on CI workers; the
-  # performance threshold, A/B waiver and full result checks remain separate.
+  # Measure the first seven further boards after the measured cold board.
+  # Do not execute and discard twenty additional copies of the same workload.
   timeout: 60
-  warmup: 20
+  warmup: 0
   repetitions: 7
   threshold_ms: 5000
   sql: |-

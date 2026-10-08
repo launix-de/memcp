@@ -5,6 +5,7 @@
 # baseline and candidate independently, then measures only the SQL statement.
 
 metadata:
+  performance_shard_weight: 2
   version: "1.0"
   description: "Selective joined aggregation with an unordered limit"
   isolated: true

@@ -3,6 +3,7 @@
 # must complete in reasonable time (<500ms).
 
 metadata:
+  performance_shard_weight: 2
   version: "1.0"
   description: "Badge count queries with session-filtered correlated subselects"
   isolated: true

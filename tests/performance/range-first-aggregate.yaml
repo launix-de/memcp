@@ -3,6 +3,7 @@
 # Workload: one cold request plus ten reuses, with no discarded warmup.
 
 metadata:
+  performance_shard_weight: 2
   version: "1.0"
   description: "Range-first scalar values inside a period aggregate"
   isolated: true

@@ -2,6 +2,7 @@
 # Performance regression for ordered scan sources.
 
 metadata:
+  performance_shard_weight: 2
   version: "1.0"
   description: "Performance: ordered UNION over a joined branch"
   isolated: true
