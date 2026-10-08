@@ -1,7 +1,8 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Lexical cases: 100 operations, 3 warmups, 9 samples. QPCache cases: five
-# fresh caches, each with 40 lookups including its first cold compilation.
+# Lexical cases: 100 operations, 3 warmups, 9 samples. Short QPCache cases:
+# 51 fresh caches, each with 40 lookups including its first cold compilation.
+# Forced-compilation coverage keeps five samples of 40 fresh caches each.
 metadata:
   reuse_fixture: true
   restart_after_setup: true
@@ -118,7 +119,7 @@ test_cases:
     - ok
 - name: QPCache parse point 40 calls including cold compile
   warmup: 0
-  timing_samples: 5
+  timing_samples: 51
   timing_aggregation: total
   threshold_ms: 3000
   scm: |-
@@ -133,7 +134,7 @@ test_cases:
     - ok
 - name: QPCache parse IN same length 40 calls including cold compile
   warmup: 0
-  timing_samples: 5
+  timing_samples: 51
   timing_aggregation: total
   threshold_ms: 3000
   scm: |-
@@ -148,7 +149,7 @@ test_cases:
     - ok
 - name: QPCache parse IN changing lengths 40 calls including cold compile
   warmup: 0
-  timing_samples: 5
+  timing_samples: 51
   timing_aggregation: total
   threshold_ms: 3000
   scm: |-
@@ -182,4 +183,3 @@ setup:
     i "item")))) (rebuild (table "memcp-tests" "ilt_perf_rows") true false))
 cleanup:
 - sql: DROP TABLE IF EXISTS ilt_perf_rows
-
