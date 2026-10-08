@@ -173,6 +173,21 @@ plans. OS page caches are not explicitly flushed. The opt-in therefore measures
 cold query/operator state, not cold OS pages or import speed. Existing case setup,
 result assertions, warmup/sample configuration and cleanup still execute.
 
+Cold query indexes remain part of the measurements. If two cases rebuild the
+same source merely to obtain independent cold indexes, prepare separate source
+tables once and give each case its own untouched table. Do not prebuild indexes
+or group state during preparation. All seven verification pairs still rerun
+every case, including initially successful cases.
+
+`metadata.performance_shard_weight` is a positive integer used only to distribute
+whole suites across the existing runners. The default is 1. The expensive prefix
+and KPI suites use 64 so that lighter suites fill the other runners; this changes
+neither test coverage nor any query, setup or regression budget. The KPI workload
+keeps its measured cold board and the next seven measured boards, without twenty
+additional discarded warmups. Normal tenant hierarchy checks use one complete
+5000-row period of the sparse keys; performance runs retain the full 800k source
+tables, and the normal query, row assertions and time limits remain unchanged.
+
 Suites with identical top-level preparation inputs share one import. Snapshots
 are temporary and deleted on success or failure; they are not committed,
 uploaded, or placed in GitHub caches. Import, mutation and storage-construction
