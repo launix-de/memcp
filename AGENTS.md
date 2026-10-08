@@ -109,39 +109,51 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- Use as few locks as possible. Reads must be lock-free and ideally perform no
+  non-local RAM writes; an RWMutex read lock also writes shared memory. Main
+  column storages are fixed and read-only within a shard generation. Deltas hold
+  inserts and deletion masks, including transaction-local deletion overlays.
+- Delta writes must be thread-safe and lock-free. Readers must never observe
+  incomplete insert rows. Preallocated insert storage is one option to avoid
+  allocating/replacing the insert slice for every append; growth must preserve
+  live readers and must not copy the entire delta for each write.
+- Readers must not be blocked by writers. Rebuilds must block neither reads nor
+  writes and must forward mutations across both live generations. Operators that
+  need a fixed input extent may retain the highest published record ID to exclude
+  later inserts, while still applying the required deletion/visibility overlays.
+- Schema and statistics reads must be O(1) per metadata item and lock-free.
+  Compute and consolidate metadata during publication, rebuild, or maintenance,
+  never by traversing shards or acquiring locks in the planner hot path.
+- Mutable directories and auxiliary caches still need a thread-safe ownership
+  and publication protocol. Do not race ordinary Go map mutations. Use stable
+  column readers and the existing lifecycle APIs; preserve ownership and
+  visibility guarantees when replacing a synchronization mechanism. See
+  `INVARIANTS.md` for the complete concurrency contract.
 - `table.contributionIdentity`, `contributionRevision`, and `contributionWriters`
   are atomic query-local reuse guards. DML, visibility changes, and topology
   publication bracket whole batches; stamps are unavailable while any writer
   is active. Readers never inspect shard containers to obtain a stamp. These
   tokens are process-local and are not persisted.
-- Never access shard internals without the shard lock:
-  - `storageShard.columns`, `deltaColumns`, `inserts`, `deletions`, and `Indexes` must only be read/written while holding `t.mu`.
-  - Use `RLock` for read-only snapshots and `Lock` for mutations. Do not read Go maps without a lock.
-  - Before touching a shard, acquire concurrency rights with GetRead() or GetWrite(). Make sure you release all locks and rights with a proper panic-safe defer
-- Avoid lock upgrades. Do not acquire `t.mu.Lock()` while holding `t.mu.RLock()`.
-  - Pattern for lazy-load under concurrency:
-    1. `RLock` → check if value is present; `RUnlock`.
-    2. If missing, `Lock` → re-check → compute/store → `Unlock`.
-- Prefer helper APIs that encapsulate locking:
-  - Use `getColumnStorageOrPanic(name)` to obtain a stable `ColumnStorage` pointer (loads on demand) without racing writers.
-  - Use `ColumnReader(name)` rather than reading `t.columns[name]` directly.
-- Scan/plan code must not read from `t.columns[...]` directly. Fetch storages with helpers outside of long-held locks; then take `RLock` only for index iteration and reading `inserts`/`deletions`/`deltaColumns`.
-- Log replay and rebuild mutate shard state and must hold `t.mu.Lock()` for their critical sections. They must not take table locks inside shard locks to avoid cycles.
-- `storageShard.filterFeedback` contains immutable observations published with one best-effort CAS after a complete shard scan. Readers may load these atomics without shard locks or concurrency rights; they must not inspect shard containers. `table.filterFeedback` publishes an immutable, bounded merged snapshot. Generation IDs are scalar planner-statistics tokens, never retained shard/topology pointers. No feedback synchronization or publication is permitted inside element or filter-batch loops. `tableShowColumnsSnapshot.filterSchema` is immutable column-semantics metadata published through the existing atomic snapshot. Optional `table.RestoredFilterFeedback` is touched only during schema loading before table publication and cleared after restoring historical aggregates; schema saves serialize an atomic table-feedback snapshot without accessing shard state.
-- When adding new storage fields, document the locking discipline and update this section.
+- Column access uses stable storage handles/readers such as
+  `getColumnStorageOrPanic(name)` and `ColumnReader(name)`, rather than racing
+  direct reads of a mutable column directory. Lazy loading and log replay must
+  preserve safe publication without extending synchronization into read loops.
+- `storageShard.filterFeedback` contains immutable observations published with one best-effort CAS after a complete shard scan. Readers may load these atomics without shard locks or concurrency rights; they must not inspect shard containers. `table.filterFeedback` publishes immutable, bounded merged metadata. Generation IDs are scalar planner-statistics tokens, never retained shard/topology pointers. No feedback synchronization or publication is permitted inside element or filter-batch loops. `tableShowColumnsSnapshot.filterSchema` is immutable column-semantics metadata published atomically. Optional `table.RestoredFilterFeedback` is touched only during schema loading before table publication and cleared after restoring historical aggregates; schema saves serialize atomically published table-feedback metadata without accessing shard state.
+- When adding new storage fields, document their ownership, publication, and
+  lifetime discipline and update this section.
 
 - `StorageComputeProxy.deltaBytes` and `mainBytes` are exclusive retained-payload
-  accounting protected by the proxy mutex (or exclusive unpublished generation
-  ownership during construction/load). Delta writes count only the changed
+  accounting with thread-safe updates and exclusive unpublished generation
+  ownership during construction/load. Delta writes count only the changed
   payload; completed main generations establish their size once. Temp-column
   cache publication reads these counters and the O(1) bitmap size, never traverses
   retained rows. Counters are reconstructed on load and are not persisted.
-  CacheManager publication remains outside row loops under existing shard locks.
+  CacheManager publication remains outside row loops.
 
 - `column.PlannerStats.KeyFrequency` is an immutable, bounded numeric summary
   collected by a rebuild-local collector. No shared counters are updated while
   iterating values. Planner and ordered-keyset reads use the atomically published
-  `tableShowColumnsSnapshot` and never load or lock shards. Snapshot column names
+  `tableShowColumnsSnapshot` and never load or lock shards. Published column names
   are immutable metadata. `table.RestoredKeyFrequencies` is consumed only during
   schema loading before database publication; schema checkpoints serialize the
   immutable summary without reading shard state. Versioned optional hints never
@@ -149,9 +161,9 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 - `table.cacheTriggerSources` is an immutable reverse dependency list published
   with atomic CAS during trigger registration. `TriggerDescription.cacheTarget`
-  is a runtime table identity protected by the source table mutex and omitted
+  is a runtime table identity owned by source dependency metadata and omitted
   from persistence. Cache eviction uses these identities to remove only its own
-  dependencies under existing schema/table TryLocks; it never acquires DDL locks,
+  dependencies through nonblocking metadata access; it never acquires DDL locks,
   runs lifecycle triggers, deletes disk files, or calls public CacheManager APIs.
   A busy dependency defers eviction without removing any trigger. Live dependent
   targets defer parent eviction until their invalidation edges have been removed.
@@ -159,8 +171,8 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   retains the target's existing cache-use pin through metadata publication.
 
 - `TriggerDescription.needsRegeneration` is initialized during JSON loading before
-  publication and protected by `table.mu` afterwards. Restored compute dependency
-  triggers stay inert until registration atomically replaces their generated code
+  publication and updated through thread-safe dependency maintenance afterwards.
+  Restored compute dependency triggers stay inert until registration atomically replaces their generated code
   and runtime target; current triggers reuse their code without recompilation.
 - `scanJoinInfo.unknownReads` is local to dependency registration and never shared
   with scan execution. Access-header filter readsets are immutable plan data;
@@ -173,20 +185,24 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - `inIndexHook.positions` is an immutable compressed main-generation row-ID
   permutation owned by its parent index hook. It retains no shard/catalog,
   reader, transaction, or invocation binding. Candidate iterators borrow the
-  immutable bound IN list and the invocation's column reader under the scan's
-  existing shard lock and concurrency rights; they never modify/sort/copy the
+  immutable bound IN list and the invocation's column reader within their valid
+  generation lifetime; they never modify/sort/copy the
   list. The scan owns delta enumeration, visibility, bounds, and residual checks.
 
+- RecSets and RecMaps are query-local physical structures. They must not survive
+  their query or be persisted; this lifetime rule does not apply to reusable
+  group caches with explicit Domain D and session-value keys.
 - `recMap` is an immutable query-local mapping between physical source and
-  target row identities. Construction and image extraction acquire the same
-  shard rights and locks as RecSet operations. A RecMap retains no transaction,
-  session, cancellation, or mutable shard containers and must never survive its
+  target row identities. Construction and image extraction preserve valid
+  source/target generations and visibility, as RecSet operations do. A RecMap
+  retains no transaction, session, cancellation, or mutable shard containers and must never survive its
   query or be persisted: shard rebuilds may replace every referenced identity.
 
-- `OverlayBlob.ram` belongs to one immutable column generation. Its `blobRAMCache.mu`
-  protects admission metadata, decoded strings, and byte/benefit accounting;
+- `OverlayBlob.ram` belongs to one immutable column generation. Admission
+  metadata, decoded strings, and byte/benefit accounting have thread-safe ownership;
   `lastUsed` is atomic and updated once per read batch. Cache callbacks use
-  `TryLock` and never acquire shard/table locks or call public CacheManager APIs.
+  nonblocking access and never acquire shard/table locks or call public
+  CacheManager APIs.
   Generation construction and `SetSchema` replace the cache under the existing
   exclusive column lifecycle. Cache registrations retain no shard/database.
 
@@ -198,7 +214,7 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 - A shard rebuild with no delta rows or deletions and no forced rebuild keeps
   the existing shard. Never publish another shard that shares its mutable column
-  map or index objects under a different mutex; old readers may still hold it.
+  map or index objects under independent ownership; old readers may still hold it.
 
 - `CacheManager.minimumMemory` is owned by the manager's `run()` goroutine,
   like its budgets and ledger. Settings publish updates through `cacheOp`;
@@ -206,15 +222,15 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   must honor this floor against tracked memory, not RSS or pending allocations.
 
 - `orderedPrefixAccess` is immutable invocation-owned key and ordering data.
-  Prefix cursors borrow index snapshots and column readers only under the
-  scan's shard read rights and lock. Cursor positions and bounded delta pages
+  Prefix cursors borrow published index data and column readers within their
+  valid generation lifetime. Cursor positions and bounded delta pages
   are local to the iterator; no query binding is retained by an index.
 
 - `TxContext.queryColumns` contains statement-local table/column cache pins.
-  It is protected by `TxContext.mu` and emptied by panic-safe `endQuery`, even
-  for explicit transactions. Preparation acquires pins under the schema lock
-  before cache registration; persistent computors retain no transaction. Cache
-  eviction continues to use existing atomic pins and TryLocks, without DDL locks.
+  Its updates are thread-safe and it is emptied by panic-safe `endQuery`, even
+  for explicit transactions. Preparation establishes column lifetime before
+  cache registration; persistent computors retain no transaction. Cache
+  eviction uses nonblocking access and lifetime pins, without DDL locks.
 
 ### Scheme AST and Codegen Quoting (lib/queryplan.scm and lib/queryplan-*.scm)
 - Build AST as data: most builder blocks use a single leading quote `'(...)` so nested lists are data, not executed at construction.
@@ -291,14 +307,14 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   after successful cleanup. A failed TryLock cannot authorize deregistration.
 - Memory bytes, reclaimable bytes and replacement-cost weights are distinct.
   Changing accounting does not authorize changing the policy weights.
-- `storageShard.tempColumnBytes` is protected by the shard mutex. It records
+- `storageShard.tempColumnBytes` has thread-safe per-shard ownership. It records
   per-shard portions of a separately registered temporary column so the manager
   can offer/release those portions without blocking on column computation.
-- `blobRAMCache.residentBytes` is an atomic snapshot published at batch and
-  eviction boundaries under the blob mutex. Size diagnostics must read that
-  snapshot, never wait on the blob mutex while holding catalog/shard locks:
-  readers can wait for CacheManager while holding the blob mutex, and eviction
-  can need catalog locks. Do not add memory traversals to scan hot paths.
+- `blobRAMCache.residentBytes` is an atomic scalar published at batch and
+  eviction boundaries. Size diagnostics must read that scalar without waiting
+  on blob-cache mutation or traversing its contents. Publication and eviction
+  must avoid cyclic dependencies between cache management and metadata access.
+  Do not add memory traversals to scan hot paths.
 - Resident payload estimates and process RSS are not interchangeable. Keep
   allocator/runtime/stack and unassigned process memory visible; do not force
   agreement by rescaling database sizes.
@@ -476,7 +492,7 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
 - Schema mapping: translate MySQL types and column sets to MemCP schemas; maintain a mapping cache keyed by (db, table, table_id, column bitmap).
 - Apply pipeline: buffer event groups per transaction; apply atomically to MemCP with retries; ensure idempotency using GTID set checkpoints persisted in MemCP `system.cdc_state`.
 - DDL handling: best-effort translate CREATE/ALTER/DROP to MemCP; accept FKs as metadata-only if not enforced.
-- Backfill: initial snapshot via consistent `mysqldump`/`CLONE`-like read or parallel SELECTs; once complete, switch to live binlog apply.
+- Backfill: initial consistent export via `mysqldump`/`CLONE`-like read or parallel SELECTs; once complete, switch to live binlog apply.
 
 ### Cutover and Safety
 - Shadow validation: run representative reads against both backends; record row diffs and latency deltas.
@@ -491,25 +507,26 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
 
 ### Logical cache dependency ownership (2026)
 
-- `column.ComputorDependencies` stores logical schema/table pairs under the same
-  schema/DDL locks as the computed definition; it never contains shard identities.
+- `column.ComputorDependencies` stores logical schema/table pairs consistently
+  with the computed definition; it never contains shard identities.
 - `table.cacheDataRevision` is an atomic private marker for preparation reuse.
   Logical mutation batches advance it; physical topology publication does not.
-- `table.cachePreparationMu` serializes idempotent domain preparation and owns
-  `cachePreparations`, atomically published for diagnostics. Its entries contain
+- Domain preparation is idempotent; its `cachePreparations` metadata has
+  thread-safe ownership and is atomically published for diagnostics. Its entries contain
   scalar markers/results and use separate CacheManager registrations. A recipe
   receives its previous result only when its domain sources and the carrier
   cells are unchanged; data-source changes alone may reuse that semantic proof.
   Native target/source mutation stamps remain private and do not invalidate
   aggregate values.
-  `cacheMap.residentBytes` publishes complete entry byte deltas under its mutex. No source table pointers or transaction closures are retained.
-- Shared payload computation holds ordered logical source read locks through
-  publication. Explicit transactions and manual table-lock owners use private
+  `cacheMap.residentBytes` publishes complete entry byte deltas through thread-safe
+  ownership. No source table pointers or transaction closures are retained.
+- Shared payload computation and publication preserve source consistency and
+  invalidation dependencies without holding source read locks throughout
+  computation. Explicit transactions and manual table-lock owners use private
   evaluation. Scheme must not inspect storage versions, cache readiness, LRU
   touches, or physical partitioning to decide cache validity or plan choice.
 
-- `discardCacheValue` pins the carrier and every payload column while schema
-  metadata is read-locked. A nonblocking `ddlMu` read acquisition protects the
-  column set through mutation; the schema lock is released before scanning.
-  Every pin and lock has panic-safe cleanup. Retirement runs on a query or
-  maintenance caller, never the CacheManager owner goroutine.
+- `discardCacheValue` pins the carrier and every payload column and preserves
+  the column set's validity through mutation. Busy DDL or eviction defers the
+  operation rather than blocking. Every pin has panic-safe cleanup. Retirement
+  runs on a query or maintenance caller, never the CacheManager owner goroutine.
