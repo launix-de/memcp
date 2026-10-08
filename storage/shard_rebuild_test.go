@@ -17,6 +17,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,6 +31,254 @@ import (
 
 	"github.com/launix-de/memcp/scm"
 )
+
+func TestColdShardLoadWaitObservesQueryCancellation(t *testing.T) {
+	for _, multi := range []bool{false, true} {
+		name := "single-shard"
+		if multi {
+			name = "parallel-shards"
+		}
+		t.Run(name, func(t *testing.T) {
+			previousProcs := runtime.GOMAXPROCS(4)
+			defer runtime.GOMAXPROCS(previousProcs)
+			tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
+			if multi {
+				extra := NewShard(tbl)
+				release := extra.GetExclusive()
+				extra.Insert([]string{"id", "payload"}, [][]scm.Scmer{
+					{scm.NewInt(3), scm.NewString("row-00000003")},
+					{scm.NewInt(4), scm.NewString("row-00000004")},
+				}, false, false, nil, false, nil)
+				release()
+				tbl.mu.Lock()
+				tbl.Shards = append(tbl.Shards, extra)
+				tbl.publishTopologyLocked()
+				tbl.mu.Unlock()
+			}
+			if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+				t.Fatalf("fixture rebuild failed: %s", result)
+			}
+			shards := tbl.ActiveShards()
+			if multi && len(shards) < 2 {
+				t.Fatal("fixture did not create multiple shards")
+			}
+			// Recreate a cold column generation without altering its durable files.
+			for _, shard := range shards {
+				shard.mu.Lock()
+				shard.main_count = 0
+				for name := range shard.columns {
+					shard.columns[name] = nil
+				}
+				shard.mu.Unlock()
+			}
+
+			ss := &scm.SessionState{}
+			seq := ss.BeginQuery("Query", "cold scan waiting for disk load")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ss.SetQueryContext(seq, ctx)
+			tx := &TxContext{}
+			tx.beginQuery(ss, seq, "cold scan waiting for disk load")
+			defer tx.endQuery(seq)
+			defer ss.EndQuery(seq, "Sleep", "")
+			// A newer overlapping request must not supply the waiter's context.
+			newSeq := ss.BeginQuery("Query", "newer overlapping request")
+			ss.SetQueryContext(newSeq, context.Background())
+			defer ss.EndQuery(newSeq, "Sleep", "")
+
+			slots := cap(loadSemaphore)
+			for i := 0; i < slots; i++ {
+				<-loadSemaphore
+			}
+			releaseSlots := sync.OnceFunc(func() {
+				for i := 0; i < slots; i++ {
+					loadSemaphore <- struct{}{}
+				}
+			})
+			defer releaseSlots()
+
+			done := make(chan any, 1)
+			go func() {
+				defer func() { done <- recover() }()
+				tbl.scan(tx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
+					nil, scm.NewBool(true), []string{"id"},
+					scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+						return scm.NewInt(values[0].Int() + 1)
+					}), scm.NewInt(0),
+					scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+						return scm.NewInt(values[0].Int() + values[1].Int())
+					}), false)
+			}()
+			select {
+			case failure := <-done:
+				t.Fatalf("cold scan returned before cancellation: %v", failure)
+			case <-time.After(25 * time.Millisecond):
+			}
+			cancel()
+			select {
+			case failure := <-done:
+				if scanFailure, ok := failure.(scanError); ok {
+					failure = scanFailure.r
+				}
+				if failure != "query killed" {
+					t.Fatalf("cold scan failure = %v, want query killed", failure)
+				}
+			case <-time.After(time.Second):
+				releaseSlots()
+				<-done
+				t.Fatal("cancelled cold scan remained blocked on exhausted load slots")
+			}
+			for _, shard := range shards {
+				if !shard.mu.TryLock() {
+					t.Fatal("cancelled load retained the shard lock")
+				}
+				for name, cs := range shard.columns {
+					if cs != nil {
+						t.Errorf("cancelled load published column %s", name)
+					}
+				}
+				shard.mu.Unlock()
+				if got := shard.activeScanners.Load(); got != 0 {
+					t.Fatalf("cancelled scan retained %d shard registrations", got)
+				}
+			}
+			if got := tbl.activeTopology().operations.Load(); got != 0 {
+				t.Fatalf("cancelled scan retained %d topology registrations", got)
+			}
+			releaseSlots()
+			// The cancelled attempt must leave the complete persisted generation readable.
+			var sum int64
+			for _, shard := range shards {
+				cs := shard.getColumnStorageOrPanic("id", false, nil)
+				shard.mu.RLock()
+				for row := uint32(0); row < shard.main_count; row++ {
+					sum += cs.GetValue(row).Int()
+				}
+				shard.mu.RUnlock()
+			}
+			wantSum := int64(3)
+			if multi {
+				wantSum = 10
+			}
+			if sum != wantSum {
+				t.Fatalf("retry sum = %d, want %d", sum, wantSum)
+			}
+			if got := tx.fanoutInUse.Load(); got != 0 {
+				t.Fatalf("cancelled scan retained %d fanout workers", got)
+			}
+			if got := len(loadSemaphore); got != slots {
+				t.Fatalf("load slots after retry = %d, want %d", got, slots)
+			}
+		})
+	}
+}
+
+func TestLoadSlotCancellationAndDeadlinePreserveTokens(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		name := "cancelled"
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if expired {
+			name = "deadline"
+			ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		}
+		t.Run(name, func(t *testing.T) {
+			before := len(loadSemaphore)
+			release, err := acquireLoadSlot(ctx)
+			if err != ctx.Err() || release != nil {
+				t.Fatalf("cancelled acquire = (%v, %v), want (nil, %v)", release != nil, err, ctx.Err())
+			}
+			if got := len(loadSemaphore); got != before {
+				t.Fatalf("cancelled acquisition retained a token: %d, want %d", got, before)
+			}
+		})
+		cancel()
+	}
+
+	// Maintenance has no query context and waits until a real token is returned.
+	slots := cap(loadSemaphore)
+	releases := make([]func(), slots)
+	for i := range releases {
+		var err error
+		releases[i], err = acquireLoadSlot(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	releaseAll := sync.OnceFunc(func() {
+		for _, release := range releases {
+			release()
+		}
+	})
+	defer releaseAll()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if release, err := acquireLoadSlot(ctx); err != context.DeadlineExceeded || release != nil {
+		t.Fatalf("saturated deadline acquire = (%v, %v)", release != nil, err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		release, err := acquireLoadSlot(nil)
+		if release != nil {
+			release()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("maintenance acquire did not wait: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	releaseAll()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("maintenance acquire did not resume after token release")
+	}
+	if got := len(loadSemaphore); got != slots {
+		t.Fatalf("remaining load slots = %d, want %d", got, slots)
+	}
+}
+
+func TestColdColumnLoadCancellationKeepsMutationAtomic(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
+	shard.mu.Lock()
+	shard.columns["payload"] = nil
+	shard.mu.Unlock()
+	ss := &scm.SessionState{}
+	seq := ss.BeginQuery("Query", "cancelled cold-column preflight")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ss.SetQueryContext(seq, ctx)
+	tx := &TxContext{}
+	tx.beginQuery(ss, seq, "cancelled cold-column preflight")
+	defer tx.endQuery(seq)
+	defer ss.EndQuery(seq, "Sleep", "")
+
+	func() {
+		defer func() {
+			if failure := recover(); failure != "query killed" {
+				t.Fatalf("column preflight failure = %v, want query killed", failure)
+			}
+		}()
+		shard.getColumnStorageOrPanic("payload", false, tx)
+	}()
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	if shard.columns["payload"] != nil {
+		t.Fatal("cancelled column preflight published storage")
+	}
+	// An already entered mutation must finish even with a cancelled query.
+	cs := shard.getColumnStorageOrPanic("payload", true, tx)
+	if got := cs.GetValue(1).String(); got != "row-00000002" {
+		t.Fatalf("write-locked column load = %q, want row-00000002", got)
+	}
+}
 
 type failColumnWritePersistence struct {
 	PersistenceEngine
@@ -157,7 +406,7 @@ func reloadTableFromPersistence(t *testing.T, name string, persistence Persisten
 		t.Fatalf("reloaded database %s has no items table", name)
 	}
 	for _, shard := range tbl.ActiveShards() {
-		release := shard.GetRead()
+		release := shard.GetRead(nil)
 		release()
 	}
 	return tbl
@@ -1252,7 +1501,7 @@ func TestEnsureColumnLoadedRestoresComputeProxyRuntimeBindings(t *testing.T) {
 	shard.columns["running"] = nil
 	shard.mu.Unlock()
 
-	loadedCol := shard.ensureColumnLoaded("running", false)
+	loadedCol := shard.ensureColumnLoaded("running", false, nil)
 	loadedProxy, ok := loadedCol.(*StorageComputeProxy)
 	if !ok {
 		t.Fatalf("loaded column is %T, want *StorageComputeProxy", loadedCol)
@@ -1322,7 +1571,7 @@ func TestEnsureColumnLoadedRehydratesOrderedProxyFromSchemaPlaceholder(t *testin
 	shard.columns["running"] = nil
 	shard.mu.Unlock()
 
-	loadedCol := shard.ensureColumnLoaded("running", false)
+	loadedCol := shard.ensureColumnLoaded("running", false, nil)
 	loadedProxy, ok := loadedCol.(*StorageComputeProxy)
 	if !ok {
 		t.Fatalf("loaded column is %T, want *StorageComputeProxy", loadedCol)
@@ -1393,10 +1642,10 @@ func TestEphemeralQueryShardLoadIgnoresPersistedHelperContents(t *testing.T) {
 	if reloaded.columns["sumv"] != nil {
 		t.Fatalf("ephemeral helper compute column should stay unloaded on reload, got %T", reloaded.columns["sumv"])
 	}
-	if _, ok := reloaded.ensureColumnLoaded("grp", false).(*StorageSparse); !ok {
+	if _, ok := reloaded.ensureColumnLoaded("grp", false, nil).(*StorageSparse); !ok {
 		t.Fatalf("ephemeral helper grp lazy load returned %T, want *StorageSparse", reloaded.columns["grp"])
 	}
-	if _, ok := reloaded.ensureColumnLoaded("sumv", false).(*StorageSparse); !ok {
+	if _, ok := reloaded.ensureColumnLoaded("sumv", false, nil).(*StorageSparse); !ok {
 		t.Fatalf("ephemeral helper compute lazy load returned %T, want *StorageSparse", reloaded.columns["sumv"])
 	}
 	if got := reloaded.Count(); got != 0 {
@@ -1865,7 +2114,7 @@ func TestRepartitionInheritsWeightedIndexesFromEverySource(t *testing.T) {
 	}
 	tbl.repartition([]shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(64)}}})
 	for _, shard := range tbl.ActiveShards() {
-		release := shard.GetRead()
+		release := shard.GetRead(nil)
 		func() {
 			defer release()
 			shard.mu.RLock()
@@ -1942,7 +2191,7 @@ func TestRepartitionIndexWarmBudgetAndThreshold(t *testing.T) {
 				definitions = append(definitions, index)
 			}
 			rebuildRepartitionIndexes(definitions, shard)
-			release := shard.GetRead()
+			release := shard.GetRead(nil)
 			defer release()
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
@@ -2569,7 +2818,7 @@ func TestNewShardRetainsComputedColumnDefinition(t *testing.T) {
 			// Construction remains private until the reader acquires its rights.
 			shard.deltaColumns["input"] = 0
 			shard.inserts = [][]scm.Scmer{{scm.NewInt(7)}, {scm.NewInt(11)}}
-			release := shard.GetRead()
+			release := shard.GetRead(nil)
 			defer release()
 			reader := shard.ColumnReaderTx(nil, "computed", false)
 			shard.mu.RLock()

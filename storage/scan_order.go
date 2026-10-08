@@ -1127,7 +1127,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 							}
 						}()
 						// Cancellation contract: check only at the scheduling boundary, before entering
-						// the shard. Once entered, a shard runs atomically without cancellation checks.
+						// the shard. Row execution runs atomically without cancellation checks.
 						if ss != nil && ss.IsKilledSeq(querySeq) {
 							panic("query killed")
 						}
@@ -1144,14 +1144,17 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 				}
 			}
 		} else {
-			done := t.iterateShardsParallel(currentTx, tableBounds, func(s *storageShard, solo bool) {
+			done := t.iterateShardsParallel(currentTx, tableBounds, func(s *storageShard, solo bool, acquisitionFailure any) {
 				defer func() {
 					if r := recover(); r != nil {
 						q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 					}
 				}()
+				if acquisitionFailure != nil {
+					panic(acquisitionFailure)
+				}
 				// Cancellation contract: check only at the scheduling boundary, before entering
-				// the shard. Once entered, a shard runs atomically without cancellation checks.
+				// the shard. Row execution runs atomically without cancellation checks.
 				if ss != nil && ss.IsKilledSeq(querySeq) {
 					panic("query killed")
 				}
@@ -1742,7 +1745,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 	var foundShard *storageShard
 	var foundID uint32
 	var firstErr scanError
-	done := t.iterateShardsParallel(currentTx, bounds, func(shard *storageShard, _ bool) {
+	done := t.iterateShardsParallel(currentTx, bounds, func(shard *storageShard, _ bool, acquisitionFailure any) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				mu.Lock()
@@ -1752,6 +1755,9 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 				mu.Unlock()
 			}
 		}()
+		if acquisitionFailure != nil {
+			panic(acquisitionFailure)
+		}
 		mu.Lock()
 		finished := foundShard != nil || firstErr.r != nil
 		mu.Unlock()
@@ -1985,7 +1991,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 		aMultiFuncs[i] = compiledColumnGetValueMulti(reader)
 	}
 	// initialize main_count lazily if needed
-	t.ensureMainCount(skipShardReadLock)
+	t.ensureMainCount(skipShardReadLock, currentTx)
 	// scan loop in read lock
 	var maxInsertIndex int
 	var visibleUpper uint32

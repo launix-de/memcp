@@ -40,7 +40,7 @@ func recMapTargetValue(target recMapTarget, column string) scm.Scmer {
 	if target.shard == nil {
 		return scm.NewNil()
 	}
-	release := target.shard.GetRead()
+	release := target.shard.GetRead(nil)
 	defer release()
 	storage := target.shard.getColumnStorageOrPanic(column, false, nil)
 	target.shard.mu.RLock()

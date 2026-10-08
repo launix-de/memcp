@@ -719,9 +719,9 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 }
 
 // SharedResource impl for database
-func (db *database) GetState() SharedState { return db.srState }
-func (db *database) GetRead() func()       { db.ensureLoaded(); return func() {} }
-func (db *database) GetExclusive() func()  { db.ensureLoaded(); db.srState = WRITE; return func() {} }
+func (db *database) GetState() SharedState       { return db.srState }
+func (db *database) GetRead(_ *TxContext) func() { db.ensureLoaded(); return func() {} }
+func (db *database) GetExclusive() func()        { db.ensureLoaded(); db.srState = WRITE; return func() {} }
 
 // helper to fetch a table with lazy db load
 func (db *database) GetTable(name string) *table {

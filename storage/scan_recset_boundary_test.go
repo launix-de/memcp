@@ -325,7 +325,7 @@ func TestSparseOrderedRecSetAppliesNativeIndexRange(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	access, _ := scanAccessFromScheme(schema, values, nil)
 	func() {
-		defer shard.GetRead()()
+		defer shard.GetRead(nil)()
 		shard.mu.RLock()
 		defer shard.mu.RUnlock()
 		var buffer [8]uint32
@@ -339,7 +339,7 @@ func TestSparseOrderedRecSetAppliesNativeIndexRange(t *testing.T) {
 	RebuildTable(tbl, true, false)
 	native := func() bool {
 		shard := tbl.ActiveShards()[0]
-		defer shard.GetRead()()
+		defer shard.GetRead(nil)()
 		shard.mu.RLock()
 		defer shard.mu.RUnlock()
 		return shard.Indexes[0].Native

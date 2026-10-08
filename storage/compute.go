@@ -195,7 +195,7 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	// We are going to mutate this shard's columns: mark shard as WRITE (not COLD)
 	s.setState(WRITE)
 	// Ensure main_count and input storages are initialized before compute
-	s.ensureMainCount(false)
+	s.ensureMainCount(false, nil)
 
 	// Check if proxy already exists (idempotent re-computation).
 	//
@@ -333,7 +333,7 @@ func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []
 // If a proxy already exists and has data (compressed), it is left untouched.
 func (t *table) initORCShard(s *storageShard, name string) {
 	s.ensureLoaded()
-	s.ensureMainCount(false)
+	s.ensureMainCount(false, nil)
 
 	s.mu.RLock()
 	existing := s.columns[name]
@@ -703,7 +703,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 				return
 			}
 			s.ensureLoaded()
-			s.ensureMainCount(false)
+			s.ensureMainCount(false, nil)
 			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
 			// iterateIndex, len(s.inserts), deletions.Get and getDelta all read

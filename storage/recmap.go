@@ -123,7 +123,7 @@ func recMapReadTarget(currentTx *TxContext, target recMapTarget, columns []strin
 	defer release()
 	target.shard.ensureLoaded()
 	skipShardReadLock := target.shard.hasWriteOwnerForTx(currentTx)
-	target.shard.ensureMainCount(skipShardReadLock)
+	target.shard.ensureMainCount(skipShardReadLock, currentTx)
 	storages := make([]ColumnStorage, len(columns))
 	for i, column := range columns {
 		storages[i] = target.shard.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
@@ -189,7 +189,7 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 			defer release()
 			shard.ensureLoaded()
 			skipShardReadLock := shard.hasWriteOwnerForTx(currentTx)
-			shard.ensureMainCount(skipShardReadLock)
+			shard.ensureMainCount(skipShardReadLock, currentTx)
 			storages := make([]ColumnStorage, len(columns))
 			for i, column := range columns {
 				storages[i] = shard.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
@@ -726,7 +726,7 @@ func (r *recMap) orderRecSet(currentTx *TxContext, sortSides, sortColumns []stri
 	}
 	for shard, ids := range byShard {
 		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-		release := shard.GetRead()
+		release := shard.GetRead(currentTx)
 		shard.mu.RLock()
 		universe := shard.main_count + uint32(len(shard.inserts))
 		shard.mu.RUnlock()
@@ -758,7 +758,7 @@ func fillRecMapOrderValues(currentTx *TxContext, rows []recMapOrderRow, sides, c
 				defer release()
 				shard.ensureLoaded()
 				skipLock := shard.hasWriteOwnerForTx(currentTx)
-				shard.ensureMainCount(skipLock)
+				shard.ensureMainCount(skipLock, currentTx)
 				storage := shard.getColumnStorageOrPanic(columns[column], skipLock, currentTx)
 				if !skipLock {
 					shard.mu.RLock()
@@ -911,7 +911,7 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 			defer release()
 			part.sourceShard.ensureLoaded()
 			skipLock := part.sourceShard.hasWriteOwnerForTx(currentTx)
-			part.sourceShard.ensureMainCount(skipLock)
+			part.sourceShard.ensureMainCount(skipLock, currentTx)
 			storages := make([]ColumnStorage, len(sourceCols))
 			for i, column := range sourceCols {
 				storages[i] = part.sourceShard.getColumnStorageOrPanic(column, skipLock, currentTx)
@@ -945,7 +945,7 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 			defer release()
 			shard.ensureLoaded()
 			skipLock := shard.hasWriteOwnerForTx(currentTx)
-			shard.ensureMainCount(skipLock)
+			shard.ensureMainCount(skipLock, currentTx)
 			storages := make([]ColumnStorage, len(previousTargetCols))
 			for i, column := range previousTargetCols {
 				storages[i] = shard.getColumnStorageOrPanic(column, skipLock, currentTx)
@@ -1039,7 +1039,7 @@ func (r *recSet) collectRecMapRows(currentTx *TxContext, sourceKeyCols []string,
 			}
 			shard.ensureLoaded()
 			skipShardReadLock := shard.hasWriteOwnerForTx(currentTx)
-			shard.ensureMainCount(skipShardReadLock)
+			shard.ensureMainCount(skipShardReadLock, currentTx)
 			allCols := append(append([]string(nil), sourceKeyCols...), valueCols...)
 			columns := make([]ColumnStorage, len(allCols))
 			for i, column := range allCols {
@@ -1124,7 +1124,7 @@ func (r *recMap) image() *recSet {
 			}
 		}
 		ids = ids[:write]
-		release := shard.GetRead()
+		release := shard.GetRead(nil)
 		shard.mu.RLock()
 		universe := shard.main_count + uint32(len(shard.inserts))
 		shard.mu.RUnlock()

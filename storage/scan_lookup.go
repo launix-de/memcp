@@ -293,7 +293,7 @@ func (t *table) scanLookupMapOne(currentTx *TxContext, access scanAccess, mapCol
 	var values []scm.Scmer
 	matches := 0
 	var panicValue any
-	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool) {
+	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool, acquisitionFailure any) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				mu.Lock()
@@ -303,6 +303,9 @@ func (t *table) scanLookupMapOne(currentTx *TxContext, access scanAccess, mapCol
 				mu.Unlock()
 			}
 		}()
+		if acquisitionFailure != nil {
+			panic(acquisitionFailure)
+		}
 		if ss := SessionStateFromTx(currentTx); ss != nil && ss.IsKilledSeq(querySeqFromTx(currentTx)) {
 			panic("query killed")
 		}
@@ -332,7 +335,7 @@ func (t *table) scanLookupMapOne(currentTx *TxContext, access scanAccess, mapCol
 
 func (t *storageShard) scanLookupMapOne(access scanAccess, mapCols []string, currentTx *TxContext) ([]scm.Scmer, int) {
 	t.ensureLoaded()
-	t.ensureMainCount(false)
+	t.ensureMainCount(false, currentTx)
 	lookupCol := access.boundaryColumn(0)
 	lookupValue := access.boundValue(0, false)
 	lookupReader := newCachedColumnReaderTx(t.getColumnStorageOrPanic(lookupCol, false, currentTx), currentTx, false)
@@ -430,7 +433,7 @@ func (t *table) scanLookupOne(currentTx *TxContext, access scanAccess, resultCol
 		matches    int
 		panicValue any
 	}{result: scm.NewNil()}
-	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool) {
+	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool, acquisitionFailure any) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				state.mu.Lock()
@@ -440,6 +443,9 @@ func (t *table) scanLookupOne(currentTx *TxContext, access scanAccess, resultCol
 				state.mu.Unlock()
 			}
 		}()
+		if acquisitionFailure != nil {
+			panic(acquisitionFailure)
+		}
 		if ss := SessionStateFromTx(currentTx); ss != nil && ss.IsKilledSeq(querySeqFromTx(currentTx)) {
 			panic("query killed")
 		}
@@ -476,7 +482,7 @@ func (t *table) scanLookupOne(currentTx *TxContext, access scanAccess, resultCol
 
 func (t *storageShard) scanLookupOne(access scanAccess, resultCol string, returnValue bool, currentTx *TxContext) (scm.Scmer, int) {
 	t.ensureLoaded()
-	t.ensureMainCount(false)
+	t.ensureMainCount(false, currentTx)
 	lookupCol := access.boundaryColumn(0)
 	lookupValue := access.boundValue(0, false)
 	lookupStorage := t.getColumnStorageOrPanic(lookupCol, false, currentTx)
@@ -570,7 +576,7 @@ func (t *table) scanLookupMany(currentTx *TxContext, access scanAccess, resultCo
 	touchTempColumns(t, lookupCols, resultCols)
 
 	state := scanLookupParallelValueState{result: scm.NewBool(false)}
-	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool) {
+	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool, acquisitionFailure any) {
 		if state.stop.Load() {
 			return
 		}
@@ -584,6 +590,9 @@ func (t *table) scanLookupMany(currentTx *TxContext, access scanAccess, resultCo
 				state.stop.Store(true)
 			}
 		}()
+		if acquisitionFailure != nil {
+			panic(acquisitionFailure)
+		}
 		if ss := SessionStateFromTx(currentTx); ss != nil && ss.IsKilledSeq(querySeqFromTx(currentTx)) {
 			panic("query killed")
 		}
@@ -626,7 +635,7 @@ func (t *table) scanLookupMany(currentTx *TxContext, access scanAccess, resultCo
 
 func (t *storageShard) scanLookupMany(access scanAccess, resultCol string, returnValue bool, currentTx *TxContext, stop *atomic.Bool) (scm.Scmer, int) {
 	t.ensureLoaded()
-	t.ensureMainCount(false)
+	t.ensureMainCount(false, currentTx)
 	var fixedLookupReaders [8]scanLookupValueReader
 	lookupReaders := fixedLookupReaders[:]
 	if access.len() <= len(fixedLookupReaders) {
@@ -714,7 +723,7 @@ func (t *table) scanLookupMapMany(currentTx *TxContext, access scanAccess, mapCo
 	touchTempColumns(t, lookupCols, mapCols)
 
 	state := scanLookupParallelMapState{}
-	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool) {
+	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool, acquisitionFailure any) {
 		if state.stop.Load() {
 			return
 		}
@@ -728,6 +737,9 @@ func (t *table) scanLookupMapMany(currentTx *TxContext, access scanAccess, mapCo
 				state.stop.Store(true)
 			}
 		}()
+		if acquisitionFailure != nil {
+			panic(acquisitionFailure)
+		}
 		if ss := SessionStateFromTx(currentTx); ss != nil && ss.IsKilledSeq(querySeqFromTx(currentTx)) {
 			panic("query killed")
 		}
@@ -760,7 +772,7 @@ func (t *table) scanLookupMapMany(currentTx *TxContext, access scanAccess, mapCo
 
 func (t *storageShard) scanLookupMapMany(access scanAccess, mapCols []string, currentTx *TxContext, stop *atomic.Bool) ([]scm.Scmer, int) {
 	t.ensureLoaded()
-	t.ensureMainCount(false)
+	t.ensureMainCount(false, currentTx)
 	var fixedLookupReaders [8]scanLookupValueReader
 	lookupReaders := fixedLookupReaders[:]
 	if access.len() <= len(fixedLookupReaders) {
