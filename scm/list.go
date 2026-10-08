@@ -1460,7 +1460,7 @@ func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 						if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) {
 							return result, td
 						}
-						return NewSlice([]Scmer{NewSymbol("map_filter"), inner[1], inner[2], rv[2]}), setOptimizedCallElement(FreshAlloc, elementType)
+						return NewSlice([]Scmer{NewSymbol("map_filter"), inner[1], inner[2], rv[2]}), setOptimizedCallElement(descriptorWithLength(FreshAlloc, UnknownLength), elementType)
 					case "map", "map_mut":
 						if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) {
 							return result, td

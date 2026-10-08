@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -532,6 +533,44 @@ func TestOptimizeKeepsDynamicWidthMergeOverMap(t *testing.T) {
 	serialized := serializedTestExpr(t, env, optimized)
 	if strings.Contains(serialized, "flat_map") {
 		t.Fatalf("dynamic-width merge/map pipeline was unsafely fused: %s", serialized)
+	}
+}
+
+func TestMapFilterInferenceKeepsAllocationContractImmutable(t *testing.T) {
+	before := *FreshAlloc
+	t.Cleanup(func() { *FreshAlloc = before })
+	optimizeListPipeline(t, `(lambda (values)
+		(map (filter values (lambda (value) (> value 1)))
+			(lambda (value) (list value))))`)
+	if FreshAlloc.Element != before.Element {
+		t.Fatal("callback inference changed the shared fresh-allocation contract")
+	}
+	TestOptimizeKeepsDynamicWidthMergeOverMap(t)
+	TestOptimizeKeepsMergeUniqueOverMapWithUnknownItems(t)
+}
+
+func TestConcurrentMapFilterInferenceKeepsTypesLocal(t *testing.T) {
+	before := *FreshAlloc
+	t.Cleanup(func() { *FreshAlloc = before })
+	var workers sync.WaitGroup
+	start := make(chan struct{})
+	for worker := 0; worker < 8; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			for iteration := 0; iteration < 50; iteration++ {
+				env := newOptimizerTestEnv()
+				Optimize(Read(t.Name(), `(lambda (values)
+					(map (filter values (lambda (value) (> value 1)))
+						(lambda (value) (list value))))`), env, nil)
+			}
+		}()
+	}
+	close(start)
+	workers.Wait()
+	if FreshAlloc.Element != before.Element {
+		t.Fatal("parallel callback inference changed the shared allocation contract")
 	}
 }
 
