@@ -87,3 +87,33 @@ func BenchmarkOrderedPrefixMerge(b *testing.B) {
 		}
 	}
 }
+
+func TestOrderedPrefixBoundsCanonicalComparator(t *testing.T) {
+	canonical := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString("bin"), scm.NewBool(false)).Func()
+	prefix := &orderedPrefixAccess{column: "key"}
+	bounds := orderedPrefixBounds(scanAccess{}, prefix)
+	relation, meta := bounds.boundaryOrder(0)
+	if meta != "bin:asc" {
+		t.Fatalf("order metadata = %q", meta)
+	}
+	less := scm.OrderRelationLess(relation)
+	values := []scm.Scmer{scm.NewNil(), scm.NewBool(false), scm.NewBool(true), scm.NewInt(-1), scm.NewInt(2), scm.NewFloat(2.5), scm.NewString("true"), scm.NewSymbol("view")}
+	for _, a := range values {
+		for _, b := range values {
+			if got, want := less(a, b), scm.ToBool(canonical(a, b)); got != want {
+				t.Fatalf("prefix order differs for %v, %v", a, b)
+			}
+		}
+	}
+	left, right := scm.NewInt(1), scm.NewInt(2)
+	if allocations := testing.AllocsPerRun(1000, func() {
+		if !less(left, right) {
+			panic("wrong order")
+		}
+	}); allocations != 0 {
+		t.Fatalf("prefix comparison allocates %g times; want zero", allocations)
+	}
+	if scm.FunctionIdentity(relation) != scm.FunctionIdentity(canonical) {
+		t.Fatal("prefix comparator lost canonical identity")
+	}
+}
