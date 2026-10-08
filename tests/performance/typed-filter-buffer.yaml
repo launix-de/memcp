@@ -8,6 +8,7 @@
 # <https://www.gnu.org/licenses/> for the GNU General Public License.
 
 metadata:
+  performance_shard_weight: 3
   reuse_fixture: true
   restart_after_setup: true
   version: "1.0"

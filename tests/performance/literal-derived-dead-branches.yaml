@@ -3,6 +3,7 @@
 # decorrelation constructs work for them.
 
 metadata:
+  performance_shard_weight: 2
   version: "1.0"
   description: "Literal parameter branches avoid unused correlated work"
   isolated: true

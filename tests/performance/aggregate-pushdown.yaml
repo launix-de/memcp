@@ -20,6 +20,7 @@
 # pushdown can count each FK partition once before applying the scalar stage.
 
 metadata:
+  performance_shard_weight: 2
   version: "1.0"
   description: "COUNT aggregate pushdown across a low-cardinality FK stage"
   isolated: true

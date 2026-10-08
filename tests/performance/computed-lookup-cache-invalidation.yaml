@@ -15,6 +15,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 metadata:
+  performance_shard_weight: 2
   version: "1.0"
   description: "Row-local invalidation of a canonical computed lookup cache"
   isolated: true

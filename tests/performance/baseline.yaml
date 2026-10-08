@@ -8,6 +8,7 @@
 # {rows} and {database} are template placeholders filled by the test runner
 
 metadata:
+  performance_shard_weight: 5
   version: "1.0"
   description: "Performance tests: aggregation, joins, ordering"
   isolated: true

@@ -1,6 +1,7 @@
 # Copyright (C) 2026  Carl-Philip Hänsch
 
 metadata:
+  performance_shard_weight: 2
   reuse_fixture: true
   version: "1.0"
   description: "WordPress posts and postmeta filtered join with ordered Top-K"

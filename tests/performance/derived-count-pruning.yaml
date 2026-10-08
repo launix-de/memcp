@@ -18,6 +18,7 @@
 # this query degenerates into repeated correlated scans over perf_detail.
 
 metadata:
+  performance_shard_weight: 2
   version: "1.0"
   description: "Performance self-check for derived COUNT(*) pruning"
   isolated: true

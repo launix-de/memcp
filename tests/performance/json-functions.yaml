@@ -24,6 +24,7 @@
 # keeps BSON traversal and parse-on-access costs directly comparable.
 
 metadata:
+  performance_shard_weight: 4
   version: "1.0"
   description: "JSON storage, path, computed ordering, and serialization performance"
   isolated: true

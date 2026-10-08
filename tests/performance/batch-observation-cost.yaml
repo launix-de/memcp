@@ -2,6 +2,7 @@
 # Use the stable scan-plan AST contract for handwritten access in cross-version A/B runs.
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
+  performance_shard_weight: 2
   version: "1.0"
   description: "Exact observations must pay their full preparation cost before displacing LIMIT batching"
 

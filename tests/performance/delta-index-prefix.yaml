@@ -1,6 +1,7 @@
 # Copyright (C) 2026 MemCP Contributors
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
+  performance_shard_weight: 2
   version: '1.0'
   description: Equality prefix seeks with an upper-only historical range on delta rows
   isolated: true

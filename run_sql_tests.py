@@ -3319,6 +3319,7 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
         # with exactly the same setup share its import without sharing mutations.
         metadata = dict(spec.get("metadata", {}))
         metadata.pop("description", None)
+        metadata.pop("performance_shard_weight", None)
         identity = json.dumps({"setup": spec.get("setup", []), "metadata": metadata,
                                "seed": workload_seed}, sort_keys=True)
         key = hashlib.sha256(identity.encode()).hexdigest()

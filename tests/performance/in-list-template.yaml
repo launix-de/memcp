@@ -4,6 +4,7 @@
 # 51 fresh caches, each with 40 lookups including its first cold compilation.
 # Forced-compilation coverage keeps five samples of 40 fresh caches each.
 metadata:
+  performance_shard_weight: 4
   reuse_fixture: true
   restart_after_setup: true
   version: '1.0'

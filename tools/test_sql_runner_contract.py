@@ -1851,6 +1851,11 @@ class PerformanceFixtureContractTests(unittest.TestCase):
 
     def test_reused_snapshot_deduplicates_setup_and_isolates_all_trials(self):
         self.enable_reuse()
+        for weight, suite in enumerate(self.suites, 1):
+            path = Path(suite)
+            spec = json.loads(path.read_text())
+            spec["metadata"]["performance_shard_weight"] = weight
+            path.write_text(json.dumps(spec))
         self.durations = lambda suite, role, index: 200 if suite == "cold" and role == "B" else 100
         self.assertFalse(self.run_experiment())
         self.assertEqual(len(self.preparations), 1)  # identical setup in both suites

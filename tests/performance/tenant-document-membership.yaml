@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 metadata:
+  performance_shard_weight: 2
   description: Limited tenant membership over documents with nested site and tenant ACLs
   isolated: true
   performance_rows: 100000

@@ -181,7 +181,10 @@ every case, including initially successful cases.
 
 `metadata.performance_shard_weight` is a positive integer used only to distribute
 whole suites across the existing runners. The default is 1. The expensive prefix
-and KPI suites use 64 so that lighter suites fill the other runners; this changes
+and KPI suites use 128 to retain dedicated runners. Other suite weights include
+one source preparation and both measurement processes from CI artifacts, rather
+than just counting suite files. Weights are rounded to 15-second units; they
+only guide scheduling, and source/measurement times remain reported. This changes
 neither test coverage nor any query, setup or regression budget. The KPI workload
 keeps its measured cold board and the next seven measured boards, without twenty
 additional discarded warmups. Normal tenant hierarchy checks use one complete

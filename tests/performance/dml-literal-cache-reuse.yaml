@@ -9,6 +9,7 @@
 # Each case rebuilds its table, disables warmup and runs once because INSERT,
 # increment and DELETE workloads cannot safely reuse their mutated fixture.
 metadata:
+  performance_shard_weight: 2
   version: "1.0"
   description: "Literal INSERT/UPDATE/DELETE workloads preserve data effects across A/B measurement"
   isolated: true

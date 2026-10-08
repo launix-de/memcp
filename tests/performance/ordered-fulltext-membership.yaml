@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Fixed workload: first execution plus two repetitions for each page size.
 metadata:
+  performance_shard_weight: 3
   reuse_fixture: true
   restart_after_setup: true
   description: Ordered document search with OR membership over filename and extracted text

@@ -1,6 +1,7 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
+  performance_shard_weight: 3
   reuse_fixture: true
   restart_after_setup: true
   description: Scan-local typed filter and reducer compilation over full column scans

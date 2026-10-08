@@ -1,6 +1,7 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
+  performance_shard_weight: 2
   version: '1.0'
   description: Outer count preaggregation preserves duplicate and NULL keys
   isolated: true
