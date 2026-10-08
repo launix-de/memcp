@@ -62,6 +62,35 @@ latency tests keep their existing median-per-request policy.
 - `performance/bulk-insert-compile.yaml`: Cold compilation of parameterized bulk INSERT rows.
 - `performance/jit-scan-kernel-compile.yaml`: Full column scans including per-invocation filter and reducer compilation; one cold request plus three repetitions.
 
+## Diagnose a red timing check
+
+The SQL runner validates the returned result before applying execution-time
+budgets. A timing failure reports `result assertions passed`; an expectation
+mismatch reports `result correctness` even when the query was also slow. A
+repeated SELECT/SCM measurement checks every returned result, including warmup
+responses, in standalone and A/B runs. Validation occurs outside the timed
+request; the first mismatch stops the measurement before a later response can
+hide it. Existing interrupted-response and baseline-recovery rules remain active.
+An ordinary planner-time or plan-size failure occurs before query execution and reports that
+the result has not yet been checked. Passing standard SQL queries also print their
+measured latency and applicable hard budget, so CI logs preserve the margin as
+well as failures. These distinctions do not waive any gate.
+
+An absolute `max_time` failure alone does not establish a regression relative to
+master. Compare the exact baseline revision and candidate on identical fixtures,
+including cold/warm phases, and retain all fixed verification trials. Check the
+baseline CI log too: a baseline which exceeds the same absolute budget is evidence
+of an existing budget problem, not proof that the candidate is harmless. Query
+errors, wrong results and timeouts still require investigation.
+
+Absolute limits are runaway backstops; the paired performance A/B job detects
+relative slowdowns. The pre-server SHA-256 machine calibration is independent of
+MemCP, but it is not a calibration of allocation, garbage collection or memory
+access costs. Before proposing a budget-policy change, collect repeated baseline
+measurements and describe the margin, measurement isolation and intended failure
+mode. Changes to protected calibration or policy code require the maintainer's
+policy-update procedure; do not hide a budget relaxation in an engine patch.
+
 ## Baseline queries that cannot execute
 
 In `--perf-ab`, a baseline query error or request timeout is recorded as
@@ -85,6 +114,10 @@ in the A/B artifacts. A candidate failure aborts rather than triggering retries.
 
 Session initialization required by a benchmark belongs in its `setup`.
 Standalone test cases without `threshold_ms` are not executed in A/B mode.
+Every A/B fixture retains its complete MemCP server log before runner-owned
+cleanup, including fixtures whose individual queries succeeded. The final
+cross-fixture verdict is computed later, so query-success logs are needed to
+investigate maintenance activity around a failed timing comparison.
 
 ## Document application SQL coverage
 

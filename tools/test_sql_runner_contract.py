@@ -88,6 +88,18 @@ from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
 
 class ManagedDataDirectoryContractTest(unittest.TestCase):
+    def test_successful_trial_keeps_server_log_before_cleanup(self):
+        with tempfile.TemporaryDirectory() as root:
+            log = Path(root) / "server.log"
+            artifact = Path(root) / "trial.memcp.log"
+            contents = "rebuilding shard\ncompleted measurement\n"
+            log.write_text(contents)
+            with mock.patch("run_sql_tests._memcp_log_file", str(log)), \
+                    mock.patch.dict(os.environ, {"MEMCP_SERVER_LOG_ARTIFACT": str(artifact)}):
+                cleanup_memcp_artifacts(None)
+            self.assertFalse(log.exists())
+            self.assertEqual(artifact.read_text(), contents)
+
     def test_failure_artifact_keeps_crash_header_after_cleanup(self):
         with tempfile.TemporaryDirectory() as root:
             log = Path(root) / "server.log"
@@ -562,6 +574,20 @@ class HookDiagnosticsContractTest(unittest.TestCase):
 
 
 class PerformanceScaleContractTest(unittest.TestCase):
+    def test_cpu_diagnostics_target_the_measured_http_instance(self):
+        base_url = "http://localhost:19991"
+        runner = SQLTestRunner(base_url)
+        response = SimpleNamespace(status_code=200, text="true", headers={})
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None) as discover, \
+                mock.patch("run_sql_tests.requests.post", return_value=response):
+            self.assertTrue(runner.run_test_case({
+                "name": "owned CPU measurement", "scm": "true", "threshold_ms": 1000,
+                "timing_samples": 1, "warmup": 0, "expect": {"result": True},
+            }, "memcp-tests"))
+        discover.assert_called_once_with(base_url)
+
     def test_performance_discovery_honors_independent_ci_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -795,6 +821,130 @@ class PerformanceScaleContractTest(unittest.TestCase):
         with mock.patch.dict("os.environ", {}, clear=True):
             publish_performance_scale(calibration)
             self.assertEqual(load_performance_scale(), calibration)
+
+
+class FailureAttributionContractTest(unittest.TestCase):
+    def run_multiple_responses(self, values, *, performance=False, warmup=0):
+        runner = SQLTestRunner("http://localhost:1", performance_calibration={"scale": 1.0})
+        responses = [SimpleNamespace(status_code=200, text=json.dumps({"n": value}), headers={})
+                     for value in values]
+        case = {"name": "all responses must match", "sql": "SELECT 1 AS n",
+                "max_plan_size": 0, "timing_samples": len(values) - warmup,
+                "expect": {"rows": 1, "data": [{"n": 1}]}}
+        if performance:
+            case.update(threshold_ms=1000, warmup=warmup)
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch("run_sql_tests.PERF_TEST_ENABLED", performance), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
+                mock.patch.object(runner, "execute_sql", side_effect=responses) as execute, \
+                redirect_stdout(output):
+            passed = runner.run_test_case(case, "memcp-tests")
+        return passed, output.getvalue(), execute.call_count, runner
+
+    def test_standard_repetitions_reject_an_earlier_wrong_result(self):
+        for values, calls in (([2, 1], 1), ([1, 2, 1], 2)):
+            with self.subTest(values=values):
+                passed, output, actual_calls, runner = self.run_multiple_responses(values)
+                self.assertFalse(passed)
+                self.assertEqual(actual_calls, calls)
+                self.assertIn("Expectation mismatch", output)
+                self.assertEqual(runner.failed_critical, 1)
+
+    def test_standalone_performance_rejects_an_earlier_wrong_result(self):
+        passed, output, calls, runner = self.run_multiple_responses([2, 1], performance=True)
+        self.assertFalse(passed)
+        self.assertEqual(calls, 1)
+        self.assertIn("Expectation mismatch", output)
+        self.assertEqual(runner.perf_results, {})
+
+    def test_standalone_performance_rejects_wrong_warmup(self):
+        passed, output, calls, runner = self.run_multiple_responses([2, 1, 1], performance=True, warmup=1)
+        self.assertFalse(passed)
+        self.assertEqual(calls, 1)
+        self.assertIn("Warmup failed", output)
+        self.assertEqual(runner.perf_results, {})
+
+    def test_successful_repetitions_still_execute_every_sample(self):
+        for performance in (False, True):
+            with self.subTest(performance=performance):
+                passed, _, calls, runner = self.run_multiple_responses([1, 1, 1], performance=performance)
+                self.assertTrue(passed)
+                self.assertEqual(calls, 3)
+                self.assertEqual(runner.failed_critical, 0)
+
+    def test_denied_shutdown_is_measured_without_restarting(self):
+        runner = SQLTestRunner("http://localhost:1", performance_calibration={"scale": 1.0})
+        response = SimpleNamespace(status_code=500, text="Error: access denied", headers={})
+        case = {"name": "denied shutdown", "sql": "SHUTDOWN", "expect": {"error": True}}
+        output = io.StringIO()
+        clock = iter((0, 2_000_000))
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", False), \
+                mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
+                mock.patch.object(runner, "execute_sql", return_value=response) as execute, \
+                mock.patch.object(runner, "_restart_handler") as restart, \
+                redirect_stdout(output):
+            self.assertTrue(runner.run_test_case(case, "memcp-tests"))
+        execute.assert_called_once()
+        restart.assert_not_called()
+        self.assertIn("2.0ms", output.getvalue())
+        self.assertEqual(runner.failed_critical, 0)
+
+    def run_timed_case(self, returned_value, *, performance=False, waived=False, duration_ns=6_000_000_000):
+        runner = SQLTestRunner("http://localhost:1", performance_calibration={"scale": 1.0})
+        response = SimpleNamespace(status_code=200, text=json.dumps({"n": returned_value}), headers={})
+        case = {"name": "budget attribution", "sql": "SELECT 1 AS n",
+                "max_plan_size": 0, "expect": {"rows": 1, "data": [{"n": 1}]}}
+        if performance:
+            case.update(threshold_ms=1, repetitions=1, warmup=0)
+        if waived:
+            runner.perf_regression_waivers = {"?::budget attribution": "accepted latency only"}
+        output = io.StringIO()
+        clock = itertools.count(0, duration_ns)
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", performance), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
+                mock.patch.object(runner, "execute_sql", return_value=response), \
+                redirect_stdout(output):
+            passed = runner.run_test_case(case, "memcp-tests")
+        return passed, output.getvalue(), runner
+
+    def test_slow_wrong_result_is_a_correctness_failure(self):
+        passed, output, runner = self.run_timed_case(2)
+        self.assertFalse(passed)
+        self.assertIn("Expectation mismatch", output)
+        self.assertIn("Failure class: result correctness", output)
+        self.assertNotIn("Too slow", output)
+        self.assertEqual(runner.failed_critical, 1)
+
+    def test_slow_correct_result_still_fails_unchanged_hard_limit(self):
+        passed, output, runner = self.run_timed_case(1)
+        self.assertFalse(passed)
+        self.assertIn("6000.0ms > 5000ms", output)
+        self.assertIn("Failure class: timing budget; result assertions passed", output)
+        self.assertEqual(runner.failed_critical, 1)
+
+    def test_performance_waiver_does_not_hide_slow_wrong_result(self):
+        passed, output, runner = self.run_timed_case(2, performance=True, waived=True)
+        self.assertFalse(passed)
+        self.assertIn("Expectation mismatch", output)
+        self.assertEqual(runner.waived_regressions, [])
+
+    def test_passing_standard_query_keeps_latency_and_budget_visible(self):
+        passed, output, runner = self.run_timed_case(1, duration_ns=1_000_000_000)
+        self.assertTrue(passed)
+        self.assertIn("1000.0ms / 5000ms", output)
+        self.assertEqual(runner.failed_critical, 0)
+
+    def test_unwaived_performance_budget_still_fails(self):
+        passed, output, runner = self.run_timed_case(1, performance=True)
+        self.assertFalse(passed)
+        self.assertIn("Too slow:", output)
+        self.assertIn("result assertions passed", output)
+        self.assertEqual(runner.failed_critical, 1)
 
 
 class ErrorResponseContractTest(unittest.TestCase):

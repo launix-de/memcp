@@ -74,18 +74,6 @@ from urllib.parse import quote
 # CPU measurement helpers
 NUM_CPUS = multiprocessing.cpu_count()
 
-def find_memcp_pid() -> Optional[int]:
-    """Find the PID of the memcp process."""
-    try:
-        result = subprocess.run(['pgrep', '-f', 'memcp'], capture_output=True, text=True, timeout=2)
-        pids = result.stdout.strip().split('\n')
-        for pid_str in pids:
-            if pid_str.strip():
-                return int(pid_str.strip())
-    except:
-        pass
-    return None
-
 def get_process_cpu_times(pid: int) -> Optional[Tuple[float, float]]:
     """Get user and system CPU times for a process from /proc/[pid]/stat.
     Returns (utime + cutime, stime + cstime) in seconds, or None if unavailable."""
@@ -104,7 +92,7 @@ def get_process_cpu_times(pid: int) -> Optional[Tuple[float, float]]:
     except:
         return None
 
-def find_memcp_pid_for_url(base_url: str) -> Optional[int]:
+def find_memcp_pid(base_url: str) -> Optional[int]:
     """Find the MemCP instance owned by this runner's HTTP endpoint."""
     try:
         port = int(base_url.rsplit(':', 1)[1])
@@ -126,7 +114,7 @@ def wait_for_performance_setup_quiescence(
     """Wait until asynchronous fixture rebuild work stops consuming CPU."""
     if timeout is None:
         timeout = PERF_SETUP_MAX_TIME_SEC
-    pid = find_memcp_pid_for_url(base_url)
+    pid = find_memcp_pid(base_url)
     if pid is None:
         return False
     started = time.monotonic()
@@ -936,6 +924,8 @@ class SQLTestRunner:
             # Show CPU load as percentage of total capacity (100%/Ncores = one core)
             cpu_info = f", {cpu_pct:.0f}%/{NUM_CPUS*100}% CPU" if cpu_pct is not None else ""
             print(f"✅ {name} ({elapsed_ms:.1f}ms / {threshold_ms:.0f}ms{rows_info}{rate_info}{mem_info}{cpu_info})")
+        elif elapsed_ms is not None:
+            print(f"✅ {name} ({elapsed_ms:.1f}ms)")
         else:
             print(f"✅ {name}")
         if is_noncritical:
@@ -953,6 +943,14 @@ class SQLTestRunner:
         time_info = f" ({elapsed_ms:.1f}ms / {threshold_ms:.0f}ms)" if elapsed_ms is not None else ""
         print(f"{'⚠️' if is_noncritical else '❌'} {name}{' (noncritical)' if is_noncritical else ''}{time_info}")
         print(f"    Reason: {reason}")
+        if reason.startswith("Too slow"):
+            print("    Failure class: timing budget; result assertions passed")
+        elif reason == "Expectation mismatch":
+            print("    Failure class: result correctness")
+        elif reason.startswith("Planner too slow"):
+            print("    Failure class: planner timing budget; result not yet checked")
+        elif reason.startswith("Query plan too large"):
+            print("    Failure class: plan size; result not yet checked")
         fail_comment = getattr(self._test_context, "fail_comment", None)
         if fail_comment:
             print(f"    Comment: {fail_comment}")
@@ -1713,12 +1711,16 @@ class SQLTestRunner:
             # A graceful shutdown may close this request before a response reaches
             # the client. Do not wait for that same process to become ready again;
             # the managed restart handler below owns process replacement.
+            start_ns = time.monotonic_ns()
             resp = self.execute_sql(
                 database, query, auth_header, active_syntax,
                 retry_on_connection_failure=False,
             )
             if resp is not None and resp.status_code >= 500:
                 response = resp
+                # A denied shutdown returns an ordinary expected error; it
+                # still needs a duration for successful result diagnostics.
+                elapsed_ms = (time.monotonic_ns() - start_ns) / 1_000_000
             else:
                 # Treat SHUTDOWN as successful regardless of response body, even if the connection closed.
                 if self._restart_handler is not None:
@@ -1869,8 +1871,8 @@ class SQLTestRunner:
             with gate:
                 for _ in range(warmup_runs):
                     warm_response = execute_sample()
-                    if (is_error_response(warm_response) or (fixture_trial and warm_response is None)
-                            or (fixture_trial and repeatable_query and not self.validate_expectation(
+                    if (is_error_response(warm_response) or warm_response is None
+                            or (repeatable_query and not self.validate_expectation(
                                 test_case, warm_response, self.parse_jsonl_response(warm_response)))):
                         if record_baseline_query_failure(warm_response, "warmup"):
                             return True
@@ -1890,7 +1892,7 @@ class SQLTestRunner:
                             query, None, test_case.get("expect"), is_noncritical,
                         )
 
-                memcp_pid = find_memcp_pid() if is_perf_test else None
+                memcp_pid = find_memcp_pid(self.base_url) if is_perf_test else None
                 start_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
                 samples_ns: list = []
                 response = None
@@ -1902,19 +1904,27 @@ class SQLTestRunner:
                 )
                 if not repeatable_query:
                     repeat = 1
+                # Validate between timed requests, never inside their measured
+                # interval. A later good response cannot hide an earlier error.
+                validate_each_sample = fixture_trial or (repeatable_query and (repeat > 1 or adaptive_repetitions))
                 measured_total_ns = 0
-                for _ in range(repeat):
+                for sample_index in range(repeat):
                     start_ns = time.monotonic_ns()
                     response = execute_sample()
                     sample_ns = time.monotonic_ns() - start_ns
                     samples_ns.append(sample_ns)
                     measured_total_ns += sample_ns
-                    if fixture_trial and (response is None or not self.validate_expectation(
-                            test_case, response, self.parse_jsonl_response(response))):
+                    if validate_each_sample and ((fixture_trial and response is None)
+                            or (response is not None and not self.validate_expectation(
+                                test_case, response, self.parse_jsonl_response(response)))):
                         if record_baseline_query_failure(response, "measurement"):
                             return True
-                        return self._record_fail(name, "Measured sample failed", query, response,
-                                                 test_case.get("expect"), is_noncritical)
+                        print(f"    Invalid measured sample: {sample_index + 1}")
+                        reason = "Measured sample failed" if fixture_trial else "Expectation mismatch"
+                        diag = None if fixture_trial else self._run_on_fail(test_case, database)
+                        return self._record_fail(name, reason, query, response,
+                                                 test_case.get("expect"), is_noncritical,
+                                                 on_fail_diag=diag)
                     if response is None or response.status_code != 200:
                         break  # don't hammer a broken endpoint
                     if adaptive_repetitions and adaptive_measurement_complete(samples_ns):
@@ -1961,6 +1971,15 @@ class SQLTestRunner:
 
         results = self.parse_jsonl_response(response)
 
+        # Correctness is independent of timing. A slow wrong result must be
+        # reported as a mismatch, not hidden behind an exceeded time budget.
+        expectation_matches = self.validate_expectation(test_case, response, results)
+        if not expectation_matches:
+            diag = self._run_on_fail(test_case, database)
+            return self._record_fail(name, "Expectation mismatch", query, response,
+                                     test_case.get("expect"), is_noncritical,
+                                     on_fail_diag=diag)
+
         # Check performance threshold
         if is_perf_test and PERF_AB_MODE == "compare" and baseline_time:
             # Shared runners have a small fixed scheduling/HTTP noise floor.
@@ -1995,6 +2014,7 @@ class SQLTestRunner:
         # without an explicit `max_time` annotation must finish within
         # DEFAULT_MAX_TIME_SEC; slower queries must declare a higher limit so the
         # time budget stays explicit and visible in the test spec.
+        hard_limit_ms = None
         if (not is_perf_test and response.status_code == 200
                 and not self._expect_interrupted_ok(test_case.get("expect"))):
             # max_time is a reference-machine budget.  Only its wall-clock
@@ -2008,31 +2028,27 @@ class SQLTestRunner:
                 return self._record_fail(name, f"Too slow (hard limit): {elapsed_ms:.1f}ms > {hard_limit_ms:.0f}ms", query, response,
                                          test_case.get("expect"), is_noncritical, elapsed_ms, hard_limit_ms, diag)
 
-        if self.validate_expectation(test_case, response, results):
-            if is_perf_test:
-                heap_mb = heap_bytes / (1024 * 1024) if heap_bytes else None
-                self._record_success(name, is_noncritical, elapsed_ms, threshold_ms, perf_rows, heap_mb, cpu_pct)
-                result = {
-                    "time_ms": elapsed_ms,
-                    "time_per_repetition_ms": elapsed_ms / len(samples_ns) if timing_aggregation == "total" else elapsed_ms,
-                    "timing_aggregation": timing_aggregation,
-                    "timing_group": test_case.get("timing_group"),
-                    "total_ms": total_ns / 1_000_000,
-                    "repetitions": len(samples_ns),
-                    "warmup": warmup_runs,
-                    "rows": perf_rows,
-                    "max_regression_pct": max_regression_pct,
-                    "workload_sha256": fingerprint,
-                }
-                if os.environ.get("PERF_FIXTURE_TRIAL"):
-                    result["samples_ns"] = samples_ns
-                self.perf_results[perf_key if PERF_AB_MODE else name] = result
-            else:
-                self._record_success(name, is_noncritical)
-            return True
+        if is_perf_test:
+            heap_mb = heap_bytes / (1024 * 1024) if heap_bytes else None
+            self._record_success(name, is_noncritical, elapsed_ms, threshold_ms, perf_rows, heap_mb, cpu_pct)
+            result = {
+                "time_ms": elapsed_ms,
+                "time_per_repetition_ms": elapsed_ms / len(samples_ns) if timing_aggregation == "total" else elapsed_ms,
+                "timing_aggregation": timing_aggregation,
+                "timing_group": test_case.get("timing_group"),
+                "total_ms": total_ns / 1_000_000,
+                "repetitions": len(samples_ns),
+                "warmup": warmup_runs,
+                "rows": perf_rows,
+                "max_regression_pct": max_regression_pct,
+                "workload_sha256": fingerprint,
+            }
+            if os.environ.get("PERF_FIXTURE_TRIAL"):
+                result["samples_ns"] = samples_ns
+            self.perf_results[perf_key if PERF_AB_MODE else name] = result
         else:
-            diag = self._run_on_fail(test_case, database)
-            return self._record_fail(name, "Expectation mismatch", query, response, test_case.get("expect"), is_noncritical, on_fail_diag=diag)
+            self._record_success(name, is_noncritical, elapsed_ms, hard_limit_ms)
+        return True
 
     def validate_expectation(self, test_case: Dict, response: requests.Response, results: Optional[List[Dict]]) -> bool:
         expect = test_case.get("expect", {})
@@ -2556,6 +2572,11 @@ def prepare_memcp_data_dir(port: int) -> Tuple[str, Optional[Path]]:
 
 def cleanup_memcp_artifacts(owned_data_dir: Optional[Path]) -> None:
     """Remove only temporary files and directories created by this runner."""
+    # An A/B verdict is computed after successful fixture processes exit.
+    # Retain their engine logs too, not only logs from query-level failures.
+    artifact = os.environ.get("MEMCP_SERVER_LOG_ARTIFACT")
+    if artifact and _memcp_log_file:
+        shutil.copyfile(_memcp_log_file, artifact)
     if owned_data_dir is not None:
         shutil.rmtree(owned_data_dir, ignore_errors=True)
     if _memcp_log_file:
@@ -3234,6 +3255,7 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
                        PERF_BASELINE_FILE=str(result_path), PERF_BASELINE_SEED=str(seed),
                        MEMCP_TEST_WORKTREE=str(tree), MEMCP_BINARY=str(tree / "memcp"),
                        MEMCP_FAILURE_LOG_ARTIFACT=str(artifacts / (name + ".memcp.log")),
+                       MEMCP_SERVER_LOG_ARTIFACT=str(artifacts / (name + ".memcp.log")),
                        MEMCP_TEST_DATA_DIR=data)
             command = [sys.executable, "-u", str(runner), str(suite), "--log-times", "--fail-fast"]
             print(f"PERF_FIXTURE {name}: {tree}", flush=True)
