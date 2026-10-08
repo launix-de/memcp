@@ -574,6 +574,20 @@ class HookDiagnosticsContractTest(unittest.TestCase):
 
 
 class PerformanceScaleContractTest(unittest.TestCase):
+    def test_cpu_diagnostics_target_the_measured_http_instance(self):
+        base_url = "http://localhost:19991"
+        runner = SQLTestRunner(base_url)
+        response = SimpleNamespace(status_code=200, text="true", headers={})
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None) as discover, \
+                mock.patch("run_sql_tests.requests.post", return_value=response):
+            self.assertTrue(runner.run_test_case({
+                "name": "owned CPU measurement", "scm": "true", "threshold_ms": 1000,
+                "timing_samples": 1, "warmup": 0, "expect": {"result": True},
+            }, "memcp-tests"))
+        discover.assert_called_once_with(base_url)
+
     def test_performance_discovery_honors_independent_ci_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

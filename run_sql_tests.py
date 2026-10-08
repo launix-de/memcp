@@ -74,18 +74,6 @@ from urllib.parse import quote
 # CPU measurement helpers
 NUM_CPUS = multiprocessing.cpu_count()
 
-def find_memcp_pid() -> Optional[int]:
-    """Find the PID of the memcp process."""
-    try:
-        result = subprocess.run(['pgrep', '-f', 'memcp'], capture_output=True, text=True, timeout=2)
-        pids = result.stdout.strip().split('\n')
-        for pid_str in pids:
-            if pid_str.strip():
-                return int(pid_str.strip())
-    except:
-        pass
-    return None
-
 def get_process_cpu_times(pid: int) -> Optional[Tuple[float, float]]:
     """Get user and system CPU times for a process from /proc/[pid]/stat.
     Returns (utime + cutime, stime + cstime) in seconds, or None if unavailable."""
@@ -104,7 +92,7 @@ def get_process_cpu_times(pid: int) -> Optional[Tuple[float, float]]:
     except:
         return None
 
-def find_memcp_pid_for_url(base_url: str) -> Optional[int]:
+def find_memcp_pid(base_url: str) -> Optional[int]:
     """Find the MemCP instance owned by this runner's HTTP endpoint."""
     try:
         port = int(base_url.rsplit(':', 1)[1])
@@ -126,7 +114,7 @@ def wait_for_performance_setup_quiescence(
     """Wait until asynchronous fixture rebuild work stops consuming CPU."""
     if timeout is None:
         timeout = PERF_SETUP_MAX_TIME_SEC
-    pid = find_memcp_pid_for_url(base_url)
+    pid = find_memcp_pid(base_url)
     if pid is None:
         return False
     started = time.monotonic()
@@ -1904,7 +1892,7 @@ class SQLTestRunner:
                             query, None, test_case.get("expect"), is_noncritical,
                         )
 
-                memcp_pid = find_memcp_pid() if is_perf_test else None
+                memcp_pid = find_memcp_pid(self.base_url) if is_perf_test else None
                 start_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
                 samples_ns: list = []
                 response = None
