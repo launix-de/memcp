@@ -101,10 +101,20 @@ func HTTPServe(a ...Scmer) Scmer {
 			}
 		},
 	}
+	// Bind before publishing the server or reporting startup success. A failed
+	// listener must reach the caller instead of disappearing in a goroutine.
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		panic(err)
+	}
 	httpServersMu.Lock()
 	httpServers = append(httpServers, server)
 	httpServersMu.Unlock()
-	go server.ListenAndServe()
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			PrintError("HTTP server failed: " + err.Error())
+		}
+	}()
 	// TODO: ListenAndServeTLS
 	return NewBool(true)
 }

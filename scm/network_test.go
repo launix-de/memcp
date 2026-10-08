@@ -20,6 +20,7 @@ package scm
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,6 +28,49 @@ import (
 	"testing"
 	"time"
 )
+
+func TestHTTPServeReportsListenerFailureBeforePublication(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	_, occupiedPort, err := net.SplitHostPort(occupied.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, port := range []string{occupiedPort, "invalid-port"} {
+		t.Run(port, func(t *testing.T) {
+			httpServersMu.Lock()
+			before := len(httpServers)
+			httpServersMu.Unlock()
+			// Also clean up the failed registration when reproducing on master.
+			t.Cleanup(func() {
+				httpServersMu.Lock()
+				added := httpServers[before:]
+				httpServers = httpServers[:before]
+				httpServersMu.Unlock()
+				for _, server := range added {
+					server.Close()
+				}
+			})
+			var failure any
+			func() {
+				defer func() { failure = recover() }()
+				HTTPServe(NewString(port), NewFunc(func(...Scmer) Scmer { return NewNil() }), NewString("127.0.0.1"))
+			}()
+			if failure == nil {
+				t.Fatal("serve reported success without binding its listener")
+			}
+			httpServersMu.Lock()
+			after := len(httpServers)
+			httpServersMu.Unlock()
+			if after != before {
+				t.Fatal("failed listener was published in the shutdown registry")
+			}
+		})
+	}
+}
 
 func TestHTTPRequestUsesOnlyExplicitServerBuiltPayload(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
