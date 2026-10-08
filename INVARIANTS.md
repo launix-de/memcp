@@ -44,8 +44,8 @@ same ownership, visibility, lifetime, and durability guarantees.
   directory, lazy-load state, or decoded-value cache immutable. Protect those
   auxiliary structures through their own publication/ownership protocol.
   Reading an ordinary Go map concurrently with mutation remains forbidden.
-- Readers acquire a valid generation and visibility snapshot at an operator or
-  batch boundary and retain its lifetime through use. Column readers, indexes,
+- Readers retain a valid main generation through use and access deltas and
+  deletion overlays according to transaction visibility. Column readers, indexes,
   physical row IDs, and delta coordinates must belong to compatible
   generations. An atomic pointer load alone is not a lifetime or consistency
   proof. Retirement must wait for all relevant owners without making active
@@ -64,7 +64,7 @@ same ownership, visibility, lifetime, and durability guarantees.
 - During a rebuild, writes must be forwarded to both generations while both
   remain live. The handover protocol must cover inserts, updates, deletes, and
   commit/rollback visibility changes, including mutations concurrent with the
-  initial snapshot and final publication. Buffered forwarding during private
+  capture of the rebuild input and final publication. Buffered forwarding during private
   construction is valid only if writes continue and the successor cannot be
   consumed until all required mutations have been incorporated. No mutation may
   be lost, applied twice logically, or resurrect a deleted row.
@@ -99,7 +99,7 @@ same ownership, visibility, lifetime, and durability guarantees.
   metadata item, independent of row count and shard count. Enumerating or
   returning `k` metadata items naturally costs O(k); the implementation must not
   traverse the underlying data to obtain them.
-- Publish immutable, consolidated metadata through atomic snapshots. Build
+- Publish consolidated metadata atomically for lock-free reads. Build
   schema descriptions and bounded statistical summaries during DDL,
   initialization, rebuild, or maintenance; do not recompute them when the
   planner or a plan-cache guard asks for them. A missing estimate is unknown,
@@ -1070,10 +1070,10 @@ before consuming rows. Storage owns usage tracking, preparation markers and
 dependency maintenance. Snapshot/point payload columns depend on logical source
 tables; source DML invalidates their values through computed-column triggers.
 Rebuild/repartition preserves valid payloads. Query-local transactions bypass
-shared payloads. Shared computation and publication must preserve a consistent
-logical source snapshot and its invalidation dependencies: concurrent source
+shared payloads. Shared computation and publication must preserve source-read
+consistency and invalidation dependencies: concurrent source
 DML must not allow stale results to be published as current. The current source
-read-lock protocol must be replaced with a nonblocking snapshot/publication
+read-lock protocol must be replaced with a nonblocking source-consistency
 protocol to satisfy the concurrency contract above; simply dropping those locks
 would remove the consistency proof. Stored payloads never retain
 session/transaction closures or physical row IDs.
