@@ -545,6 +545,8 @@ func newRecMapRangeFirstMapper(currentTx *TxContext, target *table, targetPointC
 	if relation != "<=" && relation != "<" && relation != ">=" && relation != ">" {
 		panic("recmap range-first mapper expects <, <=, >, or >=")
 	}
+	strictUpper := relation == "<=" || relation == ">"
+	lowerSide := relation == "<=" || relation == "<"
 	var buildOnce sync.Once
 	var targetRows []recMapSourceRow
 	var buildPanic any
@@ -619,28 +621,26 @@ func newRecMapRangeFirstMapper(currentTx *TxContext, target *table, targetPointC
 			if len(key) != pointWidth+1 || recMapKeyHasNull(key) {
 				continue
 			}
-			point := key[:pointWidth]
-			bound := key[pointWidth:]
-			start := sort.Search(len(targetRows), func(index int) bool {
-				return compareProjectKey(targetRows[index].key[:pointWidth], point) >= 0
+			// Search the full (point..., range) tuple, not just the start of
+			// its point group. Deep histories must take logarithmic probe
+			// work instead of walking every version on each source row.
+			best := sort.Search(len(targetRows), func(index int) bool {
+				cmp := compareProjectKey(targetRows[index].key, key)
+				if strictUpper {
+					return cmp > 0
+				}
+				return cmp >= 0
 			})
-			best := -1
-			for index := start; index < len(targetRows) &&
-				compareProjectKey(targetRows[index].key[:pointWidth], point) == 0; index++ {
-				cmp := compareProjectKey(targetRows[index].key[pointWidth:], bound)
-				qualifies := (relation == "<=" && cmp <= 0) || (relation == "<" && cmp < 0) ||
-					(relation == ">=" && cmp >= 0) || (relation == ">" && cmp > 0)
-				if !qualifies {
-					continue
-				}
-				best = index
-				if relation == ">=" || relation == ">" {
-					break
-				}
+			if lowerSide {
+				best--
 			}
-			if best >= 0 {
-				output[i] = newRecordRef(targetRows[best].target.shard, targetRows[best].target.recid)
+			// A bound outside the point group's range may land on an
+			// adjacent group. Such a row is a scalar lookup miss.
+			if best < 0 || best >= len(targetRows) ||
+				compareProjectKey(targetRows[best].key[:pointWidth], key[:pointWidth]) != 0 {
+				continue
 			}
+			output[i] = newRecordRef(targetRows[best].target.shard, targetRows[best].target.recid)
 		}
 		return scm.NewSlice(output)
 	})

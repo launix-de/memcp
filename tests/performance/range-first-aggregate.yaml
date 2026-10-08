@@ -31,6 +31,20 @@ setup:
         (rebuild)
         20000)
 
+  - sql: "DROP TABLE IF EXISTS rfa_deep_account"
+  - sql: "DROP TABLE IF EXISTS rfa_deep_event"
+  - sql: "CREATE TABLE rfa_deep_account (id INT PRIMARY KEY) ENGINE=memory"
+  - sql: "CREATE TABLE rfa_deep_event (id INT PRIMARY KEY, account_id INT, changed_at INT, quantity INT) ENGINE=memory"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "rfa_deep_account") '("id")
+          (map (produceN 512) (lambda (i) (list i))))
+        (insert (table "memcp-tests" "rfa_deep_event") '("id" "account_id" "changed_at" "quantity")
+          (map (produceN 65536) (lambda (i)
+            (list i (floor (/ i 128)) (mod i 128) (+ 1 (mod i 128))))))
+        (rebuild)
+        65536)
+
 test_cases:
   - name: "Eight period aggregates reuse range-first row identities"
     sql: |
@@ -124,7 +138,50 @@ test_cases:
     timing_samples: 11
     threshold_ms: 10000
 
+  - name: "Period aggregates over deep account histories"
+    sql: |
+      SELECT periods.period_id,
+        (SELECT SUM((SELECT e.quantity FROM rfa_deep_event e
+          WHERE e.account_id = a.id AND e.changed_at <= periods.end_time
+          ORDER BY e.changed_at DESC LIMIT 1))
+         FROM rfa_deep_account a) AS total
+      FROM (SELECT 1 AS period_id, 31 AS end_time
+        UNION SELECT 2 AS period_id, 63 AS end_time
+        UNION SELECT 3 AS period_id, 95 AS end_time
+        UNION SELECT 4 AS period_id, 127 AS end_time) periods
+      ORDER BY periods.period_id
+    expect:
+      rows: 4
+      data:
+        - {period_id: 1, total: 16384}
+        - {period_id: 2, total: 32768}
+        - {period_id: 3, total: 49152}
+        - {period_id: 4, total: 65536}
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 11
+    threshold_ms: 10000
+
+  - name: "Repeated range-first batches over deep account histories"
+    scm: |
+      (begin
+        (define target (table "memcp-tests" "rfa_deep_event"))
+        (define mapper (recmap_range_first_mapper nil target '("account_id") "changed_at" "<="
+          (lambda (id) (list id 95))))
+        (define total (reduce (produceN 64) (lambda (total request)
+          (+ total (recset_count (recmap_image
+            (scan_recmap nil (table "memcp-tests" "rfa_deep_account") '() '() '()
+              (lambda () true) '("id") mapper target))))) 0))
+        (if (equal? total 32768) true (error "range-first batches lost source matches")))
+    expect: {data: [true]}
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 11
+    threshold_ms: 10000
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS rfa_deep_account"
+  - sql: "DROP TABLE IF EXISTS rfa_deep_event"
   - sql: "DROP TABLE IF EXISTS rfa_account"
   - sql: "DROP TABLE IF EXISTS rfa_event"
   - sql: "DROP TABLE IF EXISTS rfa_type"
