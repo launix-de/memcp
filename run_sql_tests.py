@@ -62,6 +62,7 @@ import re
 import random
 import shutil
 import tempfile
+from contextlib import ExitStack
 import ctypes
 import select
 import signal
@@ -2148,6 +2149,7 @@ class SQLTestRunner:
         self.current_database = database
         setup_started = time.monotonic()
         for idx, step in enumerate(setup_steps, start=1):
+            step_started = time.monotonic()
             self.setup_operations.append(step)
             if check_ram_pressure():
                 trip_ram_abort(f"suite setup step {idx}")
@@ -2217,6 +2219,8 @@ class SQLTestRunner:
             else:
                 print(f"❌ Setup step {idx} failed: unknown step type (expected sql or scm)")
                 return False
+            if os.environ.get("PERF_FIXTURE_TRIAL"):
+                print(f"PERF_SETUP_STEP index={idx} elapsed_ms={(time.monotonic() - step_started) * 1000:.3f}", flush=True)
         return True
 
     def run_cleanup(self, cleanup_steps: List[Dict], database: str,
@@ -3185,8 +3189,43 @@ def summarize_performance_fixtures(trials: List[Dict[str, Any]], count: int) -> 
     return summary
 
 
+def performance_library_digest(tree: Path) -> str:
+    """Include dynamically loaded runtime code as well as the executable hash."""
+    digest = hashlib.sha256()
+    directory = tree / "lib"
+    for path in sorted(directory.rglob("*")):
+        if path.is_file():
+            name = str(path.relative_to(directory)).encode()
+            payload = path.read_bytes()
+            digest.update(len(name).to_bytes(8, "little"))
+            digest.update(name)
+            digest.update(len(payload).to_bytes(8, "little"))
+            digest.update(payload)
+    return digest.hexdigest()
+
+
+def performance_shard_paths(paths: List[Path]) -> List[Path]:
+    """Partition the fully validated suite set; every suite belongs to one shard."""
+    index = int(os.environ.get("PERF_SHARD_INDEX", "0"))
+    count = int(os.environ.get("PERF_SHARD_COUNT", "1"))
+    if count < 1 or not 0 <= index < count:
+        raise ValueError("invalid performance shard index/count")
+    return sorted(paths)[index::count]
+
+
+def validate_reusable_fixture(spec: Dict[str, Any]) -> None:
+    metadata = spec.get("metadata", {})
+    if metadata.get("reuse_fixture") is not True or metadata.get("restart_after_setup") is not True:
+        raise ValueError("reuse_fixture requires restart_after_setup: true")
+    for step in spec.get("setup", []):
+        if not isinstance(step, dict):
+            raise ValueError("reusable fixture setup must contain SQL/SCM mappings")
+        if re.search(r"ENGINE\s*=\s*memory\b", step.get("sql", ""), re.IGNORECASE):
+            raise ValueError("reusable fixtures must persist their tables, not ENGINE=memory")
+
+
 def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bool:
-    """Interleave immutable suites across binaries, rebuilding every fixture."""
+    """Measure old then new on independent stores, reusing prepared snapshots."""
     base, candidate = base.resolve(), candidate.resolve()
     output = Path(PERF_BASELINE_FILE).resolve()
     artifacts = output.with_suffix(".trials")
@@ -3229,17 +3268,82 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
             raise ValueError("base performance cases are missing from both roles")
     if expected_seed - declared:
         raise ValueError("trusted performance seed cases are missing from both roles")
+    all_suite_paths = suite_paths
+    suite_paths = performance_shard_paths(suite_paths)
     manifest = {"schema_version": 1, "runner_sha256": hashlib.sha256(runner.read_bytes()).hexdigest(),
                 "seed_sha256": hashlib.sha256(seed.read_bytes()).hexdigest(),
                 "binaries": {role: {"path": str(tree / "memcp"),
-                    "sha256": hashlib.sha256((tree / "memcp").read_bytes()).hexdigest()}
+                    "sha256": hashlib.sha256((tree / "memcp").read_bytes()).hexdigest(),
+                    "library_sha256": performance_library_digest(tree)}
                     for role, tree in (("A", base), ("B", candidate))},
                 "suites": {str(path): {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                    "verification_order": "ABBA" * 3}
+                    "verification_order": "AB" * 6}
                     for path in suite_paths}}
     (artifacts / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    identical_execution = all(manifest["binaries"]["A"][field] == manifest["binaries"]["B"][field]
+                              for field in ("sha256", "library_sha256"))
+    manifest["identical_execution"] = identical_execution
     complete = {"schema_version": 1}
     pending = []
+    manifest["fixture_events"] = []
+    manifest["shard"] = {"index": int(os.environ.get("PERF_SHARD_INDEX", "0")),
+                         "count": int(os.environ.get("PERF_SHARD_COUNT", "1")),
+                         "all_suites": [str(path) for path in sorted(all_suite_paths)]}
+    # All snapshots are private to this experiment, never CI-cached or committed.
+    snapshots = ExitStack()
+    prepared = {}
+
+    def save_event(event):
+        manifest["fixture_events"].append(event)
+        (artifacts / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+    def snapshot_for(suite_index, suite):
+        spec = yaml.safe_load(suite.read_text())
+        if not spec.get("metadata", {}).get("reuse_fixture"):
+            return None
+        validate_reusable_fixture(spec)
+        # Only preparation inputs identify the snapshot. Different query suites
+        # with exactly the same setup share its import without sharing mutations.
+        metadata = dict(spec.get("metadata", {}))
+        metadata.pop("description", None)
+        identity = json.dumps({"setup": spec.get("setup", []), "metadata": metadata,
+                               "seed": workload_seed}, sort_keys=True)
+        key = hashlib.sha256(identity.encode()).hexdigest()
+        if key in prepared:
+            return prepared[key]
+        data = Path(snapshots.enter_context(tempfile.TemporaryDirectory(prefix="memcp-perf-prepared-")))
+        name = f"{suite_index:03d}-{suite.stem}-prepare-A"
+        env = fixture_environment(base, "A", data, artifacts / (name + ".json"),
+                                  artifacts / (name + ".memcp.log"))
+        env["PERF_FIXTURE_STAGE"] = "prepare"
+        started = time.monotonic()
+        log_path = artifacts / (name + ".log")
+        with log_path.open("w") as log:
+            result = subprocess.run([sys.executable, "-u", str(runner), str(suite),
+                                     "--log-times", "--fail-fast"],
+                                    cwd=candidate, env=env, stdout=log, stderr=subprocess.STDOUT)
+        print(log_path.read_text(), end="", flush=True)
+        if result.returncode or not (data / ".memcp-perf-prepared.json").is_file():
+            raise RuntimeError(f"fixture preparation failed: {name}; see {log_path}")
+        prepared[key] = data
+        save_event({"stage": "prepare", "suite": str(suite), "writer": "A", "key": key,
+                    "elapsed_ms": (time.monotonic() - started) * 1000,
+                    "bytes": sum(path.stat().st_size for path in data.rglob("*") if path.is_file())})
+        return data
+
+    def fixture_environment(tree, role, data, result_path, server_log):
+        env = os.environ.copy()
+        for variable in ("PERF_REGRESSION_WAIVERS_FILE", "PERF_CALIBRATE",
+                         "MEMCP_TEST_SUPERVISOR_PID", "MEMCP_TEST_SUPERVISOR_GENERATION_FILE",
+                         "PERF_FIXTURE_STAGE"):
+            env.pop(variable, None)
+        env.update(PERF_AB_MODE="record", PERF_FIXTURE_TRIAL="1", PERF_FIXTURE_ROLE=role,
+                   PERF_BASELINE_FILE=str(result_path), PERF_BASELINE_SEED=str(seed),
+                   MEMCP_TEST_WORKTREE=str(tree), MEMCP_BINARY=str(tree / "memcp"),
+                   MEMCP_FAILURE_LOG_ARTIFACT=str(server_log),
+                   MEMCP_SERVER_LOG_ARTIFACT=str(server_log), MEMCP_TEST_DATA_DIR=str(data),
+                   PERF_FIXTURE_TIMINGS_FILE=str(server_log.with_suffix(".timings.json")))
+        return env
 
     def measure(suite_index, suite, role, trials):
         tree = base if role == "A" else candidate
@@ -3247,20 +3351,24 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
         result_path = artifacts / (name + ".json")
         log_path = artifacts / (name + ".log")
         with tempfile.TemporaryDirectory(prefix="memcp-perf-fixture-") as data:
-            env = os.environ.copy()
-            for variable in ("PERF_REGRESSION_WAIVERS_FILE", "PERF_CALIBRATE",
-                             "MEMCP_TEST_SUPERVISOR_PID", "MEMCP_TEST_SUPERVISOR_GENERATION_FILE"):
-                env.pop(variable, None)
-            env.update(PERF_AB_MODE="record", PERF_FIXTURE_TRIAL="1", PERF_FIXTURE_ROLE=role,
-                       PERF_BASELINE_FILE=str(result_path), PERF_BASELINE_SEED=str(seed),
-                       MEMCP_TEST_WORKTREE=str(tree), MEMCP_BINARY=str(tree / "memcp"),
-                       MEMCP_FAILURE_LOG_ARTIFACT=str(artifacts / (name + ".memcp.log")),
-                       MEMCP_SERVER_LOG_ARTIFACT=str(artifacts / (name + ".memcp.log")),
-                       MEMCP_TEST_DATA_DIR=data)
+            snapshot = snapshot_for(suite_index, suite)
+            clone_started = time.monotonic()
+            if snapshot is not None:
+                # Real copies, never hard links: either binary may mutate files.
+                shutil.copytree(snapshot, data, dirs_exist_ok=True)
+            env = fixture_environment(tree, role, data, result_path, artifacts / (name + ".memcp.log"))
+            if snapshot is not None:
+                env["PERF_FIXTURE_STAGE"] = "measure"
+            save_event({"stage": "clone", "suite": str(suite), "role": role,
+                        "reused": snapshot is not None,
+                        "elapsed_ms": (time.monotonic() - clone_started) * 1000})
             command = [sys.executable, "-u", str(runner), str(suite), "--log-times", "--fail-fast"]
             print(f"PERF_FIXTURE {name}: {tree}", flush=True)
+            measured_started = time.monotonic()
             with log_path.open("w") as log:
                 result = subprocess.run(command, cwd=candidate, env=env, stdout=log, stderr=subprocess.STDOUT)
+            save_event({"stage": "process", "suite": str(suite), "role": role,
+                        "elapsed_ms": (time.monotonic() - measured_started) * 1000})
             print(log_path.read_text(), end="", flush=True)
             if result.returncode:
                 raise RuntimeError(f"fixture failed: {name}; see {log_path}")
@@ -3297,6 +3405,20 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
                 summary[report_key]["recovery_budget_exceeded"] = True
             summary[report_key]["recovery_budget_ms"] = budget
 
+    def enforce_identical_execution_budgets(suite, trials, summary):
+        if not identical_execution:
+            return
+        cases = performance_fixture_cases(str(suite))
+        for key, value in summary.items():
+            if value.get("baseline_failures"):
+                # Nondeterministic query errors still need complete verification.
+                continue
+            group = value.get("timing_group")
+            members = [member for member, case in cases.items() if case.get("timing_group") == group] if group else [key]
+            budget = sum(cases[member]["threshold_ms"] for member in members)
+            passed = all(sum(trial["results"][member]["time_ms"] for member in members) <= budget for trial in trials)
+            value.update(status="identical_execution", absolute_budget_ms=budget, passed=passed)
+
     def report(summary, verification_pending=False):
         for key, value in summary.items():
             value["verification_pending"] = verification_pending
@@ -3309,6 +3431,9 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
                       f"{value['fixture_trials']} fresh fixtures", flush=True)
                 continue
             change = (value["candidate_ms"] / value["time_ms"] - 1) * 100
+            if value.get("status") == "identical_execution":
+                print(f"PERF_AB {status} IDENTICAL_EXECUTION {key}: executable and runtime libraries match; "
+                      f"A/A variation {change:+.1f}%; absolute budget {value['absolute_budget_ms']:.3f}ms", flush=True)
             print(f"PERF_AB {status} {key}: {value['time_ms']:.3f}ms -> {value['candidate_ms']:.3f}ms "
                   f"({change:+.1f}%, limit {value['threshold_ms']:.3f}ms, "
                   f"{value['fixture_trials']} fresh fixtures)", flush=True)
@@ -3317,30 +3442,33 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
         complete.update(summary)
         output.write_text(json.dumps(complete, indent=2) + "\n")
 
-    # Finish the entire initial pass before checking suspect timings again.
-    # Query-only baseline failures also receive the complete fixed verification.
-    # Setup, transport, assertion and candidate failures abort immediately.
-    for suite_index, suite in enumerate(suite_paths):
-        trials = []
-        for role in "AB":
-            measure(suite_index, suite, role, trials)
-        summary = summarize_performance_fixtures(trials, 1)
-        enforce_recovered_query_budgets(suite, trials, summary)
-        suspect = any(not value["passed"] or value.get("baseline_failures") for value in summary.values())
-        report(summary, verification_pending=suspect)
-        if suspect:
-            pending.append((suite_index, suite, trials))
+    with snapshots:
+        # Finish the entire initial pass before checking suspect timings again.
+        # Query-only baseline failures also receive the complete fixed verification.
+        # Setup, transport, assertion and candidate failures abort immediately.
+        for suite_index, suite in enumerate(suite_paths):
+            trials = []
+            for role in "AB":
+                measure(suite_index, suite, role, trials)
+            summary = summarize_performance_fixtures(trials, 1)
+            enforce_recovered_query_budgets(suite, trials, summary)
+            enforce_identical_execution_budgets(suite, trials, summary)
+            suspect = any(not value["passed"] or value.get("baseline_failures") for value in summary.values())
+            report(summary, verification_pending=suspect)
+            if suspect:
+                pending.append((suite_index, suite, trials))
 
-    for suite_index, suite, trials in pending:
-        print(f"PERF_VERIFY {suite}: six additional fresh trials per role; original pair retained", flush=True)
-        for role in "ABBA" * 3:
-            measure(suite_index, suite, role, trials)
-        # Recheck every case in the suite, including initially successful ones.
-        # There is no further retry, filtering, or early stop on a lucky sample.
-        summary = summarize_performance_fixtures(trials, 7)
-        enforce_recovered_query_budgets(suite, trials, summary)
-        report(summary)
-    return all(value["passed"] for key, value in complete.items() if key != "schema_version")
+        for suite_index, suite, trials in pending:
+            print(f"PERF_VERIFY {suite}: six additional fresh trials per role; original pair retained", flush=True)
+            for role in "AB" * 6:
+                measure(suite_index, suite, role, trials)
+            # Recheck every case in the suite, including initially successful ones.
+            # There is no further retry, filtering, or early stop on a lucky sample.
+            summary = summarize_performance_fixtures(trials, 7)
+            enforce_recovered_query_budgets(suite, trials, summary)
+            enforce_identical_execution_budgets(suite, trials, summary)
+            report(summary)
+        return all(value["passed"] for key, value in complete.items() if key != "schema_version")
 
 
 def print_usage() -> None:
@@ -3462,6 +3590,8 @@ def main():
     is_connect_only_mode = connect_only
     enable_mysql = any(load_suite_metadata(spec_file).get("requires_mysql") for spec_file in spec_files)
 
+    lifecycle = {}
+    startup_started = time.monotonic()
     memcp_process = None
     data_dir = None
     owned_data_dir = None
@@ -3486,6 +3616,7 @@ def main():
                     print("❌ Failed to start MemCP")
                     sys.exit(1)
 
+        lifecycle["startup_ms"] = (time.monotonic() - startup_started) * 1000
         runner = SQLTestRunner(
             base_url,
             log_times=log_times,
@@ -3503,15 +3634,44 @@ def main():
                 )
                 return memcp_process is not None
             runner.set_restart_handler(restart_handler)
-        if len(spec_files) == 1:
+        execution_started = time.monotonic()
+        stage = os.environ.get("PERF_FIXTURE_STAGE", "")
+        if stage:
+            if (stage not in ("prepare", "measure") or connect_only or len(spec_files) != 1
+                    or PERF_AB_MODE != "record" or not os.environ.get("PERF_FIXTURE_TRIAL")):
+                raise ValueError("fixture stages require a managed single-suite A/B child")
+            validate_reusable_fixture(yaml.safe_load(Path(spec_files[0]).read_text()))
+            marker = Path(data_dir) / ".memcp-perf-prepared.json"
+            if stage == "prepare":
+                success = runner.prepare_test_spec(spec_files[0])
+                if success:
+                    # Persist before publishing the snapshot. A kill/timeout may
+                    # not publish a partially written sloppy store as reusable.
+                    runner.execute_sql(runner.default_database, "SHUTDOWN",
+                                       retry_on_connection_failure=False)
+                    success = memcp_process.wait(timeout=30) == 0
+                if success:
+                    marker.write_text(json.dumps({"schema_version": 1, "writer": "A"}) + "\n")
+            else:
+                if json.loads(marker.read_text()) != {"schema_version": 1, "writer": "A"}:
+                    raise ValueError("invalid prepared fixture marker")
+                success = runner.run_test_spec(spec_files[0], setup_done=True)
+        elif len(spec_files) == 1:
             success = runner.run_test_spec(spec_files[0])
         else:
             success = run_test_specs(spec_files, base_url, port, log_times, jobs, restart_handler if not connect_only else None, connect_only, fail_fast)
     finally:
+        if "execution_started" in locals():
+            lifecycle["execution_ms"] = (time.monotonic() - execution_started) * 1000
+        shutdown_started = time.monotonic()
         if not connect_only and memcp_process:
             stop_memcp_process(memcp_process)
         if not connect_only:
             cleanup_memcp_artifacts(owned_data_dir)
+        lifecycle["shutdown_cleanup_ms"] = (time.monotonic() - shutdown_started) * 1000
+        timings_file = os.environ.get("PERF_FIXTURE_TIMINGS_FILE")
+        if timings_file:
+            Path(timings_file).write_text(json.dumps(lifecycle, indent=2) + "\n")
 
     sys.exit(0 if success else 1)
 

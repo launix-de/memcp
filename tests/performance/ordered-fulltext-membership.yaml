@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Fixed workload: first execution plus two repetitions for each page size.
 metadata:
+  reuse_fixture: true
+  restart_after_setup: true
   description: Ordered document search with OR membership over filename and extracted text
   isolated: true
   performance_rows: 80000
@@ -9,26 +11,26 @@ setup:
 - sql: DROP TABLE IF EXISTS nav_document
 - sql: 'CREATE TABLE `nav_document` ( `inventory` text, `note` text, `customer_note` text, `ID` int PRIMARY KEY,
 
-    `nav_department` int, `nav_year` int, `nav_tenant` int, `nav_check` int, `nav_site` int, `file` int) ENGINE=memory
+    `nav_department` int, `nav_year` int, `nav_tenant` int, `nav_check` int, `nav_site` int, `file` int) ENGINE=sloppy
 
     '
 - sql: DROP TABLE IF EXISTS nav_tenant
 - sql: CREATE TABLE `nav_tenant` (`multiStandort` boolean,`multiAbteilung` boolean,`multiPruefung` boolean,`name` text,`ID`
-    int PRIMARY KEY) ENGINE=memory
+    int PRIMARY KEY) ENGINE=sloppy
 - sql: DROP TABLE IF EXISTS nav_site
-- sql: CREATE TABLE `nav_site` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int) ENGINE=memory
+- sql: CREATE TABLE `nav_site` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int) ENGINE=sloppy
 - sql: DROP TABLE IF EXISTS nav_department
-- sql: CREATE TABLE `nav_department` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int,`nav_site` int) ENGINE=memory
+- sql: CREATE TABLE `nav_department` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int,`nav_site` int) ENGINE=sloppy
 - sql: DROP TABLE IF EXISTS nav_year
-- sql: CREATE TABLE `nav_year` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int) ENGINE=memory
+- sql: CREATE TABLE `nav_year` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int) ENGINE=sloppy
 - sql: DROP TABLE IF EXISTS nav_check
-- sql: CREATE TABLE `nav_check` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int) ENGINE=memory
+- sql: CREATE TABLE `nav_check` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int) ENGINE=sloppy
 - sql: DROP TABLE IF EXISTS nav_access
-- sql: CREATE TABLE `nav_access` (`ID` int PRIMARY KEY,`user` int,`nav_tenant` int,`nav_site` int) ENGINE=memory
+- sql: CREATE TABLE `nav_access` (`ID` int PRIMARY KEY,`user` int,`nav_tenant` int,`nav_site` int) ENGINE=sloppy
 - sql: DROP TABLE IF EXISTS nav_file
 - sql: 'CREATE TABLE `nav_file` ( `filename` text, `type` text, `size` bigint, `width` int, `height` int, `data` longblob,
 
-    `hash` varchar(64), `uploaded_at` bigint, `search` longtext, `lastUsed` bigint, `ID` int PRIMARY KEY) ENGINE=memory
+    `hash` varchar(64), `uploaded_at` bigint, `search` longtext, `lastUsed` bigint, `ID` int PRIMARY KEY) ENGINE=sloppy
 
     '
 - sql: INSERT INTO nav_tenant (ID,name) VALUES (1,'Tenant A'),(2,'Tenant B')

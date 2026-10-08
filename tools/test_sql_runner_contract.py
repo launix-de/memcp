@@ -60,6 +60,8 @@ from run_sql_tests import (  # noqa: E402
     run_performance_ab,
     summarize_performance_fixtures,
     validate_performance_fixture,
+    validate_reusable_fixture,
+    performance_shard_paths,
     performance_architecture,
     performance_case_fingerprint,
     performance_case_key,
@@ -1678,7 +1680,7 @@ class PerformanceFixtureContractTests(unittest.TestCase):
         self.base, self.candidate = self.root / "base", self.root / "candidate"
         for tree in (self.base, self.candidate):
             tree.mkdir()
-            (tree / "memcp").write_bytes(b"fake binary")
+            (tree / "memcp").write_bytes(b"fake binary " + tree.name.encode())
         directory = self.candidate / "tests/performance"
         directory.mkdir(parents=True)
         self.suites = []
@@ -1698,13 +1700,30 @@ class PerformanceFixtureContractTests(unittest.TestCase):
         self.durations = lambda suite, role, index: 100
         self.mutate = lambda result, index: None
         self.exit_code = 0
+        self.preparations = []
+        self.prepare_exit_code = 0
 
     def subprocess(self, command, *, cwd, env, stdout, stderr):
         suite = command[3]
         role = "A" if Path(env["MEMCP_TEST_WORKTREE"]) == self.base else "B"
         data = Path(env["MEMCP_TEST_DATA_DIR"])
         self.assertTrue(data.is_dir())
-        self.assertEqual(list(data.iterdir()), [])
+        if env.get("PERF_FIXTURE_STAGE") == "prepare":
+            self.assertEqual(role, "A")
+            self.assertEqual(list(data.iterdir()), [])
+            self.preparations.append(str(data))
+            (data / "prepared-payload").write_text("original data")
+            (data / ".memcp-perf-prepared.json").write_text('{"schema_version": 1, "writer": "A"}')
+            return SimpleNamespace(returncode=self.prepare_exit_code)
+        if env.get("PERF_FIXTURE_STAGE") == "measure":
+            self.assertEqual((data / "prepared-payload").read_text(), "original data")
+            self.assertFalse((data / ".grp:previous-trial").exists())
+            (data / ".grp:previous-trial").write_text("derived group state")
+            # A/B and later repetitions must not observe another trial's writes.
+            (data / "prepared-payload").write_text("mutated")
+            self.assertTrue((data / ".memcp-perf-prepared.json").is_file())
+        else:
+            self.assertEqual(list(data.iterdir()), [])
         self.assertNotIn(str(data), [call[2] for call in self.calls])
         (data / "mutated-fixture").write_text("each invocation changes its fixture")
         self.assertEqual(env["PERF_AB_MODE"], "record")
@@ -1736,6 +1755,75 @@ class PerformanceFixtureContractTests(unittest.TestCase):
                 redirect_stdout(io.StringIO()):
             return run_performance_ab(self.base, self.candidate, self.suites)
 
+    def test_identical_execution_reports_variation_without_false_patch_regression(self):
+        (self.candidate / "memcp").write_bytes((self.base / "memcp").read_bytes())
+        self.durations = lambda suite, role, index: 200 if role == "B" else 100
+        self.assertTrue(self.run_experiment())
+        self.assertEqual(len(self.calls), 4)
+        result = json.loads(self.output.read_text())[performance_case_key(self.suites[0], "cold")]
+        self.assertEqual(result["status"], "identical_execution")
+        self.assertEqual(result["absolute_budget_ms"], 1000)
+
+    def test_identical_execution_still_rejects_absolute_budget_violation(self):
+        (self.candidate / "memcp").write_bytes((self.base / "memcp").read_bytes())
+        self.durations = lambda suite, role, index: 1001 if role == "B" else 100
+        self.assertFalse(self.run_experiment())
+
+    def test_changed_scheme_code_prevents_identical_execution_shortcut(self):
+        (self.candidate / "memcp").write_bytes((self.base / "memcp").read_bytes())
+        for tree in (self.base, self.candidate):
+            (tree / "lib").mkdir()
+            (tree / "lib/main.scm").write_text(tree.name)
+        self.durations = lambda suite, role, index: 200 if role == "B" else 100
+        self.assertFalse(self.run_experiment())
+        self.assertEqual(len(self.calls), 28)
+
+    def test_shards_cover_each_suite_once_and_reject_invalid_indices(self):
+        paths = [Path(f"suite-{index}") for index in range(13)]
+        assigned = []
+        for index in range(4):
+            with mock.patch.dict(os.environ, {"PERF_SHARD_INDEX": str(index), "PERF_SHARD_COUNT": "4"}):
+                assigned.extend(performance_shard_paths(paths))
+        self.assertCountEqual(assigned, paths)
+        for index, count in (("4", "4"), ("-1", "4"), ("0", "0")):
+            with mock.patch.dict(os.environ, {"PERF_SHARD_INDEX": index, "PERF_SHARD_COUNT": count}), self.assertRaises(ValueError):
+                performance_shard_paths(paths)
+
+    def enable_reuse(self):
+        for suite in self.suites:
+            path = Path(suite)
+            spec = json.loads(path.read_text())
+            spec["metadata"]["reuse_fixture"] = True
+            spec["setup"] = [{"sql": "CREATE TABLE fixture (id int) ENGINE=sloppy"}]
+            path.write_text(json.dumps(spec))
+
+    def test_reused_snapshot_deduplicates_setup_and_isolates_all_trials(self):
+        self.enable_reuse()
+        self.durations = lambda suite, role, index: 200 if suite == "cold" and role == "B" else 100
+        self.assertFalse(self.run_experiment())
+        self.assertEqual(len(self.preparations), 1)  # identical setup in both suites
+        self.assertEqual(len(self.calls), 16)
+        self.assertEqual("".join(r for _, r, _ in self.calls[4:]), "AB" * 6)
+        self.assertTrue(all(not Path(data).exists() for data in self.preparations))
+        manifest = json.loads(self.output.with_suffix(".trials").joinpath("manifest.json").read_text())
+        self.assertEqual(sum(event["stage"] == "prepare" for event in manifest["fixture_events"]), 1)
+        self.assertTrue(all(event["reused"] for event in manifest["fixture_events"] if event["stage"] == "clone"))
+
+    def test_failed_preparation_never_starts_measurements_or_leaks_snapshot(self):
+        self.enable_reuse()
+        self.prepare_exit_code = 1
+        with self.assertRaisesRegex(RuntimeError, "preparation failed"):
+            self.run_experiment()
+        self.assertEqual(self.calls, [])
+        self.assertTrue(all(not Path(data).exists() for data in self.preparations))
+
+    def test_reuse_rejects_volatile_tables_and_missing_restart_contract(self):
+        for metadata, setup in (({"reuse_fixture": True}, []),
+                                ({"reuse_fixture": True, "restart_after_setup": True},
+                                 [{"sql": "CREATE TABLE t (id int) ENGINE = memory"}])):
+            with self.subTest(metadata=metadata, setup=setup), self.assertRaises(ValueError):
+                validate_reusable_fixture({"metadata": metadata, "setup": setup})
+
     def test_clean_initial_pass_does_not_repeat(self):
         self.assertTrue(self.run_experiment())
         self.assertEqual([(s, r) for s, r, _ in self.calls],
@@ -1747,7 +1835,7 @@ class PerformanceFixtureContractTests(unittest.TestCase):
         self.assertTrue(self.run_experiment())
         self.assertEqual([(s, r) for s, r, _ in self.calls[:4]],
                          [("cold", "A"), ("cold", "B"), ("later", "A"), ("later", "B")])
-        self.assertEqual("".join(r for _, r, _ in self.calls[4:]), "ABBA" * 3)
+        self.assertEqual("".join(r for _, r, _ in self.calls[4:]), "AB" * 6)
         result = json.loads(self.output.read_text())[performance_case_key(self.suites[0], "cold")]
         self.assertEqual(result["fixture_trials"], 7)
         self.assertEqual(result["b_samples_ms"], [500] + [100] * 6)

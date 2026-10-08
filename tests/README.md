@@ -54,8 +54,8 @@ artifacts. There are no discarded warmups or adaptive repetition counts.
 Choose `n` before measuring, apply it identically to both revisions, and retain
 it across verification trials. The initial trade-off fixtures use `n = 10`.
 The total may be at most 20% slower; no warmup bonus or fixed jitter allowance
-extends that limit. Suspect totals receive the usual complete fresh-fixture
-ABBA verification, with medians taken across whole workload totals. Independent
+extends that limit. Suspect totals receive the usual complete isolated-fixture
+old/new verification, with medians taken across whole workload totals. Independent
 latency tests keep their existing median-per-request policy.
 
 - `sql/dml/insert-values-template.yaml`: Bulk INSERT literals, session bindings and computed cells.
@@ -100,8 +100,8 @@ this outcome. Setup/cleanup failures, connection failures, malformed artifacts,
 wrong results and all candidate errors still fail the run.
 
 Such cases receive the same fixed verification as suspected regressions: the
-initial A/B pair plus six additional fresh fixtures per revision (`ABBA` three
-times). Every candidate sample must satisfy the result assertions. Every
+initial A/B pair plus six additional isolated fixtures per revision (six
+old/new pairs). Every candidate sample must satisfy the result assertions. Every
 candidate fixture must also meet the declared `threshold_ms` budget; timing
 groups use the sum of member budgets and measured totals, preserving cold/warm
 trade-offs. Regression waivers cannot bypass this recovery budget.
@@ -147,3 +147,48 @@ session changes, checking both newly granted access and revoked access. Run the
 performance suites with `PERF_TEST=1` to include their timed cases. HTTP upload,
 PDF rendering, ZIP contents, DAV protocol handling and mail delivery remain
 application-level checks; these SQL tests do not claim to exercise those layers.
+
+## Reusing prepared A/B data
+
+Query suites may opt in with `metadata.reuse_fixture: true` and
+`metadata.restart_after_setup: true`. Their top-level setup must create persistent
+fixtures (`ENGINE=sloppy` is suitable for generated benchmark data). The old/base
+binary runs this setup once and exits through SQL `SHUTDOWN`; only a successful
+process exit publishes the prepared snapshot. Preparation runs no benchmark
+queries. The new binary never writes the reusable source snapshot.
+
+Every round runs old first, new second. Each process receives its own ordinary
+file copy of the same base-written snapshot, including verification rounds;
+there are no hard links, shared writable data directories or reused processes.
+This restores the original pre-query catalog, excluding group/cache tables and
+indexes produced by earlier benchmark queries, and resets process-local compiled
+plans. OS page caches are not explicitly flushed. The opt-in therefore measures
+cold query/operator state, not cold OS pages or import speed. Existing case setup,
+result assertions, warmup/sample configuration and cleanup still execute.
+
+Suites with identical top-level preparation inputs share one import. Snapshots
+are temporary and deleted on success or failure; they are not committed,
+uploaded, or placed in GitHub caches. Import, mutation and storage-construction
+benchmarks must retain their own setup: a base-written snapshot intentionally
+compares readers of the same stored representation, not each revision's writer.
+Do not opt in suites that depend on process-local setup bindings or that must
+measure a memory engine. Sloppy fixtures survive the explicit graceful shutdown;
+they do not acquire production durability guarantees.
+
+The manifest records preparation, copy and process durations, snapshot sizes,
+binary/runtime-library hashes and shard assignment. Per-process timing artifacts
+separate startup, execution and shutdown/cleanup; server logs and every raw query
+sample remain available. If both executable and dynamically loaded runtime
+libraries match, report the relative timings as A/A variance rather than an
+engine-patch regression. Both processes must still return correct results and
+satisfy absolute workload budgets. Query errors retain the complete verification
+protocol; changes to Scheme code prevent the identical-execution shortcut.
+
+CI validates the full discovered suite set before partitioning it across four
+separate runners; each suite is assigned exactly once. The original required
+check passes only when all shards succeed. Timed queries do not compete on one
+runner. Measurement has a 15-minute cap per shard; jobs allow 30 minutes including
+cold external PHP/JIT compiler builds. Those toolchains are cached by runtime
+ABI/source identity, while benchmark data is never cached. A timeout is a failure,
+not an omitted test or a successful partial result. End-to-end 15-minute CI is a
+measurement goal, not yet a demonstrated guarantee on a cold cache.

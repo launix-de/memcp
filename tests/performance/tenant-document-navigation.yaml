@@ -3,6 +3,8 @@
 # Empty years must not inherit document membership from another year.
 # Each performance case measures one cold query plus three warm queries.
 metadata:
+  reuse_fixture: true
+  restart_after_setup: true
   description: Restricted tenant hierarchy with correlated document membership and counts; 800k documents, 100 tenants,
     5000 departments
   isolated: true
@@ -11,29 +13,29 @@ setup:
 - sql: DROP TABLE IF EXISTS nav_document
 - sql: 'CREATE TABLE `nav_document` ( `inventory` text, `note` text, `customer_note` text, `ID` int PRIMARY KEY,
 
-    `nav_department` int, `nav_year` int, `nav_tenant` int, `nav_check` int, `nav_site` int, `file` int) ENGINE=memory
+    `nav_department` int, `nav_year` int, `nav_tenant` int, `nav_check` int, `nav_site` int, `file` int) ENGINE=sloppy
 
     '
 - sql: DROP TABLE IF EXISTS nav_document_full
 - sql: 'CREATE TABLE `nav_document_full` ( `inventory` text, `note` text, `customer_note` text, `ID` int PRIMARY
     KEY,
 
-    `nav_department` int, `nav_year` int, `nav_tenant` int, `nav_check` int, `nav_site` int, `file` int) ENGINE=memory
+    `nav_department` int, `nav_year` int, `nav_tenant` int, `nav_check` int, `nav_site` int, `file` int) ENGINE=sloppy
 
     '
 - sql: DROP TABLE IF EXISTS nav_tenant
 - sql: CREATE TABLE `nav_tenant` (`multiStandort` boolean,`multiAbteilung` boolean,`multiPruefung` boolean,`name`
-    text,`ID` int PRIMARY KEY) ENGINE=memory
+    text,`ID` int PRIMARY KEY) ENGINE=sloppy
 - sql: DROP TABLE IF EXISTS nav_site
-- sql: CREATE TABLE `nav_site` (`name` text,`ID` int,`nav_tenant` integer) ENGINE=memory
+- sql: CREATE TABLE `nav_site` (`name` text,`ID` int,`nav_tenant` integer) ENGINE=sloppy
 - sql: DROP TABLE IF EXISTS nav_department
-- sql: CREATE TABLE `nav_department` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int,`nav_site` int) ENGINE=memory
+- sql: CREATE TABLE `nav_department` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int,`nav_site` int) ENGINE=sloppy
 - sql: DROP TABLE IF EXISTS nav_year
-- sql: CREATE TABLE `nav_year` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int) ENGINE=memory
+- sql: CREATE TABLE `nav_year` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int) ENGINE=sloppy
 - sql: DROP TABLE IF EXISTS nav_check
-- sql: CREATE TABLE `nav_check` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int) ENGINE=memory
+- sql: CREATE TABLE `nav_check` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int) ENGINE=sloppy
 - sql: DROP TABLE IF EXISTS nav_access
-- sql: CREATE TABLE `nav_access` (`ID` int PRIMARY KEY,`user` int,`nav_tenant` int,`nav_site` int) ENGINE=memory
+- sql: CREATE TABLE `nav_access` (`ID` int PRIMARY KEY,`user` int,`nav_tenant` int,`nav_site` int) ENGINE=sloppy
 - scm: "(begin\n (insert (table \"memcp-tests\" \"nav_tenant\") '(\"ID\" \"name\") (map (produceN 100) (lambda (i)\
     \ (list (+ i 1) (concat \"tenant-\" (+ i 1))))))\n (insert (table \"memcp-tests\" \"nav_year\") '(\"ID\" \"\
     name\" \"nav_tenant\") (map (produceN 1100) (lambda (i) (list (+ i 1) (concat \"year-\" (+ i 1)) (+ 1 (mod i\
@@ -52,14 +54,14 @@ setup:
     nav_year\" \"nav_check\" \"nav_site\" \"nav_department\" \"nav_access\" \"nav_document\" \"nav_document_full\"\
     ) (lambda (t) (rebuild (table \"memcp-tests\" t) true false)))\n true)"
 - sql: DROP TABLE IF EXISTS nav_lookup_broad
-- sql: CREATE TABLE nav_lookup_broad (ID INT PRIMARY KEY, flag INT) ENGINE=memory
+- sql: CREATE TABLE nav_lookup_broad (ID INT PRIMARY KEY, flag INT) ENGINE=sloppy
 - scm: |
     (begin
       (insert (table "memcp-tests" "nav_lookup_broad") '("ID" "flag")
         (map (produceN 1000) (lambda (i) (list (+ i 1) 1))))
       (rebuild (table "memcp-tests" "nav_lookup_broad") true false))
 - sql: DROP TABLE IF EXISTS nav_future_binder
-- sql: CREATE TABLE nav_future_binder (ID INT PRIMARY KEY, nav_tenant INTEGER) ENGINE=memory
+- sql: CREATE TABLE nav_future_binder (ID INT PRIMARY KEY, nav_tenant INTEGER) ENGINE=sloppy
 - scm: |
     (begin
       (insert (table "memcp-tests" "nav_future_binder") '("ID" "nav_tenant")

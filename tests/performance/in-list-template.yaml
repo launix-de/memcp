@@ -3,6 +3,8 @@
 # Lexical cases: 100 operations, 3 warmups, 9 samples. QPCache cases: five
 # fresh caches, each with 40 lookups including its first cold compilation.
 metadata:
+  reuse_fixture: true
+  restart_after_setup: true
   version: '1.0'
   description: Literal-array template extraction and warm front-cache A/B workloads
 test_cases:
@@ -175,7 +177,7 @@ test_cases:
     data: ["ok"]
 setup:
 - sql: DROP TABLE IF EXISTS ilt_perf_rows
-- sql: CREATE TABLE ilt_perf_rows (id INT PRIMARY KEY, label TEXT) ENGINE=memory
+- sql: CREATE TABLE ilt_perf_rows (id INT PRIMARY KEY, label TEXT) ENGINE=sloppy
 - scm: (begin (insert (table "memcp-tests" "ilt_perf_rows") '("id" "label") (map (produceN 128) (lambda (i) (list
     i "item")))) (rebuild (table "memcp-tests" "ilt_perf_rows") true false))
 cleanup:
