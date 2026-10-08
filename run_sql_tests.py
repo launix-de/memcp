@@ -3411,7 +3411,9 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
         cases = performance_fixture_cases(str(suite))
         for key, value in summary.items():
             if value.get("baseline_failures"):
-                # Nondeterministic query errors still need complete verification.
+                # Same code cannot introduce support for a query. A/A query
+                # errors expose nondeterminism and must never become a waiver.
+                value.update(status="identical_execution_failure", passed=False)
                 continue
             group = value.get("timing_group")
             members = [member for member, case in cases.items() if case.get("timing_group") == group] if group else [key]
@@ -3425,6 +3427,10 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
             status = "PASS" if value["passed"] else "VERIFICATION PENDING" if verification_pending else "FAIL"
             if value.get("baseline_failures"):
                 print(f"PERF_AB BASELINE_UNAVAILABLE {key}: {json.dumps(value['baseline_failures'])}", flush=True)
+            if value.get("status") == "identical_execution_failure":
+                print(f"PERF_AB {status} IDENTICAL_EXECUTION_QUERY_FAILURE {key}: "
+                      "same executable/libraries produced inconsistent query outcomes", flush=True)
+                continue
             if value["time_ms"] is None:
                 print(f"PERF_AB {status} NEWLY_SUPPORTED {key}: baseline unavailable -> "
                       f"{value['candidate_ms']:.3f}ms; no speedup claimed; "

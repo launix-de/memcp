@@ -1769,6 +1769,14 @@ class PerformanceFixtureContractTests(unittest.TestCase):
         self.durations = lambda suite, role, index: 1001 if role == "B" else 100
         self.assertFalse(self.run_experiment())
 
+    def test_identical_execution_query_error_cannot_claim_new_support(self):
+        (self.candidate / "memcp").write_bytes((self.base / "memcp").read_bytes())
+        self.mutate = self.fail_baseline
+        self.assertFalse(self.run_experiment())
+        result = json.loads(self.output.read_text())[performance_case_key(self.suites[0], "cold")]
+        self.assertEqual(result["status"], "identical_execution_failure")
+        self.assertEqual(result["fixture_trials"], 7)
+
     def test_changed_scheme_code_prevents_identical_execution_shortcut(self):
         (self.candidate / "memcp").write_bytes((self.base / "memcp").read_bytes())
         for tree in (self.base, self.candidate):
