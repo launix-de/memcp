@@ -633,43 +633,59 @@ keys, stage outputs, and joins.
 
 ## Neumann / Top-Down Decorrelation
 
-MemCP follows the Neumann/NK15/BTW2025 decorrelation model described in:
+MemCP's logical decorrelation contract follows the model described in:
 
 - `papers/Unnesting-Arbitrary-Queries.pdf`
 - `papers/neumann-improving-unnesting-btw2025.pdf`
 
-Every dependent subquery first goes through simple unnesting:
+First attempt simple elimination of each dependent join: along paths of linear
+operators, move selections into the join condition or maps above the join when
+semantics permit. If no operator still accesses its outer bindings, convert it
+into a regular join (NK15 Section 3.1; BTW2025 Section 3.2, Figure 3).
 
-- collect equality classes (`cclasses`)
-- derive representative substitutions (`repr`)
-- pull predicates/maps when valid
-- convert trivial dependent joins into normal joins
+Otherwise use general top-down unnesting. Share the dependent join's domain and
+outer-reference information, with a parent link for nested dependencies; keep
+equality classes (`cclasses`) and representative substitutions (`repr`) local to
+each query fragment. Separate join branches get separate rewrite states, merged
+according to join semantics (BTW2025 Figures 4 and 6, Section 3.3).
 
-Only if an accessing operator still depends on outer references do we build
-general Domain D. Domain D is the fallback after simple unnesting fails, not the
-default for every correlation.
+Process nested dependent joins together in their parent context. Do not push
+independently computed domains across dependent joins, creating Cartesian
+products that later predicates discard (BTW2025 Section 2.3).
 
-Nested dependent joins must share a parent-chained top-down context for outer
-refs, cclasses, repr/substitution maps, domain keys, and shared roots. Do not
-restart full bottom-up analysis for every inner subquery.
+At a fragment with no remaining dependent accesses, either join its input with
+D or substitute proven equivalent columns. Compare their costs: substitution
+can lose selective domain pruning and increase intermediate work (NK15 Section
+4; BTW2025 Section 3.2). General unnesting does not require materializing D.
+These papers describe logical rewrites, not MemCP's persistent group-cache
+implementation, and do not establish which SQL constructs MemCP supports.
 
 ## Domain D
 
-Domain D is the duplicate-free projection of all outer references that the
-inner side actually reads.
+For a dependent join with outer input L and inner input R, Domain D is the
+DISTINCT projection of L onto `A(L) intersect F(R)`: the attributes L produces
+that R reads as free variables. It contains the joint bindings actually present
+in L, not a Cartesian product of distinct values from individual columns
+(NK15 Section 3.2; BTW2025 Section 3.2).
 
-It must not contain duplicate bindings. Duplicate domain rows break per-key
-outer/miss/anti semantics and can duplicate results.
+Deduplicate D, not L or the subquery result. Joining the per-binding results back
+to L must preserve outer multiplicity and the original join's unmatched-row
+semantics. Domain matching uses null-safe equality. Original SQL comparisons
+retain their own NULL semantics: substituting equal columns does not authorize
+dropping a NULL-rejecting predicate such as `x = x` (NK15 Section 3.3).
 
-Session reads used inside dependent helpers are treated like outer dependencies
-when they affect semantics. Pull their values into the helper domain/key
-context and join back with null-safe equality when needed.
+In MemCP, session reads that affect a dependent helper's result are additional
+semantic inputs. Carry their values explicitly through the helper's domain/key
+context. This extends the papers' free-variable model; neither paper specifies
+persistent group caches or session-key persistence.
 
-Physical group caches represent Domain D and relevant session values as explicit
-logical keys. They may be reused across queries and sessions when those keys
-distinguish every semantic binding and source dependencies remain valid. Cache
-rows retain values, never session or transaction objects. This is separate from
-the query-local lifetime of physical RecSets and RecMaps.
+Physical group caches represent domain bindings (or their proven equivalent
+representatives) and relevant session values as explicit logical key dimensions,
+alongside any grouping, range or ordered coordinates needed by the helper.
+They may be reused across queries and sessions when those keys distinguish
+every semantic binding and source dependencies remain valid. Cache rows retain
+values, never session or transaction objects. This is separate from the
+query-local lifetime of physical RecSets and RecMaps.
 
 The internal transaction session `__memcp_tx` identifies execution state, not
 SQL input, and must not become a semantic domain key. All other session reads
@@ -732,6 +748,12 @@ used whenever the chosen scan supports it: zero rows produces `NULL`, one row
 produces the scalar value, and observing the second row proves the
 more-than-one-row error. The operator need not scan the remaining matches.
 
+Correlated ORDER BY / OFFSET / LIMIT applies separately to each domain binding,
+not globally to the unnested relation (BTW2025 Section 4.4). Preserve this
+partitioned bound through logical planning and enforce it with storage
+operators. A window/rank rewrite is one logical formulation, not a requirement
+to copy the relation into a Scmer list or to materialize the complete domain.
+
 ## EXISTS, IN, and NOT IN
 
 EXISTS is modeled as presence semantics over a domain, usually via a
@@ -769,12 +791,19 @@ HAVING is post-group semantics. It belongs to the `group-stage`, not to the
 input-row WHERE. It must not filter input rows before aggregation unless a rule
 proves that key-only post-group pruning is semantically identical.
 
-Empty correlated aggregate groups must preserve one result per required domain
-binding:
+An aggregate without grouping keys produces one row for each domain binding
+even when its input is empty, before HAVING is applied:
 
 - COUNT returns 0
 - SUM/MIN/MAX/AVG and most other aggregates return SQL `NULL` where applicable
-- missing inner rows must not erase the outer binding
+- adding domain keys during unnesting must not lose this empty-input row
+
+Use an outer join or groupjoin with the appropriate aggregate semantics, not a
+synthetic input row counted by `COUNT(*)`. HAVING may remove the aggregate row.
+An explicit nonempty GROUP BY produces no groups for empty input; a scalar
+lookup of that missing result yields NULL. Grouping sets containing the empty
+set preserve its aggregate row too (BTW2025 Section 3.3). Preserve unmatched
+outer bindings according to the enclosing join's contract.
 
 ## Derived Tables and Materialization
 
