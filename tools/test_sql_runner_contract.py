@@ -88,6 +88,18 @@ from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
 
 class ManagedDataDirectoryContractTest(unittest.TestCase):
+    def test_successful_trial_keeps_server_log_before_cleanup(self):
+        with tempfile.TemporaryDirectory() as root:
+            log = Path(root) / "server.log"
+            artifact = Path(root) / "trial.memcp.log"
+            contents = "rebuilding shard\ncompleted measurement\n"
+            log.write_text(contents)
+            with mock.patch("run_sql_tests._memcp_log_file", str(log)), \
+                    mock.patch.dict(os.environ, {"MEMCP_SERVER_LOG_ARTIFACT": str(artifact)}):
+                cleanup_memcp_artifacts(None)
+            self.assertFalse(log.exists())
+            self.assertEqual(artifact.read_text(), contents)
+
     def test_failure_artifact_keeps_crash_header_after_cleanup(self):
         with tempfile.TemporaryDirectory() as root:
             log = Path(root) / "server.log"

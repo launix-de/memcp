@@ -2584,6 +2584,11 @@ def prepare_memcp_data_dir(port: int) -> Tuple[str, Optional[Path]]:
 
 def cleanup_memcp_artifacts(owned_data_dir: Optional[Path]) -> None:
     """Remove only temporary files and directories created by this runner."""
+    # An A/B verdict is computed after successful fixture processes exit.
+    # Retain their engine logs too, not only logs from query-level failures.
+    artifact = os.environ.get("MEMCP_SERVER_LOG_ARTIFACT")
+    if artifact and _memcp_log_file:
+        shutil.copyfile(_memcp_log_file, artifact)
     if owned_data_dir is not None:
         shutil.rmtree(owned_data_dir, ignore_errors=True)
     if _memcp_log_file:
@@ -3262,6 +3267,7 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
                        PERF_BASELINE_FILE=str(result_path), PERF_BASELINE_SEED=str(seed),
                        MEMCP_TEST_WORKTREE=str(tree), MEMCP_BINARY=str(tree / "memcp"),
                        MEMCP_FAILURE_LOG_ARTIFACT=str(artifacts / (name + ".memcp.log")),
+                       MEMCP_SERVER_LOG_ARTIFACT=str(artifacts / (name + ".memcp.log")),
                        MEMCP_TEST_DATA_DIR=data)
             command = [sys.executable, "-u", str(runner), str(suite), "--log-times", "--fail-fast"]
             print(f"PERF_FIXTURE {name}: {tree}", flush=True)

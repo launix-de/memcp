@@ -114,6 +114,10 @@ in the A/B artifacts. A candidate failure aborts rather than triggering retries.
 
 Session initialization required by a benchmark belongs in its `setup`.
 Standalone test cases without `threshold_ms` are not executed in A/B mode.
+Every A/B fixture retains its complete MemCP server log before runner-owned
+cleanup, including fixtures whose individual queries succeeded. The final
+cross-fixture verdict is computed later, so query-success logs are needed to
+investigate maintenance activity around a failed timing comparison.
 
 ## Document application SQL coverage
 
