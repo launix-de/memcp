@@ -13,9 +13,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-# MemCP Query Planner Invariants
+# MemCP Planner and Storage Concurrency Invariants
 
-This document is the architecture contract for MemCP query planning work.
+This document is the architecture contract for MemCP query planning and storage
+concurrency work.
 Branches may improve the implementation, add physical operators, or change
 internal helper encodings, but they must preserve the semantic and phase
 boundaries described here.
@@ -23,6 +24,196 @@ boundaries described here.
 These invariants apply especially to the `lib/queryplan-*.scm` modules loaded
 by `lib/queryplan.scm`, `lib/sql-parser.scm`, `lib/psql-parser.scm`, and physical
 scan/storage lowering code.
+
+## Parallel execution and publication
+
+MemCP must execute independent work in parallel, using as few locks as possible.
+The rules below describe required behavior, not a claim that every existing
+implementation already satisfies it. A change must identify any remaining
+violations; fixing a race by adding locks to an inner hot path is not sufficient.
+Existing protection must not be removed before its replacement provides the
+same ownership, visibility, lifetime, and durability guarantees.
+
+### Immutable main storage and mutable deltas
+
+- A shard's main column storages contain fixed, read-only values for one
+  generation. Updates must not overwrite these values. Delta storage contains
+  the insert list and deletion masks; transaction-local deletion/visibility
+  overlays remain separate from the shared main generation.
+- Delta writes must be thread-safe and lock-free. Reserve and initialize insert
+  storage without exposing incomplete rows to readers; publication must make
+  complete row contents available safely under concurrent writers. Delete-mask
+  updates and transaction-local overlays must preserve the same visibility
+  semantics without blocking readers.
+- Preallocated insert storage can avoid allocation and replacement of the insert
+  slice on every append/publication. It is an implementation option, not a fixed
+  capacity requirement: growth must keep already published rows valid and must
+  not require copying the complete live delta for each write.
+- Main payload immutability does not make a mutable column directory, index
+  directory, lazy-load state, or decoded-value cache immutable. Protect those
+  auxiliary structures through their own publication/ownership protocol.
+  Reading an ordinary Go map concurrently with mutation remains forbidden.
+- Readers retain a valid main generation through use and access deltas and
+  deletion overlays according to transaction visibility. Column readers, indexes,
+  physical row IDs, and delta coordinates must belong to compatible
+  generations. An atomic pointer load alone is not a lifetime or consistency
+  proof. Retirement must wait for all relevant owners without making active
+  queries wait for reclamation.
+- Operators that require a fixed input extent may capture the highest published
+  record ID once and ignore later inserts. Reserved but unpublished insert slots
+  are not readable rows. The record-ID bound complements deletion masks and
+  transaction-local overlays; it does not replace their visibility checks.
+
+### Readers and rebuilds must not wait for writers
+
+- Readers must not be blocked by writers. They must be able to consume a valid
+  published generation with the visibility required by their transaction while
+  writes proceed. This requirement does not weaken SQL isolation or permit
+  uncommitted values to become visible.
+- Rebuilds must block neither reads nor writes. Compression, index construction,
+  persistence I/O, and other generation-building work run on privately owned
+  state, outside locks needed by active readers or writers. Publication must not
+  turn this work into a stop-the-world phase.
+- During a rebuild, writes must be forwarded to both generations while both
+  remain live. The handover protocol must cover inserts, updates, deletes, and
+  commit/rollback visibility changes, including mutations concurrent with the
+  capture of the rebuild input and final publication. Buffered forwarding during
+  private construction is valid only if writes continue and the successor cannot
+  be consumed until all required mutations have been incorporated. No mutation may
+  be lost, applied twice logically, or resurrect a deleted row.
+- Reads remain valid throughout the handover. Publish a complete successor;
+  never expose partially initialized columns or mix generations to construct a
+  row. An aborted rebuild leaves the original generation usable. Retaining old
+  generations must also preserve the existing WAL and durable schema-publication
+  contract; reclamation is not permission to delete committed data.
+- A bounded mutex critical section is not automatically nonblocking. If readers
+  or writers wait for a rebuild's catch-up/publication lock, that remains a gap
+  against this contract and must be addressed explicitly.
+
+### No synchronization writes in inner read hot paths
+
+- `sync.RWMutex.RLock` and `RUnlock` write shared memory and cause cache-line
+  traffic. They are not suitable for inner scan, filter, projection, comparison,
+  or JIT-fused loops; pending writers can also block new readers.
+- Reading must be lock-free and ideally perform no non-local RAM writes at all.
+  Invocation-local cursor/accumulator updates are allowed. Atomic writes to
+  shared reader counters or usage metadata are still non-local RAM writes;
+  replacing a read lock with such a write does not eliminate that traffic.
+- Move synchronization and metadata computation to publication, rebuild,
+  operator setup, or batch boundaries. Row loops use invocation-owned readers
+  and immutable main payloads. Shared usage counters, reference counters,
+  feedback CAS operations, and cache admission must likewise stay out of those
+  loops. Delta and transaction-overlay access still needs a valid concurrency
+  protocol; main immutability cannot justify racing delta writers.
+- Do not run query callbacks, compilation, I/O, or retained-memory traversals
+  while holding locks needed by other operations. Define one lock order for
+  remaining mutation/publication paths, avoid lock upgrades, and release locks
+  and ownership rights on cancellation, errors, and panics.
+
+### Planner schema and statistics reads
+
+- Schema and statistics queries must be lock-free and O(1) per requested
+  metadata item, independent of row count and shard count. Enumerating or
+  returning `k` metadata items naturally costs O(k); the implementation must not
+  traverse the underlying data to obtain them.
+- Publish consolidated metadata atomically for lock-free reads. Build
+  schema descriptions and bounded statistical summaries during DDL,
+  initialization, rebuild, or maintenance; do not recompute them when the
+  planner or a plan-cache guard asks for them. A missing estimate is unknown,
+  not permission to load columns, acquire locks, sample rows, or build indexes
+  in a metadata getter.
+- A reader must see compatible schema semantics and statistics, rather than
+  combine incompatible publication revisions. Statistics-dependent choices
+  retain the executable tipping-point guards described below. Explicitly
+  costed sampling/preparation is a separate operation, never a hidden fallback
+  inside a schema/statistics read or guard.
+
+### Bounded parallelism and verifiable ownership
+
+- Parallelize sufficiently large batches or shards within the query/session
+  budget. Use worker-local accumulators and merge at batch/task completion;
+  avoid per-row goroutines and shared counters. Streaming producers must obey
+  bounded buffering/backpressure and cancellation, rather than accumulate an
+  unbounded intermediate relation.
+- Every background task has an owner and a completion/cancellation protocol.
+  Request/test completion must not leave callbacks mutating another invocation's
+  state. Shared process settings and diagnostic callbacks need an explicit
+  ownership protocol; tests that change them must run exclusively or use
+  invocation-local state.
+- Concurrency changes need deterministic tests around publication and rebuild
+  handovers, including concurrent writes and transaction visibility, plus
+  repeated/shuffled race-detector runs where applicable. Native JIT instructions
+  are not instrumented by Go's race detector; test the shared-state protocol and
+  SQL results as well. Correctness and blocking behavior both need evidence.
+
+## Persistence and permanent format compatibility
+
+### Compression formats and versioned headers
+
+- Every persisted storage/compression format remains readable forever by later
+  MemCP versions. Removing a writer or replacing a compression algorithm does
+  not authorize removing its reader, reinterpreting old bytes, or requiring an
+  export/reimport to open existing data.
+- Format identity is stored in the file header, not inferred from the running
+  MemCP release. The storage magic byte identifies the format family; a
+  per-format version field selects its binary layout where that field exists.
+  Magic bytes and published layout/encoding identifiers are permanent
+  assignments: never reuse an old identifier for a different interpretation.
+- A layout change needs a new version and a reader for that version. Writers
+  emit their current documented layout; dispatch retains every historical
+  reader, including `deserializeXxxV*` helpers and nested component formats.
+  Never repurpose an old reader to decode a new layout. Optimization of an
+  in-memory representation must not silently change the meaning of disk bytes.
+- Legacy layouts without a version field retain their original framing. In
+  particular, magic bytes 1, 2, 13 and 40 must not gain an inline version byte;
+  changed layouts need a new magic byte and the original legacy reader remains.
+  Apply the same rule to any other unversioned layout without a safely reserved
+  version field. Existing padding or legacy sentinels may only be interpreted
+  according to the documented compatibility rules for that format.
+- Headers, byte order, integer widths, compression/encoding IDs, framing and
+  legacy dispatch must be documented with the serializer/deserializer. Mixed
+  old and new column formats must remain usable in one database; rebuilds may
+  write current formats without making untouched old files unreadable.
+- Unsupported required format versions and malformed data must fail explicitly,
+  without overwriting the original data or substituting empty values. Optional
+  statistics/cache hints may be discarded only when the public data and SQL
+  semantics remain recoverable; this exception never applies to user data.
+
+The `storages` registration and versioning comments in `storage/storage.go`
+define the current dispatch assignments and legacy exceptions.
+
+### Durability and cleanup ownership
+
+- Preserve each engine's durability contract: `safe` uses fsynced WAL and crash
+  recovery; `logged` uses WAL without fsync; `sloppy` persists rebuilt columns
+  but has no WAL for subsequent deltas; `memory` has no restart durability.
+  Performance work must not silently weaken the selected engine's guarantee.
+- Rebuild, publication, log replay and retirement must preserve committed data
+  through restart and failure according to that contract. An incomplete
+  successor must not replace the last recoverable generation. Aborting a private
+  file writer must not delete the published file.
+- Eviction releases resident representations, never persistent user data.
+  Memory-engine data and unflushed deltas must not be evicted in a way that loses
+  them. File deletion belongs to explicit DROP or the documented explicit
+  persisted-to-memory engine transition, not background cache cleanup.
+- Lifecycle triggers must not delete unrelated data except through explicitly
+  configured cascading policies. Preserve the engine-transition and cleanup
+  contracts in `AGENTS.md`; format compatibility does not authorize destructive
+  migration or weaken those contracts.
+
+### Compatibility evidence
+
+- A current-writer/current-reader round trip alone does not prove compatibility.
+  Format changes need tests that read historical encodings and check values,
+  NULLs and relevant boundary cases. Retain that coverage when writers change.
+- Upgrade tests must open untouched data produced by predecessor binaries,
+  validate public SQL results, and cover mutation and restart under the new
+  binary. A successful startup alone is not sufficient. Extend the existing
+  upgrade workload for new persisted optimization shapes.
+- Keep the predecessor matrix and immutable `upgrade-release-*` tags described
+  in `tests/storage/persistence/UPGRADE.md`; never move, reuse or remove a pin to
+  hide incompatibility. Permanent read support is the contract even for formats
+  not exercised by the current fixtures.
 
 ## Planner Pipeline
 
@@ -163,7 +354,7 @@ proven superset of `T_R(p)`, it is a safe scan boundary only while the original
 predicate `p` remains as a residual filter. This permits cheap projections or
 partially extracted branches to reduce the search space without claiming a
 stronger equivalence than was proved. Union/intersection operands must refer to
-the same base relation and visibility snapshot.
+the same base relation with compatible deletion overlays and input extents.
 
 Containment proofs compose monotonically:
 
@@ -174,8 +365,8 @@ C_R(p) contains T_R(p), C_R(q) contains T_R(q)
 ```
 
 Every RecSet rewrite must therefore record or establish whether its result is
-exact or merely a candidate, identify its base relation and snapshot, and keep
-the residual predicate unless exactness has been proved. Formula equality is
+exact or merely a candidate, identify its base relation and visibility context,
+and keep the residual predicate unless exactness has been proved. Formula equality is
 not by itself permission to change result multiplicity, ordering, NULL
 extension, or LIMIT boundaries; RecSets prove which base records may be scanned,
 not how often or in which semantic order result rows are produced.
@@ -270,10 +461,10 @@ most likely one. Existing immutable plan tails remain valid for in-flight
 queries.
 
 Guards repeat cost decisions, not query planning. They must be side-effect-free
-and must not scan relations, build indexes or group caches, acquire schema
-write locks, or materialize data. Repeated catalog inputs must be bound once
-per guard evaluation. If a useful generalized inequality is unavailable, an
-exact parameter/statistics-input guard is the conservative fallback; an old
+and must not scan relations, build indexes or group caches, acquire locks
+for schema/statistics reads, or materialize data. Repeated catalog inputs must
+be bound once per guard evaluation. If a useful generalized inequality is
+unavailable, an exact parameter/statistics-input guard is the conservative fallback; an old
 specialized plan must never be selected after an unguarded cost input changes.
 
 Coverage of session inputs is transitive through shared guard bindings. A
@@ -289,8 +480,9 @@ When an unknown cardinality interval crosses a costly operator boundary, the
 cache formula may execute one query-local observation *before* guard dispatch.
 That preparation is not part of the guard: it produces a physical value such
 as an exact RecSet plus a scalar metric, and every alternative in the request
-must reuse the same value and visibility snapshot. Only the scalar metric may
-enter the isolated compile session after a guard miss; opaque native values and
+must reuse the same value, deletion overlays, and any captured record-ID bound.
+Only the scalar metric may enter the isolated compile session after a guard miss;
+opaque native values and
 the request transaction must remain in the executing session. Preparations
 must be deduplicated by physical decision, must not persist beyond the query,
 and are justified only when the cost model says their value of information can
@@ -371,13 +563,16 @@ variants must preserve this definition/cache distinction. Eager preparation,
 selective prewarming, and lazy repair may change when work happens, never the
 query-visible result.
 
-## LIMIT Is A Scan Boundary
+## LIMIT Belongs In Storage Operators
 
-Every physical operator that owns a SQL `LIMIT` must lower to `scan_order` or
-`scan_order_multi` with that limit. This also applies without an explicit
-`ORDER BY`, using an empty sort specification. A limited relational result must
-never be copied into a Scheme list or association structure for a later
-`sort`/`slice` step.
+SQL OFFSET/LIMIT must be implemented by storage operators, with or without an
+explicit ORDER BY. `scan_order` and `scan_order_multi` are existing examples,
+not an exclusive list of permitted implementations. Use the chosen operator's
+limit/braking facilities while preserving the logical ordering and limit scope.
+Never copy a relation into a Scmer slice, Scheme list, or association structure
+and then apply list sorting/slicing to implement relational OFFSET/LIMIT.
+That bypasses storage batching, parallel execution, indexes, and range braking;
+a small-input speedup does not justify the loss of scalability.
 
 `scan_order` may also be used when row order is semantically irrelevant. In
 that mode it still owns OFFSET/LIMIT and may use top-k pruning: it need not
@@ -443,29 +638,29 @@ Do not introduce a storage-level query cache, move group caches into transient
 planner state, or merge the two lifecycles merely to simplify physical
 lowering or lock management.
 
-Point, additive-range and snapshot dimensions may coexist in one group-cache
-relation. Aggregate formulas own payload columns, not separate carriers. Cold
+Point, additive-range and ordered coordinate dimensions may coexist in one
+group-cache relation. Aggregate formulas own payload columns, not separate carriers. Cold
 scalar probes accumulate work in `system_statistic.group_cache_candidates`;
-building additional snapshot state spends that credit on a later invocation.
+building additional state at retained coordinates spends that credit on a later
+invocation.
 An already computed scalar may be retained once its storage cost is covered,
 without evaluating its producer again. Cache rows
 must retain values and logical coordinates only, never request closures,
 transactions, sessions or physical row identities.
 
-When mixed dimensions refine a range partition, capture the disjoint cell
-bounds under the partition mutex and release it before evaluating aggregate
-payloads. Concurrent refinement may create smaller cells but must not change
-the cells being summed by an already running query.
+When mixed dimensions refine a range partition, obtain consistent disjoint cell
+bounds before evaluating aggregate payloads. Concurrent refinement may create
+smaller cells but must not change the cells being summed by an already running query.
 
-Selected-row identity and value projection are independent. A shared RecMap
+Selected-row identity and value projection are independent. A query-local RecMap
 must apply the complete proven projection (including arithmetic and NULL
 handling) to the selected row. A missing selected row returns SQL NULL without
 evaluating that projection; `SELECT COALESCE(column, 7)` still returns NULL
 when its subquery has no row.
 
-A snapshot dimension denotes one ordered coordinate, not a disjoint partial
-sum interval. Reuse requires the same fixed inputs and complete source-version
-view. A logical contribution proof must cover both selected-row changes and
+An ordered coordinate dimension denotes one coordinate, not a disjoint partial
+sum interval. Reuse requires the same fixed inputs and valid source dependencies.
+A logical contribution proof must cover both selected-row changes and
 predicate/payload changes; conditional payloads and bounded existence tests
 retain all original residual predicates. A derived outer coordinate remains
 an explicit argument of every shared physical selection recipe.
@@ -507,37 +702,60 @@ keys, stage outputs, and joins.
 
 ## Neumann / Top-Down Decorrelation
 
-MemCP follows the Neumann/NK15/BTW2025 decorrelation model described in:
+MemCP's logical decorrelation contract follows the model described in:
 
 - `papers/Unnesting-Arbitrary-Queries.pdf`
 - `papers/neumann-improving-unnesting-btw2025.pdf`
 
-Every dependent subquery first goes through simple unnesting:
+First attempt simple elimination of each dependent join: along paths of linear
+operators, move selections into the join condition or maps above the join when
+semantics permit. If no operator still accesses its outer bindings, convert it
+into a regular join (NK15 Section 3.1; BTW2025 Section 3.2, Figure 3).
 
-- collect equality classes (`cclasses`)
-- derive representative substitutions (`repr`)
-- pull predicates/maps when valid
-- convert trivial dependent joins into normal joins
+Otherwise use general top-down unnesting. Share the dependent join's domain and
+outer-reference information, with a parent link for nested dependencies; keep
+equality classes (`cclasses`) and representative substitutions (`repr`) local to
+each query fragment. Separate join branches get separate rewrite states, merged
+according to join semantics (BTW2025 Figures 4 and 6, Section 3.3).
 
-Only if an accessing operator still depends on outer references do we build
-general Domain D. Domain D is the fallback after simple unnesting fails, not the
-default for every correlation.
+Process nested dependent joins together in their parent context. Do not push
+independently computed domains across dependent joins, creating Cartesian
+products that later predicates discard (BTW2025 Section 2.3).
 
-Nested dependent joins must share a parent-chained top-down context for outer
-refs, cclasses, repr/substitution maps, domain keys, and shared roots. Do not
-restart full bottom-up analysis for every inner subquery.
+At a fragment with no remaining dependent accesses, either join its input with
+D or substitute proven equivalent columns. Compare their costs: substitution
+can lose selective domain pruning and increase intermediate work (NK15 Section
+4; BTW2025 Section 3.2). General unnesting does not require materializing D.
+These papers describe logical rewrites, not MemCP's persistent group-cache
+implementation, and do not establish which SQL constructs MemCP supports.
 
 ## Domain D
 
-Domain D is the duplicate-free projection of all outer references that the
-inner side actually reads.
+For a dependent join with outer input L and inner input R, Domain D is the
+DISTINCT projection of L onto `A(L) intersect F(R)`: the attributes L produces
+that R reads as free variables. It contains the joint bindings actually present
+in L, not a Cartesian product of distinct values from individual columns
+(NK15 Section 3.2; BTW2025 Section 3.2).
 
-It must not contain duplicate bindings. Duplicate domain rows break per-key
-outer/miss/anti semantics and can duplicate results.
+Deduplicate D, not L or the subquery result. Joining the per-binding results back
+to L must preserve outer multiplicity and the original join's unmatched-row
+semantics. Domain matching uses null-safe equality. Original SQL comparisons
+retain their own NULL semantics: substituting equal columns does not authorize
+dropping a NULL-rejecting predicate such as `x = x` (NK15 Section 3.3).
 
-Session reads used inside dependent helpers are treated like outer dependencies
-when they affect semantics. Pull their values into the helper domain/key
-context and join back with null-safe equality when needed.
+In MemCP, semantically relevant external dependencies, including session reads,
+are part of the complete Domain D. Carry their values explicitly through the
+helper's domain/key context, including dependencies below grouped or derived
+blocks. This is a binding requirement, extending the papers' free-variable
+model; neither paper specifies persistent group caches or session-key persistence.
+
+Physical group caches represent domain bindings (or their proven equivalent
+representatives) and relevant session values as explicit logical key dimensions,
+alongside any grouping, range or ordered coordinates needed by the helper.
+They may be reused across queries and sessions when those keys distinguish
+every semantic binding and source dependencies remain valid. Cache rows retain
+values, never session or transaction objects. This is separate from the
+query-local lifetime of physical RecSets and RecMaps.
 
 The internal transaction session `__memcp_tx` identifies execution state, not
 SQL input, and must not become a semantic domain key. All other session reads
@@ -564,8 +782,10 @@ Intermediate-relation projection is valid only when all semantic inputs are repr
   binding
 - the full local filter remains attached to the intermediate-relation build or as a residual
   predicate
-- session-dependent intermediate relations are query-local and cannot be reused across
-  different session bindings
+- physical RecSets and RecMaps are query-local, must not survive their query,
+  and must not be persisted; their physical row identities may change on rebuild
+- reusable group caches include Domain D and all semantically relevant session
+  values in their logical keys rather than capturing a request's session
 - NULL and empty-domain behavior remains that of the logical stage
 
 ## Scalar Cardinality
@@ -585,9 +805,9 @@ Neumann decorrelation must attach the complete cardinality contract to the
 resulting LEFT JOIN helper before optimization: `first` carries
 `physical_max_rows = 1` and `on_overflow = ignore`; `single_or_error` carries
 `physical_max_rows = 2` and `on_overflow = error`. Physical lowering consumes
-these facts and emits `scan_order` with the exact bound, using an empty order
-array when no SQL ordering is required. It must not rediscover the original
-subquery syntax.
+these facts and selects a storage operator that enforces the bound and overflow
+behavior. For example, `scan_order` can use an empty order array when no SQL
+ordering is required. Lowering must not rediscover the original subquery syntax.
 
 Physical lowering may implement `single_or_error` with `scan_order` partition
 limits, `LIMIT 2`, reducers, promise/session state, or another efficient
@@ -597,6 +817,12 @@ For a scalar cardinality check, top-k of two rows is sufficient and should be
 used whenever the chosen scan supports it: zero rows produces `NULL`, one row
 produces the scalar value, and observing the second row proves the
 more-than-one-row error. The operator need not scan the remaining matches.
+
+Correlated ORDER BY / OFFSET / LIMIT applies separately to each domain binding,
+not globally to the unnested relation (BTW2025 Section 4.4). Preserve this
+partitioned bound through logical planning and enforce it with storage
+operators. A window/rank rewrite is one logical formulation, not a requirement
+to copy the relation into a Scmer list or to materialize the complete domain.
 
 ## EXISTS, IN, and NOT IN
 
@@ -635,12 +861,19 @@ HAVING is post-group semantics. It belongs to the `group-stage`, not to the
 input-row WHERE. It must not filter input rows before aggregation unless a rule
 proves that key-only post-group pruning is semantically identical.
 
-Empty correlated aggregate groups must preserve one result per required domain
-binding:
+An aggregate without grouping keys produces one row for each domain binding
+even when its input is empty, before HAVING is applied:
 
 - COUNT returns 0
 - SUM/MIN/MAX/AVG and most other aggregates return SQL `NULL` where applicable
-- missing inner rows must not erase the outer binding
+- adding domain keys during unnesting must not lose this empty-input row
+
+Use an outer join or groupjoin with the appropriate aggregate semantics, not a
+synthetic input row counted by `COUNT(*)`. HAVING may remove the aggregate row.
+An explicit nonempty GROUP BY produces no groups for empty input; a scalar
+lookup of that missing result yields NULL. Grouping sets containing the empty
+set preserve its aggregate row too (BTW2025 Section 3.3). Preserve unmatched
+outer bindings according to the enclosing join's contract.
 
 ## Derived Tables and Materialization
 
@@ -750,8 +983,8 @@ guards consuming this work must cover changes to it as well as result rates.
 UNION adds branch work independently of output cardinality. Costgen consumes
 the same work features and must not infer matcher input from result rows.
 
-See [the Omnestum analysis and measurement report](ADAPTIVE_SELECTIVITY.md) for
-representation limits and the persistence/RecSet follow-up.
+See [the adaptive selectivity analysis and measurement report](ADAPTIVE_SELECTIVITY.md)
+for representation limits and the persistence/RecSet follow-up.
 
 Cost consumers still take a scalar probability: local filtered row counts,
 join cardinalities, probe work and physical cost comparisons. The statistical
@@ -774,8 +1007,8 @@ ordinary scans count locally at batch boundaries; complete table-input RecSet
 scans reuse the builder's distinct result count. Both publish only at successful
 shard completion. They use the visible shard population for the complete
 predicate's denominator. No additional per-element atomics, locks, callbacks or
-histogram updates are allowed. Mutation scans and ACID snapshots do not train
-this shared model.
+histogram updates are allowed. Mutation scans and scans using transaction-local
+visibility overlays do not train this shared model.
 
 Each shard retains at most 64 immutable observations. One CAS publishes an EMA
 update; contention may drop an observation and must never trigger a retry loop.
@@ -789,7 +1022,7 @@ buckets average distinct retained patterns, not their query execution counts.
 The histogram is a weak workload-derived prior, not proof that a new word occurs.
 It cannot cross columns, collations, or prefix/suffix/substring pattern classes.
 
-Publication uses immutable snapshots. Reads do not acquire an RWMutex or write
+Publication uses immutable metadata records. Reads do not acquire an RWMutex or write
 LRU/access counters. A changed statistics generation retains compatible table
 aggregates as `historical_scan_feedback` with confidence 0.35. A static column
 semantics fingerprint rejects hints from incompatible schemas. Shard EMA state
@@ -852,7 +1085,7 @@ conjunct's rate. Exact predicate feedback stays first. Positive sampling budgets
 remain permitted; a frequency prior must not suppress them.
 
 Frequency payloads are immutable and published in the existing atomic column
-and table metadata snapshots. Retained summaries and their name arrays are
+and table metadata records. Retained summaries and their name arrays are
 charged to table metadata memory once. Reads neither lock nor access shards. Optional
 `key_frequencies` version 1 schema hints restore before database publication,
 without loading columns. Invalid versions/entries are ignored; memory/cache and
@@ -962,20 +1195,26 @@ Ordered plan selection must not depend on the current physical partition layout.
 
 Canonical cache access runs its idempotent `createtable`/`oninit` preparation
 before consuming rows. Storage owns usage tracking, preparation markers and
-dependency maintenance. Snapshot/point payload columns depend on logical source
-tables; source DML invalidates their values through computed-column triggers.
+dependency maintenance. Payload columns for ordered coordinates or point keys
+depend on logical source tables; source DML invalidates their values through
+computed-column triggers.
 Rebuild/repartition preserves valid payloads. Query-local transactions bypass
-shared payloads. Shared computation and publication hold source read locks;
-stored payloads never retain session/transaction closures or physical row IDs.
-Range aggregates keep their existing selective incremental maintenance; snapshot
-payloads conservatively rebuild after a source write until finer dependency
+shared payloads. Shared computation and publication must preserve source-read
+consistency and invalidation dependencies: concurrent source DML must not allow
+stale results to be published as current. Use as few locks as possible and
+preserve lock-free reads; correctness must not depend on holding source read
+locks throughout payload computation. Stored payloads never retain
+session/transaction closures or physical row IDs.
+Range aggregates keep their existing selective incremental maintenance; payloads
+at ordered coordinates conservatively rebuild after a source write until finer dependency
 maintenance is proved. Moving coordinates still use nearest-anchor corrections.
 
 ## Group-cache retention
 
 Retention changes materialization, never the logical input domain, aggregate
-recipe or source dependency graph. Snapshots are addressed by domain values;
-rebuild/repartition identities must not enter their keys or retention decisions.
+recipe or source dependency graph. Retained aggregate values are addressed by
+domain values; rebuild/repartition identities must not enter their keys or
+retention decisions.
 
 - A complete, trigger-maintained `COUNT(*) = 0` may certify that an additive
   range cell needs no further split. A nullable/filtered count, zero sum, or
@@ -993,20 +1232,21 @@ rebuild/repartition identities must not enter their keys or retention decisions.
   identical bounds on every other axis. Both boundary value and cut kind matter.
   Their union has the neutral state for every payload on that carrier. Keep the
   table, definitions and triggers; do not substitute DROP/recreate for a merge.
-- Snapshot overlays reference a retained base coordinate directly. On an
+- Aggregate payload overlays reference a retained base coordinate directly. On an
   unchanged plateau, retain that base and the last actual contribution transition;
   a superseded cursor can be retired without losing contribution coverage.
   Preserve all coordinates produced by one active SQL request: a board with many
   points must not evict its own next-request working set. Scalar connection/query
-  observations may protect that working set; they never identify a snapshot or
-  decide whether its aggregate is valid, and retain no transaction/session object.
+  observations may protect that working set; they never identify a retained
+  aggregate value or decide whether its aggregate is valid, and retain no
+  transaction/session object.
   Older payloads without the plateau witness conservatively retain their coordinate as
-  a transition. Exact retained snapshots and old data remain readable unchanged.
+  a transition. Exact retained aggregate values and old data remain readable unchanged.
 - Retirement of one payload must preserve other payloads at the same coordinate.
   Delete a cell row only after its last payload is gone, and only where missing
   cells are repaired lazily. Source-derived key domains require separate coverage
   maintenance; deleting their rows must never erase SQL groups.
-- `discard_cache_value` runs under the caller's semantic domain mutex, outside
+- `discard_cache_value` preserves semantic domain consistency and runs outside
   CacheManager callbacks. It pins the carrier and columns, checks the expected
   old payload, and uses ordinary storage mutation paths. Busy DDL or eviction
   defers retirement. It retains no source table, shard, transaction or session
