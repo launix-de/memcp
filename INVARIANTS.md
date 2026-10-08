@@ -44,11 +44,6 @@ same ownership, visibility, lifetime, and durability guarantees.
   directory, lazy-load state, or decoded-value cache immutable. Protect those
   auxiliary structures through their own publication/ownership protocol.
   Reading an ordinary Go map concurrently with mutation remains forbidden.
-- Published snapshots must be transitively immutable: referenced maps, slices,
-  type descriptors, and index metadata cannot be modified through another
-  alias. Build privately, initialize completely, then publish atomically.
-  Expression-local specialization must not mutate a shared builtin/type
-  descriptor.
 - Readers acquire a valid generation and visibility snapshot at an operator or
   batch boundary and retain its lifetime through use. Column readers, indexes,
   physical row IDs, and delta coordinates must belong to compatible
