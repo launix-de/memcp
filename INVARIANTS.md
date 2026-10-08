@@ -146,6 +146,75 @@ same ownership, visibility, lifetime, and durability guarantees.
   are not instrumented by Go's race detector; test the shared-state protocol and
   SQL results as well. Correctness and blocking behavior both need evidence.
 
+## Persistence and permanent format compatibility
+
+### Compression formats and versioned headers
+
+- Every persisted storage/compression format remains readable forever by later
+  MemCP versions. Removing a writer or replacing a compression algorithm does
+  not authorize removing its reader, reinterpreting old bytes, or requiring an
+  export/reimport to open existing data.
+- Format identity is stored in the file header, not inferred from the running
+  MemCP release. The storage magic byte identifies the format family; a
+  per-format version field selects its binary layout where that field exists.
+  Magic bytes and published layout/encoding identifiers are permanent
+  assignments: never reuse an old identifier for a different interpretation.
+- A layout change needs a new version and a reader for that version. Writers
+  emit their current documented layout; dispatch retains every historical
+  reader, including `deserializeXxxV*` helpers and nested component formats.
+  Never repurpose an old reader to decode a new layout. Optimization of an
+  in-memory representation must not silently change the meaning of disk bytes.
+- Legacy layouts without a version field retain their original framing. In
+  particular, magic bytes 1, 2, 13 and 40 must not gain an inline version byte;
+  changed layouts need a new magic byte and the original legacy reader remains.
+  Apply the same rule to any other unversioned layout without a safely reserved
+  version field. Existing padding or legacy sentinels may only be interpreted
+  according to the documented compatibility rules for that format.
+- Headers, byte order, integer widths, compression/encoding IDs, framing and
+  legacy dispatch must be documented with the serializer/deserializer. Mixed
+  old and new column formats must remain usable in one database; rebuilds may
+  write current formats without making untouched old files unreadable.
+- Unsupported required format versions and malformed data must fail explicitly,
+  without overwriting the original data or substituting empty values. Optional
+  statistics/cache hints may be discarded only when the public data and SQL
+  semantics remain recoverable; this exception never applies to user data.
+
+The `storages` registration and versioning comments in `storage/storage.go`
+define the current dispatch assignments and legacy exceptions.
+
+### Durability and cleanup ownership
+
+- Preserve each engine's durability contract: `safe` uses fsynced WAL and crash
+  recovery; `logged` uses WAL without fsync; `sloppy` persists rebuilt columns
+  but has no WAL for subsequent deltas; `memory` has no restart durability.
+  Performance work must not silently weaken the selected engine's guarantee.
+- Rebuild, publication, log replay and retirement must preserve committed data
+  through restart and failure according to that contract. An incomplete
+  successor must not replace the last recoverable generation. Aborting a private
+  file writer must not delete the published file.
+- Eviction releases resident representations, never persistent user data.
+  Memory-engine data and unflushed deltas must not be evicted in a way that loses
+  them. File deletion belongs to explicit DROP or the documented explicit
+  persisted-to-memory engine transition, not background cache cleanup.
+- Lifecycle triggers must not delete unrelated data except through explicitly
+  configured cascading policies. Preserve the engine-transition and cleanup
+  contracts in `AGENTS.md`; format compatibility does not authorize destructive
+  migration or weaken those contracts.
+
+### Compatibility evidence
+
+- A current-writer/current-reader round trip alone does not prove compatibility.
+  Format changes need tests that read historical encodings and check values,
+  NULLs and relevant boundary cases. Retain that coverage when writers change.
+- Upgrade tests must open untouched data produced by predecessor binaries,
+  validate public SQL results, and cover mutation and restart under the new
+  binary. A successful startup alone is not sufficient. Extend the existing
+  upgrade workload for new persisted optimization shapes.
+- Keep the predecessor matrix and immutable `upgrade-release-*` tags described
+  in `tests/storage/persistence/UPGRADE.md`; never move, reuse or remove a pin to
+  hide incompatibility. Permanent read support is the contract even for formats
+  not exercised by the current fixtures.
+
 ## Planner Pipeline
 
 The planner pipeline is:
@@ -674,10 +743,11 @@ semantics. Domain matching uses null-safe equality. Original SQL comparisons
 retain their own NULL semantics: substituting equal columns does not authorize
 dropping a NULL-rejecting predicate such as `x = x` (NK15 Section 3.3).
 
-In MemCP, session reads that affect a dependent helper's result are additional
-semantic inputs. Carry their values explicitly through the helper's domain/key
-context. This extends the papers' free-variable model; neither paper specifies
-persistent group caches or session-key persistence.
+In MemCP, semantically relevant external dependencies, including session reads,
+are part of the complete Domain D. Carry their values explicitly through the
+helper's domain/key context, including dependencies below grouped or derived
+blocks. This is a binding requirement, extending the papers' free-variable
+model; neither paper specifies persistent group caches or session-key persistence.
 
 Physical group caches represent domain bindings (or their proven equivalent
 representatives) and relevant session values as explicit logical key dimensions,

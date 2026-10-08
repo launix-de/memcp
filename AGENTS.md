@@ -372,7 +372,8 @@ policies. See also `docs/engine-semantics.md` for the user-facing reference.
 
 ### Serialization Format Stability Contract
 
-See the versioning rules in the `storages` map comment in `storage/storage.go`.
+See the permanent read-compatibility contract in `INVARIANTS.md` and the
+versioning rules in the `storages` map comment in `storage/storage.go`.
 Summary:
 1. Magic bytes are permanent assignments — never change or reassign.
 2. Old `deserializeXxxVN` helpers must never be deleted; on-disk data must stay
