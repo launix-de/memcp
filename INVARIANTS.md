@@ -13,9 +13,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-# MemCP Query Planner Invariants
+# MemCP Planner and Storage Concurrency Invariants
 
-This document is the architecture contract for MemCP query planning work.
+This document is the architecture contract for MemCP query planning and storage
+concurrency work.
 Branches may improve the implementation, add physical operators, or change
 internal helper encodings, but they must preserve the semantic and phase
 boundaries described here.
@@ -23,6 +24,115 @@ boundaries described here.
 These invariants apply especially to the `lib/queryplan-*.scm` modules loaded
 by `lib/queryplan.scm`, `lib/sql-parser.scm`, `lib/psql-parser.scm`, and physical
 scan/storage lowering code.
+
+## Parallel execution and publication
+
+MemCP must execute independent work in parallel with minimal synchronization.
+The rules below describe required behavior, not a claim that every existing
+implementation already satisfies it. A change must identify any remaining
+violations; fixing a race by adding locks to an inner hot path is not sufficient.
+Existing protection must not be removed before its replacement provides the
+same ownership, visibility, lifetime, and durability guarantees.
+
+### Immutable main storage and mutable deltas
+
+- A shard's main column storages contain fixed, read-only values for one
+  generation. Updates must not overwrite these values. Delta storage contains
+  the insert list and deletion masks; transaction-local deletion/visibility
+  overlays remain separate from the shared main generation.
+- Main payload immutability does not make a mutable column directory, index
+  directory, lazy-load state, or decoded-value cache immutable. Protect those
+  auxiliary structures through their own publication/ownership protocol.
+  Reading an ordinary Go map concurrently with mutation remains forbidden.
+- Published snapshots must be transitively immutable: referenced maps, slices,
+  type descriptors, and index metadata cannot be modified through another
+  alias. Build privately, initialize completely, then publish atomically.
+  Expression-local specialization must not mutate a shared builtin/type
+  descriptor.
+- Readers acquire a valid generation and visibility snapshot at an operator or
+  batch boundary and retain its lifetime through use. Column readers, indexes,
+  physical row IDs, and delta coordinates must belong to compatible
+  generations. An atomic pointer load alone is not a lifetime or consistency
+  proof. Retirement must wait for all relevant owners without making active
+  queries wait for reclamation.
+
+### Readers and rebuilds must not wait for writers
+
+- Readers must not be blocked by writers. They must be able to consume a valid
+  published generation with the visibility required by their transaction while
+  writes proceed. This requirement does not weaken SQL isolation or permit
+  uncommitted values to become visible.
+- Rebuilds must block neither reads nor writes. Compression, index construction,
+  persistence I/O, and other generation-building work run on privately owned
+  state, outside locks needed by active readers or writers. Publication must not
+  turn this work into a stop-the-world phase.
+- During a rebuild, writes must be forwarded to both generations while both
+  remain live. The handover protocol must cover inserts, updates, deletes, and
+  commit/rollback visibility changes, including mutations concurrent with the
+  initial snapshot and final publication. Buffered forwarding during private
+  construction is valid only if writes continue and the successor cannot be
+  consumed until all required mutations have been incorporated. No mutation may
+  be lost, applied twice logically, or resurrect a deleted row.
+- Reads remain valid throughout the handover. Publish a complete successor;
+  never expose partially initialized columns or mix generations to construct a
+  row. An aborted rebuild leaves the original generation usable. Retaining old
+  generations must also preserve the existing WAL and durable schema-publication
+  contract; reclamation is not permission to delete committed data.
+- A bounded mutex critical section is not automatically nonblocking. If readers
+  or writers wait for a rebuild's catch-up/publication lock, that remains a gap
+  against this contract and must be addressed explicitly.
+
+### No synchronization writes in inner read hot paths
+
+- `sync.RWMutex.RLock` and `RUnlock` write shared memory and cause cache-line
+  traffic. They are not suitable for inner scan, filter, projection, comparison,
+  or JIT-fused loops; pending writers can also block new readers.
+- Move synchronization and metadata computation to publication, rebuild,
+  operator setup, or batch boundaries. Row loops use invocation-owned readers
+  and immutable main payloads. Shared usage counters, reference counters,
+  feedback CAS operations, and cache admission must likewise stay out of those
+  loops. Delta and transaction-overlay access still needs a valid concurrency
+  protocol; main immutability cannot justify racing delta writers.
+- Do not run query callbacks, compilation, I/O, or retained-memory traversals
+  while holding locks needed by other operations. Define one lock order for
+  remaining mutation/publication paths, avoid lock upgrades, and release locks
+  and ownership rights on cancellation, errors, and panics.
+
+### Planner schema and statistics reads
+
+- Schema and statistics queries must be lock-free and O(1) per requested
+  metadata item, independent of row count and shard count. Enumerating or
+  returning `k` metadata items naturally costs O(k); the implementation must not
+  traverse the underlying data to obtain them.
+- Publish immutable, consolidated metadata through atomic snapshots. Build
+  schema descriptions and bounded statistical summaries during DDL,
+  initialization, rebuild, or maintenance; do not recompute them when the
+  planner or a plan-cache guard asks for them. A missing estimate is unknown,
+  not permission to load columns, acquire locks, sample rows, or build indexes
+  in a metadata getter.
+- A reader must see compatible schema semantics and statistics, rather than
+  combine incompatible publication revisions. Statistics-dependent choices
+  retain the executable tipping-point guards described below. Explicitly
+  costed sampling/preparation is a separate operation, never a hidden fallback
+  inside a schema/statistics read or guard.
+
+### Bounded parallelism and verifiable ownership
+
+- Parallelize sufficiently large batches or shards within the query/session
+  budget. Use worker-local accumulators and merge at batch/task completion;
+  avoid per-row goroutines and shared counters. Streaming producers must obey
+  bounded buffering/backpressure and cancellation, rather than accumulate an
+  unbounded intermediate relation.
+- Every background task has an owner and a completion/cancellation protocol.
+  Request/test completion must not leave callbacks mutating another invocation's
+  state. Shared process settings and diagnostic callbacks need an explicit
+  ownership protocol; tests that change them must run exclusively or use
+  invocation-local state.
+- Concurrency changes need deterministic tests around publication and rebuild
+  handovers, including concurrent writes and transaction visibility, plus
+  repeated/shuffled race-detector runs where applicable. Native JIT instructions
+  are not instrumented by Go's race detector; test the shared-state protocol and
+  SQL results as well. Correctness and blocking behavior both need evidence.
 
 ## Planner Pipeline
 
@@ -270,10 +380,10 @@ most likely one. Existing immutable plan tails remain valid for in-flight
 queries.
 
 Guards repeat cost decisions, not query planning. They must be side-effect-free
-and must not scan relations, build indexes or group caches, acquire schema
-write locks, or materialize data. Repeated catalog inputs must be bound once
-per guard evaluation. If a useful generalized inequality is unavailable, an
-exact parameter/statistics-input guard is the conservative fallback; an old
+and must not scan relations, build indexes or group caches, acquire locks
+for schema/statistics reads, or materialize data. Repeated catalog inputs must
+be bound once per guard evaluation. If a useful generalized inequality is
+unavailable, an exact parameter/statistics-input guard is the conservative fallback; an old
 specialized plan must never be selected after an unguarded cost input changes.
 
 Coverage of session inputs is transitive through shared guard bindings. A
@@ -750,8 +860,8 @@ guards consuming this work must cover changes to it as well as result rates.
 UNION adds branch work independently of output cardinality. Costgen consumes
 the same work features and must not infer matcher input from result rows.
 
-See [the Omnestum analysis and measurement report](ADAPTIVE_SELECTIVITY.md) for
-representation limits and the persistence/RecSet follow-up.
+See [the adaptive selectivity analysis and measurement report](ADAPTIVE_SELECTIVITY.md)
+for representation limits and the persistence/RecSet follow-up.
 
 Cost consumers still take a scalar probability: local filtered row counts,
 join cardinalities, probe work and physical cost comparisons. The statistical
@@ -965,8 +1075,13 @@ before consuming rows. Storage owns usage tracking, preparation markers and
 dependency maintenance. Snapshot/point payload columns depend on logical source
 tables; source DML invalidates their values through computed-column triggers.
 Rebuild/repartition preserves valid payloads. Query-local transactions bypass
-shared payloads. Shared computation and publication hold source read locks;
-stored payloads never retain session/transaction closures or physical row IDs.
+shared payloads. Shared computation and publication must preserve a consistent
+logical source snapshot and its invalidation dependencies: concurrent source
+DML must not allow stale results to be published as current. The current source
+read-lock protocol must be replaced with a nonblocking snapshot/publication
+protocol to satisfy the concurrency contract above; simply dropping those locks
+would remove the consistency proof. Stored payloads never retain
+session/transaction closures or physical row IDs.
 Range aggregates keep their existing selective incremental maintenance; snapshot
 payloads conservatively rebuild after a source write until finer dependency
 maintenance is proved. Moving coordinates still use nearest-anchor corrections.
