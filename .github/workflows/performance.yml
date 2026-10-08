@@ -81,8 +81,8 @@ jobs:
       - name: Build base and candidate
         shell: bash
         run: |
-          (cd base && go build -o memcp)
-          (cd candidate && go build -o memcp)
+          (cd base && go build -trimpath -buildvcs=false -o memcp)
+          (cd candidate && go build -trimpath -buildvcs=false -o memcp)
 
       - name: Measure base and candidate with the SQL test runner
         timeout-minutes: 15
