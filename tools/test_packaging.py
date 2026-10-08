@@ -43,7 +43,7 @@ class ReleaseSourceTests(unittest.TestCase):
 		# Execute the action's actual shell body against private source files and
 		# a fake privileged package client. GNU timeout still runs for real.
 		action = (ROOT / ".github/actions/setup-apt/action.yml").read_text()
-		body = textwrap.dedent(action.split("      run: |\n", 1)[1])
+		body = action.split("      run: ", 1)[1].strip()
 		with tempfile.TemporaryDirectory(prefix="memcp-ci-apt-") as tmp:
 			root = Path(tmp)
 			sources = root / "sources"
@@ -56,6 +56,11 @@ class ReleaseSourceTests(unittest.TestCase):
 			(sources / "sources.list").write_text(legacy)
 			(sources / "sources.list.d/ubuntu.sources").write_text(deb822)
 			(sources / "sources.list.d/other.list").write_text(unrelated)
+			if scenario == "mirrorlist":
+				(sources / "apt-mirrors.txt").write_text("http://azure.archive.ubuntu.com/ubuntu/\n")
+				deb822 = deb822.replace("https://azure.archive.ubuntu.com/ubuntu",
+					"mirror+file:" + str(sources / "apt-mirrors.txt"))
+				(sources / "sources.list.d/ubuntu.sources").write_text(deb822)
 			fake = root / "sudo"
 			fake.write_text(f"#!{sys.executable}\n" + textwrap.dedent('''\
 				import json, os, pathlib, sys, time
@@ -72,6 +77,10 @@ class ReleaseSourceTests(unittest.TestCase):
 				        time.sleep(10)
 				    if scenario == 'persistent' or (scenario == 'transient' and count == 1):
 				        sys.exit(100)
+				    if scenario == 'mirrorlist':
+				        mirrors = pathlib.Path(os.environ['APT_SOURCES_DIRECTORY']) / 'apt-mirrors.txt'
+				        if 'azure.archive.ubuntu.com' in mirrors.read_text():
+				            sys.exit(100)
 				elif scenario == 'install-hang':
 				    time.sleep(10)
 				elif scenario == 'install-fail':
@@ -81,6 +90,7 @@ class ReleaseSourceTests(unittest.TestCase):
 			env = os.environ.copy()
 			env.update(PATH=str(root) + os.pathsep + env['PATH'],
 				PACKAGES=packages, APT_SOURCES_DIRECTORY=str(sources),
+				GITHUB_ACTION_PATH=str(ROOT / ".github/actions/setup-apt"),
 				INDEX_TIMEOUT_SECONDS="0.5" if scenario == "hang" else "2",
 				INSTALL_TIMEOUT_SECONDS="0.5" if scenario == "install-hang" else "2",
 				FAKE_APT_ROOT=str(root), FAKE_APT_SCENARIO=scenario)
@@ -119,6 +129,20 @@ class ReleaseSourceTests(unittest.TestCase):
 		self.assertEqual(len(calls), 3)
 		self.assertIn("APT index download failed", result.stdout)
 
+	def test_runner_mirrorlist_recovers_without_replacing_signed_source(self):
+		result, calls, _, deb822, unrelated, _, old_deb822, old_unrelated = self.apt_setup("mirrorlist")
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(len(calls), 3)
+		self.assertEqual(deb822, old_deb822)
+		self.assertEqual(unrelated, old_unrelated)
+		self.assertIn("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", deb822)
+
+	def test_php_dependencies_share_the_bounded_package_installer(self):
+		php = (ROOT / ".github/actions/setup-php/action.yml").read_text()
+		self.assertNotIn("apt-get", php)
+		self.assertIn('$GITHUB_ACTION_PATH/../setup-apt/install.sh', php)
+		self.assertNotIn("continue-on-error", php)
+
 	def test_persistent_apt_failure_stops_before_installation(self):
 		result, calls, *_ = self.apt_setup("persistent")
 		self.assertNotEqual(result.returncode, 0)
@@ -154,6 +178,7 @@ class ReleaseSourceTests(unittest.TestCase):
 		self.assertEqual(calls, [])
 
 	def test_shell_scripts_parse(self) -> None:
+		run("bash", "-n", ".github/actions/setup-apt/install.sh")
 		scripts = [
 			"debian/postinst",
 			"debian/prerm",
