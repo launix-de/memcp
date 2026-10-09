@@ -953,6 +953,14 @@ func TestJITExpressionReduceLambdaArgumentOrder(t *testing.T) {
 	}
 }
 
+func TestJITEnabledPredicateUsesExecutingBuild(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda () (jit-enabled?))`)
+	requireNoDynamicJITCalls(t, compiled)
+	if got := Apply(compiled); !Equal(got, NewBool(jitEnabled)) {
+		t.Fatalf("compiled jit-enabled? = %s, want %v", String(got), jitEnabled)
+	}
+}
+
 func TestJITKnownLambdaMaterializesAtGeneratedBuiltinCallBoundary(t *testing.T) {
 	declaration := declarations["map"]
 	previous := declaration.Type.JITInlineCallbacks

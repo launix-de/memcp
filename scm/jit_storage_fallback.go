@@ -20,6 +20,8 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package scm
 
 // JITEnabled reports whether this binary contains the native JIT backend.
+//
+//jitgen:noinline
 func JITEnabled() bool { return false }
 
 func CompileJITStorageGetValue(JITStorageGetValueEmitter) JITStorageGetValueFunc {

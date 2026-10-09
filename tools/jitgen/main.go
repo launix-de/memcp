@@ -117,7 +117,7 @@ func main() {
 	// Load package with full type info for SSA
 	cfg := &packages.Config{
 		Mode: packages.NeedFiles | packages.NeedSyntax | packages.NeedTypes |
-			packages.NeedTypesInfo | packages.NeedTypesSizes | packages.NeedDeps | packages.NeedImports | packages.NeedName,
+			packages.NeedTypesInfo | packages.NeedTypesSizes | packages.NeedDeps | packages.NeedImports | packages.NeedName | packages.NeedModule,
 		Overlay: overlay,
 	}
 	pkgs, err := packages.Load(cfg, pkgDir)
@@ -136,41 +136,21 @@ func main() {
 	}
 	targetSizes = pkg.TypesSizes
 	if len(pkg.Errors) > 0 {
-		hardErr := false
 		for _, e := range pkg.Errors {
-			if doPatch {
-				// Patch mode must tolerate temporarily broken generated sections.
-				// We still proceed and let per-function generation decide what can
-				// be rewritten in this run.
-				continue
-			}
-			msg := e.Error()
-			if strings.Contains(msg, "declared and not used") {
-				// Regenerating from a temporarily inconsistent generated file is
-				// allowed; the patch pass will rewrite these sections.
-				continue
-			}
-			if strings.Contains(msg, "imported and not used") {
-				// The analysis overlay replaces generated emitters with stubs; an
-				// import referenced only by generated code can therefore look unused.
-				continue
-			}
-			if strings.Contains(msg, "missing return") {
-				// Transitional state while generated emitters are being rewritten.
-				// Patch mode will replace these sections in the same run.
-				continue
-			}
-			hardErr = true
 			fmt.Fprintf(os.Stderr, "  %v\n", e)
 		}
-		if hardErr {
-			os.Exit(1)
-		}
+		// Generated bodies are already hidden by the overlay. Any remaining
+		// error prevents SSA construction and must not look like a successful
+		// regeneration that silently skipped the package's methods.
+		os.Exit(1)
 	}
 	fset := pkg.Fset
 
-	// Build SSA
-	prog, _ := ssautil.AllPackages(pkgs, 0)
+	// Build SSA for our semantic source and module-local helpers. Dependencies
+	// supply types and Go call boundaries, not implementation bodies. In
+	// particular, their Go version can use syntax the SSA builder does not yet
+	// support (Go 1.27 permits promoted fields in struct literals).
+	prog, _ := ssautil.Packages(moduleAnalysisPackages(pkgs), 0)
 	prog.Build()
 
 	// Index all SSA functions by source position.
@@ -273,7 +253,7 @@ func main() {
 		ssaFn := generation.ssaFn
 		if ssaFn == nil {
 			fmt.Fprintf(os.Stderr, "  %s: %s — SSA function not found\n", op.path, op.name)
-			continue
+			os.Exit(1)
 		}
 
 		if dumpOp == op.name {
@@ -411,7 +391,7 @@ func main() {
 		ssaFn := ssaFuncs[si.sourcePos]
 		if ssaFn == nil {
 			fmt.Fprintf(os.Stderr, "  %s: %s.%s — SSA function not found\n", si.path, si.typeName, si.sourceName)
-			continue
+			os.Exit(1)
 		}
 
 		if dumpOp == si.typeName || dumpOp == si.typeName+"."+si.sourceName {
@@ -447,6 +427,34 @@ func main() {
 			applyPatches(path, plist)
 		}
 	}
+}
+
+func moduleAnalysisPackages(initial []*packages.Package) []*packages.Package {
+	modules := make(map[string]bool)
+	for _, pkg := range initial {
+		if pkg.Module != nil {
+			modules[pkg.Module.Path] = true
+		}
+	}
+	selected := make(map[string]*packages.Package)
+	for _, pkg := range initial {
+		selected[pkg.PkgPath] = pkg
+	}
+	packages.Visit(initial, nil, func(pkg *packages.Package) {
+		if pkg.Module != nil && modules[pkg.Module.Path] {
+			selected[pkg.PkgPath] = pkg
+		}
+	})
+	paths := make([]string, 0, len(selected))
+	for path := range selected {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	result := make([]*packages.Package, 0, len(paths))
+	for _, path := range paths {
+		result = append(result, selected[path])
+	}
+	return result
 }
 
 type operatorGeneration struct {
@@ -908,6 +916,10 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 		funcLit, isLiteral := fnExpr.(*ast.FuncLit)
 		funcName := ""
 		if ident, ok := fnExpr.(*ast.Ident); ok {
+			// A nil Fn denotes a compiler special form, not a Go function.
+			if ident.Name == "nil" {
+				return true
+			}
 			funcName = ident.Name
 		}
 		if !isLiteral && funcName == "" {
@@ -1186,7 +1198,6 @@ type codeGen struct {
 	phiTriple     map[string]bool   // SSA phi name → true if value occupies 3 words (24 bytes)
 	phiTypeTag    map[string]string // SSA phi name → static JIT tag constant (or JITTypeUnknown)
 	bbPhiBase     map[int]int       // BB index → phi base stack offset (bytes)
-	bbPhiCount    map[int]int       // BB index → number of phi slots
 	phiStackSize  int               // total bytes reserved on stack for phi nodes (local to current function/inline)
 	phiFrameFixup string            // Go var name for the current function's local phi-frame base
 	registerPlan  staticRegisterPlan
@@ -1244,8 +1255,8 @@ type codeGen struct {
 	// at a block header. Cleared when the first non-Phi instruction is emitted.
 	phiProtectedRegVars []string
 
-	// When true, emitters are generated as recursive BBDescriptor.RenderPS(ps)
-	// closures and branch lowering must recurse via bbs[i].RenderPS.
+	// When true, emitters are generated as recursive BBDescriptor.Render()
+	// closures and branch lowering must recurse via bbs[i].Render().
 	bbClosureMode bool
 	// forceLegacyCFG disables closure-recursive If/Jump lowering while keeping
 	// descriptor predeclaration/assignment mode active.
@@ -1253,12 +1264,6 @@ type codeGen struct {
 	// Descriptor predeclarations used by recursive BB closure mode, so
 	// descriptors can flow across closure boundaries without scope breakage.
 	closureDescDecl map[string]bool
-	// Dense slots belong to this generated emitter, never to a runtime pass.
-	// Slot identities stay stable as later BBs declare additional descriptors.
-	overlaySlots map[string]int
-	// Already generated block entries have a fixed set of overlay readers.
-	// Basic-block identities are scoped by fn; inline calls reset this table.
-	overlayConsumers map[*ssa.BasicBlock][]string
 	// Register predeclarations for closure-mode fixup handles (EmitSubRSP32Fixup).
 	closureRegDecl map[string]bool
 	// Optional callback-based SSA node rewrite hook.
@@ -1309,7 +1314,6 @@ func (g *codeGen) clone() *codeGen {
 	clone.phiHomeOK = cloneMap(g.phiHomeOK)
 	clone.storageInputHomes = append([]storageInputHome(nil), g.storageInputHomes...)
 	clone.bbPhiBase = cloneMap(g.bbPhiBase)
-	clone.bbPhiCount = cloneMap(g.bbPhiCount)
 	clone.fieldCache = cloneMap(g.fieldCache)
 	clone.refCounts = cloneMap(g.refCounts)
 	clone.directResultPayloads = cloneMap(g.directResultPayloads)
@@ -1317,8 +1321,6 @@ func (g *codeGen) clone() *codeGen {
 	clone.importedPkgAlias = cloneMap(g.importedPkgAlias)
 	clone.phiProtectedRegVars = append([]string(nil), g.phiProtectedRegVars...)
 	clone.closureDescDecl = cloneMap(g.closureDescDecl)
-	clone.overlaySlots = cloneMap(g.overlaySlots)
-	clone.overlayConsumers = cloneMap(g.overlayConsumers)
 	clone.closureRegDecl = cloneMap(g.closureRegDecl)
 	return &clone
 }
@@ -1351,18 +1353,22 @@ func (g *codeGen) rewriteSSAValue(v ssa.Value) ssa.Value {
 	return v
 }
 
+func (g *codeGen) declareClosureDesc(name string) {
+	if g.closureDescDecl == nil {
+		g.closureDescDecl = map[string]bool{}
+	}
+	if !g.closureDescDecl[name] {
+		g.closureDescDecl[name] = true
+		fmt.Fprintf(&g.wDecl, "\t\t\tvar %s JITValueDesc\n", name)
+		fmt.Fprintf(&g.wDecl, "\t\t\t_ = %s\n", name)
+	}
+}
+
 func (g *codeGen) allocDesc() string {
 	name := fmt.Sprintf("d%d", g.nextDesc)
 	g.nextDesc++
 	if g.bbClosureMode {
-		if g.closureDescDecl == nil {
-			g.closureDescDecl = map[string]bool{}
-		}
-		if !g.closureDescDecl[name] {
-			g.closureDescDecl[name] = true
-			fmt.Fprintf(&g.wDecl, "\t\t\tvar %s JITValueDesc\n", name)
-			fmt.Fprintf(&g.wDecl, "\t\t\t_ = %s\n", name)
-		}
+		g.declareClosureDesc(name)
 	}
 	return name
 }
@@ -1432,20 +1438,6 @@ func (g *codeGen) allClosureDescVars() []string {
 	}
 	sortDescNames(names)
 	return names
-}
-
-// overlaySlot assigns one compact runtime-state slot per descriptor. SSA names
-// also number labels and temporaries, so their numeric suffix is not a size.
-func (g *codeGen) overlaySlot(name string) int {
-	if g.overlaySlots == nil {
-		g.overlaySlots = make(map[string]int)
-	}
-	if slot, ok := g.overlaySlots[name]; ok {
-		return slot
-	}
-	slot := len(g.overlaySlots)
-	g.overlaySlots[name] = slot
-	return slot
 }
 
 func sortDescNames(names []string) {
@@ -1722,22 +1714,26 @@ func (g *codeGen) emitNormalizeSignedNarrow(descVar string, bits int) {
 
 func (g *codeGen) emit(format string, a ...any) {
 	line := fmt.Sprintf(format, a...)
-	if g.bbClosureMode && generatedDescDeclaration(line) {
-		if i := strings.Index(line, " := "); i > 1 {
-			name := line[:i]
-			if g.closureDescDecl == nil {
-				g.closureDescDecl = map[string]bool{}
-			}
-			if !g.closureDescDecl[name] {
-				g.closureDescDecl[name] = true
-				fmt.Fprintf(&g.wDecl, "\t\t\tvar %s JITValueDesc\n", name)
-				fmt.Fprintf(&g.wDecl, "\t\t\t_ = %s\n", name)
-			}
-			line = name + " = " + line[i+4:]
+	trimmed := strings.TrimLeft(line, "\t ")
+	indent := line[:len(line)-len(trimmed)]
+	if g.bbClosureMode && strings.HasPrefix(trimmed, "var ") && strings.HasSuffix(trimmed, " JITValueDesc") {
+		name := strings.TrimSuffix(strings.TrimPrefix(trimmed, "var "), " JITValueDesc")
+		if _, err := parseDescNum(name); err == nil {
+			// A renderer-local declaration would shadow the shared descriptor and
+			// require a copying overlay to cross the next basic-block boundary.
+			g.declareClosureDesc(name)
+			return
 		}
-	} else if g.bbClosureMode && strings.Contains(line, " := ctx.AllocStack(") {
-		if i := strings.Index(line, " := "); i > 0 {
-			name := line[:i]
+	}
+	if g.bbClosureMode && generatedDescDeclaration(trimmed) {
+		if i := strings.Index(trimmed, " := "); i > 1 {
+			name := trimmed[:i]
+			g.declareClosureDesc(name)
+			line = indent + name + " = " + trimmed[i+4:]
+		}
+	} else if g.bbClosureMode && strings.Contains(trimmed, " := ctx.AllocStack(") {
+		if i := strings.Index(trimmed, " := "); i > 0 {
+			name := trimmed[:i]
 			if g.closureRegDecl == nil {
 				g.closureRegDecl = map[string]bool{}
 			}
@@ -1745,7 +1741,7 @@ func (g *codeGen) emit(format string, a ...any) {
 				g.closureRegDecl[name] = true
 				fmt.Fprintf(&g.wDecl, "\t\t\tvar %s int32\n", name)
 			}
-			line = name + " = " + line[i+4:]
+			line = indent + name + " = " + trimmed[i+4:]
 		}
 	}
 	fmt.Fprintf(&g.w, "\t\t\t%s\n", line)
@@ -2392,7 +2388,7 @@ func (g *codeGen) emitSerialCallableCall(name string, producer ssa.Value, callab
 	}
 	g.emit("var %s JITValueDesc", dv)
 	// Callbacks can be invoked for their effects while their return value is
-	// unused. Descriptor overlays must not be its only artificial Go read.
+	// unused. Keep write-only results valid in single-block Go emitters too.
 	g.emit("_ = %s", dv)
 	callbackTargetOff := ""
 	phiTarget, phiShape, directPhiTarget := g.directPhiTarget(producer)
@@ -2922,121 +2918,11 @@ func (g *codeGen) emitBBPhiLayout() {
 		if !ok {
 			continue
 		}
-		count := g.bbPhiCount[bbIdx]
 		if g.phiFrameFixup != "" {
 			g.emit("bbs[%d].PhiBase = int32(%s) + int32(%d)", bbIdx, g.phiFrameFixup, base)
 		} else {
 			g.emit("bbs[%d].PhiBase = int32(%d)", bbIdx, base)
 		}
-		g.emit("bbs[%d].PhiCount = uint16(%d)", bbIdx, count)
-	}
-}
-
-func (g *codeGen) emitConstDescForSSAConst(c *ssa.Const) genVal {
-	dv := g.allocDesc()
-	if c.Value == nil {
-		g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}", dv)
-		return genVal{goVar: dv, isDesc: true}
-	}
-	switch c.Value.Kind() {
-	case constant.Bool:
-		g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%t)}", dv, constant.BoolVal(c.Value))
-	case constant.Int:
-		ival, _ := constant.Int64Val(c.Value)
-		g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%d)}", dv, ival)
-	case constant.Float:
-		fval, _ := constant.Float64Val(c.Value)
-		g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%v)}", dv, fval)
-	case constant.String:
-		sval := constant.StringVal(c.Value)
-		g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(%q)}", dv, sval)
-	default:
-		panic(fmt.Sprintf("unsupported phi const kind: %s", c))
-	}
-	return genVal{goVar: dv, isDesc: true}
-}
-
-func (g *codeGen) emitBuildPhiStateForEdge(psVar string, targetBBIdx int, succPos int, generalExpr string) {
-	g.emit("%s := PhiState{General: %s}", psVar, generalExpr)
-	overlayVars := g.allClosureDescVars()
-	if consumers, rendered := g.overlayConsumers[g.fn.Blocks[targetBBIdx]]; rendered {
-		// A previously generated renderer reads only the overlay slots present
-		// when its entry was generated. Descriptors created later cannot be
-		// consumed by that renderer or forwarded by its existing edge code.
-		readers := make(map[string]bool, len(consumers))
-		for _, name := range consumers {
-			readers[name] = true
-		}
-		filtered := overlayVars[:0]
-		for _, name := range overlayVars {
-			if readers[name] {
-				filtered = append(filtered, name)
-			}
-		}
-		overlayVars = filtered
-	}
-	if generalExpr == "true" {
-		// General renderers reconstruct phi descriptors from their canonical
-		// homes and deliberately ignore phi overlays. Do not allocate or fill
-		// incoming state which applyPhiStateOverlay cannot consume.
-		phiVars := g.phiDescVars()
-		filtered := make([]string, 0, len(overlayVars))
-		for _, name := range overlayVars {
-			if !phiVars[name] {
-				filtered = append(filtered, name)
-			}
-		}
-		overlayVars = filtered
-	}
-	if len(overlayVars) > 0 {
-		maxSlot := 0
-		for _, ov := range overlayVars {
-			maxSlot = max(maxSlot, g.overlaySlot(ov))
-		}
-		g.emit("%s.OverlayValues = make([]JITValueDesc, %d)", psVar, maxSlot+1)
-		for _, ov := range overlayVars {
-			g.emit("%s.OverlayValues[%d] = %s", psVar, g.overlaySlot(ov), ov)
-		}
-	}
-
-	if generalExpr == "true" {
-		return // General renderers ignore PhiValues as well as phi overlays.
-	}
-	phis := g.blockPhis(targetBBIdx)
-	if len(phis) == 0 {
-		return
-	}
-	g.emit("%s.PhiValues = make([]JITValueDesc, %d)", psVar, len(phis))
-	edgeIdx, ok := g.phiEdgeIndexForSucc(targetBBIdx, succPos)
-	if !ok {
-		g.emit("%s.General = true", psVar)
-		return
-	}
-	for phiIdx, phi := range phis {
-		if edgeIdx < 0 || edgeIdx >= len(phi.Edges) {
-			continue
-		}
-		edge := phi.Edges[edgeIdx]
-		if g.phiValueAlreadyStored(edge, targetBBIdx, phiIdx) {
-			continue
-		}
-		if c, ok := edge.(*ssa.Const); ok {
-			cv := g.emitConstDescForSSAConst(c)
-			g.emit("%s.PhiValues[%d] = %s", psVar, phiIdx, cv.goVar)
-			continue
-		}
-		name := edge.Name()
-		if name == "" {
-			continue
-		}
-		gv, ok := g.vals[name]
-		if !ok || !gv.isDesc {
-			g.emit("%s.General = true", psVar)
-			continue
-		}
-		tmp := g.allocDesc()
-		g.emit("%s := %s", tmp, gv.goVar)
-		g.emit("%s.PhiValues[%d] = %s", psVar, phiIdx, tmp)
 	}
 }
 
@@ -3252,9 +3138,7 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 			succPos = 0
 		}
 		g.emitEdgePhiMoves(targetBB, succPos)
-		ps := g.allocTemp("ps")
-		g.emitBuildPhiStateForEdge(ps, targetBB, succPos, "ps.General")
-		g.emit("return bbs[%d].RenderPS(%s)", targetBB, ps)
+		g.emit("return bbs[%d].Render()", targetBB)
 		return
 	}
 	cond := g.vals[v.Cond.Name()]
@@ -3275,32 +3159,16 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 	}
 	g.emit("}")
 
-	// Constant-pruned branch: recurse into exactly one successor.
+	// Constant-pruned branch: recurse into exactly one successor. Every renderer
+	// uses canonical phi homes; specialization of the input descriptors still
+	// determines whether this branch can be pruned during emitter execution.
 	g.emit("if %s.Loc == LocImm {", condVar)
 	g.emit("\tif %s.Imm.Bool() {", condVar)
-	g.emit("\t\tif ps.General {")
 	g.emitEdgePhiMoves(thenBB, 0)
-	g.emit("\t\t}")
-	thenPS := g.allocTemp("ps")
-	g.emitBuildPhiStateForEdge(thenPS, thenBB, 0, "ps.General")
-	g.emit("\t\treturn bbs[%d].RenderPS(%s)", thenBB, thenPS)
+	g.emit("\t\treturn bbs[%d].Render()", thenBB)
 	g.emit("\t}")
-	g.emit("\tif ps.General {")
 	g.emitEdgePhiMoves(elseBB, 1)
-	g.emit("\t}")
-	elsePS := g.allocTemp("ps")
-	g.emitBuildPhiStateForEdge(elsePS, elseBB, 1, "ps.General")
-	g.emit("\treturn bbs[%d].RenderPS(%s)", elseBB, elsePS)
-	g.emit("}")
-
-	// Dynamic condition in a specialized BB can otherwise poison successor
-	// general renderers with edge-local specialized overlays. Canonicalize by
-	// switching this BB to general first; successor rendering then sees stable
-	// locations from the generalized predecessor state.
-	g.emit("if !ps.General {")
-	g.emitSpecializedPhiStackWrites(g.curBlock, "ps", "\t")
-	g.emit("\tps.General = true")
-	g.emit("\treturn bbs[%d].RenderPS(ps)", g.curBlock)
+	g.emit("\treturn bbs[%d].Render()", elseBB)
 	g.emit("}")
 
 	// Dynamic branch: emit edge helpers with runtime condition and render both
@@ -3380,38 +3248,23 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 		g.emit("ctx.FlushRegisterMoves()")
 	}
 
-	thenPSGeneral := g.allocTemp("ps")
-	elsePSGeneral := g.allocTemp("ps")
-	// Dynamic branches still need edge state for successor live-ins.
-	// Render successor labels in general mode, but include edge overlays/phis.
-	g.emitBuildPhiStateForEdge(thenPSGeneral, thenBB, 0, "true")
-	g.emitBuildPhiStateForEdge(elsePSGeneral, elseBB, 1, "true")
-
-	if g.preferredIfFallthrough(thenBB, elseBB) == thenBB {
-		snaps := g.emitSaveClosureDescState(g.allClosureDescVars())
-		allocSnap := g.allocTemp("alloc")
-		g.emit("%s := ctx.SnapshotAllocState()", allocSnap)
-		g.emit("if !bbs[%d].Rendered {", thenBB)
-		g.emit("\tbbs[%d].RenderPS(%s)", thenBB, thenPSGeneral)
-		g.emit("}")
-		g.emit("ctx.RestoreAllocState(%s)", allocSnap)
-		g.emitRestoreClosureDescState(snaps)
-		g.emit("if !bbs[%d].Rendered {", elseBB)
-		g.emit("\treturn bbs[%d].RenderPS(%s)", elseBB, elsePSGeneral)
-		g.emit("}")
-	} else {
-		snaps := g.emitSaveClosureDescState(g.allClosureDescVars())
-		allocSnap := g.allocTemp("alloc")
-		g.emit("%s := ctx.SnapshotAllocState()", allocSnap)
-		g.emit("if !bbs[%d].Rendered {", elseBB)
-		g.emit("\tbbs[%d].RenderPS(%s)", elseBB, elsePSGeneral)
-		g.emit("}")
-		g.emit("ctx.RestoreAllocState(%s)", allocSnap)
-		g.emitRestoreClosureDescState(snaps)
-		g.emit("if !bbs[%d].Rendered {", thenBB)
-		g.emit("\treturn bbs[%d].RenderPS(%s)", thenBB, thenPSGeneral)
-		g.emit("}")
+	// Only a renderer which is actually entered can mutate the sibling state.
+	// The edge helper section has already flushed pending register moves.
+	firstBB, secondBB := elseBB, thenBB
+	if preferred == thenBB {
+		firstBB, secondBB = thenBB, elseBB
 	}
+	g.emit("if !bbs[%d].Rendered {", firstBB)
+	snaps := g.emitSaveClosureDescState(g.allClosureDescVars())
+	allocSnap := g.allocTemp("alloc")
+	g.emit("%s := ctx.SnapshotAllocState()", allocSnap)
+	g.emit("bbs[%d].Render()", firstBB)
+	g.emit("ctx.RestoreAllocState(%s)", allocSnap)
+	g.emitRestoreClosureDescState(snaps)
+	g.emit("}")
+	g.emit("if !bbs[%d].Rendered {", secondBB)
+	g.emit("\treturn bbs[%d].Render()", secondBB)
+	g.emit("}")
 	g.emit("return result")
 }
 
@@ -3477,20 +3330,8 @@ func valueFeedsImmediateIf(v ssa.Value) bool {
 
 func (g *codeGen) emitJumpClosure(v *ssa.Jump) {
 	targetBB := v.Block().Succs[0].Index
-	g.emit("if ps.General {")
 	g.emitEdgePhiMoves(targetBB, 0)
-	g.emit("}")
-	nextPS := g.allocTemp("ps")
-	g.emitBuildPhiStateForEdge(nextPS, targetBB, 0, "ps.General")
-	g.emit("if %s.General && bbs[%d].Rendered {", nextPS, targetBB)
-	if lbl, ok := g.bbLabels[g.scopedBBID(targetBB)]; ok {
-		g.emit("\tctx.EmitJmp(%s)", lbl)
-	} else {
-		panic(fmt.Sprintf("jitgen: recursive mode missing label for BB%d", targetBB))
-	}
-	g.emit("\treturn result")
-	g.emit("}")
-	g.emit("return bbs[%d].RenderPS(%s)", targetBB, nextPS)
+	g.emit("return bbs[%d].Render()", targetBB)
 }
 
 // emitEdgePhiMoves emits machine-code-level MOVs for phi edges to targetBB from
@@ -3840,7 +3681,6 @@ func (g *codeGen) allocPhiRegs() {
 			continue
 		}
 		g.bbPhiBase[block.Index] = offset
-		g.bbPhiCount[block.Index] = len(phis)
 		for _, phi := range phis {
 			phiName := phi.Name()
 			triple := isPhiTripleType(phi.Type())
@@ -4036,7 +3876,6 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	savedBBQueued := g.bbQueued
 	savedBBLabels := g.bbLabels
 	savedBBPosVars := g.bbPosVars
-	savedOverlayConsumers := g.overlayConsumers
 	savedBBScope := g.bbScope
 	savedCurBlock := g.curBlock
 	savedPhiRegs := g.phiRegs
@@ -4044,7 +3883,6 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	savedPhiTriple := g.phiTriple
 	savedPhiTypeTag := g.phiTypeTag
 	savedBBPhiBase := g.bbPhiBase
-	savedBBPhiCount := g.bbPhiCount
 	savedPhiStackSize := g.phiStackSize
 	savedPhiFrameFixup := g.phiFrameFixup
 	savedRegisterPlan := g.registerPlan
@@ -4087,7 +3925,6 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.bbQueued = map[uint64]bool{}
 	g.bbLabels = map[uint64]string{}
 	g.bbPosVars = map[uint64]string{}
-	g.overlayConsumers = nil
 	// Allocate a globally unique namespace for each inline call.
 	g.nextBBScope++
 	g.bbScope = g.nextBBScope
@@ -4096,7 +3933,6 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.phiTriple = map[string]bool{}
 	g.phiTypeTag = map[string]string{}
 	g.bbPhiBase = map[int]int{}
-	g.bbPhiCount = map[int]int{}
 	g.phiFrameFixup = ""
 	// The top-level planner deliberately excludes inlined helper CFGs. They are
 	// emitted into the caller's register universe and retain stack phis until a
@@ -4376,7 +4212,6 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.bbQueued = savedBBQueued
 	g.bbLabels = savedBBLabels
 	g.bbPosVars = savedBBPosVars
-	g.overlayConsumers = savedOverlayConsumers
 	g.bbScope = savedBBScope
 	g.curBlock = savedCurBlock
 	g.phiRegs = savedPhiRegs
@@ -4384,7 +4219,6 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.phiTriple = savedPhiTriple
 	g.phiTypeTag = savedPhiTypeTag
 	g.bbPhiBase = savedBBPhiBase
-	g.bbPhiCount = savedBBPhiCount
 	g.phiStackSize = savedPhiStackSize
 	g.phiFrameFixup = savedPhiFrameFixup
 	g.registerPlan = savedRegisterPlan
@@ -4720,35 +4554,16 @@ func (g *codeGen) tryInlineStorageMethod(callee *ssa.Function, callArgs []ssa.Va
 	return result, true
 }
 
-func (g *codeGen) emitSpecializedPhiStackWrites(bbIdx int, psVar string, indent string) {
-	phis := g.blockPhis(bbIdx)
-	for phiIdx, phi := range phis {
-		tmp := g.allocDesc()
-		phiOff := g.phiSlotOffExpr(bbIdx, phiIdx)
-		g.emit("%sif len(%s.PhiValues) > %d && %s.PhiValues[%d].Loc != LocNone {", indent, psVar, phiIdx, psVar, phiIdx)
-		g.emit("%s\t%s := %s.PhiValues[%d]", indent, tmp, psVar, phiIdx)
-		g.emit("%s\tctx.EnsureDesc(&%s)", indent, tmp)
-		if isPhiTripleType(phi.Type()) {
-			g.emit("%s\tctx.EmitStoreRegMem(%s.Reg, ctx.StackReg, %s)", indent, tmp, phiOff)
-			g.emit("%s\tctx.EmitStoreRegMem(%s.Reg2, ctx.StackReg, %s+8)", indent, tmp, phiOff)
-			g.emit("%s\tctx.EmitStoreRegMem(%s.Reg3, ctx.StackReg, %s+16)", indent, tmp, phiOff)
-		} else if isPhiPairType(phi.Type()) {
-			g.emit("%s\tctx.EmitStoreScmerToStack(%s, %s)", indent, tmp, phiOff)
-		} else {
-			if home, available, planned := g.phiRegisterHome(phi.Name()); planned {
-				g.emit("%s\tif %s {", indent, available)
-				g.emit("%s\t\tctx.EmitMovToReg(%s, %s)", indent, home, tmp)
-				g.emit("%s\t} else {", indent)
-				g.emit("%s\t\tctx.EmitStoreToStack(%s, %s)", indent, tmp, phiOff)
-				g.emit("%s\t}", indent)
-			} else {
-				g.emit("%s\tctx.EmitStoreToStack(%s, %s)", indent, tmp, phiOff)
-			}
-		}
-		g.emit("%s}", indent)
-	}
-}
-
+// emitRecursiveBBRenderers emits each reachable block once at its canonical
+// phi homes. The old specialized entry always generalized immediately because
+// its unsigned VisitCount >= 0 test was unconditional. That mode decision is
+// static; concrete argument types, immediates, register owners and roots remain
+// dynamic, including LocImm branch pruning in emitIfClosure.
+//
+// Non-phi descriptors are shared invocation locals. A direct renderer call sees
+// the current values; sibling calls restore both those locals and the allocator.
+// No incoming overlay array or alias lookup is necessary. Inlined callees use
+// private descriptor copies and preserve their caller's live values separately.
 func (g *codeGen) emitRecursiveBBRenderers() {
 	prevMode := g.bbClosureMode
 	g.bbClosureMode = true
@@ -4764,37 +4579,23 @@ func (g *codeGen) emitRecursiveBBRenderers() {
 		lbl := g.bbLabels[bbID]
 		posVar := g.bbPosVars[bbID]
 
-		g.emit("bbs[%d].RenderPS = func(ps PhiState) JITValueDesc {", bbIdx)
-		g.emit("if !ps.General {")
-		g.emitSpecializedPhiStackWrites(bbIdx, "ps", "\t")
-		// TODO: specialization/unrolling disabled until phi constant propagation
-		// is properly implemented. Factors to consider: loop iteration savings,
-		// fetch elimination, register pressure trade-offs.
-		g.emit("\tif bbs[%d].VisitCount >= 0 {", bbIdx)
-		g.emit("\t\tps.General = true")
-		g.emit("\t\treturn bbs[%d].RenderPS(ps)", bbIdx)
-		g.emit("\t}")
+		g.emit("bbs[%d].Render = func() JITValueDesc {", bbIdx)
+		g.emit("if bbs[%d].Rendered {", bbIdx)
+		g.emit("\tctx.EmitJmp(%s)", lbl)
+		g.emit("\treturn result")
 		g.emit("}")
-		g.emit("bbs[%d].VisitCount++", bbIdx)
-		g.emit("if ps.General {")
-		g.emit("\tif bbs[%d].Rendered {", bbIdx)
-		g.emit("\t\tctx.EmitJmp(%s)", lbl)
-		g.emit("\t\treturn result")
-		g.emit("\t}")
-		g.emit("\tbbs[%d].Rendered = true", bbIdx)
-		g.emit("\tctx.FlushRegisterMoves()")
-		g.emit("\tbbs[%d].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))", bbIdx)
-		g.emit("\t%s = bbs[%d].Address", posVar, bbIdx)
-		g.emit("\tctx.MarkLabel(%s)", lbl)
-		g.emit("\tctx.ResolveFixups()")
-		g.emit("}")
+		g.emit("bbs[%d].Rendered = true", bbIdx)
+		g.emit("ctx.FlushRegisterMoves()")
+		g.emit("%s = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))", posVar)
+		g.emit("ctx.MarkLabel(%s)", lbl)
+		g.emit("ctx.ResolveFixups()")
 
 		g.curBlock = bbIdx
 		// Keep field-load deduplication local to the block whose machine code
 		// defines the descriptor.
 		g.fieldCache = map[string]genVal{}
 		g.resetAllPhiDescsToStack()
-		g.applyPhiStateOverlay(bbIdx)
+		g.initBlockPhiDescs(bbIdx)
 		g.resetStorageInputsToHomes()
 		g.bindActivePhiRegisterHomes(bbIdx)
 		g.emit("ctx.ReclaimUntrackedRegs()")
@@ -4874,7 +4675,6 @@ func newCodeGen(fn *ssa.Function, rewrite ssaValueRewriter, sourceAliases ...map
 		phiHomeRegs:          map[string]string{},
 		phiHomeOK:            map[string]string{},
 		bbPhiBase:            map[int]int{},
-		bbPhiCount:           map[int]int{},
 		fieldCache:           map[string]genVal{},
 		refCounts:            computeRefCounts(fn),
 		crossBlockValues:     computeCrossBlockValues(fn),
@@ -4888,7 +4688,6 @@ func newCodeGen(fn *ssa.Function, rewrite ssaValueRewriter, sourceAliases ...map
 
 // emitBodyConfig parametrizes the divergent parts of the shared emitter body.
 type emitBodyConfig struct {
-	entryGeneral     bool   // PhiState{General: ...} at entry (closure: true, storage: false)
 	useReturnPhiRegs bool   // allocate returnPhiReg/Reg2 for multi-block merge (storage only)
 	bbsDeclPrefix    string // "scm." for storage package, "" for scm package
 }
@@ -4927,7 +4726,17 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 	if !g.storageMode && !g.rawReturn {
 		g.emit("returnType := uint8(JITTypeUnknown)")
 		g.emit("returnTypeSeen := false")
-		g.emit("mergeReturnType := func(t uint8) { if !returnTypeSeen { returnType, returnTypeSeen = t, true } else if returnType != t { returnType = JITTypeUnknown } }")
+		// Panic-only builtins have no rendered return arm. Do not declare a
+		// merge helper unless a block can actually use it.
+		for _, block := range g.fn.Blocks {
+			if len(block.Instrs) == 0 || blockEndsInPanic(block) {
+				continue
+			}
+			if _, returns := block.Instrs[len(block.Instrs)-1].(*ssa.Return); returns {
+				g.emit("mergeReturnType := func(t uint8) { if !returnTypeSeen { returnType, returnTypeSeen = t, true } else if returnType != t { returnType = JITTypeUnknown } }")
+				break
+			}
+		}
 	}
 	g.emit("var bbs [%d]%sBBDescriptor", len(g.fn.Blocks), cfg.bbsDeclPrefix)
 	g.emitBBPhiLayout()
@@ -4973,10 +4782,8 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 	g.emit("%s := ctx.ReserveLabel()", g.endLabel)
 
 	g.emitRecursiveBBRenderers()
-	entryPS := g.allocTemp("ps")
-	g.emit("%s := %sPhiState{General: %v}", entryPS, cfg.bbsDeclPrefix, cfg.entryGeneral)
 	if !g.storageMode {
-		g.emit("returned := bbs[0].RenderPS(%s)", entryPS)
+		g.emit("returned := bbs[0].Render()")
 		g.emit("if ctx.hasBooleanFlags(returned) {")
 		g.emit("\tif resultRegsProtected {")
 		if !g.rawReturn {
@@ -4988,7 +4795,7 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 		g.emit("\treturn returned")
 		g.emit("}")
 	} else {
-		g.emit("_ = bbs[0].RenderPS(%s)", entryPS)
+		g.emit("_ = bbs[0].Render()")
 	}
 
 	// Epilogue
@@ -5098,7 +4905,6 @@ func generateClosureCost(opName string, fn *ssa.Function, rewrite ssaValueRewrit
 	g.multiBlock = len(fn.Blocks) > 1
 
 	g.emitBody(emitBodyConfig{
-		entryGeneral:  false,
 		bbsDeclPrefix: "",
 	})
 
@@ -5161,7 +4967,7 @@ func generateJITHelperBody(fn *ssa.Function) (code string, errMsg string) {
 	fmt.Fprintln(&g.w, "\t\treturn result")
 	fmt.Fprintln(&g.w, "\t}")
 	fmt.Fprintf(&g.w, "\t%s\n", generatedBanner)
-	g.emitBody(emitBodyConfig{entryGeneral: false})
+	g.emitBody(emitBodyConfig{})
 	return g.wDecl.String() + injectBindRegCalls(g.w.String()), ""
 }
 
@@ -5239,7 +5045,6 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 	}
 
 	g.emitBody(emitBodyConfig{
-		entryGeneral:     false,
 		useReturnPhiRegs: false,
 		bbsDeclPrefix:    "scm.",
 	})
@@ -5306,8 +5111,8 @@ func addScmPrefix(code string) string {
 	scmIdents := map[string]bool{
 		"JITValueDesc": true, "JITTypeUnknown": true, "JITContext": true,
 		"Reg": true, "JITRegisterPlan": true, "JITRegisterSlot": true,
-		"BBDescriptor": true, "PhiState": true,
-		"LocNone": true, "LocReg": true, "LocRegPair": true, "LocRegTriple": true,
+		"BBDescriptor": true,
+		"LocNone":      true, "LocReg": true, "LocRegPair": true, "LocRegTriple": true,
 		"LocStack": true, "LocStackPair": true, "LocStackTriple": true, "LocInputPair": true, "LocMem": true, "LocImm": true, "LocAny": true, "LocFlags": true, "LocFPReg": true,
 		"NewInt": true, "NewFloat": true, "NewBool": true, "NewNil": true, "NewString": true,
 		"NewFastDict": true, "NewFastDictValue": true,
@@ -5747,39 +5552,11 @@ func (g *codeGen) bindActivePhiRegisterHomes(bbIdx int) {
 	}
 }
 
-// phiDescVars identifies overlay bindings ignored by canonical renderers.
-func (g *codeGen) phiDescVars() map[string]bool {
-	phiDescVars := map[string]bool{}
-	for phiName := range g.phiRegs {
-		gv, ok := g.vals[phiName]
-		if !ok || !gv.isDesc || gv.goVar == "" {
-			continue
-		}
-		phiDescVars[gv.goVar] = true
-	}
-	return phiDescVars
-}
-
-// applyPhiStateOverlay sets block-local phi descriptors from ps.PhiValues when
-// a specialized renderer call provides overlays for this block.
-func (g *codeGen) applyPhiStateOverlay(bbIdx int) {
-	phiDescVars := g.phiDescVars()
-	overlayVars := g.allClosureDescVars()
-	if g.overlayConsumers == nil {
-		g.overlayConsumers = make(map[*ssa.BasicBlock][]string)
-	}
-	g.overlayConsumers[g.fn.Blocks[bbIdx]] = overlayVars
-	for _, ov := range overlayVars {
-		idx := g.overlaySlot(ov)
-		if phiDescVars[ov] {
-			g.emit("if !ps.General && len(ps.OverlayValues) > %d && ps.OverlayValues[%d].Loc != LocNone {", idx, idx)
-		} else {
-			g.emit("if len(ps.OverlayValues) > %d && ps.OverlayValues[%d].Loc != LocNone {", idx, idx)
-		}
-		g.emit("\t%s = ps.OverlayValues[%d]", ov, idx)
-		g.emit("}")
-	}
-
+// initBlockPhiDescs creates any phi descriptor not already declared by an
+// earlier block. Other descriptors are shared closure locals, so an immediate
+// renderer call sees the predecessor's current state without an overlay copy.
+// Sibling rendering must restore those locals and allocator metadata together.
+func (g *codeGen) initBlockPhiDescs(bbIdx int) {
 	phis := g.blockPhis(bbIdx)
 	for phiIdx, phi := range phis {
 		phiOff := g.phiSlotOffExpr(bbIdx, phiIdx)
@@ -5814,9 +5591,6 @@ func (g *codeGen) applyPhiStateOverlay(bbIdx int) {
 			}
 			g.vals[phi.Name()] = gv
 		}
-		g.emit("if !ps.General && len(ps.PhiValues) > %d && ps.PhiValues[%d].Loc != LocNone {", phiIdx, phiIdx)
-		g.emit("\t%s = ps.PhiValues[%d]", gv.goVar, phiIdx)
-		g.emit("}")
 	}
 }
 
@@ -7450,6 +7224,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				panic(fmt.Sprintf("dynamic call: %s", v))
 			}
 			g.emitSerialCallableCall(name, v, callable, g.vals[v.Call.Args[0].Name()])
+			break
+		}
+		if callee.Name() == "ApplyOnce" && len(v.Call.Args) == 2 && isScmerType(v.Call.Args[0].Type()) {
+			// Singleton map/reduce paths invoke their callback without preparing
+			// a SerialProc. They still need the same lambda/stack-argument lowering;
+			// compiler-only lambda templates are not Scmer Go-call arguments.
+			g.emitSerialCallableCall(name, v, g.resolveCallValue(v.Call.Args[0]), g.resolveCallValue(v.Call.Args[1]))
 			break
 		}
 		if isSerialProcCall(callee) {
@@ -9130,7 +8911,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		// and materialize into registers only at use sites.
 		if g.bbClosureMode {
 			// In recursive BB-closure mode, phi descriptors are initialized at BB
-			// entry via resetAllPhiDescsToStack()+applyPhiStateOverlay.
+			// entry via resetAllPhiDescsToStack()+initBlockPhiDescs.
 			if gv, ok := g.vals[name]; ok && gv.isDesc {
 				break
 			}

@@ -647,6 +647,14 @@ func init_sync() {
 				{Kind: "number", Label: "offset"}, {Kind: "number", Label: "limit"},
 				{Kind: "func", Label: "consumer", Params: []*TypeDescriptor{{Kind: "list", Label: "row"}}, Return: &TypeDescriptor{Kind: "any"}},
 			}, Return: &TypeDescriptor{Kind: "any"},
+			JITInlineCost: 65535,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				// JITGen native call boundary: channel construction.
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["scan_order_merge"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	DeclareTitle("Sync")
@@ -678,7 +686,23 @@ func init_sync() {
 				_ = d1
 				var d2 JITValueDesc
 				_ = d2
-				var stackArray15 int32
+				var stackArray7 int32
+				var d8 JITValueDesc
+				_ = d8
+				var d9 JITValueDesc
+				_ = d9
+				var d10 JITValueDesc
+				_ = d10
+				var d11 JITValueDesc
+				_ = d11
+				var d12 JITValueDesc
+				_ = d12
+				var d13 JITValueDesc
+				_ = d13
+				var d14 JITValueDesc
+				_ = d14
+				var d15 JITValueDesc
+				_ = d15
 				var d16 JITValueDesc
 				_ = d16
 				var d17 JITValueDesc
@@ -707,63 +731,58 @@ func init_sync() {
 				_ = d28
 				var d29 JITValueDesc
 				_ = d29
-				var d30 JITValueDesc
-				_ = d30
-				var d31 JITValueDesc
-				_ = d31
-				var d32 JITValueDesc
-				_ = d32
-				var d33 JITValueDesc
-				_ = d33
-				var d34 JITValueDesc
-				_ = d34
-				var d35 JITValueDesc
-				_ = d35
-				var d36 JITValueDesc
-				_ = d36
-				var d37 JITValueDesc
-				_ = d37
-				var d94 JITValueDesc
-				_ = d94
-				var d95 JITValueDesc
-				_ = d95
-				var d96 JITValueDesc
-				_ = d96
-				var d97 JITValueDesc
-				_ = d97
-				var d98 JITValueDesc
-				_ = d98
-				var d99 JITValueDesc
-				_ = d99
-				var d100 JITValueDesc
-				_ = d100
-				var d101 JITValueDesc
-				_ = d101
-				var d102 JITValueDesc
-				_ = d102
-				var d103 JITValueDesc
-				_ = d103
-				var d104 JITValueDesc
-				_ = d104
-				var d105 JITValueDesc
-				_ = d105
-				var d106 JITValueDesc
-				_ = d106
-				var d107 JITValueDesc
-				_ = d107
-				var d108 JITValueDesc
-				_ = d108
-				var d109 JITValueDesc
-				_ = d109
-				var d110 JITValueDesc
-				_ = d110
-				var d111 JITValueDesc
-				_ = d111
-				var d112 JITValueDesc
-				_ = d112
-				var d113 JITValueDesc
-				_ = d113
+				var d56 JITValueDesc
+				_ = d56
+				var d57 JITValueDesc
+				_ = d57
+				var d58 JITValueDesc
+				_ = d58
+				var d59 JITValueDesc
+				_ = d59
+				var d60 JITValueDesc
+				_ = d60
+				var d61 JITValueDesc
+				_ = d61
+				var d62 JITValueDesc
+				_ = d62
+				var d63 JITValueDesc
+				_ = d63
+				var d64 JITValueDesc
+				_ = d64
+				var d65 JITValueDesc
+				_ = d65
+				var d66 JITValueDesc
+				_ = d66
+				var d67 JITValueDesc
+				_ = d67
+				var d68 JITValueDesc
+				_ = d68
+				var d69 JITValueDesc
+				_ = d69
+				var d70 JITValueDesc
+				_ = d70
+				var d71 JITValueDesc
+				_ = d71
+				var d72 JITValueDesc
+				_ = d72
+				var d73 JITValueDesc
+				_ = d73
+				var d74 JITValueDesc
+				_ = d74
+				var d75 JITValueDesc
+				_ = d75
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				branchSerial := ctx.branchSerial
+				_ = branchSerial
+				returnType := uint8(JITTypeUnknown)
+				returnTypeSeen := false
+				mergeReturnType := func(t uint8) {
+					if !returnTypeSeen {
+						returnType, returnTypeSeen = t, true
+					} else if returnType != t {
+						returnType = JITTypeUnknown
+					}
+				}
 				var bbs [5]BBDescriptor
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -799,30 +818,19 @@ func init_sync() {
 				_ = bbpos_0_4
 				lbl5 := ctx.ReserveLabel()
 				_ = lbl5
-				bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
-					if !ps.General {
-						if bbs[0].VisitCount >= 0 {
-							ps.General = true
-							return bbs[0].RenderPS(ps)
-						}
+				bbs[0].Render = func() JITValueDesc {
+					if bbs[0].Rendered {
+						ctx.EmitJmp(lbl1)
+						return result
 					}
-					bbs[0].VisitCount++
-					if ps.General {
-						if bbs[0].Rendered {
-							ctx.EmitJmp(lbl1)
-							return result
-						}
-						bbs[0].Rendered = true
-						ctx.FlushRegisterMoves()
-						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-						bbpos_0_0 = bbs[0].Address
-						ctx.MarkLabel(lbl1)
-						ctx.ResolveFixups()
-					}
+					bbs[0].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl1)
+					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					d0 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 					ctx.EnsureDesc(&d0)
-					var d1 JITValueDesc
 					if d0.Loc == LocImm {
 						d1 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d0.Imm.Int() == 0)}
 					} else {
@@ -839,134 +847,76 @@ func init_sync() {
 					}
 					if d2.Loc == LocImm {
 						if d2.Imm.Bool() {
-							if ps.General {
-							}
-							ps3 := PhiState{General: ps.General}
-							ps3.OverlayValues = make([]JITValueDesc, 3)
-							ps3.OverlayValues[0] = d0
-							ps3.OverlayValues[1] = d1
-							ps3.OverlayValues[2] = d2
-							return bbs[1].RenderPS(ps3)
+							return bbs[1].Render()
 						}
-						if ps.General {
-						}
-						ps4 := PhiState{General: ps.General}
-						ps4.OverlayValues = make([]JITValueDesc, 3)
-						ps4.OverlayValues[0] = d0
-						ps4.OverlayValues[1] = d1
-						ps4.OverlayValues[2] = d2
-						return bbs[2].RenderPS(ps4)
-					}
-					if !ps.General {
-						ps.General = true
-						return bbs[0].RenderPS(ps)
+						return bbs[2].Render()
 					}
 					ctx.EmitJump(d2.Condition, lbl2)
 					if bbs[2].Rendered {
 						ctx.EmitJmp(lbl3)
 					}
 					ctx.FreeDesc(&d1)
-					snap5 := d0
-					snap6 := d1
-					snap7 := d2
-					alloc8 := ctx.SnapshotAllocState()
-					ctx.RestoreAllocState(alloc8)
-					d0 = snap5
-					d1 = snap6
-					d2 = snap7
-					ctx.RestoreAllocState(alloc8)
-					d0 = snap5
-					d1 = snap6
-					d2 = snap7
-					ps9 := PhiState{General: true}
-					ps9.OverlayValues = make([]JITValueDesc, 3)
-					ps9.OverlayValues[0] = d0
-					ps9.OverlayValues[1] = d1
-					ps9.OverlayValues[2] = d2
-					ps10 := PhiState{General: true}
-					ps10.OverlayValues = make([]JITValueDesc, 3)
-					ps10.OverlayValues[0] = d0
-					ps10.OverlayValues[1] = d1
-					ps10.OverlayValues[2] = d2
-					snap11 := d0
-					snap12 := d1
-					snap13 := d2
-					alloc14 := ctx.SnapshotAllocState()
+					ctx.FlushRegisterMoves()
 					if !bbs[2].Rendered {
-						bbs[2].RenderPS(ps10)
+						snap3 := d0
+						snap4 := d1
+						snap5 := d2
+						alloc6 := ctx.SnapshotAllocState()
+						bbs[2].Render()
+						ctx.RestoreAllocState(alloc6)
+						d0 = snap3
+						d1 = snap4
+						d2 = snap5
 					}
-					ctx.RestoreAllocState(alloc14)
-					d0 = snap11
-					d1 = snap12
-					d2 = snap13
 					if !bbs[1].Rendered {
-						return bbs[1].RenderPS(ps9)
+						return bbs[1].Render()
 					}
 					return result
 					return result
 				}
-				bbs[1].RenderPS = func(ps PhiState) JITValueDesc {
-					if !ps.General {
-						if bbs[1].VisitCount >= 0 {
-							ps.General = true
-							return bbs[1].RenderPS(ps)
-						}
+				bbs[1].Render = func() JITValueDesc {
+					if bbs[1].Rendered {
+						ctx.EmitJmp(lbl2)
+						return result
 					}
-					bbs[1].VisitCount++
-					if ps.General {
-						if bbs[1].Rendered {
-							ctx.EmitJmp(lbl2)
-							return result
-						}
-						bbs[1].Rendered = true
-						ctx.FlushRegisterMoves()
-						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-						bbpos_0_1 = bbs[1].Address
-						ctx.MarkLabel(lbl2)
-						ctx.ResolveFixups()
-					}
-					if len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
-						d0 = ps.OverlayValues[0]
-					}
-					if len(ps.OverlayValues) > 1 && ps.OverlayValues[1].Loc != LocNone {
-						d1 = ps.OverlayValues[1]
-					}
-					if len(ps.OverlayValues) > 2 && ps.OverlayValues[2].Loc != LocNone {
-						d2 = ps.OverlayValues[2]
-					}
+					bbs[1].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl2)
+					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
-					stackArray15 = ctx.AllocStack(int32(32))
-					_ = stackArray15
-					d16 = JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, KnownSliceLen: int32(2), KnownSliceCap: int32(2), SliceSizeKnown: true}
-					_ = d16
-					d17 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					ctx.SyncDesc(&d17)
-					ctx.EmitStoreScmerToStack(d17, int32(stackArray15)+int32(16))
-					ctx.FreeDesc(&d17)
+					stackArray7 = ctx.AllocStack(int32(32))
+					_ = stackArray7
+					d8 = JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, KnownSliceLen: int32(2), KnownSliceCap: int32(2), SliceSizeKnown: true}
+					_ = d8
+					d9 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+					ctx.SyncDesc(&d9)
+					ctx.EmitStoreScmerToStack(d9, int32(stackArray7)+int32(16))
+					ctx.FreeDesc(&d9)
 					r1 := ctx.AllocReg()
 					r2 := ctx.AllocRegExcept(r1)
 					ctx.EmitMovRegImm64(r1, 0)
 					ctx.EmitMovRegImm64(r2, 0)
-					d18 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r1, Reg2: r2}
-					ctx.BindReg(r1, &d18)
-					ctx.BindReg(r2, &d18)
-					d19 = args[0]
-					d19.ID = 0
+					d10 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r1, Reg2: r2}
+					ctx.BindReg(r1, &d10)
+					ctx.BindReg(r2, &d10)
+					d11 = args[0]
+					d11.ID = 0
 					r3 := ctx.AllocReg()
-					ctx.EmitLeaRegMem(r3, ctx.StackReg, int32(stackArray15)+int32(0))
-					d20 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, NoHeapPointer: true}
-					ctx.BindReg(r3, &d20)
-					ctx.EnsureDesc(&d20)
-					ctx.EnsureDesc(&d20)
-					ctx.EnsureDesc(&d20)
-					d23 = args[0]
-					d23.ID = 0
-					d24 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(22)}
-					d25 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
-					d26 = d24
-					_ = d26
-					d27 = d25
-					_ = d27
+					ctx.EmitLeaRegMem(r3, ctx.StackReg, int32(stackArray7)+int32(0))
+					d12 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, NoHeapPointer: true}
+					ctx.BindReg(r3, &d12)
+					ctx.EnsureDesc(&d12)
+					ctx.EnsureDesc(&d12)
+					ctx.EnsureDesc(&d12)
+					d15 = args[0]
+					d15.ID = 0
+					d16 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(22)}
+					d17 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
+					d18 = d16
+					_ = d18
+					d19 = d17
+					_ = d19
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl6 := ctx.ReserveLabel()
@@ -976,746 +926,308 @@ func init_sync() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d27)
-					var d28 JITValueDesc
-					if d27.Loc == LocImm {
-						d28 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(d27.Imm.Int()) << 8))}
+					ctx.EnsureDesc(&d19)
+					if d19.Loc == LocImm {
+						d20 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(d19.Imm.Int()) << 8))}
 					} else {
-						ctx.EmitShlRegImm8(d27.Reg, 8)
-						d28 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d27.Reg}
-						ctx.BindReg(d27.Reg, &d28)
+						ctx.EmitShlRegImm8(d19.Reg, 8)
+						d20 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d19.Reg}
+						ctx.BindReg(d19.Reg, &d20)
 					}
-					if d28.Loc == LocReg && d27.Loc == LocReg && d28.Reg == d27.Reg {
-						ctx.TransferReg(d27.Reg)
-						d27.Loc = LocNone
+					if d20.Loc == LocReg && d19.Loc == LocReg && d20.Reg == d19.Reg {
+						ctx.TransferReg(d19.Reg)
+						d19.Loc = LocNone
 					}
-					ctx.FreeDesc(&d27)
+					ctx.FreeDesc(&d19)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d26)
-					var d29 JITValueDesc
-					if d26.Loc == LocImm {
-						d29 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d26.Imm.Int() & 255)}
+					ctx.EnsureDesc(&d18)
+					if d18.Loc == LocImm {
+						d21 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d18.Imm.Int() & 255)}
 					} else {
-						ctx.EmitAndRegImm32(d26.Reg, int32(255))
-						d29 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d26.Reg}
-						ctx.BindReg(d26.Reg, &d29)
+						ctx.EmitAndRegImm32(d18.Reg, int32(255))
+						d21 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d18.Reg}
+						ctx.BindReg(d18.Reg, &d21)
 					}
-					if d29.Loc == LocImm {
-						d29 = JITValueDesc{Loc: LocImm, Type: d29.Type, Imm: NewInt(int64(uint64(d29.Imm.Int()) & 0xff))}
+					if d21.Loc == LocImm {
+						d21 = JITValueDesc{Loc: LocImm, Type: d21.Type, Imm: NewInt(int64(uint64(d21.Imm.Int()) & 0xff))}
 					} else {
-						ctx.EmitShlRegImm8(d29.Reg, 56)
-						ctx.EmitShrRegImm8(d29.Reg, 56)
+						ctx.EmitShlRegImm8(d21.Reg, 56)
+						ctx.EmitShrRegImm8(d21.Reg, 56)
 					}
-					if d29.Loc == LocReg && d26.Loc == LocReg && d29.Reg == d26.Reg {
-						ctx.TransferReg(d26.Reg)
-						d26.Loc = LocNone
+					if d21.Loc == LocReg && d18.Loc == LocReg && d21.Reg == d18.Reg {
+						ctx.TransferReg(d18.Reg)
+						d18.Loc = LocNone
 					}
-					ctx.FreeDesc(&d26)
+					ctx.FreeDesc(&d18)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d29)
-					ctx.EnsureDesc(&d29)
-					var d30 JITValueDesc
-					if d29.Loc == LocImm {
-						d30 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(uint8(d29.Imm.Int()))))}
+					ctx.EnsureDesc(&d21)
+					ctx.EnsureDesc(&d21)
+					if d21.Loc == LocImm {
+						d22 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(uint8(d21.Imm.Int()))))}
 					} else {
 						r4 := ctx.AllocReg()
-						ctx.EmitMovRegReg(r4, d29.Reg)
+						ctx.EmitMovRegReg(r4, d21.Reg)
 						ctx.EmitShlRegImm8(r4, 56)
 						ctx.EmitShrRegImm8(r4, 56)
-						d30 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r4}
-						ctx.BindReg(r4, &d30)
+						d22 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r4}
+						ctx.BindReg(r4, &d22)
 					}
-					ctx.FreeDesc(&d29)
+					ctx.FreeDesc(&d21)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d28)
-					ctx.EnsureDesc(&d30)
-					var d31 JITValueDesc
-					if d28.Loc == LocImm && d30.Loc == LocImm {
-						d31 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d28.Imm.Int() | d30.Imm.Int())}
-					} else if d28.Loc == LocImm && d28.Imm.Int() == 0 {
-						d31 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d30.Reg}
-						ctx.BindReg(d30.Reg, &d31)
-					} else if d30.Loc == LocImm && d30.Imm.Int() == 0 {
-						d31 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d28.Reg}
-						ctx.BindReg(d28.Reg, &d31)
-					} else if d28.Loc == LocImm {
-						scratch := ctx.AllocRegExcept(d30.Reg)
-						ctx.EmitMovRegImm64(scratch, uint64(d28.Imm.Int()))
-						ctx.EmitOrInt64(scratch, d30.Reg)
-						d31 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
-						ctx.BindReg(scratch, &d31)
-					} else if d30.Loc == LocImm {
-						if d30.Imm.Int() >= -2147483648 && d30.Imm.Int() <= 2147483647 {
-							ctx.EmitOrRegImm32(d28.Reg, int32(d30.Imm.Int()))
+					ctx.EnsureDesc(&d20)
+					ctx.EnsureDesc(&d22)
+					if d20.Loc == LocImm && d22.Loc == LocImm {
+						d23 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d20.Imm.Int() | d22.Imm.Int())}
+					} else if d20.Loc == LocImm && d20.Imm.Int() == 0 {
+						d23 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d22.Reg}
+						ctx.BindReg(d22.Reg, &d23)
+					} else if d22.Loc == LocImm && d22.Imm.Int() == 0 {
+						d23 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d20.Reg}
+						ctx.BindReg(d20.Reg, &d23)
+					} else if d20.Loc == LocImm {
+						scratch := ctx.AllocRegExcept(d22.Reg)
+						ctx.EmitMovRegImm64(scratch, uint64(d20.Imm.Int()))
+						ctx.EmitOrInt64(scratch, d22.Reg)
+						d23 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
+						ctx.BindReg(scratch, &d23)
+					} else if d22.Loc == LocImm {
+						if d22.Imm.Int() >= -2147483648 && d22.Imm.Int() <= 2147483647 {
+							ctx.EmitOrRegImm32(d20.Reg, int32(d22.Imm.Int()))
 						} else {
-							ctx.EmitMovRegImm64(RegR11, uint64(d30.Imm.Int()))
-							ctx.EmitOrInt64(d28.Reg, RegR11)
+							ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d22.Imm.Int()))
+							ctx.EmitOrInt64(d20.Reg, ctx.ScratchReg)
 						}
-						d31 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d28.Reg}
-						ctx.BindReg(d28.Reg, &d31)
+						d23 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d20.Reg}
+						ctx.BindReg(d20.Reg, &d23)
 					} else {
-						ctx.EmitOrInt64(d28.Reg, d30.Reg)
-						d31 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d28.Reg}
-						ctx.BindReg(d28.Reg, &d31)
+						ctx.EmitOrInt64(d20.Reg, d22.Reg)
+						d23 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d20.Reg}
+						ctx.BindReg(d20.Reg, &d23)
 					}
-					if d31.Loc == LocReg && d28.Loc == LocReg && d31.Reg == d28.Reg {
-						ctx.TransferReg(d28.Reg)
-						d28.Loc = LocNone
+					if d23.Loc == LocReg && d20.Loc == LocReg && d23.Reg == d20.Reg {
+						ctx.TransferReg(d20.Reg)
+						d20.Loc = LocNone
 					}
-					ctx.FreeDesc(&d28)
-					ctx.FreeDesc(&d30)
+					ctx.FreeDesc(&d20)
+					ctx.FreeDesc(&d22)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d20)
-					ctx.EnsureDesc(&d20)
-					ctx.EmitMovToReg(d19.Reg, d20)
-					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
-					ctx.EmitMovToReg(d23.Reg2, d31)
-					ctx.FreeDesc(&d31)
-					d32 = d18
-					_ = d32
-					ctx.SyncDesc(&d32)
-					if d32.Loc == LocRegPair || d32.Loc == LocStackPair || d32.Loc == LocInputPair {
-						ctx.EmitMovPairToResult(&d32, &result)
-						result.Type = d32.Type
+					ctx.EnsureDesc(&d23)
+					ctx.EnsureDesc(&d12)
+					ctx.EnsureDesc(&d12)
+					ctx.EmitMovToReg(d11.Reg, d12)
+					ctx.EnsureDesc(&d23)
+					ctx.EnsureDesc(&d23)
+					ctx.EmitMovToReg(d15.Reg2, d23)
+					ctx.FreeDesc(&d23)
+					d24 = d10
+					_ = d24
+					ctx.SyncDesc(&d24)
+					if d24.Loc == LocRegPair || d24.Loc == LocStackPair || d24.Loc == LocInputPair {
+						ctx.EmitMovPairToResult(&d24, &result)
+						result.Type = d24.Type
 					} else {
-						switch d32.Type {
+						switch d24.Type {
 						case tagBool:
-							ctx.EmitMakeBool(result, d32)
+							ctx.EmitMakeBool(result, d24)
 							result.Type = tagBool
 						case tagInt:
-							ctx.EmitMakeInt(result, d32)
+							ctx.EmitMakeInt(result, d24)
 							result.Type = tagInt
 						case tagFloat:
-							ctx.EmitMakeFloat(result, d32)
+							ctx.EmitMakeFloat(result, d24)
 							result.Type = tagFloat
 						case tagNil:
 							ctx.EmitMakeNil(result)
 							result.Type = tagNil
 						default:
-							ctx.EmitMovPairToResult(&d32, &result)
-							result.Type = d32.Type
+							ctx.EmitMovPairToResult(&d24, &result)
+							result.Type = d24.Type
 						}
 					}
+					mergeReturnType(result.Type)
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				bbs[2].RenderPS = func(ps PhiState) JITValueDesc {
-					if !ps.General {
-						if bbs[2].VisitCount >= 0 {
-							ps.General = true
-							return bbs[2].RenderPS(ps)
-						}
+				bbs[2].Render = func() JITValueDesc {
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+						return result
 					}
-					bbs[2].VisitCount++
-					if ps.General {
-						if bbs[2].Rendered {
-							ctx.EmitJmp(lbl3)
-							return result
-						}
-						bbs[2].Rendered = true
-						ctx.FlushRegisterMoves()
-						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-						bbpos_0_2 = bbs[2].Address
-						ctx.MarkLabel(lbl3)
-						ctx.ResolveFixups()
-					}
-					if len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
-						d0 = ps.OverlayValues[0]
-					}
-					if len(ps.OverlayValues) > 1 && ps.OverlayValues[1].Loc != LocNone {
-						d1 = ps.OverlayValues[1]
-					}
-					if len(ps.OverlayValues) > 2 && ps.OverlayValues[2].Loc != LocNone {
-						d2 = ps.OverlayValues[2]
-					}
-					if len(ps.OverlayValues) > 16 && ps.OverlayValues[16].Loc != LocNone {
-						d16 = ps.OverlayValues[16]
-					}
-					if len(ps.OverlayValues) > 17 && ps.OverlayValues[17].Loc != LocNone {
-						d17 = ps.OverlayValues[17]
-					}
-					if len(ps.OverlayValues) > 18 && ps.OverlayValues[18].Loc != LocNone {
-						d18 = ps.OverlayValues[18]
-					}
-					if len(ps.OverlayValues) > 19 && ps.OverlayValues[19].Loc != LocNone {
-						d19 = ps.OverlayValues[19]
-					}
-					if len(ps.OverlayValues) > 20 && ps.OverlayValues[20].Loc != LocNone {
-						d20 = ps.OverlayValues[20]
-					}
-					if len(ps.OverlayValues) > 21 && ps.OverlayValues[21].Loc != LocNone {
-						d21 = ps.OverlayValues[21]
-					}
-					if len(ps.OverlayValues) > 22 && ps.OverlayValues[22].Loc != LocNone {
-						d22 = ps.OverlayValues[22]
-					}
-					if len(ps.OverlayValues) > 23 && ps.OverlayValues[23].Loc != LocNone {
-						d23 = ps.OverlayValues[23]
-					}
-					if len(ps.OverlayValues) > 24 && ps.OverlayValues[24].Loc != LocNone {
-						d24 = ps.OverlayValues[24]
-					}
-					if len(ps.OverlayValues) > 25 && ps.OverlayValues[25].Loc != LocNone {
-						d25 = ps.OverlayValues[25]
-					}
-					if len(ps.OverlayValues) > 26 && ps.OverlayValues[26].Loc != LocNone {
-						d26 = ps.OverlayValues[26]
-					}
-					if len(ps.OverlayValues) > 27 && ps.OverlayValues[27].Loc != LocNone {
-						d27 = ps.OverlayValues[27]
-					}
-					if len(ps.OverlayValues) > 28 && ps.OverlayValues[28].Loc != LocNone {
-						d28 = ps.OverlayValues[28]
-					}
-					if len(ps.OverlayValues) > 29 && ps.OverlayValues[29].Loc != LocNone {
-						d29 = ps.OverlayValues[29]
-					}
-					if len(ps.OverlayValues) > 30 && ps.OverlayValues[30].Loc != LocNone {
-						d30 = ps.OverlayValues[30]
-					}
-					if len(ps.OverlayValues) > 31 && ps.OverlayValues[31].Loc != LocNone {
-						d31 = ps.OverlayValues[31]
-					}
-					if len(ps.OverlayValues) > 32 && ps.OverlayValues[32].Loc != LocNone {
-						d32 = ps.OverlayValues[32]
-					}
+					bbs[2].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl3)
+					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
-					d33 = args[0]
-					d33.ID = 0
-					d34 = jitKnownSliceHeader(ctx, &d33)
-					ctx.StabilizeDescForControlFlow(&d34)
-					ctx.FreeDesc(&d33)
-					var d35 JITValueDesc
-					if d34.SliceSizeKnown {
-						d35 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d34.KnownSliceLen))}
-					} else if d34.Loc == LocImm {
-						d35 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d34.StackOff))}
-					} else if d34.Loc == LocStackTriple {
-						d35 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: d34.StackOff + 8, NoHeapPointer: true}
+					d25 = args[0]
+					d25.ID = 0
+					d26 = jitKnownSliceHeader(ctx, &d25)
+					ctx.StabilizeDescForControlFlow(&d26)
+					ctx.FreeDesc(&d25)
+					if d26.SliceSizeKnown {
+						d27 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d26.KnownSliceLen))}
+					} else if d26.Loc == LocImm {
+						d27 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d26.StackOff))}
+					} else if d26.Loc == LocStackTriple {
+						d27 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: d26.StackOff + 8, NoHeapPointer: true}
 					} else {
-						ctx.EnsureDesc(&d34)
-						if d34.Loc == LocRegPair || d34.Loc == LocRegTriple {
-							d35 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d34.Reg2, ID: 0}
-						} else if d34.Loc == LocReg {
-							d35 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d34.Reg, ID: 0}
+						ctx.EnsureDesc(&d26)
+						if d26.Loc == LocRegPair || d26.Loc == LocRegTriple {
+							d27 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d26.Reg2, ID: 0}
+						} else if d26.Loc == LocReg {
+							d27 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d26.Reg, ID: 0}
 						} else {
 							panic("len on unsupported descriptor location")
 						}
 					}
-					ctx.EnsureDesc(&d35)
-					var d36 JITValueDesc
-					if d35.Loc == LocImm {
-						d36 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d35.Imm.Int() < 2)}
+					ctx.EnsureDesc(&d27)
+					if d27.Loc == LocImm {
+						d28 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d27.Imm.Int() < 2)}
 					} else {
 						r5 := ctx.AllocReg()
-						ctx.EmitCmpRegImm32(d35.Reg, 2)
-						d36 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r5, Condition: CondSignedLess}
-						ctx.BindReg(r5, &d36)
+						ctx.EmitCmpRegImm32(d27.Reg, 2)
+						d28 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r5, Condition: CondSignedLess}
+						ctx.BindReg(r5, &d28)
 					}
-					ctx.FreeDesc(&d35)
-					d37 = d36
-					ctx.EnsureDesc(&d37)
-					if d37.Loc != LocImm && d37.Loc != LocFlags {
+					ctx.FreeDesc(&d27)
+					d29 = d28
+					ctx.EnsureDesc(&d29)
+					if d29.Loc != LocImm && d29.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
-					if d37.Loc == LocImm {
-						if d37.Imm.Bool() {
-							if ps.General {
-							}
-							ps38 := PhiState{General: ps.General}
-							ps38.OverlayValues = make([]JITValueDesc, 38)
-							ps38.OverlayValues[0] = d0
-							ps38.OverlayValues[1] = d1
-							ps38.OverlayValues[2] = d2
-							ps38.OverlayValues[16] = d16
-							ps38.OverlayValues[17] = d17
-							ps38.OverlayValues[18] = d18
-							ps38.OverlayValues[19] = d19
-							ps38.OverlayValues[20] = d20
-							ps38.OverlayValues[21] = d21
-							ps38.OverlayValues[22] = d22
-							ps38.OverlayValues[23] = d23
-							ps38.OverlayValues[24] = d24
-							ps38.OverlayValues[25] = d25
-							ps38.OverlayValues[26] = d26
-							ps38.OverlayValues[27] = d27
-							ps38.OverlayValues[28] = d28
-							ps38.OverlayValues[29] = d29
-							ps38.OverlayValues[30] = d30
-							ps38.OverlayValues[31] = d31
-							ps38.OverlayValues[32] = d32
-							ps38.OverlayValues[33] = d33
-							ps38.OverlayValues[34] = d34
-							ps38.OverlayValues[35] = d35
-							ps38.OverlayValues[36] = d36
-							ps38.OverlayValues[37] = d37
-							return bbs[3].RenderPS(ps38)
+					if d29.Loc == LocImm {
+						if d29.Imm.Bool() {
+							return bbs[3].Render()
 						}
-						if ps.General {
-						}
-						ps39 := PhiState{General: ps.General}
-						ps39.OverlayValues = make([]JITValueDesc, 38)
-						ps39.OverlayValues[0] = d0
-						ps39.OverlayValues[1] = d1
-						ps39.OverlayValues[2] = d2
-						ps39.OverlayValues[16] = d16
-						ps39.OverlayValues[17] = d17
-						ps39.OverlayValues[18] = d18
-						ps39.OverlayValues[19] = d19
-						ps39.OverlayValues[20] = d20
-						ps39.OverlayValues[21] = d21
-						ps39.OverlayValues[22] = d22
-						ps39.OverlayValues[23] = d23
-						ps39.OverlayValues[24] = d24
-						ps39.OverlayValues[25] = d25
-						ps39.OverlayValues[26] = d26
-						ps39.OverlayValues[27] = d27
-						ps39.OverlayValues[28] = d28
-						ps39.OverlayValues[29] = d29
-						ps39.OverlayValues[30] = d30
-						ps39.OverlayValues[31] = d31
-						ps39.OverlayValues[32] = d32
-						ps39.OverlayValues[33] = d33
-						ps39.OverlayValues[34] = d34
-						ps39.OverlayValues[35] = d35
-						ps39.OverlayValues[36] = d36
-						ps39.OverlayValues[37] = d37
-						return bbs[4].RenderPS(ps39)
+						return bbs[4].Render()
 					}
-					if !ps.General {
-						ps.General = true
-						return bbs[2].RenderPS(ps)
-					}
-					ctx.EmitJump(d37.Condition, lbl4)
+					ctx.EmitJump(d29.Condition, lbl4)
 					if bbs[4].Rendered {
 						ctx.EmitJmp(lbl5)
 					}
-					ctx.FreeDesc(&d36)
-					snap40 := d0
-					snap41 := d1
-					snap42 := d2
-					snap43 := d16
-					snap44 := d17
-					snap45 := d18
-					snap46 := d19
-					snap47 := d20
-					snap48 := d21
-					snap49 := d22
-					snap50 := d23
-					snap51 := d24
-					snap52 := d25
-					snap53 := d26
-					snap54 := d27
-					snap55 := d28
-					snap56 := d29
-					snap57 := d30
-					snap58 := d31
-					snap59 := d32
-					snap60 := d33
-					snap61 := d34
-					snap62 := d35
-					snap63 := d36
-					snap64 := d37
-					alloc65 := ctx.SnapshotAllocState()
-					ctx.RestoreAllocState(alloc65)
-					d0 = snap40
-					d1 = snap41
-					d2 = snap42
-					d16 = snap43
-					d17 = snap44
-					d18 = snap45
-					d19 = snap46
-					d20 = snap47
-					d21 = snap48
-					d22 = snap49
-					d23 = snap50
-					d24 = snap51
-					d25 = snap52
-					d26 = snap53
-					d27 = snap54
-					d28 = snap55
-					d29 = snap56
-					d30 = snap57
-					d31 = snap58
-					d32 = snap59
-					d33 = snap60
-					d34 = snap61
-					d35 = snap62
-					d36 = snap63
-					d37 = snap64
-					ctx.RestoreAllocState(alloc65)
-					d0 = snap40
-					d1 = snap41
-					d2 = snap42
-					d16 = snap43
-					d17 = snap44
-					d18 = snap45
-					d19 = snap46
-					d20 = snap47
-					d21 = snap48
-					d22 = snap49
-					d23 = snap50
-					d24 = snap51
-					d25 = snap52
-					d26 = snap53
-					d27 = snap54
-					d28 = snap55
-					d29 = snap56
-					d30 = snap57
-					d31 = snap58
-					d32 = snap59
-					d33 = snap60
-					d34 = snap61
-					d35 = snap62
-					d36 = snap63
-					d37 = snap64
-					ps66 := PhiState{General: true}
-					ps66.OverlayValues = make([]JITValueDesc, 38)
-					ps66.OverlayValues[0] = d0
-					ps66.OverlayValues[1] = d1
-					ps66.OverlayValues[2] = d2
-					ps66.OverlayValues[16] = d16
-					ps66.OverlayValues[17] = d17
-					ps66.OverlayValues[18] = d18
-					ps66.OverlayValues[19] = d19
-					ps66.OverlayValues[20] = d20
-					ps66.OverlayValues[21] = d21
-					ps66.OverlayValues[22] = d22
-					ps66.OverlayValues[23] = d23
-					ps66.OverlayValues[24] = d24
-					ps66.OverlayValues[25] = d25
-					ps66.OverlayValues[26] = d26
-					ps66.OverlayValues[27] = d27
-					ps66.OverlayValues[28] = d28
-					ps66.OverlayValues[29] = d29
-					ps66.OverlayValues[30] = d30
-					ps66.OverlayValues[31] = d31
-					ps66.OverlayValues[32] = d32
-					ps66.OverlayValues[33] = d33
-					ps66.OverlayValues[34] = d34
-					ps66.OverlayValues[35] = d35
-					ps66.OverlayValues[36] = d36
-					ps66.OverlayValues[37] = d37
-					ps67 := PhiState{General: true}
-					ps67.OverlayValues = make([]JITValueDesc, 38)
-					ps67.OverlayValues[0] = d0
-					ps67.OverlayValues[1] = d1
-					ps67.OverlayValues[2] = d2
-					ps67.OverlayValues[16] = d16
-					ps67.OverlayValues[17] = d17
-					ps67.OverlayValues[18] = d18
-					ps67.OverlayValues[19] = d19
-					ps67.OverlayValues[20] = d20
-					ps67.OverlayValues[21] = d21
-					ps67.OverlayValues[22] = d22
-					ps67.OverlayValues[23] = d23
-					ps67.OverlayValues[24] = d24
-					ps67.OverlayValues[25] = d25
-					ps67.OverlayValues[26] = d26
-					ps67.OverlayValues[27] = d27
-					ps67.OverlayValues[28] = d28
-					ps67.OverlayValues[29] = d29
-					ps67.OverlayValues[30] = d30
-					ps67.OverlayValues[31] = d31
-					ps67.OverlayValues[32] = d32
-					ps67.OverlayValues[33] = d33
-					ps67.OverlayValues[34] = d34
-					ps67.OverlayValues[35] = d35
-					ps67.OverlayValues[36] = d36
-					ps67.OverlayValues[37] = d37
-					snap68 := d0
-					snap69 := d1
-					snap70 := d2
-					snap71 := d16
-					snap72 := d17
-					snap73 := d18
-					snap74 := d19
-					snap75 := d20
-					snap76 := d21
-					snap77 := d22
-					snap78 := d23
-					snap79 := d24
-					snap80 := d25
-					snap81 := d26
-					snap82 := d27
-					snap83 := d28
-					snap84 := d29
-					snap85 := d30
-					snap86 := d31
-					snap87 := d32
-					snap88 := d33
-					snap89 := d34
-					snap90 := d35
-					snap91 := d36
-					snap92 := d37
-					alloc93 := ctx.SnapshotAllocState()
+					ctx.FreeDesc(&d28)
+					ctx.FlushRegisterMoves()
 					if !bbs[4].Rendered {
-						bbs[4].RenderPS(ps67)
+						snap30 := d0
+						snap31 := d1
+						snap32 := d2
+						snap33 := d8
+						snap34 := d9
+						snap35 := d10
+						snap36 := d11
+						snap37 := d12
+						snap38 := d13
+						snap39 := d14
+						snap40 := d15
+						snap41 := d16
+						snap42 := d17
+						snap43 := d18
+						snap44 := d19
+						snap45 := d20
+						snap46 := d21
+						snap47 := d22
+						snap48 := d23
+						snap49 := d24
+						snap50 := d25
+						snap51 := d26
+						snap52 := d27
+						snap53 := d28
+						snap54 := d29
+						alloc55 := ctx.SnapshotAllocState()
+						bbs[4].Render()
+						ctx.RestoreAllocState(alloc55)
+						d0 = snap30
+						d1 = snap31
+						d2 = snap32
+						d8 = snap33
+						d9 = snap34
+						d10 = snap35
+						d11 = snap36
+						d12 = snap37
+						d13 = snap38
+						d14 = snap39
+						d15 = snap40
+						d16 = snap41
+						d17 = snap42
+						d18 = snap43
+						d19 = snap44
+						d20 = snap45
+						d21 = snap46
+						d22 = snap47
+						d23 = snap48
+						d24 = snap49
+						d25 = snap50
+						d26 = snap51
+						d27 = snap52
+						d28 = snap53
+						d29 = snap54
 					}
-					ctx.RestoreAllocState(alloc93)
-					d0 = snap68
-					d1 = snap69
-					d2 = snap70
-					d16 = snap71
-					d17 = snap72
-					d18 = snap73
-					d19 = snap74
-					d20 = snap75
-					d21 = snap76
-					d22 = snap77
-					d23 = snap78
-					d24 = snap79
-					d25 = snap80
-					d26 = snap81
-					d27 = snap82
-					d28 = snap83
-					d29 = snap84
-					d30 = snap85
-					d31 = snap86
-					d32 = snap87
-					d33 = snap88
-					d34 = snap89
-					d35 = snap90
-					d36 = snap91
-					d37 = snap92
 					if !bbs[3].Rendered {
-						return bbs[3].RenderPS(ps66)
+						return bbs[3].Render()
 					}
 					return result
 					return result
 				}
-				bbs[3].RenderPS = func(ps PhiState) JITValueDesc {
-					if !ps.General {
-						if bbs[3].VisitCount >= 0 {
-							ps.General = true
-							return bbs[3].RenderPS(ps)
-						}
+				bbs[3].Render = func() JITValueDesc {
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+						return result
 					}
-					bbs[3].VisitCount++
-					if ps.General {
-						if bbs[3].Rendered {
-							ctx.EmitJmp(lbl4)
-							return result
-						}
-						bbs[3].Rendered = true
-						ctx.FlushRegisterMoves()
-						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-						bbpos_0_3 = bbs[3].Address
-						ctx.MarkLabel(lbl4)
-						ctx.ResolveFixups()
-					}
-					if len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
-						d0 = ps.OverlayValues[0]
-					}
-					if len(ps.OverlayValues) > 1 && ps.OverlayValues[1].Loc != LocNone {
-						d1 = ps.OverlayValues[1]
-					}
-					if len(ps.OverlayValues) > 2 && ps.OverlayValues[2].Loc != LocNone {
-						d2 = ps.OverlayValues[2]
-					}
-					if len(ps.OverlayValues) > 16 && ps.OverlayValues[16].Loc != LocNone {
-						d16 = ps.OverlayValues[16]
-					}
-					if len(ps.OverlayValues) > 17 && ps.OverlayValues[17].Loc != LocNone {
-						d17 = ps.OverlayValues[17]
-					}
-					if len(ps.OverlayValues) > 18 && ps.OverlayValues[18].Loc != LocNone {
-						d18 = ps.OverlayValues[18]
-					}
-					if len(ps.OverlayValues) > 19 && ps.OverlayValues[19].Loc != LocNone {
-						d19 = ps.OverlayValues[19]
-					}
-					if len(ps.OverlayValues) > 20 && ps.OverlayValues[20].Loc != LocNone {
-						d20 = ps.OverlayValues[20]
-					}
-					if len(ps.OverlayValues) > 21 && ps.OverlayValues[21].Loc != LocNone {
-						d21 = ps.OverlayValues[21]
-					}
-					if len(ps.OverlayValues) > 22 && ps.OverlayValues[22].Loc != LocNone {
-						d22 = ps.OverlayValues[22]
-					}
-					if len(ps.OverlayValues) > 23 && ps.OverlayValues[23].Loc != LocNone {
-						d23 = ps.OverlayValues[23]
-					}
-					if len(ps.OverlayValues) > 24 && ps.OverlayValues[24].Loc != LocNone {
-						d24 = ps.OverlayValues[24]
-					}
-					if len(ps.OverlayValues) > 25 && ps.OverlayValues[25].Loc != LocNone {
-						d25 = ps.OverlayValues[25]
-					}
-					if len(ps.OverlayValues) > 26 && ps.OverlayValues[26].Loc != LocNone {
-						d26 = ps.OverlayValues[26]
-					}
-					if len(ps.OverlayValues) > 27 && ps.OverlayValues[27].Loc != LocNone {
-						d27 = ps.OverlayValues[27]
-					}
-					if len(ps.OverlayValues) > 28 && ps.OverlayValues[28].Loc != LocNone {
-						d28 = ps.OverlayValues[28]
-					}
-					if len(ps.OverlayValues) > 29 && ps.OverlayValues[29].Loc != LocNone {
-						d29 = ps.OverlayValues[29]
-					}
-					if len(ps.OverlayValues) > 30 && ps.OverlayValues[30].Loc != LocNone {
-						d30 = ps.OverlayValues[30]
-					}
-					if len(ps.OverlayValues) > 31 && ps.OverlayValues[31].Loc != LocNone {
-						d31 = ps.OverlayValues[31]
-					}
-					if len(ps.OverlayValues) > 32 && ps.OverlayValues[32].Loc != LocNone {
-						d32 = ps.OverlayValues[32]
-					}
-					if len(ps.OverlayValues) > 33 && ps.OverlayValues[33].Loc != LocNone {
-						d33 = ps.OverlayValues[33]
-					}
-					if len(ps.OverlayValues) > 34 && ps.OverlayValues[34].Loc != LocNone {
-						d34 = ps.OverlayValues[34]
-					}
-					if len(ps.OverlayValues) > 35 && ps.OverlayValues[35].Loc != LocNone {
-						d35 = ps.OverlayValues[35]
-					}
-					if len(ps.OverlayValues) > 36 && ps.OverlayValues[36].Loc != LocNone {
-						d36 = ps.OverlayValues[36]
-					}
-					if len(ps.OverlayValues) > 37 && ps.OverlayValues[37].Loc != LocNone {
-						d37 = ps.OverlayValues[37]
-					}
+					bbs[3].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl4)
+					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					_ = jitEmitGoVariadicCallFromDescs(ctx, declarations["newpromise"].Fn, args, result)
 					ctx.EmitGoPanic("jit: builtin panic boundary unexpectedly returned")
 					return result
 				}
-				bbs[4].RenderPS = func(ps PhiState) JITValueDesc {
-					if !ps.General {
-						if bbs[4].VisitCount >= 0 {
-							ps.General = true
-							return bbs[4].RenderPS(ps)
-						}
+				bbs[4].Render = func() JITValueDesc {
+					if bbs[4].Rendered {
+						ctx.EmitJmp(lbl5)
+						return result
 					}
-					bbs[4].VisitCount++
-					if ps.General {
-						if bbs[4].Rendered {
-							ctx.EmitJmp(lbl5)
-							return result
-						}
-						bbs[4].Rendered = true
-						ctx.FlushRegisterMoves()
-						bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-						bbpos_0_4 = bbs[4].Address
-						ctx.MarkLabel(lbl5)
-						ctx.ResolveFixups()
-					}
-					if len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
-						d0 = ps.OverlayValues[0]
-					}
-					if len(ps.OverlayValues) > 1 && ps.OverlayValues[1].Loc != LocNone {
-						d1 = ps.OverlayValues[1]
-					}
-					if len(ps.OverlayValues) > 2 && ps.OverlayValues[2].Loc != LocNone {
-						d2 = ps.OverlayValues[2]
-					}
-					if len(ps.OverlayValues) > 16 && ps.OverlayValues[16].Loc != LocNone {
-						d16 = ps.OverlayValues[16]
-					}
-					if len(ps.OverlayValues) > 17 && ps.OverlayValues[17].Loc != LocNone {
-						d17 = ps.OverlayValues[17]
-					}
-					if len(ps.OverlayValues) > 18 && ps.OverlayValues[18].Loc != LocNone {
-						d18 = ps.OverlayValues[18]
-					}
-					if len(ps.OverlayValues) > 19 && ps.OverlayValues[19].Loc != LocNone {
-						d19 = ps.OverlayValues[19]
-					}
-					if len(ps.OverlayValues) > 20 && ps.OverlayValues[20].Loc != LocNone {
-						d20 = ps.OverlayValues[20]
-					}
-					if len(ps.OverlayValues) > 21 && ps.OverlayValues[21].Loc != LocNone {
-						d21 = ps.OverlayValues[21]
-					}
-					if len(ps.OverlayValues) > 22 && ps.OverlayValues[22].Loc != LocNone {
-						d22 = ps.OverlayValues[22]
-					}
-					if len(ps.OverlayValues) > 23 && ps.OverlayValues[23].Loc != LocNone {
-						d23 = ps.OverlayValues[23]
-					}
-					if len(ps.OverlayValues) > 24 && ps.OverlayValues[24].Loc != LocNone {
-						d24 = ps.OverlayValues[24]
-					}
-					if len(ps.OverlayValues) > 25 && ps.OverlayValues[25].Loc != LocNone {
-						d25 = ps.OverlayValues[25]
-					}
-					if len(ps.OverlayValues) > 26 && ps.OverlayValues[26].Loc != LocNone {
-						d26 = ps.OverlayValues[26]
-					}
-					if len(ps.OverlayValues) > 27 && ps.OverlayValues[27].Loc != LocNone {
-						d27 = ps.OverlayValues[27]
-					}
-					if len(ps.OverlayValues) > 28 && ps.OverlayValues[28].Loc != LocNone {
-						d28 = ps.OverlayValues[28]
-					}
-					if len(ps.OverlayValues) > 29 && ps.OverlayValues[29].Loc != LocNone {
-						d29 = ps.OverlayValues[29]
-					}
-					if len(ps.OverlayValues) > 30 && ps.OverlayValues[30].Loc != LocNone {
-						d30 = ps.OverlayValues[30]
-					}
-					if len(ps.OverlayValues) > 31 && ps.OverlayValues[31].Loc != LocNone {
-						d31 = ps.OverlayValues[31]
-					}
-					if len(ps.OverlayValues) > 32 && ps.OverlayValues[32].Loc != LocNone {
-						d32 = ps.OverlayValues[32]
-					}
-					if len(ps.OverlayValues) > 33 && ps.OverlayValues[33].Loc != LocNone {
-						d33 = ps.OverlayValues[33]
-					}
-					if len(ps.OverlayValues) > 34 && ps.OverlayValues[34].Loc != LocNone {
-						d34 = ps.OverlayValues[34]
-					}
-					if len(ps.OverlayValues) > 35 && ps.OverlayValues[35].Loc != LocNone {
-						d35 = ps.OverlayValues[35]
-					}
-					if len(ps.OverlayValues) > 36 && ps.OverlayValues[36].Loc != LocNone {
-						d36 = ps.OverlayValues[36]
-					}
-					if len(ps.OverlayValues) > 37 && ps.OverlayValues[37].Loc != LocNone {
-						d37 = ps.OverlayValues[37]
-					}
+					bbs[4].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl5)
+					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
-					d94 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					d95 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
-					ctx.SyncDesc(&d94)
-					d96 = d34
-					d96.ID = 0
-					d97 = d95
-					d97.ID = 0
-					if !ctx.TryEmitStoreScmerSliceElement(&d96, &d97, &d94, int32(16)) {
-						ctx.EmitStoreScmerSliceElement(&d96, &d97, &d94, int32(16))
+					d56 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+					d57 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
+					ctx.SyncDesc(&d56)
+					d58 = d26
+					d58.ID = 0
+					d59 = d57
+					d59.ID = 0
+					if !ctx.TryEmitStoreScmerSliceElement(&d58, &d59, &d56, int32(16)) {
+						ctx.EmitStoreScmerSliceElement(&d58, &d59, &d56, int32(16))
 					}
-					ctx.FreeDesc(&d97)
-					ctx.FreeDesc(&d94)
+					ctx.FreeDesc(&d59)
+					ctx.FreeDesc(&d56)
 					r6 := ctx.AllocReg()
 					r7 := ctx.AllocRegExcept(r6)
 					ctx.EmitMovRegImm64(r6, 0)
 					ctx.EmitMovRegImm64(r7, 0)
-					d98 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r6, Reg2: r7}
-					ctx.BindReg(r6, &d98)
-					ctx.BindReg(r7, &d98)
-					d99 = args[0]
-					d99.ID = 0
-					d100 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
-					d101 = ctx.EmitSliceElementAddress(&d34, &d100, int32(16))
-					ctx.EnsureDesc(&d101)
-					ctx.EnsureDesc(&d101)
-					ctx.EnsureDesc(&d101)
-					d104 = args[0]
-					d104.ID = 0
-					d105 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(22)}
-					d106 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
-					d107 = d105
-					_ = d107
-					d108 = d106
-					_ = d108
+					d60 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r6, Reg2: r7}
+					ctx.BindReg(r6, &d60)
+					ctx.BindReg(r7, &d60)
+					d61 = args[0]
+					d61.ID = 0
+					d62 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
+					d63 = ctx.EmitSliceElementAddress(&d26, &d62, int32(16))
+					ctx.EnsureDesc(&d63)
+					ctx.EnsureDesc(&d63)
+					ctx.EnsureDesc(&d63)
+					d66 = args[0]
+					d66.ID = 0
+					d67 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(22)}
+					d68 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
+					d69 = d67
+					_ = d69
+					d70 = d68
+					_ = d70
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
 					lbl7 := ctx.ReserveLabel()
@@ -1725,139 +1237,144 @@ func init_sync() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d108)
-					var d109 JITValueDesc
-					if d108.Loc == LocImm {
-						d109 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(d108.Imm.Int()) << 8))}
+					ctx.EnsureDesc(&d70)
+					if d70.Loc == LocImm {
+						d71 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(d70.Imm.Int()) << 8))}
 					} else {
-						ctx.EmitShlRegImm8(d108.Reg, 8)
-						d109 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d108.Reg}
-						ctx.BindReg(d108.Reg, &d109)
+						ctx.EmitShlRegImm8(d70.Reg, 8)
+						d71 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d70.Reg}
+						ctx.BindReg(d70.Reg, &d71)
 					}
-					if d109.Loc == LocReg && d108.Loc == LocReg && d109.Reg == d108.Reg {
-						ctx.TransferReg(d108.Reg)
-						d108.Loc = LocNone
+					if d71.Loc == LocReg && d70.Loc == LocReg && d71.Reg == d70.Reg {
+						ctx.TransferReg(d70.Reg)
+						d70.Loc = LocNone
 					}
-					ctx.FreeDesc(&d108)
+					ctx.FreeDesc(&d70)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d107)
-					var d110 JITValueDesc
-					if d107.Loc == LocImm {
-						d110 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d107.Imm.Int() & 255)}
+					ctx.EnsureDesc(&d69)
+					if d69.Loc == LocImm {
+						d72 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d69.Imm.Int() & 255)}
 					} else {
-						ctx.EmitAndRegImm32(d107.Reg, int32(255))
-						d110 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d107.Reg}
-						ctx.BindReg(d107.Reg, &d110)
+						ctx.EmitAndRegImm32(d69.Reg, int32(255))
+						d72 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d69.Reg}
+						ctx.BindReg(d69.Reg, &d72)
 					}
-					if d110.Loc == LocImm {
-						d110 = JITValueDesc{Loc: LocImm, Type: d110.Type, Imm: NewInt(int64(uint64(d110.Imm.Int()) & 0xff))}
+					if d72.Loc == LocImm {
+						d72 = JITValueDesc{Loc: LocImm, Type: d72.Type, Imm: NewInt(int64(uint64(d72.Imm.Int()) & 0xff))}
 					} else {
-						ctx.EmitShlRegImm8(d110.Reg, 56)
-						ctx.EmitShrRegImm8(d110.Reg, 56)
+						ctx.EmitShlRegImm8(d72.Reg, 56)
+						ctx.EmitShrRegImm8(d72.Reg, 56)
 					}
-					if d110.Loc == LocReg && d107.Loc == LocReg && d110.Reg == d107.Reg {
-						ctx.TransferReg(d107.Reg)
-						d107.Loc = LocNone
+					if d72.Loc == LocReg && d69.Loc == LocReg && d72.Reg == d69.Reg {
+						ctx.TransferReg(d69.Reg)
+						d69.Loc = LocNone
 					}
-					ctx.FreeDesc(&d107)
+					ctx.FreeDesc(&d69)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d110)
-					ctx.EnsureDesc(&d110)
-					var d111 JITValueDesc
-					if d110.Loc == LocImm {
-						d111 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(uint8(d110.Imm.Int()))))}
+					ctx.EnsureDesc(&d72)
+					ctx.EnsureDesc(&d72)
+					if d72.Loc == LocImm {
+						d73 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(uint8(d72.Imm.Int()))))}
 					} else {
 						r8 := ctx.AllocReg()
-						ctx.EmitMovRegReg(r8, d110.Reg)
+						ctx.EmitMovRegReg(r8, d72.Reg)
 						ctx.EmitShlRegImm8(r8, 56)
 						ctx.EmitShrRegImm8(r8, 56)
-						d111 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r8}
-						ctx.BindReg(r8, &d111)
+						d73 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r8}
+						ctx.BindReg(r8, &d73)
 					}
-					ctx.FreeDesc(&d110)
+					ctx.FreeDesc(&d72)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d109)
-					ctx.EnsureDesc(&d111)
-					var d112 JITValueDesc
-					if d109.Loc == LocImm && d111.Loc == LocImm {
-						d112 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d109.Imm.Int() | d111.Imm.Int())}
-					} else if d109.Loc == LocImm && d109.Imm.Int() == 0 {
-						d112 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d111.Reg}
-						ctx.BindReg(d111.Reg, &d112)
-					} else if d111.Loc == LocImm && d111.Imm.Int() == 0 {
-						d112 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d109.Reg}
-						ctx.BindReg(d109.Reg, &d112)
-					} else if d109.Loc == LocImm {
-						scratch := ctx.AllocRegExcept(d111.Reg)
-						ctx.EmitMovRegImm64(scratch, uint64(d109.Imm.Int()))
-						ctx.EmitOrInt64(scratch, d111.Reg)
-						d112 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
-						ctx.BindReg(scratch, &d112)
-					} else if d111.Loc == LocImm {
-						if d111.Imm.Int() >= -2147483648 && d111.Imm.Int() <= 2147483647 {
-							ctx.EmitOrRegImm32(d109.Reg, int32(d111.Imm.Int()))
+					ctx.EnsureDesc(&d71)
+					ctx.EnsureDesc(&d73)
+					if d71.Loc == LocImm && d73.Loc == LocImm {
+						d74 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d71.Imm.Int() | d73.Imm.Int())}
+					} else if d71.Loc == LocImm && d71.Imm.Int() == 0 {
+						d74 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d73.Reg}
+						ctx.BindReg(d73.Reg, &d74)
+					} else if d73.Loc == LocImm && d73.Imm.Int() == 0 {
+						d74 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d71.Reg}
+						ctx.BindReg(d71.Reg, &d74)
+					} else if d71.Loc == LocImm {
+						scratch := ctx.AllocRegExcept(d73.Reg)
+						ctx.EmitMovRegImm64(scratch, uint64(d71.Imm.Int()))
+						ctx.EmitOrInt64(scratch, d73.Reg)
+						d74 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
+						ctx.BindReg(scratch, &d74)
+					} else if d73.Loc == LocImm {
+						if d73.Imm.Int() >= -2147483648 && d73.Imm.Int() <= 2147483647 {
+							ctx.EmitOrRegImm32(d71.Reg, int32(d73.Imm.Int()))
 						} else {
-							ctx.EmitMovRegImm64(RegR11, uint64(d111.Imm.Int()))
-							ctx.EmitOrInt64(d109.Reg, RegR11)
+							ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d73.Imm.Int()))
+							ctx.EmitOrInt64(d71.Reg, ctx.ScratchReg)
 						}
-						d112 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d109.Reg}
-						ctx.BindReg(d109.Reg, &d112)
+						d74 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d71.Reg}
+						ctx.BindReg(d71.Reg, &d74)
 					} else {
-						ctx.EmitOrInt64(d109.Reg, d111.Reg)
-						d112 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d109.Reg}
-						ctx.BindReg(d109.Reg, &d112)
+						ctx.EmitOrInt64(d71.Reg, d73.Reg)
+						d74 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d71.Reg}
+						ctx.BindReg(d71.Reg, &d74)
 					}
-					if d112.Loc == LocReg && d109.Loc == LocReg && d112.Reg == d109.Reg {
-						ctx.TransferReg(d109.Reg)
-						d109.Loc = LocNone
+					if d74.Loc == LocReg && d71.Loc == LocReg && d74.Reg == d71.Reg {
+						ctx.TransferReg(d71.Reg)
+						d71.Loc = LocNone
 					}
-					ctx.FreeDesc(&d109)
-					ctx.FreeDesc(&d111)
+					ctx.FreeDesc(&d71)
+					ctx.FreeDesc(&d73)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d112)
-					ctx.EnsureDesc(&d101)
-					ctx.EnsureDesc(&d101)
-					ctx.EmitMovToReg(d99.Reg, d101)
-					ctx.EnsureDesc(&d112)
-					ctx.EnsureDesc(&d112)
-					ctx.EmitMovToReg(d104.Reg2, d112)
-					ctx.FreeDesc(&d112)
-					d113 = d98
-					_ = d113
-					ctx.SyncDesc(&d113)
-					if d113.Loc == LocRegPair || d113.Loc == LocStackPair || d113.Loc == LocInputPair {
-						ctx.EmitMovPairToResult(&d113, &result)
-						result.Type = d113.Type
+					ctx.EnsureDesc(&d74)
+					ctx.EnsureDesc(&d63)
+					ctx.EnsureDesc(&d63)
+					ctx.EmitMovToReg(d61.Reg, d63)
+					ctx.EnsureDesc(&d74)
+					ctx.EnsureDesc(&d74)
+					ctx.EmitMovToReg(d66.Reg2, d74)
+					ctx.FreeDesc(&d74)
+					d75 = d60
+					_ = d75
+					ctx.SyncDesc(&d75)
+					if d75.Loc == LocRegPair || d75.Loc == LocStackPair || d75.Loc == LocInputPair {
+						ctx.EmitMovPairToResult(&d75, &result)
+						result.Type = d75.Type
 					} else {
-						switch d113.Type {
+						switch d75.Type {
 						case tagBool:
-							ctx.EmitMakeBool(result, d113)
+							ctx.EmitMakeBool(result, d75)
 							result.Type = tagBool
 						case tagInt:
-							ctx.EmitMakeInt(result, d113)
+							ctx.EmitMakeInt(result, d75)
 							result.Type = tagInt
 						case tagFloat:
-							ctx.EmitMakeFloat(result, d113)
+							ctx.EmitMakeFloat(result, d75)
 							result.Type = tagFloat
 						case tagNil:
 							ctx.EmitMakeNil(result)
 							result.Type = tagNil
 						default:
-							ctx.EmitMovPairToResult(&d113, &result)
-							result.Type = d113.Type
+							ctx.EmitMovPairToResult(&d75, &result)
+							result.Type = d75.Type
 						}
 					}
+					mergeReturnType(result.Type)
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				ps114 := PhiState{General: false}
-				_ = bbs[0].RenderPS(ps114)
+				returned := bbs[0].Render()
+				if ctx.hasBooleanFlags(returned) {
+					if resultRegsProtected {
+						ctx.UnprotectReg(result.Reg2)
+						ctx.UnprotectReg(result.Reg)
+					}
+					return returned
+				}
 				ctx.MarkLabel(lbl0)
 				ctx.ResolveFixups()
 				if resultRegsProtected {
 					ctx.UnprotectReg(result.Reg2)
 					ctx.UnprotectReg(result.Reg)
 				}
+				result.Type = returnType
+				result.ReturnTypeMerged = returnTypeSeen
 				return result
 			},
 			JITVirtualArgs: true,
@@ -1976,8 +1493,24 @@ func init_sync() {
 				_ = d1
 				var d2 JITValueDesc
 				_ = d2
+				var d7 JITValueDesc
+				_ = d7
+				var d9 JITValueDesc
+				_ = d9
+				var d10 JITValueDesc
+				_ = d10
+				var d11 JITValueDesc
+				_ = d11
+				var d12 JITValueDesc
+				_ = d12
+				var d13 JITValueDesc
+				_ = d13
+				var d14 JITValueDesc
+				_ = d14
 				var d15 JITValueDesc
 				_ = d15
+				var d16 JITValueDesc
+				_ = d16
 				var d17 JITValueDesc
 				_ = d17
 				var d18 JITValueDesc
@@ -1986,8 +1519,6 @@ func init_sync() {
 				_ = d19
 				var d20 JITValueDesc
 				_ = d20
-				var d21 JITValueDesc
-				_ = d21
 				var d22 JITValueDesc
 				_ = d22
 				var d23 JITValueDesc
@@ -2002,27 +1533,24 @@ func init_sync() {
 				_ = d27
 				var d28 JITValueDesc
 				_ = d28
+				var d29 JITValueDesc
+				_ = d29
 				var d30 JITValueDesc
 				_ = d30
 				var d31 JITValueDesc
 				_ = d31
-				var d32 JITValueDesc
-				_ = d32
-				var d33 JITValueDesc
-				_ = d33
-				var d34 JITValueDesc
-				_ = d34
-				var d35 JITValueDesc
-				_ = d35
-				var d36 JITValueDesc
-				_ = d36
-				var d37 JITValueDesc
-				_ = d37
-				var d38 JITValueDesc
-				_ = d38
-				var d39 JITValueDesc
-				_ = d39
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				branchSerial := ctx.branchSerial
+				_ = branchSerial
+				returnType := uint8(JITTypeUnknown)
+				returnTypeSeen := false
+				mergeReturnType := func(t uint8) {
+					if !returnTypeSeen {
+						returnType, returnTypeSeen = t, true
+					} else if returnType != t {
+						returnType = JITTypeUnknown
+					}
+				}
 				var bbs [4]BBDescriptor
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -2054,30 +1582,19 @@ func init_sync() {
 				_ = bbpos_0_3
 				lbl4 := ctx.ReserveLabel()
 				_ = lbl4
-				bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
-					if !ps.General {
-						if bbs[0].VisitCount >= 0 {
-							ps.General = true
-							return bbs[0].RenderPS(ps)
-						}
+				bbs[0].Render = func() JITValueDesc {
+					if bbs[0].Rendered {
+						ctx.EmitJmp(lbl1)
+						return result
 					}
-					bbs[0].VisitCount++
-					if ps.General {
-						if bbs[0].Rendered {
-							ctx.EmitJmp(lbl1)
-							return result
-						}
-						bbs[0].Rendered = true
-						ctx.FlushRegisterMoves()
-						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-						bbpos_0_0 = bbs[0].Address
-						ctx.MarkLabel(lbl1)
-						ctx.ResolveFixups()
-					}
+					bbs[0].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl1)
+					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					d0 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 					ctx.EnsureDesc(&d0)
-					var d1 JITValueDesc
 					if d0.Loc == LocImm {
 						d1 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d0.Imm.Int() == 0)}
 					} else {
@@ -2094,247 +1611,166 @@ func init_sync() {
 					}
 					if d2.Loc == LocImm {
 						if d2.Imm.Bool() {
-							if ps.General {
-							}
-							ps3 := PhiState{General: ps.General}
-							ps3.OverlayValues = make([]JITValueDesc, 3)
-							ps3.OverlayValues[0] = d0
-							ps3.OverlayValues[1] = d1
-							ps3.OverlayValues[2] = d2
-							return bbs[1].RenderPS(ps3)
+							return bbs[1].Render()
 						}
-						if ps.General {
-						}
-						ps4 := PhiState{General: ps.General}
-						ps4.OverlayValues = make([]JITValueDesc, 3)
-						ps4.OverlayValues[0] = d0
-						ps4.OverlayValues[1] = d1
-						ps4.OverlayValues[2] = d2
-						return bbs[3].RenderPS(ps4)
-					}
-					if !ps.General {
-						ps.General = true
-						return bbs[0].RenderPS(ps)
+						return bbs[3].Render()
 					}
 					ctx.EmitJump(d2.Condition, lbl2)
 					if bbs[3].Rendered {
 						ctx.EmitJmp(lbl4)
 					}
 					ctx.FreeDesc(&d1)
-					snap5 := d0
-					snap6 := d1
-					snap7 := d2
-					alloc8 := ctx.SnapshotAllocState()
-					ctx.RestoreAllocState(alloc8)
-					d0 = snap5
-					d1 = snap6
-					d2 = snap7
-					ctx.RestoreAllocState(alloc8)
-					d0 = snap5
-					d1 = snap6
-					d2 = snap7
-					ps9 := PhiState{General: true}
-					ps9.OverlayValues = make([]JITValueDesc, 3)
-					ps9.OverlayValues[0] = d0
-					ps9.OverlayValues[1] = d1
-					ps9.OverlayValues[2] = d2
-					ps10 := PhiState{General: true}
-					ps10.OverlayValues = make([]JITValueDesc, 3)
-					ps10.OverlayValues[0] = d0
-					ps10.OverlayValues[1] = d1
-					ps10.OverlayValues[2] = d2
-					snap11 := d0
-					snap12 := d1
-					snap13 := d2
-					alloc14 := ctx.SnapshotAllocState()
+					ctx.FlushRegisterMoves()
 					if !bbs[3].Rendered {
-						bbs[3].RenderPS(ps10)
+						snap3 := d0
+						snap4 := d1
+						snap5 := d2
+						alloc6 := ctx.SnapshotAllocState()
+						bbs[3].Render()
+						ctx.RestoreAllocState(alloc6)
+						d0 = snap3
+						d1 = snap4
+						d2 = snap5
 					}
-					ctx.RestoreAllocState(alloc14)
-					d0 = snap11
-					d1 = snap12
-					d2 = snap13
 					if !bbs[1].Rendered {
-						return bbs[1].RenderPS(ps9)
+						return bbs[1].Render()
 					}
 					return result
 					return result
 				}
-				bbs[1].RenderPS = func(ps PhiState) JITValueDesc {
-					if !ps.General {
-						if bbs[1].VisitCount >= 0 {
-							ps.General = true
-							return bbs[1].RenderPS(ps)
-						}
+				bbs[1].Render = func() JITValueDesc {
+					if bbs[1].Rendered {
+						ctx.EmitJmp(lbl2)
+						return result
 					}
-					bbs[1].VisitCount++
-					if ps.General {
-						if bbs[1].Rendered {
-							ctx.EmitJmp(lbl2)
-							return result
-						}
-						bbs[1].Rendered = true
-						ctx.FlushRegisterMoves()
-						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-						bbpos_0_1 = bbs[1].Address
-						ctx.MarkLabel(lbl2)
-						ctx.ResolveFixups()
-					}
-					if len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
-						d0 = ps.OverlayValues[0]
-					}
-					if len(ps.OverlayValues) > 1 && ps.OverlayValues[1].Loc != LocNone {
-						d1 = ps.OverlayValues[1]
-					}
-					if len(ps.OverlayValues) > 2 && ps.OverlayValues[2].Loc != LocNone {
-						d2 = ps.OverlayValues[2]
-					}
+					bbs[1].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl2)
+					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					_ = jitEmitGoVariadicCallFromDescs(ctx, declarations["context"].Fn, args, result)
 					ctx.EmitGoPanic("jit: builtin panic boundary unexpectedly returned")
 					return result
 				}
-				bbs[2].RenderPS = func(ps PhiState) JITValueDesc {
-					if !ps.General {
-						if bbs[2].VisitCount >= 0 {
-							ps.General = true
-							return bbs[2].RenderPS(ps)
-						}
+				bbs[2].Render = func() JITValueDesc {
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+						return result
 					}
-					bbs[2].VisitCount++
-					if ps.General {
-						if bbs[2].Rendered {
-							ctx.EmitJmp(lbl3)
-							return result
-						}
-						bbs[2].Rendered = true
-						ctx.FlushRegisterMoves()
-						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-						bbpos_0_2 = bbs[2].Address
-						ctx.MarkLabel(lbl3)
-						ctx.ResolveFixups()
-					}
-					if len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
-						d0 = ps.OverlayValues[0]
-					}
-					if len(ps.OverlayValues) > 1 && ps.OverlayValues[1].Loc != LocNone {
-						d1 = ps.OverlayValues[1]
-					}
-					if len(ps.OverlayValues) > 2 && ps.OverlayValues[2].Loc != LocNone {
-						d2 = ps.OverlayValues[2]
-					}
+					bbs[2].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl3)
+					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
-					d15 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
-					ctx.EnsureDesc(&d15)
-					ctx.EnsureDesc(&d15)
+					d7 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					ctx.EnsureDesc(&d7)
+					ctx.EnsureDesc(&d7)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d15)
-					ctx.EnsureDesc(&d15)
-					callResults16 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d15, d15}, []uint8{3}, []uint8{1})
-					d17 = callResults16[0]
-					d17.Type = tagSlice
-					ctx.FreeDesc(&d15)
-					d18 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					d18 = JITPrepareGoSliceArg(ctx, d18)
-					if d18.Loc != LocRegTriple && d18.Loc != LocStackTriple {
+					ctx.EnsureDesc(&d7)
+					ctx.EnsureDesc(&d7)
+					callResults8 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d7, d7}, []uint8{3}, []uint8{1})
+					d9 = callResults8[0]
+					d9.Type = tagSlice
+					ctx.FreeDesc(&d7)
+					d10 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+					d10 = JITPrepareGoSliceArg(ctx, d10)
+					if d10.Loc != LocRegTriple && d10.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (NewSession arg0)")
 					}
-					ctx.SyncDesc(&d18)
-					d19 = ctx.EmitGoCallScalar(GoFuncAddr(NewSession), []JITValueDesc{d18}, 2)
-					d19.NoHeapPointer = false
-					ctx.BindReg(d19.Reg, &d19)
-					ctx.BindReg(d19.Reg2, &d19)
-					ctx.FreeDesc(&d18)
-					d20 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
-					ctx.SyncDesc(&d19)
-					d21 = d17
-					d21.ID = 0
-					d22 = d20
-					d22.ID = 0
-					if !ctx.TryEmitStoreScmerSliceElement(&d21, &d22, &d19, int32(16)) {
-						ctx.EmitStoreScmerSliceElement(&d21, &d22, &d19, int32(16))
+					ctx.SyncDesc(&d10)
+					d11 = ctx.EmitGoCallScalar(GoFuncAddr(NewSession), []JITValueDesc{d10}, 2)
+					d11.NoHeapPointer = false
+					ctx.BindReg(d11.Reg, &d11)
+					ctx.BindReg(d11.Reg2, &d11)
+					ctx.FreeDesc(&d10)
+					d12 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
+					ctx.SyncDesc(&d11)
+					d13 = d9
+					d13.ID = 0
+					d14 = d12
+					d14.ID = 0
+					if !ctx.TryEmitStoreScmerSliceElement(&d13, &d14, &d11, int32(16)) {
+						ctx.EmitStoreScmerSliceElement(&d13, &d14, &d11, int32(16))
 					}
-					ctx.FreeDesc(&d22)
-					ctx.FreeDesc(&d19)
-					d23 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
-					var d24 JITValueDesc
-					ctx.EnsureDesc(&d17)
-					if d17.Loc == LocRegPair || d17.Loc == LocRegTriple {
-						d24 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d17.Reg2}
-						ctx.BindReg(d17.Reg2, &d24)
+					ctx.FreeDesc(&d14)
+					ctx.FreeDesc(&d11)
+					d15 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
+					ctx.EnsureDesc(&d9)
+					if d9.Loc == LocRegPair || d9.Loc == LocRegTriple {
+						d16 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d9.Reg2}
+						ctx.BindReg(d9.Reg2, &d16)
 					} else {
 						panic("Slice with omitted high requires descriptor with length in Reg2")
 					}
-					ctx.EnsureDesc(&d17)
-					ctx.EnsureDesc(&d23)
-					ctx.EnsureDesc(&d24)
-					var d26 JITValueDesc
-					if d24.Loc == LocImm && d23.Loc == LocImm {
-						d26 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d24.Imm.Int() - d23.Imm.Int())}
+					ctx.EnsureDesc(&d9)
+					ctx.EnsureDesc(&d15)
+					ctx.EnsureDesc(&d16)
+					if d16.Loc == LocImm && d15.Loc == LocImm {
+						d18 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d16.Imm.Int() - d15.Imm.Int())}
 					} else {
 						r1 := ctx.AllocReg()
-						if d24.Loc == LocImm {
-							ctx.EmitMovRegImm64(r1, uint64(d24.Imm.Int()))
+						if d16.Loc == LocImm {
+							ctx.EmitMovRegImm64(r1, uint64(d16.Imm.Int()))
 						} else {
-							ctx.EmitMovRegReg(r1, d24.Reg)
+							ctx.EmitMovRegReg(r1, d16.Reg)
 						}
-						if d23.Loc == LocImm {
-							ctx.EmitMovRegImm64(RegR11, uint64(d23.Imm.Int()))
-							ctx.EmitSubInt64(r1, RegR11)
+						if d15.Loc == LocImm {
+							ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d15.Imm.Int()))
+							ctx.EmitSubInt64(r1, ctx.ScratchReg)
 						} else {
-							ctx.EmitSubInt64(r1, d23.Reg)
+							ctx.EmitSubInt64(r1, d15.Reg)
 						}
-						d26 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r1}
-						ctx.BindReg(r1, &d26)
+						d18 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r1}
+						ctx.BindReg(r1, &d18)
 					}
-					var d27 JITValueDesc
-					r2 := ctx.EmitSliceDataAfterLow(&d17, &d23, 16)
-					d27 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r2}
-					ctx.BindReg(r2, &d27)
-					ctx.BindReg(r2, &d27)
-					var d28 JITValueDesc
+					r2 := ctx.EmitSliceDataAfterLow(&d9, &d15, 16)
+					d19 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r2}
+					ctx.BindReg(r2, &d19)
+					ctx.BindReg(r2, &d19)
 					var r3 Reg
 					var r4 Reg
-					ctx.SyncDesc(&d27)
-					ctx.EnsureDesc(&d27)
-					if d27.Loc == LocImm {
+					ctx.SyncDesc(&d19)
+					ctx.EnsureDesc(&d19)
+					if d19.Loc == LocImm {
 						r3 = ctx.AllocReg()
-						ctx.EmitMovRegImm64(r3, uint64(d27.Imm.Int()))
+						ctx.EmitMovRegImm64(r3, uint64(d19.Imm.Int()))
 					} else {
-						r3 = d27.Reg
+						r3 = d19.Reg
 					}
 					ctx.ProtectReg(r3)
-					ctx.SyncDesc(&d26)
-					ctx.EnsureDesc(&d26)
-					if d26.Loc == LocImm {
+					ctx.SyncDesc(&d18)
+					ctx.EnsureDesc(&d18)
+					if d18.Loc == LocImm {
 						r4 = ctx.AllocReg()
-						ctx.EmitMovRegImm64(r4, uint64(d26.Imm.Int()))
+						ctx.EmitMovRegImm64(r4, uint64(d18.Imm.Int()))
 					} else {
-						r4 = d26.Reg
+						r4 = d18.Reg
 					}
 					ctx.ProtectReg(r4)
-					r5 := ctx.EmitSliceCapAfterLow(&d17, &d23, r3, r4)
+					r5 := ctx.EmitSliceCapAfterLow(&d9, &d15, r3, r4)
 					ctx.UnprotectReg(r4)
 					ctx.UnprotectReg(r3)
-					d28 = JITValueDesc{Loc: LocRegTriple, Reg: r3, Reg2: r4, Reg3: r5}
-					ctx.BindReg(r3, &d28)
-					ctx.BindReg(r4, &d28)
-					ctx.BindReg(r5, &d28)
-					ctx.BindReg(r3, &d28)
-					ctx.BindReg(r4, &d28)
-					ctx.BindReg(r5, &d28)
-					ctx.EnsureDesc(&d28)
-					callResults29 := JITEmitGoCallResults(ctx, GoFuncAddr(jitCopyScmerSlice), []JITValueDesc{d28}, []uint8{1}, []uint8{0})
-					d30 = callResults29[0]
-					d30.Type = tagInt
-					d31 = args[0]
-					d31.ID = 0
-					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d17)
-					d32 = d31
-					_ = d32
-					d33 = d17
-					_ = d33
+					d20 = JITValueDesc{Loc: LocRegTriple, Reg: r3, Reg2: r4, Reg3: r5}
+					ctx.BindReg(r3, &d20)
+					ctx.BindReg(r4, &d20)
+					ctx.BindReg(r5, &d20)
+					ctx.BindReg(r3, &d20)
+					ctx.BindReg(r4, &d20)
+					ctx.BindReg(r5, &d20)
+					ctx.EnsureDesc(&d20)
+					callResults21 := JITEmitGoCallResults(ctx, GoFuncAddr(jitCopyScmerSlice), []JITValueDesc{d20}, []uint8{1}, []uint8{0})
+					d22 = callResults21[0]
+					d22.Type = tagInt
+					d23 = args[0]
+					d23.ID = 0
+					ctx.EnsureDesc(&d23)
+					ctx.EnsureDesc(&d9)
+					d24 = d23
+					_ = d24
+					d25 = d9
+					_ = d25
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl5 := ctx.ReserveLabel()
@@ -2344,433 +1780,166 @@ func init_sync() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d32 = JITPrepareScmerGoArg(ctx, d32)
-					d33 = JITPrepareGoSliceArg(ctx, d33)
-					if d33.Loc != LocRegTriple && d33.Loc != LocStackTriple {
+					d24 = JITPrepareScmerGoArg(ctx, d24)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
+					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (ApplyEx arg1)")
 					}
-					d34 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(unsafe.Pointer(&Globalenv)))), NoHeapPointer: true, Rooted: true}
-					if d34.Loc == LocRegPair || d34.Loc == LocStackPair || d34.Loc == LocRegTriple || d34.Loc == LocStackTriple {
+					d26 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(unsafe.Pointer(&Globalenv)))), NoHeapPointer: true, Rooted: true}
+					if d26.Loc == LocRegPair || d26.Loc == LocStackPair || d26.Loc == LocRegTriple || d26.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.SyncDesc(&d32)
-					ctx.SyncDesc(&d33)
-					ctx.SyncDesc(&d34)
-					d35 = ctx.EmitGoCallScalar(GoFuncAddr(ApplyEx), []JITValueDesc{d32, d33, d34}, 2)
-					d35.NoHeapPointer = false
-					ctx.BindReg(d35.Reg, &d35)
-					ctx.BindReg(d35.Reg2, &d35)
+					ctx.SyncDesc(&d24)
+					ctx.SyncDesc(&d25)
+					ctx.SyncDesc(&d26)
+					d27 = ctx.EmitGoCallScalar(GoFuncAddr(ApplyEx), []JITValueDesc{d24, d25, d26}, 2)
+					d27.NoHeapPointer = false
+					ctx.BindReg(d27.Reg, &d27)
+					ctx.BindReg(d27.Reg2, &d27)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d35)
-					ctx.FreeDesc(&d31)
-					ctx.SyncDesc(&d35)
-					if d35.Loc == LocRegPair || d35.Loc == LocStackPair || d35.Loc == LocInputPair {
-						ctx.EmitMovPairToResult(&d35, &result)
-						result.Type = d35.Type
+					ctx.EnsureDesc(&d27)
+					ctx.FreeDesc(&d23)
+					ctx.SyncDesc(&d27)
+					if d27.Loc == LocRegPair || d27.Loc == LocStackPair || d27.Loc == LocInputPair {
+						ctx.EmitMovPairToResult(&d27, &result)
+						result.Type = d27.Type
 					} else {
-						switch d35.Type {
+						switch d27.Type {
 						case tagBool:
-							ctx.EmitMakeBool(result, d35)
+							ctx.EmitMakeBool(result, d27)
 							result.Type = tagBool
 						case tagInt:
-							ctx.EmitMakeInt(result, d35)
+							ctx.EmitMakeInt(result, d27)
 							result.Type = tagInt
 						case tagFloat:
-							ctx.EmitMakeFloat(result, d35)
+							ctx.EmitMakeFloat(result, d27)
 							result.Type = tagFloat
 						case tagNil:
 							ctx.EmitMakeNil(result)
 							result.Type = tagNil
 						default:
-							ctx.EmitMovPairToResult(&d35, &result)
-							result.Type = d35.Type
+							ctx.EmitMovPairToResult(&d27, &result)
+							result.Type = d27.Type
 						}
 					}
+					mergeReturnType(result.Type)
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				bbs[3].RenderPS = func(ps PhiState) JITValueDesc {
-					if !ps.General {
-						if bbs[3].VisitCount >= 0 {
-							ps.General = true
-							return bbs[3].RenderPS(ps)
-						}
+				bbs[3].Render = func() JITValueDesc {
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+						return result
 					}
-					bbs[3].VisitCount++
-					if ps.General {
-						if bbs[3].Rendered {
-							ctx.EmitJmp(lbl4)
-							return result
-						}
-						bbs[3].Rendered = true
-						ctx.FlushRegisterMoves()
-						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-						bbpos_0_3 = bbs[3].Address
-						ctx.MarkLabel(lbl4)
-						ctx.ResolveFixups()
-					}
-					if len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
-						d0 = ps.OverlayValues[0]
-					}
-					if len(ps.OverlayValues) > 1 && ps.OverlayValues[1].Loc != LocNone {
-						d1 = ps.OverlayValues[1]
-					}
-					if len(ps.OverlayValues) > 2 && ps.OverlayValues[2].Loc != LocNone {
-						d2 = ps.OverlayValues[2]
-					}
-					if len(ps.OverlayValues) > 15 && ps.OverlayValues[15].Loc != LocNone {
-						d15 = ps.OverlayValues[15]
-					}
-					if len(ps.OverlayValues) > 17 && ps.OverlayValues[17].Loc != LocNone {
-						d17 = ps.OverlayValues[17]
-					}
-					if len(ps.OverlayValues) > 18 && ps.OverlayValues[18].Loc != LocNone {
-						d18 = ps.OverlayValues[18]
-					}
-					if len(ps.OverlayValues) > 19 && ps.OverlayValues[19].Loc != LocNone {
-						d19 = ps.OverlayValues[19]
-					}
-					if len(ps.OverlayValues) > 20 && ps.OverlayValues[20].Loc != LocNone {
-						d20 = ps.OverlayValues[20]
-					}
-					if len(ps.OverlayValues) > 21 && ps.OverlayValues[21].Loc != LocNone {
-						d21 = ps.OverlayValues[21]
-					}
-					if len(ps.OverlayValues) > 22 && ps.OverlayValues[22].Loc != LocNone {
-						d22 = ps.OverlayValues[22]
-					}
-					if len(ps.OverlayValues) > 23 && ps.OverlayValues[23].Loc != LocNone {
-						d23 = ps.OverlayValues[23]
-					}
-					if len(ps.OverlayValues) > 24 && ps.OverlayValues[24].Loc != LocNone {
-						d24 = ps.OverlayValues[24]
-					}
-					if len(ps.OverlayValues) > 25 && ps.OverlayValues[25].Loc != LocNone {
-						d25 = ps.OverlayValues[25]
-					}
-					if len(ps.OverlayValues) > 26 && ps.OverlayValues[26].Loc != LocNone {
-						d26 = ps.OverlayValues[26]
-					}
-					if len(ps.OverlayValues) > 27 && ps.OverlayValues[27].Loc != LocNone {
-						d27 = ps.OverlayValues[27]
-					}
-					if len(ps.OverlayValues) > 28 && ps.OverlayValues[28].Loc != LocNone {
-						d28 = ps.OverlayValues[28]
-					}
-					if len(ps.OverlayValues) > 30 && ps.OverlayValues[30].Loc != LocNone {
-						d30 = ps.OverlayValues[30]
-					}
-					if len(ps.OverlayValues) > 31 && ps.OverlayValues[31].Loc != LocNone {
-						d31 = ps.OverlayValues[31]
-					}
-					if len(ps.OverlayValues) > 32 && ps.OverlayValues[32].Loc != LocNone {
-						d32 = ps.OverlayValues[32]
-					}
-					if len(ps.OverlayValues) > 33 && ps.OverlayValues[33].Loc != LocNone {
-						d33 = ps.OverlayValues[33]
-					}
-					if len(ps.OverlayValues) > 34 && ps.OverlayValues[34].Loc != LocNone {
-						d34 = ps.OverlayValues[34]
-					}
-					if len(ps.OverlayValues) > 35 && ps.OverlayValues[35].Loc != LocNone {
-						d35 = ps.OverlayValues[35]
-					}
+					bbs[3].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl4)
+					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
-					d36 = args[0]
-					d36.ID = 0
-					d38 = d36
-					d38.ID = 0
-					d37 = ctx.EmitTagEqualsBorrowed(&d38, tagNil, JITValueDesc{Loc: LocAny})
-					ctx.FreeDesc(&d36)
-					d39 = d37
-					ctx.EnsureDesc(&d39)
-					if d39.Loc != LocImm && d39.Loc != LocReg {
+					d28 = args[0]
+					d28.ID = 0
+					d30 = d28
+					d30.ID = 0
+					d29 = ctx.EmitTagEqualsBorrowed(&d30, tagNil, JITValueDesc{Loc: LocAny})
+					ctx.FreeDesc(&d28)
+					d31 = d29
+					ctx.EnsureDesc(&d31)
+					if d31.Loc != LocImm && d31.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
-					if d39.Loc == LocImm {
-						if d39.Imm.Bool() {
-							if ps.General {
-							}
-							ps40 := PhiState{General: ps.General}
-							ps40.OverlayValues = make([]JITValueDesc, 40)
-							ps40.OverlayValues[0] = d0
-							ps40.OverlayValues[1] = d1
-							ps40.OverlayValues[2] = d2
-							ps40.OverlayValues[15] = d15
-							ps40.OverlayValues[17] = d17
-							ps40.OverlayValues[18] = d18
-							ps40.OverlayValues[19] = d19
-							ps40.OverlayValues[20] = d20
-							ps40.OverlayValues[21] = d21
-							ps40.OverlayValues[22] = d22
-							ps40.OverlayValues[23] = d23
-							ps40.OverlayValues[24] = d24
-							ps40.OverlayValues[25] = d25
-							ps40.OverlayValues[26] = d26
-							ps40.OverlayValues[27] = d27
-							ps40.OverlayValues[28] = d28
-							ps40.OverlayValues[30] = d30
-							ps40.OverlayValues[31] = d31
-							ps40.OverlayValues[32] = d32
-							ps40.OverlayValues[33] = d33
-							ps40.OverlayValues[34] = d34
-							ps40.OverlayValues[35] = d35
-							ps40.OverlayValues[36] = d36
-							ps40.OverlayValues[37] = d37
-							ps40.OverlayValues[38] = d38
-							ps40.OverlayValues[39] = d39
-							return bbs[1].RenderPS(ps40)
+					if d31.Loc == LocImm {
+						if d31.Imm.Bool() {
+							return bbs[1].Render()
 						}
-						if ps.General {
-						}
-						ps41 := PhiState{General: ps.General}
-						ps41.OverlayValues = make([]JITValueDesc, 40)
-						ps41.OverlayValues[0] = d0
-						ps41.OverlayValues[1] = d1
-						ps41.OverlayValues[2] = d2
-						ps41.OverlayValues[15] = d15
-						ps41.OverlayValues[17] = d17
-						ps41.OverlayValues[18] = d18
-						ps41.OverlayValues[19] = d19
-						ps41.OverlayValues[20] = d20
-						ps41.OverlayValues[21] = d21
-						ps41.OverlayValues[22] = d22
-						ps41.OverlayValues[23] = d23
-						ps41.OverlayValues[24] = d24
-						ps41.OverlayValues[25] = d25
-						ps41.OverlayValues[26] = d26
-						ps41.OverlayValues[27] = d27
-						ps41.OverlayValues[28] = d28
-						ps41.OverlayValues[30] = d30
-						ps41.OverlayValues[31] = d31
-						ps41.OverlayValues[32] = d32
-						ps41.OverlayValues[33] = d33
-						ps41.OverlayValues[34] = d34
-						ps41.OverlayValues[35] = d35
-						ps41.OverlayValues[36] = d36
-						ps41.OverlayValues[37] = d37
-						ps41.OverlayValues[38] = d38
-						ps41.OverlayValues[39] = d39
-						return bbs[2].RenderPS(ps41)
+						return bbs[2].Render()
 					}
-					if !ps.General {
-						ps.General = true
-						return bbs[3].RenderPS(ps)
-					}
-					ctx.EmitCmpRegImm32(d39.Reg, 0)
+					ctx.EmitCmpRegImm32(d31.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
 					if bbs[2].Rendered {
 						ctx.EmitJmp(lbl3)
 					}
-					snap42 := d0
-					snap43 := d1
-					snap44 := d2
-					snap45 := d15
-					snap46 := d17
-					snap47 := d18
-					snap48 := d19
-					snap49 := d20
-					snap50 := d21
-					snap51 := d22
-					snap52 := d23
-					snap53 := d24
-					snap54 := d25
-					snap55 := d26
-					snap56 := d27
-					snap57 := d28
-					snap58 := d30
-					snap59 := d31
-					snap60 := d32
-					snap61 := d33
-					snap62 := d34
-					snap63 := d35
-					snap64 := d36
-					snap65 := d37
-					snap66 := d38
-					snap67 := d39
-					alloc68 := ctx.SnapshotAllocState()
-					ctx.RestoreAllocState(alloc68)
-					d0 = snap42
-					d1 = snap43
-					d2 = snap44
-					d15 = snap45
-					d17 = snap46
-					d18 = snap47
-					d19 = snap48
-					d20 = snap49
-					d21 = snap50
-					d22 = snap51
-					d23 = snap52
-					d24 = snap53
-					d25 = snap54
-					d26 = snap55
-					d27 = snap56
-					d28 = snap57
-					d30 = snap58
-					d31 = snap59
-					d32 = snap60
-					d33 = snap61
-					d34 = snap62
-					d35 = snap63
-					d36 = snap64
-					d37 = snap65
-					d38 = snap66
-					d39 = snap67
-					ctx.RestoreAllocState(alloc68)
-					d0 = snap42
-					d1 = snap43
-					d2 = snap44
-					d15 = snap45
-					d17 = snap46
-					d18 = snap47
-					d19 = snap48
-					d20 = snap49
-					d21 = snap50
-					d22 = snap51
-					d23 = snap52
-					d24 = snap53
-					d25 = snap54
-					d26 = snap55
-					d27 = snap56
-					d28 = snap57
-					d30 = snap58
-					d31 = snap59
-					d32 = snap60
-					d33 = snap61
-					d34 = snap62
-					d35 = snap63
-					d36 = snap64
-					d37 = snap65
-					d38 = snap66
-					d39 = snap67
-					ps69 := PhiState{General: true}
-					ps69.OverlayValues = make([]JITValueDesc, 40)
-					ps69.OverlayValues[0] = d0
-					ps69.OverlayValues[1] = d1
-					ps69.OverlayValues[2] = d2
-					ps69.OverlayValues[15] = d15
-					ps69.OverlayValues[17] = d17
-					ps69.OverlayValues[18] = d18
-					ps69.OverlayValues[19] = d19
-					ps69.OverlayValues[20] = d20
-					ps69.OverlayValues[21] = d21
-					ps69.OverlayValues[22] = d22
-					ps69.OverlayValues[23] = d23
-					ps69.OverlayValues[24] = d24
-					ps69.OverlayValues[25] = d25
-					ps69.OverlayValues[26] = d26
-					ps69.OverlayValues[27] = d27
-					ps69.OverlayValues[28] = d28
-					ps69.OverlayValues[30] = d30
-					ps69.OverlayValues[31] = d31
-					ps69.OverlayValues[32] = d32
-					ps69.OverlayValues[33] = d33
-					ps69.OverlayValues[34] = d34
-					ps69.OverlayValues[35] = d35
-					ps69.OverlayValues[36] = d36
-					ps69.OverlayValues[37] = d37
-					ps69.OverlayValues[38] = d38
-					ps69.OverlayValues[39] = d39
-					ps70 := PhiState{General: true}
-					ps70.OverlayValues = make([]JITValueDesc, 40)
-					ps70.OverlayValues[0] = d0
-					ps70.OverlayValues[1] = d1
-					ps70.OverlayValues[2] = d2
-					ps70.OverlayValues[15] = d15
-					ps70.OverlayValues[17] = d17
-					ps70.OverlayValues[18] = d18
-					ps70.OverlayValues[19] = d19
-					ps70.OverlayValues[20] = d20
-					ps70.OverlayValues[21] = d21
-					ps70.OverlayValues[22] = d22
-					ps70.OverlayValues[23] = d23
-					ps70.OverlayValues[24] = d24
-					ps70.OverlayValues[25] = d25
-					ps70.OverlayValues[26] = d26
-					ps70.OverlayValues[27] = d27
-					ps70.OverlayValues[28] = d28
-					ps70.OverlayValues[30] = d30
-					ps70.OverlayValues[31] = d31
-					ps70.OverlayValues[32] = d32
-					ps70.OverlayValues[33] = d33
-					ps70.OverlayValues[34] = d34
-					ps70.OverlayValues[35] = d35
-					ps70.OverlayValues[36] = d36
-					ps70.OverlayValues[37] = d37
-					ps70.OverlayValues[38] = d38
-					ps70.OverlayValues[39] = d39
-					snap71 := d0
-					snap72 := d1
-					snap73 := d2
-					snap74 := d15
-					snap75 := d17
-					snap76 := d18
-					snap77 := d19
-					snap78 := d20
-					snap79 := d21
-					snap80 := d22
-					snap81 := d23
-					snap82 := d24
-					snap83 := d25
-					snap84 := d26
-					snap85 := d27
-					snap86 := d28
-					snap87 := d30
-					snap88 := d31
-					snap89 := d32
-					snap90 := d33
-					snap91 := d34
-					snap92 := d35
-					snap93 := d36
-					snap94 := d37
-					snap95 := d38
-					snap96 := d39
-					alloc97 := ctx.SnapshotAllocState()
+					ctx.FlushRegisterMoves()
 					if !bbs[2].Rendered {
-						bbs[2].RenderPS(ps70)
+						snap32 := d0
+						snap33 := d1
+						snap34 := d2
+						snap35 := d7
+						snap36 := d9
+						snap37 := d10
+						snap38 := d11
+						snap39 := d12
+						snap40 := d13
+						snap41 := d14
+						snap42 := d15
+						snap43 := d16
+						snap44 := d17
+						snap45 := d18
+						snap46 := d19
+						snap47 := d20
+						snap48 := d22
+						snap49 := d23
+						snap50 := d24
+						snap51 := d25
+						snap52 := d26
+						snap53 := d27
+						snap54 := d28
+						snap55 := d29
+						snap56 := d30
+						snap57 := d31
+						alloc58 := ctx.SnapshotAllocState()
+						bbs[2].Render()
+						ctx.RestoreAllocState(alloc58)
+						d0 = snap32
+						d1 = snap33
+						d2 = snap34
+						d7 = snap35
+						d9 = snap36
+						d10 = snap37
+						d11 = snap38
+						d12 = snap39
+						d13 = snap40
+						d14 = snap41
+						d15 = snap42
+						d16 = snap43
+						d17 = snap44
+						d18 = snap45
+						d19 = snap46
+						d20 = snap47
+						d22 = snap48
+						d23 = snap49
+						d24 = snap50
+						d25 = snap51
+						d26 = snap52
+						d27 = snap53
+						d28 = snap54
+						d29 = snap55
+						d30 = snap56
+						d31 = snap57
 					}
-					ctx.RestoreAllocState(alloc97)
-					d0 = snap71
-					d1 = snap72
-					d2 = snap73
-					d15 = snap74
-					d17 = snap75
-					d18 = snap76
-					d19 = snap77
-					d20 = snap78
-					d21 = snap79
-					d22 = snap80
-					d23 = snap81
-					d24 = snap82
-					d25 = snap83
-					d26 = snap84
-					d27 = snap85
-					d28 = snap86
-					d30 = snap87
-					d31 = snap88
-					d32 = snap89
-					d33 = snap90
-					d34 = snap91
-					d35 = snap92
-					d36 = snap93
-					d37 = snap94
-					d38 = snap95
-					d39 = snap96
 					if !bbs[1].Rendered {
-						return bbs[1].RenderPS(ps69)
+						return bbs[1].Render()
 					}
 					return result
-					ctx.FreeDesc(&d37)
+					ctx.FreeDesc(&d29)
 					return result
 				}
-				ps98 := PhiState{General: false}
-				_ = bbs[0].RenderPS(ps98)
+				returned := bbs[0].Render()
+				if ctx.hasBooleanFlags(returned) {
+					if resultRegsProtected {
+						ctx.UnprotectReg(result.Reg2)
+						ctx.UnprotectReg(result.Reg)
+					}
+					return returned
+				}
 				ctx.MarkLabel(lbl0)
 				ctx.ResolveFixups()
 				if resultRegsProtected {
 					ctx.UnprotectReg(result.Reg2)
 					ctx.UnprotectReg(result.Reg)
 				}
+				result.Type = returnType
+				result.ReturnTypeMerged = returnTypeSeen
 				return result
 			},
 			JITVirtualArgs:     true,
