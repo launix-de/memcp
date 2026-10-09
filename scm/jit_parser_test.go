@@ -266,6 +266,87 @@ func TestJITParserGrammarMatchesPackrat(t *testing.T) {
 	}
 }
 
+func TestJITParserEnvironmentRootsKeepWhitespace(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	environment := &Env{Vars: make(Vars), Outer: &Globalenv}
+	cases := []struct {
+		name, grammar, input string
+	}{
+		{"default", `(parser '("alpha" "beta" $) "accepted")`, "alpha beta"},
+		{"hash", `(parser '("alpha" "beta" $) "accepted" "^(?:#[^\\r\\n]*[\\r\\n]|[\\r\\n\\t ]+)+")`, "alpha # hash comment\nbeta"},
+		{"dash", `(parser '("alpha" "beta" $) "accepted" "^(?:--[^\\r\\n]*[\\r\\n]|[\\r\\n\\t ]+)+")`, "alpha -- dash comment\nbeta"},
+	}
+	for _, test := range cases {
+		value := Eval(Read(test.name+" root grammar", test.grammar), environment)
+		environment.Vars[Symbol(test.name)] = value
+		if got := value.Parser().Execute(test.input, environment); got.String() != "accepted" {
+			t.Fatalf("interpreted %s root returned %s", test.name, String(got))
+		}
+	}
+	jitCompileEnvironmentParsers(environment)
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			parser := environment.Vars[Symbol(test.name)].Parser()
+			if parser.Compiled == nil || parser.JITProgram == nil {
+				t.Fatal("root grammar did not compile")
+			}
+			defer func() {
+				if failure := recover(); failure != nil {
+					t.Fatalf("compiled root rejected its own whitespace: %v", failure)
+				}
+			}()
+			if got := parser.Execute(test.input, environment); got.String() != "accepted" {
+				t.Fatalf("compiled root returned %s", String(got))
+			}
+		})
+	}
+}
+
+func TestJITParserNestedRuleKeepsStandaloneWhitespace(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	leafEnvironment := &Env{Vars: make(Vars), Outer: &Globalenv}
+	leaf := Eval(Read("standalone leaf grammar", `(parser '("alpha" "beta") "accepted")`), leafEnvironment)
+	leafEnvironment.Vars[Symbol("leaf")] = leaf
+	rootEnvironment := &Env{Vars: make(Vars), Outer: leafEnvironment}
+	root := Eval(Read("comment root grammar", `(parser '((define result leaf) $) result "^(?:#[^\\r\\n]*[\\r\\n]|[\\r\\n\\t ]+)+")`), rootEnvironment)
+	rootEnvironment.Vars[Symbol("root")] = root
+	const input = "alpha # inherited comment\nbeta"
+	if got := root.Parser().Execute(input, rootEnvironment); got.String() != "accepted" {
+		t.Fatalf("interpreted nested parser returned %s", String(got))
+	}
+	jitCompileEnvironmentParsers(rootEnvironment)
+	if root.Parser().Compiled == nil || root.Parser().JITProgram == nil {
+		t.Fatal("calling root grammar did not compile")
+	}
+	if got := root.Parser().Execute(input, rootEnvironment); got.String() != "accepted" {
+		t.Fatalf("compiled nested parser returned %s", String(got))
+	}
+	// A referenced rule inherits the caller's scanner during that invocation.
+	// Its independent public entry must still use its own default whitespace.
+	jitCompileEnvironmentParsers(leafEnvironment)
+	if leaf.Parser().Compiled == nil || leaf.Parser().JITProgram == nil {
+		t.Fatal("standalone leaf grammar did not compile")
+	}
+	if got := leaf.Parser().Execute("alpha beta", leafEnvironment); got.String() != "accepted" {
+		t.Fatalf("compiled standalone parser returned %s", String(got))
+	}
+	rejected := false
+	func() {
+		defer func() { rejected = recover() != nil }()
+		leaf.Parser().Execute(input, leafEnvironment)
+	}()
+	if !rejected {
+		t.Fatal("standalone parser borrowed its caller's comment whitespace")
+	}
+	if got := root.Parser().Execute(input, rootEnvironment); got.String() != "accepted" {
+		t.Fatalf("standalone compilation changed the calling root: %s", String(got))
+	}
+}
+
 func TestJITParserGrammarSpillsWideGeneratorCaptures(t *testing.T) {
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")
