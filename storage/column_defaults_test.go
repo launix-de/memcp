@@ -8,6 +8,7 @@ import "time"
 import "unsafe"
 import "strings"
 import "testing"
+import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
 func assertInitializedColumn(t *testing.T, tbl *table, column string, value scm.Scmer, rows int) {
@@ -255,19 +256,20 @@ func TestRejectedAddedDefaultLeavesSchemaAndRowsUnchanged(t *testing.T) {
 
 func TestAddedDefaultMetadataAccountsSharedPayloadAndDirectory(t *testing.T) {
 	value := scm.NewString(strings.Repeat("payload", 10000))
-	c := &column{Name: "captured", InitialValues: map[string]columnInitialValue{"first-generation": {Value: value}}}
+	c := &column{Name: "captured", InitialValue: value, InitialValues: map[string]columnInitialExtent{"first-generation": {}}}
 	tbl := &table{Columns: []*column{c}}
 	tbl.columnNamesSnapshot.Store(&tableColumnNamesSnapshot{declarations: []*column{c}})
 	one := tbl.metadataMemory()
 	for i := 0; i < 20; i++ {
-		c.InitialValues[fmt.Sprintf("generation-%d", i)] = columnInitialValue{Value: value}
+		c.InitialValues[fmt.Sprintf("generation-%d", i)] = columnInitialExtent{}
 	}
 	shared := tbl.metadataMemory()
 	if shared <= one || shared-one >= uint(len(value.String())) {
 		t.Fatal("generation extents must be counted without duplicating their shared scalar payload")
 	}
 	independent := scm.NewString(strings.Clone(value.String()))
-	c.InitialValues["independent-payload"] = columnInitialValue{Value: independent}
+	tbl.Columns = append(tbl.Columns, &column{Name: "independent", InitialValue: independent,
+		InitialValues: map[string]columnInitialExtent{"independent-generation": {}}})
 	if got := tbl.metadataMemory(); got-shared < uint(len(value.String())) {
 		t.Fatal("an independent retained scalar allocation was omitted")
 	}
@@ -278,4 +280,140 @@ func TestAddedDefaultMetadataAccountsSharedPayloadAndDirectory(t *testing.T) {
 	if got := tbl.metadataMemory(); got-beforeDirectory < 1023*uint(unsafe.Sizeof((*column)(nil))) {
 		t.Fatal("the published declaration pointer array was omitted")
 	}
+}
+
+func TestAddedDefaultSchemaDropsRetiredRecoveryExtents(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "taddeddefaultmetadata", 2)
+	second := NewShard(tbl)
+	func() {
+		release := second.GetExclusive()
+		defer release()
+		second.Insert([]string{"id", "payload"}, [][]scm.Scmer{
+			{scm.NewInt(3), scm.NewString("third")},
+			{scm.NewInt(4), scm.NewString("fourth")},
+		}, false, nil, nil, false, nil)
+	}()
+	tbl.mu.Lock()
+	tbl.Shards = append(tbl.Shards, second)
+	tbl.publishTopologyLocked()
+	tbl.mu.Unlock()
+	tbl.schema.save()
+	value := strings.Repeat("captured-default-payload", 100)
+	tbl.CreateColumn("captured", "VARCHAR", nil, []scm.Scmer{scm.NewString("default"), scm.NewString(value)})
+	encoded, err := json.Marshal(tbl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One current INSERT default and one captured ADD value, regardless of
+	// shard count; generation records contain only row extents.
+	if count := strings.Count(string(encoded), value); count != 2 {
+		t.Fatalf("serialized payload count = %d, want 2", count)
+	}
+	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+		t.Fatal(result)
+	}
+	encoded, err = json.Marshal(tbl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "initial_values") || strings.Contains(string(encoded), "initial_value") {
+		t.Fatal("checkpoint retains recovery metadata for retired shard generations")
+	}
+	assertInitializedColumn(t, reloadTableFromPersistence(t, "taddeddefaultmetadata", persistence), "captured", scm.NewString(value), 4)
+}
+
+func TestAddedNullableFreshColumnKeepsSparseColdShard(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "taddednullablecold", 2)
+	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+		t.Fatal(result)
+	}
+	db := newDatabase()
+	db.Name = "taddednullablecold"
+	db.persistence = persistence
+	db.srState = COLD
+	db.ensureLoaded()
+	reloaded := db.GetTable("items")
+	shard := reloaded.ActiveShards()[0]
+	if shard.state() != COLD {
+		t.Fatal("fixture is not cold")
+	}
+	reloaded.CreateColumn("fresh", "INT", nil, nil)
+	if shard.state() != COLD || shard.plannerMainRows.Load() != 0 || shard.plannerDeltaRows.Load() != 0 {
+		t.Fatal("fresh nullable ADD loaded old rows")
+	}
+	if _, sparse := shard.getColumnStorageOrPanic("fresh", false, nil).(*StorageSparse); !sparse {
+		t.Fatal("fresh nullable ADD did not use existing sparse storage")
+	}
+	assertInitializedColumn(t, reloaded, "fresh", scm.NewNil(), 2)
+	assertInitializedColumn(t, reloadTableFromPersistence(t, "taddednullablecold", persistence), "fresh", scm.NewNil(), 2)
+}
+
+func TestAddedNullableFreshColumnKeepsExistingDeltaRows(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "taddednullabledelta", 2)
+	shard := tbl.ActiveShards()[0]
+	row := func() *scm.Scmer {
+		release := shard.GetRead(nil)
+		defer release()
+		shard.mu.RLock()
+		defer shard.mu.RUnlock()
+		return &shard.inserts[0][0]
+	}()
+	tbl.CreateColumn("fresh", "INT", nil, nil)
+	func() {
+		release := shard.GetRead(nil)
+		defer release()
+		shard.mu.RLock()
+		defer shard.mu.RUnlock()
+		if &shard.inserts[0][0] != row {
+			t.Fatal("fresh nullable ADD copied existing delta rows")
+		}
+		if _, exists := shard.deltaColumns["fresh"]; exists {
+			t.Fatal("fresh nullable ADD widened existing delta rows")
+		}
+	}()
+	assertInitializedColumn(t, tbl, "fresh", scm.NewNil(), 2)
+}
+
+func TestAddedNullableRetiredNameDoesNotRestoreOldValues(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "taddednullablereused", 2)
+	tbl.CreateColumn("reused", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(8)})
+	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+		t.Fatal(result)
+	}
+	tbl.DropColumn("reused")
+	reloaded := reloadTableFromPersistence(t, "taddednullablereused", persistence)
+	reloaded.CreateColumn("reused", "INT", nil, nil)
+	assertInitializedColumn(t, reloaded, "reused", scm.NewNil(), 2)
+	assertInitializedColumn(t, reloadTableFromPersistence(t, "taddednullablereused", persistence), "reused", scm.NewNil(), 2)
+}
+
+func TestAddedNullableUntrackedSchemaKeepsRecoveryExtents(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "taddednullableuntracked", 2)
+	// Older schema files contain no complete dropped-name history.
+	tbl.DroppedColumns = nil
+	tbl.CreateColumn("fresh", "INT", nil, nil)
+	if len(tbl.Columns[len(tbl.Columns)-1].InitialValues) == 0 {
+		t.Fatal("untracked schema skipped conservative ADD recovery")
+	}
+}
+
+func TestAddedDefaultExpressionSurvivesNilConstantOption(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "taddeddefaultmixedoptions", 2)
+	tbl.CreateColumn("created", "DATETIME", nil, []scm.Scmer{
+		scm.NewString("default_expression"), scm.NewString("CURRENT_TIMESTAMP"),
+		scm.NewString("default"), scm.NewNil(),
+	})
+	shard := tbl.ActiveShards()[0]
+	release := shard.GetRead(nil)
+	defer release()
+	read := shard.ColumnReaderTx(nil, "created", false)
+	value := func() scm.Scmer {
+		shard.mu.RLock()
+		defer shard.mu.RUnlock()
+		return read(0)
+	}()
+	if value.IsNil() {
+		t.Fatal("nil constant option hid the existing expression default")
+	}
+	assertInitializedColumn(t, tbl, "created", value, 2)
 }

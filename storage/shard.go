@@ -686,7 +686,7 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool, cu
 		}
 		if col := u.schemaColumn(colName); col != nil && u.t.PersistencyMode != Memory && u.t.PersistencyMode != Cache && !isRuntimeComputedColumn(col) {
 			if initial, exists := col.InitialValues[u.uuid.String()]; exists {
-				u.columns[colName] = &StorageConst{value: initial.Value, count: uint64(initial.MainRows)}
+				u.columns[colName] = &StorageConst{value: col.InitialValue, count: uint64(initial.MainRows)}
 				if initial.MainRows > u.main_count {
 					u.main_count = initial.MainRows
 					u.plannerMainRows.Store(initial.MainRows)
@@ -1457,7 +1457,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 
 				payloadCols, payloadRow := buildPayload()
 				newRecid = t.main_count + uint32(len(t.inserts))
-				t.insertDataset(payloadCols, [][]scm.Scmer{payloadRow}, nil, currentTx)
+				t.insertDataset(payloadCols, [][]scm.Scmer{payloadRow}, nil, nil, currentTx)
 				if !acidMode && !uniqueCheckNeeded {
 					// Atomic visibility switch under shard write lock:
 					// make new row hidden first, then delete old, then publish new.
@@ -2840,7 +2840,7 @@ func (m *ShardMapReducer) FlushSideEffects() {
 	}
 }
 
-func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, inputSanitized bool, onFirstInsertId func(int64), isIgnore bool, currentTx *TxContext) uint32 {
+func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, validatedSchema *tableColumnNamesSnapshot, onFirstInsertId func(int64), isIgnore bool, currentTx *TxContext) uint32 {
 	t.t.beginContributionMutation()
 	defer t.t.endContributionMutation()
 	ss := SessionStateFromTx(currentTx)
@@ -2876,7 +2876,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		firstNewRecid := uint32(0)
 		firstInsertId := onFirstInsertId
 		for i, row := range preparedRows {
-			recid := t.insertPreparedLocked(preparedColumns[i], [][]scm.Scmer{row}, firstInsertId, true, true, currentTx)
+			recid := t.insertPreparedLocked(preparedColumns[i], [][]scm.Scmer{row}, firstInsertId, true, true, validatedSchema, currentTx)
 			if i == 0 {
 				firstNewRecid = recid
 			}
@@ -2887,7 +2887,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		return firstNewRecid
 	}
 
-	if !inputSanitized {
+	if validatedSchema == nil {
 		values = t.t.sanitizeInsertRows(columns, values, isIgnore)
 		if len(values) == 0 {
 			return 0 // all rows skipped by sanitizer in INSERT IGNORE mode
@@ -2898,7 +2898,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		t.lockForMutation(currentTx)
 		defer t.mu.Unlock()
 	}
-	firstNewRecid := t.insertPreparedLocked(columns, values, onFirstInsertId, true, true, currentTx)
+	firstNewRecid := t.insertPreparedLocked(columns, values, onFirstInsertId, true, true, validatedSchema, currentTx)
 	return firstNewRecid
 }
 
@@ -2930,7 +2930,7 @@ func (t *storageShard) insertReplica(columns []string, values [][]scm.Scmer, alr
 		t.mu.Lock()
 	}
 	firstNewInsertIdx := len(t.inserts)
-	firstNewRecid := t.insertPreparedLocked(columns, values, nil, false, false, currentTx)
+	firstNewRecid := t.insertPreparedLocked(columns, values, nil, false, false, nil, currentTx)
 	if next := t.nextForMaintenanceLocked(nil); next != nil {
 		// A writer may still hold an older immutable table-topology snapshot
 		// after more than one rebuild generation has been published. Replica
@@ -2963,12 +2963,12 @@ func (t *storageShard) materializedInsertedRowsLocked(firstNewInsertIdx int) ([]
 	return idx2col, logVals
 }
 
-func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), fireTriggers bool, propagateMaintenance bool, currentTx *TxContext) uint32 {
+func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), fireTriggers bool, propagateMaintenance bool, validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext) uint32 {
 	// capture starting row index for undo logging
 	firstNewRecid := t.main_count + uint32(len(t.inserts))
 	firstNewInsertIdx := len(t.inserts) // for capturing actual rows after insertDataset fills auto-increment
 	var triggerInsertRows []dataset
-	t.insertDataset(columns, values, onFirstInsertId, currentTx)
+	t.insertDataset(columns, values, onFirstInsertId, validatedSchema, currentTx)
 	if fireTriggers && len(t.t.Triggers) > 0 {
 		newRows := t.inserts[firstNewInsertIdx:]
 		triggerInsertRows = make([]dataset, len(newRows))
@@ -3052,8 +3052,15 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 }
 
 // contract: must only be called inside full write mutex mu.Lock()
-func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), currentTx *TxContext) {
-	declarations := t.t.columnDeclarations()
+func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext) {
+	snapshot := t.t.columnNamesSnapshot.Load()
+	declarations := t.t.Columns // private, unpublished constructors only
+	if snapshot != nil {
+		declarations = snapshot.declarations
+	}
+	if validatedSchema == nil || validatedSchema != snapshot {
+		validateInsertColumns(columns, declarations)
+	}
 	colidx := make([]int, len(columns))
 	for i, col := range columns {
 		// copy all dataset entries into packed array
@@ -3070,20 +3077,6 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 	var aiColIdx int = -1
 	var aiInputIdx int = -1
 	for _, c := range declarations {
-		// An INSERT may have validated before a concurrent ADD published.
-		// Recheck omitted required fields once at this existing batch boundary.
-		if !c.AllowNull && !c.AutoIncrement && !c.hasDefault() {
-			found := false
-			for _, name := range columns {
-				if name == c.Name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				panic("column " + c.Name + " cannot be NULL")
-			}
-		}
 		if c.AutoIncrement {
 			hasAI = true
 			for i, name := range columns {
@@ -3191,6 +3184,23 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			GlobalCache.UpdateSizeAsync(index, delta)
 		}
 	}
+}
+
+// initialColumnValues applies only to recovery of the captured generation and
+// prefix. Presence in a newer WAL row, including an explicit NULL, is untouched.
+type columnRecoveryValue struct {
+	Value scm.Scmer
+	columnInitialExtent
+}
+
+func (s *storageShard) initialColumnValues() map[string]columnRecoveryValue {
+	result := make(map[string]columnRecoveryValue)
+	for _, c := range s.t.columnDeclarations() {
+		if initial, exists := c.InitialValues[s.uuid.String()]; exists {
+			result[c.Name] = columnRecoveryValue{c.InitialValue, initial}
+		}
+	}
+	return result
 }
 
 // insertDatasetFromLog appends delta rows from a persisted log without applying

@@ -141,15 +141,22 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - `storageShard.filterFeedback` contains immutable observations published with one best-effort CAS after a complete shard scan. Readers may load these atomics without shard locks or concurrency rights; they must not inspect shard containers. `table.filterFeedback` publishes immutable, bounded merged metadata. Generation IDs are scalar planner-statistics tokens, never retained shard/topology pointers. No feedback synchronization or publication is permitted inside element or filter-batch loops. `tableShowColumnsSnapshot.filterSchema` is immutable column-semantics metadata published atomically. Optional `table.RestoredFilterFeedback` is touched only during schema loading before table publication and cleared after restoring historical aggregates; schema saves serialize atomically published table-feedback metadata without accessing shard state.
 - When adding new storage fields, document their ownership, publication, and
   lifetime discipline and update this section.
-- `column.InitialValues` is immutable ADD-time recovery metadata keyed by the
-  original shard UUID and bounded by its captured main and delta row counts.
+- `column.InitialValue` stores one frozen ADD value; `column.InitialValues`
+  stores only main/delta extents keyed by the original shard UUID and bounded
+  by its captured main and delta row counts.
   DDL snapshots topology under the table mutex, owns existing maintenance and
   schema locks, and constructs values under shard locks before publication;
-  only cold loading and WAL replay consume it. Rebuilt generations persist their
-  actual values. Ordinary readers and row loops never consult this metadata.
+  only cold loading and WAL replay consume it. Checkpoints serialize extents
+  only for their exact durable topology, without mutating rollback metadata.
+  Rebuilt generations persist their actual values. Ordinary readers and row loops never consult this metadata.
   `tableColumnNamesSnapshot.declarations` is an immutable directory slice,
   published with name metadata before initialized shard locks are released;
   mutable column fields retain their existing DDL ownership.
+- `table.DroppedColumns` is protected by existing DDL/schema ownership and
+  records retired persistent names. New tables persist a tracked empty map; a
+  nil map from an older schema preserves conservative ADD recovery. Query and
+  INSERT paths never consult it. Fresh nullable columns use existing sparse
+  storage without loading or rewriting old shard rows.
 
 - `StorageComputeProxy.deltaBytes` and `mainBytes` are exclusive retained-payload
   accounting with thread-safe updates and exclusive unpublished generation
