@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Scalar subselect in GROUP BY context: the correlated subselect's
 # (outer tblvar.col) must be rewritten to reference the keytable column.
 
@@ -110,6 +112,37 @@ test_cases:
         - driver_id: 2
           total_km: 50
           driver_name: null
+
+  - name: "Scalar RecMap probe survives a source rebuild before output"
+    scm: |
+      (begin
+        (define source (table "memcp-tests" "ssg_trips"))
+        (define target (table "memcp-tests" "ssg_drivers"))
+        (define mapping (scan_recmap nil source '() '() '() (lambda () true)
+          '("driver_id") (recmap_equi_first_mapper nil target '("ID") nil) target))
+        (rebuild source true false)
+        (scan nil source '() '() '() (lambda () true) '("$recmap_call")
+          (lambda (total probe)
+            (+ total (strlen (probe mapping '("name") (lambda (name) name) (lambda () "")))))
+          0 + false))
+    expect: {result: 13}
+
+  - name: "Prepared RecMap values survive a source rebuild before output"
+    setup:
+      - sql: "INSERT INTO ssg_trips VALUES (4, 2, 10)"
+    scm: |
+      (begin
+        (define source (table "memcp-tests" "ssg_trips"))
+        (define target (table "memcp-tests" "ssg_drivers"))
+        (define mapping (scan_recmap nil source '() '() '() (lambda () true)
+          '("driver_id") (recmap_equi_first_mapper nil target '("ID") nil) target))
+        (define value_mapper (recmap_value_mapper nil mapping '("name")
+          (lambda (name) name) (lambda () "")))
+        (rebuild source true false)
+        (scan nil source '() '() '() (lambda () true) '("$record_ref")
+          (lambda (total source_row) (+ total (strlen (value_mapper source_row))))
+          0 + false))
+    expect: {result: 16}
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ssg_trips"

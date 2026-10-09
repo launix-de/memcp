@@ -197,6 +197,19 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   source/target generations and visibility, as RecSet operations do. A RecMap
   retains no transaction, session, cancellation, or mutable shard containers and must never survive its
   query or be persisted: shard rebuilds may replace every referenced identity.
+  Source-domain translation uses published shard forwarding and synchronized
+  record-ID translation helpers. Prepared value projections publish complete,
+  immutable generation maps through query-local atomic CAS; row probes never
+  mutate a published map or inspect shard containers.
+  Row-bound RecMap probes cache a translated source part when maintenance
+  has replaced that shard, using the existing guarded rebuild translations.
+  The translated arrays belong to the query's accessor closure and remain
+  immutable; translation and allocation never occur in its steady probe loop.
+
+- `recMapBuildRows.tupleBuffer` is private to one serial shard accumulator.
+  Completed tuple slices own disjoint portions of its buffers; callbacks may
+  reuse their input frames. Published mapper values retain immutable copied
+  frames and never borrow a mutable scan callback frame.
 
 - `OverlayBlob.ram` belongs to one immutable column generation. Admission
   metadata, decoded strings, and byte/benefit accounting have thread-safe ownership;

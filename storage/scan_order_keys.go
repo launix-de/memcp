@@ -195,8 +195,10 @@ func declareScanOrderKeys(en *scm.Env, ordinary *scm.Declaration) {
 
 func orderedPrefixBounds(original scanAccess, prefix *orderedPrefixAccess) scanAccess {
 	relationValue := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString("bin"), scm.NewBool(false))
-	less, meta := scm.OrderRelationLess(relationValue.Func()), orderRelationMeta(relationValue.Func())
-	relation := func(v ...scm.Scmer) scm.Scmer { return scm.NewBool(less(v[0], v[1])) }
+	// Keep the canonical callback identity so index construction resolves its
+	// allocation-free scalar comparator rather than a variadic fallback.
+	relation := relationValue.Func()
+	meta := orderRelationMeta(relation)
 	boundaries := analyzedBoundaries{{col: prefix.column, matcher: RangeMatcher, order: relation, orderMeta: meta, lowerInclusive: true, upperInclusive: true}}
 	for i, col := range prefix.order {
 		if col != prefix.column {
