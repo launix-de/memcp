@@ -528,6 +528,8 @@ Algorithms use semantic operations and register roles from the shared API; instr
 register assignment and atomic memory ordering belong to the target backend.
 Type sizes follow the loaded package's target architecture. All three backends
 use the same 64-bit value layout; 32-bit targets are not supported by the JIT.
+`make jitgen` builds the generator for the host even when `GOARCH` selects a
+cross-compilation target. Regeneration is checked in JIT CI.
 
 For Linux cross-tests, install `qemu-user-static` and use the patched toolchain:
 
