@@ -67,7 +67,7 @@ func jitCapturedEnv(en *Env) *JITEnv {
 }
 
 // Keep the unwind marker above the register-argument spill area used by Go
-// callees. MemCP's JIT call bridge supports at most nine ABI words (72 bytes).
+// callees. MemCP's JIT call bridge supports at most sixteen ABI words.
 const jitGoSpillBytes = uintptr(128)
 
 // jitCompileProc compiles a Proc body to native machine code or returns nil.
@@ -101,6 +101,9 @@ func (ctx *JITContext) ensureSpace(n uintptr) {
 
 // emitByte appends a single byte to the writer.
 func (ctx *JITContext) emitByte(b byte) {
+	if jitPortableBackend {
+		panic("jit: byte instruction reached fixed-width backend")
+	}
 	if ctx.registerInstructionDepth == 0 && (ctx.DeferredRegMoves.active != 0 || ctx.lazyFlags.FlagsID != 0) {
 		ctx.FlushRegisterMoves()
 	}
@@ -111,6 +114,9 @@ func (ctx *JITContext) emitByte(b byte) {
 
 // emitBytes appends raw bytes to the writer.
 func (ctx *JITContext) emitBytes(bs ...byte) {
+	if jitPortableBackend {
+		panic("jit: byte instructions reached fixed-width backend")
+	}
 	if ctx.registerInstructionDepth == 0 && (ctx.DeferredRegMoves.active != 0 || ctx.lazyFlags.FlagsID != 0) {
 		ctx.FlushRegisterMoves()
 	}
@@ -341,4 +347,186 @@ func (ctx *JITContext) EmitStoreRegMemL(src, base Reg, disp int32) {
 	ctx.beginRegisterInstruction(jitRegisterMask(src, base), 0)
 	defer ctx.endRegisterInstruction()
 	jitArchEmitStore32(ctx, src, base, disp)
+}
+
+// EmitAtomicLoad64 and EmitAtomicStore64 have sync/atomic's sequentially
+// consistent semantics. Plain loads/stores are insufficient on weakly ordered
+// targets; the backend supplies the required acquire/release instructions.
+func (ctx *JITContext) EmitAtomicLoad64(dst, base Reg, disp int32) {
+	ctx.beginRegisterInstruction(jitRegisterMask(base), jitRegisterMask(dst))
+	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeAtomicLoad64, dst, base, 0, int64(disp))
+		return
+	}
+	jitArchEmitLoad64(ctx, dst, base, disp)
+}
+
+func (ctx *JITContext) EmitAtomicStore64(src, base Reg, disp int32) {
+	ctx.beginRegisterInstruction(jitRegisterMask(src, base), 0)
+	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeAtomicStore64, src, base, 0, int64(disp))
+		return
+	}
+	// On AMD64 a full fence after the aligned store closes the Store->Load
+	// ordering hole while preserving the source register.
+	jitArchEmitStore64(ctx, src, base, disp)
+	ctx.emitBytes(0x0F, 0xAE, 0xF0) // MFENCE
+}
+
+// jitNativeOp describes the remaining instruction families shared by the
+// fixed-width backends. Integer operands retain their semantic JITIntOp API.
+type jitNativeOp uint8
+
+const (
+	jitNativeReturn jitNativeOp = iota
+	jitNativeProlog
+	jitNativeLeave
+	jitNativeEpilog
+	jitNativeStackAdjust
+	jitNativeAndImm
+	jitNativeOrImm
+	jitNativeAddImm
+	jitNativeSubImm
+	jitNativeAddImm32
+	jitNativeSubImm32
+	jitNativeMulImm
+	jitNativeDivImm
+	jitNativeRemImm
+	jitNativeCmpImm
+	jitNativeCmpByte
+	jitNativeSetCondition
+	jitNativeALU
+	jitNativeZeroExtend32
+	jitNativeShiftLeft
+	jitNativeShiftRight
+	jitNativeShiftSigned
+	jitNativeShiftLeftReg
+	jitNativeShiftRightReg
+	jitNativeAddress
+	jitNativeIndexAddress
+	jitNativeIndexLoad
+	jitNativeFCompare
+	jitNativeFStore
+	jitNativeFLoad
+	jitNativeFloatOp
+	jitNativeFToGPR
+	jitNativeGPRToF
+	jitNativeIntToFloat
+	jitNativeFloatToInt
+	jitNativeFZero
+	jitNativeMoreStackCall
+	jitNativeCall
+	jitNativeAtomicLoad64
+	jitNativeAtomicStore64
+)
+
+// jitEmitNativeCall saves the frame base in a relocatable stack slot. Go's
+// ABIInternal has no callee-saved GPRs on RISC-V. The minimum caller frame also
+// supplies the link-register home required by Go stack arguments/spills.
+func jitEmitNativeCall(ctx *JITContext, target Reg, addr uint64, setup func(int32), roots []int32) {
+	const callBytes = int32(jitGoSpillBytes + 16)
+	ctx.EmitReserveStackBytes(callBytes)
+	ctx.EmitStoreRegMem(ctx.FrameReg, ctx.StackReg, callBytes-8)
+	ctx.setStackPointer(jitStackRootCallSP, callBytes-8, true)
+	if setup != nil {
+		setup(callBytes)
+	}
+	if addr != 0 {
+		ctx.EmitMovRegImm64(jitNativeTemp, addr)
+		target = jitNativeTemp
+	}
+	jitArchEmitNative(ctx, jitNativeCall, target, 0, 0, 0)
+	ctx.recordSafepoint(roots, callBytes)
+	ctx.EmitMovRegMem(ctx.FrameReg, ctx.StackReg, callBytes-8)
+	ctx.setStackPointer(jitStackRootCallSP, callBytes-8, false)
+	ctx.EmitReleaseStackBytes(callBytes)
+}
+
+func jitEmitClearFrame(ctx *JITContext) unsafe.Pointer {
+	ctx.emitMovRegReg(RegRDI, RegRSP)
+	fixup := jitArchEmitImmediateFixup(ctx, RegRCX)
+	ctx.emitXorReg(RegR11)
+	loop, done := ctx.ReserveLabel(), ctx.ReserveLabel()
+	ctx.MarkLabel(loop)
+	ctx.EmitCmpRegImm32(RegRCX, 0)
+	ctx.EmitJcc(CcE, done)
+	ctx.EmitStoreRegMem(RegR11, RegRDI, 0)
+	ctx.EmitAddRegImm32(RegRDI, 8)
+	ctx.EmitSubRegImm32(RegRCX, 1)
+	ctx.EmitJmp(loop)
+	ctx.MarkLabel(done)
+	return fixup
+}
+
+func jitEmitStackCheck(ctx *JITContext, guardOffset int32, grow JITLabel) unsafe.Pointer {
+	fixup := jitArchEmitImmediateFixup(ctx, jitNativeTemp)
+	ctx.emitMovRegReg(RegR11, RegRSP)
+	ctx.EmitCmpInt64(RegR11, jitNativeTemp)
+	ctx.EmitJcc(CcB, grow)
+	ctx.EmitSubInt64(RegR11, jitNativeTemp)
+	jitArchEmitLoad64(ctx, jitNativeTemp, RegR14, guardOffset)
+	ctx.EmitCmpInt64(RegR11, jitNativeTemp)
+	ctx.EmitJcc(CcBE, grow)
+	return fixup
+}
+
+func jitEmitStackGrow(ctx *JITContext, moreStackPC uintptr) {
+	// A small, fully described frame exists before morestack. Saving the link
+	// register in this record allows the runtime to unwind an entry safepoint
+	// with the same declarative recipe as an ordinary JIT frame.
+	jitArchEmitNative(ctx, jitNativeProlog, 0, 0, 0, 0)
+	jitArchEmitNative(ctx, jitNativeStackAdjust, 0, 0, 0, -32)
+	ctx.EmitStoreRegMem(RegRAX, RegRSP, 0)
+	ctx.EmitStoreRegMem(RegRBX, RegRSP, 8)
+	ctx.EmitStoreRegMem(RegRCX, RegRSP, 16)
+	ctx.EmitMovRegImm64(jitNativeTemp, uint64(moreStackPC))
+	jitArchEmitNative(ctx, jitNativeMoreStackCall, jitNativeTemp, 0, 0, 0)
+	ctx.Safepoints = append(ctx.Safepoints, jitSafepoint{
+		pcOffset: int32(uintptr(ctx.Ptr) - uintptr(ctx.Start)), entry: true,
+		entryFrameWords: 5, entryPointerMap: []byte{1},
+	})
+	jitArchEmitNative(ctx, jitNativeAddress, RegRBP, RegRSP, 0, 32)
+	ctx.EmitMovRegMem(RegRAX, RegRSP, 0)
+	ctx.EmitMovRegMem(RegRBX, RegRSP, 8)
+	ctx.EmitMovRegMem(RegRCX, RegRSP, 16)
+	jitArchEmitNative(ctx, jitNativeStackAdjust, 0, 0, 0, 32)
+	jitArchEmitNative(ctx, jitNativeLeave, 0, 0, 0, 0)
+}
+
+// EmitShiftLeft and EmitShiftRight describe a uint64 shift independently of
+// machine shift registers. bounded is a proven count <64, permitting the
+// backend to omit the Go out-of-range correction. Only dst is overwritten.
+func (ctx *JITContext) EmitShiftLeft(dst, count Reg, bounded bool) {
+	ctx.emitShift64(dst, count, true, bounded)
+}
+
+func (ctx *JITContext) EmitShiftRight(dst, count Reg, bounded bool) {
+	ctx.emitShift64(dst, count, false, bounded)
+}
+
+func (ctx *JITContext) emitShift64(dst, count Reg, left, bounded bool) {
+	ctx.beginRegisterInstruction(jitRegisterMask(dst, count), jitRegisterMask(dst))
+	defer ctx.endRegisterInstruction()
+	var done JITLabel
+	if !bounded {
+		inRange := ctx.ReserveLabel()
+		done = ctx.ReserveLabel()
+		ctx.EmitCmpRegImm32(count, 64)
+		ctx.EmitJcc(CondUnsignedBelow, inRange)
+		ctx.EmitXorInt64(dst, dst)
+		ctx.EmitJmp(done)
+		ctx.MarkLabel(inRange)
+	}
+	jitArchEmitShift64(ctx, dst, count, left)
+	if !bounded {
+		ctx.MarkLabel(done)
+	}
+}
+
+// EmitInt64ToFloatBits converts an integer in-place to IEEE float64 bits;
+// the backend chooses its internal floating-point scratch register.
+func (ctx *JITContext) EmitInt64ToFloatBits(reg Reg) {
+	ctx.EmitCvtInt64ToFloat64(RegX0, reg)
 }

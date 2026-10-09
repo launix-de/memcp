@@ -57,10 +57,10 @@ func TestJITPortableLeafParametersAndLiteralsExecuteNatively(t *testing.T) {
 		En: &Globalenv,
 	})
 	compiledAddition := CompileJIT(addition, true)
-	if proc := compiledAddition.Proc(); proc == nil || proc.JITCode != 0 {
-		t.Fatal("unsupported addition must remain an interpreted procedure")
+	if proc := compiledAddition.Proc(); proc == nil || proc.JITCode == 0 {
+		t.Fatal("addition did not compile natively")
 	}
 	if got := Apply(compiledAddition, NewInt(2), NewInt(3)); !Equal(got, NewInt(5)) {
-		t.Fatalf("fallback addition returned %s", String(got))
+		t.Fatalf("native addition returned %s", String(got))
 	}
 }

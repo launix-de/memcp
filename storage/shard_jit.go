@@ -276,21 +276,6 @@ func emitFusedLoop(ctx *scm.JITContext, mainCols []ColumnStorage, mapProc, reduc
 	ctx.EmitByte(0xC3) // RET
 }
 
-// emitMainStorageValue is the only point where a finished storage's physical
-// type proof enters an inlined query callback. The caller is intentionally the
-// main-only loop above. Delta rows live outside ColumnStorage and must continue
-// through getDelta plus the ordinary dynamically typed lambda call.
-func emitMainStorageValue(ctx *scm.JITContext, col ColumnStorage, idx, result scm.JITValueDesc) scm.JITValueDesc {
-	value := col.JITEmit(ctx, idx, result)
-	if valueType := col.JITValueType(); valueType != scm.JITTypeUnknown {
-		value.Type = valueType
-	}
-	return value
-}
-
-// emitProcInlineWithStackArgs materializes proc arguments as a contiguous
-// Scmer array on the stack and sets R12/ctx.SliceBase so legacy emitters that
-// iterate via ctx.SliceBase (e.g. variadic arithmetic) remain correct.
 func emitProcInlineWithStackArgs(ctx *scm.JITContext, proc *scm.Proc, args []scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 	if len(args) == 0 {
 		oldBase := ctx.SliceBase

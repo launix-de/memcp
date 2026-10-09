@@ -15,17 +15,17 @@ package scm
 // amd64-spelled aliases remain temporarily available to generated emitters;
 // common lowering must use JITContext register roles instead.
 const (
-	RegRAX Reg = 0 // X0: first result / first ABI word
-	RegRBX Reg = 1 // X1: second result / second ABI word
-	RegRCX Reg = 2 // X2: third ABI word
-	RegRDX Reg = 3
+	RegRAX Reg = 0  // X0: first result / first ABI word
+	RegRBX Reg = 1  // X1: second result / second ABI word
+	RegRCX Reg = 2  // X2: third ABI word
+	RegRDX Reg = 26 // Go closure context
 	RegRSI Reg = 4
 	RegRDI Reg = 5
 	RegR8  Reg = 6
 	RegR9  Reg = 7
 	RegR10 Reg = 8
 	RegR11 Reg = 16 // IP0, backend scratch
-	RegR12 Reg = 19 // callee-saved slice base
+	RegR12 Reg = 19 // slice base, preserved explicitly across Go calls
 	RegR13 Reg = 20
 	RegR14 Reg = 28 // Go g
 	RegR15 Reg = 27 // Go toolchain temporary
@@ -57,5 +57,7 @@ const (
 	jitLastFPReg           = Reg(63)
 	jitLastGPReg           = Reg(31)
 	jitRegisterCount       = 64
-	jitSupportsCalibration = false
+	jitSupportsCalibration = true
 )
+
+const jitPortableBackend = true

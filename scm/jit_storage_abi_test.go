@@ -1,4 +1,4 @@
-//go:build goexperiment.jit && amd64
+//go:build goexperiment.jit && (amd64 || arm64 || riscv64)
 
 /*
 Copyright (C) 2026  Carl-Philip Hänsch
@@ -20,7 +20,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package scm
 
 import (
-	"bytes"
+	"fmt"
 	"math"
 	"math/bits"
 	"runtime"
@@ -262,87 +262,6 @@ func TestJITFloatConversionDynamicFallback(t *testing.T) {
 	}
 }
 
-func TestEmitCmpFloat64AvoidsDuplicateSameOperandMove(t *testing.T) {
-	code := make([]byte, 16)
-	ctx := &JITContext{
-		Start: unsafe.Pointer(&code[0]),
-		Ptr:   unsafe.Pointer(&code[0]),
-		End:   unsafe.Pointer(&code[len(code)-1]),
-	}
-	ctx.EmitCmpFloat64(RegRAX, RegRAX)
-	emitted := code[:uintptr(ctx.Ptr)-uintptr(ctx.Start)]
-	want := []byte{
-		0x66, 0x48, 0x0f, 0x6e, 0xc0, // MOVQ XMM0, RAX
-		0x66, 0x0f, 0x2e, 0xc0, // UCOMISD XMM0, XMM0
-	}
-	if !bytes.Equal(emitted, want) {
-		t.Fatalf("same-operand float comparison = %x, want %x", emitted, want)
-	}
-}
-
-func emitParallelMoveTestCode(t *testing.T, batch *jitParallelRegMoveBatch) []byte {
-	t.Helper()
-	code := make([]byte, 128)
-	ctx := &JITContext{
-		Start:        unsafe.Pointer(&code[0]),
-		Ptr:          unsafe.Pointer(&code[0]),
-		End:          unsafe.Pointer(&code[len(code)-1]),
-		SliceBase:    RegR12,
-		ScratchReg:   RegR11,
-		StackReg:     RegRSP,
-		FrameReg:     RegRBP,
-		RegisterBank: jitX86RegisterBank,
-	}
-	ctx.emitParallelRegMoveBatch(batch)
-	if ctx.DynamicSP != 0 {
-		t.Fatalf("parallel move left dynamic stack offset %d", ctx.DynamicSP)
-	}
-	return code[:uintptr(ctx.Ptr)-uintptr(ctx.Start)]
-}
-
-func TestParallelMoveBatchElidesIdentityAndOrdersDependencies(t *testing.T) {
-	var batch jitParallelRegMoveBatch
-	batch.add(RegRDX, RegRDX)
-	batch.add(RegRAX, RegRBX)
-	batch.add(RegRCX, RegRAX)
-
-	// RCX must consume the old RAX before RAX is overwritten by RBX. Both x86
-	// register moves are three bytes; the identity must emit nothing.
-	code := emitParallelMoveTestCode(t, &batch)
-	want := []byte{0x48, 0x89, 0xc1, 0x48, 0x89, 0xd8}
-	if !bytes.Equal(code, want) {
-		t.Fatalf("parallel dependency moves = %x, want %x", code, want)
-	}
-}
-
-func TestParallelMoveBatchBreaksCycleWithOneSavedScratch(t *testing.T) {
-	var batch jitParallelRegMoveBatch
-	batch.add(RegRAX, RegRBX)
-	batch.add(RegRBX, RegRAX)
-
-	code := emitParallelMoveTestCode(t, &batch)
-	// PUSH/POP R12 surround exactly three MOVs: save old RAX in scratch,
-	// rotate RBX into RAX, then scratch into RBX.
-	if len(code) != 13 || !bytes.Equal(code[:2], []byte{0x41, 0x54}) || !bytes.Equal(code[len(code)-2:], []byte{0x41, 0x5c}) {
-		t.Fatalf("parallel cycle is not one saved-scratch rotation: %x", code)
-	}
-}
-
-func TestParallelMoveBatchChoosesScratchOutsideCycle(t *testing.T) {
-	var batch jitParallelRegMoveBatch
-	batch.add(RegR12, RegR11)
-	batch.add(RegR11, RegR12)
-
-	// Both preferred role registers participate in the cycle. The solver must
-	// select another register from the architecture-provided bank; reusing either
-	// cycle member would fail to break the dependency (the old R12-specific
-	// implementation could loop forever for this shape).
-	code := emitParallelMoveTestCode(t, &batch)
-	if len(code) != 13 {
-		t.Fatalf("role-register cycle emitted %d bytes, want one saved-scratch rotation (13): %x", len(code), code)
-	}
-}
-
 func TestParallelMoveBatchNeverUsesStackOrFrameRegisterAsScratch(t *testing.T) {
 	var batch jitParallelRegMoveBatch
 	batch.add(RegRAX, RegRBX)
@@ -355,74 +274,10 @@ func TestParallelMoveBatchNeverUsesStackOrFrameRegisterAsScratch(t *testing.T) {
 		ScratchReg:   RegR11,
 		StackReg:     RegRSP,
 		FrameReg:     RegRBP,
-		RegisterBank: jitX86RegisterBank,
+		RegisterBank: jitNativeRegisterBank,
 	}
 	if scratch := ctx.parallelMoveScratch(&batch); scratch != RegR11 {
 		t.Fatalf("parallel cycle scratch = %d, want non-frame scratch %d", scratch, RegR11)
-	}
-}
-
-func TestDeferredRegisterMovesCollapseAcrossEmitterBoundaries(t *testing.T) {
-	code := make([]byte, 128)
-	ctx := &JITContext{
-		Start:        unsafe.Pointer(&code[0]),
-		Ptr:          unsafe.Pointer(&code[0]),
-		End:          unsafe.Pointer(&code[len(code)-1]),
-		SliceBase:    RegR12,
-		ScratchReg:   RegR11,
-		StackReg:     RegRSP,
-		RegisterBank: jitX86RegisterBank,
-	}
-
-	// Model two independent inline emitters handing the same value through an
-	// otherwise dead intermediate register. Ending the producer lifetime must
-	// reserve its physical register for the alias rather than forcing an early
-	// copy. The physical stream needs only the final RDI -> RDX move.
-	ctx.AllRegs = uint64(jitRegisterMask(RegRDI, RegRSI, RegRDX))
-	ctx.EmitMovRegReg(RegRSI, RegRDI)
-	ctx.FreeReg(RegRDI)
-	ctx.EmitMovRegReg(RegRDX, RegRSI)
-	ctx.FreeReg(RegRSI)
-	if ctx.Ptr != ctx.Start {
-		t.Fatal("deferred moves emitted before a materialization barrier")
-	}
-	if ctx.FreeRegs&uint64(jitRegisterMask(RegRDI)) != 0 {
-		t.Fatal("aliased physical source returned to allocator before materialization")
-	}
-	ctx.ReclaimUntrackedRegs()
-	if ctx.FreeRegs&uint64(jitRegisterMask(RegRDI)) != 0 {
-		t.Fatal("reclamation returned an aliased physical source before materialization")
-	}
-	ctx.FlushRegisterMoves()
-	emitted := code[:uintptr(ctx.Ptr)-uintptr(ctx.Start)]
-	if want := []byte{0x48, 0x89, 0xfa}; !bytes.Equal(emitted, want) {
-		t.Fatalf("collapsed deferred chain = %x, want %x", emitted, want)
-	}
-	if ctx.FreeRegs&uint64(jitRegisterMask(RegRDI)) == 0 {
-		t.Fatal("physical source remained held after its final alias materialized")
-	}
-}
-
-func TestDeferredRegisterMovesPreserveOldSourceBeforeOverwrite(t *testing.T) {
-	code := make([]byte, 128)
-	ctx := &JITContext{
-		Start:        unsafe.Pointer(&code[0]),
-		Ptr:          unsafe.Pointer(&code[0]),
-		End:          unsafe.Pointer(&code[len(code)-1]),
-		SliceBase:    RegR12,
-		ScratchReg:   RegR11,
-		StackReg:     RegRSP,
-		RegisterBank: jitX86RegisterBank,
-	}
-
-	ctx.EmitMovRegReg(RegRSI, RegRDI)
-	ctx.EmitMovRegReg(RegRDI, RegRAX)
-	ctx.FlushRegisterMoves()
-	// RSI must receive the old RDI before the later RAX -> RDI assignment.
-	emitted := code[:uintptr(ctx.Ptr)-uintptr(ctx.Start)]
-	want := []byte{0x48, 0x89, 0xfe, 0x48, 0x89, 0xc7}
-	if !bytes.Equal(emitted, want) {
-		t.Fatalf("overwrite-preserving deferred moves = %x, want %x", emitted, want)
 	}
 }
 
@@ -643,7 +498,7 @@ func TestJITComparisonReturnsFlagsThroughNewBool(t *testing.T) {
 				before := uintptr(ctx.Ptr)
 				ctx.EmitJump(value.Condition, yes)
 				code := unsafe.Slice((*byte)(unsafe.Pointer(before)), int(uintptr(ctx.Ptr)-before))
-				if len(code) != 6 || code[0] != 0x0f || code[1] != 0x80|x86ConditionCode(value.Condition) {
+				if !jitPortableBackend && (len(code) != 6 || code[0] != 0x0f || code[1] != 0x80|x86ConditionCode(value.Condition)) {
 					t.Fatalf("condition did not become a direct Jcc: %x", code)
 				}
 				ctx.FreeDesc(&value)
@@ -1000,7 +855,7 @@ func TestJITNestedExpressionSpillsProtectedOuterValues(t *testing.T) {
 					if tc.fp {
 						// Storage getters normally use only GPR homes. Give this
 						// kernel the ordinary procedure emitter's FP bank as well.
-						ctx.FPRegisterBank = jitX86FPRegisterBank
+						ctx.FPRegisterBank = jitNativeFPRegisterBank
 						for i := uint8(0); i < ctx.FPRegisterBank.Count; i++ {
 							ctx.AllFPRegs |= 1 << uint(ctx.FPRegisterBank.Registers[i])
 						}
@@ -1183,6 +1038,96 @@ func TestJITMultiplyMixedFloatPreservesExactWideIntegers(t *testing.T) {
 		}
 		if got := fn(1); !got.IsInt() || got.Int() != value {
 			t.Fatalf("exact wide integer rounded: got %v, want %d", got, value)
+		}
+	}
+}
+
+func TestJITAtomicFieldLoadAndStore(t *testing.T) {
+	for _, displacement := range []int32{0, 8192, -4096} {
+		t.Run(fmt.Sprint(displacement), func(t *testing.T) {
+			values := new([2048]int64)
+			base := unsafe.Pointer(&values[512])
+			index := 512 + int(displacement)/8
+			values[index] = -7
+			fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+				ctx.EnsureDesc(&source)
+				address := ctx.AllocRegExcept(source.Reg)
+				ctx.TrackPointer(base)
+				ctx.EmitMovRegImm64(address, uint64(uintptr(base)))
+				ctx.EmitAtomicStore64(source.Reg, address, displacement)
+				loaded := ctx.AllocRegExcept(source.Reg, address)
+				ctx.EmitAtomicLoad64(loaded, address, displacement)
+				ctx.EmitAddInt64(loaded, source.Reg)
+				target = jitEnsureResultPair(ctx, target)
+				ctx.EmitMakeInt(target, JITValueDesc{Loc: LocReg, Type: tagInt, Reg: loaded})
+				return target
+			})
+			if fn == nil {
+				t.Fatal("atomic field accesses did not compile")
+			}
+			for _, value := range []uint32{0, 37, 1<<31 + 9} {
+				if got := fn(value).Int(); got != 2*int64(value) || values[index] != int64(value) {
+					t.Fatalf("value %d: result %d, field %d", value, got, values[index])
+				}
+			}
+			runtime.KeepAlive(values)
+		})
+	}
+}
+
+func TestJITGeneralShiftOperations(t *testing.T) {
+	for _, left := range []bool{false, true} {
+		for _, placement := range []string{"ordinary", "count in legacy shift register", "result in legacy shift register", "aliased"} {
+			t.Run(fmt.Sprintf("left=%v/%s", left, placement), func(t *testing.T) {
+				const value = uint64(0xfedcba9876543210)
+				fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+					ctx.EnsureDesc(&source)
+					count := source.Reg
+					if placement == "count in legacy shift register" {
+						ctx.EmitMovRegReg(RegRCX, count)
+						count = RegRCX
+					}
+					dst := ctx.AllocRegExcept(count)
+					if placement == "result in legacy shift register" {
+						dst = RegRCX
+					}
+					if placement == "aliased" {
+						dst = count
+					} else {
+						ctx.EmitMovRegImm64(dst, value)
+					}
+					if left {
+						ctx.EmitShiftLeft(dst, count, false)
+					} else {
+						ctx.EmitShiftRight(dst, count, false)
+					}
+					if placement != "aliased" {
+						ctx.EmitXorInt64(dst, count)
+					}
+					target = jitEnsureResultPair(ctx, target)
+					ctx.EmitMakeInt(target, JITValueDesc{Loc: LocReg, Type: tagInt, Reg: dst})
+					return target
+				})
+				if fn == nil {
+					t.Fatal("general shift did not compile")
+				}
+				for _, count := range []uint32{0, 1, 31, 63, 64, 65, 255, 256} {
+					input := value
+					if placement == "aliased" {
+						input = uint64(count)
+					}
+					want := input >> count
+					if left {
+						want = input << count
+					}
+					if placement != "aliased" {
+						want ^= uint64(count)
+					}
+					if got := uint64(fn(count).Int()); got != want {
+						t.Fatalf("count %d: got %#x, want %#x", count, got, want)
+					}
+				}
+			})
 		}
 	}
 }

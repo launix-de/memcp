@@ -74,6 +74,7 @@ func jitArchEmitMovRegImm64(ctx *JITContext, dst Reg, imm uint64) {
 }
 
 func jitArchEmitLoad64(ctx *JITContext, dst, base Reg, disp int32) {
+	base, disp = riscvMemoryAddress(ctx, base, disp, 0)
 	emitRISCV64(ctx, riscvI(0x03, 3, dst, base, disp)) // LD
 }
 
@@ -82,23 +83,47 @@ func jitArchEmitStore64(ctx *JITContext, src, base Reg, disp int32) {
 }
 
 func jitRISCV64Store(ctx *JITContext, src, base Reg, disp int32, funct3 uint32) {
-	if disp < -2048 || disp > 2047 {
-		panic("jit: riscv64 store displacement is out of range")
+	// Both address temporaries can be explicit operands, for example when
+	// spilling a float's raw bits through X31. Keep the source and base intact
+	// without borrowing a live ABI argument or comparison snapshot.
+	if (disp < -2048 || disp > 2047) &&
+		(base == 29 && src == 31 || base == 31 && src == 29) {
+		riscvAdjustAddress(ctx, base, int64(disp))
+		jitRISCV64Store(ctx, src, base, 0, funct3)
+		riscvAdjustAddress(ctx, base, -int64(disp))
+		return
 	}
+	base, disp = riscvMemoryAddress(ctx, base, disp, src)
 	uimm := uint32(disp) & 0xfff
 	emitRISCV64(ctx, uimm>>5<<25|riscv64GPR(src)<<20|riscv64GPR(base)<<15|
 		funct3<<12|(uimm&0x1f)<<7|0x23)
 }
 
+func riscvAdjustAddress(ctx *JITContext, base Reg, offset int64) {
+	for offset != 0 {
+		step := offset
+		if step > 2047 {
+			step = 2047
+		} else if step < -2047 {
+			step = -2047
+		}
+		emitRISCV64(ctx, riscvI(0x13, 0, base, base, int32(step)))
+		offset -= step
+	}
+}
+
 func jitArchEmitLoad8(ctx *JITContext, dst, base Reg, disp int32) {
+	base, disp = riscvMemoryAddress(ctx, base, disp, 0)
 	emitRISCV64(ctx, riscvI(0x03, 4, dst, base, disp)) // LBU
 }
 
 func jitArchEmitLoad16(ctx *JITContext, dst, base Reg, disp int32) {
+	base, disp = riscvMemoryAddress(ctx, base, disp, 0)
 	emitRISCV64(ctx, riscvI(0x03, 5, dst, base, disp)) // LHU
 }
 
 func jitArchEmitLoad32(ctx *JITContext, dst, base Reg, disp int32) {
+	base, disp = riscvMemoryAddress(ctx, base, disp, 0)
 	emitRISCV64(ctx, riscvI(0x03, 6, dst, base, disp)) // LWU
 }
 
@@ -166,7 +191,11 @@ func jitArchEmitIntBinary(ctx *JITContext, op JITIntOp, width uint8, dst Reg, ri
 	case jitIntOperandMem:
 		ctx.beginRegisterInstruction(jitRegisterMask(dst, right.base), jitRegisterMask(dst, scratch))
 		defer ctx.endRegisterInstruction()
-		jitArchEmitLoad64(ctx, scratch, right.base, right.disp)
+		if width == 32 {
+			jitArchEmitLoad32(ctx, scratch, right.base, right.disp)
+		} else {
+			jitArchEmitLoad64(ctx, scratch, right.base, right.disp)
+		}
 		riscv64EmitIntBinaryReg(ctx, op, width, dst, scratch)
 	case jitIntOperandImm:
 		if riscv64IntBinaryImmEncodable(op, right.imm) {
@@ -204,8 +233,11 @@ func riscv64EmitIntBinaryReg(ctx *JITContext, op JITIntOp, width uint8, dst, src
 			jitArchEmitAddInt32(ctx, dst, src)
 		case JITIntSub:
 			jitArchEmitSubInt32(ctx, dst, src)
+		case JITIntMul, JITIntAnd, JITIntOr, JITIntXor:
+			riscv64EmitIntBinaryReg(ctx, op, 64, dst, src)
+			riscvZeroExtendWord(ctx, dst)
 		default:
-			panic("jit: riscv64 32-bit operation is not implemented")
+			panic("jit: invalid riscv64 integer operation")
 		}
 		return
 	}
@@ -254,4 +286,19 @@ func riscv64EmitIntBinaryImm(ctx *JITContext, op JITIntOp, width uint8, dst Reg,
 		riscvZeroExtendWord(ctx, dst)
 	}
 	return true
+}
+
+func riscvMemoryAddress(ctx *JITContext, base Reg, disp int32, preserve Reg) (Reg, int32) {
+	if disp >= -2048 && disp <= 2047 {
+		return base, disp
+	}
+	temp := Reg(29)
+	if base == temp || preserve == temp {
+		temp = 31
+	}
+	if base == temp || preserve == temp {
+		panic("jit: riscv64 address temporaries are occupied")
+	}
+	riscvAddress(ctx, temp, base, disp)
+	return temp, 0
 }

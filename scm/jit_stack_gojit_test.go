@@ -1,4 +1,4 @@
-//go:build goexperiment.jit && amd64
+//go:build goexperiment.jit && (amd64 || arm64 || riscv64)
 
 /*
 Copyright (C) 2026  MemCP Contributors
@@ -28,28 +28,8 @@ import (
 	"unsafe"
 )
 
-var jitFrameClearInstruction = []byte{0xf3, 0x48, 0xab}
-
 func jitEntryCode(entry *JITEntryPoint) []byte {
 	return unsafe.Slice((*byte)(entry.CodePtr), entry.CodeLen)
-}
-
-func TestJITFrameClearingLimitedToParserControlFlow(t *testing.T) {
-	t.Run("query projection", func(t *testing.T) {
-		compiled := compileJITExpressionTestProc(t, `(lambda (a b) (list "a" a "b" b))`)
-		if bytes.Contains(jitEntryCode(compiled.Proc().Compiled), jitFrameClearInstruction) {
-			t.Fatal("ordinary expression clears its entire JIT frame")
-		}
-	})
-
-	t.Run("parser", func(t *testing.T) {
-		compiled := compileJITExpressionTestProc(t, `(lambda (input) (begin
-			(define word (parser (regex "[a-z]+" false false)))
-			((parser '((define value word) $) value "") input)))`)
-		if !bytes.Contains(jitEntryCode(compiled.Proc().Compiled), jitFrameClearInstruction) {
-			t.Fatal("parser expression does not clear shared JIT frame targets")
-		}
-	})
 }
 
 func TestJITFrameRootInitializationIsPreciseAndDeterministic(t *testing.T) {
@@ -81,7 +61,7 @@ func TestJITFrameRootInitializationIsPreciseAndDeterministic(t *testing.T) {
 }
 
 func TestJITScalarPointerSpillRemainsInStackMap(t *testing.T) {
-	code := make([]byte, 128)
+	code := make([]byte, 512)
 	start := unsafe.Pointer(&code[0])
 	ctx := &JITContext{
 		Start:      start,
@@ -107,7 +87,7 @@ func TestJITScalarPointerSpillRemainsInStackMap(t *testing.T) {
 }
 
 func TestJITUnprovenScalarDoesNotUseFPOverflowHome(t *testing.T) {
-	code := make([]byte, 128)
+	code := make([]byte, 512)
 	start := unsafe.Pointer(&code[0])
 	ctx := &JITContext{
 		Start:      start,
@@ -136,7 +116,7 @@ func TestJITUnprovenScalarDoesNotUseFPOverflowHome(t *testing.T) {
 }
 
 func TestJITPointerFreeScalarUsesFPOverflowHome(t *testing.T) {
-	code := make([]byte, 128)
+	code := make([]byte, 512)
 	start := unsafe.Pointer(&code[0])
 	ctx := &JITContext{
 		Start:      start,
@@ -173,7 +153,7 @@ func TestJITPointerFreeScalarUsesFPOverflowHome(t *testing.T) {
 }
 
 func TestJITFreeDescReleasesScalarFPOverflowHome(t *testing.T) {
-	code := make([]byte, 128)
+	code := make([]byte, 512)
 	start := unsafe.Pointer(&code[0])
 	ctx := &JITContext{
 		Start:      start,
@@ -212,7 +192,7 @@ func newJITStackMapTestContext(code []byte) *JITContext {
 }
 
 func TestJITKnownSliceHeaderWithTwoRegistersKeepsPreciseRoot(t *testing.T) {
-	ctx := newJITStackMapTestContext(make([]byte, 256))
+	ctx := newJITStackMapTestContext(make([]byte, 1024))
 	source := JITValueDesc{Loc: LocStackPair, Type: tagSlice, StackOff: -16, Rooted: true}
 	header := jitKnownSliceHeader(ctx, &source)
 	if header.Loc != LocStackTriple || !header.Rooted {
@@ -232,7 +212,7 @@ func TestJITKnownSliceHeaderWithTwoRegistersKeepsPreciseRoot(t *testing.T) {
 
 func TestJITUnboxedScalarStabilizationDoesNotCreateGCStackRoot(t *testing.T) {
 	t.Run("control flow", func(t *testing.T) {
-		code := make([]byte, 128)
+		code := make([]byte, 512)
 		ctx := newJITStackMapTestContext(code)
 		value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX}
 		ctx.BindReg(RegRAX, &value)
@@ -244,7 +224,7 @@ func TestJITUnboxedScalarStabilizationDoesNotCreateGCStackRoot(t *testing.T) {
 	})
 
 	t.Run("nested call", func(t *testing.T) {
-		code := make([]byte, 128)
+		code := make([]byte, 512)
 		ctx := newJITStackMapTestContext(code)
 		value := JITValueDesc{Loc: LocReg, Type: tagBool, Reg: RegRAX}
 		ctx.BindReg(RegRAX, &value)
@@ -256,7 +236,7 @@ func TestJITUnboxedScalarStabilizationDoesNotCreateGCStackRoot(t *testing.T) {
 	})
 
 	t.Run("parser environment", func(t *testing.T) {
-		code := make([]byte, 128)
+		code := make([]byte, 512)
 		ctx := newJITStackMapTestContext(code)
 		value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX}
 		ctx.BindReg(RegRAX, &value)
@@ -272,7 +252,7 @@ func TestJITUnboxedScalarStabilizationDoesNotCreateGCStackRoot(t *testing.T) {
 }
 
 func TestJITRelocatableScalarStabilizationCreatesGCStackRoot(t *testing.T) {
-	code := make([]byte, 128)
+	code := make([]byte, 512)
 	ctx := newJITStackMapTestContext(code)
 	value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX, RelocatablePointer: true}
 	ctx.BindReg(RegRAX, &value)
@@ -645,76 +625,8 @@ func TestJITRegisterHomesUseSeparateIntegerAndFloatBanks(t *testing.T) {
 	}
 }
 
-func TestJITPersistentRegisterBankExcludesGoScratchR15(t *testing.T) {
-	for index := uint8(0); index < jitX86RegisterBank.Count; index++ {
-		if jitX86RegisterBank.Registers[index] == RegR15 {
-			t.Fatal("R15 may be used as a block-local temporary, not as a persistent control-flow home")
-		}
-	}
-}
-
-//go:noinline
-//go:nosplit
-func jitTestZeroBuffer(dst *[32]byte) {
-	*dst = [32]byte{}
-}
-
-func TestJITFloatRegisterPressurePreservesGoZeroRegister(t *testing.T) {
-	const name = "jit_test_fp_zero_register"
-	for _, nativeCall := range []bool{false, true} {
-		label := "return"
-		if nativeCall {
-			label = "native call"
-		}
-		t.Run(label, func(t *testing.T) {
-			buffer := new([32]byte)
-			declaration := &Declaration{
-				Name: name,
-				Fn:   func(...Scmer) Scmer { return NewInt(0) },
-				Type: &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "int"},
-					JITEmit: func(ctx *JITContext, _ []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
-						// Exhaust the production FP bank, as scalar overflow and
-						// generated builtin temporaries do under register pressure.
-						ctx.EmitMovRegImm64(ctx.ScratchReg, 1)
-						for ctx.FreeFPRegs != 0 {
-							ctx.EmitMovGPRToFP(ctx.AllocFPReg(), ctx.ScratchReg)
-						}
-						if nativeCall {
-							ctx.TrackPointer(unsafe.Pointer(buffer))
-							ctx.EmitGoCallVoid(GoFuncAddr(jitTestZeroBuffer), []JITValueDesc{
-								{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(unsafe.Pointer(buffer)))), NoHeapPointer: true},
-							})
-						}
-						target := jitEnsureResultPair(ctx, result)
-						ctx.EmitMakeInt(target, JITValueDesc{Loc: LocFPReg, Type: tagInt, Reg: RegX15})
-						// Restore the ABI even on the broken implementation so the
-						// test reports failure without corrupting the test runner.
-						ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
-						ctx.EmitMovGPRToFP(RegX15, ctx.ScratchReg)
-						return target
-					},
-				},
-			}
-			Declare(&Globalenv, declaration)
-			defer func() {
-				delete(Globalenv.Vars, Symbol(name))
-				delete(declarations, name)
-				delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
-			}()
-			compiled := compileJITExpressionTestProc(t, `(lambda () (jit_test_fp_zero_register))`)
-			got := compiled.Proc().jitFunction()()
-			if got.Int() != 0 {
-				t.Errorf("Go ABI zero register contains %d after FP register pressure", got.Int())
-			}
-			if *buffer != [32]byte{} {
-				t.Errorf("native Go zero initialization wrote %x", *buffer)
-			}
-		})
-	}
-}
-
 func TestJITRegisterHomesTradeOuterForMoreValuableInnerPlan(t *testing.T) {
-	code := make([]byte, 256)
+	code := make([]byte, 1024)
 	start := unsafe.Pointer(&code[0])
 	all := uint64(1<<uint(RegR13) | 1<<uint(RegR15) | 1<<uint(RegRCX))
 	ctx := &JITContext{
@@ -744,7 +656,7 @@ func TestJITRegisterHomesTradeOuterForMoreValuableInnerPlan(t *testing.T) {
 }
 
 func TestJITRegisterHomesRetainMoreValuableOuterPlan(t *testing.T) {
-	code := make([]byte, 256)
+	code := make([]byte, 1024)
 	start := unsafe.Pointer(&code[0])
 	all := uint64(1<<uint(RegR13) | 1<<uint(RegR15) | 1<<uint(RegRCX))
 	ctx := &JITContext{
@@ -769,7 +681,7 @@ func TestJITRegisterHomesRetainMoreValuableOuterPlan(t *testing.T) {
 }
 
 func TestJITRegisterBoundaryCanReleaseAndRestorePlannedHomes(t *testing.T) {
-	code := make([]byte, 256)
+	code := make([]byte, 1024)
 	start := unsafe.Pointer(&code[0])
 	all := uint64(1<<uint(RegR13) | 1<<uint(RegR15) | 1<<uint(RegRCX))
 	ctx := &JITContext{

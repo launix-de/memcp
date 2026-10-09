@@ -25,12 +25,12 @@ import (
 
 // The generated Declaration.JITEmit callbacks still reference emitter methods
 // in this file. Architecture-neutral entry points dispatch to build-selected
-// implementations; ARM64 and RISC-V64 reject unported lowering paths and fall
-// back to the interpreter before reaching the remaining x86 encoders.
+// implementations. ARM64 and RISC-V64 implement the shared lowering through
+// fixed-width native encoders; amd64 retains its compact byte encodings.
 
 var jitCodeOverflowPanic = &struct{}{}
 
-// jitX86RegisterBank maps architecture-independent register colors to amd64.
+// jitNativeRegisterBank maps architecture-independent register colors to backend registers.
 // Registers with fixed roles in shifts, division and the Go ABI are deliberately
 // last so persistent loop values do not force avoidable shuffles.
 //
@@ -46,31 +46,13 @@ var jitCodeOverflowPanic = &struct{}{}
 // collectLiveRegsForCall. A call emitter must not duplicate a weaker owner-only
 // scan, because protected homes can be live without a direct owner in the
 // emitter's current bookkeeping snapshot.
-var jitX86RegisterBank = JITRegisterBank{
-	Registers: [16]Reg{
-		RegR13, RegR10, RegR9, RegR8, RegRDI, RegRSI,
-		RegRCX, RegRDX, RegRAX, RegRBX,
-	},
-	Count:            10,
-	TemporaryReserve: 7,
-}
-
-// Go ABIInternal requires X15 to contain zero at calls and returns. Keep it
-// out of both persistent FP homes and temporary/overflow allocation: native
-// Go code uses it to initialize stack frames and zero heap objects.
-var jitX86FPRegisterBank = JITRegisterBank{
-	Registers: [16]Reg{
-		RegX2, RegX3, RegX4, RegX5, RegX6, RegX7, RegX8,
-		RegX9, RegX10, RegX11, RegX12, RegX13, RegX14,
-	},
-	Count:            13,
-	TemporaryReserve: 2,
-}
+var jitNativeRegisterBank = jitArchRegisterBank()
+var jitNativeFPRegisterBank = jitArchFPRegisterBank()
 
 // jitCompileProcToExec compiles a Proc body directly into writable executable memory.
 // Returns code length, GC roots, direct-entry dependencies, overflow status,
 // hidden arguments, Go-callback metadata, and lowering coverage.
-func jitCompileProcToExecAMD64(proc *Proc, buf *execBuf, recursiveLambdas bool) (int, []unsafe.Pointer, []*JITEntryPoint, bool, []JITHiddenArg, bool, JITCoverage) {
+func jitCompileProcNative(proc *Proc, buf *execBuf, recursiveLambdas bool) (int, []unsafe.Pointer, []*JITEntryPoint, bool, []JITHiddenArg, bool, JITCoverage) {
 	body := proc.Body
 	if body.GetTag() == tagSourceInfo {
 		si := body.SourceInfo()
@@ -93,10 +75,7 @@ func jitCompileProcToExecAMD64(proc *Proc, buf *execBuf, recursiveLambdas bool) 
 // goroutine ptr "g"). Shared with tests that need a JITContext representative
 // of a real compile's register state.
 func jitDefaultFreeGPRegs() uint64 {
-	return uint64((1 << uint(RegRCX)) | (1 << uint(RegRDX)) |
-		(1 << uint(RegRSI)) | (1 << uint(RegRDI)) |
-		(1 << uint(RegR8)) | (1 << uint(RegR9)) | (1 << uint(RegR10)) |
-		(1 << uint(RegR13)) | (1 << uint(RegR15)))
+	return jitArchFreeGPRegs()
 }
 
 // jitCompileExprBodyToExec compiles a Scheme expression body into a writable
@@ -122,8 +101,8 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 
 	freeRegs := jitDefaultFreeGPRegs()
 	freeFPRegs := uint64(0)
-	for index := uint8(0); index < jitX86FPRegisterBank.Count; index++ {
-		freeFPRegs |= uint64(1) << uint(jitX86FPRegisterBank.Registers[index])
+	for index := uint8(0); index < jitNativeFPRegisterBank.Count; index++ {
+		freeFPRegs |= uint64(1) << uint(jitNativeFPRegisterBank.Registers[index])
 	}
 	inputArgCount := -1
 	if proc != nil && proc.Params.GetTag() == tagSlice {
@@ -141,15 +120,15 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		AllRegs:          freeRegs,
 		FreeFPRegs:       freeFPRegs,
 		AllFPRegs:        freeFPRegs,
-		RegisterBank:     jitX86RegisterBank,
-		FPRegisterBank:   jitX86FPRegisterBank,
+		RegisterBank:     jitNativeRegisterBank,
+		FPRegisterBank:   jitNativeFPRegisterBank,
 		SliceBase:        RegR12,
 		StackReg:         RegRSP,
 		FrameReg:         RegRBP,
 		ScratchReg:       RegR11,
 		ResultPtrReg:     RegRAX,
 		ResultAuxReg:     RegRBX,
-		LastIntReg:       RegR15,
+		LastIntReg:       jitLastGPReg,
 		HasFrame:         true,
 		InputArgCount:    inputArgCount,
 		LocalSlotCount:   numVars,
@@ -181,22 +160,30 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		stackRetryLabel = ctx.ReserveLabel()
 		stackGrowLabel = ctx.ReserveLabel()
 		ctx.MarkLabel(stackRetryLabel)
-		ctx.emitMovRegReg(RegR11, RegRSP)
-		ctx.emitBytes(0x49, 0x81, 0xEB) // sub r11, frameSize-StackSmall
-		ctx.emitU32(0)
-		stackCheckFrameFixup = unsafe.Add(ctx.Ptr, -4)
-		ctx.EmitJcc(CondUnsignedBelow, stackGrowLabel)
-		// cmp r11, [r14+stackguard0]
-		ctx.emitBytes(0x4D, 0x3B, 0x9E)
-		ctx.emitU32(uint32(guardOffset))
-		ctx.EmitJcc(CondUnsignedBelowOrEqual, stackGrowLabel)
+		if jitPortableBackend {
+			stackCheckFrameFixup = jitEmitStackCheck(ctx, int32(guardOffset), stackGrowLabel)
+		} else {
+			ctx.emitMovRegReg(RegR11, RegRSP)
+			ctx.emitBytes(0x49, 0x81, 0xEB) // sub r11, frameSize-StackSmall
+			ctx.emitU32(0)
+			stackCheckFrameFixup = unsafe.Add(ctx.Ptr, -4)
+			ctx.EmitJcc(CondUnsignedBelow, stackGrowLabel)
+			// cmp r11, [r14+stackguard0]
+			ctx.emitBytes(0x4D, 0x3B, 0x9E)
+			ctx.emitU32(uint32(guardOffset))
+			ctx.EmitJcc(CondUnsignedBelowOrEqual, stackGrowLabel)
+		}
 	}
 
 	// Unified frame: push rbp; mov rbp, rsp; sub rsp, <fixup>
 	// All frame access via [RSP + offset]. MaxBPOffset patched at the end.
 	// Epilog: leave; ret.
-	ctx.emitByte(0x55)                    // push rbp
-	ctx.emitBytes(0x48, 0x89, 0xE5)       // mov rbp, rsp
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeProlog, 0, 0, 0, 0)
+	} else {
+		ctx.emitByte(0x55)
+		ctx.emitBytes(0x48, 0x89, 0xE5)
+	}
 	frameFixup := ctx.EmitSubRSP32Fixup() // sub rsp, <patched>
 	var frameInitLabel, frameBodyLabel JITLabel
 	if !ctx.StackPhiTargets {
@@ -218,12 +205,16 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	// clearing their entire frame would only add work to every invocation.
 	var frameWordsFixup unsafe.Pointer
 	if ctx.StackPhiTargets {
-		ctx.emitMovRegReg(RegRDI, RegRSP)
-		ctx.emitBytes(0x31, 0xC0) // xor eax, eax
-		ctx.emitByte(0xB9)        // mov ecx, <frame words>
-		frameWordsFixup = ctx.Ptr
-		ctx.emitU32(0)
-		ctx.emitBytes(0xF3, 0x48, 0xAB) // rep stosq
+		if jitPortableBackend {
+			frameWordsFixup = jitEmitClearFrame(ctx)
+		} else {
+			ctx.emitMovRegReg(RegRDI, RegRSP)
+			ctx.emitBytes(0x31, 0xC0) // xor eax, eax
+			ctx.emitByte(0xB9)        // mov ecx, <frame words>
+			frameWordsFixup = ctx.Ptr
+			ctx.emitU32(0)
+			ctx.emitBytes(0xF3, 0x48, 0xAB) // rep stosq
+		}
 	}
 	useInputFrame := proc != nil && proc.NumberedOnly && numVars == inputArgCount && !ctx.HasSelfLoop
 	// Allocate local vars via AllocStack.
@@ -386,7 +377,11 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		// Account for the frame record and the deepest temporary call area below
 		// the fixed frame. Like Go's outgoing-argument area, DynamicSP is part of
 		// the maximum stack demand even though it is reserved only at call sites.
-		checkedFrame := frameSize + ctx.MaxDynamicSP + 8 - int32(stackSmall)
+		recordBytes := int32(8)
+		if jitPortableBackend {
+			recordBytes = 16
+		}
+		checkedFrame := frameSize + ctx.MaxDynamicSP + recordBytes - int32(stackSmall)
 		if checkedFrame < 0 {
 			checkedFrame = 0
 		}
@@ -396,13 +391,17 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	if buf.reservation != nil {
 		arenaOffset = buf.reservation.offset
 	}
-	ctx.emitByte(0xC9) // leave
-	ctx.emitByte(0xC3) // ret
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeEpilog, 0, 0, 0, 0)
+	} else {
+		ctx.emitByte(0xC9)
+		ctx.emitByte(0xC3)
+	}
 	if !ctx.StackPhiTargets {
 		ctx.MarkLabel(frameInitLabel)
 		roots := jitSortedFrameRoots(ctx.FrameRoots)
 		if len(roots) != 0 {
-			ctx.emitBytes(0x45, 0x31, 0xDB) // xor r11d, r11d
+			ctx.emitXorReg(RegR11)
 			for _, root := range roots {
 				base := RegRSP
 				if root.base == jitStackRootFrameBP {
@@ -415,20 +414,24 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	}
 	if hasStackCheck {
 		ctx.MarkLabel(stackGrowLabel)
-		// Match Go's regabi prolog: public slice arguments use their caller-owned
-		// spill homes, while runtime.morestack preserves DX as closure context.
-		ctx.EmitStoreRegMem(RegRAX, RegRSP, 8)
-		ctx.EmitStoreRegMem(RegRBX, RegRSP, 16)
-		ctx.EmitStoreRegMem(RegRCX, RegRSP, 24)
-		ctx.EmitMovRegImm64(RegR11, uint64(moreStackPC))
-		ctx.emitBytes(0x41, 0xFF, 0xD3) // call r11
-		ctx.Safepoints = append(ctx.Safepoints, jitSafepoint{
-			pcOffset: int32(uintptr(ctx.Ptr) - uintptr(ctx.Start)),
-			entry:    true,
-		})
-		ctx.EmitMovRegMem(RegRAX, RegRSP, 8)
-		ctx.EmitMovRegMem(RegRBX, RegRSP, 16)
-		ctx.EmitMovRegMem(RegRCX, RegRSP, 24)
+		if jitPortableBackend {
+			jitEmitStackGrow(ctx, moreStackPC)
+		} else {
+			// Match Go's regabi prolog: public slice arguments use their caller-owned
+			// spill homes, while runtime.morestack preserves DX as closure context.
+			ctx.EmitStoreRegMem(RegRAX, RegRSP, 8)
+			ctx.EmitStoreRegMem(RegRBX, RegRSP, 16)
+			ctx.EmitStoreRegMem(RegRCX, RegRSP, 24)
+			ctx.EmitMovRegImm64(RegR11, uint64(moreStackPC))
+			ctx.emitBytes(0x41, 0xFF, 0xD3) // call r11
+			ctx.Safepoints = append(ctx.Safepoints, jitSafepoint{
+				pcOffset: int32(uintptr(ctx.Ptr) - uintptr(ctx.Start)),
+				entry:    true,
+			})
+			ctx.EmitMovRegMem(RegRAX, RegRSP, 8)
+			ctx.EmitMovRegMem(RegRBX, RegRSP, 16)
+			ctx.EmitMovRegMem(RegRCX, RegRSP, 24)
+		}
 		ctx.EmitJmp(stackRetryLabel)
 	}
 	if jitTestPostEmitHook != nil {
@@ -446,6 +449,11 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 // EmitReturnInt emits: MOV RAX, &scmerIntSentinel; MOV RBX, value; RET
 // Constructs NewInt(value) in the return registers.
 func (ctx *JITContext) EmitReturnInt(src JITValueDesc) {
+	if jitPortableBackend {
+		ctx.EmitMakeInt(JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX}, src)
+		jitArchEmitNative(ctx, jitNativeReturn, 0, 0, 0, 0)
+		return
+	}
 	// MOV RAX, imm64 (address of scmerIntSentinel)
 	ctx.emitBytes(0x48, 0xB8)
 	ctx.emitU64(uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
@@ -468,6 +476,11 @@ func (ctx *JITContext) EmitReturnInt(src JITValueDesc) {
 // EmitReturnFloat emits: MOV RAX, &scmerFloatSentinel; MOVQ XMM→RBX; RET
 // Constructs NewFloat(value) in the return registers.
 func (ctx *JITContext) EmitReturnFloat(src JITValueDesc) {
+	if jitPortableBackend {
+		ctx.EmitMakeFloat(JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX}, src)
+		jitArchEmitNative(ctx, jitNativeReturn, 0, 0, 0, 0)
+		return
+	}
 	// MOV RAX, imm64 (address of scmerFloatSentinel)
 	ctx.emitBytes(0x48, 0xB8)
 	ctx.emitU64(uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
@@ -487,6 +500,11 @@ func (ctx *JITContext) EmitReturnFloat(src JITValueDesc) {
 
 // EmitReturnNil emits: XOR EAX,EAX; XOR EBX,EBX; RET
 func (ctx *JITContext) EmitReturnNil() {
+	if jitPortableBackend {
+		ctx.EmitMakeNil(JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX})
+		jitArchEmitNative(ctx, jitNativeReturn, 0, 0, 0, 0)
+		return
+	}
 	ctx.emitBytes(
 		0x31, 0xC0, // XOR EAX, EAX
 		0x31, 0xDB, // XOR EBX, EBX
@@ -496,6 +514,11 @@ func (ctx *JITContext) EmitReturnNil() {
 
 // EmitReturnBool emits: XOR EAX,EAX; MOV RBX, makeAux(tagBool, 0/1); RET
 func (ctx *JITContext) EmitReturnBool(src JITValueDesc) {
+	if jitPortableBackend {
+		ctx.EmitMakeBool(JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX}, src)
+		jitArchEmitNative(ctx, jitNativeReturn, 0, 0, 0, 0)
+		return
+	}
 	ctx.emitBytes(0x31, 0xC0) // XOR EAX, EAX (ptr = nil for bool)
 	switch src.Loc {
 	case LocImm:
@@ -607,6 +630,10 @@ func (ctx *JITContext) EmitMakeNil(dst JITValueDesc) {
 
 // emitAndRegImm32 emits AND r64, sign-extended imm32
 func (ctx *JITContext) emitAndRegImm32(dst Reg, imm int32) {
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeAndImm, dst, 0, 0, int64(imm))
+		return
+	}
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x01
@@ -663,6 +690,12 @@ func (ctx *JITContext) EmitDivFloat64(dst, src Reg) {
 func (ctx *JITContext) EmitCmpFloat64(left, right Reg) {
 	ctx.beginRegisterInstruction(jitRegisterMask(left, right), jitRegisterMask(RegX0, RegX1))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		ctx.emitMovqGprToXmm(RegX0, left)
+		ctx.emitMovqGprToXmm(RegX1, right)
+		ctx.emitUcomisd(RegX0, RegX1)
+		return
+	}
 	ctx.emitMovqGprToXmm(RegX0, left)
 	if left == right {
 		ctx.emitBytes(0x66, 0x0F, 0x2E, 0xC0) // UCOMISD XMM0, XMM0
@@ -764,6 +797,10 @@ func (ctx *JITContext) EmitCmpFP64Setcc(dst, left, right Reg, cc JITCondition) {
 }
 
 func (ctx *JITContext) emitUcomisd(left, right Reg) {
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeFCompare, left, right, 0, 0)
+		return
+	}
 	l := left - 16
 	r := right - 16
 	rex := byte(0)
@@ -810,6 +847,10 @@ func (ctx *JITContext) EmitLoadFPRegMem(dst, base Reg, disp int32) {
 func (ctx *JITContext) EmitStoreFPRegMem(src, base Reg, disp int32) {
 	ctx.beginRegisterInstruction(jitRegisterMask(src, base), 0)
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeFStore, src, base, 0, int64(disp))
+		return
+	}
 	x := src - 16
 	rex := byte(0)
 	if x >= 8 || base >= 8 {
@@ -851,6 +892,10 @@ func (ctx *JITContext) EmitStoreFPRegMem(src, base Reg, disp int32) {
 func (ctx *JITContext) EmitCvtInt64ToFloat64(xmmDst, gprSrc Reg) {
 	ctx.beginRegisterInstruction(jitRegisterMask(gprSrc), jitRegisterMask(xmmDst, gprSrc))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeIntToFloat, xmmDst, gprSrc, 0, 0)
+		return
+	}
 	xmm := xmmDst - 16 // convert to XMM index (unsigned underflow is fine)
 	rex := byte(0x48)
 	if xmm >= 8 {
@@ -874,6 +919,10 @@ func (ctx *JITContext) EmitCvtInt64ToFloat64(xmmDst, gprSrc Reg) {
 func (ctx *JITContext) EmitCvtFloatBitsToInt64(dst, gprSrc Reg) {
 	ctx.beginRegisterInstruction(jitRegisterMask(gprSrc), jitRegisterMask(dst, RegX0))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeFloatToInt, dst, gprSrc, 0, 0)
+		return
+	}
 	ctx.emitMovqGprToXmm(RegX0, gprSrc)
 	xmm := RegX0 - 16
 	rex := byte(0x48)
@@ -891,6 +940,10 @@ func (ctx *JITContext) EmitCvtFloatBitsToInt64(dst, gprSrc Reg) {
 func (ctx *JITContext) EmitXorpdReg(xmm Reg) {
 	ctx.beginRegisterInstruction(0, jitRegisterMask(xmm))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeFZero, xmm, 0, 0, 0)
+		return
+	}
 	r := xmm - 16
 	modrm := byte(0xC0) | (byte(r&7) << 3) | byte(r&7)
 	if r >= 8 {
@@ -947,6 +1000,11 @@ func (ctx *JITContext) EmitCmpInt64(a, b Reg) {
 
 // EmitJump emits a conditional branch through the x86 rel32 encoding.
 func (ctx *JITContext) EmitJump(cc JITCondition, labelID JITLabel) {
+	if jitPortableBackend {
+		ctx.branchSerial++
+		jitArchEmitBranch(ctx, cc, labelID, true)
+		return
+	}
 	ctx.branchSerial++
 	ctx.emitBytes(0x0F, 0x80|x86ConditionCode(cc)) // Jcc rel32
 	ctx.AddFixup(labelID, 4, true)
@@ -960,6 +1018,11 @@ func (ctx *JITContext) EmitJcc(cc JITCondition, labelID JITLabel) {
 
 // EmitJmp emits an unconditional JMP rel32.
 func (ctx *JITContext) EmitJmp(labelID JITLabel) {
+	if jitPortableBackend {
+		ctx.branchSerial++
+		jitArchEmitBranch(ctx, 0, labelID, false)
+		return
+	}
 	ctx.branchSerial++
 	ctx.emitByte(0xE9) // JMP rel32
 	ctx.AddFixup(labelID, 4, true)
@@ -968,6 +1031,13 @@ func (ctx *JITContext) EmitJmp(labelID JITLabel) {
 
 // EmitJmpToPos emits an unconditional JMP rel32 to an already-known code position.
 func (ctx *JITContext) EmitJmpToPos(targetPos int32) {
+	if jitPortableBackend {
+		ctx.FlushRegisterMoves()
+		pos := ctx.Ptr
+		jitArchEmitBranchPlaceholder(ctx)
+		jitArchPatchBranch(pos, targetPos-int32(uintptr(pos)-uintptr(ctx.Start)))
+		return
+	}
 	curPos := int32(uintptr(ctx.Ptr)-uintptr(ctx.Start)) + 5
 	off := targetPos - curPos
 	ctx.emitByte(0xE9) // JMP rel32
@@ -979,6 +1049,14 @@ func (ctx *JITContext) EmitJmpToPos(targetPos int32) {
 // inside an arena. Parser continuations use this instead of a native call
 // stack, so recursive grammars retain one runtime-visible JIT frame.
 func (ctx *JITContext) EmitJumpTable(index Reg, labels []JITLabel, invalid JITLabel) {
+	if jitPortableBackend {
+		for indexValue, label := range labels {
+			ctx.EmitCmpRegImm32(index, int32(indexValue))
+			ctx.EmitJcc(CcE, label)
+		}
+		ctx.EmitJmp(invalid)
+		return
+	}
 	if len(labels) == 0 {
 		ctx.EmitJmp(invalid)
 		return
@@ -1042,6 +1120,21 @@ func x86ConditionCode(cc JITCondition) byte {
 // emitRegMemOp emits <opcode> dst, [base + disp] (REX.W r64, r/m64 with ModRM)
 // opcode: 0x8B = MOV (load), 0x8D = LEA (address computation)
 func (ctx *JITContext) emitRegMemOp(opcode byte, dst, base Reg, disp int32) {
+	if jitPortableBackend {
+		switch opcode {
+		case 0x8B:
+			jitArchEmitLoad64(ctx, dst, base, disp)
+		case 0x8D:
+			jitArchEmitNative(ctx, jitNativeAddress, dst, base, 0, int64(disp))
+		case 0x0B:
+			jitArchEmitLoad64(ctx, jitNativeTemp, base, disp)
+			jitArchEmitOrInt64(ctx, dst, jitNativeTemp)
+		default:
+			panic("jit: unsupported portable memory operation")
+		}
+		return
+	}
+
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x04 // REX.R
@@ -1090,6 +1183,10 @@ func (ctx *JITContext) EmitOrRegMem(dst, base Reg, disp int32) {
 func (ctx *JITContext) EmitLeaRegMem(dst, base Reg, disp int32) {
 	ctx.beginRegisterInstruction(jitRegisterMask(base), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeAddress, dst, base, 0, int64(disp))
+		return
+	}
 	ctx.emitRegMemOp(0x8D, dst, base, disp)
 }
 
@@ -1099,6 +1196,10 @@ func (ctx *JITContext) EmitLeaRegMem(dst, base Reg, disp int32) {
 func (ctx *JITContext) EmitLeaRegBaseIndex(dst, base, index Reg, scale uint8) {
 	ctx.beginRegisterInstruction(jitRegisterMask(base, index), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeIndexAddress, dst, base, index, int64(scale))
+		return
+	}
 	var scaleBits byte
 	switch scale {
 	case 1:
@@ -1133,6 +1234,10 @@ func (ctx *JITContext) EmitLeaRegBaseIndex(dst, base, index Reg, scale uint8) {
 func (ctx *JITContext) EmitMovRegBaseIndex(dst, base, index Reg, scale uint8, width int32) {
 	ctx.beginRegisterInstruction(jitRegisterMask(base, index), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeIndexLoad, dst, base, index, int64(scale)|int64(width)<<8)
+		return
+	}
 	var scaleBits byte
 	switch scale {
 	case 1:
@@ -1214,6 +1319,10 @@ func (ctx *JITContext) EmitMovRegMem16(dst Reg, addr uintptr) {
 
 // emitRegMemOp32 emits a 32-bit register-memory operation (no REX.W, for zero-extending loads).
 func (ctx *JITContext) emitRegMemOp32(opcode byte, dst, base Reg, disp int32) {
+	if jitPortableBackend {
+		jitArchEmitLoad32(ctx, dst, base, disp)
+		return
+	}
 	rex := byte(0x40)
 	needRex := false
 	if dst >= 8 {
@@ -1278,6 +1387,16 @@ func (ctx *JITContext) emitRegMemOp32(opcode byte, dst, base Reg, disp int32) {
 
 // emitRegMemOp2 emits a 2-byte opcode register-memory operation with REX.W (for MOVZX etc.).
 func (ctx *JITContext) emitRegMemOp2(op1, op2 byte, dst, base Reg, disp int32) {
+	if jitPortableBackend {
+		if op2 == 0xB6 {
+			jitArchEmitLoad8(ctx, dst, base, disp)
+		} else if op2 == 0xB7 {
+			jitArchEmitLoad16(ctx, dst, base, disp)
+		} else {
+			panic("jit: unsupported portable memory opcode")
+		}
+		return
+	}
 	rex := byte(0x48) // REX.W
 	if dst >= 8 {
 		rex |= 0x04 // REX.R
@@ -1317,6 +1436,10 @@ func (ctx *JITContext) emitRegMemOp2(op1, op2 byte, dst, base Reg, disp int32) {
 
 // emitSseOp emits F2 0F <op> xmmDst, xmmSrc (scalar double operation)
 func (ctx *JITContext) emitSseOp(op byte, dst, src Reg) {
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeFloatOp, dst, src, 0, int64(op))
+		return
+	}
 	d := dst - 16 // XMM index
 	s := src - 16
 	rex := byte(0)
@@ -1339,6 +1462,10 @@ func (ctx *JITContext) emitSseOp(op byte, dst, src Reg) {
 
 // emitMovqXmmToGpr emits MOVQ gprDst, xmmSrc (66 REX.W 0F 7E /r)
 func (ctx *JITContext) emitMovqXmmToGpr(gpr, xmm Reg) {
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeFToGPR, gpr, xmm, 0, 0)
+		return
+	}
 	x := xmm - 16
 	rex := byte(0x48) // REX.W
 	if x >= 8 {
@@ -1353,6 +1480,10 @@ func (ctx *JITContext) emitMovqXmmToGpr(gpr, xmm Reg) {
 
 // emitMovqGprToXmm emits MOVQ xmmDst, gprSrc (66 REX.W 0F 6E /r)
 func (ctx *JITContext) emitMovqGprToXmm(xmm, gpr Reg) {
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeGPRToF, xmm, gpr, 0, 0)
+		return
+	}
 	x := xmm - 16
 	rex := byte(0x48)
 	if x >= 8 {
@@ -1367,6 +1498,10 @@ func (ctx *JITContext) emitMovqGprToXmm(xmm, gpr Reg) {
 
 // emitMovqMemToXmm emits MOVQ xmmDst, [base + disp32] (F3 0F 7E /r m64)
 func (ctx *JITContext) emitMovqMemToXmm(xmm, base Reg, disp int32) {
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeFLoad, xmm, base, 0, int64(disp))
+		return
+	}
 	x := xmm - 16
 	rex := byte(0)
 	if x >= 8 || base >= 8 {
@@ -1411,6 +1546,10 @@ func (ctx *JITContext) emitMovqMemToXmm(xmm, base Reg, disp int32) {
 func (ctx *JITContext) EmitCmpRegImm32(dst Reg, imm int32) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst), 0)
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeCmpImm, dst, 0, 0, int64(imm))
+		return
+	}
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x01 // REX.B
@@ -1425,6 +1564,10 @@ func (ctx *JITContext) EmitCmpRegImm32(dst Reg, imm int32) {
 func (ctx *JITContext) EmitCmpRegImm8(dst Reg, imm uint8) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst), 0)
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeCmpByte, dst, 0, 0, int64(imm))
+		return
+	}
 	rex := byte(0x40) // force low-byte register encoding (incl. SIL/DIL/BPL/SPL)
 	if dst >= 8 {
 		rex |= 0x01 // REX.B
@@ -1437,6 +1580,10 @@ func (ctx *JITContext) EmitCmpRegImm8(dst Reg, imm uint8) {
 func (ctx *JITContext) EmitAddRegImm32(dst Reg, imm int32) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeAddImm, dst, 0, 0, int64(imm))
+		return
+	}
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x01 // REX.B
@@ -1451,6 +1598,10 @@ func (ctx *JITContext) EmitAddRegImm32(dst Reg, imm int32) {
 func (ctx *JITContext) EmitAddRegImm32Low(dst Reg, imm int32) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeAddImm32, dst, 0, 0, int64(imm))
+		return
+	}
 	rex := byte(0x40)
 	if dst >= 8 {
 		rex |= 0x01
@@ -1463,6 +1614,10 @@ func (ctx *JITContext) EmitAddRegImm32Low(dst Reg, imm int32) {
 func (ctx *JITContext) EmitSubRegImm32(dst Reg, imm int32) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeSubImm, dst, 0, 0, int64(imm))
+		return
+	}
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x01 // REX.B
@@ -1476,6 +1631,10 @@ func (ctx *JITContext) EmitSubRegImm32(dst Reg, imm int32) {
 func (ctx *JITContext) EmitSubRegImm32Low(dst Reg, imm int32) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeSubImm32, dst, 0, 0, int64(imm))
+		return
+	}
 	rex := byte(0x40)
 	if dst >= 8 {
 		rex |= 0x01
@@ -1488,6 +1647,10 @@ func (ctx *JITContext) EmitSubRegImm32Low(dst Reg, imm int32) {
 func (ctx *JITContext) EmitOrRegImm32(dst Reg, imm int32) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeOrImm, dst, 0, 0, int64(imm))
+		return
+	}
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x01 // REX.B
@@ -1501,6 +1664,10 @@ func (ctx *JITContext) EmitOrRegImm32(dst Reg, imm int32) {
 func (ctx *JITContext) EmitImulRegImm32(dst Reg, imm int32) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeMulImm, dst, 0, 0, int64(imm))
+		return
+	}
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x05 // REX.R | REX.B (reg and r/m are both dst)
@@ -1512,6 +1679,10 @@ func (ctx *JITContext) EmitImulRegImm32(dst Reg, imm int32) {
 
 // EmitIdivRegImm emits signed integer division of dst by imm and stores the quotient in dst.
 func (ctx *JITContext) EmitIdivRegImm(dst Reg, imm int64) {
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeDivImm, dst, 0, 0, imm)
+		return
+	}
 	if imm == 0 {
 		panic("jit: divide by zero in EmitIdivRegImm")
 	}
@@ -1544,6 +1715,10 @@ func (ctx *JITContext) EmitIdivRegImm(dst Reg, imm int64) {
 
 // EmitIremRegImm emits signed integer remainder of dst by imm and stores the remainder in dst.
 func (ctx *JITContext) EmitIremRegImm(dst Reg, imm int64) {
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeRemImm, dst, 0, 0, imm)
+		return
+	}
 	if imm == 0 {
 		panic("jit: modulo by zero in EmitIremRegImm")
 	}
@@ -1578,6 +1753,10 @@ func (ctx *JITContext) EmitIremRegImm(dst Reg, imm int64) {
 func (ctx *JITContext) EmitSetcc(dst Reg, cc JITCondition) {
 	ctx.beginRegisterInstruction(0, jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeSetCondition, dst, 0, 0, int64(cc))
+		return
+	}
 	opcode := x86ConditionCode(cc)
 	dstEnc := byte(dst & 7)
 	// SETcc r/m8: 0F 9x /0
@@ -1605,6 +1784,10 @@ func (ctx *JITContext) EmitSetcc(dst Reg, cc JITCondition) {
 func (ctx *JITContext) EmitShlRegImm8(dst Reg, imm uint8) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeShiftLeft, dst, 0, 0, int64(imm))
+		return
+	}
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x01 // REX.B
@@ -1617,6 +1800,10 @@ func (ctx *JITContext) EmitShlRegImm8(dst Reg, imm uint8) {
 func (ctx *JITContext) EmitShrRegImm8(dst Reg, imm uint8) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeShiftRight, dst, 0, 0, int64(imm))
+		return
+	}
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x01 // REX.B
@@ -1629,6 +1816,10 @@ func (ctx *JITContext) EmitShrRegImm8(dst Reg, imm uint8) {
 func (ctx *JITContext) EmitSarRegImm8(dst Reg, imm uint8) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeShiftSigned, dst, 0, 0, int64(imm))
+		return
+	}
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x01 // REX.B
@@ -1641,6 +1832,10 @@ func (ctx *JITContext) EmitSarRegImm8(dst Reg, imm uint8) {
 func (ctx *JITContext) EmitShlRegCl(dst Reg) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst, RegRCX), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeShiftLeftReg, dst, RegRCX, 0, 0)
+		return
+	}
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x01 // REX.B
@@ -1653,6 +1848,10 @@ func (ctx *JITContext) EmitShlRegCl(dst Reg) {
 func (ctx *JITContext) EmitShrRegCl(dst Reg) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst, RegRCX), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeShiftRightReg, dst, RegRCX, 0, 0)
+		return
+	}
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x01 // REX.B
@@ -1687,6 +1886,10 @@ func (ctx *JITContext) EmitShrRegClGo64(dst Reg) {
 func (ctx *JITContext) EmitAndRegImm32(dst Reg, imm int32) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeAndImm, dst, 0, 0, int64(imm))
+		return
+	}
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x01 // REX.B
@@ -2055,6 +2258,25 @@ func (ctx *JITContext) EmitMovToReg(dst Reg, src JITValueDesc) {
 //	if ptr == &scmerFloatSentinel → tagFloat (3)
 //	else → aux & 0xFF
 func (ctx *JITContext) EmitGetTagRegs(dst, ptrReg, auxReg Reg) {
+	if jitPortableBackend {
+		isInt, isFloat, done := ctx.ReserveLabel(), ctx.ReserveLabel(), ctx.ReserveLabel()
+		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
+		ctx.EmitCmpInt64(ptrReg, RegR11)
+		ctx.EmitJcc(CcE, isInt)
+		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
+		ctx.EmitCmpInt64(ptrReg, RegR11)
+		ctx.EmitJcc(CcE, isFloat)
+		ctx.EmitMovRegReg(dst, auxReg)
+		ctx.EmitAndRegImm32(dst, 255)
+		ctx.EmitJmp(done)
+		ctx.MarkLabel(isInt)
+		ctx.EmitMovRegImm64(dst, uint64(tagInt))
+		ctx.EmitJmp(done)
+		ctx.MarkLabel(isFloat)
+		ctx.EmitMovRegImm64(dst, uint64(tagFloat))
+		ctx.MarkLabel(done)
+		return
+	}
 	// CMP ptrReg, &scmerIntSentinel (via R11 as scratch)
 	ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
 	ctx.EmitCmpInt64(ptrReg, RegR11)
@@ -2108,6 +2330,12 @@ func (ctx *JITContext) EmitGetTagRegs(dst, ptrReg, auxReg Reg) {
 
 // EmitPushReg emits PUSH r64
 func (ctx *JITContext) EmitPushReg(r Reg) {
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeStackAdjust, 0, 0, 0, -8)
+		jitArchEmitStore64(ctx, r, RegRSP, 0)
+		ctx.addDynamicStack(8)
+		return
+	}
 	if r >= 8 {
 		ctx.emitBytes(0x41, 0x50|byte(r&7))
 	} else {
@@ -2118,6 +2346,15 @@ func (ctx *JITContext) EmitPushReg(r Reg) {
 
 // EmitPopReg emits POP r64
 func (ctx *JITContext) EmitPopReg(r Reg) {
+	if jitPortableBackend {
+		jitArchEmitLoad64(ctx, r, RegRSP, 0)
+		jitArchEmitNative(ctx, jitNativeStackAdjust, 0, 0, 0, 8)
+		ctx.DynamicSP -= 8
+		if ctx.DynamicSP < 0 {
+			panic("jit: unbalanced stack pop")
+		}
+		return
+	}
 	if r >= 8 {
 		ctx.emitBytes(0x41, 0x58|byte(r&7))
 	} else {
@@ -2135,18 +2372,22 @@ func (ctx *JITContext) EmitCallIndirect(addr uint64) {
 }
 
 func (ctx *JITContext) emitCallIndirectWithSetup(addr uint64, setup func(callFrameBytes int32), roots []int32) {
-	ctx.EmitMovRegReg(RegR11, RegRBP)
-	ctx.EmitSubInt64(RegR11, RegRSP)
-	ctx.EmitPushReg(RegR11)
-	ctx.EmitPushReg(RegR11)
-	ctx.EmitSubRSP32(int32(jitGoSpillBytes))
-	if setup != nil {
-		setup(int32(jitGoSpillBytes + 16))
+	if jitPortableBackend {
+		jitEmitNativeCall(ctx, 0, addr, setup, roots)
+	} else {
+		ctx.EmitMovRegReg(RegR11, RegRBP)
+		ctx.EmitSubInt64(RegR11, RegRSP)
+		ctx.EmitPushReg(RegR11)
+		ctx.EmitPushReg(RegR11)
+		ctx.EmitSubRSP32(int32(jitGoSpillBytes))
+		if setup != nil {
+			setup(int32(jitGoSpillBytes + 16))
+		}
+		ctx.EmitMovRegImm64(RegR12, addr)
+		ctx.emitBytes(0x41, 0xFF, 0xD4) // CALL R12
+		ctx.recordSafepoint(roots, int32(jitGoSpillBytes+16))
+		ctx.EmitAddRSP32(int32(jitGoSpillBytes + 16))
 	}
-	ctx.EmitMovRegImm64(RegR12, addr)
-	ctx.emitBytes(0x41, 0xFF, 0xD4) // CALL R12
-	ctx.recordSafepoint(roots, int32(jitGoSpillBytes+16))
-	ctx.EmitAddRSP32(int32(jitGoSpillBytes + 16))
 }
 
 func (ctx *JITContext) regHoldsPointer(r Reg) bool {
@@ -2394,14 +2635,18 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	ctx.EmitMovRegReg(RegRCX, RegRBX) // cap = len
 	ctx.EmitMovRegImm64(RegRDX, uint64(fnData))
 	ctx.EmitMovRegMem(RegR11, RegRDX, 0) // fnptr := [funcval]
-	ctx.EmitMovRegReg(RegR13, RegRBP)
-	ctx.EmitSubInt64(RegR13, RegRSP)
-	ctx.EmitPushReg(RegR13)
-	ctx.EmitPushReg(RegR13)
-	ctx.EmitSubRSP32(int32(jitGoSpillBytes))
-	ctx.emitBytes(0x41, 0xFF, 0xD3) // CALL R11
-	ctx.recordSafepoint(transientRoots, int32(jitGoSpillBytes+16))
-	ctx.EmitAddRSP32(int32(jitGoSpillBytes + 16))
+	if jitPortableBackend {
+		jitEmitNativeCall(ctx, RegR11, 0, nil, transientRoots)
+	} else {
+		ctx.EmitMovRegReg(RegR13, RegRBP)
+		ctx.EmitSubInt64(RegR13, RegRSP)
+		ctx.EmitPushReg(RegR13)
+		ctx.EmitPushReg(RegR13)
+		ctx.EmitSubRSP32(int32(jitGoSpillBytes))
+		ctx.emitBytes(0x41, 0xFF, 0xD3) // CALL R11
+		ctx.recordSafepoint(transientRoots, int32(jitGoSpillBytes+16))
+		ctx.EmitAddRSP32(int32(jitGoSpillBytes + 16))
+	}
 
 	callResult := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX}
 	base := ctx.StackReg
@@ -2522,21 +2767,25 @@ func (ctx *JITContext) emitFuncValueCall(fn, argslice, result JITValueDesc, kind
 	ctx.EmitMovRegReg(RegRCX, RegRBX)
 	ctx.EmitMovRegMem(RegR11, RegRDX, 0)
 
-	callAreaBytes := int32(jitGoSpillBytes)
-	if kind == jitGoFuncCall {
-		ctx.EmitMovRegReg(RegR13, RegRBP)
-		ctx.EmitSubInt64(RegR13, RegRSP)
-		ctx.EmitPushReg(RegR13)
-		ctx.EmitPushReg(RegR13)
-		callAreaBytes += 16
+	if jitPortableBackend {
+		jitEmitNativeCall(ctx, RegR11, 0, nil, transientRoots)
+	} else {
+		callAreaBytes := int32(jitGoSpillBytes)
+		if kind == jitGoFuncCall {
+			ctx.EmitMovRegReg(RegR13, RegRBP)
+			ctx.EmitSubInt64(RegR13, RegRSP)
+			ctx.EmitPushReg(RegR13)
+			ctx.EmitPushReg(RegR13)
+			callAreaBytes += 16
+		}
+		// Go callees own spill homes for register arguments in the caller's frame.
+		// A JIT callee uses these homes before runtime.morestack just like compiled
+		// Go code, so reserve the standard call area even on the compact path.
+		ctx.EmitSubRSP32(int32(jitGoSpillBytes))
+		ctx.emitBytes(0x41, 0xFF, 0xD3) // CALL R11
+		ctx.recordSafepoint(transientRoots, callAreaBytes)
+		ctx.EmitAddRSP32(callAreaBytes)
 	}
-	// Go callees own spill homes for register arguments in the caller's frame.
-	// A JIT callee uses these homes before runtime.morestack just like compiled
-	// Go code, so reserve the standard call area even on the compact path.
-	ctx.EmitSubRSP32(int32(jitGoSpillBytes))
-	ctx.emitBytes(0x41, 0xFF, 0xD3) // CALL R11
-	ctx.recordSafepoint(transientRoots, callAreaBytes)
-	ctx.EmitAddRSP32(callAreaBytes)
 
 	ctx.EmitStoreRegMem(RegRAX, ctx.FrameReg, result.StackOff)
 	ctx.EmitStoreRegMem(RegRBX, ctx.FrameReg, result.StackOff+8)
@@ -2564,6 +2813,13 @@ func (ctx *JITContext) emitAluRegReg(opcode byte, dst, src Reg) {
 }
 
 func (ctx *JITContext) emitAluRegRegWidth(opcode byte, dst, src Reg, wide bool) {
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeALU, dst, src, 0, int64(opcode))
+		if !wide {
+			jitArchEmitNative(ctx, jitNativeZeroExtend32, dst, 0, 0, 0)
+		}
+		return
+	}
 	rex := byte(0x48)
 	if !wide {
 		rex = 0x40
@@ -2584,6 +2840,11 @@ func (ctx *JITContext) emitAluRegRegWidth(opcode byte, dst, src Reg, wide bool) 
 func (ctx *JITContext) EmitStoreImm32Mem(base Reg, disp int32, value int32) {
 	ctx.beginRegisterInstruction(jitRegisterMask(base), 0)
 	defer ctx.endRegisterInstruction()
+	if jitPortableBackend {
+		jitArchEmitMovRegImm64(ctx, jitNativeTemp, uint64(int64(value)))
+		jitArchEmitStore64(ctx, jitNativeTemp, base, disp)
+		return
+	}
 	rex := byte(0x48)
 	if base >= 8 {
 		rex |= 0x01
@@ -2643,12 +2904,27 @@ func (ctx *JITContext) emitStoreRegMemWidth(src, base Reg, disp int32, opcode by
 
 // EmitSubRSP emits SUB RSP, imm8 to reserve stack space.
 func (ctx *JITContext) EmitSubRSP(n uint8) {
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeStackAdjust, 0, 0, 0, -int64(n))
+		ctx.addDynamicStack(int32(n))
+		return
+	}
 	ctx.emitBytes(0x48, 0x83, 0xEC, n)
 	ctx.addDynamicStack(int32(n))
 }
 
 // EmitAddRSP emits ADD RSP, imm8 to release stack space.
 func (ctx *JITContext) EmitAddRSP(n uint8) {
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeStackAdjust, 0, 0, 0, int64(n))
+		old := ctx.DynamicSP
+		ctx.DynamicSP -= int32(n)
+		if ctx.DynamicSP < 0 {
+			panic("jit: unbalanced stack release")
+		}
+		ctx.clearStackRootRange(jitStackRootFrameSP, -old, -ctx.DynamicSP)
+		return
+	}
 	ctx.emitBytes(0x48, 0x83, 0xC4, n)
 	oldDynamicSP := ctx.DynamicSP
 	ctx.DynamicSP -= int32(n)
@@ -2661,6 +2937,9 @@ func (ctx *JITContext) EmitAddRSP(n uint8) {
 // EmitSubRSP32Fixup emits SUB RSP, imm32 with a zero placeholder and returns
 // a pointer to the 4-byte immediate so it can be patched later via PatchInt32.
 func (ctx *JITContext) EmitSubRSP32Fixup() unsafe.Pointer {
+	if jitPortableBackend {
+		return jitArchEmitFrameFixup(ctx)
+	}
 	ctx.emitBytes(0x48, 0x81, 0xEC)
 	ctx.emitU32(0)
 	return unsafe.Add(ctx.Ptr, -4)
@@ -2694,8 +2973,12 @@ func (ctx *JITContext) BeginStandaloneFrame() JITStandaloneFrame {
 		frameReg:    ctx.FrameReg,
 		scratchReg:  ctx.ScratchReg,
 	}
-	ctx.emitByte(0x55)              // push rbp
-	ctx.emitBytes(0x48, 0x89, 0xE5) // mov rbp, rsp
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeProlog, 0, 0, 0, 0)
+	} else {
+		ctx.emitByte(0x55)
+		ctx.emitBytes(0x48, 0x89, 0xE5)
+	}
 	state.fixup = ctx.EmitSubRSP32Fixup()
 	ctx.StackReg = RegRSP
 	ctx.FrameReg = RegRBP
@@ -2716,7 +2999,11 @@ func (ctx *JITContext) EndStandaloneFrame(state JITStandaloneFrame) {
 	}
 	frameSize := (ctx.MaxBPOffset + ctx.MaxSpillOffset + 15) &^ 15
 	ctx.PatchInt32(state.fixup, frameSize)
-	ctx.emitByte(0xC9) // leave
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeLeave, 0, 0, 0, 0)
+	} else {
+		ctx.emitByte(0xC9)
+	}
 	ctx.BPOffset = state.bpOffset
 	ctx.MaxBPOffset = state.maxBPOffset
 	ctx.SpillOffset = state.spillOffset
@@ -2729,11 +3016,25 @@ func (ctx *JITContext) EndStandaloneFrame(state JITStandaloneFrame) {
 
 // PatchInt32 writes a 32-bit little-endian value at the given position.
 func (ctx *JITContext) PatchInt32(pos unsafe.Pointer, val int32) {
+	if jitPortableBackend {
+		jitArchPatchImmediate(pos, val)
+		return
+	}
 	*(*int32)(pos) = val
 }
 
 // EmitAddRSP32 emits ADD RSP, imm32.
 func (ctx *JITContext) EmitAddRSP32(val int32) {
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeStackAdjust, 0, 0, 0, int64(val))
+		old := ctx.DynamicSP
+		ctx.DynamicSP -= int32(val)
+		if ctx.DynamicSP < 0 {
+			panic("jit: unbalanced stack release")
+		}
+		ctx.clearStackRootRange(jitStackRootFrameSP, -old, -ctx.DynamicSP)
+		return
+	}
 	ctx.emitBytes(0x48, 0x81, 0xC4)
 	ctx.emitU32(uint32(val))
 	oldDynamicSP := ctx.DynamicSP
@@ -2746,6 +3047,11 @@ func (ctx *JITContext) EmitAddRSP32(val int32) {
 
 // EmitSubRSP32 emits SUB RSP, imm32.
 func (ctx *JITContext) EmitSubRSP32(val int32) {
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeStackAdjust, 0, 0, 0, -int64(val))
+		ctx.addDynamicStack(int32(val))
+		return
+	}
 	ctx.emitBytes(0x48, 0x81, 0xEC)
 	ctx.emitU32(uint32(val))
 	ctx.addDynamicStack(val)

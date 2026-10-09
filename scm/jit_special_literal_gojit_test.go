@@ -1,4 +1,4 @@
-//go:build goexperiment.jit && amd64
+//go:build goexperiment.jit && (amd64 || arm64 || riscv64)
 
 // Copyright (C) 2026 MemCP Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
