@@ -1893,7 +1893,9 @@ func JITEmitGoCallResults(ctx *JITContext, funcAddr uint64, args []JITValueDesc,
 		off := ctx.AllocSpill(int32(count) * 8)
 		for part := 0; part < int(count); part++ {
 			resultOffs[word] = off + int32(part*8)
-			ctx.setStackPointer(jitStackRootFrameBP, resultOffs[word], pointerMasks[i]&(1<<part) != 0)
+			// A reused spill can still contain a discarded pointer. The call
+			// has not produced its result yet, so this word is not a root.
+			ctx.setStackPointer(jitStackRootFrameBP, resultOffs[word], false)
 			word++
 		}
 		switch count {
@@ -1906,6 +1908,13 @@ func JITEmitGoCallResults(ctx *JITContext, funcAddr uint64, args []JITValueDesc,
 		}
 	}
 	ctx.EmitGoCallToFrame(funcAddr, words, resultOffs)
+	word = 0
+	for i, count := range wordCounts {
+		for part := 0; part < int(count); part++ {
+			ctx.setStackPointer(jitStackRootFrameBP, resultOffs[word], pointerMasks[i]&(1<<part) != 0)
+			word++
+		}
+	}
 	return results
 }
 

@@ -2322,13 +2322,13 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	if targetHasRegs {
 		targetOff := ctx.AllocSpill(16)
 		target = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: targetOff, Rooted: true}
-		ctx.setStackPointer(jitStackRootFrameBP, targetOff, true)
+		ctx.setStackPointer(jitStackRootFrameBP, targetOff, false)
 	} else if target.Loc == LocStackPair {
 		target.Type = JITTypeUnknown
 	} else {
 		targetOff := ctx.AllocSpill(16)
 		target = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: targetOff, Rooted: true}
-		ctx.setStackPointer(jitStackRootFrameBP, targetOff, true)
+		ctx.setStackPointer(jitStackRootFrameBP, targetOff, false)
 	}
 
 	ctx.ReclaimUntrackedRegs()
@@ -2416,6 +2416,13 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	}
 	ctx.EmitStoreRegMem(callResult.Reg, base, targetOff)
 	ctx.EmitStoreRegMem(callResult.Reg2, base, targetOff+8)
+	// Publish the result root only once the Go return value replaces any
+	// discarded value left in this spill by an earlier path.
+	if target.StackOff < 0 {
+		ctx.setStackPointer(jitStackRootFrameBP, target.StackOff, true)
+	} else {
+		ctx.setStackPointer(jitStackRootFrameSP, targetOff-ctx.DynamicSP, true)
+	}
 	for i, r := range liveRegs {
 		ctx.EmitMovRegMem(r, RegRSP, int32(i*8))
 	}
