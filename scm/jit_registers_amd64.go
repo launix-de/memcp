@@ -56,3 +56,5 @@ const (
 	jitRegisterCount       = 32
 	jitSupportsCalibration = true
 )
+
+const jitPortableBackend = false

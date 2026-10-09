@@ -91,7 +91,7 @@ func TestJITAMD64IntegerSelectionPreservesDeferredMoves(t *testing.T) {
 	buffer := make([]byte, 64)
 	ctx := &JITContext{
 		Start: unsafe.Pointer(&buffer[0]), Ptr: unsafe.Pointer(&buffer[0]), End: unsafe.Pointer(&buffer[len(buffer)-1]),
-		SliceBase: RegR12, ScratchReg: RegR11, StackReg: RegRSP, FrameReg: RegRBP, RegisterBank: jitX86RegisterBank,
+		SliceBase: RegR12, ScratchReg: RegR11, StackReg: RegRSP, FrameReg: RegRBP, RegisterBank: jitNativeRegisterBank,
 	}
 
 	ctx.EmitMovRegReg(RegR11, RegRDI)

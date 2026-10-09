@@ -57,6 +57,11 @@ var missingOnly bool
 var policyOnly bool
 var jobs = runtime.GOMAXPROCS(0)
 
+// Analysis follows the loaded package's target layout, independently of the
+// architecture on which jitgen itself runs. Supported native backends use the
+// same 64-bit Scmer representation; 32-bit targets require a separate ABI port.
+var targetSizes = types.SizesFor("gc", runtime.GOARCH)
+
 const generatedBanner = "/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */"
 const phiSlotBytes = 16
 const phiStoreChunkSize = 3
@@ -112,7 +117,7 @@ func main() {
 	// Load package with full type info for SSA
 	cfg := &packages.Config{
 		Mode: packages.NeedFiles | packages.NeedSyntax | packages.NeedTypes |
-			packages.NeedTypesInfo | packages.NeedDeps | packages.NeedImports | packages.NeedName,
+			packages.NeedTypesInfo | packages.NeedTypesSizes | packages.NeedDeps | packages.NeedImports | packages.NeedName,
 		Overlay: overlay,
 	}
 	pkgs, err := packages.Load(cfg, pkgDir)
@@ -125,6 +130,11 @@ func main() {
 		os.Exit(1)
 	}
 	pkg := pkgs[0]
+	if pkg.TypesSizes == nil || pkg.TypesSizes.Sizeof(types.Typ[types.Uintptr]) != 8 {
+		fmt.Fprintln(os.Stderr, "jitgen requires a target with a 64-bit pointer ABI")
+		os.Exit(1)
+	}
+	targetSizes = pkg.TypesSizes
 	if len(pkg.Errors) > 0 {
 		hardErr := false
 		for _, e := range pkg.Errors {
@@ -1764,13 +1774,13 @@ func goCallWordCount(t types.Type) int {
 	case *types.Slice:
 		return 3
 	case *types.Struct:
-		sz := types.SizesFor("gc", "amd64").Sizeof(t)
+		sz := targetSizes.Sizeof(t)
 		if sz > 0 && sz <= 24 && sz%8 == 0 {
 			return int(sz / 8)
 		}
 		return 0
 	case *types.Array:
-		sz := types.SizesFor("gc", "amd64").Sizeof(t)
+		sz := targetSizes.Sizeof(t)
 		if sz > 0 && sz <= 24 {
 			return int((sz + 7) / 8)
 		}
@@ -1794,7 +1804,7 @@ func goCallPointerMask(t types.Type) uint8 {
 	case *types.Slice:
 		return 1
 	case *types.Struct:
-		sizes := types.SizesFor("gc", "amd64")
+		sizes := targetSizes
 		offsets := sizes.Offsetsof(fieldVarsOf(u))
 		var mask uint8
 		for i := 0; i < u.NumFields(); i++ {
@@ -2023,7 +2033,7 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 		case 0:
 			// Zero-sized values have no Go internal-ABI words. Keep them in the
 			// source-level signature, but do not invent a machine operand.
-			if types.SizesFor("gc", "amd64").Sizeof(paramType) != 0 {
+			if targetSizes.Sizeof(paramType) != 0 {
 				return false
 			}
 			continue
@@ -2515,8 +2525,8 @@ func (g *codeGen) emitMulConstOnReg(regExpr string, k int64, indent string) {
 		if fitsInt32(k) {
 			g.emit("%sctx.EmitImulRegImm32(%s, int32(%d))", indent, regExpr, k)
 		} else {
-			g.emit("%sctx.EmitMovRegImm64(RegR11, uint64(%d))", indent, k)
-			g.emit("%sctx.EmitImulInt64(%s, RegR11)", indent, regExpr)
+			g.emit("%sctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%d))", indent, k)
+			g.emit("%sctx.EmitImulInt64(%s, ctx.ScratchReg)", indent, regExpr)
 		}
 	}
 }
@@ -3644,9 +3654,9 @@ func (g *codeGen) emitPhiMov(phiName, phiOff string, v ssa.Value, phiType types.
 			}
 			materialized := g.allocDesc()
 			g.emit("%s := jitMaterializeVirtualGoSlice(ctx, args[%d%s])", materialized, src.variadicOffset, end)
-			g.emit("ctx.EmitStoreRegMem(%s.Reg, RegRSP, %s)", materialized, phiOff)
-			g.emit("ctx.EmitStoreRegMem(%s.Reg2, RegRSP, %s+8)", materialized, phiOff)
-			g.emit("ctx.EmitStoreRegMem(%s.Reg3, RegRSP, %s+16)", materialized, phiOff)
+			g.emit("ctx.EmitStoreRegMem(%s.Reg, ctx.StackReg, %s)", materialized, phiOff)
+			g.emit("ctx.EmitStoreRegMem(%s.Reg2, ctx.StackReg, %s+8)", materialized, phiOff)
+			g.emit("ctx.EmitStoreRegMem(%s.Reg3, ctx.StackReg, %s+16)", materialized, phiOff)
 			g.emit("ctx.FreeDesc(&%s)", materialized)
 			return
 		}
@@ -3660,9 +3670,9 @@ func (g *codeGen) emitPhiMov(phiName, phiOff string, v ssa.Value, phiType types.
 				g.emit("\tctx.EmitCopyStackWords(%s, %s, 3)", edgeSrc, phiOff)
 				g.emit("} else {")
 				g.emit("\tif %s.Loc != LocRegTriple { panic(\"jit: slice phi source is not a triple\") }", edgeSrc)
-				g.emit("\tctx.EmitStoreRegMem(%s.Reg, RegRSP, %s)", edgeSrc, phiOff)
-				g.emit("\tctx.EmitStoreRegMem(%s.Reg2, RegRSP, %s+8)", edgeSrc, phiOff)
-				g.emit("\tctx.EmitStoreRegMem(%s.Reg3, RegRSP, %s+16)", edgeSrc, phiOff)
+				g.emit("\tctx.EmitStoreRegMem(%s.Reg, ctx.StackReg, %s)", edgeSrc, phiOff)
+				g.emit("\tctx.EmitStoreRegMem(%s.Reg2, ctx.StackReg, %s+8)", edgeSrc, phiOff)
+				g.emit("\tctx.EmitStoreRegMem(%s.Reg3, ctx.StackReg, %s+16)", edgeSrc, phiOff)
 				g.emit("}")
 				return
 			}
@@ -4669,9 +4679,9 @@ func (g *codeGen) emitSpecializedPhiStackWrites(bbIdx int, psVar string, indent 
 		g.emit("%s\t%s := %s.PhiValues[%d]", indent, tmp, psVar, phiIdx)
 		g.emit("%s\tctx.EnsureDesc(&%s)", indent, tmp)
 		if isPhiTripleType(phi.Type()) {
-			g.emit("%s\tctx.EmitStoreRegMem(%s.Reg, RegRSP, %s)", indent, tmp, phiOff)
-			g.emit("%s\tctx.EmitStoreRegMem(%s.Reg2, RegRSP, %s+8)", indent, tmp, phiOff)
-			g.emit("%s\tctx.EmitStoreRegMem(%s.Reg3, RegRSP, %s+16)", indent, tmp, phiOff)
+			g.emit("%s\tctx.EmitStoreRegMem(%s.Reg, ctx.StackReg, %s)", indent, tmp, phiOff)
+			g.emit("%s\tctx.EmitStoreRegMem(%s.Reg2, ctx.StackReg, %s+8)", indent, tmp, phiOff)
+			g.emit("%s\tctx.EmitStoreRegMem(%s.Reg3, ctx.StackReg, %s+16)", indent, tmp, phiOff)
 		} else if isPhiPairType(phi.Type()) {
 			g.emit("%s\tctx.EmitStoreScmerToStack(%s, %s)", indent, tmp, phiOff)
 		} else {
@@ -6082,7 +6092,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					panic(fmt.Sprintf("invalid IndexAddr on local stack slice: %s", v))
 				}
 				elemType := v.Type().Underlying().(*types.Pointer).Elem()
-				elemSize := types.SizesFor("gc", "amd64").Sizeof(elemType)
+				elemSize := targetSizes.Sizeof(elemType)
 				g.vals[name] = genVal{
 					marker:     fmt.Sprintf("_stackaddr:%d", elemSize),
 					offsetExpr: fmt.Sprintf("int32(%s)+int32(%d)", src.stackBase, idxValue*elemSize),
@@ -6197,7 +6207,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// Nested field access: src is a pointer to a sub-struct within the top-level struct.
 			// Cascade the offset: parent offset + inner field offset.
 			// Compute inner field offset at jitgen time (handles unexported fields from external packages).
-			sizes := types.SizesFor("gc", "amd64")
+			sizes := targetSizes
 			offsets := sizes.Offsetsof(fieldVarsOf(structType))
 			innerOffset := offsets[v.Field]
 			tag := structType.Tag(v.Field)
@@ -6216,7 +6226,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		} else if src.isDesc {
 			// FieldAddr on a local pointer descriptor (non-receiver), e.g.
 			// fd := a.FastDict(); &fd.Pairs
-			sizes := types.SizesFor("gc", "amd64")
+			sizes := targetSizes
 			offsets := sizes.Offsetsof(fieldVarsOf(structType))
 			innerOffset := offsets[v.Field]
 			offsetExpr = fmt.Sprintf("%d", innerOffset)
@@ -6355,7 +6365,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				}
 				elemType := v.Type()
 				words := goCallWordCount(elemType)
-				if words == 0 && types.SizesFor("gc", "amd64").Sizeof(elemType) == 0 {
+				if words == 0 && targetSizes.Sizeof(elemType) == 0 {
 					g.vals[name] = genVal{marker: "_gozero", aggregateType: elemType}
 					break
 				}
@@ -7158,9 +7168,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("ctx.UnprotectReg(%s.Reg)", slice.goVar)
 				dv := g.allocDesc()
 				if phiTarget, shape, direct := g.directPhiTarget(v); direct && shape == phiTargetTriple {
-					g.emit("ctx.EmitStoreRegMem(%s.Reg, RegRSP, %s)", slice.goVar, phiTarget)
-					g.emit("ctx.EmitStoreRegMem(%s.Reg2, RegRSP, %s+8)", slice.goVar, phiTarget)
-					g.emit("ctx.EmitStoreRegMem(%s.Reg3, RegRSP, %s+16)", slice.goVar, phiTarget)
+					g.emit("ctx.EmitStoreRegMem(%s.Reg, ctx.StackReg, %s)", slice.goVar, phiTarget)
+					g.emit("ctx.EmitStoreRegMem(%s.Reg2, ctx.StackReg, %s+8)", slice.goVar, phiTarget)
+					g.emit("ctx.EmitStoreRegMem(%s.Reg3, ctx.StackReg, %s+16)", slice.goVar, phiTarget)
 					g.emit("ctx.FreeDesc(&%s)", slice.goVar)
 					g.emit("%s := JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: %s}", dv, phiTarget)
 				} else {
@@ -7432,10 +7442,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("%s := ctx.AllocReg()", rv)
 				g.emit("if thisptr.Loc == LocImm {")
 				g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + %s", arg.offsetExpr)
-				g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr)", rv)
+				g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(fieldAddr))")
+				g.emit("\tctx.EmitAtomicLoad64(%s, ctx.ScratchReg, 0)", rv)
 				g.emit("} else {")
 				g.emit("\toff := int32(%s)", arg.offsetExpr)
-				g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off)", rv)
+				g.emit("\tctx.EmitAtomicLoad64(%s, thisptr.Reg, off)", rv)
 				g.emit("}")
 				g.emit("%s := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, rv)
 			} else {
@@ -7464,19 +7475,19 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t}")
 				g.emit("\tctx.EmitMovRegImm64(baseReg, uint64(uintptr(thisptr.Imm.Int()) + %s))", dst.offsetExpr)
 				g.emit("\tif %s.Loc == LocImm {", val.goVar)
-				g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", val.goVar)
-				g.emit("\t\tctx.EmitStoreRegMem(RegR11, baseReg, 0)")
+				g.emit("\t\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%s.Imm.Int()))", val.goVar)
+				g.emit("\t\tctx.EmitAtomicStore64(ctx.ScratchReg, baseReg, 0)")
 				g.emit("\t} else {")
-				g.emit("\t\tctx.EmitStoreRegMem(%s.Reg, baseReg, 0)", val.goVar)
+				g.emit("\t\tctx.EmitAtomicStore64(%s.Reg, baseReg, 0)", val.goVar)
 				g.emit("\t}")
 				g.emit("\tctx.FreeReg(baseReg)")
 				g.emit("} else {")
 				g.emit("\toff := int32(%s)", dst.offsetExpr)
 				g.emit("\tif %s.Loc == LocImm {", val.goVar)
-				g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", val.goVar)
-				g.emit("\t\tctx.EmitStoreRegMem(RegR11, thisptr.Reg, off)")
+				g.emit("\t\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%s.Imm.Int()))", val.goVar)
+				g.emit("\t\tctx.EmitAtomicStore64(ctx.ScratchReg, thisptr.Reg, off)")
 				g.emit("\t} else {")
-				g.emit("\t\tctx.EmitStoreRegMem(%s.Reg, thisptr.Reg, off)", val.goVar)
+				g.emit("\t\tctx.EmitAtomicStore64(%s.Reg, thisptr.Reg, off)", val.goVar)
 				g.emit("\t}")
 				g.emit("}")
 			} else {
@@ -7946,7 +7957,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\t}")
 			g.emit("\ttruncInt := ctx.AllocRegExcept(truncSrc)")
 			g.emit("\tctx.EmitCvtFloatBitsToInt64(truncInt, truncSrc)")
-			g.emit("\tctx.EmitCvtInt64ToFloat64(RegX0, truncInt)")
+			g.emit("\tctx.EmitInt64ToFloatBits(truncInt)")
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: truncInt}", dv)
 			g.emit("\tctx.BindReg(truncInt, &%s)", dv)
 			g.emit("}")
@@ -7990,7 +8001,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "LoadInt64":
 			// sync/atomic.LoadInt64(ptr) int64 — atomic load from field address
-			// ptr is a FieldAddr-based descriptor; on x86 aligned MOV is atomic
+			// Atomic memory ordering is provided by the target backend.
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
 			if strings.HasPrefix(arg.marker, "_fieldaddr:") || strings.HasPrefix(arg.marker, "_fieldconst:") {
@@ -7998,10 +8009,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("%s := ctx.AllocReg()", rv)
 				g.emit("if thisptr.Loc == LocImm {")
 				g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + %s", arg.offsetExpr)
-				g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr)", rv)
+				g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(fieldAddr))")
+				g.emit("\tctx.EmitAtomicLoad64(%s, ctx.ScratchReg, 0)", rv)
 				g.emit("} else {")
 				g.emit("\toff := int32(%s)", arg.offsetExpr)
-				g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off)", rv)
+				g.emit("\tctx.EmitAtomicLoad64(%s, thisptr.Reg, off)", rv)
 				g.emit("}")
 				g.emit("%s := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, rv)
 			} else {
@@ -8010,7 +8022,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "StoreInt64":
 			// sync/atomic.StoreInt64(ptr, val) — atomic store to field address
-			// On x86, aligned MOV is atomic for 64-bit values
+			// Atomic memory ordering is provided by the target backend.
 			dst := g.vals[v.Call.Args[0].Name()]
 			val := g.resolveValue(v.Call.Args[1])
 			if strings.HasPrefix(dst.marker, "_fieldaddr:") || strings.HasPrefix(dst.marker, "_fieldconst:") {
@@ -8022,19 +8034,19 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t}")
 				g.emit("\tctx.EmitMovRegImm64(baseReg, uint64(uintptr(thisptr.Imm.Int()) + %s))", dst.offsetExpr)
 				g.emit("\tif %s.Loc == LocImm {", val.goVar)
-				g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", val.goVar)
-				g.emit("\t\tctx.EmitStoreRegMem(RegR11, baseReg, 0)")
+				g.emit("\t\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%s.Imm.Int()))", val.goVar)
+				g.emit("\t\tctx.EmitAtomicStore64(ctx.ScratchReg, baseReg, 0)")
 				g.emit("\t} else {")
-				g.emit("\t\tctx.EmitStoreRegMem(%s.Reg, baseReg, 0)", val.goVar)
+				g.emit("\t\tctx.EmitAtomicStore64(%s.Reg, baseReg, 0)", val.goVar)
 				g.emit("\t}")
 				g.emit("\tctx.FreeReg(baseReg)")
 				g.emit("} else {")
 				g.emit("\toff := int32(%s)", dst.offsetExpr)
 				g.emit("\tif %s.Loc == LocImm {", val.goVar)
-				g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", val.goVar)
-				g.emit("\t\tctx.EmitStoreRegMem(RegR11, thisptr.Reg, off)")
+				g.emit("\t\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%s.Imm.Int()))", val.goVar)
+				g.emit("\t\tctx.EmitAtomicStore64(ctx.ScratchReg, thisptr.Reg, off)")
 				g.emit("\t} else {")
-				g.emit("\t\tctx.EmitStoreRegMem(%s.Reg, thisptr.Reg, off)", val.goVar)
+				g.emit("\t\tctx.EmitAtomicStore64(%s.Reg, thisptr.Reg, off)", val.goVar)
 				g.emit("\t}")
 				g.emit("}")
 			} else {
@@ -8222,12 +8234,12 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				if xMultiUse {
 					g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directResult, plannedTarget, xVal.goVar+".Reg")
 					g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
-					g.emit("\tctx.EmitMovRegImm64(RegR11, uint64(%d))", bits)
-					g.emit("\tctx.%s(scratch, RegR11)", floatAluOp)
+					g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%d))", bits)
+					g.emit("\tctx.%s(scratch, ctx.ScratchReg)", floatAluOp)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}", dv)
 				} else {
-					g.emit("\tctx.EmitMovRegImm64(RegR11, uint64(%d))", bits)
-					g.emit("\tctx.%s(%s.Reg, RegR11)", floatAluOp, xVal.goVar)
+					g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%d))", bits)
+					g.emit("\tctx.%s(%s.Reg, ctx.ScratchReg)", floatAluOp, xVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg}", dv, xVal.goVar)
 				}
 				g.emit("}")
@@ -8248,13 +8260,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directResult, plannedTarget, xVal.goVar+".Reg")
 					g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 					g.emit("\t_, yBits := %s.Imm.RawWords()", yVal.goVar)
-					g.emit("\tctx.EmitMovRegImm64(RegR11, yBits)")
-					g.emit("\tctx.%s(scratch, RegR11)", floatAluOp)
+					g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, yBits)")
+					g.emit("\tctx.%s(scratch, ctx.ScratchReg)", floatAluOp)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}", dv)
 				} else {
 					g.emit("\t_, yBits := %s.Imm.RawWords()", yVal.goVar)
-					g.emit("\tctx.EmitMovRegImm64(RegR11, yBits)")
-					g.emit("\tctx.%s(%s.Reg, RegR11)", floatAluOp, xVal.goVar)
+					g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, yBits)")
+					g.emit("\tctx.%s(%s.Reg, ctx.ScratchReg)", floatAluOp, xVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg}", dv, xVal.goVar)
 				}
 				g.emit("} else {")
@@ -8385,8 +8397,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("} else {")
 					rv := g.allocReg()
 					g.emitAllocBooleanResultReg(rv, resultTargetVar, "\t", directResultMarker, xVal.goVar+".Reg")
-					g.emit("\tctx.EmitMovRegImm64(RegR11, uint64(%d))", bits)
-					emitComparison(rv, xVal.goVar+".Reg", "RegR11")
+					g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%d))", bits)
+					emitComparison(rv, xVal.goVar+".Reg", "ctx.ScratchReg")
 					g.emit("}")
 				} else {
 					yVal := g.resolveValue(v.Y)
@@ -8398,14 +8410,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					rv := g.allocReg()
 					g.emitAllocBooleanResultReg(rv, resultTargetVar, "\t", directResultMarker, xVal.goVar+".Reg")
 					g.emit("\t_, yBits := %s.Imm.RawWords()", yVal.goVar)
-					g.emit("\tctx.EmitMovRegImm64(RegR11, yBits)")
-					emitComparison(rv, xVal.goVar+".Reg", "RegR11")
+					g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, yBits)")
+					emitComparison(rv, xVal.goVar+".Reg", "ctx.ScratchReg")
 					g.emit("} else if %s.Loc == LocImm {", xVal.goVar)
 					rv2 := g.allocReg()
 					g.emitAllocBooleanResultReg(rv2, resultTargetVar, "\t", directResultMarker, yVal.goVar+".Reg")
 					g.emit("\t_, xBits := %s.Imm.RawWords()", xVal.goVar)
-					g.emit("\tctx.EmitMovRegImm64(RegR11, xBits)")
-					emitComparison(rv2, "RegR11", yVal.goVar+".Reg")
+					g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, xBits)")
+					emitComparison(rv2, "ctx.ScratchReg", yVal.goVar+".Reg")
 					g.emit("} else {")
 					rv3 := g.allocReg()
 					g.emitAllocBooleanResultReg(rv3, resultTargetVar, "\t", directResultMarker, xVal.goVar+".Reg", yVal.goVar+".Reg")
@@ -8441,8 +8453,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				if fitsInt32(cmpVal) {
 					g.emit("\tctx.EmitCmpRegImm32(%s.Reg, %d)", xVal.goVar, cmpVal)
 				} else {
-					g.emit("\tctx.EmitMovRegImm64(RegR11, 0x%x)", uint64(cmpVal))
-					g.emit("\tctx.EmitCmpInt64(%s.Reg, RegR11)", xVal.goVar)
+					g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, 0x%x)", uint64(cmpVal))
+					g.emit("\tctx.EmitCmpInt64(%s.Reg, ctx.ScratchReg)", xVal.goVar)
 				}
 				if flagsOnly {
 					if lazyReturn {
@@ -8478,8 +8490,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
 				g.emit("\t\tctx.EmitCmpRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
 				g.emit("\t} else {")
-				g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
-				g.emit("\t\tctx.EmitCmpInt64(%s.Reg, RegR11)", xVal.goVar)
+				g.emit("\t\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%s.Imm.Int()))", yVal.goVar)
+				g.emit("\t\tctx.EmitCmpInt64(%s.Reg, ctx.ScratchReg)", xVal.goVar)
 				g.emit("\t}")
 				if flagsOnly {
 					if lazyReturn {
@@ -8501,8 +8513,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					flagsRegX = g.allocReg()
 					g.emit("\t%s := ctx.AllocReg()", flagsRegX)
 				}
-				g.emit("\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", xVal.goVar)
-				g.emit("\tctx.EmitCmpInt64(RegR11, %s.Reg)", yVal.goVar)
+				g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%s.Imm.Int()))", xVal.goVar)
+				g.emit("\tctx.EmitCmpInt64(ctx.ScratchReg, %s.Reg)", yVal.goVar)
 				if flagsOnly {
 					if lazyReturn {
 						g.emit("\t%s = ctx.DeferBooleanFlags(%s, %s)", dv, flagsRegX, cc)
@@ -8789,22 +8801,12 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		} else if v.Op == token.SHL || v.Op == token.SHR {
 			// Shift operations
 			dv := g.allocDesc()
-			emitFn := "EmitShlRegClGo64"
-			// SSA expressions such as x&(wordBits-1) and x%wordBits prove
-			// that the count is already in the machine shift domain. Preserve
-			// that fact offline so the one-pass emitter can omit the Go >=64
-			// correction branch without carrying range-analysis state at run time.
-			if ssaUnsignedValueBelow(v.Y, 64) {
-				emitFn = "EmitShlRegCl"
-			}
+			emitFn := "EmitShiftLeft"
+			boundedShift := ssaUnsignedValueBelow(v.Y, 64)
 			immFn := "EmitShlRegImm8"
 			goShOp := "<<"
 			if v.Op == token.SHR {
-				if ssaUnsignedValueBelow(v.Y, 64) {
-					emitFn = "EmitShrRegCl"
-				} else {
-					emitFn = "EmitShrRegClGo64"
-				}
+				emitFn = "EmitShiftRight"
 				immFn = "EmitShrRegImm8"
 				goShOp = ">>"
 			}
@@ -8844,39 +8846,15 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
 				}
 				g.emit("} else {")
-				// Variable shift: must use CL register.
-				// RCX may be allocated for another value (e.g. phi register);
-				// save/restore it around the CL usage.
-				g.emit("\t{")
-				g.emit("\t\tshiftSrc := %s.Reg", xVal.goVar)
+				g.emit("\tshiftSrc := %s.Reg", xVal.goVar)
 				if xMultiUse {
 					copyReg := g.allocReg()
-					// Both operands remain live until CL has been loaded. Excluding only
-					// the shifted value lets register pressure evict and alias the shift
-					// count with the newly allocated result register.
-					g.emit("\t\t%s := ctx.AllocRegExcept(%s.Reg, %s.Reg)", copyReg, xVal.goVar, yVal.goVar)
-					g.emit("\t\tctx.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
-					g.emit("\t\tshiftSrc = %s", copyReg)
-				} else {
-					g.emit("\t\tif shiftSrc == RegRCX {")
-					g.emit("\t\t\tnewReg := ctx.AllocReg()")
-					g.emit("\t\t\tctx.EmitMovRegReg(newReg, RegRCX)")
-					g.emit("\t\t\tshiftSrc = newReg")
-					g.emit("\t\t}")
+					g.emit("\t%s := ctx.AllocRegExcept(%s.Reg, %s.Reg)", copyReg, xVal.goVar, yVal.goVar)
+					g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
+					g.emit("\tshiftSrc = %s", copyReg)
 				}
-				g.emit("\t\trcxUsed := ctx.FreeRegs & (1 << uint(RegRCX)) == 0 && %s.Reg != RegRCX", yVal.goVar)
-				g.emit("\t\tif rcxUsed {")
-				g.emit("\t\t\tctx.EmitMovRegReg(RegR11, RegRCX)")
-				g.emit("\t\t}")
-				g.emit("\t\tif %s.Reg != RegRCX {", yVal.goVar)
-				g.emit("\t\t\tctx.EmitMovRegReg(RegRCX, %s.Reg)", yVal.goVar)
-				g.emit("\t\t}")
-				g.emit("\t\tctx.%s(shiftSrc)", emitFn)
-				g.emit("\t\tif rcxUsed {")
-				g.emit("\t\t\tctx.EmitMovRegReg(RegRCX, RegR11)")
-				g.emit("\t\t}")
-				g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: shiftSrc}", dv)
-				g.emit("\t}")
+				g.emit("\tctx.%s(shiftSrc, %s.Reg, %t)", emitFn, yVal.goVar, boundedShift)
+				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: shiftSrc}", dv)
 				g.emit("}")
 			}
 			// Neutralize xVal if its register was transferred to the result
@@ -8904,16 +8882,16 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					if fitsInt32(cmpVal) {
 						g.emit("\tctx.EmitAndRegImm32(%s, int32(%d))", copyReg, cmpVal)
 					} else {
-						g.emit("\tctx.EmitMovRegImm64(RegR11, 0x%x)", uint64(cmpVal))
-						g.emit("\tctx.EmitAndInt64(%s, RegR11)", copyReg)
+						g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, 0x%x)", uint64(cmpVal))
+						g.emit("\tctx.EmitAndInt64(%s, ctx.ScratchReg)", copyReg)
 					}
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
 				} else {
 					if fitsInt32(cmpVal) {
 						g.emit("\tctx.EmitAndRegImm32(%s.Reg, int32(%d))", xVal.goVar, cmpVal)
 					} else {
-						g.emit("\tctx.EmitMovRegImm64(RegR11, 0x%x)", uint64(cmpVal))
-						g.emit("\tctx.EmitAndInt64(%s.Reg, RegR11)", xVal.goVar)
+						g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, 0x%x)", uint64(cmpVal))
+						g.emit("\tctx.EmitAndInt64(%s.Reg, ctx.ScratchReg)", xVal.goVar)
 					}
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
 				}
@@ -8936,16 +8914,16 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
 					g.emit("\t\tctx.EmitAndRegImm32(%s, int32(%s.Imm.Int()))", copyReg, yVal.goVar)
 					g.emit("\t} else {")
-					g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
-					g.emit("\t\tctx.EmitAndInt64(%s, RegR11)", copyReg)
+					g.emit("\t\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%s.Imm.Int()))", yVal.goVar)
+					g.emit("\t\tctx.EmitAndInt64(%s, ctx.ScratchReg)", copyReg)
 					g.emit("\t}")
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
 				} else {
 					g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
 					g.emit("\t\tctx.EmitAndRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
 					g.emit("\t} else {")
-					g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
-					g.emit("\t\tctx.EmitAndInt64(%s.Reg, RegR11)", xVal.goVar)
+					g.emit("\t\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%s.Imm.Int()))", yVal.goVar)
+					g.emit("\t\tctx.EmitAndInt64(%s.Reg, ctx.ScratchReg)", xVal.goVar)
 					g.emit("\t}")
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
 				}
@@ -8995,16 +8973,16 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					if fitsInt32(cmpVal) {
 						g.emit("\tctx.EmitOrRegImm32(%s, int32(%d))", copyReg, cmpVal)
 					} else {
-						g.emit("\tctx.EmitMovRegImm64(RegR11, 0x%x)", uint64(cmpVal))
-						g.emit("\tctx.EmitOrInt64(%s, RegR11)", copyReg)
+						g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, 0x%x)", uint64(cmpVal))
+						g.emit("\tctx.EmitOrInt64(%s, ctx.ScratchReg)", copyReg)
 					}
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
 				} else {
 					if fitsInt32(cmpVal) {
 						g.emit("\tctx.EmitOrRegImm32(%s.Reg, int32(%d))", xVal.goVar, cmpVal)
 					} else {
-						g.emit("\tctx.EmitMovRegImm64(RegR11, 0x%x)", uint64(cmpVal))
-						g.emit("\tctx.EmitOrInt64(%s.Reg, RegR11)", xVal.goVar)
+						g.emit("\tctx.EmitMovRegImm64(ctx.ScratchReg, 0x%x)", uint64(cmpVal))
+						g.emit("\tctx.EmitOrInt64(%s.Reg, ctx.ScratchReg)", xVal.goVar)
 					}
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
 				}
@@ -9038,16 +9016,16 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
 					g.emit("\t\tctx.EmitOrRegImm32(%s, int32(%s.Imm.Int()))", copyReg, yVal.goVar)
 					g.emit("\t} else {")
-					g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
-					g.emit("\t\tctx.EmitOrInt64(%s, RegR11)", copyReg)
+					g.emit("\t\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%s.Imm.Int()))", yVal.goVar)
+					g.emit("\t\tctx.EmitOrInt64(%s, ctx.ScratchReg)", copyReg)
 					g.emit("\t}")
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
 				} else {
 					g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
 					g.emit("\t\tctx.EmitOrRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
 					g.emit("\t} else {")
-					g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
-					g.emit("\t\tctx.EmitOrInt64(%s.Reg, RegR11)", xVal.goVar)
+					g.emit("\t\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%s.Imm.Int()))", yVal.goVar)
+					g.emit("\t\tctx.EmitOrInt64(%s.Reg, ctx.ScratchReg)", xVal.goVar)
 					g.emit("\t}")
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
 				}
@@ -9378,7 +9356,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t%s = ctx.AllocRegExcept(%s.Reg)", tmpReg, src.goVar)
 				g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", tmpReg, src.goVar)
 			}
-			g.emit("\tctx.EmitCvtInt64ToFloat64(RegX0, %s)", tmpReg)
+			g.emit("\tctx.EmitInt64ToFloatBits(%s)", tmpReg)
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s}", dv, tmpReg)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
@@ -9438,7 +9416,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				break
 			}
 			if array, ok := ptr.Elem().Underlying().(*types.Array); ok && isScmerType(array.Elem()) {
-				elemSize := types.SizesFor("gc", "amd64").Sizeof(array.Elem())
+				elemSize := targetSizes.Sizeof(array.Elem())
 				stackBase := g.allocTemp("stackArray")
 				g.emit("%s := ctx.AllocStack(int32(%d))", stackBase, elemSize*array.Len())
 				g.emit("_ = %s", stackBase)
@@ -9664,7 +9642,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			} else {
 				address := g.allocDesc()
 				g.emit("%s := ctx.EmitSliceElementAddress(&%s, &%s, int32(%s))", address, sliceUse, indexUse, elemSize)
-				width := types.SizesFor("gc", "amd64").Sizeof(v.Val.Type())
+				width := targetSizes.Sizeof(v.Val.Type())
 				if width != 1 && width != 2 && width != 4 && width != 8 {
 					panic(fmt.Sprintf("unsupported slice element store width %d for %s", width, v.Val.Type()))
 				}
@@ -9992,7 +9970,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		sliceType, isGoSlice := v.X.Type().Underlying().(*types.Slice)
 		elemSize := int64(1)
 		if isGoSlice {
-			elemSize = types.SizesFor("gc", "amd64").Sizeof(sliceType.Elem())
+			elemSize = targetSizes.Sizeof(sliceType.Elem())
 		}
 		var low genVal
 		if v.Low == nil {
@@ -10042,8 +10020,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emit("\t\tctx.EmitMovRegReg(%s, %s.Reg)", lenReg, high.goVar)
 		g.emit("\t}")
 		g.emit("\tif %s.Loc == LocImm {", low.goVar)
-		g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", low.goVar)
-		g.emit("\t\tctx.EmitSubInt64(%s, RegR11)", lenReg)
+		g.emit("\t\tctx.EmitMovRegImm64(ctx.ScratchReg, uint64(%s.Imm.Int()))", low.goVar)
+		g.emit("\t\tctx.EmitSubInt64(%s, ctx.ScratchReg)", lenReg)
 		g.emit("\t} else {")
 		g.emit("\t\tctx.EmitSubInt64(%s, %s.Reg)", lenReg, low.goVar)
 		g.emit("\t}")

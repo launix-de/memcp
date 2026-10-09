@@ -1,4 +1,4 @@
-//go:build goexperiment.jit && amd64
+//go:build goexperiment.jit && (amd64 || arm64 || riscv64)
 
 /*
 Copyright (C) 2026  Carl-Philip Hänsch
@@ -88,8 +88,8 @@ func CompileJITStorageReaders(getValue JITStorageGetValueEmitter, getValueRange 
 		requests = append(requests, jitStorageCompileRequest{jitStorageGetValueRangeABI, func(ctx *JITContext) {
 			recid := jitStorageScalarArg(ctx, RegRAX)
 			count := jitStorageScalarArg(ctx, RegRBX)
-			target := jitStorageSliceArg(ctx, RegRCX, RegRDI, RegRSI)
-			stride := jitStorageScalarArg(ctx, RegR8)
+			target := jitStorageSliceArg(ctx, RegRCX, GoABIIntRegs[3], GoABIIntRegs[4])
+			stride := jitStorageScalarArg(ctx, GoABIIntRegs[5])
 			result := JITValueDesc{Loc: LocStackPair, Type: tagNil, StackOff: ctx.AllocStack(16), Rooted: true}
 			_ = getValueRange(ctx, recid, count, target, stride, result)
 		}})
@@ -97,8 +97,8 @@ func CompileJITStorageReaders(getValue JITStorageGetValueEmitter, getValueRange 
 	if getValueMulti != nil {
 		requests = append(requests, jitStorageCompileRequest{jitStorageGetValueMultiABI, func(ctx *JITContext) {
 			recids := jitStorageSliceArg(ctx, RegRAX, RegRBX, RegRCX)
-			target := jitStorageSliceArg(ctx, RegRDI, RegRSI, RegR8)
-			stride := jitStorageScalarArg(ctx, RegR9)
+			target := jitStorageSliceArg(ctx, GoABIIntRegs[3], GoABIIntRegs[4], GoABIIntRegs[5])
+			stride := jitStorageScalarArg(ctx, GoABIIntRegs[6])
 			result := JITValueDesc{Loc: LocStackPair, Type: tagNil, StackOff: ctx.AllocStack(16), Rooted: true}
 			_ = getValueMulti(ctx, recids, target, stride, result)
 		}})
@@ -195,7 +195,7 @@ func CompileJITFilterStorage(proc *Proc, valueTypes []uint8, readers []JITStorag
 
 func emitJITFilterBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8, readers []JITStorageGetValueEmitter) {
 	recids := jitStorageSliceArg(ctx, RegRAX, RegRBX, RegRCX)
-	values := jitStorageSliceArg(ctx, RegRDI, RegRSI, RegR8)
+	values := jitStorageSliceArg(ctx, GoABIIntRegs[3], GoABIIntRegs[4], GoABIIntRegs[5])
 	ctx.StabilizeDescForControlFlow(&recids)
 	ctx.StabilizeDescForControlFlow(&values)
 	rowOff := ctx.AllocStack(8)
@@ -361,8 +361,8 @@ func emitJITMapReduceBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8) {
 	// stack pair so calls, type changes and stack growth remain safe. Physical
 	// storage inputs retain their exact types across the same backedge.
 	accumulator := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX}
-	values := jitStorageSliceArg(ctx, RegRCX, RegRDI, RegRSI)
-	rows := jitStorageScalarArg(ctx, RegR8)
+	values := jitStorageSliceArg(ctx, RegRCX, GoABIIntRegs[3], GoABIIntRegs[4])
+	rows := jitStorageScalarArg(ctx, GoABIIntRegs[5])
 	result := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX}
 	ctx.BindReg(RegRAX, &accumulator)
 	ctx.BindReg(RegRBX, &accumulator)
@@ -580,15 +580,12 @@ func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmit
 		}
 	}()
 
-	allRegs := uint64((1 << uint(RegRAX)) | (1 << uint(RegRBX)) | (1 << uint(RegRCX)) |
-		(1 << uint(RegRDX)) | (1 << uint(RegRSI)) | (1 << uint(RegRDI)) |
-		(1 << uint(RegR8)) | (1 << uint(RegR9)) | (1 << uint(RegR10)) |
-		(1 << uint(RegR13)) | (1 << uint(RegR15)))
+	allRegs := jitDefaultFreeGPRegs() | 1<<uint(RegRAX) | 1<<uint(RegRBX) | jitStorageABIInputRegisters(abi)
 	occupied := jitStorageABIInputRegisters(abi)
 	if abi == jitStorageGetValueABI {
 		occupied |= 1<<uint(RegRAX) | 1<<uint(RegRBX)
 	}
-	registerBank := jitX86RegisterBank
+	registerBank := jitNativeRegisterBank
 	if registerInputs {
 		// Four temporaries cover the deepest current getter expression while
 		// leaving the remaining registers available to preplanned loop homes.
@@ -608,7 +605,7 @@ func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmit
 		ScratchReg:               RegR11,
 		ResultPtrReg:             RegRAX,
 		ResultAuxReg:             RegRBX,
-		LastIntReg:               RegR15,
+		LastIntReg:               jitLastGPReg,
 		HasFrame:                 true,
 		FrameRoots:               make(map[jitStackRoot]struct{}),
 		Arena:                    buf.arena,
@@ -618,17 +615,23 @@ func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmit
 	stackRetry := ctx.ReserveLabel()
 	stackGrow := ctx.ReserveLabel()
 	ctx.MarkLabel(stackRetry)
-	ctx.emitMovRegReg(RegR11, RegRSP)
-	ctx.emitBytes(0x49, 0x81, 0xEB)
-	stackCheckFixup := ctx.Ptr
-	ctx.emitU32(0)
-	ctx.EmitJcc(CondUnsignedBelow, stackGrow)
-	ctx.emitBytes(0x4D, 0x3B, 0x9E)
-	ctx.emitU32(uint32(guardOffset))
-	ctx.EmitJcc(CondUnsignedBelowOrEqual, stackGrow)
+	var stackCheckFixup unsafe.Pointer
+	if jitPortableBackend {
+		stackCheckFixup = jitEmitStackCheck(ctx, int32(guardOffset), stackGrow)
+		jitArchEmitNative(ctx, jitNativeProlog, 0, 0, 0, 0)
+	} else {
+		ctx.emitMovRegReg(RegR11, RegRSP)
+		ctx.emitBytes(0x49, 0x81, 0xEB)
+		stackCheckFixup = ctx.Ptr
+		ctx.emitU32(0)
+		ctx.EmitJcc(CondUnsignedBelow, stackGrow)
+		ctx.emitBytes(0x4D, 0x3B, 0x9E)
+		ctx.emitU32(uint32(guardOffset))
+		ctx.EmitJcc(CondUnsignedBelowOrEqual, stackGrow)
 
-	ctx.emitByte(0x55)
-	ctx.emitBytes(0x48, 0x89, 0xE5)
+		ctx.emitByte(0x55)
+		ctx.emitBytes(0x48, 0x89, 0xE5)
+	}
 	frameFixup := ctx.EmitSubRSP32Fixup()
 	frameInit := ctx.ReserveLabel()
 	frameBody := ctx.ReserveLabel()
@@ -648,7 +651,7 @@ func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmit
 	// already-emitted body to the entry instead of charging every scalar read
 	// for an unused stack probe, frame and root initialization.
 	leaf := ctx.MaxBPOffset == leafFrameLimit && ctx.MaxSpillOffset == 0 &&
-		ctx.MaxDynamicSP == 0 && len(ctx.Safepoints) == 0
+		ctx.MaxDynamicSP == 0 && len(ctx.Safepoints) == 0 && !jitPortableBackend
 	if leaf {
 		ctx.emitByte(0xC3)
 		// Discard the two unresolved prologue-to-morestack fixups. A proven leaf
@@ -675,17 +678,25 @@ func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmit
 	frameSize := (ctx.MaxBPOffset + ctx.MaxSpillOffset + 15) &^ 15
 	buf.stackFrameSize = frameSize
 	ctx.PatchInt32(frameFixup, frameSize)
-	checkedFrame := frameSize + ctx.MaxDynamicSP + 8 - int32(stackSmall)
+	recordBytes := int32(8)
+	if jitPortableBackend {
+		recordBytes = 16
+	}
+	checkedFrame := frameSize + ctx.MaxDynamicSP + recordBytes - int32(stackSmall)
 	if checkedFrame < 0 {
 		checkedFrame = 0
 	}
 	ctx.PatchInt32(stackCheckFixup, checkedFrame)
-	ctx.emitByte(0xC9)
-	ctx.emitByte(0xC3)
+	if jitPortableBackend {
+		jitArchEmitNative(ctx, jitNativeEpilog, 0, 0, 0, 0)
+	} else {
+		ctx.emitByte(0xC9)
+		ctx.emitByte(0xC3)
+	}
 
 	ctx.MarkLabel(frameInit)
 	if frameRoots := jitSortedFrameRoots(ctx.FrameRoots); len(frameRoots) != 0 {
-		ctx.emitBytes(0x45, 0x31, 0xDB)
+		ctx.emitXorReg(RegR11)
 		for _, root := range frameRoots {
 			base := RegRSP
 			if root.base == jitStackRootFrameBP {
@@ -697,16 +708,20 @@ func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmit
 	ctx.EmitJmp(frameBody)
 
 	ctx.MarkLabel(stackGrow)
-	entryWords, entryPointers := jitStorageSpillEntryArgs(ctx, abi)
-	ctx.EmitMovRegImm64(RegR11, uint64(moreStackPC))
-	ctx.emitBytes(0x41, 0xFF, 0xD3)
-	ctx.Safepoints = append(ctx.Safepoints, jitSafepoint{
-		pcOffset:        int32(uintptr(ctx.Ptr) - uintptr(ctx.Start)),
-		entry:           true,
-		entryFrameWords: entryWords,
-		entryPointerMap: entryPointers,
-	})
-	jitStorageReloadEntryArgs(ctx, abi)
+	if jitPortableBackend {
+		jitEmitStorageStackGrow(ctx, abi, moreStackPC)
+	} else {
+		entryWords, entryPointers := jitStorageSpillEntryArgs(ctx, abi)
+		ctx.EmitMovRegImm64(RegR11, uint64(moreStackPC))
+		ctx.emitBytes(0x41, 0xFF, 0xD3)
+		ctx.Safepoints = append(ctx.Safepoints, jitSafepoint{
+			pcOffset:        int32(uintptr(ctx.Ptr) - uintptr(ctx.Start)),
+			entry:           true,
+			entryFrameWords: entryWords,
+			entryPointerMap: entryPointers,
+		})
+		jitStorageReloadEntryArgs(ctx, abi)
+	}
 	ctx.EmitJmp(stackRetry)
 
 	arenaOffset := 0
@@ -715,7 +730,9 @@ func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmit
 	}
 	buf.stackMaps = ctx.finalizeStackMaps(frameSize, arenaOffset)
 	ctx.ResolveFixupsFinal()
-	return int(uintptr(ctx.Ptr) - uintptr(ctx.Start)), ctx.ConstRoots, false, false
+	codeLen = int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+	jitFlushInstructionCache(uintptr(ctx.Start), uintptr(ctx.Ptr))
+	return codeLen, ctx.ConstRoots, false, false
 }
 
 func jitStorageABIInputRegisters(abi jitStorageABI) uint64 {
@@ -724,13 +741,13 @@ func jitStorageABIInputRegisters(abi jitStorageABI) uint64 {
 	case jitStorageGetValueABI:
 		registers = []Reg{RegRAX}
 	case jitStorageGetValueRangeABI:
-		registers = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8}
+		registers = []Reg{RegRAX, RegRBX, RegRCX, GoABIIntRegs[3], GoABIIntRegs[4], GoABIIntRegs[5]}
 	case jitStorageGetValueMultiABI:
-		registers = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8, RegR9}
+		registers = []Reg{RegRAX, RegRBX, RegRCX, GoABIIntRegs[3], GoABIIntRegs[4], GoABIIntRegs[5], GoABIIntRegs[6]}
 	case jitMapReduceBufferABI:
-		registers = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8}
+		registers = []Reg{RegRAX, RegRBX, RegRCX, GoABIIntRegs[3], GoABIIntRegs[4], GoABIIntRegs[5]}
 	case jitFilterBufferABI:
-		registers = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8}
+		registers = []Reg{RegRAX, RegRBX, RegRCX, GoABIIntRegs[3], GoABIIntRegs[4], GoABIIntRegs[5]}
 	}
 	var mask uint64
 	for _, reg := range registers {
@@ -748,34 +765,34 @@ func jitStorageSpillEntryArgs(ctx *JITContext, abi jitStorageABI) (uintptr, []by
 		ctx.emitStoreRegMem32(RegRAX, RegRSP, 8)
 		ctx.emitStoreRegMem32(RegRBX, RegRSP, 12)
 		ctx.EmitStoreRegMem(RegRCX, RegRSP, 16)
-		ctx.EmitStoreRegMem(RegRDI, RegRSP, 24)
-		ctx.EmitStoreRegMem(RegRSI, RegRSP, 32)
-		ctx.EmitStoreRegMem(RegR8, RegRSP, 40)
+		ctx.EmitStoreRegMem(GoABIIntRegs[3], RegRSP, 24)
+		ctx.EmitStoreRegMem(GoABIIntRegs[4], RegRSP, 32)
+		ctx.EmitStoreRegMem(GoABIIntRegs[5], RegRSP, 40)
 		return 6, []byte{0b00000100}
 	case jitStorageGetValueMultiABI:
 		ctx.EmitStoreRegMem(RegRAX, RegRSP, 8)
 		ctx.EmitStoreRegMem(RegRBX, RegRSP, 16)
 		ctx.EmitStoreRegMem(RegRCX, RegRSP, 24)
-		ctx.EmitStoreRegMem(RegRDI, RegRSP, 32)
-		ctx.EmitStoreRegMem(RegRSI, RegRSP, 40)
-		ctx.EmitStoreRegMem(RegR8, RegRSP, 48)
-		ctx.EmitStoreRegMem(RegR9, RegRSP, 56)
+		ctx.EmitStoreRegMem(GoABIIntRegs[3], RegRSP, 32)
+		ctx.EmitStoreRegMem(GoABIIntRegs[4], RegRSP, 40)
+		ctx.EmitStoreRegMem(GoABIIntRegs[5], RegRSP, 48)
+		ctx.EmitStoreRegMem(GoABIIntRegs[6], RegRSP, 56)
 		return 8, []byte{0b00010010}
 	case jitMapReduceBufferABI:
 		ctx.EmitStoreRegMem(RegRAX, RegRSP, 8)
 		ctx.EmitStoreRegMem(RegRBX, RegRSP, 16)
 		ctx.EmitStoreRegMem(RegRCX, RegRSP, 24)
-		ctx.EmitStoreRegMem(RegRDI, RegRSP, 32)
-		ctx.EmitStoreRegMem(RegRSI, RegRSP, 40)
-		ctx.EmitStoreRegMem(RegR8, RegRSP, 48)
+		ctx.EmitStoreRegMem(GoABIIntRegs[3], RegRSP, 32)
+		ctx.EmitStoreRegMem(GoABIIntRegs[4], RegRSP, 40)
+		ctx.EmitStoreRegMem(GoABIIntRegs[5], RegRSP, 48)
 		return 7, []byte{0b00001010}
 	case jitFilterBufferABI:
 		ctx.EmitStoreRegMem(RegRAX, RegRSP, 8)
 		ctx.EmitStoreRegMem(RegRBX, RegRSP, 16)
 		ctx.EmitStoreRegMem(RegRCX, RegRSP, 24)
-		ctx.EmitStoreRegMem(RegRDI, RegRSP, 32)
-		ctx.EmitStoreRegMem(RegRSI, RegRSP, 40)
-		ctx.EmitStoreRegMem(RegR8, RegRSP, 48)
+		ctx.EmitStoreRegMem(GoABIIntRegs[3], RegRSP, 32)
+		ctx.EmitStoreRegMem(GoABIIntRegs[4], RegRSP, 40)
+		ctx.EmitStoreRegMem(GoABIIntRegs[5], RegRSP, 48)
 		return 7, []byte{0b00010010}
 	default:
 		panic("jit: unknown storage ABI")
@@ -790,35 +807,39 @@ func jitStorageReloadEntryArgs(ctx *JITContext, abi jitStorageABI) {
 		ctx.emitMovRegMem32(RegRAX, RegRSP, 8)
 		ctx.emitMovRegMem32(RegRBX, RegRSP, 12)
 		ctx.EmitMovRegMem(RegRCX, RegRSP, 16)
-		ctx.EmitMovRegMem(RegRDI, RegRSP, 24)
-		ctx.EmitMovRegMem(RegRSI, RegRSP, 32)
-		ctx.EmitMovRegMem(RegR8, RegRSP, 40)
+		ctx.EmitMovRegMem(GoABIIntRegs[3], RegRSP, 24)
+		ctx.EmitMovRegMem(GoABIIntRegs[4], RegRSP, 32)
+		ctx.EmitMovRegMem(GoABIIntRegs[5], RegRSP, 40)
 	case jitStorageGetValueMultiABI:
 		ctx.EmitMovRegMem(RegRAX, RegRSP, 8)
 		ctx.EmitMovRegMem(RegRBX, RegRSP, 16)
 		ctx.EmitMovRegMem(RegRCX, RegRSP, 24)
-		ctx.EmitMovRegMem(RegRDI, RegRSP, 32)
-		ctx.EmitMovRegMem(RegRSI, RegRSP, 40)
-		ctx.EmitMovRegMem(RegR8, RegRSP, 48)
-		ctx.EmitMovRegMem(RegR9, RegRSP, 56)
+		ctx.EmitMovRegMem(GoABIIntRegs[3], RegRSP, 32)
+		ctx.EmitMovRegMem(GoABIIntRegs[4], RegRSP, 40)
+		ctx.EmitMovRegMem(GoABIIntRegs[5], RegRSP, 48)
+		ctx.EmitMovRegMem(GoABIIntRegs[6], RegRSP, 56)
 	case jitMapReduceBufferABI:
 		ctx.EmitMovRegMem(RegRAX, RegRSP, 8)
 		ctx.EmitMovRegMem(RegRBX, RegRSP, 16)
 		ctx.EmitMovRegMem(RegRCX, RegRSP, 24)
-		ctx.EmitMovRegMem(RegRDI, RegRSP, 32)
-		ctx.EmitMovRegMem(RegRSI, RegRSP, 40)
-		ctx.EmitMovRegMem(RegR8, RegRSP, 48)
+		ctx.EmitMovRegMem(GoABIIntRegs[3], RegRSP, 32)
+		ctx.EmitMovRegMem(GoABIIntRegs[4], RegRSP, 40)
+		ctx.EmitMovRegMem(GoABIIntRegs[5], RegRSP, 48)
 	case jitFilterBufferABI:
 		ctx.EmitMovRegMem(RegRAX, RegRSP, 8)
 		ctx.EmitMovRegMem(RegRBX, RegRSP, 16)
 		ctx.EmitMovRegMem(RegRCX, RegRSP, 24)
-		ctx.EmitMovRegMem(RegRDI, RegRSP, 32)
-		ctx.EmitMovRegMem(RegRSI, RegRSP, 40)
-		ctx.EmitMovRegMem(RegR8, RegRSP, 48)
+		ctx.EmitMovRegMem(GoABIIntRegs[3], RegRSP, 32)
+		ctx.EmitMovRegMem(GoABIIntRegs[4], RegRSP, 40)
+		ctx.EmitMovRegMem(GoABIIntRegs[5], RegRSP, 48)
 	}
 }
 
 func (ctx *JITContext) emitStoreRegMem32(src, base Reg, disp int32) {
+	if jitPortableBackend {
+		jitArchEmitStore32(ctx, src, base, disp)
+		return
+	}
 	rex := byte(0x40)
 	needRex := false
 	if src >= 8 {
@@ -861,4 +882,39 @@ func (ctx *JITContext) emitStoreRegMem32(src, base Reg, disp int32) {
 
 func (ctx *JITContext) emitMovRegMem32(dst, base Reg, disp int32) {
 	ctx.emitRegMemOp32(0x8B, dst, base, disp)
+}
+
+// Native entry spill homes belong to a temporary JIT frame, so morestack can
+// relocate pointers using precisely the same unwind recipe as body calls.
+func jitEmitStorageStackGrow(ctx *JITContext, abi jitStorageABI, moreStackPC uintptr) {
+	jitArchEmitNative(ctx, jitNativeProlog, 0, 0, 0, 0)
+	jitArchEmitNative(ctx, jitNativeStackAdjust, 0, 0, 0, -64)
+	mask := jitStorageABIInputRegisters(abi)
+	for index, reg := range GoABIIntRegs {
+		if mask&(1<<uint(reg)) != 0 {
+			ctx.EmitStoreRegMem(reg, RegRSP, int32(index*8))
+		}
+	}
+	pointers := byte(0)
+	switch abi {
+	case jitStorageGetValueRangeABI:
+		pointers = 1 << 2
+	case jitStorageGetValueMultiABI:
+		pointers = 1 | 1<<3
+	case jitMapReduceBufferABI:
+		pointers = 1 | 1<<2
+	case jitFilterBufferABI:
+		pointers = 1 | 1<<3
+	}
+	ctx.EmitMovRegImm64(jitNativeTemp, uint64(moreStackPC))
+	jitArchEmitNative(ctx, jitNativeMoreStackCall, jitNativeTemp, 0, 0, 0)
+	ctx.Safepoints = append(ctx.Safepoints, jitSafepoint{pcOffset: int32(uintptr(ctx.Ptr) - uintptr(ctx.Start)), entry: true, entryFrameWords: 9, entryPointerMap: []byte{pointers, 0}})
+	jitArchEmitNative(ctx, jitNativeAddress, RegRBP, RegRSP, 0, 64)
+	for index, reg := range GoABIIntRegs {
+		if mask&(1<<uint(reg)) != 0 {
+			ctx.EmitMovRegMem(reg, RegRSP, int32(index*8))
+		}
+	}
+	jitArchEmitNative(ctx, jitNativeStackAdjust, 0, 0, 0, 64)
+	jitArchEmitNative(ctx, jitNativeLeave, 0, 0, 0, 0)
 }

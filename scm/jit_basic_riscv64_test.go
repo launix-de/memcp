@@ -69,13 +69,35 @@ func TestJITRISCV64SelectsImmediateAndLateLoadOperands(t *testing.T) {
 	ctx.EmitIntBinaryImm(JITIntSub, 64, RegRAX, -8)
 	stack := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: 8}
 	ctx.EmitIntBinary(JITIntAdd, 64, RegRAX, &stack)
+	ctx.EmitIntBinary(JITIntAdd, 32, RegRAX, &stack)
 
-	want := []uint32{0x00750513, 0x00850513, 0x00813F03, 0x01E50533}
+	want := []uint32{
+		0x00750513, 0x00850513, 0x00813F03, 0x01E50533,
+		0x00816F03, 0x01E50533, 0x02051513, 0x02055513,
+	}
 	got := make([]uint32, len(want))
 	for index := range got {
 		got[index] = binary.LittleEndian.Uint32(buffer[index*4:])
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("unexpected riscv64 selection:\n got %#x\nwant %#x", got, want)
+	}
+}
+
+func TestJITRISCV64AtomicOrdering(t *testing.T) {
+	buffer := make([]byte, 64)
+	ctx := &JITContext{
+		Start: unsafe.Pointer(&buffer[0]), Ptr: unsafe.Pointer(&buffer[0]), End: unsafe.Pointer(&buffer[len(buffer)-1]),
+		ScratchReg: RegR11, StackReg: RegRSP, FrameReg: RegRBP,
+	}
+	ctx.EmitAtomicLoad64(RegRAX, RegRBX, 0)
+	ctx.EmitAtomicStore64(RegRAX, RegRBX, 0)
+	// LR.D.AQ A0, (A1); AMOSWAP.D.AQRL ZERO, A0, (A1).
+	// Ordinary LD/SD would read/write the right value but lose Go ordering.
+	want := []uint32{0x1405B52F, 0x0EA5B02F}
+	for index, instruction := range want {
+		if got := binary.LittleEndian.Uint32(buffer[index*4:]); got != instruction {
+			t.Fatalf("atomic instruction %d = %#08x, want %#08x", index, got, instruction)
+		}
 	}
 }

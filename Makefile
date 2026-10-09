@@ -213,6 +213,20 @@ jit-nophp: jit-toolchain
 		GOROOT="$(JIT_GOROOT)" GOEXPERIMENT=jit "$(JIT_GOROOT)/bin/go" \
 		build $(BUILD_FLAGS) -tags=nophp -ldflags="$(LDFLAGS)" -o memcp .
 
+# Cross execution uses static user-mode QEMU and needs no target C libraries.
+# Install qemu-user-static; override JIT_CROSS_ARCH and JIT_CROSS_EMULATOR to
+# select another supported Linux target.
+JIT_CROSS_ARCH ?= arm64
+JIT_CROSS_EMULATOR_arm64 := qemu-aarch64-static
+JIT_CROSS_EMULATOR_riscv64 := qemu-riscv64-static
+JIT_CROSS_EMULATOR ?= $(JIT_CROSS_EMULATOR_$(JIT_CROSS_ARCH))
+jit-cross-test: jit-toolchain
+	@test -n "$(JIT_CROSS_EMULATOR)" || { echo "Use arm64 or riscv64 for JIT_CROSS_ARCH" >&2; exit 1; }
+	@command -v "$(JIT_CROSS_EMULATOR)" >/dev/null
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(JIT_CROSS_ARCH) \
+		GOROOT="$(JIT_GOROOT)" GOEXPERIMENT=jit "$(JIT_GOROOT)/bin/go" \
+		test -tags=nophp -exec="$(JIT_CROSS_EMULATOR)" ./scm ./storage
+
 jitgen:
 	@set -eu; \
 	jitgen_bin=$$(mktemp /tmp/memcp-jitgen.XXXXXX); \

@@ -896,13 +896,14 @@ type JITContext struct {
 	FPRegisterBank JITRegisterBank
 	// Architecture register roles let common lowering describe placement without
 	// depending on one instruction set's register names.
-	StackReg     Reg
-	FrameReg     Reg
-	ScratchReg   Reg
-	ResultPtrReg Reg
-	ResultAuxReg Reg
-	LastIntReg   Reg
-	HasFrame     bool
+	StackReg           Reg
+	FrameReg           Reg
+	ScratchReg         Reg
+	ResultPtrReg       Reg
+	ResultAuxReg       Reg
+	NativeFloatCompare bool
+	LastIntReg         Reg
+	HasFrame           bool
 	// OriginalArgsOff stores the incoming variadic slice data pointer in the
 	// invocation-local frame.
 	// Optimized local frames may repurpose SliceBase, while hidden GC roots still
@@ -3584,10 +3585,10 @@ func JITPanic(v Scmer) {
 	jitPanic(v)
 }
 
-// GoABIIntRegs lists integer argument/result registers in Go's amd64
-// ABIInternal order. R11 is the ninth argument register, so indirect static
-// calls use the otherwise reserved R12 register as their call target.
-var GoABIIntRegs = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8, RegR9, RegR10, RegR11}
+// GoABIIntRegs lists integer argument/result registers in the target's
+// ABIInternal order. The architecture backend supplies this bank separately
+// from the allocator's persistent register homes.
+var GoABIIntRegs = jitGoABIIntRegs()
 
 type goCallArgWord struct {
 	loc      JITLoc
@@ -4129,7 +4130,7 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 		panic("jit: too many result words for Go ABI")
 	}
 	argLocations, stackArgWords := layoutGoCallArgs(argWords)
-	if stackArgWords*8 > int(jitGoSpillBytes) {
+	if len(argWords)*8 > int(jitGoSpillBytes) || stackArgWords*8 > int(jitGoSpillBytes) {
 		panic("jit: Go call arguments exceed reserved spill area")
 	}
 	// Owner-aware liveness with conservative fallback.
@@ -4185,7 +4186,7 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 			if argLocations[i].inReg {
 				continue
 			}
-			dstOff := argLocations[i].stackOff
+			dstOff := argLocations[i].stackOff + jitGoStackArgOffset
 			switch argWords[i].loc {
 			case LocReg:
 				ctx.EmitStoreRegMem(argWords[i].reg, RegRSP, dstOff)
@@ -4286,13 +4287,7 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	// After restoring saved regs, these slots will be at [RSP+0..].
 	resultBytes := numResultWords * 8
 	if resultBytes > 0 {
-		if resultBytes < 128 {
-			ctx.emitBytes(0x48, 0x83, 0xEC, byte(resultBytes)) // SUB RSP, imm8
-		} else {
-			ctx.emitBytes(0x48, 0x81, 0xEC)
-			ctx.emitU32(uint32(resultBytes)) // SUB RSP, imm32
-		}
-		ctx.addDynamicStack(int32(resultBytes))
+		ctx.EmitReserveStackBytes(int32(resultBytes))
 	}
 
 	// Save live registers (PUSH)
@@ -4984,7 +4979,9 @@ func (ctx *JITContext) ResolveFixups() {
 			continue
 		}
 		patchAddr := unsafe.Add(ctx.Start, int(f.CodePos))
-		if f.Relative {
+		if f.Relative && jitPortableBackend {
+			jitArchPatchBranch(patchAddr, targetPos-f.CodePos)
+		} else if f.Relative {
 			offset := targetPos - (f.CodePos + int32(f.Size))
 			*(*int32)(patchAddr) = offset
 			ctx.tryRewriteTrailingJmpToNop(f, offset)
@@ -5005,7 +5002,9 @@ func (ctx *JITContext) ResolveFixupsFinal() {
 			panic(fmt.Sprintf("jit: undefined label %d referenced at code offset %d", f.LabelID, f.CodePos))
 		}
 		patchAddr := unsafe.Add(ctx.Start, int(f.CodePos))
-		if f.Relative {
+		if f.Relative && jitPortableBackend {
+			jitArchPatchBranch(patchAddr, targetPos-f.CodePos)
+		} else if f.Relative {
 			offset := targetPos - (f.CodePos + int32(f.Size))
 			*(*int32)(patchAddr) = offset
 			ctx.tryRewriteTrailingJmpToNop(f, offset)

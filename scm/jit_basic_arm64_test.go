@@ -69,12 +69,34 @@ func TestJITARM64SelectsImmediateAndLateLoadOperands(t *testing.T) {
 	stack := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: 8}
 	ctx.EmitIntBinary(JITIntAdd, 64, RegRAX, &stack)
 
-	want := []uint32{0x91001C00, 0x91400400, 0xF94007F0, 0x8B100000}
+	want := []uint32{0x91001C00, 0x91400400, 0x910003F1, 0xF9400630, 0x8B100000}
 	got := make([]uint32, len(want))
 	for index := range got {
 		got[index] = binary.LittleEndian.Uint32(buffer[index*4:])
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("unexpected arm64 selection:\n got %#x\nwant %#x", got, want)
+	}
+}
+
+func TestJITARM64AtomicOrdering(t *testing.T) {
+	buffer := make([]byte, 64)
+	ctx := &JITContext{
+		Start: unsafe.Pointer(&buffer[0]), Ptr: unsafe.Pointer(&buffer[0]), End: unsafe.Pointer(&buffer[len(buffer)-1]),
+		ScratchReg: RegR11, StackReg: RegRSP, FrameReg: RegRBP,
+	}
+	ctx.EmitAtomicLoad64(RegRAX, RegRBX, 0)
+	load := binary.LittleEndian.Uint32(unsafe.Slice((*byte)(unsafe.Add(ctx.Ptr, -4)), 4))
+	ctx.EmitAtomicStore64(RegRAX, RegRBX, 0)
+	store := binary.LittleEndian.Uint32(unsafe.Slice((*byte)(unsafe.Add(ctx.Ptr, -4)), 4))
+	// LDAR/STLR provide Go's acquire/release ordering. Ordinary LDR/STR
+	// would pass the value roundtrip while losing synchronization. Ignore the
+	// address-register field so choosing another reserved scratch remains valid.
+	const addressMask = uint32(31 << 5)
+	for index, instruction := range []uint32{load, store} {
+		want := []uint32{0xC8DFFC00, 0xC89FFC00}[index] | uint32(RegRAX)
+		if got := instruction &^ addressMask; got != want {
+			t.Fatalf("atomic instruction %d = %#08x, want %#08x", index, got, want)
+		}
 	}
 }

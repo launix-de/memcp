@@ -840,3 +840,72 @@ func minimum(a ...Scmer) Scmer {
 		t.Fatal("branch materializes float comparison")
 	}
 }
+
+func TestTargetLayoutPreservesPointersAndTrailingEmptyFields(t *testing.T) {
+	previous := targetSizes
+	defer func() { targetSizes = previous }()
+	for _, arch := range []string{"amd64", "arm64", "riscv64"} {
+		t.Run(arch, func(t *testing.T) {
+			targetSizes = types.SizesFor("gc", arch)
+			fields := []*types.Var{
+				types.NewVar(token.NoPos, nil, "value", types.Typ[types.Int64]),
+				types.NewVar(token.NoPos, nil, "pointer", types.NewPointer(types.Typ[types.Byte])),
+				types.NewVar(token.NoPos, nil, "empty", types.NewStruct(nil, nil)),
+			}
+			value := types.NewStruct(fields, nil)
+			if got := goCallWordCount(value); got != 3 {
+				t.Fatalf("trailing zero-size field: %d ABI words, want 3", got)
+			}
+			if got := goCallPointerMask(value); got != 2 {
+				t.Fatalf("pointer map: %03b, want 010", got)
+			}
+		})
+	}
+}
+
+func TestAtomicFieldAccessUsesSemanticEmitterAPI(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+import "sync/atomic"
+type Scmer struct{}
+func NewInt(int64) Scmer
+type StorageTest struct { value int64 }
+func GetValue(s *StorageTest, index uint32) Scmer {
+	atomic.StoreInt64(&s.value, int64(index))
+	return NewInt(atomic.LoadInt64(&s.value))
+}
+`, "GetValue")
+	code, errMsg := generateStorageBody("StorageTest", fn, nil, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	for _, api := range []string{"ctx.EmitAtomicLoad64(", "ctx.EmitAtomicStore64("} {
+		if !strings.Contains(code, api) {
+			t.Fatalf("missing %s in generated emitter:\n%s", api, code)
+		}
+	}
+}
+
+func TestGeneratedVariableShiftHasNoArchitectureRegisterContract(t *testing.T) {
+	for _, expression := range []string{"value << count", "value >> count", "value << (count % 64)"} {
+		fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func (Scmer) Int() int64
+func NewInt(int64) Scmer
+func shift(args ...Scmer) Scmer {
+	value, count := uint64(args[0].Int()), uint64(args[1].Int())
+	return NewInt(int64(`+expression+`))
+}`, "shift")
+		code, errMsg := generateClosure("shift", fn, nil)
+		if errMsg != "" {
+			t.Fatal(errMsg)
+		}
+		if !strings.Contains(code, "ctx.EmitShift") {
+			t.Fatalf("missing general shift API:\n%s", code)
+		}
+		for _, forbidden := range []string{"RegRCX", "RegR11", "rcxUsed", "RegCl"} {
+			if strings.Contains(code, forbidden) {
+				t.Fatalf("generated algorithm contains %s:\n%s", forbidden, code)
+			}
+		}
+	}
+}

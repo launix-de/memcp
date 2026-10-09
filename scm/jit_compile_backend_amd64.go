@@ -14,5 +14,5 @@ package scm
 import "unsafe"
 
 func jitCompileProcToExec(proc *Proc, buf *execBuf, recursiveLambdas bool) (int, []unsafe.Pointer, []*JITEntryPoint, bool, []JITHiddenArg, bool, JITCoverage) {
-	return jitCompileProcToExecAMD64(proc, buf, recursiveLambdas)
+	return jitCompileProcNative(proc, buf, recursiveLambdas)
 }

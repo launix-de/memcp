@@ -35,6 +35,10 @@ func arm64GPR(reg Reg) uint32 {
 func emitARM64(ctx *JITContext, instruction uint32) { ctx.emitU32(instruction) }
 
 func jitArchEmitMovRegReg(ctx *JITContext, dst, src Reg) {
+	if dst == RegRSP || src == RegRSP {
+		emitARM64(ctx, 0x91000000|arm64GPR(src)<<5|arm64GPR(dst))
+		return
+	}
 	// ORR Xd, XZR, Xm (MOV alias).
 	emitARM64(ctx, 0xAA0003E0|arm64GPR(src)<<16|arm64GPR(dst))
 }
@@ -51,32 +55,20 @@ func jitArchEmitMovRegImm64(ctx *JITContext, dst Reg, imm uint64) {
 }
 
 func jitArchEmitLoad64(ctx *JITContext, dst, base Reg, disp int32) {
-	rt, rn := arm64GPR(dst), arm64GPR(base)
-	if disp >= 0 && disp%8 == 0 && disp/8 < 4096 {
-		emitARM64(ctx, 0xF9400000|uint32(disp/8)<<10|rn<<5|rt) // LDR unsigned offset
-		return
-	}
-	if disp >= -256 && disp <= 255 {
-		emitARM64(ctx, 0xF8400000|(uint32(disp)&0x1ff)<<12|rn<<5|rt) // LDUR
-		return
-	}
-	panic("jit: arm64 load displacement is out of range")
+	arm64LoadStore(ctx, dst, base, disp, 8, 0xF9400000, 0xF8400000)
 }
-
 func jitArchEmitStore64(ctx *JITContext, src, base Reg, disp int32) {
-	rt, rn := arm64GPR(src), arm64GPR(base)
-	if disp >= 0 && disp%8 == 0 && disp/8 < 4096 {
-		emitARM64(ctx, 0xF9000000|uint32(disp/8)<<10|rn<<5|rt) // STR unsigned offset
-		return
-	}
-	if disp >= -256 && disp <= 255 {
-		emitARM64(ctx, 0xF8000000|(uint32(disp)&0x1ff)<<12|rn<<5|rt) // STUR
-		return
-	}
-	panic("jit: arm64 store displacement is out of range")
+	arm64LoadStore(ctx, src, base, disp, 8, 0xF9000000, 0xF8000000)
 }
 
 func arm64LoadStore(ctx *JITContext, reg, base Reg, disp int32, scale int32, unsignedBase, unscaledBase uint32) {
+	// A temporary push may move SP by eight bytes. Address through IP1 so
+	// memory operations obey ARM's SP alignment checks until the call is aligned.
+	if base == RegRSP {
+		temp := arm64TempExcept(reg)
+		jitArchEmitMovRegReg(ctx, temp, base)
+		base = temp
+	}
 	rt, rn := arm64GPR(reg), arm64GPR(base)
 	if disp >= 0 && disp%scale == 0 && disp/scale < 4096 {
 		emitARM64(ctx, unsignedBase|uint32(disp/scale)<<10|rn<<5|rt)
@@ -86,7 +78,9 @@ func arm64LoadStore(ctx *JITContext, reg, base Reg, disp int32, scale int32, uns
 		emitARM64(ctx, unscaledBase|(uint32(disp)&0x1ff)<<12|rn<<5|rt)
 		return
 	}
-	panic("jit: arm64 memory displacement is out of range")
+	temp := arm64TempExcept(reg, base)
+	arm64Address(ctx, temp, base, disp)
+	emitARM64(ctx, unsignedBase|uint32(temp)<<5|rt)
 }
 
 func jitArchEmitLoad8(ctx *JITContext, dst, base Reg, disp int32) {
@@ -166,7 +160,11 @@ func jitArchEmitIntBinary(ctx *JITContext, op JITIntOp, width uint8, dst Reg, ri
 	case jitIntOperandMem:
 		ctx.beginRegisterInstruction(jitRegisterMask(dst, right.base), jitRegisterMask(dst, scratch))
 		defer ctx.endRegisterInstruction()
-		jitArchEmitLoad64(ctx, scratch, right.base, right.disp)
+		if width == 32 {
+			jitArchEmitLoad32(ctx, scratch, right.base, right.disp)
+		} else {
+			jitArchEmitLoad64(ctx, scratch, right.base, right.disp)
+		}
 		arm64EmitIntBinaryReg(ctx, op, width, dst, scratch)
 	case jitIntOperandImm:
 		if arm64IntBinaryImmEncodable(op, right.imm) {
@@ -200,13 +198,22 @@ func arm64IntBinaryImmEncodable(op JITIntOp, imm int64) bool {
 
 func arm64EmitIntBinaryReg(ctx *JITContext, op JITIntOp, width uint8, dst, src Reg) {
 	if width == 32 {
+		rd, rn := arm64GPR(dst), arm64GPR(src)
 		switch op {
 		case JITIntAdd:
 			jitArchEmitAddInt32(ctx, dst, src)
 		case JITIntSub:
 			jitArchEmitSubInt32(ctx, dst, src)
+		case JITIntMul:
+			emitARM64(ctx, 0x1B007C00|rn<<16|rd<<5|rd)
+		case JITIntAnd:
+			emitARM64(ctx, 0x0A000000|rn<<16|rd<<5|rd)
+		case JITIntOr:
+			emitARM64(ctx, 0x2A000000|rn<<16|rd<<5|rd)
+		case JITIntXor:
+			emitARM64(ctx, 0x4A000000|rn<<16|rd<<5|rd)
 		default:
-			panic("jit: arm64 32-bit operation is not implemented")
+			panic("jit: invalid arm64 32-bit integer operation")
 		}
 		return
 	}

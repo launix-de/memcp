@@ -502,6 +502,24 @@ PATH="$(cd ../go-jit/bin && pwd):$PATH" GOEXPERIMENT=jit go build -o memcp
 PATH="$(cd ../go-jit/bin && pwd):$PATH" GOEXPERIMENT=jit go test ./scm
 ```
 
+The native JIT backends support AMD64, ARM64 and RISC-V64. `jitgen` runs on the
+host and emits one shared set of Go emitters, not one set per architecture.
+Algorithms use semantic operations and register roles from the shared API; instruction selection,
+register assignment and atomic memory ordering belong to the target backend.
+Type sizes follow the loaded package's target architecture. All three backends
+use the same 64-bit value layout; 32-bit targets are not supported by the JIT.
+
+For Linux cross-tests, install `qemu-user-static` and use the patched toolchain:
+
+```bash
+make jit-cross-test JIT_CROSS_ARCH=arm64
+make jit-cross-test JIT_CROSS_ARCH=riscv64
+```
+
+These targets cross-compile and execute the Scheme and storage Go tests under
+QEMU with PHP disabled. They require no target C compiler (`CGO_ENABLED=0`).
+The JIT CI runs the same architecture matrix.
+
 The JIT is deliberately guarded by `GOEXPERIMENT=jit`. A normal build with an
 official, unpatched Go compiler remains supported and uses the interpreter; it
 does not compile or activate the experimental runtime integration.
