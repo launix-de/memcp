@@ -590,7 +590,6 @@ func (s *StorageIndex) rowWithinBounds(bounds scanAccess, indexBounds *scanIndex
 		if i >= 64 && !s.columnIsSorted(i) {
 			continue
 		}
-		v := getter(i)
 		if i < 64 {
 			if unboundedMask&(uint64(1)<<i) != 0 {
 				continue
@@ -602,6 +601,7 @@ func (s *StorageIndex) rowWithinBounds(bounds scanAccess, indexBounds *scanIndex
 				continue // ordering or residual-only range, not an index restriction
 			}
 		}
+		v := getter(i)
 		if i == lastSorted {
 			upperLast := indexBounds.upperLast()
 			if scanAccessBoundaryHasUpperBound(bounds, i) {
