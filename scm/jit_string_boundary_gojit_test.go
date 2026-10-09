@@ -272,3 +272,70 @@ func TestJITSQLParameterizationSurvivesGC(t *testing.T) {
 	runtime.KeepAlive(got)
 	runtime.KeepAlive(query)
 }
+
+func jitTestDiscardedStringResult() Scmer {
+	return NewString(strings.Repeat("discarded-result-", 3))
+}
+
+func jitTestCollectedStringResult() Scmer {
+	runtime.GC()
+	return NewString("live-result")
+}
+
+func TestJITReusedGoResultSlotDoesNotExposeDiscardedPointer(t *testing.T) {
+	name := "jit_test_reused_go_result_slot"
+	declaration := &Declaration{
+		Name: name,
+		Fn:   func(...Scmer) Scmer { return jitTestCollectedStringResult() },
+		Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "string"},
+			JITEmit: func(ctx *JITContext, _ []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
+				state := ctx.SnapshotAllocState()
+				JITEmitGoCallResults(ctx, GoFuncAddr(jitTestDiscardedStringResult), nil, []uint8{2}, []uint8{1})
+				ctx.RestoreAllocState(state)
+				ctx.EmitGoCallToFrame(GoFuncAddr(runtime.GC), nil, nil)
+				values := JITEmitGoCallResults(ctx, GoFuncAddr(jitTestCollectedStringResult), nil, []uint8{2}, []uint8{1})
+				values[0].Type = tagString
+				return jitPlaceScmerIntoTarget(ctx, values[0], result)
+			}},
+	}
+	Declare(&Globalenv, declaration)
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda () (jit_test_reused_go_result_slot))`)
+	if got := Apply(compiled).String(); got != "live-result" {
+		t.Fatalf("Go result = %q, want live-result", got)
+	}
+}
+
+func jitTestCollectedVariadicResult(...Scmer) Scmer { return jitTestCollectedStringResult() }
+
+func TestJITReusedVariadicResultSlotDoesNotExposeDiscardedPointer(t *testing.T) {
+	name := "jit_test_reused_variadic_result_slot"
+	declaration := &Declaration{
+		Name: name,
+		Fn:   jitTestCollectedVariadicResult,
+		Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "string"},
+			JITEmit: func(ctx *JITContext, _ []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
+				state := ctx.SnapshotAllocState()
+				JITEmitGoCallResults(ctx, GoFuncAddr(jitTestDiscardedStringResult), nil, []uint8{2}, []uint8{1})
+				ctx.RestoreAllocState(state)
+				ctx.EmitGoCallToFrame(GoFuncAddr(runtime.GC), nil, nil)
+				value := ctx.EmitGoCallVariadic(jitTestCollectedVariadicResult, JITValueDesc{Loc: LocImm, Imm: NewNil()}, result)
+				value.Type = tagString
+				return value
+			}},
+	}
+	Declare(&Globalenv, declaration)
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda () (jit_test_reused_variadic_result_slot))`)
+	if got := Apply(compiled).String(); got != "live-result" {
+		t.Fatalf("Go result = %q, want live-result", got)
+	}
+}
