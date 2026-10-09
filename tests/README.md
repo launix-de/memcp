@@ -180,7 +180,11 @@ or group state during preparation. All seven verification pairs still rerun
 every case, including initially successful cases.
 
 `metadata.performance_shard_weight` is a positive integer used only to distribute
-whole suites across the existing runners. The default is 1. The expensive prefix
+whole suites across six runners for each native/JIT configuration. The default
+is 1. Two runners retain the heavy suites; four runners share the other suites,
+leaving additional capacity for complete seven-pair verification under the
+unchanged 15-minute limit.
+This increases concurrent runner capacity, not any job time budget. The expensive prefix
 and KPI suites use 128 to retain dedicated runners. Other suite weights include
 one source preparation and both measurement processes from CI artifacts, rather
 than just counting suite files. Weights are rounded to 15-second units; they

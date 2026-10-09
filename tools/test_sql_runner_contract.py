@@ -1814,11 +1814,13 @@ class PerformanceFixtureContractTests(unittest.TestCase):
 
     def test_shards_cover_each_suite_once_and_reject_invalid_indices(self):
         paths = [Path(f"suite-{index}") for index in range(13)]
-        assigned = []
-        for index in range(4):
-            with mock.patch.dict(os.environ, {"PERF_SHARD_INDEX": str(index), "PERF_SHARD_COUNT": "4"}):
-                assigned.extend(performance_shard_paths(paths))
-        self.assertCountEqual(assigned, paths)
+        for count in (4, 6):
+            with self.subTest(count=count):
+                assigned = []
+                for index in range(count):
+                    with mock.patch.dict(os.environ, {"PERF_SHARD_INDEX": str(index), "PERF_SHARD_COUNT": str(count)}):
+                        assigned.extend(performance_shard_paths(paths))
+                self.assertCountEqual(assigned, paths)
         for index, count in (("4", "4"), ("-1", "4"), ("0", "0")):
             with mock.patch.dict(os.environ, {"PERF_SHARD_INDEX": index, "PERF_SHARD_COUNT": count}), self.assertRaises(ValueError):
                 performance_shard_paths(paths)
@@ -1837,13 +1839,15 @@ class PerformanceFixtureContractTests(unittest.TestCase):
             path = self.root / f"weighted-{index:02d}.yaml"
             path.write_text(json.dumps({"metadata": {"performance_shard_weight": 64 if index < 2 else 1}}))
             paths.append(path)
-        shards = []
-        for index in range(4):
-            with mock.patch.dict(os.environ, {"PERF_SHARD_INDEX": str(index), "PERF_SHARD_COUNT": "4"}):
-                shards.append(performance_shard_paths(paths))
-        self.assertCountEqual([path for shard in shards for path in shard], paths)
-        self.assertEqual(shards[:2], [[paths[0]], [paths[1]]])
-        self.assertEqual([len(shard) for shard in shards[2:]], [6, 6])
+        for count in (4, 6):
+            with self.subTest(count=count):
+                shards = []
+                for index in range(count):
+                    with mock.patch.dict(os.environ, {"PERF_SHARD_INDEX": str(index), "PERF_SHARD_COUNT": str(count)}):
+                        shards.append(performance_shard_paths(paths))
+                self.assertCountEqual([path for shard in shards for path in shard], paths)
+                self.assertEqual(shards[:2], [[paths[0]], [paths[1]]])
+                self.assertEqual([len(shard) for shard in shards[2:]], [6, 6] if count == 4 else [3, 3, 3, 3])
         for bad in (0, -1, True, 1.5, "64"):
             paths[0].write_text(json.dumps({"metadata": {"performance_shard_weight": bad}}))
             with self.subTest(bad=bad), self.assertRaises(ValueError):

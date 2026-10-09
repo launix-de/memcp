@@ -36,7 +36,7 @@ jobs:
         run: test "$SHARD_RESULT" = success
 
   jit-performance-ab-shard:
-    name: jit-performance-ab (${{ matrix.shard }}/4)
+    name: jit-performance-ab (${{ matrix.shard }}/6)
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
@@ -46,10 +46,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5]
     env:
       PERF_SHARD_INDEX: ${{ matrix.shard }}
-      PERF_SHARD_COUNT: 4
+      PERF_SHARD_COUNT: 6
 
     steps:
       - name: Check out JIT merge candidate
