@@ -24,8 +24,12 @@ update_indexes() {
   timeout --kill-after=10s "$INDEX_TIMEOUT_SECONDS" \
     sudo apt-get "${apt_options[@]}" update --error-on=any
 }
-if ! update_indexes; then
-  echo '::warning title=CI package setup::APT index download failed; retrying once with the Ubuntu archive mirror'
+archive_selected=false
+select_archive_mirror() {
+  # A second failure on the recovery mirror remains an infrastructure error.
+  if "$archive_selected"; then
+    return 1
+  fi
   shopt -s nullglob
   source_files=("$APT_SOURCES_DIRECTORY/sources.list" \
     "$APT_SOURCES_DIRECTORY"/sources.list.d/*.list \
@@ -45,16 +49,35 @@ if ! update_indexes; then
       sudo sed -i \
         -e 's#http://azure\.archive\.ubuntu\.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' \
         -e 's#https://azure\.archive\.ubuntu\.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' \
-        "$source_file"
+        "$source_file" || return 1
     fi
   done
+  archive_selected=true
+}
+install_packages() {
+  timeout --kill-after=10s "$INSTALL_TIMEOUT_SECONDS" \
+    sudo apt-get "${apt_options[@]}" install -y "${packages[@]}"
+}
+if ! update_indexes; then
+  echo '::warning title=CI package setup::APT index download failed; retrying once with the Ubuntu archive mirror'
+  select_archive_mirror
   if ! update_indexes; then
     echo '::error title=CI package setup::INFRASTRUCTURE_FAILURE: package indexes unavailable after bounded recovery; build/tests have not started'
     exit 1
   fi
 fi
-if ! timeout --kill-after=10s "$INSTALL_TIMEOUT_SECONDS" \
-    sudo apt-get "${apt_options[@]}" install -y "${packages[@]}"; then
-  echo '::error title=CI package setup::INFRASTRUCTURE_FAILURE: required package installation failed; build/tests have not started'
-  exit 1
+if install_packages; then
+  exit 0
+else
+  install_status=$?
 fi
+# Dependency or configuration errors must not become a generic retry. GNU
+# timeout's status alone permits this one bounded mirror recovery.
+if [[ "$install_status" == 124 || "$install_status" == 137 ]] && select_archive_mirror; then
+  echo '::warning title=CI package setup::APT package installation timed out; retrying once with the Ubuntu archive mirror'
+  if update_indexes && install_packages; then
+    exit 0
+  fi
+fi
+echo '::error title=CI package setup::INFRASTRUCTURE_FAILURE: required package installation failed; build/tests have not started'
+exit 1
