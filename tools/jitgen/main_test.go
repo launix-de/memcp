@@ -224,6 +224,32 @@ func choose(a ...Scmer) Scmer {
 	}
 }
 
+func TestBranchWithoutPhiHelpersOnlySnapshotsRecursiveRenderer(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func (Scmer) Int() int64
+func choose(a ...Scmer) Scmer {
+	if a[0].Int() < a[1].Int() { return a[0] }
+	return a[1]
+}
+`, "choose")
+	code, errMsg := generateClosure("choose", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	// Recursive successor emission still needs a transaction: it overwrites
+	// shared descriptor bindings. Empty phi helpers need no such transaction.
+	if got := strings.Count(code, "ctx.SnapshotAllocState()"); got != 1 {
+		t.Fatalf("branch without phi helpers has %d allocator snapshots, want one:\n%s", got, code)
+	}
+	if got := strings.Count(code, "ctx.RestoreAllocState("); got != 1 {
+		t.Fatalf("branch without phi helpers has %d allocator restores, want one:\n%s", got, code)
+	}
+	if !strings.Contains(code, "ctx.FlushRegisterMoves()") {
+		t.Fatal("empty edge helpers lost the control-flow materialization barrier")
+	}
+}
+
 func TestFloatConversionUsesSharedTypedLowering(t *testing.T) {
 	fn := buildTestSSAFunction(t, `package sample
 type Scmer struct{}
@@ -816,6 +842,66 @@ func TestPhiOverlaySlotTrialsAreIsolated(t *testing.T) {
 	}
 	if slot := g.overlaySlot("d9"); slot != 1 {
 		t.Fatalf("parent slot = %d", slot)
+	}
+}
+
+func TestGeneralEdgesOnlyCopyConsumedDescriptorOverlays(t *testing.T) {
+	newGenerator := func() *codeGen {
+		return &codeGen{
+			fn:              &ssa.Function{Blocks: []*ssa.BasicBlock{{}}},
+			closureDescDecl: map[string]bool{"d0": true, "d1": true},
+			phiRegs:         map[string]string{"phi": "0"},
+			vals:            map[string]genVal{"phi": {goVar: "d0", isDesc: true}},
+		}
+	}
+	g := newGenerator()
+	g.fn.Blocks[0].Instrs = []ssa.Instruction{&ssa.Phi{}}
+	g.emitBuildPhiStateForEdge("general", 0, 0, "true")
+	code := g.w.String()
+	if strings.Contains(code, ".PhiValues") {
+		t.Fatal("general edge copied ignored PhiValues")
+	}
+	if strings.Contains(code, " = d0") || !strings.Contains(code, " = d1") {
+		t.Fatalf("general edge does not preserve only non-phi overlays:\n%s", code)
+	}
+	for _, general := range []string{"false", "ps.General"} {
+		g = newGenerator()
+		g.emitBuildPhiStateForEdge("specialized", 0, 0, general)
+		if code = g.w.String(); !strings.Contains(code, " = d0") || !strings.Contains(code, " = d1") {
+			t.Fatalf("potentially specialized edge lost its phi overlay:\n%s", code)
+		}
+	}
+	g = newGenerator()
+	delete(g.closureDescDecl, "d1")
+	g.emitBuildPhiStateForEdge("empty", 0, 0, "true")
+	if strings.Contains(g.w.String(), ".OverlayValues") {
+		t.Fatal("general edge allocated an overlay containing only ignored phis")
+	}
+}
+
+func TestKnownOverlayConsumersExcludeDescriptorsCreatedLater(t *testing.T) {
+	block := &ssa.BasicBlock{}
+	g := &codeGen{
+		fn:               &ssa.Function{Blocks: []*ssa.BasicBlock{block}},
+		closureDescDecl:  map[string]bool{"d0": true, "d1": true},
+		overlayConsumers: map[*ssa.BasicBlock][]string{block: {"d0"}},
+	}
+	g.emitBuildPhiStateForEdge("edge", 0, 0, "false")
+	if code := g.w.String(); !strings.Contains(code, " = d0") || strings.Contains(code, " = d1") {
+		t.Fatalf("known renderer received unread descriptor copies:\n%s", code)
+	}
+	trial := g.clone()
+	trial.overlayConsumers[block] = []string{"d1"}
+	if got := g.overlayConsumers[block]; len(got) != 1 || got[0] != "d0" {
+		t.Fatal("generation trial changed the original block's overlay readers")
+	}
+	// A forward edge has no recorded reader set and must retain the existing
+	// conservative contract until its renderer has been generated.
+	g.w.Reset()
+	delete(g.overlayConsumers, block)
+	g.emitBuildPhiStateForEdge("forward", 0, 0, "false")
+	if code := g.w.String(); !strings.Contains(code, " = d0") || !strings.Contains(code, " = d1") {
+		t.Fatalf("forward renderer lost an overlay before its reader set was known:\n%s", code)
 	}
 }
 

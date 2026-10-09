@@ -1256,6 +1256,9 @@ type codeGen struct {
 	// Dense slots belong to this generated emitter, never to a runtime pass.
 	// Slot identities stay stable as later BBs declare additional descriptors.
 	overlaySlots map[string]int
+	// Already generated block entries have a fixed set of overlay readers.
+	// Basic-block identities are scoped by fn; inline calls reset this table.
+	overlayConsumers map[*ssa.BasicBlock][]string
 	// Register predeclarations for closure-mode fixup handles (EmitSubRSP32Fixup).
 	closureRegDecl map[string]bool
 	// Optional callback-based SSA node rewrite hook.
@@ -1315,6 +1318,7 @@ func (g *codeGen) clone() *codeGen {
 	clone.phiProtectedRegVars = append([]string(nil), g.phiProtectedRegVars...)
 	clone.closureDescDecl = cloneMap(g.closureDescDecl)
 	clone.overlaySlots = cloneMap(g.overlaySlots)
+	clone.overlayConsumers = cloneMap(g.overlayConsumers)
 	clone.closureRegDecl = cloneMap(g.closureRegDecl)
 	return &clone
 }
@@ -2387,6 +2391,9 @@ func (g *codeGen) emitSerialCallableCall(name string, producer ssa.Value, callab
 		g.emit("%s[%d] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(%s)+%d}", argsVar, i, callArgs.stackBase, i*16)
 	}
 	g.emit("var %s JITValueDesc", dv)
+	// Callbacks can be invoked for their effects while their return value is
+	// unused. Descriptor overlays must not be its only artificial Go read.
+	g.emit("_ = %s", dv)
 	callbackTargetOff := ""
 	phiTarget, phiShape, directPhiTarget := g.directPhiTarget(producer)
 	directPhiTarget = directPhiTarget && phiShape == phiTargetPair
@@ -2951,7 +2958,37 @@ func (g *codeGen) emitConstDescForSSAConst(c *ssa.Const) genVal {
 
 func (g *codeGen) emitBuildPhiStateForEdge(psVar string, targetBBIdx int, succPos int, generalExpr string) {
 	g.emit("%s := PhiState{General: %s}", psVar, generalExpr)
-	if overlayVars := g.allClosureDescVars(); len(overlayVars) > 0 {
+	overlayVars := g.allClosureDescVars()
+	if consumers, rendered := g.overlayConsumers[g.fn.Blocks[targetBBIdx]]; rendered {
+		// A previously generated renderer reads only the overlay slots present
+		// when its entry was generated. Descriptors created later cannot be
+		// consumed by that renderer or forwarded by its existing edge code.
+		readers := make(map[string]bool, len(consumers))
+		for _, name := range consumers {
+			readers[name] = true
+		}
+		filtered := overlayVars[:0]
+		for _, name := range overlayVars {
+			if readers[name] {
+				filtered = append(filtered, name)
+			}
+		}
+		overlayVars = filtered
+	}
+	if generalExpr == "true" {
+		// General renderers reconstruct phi descriptors from their canonical
+		// homes and deliberately ignore phi overlays. Do not allocate or fill
+		// incoming state which applyPhiStateOverlay cannot consume.
+		phiVars := g.phiDescVars()
+		filtered := make([]string, 0, len(overlayVars))
+		for _, name := range overlayVars {
+			if !phiVars[name] {
+				filtered = append(filtered, name)
+			}
+		}
+		overlayVars = filtered
+	}
+	if len(overlayVars) > 0 {
 		maxSlot := 0
 		for _, ov := range overlayVars {
 			maxSlot = max(maxSlot, g.overlaySlot(ov))
@@ -2962,6 +2999,9 @@ func (g *codeGen) emitBuildPhiStateForEdge(psVar string, targetBBIdx int, succPo
 		}
 	}
 
+	if generalExpr == "true" {
+		return // General renderers ignore PhiValues as well as phi overlays.
+	}
 	phis := g.blockPhis(targetBBIdx)
 	if len(phis) == 0 {
 		return
@@ -3315,23 +3355,30 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 	// compiler allocation and descriptor state before emitting either sibling,
 	// otherwise the second helper can load from a stack slot initialized only
 	// by the first one.
-	edgeSnaps := g.emitSaveClosureDescState(g.allClosureDescVars())
-	edgeAllocSnap := g.allocTemp("alloc")
-	g.emit("%s := ctx.SnapshotAllocState()", edgeAllocSnap)
-	if len(thenMoves) != 0 {
-		g.emit("ctx.MarkLabel(%s)", thenEdgeLbl)
-		g.emitEdgePhiMoves(thenBB, 0)
-		g.emit("ctx.EmitJmp(%s)", thenLbl)
+	if !directFallthrough {
+		edgeSnaps := g.emitSaveClosureDescState(g.allClosureDescVars())
+		edgeAllocSnap := g.allocTemp("alloc")
+		g.emit("%s := ctx.SnapshotAllocState()", edgeAllocSnap)
+		if len(thenMoves) != 0 {
+			g.emit("ctx.MarkLabel(%s)", thenEdgeLbl)
+			g.emitEdgePhiMoves(thenBB, 0)
+			g.emit("ctx.EmitJmp(%s)", thenLbl)
+			g.emit("ctx.RestoreAllocState(%s)", edgeAllocSnap)
+			g.emitRestoreClosureDescState(edgeSnaps)
+		}
+		if len(elseMoves) != 0 {
+			g.emit("ctx.MarkLabel(%s)", elseEdgeLbl)
+			g.emitEdgePhiMoves(elseBB, 1)
+			g.emit("ctx.EmitJmp(%s)", elseLbl)
+			g.emit("ctx.RestoreAllocState(%s)", edgeAllocSnap)
+			g.emitRestoreClosureDescState(edgeSnaps)
+		}
+	} else {
+		// With no phi helpers there is no edge-local state to rewind. Preserve
+		// the snapshot's materialization barrier without copying every shared
+		// descriptor and immediately assigning the same values back twice.
+		g.emit("ctx.FlushRegisterMoves()")
 	}
-	g.emit("ctx.RestoreAllocState(%s)", edgeAllocSnap)
-	g.emitRestoreClosureDescState(edgeSnaps)
-	if len(elseMoves) != 0 {
-		g.emit("ctx.MarkLabel(%s)", elseEdgeLbl)
-		g.emitEdgePhiMoves(elseBB, 1)
-		g.emit("ctx.EmitJmp(%s)", elseLbl)
-	}
-	g.emit("ctx.RestoreAllocState(%s)", edgeAllocSnap)
-	g.emitRestoreClosureDescState(edgeSnaps)
 
 	thenPSGeneral := g.allocTemp("ps")
 	elsePSGeneral := g.allocTemp("ps")
@@ -3989,6 +4036,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	savedBBQueued := g.bbQueued
 	savedBBLabels := g.bbLabels
 	savedBBPosVars := g.bbPosVars
+	savedOverlayConsumers := g.overlayConsumers
 	savedBBScope := g.bbScope
 	savedCurBlock := g.curBlock
 	savedPhiRegs := g.phiRegs
@@ -4039,6 +4087,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.bbQueued = map[uint64]bool{}
 	g.bbLabels = map[uint64]string{}
 	g.bbPosVars = map[uint64]string{}
+	g.overlayConsumers = nil
 	// Allocate a globally unique namespace for each inline call.
 	g.nextBBScope++
 	g.bbScope = g.nextBBScope
@@ -4327,6 +4376,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.bbQueued = savedBBQueued
 	g.bbLabels = savedBBLabels
 	g.bbPosVars = savedBBPosVars
+	g.overlayConsumers = savedOverlayConsumers
 	g.bbScope = savedBBScope
 	g.curBlock = savedCurBlock
 	g.phiRegs = savedPhiRegs
@@ -5697,9 +5747,8 @@ func (g *codeGen) bindActivePhiRegisterHomes(bbIdx int) {
 	}
 }
 
-// applyPhiStateOverlay sets block-local phi descriptors from ps.PhiValues when
-// a specialized renderer call provides overlays for this block.
-func (g *codeGen) applyPhiStateOverlay(bbIdx int) {
+// phiDescVars identifies overlay bindings ignored by canonical renderers.
+func (g *codeGen) phiDescVars() map[string]bool {
 	phiDescVars := map[string]bool{}
 	for phiName := range g.phiRegs {
 		gv, ok := g.vals[phiName]
@@ -5708,8 +5757,19 @@ func (g *codeGen) applyPhiStateOverlay(bbIdx int) {
 		}
 		phiDescVars[gv.goVar] = true
 	}
+	return phiDescVars
+}
 
-	for _, ov := range g.allClosureDescVars() {
+// applyPhiStateOverlay sets block-local phi descriptors from ps.PhiValues when
+// a specialized renderer call provides overlays for this block.
+func (g *codeGen) applyPhiStateOverlay(bbIdx int) {
+	phiDescVars := g.phiDescVars()
+	overlayVars := g.allClosureDescVars()
+	if g.overlayConsumers == nil {
+		g.overlayConsumers = make(map[*ssa.BasicBlock][]string)
+	}
+	g.overlayConsumers[g.fn.Blocks[bbIdx]] = overlayVars
+	for _, ov := range overlayVars {
 		idx := g.overlaySlot(ov)
 		if phiDescVars[ov] {
 			g.emit("if !ps.General && len(ps.OverlayValues) > %d && ps.OverlayValues[%d].Loc != LocNone {", idx, idx)

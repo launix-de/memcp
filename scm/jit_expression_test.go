@@ -1834,3 +1834,25 @@ func TestJITParallelMapKeepsNestedInputsAndCapturedCallbacks(t *testing.T) {
 		})
 	}
 }
+
+func TestJITNestedReduceBackedgesKeepOuterCaptures(t *testing.T) {
+	// Both reduce emitters have loop phis and backedges. The inner callback
+	// reads captures from two outer scopes after a dynamic forward branch.
+	compiled := compileJITExpressionTestProc(t, `(lambda (seed items)
+		(reduce items (lambda (acc value)
+			(+ acc (reduce (list value seed) (lambda (inner item)
+				(if (> item seed) (+ inner value) (+ inner seed))) 0))) 0))`)
+	items := make([]Scmer, 64)
+	for i := range items {
+		items[i] = NewInt(int64(i))
+	}
+	for _, seed := range []int64{7, 17, 7} {
+		var want int64
+		for i := range items {
+			want += max(int64(i), seed) + seed
+		}
+		if got := Apply(compiled, NewInt(seed), NewSlice(items)); !Equal(got, NewInt(want)) {
+			t.Fatalf("nested reduction lost outer capture for seed %d: got %s, want %d", seed, String(got), want)
+		}
+	}
+}
