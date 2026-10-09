@@ -847,6 +847,7 @@ func Init(en scm.Env) {
 			"comment":            {Kind: "string", Label: "comment", Description: "user-visible column comment"},
 			"default":            {Kind: "any", Label: "default", Description: "literal value used when an insert omits the column"},
 			"default_expression": {Kind: "string", Label: "default_expression", Description: "expression evaluated when an insert omits the column"},
+			"fill_existing":      {Kind: "bool", Label: "fill_existing", Description: "ADD-time initialization: true (default) fills existing rows with the declared default; false keeps existing nullable rows NULL. Future INSERT defaults are unchanged"},
 			"dependencies":       {Kind: "list", Description: "logical source tables whose changes invalidate a computed payload"},
 			"filtercols":         columnList("filtercols", "columns supplied to filter before computing a value"),
 			"filter":             rowCallback("filter", "predicate limiting which rows are computed", "bool", "true when the row should be computed"),
@@ -2549,7 +2550,7 @@ func Init(en scm.Env) {
 						dimensions[i] = scm.ToInt(d)
 					}
 					typeparams := mustScmerSlice(def[4], "column typeparams")
-					if _, ok := newTable.createColumnLocked(colname, typename, dimensions, typeparams); !ok {
+					if _, ok := newTable.createColumnLocked(colname, typename, dimensions, typeparams, false); !ok {
 						panic("column " + newTable.Name + "." + colname + " already exists")
 					}
 				default:

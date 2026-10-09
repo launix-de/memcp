@@ -63,7 +63,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 )))
 
 
-(define psql_column_attributes (parser (define sub (* (or
+(define psql_make_column_attributes (lambda (psql_expression) (parser (define sub (* (or
 	(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true))
 	(parser (atom "PRIMARY" true) '("primary" true))
 	(parser '((atom "UNIQUE" true) (atom "KEY" true)) '("unique" true))
@@ -77,7 +77,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(parser '((atom "COLLATE" true) (define comment sql_identifier)) '("collate" comment))
 	(parser (atom "UNSIGNED" true) '()) /* ignore */
 	/* TODO: GENERATED ALWAYS AS expr */
-))) (merge sub)))
+))) (merge sub))))
 
 (define psql_int (parser (define x (regex "-?[0-9]+")) (simplify x)))
 (define psql_number (parser (define x (regex "-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:e-?[0-9]+)?" true)) (simplify x)))
@@ -932,6 +932,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		)))
 	) '((quote createtable) (coalesce schema2 schema) id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists (quote tx))))
 
+	(define psql_column_attributes (psql_make_column_attributes psql_expression))
 	(define psql_alter_table (parser '(
 		(atom "ALTER" true)
 		(atom "TABLE" true)
@@ -953,7 +954,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					(parser empty '((quote list)))
 				))
 				(define typeparams psql_column_attributes)
-			) (lambda (id) '((quote createcolumn) '('table schema id) col type dimensions (cons 'list typeparams))))
+			) (lambda (id) '((quote createcolumn) '('table schema id) col type dimensions (cons 'list (sql_add_column_attributes typeparams)))))
 			(parser '((atom "OWNER" true) (atom "TO" true) (define owner psql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define cname psql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col psql_identifier)) (lambda (id) '((quote altertable) '('table schema id) "drop" col)))

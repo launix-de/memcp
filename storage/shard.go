@@ -592,7 +592,7 @@ func (u *storageShard) load(t *table) {
 }
 
 func (u *storageShard) schemaColumn(colName string) *column {
-	for _, c := range u.t.Columns {
+	for _, c := range u.t.columnDeclarations() {
 		if c.Name == colName {
 			return c
 		}
@@ -683,6 +683,16 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool, cu
 			cs = u.attachColumnRuntime(colName, cs)
 			u.columns[colName] = cs
 			return cs
+		}
+		if col := u.schemaColumn(colName); col != nil && u.t.PersistencyMode != Memory && u.t.PersistencyMode != Cache && !isRuntimeComputedColumn(col) {
+			if initial, exists := col.InitialValues[u.uuid.String()]; exists {
+				u.columns[colName] = &StorageConst{value: initial.Value, count: uint64(initial.MainRows)}
+				if initial.MainRows > u.main_count {
+					u.main_count = initial.MainRows
+					u.plannerMainRows.Store(initial.MainRows)
+				}
+				return u.columns[colName]
+			}
 		}
 		if u.t.PersistencyMode == Memory || u.t.PersistencyMode == Cache {
 			if proxy := u.makeComputedColumnProxy(colName, u.schemaColumn(colName)); proxy != nil {
@@ -838,7 +848,7 @@ func (u *storageShard) ensureMainCount(alreadyLocked bool, currentTx *TxContext)
 	}
 	// Load the first column (if not yet loaded); Deserialize will set main_count.
 	if alreadyLocked {
-		for _, c := range u.t.Columns {
+		for _, c := range u.t.columnDeclarations() {
 			cs, ok := u.columns[c.Name]
 			if ok && cs == nil {
 				u.ensureColumnLoaded(c.Name, true, nil)
@@ -849,7 +859,7 @@ func (u *storageShard) ensureMainCount(alreadyLocked bool, currentTx *TxContext)
 		}
 		return
 	}
-	for _, c := range u.t.Columns {
+	for _, c := range u.t.columnDeclarations() {
 		u.mu.RLock()
 		cs, ok := u.columns[c.Name]
 		u.mu.RUnlock()
@@ -891,7 +901,7 @@ func (s *storageShard) ensureLoaded() {
 		return
 	}
 	// pre-free memory before loading shard from disk
-	GlobalCache.CheckPressure(int64(len(s.t.Columns)) * int64(Settings.ShardSize) * 16)
+	GlobalCache.CheckPressure(int64(len(s.t.columnDeclarations())) * int64(Settings.ShardSize) * 16)
 	// double-check under lock to prevent concurrent map writes in load()
 	s.mu.Lock()
 	if s.state() != COLD {
@@ -3043,6 +3053,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 
 // contract: must only be called inside full write mutex mu.Lock()
 func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), currentTx *TxContext) {
+	declarations := t.t.columnDeclarations()
 	colidx := make([]int, len(columns))
 	for i, col := range columns {
 		// copy all dataset entries into packed array
@@ -3058,7 +3069,21 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 	var hasAI bool
 	var aiColIdx int = -1
 	var aiInputIdx int = -1
-	for _, c := range t.t.Columns {
+	for _, c := range declarations {
+		// An INSERT may have validated before a concurrent ADD published.
+		// Recheck omitted required fields once at this existing batch boundary.
+		if !c.AllowNull && !c.AutoIncrement && !c.hasDefault() {
+			found := false
+			for _, name := range columns {
+				if name == c.Name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				panic("column " + c.Name + " cannot be NULL")
+			}
+		}
 		if c.AutoIncrement {
 			hasAI = true
 			for i, name := range columns {
@@ -3113,7 +3138,7 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 	indexDeltaBytes := make(map[*StorageIndex]int64)
 	for _, row := range values {
 		newrow := make([]scm.Scmer, len(t.deltaColumns))
-		for _, c := range t.t.Columns {
+		for _, c := range declarations {
 			if c.AutoIncrement {
 				// Fill only missing/NULL values; explicit values were accounted for
 				// before reserving the batch's generated range.
@@ -3171,6 +3196,7 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 // insertDatasetFromLog appends delta rows from a persisted log without applying
 // defaults or auto-increment logic. Must only be called while holding t.mu.
 func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scmer) {
+	initial := t.initialColumnValues()
 	// map provided column names to delta positions, extending deltaColumns if needed
 	colidx := make([]int, len(columns))
 	for i, col := range columns {
@@ -3182,12 +3208,22 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 			colidx[i] = idx
 		}
 	}
+	for col := range initial {
+		if _, exists := t.deltaColumns[col]; !exists {
+			t.deltaColumns[col] = len(t.deltaColumns)
+		}
+	}
 	for _, row := range values {
 		newrow := make([]scm.Scmer, len(t.deltaColumns))
 		recid := uint32(len(t.inserts)) + t.main_count
 		for j, pos := range colidx {
 			if j < len(row) {
 				newrow[pos] = row[j]
+			}
+		}
+		for col, captured := range initial {
+			if uint64(len(t.inserts)) < uint64(captured.DeltaRows) {
+				newrow[t.deltaColumns[col]] = captured.Value
 			}
 		}
 		t.inserts = append(t.inserts, newrow)
@@ -3473,20 +3509,23 @@ func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
 
 func (t *storageShard) RemoveFromDisk() {
 	t.cleanupOnce.Do(func() {
+		// Rebuild retirement may overlap a later ADD after releasing ddlMu.
+		// Borrow one published directory, never the mutable declaration slice.
+		columns := t.t.columnDeclarations()
 		// close logfile
 		if t.logfile != nil {
 			t.logfile.Close()
 		}
 		// Release blob refcounts before removing column files.
 		// Skip for COLD shards (columns not loaded) -- orphaned blobs will be cleaned by (clean).
-		for _, col := range t.t.Columns {
+		for _, col := range columns {
 			if cs, ok := t.columns[col.Name]; ok && cs != nil {
 				if blob, ok := cs.(*OverlayBlob); ok {
 					blob.ReleaseBlobs(uint(t.main_count))
 				}
 			}
 		}
-		for _, col := range t.t.Columns {
+		for _, col := range columns {
 			t.t.schema.persistence.RemoveColumn(t.uuid.String(), col.Name)
 		}
 		t.t.schema.persistence.RemoveColumn(t.uuid.String(), blobManifestColumn)

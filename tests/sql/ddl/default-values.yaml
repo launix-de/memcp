@@ -1,11 +1,28 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Default Values Test Suite
 # Validate that DEFAULT values are applied on INSERT when a column is omitted
 
 metadata:
   version: "1.0"
-  description: "Default column values (boolean) on INSERT"
+  description: "Defaults on INSERT and shared ADD COLUMN initialization"
+  isolated: true
 
 setup:
+  - { sql: "DROP TABLE IF EXISTS default_test" }
+  - { sql: "DROP TABLE IF EXISTS added_defaults" }
+  - { sql: "DROP TABLE IF EXISTS added_psql_defaults" }
+  - { sql: "DROP TABLE IF EXISTS added_empty_defaults" }
+  - { sql: "DROP TABLE IF EXISTS added_psql_empty_defaults" }
+  - { sql: "CREATE TABLE added_defaults (id INT PRIMARY KEY) ENGINE=SAFE" }
+  - { sql: "CREATE TABLE added_psql_defaults (id INT PRIMARY KEY) ENGINE=SAFE" }
+  - { sql: "CREATE TABLE added_empty_defaults (id INT PRIMARY KEY) ENGINE=SAFE" }
+  - { sql: "CREATE TABLE added_psql_empty_defaults (id INT PRIMARY KEY) ENGINE=SAFE" }
+  - { sql: "INSERT INTO added_defaults VALUES(1)" }
+  - { sql: "INSERT INTO added_psql_defaults VALUES(1)" }
+  - { scm: '(begin (rebuild (table "memcp-tests" "added_defaults")) (rebuild (table "memcp-tests" "added_psql_defaults")))' }
+  - { sql: "INSERT INTO added_defaults VALUES(2)" }
+  - { sql: "INSERT INTO added_psql_defaults VALUES(2)" }
   - { sql: "CREATE TABLE default_test (id INT, flag BOOLEAN DEFAULT FALSE) ENGINE=MEMORY" }
 
 test_cases:
@@ -71,5 +88,273 @@ test_cases:
         - { id: 3, flag: true }
         - { id: 4, flag: false }
 
+  - name: "Memory tables initialize existing rows on explicit ADD"
+    sql: "ALTER TABLE default_test ADD captured INT NOT NULL DEFAULT 6"
+    expect: {}
+
+  - name: "Memory table values use the same ADD policy"
+    sql: "SELECT COUNT(*) AS n FROM default_test WHERE captured=6"
+    expect: {rows: 1, data: [{n: 4}]}
+
+  - name: "ADD initializes old main and delta rows with a non-null default"
+    sql: "ALTER TABLE added_defaults ADD flag INT NOT NULL DEFAULT 0"
+    expect: {}
+
+  - name: "Old rows contain the declared non-null default"
+    sql: "SELECT id,flag FROM added_defaults ORDER BY id"
+    expect: {rows: 2, data: [{id: 1, flag: 0}, {id: 2, flag: 0}]}
+
+  - name: "ADD initializes nullable old rows when a default is declared"
+    sql: "ALTER TABLE added_defaults ADD nullable_value INT DEFAULT 5"
+    expect: {}
+
+  - name: "Nullable existing rows receive the ADD-time value"
+    sql: "SELECT id,nullable_value FROM added_defaults ORDER BY id"
+    expect: {rows: 2, data: [{id: 1, nullable_value: 5}, {id: 2, nullable_value: 5}]}
+
+  - name: "ADD without a default leaves nullable old rows NULL"
+    sql: "ALTER TABLE added_defaults ADD optional_value INT"
+    expect: {}
+
+  - name: "Missing nullable values remain NULL"
+    sql: "SELECT id,optional_value FROM added_defaults ORDER BY id"
+    expect: {rows: 2, data: [{id: 1, optional_value: null}, {id: 2, optional_value: null}]}
+
+  - name: "ADD rejects NOT NULL without a default on existing rows"
+    sql: "ALTER TABLE added_defaults ADD rejected INT NOT NULL"
+    expect: {error: true}
+
+  - name: "Rejected ADD does not publish a column"
+    sql: "SELECT rejected FROM added_defaults"
+    expect: {error: true}
+
+  - name: "ADD rejects an explicit NULL default for historical NOT NULL rows"
+    sql: "ALTER TABLE added_defaults ADD rejected_null INT NOT NULL DEFAULT NULL"
+    expect: {error: true}
+
+  - name: "Rejected NULL default leaves the historical schema unchanged"
+    sql: "SELECT rejected_null FROM added_defaults"
+    expect: {error: true}
+
+  - name: "psql rejects a NULL default for historical NOT NULL rows"
+    syntax: psql
+    sql: "ALTER TABLE added_psql_defaults ADD COLUMN rejected_null INT NOT NULL DEFAULT NULL"
+    expect: {error: true}
+
+  - name: "Rejected psql NULL default leaves the schema unchanged"
+    syntax: psql
+    sql: "SELECT rejected_null FROM added_psql_defaults"
+    expect: {error: true}
+
+  - name: "ADD validates an invalid default before publication"
+    sql: "ALTER TABLE added_defaults ADD invalid_default DOUBLE NOT NULL DEFAULT 'bad-number'"
+    expect: {error: true}
+
+  - name: "Invalid default leaves schema unchanged"
+    sql: "SELECT invalid_default FROM added_defaults"
+    expect: {error: true}
+
+  - name: "The psql frontend uses the same existing-row initialization"
+    syntax: psql
+    sql: "ALTER TABLE added_psql_defaults ADD COLUMN flag INT NOT NULL DEFAULT 0"
+    expect: {}
+
+  - name: "The psql ADD fills old main and delta rows"
+    syntax: psql
+    sql: "SELECT id,flag FROM added_psql_defaults ORDER BY id"
+    expect: {rows: 2, data: [{id: 1, flag: 0}, {id: 2, flag: 0}]}
+
+  - name: "ADD keeps deterministic arithmetic defaults"
+    syntax: psql
+    sql: "ALTER TABLE added_psql_defaults ADD arithmetic_value INT DEFAULT (2*3+1)"
+    expect: {}
+
+  - name: "The arithmetic default is evaluated for existing rows"
+    syntax: psql
+    sql: "SELECT id,arithmetic_value FROM added_psql_defaults ORDER BY id"
+    expect: {rows: 2, data: [{id: 1, arithmetic_value: 7}, {id: 2, arithmetic_value: 7}]}
+
+  - name: "ADD keeps literal casts"
+    syntax: psql
+    sql: "ALTER TABLE added_psql_defaults ADD cast_value INT DEFAULT CAST('7' AS INTEGER)"
+    expect: {}
+
+  - name: "Literal cast initializes psql historical rows"
+    syntax: psql
+    sql: "SELECT id,cast_value FROM added_psql_defaults ORDER BY id"
+    expect: {rows: 2, data: [{id: 1, cast_value: 7}, {id: 2, cast_value: 7}]}
+
+  - name: "ADD rejects volatile defaults before publishing a column"
+    sql: "ALTER TABLE added_defaults ADD volatile_value DOUBLE DEFAULT RAND()"
+    expect: {error: true}
+
+  - name: "Rejected volatile defaults leave the schema unchanged"
+    sql: "SELECT volatile_value FROM added_defaults"
+    expect: {error: true}
+
+  - name: "psql volatile defaults also fail before publication"
+    syntax: psql
+    sql: "ALTER TABLE added_psql_defaults ADD volatile_value DOUBLE PRECISION DEFAULT RANDOM()"
+    expect: {error: true}
+
+  - name: "The failed psql expression publishes no column"
+    syntax: psql
+    sql: "SELECT volatile_value FROM added_psql_defaults"
+    expect: {error: true}
+
+  - name: "ADD captures a statement-stable clock default for old rows"
+    syntax: psql
+    sql: "ALTER TABLE added_psql_defaults ADD stamped TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+    expect: {}
+
+  - name: "Historical clock defaults share one ADD-time value"
+    syntax: psql
+    sql: "SELECT COUNT(DISTINCT stamped) AS cnt FROM added_psql_defaults"
+    expect: {rows: 1, data: [{cnt: 1}]}
+
+  - name: "Empty tables accept a non-null column without DEFAULT"
+    sql: "ALTER TABLE added_empty_defaults ADD required_value INT NOT NULL"
+    expect: {}
+
+  - name: "Empty tables also accept a NOT NULL column with DEFAULT NULL"
+    sql: "ALTER TABLE added_empty_defaults ADD required_null INT NOT NULL DEFAULT NULL"
+    expect: {}
+
+  - name: "Empty psql tables accept NOT NULL with DEFAULT NULL"
+    syntax: psql
+    sql: "ALTER TABLE added_psql_empty_defaults ADD COLUMN required_null INT NOT NULL DEFAULT NULL"
+    expect: {}
+
+  - name: "psql explicit non-null values work for that declaration"
+    syntax: psql
+    sql: "INSERT INTO added_psql_empty_defaults(id,required_null) VALUES(1,3)"
+    expect: {affected_rows: 1}
+
+  - name: "A future INSERT must supply that required value"
+    sql: "INSERT INTO added_empty_defaults(id) VALUES(1)"
+    expect: {error: true}
+
+  - name: "Explicit non-null values work after the failed INSERT"
+    sql: "INSERT INTO added_empty_defaults(id,required_value,required_null) VALUES(1,2,3)"
+    expect: {affected_rows: 1}
+
+  - name: "The empty-table NULL declaration does not replace explicit values"
+    sql: "SELECT required_value,required_null FROM added_empty_defaults"
+    expect: {rows: 1, data: [{required_value: 2, required_null: 3}]}
+
+  - name: "psql nullable DEFAULT also fills existing rows"
+    syntax: psql
+    sql: "ALTER TABLE added_psql_defaults ADD COLUMN optional_value INT DEFAULT 6"
+    expect: {}
+
+  - name: "psql changes the INSERT default independently of old values"
+    syntax: psql
+    sql: "ALTER TABLE added_psql_defaults ALTER COLUMN optional_value SET DEFAULT 11"
+    expect: {}
+
+  - name: "psql INSERT uses its changed default"
+    syntax: psql
+    sql: "INSERT INTO added_psql_defaults(id) VALUES(3)"
+    expect: {affected_rows: 1}
+
+  - name: "psql old values retain their ADD-time default"
+    syntax: psql
+    sql: "SELECT id,optional_value FROM added_psql_defaults ORDER BY id"
+    expect: {rows: 3, data: [{id: 1, optional_value: 6}, {id: 2, optional_value: 6}, {id: 3, optional_value: 11}]}
+
+  - name: "Explicit NULL remains distinct from an omitted default"
+    sql: "INSERT INTO added_defaults(id,nullable_value) VALUES(3,NULL)"
+    expect: {affected_rows: 1}
+
+  - name: "Changing DEFAULT only affects future omitted values"
+    sql: "ALTER TABLE added_defaults ALTER COLUMN nullable_value SET DEFAULT 9"
+    expect: {}
+
+  - name: "Insert after changing the default"
+    sql: "INSERT INTO added_defaults(id) VALUES(4)"
+    expect: {affected_rows: 1}
+
+  - name: "Dropping DEFAULT only affects future omitted values"
+    sql: "ALTER TABLE added_defaults ALTER COLUMN nullable_value DROP DEFAULT"
+    expect: {}
+
+  - name: "An omitted nullable value without DEFAULT is NULL"
+    sql: "INSERT INTO added_defaults(id) VALUES(5)"
+    expect: {affected_rows: 1}
+
+  - name: "Unrelated UPDATE preserves the initialized value"
+    sql: "UPDATE added_defaults SET optional_value=8 WHERE id=2"
+    expect: {affected_rows: 1}
+
+  - name: "Old initialization and explicit NULL remain distinct"
+    sql: "SELECT id,nullable_value FROM added_defaults ORDER BY id"
+    expect: {rows: 5, data: [{id: 1, nullable_value: 5}, {id: 2, nullable_value: 5}, {id: 3, nullable_value: null}, {id: 4, nullable_value: 9}, {id: 5, nullable_value: null}]}
+
+  - name: "Hard crash retains ADD-time initialization independently of DEFAULT"
+    scm: "(crash)"
+    expect: {interrupted_ok: true}
+
+  - name: "Restart after ADD and later default changes"
+    action: restart
+
+  - name: "WAL recovery preserves old values and explicit NULL"
+    sql: "SELECT id,nullable_value FROM added_defaults ORDER BY id"
+    expect: {rows: 5, data: [{id: 1, nullable_value: 5}, {id: 2, nullable_value: 5}, {id: 3, nullable_value: null}, {id: 4, nullable_value: 9}, {id: 5, nullable_value: null}]}
+
+  - name: "The recovered non-null column contains no missing values"
+    sql: "SELECT id,flag FROM added_defaults ORDER BY id"
+    expect: {rows: 5, data: [{id: 1, flag: 0}, {id: 2, flag: 0}, {id: 3, flag: 0}, {id: 4, flag: 0}, {id: 5, flag: 0}]}
+
+  - name: "psql initialized values survive the same crash"
+    syntax: psql
+    sql: "SELECT id,flag FROM added_psql_defaults ORDER BY id"
+    expect: {rows: 3, data: [{id: 1, flag: 0}, {id: 2, flag: 0}, {id: 3, flag: 0}]}
+
+  - name: "Clock defaults survive WAL replay"
+    syntax: psql
+    sql: "SELECT COUNT(DISTINCT stamped) AS cnt FROM added_psql_defaults WHERE id<3"
+    expect: {rows: 1, data: [{cnt: 1}]}
+
+  - name: "Rebuild stores the initialized values in the new generation"
+    scm: '(rebuild (table "memcp-tests" "added_defaults") true false)'
+
+  - name: "Shutdown after persisting the rebuilt generation"
+    sql: "SHUTDOWN"
+
+  - name: "Rebuilt values survive a persisted restart"
+    sql: "SELECT id,nullable_value FROM added_defaults ORDER BY id"
+    expect: {rows: 5, data: [{id: 1, nullable_value: 5}, {id: 2, nullable_value: 5}, {id: 3, nullable_value: null}, {id: 4, nullable_value: 9}, {id: 5, nullable_value: null}]}
+
+  - name: "Drop the initialized column"
+    sql: "ALTER TABLE added_defaults DROP COLUMN nullable_value"
+    expect: {}
+
+  - name: "Reusing a name initializes the new declaration independently"
+    sql: "ALTER TABLE added_defaults ADD nullable_value INT DEFAULT 12"
+    expect: {}
+
+  - name: "New declaration has its own value for all historical rows"
+    sql: "SELECT id,nullable_value FROM added_defaults ORDER BY id"
+    expect: {rows: 5, data: [{id: 1, nullable_value: 12}, {id: 2, nullable_value: 12}, {id: 3, nullable_value: 12}, {id: 4, nullable_value: 12}, {id: 5, nullable_value: 12}]}
+
+  - name: "Explicit NULL belongs to the new declaration"
+    sql: "INSERT INTO added_defaults(id,nullable_value) VALUES(6,NULL)"
+    expect: {affected_rows: 1}
+
+  - name: "Crash after dropping and readding a column"
+    scm: "(crash)"
+    expect: {interrupted_ok: true}
+
+  - name: "Restart the new declaration"
+    action: restart
+
+  - name: "New declaration recovery never restores old incarnation values"
+    sql: "SELECT id,nullable_value FROM added_defaults ORDER BY id"
+    expect: {rows: 6, data: [{id: 1, nullable_value: 12}, {id: 2, nullable_value: 12}, {id: 3, nullable_value: 12}, {id: 4, nullable_value: 12}, {id: 5, nullable_value: 12}, {id: 6, nullable_value: null}]}
+
 cleanup:
+  - { sql: "DROP TABLE IF EXISTS added_empty_defaults" }
+  - { sql: "DROP TABLE IF EXISTS added_psql_empty_defaults" }
+  - { sql: "DROP TABLE IF EXISTS added_defaults" }
+  - { sql: "DROP TABLE IF EXISTS added_psql_defaults" }
   - { sql: "DROP TABLE IF EXISTS default_test" }

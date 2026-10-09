@@ -109,6 +109,7 @@ type column struct {
 	AutoIncrement        bool
 	Default              scm.Scmer
 	DefaultExpression    string
+	InitialValues        map[string]columnInitialValue `json:"initial_values,omitempty"`
 	OnUpdate             scm.Scmer
 	AllowNull            bool
 	IsTemp               bool // columns with IsTemp may be removed without consequences
@@ -810,6 +811,11 @@ func (t *table) publishSchemaTopology(mode ShardMode, shards []*storageShard, di
 // MarshalJSON reads topology only from an immutable, atomically published
 // generation. Database schema locking keeps the remaining DDL fields stable.
 func (t *table) MarshalJSON() ([]byte, error) {
+	// INSERT reserves generated IDs under this mutex. Schema serialization
+	// snapshots the counter without holding it during persistence.
+	t.mu.Lock()
+	autoIncrement := t.Auto_increment
+	t.mu.Unlock()
 	topology := t.schemaTopology.Load()
 	if topology == nil {
 		active := t.activeTopology()
@@ -857,7 +863,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		Triggers:           t.Triggers,
 		PersistencyMode:    t.PersistencyMode,
 		OnInit:             t.OnInit,
-		AutoIncrement:      t.Auto_increment,
+		AutoIncrement:      autoIncrement,
 		Collation:          t.Collation,
 		Charset:            t.Charset,
 		Comment:            t.Comment,
@@ -1525,12 +1531,31 @@ func (t *table) metadataMemory() uint {
 		size += uint(unsafe.Sizeof(*edge))
 	}
 	size += uint(cap(t.Columns)) * uint(unsafe.Sizeof((*column)(nil)))
+	var initialPayloads map[scm.Scmer]struct{}
 	for _, c := range t.Columns {
 		size += uint(unsafe.Sizeof(*c)) + uint(len(c.Name))
+		// As with shard bookkeeping, map entry/bucket overhead is an estimate.
+		size += 64 * uint(len(c.InitialValues))
+		for uuid, initial := range c.InitialValues {
+			size += uint(len(uuid))
+			if initialPayloads == nil {
+				initialPayloads = make(map[scm.Scmer]struct{})
+			}
+			if _, charged := initialPayloads[initial.Value]; !charged {
+				initialPayloads[initial.Value] = struct{}{}
+				// The entry estimate already includes the inline Scmer slot.
+				if bytes := scm.ComputeSize(initial.Value); bytes > uint(unsafe.Sizeof(initial.Value)) {
+					size += bytes - uint(unsafe.Sizeof(initial.Value))
+				}
+			}
+		}
 		if stats := c.PlannerStats.Load(); stats != nil && stats.KeyFrequency != nil {
 			frequency := stats.KeyFrequency
 			size += uint(unsafe.Sizeof(*frequency)) + uint(cap(frequency.top))*uint(unsafe.Sizeof(keyFrequencyEntry{}))
 		}
+	}
+	if names := t.columnNamesSnapshot.Load(); names != nil {
+		size += uint(cap(names.declarations)) * uint(unsafe.Sizeof((*column)(nil)))
 	}
 	if snapshot := t.showColumnsSnapshot.Load(); snapshot != nil && snapshot.metadata != nil && snapshot.metadata.columns != nil {
 		// Names borrow the column strings; charge only the new pointer array.
@@ -1699,8 +1724,9 @@ type tableShowColumnsMetadata struct {
 }
 
 type tableColumnNamesSnapshot struct {
-	exact  map[string]string
-	folded map[string]string
+	declarations []*column // immutable directory; column fields retain existing ownership
+	exact        map[string]string
+	folded       map[string]string
 }
 
 func foldIdentifier(name string) string {
@@ -1806,7 +1832,7 @@ func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {
 			folded[foldedName] = c.Name
 		}
 	}
-	return &tableColumnNamesSnapshot{exact: exact, folded: folded}
+	return &tableColumnNamesSnapshot{declarations: append([]*column(nil), t.Columns...), exact: exact, folded: folded}
 }
 
 func (t *table) publishColumnNamesSnapshot() *tableColumnNamesSnapshot {
@@ -2268,7 +2294,7 @@ func (d dataset) GetI(key string) (scm.Scmer, bool) { // case insensitive
 // createColumnLocked mutates table metadata while the database schemalock is
 // held. It does not persist schema.json yet; callers must follow up with a
 // single saveLockedAndUnlock once the whole DDL mutation is complete.
-func (t *table) createColumnLocked(name string, typ string, typdimensions []int, extrainfo []scm.Scmer) (*column, bool) {
+func (t *table) createColumnLocked(name string, typ string, typdimensions []int, extrainfo []scm.Scmer, initializeExisting bool) (*column, bool) {
 	for _, c := range t.Columns {
 		if c.Name == name {
 			return nil, false // column already exists
@@ -2276,6 +2302,8 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 	}
 
 	var c column
+	var uniqueKeys []uniqueKey
+	fillExisting := true
 	// Scmer's Go zero value is not Scheme nil. Base columns must be explicitly
 	// non-computed immediately after DDL; otherwise rebuild statistics are
 	// skipped until a schema reload happens to normalize this field.
@@ -2291,10 +2319,12 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		switch key {
 		case "primary":
 			// append unique key
-			t.Unique = append(t.Unique, uniqueKey{"PRIMARY", []string{name}})
+			uniqueKeys = append(uniqueKeys, uniqueKey{"PRIMARY", []string{name}})
 		case "unique":
 			// append unique key
-			t.Unique = append(t.Unique, uniqueKey{name, []string{name}})
+			uniqueKeys = append(uniqueKeys, uniqueKey{name, []string{name}})
+		case "fill_existing":
+			fillExisting = scm.ToBool(extrainfo[i+1])
 		case "auto_increment":
 			c.AutoIncrement = scm.ToBool(extrainfo[i+1])
 		case "null":
@@ -2321,6 +2351,20 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 	}
 	c.UpdateSanitizer()
 	cp := &c
+	if initializeExisting && !c.IsTemp && !c.AutoIncrement {
+		release := t.initializeColumnRowsLocked(cp, fillExisting, len(uniqueKeys) != 0)
+		defer release()
+		if len(uniqueKeys) != 0 {
+			t.Unique = append(t.Unique, uniqueKeys...)
+		}
+		t.Columns = append(t.Columns, cp)
+		// Publish the directory before releasing the initialized shards.
+		t.publishShowColumnsSnapshot()
+		return cp, true
+	}
+	if len(uniqueKeys) != 0 {
+		t.Unique = append(t.Unique, uniqueKeys...)
+	}
 	t.Columns = append(t.Columns, cp)
 	for _, s := range t.Shards {
 		if s == nil {
@@ -2405,32 +2449,71 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 	// Ordinary DDL retains its existing fast path. Statement preparation must
 	// find and pin the current definition atomically with cache eviction.
 	if queryTx == nil {
-		for _, c := range t.Columns {
+		for _, c := range t.columnDeclarations() {
 			if c.Name == name {
 				return false
 			}
 		}
 	}
+	// Temporary planner helpers keep their existing preparation path. Loading
+	// old rows belongs only to an explicit persistent column declaration.
+	initializeExisting := true
+	for i := 0; i+1 < len(extrainfo); i += 2 {
+		if scm.String(extrainfo[i]) == "temp" && scm.ToBool(extrainfo[i+1]) {
+			initializeExisting = false
+		}
+	}
+	if initializeExisting {
+		// Overflow append also owns maintenanceMu before schema publication.
+		// Repartition may own it while waiting for ddlMu: relinquish only our
+		// local DDL ownership while waiting, then recheck below after reacquiring.
+		for !t.maintenanceMu.TryLock() {
+			t.ddlMu.Unlock()
+			t.maintenanceMu.Lock()
+			t.maintenanceMu.Unlock()
+			t.ddlMu.Lock()
+		}
+		defer t.maintenanceMu.Unlock()
+		for _, shard := range t.ActiveShards() {
+			if shard != nil {
+				func() {
+					release := shard.GetExclusive()
+					defer release()
+					shard.ensureMainCount(false, nil)
+				}()
+			}
+		}
+	}
 	t.schema.schemalock.Lock()
+	metadataLocked := true
+	defer func() {
+		if metadataLocked {
+			t.schema.schemalock.Unlock()
+		}
+	}()
 	for _, c := range t.Columns {
 		if c.Name == name {
 			if c.IsTemp {
 				if !queryTx.retainQueryColumn(t, c) {
+					metadataLocked = false
 					t.schema.schemalock.Unlock()
 					panic("cannot prepare a column while its cache is being evicted")
 				}
 			}
+			metadataLocked = false
 			t.schema.schemalock.Unlock()
 			return false
 		}
 	}
-	cp, ok := t.createColumnLocked(name, typ, typdimensions, extrainfo)
+	cp, ok := t.createColumnLocked(name, typ, typdimensions, extrainfo, initializeExisting)
 	if !ok {
+		metadataLocked = false
 		t.schema.schemalock.Unlock()
 		return false
 	}
 	if cp.IsTemp {
 		if !queryTx.retainQueryColumn(t, cp) {
+			metadataLocked = false
 			t.schema.schemalock.Unlock()
 			panic("cannot prepare a column while its cache is being evicted")
 		}
@@ -2442,6 +2525,7 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 	if cp.IsTemp {
 		mode = schemaSaveBuffered
 	}
+	metadataLocked = false // finishSchemaMutationLocked always releases ownership.
 	t.finishSchemaMutationLocked(mode)
 	if cp.IsTemp {
 		t.registerTempColumn(cp)
@@ -2648,7 +2732,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	// FK checks are enforced via auto-generated system triggers (see createforeignkey)
 
 	// check NOT NULL for omitted columns (not skippable by IGNORE)
-	for _, colDesc := range t.Columns {
+	for _, colDesc := range t.columnDeclarations() {
 		if !colDesc.AllowNull && colDesc.hasDefault() {
 			continue // has a default value
 		}
@@ -2810,7 +2894,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				continue
 			}
 			defaultValue := scm.NewNil()
-			for _, col := range t.Columns {
+			for _, col := range t.columnDeclarations() {
 				if cd.Column == col.Name {
 					defaultValue = col.defaultValue()
 					if col.AutoIncrement {
@@ -2905,8 +2989,9 @@ func (t *table) sanitizeInsertRows(columns []string, values [][]scm.Scmer, isIgn
 		apply         func(scm.Scmer) scm.Scmer
 	}
 	sanitizers := make([]sanitizerAt, 0, len(columns))
+	schemaColumns := t.columnDeclarations()
 	for i, col := range columns {
-		for _, colDesc := range t.Columns {
+		for _, colDesc := range schemaColumns {
 			if col == colDesc.Name && colDesc.sanitizer != nil {
 				sanitizers = append(sanitizers, sanitizerAt{
 					index: i, autoIncrement: colDesc.AutoIncrement, apply: colDesc.sanitizer,
@@ -3058,7 +3143,7 @@ func (t *table) nextUniqueConstraint(columns []string, idx int) int {
 			if provided {
 				continue
 			}
-			for _, col := range t.Columns {
+			for _, col := range t.columnDeclarations() {
 				if col.Name == keyCol && (col.AutoIncrement || col.hasDefault()) {
 					autoAssigned = true
 					break

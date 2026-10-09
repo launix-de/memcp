@@ -280,6 +280,14 @@ MemCP supports several storage engines, selectable per table via `CREATE TABLE .
 For production data, use `safe` unless you have explicitly accepted another
 engine's weaker durability contract.
 
+`ALTER TABLE ... ADD COLUMN ... DEFAULT ...` initializes existing rows with
+the value captured by that declaration. Later `SET DEFAULT` or `DROP DEFAULT`
+changes future omitted INSERT values; it does not rewrite existing values or
+explicit NULLs. A populated table cannot add a `NOT NULL` column without a
+non-null default. ADD supports the frontend's literal defaults, constant
+arithmetic/casts where supported, and `CURRENT_TIMESTAMP`; other default
+expressions fail before the column is published.
+
 ### Storage failure notifications
 
 Administrators can register named Scheme callbacks for persistence failures.
