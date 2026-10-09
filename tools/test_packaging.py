@@ -75,13 +75,17 @@ class ReleaseSourceTests(unittest.TestCase):
 				    count = sum('update' in json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines())
 				    if scenario == 'hang' and count == 1:
 				        time.sleep(10)
-				    if scenario == 'persistent' or (scenario == 'transient' and count == 1):
+				    if scenario == 'persistent' or (scenario in {'transient','update-then-install-timeout'} and count == 1):
 				        sys.exit(100)
 				    if scenario == 'mirrorlist':
 				        mirrors = pathlib.Path(os.environ['APT_SOURCES_DIRECTORY']) / 'apt-mirrors.txt'
 				        if 'azure.archive.ubuntu.com' in mirrors.read_text():
 				            sys.exit(100)
-				elif scenario == 'install-hang':
+				elif scenario == 'install-transient-timeout':
+				    count = sum('install' in json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines())
+				    if count == 1:
+				        time.sleep(10)
+				elif scenario in {'install-hang','update-then-install-timeout'}:
 				    time.sleep(10)
 				elif scenario == 'install-fail':
 				    sys.exit(100)
@@ -92,7 +96,7 @@ class ReleaseSourceTests(unittest.TestCase):
 				PACKAGES=packages, APT_SOURCES_DIRECTORY=str(sources),
 				GITHUB_ACTION_PATH=str(ROOT / ".github/actions/setup-apt"),
 				INDEX_TIMEOUT_SECONDS="0.5" if scenario == "hang" else "2",
-				INSTALL_TIMEOUT_SECONDS="0.5" if scenario == "install-hang" else "2",
+				INSTALL_TIMEOUT_SECONDS="0.5" if scenario in {"install-hang", "install-transient-timeout", "update-then-install-timeout"} else "2",
 				FAKE_APT_ROOT=str(root), FAKE_APT_SCENARIO=scenario)
 			result = subprocess.run(["bash", "-c", body], env=env, text=True,
 				stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5)
@@ -161,11 +165,29 @@ class ReleaseSourceTests(unittest.TestCase):
 		self.assertNotEqual(result.returncode, 0)
 		self.assertEqual(calls, [])
 
-	def test_hung_apt_install_is_terminated_and_fails(self):
+	def test_hung_apt_install_is_terminated_and_fails_after_one_mirror_recovery(self):
 		result, calls, *_ = self.apt_setup("install-hang")
 		self.assertNotEqual(result.returncode, 0)
-		self.assertEqual(len(calls), 2)
+		self.assertEqual(len(calls), 4)
 		self.assertIn("required package installation failed", result.stdout)
+
+	def test_apt_install_timeout_recovers_once_without_changing_trust(self):
+		result, calls, legacy, deb822, unrelated, old_legacy, old_deb822, old_unrelated = self.apt_setup("install-transient-timeout")
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(len(calls), 4)
+		self.assertEqual(legacy, old_legacy.replace("http://azure.archive.ubuntu.com", "https://archive.ubuntu.com"))
+		self.assertEqual(deb822, old_deb822.replace("https://azure.archive.ubuntu.com", "https://archive.ubuntu.com"))
+		self.assertEqual(unrelated, old_unrelated)
+		self.assertIn("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", deb822)
+		self.assertTrue(all(call[-2:] == ["mariadb-client", "rpm"] for call in calls if "install" in call))
+
+	def test_apt_install_timeout_on_recovery_mirror_is_not_retried_again(self):
+		result, calls, *_ = self.apt_setup("update-then-install-timeout")
+		self.assertNotEqual(result.returncode, 0)
+		self.assertEqual(len(calls), 3)
+		self.assertEqual(sum("update" in call for call in calls), 2)
+		self.assertEqual(sum("install" in call for call in calls), 1)
+		self.assertIn("INFRASTRUCTURE_FAILURE", result.stdout)
 
 	def test_multiline_package_list_installs_every_package(self):
 		result, calls, *_ = self.apt_setup("success", packages="mariadb-client\nrpm")
