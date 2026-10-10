@@ -735,6 +735,7 @@ func BenchmarkJITBooleanFilterBatch(b *testing.B) {
 func TestJITClosureCaptureForwardingUnderRegisterPressure(t *testing.T) {
 	values := []Scmer{NewString("retained capture")}
 	closure := jitBindProcContext(jitProcContextAllocation(1), &Proc{}, &values[0], 1, false)
+	integerSaveAreaHasPointers := false
 	fn := CompileJITStorageGetValue(func(ctx *JITContext, _, target JITValueDesc) JITValueDesc {
 		ctx.TrackPointer(unsafe.Pointer(closure))
 		ctx.ClosureFuncOff = ctx.AllocStack(8)
@@ -755,6 +756,19 @@ func TestJITClosureCaptureForwardingUnderRegisterPressure(t *testing.T) {
 		}
 		forwarded := jitCompileRootedCallValueAt(ctx, NewNthLocalVar(0), ctx.SliceBase, off)
 		ctx.EmitGoCallVoid(GoFuncAddr(runtime.GC), nil)
+		// Captures live in rooted frame slots. This argumentless helper saves
+		// only the known integer registers, so its caller-save area must not
+		// expose an unrelated incoming register as a pointer to the collector.
+		// The Go bridge may root its frame pointer below this save area.
+		callRoots := ctx.Safepoints[len(ctx.Safepoints)-1].roots[jitStackRootCallSP]
+		for index, pointers := range callRoots.bits {
+			for bit := 0; bit < 8; bit++ {
+				offset := callRoots.first + int32(index*64+bit*8)
+				if pointers&(1<<bit) != 0 && offset >= int32(jitGoSpillBytes+16) {
+					integerSaveAreaHasPointers = true
+				}
+			}
+		}
 		for i := 0; i < count; i++ {
 			ctx.UnprotectReg(held[i].Reg)
 			ctx.FreeDesc(&held[i])
@@ -763,6 +777,9 @@ func TestJITClosureCaptureForwardingUnderRegisterPressure(t *testing.T) {
 	})
 	if fn == nil {
 		t.Fatal("capture forwarding required an allocator register")
+	}
+	if integerSaveAreaHasPointers {
+		t.Fatal("integer-only caller-save area contains a pointer root")
 	}
 	for i := 0; i < 4; i++ {
 		if got := fn(uint32(i)); got.String() != "retained capture" {
