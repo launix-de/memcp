@@ -14,7 +14,8 @@ loaded again on demand, so the complete database does not have to remain memory
 resident.
 
 Applications can connect through the MySQL wire protocol or submit MySQL- and
-PostgreSQL-style SQL through separate HTTP endpoints. An RDF/SPARQL engine is
+PostgreSQL-style SQL through separate HTTP endpoints. An initial T-SQL mode adds
+`/tsql/<database>` and an optional TDS listener (`--tds-port=1433`). An RDF/SPARQL engine is
 included as well.
 
 > **Status: Beta.** MemCP is suitable for evaluation and controlled beta
@@ -86,6 +87,7 @@ Important HTTP endpoints:
 
 - `/sql/<database>` — MySQL-dialect SQL
 - `/psql/<database>` — PostgreSQL-dialect SQL
+- `/tsql/<database>` — initial T-SQL grammar using the same planner and storage
 - `/rdf/<database>` — SPARQL queries
 - `/rdf/<database>/load_ttl` — load RDF/Turtle data
 - `/dashboard` — administration, system monitoring, query activity, storage,
@@ -98,6 +100,16 @@ mounts the app into the existing HTTP handler chain and does not create a
 second listener.
 
 These are SQL-over-HTTP APIs rather than a resource-oriented REST data model.
+
+T-SQL mode currently covers bracket/double-quoted identifiers, Unicode literals,
+TOP, OFFSET/FETCH and basic DDL/DML through native defaults, constraints and
+auto-increment. Enable TDS with `--tds-port=1433 --tds-database=<existing database>`.
+The transport is the separate [go-tdsstack](https://github.com/launix-de/go-tdsstack)
+module. RPC parameter binding, metadata procedures, pure prepared-statement
+descriptions, exact dialect type semantics and script batch import remain open.
+T-SQL plans retain the existing plan cache and JIT; the dialect currently uses
+exact query text, as its literal syntax differs from the shared lexer.
+
 
 ### Reverse-proxy handlers
 
@@ -516,6 +528,8 @@ Algorithms use semantic operations and register roles from the shared API; instr
 register assignment and atomic memory ordering belong to the target backend.
 Type sizes follow the loaded package's target architecture. All three backends
 use the same 64-bit value layout; 32-bit targets are not supported by the JIT.
+`make jitgen` builds the generator for the host even when `GOARCH` selects a
+cross-compilation target. Regeneration is checked in JIT CI.
 
 For Linux cross-tests, install `qemu-user-static` and use the patched toolchain:
 

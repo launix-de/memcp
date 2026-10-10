@@ -1,0 +1,608 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixture preparation and cleanup are explicit cases so unsupported DDL stays visible.
+metadata:
+  description: Validated named and composite foreign key DDL with real enforcement
+  syntax: tsql
+  isolated: true
+setup: []
+test_cases:
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_setnull
+  name: 'Fixture setup 001: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_setnull'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_restrict
+  name: 'Fixture setup 002: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_restrict'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_text_child
+  name: 'Fixture setup 003: DROP TABLE IF EXISTS dbo.tsql_fk_text_child'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_text_parent
+  name: 'Fixture setup 004: DROP TABLE IF EXISTS dbo.tsql_fk_text_parent'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_child
+  name: 'Fixture setup 005: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_child'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_parent
+  name: 'Fixture setup 006: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_parent'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_child
+  name: 'Fixture setup 007: DROP TABLE IF EXISTS dbo.tsql_fk_child'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_alter
+  name: 'Fixture setup 008: DROP TABLE IF EXISTS dbo.tsql_fk_alter'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_cascade
+  name: 'Fixture setup 009: DROP TABLE IF EXISTS dbo.tsql_fk_cascade'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_null
+  name: 'Fixture setup 010: DROP TABLE IF EXISTS dbo.tsql_fk_null'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_invalid
+  name: 'Fixture setup 011: DROP TABLE IF EXISTS dbo.tsql_fk_invalid'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_parent
+  name: 'Fixture setup 012: DROP TABLE IF EXISTS dbo.tsql_fk_parent'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_nonunique
+  name: 'Fixture setup 013: DROP TABLE IF EXISTS dbo.tsql_fk_nonunique'
+- sql: CREATE TABLE dbo.tsql_fk_parent ([First] INT, [Second] INT, PRIMARY KEY ([First],[Second]))
+  name: 'Fixture setup 014: CREATE TABLE dbo.tsql_fk_parent ([First] INT, [Second] INT, PRIMARY KEY ([First],[Second]))'
+- sql: INSERT dbo.tsql_fk_parent VALUES (1,10),(2,20),(3,30),(4,40)
+  name: 'Fixture setup 015: INSERT dbo.tsql_fk_parent VALUES (1,10),(2,20),(3,30),(4,40)'
+  noncritical: true
+- sql: CREATE TABLE dbo.tsql_fk_nonunique (id INT)
+  name: 'Fixture setup 016: CREATE TABLE dbo.tsql_fk_nonunique (id INT)'
+- sql: CREATE TABLE dbo.tsql_fk_alter (id INT PRIMARY KEY,a INT,b INT)
+  name: 'Fixture setup 017: CREATE TABLE dbo.tsql_fk_alter (id INT PRIMARY KEY,a INT,b INT)'
+- name: Character candidate keys declare the binary FK reference profile
+  sql: CREATE TABLE dbo.tsql_fk_text_parent (code VARCHAR(12) PRIMARY KEY)
+- name: Character child preserves matching declared dimensions
+  sql: CREATE TABLE dbo.tsql_fk_text_child (code VARCHAR(12), CONSTRAINT FK_binary_text FOREIGN KEY (code) REFERENCES
+    dbo.tsql_fk_text_parent (code))
+- name: Binary profile parent fixture
+  sql: INSERT dbo.tsql_fk_text_parent VALUES ('Case')
+  noncritical: true
+- name: Exact character reference matches its parent
+  sql: INSERT dbo.tsql_fk_text_child VALUES ('Case')
+  noncritical: true
+- name: Binary FK profile rejects differently cased reference visibly
+  sql: INSERT dbo.tsql_fk_text_child VALUES ('case')
+  expect:
+    error: true
+    contains: foreign key constraint
+  noncritical: true
+- name: Nullable UNIQUE parent is a real candidate key
+  sql: CREATE TABLE dbo.tsql_fk_nullable_parent (id INT UNIQUE)
+- name: Create nullable reference with actual cascading policies
+  sql: CREATE TABLE dbo.tsql_fk_nullable_child (id INT PRIMARY KEY,p INT, CONSTRAINT FK_nullable_unique FOREIGN
+    KEY (p) REFERENCES dbo.tsql_fk_nullable_parent (id) ON DELETE CASCADE ON UPDATE CASCADE)
+- name: Nullable candidate key can hold a NULL parent
+  sql: INSERT dbo.tsql_fk_nullable_parent VALUES (NULL)
+  noncritical: true
+- name: NULL parent does not satisfy a zero foreign key
+  sql: INSERT dbo.tsql_fk_nullable_child VALUES (1,0)
+  expect:
+    error: true
+    contains: foreign key constraint
+  noncritical: true
+- name: Nullable child is exempt from reference checks
+  sql: INSERT dbo.tsql_fk_nullable_child VALUES (2,NULL)
+  noncritical: true
+- name: Removing NULL parent does not act on exempt NULL child
+  sql: DELETE FROM dbo.tsql_fk_nullable_parent WHERE id IS NULL
+- name: NULL child survives removal of NULL parent
+  sql: SELECT id,p FROM dbo.tsql_fk_nullable_child
+  expect:
+    rows: 1
+    data:
+    - id: 2
+      p: null
+  noncritical: true
+- name: Actual scalar subqueries remain rejected in INSERT VALUES
+  sql: INSERT dbo.tsql_fk_nullable_parent VALUES ((SELECT 0))
+  expect:
+    error: true
+    contains: subqueries in INSERT VALUES
+  noncritical: true
+- name: Actual zero parent is inserted
+  sql: INSERT dbo.tsql_fk_nullable_parent VALUES (0)
+  noncritical: true
+- name: Actual zero reference is inserted
+  sql: INSERT dbo.tsql_fk_nullable_child VALUES (3,0)
+  noncritical: true
+- name: Cascading zero key does not include NULL children
+  sql: DELETE FROM dbo.tsql_fk_nullable_parent WHERE id=0
+- name: NULL child survives deletion of actual zero reference
+  sql: SELECT id,p FROM dbo.tsql_fk_nullable_child
+  expect:
+    rows: 1
+    data:
+    - id: 2
+      p: null
+  noncritical: true
+- name: Recreate distinct NULL and zero candidate keys
+  sql: INSERT dbo.tsql_fk_nullable_parent VALUES (NULL),(0)
+  noncritical: true
+- name: Create SET NULL policy for nullable parent updates
+  sql: CREATE TABLE dbo.tsql_fk_nullable_setnull (id INT PRIMARY KEY,p INT, CONSTRAINT FK_nullable_setnull FOREIGN
+    KEY (p) REFERENCES dbo.tsql_fk_nullable_parent (id) ON UPDATE SET NULL)
+- name: Create restrictive policy for nullable parent updates
+  sql: CREATE TABLE dbo.tsql_fk_nullable_restrict (id INT PRIMARY KEY,p INT, CONSTRAINT FK_nullable_restrict FOREIGN
+    KEY (p) REFERENCES dbo.tsql_fk_nullable_parent (id) ON UPDATE NO ACTION)
+- name: Install actual zero and exempt NULL references for cascade
+  sql: INSERT dbo.tsql_fk_nullable_child VALUES (3,0)
+  noncritical: true
+- name: Install actual zero and exempt NULL references for SET NULL
+  sql: INSERT dbo.tsql_fk_nullable_setnull VALUES (1,0),(2,NULL)
+  noncritical: true
+- name: Install actual zero and exempt NULL references for restriction
+  sql: INSERT dbo.tsql_fk_nullable_restrict VALUES (1,0),(2,NULL)
+  noncritical: true
+- name: NULL parent update cannot act on zero references
+  sql: UPDATE dbo.tsql_fk_nullable_parent SET id=1 WHERE id IS NULL
+- name: Cascade preserves references to the other zero parent
+  sql: SELECT id,p FROM dbo.tsql_fk_nullable_child ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 2
+      p: null
+    - id: 3
+      p: 0
+  noncritical: true
+- name: SET NULL preserves references to the other zero parent
+  sql: SELECT id,p FROM dbo.tsql_fk_nullable_setnull ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      p: 0
+    - id: 2
+      p: null
+  noncritical: true
+- name: Restriction preserves references to the other zero parent
+  sql: SELECT id,p FROM dbo.tsql_fk_nullable_restrict ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      p: 0
+    - id: 2
+      p: null
+  noncritical: true
+- name: Actual zero to NULL is a restricted key change
+  sql: UPDATE dbo.tsql_fk_nullable_parent SET id=NULL WHERE id=0
+  expect:
+    error: true
+    contains: foreign key constraint
+  noncritical: true
+- name: Failed nullable parent update preserves parent rows
+  sql: SELECT id FROM dbo.tsql_fk_nullable_parent ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 0
+    - id: 1
+  noncritical: true
+- name: Failed nullable parent update preserves cascade children
+  sql: SELECT id,p FROM dbo.tsql_fk_nullable_child ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 2
+      p: null
+    - id: 3
+      p: 0
+  noncritical: true
+- name: Remove restriction before testing actual cascades
+  sql: ALTER TABLE dbo.tsql_fk_nullable_restrict DROP CONSTRAINT FK_nullable_restrict
+- name: Actual zero to NULL executes cascading policies
+  sql: UPDATE dbo.tsql_fk_nullable_parent SET id=NULL WHERE id=0
+- name: Cascade propagates NULL key instead of leaving an orphan
+  sql: SELECT id,p FROM dbo.tsql_fk_nullable_child ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 2
+      p: null
+    - id: 3
+      p: null
+  noncritical: true
+- name: SET NULL executes on a zero to NULL key transition
+  sql: SELECT id,p FROM dbo.tsql_fk_nullable_setnull ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      p: null
+    - id: 2
+      p: null
+  noncritical: true
+- name: NULL to zero has no referencing children
+  sql: UPDATE dbo.tsql_fk_nullable_parent SET id=0 WHERE id IS NULL
+- name: Cascade leaves exempt NULL children unchanged on NULL to zero
+  sql: SELECT id,p FROM dbo.tsql_fk_nullable_child ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 2
+      p: null
+    - id: 3
+      p: null
+  noncritical: true
+- name: SET NULL leaves exempt NULL children unchanged on NULL to zero
+  sql: SELECT id,p FROM dbo.tsql_fk_nullable_setnull ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      p: null
+    - id: 2
+      p: null
+  noncritical: true
+- name: CREATE validates composite references with escaped identifiers and folded casing
+  sql: CREATE TABLE dbo.tsql_fk_child (id INT PRIMARY KEY,a INT,b INT, CONSTRAINT [FK child]]parent] FOREIGN KEY
+    ([A],[b]) REFERENCES dbo.[TSQL_FK_PARENT] ([FIRST],[second]) ON DELETE NO ACTION ON UPDATE NO ACTION)
+- name: Composite constraint catalog preserves canonical names and order
+  sql: sp_fkeys @fktable_name=N'TSQL_FK_CHILD'
+  expect:
+    rows: 2
+    data:
+    - PKTABLE_NAME: tsql_fk_parent
+      PKCOLUMN_NAME: First
+      FKTABLE_NAME: tsql_fk_child
+      FKCOLUMN_NAME: a
+      KEY_SEQ: 1
+      FK_NAME: FK child]parent
+      PK_NAME: PRIMARY
+      UPDATE_RULE: 1
+      DELETE_RULE: 1
+    - PKCOLUMN_NAME: Second
+      FKCOLUMN_NAME: b
+      KEY_SEQ: 2
+  noncritical: true
+- name: Referenced parent permissions are checked during CREATE parsing
+  scm: "(parse_tsql \"memcp-tests\" \"CREATE TABLE dbo.tsql_fk_denied (a INT,b INT, CONSTRAINT FK_denied FOREIGN\
+    \ KEY (a,b) REFERENCES dbo.tsql_fk_parent ([First],[Second]))\"\n  (lambda (database relation write) (if (equal??\
+    \ relation \"tsql_fk_parent\") (error \"parent reference permission denied\") true)) nil nil)\n"
+  expect:
+    error: true
+    contains: parent reference permission denied
+  noncritical: true
+- name: Referenced parent permissions are checked during ALTER parsing
+  scm: "(parse_tsql \"memcp-tests\" \"ALTER TABLE dbo.tsql_fk_alter ADD CONSTRAINT FK_denied FOREIGN KEY (a,b) REFERENCES\
+    \ dbo.tsql_fk_parent ([First],[Second])\"\n  (lambda (database relation write) (if (equal?? relation \"tsql_fk_parent\"\
+    ) (error \"parent reference permission denied\") true)) nil nil)\n"
+  expect:
+    error: true
+    contains: parent reference permission denied
+- name: DROP TABLE cannot leave a strict child without its parent
+  sql: DROP TABLE dbo.tsql_fk_parent
+  expect:
+    error: true
+    contains: drop the foreign key constraint
+  noncritical: true
+- name: DROP TABLE cannot leave stale strict parent metadata
+  sql: DROP TABLE dbo.tsql_fk_child
+  expect:
+    error: true
+    contains: drop the foreign key constraint
+  noncritical: true
+- name: DROP COLUMN protects strict child reference fields
+  sql: ALTER TABLE dbo.tsql_fk_child DROP COLUMN a
+  expect:
+    error: true
+    contains: drop the foreign key constraint
+  noncritical: true
+- name: DROP COLUMN protects strict parent candidate fields
+  sql: ALTER TABLE dbo.tsql_fk_parent DROP COLUMN [First]
+  expect:
+    error: true
+    contains: drop the foreign key constraint
+  noncritical: true
+- name: Native candidate-key removal protects strict references
+  scm: (dropkey (table "memcp-tests" "tsql_fk_parent") "PRIMARY")
+  expect:
+    error: true
+    contains: drop the foreign key constraint
+- name: Valid composite parent is accepted
+  sql: INSERT dbo.tsql_fk_child VALUES (1,1,10)
+  noncritical: true
+- name: Child insert rejects nonexistent parent
+  sql: INSERT dbo.tsql_fk_child VALUES (2,1,20)
+  expect:
+    error: true
+- name: Child update rejects nonexistent parent
+  sql: UPDATE dbo.tsql_fk_child SET b=20 WHERE id=1
+  expect:
+    error: true
+- name: Failed child writes retain the original row
+  sql: SELECT id,a,b FROM dbo.tsql_fk_child
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      a: 1
+      b: 10
+  noncritical: true
+- name: NO ACTION rejects parent delete
+  sql: DELETE FROM dbo.tsql_fk_parent WHERE [First]=1
+  expect:
+    error: true
+- name: NO ACTION rejects parent key update
+  sql: UPDATE dbo.tsql_fk_parent SET [Second]=11 WHERE [First]=1
+  expect:
+    error: true
+- name: NULL in one composite component exempts the reference
+  sql: INSERT dbo.tsql_fk_child VALUES (2,NULL,999)
+  noncritical: true
+- name: ALTER installs a named composite key on a truly empty child
+  sql: ALTER TABLE dbo.tsql_fk_alter WITH CHECK ADD CONSTRAINT FK_alter_parent FOREIGN KEY (a,b) REFERENCES dbo.tsql_fk_parent
+    ([First],[Second])
+  noncritical: true
+- name: ALTER foreign key enforces child writes
+  sql: INSERT dbo.tsql_fk_alter VALUES (1,7,70)
+  expect:
+    error: true
+- name: DROP CONSTRAINT resolves constraint casing and removes enforcement
+  sql: ALTER TABLE dbo.tsql_fk_alter DROP CONSTRAINT fk_ALTER_parent
+- name: DROP removes the actual immutable metadata relationship
+  sql: sp_fkeys @fktable_name=N'tsql_fk_alter'
+  expect:
+    rows: 0
+  noncritical: true
+- name: A dropped constraint permits former orphans
+  sql: INSERT dbo.tsql_fk_alter VALUES (1,7,70)
+  noncritical: true
+- name: Populated ALTER rejects invalid existing rows explicitly
+  sql: ALTER TABLE dbo.tsql_fk_alter ADD CONSTRAINT FK_populated FOREIGN KEY (a,b) REFERENCES dbo.tsql_fk_parent
+    ([First],[Second])
+  expect:
+    error: true
+- name: Failed populated ALTER publishes no constraint
+  sql: ALTER TABLE dbo.tsql_fk_alter DROP CONSTRAINT FK_populated
+  expect:
+    error: true
+  noncritical: true
+- name: Failed ALTER releases metadata and table locks
+  sql: UPDATE dbo.tsql_fk_alter SET b=71 WHERE id=1
+- name: Empty the rejected ALTER table
+  sql: DELETE FROM dbo.tsql_fk_alter
+- name: Deleted physical rows conservatively reject ALTER until rebuild
+  sql: ALTER TABLE dbo.tsql_fk_alter ADD CONSTRAINT FK_deleted_parent FOREIGN KEY (a,b) REFERENCES dbo.tsql_fk_parent
+    ([First],[Second])
+  expect:
+    error: true
+- name: Missing referenced table rejects CREATE before publication
+  sql: CREATE TABLE dbo.tsql_fk_invalid (a INT, CONSTRAINT FK_missing FOREIGN KEY (a) REFERENCES dbo.tsql_fk_missing
+    (id))
+  expect:
+    error: true
+  noncritical: true
+- name: Failed CREATE has no public table identity
+  sql: SELECT OBJECT_ID('dbo.tsql_fk_invalid') AS absent
+  expect:
+    rows: 1
+    data:
+    - absent: null
+  noncritical: true
+- name: Nonunique parent rejects CREATE before publication
+  sql: CREATE TABLE dbo.tsql_fk_invalid (a INT, CONSTRAINT FK_nonunique FOREIGN KEY (a) REFERENCES dbo.tsql_fk_nonunique
+    (id))
+  expect:
+    error: true
+- name: Wrong parent candidate-key order is rejected
+  sql: CREATE TABLE dbo.tsql_fk_invalid (a INT,b INT, CONSTRAINT FK_wrong_order FOREIGN KEY (a,b) REFERENCES dbo.tsql_fk_parent
+    ([Second],[First]))
+  expect:
+    error: true
+- name: Incompatible child types reject CREATE
+  sql: CREATE TABLE dbo.tsql_fk_invalid (a BIGINT,b INT, CONSTRAINT FK_wrong_type FOREIGN KEY (a,b) REFERENCES dbo.tsql_fk_parent
+    ([First],[Second]))
+  expect:
+    error: true
+- name: Unknown child column rejects CREATE
+  sql: CREATE TABLE dbo.tsql_fk_invalid (a INT,b INT, CONSTRAINT FK_missing_col FOREIGN KEY (missing,b) REFERENCES
+    dbo.tsql_fk_parent ([First],[Second]))
+  expect:
+    error: true
+- name: Unknown parent column rejects CREATE
+  sql: CREATE TABLE dbo.tsql_fk_invalid (a INT,b INT, CONSTRAINT FK_missing_ref FOREIGN KEY (a,b) REFERENCES dbo.tsql_fk_parent
+    ([First],missing))
+  expect:
+    error: true
+- name: Mismatched column counts reject CREATE
+  sql: CREATE TABLE dbo.tsql_fk_invalid (a INT,b INT, CONSTRAINT FK_wrong_count FOREIGN KEY (a,b) REFERENCES dbo.tsql_fk_parent
+    ([First]))
+  expect:
+    error: true
+- name: Duplicate foreign-key columns reject CREATE
+  sql: CREATE TABLE dbo.tsql_fk_invalid (a INT,b INT, CONSTRAINT FK_duplicate_col FOREIGN KEY (a,a) REFERENCES dbo.tsql_fk_parent
+    ([First],[Second]))
+  expect:
+    error: true
+- name: SET NULL requires nullable child columns
+  sql: CREATE TABLE dbo.tsql_fk_invalid (a INT NOT NULL,b INT, CONSTRAINT FK_bad_null FOREIGN KEY (a,b) REFERENCES
+    dbo.tsql_fk_parent ([First],[Second]) ON DELETE SET NULL)
+  expect:
+    error: true
+- name: SET DEFAULT fails explicitly
+  sql: CREATE TABLE dbo.tsql_fk_invalid (a INT,b INT, CONSTRAINT FK_default FOREIGN KEY (a,b) REFERENCES dbo.tsql_fk_parent
+    ([First],[Second]) ON DELETE SET DEFAULT)
+  expect:
+    error: true
+- name: Cross database reference fails explicitly
+  sql: CREATE TABLE dbo.tsql_fk_invalid (a INT,b INT, CONSTRAINT FK_crossdb FOREIGN KEY (a,b) REFERENCES [other-db].dbo.tsql_fk_parent
+    ([First],[Second]))
+  expect:
+    error: true
+- name: Forward self reference fails explicitly
+  sql: CREATE TABLE dbo.tsql_fk_invalid (id INT PRIMARY KEY,pid INT, CONSTRAINT FK_self FOREIGN KEY (pid) REFERENCES
+    dbo.tsql_fk_invalid (id))
+  expect:
+    error: true
+- name: Duplicate constraint names cannot share generated parent triggers
+  sql: CREATE TABLE dbo.tsql_fk_invalid (a INT,b INT, CONSTRAINT [fk CHILD]]parent] FOREIGN KEY (a,b) REFERENCES
+    dbo.tsql_fk_parent ([First],[Second]))
+  expect:
+    error: true
+- name: Multiple declarations with one constraint name reject atomically
+  sql: CREATE TABLE dbo.tsql_fk_invalid (a INT,b INT, CONSTRAINT FK_dupe FOREIGN KEY (a,b) REFERENCES dbo.tsql_fk_parent
+    ([First],[Second]), CONSTRAINT fk_DUPE FOREIGN KEY (a,b) REFERENCES dbo.tsql_fk_parent ([First],[Second]))
+  expect:
+    error: true
+- name: All rejected CREATE commands leave the name reusable
+  sql: CREATE TABLE dbo.tsql_fk_invalid (id INT PRIMARY KEY,a INT,b INT)
+  noncritical: true
+- name: WITH NOCHECK does not publish an unenforced constraint
+  sql: ALTER TABLE dbo.tsql_fk_invalid WITH NOCHECK ADD CONSTRAINT FK_nocheck FOREIGN KEY (a,b) REFERENCES dbo.tsql_fk_parent
+    ([First],[Second])
+  expect:
+    error: true
+- name: Rejected NOCHECK leaves the child writable
+  sql: INSERT dbo.tsql_fk_invalid VALUES (1,8,80)
+  noncritical: true
+- name: DROP rejects primary and unknown names explicitly
+  sql: ALTER TABLE dbo.tsql_fk_invalid DROP CONSTRAINT PRIMARY
+  expect:
+    error: true
+  noncritical: true
+- name: CREATE installs cascade enforcement
+  sql: CREATE TABLE dbo.tsql_fk_cascade (id INT PRIMARY KEY,a INT,b INT, CONSTRAINT FK_cascade FOREIGN KEY (a,b)
+    REFERENCES dbo.tsql_fk_parent ([First],[Second]) ON UPDATE CASCADE ON DELETE CASCADE)
+  noncritical: true
+- name: Cascade fixture references its parent
+  sql: INSERT dbo.tsql_fk_cascade VALUES (1,2,20)
+  noncritical: true
+- name: Updating parent cascades the complete composite key
+  sql: UPDATE dbo.tsql_fk_parent SET [Second]=21 WHERE [First]=2
+  noncritical: true
+- name: Cascade update modified actual child data
+  sql: SELECT a,b FROM dbo.tsql_fk_cascade
+  expect:
+    rows: 1
+    data:
+    - a: 2
+      b: 21
+  noncritical: true
+- name: Deleting parent cascades to child
+  sql: DELETE FROM dbo.tsql_fk_parent WHERE [First]=2
+  noncritical: true
+- name: Cascade delete removed actual child data
+  sql: SELECT id FROM dbo.tsql_fk_cascade
+  expect:
+    rows: 0
+  noncritical: true
+- name: CREATE installs SET NULL enforcement
+  sql: CREATE TABLE dbo.tsql_fk_null (id INT PRIMARY KEY,a INT,b INT, CONSTRAINT FK_null FOREIGN KEY (a,b) REFERENCES
+    dbo.tsql_fk_parent ([First],[Second]) ON DELETE SET NULL ON UPDATE SET NULL)
+- name: SET NULL fixture references its parent
+  sql: INSERT dbo.tsql_fk_null VALUES (1,3,30),(2,4,40)
+  noncritical: true
+- name: Parent update sets both child key columns to NULL
+  sql: UPDATE dbo.tsql_fk_parent SET [Second]=31 WHERE [First]=3
+  noncritical: true
+- name: Parent deletion sets both child key columns to NULL
+  sql: DELETE FROM dbo.tsql_fk_parent WHERE [First]=4
+  noncritical: true
+- name: SET NULL actions changed actual child rows
+  sql: SELECT id,a,b FROM dbo.tsql_fk_null ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      a: null
+      b: null
+    - id: 2
+      a: null
+      b: null
+  noncritical: true
+- name: Crash after committing enforced foreign keys
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart durable constraint declarations and generated enforcement
+  action: restart
+- name: Composite constraint catalog survives restart
+  sql: sp_fkeys @fktable_name=N'tsql_fk_child'
+  expect:
+    rows: 2
+    data:
+    - FK_NAME: FK child]parent
+      PKCOLUMN_NAME: First
+      FKCOLUMN_NAME: a
+      KEY_SEQ: 1
+    - PKCOLUMN_NAME: Second
+      FKCOLUMN_NAME: b
+      KEY_SEQ: 2
+  noncritical: true
+- name: Strict endpoint safety survives catalog recovery
+  sql: DROP TABLE dbo.tsql_fk_parent
+  expect:
+    error: true
+    contains: drop the foreign key constraint
+  noncritical: true
+- name: Strict referenced-column safety survives catalog recovery
+  sql: ALTER TABLE dbo.tsql_fk_child DROP COLUMN a
+  expect:
+    error: true
+    contains: drop the foreign key constraint
+  noncritical: true
+- name: Child reference checks survive restart
+  sql: INSERT dbo.tsql_fk_child VALUES (9,99,99)
+  expect:
+    error: true
+    contains: foreign key constraint
+  noncritical: true
+- name: Parent restrictions survive restart
+  sql: DELETE FROM dbo.tsql_fk_parent WHERE [First]=1
+  expect:
+    error: true
+    contains: foreign key constraint
+  noncritical: true
+- name: Dropping populated child constraint removes parent restrictions
+  sql: ALTER TABLE dbo.tsql_fk_child DROP CONSTRAINT [FK child]]parent]
+  noncritical: true
+- name: Parent is deletable after dropping its final referencing constraint
+  sql: DELETE FROM dbo.tsql_fk_parent WHERE [First]=1
+  noncritical: true
+- name: Dropped constraint releases child insert enforcement
+  sql: INSERT dbo.tsql_fk_child VALUES (3,99,99)
+  noncritical: true
+- name: Clean restart persists dropped constraints
+  syntax: mysql
+  sql: SHUTDOWN
+- name: Removed FK metadata stays absent after clean restart
+  sql: sp_fkeys @fktable_name=N'tsql_fk_child'
+  expect:
+    rows: 0
+  noncritical: true
+- name: Dropped child enforcement stays removed after clean restart
+  sql: INSERT dbo.tsql_fk_child VALUES (4,100,100)
+  noncritical: true
+- sql: ALTER TABLE dbo.tsql_fk_nullable_setnull DROP CONSTRAINT FK_nullable_setnull
+  name: 'Fixture cleanup 001: ALTER TABLE dbo.tsql_fk_nullable_setnull DROP CONSTRAINT FK_nullable_setnull'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_setnull
+  name: 'Fixture cleanup 002: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_setnull'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_restrict
+  name: 'Fixture cleanup 003: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_restrict'
+- sql: ALTER TABLE dbo.tsql_fk_text_child DROP CONSTRAINT FK_binary_text
+  name: 'Fixture cleanup 004: ALTER TABLE dbo.tsql_fk_text_child DROP CONSTRAINT FK_binary_text'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_text_child
+  name: 'Fixture cleanup 005: DROP TABLE IF EXISTS dbo.tsql_fk_text_child'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_text_parent
+  name: 'Fixture cleanup 006: DROP TABLE IF EXISTS dbo.tsql_fk_text_parent'
+- sql: ALTER TABLE dbo.tsql_fk_nullable_child DROP CONSTRAINT FK_nullable_unique
+  name: 'Fixture cleanup 007: ALTER TABLE dbo.tsql_fk_nullable_child DROP CONSTRAINT FK_nullable_unique'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_child
+  name: 'Fixture cleanup 008: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_child'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_parent
+  name: 'Fixture cleanup 009: DROP TABLE IF EXISTS dbo.tsql_fk_nullable_parent'
+- sql: ALTER TABLE dbo.tsql_fk_cascade DROP CONSTRAINT FK_cascade
+  name: 'Fixture cleanup 010: ALTER TABLE dbo.tsql_fk_cascade DROP CONSTRAINT FK_cascade'
+  noncritical: true
+- sql: ALTER TABLE dbo.tsql_fk_null DROP CONSTRAINT FK_null
+  name: 'Fixture cleanup 011: ALTER TABLE dbo.tsql_fk_null DROP CONSTRAINT FK_null'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_child
+  name: 'Fixture cleanup 012: DROP TABLE IF EXISTS dbo.tsql_fk_child'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_alter
+  name: 'Fixture cleanup 013: DROP TABLE IF EXISTS dbo.tsql_fk_alter'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_cascade
+  name: 'Fixture cleanup 014: DROP TABLE IF EXISTS dbo.tsql_fk_cascade'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_null
+  name: 'Fixture cleanup 015: DROP TABLE IF EXISTS dbo.tsql_fk_null'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_invalid
+  name: 'Fixture cleanup 016: DROP TABLE IF EXISTS dbo.tsql_fk_invalid'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_parent
+  name: 'Fixture cleanup 017: DROP TABLE IF EXISTS dbo.tsql_fk_parent'
+- sql: DROP TABLE IF EXISTS dbo.tsql_fk_nonunique
+  name: 'Fixture cleanup 018: DROP TABLE IF EXISTS dbo.tsql_fk_nonunique'
+cleanup: []

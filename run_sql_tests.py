@@ -1053,7 +1053,7 @@ class SQLTestRunner:
         self.ensure_database(database)
         encoded_db = quote(database, safe='')
         normalized = self._normalize_syntax(syntax)
-        route = "psql" if normalized == "postgresql" else "sql"
+        route = "tsql" if normalized == "tsql" else ("psql" if normalized == "postgresql" else "sql")
         url = f"{self.base_url}/{route}/{encoded_db}"
         # Append positional params as v1=, v2=, ... query string
         if params:
@@ -1639,6 +1639,12 @@ class SQLTestRunner:
             return True
 
         query = scm_code or test_case.get("sql") or test_case.get("sparql")
+        if query is None:
+            return self._record_fail(
+                name, "No executable operation: native TDS probes are not supported by this runner"
+                if "tds" in test_case else "No executable test operation",
+                None, None, test_case.get("expect"), is_noncritical,
+            )
         if query and is_perf_test:
             query = query.replace("{rows}", str(perf_rows)).replace("{database}", database)
         is_sparql = "sparql" in test_case
