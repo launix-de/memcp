@@ -5,7 +5,7 @@
 # Normal correctness runs use one complete 5000-row sparse-key period. The
 # full-year table is unused there; performance mode retains both 800k fixtures.
 metadata:
-  performance_shard_weight: 7
+  performance_shard_weight: 22
   reuse_fixture: true
   restart_after_setup: true
   description: Restricted tenant hierarchy with correlated document membership and counts; 800k documents, 100 tenants,

@@ -3,7 +3,7 @@
 # build traces. Data and names are synthetic and anonymized.
 
 metadata:
-  performance_shard_weight: 4
+  performance_shard_weight: 24
   version: "1.0"
   description: "Large lookup GROUP BY performance"
   isolated: true
