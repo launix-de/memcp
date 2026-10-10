@@ -285,6 +285,162 @@ test_cases:
   - name: invalid alter dimensions are rejected before schema mutation
     sql: ALTER TABLE [tsql_native_copy] ADD [invalid] DECIMAL(40,2)
     expect: {error: true}
+  - name: cast result types come from declarations including null operands
+    scm: |
+      (begin
+        (define types '("INT" "INTEGER" "SMALLINT" "TINYINT" "BIGINT" "FLOAT" "REAL" "BIT"))
+        (reduce (map types (lambda (type) (begin
+          (define info (sql_expr_info (list) (tsql_cast_expr nil type (list))))
+          (and (equal? (sql_info_type info) type)
+            (nil? (sql_info_collation info))
+            (nil? (eval (sql_info_formula info)))))))
+          (lambda (ok item) (and ok item)) true))
+    expect: {result: true}
+  - name: integer cast emits only its conversion without a division marker
+    scm: |
+      (begin
+        (define info (sql_expr_info (list) (tsql_cast_expr "42" "SMALLINT" (list))))
+        (and (equal? (sql_info_type info) "SMALLINT")
+          (expression_equal? (sql_info_formula info) (list tsql_cast_integer "42" -32768 32767))
+          (equal? (eval (sql_info_formula info)) 42)))
+    expect: {result: true}
+  - name: bit cast emits only its conversion without boolean markers
+    scm: |
+      (begin
+        (define info (sql_expr_info (list) (tsql_cast_expr "1" "BIT" (list))))
+        (and (equal? (sql_info_type info) "BIT")
+          (expression_equal? (sql_info_formula info) (list tsql_cast_bit "1"))
+          (equal? (eval (sql_info_formula info)) true)))
+    expect: {result: true}
+  - name: float cast emits only its conversion without type markers
+    scm: |
+      (begin
+        (define info (sql_expr_info (list) (tsql_cast_expr 1 "FLOAT" (list))))
+        (and (equal? (sql_info_type info) "FLOAT")
+          (expression_equal? (sql_info_formula info) (list tsql_cast_float 1))
+          (equal? (eval (sql_info_formula info)) 1)))
+    expect: {result: true}
+  - name: outer cast declaration determines nested conversion type
+    scm: |
+      (begin
+        (define info (sql_expr_info (list)
+          (tsql_cast_expr (tsql_cast_expr "42" "SMALLINT" (list)) "FLOAT" (list))))
+        (and (equal? (sql_info_type info) "FLOAT")
+          (expression_equal? (sql_info_formula info)
+            (list tsql_cast_float (list tsql_cast_integer "42" -32768 32767)))
+          (equal? (eval (sql_info_formula info)) 42)))
+    expect: {result: true}
+  - name: case and coalesce merge declared cast types rather than helper contracts
+    scm: |
+      (begin
+        (define small (tsql_cast_expr "42" "SMALLINT" (list)))
+        (define absent (tsql_cast_expr nil "SMALLINT" (list)))
+        (and (equal? (sql_info_type (sql_expr_info (list) (list (quote if) false absent small))) "SMALLINT")
+          (equal? (sql_info_type (sql_expr_info (list) (list coalesceNil absent small))) "SMALLINT")
+          (equal? (sql_info_type (sql_expr_info (list) (list (quote +) small small))) "BIGINT")))
+    expect: {result: true}
+  - name: conversions inside case and isnull execute through the shared compiler
+    sql: SELECT CASE WHEN 1=1 THEN CAST('12' AS SMALLINT) ELSE CAST(NULL AS SMALLINT) END AS choice, ISNULL(CAST(NULL AS INT),CAST('42' AS INT)) AS fallback
+    expect: {rows: 1, data: [{choice: 12, fallback: 42}]}
+  - name: conversions inside a derived source retain executable formulas
+    sql: SELECT [d].[value] FROM (SELECT CAST('42' AS INT) AS [value]) AS [d]
+    expect: {rows: 1, data: [{value: 42}]}
+  - name: conversions inside union branches retain executable formulas
+    sql: SELECT CAST('12' AS INT) AS value UNION ALL SELECT CONVERT(INT,'42') AS value
+    expect: {rows: 2, data: [{value: 12}, {value: 42}]}
+  - name: conversion inside aggregate input retains executable formula
+    sql: SELECT SUM(CAST([amount] AS INT)) AS total FROM [tsql_native]
+    expect: {rows: 1, data: [{total: 14}]}
+  - name: conversion inside scalar subquery retains executable formula
+    sql: SELECT (SELECT CAST('42' AS INT)) AS value
+    expect: {rows: 1, data: [{value: 42}]}
+  - name: conversion inside joined condition retains executable formula
+    sql: SELECT a.[id] FROM [tsql_native] AS a JOIN [tsql_native] AS b ON a.[id]=CAST(b.[id] AS INT) ORDER BY a.[id]
+    expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+  - name: conversions in insert values use the normal native insert
+    sql: INSERT INTO [tsql_native_copy] ([id],[name]) VALUES (CAST('4' AS INT),N'cast value')
+    expect: {rows: 1}
+  - name: inserted converted value remains readable
+    sql: SELECT [id] FROM [tsql_native_copy] WHERE [name]=N'cast value'
+    expect: {rows: 1, data: [{id: 4}]}
+  - name: cast still checks unknown column references
+    sql: SELECT CAST([missing_column] AS INT) FROM [tsql_native]
+    expect: {error: true}
+  - name: unsupported cast target is an explicit frontend error
+    sql: SELECT CAST('42' AS VARBINARY(2))
+    expect: {error: true}
+  - name: result metadata describes null casts and nested casts before any row
+    scm: |
+      (begin
+        (define session (newsession))
+        (session "username" "root")
+        (session "schema" "memcp-tests")
+        (session "wire_metadata" true)
+        (define output (newsession))
+        (tds_frontend "execute" session
+          (list "database" "memcp-tests" "parameters" (list) "declarations" ""
+            "text" "SELECT CAST(NULL AS SMALLINT) AS absent, CAST(CAST(1 AS INT) AS FLOAT) AS numeric_value, CAST(NULL AS BIT) AS flag WHERE 1=0")
+          (lambda (values) (output "row" true))
+          (lambda (fields) (output "fields" fields)) nil nil)
+        (and (nil? (output "row"))
+          (equal? (map (output "fields") (lambda (field) (field "kind"))) '(38 109 104))))
+    expect: {result: true}
+  - name: wire widths follow integer declarations while values stay native int64
+    scm: |
+      (begin
+        (define session (newsession))
+        (session "username" "root")
+        (session "schema" "memcp-tests")
+        (session "wire_metadata" true)
+        (define output (newsession))
+        (tds_frontend "execute" session
+          (list "database" "memcp-tests" "parameters" (list) "declarations" ""
+            "text" "SELECT CAST('255' AS TINYINT) AS tiny_value, CAST('-32768' AS SMALLINT) AS small_value, CAST('2147483647' AS INT) AS int_value, CAST('9223372036854775807' AS BIGINT) AS big_value")
+          (lambda (values) (output "values" values))
+          (lambda (fields) (output "fields" fields)) nil nil)
+        (and (equal? (map (output "fields") (lambda (field) (field "size"))) '(1 2 4 8))
+          (equal? (map (output "fields") (lambda (field) (field "kind"))) '(38 38 38 38))
+          (reduce (map (output "values") int?) (lambda (ok value) (and ok value)) true)
+          (expression_equal? (nth (output "values") 3) (tsql_parse_integer "9223372036854775807"))))
+    expect: {result: true}
+  - name: compiled query block records declared cast types with plain formulas
+    scm: |
+      (begin
+        (define expr (tsql_cast_expr nil "INT" (list)))
+        (define block (make_query_block "memcp-tests" (list) (list "value" expr) true nil nil nil nil nil nil nil nil))
+        (define typed (sql_type_query_block block (list)))
+        (define result ((qassoc_get (qb_facts typed) (quote result-types) nil) "value"))
+        (and (equal? (sql_info_type result) "INT")
+          (expression_equal? ((qb_fields typed) "value") (list tsql_cast_integer nil -2147483648 2147483647))))
+    expect: {result: true}
+  - name: conversion inside window input uses the existing window planner
+    sql: SELECT [id], SUM(CAST([amount] AS INT)) OVER () AS total FROM [tsql_native] ORDER BY [id]
+    expect: {rows: 2, data: [{id: 1, total: 14}, {id: 2, total: 14}]}
+  - name: conversion inside group keys and having uses the shared grouping planner
+    sql: SELECT CAST([amount] AS INT) AS value, COUNT(*) AS entries FROM [tsql_native] GROUP BY CAST([amount] AS INT) HAVING CAST([amount] AS INT)=7
+    expect: {rows: 1, data: [{value: 7, entries: 2}]}
+  - name: conversions inside ordered expressions use the common order lowering
+    sql: SELECT [id] FROM [tsql_native] ORDER BY CAST([id] AS INT) DESC
+    expect: {rows: 2, data: [{id: 2}, {id: 1}]}
+  - name: valid conversion inside update uses the native dml plan
+    sql: UPDATE [tsql_native] SET [amount]=CAST('7' AS INT) WHERE [id]=CONVERT(INT,'1')
+    expect: {rows: 1}
+  - name: window cast result carries the frontend integer contract
+    scm: |
+      (begin
+        (define info (sql_expr_info (list)
+          (tsql_window_expr "SUM" (list (tsql_cast_expr "42" "SMALLINT" (list))) (list))))
+        (and (equal? (sql_info_type info) "INT")
+          (expression_equal? (sql_info_formula info)
+            (list (quote window_func) "SUM" (list (list tsql_cast_integer "42" -32768 32767)) (list)))))
+    expect: {result: true}
+  - name: executable window plan contains no frontend type annotations
+    scm: |
+      (not (regexp_test
+        (string (parse_tsql "memcp-tests"
+          "SELECT id,SUM(CAST(amount AS INT)) OVER () AS total FROM tsql_native ORDER BY id"
+          nil nil nil)) "sql_type_expr"))
+    expect: {result: true}
 cleanup:
   - sql: DROP VIEW IF EXISTS [tsql_native_view]
   - sql: DROP TABLE IF EXISTS [tsql_native_copy]
