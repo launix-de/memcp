@@ -618,6 +618,113 @@ test_cases:
     expect:
       affected_rows: 1
 
+  - name: Window row numbers retain partition boundaries
+    sql: SELECT id, ROW_NUMBER() OVER (PARTITION BY name ORDER BY id) AS rn FROM psql_data ORDER BY id
+    expect:
+      rows: 4
+      data:
+      - id: 1
+        rn: 1
+      - id: 2
+        rn: 1
+      - id: 3
+        rn: 1
+      - id: 4
+        rn: 2
+  - name: Window sum uses all partition rows
+    sql: SELECT id, SUM(val) OVER (PARTITION BY name) AS total FROM psql_data ORDER BY id
+    expect:
+      rows: 4
+      data:
+      - id: 1
+        total: 30
+      - id: 2
+        total: 30
+      - id: 3
+        total: 50
+      - id: 4
+        total: 30
+  - name: Window COUNT star over the complete result
+    sql: SELECT id, COUNT(*) OVER () AS n FROM psql_data ORDER BY id LIMIT 1
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        n: 4
+  - name: Window LAG with conflicting output order
+    sql: SELECT id, LAG(val) OVER (ORDER BY val) AS previous FROM psql_data ORDER BY id
+    expect:
+      rows: 4
+      data:
+      - id: 1
+        previous: null
+      - id: 2
+        previous: 20
+      - id: 3
+        previous: 30
+      - id: 4
+        previous: 10
+  - name: Unknown window function fails explicitly
+    sql: SELECT UNKNOWN_WINDOW(val) OVER (ORDER BY id) FROM psql_data
+    expect:
+      error: true
+  - name: Unsupported window frame fails explicitly
+    sql: SELECT SUM(val) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM psql_data
+    expect:
+      error: true
+
+  - name: Ordered aggregate window fails until default frames are supported
+    sql: SELECT SUM(val) OVER (ORDER BY id) FROM psql_data
+    expect: {error: true}
+
+  - name: RANK and DENSE_RANK preserve peers
+    sql: SELECT id,RANK() OVER (ORDER BY name) AS rank,DENSE_RANK() OVER (ORDER BY name) AS dense FROM psql_data ORDER BY id
+    expect:
+      rows: 4
+      data: [{id: 1, rank: 1, dense: 1}, {id: 2, rank: 3, dense: 2}, {id: 3, rank: 4, dense: 3}, {id: 4, rank: 1, dense: 1}]
+
+  - name: Partition aggregates share the native window planner
+    sql: SELECT id, COUNT(val) OVER (PARTITION BY name) AS n, AVG(val) OVER (PARTITION BY name) AS average, MIN(val) OVER (PARTITION BY name) AS lo, MAX(val) OVER (PARTITION BY name) AS hi FROM psql_data ORDER BY id
+    expect:
+      rows: 4
+      data: [{id: 1, n: 2, average: 15, lo: 10, hi: 20}, {id: 2, n: 1, average: 30, lo: 30, hi: 30}, {id: 3, n: 1, average: 50, lo: 50, hi: 50}, {id: 4, n: 2, average: 15, lo: 10, hi: 20}]
+
+  - name: Window aggregates preserve all NULL inputs
+    sql: SELECT id, COUNT(CASE WHEN val > 0 THEN NULL ELSE val END) OVER (PARTITION BY name) AS n, SUM(CASE WHEN val > 0 THEN NULL ELSE val END) OVER (PARTITION BY name) AS total FROM psql_data ORDER BY id
+    expect:
+      rows: 4
+      data: [{id: 1, n: 0, total: null}, {id: 2, n: 0, total: null}, {id: 3, n: 0, total: null}, {id: 4, n: 0, total: null}]
+
+  - name: LEAD accepts an offset
+    sql: SELECT id, LEAD(val,2) OVER (ORDER BY id ASC) AS ahead FROM psql_data ORDER BY id
+    expect:
+      rows: 4
+      data: [{id: 1, ahead: 50}, {id: 2, ahead: 20}, {id: 3, ahead: null}, {id: 4, ahead: null}]
+
+  - name: Descending window order differs from output order
+    sql: SELECT id, ROW_NUMBER() OVER (ORDER BY id DESC) AS rn FROM psql_data ORDER BY id
+    expect:
+      rows: 4
+      data: [{id: 1, rn: 4}, {id: 2, rn: 3}, {id: 3, rn: 2}, {id: 4, rn: 1}]
+
+  - name: Window keywords remain valid explicit aliases
+    sql: SELECT 1 AS over, 2 AS partition, 3 AS asc, 4 AS desc
+    expect:
+      rows: 1
+      data: [{over: 1, partition: 2, asc: 3, desc: 4}]
+
+  - name: Window functions are rejected in WHERE
+    sql: SELECT id FROM psql_data WHERE ROW_NUMBER() OVER (ORDER BY id) = 1
+    expect: {error: true}
+
+  - name: Unsupported LEAD default fails explicitly
+    sql: SELECT LEAD(val,2,-1) OVER (ORDER BY id) FROM psql_data
+    expect: {error: true}
+
+  - name: Ranking functions require an ordering
+    sql: SELECT RANK() OVER () FROM psql_data
+    expect: {error: true}
+
 cleanup:
   - sql: "DROP VIEW IF EXISTS psql_data_view"
   - sql: "DROP TABLE IF EXISTS psql_group_item"
