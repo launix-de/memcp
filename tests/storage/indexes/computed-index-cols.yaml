@@ -18,6 +18,7 @@
 # use as sort/filter keys (the building blocks for expression-index optimisation).
 
 metadata:
+  scan_debugging: true # The runner owns this flag for the complete cluster.
   version: "1.0"
   description: "Expression columns: YEAR/MONTH/DAY/QUARTER/WEEK functions and use in ORDER BY / WHERE / GROUP BY"
 
@@ -358,7 +359,6 @@ test_cases:
 
   - name: "Warm computed JSON_VALUE equality index"
     setup:
-      - scm: '(settings "ScanDebugging" true)'
       - sql: "DELETE FROM system_statistic.scans WHERE schema = 'memcp-tests' AND `table` = 'ci_json_docs'"
       - sql: "SELECT id FROM ci_json_docs WHERE JSON_VALUE(payload, '$.tenant' RETURNING UNSIGNED) = 3"
       - sql: "SELECT id FROM ci_json_docs WHERE JSON_VALUE(payload, '$.tenant' RETURNING UNSIGNED) = 3"
@@ -449,5 +449,3 @@ test_cases:
           candidateCount: 4
           outputCount: 4
           result: ok
-    cleanup:
-      - scm: '(settings "ScanDebugging" false)'

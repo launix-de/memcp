@@ -62,7 +62,7 @@ import re
 import random
 import shutil
 import tempfile
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import ctypes
 import select
 import signal
@@ -2729,6 +2729,65 @@ def load_suite_metadata(spec_file: str) -> Dict[str, Any]:
     return metadata if isinstance(metadata, dict) else {}
 
 
+def suite_scan_debugging(spec_file: str) -> bool:
+    """Declare scan diagnostics without changing a shared flag in test cases."""
+    value = load_suite_metadata(spec_file).get("scan_debugging", False)
+    if not isinstance(value, bool):
+        raise ValueError(f"{spec_file}: metadata.scan_debugging must be boolean")
+    if value:
+        writes = set(re.findall(r'\(\s*settings\s+"([^"\n]+)"\s+[^)\s]',
+                                Path(spec_file).read_text()))
+        if "ScanDebugging" in writes:
+            raise ValueError(f"{spec_file}: the runner owns ScanDebugging; remove case-level toggles")
+        if writes and not load_suite_metadata(spec_file).get("isolated"):
+            raise ValueError(f"{spec_file}: global setting changes require isolated: true")
+        if (re.search(r'\bTRUNCATE\s+(?:TABLE\s+)?`?system_statistic`?\s*\.\s*`?scans`?\b',
+                      Path(spec_file).read_text(), re.IGNORECASE)
+                and not load_suite_metadata(spec_file).get("isolated")):
+            raise ValueError(f"{spec_file}: global scan-log resets require isolated: true")
+        if suite_requires_managed_restart(spec_file):
+            raise ValueError(f"{spec_file}: scan-diagnostics clusters cannot restart the server")
+    return value
+
+
+def change_scan_debugging(base_url: str, enabled: bool) -> bool:
+    runner = SQLTestRunner(base_url)
+    response = requests.post(f"{base_url}/scm", data='(settings "ScanDebugging")',
+                             headers=runner.auth_header, timeout=10)
+    response.raise_for_status()
+    value = response.text.strip().lower()
+    if value not in ("true", "false"):
+        raise ValueError(f"Cannot read ScanDebugging: {response.text[:200]}")
+    previous = value == "true"
+    if previous != enabled:
+        response = requests.post(
+            f"{base_url}/scm",
+            data=f'(settings "ScanDebugging" {str(enabled).lower()})',
+            headers=runner.auth_header, timeout=10,
+        )
+        response.raise_for_status()
+        if response.text.strip().lower() != "true":
+            raise ValueError(f"Cannot change ScanDebugging: {response.text[:200]}")
+    return previous
+
+
+@contextmanager
+def scan_debugging_cluster(base_url: str):
+    # Enter/leave only after every worker of the preceding phase has finished.
+    # Children inherit ownership; they must never toggle the shared flag.
+    previous = change_scan_debugging(base_url, True)
+    owned = os.environ.get("MEMCP_TEST_SCAN_DEBUGGING_MANAGED")
+    os.environ["MEMCP_TEST_SCAN_DEBUGGING_MANAGED"] = "1"
+    try:
+        yield
+    finally:
+        if owned is None:
+            os.environ.pop("MEMCP_TEST_SCAN_DEBUGGING_MANAGED", None)
+        else:
+            os.environ["MEMCP_TEST_SCAN_DEBUGGING_MANAGED"] = owned
+        change_scan_debugging(base_url, previous)
+
+
 def suite_requires_managed_restart(spec_file: str) -> bool:
     with open(spec_file, 'r') as f:
         spec = yaml.safe_load(f) or {}
@@ -2831,6 +2890,26 @@ def run_spec_subprocess(spec_file: str, port: Optional[int], log_times: bool, co
 
 def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: bool, jobs: Optional[int],
                    restart_handler=None, connect_only: bool = False, fail_fast: bool = False) -> bool:
+    if os.environ.get("MEMCP_TEST_SCAN_DEBUGGING_MANAGED") != "1":
+        debug_specs = [path for path in spec_files
+                       if Path(path).is_file() and suite_scan_debugging(path)]
+        if debug_specs:
+            ordinary_specs = [path for path in spec_files if path not in debug_specs]
+            ordinary_ok = not ordinary_specs or run_test_specs(
+                ordinary_specs, base_url, port, log_times, jobs,
+                restart_handler, connect_only, fail_fast,
+            )
+            if fail_fast and not ordinary_ok:
+                return False
+            print(f"🔎 ScanDebugging cluster: {len(debug_specs)} suites, "
+                  "shared server and stable diagnostics")
+            with scan_debugging_cluster(base_url):
+                debug_ok = run_test_specs(
+                    debug_specs, base_url, port, log_times, jobs,
+                    restart_handler, connect_only, fail_fast,
+                )
+            return bool(ordinary_ok and debug_ok)
+
     if len(spec_files) == 1 and not PERF_TEST_ENABLED:
         runner = SQLTestRunner(base_url, log_times=log_times, fail_fast=fail_fast)
         if restart_handler is not None:
@@ -3686,8 +3765,6 @@ def main():
                 if json.loads(marker.read_text()) != {"schema_version": 1, "writer": "A"}:
                     raise ValueError("invalid prepared fixture marker")
                 success = runner.run_test_spec(spec_files[0], setup_done=True)
-        elif len(spec_files) == 1:
-            success = runner.run_test_spec(spec_files[0])
         else:
             success = run_test_specs(spec_files, base_url, port, log_times, jobs, restart_handler if not connect_only else None, connect_only, fail_fast)
     finally:
