@@ -1,0 +1,741 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixture preparation and cleanup are explicit cases so unsupported DDL stays visible.
+metadata:
+  version: '1.0'
+  description: Exact numeric values, casts and arithmetic in t-sql mode
+  syntax: tsql
+  isolated: true
+setup: []
+test_cases:
+- sql: DROP TABLE IF EXISTS money_bad_dimensions
+  name: 'Fixture setup 001: DROP TABLE IF EXISTS money_bad_dimensions'
+- sql: DROP TABLE IF EXISTS smallmoney_bad_dimensions
+  name: 'Fixture setup 002: DROP TABLE IF EXISTS smallmoney_bad_dimensions'
+- sql: DROP TABLE IF EXISTS tsql_assignment_bounds
+  name: 'Fixture setup 003: DROP TABLE IF EXISTS tsql_assignment_bounds'
+- sql: CREATE TABLE tsql_assignment_bounds (id INT PRIMARY KEY,tiny TINYINT NOT NULL,amount DECIMAL(5,2))
+  name: 'Fixture setup 004: CREATE TABLE tsql_assignment_bounds (id INT PRIMARY KEY,tiny TINYINT NOT NULL,amount
+    DECIMAL(5,2))'
+- sql: DROP TABLE IF EXISTS dbo.tsql_unary_exact_data
+  name: 'Fixture setup 005: DROP TABLE IF EXISTS dbo.tsql_unary_exact_data'
+- sql: CREATE TABLE dbo.tsql_unary_exact_data (id INT PRIMARY KEY,d DECIMAL(38,18),f NUMERIC(38,38),m MONEY,sm SMALLMONEY)
+  name: 'Fixture setup 006: CREATE TABLE dbo.tsql_unary_exact_data (id INT PRIMARY KEY,d DECIMAL(38,18),f NUMERIC(38,38),m
+    MONEY'
+- sql: INSERT dbo.tsql_unary_exact_data VALUES (1,99999999999999999999.999999999999999999,0.12345678901234567890123456789012345678,922337203685477.5807,214748.3647)
+  name: 'Fixture setup 007: INSERT dbo.tsql_unary_exact_data VALUES (1,99999999999999999999.999999999999999999,0.123456789012345'
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.exact_default_probe
+  name: 'Fixture setup 008: DROP TABLE IF EXISTS dbo.exact_default_probe'
+- sql: DROP TABLE IF EXISTS tsql_exact_data
+  name: 'Fixture setup 009: DROP TABLE IF EXISTS tsql_exact_data'
+- sql: CREATE TABLE tsql_exact_data (id INT PRIMARY KEY, amount DECIMAL(12,2), large DECIMAL(20,2))
+  name: 'Fixture setup 010: CREATE TABLE tsql_exact_data (id INT PRIMARY KEY, amount DECIMAL(12,2), large DECIMAL(20,2))'
+- sql: INSERT INTO tsql_exact_data VALUES (1,12.345,9007199254740993.00),(2,0.01,9007199254740992.00)
+  name: 'Fixture setup 011: INSERT INTO tsql_exact_data VALUES (1,12.345,9007199254740993.00),(2,0.01,9007199254740992.00)'
+- name: INSERT binds declared ranges and decimal scale in the frontend
+  sql: INSERT tsql_assignment_bounds VALUES (1,255,12.345)
+  noncritical: true
+- name: Frontend assignment stores the rounded decimal value
+  sql: SELECT tiny,amount FROM tsql_assignment_bounds WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - tiny: 255
+      amount: 12.35
+  noncritical: true
+- name: INSERT rejects an out-of-range declared integer
+  sql: INSERT tsql_assignment_bounds VALUES (2,256,1)
+  expect:
+    error: true
+- name: INSERT rejects an out-of-range declared decimal
+  sql: INSERT tsql_assignment_bounds VALUES (3,1,1000)
+  expect:
+    error: true
+- name: INSERT SELECT validates the target integer declaration
+  sql: INSERT tsql_assignment_bounds SELECT 2,256,1
+  expect:
+    error: true
+- name: UPDATE validates the declared integer before writing
+  sql: UPDATE tsql_assignment_bounds SET tiny=256 WHERE id=1
+  expect:
+    error: true
+  noncritical: true
+- name: Rejected frontend assignments leave existing rows unchanged
+  sql: SELECT id,tiny,amount FROM tsql_assignment_bounds ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      tiny: 255
+      amount: 12.35
+  noncritical: true
+- name: Direct engine insertion accepts the native carrier without dialect validation
+  scm: (insert (table "memcp-tests" "tsql_assignment_bounds") '("id" "tiny") (list (list 9 256)))
+  expect:
+    result: 1
+- name: Remove the direct native insertion before further dialect tests
+  sql: DELETE FROM tsql_assignment_bounds WHERE id=9
+- name: INSERT SELECT converts its output to the target scale
+  sql: INSERT tsql_assignment_bounds SELECT 4,4,4.456
+  noncritical: true
+- name: INSERT SELECT stores the frontend conversion
+  sql: SELECT tiny,amount FROM tsql_assignment_bounds WHERE id=4
+  expect:
+    rows: 1
+    data:
+    - tiny: 4
+      amount: 4.46
+  noncritical: true
+- name: MONEY rejects explicit precision dimensions
+  sql: CREATE TABLE money_bad_dimensions (value MONEY(19))
+  expect:
+    error: true
+  noncritical: true
+- name: SMALLMONEY rejects explicit scale dimensions
+  sql: CREATE TABLE smallmoney_bad_dimensions (value SMALLMONEY(10,4))
+  expect:
+    error: true
+  noncritical: true
+- name: Large numeric text remains exact when cast to decimal
+  sql: SELECT CAST(CAST('9007199254740993.01' AS DECIMAL(20,2)) AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9007199254740993.01'
+  noncritical: true
+- name: Negative numeric text retains its sign and coefficient
+  sql: SELECT CAST(CAST('-9007199254740993.01' AS DECIMAL(20,2)) AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-9007199254740993.01'
+  noncritical: true
+- name: Zero numeric text casts to integer zero
+  sql: SELECT CAST('0.00' AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+  noncritical: true
+- name: Fractional numeric text casts to floating point without truth coercion
+  sql: SELECT CAST('-12.75' AS FLOAT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12.75
+  noncritical: true
+- name: Floating point values retain magnitude when cast to decimal
+  sql: SELECT CAST(CAST(CAST('-12.75' AS FLOAT) AS DECIMAL(5,2)) AS VARCHAR(20)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-12.75'
+  noncritical: true
+- name: Numeric text converts to actual BIT values
+  sql: SELECT CAST(CAST('0' AS BIT) AS INT) AS zero,CAST(CAST('-42' AS BIT) AS INT) AS nonzero
+  expect:
+    rows: 1
+    data:
+    - zero: 0
+      nonzero: 1
+  noncritical: true
+- name: Invalid floating text fails instead of becoming one
+  sql: SELECT CAST('invalid' AS FLOAT) AS value
+  expect:
+    error: true
+- name: Actual booleans retain zero and one numeric conversion
+  scm: "(begin\n  (define decimal_text (lambda (value)\n    (tsql_cast_bound (tsql_cast_bound value '(\"BIT\") '(\"\
+    DECIMAL\" 5 2)) '(\"DECIMAL\" 5 2) '(\"VARCHAR\" 20))))\n  (and (expression_equal? (decimal_text true) \"1.00\"\
+    )\n    (expression_equal? (decimal_text false) \"0.00\")\n    (expression_equal? (tsql_cast_bound true '(\"\
+    BIT\") '(\"INT\")) tsql_i1)\n    (expression_equal? (tsql_cast_bound false '(\"BIT\") '(\"INT\")) tsql_i0)\n\
+    \    (expression_equal? (tsql_cast_bound true '(\"BIT\") '(\"FLOAT\")) tsql_i1)\n    (expression_equal? (tsql_cast_bound\
+    \ false '(\"BIT\") '(\"FLOAT\")) tsql_i0)\n    (expression_equal? (tsql_cast_bound true '(\"BIT\") '(\"BIT\"\
+    )) true)\n    (expression_equal? (tsql_cast_bound false '(\"BIT\") '(\"BIT\")) false)))\n"
+  expect:
+    result: true
+  noncritical: true
+- name: Exact decimal addition
+  sql: SELECT CAST(0.1+0.2 AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '0.3'
+  noncritical: true
+- name: Preserve adjacent large coefficients
+  sql: SELECT CAST(9007199254740993.00-9007199254740992.00 AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '1.00'
+  noncritical: true
+- name: Precision 38 literal
+  sql: SELECT CAST(99999999999999999999999999999999999999 AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '99999999999999999999999999999999999999'
+  noncritical: true
+- name: Precision 38 fraction
+  sql: SELECT CAST(0.00000000000000000000000000000000000001 AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '0.00000000000000000000000000000000000001'
+  noncritical: true
+- name: Unary negative integer preserves all 38 digits
+  sql: SELECT CAST(-99999999999999999999999999999999999999 AS VARCHAR(80)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-99999999999999999999999999999999999999'
+  noncritical: true
+- name: Unary negative maximum decimal preserves declared 38 digit shape
+  sql: SELECT CAST(CAST(-99999999999999999999.999999999999999999 AS DECIMAL(38,18)) AS VARCHAR(80)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-99999999999999999999.999999999999999999'
+  noncritical: true
+- name: Unary negative fraction preserves all 38 decimal places
+  sql: SELECT CAST(-0.12345678901234567890123456789012345678 AS VARCHAR(80)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-0.12345678901234567890123456789012345678'
+  noncritical: true
+- name: Binary subtraction retains its separate precision reduction
+  sql: SELECT CAST(0-0.12345678901234567890123456789012345678 AS VARCHAR(80)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-0.123456789012345678901234568'
+  noncritical: true
+- name: Binary subtraction overflow after narrow assignment remains explicit
+  sql: SELECT CAST(0-99999999999999999999.999999999999999999 AS DECIMAL(38,18)) AS value
+  expect:
+    error: true
+- name: Unary exact column update retains all coefficients
+  sql: UPDATE dbo.tsql_unary_exact_data SET d=-d,f=-f,m=-m,sm=-sm WHERE id=1
+- name: Unary exact updated values retain monetary scale
+  sql: SELECT CAST(d AS VARCHAR(80)) AS d,CAST(f AS VARCHAR(80)) AS f,CONVERT(VARCHAR(40),m,2) AS m,CONVERT(VARCHAR(40),sm,2)
+    AS sm FROM dbo.tsql_unary_exact_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - d: '-99999999999999999999.999999999999999999'
+      f: '-0.12345678901234567890123456789012345678'
+      m: '-922337203685477.5807'
+      sm: '-214748.3647'
+  noncritical: true
+- name: Unary exact literal update preserves signed maximum
+  sql: UPDATE dbo.tsql_unary_exact_data SET d=-99999999999999999999.999999999999999999 WHERE id=1
+- name: Unary parameter update preserves maximum 38 digit integral coefficient
+  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_bound:p\" true)\n  (s \"tsql_param_type:p\" '(\"DECIMAL\"\
+    \ 38 18))\n  (s \"tsql_param:p\" (tsql_cast_value \"99999999999999999999.999999999999999999\" '(\"DECIMAL\"\
+    \ 38 18)))\n  (sql_execute_formula s nil (sql_queryplan_compile_formula nil\n    (parse_tsql \"memcp-tests\"\
+    \ \"UPDATE dbo.tsql_unary_exact_data SET d=-@p WHERE id=1\" nil s nil))\n    (lambda rows true) (lambda fields\
+    \ true)))\n"
+  noncritical: true
+- name: Unary updated maximum parameter remains exact
+  sql: SELECT CAST(d AS VARCHAR(80)) AS value FROM dbo.tsql_unary_exact_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: '-99999999999999999999.999999999999999999'
+  noncritical: true
+- name: Unary parameter update uses its full declared scale
+  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_bound:p\" true)\n  (s \"tsql_param_type:p\" '(\"NUMERIC\"\
+    \ 38 38))\n  (s \"tsql_param:p\" (tsql_cast_value \"0.12345678901234567890123456789012345678\" '(\"NUMERIC\"\
+    \ 38 38)))\n  (sql_execute_formula s nil (sql_queryplan_compile_formula nil\n    (parse_tsql \"memcp-tests\"\
+    \ \"UPDATE dbo.tsql_unary_exact_data SET f=-@p WHERE id=1\" nil s nil))\n    (lambda rows true) (lambda fields\
+    \ true)))\n"
+  noncritical: true
+- name: Unary updated parameter retains 38 fractional digits
+  sql: SELECT CAST(f AS VARCHAR(80)) AS value FROM dbo.tsql_unary_exact_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: '-0.12345678901234567890123456789012345678'
+  noncritical: true
+- name: Unary bound null update remains null
+  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_bound:p\" true)\n  (s \"tsql_param_type:p\" '(\"NUMERIC\"\
+    \ 38 38))\n  (s \"tsql_param:p\" nil)\n  (sql_execute_formula s nil (sql_queryplan_compile_formula nil\n   \
+    \ (parse_tsql \"memcp-tests\" \"UPDATE dbo.tsql_unary_exact_data SET f=-@p WHERE id=1\" nil s nil))\n    (lambda\
+    \ rows true) (lambda fields true)))\n"
+- name: Unary null is preserved in stored and expression values
+  sql: SELECT f,-CAST(NULL AS DECIMAL(38,38)) AS value FROM dbo.tsql_unary_exact_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - f: null
+      value: null
+  noncritical: true
+- name: Unary zero has a canonical sign and its declared scale
+  sql: SELECT CAST(-CAST(0 AS DECIMAL(38,38)) AS VARCHAR(80)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '0.00000000000000000000000000000000000000'
+  noncritical: true
+- name: Unary plus retains exact fractional scale
+  sql: SELECT CAST(+0.12345678901234567890123456789012345678 AS VARCHAR(80)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '0.12345678901234567890123456789012345678'
+  noncritical: true
+- name: Unary unsigned byte promotes to signed small integer
+  sql: SELECT -CAST(255 AS TINYINT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -255
+  noncritical: true
+- name: Unary minimum small integer overflows explicitly
+  sql: SELECT -CAST(-32768 AS SMALLINT) AS value
+  expect:
+    error: true
+- name: Unary minimum integer overflows explicitly
+  sql: SELECT -CAST(-2147483648 AS INT) AS value
+  expect:
+    error: true
+- name: Unary minimum big integer overflows explicitly
+  sql: SELECT -CAST('-9223372036854775808' AS BIGINT) AS value
+  expect:
+    error: true
+- name: Unary minimum money overflows explicitly
+  sql: SELECT -CAST('-922337203685477.5808' AS MONEY) AS value
+  expect:
+    error: true
+- name: Unary minimum small money overflows explicitly
+  sql: SELECT -CAST('-214748.3648' AS SMALLMONEY) AS value
+  expect:
+    error: true
+- name: Empty unary projection preserves exact types and promotes byte operands
+  scm: "(begin\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP (0) -d AS d,-f AS f,-m AS m,-sm AS sm,-CAST(255\
+    \ AS TINYINT) AS b FROM dbo.tsql_unary_exact_data\" \"\" (newsession)))\n  (define specs (map fields (lambda\
+    \ (field) (list (field \"sql_type\") (field \"precision\") (field \"scale\")))))\n  (if (equal? (slice specs\
+    \ 0 4) '('(\"DECIMAL\" 38 18) '(\"NUMERIC\" 38 38) '(\"MONEY\" nil 4) '(\"SMALLMONEY\" nil 4)))\n    (if (equal?\
+    \ ((nth fields 4) \"sql_type\") \"SMALLINT\") true (error \"unsigned negation did not promote metadata\"))\n\
+    \    (error (concat \"empty unary projection changed exact metadata \" specs))))\n"
+  noncritical: true
+- name: Empty unary parameter metadata preserves null declarations
+  scm: "(begin\n  (define check (lambda (declaration) (begin\n    (define s (newsession))\n    (s \"tsql_bound:p\"\
+    \ true)\n    (s \"tsql_param:p\" nil)\n    (s \"tsql_param_type:p\" declaration)\n    (define field (car (tds_describe\
+    \ \"memcp-tests\" \"SELECT TOP (0) -@p AS value FROM dbo.tsql_unary_exact_data\" \"\" s)))\n    (list (field\
+    \ \"sql_type\") (field \"precision\") (field \"scale\")))))\n  (if (and (equal? (check '(\"DECIMAL\" 38 38))\
+    \ '(\"DECIMAL\" 38 38))\n      (equal? (check '(\"DECIMAL\" 18 4)) '(\"DECIMAL\" 18 4))\n      (equal? (check\
+    \ '(\"SMALLMONEY\")) '(\"SMALLMONEY\" nil 4))) true\n    (error (concat \"unary null parameter changed declared\
+    \ metadata \" (check '(\"DECIMAL\" 38 38)) \" / \" (check '(\"DECIMAL\" 18 4)) \" / \" (check '(\"SMALLMONEY\"\
+    ))))))\n"
+  noncritical: true
+- name: Empty binary subtraction retains its independent precision rules
+  scm: "(begin\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP (0) 0-f AS f,0-d AS d,0-CAST(1 AS DECIMAL(18,4))\
+    \ AS small FROM dbo.tsql_unary_exact_data\" \"\" (newsession)))\n  (define specs (map fields (lambda (field)\
+    \ (list (field \"precision\") (field \"scale\")))))\n  (if (equal? specs '('(38 27) '(38 17) '(19 4))) true\n\
+    \    (error \"unary fix changed binary subtraction metadata\")))\n"
+  noncritical: true
+- name: Unary negative Unicode text rejects before execution
+  sql: SELECT -N'5' AS value
+  expect:
+    error: true
+  noncritical: true
+- name: Unary negative cast text rejects before execution
+  sql: SELECT -CAST(N'5' AS VARCHAR(3)) AS value
+  expect:
+    error: true
+- name: Empty unary text projection rejects instead of emitting wrong metadata
+  sql: SELECT TOP (0) -CAST(N'5' AS VARCHAR(3)) AS value FROM dbo.tsql_unary_exact_data
+  expect:
+    error: true
+- name: Binary subtraction keeps its existing numeric text conversion
+  sql: SELECT 0-CAST(N'5' AS VARCHAR(3)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -5
+  noncritical: true
+- name: Unary bit operand rejects outside supported numeric types
+  sql: SELECT -CAST(1 AS BIT) AS value
+  expect:
+    error: true
+- name: Empty unary nullable bit rejects before metadata publication
+  sql: SELECT TOP (0) -CAST(NULL AS BIT) AS value FROM dbo.tsql_unary_exact_data
+  expect:
+    error: true
+- name: Divide result scale
+  sql: SELECT CAST(1.00/3.00 AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '0.333333'
+  noncritical: true
+- name: Exact decimal negative remainder
+  sql: SELECT CAST(-10.25%3.0 AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1.25'
+  noncritical: true
+- name: Rounded insert
+  sql: SELECT CAST(amount AS VARCHAR(40)) AS value FROM tsql_exact_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: '12.35'
+  noncritical: true
+- name: Exact sum
+  sql: SELECT CAST(SUM(amount) AS VARCHAR(40)) AS value FROM tsql_exact_data
+  expect:
+    rows: 1
+    data:
+    - value: '12.36'
+  noncritical: true
+- name: Exact average
+  sql: SELECT CAST(AVG(amount) AS VARCHAR(40)) AS value FROM tsql_exact_data
+  expect:
+    rows: 1
+    data:
+    - value: '6.180000'
+  noncritical: true
+- name: Exact large sum
+  sql: SELECT CAST(SUM(large) AS VARCHAR(40)) AS value FROM tsql_exact_data
+  expect:
+    rows: 1
+    data:
+    - value: '18014398509481985.00'
+  noncritical: true
+- name: Exact coefficient equality
+  sql: SELECT COUNT(*) AS value FROM tsql_exact_data WHERE large=9007199254740993.00
+  expect:
+    rows: 1
+    data:
+    - value: 1
+  noncritical: true
+- name: Exact coefficient comparison
+  sql: SELECT COUNT(*) AS value FROM tsql_exact_data WHERE large>9007199254740992.00
+  expect:
+    rows: 1
+    data:
+    - value: 1
+  noncritical: true
+- name: Distinct large coefficients
+  sql: SELECT COUNT(DISTINCT large) AS value FROM tsql_exact_data
+  expect:
+    rows: 1
+    data:
+    - value: 2
+  noncritical: true
+- name: Money upper boundary
+  sql: SELECT CONVERT(VARCHAR(40),CAST('922337203685477.5807' AS MONEY),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '922337203685477.5807'
+  noncritical: true
+- name: Money lower boundary
+  sql: SELECT CONVERT(VARCHAR(40),CAST('-922337203685477.5808' AS MONEY),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-922337203685477.5808'
+  noncritical: true
+- name: Money division retained scale
+  sql: SELECT CONVERT(VARCHAR(40),CAST(500 AS MONEY)/CAST(16000 AS MONEY),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '0.0312'
+  noncritical: true
+- name: Exact round positive half
+  sql: SELECT CAST(ROUND(CAST(12.345 AS DECIMAL(12,3)),2) AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.350'
+  noncritical: true
+- name: Exact round negative half
+  sql: SELECT CAST(ROUND(CAST(-12.345 AS DECIMAL(12,3)),2) AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-12.350'
+  noncritical: true
+- name: Exact round truncate
+  sql: SELECT CAST(ROUND(CAST(-12.345 AS DECIMAL(12,3)),2,1) AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-12.340'
+  noncritical: true
+- name: Exact floor
+  sql: SELECT CAST(FLOOR(CAST(-12.34 AS DECIMAL(12,2))) AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-13.00'
+  noncritical: true
+- name: Exact ceiling
+  sql: SELECT CAST(CEILING(CAST(-12.34 AS DECIMAL(12,2))) AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-12.00'
+  noncritical: true
+- name: Exact absolute
+  sql: SELECT CAST(ABS(CAST(-12.34 AS DECIMAL(12,2))) AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.34'
+  noncritical: true
+- name: Explicit integer truncation
+  sql: SELECT CAST(-12.99 AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12
+  noncritical: true
+- name: Unicode cast counts units
+  sql: SELECT CAST(N'🐘' AS NVARCHAR(1)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: ''
+  noncritical: true
+- name: Precision overflow
+  sql: SELECT CAST(100000 AS DECIMAL(5,0))
+  expect:
+    error: true
+- name: Addition overflow
+  sql: SELECT 99999999999999999999999999999999999999+1
+  expect:
+    error: true
+  noncritical: true
+- name: Division by zero
+  sql: SELECT 1.00/0.0
+  expect:
+    error: true
+  noncritical: true
+- name: Money upper overflow
+  sql: SELECT CAST('922337203685477.5808' AS MONEY)
+  expect:
+    error: true
+- name: Money lower overflow
+  sql: SELECT CAST('-922337203685477.5809' AS MONEY)
+  expect:
+    error: true
+- name: Invalid decimal text
+  sql: SELECT CAST('1/3' AS DECIMAL(5,2))
+  expect:
+    error: true
+- name: Oversized integer
+  sql: SELECT 100000000000000000000000000000000000000
+  expect:
+    error: true
+  noncritical: true
+- name: Exact grouping
+  sql: SELECT COUNT(*) AS value FROM (SELECT large FROM tsql_exact_data GROUP BY large) grouped
+  expect:
+    rows: 1
+    data:
+    - value: 2
+  noncritical: true
+- name: Exact ordering
+  sql: SELECT TOP(1) CAST(large AS VARCHAR(40)) AS value FROM tsql_exact_data ORDER BY large
+  expect:
+    rows: 1
+    data:
+    - value: '9007199254740992.00'
+  noncritical: true
+- name: Exact join identity
+  sql: SELECT COUNT(*) AS value FROM tsql_exact_data a JOIN tsql_exact_data b ON a.large=b.large
+  expect:
+    rows: 1
+    data:
+    - value: 2
+  noncritical: true
+- name: Exact partition sum
+  sql: SELECT TOP(1) CAST(SUM(amount) OVER() AS VARCHAR(40)) AS value FROM tsql_exact_data
+  expect:
+    rows: 1
+    data:
+    - value: '12.36'
+  noncritical: true
+- name: Exact partition average
+  sql: SELECT TOP(1) CAST(AVG(amount) OVER() AS VARCHAR(40)) AS value FROM tsql_exact_data
+  expect:
+    rows: 1
+    data:
+    - value: '6.180000'
+  noncritical: true
+- name: Money integer rounding
+  sql: SELECT CAST(CAST(-12.75 AS MONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -13
+  noncritical: true
+- name: Money default character style
+  sql: SELECT CAST(CAST(12.3456 AS MONEY) AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.35'
+  noncritical: true
+- name: Money comma character style
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234567.1234 AS MONEY),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -1,234,567.12
+  noncritical: true
+- name: Small money ROUND promotes
+  sql: SELECT CONVERT(VARCHAR(40),ROUND(CAST(12.3456 AS SMALLMONEY),2),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.3500'
+  noncritical: true
+- name: Float arithmetic precedence
+  sql: SELECT CAST(0.1+CAST(0.2 AS FLOAT) AS DECIMAL(5,2)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0.3
+  noncritical: true
+- name: Float comparison precedence
+  sql: SELECT CASE WHEN 0.1=CAST(0.1 AS FLOAT) THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+  noncritical: true
+- name: Nested exact multiplication
+  sql: SELECT CAST(-(0.1+0.2)*2 AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-0.6'
+  noncritical: true
+- name: Numeric character width rejects
+  sql: SELECT CAST(123.45 AS VARCHAR(3))
+  expect:
+    error: true
+- name: Money formatting width rejects
+  sql: SELECT CONVERT(VARCHAR(3),CAST(12345 AS MONEY),2)
+  expect:
+    error: true
+- name: Default expressions resolve dialect operators before storage publication
+  sql: CREATE TABLE dbo.exact_default_probe (keycol INT,id INT DEFAULT -1,amount DECIMAL(12,2) DEFAULT -12.345)
+- name: Implicit defaults retain signed and rounded exact values
+  sql: INSERT dbo.exact_default_probe (keycol) VALUES (1)
+  noncritical: true
+- name: Exact default values are available after insertion
+  sql: SELECT id,amount FROM dbo.exact_default_probe
+  expect:
+    rows: 1
+    data:
+    - id: -1
+      amount: -12.35
+  noncritical: true
+- name: Direct default column metadata preserves its declared precision and scale
+  scm: "(begin\n  (define field (cadr (tds_describe \"memcp-tests\" \"SELECT id,amount FROM dbo.exact_default_probe\"\
+    \ \"\" (newsession))))\n  (and (equal? (field \"sql_type\") \"DECIMAL\")\n    (equal? (field \"precision\")\
+    \ 12)\n    (equal? (field \"scale\") 2)\n    (equal? (field \"source\") '(\"memcp-tests\" \"dbo\" \"exact_default_probe\"\
+    \ \"amount\"))))\n"
+  expect:
+    result: true
+  noncritical: true
+- name: Empty exact average preserves precision and scale metadata
+  scm: "(begin\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP (0) AVG(amount) AS value FROM tsql_exact_data\"\
+    \ \"\" (newsession)))\n  (define field (car fields))\n  (if (and (equal? (field \"sql_type\") \"DECIMAL\") (equal?\
+    \ (field \"precision\") 38)\n      (equal? (field \"scale\") 6)) true (error \"exact average lost declared metadata\"\
+    )))\n"
+  noncritical: true
+- name: Literal scale identity
+  sql: SELECT CAST(1.0 AS VARCHAR(40)) AS a, CAST(1.0000 AS VARCHAR(40)) AS b
+  expect:
+    rows: 1
+    data:
+    - a: '1.0'
+      b: '1.0000'
+  noncritical: true
+- name: Aggregate literal scale identity
+  sql: SELECT CAST(SUM(1.0) AS VARCHAR(40)) AS a, CAST(SUM(1.0000) AS VARCHAR(40)) AS b FROM tsql_exact_data
+  expect:
+    rows: 1
+    data:
+    - a: '2.0'
+      b: '2.0000'
+  noncritical: true
+- name: Arithmetic literal scale identity
+  sql: SELECT CAST(1.0/3.0 AS VARCHAR(40)) AS a, CAST(1.0000000/3.0 AS VARCHAR(40)) AS b
+  expect:
+    rows: 1
+    data:
+    - a: '0.333333'
+      b: '0.3333333333'
+  noncritical: true
+- name: Decimal precision stays in frontend descriptors with neutral coefficient carriers
+  scm: "(begin\n  (define spec '(\"DECIMAL\" 38 0))\n  (define value (tsql_cast_bound \"99999999999999999999999999999999999999\"\
+    \ '(\"VARCHAR\" 38) spec))\n  (define field (tsql_expr_description '() (list 'tsql_parameter value (list 'quote\
+    \ spec)) (newsession)))\n  (if (and (string? value) (equal? (sql_runtime_value_type value) \"VARCHAR\")\n  \
+    \    (equal? (coefficient_decode value) \"99999999999999999999999999999999999999\")\n      (equal? (field \"\
+    sql_type\") \"DECIMAL\") (equal? (field \"precision\") 38) (equal? (field \"scale\") 0)) true\n    (error \"\
+    precision was lost or a SQL runtime value tag was required\")))\n"
+  expect:
+    result: true
+  noncritical: true
+- name: Cross scale exact comparisons do not overflow intermediate coefficients
+  sql: SELECT CASE WHEN CAST(99999999999999999999999999999999999999 AS DECIMAL(38,0)) > CAST(0.99999999999999999999999999999999999999
+    AS DECIMAL(38,38)) THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+  noncritical: true
+- name: Invalid text BIT conversion fails
+  sql: SELECT CAST(N'invalid' AS BIT) AS value
+  expect:
+    error: true
+- name: Window group stage retains exact declarations through common IR annotation
+  scm: "(begin\n  (define session (newsession))\n  (session \"tsql_describe_ast\" true)\n  (define query (parse_tsql\
+    \ \"memcp-tests\" \"SELECT SUM(CAST(amount AS DECIMAL(20,7))) OVER (PARTITION BY id) AS value FROM tsql_exact_data\"\
+    \ nil session nil))\n  (define typed (sql_type_annotate_ir (untangle_query_term query nil)))\n  (define fields\
+    \ (qassoc_get (qb_facts (ir_root typed)) 'result-types '()))\n  (define info (get_assoc fields \"value\"))\n\
+    \  (if (and (> (count (ir_stages typed)) 0) (equal? (sql_info_declaration info) '(\"DECIMAL\" 38 7))\n     \
+    \ (not (node_contains_physical_helper? (ir_root typed)))) true\n    (error \"stage descriptor lost precision\
+    \ or crossed physical lowering early\")))\n"
+  expect:
+    result: true
+  noncritical: true
+- name: UNION retains full exact declarations including NULL branches
+  scm: "(begin\n  (define session (newsession))\n  (session \"tsql_describe_ast\" true)\n  (define query (parse_tsql\
+    \ \"memcp-tests\" \"SELECT CAST(NULL AS DECIMAL(38,17)) AS value UNION ALL SELECT CAST(1 AS DECIMAL(38,17))\"\
+    \ nil session nil))\n  (define typed (sql_type_annotate_ir (untangle_query_term query nil)))\n  (define fields\
+    \ (qassoc_get (union_facts (ir_root typed)) 'result-types '()))\n  (if (equal? (sql_info_declaration (get_assoc\
+    \ fields \"value\")) '(\"DECIMAL\" 38 17)) true\n    (error \"UNION descriptor inferred its type from NULL or\
+    \ dropped precision\")))\n"
+  expect:
+    result: true
+  noncritical: true
+- name: Wire coefficient precision is checked before widening its target
+  scm: (tsql_convert_parameter (coefficient_encode "1000") '("wire_kind" 106 "precision" 3 "scale" 0) '("DECIMAL"
+    38 0))
+  expect:
+    error: true
+- sql: DROP TABLE IF EXISTS tsql_assignment_bounds
+  name: 'Fixture cleanup 001: DROP TABLE IF EXISTS tsql_assignment_bounds'
+- sql: DROP TABLE IF EXISTS money_bad_dimensions
+  name: 'Fixture cleanup 002: DROP TABLE IF EXISTS money_bad_dimensions'
+- sql: DROP TABLE IF EXISTS smallmoney_bad_dimensions
+  name: 'Fixture cleanup 003: DROP TABLE IF EXISTS smallmoney_bad_dimensions'
+- sql: DROP TABLE IF EXISTS dbo.tsql_unary_exact_data
+  name: 'Fixture cleanup 004: DROP TABLE IF EXISTS dbo.tsql_unary_exact_data'
+- sql: DROP TABLE IF EXISTS dbo.exact_default_probe
+  name: 'Fixture cleanup 005: DROP TABLE IF EXISTS dbo.exact_default_probe'
+- sql: DROP TABLE tsql_exact_data
+  name: 'Fixture cleanup 006: DROP TABLE tsql_exact_data'
+cleanup: []

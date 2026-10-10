@@ -1,0 +1,340 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixture preparation and cleanup are explicit cases so unsupported DDL stays visible.
+metadata:
+  description: Generated binary row versions and optimistic update predicates
+  syntax: tsql
+  isolated: true
+setup: []
+test_cases:
+- sql: DROP TABLE IF EXISTS dbo.tsql_rowversion_backfill
+  name: 'Fixture setup 001: DROP TABLE IF EXISTS dbo.tsql_rowversion_backfill'
+- sql: CREATE TABLE dbo.tsql_rowversion_backfill (id INT PRIMARY KEY)
+  name: 'Fixture setup 002: CREATE TABLE dbo.tsql_rowversion_backfill (id INT PRIMARY KEY)'
+- sql: INSERT dbo.tsql_rowversion_backfill VALUES (1)
+  name: 'Fixture setup 003: INSERT dbo.tsql_rowversion_backfill VALUES (1)'
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_rowversion_data
+  name: 'Fixture setup 004: DROP TABLE IF EXISTS dbo.tsql_rowversion_data'
+- sql: DROP TABLE IF EXISTS dbo.tsql_timestamp_data
+  name: 'Fixture setup 005: DROP TABLE IF EXISTS dbo.tsql_timestamp_data'
+- sql: CREATE TABLE dbo.tsql_rowversion_data (id INT PRIMARY KEY, val INT, rv ROWVERSION NOT NULL)
+  name: 'Fixture setup 006: CREATE TABLE dbo.tsql_rowversion_data (id INT PRIMARY KEY, val INT, rv ROWVERSION NOT
+    NULL)'
+- sql: INSERT dbo.tsql_rowversion_data VALUES (1,10),(2,20)
+  name: 'Fixture setup 007: INSERT dbo.tsql_rowversion_data VALUES (1,10),(2,20)'
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_rowversion_empty
+  name: 'Fixture setup 008: DROP TABLE IF EXISTS dbo.tsql_rowversion_empty'
+- sql: CREATE TABLE dbo.tsql_rowversion_empty (id INT PRIMARY KEY)
+  name: 'Fixture setup 009: CREATE TABLE dbo.tsql_rowversion_empty (id INT PRIMARY KEY)'
+- sql: DROP TABLE IF EXISTS dbo.tsql_binary_compare
+  name: 'Fixture setup 010: DROP TABLE IF EXISTS dbo.tsql_binary_compare'
+- sql: CREATE TABLE dbo.tsql_binary_compare (id INT PRIMARY KEY,a BINARY(1),b VARBINARY(4))
+  name: 'Fixture setup 011: CREATE TABLE dbo.tsql_binary_compare (id INT PRIMARY KEY,a BINARY(1),b VARBINARY(4))'
+- sql: INSERT dbo.tsql_binary_compare VALUES (1,0x41,0x61),(2,0x61,0x41),(3,0xff,0xfe),(4,NULL,NULL)
+  name: 'Fixture setup 012: INSERT dbo.tsql_binary_compare VALUES (1,0x41,0x61),(2,0x61,0x41),(3,0xff,0xfe),(4,NULL,NULL)'
+  noncritical: true
+- name: First insert creates distinct nonzero tokens instead of default placeholders
+  sql: SELECT COUNT(DISTINCT rv) AS value FROM dbo.tsql_rowversion_data WHERE rv<>0x0000000000000000
+  expect:
+    rows: 1
+    data:
+    - value: 2
+  noncritical: true
+- name: Persisted generated source binds the complete trigger argument list
+  scm: "(begin\n  (define generated (tsql_compile_generated_trigger \"rv\"\n    (list \"schema\" \"memcp-tests\"\
+    \ \"timing\" \"before_update\")))\n  (define parameters (nth (cadr generated) 1))\n  (if (equal? parameters\
+    \ (list (quote old) (quote new) (quote session) (quote tx)))\n    true (error \"generated trigger parameters\
+    \ are not bound symbols\"))\n  (define result ((eval (cadr generated))\n    (list \"id\" 5 \"val\" 6) (list\
+    \ \"id\" 7 \"val\" 8 \"rv\" \"old\") nil nil))\n  (if (and (equal? (result \"id\") 7) (equal? (result \"val\"\
+    ) 8)\n      (equal? (strlen (result \"rv\")) 8)\n      (not (equal? (bin2hex (result \"rv\")) \"0000000000000000\"\
+    )))\n    true (error \"generated trigger lost NEW values or returned a placeholder\"))))\n"
+  noncritical: true
+- name: Binary ASCII scalar equality is byte exact
+  sql: SELECT CASE WHEN 0x41=0x61 THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+  noncritical: true
+- name: Invalid UTF8 binary scalars remain different
+  sql: SELECT CASE WHEN 0xff=0xfe THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+  noncritical: true
+- name: Binary scalar inequality is byte exact
+  sql: SELECT CASE WHEN 0x41<>0x61 THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+  noncritical: true
+- name: Binary scalar ordering uses unsigned bytes
+  sql: SELECT CASE WHEN 0xff>0xfe AND 0x41<0x61 AND 0xff>=0xff AND 0x41<=0x41 THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Binary column equality cannot fold ASCII or invalid UTF8
+  sql: SELECT COUNT(*) AS value FROM dbo.tsql_binary_compare WHERE a=b
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: Derived binary columns retain byte comparison types
+  sql: SELECT COUNT(*) AS value FROM (SELECT a,b FROM dbo.tsql_binary_compare) AS source WHERE a=b
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: Binary column inequality excludes null comparisons
+  sql: SELECT id FROM dbo.tsql_binary_compare WHERE a<>b ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+  noncritical: true
+- name: Binary equality remains exact beside a primary key predicate
+  sql: SELECT id FROM dbo.tsql_binary_compare WHERE id=1 AND a=0x61
+  expect:
+    rows: 0
+- name: Binary column literal equality retains exact matching
+  sql: SELECT id FROM dbo.tsql_binary_compare WHERE a=0x61
+  expect:
+    rows: 1
+    data:
+    - id: 2
+  noncritical: true
+- name: Binary simple case compares exact bytes
+  sql: SELECT CASE 0x41 WHEN 0x61 THEN 1 WHEN 0x41 THEN 2 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2
+  noncritical: true
+- name: Binary null equality stays unknown
+  sql: SELECT CAST(NULL AS BINARY(1))=CAST(NULL AS BINARY(1)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+  noncritical: true
+- name: Binary null inequality stays unknown
+  sql: SELECT CAST(NULL AS BINARY(1))<>0x41 AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+  noncritical: true
+- name: Binary null ordering stays unknown
+  sql: SELECT CAST(NULL AS VARBINARY(1))<0x41 AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+  noncritical: true
+- name: Binary comparison changes preserve text case folding
+  sql: SELECT CASE WHEN N'A'=N'a' THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Scalar binary casts reuse declared byte padding and truncation
+  sql: SELECT CASE WHEN CAST(0x41 AS BINARY(2))=0x4100 AND CAST(0x4142 AS VARBINARY(1))=0x41 THEN 1 ELSE 0 END AS
+    value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+  noncritical: true
+- name: Unicode to binary encoding remains explicitly unsupported
+  sql: SELECT CAST(N'ÿ' AS VARBINARY(8))
+  expect:
+    error: true
+- name: Unicode CONVERT to binary also fails explicitly
+  sql: SELECT CONVERT(VARBINARY(8),N'ÿ')
+  expect:
+    error: true
+- name: Numeric to binary conversion fails explicitly
+  sql: SELECT CAST(65 AS BINARY(1))
+  expect:
+    error: true
+- name: Fixed binary max dimensions fail explicitly
+  sql: SELECT CAST(NULL AS BINARY(MAX))
+  expect:
+    error: true
+- name: Optimistic rowversion predicates reject ASCII-case-flipped bytes
+  scm: "(begin\n  (define s (newsession))\n  (s \"schema\" \"memcp-tests\")\n  (define execute (lambda (sql) (begin\n\
+    \    (define output (newsession))\n    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula\
+    \ s tx\n        (sql_queryplan_compile_formula tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda\
+    \ (row) (output \"row\" row)) (lambda fields true))))\n    (output \"row\"))))\n  (define seek (lambda (remaining)\
+    \ (begin\n    (if (<= remaining 0) (error \"could not reach a rowversion with an ASCII uppercase byte\") true)\n\
+    \    (define row (execute \"SELECT rv,val FROM dbo.tsql_rowversion_data WHERE id=1\"))\n    (define last (substr\
+    \ (row \"rv\") 7 1))\n    (if (and (has? '(\"A\" \"B\" \"C\" \"D\" \"E\" \"F\" \"G\" \"H\" \"I\" \"J\" \"K\"\
+    \ \"L\" \"M\" \"N\" \"O\" \"P\" \"Q\" \"R\" \"S\" \"T\" \"U\" \"V\" \"W\" \"X\" \"Y\" \"Z\") last)\n       \
+    \ (not (equal? last (toLower last)))) row\n      (begin (execute \"UPDATE dbo.tsql_rowversion_data SET val=val\
+    \ WHERE id=1\") (seek (- remaining 1)))))))\n  (define before (seek 512))\n  (define wrong (concat (substr (before\
+    \ \"rv\") 0 7) (toLower (substr (before \"rv\") 7 1))))\n  (s \"tsql_bound:previous\" true)\n  (s \"tsql_param_type:previous\"\
+    \ '(\"BINARY\" 8))\n  (s \"tsql_param:previous\" wrong)\n  (execute \"UPDATE dbo.tsql_rowversion_data SET val=99\
+    \ WHERE id=1 AND rv=@previous\")\n  (define after (execute \"SELECT rv,val FROM dbo.tsql_rowversion_data WHERE\
+    \ id=1\"))\n  (if (and (equal? (before \"val\") (after \"val\"))\n      (equal? (base64_encode (before \"rv\"\
+    )) (base64_encode (after \"rv\")))) true\n    (error \"binary optimistic predicate case-folded the stale token\"\
+    ))))\n"
+  noncritical: true
+- name: No-op update stores a generated token after an ASCII-case counter gap
+  scm: "(begin\n  (define s (newsession))\n  (s \"schema\" \"memcp-tests\")\n  (define execute (lambda (sql) (begin\n\
+    \    (define output (newsession))\n    (define affected (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula\
+    \ s tx\n        (sql_queryplan_compile_formula tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda\
+    \ (row) (output \"row\" row)) (lambda fields true)))))\n    (coalesceNil (output \"row\") affected))))\n  (define\
+    \ before (execute \"SELECT rv,val FROM dbo.tsql_rowversion_data WHERE id=1\"))\n  (define expected (concat (substr\
+    \ (before \"rv\") 0 7) (toLower (substr (before \"rv\") 7 1))))\n  (if (equal? (bin2hex expected) (bin2hex (before\
+    \ \"rv\")))\n    (error \"counter-gap fixture lacks an ASCII uppercase token\") true)\n  (define consumed (reduce\
+    \ (produceN 31) (lambda (count _)\n    (begin (next_sequence_token \"memcp-tests\") (+ count 1))) 0))\n  (if\
+    \ (equal? consumed 31) true (error \"counter-gap fixture did not consume 31 values\"))\n  (define affected (execute\
+    \ \"UPDATE dbo.tsql_rowversion_data SET val=val WHERE id=1\"))\n  (define after (execute \"SELECT rv,val FROM\
+    \ dbo.tsql_rowversion_data WHERE id=1\"))\n  (if (and (equal? affected 1) (equal? (before \"val\") (after \"\
+    val\"))\n      (equal? (bin2hex expected) (bin2hex (after \"rv\"))))\n    true (error \"no-op UPDATE discarded\
+    \ the byte-distinct generated token\"))))\n"
+  noncritical: true
+- name: Timestamp synonym creates a generated binary column
+  sql: CREATE TABLE dbo.tsql_timestamp_data (id INT,v TIMESTAMP)
+- name: Timestamp synonym preserves rowversion schema semantics
+  scm: "(begin\n  (define col (find (tsql_get_schema \"memcp-tests\" \"tsql_timestamp_data\")\n    (lambda (candidate)\
+    \ (equal?? (candidate \"Field\") \"v\")) nil))\n  (if (and col (col \"RowVersion\") (equal? (col \"Dimensions\"\
+    ) '(8))\n    (equal? (col \"SQLDeclaredType\") \"ROWVERSION\")) true (error \"timestamp became a temporal column\"\
+    )))\n"
+  noncritical: true
+- name: Generated row versions advance on no-op update and reject stale optimistic writers
+  scm: "(begin\n  (define s (newsession))\n  (s \"schema\" \"memcp-tests\")\n  (define execute (lambda (sql) (begin\n\
+    \    (define output (newsession))\n    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula\
+    \ s tx\n        (sql_queryplan_compile_formula tx\n          (parse_tsql \"memcp-tests\" sql nil s tx))\n  \
+    \      (lambda (row) (output \"row\" row)) (lambda fields true))))\n    (output \"row\"))))\n  (define before\
+    \ (execute \"SELECT rv FROM dbo.tsql_rowversion_data WHERE id=1\"))\n  (execute \"UPDATE dbo.tsql_rowversion_data\
+    \ SET val=val WHERE id=1\")\n  (define after (execute \"SELECT rv FROM dbo.tsql_rowversion_data WHERE id=1\"\
+    ))\n  (if (or (not (equal? (strlen (before \"rv\")) 8))\n      (equal?? (base64_encode (before \"rv\")) (base64_encode\
+    \ (after \"rv\"))))\n    (error \"no-op UPDATE failed to advance binary rowversion\") true)\n  (s \"tsql_bound:previous\"\
+    \ true)\n  (s \"tsql_param:previous\" (before \"rv\"))\n  (execute \"UPDATE dbo.tsql_rowversion_data SET val=99\
+    \ WHERE id=1 AND rv=@previous\")\n  (define stale (execute \"SELECT val,rv FROM dbo.tsql_rowversion_data WHERE\
+    \ id=1\"))\n  (if (not (equal? (stale \"val\") 10)) (error \"stale optimistic writer modified row\") true)\n\
+    \  (s \"tsql_param:previous\" (after \"rv\"))\n  (execute \"UPDATE dbo.tsql_rowversion_data SET val=42 WHERE\
+    \ id=1 AND rv=@previous\")\n  (define fresh (execute \"SELECT val,rv FROM dbo.tsql_rowversion_data WHERE id=1\"\
+    ))\n  (if (or (not (equal? (fresh \"val\") 42))\n      (equal?? (base64_encode (fresh \"rv\")) (base64_encode\
+    \ (after \"rv\"))))\n    (error \"current optimistic writer failed\") true)))\n"
+  noncritical: true
+- name: Rollback restores the row but never reuses consumed versions
+  scm: "(begin\n  (define s (newsession))\n  (s \"schema\" \"memcp-tests\")\n  (define execute (lambda (sql) (begin\n\
+    \    (define output (newsession))\n    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula\
+    \ s tx\n        (sql_queryplan_compile_formula tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda\
+    \ (row) (output \"row\" row)) (lambda fields true))))\n    (output \"row\"))))\n  (define before (execute \"\
+    SELECT rv,val FROM dbo.tsql_rowversion_data WHERE id=2\"))\n  (execute \"BEGIN TRANSACTION\")\n  (execute \"\
+    UPDATE dbo.tsql_rowversion_data SET val=21 WHERE id=2\")\n  (define consumed (execute \"SELECT rv,val FROM dbo.tsql_rowversion_data\
+    \ WHERE id=2\"))\n  (execute \"ROLLBACK TRANSACTION\")\n  (define restored (execute \"SELECT rv,val FROM dbo.tsql_rowversion_data\
+    \ WHERE id=2\"))\n  (if (or (not (equal? (restored \"val\") (before \"val\")))\n      (not (equal? (base64_encode\
+    \ (restored \"rv\")) (base64_encode (before \"rv\")))))\n    (error \"rollback changed the committed rowversion\"\
+    ) true)\n  (execute \"UPDATE dbo.tsql_rowversion_data SET val=22 WHERE id=2\")\n  (define after (execute \"\
+    SELECT rv FROM dbo.tsql_rowversion_data WHERE id=2\"))\n  (if (or (equal? (base64_encode (after \"rv\")) (base64_encode\
+    \ (before \"rv\")))\n      (equal? (base64_encode (after \"rv\")) (base64_encode (consumed \"rv\"))))\n    (error\
+    \ \"rollback reused a consumed rowversion\") true)))\n"
+  noncritical: true
+- name: Explicit rowversion insertion fails
+  sql: INSERT dbo.tsql_rowversion_data (id,val,rv) VALUES (3,30,'explicit')
+  expect:
+    error: true
+- name: Explicit rowversion assignment fails
+  sql: UPDATE dbo.tsql_rowversion_data SET rv='explicit' WHERE id=1
+  expect:
+    error: true
+  noncritical: true
+- name: Explicit null rowversion insertion fails
+  sql: INSERT dbo.tsql_rowversion_data (id,val,rv) VALUES (3,30,NULL)
+  expect:
+    error: true
+- name: Explicit unchanged rowversion assignment fails
+  sql: UPDATE dbo.tsql_rowversion_data SET rv=rv WHERE id=1
+  expect:
+    error: true
+  noncritical: true
+- name: Explicit rowversion assignment fails even with no matching row
+  sql: UPDATE dbo.tsql_rowversion_data SET rv=rv WHERE id=-1
+  expect:
+    error: true
+  noncritical: true
+- name: Rowversion rejects a user default
+  sql: CREATE TABLE dbo.tsql_rowversion_invalid (id INT,rv ROWVERSION DEFAULT 0x0000000000000000)
+  expect:
+    error: true
+  noncritical: true
+- name: Rowversion rejects a clock default
+  sql: CREATE TABLE dbo.tsql_rowversion_invalid (id INT,rv ROWVERSION DEFAULT GETDATE())
+  expect:
+    error: true
+- name: Rowversion rejects identity
+  sql: CREATE TABLE dbo.tsql_rowversion_invalid (id INT,rv ROWVERSION IDENTITY)
+  expect:
+    error: true
+- name: Multiple rowversion columns fail
+  sql: CREATE TABLE dbo.tsql_rowversion_invalid (a ROWVERSION,b ROWVERSION)
+  expect:
+    error: true
+- name: Adding a second rowversion fails without retaining a schema lock
+  sql: ALTER TABLE dbo.tsql_rowversion_data ADD other_rv ROWVERSION
+  expect:
+    error: true
+  noncritical: true
+- name: Adding a generated rowversion to existing rows fails explicitly
+  sql: ALTER TABLE dbo.tsql_rowversion_backfill ADD added_rv ROWVERSION
+  expect:
+    error: true
+  noncritical: true
+- name: Valid DDL still works after rejected rowversion columns
+  sql: ALTER TABLE dbo.tsql_rowversion_data ADD recovered INT DEFAULT 7
+  expect:
+    rows: 0
+- name: Rejected rowversion DDL keeps rows and schema intact
+  scm: "(begin\n  (define columns (get_schema \"memcp-tests\" \"tsql_rowversion_data\"))\n  (if (and (nil? (find\
+    \ columns (lambda (column) (equal? (column \"Field\") \"other_rv\")) nil))\n      (not (nil? (find columns (lambda\
+    \ (column) (equal? (column \"Field\") \"recovered\")) nil)))) true\n    (error \"rejected DDL changed the published\
+    \ definition\")))\n"
+  noncritical: true
+- name: Rowversion uses generated binary metadata
+  scm: "(begin\n  (define s (newsession))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP (0) rv FROM\
+    \ dbo.tsql_rowversion_data\" \"\" s))\n  (if (and (equal? ((car fields) \"sql_type\") \"ROWVERSION\")\n    \
+    \  (equal? ((car fields) \"size\") 8)) true (error \"rowversion lost binary metadata\")))\n"
+  noncritical: true
+- name: Adding rowversion to an empty published table fails explicitly
+  sql: ALTER TABLE dbo.tsql_rowversion_empty ADD added_rv ROWVERSION PRIMARY KEY
+  expect:
+    error: true
+  noncritical: true
+- name: Rejected empty ADD leaves no generated column
+  scm: (if (nil? (find (get_schema "memcp-tests" "tsql_rowversion_empty") (lambda (column) (equal? (column "Field")
+    "added_rv")) nil)) true (error "rejected ADD published a generated column"))
+  noncritical: true
+- name: Insert remains valid after empty ADD rejection
+  sql: INSERT dbo.tsql_rowversion_empty VALUES (1)
+  noncritical: true
+- name: Rows remain valid after empty ADD rejection
+  sql: SELECT COUNT(*) AS value FROM dbo.tsql_rowversion_empty
+  expect:
+    rows: 1
+    data:
+    - value: 1
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_binary_compare
+  name: 'Fixture cleanup 001: DROP TABLE IF EXISTS dbo.tsql_binary_compare'
+- sql: DROP TABLE IF EXISTS dbo.tsql_rowversion_backfill
+  name: 'Fixture cleanup 002: DROP TABLE IF EXISTS dbo.tsql_rowversion_backfill'
+- sql: DROP TABLE IF EXISTS dbo.tsql_timestamp_data
+  name: 'Fixture cleanup 003: DROP TABLE IF EXISTS dbo.tsql_timestamp_data'
+- sql: DROP TABLE IF EXISTS dbo.tsql_rowversion_data
+  name: 'Fixture cleanup 004: DROP TABLE IF EXISTS dbo.tsql_rowversion_data'
+- sql: DROP TABLE IF EXISTS dbo.tsql_rowversion_invalid
+  name: 'Fixture cleanup 005: DROP TABLE IF EXISTS dbo.tsql_rowversion_invalid'
+- sql: DROP TABLE IF EXISTS dbo.tsql_rowversion_empty
+  name: 'Fixture cleanup 006: DROP TABLE IF EXISTS dbo.tsql_rowversion_empty'
+cleanup: []

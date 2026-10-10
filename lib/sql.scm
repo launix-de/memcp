@@ -958,3 +958,5 @@ statement inside the per-query transaction callback. */
 			(print "MySQL socket listening on " socketpath)
 	))
 )) print)
+
+(import "tsql.scm")

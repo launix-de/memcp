@@ -1,0 +1,125 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixture preparation and cleanup are explicit cases so unsupported DDL stays visible.
+metadata:
+  version: '1.0'
+  description: Exact temporal SQL values survive WAL replay, compression, updates and clean restart
+  syntax: tsql
+  isolated: true
+setup: []
+test_cases:
+- sql: DROP TABLE IF EXISTS tsql_clock_recovery
+  name: 'Fixture setup 001: DROP TABLE IF EXISTS tsql_clock_recovery'
+- sql: CREATE TABLE tsql_clock_recovery (id INT PRIMARY KEY,d2 DATETIME2(7),dt DATETIME,tm TIME(7))
+  name: 'Fixture setup 002: CREATE TABLE tsql_clock_recovery (id INT PRIMARY KEY,d2 DATETIME2(7),dt DATETIME,tm
+    TIME(7))'
+- sql: INSERT INTO tsql_clock_recovery VALUES (1,N'2026-03-15 12:13:14.1234567',N'2026-03-15 12:13:14.003',N'12:13:14.1234567'),(2,N'2026-03-15
+    12:13:14.1234568',N'2026-03-15 12:13:14.007',N'12:13:14.1234568'),(3,NULL,NULL,NULL)
+  name: 'Fixture setup 003: INSERT INTO tsql_clock_recovery VALUES (1,N''2026-03-15 12:13:14.1234567'',N''2026-03-15
+    12:13:14.003'','
+- name: Fractional columns before recovery
+  sql: SELECT id,CONVERT(VARCHAR(40),d2,121) AS d2,CONVERT(VARCHAR(40),dt,121) AS dt,CAST(tm AS VARCHAR(40)) AS
+    tm FROM tsql_clock_recovery ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      d2: '2026-03-15 12:13:14.1234567'
+      dt: '2026-03-15 12:13:14.003'
+      tm: '12:13:14.1234567'
+    - id: 2
+      d2: '2026-03-15 12:13:14.1234568'
+      dt: '2026-03-15 12:13:14.007'
+      tm: '12:13:14.1234568'
+    - id: 3
+      d2: null
+      dt: null
+      tm: null
+  noncritical: true
+- name: Crash with exact clock deltas
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart exact clock WAL
+  action: restart
+- name: Fractional columns after WAL replay
+  sql: SELECT id,CONVERT(VARCHAR(40),d2,121) AS d2,CONVERT(VARCHAR(40),dt,121) AS dt,CAST(tm AS VARCHAR(40)) AS
+    tm FROM tsql_clock_recovery ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      d2: '2026-03-15 12:13:14.1234567'
+      dt: '2026-03-15 12:13:14.003'
+      tm: '12:13:14.1234567'
+    - id: 2
+      d2: '2026-03-15 12:13:14.1234568'
+      dt: '2026-03-15 12:13:14.007'
+      tm: '12:13:14.1234568'
+    - id: 3
+      d2: null
+      dt: null
+      tm: null
+  noncritical: true
+- name: Force exact clock compression
+  scm: (rebuild (table "memcp-tests" "tsql_clock_recovery") true false)
+- name: Publish exact clock column files
+  syntax: mysql
+  sql: SHUTDOWN
+- name: Fractional columns after compressed restart
+  sql: SELECT id,CONVERT(VARCHAR(40),d2,121) AS d2,CONVERT(VARCHAR(40),dt,121) AS dt,CAST(tm AS VARCHAR(40)) AS
+    tm FROM tsql_clock_recovery ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      d2: '2026-03-15 12:13:14.1234567'
+      dt: '2026-03-15 12:13:14.003'
+      tm: '12:13:14.1234567'
+    - id: 2
+      d2: '2026-03-15 12:13:14.1234568'
+      dt: '2026-03-15 12:13:14.007'
+      tm: '12:13:14.1234568'
+    - id: 3
+      d2: null
+      dt: null
+      tm: null
+  noncritical: true
+- name: Update retains one 100ns tick
+  sql: UPDATE tsql_clock_recovery SET d2=DATEADD(nanosecond,100,d2) WHERE id=1
+  noncritical: true
+- name: Updated exact clock result
+  sql: SELECT CAST(d2 AS VARCHAR(40)) AS value FROM tsql_clock_recovery WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.1234568'
+  noncritical: true
+- name: Reject excess fractional precision after replay
+  sql: UPDATE tsql_clock_recovery SET d2=N'2026-03-15 12:13:14.12345678' WHERE id=1
+  expect:
+    error: true
+  noncritical: true
+- name: Crash with updated clock WAL
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart updated exact clock WAL
+  action: restart
+- name: Updated exact clock survives crash
+  sql: SELECT CAST(d2 AS VARCHAR(40)) AS value FROM tsql_clock_recovery WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.1234568'
+  noncritical: true
+- name: Join exact clocks after replay
+  sql: SELECT COUNT(*) AS value FROM tsql_clock_recovery a JOIN tsql_clock_recovery b ON a.d2=b.d2
+  expect:
+    rows: 1
+    data:
+    - value: 4
+  noncritical: true
+- sql: DROP TABLE IF EXISTS tsql_clock_recovery
+  name: 'Fixture cleanup 001: DROP TABLE IF EXISTS tsql_clock_recovery'
+cleanup: []

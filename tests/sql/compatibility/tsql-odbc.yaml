@@ -1,0 +1,549 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixture preparation and cleanup are explicit cases so unsupported DDL stays visible.
+metadata:
+  version: '1.0'
+  description: Bound t-sql metadata procedures used by ODBC clients
+  syntax: tsql
+  isolated: true
+setup: []
+test_cases:
+- sql: DROP VIEW IF EXISTS dbo.odbc_fixture_view
+  name: 'Fixture setup 001: DROP VIEW IF EXISTS dbo.odbc_fixture_view'
+- sql: DROP TABLE IF EXISTS dbo.odbc_fixture
+  name: 'Fixture setup 002: DROP TABLE IF EXISTS dbo.odbc_fixture'
+- sql: CREATE TABLE dbo.odbc_fixture (id BIGINT NOT NULL, title NVARCHAR(20), amount DECIMAL(12,2), d DATE)
+  name: 'Fixture setup 003: CREATE TABLE dbo.odbc_fixture (id BIGINT NOT NULL, title NVARCHAR(20), amount DECIMAL(12,2),
+    d DATE)'
+- sql: CREATE VIEW dbo.odbc_fixture_view AS SELECT id,title FROM dbo.odbc_fixture
+  name: 'Fixture setup 004: CREATE VIEW dbo.odbc_fixture_view AS SELECT id,title FROM dbo.odbc_fixture'
+- sql: DROP TABLE IF EXISTS dbo.odbc_keys_child
+  name: 'Fixture setup 005: DROP TABLE IF EXISTS dbo.odbc_keys_child'
+- sql: DROP TABLE IF EXISTS dbo.odbc_keys_parent
+  name: 'Fixture setup 006: DROP TABLE IF EXISTS dbo.odbc_keys_parent'
+- sql: DROP TABLE IF EXISTS dbo.odbc_keys_unique
+  name: 'Fixture setup 007: DROP TABLE IF EXISTS dbo.odbc_keys_unique'
+- sql: CREATE TABLE dbo.odbc_keys_parent (first INT NOT NULL, second INT NOT NULL, label NVARCHAR(8), PRIMARY KEY(second,first))
+  name: 'Fixture setup 008: CREATE TABLE dbo.odbc_keys_parent (first INT NOT NULL, second INT NOT NULL, label NVARCHAR(8),
+    PRIMA'
+- sql: CREATE TABLE dbo.odbc_keys_child (id INT PRIMARY KEY, p_second INT, p_first INT, rv ROWVERSION)
+  name: 'Fixture setup 009: CREATE TABLE dbo.odbc_keys_child (id INT PRIMARY KEY, p_second INT, p_first INT, rv
+    ROWVERSION)'
+- sql: CREATE TABLE dbo.odbc_keys_unique (id INT NOT NULL, nullable_key INT, CONSTRAINT UQ_id UNIQUE(id), CONSTRAINT
+    UQ_nullable UNIQUE(nullable_key))
+  name: 'Fixture setup 010: CREATE TABLE dbo.odbc_keys_unique (id INT NOT NULL, nullable_key INT, CONSTRAINT UQ_id
+    UNIQUE(id), C'
+- scm: (createforeignkey (table "memcp-tests" "odbc_keys_child") "FK_parent" (list "p_second" "p_first") (table
+    "memcp-tests" "odbc_keys_parent") (list "second" "first") "cascade" "set null")
+  name: 'Fixture setup 011: (createforeignkey (table "memcp-tests" "odbc_keys_child") "FK_parent" (list "p_second"
+    "p_first") (t'
+- name: Direct base columns retain precise provenance and nullability
+  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_describe_only\" true)\n  (define descriptions (eval (parse_tsql\
+    \ \"memcp-tests\" \"SELECT TOP 0 id AS alias_id,p_first,rv FROM odbc_keys_child FOR BROWSE\" nil s nil)))\n\
+    \  (define id (car descriptions))\n  (define rv (nth descriptions 2))\n  (if (and (id \"updatable\") (not (id\
+    \ \"nullable\")) (id \"key\") (id \"browse\")\n      (equal? (id \"source\") '(\"memcp-tests\" \"odbc_keys_child\"\
+    \ \"id\"))\n      (not (rv \"updatable\")) (rv \"rowversion\")) true\n    (error \"direct base declaration was\
+    \ lost in result metadata\")))\n"
+  noncritical: true
+- name: Computed projections and outer joins remain read only
+  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_describe_only\" true)\n  (define computed (car (eval (parse_tsql\
+    \ \"memcp-tests\" \"SELECT TOP 0 id+1 AS computed FROM odbc_keys_child\" nil s nil))))\n  (define joined (car\
+    \ (eval (parse_tsql \"memcp-tests\" \"SELECT TOP 0 p.first FROM odbc_keys_child c LEFT JOIN odbc_keys_parent\
+    \ p ON p.first=c.p_first\" nil s nil))))\n  (if (and (not (computed \"updatable\")) (nil? (computed \"source\"\
+    ))\n      (not (joined \"updatable\")) (joined \"nullable\")) true\n    (error \"unproven projection was marked\
+    \ editable\")))\n"
+  noncritical: true
+- name: Aliased primary key and expression support explicit browse
+  sql: SELECT TOP 0 id AS alias_id,p_first+1 AS computed FROM odbc_keys_child FOR BROWSE
+  expect:
+    rows: 0
+  noncritical: true
+- name: Browse rejects missing primary key projection
+  sql: SELECT TOP 0 p_first FROM odbc_keys_child FOR BROWSE
+  expect:
+    error: true
+- name: Browse rejects joins
+  sql: SELECT TOP 0 c.id,p.first FROM odbc_keys_child c JOIN odbc_keys_parent p ON c.p_first=p.first FOR BROWSE
+  expect:
+    error: true
+- name: Browse rejects views
+  sql: SELECT TOP 0 id,title FROM odbc_fixture_view FOR BROWSE
+  expect:
+    error: true
+- name: Browse rejects grouped results
+  sql: SELECT id,COUNT(*) FROM odbc_keys_child GROUP BY id FOR BROWSE
+  expect:
+    error: true
+- name: Browse rejects unions
+  sql: SELECT id FROM odbc_keys_child UNION ALL SELECT id FROM odbc_keys_child FOR BROWSE
+  expect:
+    error: true
+- name: Bound named table metadata arguments
+  sql: sp_tables @table_name=N'odbc_fixture', @table_owner=N'dbo', @table_qualifier=N'memcp-tests', @table_type=N'''TABLE'''
+  expect:
+    rows: 1
+    data:
+    - TABLE_QUALIFIER: memcp-tests
+      TABLE_OWNER: dbo
+      TABLE_NAME: odbc_fixture
+      TABLE_TYPE: TABLE
+      REMARKS: null
+  noncritical: true
+- name: Table and view enumeration respects real object kinds
+  sql: EXEC sp_tables @table_name=N'odbc_fixture%'
+  expect:
+    rows: 2
+    data:
+    - TABLE_NAME: odbc_fixture
+      TABLE_TYPE: TABLE
+    - TABLE_NAME: odbc_fixture_view
+      TABLE_TYPE: VIEW
+  noncritical: true
+- name: Exact metadata matching does not interpret wildcards
+  sql: sp_tables @table_name=N'odbc%', @fUsePattern=0
+  expect:
+    rows: 0
+  noncritical: true
+- name: Case independent exact metadata identifiers
+  sql: sp_tables @table_name=N'ODBC_FIXTURE', @fUsePattern=0
+  expect:
+    rows: 1
+    data:
+    - TABLE_NAME: odbc_fixture
+  noncritical: true
+- name: Bracket metadata patterns support literal underscore
+  sql: sp_tables @table_name=N'odbc[_]fixture'
+  expect:
+    rows: 1
+    data:
+    - TABLE_NAME: odbc_fixture
+  noncritical: true
+- name: Foreign database metadata qualifiers are rejected
+  sql: sp_tables @table_qualifier=N'otherdb'
+  expect:
+    error: true
+- name: Unknown metadata argument is rejected
+  sql: sp_tables @typo=N'odbc_fixture'
+  expect:
+    error: true
+- name: Duplicate named and positional metadata arguments are rejected
+  sql: sp_tables N'odbc_fixture', @table_name=N'odbc_fixture'
+  expect:
+    error: true
+- name: Unknown procedure is rejected
+  sql: sp_unknown_metadata N'odbc_fixture'
+  expect:
+    error: true
+- name: Native ODBC column call preserves types and declaration order
+  sql: sp_columns @table_name=N'odbc_fixture', @table_owner=N'dbo', @table_qualifier=N'memcp-tests', @column_name=N'%',
+    @ODBCVer=3
+  expect:
+    rows: 4
+    data:
+    - COLUMN_NAME: id
+      DATA_TYPE: -5
+      TYPE_NAME: bigint
+      PRECISION: 19
+      LENGTH: 8
+      SCALE: 0
+      NULLABLE: 0
+      ORDINAL_POSITION: 1
+      IS_NULLABLE: 'NO'
+    - COLUMN_NAME: title
+      DATA_TYPE: -9
+      TYPE_NAME: nvarchar
+      PRECISION: 20
+      LENGTH: 40
+      CHAR_OCTET_LENGTH: 40
+      NULLABLE: 1
+      ORDINAL_POSITION: 2
+    - COLUMN_NAME: amount
+      DATA_TYPE: 3
+      TYPE_NAME: decimal
+      PRECISION: 12
+      SCALE: 2
+      LENGTH: 9
+      ORDINAL_POSITION: 3
+    - COLUMN_NAME: d
+      DATA_TYPE: 91
+      SQL_DATA_TYPE: 9
+      SQL_DATETIME_SUB: 1
+      ORDINAL_POSITION: 4
+  noncritical: true
+- name: Legacy ODBC column date identifier
+  sql: sp_columns N'odbc_fixture',N'dbo',N'memcp-tests',N'd',2
+  expect:
+    rows: 1
+    data:
+    - COLUMN_NAME: d
+      DATA_TYPE: 9
+      SQL_DATA_TYPE: 9
+      SQL_DATETIME_SUB: 1
+  noncritical: true
+- name: Column pattern filtering retains physical declaration ordinal
+  sql: sp_columns @table_name=N'odbc_fixture', @column_name=N'am%'
+  expect:
+    rows: 1
+    data:
+    - COLUMN_NAME: amount
+      ORDINAL_POSITION: 3
+  noncritical: true
+- name: Invalid ODBC version is rejected
+  sql: sp_columns @table_name=N'odbc_fixture', @ODBCVer=4
+  expect:
+    error: true
+- name: Columns procedure requires table name
+  sql: sp_columns
+  expect:
+    error: true
+- name: Actual native type-info batch form accepts both positional arguments
+  sql: sp_datatype_info_100 -5,3
+  expect:
+    rows: 1
+    data:
+    - TYPE_NAME: bigint
+      DATA_TYPE: -5
+      PRECISION: 19
+      SQL_DATA_TYPE: -5
+      NUM_PREC_RADIX: 10
+  noncritical: true
+- name: Actual legacy type-info batch form accepts one positional argument
+  sql: sp_datatype_info_100 -5
+  expect:
+    rows: 1
+    data:
+    - TYPE_NAME: bigint
+      DATA_TYPE: -5
+      PRECISION: 19
+  noncritical: true
+- name: Unicode type-info describes character dimensions
+  sql: sp_datatype_info @data_type=-9,@ODBCVer=3
+  expect:
+    rows: 1
+    data:
+    - TYPE_NAME: nvarchar
+      DATA_TYPE: -9
+      PRECISION: 4000
+      LITERAL_PREFIX: ''''
+      CREATE_PARAMS: length
+  noncritical: true
+- name: Native date type-info uses ODBC 3 identifier
+  sql: sp_datatype_info_100 91,3
+  expect:
+    rows: 1
+    data:
+    - TYPE_NAME: date
+      SQL_DATETIME_SUB: 1
+      SQL_DATA_TYPE: 9
+  noncritical: true
+- name: Unsupported type-info code returns a genuine empty result
+  sql: sp_datatype_info_100 999,3
+  expect:
+    rows: 0
+  noncritical: true
+- name: Metadata follows ALTER rather than retaining old rows
+  sql: ALTER TABLE dbo.odbc_fixture ADD added SMALLINT
+- name: Metadata observes newly published column
+  sql: sp_columns @table_name=N'odbc_fixture',@column_name=N'added'
+  expect:
+    rows: 1
+    data:
+    - COLUMN_NAME: added
+      DATA_TYPE: 5
+      ORDINAL_POSITION: 5
+  noncritical: true
+- name: Remove metadata fixture addition
+  sql: ALTER TABLE dbo.odbc_fixture DROP COLUMN added
+- name: Metadata observes removed column
+  sql: sp_columns @table_name=N'odbc_fixture',@column_name=N'added'
+  expect:
+    rows: 0
+  noncritical: true
+- name: Real ODBC prepare probe infers a cast parameter without executing SQL
+  sql: sp_describe_undeclared_parameters N'SELECT CAST(@PRM0001 AS BIGINT) AS probe_value'
+  expect:
+    rows: 1
+    data:
+    - parameter_ordinal: 1
+      name: '@PRM0001'
+      suggested_system_type_id: 127
+      suggested_system_type_name: bigint
+      suggested_max_length: 8
+      suggested_precision: 19
+      suggested_tds_type_id: 38
+      suggested_tds_length: 8
+  noncritical: true
+- name: Parameter inference preserves Unicode length
+  sql: sp_describe_undeclared_parameters N'SELECT CAST(@wide AS NVARCHAR(50)) AS value'
+  expect:
+    rows: 1
+    data:
+    - name: '@wide'
+      suggested_system_type_name: nvarchar(50)
+      suggested_max_length: 100
+      suggested_precision: 0
+  noncritical: true
+- name: Comparison against a real column infers its type
+  sql: sp_describe_undeclared_parameters N'SELECT title FROM dbo.odbc_fixture WHERE id=@Lookup'
+  expect:
+    rows: 1
+    data:
+    - name: '@Lookup'
+      suggested_system_type_name: bigint
+      suggested_max_length: 8
+  noncritical: true
+- name: Parameter discovery excludes declared references
+  sql: sp_describe_undeclared_parameters N'SELECT CAST(@known AS INT) AS known,CAST(@other AS SMALLINT) AS other',N'@known
+    INT'
+  expect:
+    rows: 1
+    data:
+    - name: '@other'
+      suggested_system_type_name: smallint
+      parameter_ordinal: 1
+  noncritical: true
+- name: All declared parameters produce a genuinely empty description
+  sql: sp_describe_undeclared_parameters N'SELECT @known AS value',N'@known INT'
+  expect:
+    rows: 0
+  noncritical: true
+- name: No parameters produce a genuinely empty description
+  sql: sp_describe_undeclared_parameters N'SELECT 1 AS value'
+  expect:
+    rows: 0
+  noncritical: true
+- name: Repeated references produce one parameter
+  sql: sp_describe_undeclared_parameters N'SELECT CAST(@Repeated AS INT) AS first,CAST(@repeated AS INT) AS second'
+  expect:
+    rows: 1
+    data:
+    - name: '@Repeated'
+      parameter_ordinal: 1
+      suggested_system_type_name: int
+  noncritical: true
+- name: Conflicting parameter contexts fail instead of guessing
+  sql: sp_describe_undeclared_parameters N'SELECT CAST(@p AS INT) AS a,CAST(@p AS NVARCHAR(10)) AS b'
+  expect:
+    error: true
+- name: Ambiguous parameter contexts fail instead of returning an empty result
+  sql: sp_describe_undeclared_parameters N'SELECT @unknown AS value'
+  expect:
+    error: true
+- name: Description rejects DML without executing it
+  sql: sp_describe_undeclared_parameters N'DROP TABLE dbo.odbc_fixture'
+  expect:
+    error: true
+- name: Failed description leaves the real table intact
+  sql: sp_columns @table_name=N'odbc_fixture',@column_name=N'id'
+  expect:
+    rows: 1
+    data:
+    - COLUMN_NAME: id
+      DATA_TYPE: -5
+  noncritical: true
+- name: Description cannot inspect foreign databases
+  sql: sp_describe_undeclared_parameters N'SELECT id FROM [otherdb].dbo.odbc_fixture WHERE id=@p'
+  expect:
+    error: true
+- name: Duplicate declared parameters are rejected
+  sql: sp_describe_undeclared_parameters N'SELECT CAST(@p AS INT) AS value',N'@p INT,@P INT'
+  expect:
+    error: true
+- name: Description validates tables even without parameters
+  sql: sp_describe_undeclared_parameters N'SELECT id FROM dbo.absent_odbc_table'
+  expect:
+    error: true
+- name: Description validates result columns even without parameters
+  sql: sp_describe_undeclared_parameters N'SELECT nonexistent FROM dbo.odbc_fixture'
+  expect:
+    error: true
+- name: Floating point suggestion uses native binary precision
+  sql: sp_describe_undeclared_parameters N'SELECT CAST(@p AS FLOAT) AS value'
+  expect:
+    rows: 1
+    data:
+    - suggested_system_type_name: float
+      suggested_precision: 53
+      suggested_tds_length: 8
+  noncritical: true
+- name: Large Unicode suggestion keeps native MAX sentinel
+  sql: sp_describe_undeclared_parameters N'SELECT CAST(@p AS NVARCHAR(MAX)) AS value'
+  expect:
+    rows: 1
+    data:
+    - suggested_system_type_name: nvarchar(max)
+      suggested_max_length: -1
+      suggested_tds_length: 65535
+  noncritical: true
+- name: View columns are described from neutral expressions
+  sql: sp_columns @table_name=N'odbc_fixture_view',@ODBCVer=3
+  expect:
+    rows: 2
+    data:
+    - COLUMN_NAME: id
+      DATA_TYPE: -5
+      ORDINAL_POSITION: 1
+    - COLUMN_NAME: title
+      DATA_TYPE: -9
+      PRECISION: 20
+      ORDINAL_POSITION: 2
+  noncritical: true
+- name: Composite primary key order comes from declared columns
+  sql: sp_pkeys N'odbc_keys_parent', N'dbo', N'memcp-tests'
+  expect:
+    rows: 2
+    data:
+    - COLUMN_NAME: second
+      KEY_SEQ: 1
+      PK_NAME: PRIMARY
+    - COLUMN_NAME: first
+      KEY_SEQ: 2
+      PK_NAME: PRIMARY
+  noncritical: true
+- name: Case independent key lookup
+  sql: sp_pkeys @table_name=N'ODBC_KEYS_PARENT'
+  expect:
+    rows: 2
+  noncritical: true
+- name: Unique keys do not become fabricated primary keys
+  sql: sp_pkeys N'odbc_keys_unique'
+  expect:
+    rows: 0
+  noncritical: true
+- name: Missing key tables return an empty result
+  sql: sp_pkeys N'absent_odbc_keys'
+  expect:
+    rows: 0
+  noncritical: true
+- name: Key metadata rejects foreign database access
+  sql: sp_pkeys N'odbc_keys_parent',N'dbo',N'otherdb'
+  expect:
+    error: true
+- name: Statistics enumerate actual unique definitions
+  sql: sp_statistics @table_name=N'odbc_keys_unique',@is_unique=N'Y',@accuracy=N'Q'
+  expect:
+    rows: 2
+    data:
+    - INDEX_NAME: UQ_id
+      COLUMN_NAME: id
+      NON_UNIQUE: 0
+      TYPE: 3
+      CARDINALITY: null
+      PAGES: null
+    - INDEX_NAME: UQ_nullable
+      COLUMN_NAME: nullable_key
+      NON_UNIQUE: 0
+      TYPE: 3
+  noncritical: true
+- name: Index names accept bound wildcard patterns
+  sql: sp_statistics N'odbc_keys_parent',N'dbo',N'memcp-tests',N'PRI%'
+  expect:
+    rows: 2
+  noncritical: true
+- name: Exact statistics requests fail explicitly
+  sql: sp_statistics @table_name=N'odbc_keys_parent',@accuracy=N'E'
+  expect:
+    error: true
+- name: Special row identifier preserves composite primary key order
+  sql: sp_special_columns @table_name=N'odbc_keys_parent',@col_type=N'R',@ODBCVer=3
+  expect:
+    rows: 2
+    data:
+    - COLUMN_NAME: second
+      DATA_TYPE: 4
+      PSEUDO_COLUMN: 1
+    - COLUMN_NAME: first
+      DATA_TYPE: 4
+  noncritical: true
+- name: Special row identifier uses actual non-null unique keys
+  sql: sp_special_columns @table_name=N'odbc_keys_unique'
+  expect:
+    rows: 1
+    data:
+    - COLUMN_NAME: id
+      TYPE_NAME: int
+  noncritical: true
+- name: Generated row version is identified with native binary metadata
+  sql: sp_special_columns N'odbc_keys_child',N'dbo',@qualifier=N'memcp-tests',@col_type=N'V',@scope=N'T',@nullable=N'U',@ODBCVer=3
+  expect:
+    rows: 1
+    data:
+    - COLUMN_NAME: rv
+      DATA_TYPE: -2
+      TYPE_NAME: rowversion
+      PRECISION: 8
+      LENGTH: 8
+      PSEUDO_COLUMN: 1
+  noncritical: true
+- name: Ordinary columns are not invented row versions
+  sql: sp_special_columns @table_name=N'odbc_keys_parent',@col_type=N'V'
+  expect:
+    rows: 0
+  noncritical: true
+- name: Invalid special column options fail
+  sql: sp_special_columns @table_name=N'odbc_keys_parent',@col_type=N'X'
+  expect:
+    error: true
+- name: Foreign key metadata preserves actual column order and actions
+  sql: sp_fkeys @fktable_name=N'odbc_keys_child',@fktable_qualifier=N'memcp-tests'
+  expect:
+    rows: 2
+    data:
+    - PKTABLE_NAME: odbc_keys_parent
+      PKCOLUMN_NAME: second
+      FKTABLE_NAME: odbc_keys_child
+      FKCOLUMN_NAME: p_second
+      KEY_SEQ: 1
+      UPDATE_RULE: 0
+      DELETE_RULE: 2
+      FK_NAME: FK_parent
+      PK_NAME: PRIMARY
+    - PKCOLUMN_NAME: first
+      FKCOLUMN_NAME: p_first
+      KEY_SEQ: 2
+  noncritical: true
+- name: Referenced table metadata finds referencing relationships
+  sql: sp_fkeys @pktable_name=N'ODBC_KEYS_PARENT'
+  expect:
+    rows: 2
+  noncritical: true
+- name: Foreign key discovery requires an explicit table filter
+  sql: sp_fkeys
+  expect:
+    error: true
+- name: Unrelated foreign key tables return empty results
+  sql: sp_fkeys @pktable_name=N'odbc_keys_unique'
+  expect:
+    rows: 0
+  noncritical: true
+- name: Metadata tracks a dropped foreign key immediately
+  scm: (dropforeignkey (table "memcp-tests" "odbc_keys_child") "FK_parent")
+  expect:
+    result: true
+- name: Dropped foreign key metadata does not survive in snapshots
+  sql: sp_fkeys @fktable_name=N'odbc_keys_child'
+  expect:
+    rows: 0
+  noncritical: true
+- name: Metadata tracks dropped unique keys
+  scm: (dropkey (table "memcp-tests" "odbc_keys_unique") "UQ_nullable")
+  expect:
+    result: true
+- name: Dropped unique index metadata disappears
+  sql: sp_statistics @table_name=N'odbc_keys_unique'
+  expect:
+    rows: 1
+    data:
+    - INDEX_NAME: UQ_id
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.odbc_keys_child
+  name: 'Fixture cleanup 001: DROP TABLE IF EXISTS dbo.odbc_keys_child'
+- sql: DROP TABLE IF EXISTS dbo.odbc_keys_parent
+  name: 'Fixture cleanup 002: DROP TABLE IF EXISTS dbo.odbc_keys_parent'
+- sql: DROP TABLE IF EXISTS dbo.odbc_keys_unique
+  name: 'Fixture cleanup 003: DROP TABLE IF EXISTS dbo.odbc_keys_unique'
+- sql: DROP VIEW IF EXISTS dbo.odbc_fixture_view
+  name: 'Fixture cleanup 004: DROP VIEW IF EXISTS dbo.odbc_fixture_view'
+- sql: DROP TABLE IF EXISTS dbo.odbc_fixture
+  name: 'Fixture cleanup 005: DROP TABLE IF EXISTS dbo.odbc_fixture'
+cleanup: []

@@ -1,0 +1,254 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixture preparation and cleanup are explicit cases so unsupported DDL stays visible.
+metadata:
+  version: '1.0'
+  description: T-sql key nullability and identifier semantics
+  syntax: tsql
+  isolated: true
+setup: []
+test_cases:
+- sql: DROP VIEW IF EXISTS dbo.MixedView
+  name: 'Fixture setup 001: DROP VIEW IF EXISTS dbo.MixedView'
+- sql: DROP TABLE IF EXISTS dbo.NamingFixture
+  name: 'Fixture setup 002: DROP TABLE IF EXISTS dbo.NamingFixture'
+- sql: DROP TABLE IF EXISTS dbo.key_semantics
+  name: 'Fixture setup 003: DROP TABLE IF EXISTS dbo.key_semantics'
+- sql: CREATE TABLE dbo.key_semantics (Id INT, Tenant INT, Title NVARCHAR(20), CONSTRAINT pk_semantics PRIMARY KEY
+    (ID,tenant))
+  name: 'Fixture setup 004: CREATE TABLE dbo.key_semantics (Id INT, Tenant INT, Title NVARCHAR(20), CONSTRAINT pk_semantics
+    PRIM'
+  noncritical: true
+- name: Composite primary key columns are implicitly non-nullable
+  sql: SELECT name,is_nullable FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.key_semantics') ORDER BY name
+  expect:
+    rows: 3
+    data:
+    - name: Id
+      is_nullable: 0
+    - name: Tenant
+      is_nullable: 0
+    - name: Title
+      is_nullable: 1
+  noncritical: true
+- name: Composite primary key rejects explicit NULL data
+  sql: INSERT INTO dbo.key_semantics (Id,Tenant,Title) VALUES (NULL,1,N'bad')
+  expect:
+    error: true
+- name: Composite primary key rejects omitted key data
+  sql: INSERT INTO dbo.key_semantics (Tenant,Title) VALUES (1,N'bad')
+  expect:
+    error: true
+- name: Valid composite key can be inserted
+  sql: INSERT INTO dbo.key_semantics (Id,Tenant,Title) VALUES (1,1,N'good')
+  noncritical: true
+- name: Duplicate composite key is rejected
+  sql: INSERT INTO dbo.key_semantics (Id,Tenant,Title) VALUES (1,1,N'duplicate')
+  expect:
+    error: true
+- name: Inline primary key also implies NOT NULL
+  sql: CREATE TABLE dbo.inline_key_semantics (Id INT PRIMARY KEY, title NVARCHAR(20))
+- name: Inline key exposes non-nullable metadata
+  sql: sp_columns @table_name=N'inline_key_semantics',@column_name=N'Id',@ODBCVer=3
+  expect:
+    rows: 1
+    data:
+    - NULLABLE: 0
+      IS_NULLABLE: 'NO'
+  noncritical: true
+- name: Inline key rejects NULL insert
+  sql: INSERT INTO dbo.inline_key_semantics (Id) VALUES (NULL)
+  expect:
+    error: true
+- name: Explicit NULL inline primary key declaration fails
+  sql: CREATE TABLE dbo.invalid_key_semantics (Id INT NULL PRIMARY KEY)
+  expect:
+    error: true
+  noncritical: true
+- name: Explicit NULL composite primary key declaration fails
+  sql: CREATE TABLE dbo.invalid_key_semantics (Id INT NULL, PRIMARY KEY (Id))
+  expect:
+    error: true
+- name: Missing constraint column fails before table publication
+  sql: CREATE TABLE dbo.invalid_key_semantics (Id INT, PRIMARY KEY (Missing))
+  expect:
+    error: true
+- name: Case-folded duplicate column declarations are rejected
+  sql: CREATE TABLE dbo.invalid_key_semantics (Id INT,id INT)
+  expect:
+    error: true
+- name: Invalid declarations never published a table
+  sql: SELECT OBJECT_ID(N'dbo.invalid_key_semantics') AS object_id
+  expect:
+    rows: 1
+    data:
+    - object_id: null
+  noncritical: true
+- name: Valid key data remains after rejected inserts
+  sql: SELECT Id,Tenant,Title FROM dbo.key_semantics
+  expect:
+    rows: 1
+    data:
+    - Id: 1
+      Tenant: 1
+      Title: good
+  noncritical: true
+- name: Create a view with mixed-case declared spelling
+  sql: CREATE VIEW dbo.MixedView AS SELECT Id AS MixedId,Title AS MixedTitle FROM dbo.key_semantics
+- name: Lowercase view spelling resolves its mixed-case columns
+  sql: SELECT mixedid,MIXEDTITLE FROM dbo.mixedview
+  expect:
+    rows: 1
+    data:
+    - mixedid: 1
+      MIXEDTITLE: good
+  noncritical: true
+- name: Uppercase view alias resolves qualified star
+  sql: SELECT MIXEDVIEW.* FROM dbo.mixedview
+  expect:
+    rows: 1
+    data:
+    - MixedId: 1
+      MixedTitle: good
+  noncritical: true
+- name: ODBC discovers mixed-case view columns using lowercase patterns
+  sql: sp_columns @table_name=N'mixedview',@column_name=N'mixedid',@ODBCVer=3
+  expect:
+    rows: 1
+    data:
+    - TABLE_NAME: MixedView
+      COLUMN_NAME: MixedId
+      DATA_TYPE: 4
+  noncritical: true
+- name: Case-folded view creation cannot overwrite the existing declaration
+  sql: CREATE VIEW dbo.MIXEDVIEW AS SELECT Tenant FROM dbo.key_semantics
+  expect:
+    error: true
+  noncritical: true
+- name: A table cannot shadow an existing view under another spelling
+  sql: CREATE TABLE dbo.mixedview (Id INT)
+  expect:
+    error: true
+  noncritical: true
+- name: A view cannot shadow an existing table under another spelling
+  sql: CREATE VIEW dbo.KEY_SEMANTICS AS SELECT Id FROM dbo.key_semantics
+  expect:
+    error: true
+  noncritical: true
+- name: Drop resolves the mixed-case view spelling
+  sql: DROP VIEW dbo.mixedview
+  noncritical: true
+- name: Dropped views do not remain visible through another spelling
+  sql: SELECT mixedid FROM dbo.MixedView
+  expect:
+    error: true
+- name: Declared table and column spelling is preserved
+  sql: CREATE TABLE dbo.NamingFixture (Id INT PRIMARY KEY, CompanyId INT NOT NULL, Title NVARCHAR(20))
+- name: Insert resolves a table and columns with different identifier case
+  sql: INSERT INTO dbo.namingfixture (ID,companyid,TITLE) VALUES (1,2,N'first')
+  noncritical: true
+- name: Select resolves table and columns while preserving output labels
+  sql: SELECT id,COMPANYID,title FROM dbo.NAMINGFIXTURE
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      COMPANYID: 2
+      title: first
+  noncritical: true
+- name: Qualified star resolves case-independent source aliases
+  sql: SELECT NAMINGFIXTURE.* FROM dbo.namingfixture
+  expect:
+    rows: 1
+    data:
+    - Id: 1
+      CompanyId: 2
+      Title: first
+  noncritical: true
+- name: Object lookup resolves case-independent table spelling
+  sql: SELECT CASE WHEN OBJECT_ID(N'dbo.namingfixture')=OBJECT_ID(N'dbo.NamingFixture') THEN 1 ELSE 0 END AS same_object,COL_LENGTH(N'dbo.NAMINGFIXTURE',N'title')
+    AS length
+  expect:
+    rows: 1
+    data:
+    - same_object: 1
+      length: 40
+  noncritical: true
+- name: Update resolves assignment columns with different case
+  sql: UPDATE dbo.NAMINGFIXTURE SET TITLE=N'updated',companyid=3 WHERE ID=1
+  noncritical: true
+- name: Update accepts different case for its source alias
+  sql: UPDATE F SET title=N'aliased' FROM dbo.namingfixture AS f WHERE f.ID=1
+  noncritical: true
+- name: Canonical storage spelling survives case-independent DML
+  sql: SELECT Id,CompanyId,Title FROM dbo.NamingFixture
+  expect:
+    rows: 1
+    data:
+    - Id: 1
+      CompanyId: 3
+      Title: aliased
+  noncritical: true
+- name: Create cannot publish a folded table-name collision
+  sql: CREATE TABLE dbo.NAMINGFIXTURE (Id INT)
+  expect:
+    error: true
+  noncritical: true
+- name: Alter resolves the table name and retains the new column spelling
+  sql: ALTER TABLE dbo.namingfixture ADD Added SMALLINT
+  noncritical: true
+- name: Alter cannot publish a folded column-name collision
+  sql: ALTER TABLE dbo.NAMINGFIXTURE ADD title INT
+  expect:
+    error: true
+  noncritical: true
+- name: Dropping a column resolves case-independent spelling
+  sql: ALTER TABLE dbo.NAMINGFIXTURE DROP COLUMN aDdEd
+  noncritical: true
+- name: Delete resolves case-independent table and column names
+  sql: DELETE FROM dbo.namingfixture WHERE ID=1
+  noncritical: true
+- name: Delete affected the real table
+  sql: SELECT COUNT(*) AS n FROM dbo.NamingFixture
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: Implicit INSERT columns still use canonical declarations
+  sql: INSERT INTO dbo.NAMINGFIXTURE VALUES (2,4,N'second')
+  noncritical: true
+- name: Unsupported truncate fails before changing data
+  sql: TRUNCATE TABLE dbo.namingfixture
+  expect:
+    error: true
+- name: Rejected truncate preserves the existing row
+  sql: SELECT Id,CompanyId,Title FROM dbo.NamingFixture
+  expect:
+    rows: 1
+    data:
+    - Id: 2
+      CompanyId: 4
+      Title: second
+  noncritical: true
+- name: Drop resolves current canonical table spelling
+  sql: DROP TABLE dbo.NAMINGFIXTURE
+- name: A recreated table retains its newly declared spelling
+  sql: CREATE TABLE dbo.NAMINGFIXTURE (ID INT PRIMARY KEY)
+- name: Catalog metadata exposes the newly declared spelling
+  sql: SELECT name FROM sys.tables WHERE object_id=OBJECT_ID(N'dbo.namingfixture')
+  expect:
+    rows: 1
+    data:
+    - name: NAMINGFIXTURE
+  noncritical: true
+- sql: DROP VIEW IF EXISTS dbo.mixedview
+  name: 'Fixture cleanup 001: DROP VIEW IF EXISTS dbo.mixedview'
+- sql: DROP TABLE IF EXISTS dbo.namingfixture
+  name: 'Fixture cleanup 002: DROP TABLE IF EXISTS dbo.namingfixture'
+- sql: DROP TABLE IF EXISTS dbo.invalid_key_semantics
+  name: 'Fixture cleanup 003: DROP TABLE IF EXISTS dbo.invalid_key_semantics'
+- sql: DROP TABLE IF EXISTS dbo.inline_key_semantics
+  name: 'Fixture cleanup 004: DROP TABLE IF EXISTS dbo.inline_key_semantics'
+- sql: DROP TABLE IF EXISTS dbo.key_semantics
+  name: 'Fixture cleanup 005: DROP TABLE IF EXISTS dbo.key_semantics'
+cleanup: []

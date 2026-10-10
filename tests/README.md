@@ -20,6 +20,19 @@ opt out only with `metadata.ci: false`, which is reserved for manual benchmarks
 that do not assert a stable CI budget. Every suite must provide
 `metadata.description`.
 
+A case with `noncritical: true` still runs and reports failures, but its failures
+do not block CI. The T-SQL compatibility suites retain the complete behavior
+inventory, including currently unsupported features. Remove the flag after the
+case passes focused local verification; keep its assertions unchanged. Expected
+error cases specify rejection behavior and do not establish support for the
+corresponding successful operation.
+
+In these suites, fixture preparation and cleanup are explicit cases so missing
+DDL remains visible without preventing the remaining specifications from running.
+All suites remain enabled in CI and use exclusive scheduling. Native TDS probe
+cases currently report that the runner cannot dispatch them; they remain
+noncritical until a real driver probe can execute their assertions.
+
 Place a regression at the layer that owns its root cause, not at the layer
 where an application happened to expose it. Use `integration/query-shapes`
 only when the composition of otherwise independent SQL features is the subject
