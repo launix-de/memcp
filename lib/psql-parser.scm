@@ -42,6 +42,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(atom "INSERT" true)
 	(atom "ORDER" true)
 	(atom "LIMIT" true)
+	(atom "ASC" true)
+	(atom "DESC" true)
+	(atom "OVER" true)
+	(atom "PARTITION" true)
 	(atom "DELIMITER" true)
 	(atom "TRIM" true)
 	(atom "LTRIM" true)
@@ -88,8 +92,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 )))
 
 /* SQL modulo expression: uses native mod builtin (NULL-safe, div-by-zero returns NULL) */
-(define psql_mod_expr (lambda (a b) '('mod a b))
-))
+(define psql_mod_expr (lambda (a b) '('mod a b)))
 
 /* SQL numeric literals are exact decimals. Fold literal addition and
 subtraction before the AST loses that distinction to binary float runtime
@@ -135,6 +138,11 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(parser (atom "TIMETZ" true) "TIME")
 	psql_identifier
 )))
+
+(define psql_window (lambda (name args spec)
+	(if (and (has? '("COUNT" "SUM" "AVG" "MIN" "MAX") name) (not (empty_list? (cadr spec))))
+		(error "ordered aggregate windows require default-frame support")
+		'('window_func name args spec))))
 
 (define parse_psql (lambda (schema s policy planning_session tx) (begin
 	(define parse_started_ns (nanotime))
@@ -295,10 +303,34 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		psql_expression6
 	)))
 
+	/* window function OVER() spec: parse PARTITION BY and ORDER BY clauses */
+	(define psql_window_orderby_item (parser '(
+		(define col psql_expression)
+		(define dir (or
+			(parser (atom "DESC" true) >)
+			(parser (atom "ASC" true) <)
+			(parser empty <)
+		))
+	) (list col dir)))
+	(define psql_window_spec (parser '(
+		(? (atom "PARTITION" true) (atom "BY" true) (define partition_by (+ psql_expression ",")))
+		(? (atom "ORDER" true) (atom "BY" true) (define order_by (+ psql_window_orderby_item ",")))
+	) (list (coalesce partition_by '()) (coalesce order_by '()))))
+
+
 	(define psql_expression7 (parser (or
 		/* Scalar subselect in expressions: (SELECT ...) */
 		(parser '("(" (define sub psql_select) ")") '('inner_select sub))
 		(parser '("(" (define a psql_expression) ")") a)
+
+		/* aggregate-as-window: KEYWORD(expr) OVER (...) → window_func node (must precede plain aggregate rules) */
+		(parser '((atom "COUNT" true) "(" "*" ")" (atom "OVER" true) "(" (define _over psql_window_spec) ")") (psql_window "COUNT" '() _over))
+		(parser '((atom "COUNT" true) "(" (define e psql_expression) ")" (atom "OVER" true) "(" (define _over psql_window_spec) ")") (psql_window "COUNT" (list e) _over))
+		(parser '((atom "SUM" true) "(" (define s psql_expression) ")" (atom "OVER" true) "(" (define _over psql_window_spec) ")") (psql_window "SUM" (list s) _over))
+		(parser '((atom "AVG" true) "(" (define s psql_expression) ")" (atom "OVER" true) "(" (define _over psql_window_spec) ")") (psql_window "AVG" (list s) _over))
+		(parser '((atom "MIN" true) "(" (define s psql_expression) ")" (atom "OVER" true) "(" (define _over psql_window_spec) ")") (psql_window "MIN" (list s) _over))
+		(parser '((atom "MAX" true) "(" (define s psql_expression) ")" (atom "OVER" true) "(" (define _over psql_window_spec) ")") (psql_window "MAX" (list s) _over))
+		(parser '((define fn psql_identifier_unquoted) "(" (define args (* psql_expression ",")) ")" (atom "OVER" true) "(" (define spec psql_window_spec) ")") (psql_window (toUpper fn) args spec))
 
 		/* EXISTS (SELECT ...) */
 		(parser '((atom "EXISTS" true) "(" (define sub psql_select) ")") '('inner_select_exists sub))
