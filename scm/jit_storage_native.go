@@ -336,7 +336,7 @@ func jitEmitStorageProc(ctx *JITContext, proc *Proc, args []JITValueDesc, condit
 		if jitEmitSpecialCondition(ctx, proc.Body, condition.yes, condition.no) {
 			return JITValueDesc{}
 		}
-		predicate := jitCompileExpr(ctx, proc.Body, RegR12, JITValueDesc{Loc: LocAny})
+		predicate := jitCompileExpr(ctx, proc.Body, ctx.SliceBase, JITValueDesc{Loc: LocAny})
 		if !ctx.emitBooleanFlagsJump(&predicate, condition.yes, condition.no) {
 			boolean := ctx.EmitBoolDesc(&predicate, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&predicate)
@@ -355,7 +355,7 @@ func jitEmitStorageProc(ctx *JITContext, proc *Proc, args []JITValueDesc, condit
 		}
 		return JITValueDesc{}
 	}
-	return JITEmitProcInlineWithOuter(ctx, proc, jitCapturedEnv(proc.En), args, RegR12, JITValueDesc{Loc: LocAny})
+	return JITEmitProcInlineWithOuter(ctx, proc, jitCapturedEnv(proc.En), args, ctx.SliceBase, JITValueDesc{Loc: LocAny})
 }
 
 func emitJITMapReduceBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8) {
@@ -601,16 +601,20 @@ func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmit
 		AllRegs:                  allRegs,
 		RegisterBank:             registerBank,
 		StorageInputsInRegisters: registerInputs,
-		SliceBase:                RegR12,
-		StackReg:                 RegRSP,
-		FrameReg:                 RegRBP,
-		ScratchReg:               RegR11,
-		ResultPtrReg:             RegRAX,
-		ResultAuxReg:             RegRBX,
-		LastIntReg:               jitLastGPReg,
-		HasFrame:                 true,
-		FrameRoots:               make(map[jitStackRoot]struct{}),
-		Arena:                    buf.arena,
+		// Native storage arguments have explicit register or stack homes, not
+		// a Scheme argument slice. Use the stack base rather than exposing an
+		// uninitialized incoming register as a pointer root across Go calls.
+		SliceBase:          RegRSP,
+		SliceBaseTracksRSP: true,
+		StackReg:           RegRSP,
+		FrameReg:           RegRBP,
+		ScratchReg:         RegR11,
+		ResultPtrReg:       RegRAX,
+		ResultAuxReg:       RegRBX,
+		LastIntReg:         jitLastGPReg,
+		HasFrame:           true,
+		FrameRoots:         make(map[jitStackRoot]struct{}),
+		Arena:              buf.arena,
 	}
 	ctx.W = ctx
 	guardOffset, stackSmall, moreStackPC := jitRuntimeStackCheck()

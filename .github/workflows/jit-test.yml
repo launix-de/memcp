@@ -90,6 +90,11 @@ jobs:
           go version
           go env GOEXPERIMENT
 
+      - name: Verify shared generated emitters
+        run: |
+          make jitgen
+          git diff --exit-code -- scm storage
+
       - name: Install test dependencies
         timeout-minutes: 5
         run: |
