@@ -2741,6 +2741,10 @@ def suite_scan_debugging(spec_file: str) -> bool:
             raise ValueError(f"{spec_file}: the runner owns ScanDebugging; remove case-level toggles")
         if writes and not load_suite_metadata(spec_file).get("isolated"):
             raise ValueError(f"{spec_file}: global setting changes require isolated: true")
+        if (re.search(r'\bTRUNCATE\s+(?:TABLE\s+)?`?system_statistic`?\s*\.\s*`?scans`?\b',
+                      Path(spec_file).read_text(), re.IGNORECASE)
+                and not load_suite_metadata(spec_file).get("isolated")):
+            raise ValueError(f"{spec_file}: global scan-log resets require isolated: true")
         if suite_requires_managed_restart(spec_file):
             raise ValueError(f"{spec_file}: scan-diagnostics clusters cannot restart the server")
     return value

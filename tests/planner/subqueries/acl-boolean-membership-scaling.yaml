@@ -6,6 +6,7 @@
 
 metadata:
   scan_debugging: true # The runner owns this flag for the complete cluster.
+  isolated: true # Resets all scan logs and asserts absence of generic query-group scans.
   version: "1.0"
   description: "Compound correlated boolean predicates use scalable physical probes"
 

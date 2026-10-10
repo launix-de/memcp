@@ -1663,6 +1663,23 @@ class ScanDebuggingClusterContractTest(unittest.TestCase):
         self.assertFalse(suite_scan_debugging(str(restart)))
         self.assertEqual(suite_execution_mode(str(restart)), "exclusive")
 
+    def test_global_scan_log_resets_require_exclusive_scheduling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "reset.yaml"
+            for sql in ("TRUNCATE TABLE `system_statistic`.`scans`",
+                        "truncate system_statistic.scans"):
+                path.write_text("metadata: {scan_debugging: true}\n"
+                                f"test_cases: [{{sql: '{sql}'}}]\n")
+                with self.subTest(sql=sql), self.assertRaisesRegex(ValueError, "scan-log resets"):
+                    suite_scan_debugging(str(path))
+            path.write_text("metadata: {scan_debugging: true, isolated: true}\n"
+                            "test_cases: [{sql: 'TRUNCATE TABLE system_statistic.scans'}]\n")
+            self.assertTrue(suite_scan_debugging(str(path)))
+            self.assertEqual(suite_execution_mode(str(path)), "exclusive")
+        acl = Path(__file__).resolve().parents[1] / "tests/planner/subqueries/acl-boolean-membership-scaling.yaml"
+        self.assertTrue(suite_scan_debugging(str(acl)))
+        self.assertEqual(suite_execution_mode(str(acl)), "exclusive")
+
     def test_global_shard_setting_still_requires_exclusive_scheduling(self):
         path = Path(__file__).resolve().parents[1] / "tests/planner/aggregates/group-stage-corners.yaml"
         self.assertTrue(suite_scan_debugging(str(path)))

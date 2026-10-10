@@ -245,6 +245,10 @@ filter/delete diagnostic rows by their own fixture tables; they must not toggle
 ScanDebugging themselves. Declare `isolated: true` as well when a suite changes
 another global setting such as ShardSize or JoinReorderDPBudget. Isolation still
 uses the shared server; it is a scheduling barrier.
+Suites that reset the complete scan log or assert across generic query-group
+names also run exclusively within the cluster. The runner rejects parallel
+cluster declarations that truncate the shared scan log. Server-restart suites
+stay outside the cluster.
 
 The processlist suite observes two simultaneous HTTP requests at a table-lock
 barrier, verifies a third request can progress, then checks each request's own
