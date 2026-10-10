@@ -5,6 +5,9 @@ metadata:
   syntax: tsql
   description: T-SQL grammar reuses native DDL, defaults and query planning
 setup:
+  - sql: DROP VIEW IF EXISTS [tsql_native_view]
+  - sql: DROP TABLE IF EXISTS [tsql_native_copy]
+  - sql: CREATE TABLE [tsql_native_copy] ([id] INT PRIMARY KEY, [name] NVARCHAR(80))
   - sql: DROP TABLE IF EXISTS [tsql_fk_child]
   - sql: DROP TABLE IF EXISTS [tsql_fk_parent]
   - sql: CREATE TABLE [tsql_fk_parent] ([id] INT PRIMARY KEY)
@@ -43,6 +46,57 @@ test_cases:
   - name: dialect null function and string addition
     sql: SELECT ISNULL(NULL, N'x') + N'y' AS [value]
     expect: {rows: 1, data: [{value: xy}]}
+  - name: ordinary aggregates use the canonical group stage
+    sql: SELECT COUNT(*) AS n, SUM([amount]) AS total FROM [tsql_native]
+    expect: {rows: 1, data: [{n: 2, total: 14}]}
+  - name: union uses the canonical union block
+    sql: SELECT 1 AS n UNION ALL SELECT 2 AS n
+    expect: {rows: 2, data: [{n: 1}, {n: 2}]}
+  - name: derived queries preserve top ordering
+    sql: SELECT chosen.[id] FROM (SELECT TOP (1) [id] FROM [tsql_native] ORDER BY [id] DESC) AS chosen
+    expect: {rows: 1, data: [{id: 2}]}
+  - name: searched case translates to native expressions
+    sql: SELECT CASE WHEN [id] = 1 THEN N'first' ELSE N'other' END AS [label] FROM [tsql_native] ORDER BY [id]
+    expect: {rows: 2, data: [{label: first}, {label: other}]}
+  - name: inner joins use the existing planner
+    sql: SELECT c.[id] FROM [tsql_fk_child] AS c JOIN [tsql_fk_parent] AS p ON c.[parent_id] = p.[id]
+    expect: {rows: 1, data: [{id: 1}]}
+  - name: insert select uses native insertion
+    sql: INSERT INTO [tsql_native_copy] ([id], [name]) SELECT [id], [name] FROM [tsql_native] ORDER BY [id]
+    expect: {rows: 1}
+  - name: insert select preserves all source rows
+    sql: SELECT [id], [name] FROM [tsql_native_copy] ORDER BY [id]
+    expect: {rows: 2, data: [{id: 1, name: Grüße}, {id: 2, name: "O'Brien"}]}
+  - name: create view stores the canonical query
+    sql: CREATE VIEW [tsql_native_view] AS SELECT [id] FROM [tsql_native]
+    expect: {rows: 1}
+  - name: view reads use the existing view expansion
+    sql: SELECT [id] FROM [tsql_native_view] ORDER BY [id]
+    expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+  - name: drop view uses the native catalog
+    sql: DROP VIEW [tsql_native_view]
+    expect: {rows: 1}
+  - name: substring accepts the dialect argument syntax
+    sql: SELECT SUBSTRING(N'abcdef', 2, 3) AS [part]
+    expect: {rows: 1, data: [{part: bcd}]}
+  - name: offset without ordering is rejected
+    sql: SELECT [id] FROM [tsql_native] OFFSET 1 ROWS
+    expect: {error: true}
+  - name: top combined with offset is rejected
+    sql: SELECT TOP (1) [id] FROM [tsql_native] ORDER BY [id] OFFSET 1 ROWS
+    expect: {error: true}
+  - name: limit does not leak in from another dialect
+    sql: SELECT 42 AS n LIMIT 1
+    expect: {error: true}
+  - name: backtick identifiers do not leak in from another dialect
+    sql: SELECT 42 AS `n`
+    expect: {error: true}
+  - name: insert ignore does not leak in from another dialect
+    sql: INSERT IGNORE INTO [tsql_native_copy] VALUES (99, N'unsupported')
+    expect: {error: true}
+  - name: engine clauses do not leak in from another dialect
+    sql: CREATE TABLE [tsql_wrong_engine] ([id] INT) ENGINE=MEMORY
+    expect: {error: true}
   - name: native unique constraint remains enforced
     sql: INSERT INTO [dbo].[tsql_native] ([id]) VALUES (1)
     expect: {error: true}
@@ -98,6 +152,9 @@ test_cases:
     sql: SELECT [id] FROM [tsql_fk_child]
     expect: {rows: 0}
 cleanup:
+  - sql: DROP VIEW IF EXISTS [tsql_native_view]
+  - sql: DROP TABLE IF EXISTS [tsql_native_copy]
+  - sql: DROP TABLE IF EXISTS [tsql_wrong_engine]
   - sql: DROP TABLE IF EXISTS [tsql_fk_child]
   - sql: DROP TABLE IF EXISTS [tsql_fk_parent]
   - sql: DROP TABLE IF EXISTS [tsql_native]

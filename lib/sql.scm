@@ -24,7 +24,6 @@ execution shadows it with the concrete session captured by the frontend. */
 (import "sql-parameters.scm")
 (import "psql-parser.scm")
 (import "sql-builtins.scm")
-(import "tsql-parser.scm")
 (import "sql-metadata.scm")
 (import "queryplan.scm")
 (import "sql-views.scm")
@@ -44,7 +43,6 @@ or its administrator capability. */
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))
 (set psql_queryplan_cache (newcachemap))
-(set tsql_queryplan_cache (newcachemap))
 (set sql_literal_shape_cache (newcachemap))
 
 /* Statistics guards deliberately specialize physical plans, but exact row
@@ -721,7 +719,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 /* http hook for handling SQL */
 (define http_handler (begin
 	(set old_handler http_handler)
-	(define handle_query (lambda (req res schema query dialect) (begin
+	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
 		(set pw (scan_lookup nil (table "system" "user") (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list (req "username"))))
 		(if (and pw (equal? pw (password (req "password"))))
@@ -732,7 +730,6 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 					(define session (req "__session"))
 					(define session_state (req "__session_state"))
 					(define query_seq (req "__query_seq"))
-					(session "syntax" (coalesceNil dialect "mysql"))
 					(session "username" (req "username"))
 					(session "schema" schema)
 					/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
@@ -745,10 +742,9 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 						(original_resultrow row))))
 					(set query_result (with_autocommit session session_state query_seq query
 						(lambda (tx) (begin
-							(define formula (cached_parse (if (equal? (session "syntax") "tsql") tsql_queryplan_cache sql_queryplan_cache)
-								(list (if (equal? (session "syntax") "tsql") parse_tsql parse_sql)) schema query
-								(list (quote sql-policy-for) (req "username")) (req "username") session (not (equal? (session "syntax") "tsql")) tx))
-							(sql_execute_formula session tx formula resultrow (lambda args true))))))
+							(define formula (cached_parse sql_queryplan_cache (list parse_sql) schema query
+								(list (quote sql-policy-for) (req "username")) (req "username") session true tx))
+							(sql_execute_formula session tx formula resultrow (lambda (_fields) true))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
@@ -879,10 +875,6 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 				(set query (match query (regex "^((?s:.*));\\s*$" _ body) body query))
 				(handle_query req res schema query)
 			)
-			(regex "^/tsql/([^/]+)$" url schema) (begin
-				(define raw ((req "body")))
-				(define query (match raw (regex "^((?s:.*));\\s*$" _ body) body raw))
-				(handle_query req res schema query "tsql"))
 			(regex "^/psql/([^/]+)$" url schema) (begin
 				(set query ((req "body")))
 				/* tolerate an optional trailing ';' - must be at end of string */
@@ -902,7 +894,6 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 
 /* register SQL frontends in service registry */
 (service_registry "SQL Frontend" (list (arg "api-port" (env "PORT" "4321")) "/sql/[database]" "POST, NDJSON"))
-(service_registry "T-SQL Frontend" (list (arg "api-port" (env "PORT" "4321")) "/tsql/[database]" "POST, NDJSON"))
 (service_registry "PSQL Frontend" (list (arg "api-port" (env "PORT" "4321")) "/psql/[database]" "POST, NDJSON"))
 (service_registry "SCM Frontend" (list (arg "api-port" (env "PORT" "4321")) "/scm" "POST, JSON"))
 
@@ -927,13 +918,9 @@ statement inside the per-query transaction callback. */
 	(define formula (if (equal? (session "syntax") "postgresql")
 		(cached_parse psql_queryplan_cache (list parse_psql) schema sql_parse_input
 			(list (quote sql-policy-for) mysql_username) mysql_username session false tx)
-		(cached_parse (if (equal? (session "syntax") "tsql") tsql_queryplan_cache sql_queryplan_cache)
-			(list (if (equal? (session "syntax") "tsql") parse_tsql parse_sql)) schema sql_parse_input
-			(list (quote sql-policy-for) mysql_username) mysql_username session (not (equal? (session "syntax") "tsql")) tx)))
-	(sql_execute_formula session tx formula resultrow
-		(if (equal? (session "syntax") "tsql")
-			(lambda args (if (session "wire_metadata") (apply resultfields_sql args) (resultfields_sql (car args))))
-			resultfields_sql)))))
+		(cached_parse sql_queryplan_cache (list parse_sql) schema sql_parse_input
+			(list (quote sql-policy-for) mysql_username) mysql_username session true tx)))
+	(sql_execute_formula session tx formula resultrow resultfields_sql))))
 
 (set mysql_handler (lambda (schema sql resultrow_sql resultfields_sql session session_state query_seq) (begin
 	(session "schema" schema)
