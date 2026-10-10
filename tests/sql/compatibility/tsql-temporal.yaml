@@ -1,0 +1,800 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: T-SQL temporal conversions and calendar boundary arithmetic
+  syntax: tsql
+setup:
+- sql: DROP TABLE IF EXISTS tsql_clock_defaults
+- sql: DROP TABLE IF EXISTS tsql_temporal_data
+- sql: CREATE TABLE tsql_temporal_data (id INT PRIMARY KEY, d DATE, dt DATETIME)
+- sql: INSERT INTO tsql_temporal_data VALUES (1,N'2026-03-15',N'2026-03-15 12:13:14')
+- sql: DROP TABLE IF EXISTS tsql_fractional_data
+- sql: CREATE TABLE tsql_fractional_data (id INT PRIMARY KEY, d2 DATETIME2(7), dt
+    DATETIME, tm TIME(7))
+- sql: INSERT INTO tsql_fractional_data VALUES (1,N'2026-03-15 12:13:14.1234567',N'2026-03-15
+    12:13:14.003',N'12:13:14.1234567'),(2,N'2026-03-15 12:13:14.1234568',N'2026-03-15
+    12:13:14.007',N'12:13:14.1234568')
+test_cases:
+- name: Clock defaults are evaluated by a later insert rather than create
+  scm: |
+    (begin
+      (define s (newsession))
+      (define execute (lambda (sql) (begin
+        (define output (newsession))
+        (with_autocommit s nil nil sql (lambda (tx)
+          (sql_execute_formula s tx
+            (sql_queryplan_compile_formula tx (parse_tsql "memcp-tests" sql nil s tx))
+            (lambda (row) (output "row" row)) (lambda fields true))))
+        (output "row"))))
+      (execute "CREATE TABLE tsql_clock_defaults (id INT PRIMARY KEY, created DATETIME DEFAULT ((GETDATE())), precise DATETIME2(7) DEFAULT SYSDATETIME(), standard DATETIME DEFAULT CURRENT_TIMESTAMP)")
+      (sleep 1.05)
+      (define cutoff (execute "SELECT CONVERT(VARCHAR(30),GETDATE(),121) AS created,CONVERT(VARCHAR(30),SYSDATETIME(),121) AS precise"))
+      (execute "INSERT tsql_clock_defaults (id) VALUES (1)")
+      (define row (execute "SELECT CONVERT(VARCHAR(30),created,121) AS created,CONVERT(VARCHAR(30),precise,121) AS precise,CONVERT(VARCHAR(30),standard,121) AS standard FROM tsql_clock_defaults WHERE id=1"))
+      (if (and (>= (tsql_datediff "second" (cutoff "created") (row "created")) 0)
+          (>= (tsql_datediff "second" (cutoff "precise") (row "precise")) 0)
+          (>= (tsql_datediff "second" (cutoff "created") (row "standard")) 0)) true
+        (error "clock default was frozen while creating the table")))
+- name: Raw current clocks preserve native temporal output
+  sql: SELECT GETDATE() AS legacy,SYSDATETIME() AS precise,CURRENT_TIMESTAMP AS standard
+  expect: {rows: 1}
+- name: Raw inserted default clocks retain their declared temporal values
+  sql: SELECT created,precise,standard FROM tsql_clock_defaults WHERE id=1
+  expect: {rows: 1}
+- name: Clock default expressions remain schema expressions
+  scm: |
+    (begin
+      (define cols (tsql_get_schema "memcp-tests" "tsql_clock_defaults"))
+      (define find_column (lambda (name) (find cols (lambda (col) (equal? (col "Field") name)) nil)))
+      (if (and (equal? ((find_column "created") "DefaultExpression") "GETDATE()")
+          (equal? ((find_column "precise") "DefaultExpression") "SYSDATETIME()")
+          (equal? ((find_column "standard") "DefaultExpression") "GETDATE()")) true
+        (error "clock default was serialized as a creation-time literal")))
+- name: An omitted clock default accepts explicit NULL unchanged
+  sql: INSERT tsql_clock_defaults (id,created,precise,standard) VALUES (2,NULL,NULL,NULL)
+- name: Explicit null clocks are not replaced by defaults
+  sql: SELECT created,precise,standard FROM tsql_clock_defaults WHERE id=2
+  expect: {rows: 1, data: [{created: null, precise: null, standard: null}]}
+- name: A retained compiled scalar clock is sampled on each execution
+  scm: |
+    (begin
+      (define s (newsession))
+      (define formula (sql_queryplan_compile_formula nil
+        (parse_tsql "memcp-tests" "SELECT GETDATE() AS legacy,SYSDATETIME() AS precise" nil s nil)))
+      (define execute (lambda () (begin
+        (define output (newsession))
+        (with_autocommit s nil nil "SELECT clocks" (lambda (tx)
+          (sql_execute_formula s tx formula (lambda (row) (output "row" row)) (lambda fields true))))
+        (output "row"))))
+      (define before (execute))
+      (sleep 0.02)
+      (define after (execute))
+      (if (and (> (tsql_datediff "millisecond" (before "legacy") (after "legacy")) 0)
+          (> (tsql_datediff "microsecond" (before "precise") (after "precise")) 0)) true
+        (error "compiled clock was folded into a cached literal")))
+- name: Clock functions reject unexpected arguments
+  sql: SELECT GETDATE(1) AS value
+  expect: {error: true}
+- name: Scalar subqueries cannot become default values
+  sql: CREATE TABLE tsql_invalid_clock_default (value DATETIME DEFAULT (SELECT GETDATE()))
+  expect: {error: true}
+- name: Compound clock defaults evaluate through a generic calculator at insert time
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_compound_clock_default
+  - sql: CREATE TABLE tsql_compound_clock_default (id INT,value DATETIME DEFAULT DATEADD(day,1,GETDATE()))
+  cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_compound_clock_default
+  scm: |
+    (begin
+      (define session (newsession))
+      (define run (lambda (sql) (begin
+        (define output (newsession))
+        (with_autocommit session nil nil sql (lambda (tx)
+          (sql_execute_formula session tx (sql_queryplan_compile_formula tx (parse_tsql "memcp-tests" sql nil session tx))
+            (lambda (row) (output "row" row)) (lambda fields true))))
+        (output "row"))))
+      (sleep 1.05)
+      (define cutoff (run "SELECT CONVERT(VARCHAR(30),DATEADD(day,1,GETDATE()),121) AS value"))
+      (run "INSERT tsql_compound_clock_default(id) VALUES (1)")
+      (define inserted (run "SELECT CONVERT(VARCHAR(30),value,121) AS value FROM tsql_compound_clock_default WHERE id=1"))
+      (if (>= (tsql_datediff "second" (cutoff "value") (inserted "value")) 0) true
+        (error "compound default froze its clock during CREATE")))
+  expect: {result: true}
+- name: Calendar scalars retain integer arithmetic
+  sql: SELECT YEAR(N'2026-03-15')+1 AS yr,MONTH(N'2026-03-15')+1 AS mon,DAY(N'2026-03-15')+1 AS dy,DATEPART(year,N'2026-03-15')+1 AS part,DATEDIFF(day,N'2026-03-15',N'2026-03-16')+1 AS diff
+  expect: {rows: 1, data: [{yr: 2027, mon: 4, dy: 16, part: 2027, diff: 2}]}
+- name: Clock default schema survives a graceful restart
+  sql: SHUTDOWN
+  syntax: mysql
+- name: Restarted clock defaults still evaluate during insert
+  sql: INSERT tsql_clock_defaults (id) VALUES (3)
+- name: Restarted stored clock values have native temporal output
+  sql: SELECT created,precise,standard FROM tsql_clock_defaults WHERE id=3
+  expect: {rows: 1}
+- name: Legacy export style
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'15-03-18 00:00:00 AM',4),120)
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2018-03-15 00:00:00'
+- name: Four digit local date
+  sql: SELECT CONVERT(DATE,N'15.03.2026',104) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15'
+- name: Two digit year below cutoff
+  sql: SELECT DATEPART(year,CONVERT(DATETIME,N'01/02/49',1)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2049
+- name: Two digit year above cutoff
+  sql: SELECT DATEPART(year,CONVERT(DATETIME,N'01/02/50',1)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1950
+- name: Compact canonical date
+  sql: SELECT CONVERT(DATE,N'20260315',112) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15'
+- name: Month name default style
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'Mar 15 2018 12:00AM',100),120)
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2018-03-15 00:00:00'
+- name: Default string temporal conversion
+  sql: SELECT CAST(N'2026-03-15 12:13:14' AS DATE) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15'
+- name: Time conversion retains seconds
+  sql: SELECT CAST(N'2026-03-15 12:13:14' AS TIME) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12:13:14'
+- name: Datetime2 precision zero rounds
+  sql: SELECT CONVERT(VARCHAR(19),CAST(N'2026-03-15 12:13:14.5000000' AS DATETIME2(0)),120)
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:15'
+- name: Time precision zero midnight rounding
+  sql: SELECT CAST(N'23:59:59.5' AS TIME(0)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 00:00:00
+- name: Small datetime minute round down
+  sql: SELECT CONVERT(VARCHAR(19),CAST(N'2026-03-15 12:13:29.998' AS SMALLDATETIME),120)
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:00'
+- name: Small datetime minute round up
+  sql: SELECT CONVERT(VARCHAR(19),CAST(N'2026-03-15 12:13:29.999' AS SMALLDATETIME),120)
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:14:00'
+- name: Legacy datetime numeric zero
+  sql: SELECT CONVERT(VARCHAR(19),CAST(0 AS DATETIME),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '1900-01-01 00:00:00'
+- name: Temporal null conversion
+  sql: SELECT CONVERT(DATETIME,NULL,120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Null conversion style
+  sql: SELECT CONVERT(DATETIME,N'2026-03-15',NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Output local date style
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATETIME),104) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 15.03.2026
+- name: Day boundary versus elapsed day
+  sql: SELECT DATEDIFF(day,N'2026-03-15 23:59:59',N'2026-03-16 00:00:00') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Year boundary crosses fractional input
+  sql: SELECT DATEDIFF(yy,N'2025-12-31 23:59:59.9999999',N'2026-01-01 00:00:00') AS
+    value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Sunday week boundary
+  sql: SELECT DATEDIFF(week,N'2026-03-14',N'2026-03-15') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Monday not a week boundary
+  sql: SELECT DATEDIFF(wk,N'2026-03-15',N'2026-03-16') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: Negative boundary difference
+  sql: SELECT DATEDIFF(day,N'2026-03-16',N'2026-03-15') AS value
+  expect:
+    rows: 1
+    data:
+    - value: -1
+- name: Fractional millisecond boundary
+  sql: SELECT DATEDIFF(ms,N'2026-03-15 12:00:00.9999999',N'2026-03-15 12:00:01') AS
+    value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Clamp month to final day
+  sql: SELECT CONVERT(VARCHAR(10),DATEADD(month,1,N'2026-01-31'),23) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-02-28'
+- name: Clamp leap day after year addition
+  sql: SELECT DATEADD(year,1,CAST(N'2024-02-29' AS DATE)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2025-02-28'
+- name: Date add truncates numeric offset
+  sql: SELECT CAST(DATEADD(day,1.9,N'2026-03-15') AS DATE) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-16'
+- name: Time add wraps midnight
+  sql: SELECT DATEADD(hour,1,CAST(N'23:00:00' AS TIME)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 00:00:00
+- name: Small datetime second dead band
+  sql: SELECT CONVERT(VARCHAR(19),DATEADD(second,-30,CAST(N'2026-03-15 12:00:00' AS
+    SMALLDATETIME)),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:00:00'
+- name: Small datetime negative second rounding
+  sql: SELECT CONVERT(VARCHAR(19),DATEADD(second,-31,CAST(N'2026-03-15 12:00:00' AS
+    SMALLDATETIME)),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 11:59:00'
+- name: Current timestamp date addition type
+  sql: SELECT DATEDIFF(day,GETDATE(),DATEADD(day,1,GETDATE())) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Datepart leap year ordinal
+  sql: SELECT DATEPART(dy,N'2024-12-31') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 366
+- name: Datepart Sunday weekday
+  sql: SELECT DATEPART(dw,N'2026-03-15') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Datepart ISO week across year
+  sql: SELECT DATEPART(iso_week,N'2021-01-01') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 53
+- name: Datepart fractional nanoseconds
+  sql: SELECT DATEPART(ns,N'2026-03-15 12:00:00.1234567') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 123456700
+- name: Invalid calendar date rejected
+  sql: SELECT CAST(N'2026-02-30' AS DATETIME)
+  expect:
+    error: true
+- name: Repeated date separators rejected
+  sql: SELECT CAST(N'2026--03-15' AS DATETIME)
+  expect:
+    error: true
+- name: Fractional legacy datetime quantized
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 12:13:14.001' AS DATETIME),121)
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.000'
+- name: Fractional datetime2 retained
+  sql: SELECT CAST(CAST(N'2026-03-15 12:13:14.1234567' AS DATETIME2(7)) AS VARCHAR(40))
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.1234567'
+- name: Fractional time retained
+  sql: SELECT CAST(CAST(N'12:13:14.001' AS TIME(3)) AS VARCHAR(30)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12:13:14.001'
+- name: Precision above seven rejected
+  sql: SELECT CAST(N'2026-03-15' AS DATETIME2(8))
+  expect:
+    error: true
+- name: Datetime precision rejected
+  sql: SELECT CAST(N'2026-03-15' AS DATETIME(0))
+  expect:
+    error: true
+- name: Unknown conversion style rejected
+  sql: SELECT CONVERT(DATETIME,N'2026-03-15',999)
+  expect:
+    error: true
+- name: Datetime lower bound rejected
+  sql: SELECT CAST(N'1492-08-03' AS DATETIME)
+  expect:
+    error: true
+- name: Small datetime upper bound rejected
+  sql: SELECT CAST(N'2079-06-07' AS SMALLDATETIME)
+  expect:
+    error: true
+- name: Date cannot add hours rejected
+  sql: SELECT DATEADD(hour,1,CAST(N'2026-03-15' AS DATE))
+  expect:
+    error: true
+- name: Time cannot add days rejected
+  sql: SELECT DATEADD(day,1,CAST(N'12:00:00' AS TIME))
+  expect:
+    error: true
+- name: Fractional legacy dateadd quantized
+  sql: SELECT CONVERT(VARCHAR(30),DATEADD(ms,2,N'2026-03-15 12:00:00'),121) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:00:00.003'
+- name: Date add overflow rejected
+  sql: SELECT DATEADD(year,2147483647,N'2026-03-15')
+  expect:
+    error: true
+- name: Date diff overflow rejected
+  sql: SELECT DATEDIFF(second,N'1900-01-01',N'2026-03-15')
+  expect:
+    error: true
+- name: Unknown datepart rejected
+  sql: SELECT DATEPART(unknown_part,N'2026-03-15')
+  expect:
+    error: true
+- name: Date add iso week rejected
+  sql: SELECT DATEADD(iso_week,1,N'2026-03-15')
+  expect:
+    error: true
+- name: Date diff iso week rejected
+  sql: SELECT DATEDIFF(iso_week,N'2026-03-15',N'2026-03-16')
+  expect:
+    error: true
+- name: Calendar part short YEAR
+  sql: SELECT YEAR(N'2026-03-15') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2026
+- name: Calendar part short MONTH
+  sql: SELECT MONTH(N'2026-03-15') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 3
+- name: Calendar part short DAY
+  sql: SELECT DAY(N'2026-03-15') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 15
+- name: Null formatted value
+  sql: SELECT CONVERT(VARCHAR(10),NULL,104) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Legacy timestamp default format
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 12:13:14' AS DATETIME),0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: Mar 15 2026 12:13PM
+- name: Format declared date value
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATE),104) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 15.03.2026
+- name: Format declared time value
+  sql: SELECT CONVERT(VARCHAR(8),CAST(N'12:13:14' AS TIME),108) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12:13:14'
+- name: Default date output format
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15' AS DATE)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15'
+- name: Default time output format
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'12:13:14' AS TIME)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12:13:14'
+- name: Default datetime2 output format
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 12:13:14' AS DATETIME2)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.000'
+- name: Date add uses declared column type
+  sql: SELECT DATEADD(day,1,d) AS value FROM tsql_temporal_data
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-16'
+- name: Datetime add uses declared column type
+  sql: SELECT CONVERT(VARCHAR(19),DATEADD(minute,1,dt),120) AS value FROM tsql_temporal_data
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:14:14'
+- name: Date formatting uses declared column type
+  sql: SELECT CONVERT(VARCHAR(10),d,104) AS value FROM tsql_temporal_data
+  expect:
+    rows: 1
+    data:
+    - value: 15.03.2026
+- name: Date boundary filter over stored columns
+  sql: SELECT id AS value FROM tsql_temporal_data WHERE DATEDIFF(day,dt,N'2026-03-16')=1
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Legacy numeric date floor idiom
+  sql: SELECT CONVERT(VARCHAR(19),DATEADD(day,DATEDIFF(day,0,N'2026-03-15 12:13:14'),0),120)
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 00:00:00'
+- name: Datepart numeric epoch
+  sql: SELECT DATEPART(year,0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1900
+- name: Legacy numeric date floor over stored column
+  sql: SELECT CONVERT(VARCHAR(19),DATEADD(day,DATEDIFF(day,0,dt),0),120) AS value
+    FROM tsql_temporal_data
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 00:00:00'
+- name: Exact time rounding carry
+  sql: SELECT CAST(CAST(N'23:59:59.9999999' AS TIME(3)) AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 00:00:00
+- name: Exact datetime2 rounding carry
+  sql: SELECT CAST(CAST(N'2026-03-15 23:59:59.9999999' AS DATETIME2(3)) AS VARCHAR(40))
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-16 00:00:00'
+- name: Exact nanosecond DATEADD
+  sql: SELECT CAST(DATEADD(ns,50,CAST(N'2026-03-15 12:13:14.1234567' AS DATETIME2(7)))
+    AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.1234568'
+- name: Fraction preserved on month addition
+  sql: SELECT CAST(DATEADD(month,1,CAST(N'2026-01-31 12:13:14.1234567' AS DATETIME2(7)))
+    AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-02-28 12:13:14.1234567'
+- name: Legacy grid to exact datetime2
+  sql: SELECT CAST(CAST(CAST(N'2026-03-15 12:13:14.005' AS DATETIME) AS DATETIME2(7))
+    AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.0066667'
+- name: Exact DATEPART nanosecond
+  sql: SELECT DATEPART(ns,CAST(N'2026-03-15 12:13:14.1234567' AS DATETIME2(7))) AS
+    value
+  expect:
+    rows: 1
+    data:
+    - value: 123456700
+- name: Exact DATEDIFF nanosecond
+  sql: SELECT DATEDIFF(ns,CAST(N'2026-03-15 12:13:14.1234567' AS DATETIME2(7)),CAST(N'2026-03-15
+    12:13:14.1234568' AS DATETIME2(7))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 100
+- name: Exact datetime2 default CONVERT
+  sql: SELECT CONVERT(VARCHAR(40),CAST(N'2026-03-15 12:13:14.1234567' AS DATETIME2(7)))
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.1234567'
+- name: Fraction beyond seven rejected
+  sql: SELECT CAST(N'2026-03-15 12:13:14.12345678' AS DATETIME2(7))
+  expect:
+    error: true
+- name: Rounding past maximum datetime rejected
+  sql: SELECT CAST(N'9999-12-31 23:59:59.9999' AS DATETIME)
+  expect:
+    error: true
+- name: Rounding past maximum datetime2 rejected
+  sql: SELECT CAST(N'9999-12-31 23:59:59.9999999' AS DATETIME2(0))
+  expect:
+    error: true
+- name: Fractional DML retains clock
+  sql: SELECT CAST(d2 AS VARCHAR(40)) AS value FROM tsql_fractional_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.1234567'
+- name: Legacy DML retains ticks
+  sql: SELECT CONVERT(VARCHAR(40),dt,121) AS value FROM tsql_fractional_data WHERE
+    id=2
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.007'
+- name: Fractional TIME DML retains clock
+  sql: SELECT CAST(tm AS VARCHAR(40)) AS value FROM tsql_fractional_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: '12:13:14.1234567'
+- name: Fractional equality matches exact clock
+  sql: SELECT COUNT(*) AS value FROM tsql_fractional_data WHERE d2=CAST(N'2026-03-15
+    12:13:14.1234567' AS DATETIME2(7))
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Fractional equality converts text
+  sql: SELECT COUNT(*) AS value FROM tsql_fractional_data WHERE d2=N'2026-03-15 12:13:14.1234567'
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Fractional ordering distinguishes 100ns
+  sql: SELECT TOP(1) CAST(d2 AS VARCHAR(40)) AS value FROM tsql_fractional_data ORDER
+    BY d2 DESC
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.1234568'
+- name: Fractional distinct distinguishes clocks
+  sql: SELECT COUNT(DISTINCT d2) AS value FROM tsql_fractional_data
+  expect:
+    rows: 1
+    data:
+    - value: 2
+- name: Fractional join identity
+  sql: SELECT COUNT(*) AS value FROM tsql_fractional_data a JOIN tsql_fractional_data
+    b ON a.d2=b.d2
+  expect:
+    rows: 1
+    data:
+    - value: 2
+- name: Typed TIME calendar DATEPART rejects
+  sql: SELECT DATEPART(year,tm) FROM tsql_fractional_data WHERE id=1
+  expect:
+    error: true
+- name: Typed TIME quarter DATEPART rejects
+  sql: SELECT DATEPART(quarter,CAST(N'12:10:30.1234567' AS TIME(7)))
+  expect:
+    error: true
+- name: TIME literal calendar defaults
+  sql: SELECT DATEPART(year,N'12:10:30.1234567') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1900
+- name: TIME YEAR alias defaults
+  sql: SELECT YEAR(tm) AS value FROM tsql_fractional_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 1900
+- name: TIME MONTH alias defaults
+  sql: SELECT MONTH(tm) AS value FROM tsql_fractional_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: TIME DAY alias defaults
+  sql: SELECT DAY(tm) AS value FROM tsql_fractional_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Typed TIME clock DATEPART works
+  sql: SELECT DATEPART(ns,tm) AS value FROM tsql_fractional_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 123456700
+- name: NULL TIME DATEPART remains NULL
+  sql: SELECT DATEPART(year,CAST(NULL AS TIME(7))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: NULL TIME YEAR alias remains NULL
+  sql: SELECT YEAR(CAST(NULL AS TIME(7))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Sub tick rounding carries correctly across the Unix epoch
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'1969-12-31 23:59:59.99999995' AS DATETIME2(7)),126) AS value
+  expect: {rows: 1, data: [{value: '1970-01-01T00:00:00.0000000'}]}
+- name: Exact temporal values remain plain Unix integers
+  scm: |
+    (begin
+      (define a (tsql_cast_bound "9999-12-31 23:59:59.9999998" '("VARCHAR") '("DATETIME2" 7)))
+      (define b (tsql_cast_bound "9999-12-31 23:59:59.9999999" '("VARCHAR") '("DATETIME2" 7)))
+      (if (and (int? a) (int? b) (equal? (- b a) 1)) true
+        (error "100ns carriers lost integer precision")))
+  expect: {result: true}
+- name: Offset datetime comparisons use the same UTC instant
+  sql: SELECT CASE WHEN CAST(N'2026-03-15 01:00:00+01:00' AS DATETIMEOFFSET(7)) = CAST(N'2026-03-15 00:00:00Z' AS DATETIMEOFFSET(7)) THEN 1 ELSE 0 END AS value
+  expect: {rows: 1, data: [{value: 1}]}
+- name: Offset datetime wire tuples carry UTC calendar fields and a separate offset
+  scm: |
+    (begin
+      (define spec '("DATETIMEOFFSET" 7))
+      (define value (tsql_cast_bound "2026-03-15 01:00:00+01:00" '("VARCHAR") spec))
+      (define payload (tsql_temporal_wire value spec))
+      (define wire '("wire_kind" 43 "scale" 7))
+      (define restored (tsql_convert_parameter payload wire spec))
+      (if (and (equal? (cadr payload) 0) (equal? (nth payload 2) 60)
+          (equal? (tsql_offset_ticks value) (tsql_offset_ticks restored))
+          (equal? (tsql_offset_value_minutes restored) 60)) true
+        (error "wire adapter received local calendar data instead of UTC")))
+  expect: {result: true}
+- name: Offset datetime rejects a UTC date outside the declaration range
+  sql: SELECT CAST(N'0001-01-01 00:00:00+01:00' AS DATETIMEOFFSET(7)) AS value
+  expect: {error: true}
+- name: DATEDIFF nanosecond overflow is checked before narrowing
+  sql: SELECT DATEDIFF(nanosecond,CAST(N'0001-01-01' AS DATETIME2(7)),CAST(N'9999-12-31' AS DATETIME2(7))) AS value
+  expect: {error: true}
+
+- name: Statement clocks share one immutable execution value
+  sql: SELECT CASE WHEN SYSDATETIME()=SYSDATETIME() THEN 1 ELSE 0 END AS value
+  expect: {rows: 1, data: [{value: 1}]}
+- name: Multi row omitted clocks share one statement context
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_statement_clock_rows
+  - sql: CREATE TABLE tsql_statement_clock_rows (id INT,value DATETIME2(7) DEFAULT SYSDATETIME())
+  - sql: INSERT tsql_statement_clock_rows(id) VALUES (1),(2),(3)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_statement_clock_rows
+  sql: SELECT COUNT(DISTINCT value) AS value FROM tsql_statement_clock_rows
+  expect: {rows: 1, data: [{value: 1}]}
+- name: Offset grouping uses UTC keys while preserving NULL groups
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_offset_keys
+  - sql: CREATE TABLE tsql_offset_keys (id INT,stamp DATETIMEOFFSET(7))
+  - sql: INSERT tsql_offset_keys VALUES (1,N'2026-03-15 01:00:00+01:00'),(2,N'2026-03-15 00:00:00Z'),(3,N'2026-03-16 00:00:00Z'),(4,NULL),(5,NULL)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_offset_keys
+  sql: SELECT COUNT(*) AS value FROM tsql_offset_keys GROUP BY stamp ORDER BY COUNT(*)
+  expect: {rows: 3, data: [{value: 1},{value: 2},{value: 2}]}
+- name: Offset count distinct uses canonical UTC keys
+  sql: SELECT COUNT(DISTINCT stamp) AS value FROM (SELECT CAST(N'2026-03-15 01:00:00+01:00' AS DATETIMEOFFSET(7)) AS stamp UNION ALL SELECT CAST(N'2026-03-15 00:00:00Z' AS DATETIMEOFFSET(7)) UNION ALL SELECT CAST(NULL AS DATETIMEOFFSET(7))) AS valueset
+  expect: {rows: 1, data: [{value: 1}]}
+- name: Offset projection distinct uses canonical UTC keys
+  sql: SELECT COUNT(*) AS value FROM (SELECT DISTINCT stamp FROM (SELECT CAST(N'2026-03-15 01:00:00+01:00' AS DATETIMEOFFSET(7)) AS stamp UNION ALL SELECT CAST(N'2026-03-15 00:00:00Z' AS DATETIMEOFFSET(7))) AS valueset) AS uniquevalues
+  expect: {rows: 1, data: [{value: 1}]}
+- name: Offset UNION distinct shares canonical keys with grouped queries
+  sql: SELECT COUNT(*) AS value FROM (SELECT CAST(N'2026-03-15 01:00:00+01:00' AS DATETIMEOFFSET(7)) AS stamp UNION SELECT CAST(N'2026-03-15 00:00:00Z' AS DATETIMEOFFSET(7))) AS uniquevalues
+  expect: {rows: 1, data: [{value: 1}]}
+- name: Offset partition windows use canonical UTC keys
+  sql: SELECT COUNT(*) OVER (PARTITION BY stamp) AS value FROM (SELECT CAST(N'2026-03-15 01:00:00+01:00' AS DATETIMEOFFSET(7)) AS stamp UNION ALL SELECT CAST(N'2026-03-15 00:00:00Z' AS DATETIMEOFFSET(7))) AS valueset
+  expect: {rows: 2, data: [{value: 2},{value: 2}]}
+
+- name: Wire temporal clock overflow is rejected before target conversion
+  scm: (tsql_convert_parameter '(739689 864000000000 0) '("wire_kind" 42 "scale" 7) '("VARCHAR" 80))
+  expect: {error: true}
+- name: Wire temporal oversized day cannot wrap into a valid Unix range
+  scm: (tsql_convert_parameter '(16777215 0 0) '("wire_kind" 42 "scale" 7) '("DATETIME2" 7))
+  expect: {error: true}
+- name: Wire offset parameter range is frontend validated
+  scm: (tsql_convert_parameter '(739689 0 841) '("wire_kind" 43 "scale" 7) '("VARCHAR" 80))
+  expect: {error: true}
+
+- name: ADD clock backfill preserves the future calculator separately
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_added_clock
+  - sql: CREATE TABLE tsql_added_clock (id INT)
+  - sql: INSERT tsql_added_clock VALUES (1),(2)
+  - sql: ALTER TABLE tsql_added_clock ADD stamp DATETIME2(7) NOT NULL DEFAULT SYSDATETIME()
+  cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_added_clock
+  scm: |
+    (begin
+      (define column (find (get_schema "memcp-tests" "tsql_added_clock") (lambda (column) (equal? (column "Field") "stamp")) nil))
+      (define calculator (column "DefaultCalculator"))
+      (define first (calculator '("utc_ticks" 17672256000000000 "zone_offset_seconds" 0)))
+      (define second (calculator '("utc_ticks" 17672256010000000 "zone_offset_seconds" 0)))
+      (if (and (equal? first 17672256000000000) (equal? second 17672256010000000)) true
+        (error "ADD replaced the future clock calculator with its backfill literal")))
+  expect: {result: true}
+
+- name: Offset UNIQUE rejects equal instants with different stored offsets
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_offset_unique
+  - sql: CREATE TABLE tsql_offset_unique (stamp DATETIMEOFFSET(7) NOT NULL,CONSTRAINT UQ_offset_instant UNIQUE(stamp))
+  - sql: INSERT tsql_offset_unique VALUES (N'2026-03-15 01:00:00+01:00')
+  cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_offset_unique
+  sql: INSERT tsql_offset_unique VALUES (N'2026-03-15 00:00:00Z')
+  expect: {error: true}
+- name: Offset FOREIGN KEY uses canonical instants and keeps cascade payloads
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_offset_child
+  - sql: DROP TABLE IF EXISTS tsql_offset_parent
+  - sql: CREATE TABLE tsql_offset_parent (id INT,stamp DATETIMEOFFSET(7) NOT NULL,CONSTRAINT UQ_offset_parent UNIQUE(stamp))
+  - sql: CREATE TABLE tsql_offset_child (id INT,stamp DATETIMEOFFSET(7),CONSTRAINT FK_offset_instant FOREIGN KEY(stamp) REFERENCES tsql_offset_parent(stamp) ON UPDATE CASCADE)
+  - sql: INSERT tsql_offset_parent VALUES (1,N'2026-03-15 01:00:00+01:00')
+  - sql: INSERT tsql_offset_child VALUES (1,N'2026-03-15 00:00:00Z')
+  - sql: UPDATE tsql_offset_parent SET stamp=N'2026-03-16 02:00:00+02:00' WHERE id=1
+  cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_offset_child
+  - sql: DROP TABLE IF EXISTS tsql_offset_parent
+  sql: SELECT DATEPART(tzoffset,c.stamp) AS offset_minutes FROM tsql_offset_child AS c JOIN tsql_offset_parent AS p ON c.stamp=p.stamp
+  expect: {rows: 1, data: [{offset_minutes: 120}]}
+
+cleanup:
+- sql: DROP TABLE IF EXISTS tsql_clock_defaults
+- sql: DROP TABLE IF EXISTS tsql_temporal_data
+- sql: DROP TABLE tsql_fractional_data

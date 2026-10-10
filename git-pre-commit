@@ -276,6 +276,21 @@ PY
   fi
 done
 
+enable_tds=0
+for tf in "${test_files_arr[@]}"; do
+  if python3 - "$tf" <<'PYCODE'
+import sys, yaml
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    spec = yaml.safe_load(f) or {}
+metadata = spec.get("metadata", {}) if isinstance(spec, dict) else {}
+raise SystemExit(0 if metadata.get("requires_tds") else 1)
+PYCODE
+  then
+    enable_tds=1
+    break
+  fi
+done
+
 # Runner contract:
 # - All suites use one shared data directory so restart/persistence tests see
 #   the same state. The default is a port-scoped temporary store; callers may
@@ -315,6 +330,9 @@ run_memcp_forever() {
     mysql_args=()
     if [ "$enable_mysql" -ne 1 ]; then
       mysql_args+=(--disable-mysql)
+    fi
+    if [ "${enable_tds:-0}" -eq 1 ]; then
+      mysql_args+=(--tsql-port=$((test_port + 2000)))
     fi
     ./memcp --no-repl -data "$test_data_dir" --api-port=$test_port --mysql-port=$((test_port + 1000)) "${mysql_args[@]}" lib/main.scm >> "$memcp_log" 2>&1 &
     memcp_pid=$!

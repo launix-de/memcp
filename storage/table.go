@@ -25,6 +25,7 @@ import "sync"
 import "time"
 import "errors"
 import "unsafe"
+import "slices"
 import "strconv"
 import "strings"
 import "unicode"
@@ -93,7 +94,14 @@ func (estimate *atomicPlannerRowEstimate) UnmarshalJSON(data []byte) error {
 }
 
 type column struct {
-	Name              string
+	Name string
+	// Metadata is frontend-owned durable data; the engine never interprets it.
+	Metadata          scm.Scmer  `json:"metadata,omitempty"`
+	AllocatorMax      uint64     `json:"allocator_max,omitempty"`
+	AllocatorValue    *scm.Scmer `json:"allocator_value,omitempty"`
+	AllocatorEncode   *scm.Scmer `json:"allocator_encode,omitempty"`
+	KeyProjection     *scm.Scmer `json:"key_projection,omitempty"`
+	ValueSanitizer    *scm.Scmer `json:"value_sanitizer,omitempty"`
 	Typ               string
 	Typdimensions     []int     // type dimensions for DECIMAL(10,3) and VARCHAR(5)
 	Computor          scm.Scmer `json:"-"`          // TODO: marshaljson -> serialize
@@ -112,6 +120,9 @@ type column struct {
 	DefaultExpression    string
 	InitialValue         scm.Scmer                      `json:"initial_value,omitempty"`
 	InitialValues        map[string]columnInitialExtent `json:"initial_values,omitempty"`
+	DefaultPresent       bool                           `json:"default_present,omitempty"`
+	DefaultCalculator    *scm.Scmer                     `json:"default_calculator,omitempty"`
+	initialValue         *scm.Scmer                     // invocation-owned ADD initialization value
 	OnUpdate             scm.Scmer
 	AllowNull            bool
 	IsTemp               bool // columns with IsTemp may be removed without consequences
@@ -140,11 +151,42 @@ type column struct {
 	OrcReduceInit     scm.Scmer // initial accumulator value (neutral element)
 }
 
-func (c *column) hasDefault() bool {
-	return !c.Default.IsNil() || c.DefaultExpression != ""
+func (c *column) UnmarshalJSON(data []byte) error {
+	type alias column
+	c.Default, c.Metadata = scm.NewNil(), scm.NewNil()
+	if err := json.Unmarshal(data, (*alias)(c)); err != nil {
+		return err
+	}
+	return nil
 }
 
-func (c *column) defaultValue() scm.Scmer {
+func (t *table) UnmarshalJSON(data []byte) error {
+	type alias table
+	t.Metadata = scm.NewNil()
+	if err := json.Unmarshal(data, (*alias)(t)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func closeColumnRecipe(value scm.Scmer) scm.Scmer {
+	if !value.IsProc() && !value.IsNativeFunc() {
+		panic("column recipe must be a callable value")
+	}
+	return scm.CloseProcedure(value)
+}
+
+func (c *column) hasDefault() bool {
+	return c.DefaultPresent || !c.Default.IsNil() || c.DefaultCalculator != nil || c.DefaultExpression != ""
+}
+
+func (c *column) defaultValue(context scm.Scmer) scm.Scmer {
+	if c.DefaultCalculator != nil {
+		if context.IsNil() {
+			return scm.Apply(*c.DefaultCalculator)
+		}
+		return scm.Apply(*c.DefaultCalculator, context)
+	}
 	if strings.EqualFold(c.DefaultExpression, "CURRENT_TIMESTAMP") {
 		return scm.NewDate(time.Now().Unix())
 	}
@@ -377,8 +419,9 @@ func (m *ShardMode) UnmarshalJSON(data []byte) error {
 }
 
 type uniqueKey struct {
-	Id   string
-	Cols []string
+	Id         string
+	Cols       []string
+	NullsEqual bool `json:",omitempty"`
 }
 
 type uniqueValidationRow struct {
@@ -402,47 +445,55 @@ type foreignKey struct {
 	Cols2      []string
 	Updatemode foreignKeyMode
 	Deletemode foreignKeyMode
+	// Immutable after publication; schema/DDL locks protect constraint changes.
+	Strict bool `json:",omitempty"`
 }
 
 // hasDuplicateUniqueValues validates a proposed UNIQUE key against the current
 // visible table snapshot. CREATE KEY calls this while holding an exclusive
 // table lock, so collecting keys and probing the existing adaptive indexes are
-// one atomic DDL observation. NULL-containing tuples are excluded, matching
-// the insert-time UNIQUE contract which permits multiple SQL NULL values.
-func (t *table) hasDuplicateUniqueValues(cols []string, currentTx *TxContext) bool {
+// one atomic DDL observation. Empty-containing tuples are excluded unless
+// the key explicitly declares equality of empty values, matching inserts.
+func (t *table) hasDuplicateUniqueValues(cols []string, currentTx *TxContext, nullsEqual bool) bool {
 	shards := t.ActiveShards()
 	accessSchema := newExactScanAccessSchema(cols)
+	projection := t.bindConstraintKeys(cols, nullsEqual)
 	rows := make([]uniqueValidationRow, 0, t.CountEstimate())
 
 	for _, shard := range shards {
 		if shard == nil {
 			continue
 		}
-		release := shard.GetRead(currentTx)
-		shard.mu.RLock()
-		limit := shard.main_count + uint32(len(shard.inserts))
-		for recid := uint32(0); recid < limit; recid++ {
-			visible := !shard.deletions.Get(uint(recid))
-			if currentTx != nil && currentTx.Mode == TxACID {
-				visible = currentTx.IsVisible(shard, recid)
-			}
-			if !visible {
-				continue
-			}
-			key := make([]scm.Scmer, len(cols))
-			hasNull := false
-			for i, col := range cols {
-				key[i] = shard.rowValueByRecidLocked(recid, col)
-				if key[i].IsNil() {
-					hasNull = true
+		func() {
+			release := shard.GetRead(currentTx)
+			defer release()
+			shard.mu.RLock()
+			defer shard.mu.RUnlock()
+			limit := shard.main_count + uint32(len(shard.inserts))
+			for recid := uint32(0); recid < limit; recid++ {
+				visible := !shard.deletions.Get(uint(recid))
+				if currentTx != nil && currentTx.Mode == TxACID {
+					visible = currentTx.IsVisible(shard, recid)
+				}
+				if !visible {
+					continue
+				}
+				key := make([]scm.Scmer, len(cols))
+				hasNull := false
+				for i, col := range cols {
+					key[i] = shard.rowValueByRecidLocked(recid, col)
+					if key[i].IsNil() {
+						hasNull = true
+					}
+				}
+				if !hasNull || nullsEqual {
+					if projection != nil {
+						projection.project(key)
+					}
+					rows = append(rows, uniqueValidationRow{shard: shard, recid: recid, key: key})
 				}
 			}
-			if !hasNull {
-				rows = append(rows, uniqueValidationRow{shard: shard, recid: recid, key: key})
-			}
-		}
-		shard.mu.RUnlock()
-		release()
+		}()
 	}
 
 	for _, row := range rows {
@@ -450,7 +501,13 @@ func (t *table) hasDuplicateUniqueValues(cols []string, currentTx *TxContext) bo
 			if shard == nil {
 				continue
 			}
-			recid, present := shard.GetRecordidForUnique(exactScanAccess(accessSchema, row.key), currentTx)
+			var recid uint32
+			var present bool
+			if projection == nil {
+				recid, present = shard.GetRecordidForUnique(exactScanAccess(accessSchema, row.key), currentTx)
+			} else {
+				recid, present = projection.lookup(shard, row.key, currentTx)
+			}
 			if present && (shard != row.shard || recid != row.recid) {
 				return true
 			}
@@ -483,9 +540,11 @@ type table struct {
 	contributionWriters  atomic.Int64
 
 	// Immutable, bounded filter observations, published after complete scans.
-	filterFeedback  atomic.Pointer[tableFilterFeedback]
-	schema          *database
-	Name            string
+	filterFeedback atomic.Pointer[tableFilterFeedback]
+	schema         *database
+	Name           string
+	// Metadata contains opaque frontend-owned durable declarations.
+	Metadata        scm.Scmer `json:"metadata,omitempty"`
 	Columns         []*column
 	Unique          []uniqueKey          // unique keys
 	Foreign         []foreignKey         // foreign keys
@@ -534,7 +593,7 @@ type table struct {
 	tableLockState      atomic.Int64                     // 0 = unlocked, -1 = WRITE, positive = READ count
 	tableLockReadOwners map[*scm.SessionState]uint32     // guarded by tableLockMu
 	_                   [32]byte                         // separate table locks from insert traffic
-	Auto_increment      uint64                           // last assigned/reserved value; the next generated ID is this value plus one
+	Auto_increment      uint64                           // atomic high-water mark; CAS owns batch ranges; JSON decode is private before publication
 	Collation           string
 	Charset             string
 	Comment             string
@@ -651,6 +710,12 @@ type table struct {
 	// Cold decode state, consumed before publication; keep out of hot field groups.
 	RestoredKeyFrequencies *persistedKeyFrequencies `json:"key_frequencies,omitempty"`
 	RestoredFilterFeedback *persistedFilterFeedback `json:"filter_feedback,omitempty"`
+
+	// Identity recovery publishes only process-local completion, never shard
+	// pointers. The once body pins topology and replays every shard before any
+	// generated range can be reserved; state 2 preserves a failed initialization.
+	identityRecoveryOnce  sync.Once
+	identityRecoveryState atomic.Uint32 // 0 pending, 1 complete, 2 failed
 }
 
 var nextPlannerStatsToken atomic.Uint64
@@ -818,11 +883,6 @@ func (t *table) publishSchemaTopology(mode ShardMode, shards []*storageShard, di
 // MarshalJSON reads topology only from an immutable, atomically published
 // generation. Database schema locking keeps the remaining DDL fields stable.
 func (t *table) MarshalJSON() ([]byte, error) {
-	// INSERT reserves generated IDs under this mutex. Schema serialization
-	// snapshots the counter without holding it during persistence.
-	t.mu.Lock()
-	autoIncrement := t.Auto_increment
-	t.mu.Unlock()
 	topology := t.schemaTopology.Load()
 	if topology == nil {
 		active := t.activeTopology()
@@ -875,6 +935,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		Name               string
 		Columns            []persistedColumn
 		DroppedColumns     map[string]bool `json:"dropped_columns"`
+		Metadata           scm.Scmer       `json:"metadata,omitempty"`
 		Unique             []uniqueKey
 		Foreign            []foreignKey
 		Triggers           []TriggerDescription
@@ -896,12 +957,13 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		Name:               t.Name,
 		Columns:            columns,
 		DroppedColumns:     t.DroppedColumns,
+		Metadata:           t.Metadata,
 		Unique:             t.Unique,
 		Foreign:            t.Foreign,
 		Triggers:           t.Triggers,
 		PersistencyMode:    t.PersistencyMode,
 		OnInit:             t.OnInit,
-		AutoIncrement:      autoIncrement,
+		AutoIncrement:      atomic.LoadUint64(&t.Auto_increment),
 		Collation:          t.Collation,
 		Charset:            t.Charset,
 		Comment:            t.Comment,
@@ -1768,9 +1830,10 @@ type tableShowColumnsMetadata struct {
 }
 
 type tableColumnNamesSnapshot struct {
-	declarations []*column // immutable directory; column fields retain existing ownership
-	exact        map[string]string
-	folded       map[string]string
+	declarations   []*column
+	keyProjections map[string]scm.Scmer
+	exact          map[string]string
+	folded         map[string]string
 }
 
 func foldIdentifier(name string) string {
@@ -1869,14 +1932,21 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {
 	exact := make(map[string]string, len(t.Columns))
 	folded := make(map[string]string, len(t.Columns))
+	var projections map[string]scm.Scmer
 	for _, c := range t.Columns {
+		if c.KeyProjection != nil {
+			if projections == nil {
+				projections = make(map[string]scm.Scmer)
+			}
+			projections[c.Name] = *c.KeyProjection
+		}
 		exact[c.Name] = c.Name
 		foldedName := foldIdentifier(c.Name)
 		if _, exists := folded[foldedName]; !exists {
 			folded[foldedName] = c.Name
 		}
 	}
-	return &tableColumnNamesSnapshot{declarations: append([]*column(nil), t.Columns...), exact: exact, folded: folded}
+	return &tableColumnNamesSnapshot{declarations: append([]*column(nil), t.Columns...), keyProjections: projections, exact: exact, folded: folded}
 }
 
 func (t *table) publishColumnNamesSnapshot() *tableColumnNamesSnapshot {
@@ -2044,11 +2114,27 @@ func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint,
 		scm.NewString("Type"), scm.NewString(typ),
 		scm.NewString("Collation"), scm.NewString(c.Collation),
 		scm.NewString("RawType"), scm.NewString(c.Typ),
+		scm.NewString("Metadata"), c.Metadata,
+		scm.NewString("AllocatorMax"), scm.NewInt(int64(c.AllocatorMax)),
 		scm.NewString("Dimensions"), scm.NewSlice(dims),
+		scm.NewString("Computed"), scm.NewBool(!c.Computor.IsNil() || len(c.ComputorInputCols) != 0 || len(c.ComputorDependencies) != 0 || len(c.OrcSortCols) != 0),
 		scm.NewString("Null"), scm.NewBool(c.AllowNull),
 		scm.NewString("Key"), scm.NewString(keyType),
 		scm.NewString("Default"), c.Default,
 		scm.NewString("DefaultExpression"), scm.NewString(c.DefaultExpression),
+		scm.NewString("DefaultPresent"), scm.NewBool(c.hasDefault()),
+		scm.NewString("DefaultCalculator"), func() scm.Scmer {
+			if c.DefaultCalculator != nil {
+				return *c.DefaultCalculator
+			}
+			return scm.NewNil()
+		}(),
+		scm.NewString("ValueSanitizer"), func() scm.Scmer {
+			if c.ValueSanitizer != nil {
+				return *c.ValueSanitizer
+			}
+			return scm.NewNil()
+		}(),
 		scm.NewString("Extra"), scm.NewString(extra),
 		scm.NewString("Privileges"), scm.NewString("select,insert,update,references"),
 		scm.NewString("Comment"), scm.NewString(c.Comment),
@@ -2243,6 +2329,10 @@ func (c *column) UpdateSanitizer() {
 			}
 		}
 	}
+	if c.ValueSanitizer != nil {
+		callback := *c.ValueSanitizer
+		inner = func(v scm.Scmer) scm.Scmer { return scm.Apply(callback, v) }
+	}
 	// wrap with NOT NULL check
 	if !allowNull && inner != nil {
 		base := inner
@@ -2271,6 +2361,53 @@ func (c *column) UpdateSanitizer() {
 
 func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 	switch key {
+	case "options":
+		// Stage every requested value before changing the declaration. In
+		// particular, a malformed calculator must not publish a new default
+		// together with the previous metadata generation.
+		options, ok := scmerSlice(val)
+		if !ok || len(options)%2 != 0 {
+			panic("column options require key/value pairs")
+		}
+		value, present, calculator := c.Default, c.DefaultPresent, c.DefaultCalculator
+		metadata := c.Metadata
+		seen := make(map[string]bool, len(options)/2)
+		defaultChanged := false
+		for i := 0; i < len(options); i += 2 {
+			if !options[i].IsString() {
+				panic("column option key must be a string")
+			}
+			name := options[i].String()
+			if seen[name] {
+				panic("duplicate column option: " + name)
+			}
+			seen[name] = true
+			switch name {
+			case "default", "drop_default", "default_calculator":
+				if defaultChanged {
+					panic("multiple default operations in one declaration")
+				}
+				defaultChanged = true
+				switch name {
+				case "default":
+					value, present, calculator = options[i+1], true, nil
+				case "drop_default":
+					value, present, calculator = scm.NewNil(), false, nil
+				case "default_calculator":
+					closed := closeColumnRecipe(options[i+1])
+					value, present, calculator = scm.NewNil(), true, &closed
+				}
+			case "metadata":
+				metadata = options[i+1]
+			default:
+				panic("unsupported grouped column option: " + name)
+			}
+		}
+		c.Default, c.DefaultPresent, c.DefaultCalculator, c.Metadata = value, present, calculator, metadata
+		if defaultChanged {
+			c.DefaultExpression = ""
+		}
+		return scm.NewBool(true)
 	case "type":
 		c.Typ = scm.String(val)
 		c.UpdateSanitizer()
@@ -2293,12 +2430,45 @@ func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 		panic("invalid dimensions value for alter column")
 	case "default":
 		c.Default = val
+		c.DefaultPresent = true
+		c.DefaultCalculator = nil
 		c.DefaultExpression = ""
 		return c.Default
-	case "default_expression":
-		c.Default = scm.NewNil()
-		c.DefaultExpression = scm.String(val)
-		return scm.NewString(c.DefaultExpression)
+	case "drop_default":
+		c.Default, c.DefaultPresent, c.DefaultCalculator, c.DefaultExpression = scm.NewNil(), false, nil, ""
+		return scm.NewBool(true)
+	case "default_calculator":
+		closed := closeColumnRecipe(val)
+		c.Default, c.DefaultPresent, c.DefaultCalculator, c.DefaultExpression = scm.NewNil(), true, &closed, ""
+		return closed
+	case "metadata":
+		c.Metadata = val
+		return val
+	case "allocator_max":
+		limit := scm.ToInt(val)
+		if limit < 0 {
+			panic("negative allocator bound")
+		}
+		c.AllocatorMax = uint64(limit)
+		return val
+	case "allocator_encode":
+		closed := closeColumnRecipe(val)
+		c.AllocatorEncode = &closed
+		return closed
+	case "allocator_value":
+		closed := closeColumnRecipe(val)
+		c.AllocatorValue = &closed
+		return closed
+	case "value_sanitizer":
+		closed := closeColumnRecipe(val)
+		c.ValueSanitizer = &closed
+		c.UpdateSanitizer()
+		return closed
+	case "key_projection":
+		closed := closeColumnRecipe(val)
+		compileComputedScanIndex(closed, []string{c.Name})
+		c.KeyProjection = &closed
+		return closed
 	case "null":
 		c.AllowNull = scm.ToBool(val)
 		c.UpdateSanitizer()
@@ -2381,11 +2551,13 @@ func validateInsertColumns(columns []string, declarations []*column) {
 // shard locks, retained until the caller attaches the complete declaration,
 // so an overlapping INSERT cannot publish an uninitialized new-column slot.
 // No ordinary reader or INSERT needs to inspect these initialization records.
-func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique bool) (release func()) {
+func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique, nullsEqual bool) (release func()) {
 	value := scm.NewNil()
-	if c.hasDefault() {
-		declared := c.defaultValue()
-		if c.sanitizer != nil {
+	if c.initialValue != nil && fillExisting {
+		value = *c.initialValue
+	} else if c.hasDefault() && c.DefaultCalculator == nil {
+		declared := c.defaultValue(scm.NewNil())
+		if c.sanitizer != nil && (!declared.IsNil() || c.AllowNull) {
 			declared = c.sanitizer(declared)
 		}
 		if c.DefaultExpression == "" {
@@ -2440,6 +2612,9 @@ func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique bool)
 		shard.mu.Lock()
 		locked++
 		rows := uint64(shard.main_count) + uint64(len(shard.inserts))
+		if fillExisting && c.DefaultCalculator != nil && c.initialValue == nil && rows != 0 {
+			panic("calculator backfill requires an explicit initial value")
+		}
 		if deleted := uint64(shard.deletions.Count()); authoritative[shard] && rows > deleted {
 			visibleRows += rows - deleted
 		}
@@ -2447,7 +2622,7 @@ func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique bool)
 			panic("column " + c.Name + " cannot be NULL for existing rows")
 		}
 	}
-	if unique && !value.IsNil() && visibleRows > 1 {
+	if unique && (!value.IsNil() || nullsEqual) && visibleRows > 1 {
 		panic("new unique column has duplicate values in existing rows")
 	}
 	// Allocate complete delta replacements before changing any shared state.
@@ -2481,6 +2656,7 @@ func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique bool)
 		c.InitialValue = value
 		c.InitialValues = initial
 	}
+	c.initialValue = nil
 	for i, shard := range shards {
 		if positions[i] == -1 {
 			shard.columns[c.Name] = new(StorageSparse)
@@ -2507,6 +2683,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 	var c column
 	var uniqueKeys []uniqueKey
 	fillExisting := true
+	keyNullsEqual := false
 	c.Name = name
 	c.Typ = typ
 	c.Typdimensions = typdimensions
@@ -2515,22 +2692,56 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 	for i := 0; i < len(extrainfo); i += 2 {
 		key := scm.String(extrainfo[i])
 		switch key {
+		case "key_nulls_equal":
+			keyNullsEqual = scm.ToBool(extrainfo[i+1])
 		case "primary":
 			// append unique key
-			uniqueKeys = append(uniqueKeys, uniqueKey{"PRIMARY", []string{name}})
+			uniqueKeys = append(uniqueKeys, uniqueKey{Id: "PRIMARY", Cols: []string{name}})
 		case "unique":
 			// append unique key
-			uniqueKeys = append(uniqueKeys, uniqueKey{name, []string{name}})
+			uniqueKeys = append(uniqueKeys, uniqueKey{Id: name, Cols: []string{name}})
+		case "schema_publication":
+			// Validated and published by the containing DDL boundary.
 		case "fill_existing":
 			fillExisting = scm.ToBool(extrainfo[i+1])
+		case "initial_value":
+			value := extrainfo[i+1]
+			c.initialValue = &value
 		case "auto_increment":
 			c.AutoIncrement = scm.ToBool(extrainfo[i+1])
 		case "null":
 			c.AllowNull = scm.ToBool(extrainfo[i+1])
 		case "default":
 			c.Default = extrainfo[i+1]
+			c.DefaultPresent = true
 		case "default_expression":
 			c.DefaultExpression = scm.String(extrainfo[i+1])
+		case "default_calculator":
+			closed := closeColumnRecipe(extrainfo[i+1])
+			c.DefaultCalculator, c.DefaultPresent = &closed, true
+		case "key_projection":
+			closed := closeColumnRecipe(extrainfo[i+1])
+			// Shared computed indexes accept only pure row-local procedures.
+			// Validate at declaration publication, before any row can use it.
+			compileComputedScanIndex(closed, []string{name})
+			c.KeyProjection = &closed
+		case "value_sanitizer":
+			closed := closeColumnRecipe(extrainfo[i+1])
+			c.ValueSanitizer = &closed
+		case "allocator_encode":
+			closed := closeColumnRecipe(extrainfo[i+1])
+			c.AllocatorEncode = &closed
+		case "allocator_value":
+			closed := closeColumnRecipe(extrainfo[i+1])
+			c.AllocatorValue = &closed
+		case "allocator_max":
+			limit := scm.ToInt(extrainfo[i+1])
+			if limit < 0 {
+				panic("negative allocator bound")
+			}
+			c.AllocatorMax = uint64(limit)
+		case "metadata":
+			c.Metadata = extrainfo[i+1]
 		case "update":
 			c.OnUpdate = extrainfo[i+1]
 		case "comment":
@@ -2547,10 +2758,13 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			panic("unknown column attribute: " + key)
 		}
 	}
+	for i := range uniqueKeys {
+		uniqueKeys[i].NullsEqual = keyNullsEqual
+	}
 	c.UpdateSanitizer()
-	if !initializeExisting && !c.IsTemp && c.hasDefault() {
-		declared := c.defaultValue()
-		if c.sanitizer != nil {
+	if !initializeExisting && !c.IsTemp && c.hasDefault() && c.DefaultCalculator == nil {
+		declared := c.defaultValue(scm.NewNil())
+		if c.sanitizer != nil && (!declared.IsNil() || c.AllowNull) {
 			declared = c.sanitizer(declared)
 		}
 		if c.DefaultExpression == "" {
@@ -2559,7 +2773,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 	}
 	cp := &c
 	if initializeExisting && !c.IsTemp && !c.AutoIncrement {
-		release := t.initializeColumnRowsLocked(cp, fillExisting, len(uniqueKeys) != 0)
+		release := t.initializeColumnRowsLocked(cp, fillExisting, len(uniqueKeys) != 0, keyNullsEqual)
 		defer release()
 		if len(uniqueKeys) != 0 {
 			t.Unique = append(t.Unique, uniqueKeys...)
@@ -2677,6 +2891,8 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 			fillExisting = scm.ToBool(extrainfo[i+1])
 		case "default":
 			valueDefault = !extrainfo[i+1].IsNil()
+		case "default_calculator", "initial_value":
+			valueDefault = true
 		case "default_expression":
 			expressionDefault = scm.String(extrainfo[i+1]) != ""
 		}
@@ -2711,6 +2927,15 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 			t.schema.schemalock.Unlock()
 		}
 	}()
+	publication := scm.NewNil()
+	for i := 0; i+1 < len(extrainfo); i += 2 {
+		if scm.String(extrainfo[i]) == "schema_publication" {
+			publication = extrainfo[i+1]
+		}
+	}
+	if err := t.schema.checkMetadataPublicationLocked(publication); err != nil {
+		panic(err)
+	}
 	for _, c := range t.Columns {
 		if c.Name == name {
 			if c.IsTemp {
@@ -2745,6 +2970,7 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 	if cp.IsTemp {
 		mode = schemaSaveBuffered
 	}
+	t.schema.applyMetadataPublicationLocked(publication)
 	metadataLocked = false // finishSchemaMutationLocked always releases ownership.
 	t.finishSchemaMutationLocked(mode)
 	if cp.IsTemp {
@@ -2759,8 +2985,19 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 	return t.createColumnDDLLocked(name, typ, typdimensions, extrainfo, nil)
 }
 
-func (t *table) dropColumnDDLLocked(name string) bool {
+func (t *table) dropColumnDDLLocked(name string, publication scm.Scmer) bool {
 	t.schema.schemalock.Lock()
+	if err := t.schema.checkMetadataPublicationLocked(publication); err != nil {
+		t.schema.schemalock.Unlock()
+		panic(err)
+	}
+
+	for _, fk := range t.Foreign {
+		if fk.Strict && ((fk.Tbl1 == t.Name && slices.Contains(fk.Cols1, name)) || (fk.Tbl2 == t.Name && slices.Contains(fk.Cols2, name))) {
+			t.schema.schemalock.Unlock()
+			panic("drop the foreign key constraint before dropping a referenced column")
+		}
+	}
 	var removedCol *column
 	for i, c := range t.Columns {
 		if c.Name == name {
@@ -2768,8 +3005,21 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 			if t.DroppedColumns != nil && !c.IsTemp {
 				t.DroppedColumns[name] = true
 			}
-			// found the column
+			// Column-owned trigger dependencies are same-table metadata. Explicit
+			// DROP removes them with the column before the durable schema capture.
+			t.mu.Lock()
+			kept := t.Triggers[:0]
+			for _, trigger := range t.Triggers {
+				if trigger.OwnerColumn != name {
+					kept = append(kept, trigger)
+				}
+			}
+			for j := len(kept); j < len(t.Triggers); j++ {
+				t.Triggers[j] = TriggerDescription{}
+			}
+			t.Triggers = kept
 			t.Columns = append(t.Columns[:i], t.Columns[i+1:]...) // remove from slice
+			t.mu.Unlock()
 			for _, s := range t.Shards {
 				s.mu.Lock()
 				delete(s.columns, name)
@@ -2788,6 +3038,7 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 			} else {
 				t.publishShowColumnsSnapshot()
 			}
+			t.schema.applyMetadataPublicationLocked(publication)
 			t.finishSchemaMutationLocked(t.schemaSaveMode())
 			// Fire lifecycle hooks after unlock so dependents (e.g. prejoin caches)
 			// can invalidate without lock-ordering cycles.
@@ -2807,13 +3058,13 @@ func (t *table) DropColumn(name string) bool {
 	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
-	return t.dropColumnDDLLocked(name)
+	return t.dropColumnDDLLocked(name, scm.NewNil())
 }
 
 func (t *table) dropColumnForMigration(name string) bool {
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
-	return t.dropColumnDDLLocked(name)
+	return t.dropColumnDDLLocked(name, scm.NewNil())
 }
 
 func (t *table) DropColumnIfExists(name string) bool {
@@ -2944,11 +3195,16 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 	t.collectStatistics()
 }
 
-func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64), currentTxArgs ...*TxContext) int {
+func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onInsertID func(first, last int64), options ...InsertOptions) int {
 	var currentTx *TxContext
-	if len(currentTxArgs) > 0 {
-		currentTx = currentTxArgs[0]
+	calculatorContext := scm.NewNil()
+	if len(options) > 0 {
+		currentTx = options[0].Tx
+		if options[0].CalculatorContext != nil {
+			calculatorContext = *options[0].CalculatorContext
+		}
 	}
+	t.prepareIdentityRecovery()
 	result := 0
 	inserted := 0
 	isIgnore := !onCollision.IsNil() // INSERT IGNORE or ON DUPLICATE KEY UPDATE
@@ -2962,6 +3218,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	}
 	validateInsertColumns(columns, validatedSchema.declarations)
 
+	columns, values = t.assignInsertDefaults(columns, values, calculatorContext)
 	t.beginContributionMutation()
 	defer t.endContributionMutation()
 
@@ -3041,46 +3298,48 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				repartitioned = true
 				break
 			}
-			release := shard.GetExclusive()
+			func() {
+				release := shard.GetExclusive()
+				defer release()
 
-			// check unique constraints in a thread safe manner
-			if len(t.Unique) > 0 {
-				t.ProcessUniqueCollision(columns, chunk, mergeNull, func(chunk [][]scm.Scmer) {
-					shard.Insert(columns, chunk, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
-					result += len(chunk)
-					inserted += len(chunk)
-				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
-					if !onCollision.IsNil() {
-						// Evaluate onCollision and add to affected rows per MySQL semantics
-						// - inserted rows already counted above
-						// - on duplicate: count 2 if changed, 1 if no-op
-						ret := scm.Apply(onCollision, data...)
-						switch {
-						case ret.IsBool():
-							if ret.Bool() {
-								result += 2
-							} else {
+				// check unique constraints in a thread safe manner
+				if len(t.Unique) > 0 {
+					t.ProcessUniqueCollision(columns, chunk, mergeNull, func(chunk [][]scm.Scmer) {
+						shard.Insert(columns, chunk, false, validatedSchema, onInsertID, isIgnore, currentTx)
+						result += len(chunk)
+						inserted += len(chunk)
+					}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
+						if !onCollision.IsNil() {
+							// Evaluate onCollision and add to affected rows per MySQL semantics
+							// - inserted rows already counted above
+							// - on duplicate: count 2 if changed, 1 if no-op
+							ret := scm.Apply(onCollision, data...)
+							switch {
+							case ret.IsBool():
+								if ret.Bool() {
+									result += 2
+								} else {
+									result++
+								}
+							case ret.IsInt():
+								result += int(ret.Int())
+							case ret.IsFloat():
+								result += int(ret.Float())
+							default:
+								// Fallback: consider as one affected row
 								result++
 							}
-						case ret.IsInt():
-							result += int(ret.Int())
-						case ret.IsFloat():
-							result += int(ret.Float())
-						default:
-							// Fallback: consider as one affected row
-							result++
+						} else {
+							panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
 						}
-					} else {
-						panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
-					}
-				}, 0, currentTx)
-			} else {
-				// physically insert (no unique constraints)
-				shard.Insert(columns, chunk, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
-				result += len(chunk)
-				inserted += len(chunk)
-			}
-			release()
+					}, 0, currentTx)
+				} else {
+					// physically insert (no unique constraints)
+					shard.Insert(columns, chunk, false, validatedSchema, onInsertID, isIgnore, currentTx)
+					result += len(chunk)
+					inserted += len(chunk)
+				}
+			}()
 		}
 		if !repartitioned {
 			goto insertDone
@@ -3108,7 +3367,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			defaultValue := scm.NewNil()
 			for _, col := range t.columnDeclarations() {
 				if cd.Column == col.Name {
-					defaultValue = col.defaultValue()
+					defaultValue = col.defaultValue(calculatorContext)
 					if col.AutoIncrement {
 						// Generated AUTO_INCREMENT values are monotonically above the
 						// values from which the immutable range pivots were derived.
@@ -3130,7 +3389,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				// this function will do the locking for us
 				t.ProcessUniqueCollision(columns, values, mergeNull, func(values [][]scm.Scmer) {
 					// physically insert
-					s.Insert(columns, values, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
+					s.Insert(columns, values, false, validatedSchema, onInsertID, isIgnore, currentTx)
 					result += len(values)
 					inserted += len(values)
 				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
@@ -3157,7 +3416,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				}, 0, currentTx)
 			} else {
 				// physically insert (parallel)
-				s.Insert(columns, values, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
+				s.Insert(columns, values, false, validatedSchema, onInsertID, isIgnore, currentTx)
 				result += len(values)
 				inserted += len(values)
 			}
@@ -3387,7 +3646,13 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 	}
 	uniq := t.Unique[idx]
 	accessSchema := newExactScanAccessSchema(uniq.Cols)
-	t.AddPartitioningScore(uniq.Cols) // increases partitioning score, so partitioning is improved
+	projection := t.bindConstraintKeys(uniq.Cols, uniq.NullsEqual)
+	keyMergeNull := mergeNull || uniq.NullsEqual
+	if projection == nil {
+		// Raw shard routing cannot prune canonical or empty-equal keys, so
+		// these declarations must not score raw columns for repartitioning.
+		t.AddPartitioningScore(uniq.Cols)
+	}
 	{
 		key := make([]scm.Scmer, len(uniq.Cols))
 		keyIdx := make([]int, len(uniq.Cols))
@@ -3412,7 +3677,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 		// These arrays are indexed by partition dimension, not unique-key column.
 		pruningMap := make([]int, len(t.PDimensions))
 		pruningVals := make([]scm.Scmer, len(t.PDimensions))
-		if t.ShardMode == ShardModePartition && t.maintenanceKind != 2 {
+		if t.ShardMode == ShardModePartition && t.maintenanceKind != 2 && projection == nil {
 			// partitioning
 			allowPruning = true
 			for j, dim := range t.PDimensions {
@@ -3467,12 +3732,15 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 				} else {
 					key[i] = row[colidx]
 				}
-				if !mergeNull && key[i].IsNil() {
+				if !keyMergeNull && key[i].IsNil() {
 					skipUniqueCheck = true
 				}
 			}
 			if skipUniqueCheck {
 				goto nextrow
+			}
+			if projection != nil {
+				projection.project(key)
 			}
 			if allowPruning {
 				for j, xidx := range pruningMap {
@@ -3490,7 +3758,21 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 			for _, s := range shardlist2 {
 				// ensure shard is loaded for read during unique check
 				r := s.GetRead(currentTx)
-				uid, present := s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx)
+				var uid uint32
+				var present bool
+				if projection == nil {
+					uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx)
+				} else {
+					func() {
+						defer func() {
+							if failure := recover(); failure != nil {
+								r()
+								panic(failure)
+							}
+						}()
+						uid, present = projection.lookup(s, key, currentTx)
+					}()
+				}
 				if present {
 					// found a unique collision
 					if j != last_j {

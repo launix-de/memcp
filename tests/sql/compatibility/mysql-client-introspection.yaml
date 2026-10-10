@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "SHOW ENGINES/CHARSET/COLLATION/VARIABLES; @@GLOBAL vars"
+  requires_mysql: true
 
 setup: []
 

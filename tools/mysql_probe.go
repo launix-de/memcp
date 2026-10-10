@@ -22,22 +22,27 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 
+	tdsdriver "github.com/denisenkom/go-mssqldb"
 	_ "github.com/go-sql-driver/mysql"
 	mysqlstack "github.com/launix-de/go-mysqlstack/driver"
 	"github.com/launix-de/go-mysqlstack/sqlparser/depends/sqltypes"
 )
 
 type probe struct {
-	Host       string      `json:"host"`
-	Port       int         `json:"port"`
-	Database   string      `json:"database"`
-	Username   string      `json:"username"`
-	Password   string      `json:"password"`
-	Statements []statement `json:"statements"`
+	Protocol         string      `json:"protocol"`
+	ExpectLoginError bool        `json:"expect_login_error"`
+	Host             string      `json:"host"`
+	Port             int         `json:"port"`
+	Database         string      `json:"database"`
+	Username         string      `json:"username"`
+	Password         string      `json:"password"`
+	Statements       []statement `json:"statements"`
 }
 
 type statement struct {
@@ -47,8 +52,10 @@ type statement struct {
 }
 
 type parameter struct {
-	Base64    string `json:"base64"`
-	MySQLType string `json:"mysql_type"`
+	Name      string          `json:"name"`
+	Value     json.RawMessage `json:"value"`
+	Base64    string          `json:"base64"`
+	MySQLType string          `json:"mysql_type"`
 }
 
 type expectation struct {
@@ -68,17 +75,42 @@ func main() {
 		fail("read config: %v", err)
 	}
 	var cfg probe
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&cfg); err != nil {
 		fail("parse config: %v", err)
 	}
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&multiStatements=false",
-		cfg.Username, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		fail("open mysql connection: %v", err)
+	var db *sql.DB
+	protocol := "mysql"
+	if cfg.Protocol == "tds" {
+		protocol = "tds"
+		// Brace-quoted ODBC values preserve delimiters and whitespace in credentials.
+		quote := func(value string) string { return "{" + strings.ReplaceAll(value, "}", "}}") + "}" }
+		dsn := fmt.Sprintf("odbc:server=%s;port=%d;user id=%s;password=%s;database=%s;encrypt=disable;connection timeout=10",
+			quote(cfg.Host), cfg.Port, quote(cfg.Username), quote(cfg.Password), quote(cfg.Database))
+		connector, err := tdsdriver.NewConnector(dsn)
+		if err != nil {
+			fail("open TDS connection: %v", err)
+		}
+		db = sql.OpenDB(connector)
+	} else {
+		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&multiStatements=false",
+			cfg.Username, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
+		db, err = sql.Open("mysql", dsn)
+		if err != nil {
+			fail("open mysql connection: %v", err)
+		}
 	}
 	defer db.Close()
 	conn, err := db.Conn(context.Background())
+	if cfg.ExpectLoginError {
+		if err == nil {
+			conn.Close()
+			fail("expected login denial, got success")
+		}
+		fmt.Println("login denial probe passed")
+		return
+	}
 	if err != nil {
 		fail("pin mysql connection: %v", err)
 	}
@@ -88,13 +120,32 @@ func main() {
 			fail("statement %d failed: %v\nsql: %s", i+1, err, stmt.SQL)
 		}
 	}
-	fmt.Println("mysql probe passed")
+	fmt.Printf("%s probe passed\n", protocol)
 }
 
 func runStatement(conn *sql.Conn, cfg probe, stmt statement) error {
 	args := make([]any, len(stmt.Parameters))
 	typed := false
 	for i, param := range stmt.Parameters {
+		if cfg.Protocol == "tds" {
+			decoder := json.NewDecoder(strings.NewReader(string(param.Value)))
+			decoder.UseNumber()
+			var value any
+			if err := decoder.Decode(&value); err != nil {
+				return fmt.Errorf("decode TDS parameter: %w", err)
+			}
+			if number, ok := value.(json.Number); ok {
+				if integer, err := strconv.ParseInt(string(number), 10, 64); err == nil {
+					value = integer
+				} else if real, err := strconv.ParseFloat(string(number), 64); err == nil {
+					value = real
+				} else {
+					return fmt.Errorf("invalid parameter number %q", number)
+				}
+			}
+			args[i] = sql.Named(param.Name, value)
+			continue
+		}
 		value, err := base64.StdEncoding.DecodeString(param.Base64)
 		if err != nil {
 			return fmt.Errorf("decode parameter %d: %w", i+1, err)
@@ -148,7 +199,16 @@ func runStatement(conn *sql.Conn, cfg probe, stmt statement) error {
 			return fmt.Errorf("missing expected row %d", rowIdx)
 		}
 		for key, want := range expected {
-			if fmt.Sprint(got[rowIdx][key]) != fmt.Sprint(want) {
+			if _, present := got[rowIdx][key]; !present {
+				return fmt.Errorf("missing field %s", key)
+			}
+			equal := fmt.Sprint(got[rowIdx][key]) == fmt.Sprint(want)
+			if number, ok := want.(json.Number); ok {
+				actual, actualOK := new(big.Rat).SetString(fmt.Sprint(got[rowIdx][key]))
+				expected, expectedOK := new(big.Rat).SetString(string(number))
+				equal = actualOK && expectedOK && actual.Cmp(expected) == 0
+			}
+			if !equal {
 				return fmt.Errorf("row %d field %s = %v, want %v", rowIdx, key, got[rowIdx][key], want)
 			}
 		}

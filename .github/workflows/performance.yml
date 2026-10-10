@@ -35,9 +35,9 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
-    # Cold toolchain builds have their own allowance. Measurement is capped
-    # separately at 15 minutes; a timed-out shard cannot pass the aggregate.
-    timeout-minutes: 30
+    # Keep the fixed seven-pair verification bounded while allowing complete
+    # navigation workloads and preserving time to upload diagnostic artifacts.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -85,7 +85,7 @@ jobs:
           (cd candidate && go build -trimpath -buildvcs=false -o memcp)
 
       - name: Measure base and candidate with the SQL test runner
-        timeout-minutes: 15
+        timeout-minutes: 35
         shell: bash
         run: |
           # The candidate runner defines the A/B protocol under review (including
@@ -101,7 +101,9 @@ jobs:
           # The reviewed runner measures old then new on independent
           # fixtures. Only suspect timings get fixed old/new verification pairs,
           # after the complete initial pass; original samples stay included.
+          # Temporary diagnosis: retain GC events in both roles' existing server logs.
           (cd candidate && env \
+            GODEBUG=gctrace=1 \
             PERF_BASELINE_FILE="$baseline" \
             PERF_BASELINE_SEED="$seed" \
             PERF_REPEAT=1000 \

@@ -1,0 +1,109 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Frontend-declared generated tokens use ordinary write hooks across dialects
+  syntax: tsql
+setup:
+- sql: DROP TABLE IF EXISTS dbo.tsql_frontend_versions
+- sql: CREATE TABLE dbo.tsql_frontend_versions (id INT PRIMARY KEY,val INT,rv ROWVERSION NOT NULL)
+test_cases:
+- name: Other dialects insert distinct generated tokens into an activated table
+  scm: |
+    (begin
+      (define s (newsession))
+      (s "schema" "memcp-tests")
+      (define execute (lambda (parser text) (begin
+        (define output (newsession))
+        (with_autocommit s nil nil text (lambda (tx)
+          (sql_execute_formula s tx
+            (sql_queryplan_compile_formula tx (parser "memcp-tests" text nil s tx))
+            (lambda (row) (output "row" row)) (lambda fields true))))
+        (output "row"))))
+      (execute parse_sql "INSERT INTO tsql_frontend_versions(id,val) VALUES(1,10),(2,20)")
+      (execute parse_psql "INSERT INTO tsql_frontend_versions(id,val) VALUES(3,30)")
+      (define first (execute parse_tsql "SELECT rv FROM dbo.tsql_frontend_versions WHERE id=1"))
+      (define second (execute parse_tsql "SELECT rv FROM dbo.tsql_frontend_versions WHERE id=2"))
+      (define third (execute parse_tsql "SELECT rv FROM dbo.tsql_frontend_versions WHERE id=3"))
+      (if (and (equal? (strlen (first "rv")) 8) (equal? (strlen (second "rv")) 8)
+          (equal? (strlen (third "rv")) 8)
+          (not (equal? (bin2hex (first "rv")) (bin2hex (second "rv"))))
+          (not (equal? (bin2hex (first "rv")) (bin2hex (third "rv"))))
+          (not (equal? (bin2hex (second "rv")) (bin2hex (third "rv")))))
+        true (error "cross-dialect INSERT did not generate distinct eight-byte tokens"))))
+- name: No-op updates through both other dialects generate a new token
+  scm: |
+    (begin
+      (define s (newsession))
+      (s "schema" "memcp-tests")
+      (define execute (lambda (parser text) (begin
+        (define output (newsession))
+        (with_autocommit s nil nil text (lambda (tx)
+          (sql_execute_formula s tx
+            (sql_queryplan_compile_formula tx (parser "memcp-tests" text nil s tx))
+            (lambda (row) (output "row" row)) (lambda fields true))))
+        (output "row"))))
+      (define before (execute parse_tsql "SELECT rv,val FROM dbo.tsql_frontend_versions WHERE id=1"))
+      (execute parse_sql "UPDATE tsql_frontend_versions SET val=val WHERE id=1")
+      (define middle (execute parse_tsql "SELECT rv,val FROM dbo.tsql_frontend_versions WHERE id=1"))
+      (execute parse_psql "UPDATE tsql_frontend_versions SET val=val WHERE id=1")
+      (define after (execute parse_tsql "SELECT rv,val FROM dbo.tsql_frontend_versions WHERE id=1"))
+      (if (and (equal? (before "val") 10) (equal? (middle "val") 10) (equal? (after "val") 10)
+          (not (equal? (bin2hex (before "rv")) (bin2hex (middle "rv"))))
+          (not (equal? (bin2hex (middle "rv")) (bin2hex (after "rv")))))
+        true (error "cross-dialect no-op UPDATE did not advance the generated token"))))
+- name: Ordinary binary columns retain explicit values across dialects
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_frontend_plain_binary
+  - sql: CREATE TABLE dbo.tsql_frontend_plain_binary (id INT PRIMARY KEY,val BINARY(8))
+  - sql: INSERT dbo.tsql_frontend_plain_binary VALUES (1,0x4142434445464748)
+  syntax: postgresql
+  sql: UPDATE tsql_frontend_plain_binary SET val=val WHERE id=1
+  expect: {rows: 1, data: [{affected_rows: 0}]}
+- name: Binary value without activation remains unchanged
+  sql: SELECT id FROM dbo.tsql_frontend_plain_binary WHERE val=0x4142434445464748
+  expect: {rows: 1, data: [{id: 1}]}
+- name: Explicit generated token remains forbidden through another dialect
+  syntax: mysql
+  sql: INSERT INTO tsql_frontend_versions(id,val,rv) VALUES(4,40,'explicit')
+  expect: {error: true}
+- name: Rejected generated token insert leaves the activated table unchanged
+  sql: SELECT COUNT(*) AS count FROM dbo.tsql_frontend_versions
+  expect: {rows: 1, data: [{count: 3}]}
+- name: Generated token metadata hides any internal constant default
+  scm: |
+    (begin
+      (define s (newsession))
+      (s "schema" "memcp-tests")
+      (s "username" "root")
+      (define columns (tsql_metadata_rpc "memcp-tests" "sp_columns"
+        '("table_name" "tsql_frontend_versions" "column_name" "rv") s))
+      (define row (car (columns "rows")))
+      (define fields (tds_describe "memcp-tests" "SELECT TOP (0) rv FROM dbo.tsql_frontend_versions" "" s))
+      (if (and (equal? (count (columns "rows")) 1) (nil? (row "COLUMN_DEF"))
+          (equal? (row "LENGTH") 8) ((car fields) "rowversion")
+          (not ((car fields) "updatable"))) true
+        (error "generated token exposed an ordinary default or writable field"))))
+- name: Dropping a generated column permits ordinary subsequent inserts
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_frontend_drop_versions
+  - sql: CREATE TABLE dbo.tsql_frontend_drop_versions (id INT PRIMARY KEY,val INT,rv ROWVERSION NOT NULL)
+  - sql: INSERT dbo.tsql_frontend_drop_versions(id,val) VALUES(1,10)
+  - sql: ALTER TABLE dbo.tsql_frontend_drop_versions DROP COLUMN rv
+  syntax: mysql
+  sql: INSERT INTO tsql_frontend_drop_versions(id,val) VALUES(2,20)
+  expect: {rows: 1, data: [{affected_rows: 1}]}
+- name: Dropped generated column leaves ordinary no-op update semantics
+  syntax: postgresql
+  sql: UPDATE tsql_frontend_drop_versions SET val=val WHERE id=1
+  expect: {rows: 1, data: [{affected_rows: 0}]}
+- name: Dropping a generated column removes its metadata
+  scm: |
+    (begin
+      (define columns (get_schema "memcp-tests" "tsql_frontend_drop_versions"))
+      (if (and (equal? (count columns) 2)
+          (nil? (find columns (lambda (column) (equal? (column "Field") "rv")) nil)))
+        true (error "dropped generated column remains in metadata"))))
+cleanup:
+- sql: DROP TABLE IF EXISTS dbo.tsql_frontend_versions
+- sql: DROP TABLE IF EXISTS dbo.tsql_frontend_plain_binary
+- sql: DROP TABLE IF EXISTS dbo.tsql_frontend_drop_versions

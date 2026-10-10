@@ -775,6 +775,7 @@ class SQLTestRunner:
         self._perf_round_failed = None
         self._perf_round_count = 0
         self._perf_setup_semaphore = None
+        self._perf_setup_quiescence_failed = threading.Event()
 
     def set_restart_handler(self, fn):
         """Install a restart handler callable that restarts MemCP (returns True on success)."""
@@ -984,7 +985,7 @@ class SQLTestRunner:
                     if resp and resp.status_code == 200:
                         parts.append(f"[SQL] {step['sql'][:80]}\n       → {resp.text.strip()[:500]}")
                 elif "scm" in step:
-                    resp = requests.post(f"{self.base_url}/scm", data=step["scm"], headers=self.auth_header, timeout=5)
+                    resp = requests.post(f"{self.base_url}/scm", data=step["scm"].encode("utf-8"), headers=self.auth_header, timeout=5)
                     if resp and resp.status_code == 200:
                         parts.append(f"[SCM] {step['scm'][:80]}\n       → {resp.text.strip()[:500]}")
                 elif "psql" in step:
@@ -995,11 +996,13 @@ class SQLTestRunner:
                 parts.append(f"[DIAG ERROR] {e}")
         return "\n    ".join(parts) if parts else None
 
-    def execute_mysql_probe(self, database: str, probe: Dict[str, Any]) -> Tuple[bool, str]:
-        mysql_port = int(probe.get("port") or self.suite_metadata.get("mysql_port") or (int(self.base_url.rsplit(":", 1)[1]) + 1000))
+    def execute_protocol_probe(self, database: str, probe: Dict[str, Any], protocol: str) -> Tuple[bool, str]:
+        protocol_port = int(probe.get("port") or self.suite_metadata.get(f"{protocol}_port") or (int(self.base_url.rsplit(":", 1)[1]) + (2000 if protocol == "tds" else 1000)))
         payload = {
             "host": probe.get("host", "127.0.0.1"),
-            "port": mysql_port,
+            "port": protocol_port,
+            "protocol": protocol,
+            "expect_login_error": probe.get("expect_login_error", False),
             "database": probe.get("database", database),
             "username": probe.get("username", self.username),
             "password": probe.get("password", self.password),
@@ -1035,11 +1038,11 @@ class SQLTestRunner:
         try:
             url = f"{self.base_url}/sql/system"
             create_db_sql = f"CREATE DATABASE IF NOT EXISTS {self._quote_ident(database)}"
-            requests.post(url, data=create_db_sql, headers=self.auth_header, timeout=10)
+            requests.post(url, data=create_db_sql.encode("utf-8"), headers=self.auth_header, timeout=10)
             # verify availability with a lightweight call
             check_url = f"{self.base_url}/sql/{quote(database, safe='')}"
             for _ in range(3):
-                resp = requests.post(check_url, data="SHOW TABLES", headers=self.auth_header, timeout=10)
+                resp = requests.post(check_url, data=b"SHOW TABLES", headers=self.auth_header, timeout=10)
                 if resp is not None and "database" not in resp.text.lower():
                     self._ensured_dbs.add(database)
                     break
@@ -1053,7 +1056,7 @@ class SQLTestRunner:
         self.ensure_database(database)
         encoded_db = quote(database, safe='')
         normalized = self._normalize_syntax(syntax)
-        route = "psql" if normalized == "postgresql" else "sql"
+        route = {"postgresql": "psql", "tsql": "tsql"}.get(normalized, "sql")
         url = f"{self.base_url}/{route}/{encoded_db}"
         # Append positional params as v1=, v2=, ... query string
         if params:
@@ -1093,6 +1096,8 @@ class SQLTestRunner:
             return None
         if syntax_lower in ["postgres", "postgresql", "psql"]:
             return "postgresql"
+        if syntax_lower in ["tsql", "t-sql", "tds"]:
+            return "tsql"
         return syntax_lower
 
     def execute_sparql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, timeout: int = 10) -> Optional[requests.Response]:
@@ -1115,7 +1120,7 @@ class SQLTestRunner:
         try:
             self.ensure_database(database)
             url = f"{self.base_url}/rdf/{quote(database, safe='')}/load_ttl"
-            response = requests.post(url, data=ttl_data, headers=self.auth_header, timeout=10)
+            response = requests.post(url, data=ttl_data.encode("utf-8"), headers=self.auth_header, timeout=10)
             return response is not None and response.status_code == 200
         except Exception as e:
             print(f"Error loading TTL data: {e}")
@@ -1357,6 +1362,12 @@ class SQLTestRunner:
                 self.test_count -= 1  # don't count skipped perf tests
                 return True
 
+            if self._perf_setup_quiescence_failed.is_set():
+                return self._record_fail(
+                    name, "Earlier fixture preparation did not quiesce",
+                    None, None, None, False,
+                )
+
         # session_id must be resolved before setup steps so setup runs in the same session
         session_id = test_case.get("session_id")
 
@@ -1436,7 +1447,7 @@ class SQLTestRunner:
                         try:
                             with performance_server_gate():
                                 resp = requests.post(
-                                    url, data=scm, headers=self.auth_header,
+                                    url, data=scm.encode("utf-8"), headers=self.auth_header,
                                     timeout=(max(1, min(600, math.ceil(setup_remaining)))
                                              if PERF_TEST_ENABLED else 600),
                                 )
@@ -1470,7 +1481,19 @@ class SQLTestRunner:
                 return self._record_fail(
                     name,
                     f"Fixture preparation did not quiesce within {PERF_SETUP_MAX_TIME_SEC:g}s",
-                    None, None, None, is_noncritical,
+                    None, None, None, False,
+                )
+        elif is_perf_test:
+            # The single-suite CLI and restored-fixture paths have no shared
+            # round barrier. Settle their setup work here too, before any cold
+            # request, without warming queries or resetting runtime state.
+            if not wait_for_performance_setup_quiescence(self.base_url):
+                self._perf_setup_quiescence_failed.set()
+                self.abort_performance_round()
+                return self._record_fail(
+                    name,
+                    f"Fixture preparation did not quiesce within {PERF_SETUP_MAX_TIME_SEC:g}s",
+                    None, None, None, False,
                 )
 
         # Scheme code execution via /scm endpoint
@@ -1493,7 +1516,7 @@ class SQLTestRunner:
             ))
             try:
                 url = f"{self.base_url}/scm"
-                resp = requests.post(url, data=scm_code, headers=self.auth_header, timeout=scm_timeout)
+                resp = requests.post(url, data=scm_code.encode("utf-8"), headers=self.auth_header, timeout=scm_timeout)
             except Exception as e:
                 if self._expect_interrupted_ok(expect):
                     self._record_success(name, is_noncritical)
@@ -1524,13 +1547,14 @@ class SQLTestRunner:
             self._record_success(name, is_noncritical)
             return True
 
-        mysql_probe = test_case.get("mysql")
-        if mysql_probe:
-            ok, output = self.execute_mysql_probe(database, mysql_probe)
+        protocol = "tds" if test_case.get("tds") else "mysql"
+        protocol_probe = test_case.get(protocol)
+        if protocol_probe:
+            ok, output = self.execute_protocol_probe(database, protocol_probe, protocol)
             if ok:
                 self._record_success(name, is_noncritical)
                 return True
-            return self._record_fail(name, "MySQL probe failed", json.dumps(mysql_probe), None, test_case.get("expect"), is_noncritical, on_fail_diag=output)
+            return self._record_fail(name, f"{protocol} probe failed", json.dumps(protocol_probe), None, test_case.get("expect"), is_noncritical, on_fail_diag=output)
 
         # Multi-step test case: steps list with per-step session_id + optional background
         steps = test_case.get("steps")
@@ -1543,7 +1567,7 @@ class SQLTestRunner:
                 step_timeout = int(step.get("timeout", 30))
                 if "scm" in step:
                     url = f"{self.base_url}/scm"
-                    return requests.post(url, data=step["scm"], headers=self.auth_header, timeout=step_timeout)
+                    return requests.post(url, data=step["scm"].encode("utf-8"), headers=self.auth_header, timeout=step_timeout)
                 else:
                     return self.execute_sql(database, step["sql"],
                                             session_id=step.get("session_id"),
@@ -1658,7 +1682,7 @@ class SQLTestRunner:
             self._test_context.request_timed_out = False
             if scm_code:
                 try:
-                    return requests.post(f"{self.base_url}/scm", data=query,
+                    return requests.post(f"{self.base_url}/scm", data=query.encode("utf-8"),
                                          headers=auth_header, timeout=sql_timeout)
                 except requests.RequestException as exc:
                     self._test_context.request_timed_out = isinstance(exc, requests.Timeout)
@@ -2191,7 +2215,7 @@ class SQLTestRunner:
                     url = f"{self.base_url}/scm"
                     with performance_server_gate():
                         resp = requests.post(
-                            url, data=scm_code, headers=self.auth_header,
+                            url, data=scm_code.encode("utf-8"), headers=self.auth_header,
                             timeout=(
                                 max(1, min(int(step.get("timeout", 600)), math.ceil(setup_remaining)))
                                 if PERF_TEST_ENABLED else int(step.get("timeout", 600))
@@ -2242,7 +2266,7 @@ class SQLTestRunner:
                         if session_id:
                             headers["X-Session-Id"] = session_id
                         response = requests.post(
-                            f"{self.base_url}/scm", data=statement, headers=headers,
+                            f"{self.base_url}/scm", data=statement.encode("utf-8"), headers=headers,
                             timeout=int(step.get("timeout", 30)),
                         )
                     else:
@@ -2446,6 +2470,8 @@ class SQLTestRunner:
                 else:
                     self.run_test_case(tc, database)
                     i += 1
+                if self._perf_setup_quiescence_failed.is_set():
+                    break
                 if self.fail_fast and self.failed_critical > 0:
                     remaining_tests = sum(1 for pending in test_cases[i:] if '_delay_ms' not in pending)
                     if remaining_tests > 0:
@@ -2591,7 +2617,7 @@ def cleanup_memcp_artifacts(owned_data_dir: Optional[Path]) -> None:
 
 
 def start_memcp_process(
-    port: int, enable_mysql: bool = False, data_dir: Optional[str] = None,
+    port: int, enable_mysql: bool = False, data_dir: Optional[str] = None, enable_tds: bool = False,
 ) -> subprocess.Popen | None:
     global _memcp_log_file, _owned_memcp_process
     proc = None
@@ -2613,6 +2639,8 @@ def start_memcp_process(
         ]
         if not enable_mysql:
             cmd.append("--disable-mysql")
+        if enable_tds:
+            cmd.append(f"--tsql-port={port+2000}")
         cmd.append("lib/main.scm")
         worktree = os.environ.get(
             "MEMCP_TEST_WORKTREE", os.path.dirname(os.path.abspath(__file__))
@@ -2746,7 +2774,7 @@ def suite_execution_mode(spec_file: str) -> str:
     metadata = load_suite_metadata(spec_file)
     if (suite_requires_managed_restart(spec_file)
             or metadata.get("isolated")
-            or metadata.get("requires_mysql")):
+            or metadata.get("requires_mysql") or metadata.get("requires_tds")):
         return "exclusive"
     return "parallel"
 
@@ -3608,6 +3636,7 @@ def main():
     global is_connect_only_mode
     is_connect_only_mode = connect_only
     enable_mysql = any(load_suite_metadata(spec_file).get("requires_mysql") for spec_file in spec_files)
+    enable_tds = any(load_suite_metadata(spec_file).get("requires_tds") for spec_file in spec_files)
 
     lifecycle = {}
     startup_started = time.monotonic()
@@ -3629,7 +3658,7 @@ def main():
                 requests.get(base_url, timeout=2)
             except Exception:
                 memcp_process = start_memcp_process(
-                    port, enable_mysql=enable_mysql, data_dir=data_dir,
+                    port, enable_mysql=enable_mysql, data_dir=data_dir, enable_tds=enable_tds,
                 )
                 if not memcp_process:
                     print("❌ Failed to start MemCP")
@@ -3649,7 +3678,7 @@ def main():
                     stop_memcp_process(memcp_process)
                     memcp_process = None
                 memcp_process = start_memcp_process(
-                    port, enable_mysql=enable_mysql, data_dir=data_dir,
+                    port, enable_mysql=enable_mysql, data_dir=data_dir, enable_tds=enable_tds,
                 )
                 return memcp_process is not None
             runner.set_restart_handler(restart_handler)

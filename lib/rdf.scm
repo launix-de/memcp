@@ -41,10 +41,10 @@ this is how rdf works:
 				(if (int? value)
 					(json_object "type" "literal" "value" (concat value)
 						"datatype" "http://www.w3.org/2001/XMLSchema#integer")
-				(if (number? value)
-					(json_object "type" "literal" "value" (concat value)
-						"datatype" "http://www.w3.org/2001/XMLSchema#decimal")
-					(json_object "type" "literal" "value" value))))))
+					(if (number? value)
+						(json_object "type" "literal" "value" (concat value)
+							"datatype" "http://www.w3.org/2001/XMLSchema#decimal")
+						(json_object "type" "literal" "value" value))))))
 ))
 (define rdf_sparql_json_binding (lambda (row)
 	(apply json_object (reduce_assoc row (lambda (acc key value)
@@ -168,11 +168,11 @@ this is how rdf works:
 				(or standard_csv (or standard_tsv graph_turtle)))))
 			((res "header") "Content-Type"
 				(if standard_json "application/sparql-results+json; charset=utf-8"
-				(if standard_xml "application/sparql-results+xml; charset=utf-8"
-				(if standard_csv "text/csv; charset=utf-8"
-				(if standard_tsv "text/tab-separated-values; charset=utf-8"
-				(if graph_turtle "text/turtle; charset=utf-8"
-					"application/x-ndjson; charset=utf-8"))))))
+					(if standard_xml "application/sparql-results+xml; charset=utf-8"
+						(if standard_csv "text/csv; charset=utf-8"
+							(if standard_tsv "text/tab-separated-values; charset=utf-8"
+								(if graph_turtle "text/turtle; charset=utf-8"
+									"application/x-ndjson; charset=utf-8"))))))
 			((res "status") 200)
 			(define row_store (if buffered (newsession) nil))
 			(define resultrow (if buffered
@@ -192,7 +192,7 @@ this is how rdf works:
 				(define formula (cached_parse sparql_queryplan_cache (list parse_sparql)
 					schema query (lambda (_schema _table _write) true)
 					(req "username") session false tx))
-				(sql_execute_formula session tx formula resultrow (lambda (_fields) true))
+				(sql_execute_formula session tx formula resultrow (lambda _fields true))
 			)))
 			(if buffered
 				(begin
@@ -202,10 +202,10 @@ this is how rdf works:
 					(define vars (rdf_sparql_query_vars query))
 					((res "print")
 						(if standard_json (json_encode (rdf_sparql_results_json rows ask_query vars))
-						(if standard_xml (rdf_sparql_results_xml rows ask_query vars)
-						(if standard_csv (rdf_sparql_delimited_results rows vars "," "")
-						(if standard_tsv (rdf_sparql_delimited_results rows vars "\t" "?")
-							(rdf_turtle_results rows)))))))
+							(if standard_xml (rdf_sparql_results_xml rows ask_query vars)
+								(if standard_csv (rdf_sparql_delimited_results rows vars "," "")
+									(if standard_tsv (rdf_sparql_delimited_results rows vars "\t" "?")
+										(rdf_turtle_results rows)))))))
 				nil)
 		) query) (begin
 				((res "header") "Content-Type" "text/plain")

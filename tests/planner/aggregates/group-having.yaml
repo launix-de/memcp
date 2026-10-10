@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # GROUP BY and HAVING Test Suite
 
 metadata:
@@ -48,6 +50,55 @@ test_cases:
       data:
         - dept: "C"
           s: 15
+
+  - name: "mysql aggregate input keeps its binding when output alias matches"
+    syntax: mysql
+    sql: "SELECT dept, SUM(amount) AS amount FROM sales GROUP BY dept HAVING SUM(amount) >= 10 ORDER BY SUM(amount) DESC"
+    expect: {rows: 2, data: [{dept: A, amount: 30}, {dept: C, amount: 15}]}
+
+  - name: "mysql distinct aggregate input does not become its output alias"
+    syntax: mysql
+    sql: "SELECT dept, COUNT(DISTINCT amount) AS amount FROM sales GROUP BY dept HAVING COUNT(DISTINCT amount) > 1 ORDER BY COUNT(DISTINCT amount) DESC"
+    expect: {rows: 1, data: [{dept: A, amount: 2}]}
+
+  - name: "mysql missing aggregate input cannot bind an output alias"
+    syntax: mysql
+    sql: "SELECT dept, SUM(amount) AS absent FROM sales GROUP BY dept HAVING SUM(absent) > 1"
+    expect: {error: true}
+
+  - name: "postgresql aggregate input keeps its binding when output alias matches"
+    syntax: postgresql
+    sql: "SELECT dept, SUM(amount) AS amount FROM sales GROUP BY dept HAVING SUM(amount) >= 10 ORDER BY SUM(amount) DESC"
+    expect: {rows: 2, data: [{dept: A, amount: 30}, {dept: C, amount: 15}]}
+
+  - name: "postgresql distinct aggregate input does not become its output alias"
+    syntax: postgresql
+    sql: "SELECT dept, COUNT(DISTINCT amount) AS amount FROM sales GROUP BY dept HAVING COUNT(DISTINCT amount) > 1 ORDER BY COUNT(DISTINCT amount) DESC"
+    expect: {rows: 1, data: [{dept: A, amount: 2}]}
+
+  - name: "postgresql missing aggregate input cannot bind an output alias"
+    syntax: postgresql
+    sql: "SELECT dept, SUM(amount) AS absent FROM sales GROUP BY dept HAVING SUM(absent) > 1"
+    expect: {error: true}
+
+  - name: "tsql aggregate input keeps its binding when output alias matches"
+    syntax: tsql
+    sql: "SELECT dept, SUM(amount) AS amount FROM sales GROUP BY dept HAVING SUM(amount) >= 10 ORDER BY SUM(amount) DESC"
+    expect: {rows: 2, data: [{dept: A, amount: 30}, {dept: C, amount: 15}]}
+
+  - name: "tsql distinct aggregate input does not become its output alias"
+    syntax: tsql
+    sql: "SELECT dept, COUNT(DISTINCT amount) AS amount FROM sales GROUP BY dept HAVING COUNT(DISTINCT amount) > 1 ORDER BY COUNT(DISTINCT amount) DESC"
+    expect: {rows: 1, data: [{dept: A, amount: 2}]}
+
+  - name: "tsql missing aggregate input cannot bind an output alias"
+    syntax: tsql
+    sql: "SELECT dept, SUM(amount) AS absent FROM sales GROUP BY dept HAVING SUM(absent) > 1"
+    expect: {error: true}
+
+  - name: "HAVING output alias outside aggregate keeps aggregate semantics"
+    sql: "SELECT dept, SUM(amount) AS amount FROM sales GROUP BY dept HAVING amount >= 10 ORDER BY amount DESC"
+    expect: {rows: 2, data: [{dept: A, amount: 30}, {dept: C, amount: 15}]}
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS sales"

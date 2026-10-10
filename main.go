@@ -1006,6 +1006,47 @@ func setupIO(wd string) {
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
+	scm.RegisterExactPrimitives()
+	scm.RegisterUnixPrimitives()
+	scm.RegisterReceiptPrimitives()
+	scm.RegisterTextPrimitives()
+	scm.Declare(&IOEnv, &scm.Declaration{Name: "tsql_script_read", Fn: func(a ...scm.Scmer) scm.Scmer {
+		reader, ok := a[0].Any().(io.Reader)
+		if !ok {
+			reader = getStream(wd)(a[0]).Any().(io.Reader)
+		}
+		if closer, ok := reader.(io.Closer); ok {
+			defer closer.Close()
+		}
+		var beginBatch func()
+		if len(a) > 2 && !a[2].IsNil() {
+			beginBatch = func() { scm.Apply(a[2]) }
+		}
+		return scm.NewInt(int64(scm.ReadTSQLScript(reader, func(statement string) { scm.Apply(a[1], scm.NewString(statement)) }, beginBatch)))
+	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Description: "Stream a t-sql export script with GO separators", Params: []*scm.TypeDescriptor{{Kind: "string|stream", Label: "source"}, {Kind: "func", Label: "statement"}, {Kind: "func|nil", Label: "begin_batch", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "int"}}})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		Name: "tds",
+		Fn:   scm.TDSServe,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Listen for T-SQL clients using TDS 7.4", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "port"},
+				{Kind: "func", Label: "authenticate"},
+				{Kind: "func", Label: "query"},
+				{Kind: "func", Label: "close_session"},
+				{Kind: "string", Label: "database"},
+				{Kind: "string|nil", Label: "tls_certificate", Optional: true},
+				{Kind: "string|nil", Label: "tls_key", Optional: true},
+				{Kind: "func|nil", Label: "describe", Optional: true},
+				{Kind: "func|nil", Label: "metadata", Optional: true},
+				{Kind: "func|nil", Label: "declarations", Optional: true},
+				{Kind: "func|nil", Label: "convert_parameter", Optional: true},
+				{Kind: "func|nil", Label: "parameter_session", Optional: true},
+				{Kind: "func|nil", Label: "session_event", Optional: true},
+				{Kind: "func|nil", Label: "resolve_metadata", Optional: true},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "password",
 
@@ -1281,6 +1322,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\nAdditional arguments (handled by Scheme):\n")
 		fmt.Fprintf(os.Stderr, "  --api-port=PORT        HTTP API port (default 4321)\n")
 		fmt.Fprintf(os.Stderr, "  --mysql-port=PORT      MySQL protocol port (default 3307)\n")
+		fmt.Fprintf(os.Stderr, "  --tsql-port=PORT      Enable TDS 7.4 T-SQL protocol (off by default)\n")
+		fmt.Fprintf(os.Stderr, "  --tsql-database=DB    Default TDS database (default memcp)\n")
+		fmt.Fprintf(os.Stderr, "  --tsql-tls-cert=PATH  TLS certificate; requires --tsql-tls-key=PATH\n")
+		fmt.Fprintf(os.Stderr, "  --disable-tsql        Disable TDS even when a port is configured\n")
 		fmt.Fprintf(os.Stderr, "  --disable-api          Disable HTTP API server\n")
 		fmt.Fprintf(os.Stderr, "  --mysql-socket=PATH    Unix socket path (default /tmp/memcp.sock, empty to disable)\n")
 		fmt.Fprintf(os.Stderr, "  --root-password-file=PATH  Read the initial root password from a file\n")

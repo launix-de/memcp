@@ -17,25 +17,31 @@ callback selection for comparisons, ORDER BY, GROUP BY, DISTINCT) or recorded in
 the query block's result-types fact for the wire/PDO result contract. Nothing
 type-related survives into the executable plan.
 
-A descriptor is (FORMULA TYPE COLLATION):
- - TYPE: uppercase SQL type name, or "any".
- - COLLATION: nil, or a (NAME COERCIBILITY) pair. Lower coercibility wins:
-   0 = explicit COLLATE, 2 = column, 4 = literal, 5 = numeric/ignorable. */
+A descriptor is (FORMULA TYPE COLLATION), optionally followed by the frontend declaration:
+- TYPE: uppercase SQL type name, or "any".
+- COLLATION: nil, or a (NAME COERCIBILITY) pair. Lower coercibility wins:
+0 = explicit COLLATE, 2 = column, 4 = literal, 5 = numeric/ignorable. */
 
 (define sql_info (lambda (formula type collation) (list formula type collation)))
 (define sql_info_formula car)
 (define sql_info_type cadr)
 (define sql_info_collation (lambda (info) (nth info 2)))
+/* A frontend declaration is immutable planning data, never a value tag. */
+(define sql_info_declaration (lambda (info) (if (> (count info) 3) (nth info 3) nil)))
+(define sql_declared_info (lambda (formula declaration collation)
+	(list formula (car declaration) collation declaration)))
+(define sql_info_spec (lambda (info)
+	(coalesceNil (sql_info_declaration info) (list (sql_info_type info)))))
 
 /* ---- type predicates ---- */
 
 (define sql_text_type? (lambda (type)
 	(has? '("CHAR" "VARCHAR" "TEXT" "TINYTEXT" "MEDIUMTEXT" "LONGTEXT"
-		"ENUM" "SET" "BINARY" "VARBINARY" "BLOB" "TINYBLOB" "MEDIUMBLOB" "LONGBLOB") type)))
+		"NVARCHAR" "NCHAR" "NTEXT" "ENUM" "SET" "BINARY" "VARBINARY" "BLOB" "TINYBLOB" "MEDIUMBLOB" "LONGBLOB") type)))
 
 (define sql_numeric_type? (lambda (type)
 	(has? '("BOOL" "BOOLEAN" "BIT" "INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT"
-		"MEDIUMINT" "DECIMAL" "NUMERIC" "FLOAT" "DOUBLE" "REAL") type)))
+		"MEDIUMINT" "DECIMAL" "NUMERIC" "MONEY" "SMALLMONEY" "FLOAT" "DOUBLE" "REAL") type)))
 
 (define sql_temporal_type? (lambda (type)
 	(has? '("DATE" "DATETIME" "TIMESTAMP" "TIME" "YEAR") type)))
@@ -61,13 +67,13 @@ unicode alias. Returns nil or a (NAME COERCIBILITY) pair. */
 
 (define sql_merge_type (lambda (ta tb)
 	(if (equal? ta "NULL") tb
-	(if (equal? tb "NULL") ta
-	(if (equal? ta "any") "any"
-	(if (equal? tb "any") "any"
-	(if (equal? ta tb) ta
-	(if (or (sql_text_type? ta) (sql_text_type? tb)) "VARCHAR"
-	(if (or (equal? ta "DOUBLE") (equal? tb "DOUBLE")) "DOUBLE"
-	(if (and (sql_numeric_type? ta) (sql_numeric_type? tb)) "DECIMAL" "VARCHAR"))))))))))
+		(if (equal? tb "NULL") ta
+			(if (equal? ta "any") "any"
+				(if (equal? tb "any") "any"
+					(if (equal? ta tb) ta
+						(if (or (sql_text_type? ta) (sql_text_type? tb)) "VARCHAR"
+							(if (or (equal? ta "DOUBLE") (equal? tb "DOUBLE")) "DOUBLE"
+								(if (and (sql_numeric_type? ta) (sql_numeric_type? tb)) "DECIMAL" "VARCHAR"))))))))))
 
 (define sql_merge_info (lambda (a b)
 	(sql_info nil
@@ -96,12 +102,11 @@ to DECIMAL (MySQL). Temporal/mixed arithmetic stays "any" for now. */
 (define sql_type_of_literal (lambda (v)
 	(if (nil? v) "NULL"
 		(if (string? v) "VARCHAR"
-			(if (or (equal? v true) (equal? v false)) "BOOLEAN"
-				(if (number? v) (if (equal? v (floor v)) "BIGINT" "DOUBLE")
-					"any"))))))
+			(if (number? v) (if (equal? v (floor v)) "BIGINT" "DOUBLE")
+				(if (or (equal? v true) (equal? v false)) "BOOLEAN" "any"))))))
 
-/* Type of a request-local bind value (positional ? / @var). Recorded as a plan
-cache guard by the caller; no captured value enters the result contract. */
+/* Request values carry no SQL tags. Frontends pass declarations separately,
+including for NULL, and include that full declaration in their cache guards. */
 (define sql_runtime_value_type (lambda (value)
 	(if (nil? value) "NULL"
 		(if (int? value) "BIGINT"
@@ -112,11 +117,11 @@ cache guard by the caller; no captured value enters the result contract. */
 /* ---- function return contracts ----
 
 Each entry is (HEAD TYPE MODE):
- - "fixed"  : result TYPE regardless of arguments
- - "first"  : result TYPE, collation inherited from the first argument
- - "text"   : result TYPE, collation merged from all arguments
- - "merge"  : result type and collation merged from all arguments (COALESCE, …)
- - "case"   : like "merge" but over the value arms only (IF/searched CASE) */
+- "fixed"  : result TYPE regardless of arguments
+- "first"  : result TYPE, collation inherited from the first argument
+- "text"   : result TYPE, collation merged from all arguments
+- "merge"  : result type and collation merged from all arguments (COALESCE, …)
+- "case"   : like "merge" but over the value arms only (IF/searched CASE) */
 
 (define sql_core_function_rules (list
 	(list (quote sql_compare) "BOOLEAN" "fixed")
@@ -279,9 +284,21 @@ always plain and canonical; type/collation ride alongside for the consumer. */
 resolved base table is rewritten: derived-table / stage-output columns and any
 column whose name does not resolve are returned verbatim so downstream lowering
 keeps its existing (ignorecase-flagged) resolution for them. */
-(define sql_source_column_info (lambda (src original tblvar col col_ignorecase)
+(define sql_source_column_info (lambda (src original tblvar col col_ignorecase bindings)
 	(if (not (source_is_base_table? src))
-		(sql_info original "any" nil)
+		(begin
+			(define relation (source_relation src))
+			(define staged (if (and bindings (stage_output_relation? relation)) (bindings (stage_output_relation_id relation) col) nil))
+			(if staged (list original (sql_info_type staged) (sql_info_collation staged) (sql_info_declaration staged))
+				(begin
+					(define derived (if (and bindings (or (query_block? relation) (union_block? relation))) (sql_type_node relation bindings) nil))
+					(define fields (if derived (qassoc_get (if (query_block? derived) (qb_facts derived) (union_facts derived)) 'result-types '()) '()))
+					(define descriptor (reduce_assoc fields (lambda (found name value) (if (equal?? name col) value found)) nil))
+					(if descriptor (list original (sql_info_type descriptor) (sql_info_collation descriptor) (sql_info_declaration descriptor))
+						(begin
+							(define description (if (or (string? relation) (stage_output_relation? relation)) nil
+								(find (tsql_query_descriptions relation nil) (lambda (field) (equal?? (field "name") col)) nil)))
+							(if description (sql_declared_info original (tsql_description_spec description) nil) (sql_info original "any" nil)))))))
 		(begin
 			(define canonical (source_column_name src col col_ignorecase))
 			(if (nil? canonical)
@@ -289,22 +306,22 @@ keeps its existing (ignorecase-flagged) resolution for them. */
 				(begin
 					(define meta (find (get_schema (source_schema src) (source_relation src))
 						(lambda (c) (equal?? (c "Field") canonical)) nil))
-					(define type (if (nil? meta) "any" (toUpper (coalesceNil (meta "RawType") "any"))))
+					(define declaration (if (nil? meta) nil (tsql_column_spec meta)))
+					(define type (if declaration (car declaration) (if (nil? meta) "any" (toUpper (coalesceNil (meta "RawType") "any")))))
 					(define collname (if (nil? meta) nil (meta "Collation")))
-					(sql_info
-						(list (quote get_column) (source_alias src) false canonical false)
-						type
-						(if (and (sql_text_type? type) (string? collname) (not (equal? collname "")))
-							(list collname 2) nil))))))))
+					(define column_formula (list (quote get_column) (source_alias src) false canonical false))
+					(define formula column_formula)
+					(define collation (if (and (sql_text_type? type) (string? collname) (not (equal? collname ""))) (list collname 2) nil))
+					(if declaration (sql_declared_info formula declaration collation) (sql_info formula type collation))))))))
 
-(define sql_get_column_info (lambda (sources tblvar tbl_ic col col_ic)
+(define sql_get_column_info (lambda (sources tblvar tbl_ic col col_ic bindings)
 	(begin
 		(define original (list (quote get_column) tblvar tbl_ic col col_ic))
 		(define default_alias (if (empty_list? sources) nil (source_alias (car sources))))
 		(define src (source_for_alias sources default_alias tblvar tbl_ic))
 		(if (nil? src)
 			(sql_info original "any" nil)
-			(sql_source_column_info src original tblvar col col_ic)))))
+			(sql_source_column_info src original tblvar col col_ic bindings)))))
 
 /* Comparison: BOOLEAN. The formula stays plain (canonical operands); the merged
 operand collation rides in the info slot so a consumer can pick the Less
@@ -329,44 +346,50 @@ the conditions are booleans and would otherwise pollute the merge. */
 			(lambda (i) (or (equal? i (- n 1)) (equal? (- i (* 2 (intdiv i 2))) 1))))
 			(lambda (i) (nth infos i))))))
 
-(define sql_call_info (lambda (sources head args)
+(define sql_generic_call_info (lambda (sources head args dialect bindings)
 	(begin
-		(define infos (map args (lambda (a) (sql_expr_info sources a))))
+		(define infos (map args (lambda (a) (sql_expr_info sources a dialect bindings))))
 		(define forms (map infos sql_info_formula))
 		(if (sql_arith_head? head)
 			(sql_info (cons head forms)
 				(reduce (cdr infos) (lambda (t i) (sql_type_fuse_arith (sql_arith_op_name head) t (sql_info_type i)))
 					(sql_info_type (car infos)))
 				nil)
-		(if (and (sql_comparison_head? head) (equal? (count infos) 2))
-			(sql_comparison_info head (car infos) (cadr infos))
-		(begin
-			(define rule (sql_function_rule head))
-			(define rtype (cadr rule))
-			(define mode (nth rule 2))
-			(define value_infos (if (equal? mode "case") (sql_case_value_infos infos) infos))
-			(define merged (sql_merge_infos value_infos))
-			(define type (if (has? (list "merge" "case") mode) (sql_info_type merged) rtype))
-			/* fixed: the function owns its result, no operand collation inherited.
-			   first: inherit from the first argument. text/merge/case: merge the
-			   value operands. */
-			(define collation (if (not (sql_text_type? type)) nil
-				(if (equal? mode "first")
-					(if (empty_list? infos) nil (sql_info_collation (car infos)))
-				(if (has? (list "text" "merge" "case") mode)
-					(sql_info_collation merged)
-					nil))))
-			(sql_info (cons head forms) type collation)))))))
+			(if (and (sql_comparison_head? head) (equal? (count infos) 2))
+				(sql_comparison_info head (car infos) (cadr infos))
+				(begin
+					(define rule (sql_function_rule head))
+					(define rtype (cadr rule))
+					(define mode (nth rule 2))
+					(define value_infos (if (equal? mode "case") (sql_case_value_infos infos) infos))
+					(define merged (sql_merge_infos value_infos))
+					(define type (if (has? (list "merge" "case") mode) (sql_info_type merged) rtype))
+					/* fixed: the function owns its result, no operand collation inherited.
+					first: inherit from the first argument. text/merge/case: merge the
+					value operands. */
+					(define collation (if (not (sql_text_type? type)) nil
+						(if (equal? mode "first")
+							(if (empty_list? infos) nil (sql_info_collation (car infos)))
+							(if (has? (list "text" "merge" "case") mode)
+								(sql_info_collation merged)
+								nil))))
+					(sql_info (cons head forms) type collation)))))))
 
-(define sql_expr_info (lambda (sources expr)
+(define sql_call_info (lambda (sources head args dialect bindings)
+	(if (or dialect (and (symbol? head) (strlike (string head) "tsql_%")))
+		(begin (define bound (tsql_bind_expression sources head args bindings))
+			(if (nil? bound) (sql_generic_call_info sources head args dialect bindings) bound))
+		(sql_generic_call_info sources head args dialect bindings))))
+
+(define sql_expr_info (lambda (sources expr dialect bindings)
 	(match expr
-		((symbol get_column) tblvar tbl_ic col col_ic) (sql_get_column_info sources tblvar tbl_ic col col_ic)
-		((quote get_column) tblvar tbl_ic col col_ic) (sql_get_column_info sources tblvar tbl_ic col col_ic)
+		((symbol get_column) tblvar tbl_ic col col_ic) (sql_get_column_info sources tblvar tbl_ic col col_ic bindings)
+		((quote get_column) tblvar tbl_ic col col_ic) (sql_get_column_info sources tblvar tbl_ic col col_ic bindings)
 		((symbol quote) _datum) (sql_info expr "any" nil)
 		((symbol session) _key) (sql_info expr "any" nil)
 		((symbol session_globalvar) _key) (sql_info expr "any" nil)
 		((symbol lambda) _params _body) (sql_info expr "any" nil)
-		(cons head args) (sql_call_info sources head args)
+		(cons head args) (sql_call_info sources head args dialect bindings)
 		_ (sql_info expr (sql_type_of_literal expr)
 			(if (string? expr) (list "utf8mb4_general_ci" 4) nil)))))
 
@@ -375,12 +398,12 @@ relation and operator string are resolved at plan time. */
 (define sql_compare (lambda (left right less operator collation)
 	(if (or (nil? left) (nil? right)) nil
 		(if (equal? operator "equal??") (and (not (less left right)) (not (less right left)))
-		(if (equal? operator "equal?") (and (not (less left right)) (not (less right left)))
-		(if (equal? operator "<") (less left right)
-		(if (equal? operator ">") (less right left)
-		(if (equal? operator "<=") (not (less right left))
-		(if (equal? operator ">=") (not (less left right))
-			(error "unsupported SQL comparison"))))))))))
+			(if (equal? operator "equal?") (and (not (less left right)) (not (less right left)))
+				(if (equal? operator "<") (less left right)
+					(if (equal? operator ">") (less right left)
+						(if (equal? operator "<=") (not (less right left))
+							(if (equal? operator ">=") (not (less left right))
+								(error "unsupported SQL comparison"))))))))))
 
 /* ---- query-block level type resolution ----
 
@@ -397,64 +420,110 @@ Derived-table sources and unions are passed through unchanged for now
 		_ false)))
 
 /* Plain canonical formula for one expression against the resolved sources. */
-(define sql_type_formula (lambda (sources expr) (sql_info_formula (sql_expr_info sources expr))))
+(define sql_type_formula (lambda (sources expr dialect bindings) (sql_info_formula (sql_expr_info sources expr dialect bindings))))
 
 /* Result-column descriptor (nil TYPE COLLATION) for one expression. */
-(define sql_type_result_descriptor (lambda (sources expr)
+(define sql_type_result_descriptor (lambda (sources expr dialect bindings)
 	(begin
-		(define info (sql_expr_info sources expr))
-		(sql_info nil (sql_info_type info) (sql_info_collation info)))))
+		(define info (sql_expr_info sources expr dialect bindings))
+		(if (sql_info_declaration info) (sql_declared_info nil (sql_info_declaration info) (sql_info_collation info))
+			(sql_info nil (sql_info_type info) (sql_info_collation info))))))
 
 /* Canonicalize a projected field, but leave a SELECT * / t.* entry as-is: the
 planner has its own star-expansion (and GROUP-BY-primary-key rules) downstream. */
-(define sql_type_field_formula (lambda (sources expr)
-	(if (star_expr? expr) expr (sql_type_formula sources expr))))
+(define sql_type_field_formula (lambda (sources expr dialect bindings)
+	(if (star_expr? expr) expr (sql_type_formula sources expr dialect bindings))))
 
 /* Resolve the ORDER direction of a text-valued *expression* to its collation
 callback. Bare column keys keep their raw < / > so the existing native
 scan-order path (order_relations_for_source) is untouched; only computed keys
 (UPPER(x), CONCAT(a, b), x COLLATE y) — which the old physical_expr_collation
 always treated as "bin" — get the coercing relation. */
-(define sql_type_order_item (lambda (sources item)
+(define sql_type_order_item (lambda (sources item dialect bindings)
 	(match item
 		'(order_expr order_dir) (begin
-			(define info (sql_expr_info sources order_expr))
+			(define info (sql_expr_info sources order_expr dialect bindings))
 			(define coll (sql_info_collation info))
 			(if (and (or (equal? order_dir <) (equal? order_dir >))
-					(not (sql_column_ref? (sql_info_formula info)))
-					(sql_text_type? (sql_info_type info))
-					(not (nil? coll)))
+				(not (sql_column_ref? (sql_info_formula info)))
+				(sql_text_type? (sql_info_type info))
+				(not (nil? coll)))
 				(list (sql_info_formula info) (collate (car coll) (equal? order_dir >)))
 				(list (sql_info_formula info) order_dir)))
 		_ item)))
 
-(define sql_type_query_block (lambda (block outer_sources)
+(define sql_type_query_block (lambda (block outer_sources bindings)
 	(if (not (query_block? block))
 		block
 		(begin
 			(define sources (qb_sources block))
+			(define dialect (or (not (nil? bindings)) (equal? (qassoc_get (qb_facts block) 'frontend nil) "tsql")))
 			(define outer (coalesceNil outer_sources '()))
 			(define all_sources (if (empty_list? outer) sources (merge (list sources outer))))
 			(make_query_block
 				(qb_schema block)
 				sources
 				(map_assoc (qb_fields block)
-					(lambda (field_title field_expr) (sql_type_field_formula all_sources field_expr)))
-				(sql_type_formula all_sources (qb_where block))
+					(lambda (field_title field_expr) (sql_type_field_formula all_sources field_expr dialect bindings)))
+				(sql_type_formula all_sources (qb_where block) dialect bindings)
 				(map (coalesceNil (qb_group block) '())
-					(lambda (group_expr) (sql_type_formula all_sources group_expr)))
-				(if (nil? (qb_having block)) nil (sql_type_formula all_sources (qb_having block)))
+					(lambda (group_expr) (sql_type_formula all_sources group_expr dialect bindings)))
+				(if (nil? (qb_having block)) nil (sql_type_formula all_sources (qb_having block) dialect bindings))
 				(map (coalesceNil (qb_order block) '())
-					(lambda (order_item) (sql_type_order_item all_sources order_item)))
+					(lambda (order_item) (sql_type_order_item all_sources order_item dialect bindings)))
 				(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block)
 				(qassoc_set (qb_facts block) (quote result-types)
 					(map_assoc (expand_query_block_fields sources (qb_fields block))
-						(lambda (rt_title rt_expr) (sql_type_result_descriptor all_sources rt_expr)))))))))
+						(lambda (rt_title rt_expr) (sql_type_result_descriptor all_sources rt_expr dialect bindings)))))))))
 
-/* Entry point: annotate the root query block of a compiled IR. Group/orc/window
-stages and non-query-block roots pass through untouched in this slice. */
+/* Stage descriptors live in the existing immutable facts. Their lookup is
+compiler-local; it retains only the logical program and declared metadata. */
+(define sql_type_stage_column (lambda (stages id column path) (begin
+	(if (has? path id) (error "cyclic stage type dependency") true)
+	(define stage (find stages (lambda (candidate) (and (group_stage? candidate) (equal? (gs_id candidate) id))) nil))
+	(if (nil? stage) nil (begin
+		(define nested (lambda (other name) (sql_type_stage_column stages other name (append path id))))
+		(define sources (canonical_helper_sources (gs_input stage)))
+		(define key (find (mapIndex (gs_keys stage) (lambda (i expression) (list (group_key_col_name i) expression)))
+			(lambda (item) (equal?? (car item) column)) nil))
+		(define aggregate (find (gs_aggregates stage) (lambda (descriptor) (equal? (aggregate_col_name_using (gs_input stage) descriptor) column)) nil))
+		(if key (sql_type_result_descriptor sources (cadr key) true nested)
+			(if aggregate (sql_type_result_descriptor sources (cons 'aggregate aggregate) true nested)
+				(begin
+					(define projection (reduce_assoc (gs_output stage) (lambda (found name expression)
+						(if (equal?? name column) (list expression) found)) nil))
+					(if projection (sql_type_result_descriptor sources (car projection) true nested) nil)))))))))
+(define sql_type_node (lambda (node bindings) (if (query_block? node) (begin
+	(define sources (map (qb_sources node) (lambda (source)
+		(if (or (query_block? (source_relation source)) (union_block? (source_relation source)))
+			(source_with_relation source (sql_type_node (source_relation source) bindings)) source))))
+	(sql_type_query_block (make_query_block (qb_schema node) sources (qb_fields node) (qb_where node) (qb_group node) (qb_having node)
+		(qb_order node) (qb_limit node) (qb_offset node) (qb_hidden node) (qb_stages node) (qb_facts node)) '() bindings))
+	(if (union_block? node) (begin
+		(define branches (map (union_branches node) (lambda (branch) (sql_type_node branch bindings))))
+		(define first (if (empty_list? branches) nil (car branches)))
+		(define fields (if first (qassoc_get (if (query_block? first) (qb_facts first) (union_facts first)) 'result-types '()) '()))
+		(make_union_block (union_mode node) branches (union_order node) (union_limit node) (union_offset node)
+			(qassoc_set (union_facts node) 'result-types fields))) node))))
+(define sql_type_tsql_node? (lambda (node)
+	(if (query_block? node) (equal? (qassoc_get (qb_facts node) 'frontend nil) "tsql")
+		(if (union_block? node) (reduce (union_branches node) (lambda (found branch) (or found (sql_type_tsql_node? branch))) false) false))))
+(define sql_type_stage_facts (lambda (stage stages bindings)
+	(if (group_stage? stage) (begin
+		(define sources (canonical_helper_sources (gs_input stage)))
+		(define keys (merge (mapIndex (gs_keys stage) (lambda (i expression)
+			(list (group_key_col_name i) (sql_type_result_descriptor sources expression true bindings))))))
+		(define aggregates (merge (map (gs_aggregates stage) (lambda (descriptor)
+			(list (aggregate_col_name_using (gs_input stage) descriptor)
+				(sql_type_result_descriptor sources (cons 'aggregate descriptor) true bindings))))))
+		(make_group_stage (gs_id stage) (sql_type_node (gs_input stage) bindings) (gs_domain stage) (gs_keys stage) (gs_aggregates stage)
+			(gs_having stage) (gs_output stage) (gs_order stage) (gs_limit stage) (gs_offset stage)
+			(qassoc_set (gs_facts stage) 'result-types (merge keys aggregates)))) stage)))
 (define sql_type_annotate_ir (lambda (ir)
-	(if (query_block? (ir_root ir))
-		(make_ir (ir_kind ir) (sql_type_query_block (ir_root ir) '())
-			(ir_stages ir) (ir_context_of ir) (ir_return ir))
-		ir)))
+	(if (sql_type_tsql_node? (ir_root ir)) (begin
+		(define stages (ir_stages ir))
+		(define bindings (lambda (id column) (sql_type_stage_column stages id column '())))
+		(make_ir (ir_kind ir) (sql_type_node (ir_root ir) bindings)
+			(map stages (lambda (stage) (sql_type_stage_facts stage stages bindings))) (ir_context_of ir) (ir_return ir)))
+		(if (query_block? (ir_root ir))
+			(make_ir (ir_kind ir) (sql_type_query_block (ir_root ir) '() nil) (ir_stages ir) (ir_context_of ir) (ir_return ir)) ir))))

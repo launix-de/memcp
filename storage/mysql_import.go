@@ -419,7 +419,7 @@ existingLoop:
 				continue existingLoop
 			}
 		}
-		t.Unique = append(t.Unique, uniqueKey{k.name, colNames})
+		t.Unique = append(t.Unique, uniqueKey{Id: k.name, Cols: colNames})
 	}
 	t.publishShowColumnsSnapshot()
 	t.schema.save()

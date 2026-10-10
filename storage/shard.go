@@ -576,15 +576,29 @@ func (u *storageShard) load(t *table) {
 				break
 			}
 			var maxVal uint64
+			// A configured allocator reader preserves its declared representation;
+			// negative explicit values must never wrap to an unsigned high-water.
+			_, strictIdentity := allocatorLimit(col)
 			for _, row := range u.inserts {
 				if colIdx < len(row) && !row[colIdx].IsNil() {
-					if v := uint64(scm.ToInt(row[colIdx])); v > maxVal {
+					var v uint64
+					if strictIdentity || col.AllocatorValue != nil {
+						v = allocatorExplicitValue(col, row[colIdx])
+					} else {
+						v = uint64(scm.ToInt(row[colIdx]))
+					}
+					if v > maxVal {
 						maxVal = v
 					}
 				}
 			}
-			if maxVal > t.Auto_increment {
-				t.Auto_increment = maxVal
+			// Different cold shards can replay concurrently. Raise the scalar
+			// without acquiring a table lock while this shard is locked.
+			for {
+				previous := atomic.LoadUint64(&t.Auto_increment)
+				if previous >= maxVal || atomic.CompareAndSwapUint64(&t.Auto_increment, previous, maxVal) {
+					break
+				}
 			}
 			break // only one AUTO_INCREMENT column per table
 		}
@@ -903,20 +917,25 @@ func (s *storageShard) ensureLoaded() {
 	// pre-free memory before loading shard from disk
 	GlobalCache.CheckPressure(int64(len(s.t.columnDeclarations())) * int64(Settings.ShardSize) * 16)
 	// double-check under lock to prevent concurrent map writes in load()
-	s.mu.Lock()
-	if s.state() != COLD {
-		s.mu.Unlock()
+	loaded := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.state() != COLD {
+			return false
+		}
+		// materialize shard from disk (load expects caller to hold mu.Lock)
+		s.load(s.t)
+		// memory engine shards stay WRITE to bypass LRU later
+		if s.t.PersistencyMode == Memory {
+			s.setState(WRITE)
+		} else {
+			s.setState(SHARED)
+		}
+		return true
+	}()
+	if !loaded {
 		return
 	}
-	// materialize shard from disk (load expects caller to hold mu.Lock)
-	s.load(s.t)
-	// memory engine shards stay WRITE to bypass LRU later
-	if s.t.PersistencyMode == Memory {
-		s.setState(WRITE)
-	} else {
-		s.setState(SHARED)
-	}
-	s.mu.Unlock()
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	// register with CacheManager (skip Memory-engine shards and temp tables)
 	if s.t.PersistencyMode == Cache && !s.t.isEphemeralQueryTable() {
@@ -2840,7 +2859,11 @@ func (m *ShardMapReducer) FlushSideEffects() {
 	}
 }
 
-func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, validatedSchema *tableColumnNamesSnapshot, onFirstInsertId func(int64), isIgnore bool, currentTx *TxContext) uint32 {
+func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, validatedSchema *tableColumnNamesSnapshot, onInsertID func(first, last int64), isIgnore bool, currentTx *TxContext) uint32 {
+	columns, values = t.t.assignInsertDefaults(columns, values, scm.NewNil())
+	if !alreadyLocked {
+		t.t.prepareIdentityRecovery()
+	}
 	t.t.beginContributionMutation()
 	defer t.t.endContributionMutation()
 	ss := SessionStateFromTx(currentTx)
@@ -2874,14 +2897,10 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 			defer t.mu.Unlock()
 		}
 		firstNewRecid := uint32(0)
-		firstInsertId := onFirstInsertId
 		for i, row := range preparedRows {
-			recid := t.insertPreparedLocked(preparedColumns[i], [][]scm.Scmer{row}, firstInsertId, true, true, validatedSchema, currentTx)
+			recid := t.insertPreparedLocked(preparedColumns[i], [][]scm.Scmer{row}, onInsertID, true, true, validatedSchema, currentTx)
 			if i == 0 {
 				firstNewRecid = recid
-			}
-			if firstInsertId != nil {
-				firstInsertId = nil
 			}
 		}
 		return firstNewRecid
@@ -2898,7 +2917,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		t.lockForMutation(currentTx)
 		defer t.mu.Unlock()
 	}
-	firstNewRecid := t.insertPreparedLocked(columns, values, onFirstInsertId, true, true, validatedSchema, currentTx)
+	firstNewRecid := t.insertPreparedLocked(columns, values, onInsertID, true, true, validatedSchema, currentTx)
 	return firstNewRecid
 }
 
@@ -2963,12 +2982,12 @@ func (t *storageShard) materializedInsertedRowsLocked(firstNewInsertIdx int) ([]
 	return idx2col, logVals
 }
 
-func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), fireTriggers bool, propagateMaintenance bool, validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext) uint32 {
+func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scmer, onInsertID func(first, last int64), fireTriggers bool, propagateMaintenance bool, validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext) uint32 {
 	// capture starting row index for undo logging
 	firstNewRecid := t.main_count + uint32(len(t.inserts))
 	firstNewInsertIdx := len(t.inserts) // for capturing actual rows after insertDataset fills auto-increment
 	var triggerInsertRows []dataset
-	t.insertDataset(columns, values, onFirstInsertId, validatedSchema, currentTx)
+	t.insertDataset(columns, values, onInsertID, validatedSchema, currentTx)
 	if fireTriggers && len(t.t.Triggers) > 0 {
 		newRows := t.inserts[firstNewInsertIdx:]
 		triggerInsertRows = make([]dataset, len(newRows))
@@ -3052,7 +3071,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 }
 
 // contract: must only be called inside full write mutex mu.Lock()
-func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext) {
+func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onInsertID func(first, last int64), validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext) {
 	snapshot := t.t.columnNamesSnapshot.Load()
 	declarations := t.t.Columns // private, unpublished constructors only
 	if snapshot != nil {
@@ -3074,11 +3093,16 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 	}
 	var Auto_increment uint64
 	var hasAI bool
+	var strictAI bool
+	var identityLimit uint64
 	var aiColIdx int = -1
 	var aiInputIdx int = -1
+	var aiColumn *column
 	for _, c := range declarations {
 		if c.AutoIncrement {
 			hasAI = true
+			identityLimit, strictAI = allocatorLimit(c)
+			aiColumn = c
 			for i, name := range columns {
 				if name == c.Name {
 					aiInputIdx = i
@@ -3108,25 +3132,58 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 				generatedIDs++
 				continue
 			}
-			if explicitID := scm.ToInt(row[aiInputIdx]); explicitID > 0 && uint64(explicitID) > maxExplicitID {
-				maxExplicitID = uint64(explicitID)
+			var explicitID uint64
+			if strictAI || aiColumn.AllocatorValue != nil {
+				explicitID = allocatorExplicitValue(aiColumn, row[aiInputIdx])
+			} else if id := scm.ToInt(row[aiInputIdx]); id > 0 {
+				explicitID = uint64(id)
+			}
+			if explicitID > maxExplicitID {
+				maxExplicitID = explicitID
 			}
 		}
-		t.t.mu.Lock() // reserve generated IDs once for the complete batch
-		Auto_increment = t.t.Auto_increment
-		if maxExplicitID > Auto_increment {
-			Auto_increment = maxExplicitID
+		if generatedIDs > 0 && t.t.identityRecoveryState.Load() != 1 {
+			panic("identity allocation requires recovery before acquiring the shard write lock")
 		}
-		t.t.Auto_increment = Auto_increment + uint64(generatedIDs)
-		t.t.mu.Unlock()
+		for {
+			previous := atomic.LoadUint64(&t.t.Auto_increment)
+			Auto_increment = previous
+			if maxExplicitID > Auto_increment {
+				Auto_increment = maxExplicitID
+			}
+			if strictAI && (Auto_increment > identityLimit || uint64(generatedIDs) > identityLimit-Auto_increment) {
+				panic("generated value exceeds allocator bound")
+			}
+			// Preserve this batch's range if another cold shard raises the
+			// replay high-water mark. The successful CAS owns the batch range.
+			if atomic.CompareAndSwapUint64(&t.t.Auto_increment, previous, Auto_increment+uint64(generatedIDs)) {
+				break
+			}
+		}
 	}
-	// if requested, notify the first assigned id once per statement
-	if generatedIDs > 0 && onFirstInsertId != nil {
-		onFirstInsertId(int64(Auto_increment) + 1)
-		// do not call again for this shard; table-level wrapper ensures only first shard triggers
-		onFirstInsertId = nil
+	// Report this invocation's reserved range, never the mutable global counter.
+	// Callers choose first-ID or last-ID semantics at their frontend boundary.
+	if generatedIDs > 0 && onInsertID != nil {
+		onInsertID(int64(Auto_increment)+1, int64(Auto_increment+uint64(generatedIDs)))
 	}
 
+	// Bind optional allocator representation once for this affected column/batch.
+	// Validate every generated image before publishing any inserted row.
+	var encodedGenerated []scm.Scmer
+	if generatedIDs > 0 && aiColumn.AllocatorEncode != nil {
+		encoder := scm.PrepareSerialProc(*aiColumn.AllocatorEncode)
+		encodedGenerated = make([]scm.Scmer, generatedIDs)
+		var args [1]scm.Scmer
+		for i := range encodedGenerated {
+			args[0] = scm.NewInt(int64(Auto_increment + uint64(i) + 1))
+			value := encoder.Call(args[:])
+			if aiColumn.sanitizer != nil {
+				value = aiColumn.sanitizer(value)
+			}
+			encodedGenerated[i] = value
+		}
+	}
+	generatedCursor := 0
 	var insertedBytes int64
 	indexDeltaBytes := make(map[*StorageIndex]int64)
 	for _, row := range values {
@@ -3138,12 +3195,19 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 				cidx := t.deltaColumns[c.Name]
 				if aiInputIdx < 0 || aiInputIdx >= len(row) || row[aiInputIdx].IsNil() {
 					Auto_increment++ // local increase within the reserved range
-					newrow[cidx] = scm.NewInt(int64(Auto_increment))
+					value := scm.NewInt(int64(Auto_increment))
+					if encodedGenerated != nil {
+						value = encodedGenerated[generatedCursor]
+						generatedCursor++
+					} else if strictAI && c.sanitizer != nil {
+						value = c.sanitizer(value)
+					}
+					newrow[cidx] = value
 				}
-			} else if c.hasDefault() {
-				// fill col with default
+			} else if c.hasDefault() && c.DefaultCalculator == nil {
+				// Only omitted defaults are evaluated. Prepared values never run a calculator twice.
 				cidx := t.deltaColumns[c.Name]
-				newrow[cidx] = c.defaultValue()
+				newrow[cidx] = c.defaultValue(scm.NewNil())
 			}
 		}
 		recid := uint32(len(t.inserts)) + t.main_count

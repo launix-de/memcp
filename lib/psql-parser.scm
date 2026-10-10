@@ -42,6 +42,24 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(atom "INSERT" true)
 	(atom "ORDER" true)
 	(atom "LIMIT" true)
+	(atom "HAVING" true)
+	(atom "OFFSET" true)
+	(atom "FETCH" true)
+	(atom "ROW" true)
+	(atom "ROWS" true)
+	(atom "ONLY" true)
+	(atom "FIRST" true)
+	(atom "NEXT" true)
+	(atom "AND" true)
+	(atom "OR" true)
+	(atom "FOR" true)
+	(atom "ASC" true)
+	(atom "DESC" true)
+	(atom "OVER" true)
+	(atom "PARTITION" true)
+	(atom "THEN" true)
+	(atom "ELSE" true)
+	(atom "END" true)
 	(atom "DELIMITER" true)
 	(atom "TRIM" true)
 	(atom "LTRIM" true)
@@ -50,7 +68,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(atom "INTERVAL" true)
 	(atom "DIV" true)
 )))
-(define psql_identifier_quoted (parser '("\"" (define id (regex "(?:[^\"])+" false false)) "\"") (regexp_replace id "\\\\[\\\\'\"nr0]" sql_string_unescape))) /* with double quote */
+(define psql_identifier_quoted (parser '("\"" (define id (regex "(?:[^\"]|\"\")+" false false)) "\"") (replace id "\"\"" "\"")))
 (define psql_identifier (parser (define x (or psql_identifier_unquoted psql_identifier_quoted)) x))
 
 (define psql_column (parser (or
@@ -83,13 +101,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define psql_number (parser (define x (regex "-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:e-?[0-9]+)?" true)) (simplify x)))
 (define psql_interval_unit (parser '((define unit psql_identifier_unquoted) (? "(" (regex "[0-9]+") ")")) unit))
 
+/* Standard PostgreSQL strings use doubled quotes, without MySQL backslash escapes. */
 (define psql_string (parser (or
-	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (regexp_replace x "\\\\[\\\\'\"nr0]" sql_string_unescape))
+	(parser '((atom "E'" true) (define x (regex "(\\\\.|''|[^\\'])*" false false)) (atom "'" false false)) (regexp_replace x "''|\\\\[\\\\'\"nr0]" sql_string_unescape))
+	(parser '((atom "'" false) (define x (regex "(?:''|[^'])*" false false)) (atom "'" false false)) (replace x "''" "'"))
 )))
 
 /* SQL modulo expression: uses native mod builtin (NULL-safe, div-by-zero returns NULL) */
-(define psql_mod_expr (lambda (a b) '('mod a b))
-))
+(define psql_mod_expr (lambda (a b) '('mod a b)))
 
 /* SQL numeric literals are exact decimals. Fold literal addition and
 subtraction before the AST loses that distinction to binary float runtime
@@ -135,6 +154,11 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(parser (atom "TIMETZ" true) "TIME")
 	psql_identifier
 )))
+
+(define psql_window (lambda (name args spec)
+	(if (and (has? '("COUNT" "SUM" "AVG" "MIN" "MAX") name) (not (empty_list? (cadr spec))))
+		(error "ordered aggregate windows require default-frame support")
+		'('window_func name args spec))))
 
 (define parse_psql (lambda (schema s policy planning_session tx) (begin
 	(define parse_started_ns (nanotime))
@@ -295,10 +319,34 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		psql_expression6
 	)))
 
+	/* window function OVER() spec: parse PARTITION BY and ORDER BY clauses */
+	(define psql_window_orderby_item (parser '(
+		(define col psql_expression)
+		(define dir (or
+			(parser (atom "DESC" true) >)
+			(parser (atom "ASC" true) <)
+			(parser empty <)
+		))
+	) (list col dir)))
+	(define psql_window_spec (parser '(
+		(? (atom "PARTITION" true) (atom "BY" true) (define partition_by (+ psql_expression ",")))
+		(? (atom "ORDER" true) (atom "BY" true) (define order_by (+ psql_window_orderby_item ",")))
+	) (list (coalesce partition_by '()) (coalesce order_by '()))))
+
+
 	(define psql_expression7 (parser (or
 		/* Scalar subselect in expressions: (SELECT ...) */
 		(parser '("(" (define sub psql_select) ")") '('inner_select sub))
 		(parser '("(" (define a psql_expression) ")") a)
+
+		/* aggregate-as-window: KEYWORD(expr) OVER (...) → window_func node (must precede plain aggregate rules) */
+		(parser '((atom "COUNT" true) "(" "*" ")" (atom "OVER" true) "(" (define _over psql_window_spec) ")") (psql_window "COUNT" '() _over))
+		(parser '((atom "COUNT" true) "(" (define e psql_expression) ")" (atom "OVER" true) "(" (define _over psql_window_spec) ")") (psql_window "COUNT" (list e) _over))
+		(parser '((atom "SUM" true) "(" (define s psql_expression) ")" (atom "OVER" true) "(" (define _over psql_window_spec) ")") (psql_window "SUM" (list s) _over))
+		(parser '((atom "AVG" true) "(" (define s psql_expression) ")" (atom "OVER" true) "(" (define _over psql_window_spec) ")") (psql_window "AVG" (list s) _over))
+		(parser '((atom "MIN" true) "(" (define s psql_expression) ")" (atom "OVER" true) "(" (define _over psql_window_spec) ")") (psql_window "MIN" (list s) _over))
+		(parser '((atom "MAX" true) "(" (define s psql_expression) ")" (atom "OVER" true) "(" (define _over psql_window_spec) ")") (psql_window "MAX" (list s) _over))
+		(parser '((define fn psql_identifier_unquoted) "(" (define args (* psql_expression ",")) ")" (atom "OVER" true) "(" (define spec psql_window_spec) ")") (psql_window (toUpper fn) args spec))
 
 		/* EXISTS (SELECT ...) */
 		(parser '((atom "EXISTS" true) "(" (define sub psql_select) ")") '('inner_select_exists sub))
@@ -414,7 +462,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "pg_catalog" true) "." (atom "setval" true) "(" (define seq_name psql_string) "," (define val psql_expression) "," (define is_called psql_expression) ")")
 			(psql_setval_command seq_name val is_called))
 
-		(parser (atom "NULL" true) 'nil)
+		(parser (atom "NULL" true) (sql_null_literal))
 		(parser (atom "TRUE" true) true)
 		(parser (atom "FALSE" true) false)
 		(parser (atom "ON" true) true)
@@ -618,13 +666,14 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	)))
 	(define psql_select_core (parser '(
 		(atom "SELECT" true)
-		(? (atom "DISTINCT" true))
+		(define distinct (? (atom "DISTINCT" true)))
 		(define cols (+ (or
 			(parser "*" '("*" '((quote get_column) nil false "*" false)))
 			(parser '((define tbl psql_identifier_quoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
 			(parser '((define tbl psql_identifier_unquoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
 			(parser '((define e psql_expression) (atom "AS" true) (define title psql_identifier)) '(title e))
 			(parser '((define e psql_expression) (atom "AS" true) (define title psql_string)) '(title e))
+			(parser '((define e psql_expression) (define title psql_identifier)) '(title e))
 			(parser (define e psql_expression) '((extract_title e) e))
 		) ","))
 		(?
@@ -666,15 +715,30 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(atom "," true)
 			))
 		)
-		(?
-			(atom "LIMIT" true)
+		(? (atom "LIMIT" true)
 			(or
-				'((define offset psql_expression) (atom "," true) (define limit psql_expression))
-				'((define limit psql_expression) (atom "OFFSET" true) (define offset psql_expression))
-				'((define limit psql_expression))
-			)
-		)
-	) (list (quote query-block) schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset '() '() '())))
+				'((define offset psql_expression) "," (define limit psql_expression))
+				'((define limit (or (parser (atom "ALL" true) nil) psql_expression)))
+		))
+		(? (atom "OFFSET" true) (define offset psql_expression) (? (or (atom "ROW" true) (atom "ROWS" true))))
+		(? (atom "FETCH" true) (or (atom "FIRST" true) (atom "NEXT" true))
+			(define limit (or psql_expression (parser empty 1)))
+			(or (atom "ROW" true) (atom "ROWS" true)) (atom "ONLY" true))
+	) (begin
+			(define projected_exprs (extract_assoc (merge cols) (lambda (_title expr) expr)))
+			(define sources (if (nil? from) '() (merge from)))
+			/* GROUP BY already makes the result unique when every grouping key is
+			projected. Preserve that explicit group instead of replacing it with the
+			DISTINCT projection (which may contain aggregate expressions). */
+			(define distinct_preserved_by_group (and distinct
+				(and (not (nil? group))
+					(and (not (empty_list? group))
+						(reduce group (lambda (preserved expr)
+							(and preserved (contains? projected_exprs expr))) true)))))
+			(list (quote query-block) schema sources (merge cols) condition
+				(if (and distinct (not distinct_preserved_by_group)) projected_exprs group)
+				having order limit offset '() '()
+				(if distinct (list (list (quote select_distinct) true)) '())))))
 	(define psql_select (parser (or
 		(parser '(
 			(define left psql_select_core)

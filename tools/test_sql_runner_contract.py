@@ -90,6 +90,15 @@ from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
 
 class ManagedDataDirectoryContractTest(unittest.TestCase):
+    def test_tds_is_opt_in_and_uses_its_own_port(self):
+        with mock.patch("run_sql_tests.open", mock.mock_open()), \
+                mock.patch("run_sql_tests.subprocess.Popen") as start, \
+                mock.patch("run_sql_tests.wait_for_memcp", return_value=True):
+            start_memcp_process(4321, data_dir="/owned/test-data", enable_tds=True)
+        args = start.call_args.args[0]
+        self.assertIn("--tsql-port=6321", args)
+        self.assertIn("--disable-mysql", args)
+
     def test_successful_trial_keeps_server_log_before_cleanup(self):
         with tempfile.TemporaryDirectory() as root:
             log = Path(root) / "server.log"
@@ -101,6 +110,15 @@ class ManagedDataDirectoryContractTest(unittest.TestCase):
                 cleanup_memcp_artifacts(None)
             self.assertFalse(log.exists())
             self.assertEqual(artifact.read_text(), contents)
+
+    def test_tds_is_opt_in_and_uses_its_own_port(self):
+        with mock.patch("run_sql_tests.open", mock.mock_open()), \
+                mock.patch("run_sql_tests.subprocess.Popen") as start, \
+                mock.patch("run_sql_tests.wait_for_memcp", return_value=True):
+            start_memcp_process(4321, data_dir="/owned/test-data", enable_tds=True)
+        args = start.call_args.args[0]
+        self.assertIn("--tsql-port=6321", args)
+        self.assertIn("--disable-mysql", args)
 
     def test_failure_artifact_keeps_crash_header_after_cleanup(self):
         with tempfile.TemporaryDirectory() as root:
@@ -568,6 +586,21 @@ class HookDiagnosticsContractTest(unittest.TestCase):
                 self.assertEqual(artifact["if"], "always()")
                 self.assertEqual(artifact["with"]["path"].rstrip("/"), run["env"]["MEMCP_TEST_LOGDIR"])
 
+    def test_performance_measurement_keeps_bounded_budget_and_upload_allowance(self):
+        import yaml
+        for name, job, measurement_minutes, job_minutes in (
+                ("performance.yml", "performance-ab-shard", 35, 45),
+                ("jit-performance.yml", "jit-performance-ab-shard", 35, 45)):
+            with self.subTest(workflow=name):
+                spec = yaml.safe_load((self.root / ".github/workflows" / name).read_text())["jobs"][job]
+                measurement = next(step for step in spec["steps"] if step.get("name", "").startswith("Measure "))
+                self.assertEqual(measurement["timeout-minutes"], measurement_minutes)
+                self.assertEqual(spec["timeout-minutes"], job_minutes)
+                artifact = next(step for step in spec["steps"]
+                                if step.get("name", "").startswith("Upload measured"))
+                self.assertEqual(artifact["if"], "always()")
+                self.assertGreater(job_minutes, measurement_minutes)
+
     def test_make_test_leaves_default_store_ownership_to_hook(self):
         makefile = (self.root / "Makefile").read_text(encoding="utf-8")
         test_recipe = makefile.split("\ntest:\n", 1)[1].split("\n\n", 1)[0]
@@ -576,6 +609,57 @@ class HookDiagnosticsContractTest(unittest.TestCase):
 
 
 class PerformanceScaleContractTest(unittest.TestCase):
+    def test_unicode_fixture_loading_and_database_creation_preserve_complete_bodies(self):
+        runner = SQLTestRunner("http://localhost:1")
+        database = "memcp-tests-🐘"
+        ttl = '<http://example.invalid/s> <http://example.invalid/p> "Grüße 🐘" .'
+        response = SimpleNamespace(status_code=200, text="true", headers={})
+        with mock.patch("run_sql_tests.requests.post", return_value=response) as post:
+            self.assertTrue(runner.load_ttl(database, ttl))
+        self.assertIn(database, runner._ensured_dbs)
+        bodies = [call.kwargs["data"] for call in post.call_args_list]
+        self.assertEqual(bodies[0].decode("utf-8"), f'CREATE DATABASE IF NOT EXISTS `{database}`')
+        self.assertEqual(bodies[-1].decode("utf-8"), ttl)
+        for call in post.call_args_list:
+            body = call.kwargs["data"]
+            self.assertIsInstance(body, bytes)
+            request = requests.Request("POST", call.args[0], data=body).prepare()
+            self.assertEqual(int(request.headers["Content-Length"]), len(body))
+
+    def test_unicode_scm_bodies_use_utf8_byte_lengths_in_every_execution_path(self):
+        code = '(begin (define label "Grüße 🐘") true)'
+        for mode in ("correctness", "case_setup", "suite_setup", "steps", "measured", "cleanup", "diagnostic"):
+            with self.subTest(mode=mode):
+                runner = SQLTestRunner("http://localhost:1")
+                response = SimpleNamespace(status_code=200, text="true", headers={})
+                with mock.patch("run_sql_tests.PERF_TEST_ENABLED", mode == "measured"), \
+                        mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
+                        mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                        mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
+                        mock.patch("run_sql_tests.requests.post", return_value=response) as post:
+                    case = {"name": "unicode body", "scm": code, "expect": {"result": True}}
+                    if mode == "suite_setup":
+                        self.assertTrue(runner.run_setup([{"scm": code}], "memcp-tests"))
+                    elif mode == "cleanup":
+                        self.assertTrue(runner.run_cleanup([{"scm": code}], "memcp-tests"))
+                    elif mode == "diagnostic":
+                        self.assertIn("true", runner._run_on_fail({"on_fail": [{"scm": code}]}, "memcp-tests"))
+                    else:
+                        if mode == "case_setup":
+                            case["setup"] = [{"scm": code}]
+                        elif mode == "steps":
+                            case = {"name": "unicode steps", "steps": [{"scm": code}, {"scm": code, "background": True}]}
+                        elif mode == "measured":
+                            case.update(threshold_ms=1000, timing_samples=1, warmup=0)
+                        self.assertTrue(runner.run_test_case(case, "memcp-tests"))
+                self.assertGreater(post.call_count, 0)
+                for call in post.call_args_list:
+                    body = call.kwargs["data"]
+                    self.assertIsInstance(body, bytes)
+                    self.assertEqual(body.decode("utf-8"), code)
+                    request = requests.Request("POST", call.args[0], data=body).prepare()
+                    self.assertEqual(int(request.headers["Content-Length"]), len(code.encode("utf-8")))
+
     def test_cpu_diagnostics_target_the_measured_http_instance(self):
         base_url = "http://localhost:19991"
         runner = SQLTestRunner(base_url)
@@ -583,6 +667,7 @@ class PerformanceScaleContractTest(unittest.TestCase):
         with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
                 mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
                 mock.patch("run_sql_tests.find_memcp_pid", return_value=None) as discover, \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
                 mock.patch("run_sql_tests.requests.post", return_value=response):
             self.assertTrue(runner.run_test_case({
                 "name": "owned CPU measurement", "scm": "true", "threshold_ms": 1000,
@@ -610,6 +695,7 @@ class PerformanceScaleContractTest(unittest.TestCase):
         with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
                 mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
                 mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
                 mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
                 mock.patch("run_sql_tests.requests.post", return_value=response) as post:
             result = runner.run_test_case({
@@ -908,6 +994,7 @@ class FailureAttributionContractTest(unittest.TestCase):
         with mock.patch("run_sql_tests.PERF_TEST_ENABLED", performance), \
                 mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
                 mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
                 mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
                 mock.patch.object(runner, "execute_sql", return_value=response), \
                 redirect_stdout(output):
@@ -1136,6 +1223,150 @@ class AtomicJSONObserverContractTest(unittest.TestCase):
             writer.join()
             self.assertGreater(reads, 0)
             self.assertIsNotNone(error)
+
+
+class PerformanceSetupQuiescenceContractTest(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(mock.patch("run_sql_tests.PERF_TEST_ENABLED", True))
+        self.enterContext(mock.patch("run_sql_tests.PERF_AB_MODE", "record"))
+        self.enterContext(mock.patch("run_sql_tests.start_ram_monitor"))
+        self.enterContext(mock.patch("run_sql_tests.find_memcp_pid", return_value=None))
+        self.runner = SQLTestRunner("http://localhost:1", performance_calibration={
+            "architecture": "x86_64", "scale": 1.0,
+            "measured_ns": 14400000, "reference_ns": 14400000,
+        })
+        self.runner._config_loaded = True
+        self.enterContext(mock.patch.object(self.runner, "ensure_database"))
+        self.enterContext(mock.patch.object(self.runner, "save_perf_baselines"))
+        self.enterContext(mock.patch.object(self.runner, "_bump_failure_counter"))
+        self.response = SimpleNamespace(status_code=200, text='{"n":1}', headers={})
+
+    def case(self, name="cold", **extra):
+        return {
+            "name": name, "sql": "SELECT 1 AS n", "threshold_ms": 10000,
+            "timing_aggregation": "total", "timing_samples": 3, "warmup": 0,
+            "expect": {"rows": 1, "data": [{"n": 1}]}, **extra,
+        }
+
+    def run_spec(self, cases, *, setup_done=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = Path(tmp) / "performance.yaml"
+            spec.write_text(json.dumps({
+                "setup": [{"sql": "prepare fixture"}], "test_cases": cases,
+            }))
+            return self.runner.run_test_spec(str(spec), setup_done=setup_done)
+
+    def test_single_suite_settles_before_its_first_cold_request(self):
+        events = []
+        with mock.patch.object(self.runner, "run_setup",
+                               side_effect=lambda *_: events.append("setup") or True), \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence",
+                           side_effect=lambda _: events.append("settled") or True) as settle, \
+                mock.patch.object(self.runner, "execute_sql",
+                                  side_effect=lambda *_a, **_k: events.append("query") or self.response):
+            self.assertTrue(self.run_spec([self.case()]))
+        self.assertEqual(events, ["setup", "settled", "query", "query", "query"])
+        settle.assert_called_once_with(self.runner.base_url)
+        measured = next(iter(self.runner.perf_results.values()))
+        self.assertEqual((measured["warmup"], measured["repetitions"],
+                          measured["timing_aggregation"]), (0, 3, "total"))
+
+    def test_each_case_settles_its_new_fixture_before_measuring(self):
+        events = []
+        def execute(_database, query, *_args, **_kwargs):
+            events.append(query)
+            return self.response
+        with mock.patch("run_sql_tests.wait_for_performance_setup_quiescence",
+                        side_effect=lambda _: events.append("settled") or True), \
+                mock.patch.object(self.runner, "execute_sql", side_effect=execute):
+            for name in ("first", "second"):
+                self.assertTrue(self.runner.run_test_case(self.case(
+                    name, setup=[{"sql": "fill " + name}],
+                ), "memcp-tests"))
+        self.assertEqual(events, [
+            "fill first", "settled", *["SELECT 1 AS n"] * 3,
+            "fill second", "settled", *["SELECT 1 AS n"] * 3,
+        ])
+
+    def test_reused_snapshot_settles_without_repeating_setup(self):
+        with mock.patch.object(self.runner, "run_setup") as setup, \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence",
+                           return_value=True) as settle, \
+                mock.patch.object(self.runner, "execute_sql", return_value=self.response) as query:
+            self.assertTrue(self.run_spec([self.case()], setup_done=True))
+        setup.assert_not_called()
+        settle.assert_called_once_with(self.runner.base_url)
+        self.assertEqual(query.call_count, 3)
+
+    def test_shared_round_uses_only_its_existing_quiescence_barrier(self):
+        self.runner._perf_round_setup_barrier = mock.Mock()
+        self.runner._perf_round_failed = threading.Event()
+        with mock.patch("run_sql_tests.wait_for_performance_setup_quiescence") as settle, \
+                mock.patch.object(self.runner, "execute_sql", return_value=self.response) as query:
+            self.assertTrue(self.runner.run_test_case(self.case(), "memcp-tests"))
+        self.runner._perf_round_setup_barrier.wait.assert_called_once()
+        settle.assert_not_called()
+        self.assertEqual(query.call_count, 3)
+
+    def test_timeout_is_critical_and_stops_later_cases_without_fail_fast(self):
+        self.assertFalse(self.runner.fail_fast)
+        with mock.patch.object(self.runner, "run_setup", return_value=True), \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence",
+                           return_value=False) as settle, \
+                mock.patch.object(self.runner, "execute_sql") as query:
+            self.assertFalse(self.run_spec([
+                self.case(noncritical=True),
+                self.case("later", setup=[{"sql": "must not fill"}]),
+            ]))
+            self.assertEqual(self.runner.failed_critical, 1)
+            self.assertEqual(self.runner.failed_noncritical, 0)
+            self.assertFalse(self.runner.run_test_case(self.case(
+                "another", setup=[{"sql": "must not fill"}],
+            ), "memcp-tests"))
+        settle.assert_called_once_with(self.runner.base_url)
+        query.assert_not_called()
+        self.assertEqual(self.runner.perf_results, {})
+
+    def test_shared_round_timeout_is_critical_without_a_second_wait(self):
+        self.runner._perf_round_setup_barrier = mock.Mock()
+        self.runner._perf_round_failed = threading.Event()
+        self.runner._perf_round_failed.set()
+        with mock.patch("run_sql_tests.wait_for_performance_setup_quiescence") as settle, \
+                mock.patch.object(self.runner, "execute_sql") as query:
+            self.assertFalse(self.runner.run_test_case(
+                self.case(noncritical=True), "memcp-tests",
+            ))
+        self.assertEqual(self.runner.failed_critical, 1)
+        self.assertEqual(self.runner.failed_noncritical, 0)
+        settle.assert_not_called()
+        query.assert_not_called()
+
+    def test_nonperformance_and_disabled_performance_do_not_wait(self):
+        with mock.patch("run_sql_tests.wait_for_performance_setup_quiescence") as settle, \
+                mock.patch.object(self.runner, "execute_sql", return_value=self.response) as query:
+            self.assertTrue(self.runner.run_test_case({
+                "name": "correctness", "sql": "SELECT 1 AS n", "max_plan_size": 0,
+            }, "memcp-tests"))
+            with mock.patch("run_sql_tests.PERF_TEST_ENABLED", False):
+                self.assertTrue(self.runner.run_test_case(self.case(), "memcp-tests"))
+        settle.assert_not_called()
+        self.assertEqual(query.call_count, 1)
+
+    def test_cpu_quiescence_timeout_is_bounded_without_server_requests(self):
+        from run_sql_tests import wait_for_performance_setup_quiescence
+        clock = itertools.count(0, 0.25)
+        cpu = itertools.count(0, 0.1)
+        with mock.patch("run_sql_tests.find_memcp_pid", return_value=42), \
+                mock.patch("run_sql_tests.get_process_cpu_times", side_effect=lambda _: next(cpu)), \
+                mock.patch("run_sql_tests.time.monotonic", side_effect=lambda: next(clock)), \
+                mock.patch("run_sql_tests.ram_pressure_abort.wait", return_value=False) as wait, \
+                mock.patch("run_sql_tests.requests.post") as query:
+            self.assertFalse(wait_for_performance_setup_quiescence(
+                self.runner.base_url, timeout=1,
+            ))
+        self.assertGreater(wait.call_count, 0)
+        self.assertLessEqual(wait.call_count, 4)
+        query.assert_not_called()
 
 
 class FailFastParallelContractTest(unittest.TestCase):
@@ -1387,7 +1618,7 @@ class SuiteIsolationContractTest(unittest.TestCase):
                     }, "memcp-tests")
                 self.assertEqual(bool(result), status == 200)
                 self.assertEqual(post.call_count, 2)
-                self.assertEqual(post.call_args.kwargs["data"], '(settings "ScanDebugging" false)')
+                self.assertEqual(post.call_args.kwargs["data"], b'(settings "ScanDebugging" false)')
 
     def test_case_cleanup_runs_after_partial_setup(self) -> None:
         runner = SQLTestRunner("http://localhost:1")
@@ -1604,6 +1835,7 @@ class PerfRegressionWaiverContractTest(unittest.TestCase):
         with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
                 mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
                 mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
                 mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
                 mock.patch("run_sql_tests.requests.post", return_value=response):
             result = runner.run_test_case({
@@ -1623,6 +1855,7 @@ class PerfRegressionWaiverContractTest(unittest.TestCase):
         with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
                 mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
                 mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
                 mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
                 mock.patch("run_sql_tests.requests.post", return_value=response):
             result = runner.run_test_case({
@@ -1643,6 +1876,7 @@ class PerfRegressionWaiverContractTest(unittest.TestCase):
         with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
                 mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
                 mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
                 mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
                 mock.patch("run_sql_tests.requests.post",
                            side_effect=requests.RequestException("simulated kill")):
@@ -1661,6 +1895,7 @@ class PerfRegressionWaiverContractTest(unittest.TestCase):
         with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
                 mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
                 mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
                 mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
                 mock.patch("run_sql_tests.requests.post",
                            side_effect=requests.RequestException("simulated kill")):
@@ -1918,6 +2153,7 @@ class PerformanceFixtureContractTests(unittest.TestCase):
                         mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
                         mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
                         mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                        mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
                         mock.patch("run_sql_tests.requests.post", side_effect=[bad, good]) as post, \
                         redirect_stdout(io.StringIO()):
                     result = runner.run_test_case({
@@ -2036,6 +2272,7 @@ class PerformanceFixtureContractTests(unittest.TestCase):
                         mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
                         mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
                         mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                        mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
                         mock.patch("run_sql_tests.requests.post", side_effect=[response, good]) as post, \
                         redirect_stdout(io.StringIO()):
                     result = runner.run_test_case({
@@ -2135,6 +2372,7 @@ class PerformanceFixtureContractTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PERF_FIXTURE_TRIAL": "1"}), \
                 mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
                 mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
                 mock.patch("run_sql_tests.requests.post", return_value=bad) as post, \
                 redirect_stdout(io.StringIO()):
             result = runner.run_test_case({
@@ -2210,6 +2448,7 @@ class ColdWarmTotalContractTests(unittest.TestCase):
         with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
                 mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
                 mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
                 mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
                 mock.patch("run_sql_tests.requests.post", return_value=response) as post, \
                 redirect_stdout(io.StringIO()):

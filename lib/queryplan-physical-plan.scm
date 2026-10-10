@@ -5614,7 +5614,8 @@ chooses the producer/driver implementation from canonical stage facts. */
 	(lower_query_block_with_cataloged_stages (query_block_with_full_stage_catalog block))))
 
 (define source_is_base_table? (lambda (src)
-	(string? (source_relation src))))
+	(and (string? (source_relation src))
+		(nil? (tsql_catalog_database (source_schema src))))))
 
 (define information_schema_source? (lambda (schema relation)
 	(and (string? schema)
@@ -5642,7 +5643,9 @@ fix). */
 					(list (quote literal_union_dedupe_rows) rows) rows))
 			(if (information_schema_source? (source_schema src) (source_relation src))
 				(list (quote information_schema_rows) (source_schema src) (source_relation src))
-				(list (quote table) (source_schema src) (source_relation src)))))))
+				(if (tsql_catalog_database (source_schema src))
+					(list (quote tsql_catalog_rows) (source_schema src) (source_relation src))
+					(list (quote table) (source_schema src) (source_relation src))))))))
 
 (define source_table_expr_using (lambda (stages src)
 	(begin
@@ -6818,7 +6821,8 @@ scalar comparison work rather than an uncalibrated multiplier. */
 		(define src (car (qb_sources block)))
 		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
 		(define grouped_block (expand_grouped_query_block block))
-		(if (not (or (source_is_base_table? src) (row_domain_relation? (source_relation src))))
+		(if (not (or (source_is_base_table? src) (row_domain_relation? (source_relation src))
+			(tsql_catalog_database (source_schema src))))
 			(neumann_fail "build_queryplan" "single-source query-block lowering only supports base tables")
 			true)
 		(if (not (empty_list? (qb_stages block)))
@@ -6827,7 +6831,7 @@ scalar comparison work rather than an uncalibrated multiplier. */
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
 			(begin
 				(define group_stage (make_group_stage_for_block grouped_block src))
-				(if (direct_base_group_plan_preferred? group_stage)
+				(if (or (tsql_catalog_database (source_schema src)) (direct_base_group_plan_preferred? group_stage))
 					(lower_direct_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))
 					(if (direct_base_group_plan_eligible? group_stage)
 						(list (quote if)
@@ -10183,7 +10187,8 @@ key lists as well as the optional-access workload that selects its producer. */
 				stages result_mode probe_context scalar_plan continuation outer_scan direct_group_stage facts)
 			(begin
 				(define future_sources (join_optimizer_sources_for_order all_sources future_aliases))
-				(if (not (or (source_is_base_table? src) (row_domain_relation? (source_relation src))))
+				(if (not (or (source_is_base_table? src) (row_domain_relation? (source_relation src))
+					(tsql_catalog_database (source_schema src))))
 					(neumann_fail "build_queryplan" "multi-source query-block lowering only supports base tables after untangle")
 					true)
 				(define alias (source_alias src))

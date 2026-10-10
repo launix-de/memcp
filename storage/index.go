@@ -1389,7 +1389,8 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 				}
 				// otherwise: next iteration
 			}
-			return false // fully equal
+			// Match the record-ID tie-breaker used by delta and ordered RecSet scans.
+			return a < b
 		})
 		// store sorted values into compressed format
 		state.mainIndexes.prepare()

@@ -40,9 +40,10 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
-    # Cold toolchain builds have their own allowance. Measurement is capped
-    # separately at 15 minutes; a timed-out shard cannot pass the aggregate.
-    timeout-minutes: 30
+    # Cold toolchain builds and artifact upload retain a separate allowance.
+    # Several suspect suites must complete all seven fresh A/B pairs; the
+    # measurement cap is independent of the unchanged regression thresholds.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -151,7 +152,7 @@ jobs:
           mv base/memcp-php base/memcp
 
       - name: Measure JIT base and candidate with the SQL test runner
-        timeout-minutes: 15
+        timeout-minutes: 35
         shell: bash
         run: |
           runner="$GITHUB_WORKSPACE/candidate/run_sql_tests.py"

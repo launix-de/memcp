@@ -160,7 +160,7 @@ func TestAddedDefaultPreservesTransactionCommitAndRollback(t *testing.T) {
 			tx := NewTxContext(TxACID)
 			tx.Session = scm.NewSession()
 			scm.Apply(tx.Session, scm.NewString("__memcp_tx"), scm.NewAny(tx))
-			tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("pending")}}, nil, scm.NewNil(), false, nil, tx)
+			tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("pending")}}, nil, scm.NewNil(), false, nil, InsertOptions{Tx: tx})
 			tbl.CreateColumn("flag", "INT", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false), scm.NewString("default"), scm.NewInt(3)})
 			want := 1
 			if commit {

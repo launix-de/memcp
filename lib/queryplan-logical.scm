@@ -70,17 +70,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 /* ------------------------------------------------------------------------- */
 /* Small assoc helpers                                                        */
 
+(define tsql_catalog_database (lambda (schema)
+	(if (and (string? schema) (and (> (strlen schema) 15) (equal? (substr schema 0 15) "__tsql_catalog:")))
+		(substr schema 15) nil)))
+
 (define get_schema (lambda (schema tbl)
-	(if (equal?? schema "information_schema")
-		/* sql-metadata.scm owns only the virtual catalog. This is the sole
-		public dispatcher, so module load order cannot replace its semantics. */
-		(information_schema_column_catalog schema tbl)
-		(try
-			(lambda ()
-				(begin
-					(define handle (table schema tbl))
-					(if handle (show handle) (show schema tbl))))
-			(lambda (_e) '())))))
+	(if (tsql_catalog_database schema) (tsql_catalog_columns schema tbl)
+		(if (equal?? schema "information_schema")
+			/* sql-metadata.scm owns only the virtual catalog. This is the sole
+			public dispatcher, so module load order cannot replace its semantics. */
+			(information_schema_column_catalog schema tbl)
+			(try
+				(lambda ()
+					(begin
+						(define handle (table schema tbl))
+						(if handle (show handle) (show schema tbl))))
+				(lambda (_e) '()))))))
 
 /* Runtime-only helper columns (window-function row-number caches, correlated
 lookup carriers) share the naming conventions already used elsewhere to keep
@@ -95,8 +100,9 @@ since get_schema surfaces them alongside real columns. */
 			(equal? (substr name 0 1) "$")))))))
 
 (define table_insertable_columns (lambda (schema tbl)
-	(filter (map (get_schema schema tbl) (lambda (col) (col "Field")))
-		(lambda (name) (not (internal_column_name? name))))))
+	(map (filter (get_schema schema tbl)
+		(lambda (col) (not (internal_column_name? (col "Field")))))
+		(lambda (col) (col "Field")))))
 
 (define qassoc_get (lambda (xs key default)
 	(get_assoc_pairlist (coalesceNil xs '()) key default)))
@@ -5949,6 +5955,15 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 
 (define bind_output_alias_refs (lambda (fields expr)
 	(match expr
+		/* Aggregate arguments belong to the input relation. Output aliases only
+		bind outside aggregates; replacing SUM(amount)'s input with the output
+		SUM(amount) AS amount would create an invalid nested aggregate. */
+		(cons (symbol aggregate) _) expr
+		(cons (quote aggregate) _) expr
+		(cons (symbol count_distinct) _) expr
+		(cons (quote count_distinct) _) expr
+		(cons (symbol group_concat_distinct) _) expr
+		(cons (quote group_concat_distinct) _) expr
 		((symbol inner_select) _subquery) expr
 		((quote inner_select) _subquery) expr
 		((symbol inner_select_exists) _subquery) expr

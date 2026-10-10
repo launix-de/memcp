@@ -859,3 +859,118 @@ func BenchmarkRecMapPreparedValueProbe(b *testing.B) {
 		}
 	}
 }
+
+func TestRecMapValueMapperRetainsIndependentTuplesAcrossShards(t *testing.T) {
+	database := "trecmap_retained_tuples"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	source, _ := CreateTable(database, "source", Memory, true)
+	for _, name := range []string{"id", "target_id"} {
+		source.CreateColumn(name, "INT", nil, nil)
+	}
+	source.ShardMode = ShardModePartition
+	source.PDimensions = []shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(2500)}}}
+	source.PShards = []*storageShard{NewShard(source), NewShard(source)}
+	source.publishTopologyLocked()
+	sourceRows := make([][]scm.Scmer, 5000)
+	for i := range sourceRows {
+		key := scm.NewInt(int64(i % 500))
+		if i%17 == 0 {
+			key = scm.NewNil()
+		} else if i%19 == 0 {
+			key = scm.NewInt(9000)
+		}
+		sourceRows[i] = []scm.Scmer{scm.NewInt(int64(i)), key}
+	}
+	source.Insert([]string{"id", "target_id"}, sourceRows, nil, scm.NewNil(), false, nil)
+	targetRows := make([][]scm.Scmer, 500)
+	for i := range targetRows {
+		second := scm.NewInt(int64(i * 7))
+		if i%11 == 0 {
+			second = scm.NewNil()
+		}
+		targetRows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i * 3)), second}
+	}
+	target, _ := CreateTable(database, "target", Memory, true)
+	for _, name := range []string{"id", "first", "second"} {
+		target.CreateColumn(name, "INT", nil, nil)
+	}
+	target.ShardMode = ShardModePartition
+	target.PDimensions = []shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(250)}}}
+	target.PShards = []*storageShard{NewShard(target), NewShard(target)}
+	target.publishTopologyLocked()
+	target.Insert([]string{"id", "first", "second"}, targetRows, nil, scm.NewNil(), false, nil)
+	access := newScanAccessSchema(scanAccessConsumerScan, nil, -1)
+	mapping := scanRecMap(nil, NewTableScmer(source), access, nil, nil,
+		scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
+		[]string{"target_id"}, newRecMapEquiFirstMapper(nil, target, []string{"id"}, scm.NewNil()), target)
+	if mapping.count != 5000 || len(mapping.shards) != 2 {
+		t.Fatalf("mapped %d rows across %d shards", mapping.count, len(mapping.shards))
+	}
+	var projected atomic.Int64
+	lookup := newRecMapValueMapper(nil, mapping, []string{"first", "second"},
+		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+			projected.Add(1)
+			return scm.NewSlice(values)
+		}), scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewNil() }))
+	wantProjected := int64(0)
+	for _, part := range mapping.shards {
+		for _, recid := range part.sourceRecIDs {
+			id := recMapTargetValue(recMapTarget{shard: part.sourceShard, recid: recid}, "id").Int()
+			value := scm.Apply(lookup, newRecordRef(part.sourceShard, recid))
+			if id%17 == 0 || id%19 == 0 {
+				if !value.IsNil() {
+					t.Fatalf("missing/NULL source %d ran its projection", id)
+				}
+				continue
+			}
+			wantProjected++
+			key := id % 500
+			if !value.IsSlice() || len(value.Slice()) != 2 || value.Slice()[0].Int() != key*3 {
+				t.Fatalf("source %d lost its retained projection: %v", id, value)
+			}
+			second := value.Slice()[1]
+			if (key%11 == 0 && !second.IsNil()) || (key%11 != 0 && second.Int() != key*7) {
+				t.Fatalf("source %d lost its second projected value: %v", id, second)
+			}
+		}
+	}
+	if projected.Load() != wantProjected {
+		t.Fatalf("projection ran %d times, want %d", projected.Load(), wantProjected)
+	}
+	empty := newRecMapValueMapper(nil, &recMap{}, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		panic("empty mapping evaluated projection")
+	}), scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewInt(-1) }))
+	if scm.Apply(empty, newRecordRef(source.PShards[0], 0)).Int() != -1 {
+		t.Fatal("empty mapping did not preserve its fallback")
+	}
+}
+
+func TestScanRecMapRejectsWrongBatchWidthAndReleasesRights(t *testing.T) {
+	database := "trecmap_bad_batch_width"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	source := recMapTestTable(t, database, "source", []string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}})
+	target := recMapTestTable(t, database, "target", []string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}})
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("mapper returned zero targets for a nonempty source batch")
+			}
+		}()
+		scanRecMap(nil, NewTableScmer(source), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
+			nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
+			[]string{"id"}, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewSlice(nil) }), target)
+	}()
+	// A failed mapper must leave both endpoints usable by the next operation.
+	source.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, nil, scm.NewNil(), false, nil)
+	target.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, nil, scm.NewNil(), false, nil)
+	mapped := scanRecMap(nil, NewTableScmer(source), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
+		nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
+		[]string{"id"}, newRecMapEquiFirstMapper(nil, target, []string{"id"}, scm.NewNil()), target)
+	if mapped.count != 2 || mapped.image().count != 2 {
+		t.Fatalf("valid mapper after failure returned %d rows", mapped.count)
+	}
+}

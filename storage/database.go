@@ -17,6 +17,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "os"
+import "math"
 import "fmt"
 import "sort"
 import "sync"
@@ -33,10 +34,21 @@ type database struct {
 	Name        string                                     `json:"name"`
 	persistence PersistenceEngine                          `json:"-"`
 	tables      *NonLockingReadMap.ReadMap[string, *table] `json:"-"`
+	// Frontends own the opaque payload; schemalock protects it and the revision.
+	metadataValue    scm.Scmer `json:"-"`
+	metadataRevision uint64    `json:"-"`
+	// HighWater is persisted under schemalock. Runtime sequence state belongs
+	// to DML writers; ReserveMu is acquired only before taking DML locks.
+	SequenceHighWater uint64 `json:"sequence_high_water,omitempty"`
+	sequenceNext      atomic.Uint64
+	sequenceLimit     atomic.Uint64
+	sequenceEnabled   atomic.Bool
+	sequenceReserveMu sync.Mutex
 	// loadOnce is the database-wide lazy-load barrier. The MySQL and HTTP
 	// listeners may issue the first queries concurrently; none may observe a
 	// partially decoded table catalog.
-	loadOnce sync.Once `json:"-"`
+	loadOnce    sync.Once `json:"-"`
+	loadFailure any       `json:"-"`
 	// schemalock protects only database-local schema membership and schema.json
 	// snapshots. It must never cover long rebuild/repartition/blob work. The
 	// lock order continues with table.ddlMu -> table.mu -> shard.mu.
@@ -48,17 +60,22 @@ type database struct {
 	//     instead of forcing N full schema.json rewrites in sequence
 	//   - durable=true (Safe engine metadata) upgrades the coalesced write to
 	//     a fully synced commit; non-durable callers may piggyback on it
-	saveMu          sync.Mutex    `json:"-"`
-	saveCondOnce    sync.Once     `json:"-"`
-	saveCond        *sync.Cond    `json:"-"`
-	saveRequested   uint64        `json:"-"`
-	saveCompleted   uint64        `json:"-"`
-	saveInFlight    bool          `json:"-"`
-	savePending     []byte        `json:"-"`
-	savePendingSync bool          `json:"-"`
-	savePanic       any           `json:"-"`
-	schemaDirty     atomic.Bool   `json:"-"`
-	blobRefs        *blobRefState `json:"-"`
+	saveMu                 sync.Mutex     `json:"-"`
+	saveCondOnce           sync.Once      `json:"-"`
+	saveCond               *sync.Cond     `json:"-"`
+	schemaSnapshotRevision atomic.Uint64  `json:"-"`
+	saveLatestRevision     uint64         `json:"-"`
+	saveCompleted          uint64         `json:"-"`
+	saveDurableCompleted   uint64         `json:"-"`
+	saveInFlight           bool           `json:"-"`
+	saveActive             schemaSnapshot `json:"-"`
+	saveActiveSync         bool           `json:"-"`
+	savePending            schemaSnapshot `json:"-"`
+	savePendingSync        bool           `json:"-"`
+	saveFailureEpoch       uint64         `json:"-"`
+	saveFailure            any            `json:"-"`
+	schemaDirty            atomic.Bool    `json:"-"`
+	blobRefs               *blobRefState  `json:"-"`
 	// persistenceLifecycle protects storage generations from rebuild through
 	// publication. Rebuild/repartition and short catalog mutations take a read
 	// capability; cleanup and backend migration take the exclusive capability.
@@ -290,23 +307,34 @@ func normalizeTempLookupName(dbName string, name string) string {
 // Custom JSON to persist private tables field
 func (d *database) MarshalJSON() ([]byte, error) {
 	type persist struct {
-		Name   string                                     `json:"name"`
-		Tables *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
+		SequenceEnabled   bool                                       `json:"sequence_enabled,omitempty"`
+		SequenceHighWater uint64                                     `json:"sequence_high_water,omitempty"`
+		Metadata          scm.Scmer                                  `json:"metadata"`
+		MetadataRevision  uint64                                     `json:"metadata_revision,omitempty"`
+		Name              string                                     `json:"name"`
+		Tables            *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
 	}
-	return json.Marshal(persist{Name: d.Name, Tables: d.tables})
+	return json.Marshal(persist{Name: d.Name, Tables: d.tables, Metadata: d.metadataValue, MetadataRevision: d.metadataRevision, SequenceHighWater: d.SequenceHighWater, SequenceEnabled: d.sequenceEnabled.Load()})
 }
 
 func (d *database) UnmarshalJSON(data []byte) error {
 	type persist struct {
-		Name   string                                     `json:"name"`
-		Tables *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
+		SequenceEnabled   bool                                       `json:"sequence_enabled,omitempty"`
+		SequenceHighWater uint64                                     `json:"sequence_high_water,omitempty"`
+		Metadata          scm.Scmer                                  `json:"metadata"`
+		MetadataRevision  uint64                                     `json:"metadata_revision,omitempty"`
+		Name              string                                     `json:"name"`
+		Tables            *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
 	}
 	var p persist
 	if err := json.Unmarshal(data, &p); err != nil {
 		return err
 	}
 	d.Name = p.Name
+	d.SequenceHighWater = p.SequenceHighWater
+	d.sequenceEnabled.Store(p.SequenceEnabled)
 	d.tables = p.Tables
+	d.metadataValue, d.metadataRevision = p.Metadata, p.MetadataRevision
 	if d.tables == nil {
 		d.tables = NonLockingReadMap.NewReadMap[string, *table]()
 	}
@@ -318,6 +346,10 @@ var Basepath string = "data"
 
 func (d *database) ComputeSize() uint {
 	var sz uint = 16 * 8 // heuristic
+	d.schemalock.RLock()
+	metadata := d.metadataValue
+	d.schemalock.RUnlock()
+	sz += scm.ComputeSize(metadata)
 	for _, t := range d.tables.GetAll() {
 		sz += t.ComputeSize()
 	}
@@ -523,62 +555,118 @@ func (db *database) getSaveCond() *sync.Cond {
 	return db.saveCond
 }
 
-func (db *database) commitSchemaSnapshot(jsonbytes []byte, durable bool) {
-	// Serialize publications without holding schemalock. Coalescing may skip an
-	// intermediate in-memory snapshot, but every backend call still publishes a
-	// complete generation and every waiter observes its success or panic.
-	db.saveMu.Lock()
-	cond := db.getSaveCond()
-	db.saveRequested++
-	seq := db.saveRequested
-	db.savePending = jsonbytes
-	db.savePendingSync = db.savePendingSync || durable
-	if db.savePanic != nil && !db.saveInFlight {
-		db.savePanic = nil
-	}
-	if db.saveInFlight {
-		for db.saveCompleted < seq && db.savePanic == nil {
-			cond.Wait()
-		}
-		panicVal := db.savePanic
-		db.saveMu.Unlock()
-		if panicVal != nil {
-			panic(panicVal)
-		}
-		return
-	}
-	db.saveInFlight = true
-	db.savePanic = nil
+// A capture revision is assigned under schemalock, before serialization. It
+// orders catalog generations rather than the scheduling order of I/O callers.
+// RLock captures may coexist, so allocation uses an atomic counter.
+type schemaSnapshot struct {
+	revision uint64
+	data     []byte
+}
+
+func (db *database) captureSchemaSnapshotLocked() schemaSnapshot {
+	revision := db.schemaSnapshotRevision.Add(1)
+	jsonbytes, _ := json.MarshalIndent(db, "", "  ")
+	return schemaSnapshot{revision: revision, data: jsonbytes}
+}
+
+func (db *database) commitSchemaSnapshot(snapshot schemaSnapshot, durable bool) {
 	for {
-		snapshot := db.savePending
-		writeSync := db.savePendingSync
-		targetSeq := db.saveRequested
-		db.savePending = nil
-		db.savePendingSync = false
-		db.saveMu.Unlock()
-
-		var panicVal any
-		func() {
-			defer func() {
-				panicVal = recover()
-			}()
-			db.writeSchema(snapshot, writeSync)
-		}()
-
 		db.saveMu.Lock()
-		if panicVal != nil {
-			db.savePanic = panicVal
-			db.saveInFlight = false
-			cond.Broadcast()
-			db.saveMu.Unlock()
-			panic(panicVal)
-		}
-		db.saveCompleted = targetSeq
-		cond.Broadcast()
-		if db.savePending == nil {
-			db.saveInFlight = false
+		cond := db.getSaveCond()
+		failureEpoch := db.saveFailureEpoch
+		target := snapshot.revision
+		if snapshot.revision == db.saveLatestRevision && db.saveCompleted >= target && (!durable || db.saveDurableCompleted >= target) {
 			db.saveMu.Unlock()
 			return
+		}
+		if snapshot.revision >= db.saveLatestRevision {
+			db.saveLatestRevision = snapshot.revision
+			db.savePending = snapshot
+			db.savePendingSync = db.savePendingSync || durable
+		} else if durable && db.saveDurableCompleted < db.saveLatestRevision {
+			// A superseded fsync request must sync the newest generation. While
+			// I/O is active its bytes are still owned by the publisher; queue a
+			// durable rewrite if that write was already dispatched without fsync.
+			target = db.saveLatestRevision
+			if db.savePending.data != nil {
+				db.savePendingSync = true
+			} else if db.saveInFlight {
+				if !db.saveActiveSync {
+					db.savePending = db.saveActive
+					db.savePendingSync = true
+				}
+			} else {
+				// Do not retain a permanent second JSON catalog. A late fsync
+				// after an unsynced completion captures the current schema again.
+				db.saveMu.Unlock()
+				db.schemalock.RLock()
+				snapshot = db.captureSchemaSnapshotLocked()
+				db.schemalock.RUnlock()
+				continue
+			}
+		}
+		complete := func() bool {
+			return db.saveCompleted >= target && (!durable || db.saveDurableCompleted >= target)
+		}
+		if complete() {
+			db.saveMu.Unlock()
+			return
+		}
+		if db.saveInFlight {
+			for !complete() && db.saveFailureEpoch == failureEpoch {
+				cond.Wait()
+			}
+			failed := db.saveFailureEpoch != failureEpoch
+			failure := db.saveFailure
+			db.saveMu.Unlock()
+			if failed {
+				panic(failure)
+			}
+			return
+		}
+		db.saveInFlight = true
+		for {
+			next := db.savePending
+			writeSync := db.savePendingSync
+			db.saveActive = next
+			db.saveActiveSync = writeSync
+			db.savePending = schemaSnapshot{}
+			db.savePendingSync = false
+			db.saveMu.Unlock()
+
+			var failure any
+			func() {
+				defer func() { failure = recover() }()
+				db.writeSchema(next.data, writeSync)
+			}()
+
+			db.saveMu.Lock()
+			db.saveActive = schemaSnapshot{}
+			db.saveActiveSync = false
+			if failure != nil {
+				if db.savePending.data == nil {
+					db.savePending = next
+					db.savePendingSync = writeSync
+				}
+				db.saveFailureEpoch++
+				db.saveFailure = failure
+				db.saveInFlight = false
+				cond.Broadcast()
+				db.saveMu.Unlock()
+				panic(failure)
+			}
+			if next.revision > db.saveCompleted {
+				db.saveCompleted = next.revision
+			}
+			if writeSync && next.revision > db.saveDurableCompleted {
+				db.saveDurableCompleted = next.revision
+			}
+			cond.Broadcast()
+			if db.savePending.data == nil {
+				db.saveInFlight = false
+				db.saveMu.Unlock()
+				return
+			}
 		}
 	}
 }
@@ -589,7 +677,7 @@ func (db *database) save() {
 		return
 	}
 	db.schemalock.RLock()
-	jsonbytes, _ := json.MarshalIndent(db, "", "  ")
+	snapshot := db.captureSchemaSnapshotLocked()
 	// Buffered mutations after this snapshot must leave the catalog dirty.
 	// They need the exclusive schema lock and therefore cannot race this store.
 	db.schemaDirty.Store(false)
@@ -601,7 +689,7 @@ func (db *database) save() {
 				panic(r)
 			}
 		}()
-		db.commitSchemaSnapshot(jsonbytes, true)
+		db.commitSchemaSnapshot(snapshot, true)
 	}()
 	// shards are written while rebuild
 }
@@ -610,32 +698,48 @@ func (db *database) save() {
 // schemalock. Buffered temp metadata is immediately visible in memory; a later
 // synchronous schema save or rebuild includes it in its complete snapshot.
 func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
+	schemaLocked := true
+	defer func() {
+		if schemaLocked {
+			db.schemalock.Unlock()
+		}
+	}()
 	if db.srState == COLD {
 		db.schemalock.Unlock()
+		schemaLocked = false
 		return
 	}
+	db.metadataRevision++
 	if mode == schemaSaveBuffered {
 		db.schemaDirty.Store(true)
 		db.schemalock.Unlock()
+		schemaLocked = false
 		return
 	}
-	jsonbytes, _ := json.MarshalIndent(db, "", "  ")
+	snapshot := db.captureSchemaSnapshotLocked()
 	// Clear while the snapshot is protected. A later buffered mutation takes
 	// schemalock exclusively and sets dirty again after this generation.
 	db.schemaDirty.Store(false)
 	db.schemalock.Unlock()
+	schemaLocked = false
 	defer func() {
 		if r := recover(); r != nil {
 			db.schemaDirty.Store(true)
 			panic(r)
 		}
 	}()
-	db.commitSchemaSnapshot(jsonbytes, mode == schemaSaveFsync)
+	db.commitSchemaSnapshot(snapshot, mode == schemaSaveFsync)
 }
 
 // ensureLoaded loads schema.json into the database struct exactly once.
 func (db *database) ensureLoaded() {
 	db.loadOnce.Do(func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				db.loadFailure = failure
+				panic(failure)
+			}
+		}()
 		db.initializeTransactionLog()
 		if db.srState != COLD {
 			return
@@ -644,6 +748,7 @@ func (db *database) ensureLoaded() {
 		if len(jsonbytes) == 0 {
 			// fresh/empty database
 			db.tables = NonLockingReadMap.NewReadMap[string, *table]()
+			db.metadataValue = scm.NewNil()
 			db.srState = SHARED
 			return
 		}
@@ -652,6 +757,11 @@ func (db *database) ensureLoaded() {
 			panic(err)
 		}
 		db.tables = tmp.tables
+		db.metadataValue, db.metadataRevision = tmp.metadataValue, tmp.metadataRevision
+		db.SequenceHighWater = tmp.SequenceHighWater
+		db.sequenceNext.Store(tmp.SequenceHighWater)
+		db.sequenceLimit.Store(tmp.SequenceHighWater)
+		db.sequenceEnabled.Store(tmp.sequenceEnabled.Load())
 		// restore back-references; do not touch on-disk columns yet
 		for _, t := range db.tables.GetAll() {
 			t.schema = db
@@ -686,9 +796,24 @@ func (db *database) ensureLoaded() {
 			}
 			t.publishTopologyLocked()
 			t.initializeLegacyPlannerRowEstimate()
-			t.publishShowColumnsSnapshot()
-			t.restoreKeyFrequencies()
-			t.restoreFilterFeedback()
+		}
+		// Frontends repair old default/trigger declarations on privately loaded
+		// schema metadata. Definitions may validate private unique keys against
+		// loaded rows; frontend callbacks never recursively fetch these tables.
+		initialized := initializeRestoredTables(db)
+		for _, table := range db.tables.GetAll() {
+			table.restoreKeyFrequencies()
+			table.restoreFilterFeedback()
+		}
+		if db.sequenceEnabled.Load() && db.SequenceHighWater <= math.MaxUint64-sequenceReservation {
+			// Persist initialization and a fresh lease together before publication.
+			db.prepareSequence()
+		} else if initialized {
+			db.schemalock.Lock()
+			db.metadataRevision++
+			snapshot := db.captureSchemaSnapshotLocked()
+			db.schemalock.Unlock()
+			db.commitSchemaSnapshot(snapshot, true)
 		}
 		// FK declarations are authoritative, while their system triggers are
 		// generated code. Rebuild that code at the persistence boundary so schema
@@ -705,6 +830,9 @@ func (db *database) ensureLoaded() {
 			}
 		}
 	})
+	if db.loadFailure != nil {
+		panic(db.loadFailure)
+	}
 }
 
 // invalidatePersistedPlannerCodeAfterLoad drops executable code derived from a
@@ -1804,13 +1932,14 @@ func (db *database) newTable(name string, pm PersistencyMode) *table {
 	t.DroppedColumns = make(map[string]bool)
 	t.schema = db
 	t.Name = name
+	t.Metadata = scm.NewNil()
 	t.PersistencyMode = pm
 	t.ShardMode = ShardModeFree
 	t.lastAccessed = uint64(time.Now().UnixNano())
 	t.Shards = make([]*storageShard, 1)
 	t.Shards[0] = NewShard(t)
 	t.publishTopologyLocked()
-	t.Auto_increment = 0
+	atomic.StoreUint64(&t.Auto_increment, 0)
 	t.publishShowColumnsSnapshot()
 	return t
 }
@@ -1858,6 +1987,12 @@ func DropTable(schema, name string, ifexists bool) {
 		db.schemalock.Unlock()
 		requireTableMaintenance(schema, name, maintenanceDrop)
 	}
+	for _, fk := range t.Foreign {
+		if fk.Strict {
+			db.schemalock.Unlock()
+			panic("drop the foreign key constraint before dropping an endpoint table")
+		}
+	}
 	db.tables.Remove(name)
 	if name == ".blobs" {
 		db.blobRefState().table.Store(nil)
@@ -1904,6 +2039,12 @@ func RenameTable(schema, oldname, newname string) {
 	if t == nil {
 		db.schemalock.Unlock()
 		panic("Table " + schema + "." + oldname + " does not exist")
+	}
+	// FK programs and endpoint declarations retain the original table name.
+	// Reject renames until they can be rewritten atomically with enforcement.
+	if len(t.Foreign) != 0 {
+		db.schemalock.Unlock()
+		panic("renaming foreign key endpoints is unsupported")
 	}
 	if !tableMaintenanceCapabilities(schema, oldname).canRename {
 		db.schemalock.Unlock()

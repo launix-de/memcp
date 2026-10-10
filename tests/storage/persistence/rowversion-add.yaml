@@ -1,0 +1,65 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Generated rowversion ADD rejection preserves schema and rows across
+    rebuild and restart
+  syntax: tsql
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS tsql_rv_add_empty
+- sql: DROP TABLE IF EXISTS tsql_rv_add_main
+- sql: CREATE TABLE tsql_rv_add_empty (id INT PRIMARY KEY)
+- sql: CREATE TABLE tsql_rv_add_main (id INT PRIMARY KEY)
+- sql: INSERT tsql_rv_add_main VALUES (1)
+test_cases:
+- name: Publish main generation
+  scm: (rebuild (table "memcp-tests" "tsql_rv_add_main") true false)
+- name: Main rows reject generated ADD
+  sql: ALTER TABLE tsql_rv_add_main ADD added_rv ROWVERSION PRIMARY KEY
+  expect:
+    error: true
+- name: Empty table rejects generated ADD
+  sql: ALTER TABLE tsql_rv_add_empty ADD added_rv ROWVERSION PRIMARY KEY
+  expect:
+    error: true
+- name: Rejected ADD keeps all schemas clean
+  scm: (begin (define names (list "tsql_rv_add_empty" "tsql_rv_add_main")) (if (reduce
+    names (lambda (ok name) (and ok (nil? (find (get_schema "memcp-tests" name) (lambda
+    (column) (equal? (column "Field") "added_rv")) nil)))) true) true (error "rejected
+    ADD changed published columns")))
+- name: Persist rejected ADD definitions
+  syntax: mysql
+  sql: SHUTDOWN
+- name: Restarted main rows reject generated ADD
+  sql: ALTER TABLE tsql_rv_add_main ADD added_rv ROWVERSION PRIMARY KEY
+  expect:
+    error: true
+- name: Restarted empty table rejects generated ADD
+  sql: ALTER TABLE tsql_rv_add_empty ADD added_rv ROWVERSION PRIMARY KEY
+  expect:
+    error: true
+- name: Restarted rejection keeps schemas clean
+  scm: (begin (define names (list "tsql_rv_add_empty" "tsql_rv_add_main")) (if (reduce
+    names (lambda (ok name) (and ok (nil? (find (get_schema "memcp-tests" name) (lambda
+    (column) (equal? (column "Field") "added_rv")) nil)))) true) true (error "rejected
+    ADD changed published columns")))
+- name: Valid DDL after rejected ADD
+  sql: ALTER TABLE tsql_rv_add_main ADD recovered INT DEFAULT 7
+- name: Insert after rejected ADD
+  sql: INSERT tsql_rv_add_empty VALUES (1)
+- name: Main rows remain unchanged
+  sql: SELECT COUNT(*) AS value FROM tsql_rv_add_main
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Empty table writer remains usable
+  sql: SELECT COUNT(*) AS value FROM tsql_rv_add_empty
+  expect:
+    rows: 1
+    data:
+    - value: 1
+cleanup:
+- sql: DROP TABLE IF EXISTS tsql_rv_add_empty
+- sql: DROP TABLE IF EXISTS tsql_rv_add_main

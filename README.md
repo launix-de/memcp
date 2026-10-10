@@ -13,8 +13,8 @@ into the compressed representation. Persistent data may be evicted from RAM and
 loaded again on demand, so the complete database does not have to remain memory
 resident.
 
-Applications can connect through the MySQL wire protocol or submit MySQL- and
-PostgreSQL-style SQL through separate HTTP endpoints. An RDF/SPARQL engine is
+Applications can connect through the MySQL or optional TDS protocol,
+or submit MySQL-, psql- and t-sql-style SQL through separate HTTP endpoints. An RDF/SPARQL engine is
 included as well.
 
 > **Status: Beta.** MemCP is suitable for evaluation and controlled beta
@@ -72,6 +72,100 @@ INSERT INTO users VALUES (1, 'Alice', 'alice@example.com');
 SELECT * FROM users WHERE id = 1;
 ```
 
+### t-sql mode and TDS clients
+
+Enable the TDS 7.4 listener explicitly; it uses the existing MemCP users and
+database access policies:
+
+```bash
+./memcp --no-repl --tsql-port=1433 --tsql-database=mydb lib/main.scm
+```
+
+The default database is created at startup if necessary. `TSQL_PORT` and
+`TSQL_DATABASE` provide the corresponding environment settings. Configure
+`--tsql-tls-cert=cert.pem --tsql-tls-key=key.pem` to require TLS 1.2. Without a
+certificate, clients must select an unencrypted connection (for example
+`encrypt=disable` with the Go TDS driver).
+
+The t-sql frontend uses MemCP's common planner, storage, transactions and access
+policies. It supports bracket/double-quoted identifiers, case-independent table,
+column and view lookup with preserved spelling, Unicode and binary literals,
+`TOP`, `OFFSET … FETCH`, DISTINCT, joins, subqueries, GROUP BY, windows,
+INSERT/UPDATE/DELETE, CREATE TABLE/VIEW, `IDENTITY(1,1)` and alias types.
+Scalar/catalog `IF` predicates support one statement with optional `ELSE`;
+blocks, nested conditionals and subquery guards remain unsupported.
+Each MemCP database exposes `dbo`; `database.dbo.table` addresses another MemCP
+database. Integer division and integer AVG follow declared t-sql types. The psql
+frontend also gains windows, DISTINCT, OFFSET/FETCH and corrected quoted strings.
+
+Identity retrieval separates the last generated session value (`@@IDENTITY`)
+from the current batch/RPC scope (`SCOPE_IDENTITY()`). Rollback consumes reserved
+values. Primary/unique keys and named, composite foreign keys have real storage
+constraints. Declared primary-key constraint names are normalized to `PRIMARY`.
+`DROP CONSTRAINT` supports named DEFAULT, UNIQUE and foreign-key constraints.
+Identity allocation checks the declared type before reserving a
+batch and uses a signed 64-bit counter, including zero-scale decimal identities.
+Identity columns are non-nullable and cannot be updated. Foreign-key ALTER
+requires a physically empty child table; CREATE requires an existing parent with
+a matching ordered candidate key. NO ACTION,
+CASCADE and SET NULL are enforced. Self/forward/cross-database references,
+unchecked constraints and SET DEFAULT are unsupported. Character foreign keys
+use byte-exact matching. Remove the foreign-key constraint before dropping an
+endpoint, referenced column or its last candidate key, or renaming an endpoint.
+
+DECIMAL/NUMERIC arithmetic retains up to 38 digits, and MONEY/SMALLMONEY retain
+fixed currency scale and range. Unary minus preserves precision, scale and
+currency type; TINYINT negation produces SMALLINT. Unary BIT and nonnumeric
+operands fail explicitly. Declared temporal operations use frontend-bound
+integer clock values and codecs for DATETIME's 1/300-second grid and
+TIME/DATETIME2 fractional precision. The frontend also binds precision, scale,
+casts and TDS conversion. Supported CONVERT styles, DATEADD/DATEDIFF/DATEPART, hexadecimal
+bytes and NCHAR cover common desktop application expressions. Column declarations
+retain type dimensions for conversion and metadata; unsupported types or styles
+fail explicitly. Generated ROWVERSION columns use a durable database-wide
+eight-byte sequence for inserts and updates, including no-op updates. Rollback
+consumes sequence values. Declare ROWVERSION when creating a table; adding it to
+an existing table requires backfill support and currently fails explicitly.
+
+Read-only `sys.types`, `sys.tables`, `sys.objects`, `sys.columns` and `sys.schemas`,
+along with OBJECT_ID, TYPE_ID and COL_LENGTH, expose real declaration metadata.
+ODBC table/column/type discovery and logical parameter description are supported.
+Key, index, row-version and foreign-key discovery report actual declarations.
+Direct base-column results retain nullability and editability. Explicit
+`FOR BROWSE` adds source/key metadata for a single base table when all primary-key
+columns are projected; derived results and static cursors remain read-only.
+Declared result types survive empty and all-NULL results, including prepared
+parameter precision and scale. Expressions without a known declaration use
+bounded runtime discovery. View object identities and a complete system catalog
+remain outside this subset.
+
+The TDS adapter supports SQL logins using existing user passwords, TLS 1.2,
+semicolon-separated batches, multiple result sets, transaction-manager requests,
+cancellation and connection reset. It implements `sp_executesql`, prepared
+execute/describe/unprepare RPCs and bounded, read-only STATIC cursors. Input
+bindings include integers, floating point, bits, Unicode/text, raw binary,
+exact decimals/currency and supported temporal types. Values remain separate
+from SQL text. STATIC cursors retain detached result rows within explicit
+resource limits; dynamic/keyset and writable cursors are unsupported.
+
+`load_tsql` imports schema/data SQL scripts with GO separators, UTF-8 or
+BOM-marked UTF-16 and optional gzip compression. It preserves literals and
+confines source database retargeting to the chosen destination. Errors stop
+further statements; prior commits remain, and unfinished transactions roll back.
+Native backup/package and bulk-copy formats have no reader.
+Define supported foreign keys before loading child rows; exports that add them
+to populated tables require a different export order or future validation support.
+
+This is a compatibility subset. Integrated authentication, instance discovery,
+MARS, bulk copy, arbitrary stored procedures, output parameters, named/nested
+transactions, additional schemas, CTE/APPLY, explicit window frames, ordered
+aggregate windows, TRUNCATE TABLE and TOP PERCENT/WITH TIES remain unsupported. Explicit text
+collation declarations and full session-option equivalence are not implemented.
+Application-specific installation procedures need their own implementation.
+There is no complete desktop application certification or installation replay.
+See [the evaluation guide](README-TSQL.md) for an isolated real-client test,
+script migration and the information needed to reproduce the first failure.
+
 ### SQL over HTTP
 
 ```bash
@@ -86,6 +180,7 @@ Important HTTP endpoints:
 
 - `/sql/<database>` — MySQL-dialect SQL
 - `/psql/<database>` — PostgreSQL-dialect SQL
+- `/tsql/<database>` — T-SQL-dialect SQL
 - `/rdf/<database>` — SPARQL queries
 - `/rdf/<database>/load_ttl` — load RDF/Turtle data
 - `/dashboard` — administration, system monitoring, query activity, storage,
@@ -538,6 +633,10 @@ does not compile or activate the experimental runtime integration.
 |------|---------|-------------|
 | `--api-port=PORT` | `4321` | HTTP API listen port |
 | `--mysql-port=PORT` | `3307` | MySQL protocol listen port |
+| `--tsql-port=PORT` | off | Enable T-SQL TDS 7.4 listener |
+| `--tsql-database=DB` | `memcp` | Default TDS database |
+| `--tsql-tls-cert=PATH`, `--tsql-tls-key=PATH` | — | Require TLS on the TDS listener |
+| `--disable-tsql` | — | Disable TDS despite a configured port |
 | `--mysql-socket=PATH` | `/tmp/memcp.sock` | MySQL Unix socket path |
 | `--root-password=PASSWORD` | `admin` | Initial root password (first run only) |
 | `--root-password-file=PATH` | — | Read the initial root password from a file |
@@ -725,6 +824,35 @@ mysql -h 127.0.0.1 -P 3307 -u root -p myapp < dump.sql
 
 Take the dump with `--databases` (or prepend `CREATE DATABASE` / `USE`) so the
 statements target the intended database.
+
+### Import a t-sql export script
+
+```scheme
+(load_tsql "myapp" "/path/to/export.sql" (sql_policy "root"))
+(load_tsql "myapp" "/path/to/export.sql.gz" (sql_policy "root"))
+```
+
+The loader streams plain or gzip-compressed scripts, accepts UTF-8 and
+BOM-marked UTF-16, recognizes `GO`, and keeps separators inside quoted values.
+It also recognizes line-start INSERT/SET/DDL boundaries in exports without
+semicolons. Statement buffers are limited to 16 MiB. Use schema-and-data SQL
+scripts containing supported CREATE TABLE/INSERT statements, rather than
+native `.bak`, `.bacpac`, `.dacpac` or BCP files; those formats have no reader yet.
+
+CREATE DATABASE/USE headers select a source alias; all supported object
+references are retargeted to the selected destination without rewriting string
+values. References to another database fail. The supplied policy applies to
+every statement. Clustered/nonclustered key declarations enforce uniqueness
+through existing MemCP indexes; they do not select a physical storage layout.
+Explicit identity values advance the existing identity counter, and
+IDENTITY_INSERT export switches are accepted only by the loader.
+
+The loader executes statements in order, commits ordinary statements
+individually, and honors explicit transactions. An error stops the import;
+earlier committed statements remain applied. An unfinished transaction is
+rolled back and reported as an error. Existing tables are replaced only if the
+script explicitly drops them. Unsupported DDL/procedures are reported, rather
+than skipped. Run an import into a separate target database for validation.
 
 ### Import from PostgreSQL
 

@@ -18,7 +18,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 package storage
 
 import (
+	"encoding/binary"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -411,7 +413,13 @@ func TestForeignKeyExistenceIndexedComposite(t *testing.T) {
 		{[]scm.Scmer{scm.NewInt(999), scm.NewInt(5)}, true},
 		{[]scm.Scmer{scm.NewInt(999), scm.NewInt(4)}, false},
 		{[]scm.Scmer{scm.NewInt(1001), scm.NewInt(0)}, false},
-		{[]scm.Scmer{scm.NewInt(1001), scm.NewNil()}, true},
+		// A NULL-containing tuple exempts a child FK, but cannot identify
+		// an actual reference for parent UPDATE/DELETE enforcement.
+		{[]scm.Scmer{scm.NewInt(1001), scm.NewNil()}, false},
+		{[]scm.Scmer{scm.NewInt(0), scm.NewNil()}, false},
+		{[]scm.Scmer{scm.NewNil(), scm.NewInt(0)}, false},
+		{[]scm.Scmer{scm.NewNil(), scm.NewNil()}, false},
+		{[]scm.Scmer{scm.NewInt(0), scm.NewInt(0)}, true},
 	} {
 		if got := fkExistenceCheck(nil, parent, []string{"a", "b"}, test.values); got != test.want {
 			t.Fatalf("probe %v: got %v, want %v", test.values, got, test.want)
@@ -525,6 +533,89 @@ func TestBeforeUpdateForwardsTriggerValuesAfterRebuildCompletion(t *testing.T) {
 	}
 	if len(values) != 1 || values[0] != 3 {
 		t.Fatalf("successor values = %v, want trigger-rewritten [3]", values)
+	}
+}
+
+func TestBeforeTriggerGeneratedTokenIsCopiedAcrossWriteForwarding(t *testing.T) {
+	for _, update := range []bool{false, true} {
+		name := "insert-successor-chain"
+		if update {
+			name = "update-during-rebuild"
+		}
+		t.Run(name, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tgeneratedtokenforward")
+			tbl.CreateColumn("token", "BINARY", []int{8}, nil)
+			shard := tbl.ActiveShards()[0]
+			var generations atomic.Uint64
+			var successor *storageShard
+			generate := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+				var bytes [8]byte
+				binary.BigEndian.PutUint64(bytes[:], generations.Add(1))
+				id, _ := args[1].FastDict().Get(scm.NewString("id"))
+				row := scm.NewFastDictValue(2)
+				row.Set(scm.NewString("id"), id, nil)
+				row.Set(scm.NewString("token"), scm.NewString(string(bytes[:])), nil)
+				if update {
+					// Publish while the source UPDATE is inside the unlocked
+					// before hook. Its final token must be copied, never regenerated.
+					successor = shard.rebuild(true)
+				}
+				return scm.NewFastDict(row)
+			})
+			if update {
+				tbl.Insert([]string{"id", "token"}, [][]scm.Scmer{
+					{scm.NewInt(1), scm.NewString(string(make([]byte, 8)))},
+				}, nil, scm.NewNil(), false, nil)
+				tbl.AddTrigger(TriggerDescription{Name: "generate_token", Timing: BeforeUpdate, Func: generate})
+				release := shard.GetRead(nil)
+				defer release()
+				if !shard.UpdateFunction(0, true, false, nil)(scm.NewSlice([]scm.Scmer{
+					scm.NewString("id"), scm.NewInt(1),
+				})).Bool() {
+					t.Fatal("generated token did not turn the no-op update into a write")
+				}
+			} else {
+				successor = NewShard(tbl)
+				latest := NewShard(tbl)
+				shard.storeNext(successor)
+				shard.nextReady.Store(true)
+				successor.storeNext(latest)
+				successor.nextReady.Store(true)
+				tbl.AddTrigger(TriggerDescription{Name: "generate_token", Timing: BeforeInsert, Func: generate})
+				shard.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, false, nil, nil, false, nil)
+				if latest.Count() != 1 {
+					t.Fatal("insert did not traverse both successors")
+				}
+			}
+			if got := generations.Load(); got != 1 {
+				t.Fatalf("one logical write generated %d tokens, want one", got)
+			}
+			if successor == nil {
+				t.Fatal("no successor was published")
+			}
+			for current := shard; current != nil; current = current.loadNext() {
+				func() {
+					release := current.GetRead(nil)
+					defer release()
+					current.mu.RLock()
+					defer current.mu.RUnlock()
+					live := 0
+					for id := uint32(0); id < current.main_count+uint32(len(current.inserts)); id++ {
+						if current.deletions.Get(uint(id)) {
+							continue
+						}
+						live++
+						value := current.rowValueByRecidLocked(id, "token").String()
+						if len(value) != 8 || binary.BigEndian.Uint64([]byte(value)) != 1 {
+							t.Fatalf("forwarded token = %x, want eight-byte value one", value)
+						}
+					}
+					if live != 1 {
+						t.Fatalf("generation has %d live rows, want one", live)
+					}
+				}()
+			}
+		})
 	}
 }
 

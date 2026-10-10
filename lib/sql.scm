@@ -20,12 +20,27 @@ in scope. Keep the global binding as an inert self-representing symbol; SQL
 execution shadows it with the concrete session captured by the frontend. */
 (define session (quote session))
 
+/* Catalog constraints belong to this frontend. Restore declarations while
+schema metadata is private, before any account or grant can be read. */
+(define sql_catalog_unique_definition (lambda (table_name)
+	(match table_name
+		"user" (list "unique" "uniq_username" '("username") false)
+		"access" (list "unique" "uniq_user_db" '("username" "database") false)
+		"views" (list "unique" "uniq_database_name" '("database" "name") false)
+		_ nil)))
+(registerschemainitializer "sql-catalog-keys" (lambda (context)
+	(if (equal?? (context "schema") "system") (begin
+		(define definition (sql_catalog_unique_definition (context "table")))
+		(if (nil? definition) '() (list definition))) '())))
+
 (import "sql-parser.scm")
 (import "sql-parameters.scm")
 (import "psql-parser.scm")
 (import "sql-builtins.scm")
+(import "tsql-parser.scm")
 (import "sql-metadata.scm")
 (import "queryplan.scm")
+(import "tsql-metadata.scm")
 (import "sql-views.scm")
 
 /* Root is the recovery identity for a fresh/local installation. User-facing
@@ -43,6 +58,7 @@ or its administrator capability. */
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))
 (set psql_queryplan_cache (newcachemap))
+(set tsql_queryplan_cache (newcachemap))
 (set sql_literal_shape_cache (newcachemap))
 
 /* Statistics guards deliberately specialize physical plans, but exact row
@@ -520,6 +536,15 @@ user table merely to discard a newly constructed policy closure. */
 (define sql_queryplan_cache_key (lambda (username schema query shape_hash)
 	(concat username ":" schema ":" (sql_view_query_generation query) ":" shape_hash)))
 
+/* Declared input types are part of an exact SELECT's result contract too.
+The exact-cache path has no variant guards, so keep complete immutable type
+signatures in its key. Values stay request-local and never enter this suffix. */
+(define sql_queryplan_parameter_type_signature (lambda (session) (begin
+	(define keys (sort (filter (session) (lambda (key)
+		(and (string? key) (strlike key "tsql_param_type:%")))) <))
+	(if (empty_list? keys) ""
+		(concat ":parameter-types:" (json_encode (map keys (lambda (key) (list key (session key))))))))))
+
 (define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session parameterize_literals tx)
 	(begin
 		(define explain_query (match (toUpper query)
@@ -536,7 +561,9 @@ user table merely to discard a newly constructed policy closure. */
 					(queryplan_cache (sql_queryplan_cache_key username schema query (nth exact_shape 2))))
 					exact_shape (sql_parameterize_select_literals query true)))))
 		(match parameterized '(parse_query bindings shape_hash) (begin
-			(define cache_key (sql_queryplan_cache_key username schema parse_query shape_hash))
+			(define cache_key (concat (sql_queryplan_cache_key username schema parse_query shape_hash)
+				(if (equal? (if (list? parse_fn) (car parse_fn) parse_fn) parse_tsql)
+					(sql_queryplan_parameter_type_signature session) "")))
 			(define compile_diagnostic (and explain_query (match (toUpper parse_query)
 				(regex "^\\s*EXPLAIN\\s+COMPILE\\b" _) true
 				_ false)))
@@ -588,6 +615,32 @@ user table merely to discard a newly constructed policy closure. */
 (define sql_execute_formula (lambda (session tx formula resultrow resultfields)
 	(formula session tx resultrow resultfields)))
 
+/* Transport presentation is bound by each result descriptor. Exact coefficients
+and scaled Unix values remain ordinary engine values until this frontend sink.
+The descriptor directory is per invocation; neither plan caches nor persistent
+sessions retain rows or transport values. */
+(define tsql_export_execute_formula (lambda (session tx formula resultrow resultfields) (begin
+	(define output (newsession))
+	(define emit_fields (lambda args (begin
+		(output "descriptions" (if (> (count args) 1) (cadr args) nil))
+		(apply resultfields args))))
+	(define emit_row (lambda (row) (begin
+		(define descriptions (output "descriptions"))
+		(if (nil? descriptions) (resultrow row)
+			(begin
+				(define positional (and (equal? (count row) (* 2 (count descriptions)))
+					(reduce (produceN (count descriptions)) (lambda (valid idx)
+						(and valid (equal? (nth row (* 2 idx))
+							(get_assoc (nth descriptions idx) "name")))) true)))
+				(resultrow (merge (map (produceN (/ (count row) 2)) (lambda (idx) (begin
+					(define name (nth row (* 2 idx)))
+					(define value (nth row (+ 1 (* 2 idx))))
+					(define description (if positional (nth descriptions idx)
+						(car (filter descriptions (lambda (field) (equal? (get_assoc field "name") name))))))
+					(define formatter (if description (get_assoc description "export") nil))
+					(list name (if (or (nil? value) (nil? formatter)) value (formatter value)))))))))))))
+	(formula session tx emit_row emit_fields))))
+
 /* helper: build a policy function for table-level access checks
 usage: create a policy by (set policy (sql_policy "username")),
 then you can query the policy by
@@ -627,7 +680,7 @@ if the user is not allowed to access this property, the function will throw an e
 ))
 (if (has? (show "system") "user") true (begin
 	(print "creating table system.user")
-	(eval (parse_sql "system" "CREATE TABLE `user`(username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" (lambda (schema tblname write) true)))
+	(eval (parse_sql "system" "CREATE TABLE `user`(username text, password text, admin boolean DEFAULT FALSE, UNIQUE KEY uniq_username(username)) ENGINE=SAFE" (lambda (schema tblname write) true)))
 	(insert (table "system" "user") '("username" "password" "admin") '('("root" (password (arg "root-password" "admin")) true)))
 ))
 
@@ -699,14 +752,14 @@ qry    — query text (pass "" when unknown) */
 /* access control: which user can access which database */
 (if (has? (show "system") "access") true (begin
 	(print "creating table system.access")
-	(eval (parse_sql "system" "CREATE TABLE `access`(username text, database text) ENGINE=SAFE" (lambda (schema tblname write) true)))
+	(eval (parse_sql "system" "CREATE TABLE `access`(username text, database text, UNIQUE KEY uniq_user_db(username, database)) ENGINE=SAFE" (lambda (schema tblname write) true)))
 ))
 
 /* Logical SQL views. Both the original SELECT and neutral parser IR are kept;
 the latter is expanded before logical planning and never materialized. */
 (if (has? (show "system") "views") true (begin
 	(print "creating table system.views")
-	(eval (parse_sql "system" "CREATE TABLE `views`(`database` text, `name` text, `dialect` text, `sql` text, `ir` text) ENGINE=SAFE" (lambda (schema tblname write) true)))
+	(eval (parse_sql "system" "CREATE TABLE `views`(`database` text, `name` text, `dialect` text, `sql` text, `ir` text, UNIQUE KEY uniq_database_name(`database`, `name`)) ENGINE=SAFE" (lambda (schema tblname write) true)))
 ))
 
 (sql_view_catalog_set_count
@@ -714,12 +767,22 @@ the latter is expanded before logical planning and never materialized. */
 
 /* Bootstrap owns these fixed catalog constraints. Do not suppress failures:
 without them repeated grants create duplicate accounts and ambiguous authentication. */
+(define init_sql_catalog_keys (lambda () (begin
+	(map '("user" "access" "views") (lambda (table_name) (begin
+		(define definition (sql_catalog_unique_definition table_name))
+		(define key_name (nth definition 1))
+		(define columns (nth definition 2))
+		(define unique_keys ((show (table "system" table_name) true) "Unique"))
+		(define key (find unique_keys (lambda (candidate) (equal?? (candidate "Id") key_name))))
+		(if (and key (equal? (key "Cols") columns)) true
+			(error (concat "catalog constraint system." table_name "." key_name " is missing or has a different shape"))))))
+	true)))
 (init_sql_catalog_keys)
 
 /* http hook for handling SQL */
 (define http_handler (begin
 	(set old_handler http_handler)
-	(define handle_query (lambda (req res schema query) (begin
+	(define handle_query (lambda (req res schema query parse_fn cache parameterize) (begin
 		/* check for password */
 		(set pw (scan_lookup nil (table "system" "user") (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list (req "username"))))
 		(if (and pw (equal? pw (password (req "password"))))
@@ -732,6 +795,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 					(define query_seq (req "__query_seq"))
 					(session "username" (req "username"))
 					(session "schema" schema)
+					(if (equal? parse_fn parse_tsql) (session "tsql_scope_identity" nil) true)
 					/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
 					before parse/build so session-sensitive planner rewrites see the right values. */
 					(extract_assoc (req "query") (lambda (k v) (session k v)))
@@ -740,11 +804,12 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 					(define resultrow (lambda (row) (begin
 						(set resultrow_called true)
 						(original_resultrow row))))
-					(set query_result (with_autocommit session session_state query_seq query
+					(set query_result (with_autocommit session session_state query_seq (if (equal? parse_fn parse_tsql) (tsql_guard_query query) query)
 						(lambda (tx) (begin
-							(define formula (cached_parse sql_queryplan_cache (list parse_sql) schema query
-								(list (quote sql-policy-for) (req "username")) (req "username") session true tx))
-							(sql_execute_formula session tx formula resultrow (lambda (_fields) true))))))
+							(define formula (cached_parse cache (list parse_fn) schema query
+								(list (quote sql-policy-for) (req "username")) (req "username") session parameterize tx))
+							((if (equal? parse_fn parse_tsql) tsql_export_execute_formula sql_execute_formula)
+								session tx formula resultrow (lambda _fields true))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
@@ -804,7 +869,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 							(extract_assoc (req "query") (lambda (k v) (session k v)))
 							(define formula (cached_parse psql_queryplan_cache (list parse_psql) schema query
 								(list (quote sql-policy-for) (req "username")) (req "username") session false tx))
-							(sql_execute_formula session tx formula resultrow (lambda (_fields) true)))))))
+							(sql_execute_formula session tx formula resultrow (lambda _fields true)))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
@@ -867,14 +932,22 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 				(set query ((req "body")))
 				/* tolerate an optional trailing ';' - must be at end of string */
 				(set query (match query (regex "^((?s:.*));\\s*$" _ body) body query))
-				(handle_query req res schema query)
+				(handle_query req res schema query parse_sql sql_queryplan_cache true)
 			)
 			(regex "^/sql/([^/]+)/(.*)$" url schema query_un) (begin
 				(set query (urldecode query_un))
 				/* tolerate an optional trailing ';' - must be at end of string */
 				(set query (match query (regex "^((?s:.*));\\s*$" _ body) body query))
-				(handle_query req res schema query)
+				(handle_query req res schema query parse_sql sql_queryplan_cache true)
 			)
+			(regex "^/tsql/([^/]+)$" url schema) (begin
+				(define query (strtrim ((req "body"))))
+				(define query (match query (regex "^((?s:.*));\\s*$" _ body) body query))
+				(handle_query req res schema query parse_tsql tsql_queryplan_cache false))
+			(regex "^/tsql/([^/]+)/(.*)$" url schema query_un) (begin
+				(define query (strtrim (urldecode query_un)))
+				(define query (match query (regex "^((?s:.*));\\s*$" _ body) body query))
+				(handle_query req res schema query parse_tsql tsql_queryplan_cache false))
 			(regex "^/psql/([^/]+)$" url schema) (begin
 				(set query ((req "body")))
 				/* tolerate an optional trailing ';' - must be at end of string */
@@ -895,6 +968,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 /* register SQL frontends in service registry */
 (service_registry "SQL Frontend" (list (arg "api-port" (env "PORT" "4321")) "/sql/[database]" "POST, NDJSON"))
 (service_registry "PSQL Frontend" (list (arg "api-port" (env "PORT" "4321")) "/psql/[database]" "POST, NDJSON"))
+(service_registry "T-SQL Frontend" (list (arg "api-port" (env "PORT" "4321")) "/tsql/[database]" "POST, NDJSON"))
 (service_registry "SCM Frontend" (list (arg "api-port" (env "PORT" "4321")) "/scm" "POST, JSON"))
 
 /* shared callbacks for mysql protocol (TCP and Unix socket) */
@@ -915,12 +989,21 @@ statement inside the per-query transaction callback. */
 		(set sql_parse_input (substr sql_parse_input 0 (- sql_parse_input_len 1)))
 		nil)
 	(define mysql_username (coalesce (session "username") "root"))
-	(define formula (if (equal? (session "syntax") "postgresql")
+	(define formula (if (equal? (session "syntax") "tsql")
+		(cached_parse tsql_queryplan_cache (list parse_tsql) schema sql_parse_input
+			(list (quote sql-policy-for) mysql_username) mysql_username session false tx)
+		(equal? (session "syntax") "postgresql")
 		(cached_parse psql_queryplan_cache (list parse_psql) schema sql_parse_input
 			(list (quote sql-policy-for) mysql_username) mysql_username session false tx)
 		(cached_parse sql_queryplan_cache (list parse_sql) schema sql_parse_input
 			(list (quote sql-policy-for) mysql_username) mysql_username session true tx)))
-	(sql_execute_formula session tx formula resultrow resultfields_sql))))
+	(if (equal? (session "syntax") "tsql")
+		/* T-SQL result descriptors carry frontend formatting recipes. MySQL
+		accepts only the ordered column names; bind presentation here before
+		passing rows to the protocol's ordinary metadata inference. */
+		(tsql_export_execute_formula session tx formula resultrow
+			(lambda args (resultfields_sql (car args))))
+		(sql_execute_formula session tx formula resultrow resultfields_sql)))))
 
 (set mysql_handler (lambda (schema sql resultrow_sql resultfields_sql session session_state query_seq) (begin
 	(session "schema" schema)
@@ -930,13 +1013,99 @@ statement inside the per-query transaction callback. */
 			/* scheme syntax mode */
 			(set print (lambda args (resultrow '("result" (concat args)))))
 			(resultrow '("result" (eval (scheme sql))))
-		) (time (with_autocommit session session_state query_seq sql
+		) (time (with_autocommit session session_state query_seq (if (equal? (session "syntax") "tsql") (tsql_guard_query sql) sql)
 				(lambda (tx) (mysql_run_sql_statement tx schema sql session resultrow resultfields_sql))) sql))
 	)) (lambda (e) (begin
 			(error_log (concat e) schema (coalesce (session "username") "root") sql)
 			(error e) /* re-throw so MySQL protocol sends proper error packet */
 	)))
 )))
+
+/* Frontend parameter recipes preserve declared NULL types without retaining
+values in a connection's permanent session. TDS owns framing; these callbacks
+own parameter spelling, casts, SQL session state, and result presentation. */
+(define tds_parameter_session (lambda (base params specs) (begin
+	(define bindings (newsession))
+	(define declared (newsession))
+	(reduce (produceN (/ (count params) 2)) (lambda (_ i) (begin
+		(bindings (nth params (* i 2)) true)
+		true)) true)
+	(reduce (produceN (/ (count specs) 2)) (lambda (_ i) (begin
+		(declared (nth specs (* i 2)) true)
+		true)) true)
+	(lambda args (if (equal? (count args) 0)
+		(merge (list (base)
+			(map (bindings) (lambda (name) (concat "tsql_bound:" name)))
+			(map (bindings) (lambda (name) (concat "tsql_param:" name)))
+			(map (declared) (lambda (name) (concat "tsql_param_type:" name)))))
+		(begin
+			(define key (car args))
+			(match key
+				(regex "^tsql_(bound|param|param_type):(.*)$" _ mode raw_name) (begin
+					(if (not (equal? (count args) 1)) (error "TDS input parameters are read-only"))
+					(define name (toLower raw_name))
+					(if (equal? mode "bound") (if (bindings name) true false)
+						(equal? mode "param_type") (get_assoc specs name)
+						(get_assoc params name)))
+				_ (apply base args))))))))
+(define tds_convert_parameter (lambda (raw wire spec wire_name positional_name all_specs) (begin
+	(define name (if (equal? wire_name "") positional_name
+		(if (equal? (substr wire_name 0 1) "@") (toLower (substr wire_name 1))
+			(error "invalid TDS RPC parameter name"))))
+	(define declaration (get_assoc all_specs name))
+	(if (nil? declaration) (error "undeclared TDS RPC parameter"))
+	(list name (tsql_convert_parameter raw wire declaration)))))
+(define tds_session_event (lambda (event session value)
+	(if (equal? event "initialize") (begin
+		(session "syntax" "tsql")
+		(session "tsql_wire" true)
+		(session "tsql_nocount" false))
+		(equal? event "begin") (session "tsql_scope_identity" nil)
+		(equal? event "describe") (session "tsql_prepare_describe" true)
+		(equal? event "done") (begin
+			(session "tsql_rowcount" value)
+			(session "tsql_nocount"))
+		nil)))
+
+/* TDS is opt-in and shares the SQL policy, transaction and execution callbacks. */
+(define tds_auth (lambda (username plaintext database)
+	(try (lambda () (begin
+		(define stored (mysql_auth username))
+		(if (and stored (equal? stored (password plaintext)) (list? (show database)))
+			(begin ((sql_policy username) database true false) true) false)))
+		(lambda (_) false))))
+(define tds_close_session (lambda (session) (tx_rollback session)))
+(define tds_describe (lambda (database sql declarations describe_session) (begin
+	(describe_session "tsql_describe_only" true)
+	(eval (parse_tsql database sql
+		(sql_policy (coalesceNil (describe_session "username") "root")) describe_session nil)))))
+(define tds_bind_declarations (lambda (database text)
+	(tsql_bind_declarations database (tsql_parse_declarations text database))))
+(define tds_metadata_parameters (lambda (parameters) (begin
+	(define seen (newsession))
+	(merge (map (produceN (/ (count parameters) 2)) (lambda (idx) (begin
+		(define raw (nth parameters (* 2 idx)))
+		(define name (if (equal? (substr raw 0 1) "@") (toLower (substr raw 1))
+			(match raw (regex "^[0-9]+$") raw _ (error "invalid metadata parameter name"))))
+		(if (or (equal? name "") (seen name)) (error "duplicate or empty metadata parameter"))
+		(seen name true)
+		(list name (nth parameters (+ 1 (* 2 idx)))))))))))
+(define tds_metadata_handler (lambda (database procedure parameters resultrow resultfields session session_state query_seq)
+	(with_autocommit session session_state query_seq (concat "metadata:" procedure)
+		(lambda (_tx) (begin
+			(define metadata (tsql_metadata_rpc database procedure (tds_metadata_parameters parameters) session))
+			(resultfields (map (metadata "fields") (lambda (field) (field "name"))) (metadata "fields"))
+			(map (metadata "rows") resultrow)
+			true)))))
+(define tsql_port (arg "tsql-port" (env "TSQL_PORT" nil)))
+(if (and tsql_port (not (arg "disable-tsql" false))) (begin
+	(define database (arg "tsql-database" (env "TSQL_DATABASE" "memcp")))
+	(if (has? (show) database) true (createdatabase database))
+	(tds tsql_port tds_auth mysql_handler tds_close_session database
+		(arg "tsql-tls-cert" nil) (arg "tsql-tls-key" nil) tds_describe tds_metadata_handler
+		tds_bind_declarations tds_convert_parameter tds_parameter_session tds_session_event tsql_metadata_rpc_name)
+	(service_registry "T-SQL Protocol" (list tsql_port "" "TDS 7.4"))
+	(print "T-SQL TDS listener on port " tsql_port)))
 
 /* dedicated mysql protocol listening at specified port */
 (try (lambda () (begin

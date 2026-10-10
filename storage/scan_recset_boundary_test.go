@@ -292,6 +292,77 @@ func TestOrderedInverseRecSetInterlacesDeltaRows(t *testing.T) {
 	}
 }
 
+func TestIndexEqualKeysKeepRecordOrderAcrossMainDeltaAndRecSet(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tindexequaltotalorder")
+	tbl.CreateColumn("rank", "INT", nil, nil)
+	const count = 256
+	rows := make([][]scm.Scmer, count)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i % 4))}
+	}
+	tbl.Insert([]string{"id", "rank"}, rows, nil, scm.NewNil(), false, nil)
+	RebuildTable(tbl, true, false)
+	order := buildRankOrderIndex(t, tbl)
+	shard := tbl.ActiveShards()[0]
+	readEqual := func() []uint32 {
+		release := shard.GetRead(nil)
+		defer release()
+		shard.mu.RLock()
+		defer shard.mu.RUnlock()
+		value := scm.NewInt(2)
+		bounds := runtimeScanAccess(analyzedBoundaries{{col: "rank", matcher: EqualMatcher,
+			lower: value, upper: value, lowerInclusive: true, upperInclusive: true}})
+		var buffer [8]uint32
+		var got []uint32
+		shard.iterateIndexForce(nil, bounds, len(shard.inserts), buffer[:], false,
+			func(batch []uint32) bool { got = append(got, batch...); return true })
+		return got
+	}
+	want := make([]uint32, 0, count/4+2)
+	for id := uint32(2); id < count; id += 4 {
+		want = append(want, id)
+	}
+	assertEqualOrder := func() {
+		t.Helper()
+		got := readEqual()
+		if len(got) != len(want) {
+			t.Fatalf("equal-key index IDs = %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("equal-key index IDs = %v, want %v", got, want)
+			}
+		}
+	}
+	assertEqualOrder()
+	tbl.Insert([]string{"id", "rank"}, [][]scm.Scmer{
+		{scm.NewInt(count), scm.NewInt(2)},
+		{scm.NewInt(count + 1), scm.NewInt(2)},
+	}, nil, scm.NewNil(), false, nil)
+	want = append(want, count, count+1)
+	assertEqualOrder()
+	source := recSetForIDs(tbl, map[int64]bool{2: true, 130: true, 254: true, count: true, count + 1: true})
+	for attempt := range 2 {
+		got := scanOrderedRecSetIDsWithOrder(tbl, source, 5, order)
+		if expected := []int64{2, 130, 254, count, count + 1}; !equalInt64s(got, expected) {
+			t.Fatalf("equal-key ordered RecSet attempt %d IDs = %v, want %v", attempt+1, got, expected)
+		}
+	}
+	release := shard.GetRead(nil)
+	defer release()
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	usedInverse := false
+	for _, index := range shard.Indexes {
+		index.mu.Lock()
+		usedInverse = usedInverse || index.baseState.mainIndexPositions.count > 0
+		index.mu.Unlock()
+	}
+	if !usedInverse {
+		t.Fatal("sparse ordered RecSet did not exercise the inverse main permutation")
+	}
+}
+
 func TestSparseRecSetFilterAppliesPrunedAccessBoundary(t *testing.T) {
 	tbl := setupAdaptiveRecSetOrderTable(t, "trecsetprunedboundary", 200)
 	source := recSetForIDs(tbl, map[int64]bool{3: true, 103: true, 150: true})

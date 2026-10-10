@@ -524,6 +524,7 @@ func ShutdownServers(drainSeconds int) {
 	drainDeadline := time.Now().Add(time.Duration(drainSeconds) * time.Second)
 
 	// Phase 1: stop accepting new connections.
+	closeTDSListeners()
 	mysqlListenersMu.Lock()
 	listeners := mysqlListeners
 	mysqlListeners = nil
@@ -548,7 +549,7 @@ func ShutdownServers(drainSeconds int) {
 
 	// Phase 2: drain — wait for in-flight MySQL queries to finish voluntarily.
 	for time.Now().Before(drainDeadline) {
-		if !hasActiveMySQLQueries() {
+		if !hasActiveMySQLQueries() && !hasActiveTDSQueries() {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -558,11 +559,12 @@ func ShutdownServers(drainSeconds int) {
 	for _, ss := range Snapshot() {
 		ss.Kill()
 	}
+	closeTDSConnections()
 
 	// Phase 4: wait for kills to propagate through panic-recovery paths (max 5 s).
 	killDeadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(killDeadline) {
-		if !hasActiveMySQLQueries() {
+		if !hasActiveMySQLQueries() && !hasActiveTDSQueries() {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)

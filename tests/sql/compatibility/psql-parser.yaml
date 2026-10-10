@@ -618,6 +618,150 @@ test_cases:
     expect:
       affected_rows: 1
 
+  - name: DISTINCT eliminates duplicate projection rows
+    sql: SELECT DISTINCT name FROM psql_data ORDER BY name
+    expect:
+      rows: 3
+      data:
+      - name: Alice
+      - name: Bob
+      - name: Charlie
+  - name: DISTINCT preserves grouped aggregate projection
+    sql: SELECT DISTINCT name, SUM(val) AS total FROM psql_data GROUP BY name ORDER BY name
+    expect:
+      rows: 3
+      data:
+      - name: Alice
+        total: 30
+      - name: Bob
+        total: 30
+      - name: Charlie
+        total: 50
+  - name: Window row numbers retain partition boundaries
+    sql: SELECT id, ROW_NUMBER() OVER (PARTITION BY name ORDER BY id) AS rn FROM psql_data ORDER BY id
+    expect:
+      rows: 4
+      data:
+      - id: 1
+        rn: 1
+      - id: 2
+        rn: 1
+      - id: 3
+        rn: 1
+      - id: 4
+        rn: 2
+  - name: Window sum uses all partition rows
+    sql: SELECT id, SUM(val) OVER (PARTITION BY name) AS total FROM psql_data ORDER BY id
+    expect:
+      rows: 4
+      data:
+      - id: 1
+        total: 30
+      - id: 2
+        total: 30
+      - id: 3
+        total: 50
+      - id: 4
+        total: 30
+  - name: Window COUNT star over the complete result
+    sql: SELECT id, COUNT(*) OVER () AS n FROM psql_data ORDER BY id LIMIT 1
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        n: 4
+  - name: Window LAG with conflicting output order
+    sql: SELECT id, LAG(val) OVER (ORDER BY val) AS previous FROM psql_data ORDER BY id
+    expect:
+      rows: 4
+      data:
+      - id: 1
+        previous: null
+      - id: 2
+        previous: 20
+      - id: 3
+        previous: 30
+      - id: 4
+        previous: 10
+  - name: Bare select aliases stop at clauses
+    sql: SELECT id item FROM psql_data ORDER BY id LIMIT 1
+    expect:
+      rows: 1
+      data:
+      - item: 1
+  - name: Standalone OFFSET
+    sql: SELECT id FROM psql_data ORDER BY id OFFSET 2
+    expect:
+      rows: 2
+      data:
+      - id: 3
+      - id: 4
+  - name: LIMIT ALL with OFFSET
+    sql: SELECT id FROM psql_data ORDER BY id LIMIT ALL OFFSET 3
+    expect:
+      rows: 1
+      data:
+      - id: 4
+  - name: Standard FETCH pagination
+    sql: SELECT id FROM psql_data ORDER BY id OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY
+    expect:
+      rows: 2
+      data:
+      - id: 2
+      - id: 3
+  - name: Default FETCH count
+    sql: SELECT id FROM psql_data ORDER BY id FETCH FIRST ROW ONLY
+    expect:
+      rows: 1
+      data:
+      - id: 1
+  - name: Doubled quotes in literals and quoted aliases
+    sql: SELECT 'it''s' AS "a""b"
+    expect:
+      rows: 1
+      data:
+      - a"b: it's
+  - name: Standard strings preserve backslashes
+    sql: SELECT 'C:\new' AS value
+    expect:
+      rows: 1
+      data:
+      - value: C:\new
+  - name: Escape strings decode backslashes
+    sql: SELECT E'a\nb' AS value
+    expect:
+      rows: 1
+      data:
+      - value: 'a
+
+          b'
+  - name: NULL remains distinct from numeric zero in UNION
+    sql: SELECT NULL AS val UNION SELECT 0 AS val
+    expect:
+      rows: 2
+      data:
+        - {val: null}
+        - {val: 0}
+
+  - name: Unknown window function fails explicitly
+    sql: SELECT UNKNOWN_WINDOW(val) OVER (ORDER BY id) FROM psql_data
+    expect:
+      error: true
+  - name: Unsupported window frame fails explicitly
+    sql: SELECT SUM(val) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM psql_data
+    expect:
+      error: true
+
+  - name: Ordered aggregate window fails until default frames are supported
+    sql: SELECT SUM(val) OVER (ORDER BY id) FROM psql_data
+    expect: {error: true}
+
+  - name: RANK and DENSE_RANK preserve peers
+    sql: SELECT id,RANK() OVER (ORDER BY name) AS rank,DENSE_RANK() OVER (ORDER BY name) AS dense FROM psql_data ORDER BY id
+    expect:
+      rows: 4
+      data: [{id: 1, rank: 1, dense: 1}, {id: 2, rank: 3, dense: 2}, {id: 3, rank: 4, dense: 3}, {id: 4, rank: 1, dense: 1}]
+
 cleanup:
   - sql: "DROP VIEW IF EXISTS psql_data_view"
   - sql: "DROP TABLE IF EXISTS psql_group_item"

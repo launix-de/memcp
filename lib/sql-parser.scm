@@ -187,7 +187,7 @@ escapes MySQL decodes, everything else (\x) keeps its literal second byte */
 /* Direct users of parse_sql may evaluate a compiled formula without a network
 frontend. The protocol execution path shadows this no-op with its metadata
 consumer, just as it already shadows resultrow. */
-(define resultfields (lambda (_fields) true))
+(define resultfields (lambda _fields true))
 
 /* SQL modulo expression: NULL-safe, division-by-zero-safe, truncates quotient toward zero */
 (define sql_mod_expr (lambda (a b)

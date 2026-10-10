@@ -148,19 +148,20 @@ func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
 
 // TriggerDescription holds all information about a trigger
 type TriggerDescription struct {
-	Name       string                `json:"name"`                // Trigger name (user-defined or auto-generated)
-	Timing     TriggerTiming         `json:"timing"`              // BEFORE/AFTER INSERT/UPDATE/DELETE
-	Func       scm.Scmer             `json:"func"`                // The compiled trigger procedure; omitted when source is authoritative
-	FuncPlan   scm.Scmer             `json:"-"`                   // Unevaluated lambda AST, compiled lazily on first use
-	Source     string                `json:"source,omitempty"`    // Authoritative source code for persistent language-defined triggers
-	Language   string                `json:"language,omitempty"`  // Name resolved through the process-local trigger compiler registry
-	IsSystem   bool                  `json:"is_system,omitempty"` // True for Go-internal triggers (FK etc.) — not persisted via createtrigger
-	Hidden     bool                  `json:"hidden,omitempty"`    // True for Scheme-internal triggers — persisted but hidden from SHOW TRIGGERS
-	Priority   int                   `json:"priority,omitempty"`  // Execution order (lower = earlier)
-	Async      bool                  `json:"async,omitempty"`     // Run trigger in background goroutine (fire-and-forget, no transaction context)
-	VectorFunc scm.Scmer             `json:"-"`                   // Vectorized trigger: (lambda (OLD_batch NEW_batch) ...) for batch execution
-	Acquire    func(*TxContext) bool `json:"-"`                   // Optional lock-free pin for an ephemeral trigger target
-	Release    func()                `json:"-"`                   // Releases a successful Acquire
+	Name        string                `json:"name"`                   // Trigger name (user-defined or auto-generated)
+	Timing      TriggerTiming         `json:"timing"`                 // BEFORE/AFTER INSERT/UPDATE/DELETE
+	Func        scm.Scmer             `json:"func"`                   // The compiled trigger procedure; omitted when source is authoritative
+	FuncPlan    scm.Scmer             `json:"-"`                      // Unevaluated lambda AST, compiled lazily on first use
+	Source      string                `json:"source,omitempty"`       // Authoritative source code for persistent language-defined triggers
+	Language    string                `json:"language,omitempty"`     // Name resolved through the process-local trigger compiler registry
+	IsSystem    bool                  `json:"is_system,omitempty"`    // True for Go-internal triggers (FK etc.) — not persisted via createtrigger
+	Hidden      bool                  `json:"hidden,omitempty"`       // True for Scheme-internal triggers — persisted but hidden from SHOW TRIGGERS
+	OwnerColumn string                `json:"owner_column,omitempty"` // Same-table column dependency, removed only by explicit DROP COLUMN
+	Priority    int                   `json:"priority,omitempty"`     // Execution order (lower = earlier)
+	Async       bool                  `json:"async,omitempty"`        // Run trigger in background goroutine (fire-and-forget, no transaction context)
+	VectorFunc  scm.Scmer             `json:"-"`                      // Vectorized trigger: (lambda (OLD_batch NEW_batch) ...) for batch execution
+	Acquire     func(*TxContext) bool `json:"-"`                      // Optional lock-free pin for an ephemeral trigger target
+	Release     func()                `json:"-"`                      // Releases a successful Acquire
 	// Guarded by table.mu after publication. Generated dependency code restored
 	// from a previous binary must be regenerated before its target is rebound.
 	cacheTarget       *table // runtime identity, protected by the source table mutex
@@ -255,6 +256,7 @@ type persistedTriggerDescription struct {
 	LegacySourceSQL string        `json:"source_sql,omitempty"`
 	IsSystem        bool          `json:"is_system,omitempty"`
 	Hidden          bool          `json:"hidden,omitempty"`
+	OwnerColumn     string        `json:"owner_column,omitempty"`
 	Priority        int           `json:"priority,omitempty"`
 	Async           bool          `json:"async,omitempty"`
 	RequiresTarget  bool          `json:"requires_target,omitempty"`
@@ -269,6 +271,7 @@ func (tr TriggerDescription) MarshalJSON() ([]byte, error) {
 		IsSystem:       tr.IsSystem,
 		Hidden:         tr.Hidden,
 		Priority:       tr.Priority,
+		OwnerColumn:    tr.OwnerColumn,
 		Async:          tr.Async,
 		RequiresTarget: tr.Acquire != nil,
 	}
@@ -302,6 +305,7 @@ func (tr *TriggerDescription) UnmarshalJSON(data []byte) error {
 	tr.IsSystem = persist.IsSystem
 	tr.Hidden = persist.Hidden
 	tr.Priority = persist.Priority
+	tr.OwnerColumn = persist.OwnerColumn
 	tr.needsRegeneration = strings.HasPrefix(tr.Name, ".cache:") || strings.HasPrefix(tr.Name, ".orcdep:")
 	tr.Async = persist.Async
 	tr.FuncPlan = scm.NewNil()

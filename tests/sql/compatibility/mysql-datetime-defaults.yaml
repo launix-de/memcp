@@ -67,6 +67,29 @@ test_cases:
       data:
         - ok: true
 
+  - name: "ADD COLUMN binds a parenthesized CURRENT_TIMESTAMP default"
+    sql: "ALTER TABLE tstamp ADD observed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()"
+    expect: {}
+
+  - name: "An added timestamp default fills omitted values"
+    sql: "INSERT INTO tstamp (id) VALUES (3)"
+    expect:
+      affected_rows: 1
+
+  - name: "The added timestamp default fills existing and new rows"
+    sql: "SELECT id,observed_at IS NOT NULL AS ok FROM tstamp ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - {id: 1, ok: true}
+        - {id: 2, ok: true}
+        - {id: 3, ok: true}
+
+  - name: "Unsupported timestamp default arguments remain rejected"
+    sql: "CREATE TABLE invalid_tstamp_default (id INT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(1))"
+    expect:
+      error: true
+
   - name: "Mix reloaded and newly inserted dates before rebuild"
     sql: |
       INSERT INTO tstamp_rebuild VALUES
@@ -108,5 +131,6 @@ test_cases:
       error: true
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS invalid_tstamp_default"
   - sql: "DROP TABLE IF EXISTS tstamp_rebuild"
   - sql: "DROP TABLE IF EXISTS tstamp"

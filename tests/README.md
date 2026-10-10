@@ -222,3 +222,29 @@ cold external PHP/JIT compiler builds. Those toolchains are cached by runtime
 ABI/source identity, while benchmark data is never cached. A timeout is a failure,
 not an omitted test or a successful partial result. End-to-end 15-minute CI is a
 measurement goal, not yet a demonstrated guarantee on a cold cache.
+
+### t-sql result provenance
+
+`tsql-odbc.yaml` checks declared nullability and editability for direct base-table
+projections, including empty `TOP 0` results. `FOR BROWSE` supports one base table
+with every primary-key column explicitly projected; aliases and scalar result
+expressions are allowed. Joins, views, grouped results, unions and missing key
+projections fail explicitly. Static server cursors remain read-only snapshots.
+
+`scm/tds_provenance_test.go` validates the actual metadata bytes, source-table
+ordinals, aliased base-column names, key flags, generated binary-eight row
+versions and computed-column read-only flags. Optional browse tokens are sent
+only for an explicit browse request or the existing cursor metadata request.
+
+Client drivers may interpret declaration flags differently: some treat the
+unknown-updateability bit as writable and overwrite read-only declarations when
+browse provenance arrives. Such client behavior does not change the server's
+protocol flags. Native probes must record both the wire declaration and observed
+client attributes; a successful alias/base-name probe does not establish that
+all generated columns are reported correctly by every driver.
+
+Binary comparison regressions in `tsql-rowversion.yaml` cover scalar literals,
+column residual predicates, NULLs and optimistic tokens whose bytes differ only
+by ASCII case. Scalar `BINARY`/`VARBINARY` casts accept NULL and raw byte strings
+using the existing declared padding/truncation rules. Numeric and text-to-binary
+encodings remain explicitly unsupported.

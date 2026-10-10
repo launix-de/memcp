@@ -34,10 +34,14 @@ ordering. The inherited value is stored, so ADD COLUMN and restart agree. */
 					(sql_column_collation_defaults typ attributes (get_assoc options "collation")))
 				_ definition))) options ifnotexists tx)))
 
-(define sql_create_column (lambda (relation name typ dimensions attributes)
+(define sql_create_column (lambda (relation name typ dimensions attributes) (begin
+	(define attributes (sql_column_collation_defaults typ attributes
+		(get_assoc (show relation true) "Collation")))
+	(define calculator (get_assoc attributes "default_calculator"))
+	/* ADD backfills existing rows with one DDL-time value while retaining
+	the callable recipe for future inserts. */
 	(createcolumn relation name typ dimensions
-		(sql_column_collation_defaults typ attributes
-			(get_assoc (show relation true) "Collation")))))
+		(if (nil? calculator) attributes (set_assoc attributes "initial_value" (calculator)))))))
 
 /* ADD freezes one value for historical rows. Keep the existing evaluation
 path for literal arithmetic and casts; reject volatile or relational defaults

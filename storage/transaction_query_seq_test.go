@@ -164,11 +164,11 @@ func TestContributionReadVersionTracksDMLAndVisibility(t *testing.T) {
 	for _, commit := range []bool{false, true} {
 		tx := NewTxContext(TxACID)
 		sp := tx.CreateSavepoint()
-		tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, nil, scm.NewNil(), false, nil, tx)
+		tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, nil, scm.NewNil(), false, nil, InsertOptions{Tx: tx})
 		before = stamp()
 		tx.RollbackToSavepoint(sp)
 		changed(before, "savepoint rollback")
-		tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(3)}}, nil, scm.NewNil(), false, nil, tx)
+		tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(3)}}, nil, scm.NewNil(), false, nil, InsertOptions{Tx: tx})
 		before = stamp()
 		if commit {
 			if err := tx.Commit(); err != nil {

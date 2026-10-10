@@ -109,6 +109,52 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- `table.Auto_increment` is the atomic allocator high-water scalar. Every runtime
+  read/write, including schema snapshots, uses atomic operations. Batch reservations
+  own their ranges through one successful CAS per batch so concurrent cold-shard
+  WAL recovery cannot lose a larger high-water value. WAL replay raises it with CAS
+  under the shard's existing ownership and must never acquire a table lock there. Legacy JSON
+  decoding initializes the private uint64 field before table publication; its name
+  and serialized integer format remain unchanged. Generic explicit reseeding keeps
+  its atomic reset behavior; declared IDENTITY reseeding may only raise the value.
+
+- `table.identityRecoveryOnce` and `identityRecoveryState` are process-local
+  initialization guards, never persisted. Before the first generated allocation,
+  an INSERT pins the active topology and acquires/releases each shard's existing
+  read rights to replay all cold WAL high-water values. No table/shard pointer is
+  retained by the guard, and initialization starts before any shard write lock.
+  Atomic completion is published only after every shard succeeds; a failed once
+  remains an explicit allocation error. Internal callers already holding a
+  shard write lock may insert explicit identity values, but may generate new
+  ones only after the recovery guard has completed.
+
+- `database.schemaSnapshotRevision` assigns logical capture order while holding
+  `schemalock` (atomic because shared captures may coexist). `saveMu` protects
+  latest/pending/active snapshot ownership, completion revisions and failure
+  epochs. Publication must never replace a newer captured catalog with an
+  older one. Fsync waiters require a successful durable revision covering their
+  mutation; a superseded fsync upgrades the latest pending/active snapshot or
+  captures the current catalog again. Schema I/O never holds `schemalock`.
+
+- `database.SequenceHighWater` is durable generic sequence metadata protected by
+  `schemalock`. `sequenceReserveMu` serializes lease reservation before DML locks;
+  atomic `sequenceLimit` publishes only after schema fsync. `sequenceNext` is
+  consumed by explicitly bound callbacks, never ordinary reads or planner guards.
+  Cold loading prepares one new lease before publication for enabled sequences.
+  Exhaustion is explicit; row callbacks never reserve or perform schema I/O.
+
+- `schemaInitializers` is a process-local frontend callback registry guarded by
+  its own RWMutex. A cold loader copies one ordered snapshot, then executes pure
+  callbacks without catalog/shard locks on private metadata before publication.
+  `TriggerDescription.OwnerColumn` is optional permanent same-table dependency
+  metadata protected by table.mu after publication. Explicit DROP COLUMN removes
+  only its owned triggers with the column before the durable schema capture.
+  Defaults and compiled persistent trigger definitions are durably captured
+  before loading completes. Callbacks may not re-enter GetTable/get_schema.
+  `database.loadFailure` is initialized only inside `loadOnce`; sync.Once
+  publishes it to every later accessor, which rethrows a failed initialization
+  rather than exposing partial schema. No DML/row loop accesses the registry.
+
 - Use as few locks as possible. Reads must be lock-free and ideally perform no
   non-local RAM writes; an RWMutex read lock also writes shared memory. Main
   column storages are fixed and read-only within a shard generation. Deltas hold
@@ -261,6 +307,48 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   cache registration; persistent computors retain no transaction. Cache
   eviction uses nonblocking access and lifetime pins, without DDL locks.
 
+- Insert identity callbacks receive invocation-owned allocator ranges at batch
+  boundaries. Frontends select first or last semantics without reading the
+  shared `Auto_increment` counter after reservation. Identity session values
+  are not transactional and survive rollback; batch scope values are separate.
+  Declared identity range checks run under the allocator's table mutex before
+  publishing its counter. Rejected inserts release shard rights through defer.
+  T-sql statements reduce only their own positive allocator reports into an
+  invocation-owned atomic maximum and publish identity session values once
+  after their sinks finish, including consumed IDs when an action fails.
+
+- `foreignKey.Strict` is a persisted, immutable constraint safety flag. Private
+  table creation sets it before publication; ALTER changes hold schemalock and
+  the table DDL barrier. Strict endpoint/column/candidate-key drops are rejected
+  before mutation. Missing flags retain legacy constraint behavior.
+
+- Frontend-owned `database.metadataValue`, `metadataRevision`, and table/column
+  `Metadata` are opaque durable values protected by `schemalock` and the existing
+  table DDL barrier. Explicit SHOW/schema reads copy key and relationship data
+  under that existing lock and reuse published column definitions; no second
+  catalog snapshot is rebuilt by schema saves. Readers retain no mutable catalog
+  or shard containers. Prepared DDL checks its expected revision before changing
+  declarations or payloads.
+- Column `DefaultCalculator`, `ValueSanitizer`, `AllocatorValue`, `AllocatorEncode`,
+  and `KeyProjection` are closed declaration callbacks, bound only at the affected
+  DML/constraint invocation. Their recipes are immutable after schema publication.
+  `InsertOptions.CalculatorContext` is invocation-owned immutable data; it is never
+  persisted, retained by a shard, or interpreted by storage. `constraintKeyBinding`
+  owns immutable computed-index descriptors and no shared serial-reader state.
+- `uniqueKey.NullsEqual` is immutable declaration policy, published under schema
+  and table DDL locks with the key. Its optional lookup binding is invocation-owned;
+  ordinary keys keep their existing raw lookup, and reference keys keep their
+  separate empty-value exemption. It never changes scalar equality globally.
+- `column.initialValue` is private ADD construction data. `InitialValues` records
+  immutable historical extents under the DDL/maintenance/schema boundary; capture
+  and publication retain ordered shard locks and exclusive rights. Rebuilds persist
+  actual values. Changing future defaults never rewrites these captured extents.
+- `database.SequenceHighWater` is protected by `schemalock`; `sequenceReserveMu`
+  serializes durable reservation. Atomic `sequenceNext`/`sequenceLimit` publish a
+  consumable range only after fsync. DML consumes reserved values without schema
+  locks or I/O. No scan or query reader touches sequence state. Identity recovery
+  uses one table-local `sync.Once` and an atomic success/failure state before range
+  allocation, pinning topology while replaying every shard.
 ### Scheme AST and Codegen Quoting (lib/queryplan.scm and lib/queryplan-*.scm)
 - Build AST as data: most builder blocks use a single leading quote `'(...)` so nested lists are data, not executed at construction.
 - Lambdas: embed as `'((quote lambda) (param-list) body)` where:

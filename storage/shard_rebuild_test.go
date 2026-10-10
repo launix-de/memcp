@@ -2565,7 +2565,7 @@ func TestRebuildInsideActiveTransactionDoesNotWaitForItself(t *testing.T) {
 			}
 		}()
 		withTxSession(tx, func() scm.Scmer {
-			tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("same-request")}}, nil, scm.NewNil(), false, nil, tx)
+			tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("same-request")}}, nil, scm.NewNil(), false, nil, InsertOptions{Tx: tx})
 			resultCh <- RebuildTable(tbl, true, false)
 			return scm.NewNil()
 		})
@@ -2689,7 +2689,7 @@ func TestACIDRolledBackInsertDoesNotReplayAfterRestart(t *testing.T) {
 	tx := NewTxContext(TxACID)
 	tx.Session = session
 	scm.Apply(session, scm.NewString("__memcp_tx"), scm.NewAny(tx))
-	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("rolled-back")}}, nil, scm.NewNil(), false, nil, tx)
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("rolled-back")}}, nil, scm.NewNil(), false, nil, InsertOptions{Tx: tx})
 	tx.Rollback()
 	if got := tbl.Count(); got != 0 {
 		t.Fatalf("live count after ACID rollback = %d, want 0", got)

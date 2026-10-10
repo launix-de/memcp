@@ -12,6 +12,7 @@ require (
 	github.com/ceph/go-ceph v0.37.0
 	github.com/chzyer/readline v1.5.1
 	github.com/dc0d/onexit v1.1.0
+	github.com/denisenkom/go-mssqldb v0.12.3
 	github.com/docker/go-units v0.5.0
 	github.com/dunglas/frankenphp v1.12.7
 	github.com/fsnotify/fsnotify v1.10.1
@@ -62,6 +63,8 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/gofrs/uuid/v5 v5.5.1 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
+	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
+	github.com/golang-sql/sqlexp v0.1.0 // indirect
 	github.com/gorilla/handlers v1.5.2 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/maypok86/otter/v2 v2.3.0 // indirect

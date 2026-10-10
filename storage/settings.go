@@ -472,8 +472,7 @@ func MakePrintLogFunc() func(string) {
 		t.Insert(
 			[]string{"datetime", "message"},
 			[][]scm.Scmer{{scm.NewFloat(now), scm.NewString(msg)}},
-			nil, scm.NewNil(), false, nil,
-		)
+			nil, scm.NewNil(), false, nil)
 	}
 }
 
