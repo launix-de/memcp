@@ -361,7 +361,9 @@ test_cases:
           emit (lambda (_fields) nil))
         (define entry (car (cache (car (cache)))))
         (define before (count (entry "variants")))
-        (define pred (list 'lambda (list 'x) (list '< 'x 4)))
+        /* Learn the SQL frontend's actual binding, independent of the SCM
+           literal representation. Feedback identifies the bound predicate. */
+        (define pred (list 'lambda (list 'x) (list '< 'x (sess "v1"))))
         (define access (eval (compile_scan_access '("id") pred)))
         (scan_recset nil (table "memcp-tests" "qfi_document") (car access)
           (map (cadr access) (lambda (v) (eval v))) '("id") (eval pred))
