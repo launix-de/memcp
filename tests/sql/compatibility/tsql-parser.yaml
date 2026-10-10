@@ -1,0 +1,1029 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixture preparation and cleanup are explicit cases so unsupported DDL stays visible.
+metadata:
+  version: '1.0'
+  description: T-SQL syntax through the shared MemCP planner
+  syntax: tsql
+  isolated: true
+setup: []
+test_cases:
+- sql: DROP VIEW IF EXISTS dbo.tsql_view
+  name: 'Fixture setup 001: DROP VIEW IF EXISTS dbo.tsql_view'
+- sql: DROP TABLE IF EXISTS dbo.tsql_copy
+  name: 'Fixture setup 002: DROP TABLE IF EXISTS dbo.tsql_copy'
+- sql: DROP TABLE IF EXISTS dbo.tsql_data
+  name: 'Fixture setup 003: DROP TABLE IF EXISTS dbo.tsql_data'
+- sql: CREATE TABLE dbo.tsql_data (id INT PRIMARY KEY, name NVARCHAR(50), val INT)
+  name: 'Fixture setup 004: CREATE TABLE dbo.tsql_data (id INT PRIMARY KEY, name NVARCHAR(50), val INT)'
+- sql: INSERT INTO dbo.tsql_data VALUES (1,N'Alice',10),(2,N'Bob',30),(3,N'Charlie',50),(4,N'Alice',20)
+  name: 'Fixture setup 005: INSERT INTO dbo.tsql_data VALUES (1,N''Alice'',10),(2,N''Bob'',30),(3,N''Charlie'',50),(4,N''Alice'',20)'
+- name: MySQL transport binds t-sql metadata before exporting null rows
+  scm: "(begin\n  (define s (newsession))\n  (define output (newsession))\n  (s \"syntax\" \"tsql\")\n  (mysql_run_sql_statement\
+    \ nil \"memcp-tests\"\n    \"SELECT TOP(1) 42 AS [answer],CAST(NULL AS DECIMAL(20,2)) AS [missing]\"\n    s\n\
+    \    (lambda (row) (begin\n      (if (equal? (output \"fields\") '(\"answer\" \"missing\")) true\n        (error\
+    \ \"row preceded its MySQL field declaration\"))\n      (if (output \"row\") (error \"unexpected second MySQL\
+    \ row\") true)\n      (output \"row\" row)))\n    (lambda args (begin\n      (if (and (equal? (count args) 1)\
+    \ (nil? (output \"fields\"))) true\n        (error \"MySQL metadata requires one argument and one declaration\"\
+    ))\n      (output \"fields\" (car args)))))\n  (if (equal? (output \"row\") (list \"answer\" 42 \"missing\"\
+    \ nil)) true\n    (error \"MySQL transport lost t-sql null presentation\")))\n"
+  expect:
+    result: true
+  noncritical: true
+- name: MySQL transport declares t-sql columns for an empty result
+  scm: "(begin\n  (define s (newsession))\n  (define output (newsession))\n  (s \"syntax\" \"tsql\")\n  (mysql_run_sql_statement\
+    \ nil \"memcp-tests\" \"SELECT TOP(0) 42 AS [answer]\" s\n    (lambda (_) (error \"TOP zero returned a row\"\
+    ))\n    (lambda args (begin\n      (if (and (equal? (count args) 1) (nil? (output \"fields\"))) true\n     \
+    \   (error \"MySQL metadata requires one argument and one declaration\"))\n      (output \"fields\" (car args)))))\n\
+    \  (if (equal? (output \"fields\") '(\"answer\")) true\n    (error \"empty t-sql result lost its MySQL column\
+    \ names\")))\n"
+  expect:
+    result: true
+  noncritical: true
+- name: Prepared declarations share qualified CAST precision and scale
+  scm: "(begin\n  (define s (newsession))\n  (define declaration (car (tds_bind_declarations \"memcp-tests\" \"\
+    @amount [sys].[DECIMAL](20,2)\")))\n  (s \"tsql_bound:amount\" true) (s \"tsql_param:amount\" nil)\n  (s \"\
+    tsql_param_type:amount\" (cadr declaration))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT @amount\
+    \ AS amount\" \"\" s))\n  (define field (car fields))\n  (and (equal? (field \"sql_type\") \"DECIMAL\")\n  \
+    \  (equal? (field \"precision\") 20) (equal? (field \"scale\") 2)))\n"
+  expect:
+    result: true
+  noncritical: true
+- name: Metadata declarations share qualified type and MAX grammar
+  scm: "(begin\n  (define declarations (tsql_metadata_declared_parameters \"memcp-tests\"\n    \"@amount [sys].[DECIMAL](20,2),@label\
+    \ [sys].[NVARCHAR](MAX)\"))\n  (define amount (declarations \"amount\")) (define label (declarations \"label\"\
+    ))\n  (and (equal? (amount \"type\") \"DECIMAL\") (equal? (amount \"dimensions\") '(20 2))\n    (equal? (label\
+    \ \"type\") \"NVARCHAR\") (equal? (label \"dimensions\") '(-1))))\n"
+  expect:
+    result: true
+  noncritical: true
+- name: Prepared type declarations cannot escape the active database
+  scm: '(tds_bind_declarations "memcp-tests" "@amount [other].[sys].[DECIMAL](20,2)")
+
+    '
+  expect:
+    error: true
+- name: IF chooses its true single statement
+  sql: IF 1=1 SELECT 5 AS n ELSE SELECT 6 AS n
+  expect:
+    rows: 1
+    data:
+    - n: 5
+  noncritical: true
+- name: IF chooses ELSE for false
+  sql: IF 1=0 SELECT 5 AS n ELSE SELECT 6 AS n
+  expect:
+    rows: 1
+    data:
+    - n: 6
+  noncritical: true
+- name: IF chooses ELSE for unknown NULL comparison
+  sql: IF NULL=1 SELECT 5 AS n ELSE SELECT 6 AS n
+  expect:
+    rows: 1
+    data:
+    - n: 6
+  noncritical: true
+- name: IF without ELSE leaves a missing table untouched
+  sql: IF 1=0 DROP TABLE dbo.tsql_if_missing
+  expect:
+    affected_rows: 0
+  noncritical: true
+- name: Unselected IF SELECT is not physically planned
+  sql: IF 1=0 SELECT * FROM dbo.tsql_if_missing ELSE SELECT 7 AS n
+  expect:
+    rows: 1
+    data:
+    - n: 7
+  noncritical: true
+- name: Unselected IF declaration is not resolved
+  sql: IF 1=0 CREATE TABLE dbo.tsql_if_missing(id dbo.unknown_alias) ELSE SELECT 8 AS n
+  expect:
+    rows: 1
+    data:
+    - n: 8
+  noncritical: true
+- name: IF preserves CASE ELSE and quoted control words
+  sql: IF (1=1) SELECT CASE WHEN 1=0 THEN N'ignored' ELSE N'ELSE; BEGIN IF' END AS value ELSE SELECT N'wrong' AS
+    value
+  expect:
+    rows: 1
+    data:
+    - value: ELSE; BEGIN IF
+  noncritical: true
+- name: IF preserves nested parentheses and comments
+  sql: IF (1+2)=3 /* ELSE */ SELECT CAST((4+5) AS INT) AS n -- trailing comment
+  expect:
+    rows: 1
+    data:
+    - n: 9
+  noncritical: true
+- name: IF preserves bracket and double quoted identifier escaping
+  sql: IF 1=1 SELECT 5 AS [ELSE]]value],6 AS "ELSE" ELSE SELECT 7 AS n
+  expect:
+    rows: 1
+    data:
+    - ELSE]value: 5
+      ELSE: 6
+  noncritical: true
+- name: IF preserves escaped strings and nested CASE
+  sql: IF 1=1 SELECT CASE WHEN 1=1 THEN CASE WHEN 1=0 THEN N'wrong' ELSE N'it''s ELSE' END ELSE N'wrong' END AS
+    value ELSE SELECT N'wrong' AS value
+  expect:
+    rows: 1
+    data:
+    - value: it's ELSE
+  noncritical: true
+- name: IF rejects unbalanced parentheses even in its skipped branch
+  sql: IF 1=0 SELECT CAST((1 AS INT)
+  expect:
+    error: true
+- name: IF rejects unbalanced CASE even in its skipped branch
+  sql: IF 1=0 SELECT CASE WHEN 1=1 THEN 5
+  expect:
+    error: true
+- name: IF rejects unterminated quoted identifiers in its skipped branch
+  sql: IF 1=0 SELECT 5 AS [unfinished
+  expect:
+    error: true
+- name: IF skipped trailing syntax errors remain visible
+  sql: IF 1=0 SELECT 5 AS n unexpected ELSE SELECT 6 AS n
+  expect:
+    error: true
+- name: IF selected trailing syntax errors remain visible
+  sql: IF 1=1 SELECT 5 AS n unexpected
+  expect:
+    error: true
+- name: Conditional describe cannot run DDL
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_if_describe
+  scm: "(begin\n  (define s (newsession))\n  (define failure (try (lambda () (begin\n    (tds_describe \"memcp-tests\"\
+    \ \"IF 1=1 CREATE TABLE dbo.tsql_if_describe(id INT)\" \"\" s) false)) (lambda (_) true)))\n  (s \"tsql_prepare_describe\"\
+    \ true)\n  (define prepared_failure (try (lambda () (begin\n    (tds_describe \"memcp-tests\" \"IF 1=1 CREATE\
+    \ TABLE dbo.tsql_if_describe(id INT)\" \"\" s) false)) (lambda (_) true)))\n  (if (and failure prepared_failure\
+    \ (nil? (sql_object_id \"memcp-tests\" \"tsql_if_describe\"))) true\n    (error \"conditional describe executed\
+    \ a mutation\")))\n"
+  expect:
+    result: true
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_if_describe
+  name: Fixture cleanup for Conditional describe cannot run DDL (1)
+- name: Selected IF table error remains visible
+  sql: IF 1=1 DROP TABLE dbo.tsql_if_missing ELSE SELECT 1 AS n
+  expect:
+    error: true
+- name: Selected IF scalar error remains visible
+  sql: IF 1=1 SELECT 1/0 AS n ELSE SELECT 1 AS n
+  expect:
+    error: true
+- name: IF requires a predicate
+  sql: IF 1 SELECT 5 AS n
+  expect:
+    error: true
+- name: IF rejects relational EXISTS until logical support exists
+  sql: IF EXISTS(SELECT id FROM dbo.tsql_data) SELECT 5 AS n
+  expect:
+    error: true
+- name: IF rejects scalar subqueries
+  sql: IF (SELECT 1)=1 SELECT 5 AS n
+  expect:
+    error: true
+- name: IF rejects unbound column predicates
+  sql: IF id=1 SELECT 5 AS n
+  expect:
+    error: true
+- name: IF rejects aggregate predicates
+  sql: IF COUNT(*)=1 SELECT 5 AS n
+  expect:
+    error: true
+- name: IF rejects window predicates
+  sql: IF ROW_NUMBER() OVER(ORDER BY 1)=1 SELECT 5 AS n
+  expect:
+    error: true
+- name: IF rejects BEGIN END blocks
+  sql: IF 1=1 BEGIN SELECT 5 AS n END
+  expect:
+    error: true
+- name: IF rejects nested control statements
+  sql: IF 1=1 IF 1=1 SELECT 5 AS n
+  expect:
+    error: true
+- name: IF rejects an internal semicolon before ELSE
+  sql: IF 1=1 SELECT 5 AS n; ELSE SELECT 6 AS n
+  expect:
+    error: true
+- name: IF does not dispatch arbitrary procedure text
+  sql: IF 1=0 EXEC unknown_installation_procedure
+  expect:
+    error: true
+- name: Cached IF catalog conditions observe create and drop
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_if_catalog
+  scm: "(begin\n  (define s (newsession))\n  (define cache (newcachemap))\n  (define execute (lambda (sql) (with_autocommit\
+    \ s nil nil sql (lambda (tx)\n    (sql_execute_formula s tx (cached_parse cache (list parse_tsql) \"memcp-tests\"\
+    \ sql nil \"root\" s false tx)\n      (lambda (row) true) (lambda fields true))))))\n  (define create \"IF OBJECT_ID(N'dbo.tsql_if_catalog',N'U')\
+    \ IS NULL CREATE TABLE dbo.tsql_if_catalog(id INT PRIMARY KEY)\")\n  (define drop \"IF OBJECT_ID(N'dbo.tsql_if_catalog',N'U')\
+    \ IS NOT NULL DROP TABLE dbo.tsql_if_catalog\")\n  (execute drop)\n  (execute create)\n  (if (nil? (sql_object_id\
+    \ \"memcp-tests\" \"tsql_if_catalog\")) (error \"IF CREATE was skipped\") true)\n  (execute create)\n  (execute\
+    \ drop)\n  (if (nil? (sql_object_id \"memcp-tests\" \"tsql_if_catalog\")) true (error \"cached IF retained missing\
+    \ object\"))\n  (execute create)\n  (execute drop)\n  (if (nil? (sql_object_id \"memcp-tests\" \"tsql_if_catalog\"\
+    )) true (error \"cached IF retained old object identity\")))\n"
+  expect:
+    result: true
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_if_catalog
+  name: Fixture cleanup for Cached IF catalog conditions observe create and drop (1)
+- name: Cached IF uses the current invocation session and result sink
+  scm: "(begin\n  (define cache (newcachemap))\n  (define a (newsession))\n  (define b (newsession))\n  (map (list\
+    \ a b) (lambda (s) (begin (s \"tsql_bound:gate\" true) (s \"tsql_bound:payload\" true))))\n  (a \"tsql_param:gate\"\
+    \ 1) (a \"tsql_param:payload\" 17)\n  (b \"tsql_param:gate\" 0) (b \"tsql_param:payload\" 99)\n  (define sql\
+    \ \"IF @gate=1 SELECT @payload AS n ELSE SELECT -1 AS n\")\n  (define execute (lambda (s) (begin\n    (define\
+    \ out (newsession))\n    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (cached_parse\
+    \ cache (list parse_tsql) \"memcp-tests\" sql nil \"root\" s false tx)\n        (lambda (row) (out \"row\" row))\
+    \ (lambda fields (out \"fields\" fields)))))\n    ((out \"row\") \"n\"))))\n  (define first (execute a))\n \
+    \ (define second (execute b))\n  (a \"tsql_param:payload\" 23)\n  (define third (execute a))\n  (if (and (equal?\
+    \ first 17) (equal? second -1) (equal? third 23) (equal? (count (cache)) 1)) true\n    (error \"IF retained\
+    \ a compiling session or the wrong result sink\")))\n"
+  expect:
+    result: true
+  noncritical: true
+- name: IF DML retains its existing explicit transaction and skipped writes
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_if_transaction
+  - sql: CREATE TABLE dbo.tsql_if_transaction(id INT PRIMARY KEY)
+  scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define out (newsession))\n\
+    \    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula\
+    \ tx\n        (parse_tsql \"memcp-tests\" sql nil s tx)) (lambda (row) (out \"row\" row)) (lambda fields true))))\n\
+    \    (out \"row\"))))\n  (execute \"BEGIN TRAN\")\n  (execute \"IF 1=0 INSERT INTO dbo.tsql_if_transaction VALUES(10)\"\
+    )\n  (execute \"IF 1=1 INSERT INTO dbo.tsql_if_transaction VALUES(20)\")\n  (define inside (execute \"SELECT\
+    \ COUNT(*) AS n FROM dbo.tsql_if_transaction\"))\n  (execute \"ROLLBACK\")\n  (define outside (execute \"SELECT\
+    \ COUNT(*) AS n FROM dbo.tsql_if_transaction\"))\n  (if (and (equal? (inside \"n\") 1) (equal? (outside \"n\"\
+    ) 0) (nil? (s \"transaction\"))) true\n    (error \"IF started an independent transaction or executed its skipped\
+    \ write\")))\n"
+  expect:
+    result: true
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_if_transaction
+  name: Fixture cleanup for IF DML retains its existing explicit transaction and skipped writes (1)
+- name: IF selected permission errors are not masked
+  scm: "(begin\n  (define s (newsession))\n  (define policy (lambda (db name write) (if write (error \"conditional\
+    \ write denied\") true)))\n  (define failure (try (lambda () (begin\n    (with_autocommit s nil nil \"IF 1=1\
+    \ UPDATE dbo.tsql_data SET val=1\" (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula\
+    \ tx\n        (parse_tsql \"memcp-tests\" \"IF 1=1 UPDATE dbo.tsql_data SET val=1\" policy s tx))\n        (lambda\
+    \ (row) true) (lambda fields true)))) \"unexpected success\")) (lambda (message) (concat message))))\n  (if\
+    \ (strlike failure \"%conditional write denied%\") true (error \"IF lost the caller policy or swallowed its\
+    \ error\")))\n"
+  expect:
+    result: true
+  noncritical: true
+- name: Mixed integer and string addition converts numeric input
+  sql: SELECT 2 + '3' AS n
+  expect:
+    rows: 1
+    data:
+    - n: 5
+- name: Mixed integer and string addition rejects invalid numeric input
+  sql: SELECT 2 + 'invalid' AS n
+  expect:
+    error: true
+  noncritical: true
+- name: Bracket identifiers and TOP
+  sql: SELECT TOP (2) [id], [name] FROM [dbo].[tsql_data] ORDER BY [id]
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      name: Alice
+    - id: 2
+      name: Bob
+- name: TOP without parentheses
+  sql: SELECT TOP 1 id FROM tsql_data ORDER BY id DESC
+  expect:
+    rows: 1
+    data:
+    - id: 4
+- name: TOP zero
+  sql: SELECT TOP (0) id FROM tsql_data
+  expect:
+    rows: 0
+    data: []
+- name: OFFSET FETCH
+  sql: SELECT id FROM dbo.tsql_data ORDER BY id OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY
+  expect:
+    rows: 2
+    data:
+    - id: 2
+    - id: 3
+- name: OFFSET without FETCH
+  sql: SELECT id FROM tsql_data ORDER BY id OFFSET 3 ROWS
+  expect:
+    rows: 1
+    data:
+    - id: 4
+- name: Database dbo qualification
+  sql: SELECT TOP (1) id FROM [memcp-tests].[dbo].[tsql_data] ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+  noncritical: true
+- name: TSQL DISTINCT
+  sql: SELECT DISTINCT name FROM tsql_data ORDER BY name
+  expect:
+    rows: 3
+    data:
+    - name: Alice
+    - name: Bob
+    - name: Charlie
+- name: TSQL bare alias
+  sql: SELECT TOP (1) id item FROM tsql_data ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - item: 1
+- name: Unicode literals and escaped delimiters
+  sql: SELECT N'Grüße it''s' AS [a]]b], 'C:\new' AS path
+  expect:
+    rows: 1
+    data:
+    - a]b: Grüße it's
+      path: C:\new
+- name: Double quoted identifiers
+  sql: SELECT TOP (1) "id" FROM "dbo"."tsql_data" ORDER BY "id"
+  expect:
+    rows: 1
+    data:
+    - id: 1
+- name: TSQL integer division and string addition
+  sql: SELECT 5/2 AS integer_result, 5.0/2 AS decimal_result, N'a'+N'b' AS text_result
+  expect:
+    rows: 1
+    data:
+    - integer_result: 2
+      decimal_result: 2.5
+      text_result: ab
+  noncritical: true
+- name: ISNULL uses replacement semantics
+  sql: SELECT ISNULL(NULL,7) AS a, ISNULL(0,7) AS b
+  expect:
+    rows: 1
+    data:
+    - a: 7
+      b: 0
+- name: TSQL CAST and CONVERT
+  sql: SELECT CAST(5.9 AS INT) AS a, CONVERT(NVARCHAR(30),123) AS b
+  expect:
+    rows: 1
+    data:
+    - a: 5
+      b: '123'
+  noncritical: true
+- name: TSQL standard aggregates
+  sql: SELECT COUNT(*) AS n, SUM(val) AS total, AVG(val) AS average FROM tsql_data
+  expect:
+    rows: 1
+    data:
+    - n: 4
+      total: 110
+      average: 27
+  noncritical: true
+- name: TSQL row number partitions
+  sql: SELECT id, ROW_NUMBER() OVER (PARTITION BY name ORDER BY id) AS rn FROM tsql_data ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      rn: 1
+    - id: 2
+      rn: 1
+    - id: 3
+      rn: 1
+    - id: 4
+      rn: 2
+- name: TSQL aggregate window
+  sql: SELECT TOP (1) id, SUM(val) OVER (PARTITION BY name) AS total FROM tsql_data ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      total: 30
+- name: TSQL scalar subquery
+  sql: SELECT (SELECT TOP (1) val FROM tsql_data ORDER BY id) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 10
+- name: TSQL correlated EXISTS
+  sql: SELECT a.id FROM tsql_data a WHERE EXISTS (SELECT 1 FROM tsql_data b WHERE b.id=a.id AND b.val>20) ORDER
+    BY a.id
+  expect:
+    rows: 2
+    data:
+    - id: 2
+    - id: 3
+- name: TSQL UNION ALL
+  sql: SELECT 1 AS value UNION ALL SELECT 2 AS value
+  expect:
+    rows: 2
+    data:
+    - value: 1
+    - value: 2
+- name: TSQL searched CASE
+  sql: SELECT CASE WHEN 1=1 THEN 7 ELSE 9 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: TSQL simple CASE
+  sql: SELECT CASE 2 WHEN 1 THEN 7 WHEN 2 THEN 8 ELSE 9 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 8
+- name: TSQL NULL addition
+  sql: SELECT NULL + N'x' AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TSQL LEN ignores trailing spaces
+  sql: SELECT LEN(N'abc  ') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 3
+- name: TOP PERCENT
+  sql: SELECT TOP (10) PERCENT id FROM tsql_data
+  expect:
+    error: true
+- name: TOP WITH TIES
+  sql: SELECT TOP (1) WITH TIES id FROM tsql_data ORDER BY id
+  expect:
+    error: true
+- name: OFFSET requires ORDER BY
+  sql: SELECT id FROM tsql_data OFFSET 1 ROWS
+  expect:
+    error: true
+- name: TOP and OFFSET conflict
+  sql: SELECT TOP (1) id FROM tsql_data ORDER BY id OFFSET 1 ROWS
+  expect:
+    error: true
+- name: Other T-SQL schema
+  sql: SELECT id FROM sales.tsql_data
+  expect:
+    error: true
+- name: LIMIT is rejected in t-sql mode
+  sql: SELECT id FROM tsql_data LIMIT 1
+  expect:
+    error: true
+- name: rowversion is not a datetime
+  sql: SELECT CAST(GETDATE() AS TIMESTAMP) AS v
+  expect:
+    error: true
+- name: Unsupported IDENTITY increment
+  sql: CREATE TABLE tsql_bad_identity (id INT IDENTITY(3,2))
+  expect:
+    error: true
+- name: Single-argument ISNULL is rejected
+  sql: SELECT ISNULL(NULL)
+  expect:
+    error: true
+  noncritical: true
+- name: Division by zero
+  sql: SELECT 1/0 AS value
+  expect:
+    error: true
+  noncritical: true
+- name: Unsupported APPLY
+  sql: SELECT a.id FROM tsql_data a CROSS APPLY (SELECT 1 AS value) b
+  expect:
+    error: true
+- name: TSQL CREATE TABLE with IDENTITY
+  sql: CREATE TABLE dbo.tsql_copy (id INT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(MAX))
+  expect:
+    rows: 0
+  noncritical: true
+- name: TSQL INSERT uses generated identity
+  sql: INSERT INTO dbo.tsql_copy (name) VALUES (N'first'),(N'second')
+  expect:
+    affected_rows: 2
+  noncritical: true
+- name: TSQL read generated identity
+  sql: SELECT id,name FROM dbo.tsql_copy ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      name: first
+    - id: 2
+      name: second
+  noncritical: true
+- name: TSQL UPDATE
+  sql: UPDATE dbo.tsql_copy SET name=N'updated' WHERE id=1
+  expect:
+    affected_rows: 1
+  noncritical: true
+- name: TSQL DELETE
+  sql: DELETE FROM dbo.tsql_copy WHERE id=2
+  expect:
+    affected_rows: 1
+  noncritical: true
+- name: TSQL CREATE VIEW
+  sql: CREATE VIEW dbo.tsql_view AS SELECT id,name FROM dbo.tsql_copy
+  expect:
+    rows: 1
+- name: TSQL SELECT view
+  sql: SELECT id,name FROM dbo.tsql_view
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      name: updated
+  noncritical: true
+- name: TOP remains branch-local in UNION
+  sql: SELECT TOP (1) id AS v FROM tsql_data UNION ALL SELECT TOP (1) id AS v FROM tsql_data ORDER BY v
+  expect:
+    rows: 2
+  noncritical: true
+- name: TSQL unbound parameters fail
+  sql: SELECT @missing AS v
+  expect:
+    error: true
+  noncritical: true
+- name: TSQL date boundary function
+  sql: SELECT DATEDIFF(day,N'2026-01-01',N'2026-01-02') AS days
+  expect:
+    rows: 1
+    data:
+    - days: 1
+  noncritical: true
+- name: IDENTITY zero seed is rejected
+  sql: CREATE TABLE tsql_bad_identity (id INT IDENTITY(0,1))
+  expect:
+    error: true
+- name: TSQL integer AVG window
+  sql: SELECT TOP (1) AVG(val) OVER () AS average FROM tsql_data
+  expect:
+    rows: 1
+    data:
+    - average: 27
+  noncritical: true
+- name: TSQL empty integer AVG
+  sql: SELECT AVG(val) AS average FROM tsql_data WHERE id<0
+  expect:
+    rows: 1
+    data:
+    - average: null
+- name: INT column division follows declared type
+  sql: SELECT TOP (1) val/3 AS quotient FROM tsql_data ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - quotient: 3
+  noncritical: true
+- name: BIGINT literal remains exact
+  sql: SELECT 9007199254740993 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9007199254740993
+  noncritical: true
+- name: CAST truncates requested character length
+  sql: SELECT CAST(N'abcdef' AS NVARCHAR(3)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: abc
+  noncritical: true
+- name: CONCAT treats NULL as empty string
+  sql: SELECT CONCAT(N'a',NULL,N'b') AS value
+  expect:
+    rows: 1
+    data:
+    - value: ab
+  noncritical: true
+- name: Invalid integer cast is rejected
+  sql: SELECT CAST(N'garbage' AS INT)
+  expect:
+    error: true
+- name: Integer cast overflow is rejected
+  sql: SELECT CAST(256 AS TINYINT)
+  expect:
+    error: true
+- name: Ordered aggregate window is explicitly unsupported
+  sql: SELECT SUM(val) OVER (ORDER BY id) AS total FROM tsql_data
+  expect:
+    error: true
+  noncritical: true
+- name: Missing USE database is rejected
+  sql: USE tsql_missing_database
+  expect:
+    error: true
+  noncritical: true
+- name: TSQL INSERT SELECT through shared planner
+  sql: INSERT INTO dbo.tsql_copy (name) SELECT TOP (1) name FROM dbo.tsql_data ORDER BY id
+  expect:
+    rows: 1
+  noncritical: true
+- name: TSQL INSERT SELECT writes one row
+  sql: SELECT COUNT(*) AS n FROM dbo.tsql_copy
+  expect:
+    rows: 1
+    data:
+    - n: 2
+  noncritical: true
+- name: TSQL INSERT VALUES resolves omitted target columns
+  sql: INSERT dbo.tsql_copy VALUES (10,N'implicit values')
+  expect:
+    affected_rows: 1
+  noncritical: true
+- name: TSQL INSERT SELECT resolves omitted target columns
+  sql: INSERT dbo.tsql_copy SELECT id+10,name FROM dbo.tsql_data WHERE id=1
+  noncritical: true
+- name: Implicit target columns preserve names and values
+  sql: SELECT id,name FROM dbo.tsql_copy WHERE id>=10 ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+      name: implicit values
+    - id: 11
+      name: Alice
+  noncritical: true
+- name: Implicit target columns still enforce value arity
+  sql: INSERT dbo.tsql_copy VALUES (12)
+  expect:
+    error: true
+- name: Describe empty SELECT preserves declared integer metadata
+  scm: "(begin\n  (define s (newsession))\n  (s \"username\" \"root\")\n  (define fields (tds_describe \"memcp-tests\"\
+    \ \"SELECT TOP (0) id FROM dbo.tsql_data\" \"\" s))\n  (if (and (equal? (count fields) 1) (equal? ((car fields)\
+    \ \"name\") \"id\")\n      (equal? ((car fields) \"sql_type\") \"INT\")) true (error \"empty SELECT lost its\
+    \ declared type\")))\n"
+  noncritical: true
+- name: Describe never executes INSERT
+  scm: '(tds_describe "memcp-tests" "INSERT INTO dbo.tsql_data VALUES (999,N''unexecuted'',1)" "" (newsession))
+
+    '
+  expect:
+    error: true
+- name: Failed describe leaves rows unchanged
+  sql: SELECT COUNT(*) AS n FROM dbo.tsql_data WHERE id=999
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: Describe derived star keeps exported columns
+  scm: "(begin\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP (0) d.* FROM (SELECT id,name FROM dbo.tsql_data)\
+    \ AS d\" \"\" (newsession)))\n  (if (and (equal? (count fields) 2) (equal? ((car fields) \"sql_type\") \"INT\"\
+    )\n      (equal? ((cadr fields) \"name\") \"name\")) true (error \"derived star lost its exported metadata\"\
+    )))\n"
+  noncritical: true
+- name: Numeric zero and one retain numeric result metadata
+  scm: "(begin\n  (define s (newsession))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT 0 AS zero,1 AS\
+    \ one,2 AS two\" \"\" s))\n  (if (equal? (map fields (lambda (field) (field \"sql_type\"))) '(\"INT\" \"INT\"\
+    \ \"INT\")) true\n    (error \"numeric literal became a boolean\")))\n"
+  noncritical: true
+- name: Describe empty virtual catalog retains declared field types
+  scm: "(begin\n  (define s (newsession))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP (0) object_id,name\
+    \ FROM sys.tables\" \"\" s))\n  (if (equal? (map fields (lambda (field) (field \"sql_type\"))) '(\"INT\" \"\
+    NVARCHAR\")) true\n    (error \"virtual catalog lost declared result metadata\")))\n"
+  noncritical: true
+- name: Unicode literal retains its national character result type
+  scm: "(begin\n  (define s (newsession))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT N'Grüße \U0001F418\
+    ' AS label\" \"\" s))\n  (if (equal? ((car fields) \"sql_type\") \"NVARCHAR\") true\n    (error \"Unicode literal\
+    \ was described as narrow text\")))\n"
+  noncritical: true
+- name: Guarded RPC parameter retains its declaration without reading a value
+  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_bound:v\" true)\n  (s \"tsql_param:v\" nil)\n  (s \"tsql_param_type:v\"\
+    \ '(\"BIGINT\"))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT @v AS value\" \"@v BIGINT\" s))\n\
+    \  (if (equal? ((car fields) \"sql_type\") \"BIGINT\") true\n    (error \"guarded parameter lost its declared\
+    \ type\")))\n"
+  noncritical: true
+- name: Binary literals retain bytes and empty binary values
+  scm: "(begin\n  (define s (newsession))\n  (define expression (parse_tsql \"memcp-tests\" \"SELECT 0x00FF0102\
+    \ AS bytes,0x AS empty\" nil s nil))\n  (define output (newsession))\n  (sql_execute_formula s nil (sql_queryplan_compile_formula\
+    \ nil expression)\n    (lambda (row) (output \"row\" row)) (lambda fields true))\n  (define row (output \"row\"\
+    ))\n  (if (and (equal? (base64_encode (row \"bytes\")) \"AP8BAg==\")\n      (equal? (strlen (row \"empty\"))\
+    \ 0)) true (error \"binary literal was transcoded\")))\n"
+- name: Binary literal descriptions preserve type and byte width
+  scm: "(begin\n  (define s (newsession))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP (0) 0x00FF0102\
+    \ AS bytes\" \"\" s))\n  (if (and (equal? ((car fields) \"sql_type\") \"VARBINARY\")\n      (equal? ((car fields)\
+    \ \"size\") 4)) true (error \"binary literal lost metadata\")))\n"
+  noncritical: true
+- name: Invalid hexadecimal digits fail
+  sql: SELECT 0x00GG AS bytes
+  expect:
+    error: true
+- name: National character function preserves control and supplementary characters
+  sql: SELECT NCHAR(13)+NCHAR(10) AS newline,NCHAR(128024) AS elephant
+  expect:
+    rows: 1
+    data:
+    - newline: "\r\n"
+      elephant: 🐘
+  noncritical: true
+- name: National character invalid range and NULL stay NULL
+  sql: SELECT NCHAR(-1) AS low,NCHAR(1114112) AS high,NCHAR(55296) AS surrogate,NCHAR(NULL) AS missing
+  expect:
+    rows: 1
+    data:
+    - low: null
+      high: null
+      surrogate: null
+      missing: null
+  noncritical: true
+- name: National character metadata retains a Unicode result
+  scm: "(begin\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP (0) NCHAR(13) AS value\" \"\" (newsession)))\n\
+    \  (if (and (equal? ((car fields) \"sql_type\") \"NVARCHAR\")\n      (equal? ((car fields) \"size\") 2)) true\
+    \ (error \"national character metadata lost Unicode type\")))\n"
+  noncritical: true
+- name: Fractional cast and DATEADD descriptions preserve declared clock precision
+  scm: "(begin\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP (0) CAST(N'2026-03-15 12:13:14.12' AS\
+    \ DATETIME2(2)) AS stamp,DATEADD(second,1,CAST(N'12:13:14.1234' AS TIME(4))) AS clock\" \"\" (newsession)))\n\
+    \  (if (and (equal? ((car fields) \"sql_type\") \"DATETIME2\") (equal? ((car fields) \"scale\") 2)\n      (equal?\
+    \ ((cadr fields) \"sql_type\") \"TIME\") (equal? ((cadr fields) \"scale\") 4)) true\n    (error \"fractional\
+    \ expression lost declared clock precision\")))\n"
+  noncritical: true
+- name: Fractional clocks use Unix integers and frontend declarations
+  scm: "(begin\n  (define value (tsql_cast_value \"2026-03-15 12:13:14.123\" '(\"DATETIME2\" 3)))\n  (define typed\
+    \ (list 'tsql_parameter value (list 'quote '(\"DATETIME2\" 3))))\n  (define field (tsql_expr_description '()\
+    \ typed (newsession)))\n  (if (and (int? value) (equal? (sql_runtime_value_type value) \"BIGINT\")\n      (equal?\
+    \ (field \"sql_type\") \"DATETIME2\") (equal? (field \"scale\") 3)) true\n    (error \"frontend declaration\
+    \ was lost or temporal policy leaked into value tags\")))\n"
+  noncritical: true
+- name: Exact SELECT cache separates full parameter declarations without retaining values
+  scm: "(begin\n  (define cache (newcachemap))\n  (define run (lambda (declaration) (begin\n    (define s (newsession))\n\
+    \    (s \"tsql_bound:v\" true)\n    (s \"tsql_param:v\" nil)\n    (s \"tsql_param_type:v\" declaration)\n  \
+    \  (define output (newsession))\n    (define formula (cached_parse cache (list parse_tsql) \"memcp-tests\" \"\
+    SELECT TOP (0) @v AS value\" nil \"root\" s false nil))\n    (sql_execute_formula s nil formula (lambda rows\
+    \ true)\n      (lambda args (if (> (count args) 1) (output \"field\" (car (cadr args))) true)))\n    (define\
+    \ field (output \"field\"))\n    (list (field \"sql_type\") (field \"precision\") (field \"scale\")))))\n  (define\
+    \ first (run '(\"DECIMAL\" 38 10)))\n  (define second (run '(\"DECIMAL\" 18 4)))\n  (define repeated (run '(\"\
+    DECIMAL\" 38 10)))\n  (define time (run '(\"TIME\" 2)))\n  (if (and (equal? first '(\"DECIMAL\" 38 10)) (equal?\
+    \ second '(\"DECIMAL\" 18 4))\n      (equal? repeated first) (equal? time '(\"TIME\" nil 2)) (equal? (count\
+    \ (cache)) 3)) true\n    (error \"exact cache reused stale input type precision\")))\n"
+  noncritical: true
+- name: Calendar aliases keep integer metadata for empty results
+  scm: "(begin\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP (0) YEAR(CAST('12:13:14' AS TIME)) AS\
+    \ y,MONTH(CAST('12:13:14' AS TIME)) AS m,DAY(CAST('12:13:14' AS TIME)) AS d\" \"\" (newsession)))\n  (if (equal?\
+    \ (map fields (lambda (field) (field \"sql_type\"))) '(\"INT\" \"INT\" \"INT\")) true\n    (error \"calendar\
+    \ aliases lost their integer result declarations\")))\n"
+  noncritical: true
+- name: Identity functions begin with typed NULL
+  sql: SELECT @@IDENTITY AS session_id,SCOPE_IDENTITY() AS scoped_id
+  expect:
+    rows: 1
+    data:
+    - session_id: null
+      scoped_id: null
+  noncritical: true
+- name: Identity describe remains NUMERIC 38 zero even for empty output
+  scm: "(begin (define fields (tds_describe \"memcp-tests\" \"SELECT TOP(0) @@IDENTITY AS value,SCOPE_IDENTITY()\
+    \ AS scoped\" \"\" (newsession)))\n   (if (reduce fields (lambda (valid field) (and valid (equal? (field \"\
+    sql_type\") \"NUMERIC\") (equal? (field \"precision\") 38) (equal? (field \"scale\") 0))) true) true (error\
+    \ \"identity metadata lost exact numeric type\")))"
+  expect:
+    result: true
+  noncritical: true
+- name: Multirow identity returns last allocated ID and survives rollback
+  scm: "(begin\n  (define s (newsession))\n  (s \"schema\" \"memcp-tests\")\n  (define execute (lambda (sql) (begin\n\
+    \    (define output (newsession))\n    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula\
+    \ s tx (sql_queryplan_compile_formula tx\n        (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda\
+    \ (row) (output \"row\" row)) (lambda fields true))))\n    (output \"row\"))))\n  (execute \"CREATE TABLE dbo.tsql_identity_probe\
+    \ (id BIGINT IDENTITY(1,1) PRIMARY KEY, v INT)\")\n  (execute \"INSERT INTO dbo.tsql_identity_probe(v) VALUES\
+    \ (10),(20),(30)\")\n  (define initial (execute \"SELECT @@IDENTITY AS value,SCOPE_IDENTITY() AS scoped\"))\n\
+    \  (if (and (equal? (initial \"value\") 3) (equal? (initial \"scoped\") 3)) true (error \"multirow identity\
+    \ reported first id\"))\n  (execute \"BEGIN TRANSACTION\")\n  (execute \"INSERT INTO dbo.tsql_identity_probe(v)\
+    \ VALUES (40),(50)\")\n  (execute \"ROLLBACK\")\n  (define rolled (execute \"SELECT @@IDENTITY AS value,SCOPE_IDENTITY()\
+    \ AS scoped\"))\n  (if (and (equal? (rolled \"value\") 5) (equal? (rolled \"scoped\") 5)) true (error \"rollback\
+    \ erased generated identity\"))\n  (s \"tsql_scope_identity\" nil)\n  (define next_scope (execute \"SELECT @@IDENTITY\
+    \ AS value,SCOPE_IDENTITY() AS scoped\"))\n  (if (and (equal? (next_scope \"value\") 5) (nil? (next_scope \"\
+    scoped\"))) true (error \"scope identity leaked across batch\"))\n  (execute \"INSERT INTO dbo.tsql_identity_probe(v)\
+    \ VALUES (60)\")\n  (define next (execute \"SELECT @@IDENTITY AS value\"))\n  (if (equal? (next \"value\") 6)\
+    \ true (error \"rolled-back generated IDs were reused\"))\n  (execute \"INSERT INTO dbo.tsql_identity_probe(v)\
+    \ SELECT 10 UNION ALL SELECT 20\")\n  (define copied (execute \"SELECT @@IDENTITY AS value\"))\n  (if (equal?\
+    \ (copied \"value\") 8) true (error \"INSERT SELECT lost last generated identity\"))\n  (execute \"INSERT INTO\
+    \ dbo.tsql_identity_probe(v) SELECT v FROM dbo.tsql_identity_probe WHERE id=-1\")\n  (define empty_insert (execute\
+    \ \"SELECT @@IDENTITY AS value,SCOPE_IDENTITY() AS scoped\"))\n  (if (and (nil? (empty_insert \"value\")) (equal?\
+    \ (empty_insert \"scoped\") 8)) true (error \"empty INSERT identity completion was wrong\"))\n  (execute \"\
+    DROP TABLE dbo.tsql_identity_probe\")\n  true)"
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_identity_probe
+  expect:
+    result: true
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_identity_probe
+  name: Fixture cleanup for Multirow identity returns last allocated ID and survives rollback (1)
+- name: Identity metadata marks only direct auto columns
+  scm: "(begin\n  (define s (newsession))\n  (s \"schema\" \"memcp-tests\")\n  (define execute (lambda (sql) (begin\n\
+    \    (define output (newsession))\n    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula\
+    \ s tx (sql_queryplan_compile_formula tx\n        (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda\
+    \ (row) (output \"row\" row)) (lambda fields true))))\n    (output \"row\"))))\n  (execute \"CREATE TABLE dbo.tsql_identity_probe\
+    \ (id INT IDENTITY(1,1) PRIMARY KEY, v INT)\")\n  (s \"username\" \"root\")\n  (define direct (tds_describe\
+    \ \"memcp-tests\" \"SELECT TOP(0) id,v,id+1 AS expression FROM dbo.tsql_identity_probe\" \"\" (newsession)))\n\
+    \  (if (and ((car direct) \"identity\") (not ((nth direct 1) \"identity\")) (not ((nth direct 2) \"identity\"\
+    ))) true (error \"identity flag guessed for expression\"))\n  (define metadata (tsql_metadata_rpc \"memcp-tests\"\
+    \ \"sp_columns\" (list \"table_name\" \"tsql_identity_probe\" \"column_name\" \"id\" \"odbcver\" 3) s))\n  (if\
+    \ (equal? ((car (metadata \"rows\")) \"TYPE_NAME\") \"int identity\") true (error \"column catalog hid identity\
+    \ declaration\"))\n  (execute \"DROP TABLE dbo.tsql_identity_probe\")\n  true)"
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_identity_probe
+  expect:
+    result: true
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_identity_probe
+  name: Fixture cleanup for Identity metadata marks only direct auto columns (1)
+- name: Prepare metadata for one INSERT has no fields and no side effects
+  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_prepare_describe\" true)\n  (define fields (tds_describe\
+    \ \"memcp-tests\" \"INSERT INTO dbo.tsql_data VALUES (999,N'unexecuted',1)\" \"\" s))\n  (if (empty_list? fields)\
+    \ true (error \"single INSERT acquired result fields\")))\n"
+  expect:
+    result: true
+  noncritical: true
+- name: Pure INSERT prepare did not execute its body
+  sql: SELECT COUNT(*) AS n FROM dbo.tsql_data WHERE id=999
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: INSERT followed by SELECT cannot receive empty prepare metadata
+  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_prepare_describe\" true)\n  (tds_describe \"memcp-tests\"\
+    \ \"INSERT INTO dbo.tsql_data VALUES (999,N'unexecuted',1); SELECT id FROM dbo.tsql_data\" \"\" s))\n"
+  expect:
+    error: true
+- name: DDL cannot pass the single INSERT prepare shape gate
+  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_prepare_describe\" true)\n  (tds_describe \"memcp-tests\"\
+    \ \"DROP TABLE dbo.tsql_data\" \"\" s))\n"
+  expect:
+    error: true
+- name: Identity rejects approximate type declarations
+  sql: CREATE TABLE dbo.tsql_bad_identity (id FLOAT IDENTITY(1,1))
+  expect:
+    error: true
+  noncritical: true
+- name: Identity rejects scaled exact declarations
+  sql: CREATE TABLE dbo.tsql_bad_identity (id DECIMAL(8,2) IDENTITY(1,1))
+  expect:
+    error: true
+- name: Identity rejects monetary declarations
+  sql: CREATE TABLE dbo.tsql_bad_identity (id MONEY IDENTITY(1,1))
+  expect:
+    error: true
+- name: Identity rejects explicitly nullable declarations
+  sql: CREATE TABLE dbo.tsql_bad_identity (id INT IDENTITY(1,1) NULL)
+  expect:
+    error: true
+- name: Identity rejects boolean declarations
+  sql: CREATE TABLE dbo.tsql_bad_identity (id BIT IDENTITY(1,1))
+  expect:
+    error: true
+- name: Declared identity boundaries reject before rows and retain last allocated value
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_identity_limit
+  scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define out (newsession))\n\
+    \    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula\
+    \ tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda (row) (out \"row\" row)) (lambda fields true))))\n\
+    \    (out \"row\"))))\n  (execute \"CREATE TABLE dbo.tsql_identity_limit (id TINYINT IDENTITY(1,1),value INT)\"\
+    )\n  (define metadata (car (get_schema \"memcp-tests\" \"tsql_identity_limit\")))\n  (if (metadata \"Null\"\
+    ) (error \"identity remained nullable\") true)\n  (altertable (table \"memcp-tests\" \"tsql_identity_limit\"\
+    ) \"auto_increment\" 255)\n  (define failed (try (lambda () (begin (execute \"INSERT INTO dbo.tsql_identity_limit(value)\
+    \ VALUES (1),(2)\") false)) (lambda (_) true)))\n  (if failed true (error \"tiny identity overflow was accepted\"\
+    ))\n  (define empty (execute \"SELECT COUNT(*) AS n FROM dbo.tsql_identity_limit\"))\n  (if (equal? (empty \"\
+    n\") 0) true (error \"failed identity batch partially inserted\"))\n  (execute \"INSERT INTO dbo.tsql_identity_limit(value)\
+    \ VALUES (3)\")\n  (define allocated (execute \"SELECT id FROM dbo.tsql_identity_limit\"))\n  (if (equal? (allocated\
+    \ \"id\") 255) true (error \"failed identity batch advanced the counter\"))\n  (define updated (try (lambda\
+    \ () (begin (execute \"UPDATE dbo.tsql_identity_limit SET id=1\") false)) (lambda (_) true)))\n  (if updated\
+    \ true (error \"identity was writable through UPDATE\"))\n  (define unchanged (execute \"SELECT id FROM dbo.tsql_identity_limit\"\
+    ))\n  (if (equal? (unchanged \"id\") 255) true (error \"identity changed after rejected UPDATE\"))\n  (execute\
+    \ \"DROP TABLE dbo.tsql_identity_limit\")\n  true)\n"
+  expect:
+    result: true
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_identity_limit
+  name: Fixture cleanup for Declared identity boundaries reject before rows and retain last allocated value (1)
+- name: Zero-scale decimal identity stores exact generated values
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_identity_decimal
+  scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define out (newsession))\n\
+    \    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula\
+    \ tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda (row) (out \"row\" row)) (lambda fields true))))\n\
+    \    (out \"row\"))))\n  (execute \"CREATE TABLE dbo.tsql_identity_decimal (id NUMERIC(9,0) IDENTITY(1,1),value\
+    \ INT)\")\n  (execute \"INSERT INTO dbo.tsql_identity_decimal(value) VALUES (10),(20)\")\n  (define generated\
+    \ (execute \"SELECT id FROM dbo.tsql_identity_decimal WHERE value=20\"))\n  (if (and (string? (generated \"\
+    id\")) (equal? (coefficient_decode (generated \"id\")) \"2\")) true (error \"generated decimal identity lacked\
+    \ exact representation\"))\n  (execute \"INSERT INTO dbo.tsql_identity_decimal(id,value) VALUES (99,30)\")\n\
+    \  (execute \"INSERT INTO dbo.tsql_identity_decimal(value) VALUES (40)\")\n  (define next (execute \"SELECT\
+    \ id FROM dbo.tsql_identity_decimal WHERE value=40\"))\n  (if (equal? (coefficient_decode (next \"id\")) \"\
+    100\") true (error \"exact imported identity failed to advance allocator\"))\n  (execute \"DROP TABLE dbo.tsql_identity_decimal\"\
+    )\n  true)\n"
+  expect:
+    result: true
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_identity_decimal
+  name: Fixture cleanup for Zero-scale decimal identity stores exact generated values (1)
+- name: Insert select binds its DML sink and hides source result metadata
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_identity_sink
+  - sql: CREATE TABLE dbo.tsql_identity_sink(id BIGINT IDENTITY(1,1),v INT)
+  scm: "(begin\n  (define s (newsession))\n  (define sql \"INSERT INTO dbo.tsql_identity_sink(v) SELECT 10 UNION\
+    \ ALL SELECT 20\")\n  (with_autocommit s nil nil sql (lambda (tx)\n    (sql_execute_formula s tx (sql_queryplan_compile_formula\
+    \ tx (parse_tsql \"memcp-tests\" sql nil s tx))\n      (lambda (row) (error \"INSERT SELECT leaked source rows\
+    \ to frontend\"))\n      (lambda fields (error \"INSERT SELECT leaked source metadata to frontend\")))))\n \
+    \ (define observed (newsession))\n  (define check \"SELECT COUNT(*) AS n,MAX(id) AS last_id FROM dbo.tsql_identity_sink\"\
+    )\n  (with_autocommit s nil nil check (lambda (tx)\n    (sql_execute_formula s tx (sql_queryplan_compile_formula\
+    \ tx (parse_tsql \"memcp-tests\" check nil s tx))\n      (lambda (row) (observed \"row\" row)) (lambda fields\
+    \ true))))\n  (define row (observed \"row\"))\n  (if (and (equal? (row \"n\") 2) (equal? (row \"last_id\") 2)\
+    \ (equal? (s \"tsql_last_identity\") 2))\n    true (error \"INSERT SELECT sink did not insert and report both\
+    \ rows\")))\n"
+  expect:
+    result: true
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_identity_sink
+  name: Fixture cleanup for Insert select binds its DML sink and hides source result metadata (1)
+- name: Union insert select reports completed row count
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_count_sink
+  - sql: CREATE TABLE dbo.tsql_count_sink(id BIGINT IDENTITY(1,1),v INT)
+  sql: INSERT INTO dbo.tsql_count_sink(v) SELECT 10 UNION ALL SELECT 20
+  expect:
+    affected_rows: 2
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_count_sink
+  name: Fixture cleanup for Union insert select reports completed row count (1)
+- name: Table insert select reports completed row count
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_count_sink
+  - sql: CREATE TABLE dbo.tsql_count_sink(id BIGINT IDENTITY(1,1),v INT)
+  sql: INSERT INTO dbo.tsql_count_sink(v) SELECT val FROM dbo.tsql_data WHERE id<=2
+  expect:
+    affected_rows: 2
+- sql: DROP TABLE IF EXISTS dbo.tsql_count_sink
+  name: Fixture cleanup for Table insert select reports completed row count (1)
+- name: Ordered insert select reports completed row count
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_count_sink
+  - sql: CREATE TABLE dbo.tsql_count_sink(id BIGINT IDENTITY(1,1),v INT)
+  sql: INSERT INTO dbo.tsql_count_sink(v) SELECT TOP(2) val FROM dbo.tsql_data ORDER BY id
+  expect:
+    affected_rows: 2
+- sql: DROP TABLE IF EXISTS dbo.tsql_count_sink
+  name: Fixture cleanup for Ordered insert select reports completed row count (1)
+- name: Empty insert select reports zero completed rows
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_count_sink
+  - sql: CREATE TABLE dbo.tsql_count_sink(id BIGINT IDENTITY(1,1),v INT)
+  sql: INSERT INTO dbo.tsql_count_sink(v) SELECT val FROM dbo.tsql_data WHERE id=-1
+  expect:
+    affected_rows: 0
+- sql: DROP TABLE IF EXISTS dbo.tsql_count_sink
+  name: Fixture cleanup for Empty insert select reports zero completed rows (1)
+- name: Failed insert select publishes only its own consumed identity
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_identity_failure
+  scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define output (newsession))\n\
+    \    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula\
+    \ tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda (row) (output \"row\" row)) (lambda fields\
+    \ true))))\n    (output \"row\"))))\n  (execute \"CREATE TABLE dbo.tsql_identity_failure(id BIGINT IDENTITY(1,1)\
+    \ PRIMARY KEY,v INT UNIQUE)\")\n  (define failed (try (lambda () (begin (execute \"INSERT INTO dbo.tsql_identity_failure(v)\
+    \ SELECT 10 UNION ALL SELECT 10\") false)) (lambda (_) true)))\n  (if failed true (error \"duplicate source\
+    \ row unexpectedly succeeded\"))\n  (define remaining (execute \"SELECT COUNT(*) AS n FROM dbo.tsql_identity_failure\"\
+    ))\n  (define observed (execute \"SELECT @@IDENTITY AS last_id,SCOPE_IDENTITY() AS scoped\"))\n  (if (and (equal?\
+    \ (remaining \"n\") 0) (equal? (observed \"last_id\") 1) (equal? (observed \"scoped\") 1))\n    true (error\
+    \ \"failed insert lost its consumed identity or retained its row\"))\n  (execute \"INSERT INTO dbo.tsql_identity_failure(v)\
+    \ VALUES(42)\")\n  (define next (execute \"SELECT id FROM dbo.tsql_identity_failure\"))\n  (if (equal? (next\
+    \ \"id\") 2) true (error \"failed insert reused a consumed identity\"))\n  (execute \"DROP TABLE dbo.tsql_identity_failure\"\
+    )\n  true)\n"
+  expect:
+    result: true
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_identity_failure
+  name: Fixture cleanup for Failed insert select publishes only its own consumed identity (1)
+- name: Nested character arithmetic keeps text values
+  sql: SELECT CONVERT(VARCHAR,2026)+'-'+CONVERT(VARCHAR,7) AS separator, CAST(7 AS VARCHAR(30))+'x' AS suffix
+  expect:
+    rows: 1
+    data:
+    - separator: 2026-7
+      suffix: 7x
+  noncritical: true
+- name: Unicode character arithmetic keeps national text
+  sql: SELECT N'Grüße '+'🐘' AS text
+  expect:
+    rows: 1
+    data:
+    - text: Grüße 🐘
+- name: Empty concatenation descriptions retain character types
+  scm: "(begin\n  (define s (newsession))\n  (s \"username\" \"root\")\n  (define fields (tds_describe \"memcp-tests\"\
+    \ \"SELECT TOP (0) CONVERT(VARCHAR,id)+'-'+CONVERT(VARCHAR,val) AS code,name+'!' AS label,N'Grüße '+'\U0001F418\
+    ' AS wide,2+'3' AS n FROM dbo.tsql_data\" \"\" s))\n  (if (and (equal? ((nth fields 0) \"sql_type\") \"VARCHAR\"\
+    )\n      (equal? ((nth fields 1) \"sql_type\") \"NVARCHAR\")\n      (equal? ((nth fields 2) \"sql_type\") \"\
+    NVARCHAR\")\n      (equal? ((nth fields 3) \"sql_type\") \"INT\")\n      (nil? ((nth fields 0) \"source\")))\
+    \ true (error \"concatenation lost character metadata\")))\n"
+  noncritical: true
+- sql: DROP VIEW IF EXISTS dbo.tsql_view
+  name: 'Fixture cleanup 001: DROP VIEW IF EXISTS dbo.tsql_view'
+- sql: DROP TABLE IF EXISTS dbo.tsql_copy
+  name: 'Fixture cleanup 002: DROP TABLE IF EXISTS dbo.tsql_copy'
+- sql: DROP TABLE IF EXISTS dbo.tsql_data
+  name: 'Fixture cleanup 003: DROP TABLE IF EXISTS dbo.tsql_data'
+cleanup: []

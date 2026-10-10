@@ -669,6 +669,17 @@ class PerformanceScaleContractTest(unittest.TestCase):
                     self.assertFalse(runner.run_test_case(case, "memcp-tests"))
                     post.assert_not_called()
 
+    def test_unavailable_probe_records_noncritical_failure_without_http(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        with mock.patch("run_sql_tests.requests.post") as post:
+            self.assertFalse(runner.run_test_case({
+                "name": "unavailable native probe", "noncritical": True,
+                "tds": {"statements": [{"sql": "SELECT 1"}]},
+            }, "memcp-tests"))
+            post.assert_not_called()
+        self.assertEqual(runner.failed_critical, 0)
+        self.assertEqual(runner.failed_noncritical, 1)
+
     def test_ci_workload_seed_initializes_safe_rows(self) -> None:
         seed = Path(__file__).resolve().parents[1] / "tests/performance/ci-workloads.json"
         with tempfile.TemporaryDirectory() as tmp:

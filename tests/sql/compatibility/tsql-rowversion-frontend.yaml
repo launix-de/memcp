@@ -1,0 +1,114 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixture preparation and cleanup are explicit cases so unsupported DDL stays visible.
+metadata:
+  description: Frontend-declared generated tokens use ordinary write hooks across dialects
+  syntax: tsql
+  isolated: true
+setup: []
+test_cases:
+- sql: DROP TABLE IF EXISTS dbo.tsql_frontend_versions
+  name: 'Fixture setup 001: DROP TABLE IF EXISTS dbo.tsql_frontend_versions'
+- sql: CREATE TABLE dbo.tsql_frontend_versions (id INT PRIMARY KEY,val INT,rv ROWVERSION NOT NULL)
+  name: 'Fixture setup 002: CREATE TABLE dbo.tsql_frontend_versions (id INT PRIMARY KEY,val INT,rv ROWVERSION NOT
+    NULL)'
+- name: Other dialects insert distinct generated tokens into an activated table
+  scm: "(begin\n  (define s (newsession))\n  (s \"schema\" \"memcp-tests\")\n  (define execute (lambda (parser text)\
+    \ (begin\n    (define output (newsession))\n    (with_autocommit s nil nil text (lambda (tx)\n      (sql_execute_formula\
+    \ s tx\n        (sql_queryplan_compile_formula tx (parser \"memcp-tests\" text nil s tx))\n        (lambda (row)\
+    \ (output \"row\" row)) (lambda fields true))))\n    (output \"row\"))))\n  (execute parse_sql \"INSERT INTO\
+    \ tsql_frontend_versions(id,val) VALUES(1,10),(2,20)\")\n  (execute parse_psql \"INSERT INTO tsql_frontend_versions(id,val)\
+    \ VALUES(3,30)\")\n  (define first (execute parse_tsql \"SELECT rv FROM dbo.tsql_frontend_versions WHERE id=1\"\
+    ))\n  (define second (execute parse_tsql \"SELECT rv FROM dbo.tsql_frontend_versions WHERE id=2\"))\n  (define\
+    \ third (execute parse_tsql \"SELECT rv FROM dbo.tsql_frontend_versions WHERE id=3\"))\n  (if (and (equal? (strlen\
+    \ (first \"rv\")) 8) (equal? (strlen (second \"rv\")) 8)\n      (equal? (strlen (third \"rv\")) 8)\n      (not\
+    \ (equal? (bin2hex (first \"rv\")) (bin2hex (second \"rv\"))))\n      (not (equal? (bin2hex (first \"rv\"))\
+    \ (bin2hex (third \"rv\"))))\n      (not (equal? (bin2hex (second \"rv\")) (bin2hex (third \"rv\")))))\n   \
+    \ true (error \"cross-dialect INSERT did not generate distinct eight-byte tokens\"))))\n"
+  noncritical: true
+- name: No-op updates through both other dialects generate a new token
+  scm: "(begin\n  (define s (newsession))\n  (s \"schema\" \"memcp-tests\")\n  (define execute (lambda (parser text)\
+    \ (begin\n    (define output (newsession))\n    (with_autocommit s nil nil text (lambda (tx)\n      (sql_execute_formula\
+    \ s tx\n        (sql_queryplan_compile_formula tx (parser \"memcp-tests\" text nil s tx))\n        (lambda (row)\
+    \ (output \"row\" row)) (lambda fields true))))\n    (output \"row\"))))\n  (define before (execute parse_tsql\
+    \ \"SELECT rv,val FROM dbo.tsql_frontend_versions WHERE id=1\"))\n  (execute parse_sql \"UPDATE tsql_frontend_versions\
+    \ SET val=val WHERE id=1\")\n  (define middle (execute parse_tsql \"SELECT rv,val FROM dbo.tsql_frontend_versions\
+    \ WHERE id=1\"))\n  (execute parse_psql \"UPDATE tsql_frontend_versions SET val=val WHERE id=1\")\n  (define\
+    \ after (execute parse_tsql \"SELECT rv,val FROM dbo.tsql_frontend_versions WHERE id=1\"))\n  (if (and (equal?\
+    \ (before \"val\") 10) (equal? (middle \"val\") 10) (equal? (after \"val\") 10)\n      (not (equal? (bin2hex\
+    \ (before \"rv\")) (bin2hex (middle \"rv\"))))\n      (not (equal? (bin2hex (middle \"rv\")) (bin2hex (after\
+    \ \"rv\")))))\n    true (error \"cross-dialect no-op UPDATE did not advance the generated token\"))))\n"
+  noncritical: true
+- name: Ordinary binary columns retain explicit values across dialects
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_frontend_plain_binary
+  - sql: CREATE TABLE dbo.tsql_frontend_plain_binary (id INT PRIMARY KEY,val BINARY(8))
+  - sql: INSERT dbo.tsql_frontend_plain_binary VALUES (1,0x4142434445464748)
+  syntax: postgresql
+  sql: UPDATE tsql_frontend_plain_binary SET val=val WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - affected_rows: 0
+  noncritical: true
+- name: Binary value without activation remains unchanged
+  sql: SELECT id FROM dbo.tsql_frontend_plain_binary WHERE val=0x4142434445464748
+  expect:
+    rows: 1
+    data:
+    - id: 1
+  noncritical: true
+- name: Explicit generated token remains forbidden through another dialect
+  syntax: mysql
+  sql: INSERT INTO tsql_frontend_versions(id,val,rv) VALUES(4,40,'explicit')
+  expect:
+    error: true
+  noncritical: true
+- name: Rejected generated token insert leaves the activated table unchanged
+  sql: SELECT COUNT(*) AS count FROM dbo.tsql_frontend_versions
+  expect:
+    rows: 1
+    data:
+    - count: 3
+  noncritical: true
+- name: Generated token metadata hides any internal constant default
+  scm: "(begin\n  (define s (newsession))\n  (s \"schema\" \"memcp-tests\")\n  (s \"username\" \"root\")\n  (define\
+    \ columns (tsql_metadata_rpc \"memcp-tests\" \"sp_columns\"\n    '(\"table_name\" \"tsql_frontend_versions\"\
+    \ \"column_name\" \"rv\") s))\n  (define row (car (columns \"rows\")))\n  (define fields (tds_describe \"memcp-tests\"\
+    \ \"SELECT TOP (0) rv FROM dbo.tsql_frontend_versions\" \"\" s))\n  (if (and (equal? (count (columns \"rows\"\
+    )) 1) (nil? (row \"COLUMN_DEF\"))\n      (equal? (row \"LENGTH\") 8) ((car fields) \"rowversion\")\n      (not\
+    \ ((car fields) \"updatable\"))) true\n    (error \"generated token exposed an ordinary default or writable\
+    \ field\"))))\n"
+  noncritical: true
+- name: Dropping a generated column permits ordinary subsequent inserts
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_frontend_drop_versions
+  - sql: CREATE TABLE dbo.tsql_frontend_drop_versions (id INT PRIMARY KEY,val INT,rv ROWVERSION NOT NULL)
+  - sql: INSERT dbo.tsql_frontend_drop_versions(id,val) VALUES(1,10)
+  - sql: ALTER TABLE dbo.tsql_frontend_drop_versions DROP COLUMN rv
+  syntax: mysql
+  sql: INSERT INTO tsql_frontend_drop_versions(id,val) VALUES(2,20)
+  expect:
+    rows: 1
+    data:
+    - affected_rows: 1
+  noncritical: true
+- name: Dropped generated column leaves ordinary no-op update semantics
+  syntax: postgresql
+  sql: UPDATE tsql_frontend_drop_versions SET val=val WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - affected_rows: 0
+- name: Dropping a generated column removes its metadata
+  scm: "(begin\n  (define columns (get_schema \"memcp-tests\" \"tsql_frontend_drop_versions\"))\n  (if (and (equal?\
+    \ (count columns) 2)\n      (nil? (find columns (lambda (column) (equal? (column \"Field\") \"rv\")) nil)))\n\
+    \    true (error \"dropped generated column remains in metadata\"))))\n"
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_frontend_versions
+  name: 'Fixture cleanup 001: DROP TABLE IF EXISTS dbo.tsql_frontend_versions'
+- sql: DROP TABLE IF EXISTS dbo.tsql_frontend_plain_binary
+  name: 'Fixture cleanup 002: DROP TABLE IF EXISTS dbo.tsql_frontend_plain_binary'
+- sql: DROP TABLE IF EXISTS dbo.tsql_frontend_drop_versions
+  name: 'Fixture cleanup 003: DROP TABLE IF EXISTS dbo.tsql_frontend_drop_versions'
+cleanup: []

@@ -1,0 +1,496 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixture preparation and cleanup are explicit cases so unsupported DDL stays visible.
+metadata:
+  version: '1.0'
+  description: Durable t-sql alias types and column declarations
+  syntax: tsql
+  isolated: true
+setup: []
+test_cases:
+- sql: DROP TABLE IF EXISTS aa_catalog_other_frontend
+  name: 'Fixture setup 001: DROP TABLE IF EXISTS aa_catalog_other_frontend'
+- scm: (eval (parse_sql "memcp-tests" "CREATE TABLE aa_catalog_other_frontend (id INT)" nil (newsession) nil))
+  name: 'Fixture setup 002: (eval (parse_sql "memcp-tests" "CREATE TABLE aa_catalog_other_frontend (id INT)" nil
+    (newsession) ni'
+- sql: DROP TABLE IF EXISTS dbo.catalog_items
+  name: 'Fixture setup 003: DROP TABLE IF EXISTS dbo.catalog_items'
+- sql: DROP TYPE IF EXISTS dbo.catalog_flag
+  name: 'Fixture setup 004: DROP TYPE IF EXISTS dbo.catalog_flag'
+  noncritical: true
+- sql: DROP TYPE IF EXISTS dbo.catalog_text
+  name: 'Fixture setup 005: DROP TYPE IF EXISTS dbo.catalog_text'
+  noncritical: true
+- sql: CREATE TYPE dbo.catalog_flag FROM SMALLINT NOT NULL
+  name: 'Fixture setup 006: CREATE TYPE dbo.catalog_flag FROM SMALLINT NOT NULL'
+  noncritical: true
+- sql: CREATE TYPE dbo.catalog_text FROM NVARCHAR(24) NULL
+  name: 'Fixture setup 007: CREATE TYPE dbo.catalog_text FROM NVARCHAR(24) NULL'
+  noncritical: true
+- sql: CREATE TABLE dbo.catalog_items (id INT PRIMARY KEY, flag dbo.catalog_flag, title dbo.catalog_text, amount
+    DECIMAL(12,2), fixed NCHAR(4), unlimited NVARCHAR(MAX))
+  name: 'Fixture setup 008: CREATE TABLE dbo.catalog_items (id INT PRIMARY KEY, flag dbo.catalog_flag, title dbo.catalog_text,
+    a'
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.catalog_saved_ids
+  name: 'Fixture setup 009: DROP TABLE IF EXISTS dbo.catalog_saved_ids'
+- sql: CREATE TABLE dbo.catalog_saved_ids (table_id INT,alias_id INT)
+  name: 'Fixture setup 010: CREATE TABLE dbo.catalog_saved_ids (table_id INT,alias_id INT)'
+- sql: INSERT dbo.catalog_saved_ids SELECT OBJECT_ID(N'dbo.catalog_items'),TYPE_ID(N'dbo.catalog_flag')
+  name: 'Fixture setup 011: INSERT dbo.catalog_saved_ids SELECT OBJECT_ID(N''dbo.catalog_items''),TYPE_ID(N''dbo.catalog_flag'')'
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.catalog_constraints
+  name: 'Fixture setup 012: DROP TABLE IF EXISTS dbo.catalog_constraints'
+- sql: CREATE TABLE dbo.catalog_constraints (id INT NOT NULL,value INT CONSTRAINT [DF value]]escaped] DEFAULT 4,nullable
+    INT,CONSTRAINT UQ_catalog_constraint_id UNIQUE(id))
+  name: 'Fixture setup 013: CREATE TABLE dbo.catalog_constraints (id INT NOT NULL,value INT CONSTRAINT [DF value]]escaped]
+    DEFAU'
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.catalog_nullable_unique
+  name: 'Fixture setup 014: DROP TABLE IF EXISTS dbo.catalog_nullable_unique'
+- sql: CREATE TABLE dbo.catalog_nullable_unique (id INT,value INT,CONSTRAINT UQ_catalog_nullable_fixture UNIQUE(value))
+  name: 'Fixture setup 015: CREATE TABLE dbo.catalog_nullable_unique (id INT,value INT,CONSTRAINT UQ_catalog_nullable_fixture
+    UN'
+- name: Catalog declarations coexist with tables from other frontends
+  scm: "(begin\n  (define snapshot (schema_metadata \"memcp-tests\"))\n  (define relation (find (snapshot \"tables\"\
+    ) (lambda (candidate) (equal? (candidate \"Name\") \"aa_catalog_other_frontend\")) nil))\n  (and (not (nil?\
+    \ relation)) (nil? (tsql_relation_object_id relation))))\n"
+  expect:
+    result: true
+  noncritical: true
+- name: OBJECT_ID returns a durable user table identity
+  sql: SELECT CASE WHEN OBJECT_ID(N'dbo.catalog_items',N'U') > 0 THEN 1 ELSE 0 END AS valid, OBJECT_ID(N'dbo.absent')
+    AS missing
+  expect:
+    rows: 1
+    data:
+    - valid: 1
+      missing: null
+  noncritical: true
+- name: Unsupported object kinds do not claim a user table
+  sql: SELECT OBJECT_ID(N'dbo.catalog_items',N'V') AS object_id
+  expect:
+    rows: 1
+    data:
+    - object_id: null
+  noncritical: true
+- name: Native and alias type catalogs expose real declarations
+  sql: SELECT name,max_length,is_nullable,is_user_defined FROM sys.types WHERE name IN (N'catalog_flag',N'catalog_text')
+    ORDER BY name
+  expect:
+    rows: 2
+    data:
+    - name: catalog_flag
+      max_length: 2
+      is_nullable: 0
+      is_user_defined: 1
+    - name: catalog_text
+      max_length: 48
+      is_nullable: 1
+      is_user_defined: 1
+  noncritical: true
+- name: Table catalog object identity agrees with lookup
+  sql: SELECT name,type_desc FROM sys.tables WHERE object_id = OBJECT_ID(N'dbo.catalog_items')
+  expect:
+    rows: 1
+    data:
+    - name: catalog_items
+      type_desc: USER_TABLE
+  noncritical: true
+- name: Object catalog identity agrees with lookup
+  sql: SELECT name,type FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.catalog_items')
+  expect:
+    rows: 1
+    data:
+    - name: catalog_items
+      type: U
+  noncritical: true
+- name: Column catalog exposes the original declarations and dimensions
+  sql: SELECT name,max_length,precision,scale,is_nullable FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.catalog_items')
+    AND name IN (N'amount',N'flag',N'title') ORDER BY name
+  expect:
+    rows: 3
+    data:
+    - name: amount
+      max_length: 9
+      precision: 12
+      scale: 2
+      is_nullable: 1
+    - name: flag
+      max_length: 2
+      precision: 5
+      scale: 0
+      is_nullable: 0
+    - name: title
+      max_length: 48
+      precision: 0
+      scale: 0
+      is_nullable: 1
+  noncritical: true
+- name: Sys column and type catalogs join through alias identity
+  sql: SELECT c.name,t.name AS alias_name FROM sys.columns AS c JOIN sys.types AS t ON c.user_type_id=t.user_type_id
+    WHERE c.object_id=OBJECT_ID(N'dbo.catalog_items') AND t.is_user_defined=1 ORDER BY c.name
+  expect:
+    rows: 2
+    data:
+    - name: flag
+      alias_name: catalog_flag
+    - name: title
+      alias_name: catalog_text
+  noncritical: true
+- name: Initial joined catalog column count
+  sql: SELECT COUNT(*) AS n FROM sys.columns AS c JOIN sys.types AS t ON c.user_type_id=t.user_type_id WHERE c.object_id=OBJECT_ID(N'dbo.catalog_items')
+    AND t.is_user_defined=1
+  expect:
+    rows: 1
+    data:
+    - n: 2
+  noncritical: true
+- name: Initial catalog column count
+  sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.catalog_items')
+  expect:
+    rows: 1
+    data:
+    - n: 6
+  noncritical: true
+- name: Sys native and current database alias qualification
+  sql: ALTER TABLE dbo.catalog_items ADD qualified [memcp-tests].[dbo].[catalog_text]
+  noncritical: true
+- name: Qualified alias dimensions remain available
+  sql: SELECT COL_LENGTH(N'dbo.catalog_items',N'qualified') AS size
+  expect:
+    rows: 1
+    data:
+    - size: 48
+  noncritical: true
+- name: Remove qualified alias before counting
+  sql: ALTER TABLE dbo.catalog_items DROP COLUMN qualified
+  noncritical: true
+- name: Sys native declarations retain their dimensions
+  sql: ALTER TABLE dbo.catalog_items ADD native [sys].[nvarchar](12)
+  noncritical: true
+- name: Qualified native dimensions remain available
+  sql: SELECT COL_LENGTH(N'dbo.catalog_items',N'native') AS size
+  expect:
+    rows: 1
+    data:
+    - size: 24
+  noncritical: true
+- name: Remove qualified native before counting
+  sql: ALTER TABLE dbo.catalog_items DROP COLUMN native
+  noncritical: true
+- name: Sys alias declarations are rejected
+  sql: ALTER TABLE dbo.catalog_items ADD invalid [sys].[catalog_text]
+  expect:
+    error: true
+- name: Foreign database type declarations are rejected
+  sql: ALTER TABLE dbo.catalog_items ADD invalid [otherdb].[dbo].[catalog_text]
+  expect:
+    error: true
+- name: Unsupported sys catalogs fail explicitly
+  sql: SELECT * FROM sys.unknown_catalog
+  expect:
+    error: true
+- name: Alias IDs start outside the native range
+  sql: SELECT CASE WHEN TYPE_ID(N'dbo.catalog_flag') >= 256 THEN 1 ELSE 0 END AS valid
+  expect:
+    rows: 1
+    data:
+    - valid: 1
+  noncritical: true
+- name: Native type IDs and unknown types
+  sql: SELECT TYPE_ID(N'bigint') AS big, TYPE_ID(N'nvarchar') AS wide, TYPE_ID(N'dbo.absent') AS missing
+  expect:
+    rows: 1
+    data:
+    - big: 127
+      wide: 231
+      missing: null
+  noncritical: true
+- name: Alias metadata preserves unicode byte lengths and decimal storage size
+  sql: SELECT COL_LENGTH(N'dbo.catalog_items',N'title') AS title, COL_LENGTH(N'dbo.catalog_items',N'fixed') AS fixed,
+    COL_LENGTH(N'dbo.catalog_items',N'amount') AS amount, COL_LENGTH(N'dbo.catalog_items',N'unlimited') AS unlimited
+  expect:
+    rows: 1
+    data:
+    - title: 48
+      fixed: 8
+      amount: 9
+      unlimited: -1
+  noncritical: true
+- name: Cross database metadata does not bypass the active database
+  sql: SELECT TYPE_ID(N'otherdb.dbo.catalog_flag') AS type_id, COL_LENGTH(N'otherdb.dbo.catalog_items',N'id') AS
+    size
+  expect:
+    rows: 1
+    data:
+    - type_id: null
+      size: null
+  noncritical: true
+- name: Insert through alias declarations
+  sql: INSERT INTO dbo.catalog_items (id,flag,title,amount,fixed) VALUES (1,-1,N'Hello',12.345,N'ab')
+  noncritical: true
+- name: Numeric dimensions are enforced
+  sql: SELECT flag,title,amount FROM dbo.catalog_items WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - flag: -1
+      title: Hello
+      amount: 12.35
+  noncritical: true
+- name: Alias nullability is enforced
+  sql: INSERT INTO dbo.catalog_items (id,flag) VALUES (2,NULL)
+  expect:
+    error: true
+- name: Dependent aliases cannot be dropped
+  sql: DROP TYPE dbo.catalog_flag
+  expect:
+    error: true
+- name: Duplicate alias creation fails
+  sql: CREATE TYPE dbo.catalog_flag FROM BIGINT
+  expect:
+    error: true
+- name: Alias dimensions cannot be overridden
+  sql: CREATE TABLE dbo.invalid_alias (id INT, flag dbo.catalog_flag(4))
+  expect:
+    error: true
+- name: Invalid unicode dimensions fail
+  sql: CREATE TABLE dbo.invalid_alias (id NVARCHAR(4001))
+  expect:
+    error: true
+  noncritical: true
+- name: Invalid decimal scale fails
+  sql: CREATE TABLE dbo.invalid_alias (id DECIMAL(2,3))
+  expect:
+    error: true
+- name: Add columns through the persisted alias
+  sql: ALTER TABLE dbo.catalog_items ADD extra dbo.catalog_text
+  noncritical: true
+- name: Cached joined catalog queries see newly added columns
+  sql: SELECT COUNT(*) AS n FROM sys.columns AS c JOIN sys.types AS t ON c.user_type_id=t.user_type_id WHERE c.object_id=OBJECT_ID(N'dbo.catalog_items')
+    AND t.is_user_defined=1
+  expect:
+    rows: 1
+    data:
+    - n: 3
+  noncritical: true
+- name: Cached catalog queries see newly added columns
+  sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.catalog_items')
+  expect:
+    rows: 1
+    data:
+    - n: 7
+  noncritical: true
+- name: Added alias dimensions are visible
+  sql: SELECT COL_LENGTH(N'[dbo].[catalog_items]',N'extra') AS size
+  expect:
+    rows: 1
+    data:
+    - size: 48
+  noncritical: true
+- name: Drop alias column
+  sql: ALTER TABLE dbo.catalog_items DROP COLUMN extra
+  noncritical: true
+- name: Cached joined catalog queries see dropped columns
+  sql: SELECT COUNT(*) AS n FROM sys.columns AS c JOIN sys.types AS t ON c.user_type_id=t.user_type_id WHERE c.object_id=OBJECT_ID(N'dbo.catalog_items')
+    AND t.is_user_defined=1
+  expect:
+    rows: 1
+    data:
+    - n: 2
+  noncritical: true
+- name: Cached catalog queries see dropped columns
+  sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.catalog_items')
+  expect:
+    rows: 1
+    data:
+    - n: 6
+  noncritical: true
+- name: Removed columns return NULL
+  sql: SELECT COL_LENGTH(N'dbo.catalog_items',N'extra') AS size
+  expect:
+    rows: 1
+    data:
+    - size: null
+  noncritical: true
+- name: Truthful engine property
+  sql: SELECT SERVERPROPERTY(N'Edition') AS edition,SERVERPROPERTY(N'UnknownProperty') AS missing
+  expect:
+    rows: 1
+    data:
+    - edition: MemCP
+      missing: null
+  noncritical: true
+- name: Named column DEFAULT is a real catalog object
+  sql: SELECT name,type_desc,definition,is_system_named FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'dbo.catalog_constraints')
+  expect:
+    rows: 1
+    data:
+    - name: DF value]escaped
+      type_desc: DEFAULT_CONSTRAINT
+      definition: '4'
+      is_system_named: 0
+  noncritical: true
+- name: Column default object identity agrees with its constraint
+  sql: SELECT CASE WHEN c.default_object_id=d.object_id THEN 1 ELSE 0 END AS value FROM sys.columns AS c JOIN sys.default_constraints
+    AS d ON c.object_id=d.parent_object_id AND c.column_id=d.parent_column_id WHERE d.name=N'DF value]escaped'
+  expect:
+    rows: 1
+    data:
+    - value: 1
+  noncritical: true
+- name: Named UNIQUE is a real catalog object
+  sql: SELECT name,type_desc FROM sys.key_constraints WHERE parent_object_id=OBJECT_ID(N'dbo.catalog_constraints')
+  expect:
+    rows: 1
+    data:
+    - name: UQ_catalog_constraint_id
+      type_desc: UNIQUE_CONSTRAINT
+  noncritical: true
+- name: Named default fills only omitted values
+  sql: INSERT dbo.catalog_constraints(id) VALUES (1)
+  noncritical: true
+- name: Named default executes its real calculator
+  sql: SELECT value FROM dbo.catalog_constraints WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 4
+  noncritical: true
+- name: DROP named DEFAULT resolves escaped spelling and casing
+  sql: ALTER TABLE dbo.catalog_constraints DROP CONSTRAINT [df VALUE]]escaped]
+  noncritical: true
+- name: Dropped default disappears from the catalog
+  sql: SELECT COUNT(*) AS value FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'dbo.catalog_constraints')
+  expect:
+    rows: 1
+    data:
+    - value: 0
+  noncritical: true
+- name: Dropped default no longer fills omitted values
+  sql: INSERT dbo.catalog_constraints(id) VALUES (2)
+  noncritical: true
+- name: Removed default preserves ordinary NULL insertion
+  sql: SELECT value FROM dbo.catalog_constraints WHERE id=2
+  expect:
+    rows: 1
+    data:
+    - value: null
+  noncritical: true
+- name: ALTER ADD named DEFAULT binds an existing column
+  sql: ALTER TABLE dbo.catalog_constraints ADD CONSTRAINT DF_catalog_replacement DEFAULT (7) FOR value
+  noncritical: true
+- name: Duplicate DEFAULT on one column is rejected
+  sql: ALTER TABLE dbo.catalog_constraints ADD CONSTRAINT DF_catalog_duplicate DEFAULT 8 FOR value
+  expect:
+    error: true
+- name: Constraint names collide across DEFAULT and UNIQUE kinds
+  sql: ALTER TABLE dbo.catalog_constraints ADD CONSTRAINT df_CATALOG_replacement UNIQUE(nullable)
+  expect:
+    error: true
+- name: Failed constraint CREATE publishes no table
+  sql: CREATE TABLE dbo.catalog_rejected_constraint (id INT CONSTRAINT DF_catalog_replacement DEFAULT 1)
+  expect:
+    error: true
+- name: Rejected CREATE leaves no catalog table identity
+  sql: SELECT OBJECT_ID(N'dbo.catalog_rejected_constraint') AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+  noncritical: true
+- name: CREATE rejects repeated column defaults
+  sql: CREATE TABLE dbo.catalog_rejected_constraint (id INT DEFAULT 1 DEFAULT 2)
+  expect:
+    error: true
+  noncritical: true
+- name: ALTER adds a genuinely enforced named UNIQUE
+  setup:
+  - sql: UPDATE dbo.catalog_constraints SET nullable=id
+  sql: ALTER TABLE dbo.catalog_constraints ADD CONSTRAINT UQ_catalog_nullable UNIQUE(nullable)
+  noncritical: true
+- name: Nullable UNIQUE accepts its first NULL
+  sql: INSERT dbo.catalog_nullable_unique(id,value) VALUES (1,NULL)
+  noncritical: true
+- name: Nullable UNIQUE rejects a repeated NULL key
+  sql: INSERT dbo.catalog_nullable_unique(id,value) VALUES (2,NULL)
+  expect:
+    error: true
+- name: Nullable UNIQUE repeated nonNULL key remains rejected
+  setup:
+  - sql: INSERT dbo.catalog_nullable_unique(id,value) VALUES (3,42)
+  sql: INSERT dbo.catalog_nullable_unique(id,value) VALUES (4,42)
+  expect:
+    error: true
+  noncritical: true
+- name: DROP named UNIQUE removes its actual enforcement
+  sql: ALTER TABLE dbo.catalog_constraints DROP CONSTRAINT uq_CATALOG_nullable
+  noncritical: true
+- name: Dropped named UNIQUE leaves no catalog definition
+  sql: SELECT COUNT(*) AS value FROM sys.key_constraints WHERE name=N'UQ_catalog_nullable'
+  expect:
+    rows: 1
+    data:
+    - value: 0
+  noncritical: true
+- name: Catalog identities survive a graceful restart
+  sql: SHUTDOWN
+  syntax: mysql
+- name: Restored table and alias identities match their persisted values
+  sql: SELECT CASE WHEN table_id=OBJECT_ID(N'dbo.catalog_items') AND alias_id=TYPE_ID(N'dbo.catalog_flag') THEN
+    1 ELSE 0 END AS value FROM dbo.catalog_saved_ids
+  expect:
+    rows: 1
+    data:
+    - value: 1
+  noncritical: true
+- name: Cached CREATE cannot use an alias identity replaced after binding
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.catalog_stale_alias
+  - sql: DROP TYPE IF EXISTS dbo.catalog_transient_alias
+  - sql: CREATE TYPE dbo.catalog_transient_alias FROM INT
+  scm: "(begin\n  (define session (newsession))\n  (define formula (sql_queryplan_compile_formula nil\n    (parse_tsql\
+    \ \"memcp-tests\" \"CREATE TABLE dbo.catalog_stale_alias(value dbo.catalog_transient_alias)\" nil session nil)))\n\
+    \  (drop_sql_type_alias \"memcp-tests\" \"catalog_transient_alias\" false)\n  (create_sql_type_alias \"memcp-tests\"\
+    \ \"catalog_transient_alias\" \"INT\" '() true)\n  (define rejected (try (lambda () (begin\n    (sql_execute_formula\
+    \ session nil formula (lambda row true) (lambda fields true)) false)) (lambda (_) true)))\n  (if (and rejected\
+    \ (nil? (sql_object_id \"memcp-tests\" \"catalog_stale_alias\"))) true\n    (error \"cached CREATE published\
+    \ an obsolete alias declaration\")))\n"
+  expect:
+    result: true
+  noncritical: true
+- sql: DROP TABLE IF EXISTS dbo.catalog_stale_alias
+  name: Fixture cleanup for Cached CREATE cannot use an alias identity replaced after binding (1)
+- sql: DROP TYPE IF EXISTS dbo.catalog_transient_alias
+  name: Fixture cleanup for Cached CREATE cannot use an alias identity replaced after binding (2)
+  noncritical: true
+- name: Restored named defaults continue to execute after restart
+  sql: INSERT dbo.catalog_constraints(id) VALUES (3)
+  noncritical: true
+- name: Restored named DEFAULT keeps declaration metadata and calculator
+  sql: SELECT value FROM dbo.catalog_constraints WHERE id=3
+  expect:
+    rows: 1
+    data:
+    - value: 7
+  noncritical: true
+- sql: DROP TABLE IF EXISTS aa_catalog_other_frontend
+  name: 'Fixture cleanup 001: DROP TABLE IF EXISTS aa_catalog_other_frontend'
+- sql: DROP TABLE IF EXISTS dbo.catalog_nullable_unique
+  name: 'Fixture cleanup 002: DROP TABLE IF EXISTS dbo.catalog_nullable_unique'
+- sql: DROP TABLE IF EXISTS dbo.catalog_constraints
+  name: 'Fixture cleanup 003: DROP TABLE IF EXISTS dbo.catalog_constraints'
+- sql: DROP TABLE IF EXISTS dbo.catalog_rejected_constraint
+  name: 'Fixture cleanup 004: DROP TABLE IF EXISTS dbo.catalog_rejected_constraint'
+- sql: DROP TABLE IF EXISTS dbo.catalog_saved_ids
+  name: 'Fixture cleanup 005: DROP TABLE IF EXISTS dbo.catalog_saved_ids'
+- sql: DROP TABLE IF EXISTS dbo.catalog_items
+  name: 'Fixture cleanup 006: DROP TABLE IF EXISTS dbo.catalog_items'
+- sql: DROP TYPE IF EXISTS dbo.catalog_flag
+  name: 'Fixture cleanup 007: DROP TYPE IF EXISTS dbo.catalog_flag'
+  noncritical: true
+- sql: DROP TYPE IF EXISTS dbo.catalog_text
+  name: 'Fixture cleanup 008: DROP TYPE IF EXISTS dbo.catalog_text'
+  noncritical: true
+cleanup: []

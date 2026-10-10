@@ -1,0 +1,168 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixture preparation and cleanup are explicit cases so unsupported DDL stays visible.
+metadata:
+  description: T-SQL TDS protocol with native TDS client driver
+  database: memcp-tests
+  requires_tds: true
+  isolated: true
+setup: []
+test_cases:
+- sql: DROP USER IF EXISTS 'tds;=brace} user'
+  name: 'Fixture setup 001: DROP USER IF EXISTS ''tds;=brace} user'''
+- sql: CREATE USER 'tds;=brace} user' IDENTIFIED BY ' leading ;=} p Grüße trailing '
+  name: 'Fixture setup 002: CREATE USER ''tds;=brace} user'' IDENTIFIED BY '' leading ;=} p Grüße trailing '''
+- sql: GRANT ALL ON `memcp-tests`.* TO 'tds;=brace} user'
+  name: 'Fixture setup 003: GRANT ALL ON `memcp-tests`.* TO ''tds;=brace} user'''
+- sql: DROP USER IF EXISTS tds_limited
+  name: 'Fixture setup 004: DROP USER IF EXISTS tds_limited'
+- sql: CREATE USER tds_limited IDENTIFIED BY 'secret'
+  name: 'Fixture setup 005: CREATE USER tds_limited IDENTIFIED BY ''secret'''
+- sql: DROP TABLE IF EXISTS tds_protocol_data
+  name: 'Fixture setup 006: DROP TABLE IF EXISTS tds_protocol_data'
+- name: Native login, RPC parameters, transactions and recovery
+  tds:
+    timeout: 120
+    statements:
+    - sql: SELECT 1 AS value
+      expect:
+        rows: 1
+        data:
+        - value: 1
+    - sql: SELECT CONVERT(VARCHAR,2026)+'-'+CONVERT(VARCHAR,7) AS separator, CAST(7 AS VARCHAR(30))+'x' AS suffix
+      expect:
+        rows: 1
+        data:
+        - separator: 2026-7
+          suffix: 7x
+    - sql: SELECT N'Grüße '+'🐘' AS text
+      expect:
+        rows: 1
+        data:
+        - text: Grüße 🐘
+    - sql: CREATE TABLE dbo.tds_protocol_data (id INT PRIMARY KEY, name NVARCHAR(MAX), val INT)
+    - sql: INSERT INTO dbo.tds_protocol_data VALUES (@id,@name,@val)
+      parameters:
+      - name: id
+        value: 1
+      - name: name
+        value: Grüße 🐘; DROP TABLE dbo.tds_protocol_data; --
+      - name: val
+        value: null
+    - sql: SELECT id,name,val FROM dbo.tds_protocol_data
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          name: Grüße 🐘; DROP TABLE dbo.tds_protocol_data; --
+          val: null
+    - sql: SELECT @value AS value
+      parameters:
+      - name: value
+        value: 9007199254740993
+      expect:
+        rows: 1
+        data:
+        - value: 9007199254740993
+    - sql: SELECT @missing AS value
+      expect:
+        error: true
+        contains:
+        - unbound
+    - sql: SELECT 1/0 AS value
+      expect:
+        error: true
+        contains:
+        - division by zero
+    - sql: SELECT TOP (0) id FROM dbo.tds_protocol_data
+      expect:
+        rows: 0
+    - sql: SELECT @value AS value
+      parameters:
+      - name: value
+        value: 42
+      expect:
+        rows: 1
+        data:
+        - value: 42
+    - sql: BEGIN TRANSACTION
+    - sql: INSERT INTO dbo.tds_protocol_data VALUES (1,N'duplicate',99)
+      expect:
+        error: true
+    - sql: ROLLBACK TRANSACTION
+    - sql: SELECT COUNT(*) AS n FROM dbo.tds_protocol_data
+      expect:
+        rows: 1
+        data:
+        - n: 1
+    - sql: BEGIN TRANSACTION
+    - sql: INSERT INTO dbo.tds_protocol_data VALUES (2,N'rollback',20)
+    - sql: ROLLBACK TRANSACTION
+    - sql: SELECT COUNT(*) AS n FROM dbo.tds_protocol_data
+      expect:
+        rows: 1
+        data:
+        - n: 1
+    - sql: BEGIN TRANSACTION
+    - sql: INSERT INTO dbo.tds_protocol_data VALUES (3,N'commit',30)
+    - sql: COMMIT TRANSACTION
+    - sql: SELECT id,ROW_NUMBER() OVER (ORDER BY id) AS rn FROM dbo.tds_protocol_data ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          rn: 1
+        - id: 3
+          rn: 2
+    - sql: SET NOCOUNT ON
+    - sql: SELECT DB_NAME() AS db
+      expect:
+        rows: 1
+        data:
+        - db: memcp-tests
+    - sql: DROP TABLE dbo.tds_protocol_data
+  noncritical: true
+  fail_comment: Native TDS probe dispatch is not implemented by the current YAML runner; this protocol specification
+    remains open.
+- name: Native login preserves credential delimiters, braces and whitespace
+  tds:
+    username: tds;=brace} user
+    password: ' leading ;=} p Grüße trailing '
+    statements:
+    - sql: SELECT 1 AS value
+      expect:
+        rows: 1
+        data:
+        - value: 1
+  noncritical: true
+  fail_comment: Native TDS probe dispatch is not implemented by the current YAML runner; this protocol specification
+    remains open.
+- name: Existing password authentication denies wrong credentials
+  tds:
+    password: incorrect
+    expect_login_error: true
+  noncritical: true
+  fail_comment: Native TDS probe dispatch is not implemented by the current YAML runner; this protocol specification
+    remains open.
+- name: Existing database policy denies ungranted login
+  tds:
+    username: tds_limited
+    password: secret
+    expect_login_error: true
+  noncritical: true
+  fail_comment: Native TDS probe dispatch is not implemented by the current YAML runner; this protocol specification
+    remains open.
+- name: A missing database is denied at login
+  tds:
+    database: tds_missing_db
+    expect_login_error: true
+  noncritical: true
+  fail_comment: Native TDS probe dispatch is not implemented by the current YAML runner; this protocol specification
+    remains open.
+- sql: DROP TABLE IF EXISTS tds_protocol_data
+  name: 'Fixture cleanup 001: DROP TABLE IF EXISTS tds_protocol_data'
+- sql: DROP USER IF EXISTS tds_limited
+  name: 'Fixture cleanup 002: DROP USER IF EXISTS tds_limited'
+- sql: DROP USER IF EXISTS 'tds;=brace} user'
+  name: 'Fixture cleanup 003: DROP USER IF EXISTS ''tds;=brace} user'''
+cleanup: []
