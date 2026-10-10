@@ -148,9 +148,18 @@ runtime and storage hot paths; do not substitute float64 for exact casts. */
 		"REAL" (list (quote if) (list (quote nil?) value) nil (list (quote simplify) (list tsql_cast_float value)))
 		"BIT" (list (quote sql_not) (list (quote sql_not) (list tsql_cast_bit value)))
 		_ (error "unsupported conversion to " name)))))
-(define tsql_negate_expr (lambda (value)
+(define tsql_negate_expr (lambda (value) (begin
+	/* A constant cast already gives us its value and declared range at compile
+	time. Diagnose negation overflow here without introducing runtime type tags
+	or checks into ordinary arithmetic. Dynamic result typing is a follow-up. */
+	(match value
+		((symbol intdiv) '(conversion operand minimum maximum) _divisor)
+		(if (and (equal? conversion tsql_cast_integer) (plain_literal_expr? operand))
+			(if (and (< minimum 0) (equal? (tsql_cast_integer operand minimum maximum) minimum))
+				(error "unary integer conversion overflow") true) true)
+		_ true)
 	(if (has? '("BOOLEAN" "BOOL" "BIT" "VARCHAR" "CHAR") (sql_info_type (sql_expr_info (list) value)))
-		(error "unary minus requires a numeric operand") (list (quote -) (intdiv 0 1) value))))
+		(error "unary minus requires a numeric operand") (list (quote -) (intdiv 0 1) value)))))
 (define tsql_column_attributes (parser (define attrs (* (or
 	(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true "null" false))
 	(parser (atom "UNIQUE" true) '("unique" true))
