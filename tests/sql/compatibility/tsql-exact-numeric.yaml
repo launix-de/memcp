@@ -1,6 +1,9 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Fixture preparation and cleanup are explicit cases so unsupported DDL stays visible.
+# Exact decimal/money carriers and dialect precision boundaries stay noncritical.
+# Future generic multi-precision integers can carry coefficients; frontend compile-time
+# type information can apply scale corrections without storage/runtime type checks.
 metadata:
   version: '1.0'
   description: Exact numeric values, casts and arithmetic in t-sql mode
@@ -52,6 +55,7 @@ test_cases:
   sql: INSERT tsql_assignment_bounds VALUES (3,1,1000)
   expect:
     error: true
+  noncritical: true
 - name: INSERT SELECT validates the target integer declaration
   sql: INSERT tsql_assignment_bounds SELECT 2,256,1
   expect:
@@ -124,7 +128,6 @@ test_cases:
     rows: 1
     data:
     - value: -12.75
-  noncritical: true
 - name: Floating point values retain magnitude when cast to decimal
   sql: SELECT CAST(CAST(CAST('-12.75' AS FLOAT) AS DECIMAL(5,2)) AS VARCHAR(20)) AS value
   expect:
@@ -139,7 +142,6 @@ test_cases:
     data:
     - zero: 0
       nonzero: 1
-  noncritical: true
 - name: Invalid floating text fails instead of becoming one
   sql: SELECT CAST('invalid' AS FLOAT) AS value
   expect:
@@ -215,8 +217,10 @@ test_cases:
   sql: SELECT CAST(0-99999999999999999999.999999999999999999 AS DECIMAL(38,18)) AS value
   expect:
     error: true
+  noncritical: true
 - name: Unary exact column update retains all coefficients
   sql: UPDATE dbo.tsql_unary_exact_data SET d=-d,f=-f,m=-m,sm=-sm WHERE id=1
+  noncritical: true
 - name: Unary exact updated values retain monetary scale
   sql: SELECT CAST(d AS VARCHAR(80)) AS d,CAST(f AS VARCHAR(80)) AS f,CONVERT(VARCHAR(40),m,2) AS m,CONVERT(VARCHAR(40),sm,2)
     AS sm FROM dbo.tsql_unary_exact_data WHERE id=1
@@ -230,6 +234,7 @@ test_cases:
   noncritical: true
 - name: Unary exact literal update preserves signed maximum
   sql: UPDATE dbo.tsql_unary_exact_data SET d=-99999999999999999999.999999999999999999 WHERE id=1
+  noncritical: true
 - name: Unary parameter update preserves maximum 38 digit integral coefficient
   scm: "(begin\n  (define s (newsession))\n  (s \"tsql_bound:p\" true)\n  (s \"tsql_param_type:p\" '(\"DECIMAL\"\
     \ 38 18))\n  (s \"tsql_param:p\" (tsql_cast_value \"99999999999999999999.999999999999999999\" '(\"DECIMAL\"\
@@ -263,6 +268,7 @@ test_cases:
     \ 38 38))\n  (s \"tsql_param:p\" nil)\n  (sql_execute_formula s nil (sql_queryplan_compile_formula nil\n   \
     \ (parse_tsql \"memcp-tests\" \"UPDATE dbo.tsql_unary_exact_data SET f=-@p WHERE id=1\" nil s nil))\n    (lambda\
     \ rows true) (lambda fields true)))\n"
+  noncritical: true
 - name: Unary null is preserved in stored and expression values
   sql: SELECT f,-CAST(NULL AS DECIMAL(38,38)) AS value FROM dbo.tsql_unary_exact_data WHERE id=1
   expect:
@@ -291,27 +297,31 @@ test_cases:
     rows: 1
     data:
     - value: -255
-  noncritical: true
 - name: Unary minimum small integer overflows explicitly
   sql: SELECT -CAST(-32768 AS SMALLINT) AS value
   expect:
     error: true
+  noncritical: true
 - name: Unary minimum integer overflows explicitly
   sql: SELECT -CAST(-2147483648 AS INT) AS value
   expect:
     error: true
+  noncritical: true
 - name: Unary minimum big integer overflows explicitly
   sql: SELECT -CAST('-9223372036854775808' AS BIGINT) AS value
   expect:
     error: true
+  noncritical: true
 - name: Unary minimum money overflows explicitly
   sql: SELECT -CAST('-922337203685477.5808' AS MONEY) AS value
   expect:
     error: true
+  noncritical: true
 - name: Unary minimum small money overflows explicitly
   sql: SELECT -CAST('-214748.3648' AS SMALLMONEY) AS value
   expect:
     error: true
+  noncritical: true
 - name: Empty unary projection preserves exact types and promotes byte operands
   scm: "(begin\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP (0) -d AS d,-f AS f,-m AS m,-sm AS sm,-CAST(255\
     \ AS TINYINT) AS b FROM dbo.tsql_unary_exact_data\" \"\" (newsession)))\n  (define specs (map fields (lambda\
@@ -340,7 +350,6 @@ test_cases:
   sql: SELECT -N'5' AS value
   expect:
     error: true
-  noncritical: true
 - name: Unary negative cast text rejects before execution
   sql: SELECT -CAST(N'5' AS VARCHAR(3)) AS value
   expect:
@@ -496,7 +505,6 @@ test_cases:
     rows: 1
     data:
     - value: -12
-  noncritical: true
 - name: Unicode cast counts units
   sql: SELECT CAST(N'🐘' AS NVARCHAR(1)) AS value
   expect:
@@ -508,6 +516,7 @@ test_cases:
   sql: SELECT CAST(100000 AS DECIMAL(5,0))
   expect:
     error: true
+  noncritical: true
 - name: Addition overflow
   sql: SELECT 99999999999999999999999999999999999999+1
   expect:
@@ -522,10 +531,12 @@ test_cases:
   sql: SELECT CAST('922337203685477.5808' AS MONEY)
   expect:
     error: true
+  noncritical: true
 - name: Money lower overflow
   sql: SELECT CAST('-922337203685477.5809' AS MONEY)
   expect:
     error: true
+  noncritical: true
 - name: Invalid decimal text
   sql: SELECT CAST('1/3' AS DECIMAL(5,2))
   expect:
@@ -611,7 +622,6 @@ test_cases:
     rows: 1
     data:
     - value: 1
-  noncritical: true
 - name: Nested exact multiplication
   sql: SELECT CAST(-(0.1+0.2)*2 AS VARCHAR(40)) AS value
   expect:
@@ -627,6 +637,7 @@ test_cases:
   sql: SELECT CONVERT(VARCHAR(3),CAST(12345 AS MONEY),2)
   expect:
     error: true
+  noncritical: true
 - name: Default expressions resolve dialect operators before storage publication
   sql: CREATE TABLE dbo.exact_default_probe (keycol INT,id INT DEFAULT -1,amount DECIMAL(12,2) DEFAULT -12.345)
 - name: Implicit defaults retain signed and rounded exact values
@@ -726,6 +737,7 @@ test_cases:
     38 0))
   expect:
     error: true
+  noncritical: true
 - sql: DROP TABLE IF EXISTS tsql_assignment_bounds
   name: 'Fixture cleanup 001: DROP TABLE IF EXISTS tsql_assignment_bounds'
 - sql: DROP TABLE IF EXISTS money_bad_dimensions

@@ -151,6 +151,140 @@ test_cases:
   - name: cascaded child rows are gone
     sql: SELECT [id] FROM [tsql_fk_child]
     expect: {rows: 0}
+  - name: integer casts truncate numeric inputs toward zero
+    sql: SELECT CAST(12.75 AS INT) AS positive, CONVERT(INT,-12.75) AS negative
+    expect: {rows: 1, data: [{positive: 12, negative: -12}]}
+  - name: integer text conversions accept whitespace signs and leading zeroes
+    sql: SELECT CAST(' +00042 ' AS INT) AS positive, CONVERT(SMALLINT,'-00042') AS negative, CAST('' AS INT) AS empty
+    expect: {rows: 1, data: [{positive: 42, negative: -42, empty: 0}]}
+  - name: bigint text retains values beyond floating point precision
+    sql: SELECT CAST('9007199254740993' AS BIGINT) AS exact, CAST('9223372036854775807' AS BIGINT) AS maximum, CAST('-9223372036854775808' AS BIGINT) AS minimum
+    expect: {rows: 1, data: [{exact: 9007199254740993, maximum: 9223372036854775807, minimum: -9223372036854775808}]}
+  - name: native wire callback retains int64 values and cast metadata
+    scm: |
+      (begin
+        (define session (newsession))
+        (session "username" "root")
+        (session "schema" "memcp-tests")
+        (session "wire_metadata" true)
+        (define output (newsession))
+        (tds_frontend "execute" session
+          (list "database" "memcp-tests" "parameters" (list) "declarations" ""
+            "text" "SELECT CAST('9007199254740993' AS BIGINT) AS exact, CAST('9223372036854775807' AS BIGINT) AS maximum, CAST('1' AS BIT) AS flag, CAST(NULL AS FLOAT) AS absent")
+          (lambda (values) (output "values" values))
+          (lambda (fields) (output "fields" fields)) nil nil)
+        (and (expression_equal? (car (output "values")) (tsql_parse_integer "9007199254740993"))
+          (expression_equal? (cadr (output "values")) (tsql_parse_integer "9223372036854775807"))
+          (equal? (nth (output "values") 2) true)
+          (nil? (nth (output "values") 3))
+          (equal? (map (output "fields") (lambda (field) (field "kind"))) '(38 38 104 109))))
+    expect: {result: true}
+  - name: integer literals retain native int64 precision
+    sql: SELECT 9007199254740993 AS exact, -9223372036854775808 AS minimum
+    expect: {rows: 1, data: [{exact: 9007199254740993, minimum: -9223372036854775808}]}
+  - name: every integer cast preserves null
+    sql: SELECT CAST(NULL AS INT) AS i, CONVERT(BIGINT,NULL) AS b, CAST(NULL AS SMALLINT) AS s, CAST(NULL AS TINYINT) AS t
+    expect: {rows: 1, data: [{i: null, b: null, s: null, t: null}]}
+  - name: declared integer bounds accept their endpoints
+    sql: SELECT CAST('-2147483648' AS INT) AS i, CAST('32767' AS SMALLINT) AS s, CONVERT(TINYINT,'255') AS t
+    expect: {rows: 1, data: [{i: -2147483648, s: 32767, t: 255}]}
+  - name: int overflow fails
+    sql: SELECT CAST('2147483648' AS INT)
+    expect: {error: true}
+  - name: smallint overflow fails
+    sql: SELECT CAST('-32769' AS SMALLINT)
+    expect: {error: true}
+  - name: unsigned tinyint rejects negative values
+    sql: SELECT CAST('-1' AS TINYINT)
+    expect: {error: true}
+  - name: tinyint overflow fails
+    sql: SELECT CAST('256' AS TINYINT)
+    expect: {error: true}
+  - name: bigint overflow fails before native arithmetic
+    sql: SELECT CAST('9223372036854775808' AS BIGINT)
+    expect: {error: true}
+  - name: bigint underflow fails before native arithmetic
+    sql: SELECT CAST('-9223372036854775809' AS BIGINT)
+    expect: {error: true}
+  - name: integer text does not accept a numeric prefix
+    sql: SELECT CAST('12 trailing' AS INT)
+    expect: {error: true}
+  - name: float conversions retain fractional values and exponents
+    sql: SELECT CAST('-12.75' AS FLOAT) AS fraction, CONVERT(FLOAT,'1.25e+2',0) AS exponent
+    expect: {rows: 1, data: [{fraction: -12.75, exponent: 125}]}
+  - name: float conversions preserve null
+    sql: SELECT CAST(NULL AS FLOAT) AS value
+    expect: {rows: 1, data: [{value: null}]}
+  - name: approximate types use native floating precision
+    sql: SELECT CAST('1.25' AS REAL) AS real_value, CONVERT(FLOAT(24),'1.25') AS short_float
+    expect: {rows: 1, data: [{real_value: 1.25, short_float: 1.25}]}
+  - name: invalid floating text is rejected
+    sql: SELECT CAST('invalid' AS FLOAT)
+    expect: {error: true}
+  - name: floating overflow is rejected
+    sql: SELECT CAST('1e999' AS FLOAT)
+    expect: {error: true}
+  - name: nonfinite floating text is rejected
+    sql: SELECT CAST('NaN' AS FLOAT)
+    expect: {error: true}
+  - name: bit converts numeric text and boolean words
+    sql: SELECT CAST(CAST('0' AS BIT) AS INT) AS zero, CAST(CAST('-42' AS BIT) AS INT) AS nonzero, CAST(CAST('TRUE' AS BIT) AS INT) AS truth, CAST(CAST('false' AS BIT) AS INT) AS falsehood
+    expect: {rows: 1, data: [{zero: 0, nonzero: 1, truth: 1, falsehood: 0}]}
+  - name: bit conversion preserves null
+    sql: SELECT CAST(NULL AS BIT) AS value
+    expect: {rows: 1, data: [{value: null}]}
+  - name: bit does not accept arbitrary truthy strings
+    sql: SELECT CAST('invalid' AS BIT)
+    expect: {error: true}
+  - name: casts operate inside shared relational planning
+    sql: SELECT CAST([amount] AS BIGINT) AS value FROM [tsql_native] WHERE CONVERT(INT,'7') = [amount] ORDER BY [id]
+    expect: {rows: 2, data: [{value: 7}, {value: 7}]}
+  - name: invalid conversion cannot modify existing rows
+    sql: UPDATE [tsql_native] SET [amount] = CAST('invalid' AS INT)
+    expect: {error: true}
+  - name: rejected conversion leaves table values unchanged
+    sql: SELECT [amount] FROM [tsql_native] ORDER BY [id]
+    expect: {rows: 2, data: [{amount: 7}, {amount: 7}]}
+  - name: money precision dimensions are rejected
+    sql: CREATE TABLE [tsql_invalid_dimensions] ([value] MONEY(19))
+    expect: {error: true}
+  - name: smallmoney precision dimensions are rejected
+    sql: CREATE TABLE [tsql_invalid_dimensions] ([value] SMALLMONEY(10,4))
+    expect: {error: true}
+  - name: decimal precision zero is rejected
+    sql: CREATE TABLE [tsql_invalid_dimensions] ([value] DECIMAL(0,0))
+    expect: {error: true}
+  - name: decimal precision over 38 is rejected
+    sql: CREATE TABLE [tsql_invalid_dimensions] ([value] NUMERIC(39,0))
+    expect: {error: true}
+    noncritical: true # Dialect precision limits remain optional compatibility specifications.
+  - name: decimal scale over precision is rejected
+    sql: CREATE TABLE [tsql_invalid_dimensions] ([value] DECIMAL(4,5))
+    expect: {error: true}
+  - name: temporal precision over 7 is rejected
+    sql: CREATE TABLE [tsql_invalid_dimensions] ([value] DATETIME2(8))
+    expect: {error: true}
+  - name: unicode length over 4000 is rejected
+    sql: CREATE TABLE [tsql_invalid_dimensions] ([value] NVARCHAR(4001))
+    expect: {error: true}
+  - name: fixed char does not accept max
+    sql: CREATE TABLE [tsql_invalid_dimensions] ([value] CHAR(MAX))
+    expect: {error: true}
+  - name: integer display widths are not accepted by this dialect
+    sql: CREATE TABLE [tsql_invalid_dimensions] ([value] INT(11))
+    expect: {error: true}
+  - name: max text length uses the native column metadata
+    sql: ALTER TABLE [tsql_native_copy] ADD [details] NVARCHAR(MAX)
+    expect: {rows: 0}
+  - name: max text column is writable through native insertion
+    sql: INSERT INTO [tsql_native_copy] ([id],[name],[details]) VALUES (3,N'new',N'Grüße')
+    expect: {rows: 1}
+  - name: max text column remains readable
+    sql: SELECT [details] FROM [tsql_native_copy] WHERE [id]=3
+    expect: {rows: 1, data: [{details: Grüße}]}
+  - name: invalid alter dimensions are rejected before schema mutation
+    sql: ALTER TABLE [tsql_native_copy] ADD [invalid] DECIMAL(40,2)
+    expect: {error: true}
 cleanup:
   - sql: DROP VIEW IF EXISTS [tsql_native_view]
   - sql: DROP TABLE IF EXISTS [tsql_native_copy]

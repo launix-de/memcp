@@ -502,12 +502,10 @@ test_cases:
   sql: CREATE TABLE dbo.tsql_copy (id INT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(MAX))
   expect:
     rows: 0
-  noncritical: true
 - name: TSQL INSERT uses generated identity
   sql: INSERT INTO dbo.tsql_copy (name) VALUES (N'first'),(N'second')
   expect:
     affected_rows: 2
-  noncritical: true
 - name: TSQL read generated identity
   sql: SELECT id,name FROM dbo.tsql_copy ORDER BY id
   expect:
@@ -517,17 +515,14 @@ test_cases:
       name: first
     - id: 2
       name: second
-  noncritical: true
 - name: TSQL UPDATE
   sql: UPDATE dbo.tsql_copy SET name=N'updated' WHERE id=1
   expect:
     affected_rows: 1
-  noncritical: true
 - name: TSQL DELETE
   sql: DELETE FROM dbo.tsql_copy WHERE id=2
   expect:
     affected_rows: 1
-  noncritical: true
 - name: TSQL CREATE VIEW
   sql: CREATE VIEW dbo.tsql_view AS SELECT id,name FROM dbo.tsql_copy
   expect:
@@ -539,7 +534,6 @@ test_cases:
     data:
     - id: 1
       name: updated
-  noncritical: true
 - name: TOP remains branch-local in UNION
   sql: SELECT TOP (1) id AS v FROM tsql_data UNION ALL SELECT TOP (1) id AS v FROM tsql_data ORDER BY v
   expect:
@@ -587,7 +581,6 @@ test_cases:
     rows: 1
     data:
     - value: 9007199254740993
-  noncritical: true
 - name: CAST truncates requested character length
   sql: SELECT CAST(N'abcdef' AS NVARCHAR(3)) AS value
   expect:
@@ -624,14 +617,12 @@ test_cases:
   sql: INSERT INTO dbo.tsql_copy (name) SELECT TOP (1) name FROM dbo.tsql_data ORDER BY id
   expect:
     rows: 1
-  noncritical: true
 - name: TSQL INSERT SELECT writes one row
   sql: SELECT COUNT(*) AS n FROM dbo.tsql_copy
   expect:
     rows: 1
     data:
     - n: 2
-  noncritical: true
 - name: TSQL INSERT VALUES resolves omitted target columns
   sql: INSERT dbo.tsql_copy VALUES (10,N'implicit values')
   expect:
