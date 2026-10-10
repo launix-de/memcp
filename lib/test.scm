@@ -1187,9 +1187,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (symbol? 0) false "integer should not be a symbol")
 	(assert (symbol? false) false "boolean should not be a symbol")
 
-	/* Test for int? (requires int64-producing builtin like size/now) */
+	/* Integer literals and integer-producing builtins retain native int64. */
 	(assert (int? (size "abc")) true "size returns an int")
-	(assert (int? 42) false "literal 42 is not an int (parsed as number)")
+	(assert (int? 42) true "integer literal is an int")
+	(assert (int? 42.0) false "decimal literal remains a float")
+	(assert (int? -42) true "negative integer literal is an int")
+	(assert (equal? (intdiv 9007199254740993 1) 9007199254740993) true "integer literal division preserves precision")
 
 	/* Test for + */
 	(assert (+ 1 2) 3 "1 + 2 should be 3")
@@ -1755,7 +1758,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		4
 		"length hook: count folds parallelN length")
 	/* scan callback ownership: mapreduce accumulator enables _mut inside its body */
-	(assert (serialize (optimize '('scan nil '('table "db" "tbl") '(quote '(369435906932736)) '(list) '("x") '('lambda '('x) true) '("x") '('lambda '('acc 'x) '(set_assoc 'acc 'x true)) '(list) nil false))) "(scan nil (table \"db\" \"tbl\") (quote (3.69435906932736e+14)) '() (\"x\") (lambda (x) true 1) (\"x\") (lambda (acc x) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: mapreduce acc enables set_assoc_mut")
+	(assert (serialize (optimize '('scan nil '('table "db" "tbl") '(quote '(369435906932736)) '(list) '("x") '('lambda '('x) true) '("x") '('lambda '('acc 'x) '(set_assoc 'acc 'x true)) '(list) nil false))) "(scan nil (table \"db\" \"tbl\") (quote (369435906932736)) '() (\"x\") (lambda (x) true 1) (\"x\") (lambda (acc x) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: mapreduce acc enables set_assoc_mut")
 	(define opt_merge_unique_ser (serialize (optimize
 		(list 'lambda
 			(list 'a 'b 'c)
