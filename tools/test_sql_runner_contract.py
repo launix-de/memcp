@@ -1651,6 +1651,18 @@ class ScanDebuggingClusterContractTest(unittest.TestCase):
                 with self.subTest(key=key), self.assertRaises(ValueError):
                     suite_scan_debugging(str(path))
 
+    def test_all_declared_clusters_are_schedulable_and_restarts_remain_exclusive(self):
+        root = Path(__file__).resolve().parents[1]
+        declared = []
+        for path in (root / "tests").rglob("*.yaml"):
+            if "scan_debugging: true" in path.read_text():
+                self.assertTrue(suite_scan_debugging(str(path)), str(path))
+                declared.append(path)
+        self.assertGreaterEqual(len(declared), 2)
+        restart = root / "tests/execution/operators/range-scan-coverage.yaml"
+        self.assertFalse(suite_scan_debugging(str(restart)))
+        self.assertEqual(suite_execution_mode(str(restart)), "exclusive")
+
     def test_global_shard_setting_still_requires_exclusive_scheduling(self):
         path = Path(__file__).resolve().parents[1] / "tests/planner/aggregates/group-stage-corners.yaml"
         self.assertTrue(suite_scan_debugging(str(path)))
