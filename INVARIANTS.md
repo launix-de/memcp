@@ -1185,6 +1185,17 @@ stable phase ranges in a dedicated refactoring PR so review can distinguish
 behavior changes from relocation and A/B compile-time measurements remain
 meaningful.
 
+### SQL compile-time type and collation ownership
+
+- SQL datatypes must NEVER be inherited from the SCM runtime type. The SQL
+  frontend determines types from SQL syntax, declared column metadata, and
+  expression contracts, independently of the internal value representation.
+- The expression compiler returns a triple `(expr, type, collation)` for each
+  expression. The final compiled code must contain only `expr`. `type` and
+  `collation` are used for SQL compile-time decisions such as selecting
+  collations for storage operators, compiling casts, or reporting type errors;
+  they must not survive as runtime type wrappers or checks in storage operators.
+
 ### Storage is opaque to Scheme cache and plan policy
 
 Table handles identify logical relations. Shard identities, topology generations,
