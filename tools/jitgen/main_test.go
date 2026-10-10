@@ -28,6 +28,7 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
@@ -221,6 +222,32 @@ func choose(a ...Scmer) Scmer {
 	}
 	if !strings.Contains(code, ".Rendered { ctx.EmitJmp(") {
 		t.Fatalf("generated branch can fall through into an already rendered sibling:\n%s", code)
+	}
+}
+
+func TestBranchWithoutPhiHelpersOnlySnapshotsRecursiveRenderer(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func (Scmer) Int() int64
+func choose(a ...Scmer) Scmer {
+	if a[0].Int() < a[1].Int() { return a[0] }
+	return a[1]
+}
+`, "choose")
+	code, errMsg := generateClosure("choose", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	// Recursive successor emission still needs a transaction: it overwrites
+	// shared descriptor bindings. Empty phi helpers need no such transaction.
+	if got := strings.Count(code, "ctx.SnapshotAllocState()"); got != 1 {
+		t.Fatalf("branch without phi helpers has %d allocator snapshots, want one:\n%s", got, code)
+	}
+	if got := strings.Count(code, "ctx.RestoreAllocState("); got != 1 {
+		t.Fatalf("branch without phi helpers has %d allocator restores, want one:\n%s", got, code)
+	}
+	if !strings.Contains(code, "ctx.FlushRegisterMoves()") {
+		t.Fatal("empty edge helpers lost the control-flow materialization barrier")
 	}
 }
 
@@ -787,35 +814,57 @@ func TestStorageBooleanReturnKeepsPublicMaterializedABI(t *testing.T) {
 	}
 }
 
-func TestPhiOverlaySlotsDoNotFollowSparseDescriptorNumbers(t *testing.T) {
-	g := &codeGen{fn: &ssa.Function{Blocks: []*ssa.BasicBlock{{}}}, closureDescDecl: map[string]bool{"d0": true, "d468": true}}
-	g.emitBuildPhiStateForEdge("state", 0, 0, "false")
-	code := g.w.String()
-	if !strings.Contains(code, "make([]JITValueDesc, 2)") || !strings.Contains(code, "state.OverlayValues[1] = d468") {
-		t.Fatalf("sparse descriptor identities inflated the runtime overlay:\n%s", code)
+func TestClosureDescriptorsCannotBeShadowedByBranchDeclarations(t *testing.T) {
+	g := &codeGen{bbClosureMode: true}
+	desc := g.allocDesc()
+	g.emit("var %s JITValueDesc", desc)
+	g.emit("\tvar %s JITValueDesc", desc)
+	g.emit("\t%s := JITValueDesc{Loc: LocImm}", desc)
+	if code := g.w.String(); strings.Contains(code, "var ") || strings.Contains(code, " := ") || !strings.Contains(code, "d0 = JITValueDesc{") {
+		t.Fatalf("block-local declaration shadows the shared descriptor:\n%s", code)
 	}
-	// Later descriptors may sort before an existing one. Already emitted edges
-	// must retain their slot assignment when later block renderers are produced.
-	g.closureDescDecl["d9"] = true
-	g.w.Reset()
-	g.emitBuildPhiStateForEdge("later", 0, 0, "false")
-	code = g.w.String()
-	if !strings.Contains(code, "make([]JITValueDesc, 3)") || !strings.Contains(code, "later.OverlayValues[1] = d468") || !strings.Contains(code, "later.OverlayValues[2] = d9") {
-		t.Fatalf("later descriptors changed existing runtime overlay slots:\n%s", code)
+	if declarations := g.wDecl.String(); strings.Count(declarations, "var d0 JITValueDesc") != 1 {
+		t.Fatalf("descriptor needs exactly one invocation declaration:\n%s", declarations)
 	}
 }
 
-func TestPhiOverlaySlotTrialsAreIsolated(t *testing.T) {
-	g := &codeGen{overlaySlots: map[string]int{"d0": 0}}
-	trial := g.clone()
-	if slot := trial.overlaySlot("d468"); slot != 1 {
-		t.Fatalf("trial slot = %d", slot)
+// Both recursive and backedge calls use shared descriptor locals. Phi edge
+// writes and sibling rollback remain necessary; incoming metadata slices do not.
+func TestRecursiveRenderersUseCanonicalHomesWithoutIncomingAllocations(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+ type Scmer struct{}
+ func NewInt(int64) Scmer
+ func (Scmer) Int() int64
+ func sum(a ...Scmer) Scmer {
+  total := a[0].Int()
+  for i := int64(0); i < a[1].Int(); i++ {
+   if i < a[2].Int() { total += i } else { total += a[3].Int() }
+  }
+  return NewInt(total)
+ }`, "sum")
+	code, errMsg := generateClosure("sum", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
 	}
-	if len(g.overlaySlots) != 1 {
-		t.Fatal("failed generation trial mutated parent slots")
+	for _, forbidden := range []string{"PhiState", "PhiValues", "OverlayValues", "RenderPS", "VisitCount", "ps.General"} {
+		if strings.Contains(code, forbidden) {
+			t.Fatalf("renderer retained incoming state %q:\n%s", forbidden, code)
+		}
 	}
-	if slot := g.overlaySlot("d9"); slot != 1 {
-		t.Fatalf("parent slot = %d", slot)
+	for _, required := range []string{".Render = func()", "ctx.EmitStoreToStack(", "ctx.SnapshotAllocState()", "ctx.RestoreAllocState(", ".Loc == LocImm"} {
+		if !strings.Contains(code, required) {
+			t.Fatalf("canonical renderer lost %q:\n%s", required, code)
+		}
+	}
+	// Saving dynamic allocator state is needed only when rendering the first
+	// sibling. Already-rendered loop targets perform no traversal or allocation.
+	guard := strings.Index(code, "if !bbs[")
+	snapshot := -1
+	if guard >= 0 {
+		snapshot = strings.Index(code[guard:], "ctx.SnapshotAllocState()")
+	}
+	if snapshot < 0 {
+		t.Fatal("sibling snapshot is outside renderer guard")
 	}
 }
 
@@ -907,5 +956,93 @@ func shift(args ...Scmer) Scmer {
 				t.Fatalf("generated algorithm contains %s:\n%s", forbidden, code)
 			}
 		}
+	}
+}
+
+func TestPanicOnlyEmitterHasNoUnusedReturnMerge(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func (Scmer) Bool() bool
+func fail(args ...Scmer) Scmer {
+	if args[0].Bool() { panic("first") }
+	panic("second")
+}`, "fail")
+	code, errMsg := generateClosure("fail", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	if strings.Contains(code, "mergeReturnType :=") {
+		t.Fatalf("panic-only emitter declares an unused return merge:\n%s", code)
+	}
+}
+
+func TestOperatorCollectionSkipsNilSpecialForm(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "sample.go", `package sample
+func init() {
+	Declare(nil, &Declaration{Name: "special", Fn: nil, Type: &TypeDescriptor{Kind: "func"}})
+	Declare(nil, &Declaration{Name: "builtin", Fn: builtin, Type: &TypeDescriptor{Kind: "func"}})
+}`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := collectOperators(fset, file, "sample.go")
+	if len(ops) != 1 || ops[0].name != "builtin" {
+		t.Fatalf("collected operators: %+v", ops)
+	}
+}
+
+func TestModuleAnalysisKeepsLocalHelpersAndExternalTypes(t *testing.T) {
+	module := &packages.Module{Path: "jitgen.test", Main: true}
+	helper := &packages.Package{PkgPath: "jitgen.test/helper", Module: module}
+	stdlib := &packages.Package{PkgPath: "sync", ID: "sync"}
+	foreign := &packages.Package{PkgPath: "foreign.test/lib", ID: "foreign.test/lib", Module: &packages.Module{Path: "foreign.test"}}
+	root := &packages.Package{PkgPath: "jitgen.test", ID: "jitgen.test", Module: module,
+		Imports: map[string]*packages.Package{"helper": helper, "sync": stdlib, "foreign": foreign}}
+	helper.ID = helper.PkgPath
+	selected := moduleAnalysisPackages([]*packages.Package{root})
+	if len(selected) != 2 || selected[0] != root || selected[1] != helper {
+		t.Fatalf("SSA analysis packages: %+v", selected)
+	}
+	if root.Imports["sync"] != stdlib || root.Imports["foreign"] != foreign {
+		t.Fatal("external type dependencies were removed")
+	}
+}
+
+func TestApplyOnceKeepsInlineCallbackAndStackArguments(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func ApplyOnce(source Scmer, args []Scmer) Scmer
+func singleton(args ...Scmer) Scmer {
+	return ApplyOnce(args[0], []Scmer{args[1], args[2]})
+}`, "singleton")
+	code, errMsg := generateClosure("singleton", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	for _, want := range []string{"LocLambdaTemplate", "JITEmitProcInlineWithOuter", "Loc: LocStackPair", "jitEmitDynamicCallableAt"} {
+		if !strings.Contains(code, want) {
+			t.Fatalf("missing callback lowering %q:\n%s", want, code)
+		}
+	}
+	if strings.Contains(code, "GoFuncAddr(ApplyOnce)") {
+		t.Fatalf("singleton callback escaped through the generic Go ABI:\n%s", code)
+	}
+}
+
+func TestBuildConfigurationHelperKeepsExecutingGoBoundary(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func NewBool(bool) Scmer
+//jitgen:noinline
+func JITEnabled() bool { return false }
+func enabled(args ...Scmer) Scmer { return NewBool(JITEnabled()) }
+`, "enabled")
+	code, errMsg := generateClosure("enabled", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	if !strings.Contains(code, "GoFuncAddr(JITEnabled)") {
+		t.Fatalf("generator baked in its own build flag:\n%s", code)
 	}
 }

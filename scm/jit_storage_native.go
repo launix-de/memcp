@@ -56,6 +56,8 @@ type jitStorageCompileRequest struct {
 }
 
 // JITEnabled reports whether this binary contains the native JIT backend.
+//
+//jitgen:noinline
 func JITEnabled() bool { return true }
 
 // CompileJITStorageGetValue compiles a generated scalar storage emitter into

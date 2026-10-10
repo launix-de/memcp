@@ -5,7 +5,7 @@
 # ordinary SQL CI must not pay for the production-scale fixture.
 
 metadata:
-  performance_shard_weight: 6
+  performance_shard_weight: 39
   version: "1.0"
   description: "Ordered direct and projected LIKE searches with compound ACLs"
   isolated: true
