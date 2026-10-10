@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"strings"
@@ -68,7 +69,9 @@ func main() {
 		fail("read config: %v", err)
 	}
 	var cfg probe
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&cfg); err != nil {
 		fail("parse config: %v", err)
 	}
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&multiStatements=false",
@@ -148,12 +151,24 @@ func runStatement(conn *sql.Conn, cfg probe, stmt statement) error {
 			return fmt.Errorf("missing expected row %d", rowIdx)
 		}
 		for key, want := range expected {
-			if fmt.Sprint(got[rowIdx][key]) != fmt.Sprint(want) {
+			actual, present := got[rowIdx][key]
+			if !present || !probeValuesEqual(actual, want) {
 				return fmt.Errorf("row %d field %s = %v, want %v", rowIdx, key, got[rowIdx][key], want)
 			}
 		}
 	}
 	return nil
+}
+
+func probeValuesEqual(got, want any) bool {
+	if number, ok := want.(json.Number); ok {
+		// Numeric expectations compare values, not decimal/exponent formatting.
+		// Preserve JSON integer precision and reject rounded large results.
+		expected, validExpected := new(big.Rat).SetString(string(number))
+		actual, validActual := new(big.Rat).SetString(fmt.Sprint(got))
+		return validExpected && validActual && expected.Cmp(actual) == 0
+	}
+	return fmt.Sprint(got) == fmt.Sprint(want)
 }
 
 func runTypedStatement(cfg probe, stmt statement, args []any) error {

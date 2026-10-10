@@ -3,8 +3,23 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 
 /* Independent T-SQL grammar. Statements emit the canonical query AST and
 existing native DDL/DML operations, as the other SQL frontends do. */
-(define tsql_int (parser (define value (regex "-?[0-9]+")) (simplify value)))
-(define tsql_number (parser (define value (regex "-?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:e-?[0-9]+)?" true)) (simplify value)))
+/* Integer tokens and integer text conversions use native int64 arithmetic.
+The negative accumulator also represents the minimum int64 without overflow. */
+(define tsql_parse_integer (lambda (text) (begin
+	(define trimmed (sql_trim text))
+	(if (equal? trimmed "") 0 (begin
+		(if (regexp_test trimmed "^[+-]?[0-9]+$") true (error "invalid integer text"))
+		(define negative (equal? (substr trimmed 0 1) "-"))
+		(define digits (regexp_replace trimmed "^[+-]?0*" ""))
+		(define bound (if negative "9223372036854775808" "9223372036854775807"))
+		(if (or (> (strlen digits) 19) (and (equal? (strlen digits) 19) (> digits bound)))
+			(error "integer conversion overflow") true)
+		(define coefficient (reduce (produceN (strlen digits)) (lambda (acc i)
+			(- (* acc 10) (intdiv (simplify (substr digits i 1)) 1))) 0))
+		(if negative coefficient (- 0 coefficient)))))))
+(define tsql_int (parser (define value (regex "-?[0-9]+")) (tsql_parse_integer value)))
+(define tsql_number (parser (define value (regex "-?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:e-?[0-9]+)?" true))
+	(if (regexp_test value "^-?[0-9]+$") (tsql_parse_integer value) (simplify value))))
 (define tsql_identifier_unquoted (parser (not
 	(regex "[a-zA-Z_][a-zA-Z0-9_]*")
 	(atom "NOT" true)
@@ -58,8 +73,93 @@ existing native DDL/DML operations, as the other SQL frontends do. */
 	(parser (define name tsql_identifier) '('get_column nil true name true)))))
 (define tsql_literal (parser (or
 	(parser (atom "NULL" true) (sql_null_literal)) sql_hex_literal tsql_number tsql_string)))
-(define tsql_column_type (parser (define name tsql_identifier)
-	(match (toUpper name) "NVARCHAR" "VARCHAR" "NCHAR" "CHAR" "BIT" "BOOLEAN" _ name)))
+(define tsql_column_type (parser (define name tsql_identifier) (toUpper name)))
+(define tsql_storage_type (lambda (name)
+	(match name "NVARCHAR" "VARCHAR" "NCHAR" "CHAR" "BIT" "BOOLEAN" _ name)))
+(define tsql_type_dimensions (parser (or
+	(parser '("(" (atom "MAX" true) ")") (list -1))
+	(parser '("(" (define precision tsql_int) "," (define scale tsql_int) ")") (list precision scale))
+	(parser '("(" (define length tsql_int) ")") (list length))
+	(parser empty (list)))))
+(define tsql_decl_dimensions (lambda (type dimensions) (begin
+	(define count_dimensions (count dimensions))
+	(if (has? '("VARCHAR" "CHAR" "NVARCHAR" "NCHAR" "BINARY" "VARBINARY") type)
+		(begin
+			(define length (if (empty_list? dimensions) 1 (car dimensions)))
+			(if (and (<= count_dimensions 1)
+				(or (and (equal? length -1) (has? '("VARCHAR" "NVARCHAR" "VARBINARY") type))
+					(and (>= length 1) (<= length (if (has? '("NVARCHAR" "NCHAR") type) 4000 8000)))))
+				(list length) (error "invalid length for " type)))
+		(if (has? '("DECIMAL" "NUMERIC") type) (begin
+			(define precision (if (empty_list? dimensions) 18 (car dimensions)))
+			(define scale (if (< count_dimensions 2) 0 (cadr dimensions)))
+			(if (and (<= count_dimensions 2) (>= precision 1) (<= precision 38) (>= scale 0) (<= scale precision))
+				(list precision scale) (error "invalid precision or scale for " type)))
+			(if (equal? type "FLOAT")
+				(if (and (<= count_dimensions 1) (or (empty_list? dimensions) (and (>= (car dimensions) 1) (<= (car dimensions) 53))))
+					dimensions (error "invalid FLOAT precision"))
+				(if (has? '("TIME" "DATETIME2" "DATETIMEOFFSET") type)
+					(if (and (<= count_dimensions 1) (or (empty_list? dimensions) (and (>= (car dimensions) 0) (<= (car dimensions) 7))))
+						dimensions (error "invalid temporal precision"))
+					(if (and (empty_list? dimensions) (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT" "BIT" "REAL" "MONEY" "SMALLMONEY" "DATE" "DATETIME" "SMALLDATETIME" "ROWVERSION" "TIMESTAMP" "UNIQUEIDENTIFIER" "TEXT" "NTEXT" "IMAGE") type))
+						dimensions (error "unsupported type or dimensions: " type)))))))))
+/* These conversions are frontend scalar expressions. Stored values and the
+shared planner continue to use the ordinary native numbers and booleans. */
+/* TODO: Generic multi-precision integers would permit exact DECIMAL(38,s).
+Represent decimals as integer coefficients and apply scale corrections through
+the frontend's compile-time type system. Keep precision/scale out of the Scheme
+runtime and storage hot paths; do not substitute float64 for exact casts. */
+(define tsql_float_max (simplify "1.7976931348623157e308"))
+(define tsql_numeric_input (lambda (value)
+	(if (number? value) (if (and (>= value (- 0 tsql_float_max)) (<= value tsql_float_max)) value (error "floating conversion overflow"))
+		(if (string? value) (begin
+			(define text (sql_trim value))
+			(if (equal? text "") 0
+				(if (regexp_test text "^[+-]?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
+					(begin (define number (simplify text))
+						(if (and (number? number) (>= number (- 0 tsql_float_max)) (<= number tsql_float_max)) number
+							(error "floating conversion overflow")))
+					(error "invalid numeric text"))))
+			(if (equal? value true) 1 (if (equal? value false) 0 (error "unsupported numeric conversion")))))))
+(define tsql_cast_integer (lambda (value minimum maximum)
+	(if (nil? value) nil (begin
+		(define integer (if (string? value) (tsql_parse_integer value)
+			(if (int? value) value (intdiv (tsql_numeric_input value) 1))))
+		(if (or (nil? integer) (< integer minimum) (> integer maximum))
+			(error "integer conversion overflow") integer)))))
+(define tsql_cast_float (lambda (value) (if (nil? value) nil (tsql_numeric_input value))))
+(define tsql_cast_bit (lambda (value)
+	(if (nil? value) nil
+		(if (and (string? value) (equal? (toUpper (sql_trim value)) "TRUE")) true
+			(if (and (string? value) (equal? (toUpper (sql_trim value)) "FALSE")) false
+				(not (equal? (tsql_numeric_input value) 0)))))))
+(define tsql_cast_expr (lambda (value type dimensions) (begin
+	(define name (toUpper type))
+	(tsql_decl_dimensions name dimensions)
+	(match name
+		"INT" (list (quote intdiv) (list tsql_cast_integer value -2147483648 2147483647) 1)
+		"INTEGER" (list (quote intdiv) (list tsql_cast_integer value -2147483648 2147483647) 1)
+		"SMALLINT" (list (quote intdiv) (list tsql_cast_integer value -32768 32767) 1)
+		"TINYINT" (list (quote intdiv) (list tsql_cast_integer value 0 255) 1)
+		"BIGINT" (list (quote intdiv) (list tsql_cast_integer value (tsql_parse_integer "-9223372036854775808") (tsql_parse_integer "9223372036854775807")) 1)
+		"FLOAT" (list (quote if) (list (quote nil?) value) nil (list (quote simplify) (list tsql_cast_float value)))
+		/* Approximate types use native floating precision. Binary32 rounding and
+		dialect precision boundaries remain noncritical compatibility work. */
+		"REAL" (list (quote if) (list (quote nil?) value) nil (list (quote simplify) (list tsql_cast_float value)))
+		"BIT" (list (quote sql_not) (list (quote sql_not) (list tsql_cast_bit value)))
+		_ (error "unsupported conversion to " name)))))
+(define tsql_negate_expr (lambda (value) (begin
+	/* A constant cast already gives us its value and declared range at compile
+	time. Diagnose negation overflow here without introducing runtime type tags
+	or checks into ordinary arithmetic. Dynamic result typing is a follow-up. */
+	(match value
+		((symbol intdiv) '(conversion operand minimum maximum) _divisor)
+		(if (and (equal? conversion tsql_cast_integer) (plain_literal_expr? operand))
+			(if (and (< minimum 0) (equal? (tsql_cast_integer operand minimum maximum) minimum))
+				(error "unary integer conversion overflow") true) true)
+		_ true)
+	(if (has? '("BOOLEAN" "BOOL" "BIT" "VARCHAR" "CHAR") (sql_info_type (sql_expr_info (list) value)))
+		(error "unary minus requires a numeric operand") (list (quote -) 0 value)))))
 (define tsql_column_attributes (parser (define attrs (* (or
 	(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true "null" false))
 	(parser (atom "UNIQUE" true) '("unique" true))
@@ -94,7 +194,11 @@ never from the first row. Unknown expression types stay text in this first slice
 (define tsql_result_columns (lambda (query) (match query
 	((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
 	(extract_assoc (expand_query_block_fields sources fields) (lambda (name expression) (begin
-		(define type (sql_info_type (sql_expr_info sources expression)))
+		/* Native integer division guarantees an integer even when a conversion's
+		input has no catalog type. Describe that wire result before optimization. */
+		(define type (match expression
+			((symbol intdiv) _left _right) "BIGINT"
+			_ (sql_info_type (sql_expr_info sources expression))))
 		(define kind (if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type) 38
 			(if (has? '("FLOAT" "DOUBLE" "REAL" "DECIMAL" "NUMERIC") type) 109
 				(if (has? '("BOOLEAN" "BOOL" "BIT") type) 104 231))))
@@ -190,12 +294,10 @@ never from the first row. Unknown expression types stay text in this first slice
 	) (reduce terms sql_fold_multiplicative_term a)))
 
 	(define tsql_expression5 (parser (or
-
-		(parser '("-" (define expr tsql_expression6)) '((quote -) 0 expr))
-
 		(parser '((define expr tsql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
 		(parser '((define expr tsql_expression6) (atom "IS" true) (atom "NOT" true) (atom "NULL" true)) '('not '('nil? expr)))
 		tsql_expression6
+		(parser '("-" (define expr tsql_expression6)) (tsql_negate_expr expr))
 	)))
 
 	(define tsql_window_orderby_item (parser '(
@@ -216,6 +318,13 @@ never from the first row. Unknown expression types stay text in this first slice
 
 		(parser '("(" (define sub tsql_select) ")") '('inner_select sub))
 		(parser '("(" (define a tsql_expression) ")") a)
+		(parser '((atom "CAST" true) "(" (define value tsql_expression) (atom "AS" true)
+			(define type tsql_column_type) (define dimensions tsql_type_dimensions) ")")
+			(tsql_cast_expr value type dimensions))
+		(parser '((atom "CONVERT" true) "(" (define type tsql_column_type) (define dimensions tsql_type_dimensions)
+			"," (define value tsql_expression) (? "," (define style tsql_int)) ")")
+			(if (or (nil? style) (equal? style 0)) (tsql_cast_expr value type dimensions)
+				(error "unsupported CONVERT style: " style)))
 
 		(parser '((atom "EXISTS" true) "(" (define sub tsql_select) ")") '('inner_select_exists sub))
 
@@ -703,14 +812,10 @@ never from the first row. Unknown expression types stay text in this first slice
 		(parser '((atom "NO" true) (atom "ACTION" true)) "restrict")
 		(parser (atom "CASCADE" true) "cascade")
 		(parser '((atom "SET" true) (atom "NULL" true)) "set null"))))
-	(define column_dimensions (parser (or
-		(parser '("(" (define precision tsql_int) "," (define scale tsql_int) ")") (list (quote list) precision scale))
-		(parser '("(" (define length tsql_int) ")") (list (quote list) length))
-		(parser empty '(list)))))
 	(define column_definition (parser '(
 		(define name tsql_identifier) (define type tsql_column_type)
-		(define dimensions column_dimensions) (define attributes tsql_column_attributes)
-	) (list name type dimensions attributes)))
+		(define dimensions tsql_type_dimensions) (define attributes tsql_column_attributes)
+	) (list name (tsql_storage_type type) (cons (quote list) (tsql_decl_dimensions type dimensions)) attributes)))
 	(define foreign_key_definition (parser '(
 		(? (atom "CONSTRAINT" true) (define name tsql_identifier))
 		(atom "FOREIGN" true) (atom "KEY" true) "(" (define columns (+ tsql_identifier ",")) ")"
