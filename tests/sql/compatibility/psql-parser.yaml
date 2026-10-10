@@ -707,6 +707,12 @@ test_cases:
       rows: 4
       data: [{id: 1, rn: 4}, {id: 2, rn: 3}, {id: 3, rn: 2}, {id: 4, rn: 1}]
 
+  - name: Window keywords remain valid explicit aliases
+    sql: SELECT 1 AS over, 2 AS partition, 3 AS asc, 4 AS desc
+    expect:
+      rows: 1
+      data: [{over: 1, partition: 2, asc: 3, desc: 4}]
+
   - name: Window functions are rejected in WHERE
     sql: SELECT id FROM psql_data WHERE ROW_NUMBER() OVER (ORDER BY id) = 1
     expect: {error: true}
