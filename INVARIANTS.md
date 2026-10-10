@@ -243,6 +243,13 @@ Each phase has a distinct job:
 Do not move physical decisions into `untangle_query`. Do not leave logical
 decorrelation work for `build_queryplan`.
 
+SCM/Go optimizer interfaces operate on raw Scheme expressions only. They must
+not know or hardcode a frontend's `(expression, type, collation)` record shape.
+`tryfold` returns a constant value or raises for a non-foldable expression;
+each frontend in `lib/` owns its type system and preserves or reconstructs its
+own type and collation metadata. Failed folding must leave the original AST
+available, and partially optimized execution code must not enter logical IR.
+
 Each transformation has exactly one owning phase. A later phase may consume
 facts established earlier, but it must not rediscover parser shapes or repeat a
 semantic rewrite. In particular:

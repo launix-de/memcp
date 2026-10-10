@@ -150,6 +150,49 @@ func Optimize(val Scmer, env *Env, telemetryCallback func(Scmer)) Scmer {
 	return v
 }
 
+// TryFold exposes constant evaluation of raw Scheme code. It never evaluates
+// residual code: a constant result descriptor alone can also describe a begin
+// with a nonconstant prefix. Frontends own any metadata attached to expressions.
+func TryFold(expr Scmer, env *Env) Scmer {
+	ome := newOptimizerMetainfo()
+	ome.rewrite.inputNodes = optimizerNodeCount(expr)
+	optimized, _ := OptimizeEx(CloneOptimizerExpression(expr), env, &ome, true)
+	if value, ok := optimizerConstantValue(optimized); ok {
+		return value
+	}
+	panic("tryfold: expression is not constant")
+}
+
+// Decode only values and the optimizer's constant-data encodings. In
+// particular, do not execute a residual call just because its result is Const.
+func optimizerConstantValue(expr Scmer) (Scmer, bool) {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if expr.IsSymbol() || expr.IsNthLocalVar() {
+		return NewNil(), false
+	}
+	if !expr.IsSlice() {
+		return expr, true
+	}
+	items := expr.Slice()
+	if len(items) == 2 && scmerIsSymbol(items[0], "quote") {
+		return items[1], true
+	}
+	if len(items) == 0 || !(isList(items[0]) || scmerIsSymbol(items[0], "list")) {
+		return NewNil(), false
+	}
+	values := make([]Scmer, len(items)-1)
+	for i, item := range items[1:] {
+		value, ok := optimizerConstantValue(item)
+		if !ok {
+			return NewNil(), false
+		}
+		values[i] = value
+	}
+	return NewSlice(values), true
+}
+
 type optimizerRewriteState struct {
 	remainingBudget  int
 	inputNodes       int

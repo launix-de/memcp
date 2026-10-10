@@ -4788,27 +4788,18 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(list source)))))
 
 /* Binding has validated the complete expression before stage rewriting.
-Fold only literal truth values here; keep a boolean operator around remaining
-operands so nullable/scalar values retain their boolean coercion. Stage lists
-remain intact until the existing dependency-demand pass removes unused work. */
+SCM decides whether the raw expression is constant, including lazy evaluation
+and declared function foldability. Keep the original AST on failure; never feed
+partially optimized runtime code back into logical IR. Stage lists remain intact
+until the existing dependency-demand pass removes unused work. */
 (define fold_bound_boolean_constants (lambda (head args)
-	(if (expr_head_and? head)
-		(if (reduce args (lambda (found arg) (or found (boolean_fold_false_literal? arg))) false)
-			false
-			(begin
-				(define kept (filter args (lambda (arg) (not (boolean_fold_true_literal? arg)))))
-				(if (empty_list? kept) true (cons head kept))))
-		(if (expr_head_or? head)
-			(if (reduce args (lambda (found arg) (or found (boolean_fold_true_literal? arg))) false)
-				true
-				(begin
-					(define kept (filter args (lambda (arg) (not (boolean_fold_false_literal? arg)))))
-					(if (empty_list? kept) false (cons head kept))))
-			(if (and (or (expr_head_not? head) (expr_head_sql_not? head))
-				(equal? (count args) 1)
-				(or (boolean_fold_true_literal? (car args)) (boolean_fold_false_literal? (car args))))
-				(boolean_fold_not (car args))
-				(cons head args))))))
+	(begin
+		(define expr (cons head args))
+		(if (and
+			(or (expr_head_and? head) (expr_head_or? head) (expr_head_not? head) (expr_head_sql_not? head))
+			(reduce args (lambda (found arg) (or found (boolean_fold_true_literal? arg) (boolean_fold_false_literal? arg))) false))
+			(try (lambda () (tryfold expr)) (lambda (_error) expr))
+			expr))))
 
 (define combine_stage_rewrite_results (lambda (head rewritten_args)
 	(begin
