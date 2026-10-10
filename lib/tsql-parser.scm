@@ -127,33 +127,53 @@ runtime and storage hot paths; do not substitute float64 for exact casts. */
 			(if (int? value) value (intdiv (tsql_numeric_input value) 1))))
 		(if (or (nil? integer) (< integer minimum) (> integer maximum))
 			(error "integer conversion overflow") integer)))))
-(define tsql_cast_float (lambda (value) (if (nil? value) nil (tsql_numeric_input value))))
+(define tsql_cast_float (lambda (value) (if (nil? value) nil (simplify (tsql_numeric_input value)))))
 (define tsql_cast_bit (lambda (value)
 	(if (nil? value) nil
 		(if (and (string? value) (equal? (toUpper (sql_trim value)) "TRUE")) true
 			(if (and (string? value) (equal? (toUpper (sql_trim value)) "FALSE")) false
 				(not (equal? (tsql_numeric_input value) 0)))))))
+/* A cast keeps its syntax-declared SQL type until the shared expression
+compiler consumes the (expr, type, collation) contract. Runtime values do not
+select that type, and no arithmetic operation is needed merely to mark it. */
 (define tsql_cast_expr (lambda (value type dimensions) (begin
 	(define name (toUpper type))
 	(tsql_decl_dimensions name dimensions)
-	(match name
-		"INT" (list (quote intdiv) (list tsql_cast_integer value -2147483648 2147483647) 1)
-		"INTEGER" (list (quote intdiv) (list tsql_cast_integer value -2147483648 2147483647) 1)
-		"SMALLINT" (list (quote intdiv) (list tsql_cast_integer value -32768 32767) 1)
-		"TINYINT" (list (quote intdiv) (list tsql_cast_integer value 0 255) 1)
-		"BIGINT" (list (quote intdiv) (list tsql_cast_integer value (tsql_parse_integer "-9223372036854775808") (tsql_parse_integer "9223372036854775807")) 1)
-		"FLOAT" (list (quote if) (list (quote nil?) value) nil (list (quote simplify) (list tsql_cast_float value)))
+	(define formula (match name
+		"INT" (list tsql_cast_integer value -2147483648 2147483647)
+		"INTEGER" (list tsql_cast_integer value -2147483648 2147483647)
+		"SMALLINT" (list tsql_cast_integer value -32768 32767)
+		"TINYINT" (list tsql_cast_integer value 0 255)
+		"BIGINT" (list tsql_cast_integer value (tsql_parse_integer "-9223372036854775808") (tsql_parse_integer "9223372036854775807"))
+		"FLOAT" (list tsql_cast_float value)
 		/* Approximate types use native floating precision. Binary32 rounding and
 		dialect precision boundaries remain noncritical compatibility work. */
-		"REAL" (list (quote if) (list (quote nil?) value) nil (list (quote simplify) (list tsql_cast_float value)))
-		"BIT" (list (quote sql_not) (list (quote sql_not) (list tsql_cast_bit value)))
-		_ (error "unsupported conversion to " name)))))
+		"REAL" (list tsql_cast_float value)
+		"BIT" (list tsql_cast_bit value)
+		_ (error "unsupported conversion to " name)))
+	(list (quote sql_type_expr) formula name nil))))
+/* Window inputs must be plain formulas before the common planner derives
+aggregate identities. Consume their expression triples here and keep the
+window result contract separately until shared expression compilation. */
+(define tsql_window_expr (lambda (name args over) (begin
+	(define infos (map args (lambda (arg) (sql_expr_info (list) arg))))
+	(define input_type (if (empty_list? infos) "any" (sql_info_type (car infos))))
+	(define type (match name
+		"COUNT" "BIGINT"
+		"SUM" (match input_type
+			"TINYINT" "INT" "SMALLINT" "INT" "INTEGER" "INT"
+			"REAL" "FLOAT" _ input_type)
+		"MIN" input_type "MAX" input_type
+		_ "any"))
+	(define formula (list (quote window_func) name (map infos sql_info_formula) (sql_type_lower_annotations over)))
+	(if (equal? type "any") formula
+		(list (quote sql_type_expr) formula type
+			(if (empty_list? infos) nil (sql_info_collation (car infos))))))))
 (define tsql_negate_expr (lambda (value) (begin
-	/* A constant cast already gives us its value and declared range at compile
-	time. Diagnose negation overflow here without introducing runtime type tags
-	or checks into ordinary arithmetic. Dynamic result typing is a follow-up. */
+	/* Constant operands and the syntax-declared range suffice to diagnose
+	negation overflow without runtime SQL tags or ordinary arithmetic checks. */
 	(match value
-		((symbol intdiv) '(conversion operand minimum maximum) _divisor)
+		((symbol sql_type_expr) '(conversion operand minimum maximum) _type _collation)
 		(if (and (equal? conversion tsql_cast_integer) (plain_literal_expr? operand))
 			(if (and (< minimum 0) (equal? (tsql_cast_integer operand minimum maximum) minimum))
 				(error "unary integer conversion overflow") true) true)
@@ -194,15 +214,13 @@ never from the first row. Unknown expression types stay text in this first slice
 (define tsql_result_columns (lambda (query) (match query
 	((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
 	(extract_assoc (expand_query_block_fields sources fields) (lambda (name expression) (begin
-		/* Native integer division guarantees an integer even when a conversion's
-		input has no catalog type. Describe that wire result before optimization. */
-		(define type (match expression
-			((symbol intdiv) _left _right) "BIGINT"
-			_ (sql_info_type (sql_expr_info sources expression))))
+		(define type (sql_info_type (sql_expr_info sources expression)))
 		(define kind (if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type) 38
 			(if (has? '("FLOAT" "DOUBLE" "REAL" "DECIMAL" "NUMERIC") type) 109
 				(if (has? '("BOOLEAN" "BOOL" "BIT") type) 104 231))))
-		(list "name" name "kind" kind "size" (if (equal? kind 231) 8000 (if (equal? kind 104) 1 8)) "flags" 1))))
+		(define size (if (equal? kind 231) 8000 (if (equal? kind 104) 1
+			(match type "TINYINT" 1 "SMALLINT" 2 "INT" 4 "INTEGER" 4 _ 8))))
+		(list "name" name "kind" kind "size" size "flags" 1))))
 	((symbol union-block) _mode branches _order _limit _offset _facts) (tsql_result_columns (car branches))
 	_ (error "unsupported T-SQL result metadata shape"))))
 
@@ -332,12 +350,12 @@ never from the first row. Unknown expression types stay text in this first slice
 
 		(parser '((atom "CASE" true) (define expr tsql_expression) (define conditions (+ (parser '((atom "WHEN" true) (define a tsql_expression) (atom "THEN" true) (define b tsql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch tsql_expression)) (atom "END" true)) (merge '((quote if)) (merge (extract_assoc (merge conditions) (lambda (a b) '('('equal?? expr a) b)))) '(elsebranch)))
 
-		(parser '((atom "COUNT" true) "(" "*" ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") '('window_func "COUNT" '() _over))
-		(parser '((atom "COUNT" true) "(" (define e tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") '('window_func "COUNT" (list e) _over))
-		(parser '((atom "SUM" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") '('window_func "SUM" (list s) _over))
-		(parser '((atom "AVG" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") '('window_func "AVG" (list s) _over))
-		(parser '((atom "MIN" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") '('window_func "MIN" (list s) _over))
-		(parser '((atom "MAX" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") '('window_func "MAX" (list s) _over))
+		(parser '((atom "COUNT" true) "(" "*" ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "COUNT" (list) _over))
+		(parser '((atom "COUNT" true) "(" (define e tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "COUNT" (list e) _over))
+		(parser '((atom "SUM" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "SUM" (list s) _over))
+		(parser '((atom "AVG" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "AVG" (list s) _over))
+		(parser '((atom "MIN" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "MIN" (list s) _over))
+		(parser '((atom "MAX" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "MAX" (list s) _over))
 
 		(parser '((atom "COUNT" true) "(" (atom "DISTINCT" true) (define e tsql_expression) ")") '('count_distinct e))
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
@@ -349,7 +367,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		(parser '((atom "MAX" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "MAX")) '('aggregate s (car d) (cadr d))))
 
 		(parser '((define fn tsql_identifier_unquoted) "(" (define arg tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")")
-			'('window_func (toUpper fn) (list arg) _over))
+			(tsql_window_expr (toUpper fn) (list arg) _over))
 
 		(parser '((atom "SUBSTRING" true) "(" (define s tsql_expression) "," (define start tsql_expression) "," (define len tsql_expression) ")") '((quote sql_substr) s start len))
 
@@ -795,7 +813,7 @@ never from the first row. Unknown expression types stay text in this first slice
 				true (error "INSERT column count does not match value count"))
 			(if (reduce rows (lambda (found row) (or found (tsql_dataset_contains_inner_select row))) false)
 				(tsql_insert_select_plan database tbl columns (tsql_values_to_select_query database columns rows))
-				'('insert '('table database tbl) (cons list columns) (sql_insert_values_expr rows)
+				'('insert '('table database tbl) (cons list columns) (sql_insert_values_expr (map rows (lambda (row) (map row (lambda (value) (sql_type_formula (list) value))))))
 					'(list) nil false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))
 	)))
 	(define tsql_insert_select (parser '(

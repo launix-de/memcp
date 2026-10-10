@@ -61,6 +61,27 @@ test_cases:
         (if (reduce checks (lambda (acc c) (and acc c)) true) true
           (error (concat "type predicate mismatch: " (string checks)))))
 
+  - name: "declared expression contracts override the operand representation"
+    scm: |
+      (begin
+        (define integral (sql_expr_info (list) (list (quote sql_type_expr) 1 "FLOAT" nil)))
+        (define nullable (sql_expr_info (list) (list (quote sql_type_expr) nil "INT" nil)))
+        (if (and (equal? (sql_info_type integral) "FLOAT")
+                 (equal? (sql_info_formula integral) 1)
+                 (equal? (sql_info_type nullable) "INT")
+                 (nil? (sql_info_formula nullable))) true
+          (error "SQL declaration must control the type independently of the formula value")))
+
+  - name: "declared text collation is compile-time information only"
+    scm: |
+      (begin
+        (define info (sql_expr_info (list)
+          (list (quote sql_type_expr) "x" "VARCHAR" (list "utf8mb4_bin" 0))))
+        (if (and (equal? (sql_info_formula info) "x")
+                 (equal? (sql_info_type info) "VARCHAR")
+                 (equal? (sql_info_collation info) (list "utf8mb4_bin" 0))) true
+          (error "declared expression contract leaked into the executable formula")))
+
   - name: "literal typing"
     scm: |
       (begin
