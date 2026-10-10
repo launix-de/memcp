@@ -181,13 +181,11 @@ every case, including initially successful cases.
 
 `metadata.performance_shard_weight` is a positive integer used only to distribute
 whole suites across six runners for each native/JIT configuration. The default
-is 1. Two runners retain the heavy suites; four runners share the other suites,
-leaving additional capacity for complete seven-pair verification under the
-unchanged 15-minute limit.
-This increases concurrent runner capacity, not any job time budget. The expensive prefix
-and KPI suites use 128 to retain dedicated runners. Other suite weights include
-one source preparation and both measurement processes from CI artifacts, rather
-than just counting suite files. Weights are rounded to 15-second units; they
+is 1. Weights balance measured fixture costs across all six runners under the
+unchanged 15-minute limit. CI artifacts include process startup and both roles;
+incomplete verification runs are projected to all seven pairs when updating
+their weights. This avoids reserving a runner for a short suite while placing
+several longer verification runs together. Weights are rounded to 15-second units; they
 only guide scheduling, and source/measurement times remain reported. This changes
 neither test coverage nor any query, setup or regression budget. The KPI workload
 keeps its measured cold board and the next seven measured boards, without twenty
@@ -214,7 +212,7 @@ deadlines. The reference `threshold_ms` does not become a new, unscaled absolute
 gate in A/B record mode. Query errors retain the complete verification
 protocol; changes to Scheme code prevent the identical-execution shortcut.
 
-CI validates the full discovered suite set before partitioning it across four
+CI validates the full discovered suite set before partitioning it across six
 separate runners; each suite is assigned exactly once. The original required
 check passes only when all shards succeed. Timed queries do not compete on one
 runner. Measurement has a 15-minute cap per shard; jobs allow 30 minutes including

@@ -22,7 +22,7 @@ metadata:
   isolated: true
   reuse_fixture: true
   restart_after_setup: true
-  performance_shard_weight: 128
+  performance_shard_weight: 12
   ci: false
   perf_ci: true
   performance_rows: 10000
