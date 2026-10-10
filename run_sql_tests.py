@@ -2613,6 +2613,8 @@ def start_memcp_process(
         ]
         if not enable_mysql:
             cmd.append("--disable-mysql")
+        if profile := env.get("MEMCP_CPU_PROFILE_FILE"):
+            cmd.extend(["-profile", profile])
         cmd.append("lib/main.scm")
         worktree = os.environ.get(
             "MEMCP_TEST_WORKTREE", os.path.dirname(os.path.abspath(__file__))
@@ -3357,6 +3359,9 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
                    MEMCP_FAILURE_LOG_ARTIFACT=str(server_log),
                    MEMCP_SERVER_LOG_ARTIFACT=str(server_log), MEMCP_TEST_DATA_DIR=str(data),
                    PERF_FIXTURE_TIMINGS_FILE=str(server_log.with_suffix(".timings.json")))
+        env.pop("MEMCP_CPU_PROFILE_FILE", None)
+        if env.get("MEMCP_CPU_PROFILE") == "1":
+            env["MEMCP_CPU_PROFILE_FILE"] = str(server_log.with_suffix(".pprof"))
         return env
 
     def measure(suite_index, suite, role, trials):

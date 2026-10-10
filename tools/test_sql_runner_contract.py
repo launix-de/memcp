@@ -90,6 +90,21 @@ from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
 
 class ManagedDataDirectoryContractTest(unittest.TestCase):
+    def test_optional_cpu_profile_keeps_the_managed_server_contract(self):
+        for profile in ("", "/owned/trial.pprof"):
+            with self.subTest(profile=profile), \
+                    mock.patch.dict(os.environ, {"MEMCP_CPU_PROFILE_FILE": profile}), \
+                    mock.patch("run_sql_tests.open", mock.mock_open()), \
+                    mock.patch("run_sql_tests.subprocess.Popen") as start, \
+                    mock.patch("run_sql_tests.wait_for_memcp", return_value=True):
+                start_memcp_process(4321, data_dir="/owned/test-data")
+            command = start.call_args.args[0]
+            self.assertEqual(command[-1], "lib/main.scm")
+            self.assertEqual(command[1:3], ["-data", "/owned/test-data"])
+            self.assertEqual("-profile" in command, bool(profile))
+            if profile:
+                self.assertEqual(command[command.index("-profile") + 1], profile)
+
     def test_successful_trial_keeps_server_log_before_cleanup(self):
         with tempfile.TemporaryDirectory() as root:
             log = Path(root) / "server.log"
@@ -1763,6 +1778,21 @@ class PerformanceFixtureContractTests(unittest.TestCase):
         result = json.loads(self.output.read_text())[performance_case_key(self.suites[0], "cold")]
         self.assertEqual(result["status"], "identical_execution")
         self.assertNotIn("absolute_budget_ms", result)
+
+    def test_cpu_profiles_have_separate_paths_for_each_fixture(self):
+        original = self.subprocess
+        profiles = []
+
+        def measure(command, **kwargs):
+            profiles.append(kwargs["env"]["MEMCP_CPU_PROFILE_FILE"])
+            return original(command, **kwargs)
+
+        self.subprocess = measure
+        with mock.patch.dict(os.environ, {"MEMCP_CPU_PROFILE": "1"}):
+            self.assertTrue(self.run_experiment())
+        self.assertEqual(len(profiles), 4)
+        self.assertEqual(len(set(profiles)), 4)
+        self.assertTrue(all(Path(path).parent == self.output.with_suffix(".trials") for path in profiles))
 
     def test_identical_execution_does_not_add_an_unscaled_nominal_target_gate(self):
         (self.candidate / "memcp").write_bytes((self.base / "memcp").read_bytes())
