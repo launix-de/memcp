@@ -84,6 +84,8 @@ from run_sql_tests import (  # noqa: E402
     sql_request_is_retry_safe,
     start_memcp_process,
     suite_execution_mode,
+    scan_debugging_cluster,
+    suite_scan_debugging,
     wait_for_shared_supervisor_generation,
 )
 from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
@@ -1570,6 +1572,90 @@ class SuiteIsolationContractTest(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertIn('fail_fast_mode="${MEMCP_FAIL_FAST:-0}"', hook)
+
+class ScanDebuggingClusterContractTest(unittest.TestCase):
+    def test_parallel_suites_share_one_stable_flag_and_restore_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            specs = [Path(tmp) / f"debug-{i}.yaml" for i in range(2)]
+            for spec in specs:
+                spec.write_text("metadata: {scan_debugging: true}\ntest_cases: []\n")
+            barrier = threading.Barrier(2)
+            active = []
+            requests_seen = []
+            flag = False
+
+            def request(_url, *, data, **_kwargs):
+                nonlocal flag
+                requests_seen.append(data)
+                if data == '(settings "ScanDebugging")':
+                    value = flag
+                else:
+                    flag = data.endswith('true)')
+                    value = True
+                return SimpleNamespace(text=str(value).lower(), raise_for_status=lambda: None)
+
+            def execute(spec, *_args):
+                self.assertTrue(flag)
+                self.assertEqual(os.environ.get("MEMCP_TEST_SCAN_DEBUGGING_MANAGED"), "1")
+                barrier.wait(timeout=3)
+                active.append(spec)
+                return True, ""
+
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                    mock.patch("run_sql_tests.PERF_TEST_ENABLED", False), \
+                    mock.patch("run_sql_tests.requests.post", side_effect=request), \
+                    mock.patch("run_sql_tests.run_spec_subprocess", side_effect=execute):
+                self.assertTrue(run_test_specs([str(p) for p in specs], "http://localhost:1", 1, False, 2))
+                self.assertNotIn("MEMCP_TEST_SCAN_DEBUGGING_MANAGED", os.environ)
+            self.assertCountEqual(active, [str(p) for p in specs])
+            self.assertFalse(flag)
+            self.assertEqual(requests_seen, [
+                '(settings "ScanDebugging")', '(settings "ScanDebugging" true)',
+                '(settings "ScanDebugging")', '(settings "ScanDebugging" false)',
+            ])
+
+    def test_exception_restores_the_original_setting_and_owner(self):
+        replies = iter(["false", "true", "true", "true"])
+        with mock.patch.dict(os.environ, {"MEMCP_TEST_SCAN_DEBUGGING_MANAGED": "parent"}), \
+                mock.patch("run_sql_tests.requests.post", side_effect=lambda *_a, **_k:
+                           SimpleNamespace(text=next(replies), raise_for_status=lambda: None)) as request:
+            with self.assertRaisesRegex(RuntimeError, "worker failed"):
+                with scan_debugging_cluster("http://localhost:1"):
+                    raise RuntimeError("worker failed")
+            self.assertEqual(os.environ["MEMCP_TEST_SCAN_DEBUGGING_MANAGED"], "parent")
+            self.assertEqual(request.call_args.kwargs["data"], '(settings "ScanDebugging" false)')
+
+    def test_preexisting_enabled_diagnostics_are_not_disabled(self):
+        with mock.patch("run_sql_tests.requests.post", return_value=
+                        SimpleNamespace(text="true", raise_for_status=lambda: None)) as request:
+            with scan_debugging_cluster("http://localhost:1"):
+                pass
+        self.assertEqual([call.kwargs["data"] for call in request.call_args_list],
+                         ['(settings "ScanDebugging")'] * 2)
+
+    def test_cluster_metadata_rejects_string_booleans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "wrong.yaml"
+            path.write_text('metadata: {scan_debugging: "true"}\n')
+            with self.assertRaisesRegex(ValueError, "must be boolean"):
+                suite_scan_debugging(str(path))
+
+    def test_cluster_rejects_worker_toggles_and_unisolated_global_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "unsafe.yaml"
+            for key, isolated in (("ScanDebugging", True), ("ShardSize", False)):
+                path.write_text(
+                    f"metadata: {{scan_debugging: true, isolated: {str(isolated).lower()}}}\n"
+                    f"test_cases: [{{scm: '(settings \"{key}\" 32)'}}]\n"
+                )
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    suite_scan_debugging(str(path))
+
+    def test_global_shard_setting_still_requires_exclusive_scheduling(self):
+        path = Path(__file__).resolve().parents[1] / "tests/planner/aggregates/group-stage-corners.yaml"
+        self.assertTrue(suite_scan_debugging(str(path)))
+        self.assertEqual(suite_execution_mode(str(path)), "exclusive")
+
 
 class PerfRegressionWaiverContractTest(unittest.TestCase):
     def test_parses_one_waiver_with_reason(self) -> None:

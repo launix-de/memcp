@@ -20,6 +20,7 @@
 # instead of relying on flaky scan timing diagnostics.
 
 metadata:
+  scan_debugging: true # The runner owns this flag for the complete cluster.
   version: "1.0"
   description: "Fulltext LIKE boundary matching with index building"
   isolated: true
@@ -221,7 +222,6 @@ test_cases:
 
   - name: "Enable scan debugging for LIKE test"
     setup:
-      - scm: '(settings "ScanDebugging" true)'
       - scm: '(sleep 0.1)'
       - sql: "DELETE FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%'"
     sql: "SELECT 1 AS ok"
@@ -481,8 +481,6 @@ test_cases:
       - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, `table`, index_cols, inputCount, outputCount, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%' ORDER BY timestamp LIMIT 16"
 
   - name: "Disable scan debugging"
-    setup:
-      - scm: '(settings "ScanDebugging" false)'
     sql: "SELECT 1 AS ok"
     expect: { rows: 1 }
 

@@ -14,6 +14,8 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 metadata:
+  scan_debugging: true # The runner owns this flag for the complete cluster.
+  isolated: true # Changes process-wide ShardSize.
   version: "1.0"
   description: "Group stage corner cases: limits in subqueries, DISTINCT+joins, nested staging"
 
@@ -622,7 +624,6 @@ test_cases:
   # =================================================================
   - name: "Grouped membership feeding an outer group prepares once"
     setup:
-      - scm: '(settings "ScanDebugging" true)'
       - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'gs_candidates'"
     sql: |
       SELECT o.customer, SUM(i.qty) AS total_qty
@@ -650,8 +651,6 @@ test_cases:
       rows: 1
       data:
         - scans: 1
-    cleanup:
-      - scm: '(settings "ScanDebugging" false)'
 
   # =================================================================
   # 17. A costed star join can select fused reduction without a cold prejoin

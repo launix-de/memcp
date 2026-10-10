@@ -1,6 +1,9 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # SHOW [FULL] PROCESSLIST and KILL QUERY
 
 metadata:
+  scan_debugging: true
   version: "1.0"
   description: "SHOW PROCESSLIST lists active sessions; KILL QUERY cancels a running query"
 
@@ -55,3 +58,75 @@ test_cases:
           contains: "1"
       - session_id: "cid-stable"
         sql: "DROP TABLE IF EXISTS cid_tmp"
+
+  # Observe simultaneous requests at the server, then check their individual
+  # session bindings and that a third request progresses while both wait.
+  - name: "Parallel HTTP requests retain separate session bindings"
+    session_id: "pc-owner"
+    setup:
+      - sql: "DROP TABLE IF EXISTS pc_overlap"
+      - sql: "CREATE TABLE pc_overlap (id INT PRIMARY KEY) ENGINE=memory"
+      - sql: "INSERT INTO pc_overlap VALUES (1), (2)"
+    steps:
+      - session_id: "pc-owner"
+        sql: "LOCK TABLES pc_overlap WRITE"
+      - session_id: "pc-left"
+        sql: "SET @pc_id = 1, @pc_token = 'left-session'"
+      - session_id: "pc-right"
+        sql: "SET @pc_id = 2, @pc_token = 'right-session'"
+      - session_id: "pc-left"
+        sql: "SELECT id, @pc_token AS token FROM pc_overlap WHERE id = @pc_id"
+        background: true
+        timeout: 15
+        expect:
+          rows: 1
+          contains: ["left-session", "'id': 1"]
+          not_contains: "right-session"
+      - session_id: "pc-right"
+        sql: "SELECT id, @pc_token AS token FROM pc_overlap WHERE id = @pc_id"
+        background: true
+        timeout: 15
+        expect:
+          rows: 1
+          contains: ["right-session", "'id': 2"]
+          not_contains: "left-session"
+      - scm: |
+          (begin
+            (define wait_for_both (lambda (remaining)
+              (if (>= (count (filter (show_processlist true) (lambda (row)
+                    (and (equal? (get_assoc row "State") "Waiting for table lock")
+                      (equal? (get_assoc row "Info") "SELECT id, @pc_token AS token FROM pc_overlap WHERE id = @pc_id"))))) 2)
+                true
+                (if (<= remaining 0) false
+                  (begin (sleep 0.01) (wait_for_both (- remaining 1)))))))
+            (wait_for_both 500))
+        timeout: 10
+        expect:
+          rows: 1
+          contains: "True"
+      - session_id: "pc-third"
+        sql: "SET @pc_token = 'third-session'"
+      - session_id: "pc-third"
+        sql: "SELECT @pc_token AS token"
+        expect:
+          rows: 1
+          contains: "third-session"
+          not_contains: ["left-session", "right-session"]
+      - session_id: "pc-owner"
+        sql: "UNLOCK TABLES"
+      - wait_for_background: true
+      - session_id: "pc-left"
+        sql: "SELECT @pc_token AS token"
+        expect:
+          rows: 1
+          contains: "left-session"
+          not_contains: "right-session"
+      - session_id: "pc-right"
+        sql: "SELECT @pc_token AS token"
+        expect:
+          rows: 1
+          contains: "right-session"
+          not_contains: "left-session"
+    cleanup:
+      - sql: "UNLOCK TABLES"
+      - sql: "DROP TABLE IF EXISTS pc_overlap"

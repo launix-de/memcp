@@ -101,11 +101,11 @@ jobs:
         with:
           packages: mariadb-client
 
-      - name: Run tests with JIT enabled
+      - name: Run concurrent tests with JIT enabled
         timeout-minutes: 30
         env:
           MEMCP_TEST_LOGDIR: ${{ runner.temp }}/memcp-test-diagnostics
-        run: bash git-pre-commit --fail-fast
+        run: bash git-pre-commit
 
       - name: Upload test diagnostics
         if: always()
