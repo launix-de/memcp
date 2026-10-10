@@ -1829,7 +1829,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					(parser empty '((quote list)))
 				))
 				(define typeparams sql_column_attributes)
-			) (lambda (id) '((quote sql_create_column) '((quote table) schema id) col type dimensions (cons 'list typeparams))))
+			) (lambda (id) '((quote sql_create_column) '((quote table) schema id) col type dimensions (cons 'list (sql_add_column_attributes typeparams)))))
 			(parser '((atom "MODIFY" true) (?(atom "COLUMN" true))
 				(define col sql_identifier)
 				(define type sql_column_type)

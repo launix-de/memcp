@@ -1801,6 +1801,7 @@ func (db *database) createTableLocked(name string, pm PersistencyMode, ifnotexis
 // Callers may add internal columns before publication while holding schemalock.
 func (db *database) newTable(name string, pm PersistencyMode) *table {
 	t := new(table)
+	t.DroppedColumns = make(map[string]bool)
 	t.schema = db
 	t.Name = name
 	t.PersistencyMode = pm

@@ -365,8 +365,9 @@ func jitCompileEnvironmentParsers(environment *Env) {
 		return
 	}
 	environment = environment.definitionTarget()
-	parsers := make([]*ScmParser, 0)
+	groups := make(map[string][]*ScmParser)
 	seen := make(map[*ScmParser]struct{})
+	defaultSkipper := packratDefaultSkipper().String()
 	for _, value := range environment.Vars {
 		if !value.IsParser() || value.Parser() == nil || value.Parser().Compiled != nil {
 			continue
@@ -376,9 +377,13 @@ func jitCompileEnvironmentParsers(environment *Env) {
 			continue
 		}
 		seen[parser] = struct{}{}
-		parsers = append(parsers, parser)
+		skipper := defaultSkipper
+		if parser.Skipper != nil {
+			skipper = parser.Skipper.String()
+		}
+		groups[skipper] = append(groups[skipper], parser)
 	}
-	if len(parsers) == 0 {
+	if len(groups) == 0 {
 		return
 	}
 	defer func() {
@@ -389,6 +394,20 @@ func jitCompileEnvironmentParsers(environment *Env) {
 			panic(recovered)
 		}
 	}()
+	// One native grammar inherits one entry scanner's whitespace throughout
+	// its nested rules. Independently callable roots may share that grammar
+	// only when their effective whitespace expressions agree.
+	skippers := make([]string, 0, len(groups))
+	for skipper := range groups {
+		skippers = append(skippers, skipper)
+	}
+	slices.Sort(skippers)
+	for _, skipper := range skippers {
+		jitCompileParserRoots(environment, groups[skipper])
+	}
+}
+
+func jitCompileParserRoots(environment *Env, parsers []*ScmParser) {
 	program := jitBuildParserPrograms(parsers)
 	body := NewSlice([]Scmer{
 		NewSymbol("jit-parser-program"), NewAny(program),
@@ -404,10 +423,12 @@ func jitCompileEnvironmentParsers(environment *Env) {
 	entry := compiled.Proc().Compiled
 	entry.DebugName = "parser grammar"
 	maybeLogJITCodeName(entry)
-	for parser, rule := range program.parserRule {
+	// Referenced rules inherit this caller's scanner; publishing this entry
+	// on them would also change their unrelated standalone invocations.
+	for _, parser := range parsers {
 		parser.Compiled = entry
 		parser.JITProgram = program
-		parser.JITRule = rule
+		parser.JITRule = program.parserRule[parser]
 	}
 }
 

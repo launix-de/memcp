@@ -39,6 +39,34 @@ ordering. The inherited value is stored, so ADD COLUMN and restart agree. */
 		(sql_column_collation_defaults typ attributes
 			(get_assoc (show relation true) "Collation")))))
 
+/* ADD freezes one value for historical rows. Keep the existing evaluation
+path for literal arithmetic and casts; reject volatile or relational defaults
+before emitting DDL. Clock defaults use the storage's statement-stable marker. */
+(define sql_add_default_constant? (lambda (value)
+	(or (plain_literal_expr? value) (logical_sql_null_literal? value)
+		(match value
+			(cons operator arguments)
+			(and (has? (list (quote +) (quote -) (quote *) (quote /)
+				(quote mod) (quote div_null) (quote intdiv) (quote simplify)
+				(quote concat) (quote sql_concat)
+				+ - * / mod div_null intdiv simplify concat sql_concat) operator)
+				(reduce arguments (lambda (valid argument)
+					(and valid (sql_add_default_constant? argument))) true))
+			_ false))))
+
+(define sql_add_column_attributes (lambda (attributes)
+	(match attributes
+		(cons key (cons value rest)) (begin
+			(define tail (sql_add_column_attributes rest))
+			(if (equal? key "default")
+				(if (equal? value (list (quote now)))
+					(merge '("default_expression" "CURRENT_TIMESTAMP") tail)
+					(if (sql_add_default_constant? value)
+						(merge (list key value) tail)
+						(error "ADD COLUMN default expression is unsupported")))
+				(merge (list key value) tail)))
+		_ '())))
+
 /* SQL system-variable defaults and state have one owner. Both @@ reads and
 SHOW VARIABLES use this catalog; wire frontends only transport their results.
 Keep the 40 MiB packet advertisement used by PDO on the MySQL frontend. */

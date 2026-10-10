@@ -332,7 +332,7 @@ func BenchmarkPlannerStatisticsLookup(b *testing.B) {
 func TestFreshBaseColumnIsNotMarkedComputed(t *testing.T) {
 	db := &database{Name: "fresh-column-statistics"}
 	tbl := &table{schema: db}
-	column, ok := tbl.createColumnLocked("value", "TEXT", nil, nil)
+	column, ok := tbl.createColumnLocked("value", "TEXT", nil, nil, false)
 	if !ok {
 		t.Fatal("createColumnLocked rejected a fresh column")
 	}

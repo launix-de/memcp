@@ -18,6 +18,7 @@ package storage
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/launix-de/memcp/scm"
@@ -1162,6 +1163,79 @@ func TestRowWithinBoundsLike(t *testing.T) {
 	inRange, _ := idx.rowWithinBounds(access, &indexBounds, 1, -1, 0, 0, true, true, func(i int) scm.Scmer { return scm.NewString("anything") })
 	if !inRange {
 		t.Error("expected inRange=true (LIKE skipped in rowWithinBounds)")
+	}
+}
+
+// Ordering-only keys carry no restriction and must not read row values.
+func TestRowWithinBoundsUnboundedDoesNotRead(t *testing.T) {
+	for _, width := range []int{1, 65} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			cols := make([]string, width)
+			boundaries := make(analyzedBoundaries, width)
+			for i := range cols {
+				cols[i] = fmt.Sprint(i)
+				boundaries[i] = analyzedBoundary{col: cols[i], matcher: RangeMatcher}
+			}
+			idx := &StorageIndex{Cols: cols}
+			access := runtimeScanAccess(boundaries)
+			indexBounds := newScanIndexBounds(access)
+			_, last, sorted, unbounded := idx.boundKernel(access, width)
+			inRange, beyond := idx.rowWithinBounds(access, &indexBounds, width, last, sorted, unbounded, true, true, func(i int) scm.Scmer {
+				t.Errorf("unbounded column %d was read", i)
+				return scm.NewNil()
+			})
+			if !inRange || beyond {
+				t.Fatalf("unbounded row = (%v,%v), want (true,false)", inRange, beyond)
+			}
+		})
+	}
+}
+
+func TestRowWithinBoundsRangeEndpoints(t *testing.T) {
+	idx := &StorageIndex{Cols: []string{"restricted"}}
+	access := runtimeScanAccess(analyzedBoundaries{
+		{col: "restricted", matcher: RangeMatcher, lower: scm.NewInt(5), upper: scm.NewInt(10)},
+	})
+	indexBounds := newScanIndexBounds(access)
+	_, last, sorted, unbounded := idx.boundKernel(access, 1)
+	for _, tc := range []struct {
+		value           int64
+		inclusive       bool
+		inRange, beyond bool
+	}{
+		{4, true, false, false}, {5, true, true, false},
+		{5, false, false, false}, {7, false, true, false},
+		{10, true, true, false}, {10, false, false, true},
+		{11, true, false, true},
+	} {
+		reads := 0
+		inRange, beyond := idx.rowWithinBounds(access, &indexBounds, 1, last, sorted, unbounded, tc.inclusive, tc.inclusive, func(i int) scm.Scmer {
+			if i != 0 {
+				t.Fatalf("unexpected range column %d", i)
+			}
+			reads++
+			return scm.NewInt(tc.value)
+		})
+		if inRange != tc.inRange || beyond != tc.beyond || reads != 1 {
+			t.Errorf("value %d inclusive %v = (%v,%v), %d reads", tc.value, tc.inclusive, inRange, beyond, reads)
+		}
+	}
+}
+
+func TestRowWithinBoundsNullPointStillReads(t *testing.T) {
+	idx := &StorageIndex{Cols: []string{"point"}}
+	access := runtimeScanAccess(analyzedBoundaries{{col: "point", matcher: EqualMatcher, nullSafe: true}})
+	indexBounds := newScanIndexBounds(access)
+	_, last, sorted, unbounded := idx.boundKernel(access, 1)
+	for _, value := range []scm.Scmer{scm.NewNil(), scm.NewInt(1)} {
+		reads := 0
+		inRange, _ := idx.rowWithinBounds(access, &indexBounds, 1, last, sorted, unbounded, true, true, func(i int) scm.Scmer {
+			reads++
+			return value
+		})
+		if inRange != value.IsNil() || reads != 1 {
+			t.Errorf("NULL point against %v: inRange=%v, reads=%d", value, inRange, reads)
+		}
 	}
 }
 
