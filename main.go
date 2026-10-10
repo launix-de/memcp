@@ -979,6 +979,12 @@ func setupIO(wd string) {
 		},
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
+		Name: "tds", Fn: scm.TDSServe,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Starts a TDS listener with frontend callbacks", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "number|string", Label: "port"}, {Kind: "func", Label: "handler"}, {Kind: "string", Label: "database"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"}},
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "mysql",
 
 		Fn: scm.MySQLServe,
@@ -1284,6 +1290,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  --disable-api          Disable HTTP API server\n")
 		fmt.Fprintf(os.Stderr, "  --mysql-socket=PATH    Unix socket path (default /tmp/memcp.sock, empty to disable)\n")
 		fmt.Fprintf(os.Stderr, "  --root-password-file=PATH  Read the initial root password from a file\n")
+		fmt.Fprintf(os.Stderr, "  --tds-port=PORT        Enable TDS protocol listener\n")
+		fmt.Fprintf(os.Stderr, "  --tds-database=NAME    Default existing TDS database\n")
 		fmt.Fprintf(os.Stderr, "  --disable-mysql        Disable MySQL protocol server\n")
 		fmt.Fprintf(os.Stderr, "  --serve PATH           Mount a PHP application at /; keep /dashboard (make php)\n")
 		fmt.Fprintf(os.Stderr, "... and much more (please refer to your module's documentation)\n\n")

@@ -251,7 +251,25 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		'('get_column nil _ name _) name
 		_ value)))
 
-(define parse_sql (lambda (schema s policy planning_session tx) (begin
+/* Dialects specialize lexical and syntactic boundaries. The shared grammar
+still owns canonical query/DML/DDL construction and the existing planner. */
+(define parse_sql (lambda (schema s policy planning_session tx)
+	(parse_sql_dialect schema s policy planning_session tx nil)))
+(define parse_sql_dialect (lambda (schema s policy planning_session tx dialect) (begin
+	(define sql_identifier_unquoted (if dialect (dialect "identifier_unquoted") sql_identifier_unquoted))
+	(define sql_identifier_quoted (if dialect (dialect "identifier_quoted") sql_identifier_quoted))
+	(define sql_identifier (if dialect (dialect "identifier") sql_identifier))
+	(define sql_schema_identifier (if dialect
+		(parser (define owner sql_identifier) ((dialect "schema_name") schema owner)) sql_identifier))
+	(define sql_ddl_identifier (if dialect
+		(parser '((? sql_schema_identifier ".") (define name sql_identifier)) name) sql_identifier))
+	(define sql_string (if dialect (dialect "string") sql_string))
+	(define sql_column (if dialect (dialect "column") sql_column))
+	(define sql_literal (if dialect (dialect "literal") sql_literal))
+	(define sql_builtins (if dialect (dialect "builtins") sql_builtins))
+	(define sql_select_prefix (if dialect (dialect "select_prefix") (parser empty nil)))
+	(define sql_select_suffix (if dialect (dialect "select_suffix") (parser empty nil)))
+	(define sql_fold_additive_term (if dialect (dialect "fold_additive") sql_fold_additive_term))
 	(define parse_started_ns (nanotime))
 	/* mysqldump wraps CREATE TRIGGER in a versioned executable comment. MariaDB
 	splits CREATE, DEFINER, and TRIGGER across three comments; discard the
@@ -743,7 +761,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		) (cons (quote list) assignments))
 	))))
 
-	(define sql_column_attributes (parser (define sub (* (or
+	(define standard_column_attributes (parser (define sub (* (or
 		(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true))
 		(parser (atom "PRIMARY" true) '("primary" true))
 		(parser '((atom "UNIQUE" true) (atom "KEY" true)) '("unique" true))
@@ -761,12 +779,14 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* TODO: GENERATED ALWAYS AS expr */
 	))) (merge sub)))
 
+	(define sql_column_attributes (if dialect (dialect "column_attributes") standard_column_attributes))
 	(define sql_column_type (parser (or
 		(parser '((atom "DOUBLE" true) (atom "PRECISION" true)) "DOUBLE")
 		(parser '((atom "CHARACTER" true) (atom "VARYING" true)) "VARCHAR")
 		sql_identifier
 	)))
 
+	(define sql_column_type (if dialect (dialect "column_type") sql_column_type))
 	(define sql_lock_table_mode (parser (or
 		(parser '((atom "LOW_PRIORITY" true) (atom "WRITE" true)) true)
 		(parser (atom "WRITE" true) true)
@@ -1105,9 +1125,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */
 		/* TODO: case insensititive table search */
-		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
+		(parser '((define schema sql_schema_identifier) (atom "." true) (define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define schema sql_schema_identifier) (atom "." true) (define tbl sql_identifier) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define schema sql_schema_identifier) (atom "." true) (define tbl sql_identifier)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
 		(parser '((define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
 		(parser '((define tbl sql_identifier) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
 		(parser '((define tbl sql_identifier)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
@@ -1180,7 +1200,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					actual_plan))
 			actual_plan))
 		(list (quote !begin)
-			(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded_query)))
+			(if dialect
+				(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded_query))
+					(list (quote quote) ((dialect "result_columns") expanded_query)))
+				(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded_query))))
 			execution_plan)
 	)))
 	(define sql_union_all_parts (lambda (query)
@@ -1297,6 +1320,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(atom "SELECT" true)
 		(define calc_found_rows (? (atom "SQL_CALC_FOUND_ROWS" true)))
 		(define distinct (? (atom "DISTINCT" true)))
+		(define prefix_limit sql_select_prefix)
 		(define cols (+ (or
 			(parser "*" '("*" '((quote get_column) nil false "*" false)))
 			(parser '((define tbl sql_identifier_quoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
@@ -1355,6 +1379,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				'((define limit sql_expression))
 			)
 		)
+		(define suffix_stage sql_select_suffix)
 		/* Locking reads are accepted for MySQL compatibility. MemCP's
 		transaction layer owns visibility and write serialization. */
 		(? (atom "FOR" true) (atom "UPDATE" true))
@@ -1371,7 +1396,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 							(and preserved (contains? projected_exprs expr))) true)))))
 			(list (quote query-block) schema sources (merge cols) condition
 				(if (and distinct (not distinct_preserved_by_group)) projected_exprs group)
-				having order limit offset '() '()
+				having order (if (nil? prefix_limit) (if suffix_stage (car suffix_stage) limit) prefix_limit)
+				(if suffix_stage (cadr suffix_stage) offset) '() '()
 				(merge (list
 					/* Relaxed grouping is relevant only to an aggregating block.
 					Source eligibility belongs to the logical phase after views expand. */
@@ -1450,7 +1476,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(atom "DELETE" true)
 		(atom "FROM" true)
 		/* schema-qualified */
-		(? (define schema2 sql_identifier) ".") (define tbl sql_identifier)
+		(? (define schema2 sql_schema_identifier) ".") (define tbl sql_identifier)
 		(? '(
 			(atom "WHERE" true)
 			(define condition sql_expression)
@@ -1494,7 +1520,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(define sql_truncate (parser '(
 		(atom "TRUNCATE" true) (? (atom "TABLE" true))
 		/* schema-qualified */
-		(? (define schema2 sql_identifier) ".") (define tbl sql_identifier)
+		(? (define schema2 sql_schema_identifier) ".") (define tbl sql_identifier)
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(define trunc_schema (coalesce schema2 schema))
@@ -1587,7 +1613,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(atom "INSERT" true)
 		(define ignoreexists (? (atom "IGNORE" true true true)))
 		(atom "INTO" true)
-		(? (define schema2 sql_identifier) ".")
+		(? (define schema2 sql_schema_identifier) ".")
 		(define tbl sql_identifier) /* TODO: ignorecase */
 		(? "("
 			(define coldesc (*
@@ -1632,7 +1658,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(define sql_replace_into (parser '(
 		(atom "REPLACE" true)
 		(atom "INTO" true)
-		(? (define schema2 sql_identifier) ".")
+		(? (define schema2 sql_schema_identifier) ".")
 		(define tbl sql_identifier)
 		(? "("
 			(define coldesc (* sql_identifier ","))
@@ -1657,7 +1683,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(atom "INSERT" true)
 		(define ignoreexists (? (atom "IGNORE" true true true)))
 		(atom "INTO" true)
-		(? (define schema2 sql_identifier) ".")
+		(? (define schema2 sql_schema_identifier) ".")
 		(define tbl sql_identifier) /* TODO: ignorecase */
 		(? "("
 			(define coldesc (*
@@ -1685,7 +1711,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(atom "INSERT" true)
 		(define ignoreexists (? (atom "IGNORE" true true true)))
 		(atom "INTO" true)
-		(? (define schema2 sql_identifier) ".")
+		(? (define schema2 sql_schema_identifier) ".")
 		(define tbl sql_identifier) /* TODO: ignorecase */
 		(? "("
 			(define coldesc (*
@@ -1720,7 +1746,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(atom "INSERT" true)
 		(define ignoreexists (? (atom "IGNORE" true true true)))
 		(atom "INTO" true)
-		(? (define schema2 sql_identifier) ".")
+		(? (define schema2 sql_schema_identifier) ".")
 		(define tbl sql_identifier)
 		(atom "SET" true)
 		(define assignments (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
@@ -1744,7 +1770,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(atom "VIEW" true)
 		(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
 		(define target (or
-			(parser '((define schema2 sql_identifier) "." (define id sql_identifier)) '(schema2 id))
+			(parser '((define schema2 sql_schema_identifier) "." (define id sql_identifier)) '(schema2 id))
 			(parser (define id sql_identifier) '(nil id))))
 		(define aliases (? (parser '("(" (define columns (+ sql_identifier ",")) ")") columns)))
 		(atom "AS" true)
@@ -1762,7 +1788,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(atom "CREATE" true)
 		(atom "TABLE" true)
 		(define ifnotexists (parser (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)) true))
-		(define id (or (parser '((define schema2 sql_identifier) "." (define id sql_identifier)) id) sql_identifier))
+		(define id (or (parser '((define schema2 sql_schema_identifier) "." (define id sql_identifier)) id) sql_identifier))
 		"("
 		(define cols (* (or
 			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
@@ -1806,7 +1832,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(define sql_alter_table (parser '(
 		(atom "ALTER" true)
 		(atom "TABLE" true)
-		(define id sql_identifier) /* TODO: ignorecase */
+		(define id sql_ddl_identifier) /* TODO: ignorecase */
 		(define alters (+ (or
 			/* TODO
 			(parser '((atom "ADD" true) (atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
@@ -2025,26 +2051,26 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			'((quote resultrow) '((quote list) "Database" id "Create Database" '((quote format_create_database) id (if if_not_exists true false)))))
 
 		/* SHOW CREATE TABLE [schema.]table */
-		(parser '((atom "SHOW" true) (atom "CREATE" true) (atom "TABLE" true) (define schema2 sql_identifier) (atom "." true) (define id sql_identifier))
+		(parser '((atom "SHOW" true) (atom "CREATE" true) (atom "TABLE" true) (define schema2 sql_schema_identifier) (atom "." true) (define id sql_identifier))
 			'((quote resultrow) '((quote list) "Table" id "Create Table" '((quote format_create_table) schema2 id))))
 		(parser '((atom "SHOW" true) (atom "CREATE" true) (atom "TABLE" true) (define id sql_identifier))
 			'((quote resultrow) '((quote list) "Table" id "Create Table" '((quote format_create_table) schema id))))
 		(parser '((atom "SHOW" true) (atom "DATABASES" true)) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema))))))
 		(parser '((atom "SHOW" true) (atom "TABLES" true)
-			(? (or (atom "FROM" true) (atom "IN" true)) (define schema2 sql_identifier))
+			(? (or (atom "FROM" true) (atom "IN" true)) (define schema2 sql_schema_identifier))
 			(? (atom "LIKE" true) (define likepattern sql_expression)))
 			'((quote map) '((quote show) (coalesce schema2 schema))
 				'((quote lambda) '((quote tbl))
 					'((quote if) '((quote strlike) (quote tbl) (coalesce likepattern "%"))
 						'((quote resultrow) '((quote list) "Table" (quote tbl))) nil))))
-		(parser '((atom "SHOW" true) (atom "TABLE" true) (atom "STATUS" true) (? (atom "FROM" true) (define schema2 sql_identifier)) (? (atom "LIKE" true) (define likepattern sql_expression))) '((quote map) '((quote show) (coalesce schema2 schema)) '((quote lambda) '((quote tbl)) '('if '('strlike 'tbl '('coalesce 'likepattern "%")) '((quote resultrow) '('list "name" 'tbl "rows" "1")))))) /* TODO: engine version row_format avg_row_length data_length max_data_length index_length data_free auto_increment create_time update_time check_time collation checksum create_options comment max_index_length temporary */
-		(parser '((or (atom "DESCRIBE" true) (atom "DESC" true)) (define schema2 sql_identifier) (atom "." true) (define id sql_identifier)) '((quote map) '((quote show) schema2 id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
+		(parser '((atom "SHOW" true) (atom "TABLE" true) (atom "STATUS" true) (? (atom "FROM" true) (define schema2 sql_schema_identifier)) (? (atom "LIKE" true) (define likepattern sql_expression))) '((quote map) '((quote show) (coalesce schema2 schema)) '((quote lambda) '((quote tbl)) '('if '('strlike 'tbl '('coalesce 'likepattern "%")) '((quote resultrow) '('list "name" 'tbl "rows" "1")))))) /* TODO: engine version row_format avg_row_length data_length max_data_length index_length data_free auto_increment create_time update_time check_time collation checksum create_options comment max_index_length temporary */
+		(parser '((or (atom "DESCRIBE" true) (atom "DESC" true)) (define schema2 sql_schema_identifier) (atom "." true) (define id sql_identifier)) '((quote map) '((quote show) schema2 id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
 		(parser '((or (atom "DESCRIBE" true) (atom "DESC" true)) (define id sql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
-		(parser '((atom "SHOW" true) (? (atom "FULL" true)) (atom "COLUMNS" true) (atom "FROM" true) (define schema2 sql_identifier) (atom "." true) (define id sql_identifier) (atom "LIKE" true) (define likepattern sql_expression))
+		(parser '((atom "SHOW" true) (? (atom "FULL" true)) (atom "COLUMNS" true) (atom "FROM" true) (define schema2 sql_schema_identifier) (atom "." true) (define id sql_identifier) (atom "LIKE" true) (define likepattern sql_expression))
 			'((quote map) '((quote show) schema2 id) '((quote lambda) '((quote line)) '((quote if) '((quote strlike) '((quote get_assoc) (quote line) "Field") likepattern) '((quote resultrow) (quote line)) nil))))
 		(parser '((atom "SHOW" true) (? (atom "FULL" true)) (atom "COLUMNS" true) (atom "FROM" true) (define id sql_identifier) (atom "LIKE" true) (define likepattern sql_expression))
 			'((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote if) '((quote strlike) '((quote get_assoc) (quote line) "Field") likepattern) '((quote resultrow) (quote line)) nil))))
-		(parser '((atom "SHOW" true) (? (atom "FULL" true)) (atom "COLUMNS" true) (atom "FROM" true) (define schema2 sql_identifier) (atom "." true) (define id sql_identifier) (? (atom "WHERE" true) (define where sql_expression))) (begin
+		(parser '((atom "SHOW" true) (? (atom "FULL" true)) (atom "COLUMNS" true) (atom "FROM" true) (define schema2 sql_schema_identifier) (atom "." true) (define id sql_identifier) (? (atom "WHERE" true) (define where sql_expression))) (begin
 			(define transform_col (lambda (expr) (match expr
 				'('get_column _ _ col _) (list (quote get_assoc) (quote line) col)
 				(cons head tail) (cons (transform_col head) (map tail transform_col))
@@ -2076,7 +2102,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 
 		/* SHOW CREATE TRIGGER [schema.]trigger */
 		(parser '((atom "SHOW" true) (atom "CREATE" true) (atom "TRIGGER" true)
-			(define schema2 sql_identifier) (atom "." true) (define id sql_identifier))
+			(define schema2 sql_schema_identifier) (atom "." true) (define id sql_identifier))
 			'((quote resultrow) '((quote format_create_trigger) schema2 id)))
 		(parser '((atom "SHOW" true) (atom "CREATE" true) (atom "TRIGGER" true) (define id sql_identifier))
 			'((quote resultrow) '((quote format_create_trigger) schema id)))
@@ -2086,7 +2112,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(or (atom "INDEXES" true) (atom "INDEX" true) (atom "KEYS" true))
 			(atom "FROM" true)
 			(define target (or
-				(parser '((define schema2 sql_identifier) "." (define id sql_identifier)) '(schema2 id))
+				(parser '((define schema2 sql_schema_identifier) "." (define id sql_identifier)) '(schema2 id))
 				(parser (define id sql_identifier) '(nil id))))
 			(? (or (atom "FROM" true) (atom "IN" true)) (define schema3 sql_identifier))
 			(? (atom "WHERE" true) (define where sql_expression)))
@@ -2160,11 +2186,11 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "DROP" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				(list (quote drop_sql_database) (list (quote session) "__memcp_tx") id (if if_exists true false))))
-		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema sql_identifier) (atom "." true) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
+		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema sql_schema_identifier) (atom "." true) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "VIEW" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true)))
 			(define target (or
-				(parser '((define schema2 sql_identifier) "." (define id sql_identifier)) '(schema2 id))
+				(parser '((define schema2 sql_schema_identifier) "." (define id sql_identifier)) '(schema2 id))
 				(parser (define id sql_identifier) '(nil id)))))
 			(match target '(schema2 id) (begin
 				(define view_schema (coalesce schema2 schema))
@@ -2195,7 +2221,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define idx sql_identifier)
 			(atom "ON" true)
 			(define tbl (or
-				(parser '((define schema2 sql_identifier) (atom "." true) (define t sql_identifier)) '(schema2 t))
+				(parser '((define schema2 sql_schema_identifier) (atom "." true) (define t sql_identifier)) '(schema2 t))
 				(parser (define t sql_identifier) '(nil t))
 			))
 			"(" (define cols (+ sql_index_column ",")) ")"
@@ -2206,7 +2232,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define idx sql_identifier)
 			(atom "ON" true)
 			(define tbl (or
-				(parser '((define schema2 sql_identifier) (atom "." true) (define t sql_identifier)) '(schema2 t))
+				(parser '((define schema2 sql_schema_identifier) (atom "." true) (define t sql_identifier)) '(schema2 t))
 				(parser (define t sql_identifier) '(nil t))
 			))
 			"(" (define cols (+ sql_index_column ",")) ")"
@@ -2217,7 +2243,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define idx sql_identifier)
 			(atom "ON" true)
 			(define tbl (or
-				(parser '((define schema2 sql_identifier) (atom "." true) (define t sql_identifier)) '(schema2 t))
+				(parser '((define schema2 sql_schema_identifier) (atom "." true) (define t sql_identifier)) '(schema2 t))
 				(parser (define t sql_identifier) '(nil t))
 			))
 			(atom "USING" true) (atom "BTREE" true)
@@ -2226,7 +2252,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier)
 			(atom "ON" true)
 			(define target (or
-				(parser '((define schema2 sql_identifier) "." (define tbl sql_identifier)) '(schema2 tbl))
+				(parser '((define schema2 sql_schema_identifier) "." (define tbl sql_identifier)) '(schema2 tbl))
 				(parser (define tbl sql_identifier) '(nil tbl)))))
 			(match target '(schema2 tbl)
 				(list (quote dropkey) (list (quote table) (coalesce schema2 schema) tbl) idx)))

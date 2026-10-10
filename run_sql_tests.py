@@ -1053,7 +1053,7 @@ class SQLTestRunner:
         self.ensure_database(database)
         encoded_db = quote(database, safe='')
         normalized = self._normalize_syntax(syntax)
-        route = "psql" if normalized == "postgresql" else "sql"
+        route = "tsql" if normalized == "tsql" else ("psql" if normalized == "postgresql" else "sql")
         url = f"{self.base_url}/{route}/{encoded_db}"
         # Append positional params as v1=, v2=, ... query string
         if params:
