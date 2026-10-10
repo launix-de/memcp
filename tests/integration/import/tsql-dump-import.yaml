@@ -1,0 +1,144 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixture preparation and cleanup are explicit cases so unsupported DDL stays visible.
+metadata:
+  description: Streaming t-sql script import with Unicode and target confinement
+  isolated: true
+setup: []
+test_cases:
+- sql: DROP TABLE IF EXISTS tsdump_identity_observation
+  name: 'Fixture setup 001: DROP TABLE IF EXISTS tsdump_identity_observation'
+- sql: DROP TABLE IF EXISTS tsdump_identity
+  name: 'Fixture setup 002: DROP TABLE IF EXISTS tsdump_identity'
+- sql: DROP TABLE IF EXISTS tsdump_items
+  name: 'Fixture setup 003: DROP TABLE IF EXISTS tsdump_items'
+- sql: DROP TABLE IF EXISTS tsdump_utf16
+  name: 'Fixture setup 004: DROP TABLE IF EXISTS tsdump_utf16'
+- sql: DROP TABLE IF EXISTS tsdump_conditional
+  name: 'Fixture setup 005: DROP TABLE IF EXISTS tsdump_conditional'
+- name: Load GO-delimited export into selected target
+  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-export.sql") (sql_policy "root"))
+  noncritical: true
+- name: Multiline conditional declarations and ELSE data preserve target confinement
+  sql: SELECT id,label FROM tsdump_conditional
+  expect:
+    rows: 1
+    data:
+    - id: 2
+      label: ELSE; CREATE 🐘
+  noncritical: true
+- name: Import GO clears scope while preserving session identity
+  sql: SELECT stage, value FROM tsdump_identity_observation ORDER BY stage
+  expect:
+    rows: 3
+    data:
+    - stage: 1
+      value: 2
+    - stage: 2
+      value: null
+    - stage: 3
+      value: 3
+  noncritical: true
+- name: Imported strings and defaults survive retargeting
+  sql: SELECT tenant, id, name, note, enabled FROM tsdump_items ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - tenant: 1
+      id: 7
+      name: Grüße 🐘
+      note: export_source.dbo.keep
+      enabled: -1
+    - tenant: 1
+      id: 15
+      name: Semi;colon 'quote'
+      note: 'first
+
+        GO
+
+        last'
+      enabled: -1
+  noncritical: true
+- name: Imported identity resumes above explicit IDs
+  syntax: tsql
+  sql: INSERT dbo.tsdump_items (tenant, name) VALUES (1, N'next')
+  expect:
+    rows: 1
+  noncritical: true
+- name: Imported identity generated correct successor
+  sql: SELECT id FROM tsdump_items WHERE name = 'next'
+  expect:
+    rows: 1
+    data:
+    - id: 16
+  noncritical: true
+- name: Imported compound primary key enforces uniqueness
+  syntax: tsql
+  sql: INSERT dbo.tsdump_items (tenant,id,name) VALUES (1,7,N'duplicate')
+  expect:
+    error: true
+- name: Compressed UTF16 export is decoded without data loss
+  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-utf16.sql.gz") (sql_policy "root"))
+  noncritical: true
+- name: UTF16 import preserves Unicode and nulls
+  sql: SELECT id, label, note FROM tsdump_utf16
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      label: Zürich 🐘
+      note: null
+  noncritical: true
+- name: Import policy is honored before opening a file
+  scm: (load_tsql "memcp-tests" "/does/not/exist" (lambda (db table write) (error "denied")))
+  expect:
+    error: true
+- name: Unsupported import statement stops execution
+  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-unsupported.sql") (sql_policy "root"))
+  expect:
+    error: true
+- name: Statements after an unsupported statement are not executed
+  sql: SELECT COUNT(*) AS n FROM tsdump_items WHERE id = 998
+  expect:
+    rows: 1
+    data:
+    - n: 0
+  noncritical: true
+- name: Uncommitted import transaction is rejected
+  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-uncommitted.sql") (sql_policy "root"))
+  expect:
+    error: true
+- name: Uncommitted imported rows are rolled back
+  sql: SELECT COUNT(*) AS n FROM tsdump_items WHERE id = 999
+  expect:
+    rows: 1
+    data:
+    - n: 0
+  noncritical: true
+- name: Import rejects references outside destination and source alias
+  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_import_target\" \"memcp-tests\")\n  (s \"tsql_import_source\"\
+    \ \"export_source\")\n  (parse_tsql \"memcp-tests\" \"SELECT * FROM [other_db].[dbo].[tsdump_items]\" (sql_policy\
+    \ \"root\") s nil))\n"
+  expect:
+    error: true
+- name: Import rejects a second source database
+  scm: "(begin (define s (newsession))\n  (tsql_import_database s \"first\")\n  (tsql_import_database s \"second\"\
+    ))\n"
+  expect:
+    error: true
+- name: Normal frontend does not silently ignore identity switching
+  syntax: tsql
+  sql: SET IDENTITY_INSERT dbo.tsdump_items ON
+  expect:
+    error: true
+- sql: DROP TABLE IF EXISTS tsdump_identity_observation
+  name: 'Fixture cleanup 001: DROP TABLE IF EXISTS tsdump_identity_observation'
+- sql: DROP TABLE IF EXISTS tsdump_identity
+  name: 'Fixture cleanup 002: DROP TABLE IF EXISTS tsdump_identity'
+- sql: DROP TABLE IF EXISTS tsdump_items
+  name: 'Fixture cleanup 003: DROP TABLE IF EXISTS tsdump_items'
+- sql: DROP TABLE IF EXISTS tsdump_utf16
+  name: 'Fixture cleanup 004: DROP TABLE IF EXISTS tsdump_utf16'
+- sql: DROP TABLE IF EXISTS tsdump_conditional
+  name: 'Fixture cleanup 005: DROP TABLE IF EXISTS tsdump_conditional'
+cleanup: []

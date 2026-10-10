@@ -1,0 +1,161 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  description: T-SQL grammar reuses native DDL, defaults and query planning
+setup:
+  - sql: DROP VIEW IF EXISTS [tsql_native_view]
+  - sql: DROP TABLE IF EXISTS [tsql_native_copy]
+  - sql: CREATE TABLE [tsql_native_copy] ([id] INT PRIMARY KEY, [name] NVARCHAR(80))
+  - sql: DROP TABLE IF EXISTS [tsql_fk_child]
+  - sql: DROP TABLE IF EXISTS [tsql_fk_parent]
+  - sql: CREATE TABLE [tsql_fk_parent] ([id] INT PRIMARY KEY)
+  - sql: CREATE TABLE [tsql_fk_child] ([id] INT PRIMARY KEY, [parent_id] INT, CONSTRAINT [tsql_native_fk] FOREIGN KEY ([parent_id]) REFERENCES [tsql_fk_parent] ([id]) ON DELETE CASCADE)
+  - sql: INSERT INTO [tsql_fk_parent] VALUES (1)
+  - sql: INSERT INTO [tsql_fk_child] VALUES (1,1)
+  - sql: DROP TABLE IF EXISTS [tsql_native]
+  - sql: CREATE TABLE [dbo].[tsql_native] ([id] INT IDENTITY(1,1) PRIMARY KEY, [name] NVARCHAR(80), [amount] INT NOT NULL DEFAULT (7))
+  - sql: INSERT INTO [dbo].[tsql_native] ([name]) VALUES (N'Grüße'), (N'O''Brien')
+test_cases:
+  - name: escaped closing bracket is a quoted identifier
+    sql: SELECT 42 AS [answer]]suffix]
+    expect: {rows: 1, data: [{"answer]suffix": 42}]}
+  - name: double quoted escaping remains an identifier
+    sql: SELECT 42 AS "answer""suffix"
+    expect: {rows: 1, data: [{"answer\"suffix": 42}]}
+  - name: backslashes remain literal in dialect strings
+    sql: SELECT N'C:\new' AS [path]
+    expect: {rows: 1, data: [{path: 'C:\new'}]}
+  - name: bracket identifiers and native identity default values
+    sql: SELECT [id], [name], [amount] FROM [dbo].[tsql_native] ORDER BY [id]
+    expect:
+      rows: 2
+      data:
+        - {id: 1, name: Grüße, amount: 7}
+        - {id: 2, name: "O'Brien", amount: 7}
+  - name: top clause uses shared limit planning
+    sql: SELECT TOP (1) [id] FROM [dbo].[tsql_native] ORDER BY [id] DESC
+    expect: {rows: 1, data: [{id: 2}]}
+  - name: double quoted identifiers
+    sql: SELECT TOP 1 "name" FROM "tsql_native" ORDER BY "id"
+    expect: {rows: 1, data: [{name: Grüße}]}
+  - name: offset fetch uses shared ordering and limit
+    sql: SELECT [id] FROM [dbo].[tsql_native] ORDER BY [id] OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
+    expect: {rows: 1, data: [{id: 2}]}
+  - name: dialect null function and string addition
+    sql: SELECT ISNULL(NULL, N'x') + N'y' AS [value]
+    expect: {rows: 1, data: [{value: xy}]}
+  - name: ordinary aggregates use the canonical group stage
+    sql: SELECT COUNT(*) AS n, SUM([amount]) AS total FROM [tsql_native]
+    expect: {rows: 1, data: [{n: 2, total: 14}]}
+  - name: union uses the canonical union block
+    sql: SELECT 1 AS n UNION ALL SELECT 2 AS n
+    expect: {rows: 2, data: [{n: 1}, {n: 2}]}
+  - name: derived queries preserve top ordering
+    sql: SELECT chosen.[id] FROM (SELECT TOP (1) [id] FROM [tsql_native] ORDER BY [id] DESC) AS chosen
+    expect: {rows: 1, data: [{id: 2}]}
+  - name: searched case translates to native expressions
+    sql: SELECT CASE WHEN [id] = 1 THEN N'first' ELSE N'other' END AS [label] FROM [tsql_native] ORDER BY [id]
+    expect: {rows: 2, data: [{label: first}, {label: other}]}
+  - name: inner joins use the existing planner
+    sql: SELECT c.[id] FROM [tsql_fk_child] AS c JOIN [tsql_fk_parent] AS p ON c.[parent_id] = p.[id]
+    expect: {rows: 1, data: [{id: 1}]}
+  - name: insert select uses native insertion
+    sql: INSERT INTO [tsql_native_copy] ([id], [name]) SELECT [id], [name] FROM [tsql_native] ORDER BY [id]
+    expect: {rows: 1}
+  - name: insert select preserves all source rows
+    sql: SELECT [id], [name] FROM [tsql_native_copy] ORDER BY [id]
+    expect: {rows: 2, data: [{id: 1, name: Grüße}, {id: 2, name: "O'Brien"}]}
+  - name: create view stores the canonical query
+    sql: CREATE VIEW [tsql_native_view] AS SELECT [id] FROM [tsql_native]
+    expect: {rows: 1}
+  - name: view reads use the existing view expansion
+    sql: SELECT [id] FROM [tsql_native_view] ORDER BY [id]
+    expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+  - name: drop view uses the native catalog
+    sql: DROP VIEW [tsql_native_view]
+    expect: {rows: 1}
+  - name: substring accepts the dialect argument syntax
+    sql: SELECT SUBSTRING(N'abcdef', 2, 3) AS [part]
+    expect: {rows: 1, data: [{part: bcd}]}
+  - name: offset without ordering is rejected
+    sql: SELECT [id] FROM [tsql_native] OFFSET 1 ROWS
+    expect: {error: true}
+  - name: top combined with offset is rejected
+    sql: SELECT TOP (1) [id] FROM [tsql_native] ORDER BY [id] OFFSET 1 ROWS
+    expect: {error: true}
+  - name: limit does not leak in from another dialect
+    sql: SELECT 42 AS n LIMIT 1
+    expect: {error: true}
+  - name: backtick identifiers do not leak in from another dialect
+    sql: SELECT 42 AS `n`
+    expect: {error: true}
+  - name: insert ignore does not leak in from another dialect
+    sql: INSERT IGNORE INTO [tsql_native_copy] VALUES (99, N'unsupported')
+    expect: {error: true}
+  - name: engine clauses do not leak in from another dialect
+    sql: CREATE TABLE [tsql_wrong_engine] ([id] INT) ENGINE=MEMORY
+    expect: {error: true}
+  - name: native unique constraint remains enforced
+    sql: INSERT INTO [dbo].[tsql_native] ([id]) VALUES (1)
+    expect: {error: true}
+  - name: unsupported identity increments fail explicitly
+    sql: CREATE TABLE [tsql_wrong_identity] ([id] INT IDENTITY(10,2))
+    expect: {error: true}
+  - name: native add column freezes historical defaults
+    sql: ALTER TABLE [dbo].[tsql_native] ADD [bonus] INT NOT NULL DEFAULT (9)
+    expect: {rows: 0}
+  - name: historical rows use the merged defaults implementation
+    sql: SELECT [id], [bonus] FROM [dbo].[tsql_native] ORDER BY [id]
+    expect: {rows: 2, data: [{id: 1, bonus: 9}, {id: 2, bonus: 9}]}
+  - name: native insert also uses the new column default
+    sql: INSERT INTO [dbo].[tsql_native] ([name]) VALUES (N'third')
+    expect: {rows: 1}
+  - name: native identity continues after add column
+    sql: SELECT [id], [amount], [bonus] FROM [dbo].[tsql_native] WHERE [name] = N'third'
+    expect: {rows: 1, data: [{id: 3, amount: 7, bonus: 9}]}
+  - name: native null validation remains enforced
+    sql: INSERT INTO [dbo].[tsql_native] ([amount]) VALUES (NULL)
+    expect: {error: true}
+  - name: update reuses shared dml lowering
+    sql: UPDATE [tsql_native] SET [amount] = [amount] + 1 WHERE [id] = 3
+    expect: {rows: 1}
+  - name: update result is visible
+    sql: SELECT [amount] FROM [dbo].[tsql_native] WHERE [id] = 3
+    expect: {rows: 1, data: [{amount: 8}]}
+  - name: delete reuses shared dml lowering
+    sql: DELETE FROM [tsql_native] WHERE [id] = 3
+    expect: {rows: 1}
+  - name: shared window planning remains available
+    sql: SELECT [id], COUNT(*) OVER () AS [n] FROM [dbo].[tsql_native] ORDER BY [id]
+    expect: {rows: 2, data: [{id: 1, n: 2}, {id: 2, n: 2}]}
+  - name: negative top fails
+    sql: SELECT TOP (-1) [id] FROM [dbo].[tsql_native]
+    expect: {error: true}
+  - name: top zero returns no rows
+    sql: SELECT TOP (0) [id] FROM [dbo].[tsql_native]
+    expect: {rows: 0}
+  - name: unmatched default parentheses fail
+    sql: CREATE TABLE [tsql_bad_default] ([id] INT DEFAULT (7)
+    expect: {error: true}
+  - name: an omitted default is still native null
+    sql: SELECT ISNULL(NULL, 42) AS [value]
+    expect: {rows: 1, data: [{value: 42}]}
+  - name: foreign key uses existing enforcement
+    sql: INSERT INTO [tsql_fk_child] VALUES (2,999)
+    expect: {error: true}
+  - name: foreign cascade uses existing trigger infrastructure
+    sql: DELETE FROM [tsql_fk_parent] WHERE [id] = 1
+    expect: {rows: 1}
+  - name: cascaded child rows are gone
+    sql: SELECT [id] FROM [tsql_fk_child]
+    expect: {rows: 0}
+cleanup:
+  - sql: DROP VIEW IF EXISTS [tsql_native_view]
+  - sql: DROP TABLE IF EXISTS [tsql_native_copy]
+  - sql: DROP TABLE IF EXISTS [tsql_wrong_engine]
+  - sql: DROP TABLE IF EXISTS [tsql_fk_child]
+  - sql: DROP TABLE IF EXISTS [tsql_fk_parent]
+  - sql: DROP TABLE IF EXISTS [tsql_native]
+  - sql: DROP TABLE IF EXISTS [tsql_wrong_identity]
