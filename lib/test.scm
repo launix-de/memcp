@@ -1187,9 +1187,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (symbol? 0) false "integer should not be a symbol")
 	(assert (symbol? false) false "boolean should not be a symbol")
 
-	/* Test for int? (requires int64-producing builtin like size/now) */
+	/* Integer literals and integer-producing builtins retain native int64. */
 	(assert (int? (size "abc")) true "size returns an int")
-	(assert (int? 42) false "literal 42 is not an int (parsed as number)")
+	(assert (int? 42) true "integer literal is an int")
+	(assert (int? 42.0) false "decimal literal remains a float")
+	(assert (int? -42) true "negative integer literal is an int")
+	(assert (equal? (intdiv 9007199254740993 1) 9007199254740993) true "integer literal division preserves precision")
 
 	/* Test for + */
 	(assert (+ 1 2) 3 "1 + 2 should be 3")

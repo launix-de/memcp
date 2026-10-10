@@ -16,7 +16,7 @@ The negative accumulator also represents the minimum int64 without overflow. */
 			(error "integer conversion overflow") true)
 		(define coefficient (reduce (produceN (strlen digits)) (lambda (acc i)
 			(- (* acc 10) (intdiv (simplify (substr digits i 1)) 1))) 0))
-		(if negative coefficient (- (intdiv 0 1) coefficient)))))))
+		(if negative coefficient (- 0 coefficient)))))))
 (define tsql_int (parser (define value (regex "-?[0-9]+")) (tsql_parse_integer value)))
 (define tsql_number (parser (define value (regex "-?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:e-?[0-9]+)?" true))
 	(if (regexp_test value "^-?[0-9]+$") (tsql_parse_integer value) (simplify value))))
@@ -137,11 +137,11 @@ runtime and storage hot paths; do not substitute float64 for exact casts. */
 	(define name (toUpper type))
 	(tsql_decl_dimensions name dimensions)
 	(match name
-		"INT" (list (quote intdiv) (list tsql_cast_integer value -2147483648 2147483647) (intdiv 1 1))
-		"INTEGER" (list (quote intdiv) (list tsql_cast_integer value -2147483648 2147483647) (intdiv 1 1))
-		"SMALLINT" (list (quote intdiv) (list tsql_cast_integer value -32768 32767) (intdiv 1 1))
-		"TINYINT" (list (quote intdiv) (list tsql_cast_integer value 0 255) (intdiv 1 1))
-		"BIGINT" (list (quote intdiv) (list tsql_cast_integer value (tsql_parse_integer "-9223372036854775808") (tsql_parse_integer "9223372036854775807")) (intdiv 1 1))
+		"INT" (list (quote intdiv) (list tsql_cast_integer value -2147483648 2147483647) 1)
+		"INTEGER" (list (quote intdiv) (list tsql_cast_integer value -2147483648 2147483647) 1)
+		"SMALLINT" (list (quote intdiv) (list tsql_cast_integer value -32768 32767) 1)
+		"TINYINT" (list (quote intdiv) (list tsql_cast_integer value 0 255) 1)
+		"BIGINT" (list (quote intdiv) (list tsql_cast_integer value (tsql_parse_integer "-9223372036854775808") (tsql_parse_integer "9223372036854775807")) 1)
 		"FLOAT" (list (quote if) (list (quote nil?) value) nil (list (quote simplify) (list tsql_cast_float value)))
 		/* Approximate types use native floating precision. Binary32 rounding and
 		dialect precision boundaries remain noncritical compatibility work. */
@@ -159,7 +159,7 @@ runtime and storage hot paths; do not substitute float64 for exact casts. */
 				(error "unary integer conversion overflow") true) true)
 		_ true)
 	(if (has? '("BOOLEAN" "BOOL" "BIT" "VARCHAR" "CHAR") (sql_info_type (sql_expr_info (list) value)))
-		(error "unary minus requires a numeric operand") (list (quote -) (intdiv 0 1) value)))))
+		(error "unary minus requires a numeric operand") (list (quote -) 0 value)))))
 (define tsql_column_attributes (parser (define attrs (* (or
 	(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true "null" false))
 	(parser (atom "UNIQUE" true) '("unique" true))

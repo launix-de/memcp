@@ -93,7 +93,7 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 			(tsql_execute_statement tx (payload "database") (payload "text") session
 				(lambda (values) (row (map (output "descriptors") (lambda (descriptor) (begin
 					(define value (values (descriptor "name")))
-					(if (nil? value) nil (if (equal? (descriptor "kind") 231) (string value) (if (equal? (descriptor "kind") 38) (intdiv value (intdiv 1 1)) value))))))))
+					(if (nil? value) nil (if (equal? (descriptor "kind") 231) (string value) (if (equal? (descriptor "kind") 38) (intdiv value 1) value))))))))
 				(lambda (_names descriptors) (begin
 					(output "descriptors" descriptors)
 					(fields descriptors)))))))
