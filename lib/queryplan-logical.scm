@@ -4787,9 +4787,32 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(list stage)
 			(list source)))))
 
+/* Binding has validated the complete expression before stage rewriting.
+Fold only literal truth values here; keep a boolean operator around remaining
+operands so nullable/scalar values retain their boolean coercion. Stage lists
+remain intact until the existing dependency-demand pass removes unused work. */
+(define fold_bound_boolean_constants (lambda (head args)
+	(if (expr_head_and? head)
+		(if (reduce args (lambda (found arg) (or found (boolean_fold_false_literal? arg))) false)
+			false
+			(begin
+				(define kept (filter args (lambda (arg) (not (boolean_fold_true_literal? arg)))))
+				(if (empty_list? kept) true (cons head kept))))
+		(if (expr_head_or? head)
+			(if (reduce args (lambda (found arg) (or found (boolean_fold_true_literal? arg))) false)
+				true
+				(begin
+					(define kept (filter args (lambda (arg) (not (boolean_fold_false_literal? arg)))))
+					(if (empty_list? kept) false (cons head kept))))
+			(if (and (or (expr_head_not? head) (expr_head_sql_not? head))
+				(equal? (count args) 1)
+				(or (boolean_fold_true_literal? (car args)) (boolean_fold_false_literal? (car args))))
+				(boolean_fold_not (car args))
+				(cons head args))))))
+
 (define combine_stage_rewrite_results (lambda (head rewritten_args)
 	(begin
-		(define expr (cons head (map rewritten_args (lambda (item) (nth item 0)))))
+		(define expr (fold_bound_boolean_constants head (map rewritten_args (lambda (item) (nth item 0)))))
 		(define stages (unique_stages_by_id (merge (map rewritten_args (lambda (item) (nth item 1))))))
 		(define sources (merge_unique (map rewritten_args (lambda (item) (nth item 2)))))
 		(list expr stages sources))))

@@ -44,6 +44,33 @@ setup:
       (1, 1)
 
 test_cases:
+  - name: Literal identities preserve nullable predicates and literal values
+    setup:
+      - sql: DROP TABLE IF EXISTS taut_constants
+      - sql: CREATE TABLE taut_constants (ID INT, val TEXT) ENGINE=memory
+      - sql: INSERT INTO taut_constants VALUES (1,'0'),(2,'1'),(3,'2'),(4,NULL)
+    sql: |
+      SELECT ID, ('1' AND val='1') AS conjunction, ('0' OR val='1') AS disjunction,
+        ('0' AND val='1') AS absorbing_false, ('1' OR val='1') AS absorbing_true,
+        CASE WHEN ID=1 THEN '0' ELSE '1' END AS literal_value
+      FROM taut_constants ORDER BY ID
+    expect:
+      data:
+        - {ID: 1, conjunction: false, disjunction: false, absorbing_false: false, absorbing_true: true, literal_value: '0'}
+        - {ID: 2, conjunction: true, disjunction: true, absorbing_false: false, absorbing_true: true, literal_value: '1'}
+        - {ID: 3, conjunction: false, disjunction: false, absorbing_false: false, absorbing_true: true, literal_value: '1'}
+        - {ID: 4, conjunction: null, disjunction: null, absorbing_false: false, absorbing_true: true, literal_value: '1'}
+    cleanup:
+      - sql: DROP TABLE taut_constants
+
+  - name: Absorbing literals still validate nested subquery columns
+    sql: SELECT ('0' AND (SELECT c.missing FROM taut_child c LIMIT 1)) AS result
+    expect: {error: true}
+
+  - name: Absorbing literals still validate ordinary columns
+    sql: SELECT ('1' OR p.missing) AS result FROM taut_parent p
+    expect: {error: true}
+
   - name: Common OR predicates preserve all SQL truth combinations
     setup:
       - sql: DROP TABLE IF EXISTS taut_truth
