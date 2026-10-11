@@ -37,3 +37,104 @@ func TestOptimizeTelemetryCallbackIsNotRunDuringOuterOptimization(t *testing.T) 
 		t.Fatalf("telemetry call was folded before runtime: %s", serialized)
 	}
 }
+
+func TestTryFoldRawExpressions(t *testing.T) {
+	for _, tc := range []struct {
+		code string
+		want string
+	}{
+		{"(+ 1 (* 2 3))", "7"},
+		{"(if 0 1)", "nil"},
+		{"(and 0 (error \"unreachable\"))", "false"},
+		{"(or 1 (error \"unreachable\"))", "true"},
+		{"(if 1 (+ 2 3) (error \"unreachable\"))", "5"},
+		{"(list (+ 1 2) (list 4 5))", "(3 (4 5))"},
+		{"(quote (unknown_function unknown_variable))", "(unknown_function unknown_variable)"},
+		{"(quote unknown_variable)", "unknown_variable"},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			for _, optimize := range []bool{false, true} {
+				expr := Read("tryfold", "(tryfold (quote "+tc.code+"))")
+				if optimize {
+					expr = Optimize(expr, &Globalenv, nil)
+				}
+				if got := String(Eval(expr, &Globalenv)); got != tc.want {
+					t.Fatalf("optimize=%v: got %s, want %s", optimize, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestTryFoldFailurePreservesAST(t *testing.T) {
+	for _, code := range []string{
+		"(+ unknown_variable 1)",
+		"(now)",
+		"(symbol \"unknown_variable\")",
+		"(error \"cannot fold\")",
+		"(and (error \"must evaluate first\") 0)",
+		"(or (error \"must evaluate first\") 1)",
+		"(begin (error \"must evaluate first\") 7)",
+	} {
+		t.Run(code, func(t *testing.T) {
+			expr := Read("tryfold failure", code)
+			before := serializedTestExpr(t, &Globalenv, expr)
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Fatal("nonconstant/throwing expression was folded")
+					}
+				}()
+				TryFold(expr, &Globalenv)
+			}()
+			if after := serializedTestExpr(t, &Globalenv, expr); after != before {
+				t.Fatalf("failed folding changed AST: before %s, after %s", before, after)
+			}
+			fallback := Read("tryfold fallback", "(try (lambda () (tryfold (quote "+code+"))) (lambda (_error) \"original\"))")
+			if got := String(Eval(fallback, &Globalenv)); got != "original" {
+				t.Fatalf("try did not recover folding failure: %s", got)
+			}
+		})
+	}
+}
+
+func TestTryFoldUsesDeclarationFoldability(t *testing.T) {
+	env := Env{Vars: make(Vars), Outer: &Globalenv}
+	calls := 0
+	fn := func(a ...Scmer) Scmer {
+		calls++
+		return NewInt(42)
+	}
+	name := "test_tryfold_declared_function"
+	declaration := &Declaration{Name: name, Fn: fn,
+		Type: &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "int"}}}
+	Declare(&env, declaration)
+	t.Cleanup(func() {
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(fn))
+		declaration_titles = declaration_titles[:len(declaration_titles)-1]
+	})
+	expr := NewSlice([]Scmer{NewSymbol(name)})
+	for _, code := range []Scmer{
+		expr,
+		NewSlice([]Scmer{NewSymbol("begin"), expr, NewInt(7)}),
+		NewSlice([]Scmer{NewSymbol("and"), expr, NewBool(false)}),
+		NewSlice([]Scmer{NewSymbol("or"), expr, NewBool(true)}),
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("nonfoldable declaration was evaluated")
+				}
+			}()
+			TryFold(code, &env)
+		}()
+	}
+	if calls != 0 {
+		t.Fatal("nonfoldable function was called")
+	}
+	declaration.Type.Const = true
+	if got := ToInt(TryFold(expr, &env)); got != 42 || calls != 1 {
+		t.Fatalf("foldable declaration: got %d, calls %d", got, calls)
+	}
+}
