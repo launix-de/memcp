@@ -100,6 +100,24 @@ The negative accumulator also represents the minimum int64 without overflow. */
 			(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
 		) (list (toLower name) (cons type (tsql_decl_dimensions type dimensions)))) ","))
 			declarations "^(?:/\\*.*?\\*/|--[^\r\n]*(?:[\r\n]|$)|[\r\n\t ]+)+") text))))
+/* Identity eligibility is a declaration-time dialect rule. Allocate values
+with the existing native auto_increment option, without another allocator or
+runtime SQL type checks. Numeric declarations may only have zero scale. */
+(define tsql_identity_attributes (lambda (type dimensions attributes)
+	(if (attributes "auto_increment") (begin
+		(if (or (has? '("TINYINT" "SMALLINT" "INT" "INTEGER" "BIGINT") type)
+			(and (has? '("DECIMAL" "NUMERIC") type) (equal? (cadr dimensions) 0)))
+			true (error "IDENTITY requires an integer or zero-scale numeric declaration"))
+		(if (attributes "null") (error "IDENTITY column was declared NULL") true)
+		(if (find (extract_assoc attributes (lambda (key _value) key))
+			(lambda (key) (has? '("default" "default_expression") key)))
+			(error "IDENTITY cannot have a DEFAULT declaration") true)
+		(append attributes "null" false)) attributes)))
+(define tsql_identity_columns (lambda (definitions) (begin
+	(define identities (filter definitions (lambda (definition) (match definition
+		'((symbol list) "column" _name _type _dimensions attributes) ((cdr attributes) "auto_increment")
+		_ false))))
+	(if (> (count identities) 1) (error "Only one IDENTITY column is allowed per table") definitions))))
 (define tsql_decl_dimensions (lambda (type dimensions) (begin
 	(define count_dimensions (count dimensions))
 	(if (has? '("VARCHAR" "CHAR" "NVARCHAR" "NCHAR" "BINARY" "VARBINARY") type)
@@ -433,6 +451,9 @@ No row-level datatype dispatch or alternate temporal representation is needed. *
 	(parser '((atom "DEFAULT" true) tsql_clock_default) '("default_expression" "CURRENT_TIMESTAMP"))
 	(parser '((atom "DEFAULT" true) (define value tsql_default_literal)) '("default" value))
 ))) (begin
+		(if (and (find attrs (lambda (attr) (attr "auto_increment")))
+			(find attrs (lambda (attr) (attr "null"))))
+			(error "IDENTITY column was declared NULL") true)
 		(if (and (find attrs (lambda (attr) (attr "primary")))
 			(find attrs (lambda (attr) (attr "null"))))
 			(error "PRIMARY KEY column was declared NULL") true)
@@ -1208,7 +1229,10 @@ never from the first row. Unknown expression types stay text in this first slice
 	(define column_definition (parser '(
 		(define name tsql_identifier) (define type tsql_column_type)
 		(define dimensions tsql_type_dimensions) (define attributes tsql_column_attributes)
-	) (list name (tsql_storage_type type) (cons (quote list) (tsql_decl_dimensions type dimensions)) attributes)))
+	) (begin
+			(define dimensions (tsql_decl_dimensions type dimensions))
+			(list name (tsql_storage_type type) (cons (quote list) dimensions)
+				(tsql_identity_attributes type dimensions attributes)))))
 	(define foreign_key_definition (parser '(
 		(? (atom "CONSTRAINT" true) (define name tsql_identifier))
 		(atom "FOREIGN" true) (atom "KEY" true) "(" (define columns (+ tsql_identifier ",")) ")"
@@ -1238,7 +1262,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		) ",")) ")"
 	) (begin
 			(if policy (policy (coalesce schema2 schema) name true) true)
-			(list (quote sql_create_table) (coalesce schema2 schema) name (cons (quote list) (tsql_table_primary_columns columns))
+			(list (quote sql_create_table) (coalesce schema2 schema) name (cons (quote list) (tsql_identity_columns (tsql_table_primary_columns columns)))
 				'(list) (if ifnotexists true false) (quote tx)))))
 	(define tsql_alter_table (parser '(
 		(atom "ALTER" true) (atom "TABLE" true)
@@ -1263,10 +1287,15 @@ never from the first row. Unknown expression types stay text in this first slice
 						(list (quote list) "nulls_not_distinct" true))))
 			(parser '((atom "ADD" true) (define columns (+ column_definition ",")))
 				(lambda (database name)
-					(cons (quote !begin) (map columns (lambda (column)
-						(match column '(col type dimensions attributes)
-							(list (quote sql_create_column) (list (quote table) database name)
-								col type dimensions (cons (quote list) (sql_add_column_attributes attributes)))))))))
+					(begin
+						/* Native ADD has no identity backfill for historical rows.
+						Reject this form instead of manufacturing a parallel allocator. */
+						(if (find columns (lambda (column) ((nth column 3) "auto_increment")))
+							(error "ALTER ADD IDENTITY requires native historical-row initialization") true)
+						(cons (quote !begin) (map columns (lambda (column)
+							(match column '(col type dimensions attributes)
+								(list (quote sql_create_column) (list (quote table) database name)
+									col type dimensions (cons (quote list) (sql_add_column_attributes attributes))))))))))
 			(parser '((atom "DROP" true) (atom "COLUMN" true) (define col tsql_identifier))
 				(lambda (database name)
 					(list (quote altertable) (list (quote table) database name) "drop" col)))

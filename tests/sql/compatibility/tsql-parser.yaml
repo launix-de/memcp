@@ -845,7 +845,6 @@ test_cases:
   sql: CREATE TABLE dbo.tsql_bad_identity (id FLOAT IDENTITY(1,1))
   expect:
     error: true
-  noncritical: true
 - name: Identity rejects scaled exact declarations
   sql: CREATE TABLE dbo.tsql_bad_identity (id DECIMAL(8,2) IDENTITY(1,1))
   expect:

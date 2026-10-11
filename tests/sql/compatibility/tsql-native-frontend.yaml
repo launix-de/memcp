@@ -1333,6 +1333,79 @@ test_cases:
   - name: Startup declarations reject trailing unparsed text
     sql: SET QUOTED_IDENTIFIER ON extra
     expect: {error: true}
+  - name: Identity uses the native integer allocator without requiring a key
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_identity_declaration
+    sql: CREATE TABLE tsql_identity_declaration (id BIGINT IDENTITY, value INT)
+    expect: {rows: 0}
+  - name: Identity declaration compiles native nonnullable auto increment options
+    scm: |
+      (begin
+        (define column (car (get_schema "memcp-tests" "tsql_identity_declaration")))
+        (and (not (column "Null")) (equal? (column "Extra") "auto_increment")))
+    expect: {result: true}
+  - name: Native identity allocation fills omitted values
+    sql: INSERT INTO tsql_identity_declaration (value) VALUES (10),(20)
+    expect: {affected_rows: 2}
+  - name: Generated identities remain ordinary native numbers
+    sql: SELECT id,value FROM tsql_identity_declaration ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: 10}, {id: 2, value: 20}]}
+  - name: Approximate identity declarations fail before native DDL publication
+    sql: CREATE TABLE tsql_identity_invalid (id FLOAT IDENTITY)
+    expect: {error: true}
+  - name: Boolean identity declarations fail before native DDL publication
+    sql: CREATE TABLE tsql_identity_invalid (id BIT IDENTITY)
+    expect: {error: true}
+  - name: Text identity declarations fail before native DDL publication
+    sql: CREATE TABLE tsql_identity_invalid (id NVARCHAR(20) IDENTITY)
+    expect: {error: true}
+  - name: Scaled numeric identity declarations fail before native DDL publication
+    sql: CREATE TABLE tsql_identity_invalid (id DECIMAL(8,2) IDENTITY)
+    expect: {error: true}
+  - name: Monetary identity declarations fail before native DDL publication
+    sql: CREATE TABLE tsql_identity_invalid (id MONEY IDENTITY)
+    expect: {error: true}
+  - name: Explicit nullable identity declarations are rejected
+    sql: CREATE TABLE tsql_identity_invalid (id INT NULL IDENTITY)
+    expect: {error: true}
+  - name: Multiple identity declarations are rejected before table publication
+    sql: CREATE TABLE tsql_identity_invalid (id INT IDENTITY, other_id BIGINT IDENTITY)
+    expect: {error: true}
+  - name: Identity rejects a nullable declaration even before an inline key
+    sql: CREATE TABLE tsql_identity_invalid (id INT NULL IDENTITY PRIMARY KEY)
+    expect: {error: true}
+  - name: Identity rejects competing default expressions
+    sql: CREATE TABLE tsql_identity_invalid (id INT IDENTITY DEFAULT 7)
+    expect: {error: true}
+  - name: Identity rejects a competing NULL default
+    sql: CREATE TABLE tsql_identity_invalid (id INT IDENTITY DEFAULT NULL)
+    expect: {error: true}
+  - name: Rejected identity declarations publish no native table
+    sql: SELECT id FROM tsql_identity_invalid
+    expect: {error: true}
+  - name: ALTER ADD uses the same identity declaration validation
+    sql: ALTER TABLE tsql_identity_declaration ADD unsupported FLOAT IDENTITY
+    expect: {error: true}
+  - name: Rejected ALTER did not create the invalid column
+    sql: SELECT unsupported FROM tsql_identity_declaration
+    expect: {error: true}
+  - name: ALTER ADD identity rejects unsupported historical row initialization
+    sql: ALTER TABLE tsql_identity_declaration ADD another_id INT IDENTITY
+    expect: {error: true}
+  - name: Rejected identity backfill leaves no partially added column
+    sql: SELECT another_id FROM tsql_identity_declaration
+    expect: {error: true}
+  - name: Zero scale numeric identity uses the existing allocator
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_identity_zero_scale
+    sql: CREATE TABLE tsql_identity_zero_scale (id NUMERIC(9,0) IDENTITY(1,1), value INT)
+    expect: {rows: 0}
+  - name: Zero scale native allocation inserts generated values
+    sql: INSERT INTO tsql_identity_zero_scale (value) VALUES (7),(8)
+    expect: {affected_rows: 2}
+  - name: Zero scale generated values follow the declared columns
+    sql: SELECT id,value FROM tsql_identity_zero_scale ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: 7}, {id: 2, value: 8}]}
 
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_unary_contract
@@ -1347,6 +1420,9 @@ cleanup:
   - sql: DROP TABLE IF EXISTS tsql_assignment_probe
   - sql: DROP TABLE IF EXISTS tsql_default_row
   - sql: DROP TABLE IF EXISTS tsql_default_required
+  - sql: DROP TABLE IF EXISTS tsql_identity_zero_scale
+  - sql: DROP TABLE IF EXISTS tsql_identity_invalid
+  - sql: DROP TABLE IF EXISTS tsql_identity_declaration
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: DROP TABLE IF EXISTS tsql_cast_collation
   - sql: DROP TABLE IF EXISTS tsql_setup_catalog
