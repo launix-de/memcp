@@ -933,7 +933,8 @@ never from the first row. Unknown expression types stay text in this first slice
 				(atom "UNIQUE" true) tsql_key_placement "(" (define columns tsql_key_columns) ")")
 				(lambda (database name)
 					(list (quote createkey) (list (quote table) database name) key true
-						(cons (quote list) columns) (quote tx))))
+						(cons (quote list) columns) (quote tx)
+						(list (quote list) "nulls_not_distinct" true))))
 			(parser '((atom "ADD" true) (define columns (+ column_definition ",")))
 				(lambda (database name)
 					(cons (quote !begin) (map columns (lambda (column)

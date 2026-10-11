@@ -338,6 +338,59 @@ test_cases:
   sql: INSERT INTO nkd_import VALUES (2,NULL)
   expect:
     error: true
+- name: T SQL placed column UNIQUE declaration
+  syntax: tsql
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_placed_column
+  sql: CREATE TABLE nkd_placed_column (id INT PRIMARY KEY CLUSTERED, v INT UNIQUE NONCLUSTERED)
+- name: Placed column key first NULL
+  syntax: tsql
+  sql: INSERT INTO nkd_placed_column VALUES (1,NULL)
+- name: Placed column key rejects repeated NULL
+  syntax: tsql
+  sql: INSERT INTO nkd_placed_column VALUES (2,NULL)
+  expect:
+    error: true
+- name: T SQL unnamed placed table UNIQUE declaration
+  syntax: tsql
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_placed_table
+  sql: CREATE TABLE nkd_placed_table (id INT PRIMARY KEY, v INT, UNIQUE NONCLUSTERED (v DESC))
+- name: Placed table key first NULL
+  syntax: tsql
+  sql: INSERT INTO nkd_placed_table VALUES (1,NULL)
+- name: Placed table key rejects repeated NULL
+  syntax: tsql
+  sql: INSERT INTO nkd_placed_table VALUES (2,NULL)
+  expect:
+    error: true
+- name: Declare T SQL ALTER key fixture
+  syntax: tsql
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_alter_ts
+  sql: CREATE TABLE nkd_alter_ts (id INT PRIMARY KEY, v INT)
+- name: Insert NULL before ALTER UNIQUE
+  syntax: tsql
+  sql: INSERT INTO nkd_alter_ts VALUES (1,NULL)
+- name: T SQL ALTER declares NULL equality on native key
+  syntax: tsql
+  sql: ALTER TABLE nkd_alter_ts ADD CONSTRAINT nkd_alter_ts_key UNIQUE NONCLUSTERED (v ASC)
+- name: ALTER key rejects repeated NULL
+  syntax: tsql
+  sql: INSERT INTO nkd_alter_ts VALUES (2,NULL)
+  expect:
+    error: true
+- name: Drop T SQL ALTER key
+  syntax: tsql
+  sql: ALTER TABLE nkd_alter_ts DROP CONSTRAINT nkd_alter_ts_key
+- name: Dropped key permits another NULL
+  syntax: tsql
+  sql: INSERT INTO nkd_alter_ts VALUES (2,NULL)
+- name: T SQL ALTER rejects existing duplicate NULL keys
+  syntax: tsql
+  sql: ALTER TABLE nkd_alter_ts ADD CONSTRAINT nkd_alter_ts_key UNIQUE CLUSTERED (v DESC)
+  expect:
+    error: true
 cleanup:
 - sql: DROP TABLE IF EXISTS nkd_sql
 - sql: DROP TABLE IF EXISTS nkd_psql
@@ -357,3 +410,6 @@ cleanup:
 - sql: DROP TABLE IF EXISTS nkd_unnamed_ts
 - sql: DROP TABLE IF EXISTS nkd_tx
 - sql: DROP TABLE IF EXISTS nkd_import
+- sql: DROP TABLE IF EXISTS nkd_placed_column
+- sql: DROP TABLE IF EXISTS nkd_placed_table
+- sql: DROP TABLE IF EXISTS nkd_alter_ts
