@@ -3046,6 +3046,77 @@ func init() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "tryfold",
+		Fn: func(a ...Scmer) Scmer {
+			return TryFold(a[0], &Globalenv)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "return the constant value of raw Scheme code, or raise if it cannot be folded",
+			Params: []*TypeDescriptor{{Kind: "any", Label: "code"}},
+			Return: &TypeDescriptor{Kind: "any"},
+			Const:  true,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				declaration := declarations["tryfold"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
+				}
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d0 := args[0]
+				d0.ID = 0
+				d0 = JITPrepareScmerGoArg(ctx, d0)
+				d1 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(unsafe.Pointer(&Globalenv)))), NoHeapPointer: true, Rooted: true}
+				if d1.Loc == LocRegPair || d1.Loc == LocStackPair || d1.Loc == LocRegTriple || d1.Loc == LocStackTriple {
+					panic("jit: generic call arg expects 1-word value")
+				}
+				ctx.SyncDesc(&d0)
+				ctx.SyncDesc(&d1)
+				d2 := ctx.EmitGoCallScalar(GoFuncAddr(TryFold), []JITValueDesc{d0, d1}, 2)
+				d2.NoHeapPointer = false
+				ctx.BindReg(d2.Reg, &d2)
+				ctx.BindReg(d2.Reg2, &d2)
+				ctx.FreeDesc(&d0)
+				if d2.Loc == LocImm {
+					if result.Loc == LocAny {
+						return d2
+					}
+				}
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				ctx.SyncDesc(&d2)
+				if d2.Loc == LocRegPair || d2.Loc == LocStackPair || d2.Loc == LocInputPair {
+					ctx.EmitMovPairToResult(&d2, &result)
+					result.Type = d2.Type
+				} else {
+					switch d2.Type {
+					case tagBool:
+						ctx.EmitMakeBool(result, d2)
+						result.Type = tagBool
+					case tagInt:
+						ctx.EmitMakeInt(result, d2)
+						result.Type = tagInt
+					case tagFloat:
+						ctx.EmitMakeFloat(result, d2)
+						result.Type = tagFloat
+					case tagNil:
+						ctx.EmitMakeNil(result)
+						result.Type = tagNil
+					default:
+						panic("jit: single-block scalar return with unknown type")
+					}
+				}
+				return result
+				return result
+			},
+			JITInlineCost: 4,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "optimize",
 
 		Fn: func(a ...Scmer) Scmer {

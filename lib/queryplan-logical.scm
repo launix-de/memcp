@@ -4787,9 +4787,23 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(list stage)
 			(list source)))))
 
+/* Binding has validated the complete expression before stage rewriting.
+SCM decides whether the raw expression is constant, including lazy evaluation
+and declared function foldability. Keep the original AST on failure; never feed
+partially optimized runtime code back into logical IR. Stage lists remain intact
+until the existing dependency-demand pass removes unused work. */
+(define fold_bound_boolean_constants (lambda (head args)
+	(begin
+		(define expr (cons head args))
+		(if (and
+			(or (expr_head_and? head) (expr_head_or? head) (expr_head_not? head) (expr_head_sql_not? head))
+			(reduce args (lambda (found arg) (or found (boolean_fold_true_literal? arg) (boolean_fold_false_literal? arg))) false))
+			(try (lambda () (tryfold expr)) (lambda (_error) expr))
+			expr))))
+
 (define combine_stage_rewrite_results (lambda (head rewritten_args)
 	(begin
-		(define expr (cons head (map rewritten_args (lambda (item) (nth item 0)))))
+		(define expr (fold_bound_boolean_constants head (map rewritten_args (lambda (item) (nth item 0)))))
 		(define stages (unique_stages_by_id (merge (map rewritten_args (lambda (item) (nth item 1))))))
 		(define sources (merge_unique (map rewritten_args (lambda (item) (nth item 2)))))
 		(list expr stages sources))))
