@@ -246,11 +246,34 @@ window result contract separately until shared expression compilation. */
 	(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 	(parser (atom "NULL" true) '("null" true))
 	(parser '((atom "IDENTITY" true) (? "(" (define seed tsql_int) "," (define increment tsql_int) ")"))
-		(if (and (or (nil? seed) (equal? seed 1)) (or (nil? increment) (equal? increment 1)))
-			'("auto_increment" true) (error "IDENTITY currently requires seed and increment 1")))
+		(if (and (or (nil? seed) (>= seed 1)) (or (nil? increment) (equal? increment 1)))
+			(list "auto_increment" true "identity_seed" (coalesceNil seed 1))
+			(error "IDENTITY currently requires a positive seed and increment 1")))
 	(parser '((atom "DEFAULT" true) tsql_clock_default) '("default_expression" "CURRENT_TIMESTAMP"))
 	(parser '((atom "DEFAULT" true) (define value tsql_default_literal)) '("default" value))
 ))) (merge attrs)))
+/* The seed is parser data, consumed into the existing table option.
+Only the native auto_increment flag reaches the column declaration. */
+(define tsql_identity_table_options (lambda (definitions) (begin
+	(define identities (filter definitions (lambda (definition) (match definition
+		((symbol list) "column" _name _type _dimensions (cons (symbol list) attributes)) (attributes "auto_increment")
+		_ false))))
+	(if (> (count identities) 1) (error "only one IDENTITY column is allowed") true)
+	(match identities
+		'(((symbol list) "column" _name type _dimensions (cons (symbol list) attributes))) (begin
+			(define seed (coalesceNil (attributes "identity_seed") 1))
+			(define maximum (match type "TINYINT" 255 "SMALLINT" 32767
+				"INT" 2147483647 "INTEGER" 2147483647 _ (tsql_parse_integer "9223372036854775807")))
+			(if (> seed maximum) (error "IDENTITY seed exceeds the declared range") true)
+			(if (equal? seed 1) '(list) (list (quote list) "auto_increment" seed)))
+		_ '(list)))))
+(define tsql_identity_native_column (lambda (definition) (match definition
+	((symbol list) "column" name type dimensions (cons (symbol list) attributes))
+	(if (has_assoc? attributes "identity_seed")
+		(list (quote list) "column" name type dimensions
+			(cons (quote list) (filter_assoc attributes (lambda (key _value) (not (equal? key "identity_seed"))))))
+		definition)
+	_ definition)))
 (define tsql_select_prefix (parser (? (atom "TOP" true)
 	(define top_count (or (parser '("(" (define n tsql_int) ")") n) sql_int)))
 	(if (and top_count (< top_count 0)) (error "TOP requires a nonnegative count") top_count)))
@@ -923,8 +946,9 @@ never from the first row. Unknown expression types stay text in this first slice
 		) ",")) ")"
 	) (begin
 			(if policy (policy (coalesce schema2 schema) name true) true)
-			(list (quote sql_create_table) (coalesce schema2 schema) name (cons (quote list) columns)
-				'(list) (if ifnotexists true false) (quote tx)))))
+			(list (quote sql_create_table) (coalesce schema2 schema) name
+				(cons (quote list) (map columns tsql_identity_native_column))
+				(tsql_identity_table_options columns) (if ifnotexists true false) (quote tx)))))
 	(define tsql_alter_table (parser '(
 		(atom "ALTER" true) (atom "TABLE" true)
 		(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier)
@@ -938,9 +962,10 @@ never from the first row. Unknown expression types stay text in this first slice
 			(parser '((atom "ADD" true) (define columns (+ column_definition ",")))
 				(lambda (database name)
 					(cons (quote !begin) (map columns (lambda (column)
-						(match column '(col type dimensions attributes)
+						(match column '(col type dimensions attributes) (begin
+							(if (attributes "auto_increment") (error "ALTER ADD IDENTITY requires historical-row initialization") true)
 							(list (quote sql_create_column) (list (quote table) database name)
-								col type dimensions (cons (quote list) (sql_add_column_attributes attributes)))))))))
+								col type dimensions (cons (quote list) (sql_add_column_attributes attributes))))))))))
 			(parser '((atom "DROP" true) (atom "COLUMN" true) (define col tsql_identifier))
 				(lambda (database name)
 					(list (quote altertable) (list (quote table) database name) "drop" col)))
