@@ -82,6 +82,26 @@ test_cases:
                  (equal? (sql_info_collation info) (list "utf8mb4_bin" 0))) true
           (error "declared expression contract leaked into the executable formula")))
 
+  - name: "annotation-free logical structure has no replacement"
+    scm: |
+      (begin
+        (define expression (list (quote +) (list (quote get_column) "d" false "weight" false) 1))
+        (if (and (nil? (sql_type_annotation_replacement expression))
+                 (expression_equal? (sql_type_lower_annotations expression) expression)) true
+          (error "annotation-free expressions must retain their original structure")))
+
+  - name: "annotation replacement distinguishes NULL from an unchanged node"
+    scm: |
+      (begin
+        (define contract (list (quote sql_type_expr) nil "INT" nil))
+        (define quoted (list (quote quote) contract))
+        (if (and (expression_equal? (sql_type_annotation_replacement contract) (list nil))
+                 (nil? (sql_type_lower_annotations contract))
+                 (expression_equal? (sql_type_lower_annotations (list (quote coalesceNil) contract 42))
+                   (list (quote coalesceNil) nil 42))
+                 (nil? (sql_type_annotation_replacement quoted))) true
+          (error "NULL replacement or quoted expression handling is incorrect")))
+
   - name: "literal typing"
     scm: |
       (begin

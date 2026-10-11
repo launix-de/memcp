@@ -455,14 +455,26 @@ always treated as "bin" — get the coercing relation. */
 					(map_assoc (expand_query_block_fields sources (qb_fields block))
 						(lambda (rt_title rt_expr) (sql_type_result_descriptor all_sources rt_expr)))))))))
 
-/* Frontend expression contracts in stage inputs and compound roots also belong to this
-frontend pass. They are syntax data, never executable operators. Preserve
-quoted data and all logical structure while removing just these contracts. */
-(define sql_type_lower_annotations (lambda (node)
+/* Rewrite only paths containing frontend expression contracts. nil means
+unchanged; a singleton holds the replacement, including a legitimate NULL.
+Retain annotation-free sources/stage graphs instead of cloning every node
+for frontends that have emitted no contracts. Quoted syntax stays opaque. */
+(define sql_type_annotation_replacement (lambda (node)
 	(match node
-		((symbol sql_type_expr) _formula _type _collation) (sql_type_formula '() node)
-		((symbol quote) _datum) node
-		(cons head tail) (cons (sql_type_lower_annotations head) (map tail sql_type_lower_annotations))
+		((symbol sql_type_expr) _formula _type _collation) (list (sql_type_formula '() node))
+		((symbol quote) _datum) nil
+		(cons head tail) (begin
+			(define rewritten_head (sql_type_annotation_replacement head))
+			(define rewritten_tail (sql_type_annotation_replacement tail))
+			(if (and (nil? rewritten_head) (nil? rewritten_tail)) nil
+				(list (cons
+					(if (nil? rewritten_head) head (car rewritten_head))
+					(if (nil? rewritten_tail) tail (car rewritten_tail))))))
+		_ nil)))
+
+(define sql_type_lower_annotations (lambda (node)
+	(match (sql_type_annotation_replacement node)
+		'(formula) formula
 		_ node)))
 
 /* Entry point: annotate root expressions, then remove remaining expression contracts
