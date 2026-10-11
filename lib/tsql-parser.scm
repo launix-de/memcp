@@ -277,6 +277,9 @@ window result contract separately until shared expression compilation. */
 	(parser '((atom "DEFAULT" true) tsql_clock_default) '("default_expression" "CURRENT_TIMESTAMP"))
 	(parser '((atom "DEFAULT" true) (define value tsql_default_literal)) '("default" value))
 ))) (begin
+		(if (and (find attrs (lambda (attr) (attr "primary")))
+			(find attrs (lambda (attr) (attr "null"))))
+			(error "PRIMARY KEY column was declared NULL") true)
 		(if (and (> (count (filter attrs (lambda (attr) (or (attr "primary") (attr "unique"))))) 1)
 			(find attrs (lambda (attr) (not (nil? (attr "constraint_name"))))))
 			(error "Multiple inline key declarations with constraint names are not supported") true)
@@ -284,15 +287,37 @@ window result contract separately until shared expression compilation. */
 /* PRIMARY KEY nullability is a frontend decision expressed through native
 column options; the engine does not infer SQL semantics from the key ID. */
 (define tsql_table_primary_columns (lambda (definitions) (begin
-	(define primary_columns (merge (map definitions (lambda (definition) (match definition
+	(define names (merge (map definitions (lambda (definition) (match definition
+		'((symbol list) "column" name _type _dimensions _attributes) (list name)
+		_ '())))))
+	(if (equal? (count names) (count (merge_unique (list (map names toLower)))))
+		true (error "duplicate column name"))
+	(define canonical (lambda (name)
+		(coalesceNil (find names (lambda (declared) (equal?? (toLower declared) (toLower name))))
+			(error "key column does not exist: " name))))
+	(define normalized (map definitions (lambda (definition) (match definition
+		'((symbol list) "unique" id columns options)
+		(list (quote list) "unique" id (cons (quote list) (map (cdr columns) canonical)) options)
+		_ definition))))
+	(define primary_columns (merge (map normalized (lambda (definition) (match definition
 		'((symbol list) "unique" "PRIMARY" columns _) (cdr columns)
 		_ '())))))
-	(map definitions (lambda (definition) (match definition
+	(map normalized (lambda (definition) (match definition
 		'((symbol list) "column" name type dimensions attributes)
-		(if (has? primary_columns name)
-			(list (quote list) "column" name type dimensions (append attributes "null" false))
+		(if (has? primary_columns name) (begin
+			(if ((cdr attributes) "null") (error "PRIMARY KEY column was declared NULL") true)
+			(list (quote list) "column" name type dimensions (append attributes "null" false)))
 			definition)
 		_ definition))))))
+
+/* Resolve DDL names through the existing native view catalog, never a separate
+registry. Creation and deletion still use the shared view lifecycle functions. */
+(define tsql_view_identifier (lambda (tx schema name) (begin
+	(define matches (scan tx (table "system" "views")
+		(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false)) (list schema)
+		'("name") (lambda (declared) (equal?? (toLower declared) (toLower name)))
+		'("name") (lambda (acc declared) (append acc declared)) '() merge))
+	(match matches '() name '(declared) declared _ (error "ambiguous view identifier: " name)))))
 
 (define tsql_select_prefix (parser (? (atom "TOP" true)
 	(define top_count (or (parser '("(" (define n tsql_int) ")") n) sql_int)))
@@ -875,7 +900,7 @@ never from the first row. Unknown expression types stay text in this first slice
 			(define query (sql_apply_view_column_aliases (nth captured 1) aliases))
 			(list (quote create_sql_view)
 				(list (quote session) "__memcp_tx")
-				view_schema id "tsql" (nth captured 0) (list (quote quote) query)
+				view_schema (list tsql_view_identifier (list (quote session) "__memcp_tx") view_schema id) "tsql" (nth captured 0) (list (quote quote) query)
 				(if replace "replace" (if ifnotexists "ignore" "error")))))))
 
 	(define tsql_schema_identifier (parser (define owner tsql_identifier)
@@ -1048,7 +1073,9 @@ never from the first row. Unknown expression types stay text in this first slice
 			(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier))
 			(begin (if policy (policy (coalesce schema2 schema) name true) true)
 				(list (quote drop_sql_view) (list (quote session) "__memcp_tx")
-					(coalesce schema2 schema) name (if ifexists true false))))
+					(coalesce schema2 schema)
+					(list tsql_view_identifier (list (quote session) "__memcp_tx") (coalesce schema2 schema) name)
+					(if ifexists true false))))
 		(parser '((atom "USE" true) (define name tsql_identifier)) (begin
 			(if policy (policy name true false) true)
 			(list (quote session) "schema" name)))

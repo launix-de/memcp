@@ -3,6 +3,7 @@
 metadata:
   version: '1.0'
   syntax: tsql
+  isolated: true
   description: Declaration names persist on native keys independently of their IDs
 setup:
   - sql: DROP TABLE IF EXISTS declared_key
