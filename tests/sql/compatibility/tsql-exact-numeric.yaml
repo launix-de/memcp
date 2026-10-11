@@ -263,7 +263,8 @@ test_cases:
 - name: Unary bound null update remains null
   setup:
   - sql: DELETE FROM dbo.tsql_unary_exact_data WHERE id=1
-  - sql: INSERT INTO dbo.tsql_unary_exact_data (id,f) VALUES (1,7)
+  # This NULL-update probe needs a non-NULL value within NUMERIC(38,38).
+  - sql: INSERT INTO dbo.tsql_unary_exact_data (id,f) VALUES (1,0.5)
   scm: |
     (begin
       (define s (newsession))
