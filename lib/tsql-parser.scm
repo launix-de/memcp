@@ -265,8 +265,10 @@ window result contract separately until shared expression compilation. */
 	(parser '("(" tsql_clock_default ")") true)
 	'((atom "GETDATE" true) "(" ")") (atom "CURRENT_TIMESTAMP" true))))
 (define tsql_column_attributes (parser (define attrs (* (or
-	(parser '((atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement) '("primary" true "null" false))
-	(parser '((atom "UNIQUE" true) tsql_key_placement) '("unique" true "nulls_not_distinct" true))
+	(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement)
+		(if key (list "primary" true "null" false "constraint_name" key) '("primary" true "null" false)))
+	(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "UNIQUE" true) tsql_key_placement)
+		(if key (list "unique" true "nulls_not_distinct" true "constraint_name" key) '("unique" true "nulls_not_distinct" true)))
 	(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 	(parser (atom "NULL" true) '("null" true))
 	(parser '((atom "IDENTITY" true) (? "(" (define seed tsql_int) "," (define increment tsql_int) ")"))
@@ -274,7 +276,24 @@ window result contract separately until shared expression compilation. */
 			'("auto_increment" true) (error "IDENTITY currently requires seed and increment 1")))
 	(parser '((atom "DEFAULT" true) tsql_clock_default) '("default_expression" "CURRENT_TIMESTAMP"))
 	(parser '((atom "DEFAULT" true) (define value tsql_default_literal)) '("default" value))
-))) (merge attrs)))
+))) (begin
+		(if (and (> (count (filter attrs (lambda (attr) (or (attr "primary") (attr "unique"))))) 1)
+			(find attrs (lambda (attr) (not (nil? (attr "constraint_name"))))))
+			(error "Multiple inline key declarations with constraint names are not supported") true)
+		(merge attrs))))
+/* PRIMARY KEY nullability is a frontend decision expressed through native
+column options; the engine does not infer SQL semantics from the key ID. */
+(define tsql_table_primary_columns (lambda (definitions) (begin
+	(define primary_columns (merge (map definitions (lambda (definition) (match definition
+		'((symbol list) "unique" "PRIMARY" columns _) (cdr columns)
+		_ '())))))
+	(map definitions (lambda (definition) (match definition
+		'((symbol list) "column" name type dimensions attributes)
+		(if (has? primary_columns name)
+			(list (quote list) "column" name type dimensions (append attributes "null" false))
+			definition)
+		_ definition))))))
+
 (define tsql_select_prefix (parser (? (atom "TOP" true)
 	(define top_count (or (parser '("(" (define n tsql_int) ")") n) sql_int)))
 	(if (and top_count (< top_count 0)) (error "TOP requires a nonnegative count") top_count)))
@@ -947,8 +966,9 @@ never from the first row. Unknown expression types stay text in this first slice
 		"(" (define columns (+ (or
 			/* Placement and direction are physical index preferences. Logical
 			uniqueness uses native keys; MemCP selects its own columnar access. */
-			(parser '((atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement "(" (define keys tsql_key_columns) ")")
-				(list (quote list) "unique" "PRIMARY" (cons (quote list) keys)))
+			(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement "(" (define keys tsql_key_columns) ")")
+				(list (quote list) "unique" "PRIMARY" (cons (quote list) keys)
+					(cons (quote list) (if key (list "constraint_name" key) '()))))
 			(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "UNIQUE" true) tsql_key_placement
 				"(" (define keys tsql_key_columns) ")")
 				(list (quote list) "unique" (coalesce key (reduce keys (lambda (a b) (concat a "_" b)) name)) (cons (quote list) keys)
@@ -959,12 +979,23 @@ never from the first row. Unknown expression types stay text in this first slice
 		) ",")) ")"
 	) (begin
 			(if policy (policy (coalesce schema2 schema) name true) true)
-			(list (quote sql_create_table) (coalesce schema2 schema) name (cons (quote list) columns)
+			(list (quote sql_create_table) (coalesce schema2 schema) name (cons (quote list) (tsql_table_primary_columns columns))
 				'(list) (if ifnotexists true false) (quote tx)))))
 	(define tsql_alter_table (parser '(
 		(atom "ALTER" true) (atom "TABLE" true)
 		(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier)
 		(define changes (+ (or
+			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define key tsql_identifier))
+				(atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement "(" (define columns tsql_key_columns) ")")
+				(lambda (database name) (begin
+					/* Nullable existing columns need native ALTER nullability support.
+					Reject this shape rather than adding a parallel validation scan. */
+					(if (reduce columns (lambda (valid column) (and valid
+						(not ((find (show database name) (lambda (meta) (equal? (meta "Field") column))) "Null")))) true)
+						true (error "ADD PRIMARY KEY currently requires NOT NULL columns"))
+					(list (quote createkey) (list (quote table) database name) "PRIMARY" true
+						(cons (quote list) columns) (quote tx)
+						(cons (quote list) (if key (list "constraint_name" key) '()))))))
 			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define key tsql_identifier)
 				(atom "UNIQUE" true) tsql_key_placement "(" (define columns tsql_key_columns) ")")
 				(lambda (database name)

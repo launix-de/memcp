@@ -255,10 +255,15 @@ table, timing, and event around that language-neutral persisted source. */
 				(info_schema_fk_column_rows schema tbl fk
 					(cdr local_columns) (cdr other_columns) (+ ordinal 1)))))))
 
+/* A public constraint name is native key metadata; legacy keys use their ID. */
+(define sql_key_constraint_name (lambda (key)
+	(if (or (nil? (key "constraint_name")) (equal? (key "constraint_name") ""))
+		(key "Id") (key "constraint_name"))))
+
 (define info_schema_unique_column_rows (lambda (schema tbl key columns ordinal)
 	(if (empty_list? columns) '()
 		(cons (list "constraint_catalog" "def" "constraint_schema" schema
-			"constraint_name" (key "Id") "table_catalog" "def"
+			"constraint_name" (sql_key_constraint_name key) "table_catalog" "def"
 			"table_schema" schema "table_name" tbl
 			"column_name" (car columns)
 			"ordinal_position" ordinal
@@ -273,7 +278,7 @@ table, timing, and event around that language-neutral persisted source. */
 	(define referenced_meta (referenced_info "meta"))
 	(define referenced_key (find (referenced_meta "Unique") (lambda (key)
 		(equal? (key "Cols") (fk "OtherColumns")))))
-	(if (nil? referenced_key) NULL (referenced_key "Id"))
+	(if (nil? referenced_key) NULL (sql_key_constraint_name referenced_key))
 )))
 
 (define info_schema_key_column_usage_rows (lambda ()
