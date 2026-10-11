@@ -24,9 +24,11 @@ execution paths. The cache, transaction owner and compiled evaluator are shared.
 			(try (lambda () (time (begin
 				((res "header") "Content-Type" "text/event-stream; charset=utf-8")
 				(define session (req "__session"))
+				(extract_assoc (req "query") (lambda (key value) (session key value)))
+				/* Authentication and the route own identity and database selection;
+				query options may supply values, never replace either authority. */
 				(session "username" (req "username"))
 				(session "schema" schema)
-				(extract_assoc (req "query") (lambda (key value) (session key value)))
 				(define output (newsession))
 				(define result (with_autocommit session (req "__session_state") (req "__query_seq") text
 					(lambda (tx) (tsql_execute_statement tx schema text session

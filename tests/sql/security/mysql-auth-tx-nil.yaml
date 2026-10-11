@@ -1,11 +1,16 @@
 # Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # MySQL auth callback must stay readonly and work with tx=nil
 
 metadata:
+  isolated: true
   version: "1.0"
   description: "mysql_auth and direct system.user lookup work without __memcp_tx"
 
 setup:
+  - sql: "DROP TABLE IF EXISTS tsql_auth_identity"
+  - sql: "CREATE TABLE tsql_auth_identity (id INT)"
+  - sql: "INSERT INTO tsql_auth_identity VALUES (7)"
   - sql: "DELETE FROM system.user WHERE username IN ('auth_scan_nil_repro', 'auth_scan_nil_other')"
   - sql: "INSERT INTO system.user (username, password, admin) VALUES ('auth_scan_nil_repro', PASSWORD('secret123'), FALSE)"
 
@@ -128,5 +133,76 @@ test_cases:
         (if (and (equal? (response "status") 401) (equal? (response "body") "Unauthorized"))
           "ok" (error "dashboard exposed user overview without admin credentials")))))
 
+  - name: T-SQL HTTP query options cannot change the authenticated user
+    scm: |
+      (begin
+        (define response (newsession))
+        (define session (newsession))
+        (http_handler
+          (lambda (key) (match key
+            "path" "/tsql/memcp-tests"
+            "username" "auth_scan_nil_repro"
+            "password" "secret123"
+            "body" (lambda () "SELECT id FROM tsql_auth_identity")
+            "query" '("username" "root")
+            "__session" session
+            nil))
+          (lambda (key) (match key
+            "header" (lambda (name value) (response name value))
+            "status" (lambda (value) (response "status" value))
+            "print" (lambda values (response "body" (reduce values concat "")))
+            "jsonl" (lambda (row) (response "row" row))
+            nil)))
+        (and (equal? (response "status") 500) (nil? (response "row"))
+          (equal? (session "username") "auth_scan_nil_repro")))
+    expect: {result: true}
+
+  - name: T-SQL HTTP authenticated identity and route override forged query options
+    scm: |
+      (begin
+        (define response (newsession))
+        (define session (newsession))
+        (http_handler
+          (lambda (key) (match key
+            "path" "/tsql/memcp-tests"
+            "username" "root"
+            "password" "admin"
+            "body" (lambda () "SELECT id FROM tsql_auth_identity")
+            "query" '("username" "auth_scan_nil_repro" "schema" "otherdb")
+            "__session" session
+            nil))
+          (lambda (key) (match key
+            "header" (lambda (name value) (response name value))
+            "status" (lambda (value) (response "status" value))
+            "print" (lambda values (response "body" (reduce values concat "")))
+            "jsonl" (lambda (row) (response "row" row))
+            nil)))
+        (and (nil? (response "status")) (equal? ((response "row") "id") 7)
+          (equal? (session "username") "root") (equal? (session "schema") "memcp-tests")))
+    expect: {result: true}
+
+  - name: T-SQL HTTP still supplies ordinary positional query parameters
+    scm: |
+      (begin
+        (define response (newsession))
+        (http_handler
+          (lambda (key) (match key
+            "path" "/tsql/memcp-tests"
+            "username" "root"
+            "password" "admin"
+            "body" (lambda () "SELECT ? AS supplied")
+            "query" '("v1" "8")
+            "__session" (newsession)
+            nil))
+          (lambda (key) (match key
+            "header" (lambda (name value) (response name value))
+            "status" (lambda (value) (response "status" value))
+            "print" (lambda values (response "body" (reduce values concat "")))
+            "jsonl" (lambda (row) (response "row" row))
+            nil)))
+        (and (nil? (response "status")) (equal? ((response "row") "supplied") "8")))
+    expect: {result: true}
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS tsql_auth_identity"
   - sql: "DELETE FROM system.user WHERE username IN ('auth_scan_nil_repro', 'auth_scan_nil_other')"
