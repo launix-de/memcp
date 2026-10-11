@@ -2200,7 +2200,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			))
 			"(" (define cols (+ sql_index_column ",")) ")"
 			(? (atom "USING" true) (atom "BTREE" true))
-		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) t) idx true (cons (quote list) cols) nil '('list "nulls_not_distinct" false))))
+		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) t) idx true (cons (quote list) cols) '(session "__memcp_tx") '('list "nulls_not_distinct" false))))
 		(parser '((atom "CREATE" true)
 			(atom "INDEX" true)
 			(define idx sql_identifier)
@@ -2222,7 +2222,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			))
 			(atom "USING" true) (atom "BTREE" true)
 			"(" (define cols (+ sql_index_column ",")) ")"
-		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) t) idx true (cons (quote list) cols) nil '('list "nulls_not_distinct" false))))
+		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) t) idx true (cons (quote list) cols) '(session "__memcp_tx") '('list "nulls_not_distinct" false))))
 		(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier)
 			(atom "ON" true)
 			(define target (or
