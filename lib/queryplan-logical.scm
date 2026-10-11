@@ -6043,10 +6043,14 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 			fields
 			(bind_query_expr scopes (qb_where block) (binding_path path "where" 0) all_strings)
 			/* MariaDB resolves GROUP BY against input columns first, while
-			HAVING and ORDER BY prefer SELECT-list aliases. */
+			HAVING defaults to SELECT-list aliases unless the frontend declares
+			input-scope ownership; ORDER BY prefers SELECT-list aliases. */
 			(map (coalesceNil (qb_group block) '()) (lambda (expr)
 				(bind_group_expr scopes fields expr (binding_path path "group" 0) all_strings)))
-			(bind_alias_first_expr (qb_having block))
+			/* Name ownership is a frontend fact, not a separate planner. */
+			(if (qassoc_get (qb_facts block) (quote having_input_scope) false)
+				(bind_query_expr scopes (qb_having block) (binding_path path "having" 0) all_strings)
+				(bind_alias_first_expr (qb_having block)))
 			(bind_query_order (qb_order block) scopes fields true path all_strings 0)
 			(qb_limit block)
 			(qb_offset block)

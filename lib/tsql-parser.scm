@@ -136,14 +136,14 @@ runtime and storage hot paths; do not substitute float64 for exact casts. */
 /* Character casts own their width semantics in the frontend. National text
 counts UTF-16 units and never returns half of a supplementary character. The
 fast path avoids splitting the ordinary short numeric/text conversions. */
-(define tsql_cast_text (lambda (value length national) (begin
+(define tsql_cast_text (lambda (value length national) (if (nil? value) nil (begin
 	(define text (string value))
 	(if (or (equal? length -1) (<= (strlen text) length)) text
 		(cadr (reduce (split text "") (lambda (prefix character) (begin
 			(define units (if national (if (equal? (strlen character) 4) 2 1) (strlen character)))
 			(if (< (car prefix) units) (list 0 (cadr prefix))
 				(list (- (car prefix) units) (concat (cadr prefix) character)))))
-			(list length "")))))))
+			(list length ""))))))))
 (define tsql_cast_expr (lambda (value type dimensions) (begin
 	(define name (toUpper type))
 	(tsql_decl_dimensions name dimensions)
@@ -163,14 +163,13 @@ fast path avoids splitting the ordinary short numeric/text conversions. */
 		_ (error "unsupported conversion to " name)))))
 (define tsql_cast_text_expr (lambda (value dimensions national) (begin
 	/* A CAST without a length defaults to 30, unlike a column declaration.
-	The native concat contract supplies the text type to sql_expr_info; it is
-	independent of the converted value's Scheme representation. */
+	The expression compiler's explicit function contract supplies the text
+	type and input collation; no runtime operation is emitted to mark a type. */
 	(define length (if (empty_list? dimensions) 30 (car dimensions)))
 	(if (and (plain_literal_expr? value) (sql_numeric_type? (sql_info_type (sql_expr_info '() value)))
 		(not (equal? length -1)) (> (strlen (string value)) length))
 		(error "numeric character conversion overflow") true)
-	(list (quote if) (list (quote nil?) value) nil
-		(list (quote concat) "" (list tsql_cast_text value length national))))))
+	(list (quote tsql_cast_text) value length national))))
 /* Export-style day/month/year spelling is a frontend concern. Parse into Unix
 seconds with the existing date primitives; no temporal runtime type is added.
 Two-digit years use the default 1950..2049 window. Fractional precision and the
@@ -690,14 +689,13 @@ never from the first row. Unknown expression types stay text in this first slice
 							(and preserved (contains? projected_exprs expr))) true)))))
 			(list (quote query-block) schema sources (merge cols) condition
 				(if (and distinct (not distinct_preserved_by_group)) projected_exprs group)
-				/* HAVING names belong to the input scope. Resolve through the
-				shared expression compiler before output aliases can shadow an
-				aggregate operand such as SUM(revenue) AS revenue. */
-				(if (nil? having) nil (sql_type_formula sources having))
+				having
 				order (if (nil? prefix_limit) (if suffix_stage (car suffix_stage) limit) prefix_limit)
 				(if suffix_stage (cadr suffix_stage) offset) '() '()
 				(merge (list
-
+					/* The common name binder resolves all joined/derived sources.
+					HAVING names belong to the input scope in this frontend. */
+					(list (list (quote having_input_scope) true))
 					(if distinct (list (list (quote select_distinct) true)) '())))))))
 
 	(define tsql_select (parser (or

@@ -5,6 +5,10 @@ metadata:
   syntax: tsql
   description: T-SQL grammar reuses native DDL, defaults and query planning
 setup:
+  - sql: DROP TABLE IF EXISTS tsql_having_input
+  - sql: CREATE TABLE tsql_having_input (id INT PRIMARY KEY)
+  - sql: INSERT INTO tsql_having_input VALUES (1)
+  - sql: DROP TABLE IF EXISTS tsql_cast_collation
   - sql: DROP TABLE IF EXISTS tsql_setup_catalog
   - sql: DROP TABLE IF EXISTS tsql_setup_columns
   - sql: DROP TABLE IF EXISTS tsql_setup_key
@@ -261,7 +265,6 @@ test_cases:
   - name: decimal precision over 38 is rejected
     sql: CREATE TABLE [tsql_invalid_dimensions] ([value] NUMERIC(39,0))
     expect: {error: true}
-    noncritical: true # Dialect precision limits remain optional compatibility specifications.
   - name: decimal scale over precision is rejected
     sql: CREATE TABLE [tsql_invalid_dimensions] ([value] DECIMAL(4,5))
     expect: {error: true}
@@ -412,11 +415,10 @@ test_cases:
         revision: 1
       - id: 2
         revision: 0
-  - name: DDL execution failure restores every column in the statement
+  - name: Multi column DDL reports a runtime failure
     sql: ALTER TABLE tsql_setup_columns ADD atomic_first INT DEFAULT 1, atomic_second INT NOT NULL DEFAULT NULL
     expect:
       error: true
-    noncritical: true
   - name: Runtime DDL failure leaves no partially added column
     sql: SELECT atomic_first FROM tsql_setup_columns
     expect:
@@ -497,7 +499,43 @@ test_cases:
     sql: INSERT INTO tsql_setup_catalog VALUES (N'tsql_setup_columns',99)
     expect: {error: true}
 
+  - name: Text cast fixture uses native column collation options
+    scm: >-
+      (createtable "memcp-tests" "tsql_cast_collation"
+        (list (list "column" "value" "VARCHAR" (list 40) (list "collate" "bin")))
+        (list) false nil)
+    expect: {result: true}
+  - name: Text cast collation fixture contains distinguishable case variants
+    sql: INSERT INTO tsql_cast_collation VALUES (N'foo'),(N'FOO')
+    expect: {rows: 1}
+  - name: Text casts inherit declared input collation for comparison
+    sql: SELECT CAST(value AS NVARCHAR(20)) AS value FROM tsql_cast_collation WHERE CAST(value AS NVARCHAR(20))=N'FOO'
+    expect: {rows: 1, data: [{value: FOO}]}
+  - name: Text cast compiler returns its type and collation separately from code
+    scm: >-
+      (begin
+        (define sources (list (list "c" "memcp-tests" "tsql_cast_collation" false nil)))
+        (define expr (list (quote get_column) "c" true "value" true))
+        (define info (sql_expr_info sources (tsql_cast_expr expr "NVARCHAR" (list 20))))
+        (if (and (equal? (sql_info_type info) "VARCHAR")
+            (equal? (sql_info_collation info) (list "bin" 2))
+            (equal? (car (sql_info_formula info)) (quote tsql_cast_text)))
+          true (error "text conversion lost its compiler contract")))
+    expect: {result: true}
+
+  - name: Having aggregate operand binds to the second joined source before its output alias
+    sql: SELECT SUM(amount) AS amount FROM tsql_having_input AS p JOIN tsql_native AS n ON p.id=n.id HAVING SUM(amount)>6
+    expect: {rows: 1, data: [{amount: 7}]}
+  - name: Having rejects an output alias outside its input scope
+    sql: SELECT SUM(amount) AS output_alias FROM tsql_native HAVING output_alias>6
+    expect: {error: true}
+  - name: Having aggregate binds unqualified input columns from a derived relation
+    sql: SELECT SUM(amount) AS amount FROM (SELECT amount FROM tsql_native) AS d HAVING SUM(amount)>10
+    expect: {rows: 1, data: [{amount: 14}]}
+
 cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_having_input
+  - sql: DROP TABLE IF EXISTS tsql_cast_collation
   - sql: DROP TABLE IF EXISTS tsql_setup_catalog
   - sql: DROP TABLE IF EXISTS tsql_setup_columns
   - sql: DROP TABLE IF EXISTS tsql_setup_key

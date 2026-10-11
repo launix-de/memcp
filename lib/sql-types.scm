@@ -18,9 +18,9 @@ the query block's result-types fact for the wire/PDO result contract. Nothing
 type-related survives into the executable plan.
 
 A descriptor is (FORMULA TYPE COLLATION):
- - TYPE: uppercase SQL type name, or "any".
- - COLLATION: nil, or a (NAME COERCIBILITY) pair. Lower coercibility wins:
-   0 = explicit COLLATE, 2 = column, 4 = literal, 5 = numeric/ignorable. */
+- TYPE: uppercase SQL type name, or "any".
+- COLLATION: nil, or a (NAME COERCIBILITY) pair. Lower coercibility wins:
+0 = explicit COLLATE, 2 = column, 4 = literal, 5 = numeric/ignorable. */
 
 (define sql_info (lambda (formula type collation) (list formula type collation)))
 (define sql_info_formula car)
@@ -61,13 +61,13 @@ unicode alias. Returns nil or a (NAME COERCIBILITY) pair. */
 
 (define sql_merge_type (lambda (ta tb)
 	(if (equal? ta "NULL") tb
-	(if (equal? tb "NULL") ta
-	(if (equal? ta "any") "any"
-	(if (equal? tb "any") "any"
-	(if (equal? ta tb) ta
-	(if (or (sql_text_type? ta) (sql_text_type? tb)) "VARCHAR"
-	(if (or (equal? ta "DOUBLE") (equal? tb "DOUBLE")) "DOUBLE"
-	(if (and (sql_numeric_type? ta) (sql_numeric_type? tb)) "DECIMAL" "VARCHAR"))))))))))
+		(if (equal? tb "NULL") ta
+			(if (equal? ta "any") "any"
+				(if (equal? tb "any") "any"
+					(if (equal? ta tb) ta
+						(if (or (sql_text_type? ta) (sql_text_type? tb)) "VARCHAR"
+							(if (or (equal? ta "DOUBLE") (equal? tb "DOUBLE")) "DOUBLE"
+								(if (and (sql_numeric_type? ta) (sql_numeric_type? tb)) "DECIMAL" "VARCHAR"))))))))))
 
 (define sql_merge_info (lambda (a b)
 	(sql_info nil
@@ -112,13 +112,16 @@ cache guard by the caller; no captured value enters the result contract. */
 /* ---- function return contracts ----
 
 Each entry is (HEAD TYPE MODE):
- - "fixed"  : result TYPE regardless of arguments
- - "first"  : result TYPE, collation inherited from the first argument
- - "text"   : result TYPE, collation merged from all arguments
- - "merge"  : result type and collation merged from all arguments (COALESCE, …)
- - "case"   : like "merge" but over the value arms only (IF/searched CASE) */
+- "fixed"  : result TYPE regardless of arguments
+- "first"  : result TYPE, collation inherited from the first argument
+- "text"   : result TYPE, collation merged from all arguments
+- "merge"  : result type and collation merged from all arguments (COALESCE, …)
+- "case"   : like "merge" but over the value arms only (IF/searched CASE) */
 
 (define sql_core_function_rules (list
+	/* Frontend text conversion owns its return type and inherits the input's
+	declared collation. Neither comes from the converted runtime value. */
+	(list (quote tsql_cast_text) "VARCHAR" "first")
 	(list (quote sql_compare) "BOOLEAN" "fixed")
 	(list (quote count) "BIGINT" "fixed")
 	(list (quote if) "NULL" "case")
@@ -306,17 +309,27 @@ keeps its existing (ignorecase-flagged) resolution for them. */
 			(sql_info original "any" nil)
 			(sql_source_column_info src original tblvar col col_ic)))))
 
-/* Comparison: BOOLEAN. The formula stays plain (canonical operands); the merged
-operand collation rides in the info slot so a consumer can pick the Less
-relation for scan bounds / ORDER without re-deriving it. */
+/* Comparison: BOOLEAN. Preserve plain operators for direct scan bounds;
+computed text comparisons use the compile-time selected Less relation. The
+merged collation remains in the info slot for other compiler consumers. */
 (define sql_comparison_info (lambda (head left_info right_info)
 	(begin
 		(define lt (sql_info_type left_info))
 		(define rt (sql_info_type right_info))
 		(define plain (list head (sql_info_formula left_info) (sql_info_formula right_info)))
 		(if (and (sql_text_type? lt) (sql_text_type? rt))
-			(sql_info plain "BOOLEAN"
-				(sql_merge_collation (sql_info_collation left_info) (sql_info_collation right_info)))
+			(begin
+				(define collation (sql_merge_collation (sql_info_collation left_info) (sql_info_collation right_info)))
+				/* Direct column/literal comparisons retain their operator shape
+				for storage bounds. Computed text needs the compiler-selected
+				relation in its residual scalar comparison too. */
+				(define computed? (lambda (info) (begin
+					(define formula (sql_info_formula info))
+					(and (not (sql_column_ref? formula)) (not (empty_list? (query_expr_alias_set "" formula '())))))))
+				(sql_info (if (or (computed? left_info) (computed? right_info))
+					(list (quote sql_compare) (sql_info_formula left_info) (sql_info_formula right_info)
+						(collate (if (nil? collation) "bin" (car collation)) false) (string head))
+					plain) "BOOLEAN" collation))
 			(sql_info plain "BOOLEAN" nil)))))
 
 /* IF / searched CASE lowers to (if cond1 val1 cond2 val2 ... else). Only the
@@ -338,25 +351,25 @@ the conditions are booleans and would otherwise pollute the merge. */
 				(reduce (cdr infos) (lambda (t i) (sql_type_fuse_arith (sql_arith_op_name head) t (sql_info_type i)))
 					(sql_info_type (car infos)))
 				nil)
-		(if (and (sql_comparison_head? head) (equal? (count infos) 2))
-			(sql_comparison_info head (car infos) (cadr infos))
-		(begin
-			(define rule (sql_function_rule head))
-			(define rtype (cadr rule))
-			(define mode (nth rule 2))
-			(define value_infos (if (equal? mode "case") (sql_case_value_infos infos) infos))
-			(define merged (sql_merge_infos value_infos))
-			(define type (if (has? (list "merge" "case") mode) (sql_info_type merged) rtype))
-			/* fixed: the function owns its result, no operand collation inherited.
-			   first: inherit from the first argument. text/merge/case: merge the
-			   value operands. */
-			(define collation (if (not (sql_text_type? type)) nil
-				(if (equal? mode "first")
-					(if (empty_list? infos) nil (sql_info_collation (car infos)))
-				(if (has? (list "text" "merge" "case") mode)
-					(sql_info_collation merged)
-					nil))))
-			(sql_info (cons head forms) type collation)))))))
+			(if (and (sql_comparison_head? head) (equal? (count infos) 2))
+				(sql_comparison_info head (car infos) (cadr infos))
+				(begin
+					(define rule (sql_function_rule head))
+					(define rtype (cadr rule))
+					(define mode (nth rule 2))
+					(define value_infos (if (equal? mode "case") (sql_case_value_infos infos) infos))
+					(define merged (sql_merge_infos value_infos))
+					(define type (if (has? (list "merge" "case") mode) (sql_info_type merged) rtype))
+					/* fixed: the function owns its result, no operand collation inherited.
+					first: inherit from the first argument. text/merge/case: merge the
+					value operands. */
+					(define collation (if (not (sql_text_type? type)) nil
+						(if (equal? mode "first")
+							(if (empty_list? infos) nil (sql_info_collation (car infos)))
+							(if (has? (list "text" "merge" "case") mode)
+								(sql_info_collation merged)
+								nil))))
+					(sql_info (cons head forms) type collation)))))))
 
 (define sql_expr_info (lambda (sources expr)
 	(match expr
@@ -370,17 +383,17 @@ the conditions are booleans and would otherwise pollute the merge. */
 		_ (sql_info expr (sql_type_of_literal expr)
 			(if (string? expr) (list "utf8mb4_general_ci" 4) nil)))))
 
-/* NULL-safe comparison primitive emitted by sql_comparison_info. The Less
+/* NULL-propagating comparison primitive emitted by sql_comparison_info. The Less
 relation and operator string are resolved at plan time. */
-(define sql_compare (lambda (left right less operator collation)
+(define sql_compare (lambda (left right less operator)
 	(if (or (nil? left) (nil? right)) nil
-		(if (equal? operator "equal??") (and (not (less left right)) (not (less right left)))
-		(if (equal? operator "equal?") (and (not (less left right)) (not (less right left)))
-		(if (equal? operator "<") (less left right)
-		(if (equal? operator ">") (less right left)
-		(if (equal? operator "<=") (not (less right left))
-		(if (equal? operator ">=") (not (less left right))
-			(error "unsupported SQL comparison"))))))))))
+		(or (equal? operator "equal??") (equal? operator "equal?"))
+		(and (not (less left right)) (not (less right left)))
+		(equal? operator "<") (less left right)
+		(equal? operator ">") (less right left)
+		(equal? operator "<=") (not (less right left))
+		(equal? operator ">=") (not (less left right))
+		(error "unsupported SQL comparison"))))
 
 /* ---- query-block level type resolution ----
 
@@ -421,9 +434,9 @@ always treated as "bin" — get the coercing relation. */
 			(define info (sql_expr_info sources order_expr))
 			(define coll (sql_info_collation info))
 			(if (and (or (equal? order_dir <) (equal? order_dir >))
-					(not (sql_column_ref? (sql_info_formula info)))
-					(sql_text_type? (sql_info_type info))
-					(not (nil? coll)))
+				(not (sql_column_ref? (sql_info_formula info)))
+				(sql_text_type? (sql_info_type info))
+				(not (nil? coll)))
 				(list (sql_info_formula info) (collate (car coll) (equal? order_dir >)))
 				(list (sql_info_formula info) order_dir)))
 		_ item)))
