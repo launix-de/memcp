@@ -109,6 +109,11 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- `uniqueKey.NullsNotDistinct` is persisted as `nulls_not_distinct` in existing key
+  metadata. It is immutable after key publication and follows the existing
+  table DDL lock and uniqueness-lock protocol; it adds no scan-row state.
+
+
 - Use as few locks as possible. Reads must be lock-free and ideally perform no
   non-local RAM writes; an RWMutex read lock also writes shared memory. Main
   column storages are fixed and read-only within a shard generation. Deltas hold

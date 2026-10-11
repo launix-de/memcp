@@ -242,7 +242,7 @@ window result contract separately until shared expression compilation. */
 	'((atom "GETDATE" true) "(" ")") (atom "CURRENT_TIMESTAMP" true))))
 (define tsql_column_attributes (parser (define attrs (* (or
 	(parser '((atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement) '("primary" true "null" false))
-	(parser '((atom "UNIQUE" true) tsql_key_placement) '("unique" true))
+	(parser '((atom "UNIQUE" true) tsql_key_placement) '("unique" true "nulls_not_distinct" true))
 	(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 	(parser (atom "NULL" true) '("null" true))
 	(parser '((atom "IDENTITY" true) (? "(" (define seed tsql_int) "," (define increment tsql_int) ")"))
@@ -913,9 +913,10 @@ never from the first row. Unknown expression types stay text in this first slice
 			uniqueness uses native keys; MemCP selects its own columnar access. */
 			(parser '((atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement "(" (define keys tsql_key_columns) ")")
 				(list (quote list) "unique" "PRIMARY" (cons (quote list) keys)))
-			(parser '((atom "CONSTRAINT" true) (define key tsql_identifier) (atom "UNIQUE" true) tsql_key_placement
+			(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "UNIQUE" true) tsql_key_placement
 				"(" (define keys tsql_key_columns) ")")
-				(list (quote list) "unique" key (cons (quote list) keys)))
+				(list (quote list) "unique" (coalesce key (reduce keys (lambda (a b) (concat a "_" b)) name)) (cons (quote list) keys)
+					(list (quote list) "nulls_not_distinct" true)))
 			foreign_key_definition
 			(parser (define column column_definition) (match column '(name type dimensions attributes)
 				(list (quote list) "column" name type dimensions (cons (quote list) attributes))))
@@ -932,7 +933,8 @@ never from the first row. Unknown expression types stay text in this first slice
 				(atom "UNIQUE" true) tsql_key_placement "(" (define columns tsql_key_columns) ")")
 				(lambda (database name)
 					(list (quote createkey) (list (quote table) database name) key true
-						(cons (quote list) columns) (quote tx))))
+						(cons (quote list) columns) (quote tx)
+						(list (quote list) "nulls_not_distinct" true))))
 			(parser '((atom "ADD" true) (define columns (+ column_definition ",")))
 				(lambda (database name)
 					(cons (quote !begin) (map columns (lambda (column)

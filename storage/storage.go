@@ -861,6 +861,7 @@ func Init(en scm.Env) {
 			"sortdirs":           sortDirectionList("sortdirs", "one ordering relation for every sortcols entry"),
 			"temp":               {Kind: "bool", Label: "temp", Description: "whether this is a query-local temporary computed column"},
 			"unique":             {Kind: "bool", Label: "unique", Description: "whether values must be unique"},
+			"nulls_not_distinct": {Kind: "bool", Label: "nulls_not_distinct", Description: "whether NULL values compare equal in this column's unique key"},
 			"update":             {Kind: "any", Label: "update", Description: "expression evaluated when a row is updated"},
 		},
 	}
@@ -2520,7 +2521,11 @@ func Init(en scm.Env) {
 				switch head {
 				case "unique":
 					cols := scmerSliceToStrings(mustScmerSlice(def[2], "unique columns"))
-					newTable.Unique = append(newTable.Unique, uniqueKey{scm.String(def[1]), cols})
+					nullsNotDistinct := false
+					if len(def) > 3 {
+						nullsNotDistinct = uniqueNullsNotDistinct(def[3])
+					}
+					newTable.Unique = append(newTable.Unique, uniqueKey{Id: scm.String(def[1]), Cols: cols, NullsNotDistinct: nullsNotDistinct})
 				case "foreign":
 					cols1 := scmerSliceToStrings(mustScmerSlice(def[2], "foreign cols1"))
 					cols2 := scmerSliceToStrings(mustScmerSlice(def[4], "foreign cols2"))
@@ -2648,7 +2653,7 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", Label: "schema", Description: "name of the existing database that will contain the table"},
 				{Kind: "string", Label: "table", Description: "name of the table to create"},
-				{Kind: "list", Label: "cols", Description: "column and constraint definitions", Element: &scm.TypeDescriptor{Kind: "list", Label: "definition", Description: "one of (\"column\" name type dimensions typeparams), (\"unique\" name columns), or (\"foreign\" name local_columns referenced_table referenced_columns update_mode delete_mode). Column lists contain strings; foreign-key modes are restrict, cascade, or set null. A column definition's dimensions contains integers and its typeparams uses the same fields documented by createcolumn options"}},
+				{Kind: "list", Label: "cols", Description: "column and constraint definitions", Element: &scm.TypeDescriptor{Kind: "list", Label: "definition", Description: "one of (\"column\" name type dimensions typeparams), (\"unique\" name columns [options]), or (\"foreign\" name local_columns referenced_table referenced_columns update_mode delete_mode). Column lists contain strings; foreign-key modes are restrict, cascade, or set null. A column definition's dimensions contains integers and its typeparams uses the same fields documented by createcolumn options"}},
 				tableOptions,
 				{Kind: "bool", Label: "ifnotexists", Description: "when true, return false instead of failing if the table exists; if another caller is still creating it, wait for that caller's after-create-table initialization before returning false", Optional: true},
 				{Kind: "any", Label: "tx", Description: "explicit transaction context for oninit", Optional: true},
@@ -2793,7 +2798,7 @@ func Init(en scm.Env) {
 				{"access", "uniq_user_db", []string{"username", "database"}},
 				{"views", "uniq_database_name", []string{"database", "name"}},
 			} {
-				createTableKey(GetDatabase("system").GetTable(key.table), key.name, key.cols, nil)
+				createTableKey(GetDatabase("system").GetTable(key.table), key.name, key.cols, false, nil)
 			}
 			return scm.NewBool(true)
 		},
@@ -2812,7 +2817,11 @@ func Init(en scm.Env) {
 				return scm.NewBool(true)
 			}
 			requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
-			return scm.NewBool(createTableKey(t, scm.String(a[1]), scmerSliceToStrings(mustScmerSlice(a[3], "unique columns")), currentTx))
+			nullsNotDistinct := false
+			if len(a) > 5 {
+				nullsNotDistinct = uniqueNullsNotDistinct(a[5])
+			}
+			return scm.NewBool(createTableKey(t, scm.String(a[1]), scmerSliceToStrings(mustScmerSlice(a[3], "unique columns")), nullsNotDistinct, currentTx))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a new key on a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
@@ -2821,6 +2830,7 @@ func Init(en scm.Env) {
 				{Kind: "bool", Label: "unique", Description: "whether the key is unique"},
 				{Kind: "list", Label: "columns", Description: "list of columns to include"},
 				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
+				{Kind: "list|assoc", Label: "options", Optional: true, Keys: map[string]*scm.TypeDescriptor{"nulls_not_distinct": {Kind: "bool", Description: "whether NULL values compare equal in this unique key"}}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -5226,7 +5236,7 @@ func showBuildIndexRows(db *database, t *table, mysqlNames bool) scm.Scmer {
 	t.ddlMu.RLock()
 	keys := make([]uniqueKey, len(t.Unique))
 	for i, key := range t.Unique {
-		keys[i] = uniqueKey{Id: key.Id, Cols: append([]string(nil), key.Cols...)}
+		keys[i] = uniqueKey{Id: key.Id, Cols: append([]string(nil), key.Cols...), NullsNotDistinct: key.NullsNotDistinct}
 	}
 	t.ddlMu.RUnlock()
 
@@ -5339,6 +5349,7 @@ func showBuildMeta(db *database, t *table) scm.Scmer {
 		uniques[i] = scm.NewSlice([]scm.Scmer{
 			scm.NewString("Id"), scm.NewString(uk.Id),
 			scm.NewString("Cols"), showStringSlice(uk.Cols),
+			scm.NewString("nulls_not_distinct"), scm.NewBool(uk.NullsNotDistinct),
 		})
 	}
 	multiColumnDistinct := make([]scm.Scmer, 0, len(t.Unique))
@@ -5464,9 +5475,28 @@ func showBuildShardRow(t *table, i int, s *storageShard) scm.Scmer {
 	})
 }
 
+// uniqueNullsNotDistinct reads the generic per-key declaration options.
+func uniqueNullsNotDistinct(options scm.Scmer) bool {
+	if options.IsNil() {
+		return false
+	}
+	values := mustScmerSlice(options, "unique key options")
+	if len(values)%2 != 0 {
+		panic("unique key options must contain key/value pairs")
+	}
+	result := false
+	for i := 0; i < len(values); i += 2 {
+		if scm.String(values[i]) != "nulls_not_distinct" {
+			panic("unknown unique key option: " + scm.String(values[i]))
+		}
+		result = scm.ToBool(values[i+1])
+	}
+	return result
+}
+
 // createTableKey publishes validated uniqueness metadata. Callers enforce user
 // maintenance policy; the fixed bootstrap key list is initialized before serving.
-func createTableKey(t *table, name string, cols []string, currentTx *TxContext) bool {
+func createTableKey(t *table, name string, cols []string, nullsNotDistinct bool, currentTx *TxContext) bool {
 	// SQL DDL runs with a query session. Its exclusive table lock closes the
 	// race with writers which selected the no-UNIQUE insert path before the
 	// metadata was published. Boot-time catalog creation is single-threaded
@@ -5487,7 +5517,7 @@ func createTableKey(t *table, name string, cols []string, currentTx *TxContext) 
 				return true, false
 			}
 		}
-		return false, t.hasDuplicateUniqueValues(cols, currentTx)
+		return false, t.hasDuplicateUniqueValues(cols, nullsNotDistinct, currentTx)
 	}()
 	if alreadyExists {
 		return false
@@ -5508,7 +5538,7 @@ func createTableKey(t *table, name string, cols []string, currentTx *TxContext) 
 			return false
 		}
 	}
-	t.Unique = append(t.Unique, uniqueKey{name, cols})
+	t.Unique = append(t.Unique, uniqueKey{Id: name, Cols: cols, NullsNotDistinct: nullsNotDistinct})
 	t.publishShowColumnsSnapshot()
 	t.schema.saveLockedAndUnlock(t.schemaSaveMode())
 	return true

@@ -470,3 +470,30 @@ func TestShowColumnsBoundsIntegerDistinctByPublishedDomain(t *testing.T) {
 		})
 	}
 }
+
+func TestUniqueNullPolicySchemaRoundTrip(t *testing.T) {
+	tbl := showColumnsTestTable(1)
+	tbl.Unique = []uniqueKey{
+		{Id: "equal_nulls", Cols: []string{"column_0"}, NullsNotDistinct: true},
+		{Id: "distinct_nulls", Cols: []string{"column_0"}},
+	}
+	encoded, err := json.Marshal(tbl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored table
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if !restored.Unique[0].NullsNotDistinct || restored.Unique[1].NullsNotDistinct {
+		t.Fatal("schema round trip changed the per-key NULL policy")
+	}
+	// Decode old metadata into a fresh object, as schema loading does.
+	var legacy uniqueKey
+	if err := json.Unmarshal([]byte(`{"Id":"legacy","Cols":["column_0"]}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.NullsNotDistinct {
+		t.Fatal("legacy metadata must retain distinct NULL values")
+	}
+}

@@ -377,8 +377,9 @@ func (m *ShardMode) UnmarshalJSON(data []byte) error {
 }
 
 type uniqueKey struct {
-	Id   string
-	Cols []string
+	Id               string
+	Cols             []string
+	NullsNotDistinct bool `json:"nulls_not_distinct,omitempty"`
 }
 
 type uniqueValidationRow struct {
@@ -407,9 +408,9 @@ type foreignKey struct {
 // hasDuplicateUniqueValues validates a proposed UNIQUE key against the current
 // visible table snapshot. CREATE KEY calls this while holding an exclusive
 // table lock, so collecting keys and probing the existing adaptive indexes are
-// one atomic DDL observation. NULL-containing tuples are excluded, matching
-// the insert-time UNIQUE contract which permits multiple SQL NULL values.
-func (t *table) hasDuplicateUniqueValues(cols []string, currentTx *TxContext) bool {
+// one atomic DDL observation. The key option determines whether NULL-containing
+// tuples participate, matching the insert-time uniqueness contract.
+func (t *table) hasDuplicateUniqueValues(cols []string, nullsNotDistinct bool, currentTx *TxContext) bool {
 	shards := t.ActiveShards()
 	accessSchema := newExactScanAccessSchema(cols)
 	rows := make([]uniqueValidationRow, 0, t.CountEstimate())
@@ -437,7 +438,7 @@ func (t *table) hasDuplicateUniqueValues(cols []string, currentTx *TxContext) bo
 					hasNull = true
 				}
 			}
-			if !hasNull {
+			if !hasNull || nullsNotDistinct {
 				rows = append(rows, uniqueValidationRow{shard: shard, recid: recid, key: key})
 			}
 		}
@@ -2381,7 +2382,7 @@ func validateInsertColumns(columns []string, declarations []*column) {
 // shard locks, retained until the caller attaches the complete declaration,
 // so an overlapping INSERT cannot publish an uninitialized new-column slot.
 // No ordinary reader or INSERT needs to inspect these initialization records.
-func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique bool) (release func()) {
+func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique, nullsNotDistinct bool) (release func()) {
 	value := scm.NewNil()
 	if c.hasDefault() {
 		declared := c.defaultValue()
@@ -2447,7 +2448,7 @@ func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique bool)
 			panic("column " + c.Name + " cannot be NULL for existing rows")
 		}
 	}
-	if unique && !value.IsNil() && visibleRows > 1 {
+	if unique && (!value.IsNil() || nullsNotDistinct) && visibleRows > 1 {
 		panic("new unique column has duplicate values in existing rows")
 	}
 	// Allocate complete delta replacements before changing any shared state.
@@ -2506,6 +2507,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 
 	var c column
 	var uniqueKeys []uniqueKey
+	nullsNotDistinct := false
 	fillExisting := true
 	c.Name = name
 	c.Typ = typ
@@ -2517,10 +2519,12 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		switch key {
 		case "primary":
 			// append unique key
-			uniqueKeys = append(uniqueKeys, uniqueKey{"PRIMARY", []string{name}})
+			uniqueKeys = append(uniqueKeys, uniqueKey{Id: "PRIMARY", Cols: []string{name}})
 		case "unique":
 			// append unique key
-			uniqueKeys = append(uniqueKeys, uniqueKey{name, []string{name}})
+			uniqueKeys = append(uniqueKeys, uniqueKey{Id: name, Cols: []string{name}})
+		case "nulls_not_distinct":
+			nullsNotDistinct = scm.ToBool(extrainfo[i+1])
 		case "fill_existing":
 			fillExisting = scm.ToBool(extrainfo[i+1])
 		case "auto_increment":
@@ -2547,6 +2551,9 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			panic("unknown column attribute: " + key)
 		}
 	}
+	for i := range uniqueKeys {
+		uniqueKeys[i].NullsNotDistinct = nullsNotDistinct
+	}
 	c.UpdateSanitizer()
 	if !initializeExisting && !c.IsTemp && c.hasDefault() {
 		declared := c.defaultValue()
@@ -2559,7 +2566,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 	}
 	cp := &c
 	if initializeExisting && !c.IsTemp && !c.AutoIncrement {
-		release := t.initializeColumnRowsLocked(cp, fillExisting, len(uniqueKeys) != 0)
+		release := t.initializeColumnRowsLocked(cp, fillExisting, len(uniqueKeys) != 0, nullsNotDistinct)
 		defer release()
 		if len(uniqueKeys) != 0 {
 			t.Unique = append(t.Unique, uniqueKeys...)
@@ -3386,6 +3393,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 		return
 	}
 	uniq := t.Unique[idx]
+	compareNulls := mergeNull || uniq.NullsNotDistinct
 	accessSchema := newExactScanAccessSchema(uniq.Cols)
 	t.AddPartitioningScore(uniq.Cols) // increases partitioning score, so partitioning is improved
 	{
@@ -3467,7 +3475,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 				} else {
 					key[i] = row[colidx]
 				}
-				if !mergeNull && key[i].IsNil() {
+				if !compareNulls && key[i].IsNil() {
 					skipUniqueCheck = true
 				}
 			}

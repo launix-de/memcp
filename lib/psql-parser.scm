@@ -63,11 +63,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 )))
 
 
+/* NULL comparison in UNIQUE keys is a declaration option, not an expression type. */
+(define psql_unique_null_policy (parser (or
+	(parser '((atom "NULLS" true) (atom "NOT" true) (atom "DISTINCT" true)) true)
+	(parser '((atom "NULLS" true) (atom "DISTINCT" true)) false)
+	(parser empty false)
+)))
+
 (define psql_make_column_attributes (lambda (psql_expression) (parser (define sub (* (or
 	(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true))
 	(parser (atom "PRIMARY" true) '("primary" true))
-	(parser '((atom "UNIQUE" true) (atom "KEY" true)) '("unique" true))
-	(parser (atom "UNIQUE" true) '("unique" true))
+	(parser '((atom "UNIQUE" true) (atom "KEY" true) (define equalnulls psql_unique_null_policy)) '("unique" true "nulls_not_distinct" equalnulls))
+	(parser '((atom "UNIQUE" true) (define equalnulls psql_unique_null_policy)) '("unique" true "nulls_not_distinct" equalnulls))
 	(parser (atom "AUTO_INCREMENT" true) '("auto_increment" true))
 	(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 	(parser (atom "NULL" true) '("null" true))
@@ -916,6 +923,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(define cols (* (or
 			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ psql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
 			(parser '((atom "UNIQUE" true) (atom "KEY" true) (define id psql_identifier) "(" (define cols (+ psql_identifier ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
+			(parser '((? (atom "CONSTRAINT" true) (define key psql_identifier)) (atom "UNIQUE" true)
+				(define equalnulls psql_unique_null_policy) "(" (define cols (+ psql_identifier ",")) ")")
+				(list (quote list) "unique" (coalesce key (reduce cols (lambda (a b) (concat a "_" b)) id))
+					(cons (quote list) cols) (list (quote list) "nulls_not_distinct" equalnulls)))
 			(parser '((atom "CONSTRAINT" true) (define id (? psql_identifier)) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ psql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 psql_identifier) "(" (define cols2 (+ psql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (define deletemode psql_foreign_key_mode)) (? (atom "ON" true) (atom "UPDATE" true) (define updatemode psql_foreign_key_mode))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2) updatemode deletemode))
 			(parser '((atom "FOREIGN" true) (atom "KEY" true) (define id (? psql_identifier)) "(" (define cols1 (+ psql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 psql_identifier) "(" (define cols2 (+ psql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode psql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode psql_foreign_key_mode))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2)))
 			(parser '((atom "KEY" true) psql_identifier "(" (+ psql_identifier ",") ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list))) /* ignore index definitions */
@@ -931,8 +942,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(define typeparams (parser (define sub (* (or
 					(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true))
 					(parser (atom "PRIMARY" true) '("primary" true))
-					(parser '((atom "UNIQUE" true) (atom "KEY" true)) '("unique" true))
-					(parser (atom "UNIQUE" true) '("unique" true))
+					(parser '((atom "UNIQUE" true) (atom "KEY" true) (define equalnulls psql_unique_null_policy)) '("unique" true "nulls_not_distinct" equalnulls))
+					(parser '((atom "UNIQUE" true) (define equalnulls psql_unique_null_policy)) '("unique" true "nulls_not_distinct" equalnulls))
 					(parser (atom "AUTO_INCREMENT" true) '("auto_increment" true))
 					(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 					(parser (atom "NULL" true) '("null" true))
@@ -969,6 +980,11 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(define alters (+ (or
 			/* TODO */
 			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ psql_identifier ",")) ")") (lambda (tbl) '('createkey '('table schema tbl) "PRIMARY" true (cons (quote list) cols) '(session "__memcp_tx"))))
+			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define key psql_identifier)) (atom "UNIQUE" true)
+				(define equalnulls psql_unique_null_policy) "(" (define cols (+ psql_identifier ",")) ")")
+				(lambda (tbl) (list (quote createkey) (list (quote table) schema tbl)
+					(coalesce key (reduce cols (lambda (a b) (concat a "_" b)) tbl)) true
+					(cons (quote list) cols) '(session "__memcp_tx") (list (quote list) "nulls_not_distinct" equalnulls))))
 			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ psql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) "(" (define cols2 (+ psql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode psql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode psql_foreign_key_mode))) (lambda (tbl) '('createforeignkey '('table schema tbl) id (cons (quote list) cols1) '('table schema tbl2) (cons (quote list) cols2) updatemode deletemode)))
 			/*
 			(parser '((atom "ADD" true) (atom "UNIQUE" true) (atom "KEY" true) (define id psql_identifier) "(" (define cols (+ psql_identifier ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
@@ -1085,7 +1101,6 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser (regex "^[\\r\\n\\t ]*COMMENT ON EXTENSION (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*CREATE SEQUENCE (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*ALTER SEQUENCE (?s:.*)\\z") true)
-		(parser (regex "^[\\r\\n\\t ]*CREATE INDEX (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*CREATE STATISTICS (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*ALTER STATISTICS (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*CREATE TRIGGER (?s:.*)\\z") true)
@@ -1216,7 +1231,11 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					false
 		)))
 
-		(parser '((atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) (atom "INDEX" true) (define id psql_identifier) (atom "ON" true) (define tbl (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) (? (atom "USING" true) psql_identifier) "(" (define cols (+ psql_identifier ",")) ")") (if unique '('createkey '('table schema tbl) id unique (cons (quote list) cols) '(session "__memcp_tx")) true))
+		(parser '((atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) (atom "INDEX" true) (define id psql_identifier) (atom "ON" true) (define tbl (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) (? (atom "USING" true) psql_identifier) "(" (define cols (+ psql_identifier ",")) ")" (define equalnulls psql_unique_null_policy)) (if unique '('createkey '('table schema tbl) id unique (cons (quote list) cols) '(session "__memcp_tx") (list (quote list) "nulls_not_distinct" equalnulls)) (if equalnulls (error "NULLS NOT DISTINCT requires a unique index") true)))
+		/* Preserve acceptance of unsupported physical index hints, but never discard a NULL policy. */
+		(parser (define ignored_index (regex "^[\\r\\n\\t ]*CREATE INDEX (?s:.*)\\z"))
+			(if (empty_list? (regexp_matches ignored_index "(?i)\\bNULLS\\b")) true
+				(error "unsupported index declaration with a NULL comparison policy")))
 		(parser '((atom "DROP" true) (atom "INDEX" true) (define id psql_identifier)) true)
 
 		/* SHOW CREATE TABLE [schema.]table */

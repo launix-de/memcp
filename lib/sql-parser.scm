@@ -746,8 +746,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(define sql_column_attributes (parser (define sub (* (or
 		(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true))
 		(parser (atom "PRIMARY" true) '("primary" true))
-		(parser '((atom "UNIQUE" true) (atom "KEY" true)) '("unique" true))
-		(parser (atom "UNIQUE" true) '("unique" true))
+		(parser '((atom "UNIQUE" true) (atom "KEY" true)) '("unique" true "nulls_not_distinct" false))
+		(parser (atom "UNIQUE" true) '("unique" true "nulls_not_distinct" false))
 		(parser (atom "AUTO_INCREMENT" true) '("auto_increment" true))
 		(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 		(parser (atom "NULL" true) '("null" true))
@@ -1766,7 +1766,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		"("
 		(define cols (* (or
 			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
-			(parser '((atom "UNIQUE" true) (atom "KEY" true) (define id sql_identifier) "(" (define cols (+ (parser '((define col sql_identifier) (? "(" sql_int ")")) col) ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
+			(parser '((atom "UNIQUE" true) (atom "KEY" true) (define id sql_identifier) "(" (define cols (+ (parser '((define col sql_identifier) (? "(" sql_int ")")) col) ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols) '((quote list) "nulls_not_distinct" false)))
 			(parser '((atom "CONSTRAINT" true) (define id (? sql_identifier)) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2) updatemode deletemode))
 			(parser '((atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2) updatemode deletemode))
 			(parser '((atom "KEY" true) sql_identifier "(" (+ (parser '((define col sql_identifier) (? "(" sql_int ")")) col) ",") ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list))) /* ignore index definitions */
@@ -2200,7 +2200,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			))
 			"(" (define cols (+ sql_index_column ",")) ")"
 			(? (atom "USING" true) (atom "BTREE" true))
-		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) t) idx true (cons (quote list) cols))))
+		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) t) idx true (cons (quote list) cols) '(session "__memcp_tx") '('list "nulls_not_distinct" false))))
 		(parser '((atom "CREATE" true)
 			(atom "INDEX" true)
 			(define idx sql_identifier)
@@ -2222,7 +2222,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			))
 			(atom "USING" true) (atom "BTREE" true)
 			"(" (define cols (+ sql_index_column ",")) ")"
-		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) t) idx true (cons (quote list) cols))))
+		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) t) idx true (cons (quote list) cols) '(session "__memcp_tx") '('list "nulls_not_distinct" false))))
 		(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier)
 			(atom "ON" true)
 			(define target (or
