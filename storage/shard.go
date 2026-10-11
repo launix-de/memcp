@@ -43,8 +43,9 @@ type storageShard struct {
 	// plannerMainRows and plannerDeltaRows publish only row counts. They may be
 	// read without mu by the compiler; shard containers themselves remain
 	// strictly lock-protected. Writers update these counters while holding mu.
-	plannerMainRows  atomic.Uint32
-	plannerDeltaRows atomic.Uint64
+	plannerMainRows   atomic.Uint32
+	plannerDeltaRows  atomic.Uint64
+	pendingInsertRows atomic.Int64 // free-routing reservations, one charge/release per batch
 	// columns, deltaColumns, inserts, deletions and Indexes are shard-local
 	// internals guarded by mu. Code outside this file
 	// must treat s.mu as the only authority for shard-local state and must not
@@ -70,9 +71,8 @@ type storageShard struct {
 	//   - lazy-load attach state and next-shard dual-write publication helpers
 	// Reads take RLock snapshots; mutations, log replay, rebuild publish and
 	// repartition dual-write state updates take Lock.
-	mu         sync.RWMutex
-	uniquelock sync.Mutex                   // unique insert lock (only used in the sharded case)
-	next       atomic.Pointer[storageShard] // rebuild successor published lock-free to concurrent writers
+	mu   sync.RWMutex
+	next atomic.Pointer[storageShard] // rebuild successor published lock-free to concurrent writers
 	// nextReady separates rebuild publication from direct maintenance forwarding.
 	// While false, writers only mutate this shard; rebuild catches up from the
 	// appended delta rows and pending delete recids before setting it true.
@@ -3322,8 +3322,6 @@ func releaseUniqueLookupScratch(scratch *uniqueLookupScratch, columns int) {
 }
 
 func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxContext) (result uint32, present bool) {
-	// Preload main storages and establish main_count without holding any shard lock
-	t.ensureMainCount(false, currentTx)
 	columns := access.len()
 	scratch := acquireUniqueLookupScratch()
 	defer releaseUniqueLookupScratch(scratch, columns)
@@ -3333,12 +3331,38 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 	} else {
 		mcols = make([]ColumnStorage, columns)
 	}
-	for i := range mcols {
-		mcols[i] = t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx)
-	}
-
-	// From here on, read under shard read lock for a consistent snapshot of deletions/inserts/deltaColumns
 	t.mu.RLock()
+	ready := true
+	if t.main_count == 0 {
+		// Empty live shards need no main-load preflight. Check all declarations
+		// in this same snapshot so cold generations still establish their extent.
+		for _, declaration := range t.t.columnDeclarations() {
+			if column, present := t.columns[declaration.Name]; present && column == nil {
+				ready = false
+				break
+			}
+		}
+	}
+	for i := range mcols {
+		name := access.boundaryColumn(i)
+		column := t.columns[name]
+		if column == nil || t.needsRuntimeAttach(name, column) {
+			ready = false
+			break
+		}
+		mcols[i] = column
+	}
+	if !ready {
+		// Lazy loading/attachment may take the write lock. Release the snapshot
+		// first; already loaded columns share the lookup's single read lock.
+		t.mu.RUnlock()
+		t.ensureMainCount(false, currentTx)
+		for i := range mcols {
+			mcols[i] = t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx)
+		}
+		t.mu.RLock()
+	}
+	defer t.mu.RUnlock()
 
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 
@@ -3387,7 +3411,6 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 		return true
 	})
 
-	t.mu.RUnlock()
 	return
 }
 

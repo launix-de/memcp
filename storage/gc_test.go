@@ -911,7 +911,7 @@ func TestOverflowRebuildBlobSurvivesConcurrentClean(t *testing.T) {
 		defer close(rebuildDone)
 		// Force the overflow branch regardless of the configured ShardSize:
 		// this is exactly what an oversized upload triggers organically.
-		published, _ := tbl.appendFreeShardDurably(topology, source, Settings.ShardSize+1)
+		published, _ := tbl.appendFreeShardDurably(topology, source, Settings.ShardSize+1, false)
 		if published != nil {
 			topology.releaseOperation()
 		}

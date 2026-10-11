@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Multi-shard test cases
 # Exercises code paths that only run when tables exceed ShardSize (60000 rows):
 # - iterateShards parallel scan (storage/partition.go)
@@ -325,5 +327,41 @@ test_cases:
         - id: 70000
           val: 70000
 
+  - name: "Concurrent INSERT writers preserve all rows"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ms_insert_writers"
+      - sql: "CREATE TABLE ms_insert_writers (id INT PRIMARY KEY, worker INT) ENGINE=safe"
+    scm: |
+      (begin
+        (set target (table "memcp-tests" "ms_insert_writers"))
+        (parallelN 4 (lambda (worker)
+          (reduce (produceN 128) (lambda (count i)
+            (+ count (insert target '("id" "worker")
+              (list (list (+ 1 i (* worker 128)) worker))))) 0))))
+    expect:
+      rows: 1
+      data: [[128, 128, 128, 128]]
+
+  - name: "Concurrent INSERT count and key checksum"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS checksum FROM ms_insert_writers"
+    expect:
+      rows: 1
+      data: [{cnt: 512, checksum: 131328}]
+
+  - name: "Concurrent INSERT leaves duplicate protection active"
+    sql: "INSERT INTO ms_insert_writers VALUES (1, 9)"
+    expect:
+      error: true
+
+  - name: "Rebuild concurrent INSERT result"
+    scm: "(rebuild)"
+
+  - name: "Concurrent INSERT checksum survives rebuild"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS checksum FROM ms_insert_writers"
+    expect:
+      rows: 1
+      data: [{cnt: 512, checksum: 131328}]
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS ms_insert_writers"
   - sql: "DROP TABLE IF EXISTS `ms_data`"

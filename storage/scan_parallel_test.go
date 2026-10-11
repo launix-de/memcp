@@ -190,10 +190,7 @@ func TestGeneratedUniqueKeySkipReleasesOuterLockOnPanic(t *testing.T) {
 			if caught != "insert callback failed" {
 				t.Fatalf("expected callback panic, got %v", caught)
 			}
-			if !tbl.uniquelock.TryLock() {
-				t.Fatal("skipping a generated unique key retained the outer unique lock")
-			}
-			tbl.uniquelock.Unlock()
+			assertUniqueWriteLocksReleased(t, tbl)
 		})
 	}
 }
@@ -220,10 +217,7 @@ func TestMultipleUniqueKeysReleaseOuterLockOnCallbackPanic(t *testing.T) {
 			t.Fatalf("insert callback panic retained %d cache read leases", got)
 		}
 	}
-	if !tbl.uniquelock.TryLock() {
-		t.Fatal("callback panic after multiple unique checks retained the outer unique lock")
-	}
-	tbl.uniquelock.Unlock()
+	assertUniqueWriteLocksReleased(t, tbl)
 }
 
 func TestMultipleUniqueKeysReleaseOuterLockOnCollisionPanic(t *testing.T) {
@@ -250,10 +244,7 @@ func TestMultipleUniqueKeysReleaseOuterLockOnCollisionPanic(t *testing.T) {
 			t.Fatalf("collision callback panic retained %d cache read leases", got)
 		}
 	}
-	if !tbl.uniquelock.TryLock() {
-		t.Fatal("collision callback panic after multiple unique checks retained the outer unique lock")
-	}
-	tbl.uniquelock.Unlock()
+	assertUniqueWriteLocksReleased(t, tbl)
 }
 
 func TestIterateShardsParallelMarksFreeSingleShardSolo(t *testing.T) {
@@ -1061,5 +1052,19 @@ func TestReserveIDsPersistedPrefixRecovery(t *testing.T) {
 	next := scm.Apply(reserve, NewTableScmer(reloaded), scm.NewInt(1)).Slice()
 	if next[0].Int() != 2 || next[1].Int() != 2 {
 		t.Fatalf("unlogged suffix was not recovered from persisted IDs: %v", next)
+	}
+}
+
+func assertUniqueWriteLocksReleased(t *testing.T, tbl *table) {
+	t.Helper()
+	locks := tbl.uniqueWrites.Load()
+	if locks == nil {
+		return
+	}
+	for i := range locks {
+		if !locks[i].TryLock() {
+			t.Fatalf("unique stripe %d retained after callback panic", i)
+		}
+		locks[i].Unlock()
 	}
 }

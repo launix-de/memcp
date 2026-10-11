@@ -662,8 +662,8 @@ func (snap shardPartitionSnapshot) partition(schema []shardDimension) (result ma
 func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimension, shouldChange bool) { // this happens inside t.mu.Lock()
 	// reevaluate partitioning schema
 	for _, c := range t.Columns {
-		if c.PartitioningScore > 0 {
-			shardCandidates = append(shardCandidates, shardDimension{c.Name, c.PartitioningScore, nil})
+		if score := c.PartitioningScore + int(c.partitioningTraffic.Load()); score > 0 {
+			shardCandidates = append(shardCandidates, shardDimension{c.Name, score, nil})
 		}
 	}
 	if len(shardCandidates) == 0 || Settings.PartitionMaxDimensions <= 0 {
