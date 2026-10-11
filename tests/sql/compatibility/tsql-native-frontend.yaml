@@ -839,6 +839,45 @@ test_cases:
     sql: SET ANSI_NULLS OFF
     expect: {error: true}
 
+  - name: ANSI NULL startup setting accepts the existing three-valued semantics
+    sql: SET ANSI_NULLS ON
+    expect: {rows: 0}
+  - name: Repeated startup declarations remain case insensitive
+    sql: set ansi_nulls on
+    expect: {rows: 0}
+  - name: NULL equality and inequality stay unknown while IS NULL stays true
+    sql: SELECT CASE WHEN NULL=NULL THEN 1 ELSE 0 END AS equal_null, CASE WHEN NULL<>1 THEN 1 ELSE 0 END AS different_null, CASE WHEN NULL IS NULL THEN 1 ELSE 0 END AS is_null
+    expect: {rows: 1, data: [{equal_null: 0, different_null: 0, is_null: 1}]}
+  - name: Quoted identifier startup setting accepts the existing lexical rules
+    sql: SET QUOTED_IDENTIFIER ON
+    expect: {rows: 0}
+  - name: Quoted identifiers retain escaped quotes in native DDL
+    setup:
+      - sql: DROP TABLE IF EXISTS "startup identifiers"
+    sql: CREATE TABLE "startup identifiers" ("quoted""column" INT, "select" NVARCHAR(20))
+    expect: {rows: 0}
+  - name: Quoted identifier spelling uses native insert and string literals
+    sql: INSERT INTO "startup identifiers" ("quoted""column","select") VALUES (7,N'ordinary literal')
+    expect: {affected_rows: 1}
+  - name: Quoted projections retain their declared output names
+    sql: SELECT "quoted""column","select" FROM "startup identifiers"
+    expect: {rows: 1, data: [{'quoted"column': 7, select: ordinary literal}]}
+  - name: Double quoted text is an identifier rather than a string literal
+    sql: SELECT "absent identifier" FROM "startup identifiers"
+    expect: {error: true}
+  - name: Unsupported nonstandard NULL comparisons are rejected
+    sql: SET ANSI_NULLS OFF
+    expect: {error: true}
+  - name: Unsupported double quoted string mode is rejected
+    sql: SET QUOTED_IDENTIFIER OFF
+    expect: {error: true}
+  - name: Startup declarations reject values outside the fixed ON mode
+    sql: SET ANSI_NULLS 1
+    expect: {error: true}
+  - name: Startup declarations reject trailing unparsed text
+    sql: SET QUOTED_IDENTIFIER ON extra
+    expect: {error: true}
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: DROP TABLE IF EXISTS tsql_cast_collation

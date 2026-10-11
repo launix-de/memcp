@@ -1068,6 +1068,11 @@ never from the first row. Unknown expression types stay text in this first slice
 		(parser '((atom "SET" true) (atom "NOCOUNT" true)
 			(define enabled (or (parser (atom "ON" true) true) (parser (atom "OFF" true) false))))
 			(list (quote session) "__tsql_nocount" enabled))
+		/* These ON modes are the frontend's fixed comparison and lexical rules.
+		Accept the declarations without adding state or branches to row execution;
+		OFF and other settings remain explicit unsupported syntax. */
+		(parser '((atom "SET" true) (or (atom "ANSI_NULLS" true) (atom "QUOTED_IDENTIFIER" true))
+			(atom "ON" true)) (list (quote quote) nil))
 		(parser '((atom "USE" true) (define name tsql_identifier)) (begin
 			(if policy (policy name true false) true)
 			(list (quote session) "schema" name)))
