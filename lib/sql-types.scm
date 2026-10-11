@@ -30,7 +30,7 @@ A descriptor is (FORMULA TYPE COLLATION):
 /* ---- type predicates ---- */
 
 (define sql_text_type? (lambda (type)
-	(has? '("CHAR" "VARCHAR" "TEXT" "TINYTEXT" "MEDIUMTEXT" "LONGTEXT"
+	(has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "NTEXT" "TEXT" "TINYTEXT" "MEDIUMTEXT" "LONGTEXT"
 		"ENUM" "SET" "BINARY" "VARBINARY" "BLOB" "TINYBLOB" "MEDIUMBLOB" "LONGBLOB") type)))
 
 (define sql_numeric_type? (lambda (type)
@@ -119,6 +119,9 @@ Each entry is (HEAD TYPE MODE):
 - "case"   : like "merge" but over the value arms only (IF/searched CASE) */
 
 (define sql_core_function_rules (list
+	/* Frontend text conversion owns its return type and inherits the input's
+	declared collation. Neither comes from the converted runtime value. */
+	(list (quote tsql_cast_text) "VARCHAR" "first")
 	(list (quote sql_compare) "BOOLEAN" "fixed")
 	(list (quote count) "BIGINT" "fixed")
 	(list (quote if) "NULL" "case")
@@ -306,17 +309,27 @@ keeps its existing (ignorecase-flagged) resolution for them. */
 			(sql_info original "any" nil)
 			(sql_source_column_info src original tblvar col col_ic)))))
 
-/* Comparison: BOOLEAN. The formula stays plain (canonical operands); the merged
-operand collation rides in the info slot so a consumer can pick the Less
-relation for scan bounds / ORDER without re-deriving it. */
+/* Comparison: BOOLEAN. Preserve plain operators for direct scan bounds;
+computed text comparisons use the compile-time selected Less relation. The
+merged collation remains in the info slot for other compiler consumers. */
 (define sql_comparison_info (lambda (head left_info right_info)
 	(begin
 		(define lt (sql_info_type left_info))
 		(define rt (sql_info_type right_info))
 		(define plain (list head (sql_info_formula left_info) (sql_info_formula right_info)))
 		(if (and (sql_text_type? lt) (sql_text_type? rt))
-			(sql_info plain "BOOLEAN"
-				(sql_merge_collation (sql_info_collation left_info) (sql_info_collation right_info)))
+			(begin
+				(define collation (sql_merge_collation (sql_info_collation left_info) (sql_info_collation right_info)))
+				/* Direct column/literal comparisons retain their operator shape
+				for storage bounds. Computed text needs the compiler-selected
+				relation in its residual scalar comparison too. */
+				(define computed? (lambda (info) (begin
+					(define formula (sql_info_formula info))
+					(and (not (sql_column_ref? formula)) (not (empty_list? (query_expr_alias_set "" formula '())))))))
+				(sql_info (if (or (computed? left_info) (computed? right_info))
+					(list (quote sql_compare) (sql_info_formula left_info) (sql_info_formula right_info)
+						(collate (if (nil? collation) "bin" (car collation)) false) (string head))
+					plain) "BOOLEAN" collation))
 			(sql_info plain "BOOLEAN" nil)))))
 
 /* IF / searched CASE lowers to (if cond1 val1 cond2 val2 ... else). Only the
@@ -366,7 +379,10 @@ the conditions are booleans and would otherwise pollute the merge. */
 		/* Frontends attach the declared contract to their conversion formula.
 		Resolve the operand normally; only its executable formula survives. */
 		((symbol sql_type_expr) formula type collation)
-		(sql_info (sql_info_formula (sql_expr_info sources formula)) type collation)
+		(begin
+			(define info (sql_expr_info sources formula))
+			(sql_info (sql_info_formula info) type
+				(if (and (sql_text_type? type) (nil? collation)) (sql_info_collation info) collation)))
 		((symbol session) _key) (sql_info expr "any" nil)
 		((symbol session_globalvar) _key) (sql_info expr "any" nil)
 		((symbol lambda) _params _body) (sql_info expr "any" nil)
@@ -374,17 +390,18 @@ the conditions are booleans and would otherwise pollute the merge. */
 		_ (sql_info expr (sql_type_of_literal expr)
 			(if (string? expr) (list "utf8mb4_general_ci" 4) nil)))))
 
-/* NULL-safe comparison primitive emitted by sql_comparison_info. The Less
+/* NULL-propagating comparison primitive emitted by sql_comparison_info. The Less
 relation and operator string are resolved at plan time. */
-(define sql_compare (lambda (left right less operator collation)
+(define sql_compare (lambda (left right less operator)
 	(if (or (nil? left) (nil? right)) nil
-		(if (equal? operator "equal??") (and (not (less left right)) (not (less right left)))
-			(if (equal? operator "equal?") (and (not (less left right)) (not (less right left)))
-				(if (equal? operator "<") (less left right)
-					(if (equal? operator ">") (less right left)
-						(if (equal? operator "<=") (not (less right left))
-							(if (equal? operator ">=") (not (less left right))
-								(error "unsupported SQL comparison"))))))))))
+		(or (equal? operator "equal??") (equal? operator "equal?"))
+		(and (not (less left right)) (not (less right left)))
+		(equal? operator "<") (less left right)
+		(equal? operator ">") (less right left)
+		(equal? operator "<=") (not (less right left))
+		(equal? operator ">=") (not (less left right))
+		(error "unsupported SQL comparison"))))
+
 
 /* ---- query-block level type resolution ----
 

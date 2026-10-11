@@ -377,7 +377,6 @@ test_cases:
     data:
     - a: 5
       b: '123'
-  noncritical: true
 - name: TSQL standard aggregates
   sql: SELECT COUNT(*) AS n, SUM(val) AS total, AVG(val) AS average FROM tsql_data
   expect:
@@ -587,14 +586,12 @@ test_cases:
     rows: 1
     data:
     - value: abc
-  noncritical: true
 - name: CONCAT treats NULL as empty string
   sql: SELECT CONCAT(N'a',NULL,N'b') AS value
   expect:
     rows: 1
     data:
     - value: ab
-  noncritical: true
 - name: Invalid integer cast is rejected
   sql: SELECT CAST(N'garbage' AS INT)
   expect:
@@ -996,7 +993,6 @@ test_cases:
     data:
     - separator: 2026-7
       suffix: 7x
-  noncritical: true
 - name: Unicode character arithmetic keeps national text
   sql: SELECT N'Grüße '+'🐘' AS text
   expect:

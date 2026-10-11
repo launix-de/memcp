@@ -133,7 +133,6 @@ test_cases:
     rows: 1
     data:
     - value: '2018-03-15 00:00:00'
-  noncritical: true
 - name: Four digit local date
   sql: SELECT CONVERT(DATE,N'15.03.2026',104) AS value
   expect:
@@ -911,10 +910,32 @@ test_cases:
   name: Fixture cleanup for Offset FOREIGN KEY uses canonical instants and keeps cascade payloads (1)
 - sql: DROP TABLE IF EXISTS tsql_offset_parent
   name: Fixture cleanup for Offset FOREIGN KEY uses canonical instants and keeps cascade payloads (2)
+- name: Export style uses two digit year cutoff
+  sql: SELECT YEAR(CONVERT(DATETIME,N'01.02.49',4)) AS below, YEAR(CONVERT(DATETIME,N'01.02.50',4)) AS
+    above
+  expect:
+    rows: 1
+    data:
+    - below: 2049
+      above: 1950
+- name: Export style validates calendar dates
+  sql: SELECT CONVERT(DATETIME,N'31.02.18',4)
+  expect:
+    error: true
+- name: Export style translates afternoon clock
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'15.03.18 01:02:03 PM',4),120) AS clock, CONVERT(VARCHAR(19),CONVERT(DATETIME,NULL,4),120)
+    AS missing
+  expect:
+    rows: 1
+    data:
+    - clock: '2018-03-15 13:02:03'
+      missing: null
+
 - sql: DROP TABLE IF EXISTS tsql_clock_defaults
   name: 'Fixture cleanup 001: DROP TABLE IF EXISTS tsql_clock_defaults'
 - sql: DROP TABLE IF EXISTS tsql_temporal_data
   name: 'Fixture cleanup 002: DROP TABLE IF EXISTS tsql_temporal_data'
 - sql: DROP TABLE tsql_fractional_data
   name: 'Fixture cleanup 003: DROP TABLE tsql_fractional_data'
+
 cleanup: []

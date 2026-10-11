@@ -133,9 +133,21 @@ runtime and storage hot paths; do not substitute float64 for exact casts. */
 		(if (and (string? value) (equal? (toUpper (sql_trim value)) "TRUE")) true
 			(if (and (string? value) (equal? (toUpper (sql_trim value)) "FALSE")) false
 				(not (equal? (tsql_numeric_input value) 0)))))))
+/* Character casts own their width semantics in the frontend. National text
+counts UTF-16 units and never returns half of a supplementary character. The
+fast path avoids splitting the ordinary short numeric/text conversions. */
+(define tsql_cast_text (lambda (value length national) (if (nil? value) nil (begin
+	(define text (string value))
+	(if (or (equal? length -1) (<= (strlen text) length)) text
+		(cadr (reduce (split text "") (lambda (prefix character) (begin
+			(define units (if national (if (equal? (strlen character) 4) 2 1) (strlen character)))
+			(if (< (car prefix) units) (list 0 (cadr prefix))
+				(list (- (car prefix) units) (concat (cadr prefix) character)))))
+			(list length ""))))))))
 /* A cast keeps its syntax-declared SQL type until the shared expression
 compiler consumes the (expr, type, collation) contract. Runtime values do not
 select that type, and no arithmetic operation is needed merely to mark it. */
+
 (define tsql_cast_expr (lambda (value type dimensions) (begin
 	(define name (toUpper type))
 	(tsql_decl_dimensions name dimensions)
@@ -150,8 +162,47 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		dialect precision boundaries remain noncritical compatibility work. */
 		"REAL" (list tsql_cast_float value)
 		"BIT" (list tsql_cast_bit value)
+		"VARCHAR" (tsql_cast_text_expr value dimensions false)
+		"NVARCHAR" (tsql_cast_text_expr value dimensions true)
 		_ (error "unsupported conversion to " name)))
 	(list (quote sql_type_expr) formula name nil))))
+(define tsql_cast_text_expr (lambda (value dimensions national) (begin
+	/* A CAST without a length defaults to 30, unlike a column declaration.
+	The expression compiler's explicit function contract supplies the text
+	type and input collation; no runtime operation is emitted to mark a type. */
+	(define length (if (empty_list? dimensions) 30 (car dimensions)))
+	(if (and (plain_literal_expr? value) (sql_numeric_type? (sql_info_type (sql_expr_info '() value)))
+		(not (equal? length -1)) (> (strlen (string value)) length))
+		(error "numeric character conversion overflow") true)
+	(list (quote tsql_cast_text) value length national))))
+/* Export-style day/month/year spelling is a frontend concern. Parse into Unix
+seconds with the existing date primitives; no temporal runtime type is added.
+Two-digit years use the default 1950..2049 window. Fractional precision and the
+configurable cutoff remain separate compatibility work. */
+(define tsql_export_datetime_seconds (lambda (value) (if (nil? value) nil (begin
+	(define text (toUpper (sql_trim (string value))))
+	(if (regexp_test text "^[0-9]{2}[.-][0-9]{2}[.-][0-9]{2}( [0-9]{2}:[0-9]{2}:[0-9]{2}( (AM|PM))?)?$")
+		true (error "invalid day/month/year datetime text"))
+	(define year (substr text 6 2))
+	(define date (concat (if (< (tsql_parse_integer year) 50) "20" "19") year "-" (substr text 3 2) "-" (substr text 0 2)))
+	(define clock (if (equal? (strlen text) 8) "00:00:00" (substr text 9 8)))
+	(define clock (if (> (strlen text) 17) (begin
+		(define hour (tsql_parse_integer (substr clock 0 2)))
+		(if (> hour 12) (error "invalid twelve-hour datetime text") true)
+		(define hour (+ (mod hour 12) (if (equal? (substr text 18 2) "PM") 12 0)))
+		(concat (if (< hour 10) "0" "") hour (substr clock 2 6))) clock))
+	(define parsed (str_to_date (concat date " " clock) "%Y-%m-%d %H:%i:%s"))
+	(if (nil? parsed) (error "invalid datetime value") (unix_timestamp parsed))))))
+(define tsql_convert_expr (lambda (value type dimensions style)
+	(if (or (nil? style) (equal? style 0)) (tsql_cast_expr value type dimensions)
+		(begin
+			(tsql_decl_dimensions type dimensions)
+			(match (list type style)
+				'("DATETIME" 4) (list (quote from_unixtime) (list tsql_export_datetime_seconds value))
+				'(text_type 120) (if (has? '("VARCHAR" "NVARCHAR") text_type)
+					(tsql_cast_expr (list format_date value "%Y-%m-%d %H:%i:%s") text_type dimensions)
+					(error "unsupported CONVERT style for " text_type))
+				_ (error "unsupported CONVERT style: " style))))))
 /* Window inputs must be plain formulas before the common planner derives
 aggregate identities. Consume their expression triples here and keep the
 window result contract separately until shared expression compilation. */
@@ -169,6 +220,7 @@ window result contract separately until shared expression compilation. */
 	(if (equal? type "any") formula
 		(list (quote sql_type_expr) formula type
 			(if (empty_list? infos) nil (sql_info_collation (car infos))))))))
+
 (define tsql_negate_expr (lambda (value) (begin
 	/* Constant operands and the syntax-declared range suffice to diagnose
 	negation overflow without runtime SQL tags or ordinary arithmetic checks. */
@@ -180,19 +232,24 @@ window result contract separately until shared expression compilation. */
 		_ true)
 	(if (has? '("BOOLEAN" "BOOL" "BIT" "VARCHAR" "CHAR") (sql_info_type (sql_expr_info (list) value)))
 		(error "unary minus requires a numeric operand") (list (quote -) 0 value)))))
+(define tsql_key_placement (parser (? (or (atom "CLUSTERED" true) (atom "NONCLUSTERED" true)))))
+(define tsql_key_columns (parser (define columns (+ (parser '(
+	(define name tsql_identifier) (? (or (atom "ASC" true) (atom "DESC" true)))) name) ",")) columns))
+(define tsql_default_literal (parser (or
+	(parser '("(" (define value tsql_default_literal) ")") value) tsql_literal)))
+(define tsql_clock_default (parser (or
+	(parser '("(" tsql_clock_default ")") true)
+	'((atom "GETDATE" true) "(" ")") (atom "CURRENT_TIMESTAMP" true))))
 (define tsql_column_attributes (parser (define attrs (* (or
-	(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true "null" false))
-	(parser (atom "UNIQUE" true) '("unique" true))
+	(parser '((atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement) '("primary" true "null" false))
+	(parser '((atom "UNIQUE" true) tsql_key_placement) '("unique" true))
 	(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 	(parser (atom "NULL" true) '("null" true))
 	(parser '((atom "IDENTITY" true) (? "(" (define seed tsql_int) "," (define increment tsql_int) ")"))
 		(if (and (or (nil? seed) (equal? seed 1)) (or (nil? increment) (equal? increment 1)))
 			'("auto_increment" true) (error "IDENTITY currently requires seed and increment 1")))
-	(parser '((atom "DEFAULT" true) (or
-		'((atom "GETDATE" true) "(" ")")
-		'("(" (atom "GETDATE" true) "(" ")" ")"))) '("default_expression" "CURRENT_TIMESTAMP"))
-	(parser '((atom "DEFAULT" true) (define value (or
-		(parser '("(" (define constant tsql_literal) ")") constant) tsql_literal))) '("default" value))
+	(parser '((atom "DEFAULT" true) tsql_clock_default) '("default_expression" "CURRENT_TIMESTAMP"))
+	(parser '((atom "DEFAULT" true) (define value tsql_default_literal)) '("default" value))
 ))) (merge attrs)))
 (define tsql_select_prefix (parser (? (atom "TOP" true)
 	(define top_count (or (parser '("(" (define n tsql_int) ")") n) sql_int)))
@@ -228,7 +285,7 @@ never from the first row. Unknown expression types stay text in this first slice
 	"ISNULL" coalesceNil
 	"GETDATE" now
 	"LEN" (lambda (value) (if (nil? value) nil (strlen (sql_rtrim value))))
-	_ (if (has? '("ABS" "CEILING" "FLOOR" "ROUND" "SQRT" "UPPER" "LOWER" "REPLACE" "SUBSTRING" "CONCAT") name)
+	_ (if (has? '("ABS" "CEILING" "FLOOR" "ROUND" "SQRT" "UPPER" "LOWER" "REPLACE" "SUBSTRING" "CONCAT" "YEAR" "MONTH" "DAY") name)
 		(sql_builtins name) nil))))
 
 (define parse_tsql (lambda (database s policy planning_session tx) (begin
@@ -341,8 +398,7 @@ never from the first row. Unknown expression types stay text in this first slice
 			(tsql_cast_expr value type dimensions))
 		(parser '((atom "CONVERT" true) "(" (define type tsql_column_type) (define dimensions tsql_type_dimensions)
 			"," (define value tsql_expression) (? "," (define style tsql_int)) ")")
-			(if (or (nil? style) (equal? style 0)) (tsql_cast_expr value type dimensions)
-				(error "unsupported CONVERT style: " style)))
+			(tsql_convert_expr value type dimensions style))
 
 		(parser '((atom "EXISTS" true) "(" (define sub tsql_select) ")") '('inner_select_exists sub))
 
@@ -371,7 +427,8 @@ never from the first row. Unknown expression types stay text in this first slice
 
 		(parser '((atom "SUBSTRING" true) "(" (define s tsql_expression) "," (define start tsql_expression) "," (define len tsql_expression) ")") '((quote sql_substr) s start len))
 
-		(parser '((atom "CONCAT" true) "(" (define p (+ tsql_expression ",")) ")") (cons 'sql_concat p))
+		(parser '((atom "CONCAT" true) "(" (define p (+ tsql_expression ",")) ")")
+			(cons (quote concat) (map p (lambda (value) (list (quote coalesceNil) value "")))))
 
 		(parser '((atom "TRIM" true) "(" (define e tsql_expression) ")") '((quote sql_trim) e))
 		(parser '((atom "LTRIM" true) "(" (define e tsql_expression) ")") '((quote sql_ltrim) e))
@@ -382,6 +439,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		(parser '((atom "NULLIF" true) "(" (define a tsql_expression) "," (define b tsql_expression) ")") '((quote if) '((quote equal??) a b) nil a))
 
 		(parser (atom "NULL" true) (sql_null_literal))
+		(parser (atom "CURRENT_TIMESTAMP" true) (list (quote now)))
 
 		(parser '((atom "@" true) (define var tsql_identifier_unquoted)) '('session (toLower var)))
 
@@ -651,10 +709,13 @@ never from the first row. Unknown expression types stay text in this first slice
 							(and preserved (contains? projected_exprs expr))) true)))))
 			(list (quote query-block) schema sources (merge cols) condition
 				(if (and distinct (not distinct_preserved_by_group)) projected_exprs group)
-				having order (if (nil? prefix_limit) (if suffix_stage (car suffix_stage) limit) prefix_limit)
+				having
+				order (if (nil? prefix_limit) (if suffix_stage (car suffix_stage) limit) prefix_limit)
 				(if suffix_stage (cadr suffix_stage) offset) '() '()
 				(merge (list
-
+					/* The common name binder resolves all joined/derived sources.
+					HAVING names belong to the input scope in this frontend. */
+					(list (list (quote having_input_scope) true))
 					(if distinct (list (list (quote select_distinct) true)) '())))))))
 
 	(define tsql_select (parser (or
@@ -848,10 +909,12 @@ never from the first row. Unknown expression types stay text in this first slice
 		(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
 		(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier)
 		"(" (define columns (+ (or
-			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define keys (+ tsql_identifier ",")) ")")
+			/* Placement and direction are physical index preferences. Logical
+			uniqueness uses native keys; MemCP selects its own columnar access. */
+			(parser '((atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement "(" (define keys tsql_key_columns) ")")
 				(list (quote list) "unique" "PRIMARY" (cons (quote list) keys)))
-			(parser '((atom "CONSTRAINT" true) (define key tsql_identifier) (atom "UNIQUE" true)
-				"(" (define keys (+ tsql_identifier ",")) ")")
+			(parser '((atom "CONSTRAINT" true) (define key tsql_identifier) (atom "UNIQUE" true) tsql_key_placement
+				"(" (define keys tsql_key_columns) ")")
 				(list (quote list) "unique" key (cons (quote list) keys)))
 			foreign_key_definition
 			(parser (define column column_definition) (match column '(name type dimensions attributes)
@@ -865,11 +928,17 @@ never from the first row. Unknown expression types stay text in this first slice
 		(atom "ALTER" true) (atom "TABLE" true)
 		(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier)
 		(define changes (+ (or
-			(parser '((atom "ADD" true) (define column column_definition))
-				(match column '(col type dimensions attributes)
-					(lambda (database name)
-						(list (quote sql_create_column) (list (quote table) database name)
-							col type dimensions (cons (quote list) (sql_add_column_attributes attributes))))))
+			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define key tsql_identifier)
+				(atom "UNIQUE" true) tsql_key_placement "(" (define columns tsql_key_columns) ")")
+				(lambda (database name)
+					(list (quote createkey) (list (quote table) database name) key true
+						(cons (quote list) columns) (quote tx))))
+			(parser '((atom "ADD" true) (define columns (+ column_definition ",")))
+				(lambda (database name)
+					(cons (quote !begin) (map columns (lambda (column)
+						(match column '(col type dimensions attributes)
+							(list (quote sql_create_column) (list (quote table) database name)
+								col type dimensions (cons (quote list) (sql_add_column_attributes attributes)))))))))
 			(parser '((atom "DROP" true) (atom "COLUMN" true) (define col tsql_identifier))
 				(lambda (database name)
 					(list (quote altertable) (list (quote table) database name) "drop" col)))
