@@ -23,6 +23,8 @@ setup:
   - sql: INSERT INTO tsql_index_duplicates VALUES (1,9),(2,9)
   - sql: CREATE TABLE tsql_index_nulls (id INT PRIMARY KEY,value INT)
   - sql: INSERT INTO tsql_index_nulls VALUES (1,NULL)
+  - sql: DROP TABLE IF EXISTS tsql_assignment_probe
+  - sql: CREATE TABLE tsql_assignment_probe (id INT PRIMARY KEY,tiny TINYINT,amount DECIMAL(5,2))
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: CREATE TABLE tsql_having_input (id INT PRIMARY KEY)
   - sql: INSERT INTO tsql_having_input VALUES (1)
@@ -797,6 +799,69 @@ test_cases:
     sql: INSERT tsql_native_copy (id,name) VALUES (99,N'optional keyword')
     expect: {rows: 1}
     noncritical: true
+  - name: Numeric assignments use native target declarations
+    sql: INSERT INTO tsql_assignment_probe VALUES (1,255,999.994)
+    expect: {affected_rows: 1}
+  - name: Assignment limits retain supported native decimal rounding
+    sql: SELECT tiny,amount FROM tsql_assignment_probe WHERE id=1
+    expect: {rows: 1, data: [{tiny: 255, amount: 999.99}]}
+  - name: Integer assignment overflow does not reach native insertion
+    sql: INSERT INTO tsql_assignment_probe VALUES (2,256,1)
+    expect: {error: true, contains: integer conversion overflow}
+  - name: Decimal assignment overflow does not reach native insertion
+    sql: INSERT INTO tsql_assignment_probe VALUES (3,1,1000)
+    expect: {error: true, contains: decimal conversion overflow}
+  - name: Decimal rounding carry cannot exceed positive precision
+    sql: INSERT INTO tsql_assignment_probe VALUES (4,1,999.995)
+    expect: {error: true, contains: decimal conversion overflow}
+  - name: Decimal rounding carry cannot exceed negative precision
+    sql: INSERT INTO tsql_assignment_probe VALUES (5,1,-999.995)
+    expect: {error: true, contains: decimal conversion overflow}
+  - name: Nullable assignment retains SQL NULL
+    sql: INSERT INTO tsql_assignment_probe SELECT 6,NULL,NULL
+  - name: Null conversion does not inherit a numeric runtime value
+    sql: SELECT tiny,amount FROM tsql_assignment_probe WHERE id=6
+    expect: {rows: 1, data: [{tiny: null, amount: null}]}
+  - name: Assignment converts valid numeric text through the frontend
+    sql: INSERT INTO tsql_assignment_probe VALUES (7,N'12',N'2.125')
+  - name: Converted numeric text retains target values
+    sql: SELECT tiny,amount FROM tsql_assignment_probe WHERE id=7
+    expect: {rows: 1, data: [{tiny: 12, amount: 2.13}]}
+  - name: Invalid integer text cannot use native permissive coercion
+    sql: INSERT INTO tsql_assignment_probe VALUES (8,N'12x',1)
+    expect: {error: true, contains: invalid integer text}
+  - name: Values assignment failure does not publish an earlier valid row
+    sql: INSERT INTO tsql_assignment_probe VALUES (9,9,9),(10,256,10)
+    expect: {error: true, contains: integer conversion overflow}
+  - name: Select assignment failure rolls back earlier native writes
+    sql: INSERT INTO tsql_assignment_probe SELECT 11,11,11 UNION ALL SELECT 12,256,12
+    expect: {error: true, contains: integer conversion overflow}
+  - name: Rejected assignments retain the existing native transaction boundary
+    sql: SELECT COUNT(*) AS n FROM tsql_assignment_probe
+    expect: {rows: 1, data: [{n: 3}]}
+  - name: Update numeric contracts use the same target declaration
+    sql: UPDATE tsql_assignment_probe SET tiny=tiny+1 WHERE id=1
+    expect: {error: true, contains: integer conversion overflow}
+  - name: Update decimal overflow is checked by the frontend
+    sql: UPDATE tsql_assignment_probe SET amount=1000 WHERE id=1
+    expect: {error: true, contains: decimal conversion overflow}
+  - name: Rejected updates preserve existing native row values
+    sql: SELECT tiny,amount FROM tsql_assignment_probe WHERE id=1
+    expect: {rows: 1, data: [{tiny: 255, amount: 999.99}]}
+  - name: Insert select checks projected arity before writing
+    sql: INSERT INTO tsql_assignment_probe SELECT 20,1
+    expect: {error: true, contains: INSERT column count does not match SELECT column count}
+  - name: Folded target names resolve to native declarations
+    sql: INSERT INTO tsql_assignment_probe ([ID],[TINY],[AMOUNT]) VALUES (20,20,20)
+  - name: Folded target names retain native storage names
+    sql: SELECT tiny,amount FROM tsql_assignment_probe WHERE id=20
+    expect: {rows: 1, data: [{tiny: 20, amount: 20}]}
+  - name: Compiled numeric assignments contain expressions without SQL type wrappers
+    scm: |
+      (not (regexp_test
+        (string (parse_tsql "memcp-tests" "INSERT INTO tsql_assignment_probe VALUES (21,21,21)" nil nil nil))
+        "sql_type_expr"))
+    expect: {result: true}
   - name: Alter adds an enforced named unique through native keys
     sql: ALTER TABLE tsql_setup_columns ADD CONSTRAINT setup_unique_revision UNIQUE (tenant ASC,revision DESC)
     expect: {rows: 0}
@@ -1222,6 +1287,7 @@ cleanup:
   - sql: DROP TABLE IF EXISTS tsql_index_rows
   - sql: DROP TABLE IF EXISTS tsql_index_duplicates
   - sql: DROP TABLE IF EXISTS tsql_index_nulls
+  - sql: DROP TABLE IF EXISTS tsql_assignment_probe
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: DROP TABLE IF EXISTS tsql_cast_collation
   - sql: DROP TABLE IF EXISTS tsql_setup_catalog
