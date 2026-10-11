@@ -791,6 +791,54 @@ test_cases:
     sql: SELECT CAST('7' AS [sys].[INT]) AS value
     expect: {rows: 1, data: [{value: 7}]}
 
+  - name: NOCOUNT controls completion while native writes and rows remain visible
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (s "schema" "memcp-tests")
+        (define output (newsession))
+        (define run (lambda (text) (tds_frontend "execute" s
+          (list "database" "memcp-tests" "text" text "declarations" "" "parameters" (list))
+          (lambda (row) (output (concat "id:" (string (car row))) true))
+          (lambda fields true) nil nil)))
+        (define setting (run "SET NOCOUNT ON"))
+        (define write (run "UPDATE tsql_native SET amount=amount+1 WHERE id=1"))
+        (define read (run "SELECT id FROM tsql_native"))
+        (and (setting "no_count") (write "no_count") (equal? (write "rows") 1)
+          (read "no_count") (output "id:1") (output "id:2")))
+    expect: {result: true}
+  - name: NOCOUNT OFF restores native affected-row completion
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (define run (lambda (text) (tds_frontend "execute" s
+          (list "database" "memcp-tests" "text" text "declarations" "" "parameters" (list))
+          (lambda row true) (lambda fields true) nil nil)))
+        (run "SET NOCOUNT ON")
+        (run "SET NOCOUNT OFF")
+        (define write (run "UPDATE tsql_native SET amount=amount-1 WHERE id=1"))
+        (and (not (s "__tsql_nocount")) (nil? (write "no_count")) (equal? (write "rows") 1)))
+    expect: {result: true}
+  - name: Connection reset clears NOCOUNT using existing session replacement
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (s "schema" "memcp-tests")
+        (s "__tsql_nocount" true)
+        (define replacement (tds_frontend "reset" s nil nil nil nil nil))
+        (and (nil? (replacement "__tsql_nocount"))
+          (equal? (replacement "username") "root") (equal? (replacement "schema") "memcp-tests")))
+    expect: {result: true}
+  - name: NOCOUNT accepts only its declared ON OFF syntax
+    sql: SET NOCOUNT 1
+    expect: {error: true}
+  - name: Unsupported session semantics are rejected explicitly
+    sql: SET ANSI_NULLS OFF
+    expect: {error: true}
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: DROP TABLE IF EXISTS tsql_cast_collation
