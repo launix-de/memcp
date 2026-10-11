@@ -178,8 +178,10 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 	The expression compiler's explicit function contract supplies the text
 	type and input collation; no runtime operation is emitted to mark a type. */
 	(define length (if (empty_list? dimensions) 30 (car dimensions)))
-	(if (and (plain_literal_expr? value) (sql_numeric_type? (sql_info_type (sql_expr_info '() value)))
-		(not (equal? length -1)) (> (strlen (string value)) length))
+	(define info (sql_expr_info (list) value))
+	(define literal (sql_info_formula info))
+	(if (and (plain_literal_expr? literal) (sql_numeric_type? (sql_info_type info))
+		(not (equal? length -1)) (> (strlen (string literal)) length))
 		(error "numeric character conversion overflow") true)
 	(list (quote tsql_cast_text) value length national))))
 /* Export-style day/month/year spelling is a frontend concern. Parse into Unix
@@ -233,9 +235,11 @@ window result contract separately until shared expression compilation. */
 	negation overflow without runtime SQL tags or ordinary arithmetic checks. */
 	(match value
 		((symbol sql_type_expr) '(conversion operand minimum maximum) _type _collation)
-		(if (and (equal? conversion tsql_cast_integer) (plain_literal_expr? operand))
-			(if (and (< minimum 0) (equal? (tsql_cast_integer operand minimum maximum) minimum))
-				(error "unary integer conversion overflow") true) true)
+		(begin
+			(define literal (sql_info_formula (sql_expr_info (list) operand)))
+			(if (and (equal? conversion tsql_cast_integer) (plain_literal_expr? literal))
+				(if (and (< minimum 0) (equal? (tsql_cast_integer literal minimum maximum) minimum))
+					(error "unary integer conversion overflow") true) true))
 		_ true)
 	(if (has? '("BOOLEAN" "BOOL" "BIT" "VARCHAR" "CHAR") (sql_info_type (sql_expr_info (list) value)))
 		(error "unary minus requires a numeric operand") (list (quote -) 0 value)))))

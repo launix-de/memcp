@@ -260,21 +260,17 @@ memcp_log="${MEMCP_LOG:-$tmpdir/memcp.log}"
 echo "📁 Test diagnostics: $tmpdir"
 supervisor_generation_file="${MEMCP_TEST_SUPERVISOR_GENERATION_FILE:-/tmp/memcp-test-supervisor-$test_port.generation}"
 supervisor_pid=""
-enable_mysql=0
-
-for tf in "${test_files_arr[@]}"; do
-  if python3 - "$tf" <<'PY'
+read -r enable_mysql enable_tds < <(python3 - "${test_files_arr[@]}" <<'PYFLAGS'
 import sys, yaml
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    spec = yaml.safe_load(f) or {}
-metadata = spec.get("metadata", {}) if isinstance(spec, dict) else {}
-raise SystemExit(0 if metadata.get("requires_mysql") else 1)
-PY
-  then
-    enable_mysql=1
-    break
-  fi
-done
+metadata = []
+for path in sys.argv[1:]:
+    with open(path, "r", encoding="utf-8") as f:
+        spec = yaml.safe_load(f) or {}
+    metadata.append(spec.get("metadata", {}) if isinstance(spec, dict) else {})
+print(int(any(m.get("requires_mysql") for m in metadata)),
+      int(any(m.get("requires_tds") for m in metadata)))
+PYFLAGS
+)
 
 # Runner contract:
 # - All suites use one shared data directory so restart/persistence tests see
@@ -315,6 +311,9 @@ run_memcp_forever() {
     mysql_args=()
     if [ "$enable_mysql" -ne 1 ]; then
       mysql_args+=(--disable-mysql)
+    fi
+    if [ "$enable_tds" -eq 1 ]; then
+      mysql_args+=(--tds-port=$((test_port + 2000)) --tds-database=memcp-tests)
     fi
     ./memcp --no-repl -data "$test_data_dir" --api-port=$test_port --mysql-port=$((test_port + 1000)) "${mysql_args[@]}" lib/main.scm >> "$memcp_log" 2>&1 &
     memcp_pid=$!
