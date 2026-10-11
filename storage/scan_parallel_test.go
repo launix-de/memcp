@@ -17,8 +17,10 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -831,5 +833,32 @@ func TestUniqueChecksRejectCollisionsOutsideInsertPartition(t *testing.T) {
 				t.Fatalf("collision = %q, want %q", collision, tc.key)
 			}
 		})
+	}
+}
+
+func TestUniqueNullPolicyConcurrentInsert(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tnullkeyconcurrent")
+	tbl.CreateColumn("value", "INT", nil, []scm.Scmer{
+		scm.NewString("unique"), scm.NewBool(true),
+		scm.NewString("nulls_not_distinct"), scm.NewBool(true),
+	})
+	var successes atomic.Int64
+	var workers sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		workers.Add(1)
+		go func(id int) {
+			defer workers.Done()
+			defer func() {
+				if caught := recover(); caught != nil && !strings.Contains(fmt.Sprint(caught), "Duplicate entry") {
+					t.Errorf("unexpected insert failure: %v", caught)
+				}
+			}()
+			tbl.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(int64(id)), scm.NewNil()}}, nil, scm.NewNil(), false, nil)
+			successes.Add(1)
+		}(i)
+	}
+	workers.Wait()
+	if got := successes.Load(); got != 1 {
+		t.Fatalf("concurrent equal-NULL inserts succeeded %d times, want 1", got)
 	}
 }

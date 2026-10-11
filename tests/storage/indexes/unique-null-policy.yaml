@@ -1,0 +1,359 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Native UNIQUE key NULL equality selected by each SQL frontend
+  isolated: true
+test_cases:
+- name: Declare nkd_sql
+  syntax: sql
+  sql: CREATE TABLE nkd_sql (id INT PRIMARY KEY, v INT UNIQUE)
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_sql
+- name: sql default permits repeated NULL
+  syntax: sql
+  sql: INSERT INTO nkd_sql VALUES (1,NULL),(2,NULL)
+- name: sql first non NULL value
+  syntax: sql
+  sql: INSERT INTO nkd_sql VALUES (3,7)
+- name: sql default still rejects duplicate non NULL
+  syntax: sql
+  sql: INSERT INTO nkd_sql VALUES (4,7)
+  expect: &id001
+    error: true
+- name: Declare nkd_psql
+  syntax: psql
+  sql: CREATE TABLE nkd_psql (id INT PRIMARY KEY, v INT UNIQUE)
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_psql
+- name: psql default permits repeated NULL
+  syntax: psql
+  sql: INSERT INTO nkd_psql VALUES (1,NULL),(2,NULL)
+- name: psql first non NULL value
+  syntax: psql
+  sql: INSERT INTO nkd_psql VALUES (3,7)
+- name: psql default still rejects duplicate non NULL
+  syntax: psql
+  sql: INSERT INTO nkd_psql VALUES (4,7)
+  expect: *id001
+- name: Declare nkd_tsql
+  syntax: tsql
+  sql: CREATE TABLE nkd_tsql (id INT PRIMARY KEY, v INT UNIQUE)
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_tsql
+- name: T SQL first NULL
+  syntax: tsql
+  sql: INSERT INTO nkd_tsql VALUES (1,NULL)
+- name: T SQL repeated NULL rejected
+  syntax: tsql
+  sql: INSERT INTO nkd_tsql VALUES (2,NULL)
+  expect: *id001
+- name: Key policy also applies to SQL mode writers
+  syntax: sql
+  sql: INSERT INTO nkd_tsql VALUES (3,NULL)
+  expect: *id001
+- name: T SQL distinct non NULL
+  syntax: tsql
+  sql: INSERT INTO nkd_tsql VALUES (4,7)
+- name: UPDATE uses the same NULL policy
+  syntax: tsql
+  sql: UPDATE nkd_tsql SET v=NULL WHERE id=4
+  expect: *id001
+- name: Failed UPDATE preserves rows
+  syntax: tsql
+  sql: SELECT COUNT(*) AS n FROM nkd_tsql
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: Declare nkd_pg_equal
+  syntax: psql
+  sql: CREATE TABLE nkd_pg_equal (id INT PRIMARY KEY, v INT UNIQUE NULLS NOT DISTINCT)
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_pg_equal
+- name: Explicit equal NULL first insert
+  syntax: psql
+  sql: INSERT INTO nkd_pg_equal VALUES (1,NULL)
+- name: Explicit equal NULL repeated insert
+  syntax: psql
+  sql: INSERT INTO nkd_pg_equal VALUES (2,NULL)
+  expect: *id001
+- name: Declare nkd_pg_distinct
+  syntax: psql
+  sql: CREATE TABLE nkd_pg_distinct (id INT PRIMARY KEY, v INT UNIQUE NULLS DISTINCT)
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_pg_distinct
+- name: Explicit distinct NULL permits batch
+  syntax: psql
+  sql: INSERT INTO nkd_pg_distinct VALUES (1,NULL),(2,NULL)
+- name: Declare nkd_composite_psql
+  syntax: psql
+  sql: CREATE TABLE nkd_composite_psql (id INT PRIMARY KEY, a INT, b INT, CONSTRAINT nkd_composite_key UNIQUE NULLS
+    NOT DISTINCT (a,b))
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_composite_psql
+- name: psql composite different partial NULL keys
+  syntax: psql
+  sql: INSERT INTO nkd_composite_psql VALUES (1,NULL,1),(2,NULL,2)
+- name: psql composite identical partial NULL rejected
+  syntax: psql
+  sql: INSERT INTO nkd_composite_psql VALUES (3,NULL,1)
+  expect: *id001
+- name: psql all NULL composite first
+  syntax: psql
+  sql: INSERT INTO nkd_composite_psql VALUES (4,NULL,NULL)
+- name: psql all NULL composite repeated rejected
+  syntax: psql
+  sql: INSERT INTO nkd_composite_psql VALUES (5,NULL,NULL)
+  expect: *id001
+- name: psql composite update collision rejected
+  syntax: psql
+  sql: UPDATE nkd_composite_psql SET b=1 WHERE id=2
+  expect: *id001
+- name: Declare nkd_composite_tsql
+  syntax: tsql
+  sql: CREATE TABLE nkd_composite_tsql (id INT PRIMARY KEY, a INT, b INT, CONSTRAINT nkd_composite_key UNIQUE (a,b))
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_composite_tsql
+- name: tsql composite different partial NULL keys
+  syntax: tsql
+  sql: INSERT INTO nkd_composite_tsql VALUES (1,NULL,1),(2,NULL,2)
+- name: tsql composite identical partial NULL rejected
+  syntax: tsql
+  sql: INSERT INTO nkd_composite_tsql VALUES (3,NULL,1)
+  expect: *id001
+- name: tsql all NULL composite first
+  syntax: tsql
+  sql: INSERT INTO nkd_composite_tsql VALUES (4,NULL,NULL)
+- name: tsql all NULL composite repeated rejected
+  syntax: tsql
+  sql: INSERT INTO nkd_composite_tsql VALUES (5,NULL,NULL)
+  expect: *id001
+- name: tsql composite update collision rejected
+  syntax: tsql
+  sql: UPDATE nkd_composite_tsql SET b=1 WHERE id=2
+  expect: *id001
+- name: Declare nkd_mixed
+  syntax: psql
+  sql: CREATE TABLE nkd_mixed (id INT PRIMARY KEY, a INT UNIQUE NULLS NOT DISTINCT, b INT UNIQUE NULLS DISTINCT)
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_mixed
+- name: Equal NULL policy stays local to first key
+  syntax: psql
+  sql: INSERT INTO nkd_mixed VALUES (1,1,NULL),(2,2,NULL)
+- name: Declare nkd_batch
+  syntax: psql
+  sql: CREATE TABLE nkd_batch (id INT PRIMARY KEY, v INT UNIQUE NULLS NOT DISTINCT)
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_batch
+- name: Repeated NULL within one native batch rejected
+  syntax: psql
+  sql: INSERT INTO nkd_batch VALUES (1,NULL),(2,NULL)
+  expect: *id001
+  noncritical: true
+- name: Declare nkd_existing
+  syntax: psql
+  sql: CREATE TABLE nkd_existing (id INT PRIMARY KEY, v INT)
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_existing
+- name: Prepare duplicate NULL before key creation
+  syntax: psql
+  sql: INSERT INTO nkd_existing VALUES (1,NULL),(2,NULL)
+- name: CREATE INDEX validates existing NULL values
+  syntax: psql
+  sql: CREATE UNIQUE INDEX nkd_existing_key ON nkd_existing(v) NULLS NOT DISTINCT
+  expect: *id001
+- name: ALTER UNIQUE validates existing NULL values
+  syntax: psql
+  sql: ALTER TABLE nkd_existing ADD CONSTRAINT nkd_existing_key UNIQUE NULLS NOT DISTINCT (v)
+  expect: *id001
+- name: Rejected DDL leaves previous policy intact
+  syntax: psql
+  sql: INSERT INTO nkd_existing VALUES (3,NULL)
+- name: CREATE INDEX distinct NULL accepts existing duplicates
+  syntax: psql
+  sql: CREATE UNIQUE INDEX nkd_existing_distinct ON nkd_existing(v) NULLS DISTINCT
+- name: Distinct NULL index accepts another NULL
+  syntax: psql
+  sql: INSERT INTO nkd_existing VALUES (4,NULL)
+- name: Declare nkd_index
+  syntax: psql
+  sql: CREATE TABLE nkd_index (id INT PRIMARY KEY, v INT)
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_index
+- name: CREATE INDEX declares equal NULL policy
+  syntax: psql
+  sql: CREATE UNIQUE INDEX nkd_index_key ON nkd_index(v) NULLS NOT DISTINCT
+- name: Index first NULL
+  syntax: psql
+  sql: INSERT INTO nkd_index VALUES (1,NULL)
+- name: Index repeated NULL rejected
+  syntax: psql
+  sql: INSERT INTO nkd_index VALUES (2,NULL)
+  expect: *id001
+- name: Declare nkd_alter
+  syntax: psql
+  sql: CREATE TABLE nkd_alter (id INT PRIMARY KEY, v INT)
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_alter
+- name: ALTER declares equal NULL key
+  syntax: psql
+  sql: ALTER TABLE nkd_alter ADD CONSTRAINT nkd_alter_key UNIQUE NULLS NOT DISTINCT(v)
+- name: Alter key first NULL
+  syntax: psql
+  sql: INSERT INTO nkd_alter VALUES (1,NULL)
+- name: Alter key repeated NULL rejected
+  syntax: psql
+  sql: INSERT INTO nkd_alter VALUES (2,NULL)
+  expect: *id001
+- name: ADD nullable unique column validates initialized rows
+  syntax: psql
+  sql: ALTER TABLE nkd_existing ADD COLUMN extra INT UNIQUE NULLS NOT DISTINCT
+  expect: *id001
+- name: Failed ADD column remains absent
+  syntax: psql
+  sql: SELECT extra FROM nkd_existing
+  expect: *id001
+- name: Nonunique index cannot request equal NULL
+  syntax: psql
+  sql: CREATE INDEX nkd_invalid ON nkd_index(v) NULLS NOT DISTINCT
+  expect: *id001
+- name: SQL mode rejects unsupported NULLS declaration
+  syntax: sql
+  sql: CREATE TABLE nkd_invalid_sql (v INT UNIQUE NULLS NOT DISTINCT)
+  expect: *id001
+- name: Declare nkd_main_psql
+  syntax: psql
+  sql: CREATE TABLE nkd_main_psql (id INT PRIMARY KEY, v INT UNIQUE NULLS NOT DISTINCT)
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_main_psql
+- name: psql first main storage NULL
+  syntax: psql
+  sql: INSERT INTO nkd_main_psql VALUES (1,NULL)
+- name: psql rebuild existing NULL into main storage
+  scm: (rebuild)
+- name: psql main versus delta NULL collision
+  syntax: psql
+  sql: INSERT INTO nkd_main_psql VALUES (2,NULL)
+  expect: *id001
+- name: psql published key option visible in native metadata
+  scm: (if ((nth ((show (table "memcp-tests" "nkd_main_psql") true) "Unique") 1) "nulls_not_distinct") true (error
+    "missing native NULL equality option"))
+- name: Declare nkd_main_tsql
+  syntax: tsql
+  sql: CREATE TABLE nkd_main_tsql (id INT PRIMARY KEY, v INT UNIQUE)
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_main_tsql
+- name: tsql first main storage NULL
+  syntax: tsql
+  sql: INSERT INTO nkd_main_tsql VALUES (1,NULL)
+- name: tsql rebuild existing NULL into main storage
+  scm: (rebuild)
+- name: tsql main versus delta NULL collision
+  syntax: tsql
+  sql: INSERT INTO nkd_main_tsql VALUES (2,NULL)
+  expect: *id001
+- name: tsql published key option visible in native metadata
+  scm: (if ((nth ((show (table "memcp-tests" "nkd_main_tsql") true) "Unique") 1) "nulls_not_distinct") true (error
+    "missing native NULL equality option"))
+- name: Persist key policy through ordinary shutdown
+  sql: SHUTDOWN
+  restart_timeout: 300
+  expect:
+    rows: 0
+- name: Restored T SQL key rejects repeated NULL
+  syntax: tsql
+  sql: INSERT INTO nkd_main_tsql VALUES (3,NULL)
+  expect:
+    error: true
+- name: Restored psql key rejects repeated NULL
+  syntax: psql
+  sql: INSERT INTO nkd_main_psql VALUES (3,NULL)
+  expect:
+    error: true
+- name: Restored default key still permits repeated NULL
+  syntax: sql
+  sql: INSERT INTO nkd_sql VALUES (5,NULL)
+- name: Unnamed psql table key declares equal NULL
+  syntax: psql
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_unnamed_pg
+  sql: CREATE TABLE nkd_unnamed_pg (id INT PRIMARY KEY, v INT, UNIQUE NULLS NOT DISTINCT (v))
+- name: Unnamed T SQL table key declares equal NULL
+  syntax: tsql
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_unnamed_ts
+  sql: CREATE TABLE nkd_unnamed_ts (id INT PRIMARY KEY, v INT, UNIQUE(v))
+- name: Unnamed psql key first omitted NULL
+  syntax: psql
+  sql: INSERT INTO nkd_unnamed_pg (id) VALUES (1)
+- name: Unnamed psql key repeated omitted NULL
+  syntax: psql
+  sql: INSERT INTO nkd_unnamed_pg (id) VALUES (2)
+  expect:
+    error: true
+- name: Unnamed T SQL key first omitted NULL
+  syntax: tsql
+  sql: INSERT INTO nkd_unnamed_ts (id) VALUES (1)
+- name: Unnamed T SQL key repeated omitted NULL
+  syntax: tsql
+  sql: INSERT INTO nkd_unnamed_ts (id) VALUES (2)
+  expect:
+    error: true
+- name: Native collision callback preserves INSERT IGNORE semantics
+  sql: INSERT IGNORE INTO nkd_tsql VALUES (99,NULL)
+  expect:
+    affected_rows: 0
+- name: Declare rollback fixture
+  syntax: psql
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_tx
+  sql: CREATE TABLE nkd_tx (id INT PRIMARY KEY, v INT UNIQUE NULLS NOT DISTINCT)
+- name: Begin NULL key transaction
+  session_id: nkd_rollback
+  sql: BEGIN
+- name: Insert transactional NULL key
+  session_id: nkd_rollback
+  sql: INSERT INTO nkd_tx VALUES (1,NULL)
+- name: Rollback removes the NULL key row
+  session_id: nkd_rollback
+  sql: ROLLBACK
+- name: Rolled back NULL key can be inserted again
+  sql: INSERT INTO nkd_tx VALUES (2,NULL)
+- name: Committed NULL key still collides
+  sql: INSERT INTO nkd_tx VALUES (3,NULL)
+  expect:
+    error: true
+- name: Declare import fixture
+  syntax: psql
+  setup:
+  - sql: DROP TABLE IF EXISTS nkd_import
+  sql: CREATE TABLE nkd_import (id INT PRIMARY KEY, v INT)
+- name: Script import uses the ordinary native key option
+  scm: (psql_eval_import_command "memcp-tests" "" nil "CREATE UNIQUE INDEX nkd_import_key ON public.nkd_import (v)
+    NULLS NOT DISTINCT" (sql_policy "root") nil (newsession))
+- name: Imported key first NULL
+  sql: INSERT INTO nkd_import VALUES (1,NULL)
+- name: Imported key rejects repeated NULL
+  sql: INSERT INTO nkd_import VALUES (2,NULL)
+  expect:
+    error: true
+cleanup:
+- sql: DROP TABLE IF EXISTS nkd_sql
+- sql: DROP TABLE IF EXISTS nkd_psql
+- sql: DROP TABLE IF EXISTS nkd_tsql
+- sql: DROP TABLE IF EXISTS nkd_pg_equal
+- sql: DROP TABLE IF EXISTS nkd_pg_distinct
+- sql: DROP TABLE IF EXISTS nkd_composite_psql
+- sql: DROP TABLE IF EXISTS nkd_composite_tsql
+- sql: DROP TABLE IF EXISTS nkd_mixed
+- sql: DROP TABLE IF EXISTS nkd_batch
+- sql: DROP TABLE IF EXISTS nkd_existing
+- sql: DROP TABLE IF EXISTS nkd_index
+- sql: DROP TABLE IF EXISTS nkd_alter
+- sql: DROP TABLE IF EXISTS nkd_main_psql
+- sql: DROP TABLE IF EXISTS nkd_main_tsql
+- sql: DROP TABLE IF EXISTS nkd_unnamed_pg
+- sql: DROP TABLE IF EXISTS nkd_unnamed_ts
+- sql: DROP TABLE IF EXISTS nkd_tx
+- sql: DROP TABLE IF EXISTS nkd_import
