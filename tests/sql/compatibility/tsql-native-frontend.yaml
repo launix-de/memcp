@@ -5,6 +5,10 @@ metadata:
   syntax: tsql
   description: T-SQL grammar reuses native DDL, defaults and query planning
 setup:
+  - sql: DROP TABLE IF EXISTS tsql_setup_catalog
+  - sql: DROP TABLE IF EXISTS tsql_setup_columns
+  - sql: DROP TABLE IF EXISTS tsql_setup_key
+  - sql: DROP TABLE IF EXISTS tsql_setup_named_key
   - sql: DROP VIEW IF EXISTS [tsql_native_view]
   - sql: DROP TABLE IF EXISTS [tsql_native_copy]
   - sql: CREATE TABLE [tsql_native_copy] ([id] INT PRIMARY KEY, [name] NVARCHAR(80))
@@ -285,7 +289,219 @@ test_cases:
   - name: invalid alter dimensions are rejected before schema mutation
     sql: ALTER TABLE [tsql_native_copy] ADD [invalid] DECIMAL(40,2)
     expect: {error: true}
+  - name: Character conversions default to thirty characters rather than declaration length
+    sql: SELECT CONVERT(VARCHAR,2026)+'-'+CONVERT(VARCHAR,7) AS code, CAST(NULL AS NVARCHAR(3)) AS missing, CAST(N'abcdef'
+      AS NVARCHAR(3)) AS short_text
+    expect:
+      rows: 1
+      data:
+      - code: 2026-7
+        missing: null
+        short_text: abc
+  - name: National character casts preserve whole supplementary characters
+    sql: SELECT CAST(N'🐘a' AS NVARCHAR(1)) AS one_unit, CAST(N'🐘a' AS NVARCHAR(2)) AS two_units, CAST(N'Grüße' AS
+      NVARCHAR(3)) AS short_text, CAST(N'a🐘b' AS NVARCHAR(2)) AS stopped
+    expect:
+      rows: 1
+      data:
+      - one_unit: ''
+        two_units: 🐘
+        short_text: Grü
+        stopped: a
+  - name: Invalid character conversion lengths fail before execution
+    sql: SELECT CONVERT(NVARCHAR(0),123)
+    expect:
+      error: true
+  - name: Clock parts use the shared builtins
+    sql: SELECT YEAR(GETDATE())=YEAR(CURRENT_TIMESTAMP) AS same_year, MONTH(GETDATE())=MONTH(CURRENT_TIMESTAMP) AS
+      same_month, DAY(GETDATE())=DAY(CURRENT_TIMESTAMP) AS same_day
+    expect:
+      rows: 1
+      data:
+      - same_year: true
+        same_month: true
+        same_day: true
+  - name: Create setup table with nested defaults and physical key preferences
+    sql: CREATE TABLE tsql_setup_columns (tenant INT NOT NULL, id INT IDENTITY PRIMARY KEY NONCLUSTERED, label NVARCHAR(50)
+      DEFAULT ((N'pending')), enabled SMALLINT NOT NULL DEFAULT ((-1)), created DATETIME DEFAULT ((GETDATE())), CONSTRAINT
+      setup_label_unique UNIQUE NONCLUSTERED (tenant ASC,label DESC))
+    expect:
+      rows: 0
+  - name: Insert uses native identity and nested defaults
+    sql: INSERT INTO tsql_setup_columns (tenant) VALUES (1)
+    expect:
+      rows: 1
+  - name: Initial setup defaults are visible
+    sql: SELECT id,label,enabled,CASE WHEN created IS NOT NULL THEN 1 ELSE 0 END AS has_clock FROM tsql_setup_columns
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        label: pending
+        enabled: -1
+        has_clock: 1
+  - name: Add six columns in one setup declaration
+    sql: ALTER TABLE tsql_setup_columns ADD revision INT NOT NULL DEFAULT ((0)), amount DECIMAL(18,4) NOT NULL DEFAULT
+      ((0.0000)), active SMALLINT NOT NULL DEFAULT ((-1)), note NVARCHAR(200) NULL, category INT DEFAULT ((7)), changed
+      DATETIME DEFAULT CURRENT_TIMESTAMP
+    expect:
+      rows: 0
+  - name: Six added columns backfill historical rows through native defaults
+    sql: SELECT id,revision,amount,active,note,category,CASE WHEN changed IS NOT NULL THEN 1 ELSE 0 END AS has_clock
+      FROM tsql_setup_columns
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        revision: 0
+        amount: 0
+        active: -1
+        note: null
+        category: 7
+        has_clock: 1
+  - name: Later inserts use all added defaults and preserve explicit clock nulls
+    sql: INSERT INTO tsql_setup_columns (tenant,label,created,changed) VALUES (1,N'new',NULL,NULL)
+    expect:
+      rows: 1
+  - name: Explicit null stays null instead of reevaluating clock defaults
+    sql: SELECT id,revision,amount,active,category,created,changed FROM tsql_setup_columns WHERE label=N'new'
+    expect:
+      rows: 1
+      data:
+      - id: 2
+        revision: 0
+        amount: 0
+        active: -1
+        category: 7
+        created: null
+        changed: null
+  - name: Named unique key remains enforced with placement and direction syntax
+    sql: INSERT INTO tsql_setup_columns (tenant,label) VALUES (1,N'new')
+    expect:
+      error: true
+  - name: Invalid later column type rejects entire declaration during compilation
+    sql: ALTER TABLE tsql_setup_columns ADD should_not_exist INT DEFAULT 9, invalid DECIMAL(40,2)
+    expect:
+      error: true
+  - name: Failed declaration publishes no earlier valid column
+    sql: SELECT should_not_exist FROM tsql_setup_columns
+    expect:
+      error: true
+  - name: Composite primary keys accept explicit placement and key direction
+    sql: CREATE TABLE tsql_setup_key (tenant INT NOT NULL,id INT NOT NULL,PRIMARY KEY CLUSTERED (tenant ASC,id DESC))
+    expect:
+      rows: 0
+  - name: Composite key accepts distinct tenants
+    sql: INSERT INTO tsql_setup_key VALUES (1,1),(2,1)
+    expect:
+      rows: 1
+  - name: Composite key rejects same tenant and record pair
+    sql: INSERT INTO tsql_setup_key VALUES (1,1)
+    expect:
+      error: true
+  - name: Setup counter advances through an ordinary update
+    sql: UPDATE tsql_setup_columns SET revision=revision+1 WHERE tenant=1 AND id=1
+    expect:
+      rows: 1
+  - name: Updated counter is isolated to the matching setup record
+    sql: SELECT id,revision FROM tsql_setup_columns ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        revision: 1
+      - id: 2
+        revision: 0
+  - name: DDL execution failure restores every column in the statement
+    sql: ALTER TABLE tsql_setup_columns ADD atomic_first INT DEFAULT 1, atomic_second INT NOT NULL DEFAULT NULL
+    expect:
+      error: true
+    noncritical: true
+  - name: Runtime DDL failure leaves no partially added column
+    sql: SELECT atomic_first FROM tsql_setup_columns
+    expect:
+      error: true
+    noncritical: true
+  - name: Named primary declaration retains its native logical key identity
+    sql: CREATE TABLE tsql_setup_named_key (id INT,CONSTRAINT setup_pk PRIMARY KEY CLUSTERED (id ASC))
+    expect:
+      rows: 0
+    noncritical: true
+  - name: Application procedure can declare an ordinary counter update
+    sql: CREATE PROCEDURE tsql_setup_advance @tenant INT AS UPDATE tsql_setup_columns SET revision=revision+1 WHERE
+      tenant=@tenant
+    expect:
+      rows: 0
+    noncritical: true
+  - name: Named procedure invocation binds the tenant argument
+    sql: EXEC tsql_setup_advance @tenant=1
+    expect:
+      rows: 1
+    noncritical: true
+  - name: Procedure invocation has observable tenant scoped write effects
+    sql: SELECT id,revision FROM tsql_setup_columns ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        revision: 2
+      - id: 2
+        revision: 1
+    noncritical: true
+  - name: Read uncommitted hint parses in a composed document lookup
+    sql: SELECT id,label FROM tsql_setup_columns WITH (READUNCOMMITTED) WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        label: pending
+    noncritical: true
+
+  - name: Insert without into accepts the dialect statement spelling
+    sql: INSERT tsql_native_copy (id,name) VALUES (99,N'optional keyword')
+    expect: {rows: 1}
+    noncritical: true
+  - name: Alter adds an enforced named unique through native keys
+    sql: ALTER TABLE tsql_setup_columns ADD CONSTRAINT setup_unique_revision UNIQUE (tenant ASC,revision DESC)
+    expect: {rows: 0}
+  - name: Added unique key rejects duplicate values
+    sql: INSERT INTO tsql_setup_columns (tenant,label,revision) VALUES (1,N'duplicate revision',1)
+    expect: {error: true}
+  - name: Added unique key permits another key tuple
+    sql: INSERT INTO tsql_setup_columns (tenant,label,revision) VALUES (2,N'another tenant',1)
+    expect: {rows: 1}
+  - name: Drop constraint removes the actual native key
+    sql: ALTER TABLE tsql_setup_columns DROP CONSTRAINT setup_unique_revision
+    expect: {rows: 0}
+  - name: Dropped unique key permits the previously conflicting tuple
+    sql: INSERT INTO tsql_setup_columns (tenant,label,revision) VALUES (1,N'after key drop',1)
+    expect: {rows: 1}
+
+  - name: Application catalog uses an ordinary native table
+    sql: CREATE TABLE tsql_setup_catalog ([Table] NVARCHAR(80) PRIMARY KEY, Revision INT NOT NULL DEFAULT ((1)))
+    expect: {rows: 0}
+  - name: Setup registers both installed relations
+    sql: INSERT INTO tsql_setup_catalog ([Table]) VALUES (N'tsql_setup_columns'),(N'tsql_setup_key')
+    expect: {rows: 1}
+  - name: Upgrade advances only the installed relation revision
+    sql: UPDATE tsql_setup_catalog SET Revision=Revision+1 WHERE [Table]=N'tsql_setup_columns'
+    expect: {rows: 1}
+  - name: Catalog registration preserves revision and identifier text
+    sql: SELECT [Table],Revision FROM tsql_setup_catalog ORDER BY [Table]
+    expect:
+      rows: 2
+      data:
+        - {Table: tsql_setup_columns, Revision: 2}
+        - {Table: tsql_setup_key, Revision: 1}
+  - name: Registry keys are enforced by the ordinary native primary key
+    sql: INSERT INTO tsql_setup_catalog VALUES (N'tsql_setup_columns',99)
+    expect: {error: true}
+
 cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_setup_catalog
+  - sql: DROP TABLE IF EXISTS tsql_setup_columns
+  - sql: DROP TABLE IF EXISTS tsql_setup_key
+  - sql: DROP TABLE IF EXISTS tsql_setup_named_key
   - sql: DROP VIEW IF EXISTS [tsql_native_view]
   - sql: DROP TABLE IF EXISTS [tsql_native_copy]
   - sql: DROP TABLE IF EXISTS [tsql_wrong_engine]

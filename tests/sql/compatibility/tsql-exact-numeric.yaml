@@ -502,7 +502,6 @@ test_cases:
     rows: 1
     data:
     - value: ''
-  noncritical: true
 - name: Precision overflow
   sql: SELECT CAST(100000 AS DECIMAL(5,0))
   expect:

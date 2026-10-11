@@ -1,0 +1,786 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  description: Application-shaped tenant joins, document lists and clock-bounded aggregates
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS tsql_app_Controls
+- sql: DROP TABLE IF EXISTS tsql_app_Projects
+- sql: DROP TABLE IF EXISTS tsql_app_Accounts
+- sql: DROP TABLE IF EXISTS tsql_app_Documents
+- sql: DROP TABLE IF EXISTS tsql_app_Processes
+- sql: DROP TABLE IF EXISTS tsql_app_Groups
+- sql: DROP TABLE IF EXISTS tsql_app_DocumentKinds
+- sql: DROP TABLE IF EXISTS tsql_app_TaxKinds
+- sql: DROP TABLE IF EXISTS tsql_app_Periods
+- sql: DROP TABLE IF EXISTS tsql_app_CustomerStats
+- sql: DROP TABLE IF EXISTS tsql_app_Addresses
+- sql: CREATE TABLE tsql_app_Controls (Tenant INT, Project INT, Matchcode NVARCHAR(30), Leader NVARCHAR(30), Contact
+    NVARCHAR(30), Phone NVARCHAR(30), EMail NVARCHAR(60), ControlId INT)
+- sql: CREATE TABLE tsql_app_Projects (Tenant INT, ProjectNumber INT, ProjectBegin DATETIME, Customer VARCHAR(20),
+    Budget DECIMAL(18,4), Matchcode NVARCHAR(30), ProjectEnd DATETIME, Status INT, ProjectGroup INT)
+- sql: CREATE TABLE tsql_app_Accounts (Tenant INT, Account VARCHAR(20), AccountType CHAR(1), Matchcode NVARCHAR(30),
+    AddressId INT, GroupCode INT, Tour INT)
+- sql: |-
+    INSERT INTO tsql_app_Controls VALUES (123,10,N'Control A',N'Leader',N'Contact',N'123',N'test@example.invalid',1),
+      (123,10,N'Control B',N'Leader',N'Contact',N'123',N'test@example.invalid',2),
+      (999,10,N'Other tenant',N'X',N'X',N'X',N'x@example.invalid',3)
+- sql: |-
+    INSERT INTO tsql_app_Projects VALUES (123,10,'2025-01-02','D1',2000.1234,N'Project','2026-01-02',1,2),
+      (999,10,'2025-01-02','D1',9999,N'Other tenant','2026-01-02',1,2)
+- sql: INSERT INTO tsql_app_Accounts VALUES (123,'D1','D',N'Customer',1,3,4),(999,'D1','D',N'Other tenant',1,3,4)
+- sql: CREATE TABLE tsql_app_Documents (Tenant INT, ContactId INT, Recipient VARCHAR(20), RecipientMatchcode NVARCHAR(30),
+    OtherContactId INT, DocumentKind NVARCHAR(20), DocumentDate DATETIME, DocumentYear INT, DocumentCode VARCHAR(3),
+    DocumentNumber INT, DocumentId INT, NetAmount DECIMAL(18,4), InvoiceContactId INT, ProcessId INT, SaveStatus
+    INT, Status INT, Journal INT, Tax INT, Period INT)
+- sql: CREATE TABLE tsql_app_Processes (Tenant INT, ProcessId INT, Fulfilled INT)
+- sql: CREATE TABLE tsql_app_Groups (Tenant INT, Kind INT, GroupInt INT, GroupCode VARCHAR(20), Label NVARCHAR(30))
+- sql: CREATE TABLE tsql_app_DocumentKinds (Code VARCHAR(3))
+- sql: CREATE TABLE tsql_app_TaxKinds (Id INT)
+- sql: CREATE TABLE tsql_app_Periods (Tenant INT, TotalPeriod INT)
+- sql: INSERT INTO tsql_app_Processes VALUES (1,7,0),(2,7,1),(1,9,1)
+- sql: |-
+    INSERT INTO tsql_app_Groups VALUES (0,40050,1,'1',N'Status'),
+      (0,10000,0,'2',N'Accounting'),
+      (123,40043,1,'1',N'Open'),
+      (123,40044,2,'2',N'ProjectGroup'),
+      (123,11,3,'3',N'Customer group'),
+      (123,40012,4,'4',N'Tour')
+- sql: INSERT INTO tsql_app_DocumentKinds VALUES ('RE')
+- sql: INSERT INTO tsql_app_Periods VALUES (1,2025001),(2,2025001)
+- sql: INSERT INTO tsql_app_Controls VALUES (123,11,N'Control filter 0',N'Leader',N'Contact',N'123',N'test@example.invalid',3)
+- sql: INSERT INTO tsql_app_Projects VALUES (123,11,'2025-01-02','P0',2000.1234,N'Project','2026-01-02',9,2)
+- sql: INSERT INTO tsql_app_Accounts VALUES (123,'P0','D',N'Customer',10,3,4)
+- sql: INSERT INTO tsql_app_Controls VALUES (123,12,N'Control filter 1',N'Leader',N'Contact',N'123',N'test@example.invalid',4)
+- sql: INSERT INTO tsql_app_Projects VALUES (123,12,'2025-01-02','P1',2000.1234,N'Project','2026-01-02',1,9)
+- sql: INSERT INTO tsql_app_Accounts VALUES (123,'P1','D',N'Customer',11,3,4)
+- sql: INSERT INTO tsql_app_Controls VALUES (123,13,N'Control filter 2',N'Leader',N'Contact',N'123',N'test@example.invalid',5)
+- sql: INSERT INTO tsql_app_Projects VALUES (123,13,'2025-01-02','P2',2000.1234,N'Project','2026-01-02',1,2)
+- sql: INSERT INTO tsql_app_Accounts VALUES (123,'P2','D',N'Customer',12,9,4)
+- sql: INSERT INTO tsql_app_Controls VALUES (123,14,N'Control filter 3',N'Leader',N'Contact',N'123',N'test@example.invalid',6)
+- sql: INSERT INTO tsql_app_Projects VALUES (123,14,'2025-01-02','P3',2000.1234,N'Project','2026-01-02',1,2)
+- sql: INSERT INTO tsql_app_Accounts VALUES (123,'P3','D',N'Customer',13,3,9)
+- sql: INSERT INTO tsql_app_Documents VALUES (1,1,'C100',N'ÄÖÜ',2,N'Invoice','2025-01-02',2024,'RE',5,1,123.4567,3,7,0,1,2,99,2025001)
+- sql: INSERT INTO tsql_app_Documents VALUES (1,1,'C100',N'ÄÖÜ',2,N'Invoice','2025-01-02',2025,'RE',8,2,123.4567,3,7,1,1,2,99,2025001)
+- sql: INSERT INTO tsql_app_Documents VALUES (1,1,'C100',N'ÄÖÜ',2,N'Invoice','2025-01-02',2025,'RE',9,3,123.4567,3,8,0,1,2,99,2025001)
+- sql: INSERT INTO tsql_app_Documents VALUES (1,1,'other',N'ÄÖÜ',2,N'Invoice','2025-01-02',2025,'RE',10,4,123.4567,3,7,0,1,2,99,2025001)
+- sql: INSERT INTO tsql_app_Documents VALUES (2,1,'C100',N'ÄÖÜ',2,N'Invoice','2025-01-02',2025,'RE',11,5,123.4567,3,7,0,1,2,99,2025001)
+- sql: INSERT INTO tsql_app_Documents VALUES (1,1,'C100',N'ÄÖÜ',2,N'Invoice','2025-01-02',2025,'RE',12,6,123.4567,3,9,0,1,2,99,2025001)
+- sql: CREATE TABLE tsql_app_CustomerStats (Tenant INT, Customer VARCHAR(20), Period INT, Revenue DECIMAL(18,4))
+- sql: CREATE TABLE tsql_app_Addresses (Tenant INT, AddressId INT, Name NVARCHAR(30), Email NVARCHAR(60))
+- sql: INSERT INTO tsql_app_Accounts VALUES (1,'C2','D',N'A',2,1,1),(2,'C2','D',N'B',2,1,1),(1,'C3','D',N'C',3,1,1)
+- sql: |-
+    INSERT INTO tsql_app_Addresses VALUES (1,2,N'Müller',N'a@example.invalid'),
+      (2,2,N'Other tenant',N'b@example.invalid'),
+      (1,3,N'Below threshold',N'c@example.invalid')
+- sql: |-
+    INSERT INTO tsql_app_CustomerStats VALUES (1,'C2',(YEAR(GETDATE())-2)*1000+MONTH(GETDATE()),500),
+      (1,'C2',(YEAR(GETDATE())-2)*1000+MONTH(GETDATE())+1,1000),
+      (1,'C2',(YEAR(GETDATE())-2)*1000+MONTH(GETDATE())-1,9000),
+      (2,'C2',(YEAR(GETDATE())-2)*1000+MONTH(GETDATE())+1,1),
+      (1,'C3',(YEAR(GETDATE())-2)*1000+MONTH(GETDATE())+1,1233)
+test_cases:
+- name: Composite tenant project joins with optional filter mask 0000
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D'
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 6
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 3
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 4
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 5
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 6
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 0001
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Projects.Status=1
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 5
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 4
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 5
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 6
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 0010
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Projects.ProjectGroup=2
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 5
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 3
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 5
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 6
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 0011
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Projects.Status=1 AND tsql_app_Projects.ProjectGroup=2
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 4
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 5
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 6
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 0100
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Accounts.GroupCode=3
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 5
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 3
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 4
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 6
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 0101
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Projects.Status=1 AND tsql_app_Accounts.GroupCode=3
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 4
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 4
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 6
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 0110
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Projects.ProjectGroup=2 AND tsql_app_Accounts.GroupCode=3
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 4
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 3
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 6
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 0111
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Projects.Status=1 AND tsql_app_Projects.ProjectGroup=2 AND tsql_app_Accounts.GroupCode=3
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 3
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 6
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 1000
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Accounts.Tour=4
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 5
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 3
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 4
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 5
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 1001
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Projects.Status=1 AND tsql_app_Accounts.Tour=4
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 4
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 4
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 5
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 1010
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Projects.ProjectGroup=2 AND tsql_app_Accounts.Tour=4
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 4
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 3
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 5
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 1011
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Projects.Status=1 AND tsql_app_Projects.ProjectGroup=2 AND tsql_app_Accounts.Tour=4
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 3
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 5
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 1100
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Accounts.GroupCode=3 AND tsql_app_Accounts.Tour=4
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 4
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 3
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 4
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 1101
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Projects.Status=1 AND tsql_app_Accounts.GroupCode=3 AND tsql_app_Accounts.Tour=4
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 3
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 4
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 1110
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Projects.ProjectGroup=2 AND tsql_app_Accounts.GroupCode=3 AND tsql_app_Accounts.Tour=4
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 3
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 3
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Composite tenant project joins with optional filter mask 1111
+  sql: |-
+    SELECT tsql_app_Controls.Matchcode AS ProjectControl,
+      tsql_app_Controls.Project,
+      tsql_app_Projects.ProjectBegin,
+      tsql_app_Controls.Leader,
+      tsql_app_Controls.Contact,
+      tsql_app_Projects.Customer,
+      tsql_app_Projects.Budget,
+      tsql_app_Controls.Phone,
+      tsql_app_Controls.EMail,
+      tsql_app_Projects.Matchcode AS ProjectMatchcode,
+      tsql_app_Accounts.Matchcode AS CustomerMatchcode,
+      tsql_app_Projects.ProjectEnd,
+      tsql_app_Controls.ControlId
+    FROM tsql_app_Controls
+    INNER JOIN tsql_app_Projects ON (tsql_app_Controls.Project = tsql_app_Projects.ProjectNumber AND tsql_app_Controls.Tenant = tsql_app_Projects.Tenant)
+    INNER JOIN tsql_app_Accounts ON (tsql_app_Projects.Customer = tsql_app_Accounts.Account AND tsql_app_Projects.Tenant = tsql_app_Accounts.Tenant)
+    WHERE tsql_app_Controls.Tenant=123 AND tsql_app_Accounts.AccountType='D' AND tsql_app_Projects.Status=1 AND tsql_app_Projects.ProjectGroup=2 AND tsql_app_Accounts.GroupCode=3 AND tsql_app_Accounts.Tour=4
+    ORDER BY tsql_app_Controls.Project, ControlId
+  expect:
+    rows: 2
+    data:
+    - ControlId: 1
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+    - ControlId: 2
+      ProjectMatchcode: Project
+      CustomerMatchcode: Customer
+      Budget: 2000.1234
+- name: Document list combines top case null filtering casts and six joins
+  sql: |-
+    SELECT TOP 301 tsql_app_Documents.ContactId AS ContactId,
+      tsql_app_Documents.Recipient AS Recipient,
+      tsql_app_Documents.RecipientMatchcode AS RecipientMatchcode,
+      tsql_app_Documents.OtherContactId AS OtherContactId,
+      tsql_app_Documents.DocumentKind AS DocumentKind,
+      tsql_app_Documents.DocumentDate AS DocumentDate,
+      tsql_app_Documents.DocumentYear AS DocumentYear,
+      tsql_app_Documents.DocumentCode AS DocumentCode,
+      tsql_app_Documents.DocumentNumber AS DocumentNumber,
+      tsql_app_Documents.DocumentId AS DocumentId, CASE WHEN ISNULL(2002,0) > 0 THEN 'EUR' ELSE 'DEM' END AS Currency, ISNULL(Process.Fulfilled,-2) AS Fulfilled,
+      tsql_app_Documents.NetAmount AS NetAmount,
+      tsql_app_Documents.InvoiceContactId AS InvoiceContactId, Convert(Varchar,DocumentYear) + '-' + Convert(Varchar,DocumentNumber) AS Separator,
+      tsql_app_Documents.ProcessId AS Process,
+      tsql_app_Documents.ProcessId AS ProcessId, CASE WHEN ISNULL(SaveStatus,0) = 1 THEN 0 ELSE -1 END  AS SaveStatusMenu, 4000 AS EntryKind,
+      tsql_app_TaxKinds.Id AS OptionalTaxId
+    FROM tsql_app_Documents
+    LEFT JOIN tsql_app_Processes AS Process ON tsql_app_Documents.Tenant = Process.Tenant AND tsql_app_Documents.ProcessId = Process.ProcessId
+    INNER JOIN tsql_app_Groups OfferStatus ON OfferStatus.GroupInt = tsql_app_Documents.Status AND OfferStatus.Tenant=0 AND OfferStatus.Kind=40050
+    INNER JOIN tsql_app_DocumentKinds ON tsql_app_DocumentKinds.Code = tsql_app_Documents.DocumentCode
+    INNER JOIN tsql_app_Groups AccountingGroup ON AccountingGroup.GroupCode = CONVERT(varchar,tsql_app_Documents.Journal ) AND AccountingGroup.Tenant=0 AND AccountingGroup.Kind=10000
+    LEFT JOIN tsql_app_TaxKinds ON tsql_app_TaxKinds.Id = tsql_app_Documents.Tax
+    INNER JOIN tsql_app_Periods ON tsql_app_Periods.Tenant=tsql_app_Documents.Tenant AND tsql_app_Periods.TotalPeriod=tsql_app_documents.Period
+    WHERE tsql_app_Documents.Tenant=1
+    AND ISNULL(ISNULL(Process.Fulfilled,-2), 0) IN (0) AND ISNULL(tsql_app_Documents.Recipient, '') = 'C100'
+    ORDER BY DocumentYear ASC,DocumentNumber ASC,DocumentId ASC
+  expect:
+    rows: 2
+    data:
+    - DocumentId: 1
+      Separator: 2024-5
+      SaveStatusMenu: -1
+      Currency: EUR
+      NetAmount: 123.4567
+      OptionalTaxId: null
+      Fulfilled: 0
+      RecipientMatchcode: ÄÖÜ
+    - DocumentId: 2
+      Separator: 2025-8
+      SaveStatusMenu: 0
+      Currency: EUR
+      NetAmount: 123.4567
+      OptionalTaxId: null
+      Fulfilled: 0
+      RecipientMatchcode: ÄÖÜ
+- name: Customer aggregate uses inclusive clock boundary and tenant keys before having
+  sql: |-
+    Select Customer, sum(Revenue) as Revenue,
+      tsql_app_Addresses.Name,
+      tsql_app_Addresses.EMail
+    from tsql_app_CustomerStats
+    inner join tsql_app_Accounts on tsql_app_Accounts.Tenant = tsql_app_CustomerStats.Tenant and tsql_app_Accounts.Account = tsql_app_CustomerStats.Customer
+    inner join tsql_app_Addresses on tsql_app_Addresses.Tenant = tsql_app_Accounts.Tenant and tsql_app_Addresses.AddressId = tsql_app_Accounts.AddressId
+    Where Period >= (year(getdate())-2) * 1000 + month(getdate())
+    Group By tsql_app_CustomerStats.Customer,
+      tsql_app_Addresses.Name,
+      tsql_app_Addresses.EMail
+    Having sum(Revenue) >= 1234
+  expect:
+    rows: 1
+    data:
+    - Customer: C2
+      Revenue: 1500
+      Name: Müller
+      EMail: a@example.invalid
+cleanup:
+- sql: DROP TABLE IF EXISTS tsql_app_Controls
+- sql: DROP TABLE IF EXISTS tsql_app_Projects
+- sql: DROP TABLE IF EXISTS tsql_app_Accounts
+- sql: DROP TABLE IF EXISTS tsql_app_Documents
+- sql: DROP TABLE IF EXISTS tsql_app_Processes
+- sql: DROP TABLE IF EXISTS tsql_app_Groups
+- sql: DROP TABLE IF EXISTS tsql_app_DocumentKinds
+- sql: DROP TABLE IF EXISTS tsql_app_TaxKinds
+- sql: DROP TABLE IF EXISTS tsql_app_Periods
+- sql: DROP TABLE IF EXISTS tsql_app_CustomerStats
+- sql: DROP TABLE IF EXISTS tsql_app_Addresses
