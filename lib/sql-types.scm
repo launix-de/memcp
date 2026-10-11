@@ -30,7 +30,7 @@ A descriptor is (FORMULA TYPE COLLATION):
 /* ---- type predicates ---- */
 
 (define sql_text_type? (lambda (type)
-	(has? '("CHAR" "VARCHAR" "TEXT" "TINYTEXT" "MEDIUMTEXT" "LONGTEXT"
+	(has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "NTEXT" "TEXT" "TINYTEXT" "MEDIUMTEXT" "LONGTEXT"
 		"ENUM" "SET" "BINARY" "VARBINARY" "BLOB" "TINYBLOB" "MEDIUMBLOB" "LONGBLOB") type)))
 
 (define sql_numeric_type? (lambda (type)
@@ -376,6 +376,13 @@ the conditions are booleans and would otherwise pollute the merge. */
 		((symbol get_column) tblvar tbl_ic col col_ic) (sql_get_column_info sources tblvar tbl_ic col col_ic)
 		((quote get_column) tblvar tbl_ic col col_ic) (sql_get_column_info sources tblvar tbl_ic col col_ic)
 		((symbol quote) _datum) (sql_info expr "any" nil)
+		/* Frontends attach the declared contract to their conversion formula.
+		Resolve the operand normally; only its executable formula survives. */
+		((symbol sql_type_expr) formula type collation)
+		(begin
+			(define info (sql_expr_info sources formula))
+			(sql_info (sql_info_formula info) type
+				(if (and (sql_text_type? type) (nil? collation)) (sql_info_collation info) collation)))
 		((symbol session) _key) (sql_info expr "any" nil)
 		((symbol session_globalvar) _key) (sql_info expr "any" nil)
 		((symbol lambda) _params _body) (sql_info expr "any" nil)
@@ -394,6 +401,7 @@ relation and operator string are resolved at plan time. */
 		(equal? operator "<=") (not (less right left))
 		(equal? operator ">=") (not (less left right))
 		(error "unsupported SQL comparison"))))
+
 
 /* ---- query-block level type resolution ----
 
@@ -445,7 +453,7 @@ always treated as "bin" — get the coercing relation. */
 	(if (not (query_block? block))
 		block
 		(begin
-			(define sources (qb_sources block))
+			(define sources (sql_type_lower_annotations (qb_sources block)))
 			(define outer (coalesceNil outer_sources '()))
 			(define all_sources (if (empty_list? outer) sources (merge (list sources outer))))
 			(make_query_block
@@ -459,15 +467,37 @@ always treated as "bin" — get the coercing relation. */
 				(if (nil? (qb_having block)) nil (sql_type_formula all_sources (qb_having block)))
 				(map (coalesceNil (qb_order block) '())
 					(lambda (order_item) (sql_type_order_item all_sources order_item)))
-				(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block)
+				(qb_limit block) (qb_offset block) (sql_type_lower_annotations (qb_hidden block)) (sql_type_lower_annotations (qb_stages block))
 				(qassoc_set (qb_facts block) (quote result-types)
 					(map_assoc (expand_query_block_fields sources (qb_fields block))
 						(lambda (rt_title rt_expr) (sql_type_result_descriptor all_sources rt_expr)))))))))
 
-/* Entry point: annotate the root query block of a compiled IR. Group/orc/window
-stages and non-query-block roots pass through untouched in this slice. */
+/* Rewrite only paths containing frontend expression contracts. nil means
+unchanged; a singleton holds the replacement, including a legitimate NULL.
+Retain annotation-free sources/stage graphs instead of cloning every node
+for frontends that have emitted no contracts. Quoted syntax stays opaque. */
+(define sql_type_annotation_replacement (lambda (node)
+	(match node
+		((symbol sql_type_expr) _formula _type _collation) (list (sql_type_formula '() node))
+		((symbol quote) _datum) nil
+		(cons head tail) (begin
+			(define rewritten_head (sql_type_annotation_replacement head))
+			(define rewritten_tail (sql_type_annotation_replacement tail))
+			(if (and (nil? rewritten_head) (nil? rewritten_tail)) nil
+				(list (cons
+					(if (nil? rewritten_head) head (car rewritten_head))
+					(if (nil? rewritten_tail) tail (car rewritten_tail))))))
+		_ nil)))
+
+(define sql_type_lower_annotations (lambda (node)
+	(match (sql_type_annotation_replacement node)
+		'(formula) formula
+		_ node)))
+
+/* Entry point: annotate root expressions, then remove remaining expression contracts
+from nested logical inputs without inventing storage or planner operations. */
 (define sql_type_annotate_ir (lambda (ir)
-	(if (query_block? (ir_root ir))
-		(make_ir (ir_kind ir) (sql_type_query_block (ir_root ir) '())
-			(ir_stages ir) (ir_context_of ir) (ir_return ir))
-		ir)))
+	(make_ir (ir_kind ir)
+		(if (query_block? (ir_root ir))
+			(sql_type_query_block (ir_root ir) '()) (sql_type_lower_annotations (ir_root ir)))
+		(sql_type_lower_annotations (ir_stages ir)) (ir_context_of ir) (ir_return ir))))
