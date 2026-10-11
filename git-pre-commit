@@ -444,13 +444,16 @@ failed_files=""
 
 parallel_tests=()
 sequential_tests=()
+debug_parallel_tests=()
+debug_sequential_tests=()
 suite_mode() {
   python3 - "$1" <<'PY'
 import sys
 
-from run_sql_tests import suite_execution_mode
+from run_sql_tests import suite_execution_mode, suite_scan_debugging
 
-print(suite_execution_mode(sys.argv[1]))
+mode = suite_execution_mode(sys.argv[1])
+print(("debug_" if suite_scan_debugging(sys.argv[1]) else "") + mode)
 PY
 }
 
@@ -460,11 +463,13 @@ PY
 # - every exclusive suite runs sequentially against that same process lifecycle
 #   and data directory
 for tf in "${test_files_arr[@]}"; do
-  if [ "$(suite_mode "$tf")" = "parallel" ]; then
-    parallel_tests+=("$tf")
-  else
-    sequential_tests+=("$tf")
-  fi
+  case "$(suite_mode "$tf")" in
+    parallel) parallel_tests+=("$tf") ;;
+    exclusive) sequential_tests+=("$tf") ;;
+    debug_parallel) debug_parallel_tests+=("$tf") ;;
+    debug_exclusive) debug_sequential_tests+=("$tf") ;;
+    *) echo "❌ Invalid suite scheduling metadata: $tf"; exit 1 ;;
+  esac
 done
 
 max_jobs="${MEMCP_TEST_JOBS:-4}"
@@ -601,27 +606,54 @@ if [ "$fail_fast_mode" -eq 1 ]; then
     fi
   done
 else
-  for tf in "${parallel_tests[@]}"; do
-    out="$tmpdir/$(basename "$tf").out"
-    statusf="$tmpdir/$(basename "$tf").status"
-    run_one "$tf" "$out" "$statusf" &
-    active_pids+=("$!")
-    while [ ${#active_pids[@]} -ge $max_jobs ]; do
-      wait "${active_pids[0]}"
-      active_pids=("${active_pids[@]:1}")
+  run_phase() {
+    local -n phase_parallel="$1" phase_sequential="$2"
+    for tf in "${phase_parallel[@]}"; do
+      out="$tmpdir/$(basename "$tf").out"
+      statusf="$tmpdir/$(basename "$tf").status"
+      run_one "$tf" "$out" "$statusf" &
+      active_pids+=("$!")
+      while [ ${#active_pids[@]} -ge $max_jobs ]; do
+        wait "${active_pids[0]}"
+        active_pids=("${active_pids[@]:1}")
+      done
     done
-  done
 
-  for pid in "${active_pids[@]}"; do
-    wait "$pid"
-  done
-  active_pids=()
+    for pid in "${active_pids[@]}"; do
+      wait "$pid"
+    done
+    active_pids=()
 
-  for tf in "${sequential_tests[@]}"; do
-    out="$tmpdir/$(basename "$tf").out"
-    statusf="$tmpdir/$(basename "$tf").status"
-    run_one "$tf" "$out" "$statusf"
-  done
+    for tf in "${phase_sequential[@]}"; do
+      out="$tmpdir/$(basename "$tf").out"
+      statusf="$tmpdir/$(basename "$tf").status"
+      run_one "$tf" "$out" "$statusf"
+    done
+  }
+  run_phase parallel_tests sequential_tests
+
+  if [ $(( ${#debug_parallel_tests[@]} + ${#debug_sequential_tests[@]} )) -gt 0 ]; then
+    change_scan_debugging() {
+      python3 - "$test_port" "$1" <<'PYTHON'
+import sys
+from run_sql_tests import change_scan_debugging
+print(str(change_scan_debugging(f"http://localhost:{sys.argv[1]}", sys.argv[2] == "true")).lower())
+PYTHON
+    }
+    if debug_previous=$(change_scan_debugging true); then
+      echo "🔎 ScanDebugging cluster: ${#debug_parallel_tests[@]} parallel, ${#debug_sequential_tests[@]} exclusive suites on the shared server"
+      export MEMCP_TEST_SCAN_DEBUGGING_MANAGED=1
+      run_phase debug_parallel_tests debug_sequential_tests
+      unset MEMCP_TEST_SCAN_DEBUGGING_MANAGED
+      if ! change_scan_debugging "$debug_previous" >/dev/null; then
+        echo "❌ Could not restore ScanDebugging after the cluster"
+        all_passed=false
+      fi
+    else
+      echo "❌ Could not enable ScanDebugging for the cluster"
+      all_passed=false
+    fi
+  fi
 fi
 
 print_scm_coverage_report

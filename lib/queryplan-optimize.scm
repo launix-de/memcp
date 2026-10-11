@@ -921,14 +921,15 @@ with per-binding lookup work charged by the join below. */
 (define planner_repeat_execution_cost (lambda (cost repetitions)
 	(begin
 		/* Nested execution counts may exceed int64 even for small real tables.
-		Convert before multiplying, not after an overflowing product. */
-		(define repetitions (+ 0.0 repetitions))
+		Convert before multiplying, not after an overflowing product. Keep the
+		floating execution count in its own local binding. */
+		(define execution_count (+ 0.0 repetitions))
 		(planner_cost
-			(* repetitions (qassoc_get cost (quote startup_ns) 0))
-			(* repetitions (qassoc_get cost (quote row_ns) 0))
-			(* repetitions (qassoc_get cost (quote probe_ns) 0))
-			(* repetitions (qassoc_get cost (quote batch_startup_ns) 0))
-			(* repetitions (qassoc_get cost (quote batch_row_ns) 0))
+			(* execution_count (qassoc_get cost (quote startup_ns) 0))
+			(* execution_count (qassoc_get cost (quote row_ns) 0))
+			(* execution_count (qassoc_get cost (quote probe_ns) 0))
+			(* execution_count (qassoc_get cost (quote batch_startup_ns) 0))
+			(* execution_count (qassoc_get cost (quote batch_row_ns) 0))
 			(qassoc_get cost (quote build_ns) 0)
 			(qassoc_get cost (quote memory_bytes) 0)
 			(qassoc_get cost (quote compile_ns) 0)

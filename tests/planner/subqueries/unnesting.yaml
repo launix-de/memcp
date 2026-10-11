@@ -1,6 +1,9 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Unnesting: Derived Tables (Basic)
 
 metadata:
+  scan_debugging: true # The runner owns this flag for the complete cluster.
   version: "1.0"
   description: "Unnesting arbitrary queries: basic derived table"
 
@@ -204,7 +207,6 @@ test_cases:
   - name: "Derived LEFT JOIN preserves point boundary in ON condition"
     setup:
       - scm: '(rebuild (table "memcp-tests" "unn_ref") true false)'
-      - scm: '(settings "ScanDebugging" true)'
       - sql: "DELETE FROM system_statistic.scans WHERE schema = 'memcp-tests' AND `table` = 'unn_ref'"
     sql: |
       SELECT m.id, r.ref_descr
@@ -234,8 +236,6 @@ test_cases:
       data:
         - scans: 2
           bounded_scans: 2
-    cleanup:
-      - scm: '(settings "ScanDebugging" false)'
   - name: "cleanup unn_main"
     sql: "DROP TABLE IF EXISTS unn_main"
     expect: {}

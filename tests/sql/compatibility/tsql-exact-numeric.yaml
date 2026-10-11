@@ -1,6 +1,10 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Fixture preparation and cleanup are explicit cases so unsupported DDL stays visible.
+# Unimplemented exact decimal/money specifications remain noncritical.
+# Existing critical specifications retain their regression gates.
+# Future generic multi-precision integers can carry coefficients; frontend compile-time
+# type information can apply scale corrections without storage/runtime type checks.
 metadata:
   version: '1.0'
   description: Exact numeric values, casts and arithmetic in t-sql mode
@@ -124,7 +128,6 @@ test_cases:
     rows: 1
     data:
     - value: -12.75
-  noncritical: true
 - name: Floating point values retain magnitude when cast to decimal
   sql: SELECT CAST(CAST(CAST('-12.75' AS FLOAT) AS DECIMAL(5,2)) AS VARCHAR(20)) AS value
   expect:
@@ -139,7 +142,6 @@ test_cases:
     data:
     - zero: 0
       nonzero: 1
-  noncritical: true
 - name: Invalid floating text fails instead of becoming one
   sql: SELECT CAST('invalid' AS FLOAT) AS value
   expect:
@@ -291,7 +293,6 @@ test_cases:
     rows: 1
     data:
     - value: -255
-  noncritical: true
 - name: Unary minimum small integer overflows explicitly
   sql: SELECT -CAST(-32768 AS SMALLINT) AS value
   expect:
@@ -340,7 +341,6 @@ test_cases:
   sql: SELECT -N'5' AS value
   expect:
     error: true
-  noncritical: true
 - name: Unary negative cast text rejects before execution
   sql: SELECT -CAST(N'5' AS VARCHAR(3)) AS value
   expect:
@@ -496,7 +496,6 @@ test_cases:
     rows: 1
     data:
     - value: -12
-  noncritical: true
 - name: Unicode cast counts units
   sql: SELECT CAST(N'🐘' AS NVARCHAR(1)) AS value
   expect:
@@ -611,7 +610,6 @@ test_cases:
     rows: 1
     data:
     - value: 1
-  noncritical: true
 - name: Nested exact multiplication
   sql: SELECT CAST(-(0.1+0.2)*2 AS VARCHAR(40)) AS value
   expect:

@@ -5,9 +5,10 @@
 # and choose a bounded storage carrier for it.
 
 metadata:
+  scan_debugging: true # The runner owns this flag for the complete cluster.
+  isolated: true # Resets all scan logs and asserts absence of generic query-group scans.
   version: "1.0"
   description: "Compound correlated boolean predicates use scalable physical probes"
-  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS bqm_file"
@@ -443,7 +444,6 @@ test_cases:
     max_time: 3
     setup:
       - sql: "TRUNCATE TABLE `system_statistic`.`scans`"
-      - scm: '(settings "ScanDebugging" true)'
     sql: |
       SELECT COUNT(*) AS permitted_count, COUNT(counted._count) AS counted_count
       FROM (
@@ -502,8 +502,6 @@ test_cases:
       rows: 1
       data:
         - {unused_lookup_scans: 0}
-    cleanup:
-      - scm: '(settings "ScanDebugging" false)'
 
   - name: "large filtered count keeps correlated scalar semantics"
     max_time: 2
@@ -1164,7 +1162,6 @@ test_cases:
     session_id: "bqm_projection_prepare"
     setup:
       - sql: "TRUNCATE TABLE `system_statistic`.`scans`"
-      - scm: '(settings "ScanDebugging" true)'
     sql: "SET @bqm_projection_actor = 7"
 
   - name: "bounded projected ACL remains correct"
@@ -1213,8 +1210,6 @@ test_cases:
       rows: 1
       data:
         - scans: 0
-    cleanup:
-      - scm: '(settings "ScanDebugging" false)'
 
   - name: "Ordered membership intersects an independent scalar carrier"
     session_id: "bqm_combined_carriers"

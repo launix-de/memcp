@@ -274,6 +274,23 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 }
 
 // Lexical Analysis
+func parseNumberToken(text string) Scmer {
+	if text == "-" {
+		return NewSymbol("-")
+	}
+	// Preserve integer precision and expose the native integer type to codegen.
+	// Decimal literals and integers outside int64 retain the floating fallback.
+	if strings.IndexByte(text, '.') < 0 {
+		if integer, err := strconv.ParseInt(text, 10, 64); err == nil {
+			return NewInt(integer)
+		}
+	}
+	if number, err := strconv.ParseFloat(text, 64); err == nil {
+		return NewFloat(number)
+	}
+	return NewSymbol("NaN")
+}
+
 func tokenize(source, s string) []Scmer {
 	/* tokenizer state machine:
 		0 = expecting next item
@@ -339,13 +356,7 @@ func tokenize(source, s string) []Scmer {
 			// otherwise: state change!
 			if state == 1 {
 				// finish Number
-				if f, err := strconv.ParseFloat(s[startToken:i], 64); err == nil {
-					result = append(result, NewFloat(f))
-				} else if s[startToken:i] == "-" {
-					result = append(result, NewSymbol("-"))
-				} else {
-					result = append(result, NewSymbol("NaN"))
-				}
+				result = append(result, parseNumberToken(s[startToken:i]))
 			}
 			if state == 2 {
 				// finish Symbol
@@ -381,13 +392,7 @@ func tokenize(source, s string) []Scmer {
 	// in the end: finish unfinished Symbols and Numbers
 	if state == 1 {
 		// finish Number
-		if f, err := strconv.ParseFloat(s[startToken:], 64); err == nil {
-			result = append(result, NewFloat(f))
-		} else if s[startToken:] == "-" {
-			result = append(result, NewSymbol("-"))
-		} else {
-			result = append(result, NewSymbol("NaN"))
-		}
+		result = append(result, parseNumberToken(s[startToken:]))
 	}
 	if state == 2 {
 		// finish Symbol

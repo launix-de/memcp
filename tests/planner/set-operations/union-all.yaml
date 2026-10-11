@@ -18,6 +18,7 @@
 # Ordered branches use native multi-scan or bounded complete-row producer merging.
 
 metadata:
+  isolated: true # Changes process-wide ShardSize while rebuilding fixtures.
   version: "1.0"
   description: "UNION ALL combining results from multiple tables"
 

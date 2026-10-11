@@ -233,3 +233,27 @@ cold external PHP/JIT compiler builds. Those toolchains are cached by runtime
 ABI/source identity, while benchmark data is never cached. A timeout is a failure,
 not an omitted test or a successful partial result. End-to-end 15-minute CI is a
 measurement goal, not yet a demonstrated guarantee on a cold cache.
+
+### Shared scan diagnostics and concurrent requests
+
+Functional suites that inspect `system_statistic.scans` declare
+`metadata.scan_debugging: true`. The runner enables ScanDebugging once for that
+cluster, runs eligible suites concurrently against the same MemCP process and
+data directory, waits for every worker, and restores the previous setting even
+when a suite fails. The CI hook uses the same cluster declaration. Suites must
+filter/delete diagnostic rows by their own fixture tables; they must not toggle
+ScanDebugging themselves. Declare `isolated: true` as well when a suite changes
+another global setting such as ShardSize or JoinReorderDPBudget. Isolation still
+uses the shared server; it is a scheduling barrier.
+Suites that reset the complete scan log or assert across generic query-group
+names also run exclusively within the cluster. The runner rejects parallel
+cluster declarations that truncate the shared scan log. Server-restart suites
+stay outside the cluster.
+
+The processlist suite observes two simultaneous HTTP requests at a table-lock
+barrier, verifies a third request can progress, then checks each request's own
+session-variable bindings and result after release. This runs in both normal
+and JIT CI, including alongside other suites in the scan-diagnostics cluster.
+The runner contract tests additionally require concurrent cluster workers and
+verify setting restoration on success and exceptions. Performance suites keep
+their existing fixture, restart and measurement scheduling.
