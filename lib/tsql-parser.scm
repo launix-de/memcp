@@ -19,7 +19,14 @@ The negative accumulator also represents the minimum int64 without overflow. */
 		(if negative coefficient (- 0 coefficient)))))))
 (define tsql_int (parser (define value (regex "-?[0-9]+")) (tsql_parse_integer value)))
 (define tsql_number (parser (define value (regex "-?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:e-?[0-9]+)?" true))
-	(if (regexp_test value "^-?[0-9]+$") (tsql_parse_integer value) (simplify value))))
+	(begin
+		(define integer (regexp_test value "^-?[0-9]+$"))
+		(define number (if integer (tsql_parse_integer value) (simplify value)))
+		/* Syntax owns the SQL contract, including numeric zero and one.
+		The shared scalar equality considers these equal to Boolean values. */
+		(list (quote sql_type_expr) number
+			(if integer (if (and (>= number -2147483648) (<= number 2147483647)) "INT" "BIGINT")
+				(if (regexp_test value "[eE]") "FLOAT" "DECIMAL")) nil))))
 (define tsql_identifier_unquoted (parser (not
 	(regex "[a-zA-Z_][a-zA-Z0-9_]*")
 	(atom "NOT" true)
@@ -236,7 +243,8 @@ window result contract separately until shared expression compilation. */
 (define tsql_key_columns (parser (define columns (+ (parser '(
 	(define name tsql_identifier) (? (or (atom "ASC" true) (atom "DESC" true)))) name) ",")) columns))
 (define tsql_default_literal (parser (or
-	(parser '("(" (define value tsql_default_literal) ")") value) tsql_literal)))
+	(parser '("(" (define value tsql_default_literal) ")") value)
+	(parser (define value tsql_literal) (sql_type_lower_annotations value)))))
 (define tsql_clock_default (parser (or
 	(parser '("(" tsql_clock_default ")") true)
 	'((atom "GETDATE" true) "(" ")") (atom "CURRENT_TIMESTAMP" true))))
@@ -413,9 +421,12 @@ never from the first row. Unknown expression types stay text in this first slice
 		(parser '((atom "MIN" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "MIN" (list s) _over))
 		(parser '((atom "MAX" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "MAX" (list s) _over))
 
-		(parser '((atom "COUNT" true) "(" (atom "DISTINCT" true) (define e tsql_expression) ")") '('count_distinct e))
-		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
-		(parser '((atom "COUNT" true) "(" (define e tsql_expression) ")") '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0))
+		(parser '((atom "COUNT" true) "(" (atom "DISTINCT" true) (define e tsql_expression) ")")
+			'('sql_type_expr '('count_distinct e) "INT" nil))
+		(parser '((atom "COUNT" true) "(" "*" ")")
+			'('sql_type_expr '((quote aggregate) 1 (quote +) 0) "INT" nil))
+		(parser '((atom "COUNT" true) "(" (define e tsql_expression) ")")
+			'('sql_type_expr '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0) "INT" nil))
 		(parser '((atom "SUM" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "SUM")) '('aggregate s (car d) (cadr d))))
 		(parser '((atom "AVG" true) "(" (define s tsql_expression) ")")
 			(sql_avg_expr s (sql_aggregates "SUM") (sql_aggregates "COUNT")))
