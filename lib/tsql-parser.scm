@@ -195,7 +195,7 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		(if (and (plain_literal_expr? formula) (sql_numeric_type? (sql_info_type info))
 			(not (equal? length -1)) (> (strlen (string formula)) length))
 			(error "numeric character conversion overflow") true)
-		(sql_info (list tsql_cast_text formula length national)
+		(sql_info (list (quote tsql_cast_text) formula length national)
 			(if national "NVARCHAR" "VARCHAR") (sql_info_collation info)))) value))))
 /* Export-style day/month/year spelling is a frontend concern. Parse into Unix
 seconds with the existing date primitives; no temporal runtime type is added.

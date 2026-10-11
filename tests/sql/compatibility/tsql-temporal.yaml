@@ -1001,6 +1001,13 @@ test_cases:
   sql: SELECT CAST(CAST(DATEADD(day,1,dt) AS VARCHAR(19)) AS NVARCHAR(19)) AS value FROM tsql_temporal_data WHERE id=1
   expect: {rows: 1, data: [{value: '2026-03-16 12:13:14'}]}
 
+- name: Calendar large minutes interval cannot wrap a native duration
+  sql: SELECT CONVERT(VARCHAR(19),DATEADD(minute,2147483647,N'1900-01-01'),120) AS value
+  expect: {rows: 1, data: [{value: '5983-01-24 02:07:00'}]}
+- name: Calendar large hours interval rejects an out of range result
+  sql: SELECT DATEADD(hour,2147483647,N'1900-01-01')
+  expect: {error: true}
+
 - sql: DROP TABLE IF EXISTS tsql_clock_defaults
   name: 'Fixture cleanup 001: DROP TABLE IF EXISTS tsql_clock_defaults'
 - sql: DROP TABLE IF EXISTS tsql_temporal_data
