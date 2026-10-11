@@ -8,6 +8,9 @@ setup:
   - sql: DROP TABLE IF EXISTS tsql_unary_contract
   - sql: CREATE TABLE tsql_unary_contract(id INT PRIMARY KEY,value TINYINT)
   - sql: INSERT INTO tsql_unary_contract VALUES (1,255)
+  - sql: DROP TABLE IF EXISTS tsql_seeded_identity
+  - sql: DROP TABLE IF EXISTS tsql_empty_seed
+  - sql: DROP TABLE IF EXISTS tsql_bad_seed
   - sql: DROP TABLE IF EXISTS tsql_add_contracts
   - sql: DROP TABLE IF EXISTS tsql_add_copy
   - sql: CREATE TABLE tsql_add_contracts (id INT PRIMARY KEY,a INT,b SMALLINT,txt NVARCHAR(20),suffix VARCHAR(20))
@@ -1407,8 +1410,66 @@ test_cases:
     sql: SELECT id,value FROM tsql_identity_zero_scale ORDER BY id
     expect: {rows: 2, data: [{id: 1, value: 7}, {id: 2, value: 8}]}
 
+  - name: Positive identity seed uses the native table allocator
+    sql: CREATE TABLE tsql_seeded_identity (id INT IDENTITY(50,1) PRIMARY KEY,value INT)
+  - name: Native seeded identity assigns consecutive values
+    sql: INSERT INTO tsql_seeded_identity (value) VALUES (7),(8)
+  - name: Native seeded identity retains its declared origin
+    sql: SELECT id,value FROM tsql_seeded_identity ORDER BY id
+    expect: {rows: 2, data: [{id: 50, value: 7}, {id: 51, value: 8}]}
+  - name: Native seeded identity explicit values advance the existing allocator
+    sql: INSERT INTO tsql_seeded_identity VALUES (100,9)
+  - name: Native seeded identity reuses the advanced allocator
+    sql: INSERT INTO tsql_seeded_identity (value) VALUES (10)
+  - name: Native seeded identity explicit maximum controls the next value
+    sql: SELECT id AS value FROM tsql_seeded_identity WHERE value=10
+    expect: {rows: 1, data: [{value: 101}]}
+  - name: Empty seeded identity uses ordinary native schema persistence
+    sql: CREATE TABLE tsql_empty_seed (id INT IDENTITY(200,1),value INT)
+  - name: Seeded identity restarts through native persistence
+    sql: SHUTDOWN
+    syntax: mysql
+  - name: Existing seeded identity continues after restart
+    sql: INSERT INTO tsql_seeded_identity (value) VALUES (11)
+  - name: Existing seeded identity counter survives replay
+    sql: SELECT id AS value FROM tsql_seeded_identity WHERE value=11
+    expect: {rows: 1, data: [{value: 102}]}
+  - name: Empty seeded identity retains its starting option after restart
+    sql: INSERT INTO tsql_empty_seed (value) VALUES (7)
+  - name: Empty seeded identity produces its persisted origin
+    sql: SELECT id AS value FROM tsql_empty_seed
+    expect: {rows: 1, data: [{value: 200}]}
+  - name: Existing table admission does not reseed a native allocator
+    sql: CREATE TABLE IF NOT EXISTS tsql_seeded_identity (id INT IDENTITY(999,1) PRIMARY KEY,value INT)
+  - name: Existing table continues after ignored create
+    sql: INSERT INTO tsql_seeded_identity (value) VALUES (12)
+  - name: Ignored create retains the running native counter
+    sql: SELECT id AS value FROM tsql_seeded_identity WHERE value=12
+    expect: {rows: 1, data: [{value: 103}]}
+  - name: Seed exceeds a declared small integer range
+    sql: CREATE TABLE tsql_bad_seed (id SMALLINT IDENTITY(32768,1))
+    expect: {error: true}
+  - name: Native zero seed is explicitly unsupported
+    sql: CREATE TABLE tsql_bad_seed (id INT IDENTITY(0,1))
+    expect: {error: true}
+  - name: Native negative seed is explicitly unsupported
+    sql: CREATE TABLE tsql_bad_seed (id INT IDENTITY(-1,1))
+    expect: {error: true}
+  - name: Native non-unit increment is explicitly unsupported
+    sql: CREATE TABLE tsql_bad_seed (id INT IDENTITY(50,2))
+    expect: {error: true}
+  - name: Multiple identity columns cannot share one native allocator
+    sql: CREATE TABLE tsql_bad_seed (first_id INT IDENTITY(50,1),second_id INT IDENTITY(100,1))
+    expect: {error: true}
+  - name: Seeded ALTER ADD does not bypass historical row initialization
+    sql: ALTER TABLE tsql_seeded_identity ADD other INT IDENTITY(50,1)
+    expect: {error: true}
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_unary_contract
+  - sql: DROP TABLE IF EXISTS tsql_seeded_identity
+  - sql: DROP TABLE IF EXISTS tsql_empty_seed
+  - sql: DROP TABLE IF EXISTS tsql_bad_seed
   - sql: DROP TABLE IF EXISTS tsql_add_contracts
   - sql: DROP TABLE IF EXISTS tsql_add_copy
   - sql: DROP TABLE IF EXISTS tsql_terminator_probe
