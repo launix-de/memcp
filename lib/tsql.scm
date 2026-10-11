@@ -34,8 +34,11 @@ value; the wire descriptor and SQL declaration own the type independently. */
 		(define wire (parameter "type"))
 		(if (not (has? '(31 38 104 109 167 175 231 239) (wire "kind")))
 			(error "unsupported T-SQL parameter wire type: " (wire "kind")) true)
-		(define converted (eval (sql_type_lower_annotations
-			(tsql_cast_expr (list (quote quote) (parameter "value")) (car contract) (cdr contract)))))
+		/* A supplied NULL needs no numeric representation or conversion. Its SQL
+		contract still comes exclusively from the declaration. */
+		(define converted (if (nil? (parameter "value")) nil
+			(eval (sql_type_lower_annotations
+				(tsql_cast_expr (list (quote quote) (parameter "value")) (car contract) (cdr contract))))))
 		(list (concat "__tsql_parameter:" name) converted)))))
 	/* All declarations and values are validated before installing this request. */
 	(map values (lambda (item) (session (car item) (cadr item))))

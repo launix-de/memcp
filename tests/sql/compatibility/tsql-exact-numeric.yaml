@@ -261,10 +261,20 @@ test_cases:
     - value: '-0.12345678901234567890123456789012345678'
   noncritical: true
 - name: Unary bound null update remains null
-  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_bound:p\" true)\n  (s \"tsql_param_type:p\" '(\"NUMERIC\"\
-    \ 38 38))\n  (s \"tsql_param:p\" nil)\n  (sql_execute_formula s nil (sql_queryplan_compile_formula nil\n   \
-    \ (parse_tsql \"memcp-tests\" \"UPDATE dbo.tsql_unary_exact_data SET f=-@p WHERE id=1\" nil s nil))\n    (lambda\
-    \ rows true) (lambda fields true)))\n"
+  setup:
+  - sql: DELETE FROM dbo.tsql_unary_exact_data WHERE id=1
+  - sql: INSERT INTO dbo.tsql_unary_exact_data (id,f) VALUES (1,7)
+  scm: |
+    (begin
+      (define s (newsession))
+      (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@p NUMERIC(38,38)")
+        (list (list "name" "p" "flags" 0 "type" (list "kind" 31) "value" nil)))
+      (sql_execute_formula s nil (sql_queryplan_compile_formula nil
+        (parse_tsql "memcp-tests" "UPDATE dbo.tsql_unary_exact_data SET f=-@p WHERE id=1" nil s nil))
+        (lambda rows true) (lambda fields true)))
+- name: Unary bound NULL is stored through native UPDATE
+  sql: SELECT f FROM dbo.tsql_unary_exact_data WHERE id=1
+  expect: {rows: 1, data: [{f: null}]}
 - name: Unary null is preserved in stored and expression values
   sql: SELECT f,-CAST(NULL AS DECIMAL(38,38)) AS value FROM dbo.tsql_unary_exact_data WHERE id=1
   expect:

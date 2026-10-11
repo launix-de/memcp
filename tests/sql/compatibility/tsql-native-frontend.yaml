@@ -748,6 +748,21 @@ test_cases:
       (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v INT,@w INT")
         (list (list "name" "v" "flags" 0) (list "name" "v" "flags" 0)))
     expect: {error: true}
+  - name: Guarded parameter plans read each invocation value
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (define declarations (tds_bind_declarations "memcp-tests" "@v INT"))
+        (define run (lambda (value) (begin
+          (tds_bind_parameters s declarations
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 38 "size" 4) "value" value)))
+          (define output (newsession))
+          (tsql_execute_statement nil "memcp-tests" "SELECT id FROM tsql_native WHERE id IN (@v)" s
+            (lambda (row) (output "id" (row "id"))) (lambda fields true))
+          (output "id"))))
+        (equal? (map '(1 2 99 1) run) '(1 2 nil 1)))
+    expect: {result: true}
   - name: RPC output parameters require an explicit implemented contract
     scm: |
       (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v INT")
