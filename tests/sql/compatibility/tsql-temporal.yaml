@@ -115,7 +115,6 @@ test_cases:
       dy: 16
       part: 2027
       diff: 2
-  noncritical: true
 - name: Clock default schema survives a graceful restart
   sql: SHUTDOWN
   syntax: mysql
@@ -244,35 +243,30 @@ test_cases:
     rows: 1
     data:
     - value: 1
-  noncritical: true
 - name: Year boundary crosses fractional input
   sql: SELECT DATEDIFF(yy,N'2025-12-31 23:59:59.9999999',N'2026-01-01 00:00:00') AS value
   expect:
     rows: 1
     data:
     - value: 1
-  noncritical: true
 - name: Sunday week boundary
   sql: SELECT DATEDIFF(week,N'2026-03-14',N'2026-03-15') AS value
   expect:
     rows: 1
     data:
     - value: 1
-  noncritical: true
 - name: Monday not a week boundary
   sql: SELECT DATEDIFF(wk,N'2026-03-15',N'2026-03-16') AS value
   expect:
     rows: 1
     data:
     - value: 0
-  noncritical: true
 - name: Negative boundary difference
   sql: SELECT DATEDIFF(day,N'2026-03-16',N'2026-03-15') AS value
   expect:
     rows: 1
     data:
     - value: -1
-  noncritical: true
 - name: Fractional millisecond boundary
   sql: SELECT DATEDIFF(ms,N'2026-03-15 12:00:00.9999999',N'2026-03-15 12:00:01') AS value
   expect:
@@ -328,14 +322,12 @@ test_cases:
     rows: 1
     data:
     - value: 1
-  noncritical: true
 - name: Datepart leap year ordinal
   sql: SELECT DATEPART(dy,N'2024-12-31') AS value
   expect:
     rows: 1
     data:
     - value: 366
-  noncritical: true
 - name: Datepart Sunday weekday
   sql: SELECT DATEPART(dw,N'2026-03-15') AS value
   expect:
@@ -538,28 +530,24 @@ test_cases:
     rows: 1
     data:
     - value: 1
-  noncritical: true
 - name: Legacy numeric date floor idiom
   sql: SELECT CONVERT(VARCHAR(19),DATEADD(day,DATEDIFF(day,0,N'2026-03-15 12:13:14'),0),120) AS value
   expect:
     rows: 1
     data:
     - value: '2026-03-15 00:00:00'
-  noncritical: true
 - name: Datepart numeric epoch
   sql: SELECT DATEPART(year,0) AS value
   expect:
     rows: 1
     data:
     - value: 1900
-  noncritical: true
 - name: Legacy numeric date floor over stored column
   sql: SELECT CONVERT(VARCHAR(19),DATEADD(day,DATEDIFF(day,0,dt),0),120) AS value FROM tsql_temporal_data
   expect:
     rows: 1
     data:
     - value: '2026-03-15 00:00:00'
-  noncritical: true
 - name: Exact time rounding carry
   sql: SELECT CAST(CAST(N'23:59:59.9999999' AS TIME(3)) AS VARCHAR(40)) AS value
   expect:
@@ -696,7 +684,6 @@ test_cases:
     rows: 1
     data:
     - value: 1900
-  noncritical: true
 - name: TIME YEAR alias defaults
   sql: SELECT YEAR(tm) AS value FROM tsql_fractional_data WHERE id=1
   expect:
@@ -930,6 +917,89 @@ test_cases:
     data:
     - clock: '2018-03-15 13:02:03'
       missing: null
+
+- name: Calendar numeric constants retain their syntax type
+  sql: SELECT DATEPART(year,0) AS origin,DATEPART(day,1) AS next_day,DATEPART(hour,0.5) AS hour
+  expect: {rows: 1, data: [{origin: 1900, next_day: 2, hour: 12}]}
+- name: Calendar numeric and textual origins agree
+  sql: SELECT DATEDIFF(day,0,N'1970-01-01') AS days,DATEDIFF(second,0,N'1900-01-01 00:00:01') AS seconds
+  expect: {rows: 1, data: [{days: 25567, seconds: 1}]}
+- name: Calendar column declarations control the same Unix carrier
+  scm: |
+    (begin
+      (define timestamp (sql_expr_info (list)
+        (tsql_datepart_expr "year" (list (quote sql_type_expr) 0 "DATETIME" nil))))
+      (define numeric (sql_expr_info (list)
+        (tsql_datepart_expr "year" (list (quote sql_type_expr) 0 "INT" nil))))
+      (if (and (equal? (eval (sql_info_formula timestamp)) 1970)
+               (equal? (eval (sql_info_formula numeric)) 1900)
+               (equal? (sql_info_type timestamp) "INT")
+               (equal? (sql_info_type numeric) "INT")) true
+        (error "calendar semantics were selected from a runtime value")))
+- name: Calendar negative Unix boundaries use floor
+  sql: SELECT DATEDIFF(day,N'1969-12-31 23:59:59',N'1970-01-01 00:00:00') AS days,DATEDIFF(hour,N'1969-12-31 23:59:59',N'1970-01-01 00:00:00') AS hours
+  expect: {rows: 1, data: [{days: 1, hours: 1}]}
+- name: Calendar quarter and month boundaries
+  sql: SELECT DATEDIFF(quarter,N'2026-03-31 23:59:59',N'2026-04-01') AS quarters,DATEDIFF(month,N'2026-01-31',N'2026-02-01') AS months
+  expect: {rows: 1, data: [{quarters: 1, months: 1}]}
+- name: Calendar clock and quarter parts
+  sql: SELECT DATEPART(q,N'2026-04-01') AS quarter,DATEPART(hh,N'2026-04-01 12:13:14') AS hour,DATEPART(mi,N'2026-04-01 12:13:14') AS minute,DATEPART(ss,N'2026-04-01 12:13:14') AS second
+  expect: {rows: 1, data: [{quarter: 2, hour: 12, minute: 13, second: 14}]}
+- name: Calendar nullable values propagate NULL
+  sql: SELECT DATEPART(year,NULL) AS part,DATEDIFF(day,NULL,N'2026-03-15') AS difference,DATEADD(day,NULL,N'2026-03-15') AS addition
+  expect: {rows: 1, data: [{part: null, difference: null, addition: null}]}
+- name: Calendar large difference retains BIGINT range
+  sql: SELECT DATEDIFF_BIG(second,N'1900-01-01',N'1970-01-01') AS value
+  expect: {rows: 1, data: [{value: 2208988800}]}
+- name: Calendar declared numeric NULL keeps its contract
+  sql: SELECT DATEPART(year,CAST(NULL AS INT)) AS part,DATEDIFF(day,CAST(NULL AS INT),0) AS difference
+  expect: {rows: 1, data: [{part: null, difference: null}]}
+- name: Calendar day addition preserves stored timestamp
+  sql: SELECT CONVERT(VARCHAR(19),DATEADD(day,1,dt),120) AS value FROM tsql_temporal_data WHERE id=1
+  expect: {rows: 1, data: [{value: '2026-03-16 12:13:14'}]}
+- name: Calendar numeric addition uses the date origin
+  sql: SELECT CONVERT(VARCHAR(19),DATEADD(day,1,0),120) AS value
+  expect: {rows: 1, data: [{value: '1900-01-02 00:00:00'}]}
+- name: Calendar month addition clamps day and preserves clock
+  sql: SELECT CONVERT(VARCHAR(19),DATEADD(month,1,N'2024-01-31 12:13:14'),120) AS value
+  expect: {rows: 1, data: [{value: '2024-02-29 12:13:14'}]}
+- name: Calendar negative month and leap year addition
+  sql: SELECT CONVERT(VARCHAR(19),DATEADD(month,-1,N'2026-03-31'),120) AS previous,CONVERT(VARCHAR(19),DATEADD(year,1,N'2024-02-29'),120) AS following
+  expect: {rows: 1, data: [{previous: '2026-02-28 00:00:00', following: '2025-02-28 00:00:00'}]}
+- name: Calendar fractional interval truncates toward zero
+  sql: SELECT CONVERT(VARCHAR(19),DATEADD(day,-1.9,N'2026-03-15'),120) AS value
+  expect: {rows: 1, data: [{value: '2026-03-14 00:00:00'}]}
+- name: Calendar large seconds interval cannot wrap a native duration
+  sql: SELECT CONVERT(VARCHAR(19),DATEADD(second,2147483647,N'1900-01-01'),120) AS value
+  expect: {rows: 1, data: [{value: '1968-01-20 03:14:07'}]}
+- name: Calendar date columns reject clock intervals
+  sql: SELECT DATEADD(hour,1,d) FROM tsql_temporal_data WHERE id=1
+  expect: {error: true}
+- name: Calendar numeric origin rejects out of range days
+  sql: SELECT DATEPART(year,2958464)
+  expect: {error: true}
+- name: Calendar addition rejects interval overflow
+  sql: SELECT DATEADD(day,2147483648,N'2026-03-15')
+  expect: {error: true}
+- name: Calendar addition rejects result overflow
+  sql: SELECT DATEADD(day,1,N'9999-12-31')
+  expect: {error: true}
+- name: Calendar addition rejects untyped interval expressions
+  scm: |
+    (sql_expr_info (list) (tsql_dateadd_expr "day" (list (quote session) "interval") "2026-03-15"))
+  expect: {error: true}
+- name: Calendar compilation rejects unresolved date contracts
+  scm: |
+    (sql_expr_info (list) (tsql_datepart_expr "year" (list (quote session) "date")))
+  expect: {error: true}
+
+
+- name: Calendar unary expression resolves the source declaration
+  sql: SELECT -DATEPART(year,dt) AS value FROM tsql_temporal_data WHERE id=1
+  expect: {rows: 1, data: [{value: -2026}]}
+- name: Calendar nested text cast resolves the source declaration
+  sql: SELECT CAST(CAST(DATEADD(day,1,dt) AS VARCHAR(19)) AS NVARCHAR(19)) AS value FROM tsql_temporal_data WHERE id=1
+  expect: {rows: 1, data: [{value: '2026-03-16 12:13:14'}]}
 
 - sql: DROP TABLE IF EXISTS tsql_clock_defaults
   name: 'Fixture cleanup 001: DROP TABLE IF EXISTS tsql_clock_defaults'

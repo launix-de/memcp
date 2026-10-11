@@ -428,6 +428,58 @@ test_cases:
     expect:
       result: true
 
+  - name: "frontend compiler receives declared column triples"
+    scm: |
+      (begin
+        (define sources (list (list "d" "memcp-tests" "stf_doc" false nil)))
+        (define compiler (lambda (infos)
+          (if (and (equal? (sql_info_type (car infos)) "INT")
+                   (equal? (sql_info_type (cadr infos)) "VARCHAR"))
+            (sql_info 41 "INT" nil)
+            (error "frontend compiler did not receive catalog types"))))
+        (define expression (list (quote sql_compile_expr) compiler
+          (list (quote get_column) "d" false "weight" false)
+          (list (quote get_column) "d" false "title" false)))
+        (define info (sql_expr_info sources expression))
+        (if (and (equal? (sql_info_formula info) 41)
+                 (equal? (sql_info_type info) "INT")) true
+          (error "frontend compiler survived into the executable expression")))
+
+  - name: "nested frontend compilers preserve declared text collation"
+    scm: |
+      (begin
+        (define compiler (lambda (infos) (car infos)))
+        (define contract (list (quote sql_type_expr) "x" "NVARCHAR" (list "utf8mb4_bin" 0)))
+        (define inner (list (quote sql_compile_expr) compiler contract))
+        (define outer (list (quote sql_compile_expr) compiler inner))
+        (define info (sql_expr_info (list) outer))
+        (if (and (equal? (sql_info_formula info) "x")
+                 (equal? (sql_info_type info) "NVARCHAR")
+                 (equal? (sql_info_collation info) (list "utf8mb4_bin" 0))
+                 (equal? (sql_type_lower_annotations outer) "x")) true
+          (error "nested compilation lost a SQL contract or retained a compiler")))
+
+  - name: "frontend compiler can return a typed NULL without losing replacement"
+    scm: |
+      (begin
+        (define compiler (lambda (infos) (car infos)))
+        (define expression (list (quote sql_compile_expr) compiler
+          (list (quote sql_type_expr) nil "BIGINT" nil)))
+        (define info (sql_expr_info (list) expression))
+        (if (and (nil? (sql_info_formula info))
+                 (equal? (sql_info_type info) "BIGINT")
+                 (expression_equal? (sql_type_annotation_replacement expression) (list nil))
+                 (nil? (sql_type_annotation_replacement (list (quote quote) expression)))) true
+          (error "typed NULL or quoted compiler handling is incorrect")))
+
+  - name: "frontend compiler errors fail expression compilation"
+    scm: |
+      (sql_expr_info (list) (list (quote sql_compile_expr)
+        (lambda (infos) (error "unsupported frontend argument contract"))
+        (list (quote sql_type_expr) 1 "INT" nil)))
+    expect: {error: true}
+
+
 cleanup:
   - sql: DROP TABLE IF EXISTS stf_bin_compare
   - sql: DROP TABLE IF EXISTS stf_doc
