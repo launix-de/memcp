@@ -1157,6 +1157,17 @@ never from the first row. Unknown expression types stay text in this first slice
 					(lambda (i) (sql_type_formula (list) (tsql_assignment_expr (nth row i) (nth declarations i))))))))
 					'(list) nil false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))
 	)))
+	/* An all-default row is the native empty-column INSERT. Defaults and
+	generated values are filled by the same operator as ordinary insertion. */
+	(define tsql_insert_default (parser '(
+		(atom "INSERT" true) (? (atom "INTO" true))
+		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
+		(atom "DEFAULT" true) (atom "VALUES" true)
+	) (begin
+			(define database (coalesce schema2 schema))
+			(if policy (policy database tbl true) true)
+			'('insert '('table database tbl) '(list) '('list '(list))
+				'(list) nil false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))))
 	(define tsql_insert_select (parser '(
 		(atom "INSERT" true) (atom "INTO" true)
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
@@ -1275,7 +1286,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query tsql_select)) (explain_queryplan_physical (sql_expand_views query policy) planning_session))
 		(parser '((atom "EXPLAIN" true) (define query tsql_select))
 			'('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy) planning_session tx)) (settings "ExplainWidth")))))
-		tsql_insert_into tsql_insert_select tsql_update tsql_delete tsql_truncate
+		tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete tsql_truncate
 		tsql_create_view tsql_create_table tsql_alter_table tsql_create_unique_index
 		(parser '((atom "CREATE" true) (atom "DATABASE" true)
 			(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))

@@ -25,6 +25,10 @@ setup:
   - sql: INSERT INTO tsql_index_nulls VALUES (1,NULL)
   - sql: DROP TABLE IF EXISTS tsql_assignment_probe
   - sql: CREATE TABLE tsql_assignment_probe (id INT PRIMARY KEY,tiny TINYINT,amount DECIMAL(5,2))
+  - sql: DROP TABLE IF EXISTS tsql_default_row
+  - sql: DROP TABLE IF EXISTS tsql_default_required
+  - sql: CREATE TABLE tsql_default_row (id INT IDENTITY PRIMARY KEY,amount INT NOT NULL DEFAULT ((7)),label NVARCHAR(30) DEFAULT N'Grüße',nullable_value INT)
+  - sql: CREATE TABLE tsql_default_required (value INT NOT NULL)
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: CREATE TABLE tsql_having_input (id INT PRIMARY KEY)
   - sql: INSERT INTO tsql_having_input VALUES (1)
@@ -862,6 +866,36 @@ test_cases:
         (string (parse_tsql "memcp-tests" "INSERT INTO tsql_assignment_probe VALUES (21,21,21)" nil nil nil))
         "sql_type_expr"))
     expect: {result: true}
+  - name: Default values inserts a native omitted-column row
+    sql: INSERT INTO [dbo].[tsql_default_row] DEFAULT VALUES
+    expect: {affected_rows: 1}
+  - name: All-default insertion uses native defaults and identity
+    sql: SELECT id,amount,label,nullable_value FROM tsql_default_row
+    expect: {rows: 1, data: [{id: 1, amount: 7, label: Grüße, nullable_value: null}]}
+  - name: Default values accepts an omitted into keyword
+    sql: INSERT tsql_default_row DEFAULT VALUES
+    expect: {affected_rows: 1}
+  - name: Default rows share the ordinary native allocator
+    sql: INSERT INTO tsql_default_row (label) VALUES (N'explicit')
+    expect: {affected_rows: 1}
+  - name: Ordinary and default inserts retain one sequence
+    sql: SELECT id,amount,label FROM tsql_default_row ORDER BY id
+    expect: {rows: 3, data: [{id: 1, amount: 7, label: Grüße}, {id: 2, amount: 7, label: Grüße}, {id: 3, amount: 7, label: explicit}]}
+  - name: Default values rejects an explicit column list
+    sql: INSERT INTO tsql_default_row (amount) DEFAULT VALUES
+    expect: {error: true}
+  - name: Default values rejects trailing row data
+    sql: INSERT INTO tsql_default_row DEFAULT VALUES (1)
+    expect: {error: true}
+  - name: Default values rejects a missing values keyword
+    sql: INSERT INTO tsql_default_row DEFAULT
+    expect: {error: true}
+  - name: All-default admission respects native required columns
+    sql: INSERT INTO tsql_default_required DEFAULT VALUES
+    expect: {error: true}
+  - name: Rejected all-default row does not publish data
+    sql: SELECT COUNT(*) AS n FROM tsql_default_required
+    expect: {rows: 1, data: [{n: 0}]}
   - name: Alter adds an enforced named unique through native keys
     sql: ALTER TABLE tsql_setup_columns ADD CONSTRAINT setup_unique_revision UNIQUE (tenant ASC,revision DESC)
     expect: {rows: 0}
@@ -1288,6 +1322,8 @@ cleanup:
   - sql: DROP TABLE IF EXISTS tsql_index_duplicates
   - sql: DROP TABLE IF EXISTS tsql_index_nulls
   - sql: DROP TABLE IF EXISTS tsql_assignment_probe
+  - sql: DROP TABLE IF EXISTS tsql_default_row
+  - sql: DROP TABLE IF EXISTS tsql_default_required
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: DROP TABLE IF EXISTS tsql_cast_collation
   - sql: DROP TABLE IF EXISTS tsql_setup_catalog
