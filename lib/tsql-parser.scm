@@ -313,7 +313,7 @@ Numeric dates count days from 1900; native DATE/DATETIME values are Unix values.
 		/* Floor, including before the Unix epoch. Week boundaries are Sundays,
 		independent of any session's first-day-of-week setting. */
 		(lambda (value) (if (nil? value) nil
-			(floor (/ (+ (unix_timestamp value) offset) seconds)))))))))
+			(floor (/ (+ (unix_timestamp value) offset) seconds))))))))
 /* Use native date arithmetic, correcting only this dialect's month-end rule.
 No row-level datatype dispatch or alternate temporal representation is needed. */
 (define tsql_calendar_shift_months (lambda (value amount) (if (or (nil? value) (nil? amount)) nil (begin
