@@ -8,6 +8,8 @@ setup:
   - sql: DROP TABLE IF EXISTS tsql_setup_memo
   - sql: CREATE TABLE tsql_setup_memo (id INT PRIMARY KEY, note NVARCHAR(200), code INT, money_code MONEY, smallmoney_code SMALLMONEY, date_code DATE, time_code TIME, datetime_code DATETIME)
   - sql: INSERT INTO tsql_setup_memo (id,note,code,money_code,smallmoney_code) VALUES (1,N'pending',13,65.9,65.9),(2,NULL,NULL,NULL,NULL),(3,N'pending',228,65.5,65.4)
+  - sql: DROP TABLE IF EXISTS tsql_optional_insert
+  - sql: CREATE TABLE tsql_optional_insert (id INT PRIMARY KEY, label NVARCHAR(80))
   - sql: DROP TABLE IF EXISTS tsql_unary_contract
   - sql: CREATE TABLE tsql_unary_contract(id INT PRIMARY KEY,value TINYINT)
   - sql: INSERT INTO tsql_unary_contract VALUES (1,255)
@@ -926,7 +928,42 @@ test_cases:
   - name: Insert without into accepts the dialect statement spelling
     sql: INSERT tsql_native_copy (id,name) VALUES (99,N'optional keyword')
     expect: {rows: 1}
-    noncritical: true
+  - name: Optional into values lowers to the same native insertion
+    scm: |
+      (expression_equal?
+        (parse_tsql "memcp-tests" "INSERT tsql_optional_insert VALUES (10,N'same')" nil nil nil)
+        (parse_tsql "memcp-tests" "INSERT INTO tsql_optional_insert VALUES (10,N'same')" nil nil nil))
+    expect: {result: true}
+  - name: Optional into select lowers to the same shared plan
+    scm: |
+      (expression_equal?
+        (parse_tsql "memcp-tests" "INSERT tsql_optional_insert SELECT 10,N'same'" nil nil nil)
+        (parse_tsql "memcp-tests" "INSERT INTO tsql_optional_insert SELECT 10,N'same'" nil nil nil))
+    expect: {result: true}
+  - name: Omitted into accepts a qualified escaped target and columns
+    sql: INSERT [dbo].[tsql_optional_insert] ([id],[label]) VALUES (1,N'values')
+    expect: {rows: 1}
+  - name: Omitted into accepts select and implicit target columns
+    sql: INSERT tsql_optional_insert SELECT 2,N'select'
+    expect: {rows: 1}
+  - name: Explicit into keeps the same target and constraints
+    sql: INSERT INTO tsql_optional_insert VALUES (3,N'explicit')
+    expect: {rows: 1}
+  - name: Both insertion spellings retain their actual rows
+    sql: SELECT id,label FROM tsql_optional_insert ORDER BY id
+    expect: {rows: 3, data: [{id: 1, label: values}, {id: 2, label: select}, {id: 3, label: explicit}]}
+  - name: Omitted into still enforces native primary uniqueness
+    sql: INSERT tsql_optional_insert VALUES (1,N'duplicate')
+    expect: {error: true, contains: Duplicate entry}
+  - name: Explicit into still enforces native primary uniqueness
+    sql: INSERT INTO tsql_optional_insert VALUES (1,N'duplicate')
+    expect: {error: true, contains: Duplicate entry}
+  - name: Optional into cannot repeat the keyword
+    sql: INSERT INTO INTO tsql_optional_insert VALUES (4,N'invalid')
+    expect: {error: true}
+  - name: Omitted into still validates values width
+    sql: INSERT tsql_optional_insert VALUES (4)
+    expect: {error: true, contains: column count}
   - name: Numeric assignments use native target declarations
     sql: INSERT INTO tsql_assignment_probe VALUES (1,255,999.994)
     expect: {affected_rows: 1}
@@ -2062,6 +2099,7 @@ cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_tiny_limit
   - sql: DROP TABLE IF EXISTS tsql_identity_int_limit
   - sql: DROP TABLE IF EXISTS tsql_setup_memo
+  - sql: DROP TABLE IF EXISTS tsql_optional_insert
   - sql: DROP TABLE IF EXISTS tsql_unary_contract
   - sql: DROP TABLE IF EXISTS tsql_seeded_identity
   - sql: DROP TABLE IF EXISTS tsql_empty_seed
