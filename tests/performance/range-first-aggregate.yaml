@@ -3,7 +3,9 @@
 # Workload: one cold request plus ten reuses, with no discarded warmup.
 
 metadata:
-  performance_shard_weight: 2
+  # Measured JIT verification: about 268 seconds for all seven pairs,
+  # including process startup; scheduling weights use 15-second units.
+  performance_shard_weight: 18
   version: "1.0"
   description: "Range-first scalar values inside a period aggregate"
   isolated: true
