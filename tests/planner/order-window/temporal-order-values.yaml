@@ -1,0 +1,99 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Temporal ORDER BY aliases retain value semantics and format only emitted rows
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS temporal_order_value
+- sql: DROP TABLE IF EXISTS temporal_order_types
+- sql: CREATE TABLE temporal_order_value (id INT PRIMARY KEY, stamp DATETIME) ENGINE=memory
+- sql: INSERT INTO temporal_order_value VALUES (1,NULL),(2,'0000-00-00 00:00:00'),(3,'2024-10-27 00:59:59'),(4,'2024-10-27 01:00:00'),(5,'2024-10-27 00:59:59')
+- sql: CREATE TABLE temporal_order_types (id INT PRIMARY KEY, day_value DATE, instant TIMESTAMP) ENGINE=memory
+- sql: INSERT INTO temporal_order_types VALUES (1,NULL,NULL),(2,'2024-10-26','2024-10-27 00:59:59'),(3,'2024-10-27','2024-10-27 01:00:00')
+- scm: (rebuild)
+test_cases:
+- name: Logical ordering keeps the value while projection retains its formatter
+  scm: |
+    (begin
+      (define value (list (quote get_column) "temporal_order_value" false "stamp" false))
+      (define query (make_query_block "memcp-tests"
+        (list (list "temporal_order_value" "memcp-tests" "temporal_order_value" false nil))
+        (list "displayed" value) true nil nil
+        (list (list (list (quote get_column) nil false "displayed" false) >))
+        3 nil '() '() '()))
+      (define block (ir_root (decorrelate_logical_query query)))
+      (if (and (expression_equal? (car (car (qb_order block))) value)
+        (match (cadr (qb_fields block))
+          ((symbol sql_temporal_output) emitted "DATETIME" _timezone)
+            (expression_equal? emitted value)
+          _ false))
+        true (error "temporal formatting crossed the relational ordering boundary")))
+  expect: {result_contains: ['true']}
+- name: Bare temporal column preserves output and descending ties
+  sql: SELECT id, stamp FROM temporal_order_value ORDER BY stamp DESC, id ASC LIMIT 3
+  expect:
+    data:
+    - {id: 4, stamp: '2024-10-27 01:00:00'}
+    - {id: 3, stamp: '2024-10-27 00:59:59'}
+    - {id: 5, stamp: '2024-10-27 00:59:59'}
+- name: Temporal alias is ordered before session timezone formatting
+  session_id: temporal-order-dst
+  setup:
+  - sql: SET time_zone='Europe/Berlin'
+  sql: SELECT id, stamp AS displayed FROM temporal_order_value ORDER BY displayed DESC, id ASC LIMIT 3
+  expect:
+    data:
+    - {id: 4, displayed: '2024-10-27 02:00:00'}
+    - {id: 3, displayed: '2024-10-27 02:59:59'}
+    - {id: 5, displayed: '2024-10-27 02:59:59'}
+- name: Qualified temporal column agrees with alias ordering
+  session_id: temporal-order-dst
+  sql: SELECT id, stamp AS displayed FROM temporal_order_value t ORDER BY t.stamp DESC, id ASC LIMIT 3
+  expect:
+    data:
+    - {id: 4, displayed: '2024-10-27 02:00:00'}
+    - {id: 3, displayed: '2024-10-27 02:59:59'}
+    - {id: 5, displayed: '2024-10-27 02:59:59'}
+- name: Ascending temporal alias keeps NULL and zero date before real values
+  sql: SELECT id, stamp AS value FROM temporal_order_value ORDER BY value, id
+  expect:
+    data:
+    - {id: 1, value: null}
+    - {id: 2, value: '0000-00-00 00:00:00'}
+    - {id: 3, value: '2024-10-27 00:59:59'}
+    - {id: 5, value: '2024-10-27 00:59:59'}
+    - {id: 4, value: '2024-10-27 01:00:00'}
+- name: Explicit DATE_FORMAT alias keeps its requested string ordering
+  sql: SELECT id, DATE_FORMAT(stamp,'%i:%s') AS clock FROM temporal_order_value WHERE id>=3 ORDER BY clock, id
+  expect:
+    data:
+    - {id: 4, clock: '00:00'}
+    - {id: 3, clock: '59:59'}
+    - {id: 5, clock: '59:59'}
+- name: Delta insert participates in temporal page order
+  setup:
+  - sql: INSERT INTO temporal_order_value VALUES (6,'2024-10-28 00:00:00')
+  sql: SELECT id, stamp FROM temporal_order_value ORDER BY stamp DESC LIMIT 1
+  expect:
+    data:
+    - {id: 6, stamp: '2024-10-28 00:00:00'}
+- name: Unknown order alias fails explicitly
+  sql: SELECT id, stamp AS displayed FROM temporal_order_value ORDER BY missing_stamp
+  expect: {error: true}
+- name: DATE alias keeps date values and NULL placement
+  sql: SELECT id, day_value AS day FROM temporal_order_types ORDER BY day
+  expect:
+    data:
+    - {id: 1, day: null}
+    - {id: 2, day: '2024-10-26'}
+    - {id: 3, day: '2024-10-27'}
+- name: TIMESTAMP alias keeps chronological order across DST fallback
+  session_id: temporal-order-dst
+  sql: SELECT id, instant AS displayed FROM temporal_order_types WHERE id>=2 ORDER BY displayed DESC
+  expect:
+    data:
+    - {id: 3, displayed: '2024-10-27 02:00:00'}
+    - {id: 2, displayed: '2024-10-27 02:59:59'}
+cleanup:
+- sql: DROP TABLE IF EXISTS temporal_order_value
+- sql: DROP TABLE IF EXISTS temporal_order_types

@@ -1,0 +1,45 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Temporal page ordering uses SQL values before result formatting
+  isolated: true
+  reuse_fixture: true
+  restart_after_setup: true
+setup:
+- sql: DROP TABLE IF EXISTS temporal_order_page
+- sql: CREATE TABLE temporal_order_page (id BIGINT PRIMARY KEY, stamp DATETIME, title VARCHAR(64), kind VARCHAR(20), status VARCHAR(20)) ENGINE=sloppy
+- scm: |
+    (begin
+      (insert (table "memcp-tests" "temporal_order_page") '("id" "stamp" "title" "kind" "status")
+        (map (produceN 22000) (lambda (i)
+          (list (+ i 1) (sql_temporal_output (+ 1577836800 (* i 3600)) "DATETIME" "UTC")
+            (concat "Article " i) (if (equal? (mod i 11) 0) "post" "revision") "publish"))))
+      (rebuild))
+test_cases:
+- name: First temporal page plus ten repetitions
+  sql: SELECT id, title, stamp FROM temporal_order_page WHERE kind='post' AND status='publish' ORDER BY stamp DESC, id DESC LIMIT 10
+  warmup: 0
+  timing_samples: 11
+  timing_aggregation: total
+  threshold_ms: 1000
+  expect:
+    rows: 10
+    data:
+    - {id: 21990, title: Article 21989, stamp: '2022-07-05 05:00:00'}
+    - {id: 21979, title: Article 21978, stamp: '2022-07-04 18:00:00'}
+    - {id: 21968, title: Article 21967, stamp: '2022-07-04 07:00:00'}
+    - {id: 21957, title: Article 21956, stamp: '2022-07-03 20:00:00'}
+    - {id: 21946, title: Article 21945, stamp: '2022-07-03 09:00:00'}
+    - {id: 21935, title: Article 21934, stamp: '2022-07-02 22:00:00'}
+    - {id: 21924, title: Article 21923, stamp: '2022-07-02 11:00:00'}
+    - {id: 21913, title: Article 21912, stamp: '2022-07-02 00:00:00'}
+    - {id: 21902, title: Article 21901, stamp: '2022-07-01 13:00:00'}
+    - {id: 21891, title: Article 21890, stamp: '2022-07-01 02:00:00'}
+- name: Warm temporal page
+  sql: SELECT id, title, stamp FROM temporal_order_page WHERE kind='post' AND status='publish' ORDER BY stamp DESC, id DESC LIMIT 10
+  warmup: 20
+  timing_samples: 100
+  threshold_ms: 10
+  expect: {rows: 10}
+cleanup:
+- sql: DROP TABLE IF EXISTS temporal_order_page
