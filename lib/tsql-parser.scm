@@ -310,15 +310,6 @@ column options; the engine does not infer SQL semantics from the key ID. */
 			definition)
 		_ definition))))))
 
-/* Resolve DDL names through the existing native view catalog, never a separate
-registry. Creation and deletion still use the shared view lifecycle functions. */
-(define tsql_view_identifier (lambda (tx schema name) (begin
-	(define matches (scan tx (table "system" "views")
-		(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false)) (list schema)
-		'("name") (lambda (declared) (equal?? (toLower declared) (toLower name)))
-		'("name") (lambda (acc declared) (append acc declared)) '() merge))
-	(match matches '() name '(declared) declared _ (error "ambiguous view identifier: " name)))))
-
 (define tsql_select_prefix (parser (? (atom "TOP" true)
 	(define top_count (or (parser '("(" (define n tsql_int) ")") n) sql_int)))
 	(if (and top_count (< top_count 0)) (error "TOP requires a nonnegative count") top_count)))
@@ -900,7 +891,7 @@ never from the first row. Unknown expression types stay text in this first slice
 			(define query (sql_apply_view_column_aliases (nth captured 1) aliases))
 			(list (quote create_sql_view)
 				(list (quote session) "__memcp_tx")
-				view_schema (list tsql_view_identifier (list (quote session) "__memcp_tx") view_schema id) "tsql" (nth captured 0) (list (quote quote) query)
+				view_schema id "tsql" (nth captured 0) (list (quote quote) query)
 				(if replace "replace" (if ifnotexists "ignore" "error")))))))
 
 	(define tsql_schema_identifier (parser (define owner tsql_identifier)
@@ -1073,9 +1064,7 @@ never from the first row. Unknown expression types stay text in this first slice
 			(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier))
 			(begin (if policy (policy (coalesce schema2 schema) name true) true)
 				(list (quote drop_sql_view) (list (quote session) "__memcp_tx")
-					(coalesce schema2 schema)
-					(list tsql_view_identifier (list (quote session) "__memcp_tx") (coalesce schema2 schema) name)
-					(if ifexists true false))))
+					(coalesce schema2 schema) name (if ifexists true false))))
 		(parser '((atom "USE" true) (define name tsql_identifier)) (begin
 			(if policy (policy name true false) true)
 			(list (quote session) "schema" name)))
