@@ -3496,11 +3496,8 @@ ordinary probe path until RecMap carries explicit equality relations. */
 				"timestamp" "time" "year") rawtype)))))
 
 (define nested_scalar_recmap_call_expr (lambda (candidate)
-	(list recmap_call_callback_symbol
-		(nested_scalar_recmap_var candidate)
-		(quoted_runtime_list (nth candidate 13))
-		(nth candidate 14)
-		(list (quote lambda) '() nil))))
+	(list (symbol (concat (string (nested_scalar_recmap_var candidate)) "_value"))
+		(list (quote get_column) (source_alias (nth candidate 0)) false "$record_ref" false))))
 
 (define nested_scalar_recmap_scalar_marker (lambda (expr)
 	(if (not (list? expr))
@@ -3870,11 +3867,19 @@ The candidate's extra slot is private to physical lowering, never logical IR. */
 				(physical_query_tx_symbol) (source_table_expr target)
 				(quoted_runtime_list (nth candidate 12)) (nth candidate 11))
 			(source_table_expr target)))
-		(list (quote define) (nested_scalar_recmap_var candidate)
-			(list
-				(list (quote lambda) (list left_var)
-					(list (quote recmap_compose) left_var right_expr))
-				left_expr)))))
+		/* Project target values once in the existing physical preparation.
+		The native mapper owns one read lease per target shard; row probes only
+		read immutable query-local values and never acquire storage rights. */
+		(list (quote !begin)
+			(list (quote define) (nested_scalar_recmap_var candidate)
+				(list
+					(list (quote lambda) (list left_var)
+						(list (quote recmap_compose) left_var right_expr))
+					left_expr))
+			(list (quote define) (symbol (concat (string (nested_scalar_recmap_var candidate)) "_value"))
+				(list (quote recmap_value_mapper) (physical_query_tx_symbol)
+					(nested_scalar_recmap_var candidate) (quoted_runtime_list (nth candidate 13))
+					(nth candidate 14) (list (quote lambda) '() nil)))))))
 
 /* A decorrelated scalar FK chain can be a sequence of stage-output LEFT
 joins rather than nested scalar_first_probe expressions. Each stage must be
@@ -5151,19 +5156,14 @@ stage requested-column. The recursive result is ordered driver -> final. */
 		(symbol (concat "__relational_recmap_"
 			(fnv_hash (gs_id (nth final_edge 5))))))))
 
-(define relational_recmap_call_expr (lambda (candidate requested_col)
-	(begin
-		(define final_edge (nth (nth candidate 3) (- (count (nth candidate 3)) 1)))
-		(define value_col (relational_recmap_stage_value
-			(nth final_edge 5) requested_col (nth final_edge 0)))
-		(list (symbol "__recmap_call_for_alias") (source_alias (nth candidate 0))
-			(relational_recmap_var candidate)
-			(quoted_runtime_list (list value_col))
-			(list (quote lambda) (list (scan_callback_symbol_for_alias
-				(source_alias (nth final_edge 0)) value_col))
-				(scan_callback_symbol_for_alias
-					(source_alias (nth final_edge 0)) value_col))
-			(list (quote lambda) '() nil)))))
+(define relational_recmap_call_expr (lambda (candidate requested_col) (begin
+	(define columns (nth candidate 2))
+	(define position (car (find (zip (produceN (count columns)) columns)
+		(lambda (entry) (equal? (cadr entry) requested_col)) nil)))
+	(list (quote nth)
+		(list (symbol (concat (string (relational_recmap_var candidate)) "_values"))
+			(list (quote get_column) (source_alias (nth candidate 0)) false "$record_ref" false))
+		position))))
 
 (define rewrite_relational_recmap_expr (lambda (candidate expr)
 	(if (nil? candidate) expr
@@ -5270,7 +5270,20 @@ stage requested-column. The recursive result is ordered driver -> final. */
 									(source_table_expr (nth edge 0))
 									(quoted_runtime_list (nth edge 3)) (nth edge 2))
 								(source_table_expr (nth edge 0)))))) previous))) first_with_dependencies))
-		(list (quote define) (relational_recmap_var candidate) composed))))
+		/* Keep the composed map for native ordering; prepare its requested
+		payload once for row-bound projection through the existing mapper. */
+		(define final_edge (nth edges (- (count edges) 1)))
+		(define value_cols (map (nth candidate 2) (lambda (col)
+			(relational_recmap_stage_value (nth final_edge 5) col (nth final_edge 0)))))
+		(define value_vars (map (produceN (count value_cols)) (lambda (i)
+			(symbol (concat "__recmap_value_" i)))))
+		(list (quote !begin)
+			(list (quote define) (relational_recmap_var candidate) composed)
+			(list (quote define) (symbol (concat (string (relational_recmap_var candidate)) "_values"))
+				(list (quote recmap_value_mapper) (physical_query_tx_symbol)
+					(relational_recmap_var candidate) (quoted_runtime_list value_cols)
+					(list (quote lambda) value_vars (cons (quote list) value_vars))
+					(list (quote lambda) '() (cons (quote list) (map value_cols (lambda (_col) nil))))))))))
 
 (define relational_recmap_order_entry (lambda (candidate item)
 	(begin

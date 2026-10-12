@@ -313,7 +313,7 @@ test_cases:
         - "scan_order_recset"
         - "scan_recmap"
         - "recmap_compose"
-        - "$recmap_call"
+        - "recmap_value_mapper"
     cleanup: &recmap_window_cleanup
       - sql: "DROP TABLE IF EXISTS nc_recmap_driver"
       - sql: "DROP TABLE IF EXISTS nc_recmap_middle"

@@ -185,7 +185,7 @@ test_cases:
         - "recmap_order_recset"
         - "scan_recmap"
         - "recmap_compose"
-        - "$recmap_call"
+        - "recmap_value_mapper"
 
   - name: "three-stage scalar FK chain retains the selected row value"
     sql: |
