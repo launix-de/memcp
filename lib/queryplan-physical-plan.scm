@@ -3633,15 +3633,18 @@ The candidate's extra slot is private to physical lowering, never logical IR. */
 always demand their inputs. Do not descend into a scalar probe's stage data:
 its own projection runs only after the native selected-row mapping. A guarded
 outer CASE/short-circuit expression must keep its existing row-bound probe. */
+(define recmap_projection_deferred_heads (begin
+	(define names '(if and or coalesce coalesceNil match match_mut lambda quote try
+		eval parser outer begin begin_mut !begin define set setN parallel))
+	/* Frontends may emit either a symbol or the actual builtin procedure. */
+	(merge (list names (map names (lambda (name) (eval name)))))))
+
 (define recmap_projection_strict? (lambda (expr)
 	(match expr
-		(cons head _tail)
-		(if (and (symbol? head) (equal? (string head) "scalar_first_probe")) true
-			(and (not (and (symbol? head) (contains? '("if" "and" "or" "coalesce" "coalesceNil"
-				"match" "match_mut" "lambda" "quote" "try" "eval" "parser" "outer"
-				"begin" "begin_mut" "!begin" "define" "set" "setN" "parallel") (string head))))
-				(reduce expr (lambda (strict item)
-					(and strict (recmap_projection_strict? item))) true)))
+		(cons (symbol scalar_first_probe) _arguments) true
+		(cons head _tail) (and (not (contains? recmap_projection_deferred_heads head))
+			(reduce expr (lambda (strict item)
+				(and strict (recmap_projection_strict? item))) true))
 		_ true)))
 
 (define nested_scalar_recmap_prepared_window? (lambda (candidate)

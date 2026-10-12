@@ -393,6 +393,17 @@ test_cases:
         - {id: 195, value: null}
     cleanup: *recmap_projection_cleanup
 
+  - name: "First-class null fallback preserves delayed projection demand"
+    scm: |
+      (begin
+        (define fallback (tsql_builtins "ISNULL"))
+        (define unused '(error "discarded null fallback was evaluated"))
+        (define expr (list fallback 1 unused))
+        (if (recmap_projection_strict? expr)
+          (error "deferred procedure head was classified for eager projection") true)
+        (eval (optimize expr)))
+    expect: {result: 1}
+
   - name: "Ordered RecMap window applies OFFSET only once"
     setup: *recmap_window_setup
     sql: |
