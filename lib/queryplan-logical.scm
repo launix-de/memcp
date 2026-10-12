@@ -4725,8 +4725,11 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		alternative physical plan. */
 		(define derived_rewrites (uctx_get ctx (quote derived-rewrites) '()))
 		(define rewrite_window_expr (lambda (expr)
-			(canonical_column_expr_for_alias alias
-				(rewrite_window_derived_ref_chain derived_rewrites expr))))
+			/* Compile argument contracts with the bound sources before deriving
+			aggregate identities and reducer parameters. The result stays a logical
+			expression; no scan/storage lowering occurs at this boundary. */
+			(sql_type_formula outer_sources (canonical_column_expr_for_alias alias
+				(rewrite_window_derived_ref_chain derived_rewrites expr)))))
 		(define partition_exprs (map (nth over 0) rewrite_window_expr))
 		(define canonical_args (map (coalesceNil args '()) rewrite_window_expr))
 		/* The window reads the same filtered row domain as its query block.

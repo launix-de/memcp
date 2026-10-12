@@ -282,9 +282,22 @@ always plain and canonical; type/collation ride alongside for the consumer. */
 resolved base table is rewritten: derived-table / stage-output columns and any
 column whose name does not resolve are returned verbatim so downstream lowering
 keeps its existing (ignorecase-flagged) resolution for them. */
+/* A derived column keeps its producer's SQL contract and its own reference.
+This resolves metadata only; the logical planner still owns projection rewrite. */
+(define sql_projection_column_info (lambda (relation original col col_ignorecase)
+	(if (not (query_block? relation)) (sql_info original "any" nil) (begin
+		(define fields (extract_assoc
+			(expand_query_block_fields (qb_sources relation) (qb_fields relation))
+			(lambda (name expression) (list name expression))))
+		(define field (find fields (lambda (field)
+			(if col_ignorecase (equal?? (car field) col) (equal? (car field) col))) nil))
+		(if (nil? field) (sql_info original "any" nil) (begin
+			(define info (sql_expr_info (qb_sources relation) (cadr field)))
+			(sql_info original (sql_info_type info) (sql_info_collation info))))))))
+
 (define sql_source_column_info (lambda (src original tblvar col col_ignorecase)
 	(if (not (source_is_base_table? src))
-		(sql_info original "any" nil)
+		(sql_projection_column_info (source_relation src) original col col_ignorecase)
 		(begin
 			(define canonical (source_column_name src col col_ignorecase))
 			(if (nil? canonical)
@@ -383,6 +396,10 @@ the conditions are booleans and would otherwise pollute the merge. */
 			(define info (sql_expr_info sources formula))
 			(sql_info (sql_info_formula info) type
 				(if (and (sql_text_type? type) (nil? collation)) (sql_info_collation info) collation)))
+		/* Dialects compile type-directed operations from resolved argument triples.
+		The callback is a compiler, never an executable SQL operator. */
+		(cons (symbol sql_compile_expr) (cons compiler arguments))
+		(compiler (map arguments (lambda (argument) (sql_expr_info sources argument))))
 		((symbol session) _key) (sql_info expr "any" nil)
 		((symbol session_globalvar) _key) (sql_info expr "any" nil)
 		((symbol lambda) _params _body) (sql_info expr "any" nil)
@@ -479,6 +496,7 @@ for frontends that have emitted no contracts. Quoted syntax stays opaque. */
 (define sql_type_annotation_replacement (lambda (node)
 	(match node
 		((symbol sql_type_expr) _formula _type _collation) (list (sql_type_formula '() node))
+		(cons (symbol sql_compile_expr) _arguments) (list (sql_type_formula '() node))
 		((symbol quote) _datum) nil
 		(cons head tail) (begin
 			(define rewritten_head (sql_type_annotation_replacement head))

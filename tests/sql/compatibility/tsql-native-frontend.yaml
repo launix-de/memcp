@@ -5,6 +5,11 @@ metadata:
   syntax: tsql
   description: T-SQL grammar reuses native DDL, defaults and query planning
 setup:
+  - sql: DROP TABLE IF EXISTS tsql_add_contracts
+  - sql: DROP TABLE IF EXISTS tsql_add_copy
+  - sql: CREATE TABLE tsql_add_contracts (id INT PRIMARY KEY,a INT,b SMALLINT,txt NVARCHAR(20),suffix VARCHAR(20))
+  - sql: CREATE TABLE tsql_add_copy (id INT PRIMARY KEY,value INT)
+  - sql: INSERT INTO tsql_add_contracts VALUES (1,10,2,N'3','x'),(2,NULL,2,NULL,'x')
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: CREATE TABLE tsql_having_input (id INT PRIMARY KEY)
   - sql: INSERT INTO tsql_having_input VALUES (1)
@@ -26,6 +31,94 @@ setup:
   - sql: CREATE TABLE [dbo].[tsql_native] ([id] INT IDENTITY(1,1) PRIMARY KEY, [name] NVARCHAR(80), [amount] INT NOT NULL DEFAULT (7))
   - sql: INSERT INTO [dbo].[tsql_native] ([name]) VALUES (N'Grüße'), (N'O''Brien')
 test_cases:
+  - name: Addition chooses operators from declared contracts for identical formulas
+    scm: |
+      (begin
+        (define numeric (sql_expr_info '()
+          (tsql_add_expr (list (quote sql_type_expr) nil "INT" nil)
+            (list (quote sql_type_expr) nil "SMALLINT" nil))))
+        (define text (sql_expr_info '()
+          (tsql_add_expr (list (quote sql_type_expr) nil "NVARCHAR" '("bin" 2))
+            (list (quote sql_type_expr) nil "VARCHAR" '("bin" 4)))))
+        (and (equal? (sql_info_type numeric) "INT")
+          (expression_equal? (sql_info_formula numeric) (list (quote +) nil nil))
+          (equal? (sql_info_type text) "NVARCHAR")
+          (expression_equal? (sql_info_formula text) (list (quote concat) nil nil))
+          (expression_equal? (sql_info_collation text) '("bin" 2))))
+    expect: {result: true}
+  - name: Addition compiler refuses unresolved contracts
+    scm: |
+      (try (lambda () (begin
+        (tsql_compile_addition (list (sql_info nil "any" nil) (sql_info 1 "INT" nil))) false))
+        (lambda (_) true))
+    expect: {result: true}
+  - name: Character operands concatenate even when they spell numbers
+    sql: SELECT '12'+'3' AS value
+    expect: {rows: 1, data: [{value: '123'}]}
+  - name: Integer precedence converts the left character operand
+    sql: SELECT '12'+CAST(3 AS INT) AS value
+    expect: {rows: 1, data: [{value: 15}]}
+  - name: Integer precedence converts the right character operand
+    sql: SELECT CAST(3 AS INT)+'12' AS value
+    expect: {rows: 1, data: [{value: 15}]}
+  - name: Float precedence converts a fractional character operand
+    sql: SELECT CAST(1 AS FLOAT)+'2.5' AS value
+    expect: {rows: 1, data: [{value: 3.5}]}
+  - name: Mixed numeric addition rejects invalid integer text
+    sql: SELECT 'invalid'+CAST(3 AS INT) AS value
+    expect: {error: true, contains: invalid integer text}
+  - name: Mixed integer addition rejects fractional text
+    sql: SELECT '1.5'+CAST(3 AS INT) AS value
+    expect: {error: true, contains: invalid integer text}
+  - name: Typed null addition keeps its integer contract
+    sql: SELECT CAST(NULL AS INT)+'3' AS value
+    expect: {rows: 1, data: [{value: null}]}
+  - name: Character plus null keeps null propagation
+    sql: SELECT CAST(NULL AS NVARCHAR(20))+'x' AS value
+    expect: {rows: 1, data: [{value: null}]}
+  - name: Two bit operands cannot choose an arithmetic overload
+    sql: SELECT CAST(1 AS BIT)+CAST(0 AS BIT) AS value
+    expect: {error: true, contains: unsupported SQL operands}
+  - name: Declared columns select numeric addition and null propagation
+    sql: SELECT id,a+b AS value FROM tsql_add_contracts ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: 12}, {id: 2, value: null}]}
+  - name: Column contracts convert mixed character input
+    sql: SELECT a+txt AS forward,txt+a AS backward FROM tsql_add_contracts WHERE id=1
+    expect: {rows: 1, data: [{forward: 13, backward: 13}]}
+  - name: Character column contracts select native concatenation
+    sql: SELECT id,txt+suffix AS value FROM tsql_add_contracts ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: '3x'}, {id: 2, value: null}]}
+  - name: Addition contracts survive case branches
+    sql: SELECT CASE WHEN id=1 THEN a+txt ELSE NULL END AS value FROM tsql_add_contracts WHERE id=1
+    expect: {rows: 1, data: [{value: 13}]}
+  - name: Addition contracts resolve a derived projection
+    sql: SELECT d.a+d.txt AS value FROM (SELECT a,txt FROM tsql_add_contracts) AS d WHERE d.a IS NOT NULL
+    expect: {rows: 1, data: [{value: 13}]}
+  - name: Addition contracts resolve aggregate input through the shared planner
+    sql: SELECT SUM(a+txt) AS value FROM tsql_add_contracts WHERE id=1
+    expect: {rows: 1, data: [{value: 13}]}
+  - name: Addition contracts resolve window input through the shared planner
+    sql: SELECT id,SUM(a+txt) OVER () AS value FROM tsql_add_contracts WHERE id=1
+    expect: {rows: 1, data: [{id: 1, value: 13}]}
+  - name: Native update uses the compile-selected addition
+    sql: UPDATE tsql_add_contracts SET a=a+txt WHERE id=1
+    expect: {affected_rows: 1}
+  - name: Invalid mixed update fails before publication
+    sql: UPDATE tsql_add_contracts SET a=a+suffix WHERE id=1
+    expect: {error: true, contains: invalid integer text}
+  - name: Rejected mixed update retains its native row
+    sql: SELECT a FROM tsql_add_contracts WHERE id=1
+    expect: {rows: 1, data: [{a: 13}]}
+  - name: Insert select uses the shared addition contract
+    sql: INSERT INTO tsql_add_copy SELECT id,a+txt FROM tsql_add_contracts WHERE id=1
+  - name: Inserted selected addition retains its numeric result
+    sql: SELECT value FROM tsql_add_copy WHERE id=1
+    expect: {rows: 1, data: [{value: 16}]}
+  - name: Executable addition plan contains no compiler callback or runtime dispatch
+    scm: |
+      (not (regexp_test (string (parse_tsql "memcp-tests"
+        "SELECT a+txt AS value FROM tsql_add_contracts" nil nil nil)) "sql_compile_expr|tsql_compile_addition"))
+    expect: {result: true}
   - name: escaped closing bracket is a quoted identifier
     sql: SELECT 42 AS [answer]]suffix]
     expect: {rows: 1, data: [{"answer]suffix": 42}]}
@@ -879,6 +972,8 @@ test_cases:
     expect: {error: true}
 
 cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_add_contracts
+  - sql: DROP TABLE IF EXISTS tsql_add_copy
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: DROP TABLE IF EXISTS tsql_cast_collation
   - sql: DROP TABLE IF EXISTS tsql_setup_catalog

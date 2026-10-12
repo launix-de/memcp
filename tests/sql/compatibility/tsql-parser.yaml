@@ -286,7 +286,6 @@ test_cases:
   sql: SELECT 2 + 'invalid' AS n
   expect:
     error: true
-  noncritical: true
 - name: Bracket identifiers and TOP
   sql: SELECT TOP (2) [id], [name] FROM [dbo].[tsql_data] ORDER BY [id]
   expect:

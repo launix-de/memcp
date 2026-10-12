@@ -224,23 +224,26 @@ configurable cutoff remain separate compatibility work. */
 					(tsql_cast_expr (list format_date value "%Y-%m-%d %H:%i:%s") text_type dimensions)
 					(error "unsupported CONVERT style for " text_type))
 				_ (error "unsupported CONVERT style: " style))))))
-/* Window inputs must be plain formulas before the common planner derives
-aggregate identities. Consume their expression triples here and keep the
-window result contract separately until shared expression compilation. */
-(define tsql_window_expr (lambda (name args over) (begin
-	(define infos (map args (lambda (arg) (sql_expr_info (list) arg))))
-	(define input_type (if (empty_list? infos) "any" (sql_info_type (car infos))))
-	(define type (match name
-		"COUNT" "BIGINT"
-		"SUM" (match input_type
-			"TINYINT" "INT" "SMALLINT" "INT" "INTEGER" "INT"
-			"REAL" "FLOAT" _ input_type)
-		"MIN" input_type "MAX" input_type
-		_ "any"))
-	(define formula (list (quote window_func) name (map infos sql_info_formula) (sql_type_lower_annotations over)))
-	(if (equal? type "any") formula
-		(list (quote sql_type_expr) formula type
-			(if (empty_list? infos) nil (sql_info_collation (car infos))))))))
+/* Preserve the native window AST for logical stage construction. Its result
+contract is compiled from resolved input triples, never from an empty scope. */
+(define tsql_window_expr (lambda (name args over)
+	(cons (quote sql_compile_expr)
+		(cons (lambda (infos) (begin
+			(define input_type (if (empty_list? args) "any" (sql_info_type (cadr infos))))
+			(define type (match name
+				"COUNT" "BIGINT"
+				"SUM" (match input_type
+					"TINYINT" "INT" "SMALLINT" "INT" "INTEGER" "INT"
+					"REAL" "FLOAT" _ input_type)
+				"MIN" input_type "MAX" input_type
+				_ "any"))
+			(define formula (match (sql_info_formula (car infos))
+				((symbol window_func) function _arguments specification)
+				(list (quote window_func) function (map (cdr infos) sql_info_formula) specification)
+				_ (sql_info_formula (car infos))))
+			(sql_info formula type
+				(if (empty_list? args) nil (sql_info_collation (cadr infos))))))
+			(cons (list (quote window_func) name args over) args)))))
 
 (define tsql_negate_expr (lambda (value) (begin
 	/* Constant operands and the syntax-declared range suffice to diagnose
@@ -319,11 +322,39 @@ column options; the engine does not infer SQL semantics from the key ID. */
 		(define limit tsql_int) (or (atom "ROW" true) (atom "ROWS" true)) (atom "ONLY" true)))
 	(if (nil? offset) nil (if (or (< offset 0) (and limit (< limit 0)))
 		(error "OFFSET and FETCH require nonnegative counts") (list limit offset)))))
-(define tsql_add (lambda (left right)
-	(if (or (nil? left) (nil? right)) nil
-		(if (and (string? left) (string? right)) (concat left right) (+ left right)))))
+/* Operator selection and implicit conversions use the SQL argument contracts.
+Only the selected native operation survives the shared compile boundary. */
+(define tsql_addition_numeric_types '("FLOAT" "REAL" "DECIMAL" "MONEY" "SMALLMONEY" "BIGINT" "INT" "SMALLINT" "TINYINT" "BIT"))
+(define tsql_addition_text_types '("NVARCHAR" "NCHAR" "VARCHAR" "CHAR"))
+(define tsql_addition_type (lambda (type) (match type
+	"INTEGER" "INT" "DOUBLE" "FLOAT" "NUMERIC" "DECIMAL"
+	"BOOLEAN" "BIT" "BOOL" "BIT" _ type)))
+(define tsql_compile_addition (lambda (infos) (begin
+	(define types (map infos (lambda (info) (tsql_addition_type (sql_info_type info)))))
+	(define active (filter types (lambda (type) (not (equal? type "NULL")))))
+	(define numeric (if (empty_list? active) "INT"
+		(find tsql_addition_numeric_types (lambda (type) (has? active type)) nil)))
+	(define text (find tsql_addition_text_types (lambda (type) (has? active type)) nil))
+	(define target (if (empty_list? active) "INT" numeric numeric text text
+		(error "unresolved or unsupported SQL type for +")))
+	(if (or (equal? target "BIT")
+		(not (reduce active (lambda (valid type) (and valid
+			(or (has? tsql_addition_numeric_types type) (has? tsql_addition_text_types type)))) true)))
+		(error "unsupported SQL operands for +") true)
+	(define formulas (map infos (lambda (info) (begin
+		(define type (tsql_addition_type (sql_info_type info)))
+		(define formula (sql_info_formula info))
+		(if (and numeric (or (has? tsql_addition_text_types type) (equal? type "BIT")))
+			(sql_type_formula '() (tsql_cast_expr formula
+				(if (has? '("DECIMAL" "MONEY" "SMALLMONEY") target) "FLOAT" target) '()))
+			formula)))))
+	(sql_info (cons (if numeric (quote +) (quote concat)) formulas) target
+		(if numeric nil (reduce infos (lambda (collation info)
+			(sql_merge_collation collation (sql_info_collation info))) nil))))))
+(define tsql_add_expr (lambda (left right)
+	(list (quote sql_compile_expr) tsql_compile_addition left right)))
 (define tsql_fold_additive (lambda (acc term) (match term
-	'("add" value) (list tsql_add acc value)
+	'("add" value) (tsql_add_expr acc value)
 	_ (sql_fold_additive_term acc term))))
 /* Explicit wire descriptors come from the existing SQL expression metadata,
 never from the first row. Unknown expression types stay text in this first slice. */
