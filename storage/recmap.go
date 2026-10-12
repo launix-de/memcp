@@ -194,8 +194,10 @@ func (r *recMap) partForSourceShard(shard *storageShard) *recMapShard {
 
 // Direct point access owns one read capability per invocation through column
 // preparation and mapper completion. This explicit $recmap_call interface must
-// not become a generated SQL row-loop access path: repeated projection uses
-// newRecMapValueMapper, which prepares payload with one lease per target shard.
+// not become a new generated SQL row-loop access path. Remaining SQL lowering
+// still uses it; exact nested scalar source windows instead prepare their selected
+// domain with newRecMapValueMapper, once per target shard. A general
+// batch conversion must preserve filtering and LIMIT before projection-only work.
 func recMapReadTarget(currentTx *TxContext, target recMapTarget, columns []string,
 	mapper, ifNull scm.Scmer) scm.Scmer {
 	if target.shard == nil {

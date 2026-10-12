@@ -96,8 +96,9 @@ type storageShard struct {
 	// This is eviction lifetime ownership, not row synchronization or a query
 	// snapshot: existing column/read-lock protocols still protect row access.
 	// Scan and prepared RecMap operators retain once per shard/batch. Explicit
-	// $recmap_call point access still retains per invocation; repeated SQL
-	// projections use the batch mapper instead. The count is never persisted.
+	// $recmap_call point access and remaining SQL projections still retain per
+	// invocation. Exact nested scalar source windows use the batch mapper only
+	// after native window selection. The count is never persisted.
 	cacheReaders atomic.Int32
 
 	// Repartition generation tracking. Counters are atomic; generation points to

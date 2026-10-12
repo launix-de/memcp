@@ -321,6 +321,58 @@ test_cases:
       - sql: "DROP TABLE IF EXISTS nc_recmap_middle"
       - sql: "DROP TABLE IF EXISTS nc_recmap_target"
 
+  - name: "Selected RecMap window does not evaluate invalid discarded projections"
+    setup: &recmap_projection_setup
+      - sql: "DROP TABLE IF EXISTS nc_projection_driver"
+      - sql: "DROP TABLE IF EXISTS nc_projection_middle"
+      - sql: "DROP TABLE IF EXISTS nc_projection_target"
+      - sql: "CREATE TABLE nc_projection_driver (id INT, middle_id INT)"
+      - sql: "CREATE TABLE nc_projection_middle (id INT, target_id INT)"
+      - sql: "CREATE TABLE nc_projection_target (id INT, value VARCHAR(20))"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "nc_projection_driver") '("id" "middle_id")
+              (map (produceN 200) (lambda (i) (list i (mod i 50)))))
+            (insert (table "memcp-tests" "nc_projection_middle") '("id" "target_id")
+              (map (produceN 50) (lambda (i) (list i i))))
+            (insert (table "memcp-tests" "nc_projection_target") '("id" "value")
+              (map (produceN 50) (lambda (i) (list i (if (>= i 45) "4" "(")))))
+            (rebuild))
+    sql: |
+      SELECT d.id, (
+        SELECT (
+          SELECT REGEXP_REPLACE('4', t.value, '4') FROM nc_projection_target t
+          WHERE t.id = m.target_id LIMIT 1)
+        FROM nc_projection_middle m
+        WHERE m.id = d.middle_id LIMIT 1) AS value
+      FROM nc_projection_driver d
+      ORDER BY d.id DESC LIMIT 5
+    expect:
+      rows: 5
+      data:
+        - {id: 199, value: "4"}
+        - {id: 198, value: "4"}
+        - {id: 197, value: "4"}
+        - {id: 196, value: "4"}
+        - {id: 195, value: "4"}
+    cleanup: &recmap_projection_cleanup
+      - sql: "DROP TABLE IF EXISTS nc_projection_driver"
+      - sql: "DROP TABLE IF EXISTS nc_projection_middle"
+      - sql: "DROP TABLE IF EXISTS nc_projection_target"
+
+  - name: "Invalid RecMap projection is rejected when its row is consumed"
+    setup: *recmap_projection_setup
+    sql: |
+      SELECT d.id, (
+        SELECT (
+          SELECT REGEXP_REPLACE('4', t.value, '4') FROM nc_projection_target t
+          WHERE t.id = m.target_id LIMIT 1)
+        FROM nc_projection_middle m
+        WHERE m.id = d.middle_id LIMIT 1) AS value
+      FROM nc_projection_driver d
+    expect: {error: true, contains: "regexp_replace: invalid pattern"}
+    cleanup: *recmap_projection_cleanup
+
   - name: "Ordered RecMap window applies OFFSET only once"
     setup: *recmap_window_setup
     sql: |

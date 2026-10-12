@@ -212,9 +212,12 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   they do not replace row synchronization, visibility or generation ownership.
   Scans and prepared RecMap projections retain once per shard/batch, outside
   generated SQL row loops. The explicit `$recmap_call` point-access interface
-  still retains per invocation; repeated projection must prepare
-  `recmap_value_mapper` instead. The counter is not persisted. Idle/LRU time
-  hints cannot authorize eviction of an active, arbitrarily paused preparation.
+  and remaining SQL projections still retain per invocation. Exact nested
+  scalar source windows use the prepared mapper after native window selection.
+  Repeated projection must prepare `recmap_value_mapper` on the consumed domain;
+  projection-only payloads must not be prepared ahead of filtering or LIMIT.
+  The counter is not persisted. Idle/LRU time hints cannot authorize eviction
+  of an active, arbitrarily paused preparation.
 
 - `inIndexHook.positions` is an immutable compressed main-generation row-ID
   permutation owned by its parent index hook. It retains no shard/catalog,

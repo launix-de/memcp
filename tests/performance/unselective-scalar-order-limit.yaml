@@ -436,9 +436,8 @@ test_cases:
         - "recmap_order_recset"
         - "recmap_extend"
         - "recmap_equi_first_of_mapper"
-        - "recmap_value_mapper"
-      result_not_contains:
         - "$recmap_call"
+      result_not_contains:
         - "get_or_compute_scoped"
 
   - name: "Projected nested foreign key keeps OR lookup bounded"
