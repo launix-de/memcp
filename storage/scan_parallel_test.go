@@ -1045,3 +1045,21 @@ func TestReserveIDsConcurrentWithNativeInsert(t *testing.T) {
 		t.Fatal("reservation unexpectedly published rows or INSERT lost rows")
 	}
 }
+
+func TestReserveIDsPersistedPrefixRecovery(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "treserveidprefix", 0)
+	tbl.Columns[0].AutoIncrement = true
+	tbl.publishShowColumnsSnapshot()
+	tbl.schema.save()
+	reserve := scm.Globalenv.Vars["reserve_ids"]
+	block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(100)).Slice()
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{block[0], scm.NewString("only first ID persisted")}}, nil, scm.NewNil(), false, nil)
+	reloaded := reloadTableFromPersistence(t, "treserveidprefix", persistence)
+	if atomic.LoadUint64(&reloaded.Auto_increment) != 1 {
+		t.Fatal("a persisted prefix made its unlogged unused suffix durable")
+	}
+	next := scm.Apply(reserve, NewTableScmer(reloaded), scm.NewInt(1)).Slice()
+	if next[0].Int() != 2 || next[1].Int() != 2 {
+		t.Fatalf("unlogged suffix was not recovered from persisted IDs: %v", next)
+	}
+}

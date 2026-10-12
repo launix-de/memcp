@@ -3736,7 +3736,7 @@ func Init(en scm.Env) {
 			base := t.reserveAutoIncrement(0, count)
 			return scm.NewSlice([]scm.Scmer{scm.NewInt(int64(base + 1)), scm.NewInt(int64(base + count))})
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "reserves a disjoint ID block from the existing table counter; returns inclusive (first last), or an empty list for zero. Unused reservations are not crash-durable until the counter is checkpointed or inserted values are persisted.", HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "reserves a disjoint ID block from the existing table counter; returns inclusive (first last), or an empty list for zero. Unused reservations have no independent WAL durability; restart retains checkpointed counters and IDs reconstructed from persisted inserted values.", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
 				{Kind: "int", Label: "count", Description: "nonnegative number of IDs to reserve"},
