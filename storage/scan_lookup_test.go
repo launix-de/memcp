@@ -56,7 +56,7 @@ func TestNullSafePointIndexDoesNotScanNonNullRows(t *testing.T) {
 	var buf [8]uint32
 	var candidates []uint32
 	release := shard.GetRead(nil)
-	defer release()
+	defer release.Release()
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	shard.iterateIndexForce(nil, access, len(shard.inserts), buf[:], false, func(batch []uint32) bool {

@@ -90,6 +90,11 @@ type storageShard struct {
 	// lazy-loading/shared-resource state
 	srState      atomic.Uint32
 	lastAccessed uint64 // UnixNano, atomic; updated on GetRead/GetExclusive for LRU eviction
+	// GetRead leases retain the column directory through preparation and use.
+	// The first lease synchronizes with eviction under mu; further leases and
+	// releases are atomic. Cleanup checks the count while owning mu exclusively.
+	// This process-local lifetime guard is never updated in row loops or persisted.
+	cacheReaders atomic.Int32
 
 	// Repartition generation tracking. Counters are atomic; generation points to
 	// the immutable topology owning this shard and changes only on publication.
@@ -879,7 +884,37 @@ func (s *storageShard) state() SharedState { return SharedState(s.srState.Load()
 
 func (s *storageShard) setState(state SharedState) { s.srState.Store(uint32(state)) }
 
-func (s *storageShard) GetRead(currentTx *TxContext) func() {
+// retainCacheRead closes the gap between loading columns and acquiring a scan's
+// row-processing lock. An existing reader permits lock-free nesting: taking
+// another RLock there could deadlock behind a writer waiting on the outer scan.
+func (s *storageShard) retainCacheRead() {
+	for {
+		readers := s.cacheReaders.Load()
+		if readers > 0 {
+			if s.cacheReaders.CompareAndSwap(readers, readers+1) {
+				return
+			}
+			continue
+		}
+		// A cleanup that already observed zero readers must finish before this
+		// lease is published. Once published, every full eviction must defer.
+		s.mu.RLock()
+		s.cacheReaders.Add(1)
+		s.mu.RUnlock()
+		return
+	}
+}
+
+func (s *storageShard) releaseCacheRead() { s.cacheReaders.Add(-1) }
+
+func (s *storageShard) GetRead(currentTx *TxContext) ReadAccess {
+	s.retainCacheRead()
+	ready := false
+	defer func() {
+		if !ready {
+			s.releaseCacheRead()
+		}
+	}()
 	s.ensureLoaded()
 	// Ensure main_count is initialized by loading at least one column
 	s.ensureMainCount(false, currentTx)
@@ -887,7 +922,8 @@ func (s *storageShard) GetRead(currentTx *TxContext) func() {
 		s.setState(SHARED)
 	}
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
-	return func() {}
+	ready = true
+	return ReadAccess{shard: s}
 }
 func (s *storageShard) GetExclusive() func() {
 	s.ensureLoaded()
@@ -937,6 +973,10 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	if !s.mu.TryLock() {
 		return false // shard is in use, skip eviction
 	}
+	if s.cacheReaders.Load() != 0 {
+		s.mu.Unlock()
+		return false // preparation/scan owns columns even outside its row lock
+	}
 	// Sloppy/Logged shards with pending deltas must be flushed to disk before eviction.
 	// If there are deltas, we can't evict now — a rebuild is needed first.
 	if len(s.inserts) > 0 || s.deletions.Count() > 0 {
@@ -969,6 +1009,9 @@ func (s *storageShard) evictionOffer(currentSize int64) evictionOffer {
 		return evictionOffer{}
 	}
 	defer s.mu.RUnlock()
+	if s.cacheReaders.Load() != 0 {
+		return evictionOffer{}
+	}
 	if s.t != nil && (s.t.PersistencyMode == Memory ||
 		(s.t.PersistencyMode != Cache && (len(s.inserts) > 0 || s.deletions.Count() > 0))) {
 		return evictionOffer{}
@@ -1066,6 +1109,10 @@ func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	s := ptr.(*storageShard)
 	if !s.mu.TryLock() {
 		return false // shard is in use, retry later
+	}
+	if s.cacheReaders.Load() != 0 {
+		s.mu.Unlock()
+		return false
 	}
 	if !s.evictChildrenLocked(freedByType) {
 		s.mu.Unlock()

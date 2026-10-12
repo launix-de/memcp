@@ -1511,7 +1511,7 @@ func runDirectSingleShardExists(currentTx *TxContext, topology *tableShardTopolo
 		}
 	}()
 	release := shard.acquireReadForScan(currentTx)
-	defer release()
+	defer release.Release()
 	if ss != nil && ss.IsKilledSeq(querySeq) {
 		panic("query killed")
 	}
@@ -1542,7 +1542,7 @@ func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology
 		}
 	}()
 	release := shard.acquireReadForScan(currentTx)
-	defer release()
+	defer release.Release()
 	if ss != nil && ss.IsKilledSeq(querySeq) {
 		panic("query killed")
 	}

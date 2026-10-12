@@ -203,6 +203,14 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   `state()` and publish transitions through `setState()`; shard read hot paths
   must not acquire a shard lock merely to inspect the lifecycle state.
 
+- `storageShard.cacheReaders` is an atomic, process-local count of `GetRead`
+  leases. The first lease synchronizes with cleanup under `shard.mu`; nested
+  leases use CAS while an existing owner protects the directory. Each lease
+  releases exactly once, including failed/cancelled acquisition. Full shard
+  eviction checks zero readers under its exclusive shard lock before detaching
+  any payload. Leases cover column preparation through operator completion;
+  row loops never update the counter and it is not persisted.
+
 - `inIndexHook.positions` is an immutable compressed main-generation row-ID
   permutation owned by its parent index hook. It retains no shard/catalog,
   reader, transaction, or invocation binding. Candidate iterators borrow the
