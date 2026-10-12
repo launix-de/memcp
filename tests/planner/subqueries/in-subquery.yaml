@@ -71,6 +71,65 @@ setup:
         true)
 
 test_cases:
+  - name: "Ordered disjunctive computed membership keeps probe closures distinct from RecSets"
+    # Exercise the ordered probe alternative even when adaptive batch acceptance
+    # is cheaper on this small fixture. The three RHS sources must stay separate.
+    scm: |
+      (begin
+        (define planning (newsession))
+        (define sink (newsession))
+        (planning "__memcp_explain_physical" sink)
+        (define query "SELECT t.ID FROM ( SELECT ID, entity_kind, entity_key, event_time FROM membership_event WHERE (ID >= 9974 OR ID BETWEEN 7996 AND 8000) AND ((entity_kind = 'root' AND entity_key = 'root:1') OR (entity_kind = 'narrow_a' AND entity_key IN ( SELECT CONCAT('narrow_a:', ID) FROM membership_narrow_key_a WHERE enabled = 1)) OR (entity_kind = 'narrow_b' AND entity_key IN ( SELECT CONCAT('narrow_b:', ID) FROM membership_narrow_key_b WHERE enabled = 1)) OR (entity_kind = 'noise' AND entity_key IN ( SELECT CONCAT('noise:', ID) FROM membership_broad_key WHERE enabled = 1)) )) t ORDER BY t.event_time DESC, t.ID DESC LIMIT 12 OFFSET 20")
+        (parse_sql "memcp-tests" query nil planning nil)
+        (define decisions (filter (planner_physical_explain_decisions sink)
+          (lambda (decision) (equal? (qassoc_get decision "decision" nil) "membership_carrier"))))
+        (if (equal? (count decisions) 3) true (error "expected three membership decisions"))
+        (planning "__memcp_physical_overrides" (map decisions (lambda (decision)
+          (list (qassoc_get decision "decision_id" nil) "driver_order_membership_probe"))))
+        (define formula (parse_sql "memcp-tests" query nil planning nil))
+        (define captured (newsession))
+        (captured "count" 0)
+        (captured "valid" true)
+        ((sql_queryplan_compile_formula nil formula) planning nil
+          (lambda (row) (begin
+            (define position (captured "count"))
+            (define expected (if (< position 7) (- 9980 position) (- 8007 position)))
+            (captured "valid" (and (captured "valid") (equal? (get_assoc row "ID") expected)))
+            (captured "count" (+ position 1))))
+          (lambda (_fields) nil))
+        (if (and (equal? (captured "count") 12) (captured "valid")) true
+          (error "computed membership probes lost an OR branch or its ordered window")))
+    expect:
+      result_contains: ["true"]
+
+  - name: "Derived disjunctive computed membership preserves ordered OFFSET and LIMIT"
+    sql: |
+      SELECT t.ID FROM (
+       SELECT ID, entity_kind, entity_key, event_time FROM membership_event
+       WHERE (ID >= 9974 OR ID BETWEEN 7996 AND 8000) AND ((entity_kind = 'root' AND entity_key = 'root:1')
+        OR (entity_kind = 'narrow_a' AND entity_key IN (
+         SELECT CONCAT('narrow_a:', ID) FROM membership_narrow_key_a WHERE enabled = 1))
+        OR (entity_kind = 'narrow_b' AND entity_key IN (
+         SELECT CONCAT('narrow_b:', ID) FROM membership_narrow_key_b WHERE enabled = 1))
+        OR (entity_kind = 'noise' AND entity_key IN (
+         SELECT CONCAT('noise:', ID) FROM membership_broad_key WHERE enabled = 1))
+       )) t ORDER BY t.event_time DESC, t.ID DESC LIMIT 12 OFFSET 20
+    expect:
+      rows: 12
+      data:
+        - ID: 9980
+        - ID: 9979
+        - ID: 9978
+        - ID: 9977
+        - ID: 9976
+        - ID: 9975
+        - ID: 9974
+        - ID: 8000
+        - ID: 7999
+        - ID: 7998
+        - ID: 7997
+        - ID: 7996
+
   - name: "Selective IN branches under OR use projected membership recsets"
     sql: |
       EXPLAIN
