@@ -8,7 +8,9 @@
 # {rows} and {database} are template placeholders filled by the test runner
 
 metadata:
-  performance_shard_weight: 5
+  # A JIT fixture takes about 39 s per side: seven A/B pairs need nine minutes.
+  # Account for that verification cost when balancing whole suites.
+  performance_shard_weight: 48
   version: "1.0"
   description: "Performance tests: aggregation, joins, ordering"
   isolated: true

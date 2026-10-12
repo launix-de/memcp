@@ -6007,6 +6007,18 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 			(bind_query_order rest scopes fields alias_first path all_strings (+ index 1)))
 		_ '())))
 
+/* Result formatting does not change the value of a SELECT-list alias used
+by ORDER BY. In particular a session timezone can reverse displayed clock
+strings across a DST transition. Resolve names against the underlying SQL
+values; retain the formatters in the emitted fields. Explicit DATE_FORMAT
+expressions are values in their own right and stay untouched. */
+(define order_value_fields (lambda (fields)
+	(map_assoc fields (lambda (_title expr)
+		(match expr
+			((symbol sql_temporal_output) value _type _timezone) value
+			((quote sql_temporal_output) value _type _timezone) value
+			_ expr)))))
+
 (define bind_union_output_expr (lambda (fields carrier_alias expr)
 	(match expr
 		((symbol get_column) nil _tbl_ignorecase col col_ignorecase) (begin
@@ -6062,7 +6074,8 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 			(if (qassoc_get (qb_facts block) (quote having_input_scope) false)
 				(bind_query_expr scopes (qb_having block) (binding_path path "having" 0) all_strings)
 				(bind_alias_first_expr (qb_having block)))
-			(bind_query_order (qb_order block) scopes fields true path all_strings 0)
+			(bind_query_order (qb_order block) scopes
+				(if (empty_list? (qb_order block)) fields (order_value_fields fields)) true path all_strings 0)
 			(qb_limit block)
 			(qb_offset block)
 			(bind_query_fields (qb_hidden block) scopes (binding_path path "hidden" 0) all_strings 0)
