@@ -282,7 +282,7 @@ func TestInsertConcurrentAutoIncrementReservations(t *testing.T) {
 			seen[id] = true
 		}
 		shard.mu.RUnlock()
-		release()
+		release.Release()
 	}
 	if len(seen) != 256 {
 		t.Fatalf("generated %d distinct IDs", len(seen))
