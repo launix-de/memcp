@@ -4725,8 +4725,11 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		alternative physical plan. */
 		(define derived_rewrites (uctx_get ctx (quote derived-rewrites) '()))
 		(define rewrite_window_expr (lambda (expr)
-			(canonical_column_expr_for_alias alias
-				(rewrite_window_derived_ref_chain derived_rewrites expr))))
+			/* Compile argument contracts with the bound sources before deriving
+			aggregate identities and reducer parameters. The result stays a logical
+			expression; no scan/storage lowering occurs at this boundary. */
+			(sql_type_formula outer_sources (canonical_column_expr_for_alias alias
+				(rewrite_window_derived_ref_chain derived_rewrites expr)))))
 		(define partition_exprs (map (nth over 0) rewrite_window_expr))
 		(define canonical_args (map (coalesceNil args '()) rewrite_window_expr))
 		/* The window reads the same filtered row domain as its query block.
@@ -5821,6 +5824,14 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 
 (define bind_query_expr (lambda (scopes expr path all_strings)
 	(match expr
+		(cons (symbol sql_compile_expr) (cons compiler arguments)) (begin
+			/* Freeze frontend contracts in their producing SQL scope before
+			derived/group rewrites move expressions to different source scopes.
+			Only compile-time annotations remain; executable lowering consumes them. */
+			(define bound (bind_query_expr_tail scopes arguments path all_strings 0))
+			(define sources (map (merge scopes) binding_entry_source))
+			(define info (compiler (map bound (lambda (argument) (sql_expr_info sources argument)))))
+			(list (quote sql_type_expr) (sql_info_formula info) (sql_info_type info) (sql_info_collation info)))
 		((symbol inner_select) subquery)
 		(list (quote inner_select) (bind_query_names_at subquery scopes (binding_path path "subquery" 0) all_strings))
 		((quote inner_select) subquery)

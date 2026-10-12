@@ -224,23 +224,44 @@ configurable cutoff remain separate compatibility work. */
 					(tsql_cast_expr (list format_date value "%Y-%m-%d %H:%i:%s") text_type dimensions)
 					(error "unsupported CONVERT style for " text_type))
 				_ (error "unsupported CONVERT style: " style))))))
-/* Window inputs must be plain formulas before the common planner derives
-aggregate identities. Consume their expression triples here and keep the
-window result contract separately until shared expression compilation. */
-(define tsql_window_expr (lambda (name args over) (begin
-	(define infos (map args (lambda (arg) (sql_expr_info (list) arg))))
-	(define input_type (if (empty_list? infos) "any" (sql_info_type (car infos))))
-	(define type (match name
-		"COUNT" "BIGINT"
-		"SUM" (match input_type
-			"TINYINT" "INT" "SMALLINT" "INT" "INTEGER" "INT"
-			"REAL" "FLOAT" _ input_type)
-		"MIN" input_type "MAX" input_type
-		_ "any"))
-	(define formula (list (quote window_func) name (map infos sql_info_formula) (sql_type_lower_annotations over)))
-	(if (equal? type "any") formula
-		(list (quote sql_type_expr) formula type
-			(if (empty_list? infos) nil (sql_info_collation (car infos))))))))
+/* Aggregate contracts come from SQL syntax and the declared input type.
+The native reducers do not determine the frontend's SQL result contract. */
+(define tsql_aggregate_type (lambda (name input_type) (match name
+	"COUNT" "INT"
+	"ROW_NUMBER" "BIGINT" "RANK" "BIGINT" "DENSE_RANK" "BIGINT"
+	"SUM" (tsql_numeric_aggregate_type input_type)
+	"AVG" (tsql_numeric_aggregate_type input_type)
+	"MIN" input_type "MAX" input_type "LAG" input_type "LEAD" input_type
+	_ "any")))
+(define tsql_numeric_aggregate_type (lambda (input_type) (match (tsql_addition_type input_type)
+	"TINYINT" "INT" "SMALLINT" "INT" "INT" "INT"
+	"BIGINT" "BIGINT" "REAL" "FLOAT" "FLOAT" "FLOAT"
+	"DECIMAL" "DECIMAL" "MONEY" "MONEY" "SMALLMONEY" "MONEY"
+	"NULL" "INT"
+	_ (error "numeric aggregate requires a declared numeric input"))))
+(define tsql_aggregate_result (lambda (name formula type collation)
+	(sql_info (if (and (equal? name "AVG") (has? '("INT" "BIGINT") type))
+		(sql_type_formula '() (tsql_cast_expr formula type '())) formula) type
+		(if (sql_text_type? type) collation nil))))
+(define tsql_aggregate_expr (lambda (name formula value)
+	(list (quote sql_compile_expr) (lambda (infos)
+		(tsql_aggregate_result name (sql_info_formula (car infos))
+			(tsql_aggregate_type name (sql_info_type (cadr infos)))
+			(sql_info_collation (cadr infos)))) formula value)))
+/* Preserve the native window AST for logical stage construction. Its result
+contract is compiled from resolved input triples, never from an empty scope. */
+(define tsql_window_expr (lambda (name args over)
+	(cons (quote sql_compile_expr)
+		(cons (lambda (infos) (begin
+			(define input_type (if (empty_list? args) "any" (sql_info_type (cadr infos))))
+			(define type (tsql_aggregate_type name input_type))
+			(define formula (match (sql_info_formula (car infos))
+				((symbol window_func) function _arguments specification)
+				(list (quote window_func) function (map (cdr infos) sql_info_formula) specification)
+				_ (sql_info_formula (car infos))))
+			(tsql_aggregate_result name formula type
+				(if (empty_list? args) nil (sql_info_collation (cadr infos))))))
+			(cons (list (quote window_func) name args over) args)))))
 
 (define tsql_negate_expr (lambda (value) (begin
 	/* Constant operands and the syntax-declared range suffice to diagnose
@@ -319,11 +340,39 @@ column options; the engine does not infer SQL semantics from the key ID. */
 		(define limit tsql_int) (or (atom "ROW" true) (atom "ROWS" true)) (atom "ONLY" true)))
 	(if (nil? offset) nil (if (or (< offset 0) (and limit (< limit 0)))
 		(error "OFFSET and FETCH require nonnegative counts") (list limit offset)))))
-(define tsql_add (lambda (left right)
-	(if (or (nil? left) (nil? right)) nil
-		(if (and (string? left) (string? right)) (concat left right) (+ left right)))))
+/* Operator selection and implicit conversions use the SQL argument contracts.
+Only the selected native operation survives the shared compile boundary. */
+(define tsql_addition_numeric_types '("FLOAT" "REAL" "DECIMAL" "MONEY" "SMALLMONEY" "BIGINT" "INT" "SMALLINT" "TINYINT" "BIT"))
+(define tsql_addition_text_types '("NVARCHAR" "NCHAR" "VARCHAR" "CHAR"))
+(define tsql_addition_type (lambda (type) (match type
+	"INTEGER" "INT" "DOUBLE" "FLOAT" "NUMERIC" "DECIMAL"
+	"BOOLEAN" "BIT" "BOOL" "BIT" _ type)))
+(define tsql_compile_addition (lambda (infos) (begin
+	(define types (map infos (lambda (info) (tsql_addition_type (sql_info_type info)))))
+	(define active (filter types (lambda (type) (not (equal? type "NULL")))))
+	(define numeric (if (empty_list? active) "INT"
+		(find tsql_addition_numeric_types (lambda (type) (has? active type)) nil)))
+	(define text (find tsql_addition_text_types (lambda (type) (has? active type)) nil))
+	(define target (if (empty_list? active) "INT" numeric numeric text text
+		(error "unresolved or unsupported SQL type for +")))
+	(if (or (equal? target "BIT")
+		(not (reduce active (lambda (valid type) (and valid
+			(or (has? tsql_addition_numeric_types type) (has? tsql_addition_text_types type)))) true)))
+		(error "unsupported SQL operands for +") true)
+	(define formulas (map infos (lambda (info) (begin
+		(define type (tsql_addition_type (sql_info_type info)))
+		(define formula (sql_info_formula info))
+		(if (and numeric (or (has? tsql_addition_text_types type) (equal? type "BIT")))
+			(sql_type_formula '() (tsql_cast_expr formula
+				(if (has? '("DECIMAL" "MONEY" "SMALLMONEY") target) "FLOAT" target) '()))
+			formula)))))
+	(sql_info (cons (if numeric (quote +) (quote concat)) formulas) target
+		(if numeric nil (reduce infos (lambda (collation info)
+			(sql_merge_collation collation (sql_info_collation info))) nil))))))
+(define tsql_add_expr (lambda (left right)
+	(list (quote sql_compile_expr) tsql_compile_addition left right)))
 (define tsql_fold_additive (lambda (acc term) (match term
-	'("add" value) (list tsql_add acc value)
+	'("add" value) (tsql_add_expr acc value)
 	_ (sql_fold_additive_term acc term))))
 /* Explicit wire descriptors come from the existing SQL expression metadata,
 never from the first row. Unknown expression types stay text in this first slice. */
@@ -487,11 +536,11 @@ never from the first row. Unknown expression types stay text in this first slice
 			'('sql_type_expr '((quote aggregate) 1 (quote +) 0) "INT" nil))
 		(parser '((atom "COUNT" true) "(" (define e tsql_expression) ")")
 			'('sql_type_expr '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0) "INT" nil))
-		(parser '((atom "SUM" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "SUM")) '('aggregate s (car d) (cadr d))))
+		(parser '((atom "SUM" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "SUM")) (tsql_aggregate_expr "SUM" '('aggregate s (car d) (cadr d)) s)))
 		(parser '((atom "AVG" true) "(" (define s tsql_expression) ")")
-			(sql_avg_expr s (sql_aggregates "SUM") (sql_aggregates "COUNT")))
-		(parser '((atom "MIN" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "MIN")) '('aggregate s (car d) (cadr d))))
-		(parser '((atom "MAX" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "MAX")) '('aggregate s (car d) (cadr d))))
+			(tsql_aggregate_expr "AVG" (sql_avg_expr s (sql_aggregates "SUM") (sql_aggregates "COUNT")) s))
+		(parser '((atom "MIN" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "MIN")) (tsql_aggregate_expr "MIN" '('aggregate s (car d) (cadr d)) s)))
+		(parser '((atom "MAX" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "MAX")) (tsql_aggregate_expr "MAX" '('aggregate s (car d) (cadr d)) s)))
 
 		(parser '((define fn tsql_identifier_unquoted) "(" (define arg tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")")
 			(tsql_window_expr (toUpper fn) (list arg) _over))
@@ -518,7 +567,7 @@ never from the first row. Unknown expression types stay text in this first slice
 
 		(parser '((atom "RIGHT" true) "(" (define s tsql_expression) "," (define n tsql_expression) ")") '((quote if) '((quote nil?) s) nil '((quote sql_substr) s '((quote +) 1 '((quote -) '((quote strlen) s) n)) n)))
 
-		(parser '((define fn tsql_identifier_unquoted) "(" (define args (* tsql_expression ",")) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") '('window_func (toUpper fn) args _over))
+		(parser '((define fn tsql_identifier_unquoted) "(" (define args (* tsql_expression ",")) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr (toUpper fn) args _over))
 
 		(parser '((define fn tsql_identifier_unquoted) "(" (define args (* tsql_expression ",")) ")")
 			(begin (define d (sql_aggregates (toUpper fn)))

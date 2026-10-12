@@ -286,7 +286,6 @@ test_cases:
   sql: SELECT 2 + 'invalid' AS n
   expect:
     error: true
-  noncritical: true
 - name: Bracket identifiers and TOP
   sql: SELECT TOP (2) [id], [name] FROM [dbo].[tsql_data] ORDER BY [id]
   expect:
@@ -385,7 +384,6 @@ test_cases:
     - n: 4
       total: 110
       average: 27
-  noncritical: true
 - name: TSQL row number partitions
   sql: SELECT id, ROW_NUMBER() OVER (PARTITION BY name ORDER BY id) AS rn FROM tsql_data ORDER BY id
   expect:
@@ -560,7 +558,6 @@ test_cases:
     rows: 1
     data:
     - average: 27
-  noncritical: true
 - name: TSQL empty integer AVG
   sql: SELECT AVG(val) AS average FROM tsql_data WHERE id<0
   expect:
