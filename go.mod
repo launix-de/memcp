@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Carl-Philip Hänsch
 module github.com/launix-de/memcp
 
 go 1.26.0
@@ -8,7 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.7
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.3
 	github.com/aws/smithy-go v1.24.2
-	github.com/carli2/hybridsort v0.0.0-20260319220658-610599b2851c
+	github.com/carli2/hybridsort v0.1.0
 	github.com/ceph/go-ceph v0.37.0
 	github.com/chzyer/readline v1.5.1
 	github.com/dc0d/onexit v1.1.0

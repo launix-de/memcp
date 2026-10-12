@@ -1,0 +1,84 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Cold compound index construction with short, long and shuffled physical runs
+  isolated: true
+  reuse_fixture: true
+  restart_after_setup: true
+setup:
+- sql: DROP TABLE IF EXISTS index_run_interleaved
+- sql: DROP TABLE IF EXISTS index_run_blocks
+- sql: DROP TABLE IF EXISTS index_run_shuffled
+- sql: CREATE TABLE index_run_interleaved (id BIGINT PRIMARY KEY, stamp BIGINT, kind VARCHAR(20), status VARCHAR(20)) ENGINE=sloppy
+- sql: CREATE TABLE index_run_blocks (id BIGINT PRIMARY KEY, stamp BIGINT, kind VARCHAR(20), status VARCHAR(20)) ENGINE=sloppy
+- sql: CREATE TABLE index_run_shuffled (id BIGINT PRIMARY KEY, stamp BIGINT, kind VARCHAR(20), status VARCHAR(20)) ENGINE=sloppy
+- scm: |
+    (begin
+      (map '("index_run_interleaved" "index_run_blocks" "index_run_shuffled") (lambda (name)
+        (insert (table "memcp-tests" name) '("id" "stamp" "kind" "status")
+          (map (produceN 22000) (lambda (i)
+            (begin
+              (define value (if (equal? name "index_run_shuffled") (mod (* i 7919) 22000) i))
+              (list (+ value 1) value
+                (if (if (equal? name "index_run_blocks") (< value 2000) (equal? (mod value 11) 0))
+                  "post" "revision") "publish")))))))
+      (rebuild))
+test_cases:
+- name: Compound index over many short reverse runs and ten reuses
+  sql: SELECT id, stamp FROM index_run_interleaved t WHERE kind='post' AND status='publish' ORDER BY t.stamp DESC, t.id DESC LIMIT 10
+  warmup: 0
+  timing_samples: 11
+  timing_aggregation: total
+  threshold_ms: 2000
+  expect:
+    data:
+    - {id: 21990, stamp: 21989}
+    - {id: 21979, stamp: 21978}
+    - {id: 21968, stamp: 21967}
+    - {id: 21957, stamp: 21956}
+    - {id: 21946, stamp: 21945}
+    - {id: 21935, stamp: 21934}
+    - {id: 21924, stamp: 21923}
+    - {id: 21913, stamp: 21912}
+    - {id: 21902, stamp: 21901}
+    - {id: 21891, stamp: 21890}
+- name: Compound index over two long reverse runs and ten reuses
+  sql: SELECT id, stamp FROM index_run_blocks t WHERE kind='post' AND status='publish' ORDER BY t.stamp DESC, t.id DESC LIMIT 10
+  warmup: 0
+  timing_samples: 11
+  timing_aggregation: total
+  threshold_ms: 2000
+  expect:
+    data:
+    - {id: 2000, stamp: 1999}
+    - {id: 1999, stamp: 1998}
+    - {id: 1998, stamp: 1997}
+    - {id: 1997, stamp: 1996}
+    - {id: 1996, stamp: 1995}
+    - {id: 1995, stamp: 1994}
+    - {id: 1994, stamp: 1993}
+    - {id: 1993, stamp: 1992}
+    - {id: 1992, stamp: 1991}
+    - {id: 1991, stamp: 1990}
+- name: Compound index over shuffled rows and ten reuses
+  sql: SELECT id, stamp FROM index_run_shuffled t WHERE kind='post' AND status='publish' ORDER BY t.stamp DESC, t.id DESC LIMIT 10
+  warmup: 0
+  timing_samples: 11
+  timing_aggregation: total
+  threshold_ms: 2000
+  expect:
+    data:
+    - {id: 21990, stamp: 21989}
+    - {id: 21979, stamp: 21978}
+    - {id: 21968, stamp: 21967}
+    - {id: 21957, stamp: 21956}
+    - {id: 21946, stamp: 21945}
+    - {id: 21935, stamp: 21934}
+    - {id: 21924, stamp: 21923}
+    - {id: 21913, stamp: 21912}
+    - {id: 21902, stamp: 21901}
+    - {id: 21891, stamp: 21890}
+cleanup:
+- sql: DROP TABLE IF EXISTS index_run_interleaved
+- sql: DROP TABLE IF EXISTS index_run_blocks
+- sql: DROP TABLE IF EXISTS index_run_shuffled
