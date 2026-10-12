@@ -3,7 +3,9 @@
 # build traces. Data and names are synthetic and anonymized.
 
 metadata:
-  performance_shard_weight: 24
+  # Million-row cold fixtures are rebuilt for every A/B verification pair.
+  # Keep this suite on its own worker instead of delaying verification behind KPI.
+  performance_shard_weight: 64
   version: "1.0"
   description: "Large lookup GROUP BY performance"
   isolated: true
