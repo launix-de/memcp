@@ -405,6 +405,30 @@ func TestUniqueReservationLifecycle(t *testing.T) {
 	}
 }
 
+func TestUniqueReservationReleasedAfterACIDCommitConflict(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tuniquereservationconflict")
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	cols := []string{"id"}
+	tbl.Insert(cols, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+	shard := tbl.ActiveShards()[0]
+	tx, other := NewTxContext(TxACID), NewTxContext(TxACID)
+	tx.AddToDeleteMask(shard, 0)
+	other.AddToDeleteMask(shard, 0)
+	tbl.Insert(cols, [][]scm.Scmer{{scm.NewInt(7)}}, nil, scm.NewNil(), false, nil, tx)
+	if err := other.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err == nil || tx.State != TxAborted {
+		t.Fatalf("expected aborted commit, state=%d error=%v", tx.State, err)
+	}
+	if got := tbl.Insert(cols, [][]scm.Scmer{{scm.NewInt(7)}}, nil, scm.NewNil(), false, nil); got != 1 {
+		t.Fatalf("aborted transaction retained key reservation: inserted=%d", got)
+	}
+	if got := tbl.CountExact(); got != 1 {
+		t.Fatalf("aborted commit resurrected a row: count=%d", got)
+	}
+}
+
 func TestGeneratedUniqueKeySkipReleasesOuterLockOnPanic(t *testing.T) {
 	for _, generatedFirst := range []bool{true, false} {
 		name := "generated_first"
