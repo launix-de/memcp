@@ -30,6 +30,13 @@ setup:
   - sql: CREATE TABLE [dbo].[tsql_native] ([id] INT IDENTITY(1,1) PRIMARY KEY, [name] NVARCHAR(80), [amount] INT NOT NULL DEFAULT (7))
   - sql: INSERT INTO [dbo].[tsql_native] ([name]) VALUES (N'Grüße'), (N'O''Brien')
 test_cases:
+  - name: National default strings accept leading lexical whitespace
+    scm: |
+      (tsql_default_literal "   N'spaces'")
+    expect: {result: spaces}
+  - name: National string prefix must stay adjacent to the opening quote
+    sql: SELECT N 'not adjacent' AS value
+    expect: {error: true}
   - name: escaped closing bracket is a quoted identifier
     sql: SELECT 42 AS [answer]]suffix]
     expect: {rows: 1, data: [{"answer]suffix": 42}]}
