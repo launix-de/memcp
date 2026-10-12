@@ -293,7 +293,7 @@ func (t *table) scanLookupMapOne(currentTx *TxContext, access scanAccess, mapCol
 	var values []scm.Scmer
 	matches := 0
 	var panicValue any
-	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool, acquisitionFailure any) {
+	done := t.iterateShardsParallel(currentTx, access, nil, func(shard *storageShard, solo bool, acquisitionFailure any) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				mu.Lock()
@@ -433,7 +433,7 @@ func (t *table) scanLookupOne(currentTx *TxContext, access scanAccess, resultCol
 		matches    int
 		panicValue any
 	}{result: scm.NewNil()}
-	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool, acquisitionFailure any) {
+	done := t.iterateShardsParallel(currentTx, access, nil, func(shard *storageShard, solo bool, acquisitionFailure any) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				state.mu.Lock()
@@ -576,7 +576,7 @@ func (t *table) scanLookupMany(currentTx *TxContext, access scanAccess, resultCo
 	touchTempColumns(t, lookupCols, resultCols)
 
 	state := scanLookupParallelValueState{result: scm.NewBool(false)}
-	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool, acquisitionFailure any) {
+	done := t.iterateShardsParallel(currentTx, access, nil, func(shard *storageShard, solo bool, acquisitionFailure any) {
 		if state.stop.Load() {
 			return
 		}
@@ -723,7 +723,7 @@ func (t *table) scanLookupMapMany(currentTx *TxContext, access scanAccess, mapCo
 	touchTempColumns(t, lookupCols, mapCols)
 
 	state := scanLookupParallelMapState{}
-	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool, acquisitionFailure any) {
+	done := t.iterateShardsParallel(currentTx, access, nil, func(shard *storageShard, solo bool, acquisitionFailure any) {
 		if state.stop.Load() {
 			return
 		}

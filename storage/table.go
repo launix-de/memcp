@@ -103,10 +103,11 @@ type column struct {
 	// filter cols are persisted because they are part of the canonical helper
 	// definition; the filter expression itself is runtime-only like Computor.
 	// ComputorDependencies contains logical schema/table pairs, never topology IDs.
-	ComputorDependencies []string  `json:",omitempty"`
-	ComputorFilterCols   []string  `json:",omitempty"`
-	ComputorFilter       scm.Scmer `json:"-"`
-	PartitioningScore    int       // count this up to increase the chance of partitioning for this column
+	ComputorDependencies []string     `json:",omitempty"`
+	ComputorFilterCols   []string     `json:",omitempty"`
+	ComputorFilter       scm.Scmer    `json:"-"`
+	partitioningTraffic  atomic.Int64 // runtime query/UNIQUE routing hints; never persisted
+	PartitioningScore    int          // count this up to increase the chance of partitioning for this column
 	AutoIncrement        bool
 	Default              scm.Scmer
 	DefaultExpression    string
@@ -543,8 +544,9 @@ type table struct {
 	// t.mu protects table-local storage topology and long-lived maintenance
 	// state: ShardMode, Shards/PShards, maintenanceKind and the dual-write
 	// flags that coordinate table-level rebuild/repartition.
-	mu         sync.Mutex
-	uniquelock sync.Mutex // unique insert lock
+	mu           sync.Mutex
+	uniqueWrites atomic.Pointer[uniqueWriteLocks] // logical-key guards, shared by all generations
+	insertRoute  atomic.Uint64                    // rotating free-shard writer selection; runtime-only
 	// LOCK TABLES: variable-based lock that is cheap for scans to check but
 	// expensive to acquire (drains shard readers first via waitTableLock).
 	// Software contract:
@@ -881,12 +883,14 @@ func (t *table) MarshalJSON() ([]byte, error) {
 	// can restore its previous topology without losing the original extents.
 	type persistedColumn struct {
 		*column
-		InitialValue  *scm.Scmer                     `json:"initial_value,omitempty"`
-		InitialValues map[string]columnInitialExtent `json:"initial_values,omitempty"`
+		PartitioningScore int
+		InitialValue      *scm.Scmer                     `json:"initial_value,omitempty"`
+		InitialValues     map[string]columnInitialExtent `json:"initial_values,omitempty"`
 	}
 	columns := make([]persistedColumn, len(t.Columns))
 	for i, c := range t.Columns {
 		columns[i].column = c
+		columns[i].PartitioningScore = c.PartitioningScore + int(c.partitioningTraffic.Load())
 		if len(c.InitialValues) == 0 {
 			continue
 		}
@@ -1598,6 +1602,9 @@ func (t *table) evict(mode evictionMode, currentSize int64, freedByType *[numEvi
 // Schema metadata belongs to the table, never to every referencing shard.
 func (t *table) metadataMemory() uint {
 	size := uint(unsafe.Sizeof(*t)) + uint(len(t.Name))
+	if locks := t.uniqueWrites.Load(); locks != nil {
+		size += uint(unsafe.Sizeof(*locks))
+	}
 	for name := range t.DroppedColumns {
 		size += 64 + uint(len(name))
 	}
@@ -1643,11 +1650,10 @@ func (t *table) metadataMemory() uint {
 
 // increases PartitioningScore for a set of columns
 func (t *table) AddPartitioningScore(cols []string) {
-	// we don't sync because we want to be fast; we ignore write-after-write hazards
-	for _, c := range t.Columns {
+	for _, c := range t.columnDeclarations() {
 		for _, col := range cols {
 			if col == c.Name {
-				c.PartitioningScore++
+				c.partitioningTraffic.Add(1)
 			}
 		}
 	}
@@ -2874,9 +2880,11 @@ func (t *table) DropColumnIfExists(name string) bool {
 	return false
 }
 
-func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *storageShard, incoming uint) (*tableShardTopology, *storageShard) {
-	t.maintenanceMu.Lock()
-	sourceCount := uint(source.Count())
+func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *storageShard, incoming uint, balance bool) (*tableShardTopology, *storageShard) {
+	if !t.maintenanceMu.TryLock() {
+		return t.topology.Load(), nil
+	}
+	sourceCount := uint(source.plannerMainRows.Load()) + uint(source.plannerDeltaRows.Load()) + uint(source.pendingInsertRows.Load())
 	t.mu.Lock()
 	active := t.activeTopology()
 	if active != topology || active.mode != ShardModeFree || len(active.shards) == 0 || active.shards[len(active.shards)-1] != source {
@@ -2884,7 +2892,7 @@ func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *sto
 		t.maintenanceMu.Unlock()
 		return active, nil
 	}
-	if sourceCount+incoming <= Settings.ShardSize {
+	if !balance && sourceCount+incoming <= Settings.ShardSize {
 		t.mu.Unlock()
 		t.maintenanceMu.Unlock()
 		return active, source
@@ -2916,13 +2924,24 @@ func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *sto
 		panic(savePanic)
 	}
 
+	// Register the empty generation before writers can reach it, so their
+	// incremental size updates cannot race its initial ledger admission.
+	if t.PersistencyMode == Cache && !strings.HasPrefix(t.Name, ".") {
+		GlobalCache.AddItem(newShard, int64(newShard.exclusiveSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+	} else if t.PersistencyMode != Memory && !t.isEphemeralQueryTable() {
+		GlobalCache.AddItem(newShard, int64(newShard.exclusiveSize()), TypeShard, shardCleanup, shardLastUsed, nil)
+	}
 	t.mu.Lock()
 	published := t.publishTopologyLocked()
 	t.mu.Unlock()
-	if t.PersistencyMode == Cache && !strings.HasPrefix(t.Name, ".") {
-		GlobalCache.AddItem(newShard, 0, TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
-	}
 	fmt.Println("started new shard for table", t.Name)
+	if balance {
+		t.mu.Lock()
+		t.maintenanceKind = 0
+		t.mu.Unlock()
+		t.maintenanceMu.Unlock()
+		return published, newShard
+	}
 	t.overflowRebuilds.Add(1)
 	go t.finishOverflowRebuild(sourceIndex, source)
 	return published, newShard
@@ -3015,6 +3034,11 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	if len(currentTxArgs) > 0 {
 		currentTx = currentTxArgs[0]
 	}
+	// A blocked request must not retain UNIQUE guards or routing reservations
+	// needed by the SQL LOCK TABLES owner. Shard mutation still rechecks races.
+	if t.hasTableLock() {
+		t.waitTableLock(SessionStateFromTx(currentTx), querySeqFromTx(currentTx), true)
+	}
 	result := 0
 	inserted := 0
 	isIgnore := !onCollision.IsNil() // INSERT IGNORE or ON DUPLICATE KEY UPDATE
@@ -3052,42 +3076,28 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	}
 	if topology.mode == ShardModeFree { // unpartitioned sharding
 		// Helper to get or create a shard with capacity for n rows
-		getShardWithCapacity := func(n uint) *storageShard {
+		getShardWithCapacity := func(n int64) (*storageShard, func()) {
 			for {
-				t.mu.Lock()
-				active := t.activeTopology()
-				if active != topology {
-					t.mu.Unlock()
-					switchTopology(active)
+				shard, release, next := t.routeFreeInsert(topology, n)
+				if next == nil {
+					continue // reservation contention; keep the existing topology pin
+				}
+				if next != topology {
+					switchTopology(next)
 					if topology.mode != ShardModeFree {
-						return nil
+						return nil, nil
 					}
 					continue
 				}
-				if len(topology.shards) == 0 {
-					t.mu.Unlock()
-					return nil
-				}
-				shard := topology.shards[len(topology.shards)-1]
-				physicalRows := uint(shard.plannerMainRows.Load()) + uint(shard.plannerDeltaRows.Load())
-				if physicalRows+n <= Settings.ShardSize || t.maintenanceKind != 0 {
-					t.mu.Unlock()
-					return shard
-				}
-
-				t.mu.Unlock()
-				published, appended := t.appendFreeShardDurably(topology, shard, n)
-				if published != nil {
-					switchTopology(published)
-				}
-				if appended != nil {
-					return appended
-				}
+				return shard, release
 			}
 		}
 
 		// For bulk inserts larger than ShardSize, split into chunks
 		chunkSize := int(Settings.ShardSize)
+		if chunkSize <= 0 {
+			panic("ShardSize must be greater than zero for INSERT")
+		}
 		repartitioned := false
 		for start := 0; start < len(values); start += chunkSize {
 			end := start + chunkSize
@@ -3096,7 +3106,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			}
 			chunk := values[start:end]
 
-			shard := getShardWithCapacity(uint(len(chunk)))
+			shard, releaseReservation := getShardWithCapacity(int64(len(chunk)))
 			if shard == nil {
 				// Repartition completed after this Insert loaded its starting
 				// generation. Reload the published partition topology before routing
@@ -3107,46 +3117,49 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				repartitioned = true
 				break
 			}
-			release := shard.GetExclusive()
+			func() {
+				defer releaseReservation()
+				release := shard.GetExclusive()
+				defer release()
 
-			// check unique constraints in a thread safe manner
-			if len(t.Unique) > 0 {
-				t.ProcessUniqueCollision(columns, chunk, mergeNull, func(chunk [][]scm.Scmer) {
+				// check unique constraints in a thread safe manner
+				if len(t.Unique) > 0 {
+					t.ProcessUniqueCollision(columns, chunk, mergeNull, func(chunk [][]scm.Scmer) {
+						shard.Insert(columns, chunk, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
+						result += len(chunk)
+						inserted += len(chunk)
+					}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
+						if !onCollision.IsNil() {
+							// Evaluate onCollision and add to affected rows per MySQL semantics
+							// - inserted rows already counted above
+							// - on duplicate: count 2 if changed, 1 if no-op
+							ret := scm.Apply(onCollision, data...)
+							switch {
+							case ret.IsBool():
+								if ret.Bool() {
+									result += 2
+								} else {
+									result++
+								}
+							case ret.IsInt():
+								result += int(ret.Int())
+							case ret.IsFloat():
+								result += int(ret.Float())
+							default:
+								// Fallback: consider as one affected row
+								result++
+							}
+						} else {
+							panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
+						}
+					}, 0, currentTx)
+				} else {
+					// physically insert (no unique constraints)
 					shard.Insert(columns, chunk, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
 					result += len(chunk)
 					inserted += len(chunk)
-				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
-					if !onCollision.IsNil() {
-						// Evaluate onCollision and add to affected rows per MySQL semantics
-						// - inserted rows already counted above
-						// - on duplicate: count 2 if changed, 1 if no-op
-						ret := scm.Apply(onCollision, data...)
-						switch {
-						case ret.IsBool():
-							if ret.Bool() {
-								result += 2
-							} else {
-								result++
-							}
-						case ret.IsInt():
-							result += int(ret.Int())
-						case ret.IsFloat():
-							result += int(ret.Float())
-						default:
-							// Fallback: consider as one affected row
-							result++
-						}
-					} else {
-						panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
-					}
-				}, 0, currentTx)
-			} else {
-				// physically insert (no unique constraints)
-				shard.Insert(columns, chunk, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
-				result += len(chunk)
-				inserted += len(chunk)
-			}
-			release()
+				}
+			}()
 		}
 		if !repartitioned {
 			goto insertDone
@@ -3439,12 +3452,16 @@ func (t *table) nextUniqueConstraint(columns []string, idx int) int {
 }
 
 func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext) {
-	t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, true, nil)
+	guard := t.guardUniqueWrites(columns, values, mergeNull, idx)
+	guard.lock()
+	defer guard.unlock()
+	t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, &guard)
 }
 
-func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, root bool, sharedLockHeld *bool) {
+func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, guard *uniqueWriteGuard) {
 	// An omitted generated key skips only its own constraint. Keep the outer
 	// invocation's lock ownership when the first checked key is a later UNIQUE.
+	checkedVersion := guard.version
 	idx = t.nextUniqueConstraint(columns, idx)
 	// check for duplicates
 	if idx >= len(t.Unique) {
@@ -3467,35 +3484,34 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 			}
 		}
 
-		shardlist := t.ActiveShards()
-		// During repartition drain (ShardMode already flipped to Partition but
-		// maintenanceKind == 2 still true), in-flight scans on old shards call
-		// ProcessUniqueCollision. We must check old Shards because the deletion
-		// from the UPDATE is only in the old shard, not yet in PShards.
-		if t.maintenanceKind == 2 && t.ShardMode == ShardModePartition && t.Shards != nil {
-			shardlist = t.Shards
+		topology := t.pinActiveTopology()
+		defer topology.releaseOperation()
+		shardlist := topology.shards
+		// Source visibility remains authoritative throughout the repartition drain.
+		// Read immutable publications, never mutable Shards/PDimensions here.
+		sources := t.repartitionSources.Load()
+		repartitioning := t.repartitionDualWriteActive.Load() && sources != nil
+		if repartitioning {
+			shardlist = sources.shards
 		}
-		allowPruning := false // if we can prune the shardlist
-		// These arrays are indexed by partition dimension, not unique-key column.
-		pruningMap := make([]int, len(t.PDimensions))
-		pruningVals := make([]scm.Scmer, len(t.PDimensions))
-		if t.ShardMode == ShardModePartition && t.maintenanceKind != 2 {
-			// partitioning
-			allowPruning = true
-			for j, dim := range t.PDimensions {
-				hasPruningCol := false
+		dimensions := topology.dimensions
+		allowPruning := topology.mode == ShardModePartition && !repartitioning
+		pruningMap := make([]int, len(dimensions))
+		pruningVals := make([]scm.Scmer, len(dimensions))
+		if allowPruning {
+			for j, dim := range dimensions {
+				found := false
 				for i, col := range uniq.Cols {
 					if dim.Column == col {
-						hasPruningCol = true // we found the uniq column in our partitioning schema
 						pruningMap[j] = i
+						found = true
+						break
 					}
 				}
-				if !hasPruningCol {
-					// a column different from the unique key is part of our partitioning schema -> we cannot prune (TODO: array pruning)
-					allowPruning = false // all unique columns must be present in the partitioning schema, otherwise a unique collision might hide in pruned shards
-				}
+				allowPruning = allowPruning && found
 			}
 		}
+
 		// Compute the existing probe domain before loading any shard. NULLs
 		// skipped by this key need no read access, and partition-local keys
 		// retain only the shards reached by this batch.
@@ -3532,7 +3548,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 			for j, xidx := range pruningMap {
 				pruningVals[j] = key[xidx]
 			}
-			needed[computeShardIndex(t.PDimensions, pruningVals)] = true
+			needed[computeShardIndex(dimensions, pruningVals)] = true
 		}
 		// Retain each generation once for this unique-check batch, outside the
 		// row/key probe loops. Collision callbacks may panic or recursively scan;
@@ -3553,33 +3569,6 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 				readAccesses[i] = shard.acquireReadForScan(currentTx)
 			}
 		}
-		// TODO: only shard-local lock if allowPruning
-
-		var lock *sync.Mutex
-		lock = &t.uniquelock
-		localLockHeld := false
-		lockHeld := &localLockHeld
-		ownsLock := false
-		if sharedLockHeld != nil {
-			lockHeld = sharedLockHeld
-		}
-		// Only the frame that acquired the lock releases it while unwinding.
-		// Recursive unique checks share lockHeld because collision callbacks may
-		// temporarily release the outer table-wide lock.
-		defer func() {
-			if r := recover(); r != nil {
-				if ownsLock && *lockHeld {
-					lock.Unlock()
-					*lockHeld = false
-				}
-				panic(r) // re-panic after releasing lock
-			}
-		}()
-		if (!allowPruning || len(t.Unique) > 1) && root {
-			lock.Lock()
-			*lockHeld = true
-			ownsLock = true
-		}
 
 		last_j := 0
 		for j, row := range values {
@@ -3593,24 +3582,21 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 					pruningVals[j] = key[xidx]
 				}
 				// only one shard to visit for unique check
-				shardlist2 = []*storageShard{shardlist[computeShardIndex(t.PDimensions, pruningVals)]} // (TODO: array pruning)
-				if len(t.Unique) == 1 {
-					lock = &shardlist2[0].uniquelock
-					lock.Lock()
-					*lockHeld = true
-					ownsLock = true
-				}
+				shardlist2 = []*storageShard{shardlist[computeShardIndex(dimensions, pruningVals)]} // (TODO: array pruning)
 			}
 			for _, s := range shardlist2 {
 				uid, present := s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx)
 				if present {
 					// found a unique collision
 					if j != last_j {
-						t.processUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx+1, currentTx, false, lockHeld) // flush
+						nextConstraint := idx + 1
+						if checkedVersion != guard.version {
+							nextConstraint = 0 // callback allowed another writer; recheck earlier keys
+						}
+						t.processUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, nextConstraint, currentTx, guard) // flush
 					}
 					last_j = j + 1
-					lock.Unlock()
-					*lockHeld = false
+					guard.unlock()
 					params := make([]scm.Scmer, len(onCollisionCols))
 					for i, p := range onCollisionCols {
 						if p == "$update" {
@@ -3644,25 +3630,19 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 						}
 					}
 					failure(uniq.Id, params) // notify about failure while unlocked
-					lock.Lock()
-					*lockHeld = true
+					guard.lock()
 					goto nextrow
 				}
 			}
+
 		nextrow:
-			if allowPruning {
-				if len(t.Unique) == 1 && !skipUniqueCheck {
-					*lockHeld = false
-					lock.Unlock()
-				}
-			}
 		}
 		if len(values) != last_j {
-			t.processUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx+1, currentTx, false, lockHeld) // flush the rest
-		}
-		if ownsLock && *lockHeld {
-			lock.Unlock()
-			*lockHeld = false
+			nextConstraint := idx + 1
+			if checkedVersion != guard.version {
+				nextConstraint = 0
+			}
+			t.processUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, nextConstraint, currentTx, guard) // flush the rest
 		}
 	}
 }

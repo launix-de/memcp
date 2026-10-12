@@ -120,6 +120,27 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   existing key metadata. It is immutable after publication; CREATE/DROP use the
   existing schema and table DDL locks. SHOW reads it under the existing catalog
   lock. It does not participate in scans or row-level uniqueness checks.
+- `table.uniqueWrites` atomically publishes lazy logical-key guards shared by
+  all physical generations. A batch acquires its guard stripes in ascending
+  order and releases them on return/panic or before collision callbacks;
+  callback releases invalidate earlier uniqueness checks for pending rows.
+  Coercing/opaque keys conservatively intersect all stripes. Membership is
+  always checked against storage, never inferred from hashes. Shard writes
+  still own the existing shard mutex and WAL/visibility protocol.
+- `storageShard.pendingInsertRows` is an atomic routing reservation for queued
+  and executing free-shard batches, charged/released once per batch including
+  failure paths. It is runtime-only and is not forwarded to successor shards.
+  `table.insertRoute` rotates the bounded recent writer window. Spare writer
+  lanes publish through the existing durable schema topology; concurrent
+  maintenance causes routing to use live shards rather than wait for rebuild.
+  Range partitions keep their semantic key routing.
+- `table.Auto_increment` uses atomic batch reservation, snapshot and DDL/runtime
+  access. Initial JSON loading and unpublished constructors own it exclusively;
+  INSERT never takes the table topology mutex while reserving IDs.
+- `column.partitioningTraffic` is atomic runtime-only partitioning feedback.
+  Explicit/persisted `PartitioningScore` remains declaration-owned; automatic
+  repartition combines it with this counter outside query row loops. Schema
+  checkpoints fold traffic into the existing persisted score field.
 
 - `uniqueKey.NullsNotDistinct` is persisted as `nulls_not_distinct` in existing key
   metadata. It is immutable after key publication and follows the existing
@@ -487,7 +508,6 @@ To optimize memcp for a query you must consider the following steps:
 The first line of `CHANGELOG.md` must be the bare version number followed by an em-dash and ISO date:
 ```
 0.2 — 2026-03-XX
-=================
 - feat: short description
 - fix: short description
 ```

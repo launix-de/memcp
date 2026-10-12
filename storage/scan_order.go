@@ -981,18 +981,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	}
 
 	var q globalqueue
-	resultBufferSize := 0
-	for i := range tables {
-		if tables[i].recset != nil {
-			resultBufferSize += len(tables[i].recset.shards)
-		} else {
-			resultBufferSize += tables[i].backingTable().shardResultBufferSize()
-		}
-	}
-	if resultBufferSize < 1 {
-		resultBufferSize = 1
-	}
-	q_ := make(chan scanOrderResult, resultBufferSize)
+	resultChannels := make([]chan scanOrderResult, 0, len(tables))
 	doneChannels := make([]<-chan struct{}, 0, len(tables))
 	querySeq := querySeqFromTx(currentTx)
 	stats := make([]scanOrderStats, len(tables))
@@ -1000,6 +989,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	// Launch shard-parallel scans for each table
 	for ti := range tables {
 		spec := &tables[ti]
+		var q_ chan scanOrderResult
 		t := spec.backingTable()
 		touchTempColumns(t, spec.conditionCols, spec.callbackCols)
 		touchTempColumns(t, spec.acceptCols, nil)
@@ -1074,6 +1064,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		shardLimit := shardTotalLimit
 
 		if spec.recset != nil {
+			q_ = make(chan scanOrderResult, len(spec.recset.shards))
 			if len(sortcols) > 0 {
 				// Preserve the RecSet's shard order when merging equal sort keys,
 				// but compute each shard's sorted run within the query fanout budget.
@@ -1144,7 +1135,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 				}
 			}
 		} else {
-			done := t.iterateShardsParallel(currentTx, tableBounds, func(s *storageShard, solo bool, acquisitionFailure any) {
+			done := t.iterateShardsParallel(currentTx, tableBounds, func(shards int) {
+				q_ = make(chan scanOrderResult, shards)
+			}, func(s *storageShard, solo bool, acquisitionFailure any) {
 				defer func() {
 					if r := recover(); r != nil {
 						q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
@@ -1170,42 +1163,39 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			}
 		}
 
+		resultChannels = append(resultChannels, q_)
 	}
 
-	// Synchronous scans have already filled the bounded result channel. Only a
-	// real fanout needs a coordinator goroutine while this caller consumes.
-	if len(doneChannels) == 0 {
-		close(q_)
-	} else {
-		go func() {
-			for _, done := range doneChannels {
-				<-done
-			}
-			close(q_)
-		}()
+	// Each registered domain fits entirely in its own channel, including
+	// synchronous fanout. Completion therefore never waits for collection.
+	for _, done := range doneChannels {
+		<-done
 	}
 
 	// Collect shard results into globalqueue
 	var scanErr scanError
-	for msg := range q_ {
-		if msg.err.r != nil {
-			if scanErr.r == nil {
-				scanErr = msg.err
+	for _, q_ := range resultChannels {
+		close(q_)
+		for msg := range q_ {
+			if msg.err.r != nil {
+				if scanErr.r == nil {
+					scanErr = msg.err
+				}
+				continue
 			}
-			continue
-		}
-		if scanErr.r != nil {
-			continue
-		}
-		if msg.res != nil && len(msg.res.items) > 0 {
-			heap.Push(&q, msg.res)
-		}
-		if msg.res != nil && msg.res.tableIdx >= 0 && msg.res.tableIdx < len(stats) {
-			tableStats := &stats[msg.res.tableIdx]
-			tableStats.inputCount += msg.inputCount
-			tableStats.candidateCount += msg.candidateCount
-			if tables[msg.res.tableIdx].postOrderFilter.IsNil() {
-				tableStats.outputCount += msg.outputCount
+			if scanErr.r != nil {
+				continue
+			}
+			if msg.res != nil && len(msg.res.items) > 0 {
+				heap.Push(&q, msg.res)
+			}
+			if msg.res != nil && msg.res.tableIdx >= 0 && msg.res.tableIdx < len(stats) {
+				tableStats := &stats[msg.res.tableIdx]
+				tableStats.inputCount += msg.inputCount
+				tableStats.candidateCount += msg.candidateCount
+				if tables[msg.res.tableIdx].postOrderFilter.IsNil() {
+					tableStats.outputCount += msg.outputCount
+				}
 			}
 		}
 	}
@@ -1745,7 +1735,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 	var foundShard *storageShard
 	var foundID uint32
 	var firstErr scanError
-	done := t.iterateShardsParallel(currentTx, bounds, func(shard *storageShard, _ bool, acquisitionFailure any) {
+	done := t.iterateShardsParallel(currentTx, bounds, nil, func(shard *storageShard, _ bool, acquisitionFailure any) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				mu.Lock()

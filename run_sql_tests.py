@@ -2747,7 +2747,9 @@ def find_free_port(start: int = 20000, end: int = 60000) -> int:
     for port in candidates:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                # Reuse-enabled bind can accept a port already claimed by
+                # another bound socket. Managed listener probes need exclusive
+                # ownership, including before the other socket starts listening.
                 s.bind(('', port))
                 return port
         except OSError:

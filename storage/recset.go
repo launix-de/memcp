@@ -512,8 +512,10 @@ func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessV
 		return result
 	}
 
-	values := make(chan recSetBuildResult, t.shardResultBufferSize())
-	done := t.iterateShardsParallel(currentTx, access, func(shard *storageShard, solo bool, acquisitionFailure any) {
+	var values chan recSetBuildResult
+	done := t.iterateShardsParallel(currentTx, access, func(shards int) {
+		values = make(chan recSetBuildResult, shards)
+	}, func(shard *storageShard, solo bool, acquisitionFailure any) {
 		withTxSession(currentTx, func() scm.Scmer {
 			defer func() {
 				if rec := recover(); rec != nil {
@@ -1026,8 +1028,10 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 		part recSetShard
 		err  scanError
 	}
-	values := make(chan targetPartResult, t.shardResultBufferSize())
-	done := t.iterateShardsParallel(currentTx, scanAccess{}, func(shard *storageShard, solo bool, acquisitionFailure any) {
+	var values chan targetPartResult
+	done := t.iterateShardsParallel(currentTx, scanAccess{}, func(shards int) {
+		values = make(chan targetPartResult, shards)
+	}, func(shard *storageShard, solo bool, acquisitionFailure any) {
 		withTxSession(currentTx, func() scm.Scmer {
 			defer func() {
 				if rec := recover(); rec != nil {

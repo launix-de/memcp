@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Performance tests for unique key insert operations
 # Tests INSERT with UNIQUE constraint to measure delta btree index performance
 # A: full delta scan fallback (O(N^2) for batch inserts)
@@ -90,7 +92,27 @@ test_cases:
     warmup: false
     threshold_ms: 5000
 
+  - name: "Perf: Concurrent single-row UNIQUE INSERT"
+    performance_rows: 128
+    setup:
+      - sql: "DROP TABLE IF EXISTS perf_concurrent_insert"
+      - sql: "CREATE TABLE perf_concurrent_insert (id INT PRIMARY KEY, val INT) ENGINE=safe"
+    scm: |
+      (begin
+        (set target (table "{database}" "perf_concurrent_insert"))
+        (parallelN 4 (lambda (worker)
+          (reduce (produceN {rows}) (lambda (count i)
+            (+ count (insert target '("id" "val")
+              (list (list (+ 1 i (* worker {rows})) worker))))) 0))))
+    warmup: 0
+    timing_samples: 1
+    threshold_ms: 10000
+    expect:
+      rows: 1
+      data: [[128, 128, 128, 128]]
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS perf_concurrent_insert"
   - sql: "DROP TABLE IF EXISTS perf_unique"
   - sql: "DROP TABLE IF EXISTS perf_source"
   - sql: "DROP TABLE IF EXISTS perf_unique_text"
