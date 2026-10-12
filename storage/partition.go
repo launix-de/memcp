@@ -229,17 +229,6 @@ func runFanoutTasks(currentTx *TxContext, taskCount int, task func(int, bool)) <
 	return doneCh
 }
 
-// shardResultBufferSize bounds synchronous multi-shard result buffering. It
-// snapshots only shard topology and does not touch the transaction fanout
-// budget; callers reach it after boundary analysis has selected a table scan.
-func (t *table) shardResultBufferSize() int {
-	size := len(t.activeTopology().shards)
-	if size < 1 {
-		return 1
-	}
-	return size
-}
-
 func traceShardScanCallback(callback func(*storageShard, bool, any), shard *storageShard, solo bool, acquisitionFailure any) {
 	scm.Trace.Duration(fmt.Sprintf("%p", shard), "shard", func() {
 		callback(shard, solo, acquisitionFailure)
@@ -373,7 +362,7 @@ func runParallelShardScans(currentTx *TxContext, shards []*storageShard, topolog
 	})
 }
 
-func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, callback func(*storageShard, bool, any)) <-chan struct{} {
+func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, prepare func(int), callback func(*storageShard, bool, any)) <-chan struct{} {
 	// Keep shard acquisition outside physical scan callbacks. In clustered mode
 	// this is the orchestration point that can choose a local SHARED copy or send
 	// the whole shard-local scan pipeline to a remote holder; row readers must not
@@ -393,6 +382,9 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, c
 			relevant = collectRelevantShards(topology.dimensions, access, topology.shards)
 		}
 		if len(relevant) == 0 {
+			if prepare != nil {
+				prepare(0)
+			}
 			return nil
 		}
 
@@ -414,6 +406,25 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, c
 				topology.releaseOperation()
 			}
 			continue
+		}
+
+		// Result buffering must use this registered domain. Loading a separate
+		// topology earlier can under-size the channel when INSERT adds a lane,
+		// blocking a producer before the caller can collect any results.
+		if prepare != nil {
+			func() {
+				prepared := false
+				defer func() {
+					if !prepared {
+						for _, shard := range relevant {
+							shard.activeScanners.Add(-1)
+							topology.releaseOperation()
+						}
+					}
+				}()
+				prepare(len(relevant))
+				prepared = true
+			}()
 		}
 
 		if len(relevant) == 1 {

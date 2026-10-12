@@ -252,7 +252,7 @@ func TestIterateShardsParallelMarksFreeSingleShardSolo(t *testing.T) {
 
 	calls := 0
 	sawSolo := false
-	done := tbl.iterateShardsParallel(nil, scanAccess{}, func(s *storageShard, solo bool, acquisitionFailure any) {
+	done := tbl.iterateShardsParallel(nil, scanAccess{}, nil, func(s *storageShard, solo bool, acquisitionFailure any) {
 		if acquisitionFailure != nil {
 			panic(acquisitionFailure)
 		}
@@ -282,7 +282,7 @@ func TestIterateShardsParallelReleasesFreeShardRegistrationOnPanic(t *testing.T)
 				t.Fatal("iterateShardsParallel callback did not panic")
 			}
 		}()
-		tbl.iterateShardsParallel(nil, scanAccess{}, func(_ *storageShard, _ bool, acquisitionFailure any) {
+		tbl.iterateShardsParallel(nil, scanAccess{}, nil, func(_ *storageShard, _ bool, acquisitionFailure any) {
 			if acquisitionFailure != nil {
 				panic(acquisitionFailure)
 			}
@@ -316,7 +316,7 @@ func TestRepartitionPublishesWhileOldGenerationReaderRuns(t *testing.T) {
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
-		tbl.iterateShardsParallel(nil, scanAccess{}, func(_ *storageShard, _ bool, acquisitionFailure any) {
+		tbl.iterateShardsParallel(nil, scanAccess{}, nil, func(_ *storageShard, _ bool, acquisitionFailure any) {
 			if acquisitionFailure != nil {
 				panic(acquisitionFailure)
 			}
@@ -479,7 +479,7 @@ func TestIterateShardsParallelMarksPartitionSingleShardSolo(t *testing.T) {
 		lowerInclusive: true,
 		upper:          scm.NewInt(15),
 		upperInclusive: true,
-	}}), func(s *storageShard, solo bool, acquisitionFailure any) {
+	}}), nil, func(s *storageShard, solo bool, acquisitionFailure any) {
 		if acquisitionFailure != nil {
 			panic(acquisitionFailure)
 		}
@@ -511,7 +511,7 @@ func TestIterateShardsParallelMarksPartitionMultiShardNonSolo(t *testing.T) {
 
 	var calls atomic.Int32
 	var sawSolo atomic.Bool
-	done := tbl.iterateShardsParallel(nil, scanAccess{}, func(s *storageShard, solo bool, acquisitionFailure any) {
+	done := tbl.iterateShardsParallel(nil, scanAccess{}, nil, func(s *storageShard, solo bool, acquisitionFailure any) {
 		if acquisitionFailure != nil {
 			panic(acquisitionFailure)
 		}
@@ -548,7 +548,7 @@ func TestIterateShardsParallelMarksSynchronousMultiShardNonSolo(t *testing.T) {
 
 	calls := 0
 	sawSolo := false
-	done := tbl.iterateShardsParallel(tx, scanAccess{}, func(_ *storageShard, solo bool, acquisitionFailure any) {
+	done := tbl.iterateShardsParallel(tx, scanAccess{}, nil, func(_ *storageShard, solo bool, acquisitionFailure any) {
 		if acquisitionFailure != nil {
 			panic(acquisitionFailure)
 		}
@@ -567,7 +567,7 @@ func TestIterateShardsParallelMarksSynchronousMultiShardNonSolo(t *testing.T) {
 }
 
 func TestScanResultCollectorDoesNotInventEmptyShardResult(t *testing.T) {
-	collector := scanResultCollector{channelSize: 1}
+	var collector scanResultCollector
 	collector.finish(nil)
 	if result, ok := collector.next(); ok {
 		t.Fatalf("empty collector returned an invented result: %#v", result)
@@ -580,6 +580,93 @@ func TestScanResultCollectorDoesNotInventEmptyShardResult(t *testing.T) {
 	}
 	if result, ok := collector.next(); ok {
 		t.Fatalf("solo collector returned a second result: %#v", result)
+	}
+}
+
+func TestScanResultCollectorUsesPinnedDomainAfterTopologyGrowth(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(4)
+	defer runtime.GOMAXPROCS(previousProcs)
+	for _, workerLimit := range []int32{1, 4} {
+		t.Run(fmt.Sprintf("workers_%d", workerLimit), func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tscanresultgrowth")
+			var collector scanResultCollector
+			if got := len(tbl.activeTopology().shards); got != 1 {
+				t.Fatalf("initial shards = %d, want 1", got)
+			}
+			// Reproduce INSERT publishing writer lanes after the collector exists
+			// but before the scan registers its authoritative shard domain.
+			tbl.mu.Lock()
+			tbl.Shards = append(tbl.Shards, NewShard(tbl), NewShard(tbl))
+			topology := tbl.publishTopologyLocked()
+			tbl.mu.Unlock()
+			tx := NewTxContext(TxCursorStability)
+			tx.fanoutLimit.Store(workerLimit)
+			finished := make(chan struct{})
+			go func() {
+				done := tbl.iterateShardsParallel(tx, scanAccess{}, collector.prepare, func(_ *storageShard, solo bool, failure any) {
+					collector.send(solo, scanResult{outCount: 1, err: scanError{r: failure}})
+				})
+				collector.finish(done)
+				close(finished)
+			}()
+			select {
+			case <-finished:
+			case <-time.After(5 * time.Second):
+				t.Fatal("fanout completion blocked before result collection")
+			}
+			if capacity := cap(collector.parallel); capacity != 3 {
+				t.Fatalf("result capacity = %d, want registered domain 3", capacity)
+			}
+			results := 0
+			for result, ok := collector.next(); ok; result, ok = collector.next() {
+				if result.err.r != nil {
+					t.Fatalf("shard acquisition failed: %v", result.err.r)
+				}
+				results += int(result.outCount)
+			}
+			if results != 3 {
+				t.Fatalf("collected %d shard results, want 3", results)
+			}
+			if got := topology.operations.Load(); got != 0 {
+				t.Fatalf("completed fanout retained %d topology operations", got)
+			}
+			for _, shard := range topology.shards {
+				if shard.activeScanners.Load() != 0 || shard.cacheReaders.Load() != 0 {
+					t.Fatal("completed fanout retained shard ownership")
+				}
+			}
+		})
+	}
+}
+
+func TestIterateShardsParallelPreparationPanicReleasesDomain(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tscanpreparepanic")
+	tbl.mu.Lock()
+	tbl.Shards = append(tbl.Shards, NewShard(tbl))
+	topology := tbl.publishTopologyLocked()
+	tbl.mu.Unlock()
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		tbl.iterateShardsParallel(nil, scanAccess{}, func(shards int) {
+			if shards != 2 {
+				t.Fatalf("preparation domain = %d, want 2", shards)
+			}
+			panic("result preparation failed")
+		}, func(*storageShard, bool, any) {
+			t.Fatal("shard ran after result preparation failed")
+		})
+	}()
+	if failure != "result preparation failed" {
+		t.Fatalf("preparation failure = %v", failure)
+	}
+	if got := topology.operations.Load(); got != 0 {
+		t.Fatalf("failed preparation retained %d topology operations", got)
+	}
+	for _, shard := range topology.shards {
+		if shard.activeScanners.Load() != 0 || shard.cacheReaders.Load() != 0 {
+			t.Fatal("failed result preparation retained shard ownership")
+		}
 	}
 }
 
@@ -604,7 +691,7 @@ func TestIterateShardsParallelAutocommitUsesExplicitContext(t *testing.T) {
 	var missingSession atomic.Bool
 	var missingSessionState atomic.Bool
 	var missingQuerySeq atomic.Bool
-	done := tbl.iterateShardsParallel(tx, scanAccess{}, func(s *storageShard, solo bool, acquisitionFailure any) {
+	done := tbl.iterateShardsParallel(tx, scanAccess{}, nil, func(s *storageShard, solo bool, acquisitionFailure any) {
 		if acquisitionFailure != nil {
 			panic(acquisitionFailure)
 		}

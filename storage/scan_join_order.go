@@ -1238,11 +1238,13 @@ func collectScanJoinOrderShardStreams(currentTx *TxContext, input *scanJoinOrder
 		input.table.AddPartitioningScore([]string{bounds.boundaryColumn(i)})
 	}
 
-	values := make(chan *scanJoinOrderShardStream, input.table.shardResultBufferSize())
+	var values chan *scanJoinOrderShardStream
 	ss := SessionStateFromTx(currentTx)
 	var failureOnce sync.Once
 	var firstFailure any
-	done := input.table.iterateShardsParallel(currentTx, bounds, func(shard *storageShard, _ bool, acquisitionFailure any) {
+	done := input.table.iterateShardsParallel(currentTx, bounds, func(shards int) {
+		values = make(chan *scanJoinOrderShardStream, shards)
+	}, func(shard *storageShard, _ bool, acquisitionFailure any) {
 		defer func() {
 			if failure := recover(); failure != nil {
 				failureOnce.Do(func() { firstFailure = failure })

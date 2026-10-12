@@ -1248,15 +1248,19 @@ type scanResult struct {
 }
 
 // scanResultCollector keeps the one-shard path synchronous. Parallel scans
-// lazily allocate their channel on the first non-solo callback; a scan whose
+// size their channel from the registered fanout domain; a scan whose
 // selected topology contains one shard writes its sole result directly.
 type scanResultCollector struct {
-	channelSize int
-	once        sync.Once
-	parallel    chan scanResult
-	solo        scanResult
-	soloSet     bool
-	soloRead    bool
+	parallel chan scanResult
+	solo     scanResult
+	soloSet  bool
+	soloRead bool
+}
+
+func (c *scanResultCollector) prepare(shards int) {
+	if shards > 1 {
+		c.parallel = make(chan scanResult, shards)
+	}
 }
 
 func (c *scanResultCollector) send(solo bool, result scanResult) {
@@ -1265,9 +1269,6 @@ func (c *scanResultCollector) send(solo bool, result scanResult) {
 		c.soloSet = true
 		return
 	}
-	c.once.Do(func() {
-		c.parallel = make(chan scanResult, c.channelSize)
-	})
 	c.parallel <- result
 }
 
@@ -1455,9 +1456,9 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchem
 		return found
 	}
 
-	values := scanResultCollector{channelSize: t.shardResultBufferSize()}
+	var values scanResultCollector
 	var found atomic.Bool
-	done := t.iterateShardsParallel(currentTx, executionAccess, func(s *storageShard, solo bool, acquisitionFailure any) {
+	done := t.iterateShardsParallel(currentTx, executionAccess, values.prepare, func(s *storageShard, solo bool, acquisitionFailure any) {
 		if found.Load() {
 			values.send(solo, scanResult{})
 			return
@@ -1658,8 +1659,8 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 			}
 		}
 	} else {
-		values := scanResultCollector{channelSize: t.shardResultBufferSize()}
-		done := t.iterateShardsParallel(currentTx, executionAccess, func(s *storageShard, solo bool, acquisitionFailure any) {
+		var values scanResultCollector
+		done := t.iterateShardsParallel(currentTx, executionAccess, values.prepare, func(s *storageShard, solo bool, acquisitionFailure any) {
 			defer func() {
 				if r := recover(); r != nil {
 					values.send(solo, scanResult{err: scanError{r, string(debug.Stack())}})
