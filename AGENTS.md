@@ -109,6 +109,11 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- `uniqueKey.ConstraintName` is persisted as optional `constraint_name` in the
+  existing key metadata. It is immutable after publication; CREATE/DROP use the
+  existing schema and table DDL locks. SHOW reads it under the existing catalog
+  lock. It does not participate in scans or row-level uniqueness checks.
+
 - `uniqueKey.NullsNotDistinct` is persisted as `nulls_not_distinct` in existing key
   metadata. It is immutable after key publication and follows the existing
   table DDL lock and uniqueness-lock protocol; it adds no scan-row state.

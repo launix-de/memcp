@@ -1,0 +1,95 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  isolated: true
+  description: Declaration names persist on native keys independently of their IDs
+setup:
+  - sql: DROP TABLE IF EXISTS declared_key
+  - sql: DROP TABLE IF EXISTS inline_declared_key
+  - sql: DROP TABLE IF EXISTS added_declared_key
+  - sql: DROP TABLE IF EXISTS conflicting_declared_key
+  - sql: CREATE TABLE declared_key (id INT, tenant INT, CONSTRAINT [Declared]]PK] PRIMARY KEY NONCLUSTERED (id DESC,tenant))
+  - sql: CREATE TABLE inline_declared_key (id INT CONSTRAINT inline_pk PRIMARY KEY, code INT CONSTRAINT inline_uq UNIQUE)
+  - sql: CREATE TABLE added_declared_key (id INT NOT NULL)
+test_cases:
+  - name: Primary key retains its native ID and public declaration name
+    scm: |
+      (begin
+        (define meta ((show "memcp-tests" "declared_key" true) "meta"))
+        (define key (car (meta "Unique")))
+        (if (and (equal? (key "Id") "PRIMARY") (equal? (key "constraint_name") "Declared]PK"))
+          true (error "native key identity or declaration name changed")))
+    expect: {}
+  - name: Primary columns use native NOT NULL options
+    sql: INSERT INTO declared_key VALUES (NULL,1)
+    expect: {error: true}
+  - name: Composite primary key applies NOT NULL to every component
+    sql: INSERT INTO declared_key VALUES (1,NULL)
+    expect: {error: true}
+  - name: Insert into the named native primary key
+    sql: INSERT INTO declared_key VALUES (1,1)
+    expect: {affected_rows: 1}
+  - name: Named native primary key enforces uniqueness
+    sql: INSERT INTO declared_key VALUES (1,1)
+    expect: {error: true}
+  - name: Key column catalog exposes the public declaration name
+    syntax: sql
+    sql: SELECT constraint_name,column_name FROM information_schema.key_column_usage WHERE table_schema='memcp-tests' AND table_name='declared_key' ORDER BY ordinal_position
+    expect: {rows: 2, data: [{constraint_name: 'Declared]PK', column_name: id}, {constraint_name: 'Declared]PK', column_name: tenant}]}
+  - name: Inline declarations use the same native key metadata
+    syntax: sql
+    sql: SELECT constraint_name,column_name FROM information_schema.key_column_usage WHERE table_schema='memcp-tests' AND table_name='inline_declared_key' ORDER BY column_name
+    expect: {rows: 2, data: [{constraint_name: inline_uq, column_name: code}, {constraint_name: inline_pk, column_name: id}]}
+  - name: Add a named primary key to existing non-null columns
+    sql: ALTER TABLE added_declared_key ADD CONSTRAINT added_pk PRIMARY KEY CLUSTERED (id)
+    expect: {rows: 0}
+  - name: Native createkey accepts a public name through its options
+    scm: '(if (createkey (table "memcp-tests" "added_declared_key") "other_key" true (list "id") nil (list "constraint_name" "other_declared_name")) true (error "native key creation failed"))'
+    expect: {}
+  - name: Duplicate public declaration names are rejected before publication
+    sql: CREATE TABLE conflicting_declared_key (id INT CONSTRAINT alias PRIMARY KEY, value INT CONSTRAINT ALIAS UNIQUE)
+    expect: {error: true}
+  - name: A rejected duplicate declaration publishes no table
+    sql: SELECT id FROM conflicting_declared_key
+    expect: {error: true}
+  - name: Native createkey refuses an alias already used by another key
+    scm: '(if (createkey (table "memcp-tests" "added_declared_key") "conflicting_key" true (list "id") nil (list "constraint_name" "ADDED_PK")) (error "ambiguous alias was published") true)'
+    expect: {}
+  - name: Restart preserves native schema and key declarations
+    action: restart
+  - name: Recovered catalog retains the declared primary name
+    syntax: sql
+    sql: SELECT constraint_name,column_name FROM information_schema.key_column_usage WHERE table_schema='memcp-tests' AND table_name='declared_key' ORDER BY ordinal_position
+    expect: {rows: 2, data: [{constraint_name: 'Declared]PK', column_name: id}, {constraint_name: 'Declared]PK', column_name: tenant}]}
+  - name: Recovered named key still rejects duplicate rows
+    sql: INSERT INTO declared_key VALUES (1,1)
+    expect: {error: true}
+  - name: Drop uses the public name with existing case insensitive resolution
+    sql: ALTER TABLE declared_key DROP CONSTRAINT [declared]]pk]
+    expect: {rows: 0}
+  - name: Dropped declaration disappears from the native key catalog
+    syntax: sql
+    sql: SELECT constraint_name FROM information_schema.key_column_usage WHERE table_schema='memcp-tests' AND table_name='declared_key'
+    expect: {rows: 0}
+  - name: Dropping the named key permits duplicate tuples
+    sql: INSERT INTO declared_key VALUES (1,1)
+    expect: {affected_rows: 1}
+  - name: Dropping a named key retains independently declared column nullability
+    sql: INSERT INTO declared_key VALUES (NULL,1)
+    expect: {error: true}
+  - name: Legacy internal key ID remains usable for dropping
+    sql: ALTER TABLE inline_declared_key DROP CONSTRAINT PRIMARY
+    expect: {rows: 0}
+  - name: Inline unique declaration resolves through the same drop operator
+    sql: ALTER TABLE inline_declared_key DROP CONSTRAINT INLINE_UQ
+    expect: {rows: 0}
+  - name: A native option name can also be dropped after restart
+    scm: '(if (dropkey (table "memcp-tests" "added_declared_key") "OTHER_DECLARED_NAME") true (error "native public name did not survive restart"))'
+    expect: {}
+cleanup:
+  - sql: DROP TABLE IF EXISTS conflicting_declared_key
+  - sql: DROP TABLE IF EXISTS added_declared_key
+  - sql: DROP TABLE IF EXISTS inline_declared_key
+  - sql: DROP TABLE IF EXISTS declared_key

@@ -18,7 +18,6 @@ test_cases:
     (ID,tenant))
   name: 'Fixture setup 004: CREATE TABLE dbo.key_semantics (Id INT, Tenant INT, Title NVARCHAR(20), CONSTRAINT pk_semantics
     PRIM'
-  noncritical: true
 - name: Composite primary key columns are implicitly non-nullable
   sql: SELECT name,is_nullable FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.key_semantics') ORDER BY name
   expect:
@@ -41,7 +40,6 @@ test_cases:
     error: true
 - name: Valid composite key can be inserted
   sql: INSERT INTO dbo.key_semantics (Id,Tenant,Title) VALUES (1,1,N'good')
-  noncritical: true
 - name: Duplicate composite key is rejected
   sql: INSERT INTO dbo.key_semantics (Id,Tenant,Title) VALUES (1,1,N'duplicate')
   expect:
@@ -64,7 +62,6 @@ test_cases:
   sql: CREATE TABLE dbo.invalid_key_semantics (Id INT NULL PRIMARY KEY)
   expect:
     error: true
-  noncritical: true
 - name: Explicit NULL composite primary key declaration fails
   sql: CREATE TABLE dbo.invalid_key_semantics (Id INT NULL, PRIMARY KEY (Id))
   expect:
@@ -92,7 +89,6 @@ test_cases:
     - Id: 1
       Tenant: 1
       Title: good
-  noncritical: true
 - name: Create a view with mixed-case declared spelling
   sql: CREATE VIEW dbo.MixedView AS SELECT Id AS MixedId,Title AS MixedTitle FROM dbo.key_semantics
 - name: Lowercase view spelling resolves its mixed-case columns
@@ -138,6 +134,9 @@ test_cases:
 - name: Drop resolves the mixed-case view spelling
   sql: DROP VIEW dbo.mixedview
   noncritical: true
+# Keep the visibility check independent of unsupported folded-name DROP.
+- name: Drop the declared view spelling before checking visibility
+  sql: DROP VIEW dbo.MixedView
 - name: Dropped views do not remain visible through another spelling
   sql: SELECT mixedid FROM dbo.MixedView
   expect:

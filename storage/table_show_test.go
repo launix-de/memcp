@@ -497,3 +497,27 @@ func TestUniqueNullPolicySchemaRoundTrip(t *testing.T) {
 		t.Fatal("legacy metadata must retain distinct NULL values")
 	}
 }
+
+func TestUniqueConstraintNameSchemaRoundTrip(t *testing.T) {
+	tbl := showColumnsTestTable(1)
+	tbl.Unique[0].ConstraintName = "declared_pk"
+	encoded, err := json.Marshal(tbl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored table
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	key := restored.Unique[0]
+	if key.Id != "PRIMARY" || key.ConstraintName != "declared_pk" || !key.matchesName("DECLARED_PK") || !key.matchesName("primary") || key.matchesName("other") {
+		t.Fatalf("restored key lost its native ID or declaration name: %+v", key)
+	}
+	var legacy uniqueKey
+	if err := json.Unmarshal([]byte(`{"Id":"PRIMARY","Cols":["column_0"]}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.ConstraintName != "" || !legacy.matchesName("PRIMARY") || legacy.matchesName("") {
+		t.Fatal("legacy keys must retain their original name resolution")
+	}
+}

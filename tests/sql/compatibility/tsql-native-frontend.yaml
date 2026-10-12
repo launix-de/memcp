@@ -428,7 +428,6 @@ test_cases:
     sql: CREATE TABLE tsql_setup_named_key (id INT,CONSTRAINT setup_pk PRIMARY KEY CLUSTERED (id ASC))
     expect:
       rows: 0
-    noncritical: true
   - name: Application procedure can declare an ordinary counter update
     sql: CREATE PROCEDURE tsql_setup_advance @tenant INT AS UPDATE tsql_setup_columns SET revision=revision+1 WHERE
       tenant=@tenant

@@ -379,7 +379,28 @@ func (m *ShardMode) UnmarshalJSON(data []byte) error {
 type uniqueKey struct {
 	Id               string
 	Cols             []string
-	NullsNotDistinct bool `json:"nulls_not_distinct,omitempty"`
+	ConstraintName   string `json:"constraint_name,omitempty"`
+	NullsNotDistinct bool   `json:"nulls_not_distinct,omitempty"`
+}
+
+// matchesName resolves a declaration name without changing the native key ID.
+func (key uniqueKey) matchesName(name string) bool {
+	return strings.EqualFold(key.Id, name) || (key.ConstraintName != "" && strings.EqualFold(key.ConstraintName, name))
+}
+
+// validateUniqueConstraintNames rejects ambiguous public aliases before DDL
+// publication. Unnamed legacy keys retain their existing ID behavior.
+func validateUniqueConstraintNames(keys []uniqueKey) {
+	for i, key := range keys {
+		if key.ConstraintName == "" {
+			continue
+		}
+		for j, other := range keys {
+			if i != j && other.matchesName(key.ConstraintName) {
+				panic("duplicate key declaration name: " + key.ConstraintName)
+			}
+		}
+	}
 }
 
 type uniqueValidationRow struct {
@@ -2520,6 +2541,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 
 	var c column
 	var uniqueKeys []uniqueKey
+	constraintName := ""
 	nullsNotDistinct := false
 	fillExisting := true
 	c.Name = name
@@ -2536,6 +2558,8 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		case "unique":
 			// append unique key
 			uniqueKeys = append(uniqueKeys, uniqueKey{Id: name, Cols: []string{name}})
+		case "constraint_name":
+			constraintName = scm.String(extrainfo[i+1])
 		case "nulls_not_distinct":
 			nullsNotDistinct = scm.ToBool(extrainfo[i+1])
 		case "fill_existing":
@@ -2566,6 +2590,10 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 	}
 	for i := range uniqueKeys {
 		uniqueKeys[i].NullsNotDistinct = nullsNotDistinct
+		uniqueKeys[i].ConstraintName = constraintName
+	}
+	if len(uniqueKeys) != 0 {
+		validateUniqueConstraintNames(append(append([]uniqueKey(nil), t.Unique...), uniqueKeys...))
 	}
 	c.UpdateSanitizer()
 	if !initializeExisting && !c.IsTemp && c.hasDefault() {

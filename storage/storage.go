@@ -2521,11 +2521,11 @@ func Init(en scm.Env) {
 				switch head {
 				case "unique":
 					cols := scmerSliceToStrings(mustScmerSlice(def[2], "unique columns"))
-					nullsNotDistinct := false
+					key := uniqueKey{Id: scm.String(def[1]), Cols: cols}
 					if len(def) > 3 {
-						nullsNotDistinct = uniqueNullsNotDistinct(def[3])
+						key = uniqueKeyOptions(key, def[3])
 					}
-					newTable.Unique = append(newTable.Unique, uniqueKey{Id: scm.String(def[1]), Cols: cols, NullsNotDistinct: nullsNotDistinct})
+					newTable.Unique = append(newTable.Unique, key)
 				case "foreign":
 					cols1 := scmerSliceToStrings(mustScmerSlice(def[2], "foreign cols1"))
 					cols2 := scmerSliceToStrings(mustScmerSlice(def[4], "foreign cols2"))
@@ -2562,6 +2562,7 @@ func Init(en scm.Env) {
 					panic("unknown column definition: " + head)
 				}
 			}
+			validateUniqueConstraintNames(newTable.Unique)
 			newTable.publishShowColumnsSnapshot()
 
 			db.schemalock.Lock()
@@ -2798,7 +2799,7 @@ func Init(en scm.Env) {
 				{"access", "uniq_user_db", []string{"username", "database"}},
 				{"views", "uniq_database_name", []string{"database", "name"}},
 			} {
-				createTableKey(GetDatabase("system").GetTable(key.table), key.name, key.cols, false, nil)
+				createTableKey(GetDatabase("system").GetTable(key.table), uniqueKey{Id: key.name, Cols: key.cols}, nil)
 			}
 			return scm.NewBool(true)
 		},
@@ -2817,11 +2818,11 @@ func Init(en scm.Env) {
 				return scm.NewBool(true)
 			}
 			requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
-			nullsNotDistinct := false
+			key := uniqueKey{Id: scm.String(a[1]), Cols: scmerSliceToStrings(mustScmerSlice(a[3], "unique columns"))}
 			if len(a) > 5 {
-				nullsNotDistinct = uniqueNullsNotDistinct(a[5])
+				key = uniqueKeyOptions(key, a[5])
 			}
-			return scm.NewBool(createTableKey(t, scm.String(a[1]), scmerSliceToStrings(mustScmerSlice(a[3], "unique columns")), nullsNotDistinct, currentTx))
+			return scm.NewBool(createTableKey(t, key, currentTx))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a new key on a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
@@ -2830,7 +2831,7 @@ func Init(en scm.Env) {
 				{Kind: "bool", Label: "unique", Description: "whether the key is unique"},
 				{Kind: "list", Label: "columns", Description: "list of columns to include"},
 				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
-				{Kind: "list|assoc", Label: "options", Optional: true, Keys: map[string]*scm.TypeDescriptor{"nulls_not_distinct": {Kind: "bool", Description: "whether NULL values compare equal in this unique key"}}},
+				{Kind: "list|assoc", Label: "options", Optional: true, Keys: map[string]*scm.TypeDescriptor{"nulls_not_distinct": {Kind: "bool", Description: "whether NULL values compare equal in this unique key"}, "constraint_name": {Kind: "string", Description: "public declaration name, independent of the native key ID"}}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -2855,7 +2856,7 @@ func Init(en scm.Env) {
 			t.ddlMu.Lock()
 			defer t.ddlMu.Unlock()
 			for i, key := range t.Unique {
-				if strings.EqualFold(key.Id, name) {
+				if key.matchesName(name) {
 					t.Unique = append(t.Unique[:i], t.Unique[i+1:]...)
 					t.publishShowColumnsSnapshot()
 					t.schema.saveLockedAndUnlock(t.schemaSaveMode())
@@ -5349,6 +5350,7 @@ func showBuildMeta(db *database, t *table) scm.Scmer {
 		uniques[i] = scm.NewSlice([]scm.Scmer{
 			scm.NewString("Id"), scm.NewString(uk.Id),
 			scm.NewString("Cols"), showStringSlice(uk.Cols),
+			scm.NewString("constraint_name"), scm.NewString(uk.ConstraintName),
 			scm.NewString("nulls_not_distinct"), scm.NewBool(uk.NullsNotDistinct),
 		})
 	}
@@ -5475,28 +5477,31 @@ func showBuildShardRow(t *table, i int, s *storageShard) scm.Scmer {
 	})
 }
 
-// uniqueNullsNotDistinct reads the generic per-key declaration options.
-func uniqueNullsNotDistinct(options scm.Scmer) bool {
+// uniqueKeyOptions reads generic declaration options into native key metadata.
+func uniqueKeyOptions(key uniqueKey, options scm.Scmer) uniqueKey {
 	if options.IsNil() {
-		return false
+		return key
 	}
 	values := mustScmerSlice(options, "unique key options")
 	if len(values)%2 != 0 {
 		panic("unique key options must contain key/value pairs")
 	}
-	result := false
 	for i := 0; i < len(values); i += 2 {
-		if scm.String(values[i]) != "nulls_not_distinct" {
+		switch scm.String(values[i]) {
+		case "nulls_not_distinct":
+			key.NullsNotDistinct = scm.ToBool(values[i+1])
+		case "constraint_name":
+			key.ConstraintName = scm.String(values[i+1])
+		default:
 			panic("unknown unique key option: " + scm.String(values[i]))
 		}
-		result = scm.ToBool(values[i+1])
 	}
-	return result
+	return key
 }
 
 // createTableKey publishes validated uniqueness metadata. Callers enforce user
 // maintenance policy; the fixed bootstrap key list is initialized before serving.
-func createTableKey(t *table, name string, cols []string, nullsNotDistinct bool, currentTx *TxContext) bool {
+func createTableKey(t *table, key uniqueKey, currentTx *TxContext) bool {
 	// SQL DDL runs with a query session. Its exclusive table lock closes the
 	// race with writers which selected the no-UNIQUE insert path before the
 	// metadata was published. Boot-time catalog creation is single-threaded
@@ -5513,17 +5518,17 @@ func createTableKey(t *table, name string, cols []string, nullsNotDistinct bool,
 		t.ddlMu.Lock()
 		defer t.ddlMu.Unlock()
 		for _, u := range t.Unique {
-			if strings.EqualFold(u.Id, name) {
+			if u.matchesName(key.Id) || (key.ConstraintName != "" && u.matchesName(key.ConstraintName)) {
 				return true, false
 			}
 		}
-		return false, t.hasDuplicateUniqueValues(cols, nullsNotDistinct, currentTx)
+		return false, t.hasDuplicateUniqueValues(key.Cols, key.NullsNotDistinct, currentTx)
 	}()
 	if alreadyExists {
 		return false
 	}
 	if hasDuplicates {
-		panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s prevents unique key %s", t.Name, name))
+		panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s prevents unique key %s", t.Name, key.Id))
 	}
 
 	// Publication follows the documented database -> table DDL lock order.
@@ -5533,12 +5538,12 @@ func createTableKey(t *table, name string, cols []string, nullsNotDistinct bool,
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
 	for _, u := range t.Unique {
-		if strings.EqualFold(u.Id, name) {
+		if u.matchesName(key.Id) || (key.ConstraintName != "" && u.matchesName(key.ConstraintName)) {
 			t.schema.schemalock.Unlock()
 			return false
 		}
 	}
-	t.Unique = append(t.Unique, uniqueKey{Id: name, Cols: cols, NullsNotDistinct: nullsNotDistinct})
+	t.Unique = append(t.Unique, key)
 	t.publishShowColumnsSnapshot()
 	t.schema.saveLockedAndUnlock(t.schemaSaveMode())
 	return true
