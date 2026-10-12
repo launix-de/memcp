@@ -523,16 +523,18 @@ func (db *database) getSaveCond() *sync.Cond {
 	return db.saveCond
 }
 
-func (db *database) commitSchemaSnapshot(jsonbytes []byte, durable bool) {
-	// Serialize publications without holding schemalock. Coalescing may skip an
-	// intermediate in-memory snapshot, but every backend call still publishes a
-	// complete generation and every waiter observes its success or panic.
+func (db *database) commitSchemaSnapshot(jsonbytes []byte, durable bool, releaseSchema func()) {
+	// The caller still owns schemalock from snapshot capture. Register its
+	// queue position before releasing that ownership: a later DDL snapshot
+	// must never be followed on disk by an older rebuild snapshot. Waiting
+	// and backend I/O continue without schemalock, as before.
 	db.saveMu.Lock()
 	cond := db.getSaveCond()
 	db.saveRequested++
 	seq := db.saveRequested
 	db.savePending = jsonbytes
 	db.savePendingSync = db.savePendingSync || durable
+	releaseSchema()
 	if db.savePanic != nil && !db.saveInFlight {
 		db.savePanic = nil
 	}
@@ -593,7 +595,6 @@ func (db *database) save() {
 	// Buffered mutations after this snapshot must leave the catalog dirty.
 	// They need the exclusive schema lock and therefore cannot race this store.
 	db.schemaDirty.Store(false)
-	db.schemalock.RUnlock()
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -601,7 +602,7 @@ func (db *database) save() {
 				panic(r)
 			}
 		}()
-		db.commitSchemaSnapshot(jsonbytes, true)
+		db.commitSchemaSnapshot(jsonbytes, true, db.schemalock.RUnlock)
 	}()
 	// shards are written while rebuild
 }
@@ -623,14 +624,13 @@ func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
 	// Clear while the snapshot is protected. A later buffered mutation takes
 	// schemalock exclusively and sets dirty again after this generation.
 	db.schemaDirty.Store(false)
-	db.schemalock.Unlock()
 	defer func() {
 		if r := recover(); r != nil {
 			db.schemaDirty.Store(true)
 			panic(r)
 		}
 	}()
-	db.commitSchemaSnapshot(jsonbytes, mode == schemaSaveFsync)
+	db.commitSchemaSnapshot(jsonbytes, mode == schemaSaveFsync, db.schemalock.Unlock)
 }
 
 // ensureLoaded loads schema.json into the database struct exactly once.

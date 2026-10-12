@@ -231,6 +231,87 @@ func TestAddedDefaultWaitsForExistingRebuildPublication(t *testing.T) {
 	assertInitializedColumn(t, reloadTableFromPersistence(t, "taddeddefaultrebuild", persistence), "flag", scm.NewInt(8), 50)
 }
 
+func TestSchemaQueueRetainsCaptureOwnershipAndPublishesNewerDDL(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "tschemaqueueorder", 50)
+	db := tbl.schema
+	blocking := &blockingSchemaWritePersistence{
+		PersistenceEngine: persistence, entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	db.persistence = blocking
+	db.schemalock.RLock()
+	older, err := json.Marshal(db)
+	if err != nil {
+		db.schemalock.RUnlock()
+		t.Fatal(err)
+	}
+	db.saveMu.Lock()
+	queueLocked, backendReleased := true, false
+	published := make(chan any, 1)
+	added := make(chan any, 1)
+	started := make(chan struct{})
+	released := make(chan struct{})
+	defer func() {
+		if queueLocked {
+			db.saveMu.Unlock()
+		}
+		if !backendReleased {
+			close(blocking.release)
+		}
+	}()
+	go func() {
+		defer func() { published <- recover() }()
+		close(started)
+		db.commitSchemaSnapshot(older, true, func() {
+			db.schemalock.RUnlock()
+			close(released)
+		})
+	}()
+	<-started
+	select {
+	case <-released:
+		t.Error("captured schema was released before its queue registration")
+	case <-time.After(20 * time.Millisecond):
+	}
+	db.saveMu.Unlock()
+	queueLocked = false
+	<-blocking.entered
+	go func() {
+		defer func() { added <- recover() }()
+		tbl.CreateColumn("flag", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(8)})
+	}()
+	// The newer DDL must register and release schema ownership while the
+	// older backend write is blocked. Its publication still waits for I/O.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		found := false
+		for _, col := range tbl.columnDeclarations() {
+			found = found || col.Name == "flag"
+		}
+		if found && db.schemalock.TryRLock() {
+			db.schemalock.RUnlock()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Error("newer DDL could not register during blocked persistence")
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case failure := <-added:
+		t.Errorf("DDL returned before its schema became durable: %v", failure)
+		added <- failure
+	default:
+	}
+	close(blocking.release)
+	backendReleased = true
+	olderFailure, newerFailure := <-published, <-added
+	if olderFailure != nil || newerFailure != nil {
+		t.Fatalf("publication failed: older=%v newer=%v", olderFailure, newerFailure)
+	}
+	assertInitializedColumn(t, reloadTableFromPersistence(t, "tschemaqueueorder", persistence), "flag", scm.NewInt(8), 50)
+}
+
 func TestRejectedAddedDefaultLeavesSchemaAndRowsUnchanged(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "taddeddefaultreject", 2)
 	for _, options := range [][]scm.Scmer{
