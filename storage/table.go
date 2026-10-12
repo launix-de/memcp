@@ -3429,25 +3429,6 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 		if t.maintenanceKind == 2 && t.ShardMode == ShardModePartition && t.Shards != nil {
 			shardlist = t.Shards
 		}
-		// Retain each generation once for this unique-check batch, outside the
-		// row/key probe loops. Collision callbacks may panic or recursively scan;
-		// neither path may leak a lease or let eviction detach prepared columns.
-		var readAccessBuffer [8]ReadAccess
-		readAccesses := readAccessBuffer[:]
-		if len(shardlist) > len(readAccesses) {
-			readAccesses = make([]ReadAccess, len(shardlist))
-		}
-		readAccesses = readAccesses[:len(shardlist)]
-		defer func() {
-			for _, access := range readAccesses {
-				access.Release()
-			}
-		}()
-		for i, shard := range shardlist {
-			if shard != nil {
-				readAccesses[i] = shard.acquireReadForScan(currentTx)
-			}
-		}
 		allowPruning := false // if we can prune the shardlist
 		// These arrays are indexed by partition dimension, not unique-key column.
 		pruningMap := make([]int, len(t.PDimensions))
@@ -3467,6 +3448,63 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 					// a column different from the unique key is part of our partitioning schema -> we cannot prune (TODO: array pruning)
 					allowPruning = false // all unique columns must be present in the partitioning schema, otherwise a unique collision might hide in pruned shards
 				}
+			}
+		}
+		// Compute the existing probe domain before loading any shard. NULLs
+		// skipped by this key need no read access, and partition-local keys
+		// retain only the shards reached by this batch.
+		prepareKey := func(row []scm.Scmer) bool {
+			needsProbe := true
+			for i, colidx := range keyIdx {
+				if colidx < 0 {
+					key[i] = scm.NewNil()
+				} else {
+					key[i] = row[colidx]
+				}
+				if !compareNulls && key[i].IsNil() {
+					needsProbe = false
+				}
+			}
+			return needsProbe
+		}
+		var neededBuffer [8]bool
+		needed := neededBuffer[:]
+		if len(shardlist) > len(needed) {
+			needed = make([]bool, len(shardlist))
+		}
+		needed = needed[:len(shardlist)]
+		for _, row := range values {
+			if !prepareKey(row) {
+				continue
+			}
+			if !allowPruning {
+				for i, shard := range shardlist {
+					needed[i] = shard != nil
+				}
+				break
+			}
+			for j, xidx := range pruningMap {
+				pruningVals[j] = key[xidx]
+			}
+			needed[computeShardIndex(t.PDimensions, pruningVals)] = true
+		}
+		// Retain each generation once for this unique-check batch, outside the
+		// row/key probe loops. Collision callbacks may panic or recursively scan;
+		// neither path may leak a lease or let eviction detach prepared columns.
+		var readAccessBuffer [8]ReadAccess
+		readAccesses := readAccessBuffer[:]
+		if len(shardlist) > len(readAccesses) {
+			readAccesses = make([]ReadAccess, len(shardlist))
+		}
+		readAccesses = readAccesses[:len(shardlist)]
+		defer func() {
+			for _, access := range readAccesses {
+				access.Release()
+			}
+		}()
+		for i, shard := range shardlist {
+			if needed[i] {
+				readAccesses[i] = shard.acquireReadForScan(currentTx)
 			}
 		}
 		// TODO: only shard-local lock if allowPruning
@@ -3500,17 +3538,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 		last_j := 0
 		for j, row := range values {
 			shardlist2 := shardlist
-			skipUniqueCheck := false
-			for i, colidx := range keyIdx {
-				if colidx < 0 {
-					key[i] = scm.NewNil()
-				} else {
-					key[i] = row[colidx]
-				}
-				if !compareNulls && key[i].IsNil() {
-					skipUniqueCheck = true
-				}
-			}
+			skipUniqueCheck := !prepareKey(row)
 			if skipUniqueCheck {
 				goto nextrow
 			}

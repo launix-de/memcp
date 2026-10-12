@@ -2984,3 +2984,68 @@ func TestGroupPartitionHintsShareWeightedRowBudget(t *testing.T) {
 		})
 	}
 }
+
+func TestNullDistinctUniqueSkipsColdShard(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "treviewuniquecold", 2)
+	tbl.Unique = []uniqueKey{{Id: "payload_unique", Cols: []string{"payload"}}}
+	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+		t.Fatal(result)
+	}
+	shard := tbl.ActiveShards()[0]
+	var freed [numEvictableTypes]int64
+	if !shardCleanup(shard, &freed) || shard.state() != COLD {
+		t.Fatal("fixture did not become cold")
+	}
+	accepted := 0
+	tbl.ProcessUniqueCollision([]string{"payload"}, [][]scm.Scmer{{scm.NewNil()}}, false,
+		func(rows [][]scm.Scmer) { accepted += len(rows) }, nil,
+		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision %s", key) }, 0, nil)
+	if accepted != 1 {
+		t.Fatalf("accepted=%d", accepted)
+	}
+	if shard.state() != COLD {
+		t.Fatalf("NULL-distinct unique batch loaded an unneeded shard: state=%d", shard.state())
+	}
+}
+
+func TestPartitionUniqueKeepsUnrelatedShardsCold(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tuniquepartitioncold", 0)
+	tbl.mu.Lock()
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	tbl.ShardMode = ShardModePartition
+	tbl.PDimensions = []shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(10)}}}
+	tbl.PShards = []*storageShard{NewShard(tbl), NewShard(tbl)}
+	tbl.publishTopologyLocked()
+	tbl.mu.Unlock()
+	tbl.schema.save()
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewString("low")}, {scm.NewInt(11), scm.NewString("high")},
+	}, nil, scm.NewNil(), false, nil)
+	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+		t.Fatal(result)
+	}
+	shards := tbl.ActiveShards()
+	var freed [numEvictableTypes]int64
+	for _, shard := range shards {
+		if !shardCleanup(shard, &freed) || shard.state() != COLD {
+			t.Fatal("partition fixture did not become cold")
+		}
+	}
+	id := scm.NewInt(15)
+	target := computeShardIndex(tbl.PDimensions, []scm.Scmer{id})
+	accepted := 0
+	tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{id}}, false,
+		func(rows [][]scm.Scmer) { accepted += len(rows) }, nil,
+		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision %s", key) }, 0, nil)
+	if accepted != 1 || shards[target].state() == COLD {
+		t.Fatal("partition-local unique probe did not inspect its target")
+	}
+	for i, shard := range shards {
+		if i != target && shard.state() != COLD {
+			t.Fatalf("partition-local unique probe loaded unrelated shard %d", i)
+		}
+		if shard.cacheReaders.Load() != 0 {
+			t.Fatalf("unique probe leaked a read lease on shard %d", i)
+		}
+	}
+}
