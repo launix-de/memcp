@@ -3499,7 +3499,7 @@ ordinary probe path until RecMap carries explicit equality relations. */
 record identity. Keep its storage acquisition out of the callback; the existing
 mapper handles source-generation translation without changing logical stages. */
 (define nested_scalar_recmap_call_expr (lambda (candidate)
-	(if (nil? (nested_scalar_recmap_window candidate))
+	(if (not (nested_scalar_recmap_prepared_window? candidate))
 		(list recmap_call_callback_symbol
 			(nested_scalar_recmap_var candidate)
 			(quoted_runtime_list (nth candidate 13))
@@ -3629,6 +3629,26 @@ The candidate's extra slot is private to physical lowering, never logical IR. */
 (define nested_scalar_recmap_window (lambda (candidate)
 	(if (> (count candidate) 15) (nth candidate 15) nil)))
 
+/* Eager payload projection is valid only when the containing expressions
+always demand their inputs. Do not descend into a scalar probe's stage data:
+its own projection runs only after the native selected-row mapping. A guarded
+outer CASE/short-circuit expression must keep its existing row-bound probe. */
+(define recmap_projection_strict? (lambda (expr)
+	(match expr
+		(cons head _tail)
+		(if (and (symbol? head) (equal? (string head) "scalar_first_probe")) true
+			(and (not (and (symbol? head) (contains? '("if" "and" "or" "coalesce" "coalesceNil"
+				"match" "match_mut" "lambda" "quote" "try" "eval" "parser" "outer"
+				"begin" "begin_mut" "!begin" "define" "set" "setN" "parallel") (string head))))
+				(reduce expr (lambda (strict item)
+					(and strict (recmap_projection_strict? item))) true)))
+		_ true)))
+
+(define nested_scalar_recmap_prepared_window? (lambda (candidate)
+	(begin
+		(define window (nested_scalar_recmap_window candidate))
+		(and (not (nil? window)) (nth window 5)))))
+
 (define nested_scalar_recmap_window_candidate (lambda (stages block)
 	(begin
 		(define sources (qb_sources block))
@@ -3659,7 +3679,8 @@ The candidate's extra slot is private to physical lowering, never logical IR. */
 					(merge (list candidate (list (list sortcols
 						(order_relations_for_source src order_items)
 						(coalesceNil (qb_offset block) 0) (qb_limit block)
-						limit_rows))))))))))
+						limit_rows (recmap_projection_strict?
+							(list (qb_fields block) (qb_hidden block)))))))))))))
 
 (define nested_scalar_recmap_window_source_expr (lambda (candidate)
 	(begin
@@ -3881,11 +3902,11 @@ The candidate's extra slot is private to physical lowering, never logical IR. */
 				(list (quote lambda) (list left_var)
 					(list (quote recmap_compose) left_var right_expr))
 				left_expr)))
-		/* Only the exact source window is already selected before this binding.
-		Keep other paths unchanged: their source domain can still precede root
-		filtering or LIMIT. This window's native mapper retains once per target
-		shard; row probes only read immutable query-local values. */
-		(if (nil? (nested_scalar_recmap_window candidate)) map_binding
+		/* Only an exact source window with unconditional payload demand is safe
+		to project here. Other paths can still precede root filtering/LIMIT or
+		contain inactivated CASE branches. The native mapper retains once per
+		target shard; row probes only read immutable query-local values. */
+		(if (not (nested_scalar_recmap_prepared_window? candidate)) map_binding
 			(list (quote !begin) map_binding
 				(list (quote define) (symbol (concat (string (nested_scalar_recmap_var candidate)) "_value"))
 					(list (quote recmap_value_mapper) (physical_query_tx_symbol)

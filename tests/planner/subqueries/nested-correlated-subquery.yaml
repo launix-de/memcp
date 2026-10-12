@@ -373,6 +373,26 @@ test_cases:
     expect: {error: true, contains: "regexp_replace: invalid pattern"}
     cleanup: *recmap_projection_cleanup
 
+  - name: "Selected RecMap window preserves inactive CASE projection branches"
+    setup: *recmap_projection_setup
+    sql: |
+      SELECT d.id, CASE WHEN d.id = 199 THEN (
+        SELECT (
+          SELECT REGEXP_REPLACE('4', CASE WHEN t.id = 49 THEN t.value ELSE '(' END, '4')
+          FROM nc_projection_target t WHERE t.id = m.target_id LIMIT 1)
+        FROM nc_projection_middle m WHERE m.id = d.middle_id LIMIT 1)
+        ELSE NULL END AS value
+      FROM nc_projection_driver d ORDER BY d.id DESC LIMIT 5
+    expect:
+      rows: 5
+      data:
+        - {id: 199, value: "4"}
+        - {id: 198, value: null}
+        - {id: 197, value: null}
+        - {id: 196, value: null}
+        - {id: 195, value: null}
+    cleanup: *recmap_projection_cleanup
+
   - name: "Ordered RecMap window applies OFFSET only once"
     setup: *recmap_window_setup
     sql: |

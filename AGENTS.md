@@ -213,7 +213,9 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   Scans and prepared RecMap projections retain once per shard/batch, outside
   generated SQL row loops. The explicit `$recmap_call` point-access interface
   and remaining SQL projections still retain per invocation. Exact nested
-  scalar source windows use the prepared mapper after native window selection.
+  scalar source windows with unconditional payload demand use the prepared
+  mapper after native window selection. Guarded CASE/short-circuit expressions
+  retain their existing row-bound probes.
   Repeated projection must prepare `recmap_value_mapper` on the consumed domain;
   projection-only payloads must not be prepared ahead of filtering or LIMIT.
   The counter is not persisted. Idle/LRU time hints cannot authorize eviction

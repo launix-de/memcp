@@ -97,8 +97,8 @@ type storageShard struct {
 	// snapshot: existing column/read-lock protocols still protect row access.
 	// Scan and prepared RecMap operators retain once per shard/batch. Explicit
 	// $recmap_call point access and remaining SQL projections still retain per
-	// invocation. Exact nested scalar source windows use the batch mapper only
-	// after native window selection. The count is never persisted.
+	// invocation. Exact nested scalar source windows with unconditional payload
+	// demand use the batch mapper only after native window selection. The count is never persisted.
 	cacheReaders atomic.Int32
 
 	// Repartition generation tracking. Counters are atomic; generation points to
