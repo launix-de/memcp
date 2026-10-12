@@ -367,6 +367,13 @@ test_cases:
   - name: Native indexed data retains the zero and null entries
     sql: SELECT id,value FROM tsql_index_nulls ORDER BY id
     expect: {rows: 2, data: [{id: 1, value: null}, {id: 3, value: 0}]}
+  - name: National default strings accept leading lexical whitespace
+    scm: |
+      (tsql_default_literal "   N'spaces'")
+    expect: {result: spaces}
+  - name: National string prefix must stay adjacent to the opening quote
+    sql: SELECT N 'not adjacent' AS value
+    expect: {error: true}
   - name: escaped closing bracket is a quoted identifier
     sql: SELECT 42 AS [answer]]suffix]
     expect: {rows: 1, data: [{"answer]suffix": 42}]}

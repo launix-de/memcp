@@ -72,7 +72,7 @@ The negative accumulator also represents the minimum int64 without overflow. */
 	(parser '("[" (define id (regex "(?:[^\\]]|\\]\\])+" false false)) "]") (replace id "]]" "]"))
 	(parser '("\"" (define id (regex "(?:[^\"]|\"\")+" false false)) "\"") (replace id "\"\"" "\"")))))
 (define tsql_identifier (parser (or tsql_identifier_quoted tsql_identifier_unquoted)))
-(define tsql_string (parser '((? (atom "N" true false)) (atom "'" false)
+(define tsql_string (parser '((or (atom "N'" true) (atom "'" false))
 	(define value (regex "(?:''|[^'])*" false false)) (atom "'" false false))
 	(replace value "''" "'")))
 (define tsql_column (parser (or
