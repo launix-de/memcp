@@ -250,15 +250,13 @@ func traceShardScanCallback(callback func(*storageShard, bool, any), shard *stor
 // scan failures. In particular, a cancelled load wait must never escape a
 // fanout worker before the callback has installed its recovery handler.
 func runAcquiredShardScan(currentTx *TxContext, shard *storageShard, solo bool, callback func(*storageShard, bool, any)) {
-	var release func()
+	var release ReadAccess
 	var acquisitionFailure any
 	func() {
 		defer func() { acquisitionFailure = recover() }()
 		release = shard.acquireReadForScan(currentTx)
 	}()
-	if release != nil {
-		defer release()
-	}
+	defer release.Release()
 	if scm.Trace == nil {
 		callback(shard, solo, acquisitionFailure)
 	} else {
@@ -429,9 +427,9 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, c
 // acquireReadForScan obtains shard access unless this worker already owns the
 // stronger write lock. Re-entering GetRead while holding shard.mu for a
 // mutation would make its lazy-load checks deadlock on their own RLock.
-func (s *storageShard) acquireReadForScan(currentTx *TxContext) func() {
+func (s *storageShard) acquireReadForScan(currentTx *TxContext) ReadAccess {
 	if s.hasWriteOwnerForTx(currentTx) {
-		return func() {}
+		return ReadAccess{}
 	}
 	return s.GetRead(currentTx)
 }
@@ -1353,7 +1351,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 	for _, shard := range newshards {
 		indexes := func() []*StorageIndex {
 			release := shard.GetRead(nil)
-			defer release()
+			defer release.Release()
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
 			return append([]*StorageIndex(nil), shard.Indexes...)

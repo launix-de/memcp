@@ -414,36 +414,49 @@ func (t *table) hasDuplicateUniqueValues(cols []string, nullsNotDistinct bool, c
 	shards := t.ActiveShards()
 	accessSchema := newExactScanAccessSchema(cols)
 	rows := make([]uniqueValidationRow, 0, t.CountEstimate())
+	var readAccessBuffer [8]ReadAccess
+	readAccesses := readAccessBuffer[:]
+	if len(shards) > len(readAccesses) {
+		readAccesses = make([]ReadAccess, len(shards))
+	}
+	readAccesses = readAccesses[:len(shards)]
+	defer func() {
+		for _, access := range readAccesses {
+			access.Release()
+		}
+	}()
 
-	for _, shard := range shards {
+	for i, shard := range shards {
 		if shard == nil {
 			continue
 		}
-		release := shard.GetRead(currentTx)
-		shard.mu.RLock()
-		limit := shard.main_count + uint32(len(shard.inserts))
-		for recid := uint32(0); recid < limit; recid++ {
-			visible := !shard.deletions.Get(uint(recid))
-			if currentTx != nil && currentTx.Mode == TxACID {
-				visible = currentTx.IsVisible(shard, recid)
-			}
-			if !visible {
-				continue
-			}
-			key := make([]scm.Scmer, len(cols))
-			hasNull := false
-			for i, col := range cols {
-				key[i] = shard.rowValueByRecidLocked(recid, col)
-				if key[i].IsNil() {
-					hasNull = true
+		// The later key-probe loop consumes the same prepared generations.
+		readAccesses[i] = shard.GetRead(currentTx)
+		func() {
+			shard.mu.RLock()
+			defer shard.mu.RUnlock()
+			limit := shard.main_count + uint32(len(shard.inserts))
+			for recid := uint32(0); recid < limit; recid++ {
+				visible := !shard.deletions.Get(uint(recid))
+				if currentTx != nil && currentTx.Mode == TxACID {
+					visible = currentTx.IsVisible(shard, recid)
+				}
+				if !visible {
+					continue
+				}
+				key := make([]scm.Scmer, len(cols))
+				hasNull := false
+				for i, col := range cols {
+					key[i] = shard.rowValueByRecidLocked(recid, col)
+					if key[i].IsNil() {
+						hasNull = true
+					}
+				}
+				if !hasNull || nullsNotDistinct {
+					rows = append(rows, uniqueValidationRow{shard: shard, recid: recid, key: key})
 				}
 			}
-			if !hasNull || nullsNotDistinct {
-				rows = append(rows, uniqueValidationRow{shard: shard, recid: recid, key: key})
-			}
-		}
-		shard.mu.RUnlock()
-		release()
+		}()
 	}
 
 	for _, row := range rows {
@@ -1051,7 +1064,7 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 		}
 		func() {
 			done := shard.GetRead(nil)
-			defer done()
+			defer done.Release()
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
 			columnStorage := shard.columns[columnName]
@@ -1449,7 +1462,7 @@ func (t *table) initializeLegacyPlannerRowEstimate() {
 		}
 		func() {
 			release := shard.GetRead(nil)
-			defer release()
+			defer release.Release()
 			rows += shard.statsSnapshot().rowCount()
 		}()
 	}
@@ -1517,7 +1530,7 @@ func (t *table) CountExact() (result uint) {
 		}
 		func() {
 			unlock := shard.GetRead(nil)
-			defer unlock()
+			defer unlock.Release()
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
 			result += uint(shard.Count())
@@ -3437,6 +3450,63 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 				}
 			}
 		}
+		// Compute the existing probe domain before loading any shard. NULLs
+		// skipped by this key need no read access, and partition-local keys
+		// retain only the shards reached by this batch.
+		prepareKey := func(row []scm.Scmer) bool {
+			needsProbe := true
+			for i, colidx := range keyIdx {
+				if colidx < 0 {
+					key[i] = scm.NewNil()
+				} else {
+					key[i] = row[colidx]
+				}
+				if !compareNulls && key[i].IsNil() {
+					needsProbe = false
+				}
+			}
+			return needsProbe
+		}
+		var neededBuffer [8]bool
+		needed := neededBuffer[:]
+		if len(shardlist) > len(needed) {
+			needed = make([]bool, len(shardlist))
+		}
+		needed = needed[:len(shardlist)]
+		for _, row := range values {
+			if !prepareKey(row) {
+				continue
+			}
+			if !allowPruning {
+				for i, shard := range shardlist {
+					needed[i] = shard != nil
+				}
+				break
+			}
+			for j, xidx := range pruningMap {
+				pruningVals[j] = key[xidx]
+			}
+			needed[computeShardIndex(t.PDimensions, pruningVals)] = true
+		}
+		// Retain each generation once for this unique-check batch, outside the
+		// row/key probe loops. Collision callbacks may panic or recursively scan;
+		// neither path may leak a lease or let eviction detach prepared columns.
+		var readAccessBuffer [8]ReadAccess
+		readAccesses := readAccessBuffer[:]
+		if len(shardlist) > len(readAccesses) {
+			readAccesses = make([]ReadAccess, len(shardlist))
+		}
+		readAccesses = readAccesses[:len(shardlist)]
+		defer func() {
+			for _, access := range readAccesses {
+				access.Release()
+			}
+		}()
+		for i, shard := range shardlist {
+			if needed[i] {
+				readAccesses[i] = shard.acquireReadForScan(currentTx)
+			}
+		}
 		// TODO: only shard-local lock if allowPruning
 
 		var lock *sync.Mutex
@@ -3468,17 +3538,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 		last_j := 0
 		for j, row := range values {
 			shardlist2 := shardlist
-			skipUniqueCheck := false
-			for i, colidx := range keyIdx {
-				if colidx < 0 {
-					key[i] = scm.NewNil()
-				} else {
-					key[i] = row[colidx]
-				}
-				if !compareNulls && key[i].IsNil() {
-					skipUniqueCheck = true
-				}
-			}
+			skipUniqueCheck := !prepareKey(row)
 			if skipUniqueCheck {
 				goto nextrow
 			}
@@ -3496,8 +3556,6 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 				}
 			}
 			for _, s := range shardlist2 {
-				// ensure shard is loaded for read during unique check
-				r := s.GetRead(currentTx)
 				uid, present := s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx)
 				if present {
 					// found a unique collision
@@ -3542,10 +3600,8 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 					failure(uniq.Id, params) // notify about failure while unlocked
 					lock.Lock()
 					*lockHeld = true
-					r()
 					goto nextrow
 				}
-				r()
 			}
 		nextrow:
 			if allowPruning {

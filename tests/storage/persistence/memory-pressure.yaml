@@ -8,8 +8,93 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS mp_pressure"
   - sql: "CREATE TABLE mp_pressure (id INT, a INT, b INT, c INT, d INT, e INT, f TEXT)"
+  - sql: "DROP TABLE IF EXISTS mp_scan_lifetime"
+  - sql: "CREATE TABLE mp_scan_lifetime (id INT PRIMARY KEY, mandant INT, standort INT)"
+  - sql: "INSERT INTO mp_scan_lifetime VALUES (1, 7, NULL), (2, NULL, 9)"
 
 test_cases:
+  - name: "MP: persist the scan lifetime fixture"
+    scm: '(rebuild (table "memcp-tests" "mp_scan_lifetime") true false)'
+
+  # A table-lock wait pauses scan_exists after column preparation and before
+  # index access. The normal cache budget forces the same eviction as external
+  # memory pressure, without privileged cgroups or scheduler-dependent races.
+  - name: "MP: prepared EXISTS survives eviction during a table-lock wait"
+    session_id: "mp-scan-owner"
+    steps:
+      - session_id: "mp-scan-owner"
+        sql: "LOCK TABLES mp_scan_lifetime WRITE"
+      - scm: |
+          (begin
+            (define predicate (scheme "(lambda (mandant standort) (and (equal?? mandant 7) (nil? standort)))"))
+            (define access (eval (compile_scan_access '("mandant" "standort") predicate)))
+            (with_autocommit session (req "__session_state") (req "__query_seq") "mp prepared EXISTS"
+              (lambda (tx)
+                (scan_exists tx (table "memcp-tests" "mp_scan_lifetime")
+                  (car access) (cadr access) '("mandant" "standort") (eval predicate)))))
+        background: true
+        timeout: 15
+        expect:
+          rows: 1
+          contains: "True"
+      - scm: |
+          (begin
+            (define wait_for_reader (lambda (remaining)
+              (if (not (empty_list? (filter (show_processlist) (lambda (row)
+                    (and (equal? (get_assoc row "State") "Waiting for table lock")
+                      (equal? (get_assoc row "Info") "mp prepared EXISTS"))))))
+                true
+                (if (<= remaining 0) (error "EXISTS reader did not reach its table-lock wait")
+                  (begin (sleep 0.01) (wait_for_reader (- remaining 1)))))))
+            (wait_for_reader 500))
+        timeout: 10
+        expect:
+          rows: 1
+          contains: "True"
+      # Shard registrations have a one-second minimum idle lifetime. The
+      # process-list barrier above proves preparation has already completed.
+      - scm: '(begin (sleep 1.1) (settings "MaxPersistBytes" 1) (settings "MaxPersistBytes" 0) true)'
+        expect:
+          rows: 1
+          contains: "True"
+      - session_id: "mp-scan-owner"
+        sql: "UNLOCK TABLES"
+      - wait_for_background: true
+    cleanup:
+      - sql: "UNLOCK TABLES"
+      - scm: '(settings "MaxPersistBytes" 0)'
+
+  - name: "MP: EXISTS remains correct after releasing its scan"
+    sql: "SELECT EXISTS(SELECT 1 FROM mp_scan_lifetime WHERE mandant = 7 AND standort IS NULL) AS found"
+    expect:
+      rows: 1
+      data:
+        - found: true
+
+  - name: "MP: failing EXISTS unwinds its read lease"
+    scm: |
+      (begin
+        (define predicate (scheme "(lambda (id) (if (equal?? id 1) (error \"expected scan failure\") false))"))
+        (define access (eval (compile_scan_access '("id") predicate)))
+        (scan_exists nil (table "memcp-tests" "mp_scan_lifetime")
+          (car access) (cadr access) '("id") (eval predicate)))
+    expect:
+      error: true
+
+  - name: "MP: durable rows survive pressure after failed EXISTS"
+    setup:
+      - scm: '(begin (sleep 1.1) (settings "MaxPersistBytes" 1) (settings "MaxPersistBytes" 0))'
+    sql: "SELECT id, mandant, standort FROM mp_scan_lifetime ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          mandant: 7
+          standort: null
+        - id: 2
+          mandant: null
+          standort: 9
+
   - name: "MP: insert 4k rows with ~2MB hash payload"
     scm: |
       (begin
@@ -217,3 +302,4 @@ test_cases:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS mp_pressure"
+  - sql: "DROP TABLE IF EXISTS mp_scan_lifetime"

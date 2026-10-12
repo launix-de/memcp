@@ -1626,7 +1626,7 @@ func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopolog
 	var queue *shardqueue
 	func() {
 		release := shard.acquireReadForScan(currentTx)
-		defer release()
+		defer release.Release()
 		if scm.Trace == nil {
 			queue = shard.scan_order(bounds, spec.conditionCols, spec.condition, spec.acceptCols, spec.accept, spec.sortcols, sortdirs, limitPartitionCols, offset, shardLimit, spec.callbackCols, currentTx, ss)
 		} else {

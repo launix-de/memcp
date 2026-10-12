@@ -26,14 +26,25 @@ const (
 	WRITE  SharedState = 2
 )
 
+// ReadAccess delimits an acquired read capability without allocating a closure
+// for every local lookup. It can evolve into a cluster reference release.
+// Release must be called exactly once; a zero access requires no cleanup.
+type ReadAccess struct {
+	shard *storageShard
+}
+
+func (access ReadAccess) Release() {
+	if access.shard != nil {
+		access.shard.releaseCacheRead()
+	}
+}
+
 // SharedResource is the access boundary for a lazily loaded local or clustered
 // resource. GetRead/GetExclusive must not be bypassed by callers that happen to
 // know today's in-process representation: a cluster implementation may satisfy a
 // read by loading a local SHARED copy or by routing work to a current shard owner.
-// The returned release function delimits that acquired capability and can evolve
-// from the current local lifetime tracking into a cluster reference release.
 type SharedResource interface {
 	GetState() SharedState
-	GetRead(currentTx *TxContext) func() // acquire read access; cold-load waits observe this query
-	GetExclusive() func()                // acquire exclusive access; returns release()
+	GetRead(currentTx *TxContext) ReadAccess // cold-load waits observe this query
+	GetExclusive() func()                    // acquire exclusive access; returns release()
 }

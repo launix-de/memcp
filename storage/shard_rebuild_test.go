@@ -141,6 +141,9 @@ func TestColdShardLoadWaitObservesQueryCancellation(t *testing.T) {
 				if got := shard.activeScanners.Load(); got != 0 {
 					t.Fatalf("cancelled scan retained %d shard registrations", got)
 				}
+				if got := shard.cacheReaders.Load(); got != 0 {
+					t.Fatalf("cancelled load retained %d cache read leases", got)
+				}
 			}
 			if got := tbl.activeTopology().operations.Load(); got != 0 {
 				t.Fatalf("cancelled scan retained %d topology registrations", got)
@@ -407,7 +410,7 @@ func reloadTableFromPersistence(t *testing.T, name string, persistence Persisten
 	}
 	for _, shard := range tbl.ActiveShards() {
 		release := shard.GetRead(nil)
-		release()
+		release.Release()
 	}
 	return tbl
 }
@@ -2116,7 +2119,7 @@ func TestRepartitionInheritsWeightedIndexesFromEverySource(t *testing.T) {
 	for _, shard := range tbl.ActiveShards() {
 		release := shard.GetRead(nil)
 		func() {
-			defer release()
+			defer release.Release()
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
 			if len(shard.Indexes) != 2 {
@@ -2192,7 +2195,7 @@ func TestRepartitionIndexWarmBudgetAndThreshold(t *testing.T) {
 			}
 			rebuildRepartitionIndexes(definitions, shard)
 			release := shard.GetRead(nil)
-			defer release()
+			defer release.Release()
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
 			warmed := 0
@@ -2789,6 +2792,107 @@ func TestUnchangedShardRebuildRetainsOwnership(t *testing.T) {
 	}
 }
 
+// A scan binds columns before taking its row-processing read lock. Eviction
+// in that window used to clear the directory and make index setup panic with
+// "Column not loaded while shard RLocked". GetRead must own that whole window.
+func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
+	for _, engine := range []PersistencyMode{Safe, Cache} {
+		t.Run(fmt.Sprint(engine), func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
+			cleanup := shardCleanup
+			if engine == Cache {
+				tbl, _ = CreateTable("memcp-tests", "cache_items", Cache, false)
+				tbl.CreateColumn("id", "INT", nil, nil)
+				tbl.CreateColumn("payload", "TEXT", nil, nil)
+				tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
+					{scm.NewInt(1), scm.NewString("row-00000001")},
+				}, nil, scm.NewNil(), false, nil)
+				cleanup = cacheShardCleanup
+			}
+			if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+				t.Fatal(result)
+			}
+			shard := tbl.ActiveShards()[0]
+			release := shard.GetRead(nil)
+			defer func() {
+				release.Release()
+			}()
+			secondRelease := shard.GetRead(nil)
+			secondRelease.Release()
+			access := runtimeScanAccess(analyzedBoundaries{{
+				col: "payload", matcher: EqualMatcher,
+				lower: scm.NewString("row-00000001"), lowerInclusive: true,
+				upper: scm.NewString("row-00000001"), upperInclusive: true,
+			}})
+			shard.ensureScanAccessColumns(access, false, nil)
+			var freed [numEvictableTypes]int64
+			if cleanup(shard, &freed) {
+				t.Fatal("eviction detached a prepared column while a read was active")
+			}
+			func() {
+				shard.mu.RLock()
+				defer shard.mu.RUnlock()
+				index := &StorageIndex{t: shard, Cols: []string{"payload"}}
+				getters := index.buildGetters(nil, nil)
+				if got := getters[0].get(0).String(); got != "row-00000001" {
+					t.Fatalf("prepared index value = %q", got)
+				}
+			}()
+			release.Release()
+			release = ReadAccess{}
+			if !cleanup(shard, &freed) {
+				t.Fatal("last read release did not make the shard evictable")
+			}
+			if engine == Safe {
+				release = shard.GetRead(nil)
+				shard.ensureScanAccessColumns(access, false, nil)
+				if got := shard.ColumnReaderTx(nil, "payload", false)(0).String(); got != "row-00000001" {
+					t.Fatalf("durable value after eviction/reload = %q", got)
+				}
+			}
+		})
+	}
+}
+
+func TestNestedShardReadLeaseDoesNotWaitBehindWriter(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
+	release := shard.GetRead(nil)
+	defer release.Release()
+	shard.mu.RLock()
+	writerDone := make(chan struct{})
+	go func() {
+		shard.mu.Lock()
+		shard.mu.Unlock()
+		close(writerDone)
+	}()
+	// Observe an actually queued writer instead of guessing when it starts.
+	deadline := time.Now().Add(time.Second)
+	for shard.mu.TryRLock() {
+		shard.mu.RUnlock()
+		if time.Now().After(deadline) {
+			shard.mu.RUnlock()
+			<-writerDone
+			t.Fatal("writer did not queue behind the outer scan")
+		}
+		runtime.Gosched()
+	}
+	nestedDone := make(chan ReadAccess, 1)
+	go func() { nestedDone <- shard.GetRead(nil) }()
+	select {
+	case nestedRelease := <-nestedDone:
+		nestedRelease.Release()
+		shard.mu.RUnlock()
+	case <-time.After(time.Second):
+		shard.mu.RUnlock()
+		nestedRelease := <-nestedDone
+		nestedRelease.Release()
+		t.Error("nested GetRead reacquired the shard mutex behind a writer")
+	}
+	<-writerDone
+}
+
 func TestCacheShardCleanupAdvancesDataGeneration(t *testing.T) {
 	tbl := &table{Name: ".grp-range:test", PersistencyMode: Cache}
 	shard := NewShard(tbl)
@@ -2819,7 +2923,7 @@ func TestNewShardRetainsComputedColumnDefinition(t *testing.T) {
 			shard.deltaColumns["input"] = 0
 			shard.inserts = [][]scm.Scmer{{scm.NewInt(7)}, {scm.NewInt(11)}}
 			release := shard.GetRead(nil)
-			defer release()
+			defer release.Release()
 			reader := shard.ColumnReaderTx(nil, "computed", false)
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
@@ -2878,5 +2982,70 @@ func TestGroupPartitionHintsShareWeightedRowBudget(t *testing.T) {
 				t.Fatalf("relative weights lost: %#v", balanced)
 			}
 		})
+	}
+}
+
+func TestNullDistinctUniqueSkipsColdShard(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "treviewuniquecold", 2)
+	tbl.Unique = []uniqueKey{{Id: "payload_unique", Cols: []string{"payload"}}}
+	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+		t.Fatal(result)
+	}
+	shard := tbl.ActiveShards()[0]
+	var freed [numEvictableTypes]int64
+	if !shardCleanup(shard, &freed) || shard.state() != COLD {
+		t.Fatal("fixture did not become cold")
+	}
+	accepted := 0
+	tbl.ProcessUniqueCollision([]string{"payload"}, [][]scm.Scmer{{scm.NewNil()}}, false,
+		func(rows [][]scm.Scmer) { accepted += len(rows) }, nil,
+		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision %s", key) }, 0, nil)
+	if accepted != 1 {
+		t.Fatalf("accepted=%d", accepted)
+	}
+	if shard.state() != COLD {
+		t.Fatalf("NULL-distinct unique batch loaded an unneeded shard: state=%d", shard.state())
+	}
+}
+
+func TestPartitionUniqueKeepsUnrelatedShardsCold(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tuniquepartitioncold", 0)
+	tbl.mu.Lock()
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	tbl.ShardMode = ShardModePartition
+	tbl.PDimensions = []shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(10)}}}
+	tbl.PShards = []*storageShard{NewShard(tbl), NewShard(tbl)}
+	tbl.publishTopologyLocked()
+	tbl.mu.Unlock()
+	tbl.schema.save()
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewString("low")}, {scm.NewInt(11), scm.NewString("high")},
+	}, nil, scm.NewNil(), false, nil)
+	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+		t.Fatal(result)
+	}
+	shards := tbl.ActiveShards()
+	var freed [numEvictableTypes]int64
+	for _, shard := range shards {
+		if !shardCleanup(shard, &freed) || shard.state() != COLD {
+			t.Fatal("partition fixture did not become cold")
+		}
+	}
+	id := scm.NewInt(15)
+	target := computeShardIndex(tbl.PDimensions, []scm.Scmer{id})
+	accepted := 0
+	tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{id}}, false,
+		func(rows [][]scm.Scmer) { accepted += len(rows) }, nil,
+		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision %s", key) }, 0, nil)
+	if accepted != 1 || shards[target].state() == COLD {
+		t.Fatal("partition-local unique probe did not inspect its target")
+	}
+	for i, shard := range shards {
+		if i != target && shard.state() != COLD {
+			t.Fatalf("partition-local unique probe loaded unrelated shard %d", i)
+		}
+		if shard.cacheReaders.Load() != 0 {
+			t.Fatalf("unique probe leaked a read lease on shard %d", i)
+		}
 	}
 }

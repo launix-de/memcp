@@ -22,14 +22,14 @@ func assertInitializedColumn(t *testing.T, tbl *table, column string, value scm.
 			if !shard.deletions.Get(uint(i)) {
 				if actual := read(i); !scm.Equal(actual, value) {
 					shard.mu.RUnlock()
-					release()
+					release.Release()
 					t.Fatalf("row %d column %s = %v, want %v", i, column, actual, value)
 				}
 				count++
 			}
 		}
 		shard.mu.RUnlock()
-		release()
+		release.Release()
 	}
 	if count != rows {
 		t.Fatalf("initialized visible rows = %d, want %d", count, rows)
@@ -353,7 +353,7 @@ func TestAddedNullableFreshColumnKeepsExistingDeltaRows(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	row := func() *scm.Scmer {
 		release := shard.GetRead(nil)
-		defer release()
+		defer release.Release()
 		shard.mu.RLock()
 		defer shard.mu.RUnlock()
 		return &shard.inserts[0][0]
@@ -361,7 +361,7 @@ func TestAddedNullableFreshColumnKeepsExistingDeltaRows(t *testing.T) {
 	tbl.CreateColumn("fresh", "INT", nil, nil)
 	func() {
 		release := shard.GetRead(nil)
-		defer release()
+		defer release.Release()
 		shard.mu.RLock()
 		defer shard.mu.RUnlock()
 		if &shard.inserts[0][0] != row {
@@ -405,7 +405,7 @@ func TestAddedDefaultExpressionSurvivesNilConstantOption(t *testing.T) {
 	})
 	shard := tbl.ActiveShards()[0]
 	release := shard.GetRead(nil)
-	defer release()
+	defer release.Release()
 	read := shard.ColumnReaderTx(nil, "created", false)
 	value := func() scm.Scmer {
 		shard.mu.RLock()

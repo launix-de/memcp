@@ -198,7 +198,7 @@ func recMapReadTarget(currentTx *TxContext, target recMapTarget, columns []strin
 		return scm.Apply(ifNull)
 	}
 	release := target.shard.acquireReadForScan(currentTx)
-	defer release()
+	defer release.Release()
 	target.shard.ensureLoaded()
 	skipShardReadLock := target.shard.hasWriteOwnerForTx(currentTx)
 	target.shard.ensureMainCount(skipShardReadLock, currentTx)
@@ -264,7 +264,7 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 	for shard, positions := range groups {
 		release := shard.acquireReadForScan(currentTx)
 		func() {
-			defer release()
+			defer release.Release()
 			shard.ensureLoaded()
 			skipShardReadLock := shard.hasWriteOwnerForTx(currentTx)
 			shard.ensureMainCount(skipShardReadLock, currentTx)
@@ -862,7 +862,7 @@ func (r *recMap) orderRecSet(currentTx *TxContext, sortSides, sortColumns []stri
 		shard.mu.RLock()
 		universe := shard.main_count + uint32(len(shard.inserts))
 		shard.mu.RUnlock()
-		release()
+		release.Release()
 		part := newRecSetShardFromSortedIDs(shard, universe, ids)
 		result.count += part.count
 		result.shards = append(result.shards, part)
@@ -887,7 +887,7 @@ func fillRecMapOrderValues(currentTx *TxContext, rows []recMapOrderRow, sides, c
 		for shard, indexes := range groups {
 			release := shard.acquireReadForScan(currentTx)
 			func() {
-				defer release()
+				defer release.Release()
 				shard.ensureLoaded()
 				skipLock := shard.hasWriteOwnerForTx(currentTx)
 				shard.ensureMainCount(skipLock, currentTx)
@@ -1040,7 +1040,7 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 		part := &previous.shards[partIndex]
 		func() {
 			release := part.sourceShard.acquireReadForScan(currentTx)
-			defer release()
+			defer release.Release()
 			part.sourceShard.ensureLoaded()
 			skipLock := part.sourceShard.hasWriteOwnerForTx(currentTx)
 			part.sourceShard.ensureMainCount(skipLock, currentTx)
@@ -1074,7 +1074,7 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 	for shard, positions := range targetPositions {
 		func() {
 			release := shard.acquireReadForScan(currentTx)
-			defer release()
+			defer release.Release()
 			shard.ensureLoaded()
 			skipLock := shard.hasWriteOwnerForTx(currentTx)
 			shard.ensureMainCount(skipLock, currentTx)
@@ -1165,7 +1165,7 @@ func (r *recSet) collectRecMapRows(currentTx *TxContext, sourceKeyCols []string,
 		shard := part.shard
 		release := shard.acquireReadForScan(currentTx)
 		func() {
-			defer release()
+			defer release.Release()
 			if ss != nil && ss.IsKilledSeq(querySeq) {
 				panic("query killed")
 			}
@@ -1260,7 +1260,7 @@ func (r *recMap) image() *recSet {
 		shard.mu.RLock()
 		universe := shard.main_count + uint32(len(shard.inserts))
 		shard.mu.RUnlock()
-		release()
+		release.Release()
 		part := newRecSetShardFromSortedIDs(shard, universe, ids)
 		result.count += part.count
 		result.shards = append(result.shards, part)

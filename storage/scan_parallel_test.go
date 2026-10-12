@@ -214,6 +214,11 @@ func TestMultipleUniqueKeysReleaseOuterLockOnCallbackPanic(t *testing.T) {
 	if caught != "insert callback failed" {
 		t.Fatalf("expected callback panic, got %v", caught)
 	}
+	for _, shard := range tbl.ActiveShards() {
+		if got := shard.cacheReaders.Load(); got != 0 {
+			t.Fatalf("insert callback panic retained %d cache read leases", got)
+		}
+	}
 	if !tbl.uniquelock.TryLock() {
 		t.Fatal("callback panic after multiple unique checks retained the outer unique lock")
 	}
@@ -238,6 +243,11 @@ func TestMultipleUniqueKeysReleaseOuterLockOnCollisionPanic(t *testing.T) {
 	}()
 	if caught != "collision callback failed" {
 		t.Fatalf("expected collision callback panic, got %v", caught)
+	}
+	for _, shard := range tbl.ActiveShards() {
+		if got := shard.cacheReaders.Load(); got != 0 {
+			t.Fatalf("collision callback panic retained %d cache read leases", got)
+		}
 	}
 	if !tbl.uniquelock.TryLock() {
 		t.Fatal("collision callback panic after multiple unique checks retained the outer unique lock")
@@ -290,6 +300,9 @@ func TestIterateShardsParallelReleasesFreeShardRegistrationOnPanic(t *testing.T)
 
 	if got := shard.activeScanners.Load(); got != 0 {
 		t.Fatalf("active scanner registrations after panic = %d, want 0", got)
+	}
+	if got := shard.cacheReaders.Load(); got != 0 {
+		t.Fatalf("cache read leases after panic = %d, want 0", got)
 	}
 	if got := topology.operations.Load(); got != 0 {
 		t.Fatalf("topology user registrations after panic = %d, want 0", got)
