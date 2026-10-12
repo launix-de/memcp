@@ -18,8 +18,40 @@ test_cases:
   name: 'Fixture setup 004: DROP USER IF EXISTS tds_limited'
 - sql: CREATE USER tds_limited IDENTIFIED BY 'secret'
   name: 'Fixture setup 005: CREATE USER tds_limited IDENTIFIED BY ''secret'''
+- sql: DROP TABLE IF EXISTS tds_protocol_basic
+  name: Remove native batch fixture
 - sql: DROP TABLE IF EXISTS tds_protocol_data
   name: 'Fixture setup 006: DROP TABLE IF EXISTS tds_protocol_data'
+- name: Native TDS batches preserve numeric literals and Unicode output
+  tds:
+    statements:
+    - sql: SELECT 0 AS zero,1 AS one,2 AS two,9007199254740993 AS large,N'Grüße 🐘' AS text
+      expect:
+        rows: 1
+        columns: [zero, one, two, large, text]
+        data: [{zero: 0, one: 1, two: 2, large: 9007199254740993, text: 'Grüße 🐘'}]
+- name: Native TDS DDL defaults and transaction rollback
+  tds:
+    statements:
+    - sql: CREATE TABLE tds_protocol_basic (id INT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(50), amount INT DEFAULT ((7)))
+    - sql: INSERT INTO tds_protocol_basic (name) VALUES (N'Grüße')
+    - sql: BEGIN TRANSACTION
+    - sql: INSERT INTO tds_protocol_basic (name) VALUES (N'rollback')
+    - sql: ROLLBACK TRANSACTION
+    - sql: SELECT id,name,amount FROM tds_protocol_basic
+      expect:
+        rows: 1
+        data: [{id: 1, name: Grüße, amount: 7}]
+    - sql: SELECT TOP (0) id,name FROM tds_protocol_basic
+      expect:
+        rows: 0
+        columns: [id, name]
+    - sql: BEGIN TRANSACTION
+    - sql: INSERT INTO tds_protocol_basic (name) VALUES (N'commit')
+    - sql: COMMIT TRANSACTION
+    - sql: SELECT COUNT(*) AS n FROM tds_protocol_basic
+      expect: {rows: 1, data: [{n: 2}]}
+    - sql: DROP TABLE tds_protocol_basic
 - name: Native login, RPC parameters, transactions and recovery
   tds:
     timeout: 120
@@ -122,8 +154,7 @@ test_cases:
         - db: memcp-tests
     - sql: DROP TABLE dbo.tds_protocol_data
   noncritical: true
-  fail_comment: Native TDS probe dispatch is not implemented by the current YAML runner; this protocol specification
-    remains open.
+  fail_comment: Typed parameter binding and session options remain frontend follow-ups.
 - name: Native login preserves credential delimiters, braces and whitespace
   tds:
     username: tds;=brace} user
@@ -134,35 +165,24 @@ test_cases:
         rows: 1
         data:
         - value: 1
-  noncritical: true
-  fail_comment: Native TDS probe dispatch is not implemented by the current YAML runner; this protocol specification
-    remains open.
 - name: Existing password authentication denies wrong credentials
   tds:
     password: incorrect
     expect_login_error: true
-  noncritical: true
-  fail_comment: Native TDS probe dispatch is not implemented by the current YAML runner; this protocol specification
-    remains open.
 - name: Existing database policy denies ungranted login
   tds:
     username: tds_limited
     password: secret
     expect_login_error: true
-  noncritical: true
-  fail_comment: Native TDS probe dispatch is not implemented by the current YAML runner; this protocol specification
-    remains open.
 - name: A missing database is denied at login
   tds:
     database: tds_missing_db
     expect_login_error: true
-  noncritical: true
-  fail_comment: Native TDS probe dispatch is not implemented by the current YAML runner; this protocol specification
-    remains open.
 - sql: DROP TABLE IF EXISTS tds_protocol_data
   name: 'Fixture cleanup 001: DROP TABLE IF EXISTS tds_protocol_data'
 - sql: DROP USER IF EXISTS tds_limited
   name: 'Fixture cleanup 002: DROP USER IF EXISTS tds_limited'
 - sql: DROP USER IF EXISTS 'tds;=brace} user'
   name: 'Fixture cleanup 003: DROP USER IF EXISTS ''tds;=brace} user'''
-cleanup: []
+cleanup:
+- sql: DROP TABLE IF EXISTS tds_protocol_basic

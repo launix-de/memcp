@@ -12,6 +12,7 @@ require (
 	github.com/ceph/go-ceph v0.37.0
 	github.com/chzyer/readline v1.5.1
 	github.com/dc0d/onexit v1.1.0
+	github.com/denisenkom/go-mssqldb v0.12.3
 	github.com/docker/go-units v0.5.0
 	github.com/dunglas/frankenphp v1.12.7
 	github.com/fsnotify/fsnotify v1.10.1
@@ -20,9 +21,9 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/launix-de/NonLockingReadMap v1.1.1
-	github.com/launix-de/go-tdsstack v0.1.0
 	github.com/launix-de/go-mysqlstack v0.2.0
 	github.com/launix-de/go-packrat/v2 v2.1.24
+	github.com/launix-de/go-tdsstack v0.1.0
 	github.com/leonelquinteros/gotext v1.7.2
 	github.com/lib/pq v1.11.2
 	github.com/pierrec/lz4/v4 v4.1.26
@@ -63,6 +64,8 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/gofrs/uuid/v5 v5.5.1 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
+	github.com/golang-sql/civil v0.0.0-20190719163853-cb61b32ac6fe // indirect
+	github.com/golang-sql/sqlexp v0.1.0 // indirect
 	github.com/gorilla/handlers v1.5.2 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/maypok86/otter/v2 v2.3.0 // indirect

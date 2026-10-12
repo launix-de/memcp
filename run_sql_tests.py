@@ -1026,6 +1026,27 @@ class SQLTestRunner:
             output = f"{output}{proc.stderr}"
         return proc.returncode == 0, output.strip()
 
+    def execute_tds_probe(self, database: str, probe: Dict[str, Any]) -> Tuple[bool, str]:
+        payload = dict(probe)
+        payload.setdefault("host", "127.0.0.1")
+        payload.setdefault("port", int(self.base_url.rsplit(":", 1)[1]) + 2000)
+        payload.setdefault("database", database)
+        payload.setdefault("username", self.username)
+        payload.setdefault("password", self.password)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
+            json.dump(payload, f)
+            path = f.name
+        try:
+            proc = subprocess.run(
+                ["go", "run", "./tools/tdsprobe", path],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                capture_output=True, text=True,
+                timeout=int(probe.get("timeout", 120)),
+            )
+            return proc.returncode == 0, (proc.stdout + proc.stderr).strip()
+        finally:
+            os.unlink(path)
+
     # ----------------------
     # Core execution
     # ----------------------
@@ -1531,6 +1552,15 @@ class SQLTestRunner:
                 self._record_success(name, is_noncritical)
                 return True
             return self._record_fail(name, "MySQL probe failed", json.dumps(mysql_probe), None, test_case.get("expect"), is_noncritical, on_fail_diag=output)
+
+        tds_probe = test_case.get("tds")
+        if tds_probe:
+            ok, output = self.execute_tds_probe(database, tds_probe)
+            if ok:
+                self._record_success(name, is_noncritical)
+                return True
+            return self._record_fail(name, "TDS probe failed", json.dumps(tds_probe), None,
+                                     test_case.get("expect"), is_noncritical, on_fail_diag=output)
 
         # Multi-step test case: steps list with per-step session_id + optional background
         steps = test_case.get("steps")
@@ -2598,6 +2628,7 @@ def cleanup_memcp_artifacts(owned_data_dir: Optional[Path]) -> None:
 
 def start_memcp_process(
     port: int, enable_mysql: bool = False, data_dir: Optional[str] = None,
+    enable_tds: bool = False,
 ) -> subprocess.Popen | None:
     global _memcp_log_file, _owned_memcp_process
     proc = None
@@ -2619,6 +2650,8 @@ def start_memcp_process(
         ]
         if not enable_mysql:
             cmd.append("--disable-mysql")
+        if enable_tds:
+            cmd.extend([f"--tds-port={port+2000}", "--tds-database=memcp-tests"])
         if profile := env.get("MEMCP_CPU_PROFILE_FILE"):
             cmd.extend(["-profile", profile])
         cmd.append("lib/main.scm")
@@ -2813,7 +2846,7 @@ def suite_execution_mode(spec_file: str) -> str:
     metadata = load_suite_metadata(spec_file)
     if (suite_requires_managed_restart(spec_file)
             or metadata.get("isolated")
-            or metadata.get("requires_mysql")):
+            or metadata.get("requires_mysql") or metadata.get("requires_tds")):
         return "exclusive"
     return "parallel"
 
@@ -3698,6 +3731,7 @@ def main():
     global is_connect_only_mode
     is_connect_only_mode = connect_only
     enable_mysql = any(load_suite_metadata(spec_file).get("requires_mysql") for spec_file in spec_files)
+    enable_tds = any(load_suite_metadata(spec_file).get("requires_tds") for spec_file in spec_files)
 
     lifecycle = {}
     startup_started = time.monotonic()
@@ -3719,7 +3753,7 @@ def main():
                 requests.get(base_url, timeout=2)
             except Exception:
                 memcp_process = start_memcp_process(
-                    port, enable_mysql=enable_mysql, data_dir=data_dir,
+                    port, enable_mysql=enable_mysql, data_dir=data_dir, enable_tds=enable_tds,
                 )
                 if not memcp_process:
                     print("❌ Failed to start MemCP")
@@ -3739,7 +3773,7 @@ def main():
                     stop_memcp_process(memcp_process)
                     memcp_process = None
                 memcp_process = start_memcp_process(
-                    port, enable_mysql=enable_mysql, data_dir=data_dir,
+                    port, enable_mysql=enable_mysql, data_dir=data_dir, enable_tds=enable_tds,
                 )
                 return memcp_process is not None
             runner.set_restart_handler(restart_handler)

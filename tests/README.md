@@ -29,9 +29,12 @@ corresponding successful operation.
 
 In these suites, fixture preparation and cleanup are explicit cases so missing
 DDL remains visible without preventing the remaining specifications from running.
-All suites remain enabled in CI and use exclusive scheduling. Native TDS probe
-cases currently report that the runner cannot dispatch them; they remain
-noncritical until a real driver probe can execute their assertions.
+All suites remain enabled in CI and use exclusive scheduling. A suite with
+`metadata.requires_tds: true` starts the native listener at HTTP port + 2000.
+Its `tds` cases run `tools/tdsprobe` against that listener using a real client
+driver. Each probe keeps one connection for its statements, supports named
+parameters and prepared calls, and checks rows, values, column names and errors.
+Unsupported frontend features remain noncritical specifications.
 
 Place a regression at the layer that owns its root cause, not at the layer
 where an application happened to expose it. Use `integration/query-shapes`
