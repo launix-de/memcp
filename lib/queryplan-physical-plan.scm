@@ -3495,6 +3495,9 @@ ordinary probe path until RecMap carries explicit equality relations. */
 				"decimal" "float" "double" "bool" "boolean" "date" "datetime"
 				"timestamp" "time" "year") rawtype)))))
 
+/* Physical projection reads the prepared query-local payload by source record
+identity. Keep storage acquisition out of the callback; logical stages remain
+unchanged and the existing mapper handles source-generation translation. */
 (define nested_scalar_recmap_call_expr (lambda (candidate)
 	(list (symbol (concat (string (nested_scalar_recmap_var candidate)) "_value"))
 		(list (quote get_column) (source_alias (nth candidate 0)) false "$record_ref" false))))

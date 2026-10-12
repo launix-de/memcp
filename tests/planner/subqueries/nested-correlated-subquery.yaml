@@ -314,6 +314,8 @@ test_cases:
         - "scan_recmap"
         - "recmap_compose"
         - "recmap_value_mapper"
+      result_not_contains:
+        - "$recmap_call"
     cleanup: &recmap_window_cleanup
       - sql: "DROP TABLE IF EXISTS nc_recmap_driver"
       - sql: "DROP TABLE IF EXISTS nc_recmap_middle"

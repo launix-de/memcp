@@ -192,6 +192,10 @@ func (r *recMap) partForSourceShard(shard *storageShard) *recMapShard {
 	}
 }
 
+// Direct point access owns one read capability per invocation through column
+// preparation and mapper completion. This explicit $recmap_call interface must
+// not become a generated SQL row-loop access path: repeated projection uses
+// newRecMapValueMapper, which prepares payload with one lease per target shard.
 func recMapReadTarget(currentTx *TxContext, target recMapTarget, columns []string,
 	mapper, ifNull scm.Scmer) scm.Scmer {
 	if target.shard == nil {
@@ -237,7 +241,9 @@ type recMapValuePosition struct {
 // newRecMapValueMapper materializes values reached through a RecMap one shard
 // at a time. The returned lookup is immutable and lock-free; it is suitable
 // for another operator's row callback without re-acquiring storage rights in
-// that loop.
+// that loop. The prepared values and source-generation projections belong only
+// to this query; they do not establish a transaction snapshot or survive it.
+// Each target lease is released before row probes, including on panic.
 func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []string,
 	mapper, ifNull scm.Scmer) scm.Scmer {
 	fallback := scm.Apply(ifNull)
