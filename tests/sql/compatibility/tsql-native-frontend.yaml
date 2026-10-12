@@ -115,6 +115,24 @@ test_cases:
   - name: Grouped aggregate results use the same addition compiler
     sql: SELECT suffix,SUM(a)+COUNT(*) AS value FROM tsql_add_contracts GROUP BY suffix
     expect: {rows: 1, data: [{suffix: x, value: 12}]}
+  - name: Derived aggregate producer keeps its contract after scope rewrite
+    sql: SELECT total+N'2' AS value FROM (SELECT SUM(a) AS total FROM tsql_add_contracts) AS d
+    expect: {rows: 1, data: [{value: 12}]}
+  - name: Outer aggregate keeps the grouped derived producer contract
+    sql: SELECT MAX(total)+N'2' AS value FROM (SELECT SUM(a) AS total FROM tsql_add_contracts GROUP BY suffix) AS d
+    expect: {rows: 1, data: [{value: 12}]}
+  - name: Lag output keeps its declared integer operand type
+    sql: SELECT id,LAG(b) OVER(ORDER BY id)+1 AS value FROM tsql_add_contracts ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: null}, {id: 2, value: 3}]}
+  - name: Lead output keeps its declared integer operand type
+    sql: SELECT id,LEAD(b) OVER(ORDER BY id)+1 AS value FROM tsql_add_contracts ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: 3}, {id: 2, value: null}]}
+  - name: Lag output keeps its declared character operand type
+    sql: SELECT id,LAG(txt) OVER(ORDER BY id)+N'2' AS value FROM tsql_add_contracts ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: null}, {id: 2, value: '32'}]}
+  - name: Lead output keeps its declared character operand type
+    sql: SELECT id,LEAD(suffix) OVER(ORDER BY id)+N'2' AS value FROM tsql_add_contracts ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: x2}, {id: 2, value: null}]}
   - name: Integer average uses its frontend integer result contract
     sql: SELECT AVG(id)+'2' AS value FROM tsql_add_contracts
     expect: {rows: 1, data: [{value: 3}]}

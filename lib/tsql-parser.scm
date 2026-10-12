@@ -230,7 +230,7 @@ The native reducers do not determine the frontend's SQL result contract. */
 	"COUNT" "INT"
 	"SUM" (tsql_numeric_aggregate_type input_type)
 	"AVG" (tsql_numeric_aggregate_type input_type)
-	"MIN" input_type "MAX" input_type
+	"MIN" input_type "MAX" input_type "LAG" input_type "LEAD" input_type
 	_ "any")))
 (define tsql_numeric_aggregate_type (lambda (input_type) (match (tsql_addition_type input_type)
 	"TINYINT" "INT" "SMALLINT" "INT" "INT" "INT"
