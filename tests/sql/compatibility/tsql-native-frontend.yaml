@@ -10,6 +10,8 @@ setup:
   - sql: CREATE TABLE tsql_add_contracts (id INT PRIMARY KEY,a INT,b SMALLINT,txt NVARCHAR(20),suffix VARCHAR(20))
   - sql: CREATE TABLE tsql_add_copy (id INT PRIMARY KEY,value INT)
   - sql: INSERT INTO tsql_add_contracts VALUES (1,10,2,N'3','x'),(2,NULL,2,NULL,'x')
+  - sql: DROP TABLE IF EXISTS tsql_terminator_probe
+  - sql: DROP TABLE IF EXISTS tsql_terminator_rejected
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: CREATE TABLE tsql_having_input (id INT PRIMARY KEY)
   - sql: INSERT INTO tsql_having_input VALUES (1)
@@ -223,6 +225,65 @@ test_cases:
       (not (regexp_test (string (parse_tsql "memcp-tests"
         "SELECT a+txt AS value FROM tsql_add_contracts" nil nil nil)) "sql_compile_expr|tsql_compile_addition"))
     expect: {result: true}
+  - name: Statement terminators belong to the grammar
+    scm: |
+      (expression_equal?
+        (parse_tsql "memcp-tests" "SELECT N'a;b' AS value" nil nil nil)
+        (parse_tsql "memcp-tests" "; ; SELECT N'a;b' AS value; ; -- trailing separator" nil nil nil))
+    expect: {result: true}
+  - name: Leading empty statements preserve one result
+    sql: ; ; SELECT 42 AS n; ;
+    expect: {rows: 1, data: [{n: 42}]}
+  - name: Multiline block comments are lexical whitespace
+    sql: |
+      /* setup text
+         ; SELECT 99 AS ignored */
+      SELECT /* projection
+                text */ 7 AS n;
+      /* trailing comment
+         SELECT 99 AS ignored; */
+    expect: {rows: 1, data: [{n: 7}]}
+  - name: Unterminated block comments remain syntax errors
+    sql: SELECT 7 AS n; /* unfinished
+    expect: {error: true}
+  - name: A line comment at end of input follows the terminator
+    sql: SELECT 8 AS n; -- trailing text
+    expect: {rows: 1, data: [{n: 8}]}
+  - name: Consecutive result statements remain explicitly unsupported
+    sql: SELECT 1 AS n; SELECT 2 AS n;
+    expect: {error: true}
+  - name: Invalid trailing statement cannot execute an earlier declaration
+    sql: CREATE TABLE tsql_terminator_rejected (id INT); invalid_token
+    expect: {error: true}
+  - name: Rejected statement does not publish the native table
+    sql: SELECT id FROM tsql_terminator_rejected
+    expect: {error: true}
+  - name: Statement terminators cannot swallow invalid trailing syntax
+    sql: SELECT 1 AS n; invalid_token
+    expect: {error: true}
+  - name: Multiline comments preserve quoted punctuation
+    sql: |
+      SELECT N'/* not a comment */; -- still text' AS label /* outside
+         comment */;
+    expect: {rows: 1, data: [{label: '/* not a comment */; -- still text'}]}
+  - name: Terminated DDL uses native table admission
+    sql: CREATE TABLE tsql_terminator_probe (id INT PRIMARY KEY,label NVARCHAR(80)); -- create
+    expect: {rows: 0}
+  - name: Terminated insert preserves semicolons inside literal data
+    sql: INSERT INTO tsql_terminator_probe VALUES (1,N'first;second'); /* insertion */
+    expect: {affected_rows: 1}
+  - name: Terminated mutation uses the native update planner
+    sql: UPDATE tsql_terminator_probe SET label=N'updated;value' WHERE id=1; -- update
+    expect: {affected_rows: 1}
+  - name: Native data survives terminated DDL and DML
+    sql: SELECT id,label FROM tsql_terminator_probe; /* read */
+    expect: {rows: 1, data: [{id: 1, label: 'updated;value'}]}
+  - name: Terminated deletion uses the native transaction path
+    sql: DELETE FROM tsql_terminator_probe WHERE id=1; -- delete
+    expect: {affected_rows: 1}
+  - name: Terminated deletion has an observable effect
+    sql: SELECT COUNT(*) AS n FROM tsql_terminator_probe; -- count
+    expect: {rows: 1, data: [{n: 0}]}
   - name: escaped closing bracket is a quoted identifier
     sql: SELECT 42 AS [answer]]suffix]
     expect: {rows: 1, data: [{"answer]suffix": 42}]}
@@ -1078,6 +1139,8 @@ test_cases:
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_add_contracts
   - sql: DROP TABLE IF EXISTS tsql_add_copy
+  - sql: DROP TABLE IF EXISTS tsql_terminator_probe
+  - sql: DROP TABLE IF EXISTS tsql_terminator_rejected
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: DROP TABLE IF EXISTS tsql_cast_collation
   - sql: DROP TABLE IF EXISTS tsql_setup_catalog

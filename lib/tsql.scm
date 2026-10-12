@@ -3,11 +3,7 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 
 (import "tsql-parser.scm")
 (define tsql_queryplan_cache (newcachemap))
-(define tsql_statement_text (lambda (text) (begin
-	(define input (strtrim text))
-	(define length (strlen input))
-	(if (and (> length 0) (equal? (substr input (- length 1) 1) ";"))
-		(substr input 0 (- length 1)) input))))
+(define tsql_statement_text strtrim)
 
 /* Bind at the request boundary, not in storage or row loops. NULL is a supplied
 value; the wire descriptor and SQL declaration own the type independently. */

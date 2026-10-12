@@ -1258,5 +1258,5 @@ never from the first row. Unknown expression types stay text in this first slice
 
 	(define command_parser (if describe
 		(parser (define query tsql_select) (tsql_build_select_plan query)) p))
-	((parser (define command command_parser) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
+	((parser '((* ";") (define command command_parser) (* ";")) command "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 )))
