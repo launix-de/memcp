@@ -1139,6 +1139,9 @@ never from the first row. Unknown expression types stay text in this first slice
 	) (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
+			/* PRIMARY is a reserved native key identity, not an index alias. */
+			(if (equal? (toUpper name) "PRIMARY")
+				(error "index name PRIMARY is reserved") true)
 			(define declarations (get_schema database tbl))
 			(define columns (map columns (lambda (name) (begin
 				(define declaration (find declarations (lambda (column) (equal?? (column "Field") name)) nil))

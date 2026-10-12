@@ -12,6 +12,8 @@ setup:
   - sql: INSERT INTO tsql_add_contracts VALUES (1,10,2,N'3','x'),(2,NULL,2,NULL,'x')
   - sql: DROP TABLE IF EXISTS tsql_terminator_probe
   - sql: DROP TABLE IF EXISTS tsql_terminator_rejected
+  - sql: DROP TABLE IF EXISTS tsql_index_reserved
+  - sql: CREATE TABLE tsql_index_reserved (id INT)
   - sql: DROP TABLE IF EXISTS tsql_index_rows
   - sql: DROP TABLE IF EXISTS tsql_index_duplicates
   - sql: DROP TABLE IF EXISTS tsql_index_nulls
@@ -293,6 +295,12 @@ test_cases:
   - name: Terminated deletion has an observable effect
     sql: SELECT COUNT(*) AS n FROM tsql_terminator_probe; -- count
     expect: {rows: 1, data: [{n: 0}]}
+  - name: Unique index declarations reject the reserved native primary key identity
+    sql: CREATE UNIQUE INDEX [pRiMaRy] ON tsql_index_reserved(id)
+    expect: {error: true, contains: index name PRIMARY is reserved}
+  - name: Rejected reserved index names leave native key metadata unchanged
+    scm: '(empty_list? (((show "memcp-tests" "tsql_index_reserved" true) "meta") "Unique"))'
+    expect: {result: true}
   - name: Unique index declaration emits the native key operation
     scm: |
       (expression_equal?
@@ -1210,6 +1218,7 @@ cleanup:
   - sql: DROP TABLE IF EXISTS tsql_add_copy
   - sql: DROP TABLE IF EXISTS tsql_terminator_probe
   - sql: DROP TABLE IF EXISTS tsql_terminator_rejected
+  - sql: DROP TABLE IF EXISTS tsql_index_reserved
   - sql: DROP TABLE IF EXISTS tsql_index_rows
   - sql: DROP TABLE IF EXISTS tsql_index_duplicates
   - sql: DROP TABLE IF EXISTS tsql_index_nulls
