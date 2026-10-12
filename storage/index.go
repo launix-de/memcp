@@ -1253,6 +1253,37 @@ func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, matchers []Ind
 	}
 }
 
+// sortIndexRows keeps the adaptive sorter for a bounded number of natural
+// runs. Merging thousands of short runs into a growing prefix is expensive;
+// the standard sort bounds that work. The probe stops once more than four
+// runs appear, so scattered input does not pay for a complete extra traversal.
+func sortIndexRows(rows []uint32, less func(uint32, uint32) bool) {
+	const maxRuns = 4
+	runs, direction := 1, 0
+	for i := 1; i < len(rows); i++ {
+		if direction == 0 {
+			if less(rows[i], rows[i-1]) {
+				direction = -1
+			} else if less(rows[i-1], rows[i]) {
+				direction = 1
+			}
+			continue
+		}
+		// One comparison continues a known direction, including equal keys.
+		if direction > 0 && !less(rows[i], rows[i-1]) ||
+			direction < 0 && !less(rows[i-1], rows[i]) {
+			continue
+		}
+		runs++
+		if runs > maxRuns {
+			sort.Slice(rows, func(a, b int) bool { return less(rows[a], rows[b]) })
+			return
+		}
+		direction = -direction
+	}
+	hybridsort.HybridSort(rows, less)
+}
+
 // buildIndex constructs the shared index data structures.
 // cols must contain value getters for each index column in order.
 // The caller must hold s.mu.Lock() or have exclusive access.
@@ -1354,7 +1385,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 		}
 		// sort indexes; skip non-sorted matcher columns (they don't affect
 		// sort order, they are query-level overlays for pruning)
-		hybridsort.HybridSort(tmp, func(a, b uint32) bool {
+		sortIndexRows(tmp, func(a, b uint32) bool {
 			rowA := uint(a) * uint(numCols)
 			rowB := uint(b) * uint(numCols)
 			for colIdx := range cols {
