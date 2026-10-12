@@ -209,7 +209,17 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   releases exactly once, including failed/cancelled acquisition. Full shard
   eviction checks zero readers under its exclusive shard lock before detaching
   any payload. Leases cover column preparation through operator completion;
-  row loops never update the counter and it is not persisted.
+  they do not replace row synchronization, visibility or generation ownership.
+  Scans and prepared RecMap projections retain once per shard/batch, outside
+  generated SQL row loops. The explicit `$recmap_call` point-access interface
+  and remaining SQL projections still retain per invocation. Exact nested
+  scalar source windows with unconditional payload demand use the prepared
+  mapper after native window selection. Guarded CASE/short-circuit expressions
+  retain their existing row-bound probes.
+  Repeated projection must prepare `recmap_value_mapper` on the consumed domain;
+  projection-only payloads must not be prepared ahead of filtering or LIMIT.
+  The counter is not persisted. Idle/LRU time hints cannot authorize eviction
+  of an active, arbitrarily paused preparation.
 
 - `inIndexHook.positions` is an immutable compressed main-generation row-ID
   permutation owned by its parent index hook. It retains no shard/catalog,

@@ -93,7 +93,12 @@ type storageShard struct {
 	// GetRead leases retain the column directory through preparation and use.
 	// The first lease synchronizes with eviction under mu; further leases and
 	// releases are atomic. Cleanup checks the count while owning mu exclusively.
-	// This process-local lifetime guard is never updated in row loops or persisted.
+	// This is eviction lifetime ownership, not row synchronization or a query
+	// snapshot: existing column/read-lock protocols still protect row access.
+	// Scan and prepared RecMap operators retain once per shard/batch. Explicit
+	// $recmap_call point access and remaining SQL projections still retain per
+	// invocation. Exact nested scalar source windows with unconditional payload
+	// demand use the batch mapper only after native window selection. The count is never persisted.
 	cacheReaders atomic.Int32
 
 	// Repartition generation tracking. Counters are atomic; generation points to
@@ -887,6 +892,9 @@ func (s *storageShard) setState(state SharedState) { s.srState.Store(uint32(stat
 // retainCacheRead closes the gap between loading columns and acquiring a scan's
 // row-processing lock. An existing reader permits lock-free nesting: taking
 // another RLock there could deadlock behind a writer waiting on the outer scan.
+// An idle/LRU timestamp cannot replace this guard: preparation can pause or
+// wait for a table lock without a bounded deadline. Cleanup may detach columns
+// only after the last owner releases; that decision is checked under mu.
 func (s *storageShard) retainCacheRead() {
 	for {
 		readers := s.cacheReaders.Load()

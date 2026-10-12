@@ -28,7 +28,10 @@ const (
 
 // ReadAccess delimits an acquired read capability without allocating a closure
 // for every local lookup. It can evolve into a cluster reference release.
-// Release must be called exactly once; a zero access requires no cleanup.
+// It retains prepared payload against full shard eviction, not a query-wide
+// snapshot or a row lock. Operators keep their existing synchronization and
+// generation/visibility rules. Release must be called exactly once, including
+// panic/cancellation unwinding; a zero access requires no cleanup.
 type ReadAccess struct {
 	shard *storageShard
 }

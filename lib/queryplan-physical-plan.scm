@@ -3495,12 +3495,18 @@ ordinary probe path until RecMap carries explicit equality relations. */
 				"decimal" "float" "double" "bool" "boolean" "date" "datetime"
 				"timestamp" "time" "year") rawtype)))))
 
+/* An already selected source window reads prepared query-local payload by
+record identity. Keep its storage acquisition out of the callback; the existing
+mapper handles source-generation translation without changing logical stages. */
 (define nested_scalar_recmap_call_expr (lambda (candidate)
-	(list recmap_call_callback_symbol
-		(nested_scalar_recmap_var candidate)
-		(quoted_runtime_list (nth candidate 13))
-		(nth candidate 14)
-		(list (quote lambda) '() nil))))
+	(if (not (nested_scalar_recmap_prepared_window? candidate))
+		(list recmap_call_callback_symbol
+			(nested_scalar_recmap_var candidate)
+			(quoted_runtime_list (nth candidate 13))
+			(nth candidate 14)
+			(list (quote lambda) '() nil))
+		(list (symbol (concat (string (nested_scalar_recmap_var candidate)) "_value"))
+			(list (quote get_column) (source_alias (nth candidate 0)) false "$record_ref" false)))))
 
 (define nested_scalar_recmap_scalar_marker (lambda (expr)
 	(if (not (list? expr))
@@ -3623,6 +3629,29 @@ The candidate's extra slot is private to physical lowering, never logical IR. */
 (define nested_scalar_recmap_window (lambda (candidate)
 	(if (> (count candidate) 15) (nth candidate 15) nil)))
 
+/* Eager payload projection is valid only when the containing expressions
+always demand their inputs. Do not descend into a scalar probe's stage data:
+its own projection runs only after the native selected-row mapping. A guarded
+outer CASE/short-circuit expression must keep its existing row-bound probe. */
+(define recmap_projection_deferred_heads (begin
+	(define names '(if and or coalesce coalesceNil match match_mut lambda quote try
+		eval parser outer begin begin_mut !begin define set setN parallel))
+	/* Frontends may emit either a symbol or the actual builtin procedure. */
+	(merge (list names (map names (lambda (name) (eval name)))))))
+
+(define recmap_projection_strict? (lambda (expr)
+	(match expr
+		(cons (symbol scalar_first_probe) _arguments) true
+		(cons head _tail) (and (not (contains? recmap_projection_deferred_heads head))
+			(reduce expr (lambda (strict item)
+				(and strict (recmap_projection_strict? item))) true))
+		_ true)))
+
+(define nested_scalar_recmap_prepared_window? (lambda (candidate)
+	(begin
+		(define window (nested_scalar_recmap_window candidate))
+		(and (not (nil? window)) (nth window 5)))))
+
 (define nested_scalar_recmap_window_candidate (lambda (stages block)
 	(begin
 		(define sources (qb_sources block))
@@ -3653,7 +3682,8 @@ The candidate's extra slot is private to physical lowering, never logical IR. */
 					(merge (list candidate (list (list sortcols
 						(order_relations_for_source src order_items)
 						(coalesceNil (qb_offset block) 0) (qb_limit block)
-						limit_rows))))))))))
+						limit_rows (recmap_projection_strict?
+							(list (qb_fields block) (qb_hidden block)))))))))))))
 
 (define nested_scalar_recmap_window_source_expr (lambda (candidate)
 	(begin
@@ -3870,11 +3900,21 @@ The candidate's extra slot is private to physical lowering, never logical IR. */
 				(physical_query_tx_symbol) (source_table_expr target)
 				(quoted_runtime_list (nth candidate 12)) (nth candidate 11))
 			(source_table_expr target)))
-		(list (quote define) (nested_scalar_recmap_var candidate)
+		(define map_binding (list (quote define) (nested_scalar_recmap_var candidate)
 			(list
 				(list (quote lambda) (list left_var)
 					(list (quote recmap_compose) left_var right_expr))
-				left_expr)))))
+				left_expr)))
+		/* Only an exact source window with unconditional payload demand is safe
+		to project here. Other paths can still precede root filtering/LIMIT or
+		contain inactivated CASE branches. The native mapper retains once per
+		target shard; row probes only read immutable query-local values. */
+		(if (not (nested_scalar_recmap_prepared_window? candidate)) map_binding
+			(list (quote !begin) map_binding
+				(list (quote define) (symbol (concat (string (nested_scalar_recmap_var candidate)) "_value"))
+					(list (quote recmap_value_mapper) (physical_query_tx_symbol)
+						(nested_scalar_recmap_var candidate) (quoted_runtime_list (nth candidate 13))
+						(nth candidate 14) (list (quote lambda) '() nil))))))))
 
 /* A decorrelated scalar FK chain can be a sequence of stage-output LEFT
 joins rather than nested scalar_first_probe expressions. Each stage must be

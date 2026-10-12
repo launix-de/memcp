@@ -313,11 +313,96 @@ test_cases:
         - "scan_order_recset"
         - "scan_recmap"
         - "recmap_compose"
+        - "recmap_value_mapper"
+      result_not_contains:
         - "$recmap_call"
     cleanup: &recmap_window_cleanup
       - sql: "DROP TABLE IF EXISTS nc_recmap_driver"
       - sql: "DROP TABLE IF EXISTS nc_recmap_middle"
       - sql: "DROP TABLE IF EXISTS nc_recmap_target"
+
+  - name: "Selected RecMap window does not evaluate invalid discarded projections"
+    setup: &recmap_projection_setup
+      - sql: "DROP TABLE IF EXISTS nc_projection_driver"
+      - sql: "DROP TABLE IF EXISTS nc_projection_middle"
+      - sql: "DROP TABLE IF EXISTS nc_projection_target"
+      - sql: "CREATE TABLE nc_projection_driver (id INT, middle_id INT)"
+      - sql: "CREATE TABLE nc_projection_middle (id INT, target_id INT)"
+      - sql: "CREATE TABLE nc_projection_target (id INT, value VARCHAR(20))"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "nc_projection_driver") '("id" "middle_id")
+              (map (produceN 200) (lambda (i) (list i (mod i 50)))))
+            (insert (table "memcp-tests" "nc_projection_middle") '("id" "target_id")
+              (map (produceN 50) (lambda (i) (list i i))))
+            (insert (table "memcp-tests" "nc_projection_target") '("id" "value")
+              (map (produceN 50) (lambda (i) (list i (if (>= i 45) "4" "(")))))
+            (rebuild))
+    sql: |
+      SELECT d.id, (
+        SELECT (
+          SELECT REGEXP_REPLACE('4', t.value, '4') FROM nc_projection_target t
+          WHERE t.id = m.target_id LIMIT 1)
+        FROM nc_projection_middle m
+        WHERE m.id = d.middle_id LIMIT 1) AS value
+      FROM nc_projection_driver d
+      ORDER BY d.id DESC LIMIT 5
+    expect:
+      rows: 5
+      data:
+        - {id: 199, value: "4"}
+        - {id: 198, value: "4"}
+        - {id: 197, value: "4"}
+        - {id: 196, value: "4"}
+        - {id: 195, value: "4"}
+    cleanup: &recmap_projection_cleanup
+      - sql: "DROP TABLE IF EXISTS nc_projection_driver"
+      - sql: "DROP TABLE IF EXISTS nc_projection_middle"
+      - sql: "DROP TABLE IF EXISTS nc_projection_target"
+
+  - name: "Invalid RecMap projection is rejected when its row is consumed"
+    setup: *recmap_projection_setup
+    sql: |
+      SELECT d.id, (
+        SELECT (
+          SELECT REGEXP_REPLACE('4', t.value, '4') FROM nc_projection_target t
+          WHERE t.id = m.target_id LIMIT 1)
+        FROM nc_projection_middle m
+        WHERE m.id = d.middle_id LIMIT 1) AS value
+      FROM nc_projection_driver d
+    expect: {error: true, contains: "regexp_replace: invalid pattern"}
+    cleanup: *recmap_projection_cleanup
+
+  - name: "Selected RecMap window preserves inactive CASE projection branches"
+    setup: *recmap_projection_setup
+    sql: |
+      SELECT d.id, CASE WHEN d.id = 199 THEN (
+        SELECT (
+          SELECT REGEXP_REPLACE('4', CASE WHEN t.id = 49 THEN t.value ELSE '(' END, '4')
+          FROM nc_projection_target t WHERE t.id = m.target_id LIMIT 1)
+        FROM nc_projection_middle m WHERE m.id = d.middle_id LIMIT 1)
+        ELSE NULL END AS value
+      FROM nc_projection_driver d ORDER BY d.id DESC LIMIT 5
+    expect:
+      rows: 5
+      data:
+        - {id: 199, value: "4"}
+        - {id: 198, value: null}
+        - {id: 197, value: null}
+        - {id: 196, value: null}
+        - {id: 195, value: null}
+    cleanup: *recmap_projection_cleanup
+
+  - name: "First-class null fallback preserves delayed projection demand"
+    scm: |
+      (begin
+        (define fallback (tsql_builtins "ISNULL"))
+        (define unused '(error "discarded null fallback was evaluated"))
+        (define expr (list fallback 1 unused))
+        (if (recmap_projection_strict? expr)
+          (error "deferred procedure head was classified for eager projection") true)
+        (eval (optimize expr)))
+    expect: {result: 1}
 
   - name: "Ordered RecMap window applies OFFSET only once"
     setup: *recmap_window_setup
