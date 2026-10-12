@@ -121,6 +121,45 @@ test_cases:
   - name: Outer aggregate keeps the grouped derived producer contract
     sql: SELECT MAX(total)+N'2' AS value FROM (SELECT SUM(a) AS total FROM tsql_add_contracts GROUP BY suffix) AS d
     expect: {rows: 1, data: [{value: 12}]}
+  - name: Scalar subquery preserves its declared numeric result contract
+    sql: SELECT (SELECT CAST('42' AS INT))+N'2' AS value
+    expect: {rows: 1, data: [{value: 44}]}
+  - name: Scalar subquery preserves its declared character result contract
+    sql: SELECT (SELECT N'ab')+N'c' AS value
+    expect: {rows: 1, data: [{value: abc}]}
+  - name: Scalar subquery preserves its declared typed null contract
+    sql: SELECT (SELECT CAST(NULL AS INT))+N'2' AS value
+    expect: {rows: 1, data: [{value: null}]}
+  - name: Empty scalar keeps its declared type and native null cardinality result
+    sql: SELECT (SELECT a FROM tsql_add_contracts WHERE id<0)+N'2' AS value
+    expect: {rows: 1, data: [{value: null}]}
+  - name: Correlated scalar keeps the native planner and declared result type
+    sql: SELECT p.id,(SELECT n.b FROM tsql_add_contracts AS n WHERE n.id=p.id)+N'2' AS value FROM tsql_add_contracts AS p ORDER BY p.id
+    expect: {rows: 2, data: [{id: 1, value: 4}, {id: 2, value: 4}]}
+  - name: Scalar metadata respects inner alias shadowing
+    sql: SELECT p.id,(SELECT b FROM tsql_add_contracts AS p WHERE p.id=1)+N'2' AS value FROM tsql_add_contracts AS p ORDER BY p.id
+    expect: {rows: 2, data: [{id: 1, value: 4}, {id: 2, value: 4}]}
+  - name: Scalar metadata does not hide invalid multi column scalar shapes
+    sql: SELECT (SELECT CAST(1 AS INT),CAST(2 AS INT))+N'2' AS value
+    expect: {error: true}
+  - name: Scalar metadata does not execute or collapse multiple native rows
+    sql: SELECT (SELECT b FROM tsql_add_contracts)+N'2' AS value
+    expect: {error: true}
+  - name: Union producer keeps identical declared numeric contracts by position
+    sql: SELECT v+N'2' AS value FROM (SELECT CAST('42' AS INT) AS v UNION ALL SELECT CAST('7' AS INT) AS other_name) AS d
+    expect: {rows: 2, data: [{value: 44}, {value: 9}]}
+  - name: Union producer keeps declared null and integer contracts
+    sql: SELECT v+N'2' AS value FROM (SELECT CAST(NULL AS INT) AS v UNION ALL SELECT CAST('7' AS INT) AS v) AS d
+    expect: {rows: 2, data: [{value: null}, {value: 9}]}
+  - name: Ranking row number has a frontend bigint contract
+    sql: SELECT id,ROW_NUMBER() OVER(ORDER BY id)+N'2' AS value FROM tsql_add_contracts ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: 3}, {id: 2, value: 4}]}
+  - name: Ranking rank has a frontend bigint contract
+    sql: SELECT id,RANK() OVER(ORDER BY id)+N'2' AS value FROM tsql_add_contracts ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: 3}, {id: 2, value: 4}]}
+  - name: Ranking dense rank has a frontend bigint contract
+    sql: SELECT id,DENSE_RANK() OVER(ORDER BY suffix)+N'2' AS value FROM tsql_add_contracts ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: 3}, {id: 2, value: 3}]}
   - name: Lag output keeps its declared integer operand type
     sql: SELECT id,LAG(b) OVER(ORDER BY id)+1 AS value FROM tsql_add_contracts ORDER BY id
     expect: {rows: 2, data: [{id: 1, value: null}, {id: 2, value: 3}]}

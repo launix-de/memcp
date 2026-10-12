@@ -228,6 +228,7 @@ configurable cutoff remain separate compatibility work. */
 The native reducers do not determine the frontend's SQL result contract. */
 (define tsql_aggregate_type (lambda (name input_type) (match name
 	"COUNT" "INT"
+	"ROW_NUMBER" "BIGINT" "RANK" "BIGINT" "DENSE_RANK" "BIGINT"
 	"SUM" (tsql_numeric_aggregate_type input_type)
 	"AVG" (tsql_numeric_aggregate_type input_type)
 	"MIN" input_type "MAX" input_type "LAG" input_type "LEAD" input_type
@@ -566,7 +567,7 @@ never from the first row. Unknown expression types stay text in this first slice
 
 		(parser '((atom "RIGHT" true) "(" (define s tsql_expression) "," (define n tsql_expression) ")") '((quote if) '((quote nil?) s) nil '((quote sql_substr) s '((quote +) 1 '((quote -) '((quote strlen) s) n)) n)))
 
-		(parser '((define fn tsql_identifier_unquoted) "(" (define args (* tsql_expression ",")) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") '('window_func (toUpper fn) args _over))
+		(parser '((define fn tsql_identifier_unquoted) "(" (define args (* tsql_expression ",")) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr (toUpper fn) args _over))
 
 		(parser '((define fn tsql_identifier_unquoted) "(" (define args (* tsql_expression ",")) ")")
 			(begin (define d (sql_aggregates (toUpper fn)))

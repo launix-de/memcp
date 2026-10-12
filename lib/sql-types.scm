@@ -278,23 +278,37 @@ always plain and canonical; type/collation ride alongside for the consumer. */
 (define sql_comparison_head? (lambda (head)
 	(has? (list (quote equal??) (quote equal?) (quote <) (quote >) (quote <=) (quote >=)) head)))
 
+/* Read a producer's declared projection contract, never its runtime values.
+UNION can carry identical/NULL contracts without choosing dialect coercions;
+heterogeneous branches require a frontend-assigned contract or casts. */
+(define sql_projection_info_at (lambda (relation index outer_sources)
+	(if (query_block? relation) (begin
+		(define fields (projection_exprs (expand_query_block_fields (qb_sources relation) (qb_fields relation))))
+		(if (>= index (count fields)) (sql_info nil "any" nil)
+			(sql_expr_info (merge (list (qb_sources relation) outer_sources)) (nth fields index))))
+		(union_block? relation) (begin
+			(define infos (map (union_branches relation) (lambda (branch) (sql_projection_info_at branch index outer_sources))))
+			(define types (filter (map infos sql_info_type) (lambda (type) (not (equal? type "NULL")))))
+			(define type (if (empty_list? types) "NULL" (car types)))
+			(if (reduce types (lambda (same current) (and same (equal? current type))) true)
+				(sql_info nil type (reduce infos (lambda (collation info)
+					(sql_merge_collation collation (sql_info_collation info))) nil))
+				(sql_info nil "any" nil)))
+		(sql_info nil "any" nil))))
+/* A derived column keeps its producer's SQL contract and its own reference.
+This resolves metadata only; the logical planner still owns projection rewrite. */
+(define sql_projection_column_info (lambda (relation original col col_ignorecase)
+	(begin
+		(define titles (queryplan_result_titles relation))
+		(define index (find (produceN (count titles)) (lambda (index)
+			(if col_ignorecase (equal?? (nth titles index) col) (equal? (nth titles index) col))) nil))
+		(define info (if (nil? index) (sql_info nil "any" nil) (sql_projection_info_at relation index '())))
+		(sql_info original (sql_info_type info) (sql_info_collation info)))))
+
 /* Catalog type/collation for a base-table column, name canonicalized. Only a
 resolved base table is rewritten: derived-table / stage-output columns and any
 column whose name does not resolve are returned verbatim so downstream lowering
 keeps its existing (ignorecase-flagged) resolution for them. */
-/* A derived column keeps its producer's SQL contract and its own reference.
-This resolves metadata only; the logical planner still owns projection rewrite. */
-(define sql_projection_column_info (lambda (relation original col col_ignorecase)
-	(if (not (query_block? relation)) (sql_info original "any" nil) (begin
-		(define fields (extract_assoc
-			(expand_query_block_fields (qb_sources relation) (qb_fields relation))
-			(lambda (name expression) (list name expression))))
-		(define field (find fields (lambda (field)
-			(if col_ignorecase (equal?? (car field) col) (equal? (car field) col))) nil))
-		(if (nil? field) (sql_info original "any" nil) (begin
-			(define info (sql_expr_info (qb_sources relation) (cadr field)))
-			(sql_info original (sql_info_type info) (sql_info_collation info))))))))
-
 (define sql_source_column_info (lambda (src original tblvar col col_ignorecase)
 	(if (not (source_is_base_table? src))
 		(sql_projection_column_info (source_relation src) original col col_ignorecase)
@@ -394,6 +408,15 @@ the conditions are booleans and would otherwise pollute the merge. */
 
 (define sql_expr_info (lambda (sources expr)
 	(match expr
+		((symbol inner_select) query) (begin
+			/* Only metadata is read here. The original scalar query stays in the
+			logical AST for the common decorrelator and its cardinality checks. */
+			(define outer_scope (binding_scope_entries sources '() "types" (list '() '() "types") 0))
+			(define bound (bind_query_names query (list outer_scope)))
+			(define info (if (equal? (count (queryplan_result_titles bound)) 1)
+				(sql_projection_info_at bound 0 sources) (sql_info nil "any" nil)))
+			(sql_info expr (sql_info_type info) (sql_info_collation info)))
+		((quote inner_select) query) (sql_expr_info sources (list (quote inner_select) query))
 		((symbol get_column) tblvar tbl_ic col col_ic) (sql_get_column_info sources tblvar tbl_ic col col_ic)
 		((quote get_column) tblvar tbl_ic col col_ic) (sql_get_column_info sources tblvar tbl_ic col col_ic)
 		((symbol quote) _datum) (sql_info expr "any" nil)
