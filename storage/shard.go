@@ -593,9 +593,7 @@ func (u *storageShard) load(t *table) {
 					}
 				}
 			}
-			if maxVal > t.Auto_increment {
-				t.Auto_increment = maxVal
-			}
+			t.reserveAutoIncrement(maxVal, 0)
 			break // only one AUTO_INCREMENT column per table
 		}
 	}
@@ -3167,13 +3165,7 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 				maxExplicitID = uint64(explicitID)
 			}
 		}
-		t.t.mu.Lock() // reserve generated IDs once for the complete batch
-		Auto_increment = t.t.Auto_increment
-		if maxExplicitID > Auto_increment {
-			Auto_increment = maxExplicitID
-		}
-		t.t.Auto_increment = Auto_increment + uint64(generatedIDs)
-		t.t.mu.Unlock()
+		Auto_increment = t.t.reserveAutoIncrement(maxExplicitID, uint64(generatedIDs))
 	}
 	// if requested, notify the first assigned id once per statement
 	if generatedIDs > 0 && onFirstInsertId != nil {

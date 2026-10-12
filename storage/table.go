@@ -569,7 +569,7 @@ type table struct {
 	tableLockState      atomic.Int64                     // 0 = unlocked, -1 = WRITE, positive = READ count
 	tableLockReadOwners map[*scm.SessionState]uint32     // guarded by tableLockMu
 	_                   [32]byte                         // separate table locks from insert traffic
-	Auto_increment      uint64                           // last assigned/reserved value; the next generated ID is this value plus one
+	Auto_increment      uint64                           // atomic runtime accesses; next generated ID is this value plus one
 	Collation           string
 	Charset             string
 	Comment             string
@@ -853,11 +853,9 @@ func (t *table) publishSchemaTopology(mode ShardMode, shards []*storageShard, di
 // MarshalJSON reads topology only from an immutable, atomically published
 // generation. Database schema locking keeps the remaining DDL fields stable.
 func (t *table) MarshalJSON() ([]byte, error) {
-	// INSERT reserves generated IDs under this mutex. Schema serialization
-	// snapshots the counter without holding it during persistence.
-	t.mu.Lock()
-	autoIncrement := t.Auto_increment
-	t.mu.Unlock()
+	// Reservations publish once per batch; snapshot the same counter without
+	// acquiring the topology mutex during schema persistence.
+	autoIncrement := atomic.LoadUint64(&t.Auto_increment)
 	topology := t.schemaTopology.Load()
 	if topology == nil {
 		active := t.activeTopology()
@@ -2990,6 +2988,26 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 	t.mu.Unlock()
 	source.mu.Unlock()
 	t.collectStatistics()
+}
+
+// Reserve one generated-ID range per batch without taking the topology mutex
+// from inside a shard writer. Explicit IDs advance the same monotonic counter.
+func (t *table) reserveAutoIncrement(explicit, generated uint64) uint64 {
+	for {
+		previous := atomic.LoadUint64(&t.Auto_increment)
+		base := max(previous, explicit)
+		// Generated values use the runtime's signed integer carrier. Recovery of
+		// old explicit counters remains unchanged when no IDs are requested.
+		if generated > 0 && (base > math.MaxInt64 || generated > math.MaxInt64-base) {
+			panic("generated ID block exceeds native integer capacity")
+		}
+		if base == previous && generated == 0 {
+			return base
+		}
+		if atomic.CompareAndSwapUint64(&t.Auto_increment, previous, base+generated) {
+			return base
+		}
+	}
 }
 
 func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64), currentTxArgs ...*TxContext) int {

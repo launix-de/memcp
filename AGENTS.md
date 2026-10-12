@@ -109,6 +109,13 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- `table.Auto_increment` uses the same atomic reservation for native INSERT
+  and `reserve_ids`, once per batch/block. Runtime counter snapshots and DDL
+  updates are atomic; loading unpublished table objects owns initialization.
+  Returned ID ranges are immutable invocation data, with no SQL type/session
+  policy in storage. Unused blocks are not independently WAL-durable and may
+  be reused after restart unless an existing schema checkpoint saved them.
+
 - `uniqueKey.ConstraintName` is persisted as optional `constraint_name` in the
   existing key metadata. It is immutable after publication; CREATE/DROP use the
   existing schema and table DDL locks. SHOW reads it under the existing catalog
