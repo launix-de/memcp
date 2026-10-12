@@ -27,6 +27,7 @@ from contextlib import redirect_stdout
 import itertools
 import requests
 import signal
+import socket
 import sys
 import tempfile
 import threading
@@ -49,6 +50,7 @@ from run_sql_tests import (  # noqa: E402
     adaptive_measurement_complete,
     cleanup_memcp_artifacts,
     discover_performance_ci_suites,
+    find_free_port,
     is_error_response,
     initialize_performance_recording,
     load_perf_regression_waivers,
@@ -92,6 +94,21 @@ from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
 
 class ManagedDataDirectoryContractTest(unittest.TestCase):
+    def test_free_port_probe_rejects_an_already_bound_reuse_socket(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as owner:
+            owner.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            owner.bind(("", 0))
+            port = owner.getsockname()[1]
+            with mock.patch("run_sql_tests.random.sample", return_value=[port]):
+                with self.assertRaises(RuntimeError):
+                    find_free_port()
+
+    def test_free_port_probe_returns_a_listenable_port(self):
+        port = find_free_port()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("", port))
+            listener.listen(1)
+
     def test_optional_cpu_profile_keeps_the_managed_server_contract(self):
         for profile in ("", "/owned/trial.pprof"):
             with self.subTest(profile=profile), \
