@@ -18,6 +18,7 @@ package storage
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"strings"
@@ -873,5 +874,192 @@ func TestUniqueNullPolicyConcurrentInsert(t *testing.T) {
 	workers.Wait()
 	if got := successes.Load(); got != 1 {
 		t.Fatalf("concurrent equal-NULL inserts succeeded %d times, want 1", got)
+	}
+}
+
+func TestReserveIDsConcurrentBlocks(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "treserveidblocks")
+	reserve := scm.Globalenv.Vars["reserve_ids"]
+	const workers, blocks, count = 8, 32, 7
+	ranges := make(chan scm.Scmer, workers*blocks)
+	var writers sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			for i := 0; i < blocks; i++ {
+				ranges <- scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(count))
+			}
+		}()
+	}
+	writers.Wait()
+	close(ranges)
+	seen := make(map[int64]bool)
+	for block := range ranges {
+		ends := block.Slice()
+		if len(ends) != 2 || ends[1].Int()-ends[0].Int()+1 != count {
+			t.Fatalf("invalid inclusive block: %v", block)
+		}
+		for id := ends[0].Int(); id <= ends[1].Int(); id++ {
+			if seen[id] {
+				t.Fatalf("overlapping reserved ID %d", id)
+			}
+			seen[id] = true
+		}
+	}
+	if len(seen) != workers*blocks*count || atomic.LoadUint64(&tbl.Auto_increment) != workers*blocks*count {
+		t.Fatal("concurrent blocks lost IDs")
+	}
+}
+
+func TestReserveIDsRejectsInvalidAndExhaustedBlocks(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "treserveidlimits")
+	reserve := scm.Globalenv.Vars["reserve_ids"]
+	for _, count := range []scm.Scmer{scm.NewInt(-1), scm.NewFloat(1.5), scm.NewString("2")} {
+		requirePanic(t, func() { scm.Apply(reserve, NewTableScmer(tbl), count) })
+	}
+	if atomic.LoadUint64(&tbl.Auto_increment) != 0 {
+		t.Fatal("invalid request changed the counter")
+	}
+	atomic.StoreUint64(&tbl.Auto_increment, math.MaxInt64-1)
+	requirePanic(t, func() { scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(2)) })
+	if atomic.LoadUint64(&tbl.Auto_increment) != math.MaxInt64-1 {
+		t.Fatal("overflow request changed the counter")
+	}
+	block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(1)).Slice()
+	if block[0].Int() != math.MaxInt64 || block[1].Int() != math.MaxInt64 {
+		t.Fatalf("last valid native block = %v", block)
+	}
+	requirePanic(t, func() { scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(1)) })
+	if zero := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(0)); len(zero.Slice()) != 0 {
+		t.Fatalf("zero request returned %v", zero)
+	}
+	if atomic.LoadUint64(&tbl.Auto_increment) != math.MaxInt64 {
+		t.Fatal("zero or rejected block changed the exhausted counter")
+	}
+	// Legacy signed explicit IDs can leave a high unsigned recovery counter.
+	// Loading/advancing that state without generating values stays supported.
+	if base := tbl.reserveAutoIncrement(math.MaxUint64, 0); base != math.MaxUint64 {
+		t.Fatalf("legacy recovery counter changed: %d", base)
+	}
+	requirePanic(t, func() { tbl.reserveAutoIncrement(0, 1) })
+}
+
+func TestReserveIDsExplicitInsertAndCallback(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "treserveidinsert")
+	tbl.Columns[0].AutoIncrement = true
+	reserve := scm.Globalenv.Vars["reserve_ids"]
+	block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(3)).Slice()
+	if block[0].Int() != 1 || block[1].Int() != 3 {
+		t.Fatalf("first block = %v", block)
+	}
+	var callbackID int64
+	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(3)}, {scm.NewInt(1)}}, nil, scm.NewNil(), false, func(id int64) { callbackID = id })
+	if atomic.LoadUint64(&tbl.Auto_increment) != 3 || callbackID != 0 {
+		t.Fatal("explicit reserved values allocated again or called the generated-ID callback")
+	}
+	tbl.Insert(nil, [][]scm.Scmer{{}, {}}, nil, scm.NewNil(), false, func(id int64) { callbackID = id })
+	if callbackID != 4 || atomic.LoadUint64(&tbl.Auto_increment) != 5 || tbl.CountExact() != 4 {
+		t.Fatal("implicit INSERT lost its first-ID callback or reused reserved values")
+	}
+	atomic.StoreUint64(&tbl.Auto_increment, math.MaxInt64)
+	callbackID = 0
+	requirePanic(t, func() {
+		tbl.Insert(nil, [][]scm.Scmer{{}}, nil, scm.NewNil(), false, func(id int64) { callbackID = id })
+	})
+	if callbackID != 0 || tbl.CountExact() != 4 {
+		t.Fatal("exhausted implicit INSERT published a row or called its callback")
+	}
+}
+
+func TestReserveIDsRestartContract(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "treserveidrestart", 0)
+	tbl.Columns[0].AutoIncrement = true
+	tbl.publishShowColumnsSnapshot()
+	tbl.schema.save()
+	reserve := scm.Globalenv.Vars["reserve_ids"]
+	block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(3)).Slice()
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{block[1], scm.NewString("durable reserved ID")}}, nil, scm.NewNil(), false, nil)
+	reloaded := reloadTableFromPersistence(t, "treserveidrestart", persistence)
+	if reloaded.CountExact() != 1 || atomic.LoadUint64(&reloaded.Auto_increment) != 3 {
+		t.Fatal("persisted reserved ID did not recover through existing WAL")
+	}
+	unused := scm.Apply(reserve, NewTableScmer(reloaded), scm.NewInt(2)).Slice()
+	if unused[0].Int() != 4 || unused[1].Int() != 5 {
+		t.Fatalf("unexpected unused block %v", unused)
+	}
+	crashed := reloadTableFromPersistence(t, "treserveidrestart", persistence)
+	if atomic.LoadUint64(&crashed.Auto_increment) != 3 {
+		t.Fatal("pure reservation unexpectedly changed persistent state")
+	}
+	crashed.schema.save()
+	scm.Apply(reserve, NewTableScmer(crashed), scm.NewInt(2))
+	crashed.schema.save()
+	checkpointed := reloadTableFromPersistence(t, "treserveidrestart", persistence)
+	if atomic.LoadUint64(&checkpointed.Auto_increment) != 5 {
+		t.Fatal("existing schema checkpoint did not retain the reserved counter")
+	}
+}
+
+// Native INSERT and callers reserving their own blocks must compete for the
+// same counter. Each callback reports its own batch, never a later global value.
+func TestReserveIDsConcurrentWithNativeInsert(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "treserveidmixed")
+	tbl.Columns[0].AutoIncrement = true
+	reserve := scm.Globalenv.Vars["reserve_ids"]
+	const workers, batches = 8, 20
+	blocks := make(chan [2]int64, workers*batches)
+	var writers sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		writers.Add(1)
+		go func(worker int) {
+			defer writers.Done()
+			for batch := 0; batch < batches; batch++ {
+				if worker%2 == 0 {
+					block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(7)).Slice()
+					blocks <- [2]int64{block[0].Int(), block[1].Int()}
+				} else {
+					tbl.Insert(nil, [][]scm.Scmer{{}, {}, {}}, nil, scm.NewNil(), false, func(first int64) {
+						blocks <- [2]int64{first, first + 2}
+					})
+				}
+			}
+		}(worker)
+	}
+	writers.Wait()
+	close(blocks)
+	seen := make(map[int64]bool)
+	for block := range blocks {
+		for id := block[0]; id <= block[1]; id++ {
+			if seen[id] {
+				t.Fatalf("native INSERT and reservation overlap at %d", id)
+			}
+			seen[id] = true
+		}
+	}
+	const expected = workers / 2 * batches * (7 + 3)
+	if len(seen) != expected || atomic.LoadUint64(&tbl.Auto_increment) != expected {
+		t.Fatal("mixed native batches lost or consumed IDs twice")
+	}
+	if tbl.CountExact() != workers/2*batches*3 {
+		t.Fatal("reservation unexpectedly published rows or INSERT lost rows")
+	}
+}
+
+func TestReserveIDsPersistedPrefixRecovery(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "treserveidprefix", 0)
+	tbl.Columns[0].AutoIncrement = true
+	tbl.publishShowColumnsSnapshot()
+	tbl.schema.save()
+	reserve := scm.Globalenv.Vars["reserve_ids"]
+	block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(100)).Slice()
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{block[0], scm.NewString("only first ID persisted")}}, nil, scm.NewNil(), false, nil)
+	reloaded := reloadTableFromPersistence(t, "treserveidprefix", persistence)
+	if atomic.LoadUint64(&reloaded.Auto_increment) != 1 {
+		t.Fatal("a persisted prefix made its unlogged unused suffix durable")
+	}
+	next := scm.Apply(reserve, NewTableScmer(reloaded), scm.NewInt(1)).Slice()
+	if next[0].Int() != 2 || next[1].Int() != 2 {
+		t.Fatalf("unlogged suffix was not recovered from persisted IDs: %v", next)
 	}
 }

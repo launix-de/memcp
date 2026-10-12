@@ -1203,6 +1203,23 @@ meaningful.
   collations for storage operators, compiling casts, or reporting type errors;
   they must not survive as runtime type wrappers or checks in storage operators.
 
+### Native generated-ID blocks
+
+`reserve_ids(table, count)` and automatic INSERT share the existing atomic table
+counter and batch reservation. Returned inclusive endpoints are immutable,
+invocation-owned signed integers; zero requests return an empty list without
+advancing the counter. A block must fit the native signed-integer carrier before
+reservation succeeds. SQL type bounds and assignment semantics belong to the
+frontend. Feeding reserved IDs to native INSERT as explicit values neither
+reserves a second block nor moves the counter backwards.
+
+Reservation adds no locks, per-row checks, separate allocator, persistent sequence
+or session state. Unused blocks are not independently WAL-logged: restart can
+reuse them unless an existing schema checkpoint persisted the counter. Persisted
+inserted values retain the existing engine durability contract and advance the
+same counter during replay. SQL frontends must not claim stronger reservation
+durability or materialize arbitrary SELECT input to obtain a block size.
+
 ### Storage is opaque to Scheme cache and plan policy
 
 Table handles identify logical relations. Shard identities, topology generations,

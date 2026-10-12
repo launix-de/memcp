@@ -3150,11 +3150,7 @@ func Init(en scm.Env) {
 				requireTableMaintenance(db.Name, t.Name, maintenanceAlter)
 				next := uint64(scm.ToInt(a[2]))
 				if next > 0 {
-					t.mu.Lock()
-					if next-1 > t.Auto_increment {
-						t.Auto_increment = next - 1
-					}
-					t.mu.Unlock()
+					t.reserveAutoIncrement(next-1, 0)
 					db.save()
 				}
 				return scm.NewBool(true)
@@ -3188,9 +3184,7 @@ func Init(en scm.Env) {
 					case "auto_increment":
 						ai := scm.ToInt(a[3])
 						if ai > 1 {
-							t.mu.Lock()
-							t.Auto_increment = uint64(ai)
-							t.mu.Unlock()
+							atomic.StoreUint64(&t.Auto_increment, uint64(ai))
 							db.save()
 							return scm.NewBool(true)
 						}
@@ -3726,6 +3720,28 @@ func Init(en scm.Env) {
 				{Kind: "string", Label: "newname", Description: "new name of the table"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "reserve_ids",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			t := TableFromScmer(a[0])
+			if !a[1].IsInt() || a[1].Int() < 0 {
+				panic("reserve_ids: count must be a nonnegative integer")
+			}
+			count := uint64(a[1].Int())
+			if count == 0 {
+				return scm.NewSlice(nil)
+			}
+			base := t.reserveAutoIncrement(0, count)
+			return scm.NewSlice([]scm.Scmer{scm.NewInt(int64(base + 1)), scm.NewInt(int64(base + count))})
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "reserves a disjoint ID block from the existing table counter; returns inclusive (first last), or an empty list for zero. Unused reservations have no independent WAL durability; restart retains checkpointed counters and IDs reconstructed from persisted inserted values.", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "table", Label: "table"},
+				{Kind: "int", Label: "count", Description: "nonnegative number of IDs to reserve"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "list"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -5342,9 +5358,7 @@ func plannerDistinctForColumns(t *table, columns []string) (float64, float64, st
 func showBuildMeta(db *database, t *table) scm.Scmer {
 	engine := showEngineStr(t)
 	maintenance := tableMaintenanceCapabilities(db.Name, t.Name)
-	t.mu.Lock()
-	nextAutoIncrement := t.Auto_increment + 1
-	t.mu.Unlock()
+	nextAutoIncrement := atomic.LoadUint64(&t.Auto_increment) + 1
 	uniques := make([]scm.Scmer, len(t.Unique))
 	for i, uk := range t.Unique {
 		uniques[i] = scm.NewSlice([]scm.Scmer{
