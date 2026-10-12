@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Corner case tests for UNIQUE constraint enforcement across main and delta storage
 # Tests unique key checking when data lives in:
 # - delta only (before rebuild)
@@ -308,5 +310,65 @@ test_cases:
     expect:
       affected_rows: 1
 
+  - name: "Batch: setup table"
+    setup:
+      - sql: "DROP TABLE IF EXISTS uniq_batch"
+    sql: "CREATE TABLE uniq_batch (id INT PRIMARY KEY, val INT UNIQUE, payload TEXT) ENGINE=memory"
+
+  - name: "Batch: repeated primary key fails"
+    sql: "INSERT INTO uniq_batch VALUES (1, 10, 'first'), (2, 20, 'other'), (1, 30, 'duplicate')"
+    expect:
+      error: true
+
+  - name: "Batch: failed primary key statement rolls back prefix"
+    sql: "SELECT COUNT(*) AS n FROM uniq_batch"
+    expect:
+      data: [{n: 0}]
+
+  - name: "Batch: repeated secondary key fails"
+    sql: "INSERT INTO uniq_batch VALUES (1, 10, 'first'), (2, 20, 'other'), (3, 10, 'duplicate')"
+    expect:
+      error: true
+
+  - name: "Batch: failed secondary key statement rolls back prefix"
+    sql: "SELECT COUNT(*) AS n FROM uniq_batch"
+    expect:
+      data: [{n: 0}]
+
+  - name: "Batch: ignore retains first row per unique key"
+    sql: "INSERT IGNORE INTO uniq_batch VALUES (1, 10, 'first'), (2, 20, 'other'), (1, 30, 'duplicate'), (3, 20, 'duplicate secondary'), (4, NULL, 'null one'), (5, NULL, 'null two')"
+    expect:
+      affected_rows: 4
+
+  - name: "Batch: ignore result preserves order and NULL-distinct semantics"
+    sql: "SELECT id, val, payload FROM uniq_batch ORDER BY id"
+    expect:
+      data:
+        - {id: 1, val: 10, payload: "first"}
+        - {id: 2, val: 20, payload: "other"}
+        - {id: 4, val: null, payload: "null one"}
+        - {id: 5, val: null, payload: "null two"}
+
+  - name: "Batch: rejected first row does not claim an earlier key"
+    sql: "INSERT IGNORE INTO uniq_batch VALUES (6, 10, 'rejected'), (6, 60, 'accepted')"
+    expect:
+      affected_rows: 1
+
+  - name: "Batch: secondary rejection allows later same primary key"
+    sql: "SELECT id, val, payload FROM uniq_batch WHERE id=6"
+    expect:
+      data: [{id: 6, val: 60, payload: "accepted"}]
+
+  - name: "Batch: upsert sees preceding inserted row"
+    sql: "INSERT INTO uniq_batch VALUES (7, 70, 'first'), (7, 70, 'last') ON DUPLICATE KEY UPDATE payload=VALUES(payload)"
+    expect:
+      affected_rows: 3
+
+  - name: "Batch: upsert leaves one row with final payload"
+    sql: "SELECT id, val, payload FROM uniq_batch WHERE id=7"
+    expect:
+      data: [{id: 7, val: 70, payload: "last"}]
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS uniq_md"
+  - sql: "DROP TABLE IF EXISTS uniq_batch"

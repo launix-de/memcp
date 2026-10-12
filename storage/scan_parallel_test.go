@@ -164,6 +164,247 @@ func setupScanParallelTestTable(t *testing.T, dbName string) *table {
 	return tbl
 }
 
+func TestUniqueBatchRejectsRepeatedKeys(t *testing.T) {
+	for _, ignore := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ignore-%v", ignore), func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tuniquebatchduplicates")
+			tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+			tx := NewTxContext(TxCursorStability)
+			onCollision := scm.NewNil()
+			if ignore {
+				onCollision = scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewInt(0) })
+			}
+			var caught any
+			func() {
+				defer func() { caught = recover() }()
+				tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}, {scm.NewInt(8)}, {scm.NewInt(7)}}, nil, onCollision, false, nil, tx)
+			}()
+			if ignore {
+				if caught != nil {
+					t.Fatalf("INSERT IGNORE panicked: %v", caught)
+				}
+				if err := tx.Commit(); err != nil {
+					t.Fatal(err)
+				}
+				if got := tbl.CountExact(); got != 2 {
+					t.Fatalf("INSERT IGNORE published %d rows, want 2", got)
+				}
+			} else {
+				tx.Rollback()
+				if caught == nil || !strings.Contains(fmt.Sprint(caught), "Duplicate entry") {
+					t.Fatalf("expected duplicate error, got %v", caught)
+				}
+				if got := tbl.CountExact(); got != 0 {
+					t.Fatalf("failed statement retained %d rows", got)
+				}
+			}
+		})
+	}
+}
+
+func TestUniqueOverlappingACIDInserts(t *testing.T) {
+	for _, mode := range []string{"free", "pruned", "global"} {
+		t.Run(mode, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tuniqueacidoverlap")
+			tbl.CreateColumn("route", "INT", nil, nil)
+			tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+			if mode != "free" {
+				dimension := "id"
+				if mode == "global" {
+					dimension = "route"
+				}
+				tbl.mu.Lock()
+				tbl.ShardMode = ShardModePartition
+				tbl.PDimensions = []shardDimension{{Column: dimension, NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(3)}}}
+				tbl.PShards = []*storageShard{NewShard(tbl), NewShard(tbl)}
+				tbl.publishTopologyLocked()
+				tbl.mu.Unlock()
+			}
+			const writers = 8
+			staged := make(chan struct{}, writers)
+			commit := make(chan struct{})
+			var committed atomic.Int64
+			var workers sync.WaitGroup
+			for writer := range writers {
+				workers.Add(1)
+				go func() {
+					defer workers.Done()
+					tx := NewTxContext(TxACID)
+					var caught any
+					func() {
+						defer func() { caught = recover() }()
+						tbl.Insert([]string{"id", "route"}, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(int64(writer))}}, nil, scm.NewNil(), false, nil, tx)
+					}()
+					staged <- struct{}{}
+					<-commit
+					if caught != nil {
+						tx.Rollback()
+						if !strings.Contains(fmt.Sprint(caught), "Concurrent UNIQUE reservation") && !strings.Contains(fmt.Sprint(caught), "Duplicate entry") {
+							t.Errorf("unexpected insert error: %v", caught)
+						}
+						return
+					}
+					if err := tx.Commit(); err != nil {
+						tx.Rollback()
+						return
+					}
+					committed.Add(1)
+				}()
+			}
+			for range writers {
+				<-staged
+			}
+			close(commit)
+			workers.Wait()
+			if got := committed.Load(); got != 1 {
+				t.Fatalf("%d transactions committed the same key, want 1", got)
+			}
+			if got := tbl.CountExact(); got != 1 {
+				t.Fatalf("published %d rows for one unique key", got)
+			}
+
+		})
+	}
+}
+
+func TestUniqueBatchRechecksRowsRejectedByAnotherKey(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tuniquebatchlaterkey")
+	tbl.CreateColumn("val", "INT", nil, nil)
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "val", Cols: []string{"val"}}}
+	cols := []string{"id", "val"}
+	tbl.Insert(cols, [][]scm.Scmer{{scm.NewInt(10), scm.NewInt(99)}}, nil, scm.NewNil(), false, nil)
+	ignore := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewInt(0) })
+	got := tbl.Insert(cols, [][]scm.Scmer{{scm.NewInt(1), scm.NewInt(99)}, {scm.NewInt(1), scm.NewInt(100)}}, nil, ignore, false, nil)
+	if got != 1 || tbl.CountExact() != 2 {
+		t.Fatalf("later key rejection incorrectly reserved first key: inserted=%d count=%d", got, tbl.CountExact())
+	}
+}
+
+func TestUniqueBatchCoercingAndNullKeys(t *testing.T) {
+	cases := []struct {
+		name             string
+		first, second    scm.Scmer
+		nullsNotDistinct bool
+		want             int
+	}{
+		{"numeric-prefix", scm.NewString("12x"), scm.NewInt(12), false, 1},
+		{"int-float", scm.NewInt(12), scm.NewFloat(12), false, 1},
+		{"signed-zero", scm.NewFloat(0), scm.NewFloat(math.Copysign(0, -1)), false, 1},
+		{"large-distinct-ints", scm.NewInt(9007199254740992), scm.NewInt(9007199254740993), false, 2},
+		{"rounded-int-float", scm.NewInt(9007199254740993), scm.NewFloat(9007199254740992), false, 1},
+		{"null-distinct", scm.NewNil(), scm.NewNil(), false, 2},
+		{"null-not-distinct", scm.NewNil(), scm.NewNil(), true, 1},
+		{"null-false-coercion", scm.NewBool(false), scm.NewNil(), true, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tuniquebatchcoercion")
+			tbl.CreateColumn("value", "TEXT", nil, nil)
+			tbl.Unique = []uniqueKey{{Id: "value", Cols: []string{"value"}, NullsNotDistinct: tc.nullsNotDistinct}}
+			cols := []string{"id", "value"}
+			rows := [][]scm.Scmer{{scm.NewInt(1), tc.first}, {scm.NewInt(2), tc.second}}
+			accepted, rejected := 0, 0
+			tbl.ProcessUniqueCollision(cols, rows, false, func(rows [][]scm.Scmer) {
+				tbl.ActiveShards()[0].Insert(cols, rows, false, nil, nil, false, nil)
+				accepted += len(rows)
+			}, nil, func(string, []scm.Scmer) { rejected++ }, 0, nil)
+			if accepted != tc.want || rejected != 2-tc.want || tbl.CountExact() != uint(tc.want) {
+				t.Fatalf("accepted=%d rejected=%d visible=%d, want %d", accepted, rejected, tbl.CountExact(), tc.want)
+			}
+		})
+	}
+}
+
+func TestUniqueReservationLifecycle(t *testing.T) {
+	for _, action := range []string{"rollback", "savepoint", "unstage", "commit", "rebuild"} {
+		t.Run(action, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tuniquereservation")
+			tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+			tx := NewTxContext(TxACID)
+			defer func() {
+				if tx.State == TxActive {
+					tx.Rollback()
+				}
+			}()
+			sp := tx.CreateSavepoint()
+			cols := []string{"id"}
+			rows := [][]scm.Scmer{{scm.NewInt(7)}}
+			tbl.Insert(cols, rows, nil, scm.NewNil(), false, nil, tx)
+			shard := tbl.ActiveShards()[0]
+			access := exactScanAccess(newExactScanAccessSchema(cols), rows[0])
+			if _, present := shard.GetRecordidForUnique(access, nil, false); present {
+				t.Fatal("ordinary key lookup exposed an uncommitted row")
+			}
+			var callbacks int
+			collision := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+				callbacks++
+				return scm.NewBool(true)
+			})
+			var caught any
+			func() {
+				defer func() { caught = recover() }()
+				tbl.Insert(cols, rows, nil, collision, false, nil)
+			}()
+			if caught == nil || !strings.Contains(fmt.Sprint(caught), "Concurrent UNIQUE reservation") || callbacks != 0 {
+				t.Fatalf("pending key: error=%v callbacks=%d", caught, callbacks)
+			}
+			if !shard.mu.TryLock() {
+				t.Fatal("reservation conflict leaked shard lock")
+			}
+			shard.mu.Unlock()
+			switch action {
+			case "rollback":
+				tx.Rollback()
+			case "savepoint":
+				tx.RollbackToSavepoint(sp)
+			case "unstage":
+				shard.mu.Lock()
+				unstaged := tx.UnstageRow(shard, shard.main_count)
+				shard.mu.Unlock()
+				if !unstaged {
+					t.Fatal("could not unstage inserted row")
+				}
+				tbl.Insert(cols, rows, nil, scm.NewNil(), false, nil, tx)
+				if err := tx.Commit(); err != nil {
+					t.Fatal(err)
+				}
+			case "commit":
+				if err := tx.Commit(); err != nil {
+					t.Fatal(err)
+				}
+			case "rebuild":
+				Rebuild(true, true)
+				caught = nil
+				func() {
+					defer func() { caught = recover() }()
+					tbl.Insert(cols, rows, nil, scm.NewNil(), false, nil)
+				}()
+				if caught == nil || !strings.Contains(fmt.Sprint(caught), "Concurrent UNIQUE reservation") {
+					t.Fatalf("rebuild lost pending key: %v", caught)
+				}
+				tx.Rollback()
+			}
+			if action == "commit" || action == "unstage" {
+				caught = nil
+				func() {
+					defer func() { caught = recover() }()
+					tbl.Insert(cols, rows, nil, scm.NewNil(), false, nil)
+				}()
+				if caught == nil || !strings.Contains(fmt.Sprint(caught), "Duplicate entry") {
+					t.Fatalf("committed key: %v", caught)
+				}
+			} else {
+				if got := tbl.Insert(cols, rows, nil, scm.NewNil(), false, nil); got != 1 {
+					t.Fatalf("released key accepted %d rows", got)
+				}
+			}
+			if got := tbl.CountExact(); got != 1 {
+				t.Fatalf("reservation lifecycle left %d visible rows", got)
+			}
+		})
+	}
+}
+
 func TestGeneratedUniqueKeySkipReleasesOuterLockOnPanic(t *testing.T) {
 	for _, generatedFirst := range []bool{true, false} {
 		name := "generated_first"
