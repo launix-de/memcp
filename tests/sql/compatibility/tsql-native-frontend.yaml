@@ -690,6 +690,108 @@ test_cases:
           nil nil nil)) "sql_type_expr"))
     expect: {result: true}
 
+  - name: RPC declaration grammar uses qualified builtin types and native dimensions
+    scm: |
+      (expression_equal? (tds_bind_declarations "memcp-tests"
+        "@id [sys].[BIGINT], @label [sys].[NVARCHAR](MAX), @amount DECIMAL(20,2)")
+        (list (list "id" (list "BIGINT")) (list "label" (list "NVARCHAR" -1))
+          (list "amount" (list "DECIMAL" 20 2)))))
+    expect: {result: true}
+  - name: RPC binding keeps declared types for null and integer values
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (define output (newsession))
+        (tds_frontend "execute" s
+          (list "database" "memcp-tests" "text" "SELECT @big AS exact,@missing AS absent"
+            "declarations" "@big BIGINT,@missing INT"
+            "parameters" (list
+              (list "name" "@big" "flags" 0 "type" (list "kind" 38 "size" 8)
+                "value" (tsql_parse_integer "9007199254740993"))
+              (list "name" "@missing" "flags" 0 "type" (list "kind" 231 "size" 2) "value" nil)))
+          (lambda (values) (output "values" values))
+          (lambda (fields) (output "fields" fields)) nil nil)
+        (and (expression_equal? (car (output "values")) (tsql_parse_integer "9007199254740993"))
+          (nil? (cadr (output "values")))
+          (equal? (map (output "fields") (lambda (f) (f "sql_type"))) '("BIGINT" "INT"))))
+    expect: {result: true}
+  - name: RPC cached query uses current values and isolates declaration contracts
+    scm: |
+      (begin
+        (define output (newsession))
+        (define query (lambda (type value) (begin
+          (define s (newsession))
+          (s "username" "root")
+          (tds_frontend "execute" s
+            (list "database" "memcp-tests" "text" "SELECT @v AS value"
+              "declarations" (concat "@v " type)
+              "parameters" (list (list "name" "@v" "flags" 0 "type" (list "kind" 231 "size" 10) "value" value)))
+            (lambda (row) (output "value" (car row)))
+            (lambda (fields) (output "type" ((car fields) "sql_type"))) nil nil)
+          (list (output "value") (output "type")))))
+        (and (expression_equal? (query "INT" "7") '(7 "INT"))
+          (expression_equal? (query "INT" "8") '(8 "INT"))
+          (expression_equal? (query "NVARCHAR(10)" "hello") '("hello" "NVARCHAR"))
+          (expression_equal? (query "INT" nil) '(nil "INT"))))
+    expect: {result: true}
+  - name: RPC declaration validates missing parameters before execution
+    scm: '(tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v INT") (list))'
+    expect: {error: true}
+  - name: RPC duplicate declarations are rejected
+    scm: |
+      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v INT,@V INT")
+        (list (list "name" "v" "flags" 0) (list "name" "v" "flags" 0)))
+    expect: {error: true}
+  - name: RPC duplicate supplied names are rejected
+    scm: |
+      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v INT,@w INT")
+        (list (list "name" "v" "flags" 0) (list "name" "v" "flags" 0)))
+    expect: {error: true}
+  - name: Guarded parameter plans read each invocation value
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (define declarations (tds_bind_declarations "memcp-tests" "@v INT"))
+        (define run (lambda (value) (begin
+          (tds_bind_parameters s declarations
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 38 "size" 4) "value" value)))
+          (define output (newsession))
+          (tsql_execute_statement nil "memcp-tests" "SELECT id FROM tsql_native WHERE id IN (@v)" s
+            (lambda (row) (output "id" (row "id"))) (lambda fields true))
+          (output "id"))))
+        (equal? (map '(1 2 99 1) run) '(1 2 nil 1)))
+    expect: {result: true}
+  - name: RPC output parameters require an explicit implemented contract
+    scm: |
+      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v INT")
+        (list (list "name" "v" "flags" 1 "type" (list "kind" 38 "size" 4) "value" 7)))
+    expect: {error: true}
+  - name: RPC temporal wire inputs remain explicit unsupported types
+    scm: |
+      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v DATETIME2(7)")
+        (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "scale" 7) "value" nil)))
+    expect: {error: true}
+  - name: Pure prepare description retains types without parameter values
+    scm: |
+      (begin
+        (define s (newsession))
+        (define fields (tds_describe "memcp-tests" "SELECT TOP (0) @n AS n,@label AS label"
+          "@n BIGINT,@label NVARCHAR(50)" s))
+        (and (equal? (map fields (lambda (f) (f "sql_type"))) '("BIGINT" "NVARCHAR"))
+          (nil? (s "__tsql_parameter:n"))))
+    expect: {result: true}
+  - name: Pure prepare description rejects undeclared variables
+    scm: '(tds_describe "memcp-tests" "SELECT @missing AS value" "" (newsession))'
+    expect: {error: true}
+  - name: Pure prepare description cannot execute schema changes
+    scm: '(tds_describe "memcp-tests" "DROP TABLE tsql_native" "" (newsession))'
+    expect: {error: true}
+  - name: Qualified expression cast reuses the declaration grammar
+    sql: SELECT CAST('7' AS [sys].[INT]) AS value
+    expect: {rows: 1, data: [{value: 7}]}
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: DROP TABLE IF EXISTS tsql_cast_collation

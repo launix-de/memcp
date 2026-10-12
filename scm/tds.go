@@ -47,7 +47,7 @@ func tdsValueData(v any) Scmer {
 	case tds.Temporal:
 		return NewSlice([]Scmer{NewString("days"), NewInt(x.Days), NewString("ticks"), NewInt(x.Ticks), NewString("offset"), NewInt(x.Offset)})
 	default:
-		return NewAny(v)
+		return FromAny(v)
 	}
 }
 func tdsRequestData(r tds.Request) Scmer {

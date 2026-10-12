@@ -542,7 +542,7 @@ test_cases:
   sql: SELECT @missing AS v
   expect:
     error: true
-  noncritical: true
+
 - name: TSQL date boundary function
   sql: SELECT DATEDIFF(day,N'2026-01-01',N'2026-01-02') AS days
   expect:
@@ -647,7 +647,7 @@ test_cases:
     \ \"SELECT TOP (0) id FROM dbo.tsql_data\" \"\" s))\n  (if (and (equal? (count fields) 1) (equal? ((car fields)\
     \ \"name\") \"id\")\n      (equal? ((car fields) \"sql_type\") \"INT\")) true (error \"empty SELECT lost its\
     \ declared type\")))\n"
-  noncritical: true
+
 - name: Describe never executes INSERT
   scm: '(tds_describe "memcp-tests" "INSERT INTO dbo.tsql_data VALUES (999,N''unexecuted'',1)" "" (newsession))
 
@@ -686,7 +686,7 @@ test_cases:
     \ '(\"BIGINT\"))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT @v AS value\" \"@v BIGINT\" s))\n\
     \  (if (equal? ((car fields) \"sql_type\") \"BIGINT\") true\n    (error \"guarded parameter lost its declared\
     \ type\")))\n"
-  noncritical: true
+
 - name: Binary literals retain bytes and empty binary values
   scm: "(begin\n  (define s (newsession))\n  (define expression (parse_tsql \"memcp-tests\" \"SELECT 0x00FF0102\
     \ AS bytes,0x AS empty\" nil s nil))\n  (define output (newsession))\n  (sql_execute_formula s nil (sql_queryplan_compile_formula\

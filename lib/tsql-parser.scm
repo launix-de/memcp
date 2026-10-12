@@ -88,6 +88,18 @@ The negative accumulator also represents the minimum int64 without overflow. */
 	(parser '("(" (define precision tsql_int) "," (define scale tsql_int) ")") (list precision scale))
 	(parser '("(" (define length tsql_int) ")") (list length))
 	(parser empty (list)))))
+/* The same type grammar is used for RPC declarations and expression casts. */
+(define tsql_declared_type (parser '(
+	(? (define namespace tsql_identifier) ".") (define type tsql_column_type)
+) (if (or (nil? namespace) (equal?? namespace "sys")) type
+		(error "unsupported type namespace: " namespace))))
+(define tds_bind_declarations (lambda (_schema text)
+	(if (equal? (strtrim text) "") (list)
+		((parser (define declarations (+ (parser '(
+			"@" (define name tsql_identifier_unquoted)
+			(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
+		) (list (toLower name) (cons type (tsql_decl_dimensions type dimensions)))) ","))
+			declarations "^(?:/\\*.*?\\*/|--[^\r\n]*(?:[\r\n]|$)|[\r\n\t ]+)+") text))))
 (define tsql_decl_dimensions (lambda (type dimensions) (begin
 	(define count_dimensions (count dimensions))
 	(if (has? '("VARCHAR" "CHAR" "NVARCHAR" "NCHAR" "BINARY" "VARBINARY") type)
@@ -289,7 +301,7 @@ never from the first row. Unknown expression types stay text in this first slice
 				(if (has? '("BOOLEAN" "BOOL" "BIT") type) 104 231))))
 		(define size (if (equal? kind 231) 8000 (if (equal? kind 104) 1
 			(match type "TINYINT" 1 "SMALLINT" 2 "INT" 4 "INTEGER" 4 _ 8))))
-		(list "name" name "kind" kind "size" size "flags" 1))))
+		(list "name" name "kind" kind "size" size "flags" 1 "sql_type" type))))
 	((symbol union-block) _mode branches _order _limit _offset _facts) (tsql_result_columns (car branches))
 	_ (error "unsupported T-SQL result metadata shape"))))
 
@@ -303,6 +315,15 @@ never from the first row. Unknown expression types stay text in this first slice
 (define parse_tsql (lambda (database s policy planning_session tx) (begin
 	(define schema database)
 	(define parse_started_ns (nanotime))
+	(define frontend_options (if (nil? planning_session) (newsession) planning_session))
+	(define describe (frontend_options "__tsql_describe"))
+	(define parameters (coalesceNil (frontend_options "__tsql_parameter_declarations") (list)))
+	(define parameter_expression (lambda (name) (begin
+		(define name (toLower name))
+		(define declaration (filter parameters (lambda (item) (equal? (car item) name))))
+		(if (empty_list? declaration) (error "undeclared T-SQL parameter: @" name)
+			(list (quote sql_type_expr) (list (quote session) (concat "__tsql_parameter:" name))
+				(car (cadr (car declaration))) nil)))))
 
 	(define placeholder_counter (newsession))
 	(placeholder_counter "n" 0)
@@ -406,9 +427,9 @@ never from the first row. Unknown expression types stay text in this first slice
 		(parser '("(" (define sub tsql_select) ")") '('inner_select sub))
 		(parser '("(" (define a tsql_expression) ")") a)
 		(parser '((atom "CAST" true) "(" (define value tsql_expression) (atom "AS" true)
-			(define type tsql_column_type) (define dimensions tsql_type_dimensions) ")")
+			(define type tsql_declared_type) (define dimensions tsql_type_dimensions) ")")
 			(tsql_cast_expr value type dimensions))
-		(parser '((atom "CONVERT" true) "(" (define type tsql_column_type) (define dimensions tsql_type_dimensions)
+		(parser '((atom "CONVERT" true) "(" (define type tsql_declared_type) (define dimensions tsql_type_dimensions)
 			"," (define value tsql_expression) (? "," (define style tsql_int)) ")")
 			(tsql_convert_expr value type dimensions style))
 
@@ -456,7 +477,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		(parser (atom "NULL" true) (sql_null_literal))
 		(parser (atom "CURRENT_TIMESTAMP" true) (list (quote now)))
 
-		(parser '((atom "@" true) (define var tsql_identifier_unquoted)) '('session (toLower var)))
+		(parser '((atom "@" true) (define var tsql_identifier_unquoted)) (parameter_expression var))
 
 		(parser '((atom "LEFT" true) "(" (define s tsql_expression) "," (define n tsql_expression) ")") '((quote sql_substr) s 1 n))
 
@@ -849,10 +870,10 @@ never from the first row. Unknown expression types stay text in this first slice
 	) (reduce terms tsql_fold_additive a)))
 	(define tsql_build_select_plan (lambda (query) (begin
 		(define expanded (sql_expand_views query policy))
-		(list (quote !begin)
+		(if describe (list (quote quote) (tsql_result_columns expanded)) (list (quote !begin)
 			(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded))
 				(list (quote quote) (tsql_result_columns expanded)))
-			(build_queryplan_term expanded planning_session tx)))))
+			(build_queryplan_term expanded planning_session tx))))))
 	/* INSERT SELECT consumes the existing planner's result stream and the native
 	insert operator. Identity allocation and constraints remain native. */
 	(define tsql_insert_select_plan (lambda (database tbl columns query) (begin
@@ -1009,5 +1030,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		""
 	)))
 
-	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
+	(define command_parser (if describe
+		(parser (define query tsql_select) (tsql_build_select_plan query)) p))
+	((parser (define command command_parser) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 )))
