@@ -1065,6 +1065,9 @@ never from the first row. Unknown expression types stay text in this first slice
 			(begin (if policy (policy (coalesce schema2 schema) name true) true)
 				(list (quote drop_sql_view) (list (quote session) "__memcp_tx")
 					(coalesce schema2 schema) name (if ifexists true false))))
+		(parser '((atom "SET" true) (atom "NOCOUNT" true)
+			(define enabled (or (parser (atom "ON" true) true) (parser (atom "OFF" true) false))))
+			(list (quote session) "__tsql_nocount" enabled))
 		(parser '((atom "USE" true) (define name tsql_identifier)) (begin
 			(if policy (policy name true false) true)
 			(list (quote session) "schema" name)))

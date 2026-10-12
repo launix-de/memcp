@@ -153,7 +153,11 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 				(lambda (_names descriptors) (begin
 					(output "descriptors" descriptors)
 					(fields descriptors)))))))
-		(if (number? result) (list "rows" result) nil))
+		/* NOCOUNT changes protocol completion only; native DML still computes
+		its affected-row count and result rows follow the shared planner. */
+		(if (session "__tsql_nocount")
+			(list "rows" (if (number? result) result 0) "no_count" true)
+			(if (number? result) (list "rows" result) nil)))
 	"describe" (tds_describe (payload "database") (payload "text") (payload "declarations") session)
 	"metadata" (error "T-SQL metadata procedures are not implemented yet")
 	_ (error "unknown TDS frontend callback"))))
