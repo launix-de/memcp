@@ -316,11 +316,19 @@ This resolves metadata only; the logical planner still owns projection rewrite. 
 (define sql_get_column_info (lambda (sources tblvar tbl_ic col col_ic)
 	(begin
 		(define original (list (quote get_column) tblvar tbl_ic col col_ic))
-		(define default_alias (if (empty_list? sources) nil (source_alias (car sources))))
-		(define src (source_for_alias sources default_alias tblvar tbl_ic))
-		(if (nil? src)
-			(sql_info original "any" nil)
-			(sql_source_column_info src original tblvar col col_ic)))))
+		/* Metadata consumers can precede full query binding. Reuse the common
+		column binder for unqualified joined inputs instead of assuming source 0. */
+		(define reference (if (and (nil? tblvar) (not (single_source? sources)))
+			(coalesceNil (try_bind_unqualified_column_in_scopes
+				(list (binding_scope_entries sources '() "types" (list '() '() "types") 0)) col col_ic) original)
+			original))
+		(match reference
+			((symbol get_column) alias alias_ic column column_ic) (begin
+				(define default_alias (if (empty_list? sources) nil (source_alias (car sources))))
+				(define src (source_for_alias sources default_alias alias alias_ic))
+				(if (nil? src)
+					(sql_info reference "any" nil)
+					(sql_source_column_info src reference alias column column_ic)))))))
 
 /* Comparison: BOOLEAN. Preserve plain operators for direct scan bounds;
 computed text comparisons use the compile-time selected Less relation. The

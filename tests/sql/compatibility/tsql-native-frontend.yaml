@@ -100,6 +100,53 @@ test_cases:
   - name: Addition contracts resolve window input through the shared planner
     sql: SELECT id,SUM(a+txt) OVER () AS value FROM tsql_add_contracts WHERE id=1
     expect: {rows: 1, data: [{id: 1, value: 13}]}
+  - name: Addition around aggregate results keeps numeric operand contracts
+    sql: SELECT SUM(a)+SUM(CAST(txt AS INT)) AS value FROM tsql_add_contracts
+    expect: {rows: 1, data: [{value: 13}]}
+  - name: Addition around a character aggregate keeps concatenation semantics
+    sql: SELECT MAX(txt)+'2' AS value FROM tsql_add_contracts
+    expect: {rows: 1, data: [{value: '32'}]}
+  - name: Defaulted aggregate result keeps numeric precedence
+    sql: SELECT COALESCE(SUM(a),0)+'2' AS value FROM tsql_add_contracts
+    expect: {rows: 1, data: [{value: 12}]}
+  - name: Count result retains its integer addition contract
+    sql: SELECT COUNT(*)+'2' AS value FROM tsql_add_contracts
+    expect: {rows: 1, data: [{value: 4}]}
+  - name: Grouped aggregate results use the same addition compiler
+    sql: SELECT suffix,SUM(a)+COUNT(*) AS value FROM tsql_add_contracts GROUP BY suffix
+    expect: {rows: 1, data: [{suffix: x, value: 12}]}
+  - name: Integer average uses its frontend integer result contract
+    sql: SELECT AVG(id)+'2' AS value FROM tsql_add_contracts
+    expect: {rows: 1, data: [{value: 3}]}
+  - name: Floating average retains its fractional arithmetic result
+    sql: SELECT AVG(CAST(id AS FLOAT))+'2' AS value FROM tsql_add_contracts
+    expect: {rows: 1, data: [{value: 3.5}]}
+  - name: Window integer average uses the same declared result contract
+    sql: SELECT id,AVG(id) OVER () AS value FROM tsql_add_contracts ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: 1}, {id: 2, value: 1}]}
+  - name: Numeric aggregates reject character input contracts
+    sql: SELECT SUM(txt) AS value FROM tsql_add_contracts
+    expect: {error: true, contains: numeric aggregate requires a declared numeric input}
+  - name: Numeric aggregates reject bit input contracts
+    sql: SELECT AVG(CAST(id AS BIT)) AS value FROM tsql_add_contracts
+    expect: {error: true, contains: numeric aggregate requires a declared numeric input}
+  - name: Aggregate and count descriptions use frontend contracts before lowering
+    scm: |
+      (begin
+        (define small (tsql_cast_expr nil "SMALLINT" '()))
+        (define aggregate (list (quote aggregate) small (quote +) 0))
+        (define text (list (quote sql_type_expr) nil "NVARCHAR" '("bin" 2)))
+        (and (equal? (sql_info_type (sql_expr_info '() (tsql_aggregate_expr "SUM" aggregate small))) "INT")
+          (equal? (sql_info_type (sql_expr_info '() (tsql_aggregate_expr "COUNT" aggregate small))) "INT")
+          (nil? (sql_info_collation (sql_expr_info '() (tsql_aggregate_expr "COUNT" aggregate text))))
+          (equal? (sql_info_type (sql_expr_info '() (tsql_window_expr "COUNT" '() '('() '())))) "INT")))
+    expect: {result: true}
+  - name: Aggregate addition plans remove all compiler callbacks
+    scm: |
+      (not (regexp_test (string (parse_tsql "memcp-tests"
+        "SELECT SUM(a)+SUM(CAST(txt AS INT)) AS value FROM tsql_add_contracts"
+        nil nil nil)) "sql_compile_expr|sql_type_expr|tsql_compile_addition"))
+    expect: {result: true}
   - name: Native update uses the compile-selected addition
     sql: UPDATE tsql_add_contracts SET a=a+txt WHERE id=1
     expect: {affected_rows: 1}

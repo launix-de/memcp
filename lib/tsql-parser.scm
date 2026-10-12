@@ -224,24 +224,41 @@ configurable cutoff remain separate compatibility work. */
 					(tsql_cast_expr (list format_date value "%Y-%m-%d %H:%i:%s") text_type dimensions)
 					(error "unsupported CONVERT style for " text_type))
 				_ (error "unsupported CONVERT style: " style))))))
+/* Aggregate contracts come from SQL syntax and the declared input type.
+The native reducers do not determine the frontend's SQL result contract. */
+(define tsql_aggregate_type (lambda (name input_type) (match name
+	"COUNT" "INT"
+	"SUM" (tsql_numeric_aggregate_type input_type)
+	"AVG" (tsql_numeric_aggregate_type input_type)
+	"MIN" input_type "MAX" input_type
+	_ "any")))
+(define tsql_numeric_aggregate_type (lambda (input_type) (match (tsql_addition_type input_type)
+	"TINYINT" "INT" "SMALLINT" "INT" "INT" "INT"
+	"BIGINT" "BIGINT" "REAL" "FLOAT" "FLOAT" "FLOAT"
+	"DECIMAL" "DECIMAL" "MONEY" "MONEY" "SMALLMONEY" "MONEY"
+	"NULL" "INT"
+	_ (error "numeric aggregate requires a declared numeric input"))))
+(define tsql_aggregate_result (lambda (name formula type collation)
+	(sql_info (if (and (equal? name "AVG") (has? '("INT" "BIGINT") type))
+		(sql_type_formula '() (tsql_cast_expr formula type '())) formula) type
+		(if (sql_text_type? type) collation nil))))
+(define tsql_aggregate_expr (lambda (name formula value)
+	(list (quote sql_compile_expr) (lambda (infos)
+		(tsql_aggregate_result name (sql_info_formula (car infos))
+			(tsql_aggregate_type name (sql_info_type (cadr infos)))
+			(sql_info_collation (cadr infos)))) formula value)))
 /* Preserve the native window AST for logical stage construction. Its result
 contract is compiled from resolved input triples, never from an empty scope. */
 (define tsql_window_expr (lambda (name args over)
 	(cons (quote sql_compile_expr)
 		(cons (lambda (infos) (begin
 			(define input_type (if (empty_list? args) "any" (sql_info_type (cadr infos))))
-			(define type (match name
-				"COUNT" "BIGINT"
-				"SUM" (match input_type
-					"TINYINT" "INT" "SMALLINT" "INT" "INTEGER" "INT"
-					"REAL" "FLOAT" _ input_type)
-				"MIN" input_type "MAX" input_type
-				_ "any"))
+			(define type (tsql_aggregate_type name input_type))
 			(define formula (match (sql_info_formula (car infos))
 				((symbol window_func) function _arguments specification)
 				(list (quote window_func) function (map (cdr infos) sql_info_formula) specification)
 				_ (sql_info_formula (car infos))))
-			(sql_info formula type
+			(tsql_aggregate_result name formula type
 				(if (empty_list? args) nil (sql_info_collation (cadr infos))))))
 			(cons (list (quote window_func) name args over) args)))))
 
@@ -518,11 +535,11 @@ never from the first row. Unknown expression types stay text in this first slice
 			'('sql_type_expr '((quote aggregate) 1 (quote +) 0) "INT" nil))
 		(parser '((atom "COUNT" true) "(" (define e tsql_expression) ")")
 			'('sql_type_expr '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0) "INT" nil))
-		(parser '((atom "SUM" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "SUM")) '('aggregate s (car d) (cadr d))))
+		(parser '((atom "SUM" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "SUM")) (tsql_aggregate_expr "SUM" '('aggregate s (car d) (cadr d)) s)))
 		(parser '((atom "AVG" true) "(" (define s tsql_expression) ")")
-			(sql_avg_expr s (sql_aggregates "SUM") (sql_aggregates "COUNT")))
-		(parser '((atom "MIN" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "MIN")) '('aggregate s (car d) (cadr d))))
-		(parser '((atom "MAX" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "MAX")) '('aggregate s (car d) (cadr d))))
+			(tsql_aggregate_expr "AVG" (sql_avg_expr s (sql_aggregates "SUM") (sql_aggregates "COUNT")) s))
+		(parser '((atom "MIN" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "MIN")) (tsql_aggregate_expr "MIN" '('aggregate s (car d) (cadr d)) s)))
+		(parser '((atom "MAX" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "MAX")) (tsql_aggregate_expr "MAX" '('aggregate s (car d) (cadr d)) s)))
 
 		(parser '((define fn tsql_identifier_unquoted) "(" (define arg tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")")
 			(tsql_window_expr (toUpper fn) (list arg) _over))
