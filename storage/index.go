@@ -106,9 +106,13 @@ func (g colGetter) get(recid uint32) scm.Scmer {
 
 // Persistent index boundaries must not retain a view into an evictable decoded
 // dictionary. The original source returns its stable compressed handle instead.
-func (g colGetter) persistentValue(recid uint32) scm.Scmer {
+func (g colGetter) persistentValue(recid uint32, tx *TxContext) scm.Scmer {
 	if g.source != nil {
-		return g.source.GetValue(recid)
+		// Index construction already owns the shard lock. Preserve that
+		// capability and the caller's visibility for computed source readers.
+		reader := newCachedColumnReaderTx(g.source, tx, true, ReadCompressed)
+		defer ReleaseColumnReader(reader)
+		return reader.GetValue(recid)
 	}
 	return g.get(recid)
 }
@@ -1345,7 +1349,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			// decode. Keep this lease through sorting and failure cleanup, never
 			// retain the decoded reader in the published index getters.
 			if g.source != nil {
-				reader := g.source.GetCachedReader(ReadDecoded)
+				reader := newCachedColumnReaderTx(g.source, tx, true, ReadDecoded)
 				defer ReleaseColumnReader(reader)
 				g.raw = reader
 			}
@@ -1431,8 +1435,8 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 				if !s.columnIsSorted(i) {
 					continue
 				}
-				state.minVals[i] = g.persistentValue(tmp[0])
-				state.maxVals[i] = g.persistentValue(tmp[len(tmp)-1])
+				state.minVals[i] = g.persistentValue(tmp[0], tx)
+				state.maxVals[i] = g.persistentValue(tmp[len(tmp)-1], tx)
 			}
 		}
 	} else if s.t.main_count > 0 {
@@ -1443,8 +1447,8 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			if !s.columnIsSorted(i) {
 				continue
 			}
-			state.minVals[i] = g.persistentValue(0)
-			state.maxVals[i] = g.persistentValue(s.t.main_count - 1)
+			state.minVals[i] = g.persistentValue(0, tx)
+			state.maxVals[i] = g.persistentValue(s.t.main_count-1, tx)
 		}
 	}
 

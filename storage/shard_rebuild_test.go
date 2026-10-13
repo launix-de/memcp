@@ -2756,7 +2756,13 @@ func TestIndexComputedReadersRespectHeldShardLock(t *testing.T) {
 				index.ColMapFn = []scm.Scmer{scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[0] })}
 			}
 			done := make(chan []colGetter, 1)
-			go func() { done <- index.buildGetters(nil, nil) }()
+			go func() {
+				getters := index.buildGetters(nil, nil)
+				// Sorting must keep the same lock capability while preparing its
+				// operator-specific reader and immutable boundary values.
+				index.buildIndex(&index.baseState, getters, nil)
+				done <- getters
+			}()
 			var getters []colGetter
 			select {
 			case getters = <-done:
