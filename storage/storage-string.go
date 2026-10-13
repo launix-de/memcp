@@ -811,6 +811,9 @@ func (s *StorageString) GetCachedReader(hints ColumnReadHints) ColumnReader {
 		if cache := s.acquireDictionary(hints == ReadDecoded || !s.bufferHandles); cache != nil {
 			return &decodedStringReader{storage: s, cache: cache, text: cache.text}
 		}
+		if s.bufferHandles {
+			return &batchStringReader{storage: s}
+		}
 	}
 	return s.storageJITFunctions.reader(s)
 }

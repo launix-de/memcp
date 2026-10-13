@@ -280,6 +280,66 @@ type decodedStringReader struct {
 	text    string // immutable reader-owned workspace or its retained cache payload
 }
 
+// An automatic cold reader keeps scalar probes compressed. Bulk consumers
+// already selected their rows: materialize just that batch into an owned arena,
+// reusing one cursor scratch across its values instead of decoding the same
+// block again in every subsequent scalar string operation. No returned value
+// borrows the scratch, and neither preparation nor probes publish cache state.
+type batchStringReader struct{ storage *StorageString }
+
+func (r *batchStringReader) release()                      {} // propagation marker; batch outputs own their bytes
+func (r *batchStringReader) JITValueType() uint8           { return scm.JITTypeUnknown }
+func (r *batchStringReader) GetValue(row uint32) scm.Scmer { return r.storage.GetValue(row) }
+
+func (r *batchStringReader) GetValueMulti(rows []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	atomic.AddUint64(&r.storage.readCount, uint64(len(rows)))
+	for i, row := range rows {
+		target[i*stride] = r.storage.compressedAt(row)
+	}
+	r.materializeBatch(target, len(rows), stride)
+}
+
+func (r *batchStringReader) GetValueRange(row, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	atomic.AddUint64(&r.storage.readCount, uint64(count))
+	for i := uint32(0); i < count; i++ {
+		target[int(i)*stride] = r.storage.compressedAt(row + i)
+	}
+	r.materializeBatch(target, int(count), stride)
+}
+
+func (r *batchStringReader) materializeBatch(target []scm.Scmer, count, stride int) {
+	total := 0
+	for i := 0; i < count; i++ {
+		if value := target[i*stride]; value.IsBufferString() {
+			total += scm.BufferStringLength(value)
+		}
+	}
+	if total == 0 {
+		return
+	}
+	bytes := make([]byte, total)
+	var scratch scm.TextScratch
+	var cursor scm.TextCursor
+	offset := 0
+	for i := 0; i < count; i++ {
+		value := target[i*stride]
+		if !value.IsBufferString() {
+			continue
+		}
+		length := scm.BufferStringLength(value)
+		cursor.Reset(value)
+		cursor.Read(bytes[offset:offset+length], &scratch)
+		target[i*stride] = scm.NewString(unsafe.String(&bytes[offset], length))
+		offset += length
+	}
+}
+
 // Reader preparation can change the physical tag without changing the column
 // type. Typed JIT filters must specialize against this prepared representation.
 func (r *decodedStringReader) JITValueType() uint8 {

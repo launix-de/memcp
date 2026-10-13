@@ -678,6 +678,11 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   workspace when no shared lease owner is available, never dictionary-manager
   synchronization per row. Typed kernels consume the prepared reader's physical
   tag, which does not determine SQL types.
+  Cold automatic bulk reads materialize only their selected rows into one
+  batch-owned arena, using existing invocation-local `TextScratch`; outputs
+  never borrow the scratch. Scalar probes and explicit compressed/bigram
+  consumers retain compressed handles. Prefix/overlay preparation propagates
+  child reader ownership rather than bypassing its representation or lease.
   `shardqueue.sortReaders` owns comparison-only leases prepared after candidate
   filtering for an actual local sort. Construction failure releases them; a
   completed queue transfers ownership to its global/direct ordered consumer.

@@ -337,6 +337,26 @@ func TestDictionaryReaderHintsAndEviction(t *testing.T) {
 		if s.GetCachedReader(ReadAuto).GetValue(0).IsBufferString() != true || s.dictCache.Load() != nil {
 			t.Fatal("auto hint populated cache")
 		}
+		automatic := s.GetCachedReader(ReadAuto)
+		rows := []uint32{299, 0, 4, 2, 15, 0}
+		batch := make([]scm.Scmer, len(rows)*2)
+		for i := range batch {
+			batch[i] = scm.NewString("untouched")
+		}
+		automatic.GetValueMulti(rows, batch, 2)
+		for i, row := range rows {
+			got, want := batch[i*2], values[row]
+			if got.IsBufferString() || got.IsNil() != want.IsNil() ||
+				(!got.IsNil() && got.String() != want.String()) || batch[i*2+1].String() != "untouched" {
+				t.Fatalf("automatic selected batch row %d changed", i)
+			}
+		}
+		second := make([]scm.Scmer, 5)
+		automatic.GetValueRange(0, uint32(len(second)), second, 1)
+		ReleaseColumnReader(automatic)
+		if batch[0].String() != values[299].String() || second[0].String() != values[0].String() || s.dictCache.Load() != nil {
+			t.Fatal("automatic batches borrowed scratch or admitted a whole dictionary")
+		}
 		expected := buildBigramIndex(uint32(len(values)), buildStorageString(values))
 		if got := buildBigramIndex(uint32(len(values)), s); !reflect.DeepEqual(got.grams, expected.grams) {
 			t.Fatal("compressed bigrams changed")
@@ -710,6 +730,33 @@ func TestStringReaderOperatorOwnership(t *testing.T) {
 	ReleaseColumnReader(reader)
 	if source.EvictDictionary() <= 0 {
 		t.Fatal("inactive transaction's operator did not release its dictionary")
+	}
+}
+
+func TestPrefixPreparedReaderOwnership(t *testing.T) {
+	source := &StoragePrefix{prefixdictionary: []string{"", "report-prefix-"}}
+	inputs := []string{"report-prefix-10203", "report-prefix-40506"}
+	source.prepare()
+	for i, value := range inputs {
+		source.scan(uint32(i), scm.NewString(value))
+	}
+	source.init(uint32(len(inputs)))
+	for i, value := range inputs {
+		source.build(uint32(i), scm.NewString(value))
+	}
+	source.finish()
+	reader := source.GetCachedReader(ReadDecoded)
+	if source.values.EvictDictionary() != 0 {
+		t.Fatal("prefix preparation lost its suffix lease")
+	}
+	values := make([]scm.Scmer, len(inputs))
+	reader.GetValueMulti([]uint32{1, 0}, values, 1)
+	if values[0].String() != inputs[1] || values[1].String() != inputs[0] || reader.GetValue(0).String() != inputs[0] {
+		t.Fatal("prepared prefix rows changed")
+	}
+	ReleaseColumnReader(reader)
+	if source.values.EvictDictionary() <= 0 || values[0].String() != inputs[1] {
+		t.Fatal("prefix completion leaked its suffix or borrowed output bytes")
 	}
 }
 
