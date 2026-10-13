@@ -42,7 +42,9 @@ func (s *StoragePrefix) String() string {
 	return fmt.Sprintf("prefix[%s]-%s", s.prefixdictionary[1], s.values.String())
 }
 
-func (s *StoragePrefix) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
+func (s *StoragePrefix) GetCachedReader(hints ColumnReadHints) ColumnReader {
+	return s.storageJITFunctions.reader(s)
+}
 
 func (s *StoragePrefix) GetValue(i uint32) scm.Scmer {
 	inner := s.values.GetValue(i)

@@ -170,7 +170,7 @@ func verifyBulkAgainstGetValue(t *testing.T, name string, col bulkReadable, n in
 // TestBulkReadMatchesGetValue checks GetValueRange/GetValueMulti against a
 // plain per-element GetValue loop across every ColumnStorage format
 // proposeCompression can produce, plus the reader returned by
-// GetCachedReader() for each.
+// GetCachedReader(ReadCompressed) for each.
 func TestBulkReadMatchesGetValue(t *testing.T) {
 	for _, fx := range bulkReadFixtures() {
 		fx := fx
@@ -179,7 +179,7 @@ func TestBulkReadMatchesGetValue(t *testing.T) {
 			t.Logf("%s compressed to %s", fx.name, col.String())
 			verifyBulkAgainstGetValue(t, fx.name+"/storage", col, fx.n)
 
-			reader := col.GetCachedReader()
+			reader := col.GetCachedReader(ReadCompressed)
 			verifyBulkAgainstGetValue(t, fx.name+"/reader", reader, fx.n)
 		})
 	}

@@ -194,7 +194,9 @@ func (s *StorageSCMER) Deserialize(f io.Reader) uint {
 	return uint(l)
 }
 
-func (s *StorageSCMER) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
+func (s *StorageSCMER) GetCachedReader(hints ColumnReadHints) ColumnReader {
+	return s.storageJITFunctions.reader(s)
+}
 
 func (s *StorageSCMER) GetValue(i uint32) scm.Scmer {
 	return s.values[i]

@@ -116,19 +116,20 @@ var GlobalCommitEpoch uint64
 // (the common case with with_autocommit) allocate nothing beyond the
 // TxContext struct itself.
 type TxContext struct {
-	ID            uint64
-	Mode          TxMode
-	State         TxState
-	SnapshotEpoch uint64 // ACID: snapshot boundary
-	Depth         uint32 // nesting depth for savepoints / triggers
-	Session       scm.Scmer
-	SessionState  *scm.SessionState // owning connection; retained while the transaction object is parked
-	querySeq      atomic.Uint64     // current statement generation; zero while parked
-	queryInfo     atomic.Pointer[string]
-	queryActive   atomic.Bool
-	queryMu       sync.Mutex         // serializes statements which reuse this transaction object
-	queryColumns  map[*column]*table // statement cache leases, protected by mu
-	walTxID       atomic.Pointer[string]
+	ID                  uint64
+	Mode                TxMode
+	State               TxState
+	SnapshotEpoch       uint64 // ACID: snapshot boundary
+	Depth               uint32 // nesting depth for savepoints / triggers
+	Session             scm.Scmer
+	SessionState        *scm.SessionState // owning connection; retained while the transaction object is parked
+	querySeq            atomic.Uint64     // current statement generation; zero while parked
+	queryInfo           atomic.Pointer[string]
+	queryActive         atomic.Bool
+	queryMu             sync.Mutex         // serializes statements which reuse this transaction object
+	queryColumns        map[*column]*table // statement cache leases, protected by mu
+	queryReaderReleases []func()           // decoded dictionary leases, protected by mu
+	walTxID             atomic.Pointer[string]
 	// fanoutLimit/fanoutInUse bound only additional multi-shard workers. A
 	// single relevant shard never reads or writes this cache line.
 	fanoutLimit atomic.Int32
@@ -280,13 +281,28 @@ func (tx *TxContext) retainQueryColumn(t *table, c *column) bool {
 	return true
 }
 
+func (tx *TxContext) retainQueryReader(release func()) bool {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if !tx.queryActive.Load() {
+		return false
+	}
+	tx.queryReaderReleases = append(tx.queryReaderReleases, release)
+	return true
+}
+
 func (tx *TxContext) endQuery(seq uint64) {
 	if tx.querySeq.CompareAndSwap(seq, 0) {
 		tx.mu.Lock()
 		tx.queryActive.Store(false)
 		columns := tx.queryColumns
 		tx.queryColumns = nil
+		readers := tx.queryReaderReleases
+		tx.queryReaderReleases = nil
 		tx.mu.Unlock()
+		for _, release := range readers {
+			release()
+		}
 		for c, t := range columns {
 			t.releaseColumnCacheUse(c)
 		}

@@ -1,0 +1,281 @@
+{
+  "copyright": "Copyright (C) 2026 Carl-Philip H\u00e4nsch",
+  "corpus": {
+    "rows": 16663,
+    "source_utf8_bytes": 107494059,
+    "kind": "private local report-text corpus; complete partition interval"
+  },
+  "units": "bytes; MB=1000000 bytes; Go storage microbenchmarks",
+  "sizes": {
+    "raw": {
+      "rows": 16663,
+      "source_bytes": 107494059,
+      "resident_bytes": 103130715,
+      "serialized_bytes": 103130340
+    },
+    "lz4": {
+      "rows": 16663,
+      "source_bytes": 107494059,
+      "resident_bytes": 13514176,
+      "serialized_bytes": 13574061
+    }
+  },
+  "operations": {
+    "raw": {
+      "get-range": [
+        {
+          "iterations": 16,
+          "ns_per_op": 21791346.0,
+          "bytes_per_op": 108079104,
+          "allocs_per_op": 7
+        },
+        {
+          "iterations": 20,
+          "ns_per_op": 15406024.0,
+          "bytes_per_op": 108079328,
+          "allocs_per_op": 7
+        }
+      ],
+      "equal-plain": [
+        {
+          "iterations": 421744,
+          "ns_per_op": 563.8,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "iterations": 528158,
+          "ns_per_op": 562.6,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ],
+      "less-adjacent": [
+        {
+          "iterations": 6815396,
+          "ns_per_op": 35.28,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "iterations": 7152723,
+          "ns_per_op": 35.13,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ],
+      "like-random": [
+        {
+          "iterations": 10000,
+          "ns_per_op": 21045.0,
+          "bytes_per_op": 6849,
+          "allocs_per_op": 1
+        },
+        {
+          "iterations": 12399,
+          "ns_per_op": 17698.0,
+          "bytes_per_op": 6512,
+          "allocs_per_op": 1
+        }
+      ],
+      "bigram-build": [
+        {
+          "iterations": 1,
+          "ns_per_op": 505973731.0,
+          "bytes_per_op": 122349304,
+          "allocs_per_op": 24875
+        },
+        {
+          "iterations": 1,
+          "ns_per_op": 482686882.0,
+          "bytes_per_op": 122344840,
+          "allocs_per_op": 24868
+        }
+      ],
+      "unicode-scan": [
+        {
+          "iterations": 1,
+          "ns_per_op": 345170517.0,
+          "bytes_per_op": 4480,
+          "allocs_per_op": 7
+        },
+        {
+          "iterations": 1,
+          "ns_per_op": 376320371.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ],
+      "sort-compressed": [
+        {
+          "iterations": 28,
+          "ns_per_op": 9706270.0,
+          "bytes_per_op": 344120,
+          "allocs_per_op": 4
+        },
+        {
+          "iterations": 22,
+          "ns_per_op": 10237128.0,
+          "bytes_per_op": 344120,
+          "allocs_per_op": 4
+        }
+      ],
+      "sort-decoded-cold": [
+        {
+          "iterations": 30,
+          "ns_per_op": 8811355.0,
+          "bytes_per_op": 344120,
+          "allocs_per_op": 4
+        },
+        {
+          "iterations": 28,
+          "ns_per_op": 8817198.0,
+          "bytes_per_op": 344280,
+          "allocs_per_op": 4
+        }
+      ],
+      "sort-decoded-warm": [
+        {
+          "iterations": 25,
+          "ns_per_op": 9285814.0,
+          "bytes_per_op": 344120,
+          "allocs_per_op": 4
+        },
+        {
+          "iterations": 25,
+          "ns_per_op": 8444421.0,
+          "bytes_per_op": 344120,
+          "allocs_per_op": 4
+        }
+      ]
+    },
+    "lz4": {
+      "get-range": [
+        {
+          "iterations": 1795,
+          "ns_per_op": 139785.0,
+          "bytes_per_op": 2,
+          "allocs_per_op": 0
+        },
+        {
+          "iterations": 1698,
+          "ns_per_op": 140225.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ],
+      "equal-plain": [
+        {
+          "iterations": 21382,
+          "ns_per_op": 11454.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "iterations": 21466,
+          "ns_per_op": 11372.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ],
+      "less-adjacent": [
+        {
+          "iterations": 15582,
+          "ns_per_op": 16581.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "iterations": 14552,
+          "ns_per_op": 16144.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ],
+      "like-random": [
+        {
+          "iterations": 3253,
+          "ns_per_op": 65985.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "iterations": 3693,
+          "ns_per_op": 62260.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ],
+      "bigram-build": [
+        {
+          "iterations": 1,
+          "ns_per_op": 1088261207.0,
+          "bytes_per_op": 14229976,
+          "allocs_per_op": 24756
+        },
+        {
+          "iterations": 1,
+          "ns_per_op": 1074565761.0,
+          "bytes_per_op": 14229976,
+          "allocs_per_op": 24756
+        }
+      ],
+      "unicode-scan": [
+        {
+          "iterations": 1,
+          "ns_per_op": 666629675.0,
+          "bytes_per_op": 4480,
+          "allocs_per_op": 7
+        },
+        {
+          "iterations": 1,
+          "ns_per_op": 688855039.0,
+          "bytes_per_op": 4480,
+          "allocs_per_op": 7
+        }
+      ],
+      "sort-compressed": [
+        {
+          "iterations": 1,
+          "ns_per_op": 3304243851.0,
+          "bytes_per_op": 357560,
+          "allocs_per_op": 25
+        },
+        {
+          "iterations": 1,
+          "ns_per_op": 3266121984.0,
+          "bytes_per_op": 357560,
+          "allocs_per_op": 25
+        }
+      ],
+      "sort-decoded-cold": [
+        {
+          "iterations": 6,
+          "ns_per_op": 35079007.0,
+          "bytes_per_op": 103350392,
+          "allocs_per_op": 7
+        },
+        {
+          "iterations": 6,
+          "ns_per_op": 39697834.0,
+          "bytes_per_op": 103350392,
+          "allocs_per_op": 7
+        }
+      ],
+      "sort-decoded-warm": [
+        {
+          "iterations": 25,
+          "ns_per_op": 10452329.0,
+          "bytes_per_op": 344315,
+          "allocs_per_op": 5
+        },
+        {
+          "iterations": 24,
+          "ns_per_op": 10373888.0,
+          "bytes_per_op": 344136,
+          "allocs_per_op": 5
+        }
+      ]
+    }
+  }
+}

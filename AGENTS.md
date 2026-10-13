@@ -109,6 +109,16 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- `StorageString.textBuffer` is constructed/loaded under
+  exclusive unpublished generation ownership, then remains immutable.
+  LZ4 Scmer handles retain the buffer header through a GC-visible pointer;
+  the header owns its bytes and block directory, with no shard, session,
+  transaction, or mutable decoder state. `scm.TextScratch` is exclusive to one
+  operator/reader invocation and reused outside row loops; no returned value
+  borrows its decoded bytes. The optional forced LZ4 compression is selected at process
+  startup; live generations are never recompressed in place. Version-4 string
+  payloads preserve the historical readers and flags 0/1 layouts.
+
 - `table.Auto_increment` uses the same atomic reservation for native INSERT
   and `reserve_ids`, once per batch/block. Runtime counter snapshots and DDL
   updates are atomic; loading unpublished table objects owns initialization.
@@ -621,3 +631,20 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   the column set's validity through mutation. Busy DDL or eviction defers the
   operation rather than blocking. Every pin has panic-safe cleanup. Retirement
   runs on a query or maintenance caller, never the CacheManager owner goroutine.
+
+- `StorageString.textBuffer` is the immutable compressed dictionary of one
+  generation; ordinary raw text uses no additional `compressedDict` payload.
+  Historical monolithic LZ4 and encoded alphabets retain their compatible layout.
+  `StorageString.dictCache` atomically publishes one complete decoded generation.
+  Its `stringDictionaryCache` owns an exclusive `TypeStringDict` registration;
+  parent sizes subtract that child explicitly. `dictMu` protects admission and
+  prepared-reader leases outside row loops. Cleanup uses TryLock and declines
+  eviction while leased. Each decoded generation has its own registration
+  identity, so late deregistration cannot remove a replacement.
+  `ColumnReadHints` are resolved during reader preparation: bigram walks request
+  `ReadCompressed`, repeated sort comparisons request `ReadDecoded`, and
+  statement-bound `ReadAuto` only reuses an existing decoded generation.
+  `TxContext.queryReaderReleases` is protected by its mutex and drained by
+  panic-safe `endQuery`; non-statement consumers release their prepared reader
+  explicitly. Usage timestamps change only during preparation. None of this
+  process-local cache or lease state is persisted.

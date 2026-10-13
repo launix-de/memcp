@@ -198,8 +198,11 @@ func Equal(a, b Scmer) bool {
 			// general converter carries a large type switch and stack frame for
 			// compressed strings, BSON, lists, and numeric formatting.
 			return unsafe.String(a.ptr, int(auxVal(a.aux))) == unsafe.String(b.ptr, int(auxVal(b.aux)))
-		case tagCString:
-			return cstringEqual(a, b)
+		case tagCString, tagLZ4:
+			if ta == tagCString {
+				return cstringEqual(a, b)
+			}
+			return equalBufferText(a, b, false)
 		case tagBString:
 			if auxVal(a.aux)>>46 == auxVal(b.aux)>>46 {
 				an, bn := int(auxVal(a.aux)&bstringLengthMask), int(auxVal(b.aux)&bstringLengthMask)
@@ -294,7 +297,7 @@ func Equal(a, b Scmer) bool {
 			return a.Bool() == b.Bool()
 		}
 		return equalStringValues(a, b, false)
-	case tagCString:
+	case tagCString, tagLZ4:
 		return equalStringValues(a, b, false)
 	case tagBString:
 		return equalStringValues(a, b, false)
@@ -418,7 +421,7 @@ func EqualSQL(a, b Scmer) Scmer {
 			return NewBool(a.Float() == b.Float())
 		case tagString, tagSymbol:
 			return NewBool(equalStringValues(a, b, true))
-		case tagCString:
+		case tagCString, tagLZ4:
 			return NewBool(equalStringValues(a, b, true))
 		case tagBString:
 			if a.aux == b.aux && unsafe.String(a.ptr, int(auxVal(a.aux)&bstringLengthMask)) == unsafe.String(b.ptr, int(auxVal(b.aux)&bstringLengthMask)) {
@@ -468,7 +471,7 @@ func EqualSQL(a, b Scmer) Scmer {
 		if tb == tagFloat {
 			return NewBool(float64(a.Int()) == b.Float())
 		}
-		if tb == tagString || tb == tagSymbol || tb == tagCString || tb == tagBString {
+		if tb == tagString || tb == tagSymbol || tb == tagCString || tb == tagBString || tb == tagLZ4 {
 			return NewBool(numericStringEqualsInt(b.String(), a.Int()))
 		}
 		return NewBool(a.Int() == b.Int())
@@ -476,11 +479,11 @@ func EqualSQL(a, b Scmer) Scmer {
 		if tb == tagInt {
 			return NewBool(a.Float() == float64(b.Int()))
 		}
-		if tb == tagString || tb == tagSymbol || tb == tagCString || tb == tagBString {
+		if tb == tagString || tb == tagSymbol || tb == tagCString || tb == tagBString || tb == tagLZ4 {
 			return NewBool(a.Float() == b.Float())
 		}
 		return NewBool(a.Float() == b.Float())
-	case tagString, tagSymbol, tagCString:
+	case tagString, tagSymbol, tagCString, tagLZ4:
 		if tb == tagDate {
 			if ts, ok := ParseDateString(a.String()); ok {
 				return NewBool(ts == b.Int())
@@ -629,6 +632,9 @@ func Less(a, b Scmer) bool {
 
 //jitgen:noinline
 func lessNonNumeric(a, b Scmer, ta, tb uint8) bool {
+	if (a.IsBufferString() || b.IsBufferString()) && (a.IsString() || a.IsSymbol()) && (b.IsString() || b.IsSymbol()) {
+		return compareBufferText(a, b, false) < 0
+	}
 	if ta == tagCString || tb == tagCString {
 		if c, ok := compareCString(a, b, false); ok {
 			return c < 0
@@ -651,7 +657,7 @@ func lessNonNumeric(a, b Scmer, ta, tb uint8) bool {
 		default:
 			return a.String() < b.String()
 		}
-	case tagString, tagSymbol, tagCString, tagBString:
+	case tagString, tagSymbol, tagCString, tagBString, tagLZ4:
 		switch tb {
 		case tagDate:
 			if ts, ok := ParseDateString(a.String()); ok {
@@ -669,7 +675,7 @@ func lessNonNumeric(a, b Scmer, ta, tb uint8) bool {
 				return unsafe.String(a.ptr, int(auxVal(a.aux))) < unsafe.String(b.ptr, int(auxVal(b.aux)))
 			}
 			return a.String() < b.String()
-		case tagCString, tagBString, tagBSON:
+		case tagCString, tagBString, tagLZ4, tagBSON:
 			return a.String() < b.String()
 		default:
 			// Fallback: compare by string representation to avoid panics on mixed types

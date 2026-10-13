@@ -47,6 +47,14 @@ func compressedOpValues() []scm.Scmer {
 			}
 		}
 	}
+	plainTexts := make([]string, len(values))
+	for i, v := range values {
+		plainTexts[i] = v.String()
+	}
+	buffer, offsets := scm.BuildCompressedStringBuffer(plainTexts)
+	for i, text := range plainTexts {
+		values = append(values, scm.NewBufferString(buffer, offsets[i], len(text)))
+	}
 	return values
 }
 
@@ -80,6 +88,9 @@ func TestCompressedStringOperators(t *testing.T) {
 		}
 		for _, name := range []string{"string?", "strlen", "toLower", "toUpper", "strtrim", "strltrim", "strrtrim", "sql_trim", "sql_ltrim", "sql_rtrim", "fnv_hash", "stable_structural_hash", "md5", "sha1", "sha256", "hex2bin", "bin2hex", "base64_encode", "base64_decode"} {
 			check(name)
+		}
+		for _, find := range []string{"", "x", "abc", "\\", "%"} {
+			check("replace", scm.NewString(find), scm.NewString("changed"))
 		}
 		check("stable_structural_hash", scm.NewBool(true))
 		check("concat", scm.NewString("!"), v)

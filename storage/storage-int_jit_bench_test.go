@@ -500,7 +500,7 @@ func BenchmarkStorageIntCachedReader(b *testing.B) {
 	}
 	s := buildBenchStorageInt(benchN)
 	var goReader ColumnReader = s
-	jitReader := s.GetCachedReader()
+	jitReader := s.GetCachedReader(ReadCompressed)
 	// Keep the baseline on the ordinary Go method even though the concrete
 	// storage also exposes a compiled reader in JIT builds.
 	goValue := scm.JITStorageGetValueFunc(s.GetValue)
@@ -643,7 +643,7 @@ func BenchmarkStorageConstFinishedReaders(b *testing.B) {
 	goRange := scm.JITStorageGetValueRangeFunc(s.GetValueRange)
 	goMulti := scm.JITStorageGetValueMultiFunc(s.GetValueMulti)
 	var goReader ColumnReader = s
-	jitValue := compiledColumnGetValue(s.GetCachedReader())
+	jitValue := compiledColumnGetValue(s.GetCachedReader(ReadCompressed))
 
 	b.Run("Scalar/Go", func(b *testing.B) {
 		var sum int64
@@ -736,7 +736,7 @@ func BenchmarkStorageFloatFinishedReaders(b *testing.B) {
 	goRange := scm.JITStorageGetValueRangeFunc(s.GetValueRange)
 	goMulti := scm.JITStorageGetValueMultiFunc(s.GetValueMulti)
 	var goReader ColumnReader = s
-	jitValue := compiledColumnGetValue(s.GetCachedReader())
+	jitValue := compiledColumnGetValue(s.GetCachedReader(ReadCompressed))
 
 	b.Run("Scalar/Go", func(b *testing.B) {
 		var sum int64

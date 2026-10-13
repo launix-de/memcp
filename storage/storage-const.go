@@ -72,7 +72,9 @@ func (s *StorageConst) GetValueMulti(recids []uint32, target []scm.Scmer, stride
 	}
 }
 
-func (s *StorageConst) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
+func (s *StorageConst) GetCachedReader(hints ColumnReadHints) ColumnReader {
+	return s.storageJITFunctions.reader(s)
+}
 
 func (s *StorageConst) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */

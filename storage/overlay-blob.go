@@ -267,7 +267,41 @@ func gunzipValue(gzipped string) scm.Scmer {
 	return value
 }
 
-func (s *OverlayBlob) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
+func (s *OverlayBlob) GetCachedReader(hints ColumnReadHints) ColumnReader {
+	if hints != ReadCompressed && s.Base != nil {
+		base := s.Base.GetCachedReader(hints)
+		if _, leased := base.(interface{ release() }); leased {
+			return &overlayBlobReader{overlay: s, base: base}
+		}
+	}
+	return s.storageJITFunctions.reader(s)
+}
+
+// Hints apply to the inline dictionary; blob markers retain their ordinary
+// resolution and cache ownership. A prepared reader never strips the overlay.
+type overlayBlobReader struct {
+	overlay *OverlayBlob
+	base    ColumnReader
+}
+
+func (r *overlayBlobReader) release() { ReleaseColumnReader(r.base) }
+func (r *overlayBlobReader) GetValue(row uint32) scm.Scmer {
+	return r.overlay.resolveBlob(r.base.GetValue(row))
+}
+func (r *overlayBlobReader) GetValueRange(row, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	r.base.GetValueRange(row, count, target, stride)
+	r.overlay.resolveBlobBatch(target, int(count), stride)
+}
+func (r *overlayBlobReader) GetValueMulti(rows []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	r.base.GetValueMulti(rows, target, stride)
+	r.overlay.resolveBlobBatch(target, len(rows), stride)
+}
 
 func (s *OverlayBlob) GetValue(i uint32) scm.Scmer {
 	return s.resolveBlob(s.Base.GetValue(i))
@@ -338,6 +372,13 @@ func (s *OverlayBlob) readBlob(hash [32]byte) (scm.Scmer, bool) {
 // literal identical to a present blob reference cannot be distinguished in v0;
 // only a rebuild from an authoritative source can resolve that case.
 func (s *OverlayBlob) resolveBlob(v scm.Scmer) scm.Scmer {
+	if v.IsBufferString() {
+		var cursor scm.TextCursor
+		var scratch scm.TextScratch
+		if value, inline := s.inlineBufferValue(v, &cursor, &scratch); inline {
+			return value
+		}
+	}
 	if !v.IsString() || v.String() == "" || v.String()[0] != '!' {
 		return v
 	}
@@ -350,10 +391,18 @@ func (s *OverlayBlob) resolveBlob(v scm.Scmer) scm.Scmer {
 // The base column is already fetched. Inline-only batches retain the old path;
 // external payloads synchronize once per batch, including scalar point reads.
 func (s *OverlayBlob) resolveBlobBatch(values []scm.Scmer, count, stride int) {
+	var cursor scm.TextCursor
+	var scratch scm.TextScratch
 	for i := 0; i < count; i++ {
 		v := values[i*stride]
 		if !v.IsString() {
 			continue
+		}
+		if v.IsBufferString() {
+			if value, inline := s.inlineBufferValue(v, &cursor, &scratch); inline {
+				values[i*stride] = value
+				continue
+			}
 		}
 		raw := v.String()
 		if raw == "" || raw[0] != '!' {
@@ -381,8 +430,16 @@ func (s *OverlayBlob) resolveBlobRAMBatch(values []scm.Scmer, count, stride int)
 	defer c.endBatch(before)
 	limit := int64(-1) // lazy budget snapshot, only when a batch actually misses
 	c.lastUsed.Store(time.Now().UnixNano())
+	var cursor scm.TextCursor
+	var scratch scm.TextScratch
 	for i := 0; i < count; i++ {
 		v := values[i*stride]
+		if v.IsBufferString() {
+			if value, inline := s.inlineBufferValue(v, &cursor, &scratch); inline {
+				values[i*stride] = value
+				continue
+			}
+		}
 		if v.IsString() {
 			hash, reference, ambiguous := s.blobReference(v.String())
 			if reference && !ambiguous {
@@ -397,6 +454,13 @@ func (s *OverlayBlob) resolveBlobRAMBatch(values []scm.Scmer, count, stride int)
 func (s *OverlayBlob) resolveBlobUncached(v scm.Scmer) scm.Scmer {
 	if !v.IsString() {
 		return v
+	}
+	if v.IsBufferString() {
+		var cursor scm.TextCursor
+		var scratch scm.TextScratch
+		if value, inline := s.inlineBufferValue(v, &cursor, &scratch); inline {
+			return value
+		}
 	}
 	raw := v.String()
 	if raw == "" || raw[0] != '!' {
@@ -418,6 +482,19 @@ func (s *OverlayBlob) resolveBlobUncached(v scm.Scmer) scm.Scmer {
 		return scm.NewString(raw[1:])
 	}
 	panic("OverlayBlob: malformed reference encoding")
+}
+
+func (s *OverlayBlob) inlineBufferValue(v scm.Scmer, cursor *scm.TextCursor, scratch *scm.TextScratch) (scm.Scmer, bool) {
+	var prefix [2]byte
+	cursor.Reset(v)
+	n := cursor.Read(prefix[:], scratch)
+	if n == 0 || prefix[0] != '!' {
+		return v, true
+	}
+	if n == 2 && prefix[1] == '!' && (!s.legacy || scm.BufferStringLength(v) != 33) {
+		return scm.BufferSlice(v, 1, scm.BufferStringLength(v)), true
+	}
+	return scm.NewNil(), false
 }
 
 func (s *OverlayBlob) prepare() {

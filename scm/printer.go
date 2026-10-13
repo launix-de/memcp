@@ -88,7 +88,7 @@ func String(v Scmer) string {
 		return "nil"
 	case tagBool, tagInt, tagFloat, tagDate:
 		return v.String()
-	case tagString, tagCString, tagBString, tagBSON:
+	case tagString, tagCString, tagBString, tagLZ4, tagBSON:
 		return v.String()
 	case tagSymbol:
 		return v.String()
@@ -167,7 +167,7 @@ func WriteStringValue(w *schemeTextWriter, v Scmer) {
 	switch v.GetTag() {
 	case tagNil:
 		w.WriteString("nil")
-	case tagCString, tagBString:
+	case tagCString, tagBString, tagLZ4:
 		w.writeCompressedText(v)
 	case tagBool, tagString, tagSymbol, tagDate:
 		w.WriteString(v.String())
@@ -312,9 +312,11 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		var buffer [64]byte
 		value := strconv.AppendFloat(buffer[:0], v.Float(), 'g', -1, 64)
 		_, _ = b.Write(value)
-	case tagString, tagCString, tagBString:
+	case tagString, tagCString, tagBString, tagLZ4:
 		b.WriteByte('"')
-		if isCompressedText(v) {
+		if v.IsBufferString() {
+			serializeBufferString(b, v)
+		} else if isCompressedText(v) {
 			view, ok := makeOperatorView(v)
 			if ok {
 				var chunk [768]byte

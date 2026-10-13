@@ -160,7 +160,7 @@ func TestShardMemoryExcludesMaterializedCompressedDictionary(t *testing.T) {
 	}
 	shard.setState(SHARED)
 	before := shard.exclusiveSize()
-	strings.dictionary = "materialized-dictionary"
+	strings.dictCache.Store(&stringDictionaryCache{storage: strings, text: "materialized-dictionary"})
 	if after := shard.exclusiveSize(); after != before {
 		t.Fatalf("shard size grew with separately owned dictionary: before=%d after=%d", before, after)
 	}
@@ -170,18 +170,19 @@ func TestOwnedMemoryExcludesNestedMaterializedDictionaries(t *testing.T) {
 	base := &StorageString{compressedDict: []byte("compressed"), compressed: true}
 	blob := &OverlayBlob{Base: base}
 	before := ownedColumnMemory(blob)
-	base.dictionary = "materialized-under-blob"
+	base.dictCache.Store(&stringDictionaryCache{storage: base, text: "materialized-under-blob"})
 	if after := ownedColumnMemory(blob); after != before {
 		t.Fatalf("blob owner includes separately weighted nested dictionary: before=%d after=%d", before, after)
 	}
 
-	prefix := &StoragePrefix{values: StorageString{compressed: true, dictionary: "materialized-under-prefix"}}
-	if got, want := materializedDictionaryMemory(prefix), uint(len(prefix.values.dictionary)); got != want {
+	prefix := &StoragePrefix{values: StorageString{compressed: true}}
+	prefix.values.dictCache.Store(&stringDictionaryCache{storage: &prefix.values, text: "materialized-under-prefix"})
+	if got, want := materializedDictionaryMemory(prefix), prefix.values.dictCache.Load().computeSize(); got != want {
 		t.Fatalf("nested prefix dictionary ownership = %d, want %d", got, want)
 	}
 
 	proxy := &StorageComputeProxy{main: base, delta: make(map[uint32]scm.Scmer)}
-	if got, want := materializedDictionaryMemory(proxy), uint(len(base.dictionary)); got != want {
+	if got, want := materializedDictionaryMemory(proxy), base.dictCache.Load().computeSize(); got != want {
 		t.Fatalf("nested compute-proxy dictionary ownership = %d, want %d", got, want)
 	}
 }
@@ -451,7 +452,7 @@ func TestComputeProxyMemoryKeepsDictionaryOwnershipSeparate(t *testing.T) {
 	main := &StorageString{compressed: true, compressedDict: []byte("compressed")}
 	proxy := &StorageComputeProxy{main: main, mainBytes: ownedColumnMemory(main), delta: make(map[uint32]scm.Scmer)}
 	before := proxy.ownedMemory()
-	main.dictionary = "separately-owned-decoded-dictionary"
+	main.dictCache.Store(&stringDictionaryCache{storage: main, text: "separately-owned-decoded-dictionary"})
 	if got := proxy.ownedMemory(); got != before {
 		t.Fatalf("proxy charged decoded dictionary: %d != %d", got, before)
 	}

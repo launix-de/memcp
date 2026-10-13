@@ -368,8 +368,8 @@ func (s *storageShard) residentMemoryLocked() memoryOwnerSnapshot {
 func visitColumnCaches(column any, nonblocking bool, visit func(any) bool) bool {
 	switch c := column.(type) {
 	case *StorageString:
-		if c.compressed {
-			return visit(c)
+		if cache := c.dictCache.Load(); cache != nil {
+			return visit(cache)
 		}
 	case *OverlayBlob:
 		if c.ram != nil && !visit(c.ram) {
@@ -415,8 +415,19 @@ func ownedColumnMemory(storage ColumnStorage) uint {
 	if storage == nil {
 		return 0
 	}
-	if proxy, ok := storage.(*StorageComputeProxy); ok {
-		return proxy.ownedMemory()
+	switch column := storage.(type) {
+	case *StorageComputeProxy:
+		return column.ownedMemory()
+	case *StorageString:
+		return column.payloadSize()
+	case *OverlayBlob:
+		size := uint(unsafe.Sizeof(*column)) + column.size
+		if column.ram != nil {
+			// The cache object survives eviction; its payload belongs to its
+			// separate registration. No pair of mutable size snapshots here.
+			size += uint(unsafe.Sizeof(*column.ram))
+		}
+		return size + ownedColumnMemory(column.Base)
 	}
 	size := storage.ComputeSize()
 	materialized := materializedDictionaryMemory(storage)
@@ -440,13 +451,10 @@ func ownedColumnMemory(storage ColumnStorage) uint {
 func materializedDictionaryMemory(storage any) uint {
 	switch typed := storage.(type) {
 	case *StorageString:
-		if !typed.compressed {
-			return 0
+		if cache := typed.dictCache.Load(); cache != nil {
+			return cache.computeSize()
 		}
-		typed.dictMu.RLock()
-		size := uint(len(typed.dictionary))
-		typed.dictMu.RUnlock()
-		return size
+		return 0
 	case *OverlayBlob:
 		if typed.Base == nil {
 			return 0
@@ -1801,7 +1809,7 @@ func (t *storageShard) ColumnReaderTx(tx *TxContext, col string, alreadyLocked b
 	} else {
 		cstorage = t.getColumnStorageOrPanic(col, writeLocked, tx)
 	}
-	reader := newCachedColumnReaderTx(cstorage, tx, alreadyLocked || writeLocked)
+	reader := newCachedColumnReaderTx(cstorage, tx, alreadyLocked || writeLocked, ReadCompressed)
 	_, computed := cstorage.(*StorageComputeProxy)
 	return func(idx uint32) scm.Scmer {
 		if idx < t.main_count {
@@ -1981,7 +1989,7 @@ func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, ma
 
 	for i, colName := range cols {
 		mainCol := t.getColumnStorageOrPanic(colName, alreadyLocked, currentTx)
-		mainReader := newCachedColumnReaderTx(mainCol, currentTx, false)
+		mainReader := newCachedColumnReaderTx(mainCol, currentTx, false, ReadCompressed)
 		mr.mainCols[i] = mainCol
 		mr.mainBulkReaders[i] = mainReader
 		mr.mainValueFuncs[i] = compiledColumnGetValue(mainReader)
@@ -2320,7 +2328,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			continue
 		}
 		mainCol := mr.mainCols[i]
-		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx, false)
+		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx, false, ReadCompressed)
 		mr.mainBulkReaders[i] = mainReader
 		mr.mainMultiFuncs[i] = compiledColumnGetValueMulti(mainReader)
 		colName := mr.colNames[i]
@@ -4091,7 +4099,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			var reader ColumnReader
 			for {
 				// scan phase
-				reader = c.GetCachedReader() // must NOT use newCachedColumnReader: it strips OverlayBlob
+				reader = c.GetCachedReader(ReadCompressed) // must NOT use newCachedColumnReader: it strips OverlayBlob
 				newcol.prepare()
 				replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, newcol.scan)
 				i = uint32(len(rebuiltRowIDs))
@@ -4113,7 +4121,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				blob.schema = result.t.schema
 			}
 			newcol.init(i)
-			reader = c.GetCachedReader() // must NOT use newCachedColumnReader: it strips OverlayBlob
+			reader = c.GetCachedReader(ReadCompressed) // must NOT use newCachedColumnReader: it strips OverlayBlob
 			replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, newcol.build)
 			newcol.finish()
 

@@ -682,9 +682,9 @@ func TestGetCachedReaderReturnsSelf(t *testing.T) {
 		{"OverlayBlob", &OverlayBlob{}},
 	}
 	for _, tc := range types {
-		reader := tc.col.GetCachedReader()
+		reader := tc.col.GetCachedReader(ReadCompressed)
 		if reader != ColumnReader(tc.col) {
-			t.Errorf("%s.GetCachedReader() should return self", tc.name)
+			t.Errorf("%s.GetCachedReader(ReadCompressed) should return self", tc.name)
 		}
 	}
 }

@@ -370,7 +370,7 @@ restart:
 	case tagFunc, tagFuncEnv, tagProc, tagJIT, tagClosure, tagPromise, tagSpecialForm:
 		// Optimizer-resolved native callables.
 		return expression
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagCString, tagBString, tagRegex, tagVector, tagFastDict, tagParser, tagAny, tagBSON:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagCString, tagBString, tagLZ4, tagRegex, tagVector, tagFastDict, tagParser, tagAny, tagBSON:
 		// Self-evaluating literals.
 		return expression
 	case tagNthLocalVar:
@@ -41374,7 +41374,7 @@ func ComputeSize(v Scmer) uint {
 			return base
 		}
 		return base + goAllocOverhead + align8(ln)
-	case tagCString, tagBString:
+	case tagCString, tagBString, tagLZ4:
 		// These values borrow dictionary/blob storage. Its owning column accounts
 		// for the backing allocation; this reference owns only its Scmer slot.
 		// Do not decode strings or charge the shared dictionary per reference.

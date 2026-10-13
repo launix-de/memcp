@@ -1878,6 +1878,9 @@ func (t *storageShard) prepareTypedScanFilter(condition scm.Scmer, ccols []Colum
 			return nil
 		}
 		valueType := column.JITValueType()
+		if prepared, ok := cReaders[index].(interface{ JITValueType() uint8 }); ok {
+			valueType = prepared.JITValueType()
+		}
 		if valueType == scm.JITTypeUnknown {
 			return nil
 		}
@@ -2038,7 +2041,7 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
 			if _, ok := ccols[i].(*StorageComputeProxy); ok {
 				cNeedsCachedReader[i] = true
 			}
@@ -2304,7 +2307,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
 	}
@@ -2636,7 +2639,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
 			if _, ok := ccols[i].(*StorageComputeProxy); ok {
 				cNeedsCachedReader[i] = true
 			}

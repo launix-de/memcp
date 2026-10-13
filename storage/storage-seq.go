@@ -5945,7 +5945,9 @@ func (s *StorageSeq) deserializeSeqV0(f io.Reader) uint {
 	return uint(l)
 }
 
-func (s *StorageSeq) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
+func (s *StorageSeq) GetCachedReader(hints ColumnReadHints) ColumnReader {
+	return s.storageJITFunctions.reader(s)
+}
 
 func (s *StorageSeq) GetValue(i uint32) scm.Scmer {
 	// bisect to the correct index where to find (lowest idx to find our sequence)

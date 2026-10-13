@@ -1520,7 +1520,9 @@ func (s *StorageInt) String() string {
 	}
 }
 
-func (s *StorageInt) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
+func (s *StorageInt) GetCachedReader(hints ColumnReadHints) ColumnReader {
+	return s.storageJITFunctions.reader(s)
+}
 
 func (s *StorageInt) GetValue(i uint32) scm.Scmer {
 	if !s.hasNull {

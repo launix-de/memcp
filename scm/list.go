@@ -1642,7 +1642,10 @@ func orderedUniqueCanonical(value Scmer) (Scmer, uint8, bool) {
 	// Hash only a proven homogeneous domain; add degrades to the exact linear
 	// Equal path as soon as a value leaves that domain.
 	switch value.GetTag() {
-	case tagString, tagSymbol, tagCString, tagBString:
+	case tagString, tagSymbol, tagCString, tagBString, tagLZ4:
+		if value.IsBufferString() {
+			return value, 1, true
+		}
 		return NewString(value.String()), 1, true
 	case tagInt:
 		return value, 2, true

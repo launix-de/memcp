@@ -74,7 +74,7 @@ func toTime(v Scmer) (time.Time, bool) {
 		return time.Unix(v.Int(), 0).UTC(), true
 	case tagFloat:
 		return time.Unix(int64(v.Float()), 0).UTC(), true
-	case tagString, tagSymbol, tagCString, tagBString:
+	case tagString, tagSymbol, tagCString, tagBString, tagLZ4:
 		if ts, ok := ParseDateString(v.String()); ok {
 			return time.Unix(ts, 0).UTC(), true
 		}

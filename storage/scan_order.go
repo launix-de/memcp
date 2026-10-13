@@ -1953,7 +1953,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
 			if _, ok := ccols[i].(*StorageComputeProxy); ok {
 				cNeedsCachedReader[i] = true
 			}
@@ -1970,7 +1970,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 	aMultiFuncs := make([]scm.JITStorageGetValueMultiFunc, len(acceptCols))
 	for i, column := range acceptCols {
 		acols[i] = t.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
-		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx, false)
+		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx, false, ReadCompressed)
 		if _, ok := acols[i].(*StorageComputeProxy); ok {
 			aNeedsCachedReader[i] = true
 		}

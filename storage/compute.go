@@ -37,15 +37,28 @@ func requireStatelessComputedCallback(label string, callback scm.Scmer) {
 // storage and tx context. alreadyLocked records an existing read or write lock
 // on the owning shard; recursive computed inputs must not acquire it again.
 //
-// For StorageEnum this gives O(1) sequential decode; for others it's a no-op.
+// StorageEnum prepares a sequential cursor. StorageString resolves dictionary
+// hints and statement-owned decoded leases here, outside row loops.
 // Do not strip runtime overlays here: generic scan/read paths must still see
 // user-visible values (for example OverlayBlob must dereference its hash marker
 // back to the persisted blob payload after restart).
-func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked bool) ColumnReader {
+func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked bool, hints ColumnReadHints) ColumnReader {
 	if provider, ok := col.(TxColumnReaderProvider); ok {
-		return provider.GetCachedReaderTx(tx, alreadyLocked)
+		return provider.GetCachedReaderTx(tx, alreadyLocked, hints)
 	}
-	return col.GetCachedReader()
+	// Without a statement owner, automatic reads retain no shared decoded
+	// dictionary. Explicit ReadDecoded consumers own and release their reader.
+	if hints == ReadAuto && (tx == nil || !tx.queryActive.Load()) {
+		hints = ReadCompressed
+	}
+	reader := col.GetCachedReader(hints)
+	if leased, ok := reader.(interface{ release() }); ok && tx != nil {
+		if !tx.retainQueryReader(leased.release) {
+			leased.release()
+			return col.GetCachedReader(ReadCompressed)
+		}
+	}
+	return reader
 }
 
 func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, dependencies []string) {

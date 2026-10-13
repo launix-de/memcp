@@ -350,7 +350,7 @@ type EnumDecodeCache struct {
 }
 
 // cachedEnumReader wraps a StorageEnum with a private EnumDecodeCache.
-// Returned by StorageEnum.GetCachedReader(). Must not be shared between goroutines.
+// Returned by StorageEnum.GetCachedReader(ReadCompressed). Must not be shared between goroutines.
 type cachedEnumReader struct {
 	s     *StorageEnum
 	cache EnumDecodeCache
@@ -387,7 +387,7 @@ func (r *cachedEnumReader) GetValueMulti(recids []uint32, target []scm.Scmer, st
 	}
 }
 
-func (s *StorageEnum) GetCachedReader() ColumnReader {
+func (s *StorageEnum) GetCachedReader(hints ColumnReadHints) ColumnReader {
 	// Enum decoding is stateful even though the finished storage is immutable.
 	// Keep one private rANS cursor per consumer: replacing it with the stateless
 	// scalar JIT entry would restart symbol lookup and decoding for every row.
@@ -398,7 +398,7 @@ func (s *StorageEnum) GetCachedReader() ColumnReader {
 
 // GetValue is safe for concurrent use — it is fully read-only on the struct.
 // Uses binary search + sequential decode from chunk start. For O(1) sequential
-// access, use GetCachedReader() which returns a per-goroutine cached wrapper.
+// access, use GetCachedReader(ReadCompressed) which returns a per-goroutine cached wrapper.
 func (s *StorageEnum) GetValue(i uint32) scm.Scmer {
 	if uint64(i) >= s.count {
 		return scm.NewNil()
