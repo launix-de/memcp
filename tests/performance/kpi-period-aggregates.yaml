@@ -22,7 +22,9 @@ metadata:
   isolated: true
   reuse_fixture: true
   restart_after_setup: true
-  performance_shard_weight: 12
+  # A fresh A/B pair takes about four minutes on CI; keep this large
+  # fixture separate so other suites retain their required verification pairs.
+  performance_shard_weight: 96
   ci: false
   perf_ci: true
   performance_rows: 10000
