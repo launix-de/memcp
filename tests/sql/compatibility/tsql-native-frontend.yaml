@@ -1634,7 +1634,27 @@ test_cases:
     sql: SELECT id,value FROM tsql_identity_big_limit
     expect: {rows: 1, data: [{id: 9223372036854775807, value: 7}]}
 
+  - name: Duplicate identity targets cannot overwrite a validated explicit value
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_identity_duplicate
+      - sql: CREATE TABLE tsql_identity_duplicate(id INT IDENTITY,value INT)
+    sql: INSERT INTO tsql_identity_duplicate(id,id,value) VALUES(1,NULL,7)
+    expect: {error: true}
+  - name: Case variants also denote duplicate identity targets
+    sql: INSERT INTO tsql_identity_duplicate(id,ID,value) VALUES(1,NULL,7)
+    expect: {error: true}
+  - name: Streaming insert rejects duplicate identity targets before source execution
+    sql: INSERT INTO tsql_identity_duplicate(id,id,value) SELECT 1,NULL,7
+    expect: {error: true}
+  - name: Ordinary assignment targets obey the same duplicate column rule
+    sql: INSERT INTO tsql_identity_duplicate(value,value) VALUES(7,8)
+    expect: {error: true}
+  - name: Duplicate target rejections publish no native rows
+    sql: SELECT COUNT(*) AS n FROM tsql_identity_duplicate
+    expect: {rows: 1, data: [{n: 0}]}
+
 cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_identity_duplicate
   - sql: DROP TABLE IF EXISTS tsql_identity_small_limit
   - sql: DROP TABLE IF EXISTS tsql_identity_big_limit
   - sql: DROP TABLE IF EXISTS tsql_identity_parallel

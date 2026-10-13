@@ -218,6 +218,10 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 			(list (quote sql_type_expr) (list tsql_assignment_decimal value threshold) type nil))
 		value))))
 (define tsql_insert_declarations (lambda (database table_name columns) (begin
+	/* Resolve each target exactly once. Duplicate targets can overwrite an
+	already validated identity/default value in the native column vector. */
+	(if (equal? (count columns) (count (merge_unique (list (map columns toLower)))))
+		true (error "duplicate INSERT column"))
 	(define declarations (get_schema database table_name))
 	(map columns (lambda (name) (begin
 		(define declaration (find declarations (lambda (column) (equal?? (column "Field") name)) nil))
