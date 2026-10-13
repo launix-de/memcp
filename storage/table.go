@@ -3502,8 +3502,15 @@ func newUniquePendingKeys(rows [][]scm.Scmer, positions []int, compareNulls bool
 			}
 			family = kind
 		}
-		if hasNull && compareNulls && (family == 3 || family == 5) {
-			family = 0
+		if hasNull && compareNulls {
+			switch family {
+			case 2:
+				// Equal compares nil with text through Bool. Keep every falsy
+				// spelling in nil's bucket without collapsing text equality.
+				family = 6
+			case 3, 5:
+				family = 0
+			}
 		}
 		pending.families[i] = family
 	}
@@ -3523,9 +3530,9 @@ func (p *uniquePendingKeys) remember(rowIndex int, key []scm.Scmer) bool {
 			if value.IsNil() {
 				value = scm.NewInt(0)
 			}
-		case 2:
+		case 2, 6:
 			text := ""
-			if !value.IsNil() {
+			if !value.IsNil() && (p.families[i] != 6 || value.Bool()) {
 				text = scm.String(value)
 			}
 			value = scm.NewString(text)

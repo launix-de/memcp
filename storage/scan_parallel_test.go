@@ -230,6 +230,14 @@ func TestUniqueBatchCoercingAndNullKeys(t *testing.T) {
 		{"null-distinct", scm.NewNil(), scm.NewNil(), false, 2},
 		{"null-not-distinct", scm.NewNil(), scm.NewNil(), true, 1},
 		{"null-false-coercion", scm.NewBool(false), scm.NewNil(), true, 1},
+		{"null-empty-text", scm.NewString(""), scm.NewNil(), true, 1},
+		{"null-false-text", scm.NewString("false"), scm.NewNil(), true, 1},
+		{"null-uppercase-false-text", scm.NewString("FALSE"), scm.NewNil(), true, 1},
+		{"null-zero-text", scm.NewString("0"), scm.NewNil(), true, 1},
+		{"null-spaced-zero-text", scm.NewString(" 0 "), scm.NewNil(), true, 1},
+		{"null-negative-zero-text", scm.NewString("-0.0"), scm.NewNil(), true, 1},
+		{"null-zero-exponent-text", scm.NewString("0e3"), scm.NewNil(), true, 1},
+		{"distinct-false-text", scm.NewString("false"), scm.NewString("0"), true, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
