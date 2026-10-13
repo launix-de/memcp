@@ -34,7 +34,6 @@ test_cases:
   name: 'Fixture setup 011: CREATE TABLE dbo.tsql_binary_compare (id INT PRIMARY KEY,a BINARY(1),b VARBINARY(4))'
 - sql: INSERT dbo.tsql_binary_compare VALUES (1,0x41,0x61),(2,0x61,0x41),(3,0xff,0xfe),(4,NULL,NULL)
   name: 'Fixture setup 012: INSERT dbo.tsql_binary_compare VALUES (1,0x41,0x61),(2,0x61,0x41),(3,0xff,0xfe),(4,NULL,NULL)'
-  noncritical: true
 - name: First insert creates distinct nonzero tokens instead of default placeholders
   sql: SELECT COUNT(DISTINCT rv) AS value FROM dbo.tsql_rowversion_data WHERE rv<>0x0000000000000000
   expect:
@@ -57,21 +56,18 @@ test_cases:
     rows: 1
     data:
     - value: 0
-  noncritical: true
 - name: Invalid UTF8 binary scalars remain different
   sql: SELECT CASE WHEN 0xff=0xfe THEN 1 ELSE 0 END AS value
   expect:
     rows: 1
     data:
     - value: 0
-  noncritical: true
 - name: Binary scalar inequality is byte exact
   sql: SELECT CASE WHEN 0x41<>0x61 THEN 1 ELSE 0 END AS value
   expect:
     rows: 1
     data:
     - value: 1
-  noncritical: true
 - name: Binary scalar ordering uses unsigned bytes
   sql: SELECT CASE WHEN 0xff>0xfe AND 0x41<0x61 AND 0xff>=0xff AND 0x41<=0x41 THEN 1 ELSE 0 END AS value
   expect:
@@ -98,7 +94,6 @@ test_cases:
     - id: 1
     - id: 2
     - id: 3
-  noncritical: true
 - name: Binary equality remains exact beside a primary key predicate
   sql: SELECT id FROM dbo.tsql_binary_compare WHERE id=1 AND a=0x61
   expect:
@@ -109,14 +104,12 @@ test_cases:
     rows: 1
     data:
     - id: 2
-  noncritical: true
 - name: Binary simple case compares exact bytes
   sql: SELECT CASE 0x41 WHEN 0x61 THEN 1 WHEN 0x41 THEN 2 ELSE 0 END AS value
   expect:
     rows: 1
     data:
     - value: 2
-  noncritical: true
 - name: Binary null equality stays unknown
   sql: SELECT CAST(NULL AS BINARY(1))=CAST(NULL AS BINARY(1)) AS value
   expect:
@@ -138,6 +131,29 @@ test_cases:
     data:
     - value: null
   noncritical: true
+- name: Binary literal equality with NULL remains unknown
+  sql: SELECT 0x41=NULL AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Binary literal inequality with NULL remains unknown
+  sql: SELECT NULL<>0x41 AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Binary literal ordering with NULL remains unknown
+  sql: SELECT NULL<0x41 AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Binary compiled plans contain only executable formulas
+  scm: (not (regexp_test (string (parse_tsql "memcp-tests" "SELECT id FROM tsql_binary_compare
+    WHERE a=b OR a=0x41" nil nil nil)) "sql_type_expr|sql_compile_expr"))
+  expect:
+    result: true
 - name: Binary comparison changes preserve text case folding
   sql: SELECT CASE WHEN N'A'=N'a' THEN 1 ELSE 0 END AS value
   expect:
@@ -249,7 +265,6 @@ test_cases:
   sql: UPDATE dbo.tsql_rowversion_data SET rv='explicit' WHERE id=1
   expect:
     error: true
-  noncritical: true
 - name: Explicit null rowversion insertion fails
   sql: INSERT dbo.tsql_rowversion_data (id,val,rv) VALUES (3,30,NULL)
   expect:
@@ -258,12 +273,10 @@ test_cases:
   sql: UPDATE dbo.tsql_rowversion_data SET rv=rv WHERE id=1
   expect:
     error: true
-  noncritical: true
 - name: Explicit rowversion assignment fails even with no matching row
   sql: UPDATE dbo.tsql_rowversion_data SET rv=rv WHERE id=-1
   expect:
     error: true
-  noncritical: true
 - name: Rowversion rejects a user default
   sql: CREATE TABLE dbo.tsql_rowversion_invalid (id INT,rv ROWVERSION DEFAULT 0x0000000000000000)
   expect:
