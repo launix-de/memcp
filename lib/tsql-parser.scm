@@ -1129,6 +1129,29 @@ never from the first row. Unknown expression types stay text in this first slice
 			(if policy (policy database tbl true) true)
 			(tsql_insert_select_plan database tbl (coalesce columns (table_insertable_columns database tbl)) query)
 	)))
+	/* Unique index declarations are native keys. Placement/direction syntax
+	is a physical hint; admission and enforcement stay in the existing operator. */
+	(define tsql_create_unique_index (parser '(
+		(atom "CREATE" true) (atom "UNIQUE" true) tsql_key_placement
+		(atom "INDEX" true) (define name tsql_identifier) (atom "ON" true)
+		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
+		"(" (define columns tsql_key_columns) ")"
+	) (begin
+			(define database (coalesce schema2 schema))
+			(if policy (policy database tbl true) true)
+			/* PRIMARY is a reserved native key identity, not an index alias. */
+			(if (equal? (toUpper name) "PRIMARY")
+				(error "index name PRIMARY is reserved") true)
+			(define declarations (get_schema database tbl))
+			(define columns (map columns (lambda (name) (begin
+				(define declaration (find declarations (lambda (column) (equal?? (column "Field") name)) nil))
+				(if declaration (declaration "Field") (error "unknown index column: " name))))))
+			(reduce columns (lambda (seen name)
+				(if (has? seen name) (error "duplicate index column: " name) (cons name seen))) '())
+			(list (quote if)
+				(list (quote createkey) (list (quote table) database tbl) name true
+					(cons (quote list) columns) (quote tx) (list (quote list) "nulls_not_distinct" true))
+				true (list (quote error) "index already exists: " name)))))
 	(define tsql_foreign_key_mode (parser (or
 		(parser '((atom "NO" true) (atom "ACTION" true)) "restrict")
 		(parser (atom "CASCADE" true) "cascade")
@@ -1215,7 +1238,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		(parser '((atom "EXPLAIN" true) (define query tsql_select))
 			'('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy) planning_session tx)) (settings "ExplainWidth")))))
 		tsql_insert_into tsql_insert_select tsql_update tsql_delete tsql_truncate
-		tsql_create_view tsql_create_table tsql_alter_table
+		tsql_create_view tsql_create_table tsql_alter_table tsql_create_unique_index
 		(parser '((atom "CREATE" true) (atom "DATABASE" true)
 			(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
 			(define name tsql_identifier)) (begin
@@ -1258,5 +1281,5 @@ never from the first row. Unknown expression types stay text in this first slice
 
 	(define command_parser (if describe
 		(parser (define query tsql_select) (tsql_build_select_plan query)) p))
-	((parser (define command command_parser) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
+	((parser '((* ";") (define command command_parser) (* ";")) command "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 )))

@@ -10,6 +10,19 @@ setup:
   - sql: CREATE TABLE tsql_add_contracts (id INT PRIMARY KEY,a INT,b SMALLINT,txt NVARCHAR(20),suffix VARCHAR(20))
   - sql: CREATE TABLE tsql_add_copy (id INT PRIMARY KEY,value INT)
   - sql: INSERT INTO tsql_add_contracts VALUES (1,10,2,N'3','x'),(2,NULL,2,NULL,'x')
+  - sql: DROP TABLE IF EXISTS tsql_terminator_probe
+  - sql: DROP TABLE IF EXISTS tsql_terminator_rejected
+  - sql: DROP TABLE IF EXISTS tsql_index_reserved
+  - sql: CREATE TABLE tsql_index_reserved (id INT)
+  - sql: DROP TABLE IF EXISTS tsql_index_rows
+  - sql: DROP TABLE IF EXISTS tsql_index_duplicates
+  - sql: DROP TABLE IF EXISTS tsql_index_nulls
+  - sql: CREATE TABLE tsql_index_rows (id INT PRIMARY KEY,tenant INT,Code NVARCHAR(80))
+  - sql: INSERT INTO tsql_index_rows VALUES (1,1,N'A'),(2,2,N'A')
+  - sql: CREATE TABLE tsql_index_duplicates (id INT PRIMARY KEY,value INT)
+  - sql: INSERT INTO tsql_index_duplicates VALUES (1,9),(2,9)
+  - sql: CREATE TABLE tsql_index_nulls (id INT PRIMARY KEY,value INT)
+  - sql: INSERT INTO tsql_index_nulls VALUES (1,NULL)
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: CREATE TABLE tsql_having_input (id INT PRIMARY KEY)
   - sql: INSERT INTO tsql_having_input VALUES (1)
@@ -223,6 +236,131 @@ test_cases:
       (not (regexp_test (string (parse_tsql "memcp-tests"
         "SELECT a+txt AS value FROM tsql_add_contracts" nil nil nil)) "sql_compile_expr|tsql_compile_addition"))
     expect: {result: true}
+  - name: Statement terminators belong to the grammar
+    scm: |
+      (expression_equal?
+        (parse_tsql "memcp-tests" "SELECT N'a;b' AS value" nil nil nil)
+        (parse_tsql "memcp-tests" "; ; SELECT N'a;b' AS value; ; -- trailing separator" nil nil nil))
+    expect: {result: true}
+  - name: Leading empty statements preserve one result
+    sql: ; ; SELECT 42 AS n; ;
+    expect: {rows: 1, data: [{n: 42}]}
+  - name: Multiline block comments are lexical whitespace
+    sql: |
+      /* setup text
+         ; SELECT 99 AS ignored */
+      SELECT /* projection
+                text */ 7 AS n;
+      /* trailing comment
+         SELECT 99 AS ignored; */
+    expect: {rows: 1, data: [{n: 7}]}
+  - name: Unterminated block comments remain syntax errors
+    sql: SELECT 7 AS n; /* unfinished
+    expect: {error: true}
+  - name: A line comment at end of input follows the terminator
+    sql: SELECT 8 AS n; -- trailing text
+    expect: {rows: 1, data: [{n: 8}]}
+  - name: Consecutive result statements remain explicitly unsupported
+    sql: SELECT 1 AS n; SELECT 2 AS n;
+    expect: {error: true}
+  - name: Invalid trailing statement cannot execute an earlier declaration
+    sql: CREATE TABLE tsql_terminator_rejected (id INT); invalid_token
+    expect: {error: true}
+  - name: Rejected statement does not publish the native table
+    sql: SELECT id FROM tsql_terminator_rejected
+    expect: {error: true}
+  - name: Statement terminators cannot swallow invalid trailing syntax
+    sql: SELECT 1 AS n; invalid_token
+    expect: {error: true}
+  - name: Multiline comments preserve quoted punctuation
+    sql: |
+      SELECT N'/* not a comment */; -- still text' AS label /* outside
+         comment */;
+    expect: {rows: 1, data: [{label: '/* not a comment */; -- still text'}]}
+  - name: Terminated DDL uses native table admission
+    sql: CREATE TABLE tsql_terminator_probe (id INT PRIMARY KEY,label NVARCHAR(80)); -- create
+    expect: {rows: 0}
+  - name: Terminated insert preserves semicolons inside literal data
+    sql: INSERT INTO tsql_terminator_probe VALUES (1,N'first;second'); /* insertion */
+    expect: {affected_rows: 1}
+  - name: Terminated mutation uses the native update planner
+    sql: UPDATE tsql_terminator_probe SET label=N'updated;value' WHERE id=1; -- update
+    expect: {affected_rows: 1}
+  - name: Native data survives terminated DDL and DML
+    sql: SELECT id,label FROM tsql_terminator_probe; /* read */
+    expect: {rows: 1, data: [{id: 1, label: 'updated;value'}]}
+  - name: Terminated deletion uses the native transaction path
+    sql: DELETE FROM tsql_terminator_probe WHERE id=1; -- delete
+    expect: {affected_rows: 1}
+  - name: Terminated deletion has an observable effect
+    sql: SELECT COUNT(*) AS n FROM tsql_terminator_probe; -- count
+    expect: {rows: 1, data: [{n: 0}]}
+  - name: Unique index declarations reject the reserved native primary key identity
+    sql: CREATE UNIQUE INDEX [pRiMaRy] ON tsql_index_reserved(id)
+    expect: {error: true, contains: index name PRIMARY is reserved}
+  - name: Rejected reserved index names leave native key metadata unchanged
+    scm: '(empty_list? (((show "memcp-tests" "tsql_index_reserved" true) "meta") "Unique"))'
+    expect: {result: true}
+  - name: Unique index declaration emits the native key operation
+    scm: |
+      (expression_equal?
+        (parse_tsql "memcp-tests" "CREATE UNIQUE NONCLUSTERED INDEX uq_pair ON [dbo].[tsql_index_rows] ([tenant] DESC,[code] ASC)" nil nil nil)
+        (list (quote if)
+          (list (quote createkey) (list (quote table) "memcp-tests" "tsql_index_rows") "uq_pair" true
+            (list (quote list) "tenant" "Code") (quote tx) (list (quote list) "nulls_not_distinct" true))
+          true (list (quote error) "index already exists: " "uq_pair")))
+    expect: {result: true}
+  - name: Standalone unique index uses native existing-row admission
+    sql: CREATE UNIQUE NONCLUSTERED INDEX uq_pair ON [dbo].[tsql_index_rows] ([tenant] DESC,[code] ASC)
+    expect: {rows: 0}
+  - name: Native unique index rejects a duplicate tuple
+    sql: INSERT INTO tsql_index_rows VALUES (3,1,N'A')
+    expect: {error: true, contains: Duplicate entry}
+  - name: Native unique index accepts a different tuple
+    sql: INSERT INTO tsql_index_rows VALUES (4,1,N'B')
+    expect: {affected_rows: 1}
+  - name: Native unique index rejects a conflicting update
+    sql: UPDATE tsql_index_rows SET tenant=1 WHERE id=2
+    expect: {error: true, contains: Duplicate entry}
+  - name: Rejected native unique writes retain existing tuples
+    sql: SELECT id,tenant,Code FROM tsql_index_rows ORDER BY id
+    expect: {rows: 3, data: [{id: 1, tenant: 1, Code: A}, {id: 2, tenant: 2, Code: A}, {id: 4, tenant: 1, Code: B}]}
+  - name: Existing unique index name cannot silently succeed
+    sql: CREATE UNIQUE INDEX uq_pair ON tsql_index_rows (id)
+    expect: {error: true, contains: index already exists}
+  - name: Unique index rejects an unknown declared column
+    sql: CREATE UNIQUE INDEX uq_missing ON tsql_index_rows (missing)
+    expect: {error: true, contains: unknown index column}
+  - name: Unique index rejects repeated canonical columns
+    sql: CREATE UNIQUE INDEX uq_repeated ON tsql_index_rows (Code,code)
+    expect: {error: true, contains: duplicate index column}
+  - name: Filtered unique indexes remain explicitly unsupported
+    sql: CREATE UNIQUE INDEX uq_filtered ON tsql_index_rows (Code) WHERE tenant=1
+    expect: {error: true}
+  - name: Duplicate-ignore policy cannot silently change uniqueness
+    sql: CREATE UNIQUE INDEX uq_ignore ON tsql_index_rows (Code) WITH (IGNORE_DUP_KEY=ON)
+    expect: {error: true}
+  - name: Unique admission rejects duplicates already in native data
+    sql: CREATE UNIQUE INDEX uq_existing ON tsql_index_duplicates (value)
+    expect: {error: true, contains: Duplicate entry}
+  - name: Failed index admission publishes no key
+    sql: INSERT INTO tsql_index_duplicates VALUES (3,9)
+    expect: {affected_rows: 1}
+  - name: Rejected unique admission preserves all existing data
+    sql: SELECT COUNT(*) AS n FROM tsql_index_duplicates
+    expect: {rows: 1, data: [{n: 3}]}
+  - name: Clustered unique declaration selects native null equality
+    sql: CREATE UNIQUE CLUSTERED INDEX uq_null ON tsql_index_nulls (value DESC)
+    expect: {rows: 0}
+  - name: Standalone unique index rejects a second null
+    sql: INSERT INTO tsql_index_nulls VALUES (2,NULL)
+    expect: {error: true, contains: Duplicate entry}
+  - name: Standalone unique index keeps null distinct from zero
+    sql: INSERT INTO tsql_index_nulls VALUES (3,0)
+    expect: {affected_rows: 1}
+  - name: Native indexed data retains the zero and null entries
+    sql: SELECT id,value FROM tsql_index_nulls ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: null}, {id: 3, value: 0}]}
   - name: escaped closing bracket is a quoted identifier
     sql: SELECT 42 AS [answer]]suffix]
     expect: {rows: 1, data: [{"answer]suffix": 42}]}
@@ -1078,6 +1216,12 @@ test_cases:
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_add_contracts
   - sql: DROP TABLE IF EXISTS tsql_add_copy
+  - sql: DROP TABLE IF EXISTS tsql_terminator_probe
+  - sql: DROP TABLE IF EXISTS tsql_terminator_rejected
+  - sql: DROP TABLE IF EXISTS tsql_index_reserved
+  - sql: DROP TABLE IF EXISTS tsql_index_rows
+  - sql: DROP TABLE IF EXISTS tsql_index_duplicates
+  - sql: DROP TABLE IF EXISTS tsql_index_nulls
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: DROP TABLE IF EXISTS tsql_cast_collation
   - sql: DROP TABLE IF EXISTS tsql_setup_catalog
