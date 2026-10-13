@@ -690,6 +690,8 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   inputs keep optional cache reuse, since their consumed extent is not yet
   established. Reader setup releases already bound children on failure. Later
   main replacement or appended rows retain the existing delta/repair semantics.
+  Point repair carries the caller's existing shard-read capability and uses
+  compressed input access, without appending row-bound statement releases.
   `batchStringReader.demandedWorkBytes` counts copying and compressed-block
   replay for only already selected values at batch boundaries. Raw blocks add
   no decode work. Once this demanded work covers the immutable dictionary,

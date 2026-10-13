@@ -29,12 +29,13 @@ import "github.com/launix-de/NonLockingReadMap"
 import "unsafe"
 
 type computeProxyReader struct {
-	proxy      *StorageComputeProxy
-	tx         *TxContext
-	mainSource ColumnStorage
-	mainReader ColumnReader
-	readers    []ColumnReader
-	values     []scm.Scmer
+	proxy         *StorageComputeProxy
+	tx            *TxContext
+	alreadyLocked bool
+	mainSource    ColumnStorage
+	mainReader    ColumnReader
+	readers       []ColumnReader
+	values        []scm.Scmer
 }
 
 func (r *computeProxyReader) release() {
@@ -53,12 +54,13 @@ func (r *computeProxyReader) readerForMain(main ColumnStorage) ColumnReader {
 }
 
 type orderedComputeProxyReader struct {
-	proxy *StorageComputeProxy
-	tx    *TxContext
+	proxy         *StorageComputeProxy
+	tx            *TxContext
+	alreadyLocked bool
 }
 
 func (r *orderedComputeProxyReader) GetValue(idx uint32) scm.Scmer {
-	return r.proxy.getValueTx(r.tx, idx)
+	return r.proxy.getValueTx(r.tx, idx, r.alreadyLocked, ReadAuto)
 }
 
 func (r *orderedComputeProxyReader) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
@@ -66,7 +68,7 @@ func (r *orderedComputeProxyReader) GetValueRange(recid uint32, count uint32, ta
 		stride = 1
 	}
 	for i := uint32(0); i < count; i++ {
-		target[int(i)*stride] = r.proxy.getValueTx(r.tx, recid+i)
+		target[int(i)*stride] = r.proxy.getValueTx(r.tx, recid+i, r.alreadyLocked, ReadAuto)
 	}
 }
 
@@ -75,7 +77,7 @@ func (r *orderedComputeProxyReader) GetValueMulti(recids []uint32, target []scm.
 		stride = 1
 	}
 	for i, recid := range recids {
-		target[i*stride] = r.proxy.getValueTx(r.tx, recid)
+		target[i*stride] = r.proxy.getValueTx(r.tx, recid, r.alreadyLocked, ReadAuto)
 	}
 }
 
@@ -223,7 +225,7 @@ func (r *computeProxyReader) GetValue(idx uint32) scm.Scmer {
 	if r.readers == nil && len(p.inputCols) != 0 {
 		// This reader bound a complete main snapshot. A later appended or
 		// invalidated value still uses the existing transaction-aware repair.
-		return p.getValueTx(r.tx, idx)
+		return p.getValueTx(r.tx, idx, r.alreadyLocked, ReadCompressed)
 	}
 
 	for i := range r.readers {
@@ -295,9 +297,9 @@ func (r *computeProxyReader) GetValueMulti(recids []uint32, target []scm.Scmer, 
 
 func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext, alreadyLocked bool, hints ColumnReadHints) ColumnReader {
 	if p.isOrdered {
-		return &orderedComputeProxyReader{proxy: p, tx: tx}
+		return &orderedComputeProxyReader{proxy: p, tx: tx, alreadyLocked: alreadyLocked}
 	}
-	reader := &computeProxyReader{proxy: p, tx: tx}
+	reader := &computeProxyReader{proxy: p, tx: tx, alreadyLocked: alreadyLocked}
 	complete := false
 	defer func() {
 		if !complete {
@@ -473,10 +475,10 @@ func (p *StorageComputeProxy) ComputeSize() uint {
 // ordered dependency range instead. Neither kind may treat an unprepared row as
 // absent or expose a transient invalid-cache sentinel as its logical value.
 func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
-	return p.getValueTx(nil, idx)
+	return p.getValueTx(nil, idx, false, ReadAuto)
 }
 
-func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32) scm.Scmer {
+func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32, alreadyLocked bool, hints ColumnReadHints) scm.Scmer {
 	// ORC path: validity tracked per-row via validMask.
 	if p.isOrdered {
 		if !p.validMask.AtomicGet(uint(idx)) {
@@ -523,9 +525,10 @@ func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32) scm.Scmer {
 	// Slow path: compute on demand
 	colvalues := make([]scm.Scmer, len(p.inputCols))
 	for i, col := range p.inputCols {
-		// Delta rows must be read via the shard-level ColumnReader; direct
-		// ColumnStorage access only understands main-row indexes.
-		colvalues[i] = p.shard.ColumnReaderTx(tx, col, false, ReadAuto).GetValue(idx)
+		// Delta rows use the existing shard reader and its caller's read/write
+		// capability. Point repair has no prepared bulk domain; its explicit
+		// compressed hint retains no new statement lease in this row callback.
+		colvalues[i] = p.shard.ColumnReaderTx(tx, col, alreadyLocked, hints).GetValue(idx)
 	}
 	val := scm.Apply(p.computor, colvalues...)
 
@@ -935,7 +938,7 @@ func (p *StorageComputeProxy) IncrementalUpdateTx(tx *TxContext, idx uint32, del
 		// Recompute the affected row from the already-mutated source state so the
 		// cache converges immediately even when this row had never been
 		// materialized before.
-		p.getValueTx(tx, idx)
+		p.getValueTx(tx, idx, false, ReadAuto)
 		return
 	}
 	var oldVal scm.Scmer
@@ -948,7 +951,7 @@ func (p *StorageComputeProxy) IncrementalUpdateTx(tx *TxContext, idx uint32, del
 		// The row was appended after main storage was compressed. Its source
 		// state already contains this trigger update, so materialize that state
 		// once instead of applying delta a second time.
-		p.getValueTx(tx, idx)
+		p.getValueTx(tx, idx, false, ReadAuto)
 		return
 	}
 	// Add oldVal + delta using Go arithmetic (avoids Scheme runtime overhead)

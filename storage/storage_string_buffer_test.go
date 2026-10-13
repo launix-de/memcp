@@ -15,6 +15,7 @@ import "bytes"
 import "testing"
 import "strings"
 import "reflect"
+import "runtime"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
@@ -1233,4 +1234,63 @@ func TestComputedReaderSetupFailureReleasesEarlierChildren(t *testing.T) {
 	if first.EvictDictionary() <= 0 {
 		t.Fatal("later input setup panic leaked an earlier operator-owned leaf")
 	}
+}
+
+func TestMaterializedReaderRepairPreservesExistingShardRead(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tmaterializedreadercapability")
+	tbl.CreateColumn("label", "TEXT", nil, nil)
+	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewString("first")}, {scm.NewInt(2), scm.NewString("second")},
+	}, nil, scm.NewNil(), false, nil)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
+	main := buildStorageString([]scm.Scmer{scm.NewString("cached first"), scm.NewString("cached second")})
+	main.CompressDictionary()
+	proxy := &StorageComputeProxy{shard: shard, main: main, count: 2, compressed: true,
+		inputCols: []string{"label"}, delta: make(map[uint32]scm.Scmer),
+		computor: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })}
+	shard.mu.Lock()
+	shard.deltaColumns["label"] = 0
+	shard.inserts = [][]scm.Scmer{{scm.NewString("appended")}}
+	shard.mu.Unlock()
+	tx := &TxContext{}
+	tx.querySeq.Store(19)
+	tx.queryActive.Store(true)
+	shard.mu.RLock()
+	reader := newCachedColumnReaderTx(proxy, tx, true, ReadDecoded|readOperatorOwned)
+	writerDone := make(chan struct{})
+	go func() {
+		shard.mu.Lock()
+		shard.mu.Unlock()
+		close(writerDone)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for shard.mu.TryRLock() {
+		shard.mu.RUnlock()
+		if time.Now().After(deadline) {
+			shard.mu.RUnlock()
+			ReleaseColumnReader(reader)
+			t.Fatal("writer did not queue behind the retained read capability")
+		}
+		runtime.Gosched()
+	}
+	done := make(chan scm.Scmer, 1)
+	go func() { done <- reader.GetValue(2) }()
+	var value scm.Scmer
+	blocked := false
+	select {
+	case value = <-done:
+	case <-time.After(100 * time.Millisecond):
+		blocked = true
+	}
+	shard.mu.RUnlock()
+	<-writerDone
+	if blocked {
+		value = <-done
+	}
+	ReleaseColumnReader(reader)
+	if blocked || value.String() != "appended" || len(tx.queryReaderReleases) != 0 {
+		t.Fatal("point repair re-entered an owned shard read or added row-bound statement leases")
+	}
+	tx.endQuery(19)
 }
