@@ -678,6 +678,11 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   workspace when no shared lease owner is available, never dictionary-manager
   synchronization per row. Typed kernels consume the prepared reader's physical
   tag, which does not determine SQL types.
+  `shardqueue.sortReaders` owns comparison-only leases prepared after candidate
+  filtering for an actual local sort. Construction failure releases them; a
+  completed queue transfers ownership to its global/direct ordered consumer.
+  Completion, early LIMIT and panic/cancellation cleanup join producers and
+  release queued readers exactly once, including queues removed from the heap.
   `TxContext.queryReaderReleases` is protected by its mutex and drained by
   panic-safe `endQuery`; non-statement consumers release their prepared reader
   explicitly. Usage timestamps change only during preparation. None of this

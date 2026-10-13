@@ -161,6 +161,7 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 						nil, scm.NewNil(), sortcols, sortdirs, 0, remainingOffset,
 						limit-len(records), nil, currentTx, sessionState)
 				}()
+				defer queue.closeReaders()
 				if remainingOffset >= len(queue.items) {
 					remainingOffset -= len(queue.items)
 					return

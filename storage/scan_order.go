@@ -424,6 +424,7 @@ type shardqueue struct {
 	candidateCount  int64
 	err             scanError
 	scols           []func(uint32) scm.Scmer // sort criteria column reader
+	sortReaders     []ColumnReader           // queue-owned comparison leases, retained through global merge
 	sortdirs        []func(...scm.Scmer) scm.Scmer
 	sortless        []func(scm.Scmer, scm.Scmer) bool
 	mapper          *ShardMapReducer
@@ -431,6 +432,15 @@ type shardqueue struct {
 	callbackCols    []string  // per-table map columns (for multi-table merge)
 	callback        scm.Scmer // per-table map function (for multi-table merge)
 	tableIdx        int       // index into scanOrderMulti tables slice; 0 for single-table scan_order
+}
+
+// A queue owns prepared comparison readers until its ordered consumer finishes.
+// Shard construction releases them on panic; successful construction transfers
+// them to global/direct consumption, including early LIMIT and cancellation.
+func (s *shardqueue) closeReaders() {
+	readers := s.sortReaders
+	s.sortReaders = nil
+	releaseColumnReaders(readers)
 }
 
 const directScanOrderColumns = 8
@@ -983,6 +993,39 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	var q globalqueue
 	resultChannels := make([]chan scanOrderResult, 0, len(tables))
 	doneChannels := make([]<-chan struct{}, 0, len(tables))
+	var ownedQueues []*shardqueue
+	defer func() {
+		// Producers have bounded result channels. On an early error, join them
+		// before draining uncollected ownership; no producer can outlive cleanup.
+		for _, done := range doneChannels {
+			<-done
+		}
+		for _, channel := range resultChannels {
+		drain:
+			for {
+				select {
+				case message, ok := <-channel:
+					if !ok {
+						break drain
+					}
+					if message.res != nil {
+						message.res.closeReaders()
+					}
+				default:
+					break drain
+				}
+			}
+		}
+		for _, queue := range ownedQueues {
+			queue.closeReaders()
+			if queue.mapper != nil {
+				queue.mapper.Close()
+			}
+			if queue.postOrderMapper != nil {
+				queue.postOrderMapper.Close()
+			}
+		}
+	}()
 	querySeq := querySeqFromTx(currentTx)
 	stats := make([]scanOrderStats, len(tables))
 
@@ -1177,6 +1220,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	for _, q_ := range resultChannels {
 		close(q_)
 		for msg := range q_ {
+			if msg.res != nil {
+				ownedQueues = append(ownedQueues, msg.res)
+			}
 			if msg.err.r != nil {
 				if scanErr.r == nil {
 					scanErr = msg.err
@@ -1455,6 +1501,7 @@ func flushDirectScanOrder(mapper *ShardMapReducer, accumulator scm.Scmer, stream
 }
 
 func consumeDirectScanOrder(queue *shardqueue, spec *scanOrderTableSpec, currentTx *TxContext, limitPartitionCols, offset, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) (scm.Scmer, bool, int64) {
+	defer queue.closeReaders()
 	if len(queue.items) == 0 {
 		return directScanOrderNullResult(spec.callbackCols, spec.callback, neutral, isOuter, notFoundValue), false, 0
 	}
@@ -1836,6 +1883,12 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 
 func (t *storageShard) scan_order(access scanAccess, conditionCols []string, condition scm.Scmer, acceptCols []string, accept scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
 	result = new(shardqueue)
+	complete := false
+	defer func() {
+		if !complete {
+			result.closeReaders()
+		}
+	}()
 	result.shard = t
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
@@ -2216,6 +2269,28 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 	}()
 
 	// and now sort result!
+	if !resultAlreadySorted && len(result.items) > 1 {
+		// Only a chosen local sort needs repeated comparison-key reads. Bind
+		// those keys after filtering; an index-ordered/braked path and all
+		// projection payloads retain their existing lazy preparation.
+		for i, sortcol := range sortcols {
+			if !sortcol.IsString() {
+				continue
+			}
+			name := sortcol.String()
+			column := t.getColumnStorageOrPanic(name, skipShardReadLock, currentTx)
+			reader := newCachedColumnReaderTx(column, currentTx, false, ReadDecoded)
+			result.sortReaders = append(result.sortReaders, reader)
+			fallback := result.scols[i]
+			mainCount := t.main_count
+			result.scols[i] = func(row uint32) scm.Scmer {
+				if row < mainCount {
+					return reader.GetValue(row)
+				}
+				return fallback(row)
+			}
+		}
+	}
 	result.sortdirs = adjustedSortdirs
 	result.sortless = make([]func(scm.Scmer, scm.Scmer) bool, len(adjustedSortdirs))
 	for i, relation := range adjustedSortdirs {
@@ -2314,5 +2389,6 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 		}
 		result.items = pruned
 	}
+	complete = true
 	return
 }
