@@ -44,6 +44,7 @@ The negative accumulator also represents the minimum int64 without overflow. */
 	(atom "INNER" true)
 	(atom "OUTER" true)
 	(atom "CROSS" true)
+	(atom "APPLY" true)
 	(atom "JOIN" true)
 	(atom "SELECT" true)
 	(atom "UNION" true)
@@ -927,6 +928,8 @@ never from the first row. Unknown expression types stay text in this first slice
 	(define tabledefs (parser (or
 
 		(parser '((define l tabledefs) (define x (or
+			(parser '((atom "CROSS" true) (atom "APPLY" true) (define r tabledef)) (list (tsql_apply_source r false)))
+			(parser '((atom "OUTER" true) (atom "APPLY" true) (define r tabledef)) (list (tsql_apply_source r true)))
 			(parser '((atom "LEFT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e tsql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl true e))))
 			(parser '((? (atom "INNER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e tsql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl false e))))
 			(parser '((? (atom "CROSS" true)) (atom "JOIN" true) (define r tabledefs)) r)
@@ -937,6 +940,23 @@ never from the first row. Unknown expression types stay text in this first slice
 				(merge r '('(id schema tbl true e)))))
 		(parser (define t tabledef) '(t))
 	)))
+
+	/* Lateral visibility is a logical source fact. The common binder and
+	decorrelator own dependency elimination; APPLY emits no execution code. */
+	(define tsql_apply_source (lambda (src outer) (match src
+		'(id database relation _outer _join) (list id database
+			(match relation
+				((symbol query-block) db sources fields condition group having order limit offset hidden stages facts)
+				/* Freeze exported contracts in the producer's lexical SQL scope.
+				The existing compiler callback disappears before physical lowering. */
+				(make_query_block db sources
+					(map_assoc (expand_query_block_fields sources fields) (lambda (_title expr)
+						(if (star_expr? expr) expr
+							(list (quote sql_compile_expr) (lambda (infos) (car infos)) expr))))
+					condition group having order limit offset hidden stages
+					(qassoc_set facts (quote lateral) true))
+				_ (error "APPLY currently requires a SELECT query"))
+			outer nil))))
 
 	(define tabledef (parser (or
 

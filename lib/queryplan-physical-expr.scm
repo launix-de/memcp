@@ -6188,7 +6188,10 @@ mapping uses the native unary callback selected here. */
 				(list (quote if) (list (quote nil?) (quote a)) (list (quote list)) (list (quote cons) (quote a) (list (quote list))))))
 			(list (quote define) (quote bb) (list (quote if)
 				(list (quote list?) (quote b))
-				(quote b)
+				/* Batch input may contain NULL; discard it while accumulating,
+				not on every read of the cached distinct cardinality. */
+				(list (quote filter) (quote b)
+					(list (quote lambda) (list (quote value)) (list (quote not) (list (quote nil?) (quote value)))))
 				(list (quote if) (list (quote nil?) (quote b)) (list (quote list)) (list (quote cons) (quote b) (list (quote list))))))
 			(list (quote merge_unique)
 				(list (quote cons) (quote aa)
