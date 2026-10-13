@@ -44,7 +44,6 @@ The negative accumulator also represents the minimum int64 without overflow. */
 	(atom "INNER" true)
 	(atom "OUTER" true)
 	(atom "CROSS" true)
-	(atom "APPLY" true)
 	(atom "JOIN" true)
 	(atom "SELECT" true)
 	(atom "UNION" true)

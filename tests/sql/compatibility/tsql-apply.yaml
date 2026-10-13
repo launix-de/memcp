@@ -6,13 +6,28 @@ metadata:
   syntax: tsql
   isolated: true
 setup:
+  - sql: DROP TABLE IF EXISTS tsql_apply_keywords
   - sql: DROP TABLE IF EXISTS tsql_apply_inner
   - sql: DROP TABLE IF EXISTS tsql_apply_outer
   - sql: CREATE TABLE tsql_apply_outer (id INT PRIMARY KEY, lookup_key INT)
   - sql: CREATE TABLE tsql_apply_inner (id INT PRIMARY KEY, lookup_key INT, amount INT)
+  - sql: CREATE TABLE tsql_apply_keywords (id INT PRIMARY KEY, apply INT)
+  - sql: INSERT INTO tsql_apply_keywords VALUES (1,17)
   - sql: INSERT INTO tsql_apply_outer VALUES (1,7),(2,7),(3,NULL),(4,9),(5,12)
   - sql: INSERT INTO tsql_apply_inner VALUES (10,7,4),(11,7,NULL),(12,9,6),(13,NULL,8)
 test_cases:
+  - name: APPLY remains an unquoted declared column and table alias
+    sql: SELECT apply.apply AS n FROM tsql_apply_keywords apply
+    expect:
+      rows: 1
+      data: [{n: 17}]
+  - name: APPLY remains an unquoted projection alias beside the FROM operator
+    sql: >-
+      SELECT q.apply FROM tsql_apply_outer p
+      CROSS APPLY (SELECT p.id AS apply) q ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{apply: 1}, {apply: 2}, {apply: 3}, {apply: 4}, {apply: 5}]
   - name: CROSS APPLY retains inner multiplicity and repeated outer bindings
     sql: >-
       SELECT p.id, q.child_id, q.amount FROM tsql_apply_outer p
@@ -213,5 +228,6 @@ test_cases:
                    WHERE c.lookup_key=p.lookup_key ORDER BY c.id) q
     expect: {error: true}
 cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_apply_keywords
   - sql: DROP TABLE IF EXISTS tsql_apply_inner
   - sql: DROP TABLE IF EXISTS tsql_apply_outer
