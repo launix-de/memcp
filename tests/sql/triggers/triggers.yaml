@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Trigger Infrastructure Tests
 # Testing SQL CREATE/DROP TRIGGER and basic trigger execution
 
@@ -7,6 +9,8 @@ metadata:
   isolated: true
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS trigger_fk_final_child"
+  - sql: "DROP TABLE IF EXISTS trigger_fk_final_parent"
   - action: "Clean up test tables"
     sql: "DROP TABLE IF EXISTS trigger_test"
   - action: "Clean up log table"
@@ -15,6 +19,11 @@ cleanup:
     sql: "DROP TABLE IF EXISTS trigger_auto_bi"
 
 setup:
+  - sql: "DROP TABLE IF EXISTS trigger_fk_final_child"
+  - sql: "DROP TABLE IF EXISTS trigger_fk_final_parent"
+  - sql: "CREATE TABLE trigger_fk_final_parent (id INT PRIMARY KEY) ENGINE=safe"
+  - sql: "CREATE TABLE trigger_fk_final_child (id INT PRIMARY KEY, p INT, CONSTRAINT fk_trigger_final FOREIGN KEY (p) REFERENCES trigger_fk_final_parent(id)) ENGINE=safe"
+  - sql: "INSERT INTO trigger_fk_final_parent VALUES (1),(2)"
   - action: "Create test table"
     sql: "CREATE TABLE trigger_test (id INT, val INT, name VARCHAR(50))"
   - action: "Create log table for trigger testing"
@@ -2007,3 +2016,141 @@ test_cases:
     sql: "DROP TABLE IF EXISTS trigger_nested_target"
     expect:
       affected_rows: 0
+
+  # Existing native FK BEFORE checks must see the final user-trigger values.
+  # These cases cover trigger ordering only, not concurrent Tx reference leases.
+  - name: "Create before insert trigger producing an orphan reference"
+    sql: "CREATE TRIGGER trigger_fk_insert BEFORE INSERT ON trigger_fk_final_child FOR EACH ROW SET NEW.p = 99"
+
+  - name: "Final FK check rejects a before insert mutated orphan"
+    sql: "INSERT INTO trigger_fk_final_child VALUES (1,1)"
+    expect: {error: true, contains: "foreign key constraint"}
+
+  - name: "Rejected before insert mutation publishes no child"
+    sql: "SELECT COUNT(*) AS n FROM trigger_fk_final_child"
+    expect: {data: [{n: 0}]}
+
+  - name: "Drop orphan-producing before insert trigger"
+    sql: "DROP TRIGGER trigger_fk_insert"
+
+  - name: "Create before insert trigger repairing the reference"
+    sql: "CREATE TRIGGER trigger_fk_insert BEFORE INSERT ON trigger_fk_final_child FOR EACH ROW SET NEW.p = 2"
+
+  - name: "Final FK check accepts a before insert repaired reference"
+    sql: "INSERT INTO trigger_fk_final_child VALUES (2,99)"
+
+  - name: "Repaired before insert stores its final declared value"
+    sql: "SELECT id,p FROM trigger_fk_final_child WHERE id=2"
+    expect: {data: [{id: 2, p: 2}]}
+
+  - name: "Restart preserves final FK check ordering"
+    sql: "SHUTDOWN"
+    expect: {rows: 0}
+
+  - name: "Restored before insert trigger repairs reference before restored FK check"
+    sql: "INSERT INTO trigger_fk_final_child VALUES (6,99)"
+
+  - name: "Restored final FK ordering stores repaired reference"
+    sql: "SELECT id,p FROM trigger_fk_final_child WHERE id=6"
+    expect: {data: [{id: 6, p: 2}]}
+
+  - name: "Drop repairing before insert trigger"
+    sql: "DROP TRIGGER trigger_fk_insert"
+
+  - name: "Create before insert trigger clearing a nullable reference"
+    sql: "CREATE TRIGGER trigger_fk_insert BEFORE INSERT ON trigger_fk_final_child FOR EACH ROW SET NEW.p = NULL"
+
+  - name: "Final FK check keeps nullable exemption after user mutation"
+    sql: "INSERT INTO trigger_fk_final_child VALUES (3,99)"
+
+  - name: "Cleared before insert stores nullable reference"
+    sql: "SELECT id,p FROM trigger_fk_final_child WHERE id=3"
+    expect: {data: [{id: 3, p: null}]}
+
+  - name: "Drop nullable before insert trigger"
+    sql: "DROP TRIGGER trigger_fk_insert"
+
+  - name: "Seed child for final before update checks"
+    sql: "INSERT INTO trigger_fk_final_child VALUES (4,1)"
+
+  - name: "Create before update trigger producing an orphan reference"
+    sql: "CREATE TRIGGER trigger_fk_update BEFORE UPDATE ON trigger_fk_final_child FOR EACH ROW SET NEW.p = 99"
+
+  - name: "Final FK check rejects before update mutated orphan"
+    sql: "UPDATE trigger_fk_final_child SET p=2 WHERE id=4"
+    expect: {error: true, contains: "foreign key constraint"}
+
+  - name: "Rejected before update mutation preserves original reference"
+    sql: "SELECT p FROM trigger_fk_final_child WHERE id=4"
+    expect: {data: [{p: 1}]}
+
+  - name: "Drop orphan-producing before update trigger"
+    sql: "DROP TRIGGER trigger_fk_update"
+
+  - name: "Create before update trigger repairing the reference"
+    sql: "CREATE TRIGGER trigger_fk_update BEFORE UPDATE ON trigger_fk_final_child FOR EACH ROW SET NEW.p = 2"
+
+  - name: "Final FK check accepts before update repaired reference"
+    sql: "UPDATE trigger_fk_final_child SET p=99 WHERE id=4"
+
+  - name: "Repaired before update stores its final value"
+    sql: "SELECT p FROM trigger_fk_final_child WHERE id=4"
+    expect: {data: [{p: 2}]}
+
+  - name: "Drop repairing before update trigger"
+    sql: "DROP TRIGGER trigger_fk_update"
+
+  - name: "Create parent before update trigger changing the referenced key"
+    sql: "CREATE TRIGGER trigger_fk_parent_update BEFORE UPDATE ON trigger_fk_final_parent FOR EACH ROW SET NEW.id = 99"
+
+  - name: "Final parent FK check rejects a user-mutated key change"
+    sql: "UPDATE trigger_fk_final_parent SET id=2 WHERE id=2"
+    expect: {error: true, contains: "foreign key constraint"}
+
+  - name: "Rejected parent mutation retains the referenced key"
+    sql: "SELECT id FROM trigger_fk_final_parent WHERE id=2"
+    expect: {data: [{id: 2}]}
+
+  - name: "Drop key-changing parent before update trigger"
+    sql: "DROP TRIGGER trigger_fk_parent_update"
+
+  - name: "Create parent before update trigger preserving the referenced key"
+    sql: "CREATE TRIGGER trigger_fk_parent_update BEFORE UPDATE ON trigger_fk_final_parent FOR EACH ROW SET NEW.id = 2"
+
+  - name: "Final parent FK check accepts a trigger-repaired unchanged key"
+    sql: "UPDATE trigger_fk_final_parent SET id=99 WHERE id=2"
+
+  - name: "Drop key-preserving parent before update trigger"
+    sql: "DROP TRIGGER trigger_fk_parent_update"
+
+  - name: "Create parent before delete trigger adding a new child reference"
+    sql: "CREATE TRIGGER trigger_fk_parent_delete BEFORE DELETE ON trigger_fk_final_parent FOR EACH ROW INSERT INTO trigger_fk_final_child (id,p) VALUES (5,OLD.id)"
+
+  - name: "Final parent delete check includes user trigger child writes"
+    sql: "DELETE FROM trigger_fk_final_parent WHERE id=1"
+    expect: {error: true, contains: "foreign key constraint"}
+
+  - name: "Rejected parent delete rolls back its trigger-created child"
+    sql: "SELECT COUNT(*) AS n FROM trigger_fk_final_child WHERE id=5"
+    expect: {data: [{n: 0}]}
+
+  - name: "Rejected parent delete preserves its referenced row"
+    sql: "SELECT id FROM trigger_fk_final_parent WHERE id=1"
+    expect: {data: [{id: 1}]}
+
+  - name: "Drop child-adding parent before delete trigger"
+    sql: "DROP TRIGGER trigger_fk_parent_delete"
+
+  - name: "Create parent before delete trigger clearing its references"
+    sql: "CREATE TRIGGER trigger_fk_parent_delete BEFORE DELETE ON trigger_fk_final_parent FOR EACH ROW UPDATE trigger_fk_final_child SET p=NULL WHERE p=OLD.id"
+
+  - name: "Final parent delete check accepts user-cleared references"
+    sql: "DELETE FROM trigger_fk_final_parent WHERE id=2"
+
+  - name: "Deleted parent key is absent after clearing user trigger"
+    sql: "SELECT COUNT(*) AS n FROM trigger_fk_final_parent WHERE id=2"
+    expect: {data: [{n: 0}]}
+
+  - name: "Clearing before delete leaves no child referencing deleted parent"
+    sql: "SELECT COUNT(*) AS n FROM trigger_fk_final_child WHERE p=2"
+    expect: {data: [{n: 0}]}

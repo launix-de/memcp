@@ -19,6 +19,8 @@ package storage
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -748,5 +750,83 @@ func TestKeytableEvictionKeepsLiveDependentInvalidationPath(t *testing.T) {
 	}
 	if !keytableCleanup(consumer, nil) || !keytableCleanup(intermediate, nil) {
 		t.Fatal("cache dependency leaves could not be evicted in order")
+	}
+}
+
+func TestForeignKeyTriggerRestoresFinalValuePriority(t *testing.T) {
+	for _, mode := range []foreignKeyMode{RESTRICT, CASCADE, SETNULL} {
+		Init(scm.Globalenv)
+		const name = "fk_final_value_priority_upgrade"
+		defer databases.Remove(name)
+		CreateDatabase(name, true)
+		db := GetDatabase(name)
+		parent, _ := CreateTable(name, "parent", Memory, true)
+		child, _ := CreateTable(name, "child", Memory, true)
+		parent.CreateColumn("id", "INT", nil, nil)
+		child.CreateColumn("p", "INT", nil, nil)
+		parent.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+		fk := foreignKey{Id: "final_value", Tbl1: "child", Cols1: []string{"p"}, Tbl2: "parent", Cols2: []string{"id"}, Updatemode: mode, Deletemode: RESTRICT}
+		child.Foreign = []foreignKey{fk}
+		parent.Foreign = []foreignKey{fk}
+		installFKTriggers(db, child, parent, fk)
+		child.AddTrigger(TriggerDescription{
+			Name: "user_mutates_reference", Timing: BeforeInsert, Priority: 0,
+			Func: buildFKProc(scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("set_assoc"), scm.NewSymbol("NEW"), scm.NewString("p"), scm.NewInt(99),
+			})),
+		})
+		// Decode genuinely serialized legacy priorities, not merely restart a
+		// schema written with this binary's already corrected trigger ordering.
+		for _, tbl := range []*table{child, parent} {
+			legacy := append([]TriggerDescription(nil), tbl.Triggers...)
+			for i := range legacy {
+				if legacy[i].IsSystem {
+					legacy[i].Priority = -100
+				}
+			}
+			encoded, err := json.Marshal(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var restored []TriggerDescription
+			if err := json.Unmarshal(encoded, &restored); err != nil {
+				t.Fatal(err)
+			}
+			tbl.mu.Lock()
+			tbl.Triggers = nil
+			tbl.mu.Unlock()
+			for _, trigger := range restored {
+				tbl.AddTrigger(trigger)
+			}
+		}
+		if first := child.GetTriggers(BeforeInsert)[0]; first.Priority != -100 {
+			t.Fatal("fixture did not restore the earlier FK-before-user ordering")
+		}
+		rebuildFKTriggersAfterLoad(db)
+		triggers := child.GetTriggers(BeforeInsert)
+		if len(triggers) != 2 || triggers[0].Name != "user_mutates_reference" || triggers[0].Priority != 0 || triggers[1].Priority != 100 {
+			t.Fatalf("regenerated child priority did not preserve user-before-FK order: %v", triggers)
+		}
+		for _, timing := range []TriggerTiming{BeforeUpdate, BeforeDelete} {
+			for _, trigger := range parent.GetTriggers(timing) {
+				if trigger.Priority != 100 {
+					t.Fatalf("regenerated parent BEFORE priority: %v", trigger)
+				}
+			}
+		}
+		if mode != RESTRICT {
+			if triggers := parent.GetTriggers(AfterUpdate); len(triggers) != 1 || triggers[0].Priority != -100 {
+				t.Fatal("regeneration changed the existing AFTER cascade/set-null ordering")
+			}
+		}
+		var caught any
+		func() {
+			defer func() { caught = recover() }()
+			child.Insert([]string{"p"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+		}()
+		if !strings.Contains(fmt.Sprint(caught), "foreign key constraint final_value failed") || child.CountExact() != 0 {
+			t.Fatalf("restored final-value check did not reject orphan: %v", caught)
+		}
+		databases.Remove(name)
 	}
 }

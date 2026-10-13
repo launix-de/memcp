@@ -5091,12 +5091,16 @@ func installFKTriggers(db *database, t1, t2 *table, fk foreignKey) {
 	triggerPrefix := "__fk_" + fk.Id + "_"
 	dbName := db.Name
 
+	// User BEFORE triggers are published by createtrigger at priority zero.
+	// Validate their final NEW values and parent-side effects afterwards, while
+	// still in the existing BEFORE phase, before native row publication. This
+	// ordering does not provide cross-transaction reference protection.
 	// 1) BEFORE INSERT on child: (lambda (OLD NEW) (begin (__fk_check_ref ...) NEW))
 	t1.AddTrigger(TriggerDescription{
 		Name:     triggerPrefix + "child_insert",
 		Timing:   BeforeInsert,
 		IsSystem: true,
-		Priority: -100,
+		Priority: 100,
 		Func: buildFKProc(scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("begin"),
 			scm.NewSlice([]scm.Scmer{
@@ -5114,7 +5118,7 @@ func installFKTriggers(db *database, t1, t2 *table, fk foreignKey) {
 		Name:     triggerPrefix + "child_update",
 		Timing:   BeforeUpdate,
 		IsSystem: true,
-		Priority: -100,
+		Priority: 100,
 		Func: buildFKProc(scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("begin"),
 			scm.NewSlice([]scm.Scmer{
@@ -5139,7 +5143,7 @@ func installFKTriggers(db *database, t1, t2 *table, fk foreignKey) {
 		Name:     triggerPrefix + "parent_delete",
 		Timing:   BeforeDelete,
 		IsSystem: true,
-		Priority: -100,
+		Priority: 100,
 		Func: buildFKProc(scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("__fk_on_parent_delete"),
 			scm.NewString(dbName), scm.NewString(fk.Tbl1),
@@ -5159,14 +5163,16 @@ func installFKTriggers(db *database, t1, t2 *table, fk foreignKey) {
 		updateModeStr = "SETNULL"
 	}
 	timing := BeforeUpdate
+	priority := 100
 	if fk.Updatemode != RESTRICT {
 		timing = AfterUpdate
+		priority = -100 // preserve the existing AFTER cascade/set-null ordering
 	}
 	t2.AddTrigger(TriggerDescription{
 		Name:     triggerPrefix + "parent_update",
 		Timing:   timing,
 		IsSystem: true,
-		Priority: -100,
+		Priority: priority,
 		Func: buildFKProc(scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("begin"),
 			scm.NewSlice([]scm.Scmer{
