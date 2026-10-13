@@ -313,13 +313,13 @@ func benchmarkGetRecordIDForUnique(b *testing.B, value int64) {
 	values := []scm.Scmer{scm.NewInt(value)}
 	access := exactScanAccess(newExactScanAccessSchema(columns), values)
 	// Cross the adaptive threshold before measuring the steady-state lookup.
-	shard.GetRecordidForUnique(access, nil)
-	shard.GetRecordidForUnique(access, nil)
+	shard.GetRecordidForUnique(access, nil, false)
+	shard.GetRecordidForUnique(access, nil, false)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		shard.GetRecordidForUnique(access, nil)
+		shard.GetRecordidForUnique(access, nil, false)
 	}
 }
 

@@ -486,7 +486,7 @@ func (t *table) hasDuplicateUniqueValues(cols []string, nullsNotDistinct bool, c
 			if shard == nil {
 				continue
 			}
-			recid, present := shard.GetRecordidForUnique(exactScanAccess(accessSchema, row.key), currentTx)
+			recid, present := shard.GetRecordidForUnique(exactScanAccess(accessSchema, row.key), currentTx, false)
 			if present && (shard != row.shard || recid != row.recid) {
 				return true
 			}
@@ -3585,7 +3585,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 				shardlist2 = []*storageShard{shardlist[computeShardIndex(dimensions, pruningVals)]} // (TODO: array pruning)
 			}
 			for _, s := range shardlist2 {
-				uid, present := s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx)
+				uid, present := s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true)
 				if present {
 					// found a unique collision
 					if j != last_j {
