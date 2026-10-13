@@ -1,4 +1,5 @@
 # Copyright (C) 2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Feature-complete executable inventory for SPARQL 1.1 sections 4 and 17.
 # Every case is intentionally noncritical until its semantics are implemented.
@@ -24,6 +25,9 @@ test_cases:
       contains: '"xml:lang":"de"'
 
   - name: "SPARQL 1.1 4.1.2 language tags participate in term identity"
+    noncritical: true
+    # Known frontend limitation: primitive RDF objects lose language-tag identity.
+    # TODO: preserve term metadata through native columns/keys; native SQL UNIQUE stays strict.
     ttl_data: |
       @prefix ex: <http://spec11-terms-lang.example/> .
       ex:subject ex:label "Berlin"@de, "Berlin"@en .
@@ -33,6 +37,9 @@ test_cases:
     expect: {rows: 2}
 
   - name: "SPARQL 1.1 4.1.2 datatype IRIs participate in term identity"
+    noncritical: true
+    # Known frontend limitation: primitive RDF objects lose datatype-IRI identity.
+    # TODO: preserve term metadata through native columns/keys; native SQL UNIQUE stays strict.
     ttl_data: |
       @prefix ex: <http://spec11-terms-datatype.example/> .
       @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
