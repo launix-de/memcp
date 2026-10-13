@@ -5,6 +5,9 @@ metadata:
   syntax: tsql
   description: T-SQL grammar reuses native DDL, defaults and query planning
 setup:
+  - sql: DROP TABLE IF EXISTS tsql_setup_memo
+  - sql: CREATE TABLE tsql_setup_memo (id INT PRIMARY KEY, note NVARCHAR(200), code INT, money_code MONEY, smallmoney_code SMALLMONEY, date_code DATE, time_code TIME, datetime_code DATETIME)
+  - sql: INSERT INTO tsql_setup_memo (id,note,code,money_code,smallmoney_code) VALUES (1,N'pending',13,65.9,65.9),(2,NULL,NULL,NULL,NULL),(3,N'pending',228,65.5,65.4)
   - sql: DROP TABLE IF EXISTS tsql_unary_contract
   - sql: CREATE TABLE tsql_unary_contract(id INT PRIMARY KEY,value TINYINT)
   - sql: INSERT INTO tsql_unary_contract VALUES (1,255)
@@ -56,6 +59,100 @@ setup:
   - sql: CREATE TABLE [dbo].[tsql_native] ([id] INT IDENTITY(1,1) PRIMARY KEY, [name] NVARCHAR(80), [amount] INT NOT NULL DEFAULT (7))
   - sql: INSERT INTO [dbo].[tsql_native] ([name]) VALUES (N'Grüße'), (N'O''Brien')
 test_cases:
+  - name: Setup text uses national character control codes
+    sql: SELECT N'first'+NCHAR(13)+NCHAR(10)+N'second' AS value
+    expect: {rows: 1, data: [{value: "first\r\nsecond"}]}
+  - name: National characters use declared text contracts
+    sql: SELECT NCHAR(65) AS ascii_value,NCHAR(228) AS national_value,NCHAR(8364) AS currency_value
+    expect: {rows: 1, data: [{ascii_value: A, national_value: ä, currency_value: €}]}
+  - name: National characters convert their integer argument
+    sql: SELECT NCHAR(N'65') AS text_value,NCHAR(65.9) AS truncated_value
+    expect: {rows: 1, data: [{text_value: A, truncated_value: A}]}
+  - name: National character invalid default range returns null
+    sql: SELECT NCHAR(-1) AS negative,NCHAR(65536) AS outside,NCHAR(NULL) AS missing
+    expect: {rows: 1, data: [{negative: null, outside: null, missing: null}]}
+  - name: National character isolated high surrogate is explicitly unsupported
+    sql: SELECT NCHAR(55296) AS value
+    expect: {error: true, contains: invalid Unicode scalar value}
+  - name: National character isolated low surrogate is explicitly unsupported
+    sql: SELECT NCHAR(57343) AS value
+    expect: {error: true, contains: invalid Unicode scalar value}
+  - name: National character invalid integer text fails
+    sql: SELECT NCHAR(N'13x') AS value
+    expect: {error: true}
+  - name: National character money inputs use declared rounding rules
+    sql: SELECT id,NCHAR(money_code) AS money_value,NCHAR(smallmoney_code) AS smallmoney_value FROM tsql_setup_memo ORDER BY id
+    expect: {rows: 3, data: [{id: 1, money_value: B, smallmoney_value: B}, {id: 2, money_value: null, smallmoney_value: null}, {id: 3, money_value: B, smallmoney_value: A}]}
+  - name: National character derived projection retains money conversion rules
+    sql: SELECT NCHAR(value) AS value FROM (SELECT money_code AS value FROM tsql_setup_memo WHERE id=1) AS projected
+    expect: {rows: 1, data: [{value: B}]}
+  - name: National character aggregate retains declared money conversion rules
+    sql: SELECT NCHAR(SUM(money_code)) AS value FROM tsql_setup_memo WHERE id=1
+    expect: {rows: 1, data: [{value: B}]}
+  - name: National character coalesce retains declared money conversion rules
+    sql: SELECT NCHAR(COALESCE(money_code,0)) AS value FROM tsql_setup_memo WHERE id=1
+    expect: {rows: 1, data: [{value: B}]}
+  - name: Null fallback retains money metadata for null input rows
+    sql: SELECT id,NCHAR(COALESCE(money_code,66)) AS value FROM tsql_setup_memo ORDER BY id
+    expect: {rows: 3, data: [{id: 1,value: B},{id: 2,value: B},{id: 3,value: B}]}
+  - name: Null fallback converts national integer text to the declared numeric result
+    sql: SELECT COALESCE(CAST(NULL AS INT),N'42')+2 AS value
+    expect: {rows: 1, data: [{value: 44}]}
+  - name: Null fallback preserves zero and does not evaluate a later bad conversion
+    sql: SELECT COALESCE(0,N'invalid') AS value
+    expect: {rows: 1, data: [{value: 0}]}
+  - name: Null fallback rejects a selected invalid integer conversion
+    sql: SELECT COALESCE(CAST(NULL AS INT),N'invalid') AS value
+    expect: {error: true}
+  - name: Null fallback rejects only untyped null arguments
+    sql: SELECT COALESCE(NULL,NULL) AS value
+    expect: {error: true, contains: declared non-NULL type}
+  - name: Null fallback accepts a declared null result
+    sql: SELECT COALESCE(CAST(NULL AS SMALLINT),NULL) AS value
+    expect: {rows: 1, data: [{value: null}]}
+  - name: Null fallback requires more than one argument
+    sql: SELECT COALESCE(1) AS value
+    expect: {error: true, contains: at least two arguments}
+  - name: Null fallback uses numeric result metadata without executing rows
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests" "SELECT TOP(0) COALESCE(money_code,0) AS value FROM tsql_setup_memo" "" (newsession)))
+        (equal? ((car fields) "sql_type") "MONEY"))
+    expect: {result: true}
+  - name: National character DATE input cannot inherit its NULL carrier type
+    sql: SELECT NCHAR(date_code) AS value FROM tsql_setup_memo
+    expect: {error: true, contains: implicitly convertible integer expression}
+  - name: National character TIME input cannot inherit its NULL carrier type
+    sql: SELECT NCHAR(time_code) AS value FROM tsql_setup_memo
+    expect: {error: true, contains: implicitly convertible integer expression}
+  - name: National character DATETIME requires explicit integer conversion
+    sql: SELECT NCHAR(datetime_code) AS value FROM tsql_setup_memo
+    expect: {error: true, contains: implicitly convertible integer expression}
+  - name: National character invalid input contract fails even with no rows
+    sql: SELECT NCHAR(date_code) AS value FROM tsql_setup_memo WHERE id=-1
+    expect: {error: true, contains: implicitly convertible integer expression}
+  - name: National character description validates its declared input contract
+    scm: '(tds_describe "memcp-tests" "SELECT TOP(0) NCHAR(date_code) AS value FROM tsql_setup_memo" "" (newsession))'
+    expect: {error: true, contains: implicitly convertible integer expression}
+  - name: National character input reads native declared columns
+    sql: SELECT id,NCHAR(code) AS value FROM tsql_setup_memo ORDER BY id
+    expect: {rows: 3, data: [{id: 1, value: "\r"}, {id: 2, value: null}, {id: 3, value: ä}]}
+  - name: Setup memo update uses existing native mutation
+    sql: UPDATE tsql_setup_memo SET note=N'approved'+NCHAR(13)+NCHAR(10)+N'pending' WHERE id=1
+    expect: {affected_rows: 1}
+  - name: Setup memo update stores its control characters
+    sql: SELECT note FROM tsql_setup_memo WHERE id=1
+    expect: {rows: 1, data: [{note: "approved\r\npending"}]}
+  - name: National character description remains declared even for null or empty results
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests" "SELECT TOP(0) NCHAR(NULL) AS missing,NCHAR(code) AS value FROM tsql_setup_memo" "" (newsession)))
+        (reduce fields (lambda (valid field) (and valid (equal? (field "sql_type") "NCHAR"))) true))
+    expect: {result: true}
+  - name: National character compiled code contains no SQL metadata wrappers
+    scm: |
+      (not (regexp_test (string (parse_tsql "memcp-tests" "SELECT NCHAR(code) AS value FROM tsql_setup_memo" nil nil nil)) "sql_type_expr|sql_compile_expr"))
+    expect: {result: true}
   - name: Tiny unsigned negation retains its signed value
     sql: SELECT -value AS value FROM tsql_unary_contract
     expect: {rows: 1, data: [{value: -255}]}
@@ -1748,6 +1845,7 @@ cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_select_limit
   - sql: DROP TABLE IF EXISTS tsql_identity_tiny_limit
   - sql: DROP TABLE IF EXISTS tsql_identity_int_limit
+  - sql: DROP TABLE IF EXISTS tsql_setup_memo
   - sql: DROP TABLE IF EXISTS tsql_unary_contract
   - sql: DROP TABLE IF EXISTS tsql_seeded_identity
   - sql: DROP TABLE IF EXISTS tsql_empty_seed
