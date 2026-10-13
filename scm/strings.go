@@ -491,6 +491,13 @@ func init_strings() {
 			Params: []*TypeDescriptor{{Kind: "int", Label: "code", Description: "Unicode scalar value"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["unicode_char"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
+			},
+			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	initExpressionMetadata()
