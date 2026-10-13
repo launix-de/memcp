@@ -1294,3 +1294,39 @@ func TestMaterializedReaderRepairPreservesExistingShardRead(t *testing.T) {
 	}
 	tx.endQuery(19)
 }
+
+// The generated scalar entry must pass the native reader's full capability
+// signature; an outdated Go-call ABI can leak arbitrary register contents into
+// the lock/representation arguments even when a materialized row looks correct.
+type jitCapabilityTextStorage struct {
+	*StorageString
+	locked bool
+	hints  ColumnReadHints
+	calls  int
+}
+
+func (s *jitCapabilityTextStorage) GetCachedReaderTx(_ *TxContext, locked bool, hints ColumnReadHints) ColumnReader {
+	s.locked, s.hints = locked, hints
+	s.calls++
+	return s.StorageString.GetCachedReader(hints)
+}
+
+func TestComputedScalarJITPreservesDefaultReadCapabilities(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tcomputedjitcapability")
+	tbl.CreateColumn("label", "TEXT", nil, nil)
+	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("native value")}}, nil, scm.NewNil(), false, nil)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
+	source := &jitCapabilityTextStorage{StorageString: buildStorageString([]scm.Scmer{scm.NewString("native value")})}
+	shard.mu.Lock()
+	shard.columns["label"] = source
+	shard.mu.Unlock()
+	proxy := &StorageComputeProxy{shard: shard, count: 1, inputCols: []string{"label"}, delta: make(map[uint32]scm.Scmer),
+		computor: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })}
+	jitGet, cleanup := jitBuildGetValueFunc(t, proxy, false)
+	defer cleanup()
+	value := jitGet(0)
+	if value.String() != "native value" || source.calls != 1 || source.locked || source.hints != ReadAuto {
+		t.Fatalf("native scalar ABI lost its default read capability: value=%v calls=%d locked=%v hints=%d", value, source.calls, source.locked, source.hints)
+	}
+}

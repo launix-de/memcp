@@ -1317,18 +1317,30 @@ func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc,
 	if idxInt.Loc == scm.LocRegPair || idxInt.Loc == scm.LocStackPair || idxInt.Loc == scm.LocRegTriple || idxInt.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
 	}
+	d1 := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewBool(false)}
+	if d1.Loc == scm.LocRegPair || d1.Loc == scm.LocStackPair || d1.Loc == scm.LocRegTriple || d1.Loc == scm.LocStackTriple {
+		panic("jit: generic call arg expects 1-word value")
+	}
+	d2 := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(0)}
+	if d2.Loc == scm.LocRegPair || d2.Loc == scm.LocStackPair || d2.Loc == scm.LocRegTriple || d2.Loc == scm.LocStackTriple {
+		panic("jit: generic call arg expects 1-word value")
+	}
 	ctx.SyncDesc(&thisptr)
 	ctx.SyncDesc(&d0)
 	ctx.SyncDesc(&idxInt)
-	d1 := ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageComputeProxy).getValueTx), []scm.JITValueDesc{thisptr, d0, idxInt}, 2)
-	d1.NoHeapPointer = false
-	ctx.BindReg(d1.Reg, &d1)
-	ctx.BindReg(d1.Reg2, &d1)
+	ctx.SyncDesc(&d1)
+	ctx.SyncDesc(&d2)
+	d3 := ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageComputeProxy).getValueTx), []scm.JITValueDesc{thisptr, d0, idxInt, d1, d2}, 2)
+	d3.NoHeapPointer = false
+	ctx.BindReg(d3.Reg, &d3)
+	ctx.BindReg(d3.Reg2, &d3)
 	ctx.FreeDesc(&d0)
+	ctx.FreeDesc(&d1)
+	ctx.FreeDesc(&d2)
 	ctx.FreeDesc(&idxInt)
-	if d1.Loc == scm.LocImm {
+	if d3.Loc == scm.LocImm {
 		if result.Loc == scm.LocAny {
-			return d1
+			return d3
 		}
 	}
 	if result.Loc == scm.LocAny {
@@ -1336,8 +1348,8 @@ func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc,
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	ctx.EmitMovPairToResult(&d1, &result)
-	result.Type = d1.Type
+	ctx.EmitMovPairToResult(&d3, &result)
+	result.Type = d3.Type
 	return result
 	return result
 }
