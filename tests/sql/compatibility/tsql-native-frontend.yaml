@@ -1465,7 +1465,186 @@ test_cases:
     sql: ALTER TABLE tsql_seeded_identity ADD other INT IDENTITY(50,1)
     expect: {error: true}
 
+  - name: Generated integer boundary uses the declared maximum
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_identity_int_limit
+    sql: CREATE TABLE tsql_identity_int_limit(id INT IDENTITY(2147483647,1),value INT DEFAULT 7)
+  - name: Last representable integer identity can be inserted
+    sql: INSERT INTO tsql_identity_int_limit DEFAULT VALUES
+    expect: {affected_rows: 1}
+  - name: Generated integer overflow rejects before native insertion
+    sql: INSERT INTO tsql_identity_int_limit(value) VALUES (8)
+    expect: {error: true}
+  - name: Integer overflow leaves only the representable stored value
+    sql: SELECT id,value FROM tsql_identity_int_limit
+    expect: {rows: 1, data: [{id: 2147483647, value: 7}]}
+  - name: Tiny identity batch crossing its bound rejects before publication
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_identity_tiny_limit
+      - sql: CREATE TABLE tsql_identity_tiny_limit(id TINYINT IDENTITY(255,1),value INT)
+    sql: INSERT INTO tsql_identity_tiny_limit(value) VALUES (1),(2)
+    expect: {error: true}
+  - name: Failed generated batch publishes no prefix
+    sql: SELECT COUNT(*) AS n FROM tsql_identity_tiny_limit
+    expect: {rows: 1, data: [{n: 0}]}
+  - name: Failed generated batch never rewinds a consumed reservation
+    scm: '(reserve_ids (table "memcp-tests" "tsql_identity_tiny_limit") 1)'
+    expect: {result: [257,257]}
+  - name: Explicit identity NULL cannot bypass generated bounds
+    sql: INSERT INTO tsql_identity_tiny_limit(id,value) VALUES (NULL,3)
+    expect: {error: true}
+  - name: Explicit identity overflow uses ordinary assignment narrowing
+    sql: INSERT INTO tsql_identity_tiny_limit(id,value) VALUES (256,3)
+    expect: {error: true}
+  - name: Explicit batch identity NULL rejects all supplied rows
+    sql: INSERT INTO tsql_identity_tiny_limit(id,value) VALUES (1,4),(NULL,5)
+    expect: {error: true}
+  - name: Invalid explicit identity batch publishes no valid prefix
+    sql: SELECT COUNT(*) AS n FROM tsql_identity_tiny_limit
+    expect: {rows: 1, data: [{n: 0}]}
+  - name: Empty identity SELECT consumes no reservation
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_identity_select_limit
+      - sql: CREATE TABLE tsql_identity_select_limit(id TINYINT IDENTITY(255,1),value INT)
+    sql: INSERT INTO tsql_identity_select_limit(value) SELECT id FROM tsql_add_contracts WHERE id<0
+    expect: {affected_rows: 0}
+  - name: Streaming identity SELECT validates its declared target bound
+    sql: INSERT INTO tsql_identity_select_limit(value) SELECT 9
+    expect: {affected_rows: 1}
+  - name: Streaming identity SELECT rejects the next unrepresentable ID
+    sql: INSERT INTO tsql_identity_select_limit(value) SELECT 10
+    expect: {error: true}
+  - name: Streaming overflow leaves its previous committed row
+    sql: SELECT id,value FROM tsql_identity_select_limit
+    expect: {rows: 1, data: [{id: 255, value: 9}]}
+  - name: Explicit streaming identity NULL rejects before native allocation
+    sql: INSERT INTO tsql_identity_select_limit(id,value) SELECT CAST(NULL AS TINYINT),11
+    expect: {error: true}
+  - name: Explicit streaming identity overflow rejects before native insertion
+    sql: INSERT INTO tsql_identity_select_limit(id,value) SELECT 256,11
+    expect: {error: true}
+  - name: Multirow streaming identity overflow rolls back its inserted prefix
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_identity_stream_rollback
+      - sql: CREATE TABLE tsql_identity_stream_rollback(id TINYINT IDENTITY(255,1),value INT)
+    sql: INSERT INTO tsql_identity_stream_rollback(value) SELECT 1 UNION ALL SELECT 2
+    expect: {error: true}
+  - name: Failed streamed statement leaves no committed prefix
+    sql: SELECT COUNT(*) AS n FROM tsql_identity_stream_rollback
+    expect: {rows: 1, data: [{n: 0}]}
+  - name: Default insertion validates generated tiny identity bounds
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_identity_default_limit
+      - sql: CREATE TABLE tsql_identity_default_limit(id TINYINT IDENTITY(255,1),value INT DEFAULT 8)
+      - sql: INSERT INTO tsql_identity_default_limit DEFAULT VALUES
+    sql: INSERT INTO tsql_identity_default_limit DEFAULT VALUES
+    expect: {error: true}
+  - name: Failed all-default identity insert leaves the committed row intact
+    sql: SELECT id,value FROM tsql_identity_default_limit
+    expect: {rows: 1, data: [{id: 255, value: 8}]}
+  - name: Small zero scale numeric identity enforces its decimal declaration
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_identity_decimal_limit
+      - sql: CREATE TABLE tsql_identity_decimal_limit(id NUMERIC(2,0) IDENTITY(99,1),value INT)
+      - sql: INSERT INTO tsql_identity_decimal_limit(value) VALUES (7)
+    sql: INSERT INTO tsql_identity_decimal_limit(value) VALUES (8)
+    expect: {error: true}
+  - name: Small numeric identity stores its representable native value
+    sql: SELECT id,value FROM tsql_identity_decimal_limit
+    expect: {rows: 1, data: [{id: 99, value: 7}]}
+  - name: Numeric seed validation uses declared precision
+    sql: CREATE TABLE tsql_bad_seed(id NUMERIC(2,0) IDENTITY(100,1))
+    expect: {error: true}
+  - name: Identity UPDATE rejects even an unchanged assignment
+    sql: UPDATE tsql_seeded_identity SET id=id WHERE value=7
+    expect: {error: true}
+  - name: Identity UPDATE does not publish another column assignment
+    sql: UPDATE tsql_seeded_identity SET value=99,id=1 WHERE value=7
+    expect: {error: true}
+  - name: Rejected identity UPDATE preserves the original row
+    sql: SELECT id,value FROM tsql_seeded_identity WHERE value=7
+    expect: {rows: 1, data: [{id: 50, value: 7}]}
+
+  - name: Parallel sessions receive disjoint own identity blocks
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_identity_parallel
+      - sql: CREATE TABLE tsql_identity_parallel(id BIGINT IDENTITY PRIMARY KEY,writer INT)
+    scm: |
+      (begin
+        (define execute (lambda (s sql) (begin
+          (define out (newsession))
+          (with_autocommit s nil nil sql (lambda (tx)
+            (sql_execute_formula s tx (sql_queryplan_compile_formula
+              tx (parse_tsql "memcp-tests" sql nil s tx))
+              (lambda (row) (out "row" row)) (lambda fields true))))
+          (out "row"))))
+        (define results (parallelN 8 (lambda (writer) (begin
+          (define s (newsession))
+          (execute s (concat "INSERT INTO tsql_identity_parallel(writer) VALUES (" writer "),(" writer "),(" writer ")"))
+          (define own (execute s (concat "SELECT MIN(id) AS first,MAX(id) AS last,COUNT(*) AS n FROM tsql_identity_parallel WHERE writer=" writer)))
+          (and (equal? (own "n") 3) (equal? (- (own "last") (own "first")) 2)
+            (equal? (s "last_insert_id") (own "first")))))))
+        (and (reduce results (lambda (valid result) (and valid result)) true)
+          (equal? ((execute (newsession) "SELECT COUNT(*) AS n FROM tsql_identity_parallel") "n") 24)))
+    expect: {result: true}
+  - name: Rollback retains consumed own identity IDs and removes inserted rows
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_identity_tx
+      - sql: CREATE TABLE tsql_identity_tx(id INT IDENTITY PRIMARY KEY,value INT)
+    scm: |
+      (begin
+        (define s (newsession))
+        (define execute (lambda (sql) (begin
+          (define out (newsession))
+          (with_autocommit s nil nil sql (lambda (tx)
+            (sql_execute_formula s tx (sql_queryplan_compile_formula
+              tx (parse_tsql "memcp-tests" sql nil s tx))
+              (lambda (row) (out "row" row)) (lambda fields true))))
+          (out "row"))))
+        (execute "BEGIN TRANSACTION")
+        (execute "INSERT INTO tsql_identity_tx(value) VALUES (7),(8)")
+        (execute "ROLLBACK")
+        (define count (execute "SELECT COUNT(*) AS n FROM tsql_identity_tx"))
+        (if (equal? (count "n") 0) true (error "rollback retained inserted rows"))
+        (execute "INSERT INTO tsql_identity_tx(value) VALUES (9)")
+        (equal? ((execute "SELECT id FROM tsql_identity_tx") "id") 3))
+    expect: {result: true}
+
+  - name: Small integer identity preserves its last declared value
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_identity_small_limit
+      - sql: CREATE TABLE tsql_identity_small_limit(id SMALLINT IDENTITY(32767,1),value INT)
+      - sql: INSERT INTO tsql_identity_small_limit(value) VALUES (7)
+    sql: INSERT INTO tsql_identity_small_limit(value) VALUES (8)
+    expect: {error: true}
+  - name: Small integer generated overflow leaves native storage readable
+    sql: SELECT id,value FROM tsql_identity_small_limit
+    expect: {rows: 1, data: [{id: 32767, value: 7}]}
+  - name: Native signed identity carrier preserves its maximum exactly
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_identity_big_limit
+      - sql: CREATE TABLE tsql_identity_big_limit(id BIGINT IDENTITY(9223372036854775807,1),value INT)
+      - sql: INSERT INTO tsql_identity_big_limit(value) VALUES (7)
+    sql: SELECT id,value FROM tsql_identity_big_limit
+    expect: {rows: 1, data: [{id: 9223372036854775807, value: 7}]}
+  - name: Native signed allocator exhaustion rejects before publishing a row
+    sql: INSERT INTO tsql_identity_big_limit(value) VALUES (8)
+    expect: {error: true}
+  - name: Carrier exhaustion preserves the exact committed identity
+    sql: SELECT id,value FROM tsql_identity_big_limit
+    expect: {rows: 1, data: [{id: 9223372036854775807, value: 7}]}
+
 cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_identity_small_limit
+  - sql: DROP TABLE IF EXISTS tsql_identity_big_limit
+  - sql: DROP TABLE IF EXISTS tsql_identity_parallel
+  - sql: DROP TABLE IF EXISTS tsql_identity_tx
+  - sql: DROP TABLE IF EXISTS tsql_identity_decimal_limit
+  - sql: DROP TABLE IF EXISTS tsql_identity_default_limit
+  - sql: DROP TABLE IF EXISTS tsql_identity_stream_rollback
+  - sql: DROP TABLE IF EXISTS tsql_identity_select_limit
+  - sql: DROP TABLE IF EXISTS tsql_identity_tiny_limit
+  - sql: DROP TABLE IF EXISTS tsql_identity_int_limit
   - sql: DROP TABLE IF EXISTS tsql_unary_contract
   - sql: DROP TABLE IF EXISTS tsql_seeded_identity
   - sql: DROP TABLE IF EXISTS tsql_empty_seed

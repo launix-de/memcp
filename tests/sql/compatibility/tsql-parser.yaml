@@ -861,9 +861,42 @@ test_cases:
   sql: CREATE TABLE dbo.tsql_bad_identity (id BIT IDENTITY(1,1))
   expect:
     error: true
-- name: Declared identity boundaries reject before rows and retain last allocated value
+- name: Declared identity boundaries reject before rows without rewinding consumed IDs
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_identity_limit
+  scm: |
+    (begin
+      (define s (newsession))
+      (define execute (lambda (sql) (begin
+        (define out (newsession))
+        (with_autocommit s nil nil sql (lambda (tx)
+          (sql_execute_formula s tx (sql_queryplan_compile_formula
+            tx (parse_tsql "memcp-tests" sql nil s tx))
+            (lambda (row) (out "row" row)) (lambda fields true))))
+        (out "row"))))
+      (execute "CREATE TABLE dbo.tsql_identity_limit (id TINYINT IDENTITY(1,1),value INT)")
+      (define metadata (car (get_schema "memcp-tests" "tsql_identity_limit")))
+      (if (metadata "Null") (error "identity remained nullable") true)
+      (altertable (table "memcp-tests" "tsql_identity_limit") "auto_increment" 255)
+      (define failed (try (lambda () (begin
+        (execute "INSERT INTO dbo.tsql_identity_limit(value) VALUES (1),(2)") false)) (lambda (_) true)))
+      (if failed true (error "tiny identity overflow was accepted"))
+      (define empty (execute "SELECT COUNT(*) AS n FROM dbo.tsql_identity_limit"))
+      (if (equal? (empty "n") 0) true (error "failed identity batch partially inserted"))
+      /* Failed reservations can leave gaps. Rewinding would race other writers. */
+      (if (equal? (reserve_ids (table "memcp-tests" "tsql_identity_limit") 1) '(257 257))
+        true (error "failed identity batch rewound its consumed reservation"))
+      (execute "INSERT INTO dbo.tsql_identity_limit(id,value) VALUES (255,3)")
+      (define updated (try (lambda () (begin
+        (execute "UPDATE dbo.tsql_identity_limit SET id=1") false)) (lambda (_) true)))
+      (if updated true (error "identity was writable through UPDATE"))
+      (define unchanged (execute "SELECT id FROM dbo.tsql_identity_limit"))
+      (if (equal? (unchanged "id") 255) true (error "identity changed after rejected UPDATE"))
+      (execute "DROP TABLE dbo.tsql_identity_limit")
+      true)
+  expect:
+    result: true
+- sql: DROP TABLE IF EXISTS dbo.tsql_identity_limit
   scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define out (newsession))\n\
     \    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula\
     \ tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda (row) (out \"row\" row)) (lambda fields true))))\n\
@@ -884,7 +917,7 @@ test_cases:
     result: true
   noncritical: true
 - sql: DROP TABLE IF EXISTS dbo.tsql_identity_limit
-  name: Fixture cleanup for Declared identity boundaries reject before rows and retain last allocated value (1)
+  name: Fixture cleanup for Declared identity boundaries reject before rows without rewinding consumed IDs (1)
 - name: Zero-scale decimal identity stores exact generated values
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_identity_decimal

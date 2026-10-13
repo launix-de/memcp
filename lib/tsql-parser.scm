@@ -113,11 +113,6 @@ runtime SQL type checks. Numeric declarations may only have zero scale. */
 			(lambda (key) (has? '("default" "default_expression") key)))
 			(error "IDENTITY cannot have a DEFAULT declaration") true)
 		(append attributes "null" false)) attributes)))
-(define tsql_identity_columns (lambda (definitions) (begin
-	(define identities (filter definitions (lambda (definition) (match definition
-		'((symbol list) "column" _name _type _dimensions attributes) ((cdr attributes) "auto_increment")
-		_ false))))
-	(if (> (count identities) 1) (error "Only one IDENTITY column is allowed per table") definitions))))
 (define tsql_decl_dimensions (lambda (type dimensions) (begin
 	(define count_dimensions (count dimensions))
 	(if (has? '("VARCHAR" "CHAR" "NVARCHAR" "NCHAR" "BINARY" "VARBINARY") type)
@@ -496,10 +491,9 @@ Only the native auto_increment flag reaches the column declaration. */
 		_ false))))
 	(if (> (count identities) 1) (error "only one IDENTITY column is allowed") true)
 	(match identities
-		'(((symbol list) "column" _name type _dimensions (cons (symbol list) attributes))) (begin
+		'(((symbol list) "column" _name type dimensions (cons (symbol list) attributes))) (begin
 			(define seed (coalesceNil (attributes "identity_seed") 1))
-			(define maximum (match type "TINYINT" 255 "SMALLINT" 32767
-				"INT" 2147483647 "INTEGER" 2147483647 _ (tsql_parse_integer "9223372036854775807")))
+			(define maximum (tsql_identity_maximum type (cdr dimensions)))
 			(if (> seed maximum) (error "IDENTITY seed exceeds the declared range") true)
 			(if (equal? seed 1) '(list) (list (quote list) "auto_increment" seed)))
 		_ '(list)))))
@@ -510,6 +504,58 @@ Only the native auto_increment flag reaches the column declaration. */
 			(cons (quote list) (filter_assoc attributes (lambda (key _value) (not (equal? key "identity_seed"))))))
 		definition)
 	_ definition)))
+/* SQL bounds come from declared metadata, not the native value tag. Wide
+numeric identities retain the native integer carrier until generic precision
+support exists; exact precision-limit emulation remains deferred. */
+(define tsql_identity_maximum (lambda (type dimensions) (match (toUpper type)
+	"TINYINT" 255 "SMALLINT" 32767 "INT" 2147483647 "INTEGER" 2147483647
+	"BIGINT" (tsql_parse_integer "9223372036854775807")
+	"DECIMAL" (tsql_identity_decimal_maximum dimensions)
+	"NUMERIC" (tsql_identity_decimal_maximum dimensions)
+	_ (error "unsupported IDENTITY declaration"))))
+(define tsql_identity_decimal_maximum (lambda (dimensions) (begin
+	(define precision (if (empty_list? dimensions) 18 (car dimensions)))
+	(if (>= precision 19) (tsql_parse_integer "9223372036854775807")
+		(tsql_parse_integer (reduce (produceN precision) (lambda (text _index) (concat text "9")) ""))))))
+/* Emit the existing native INSERT. VALUES and DEFAULT supply their bounded
+syntax batch; the existing SELECT result sink supplies one emitted row. Never
+scan/count/materialize SELECT input to reserve IDs, or rewind consumed blocks.
+The frontend checks the complete reserved block before any row publication.
+Explicit NULL must fail here: native auto_increment would otherwise allocate
+an unchecked replacement. Scope/session identity reporting is separate work. */
+(define tsql_native_insert_expr (lambda (database name columns values) (begin
+	(define relation (list (quote table) database name))
+	(define identity (find (get_schema database name)
+		(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
+	(define native_insert (lambda (names rows callback)
+		(list (quote insert) relation (list (quote quote) names) rows
+			'(list) nil false callback (quote tx))))
+	(define callback '('lambda '('id) '('session "last_insert_id" 'id)))
+	(if (nil? identity) (native_insert columns values callback)
+		(begin
+			(define explicit (find (produceN (count columns))
+				(lambda (index) (equal?? (nth columns index) (identity "Field"))) nil))
+			(if (not (nil? explicit))
+				'('begin
+					'('define '__tsql_rows values)
+					'('reduce '__tsql_rows
+						'('lambda '('valid 'row)
+							'('if '('nil? '('nth 'row explicit)) '('error "IDENTITY cannot be assigned NULL") 'valid)) true)
+					(native_insert columns (quote __tsql_rows) callback))
+				(begin
+					(define maximum (tsql_identity_maximum (identity "RawType") (identity "Dimensions")))
+					'('begin
+						'('define '__tsql_rows values)
+						'('define '__tsql_ids '('reserve_ids relation '('count '__tsql_rows)))
+						'('if '('empty_list? '__tsql_ids)
+							(native_insert columns (quote __tsql_rows) nil)
+							'('begin
+								'('if '('> '('cadr '__tsql_ids) maximum) '('error "IDENTITY exceeds the declared range") true)
+								/* Preserve the existing first-ID completion contract. */
+								'('session "last_insert_id" '('car '__tsql_ids))
+								(native_insert (cons (identity "Field") columns)
+									'('map '('produceN '('count '__tsql_rows))
+										'('lambda '('index) '('cons '('+ '('car '__tsql_ids) 'index) '('nth '__tsql_rows 'index)))) nil)))))))))))
 (define tsql_select_prefix (parser (? (atom "TOP" true)
 	(define top_count (or (parser '("(" (define n tsql_int) ")") n) sql_int)))
 	(if (and top_count (< top_count 0)) (error "TOP requires a nonnegative count") top_count)))
@@ -1068,6 +1114,7 @@ never from the first row. Unknown expression types stay text in this first slice
 			(define assignments (merge (extract_assoc (merge cols) (lambda (title expression) (begin
 				(define declaration (find declarations (lambda (column) (equal?? (column "Field") title)) nil))
 				(if (nil? declaration) (error "unknown UPDATE column: " title)
+					(equal? (declaration "Extra") "auto_increment") (error "IDENTITY column cannot be updated")
 					(list (declaration "Field") (tsql_assignment_expr expression declaration))))))))
 			(build_dml_plan target_schema tbl tblalias all_defs assignments (coalesceNil condition true) order limit offset planning_session tx)
 	)))
@@ -1158,11 +1205,10 @@ never from the first row. Unknown expression types stay text in this first slice
 	(define tsql_insert_select_plan (lambda (database tbl columns query) (begin
 		(define declarations (tsql_insert_declarations database tbl columns))
 		(define columns (map declarations (lambda (column) (column "Field"))))
-		(define insert_expr '('insert '('table database tbl) (cons list columns)
+		(define insert_expr (tsql_native_insert_expr database tbl columns
 			(cons list '((cons list (map (produceN (count columns))
 				(lambda (i) (sql_type_formula '() (tsql_assignment_expr
-					'('nth 'item (+ (* i 2) 1)) (nth declarations i))))))))
-			'(list) nil false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))
+					'('nth 'item (+ (* i 2) 1)) (nth declarations i))))))))))
 		(define expanded (sql_expand_views query policy))
 		(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
 			(error "INSERT column count does not match SELECT column count"))
@@ -1197,9 +1243,8 @@ never from the first row. Unknown expression types stay text in this first slice
 				true (error "INSERT column count does not match value count"))
 			(if (reduce rows (lambda (found row) (or found (tsql_dataset_contains_inner_select row))) false)
 				(tsql_insert_select_plan database tbl columns (tsql_values_to_select_query database columns rows))
-				'('insert '('table database tbl) (cons list columns) (sql_insert_values_expr (map rows (lambda (row) (map (produceN (count columns))
-					(lambda (i) (sql_type_formula (list) (tsql_assignment_expr (nth row i) (nth declarations i))))))))
-					'(list) nil false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))
+				(tsql_native_insert_expr database tbl columns (sql_insert_values_expr (map rows (lambda (row) (map (produceN (count columns))
+					(lambda (i) (sql_type_formula (list) (tsql_assignment_expr (nth row i) (nth declarations i))))))))))
 	)))
 	/* An all-default row is the native empty-column INSERT. Defaults and
 	generated values are filled by the same operator as ordinary insertion. */
@@ -1210,8 +1255,7 @@ never from the first row. Unknown expression types stay text in this first slice
 	) (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
-			'('insert '('table database tbl) '(list) '('list '(list))
-				'(list) nil false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))))
+			(tsql_native_insert_expr database tbl '() '('list '(list))))))
 	(define tsql_insert_select (parser '(
 		(atom "INSERT" true) (atom "INTO" true)
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
@@ -1285,7 +1329,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		) ",")) ")"
 	) (begin
 			(if policy (policy (coalesce schema2 schema) name true) true)
-			(define columns (tsql_identity_columns (tsql_table_primary_columns columns)))
+			(define columns (tsql_table_primary_columns columns))
 			(list (quote sql_create_table) (coalesce schema2 schema) name
 				(cons (quote list) (map columns tsql_identity_native_column))
 				(tsql_identity_table_options columns) (if ifnotexists true false) (quote tx)))))
