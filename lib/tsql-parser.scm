@@ -410,7 +410,7 @@ No row-level datatype dispatch or alternate temporal representation is needed. *
 		(if (or (has? '("NULL" "any" "MONEY" "SMALLMONEY") type)
 			(and (sql_numeric_type? type) (not (has? '("BOOLEAN" "BOOL" "BIT") type)))) true
 			(error "unary minus requires a numeric operand"))
-		(sql_info (list (quote -) 0 formula) type nil))) value)))
+		(sql_info (list (quote -) 0 formula) (if (equal? type "TINYINT") "SMALLINT" type) nil))) value)))
 (define tsql_key_placement (parser (? (or (atom "CLUSTERED" true) (atom "NONCLUSTERED" true)))))
 (define tsql_key_columns (parser (define columns (+ (parser '(
 	(define name tsql_identifier) (? (or (atom "ASC" true) (atom "DESC" true)))) name) ",")) columns))

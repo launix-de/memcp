@@ -5,6 +5,9 @@ metadata:
   syntax: tsql
   description: T-SQL grammar reuses native DDL, defaults and query planning
 setup:
+  - sql: DROP TABLE IF EXISTS tsql_unary_contract
+  - sql: CREATE TABLE tsql_unary_contract(id INT PRIMARY KEY,value TINYINT)
+  - sql: INSERT INTO tsql_unary_contract VALUES (1,255)
   - sql: DROP TABLE IF EXISTS tsql_add_contracts
   - sql: DROP TABLE IF EXISTS tsql_add_copy
   - sql: CREATE TABLE tsql_add_contracts (id INT PRIMARY KEY,a INT,b SMALLINT,txt NVARCHAR(20),suffix VARCHAR(20))
@@ -50,6 +53,18 @@ setup:
   - sql: CREATE TABLE [dbo].[tsql_native] ([id] INT IDENTITY(1,1) PRIMARY KEY, [name] NVARCHAR(80), [amount] INT NOT NULL DEFAULT (7))
   - sql: INSERT INTO [dbo].[tsql_native] ([name]) VALUES (N'Grüße'), (N'O''Brien')
 test_cases:
+  - name: Tiny unsigned negation retains its signed value
+    sql: SELECT -value AS value FROM tsql_unary_contract
+    expect: {rows: 1, data: [{value: -255}]}
+  - name: Tiny cast negation describes a signed small result
+    scm: '((car (tds_describe "memcp-tests" "SELECT -CAST(1 AS TINYINT) AS value" "" (newsession))) "sql_type")'
+    expect: {result: SMALLINT}
+  - name: Nullable tiny negation describes a signed small result
+    scm: '((car (tds_describe "memcp-tests" "SELECT -CAST(NULL AS TINYINT) AS value" "" (newsession))) "sql_type")'
+    expect: {result: SMALLINT}
+  - name: Empty tiny column negation describes a signed small result
+    scm: '((car (tds_describe "memcp-tests" "SELECT TOP (0) -value AS value FROM tsql_unary_contract" "" (newsession))) "sql_type")'
+    expect: {result: SMALLINT}
   - name: Addition chooses operators from declared contracts for identical formulas
     scm: |
       (begin
@@ -1320,6 +1335,7 @@ test_cases:
     expect: {error: true}
 
 cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_unary_contract
   - sql: DROP TABLE IF EXISTS tsql_add_contracts
   - sql: DROP TABLE IF EXISTS tsql_add_copy
   - sql: DROP TABLE IF EXISTS tsql_terminator_probe
