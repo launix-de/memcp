@@ -2041,7 +2041,9 @@ func (m *ShardMapReducer) prepareJITBufferReducer() {
 			return
 		}
 		valueType := column.JITValueType()
-		if prepared, ok := m.mainBulkReaders[index].(interface{ JITValueType() uint8 }); ok {
+		if prepared, ok := m.mainBulkReaders[index].(interface{ JITBatchValueType() uint8 }); ok {
+			valueType = prepared.JITBatchValueType()
+		} else if prepared, ok := m.mainBulkReaders[index].(interface{ JITValueType() uint8 }); ok {
 			valueType = prepared.JITValueType()
 		}
 		if valueType == scm.JITTypeUnknown {

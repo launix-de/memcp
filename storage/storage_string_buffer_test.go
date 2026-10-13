@@ -471,25 +471,33 @@ func TestDictionaryPreparedReaderJITTag(t *testing.T) {
 	if !scm.JITEnabled() {
 		t.Skip("JIT disabled")
 	}
-	values := []scm.Scmer{scm.NewString("Prüfbericht Eins"), scm.NewString("Prüfbericht Zwei")}
-	s := buildStorageString(values)
-	s.CompressDictionary()
-	reader := s.GetCachedReader(ReadDecoded)
-	defer ReleaseColumnReader(reader)
-	condition := scm.NewProcStruct(scm.Proc{
-		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("v")}),
-		Body:   scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), scm.NewSymbol("v"), values[1]}),
-		En:     &scm.Globalenv,
-	})
-	shard := &storageShard{main_count: 2}
-	filter := shard.prepareTypedScanFilter(condition, []ColumnStorage{s}, []ColumnReader{reader}, 1000000)
-	if filter == nil {
-		t.Fatal("typed filter not prepared")
-	}
-	defer filter.close()
-	rows := []uint32{0, 1}
-	if n := filter.filterMain(rows, []ColumnReader{reader}); n != 1 || rows[0] != 1 {
-		t.Fatalf("prepared tag mismatch: %v", rows[:n])
+	for _, hint := range []ColumnReadHints{ReadDecoded, ReadAuto} {
+		for _, overlay := range []bool{false, true} {
+			values := []scm.Scmer{scm.NewString("Prüfbericht Eins"), scm.NewString("Prüfbericht Zwei")}
+			s := buildStorageString(values)
+			s.CompressDictionary()
+			var storage ColumnStorage = s
+			if overlay {
+				storage = &OverlayBlob{Base: s}
+			}
+			reader := storage.GetCachedReader(hint)
+			defer ReleaseColumnReader(reader)
+			condition := scm.NewProcStruct(scm.Proc{
+				Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("v")}),
+				Body:   scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), scm.NewSymbol("v"), values[1]}),
+				En:     &scm.Globalenv,
+			})
+			shard := &storageShard{main_count: 2}
+			filter := shard.prepareTypedScanFilter(condition, []ColumnStorage{storage}, []ColumnReader{reader}, 1000000)
+			if filter == nil {
+				t.Fatal("typed filter not prepared")
+			}
+			defer filter.close()
+			rows := []uint32{0, 1}
+			if n := filter.filterMain(rows, []ColumnReader{reader}); n != 1 || rows[0] != 1 {
+				t.Fatalf("prepared tag mismatch: %v", rows[:n])
+			}
+		}
 	}
 }
 
@@ -731,6 +739,29 @@ func TestStringReaderOperatorOwnership(t *testing.T) {
 	if source.EvictDictionary() <= 0 {
 		t.Fatal("inactive transaction's operator did not release its dictionary")
 	}
+	// Compressed specialized inputs own private workspace bytes. A row-bound
+	// caller must not add statement-bookkeeping writes for each point probe.
+	var specialized StorageString
+	specialized.prepare()
+	for i, value := range []string{"550e8400-e29b-41d4-a716-446655440000", "6ba7b810-9dad-11d1-80b4-00c04fd430c8"} {
+		specialized.scan(uint32(i), scm.NewString(value))
+	}
+	specialized.init(2)
+	for i, value := range []string{"550e8400-e29b-41d4-a716-446655440000", "6ba7b810-9dad-11d1-80b4-00c04fd430c8"} {
+		specialized.build(uint32(i), scm.NewString(value))
+	}
+	specialized.finish()
+	tx.beginQuery(nil, 2, "compressed points")
+	for range 3 {
+		compressed := newCachedColumnReaderTx(&specialized, tx, false, ReadCompressed)
+		if compressed.GetValue(0).String() != "550e8400-e29b-41d4-a716-446655440000" {
+			t.Fatal("specialized compressed point changed")
+		}
+	}
+	if len(tx.queryReaderReleases) != 0 {
+		t.Fatal("compressed points published statement release bookkeeping")
+	}
+	tx.endQuery(2)
 }
 
 func TestPrefixPreparedReaderOwnership(t *testing.T) {
@@ -757,6 +788,42 @@ func TestPrefixPreparedReaderOwnership(t *testing.T) {
 	ReleaseColumnReader(reader)
 	if source.values.EvictDictionary() <= 0 || values[0].String() != inputs[1] {
 		t.Fatal("prefix completion leaked its suffix or borrowed output bytes")
+	}
+}
+
+func TestRepeatedDictionaryBatchNeedsNoSharedAdmission(t *testing.T) {
+	left := "report one " + strings.Repeat("padding-", 512)
+	right := "report two " + strings.Repeat("padding-", 512)
+	source := buildStorageString([]scm.Scmer{
+		scm.NewString(left), scm.NewString(right), scm.NewString(left), scm.NewNil(),
+	})
+	source.CompressDictionary()
+	reader := source.GetCachedReader(ReadAuto)
+	if !reader.GetValue(0).IsBufferString() || source.dictCache.Load() != nil {
+		t.Fatal("point demand eagerly expanded its dictionary")
+	}
+	done := make(chan []scm.Scmer, 1)
+	source.dictMu.Lock()
+	go func() {
+		values := make([]scm.Scmer, 4)
+		reader.GetValueMulti([]uint32{0, 1, 2, 3}, values, 1)
+		done <- values
+	}()
+	var values []scm.Scmer
+	blocked := false
+	select {
+	case values = <-done:
+	case <-time.After(time.Second):
+		blocked = true
+	}
+	source.dictMu.Unlock()
+	if blocked {
+		values = <-done
+	}
+	ReleaseColumnReader(reader)
+	if blocked || source.dictCache.Load() != nil || values[0].String() != left || values[1].String() != right ||
+		values[2].String() != left || !values[3].IsNil() || source.ReadCount() != 5 {
+		t.Fatal("repeated dictionary batch waited for management, lost values or changed telemetry")
 	}
 }
 

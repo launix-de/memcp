@@ -116,7 +116,10 @@ func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked boo
 		hints = ReadCompressed
 	}
 	reader := col.GetCachedReader(hints)
-	if leased, ok := reader.(interface{ release() }); ok && !operatorOwned && tx != nil && tx.queryActive.Load() {
+	// Compressed readers never retain a shared decoded generation. Inner
+	// encodings may own an immutable private workspace; GC carries its values,
+	// so a row-bound point caller must not append a statement release per probe.
+	if leased, ok := reader.(interface{ release() }); ok && !operatorOwned && hints != ReadCompressed && tx != nil && tx.queryActive.Load() {
 		if !tx.retainQueryReader(leased.release) {
 			leased.release()
 			return col.GetCachedReader(ReadCompressed)

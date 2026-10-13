@@ -285,6 +285,18 @@ type overlayBlobReader struct {
 }
 
 func (r *overlayBlobReader) release() { ReleaseColumnReader(r.base) }
+func (r *overlayBlobReader) JITBatchValueType() uint8 {
+	if reader, ok := r.base.(interface{ JITBatchValueType() uint8 }); ok {
+		if reader.JITBatchValueType() == scm.TagString {
+			// Plain batch strings stay plain through escape/blob resolution.
+			return scm.TagString
+		}
+	}
+	if reader, ok := r.base.(interface{ JITValueType() uint8 }); ok && reader.JITValueType() == scm.TagString {
+		return scm.TagString
+	}
+	return scm.JITTypeUnknown
+}
 func (r *overlayBlobReader) GetValue(row uint32) scm.Scmer {
 	return r.overlay.resolveBlob(r.base.GetValue(row))
 }

@@ -684,6 +684,14 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   never borrow the scratch. Scalar probes and explicit compressed/bigram
   consumers retain compressed handles. Prefix/overlay preparation propagates
   child reader ownership rather than bypassing its representation or lease.
+  `batchStringReader.materializedBytes` counts only already demanded bytes at
+  batch boundaries. Once their copying cost covers the immutable dictionary,
+  its private `decoded` workspace replaces repeated batch copies; no shared
+  admission or statement bookkeeping is performed in scalar probes. Optional
+  `JITBatchValueType` describes only this prepared bulk representation at the
+  existing filter/reducer setup boundaries; scalar tags and SQL types remain
+  separate. The direct row-bound RecMap fallback keeps compressed readers;
+  selected-domain batch mappers own prepared dictionary work.
   `shardqueue.sortReaders` owns comparison-only leases prepared after candidate
   filtering for an actual local sort. Construction failure releases them; a
   completed queue transfers ownership to its global/direct ordered consumer.

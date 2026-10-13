@@ -285,41 +285,94 @@ type decodedStringReader struct {
 // reusing one cursor scratch across its values instead of decoding the same
 // block again in every subsequent scalar string operation. No returned value
 // borrows the scratch, and neither preparation nor probes publish cache state.
-type batchStringReader struct{ storage *StorageString }
+type batchStringReader struct {
+	storage           *StorageString
+	decoded           *decodedStringReader
+	materializedBytes uint64 // invocation-local demand, updated once per consumed batch
+}
 
-func (r *batchStringReader) release()                      {} // propagation marker; batch outputs own their bytes
-func (r *batchStringReader) JITValueType() uint8           { return scm.JITTypeUnknown }
-func (r *batchStringReader) GetValue(row uint32) scm.Scmer { return r.storage.GetValue(row) }
+func (r *batchStringReader) release() {
+	if r.decoded != nil {
+		r.decoded.release()
+		r.decoded = nil
+	}
+}
+func (r *batchStringReader) JITValueType() uint8 { return scm.JITTypeUnknown }
+
+// Only bulk preparation may use this contract: scalar probes can still return
+// compressed handles, while every non-NULL batch cell is an owned plain string.
+func (r *batchStringReader) JITBatchValueType() uint8 {
+	if r.storage.stringHasNull() {
+		return scm.JITTypeUnknown
+	}
+	return scm.TagString
+}
+func (r *batchStringReader) GetValue(row uint32) scm.Scmer {
+	if r.decoded != nil {
+		return r.decoded.GetValue(row)
+	}
+	return r.storage.GetValue(row)
+}
 
 func (r *batchStringReader) GetValueMulti(rows []uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
 	}
-	atomic.AddUint64(&r.storage.readCount, uint64(len(rows)))
+	if r.decoded != nil {
+		r.decoded.GetValueMulti(rows, target, stride)
+		return
+	}
 	for i, row := range rows {
 		target[i*stride] = r.storage.compressedAt(row)
 	}
-	r.materializeBatch(target, len(rows), stride)
+	total := r.prepareBatch(target, len(rows), stride)
+	if r.decoded != nil {
+		r.decoded.GetValueMulti(rows, target, stride)
+		return
+	}
+	atomic.AddUint64(&r.storage.readCount, uint64(len(rows)))
+	r.materializeBatch(target, len(rows), stride, total)
 }
 
 func (r *batchStringReader) GetValueRange(row, count uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
 	}
-	atomic.AddUint64(&r.storage.readCount, uint64(count))
+	if r.decoded != nil {
+		r.decoded.GetValueRange(row, count, target, stride)
+		return
+	}
 	for i := uint32(0); i < count; i++ {
 		target[int(i)*stride] = r.storage.compressedAt(row + i)
 	}
-	r.materializeBatch(target, int(count), stride)
+	total := r.prepareBatch(target, int(count), stride)
+	if r.decoded != nil {
+		r.decoded.GetValueRange(row, count, target, stride)
+		return
+	}
+	atomic.AddUint64(&r.storage.readCount, uint64(count))
+	r.materializeBatch(target, int(count), stride, total)
 }
 
-func (r *batchStringReader) materializeBatch(target []scm.Scmer, count, stride int) {
+func (r *batchStringReader) prepareBatch(target []scm.Scmer, count, stride int) int {
 	total := 0
 	for i := 0; i < count; i++ {
 		if value := target[i*stride]; value.IsBufferString() {
 			total += scm.BufferStringLength(value)
 		}
 	}
+	r.materializedBytes += uint64(total)
+	// A repeated dictionary can be far smaller than copying its demanded
+	// rows. Once actual consumed bytes already cover a whole dictionary, reuse
+	// one private immutable workspace. This does not admit shared cache state,
+	// wait for management, or prepare a large projection for a sparse LIMIT.
+	if total > 0 && r.materializedBytes >= uint64(r.storage.textBuffer.DecodedSize()) {
+		r.decoded = &decodedStringReader{storage: r.storage, text: r.storage.decodeDictionary()}
+	}
+	return total
+}
+
+func (r *batchStringReader) materializeBatch(target []scm.Scmer, count, stride, total int) {
 	if total == 0 {
 		return
 	}

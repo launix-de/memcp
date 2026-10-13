@@ -213,7 +213,10 @@ func recMapReadTarget(currentTx *TxContext, target recMapTarget, columns []strin
 	readers := make([]ColumnReader, len(columns))
 	for i, column := range columns {
 		storages[i] = target.shard.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
-		readers[i] = newCachedColumnReaderTx(storages[i], currentTx, false, projectionColumnReadHints(storages[i], 1, currentTx))
+		// This explicitly row-bound fallback must not admit or lease a decoded
+		// dictionary in each outer probe. Prepared selected-domain consumers
+		// use the existing batch mapper below instead.
+		readers[i] = newCachedColumnReaderTx(storages[i], currentTx, false, ReadCompressed)
 	}
 	if !skipShardReadLock {
 		target.shard.mu.RLock()

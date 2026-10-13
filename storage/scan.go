@@ -1878,7 +1878,9 @@ func (t *storageShard) prepareTypedScanFilter(condition scm.Scmer, ccols []Colum
 			return nil
 		}
 		valueType := column.JITValueType()
-		if prepared, ok := cReaders[index].(interface{ JITValueType() uint8 }); ok {
+		if prepared, ok := cReaders[index].(interface{ JITBatchValueType() uint8 }); ok {
+			valueType = prepared.JITBatchValueType()
+		} else if prepared, ok := cReaders[index].(interface{ JITValueType() uint8 }); ok {
 			valueType = prepared.JITValueType()
 		}
 		if valueType == scm.JITTypeUnknown {

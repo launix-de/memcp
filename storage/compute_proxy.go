@@ -281,11 +281,15 @@ func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext, alreadyLocked boo
 	// the shard lock. Propagate that ownership through every computed input
 	// instead of recursively acquiring the same write-preferring RWMutex.
 	readers := make([]ColumnReader, len(p.inputCols))
+	inputHints := ReadAuto
+	if hints == ReadCompressed {
+		inputHints = ReadCompressed
+	}
 	for i, col := range p.inputCols {
 		// tx is a physical lock-capability token here, not callback state.
 		// Passing it through prevents a mutation scan which already owns the
 		// shard write lock from recursively acquiring the same RWMutex.
-		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col, alreadyLocked, ReadAuto).GetValue)
+		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col, alreadyLocked, inputHints).GetValue)
 	}
 	return &computeProxyReader{
 		proxy:   p,
