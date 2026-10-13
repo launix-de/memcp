@@ -108,6 +108,9 @@ func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked boo
 	operatorOwned := hints&readOperatorOwned != 0
 	hints &^= readOperatorOwned
 	if provider, ok := col.(TxColumnReaderProvider); ok {
+		if operatorOwned {
+			hints |= readOperatorOwned
+		}
 		return provider.GetCachedReaderTx(tx, alreadyLocked, hints)
 	}
 	// Without a statement owner, automatic reads retain no shared decoded

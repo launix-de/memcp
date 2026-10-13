@@ -1081,3 +1081,60 @@ func TestPreparedTextBatchAmortizesAlternatingBlocks(t *testing.T) {
 		}
 	}
 }
+
+func TestComputedComparisonReaderRetainsLeafOwnership(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tcomputedreaderownership")
+	tbl.CreateColumn("label", "TEXT", nil, nil)
+	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewString("report alpha")},
+		{scm.NewInt(2), scm.NewString("report beta")},
+	}, nil, scm.NewNil(), false, nil)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
+	for _, active := range []bool{false, true} {
+		source := buildStorageString([]scm.Scmer{scm.NewString("report alpha"), scm.NewString("report beta")})
+		source.CompressDictionary()
+		shard.mu.Lock()
+		shard.columns["label"] = source
+		shard.mu.Unlock()
+		proxy := &StorageComputeProxy{shard: shard, count: 2, inputCols: []string{"label"},
+			delta: make(map[uint32]scm.Scmer), computor: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })}
+		var tx *TxContext
+		if active {
+			tx = &TxContext{}
+			tx.querySeq.Store(7)
+			tx.queryActive.Store(true)
+		}
+		reader := newCachedColumnReaderTx(proxy, tx, false, ReadDecoded|readOperatorOwned)
+		if source.dictCache.Load() == nil {
+			t.Fatal("computed comparison discarded its leaf decoding hint")
+		}
+		if active {
+			if len(tx.queryReaderReleases) != 0 {
+				t.Fatal("operator-owned computed leaf became statement-owned")
+			}
+			tx.endQuery(7)
+			if source.EvictDictionary() != 0 {
+				t.Fatal("statement completion released its operator-owned computed leaf")
+			}
+		}
+		source.dictMu.Lock()
+		done := make(chan scm.Scmer, 1)
+		go func() { done <- reader.GetValue(1) }()
+		var value scm.Scmer
+		blocked := false
+		select {
+		case value = <-done:
+		case <-time.After(time.Second):
+			blocked = true
+		}
+		source.dictMu.Unlock()
+		if blocked {
+			value = <-done
+		}
+		ReleaseColumnReader(reader)
+		if blocked || value.IsBufferString() || value.String() != "report beta" || source.EvictDictionary() <= 0 {
+			t.Fatal("computed comparison waited for management or lost its leaf release")
+		}
+	}
+}

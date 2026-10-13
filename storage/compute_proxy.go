@@ -34,6 +34,11 @@ type computeProxyReader struct {
 	values  []scm.Scmer
 }
 
+func (r *computeProxyReader) release() {
+	releaseColumnReaders(r.readers)
+	r.readers = nil
+}
+
 type orderedComputeProxyReader struct {
 	proxy *StorageComputeProxy
 	tx    *TxContext
@@ -281,15 +286,15 @@ func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext, alreadyLocked boo
 	// the shard lock. Propagate that ownership through every computed input
 	// instead of recursively acquiring the same write-preferring RWMutex.
 	readers := make([]ColumnReader, len(p.inputCols))
-	inputHints := ReadAuto
-	if hints == ReadCompressed {
-		inputHints = ReadCompressed
-	}
+	// The same operator owns its computed inputs. In particular a queue's
+	// decoded comparison hint must reach the physical leaf, with its release
+	// retained here instead of hidden behind a scalar method closure.
+	inputHints := hints
 	for i, col := range p.inputCols {
 		// tx is a physical lock-capability token here, not callback state.
 		// Passing it through prevents a mutation scan which already owns the
 		// shard write lock from recursively acquiring the same RWMutex.
-		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col, alreadyLocked, inputHints).GetValue)
+		readers[i] = p.shard.ColumnReaderTx(tx, col, alreadyLocked, inputHints)
 	}
 	return &computeProxyReader{
 		proxy:   p,
