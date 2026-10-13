@@ -562,6 +562,32 @@ func (tx *TxContext) IsVisible(shard *storageShard, recid uint32) bool {
 	return !shard.deletions.Get(uint(recid)) && !st.DeleteMask.Get(uint(recid))
 }
 
+// releasedUniqueReservation recognizes this transaction's own hidden old
+// versions. A replacement may reuse their keys; other transactions must wait
+// until their owner finishes. The caller holds the shard read lock, which also
+// protects the staged-row list against physical mutations in that shard.
+func (tx *TxContext) releasedUniqueReservation(shard *storageShard, recid uint32) bool {
+	if tx == nil {
+		return false
+	}
+	st := tx.getShardTx(shard)
+	if st == nil {
+		return false
+	}
+	if tx.Mode == TxCursorStability {
+		return st.DeletedMask.Get(uint(recid))
+	}
+	if st.DeleteMask.Get(uint(recid)) {
+		return true
+	}
+	for _, staged := range st.UndeleteRecids {
+		if staged == recid {
+			return !st.UndeleteMask.Get(uint(recid))
+		}
+	}
+	return false
+}
+
 // ---------------------------------------------------------------------------
 // Savepoints
 // ---------------------------------------------------------------------------
@@ -753,6 +779,10 @@ func (tx *TxContext) commitACID() error {
 			}
 			if shard.deletions.Get(uint(recid)) {
 				for _, s := range shards {
+					for _, staged := range tx.shards[s].UndeleteRecids {
+						s.rollbackProtected.Set(uint(staged), false)
+						s.syncNextVisibilityLocked(staged, trackedShards, tx, false)
+					}
 					s.mu.Unlock()
 				}
 				tx.finishRepartitionActions(false)
@@ -761,6 +791,7 @@ func (tx *TxContext) commitACID() error {
 				tx.State = TxAborted
 				tx.shards = nil
 				tx.mu.Unlock()
+				tx.touchedShards = sync.Map{}
 				return fmt.Errorf("ACID commit conflict: row %d already deleted", recid)
 			}
 		}
@@ -785,11 +816,12 @@ func (tx *TxContext) commitACID() error {
 		for _, shard := range shards {
 			st := tx.shards[shard]
 			for _, recid := range st.UndeleteRecids {
+				shard.rollbackProtected.Set(uint(recid), false)
 				if !st.UndeleteMask.Get(uint(recid)) {
+					shard.syncNextVisibilityLocked(recid, trackedShards, tx, true)
 					continue // un-staged (row overwritten/deleted in same tx)
 				}
 				shard.deletions.Set(uint(recid), false)
-				shard.rollbackProtected.Set(uint(recid), false)
 				shard.logVisibilityChangeLocked(recid, false, tx.durableID())
 				shard.syncNextVisibilityLocked(recid, trackedShards, tx, true)
 			}
@@ -848,11 +880,11 @@ func (tx *TxContext) abortACIDCommit(shards []*storageShard, trackedShards map[*
 			}
 		}
 		for _, recid := range st.UndeleteRecids {
+			shard.rollbackProtected.Set(uint(recid), false)
 			if st.UndeleteMask.Get(uint(recid)) {
 				shard.deletions.Set(uint(recid), true)
-				shard.rollbackProtected.Set(uint(recid), false)
-				shard.syncNextVisibilityLocked(recid, trackedShards, tx, false)
 			}
+			shard.syncNextVisibilityLocked(recid, trackedShards, tx, false)
 		}
 	}
 	for _, shard := range shards {

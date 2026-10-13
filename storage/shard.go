@@ -60,7 +60,7 @@ type storageShard struct {
 	deletions    NonLockingReadMap.NonBlockingBitMap // items removed from main or inserts (based on main_count + i)
 	// rollbackProtected keeps transaction-owned tombstones in a rebuild so a
 	// later rollback or ACID commit can still change successor visibility.
-	// Guarded by mu.
+	// Their UNIQUE keys remain reserved against competing DML. Guarded by mu.
 	rollbackProtected NonLockingReadMap.NonBlockingBitMap
 	writeOwners       map[uint64]uint32  // goroutine-local write ownership marker
 	writeOwnMu        sync.Mutex         // guards writeOwners
@@ -3321,7 +3321,7 @@ func releaseUniqueLookupScratch(scratch *uniqueLookupScratch, columns int) {
 	uniqueLookupScratchPool.Put(scratch)
 }
 
-func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxContext) (result uint32, present bool) {
+func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxContext, checkReservations bool) (result uint32, present bool) {
 	columns := access.len()
 	scratch := acquireUniqueLookupScratch()
 	defer releaseUniqueLookupScratch(scratch, columns)
@@ -3406,6 +3406,13 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 				result = idx
 				present = true
 				return false
+			}
+			// Transaction-owned tombstones retain their keys until commit or
+			// rollback. Ordinary reads still hide them; DML must not admit a
+			// competing insert or let a collision callback modify another
+			// transaction's uncommitted row.
+			if checkReservations && t.rollbackProtected.Get(uint(idx)) && !currentTx.releasedUniqueReservation(t, idx) {
+				panic(sqldb.NewSQLError1(1213, "40001", "Concurrent UNIQUE reservation in table %s; retry transaction", t.t.Name))
 			}
 		}
 		return true
