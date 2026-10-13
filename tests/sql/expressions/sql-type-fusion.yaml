@@ -480,6 +480,35 @@ test_cases:
     expect: {error: true}
 
 
+  - name: Fixed boolean compiler contracts expose their existing predicate AST
+    scm: |
+      (expression_equal?
+        (bind_query_expr '()
+          (list (quote sql_compile_expr) (lambda (infos)
+            (sql_info (list (quote equal_collate) "A" "a" "bin") "BOOLEAN" nil)))
+          "boolean-contract" '())
+        (list (quote equal_collate) "A" "a" "bin"))
+    expect: {result: true}
+
+  - name: Opaque boolean compiler results keep their declared annotation
+    scm: |
+      (expression_equal?
+        (bind_query_expr '()
+          (list (quote sql_compile_expr) (lambda (infos)
+            (sql_info (list (quote opaque_boolean_contract) 1) "BOOLEAN" nil)))
+          "opaque-contract" '())
+        (list (quote sql_type_expr) (list (quote opaque_boolean_contract) 1) "BOOLEAN" nil))
+    expect: {result: true}
+
+  - name: Nonboolean compiler contracts keep their declared annotation
+    scm: |
+      (expression_equal?
+        (bind_query_expr '()
+          (list (quote sql_compile_expr) (lambda (infos) (sql_info 1 "INT" nil)))
+          "integer-contract" '())
+        (list (quote sql_type_expr) 1 "INT" nil))
+    expect: {result: true}
+
 cleanup:
   - sql: DROP TABLE IF EXISTS stf_bin_compare
   - sql: DROP TABLE IF EXISTS stf_doc

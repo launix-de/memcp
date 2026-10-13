@@ -4766,16 +4766,17 @@ func (t *table) residentMemory() memoryOwnerSnapshot {
 	return t.memoryOwnerSnapshotLocked()
 }
 
-// fkExistenceCheck checks if values exist in tbl[filterCols]. Returns true if found or all NULL.
+// fkExistenceCheck finds an actual non-NULL reference in tbl[filterCols].
+// Nullable child-key admission is handled by __fk_check_ref, not existence.
 func fkExistenceCheck(currentTx *TxContext, tbl *table, filterCols []string, vals []scm.Scmer) bool {
 	for _, v := range vals {
 		if v.IsNil() {
-			return true // NULL FK is always valid
+			return false // NULL components do not identify a referencing row
 		}
 	}
 	condition := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		for i := range filterCols {
-			if !scm.Equal(a[i], vals[i]) {
+			if a[i].IsNil() || !scm.Equal(a[i], vals[i]) {
 				return scm.NewBool(false)
 			}
 		}
@@ -4790,7 +4791,7 @@ func fkExistenceCheck(currentTx *TxContext, tbl *table, filterCols []string, val
 func fkCascadeDelete(currentTx *TxContext, childTbl *table, cols []string, vals []scm.Scmer) {
 	condition := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		for i := range cols {
-			if !scm.Equal(a[i], vals[i]) {
+			if a[i].IsNil() || !scm.Equal(a[i], vals[i]) {
 				return scm.NewBool(false)
 			}
 		}
@@ -4810,7 +4811,7 @@ func fkCascadeDelete(currentTx *TxContext, childTbl *table, cols []string, vals 
 func fkCascadeSetNull(currentTx *TxContext, childTbl *table, cols []string, vals []scm.Scmer) {
 	condition := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		for i := range cols {
-			if !scm.Equal(a[i], vals[i]) {
+			if a[i].IsNil() || !scm.Equal(a[i], vals[i]) {
 				return scm.NewBool(false)
 			}
 		}
@@ -4835,7 +4836,7 @@ func fkCascadeSetNull(currentTx *TxContext, childTbl *table, cols []string, vals
 func fkCascadeUpdate(currentTx *TxContext, childTbl *table, cols []string, oldVals, newVals []scm.Scmer) {
 	condition := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		for i := range cols {
-			if !scm.Equal(a[i], oldVals[i]) {
+			if a[i].IsNil() || !scm.Equal(a[i], oldVals[i]) {
 				return scm.NewBool(false)
 			}
 		}
@@ -4981,11 +4982,18 @@ func initFKBuiltins(en scm.Env) {
 			newVals := mustScmerSlice(a[4], "new_vals")
 			fkId := scm.String(a[5])
 			mode := scm.String(a[6])
+			// A nullable parent key has no referencing children. In particular,
+			// coercing numeric equality must not turn NULL into a zero key.
+			for _, value := range oldVals {
+				if value.IsNil() {
+					return scm.NewNil()
+				}
+			}
 			// check if PK actually changed
 			if len(oldVals) == len(newVals) {
 				changed := false
 				for i := range oldVals {
-					if !scm.Equal(oldVals[i], newVals[i]) {
+					if oldVals[i].IsNil() != newVals[i].IsNil() || !scm.Equal(oldVals[i], newVals[i]) {
 						changed = true
 						break
 					}

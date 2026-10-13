@@ -5831,7 +5831,16 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 			(define bound (bind_query_expr_tail scopes arguments path all_strings 0))
 			(define sources (map (merge scopes) binding_entry_source))
 			(define info (compiler (map bound (lambda (argument) (sql_expr_info sources argument)))))
-			(list (quote sql_type_expr) (sql_info_formula info) (sql_info_type info) (sql_info_collation info)))
+			(define formula (sql_info_formula info))
+			/* A fixed frontend BOOLEAN operator already carries this contract.
+			Keep its predicate AST visible to the shared logical extractors. */
+			(if (and (equal? (sql_info_type info) "BOOLEAN")
+				(match formula
+					(cons head _arguments) (match (sql_function_rule head)
+						'(_ "BOOLEAN" "fixed") true _ false)
+					_ false))
+				formula
+				(list (quote sql_type_expr) formula (sql_info_type info) (sql_info_collation info))))
 		((symbol inner_select) subquery)
 		(list (quote inner_select) (bind_query_names_at subquery scopes (binding_path path "subquery" 0) all_strings))
 		((quote inner_select) subquery)
