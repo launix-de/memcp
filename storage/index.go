@@ -105,16 +105,23 @@ func (g colGetter) get(recid uint32) scm.Scmer {
 }
 
 // Persistent index boundaries must not retain a view into an evictable decoded
-// dictionary. The original source returns its stable compressed handle instead.
+// dictionary. Eligible raw text keeps its stable compressed handle. Other
+// string representations own a copied boundary rather than pinning the cache.
 func (g colGetter) persistentValue(recid uint32, tx *TxContext) scm.Scmer {
+	var value scm.Scmer
 	if g.source != nil {
 		// Index construction already owns the shard lock. Preserve that
 		// capability and the caller's visibility for computed source readers.
 		reader := newCachedColumnReaderTx(g.source, tx, true, ReadCompressed)
 		defer ReleaseColumnReader(reader)
-		return reader.GetValue(recid)
+		value = reader.GetValue(recid)
+	} else {
+		value = g.get(recid)
 	}
-	return g.get(recid)
+	if value.IsString() && !value.IsBufferString() {
+		return scm.NewString(strings.Clone(value.String()))
+	}
+	return value
 }
 
 type StorageIndex struct {

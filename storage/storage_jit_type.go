@@ -83,7 +83,7 @@ func (s *StorageString) JITValueType() uint8 {
 	if s.stringHasNull() {
 		return scm.JITTypeUnknown
 	}
-	if s.textBuffer != nil {
+	if s.bufferHandles {
 		// Empty entries retain TagString. A positive minimum length proves
 		// that every main-row value uses the selected compressed handle tag.
 		if s.lens.offset <= 0 {

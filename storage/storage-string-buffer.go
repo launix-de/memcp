@@ -9,44 +9,25 @@ import "time"
 import "unsafe"
 import "sync/atomic"
 import "github.com/pierrec/lz4/v4"
-import "os"
 import "bytes"
 import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
-// Experimental opt-in for the comparison worktree. Ordinary builds retain
-// their current compression choice; SQL and planner types remain unchanged.
-var experimentalStringCodec = func() int {
-	switch os.Getenv("MEMCP_EXPERIMENTAL_STRING_CODEC") {
-	case "lz4":
-		return scm.StringCodecLZ4
-	case "":
-		return 0
-	default:
-		panic("unknown MEMCP_EXPERIMENTAL_STRING_CODEC")
-	}
-}()
-
-// compressText is only valid while this generation has exclusive unpublished
-// ownership (construction, cold loading, or a test fixture). It never rewrites
-// a live dictionary or changes a previously returned handle's meaning.
-func (s *StorageString) compressText() bool {
-	if s.textBuffer != nil || s.format != FormatRaw {
+// canUseBufferHandles is evaluated once before generation publication.
+// Special inner encodings and oversized text use the shared decoded cache.
+func (s *StorageString) canUseBufferHandles() bool {
+	if s.format != FormatRaw {
 		return false
 	}
 	for i := uint32(0); uint64(i) < s.starts.count; i++ {
 		if s.nodict && s.starts.hasNull && s.starts.GetValueUInt(i) == s.starts.null {
 			continue
 		}
-		length := int(int64(s.lens.GetValueUInt(i)) + s.lens.offset)
-		if length > scm.StringBufferMaxStringBytes {
+		length := int64(s.lens.GetValueUInt(i)) + s.lens.offset
+		if length < 0 || length > scm.StringBufferMaxStringBytes {
 			return false
 		}
 	}
-	s.textBuffer = scm.CompressStringBuffer(s.ensureDict())
-	s.dictionary = ""
-	s.compressedDict = nil
-	s.compressed = false
 	return true
 }
 
@@ -74,42 +55,6 @@ func (s *StorageString) compressedAt(recid uint32) scm.Scmer {
 // payload;
 // LZ4: blockCount u32, boundaries[blockCount+1]u32, rawFlags[blockCount]u8.
 // LZ4 logical blocks are permanently 65536 bytes for this payload version.
-func (s *StorageString) serializeStringBuffer(w io.Writer) {
-	write := func(v any) {
-		if err := binary.Write(w, binary.LittleEndian, v); err != nil {
-			panic(err)
-		}
-	}
-	write(uint8(20))
-	var nodict uint8
-	if s.nodict {
-		nodict = 1
-	}
-	write(nodict)
-	write(uint8(s.format))
-	write(uint8(4))
-	write([4]byte{})
-	write(uint8(2))
-	count := s.values.count
-	if s.nodict {
-		count = s.starts.count
-	}
-	write(uint64(count))
-	s.values.Serialize(w)
-	s.starts.Serialize(w)
-	s.lens.Serialize(w)
-	write(uint32(s.starts.count))
-	// Preserve V4 framing without retaining its redundant runtime offset array.
-	for i := uint32(0); uint64(i) < s.starts.count; i++ {
-		start := s.starts.GetValueUInt(i)
-		if s.nodict && s.starts.hasNull && start == s.starts.null {
-			write(uint32(0))
-		} else {
-			write(uint32(int64(start) + s.starts.offset))
-		}
-	}
-	s.textBuffer.WriteTo(w)
-}
 
 func (s *StorageString) deserializeStringV4(r io.Reader) uint {
 	var flag uint8
@@ -159,6 +104,96 @@ func (s *StorageString) deserializeStringV4(r io.Reader) uint {
 		for cursor.Read(chunk[:], &scratch) > 0 {
 		}
 	}
+	s.bufferHandles = true
+	return uint(count)
+}
+
+// V5: count, values/starts/lens, block payload. No compression flag and no
+// duplicate offset directory. StringFormat still describes the inner encoding.
+func (s *StorageString) serializeStringBufferV5(w io.Writer, buffer *scm.CompressedStringBuffer) {
+	write := func(v any) {
+		if err := binary.Write(w, binary.LittleEndian, v); err != nil {
+			panic(err)
+		}
+	}
+	write(uint8(20))
+	var nodict uint8
+	if s.nodict {
+		nodict = 1
+	}
+	write(nodict)
+	write(uint8(s.format))
+	write(uint8(storageStringVersion))
+	write([4]byte{})
+	count := s.values.count
+	if s.nodict {
+		count = s.starts.count
+	}
+	write(count)
+	s.values.Serialize(w)
+	s.starts.Serialize(w)
+	s.lens.Serialize(w)
+	buffer.WriteTo(w)
+}
+
+func (s *StorageString) deserializeStringV5(r io.Reader) uint {
+	if s.format > FormatDateTimeOffset {
+		panic("invalid compressed string inner format")
+	}
+	var count uint64
+	if err := binary.Read(r, binary.LittleEndian, &count); err != nil {
+		panic(err)
+	}
+	s.values.DeserializeEx(r, true)
+	s.count = s.starts.DeserializeEx(r, true)
+	s.lens.DeserializeEx(r, true)
+	if s.lens.count != s.starts.count || s.nodict && count != s.starts.count || !s.nodict && count != s.values.count {
+		panic("invalid compressed string entry count")
+	}
+	s.textBuffer = scm.ReadCompressedStringBuffer(r)
+	// Check all block bytes with bounded scratch, never a full decoded cache.
+	var scratch scm.TextScratch
+	var cursor scm.TextCursor
+	var chunk [1024]byte
+	size := s.textBuffer.DecodedSize()
+	for offset := 0; offset < size; offset += scm.StringBufferBlockBytes {
+		cursor.Reset(scm.NewBufferString(s.textBuffer, uint32(offset), min(scm.StringBufferBlockBytes, size-offset)))
+		for cursor.Read(chunk[:], &scratch) > 0 {
+		}
+	}
+	for i := uint32(0); uint64(i) < s.starts.count; i++ {
+		start := s.starts.GetValueUInt(i)
+		if s.nodict && s.starts.hasNull && start == s.starts.null {
+			continue
+		}
+		position := int64(start) + s.starts.offset
+		length := int64(s.lens.GetValueUInt(i)) + s.lens.offset
+		if position < 0 || length < 0 {
+			panic("invalid compressed string extent")
+		}
+		end := position + length
+		if nibbleCharsetFor(s.format) != nil {
+			end = (end + 1) / 2
+		} else if s.format == FormatUUIDLower || s.format == FormatUUIDUpper {
+			end = position + 16
+		}
+		if end > int64(size) {
+			panic("invalid compressed string extent")
+		}
+	}
+	if !s.nodict {
+		for i := uint32(0); uint64(i) < s.values.count; i++ {
+			entry := s.values.GetValueUInt(i)
+			if s.values.hasNull && entry == s.values.null {
+				continue
+			}
+			index := int64(entry) + s.values.offset
+			if index < 0 || uint64(index) >= s.starts.count {
+				panic("invalid compressed string dictionary entry")
+			}
+		}
+	}
+	s.bufferHandles = s.canUseBufferHandles()
 	return uint(count)
 }
 

@@ -4125,17 +4125,6 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, newcol.build)
 			newcol.finish()
 
-			// LZ4 string dict compression: if the old column was a StorageString
-			// with zero reads in the last rebuild cycle, compress the new column's
-			// dictionary so it doesn't occupy RAM until actually needed.
-			if oldStr, ok := c.(*StorageString); ok {
-				if newStr, ok2 := newcol.(*StorageString); ok2 {
-					if oldStr.ReadCount() == 0 {
-						newStr.CompressDictionary()
-					}
-				}
-			}
-
 			result.columns[col] = newcol
 			result.main_count = i
 			result.plannerMainRows.Store(i)

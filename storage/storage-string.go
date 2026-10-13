@@ -26,7 +26,6 @@ import "sync/atomic"
 import "encoding/hex"
 import "encoding/base64"
 import "encoding/binary"
-import "github.com/pierrec/lz4/v4"
 import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
 
@@ -497,16 +496,18 @@ type StorageString struct {
 	format     StringFormat `jit:"immutable-after-finish"`
 
 	// LZ4 compression: when compressed==true, compressedDict holds the
-	// lz4-compressed dictionary and dictionary is materialized on demand.
+	// lz4-compressed dictionary; materialization belongs only to dictCache.
 	compressedDict []byte // lz4-compressed dictionary bytes
 	compressed     bool   // true → dictionary is stored lz4-compressed
 	// Immutable post-compression payload; starts/lens retain the entry directory. Construction and
 	// cold loading exclusively own these fields before generation publication.
 	// Scmer handles retain the buffer header, never this mutable storage object.
 	textBuffer *scm.CompressedStringBuffer
-	dictMu     sync.Mutex
-	dictCache  atomic.Pointer[stringDictionaryCache]
-	readCount  uint64 // atomic; incremented on each GetValue for rebuild telemetry
+	// Immutable preparation result: only eligible raw text can expose tagLZ4.
+	bufferHandles bool
+	dictMu        sync.Mutex
+	dictCache     atomic.Pointer[stringDictionaryCache]
+	readCount     uint64 // atomic; incremented on each GetValue for rebuild telemetry
 
 	// helpers (scan/build phase only)
 	sb           strings.Builder
@@ -563,29 +564,18 @@ func (s *StorageString) ReadCount() uint64 {
 	return atomic.LoadUint64(&s.readCount)
 }
 
-// CompressDictionary creates one compressed payload for an unpublished
-// generation and drops its raw copy. Raw text uses compressed handles; encoded
-// alphabets and values beyond the handle limit retain the historical LZ4 layout.
-// Both layouts share one decoded cache and the same reader hints.
+// CompressDictionary replaces the raw dictionary of an unpublished generation
+// with independent LZ4 blocks, including nibble and binary inner encodings.
+// Incompressible blocks stay literal within the same compact block container.
 func (s *StorageString) CompressDictionary() bool {
-	if s.textBuffer != nil || s.compressed || len(s.dictionary) == 0 {
+	if s.textBuffer != nil || len(s.dictionary) == 0 && !s.compressed {
 		return false
 	}
-	if s.format == FormatRaw && s.compressText() {
-		return true
-	}
-	src := unsafe.Slice(unsafe.StringData(s.dictionary), len(s.dictionary))
-	dst := make([]byte, lz4.CompressBlockBound(len(src)))
-	var compressor lz4.Compressor
-	n, err := compressor.CompressBlock(src, dst)
-	if err != nil || n == 0 {
-		return false
-	}
-	s.compressedDict = make([]byte, 4+n)
-	binary.LittleEndian.PutUint32(s.compressedDict, uint32(len(s.dictionary)))
-	copy(s.compressedDict[4:], dst[:n])
+	s.textBuffer = scm.CompressStringBuffer(s.decodeDictionary())
+	s.bufferHandles = s.canUseBufferHandles()
 	s.dictionary = ""
-	s.compressed = true
+	s.compressedDict = nil
+	s.compressed = false
 	return true
 }
 
@@ -656,9 +646,10 @@ func (s *StorageString) ensureDict() string {
 //
 // Version 2 introduces ordered nibble IDs 11..16; version 3 adds IDs 17..20.
 // Version 4 adds immutable LZ4 buffer payloads (flag 2). Flags 0/1 retain
-// the V1 layout. All historical readers remain unchanged.
+// the V1 layout. Version 5 always writes a block buffer, without a flag or
+// redundant offsets. All historical readers remain unchanged.
 // The historical raw sentinel is exactly ASCII '1' (49), never a format range.
-const storageStringVersion = 4
+const storageStringVersion = 5
 
 // StorageString binary layout (magic byte 20 consumed by shard loader):
 //
@@ -690,52 +681,29 @@ const storageStringVersion = 4
 //	1: adds lz4-compressed dictionary support.
 //	2: ordered nibble IDs 11..16; V1 body layout.
 //	3: unpadded Base64 and timestamp IDs 17..20; V1 body layout.
-//	4 (current): immutable buffer payloads; see storage-string-buffer.go.
+//	4: immutable buffer payloads with flags 0/1/2.
+//	5 (current): block payload only; see storage-string-buffer.go.
 func (s *StorageString) Serialize(f io.Writer) {
-	if s.textBuffer != nil {
-		s.serializeStringBuffer(f)
-		return
+	// Saving an old generation must not rewrite published fields or invalidate
+	// existing handles. Its temporary conversion does not populate the cache.
+	buffer := s.textBuffer
+	if buffer == nil {
+		buffer = scm.CompressStringBuffer(s.decodeDictionary())
 	}
-	binary.Write(f, binary.LittleEndian, uint8(20)) // 20 = StorageString
-	var nodict uint8 = 0
-	if s.nodict {
-		nodict = 1
-	}
-	binary.Write(f, binary.LittleEndian, uint8(nodict))
-	binary.Write(f, binary.LittleEndian, uint8(s.format))
-	binary.Write(f, binary.LittleEndian, uint8(storageStringVersion)) // pad[0] repurposed as version byte
-	var pad [4]byte
-	f.Write(pad[:]) // remaining 4 alignment bytes
-
-	// Version 1: compressed flag
-	var compFlag uint8 = 0
-	if s.compressed && len(s.compressedDict) > 0 {
-		compFlag = 1
-	}
-	binary.Write(f, binary.LittleEndian, compFlag)
-
-	if s.nodict {
-		binary.Write(f, binary.LittleEndian, uint64(s.starts.count))
-	} else {
-		binary.Write(f, binary.LittleEndian, uint64(s.values.count))
-	}
-	s.values.Serialize(f)
-	s.starts.Serialize(f)
-	s.lens.Serialize(f)
-
-	if compFlag == 1 {
-		// write only the lz4-compressed dictionary
-		binary.Write(f, binary.LittleEndian, uint64(len(s.compressedDict)))
-		f.Write(s.compressedDict)
-	} else {
-		// write uncompressed dictionary (may need to materialize if compressed)
-		dict := s.ensureDict()
-		binary.Write(f, binary.LittleEndian, uint64(len(dict)))
-		io.WriteString(f, dict)
-	}
+	s.serializeStringBufferV5(f, buffer)
 }
 
 func (s *StorageString) Deserialize(f io.Reader) uint {
+	count := s.deserializeString(f)
+	// Cold loading exclusively owns this generation. Historical dictionaries
+	// are normalized before publication; decoded bytes are not retained.
+	if !s.compressed {
+		s.CompressDictionary()
+	}
+	return count
+}
+
+func (s *StorageString) deserializeString(f io.Reader) uint {
 	var nodict uint8
 	binary.Read(f, binary.LittleEndian, &nodict)
 	if nodict == 1 {
@@ -777,6 +745,8 @@ func (s *StorageString) Deserialize(f io.Reader) uint {
 		return s.deserializeStringV3(f)
 	case 4:
 		return s.deserializeStringV4(f)
+	case 5:
+		return s.deserializeStringV5(f)
 	default:
 		panic(fmt.Sprintf("StorageString: unknown version %d", version))
 	}
@@ -850,7 +820,7 @@ func (s *StorageString) GetValue(i uint32) scm.Scmer {
 //
 //jitgen:noinline
 func (s *StorageString) readValue(i uint32) scm.Scmer {
-	if s.textBuffer != nil {
+	if s.bufferHandles {
 		return s.compressedAt(i)
 	}
 	dict := s.ensureDict()
@@ -945,7 +915,7 @@ func (s *StorageString) GetValueRange(recid uint32, count uint32, target []scm.S
 	if count == 0 {
 		return
 	}
-	if s.textBuffer != nil {
+	if s.bufferHandles {
 		atomic.AddUint64(&s.readCount, uint64(count))
 		for i := uint32(0); i < count; i++ {
 			target[int(i)*stride] = s.compressedAt(recid + i)
@@ -967,7 +937,7 @@ func (s *StorageString) GetValueMulti(recids []uint32, target []scm.Scmer, strid
 	if len(recids) == 0 {
 		return
 	}
-	if s.textBuffer != nil {
+	if s.bufferHandles {
 		atomic.AddUint64(&s.readCount, uint64(len(recids)))
 		for i, recid := range recids {
 			target[i*stride] = s.compressedAt(recid)
@@ -1318,9 +1288,7 @@ func (s *StorageString) finish() {
 	}
 	s.starts.finish()
 	s.lens.finish()
-	if experimentalStringCodec != 0 {
-		s.CompressDictionary()
-	}
+	s.CompressDictionary()
 	s.storageJITFunctions.finish(s)
 }
 

@@ -19,6 +19,9 @@ it afterward. Blocks are independently encoded in 64 KiB units.
 | `ReadAuto` | Reuse a ready decoded cache within an owned statement; otherwise return compressed handles. Never initiate full decoding or wait for optional cache reuse. | Residual scan filters and index probes. |
 | `ReadDecoded` | Prepare the shared decoded dictionary once and lease it. | Repeated comparisons during sorted-index construction. |
 
+These compressed-handle decisions apply to eligible raw text. Specialized inner
+encodings currently need full cached decoding for access.
+
 A bigram walk reuses one invocation-local scratch buffer and decodes blocks as
 it walks them. It does not retain a complete decoded dictionary. The resulting
 postings restrict subsequent scans; only candidate values used by residual
@@ -41,13 +44,23 @@ Usage timestamps change during preparation, not comparison loops. Prefix-build
 sampling is cleared after construction so it cannot retain a predecessor's raw
 buffer.
 
-The existing cold-column rebuild selection remains in place. For explicit
-experiments, `MEMCP_EXPERIMENTAL_STRING_CODEC=lz4` forces eligible dictionaries
-in new generations. There is no alternate codec or extra compression dependency.
-Historical V0–V3 storage readers remain; V4 carries the block payload and retains
-its wire framing. Legacy monolithic LZ4 and specialized alphabets keep their
-previous representation and share the decoded-cache lifecycle. Historical
-monolithic dictionaries still require whole-payload decoding until rebuilt.
+All new non-empty dictionaries are block-compressed during private construction,
+including Hex/nibble and Base64/binary inner encodings. There is no opt-in or
+read-count gate. Construction pays block encoding once per generation; the
+operator timings below exclude this cost. Cold loading normalizes historical raw dictionaries before
+publication; historical monolithic LZ4 can remain compressed until its next save.
+V0–V4 readers remain intact. The current V5 writer always writes a block buffer,
+without a compression flag or redundant offsets, regardless of input version or
+cache residency. Saving a published historical generation converts privately and
+does not mutate its handles or admit a decoded cache. Empty dictionaries also
+use the V5 container on disk. Incompressible blocks are literal inside that
+container; LZ4 cannot guarantee a smaller payload for arbitrary bytes.
+
+Eligible raw text returns compressed handles. Specialized inner encodings and
+raw values exceeding the handle length limit use the common decoded cache for
+access; their persisted and primary resident dictionaries are still LZ4 blocks.
+The cache is never serialized. Existing file versions are read, not rewritten
+merely by loading: migration reaches disk on the next normal save/checkpoint.
 
 ## Measured memory and CPU tradeoffs
 
@@ -69,18 +82,21 @@ power-on latency. `B/op` measures allocation volume, not peak resident memory.
 | Storage measurement | Raw | LZ4 blocks |
 |---|---:|---:|
 | Resident dictionary and metadata, without decoded cache | 103.13 MB | 13.51 MB |
-| Serialized storage | 103.13 MB | 13.57 MB |
+| Serialized storage | 103.13 MB | 13.51 MB |
 
-The compact resident representation saves **86.9%**. A full decoded cache
+The compact resident representation saves **86.9%**; V5 also saves **86.9%**
+on disk against the historical raw V3 fixture. Both benchmark representations
+now persist compressed when using the production writer, so the disk baseline
+explicitly uses a test-only historical writer. A full decoded cache
 adds approximately 103 MB while retained; the saving is not claimed while that
 cache is resident. Memory pressure can reclaim the decoded child without losing
 the compressed dictionary or its persisted data.
 
 | Compressed-only access | Raw | LZ4 blocks |
 |---|---:|---:|
-| Full equality against plain text | 0.56 µs | 11.41 µs |
-| Adjacent lexical comparison | 0.04 µs | 16.36 µs |
-| Random LIKE predicate | 19.37 µs | 64.12 µs |
+| Full equality against plain text | 0.63 µs | 11.51 µs |
+| Adjacent lexical comparison | 0.04 µs | 15.68 µs |
+| Random LIKE predicate | 19.90 µs | 66.86 µs |
 
 These comparisons allocate zero heap objects. LIKE allocates zero objects for
 the compressed path; the raw baseline allocates lowercase text. Direct block
@@ -89,17 +105,17 @@ sorting requests `ReadDecoded` instead of repeatedly decoding random blocks.
 
 | Whole-corpus operation | Raw | LZ4 blocks |
 |---|---:|---:|
-| Bigram build | 494.3 ms | 1081.4 ms |
+| Bigram build | 498.3 ms | 1059.1 ms |
 | Allocation volume during bigram build | 122.35 MB | 14.23 MB |
-| Sort using compressed handles throughout | 10.0 ms | 3285.2 ms |
-| Sort including one complete decode, cache evicted each iteration | 8.8 ms | 37.4 ms |
-| Sort with decoded cache already present | 8.9 ms | 10.4 ms |
+| Sort using compressed handles throughout | 10.4 ms | 3249.2 ms |
+| Sort including one complete decode, cache evicted each iteration | 10.7 ms | 52.2 ms |
+| Sort with decoded cache already present | 10.7 ms | 10.1 ms |
 
-Bigram building trades approximately 2.19× CPU time for substantially less
+Bigram building trades approximately 2.13× CPU time for substantially less
 allocation and a compact retained dictionary. Choosing full decoding for sorting
-reduces LZ4 sort time from 3.29 s to
-37.4 ms including decoding, or
-10.4 ms with a ready cache. The benefit depends on
+reduces LZ4 sort time from 3.25 s to
+52.2 ms including decoding, or
+10.1 ms with a ready cache. The benefit depends on
 operator demand; the compressed-only path is not a universal CPU speedup.
 
 Read-only comparisons, LIKE, hashing, substring/trim views and cursor traversal

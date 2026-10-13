@@ -115,9 +115,13 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   the header owns its bytes and block directory, with no shard, session,
   transaction, or mutable decoder state. `scm.TextScratch` is exclusive to one
   operator/reader invocation and reused outside row loops; no returned value
-  borrows its decoded bytes. The optional forced LZ4 compression is selected at process
-  startup; live generations are never recompressed in place. Version-4 string
-  payloads preserve the historical readers and flags 0/1 layouts.
+  borrows its decoded bytes. `StorageString.bufferHandles` is computed under
+  the same unpublished ownership and is immutable; it distinguishes eligible
+  raw text from specialized inner encodings and oversized strings. New
+  dictionaries always use LZ4 blocks; live generations are never recompressed
+  in place. V5 writes block payloads without a flag; V0–V4 readers remain intact.
+  Saving a historical generation creates a private temporary block payload,
+  without mutating the published generation or admitting a decoded cache.
 
 - `table.Auto_increment` uses the same atomic reservation for native INSERT
   and `reserve_ids`, once per batch/block. Runtime counter snapshots and DDL
@@ -634,7 +638,8 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
 
 - `StorageString.textBuffer` is the immutable compressed dictionary of one
   generation; ordinary raw text uses no additional `compressedDict` payload.
-  Historical monolithic LZ4 and encoded alphabets retain their compatible layout.
+  Encoded alphabets also use block compression; historical monolithic LZ4
+  retains its read-compatible payload until saving.
   `StorageString.dictCache` atomically publishes one complete decoded generation.
   Its `stringDictionaryCache` owns an exclusive `TypeStringDict` registration;
   parent sizes subtract that child explicitly. `dictMu` protects admission and

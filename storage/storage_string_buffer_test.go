@@ -7,13 +7,16 @@ package storage
 import "os"
 import "sync"
 import "time"
+import "unsafe"
 import "sort"
 import "fmt"
+import "io"
 import "bytes"
 import "testing"
 import "strings"
 import "reflect"
 import "encoding/json"
+import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
 func TestStorageStringBuffer(t *testing.T) {
@@ -204,7 +207,11 @@ func BenchmarkStorageStringBufferCorpus(b *testing.B) {
 			b.Fatal("codec was not applied")
 		}
 		var serialized bytes.Buffer
-		storage.Serialize(&serialized)
+		if mode.codec == 0 {
+			storage.serializeRawFixtureV3(&serialized)
+		} else {
+			storage.Serialize(&serialized)
+		}
 		b.Logf("%s rows=%d source=%d resident=%d serialized=%d", mode.name, len(texts), total, storage.ComputeSize(), serialized.Len())
 		handles := make([]scm.Scmer, len(texts))
 		storage.GetValueRange(0, uint32(len(texts)), handles, 1)
@@ -519,6 +526,234 @@ func TestDictionaryConcurrentParentAccounting(t *testing.T) {
 		case <-finished:
 			return
 		default:
+		}
+	}
+}
+
+// Every historical raw version remains readable and saves as flag-free V5.
+func TestStorageStringPersistenceMigration(t *testing.T) {
+	for _, version := range []byte{0, 1, 2, 3, 4, 49} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			values := []string{"historical report one", "historical report two", "historical report one"}
+			source := buildStringColumn(values)
+			var old bytes.Buffer
+			nodict := byte(0)
+			count := source.values.count
+			if source.nodict {
+				nodict = 1
+				count = source.starts.count
+			}
+			if version == 49 {
+				old.Write([]byte{20, nodict, '1', '2', '3', '4', '5', '6'})
+			} else {
+				old.Write([]byte{20, nodict, byte(source.format), version, 0, 0, 0, 0})
+			}
+			if version != 0 && version != 49 {
+				old.WriteByte(0)
+			}
+			binary.Write(&old, binary.LittleEndian, count)
+			source.values.Serialize(&old)
+			source.starts.Serialize(&old)
+			source.lens.Serialize(&old)
+			binary.Write(&old, binary.LittleEndian, uint64(len(source.dictionary)))
+			old.WriteString(source.dictionary)
+			var loaded StorageString
+			loaded.Deserialize(bytes.NewReader(old.Bytes()[1:]))
+			if loaded.textBuffer == nil || loaded.dictionary != "" || loaded.dictCache.Load() != nil {
+				t.Fatal("historical raw dictionary not normalized before publication")
+			}
+			var current bytes.Buffer
+			loaded.Serialize(&current)
+			if current.Bytes()[3] != 5 || binary.LittleEndian.Uint64(current.Bytes()[8:16]) != uint64(len(values)) {
+				t.Fatal("writer did not emit flag-free V5")
+			}
+			var restored StorageString
+			restored.Deserialize(bytes.NewReader(current.Bytes()[1:]))
+			for i, want := range values {
+				if got := restored.GetValue(uint32(i)).String(); got != want {
+					t.Fatalf("row %d got %q want %q", i, got, want)
+				}
+			}
+		})
+	}
+	// Preserve the V4 flag-2 reader and its historical duplicate offsets.
+	source := buildStringColumn([]string{"legacy block report one", "legacy block report two"})
+	source.CompressDictionary()
+	var old bytes.Buffer
+	source.serializeStringBuffer(&old)
+	var loaded StorageString
+	loaded.Deserialize(bytes.NewReader(old.Bytes()[1:]))
+	if loaded.GetValue(1).String() != "legacy block report two" {
+		t.Fatal("V4 block payload changed")
+	}
+}
+
+func TestStorageStringAlwaysCompressed(t *testing.T) {
+	for name, inputs := range map[string][]string{
+		"raw":       {"report item one", "report item two"},
+		"hex":       {strings.Repeat("deadbeef", 100), strings.Repeat("cafebabe", 100)},
+		"base64":    {"YWJjZGVmZ2hpamtsbW5vcA==", "cXJzdHV2d3h5ejAxMjM0NQ=="},
+		"oversized": {strings.Repeat("report ", scm.StringBufferMaxStringBytes/7+1), "small report"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var s StorageString
+			s.prepare()
+			for i, v := range inputs {
+				s.scan(uint32(i), scm.NewString(v))
+			}
+			s.init(uint32(len(inputs)))
+			for i, v := range inputs {
+				s.build(uint32(i), scm.NewString(v))
+			}
+			s.finish()
+			if s.textBuffer == nil || s.dictionary != "" || s.dictCache.Load() != nil {
+				t.Fatal("finish retained an uncompressed dictionary")
+			}
+			if name == "hex" && s.format == FormatRaw || name == "base64" && s.format == FormatRaw {
+				t.Fatal("lost inner encoding")
+			}
+			var before, after bytes.Buffer
+			s.Serialize(&before)
+			var restored StorageString
+			restored.Deserialize(bytes.NewReader(before.Bytes()[1:]))
+			if restored.dictionary != "" || restored.dictCache.Load() != nil {
+				t.Fatal("load retained decoded data")
+			}
+			reader := restored.GetCachedReader(ReadDecoded)
+			for i, want := range inputs {
+				if got := reader.GetValue(uint32(i)).String(); got != want {
+					t.Fatalf("row %d changed", i)
+				}
+			}
+			restored.Serialize(&after)
+			if !bytes.Equal(before.Bytes(), after.Bytes()) {
+				t.Fatal("decoded cache changed persisted data")
+			}
+			if restored.EvictDictionary() != 0 {
+				t.Fatal("evicted active cache")
+			}
+			ReleaseColumnReader(reader)
+			if restored.EvictDictionary() <= 0 {
+				t.Fatal("idle decoded cache not reclaimed")
+			}
+			if restored.dictionary != "" || restored.textBuffer == nil {
+				t.Fatal("eviction changed primary payload")
+			}
+			for i, want := range inputs {
+				if got := restored.GetValue(uint32(i)).String(); got != want {
+					t.Fatalf("row %d after eviction changed", i)
+				}
+			}
+		})
+	}
+}
+
+// Historical V4 writer exists only to construct read-compatibility fixtures.
+func (s *StorageString) serializeStringBuffer(w io.Writer) {
+	write := func(v any) {
+		if err := binary.Write(w, binary.LittleEndian, v); err != nil {
+			panic(err)
+		}
+	}
+	write(uint8(20))
+	var nodict uint8
+	if s.nodict {
+		nodict = 1
+	}
+	write(nodict)
+	write(uint8(s.format))
+	write(uint8(4))
+	write([4]byte{})
+	write(uint8(2))
+	count := s.values.count
+	if s.nodict {
+		count = s.starts.count
+	}
+	write(uint64(count))
+	s.values.Serialize(w)
+	s.starts.Serialize(w)
+	s.lens.Serialize(w)
+	write(uint32(s.starts.count))
+	// Preserve V4 framing without retaining its redundant runtime offset array.
+	for i := uint32(0); uint64(i) < s.starts.count; i++ {
+		start := s.starts.GetValueUInt(i)
+		if s.nodict && s.starts.hasNull && start == s.starts.null {
+			write(uint32(0))
+		} else {
+			write(uint32(int64(start) + s.starts.offset))
+		}
+	}
+	s.textBuffer.WriteTo(w)
+}
+
+// Historical disk baseline for the codec benchmark, never a production writer.
+func (s *StorageString) serializeRawFixtureV3(w io.Writer) {
+	var nodict byte
+	count := s.values.count
+	if s.nodict {
+		nodict = 1
+		count = s.starts.count
+	}
+	w.Write([]byte{20, nodict, byte(s.format), 3, 0, 0, 0, 0, 0})
+	binary.Write(w, binary.LittleEndian, count)
+	s.values.Serialize(w)
+	s.starts.Serialize(w)
+	s.lens.Serialize(w)
+	binary.Write(w, binary.LittleEndian, uint64(len(s.dictionary)))
+	io.WriteString(w, s.dictionary)
+}
+
+func TestStorageStringV5RejectsMalformed(t *testing.T) {
+	for _, kind := range []string{"count", "format", "truncated", "extent"} {
+		t.Run(kind, func(t *testing.T) {
+			s := buildStringColumn([]string{"report one", "report two"})
+			if kind == "extent" {
+				s.lens.offset += 1000000
+			}
+			var wire bytes.Buffer
+			s.Serialize(&wire)
+			data := append([]byte(nil), wire.Bytes()...)
+			switch kind {
+			case "count":
+				binary.LittleEndian.PutUint64(data[8:16], 999)
+			case "format":
+				data[2] = 255
+			case "truncated":
+				data = data[:len(data)-1]
+			}
+			defer func() {
+				if recover() == nil {
+					t.Fatal("accepted malformed V5 payload")
+				}
+			}()
+			var restored StorageString
+			restored.Deserialize(bytes.NewReader(data[1:]))
+		})
+	}
+}
+
+func TestStorageStringSpecialBoundaryDoesNotPinCache(t *testing.T) {
+	for _, inputs := range [][]string{
+		{strings.Repeat("deadbeef", 100), strings.Repeat("cafebabe", 100)},
+		{"YWJjZGVmZ2hpamtsbW5vcA==", "cXJzdHV2d3h5ejAxMjM0NQ=="},
+	} {
+		s := buildStringColumn(inputs)
+		s.CompressDictionary()
+		key := (colGetter{source: s}).persistentValue(1, nil)
+		if key.GetTag() != scm.TagString || key.String() != inputs[1] {
+			t.Fatal("wrong owned boundary")
+		}
+		cache := s.dictCache.Load()
+		if cache == nil {
+			t.Fatal("missing decoded cache")
+		}
+		base := uintptr(unsafe.Pointer(unsafe.StringData(cache.text)))
+		ptr := uintptr(unsafe.Pointer(unsafe.StringData(key.String())))
+		if ptr >= base && ptr < base+uintptr(len(cache.text)) {
+			t.Fatal("boundary still borrows cache")
+		}
+		if s.EvictDictionary() <= 0 || key.String() != inputs[1] {
+			t.Fatal("boundary failed after eviction")
 		}
 	}
 }

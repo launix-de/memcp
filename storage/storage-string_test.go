@@ -40,6 +40,17 @@ func buildStringColumn(values []string) *StorageString {
 		s.build(uint32(i), scm.NewString(v))
 	}
 	s.finish()
+	return rawStringFixture(s)
+}
+
+// rawStringFixture deliberately restores an unpublished raw baseline for
+// codec comparisons and historical format fixtures. Production finish uses LZ4.
+func rawStringFixture(s *StorageString) *StorageString {
+	s.dictionary = s.decodeDictionary()
+	s.textBuffer = nil
+	s.bufferHandles = false
+	s.compressedDict = nil
+	s.compressed = false
 	return s
 }
 
@@ -615,9 +626,9 @@ func TestSerializeDeserializeCompressed(t *testing.T) {
 	}
 }
 
-// TestSerializeDeserializeUncompressed verifies version 1 format works for
-// uncompressed dictionaries (backward-compatible read path).
-func TestSerializeDeserializeUncompressed(t *testing.T) {
+// TestSerializeDeserializeRawSource verifies the current writer converts a
+// raw source without mutating its published representation.
+func TestSerializeDeserializeRawSource(t *testing.T) {
 	inputs := []string{"hello", "world", "hello", "world", "foo"}
 	col := buildStringColumn(inputs)
 	// do NOT compress
@@ -630,8 +641,8 @@ func TestSerializeDeserializeUncompressed(t *testing.T) {
 	col2 := new(StorageString)
 	col2.Deserialize(reader)
 
-	if col2.compressed {
-		t.Fatal("deserialized column should not be compressed")
+	if col2.textBuffer == nil || col2.dictionary != "" || col.dictionary == "" || col.textBuffer != nil {
+		t.Fatal("writer failed private raw-to-block conversion")
 	}
 	for i, want := range inputs {
 		got := scm.String(col2.GetValue(uint32(i)))
@@ -912,6 +923,17 @@ func TestLegacyLZ4DictionaryReaderHints(t *testing.T) {
 	if !restored.compressed || len(restored.dictionary) != 0 || restored.dictCache.Load() != nil {
 		t.Fatal("legacy file eagerly decoded")
 	}
+	var saved bytes.Buffer
+	restored.Serialize(&saved)
+	if saved.Bytes()[3] != 5 || restored.dictCache.Load() != nil || !restored.compressed {
+		t.Fatal("legacy save failed private V5 conversion")
+	}
+	var migrated StorageString
+	migrated.Deserialize(bytes.NewReader(saved.Bytes()[1:]))
+	if migrated.textBuffer == nil || migrated.GetValue(1).String() != inputs[1] {
+		t.Fatal("legacy compressed migration changed values")
+	}
+
 	reader := restored.GetCachedReader(ReadDecoded)
 	for i, want := range inputs {
 		if got := reader.GetValue(uint32(i)).String(); got != want {
