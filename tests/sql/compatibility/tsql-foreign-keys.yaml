@@ -66,16 +66,13 @@ test_cases:
     KEY (p) REFERENCES dbo.tsql_fk_nullable_parent (id) ON DELETE CASCADE ON UPDATE CASCADE)
 - name: Nullable candidate key can hold a NULL parent
   sql: INSERT dbo.tsql_fk_nullable_parent VALUES (NULL)
-  noncritical: true
 - name: NULL parent does not satisfy a zero foreign key
   sql: INSERT dbo.tsql_fk_nullable_child VALUES (1,0)
   expect:
     error: true
     contains: foreign key constraint
-  noncritical: true
 - name: Nullable child is exempt from reference checks
   sql: INSERT dbo.tsql_fk_nullable_child VALUES (2,NULL)
-  noncritical: true
 - name: Removing NULL parent does not act on exempt NULL child
   sql: DELETE FROM dbo.tsql_fk_nullable_parent WHERE id IS NULL
 - name: NULL child survives removal of NULL parent
@@ -85,7 +82,6 @@ test_cases:
     data:
     - id: 2
       p: null
-  noncritical: true
 - name: Actual scalar subqueries remain rejected in INSERT VALUES
   sql: INSERT dbo.tsql_fk_nullable_parent VALUES ((SELECT 0))
   expect:
@@ -97,7 +93,6 @@ test_cases:
   noncritical: true
 - name: Actual zero reference is inserted
   sql: INSERT dbo.tsql_fk_nullable_child VALUES (3,0)
-  noncritical: true
 - name: Cascading zero key does not include NULL children
   sql: DELETE FROM dbo.tsql_fk_nullable_parent WHERE id=0
 - name: NULL child survives deletion of actual zero reference
@@ -107,10 +102,8 @@ test_cases:
     data:
     - id: 2
       p: null
-  noncritical: true
 - name: Recreate distinct NULL and zero candidate keys
   sql: INSERT dbo.tsql_fk_nullable_parent VALUES (NULL),(0)
-  noncritical: true
 - name: Create SET NULL policy for nullable parent updates
   sql: CREATE TABLE dbo.tsql_fk_nullable_setnull (id INT PRIMARY KEY,p INT, CONSTRAINT FK_nullable_setnull FOREIGN
     KEY (p) REFERENCES dbo.tsql_fk_nullable_parent (id) ON UPDATE SET NULL)
@@ -119,13 +112,10 @@ test_cases:
     KEY (p) REFERENCES dbo.tsql_fk_nullable_parent (id) ON UPDATE NO ACTION)
 - name: Install actual zero and exempt NULL references for cascade
   sql: INSERT dbo.tsql_fk_nullable_child VALUES (3,0)
-  noncritical: true
 - name: Install actual zero and exempt NULL references for SET NULL
   sql: INSERT dbo.tsql_fk_nullable_setnull VALUES (1,0),(2,NULL)
-  noncritical: true
 - name: Install actual zero and exempt NULL references for restriction
   sql: INSERT dbo.tsql_fk_nullable_restrict VALUES (1,0),(2,NULL)
-  noncritical: true
 - name: NULL parent update cannot act on zero references
   sql: UPDATE dbo.tsql_fk_nullable_parent SET id=1 WHERE id IS NULL
 - name: Cascade preserves references to the other zero parent
@@ -137,7 +127,6 @@ test_cases:
       p: null
     - id: 3
       p: 0
-  noncritical: true
 - name: SET NULL preserves references to the other zero parent
   sql: SELECT id,p FROM dbo.tsql_fk_nullable_setnull ORDER BY id
   expect:
@@ -147,7 +136,6 @@ test_cases:
       p: 0
     - id: 2
       p: null
-  noncritical: true
 - name: Restriction preserves references to the other zero parent
   sql: SELECT id,p FROM dbo.tsql_fk_nullable_restrict ORDER BY id
   expect:
@@ -157,13 +145,11 @@ test_cases:
       p: 0
     - id: 2
       p: null
-  noncritical: true
 - name: Actual zero to NULL is a restricted key change
   sql: UPDATE dbo.tsql_fk_nullable_parent SET id=NULL WHERE id=0
   expect:
     error: true
     contains: foreign key constraint
-  noncritical: true
 - name: Failed nullable parent update preserves parent rows
   sql: SELECT id FROM dbo.tsql_fk_nullable_parent ORDER BY id
   expect:
@@ -171,7 +157,6 @@ test_cases:
     data:
     - id: 0
     - id: 1
-  noncritical: true
 - name: Failed nullable parent update preserves cascade children
   sql: SELECT id,p FROM dbo.tsql_fk_nullable_child ORDER BY id
   expect:
@@ -181,7 +166,6 @@ test_cases:
       p: null
     - id: 3
       p: 0
-  noncritical: true
 - name: Remove restriction before testing actual cascades
   sql: ALTER TABLE dbo.tsql_fk_nullable_restrict DROP CONSTRAINT FK_nullable_restrict
 - name: Actual zero to NULL executes cascading policies
@@ -195,7 +179,6 @@ test_cases:
       p: null
     - id: 3
       p: null
-  noncritical: true
 - name: SET NULL executes on a zero to NULL key transition
   sql: SELECT id,p FROM dbo.tsql_fk_nullable_setnull ORDER BY id
   expect:
@@ -205,7 +188,6 @@ test_cases:
       p: null
     - id: 2
       p: null
-  noncritical: true
 - name: NULL to zero has no referencing children
   sql: UPDATE dbo.tsql_fk_nullable_parent SET id=0 WHERE id IS NULL
 - name: Cascade leaves exempt NULL children unchanged on NULL to zero
@@ -217,7 +199,6 @@ test_cases:
       p: null
     - id: 3
       p: null
-  noncritical: true
 - name: SET NULL leaves exempt NULL children unchanged on NULL to zero
   sql: SELECT id,p FROM dbo.tsql_fk_nullable_setnull ORDER BY id
   expect:
@@ -227,7 +208,6 @@ test_cases:
       p: null
     - id: 2
       p: null
-  noncritical: true
 - name: CREATE validates composite references with escaped identifiers and folded casing
   sql: CREATE TABLE dbo.tsql_fk_child (id INT PRIMARY KEY,a INT,b INT, CONSTRAINT [FK child]]parent] FOREIGN KEY
     ([A],[b]) REFERENCES dbo.[TSQL_FK_PARENT] ([FIRST],[second]) ON DELETE NO ACTION ON UPDATE NO ACTION)
