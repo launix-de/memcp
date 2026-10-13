@@ -164,6 +164,100 @@ func setupScanParallelTestTable(t *testing.T, dbName string) *table {
 	return tbl
 }
 
+func TestUniqueBatchRejectsRepeatedKeys(t *testing.T) {
+	for _, ignore := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ignore-%v", ignore), func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tuniquebatchduplicates")
+			tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+			tx := NewTxContext(TxCursorStability)
+			onCollision := scm.NewNil()
+			if ignore {
+				onCollision = scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewInt(0) })
+			}
+			var caught any
+			func() {
+				defer func() { caught = recover() }()
+				tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}, {scm.NewInt(8)}, {scm.NewInt(7)}}, nil, onCollision, false, nil, tx)
+			}()
+			if ignore {
+				if caught != nil {
+					t.Fatalf("INSERT IGNORE panicked: %v", caught)
+				}
+				if err := tx.Commit(); err != nil {
+					t.Fatal(err)
+				}
+				if got := tbl.CountExact(); got != 2 {
+					t.Fatalf("INSERT IGNORE published %d rows, want 2", got)
+				}
+			} else {
+				tx.Rollback()
+				if caught == nil || !strings.Contains(fmt.Sprint(caught), "Duplicate entry") {
+					t.Fatalf("expected duplicate error, got %v", caught)
+				}
+				if got := tbl.CountExact(); got != 0 {
+					t.Fatalf("failed statement retained %d rows", got)
+				}
+			}
+		})
+	}
+}
+
+func TestUniqueBatchRechecksRowsRejectedByAnotherKey(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tuniquebatchlaterkey")
+	tbl.CreateColumn("val", "INT", nil, nil)
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "val", Cols: []string{"val"}}}
+	cols := []string{"id", "val"}
+	tbl.Insert(cols, [][]scm.Scmer{{scm.NewInt(10), scm.NewInt(99)}}, nil, scm.NewNil(), false, nil)
+	ignore := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewInt(0) })
+	got := tbl.Insert(cols, [][]scm.Scmer{{scm.NewInt(1), scm.NewInt(99)}, {scm.NewInt(1), scm.NewInt(100)}}, nil, ignore, false, nil)
+	if got != 1 || tbl.CountExact() != 2 {
+		t.Fatalf("later key rejection incorrectly reserved first key: inserted=%d count=%d", got, tbl.CountExact())
+	}
+}
+
+func TestUniqueBatchCoercingAndNullKeys(t *testing.T) {
+	cases := []struct {
+		name             string
+		first, second    scm.Scmer
+		nullsNotDistinct bool
+		want             int
+	}{
+		{"numeric-prefix", scm.NewString("12x"), scm.NewInt(12), false, 1},
+		{"int-float", scm.NewInt(12), scm.NewFloat(12), false, 1},
+		{"signed-zero", scm.NewFloat(0), scm.NewFloat(math.Copysign(0, -1)), false, 1},
+		{"large-distinct-ints", scm.NewInt(9007199254740992), scm.NewInt(9007199254740993), false, 2},
+		{"rounded-int-float", scm.NewInt(9007199254740993), scm.NewFloat(9007199254740992), false, 1},
+		{"null-distinct", scm.NewNil(), scm.NewNil(), false, 2},
+		{"null-not-distinct", scm.NewNil(), scm.NewNil(), true, 1},
+		{"null-false-coercion", scm.NewBool(false), scm.NewNil(), true, 1},
+		{"null-empty-text", scm.NewString(""), scm.NewNil(), true, 1},
+		{"null-false-text", scm.NewString("false"), scm.NewNil(), true, 1},
+		{"null-uppercase-false-text", scm.NewString("FALSE"), scm.NewNil(), true, 1},
+		{"null-zero-text", scm.NewString("0"), scm.NewNil(), true, 1},
+		{"null-spaced-zero-text", scm.NewString(" 0 "), scm.NewNil(), true, 1},
+		{"null-negative-zero-text", scm.NewString("-0.0"), scm.NewNil(), true, 1},
+		{"null-zero-exponent-text", scm.NewString("0e3"), scm.NewNil(), true, 1},
+		{"distinct-false-text", scm.NewString("false"), scm.NewString("0"), true, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tuniquebatchcoercion")
+			tbl.CreateColumn("value", "TEXT", nil, nil)
+			tbl.Unique = []uniqueKey{{Id: "value", Cols: []string{"value"}, NullsNotDistinct: tc.nullsNotDistinct}}
+			cols := []string{"id", "value"}
+			rows := [][]scm.Scmer{{scm.NewInt(1), tc.first}, {scm.NewInt(2), tc.second}}
+			accepted, rejected := 0, 0
+			tbl.ProcessUniqueCollision(cols, rows, false, func(rows [][]scm.Scmer) {
+				tbl.ActiveShards()[0].Insert(cols, rows, false, nil, nil, false, nil)
+				accepted += len(rows)
+			}, nil, func(string, []scm.Scmer) { rejected++ }, 0, nil)
+			if accepted != tc.want || rejected != 2-tc.want || tbl.CountExact() != uint(tc.want) {
+				t.Fatalf("accepted=%d rejected=%d visible=%d, want %d", accepted, rejected, tbl.CountExact(), tc.want)
+			}
+		})
+	}
+}
+
 func TestGeneratedUniqueKeySkipReleasesOuterLockOnPanic(t *testing.T) {
 	for _, generatedFirst := range []bool{true, false} {
 		name := "generated_first"
