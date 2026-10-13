@@ -1918,71 +1918,6 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 		adataset[i] = scm.NewNil()
 	}
 
-	// Prepared sort readers survive this shard queue until statement teardown.
-	// Calls without a statement owner retain the ordinary compressed path.
-	sortReadHints := ReadAuto
-	if currentTx != nil && currentTx.queryActive.Load() {
-		sortReadHints = ReadDecoded
-	}
-	// prepare sort criteria so they can be queried easily
-	result.scols = make([]func(uint32) scm.Scmer, len(sortcols))
-	for i, scol := range sortcols {
-		if scol.IsCustom(TagRecSetOrder) {
-			order := (*recSetOrder)(scol.Custom(TagRecSetOrder))
-			result.scols[i] = func(idx uint32) scm.Scmer {
-				rank, ok := order.rank(t, idx)
-				if !ok {
-					return scm.NewInt(math.MaxInt64)
-				}
-				return scm.NewInt(rank)
-			}
-			continue
-		}
-		if scol.IsString() {
-			colname := scol.String()
-			reader := t.ColumnReaderTx(currentTx, colname, false, sortReadHints)
-			result.scols[i] = reader.GetValue
-			continue
-		}
-		if scol.IsProc() {
-			proc := scol.Proc()
-			var params []scm.Scmer
-			if proc.Params.IsSlice() {
-				params = proc.Params.Slice()
-			} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
-				params = arr
-			}
-			largs := make([]func(uint32) scm.Scmer, len(params))
-			for j, param := range params {
-				name := ""
-				if param.IsSymbol() {
-					name = param.String()
-				} else if sym, ok := param.Any().(scm.Symbol); ok {
-					name = string(sym)
-				} else {
-					name = scm.String(param)
-				}
-				if name == "$tx" {
-					txValue := scm.NewAny(currentTx)
-					largs[j] = func(uint32) scm.Scmer { return txValue }
-				} else {
-					reader := t.ColumnReaderTx(currentTx, name, false, sortReadHints)
-					largs[j] = reader.GetValue
-				}
-			}
-			procFn := scm.PrepareSerialProc(scol)
-			vals := make([]scm.Scmer, len(largs))
-			result.scols[i] = func(idx uint32) scm.Scmer {
-				for j, getter := range largs {
-					vals[j] = getter(idx)
-				}
-				return procFn.Call(vals)
-			}
-			continue
-		}
-		panic("unknown sort criteria: " + scm.String(scol))
-	}
-
 	adjustedSortdirs := sortdirs
 
 	if t.t.hasTableLock() {
@@ -2268,29 +2203,74 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 		result.items = result.items[:resultN]
 	}()
 
-	// and now sort result!
+	// Bind comparison keys, then sort the already filtered candidate set.
+	// Comparison readers bind only after candidate filtering. The queue owns
+	// their lifetime through the global merge, including nil/parked transactions.
+	sortReadHints := ReadAuto | readOperatorOwned
 	if !resultAlreadySorted && len(result.items) > 1 {
-		// Only a chosen local sort needs repeated comparison-key reads. Bind
-		// those keys after filtering; an index-ordered/braked path and all
-		// projection payloads retain their existing lazy preparation.
-		for i, sortcol := range sortcols {
-			if !sortcol.IsString() {
-				continue
-			}
-			name := sortcol.String()
-			column := t.getColumnStorageOrPanic(name, skipShardReadLock, currentTx)
-			reader := newCachedColumnReaderTx(column, currentTx, false, ReadDecoded)
-			result.sortReaders = append(result.sortReaders, reader)
-			fallback := result.scols[i]
-			mainCount := t.main_count
-			result.scols[i] = func(row uint32) scm.Scmer {
-				if row < mainCount {
-					return reader.GetValue(row)
-				}
-				return fallback(row)
-			}
-		}
+		sortReadHints = ReadDecoded | readOperatorOwned
 	}
+	// prepare sort criteria so they can be queried easily
+	result.scols = make([]func(uint32) scm.Scmer, len(sortcols))
+	for i, scol := range sortcols {
+		if scol.IsCustom(TagRecSetOrder) {
+			order := (*recSetOrder)(scol.Custom(TagRecSetOrder))
+			result.scols[i] = func(idx uint32) scm.Scmer {
+				rank, ok := order.rank(t, idx)
+				if !ok {
+					return scm.NewInt(math.MaxInt64)
+				}
+				return scm.NewInt(rank)
+			}
+			continue
+		}
+		if scol.IsString() {
+			colname := scol.String()
+			reader := t.ColumnReaderTx(currentTx, colname, false, sortReadHints)
+			result.sortReaders = append(result.sortReaders, reader)
+			result.scols[i] = reader.GetValue
+			continue
+		}
+		if scol.IsProc() {
+			proc := scol.Proc()
+			var params []scm.Scmer
+			if proc.Params.IsSlice() {
+				params = proc.Params.Slice()
+			} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
+				params = arr
+			}
+			largs := make([]func(uint32) scm.Scmer, len(params))
+			for j, param := range params {
+				name := ""
+				if param.IsSymbol() {
+					name = param.String()
+				} else if sym, ok := param.Any().(scm.Symbol); ok {
+					name = string(sym)
+				} else {
+					name = scm.String(param)
+				}
+				if name == "$tx" {
+					txValue := scm.NewAny(currentTx)
+					largs[j] = func(uint32) scm.Scmer { return txValue }
+				} else {
+					reader := t.ColumnReaderTx(currentTx, name, false, sortReadHints)
+					result.sortReaders = append(result.sortReaders, reader)
+					largs[j] = reader.GetValue
+				}
+			}
+			procFn := scm.PrepareSerialProc(scol)
+			vals := make([]scm.Scmer, len(largs))
+			result.scols[i] = func(idx uint32) scm.Scmer {
+				for j, getter := range largs {
+					vals[j] = getter(idx)
+				}
+				return procFn.Call(vals)
+			}
+			continue
+		}
+		panic("unknown sort criteria: " + scm.String(scol))
+	}
+
 	result.sortdirs = adjustedSortdirs
 	result.sortless = make([]func(scm.Scmer, scm.Scmer) bool, len(adjustedSortdirs))
 	for i, relation := range adjustedSortdirs {

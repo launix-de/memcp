@@ -673,7 +673,8 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   statement-bound `ReadAuto` only reuses an existing decoded generation.
   Synchronous operators mark their reader ownership during preparation and
   release all prepared readers on their existing completion/panic boundary;
-  explicit `ReadDecoded` is always operator-owned. A compressed inner encoding
+  marked `ReadDecoded` is operator-owned; unmarked statement readers
+  retain the existing `endQuery` release owner. A compressed inner encoding
   without a compressed value handle uses one immutable reader-local decoding
   workspace when no shared lease owner is available, never dictionary-manager
   synchronization per row. Typed kernels consume the prepared reader's physical
