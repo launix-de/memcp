@@ -622,6 +622,37 @@ Only the selected native operation survives the shared compile boundary. */
 (define tsql_fold_additive (lambda (acc term) (match term
 	'("add" value) (tsql_add_expr acc value)
 	_ (sql_fold_additive_term acc term))))
+/* NULL fallback has the same declared precedence as other T-SQL expressions.
+The shared lazy coalesce operator remains responsible for evaluation; this
+callback consumes SQL triples and leaves only converted formulas in the plan.
+Dimension merging and exact decimal precision are separate frontend work. */
+(define tsql_coalesce_expr (lambda (arguments)
+	(cons (quote sql_compile_expr) (cons (lambda (infos) (begin
+		(if (< (count infos) 2) (error "COALESCE requires at least two arguments") true)
+		(define types (map infos (lambda (info) (tsql_addition_type (sql_info_type info)))))
+		(define active (filter types (lambda (type) (not (equal? type "NULL")))))
+		(if (empty_list? active) (error "COALESCE requires a declared non-NULL type") true)
+		(define target (coalesceNil
+			(find (merge (list tsql_addition_numeric_types tsql_addition_text_types))
+				(lambda (type) (has? active type)) nil)
+			(if (reduce active (lambda (same type) (and same (equal? type (car active)))) true)
+				(car active) (error "unsupported COALESCE type combination"))))
+		(define formulas (map infos (lambda (info) (begin
+			(define type (tsql_addition_type (sql_info_type info)))
+			(define formula (sql_info_formula info))
+			(if (or (equal? type "NULL") (equal? type target)) formula
+				(and (has? tsql_addition_numeric_types target)
+					(or (has? tsql_addition_numeric_types type) (has? tsql_addition_text_types type)))
+				(if (has? '("DECIMAL" "MONEY" "SMALLMONEY") target)
+					(list tsql_cast_float formula)
+					(sql_type_lower_annotations (tsql_cast_expr formula target '())))
+				(and (has? tsql_addition_text_types target) (has? tsql_addition_text_types type)) formula
+				(error "unsupported implicit COALESCE conversion from " type " to " target))))))
+		(sql_info (cons (quote coalesceNil) formulas) target
+			(if (has? tsql_addition_text_types target)
+				(reduce infos (lambda (collation info) (sql_merge_collation collation (sql_info_collation info))) nil)
+				nil)))) arguments))))
+
 /* Explicit wire descriptors come from the existing SQL expression metadata,
 never from the first row. Unknown expression types stay text in this first slice. */
 (define tsql_result_columns (lambda (query) (match query
@@ -813,7 +844,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		(parser '((atom "LTRIM" true) "(" (define e tsql_expression) ")") '((quote sql_ltrim) e))
 		(parser '((atom "RTRIM" true) "(" (define e tsql_expression) ")") '((quote sql_rtrim) e))
 
-		(parser '((atom "COALESCE" true) "(" (define args (* tsql_expression ",")) ")") (cons (quote coalesceNil) args))
+		(parser '((atom "COALESCE" true) "(" (define args (* tsql_expression ",")) ")") (tsql_coalesce_expr args))
 
 		(parser '((atom "NULLIF" true) "(" (define a tsql_expression) "," (define b tsql_expression) ")") '((quote if) '((quote equal??) a b) nil a))
 		(parser '((atom "NCHAR" true) "(" (define value tsql_expression) ")") (tsql_nchar_expr value))
