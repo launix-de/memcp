@@ -527,7 +527,7 @@ scan/count/materialize SELECT input to reserve IDs, or rewind consumed blocks.
 The frontend checks the complete reserved block before any row publication.
 Explicit NULL must fail here: native auto_increment would otherwise allocate
 an unchecked replacement. Scope/session identity reporting is separate work. */
-(define tsql_native_insert_expr (lambda (database name columns values) (begin
+(define tsql_native_insert_expr (lambda (database name columns values row_count) (begin
 	(define relation (list (quote table) database name))
 	(define identity (find (get_schema database name)
 		(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
@@ -536,6 +536,7 @@ an unchecked replacement. Scope/session identity reporting is separate work. */
 			'(list) nil false callback (quote tx))))
 	(define callback '('lambda '('id) '('session "last_insert_id" 'id)))
 	(if (nil? identity) (native_insert columns values callback)
+		(equal? row_count 0) (native_insert columns values nil)
 		(begin
 			(define explicit (find (produceN (count columns))
 				(lambda (index) (equal?? (nth columns index) (identity "Field"))) nil))
@@ -548,18 +549,20 @@ an unchecked replacement. Scope/session identity reporting is separate work. */
 					(native_insert columns (quote __tsql_rows) callback))
 				(begin
 					(define maximum (tsql_identity_maximum (identity "RawType") (identity "Dimensions")))
+					/* Batch extent comes from VALUES syntax or the existing sink's
+					single-row contract, never a scan/count of SELECT input. */
+					(define own_rows (if (equal? row_count 1)
+						'('list '('cons '('car '__tsql_ids) '('car '__tsql_rows)))
+						'('map '('produceN row_count)
+							'('lambda '('index) '('cons '('+ '('car '__tsql_ids) 'index) '('nth '__tsql_rows 'index))))))
 					'('begin
 						'('define '__tsql_rows values)
-						'('define '__tsql_ids '('reserve_ids relation '('count '__tsql_rows)))
-						'('if '('empty_list? '__tsql_ids)
-							(native_insert columns (quote __tsql_rows) nil)
-							'('begin
-								'('if '('> '('cadr '__tsql_ids) maximum) '('error "IDENTITY exceeds the declared range") true)
-								/* Preserve the existing first-ID completion contract. */
-								'('session "last_insert_id" '('car '__tsql_ids))
-								(native_insert (cons (identity "Field") columns)
-									'('map '('produceN '('count '__tsql_rows))
-										'('lambda '('index) '('cons '('+ '('car '__tsql_ids) 'index) '('nth '__tsql_rows 'index)))) nil)))))))))))
+						'('define '__tsql_ids '('reserve_ids relation row_count))
+						'('if '('> '('cadr '__tsql_ids) maximum) '('error "IDENTITY exceeds the declared range") true)
+						'('define '__tsql_inserted (native_insert (cons (identity "Field") columns) own_rows nil))
+						/* Preserve completion only after successful native admission. */
+						'('if '('> '__tsql_inserted 0) '('session "last_insert_id" '('car '__tsql_ids)) true)
+						'__tsql_inserted))))))))
 (define tsql_select_prefix (parser (? (atom "TOP" true)
 	(define top_count (or (parser '("(" (define n tsql_int) ")") n) sql_int)))
 	(if (and top_count (< top_count 0)) (error "TOP requires a nonnegative count") top_count)))
@@ -1212,7 +1215,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		(define insert_expr (tsql_native_insert_expr database tbl columns
 			(cons list '((cons list (map (produceN (count columns))
 				(lambda (i) (sql_type_formula '() (tsql_assignment_expr
-					'('nth 'item (+ (* i 2) 1)) (nth declarations i))))))))))
+					'('nth 'item (+ (* i 2) 1)) (nth declarations i)))))))) 1))
 		(define expanded (sql_expand_views query policy))
 		(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
 			(error "INSERT column count does not match SELECT column count"))
@@ -1248,7 +1251,7 @@ never from the first row. Unknown expression types stay text in this first slice
 			(if (reduce rows (lambda (found row) (or found (tsql_dataset_contains_inner_select row))) false)
 				(tsql_insert_select_plan database tbl columns (tsql_values_to_select_query database columns rows))
 				(tsql_native_insert_expr database tbl columns (sql_insert_values_expr (map rows (lambda (row) (map (produceN (count columns))
-					(lambda (i) (sql_type_formula (list) (tsql_assignment_expr (nth row i) (nth declarations i))))))))))
+					(lambda (i) (sql_type_formula (list) (tsql_assignment_expr (nth row i) (nth declarations i)))))))) (count rows)))
 	)))
 	/* An all-default row is the native empty-column INSERT. Defaults and
 	generated values are filled by the same operator as ordinary insertion. */
@@ -1259,7 +1262,7 @@ never from the first row. Unknown expression types stay text in this first slice
 	) (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
-			(tsql_native_insert_expr database tbl '() '('list '(list))))))
+			(tsql_native_insert_expr database tbl '() '('list '(list)) 1))))
 	(define tsql_insert_select (parser '(
 		(atom "INSERT" true) (atom "INTO" true)
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
