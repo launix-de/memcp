@@ -684,9 +684,12 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   never borrow the scratch. Scalar probes and explicit compressed/bigram
   consumers retain compressed handles. Prefix/overlay preparation propagates
   child reader ownership rather than bypassing its representation or lease.
-  Computed readers retain the existing child ColumnReaders, propagate the
-  same demand/ownership hints and release through the existing child lifecycle.
-  Scalar method closures must not hide that child's lease or decoding contract.
+  Computed readers retain existing child ColumnReaders and carry operator
+  ownership through their release chain. A complete materialized main binds its
+  own representation and leaves unused inputs unprepared. Partially cached
+  inputs keep optional cache reuse, since their consumed extent is not yet
+  established. Reader setup releases already bound children on failure. Later
+  main replacement or appended rows retain the existing delta/repair semantics.
   `batchStringReader.demandedWorkBytes` counts copying and compressed-block
   replay for only already selected values at batch boundaries. Raw blocks add
   no decode work. Once this demanded work covers the immutable dictionary,

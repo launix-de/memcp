@@ -1094,6 +1094,8 @@ func TestComputedComparisonReaderRetainsLeafOwnership(t *testing.T) {
 	for _, active := range []bool{false, true} {
 		source := buildStorageString([]scm.Scmer{scm.NewString("report alpha"), scm.NewString("report beta")})
 		source.CompressDictionary()
+		warm := source.GetCachedReader(ReadDecoded)
+		ReleaseColumnReader(warm)
 		shard.mu.Lock()
 		shard.columns["label"] = source
 		shard.mu.Unlock()
@@ -1107,7 +1109,7 @@ func TestComputedComparisonReaderRetainsLeafOwnership(t *testing.T) {
 		}
 		reader := newCachedColumnReaderTx(proxy, tx, false, ReadDecoded|readOperatorOwned)
 		if source.dictCache.Load() == nil {
-			t.Fatal("computed comparison discarded its leaf decoding hint")
+			t.Fatal("computed comparison lost its reusable leaf dictionary")
 		}
 		if active {
 			if len(tx.queryReaderReleases) != 0 {
@@ -1136,5 +1138,99 @@ func TestComputedComparisonReaderRetainsLeafOwnership(t *testing.T) {
 		if blocked || value.IsBufferString() || value.String() != "report beta" || source.EvictDictionary() <= 0 {
 			t.Fatal("computed comparison waited for management or lost its leaf release")
 		}
+	}
+}
+
+func TestMaterializedComputedReaderPreparesOutputOnly(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tmaterializedreaderdemand")
+	tbl.CreateColumn("label", "TEXT", nil, nil)
+	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewString("input alpha")},
+		{scm.NewInt(2), scm.NewString("input beta")},
+	}, nil, scm.NewNil(), false, nil)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
+	input := buildStorageString([]scm.Scmer{scm.NewString(strings.Repeat("input alpha ", 10000)), scm.NewString(strings.Repeat("input beta ", 10000))})
+	input.CompressDictionary()
+	main := buildStorageString([]scm.Scmer{scm.NewString("output alpha"), scm.NewString("output beta")})
+	main.CompressDictionary()
+	shard.mu.Lock()
+	shard.columns["label"] = input
+	shard.mu.Unlock()
+	proxy := &StorageComputeProxy{shard: shard, main: main, count: 2, compressed: true,
+		inputCols: []string{"label"}, delta: make(map[uint32]scm.Scmer),
+		computor: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })}
+	reader := newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned)
+	if input.dictCache.Load() != nil || main.dictCache.Load() == nil {
+		t.Fatal("materialized output prepared an unused input instead of its actual main")
+	}
+	values := make([]scm.Scmer, 2)
+	reader.GetValueRange(0, 2, values, 1)
+	if values[0].IsBufferString() || values[0].String() != "output alpha" || values[1].String() != "output beta" {
+		t.Fatal("materialized range bypassed its prepared output reader")
+	}
+	reader.GetValueMulti([]uint32{1, 0}, values, 1)
+	if values[0].String() != "output beta" || values[1].String() != "output alpha" {
+		t.Fatal("materialized row permutation lost its output reader")
+	}
+	proxy.mu.Lock()
+	proxy.delta[1] = scm.NewString("own update")
+	proxy.mu.Unlock()
+	if reader.GetValue(1).String() != "own update" {
+		t.Fatal("prepared materialized main hid a newer delta value")
+	}
+	replacement := buildStorageString([]scm.Scmer{scm.NewString("replacement alpha"), scm.NewString("replacement beta")})
+	replacement.CompressDictionary()
+	proxy.mu.Lock()
+	proxy.main = replacement
+	proxy.mu.Unlock()
+	if reader.GetValue(0).String() != "replacement alpha" {
+		t.Fatal("prepared reader reused a stale replaced main")
+	}
+	shard.mu.Lock()
+	shard.deltaColumns["label"] = 0
+	shard.inserts = [][]scm.Scmer{{scm.NewString("appended label")}}
+	shard.mu.Unlock()
+	if reader.GetValue(2).String() != "appended label" || input.dictCache.Load() != nil {
+		t.Fatal("materialized reader lost existing appended-row repair or prepared unused input")
+	}
+	ReleaseColumnReader(reader)
+	if main.EvictDictionary() <= 0 {
+		t.Fatal("materialized output completion leaked its lease")
+	}
+}
+
+type failingPreparedTextStorage struct{ *StorageString }
+
+func (s *failingPreparedTextStorage) GetCachedReader(ColumnReadHints) ColumnReader {
+	panic("second prepared input failed")
+}
+
+func TestComputedReaderSetupFailureReleasesEarlierChildren(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tcomputedsetupownership")
+	tbl.CreateColumn("first", "TEXT", nil, nil)
+	tbl.CreateColumn("second", "TEXT", nil, nil)
+	tbl.Insert([]string{"id", "first", "second"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("first"), scm.NewString("second")}}, nil, scm.NewNil(), false, nil)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
+	first := buildStorageString([]scm.Scmer{scm.NewString("first")})
+	first.CompressDictionary()
+	warm := first.GetCachedReader(ReadDecoded)
+	ReleaseColumnReader(warm)
+	shard.mu.Lock()
+	shard.columns["first"] = first
+	shard.columns["second"] = &failingPreparedTextStorage{buildStorageString([]scm.Scmer{scm.NewString("second")})}
+	shard.mu.Unlock()
+	proxy := &StorageComputeProxy{shard: shard, inputCols: []string{"first", "second"}}
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != "second prepared input failed" {
+				t.Fatalf("wrong setup failure: %v", recovered)
+			}
+		}()
+		newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned)
+	}()
+	if first.EvictDictionary() <= 0 {
+		t.Fatal("later input setup panic leaked an earlier operator-owned leaf")
 	}
 }
