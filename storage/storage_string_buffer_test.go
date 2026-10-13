@@ -89,6 +89,13 @@ func TestOverlayBlobBufferPassthrough(t *testing.T) {
 	if got := testing.AllocsPerRun(30, func() { overlay.GetValueRange(0, uint32(len(values)), target, 1) }); got != 0 {
 		t.Fatalf("codec %d overlay allocates %v", codec, got)
 	}
+	// Prepared batches may mix ordinary values with compressed handles. A
+	// decoder is still needed when the first row itself is an ordinary string.
+	mixed := []scm.Scmer{scm.NewString("plain"), s.GetValue(1), scm.NewNil()}
+	overlay.resolveBlobBatch(mixed, len(mixed), 1)
+	if mixed[0].String() != "plain" || !mixed[1].IsBufferString() || mixed[1].String() != "!escaped" || !mixed[2].IsNil() {
+		t.Fatal("mixed batch lost compressed pass-through or literal escaping")
+	}
 	decoded := overlay.GetCachedReader(ReadDecoded)
 	decoded.GetValueRange(0, uint32(len(values)), target, 1)
 	if target[0].String() != "ordinary Prüfreport" || target[1].String() != "!escaped" || !target[2].IsNil() {

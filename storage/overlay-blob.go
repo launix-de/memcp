@@ -391,15 +391,28 @@ func (s *OverlayBlob) resolveBlob(v scm.Scmer) scm.Scmer {
 // The base column is already fetched. Inline-only batches retain the old path;
 // external payloads synchronize once per batch, including scalar point reads.
 func (s *OverlayBlob) resolveBlobBatch(values []scm.Scmer, count, stride int) {
+	// Only compressed handles need a block decoder. In particular, scalar
+	// blob probes must not clear 64 KiB for an ordinary reference. Preparation
+	// keeps the scratch stack-owned and amortizes it across the complete batch.
+	for i := 0; i < count; i++ {
+		if values[i*stride].IsBufferString() {
+			var scratch scm.TextScratch
+			s.resolveBlobBatchPrepared(values, count, stride, &scratch)
+			return
+		}
+	}
+	s.resolveBlobBatchPrepared(values, count, stride, nil)
+}
+
+func (s *OverlayBlob) resolveBlobBatchPrepared(values []scm.Scmer, count, stride int, scratch *scm.TextScratch) {
 	var cursor scm.TextCursor
-	var scratch scm.TextScratch
 	for i := 0; i < count; i++ {
 		v := values[i*stride]
 		if !v.IsString() {
 			continue
 		}
 		if v.IsBufferString() {
-			if value, inline := s.inlineBufferValue(v, &cursor, &scratch); inline {
+			if value, inline := s.inlineBufferValue(v, &cursor, scratch); inline {
 				values[i*stride] = value
 				continue
 			}
@@ -413,7 +426,7 @@ func (s *OverlayBlob) resolveBlobBatch(values []scm.Scmer, count, stride int) {
 			// Bound cold-reader admission buffers and publication delay.
 			for i < count {
 				n := min(256, count-i)
-				s.resolveBlobRAMBatch(values[i*stride:], n, stride)
+				s.resolveBlobRAMBatch(values[i*stride:], n, stride, scratch)
 				i += n
 			}
 			return
@@ -422,7 +435,7 @@ func (s *OverlayBlob) resolveBlobBatch(values []scm.Scmer, count, stride int) {
 	}
 }
 
-func (s *OverlayBlob) resolveBlobRAMBatch(values []scm.Scmer, count, stride int) {
+func (s *OverlayBlob) resolveBlobRAMBatch(values []scm.Scmer, count, stride int, scratch *scm.TextScratch) {
 	c := s.ram
 	c.mu.Lock()
 	before := c.size()
@@ -431,11 +444,10 @@ func (s *OverlayBlob) resolveBlobRAMBatch(values []scm.Scmer, count, stride int)
 	limit := int64(-1) // lazy budget snapshot, only when a batch actually misses
 	c.lastUsed.Store(time.Now().UnixNano())
 	var cursor scm.TextCursor
-	var scratch scm.TextScratch
 	for i := 0; i < count; i++ {
 		v := values[i*stride]
 		if v.IsBufferString() {
-			if value, inline := s.inlineBufferValue(v, &cursor, &scratch); inline {
+			if value, inline := s.inlineBufferValue(v, &cursor, scratch); inline {
 				values[i*stride] = value
 				continue
 			}
