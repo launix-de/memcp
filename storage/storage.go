@@ -76,12 +76,23 @@ const (
 	ReadDecoded
 )
 
+// readOperatorOwned records an existing synchronous operator's responsibility
+// to release its prepared reader. It permits decoded-cache reuse without a
+// statement owner; the representation hint remains the low bits above.
+const readOperatorOwned ColumnReadHints = 4
+
 // ReleaseColumnReader releases an optional prepared-reader lease. Readers
 // bound to a statement are released by endQuery. Other consumers must defer
 // this helper and stop using both the reader and its borrowed values first.
 func ReleaseColumnReader(reader ColumnReader) {
 	if leased, ok := reader.(interface{ release() }); ok {
 		leased.release()
+	}
+}
+
+func releaseColumnReaders(readers []ColumnReader) {
+	for _, reader := range readers {
+		ReleaseColumnReader(reader)
 	}
 }
 

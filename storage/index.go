@@ -339,7 +339,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 					continue
 				}
 				cs := s.t.getColumnStorageRLocked(mc)
-				mapColReaders[j] = newCachedColumnReaderTx(cs, tx, true, ReadAuto)
+				mapColReaders[j] = newCachedColumnReaderTx(cs, tx, true, ReadAuto|readOperatorOwned)
 			}
 			mapFn := s.ColMapFn[i]
 			fn := scm.PrepareSerialProc(mapFn)
@@ -350,7 +350,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 			if !s.columnIsSorted(i) {
 				hints = ReadCompressed
 			}
-			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true, hints), source: cs}
+			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true, hints|readOperatorOwned), source: cs}
 		}
 	}
 	return getters
@@ -1894,6 +1894,16 @@ func (s *StorageIndex) bindColdRangeMatcher(tx *TxContext, bounds scanAccess, in
 		return nil
 	}
 	_, lastSorted, sortedMask, unboundedMask := s.boundKernel(bounds, cmpCols)
+	// This chosen cold-index path compares a main-generation extent. Prepare
+	// its actual comparison columns once; projection-only columns remain lazy.
+	// iterate owns these readers until the synchronous matcher has finished.
+	for col := 0; col < cmpCols; col++ {
+		if s.columnIsSorted(col) && cols[col].source != nil {
+			reader := newCachedColumnReaderTx(cols[col].source, tx, true, ReadDecoded)
+			ReleaseColumnReader(cols[col].raw)
+			cols[col].raw = reader
+		}
+	}
 	lowerInclusive, _ := effectiveBoundaryInclusiveness(bounds, indexBounds)
 	return []IndexRowMatcher{func(ids []uint32) []uint32 {
 		out := 0
@@ -1988,6 +1998,12 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBoundsValu
 	getterScratch.indexBounds.access = &getterScratch.access
 	indexBounds := &getterScratch.indexBounds
 	defer func() {
+		for _, getter := range cols {
+			ReleaseColumnReader(getter.raw)
+			for _, reader := range getter.mapCols {
+				ReleaseColumnReader(reader)
+			}
+		}
 		clear(getterScratch.getters[:])
 		getterScratch.access = scanAccess{}
 		getterScratch.indexBounds = scanIndexBounds{}

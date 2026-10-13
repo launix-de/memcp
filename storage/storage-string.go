@@ -801,9 +801,15 @@ func (s *StorageString) deserializeStringV2(f io.Reader) uint {
 func (s *StorageString) deserializeStringV3(f io.Reader) uint { return s.deserializeStringV1(f) }
 
 func (s *StorageString) GetCachedReader(hints ColumnReadHints) ColumnReader {
+	if hints == ReadCompressed && (s.textBuffer != nil || s.compressed) && !s.bufferHandles {
+		// Inner encodings cannot expose a compressed Scmer handle. An unbound
+		// reader owns one immutable decoding workspace instead of entering the
+		// shared dictionary manager in every row probe. It needs no cache lease.
+		return &decodedStringReader{storage: s, text: s.decodeDictionary()}
+	}
 	if hints != ReadCompressed && (s.textBuffer != nil || s.compressed) {
-		if cache := s.acquireDictionary(hints == ReadDecoded); cache != nil {
-			return &decodedStringReader{storage: s, cache: cache}
+		if cache := s.acquireDictionary(hints == ReadDecoded || !s.bufferHandles); cache != nil {
+			return &decodedStringReader{storage: s, cache: cache, text: cache.text}
 		}
 	}
 	return s.storageJITFunctions.reader(s)

@@ -105,16 +105,18 @@ func projectionColumnReadHints(col ColumnStorage, rows int, tx *TxContext) Colum
 // user-visible values (for example OverlayBlob must dereference its hash marker
 // back to the persisted blob payload after restart).
 func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked bool, hints ColumnReadHints) ColumnReader {
+	operatorOwned := hints&readOperatorOwned != 0
+	hints &^= readOperatorOwned
 	if provider, ok := col.(TxColumnReaderProvider); ok {
 		return provider.GetCachedReaderTx(tx, alreadyLocked, hints)
 	}
 	// Without a statement owner, automatic reads retain no shared decoded
 	// dictionary. Explicit ReadDecoded consumers own and release their reader.
-	if hints == ReadAuto && (tx == nil || !tx.queryActive.Load()) {
+	if !operatorOwned && hints == ReadAuto && (tx == nil || !tx.queryActive.Load()) {
 		hints = ReadCompressed
 	}
 	reader := col.GetCachedReader(hints)
-	if leased, ok := reader.(interface{ release() }); ok && tx != nil {
+	if leased, ok := reader.(interface{ release() }); ok && !operatorOwned && tx != nil && tx.queryActive.Load() {
 		if !tx.retainQueryReader(leased.release) {
 			leased.release()
 			return col.GetCachedReader(ReadCompressed)

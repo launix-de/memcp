@@ -268,7 +268,7 @@ func gunzipValue(gzipped string) scm.Scmer {
 }
 
 func (s *OverlayBlob) GetCachedReader(hints ColumnReadHints) ColumnReader {
-	if hints != ReadCompressed && s.Base != nil {
+	if s.Base != nil {
 		base := s.Base.GetCachedReader(hints)
 		if _, leased := base.(interface{ release() }); leased {
 			return &overlayBlobReader{overlay: s, base: base}

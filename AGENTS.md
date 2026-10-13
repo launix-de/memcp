@@ -671,6 +671,13 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   `ColumnReadHints` are resolved during reader preparation: bigram walks request
   `ReadCompressed`, repeated sort comparisons request `ReadDecoded`, and
   statement-bound `ReadAuto` only reuses an existing decoded generation.
+  Synchronous operators mark their reader ownership during preparation and
+  release all prepared readers on their existing completion/panic boundary;
+  explicit `ReadDecoded` is always operator-owned. A compressed inner encoding
+  without a compressed value handle uses one immutable reader-local decoding
+  workspace when no shared lease owner is available, never dictionary-manager
+  synchronization per row. Typed kernels consume the prepared reader's physical
+  tag, which does not determine SQL types.
   `TxContext.queryReaderReleases` is protected by its mutex and drained by
   panic-safe `endQuery`; non-statement consumers release their prepared reader
   explicitly. Usage timestamps change only during preparation. None of this

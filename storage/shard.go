@@ -2015,7 +2015,7 @@ func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, ma
 
 	for i, colName := range cols {
 		mainCol := t.getColumnStorageOrPanic(colName, alreadyLocked, currentTx)
-		mainReader := newCachedColumnReaderTx(mainCol, currentTx, false, ReadAuto)
+		mainReader := newCachedColumnReaderTx(mainCol, currentTx, false, ReadAuto|readOperatorOwned)
 		mr.mainCols[i] = mainCol
 		mr.mainBulkReaders[i] = mainReader
 		mr.mainValueFuncs[i] = compiledColumnGetValue(mainReader)
@@ -2360,7 +2360,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			continue
 		}
 		mainCol := mr.mainCols[i]
-		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx, false, ReadAuto)
+		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx, false, ReadAuto|readOperatorOwned)
 		mr.mainBulkReaders[i] = mainReader
 		mr.mainMultiFuncs[i] = compiledColumnGetValueMulti(mainReader)
 		colName := mr.colNames[i]
@@ -2931,6 +2931,9 @@ func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32,
 // batches — that must happen after all shard locks are released.
 // Call FlushTriggerBatch() separately after the scan completes.
 func (m *ShardMapReducer) Close() {
+	for _, reader := range m.mainBulkReaders {
+		ReleaseColumnReader(reader)
+	}
 	if m.hasUpdateCol && m.currentTx != nil && m.currentTx.getShardTx(m.shard) != nil {
 		m.currentTx.RegisterTouchedShard(m.shard)
 	}

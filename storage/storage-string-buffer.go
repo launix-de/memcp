@@ -277,6 +277,7 @@ func (s *StorageString) decodeDictionary() string {
 type decodedStringReader struct {
 	storage *StorageString
 	cache   *stringDictionaryCache
+	text    string // immutable reader-owned workspace or its retained cache payload
 }
 
 // Reader preparation can change the physical tag without changing the column
@@ -296,10 +297,11 @@ func (r *decodedStringReader) release() {
 		r.storage.releaseDictionary(r.cache)
 		r.cache = nil
 	}
+	r.text = ""
 }
 
 func (r *decodedStringReader) GetValue(row uint32) scm.Scmer {
-	text := r.cache.text
+	text := r.text
 	return r.storage.decodeAt(row, text, unsafe.Pointer(unsafe.StringData(text)))
 }
 
@@ -308,7 +310,7 @@ func (r *decodedStringReader) GetValueMulti(rows []uint32, target []scm.Scmer, s
 		stride = 1
 	}
 	atomic.AddUint64(&r.storage.readCount, uint64(len(rows)))
-	text := r.cache.text
+	text := r.text
 	base := unsafe.Pointer(unsafe.StringData(text))
 	for i, row := range rows {
 		target[i*stride] = r.storage.decodeAt(row, text, base)
@@ -320,7 +322,7 @@ func (r *decodedStringReader) GetValueRange(row, count uint32, target []scm.Scme
 		stride = 1
 	}
 	atomic.AddUint64(&r.storage.readCount, uint64(count))
-	text := r.cache.text
+	text := r.text
 	base := unsafe.Pointer(unsafe.StringData(text))
 	for i := uint32(0); i < count; i++ {
 		target[int(i)*stride] = r.storage.decodeAt(row+i, text, base)

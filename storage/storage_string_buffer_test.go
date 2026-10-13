@@ -593,6 +593,7 @@ func TestStorageStringAlwaysCompressed(t *testing.T) {
 		"raw":       {"report item one", "report item two"},
 		"hex":       {strings.Repeat("deadbeef", 100), strings.Repeat("cafebabe", 100)},
 		"base64":    {"YWJjZGVmZ2hpamtsbW5vcA==", "cXJzdHV2d3h5ejAxMjM0NQ=="},
+		"uuid":      {"550e8400-e29b-41d4-a716-446655440000", "6ba7b810-9dad-11d1-80b4-00c04fd430c8"},
 		"oversized": {strings.Repeat("report ", scm.StringBufferMaxStringBytes/7+1), "small report"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -618,6 +619,36 @@ func TestStorageStringAlwaysCompressed(t *testing.T) {
 			restored.Deserialize(bytes.NewReader(before.Bytes()[1:]))
 			if restored.dictionary != "" || restored.dictCache.Load() != nil {
 				t.Fatal("load retained decoded data")
+			}
+			// Prepare outside the row loop, then hold cache-management ownership.
+			// Specialized compressed formats must not acquire that mutex again
+			// when the operator consumes its already prepared representation.
+			compressed := restored.GetCachedReader(ReadCompressed)
+			done := make(chan []string, 1)
+			restored.dictMu.Lock()
+			go func() {
+				values := make([]scm.Scmer, len(inputs))
+				compressed.GetValueRange(0, uint32(len(inputs)), values, 1)
+				texts := make([]string, len(values))
+				for i, value := range values {
+					texts[i] = value.String()
+				}
+				done <- texts
+			}()
+			var texts []string
+			blocked := false
+			select {
+			case texts = <-done:
+			case <-time.After(time.Second):
+				blocked = true
+			}
+			restored.dictMu.Unlock()
+			if blocked {
+				texts = <-done
+			}
+			ReleaseColumnReader(compressed)
+			if blocked || !reflect.DeepEqual(texts, inputs) {
+				t.Fatal("prepared compressed reader blocked on management or changed values")
 			}
 			reader := restored.GetCachedReader(ReadDecoded)
 			for i, want := range inputs {
@@ -645,6 +676,40 @@ func TestStorageStringAlwaysCompressed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStringReaderOperatorOwnership(t *testing.T) {
+	inputs := []string{"report item one", "report item two"}
+	var source StorageString
+	source.prepare()
+	for i, value := range inputs {
+		source.scan(uint32(i), scm.NewString(value))
+	}
+	source.init(uint32(len(inputs)))
+	for i, value := range inputs {
+		source.build(uint32(i), scm.NewString(value))
+	}
+	source.finish()
+	tx := new(TxContext)
+	tx.beginQuery(nil, 1, "reader ownership")
+	reader := newCachedColumnReaderTx(&source, tx, false, ReadDecoded|readOperatorOwned)
+	tx.endQuery(1)
+	if got := reader.GetValue(0).String(); got != inputs[0] || source.EvictDictionary() != 0 {
+		t.Fatal("statement completion released an operator-owned reader")
+	}
+	ReleaseColumnReader(reader)
+	if source.EvictDictionary() <= 0 {
+		t.Fatal("operator completion did not release its dictionary")
+	}
+	// A parked transaction is also valid for explicit decoded preparation.
+	reader = newCachedColumnReaderTx(&source, tx, false, ReadDecoded|readOperatorOwned)
+	if got := reader.GetValue(1).String(); got != inputs[1] || source.EvictDictionary() != 0 {
+		t.Fatal("inactive transaction lost an explicitly prepared reader")
+	}
+	ReleaseColumnReader(reader)
+	if source.EvictDictionary() <= 0 {
+		t.Fatal("inactive transaction's operator did not release its dictionary")
 	}
 }
 
