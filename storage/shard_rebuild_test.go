@@ -2773,6 +2773,7 @@ func TestIndexComputedReadersRespectHeldShardLock(t *testing.T) {
 				getters = <-done
 				t.Error("index reader recursively acquired the held shard lock")
 			}
+			defer releaseIndexGetters(getters)
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
 			if got := getters[0].get(0); got.Int() != 14 {
@@ -2831,6 +2832,11 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 				upper: scm.NewString("row-00000001"), upperInclusive: true,
 			}})
 			shard.ensureScanAccessColumns(access, false, nil)
+			// The manual cleanup below exercises CacheManager-owned ledger
+			// internals. Pause/resume its existing worker, as other ownership
+			// tests do, so this test is the sole eviction caller.
+			GlobalCache.Stop()
+			defer resumeOwnershipTestCache()
 			var freed [numEvictableTypes]int64
 			if cleanup(shard, &freed) {
 				t.Fatal("eviction detached a prepared column while a read was active")
@@ -2840,6 +2846,7 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 				defer shard.mu.RUnlock()
 				index := &StorageIndex{t: shard, Cols: []string{"payload"}}
 				getters := index.buildGetters(nil, nil)
+				defer releaseIndexGetters(getters)
 				if got := getters[0].get(0).String(); got != "row-00000001" {
 					t.Fatalf("prepared index value = %q", got)
 				}

@@ -4267,8 +4267,11 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 					}
 				}
 				if allFound {
-					getters := idx.buildGetters(nil, nil)
-					idx.buildIndex(&idx.baseState, getters, nil)
+					func() {
+						getters := idx.buildGetters(nil, nil)
+						defer releaseIndexGetters(getters)
+						idx.buildIndex(&idx.baseState, getters, nil)
+					}()
 					GlobalCache.AddItem(idx, int64(idx.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
 				}
 			}

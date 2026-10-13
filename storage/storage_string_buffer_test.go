@@ -919,6 +919,11 @@ func TestStorageStringSpecialBoundaryDoesNotPinCache(t *testing.T) {
 	} {
 		s := buildStringColumn(inputs)
 		s.CompressDictionary()
+		// Boundary construction is not cache admission. Retain an explicit
+		// decoded owner to verify that the boundary owns detached bytes even
+		// when an evictable dictionary generation is already available.
+		warm := s.GetCachedReader(ReadDecoded)
+		defer ReleaseColumnReader(warm)
 		key := (colGetter{source: s}).persistentValue(1, nil)
 		if key.GetTag() != scm.TagString || key.String() != inputs[1] {
 			t.Fatal("wrong owned boundary")
@@ -932,6 +937,7 @@ func TestStorageStringSpecialBoundaryDoesNotPinCache(t *testing.T) {
 		if ptr >= base && ptr < base+uintptr(len(cache.text)) {
 			t.Fatal("boundary still borrows cache")
 		}
+		ReleaseColumnReader(warm)
 		if s.EvictDictionary() <= 0 || key.String() != inputs[1] {
 			t.Fatal("boundary failed after eviction")
 		}
@@ -1223,16 +1229,29 @@ func TestComputedReaderSetupFailureReleasesEarlierChildren(t *testing.T) {
 	shard.columns["second"] = &failingPreparedTextStorage{buildStorageString([]scm.Scmer{scm.NewString("second")})}
 	shard.mu.Unlock()
 	proxy := &StorageComputeProxy{shard: shard, inputCols: []string{"first", "second"}}
-	func() {
-		defer func() {
-			if recovered := recover(); recovered != "second prepared input failed" {
-				t.Fatalf("wrong setup failure: %v", recovered)
-			}
+	index := &StorageIndex{t: shard, Cols: []string{".mapped"}, ColMapCols: [][]string{{"first", "second"}},
+		ColMapFn: []scm.Scmer{scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })}}
+	for _, prepare := range []func(){
+		func() { newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned) },
+		func() {
+			shard.mu.RLock()
+			defer shard.mu.RUnlock()
+			index.buildGetters(nil, nil)
+		},
+	} {
+		warm := first.GetCachedReader(ReadDecoded)
+		ReleaseColumnReader(warm)
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != "second prepared input failed" {
+					t.Fatalf("wrong setup failure: %v", recovered)
+				}
+			}()
+			prepare()
 		}()
-		newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned)
-	}()
-	if first.EvictDictionary() <= 0 {
-		t.Fatal("later input setup panic leaked an earlier operator-owned leaf")
+		if first.EvictDictionary() <= 0 {
+			t.Fatal("later input setup panic leaked an earlier operator-owned leaf")
+		}
 	}
 }
 

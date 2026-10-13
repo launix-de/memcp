@@ -315,9 +315,19 @@ func (s *StorageIndex) usesNaturalAscendingOrder(col int) bool {
 	}
 }
 
+// Index getters own their prepared readers until their native caller finishes.
+// Release outside row loops, including warming/rebuild and failed preparation.
+func releaseIndexGetters(getters []colGetter) {
+	for _, getter := range getters {
+		ReleaseColumnReader(getter.raw)
+		releaseColumnReaders(getter.mapCols)
+	}
+}
+
 // buildGetters returns per-column value getters for this index, reading from the
 // shard under its currently-held read or write lock. Recursive computed
-// readers must use that same lock instead of entering it again.
+// readers must use that same lock instead of entering it again. The caller
+// releases all returned readers through releaseIndexGetters.
 func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGetter {
 	var getters []colGetter
 	if cap(storage) >= len(s.Cols) {
@@ -326,6 +336,12 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 	} else {
 		getters = make([]colGetter, len(s.Cols))
 	}
+	complete := false
+	defer func() {
+		if !complete {
+			releaseIndexGetters(getters)
+		}
+	}()
 	for i, col := range s.Cols {
 		if !s.columnIsSorted(i) && isScanPseudoColName(col) {
 			continue
@@ -333,6 +349,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 		if len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil() {
 			// computed column: read mapCols and apply mapFn
 			mapColReaders := make([]ColumnReader, len(s.ColMapCols[i]))
+			getters[i].mapCols = mapColReaders
 			for j, mc := range s.ColMapCols[i] {
 				if isScanPseudoColName(mc) {
 					mapColReaders[j] = ColumnReaderFunc(func(uint32) scm.Scmer { return scm.NewNil() })
@@ -353,6 +370,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true, hints|readOperatorOwned), source: cs}
 		}
 	}
+	complete = true
 	return getters
 }
 
@@ -1122,7 +1140,11 @@ func rebuildRepartitionIndexes(candidates []*StorageIndex, shard *storageShard) 
 		if !index.hasAvailableColumnsRLocked() || indexHasComputedCol(shard, index) {
 			continue
 		}
-		index.buildIndex(&index.baseState, index.buildGetters(nil, nil), nil)
+		func() {
+			getters := index.buildGetters(nil, nil)
+			defer releaseIndexGetters(getters)
+			index.buildIndex(&index.baseState, getters, nil)
+		}()
 		warmed++
 	}
 }
@@ -1998,12 +2020,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBoundsValu
 	getterScratch.indexBounds.access = &getterScratch.access
 	indexBounds := &getterScratch.indexBounds
 	defer func() {
-		for _, getter := range cols {
-			ReleaseColumnReader(getter.raw)
-			for _, reader := range getter.mapCols {
-				ReleaseColumnReader(reader)
-			}
-		}
+		releaseIndexGetters(cols)
 		clear(getterScratch.getters[:])
 		getterScratch.access = scanAccess{}
 		getterScratch.indexBounds = scanIndexBounds{}
