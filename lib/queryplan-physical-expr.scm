@@ -8039,7 +8039,7 @@ state through an assoc and one-element payload lists adds no semantics. */
 		(list key_name (list agg_expr agg_reduce agg_neutral agg_finalize))
 		_ nil)))
 
-(define build_ungrouped_aggregate_insert_plan (lambda (schema grouptbl key_name aggregate_col ag state_plan computed)
+(define build_ungrouped_aggregate_insert_plan (lambda (schema grouptbl key_name aggregate_col ag state_plan computed write_tx)
 	(begin
 		(define value_cols (list aggregate_col))
 		(list
@@ -8051,7 +8051,7 @@ state through an assoc and one-element payload lists adds no semantics. */
 						(aggregate_finalize_expr ag (quote aggregate_state))))
 					(group_upsert_collision_cols value_cols computed)
 					(group_upsert_collision_lambda value_cols computed)
-					true nil (physical_query_tx_symbol)))
+					true nil write_tx))
 			state_plan))))
 
 (define base_group_membership_parts (lambda (src condition facts)
@@ -8138,7 +8138,7 @@ query transaction; DML-trigger replacement plans pass it through explicitly. */
 				(build_ungrouped_aggregate_insert_plan schema grouptbl key_name aggregate_col ag
 					(build_base_ungrouped_aggregate_state_plan
 						schema tbl alias source_expr effective_condition ag)
-					true))))
+					true nil))))
 		(if (nil? membership_expr)
 			plan
 			(list
@@ -8607,7 +8607,7 @@ invent a group; global aggregates retain the existing seed-empty contract. */
 				(build_ungrouped_aggregate_insert_plan
 					(qb_schema input) grouptbl (car scalar_parts) (car aggregate_cols) ag
 					(build_query_ungrouped_aggregate_state_plan input ag)
-					false))))))
+					false (physical_query_tx_symbol)))))))
 
 /* A unique, prepared group lookup is a scalar column of its driving relation.
 Keep the logical LEFT JOIN intact until this physical alternative is selected:
