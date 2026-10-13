@@ -7607,7 +7607,7 @@ every group row and its canonical identity stays independent of bound values. */
 		(list (quote list) (list (quote list) 1))
 		(quoted_runtime_list '())
 		(list (quote lambda) '() true)
-		true)))
+		true nil (physical_query_tx_symbol))))
 
 (define build_group_session_key_insert_plan (lambda (schema grouptbl key_names keys)
 	(list (quote insert)
@@ -7616,7 +7616,7 @@ every group row and its canonical identity stays independent of bound values. */
 		(list (quote list) (cons (quote list) keys))
 		(quoted_runtime_list '())
 		(list (quote lambda) '() true)
-		true)))
+		true nil (physical_query_tx_symbol))))
 
 (define grouped_state_merge_expr (lambda (merge_payload)
 	(list (quote lambda) (list (quote acc) (quote grouped))
@@ -7631,7 +7631,7 @@ every group row and its canonical identity stays independent of bound values. */
 		(define combine_grouped (grouped_state_merge_expr keep_old))
 		(list
 			(list (quote lambda) (list (quote grouped))
-				(group_insert_batches_expr schema grouptbl key_names '() false (quote grouped)))
+				(group_insert_batches_expr schema grouptbl key_names '() false (quote grouped) (physical_query_tx_symbol)))
 			(lower_query_block_as_dataset_reduce
 				input
 				key_fields
@@ -7709,7 +7709,7 @@ every group row and its canonical identity stays independent of bound values. */
 		(define keep_first (list (quote lambda) (list (quote old) (quote new)) (quote old)))
 		(list
 			(list (quote lambda) (list (quote grouped))
-				(group_insert_finish_expr schema grouptbl keys key_names agg_cols true))
+				(group_insert_finish_expr schema grouptbl keys key_names agg_cols true (physical_query_tx_symbol)))
 			(compile_scan_plan (quote scan_order)
 				(physical_query_tx_symbol)
 				(list (quote table) schema tbl)
@@ -8051,7 +8051,7 @@ state through an assoc and one-element payload lists adds no semantics. */
 						(aggregate_finalize_expr ag (quote aggregate_state))))
 					(group_upsert_collision_cols value_cols computed)
 					(group_upsert_collision_lambda value_cols computed)
-					true))
+					true nil (physical_query_tx_symbol)))
 			state_plan))))
 
 (define base_group_membership_parts (lambda (src condition facts)
@@ -8093,6 +8093,10 @@ state through an assoc and one-element payload lists adds no semantics. */
 				(strip_driver_membership_for_source src condition (if (nil? table_expr) nil membership))
 				(strip_driver_membership_formula_terms condition (car formula)))))))
 
+/* Canonical cache initialization owns its target writes independently of the
+consumer transaction: a later projection error must not roll back initialized
+cache rows while leaving the shared cache marked ready. Source scans keep the
+query transaction; DML-trigger replacement plans pass it through explicitly. */
 (define build_base_group_into_plan (lambda (schema tbl alias src grouptbl keys key_names condition ags facts)
 	(begin
 		(define membership_parts (base_group_membership_parts src condition facts))
@@ -8124,7 +8128,7 @@ state through an assoc and one-element payload lists adds no semantics. */
 						(list
 							(list (quote lambda) (list (quote grouped))
 								(group_insert_finish_expr schema grouptbl keys key_names
-									(map ags (lambda (ag) (aggregate_col_name_using src ag))) true))
+									(map ags (lambda (ag) (aggregate_col_name_using src ag))) true nil))
 							(finalize_query_grouped_assoc_expr ags grouped_expr)))
 					grouped_scan))
 			(begin
@@ -8337,14 +8341,14 @@ slot per syntactically repeated COUNT. */
 						(merge (map (produceN (count value_cols)) (lambda (i)
 							(list (nth value_cols i) (nth new_params i)))))))))))))
 
-(define group_cleanup_missing_keys_plan (lambda (schema grouptbl keys key_names)
+(define group_cleanup_missing_keys_plan (lambda (schema grouptbl keys key_names write_tx)
 	(begin
 		(define key_symbols (map key_names (lambda (col) (symbol col))))
 		(define key_expr (runtime_cons_list_expr key_symbols))
 		(define bound_indices (filter (produceN (count keys))
 			(lambda (i) (query_session_read? (nth keys i)))))
 		(compile_scan_plan (quote scan)
-			(physical_query_tx_symbol)
+			write_tx
 			(list (quote table) schema grouptbl)
 			(quoted_runtime_list (map bound_indices (lambda (i) (nth key_names i))))
 			(list (quote lambda) (map bound_indices (lambda (i) (nth key_symbols i)))
@@ -8365,11 +8369,11 @@ slot per syntactically repeated COUNT. */
 
 (define group_insert_batch_size 4096)
 
-(define group_insert_batches (lambda (target columns collision_cols collision_fn grouped)
+(define group_insert_batches (lambda (target columns collision_cols collision_fn grouped tx)
 	((lambda (rows)
 		(if (empty_list? rows)
 			0
-			(insert target columns rows collision_cols collision_fn true)))
+			(insert target columns rows collision_cols collision_fn true nil tx)))
 		(reduce_assoc grouped
 			(lambda (rows key payload)
 				(begin
@@ -8378,7 +8382,7 @@ slot per syntactically repeated COUNT. */
 					(define batch (append rows (merge (list key payload))))
 					(if (>= (count batch) group_insert_batch_size)
 						(begin
-							(insert target columns batch collision_cols collision_fn true)
+							(insert target columns batch collision_cols collision_fn true nil tx)
 							(list))
 						batch)))
 			(list)))))
@@ -8387,13 +8391,13 @@ slot per syntactically repeated COUNT. */
 use their proxy. Install the already reduced payload through the existing
 computed-column setters before rebuilding the key table. Otherwise the first
 consumer recomputes every group with a separate scan of the source. */
-(define group_seed_computed_values_plan (lambda (schema grouptbl key_names value_cols grouped_expr)
+(define group_seed_computed_values_plan (lambda (schema grouptbl key_names value_cols grouped_expr write_tx)
 	(begin
 		(define key_symbols (map key_names symbol))
 		(define setters (map (produceN (count value_cols)) (lambda (i)
 			(symbol (concat "__seed_group_value_" i)))))
 		(compile_scan_plan (quote scan)
-			(physical_query_tx_symbol)
+			write_tx
 			(list (quote table) schema grouptbl)
 			(quoted_runtime_list key_names)
 			(list (quote lambda) key_symbols
@@ -8410,23 +8414,23 @@ consumer recomputes every group with a separate scan of the source. */
 					(list (quote get_assoc) grouped_expr (runtime_cons_list_expr key_symbols))))
 			nil nil false))))
 
-(define group_insert_batches_expr (lambda (schema grouptbl key_names value_cols computed_values grouped_expr)
+(define group_insert_batches_expr (lambda (schema grouptbl key_names value_cols computed_values grouped_expr write_tx)
 	(begin
 		(define insert_plan (list (quote group_insert_batches)
 			(list (quote table) schema grouptbl)
 			(cons (quote list) (merge (list key_names value_cols)))
 			(group_upsert_collision_cols value_cols computed_values)
 			(group_upsert_collision_lambda value_cols computed_values)
-			grouped_expr))
+			grouped_expr write_tx))
 		(if (and computed_values (not (empty_list? value_cols)))
 			(list (quote !begin) insert_plan
-				(group_seed_computed_values_plan schema grouptbl key_names value_cols grouped_expr))
+				(group_seed_computed_values_plan schema grouptbl key_names value_cols grouped_expr write_tx))
 			insert_plan))))
 
-(define group_insert_finish_expr (lambda (schema grouptbl keys key_names value_cols computed_values)
+(define group_insert_finish_expr (lambda (schema grouptbl keys key_names value_cols computed_values write_tx)
 	(list (quote !begin)
-		(group_cleanup_missing_keys_plan schema grouptbl keys key_names)
-		(group_insert_batches_expr schema grouptbl key_names value_cols computed_values (quote grouped)))))
+		(group_cleanup_missing_keys_plan schema grouptbl keys key_names write_tx)
+		(group_insert_batches_expr schema grouptbl key_names value_cols computed_values (quote grouped) write_tx))))
 
 /* Eager preparation may rewrite nested stage-output sources and aggregate
 expressions. Persistent column identity was selected from the original logical
@@ -8733,7 +8737,7 @@ canonical projection, using the existing cache-admission accounting. */
 								(quoted_runtime_list (merge (list key_names aggregate_cols)))
 								(list (quote list) (cons (quote list) (cons 1 aggregate_values)))
 								(group_upsert_collision_cols aggregate_cols false)
-								(group_upsert_collision_lambda aggregate_cols false) true))))))
+								(group_upsert_collision_lambda aggregate_cols false) true nil (physical_query_tx_symbol)))))))
 						(define driver_table (source_table_expr driver))
 						(define costs (scalar_group_projection_costs (table (source_schema driver) (source_relation driver))
 							matching_rows (count columns) (count ags)))
@@ -8774,7 +8778,7 @@ canonical projection, using the existing cache-admission accounting. */
 		(define direct_plan (if (nil? ungrouped_plan)
 			(list
 				(list (quote lambda) (list (quote grouped))
-					(group_insert_finish_expr (qb_schema input) grouptbl keys key_names aggregate_cols false))
+					(group_insert_finish_expr (qb_schema input) grouptbl keys key_names aggregate_cols false (physical_query_tx_symbol)))
 				(build_query_grouped_assoc_plan input keys key_names ags false))
 			ungrouped_plan))
 		(build_scalar_group_projection_plan input grouptbl keys key_names ags aggregate_cols direct_plan planning_session))))
@@ -9028,7 +9032,7 @@ once and every base-only leaf remains a vectorized domain scan. */
 		(define merge_payload (list (quote lambda) (list (quote old) (quote new))
 			(aggregate_payload_merge_expr ags 0)))
 		(define finish_expr (group_insert_finish_expr schema grouptbl keys key_names
-			(map ags (lambda (ag) (aggregate_col_name_using naming_input ag))) false))
+			(map ags (lambda (ag) (aggregate_col_name_using naming_input ag))) false (physical_query_tx_symbol)))
 		(define row_mapper (list (quote lambda)
 			(merge (list key_symbols value_symbols))
 			(runtime_cons_list_expr (list key_expr payload_expr))))
@@ -9073,7 +9077,7 @@ once and every base-only leaf remains a vectorized domain scan. */
 		(define combine_grouped (grouped_state_merge_expr merge_payload))
 		(define scan_plan (list
 			(list (quote lambda) (list (quote grouped))
-				(group_insert_finish_expr schema grouptbl keys key_names (list value_col count_col) false))
+				(group_insert_finish_expr schema grouptbl keys key_names (list value_col count_col) false (physical_query_tx_symbol)))
 			(lower_query_block_as_dataset_reduce
 				prepared_input
 				row_fields

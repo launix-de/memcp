@@ -10888,7 +10888,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(list (quote list) (cons (quote list) values))
 		(quoted_runtime_list '())
 		(list (quote lambda) '() true)
-		true)))
+		true nil (physical_query_tx_symbol))))
 
 (define prejoin_initial_fill_plan (lambda (block table_name)
 	(begin

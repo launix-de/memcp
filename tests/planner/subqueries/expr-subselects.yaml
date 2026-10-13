@@ -6,6 +6,9 @@ metadata:
   description: "IN/EXISTS and scalar subselects supported"
 
 setup:
+  - sql: "DROP TABLE IF EXISTS es_cache_tx"
+  - sql: "CREATE TABLE es_cache_tx (id INT PRIMARY KEY, bucket INT, amount INT, state VARCHAR(16)) ENGINE=memory"
+  - sql: "INSERT INTO es_cache_tx VALUES (1,0,10,'original'),(2,1,20,'original'),(3,0,30,'original')"
   - sql: "DROP TABLE IF EXISTS t1"
   - sql: "DROP TABLE IF EXISTS t2"
   - sql: "DROP TABLE IF EXISTS t3"
@@ -50,6 +53,56 @@ setup:
   - sql: "INSERT INTO userconfig (ID, Tables_Doc_defaultDoctype) VALUES (1, 7)"
 
 test_cases:
+  - name: "Cold group initialization keeps transaction-local rows out of other sessions"
+    steps:
+      - session_id: "es_cache_isolation_writer"
+        sql: "START ACID TRANSACTION"
+      - session_id: "es_cache_isolation_writer"
+        sql: "UPDATE es_cache_tx SET amount=777,state='pending' WHERE id=1"
+        expect: {affected_rows: 1}
+      - session_id: "es_cache_isolation_writer"
+        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx WHERE state='pending' GROUP BY bucket"
+        expect: {rows: 1, data: [{bucket: 0, total: 777}]}
+      - session_id: "es_cache_isolation_reader"
+        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx WHERE state='pending' GROUP BY bucket"
+        expect: {rows: 0}
+      - session_id: "es_cache_isolation_writer"
+        sql: "SELECT (SELECT SUM(i.amount) FROM es_cache_tx i WHERE i.bucket=e.bucket AND i.state='pending') AS total FROM es_cache_tx e WHERE e.id=1"
+        expect: {rows: 1, data: [{total: 777}]}
+      - session_id: "es_cache_isolation_reader"
+        sql: "SELECT (SELECT SUM(i.amount) FROM es_cache_tx i WHERE i.bucket=e.bucket AND i.state='pending') AS total FROM es_cache_tx e WHERE e.id=1"
+        expect: {rows: 1, data: [{total: null}]}
+      - session_id: "es_cache_isolation_writer"
+        sql: "ROLLBACK"
+      - session_id: "es_cache_isolation_reader"
+        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx WHERE state='pending' GROUP BY bucket"
+        expect: {rows: 0}
+      - session_id: "es_cache_isolation_reader"
+        sql: "SELECT (SELECT SUM(i.amount) FROM es_cache_tx i WHERE i.bucket=e.bucket AND i.state='pending') AS total FROM es_cache_tx e WHERE e.id=1"
+        expect: {rows: 1, data: [{total: null}]}
+
+  - name: "Warm group cache preserves other-session visibility through rollback"
+    steps:
+      - session_id: "es_cache_isolation_reader"
+        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx GROUP BY bucket ORDER BY bucket"
+        expect: {rows: 2, data: [{bucket: 0, total: 40}, {bucket: 1, total: 20}]}
+      - session_id: "es_cache_isolation_writer"
+        sql: "START ACID TRANSACTION"
+      - session_id: "es_cache_isolation_writer"
+        sql: "UPDATE es_cache_tx SET amount=777 WHERE id=1"
+        expect: {affected_rows: 1}
+      - session_id: "es_cache_isolation_writer"
+        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx GROUP BY bucket ORDER BY bucket"
+        expect: {rows: 2, data: [{bucket: 0, total: 807}, {bucket: 1, total: 20}]}
+      - session_id: "es_cache_isolation_reader"
+        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx GROUP BY bucket ORDER BY bucket"
+        expect: {rows: 2, data: [{bucket: 0, total: 40}, {bucket: 1, total: 20}]}
+      - session_id: "es_cache_isolation_writer"
+        sql: "ROLLBACK"
+      - session_id: "es_cache_isolation_reader"
+        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx GROUP BY bucket ORDER BY bucket"
+        expect: {rows: 2, data: [{bucket: 0, total: 40}, {bucket: 1, total: 20}]}
+
   - name: "IN subselect simple"
     sql: "SELECT 1 WHERE 1 IN (SELECT 1)"
     expect:
@@ -626,6 +679,11 @@ test_cases:
     expect:
       error: true
 
+  - name: "Repeated scalar cardinality error does not leave an empty initialized cache"
+    sql: "SELECT (SELECT val FROM t2 WHERE owner = 2) AS v"
+    expect:
+      error: true
+
   - name: "Correlated scalar subselect multiple rows errors"
     sql: "SELECT (SELECT val FROM t2 WHERE owner = t1.id) AS v FROM (SELECT 2 AS id) AS t1"
     expect:
@@ -665,6 +723,7 @@ test_cases:
         - id: 4
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS es_cache_tx"
   - sql: "DROP TABLE IF EXISTS userconfig"
   - sql: "DROP TABLE IF EXISTS login"
   - sql: "DROP TABLE IF EXISTS es_fop_files"

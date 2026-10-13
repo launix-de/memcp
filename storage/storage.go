@@ -3470,6 +3470,7 @@ func Init(en scm.Env) {
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{}), scm.NewBool(true)}),
 					scm.NewBool(true),
+					scm.NewNil(), scm.NewSymbol("tx"),
 				})
 			}
 
