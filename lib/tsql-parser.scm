@@ -238,6 +238,14 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 			(error "numeric character conversion overflow") true)
 		(sql_info (list (quote tsql_cast_text) formula length national)
 			(if national "NVARCHAR" "VARCHAR") (sql_info_collation info)))) value))))
+/* The default character contract is NCHAR(1), without a supplementary-character
+collation. SQL conversion and range decisions stay here; the runtime operator
+only encodes Unicode scalars. Isolated surrogate code units are unsupported. */
+(define tsql_nchar (lambda (value) (if (nil? value) nil (begin
+	(define code (tsql_cast_integer value -2147483648 2147483647))
+	(if (or (< code 0) (> code 65535)) nil (unicode_char code))))))
+(define tsql_nchar_expr (lambda (value)
+	(list (quote sql_type_expr) (list tsql_nchar value) "NCHAR" nil)))
 /* Export-style day/month/year spelling is a frontend concern. Parse into Unix
 seconds with the existing date primitives; no temporal runtime type is added.
 Two-digit years use the default 1950..2049 window. Fractional precision and the
@@ -800,6 +808,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		(parser '((atom "COALESCE" true) "(" (define args (* tsql_expression ",")) ")") (cons (quote coalesceNil) args))
 
 		(parser '((atom "NULLIF" true) "(" (define a tsql_expression) "," (define b tsql_expression) ")") '((quote if) '((quote equal??) a b) nil a))
+		(parser '((atom "NCHAR" true) "(" (define value tsql_expression) ")") (tsql_nchar_expr value))
 
 		(parser (atom "NULL" true) (sql_null_literal))
 		(parser (atom "CURRENT_TIMESTAMP" true) (list (quote sql_type_expr) (list (quote now)) "DATETIME" nil))

@@ -476,6 +476,23 @@ func TransformFromJSON(a_ any) Scmer {
 }
 
 func init_strings() {
+	// Encode one scalar value independently of any frontend character type or
+	// collation. Frontends select their own ranges before calling this operator.
+	Declare(&Globalenv, &Declaration{
+		Name: "unicode_char",
+		Fn: func(a ...Scmer) Scmer {
+			code := a[0].Int()
+			if code < 0 || code > utf8.MaxRune || code >= 0xd800 && code <= 0xdfff {
+				panic("invalid Unicode scalar value")
+			}
+			return NewString(string(rune(code)))
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "encodes one Unicode scalar value as UTF-8",
+			Params: []*TypeDescriptor{{Kind: "int", Label: "code", Description: "Unicode scalar value"}},
+			Return: &TypeDescriptor{Kind: "string"},
+			Const:  true,
+		},
+	})
 	initExpressionMetadata()
 	Declare(&Globalenv, &Declaration{
 		Name: "regexp_matches",

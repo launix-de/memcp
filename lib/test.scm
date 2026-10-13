@@ -27,6 +27,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)))
 
 	/* equal? */
+	(assert (unicode_char 65) "A" "encode ASCII scalar")
+	(assert (unicode_char 8364) "€" "encode three-byte UTF-8 scalar")
+	(assert (unicode_char 128024) "🐘" "encode supplementary UTF-8 scalar")
+	(define unicode_scalar_input (lambda (code) code))
+	(assert (try (lambda () (unicode_char (unicode_scalar_input -1))) (lambda (err) "invalid")) "invalid" "reject negative Unicode scalar")
+	(assert (try (lambda () (unicode_char (unicode_scalar_input 55296))) (lambda (err) "invalid")) "invalid" "reject isolated Unicode surrogate")
+	(assert (try (lambda () (unicode_char (unicode_scalar_input 1114112))) (lambda (err) "invalid")) "invalid" "reject scalar beyond Unicode range")
 	(assert (equal? "a" "a") true "equality check")
 	(assert (equal? "a" "b") false "inequality check")
 	/* equal? cross-type coverage (compare.go:Equal) */
