@@ -387,9 +387,11 @@ func (s *OverlayBlob) resolveBlob(v scm.Scmer) scm.Scmer {
 	if v.IsBufferString() {
 		var cursor scm.TextCursor
 		var scratch scm.TextScratch
-		if value, inline := s.inlineBufferValue(v, &cursor, &scratch); inline {
+		value, inline := s.inlineBufferValue(v, &cursor, &scratch)
+		if inline {
 			return value
 		}
+		v = value
 	}
 	if !v.IsString() || v.String() == "" || v.String()[0] != '!' {
 		return v
@@ -424,10 +426,12 @@ func (s *OverlayBlob) resolveBlobBatchPrepared(values []scm.Scmer, count, stride
 			continue
 		}
 		if v.IsBufferString() {
-			if value, inline := s.inlineBufferValue(v, &cursor, scratch); inline {
-				values[i*stride] = value
+			value, inline := s.inlineBufferValue(v, &cursor, scratch)
+			values[i*stride] = value
+			if inline {
 				continue
 			}
+			v = value
 		}
 		raw := v.String()
 		if raw == "" || raw[0] != '!' {
@@ -459,10 +463,12 @@ func (s *OverlayBlob) resolveBlobRAMBatch(values []scm.Scmer, count, stride int,
 	for i := 0; i < count; i++ {
 		v := values[i*stride]
 		if v.IsBufferString() {
-			if value, inline := s.inlineBufferValue(v, &cursor, scratch); inline {
-				values[i*stride] = value
+			value, inline := s.inlineBufferValue(v, &cursor, scratch)
+			values[i*stride] = value
+			if inline {
 				continue
 			}
+			v = value
 		}
 		if v.IsString() {
 			hash, reference, ambiguous := s.blobReference(v.String())
@@ -482,9 +488,11 @@ func (s *OverlayBlob) resolveBlobUncached(v scm.Scmer) scm.Scmer {
 	if v.IsBufferString() {
 		var cursor scm.TextCursor
 		var scratch scm.TextScratch
-		if value, inline := s.inlineBufferValue(v, &cursor, &scratch); inline {
+		value, inline := s.inlineBufferValue(v, &cursor, &scratch)
+		if inline {
 			return value
 		}
+		v = value
 	}
 	raw := v.String()
 	if raw == "" || raw[0] != '!' {
@@ -518,7 +526,13 @@ func (s *OverlayBlob) inlineBufferValue(v scm.Scmer, cursor *scm.TextCursor, scr
 	if n == 2 && prefix[1] == '!' && (!s.legacy || scm.BufferStringLength(v) != 33) {
 		return scm.BufferSlice(v, 1, scm.BufferStringLength(v)), true
 	}
-	return scm.NewNil(), false
+	// A reference candidate must be read by the existing blob resolver. Keep
+	// its owned bytes across that scalar/batch handoff, reusing the block that
+	// the prefix probe already decoded. Inline payloads above stay lazy.
+	text := make([]byte, scm.BufferStringLength(v))
+	cursor.Reset(v)
+	cursor.Read(text, scratch)
+	return scm.NewString(unsafe.String(unsafe.SliceData(text), len(text))), false
 }
 
 func (s *OverlayBlob) prepare() {

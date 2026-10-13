@@ -901,3 +901,41 @@ func TestBlobRefcountPanicReleasesRowsLock(t *testing.T) {
 	db.blobRefState().locks[blobRefStripe(hash)].mu.Unlock()
 	db.IncrBlobRefcount(strings.Repeat("cd", 32))
 }
+
+// References crossing codec blocks retain their bytes when the next row reuses
+// the cursor scratch; inline literals continue to expose their lazy handle.
+func TestOverlayCompressedReferenceOwnsDecodedBytes(t *testing.T) {
+	payload := blobBangPayload()
+	hash := sha256.Sum256([]byte(payload))
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	writer.Write([]byte(payload))
+	writer.Close()
+	for _, legacy := range []bool{false, true} {
+		overlay := OverlayBlob{legacy: legacy, values: map[[32]byte]string{hash: compressed.String()}}
+		raw := "!b" + string(hash[:])
+		if legacy {
+			raw = "!" + string(hash[:])
+		}
+		buffer, offsets := scm.BuildCompressedStringBuffer([]string{
+			strings.Repeat("p", scm.StringBufferBlockBytes-8), raw, "!!literal",
+		})
+		var cursor scm.TextCursor
+		var scratch scm.TextScratch
+		value, inline := overlay.inlineBufferValue(scm.NewBufferString(buffer, offsets[1], len(raw)), &cursor, &scratch)
+		if inline || value.IsBufferString() || value.String() != raw {
+			t.Fatal("reference handoff lost its owned bytes")
+		}
+		other, _ := scm.BuildCompressedStringBuffer([]string{strings.Repeat("q", scm.StringBufferBlockBytes)})
+		cursor.Reset(scm.NewBufferString(other, 0, scm.StringBufferBlockBytes))
+		var prefix [2]byte
+		cursor.Read(prefix[:], &scratch)
+		if got := overlay.resolveBlob(value); got.String() != payload {
+			t.Fatal("scratch reuse changed the resolved reference")
+		}
+		literal, inline := overlay.inlineBufferValue(scm.NewBufferString(buffer, offsets[2], len("!!literal")), &cursor, &scratch)
+		if !inline || !literal.IsBufferString() || literal.String() != "!literal" {
+			t.Fatal("reference preparation eagerly copied an escaped inline literal")
+		}
+	}
+}
