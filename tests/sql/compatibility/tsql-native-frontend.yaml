@@ -5,6 +5,9 @@ metadata:
   syntax: tsql
   description: T-SQL grammar reuses native DDL, defaults and query planning
 setup:
+  - sql: DROP TABLE IF EXISTS tsql_unary_contract
+  - sql: CREATE TABLE tsql_unary_contract(id INT PRIMARY KEY,value TINYINT)
+  - sql: INSERT INTO tsql_unary_contract VALUES (1,255)
   - sql: DROP TABLE IF EXISTS tsql_add_contracts
   - sql: DROP TABLE IF EXISTS tsql_add_copy
   - sql: CREATE TABLE tsql_add_contracts (id INT PRIMARY KEY,a INT,b SMALLINT,txt NVARCHAR(20),suffix VARCHAR(20))
@@ -23,6 +26,12 @@ setup:
   - sql: INSERT INTO tsql_index_duplicates VALUES (1,9),(2,9)
   - sql: CREATE TABLE tsql_index_nulls (id INT PRIMARY KEY,value INT)
   - sql: INSERT INTO tsql_index_nulls VALUES (1,NULL)
+  - sql: DROP TABLE IF EXISTS tsql_assignment_probe
+  - sql: CREATE TABLE tsql_assignment_probe (id INT PRIMARY KEY,tiny TINYINT,amount DECIMAL(5,2))
+  - sql: DROP TABLE IF EXISTS tsql_default_row
+  - sql: DROP TABLE IF EXISTS tsql_default_required
+  - sql: CREATE TABLE tsql_default_row (id INT IDENTITY PRIMARY KEY,amount INT NOT NULL DEFAULT ((7)),label NVARCHAR(30) DEFAULT N'Grüße',nullable_value INT)
+  - sql: CREATE TABLE tsql_default_required (value INT NOT NULL)
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: CREATE TABLE tsql_having_input (id INT PRIMARY KEY)
   - sql: INSERT INTO tsql_having_input VALUES (1)
@@ -44,6 +53,18 @@ setup:
   - sql: CREATE TABLE [dbo].[tsql_native] ([id] INT IDENTITY(1,1) PRIMARY KEY, [name] NVARCHAR(80), [amount] INT NOT NULL DEFAULT (7))
   - sql: INSERT INTO [dbo].[tsql_native] ([name]) VALUES (N'Grüße'), (N'O''Brien')
 test_cases:
+  - name: Tiny unsigned negation retains its signed value
+    sql: SELECT -value AS value FROM tsql_unary_contract
+    expect: {rows: 1, data: [{value: -255}]}
+  - name: Tiny cast negation describes a signed small result
+    scm: '((car (tds_describe "memcp-tests" "SELECT -CAST(1 AS TINYINT) AS value" "" (newsession))) "sql_type")'
+    expect: {result: SMALLINT}
+  - name: Nullable tiny negation describes a signed small result
+    scm: '((car (tds_describe "memcp-tests" "SELECT -CAST(NULL AS TINYINT) AS value" "" (newsession))) "sql_type")'
+    expect: {result: SMALLINT}
+  - name: Empty tiny column negation describes a signed small result
+    scm: '((car (tds_describe "memcp-tests" "SELECT TOP (0) -value AS value FROM tsql_unary_contract" "" (newsession))) "sql_type")'
+    expect: {result: SMALLINT}
   - name: Addition chooses operators from declared contracts for identical formulas
     scm: |
       (begin
@@ -361,6 +382,13 @@ test_cases:
   - name: Native indexed data retains the zero and null entries
     sql: SELECT id,value FROM tsql_index_nulls ORDER BY id
     expect: {rows: 2, data: [{id: 1, value: null}, {id: 3, value: 0}]}
+  - name: National default strings accept leading lexical whitespace
+    scm: |
+      (tsql_default_literal "   N'spaces'")
+    expect: {result: spaces}
+  - name: National string prefix must stay adjacent to the opening quote
+    sql: SELECT N 'not adjacent' AS value
+    expect: {error: true}
   - name: escaped closing bracket is a quoted identifier
     sql: SELECT 42 AS [answer]]suffix]
     expect: {rows: 1, data: [{"answer]suffix": 42}]}
@@ -797,6 +825,99 @@ test_cases:
     sql: INSERT tsql_native_copy (id,name) VALUES (99,N'optional keyword')
     expect: {rows: 1}
     noncritical: true
+  - name: Numeric assignments use native target declarations
+    sql: INSERT INTO tsql_assignment_probe VALUES (1,255,999.994)
+    expect: {affected_rows: 1}
+  - name: Assignment limits retain supported native decimal rounding
+    sql: SELECT tiny,amount FROM tsql_assignment_probe WHERE id=1
+    expect: {rows: 1, data: [{tiny: 255, amount: 999.99}]}
+  - name: Integer assignment overflow does not reach native insertion
+    sql: INSERT INTO tsql_assignment_probe VALUES (2,256,1)
+    expect: {error: true, contains: integer conversion overflow}
+  - name: Decimal assignment overflow does not reach native insertion
+    sql: INSERT INTO tsql_assignment_probe VALUES (3,1,1000)
+    expect: {error: true, contains: decimal conversion overflow}
+  - name: Decimal rounding carry cannot exceed positive precision
+    sql: INSERT INTO tsql_assignment_probe VALUES (4,1,999.995)
+    expect: {error: true, contains: decimal conversion overflow}
+  - name: Decimal rounding carry cannot exceed negative precision
+    sql: INSERT INTO tsql_assignment_probe VALUES (5,1,-999.995)
+    expect: {error: true, contains: decimal conversion overflow}
+  - name: Nullable assignment retains SQL NULL
+    sql: INSERT INTO tsql_assignment_probe SELECT 6,NULL,NULL
+  - name: Null conversion does not inherit a numeric runtime value
+    sql: SELECT tiny,amount FROM tsql_assignment_probe WHERE id=6
+    expect: {rows: 1, data: [{tiny: null, amount: null}]}
+  - name: Assignment converts valid numeric text through the frontend
+    sql: INSERT INTO tsql_assignment_probe VALUES (7,N'12',N'2.125')
+  - name: Converted numeric text retains target values
+    sql: SELECT tiny,amount FROM tsql_assignment_probe WHERE id=7
+    expect: {rows: 1, data: [{tiny: 12, amount: 2.13}]}
+  - name: Invalid integer text cannot use native permissive coercion
+    sql: INSERT INTO tsql_assignment_probe VALUES (8,N'12x',1)
+    expect: {error: true, contains: invalid integer text}
+  - name: Values assignment failure does not publish an earlier valid row
+    sql: INSERT INTO tsql_assignment_probe VALUES (9,9,9),(10,256,10)
+    expect: {error: true, contains: integer conversion overflow}
+  - name: Select assignment failure rolls back earlier native writes
+    sql: INSERT INTO tsql_assignment_probe SELECT 11,11,11 UNION ALL SELECT 12,256,12
+    expect: {error: true, contains: integer conversion overflow}
+  - name: Rejected assignments retain the existing native transaction boundary
+    sql: SELECT COUNT(*) AS n FROM tsql_assignment_probe
+    expect: {rows: 1, data: [{n: 3}]}
+  - name: Update numeric contracts use the same target declaration
+    sql: UPDATE tsql_assignment_probe SET tiny=tiny+1 WHERE id=1
+    expect: {error: true, contains: integer conversion overflow}
+  - name: Update decimal overflow is checked by the frontend
+    sql: UPDATE tsql_assignment_probe SET amount=1000 WHERE id=1
+    expect: {error: true, contains: decimal conversion overflow}
+  - name: Rejected updates preserve existing native row values
+    sql: SELECT tiny,amount FROM tsql_assignment_probe WHERE id=1
+    expect: {rows: 1, data: [{tiny: 255, amount: 999.99}]}
+  - name: Insert select checks projected arity before writing
+    sql: INSERT INTO tsql_assignment_probe SELECT 20,1
+    expect: {error: true, contains: INSERT column count does not match SELECT column count}
+  - name: Folded target names resolve to native declarations
+    sql: INSERT INTO tsql_assignment_probe ([ID],[TINY],[AMOUNT]) VALUES (20,20,20)
+  - name: Folded target names retain native storage names
+    sql: SELECT tiny,amount FROM tsql_assignment_probe WHERE id=20
+    expect: {rows: 1, data: [{tiny: 20, amount: 20}]}
+  - name: Compiled numeric assignments contain expressions without SQL type wrappers
+    scm: |
+      (not (regexp_test
+        (string (parse_tsql "memcp-tests" "INSERT INTO tsql_assignment_probe VALUES (21,21,21)" nil nil nil))
+        "sql_type_expr"))
+    expect: {result: true}
+  - name: Default values inserts a native omitted-column row
+    sql: INSERT INTO [dbo].[tsql_default_row] DEFAULT VALUES
+    expect: {affected_rows: 1}
+  - name: All-default insertion uses native defaults and identity
+    sql: SELECT id,amount,label,nullable_value FROM tsql_default_row
+    expect: {rows: 1, data: [{id: 1, amount: 7, label: Grüße, nullable_value: null}]}
+  - name: Default values accepts an omitted into keyword
+    sql: INSERT tsql_default_row DEFAULT VALUES
+    expect: {affected_rows: 1}
+  - name: Default rows share the ordinary native allocator
+    sql: INSERT INTO tsql_default_row (label) VALUES (N'explicit')
+    expect: {affected_rows: 1}
+  - name: Ordinary and default inserts retain one sequence
+    sql: SELECT id,amount,label FROM tsql_default_row ORDER BY id
+    expect: {rows: 3, data: [{id: 1, amount: 7, label: Grüße}, {id: 2, amount: 7, label: Grüße}, {id: 3, amount: 7, label: explicit}]}
+  - name: Default values rejects an explicit column list
+    sql: INSERT INTO tsql_default_row (amount) DEFAULT VALUES
+    expect: {error: true}
+  - name: Default values rejects trailing row data
+    sql: INSERT INTO tsql_default_row DEFAULT VALUES (1)
+    expect: {error: true}
+  - name: Default values rejects a missing values keyword
+    sql: INSERT INTO tsql_default_row DEFAULT
+    expect: {error: true}
+  - name: All-default admission respects native required columns
+    sql: INSERT INTO tsql_default_required DEFAULT VALUES
+    expect: {error: true}
+  - name: Rejected all-default row does not publish data
+    sql: SELECT COUNT(*) AS n FROM tsql_default_required
+    expect: {rows: 1, data: [{n: 0}]}
   - name: Alter adds an enforced named unique through native keys
     sql: ALTER TABLE tsql_setup_columns ADD CONSTRAINT setup_unique_revision UNIQUE (tenant ASC,revision DESC)
     expect: {rows: 0}
@@ -1214,6 +1335,7 @@ test_cases:
     expect: {error: true}
 
 cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_unary_contract
   - sql: DROP TABLE IF EXISTS tsql_add_contracts
   - sql: DROP TABLE IF EXISTS tsql_add_copy
   - sql: DROP TABLE IF EXISTS tsql_terminator_probe
@@ -1222,6 +1344,9 @@ cleanup:
   - sql: DROP TABLE IF EXISTS tsql_index_rows
   - sql: DROP TABLE IF EXISTS tsql_index_duplicates
   - sql: DROP TABLE IF EXISTS tsql_index_nulls
+  - sql: DROP TABLE IF EXISTS tsql_assignment_probe
+  - sql: DROP TABLE IF EXISTS tsql_default_row
+  - sql: DROP TABLE IF EXISTS tsql_default_required
   - sql: DROP TABLE IF EXISTS tsql_having_input
   - sql: DROP TABLE IF EXISTS tsql_cast_collation
   - sql: DROP TABLE IF EXISTS tsql_setup_catalog

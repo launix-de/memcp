@@ -72,7 +72,7 @@ The negative accumulator also represents the minimum int64 without overflow. */
 	(parser '("[" (define id (regex "(?:[^\\]]|\\]\\])+" false false)) "]") (replace id "]]" "]"))
 	(parser '("\"" (define id (regex "(?:[^\"]|\"\")+" false false)) "\"") (replace id "\"\"" "\"")))))
 (define tsql_identifier (parser (or tsql_identifier_quoted tsql_identifier_unquoted)))
-(define tsql_string (parser '((? (atom "N" true false)) (atom "'" false)
+(define tsql_string (parser '((or (atom "N'" true) (atom "'" false))
 	(define value (regex "(?:''|[^'])*" false false)) (atom "'" false false))
 	(replace value "''" "'")))
 (define tsql_column (parser (or
@@ -185,6 +185,30 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		"NVARCHAR" (tsql_cast_text_expr value dimensions true)
 		_ (error "unsupported conversion to " name)))
 	(list (quote sql_type_expr) formula name nil))))
+/* Assignment contracts come from native column declarations at compile time.
+Integer narrowing is an ordinary frontend cast. Existing native decimal scale
+normalization remains in use; this guard rejects overflow, including carry from
+rounding, before native insertion. Full precision-limit emulation is deferred. */
+(define tsql_assignment_decimal (lambda (value threshold) (if (nil? value) nil (begin
+	(define number (tsql_numeric_input value))
+	(if (or (>= number threshold) (<= number (- 0 threshold))) (error "decimal conversion overflow") number)))))
+(define tsql_assignment_expr (lambda (value declaration) (begin
+	(define type (toUpper (declaration "RawType")))
+	(if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type)
+		(tsql_cast_expr value type '())
+		(has? '("DECIMAL" "NUMERIC") type) (begin
+			(define dimensions (declaration "Dimensions"))
+			(define precision (if (empty_list? dimensions) 18 (car dimensions)))
+			(define scale (if (< (count dimensions) 2) 0 (cadr dimensions)))
+			(define threshold (- (simplify (concat "1e" (- precision scale)))
+				(* 0.5 (simplify (concat "1e-" scale)))))
+			(list (quote sql_type_expr) (list tsql_assignment_decimal value threshold) type nil))
+		value))))
+(define tsql_insert_declarations (lambda (database table_name columns) (begin
+	(define declarations (get_schema database table_name))
+	(map columns (lambda (name) (begin
+		(define declaration (find declarations (lambda (column) (equal?? (column "Field") name)) nil))
+		(if (nil? declaration) (error "unknown INSERT column: " name) declaration)))))))
 (define tsql_cast_text_expr (lambda (value dimensions national) (begin
 	/* Resolve the operand at the shared compile boundary, where its sources
 	and SQL contract are known. A parser-local walk would lose column types. */
@@ -386,7 +410,7 @@ No row-level datatype dispatch or alternate temporal representation is needed. *
 		(if (or (has? '("NULL" "any" "MONEY" "SMALLMONEY") type)
 			(and (sql_numeric_type? type) (not (has? '("BOOLEAN" "BOOL" "BIT") type)))) true
 			(error "unary minus requires a numeric operand"))
-		(sql_info (list (quote -) 0 formula) type nil))) value)))
+		(sql_info (list (quote -) 0 formula) (if (equal? type "TINYINT") "SMALLINT" type) nil))) value)))
 (define tsql_key_placement (parser (? (or (atom "CLUSTERED" true) (atom "NONCLUSTERED" true)))))
 (define tsql_key_columns (parser (define columns (+ (parser '(
 	(define name tsql_identifier) (? (or (atom "ASC" true) (atom "DESC" true)))) name) ",")) columns))
@@ -994,9 +1018,14 @@ never from the first row. Unknown expression types stay text in this first slice
 			(define tbl (match first_def '(_ _ t _ _) t))
 			(define tblalias (match first_def '(id _ _ _ _) id))
 
-			(if policy (policy schema tbl true) true)
-
-			(build_dml_plan schema tbl tblalias all_defs (merge cols) (coalesceNil condition true) order limit offset planning_session tx)
+			(define target_schema (source_schema first_def))
+			(if policy (policy target_schema tbl true) true)
+			(define declarations (get_schema target_schema tbl))
+			(define assignments (merge (extract_assoc (merge cols) (lambda (title expression) (begin
+				(define declaration (find declarations (lambda (column) (equal?? (column "Field") title)) nil))
+				(if (nil? declaration) (error "unknown UPDATE column: " title)
+					(list (declaration "Field") (tsql_assignment_expr expression declaration))))))))
+			(build_dml_plan target_schema tbl tblalias all_defs assignments (coalesceNil condition true) order limit offset planning_session tx)
 	)))
 
 	(define tsql_delete (parser '(
@@ -1083,11 +1112,17 @@ never from the first row. Unknown expression types stay text in this first slice
 	/* INSERT SELECT consumes the existing planner's result stream and the native
 	insert operator. Identity allocation and constraints remain native. */
 	(define tsql_insert_select_plan (lambda (database tbl columns query) (begin
+		(define declarations (tsql_insert_declarations database tbl columns))
+		(define columns (map declarations (lambda (column) (column "Field"))))
 		(define insert_expr '('insert '('table database tbl) (cons list columns)
 			(cons list '((cons list (map (produceN (count columns))
-				(lambda (i) '('nth 'item (+ (* i 2) 1)))))))
+				(lambda (i) (sql_type_formula '() (tsql_assignment_expr
+					'('nth 'item (+ (* i 2) 1)) (nth declarations i))))))))
 			'(list) nil false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))
-		(define plan (build_queryplan_term (sql_expand_views query policy) planning_session tx))
+		(define expanded (sql_expand_views query policy))
+		(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
+			(error "INSERT column count does not match SELECT column count"))
+		(define plan (build_queryplan_term expanded planning_session tx))
 		(define ordered (or
 			(and (query_block? query) (not (empty_list? (coalesceNil (qb_order query) '()))))
 			(and (union_block? query) (not (empty_list? (coalesceNil (union_order query) '()))))))
@@ -1111,14 +1146,28 @@ never from the first row. Unknown expression types stay text in this first slice
 	) (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
-			(define columns (coalesce columns (table_insertable_columns database tbl)))
+			(define declarations (tsql_insert_declarations database tbl
+				(coalesce columns (table_insertable_columns database tbl))))
+			(define columns (map declarations (lambda (column) (column "Field"))))
 			(if (reduce rows (lambda (valid row) (and valid (equal? (count row) (count columns)))) true)
 				true (error "INSERT column count does not match value count"))
 			(if (reduce rows (lambda (found row) (or found (tsql_dataset_contains_inner_select row))) false)
 				(tsql_insert_select_plan database tbl columns (tsql_values_to_select_query database columns rows))
-				'('insert '('table database tbl) (cons list columns) (sql_insert_values_expr (map rows (lambda (row) (map row (lambda (value) (sql_type_formula (list) value))))))
+				'('insert '('table database tbl) (cons list columns) (sql_insert_values_expr (map rows (lambda (row) (map (produceN (count columns))
+					(lambda (i) (sql_type_formula (list) (tsql_assignment_expr (nth row i) (nth declarations i))))))))
 					'(list) nil false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))
 	)))
+	/* An all-default row is the native empty-column INSERT. Defaults and
+	generated values are filled by the same operator as ordinary insertion. */
+	(define tsql_insert_default (parser '(
+		(atom "INSERT" true) (? (atom "INTO" true))
+		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
+		(atom "DEFAULT" true) (atom "VALUES" true)
+	) (begin
+			(define database (coalesce schema2 schema))
+			(if policy (policy database tbl true) true)
+			'('insert '('table database tbl) '(list) '('list '(list))
+				'(list) nil false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))))
 	(define tsql_insert_select (parser '(
 		(atom "INSERT" true) (atom "INTO" true)
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
@@ -1237,7 +1286,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query tsql_select)) (explain_queryplan_physical (sql_expand_views query policy) planning_session))
 		(parser '((atom "EXPLAIN" true) (define query tsql_select))
 			'('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy) planning_session tx)) (settings "ExplainWidth")))))
-		tsql_insert_into tsql_insert_select tsql_update tsql_delete tsql_truncate
+		tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete tsql_truncate
 		tsql_create_view tsql_create_table tsql_alter_table tsql_create_unique_index
 		(parser '((atom "CREATE" true) (atom "DATABASE" true)
 			(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
