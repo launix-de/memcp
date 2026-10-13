@@ -861,7 +861,9 @@ test_cases:
   sql: CREATE TABLE dbo.tsql_bad_identity (id BIT IDENTITY(1,1))
   expect:
     error: true
-- name: Declared identity boundaries reject before rows without rewinding consumed IDs
+# Preserve this existing regression identity; consumed reservations may leave
+# gaps and must not rewind the shared native allocator.
+- name: Declared identity boundaries reject before rows and retain last allocated value
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_identity_limit
   scm: |
@@ -917,7 +919,7 @@ test_cases:
     result: true
   noncritical: true
 - sql: DROP TABLE IF EXISTS dbo.tsql_identity_limit
-  name: Fixture cleanup for Declared identity boundaries reject before rows without rewinding consumed IDs (1)
+  name: Fixture cleanup for Declared identity boundaries reject before rows and retain last allocated value (1)
 - name: Zero-scale decimal identity stores exact generated values
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_identity_decimal
