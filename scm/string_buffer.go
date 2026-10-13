@@ -35,6 +35,15 @@ type CompressedStringBuffer struct {
 func (b *CompressedStringBuffer) Codec() int       { return int(b.codec) }
 func (b *CompressedStringBuffer) DecodedSize() int { return int(b.rawSize) }
 
+// BlockDecodeBytes describes immutable codec work for an invocation-owned
+// reader. Raw blocks need no decompression; the final block may be shorter.
+func (b *CompressedStringBuffer) BlockDecodeBytes(block int) int {
+	if b.rawBlocks[block] {
+		return 0
+	}
+	return min(StringBufferBlockBytes, int(b.rawSize)-block*StringBufferBlockBytes)
+}
+
 // DecodeInto expands a complete LZ4 dictionary into caller-owned preparation
 // memory. The same block decoder serves cursor walks and decoded cache fills.
 func (b *CompressedStringBuffer) DecodeInto(dst []byte) {
@@ -137,6 +146,7 @@ func bufferOf(s Scmer) *CompressedStringBuffer {
 }
 
 func BufferStringLength(s Scmer) int    { return bufferStringLen(s) }
+func BufferStringOffset(s Scmer) uint32 { return bufferStringOffset(s) }
 func bufferStringLen(s Scmer) int       { return int(auxVal(s.aux) & bufferLengthMask) }
 func bufferStringOffset(s Scmer) uint32 { return uint32(auxVal(s.aux) >> 24) }
 

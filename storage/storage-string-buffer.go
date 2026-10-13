@@ -288,7 +288,7 @@ type decodedStringReader struct {
 type batchStringReader struct {
 	storage           *StorageString
 	decoded           *decodedStringReader
-	materializedBytes uint64 // invocation-local demand, updated once per consumed batch
+	demandedWorkBytes uint64 // invocation-local demand, updated once per consumed batch
 }
 
 func (r *batchStringReader) release() {
@@ -355,18 +355,27 @@ func (r *batchStringReader) GetValueRange(row, count uint32, target []scm.Scmer,
 }
 
 func (r *batchStringReader) prepareBatch(target []scm.Scmer, count, stride int) int {
-	total := 0
+	total, decodeBytes, previousBlock := 0, 0, -1
 	for i := 0; i < count; i++ {
 		if value := target[i*stride]; value.IsBufferString() {
-			total += scm.BufferStringLength(value)
+			length := scm.BufferStringLength(value)
+			total += length
+			start := int(scm.BufferStringOffset(value))
+			for block, last := start/scm.StringBufferBlockBytes, (start+length-1)/scm.StringBufferBlockBytes; block <= last; block++ {
+				if work := r.storage.textBuffer.BlockDecodeBytes(block); work != 0 && block != previousBlock {
+					decodeBytes += work
+					previousBlock = block
+				}
+			}
 		}
 	}
-	r.materializedBytes += uint64(total)
-	// A repeated dictionary can be far smaller than copying its demanded
-	// rows. Once actual consumed bytes already cover a whole dictionary, reuse
-	// one private immutable workspace. This does not admit shared cache state,
-	// wait for management, or prepare a large projection for a sparse LIMIT.
-	if total > 0 && r.materializedBytes >= uint64(r.storage.textBuffer.DecodedSize()) {
+	r.demandedWorkBytes += uint64(max(total, decodeBytes))
+	// A dictionary can be smaller than copying repeated values or decoding
+	// alternating blocks for the already demanded batch. Count exactly the
+	// compressed block transitions the single cursor scratch would perform;
+	// raw blocks contribute no codec work. Reuse a private whole workspace only
+	// after this demanded work covers it, without cache admission or waiting.
+	if total > 0 && r.demandedWorkBytes >= uint64(r.storage.textBuffer.DecodedSize()) {
 		r.decoded = &decodedStringReader{storage: r.storage, text: r.storage.decodeDictionary()}
 	}
 	return total

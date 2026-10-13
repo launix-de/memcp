@@ -684,8 +684,9 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   never borrow the scratch. Scalar probes and explicit compressed/bigram
   consumers retain compressed handles. Prefix/overlay preparation propagates
   child reader ownership rather than bypassing its representation or lease.
-  `batchStringReader.materializedBytes` counts only already demanded bytes at
-  batch boundaries. Once their copying cost covers the immutable dictionary,
+  `batchStringReader.demandedWorkBytes` counts copying and compressed-block
+  replay for only already selected values at batch boundaries. Raw blocks add
+  no decode work. Once this demanded work covers the immutable dictionary,
   its private `decoded` workspace replaces repeated batch copies; no shared
   admission or statement bookkeeping is performed in scalar probes. Optional
   `JITBatchValueType` describes only this prepared bulk representation at the

@@ -1044,3 +1044,40 @@ func TestStorageStringProjectionPreparationFollowsDemand(t *testing.T) {
 		t.Fatal("repeated selected batch admitted another reader")
 	}
 }
+
+func TestPreparedTextBatchAmortizesAlternatingBlocks(t *testing.T) {
+	values := make([]scm.Scmer, 100)
+	for i := range values {
+		values[i] = scm.NewString(fmt.Sprintf("entry-%03d-", i) + strings.Repeat("padding-", 1024))
+	}
+	source := buildStorageString(values)
+	source.CompressDictionary()
+	if source.textBuffer.DecodedSize() < 8*scm.StringBufferBlockBytes {
+		t.Fatal("fixture must exceed its selected payload size")
+	}
+	point := source.GetCachedReader(ReadAuto).(*batchStringReader)
+	selected := make([]scm.Scmer, 1)
+	point.GetValueMulti([]uint32{90}, selected, 1)
+	if point.decoded != nil || selected[0].String() != values[90].String() {
+		t.Fatal("one selected row eagerly expanded the whole dictionary")
+	}
+	ReleaseColumnReader(point)
+	reader := source.GetCachedReader(ReadAuto).(*batchStringReader)
+	ids := make([]uint32, 20)
+	for i := range ids {
+		if i%2 != 0 {
+			ids[i] = 90
+		}
+	}
+	selected = make([]scm.Scmer, len(ids))
+	reader.GetValueMulti(ids, selected, 1)
+	if reader.decoded == nil || source.dictCache.Load() != nil {
+		t.Fatal("alternating demanded blocks did not amortize into a private workspace")
+	}
+	ReleaseColumnReader(reader)
+	for i, id := range ids {
+		if selected[i].String() != values[id].String() {
+			t.Fatal("reader completion invalidated selected values")
+		}
+	}
+}
