@@ -71,6 +71,12 @@ test_cases:
   - name: National character invalid default range returns null
     sql: SELECT NCHAR(-1) AS negative,NCHAR(65536) AS outside,NCHAR(NULL) AS missing
     expect: {rows: 1, data: [{negative: null, outside: null, missing: null}]}
+  - name: National character isolated high surrogate is explicitly unsupported
+    sql: SELECT NCHAR(55296) AS value
+    expect: {error: true, contains: invalid Unicode scalar value}
+  - name: National character isolated low surrogate is explicitly unsupported
+    sql: SELECT NCHAR(57343) AS value
+    expect: {error: true, contains: invalid Unicode scalar value}
   - name: National character invalid integer text fails
     sql: SELECT NCHAR(N'13x') AS value
     expect: {error: true}
