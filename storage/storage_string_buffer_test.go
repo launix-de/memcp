@@ -757,3 +757,111 @@ func TestStorageStringSpecialBoundaryDoesNotPinCache(t *testing.T) {
 		}
 	}
 }
+
+func TestStorageStringPreparedFilterReaderIsConsumed(t *testing.T) {
+	Init(scm.Globalenv)
+	const dbName = "test_prepared_string_filter"
+	databases.Remove(dbName)
+	t.Cleanup(func() { databases.Remove(dbName) })
+	CreateDatabase(dbName, true)
+	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("label", "TEXT", nil, nil)
+	rows := make([][]scm.Scmer, 2048)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString(fmt.Sprintf("report label %04d", i))}
+	}
+	tbl.Insert([]string{"id", "label"}, rows, nil, scm.NewNil(), false, nil)
+	if result := GetDatabase(dbName).rebuild(true, false, true); len(result.errors) > 0 {
+		t.Fatal(result.errors)
+	}
+	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{{scm.NewInt(2048), scm.NewString("delta label")}}, nil, scm.NewNil(), false, nil)
+	tx := NewTxContext(TxCursorStability)
+	tx.beginQuery(nil, 71, "prepared string filter")
+	defer tx.endQuery(71)
+	condition := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return scm.NewBool(args[0].GetTag() == scm.TagString) })
+	access := newScanAccessSchema(scanAccessConsumerScan, nil, -1)
+	count := tbl.scan(tx, access, nil, []string{"label"}, condition, nil, scm.Globalenv.Vars[scm.Symbol("scan_count")], scm.NewInt(0), scm.Globalenv.Vars[scm.Symbol("+")], false)
+	if count.Int() != int64(len(rows)+1) {
+		t.Fatalf("prepared filter consumed compressed source: got %d", count.Int())
+	}
+	// The ordered scalar/bulk paths must use the same prepared representation.
+	callback := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[1] })
+	result := tbl.scan_order(tx, access, nil, []string{"label"}, condition, nil, nil, 0, 0, 1,
+		[]string{"id"}, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+	if result.IsNil() {
+		t.Fatal("ordered filter bypassed prepared reader")
+	}
+	// Early-exit scans reuse an already admitted cache without decoding a cold one.
+	shard := tbl.ActiveShards()[0]
+	if _, found := shard.scanFirstRecord(scanAccess{}, []string{"label"}, condition, tx, nil, nil); !found {
+		t.Fatal("first-record filter bypassed warm reader")
+	}
+	deltaCondition := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		return scm.NewBool(args[0].GetTag() == scm.TagString && args[0].String() == "delta label")
+	})
+	if id, found := shard.scanFirstRecord(scanAccess{}, []string{"label"}, deltaCondition, tx, nil, nil); !found || id != 2048 {
+		t.Fatal("first-record prepared reader lost physical delta")
+	}
+	delta := tbl.scan_order(tx, access, nil, []string{"label"}, deltaCondition, nil, nil, 0, 0, 1,
+		[]string{"id"}, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+	if delta.IsNil() || delta.Int() != 2048 {
+		t.Fatal("ordered prepared reader lost physical delta")
+	}
+
+}
+
+func TestStorageStringFilterDecodingChoice(t *testing.T) {
+	short := buildStringColumn([]string{"report label one", "report label two"})
+	short.CompressDictionary()
+	long := buildStringColumn([]string{strings.Repeat("long report one ", 100), strings.Repeat("long report two ", 100)})
+	long.CompressDictionary()
+	for _, tc := range []struct {
+		name    string
+		storage ColumnStorage
+		access  scanAccess
+		rows    uint32
+		want    ColumnReadHints
+	}{
+		{"short full scan", short, scanAccess{}, 10000, ReadDecoded},
+		{"large report full scan", long, scanAccess{}, 10000, ReadAuto},
+		{"short point", short, runtimeScanAccess(analyzedBoundaries{{col: "label", matcher: EqualMatcher, lower: scm.NewString("report label one"), upper: scm.NewString("report label one")}}), 10000, ReadAuto},
+		{"short range", short, runtimeScanAccess(analyzedBoundaries{{col: "label", matcher: RangeMatcher}}), 10000, ReadDecoded},
+		{"bigram candidates", short, runtimeScanAccess(analyzedBoundaries{{col: "label", matcher: LikeMatcher}}), 10000, ReadAuto},
+		{"small population", short, scanAccess{}, 1, ReadAuto},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := filterColumnReadHints(tc.storage, tc.access, "label", tc.rows); got != tc.want {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStorageStringProjectionPreparationFollowsDemand(t *testing.T) {
+	s := buildStringColumn([]string{"short group key one", "short group key two"})
+	s.CompressDictionary()
+	tx := NewTxContext(TxCursorStability)
+	tx.beginQuery(nil, 72, "selected projection")
+	defer tx.endQuery(72)
+	mapper := &ShardMapReducer{
+		mainCols: []ColumnStorage{s}, mainBulkReaders: []ColumnReader{s.GetCachedReader(ReadCompressed)},
+		mainValueFuncs: make([]scm.JITStorageGetValueFunc, 1), mainMultiFuncs: make([]scm.JITStorageGetValueMultiFunc, 1),
+		currentTx: tx, mainCount: 2, directRead: true,
+	}
+	if s.dictCache.Load() != nil {
+		t.Fatal("projection-only payload prepared before demand")
+	}
+	mapper.prefetchMainColumns([]uint32{1})
+	if mapper.mainBulkValues[0].GetTag() != scm.TagString || mapper.mainBulkValues[0].String() != "short group key two" {
+		t.Fatal("selected projection did not use prepared reader")
+	}
+	if s.dictCache.Load() == nil || s.EvictDictionary() != 0 {
+		t.Fatal("selected projection cache is not leased")
+	}
+	before := s.dictCache.Load().users
+	mapper.prefetchMainColumns([]uint32{0})
+	if s.dictCache.Load().users != before {
+		t.Fatal("repeated selected batch admitted another reader")
+	}
+}

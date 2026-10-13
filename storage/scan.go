@@ -2042,9 +2042,8 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
 			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
-			if _, ok := ccols[i].(*StorageComputeProxy); ok {
-				cNeedsCachedReader[i] = true
-			}
+			defer ReleaseColumnReader(cReaders[i])
+			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
 	}
@@ -2145,10 +2144,8 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 				for i, col := range conditionCols {
 					if getter := conditionGetters[i]; getter != nil {
 						cdataset[i] = getter(idx, 0)
-					} else if cNeedsCachedReader[i] {
-						cdataset[i] = cReaders[i].GetValue(idx)
 					} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
-						cdataset[i] = ccols[i].GetValue(idx)
+						cdataset[i] = cReaders[i].GetValue(idx)
 					} else {
 						cdataset[i] = t.getDelta(int(idx-mainCount), col)
 					}
@@ -2307,7 +2304,8 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count))
+			defer ReleaseColumnReader(cReaders[i])
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
 	}
@@ -2639,10 +2637,9 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
-			if _, ok := ccols[i].(*StorageComputeProxy); ok {
-				cNeedsCachedReader[i] = true
-			}
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count))
+			defer ReleaseColumnReader(cReaders[i])
+			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
 	}
@@ -2720,10 +2717,8 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 								cdataset[i] = batchdata[batchid*stride+subidx]
 							} else if getter := conditionGetters[i]; getter != nil {
 								cdataset[i] = getter(effectiveIdx, uint32(batchid))
-							} else if cNeedsCachedReader[i] {
-								cdataset[i] = cReaders[i].GetValue(effectiveIdx)
 							} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
-								cdataset[i] = ccols[i].GetValue(effectiveIdx)
+								cdataset[i] = cReaders[i].GetValue(effectiveIdx)
 							} else {
 								cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
 							}

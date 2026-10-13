@@ -644,6 +644,20 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   operation rather than blocking. Every pin has panic-safe cleanup. Retirement
   runs on a query or maintenance caller, never the CacheManager owner goroutine.
 
+- `shardColumnReader` is invocation-owned and binds one prepared main reader,
+  a physical delta source and the existing computed-reader transaction binding.
+  `ColumnReaderTx` accepts an explicit representation hint and returns a
+  releasable reader; its function view cannot outlive the owning statement or
+  explicit lease. Sorted shard queues retain their readers through statement
+  teardown, not merely through queue construction.
+- `ShardMapReducer.projectionRows` is private to one serial mapper. It records
+  only an already-consumed point/batch extent. Projection cache preparation
+  cannot run before filtering or LIMIT establishes payload demand. Batch
+  preparation is outside row callbacks; an explicit selected-point consumer
+  may prepare its first demanded short payload. Replacing
+  a reader also replaces compiled scalar/bulk targets and resets typed reducer
+  specialization; ordinary delta readers keep their original visibility path.
+
 - `StorageString.textBuffer` is the immutable compressed dictionary of one
   generation; ordinary raw text uses no additional `compressedDict` payload.
   Encoded alphabets also use block compression; historical monolithic LZ4

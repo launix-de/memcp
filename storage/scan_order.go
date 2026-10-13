@@ -1865,6 +1865,12 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 		adataset[i] = scm.NewNil()
 	}
 
+	// Prepared sort readers survive this shard queue until statement teardown.
+	// Calls without a statement owner retain the ordinary compressed path.
+	sortReadHints := ReadAuto
+	if currentTx != nil && currentTx.queryActive.Load() {
+		sortReadHints = ReadDecoded
+	}
 	// prepare sort criteria so they can be queried easily
 	result.scols = make([]func(uint32) scm.Scmer, len(sortcols))
 	for i, scol := range sortcols {
@@ -1881,7 +1887,8 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 		}
 		if scol.IsString() {
 			colname := scol.String()
-			result.scols[i] = t.ColumnReaderTx(currentTx, colname, false)
+			reader := t.ColumnReaderTx(currentTx, colname, false, sortReadHints)
+			result.scols[i] = reader.GetValue
 			continue
 		}
 		if scol.IsProc() {
@@ -1906,7 +1913,8 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 					txValue := scm.NewAny(currentTx)
 					largs[j] = func(uint32) scm.Scmer { return txValue }
 				} else {
-					largs[j] = t.ColumnReaderTx(currentTx, name, false)
+					reader := t.ColumnReaderTx(currentTx, name, false, sortReadHints)
+					largs[j] = reader.GetValue
 				}
 			}
 			procFn := scm.PrepareSerialProc(scol)
@@ -1953,10 +1961,9 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
-			if _, ok := ccols[i].(*StorageComputeProxy); ok {
-				cNeedsCachedReader[i] = true
-			}
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count))
+			defer ReleaseColumnReader(cReaders[i])
+			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
 			reader := ColumnReader(ccols[i])
 			if cNeedsCachedReader[i] {
 				reader = cReaders[i]
@@ -1970,10 +1977,9 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 	aMultiFuncs := make([]scm.JITStorageGetValueMultiFunc, len(acceptCols))
 	for i, column := range acceptCols {
 		acols[i] = t.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
-		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx, false, ReadCompressed)
-		if _, ok := acols[i].(*StorageComputeProxy); ok {
-			aNeedsCachedReader[i] = true
-		}
+		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx, false, ReadAuto)
+		defer ReleaseColumnReader(aReaders[i])
+		aNeedsCachedReader[i] = columnReaderRequiresBinding(acols[i], aReaders[i])
 		reader := ColumnReader(acols[i])
 		if aNeedsCachedReader[i] {
 			reader = aReaders[i]
@@ -2120,10 +2126,8 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 							for i, k := range conditionCols {
 								if conditionGetters[i] != nil {
 									cdataset[i] = conditionGetters[i](idx, 0)
-								} else if cNeedsCachedReader[i] {
-									cdataset[i] = cReaders[i].GetValue(idx)
 								} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
-									cdataset[i] = ccols[i].GetValue(idx)
+									cdataset[i] = cReaders[i].GetValue(idx)
 								} else {
 									cdataset[i] = t.getDelta(int(idx-t.main_count), k)
 								}
@@ -2176,10 +2180,8 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 						mainBufIdx++
 					} else {
 						for i, column := range acceptCols {
-							if aNeedsCachedReader[i] {
+							if _, isProxy := acols[i].(*StorageComputeProxy); isProxy {
 								adataset[i] = aReaders[i].GetValue(idx)
-							} else if _, isProxy := acols[i].(*StorageComputeProxy); isProxy {
-								adataset[i] = acols[i].GetValue(idx)
 							} else {
 								adataset[i] = t.getDelta(int(idx-t.main_count), column)
 							}

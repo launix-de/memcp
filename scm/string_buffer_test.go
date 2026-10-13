@@ -137,3 +137,15 @@ func TestStringBufferLargeLength(t *testing.T) {
 		t.Fatal("large substring offset truncated")
 	}
 }
+
+// Identical immutable handles prove equality without touching encoded blocks.
+func TestStringBufferIdentityComparison(t *testing.T) {
+	text := strings.Repeat("identical dictionary group key ", 1000)
+	buffer, offsets := BuildCompressedStringBuffer([]string{text})
+	value := NewBufferString(buffer, offsets[0], len(text))
+	// Make decoding observable; storage validates buffers before publication.
+	buffer.data = nil
+	if !Equal(value, value) || Less(value, value) || compareBufferText(value, value, true) != 0 || generalBufferLess(value, value, false) || generalBufferLess(value, value, true) {
+		t.Fatal("identical handle comparison decoded its payload")
+	}
+}

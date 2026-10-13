@@ -568,7 +568,7 @@ func (s *StorageString) ReadCount() uint64 {
 // with independent LZ4 blocks, including nibble and binary inner encodings.
 // Incompressible blocks stay literal within the same compact block container.
 func (s *StorageString) CompressDictionary() bool {
-	if s.textBuffer != nil || len(s.dictionary) == 0 && !s.compressed {
+	if s.textBuffer != nil || len(s.dictionary) == 0 && !s.compressed || uint64(len(s.dictionary)) > uint64(^uint32(0)) {
 		return false
 	}
 	s.textBuffer = scm.CompressStringBuffer(s.decodeDictionary())

@@ -983,7 +983,7 @@ func TestShardRebuildUpdatePropagationUsesStableTranslation(t *testing.T) {
 	rebuilt.mu.RLock()
 	rowOneDeleted := rebuilt.deletions.Get(1)
 	rebuilt.mu.RUnlock()
-	got := rebuilt.ColumnReaderTx(nil, "payload", false)(2)
+	got := rebuilt.ColumnReaderTx(nil, "payload", false, ReadAuto).GetValue(2)
 	if !rowOneDeleted || got.String() != "two-updated" {
 		t.Fatalf("rebuilt update state = (deleted=%v, payload=%v), want (true, two-updated)", rowOneDeleted, got)
 	}
@@ -2852,7 +2852,7 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 			if engine == Safe {
 				release = shard.GetRead(nil)
 				shard.ensureScanAccessColumns(access, false, nil)
-				if got := shard.ColumnReaderTx(nil, "payload", false)(0).String(); got != "row-00000001" {
+				if got := shard.ColumnReaderTx(nil, "payload", false, ReadAuto).GetValue(0).String(); got != "row-00000001" {
 					t.Fatalf("durable value after eviction/reload = %q", got)
 				}
 			}
@@ -2930,7 +2930,7 @@ func TestNewShardRetainsComputedColumnDefinition(t *testing.T) {
 			shard.inserts = [][]scm.Scmer{{scm.NewInt(7)}, {scm.NewInt(11)}}
 			release := shard.GetRead(nil)
 			defer release.Release()
-			reader := shard.ColumnReaderTx(nil, "computed", false)
+			reader := shard.ColumnReaderTx(nil, "computed", false, ReadAuto).GetValue
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
 			for i, want := range []int{14, 22} {

@@ -3753,7 +3753,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 								}
 							}
 						} else {
-							params[i] = s.ColumnReaderTx(currentTx, p, false)(uid)
+							params[i] = s.ColumnReaderTx(currentTx, p, false, ReadAuto).GetValue(uid)
 						}
 					}
 					failure(uniq.Id, params) // notify about failure while unlocked

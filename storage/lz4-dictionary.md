@@ -15,9 +15,36 @@ it afterward. Blocks are independently encoded in 64 KiB units.
 
 | Hint | Behavior | Consumers |
 |---|---|---|
-| `ReadCompressed` | Return compressed handles even when a decoded cache exists. | Bigram walks, retained projections, computed inputs. |
+| `ReadCompressed` | Return compressed handles even when a decoded cache exists. | Bigram walks and explicit compressed inputs. |
 | `ReadAuto` | Reuse a ready decoded cache within an owned statement; otherwise return compressed handles. Never initiate full decoding or wait for optional cache reuse. | Residual scan filters and index probes. |
-| `ReadDecoded` | Prepare the shared decoded dictionary once and lease it. | Repeated comparisons during sorted-index construction. |
+| `ReadDecoded` | Prepare the shared decoded dictionary once and lease it. | Sorted-index construction, ORDER BY, RecMap ordering and full rebuild replay. |
+
+Prepared readers are the actual scalar and bulk scan inputs; direct storage
+emitters must not bypass a decoded reader. Typed filters and map reducers use
+that reader's physical tag. Physical delta rows still use their delta reader,
+while computed deltas retain their transaction-bound reader.
+
+Dense full-scan or range comparisons of short dictionaries (at most 256 logical
+bytes per dictionary entry) request `ReadDecoded` for populations above the
+1,024-row scan buffer. Point, IN/RecSet and bigram-pruned accesses keep
+`ReadAuto`; early-exit probes do not initiate a complete decode.
+
+Projection preparation starts with `ReadAuto`. Only an already-selected point
+or consumed batch can request full decoding: short-key dictionaries up to
+1 MiB may be decoded for a consumed point; larger ones need selectedRows ×
+4 KiB to cover their logical size. These are bounded preparation heuristics,
+not a claim that all compressed accesses are faster. Long report texts do not
+meet the short-key condition. Preparation occurs before the selected batch's
+row callbacks, or at the explicit already-selected point consumer. Reader
+replacement refreshes compiled accessors and physical-tag specialization.
+`ReadAuto` itself still never admits a new cache.
+
+Full rebuild replay and physical shard reordering also prepare decoded readers
+once, release their leases after the phase, and retain the compressed primary
+payload. Reusing one reader across scan/build passes avoids repeated block work.
+
+Identical immutable compressed handles compare equal without decoding. This
+avoids repeated block work for shared dictionary keys in grouping.
 
 These compressed-handle decisions apply to eligible raw text. Specialized inner
 encodings currently need full cached decoding for access.
@@ -59,6 +86,9 @@ container; LZ4 cannot guarantee a smaller payload for arbitrary bytes.
 Eligible raw text returns compressed handles. Specialized inner encodings and
 raw values exceeding the handle length limit use the common decoded cache for
 access; their persisted and primary resident dictionaries are still LZ4 blocks.
+The block container has a 32-bit logical-size limit. Historical raw dictionaries
+exceeding that limit remain readable in their old resident representation; the
+current writer rejects such a payload before writing, rather than truncating it.
 The cache is never serialized. Existing file versions are read, not rewritten
 merely by loading: migration reaches disk on the next normal save/checkpoint.
 

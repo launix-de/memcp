@@ -16,6 +16,9 @@ import "encoding/hex"
 import "encoding/base64"
 
 func compareBufferText(a, b Scmer, fold bool) int {
+	if a.ptr == b.ptr && a.aux == b.aux {
+		return 0
+	}
 	if a.GetTag() == tagLZ4 || b.GetTag() == tagLZ4 {
 		return compareLZ4Text(a, b, fold)
 	}
@@ -114,6 +117,9 @@ func equalCursorFold(a, b Scmer, left, right *TextScratch) bool {
 }
 
 func generalBufferLess(a, b Scmer, reverse bool) bool {
+	if a.ptr == b.ptr && a.aux == b.aux {
+		return false
+	}
 	if a.GetTag() == tagLZ4 || b.GetTag() == tagLZ4 {
 		var x, y TextScratch
 		return generalBufferLessScratch(a, b, reverse, &x, &y)

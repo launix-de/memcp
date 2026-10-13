@@ -285,7 +285,7 @@ func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext, alreadyLocked boo
 		// tx is a physical lock-capability token here, not callback state.
 		// Passing it through prevents a mutation scan which already owns the
 		// shard write lock from recursively acquiring the same RWMutex.
-		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col, alreadyLocked))
+		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col, alreadyLocked, ReadAuto).GetValue)
 	}
 	return &computeProxyReader{
 		proxy:   p,
@@ -317,11 +317,11 @@ func (p *StorageComputeProxy) needsUnfilteredPreparation() bool {
 func (p *StorageComputeProxy) prewarmDeltaRows(_ *TxContext, filterCols []string, filter scm.Scmer, onlyMissing bool) {
 	filterReaders := make([]ColumnReader, len(filterCols))
 	for i, col := range filterCols {
-		filterReaders[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(nil, col, false))
+		filterReaders[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(nil, col, false, ReadAuto).GetValue)
 	}
 	inputReaders := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
-		inputReaders[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(nil, col, false))
+		inputReaders[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(nil, col, false, ReadAuto).GetValue)
 	}
 
 	recids := p.visibleDeltaRecids()
@@ -488,7 +488,7 @@ func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32) scm.Scmer {
 	for i, col := range p.inputCols {
 		// Delta rows must be read via the shard-level ColumnReader; direct
 		// ColumnStorage access only understands main-row indexes.
-		colvalues[i] = p.shard.ColumnReaderTx(tx, col, false)(idx)
+		colvalues[i] = p.shard.ColumnReaderTx(tx, col, false, ReadAuto).GetValue(idx)
 	}
 	val := scm.Apply(p.computor, colvalues...)
 

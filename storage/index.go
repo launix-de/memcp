@@ -564,7 +564,7 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 				if !proxy.isOrdered {
 					vals[i] = proxy.getValueRLocked(tx, recid)
 				} else {
-					vals[i] = s.t.ColumnReaderTx(tx, mc, true)(recid)
+					vals[i] = s.t.ColumnReaderTx(tx, mc, true, ReadAuto).GetValue(recid)
 				}
 			} else {
 				vals[i] = s.getDeltaValue(data, mc)
@@ -577,7 +577,7 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 		if !proxy.isOrdered {
 			return proxy.getValueRLocked(tx, recid)
 		}
-		return s.t.ColumnReaderTx(tx, s.Cols[colIdx], true)(recid)
+		return s.t.ColumnReaderTx(tx, s.Cols[colIdx], true, ReadAuto).GetValue(recid)
 	}
 	return s.getDeltaValue(data, s.Cols[colIdx])
 }

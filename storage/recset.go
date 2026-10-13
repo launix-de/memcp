@@ -595,10 +595,9 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadCompressed)
-			if _, ok := ccols[i].(*StorageComputeProxy); ok {
-				cNeedsCachedReader[i] = true
-			}
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count))
+			defer ReleaseColumnReader(cReaders[i])
+			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
 	}
@@ -656,10 +655,8 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 			for i, col := range conditionCols {
 				if getter := conditionGetters[i]; getter != nil {
 					cdataset[i] = getter(idx, 0)
-				} else if cNeedsCachedReader[i] {
-					cdataset[i] = cReaders[i].GetValue(idx)
 				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
-					cdataset[i] = ccols[i].GetValue(idx)
+					cdataset[i] = cReaders[i].GetValue(idx)
 				} else {
 					cdataset[i] = t.getDelta(int(idx-t.main_count), col)
 				}
@@ -1293,7 +1290,8 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 			continue
 		}
 		ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadCompressed)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
+		defer ReleaseColumnReader(cReaders[i])
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
@@ -1380,7 +1378,8 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 			continue
 		}
 		ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadCompressed)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
+		defer ReleaseColumnReader(cReaders[i])
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
 	var mapperStorage ShardMapReducer
@@ -1555,7 +1554,8 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadCompressed)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
+			defer ReleaseColumnReader(cReaders[i])
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
 	}

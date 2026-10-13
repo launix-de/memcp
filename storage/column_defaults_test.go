@@ -16,7 +16,7 @@ func assertInitializedColumn(t *testing.T, tbl *table, column string, value scm.
 	count := 0
 	for _, shard := range tbl.ActiveShards() {
 		release := shard.GetRead(nil)
-		read := shard.ColumnReaderTx(nil, column, false)
+		read := shard.ColumnReaderTx(nil, column, false, ReadAuto).GetValue
 		shard.mu.RLock()
 		for i := uint32(0); i < shard.main_count+uint32(len(shard.inserts)); i++ {
 			if !shard.deletions.Get(uint(i)) {
@@ -184,7 +184,7 @@ func TestAddedDefaultNullableAdapterPolicy(t *testing.T) {
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("new")}}, nil, scm.NewNil(), false, nil)
 	reloaded := reloadTableFromPersistence(t, "taddeddefaultpolicy", persistence)
 	shard := reloaded.ActiveShards()[0]
-	read := shard.ColumnReaderTx(nil, "optional", false)
+	read := shard.ColumnReaderTx(nil, "optional", false, ReadAuto).GetValue
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	if !read(0).IsNil() || read(1).Int() != 4 {
@@ -487,7 +487,7 @@ func TestAddedDefaultExpressionSurvivesNilConstantOption(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	release := shard.GetRead(nil)
 	defer release.Release()
-	read := shard.ColumnReaderTx(nil, "created", false)
+	read := shard.ColumnReaderTx(nil, "created", false, ReadAuto).GetValue
 	value := func() scm.Scmer {
 		shard.mu.RLock()
 		defer shard.mu.RUnlock()

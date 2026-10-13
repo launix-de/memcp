@@ -2743,7 +2743,21 @@ def kill_memcp_by_port(port: int) -> None:
 
 def find_free_port(start: int = 20000, end: int = 60000) -> int:
     """Find a free TCP port in the given range, trying random candidates first."""
-    candidates = random.sample(range(start, end), min(200, end - start))
+    # A probe socket is closed before startup. Do not choose listener ports
+    # that outgoing HTTP connections may claim during that gap (or a restart).
+    # Reserve the runner's API/MySQL/TDS offsets outside Linux's ephemeral range.
+    try:
+        ephemeral_start, ephemeral_end = map(
+            int, Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split(),
+        )
+    except (OSError, ValueError):
+        ephemeral_start, ephemeral_end = 49152, 65535
+    available = [
+        port for port in range(start, end)
+        if all(not ephemeral_start <= port + offset <= ephemeral_end
+               for offset in (0, 1000, 2000))
+    ]
+    candidates = random.sample(available, min(200, len(available)))
     for port in candidates:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
