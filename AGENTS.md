@@ -142,6 +142,12 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   repartition combines it with this counter outside query row loops. Schema
   checkpoints fold traffic into the existing persisted score field.
 
+- Schema snapshot producers retain their existing `database.schemalock`
+  ownership until `commitSchemaSnapshot` has registered the snapshot under
+  `saveMu`. It releases schema ownership immediately after registration,
+  before condition waits or persistence I/O. Queue order must follow schema
+  mutation order so an old rebuild cannot overwrite newer durable DDL.
+
 - `uniqueKey.NullsNotDistinct` is persisted as `nulls_not_distinct` in existing key
   metadata. It is immutable after key publication and follows the existing
   table DDL lock and uniqueness-lock protocol; it adds no scan-row state.
