@@ -1,0 +1,286 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Independently authored synthetic schema, records and query texts.
+# These specifications exercise SQL shapes, not a product schema or replay.
+metadata:
+  version: '1.0'
+  syntax: tsql
+  description: Synthetic T-SQL business reports with composite identities and nullable values
+  isolated: true
+
+setup:
+  - sql: DROP TABLE IF EXISTS tsql_report_entries
+  - sql: DROP TABLE IF EXISTS tsql_report_accounts
+  - sql: DROP TABLE IF EXISTS tsql_report_documents
+  - sql: DROP TABLE IF EXISTS tsql_report_lines
+  - sql: DROP TABLE IF EXISTS tsql_report_orders
+  - sql: DROP TABLE IF EXISTS tsql_report_catalog
+  - sql: DROP TABLE IF EXISTS tsql_report_partners
+  - sql: >-
+      CREATE TABLE tsql_report_partners (
+        tenant_code VARCHAR(8) NOT NULL, partner_ref VARCHAR(8) NOT NULL,
+        display_name NVARCHAR(40), PRIMARY KEY (tenant_code, partner_ref))
+  - sql: >-
+      INSERT INTO tsql_report_partners VALUES
+        ('A', 'p01', N'Gruppe Nord'), ('A', 'p02', N'Gruppe Süd'),
+        ('B', 'p01', N'Gruppe Ost')
+  - sql: >-
+      CREATE TABLE tsql_report_catalog (
+        sku VARCHAR(16) PRIMARY KEY, label NVARCHAR(40), family_code VARCHAR(8))
+  - sql: >-
+      INSERT INTO tsql_report_catalog VALUES
+        ('kit-x10', N'Kleines Set', 'KIT'), ('kit-x20', N'Großes Set', 'KIT'),
+        ('part-y30', N'Einzelteil', 'PART')
+  - sql: >-
+      CREATE TABLE tsql_report_orders (
+        order_ref VARCHAR(8) PRIMARY KEY, placed_at DATETIME, state_code VARCHAR(1),
+        tenant_code VARCHAR(8), partner_ref VARCHAR(8),
+        goods_amount DECIMAL(15,2), extra_amount DECIMAL(15,2), delivery_amount DECIMAL(15,2))
+  - sql: >-
+      INSERT INTO tsql_report_orders VALUES
+        ('R-100', '2028-02-20 10:15:00', 'P', 'A', 'p01', 11.50, 2.50, 4.00),
+        ('R-200', '2028-02-27 09:00:00', 'P', 'A', 'p02', 88.25, 7.50, 3.25),
+        ('R-300', '2028-03-01 14:00:00', 'F', 'A', 'p01', 43.50, 0.00, 2.00),
+        ('R-400', '2028-03-05 15:30:00', 'Q', 'B', 'p01', NULL, 0.00, 0.00)
+  - sql: >-
+      CREATE TABLE tsql_report_lines (
+        order_ref VARCHAR(8), position_code VARCHAR(3), sku VARCHAR(16),
+        quantity DECIMAL(15,4), unit_amount DECIMAL(15,4), net_amount DECIMAL(15,2),
+        PRIMARY KEY (order_ref, position_code))
+  - sql: >-
+      INSERT INTO tsql_report_lines VALUES
+        ('R-100', '010', 'kit-x10', 2.0000, 5.7500, 11.50),
+        ('R-200', '010', 'kit-x20', 3.0000, 27.5000, 82.50),
+        ('R-200', '020', 'kit-x10', 1.0000, 5.7500, 5.75),
+        ('R-200', '030', 'service', 1.0000, 7.5000, 7.50),
+        ('R-300', '010', 'part-y30', 12.0000, 3.6250, 43.50)
+  - sql: >-
+      CREATE TABLE tsql_report_documents (
+        document_ref VARCHAR(8) PRIMARY KEY, order_ref VARCHAR(8),
+        tenant_code VARCHAR(8), partner_ref VARCHAR(8), total_amount DECIMAL(15,2))
+  - sql: INSERT INTO tsql_report_documents VALUES ('D-10', 'R-300', 'A', 'p01', 45.50)
+  - sql: >-
+      CREATE TABLE tsql_report_accounts (
+        account_ref VARCHAR(8) PRIMARY KEY, account_label NVARCHAR(40))
+  - sql: INSERT INTO tsql_report_accounts VALUES ('cash', N'Zahlungsmittel'), ('income', N'Erlöse')
+  - sql: >-
+      CREATE TABLE tsql_report_entries (
+        entry_ref VARCHAR(8) PRIMARY KEY, account_ref VARCHAR(8), amount DECIMAL(15,2))
+  - sql: INSERT INTO tsql_report_entries VALUES ('E-1', 'cash', 18.00), ('E-2', 'income', -18.00)
+
+test_cases:
+  - name: Composite partner join retains tenant identity and typed text concatenation
+    sql: |
+      SELECT o.order_ref, o.placed_at,
+             p.tenant_code + ':' + p.partner_ref AS partner_key, p.display_name,
+             o.goods_amount + o.extra_amount + o.delivery_amount AS total_amount
+      FROM tsql_report_partners p
+      JOIN tsql_report_orders o
+        ON o.partner_ref=p.partner_ref AND o.tenant_code=p.tenant_code
+      WHERE o.state_code='P'
+      ORDER BY o.order_ref
+    expect:
+      rows: 2
+      data:
+        - {order_ref: R-100, placed_at: '2028-02-20 10:15:00', partner_key: 'A:p01', display_name: Gruppe Nord, total_amount: 18.00}
+        - {order_ref: R-200, placed_at: '2028-02-27 09:00:00', partner_key: 'A:p02', display_name: Gruppe Süd, total_amount: 99.00}
+
+  - name: Optional catalog join keeps service rows and ISNULL fallback
+    sql: |
+      SELECT o.order_ref, l.position_code, l.sku,
+             ISNULL(c.label, l.sku) AS line_label, l.quantity, l.unit_amount, l.net_amount
+      FROM tsql_report_lines l
+      JOIN tsql_report_orders o ON o.order_ref=l.order_ref
+      LEFT JOIN tsql_report_catalog c ON c.sku=l.sku
+      WHERE o.order_ref='R-200'
+      ORDER BY l.position_code
+    expect:
+      rows: 3
+      data:
+        - {order_ref: R-200, position_code: '010', sku: kit-x20, line_label: Großes Set, quantity: 3, unit_amount: 27.50, net_amount: 82.50}
+        - {order_ref: R-200, position_code: '020', sku: kit-x10, line_label: Kleines Set, quantity: 1, unit_amount: 5.75, net_amount: 5.75}
+        - {order_ref: R-200, position_code: '030', sku: service, line_label: service, quantity: 1, unit_amount: 7.50, net_amount: 7.50}
+
+  - name: State grouping combines CASE labels and nullable amount reduction
+    sql: |
+      SELECT state_code,
+             CASE state_code WHEN 'F' THEN N'Fertig' WHEN 'P' THEN N'Geplant'
+                             WHEN 'Q' THEN N'Wartend' ELSE N'Unbekannt' END AS state_label,
+             COUNT(*) AS order_count,
+             SUM(ISNULL(goods_amount, 0) + extra_amount) AS net_total,
+             SUM(delivery_amount) AS delivery_total
+      FROM tsql_report_orders
+      GROUP BY state_code
+      ORDER BY state_code
+    expect:
+      rows: 3
+      data:
+        - {state_code: F, state_label: Fertig, order_count: 1, net_total: 43.50, delivery_total: 2.00}
+        - {state_code: P, state_label: Geplant, order_count: 2, net_total: 109.75, delivery_total: 7.25}
+        - {state_code: Q, state_label: Wartend, order_count: 1, net_total: 0.00, delivery_total: 0.00}
+
+  - name: Correlated document membership matches the complete partner key
+    sql: |
+      SELECT p.tenant_code, p.partner_ref, p.display_name
+      FROM tsql_report_partners p
+      WHERE EXISTS (
+        SELECT 1 FROM tsql_report_documents d
+        WHERE d.partner_ref=p.partner_ref AND d.tenant_code=p.tenant_code)
+      ORDER BY p.tenant_code, p.partner_ref
+    expect:
+      rows: 1
+      data: [{tenant_code: A, partner_ref: p01, display_name: Gruppe Nord}]
+
+  - name: Stable dated page uses OFFSET and FETCH
+    sql: |
+      SELECT order_ref, placed_at FROM tsql_report_orders
+      ORDER BY placed_at, order_ref
+      OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY
+    expect:
+      rows: 2
+      data:
+        - {order_ref: R-200, placed_at: '2028-02-27 09:00:00'}
+        - {order_ref: R-300, placed_at: '2028-03-01 14:00:00'}
+
+  - name: TOP report orders by a declared numeric expression
+    sql: |
+      SELECT TOP (2) order_ref,
+             ISNULL(goods_amount, 0) + extra_amount + delivery_amount AS total_amount
+      FROM tsql_report_orders
+      ORDER BY total_amount DESC, order_ref
+    expect:
+      rows: 2
+      data: [{order_ref: R-200, total_amount: 99.00}, {order_ref: R-300, total_amount: 45.50}]
+
+  - name: Left anti join retains partners without planned orders in their own tenant
+    sql: |
+      SELECT p.tenant_code, p.partner_ref, p.display_name
+      FROM tsql_report_partners p
+      LEFT JOIN tsql_report_orders o
+        ON o.partner_ref=p.partner_ref AND o.tenant_code=p.tenant_code AND o.state_code='P'
+      WHERE o.order_ref IS NULL
+      ORDER BY p.tenant_code, p.partner_ref
+    expect:
+      rows: 1
+      data: [{tenant_code: B, partner_ref: p01, display_name: Gruppe Ost}]
+
+  - name: Window ranking separates identical partner references across tenants
+    sql: |
+      SELECT order_ref, tenant_code, partner_ref, placed_at,
+             ROW_NUMBER() OVER (PARTITION BY tenant_code, partner_ref
+                                ORDER BY placed_at DESC, order_ref) AS rank_in_partner
+      FROM tsql_report_orders
+      ORDER BY tenant_code, partner_ref, placed_at DESC, order_ref
+    expect:
+      rows: 4
+      data:
+        - {order_ref: R-300, tenant_code: A, partner_ref: p01, placed_at: '2028-03-01 14:00:00', rank_in_partner: 1}
+        - {order_ref: R-100, tenant_code: A, partner_ref: p01, placed_at: '2028-02-20 10:15:00', rank_in_partner: 2}
+        - {order_ref: R-200, tenant_code: A, partner_ref: p02, placed_at: '2028-02-27 09:00:00', rank_in_partner: 1}
+        - {order_ref: R-400, tenant_code: B, partner_ref: p01, placed_at: '2028-03-05 15:30:00', rank_in_partner: 1}
+
+  - name: Family totals count distinct orders despite repeated family lines
+    sql: |
+      SELECT c.family_code, COUNT(DISTINCT l.order_ref) AS order_count,
+             SUM(l.net_amount) AS family_total
+      FROM tsql_report_catalog c
+      JOIN tsql_report_lines l ON l.sku=c.sku
+      GROUP BY c.family_code
+      HAVING SUM(l.net_amount) > 40.00
+      ORDER BY family_total DESC
+    expect:
+      rows: 2
+      data: [{family_code: KIT, order_count: 2, family_total: 99.75}, {family_code: PART, order_count: 1, family_total: 43.50}]
+
+  - name: HAVING filters completed family aggregates without filtering their contributing lines
+    sql: |
+      SELECT c.family_code, COUNT(DISTINCT l.order_ref) AS order_count,
+             SUM(l.net_amount) AS family_total
+      FROM tsql_report_catalog c
+      JOIN tsql_report_lines l ON l.sku=c.sku
+      GROUP BY c.family_code
+      HAVING SUM(l.net_amount) > 50.00
+      ORDER BY family_total DESC
+    expect:
+      rows: 1
+      data: [{family_code: KIT, order_count: 2, family_total: 99.75}]
+
+  - name: Posting report aggregates each account with a nonzero HAVING predicate
+    sql: |
+      SELECT a.account_ref, a.account_label, SUM(e.amount) AS balance
+      FROM tsql_report_accounts a
+      JOIN tsql_report_entries e ON e.account_ref=a.account_ref
+      GROUP BY a.account_ref, a.account_label
+      HAVING SUM(e.amount) <> 0.00
+      ORDER BY a.account_ref
+    expect:
+      rows: 2
+      data: [{account_ref: cash, account_label: Zahlungsmittel, balance: 18.00}, {account_ref: income, account_label: Erlöse, balance: -18.00}]
+
+  - name: Calendar report crosses the synthetic leap day with DATEADD and DATEDIFF
+    sql: |
+      SELECT order_ref, DATEDIFF(day, placed_at, '2028-03-10 00:00:00') AS age_days,
+             DATEADD(day, 14, placed_at) AS followup_at
+      FROM tsql_report_orders WHERE order_ref='R-100'
+    expect:
+      rows: 1
+      data: [{order_ref: R-100, age_days: 19, followup_at: '2028-03-05 10:15:00'}]
+
+  - name: Catalog report extracts fixed string components
+    sql: |
+      SELECT sku, SUBSTRING(sku, 1, 3) AS prefix, RIGHT(sku, 3) AS suffix
+      FROM tsql_report_catalog ORDER BY sku
+    expect:
+      rows: 3
+      data: [{sku: kit-x10, prefix: kit, suffix: x10}, {sku: kit-x20, prefix: kit, suffix: x20}, {sku: part-y30, prefix: par, suffix: y30}]
+
+  # Negative specifications use this suite's own schema and leave it intact.
+  - name: Duplicate complete partner identity is rejected
+    sql: INSERT INTO tsql_report_partners VALUES ('A', 'p01', N'Andere Gruppe')
+    expect: {error: true}
+
+  - name: Rejected duplicate retains all distinct composite identities
+    sql: SELECT tenant_code, partner_ref, display_name FROM tsql_report_partners ORDER BY tenant_code, partner_ref
+    expect:
+      rows: 3
+      data:
+        - {tenant_code: A, partner_ref: p01, display_name: Gruppe Nord}
+        - {tenant_code: A, partner_ref: p02, display_name: Gruppe Süd}
+        - {tenant_code: B, partner_ref: p01, display_name: Gruppe Ost}
+
+  - name: Reporting cannot silently bind an undeclared column
+    sql: SELECT undeclared_total FROM tsql_report_orders
+    expect: {error: true}
+
+  # Open syntax/binding specifications; no dirty-read or deployment claim.
+  - name: NOLOCK reporting hint syntax remains an open specification
+    sql: |
+      SELECT order_ref FROM tsql_report_orders WITH (NOLOCK) WHERE order_ref='R-100'
+    expect: {rows: 1, data: [{order_ref: R-100}]}
+    noncritical: true
+
+  - name: OUTER APPLY grouped report includes the order with no lines
+    sql: |
+      SELECT o.order_ref, q.line_count, q.largest_amount
+      FROM tsql_report_orders o
+      OUTER APPLY (
+        SELECT COUNT(*) AS line_count, MAX(l.net_amount) AS largest_amount
+        FROM tsql_report_lines l WHERE l.order_ref=o.order_ref) q
+      WHERE o.state_code IN ('P', 'Q')
+      ORDER BY o.order_ref
+    expect:
+      rows: 3
+      data:
+        - {order_ref: R-100, line_count: 1, largest_amount: 11.50}
+        - {order_ref: R-200, line_count: 3, largest_amount: 82.50}
+        - {order_ref: R-400, line_count: 0, largest_amount: null}
+    noncritical: true
+
+cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_report_entries
+  - sql: DROP TABLE IF EXISTS tsql_report_accounts
+  - sql: DROP TABLE IF EXISTS tsql_report_documents
+  - sql: DROP TABLE IF EXISTS tsql_report_lines
+  - sql: DROP TABLE IF EXISTS tsql_report_orders
+  - sql: DROP TABLE IF EXISTS tsql_report_catalog
+  - sql: DROP TABLE IF EXISTS tsql_report_partners
