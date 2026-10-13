@@ -403,6 +403,8 @@ func TestForeignKeyExistenceIndexedComposite(t *testing.T) {
 	for i := 0; i < 1000; i++ {
 		rows = append(rows, []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i % 7))})
 	}
+	rows = append(rows, []scm.Scmer{scm.NewInt(1001), scm.NewNil()})
+	rows = append(rows, []scm.Scmer{scm.NewInt(1002), scm.NewInt(0)})
 	parent.Insert([]string{"a", "b"}, rows, nil, scm.NewNil(), false, nil)
 	for _, test := range []struct {
 		values []scm.Scmer
@@ -411,7 +413,8 @@ func TestForeignKeyExistenceIndexedComposite(t *testing.T) {
 		{[]scm.Scmer{scm.NewInt(999), scm.NewInt(5)}, true},
 		{[]scm.Scmer{scm.NewInt(999), scm.NewInt(4)}, false},
 		{[]scm.Scmer{scm.NewInt(1001), scm.NewInt(0)}, false},
-		{[]scm.Scmer{scm.NewInt(1001), scm.NewNil()}, true},
+		{[]scm.Scmer{scm.NewInt(1001), scm.NewNil()}, false},
+		{[]scm.Scmer{scm.NewInt(1002), scm.NewInt(0)}, true},
 	} {
 		if got := fkExistenceCheck(nil, parent, []string{"a", "b"}, test.values); got != test.want {
 			t.Fatalf("probe %v: got %v, want %v", test.values, got, test.want)
@@ -423,6 +426,37 @@ func TestForeignKeyExistenceIndexedComposite(t *testing.T) {
 	if len(shard.Indexes) == 0 {
 		t.Fatal("foreign-key probes did not expose their equality bounds to the index engine")
 	}
+}
+
+func TestForeignKeyNullableChildReferenceExemption(t *testing.T) {
+	Init(scm.Globalenv)
+	const name = "fk_nullable_child_probe"
+	CreateDatabase(name, true)
+	defer databases.Remove(name)
+	parent, _ := CreateTable(name, "parent", Memory, true)
+	parent.CreateColumn("a", "INT", nil, nil)
+	parent.CreateColumn("b", "INT", nil, nil)
+	parent.Insert([]string{"a", "b"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewNil()}}, nil, scm.NewNil(), false, nil)
+	check := scm.Globalenv.Vars["__fk_check_ref"]
+	cols := scm.NewSlice([]scm.Scmer{scm.NewString("a"), scm.NewString("b")})
+	// Any NULL component exempts a child, even if its other value is absent.
+	for _, values := range [][]scm.Scmer{
+		{scm.NewInt(999), scm.NewNil()},
+		{scm.NewNil(), scm.NewInt(999)},
+	} {
+		if result := scm.Apply(check, scm.NewString(name), scm.NewString("parent"), cols,
+			scm.NewSlice(values), scm.NewString("nullable_child"), scm.NewNil()); !result.IsNil() {
+			t.Fatalf("nullable child admission returned %v", result)
+		}
+	}
+	// A zero component is a real reference, not the parent's NULL component.
+	defer func() {
+		if recover() == nil {
+			t.Fatal("zero child incorrectly matched a NULL parent")
+		}
+	}()
+	scm.Apply(check, scm.NewString(name), scm.NewString("parent"), cols,
+		scm.NewSlice([]scm.Scmer{scm.NewInt(1), scm.NewInt(0)}), scm.NewString("nullable_child"), scm.NewNil())
 }
 
 func BenchmarkForeignKeyExistenceProbe(b *testing.B) {

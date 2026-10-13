@@ -78,8 +78,34 @@ The negative accumulator also represents the minimum int64 without overflow. */
 (define tsql_column (parser (or
 	(parser '((define alias tsql_identifier) "." (define name tsql_identifier)) '('get_column alias true name true))
 	(parser (define name tsql_identifier) '('get_column nil true name true)))))
+(define tsql_hex_literal (parser (define value sql_hex_literal)
+	(list (quote sql_type_expr) value "VARBINARY" nil)))
 (define tsql_literal (parser (or
-	(parser (atom "NULL" true) (sql_null_literal)) sql_hex_literal tsql_number tsql_string)))
+	(parser (atom "NULL" true) (sql_null_literal)) tsql_hex_literal tsql_number tsql_string)))
+/* Binary semantics are chosen from declared SQL contracts at the shared
+compile boundary. Byte equality reuses the native collation-aware operator;
+no SQL type wrapper survives into execution or storage. */
+(define tsql_binary_type? (lambda (type)
+	(has? '("BINARY" "VARBINARY" "IMAGE" "ROWVERSION" "TIMESTAMP") type)))
+(define tsql_comparison_expr (lambda (op left right)
+	(list (quote sql_compile_expr) (lambda (infos) (begin
+		(define left_info (car infos))
+		(define right_info (cadr infos))
+		(define left_type (sql_info_type left_info))
+		(define right_type (sql_info_type right_info))
+		(define head (match op "eq" (quote equal??) "ne" (quote equal??)
+			"lt" (quote <) "gt" (quote >) "le" (quote <=) "ge" (quote >=)))
+		(define comparison (if (and
+			(or (tsql_binary_type? left_type) (equal? left_type "NULL"))
+			(or (tsql_binary_type? right_type) (equal? right_type "NULL"))
+			(or (tsql_binary_type? left_type) (tsql_binary_type? right_type)))
+			(sql_info (if (has? '("eq" "ne") op)
+				(list (quote equal_collate) (sql_info_formula left_info) (sql_info_formula right_info) "bin")
+				(list (quote sql_compare) (sql_info_formula left_info) (sql_info_formula right_info)
+					(collate "bin" false) (string head))) "BOOLEAN" nil)
+			(sql_comparison_info head left_info right_info)))
+		(sql_info (if (equal? op "ne") (list (quote sql_not) (sql_info_formula comparison))
+			(sql_info_formula comparison)) "BOOLEAN" (sql_info_collation comparison)))) left right)))
 (define tsql_column_type (parser (define name tsql_identifier) (toUpper name)))
 (define tsql_storage_type (lambda (name)
 	(match name "NVARCHAR" "VARCHAR" "NCHAR" "CHAR" "BIT" "BOOLEAN" _ name)))
@@ -207,7 +233,9 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 	(if (or (>= number threshold) (<= number (- 0 threshold))) (error "decimal conversion overflow") number)))))
 (define tsql_assignment_expr (lambda (value declaration) (begin
 	(define type (toUpper (declaration "RawType")))
-	(if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type)
+	(if (has? '("ROWVERSION" "TIMESTAMP") type)
+		(error "generated version column cannot be assigned explicitly")
+		(has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type)
 		(tsql_cast_expr value type '())
 		(has? '("DECIMAL" "NUMERIC") type) (begin
 			(define dimensions (declaration "Dimensions"))
@@ -736,7 +764,7 @@ never from the first row. Unknown expression types stay text in this first slice
 			(parser ">=" "ge")
 			(parser "<" "lt")
 			(parser ">" "gt")
-		)) (define b tsql_expression2)) (sql_comparison_expr op a b))
+		)) (define b tsql_expression2)) (tsql_comparison_expr op a b))
 		(parser '((define a tsql_expression3) (atom "COLLATE" true) (define collation tsql_identifier) (atom "LIKE" true) (define b tsql_expression2)) '('strlike a b collation))
 
 		(parser '((define a tsql_expression3) (atom "LIKE" true) (define b tsql_expression2)) '('strlike a b "utf8mb4_general_ci"))
@@ -811,7 +839,7 @@ never from the first row. Unknown expression types stay text in this first slice
 
 		(parser '((atom "CASE" true) (define conditions (+ (parser '((atom "WHEN" true) (define a tsql_expression) (atom "THEN" true) (define b tsql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch tsql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
 
-		(parser '((atom "CASE" true) (define expr tsql_expression) (define conditions (+ (parser '((atom "WHEN" true) (define a tsql_expression) (atom "THEN" true) (define b tsql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch tsql_expression)) (atom "END" true)) (merge '((quote if)) (merge (extract_assoc (merge conditions) (lambda (a b) '('('equal?? expr a) b)))) '(elsebranch)))
+		(parser '((atom "CASE" true) (define expr tsql_expression) (define conditions (+ (parser '((atom "WHEN" true) (define a tsql_expression) (atom "THEN" true) (define b tsql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch tsql_expression)) (atom "END" true)) (merge '((quote if)) (merge (extract_assoc (merge conditions) (lambda (a b) (list (tsql_comparison_expr "eq" expr a) b)))) '(elsebranch)))
 
 		(parser '((atom "COUNT" true) "(" "*" ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "COUNT" (list) _over))
 		(parser '((atom "COUNT" true) "(" (define e tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "COUNT" (list e) _over))
@@ -870,7 +898,7 @@ never from the first row. Unknown expression types stay text in this first slice
 			(define n (placeholder_counter "n"))
 			(placeholder_counter "n" (+ n 1))
 			(list (quote session) (concat "v" (string (+ n 1))))))
-		sql_hex_literal
+		tsql_hex_literal
 		tsql_number
 		tsql_string
 		tsql_column

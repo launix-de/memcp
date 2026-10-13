@@ -337,4 +337,137 @@ test_cases:
   name: 'Fixture cleanup 005: DROP TABLE IF EXISTS dbo.tsql_rowversion_invalid'
 - sql: DROP TABLE IF EXISTS dbo.tsql_rowversion_empty
   name: 'Fixture cleanup 006: DROP TABLE IF EXISTS dbo.tsql_rowversion_empty'
+# Independent declared contracts keep the existing historical specifications unchanged.
+- name: Independent byte contracts fixture drop
+  sql: DROP TABLE IF EXISTS tsql_byte_contract
+- name: Independent byte contracts fixture create
+  sql: CREATE TABLE tsql_byte_contract (id INT PRIMARY KEY,a BINARY(1),b VARBINARY(4))
+- name: Independent byte contracts fixture insert
+  sql: INSERT INTO tsql_byte_contract VALUES (1,0x41,0x61),(2,0x61,0x41),(3,0xff,0xfe),(4,NULL,NULL)
+- name: 'Independent declared contract: Binary ASCII scalar equality is byte exact'
+  sql: SELECT CASE WHEN 0x41=0x61 THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: 'Independent declared contract: Invalid UTF8 binary scalars remain different'
+  sql: SELECT CASE WHEN 0xff=0xfe THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: 'Independent declared contract: Binary scalar inequality is byte exact'
+  sql: SELECT CASE WHEN 0x41<>0x61 THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: 'Independent declared contract: Binary scalar ordering uses unsigned bytes'
+  sql: SELECT CASE WHEN 0xff>0xfe AND 0x41<0x61 AND 0xff>=0xff AND 0x41<=0x41 THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: 'Independent declared contract: Binary column equality cannot fold ASCII or invalid UTF8'
+  sql: SELECT COUNT(*) AS value FROM tsql_byte_contract WHERE a=b
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: 'Independent declared contract: Derived binary columns retain byte comparison types'
+  sql: SELECT COUNT(*) AS value FROM (SELECT a,b FROM tsql_byte_contract) AS source WHERE a=b
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: 'Independent declared contract: Binary column inequality excludes null comparisons'
+  sql: SELECT id FROM tsql_byte_contract WHERE a<>b ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+- name: 'Independent declared contract: Binary equality remains exact beside a primary key predicate'
+  sql: SELECT id FROM tsql_byte_contract WHERE id=1 AND a=0x61
+  expect:
+    rows: 0
+- name: 'Independent declared contract: Binary column literal equality retains exact matching'
+  sql: SELECT id FROM tsql_byte_contract WHERE a=0x61
+  expect:
+    rows: 1
+    data:
+    - id: 2
+- name: 'Independent declared contract: Binary simple case compares exact bytes'
+  sql: SELECT CASE 0x41 WHEN 0x61 THEN 1 WHEN 0x41 THEN 2 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2
+- name: 'Independent declared contract: Binary literal equality with NULL remains unknown'
+  sql: SELECT 0x41=NULL AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: 'Independent declared contract: Binary literal inequality with NULL remains unknown'
+  sql: SELECT NULL<>0x41 AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: 'Independent declared contract: Binary literal ordering with NULL remains unknown'
+  sql: SELECT NULL<0x41 AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: 'Independent declared contract: Binary compiled plans contain only executable formulas'
+  scm: (not (regexp_test (string (parse_tsql "memcp-tests" "SELECT id FROM tsql_byte_contract WHERE a=b OR
+    a=0x41" nil nil nil)) "sql_type_expr|sql_compile_expr"))
+  expect:
+    result: true
+- name: 'Independent declared contract: Binary comparison changes preserve text case folding'
+  sql: SELECT CASE WHEN N'A'=N'a' THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Independent correlation uses the existing equality extractor
+  sql: SELECT p.id,(SELECT COUNT(*) FROM tsql_byte_contract c WHERE c.id=p.id) AS matches FROM tsql_byte_contract
+    p ORDER BY p.id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      matches: 1
+    - id: 2
+      matches: 1
+    - id: 3
+      matches: 1
+    - id: 4
+      matches: 1
+- name: Independent generated assignment fixture drop
+  sql: DROP TABLE IF EXISTS tsql_generated_contract
+- name: Independent generated assignment fixture create
+  sql: CREATE TABLE tsql_generated_contract (id INT PRIMARY KEY,val INT,rv ROWVERSION NOT NULL)
+- name: Explicit byte generated insertion rejects at compilation
+  sql: INSERT INTO tsql_generated_contract (id,val,rv) VALUES (1,10,0x01)
+  expect:
+    error: true
+    contains: generated version column cannot be assigned explicitly
+- name: Explicit NULL generated insertion rejects at compilation
+  sql: INSERT INTO tsql_generated_contract (id,val,rv) VALUES (1,10,NULL)
+  expect:
+    error: true
+    contains: generated version column cannot be assigned explicitly
+- name: Explicit unchanged generated update rejects with no matching row
+  sql: UPDATE tsql_generated_contract SET rv=rv WHERE id=-1
+  expect:
+    error: true
+    contains: generated version column cannot be assigned explicitly
+- name: Independent generated assignment fixture cleanup
+  sql: DROP TABLE tsql_generated_contract
+- name: Independent byte contracts fixture cleanup
+  sql: DROP TABLE tsql_byte_contract
 cleanup: []

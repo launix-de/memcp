@@ -605,4 +605,216 @@ test_cases:
   name: 'Fixture cleanup 017: DROP TABLE IF EXISTS dbo.tsql_fk_parent'
 - sql: DROP TABLE IF EXISTS dbo.tsql_fk_nonunique
   name: 'Fixture cleanup 018: DROP TABLE IF EXISTS dbo.tsql_fk_nonunique'
+# Independent native NULL/zero regressions avoid preceding failed fixtures.
+- name: Nullable parent independent setup 1
+  sql: DROP TABLE IF EXISTS fk_probe_child_cascade
+- name: Nullable parent independent setup 2
+  sql: DROP TABLE IF EXISTS fk_probe_child_set_null
+- name: Nullable parent independent setup 3
+  sql: DROP TABLE IF EXISTS fk_probe_child_no_action
+- name: Nullable parent independent setup 4
+  sql: DROP TABLE IF EXISTS fk_probe_parent_cascade
+- name: Nullable parent independent setup 5
+  sql: DROP TABLE IF EXISTS fk_probe_parent_set_null
+- name: Nullable parent independent setup 6
+  sql: DROP TABLE IF EXISTS fk_probe_parent_no_action
+- name: 'Nullable parent independent cascade: parent creation'
+  sql: CREATE TABLE fk_probe_parent_cascade (id INT UNIQUE)
+- name: 'Nullable parent independent cascade: child creation'
+  sql: CREATE TABLE fk_probe_child_cascade (id INT PRIMARY KEY,p INT,CONSTRAINT fk_cascade
+    FOREIGN KEY(p) REFERENCES fk_probe_parent_cascade(id) ON DELETE CASCADE ON UPDATE
+    CASCADE)
+- name: 'Nullable parent independent cascade: parent null and zero'
+  sql: INSERT INTO fk_probe_parent_cascade VALUES(NULL),(0)
+- name: 'Nullable parent independent cascade: child exempt and zero'
+  sql: INSERT INTO fk_probe_child_cascade VALUES(1,NULL),(2,0)
+- name: 'Nullable parent independent cascade: null parent changes independently'
+  sql: UPDATE fk_probe_parent_cascade SET id=1 WHERE id IS NULL
+- name: 'Nullable parent independent cascade: exempt and zero unchanged'
+  sql: SELECT id,p FROM fk_probe_child_cascade ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      p: null
+    - id: 2
+      p: 0
+- name: 'Nullable parent independent cascade: zero parent to null'
+  sql: UPDATE fk_probe_parent_cascade SET id=NULL WHERE id=0
+- name: 'Nullable parent independent cascade: expected child transition'
+  sql: SELECT id,p FROM fk_probe_child_cascade ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      p: null
+    - id: 2
+      p: null
+- name: 'Nullable parent independent set_null: parent creation'
+  sql: CREATE TABLE fk_probe_parent_set_null (id INT UNIQUE)
+- name: 'Nullable parent independent set_null: child creation'
+  sql: CREATE TABLE fk_probe_child_set_null (id INT PRIMARY KEY,p INT,CONSTRAINT fk_set_null
+    FOREIGN KEY(p) REFERENCES fk_probe_parent_set_null(id) ON DELETE SET NULL ON UPDATE
+    SET NULL)
+- name: 'Nullable parent independent set_null: parent null and zero'
+  sql: INSERT INTO fk_probe_parent_set_null VALUES(NULL),(0)
+- name: 'Nullable parent independent set_null: child exempt and zero'
+  sql: INSERT INTO fk_probe_child_set_null VALUES(1,NULL),(2,0)
+- name: 'Nullable parent independent set_null: null parent changes independently'
+  sql: UPDATE fk_probe_parent_set_null SET id=1 WHERE id IS NULL
+- name: 'Nullable parent independent set_null: exempt and zero unchanged'
+  sql: SELECT id,p FROM fk_probe_child_set_null ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      p: null
+    - id: 2
+      p: 0
+- name: 'Nullable parent independent set_null: zero parent to null'
+  sql: UPDATE fk_probe_parent_set_null SET id=NULL WHERE id=0
+- name: 'Nullable parent independent set_null: expected child transition'
+  sql: SELECT id,p FROM fk_probe_child_set_null ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      p: null
+    - id: 2
+      p: null
+- name: 'Nullable parent independent no_action: parent creation'
+  sql: CREATE TABLE fk_probe_parent_no_action (id INT UNIQUE)
+- name: 'Nullable parent independent no_action: child creation'
+  sql: CREATE TABLE fk_probe_child_no_action (id INT PRIMARY KEY,p INT,CONSTRAINT
+    fk_no_action FOREIGN KEY(p) REFERENCES fk_probe_parent_no_action(id) ON DELETE
+    NO ACTION ON UPDATE NO ACTION)
+- name: 'Nullable parent independent no_action: parent null and zero'
+  sql: INSERT INTO fk_probe_parent_no_action VALUES(NULL),(0)
+- name: 'Nullable parent independent no_action: child exempt and zero'
+  sql: INSERT INTO fk_probe_child_no_action VALUES(1,NULL),(2,0)
+- name: 'Nullable parent independent no_action: null parent changes independently'
+  sql: UPDATE fk_probe_parent_no_action SET id=1 WHERE id IS NULL
+- name: 'Nullable parent independent no_action: exempt and zero unchanged'
+  sql: SELECT id,p FROM fk_probe_child_no_action ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      p: null
+    - id: 2
+      p: 0
+- name: 'Nullable parent independent no_action: zero parent to null'
+  sql: UPDATE fk_probe_parent_no_action SET id=NULL WHERE id=0
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: 'Nullable parent independent no_action: expected child transition'
+  sql: SELECT id,p FROM fk_probe_child_no_action ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      p: null
+    - id: 2
+      p: 0
+- name: Nullable parent independent cleanup 1
+  sql: DROP TABLE IF EXISTS fk_probe_child_cascade
+- name: Nullable parent independent cleanup 2
+  sql: DROP TABLE IF EXISTS fk_probe_child_set_null
+- name: Nullable parent independent cleanup 3
+  sql: DROP TABLE IF EXISTS fk_probe_child_no_action
+- name: Nullable parent independent cleanup 4
+  sql: DROP TABLE IF EXISTS fk_probe_parent_cascade
+- name: Nullable parent independent cleanup 5
+  sql: DROP TABLE IF EXISTS fk_probe_parent_set_null
+- name: Nullable parent independent cleanup 6
+  sql: DROP TABLE IF EXISTS fk_probe_parent_no_action
+- name: Zero parent independent setup 1
+  sql: DROP TABLE IF EXISTS fk_zero_child_cascade
+- name: Zero parent independent setup 2
+  sql: DROP TABLE IF EXISTS fk_zero_only_cascade
+- name: Zero parent independent setup 3
+  sql: DROP TABLE IF EXISTS fk_zero_child_set_null
+- name: Zero parent independent setup 4
+  sql: DROP TABLE IF EXISTS fk_zero_only_set_null
+- name: Zero parent independent setup 5
+  sql: DROP TABLE IF EXISTS fk_zero_child_no_action
+- name: Zero parent independent setup 6
+  sql: DROP TABLE IF EXISTS fk_zero_only_no_action
+- name: 'Zero parent independent cascade: parent creation'
+  sql: CREATE TABLE fk_zero_only_cascade (id INT UNIQUE)
+- name: 'Zero parent independent cascade: child creation'
+  sql: CREATE TABLE fk_zero_child_cascade (id INT PRIMARY KEY,p INT,CONSTRAINT fk_zero_cascade
+    FOREIGN KEY(p) REFERENCES fk_zero_only_cascade(id) ON UPDATE CASCADE)
+- name: 'Zero parent independent cascade: parent zero'
+  sql: INSERT INTO fk_zero_only_cascade VALUES(0)
+- name: 'Zero parent independent cascade: child zero and exempt'
+  sql: INSERT INTO fk_zero_child_cascade VALUES(1,0),(2,NULL)
+- name: 'Zero parent independent cascade: zero to null'
+  sql: UPDATE fk_zero_only_cascade SET id=NULL WHERE id=0
+- name: 'Zero parent independent cascade: references remain valid'
+  sql: SELECT id,p FROM fk_zero_child_cascade ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      p: null
+    - id: 2
+      p: null
+- name: 'Zero parent independent set_null: parent creation'
+  sql: CREATE TABLE fk_zero_only_set_null (id INT UNIQUE)
+- name: 'Zero parent independent set_null: child creation'
+  sql: CREATE TABLE fk_zero_child_set_null (id INT PRIMARY KEY,p INT,CONSTRAINT fk_zero_set_null
+    FOREIGN KEY(p) REFERENCES fk_zero_only_set_null(id) ON UPDATE SET NULL)
+- name: 'Zero parent independent set_null: parent zero'
+  sql: INSERT INTO fk_zero_only_set_null VALUES(0)
+- name: 'Zero parent independent set_null: child zero and exempt'
+  sql: INSERT INTO fk_zero_child_set_null VALUES(1,0),(2,NULL)
+- name: 'Zero parent independent set_null: zero to null'
+  sql: UPDATE fk_zero_only_set_null SET id=NULL WHERE id=0
+- name: 'Zero parent independent set_null: references remain valid'
+  sql: SELECT id,p FROM fk_zero_child_set_null ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      p: null
+    - id: 2
+      p: null
+- name: 'Zero parent independent no_action: parent creation'
+  sql: CREATE TABLE fk_zero_only_no_action (id INT UNIQUE)
+- name: 'Zero parent independent no_action: child creation'
+  sql: CREATE TABLE fk_zero_child_no_action (id INT PRIMARY KEY,p INT,CONSTRAINT fk_zero_no_action
+    FOREIGN KEY(p) REFERENCES fk_zero_only_no_action(id) ON UPDATE NO ACTION)
+- name: 'Zero parent independent no_action: parent zero'
+  sql: INSERT INTO fk_zero_only_no_action VALUES(0)
+- name: 'Zero parent independent no_action: child zero and exempt'
+  sql: INSERT INTO fk_zero_child_no_action VALUES(1,0),(2,NULL)
+- name: 'Zero parent independent no_action: zero to null'
+  sql: UPDATE fk_zero_only_no_action SET id=NULL WHERE id=0
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: 'Zero parent independent no_action: references remain valid'
+  sql: SELECT id,p FROM fk_zero_child_no_action ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      p: 0
+    - id: 2
+      p: null
+- name: Zero parent independent cleanup 1
+  sql: DROP TABLE IF EXISTS fk_zero_child_cascade
+- name: Zero parent independent cleanup 2
+  sql: DROP TABLE IF EXISTS fk_zero_only_cascade
+- name: Zero parent independent cleanup 3
+  sql: DROP TABLE IF EXISTS fk_zero_child_set_null
+- name: Zero parent independent cleanup 4
+  sql: DROP TABLE IF EXISTS fk_zero_only_set_null
+- name: Zero parent independent cleanup 5
+  sql: DROP TABLE IF EXISTS fk_zero_child_no_action
+- name: Zero parent independent cleanup 6
+  sql: DROP TABLE IF EXISTS fk_zero_only_no_action
+
 cleanup: []
