@@ -17,7 +17,7 @@ metadata:
   # Seven complete A/B pairs take about ten minutes on CI. Keep this suite
   # above the other workers' current combined weight so it remains alone;
   # all cases and original verification pairs stay intact.
-  performance_shard_weight: 128
+  performance_shard_weight: 192
   version: "1.0"
   description: "Unselective scalar ORDER LIMIT late projection"
   isolated: true

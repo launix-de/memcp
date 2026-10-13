@@ -1,7 +1,8 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
-  performance_shard_weight: 4
+  # Reserve capacity for all seven original fresh-fixture verification pairs.
+  performance_shard_weight: 100
   version: "1.0"
   description: "Repeated skewed filters train cardinality estimates before join planning"
   isolated: true
