@@ -3451,6 +3451,119 @@ func (t *table) nextUniqueConstraint(columns []string, idx int) int {
 	return idx
 }
 
+// uniquePendingKeys tracks only the not-yet-written prefix of one constraint.
+// Hashing narrows candidate comparisons; Equal remains the membership proof.
+// Mixed coercing columns omit their hash component because Equal's cross-type
+// conversions do not define a general hash equivalence (e.g. numeric-prefix
+// strings). The other columns can still narrow candidate comparisons.
+type uniquePendingKeys struct {
+	rows      [][]scm.Scmer
+	positions []int
+	heads     map[uint64]int
+	next      []int
+	families  []uint8
+}
+
+func newUniquePendingKeys(rows [][]scm.Scmer, positions []int, compareNulls bool) uniquePendingKeys {
+	pending := uniquePendingKeys{rows: rows, positions: positions}
+	if len(rows) < 2 {
+		return pending
+	}
+	pending.heads = make(map[uint64]int, len(rows))
+	pending.next = make([]int, len(rows))
+	pending.families = make([]uint8, len(positions))
+	for i, position := range positions {
+		if position < 0 {
+			continue
+		}
+		family := uint8(0)
+		hasNull := false
+		for _, row := range rows {
+			value := row[position]
+			kind := uint8(0)
+			switch {
+			case value.IsNil():
+				hasNull = true
+				continue
+			case value.IsInt(), value.IsFloat():
+				kind = 1
+			case value.IsString():
+				kind = 2
+			case value.IsSymbol():
+				kind = 3
+			case value.IsBool():
+				kind = 4
+			case value.IsDate():
+				kind = 5
+			}
+			if kind == 0 || (family != 0 && family != kind) {
+				family = 0
+				break
+			}
+			family = kind
+		}
+		if hasNull && compareNulls {
+			switch family {
+			case 2:
+				// Equal compares nil with text through Bool. Keep every falsy
+				// spelling in nil's bucket without collapsing text equality.
+				family = 6
+			case 3, 5:
+				family = 0
+			}
+		}
+		pending.families[i] = family
+	}
+	return pending
+}
+
+func (p *uniquePendingKeys) remember(rowIndex int, key []scm.Scmer) bool {
+	if p.heads == nil {
+		return false
+	}
+	hash := uint64(0)
+	for i, value := range key {
+		switch p.families[i] {
+		case 0:
+			continue
+		case 1:
+			if value.IsNil() {
+				value = scm.NewInt(0)
+			}
+		case 2, 6:
+			text := ""
+			if !value.IsNil() && (p.families[i] != 6 || value.Bool()) {
+				text = scm.String(value)
+			}
+			value = scm.NewString(text)
+		case 4:
+			if value.IsNil() {
+				value = scm.NewBool(false)
+			}
+		}
+		hash = (hash ^ scm.HashKey(value)) * 1099511628211
+	}
+	for previous := p.heads[hash] - 1; previous >= 0; previous = p.next[previous] {
+		matched := true
+		for i, position := range p.positions {
+			value := scm.NewNil()
+			if position >= 0 {
+				value = p.rows[previous][position]
+			}
+			if !scm.Equal(value, key[i]) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	p.next[rowIndex] = p.heads[hash] - 1
+	p.heads[hash] = rowIndex + 1
+	return false
+}
+
 func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext) {
 	guard := t.guardUniqueWrites(columns, values, mergeNull, idx)
 	guard.lock()
@@ -3570,6 +3683,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 			}
 		}
 
+		pending := newUniquePendingKeys(values, keyIdx, compareNulls)
 		last_j := 0
 		for j, row := range values {
 			shardlist2 := shardlist
@@ -3584,6 +3698,18 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 				// only one shard to visit for unique check
 				shardlist2 = []*storageShard{shardlist[computeShardIndex(dimensions, pruningVals)]} // (TODO: array pruning)
 			}
+			if pending.remember(j, key) {
+				// Publish the unwritten prefix through every remaining constraint
+				// before probing this key again. A later constraint may reject it.
+				nextConstraint := idx + 1
+				if checkedVersion != guard.version {
+					nextConstraint = 0 // a callback admitted other writers; recheck keys
+				}
+				t.processUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, nextConstraint, currentTx, guard)
+				last_j = j
+				clear(pending.heads)
+				pending.remember(j, key)
+			}
 			for _, s := range shardlist2 {
 				uid, present := s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true)
 				if present {
@@ -3596,6 +3722,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 						t.processUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, nextConstraint, currentTx, guard) // flush
 					}
 					last_j = j + 1
+					clear(pending.heads)
 					guard.unlock()
 					params := make([]scm.Scmer, len(onCollisionCols))
 					for i, p := range onCollisionCols {

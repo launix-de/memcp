@@ -109,6 +109,13 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- `storageShard.rollbackProtected` also reserves UNIQUE keys of hidden
+  transaction-owned rows. DML key probes reject a foreign reservation with a
+  serialization error; ordinary reads and DDL validation keep their visibility
+  rules. Only the owning transaction may reuse a hidden old version's key.
+  Commit, rollback, savepoint rollback and definite commit failure release
+  reservations through the existing shard lock and rebuild visibility-forwarding
+  protocol. No reservation directory is retained or persisted.
 - `table.Auto_increment` uses the same atomic reservation for native INSERT
   and `reserve_ids`, once per batch/block. Runtime counter snapshots and DDL
   updates are atomic; loading unpublished table objects owns initialization.
