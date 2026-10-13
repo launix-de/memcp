@@ -241,11 +241,19 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 /* The default character contract is NCHAR(1), without a supplementary-character
 collation. SQL conversion and range decisions stay here; the runtime operator
 only encodes Unicode scalars. Isolated surrogate code units are unsupported. */
-(define tsql_nchar (lambda (value) (if (nil? value) nil (begin
-	(define code (tsql_cast_integer value -2147483648 2147483647))
+(define tsql_nchar (lambda (value round_input) (if (nil? value) nil (begin
+	(define code (tsql_cast_integer (if round_input (round value) value) -2147483648 2147483647))
 	(if (or (< code 0) (> code 65535)) nil (unicode_char code))))))
 (define tsql_nchar_expr (lambda (value)
-	(list (quote sql_type_expr) (list tsql_nchar value) "NCHAR" nil)))
+	(list (quote sql_compile_expr) (lambda (infos) (begin
+		(define info (car infos))
+		(define type (tsql_addition_type (sql_info_type info)))
+		/* Implicit INT conversion is a SQL decision. Money rounds; other numeric
+		inputs truncate. Temporal carriers never become integer codes. */
+		(if (has? '("NULL" "BIT" "TINYINT" "SMALLINT" "INT" "BIGINT" "REAL" "FLOAT"
+			"DECIMAL" "MONEY" "SMALLMONEY" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type) true
+			(error "NCHAR requires an implicitly convertible integer expression"))
+		(sql_info (list tsql_nchar (sql_info_formula info) (has? '("MONEY" "SMALLMONEY") type)) "NCHAR" nil))) value)))
 /* Export-style day/month/year spelling is a frontend concern. Parse into Unix
 seconds with the existing date primitives; no temporal runtime type is added.
 Two-digit years use the default 1950..2049 window. Fractional precision and the

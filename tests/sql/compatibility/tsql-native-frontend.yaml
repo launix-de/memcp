@@ -6,8 +6,8 @@ metadata:
   description: T-SQL grammar reuses native DDL, defaults and query planning
 setup:
   - sql: DROP TABLE IF EXISTS tsql_setup_memo
-  - sql: CREATE TABLE tsql_setup_memo (id INT PRIMARY KEY, note NVARCHAR(200), code INT)
-  - sql: INSERT INTO tsql_setup_memo VALUES (1,N'pending',13),(2,NULL,NULL),(3,N'pending',228)
+  - sql: CREATE TABLE tsql_setup_memo (id INT PRIMARY KEY, note NVARCHAR(200), code INT, money_code MONEY, smallmoney_code SMALLMONEY, date_code DATE, time_code TIME, datetime_code DATETIME)
+  - sql: INSERT INTO tsql_setup_memo (id,note,code,money_code,smallmoney_code) VALUES (1,N'pending',13,65.9,65.9),(2,NULL,NULL,NULL,NULL),(3,N'pending',228,65.5,65.4)
   - sql: DROP TABLE IF EXISTS tsql_unary_contract
   - sql: CREATE TABLE tsql_unary_contract(id INT PRIMARY KEY,value TINYINT)
   - sql: INSERT INTO tsql_unary_contract VALUES (1,255)
@@ -80,6 +80,34 @@ test_cases:
   - name: National character invalid integer text fails
     sql: SELECT NCHAR(N'13x') AS value
     expect: {error: true}
+  - name: National character money inputs use declared rounding rules
+    sql: SELECT id,NCHAR(money_code) AS money_value,NCHAR(smallmoney_code) AS smallmoney_value FROM tsql_setup_memo ORDER BY id
+    expect: {rows: 3, data: [{id: 1, money_value: B, smallmoney_value: B}, {id: 2, money_value: null, smallmoney_value: null}, {id: 3, money_value: B, smallmoney_value: A}]}
+  - name: National character derived projection retains money conversion rules
+    sql: SELECT NCHAR(value) AS value FROM (SELECT money_code AS value FROM tsql_setup_memo WHERE id=1) AS projected
+    expect: {rows: 1, data: [{value: B}]}
+  - name: National character aggregate retains declared money conversion rules
+    sql: SELECT NCHAR(SUM(money_code)) AS value FROM tsql_setup_memo WHERE id=1
+    expect: {rows: 1, data: [{value: B}]}
+  - name: National character coalesce retains declared money conversion rules
+    noncritical: true
+    sql: SELECT NCHAR(COALESCE(money_code,0)) AS value FROM tsql_setup_memo WHERE id=1
+    expect: {rows: 1, data: [{value: B}]}
+  - name: National character DATE input cannot inherit its NULL carrier type
+    sql: SELECT NCHAR(date_code) AS value FROM tsql_setup_memo
+    expect: {error: true, contains: implicitly convertible integer expression}
+  - name: National character TIME input cannot inherit its NULL carrier type
+    sql: SELECT NCHAR(time_code) AS value FROM tsql_setup_memo
+    expect: {error: true, contains: implicitly convertible integer expression}
+  - name: National character DATETIME requires explicit integer conversion
+    sql: SELECT NCHAR(datetime_code) AS value FROM tsql_setup_memo
+    expect: {error: true, contains: implicitly convertible integer expression}
+  - name: National character invalid input contract fails even with no rows
+    sql: SELECT NCHAR(date_code) AS value FROM tsql_setup_memo WHERE id=-1
+    expect: {error: true, contains: implicitly convertible integer expression}
+  - name: National character description validates its declared input contract
+    scm: '(tds_describe "memcp-tests" "SELECT TOP(0) NCHAR(date_code) AS value FROM tsql_setup_memo" "" (newsession))'
+    expect: {error: true, contains: implicitly convertible integer expression}
   - name: National character input reads native declared columns
     sql: SELECT id,NCHAR(code) AS value FROM tsql_setup_memo ORDER BY id
     expect: {rows: 3, data: [{id: 1, value: "\r"}, {id: 2, value: null}, {id: 3, value: ä}]}
