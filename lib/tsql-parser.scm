@@ -74,21 +74,25 @@ The negative accumulator also represents the minimum int64 without overflow. */
 	(parser '("[" (define id (regex "(?:[^\\]]|\\]\\])+" false false)) "]") (replace id "]]" "]"))
 	(parser '("\"" (define id (regex "(?:[^\"]|\"\")+" false false)) "\"") (replace id "\"\"" "\"")))))
 (define tsql_identifier (parser (or tsql_identifier_quoted tsql_identifier_unquoted)))
-(define tsql_string (parser '((or (atom "N'" true) (atom "'" false))
+(define tsql_string_token (parser '((define national (or
+	(parser (atom "N'" true) true) (parser (atom "'" false) false)))
 	(define value (regex "(?:''|[^'])*" false false)) (atom "'" false false))
-	(replace value "''" "'")))
+	(list (replace value "''" "'") national)))
+(define tsql_string (parser (define token tsql_string_token) (car token)))
+(define tsql_text_literal (parser (define token tsql_string_token)
+	(list (quote sql_type_expr) (car token) (if (cadr token) "NVARCHAR" "VARCHAR") nil)))
 (define tsql_column (parser (or
 	(parser '((define alias tsql_identifier) "." (define name tsql_identifier)) '('get_column alias true name true))
 	(parser (define name tsql_identifier) '('get_column nil true name true)))))
 (define tsql_hex_literal (parser (define value sql_hex_literal)
 	(list (quote sql_type_expr) value "VARBINARY" nil)))
 (define tsql_literal (parser (or
-	(parser (atom "NULL" true) (sql_null_literal)) tsql_hex_literal tsql_number tsql_string)))
+	(parser (atom "NULL" true) (sql_null_literal)) tsql_hex_literal tsql_number tsql_text_literal)))
 /* Binary semantics are chosen from declared SQL contracts at the shared
 compile boundary. Byte equality reuses the native collation-aware operator;
 no SQL type wrapper survives into execution or storage. */
 (define tsql_binary_type? (lambda (type)
-	(has? '("BINARY" "VARBINARY" "IMAGE" "ROWVERSION" "TIMESTAMP") type)))
+	(has? '("BINARY" "VARBINARY" "IMAGE" "ROWVERSION") type)))
 (define tsql_comparison_expr (lambda (op left right)
 	(list (quote sql_compile_expr) (lambda (infos) (begin
 		(define left_info (car infos))
@@ -110,7 +114,9 @@ no SQL type wrapper survives into execution or storage. */
 			(sql_info_formula comparison)) "BOOLEAN" (sql_info_collation comparison)))) left right)))
 (define tsql_column_type (parser (define name tsql_identifier) (toUpper name)))
 (define tsql_storage_type (lambda (name)
-	(match name "NVARCHAR" "VARCHAR" "NCHAR" "CHAR" "BIT" "BOOLEAN" _ name)))
+	/* Text declarations remain native metadata. Storage chooses its value
+	encoding independently; the frontend owns national-character width. */
+	(match name "BIT" "BOOLEAN" "TIMESTAMP" "ROWVERSION" _ name)))
 (define tsql_type_dimensions (parser (or
 	(parser '("(" (atom "MAX" true) ")") (list -1))
 	(parser '("(" (define precision tsql_int) "," (define scale tsql_int) ")") (list precision scale))
@@ -188,6 +194,24 @@ runtime and storage hot paths; do not substitute float64 for exact casts. */
 		(if (or (nil? integer) (< integer minimum) (> integer maximum))
 			(error "integer conversion overflow") integer)))))
 (define tsql_cast_float (lambda (value) (if (nil? value) nil (simplify (tsql_numeric_input value)))))
+(define tsql_cast_decimal (lambda (value precision scale) (if (nil? value) nil (begin
+	/* The declaration selects the integer carrier for scale zero. Preserve an
+	already integral input rather than route it through floating-point round. */
+	(define number (if (and (string? value) (regexp_test (sql_trim value) "^[+-]?[0-9]+$"))
+		(tsql_parse_integer value) (tsql_numeric_input value)))
+	(define converted (if (equal? scale 0)
+		(tsql_cast_integer (if (int? number) number (round number))
+			(tsql_parse_integer "-9223372036854775808") (tsql_parse_integer "9223372036854775807"))
+		(if (<= scale 15) (sql_decimal_output number scale)
+			(error "decimal scale exceeds native numeric precision"))))
+	(define bound (simplify (concat "1e" (- precision scale))))
+	(if (and (> converted (- 0 bound)) (< converted bound)) converted
+		(error "decimal conversion overflow"))))))
+(define tsql_cast_binary (lambda (value length fixed) (if (nil? value) nil (begin
+	(if (string? value) true (error "numeric binary conversion is not implemented"))
+	(define bytes (if (or (equal? length -1) (<= (strlen value) length)) value (substr value 0 length)))
+	(if (and fixed (< (strlen bytes) length))
+		(concat bytes (string_repeat (hex2bin "00") (- length (strlen bytes)))) bytes)))))
 (define tsql_cast_bit (lambda (value)
 	(if (nil? value) nil
 		(if (and (string? value) (equal? (toUpper (sql_trim value)) "TRUE")) true
@@ -204,6 +228,11 @@ fast path avoids splitting the ordinary short numeric/text conversions. */
 			(if (< (car prefix) units) (list 0 (cadr prefix))
 				(list (- (car prefix) units) (concat (cadr prefix) character)))))
 			(list length ""))))))))
+(define tsql_cast_fixed_text (lambda (value length national) (if (nil? value) nil (begin
+	(define text (tsql_cast_text value length national))
+	(define units (if national (reduce (split text "") (lambda (count character)
+		(+ count (if (equal? (strlen character) 4) 2 1))) 0) (strlen text)))
+	(concat text (string_repeat " " (- length units)))))))
 /* A cast keeps its syntax-declared SQL type until the shared expression
 compiler consumes the (expr, type, collation) contract. Runtime values do not
 select that type, and no arithmetic operation is needed merely to mark it. */
@@ -222,10 +251,36 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		dialect precision boundaries remain noncritical compatibility work. */
 		"REAL" (list tsql_cast_float value)
 		"BIT" (list tsql_cast_bit value)
-		"VARCHAR" (tsql_cast_text_expr value dimensions false)
-		"NVARCHAR" (tsql_cast_text_expr value dimensions true)
+		"DECIMAL" (tsql_cast_decimal_expr value name dimensions)
+		"NUMERIC" (tsql_cast_decimal_expr value name dimensions)
+		"BINARY" (tsql_cast_binary_expr value dimensions true)
+		"VARBINARY" (tsql_cast_binary_expr value dimensions false)
+		"VARCHAR" (tsql_cast_text_expr value dimensions false false)
+		"NVARCHAR" (tsql_cast_text_expr value dimensions true false)
+		"CHAR" (tsql_cast_text_expr value dimensions false true)
+		"NCHAR" (tsql_cast_text_expr value dimensions true true)
 		_ (error "unsupported conversion to " name)))
 	(list (quote sql_type_expr) formula name nil))))
+(define tsql_cast_decimal_expr (lambda (value type dimensions) (begin
+	(define dims (tsql_decl_dimensions type dimensions))
+	(list (quote sql_compile_expr) (lambda (infos) (begin
+		(define input (car infos))
+		(define input_type (sql_info_type input))
+		(if (or (sql_numeric_type? input_type)
+			(has? '("NULL" "any" "MONEY" "SMALLMONEY" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT") input_type)) true
+			(error "decimal conversion from " input_type " is not implemented"))
+		(sql_info (list (quote tsql_cast_decimal) (sql_info_formula input) (car dims) (cadr dims)) type nil))) value))))
+(define tsql_cast_binary_expr (lambda (value dimensions fixed) (begin
+	(define length (car (tsql_decl_dimensions (if fixed "BINARY" "VARBINARY")
+		(if (empty_list? dimensions) '(30) dimensions))))
+	(list (quote sql_compile_expr) (lambda (infos) (begin
+		(define input (car infos))
+		/* Text requires its declared encoding, and numeric values have another
+		padding direction. Refuse those shapes rather than guess from strings. */
+		(if (or (tsql_binary_type? (sql_info_type input)) (has? '("NULL" "any") (sql_info_type input))) true
+			(error "binary conversion from " (sql_info_type input) " is not implemented"))
+		(sql_info (list (quote tsql_cast_binary) (sql_info_formula input) length fixed)
+			(if fixed "BINARY" "VARBINARY") nil))) value))))
 /* Assignment contracts come from native column declarations at compile time.
 Integer narrowing is an ordinary frontend cast. Existing native decimal scale
 normalization remains in use; this guard rejects overflow, including carry from
@@ -235,10 +290,12 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 	(if (or (>= number threshold) (<= number (- 0 threshold))) (error "decimal conversion overflow") number)))))
 (define tsql_assignment_expr (lambda (value declaration) (begin
 	(define type (toUpper (declaration "RawType")))
-	(if (has? '("ROWVERSION" "TIMESTAMP") type)
+	(if (equal? type "ROWVERSION")
 		(error "generated version column cannot be assigned explicitly")
 		(has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type)
 		(tsql_cast_expr value type '())
+		(has? '("NVARCHAR" "NCHAR") type)
+		(tsql_cast_expr value type (declaration "Dimensions"))
 		(has? '("DECIMAL" "NUMERIC") type) (begin
 			(define dimensions (declaration "Dimensions"))
 			(define precision (if (empty_list? dimensions) 18 (car dimensions)))
@@ -256,7 +313,7 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 	(map columns (lambda (name) (begin
 		(define declaration (find declarations (lambda (column) (equal?? (column "Field") name)) nil))
 		(if (nil? declaration) (error "unknown INSERT column: " name) declaration)))))))
-(define tsql_cast_text_expr (lambda (value dimensions national) (begin
+(define tsql_cast_text_expr (lambda (value dimensions national fixed) (begin
 	/* Resolve the operand at the shared compile boundary, where its sources
 	and SQL contract are known. A parser-local walk would lose column types. */
 	(define length (if (empty_list? dimensions) 30 (car dimensions)))
@@ -266,8 +323,9 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 		(if (and (plain_literal_expr? formula) (sql_numeric_type? (sql_info_type info))
 			(not (equal? length -1)) (> (strlen (string formula)) length))
 			(error "numeric character conversion overflow") true)
-		(sql_info (list (quote tsql_cast_text) formula length national)
-			(if national "NVARCHAR" "VARCHAR") (sql_info_collation info)))) value))))
+		(sql_info (list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national)
+			(if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR")
+			(sql_info_collation info)))) value))))
 /* The default character contract is NCHAR(1), without a supplementary-character
 collation. SQL conversion and range decisions stay here; the runtime operator
 only encodes Unicode scalars. Isolated surrogate code units are unsupported. */
@@ -742,6 +800,36 @@ Only the selected native operation survives the shared compile boundary. */
 			(sql_merge_collation collation (sql_info_collation info))) nil))))))
 (define tsql_add_expr (lambda (left right)
 	(list (quote sql_compile_expr) tsql_compile_addition left right)))
+(define tsql_integer_divide (lambda (left right)
+	(if (or (nil? left) (nil? right)) nil
+		(equal? right 0) (error "division by zero")
+		(and (equal? left (tsql_parse_integer "-9223372036854775808")) (equal? right -1))
+		(error "integer division overflow")
+		(intdiv left right))))
+(define tsql_fractional_divide (lambda (left right)
+	(if (or (nil? left) (nil? right)) nil
+		(equal? right 0) (error "division by zero")
+		(/ left right))))
+(define tsql_divide_expr (lambda (left right)
+	(list (quote sql_compile_expr) (lambda (infos) (begin
+		(define types (map infos (lambda (info) (tsql_addition_type (sql_info_type info)))))
+		(define active (filter types (lambda (type) (not (equal? type "NULL")))))
+		(define target (if (empty_list? active) "INT"
+			(find tsql_addition_numeric_types (lambda (type) (has? active type)) nil)))
+		(if (or (nil? target) (equal? target "BIT")
+			(not (reduce active (lambda (valid type) (and valid
+				(or (has? tsql_addition_numeric_types type) (has? tsql_addition_text_types type)))) true)))
+			(error "unsupported SQL operands for /") true)
+		(define integer (has? '("BIGINT" "INT" "SMALLINT" "TINYINT") target))
+		(define operands (map infos (lambda (info)
+			(if (has? tsql_addition_text_types (tsql_addition_type (sql_info_type info)))
+				(sql_type_formula '() (tsql_cast_expr (sql_info_formula info)
+					(if integer target "FLOAT") '())) (sql_info_formula info)))))
+		(define formula (cons (if integer (quote tsql_integer_divide) (quote tsql_fractional_divide)) operands))
+		(sql_info (if integer (sql_type_formula '() (tsql_cast_expr formula target '())) formula) target nil))) left right)))
+(define tsql_fold_multiplicative (lambda (acc term) (match term
+	'("divide" value) (tsql_divide_expr acc value)
+	_ (sql_fold_multiplicative_term acc term))))
 (define tsql_fold_additive (lambda (acc term) (match term
 	'("add" value) (tsql_add_expr acc value)
 	_ (sql_fold_additive_term acc term))))
@@ -778,17 +866,61 @@ Dimension merging and exact decimal precision are separate frontend work. */
 
 /* Explicit wire descriptors come from the existing SQL expression metadata,
 never from the first row. Unknown expression types stay text in this first slice. */
-(define tsql_result_columns (lambda (query) (match query
+/* Width/scale originate in declaration syntax, never in the first output row.
+The shared expression compiler still owns the SQL type; these additional wire
+dimensions are metadata only and are absent from the executable plan. */
+(define tsql_result_dimensions (lambda (sources expression parameters) (match expression
+	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
+	((symbol tsql_cast_decimal) _value precision scale) (list precision scale)
+	((symbol tsql_read_identity) _state) '(38 0)
+	((symbol tsql_cast_binary) _value length _fixed) (list length)
+	((symbol tsql_cast_text) _value length _national) (list length)
+	((symbol tsql_cast_fixed_text) _value length _national) (list length)
+	((symbol hex2bin) hex) (if (string? hex) (list (intdiv (strlen hex) 2)) nil)
+	((symbol session) key) (begin
+		(define declaration (find parameters (lambda (item) (equal? key (concat "__tsql_parameter:" (car item)))) nil))
+		(if declaration (cdr (cadr declaration))
+			(if (has? '("__tsql_scope_identity" "__tsql_identity") key) '(38 0) nil)))
+	((symbol get_column) alias alias_ic column column_ic) (begin
+		(define info (sql_get_column_info sources alias alias_ic column column_ic))
+		(match (sql_info_formula info)
+			((symbol get_column) bound_alias _bound_ic bound_column _column_ic) (begin
+				(define src (source_for_alias sources (if (empty_list? sources) nil (source_alias (car sources))) bound_alias false))
+				(if (nil? src) nil (source_is_base_table? src)
+					(begin
+						(define metadata (find (get_schema (source_schema src) (source_relation src))
+							(lambda (item) (equal? (item "Field") bound_column)) nil))
+						(if metadata (metadata "Dimensions") nil))
+					(match (source_relation src)
+						((symbol query-block) _schema inner_sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
+						(tsql_result_dimensions inner_sources ((expand_query_block_fields inner_sources fields) bound_column) parameters)
+						_ nil)))
+			_ nil))
+	_ nil)))
+(define tsql_result_columns (lambda (query parameters) (match query
 	((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
 	(extract_assoc (expand_query_block_fields sources fields) (lambda (name expression) (begin
-		(define type (sql_info_type (sql_expr_info sources expression)))
+		(define info (sql_expr_info sources expression))
+		(define type (sql_info_type info))
+		(define dimensions (coalesceNil (tsql_result_dimensions sources expression parameters)
+			(tsql_result_dimensions sources (sql_info_formula info) parameters) '()))
+		(define numeric (and (has? '("DECIMAL" "NUMERIC") type) (>= (count dimensions) 2)))
 		(define kind (if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type) 38
-			(if (has? '("FLOAT" "DOUBLE" "REAL" "DECIMAL" "NUMERIC") type) 109
-				(if (has? '("BOOLEAN" "BOOL" "BIT") type) 104 231))))
-		(define size (if (equal? kind 231) 8000 (if (equal? kind 104) 1
-			(match type "TINYINT" 1 "SMALLINT" 2 "INT" 4 "INTEGER" 4 _ 8))))
-		(list "name" name "kind" kind "size" size "flags" 1 "sql_type" type))))
-	((symbol union-block) _mode branches _order _limit _offset _facts) (tsql_result_columns (car branches))
+			numeric 108 (tsql_binary_type? type) 165
+			(has? '("FLOAT" "DOUBLE" "REAL" "DECIMAL" "NUMERIC") type) 109
+			(has? '("BOOLEAN" "BOOL" "BIT") type) 104 231))
+		(define precision (if numeric (car dimensions) 0))
+		(define scale (if numeric (cadr dimensions) 0))
+		(define size (match kind
+			108 (if (<= precision 9) 5 (<= precision 19) 9 (<= precision 28) 13 17)
+			165 (if (equal? type "ROWVERSION") 8
+				(and (not (empty_list? dimensions)) (> (car dimensions) 0)) (car dimensions) 65535)
+			231 (if (and (has? '("NVARCHAR" "NCHAR") type) (not (empty_list? dimensions)))
+				(if (equal? (car dimensions) -1) 65535 (* 2 (car dimensions))) 8000)
+			104 1
+			_ (match type "TINYINT" 1 "SMALLINT" 2 "INT" 4 "INTEGER" 4 _ 8)))
+		(list "name" name "kind" kind "size" size "precision" precision "scale" scale "flags" 1 "sql_type" type))))
+	((symbol union-block) _mode branches _order _limit _offset _facts) (tsql_result_columns (car branches) parameters)
 	_ (error "unsupported T-SQL result metadata shape"))))
 
 (define tsql_builtins (lambda (name) (match name
@@ -884,7 +1016,7 @@ never from the first row. Unknown expression types stay text in this first slice
 			))
 			(define value tsql_expression5)
 		) (list op value)) empty true))
-	) (reduce terms sql_fold_multiplicative_term a)))
+	) (reduce terms tsql_fold_multiplicative a)))
 
 	(define tsql_expression5 (parser (or
 		(parser '((define expr tsql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
@@ -998,7 +1130,7 @@ never from the first row. Unknown expression types stay text in this first slice
 			(list (quote session) (concat "v" (string (+ n 1))))))
 		tsql_hex_literal
 		tsql_number
-		tsql_string
+		tsql_text_literal
 		tsql_column
 	)))
 
@@ -1400,9 +1532,9 @@ never from the first row. Unknown expression types stay text in this first slice
 	) (reduce terms tsql_fold_additive a)))
 	(define tsql_build_select_plan (lambda (query) (begin
 		(define expanded (sql_expand_views query policy))
-		(if describe (list (quote quote) (tsql_result_columns expanded)) (list (quote !begin)
+		(if describe (list (quote quote) (tsql_result_columns expanded parameters)) (list (quote !begin)
 			(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded))
-				(list (quote quote) (tsql_result_columns expanded)))
+				(list (quote quote) (tsql_result_columns expanded parameters)))
 			(build_queryplan_term expanded planning_session tx))))))
 	/* INSERT SELECT consumes the existing planner's result stream and the native
 	insert operator. Identity allocation and constraints remain native. */
@@ -1551,6 +1683,14 @@ never from the first row. Unknown expression types stay text in this first slice
 		(define dimensions tsql_type_dimensions) (define attributes tsql_column_attributes)
 	) (begin
 			(define dimensions (tsql_decl_dimensions type dimensions))
+			/* Keep literal defaults in the existing native default option, after
+			frontend conversion. No additional default registry or storage type
+			semantics are introduced for national text declarations. */
+			(define attributes (if (has? '("NVARCHAR" "NCHAR") type)
+				(merge (extract_assoc attributes (lambda (key value)
+					(list key (if (equal? key "default")
+						(eval (sql_type_lower_annotations (tsql_cast_expr (list (quote quote) value) type dimensions))) value)))))
+				attributes))
 			(list name (tsql_storage_type type) (cons (quote list) dimensions)
 				(tsql_identity_attributes type dimensions attributes)))))
 	(define foreign_key_definition (parser '(

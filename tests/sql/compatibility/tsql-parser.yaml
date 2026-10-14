@@ -41,14 +41,15 @@ test_cases:
     result: true
   noncritical: true
 - name: Prepared declarations share qualified CAST precision and scale
-  scm: "(begin\n  (define s (newsession))\n  (define declaration (car (tds_bind_declarations \"memcp-tests\" \"\
-    @amount [sys].[DECIMAL](20,2)\")))\n  (s \"tsql_bound:amount\" true) (s \"tsql_param:amount\" nil)\n  (s \"\
-    tsql_param_type:amount\" (cadr declaration))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT @amount\
-    \ AS amount\" \"\" s))\n  (define field (car fields))\n  (and (equal? (field \"sql_type\") \"DECIMAL\")\n  \
-    \  (equal? (field \"precision\") 20) (equal? (field \"scale\") 2)))\n"
+  scm: |
+    (begin
+      (define fields (tds_describe "memcp-tests" "SELECT @amount AS amount"
+        "@amount [sys].[DECIMAL](20,2)" (newsession)))
+      (define field (car fields))
+      (and (equal? (field "sql_type") "DECIMAL")
+        (equal? (field "precision") 20) (equal? (field "scale") 2)))
   expect:
     result: true
-  noncritical: true
 - name: Metadata declarations share qualified type and MAX grammar
   scm: "(begin\n  (define declarations (tsql_metadata_declared_parameters \"memcp-tests\"\n    \"@amount [sys].[DECIMAL](20,2),@label\
     \ [sys].[NVARCHAR](MAX)\"))\n  (define amount (declarations \"amount\")) (define label (declarations \"label\"\
@@ -679,7 +680,6 @@ test_cases:
   scm: "(begin\n  (define s (newsession))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT N'Grüße \U0001F418\
     ' AS label\" \"\" s))\n  (if (equal? ((car fields) \"sql_type\") \"NVARCHAR\") true\n    (error \"Unicode literal\
     \ was described as narrow text\")))\n"
-  noncritical: true
 - name: Guarded RPC parameter retains its declaration without reading a value
   scm: "(begin\n  (define s (newsession))\n  (s \"tsql_bound:v\" true)\n  (s \"tsql_param:v\" nil)\n  (s \"tsql_param_type:v\"\
     \ '(\"BIGINT\"))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT @v AS value\" \"@v BIGINT\" s))\n\
@@ -696,7 +696,6 @@ test_cases:
   scm: "(begin\n  (define s (newsession))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP (0) 0x00FF0102\
     \ AS bytes\" \"\" s))\n  (if (and (equal? ((car fields) \"sql_type\") \"VARBINARY\")\n      (equal? ((car fields)\
     \ \"size\") 4)) true (error \"binary literal lost metadata\")))\n"
-  noncritical: true
 - name: Invalid hexadecimal digits fail
   sql: SELECT 0x00GG AS bytes
   expect:

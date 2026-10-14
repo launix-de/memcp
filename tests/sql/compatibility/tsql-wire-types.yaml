@@ -1,0 +1,299 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Declared binary and numeric contracts at the TDS boundary
+  requires_tds: true
+  isolated: true
+setup:
+  - sql: DROP TABLE IF EXISTS tsql_wire_contract
+  - sql: CREATE TABLE tsql_wire_contract (id INT PRIMARY KEY, bytes VARBINARY(20), amount DECIMAL(9,2), whole NUMERIC(18,0))
+  - sql: INSERT INTO tsql_wire_contract VALUES (1,0x004180FF,12.50,42),(2,NULL,NULL,NULL)
+  - sql: DROP TABLE IF EXISTS tsql_wire_text
+  - sql: CREATE TABLE tsql_wire_text (id INT PRIMARY KEY, value NVARCHAR(3), fixed NCHAR(3), label NVARCHAR(3) DEFAULT N'Grüße')
+  - sql: INSERT INTO tsql_wire_text (id,value,fixed) VALUES (1,N'🐘X',N'Ä'),(2,N'🐘XY',N'🐘XY')
+  - sql: DROP TABLE IF EXISTS tsql_wire_version_contract
+  - sql: CREATE TABLE tsql_wire_version_contract (id INT PRIMARY KEY, rv TIMESTAMP)
+test_cases:
+  - name: Version keyword alias preserves its distinct native declaration
+    scm: |
+      (and (equal? ((cadr (get_schema "memcp-tests" "tsql_wire_version_contract")) "RawType") "ROWVERSION")
+        (not (tsql_binary_type? "TIMESTAMP")))
+    expect: {result: true}
+  - name: Version declaration exposes binary width without generating values
+    scm: |
+      (begin
+        (define field (car (tds_describe "memcp-tests"
+          "SELECT TOP(0) rv FROM tsql_wire_version_contract" "" (newsession))))
+        (and (equal? (field "sql_type") "ROWVERSION") (equal? (field "kind") 165) (equal? (field "size") 8)))
+    expect: {result: true}
+  - name: Native column metadata retains original national declarations
+    scm: |
+      (equal? (map (get_schema "memcp-tests" "tsql_wire_text") (lambda (column) (column "RawType")))
+        '("INT" "NVARCHAR" "NCHAR" "NVARCHAR"))
+    expect: {result: true}
+  - name: National assignments preserve whole supplementary characters
+    sql: SELECT id,value,fixed,label FROM tsql_wire_text ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: '🐘X', fixed: 'Ä  ', label: Grü}, {id: 2, value: '🐘X', fixed: '🐘X', label: Grü}]}
+  - name: National declarations keep compile-time Unicode result contracts
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests" "SELECT TOP(0) value,fixed FROM tsql_wire_text" "" (newsession)))
+        (and (equal? (map fields (lambda (field) (field "sql_type"))) '("NVARCHAR" "NCHAR"))
+          (equal? (map fields (lambda (field) (field "size"))) '(6 6))))
+    expect: {result: true}
+  - name: National update uses the existing typed assignment path
+    sql: UPDATE tsql_wire_text SET value=N'🐘ZQ',fixed=N'ä' WHERE id=2
+    expect: {affected_rows: 1}
+  - name: National updated values keep frontend width and padding
+    sql: SELECT value,fixed FROM tsql_wire_text WHERE id=2
+    expect: {rows: 1, data: [{value: '🐘Z', fixed: 'ä  '}]}
+  - name: National cast refuses half a supplementary character
+    sql: SELECT CAST(N'🐘X' AS NVARCHAR(1)) AS absent,CAST(N'🐘X' AS NCHAR(3)) AS value
+    expect: {rows: 1, data: [{absent: '', value: '🐘X'}]}
+  - name: National result contracts roundtrip through TDS
+    tds:
+      statements:
+        - sql: SELECT value,fixed,label FROM tsql_wire_text WHERE id=1
+          expect: {rows: 1, data: [{value: '🐘X', fixed: 'Ä  ', label: Grü}]}
+  - name: Binary empty-output metadata comes from its SQL contract
+    scm: |
+      (begin
+        (define field (car (tds_describe "memcp-tests" "SELECT TOP(0) 0x0080FF AS value" "" (newsession))))
+        (and (equal? (field "sql_type") "VARBINARY") (equal? (field "kind") 165)))
+    expect: {result: true}
+  - name: Native numeric metadata preserves declared precision and scale
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests" "SELECT TOP(0) amount,whole FROM tsql_wire_contract" "" (newsession)))
+        (and (equal? ((car fields) "kind") 108) (equal? ((car fields) "precision") 9)
+          (equal? ((car fields) "scale") 2) (equal? ((cadr fields) "precision") 18)
+          (equal? ((cadr fields) "scale") 0)))
+    expect: {result: true}
+  - name: Numeric parameter metadata is independent of a supplied value
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests" "SELECT TOP(0) @amount AS value" "@amount NUMERIC(38,0)" (newsession)))
+        (and (equal? ((car fields) "kind") 108) (equal? ((car fields) "precision") 38)
+          (equal? ((car fields) "scale") 0) (equal? ((car fields) "size") 17)))
+    expect: {result: true}
+  - name: Derived projections retain native numeric dimensions
+    scm: |
+      (begin
+        (define field (car (tds_describe "memcp-tests"
+          "SELECT TOP(0) q.amount AS value FROM (SELECT amount FROM tsql_wire_contract) q" "" (newsession))))
+        (and (equal? (field "kind") 108) (equal? (field "precision") 9) (equal? (field "scale") 2)))
+    expect: {result: true}
+  - name: Cast metadata is available without executing conversions
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests"
+          "SELECT TOP(0) CAST(NULL AS NUMERIC(20,4)) AS amount,CAST(NULL AS BINARY) AS bytes" "" (newsession)))
+        (and (equal? ((car fields) "precision") 20) (equal? ((car fields) "scale") 4)
+          (equal? ((car fields) "size") 13) (equal? ((cadr fields) "size") 30)))
+    expect: {result: true}
+  - name: Numeric parameter binding preserves native integer coefficients
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v NUMERIC(38,0)")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 108 "precision" 38 "scale" 0 "size" 17)
+            "value" (list "coefficient" "9007199254740993"))))
+        (expression_equal? (s "__tsql_parameter:v") (tsql_parse_integer "9007199254740993")))
+    expect: {result: true}
+  - name: Numeric transport rounds at the declared target scale
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DECIMAL(9,2)")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 106 "precision" 9 "scale" 3 "size" 5)
+            "value" (list "coefficient" "-12345"))))
+        (equal? (s "__tsql_parameter:v") -12.35))
+    expect: {result: true}
+  - name: Numeric transport rejects narrowing overflow before installing values
+    scm: |
+      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v DECIMAL(3,2)")
+        (list (list "name" "v" "flags" 0 "type" (list "kind" 108 "precision" 9 "scale" 3 "size" 5)
+          "value" (list "coefficient" "9995"))))
+    expect: {error: true, contains: decimal conversion overflow}
+  - name: Scaled numeric transport converts to a declared integer target
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v INT")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 108 "precision" 9 "scale" 3 "size" 5)
+            "value" (list "coefficient" "-12345"))))
+        (expression_equal? (s "__tsql_parameter:v") -12))
+    expect: {result: true}
+  - name: Numeric transport supplied null keeps its declaration
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DECIMAL(9,2)")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 108 "precision" 9 "scale" 2 "size" 5) "value" nil)))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {result: true}
+  - name: Numeric transport rejects malformed coefficients
+    scm: |
+      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v NUMERIC(18,0)")
+        (list (list "name" "v" "flags" 0 "type" (list "kind" 108 "precision" 18 "scale" 0 "size" 9)
+          "value" (list "coefficient" "12x"))))
+    expect: {error: true}
+  - name: Numeric transport rejects a scale outside its wire contract
+    scm: |
+      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v NUMERIC(18,0)")
+        (list (list "name" "v" "flags" 0 "type" (list "kind" 108 "precision" 18 "scale" 19 "size" 9)
+          "value" (list "coefficient" "123"))))
+    expect: {error: true}
+  - name: Binary transport does not decode bytes as character text
+    scm: |
+      (begin
+        (define s (newsession))
+        (define bytes (hex2bin "004180FF"))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v VARBINARY(20)")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 165 "size" 20) "value" bytes)))
+        (expression_equal? (s "__tsql_parameter:v") bytes))
+    expect: {result: true}
+  - name: Binary parameter narrowing truncates by bytes
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v VARBINARY(2)")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 165 "size" 20) "value" (hex2bin "0080FF"))))
+        (expression_equal? (s "__tsql_parameter:v") (hex2bin "0080")))
+    expect: {result: true}
+  - name: Binary parameter bytes cannot become numeric text by their runtime carrier
+    scm: |
+      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v INT")
+        (list (list "name" "v" "flags" 0 "type" (list "kind" 165 "size" 2) "value" "12")))
+    expect: {error: true}
+  - name: Binary transport null still binds a different declared target
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v INT")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 165 "size" 20) "value" nil)))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {result: true}
+  - name: Binary fixed-width cast pads with zero bytes
+    sql: SELECT CAST(0x4180 AS BINARY(4))=0x41800000 AS value
+    expect: {rows: 1, data: [{value: true}]}
+  - name: Binary conversion refuses unsupported numeric encoding
+    sql: SELECT CAST(256 AS BINARY(2)) AS value
+    expect: {error: true}
+  - name: Binary conversion refuses guessing a national text encoding
+    sql: SELECT CAST(N'ä' AS VARBINARY(4)) AS value
+    expect: {error: true}
+  - name: Normal decimal casts retain declared rounding
+    sql: SELECT CAST(-12.345 AS DECIMAL(9,2)) AS value,CAST(12.5 AS NUMERIC(3,0)) AS whole
+    expect: {rows: 1, data: [{value: -12.35, whole: 13}]}
+  - name: Numeric zero-scale cast retains an integer beyond floating precision
+    sql: SELECT CAST(9007199254740993 AS NUMERIC(38,0)) AS value
+    expect: {rows: 1, data: [{value: 9007199254740993}]}
+  - name: Decimal narrowing rejects a rounding carry
+    sql: SELECT CAST(9.995 AS DECIMAL(3,2)) AS value
+    expect: {error: true}
+  - name: Extreme scaled precision remains explicitly unsupported
+    sql: SELECT CAST(0.00000000000000001 AS NUMERIC(38,17)) AS value
+    expect: {error: true}
+  - name: Integer division follows declared operand contracts
+    sql: SELECT 7/2 AS positive,-7/2 AS negative,7/-2 AS negative_divisor,CAST(7 AS BIGINT)/2 AS wide
+    expect: {rows: 1, data: [{positive: 3, negative: -3, negative_divisor: -3, wide: 3}]}
+  - name: Decimal and approximate division retain fractions
+    sql: SELECT 7.0/2 AS scaled,CAST(7 AS FLOAT)/2 AS approximate
+    expect: {rows: 1, data: [{scaled: 3.5, approximate: 3.5}]}
+  - name: Typed zero denominator produces an arithmetic error
+    sql: SELECT 1/0 AS value
+    expect: {error: true, contains: division by zero}
+  - name: Approximate zero denominator produces an arithmetic error
+    sql: SELECT CAST(1 AS FLOAT)/0 AS value
+    expect: {error: true, contains: division by zero}
+  - name: Division preserves null and short circuit semantics
+    sql: SELECT NULL/0 AS missing,1/NULL AS absent,CASE WHEN 1=0 THEN 1/0 ELSE 7 END AS guarded
+    expect: {rows: 1, data: [{missing: null, absent: null, guarded: 7}]}
+  - name: Integer division rejects declared signed overflow
+    sql: SELECT -2147483648/(-1) AS value
+    expect: {error: true}
+  - name: Division result descriptors follow declared SQL types
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests"
+          "SELECT TOP(0) 7/2 AS narrow,CAST(7 AS BIGINT)/2 AS wide,7.0/2 AS scaled" "" (newsession)))
+        (equal? (map fields (lambda (field) (field "sql_type"))) '("INT" "BIGINT" "DECIMAL")))
+    expect: {result: true}
+  - name: A native integer carrier does not turn a declared date into numeric input
+    scm: |
+      (sql_expr_info '() (tsql_cast_expr (list (quote sql_type_expr) 7 "DATE" nil) "NUMERIC" '(18 0)))
+    expect: {error: true}
+  - name: Compiled typed conversions contain no compiler annotations
+    scm: |
+      (not (regexp_test (string (parse_tsql "memcp-tests"
+        "SELECT CAST(amount AS DECIMAL(9,2)) AS amount,CAST(bytes AS BINARY(20)) AS bytes,id/2 AS quotient FROM tsql_wire_contract"
+        nil nil nil)) "sql_type_expr|sql_compile_expr"))
+    expect: {result: true}
+  - name: Native binary and scaled numeric results use existing TDS codecs
+    tds:
+      statements:
+        - sql: SELECT bytes,amount,whole FROM tsql_wire_contract ORDER BY id
+          expect: {rows: 2, data: [{bytes: {binary_hex: '004180ff'}, amount: '12.50', whole: '42'}, {bytes: null, amount: null, whole: null}]}
+  - name: TDS numeric zero-scale cast is exact beyond floating precision
+    tds:
+      statements:
+        - sql: SELECT CAST(9007199254740993 AS NUMERIC(38,0)) AS value
+          expect: {rows: 1, data: [{value: '9007199254740993'}]}
+        - sql: SELECT CAST(-9223372036854775808 AS NUMERIC(38,0)) AS value
+          expect: {rows: 1, data: [{value: '-9223372036854775808'}]}
+  - name: TDS binary literals include arbitrary nontext bytes and empty value
+    tds:
+      statements:
+        - sql: SELECT 0x004180FF AS bytes,0x AS empty,CAST(NULL AS VARBINARY(8)) AS missing
+          expect: {rows: 1, columns: [bytes, empty, missing], data: [{bytes: {binary_hex: '004180ff'}, empty: {binary_hex: ''}, missing: null}]}
+  - name: TDS prepared binary parameters roundtrip through the shared compiler
+    tds:
+      statements:
+        - sql: SELECT @value AS value
+          prepare: true
+          parameters: [{name: value, value: {binary_hex: '004180ff'}}]
+          expect: {rows: 1, data: [{value: {binary_hex: '004180ff'}}]}
+        - sql: SELECT CAST(@value AS VARBINARY(2)) AS value
+          parameters: [{name: value, value: {binary_hex: '0080ff'}}]
+          expect: {rows: 1, data: [{value: {binary_hex: '0080'}}]}
+  - name: Approximate result transport follows SQL contracts for integral carriers
+    tds:
+      statements:
+        - sql: SELECT CAST(7 AS FLOAT) AS value,CAST(NULL AS REAL) AS missing
+          expect: {rows: 1, data: [{value: 7, missing: null}]}
+  - name: Typed RPC binding resolves permuted numeric binary and national names
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (define output (newsession))
+        (tds_frontend "execute" s
+          (list "database" "memcp-tests" "text" "SELECT @n AS number,@b AS bytes,@t AS label"
+            "declarations" "@n NUMERIC(38,0),@b VARBINARY(20),@t NVARCHAR(20)"
+            "parameters" (list
+              (list "name" "t" "flags" 0 "type" (list "kind" 231 "size" 40) "value" "Grüße 🐘")
+              (list "name" "n" "flags" 0 "type" (list "kind" 108 "precision" 38 "scale" 0 "size" 17)
+                "value" (list "coefficient" "9007199254740993"))
+              (list "name" "b" "flags" 0 "type" (list "kind" 165 "size" 20) "value" (hex2bin "0080ff"))))
+          (lambda (row) (output "row" row)) (lambda (fields) (output "fields" fields)) nil nil)
+        (and (equal? ((car (output "row")) "coefficient") "9007199254740993")
+          (expression_equal? ((cadr (output "row")) "bytes") (hex2bin "0080ff"))
+          (equal? (nth (output "row") 2) "Grüße 🐘")
+          (equal? (map (output "fields") (lambda (field) (field "kind"))) '(108 165 231))))
+    expect: {result: true}
+  - name: Prepared TDS mixes numeric binary and national contracts in another order
+    tds:
+      statements:
+        - sql: SELECT CAST(@n AS NUMERIC(38,0)) AS number,@b AS bytes,@t AS label
+          prepare: true
+          parameters:
+            - {name: b, value: {binary_hex: '0080ff'}}
+            - {name: t, value: 'Grüße 🐘'}
+            - {name: n, value: 9007199254740993}
+          expect: {rows: 1, data: [{number: '9007199254740993', bytes: {binary_hex: '0080ff'}, label: 'Grüße 🐘'}]}
+cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_wire_contract
+  - sql: DROP TABLE IF EXISTS tsql_wire_text
+  - sql: DROP TABLE IF EXISTS tsql_wire_version_contract

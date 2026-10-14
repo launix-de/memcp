@@ -22,3 +22,13 @@ func TestNumericExpectationsPreserveLargeIntegers(t *testing.T) {
 		t.Fatal("equivalent decimal result was rejected")
 	}
 }
+
+func TestBinaryExpectationsRequireBytes(t *testing.T) {
+	want := map[string]any{"binary_hex": "0080ff"}
+	if !equalValue([]byte{0, 128, 255}, want) || equalValue("\x00\x80\xff", want) || equalValue([]byte{0, 128}, want) {
+		t.Fatal("binary expectation did not preserve byte identity")
+	}
+	if !equalValue([]byte{}, map[string]any{"binary_hex": ""}) || equalValue(nil, map[string]any{"binary_hex": ""}) {
+		t.Fatal("empty bytes were confused with NULL")
+	}
+}

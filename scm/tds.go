@@ -105,6 +105,12 @@ func tdsWireValue(v Scmer) any {
 		return nil
 	}
 	if v.IsSlice() {
+		if bytes := tdsAssoc(v, "bytes"); !bytes.IsNil() {
+			return []byte(bytes.String())
+		}
+		if floating := tdsAssoc(v, "floating"); !floating.IsNil() {
+			return floating.Float()
+		}
 		if coefficient := tdsAssoc(v, "coefficient"); !coefficient.IsNil() {
 			return tds.Decimal{Coefficient: coefficient.String()}
 		}
