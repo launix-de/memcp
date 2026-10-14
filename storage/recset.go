@@ -577,9 +577,12 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 	var cNeedsCachedReader []bool
 	var conditionGetters []mapArgGetter
 	var cdataset []scm.Scmer
+	var batchInputs []bool
+	batchPreparation := false
 	if !conditionAlwaysTrue {
 		ccols = make([]ColumnStorage, len(conditionCols))
 		cReaders = make([]ColumnReader, len(conditionCols))
+		batchInputs = make([]bool, len(conditionCols))
 		cNeedsCachedReader = make([]bool, len(conditionCols))
 		conditionGetters = make([]mapArgGetter, len(conditionCols))
 		for i, k := range conditionCols {
@@ -598,6 +601,11 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned)
 			defer ReleaseColumnReader(cReaders[i])
 			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
+			// This existing physical carrier contract marks readers whose batch
+			// preparation changes lazy text into owned plain values. Cheap enum,
+			// numeric and direct decoded readers keep their scalar fast path.
+			_, batchInputs[i] = cReaders[i].(interface{ JITBatchValueType() uint8 })
+			batchPreparation = batchPreparation || batchInputs[i]
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
 	}
@@ -650,7 +658,7 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 			for i, c := range cReaders {
 				if getter := conditionGetters[i]; getter != nil {
 					cdataset[i] = getter(idx, 0)
-				} else if prepared != nil {
+				} else if prepared != nil && batchInputs[i] {
 					cdataset[i] = prepared[i]
 				} else if cNeedsCachedReader[i] {
 					cdataset[i] = c.GetValue(idx)
@@ -685,7 +693,7 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 	t.iterateIndexMatchAware(currentTx, access, maxInsertIndex, buf, true, &exactLikeMain, func(batch []uint32) bool {
 		feedbackCandidates += int64(len(batch))
 		mainRows = mainRows[:0]
-		prepareMain := !conditionAlwaysTrue && len(cReaders) != 0 &&
+		prepareMain := batchPreparation && !conditionAlwaysTrue &&
 			!(exactLikeMain && singleExactLike) && len(batch) > 1
 		if prepareMain {
 			if cap(positions) < len(batch) {
@@ -712,7 +720,7 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 				prepared = prepared[:length]
 			}
 			for col, reader := range cReaders {
-				if conditionGetters[col] == nil {
+				if batchInputs[col] {
 					reader.GetValueMulti(mainRows, prepared[col:], width)
 				}
 			}

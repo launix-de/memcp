@@ -1390,9 +1390,16 @@ func TestRecSetResidualPreparesVisibleTextBatch(t *testing.T) {
 		if values[0].IsBufferString() {
 			t.Fatal("RecSet residual bypassed its prepared text batch")
 		}
+		if values[1].Int() == 0 {
+			t.Fatal("deleted main row reached mixed text/numeric residual")
+		}
+		if id := values[1].Int(); id < 64 && !values[0].IsNil() &&
+			!strings.HasSuffix(values[0].String(), " "+fmt.Sprint(id)) {
+			t.Fatal("mixed residual columns came from different main rows")
+		}
 		return scm.NewBool(!values[0].IsNil() && strings.HasPrefix(values[0].String(), "accepted"))
 	})
-	got := tbl.scanRecSet(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"label"}, condition)
+	got := tbl.scanRecSet(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"label", "id"}, condition)
 	if got.count != 16 || text.dictCache.Load() != nil || text.ReadCount()-priorReads != 63 {
 		t.Fatalf("count=%d decoded cache=%v main reads=%d", got.count, text.dictCache.Load(), text.ReadCount()-priorReads)
 	}
@@ -1402,7 +1409,7 @@ func TestRecSetResidualPreparesVisibleTextBatch(t *testing.T) {
 	defer tx.Rollback()
 	tx.AddToDeleteMask(shard, 4)
 	priorReads = text.ReadCount()
-	acid := tbl.scanRecSet(tx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"label"}, condition)
+	acid := tbl.scanRecSet(tx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"label", "id"}, condition)
 	if acid.count != 15 || text.ReadCount()-priorReads != 62 || shard.deletions.Get(4) {
 		t.Fatalf("ACID count=%d main reads=%d shared delete=%v", acid.count, text.ReadCount()-priorReads, shard.deletions.Get(4))
 	}
