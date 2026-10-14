@@ -106,6 +106,9 @@ type repartitionDeleteAction struct {
 // global transaction ID counter
 var txIDCounter uint64
 
+// Statement cache identities are process-local and never persisted.
+var statementGenerationCounter atomic.Uint64
+
 // GlobalCommitEpoch is advanced on each ACID commit.
 var GlobalCommitEpoch uint64
 
@@ -123,7 +126,8 @@ type TxContext struct {
 	Depth               uint32 // nesting depth for savepoints / triggers
 	Session             scm.Scmer
 	SessionState        *scm.SessionState // owning connection; retained while the transaction object is parked
-	querySeq            atomic.Uint64     // current statement generation; zero while parked
+	querySeq            atomic.Uint64     // active request cancellation identity; zero while parked
+	statementGeneration atomic.Uint64     // globally unique statement cache scope; zero while parked
 	queryInfo           atomic.Pointer[string]
 	queryActive         atomic.Bool
 	queryMu             sync.Mutex         // serializes statements which reuse this transaction object
@@ -249,6 +253,7 @@ func (tx *TxContext) QuerySessionState() (*scm.SessionState, uint64) {
 }
 
 func (tx *TxContext) beginQuery(ss *scm.SessionState, seq uint64, info string) {
+	tx.statementGeneration.Store(statementGenerationCounter.Add(1))
 	tx.SessionState = ss
 	tx.querySeq.Store(seq)
 	infoPtr := &info
@@ -291,21 +296,27 @@ func (tx *TxContext) retainQueryReader(release func()) bool {
 	return true
 }
 
+// endStatement releases only physical query-local ownership. Request
+// cancellation and process-list identity survive until endQuery below.
+func (tx *TxContext) endStatement() {
+	tx.mu.Lock()
+	tx.queryActive.Store(false)
+	tx.statementGeneration.Store(0)
+	columns := tx.queryColumns
+	tx.queryColumns = nil
+	readers := tx.queryReaderReleases
+	tx.queryReaderReleases = nil
+	tx.mu.Unlock()
+	for _, release := range readers {
+		release()
+	}
+	for c, t := range columns {
+		t.releaseColumnCacheUse(c)
+	}
+}
 func (tx *TxContext) endQuery(seq uint64) {
 	if tx.querySeq.CompareAndSwap(seq, 0) {
-		tx.mu.Lock()
-		tx.queryActive.Store(false)
-		columns := tx.queryColumns
-		tx.queryColumns = nil
-		readers := tx.queryReaderReleases
-		tx.queryReaderReleases = nil
-		tx.mu.Unlock()
-		for _, release := range readers {
-			release()
-		}
-		for c, t := range columns {
-			t.releaseColumnCacheUse(c)
-		}
+		tx.endStatement()
 		tx.queryInfo.Store(nil)
 		if tx.SessionState != nil {
 			tx.SessionState.FinishQueryExecution(seq)
@@ -1015,9 +1026,8 @@ func SessionStateFromTx(tx *TxContext) *scm.SessionState {
 	return tx.SessionState
 }
 
-// querySeqFromTx returns the statement generation cached by an autocommit
-// transaction. Explicit transactions can serve multiple concurrent statements;
-// each statement updates the generation on its explicit transaction context.
+// querySeqFromTx returns the active request identity used by cancellation
+// and lock waiters. Statement-local cache scopes use statementGeneration.
 func querySeqFromTx(tx *TxContext) uint64 {
 	if tx == nil {
 		return 0
@@ -1050,15 +1060,20 @@ func transactionForSession(session scm.Scmer) *TxContext {
 // Query identity and cancellation belong to the transaction only while fn is
 // running; an explicit transaction remains parked after the statement ends.
 func WithAutocommit(session scm.Scmer, ss *scm.SessionState, querySeq uint64, query string, fn scm.Scmer) scm.Scmer {
-	sessionFn := session.Func()
 	tx := transactionForSession(session)
 	tx.queryMu.Lock()
 	defer tx.queryMu.Unlock()
 	tx.beginQuery(ss, querySeq, query)
 	defer tx.endQuery(querySeq)
+	// Preserve the preexisting single-statement compatibility exception.
+	// New request executors supply a parsed, generic recovery capability.
+	return runAutocommitStatement(tx, session, strings.EqualFold(strings.TrimSpace(query), "ROLLBACK"), fn)
+}
+func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, fn scm.Scmer) scm.Scmer {
+	sessionFn := session.Func()
 	txValue := scm.NewAny(tx)
 	explicit := !sessionFn(scm.NewString("transaction")).IsNil()
-	if explicit && tx.State != TxActive && !strings.EqualFold(strings.TrimSpace(query), "ROLLBACK") {
+	if explicit && tx.State != TxActive && !recovery {
 		panic("transaction is aborted; ROLLBACK required")
 	}
 
@@ -1111,6 +1126,45 @@ func WithAutocommit(session scm.Scmer, ss *scm.SessionState, querySeq uint64, qu
 	return result
 }
 
+// WithQueryRequest owns cancellation/process-list state for a complete request.
+// fn receives a sequential statement executor (text, recovery, body). Recovery
+// is a trusted frontend capability derived from its parsed control statement,
+// never a SQL keyword interpreted here. Native transaction records are reused.
+func WithQueryRequest(session scm.Scmer, ss *scm.SessionState, querySeq uint64, query string, fn scm.Scmer) scm.Scmer {
+	tx := transactionForSession(session)
+	tx.queryMu.Lock()
+	defer tx.queryMu.Unlock()
+	tx.SessionState = ss
+	tx.querySeq.Store(querySeq)
+	info := &query
+	tx.queryInfo.Store(info)
+	if ss != nil {
+		ss.SetQueryInfoPointer(querySeq, info)
+	}
+	var live, executing atomic.Bool
+	live.Store(true)
+	defer live.Store(false)
+	defer tx.endQuery(querySeq)
+	statement := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		if !live.Load() || !executing.CompareAndSwap(false, true) {
+			panic("statement executor is outside its request or already executing")
+		}
+		defer executing.Store(false)
+		if ss != nil {
+			if ss.IsKilledSeq(querySeq) {
+				panic(context.Canceled)
+			}
+			if ctx := ss.QueryContext(querySeq); ctx != nil && ctx.Err() != nil {
+				panic(ctx.Err())
+			}
+		}
+		tx.beginQuery(ss, querySeq, a[0].String())
+		defer tx.endStatement()
+		return runAutocommitStatement(tx, session, a[1].Bool(), a[2])
+	})
+	return scm.Apply(fn, statement)
+}
+
 func txRequiresQueryLocalCache(tx *TxContext) bool {
 	return tx != nil && (!tx.autoCommit || tx.Mode == TxACID || tx.SessionState.HasLocks())
 }
@@ -1120,9 +1174,13 @@ func initTransaction(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "tx_query",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			return scm.NewInt(int64(querySeqFromTx(scmerToTxContext(a[0]))))
+			tx := scmerToTxContext(a[0])
+			if tx == nil {
+				return scm.NewInt(0)
+			}
+			return scm.NewInt(int64(tx.statementGeneration.Load()))
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the current query generation of an active transaction",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the current statement-local cache generation of an active transaction",
 			Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "int"}},
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -1264,6 +1322,24 @@ func initTransaction(en scm.Env) {
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Rolls back the current transaction.", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{{Kind: "func", Label: "session", Description: "the session function that holds tx state", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
+		Name: "with_query_request",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			var ss *scm.SessionState
+			if !a[1].IsNil() {
+				ss, _ = a[1].Any().(*scm.SessionState)
+			}
+			return WithQueryRequest(a[0], ss, uint64(a[2].Int()), a[3].String(), a[4])
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "owns one request while executing sequential statements with independent autocommit and cache lifetimes", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "func", Label: "session"}, {Kind: "any", Label: "session_state"},
+				{Kind: "int", Label: "query_seq"}, {Kind: "string", Label: "query"},
+				{Kind: "func", Label: "fn", Params: []*scm.TypeDescriptor{{Kind: "func", Label: "statement", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "text"}, {Kind: "bool", Label: "recovery"}, {Kind: "func", Label: "body", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "any"}}}, Return: &scm.TypeDescriptor{Kind: "any"}}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+			}, Return: &scm.TypeDescriptor{Kind: "any"},
 		},
 	})
 

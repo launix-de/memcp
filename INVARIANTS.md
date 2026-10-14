@@ -1302,6 +1302,15 @@ policy, nonempty-range merging, or cold-anchor rebasing.
 
 ### Native stored source procedures
 
+- `TxContext.statementGeneration` is a process-local, globally unique cache
+  scope published once per statement, outside row and batch loops. `querySeq`
+  remains the request cancellation/process-list identity. `with_query_request`
+  retains the existing transaction object and query mutex for its request;
+  sequential statement callbacks release column/reader ownership independently,
+  while cancellation is released only when the request unwinds. Recovery is an
+  explicit capability supplied by the frontend's parsed control statement.
+  Stored plans never retain the request's statement executor.
+
 - `database.procedures` publishes immutable source definitions through the
   existing lock-free catalog. CREATE/DROP use database schema ownership and
   the existing durable schema checkpoint. Name, source, language and frontend
