@@ -3428,7 +3428,7 @@ logical IR: it samples once per request and is shared by every guard binding. */
 (define direct_base_group_plan_eligible? (lambda (stage)
 	(and (source_is_base_table? (gs_input stage))
 		(and (or (not (empty_list? (gs_keys stage)))
-			(equal? (count (gs_aggregates stage)) 1))
+			(not (empty_list? (gs_aggregates stage))))
 			(empty_list? (gs_order stage))))))
 
 (define direct_base_group_plan_preferred? (lambda (stage)
