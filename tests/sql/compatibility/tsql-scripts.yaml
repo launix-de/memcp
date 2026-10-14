@@ -4,6 +4,7 @@ metadata:
   description: T-SQL script boundaries and shared statement grammar
   syntax: tsql
   isolated: true
+  requires_tds: true
 setup: []
 test_cases:
 - name: GO separates physical batches and preserves repetition
@@ -138,4 +139,227 @@ test_cases:
       (dropprocedure "memcp-tests" "script_source_example")
       (and (equal? first 12) (equal? second 14) (equal? retained 12)))
   expect: {result: true}
+- name: Executable batch variables and branches use declared SQL contracts
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (define rows (newsession))
+      (tsql_execute_request "memcp-tests"
+        "DECLARE @value INT=2; SET @value=@value+3; IF @value=5 BEGIN SELECT @value AS value END ELSE SELECT 99 AS value"
+        session nil 0 (lambda (row) (rows "value" (row "value"))) (lambda args true))
+      (equal? (rows "value") 5))
+  expect: {result: true}
+- name: Procedure execution updates through the shared native DML path
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (define rows (newsession))
+      (tsql_execute_request "memcp-tests"
+        "DROP TABLE IF EXISTS dbo.script_runtime; CREATE TABLE dbo.script_runtime(id INT PRIMARY KEY, value INT); INSERT INTO dbo.script_runtime VALUES(1,2);"
+        session nil 0 (lambda (_row) true) (lambda args true))
+      (dropprocedure "memcp-tests" "script_advance" true)
+      (tsql_execute_request "memcp-tests"
+        "CREATE PROCEDURE dbo.script_advance @id INT, @amount INT=3 AS BEGIN UPDATE dbo.script_runtime SET value=value+@amount WHERE id=@id; SELECT value FROM dbo.script_runtime WHERE id=@id END"
+        session nil 0 (lambda (_row) true) (lambda args true))
+      (tsql_execute_request "memcp-tests" "EXEC dbo.script_advance @id=1"
+        session nil 0 (lambda (row) (rows "value" (row "value"))) (lambda args true))
+      (dropprocedure "memcp-tests" "script_advance")
+      (tsql_execute_request "memcp-tests" "DROP TABLE dbo.script_runtime"
+        session nil 0 (lambda (_row) true) (lambda args true))
+      (equal? (rows "value") 5))
+  expect: {result: true}
+- name: REST executes ordinary leaves after preceding DDL
+  sql: |
+    DROP TABLE IF EXISTS dbo.script_rest;
+    CREATE TABLE dbo.script_rest(id INT PRIMARY KEY, value INT);
+    INSERT dbo.script_rest VALUES(1,4);
+    UPDATE dbo.script_rest SET value=value+2 WHERE id=1;
+    SELECT value FROM dbo.script_rest WHERE id=1;
+    DROP TABLE dbo.script_rest;
+  expect: {rows: 1, data: [{value: 6}]}
+- name: REST executes nested branches and typed local assignments
+  sql: |
+    DECLARE @n INT=1;
+    IF @n=1 BEGIN SET @n=@n+2; IF @n=3 SELECT @n AS value ELSE SELECT 0 AS value END
+    ELSE SELECT 99 AS value;
+  expect: {rows: 1, data: [{value: 3}]}
+- name: REST evaluates only the selected branch
+  sql: IF 1=0 SELECT missing FROM unknown_table ELSE SELECT 7 AS value
+  expect: {rows: 1, data: [{value: 7}]}
+- name: REST physical batches repeat and start fresh variable scope
+  sql: |
+    DECLARE @value INT=3; SET @value=@value+1; SELECT @value AS value;
+    GO 2
+    SELECT 9 AS value
+  expect: {rows: 3, data: [{value: 4}, {value: 4}, {value: 9}]}
+- name: REST rejects use of variables from an earlier physical batch
+  sql: |
+    DECLARE @value INT=3;
+    GO
+    SELECT @value AS value
+  expect: {error: true}
+- name: Variable SQL contracts survive a NULL initial value
+  sql: DECLARE @value INT=NULL; IF @value IS NULL SET @value=7; SELECT @value+1 AS value
+  expect: {rows: 1, data: [{value: 8}]}
+- name: String variable addition uses the declared frontend contract
+  sql: DECLARE @value VARCHAR(20)='12'; SET @value=@value+'3'; SELECT @value AS value
+  expect: {rows: 1, data: [{value: '123'}]}
+- name: REST rejects undeclared assignments
+  sql: SET @missing=1
+  expect: {error: true}
+- name: REST rejects duplicate variable contracts
+  sql: DECLARE @value INT=1; DECLARE @value INT=2
+  expect: {error: true}
+- name: REST rejects a scalar IF value without a predicate contract
+  sql: IF 1 SELECT 7 AS value
+  expect: {error: true}
+- name: REST rejects a relational scalar fallback in IF
+  sql: IF EXISTS(SELECT 1) SELECT 7 AS value
+  expect: {error: true}
+- name: REST source procedures bind named positional and default arguments
+  sql: |
+    CREATE PROCEDURE dbo.script_rest_proc @value INT, @amount INT=3 AS
+    BEGIN SELECT @value+@amount AS value END
+    GO
+    EXEC dbo.script_rest_proc 4;
+    EXEC dbo.script_rest_proc @amount=2,@value=8;
+  expect: {rows: 2, data: [{value: 7}, {value: 10}]}
+- name: Procedure calls reject unknown named parameters
+  sql: EXEC dbo.script_rest_proc @wrong=1
+  expect: {error: true}
+- name: Procedure calls reject duplicate named parameters
+  sql: EXEC dbo.script_rest_proc @value=1,@value=2
+  expect: {error: true}
+- name: Procedure calls reject missing required parameters
+  sql: EXEC dbo.script_rest_proc
+  expect: {error: true}
+- name: Nested procedure variables preserve the caller scope
+  sql: |
+    DECLARE @value INT=40;
+    EXEC dbo.script_rest_proc @value=2;
+    SELECT @value AS value;
+  expect: {rows: 2, data: [{value: 5}, {value: 40}]}
+- name: Aborted explicit transactions permit parsed rollback recovery
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (define execute (lambda (text)
+        (tsql_execute_request "memcp-tests" text session nil 0 (lambda (_row) true) (lambda args true))))
+      (execute "DROP TABLE IF EXISTS dbo.script_recovery; CREATE TABLE dbo.script_recovery(id INT PRIMARY KEY); INSERT dbo.script_recovery VALUES(1);")
+      (execute "BEGIN TRANSACTION")
+      (define failed (try (lambda () (begin (execute "INSERT dbo.script_recovery VALUES(1)") false)) (lambda (_err) true)))
+      (define rejected (try (lambda () (begin (execute "SELECT 'ROLLBACK' AS value") false)) (lambda (_err) true)))
+      (execute "/* recovery */ ROLLBACK TRANSACTION")
+      (execute "INSERT dbo.script_recovery VALUES(2); DROP TABLE dbo.script_recovery;")
+      (and failed rejected (nil? (session "transaction"))))
+  expect: {result: true}
+- name: Procedure declaration names use the frontend case-insensitive identity
+  sql: CREATE PROCEDURE dbo.SCRIPT_REST_PROC @value INT AS SELECT @value AS value
+  expect: {error: true}
+- name: Procedure calls resolve delimited identifier casing
+  sql: EXEC [dbo].[SCRIPT_REST_PROC] @value=4
+  expect: {rows: 1, data: [{value: 7}]}
+- name: CREATE OR ALTER replaces source without keeping an old plan
+  sql: |
+    CREATE OR ALTER PROCEDURE dbo.script_rest_proc @value INT AS SELECT @value+8 AS value
+    GO
+    EXEC dbo.script_rest_proc 4;
+  expect: {rows: 1, data: [{value: 12}]}
+- name: SQL procedure deletion uses the native persisted registry
+  sql: DROP PROCEDURE dbo.script_rest_proc
+- name: Deleted procedure definitions no longer execute
+  sql: EXEC dbo.script_rest_proc 4
+  expect: {error: true}
+- name: Idempotent procedure deletion accepts an absent definition
+  sql: DROP PROC IF EXISTS dbo.script_rest_proc
+- name: Connector scripts and procedures recover the existing transaction after an error
+  tds:
+    statements:
+    - sql: DROP TABLE IF EXISTS dbo.script_wire
+    - sql: CREATE TABLE dbo.script_wire(id INT PRIMARY KEY,value INT)
+    - sql: INSERT dbo.script_wire VALUES(1,2)
+    - sql: DECLARE @value INT=4; SET @value=@value+1; IF @value=5 BEGIN SELECT @value AS value END
+      expect: {rows: 1, data: [{value: 5}]}
+    - sql: DROP PROCEDURE IF EXISTS dbo.script_wire_proc
+    - sql: CREATE PROCEDURE dbo.script_wire_proc @id INT,@amount INT=3 AS BEGIN UPDATE dbo.script_wire SET value=value+@amount WHERE id=@id; SELECT value FROM dbo.script_wire WHERE id=@id END
+    - sql: EXEC dbo.script_wire_proc @id=1
+      expect: {rows: 1, data: [{value: 5}]}
+    - sql: BEGIN TRANSACTION
+    - sql: INSERT dbo.script_wire VALUES(1,9)
+      expect: {error: true}
+    - sql: SELECT N'ROLLBACK' AS value
+      expect: {error: true, contains: [aborted]}
+    - sql: /* recover */ ROLLBACK TRANSACTION
+    - sql: SELECT value FROM dbo.script_wire
+      expect: {rows: 1, data: [{value: 5}]}
+    - sql: BEGIN TRANSACTION
+    - sql: EXEC dbo.script_wire_proc @id=1,@amount=10
+      expect: {rows: 1, data: [{value: 15}]}
+    - sql: ROLLBACK TRANSACTION
+    - sql: SELECT value FROM dbo.script_wire
+      expect: {rows: 1, data: [{value: 5}]}
+    - sql: DROP PROCEDURE dbo.script_wire_proc
+    - sql: DROP TABLE dbo.script_wire
+- name: Procedure plans rebind the native table after drop and recreation
+  sql: |
+    DROP TABLE IF EXISTS dbo.script_binding;
+    CREATE TABLE dbo.script_binding(id INT PRIMARY KEY,value INT);
+    INSERT dbo.script_binding VALUES(1,4);
+    GO
+    CREATE PROCEDURE dbo.script_binding_proc AS SELECT value FROM dbo.script_binding
+    GO
+    EXEC dbo.script_binding_proc;
+    DROP TABLE dbo.script_binding;
+    CREATE TABLE dbo.script_binding(id INT PRIMARY KEY,value INT);
+    INSERT dbo.script_binding VALUES(1,8);
+    EXEC dbo.script_binding_proc;
+    DROP PROCEDURE dbo.script_binding_proc;
+    DROP TABLE dbo.script_binding;
+  expect: {rows: 2, data: [{value: 4}, {value: 8}]}
+- name: Stored procedure invocation keeps caller permissions
+  scm: |
+    (begin
+      (define admin (newsession))
+      (admin "username" "root")
+      (define caller (newsession))
+      (caller "username" "script_unprivileged")
+      (tsql_execute_request "memcp-tests" "CREATE PROCEDURE dbo.script_privilege AS SELECT 7 AS value"
+        admin nil 0 (lambda (_row) true) (lambda args true))
+      (define denied (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "EXEC dbo.script_privilege" caller nil 0
+          (lambda (_row) true) (lambda args true))
+        false)) (lambda (err) (strlike (concat err) "%access denied%"))))
+      (dropprocedure "memcp-tests" "script_privilege")
+      denied)
+  expect: {result: true}
+- name: Console script import uses the same batch execution path
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-script-basic.sql") session)
+      true)
+  expect: {result: true}
+- name: Console import preserves GO inside a multiline value
+  sql: SELECT id,label FROM dbo.script_import
+  expect:
+    rows: 1
+    data: [{id: 7, label: "line one\nGO\nline two"}]
+- name: Fixture cleanup removes console import data
+  sql: DROP TABLE dbo.script_import
+- name: Source-only procedures persist their frontend-owned parameter contracts
+  sql: CREATE PROCEDURE dbo.script_persisted @value INT=4 AS SELECT @value+1 AS value
+- name: Restart after procedure catalog publication
+  action: restart
+- name: Cold restored procedures regenerate executable code before first invocation
+  sql: EXEC dbo.script_persisted
+  expect: {rows: 1, data: [{value: 5}]}
+- name: Restored procedure definitions preserve parameter overrides
+  sql: EXEC dbo.script_persisted @value=8
+  expect: {rows: 1, data: [{value: 9}]}
+- name: Fixture cleanup deletes the restored source definition
+  sql: DROP PROCEDURE dbo.script_persisted
 cleanup: []

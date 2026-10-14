@@ -994,12 +994,16 @@ a separator is recognized only on a physical line containing no SQL text. */
 	(reverse (if (equal? (strtrim tail) "") (car final)
 		(cons (list "text" tail "repeat" 1) (car final)))))))
 
+(define tsql_connection_session (lambda (session)
+	(coalesceNil (session "__tsql_connection_session") session)))
+
 (define parse_tsql (lambda (database s policy planning_session tx) (begin
 	(define schema database)
 	(define parse_started_ns (nanotime))
 	(define frontend_options (if (nil? planning_session) (newsession) planning_session))
 	(define describe (frontend_options "__tsql_describe"))
 	(define script_syntax (frontend_options "__tsql_script_syntax"))
+	(define expression_only (frontend_options "__tsql_expression_only"))
 	(define parameters (coalesceNil (frontend_options "__tsql_parameter_declarations") (list)))
 	(define parameter_expression (lambda (name) (begin
 		(define name (toLower name))
@@ -1680,7 +1684,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(list (quote begin)
 				(list (quote set) (quote resultrow) (list (quote lambda) (list (quote item)) insert_expr)) plan)))))
 	(define tsql_insert_into (parser '(
-		(atom "INSERT" true) (atom "INTO" true)
+		(atom "INSERT" true) (? (atom "INTO" true))
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
 		(? "(" (define columns (+ tsql_identifier ",")) ")")
 		(atom "VALUES" true) (define rows (+ tsql_insert_values_row ","))
@@ -1708,7 +1712,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(if policy (policy database tbl true) true)
 			(tsql_native_insert_expr database tbl '() '('list '(list)) 1 true)))))
 	(define tsql_insert_select (parser '(
-		(atom "INSERT" true) (atom "INTO" true)
+		(atom "INSERT" true) (? (atom "INTO" true))
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
 		(? "(" (define columns (+ tsql_identifier ",")) ")")
 		(define query tsql_select)
@@ -1872,6 +1876,9 @@ a separator is recognized only on a physical line containing no SQL text. */
 	(define tsql_transaction_keyword (if script_syntax
 		(parser (or (atom "TRAN" true) (atom "TRANSACTION" true)))
 		(parser (? (or (atom "TRAN" true) (atom "TRANSACTION" true))))))
+	(define tsql_rollback (parser '((atom "ROLLBACK" true)
+		(? (or (atom "TRAN" true) (atom "TRANSACTION" true))))
+		(lambda () (list (quote tx_rollback) (list (quote tsql_connection_session) (quote session))))))
 	(define p (parser (or
 		(parser (define query tsql_select) (lambda () (tsql_build_select_plan query)))
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query tsql_select)) (lambda () (explain_queryplan_ir (sql_expand_views query policy))))
@@ -1914,66 +1921,72 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(if policy (policy name true false) true)
 			(list (quote session) "schema" name))))
 		(parser '((atom "BEGIN" true) tsql_transaction_keyword)
-			(lambda () (list (quote tx_begin) (quote session) (quote tx))))
+			(lambda () (list (quote tx_begin) (list (quote tsql_connection_session) (quote session)) (quote tx))))
 		(parser '((atom "COMMIT" true) (? (or (atom "TRAN" true) (atom "TRANSACTION" true))))
-			(lambda () (list (quote tx_commit) (quote session))))
-		(parser '((atom "ROLLBACK" true) (? (or (atom "TRAN" true) (atom "TRANSACTION" true))))
-			(lambda () (list (quote tx_rollback) (quote session))))
+			(lambda () (list (quote tx_commit) (list (quote tsql_connection_session) (quote session)))))
+		tsql_rollback
 	)))
 
 
 	(define command_parser (if describe
 		(parser (define query tsql_select) (lambda () (tsql_build_select_plan query))) (parser (or p (parser empty (lambda () ""))))))
-	(if script_syntax (begin
-		/* Control grammar captures the ordinary leaf grammar without compiling its
-		statement yet. Earlier DDL in a batch must publish before later DML binds.
-		Control nodes are syntax data, not another query or transaction engine. */
-		(define tsql_script_variable (parser '("@" (define name tsql_identifier_unquoted)) (toLower name)))
-		(define tsql_script_declaration (parser '(
-			(define name tsql_script_variable) (? (atom "AS" true))
-			(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
-			(? "=" (define initializer (capture tsql_expression)))
-		) (list name (cons type (tsql_decl_dimensions type dimensions))
-				(if initializer (car initializer) nil))))
-		(define tsql_script_exec_argument (parser (or
-			(parser '((define name tsql_script_variable) "=" (define value (capture tsql_expression)))
-				(list name (car value)))
-			(parser (define value (capture tsql_expression)) (list "" (car value))))))
-		(define tsql_script_command (parser (or
-			(parser '((atom "IF" true) (define condition (capture tsql_expression))
-				(define yes tsql_script_command)
-				(? (atom "ELSE" true) (define no tsql_script_command)))
-				(list "if" (car condition) yes no))
-			(parser '((atom "BEGIN" true) (define commands (* tsql_script_item empty)) (atom "END" true))
-				(list "block" commands))
-			(parser '((atom "DECLARE" true) (define declarations (+ tsql_script_declaration ",")))
-				(list "declare" declarations))
-			(parser '((atom "SET" true) (define name tsql_script_variable) "=" (define value (capture tsql_expression)))
-				(list "assign" name (car value)))
-			(parser '((or (atom "EXEC" true) (atom "EXECUTE" true))
+	(if expression_only
+		((parser (define expression tsql_expression) (sql_expr_info '() expression) "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
+		script_syntax (begin
+			/* Control grammar captures the ordinary leaf grammar without compiling its
+			statement yet. Earlier DDL in a batch must publish before later DML binds.
+			Control nodes are syntax data, not another query or transaction engine. */
+			(define tsql_script_variable (parser '("@" (define name tsql_identifier_unquoted)) (toLower name)))
+			(define tsql_script_declaration (parser '(
+				(define name tsql_script_variable) (? (atom "AS" true))
+				(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
+				(? "=" (define initializer (capture tsql_expression)))
+			) (list name (cons type (tsql_decl_dimensions type dimensions))
+					(if initializer (car initializer) nil))))
+			(define tsql_script_exec_argument (parser (or
+				(parser '((define name tsql_script_variable) "=" (define value (capture tsql_expression)))
+					(list name (car value)))
+				(parser (define value (capture tsql_expression)) (list "" (car value))))))
+			(define tsql_script_command (parser (or
+				(parser (define statement (capture tsql_rollback)) (list "recovery" (strtrim (car statement))))
+				(parser '((atom "IF" true) (define condition (capture tsql_expression))
+					(define yes tsql_script_command)
+					(? (atom "ELSE" true) (define no tsql_script_command)))
+					(list "if" (car condition) yes no))
+				(parser '((atom "BEGIN" true) (define commands (* tsql_script_item empty)) (atom "END" true))
+					(list "block" commands))
+				(parser '((atom "DECLARE" true) (define declarations (+ tsql_script_declaration ",")))
+					(list "declare" declarations))
+				(parser '((atom "SET" true) (define name tsql_script_variable) "=" (define value (capture tsql_expression)))
+					(list "assign" name (car value)))
+				(parser '((atom "DROP" true) (or (atom "PROCEDURE" true) (atom "PROC" true))
+					(define ignore (? (atom "IF" true) (atom "EXISTS" true)))
+					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier))
+					(list "drop-procedure" (coalesce owner schema) name (if ignore true false)))
+				(parser '((or (atom "EXEC" true) (atom "EXECUTE" true))
+					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
+					(define arguments (* tsql_script_exec_argument ",")))
+					(list "execute" (coalesce owner schema) name arguments))
+				(parser (define statement (capture p)) (list "statement" (strtrim (car statement))))
+			)))
+			(define tsql_script_item (parser '((* ";") (define command tsql_script_command) (* ";")) command))
+			(define tsql_script_procedure_parameter (parser '(
+				(define declaration tsql_script_declaration)
+				(define output (? (or (atom "OUTPUT" true) (atom "OUT" true))))
+			) (append declaration (if output true false))))
+			(define tsql_script_procedure (parser '(
+				(atom "CREATE" true) (define replace (? (atom "OR" true) (atom "ALTER" true)))
+				(or (atom "PROCEDURE" true) (atom "PROC" true))
 				(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
-				(define arguments (* tsql_script_exec_argument ",")))
-				(list "execute" (coalesce owner schema) name arguments))
-			(parser (define statement (capture p)) (list "statement" (strtrim (car statement))))
-		)))
-		(define tsql_script_item (parser '((* ";") (define command tsql_script_command) (* ";")) command))
-		(define tsql_script_procedure_parameter (parser '(
-			(define declaration tsql_script_declaration)
-			(define output (? (or (atom "OUTPUT" true) (atom "OUT" true))))
-		) (append declaration (if output true false))))
-		(define tsql_script_procedure (parser '(
-			(atom "CREATE" true) (define replace (? (atom "OR" true) (atom "ALTER" true)))
-			(or (atom "PROCEDURE" true) (atom "PROC" true))
-			(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
-			(define parameters (* tsql_script_procedure_parameter ","))
-			(atom "AS" true) (define body (capture (+ tsql_script_item empty)))
-		) (list "batch" (list (list "create-procedure" (coalesce owner schema) name
-				parameters (strtrim (car body)) (if replace true false))))))
-		(define script_parser (parser (define batch (or tsql_script_procedure
-			(parser '((* ";") (define commands (* tsql_script_item empty)) (* ";"))
-				(list "batch" commands)))) batch "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
+				(define parameters (* tsql_script_procedure_parameter ","))
+				(atom "AS" true) (define body (capture (+ tsql_script_item empty)))
+			) (list "batch" (list (list "create-procedure" (coalesce owner schema) name
+					parameters (strtrim (car body)) (if replace true false))))))
+			(define script_parser (parser (define batch (or tsql_script_procedure
+				(parser '((* ";") (define commands (* tsql_script_item empty)) (* ";"))
+					(list "batch" commands)))) batch "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
 
-		(script_parser s))
+			(script_parser s))
 		((parser '((* ";") (define command command_parser) (* ";")) (if (string? command) command (command)) "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s))
 )))
 
