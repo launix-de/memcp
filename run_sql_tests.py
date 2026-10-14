@@ -984,7 +984,7 @@ class SQLTestRunner:
                     if resp and resp.status_code == 200:
                         parts.append(f"[SQL] {step['sql'][:80]}\n       → {resp.text.strip()[:500]}")
                 elif "scm" in step:
-                    resp = requests.post(f"{self.base_url}/scm", data=step["scm"], headers=self.auth_header, timeout=5)
+                    resp = requests.post(f"{self.base_url}/scm", data=step["scm"].encode("utf-8"), headers=self.auth_header, timeout=5)
                     if resp and resp.status_code == 200:
                         parts.append(f"[SCM] {step['scm'][:80]}\n       → {resp.text.strip()[:500]}")
                 elif "psql" in step:
@@ -1457,7 +1457,7 @@ class SQLTestRunner:
                         try:
                             with performance_server_gate():
                                 resp = requests.post(
-                                    url, data=scm, headers=self.auth_header,
+                                    url, data=scm.encode("utf-8"), headers=self.auth_header,
                                     timeout=(max(1, min(600, math.ceil(setup_remaining)))
                                              if PERF_TEST_ENABLED else 600),
                                 )
@@ -1514,7 +1514,7 @@ class SQLTestRunner:
             ))
             try:
                 url = f"{self.base_url}/scm"
-                resp = requests.post(url, data=scm_code, headers=self.auth_header, timeout=scm_timeout)
+                resp = requests.post(url, data=scm_code.encode("utf-8"), headers=self.auth_header, timeout=scm_timeout)
             except Exception as e:
                 if self._expect_interrupted_ok(expect):
                     self._record_success(name, is_noncritical)
@@ -1573,7 +1573,7 @@ class SQLTestRunner:
                 step_timeout = int(step.get("timeout", 30))
                 if "scm" in step:
                     url = f"{self.base_url}/scm"
-                    return requests.post(url, data=step["scm"], headers=self.auth_header, timeout=step_timeout)
+                    return requests.post(url, data=step["scm"].encode("utf-8"), headers=self.auth_header, timeout=step_timeout)
                 else:
                     return self.execute_sql(database, step["sql"],
                                             session_id=step.get("session_id"),
@@ -1694,7 +1694,7 @@ class SQLTestRunner:
             self._test_context.request_timed_out = False
             if scm_code:
                 try:
-                    return requests.post(f"{self.base_url}/scm", data=query,
+                    return requests.post(f"{self.base_url}/scm", data=query.encode("utf-8"),
                                          headers=auth_header, timeout=sql_timeout)
                 except requests.RequestException as exc:
                     self._test_context.request_timed_out = isinstance(exc, requests.Timeout)
@@ -2227,7 +2227,7 @@ class SQLTestRunner:
                     url = f"{self.base_url}/scm"
                     with performance_server_gate():
                         resp = requests.post(
-                            url, data=scm_code, headers=self.auth_header,
+                            url, data=scm_code.encode("utf-8"), headers=self.auth_header,
                             timeout=(
                                 max(1, min(int(step.get("timeout", 600)), math.ceil(setup_remaining)))
                                 if PERF_TEST_ENABLED else int(step.get("timeout", 600))
@@ -2278,7 +2278,7 @@ class SQLTestRunner:
                         if session_id:
                             headers["X-Session-Id"] = session_id
                         response = requests.post(
-                            f"{self.base_url}/scm", data=statement, headers=headers,
+                            f"{self.base_url}/scm", data=statement.encode("utf-8"), headers=headers,
                             timeout=int(step.get("timeout", 30)),
                         )
                     else:
@@ -2801,7 +2801,7 @@ def suite_scan_debugging(spec_file: str) -> bool:
 
 def change_scan_debugging(base_url: str, enabled: bool) -> bool:
     runner = SQLTestRunner(base_url)
-    response = requests.post(f"{base_url}/scm", data='(settings "ScanDebugging")',
+    response = requests.post(f"{base_url}/scm", data='(settings "ScanDebugging")'.encode("utf-8"),
                              headers=runner.auth_header, timeout=10)
     response.raise_for_status()
     value = response.text.strip().lower()
@@ -2811,7 +2811,7 @@ def change_scan_debugging(base_url: str, enabled: bool) -> bool:
     if previous != enabled:
         response = requests.post(
             f"{base_url}/scm",
-            data=f'(settings "ScanDebugging" {str(enabled).lower()})',
+            data=f'(settings "ScanDebugging" {str(enabled).lower()})'.encode("utf-8"),
             headers=runner.auth_header, timeout=10,
         )
         response.raise_for_status()

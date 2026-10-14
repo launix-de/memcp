@@ -24,6 +24,7 @@ import os
 import json
 import io
 from contextlib import redirect_stdout
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import itertools
 import requests
 import signal
@@ -621,6 +622,52 @@ class HookDiagnosticsContractTest(unittest.TestCase):
         test_recipe = makefile.split("\ntest:\n", 1)[1].split("\n\n", 1)[0]
         self.assertNotIn("MEMCP_TEST_DATA_DIR=", test_recipe)
         self.assertIn("./git-pre-commit", test_recipe)
+
+
+class UnicodeSCMTransportContractTest(unittest.TestCase):
+    def test_all_scm_request_paths_send_complete_utf8_bodies(self):
+        code = '(equal? "Grüße 🐘" "Grüße 🐘")'
+        wanted = code.encode("utf-8")
+        received = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                received.append(body)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"true" if body in (wanted, b"true") else b"false")
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever)
+        worker.start()
+        runner = SQLTestRunner(f"http://127.0.0.1:{server.server_port}")
+        actions = [
+            ("case", lambda: runner.run_test_case({"scm": code, "expect": {"result": True}}, "memcp-tests")),
+            ("setup", lambda: runner.run_setup([{"scm": code}], "memcp-tests")),
+            ("case setup", lambda: runner.run_test_case({"scm": "true", "setup": [{"scm": code}], "expect": {"result": True}}, "memcp-tests")),
+            ("steps", lambda: runner.run_test_case({"steps": [{"scm": code, "expect": {"result": True}}]}, "memcp-tests")),
+            ("cleanup", lambda: runner.run_cleanup([{"scm": code}], "memcp-tests")),
+            ("diagnostics", lambda: runner._run_on_fail({"on_fail": {"scm": code}}, "memcp-tests")),
+            ("timing", lambda: runner.run_test_case({"scm": code, "expect": {"result": True}, "threshold_ms": 10000, "timing_samples": 1, "warmup": 0}, "memcp-tests")),
+        ]
+        try:
+            for name, action in actions:
+                with self.subTest(path=name), redirect_stdout(io.StringIO()), \
+                        mock.patch("run_sql_tests.PERF_TEST_ENABLED", name == "timing"), \
+                        mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
+                        mock.patch("run_sql_tests.find_memcp_pid", return_value=None):
+                    start = len(received)
+                    self.assertTrue(action())
+                    self.assertIn(wanted, received[start:])
+                    self.assertTrue(all(body in (wanted, b"true") for body in received[start:]))
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
 
 
 class PerformanceScaleContractTest(unittest.TestCase):
