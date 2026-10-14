@@ -2961,6 +2961,9 @@ func Init(en scm.Env) {
 			cols1 := scmerSliceToStrings(mustScmerSlice(a[2], "foreign cols1"))
 			t2 := TableFromScmer(a[3])
 			cols2 := scmerSliceToStrings(mustScmerSlice(a[4], "foreign cols2"))
+			if t1.schema != t2.schema {
+				panic("foreign key endpoints must belong to the same schema")
+			}
 
 			requireTableMaintenance(t1.schema.Name, t1.Name, maintenanceAlter)
 			t1.ddlMu.Lock()
