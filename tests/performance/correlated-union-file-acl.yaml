@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Imported tables deliberately have no declared unique keys.
 metadata:
-  performance_shard_weight: 2
+  # Account for fresh verification fixtures when balancing the slow suites.
+  # This changes scheduling only, without changing samples or timing gates.
+  performance_shard_weight: 48
   description: Point file permission through a union of direct and nested tenant ACL references
   isolated: true
   performance_rows: 800000

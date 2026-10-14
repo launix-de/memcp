@@ -1,0 +1,515 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: T-SQL script boundaries and shared statement grammar
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+setup: []
+test_cases:
+- name: GO separates physical batches and preserves repetition
+  scm: |
+    (equal? (tsql_script_batches "SELECT 1\nGO 3\nSELECT 2\nGO\n")
+      (list (list "text" "SELECT 1\n" "repeat" 3)
+        (list "text" "SELECT 2\n" "repeat" 1)))
+  expect: {result: true}
+- name: GO accepts CRLF and trailing comments
+  scm: |
+    (equal? (tsql_script_batches "SELECT 1\r\n go 2 -- repeat\r\nSELECT 2")
+      (list (list "text" "SELECT 1\r\n" "repeat" 2)
+        (list "text" "SELECT 2" "repeat" 1)))
+  expect: {result: true}
+- name: GO inside multiline literals never separates a batch
+  scm: |
+    (equal? (tsql_script_batches "SELECT N'first\nGO\nlast', 'a''b'\nGO\n")
+      (list (list "text" "SELECT N'first\nGO\nlast', 'a''b'\n" "repeat" 1)))
+  expect: {result: true}
+- name: Delimited identifiers protect separator text
+  scm: |
+    (equal? (tsql_script_batches "SELECT [a]]\nGO\nb], \"c\"\"\nGO\nd\"\nGO\n")
+      (list (list "text" "SELECT [a]]\nGO\nb], \"c\"\"\nGO\nd\"\n" "repeat" 1)))
+  expect: {result: true}
+- name: Nested block comments protect separator text
+  scm: |
+    (equal? (tsql_script_batches "/* outer\n/* inner */\nGO\n*/\nSELECT 1\nGO\n")
+      (list (list "text" "/* outer\n/* inner */\nGO\n*/\nSELECT 1\n" "repeat" 1)))
+  expect: {result: true}
+- name: Comments around a separator do not become SQL
+  scm: |
+    (equal? (tsql_script_batches "SELECT 1\n/* before */ GO /* after */\n")
+      (list (list "text" "SELECT 1\n" "repeat" 1)))
+  expect: {result: true}
+- name: GO appearing alongside SQL is ordinary statement text
+  scm: |
+    (equal? (tsql_script_batches "SELECT GO, GO_count FROM go_table\n")
+      (list (list "text" "SELECT GO, GO_count FROM go_table\n" "repeat" 1)))
+  expect: {result: true}
+- name: Empty script and leading separators produce no batches
+  scm: (empty_list? (tsql_script_batches "GO\n  GO 2\n"))
+  expect: {result: true}
+- name: GO rejects zero repetitions
+  scm: (tsql_script_batches "SELECT 1\nGO 0\n")
+  expect: {error: true}
+- name: GO rejects a repetition exceeding native integer range
+  scm: (tsql_script_batches "SELECT 1\nGO 9223372036854775808\n")
+  expect: {error: true}
+- name: Script rejects unterminated quoted values
+  scm: (tsql_script_batches "SELECT 'unfinished\nGO\n")
+  expect: {error: true}
+- name: Script rejects unterminated nested comments
+  scm: (tsql_script_batches "SELECT 1 /* outer /* inner */\nGO\n")
+  expect: {error: true}
+- name: Batch parses preceding DDL without prematurely binding later DML
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests"
+      "CREATE TABLE dbo.batch_new (id INT); INSERT INTO dbo.batch_new VALUES(1); SELECT id FROM dbo.batch_new")
+      (list "batch" (list
+        (list "statement" "CREATE TABLE dbo.batch_new (id INT)")
+        (list "statement" "INSERT INTO dbo.batch_new VALUES(1)")
+        (list "statement" "SELECT id FROM dbo.batch_new"))))
+  expect: {result: true}
+- name: Batch variables retain declared contracts independently of values
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests" "DECLARE @amount DECIMAL(12,2)=1, @label NVARCHAR(20); SET @amount=2.5")
+      (list "batch" (list
+        (list "declare" (list (list "amount" '("DECIMAL" 12 2) "1")
+          (list "label" '("NVARCHAR" 20) nil)))
+        (list "assign" "amount" "2.5"))))
+  expect: {result: true}
+- name: IF and nested blocks retain ordinary SELECT syntax
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests" "IF @enabled=1 BEGIN SELECT 2 AS n; IF 1=0 SELECT 3 AS n ELSE SELECT 4 AS n END ELSE SELECT 5 AS n")
+      (list "batch" (list (list "if" "@enabled=1"
+        (list "block" (list (list "statement" "SELECT 2 AS n")
+          (list "if" "1=0" (list "statement" "SELECT 3 AS n")
+            (list "statement" "SELECT 4 AS n"))))
+        (list "statement" "SELECT 5 AS n")))))
+  expect: {result: true}
+- name: EXEC arguments use shared expression and identifier grammar
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests" "EXEC dbo.inspect @table_name=N'a; ELSE', @owner=@who")
+      (list "batch" (list (list "execute" "memcp-tests" "inspect"
+        (list (list "table_name" "N'a; ELSE'") (list "owner" "@who"))))))
+  expect: {result: true}
+- name: Batch rejects malformed declaration dimensions
+  scm: (parse_tsql_batch "memcp-tests" "DECLARE @value DECIMAL(2,3)")
+  expect: {error: true}
+- name: Batch rejects unterminated block
+  scm: (parse_tsql_batch "memcp-tests" "IF 1=1 BEGIN SELECT 2")
+  expect: {error: true}
+- name: Batch rejects unsupported leaf SQL instead of splitting guesses
+  scm: (parse_tsql_batch "memcp-tests" "SELECT 1; UNSUPPORTED arbitrary text; SELECT 2")
+  expect: {error: true}
+- name: Procedure source captures the complete batch and parameter contracts
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests"
+      "CREATE PROCEDURE dbo.adjust @tenant INT=1, @value DECIMAL(12,2) OUTPUT AS BEGIN SET @value=@value+1; SELECT @tenant AS tenant END")
+      (list "batch" (list (list "create-procedure" "memcp-tests" "adjust"
+        (list (list "tenant" '("INT") "1" false)
+          (list "value" '("DECIMAL" 12 2) nil true))
+        "BEGIN SET @value=@value+1; SELECT @tenant AS tenant END" false))))
+  expect: {result: true}
+- name: Procedure declaration must start its batch
+  scm: (parse_tsql_batch "memcp-tests" "SELECT 1; CREATE PROCEDURE dbo.late AS SELECT 2")
+  expect: {error: true}
+- name: Procedure body may contain several ordinary statements without a block
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests" "CREATE OR ALTER PROC dbo.sequence AS SELECT 1; SELECT 2")
+      (list "batch" (list (list "create-procedure" "memcp-tests" "sequence"
+        '() "SELECT 1; SELECT 2" true))))
+  expect: {result: true}
+- name: A spanning comment closes before a physical separator line
+  scm: |
+    (equal? (tsql_script_batches "SELECT 1 /* first\nlast */ GO\nSELECT 2")
+      (list (list "text" "SELECT 1 /* first\nlast */" "repeat" 1)
+        (list "text" "SELECT 2" "repeat" 1)))
+  expect: {result: true}
+- name: Native source procedure is callable from the Scheme frontend
+  scm: |
+    (begin
+      (registerprocedurelanguage "add-constant" (lambda (source context)
+        (lambda (value) (+ value (simplify source)))))
+      (dropprocedure "memcp-tests" "script_source_example" true)
+      (createprocedure "memcp-tests" "script_source_example" "add-constant" "7" '())
+      (define original (procedure "memcp-tests" "script_source_example"))
+      (define first (original 5))
+      (createprocedure "memcp-tests" "script_source_example" "add-constant" "9" '() true)
+      (define second ((procedure "memcp-tests" "script_source_example") 5))
+      (define retained (original 5))
+      (dropprocedure "memcp-tests" "script_source_example")
+      (and (equal? first 12) (equal? second 14) (equal? retained 12)))
+  expect: {result: true}
+- name: Executable batch variables and branches use declared SQL contracts
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (define rows (newsession))
+      (tsql_execute_request "memcp-tests"
+        "DECLARE @value INT=2; SET @value=@value+3; IF @value=5 BEGIN SELECT @value AS value END ELSE SELECT 99 AS value"
+        session nil 0 (lambda (row) (rows "value" (row "value"))) (lambda args true))
+      (equal? (rows "value") 5))
+  expect: {result: true}
+- name: Procedure execution updates through the shared native DML path
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (define rows (newsession))
+      (tsql_execute_request "memcp-tests"
+        "DROP TABLE IF EXISTS dbo.script_runtime; CREATE TABLE dbo.script_runtime(id INT PRIMARY KEY, value INT); INSERT INTO dbo.script_runtime VALUES(1,2);"
+        session nil 0 (lambda (_row) true) (lambda args true))
+      (dropprocedure "memcp-tests" "script_advance" true)
+      (tsql_execute_request "memcp-tests"
+        "CREATE PROCEDURE dbo.script_advance @id INT, @amount INT=3 AS BEGIN UPDATE dbo.script_runtime SET value=value+@amount WHERE id=@id; SELECT value FROM dbo.script_runtime WHERE id=@id END"
+        session nil 0 (lambda (_row) true) (lambda args true))
+      (tsql_execute_request "memcp-tests" "EXEC dbo.script_advance @id=1"
+        session nil 0 (lambda (row) (rows "value" (row "value"))) (lambda args true))
+      (dropprocedure "memcp-tests" "script_advance")
+      (tsql_execute_request "memcp-tests" "DROP TABLE dbo.script_runtime"
+        session nil 0 (lambda (_row) true) (lambda args true))
+      (equal? (rows "value") 5))
+  expect: {result: true}
+- name: REST executes ordinary leaves after preceding DDL
+  sql: |
+    DROP TABLE IF EXISTS dbo.script_rest;
+    CREATE TABLE dbo.script_rest(id INT PRIMARY KEY, value INT);
+    INSERT INTO dbo.script_rest VALUES(1,4);
+    UPDATE dbo.script_rest SET value=value+2 WHERE id=1;
+    SELECT value FROM dbo.script_rest WHERE id=1;
+    DROP TABLE dbo.script_rest;
+  expect: {rows: 1, data: [{value: 6}]}
+- name: REST executes nested branches and typed local assignments
+  sql: |
+    DECLARE @n INT=1;
+    IF @n=1 BEGIN SET @n=@n+2; IF @n=3 SELECT @n AS value ELSE SELECT 0 AS value END
+    ELSE SELECT 99 AS value;
+  expect: {rows: 1, data: [{value: 3}]}
+- name: REST evaluates only the selected branch
+  sql: IF 1=0 SELECT missing FROM unknown_table ELSE SELECT 7 AS value
+  expect: {rows: 1, data: [{value: 7}]}
+- name: REST physical batches repeat and start fresh variable scope
+  sql: |
+    DECLARE @value INT=3; SET @value=@value+1; SELECT @value AS value;
+    GO 2
+    SELECT 9 AS value
+  expect: {rows: 3, data: [{value: 4}, {value: 4}, {value: 9}]}
+- name: REST rejects use of variables from an earlier physical batch
+  sql: |
+    DECLARE @value INT=3;
+    GO
+    SELECT @value AS value
+  expect: {error: true}
+- name: Variable SQL contracts survive a NULL initial value
+  sql: DECLARE @value INT=NULL; IF @value IS NULL SET @value=7; SELECT @value+1 AS value
+  expect: {rows: 1, data: [{value: 8}]}
+- name: String variable addition uses the declared frontend contract
+  sql: DECLARE @value VARCHAR(20)='12'; SET @value=@value+'3'; SELECT @value AS value
+  expect: {rows: 1, data: [{value: '123'}]}
+- name: REST rejects undeclared assignments
+  sql: SET @missing=1
+  expect: {error: true}
+- name: REST rejects duplicate variable contracts
+  sql: DECLARE @value INT=1; DECLARE @value INT=2
+  expect: {error: true}
+- name: REST rejects a scalar IF value without a predicate contract
+  sql: IF 1 SELECT 7 AS value
+  expect: {error: true}
+- name: REST rejects a relational scalar fallback in IF
+  sql: IF EXISTS(SELECT 1) SELECT 7 AS value
+  expect: {error: true}
+- name: REST source procedures bind named positional and default arguments
+  sql: |
+    CREATE PROCEDURE dbo.script_rest_proc @value INT, @amount INT=3 AS
+    BEGIN SELECT @value+@amount AS value END
+    GO
+    EXEC dbo.script_rest_proc 4;
+    EXEC dbo.script_rest_proc @amount=2,@value=8;
+  expect: {rows: 2, data: [{value: 7}, {value: 10}]}
+- name: Procedure calls reject unknown named parameters
+  sql: EXEC dbo.script_rest_proc @wrong=1
+  expect: {error: true}
+- name: Procedure calls reject duplicate named parameters
+  sql: EXEC dbo.script_rest_proc @value=1,@value=2
+  expect: {error: true}
+- name: Procedure calls reject missing required parameters
+  sql: EXEC dbo.script_rest_proc
+  expect: {error: true}
+- name: Nested procedure variables preserve the caller scope
+  sql: |
+    DECLARE @value INT=40;
+    EXEC dbo.script_rest_proc @value=2;
+    SELECT @value AS value;
+  expect: {rows: 2, data: [{value: 5}, {value: 40}]}
+- name: Aborted explicit transactions permit parsed rollback recovery
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (define execute (lambda (text)
+        (tsql_execute_request "memcp-tests" text session nil 0 (lambda (_row) true) (lambda args true))))
+      (execute "DROP TABLE IF EXISTS dbo.script_recovery; CREATE TABLE dbo.script_recovery(id INT PRIMARY KEY); INSERT INTO dbo.script_recovery VALUES(1);")
+      (execute "BEGIN TRANSACTION")
+      (define failed (try (lambda () (begin (execute "INSERT INTO dbo.script_recovery VALUES(1)") false)) (lambda (_err) true)))
+      (define rejected (try (lambda () (begin (execute "SELECT 'ROLLBACK' AS value") false)) (lambda (_err) true)))
+      (execute "/* recovery */ ROLLBACK TRANSACTION")
+      (execute "INSERT INTO dbo.script_recovery VALUES(2); DROP TABLE dbo.script_recovery;")
+      (and failed rejected (nil? (session "transaction"))))
+  expect: {result: true}
+- name: Procedure declaration names use the frontend case-insensitive identity
+  sql: CREATE PROCEDURE dbo.SCRIPT_REST_PROC @value INT AS SELECT @value AS value
+  expect: {error: true}
+- name: Procedure calls resolve delimited identifier casing
+  sql: EXEC [dbo].[SCRIPT_REST_PROC] @value=4
+  expect: {rows: 1, data: [{value: 7}]}
+- name: CREATE OR ALTER replaces source without keeping an old plan
+  sql: |
+    CREATE OR ALTER PROCEDURE dbo.script_rest_proc @value INT AS SELECT @value+8 AS value
+    GO
+    EXEC dbo.script_rest_proc 4;
+  expect: {rows: 1, data: [{value: 12}]}
+- name: SQL procedure deletion uses the native persisted registry
+  sql: DROP PROCEDURE dbo.script_rest_proc
+- name: Deleted procedure definitions no longer execute
+  sql: EXEC dbo.script_rest_proc 4
+  expect: {error: true}
+- name: Idempotent procedure deletion accepts an absent definition
+  sql: DROP PROC IF EXISTS dbo.script_rest_proc
+- name: Connector scripts and procedures recover the existing transaction after an error
+  tds:
+    statements:
+    - sql: DROP TABLE IF EXISTS dbo.script_wire
+    - sql: CREATE TABLE dbo.script_wire(id INT PRIMARY KEY,value INT)
+    - sql: INSERT INTO dbo.script_wire VALUES(1,2)
+    - sql: DECLARE @value INT=4; SET @value=@value+1; IF @value=5 BEGIN SELECT @value AS value END
+      expect: {rows: 1, data: [{value: 5}]}
+    - sql: DROP PROCEDURE IF EXISTS dbo.script_wire_proc
+    - sql: CREATE PROCEDURE dbo.script_wire_proc @id INT,@amount INT=3 AS BEGIN UPDATE dbo.script_wire SET value=value+@amount WHERE id=@id; SELECT value FROM dbo.script_wire WHERE id=@id END
+    - sql: EXEC dbo.script_wire_proc @id=1
+      expect: {rows: 1, data: [{value: 5}]}
+    - sql: BEGIN TRANSACTION
+    - sql: INSERT INTO dbo.script_wire VALUES(1,9)
+      expect: {error: true}
+    - sql: SELECT N'ROLLBACK' AS value
+      expect: {error: true, contains: [aborted]}
+    - sql: /* recover */ ROLLBACK TRANSACTION
+    - sql: SELECT value FROM dbo.script_wire
+      expect: {rows: 1, data: [{value: 5}]}
+    - sql: BEGIN TRANSACTION
+    - sql: EXEC dbo.script_wire_proc @id=1,@amount=10
+      expect: {rows: 1, data: [{value: 15}]}
+    - sql: ROLLBACK TRANSACTION
+    - sql: SELECT value FROM dbo.script_wire
+      expect: {rows: 1, data: [{value: 5}]}
+    - sql: DROP PROCEDURE dbo.script_wire_proc
+    - sql: DROP TABLE dbo.script_wire
+- name: Procedure plans rebind the native table after drop and recreation
+  sql: |
+    DROP TABLE IF EXISTS dbo.script_binding;
+    CREATE TABLE dbo.script_binding(id INT PRIMARY KEY,value INT);
+    INSERT INTO dbo.script_binding VALUES(1,4);
+    GO
+    CREATE PROCEDURE dbo.script_binding_proc AS SELECT value FROM dbo.script_binding
+    GO
+    EXEC dbo.script_binding_proc;
+    DROP TABLE dbo.script_binding;
+    CREATE TABLE dbo.script_binding(id INT PRIMARY KEY,value INT);
+    INSERT INTO dbo.script_binding VALUES(1,8);
+    EXEC dbo.script_binding_proc;
+    DROP PROCEDURE dbo.script_binding_proc;
+    DROP TABLE dbo.script_binding;
+  expect: {rows: 2, data: [{value: 4}, {value: 8}]}
+- name: Stored procedure invocation keeps caller permissions
+  scm: |
+    (begin
+      (define admin (newsession))
+      (admin "username" "root")
+      (define caller (newsession))
+      (caller "username" "script_unprivileged")
+      (tsql_execute_request "memcp-tests" "CREATE PROCEDURE dbo.script_privilege AS SELECT 7 AS value"
+        admin nil 0 (lambda (_row) true) (lambda args true))
+      (define denied (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "EXEC dbo.script_privilege" caller nil 0
+          (lambda (_row) true) (lambda args true))
+        false)) (lambda (err) (strlike (concat err) "%access denied%"))))
+      (dropprocedure "memcp-tests" "script_privilege")
+      denied)
+  expect: {result: true}
+- name: Leading line comments are skipped by the ordinary statement grammar
+  sql: |
+    -- leading declaration comment
+    SELECT 7 AS value -- trailing comment
+  expect: {rows: 1, data: [{value: 7}]}
+- name: Console script import uses the same batch execution path
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-script-basic.sql") session)
+      true)
+  expect: {result: true}
+- name: Console import preserves GO inside a multiline value
+  sql: SELECT id,label FROM dbo.script_import
+  expect:
+    rows: 1
+    data: [{id: 7, label: "line one\nGO\nline two"}]
+- name: Fixture cleanup removes console import data
+  sql: DROP TABLE dbo.script_import
+- name: Source-only procedures persist their frontend-owned parameter contracts
+  sql: CREATE PROCEDURE dbo.script_persisted @value INT=4 AS SELECT @value+1 AS value
+- name: Restart after procedure catalog publication
+  action: restart
+- name: Cold restored procedures regenerate executable code before first invocation
+  sql: EXEC dbo.script_persisted
+  expect: {rows: 1, data: [{value: 5}]}
+- name: Restored procedure definitions preserve parameter overrides
+  sql: EXEC dbo.script_persisted @value=8
+  expect: {rows: 1, data: [{value: 9}]}
+- name: Fixture cleanup deletes the restored source definition
+  sql: DROP PROCEDURE dbo.script_persisted
+- name: Scalar variable and IF compilation observe the active batch identity
+  sql: |
+    DROP TABLE IF EXISTS dbo.script_identity_scope;
+    CREATE TABLE dbo.script_identity_scope(id INT IDENTITY,value INT);
+    INSERT INTO dbo.script_identity_scope(value) VALUES(10);
+    DECLARE @first NUMERIC = SCOPE_IDENTITY();
+    INSERT INTO dbo.script_identity_scope(value) VALUES(20);
+    DECLARE @second NUMERIC = NULL;
+    IF SCOPE_IDENTITY()=2 SET @second=SCOPE_IDENTITY();
+    SELECT @first AS first_value,@second AS second_value,SCOPE_IDENTITY() AS scoped,@@IDENTITY AS connection_value;
+  expect:
+    rows: 1
+    data: [{first_value: 1, second_value: 2, scoped: 2, connection_value: 2}]
+- name: GO resets scalar scope while retaining the same connection identity
+  sql: |
+    INSERT INTO dbo.script_identity_scope(value) VALUES(30);
+    GO
+    DECLARE @fresh NUMERIC = SCOPE_IDENTITY();
+    SELECT @fresh AS scoped,@@IDENTITY AS connection_value;
+  expect:
+    rows: 1
+    data: [{scoped: null, connection_value: 3}]
+- name: Nested procedures restore parent identity for scalar assignments and IF
+  sql: |
+    CREATE PROCEDURE dbo.script_identity_grandchild AS
+    INSERT INTO dbo.script_identity_scope(value) VALUES(60);
+    GO
+    CREATE PROCEDURE dbo.script_identity_child AS BEGIN
+      INSERT INTO dbo.script_identity_scope(value) VALUES(50);
+      DECLARE @before NUMERIC = SCOPE_IDENTITY();
+      EXEC dbo.script_identity_grandchild;
+      DECLARE @after NUMERIC = SCOPE_IDENTITY();
+      IF SCOPE_IDENTITY()=5 SET @after=SCOPE_IDENTITY();
+      SELECT @before AS before_value,@after AS after_value,@@IDENTITY AS connection_value;
+    END;
+    GO
+    CREATE PROCEDURE dbo.script_identity_parent AS BEGIN
+      INSERT INTO dbo.script_identity_scope(value) VALUES(40);
+      DECLARE @before NUMERIC = SCOPE_IDENTITY();
+      EXEC dbo.script_identity_child;
+      DECLARE @after NUMERIC = SCOPE_IDENTITY();
+      IF SCOPE_IDENTITY()=4 SET @after=SCOPE_IDENTITY();
+      SELECT @before AS before_value,@after AS after_value,@@IDENTITY AS connection_value;
+    END;
+    GO
+    EXEC dbo.script_identity_parent;
+    DECLARE @fresh NUMERIC=SCOPE_IDENTITY();
+    SELECT @fresh AS scoped,@@IDENTITY AS connection_value;
+  expect:
+    rows: 3
+    data:
+    - {before_value: 5, after_value: 5, connection_value: 6}
+    - {before_value: 4, after_value: 4, connection_value: 6}
+    - {scoped: null, connection_value: 6}
+- name: Fixture cleanup removes identity scope procedures and data
+  sql: |
+    DROP PROCEDURE dbo.script_identity_grandchild;
+    DROP PROCEDURE dbo.script_identity_child;
+    DROP PROCEDURE dbo.script_identity_parent;
+    DROP TABLE dbo.script_identity_scope;
+- name: Metadata EXEC arguments use ordinary declared variable expressions
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_exec_catalog
+  - sql: CREATE TABLE dbo.script_exec_catalog(id INT PRIMARY KEY,label NVARCHAR(16))
+  sql: |
+    DECLARE @table NVARCHAR(64)=N'script_exec_catalog';
+    EXEC dbo.sp_tables @table_name=@table;
+  expect:
+    rows: 1
+    data: [{TABLE_NAME: script_exec_catalog, TABLE_OWNER: dbo, TABLE_TYPE: TABLE}]
+- name: Metadata column EXEC uses the shared named argument dispatcher
+  sql: EXEC dbo.sp_columns @table_name=N'script_exec_catalog',@column_name=N'id'
+  expect:
+    rows: 1
+    data: [{COLUMN_NAME: id, TYPE_NAME: int}]
+- name: Metadata special column EXEC reports only the actual native constraint
+  sql: EXEC dbo.sp_special_columns @table_name=N'script_exec_catalog',@col_type=N'R'
+  expect:
+    rows: 1
+    data: [{COLUMN_NAME: id}]
+- name: Fixture cleanup removes metadata EXEC source table
+  sql: DROP TABLE dbo.script_exec_catalog
+- name: Current database expression uses the active batch context
+  sql: DECLARE @db NVARCHAR(128)=DB_NAME(); SELECT @db AS value
+  expect: {rows: 1, data: [{value: memcp-tests}]}
+- name: Database context declarations remain exact for empty results
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (define column (car (tds_describe "memcp-tests" "SELECT TOP(0) DB_NAME() AS value" "" session)))
+      (and (equal? (column "sql_type") "NVARCHAR") (equal? (column "kind") 231)
+        (equal? (column "size") 256)))
+  expect: {result: true}
+- name: Stored procedure resolves its database through the caller execution context
+  sql: |
+    CREATE PROCEDURE dbo.script_context AS DECLARE @db NVARCHAR(128)=DB_NAME(); SELECT @db AS value;
+    GO
+    EXEC dbo.script_context;
+  expect: {rows: 1, data: [{value: memcp-tests}]}
+- name: Database identifier lookup stays explicitly unsupported
+  sql: SELECT DB_NAME(1) AS value
+  expect: {error: true}
+- name: Fixture cleanup removes database context procedure
+  sql: DROP PROCEDURE dbo.script_context
+- name: Zero variable initializers are present syntax data
+  sql: DECLARE @zero INT=0; SELECT @zero AS value
+  expect: {rows: 1, data: [{value: 0}]}
+- name: Zero procedure defaults are present syntax data
+  sql: |
+    CREATE PROCEDURE dbo.script_zero_default @value INT=0 AS SELECT @value AS value;
+    GO
+    EXEC dbo.script_zero_default;
+    DROP PROCEDURE dbo.script_zero_default;
+  expect: {rows: 1, data: [{value: 0}]}
+- name: Procedure replacement during argument binding retains one source snapshot
+  scm: |
+    (begin
+      (define base (newsession))
+      (base "username" "root")
+      (base "schema" "memcp-tests")
+      (base "__tsql_parameter_declarations" (list (list "argument" (list "INT"))))
+      (base "__tsql_parameter:argument" 7)
+      (define state (newsession))
+      (define results (newsession))
+      (dropprocedure "memcp-tests" "script_snapshot_binding" true)
+      (createprocedure "memcp-tests" "script_snapshot_binding" "tsql-procedure"
+        "SELECT @value+1 AS value" (list (list "value" (list "INT") nil false)) false)
+      (define caller (lambda args (begin
+        (match args
+          '("__tsql_parameter:argument") (if (state "replaced") true (begin
+            (state "replaced" true)
+            (createprocedure "memcp-tests" "script_snapshot_binding" "tsql-procedure"
+              "SELECT @value+100 AS value" (list (list "value" (list "INT") nil false)) true)))
+          _ true)
+        (apply base args))))
+      (with_query_request base nil 0 "snapshot invocation" (lambda (statement)
+        (tsql_invoke_procedure "memcp-tests" "script_snapshot_binding" (list (list "" "@argument"))
+          statement caller (lambda (row) (results "first" (row "value"))) (lambda args true))))
+      (with_query_request base nil 0 "replacement invocation" (lambda (statement)
+        (tsql_invoke_procedure "memcp-tests" "script_snapshot_binding" (list (list "" "7"))
+          statement base (lambda (row) (results "second" (row "value"))) (lambda args true))))
+      (dropprocedure "memcp-tests" "script_snapshot_binding")
+      (and (state "replaced") (equal? (results "first") 8) (equal? (results "second") 107))))
+  expect: {result: true}
+cleanup: []

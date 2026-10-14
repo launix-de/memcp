@@ -4466,6 +4466,8 @@ func Init(en scm.Env) {
 		},
 	})
 
+	initProcedureBuiltins(&en)
+
 	// Trigger management
 	scm.Declare(&en, &scm.Declaration{
 		Name: "registertriggerlanguage",

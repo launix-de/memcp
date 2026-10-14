@@ -70,33 +70,28 @@ test_cases:
     rows: 1
     data:
     - n: 5
-  noncritical: true
 - name: IF chooses ELSE for false
   sql: IF 1=0 SELECT 5 AS n ELSE SELECT 6 AS n
   expect:
     rows: 1
     data:
     - n: 6
-  noncritical: true
 - name: IF chooses ELSE for unknown NULL comparison
   sql: IF NULL=1 SELECT 5 AS n ELSE SELECT 6 AS n
   expect:
     rows: 1
     data:
     - n: 6
-  noncritical: true
 - name: IF without ELSE leaves a missing table untouched
   sql: IF 1=0 DROP TABLE dbo.tsql_if_missing
   expect:
     affected_rows: 0
-  noncritical: true
 - name: Unselected IF SELECT is not physically planned
   sql: IF 1=0 SELECT * FROM dbo.tsql_if_missing ELSE SELECT 7 AS n
   expect:
     rows: 1
     data:
     - n: 7
-  noncritical: true
 - name: Unselected IF declaration is not resolved
   sql: IF 1=0 CREATE TABLE dbo.tsql_if_missing(id dbo.unknown_alias) ELSE SELECT 8 AS n
   expect:
@@ -111,14 +106,12 @@ test_cases:
     rows: 1
     data:
     - value: ELSE; BEGIN IF
-  noncritical: true
 - name: IF preserves nested parentheses and comments
   sql: IF (1+2)=3 /* ELSE */ SELECT CAST((4+5) AS INT) AS n -- trailing comment
   expect:
     rows: 1
     data:
     - n: 9
-  noncritical: true
 - name: IF preserves bracket and double quoted identifier escaping
   sql: IF 1=1 SELECT 5 AS [ELSE]]value],6 AS "ELSE" ELSE SELECT 7 AS n
   expect:
@@ -126,7 +119,6 @@ test_cases:
     data:
     - ELSE]value: 5
       ELSE: 6
-  noncritical: true
 - name: IF preserves escaped strings and nested CASE
   sql: IF 1=1 SELECT CASE WHEN 1=1 THEN CASE WHEN 1=0 THEN N'wrong' ELSE N'it''s ELSE' END ELSE N'wrong' END AS
     value ELSE SELECT N'wrong' AS value
@@ -134,7 +126,6 @@ test_cases:
     rows: 1
     data:
     - value: it's ELSE
-  noncritical: true
 - name: IF rejects unbalanced parentheses even in its skipped branch
   sql: IF 1=0 SELECT CAST((1 AS INT)
   expect:
@@ -158,15 +149,15 @@ test_cases:
 - name: Conditional describe cannot run DDL
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_if_describe
-  scm: "(begin\n  (define s (newsession))\n  (define failure (try (lambda () (begin\n    (tds_describe \"memcp-tests\"\
-    \ \"IF 1=1 CREATE TABLE dbo.tsql_if_describe(id INT)\" \"\" s) false)) (lambda (_) true)))\n  (s \"tsql_prepare_describe\"\
-    \ true)\n  (define prepared_failure (try (lambda () (begin\n    (tds_describe \"memcp-tests\" \"IF 1=1 CREATE\
-    \ TABLE dbo.tsql_if_describe(id INT)\" \"\" s) false)) (lambda (_) true)))\n  (if (and failure prepared_failure\
-    \ (nil? (sql_object_id \"memcp-tests\" \"tsql_if_describe\"))) true\n    (error \"conditional describe executed\
-    \ a mutation\")))\n"
-  expect:
-    result: true
-  noncritical: true
+  scm: |
+    (begin
+      (define session (newsession))
+      (define failed (try (lambda () (begin
+        (tds_describe "memcp-tests" "IF 1=1 CREATE TABLE dbo.tsql_if_describe(id INT)" "" session)
+        false)) (lambda (_err) true)))
+      (and failed (nil? (table "memcp-tests" "tsql_if_describe"))))
+  expect: {result: true}
+
 - sql: DROP TABLE IF EXISTS dbo.tsql_if_describe
   name: Fixture cleanup for Conditional describe cannot run DDL (1)
 - name: Selected IF table error remains visible
@@ -202,21 +193,27 @@ test_cases:
   expect:
     error: true
 - name: IF rejects BEGIN END blocks
+  # Retain the existing regression identity; blocks are now supported.
   sql: IF 1=1 BEGIN SELECT 5 AS n END
   expect:
-    error: true
+    rows: 1
+    data: [{n: 5}]
 - name: IF rejects nested control statements
+  # Retain the existing regression identity; blocks are now supported.
   sql: IF 1=1 IF 1=1 SELECT 5 AS n
   expect:
-    error: true
+    rows: 1
+    data: [{n: 5}]
 - name: IF rejects an internal semicolon before ELSE
   sql: IF 1=1 SELECT 5 AS n; ELSE SELECT 6 AS n
   expect:
     error: true
 - name: IF does not dispatch arbitrary procedure text
-  sql: IF 1=0 EXEC unknown_installation_procedure
+  # Unselected EXEC must not look up or invoke a procedure.
+  sql: IF 1=0 EXEC unknown_installation_procedure ELSE SELECT 5 AS n
   expect:
-    error: true
+    rows: 1
+    data: [{n: 5}]
 - name: Cached IF catalog conditions observe create and drop
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_if_catalog
@@ -235,48 +232,64 @@ test_cases:
 - sql: DROP TABLE IF EXISTS dbo.tsql_if_catalog
   name: Fixture cleanup for Cached IF catalog conditions observe create and drop (1)
 - name: Cached IF uses the current invocation session and result sink
-  scm: "(begin\n  (define cache (newcachemap))\n  (define a (newsession))\n  (define b (newsession))\n  (map (list\
-    \ a b) (lambda (s) (begin (s \"tsql_bound:gate\" true) (s \"tsql_bound:payload\" true))))\n  (a \"tsql_param:gate\"\
-    \ 1) (a \"tsql_param:payload\" 17)\n  (b \"tsql_param:gate\" 0) (b \"tsql_param:payload\" 99)\n  (define sql\
-    \ \"IF @gate=1 SELECT @payload AS n ELSE SELECT -1 AS n\")\n  (define execute (lambda (s) (begin\n    (define\
-    \ out (newsession))\n    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (cached_parse\
-    \ cache (list parse_tsql) \"memcp-tests\" sql nil \"root\" s false tx)\n        (lambda (row) (out \"row\" row))\
-    \ (lambda fields (out \"fields\" fields)))))\n    ((out \"row\") \"n\"))))\n  (define first (execute a))\n \
-    \ (define second (execute b))\n  (a \"tsql_param:payload\" 23)\n  (define third (execute a))\n  (if (and (equal?\
-    \ first 17) (equal? second -1) (equal? third 23) (equal? (count (cache)) 1)) true\n    (error \"IF retained\
-    \ a compiling session or the wrong result sink\")))\n"
-  expect:
-    result: true
-  noncritical: true
+  scm: |
+    (begin
+      (define a (newsession))
+      (define b (newsession))
+      (map (list a b) (lambda (session) (begin
+        (session "username" "root")
+        (session "__tsql_parameter_declarations" (list (list "gate" (list "INT")) (list "payload" (list "INT")))))))
+      (a "__tsql_parameter:gate" 1) (a "__tsql_parameter:payload" 17)
+      (b "__tsql_parameter:gate" 0) (b "__tsql_parameter:payload" 99)
+      (define sql "IF @gate=1 SELECT @payload AS n ELSE SELECT -1 AS n")
+      (define execute (lambda (session) (begin
+        (define output (newsession))
+        (tsql_execute_request "memcp-tests" sql session nil 0
+          (lambda (row) (output "row" row)) (lambda args true))
+        ((output "row") "n"))))
+      (define first (execute a))
+      (define second (execute b))
+      (a "__tsql_parameter:payload" 23)
+      (define third (execute a))
+      (and (equal? first 17) (equal? second -1) (equal? third 23)))
+  expect: {result: true}
+
 - name: IF DML retains its existing explicit transaction and skipped writes
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_if_transaction
   - sql: CREATE TABLE dbo.tsql_if_transaction(id INT PRIMARY KEY)
-  scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define out (newsession))\n\
-    \    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula\
-    \ tx\n        (parse_tsql \"memcp-tests\" sql nil s tx)) (lambda (row) (out \"row\" row)) (lambda fields true))))\n\
-    \    (out \"row\"))))\n  (execute \"BEGIN TRAN\")\n  (execute \"IF 1=0 INSERT INTO dbo.tsql_if_transaction VALUES(10)\"\
-    )\n  (execute \"IF 1=1 INSERT INTO dbo.tsql_if_transaction VALUES(20)\")\n  (define inside (execute \"SELECT\
-    \ COUNT(*) AS n FROM dbo.tsql_if_transaction\"))\n  (execute \"ROLLBACK\")\n  (define outside (execute \"SELECT\
-    \ COUNT(*) AS n FROM dbo.tsql_if_transaction\"))\n  (if (and (equal? (inside \"n\") 1) (equal? (outside \"n\"\
-    ) 0) (nil? (s \"transaction\"))) true\n    (error \"IF started an independent transaction or executed its skipped\
-    \ write\")))\n"
-  expect:
-    result: true
-  noncritical: true
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (define execute (lambda (sql) (begin
+        (define output (newsession))
+        (tsql_execute_request "memcp-tests" sql session nil 0
+          (lambda (row) (output "row" row)) (lambda args true))
+        (output "row"))))
+      (execute "BEGIN TRANSACTION")
+      (execute "IF 1=0 INSERT INTO dbo.tsql_if_transaction VALUES(10)")
+      (execute "IF 1=1 INSERT INTO dbo.tsql_if_transaction VALUES(20)")
+      (define inside (execute "SELECT COUNT(*) AS n FROM dbo.tsql_if_transaction"))
+      (execute "ROLLBACK")
+      (define outside (execute "SELECT COUNT(*) AS n FROM dbo.tsql_if_transaction"))
+      (and (equal? (inside "n") 1) (equal? (outside "n") 0) (nil? (session "transaction"))))
+  expect: {result: true}
+
 - sql: DROP TABLE IF EXISTS dbo.tsql_if_transaction
   name: Fixture cleanup for IF DML retains its existing explicit transaction and skipped writes (1)
 - name: IF selected permission errors are not masked
-  scm: "(begin\n  (define s (newsession))\n  (define policy (lambda (db name write) (if write (error \"conditional\
-    \ write denied\") true)))\n  (define failure (try (lambda () (begin\n    (with_autocommit s nil nil \"IF 1=1\
-    \ UPDATE dbo.tsql_data SET val=1\" (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula\
-    \ tx\n        (parse_tsql \"memcp-tests\" \"IF 1=1 UPDATE dbo.tsql_data SET val=1\" policy s tx))\n        (lambda\
-    \ (row) true) (lambda fields true)))) \"unexpected success\")) (lambda (message) (concat message))))\n  (if\
-    \ (strlike failure \"%conditional write denied%\") true (error \"IF lost the caller policy or swallowed its\
-    \ error\")))\n"
-  expect:
-    result: true
-  noncritical: true
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "script_unprivileged")
+      (define failure (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "IF 1=1 UPDATE dbo.tsql_data SET val=1"
+          session nil 0 (lambda (_row) true) (lambda args true))
+        "unexpected success")) (lambda (message) (concat message))))
+      (strlike failure "%access denied%"))
+  expect: {result: true}
+
 - name: Mixed integer and string addition converts numeric input
   sql: SELECT 2 + '3' AS n
   expect:

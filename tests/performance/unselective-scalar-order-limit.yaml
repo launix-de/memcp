@@ -14,10 +14,9 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 metadata:
-  # Seven complete A/B pairs take about ten minutes on CI. Keep this suite
-  # above the other workers' current combined weight so it remains alone;
-  # all cases and original verification pairs stay intact.
-  performance_shard_weight: 192
+  # Reserve capacity for all seven fresh pairs, including the retained pilot.
+  # Balance both recorded CI cohorts; samples and timing gates stay unchanged.
+  performance_shard_weight: 137
   version: "1.0"
   description: "Unselective scalar ORDER LIMIT late projection"
   isolated: true

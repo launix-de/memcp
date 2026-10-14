@@ -153,8 +153,6 @@ test_cases:
         data:
         - db: memcp-tests
     - sql: DROP TABLE dbo.tds_protocol_data
-  noncritical: true
-  fail_comment: Typed parameter binding and session options remain frontend follow-ups.
 - name: Native login preserves credential delimiters, braces and whitespace
   tds:
     username: tds;=brace} user

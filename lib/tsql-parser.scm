@@ -69,6 +69,19 @@ The negative accumulator also represents the minimum int64 without overflow. */
 	(atom "HAVING" true)
 	(atom "WITH" true)
 	(atom "OPTION" true)
+	(atom "IF" true)
+	(atom "BEGIN" true)
+	(atom "DECLARE" true)
+	(atom "EXEC" true)
+	(atom "EXECUTE" true)
+	(atom "CREATE" true)
+	(atom "ALTER" true)
+	(atom "DROP" true)
+	(atom "UPDATE" true)
+	(atom "DELETE" true)
+	(atom "COMMIT" true)
+	(atom "ROLLBACK" true)
+
 )))
 (define tsql_identifier_quoted (parser (or
 	(parser '("[" (define id (regex "(?:[^\\]]|\\]\\])+" false false)) "]") (replace id "]]" "]"))
@@ -887,7 +900,8 @@ dimensions are metadata only and are absent from the executable plan. */
 	((symbol session) key) (begin
 		(define declaration (find parameters (lambda (item) (equal? key (concat "__tsql_parameter:" (car item)))) nil))
 		(if declaration (cdr (cadr declaration))
-			(if (has? '("__tsql_scope_identity" "__tsql_identity") key) '(38 0) nil)))
+			(equal? key "schema") '(128)
+			(has? '("__tsql_scope_identity" "__tsql_identity") key) '(38 0) nil))
 	((symbol get_column) alias alias_ic column column_ic) (begin
 		(define info (sql_get_column_info sources alias alias_ic column column_ic))
 		(match (sql_info_formula info)
@@ -936,16 +950,67 @@ dimensions are metadata only and are absent from the executable plan. */
 	_ (if (has? '("ABS" "CEILING" "FLOOR" "ROUND" "SQRT" "UPPER" "LOWER" "REPLACE" "SUBSTRING" "CONCAT" "YEAR" "MONTH" "DAY") name)
 		(sql_builtins name) nil))))
 
+/* GO belongs to the script envelope, never the SQL statement grammar. Quoted
+values/identifiers and nested comments are consumed as complete lexical tokens;
+a separator is recognized only on a physical line containing no SQL text. */
+(define tsql_script_comment (parser '("/*"
+	(* (or tsql_script_comment
+		(regex "(?:[^*/]+|/[^*]|\\*[^/])" false false)) empty)
+	"*/") nil "^$"))
+(define tsql_script_tokens (parser (define tokens (* (or
+	(parser (define text (capture tsql_script_comment)) (list "comment" (car text)))
+	(parser (define text (regex "(?:--[^\\r\\n]*)" false false)) (list "comment" text))
+	(parser (define text (regex "(?:'(?:''|[^'])*'|\\\"(?:\\\"\\\"|[^\\\"])*\\\"|\\[(?:\\]\\]|[^\\]])*\\])" false false)) (list "quoted" text))
+	(parser (define text (regex "(?:\\r\\n|\\r|\\n)" false false)) (list "newline" text))
+	(parser (define text (regex "(?:[^'\\\"\\[\\r\\n/-]+|/[^*]|-[^-]|[/-]$)" false false)) (list "text" text))
+) empty)) tokens "^$"))
+(define tsql_script_flush_line (lambda (state newline) (begin
+	(define line (apply concat (reverse (nth state 2))))
+	(define code (apply concat (reverse (nth state 3))))
+	(define separator (and (not (nth state 4))
+		(regexp_test code "(?i)^[\\t ]*GO(?:[\\t ]+[0-9]+)?[\\t ]*$")))
+	(if separator (begin
+		(define repetitions (regexp_replace (sql_trim code) "(?i)^GO[\\t ]*" ""))
+		(define repetitions (if (equal? repetitions "") 1 (tsql_parse_integer repetitions)))
+		(if (<= repetitions 0) (error "GO count must be positive") true)
+		(define text (apply concat (reverse (nth state 1))))
+		(list (if (equal? (strtrim text) "") (car state)
+			(cons (list "text" text "repeat" repetitions) (car state))) '() '() '() false))
+		(list (car state) (cons (concat line newline) (nth state 1)) '() '() false)))))
+(define tsql_script_batches (lambda (text) (begin
+	(define state (reduce (tsql_script_tokens text) (lambda (state token)
+		(match token
+			'("newline" newline) (tsql_script_flush_line state newline)
+			'(kind text) (if (and (equal? kind "comment") (regexp_test text "[\r\n]"))
+				/* Keep a spanning comment balanced in the preceding batch while
+				resetting recognition to the physical line where it closes. */
+				(list (car state) (cons (concat (apply concat (reverse (nth state 2))) text)
+					(nth state 1)) '() '() false)
+				(list (car state) (nth state 1) (cons text (nth state 2))
+					(if (equal? kind "text") (cons text (nth state 3)) (nth state 3))
+					(or (nth state 4) (equal? kind "quoted"))))))
+		(list '() '() '() '() false)))
+	(define final (tsql_script_flush_line state ""))
+	(define tail (apply concat (reverse (nth final 1))))
+	(reverse (if (equal? (strtrim tail) "") (car final)
+		(cons (list "text" tail "repeat" 1) (car final)))))))
+
+(define tsql_connection_session (lambda (session)
+	(coalesceNil (session "__tsql_connection_session") session)))
+
 (define parse_tsql (lambda (database s policy planning_session tx) (begin
 	(define schema database)
 	(define parse_started_ns (nanotime))
 	(define frontend_options (if (nil? planning_session) (newsession) planning_session))
 	(define describe (frontend_options "__tsql_describe"))
+	(define script_syntax (frontend_options "__tsql_script_syntax"))
+	(define expression_only (frontend_options "__tsql_expression_only"))
 	(define parameters (coalesceNil (frontend_options "__tsql_parameter_declarations") (list)))
 	(define parameter_expression (lambda (name) (begin
 		(define name (toLower name))
 		(define declaration (filter parameters (lambda (item) (equal? (car item) name))))
-		(if (empty_list? declaration) (error "undeclared T-SQL parameter: @" name)
+		(if script_syntax (list (quote tsql_batch_variable) name)
+			(empty_list? declaration) (error "undeclared T-SQL parameter: @" name)
 			(list (quote sql_type_expr) (list (quote session) (concat "__tsql_parameter:" name))
 				(car (cadr (car declaration))) nil)))))
 
@@ -1114,6 +1179,10 @@ dimensions are metadata only and are absent from the executable plan. */
 		(parser (atom "NULL" true) (sql_null_literal))
 		(parser (atom "CURRENT_TIMESTAMP" true) (list (quote sql_type_expr) (list (quote now)) "DATETIME" nil))
 
+		/* Current database is invocation context, bound by the shared planner.
+		Its SQL declaration is independent of the session value carrier. */
+		(parser '((atom "DB_NAME" true) "(" ")")
+			(list (quote sql_type_expr) (list (quote session) "schema") "NVARCHAR" '("utf8mb4_general_ci" 4)))
 		(parser '((atom "SCOPE_IDENTITY" true) "(" ")") (tsql_identity_expr true))
 		(parser '((atom "@@IDENTITY" true)) (tsql_identity_expr false))
 
@@ -1475,7 +1544,7 @@ dimensions are metadata only and are absent from the executable plan. */
 		))
 
 		(? tsql_query_hints)
-	) (begin
+	) (lambda () (begin
 			(define all_defs (merge tbldefs))
 			(define first_def (car all_defs))
 			(define tbl (match first_def '(_ _ t _ _) t))
@@ -1490,7 +1559,7 @@ dimensions are metadata only and are absent from the executable plan. */
 					(equal? (declaration "Extra") "auto_increment") (error "IDENTITY column cannot be updated")
 					(list (declaration "Field") (tsql_assignment_expr expression declaration))))))))
 			(build_dml_plan target_schema tbl tblalias all_defs assignments (coalesceNil condition true) order limit offset planning_session tx)
-	)))
+	))))
 
 	(define tsql_delete (parser '(
 		(atom "DELETE" true)
@@ -1504,26 +1573,26 @@ dimensions are metadata only and are absent from the executable plan. */
 		))
 
 		(? tsql_query_hints)
-	) (begin
+	) (lambda () (begin
 
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 
 			(define del_schema (coalesce schema2 schema))
 			(define del_defs (list (list tbl del_schema tbl false nil)))
 			(build_dml_plan del_schema tbl nil del_defs nil (coalesceNil condition true) order limit offset planning_session tx)
-	)))
+	))))
 
 	(define tsql_truncate (parser '(
 		(atom "TRUNCATE" true) (? (atom "TABLE" true))
 
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
-	) (begin
+	) (lambda () (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(define trunc_schema (coalesce schema2 schema))
 			(cons '!begin (list
 				(list (quote checktablemaintenance) trunc_schema tbl "truncate")
 				(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil planning_session tx)))
-	)))
+	))))
 
 	(define tsql_insert_literal_cell (parser (or
 		(parser "?" (quote sql_insert_placeholder))
@@ -1551,14 +1620,14 @@ dimensions are metadata only and are absent from the executable plan. */
 		(define aliases (? (parser '("(" (define columns (+ tsql_identifier ",")) ")") columns)))
 		(atom "AS" true)
 		(define captured (capture tsql_select))
-	) (match target '(schema2 id) (begin
+	) (lambda () (match target '(schema2 id) (begin
 			(define view_schema (coalesce schema2 schema))
 			(if policy (policy view_schema id true) true)
 			(define query (sql_apply_view_column_aliases (nth captured 1) aliases))
 			(list (quote create_sql_view)
 				(list (quote session) "__memcp_tx")
 				view_schema id "tsql" (nth captured 0) (list (quote quote) query)
-				(if replace "replace" (if ifnotexists "ignore" "error")))))))
+				(if replace "replace" (if ifnotexists "ignore" "error"))))))))
 
 	(define tsql_schema_identifier (parser (define owner tsql_identifier)
 		(if (equal?? owner "dbo") database owner)))
@@ -1624,7 +1693,7 @@ dimensions are metadata only and are absent from the executable plan. */
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
 		(? "(" (define columns (+ tsql_identifier ",")) ")")
 		(atom "VALUES" true) (define rows (+ tsql_insert_values_row ","))
-	) (begin
+	) (lambda () (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
 			(define declarations (tsql_insert_declarations database tbl
@@ -1636,27 +1705,27 @@ dimensions are metadata only and are absent from the executable plan. */
 				(tsql_insert_select_plan database tbl columns (tsql_values_to_select_query database columns rows))
 				(tsql_native_insert_expr database tbl columns (sql_insert_values_expr (map rows (lambda (row) (map (produceN (count columns))
 					(lambda (i) (sql_type_formula (list) (tsql_assignment_expr (nth row i) (nth declarations i)))))))) (count rows) true))
-	)))
+	))))
 	/* An all-default row is the native empty-column INSERT. Defaults and
 	generated values are filled by the same operator as ordinary insertion. */
 	(define tsql_insert_default (parser '(
 		(atom "INSERT" true) (? (atom "INTO" true))
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
 		(atom "DEFAULT" true) (atom "VALUES" true)
-	) (begin
+	) (lambda () (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
-			(tsql_native_insert_expr database tbl '() '('list '(list)) 1 true))))
+			(tsql_native_insert_expr database tbl '() '('list '(list)) 1 true)))))
 	(define tsql_insert_select (parser '(
 		(atom "INSERT" true) (atom "INTO" true)
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
 		(? "(" (define columns (+ tsql_identifier ",")) ")")
 		(define query tsql_select)
-	) (begin
+	) (lambda () (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
 			(tsql_insert_select_plan database tbl (coalesce columns (table_insertable_columns database tbl)) query)
-	)))
+	))))
 	/* Only UNIQUE declarations publish native keys. Ordinary acceleration
 	declarations carry no catalog state: the common planner owns autoindexes. */
 	(define tsql_create_index (parser '(
@@ -1668,7 +1737,7 @@ dimensions are metadata only and are absent from the executable plan. */
 		(? (atom "WHERE" true) (define predicate tsql_expression))
 		(? (define options tsql_index_options))
 		(? tsql_index_location)
-	) (begin
+	) (lambda () (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
 			(if (and unique predicate) (error "filtered UNIQUE requires native filtered-key support") true)
@@ -1687,32 +1756,32 @@ dimensions are metadata only and are absent from the executable plan. */
 			(if (not unique) true (list (quote if)
 				(list (quote createkey) (list (quote table) database tbl) name true
 					(cons (quote list) columns) (quote tx) (list (quote list) "nulls_not_distinct" true))
-				true (list (quote error) "index already exists: " name))))))
+				true (list (quote error) "index already exists: " name)))))))
 	(define tsql_alter_index (parser '(
 		(atom "ALTER" true) (atom "INDEX" true) (or (atom "ALL" true) tsql_identifier) (atom "ON" true)
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
 		(define action (regex "(?:REBUILD|REORGANIZE|DISABLE)\\b" true))
 		(? (atom "PARTITION" true) "=" (or tsql_int (atom "ALL" true)))
 		(? (define options tsql_index_options))
-	) (begin
+	) (lambda () (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(get_schema (coalesce schema2 schema) tbl)
 			(if (equal? (toUpper action) "DISABLE") (error "DISABLE cannot bypass native constraints") true)
 			(tsql_check_index_options options true)
-			true)))
+			true))))
 	(define tsql_drop_index (parser '(
 		(atom "DROP" true) (atom "INDEX" true)
 		(? (atom "IF" true) (atom "EXISTS" true))
 		(define name tsql_identifier) (atom "ON" true)
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
 		(? tsql_index_options)
-	) (begin
+	) (lambda () (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(if (equal? (toUpper name) "PRIMARY") (error "PRIMARY is a constraint, not an acceleration index") true)
 			/* A physical name carries no catalog state. Until native key removal
 			protects referenced constraints, do not guess whether this name owns
 			a real key or run a metadata check followed by an unsafe drop. */
-			(error "DROP INDEX requires native constraint-safe key removal"))))
+			(error "DROP INDEX requires native constraint-safe key removal")))))
 	(define tsql_foreign_key_mode (parser (or
 		(parser '((atom "NO" true) (atom "ACTION" true)) "restrict")
 		(parser (atom "CASCADE" true) "cascade")
@@ -1760,12 +1829,12 @@ dimensions are metadata only and are absent from the executable plan. */
 				(list (quote list) "column" name type dimensions (cons (quote list) attributes))))
 		) ",")) ")"
 		(? tsql_index_location)
-	) (begin
+	) (lambda () (begin
 			(if policy (policy (coalesce schema2 schema) name true) true)
 			(define columns (tsql_table_primary_columns columns))
 			(list (quote sql_create_table) (coalesce schema2 schema) name
 				(cons (quote list) (map columns tsql_identity_native_column))
-				(tsql_identity_table_options columns) (if ifnotexists true false) (quote tx)))))
+				(tsql_identity_table_options columns) (if ifnotexists true false) (quote tx))))))
 	(define tsql_alter_table (parser '(
 		(atom "ALTER" true) (atom "TABLE" true)
 		(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier)
@@ -1806,60 +1875,127 @@ dimensions are metadata only and are absent from the executable plan. */
 					(list (quote dropforeignkey) (list (quote table) database name) key)
 					(list (quote dropkey) (list (quote table) database name) key))))
 		) ","))
-	) (begin
+	) (lambda () (begin
 			(if policy (policy (coalesce schema2 schema) name true) true)
-			(cons (quote !begin) (map changes (lambda (change) (change (coalesce schema2 schema) name)))))))
+			(cons (quote !begin) (map changes (lambda (change) (change (coalesce schema2 schema) name))))))))
+	(define tsql_transaction_keyword (if script_syntax
+		(parser (or (atom "TRAN" true) (atom "TRANSACTION" true)))
+		(parser (? (or (atom "TRAN" true) (atom "TRANSACTION" true))))))
+	(define tsql_rollback (parser '((atom "ROLLBACK" true)
+		(? (or (atom "TRAN" true) (atom "TRANSACTION" true))))
+		(lambda () (list (quote tx_rollback) (list (quote tsql_connection_session) (quote session))))))
 	(define p (parser (or
-		(parser (define query tsql_select) (tsql_build_select_plan query))
-		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query tsql_select)) (explain_queryplan_ir (sql_expand_views query policy)))
-		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query tsql_select)) (explain_queryplan_reorder (sql_expand_views query policy) planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query tsql_select)) (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s) planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query tsql_select)) (explain_queryplan_physical (sql_expand_views query policy) planning_session))
+		(parser (define query tsql_select) (lambda () (tsql_build_select_plan query)))
+		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query tsql_select)) (lambda () (explain_queryplan_ir (sql_expand_views query policy))))
+		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query tsql_select)) (lambda () (explain_queryplan_reorder (sql_expand_views query policy) planning_session)))
+		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query tsql_select)) (lambda () (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s) planning_session)))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query tsql_select)) (lambda () (explain_queryplan_physical (sql_expand_views query policy) planning_session)))
 		(parser '((atom "EXPLAIN" true) (define query tsql_select))
-			'('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy) planning_session tx)) (settings "ExplainWidth")))))
+			'(lambda () ('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy) planning_session tx)) (settings "ExplainWidth"))))))
 		tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete tsql_truncate
 		tsql_create_view tsql_create_table tsql_alter_table tsql_create_index tsql_alter_index tsql_drop_index
 		(parser '((atom "CREATE" true) (atom "DATABASE" true)
 			(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
-			(define name tsql_identifier)) (begin
+			(define name tsql_identifier)) (lambda () (begin
 				(if policy (policy "system" true true) true)
-				(list (quote createdatabase) name (if ifnotexists true false) nil nil)))
+				(list (quote createdatabase) name (if ifnotexists true false) nil nil))))
 		(parser '((atom "DROP" true) (atom "DATABASE" true)
 			(define ifexists (? (atom "IF" true) (atom "EXISTS" true))) (define name tsql_identifier))
-			(begin (if policy (policy "system" true true) true)
-				(list (quote drop_sql_database) (list (quote session) "__memcp_tx") name (if ifexists true false))))
+			(lambda () (begin (if policy (policy "system" true true) true)
+				(list (quote drop_sql_database) (list (quote session) "__memcp_tx") name (if ifexists true false)))))
 		(parser '((atom "DROP" true) (atom "TABLE" true)
 			(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
 			(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier))
-			(begin (if policy (policy (coalesce schema2 schema) name true) true)
-				(list (quote droptable) (coalesce schema2 schema) name (if ifexists true false))))
+			(lambda () (begin (if policy (policy (coalesce schema2 schema) name true) true)
+				(list (quote droptable) (coalesce schema2 schema) name (if ifexists true false)))))
 		(parser '((atom "DROP" true) (atom "VIEW" true)
 			(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
 			(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier))
-			(begin (if policy (policy (coalesce schema2 schema) name true) true)
+			(lambda () (begin (if policy (policy (coalesce schema2 schema) name true) true)
 				(list (quote drop_sql_view) (list (quote session) "__memcp_tx")
-					(coalesce schema2 schema) name (if ifexists true false))))
+					(coalesce schema2 schema) name (if ifexists true false)))))
 		(parser '((atom "SET" true) (atom "NOCOUNT" true)
 			(define enabled (or (parser (atom "ON" true) true) (parser (atom "OFF" true) false))))
-			(list (quote session) "__tsql_nocount" enabled))
+			(lambda () (list (quote session) "__tsql_nocount" enabled)))
 		/* These ON modes are the frontend's fixed comparison and lexical rules.
 		Accept the declarations without adding state or branches to row execution;
 		OFF and other settings remain explicit unsupported syntax. */
 		(parser '((atom "SET" true) (or (atom "ANSI_NULLS" true) (atom "QUOTED_IDENTIFIER" true))
-			(atom "ON" true)) (list (quote quote) nil))
-		(parser '((atom "USE" true) (define name tsql_identifier)) (begin
+			(atom "ON" true)) (lambda () (list (quote quote) nil)))
+		(parser '((atom "USE" true) (define name tsql_identifier)) (lambda () (begin
 			(if policy (policy name true false) true)
-			(list (quote session) "schema" name)))
-		(parser '((atom "BEGIN" true) (? (or (atom "TRAN" true) (atom "TRANSACTION" true))))
-			(list (quote tx_begin) (quote session) (quote tx)))
+			(list (quote session) "schema" name))))
+		(parser '((atom "BEGIN" true) tsql_transaction_keyword)
+			(lambda () (list (quote tx_begin) (list (quote tsql_connection_session) (quote session)) (quote tx))))
 		(parser '((atom "COMMIT" true) (? (or (atom "TRAN" true) (atom "TRANSACTION" true))))
-			(list (quote tx_commit) (quote session)))
-		(parser '((atom "ROLLBACK" true) (? (or (atom "TRAN" true) (atom "TRANSACTION" true))))
-			(list (quote tx_rollback) (quote session)))
-		""
+			(lambda () (list (quote tx_commit) (list (quote tsql_connection_session) (quote session)))))
+		tsql_rollback
 	)))
 
+
 	(define command_parser (if describe
-		(parser (define query tsql_select) (tsql_build_select_plan query)) p))
-	((parser '((* ";") (define command command_parser) (* ";")) command "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
+		(parser (define query tsql_select) (lambda () (tsql_build_select_plan query))) (parser (or p (parser empty (lambda () ""))))))
+	(if expression_only
+		((parser (define expression tsql_expression) (sql_expr_info '() expression) "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
+		script_syntax (begin
+			/* Control grammar captures the ordinary leaf grammar without compiling its
+			statement yet. Earlier DDL in a batch must publish before later DML binds.
+			Control nodes are syntax data, not another query or transaction engine. */
+			(define tsql_script_variable (parser '("@" (define name tsql_identifier_unquoted)) (toLower name)))
+			(define tsql_script_declaration (parser '(
+				(define name tsql_script_variable) (? (atom "AS" true))
+				(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
+				(? "=" (define initializer (capture tsql_expression)))
+			) (list name (cons type (tsql_decl_dimensions type dimensions))
+					(if initializer (car initializer) nil))))
+			(define tsql_script_exec_argument (parser (or
+				(parser '((define name tsql_script_variable) "=" (define value (capture tsql_expression)))
+					(list name (car value)))
+				(parser (define value (capture tsql_expression)) (list "" (car value))))))
+			(define tsql_script_command (parser (or
+				(parser (define statement (capture tsql_rollback)) (list "recovery" (strtrim (car statement))))
+				(parser '((atom "IF" true) (define condition (capture tsql_expression))
+					(define yes tsql_script_command)
+					(? (atom "ELSE" true) (define no tsql_script_command)))
+					(list "if" (car condition) yes no))
+				(parser '((atom "BEGIN" true) (define commands (* tsql_script_item empty)) (atom "END" true))
+					(list "block" commands))
+				(parser '((atom "DECLARE" true) (define declarations (+ tsql_script_declaration ",")))
+					(list "declare" declarations))
+				(parser '((atom "SET" true) (define name tsql_script_variable) "=" (define value (capture tsql_expression)))
+					(list "assign" name (car value)))
+				(parser '((atom "DROP" true) (or (atom "PROCEDURE" true) (atom "PROC" true))
+					(define ignore (? (atom "IF" true) (atom "EXISTS" true)))
+					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier))
+					(list "drop-procedure" (coalesce owner schema) name (if ignore true false)))
+				(parser '((or (atom "EXEC" true) (atom "EXECUTE" true))
+					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
+					(define arguments (* tsql_script_exec_argument ",")))
+					(list "execute" (coalesce owner schema) name arguments))
+				(parser (define statement (capture p)) (list "statement" (strtrim (car statement))))
+			)))
+			(define tsql_script_item (parser '((* ";") (define command tsql_script_command) (* ";")) command))
+			(define tsql_script_procedure_parameter (parser '(
+				(define declaration tsql_script_declaration)
+				(define output (? (or (atom "OUTPUT" true) (atom "OUT" true))))
+			) (append declaration (if output true false))))
+			(define tsql_script_procedure (parser '(
+				(atom "CREATE" true) (define replace (? (atom "OR" true) (atom "ALTER" true)))
+				(or (atom "PROCEDURE" true) (atom "PROC" true))
+				(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
+				(define parameters (* tsql_script_procedure_parameter ","))
+				(atom "AS" true) (define body (capture (+ tsql_script_item empty)))
+			) (list "batch" (list (list "create-procedure" (coalesce owner schema) name
+					parameters (strtrim (car body)) (if replace true false))))))
+			(define script_parser (parser (define batch (or tsql_script_procedure
+				(parser '((* ";") (define commands (* tsql_script_item empty)) (* ";"))
+					(list "batch" commands)))) batch "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
+
+			(script_parser s))
+		((parser '((* ";") (define command command_parser) (* ";")) (if (string? command) command (command)) "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s))
 )))
+
+(define parse_tsql_batch (lambda (schema text) (begin
+	(define syntax (newsession))
+	(syntax "__tsql_script_syntax" true)
+	(parse_tsql schema text nil syntax nil))))

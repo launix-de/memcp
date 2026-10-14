@@ -17,6 +17,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package storage
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -226,5 +227,129 @@ func TestParkedTransactionDoesNotRetainQueryColumn(t *testing.T) {
 	tx.retainQueryColumn(tbl, col)
 	if tx.queryColumns != nil || tbl.cacheUsers != 0 || col.cacheUsers != 0 {
 		t.Fatal("parked transaction retained a statement dependency")
+	}
+}
+
+func TestQueryRequestPreservesCancellationAndReusesStatementContext(t *testing.T) {
+	session := scm.NewSession()
+	ss := &scm.SessionState{}
+	seq := ss.BeginQuery("Query", "several statements")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ss.SetQueryContext(seq, ctx)
+	defer ss.EndQuery(seq, "Sleep", "")
+	var original *TxContext
+	var firstGeneration uint64
+	tbl, col := &table{}, &column{IsTemp: true}
+	WithQueryRequest(session, ss, seq, "several statements", scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		statement := a[0]
+		for i := 0; i < 2; i++ {
+			scm.Apply(statement, scm.NewString("statement"), scm.NewBool(false), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+				tx := scmerToTxContext(values[0])
+				if original == nil {
+					original = tx
+					firstGeneration = tx.statementGeneration.Load()
+				} else {
+					if tx != original {
+						t.Fatal("request allocated another transaction record")
+					}
+					if tx.statementGeneration.Load() == firstGeneration {
+						t.Fatal("statement reused its predecessor's cache scope")
+					}
+				}
+				if querySeqFromTx(tx) != seq {
+					t.Fatal("statement changed request cancellation identity")
+				}
+				if !tx.retainQueryColumn(tbl, col) {
+					t.Fatal("statement dependency was not retained")
+				}
+				return scm.NewBool(true)
+			}))
+			if ss.QueryContext(seq) != ctx {
+				t.Fatal("statement ended request cancellation context")
+			}
+			if original.queryActive.Load() || original.statementGeneration.Load() != 0 || tbl.cacheUsers != 0 || col.cacheUsers != 0 {
+				t.Fatal("completed statement retained its physical ownership")
+			}
+		}
+		return scm.NewBool(true)
+	}))
+	if ss.QueryContext(seq) != nil || original.querySeq.Load() != 0 {
+		t.Fatal("finished request retained cancellation ownership")
+	}
+}
+
+func TestQueryRequestCancellationStopsFollowingStatementAndRejectsEscapedExecutor(t *testing.T) {
+	session := scm.NewSession()
+	ss := &scm.SessionState{}
+	seq := ss.BeginQuery("Query", "cancelled request")
+	ctx, cancel := context.WithCancel(context.Background())
+	ss.SetQueryContext(seq, ctx)
+	defer ss.EndQuery(seq, "Sleep", "")
+	var escaped scm.Scmer
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("cancelled request executed its following statement")
+			}
+		}()
+		WithQueryRequest(session, ss, seq, "cancelled request", scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			escaped = a[0]
+			scm.Apply(escaped, scm.NewString("first"), scm.NewBool(false), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return scm.NewNil() }))
+			cancel()
+			return scm.Apply(escaped, scm.NewString("must not execute"), scm.NewBool(false), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+				t.Fatal("cancelled statement body ran")
+				return scm.NewNil()
+			}))
+		}))
+	}()
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("escaped request executor remained callable")
+			}
+		}()
+		scm.Apply(escaped, scm.NewString("escaped"), scm.NewBool(false), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return scm.NewNil() }))
+	}()
+	if ss.QueryContext(seq) != nil {
+		t.Fatal("cancelled request retained its context")
+	}
+}
+
+func TestQueryRequestRecoveryCapabilityAndGlobalStatementScopes(t *testing.T) {
+	var previous uint64
+	for i := 0; i < 2; i++ {
+		session := scm.NewSession()
+		WithQueryRequest(session, nil, 0, "request", scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			return scm.Apply(a[0], scm.NewString("statement"), scm.NewBool(false), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+				tx := scmerToTxContext(values[0])
+				if generation := tx.statementGeneration.Load(); generation == 0 || generation == previous {
+					t.Fatal("distinct sessions reused statement scope")
+				} else {
+					previous = generation
+				}
+				return scm.NewNil()
+			}))
+		}))
+	}
+	session := scm.NewSession()
+	tx := transactionForSession(session)
+	tx.State = TxAborted
+	session.Func()(scm.NewString("transaction"), scm.NewAny(tx))
+	for _, recovery := range []bool{false, true} {
+		func() {
+			defer func() {
+				if got := recover(); (got != nil) == recovery {
+					t.Fatalf("recovery=%v unexpected outcome: %v", recovery, got)
+				}
+			}()
+			WithQueryRequest(session, nil, 0, "request", scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+				return scm.Apply(a[0], scm.NewString("opaque statement text"), scm.NewBool(recovery), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+					tx.Rollback()
+					session.Func()(scm.NewString("transaction"), scm.NewNil())
+					return scm.NewBool(true)
+				}))
+			}))
+		}()
 	}
 }

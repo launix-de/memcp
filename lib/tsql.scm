@@ -114,6 +114,196 @@ execution paths. The cache, transaction owner and compiled evaluator are shared.
 		(list (quote sql-policy-for) username) cache_scope session false tx))
 	(sql_execute_formula session tx formula resultrow resultfields))))
 
+/* Syntax recipes retain only source and declaration data. Query compilation
+and all row execution stay in the existing shared SQL compiler and planner. */
+(define tsql_script_cache (newcachemap))
+(define tsql_scalar_cache (newcachemap))
+(define tsql_batch_contracts (lambda (commands inherited) (reduce commands (lambda (contracts command)
+	(match command
+		'("declare" declarations) (reduce declarations (lambda (contracts declaration) (begin
+			(define name (car declaration))
+			(if (find contracts (lambda (item) (equal? (car item) name)) nil)
+				(error "duplicate variable declaration: @" name) true)
+			(append contracts (list name (cadr declaration))))) contracts)
+		'("block" commands) (tsql_batch_contracts commands contracts)
+		'("if" _condition yes no) (tsql_batch_contracts (if no (list yes no) (list yes)) contracts)
+		_ contracts)) inherited)))
+(define tsql_scope_session (lambda (parent contracts owner_schema) (begin
+	(define local (newsession))
+	(if owner_schema (local "schema" owner_schema) true)
+	(local "__tsql_parameter_declarations" contracts)
+	(local "__tsql_scope" (newsession))
+	(local "__tsql_connection_session" (tsql_connection_session parent))
+	/* Parameters are lexical batch/procedure locals; account, transaction and
+	connection state remain owned by the original session. Nested invocations
+	do not overwrite a caller's local variables or identity owner. */
+	(lambda args (match args
+		'() (merge_unique (list (filter (local) (lambda (key)
+			(not (has? '("__tsql_scope" "__tsql_connection_session") key)))) (filter (parent) (lambda (key)
+				(not (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
+					(has? '("__tsql_scope" "__tsql_connection_session") key)
+					(and owner_schema (equal? key "schema"))))))))
+		'(key) (if (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
+			(has? '("__tsql_scope" "__tsql_connection_session") key)
+			(and owner_schema (equal? key "schema"))) (local key) (parent key))
+		'(key value) (if (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
+			(has? '("__tsql_scope" "__tsql_connection_session") key)
+			(and owner_schema (equal? key "schema"))) (local key value) (parent key value))
+		_ (apply parent args))))))
+(define tsql_scalar_expression_allowed? (lambda (expr) (match expr
+	((symbol quote) _value) true
+	(cons head tail) (and (not (and (symbol? head)
+		(has? '(inner_select inner_select_exists inner_select_in get_column aggregate window) head)))
+		(reduce tail (lambda (allowed child) (and allowed (tsql_scalar_expression_allowed? child))) true))
+	_ true)))
+(define tsql_scalar_formula (lambda (schema text contracts mode target tx) (begin
+	(define key (json_encode (list schema text contracts mode target)))
+	(tsql_scalar_cache "get_or_compute" key tx (lambda (tx) (begin
+		(define planning (newsession))
+		(planning "__tsql_parameter_declarations" contracts)
+		(planning "__tsql_expression_only" true)
+		(define info (parse_tsql schema text nil planning tx))
+		(define expr (sql_info_formula info))
+		(if (tsql_scalar_expression_allowed? expr) true
+			(error "batch scalar expression requires a relational plan"))
+		(if (and (equal? mode "predicate") (not (equal? (toUpper (sql_info_type info)) "BOOLEAN")))
+			(error "IF requires a Boolean predicate") true)
+		(define expr (if (equal? mode "assignment")
+			(sql_type_formula '() (tsql_cast_expr (list (quote sql_type_expr) expr (sql_info_type info) (sql_info_collation info))
+				(car target) (cdr target))) expr))
+		(sql_queryplan_compile_formula tx (sql_queryplan_bind_tx_calls
+			(sql_queryplan_bind_execution_session (sql_type_lower_annotations expr))))))))))
+(define tsql_scalar_value (lambda (schema text session tx mode target) (begin
+	/* Scalar control expressions use the same scope dependency as SELECT leaves.
+	Restore the caller owner before shared compilation after a child procedure. */
+	(session "__tsql_scope_identity" ((tsql_identity_scope session) "__tsql_scope_identity"))
+	((tsql_scalar_formula schema text (session "__tsql_parameter_declarations") mode target tx)
+		session tx (lambda (_row) (error "scalar expression emitted rows")) (lambda args true)))))
+(define tsql_run_commands (lambda (commands statement session resultrow resultfields)
+	(reduce commands (lambda (_result command)
+		(tsql_run_command command statement session resultrow resultfields)) 0)))
+(define tsql_run_command (lambda (command statement session resultrow resultfields) (begin
+	(define schema (session "schema"))
+	(match command
+		'("statement" text) (statement text false (lambda (tx)
+			(tsql_execute_statement tx schema text session resultrow resultfields)))
+		'("recovery" text) (statement text true (lambda (tx)
+			(tsql_execute_statement tx schema text session resultrow resultfields)))
+		'("block" commands) (tsql_run_commands commands statement session resultrow resultfields)
+		'("if" condition yes no) (begin
+			(define selected (statement condition false (lambda (tx)
+				(tsql_scalar_value schema condition session tx "predicate" nil))))
+			(if selected (tsql_run_command yes statement session resultrow resultfields)
+				no (tsql_run_command no statement session resultrow resultfields) 0))
+		'("declare" declarations) (begin
+			(reduce declarations (lambda (_result declaration) (begin
+				(define name (car declaration))
+				(define value (if (not (nil? (nth declaration 2)))
+					(statement "variable initializer" false (lambda (tx)
+						(tsql_scalar_value schema (nth declaration 2) session tx "assignment" (cadr declaration)))) nil))
+				(session (concat "__tsql_parameter:" name) value))) nil)
+			0)
+		'("assign" name text) (begin
+			(define declaration (find (session "__tsql_parameter_declarations") (lambda (item) (equal? (car item) name)) nil))
+			(if declaration true (error "undeclared variable: @" name))
+			(define value (statement text false (lambda (tx)
+				(tsql_scalar_value schema text session tx "assignment" (cadr declaration)))))
+			(session (concat "__tsql_parameter:" name) value)
+			0)
+		'("create-procedure" owner name parameters source replace) (statement "procedure definition" false (lambda (tx) (begin
+			(if (session "transaction") (error "procedure DDL inside explicit transactions is not supported") true)
+			((sql_policy (session "username")) owner name true)
+			(createprocedure owner (toLower name) "tsql-procedure" source parameters replace)
+			0)))
+		'("drop-procedure" owner name ignore) (statement "procedure deletion" false (lambda (_tx) (begin
+			(if (session "transaction") (error "procedure DDL inside explicit transactions is not supported") true)
+			((sql_policy (session "username")) owner name true)
+			(define definition (find (showprocedures owner (toLower name)) (lambda (_definition) true) nil))
+			(dropprocedure owner (if definition (definition "name") name) ignore)
+			0)))
+		'("execute" owner name arguments) (tsql_invoke_procedure owner name arguments statement session resultrow resultfields)
+		_ (error "unsupported batch command")))))
+(define tsql_execute_batches (lambda (schema text session statement resultrow resultfields) (begin
+	(session "schema" schema)
+	(session "__tsql_connection_session" session)
+	(define inherited (coalesceNil (session "__tsql_parameter_declarations") '()))
+	(define supplied (map inherited (lambda (declaration)
+		(list (car declaration) (session (concat "__tsql_parameter:" (car declaration)))))))
+	(define batches (tsql_script_cache "get_or_compute" (json_encode (list schema text)) nil
+		(lambda (_tx) (map (tsql_script_batches text) (lambda (batch)
+			(list "syntax" (parse_tsql_batch schema (batch "text")) "repeat" (batch "repeat")))))))
+	(reduce batches (lambda (_result batch) (reduce (produceN (batch "repeat")) (lambda (_result _iteration) (begin
+		(define commands (cadr (batch "syntax")))
+		(define scoped (tsql_scope_session session (tsql_batch_contracts commands inherited) nil))
+		(map supplied (lambda (item) (scoped (concat "__tsql_parameter:" (car item)) (cadr item))))
+		(tsql_run_commands commands statement scoped resultrow resultfields))) 0)) 0))))
+(define tsql_execute_request (lambda (schema text session state sequence resultrow resultfields)
+	(with_query_request session state sequence text (lambda (statement)
+		(tsql_execute_batches schema text session statement resultrow resultfields)))))
+/* Console imports accept the same textual script as REST and the connector.
+The caller supplies its ordinary authenticated session; file I/O stays in load. */
+(define load_tsql (lambda (schema stream session)
+	(tsql_execute_request schema (load stream) session nil 0 print (lambda args true))))
+/* Source compilers capture definitions only. Execution receives the caller's
+statement owner, account, transaction session, arguments and output callbacks. */
+(define tsql_procedure_compile (lambda (source context) (begin
+	(define schema (context "schema"))
+	(define parameters (context "parameters"))
+	(define commands (cadr (parse_tsql_batch schema source)))
+	(define contracts (tsql_batch_contracts commands (map parameters (lambda (parameter)
+		(list (car parameter) (cadr parameter))))))
+	/* This compiler emits a closed lambda explicitly. Contract lists and command
+	recipes are quoted data; no creator environment or privilege is captured. */
+	(eval (list (quote lambda)
+		(list (quote statement) (quote caller) (quote values) (quote resultrow) (quote resultfields))
+		(list (quote begin)
+			(list (quote define) (quote session)
+				(list (quote tsql_scope_session) (quote caller) (list (quote quote) contracts) schema))
+			(list (quote session) "schema" schema)
+			(list (quote map) (quote values) (list (quote lambda) (list (quote item))
+				(list (quote session) (list (quote concat) "__tsql_parameter:" (list (quote car) (quote item)))
+					(list (quote cadr) (quote item)))))
+			(list (quote tsql_run_commands) (list (quote quote) commands) (quote statement) (quote session)
+				(quote resultrow) (quote resultfields))))))))
+
+(registerprocedurelanguage "tsql-procedure" tsql_procedure_compile)
+(define tsql_invoke_procedure (lambda (schema name arguments statement caller resultrow resultfields)
+	(if (has? '("sp_tables" "sp_columns" "sp_pkeys" "sp_statistics" "sp_fkeys" "sp_datatype_info" "sp_datatype_info_100" "sp_special_columns") (toLower name))
+		(statement "metadata procedure" false (lambda (tx) (begin
+			(define values (map arguments (lambda (argument)
+				(list (car argument) (tsql_scalar_value (caller "schema") (cadr argument) caller tx "value" nil)))))
+			(tsql_execute_metadata schema name values (sql_policy (caller "username")) resultrow resultfields))))
+		(begin
+			((sql_policy (caller "username")) schema name false)
+			/* One immutable native snapshot owns both the contract and callable.
+			Replacing the catalog name during argument binding cannot mix versions. */
+			(define snapshot (statement "procedure lookup" false (lambda (_tx)
+				(procedure schema (toLower name) true))))
+			(define definition (snapshot "declaration"))
+			(if (equal? (definition "language") "tsql-procedure") true
+				(error "procedure language cannot execute in this frontend"))
+			(define declarations (definition "parameters"))
+			(define named (map (produceN (count arguments)) (lambda (i) (begin
+				(define supplied (nth arguments i))
+				(define name (car supplied))
+				(if (and (equal? name "") (>= i (count declarations))) (error "too many procedure arguments") true)
+				(list (if (equal? name "") (car (nth declarations i)) name) (cadr supplied))))))
+			(define names (map named car))
+			(if (not (equal? (count names) (count (merge_unique (list names))))) (error "duplicate procedure argument") true)
+			(map names (lambda (name) (if (find declarations (lambda (declaration) (equal? (car declaration) name)) nil)
+				true (error "unknown procedure argument: @" name))))
+			(define values (statement "procedure parameter binding" false (lambda (tx) (map declarations (lambda (declaration) (begin
+				(define name (car declaration))
+				(define supplied (find named (lambda (item) (equal? (car item) name)) nil))
+				(if (nth declaration 3) (error "output procedure parameters are not supported yet") true)
+				/* Compile the argument's own expression triple against the declared
+				parameter contract before evaluation; runtime carriers never set SQL types. */
+				(define expression (if supplied (cadr supplied)
+					(not (nil? (nth declaration 2))) (nth declaration 2)
+					(error "missing procedure argument: @" name)))
+				(list name (tsql_scalar_value (caller "schema") expression caller tx "assignment" (cadr declaration)))))))))
+			((snapshot "callable") statement caller values resultrow resultfields)))))
+
 (define tsql_http_query (lambda (req res schema) (begin
 	(define stored (mysql_auth (req "username")))
 	(if (and stored (equal? stored (password (req "password"))))
@@ -130,10 +320,9 @@ execution paths. The cache, transaction owner and compiled evaluator are shared.
 				/* One scope owner per submitted batch, never per native insert row. */
 				(session "__tsql_scope" (newsession))
 				(define output (newsession))
-				(define result (with_autocommit session (req "__session_state") (req "__query_seq") text
-					(lambda (tx) (tsql_execute_statement tx schema text session
-						(lambda (values) (begin (output "rows" true) ((res "jsonl") values)))
-						(lambda args true)))))
+				(define result (tsql_execute_request schema text session (req "__session_state") (req "__query_seq")
+					(lambda (values) (begin (output "rows" true) ((res "jsonl") values)))
+					(lambda args true)))
 				(if (and (not (output "rows")) (number? result))
 					((res "jsonl") (list "affected_rows" result)) true)
 			) text)) (lambda (err) (begin
@@ -425,23 +614,21 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 	"transaction" (begin
 		(if (and (equal? (payload "action") 1) (not (has? '(0 2) (payload "isolation"))))
 			(error "unsupported TDS transaction isolation") true)
-		(define sql (match (payload "action") 1 "BEGIN" 2 "COMMIT" 3 "ROLLBACK" _ (error "unknown transaction action")))
-		(with_autocommit session state sequence sql (lambda (tx)
-			(tsql_execute_statement tx (session "schema") sql session (lambda (_row) true) (lambda args true))))
+		(define sql (match (payload "action") 1 "BEGIN TRANSACTION" 2 "COMMIT" 3 "ROLLBACK" _ (error "unknown transaction action")))
+		(tsql_execute_request (session "schema") sql session state sequence (lambda (_row) true) (lambda args true))
 		(list "rows" 0 "transaction" (payload "action")))
 	"execute" (begin
-		(session "__tsql_scope" (newsession))
-		(tds_bind_parameters session (tds_bind_declarations (payload "database") (payload "declarations"))
-			(payload "parameters"))
 		(define output (newsession))
-		(define result (with_autocommit session state sequence (payload "text") (lambda (tx)
-			(tsql_execute_statement tx (payload "database") (payload "text") session
+		(define result (with_query_request session state sequence (payload "text") (lambda (statement) (begin
+			(tds_bind_parameters session (tds_bind_declarations (payload "database") (payload "declarations"))
+				(payload "parameters"))
+			(tsql_execute_batches (payload "database") (payload "text") session statement
 				(lambda (values) (row (map (output "descriptors") (lambda (descriptor) (begin
 					(define value (values (descriptor "name")))
 					(tds_result_value descriptor value))))))
 				(lambda (_names descriptors) (begin
 					(output "descriptors" descriptors)
-					(fields descriptors)))))))
+					(fields descriptors))))))))
 		/* NOCOUNT changes protocol completion only; native DML still computes
 		its affected-row count and result rows follow the shared planner. */
 		(if (session "__tsql_nocount")

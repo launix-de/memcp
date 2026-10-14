@@ -143,6 +143,26 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   reservations through the existing shard lock and rebuild visibility-forwarding
   protocol. No reservation directory is retained or persisted.
 
+- `TxContext.statementGeneration` is a process-local, globally unique cache
+  scope published once per statement, outside row and batch loops. `querySeq`
+  remains the request cancellation/process-list identity. `with_query_request`
+  retains the existing transaction object and query mutex for its request;
+  sequential statement callbacks release column/reader ownership independently,
+  while cancellation is released only when the request unwinds. Recovery is an
+  explicit capability supplied by the frontend's parsed control statement.
+  Stored plans never retain the request's statement executor.
+
+- `database.procedures` publishes immutable source definitions through the
+  existing lock-free catalog. CREATE/DROP use database schema ownership and
+  the existing durable schema checkpoint. Name, source, language and frontend
+  parameter contracts are persisted; compiled callables, sessions and
+  transactions are never serialized. Source compilation runs outside catalog
+  locks and schema loading, using the registered source-language compiler and
+  ordinary closure/JIT boundary. Each immutable definition publishes its
+  compiled callable once; replacement leaves active invocations intact.
+  Frontend-generated bodies retain the shared planner's schema guards and
+  accept invocation bindings explicitly.
+
 - `table.Auto_increment` uses the same atomic reservation for native INSERT
   and `reserve_ids`, once per batch/block. Runtime counter snapshots and DDL
   updates are atomic; loading unpublished table objects owns initialization.
