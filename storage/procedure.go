@@ -5,6 +5,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -70,6 +71,46 @@ func (p *ProcedureDescription) callable(schema string) scm.Scmer {
 	return *p.compiled.Load()
 }
 
+// Procedure contracts are portable declaration data, never executable values
+// or request-owned handles. This validation runs only at catalog admission.
+func freezeProcedureParameters(value scm.Scmer) scm.Scmer {
+	var plain func(scm.Scmer) bool
+	plain = func(value scm.Scmer) bool {
+		if value.IsNil() || value.IsBool() || value.IsInt() || value.IsFloat() || value.IsString() {
+			return true
+		}
+		var children []scm.Scmer
+		if value.IsSlice() {
+			children = value.Slice()
+		} else if value.IsFastDict() {
+			if value.FastDict() != nil {
+				children = value.FastDict().ToList()
+			}
+		} else {
+			return false
+		}
+		for _, child := range children {
+			if !plain(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if !plain(value) {
+		panic("procedure parameters must contain only portable declaration data")
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		panic("procedure parameters cannot be persisted: " + err.Error())
+	}
+	var frozen scm.Scmer
+	// Scmer's decoder uses json.Number and retains exact signed integers.
+	if err := json.Unmarshal(encoded, &frozen); err != nil {
+		panic(err)
+	}
+	return frozen
+}
+
 func CreateProcedure(schema, name, language, source string, parameters scm.Scmer, replace bool) bool {
 	db := GetDatabase(schema)
 	if db == nil {
@@ -80,7 +121,7 @@ func CreateProcedure(schema, name, language, source string, parameters scm.Scmer
 		panic("procedure name, language and source must not be empty")
 	}
 	definition := &ProcedureDescription{Name: name, Language: language, Source: source,
-		Parameters: scm.CloneOptimizerExpression(parameters)}
+		Parameters: freezeProcedureParameters(parameters)}
 	// Validate and compile before publication, without catalog ownership. A
 	// compiler may inspect the existing schema through ordinary metadata APIs.
 	definition.callable(schema)

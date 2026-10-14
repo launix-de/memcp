@@ -6,6 +6,7 @@ package storage
 
 import (
 	"encoding/json"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -116,6 +117,14 @@ func TestProcedureCatalogDDLCheckpointReloadAndReplace(t *testing.T) {
 		"missing-name":     func() { CreateProcedure(schema, "", "procedure-catalog-test", "source", scm.NewNil(), false) },
 		"missing-source":   func() { CreateProcedure(schema, "empty", "procedure-catalog-test", "", scm.NewNil(), false) },
 		"missing-drop":     func() { DropProcedure(schema, "absent", false) },
+		"nonportable-parameters": func() {
+			CreateProcedure(schema, "invalid-data", "procedure-catalog-test", "source",
+				scm.NewSlice([]scm.Scmer{scm.NewAny(&TxContext{})}), false)
+		},
+		"nonfinite-parameters": func() {
+			CreateProcedure(schema, "invalid-number", "procedure-catalog-test", "source",
+				scm.NewFloat(math.NaN()), false)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			defer func() {
@@ -231,4 +240,36 @@ func TestProcedurePublicAPIsLoadColdCatalogBeforeAccess(t *testing.T) {
 		t.Fatalf("cold DROP did not survive restart: %d definitions", got)
 	}
 	checkTable()
+}
+
+func TestProcedureParametersFreezePortableDataAndExactIntegers(t *testing.T) {
+	original := scm.NewSlice([]scm.Scmer{scm.NewString("largest"), scm.NewInt(9223372036854775807),
+		scm.NewSlice([]scm.Scmer{scm.NewString("nested"), scm.NewBool(true)})})
+	frozen := freezeProcedureParameters(original)
+	original.Slice()[1] = scm.NewInt(0)
+	original.Slice()[2].Slice()[1] = scm.NewBool(false)
+	if got := frozen.Slice()[1].Int(); got != 9223372036854775807 {
+		t.Fatalf("frozen declaration lost exact integer carrier: %d", got)
+	}
+	if !frozen.Slice()[2].Slice()[1].Bool() {
+		t.Fatal("caller mutation changed frozen declaration")
+	}
+	declarations := scm.NewFastDictValue(1)
+	declarations.Set(scm.NewString("limit"), scm.NewInt(9223372036854775807), nil)
+	frozenMap := freezeProcedureParameters(scm.NewFastDict(declarations))
+	declarations.Set(scm.NewString("limit"), scm.NewInt(0), nil)
+	if got := frozenMap.Slice()[1].Int(); got != 9223372036854775807 {
+		t.Fatalf("dictionary freeze lost integer: %d", got)
+	}
+	for _, invalid := range []scm.Scmer{scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewNil() }),
+		scm.NewAny(&TxContext{}), scm.NewFloat(math.NaN()), scm.NewFloat(math.Inf(1))} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("nonportable procedure declaration was accepted")
+				}
+			}()
+			freezeProcedureParameters(scm.NewSlice([]scm.Scmer{invalid}))
+		}()
+	}
 }
