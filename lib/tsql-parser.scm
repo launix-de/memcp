@@ -67,6 +67,8 @@ The negative accumulator also represents the minimum int64 without overflow. */
 	(atom "ELSE" true)
 	(atom "END" true)
 	(atom "HAVING" true)
+	(atom "WITH" true)
+	(atom "OPTION" true)
 )))
 (define tsql_identifier_quoted (parser (or
 	(parser '("[" (define id (regex "(?:[^\\]]|\\]\\])+" false false)) "]") (replace id "]]" "]"))
@@ -475,6 +477,60 @@ No row-level datatype dispatch or alternate temporal representation is needed. *
 (define tsql_key_placement (parser (? (or (atom "CLUSTERED" true) (atom "NONCLUSTERED" true)))))
 (define tsql_key_columns (parser (define columns (+ (parser '(
 	(define name tsql_identifier) (? (or (atom "ASC" true) (atom "DESC" true)))) name) ",")) columns))
+/* Physical access preferences are accepted as syntax only. They do not
+enter the AST or constrain the common planner, native isolation, or autoindexes.
+Semantic requests to bypass constraints/triggers are deliberately excluded. */
+(define tsql_hint_index (parser (or tsql_int tsql_identifier)))
+(define tsql_table_hint (parser (or
+	(parser '((atom "INDEX" true) (? "=") "(" (+ tsql_hint_index ",") ")") true)
+	(parser '((atom "FORCESEEK" true) (? "(" tsql_hint_index "(" (+ tsql_identifier ",") ")" ")")) true)
+	(parser (regex "(?:NOEXPAND|FORCESCAN|HOLDLOCK|NOLOCK|NOWAIT|PAGLOCK|READCOMMITTEDLOCK|READCOMMITTED|READPAST|READUNCOMMITTED|REPEATABLEREAD|ROWLOCK|SERIALIZABLE|SNAPSHOT|TABLOCKX|TABLOCK|UPDLOCK|XLOCK)\\b" true) true)
+)))
+(define tsql_table_hints (parser (or
+	(parser '((atom "WITH" true) "(" (+ tsql_table_hint (? ",")) ")") true)
+	/* The legacy parenthesized spelling permits a single simple hint. */
+	(parser '("(" (regex "(?:NOLOCK|READUNCOMMITTED|READCOMMITTED|REPEATABLEREAD|SERIALIZABLE|HOLDLOCK|ROWLOCK|PAGLOCK|TABLOCKX|TABLOCK|UPDLOCK|XLOCK|NOWAIT)\\b" true) ")") true)
+)))
+(define tsql_query_hint (parser (or
+	(parser '((regex "(?:HASH|LOOP|MERGE)\\b" true) (atom "JOIN" true)) true)
+	(parser '((regex "(?:HASH|ORDER)\\b" true) (atom "GROUP" true)) true)
+	(parser '((regex "(?:HASH|MERGE|CONCAT)\\b" true) (atom "UNION" true)) true)
+	(parser '((atom "FORCE" true) (atom "ORDER" true)) true)
+	(parser (regex "(?:RECOMPILE|ROBUST\\s+PLAN|KEEPFIXED\\s+PLAN|KEEP\\s+PLAN)\\b" true) true)
+	(parser '((regex "(?:MAXDOP|MAXRECURSION|FAST)\\b" true) tsql_int) true)
+	(parser '((atom "USE" true) (atom "HINT" true) "(" (+ tsql_string ",") ")") true)
+	(parser '((atom "OPTIMIZE" true) (atom "FOR" true) (or
+		(atom "UNKNOWN" true)
+		'("(" (+ '("@" tsql_identifier (or (atom "UNKNOWN" true) '("=" tsql_literal))) ",") ")"))) true)
+	(parser '((atom "TABLE" true) (atom "HINT" true) "(" tsql_identifier "," (+ tsql_table_hint ",") ")") true)
+)))
+(define tsql_query_hints (parser '((atom "OPTION" true) "(" (+ tsql_query_hint ",") ")") true))
+/* Index layout options are compile-time spelling, not persistent metadata.
+The two options which change uniqueness/admission remain explicit contracts. */
+(define tsql_on_off (parser (or (atom "ON" true) (atom "OFF" true))))
+(define tsql_index_wait (parser '("(" (atom "WAIT_AT_LOW_PRIORITY" true) "("
+	(atom "MAX_DURATION" true) "=" tsql_int (atom "MINUTES" true) ","
+	(atom "ABORT_AFTER_WAIT" true) "=" (regex "(?:NONE|SELF|BLOCKERS)\\b" true) ")" ")") true))
+(define tsql_index_option (parser (or
+	(parser '((define name (regex "(?:IGNORE_DUP_KEY|DROP_EXISTING)\\b" true)) "=" (define value tsql_on_off))
+		(list (toUpper name) (equal? (toUpper value) "ON")))
+	(parser '((regex "(?:PAD_INDEX|SORT_IN_TEMPDB|STATISTICS_NORECOMPUTE|STATISTICS_INCREMENTAL|ALLOW_ROW_LOCKS|ALLOW_PAGE_LOCKS|OPTIMIZE_FOR_SEQUENTIAL_KEY|RESUMABLE|LOB_COMPACTION)\\b" true) "=" tsql_on_off) '())
+	(parser '((atom "ONLINE" true) "=" tsql_on_off (? tsql_index_wait)) '())
+	(parser '((regex "(?:FILLFACTOR|MAXDOP|MAX_DURATION)\\b" true) "=" tsql_int (? (atom "MINUTES" true))) '())
+	(parser '((atom "DATA_COMPRESSION" true) "=" (regex "(?:NONE|ROW|PAGE|COLUMNSTORE_ARCHIVE|COLUMNSTORE)\\b" true)) '())
+)))
+(define tsql_index_options (parser '((atom "WITH" true) "(" (define options (+ tsql_index_option ",")) ")") (merge options)))
+(define tsql_index_location (parser '((atom "ON" true) tsql_identifier (? "(" tsql_identifier ")")) true))
+(define tsql_check_index_options (lambda (options unique) (match options
+	(cons _ _) (begin
+		(if (and unique (options "IGNORE_DUP_KEY")) (error "IGNORE_DUP_KEY=ON requires native duplicate suppression") true)
+		/* Even an ordinary acceleration declaration may replace a UNIQUE index.
+		Reject replacement until the native key operation owns that transition. */
+		(if (options "DROP_EXISTING") (error "DROP_EXISTING=ON requires native atomic key replacement") true)
+		true)
+	_ true)))
+(define tsql_key_layout (parser '((? (define options tsql_index_options)) (? tsql_index_location))
+	(tsql_check_index_options options true)))
 (define tsql_default_literal (parser (or
 	(parser '("(" (define value tsql_default_literal) ")") value)
 	(parser (define value tsql_literal) (sql_type_lower_annotations value)))))
@@ -482,9 +538,9 @@ No row-level datatype dispatch or alternate temporal representation is needed. *
 	(parser '("(" tsql_clock_default ")") true)
 	'((atom "GETDATE" true) "(" ")") (atom "CURRENT_TIMESTAMP" true))))
 (define tsql_column_attributes (parser (define attrs (* (or
-	(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement)
+	(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement tsql_key_layout)
 		(if key (list "primary" true "null" false "constraint_name" key) '("primary" true "null" false)))
-	(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "UNIQUE" true) tsql_key_placement)
+	(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "UNIQUE" true) tsql_key_placement tsql_key_layout)
 		(if key (list "unique" true "nulls_not_distinct" true "constraint_name" key) '("unique" true "nulls_not_distinct" true)))
 	(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 	(parser (atom "NULL" true) '("null" true))
@@ -966,12 +1022,12 @@ never from the first row. Unknown expression types stay text in this first slice
 		(parser '((atom "(" true) (define query tsql_select) (atom ")" true) (atom "AS" true) (define id tsql_identifier)) '(id schema query false nil))
 		(parser '((atom "(" true) (define query tsql_select) (atom ")" true) (define id tsql_identifier)) '(id schema query false nil))
 
-		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier) (define id tsql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
-		(parser '((define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define tbl tsql_identifier) (define id tsql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define tbl tsql_identifier)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
+		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
+		(parser '((define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define tbl tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
 	)))
 
 	(define from nil)
@@ -1153,6 +1209,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		)
 
 		(define suffix_stage tsql_select_suffix)
+		(? tsql_query_hints)
 
 	) (begin
 			(if (and suffix_stage (nil? order)) (error "OFFSET requires ORDER BY") true)
@@ -1204,6 +1261,7 @@ never from the first row. Unknown expression types stay text in this first slice
 			(define condition tsql_expression)
 		))
 
+		(? tsql_query_hints)
 	) (begin
 			(define all_defs (merge tbldefs))
 			(define first_def (car all_defs))
@@ -1226,11 +1284,13 @@ never from the first row. Unknown expression types stay text in this first slice
 		(atom "FROM" true)
 
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
+		(? tsql_table_hints)
 		(? '(
 			(atom "WHERE" true)
 			(define condition tsql_expression)
 		))
 
+		(? tsql_query_hints)
 	) (begin
 
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
@@ -1368,29 +1428,62 @@ never from the first row. Unknown expression types stay text in this first slice
 			(if policy (policy database tbl true) true)
 			(tsql_insert_select_plan database tbl (coalesce columns (table_insertable_columns database tbl)) query)
 	)))
-	/* Unique index declarations are native keys. Placement/direction syntax
-	is a physical hint; admission and enforcement stay in the existing operator. */
-	(define tsql_create_unique_index (parser '(
-		(atom "CREATE" true) (atom "UNIQUE" true) tsql_key_placement
+	/* Only UNIQUE declarations publish native keys. Ordinary acceleration
+	declarations carry no catalog state: the common planner owns autoindexes. */
+	(define tsql_create_index (parser '(
+		(atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) tsql_key_placement
 		(atom "INDEX" true) (define name tsql_identifier) (atom "ON" true)
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
 		"(" (define columns tsql_key_columns) ")"
+		(? (atom "INCLUDE" true) "(" (define included (+ tsql_identifier ",")) ")")
+		(? (atom "WHERE" true) (define predicate tsql_expression))
+		(? (define options tsql_index_options))
+		(? tsql_index_location)
 	) (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
+			(if (and unique predicate) (error "filtered UNIQUE requires native filtered-key support") true)
+			(tsql_check_index_options options unique)
 			/* PRIMARY is a reserved native key identity, not an index alias. */
-			(if (equal? (toUpper name) "PRIMARY")
+			(if (and unique (equal? (toUpper name) "PRIMARY"))
 				(error "index name PRIMARY is reserved") true)
 			(define declarations (get_schema database tbl))
 			(define columns (map columns (lambda (name) (begin
 				(define declaration (find declarations (lambda (column) (equal?? (column "Field") name)) nil))
 				(if declaration (declaration "Field") (error "unknown index column: " name))))))
+			(map included (lambda (name) (if (find declarations (lambda (column) (equal?? (column "Field") name)))
+				true (error "unknown included column: " name))))
 			(reduce columns (lambda (seen name)
 				(if (has? seen name) (error "duplicate index column: " name) (cons name seen))) '())
-			(list (quote if)
+			(if (not unique) true (list (quote if)
 				(list (quote createkey) (list (quote table) database tbl) name true
 					(cons (quote list) columns) (quote tx) (list (quote list) "nulls_not_distinct" true))
-				true (list (quote error) "index already exists: " name)))))
+				true (list (quote error) "index already exists: " name))))))
+	(define tsql_alter_index (parser '(
+		(atom "ALTER" true) (atom "INDEX" true) (or (atom "ALL" true) tsql_identifier) (atom "ON" true)
+		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
+		(define action (regex "(?:REBUILD|REORGANIZE|DISABLE)\\b" true))
+		(? (atom "PARTITION" true) "=" (or tsql_int (atom "ALL" true)))
+		(? (define options tsql_index_options))
+	) (begin
+			(if policy (policy (coalesce schema2 schema) tbl true) true)
+			(get_schema (coalesce schema2 schema) tbl)
+			(if (equal? (toUpper action) "DISABLE") (error "DISABLE cannot bypass native constraints") true)
+			(tsql_check_index_options options true)
+			true)))
+	(define tsql_drop_index (parser '(
+		(atom "DROP" true) (atom "INDEX" true)
+		(? (atom "IF" true) (atom "EXISTS" true))
+		(define name tsql_identifier) (atom "ON" true)
+		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
+		(? tsql_index_options)
+	) (begin
+			(if policy (policy (coalesce schema2 schema) tbl true) true)
+			(if (equal? (toUpper name) "PRIMARY") (error "PRIMARY is a constraint, not an acceleration index") true)
+			/* A physical name carries no catalog state. Until native key removal
+			protects referenced constraints, do not guess whether this name owns
+			a real key or run a metadata check followed by an unsafe drop. */
+			(error "DROP INDEX requires native constraint-safe key removal"))))
 	(define tsql_foreign_key_mode (parser (or
 		(parser '((atom "NO" true) (atom "ACTION" true)) "restrict")
 		(parser (atom "CASCADE" true) "cascade")
@@ -1418,17 +1511,18 @@ never from the first row. Unknown expression types stay text in this first slice
 		"(" (define columns (+ (or
 			/* Placement and direction are physical index preferences. Logical
 			uniqueness uses native keys; MemCP selects its own columnar access. */
-			(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement "(" (define keys tsql_key_columns) ")")
+			(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement "(" (define keys tsql_key_columns) ")" tsql_key_layout)
 				(list (quote list) "unique" "PRIMARY" (cons (quote list) keys)
 					(cons (quote list) (if key (list "constraint_name" key) '()))))
 			(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "UNIQUE" true) tsql_key_placement
-				"(" (define keys tsql_key_columns) ")")
+				"(" (define keys tsql_key_columns) ")" tsql_key_layout)
 				(list (quote list) "unique" (coalesce key (reduce keys (lambda (a b) (concat a "_" b)) name)) (cons (quote list) keys)
 					(list (quote list) "nulls_not_distinct" true)))
 			foreign_key_definition
 			(parser (define column column_definition) (match column '(name type dimensions attributes)
 				(list (quote list) "column" name type dimensions (cons (quote list) attributes))))
 		) ",")) ")"
+		(? tsql_index_location)
 	) (begin
 			(if policy (policy (coalesce schema2 schema) name true) true)
 			(define columns (tsql_table_primary_columns columns))
@@ -1440,7 +1534,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier)
 		(define changes (+ (or
 			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define key tsql_identifier))
-				(atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement "(" (define columns tsql_key_columns) ")")
+				(atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement "(" (define columns tsql_key_columns) ")" tsql_key_layout)
 				(lambda (database name) (begin
 					/* Nullable existing columns need native ALTER nullability support.
 					Reject this shape rather than adding a parallel validation scan. */
@@ -1451,7 +1545,7 @@ never from the first row. Unknown expression types stay text in this first slice
 						(cons (quote list) columns) (quote tx)
 						(cons (quote list) (if key (list "constraint_name" key) '()))))))
 			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define key tsql_identifier)
-				(atom "UNIQUE" true) tsql_key_placement "(" (define columns tsql_key_columns) ")")
+				(atom "UNIQUE" true) tsql_key_placement "(" (define columns tsql_key_columns) ")" tsql_key_layout)
 				(lambda (database name)
 					(list (quote createkey) (list (quote table) database name) key true
 						(cons (quote list) columns) (quote tx)
@@ -1487,7 +1581,7 @@ never from the first row. Unknown expression types stay text in this first slice
 		(parser '((atom "EXPLAIN" true) (define query tsql_select))
 			'('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy) planning_session tx)) (settings "ExplainWidth")))))
 		tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete tsql_truncate
-		tsql_create_view tsql_create_table tsql_alter_table tsql_create_unique_index
+		tsql_create_view tsql_create_table tsql_alter_table tsql_create_index tsql_alter_index tsql_drop_index
 		(parser '((atom "CREATE" true) (atom "DATABASE" true)
 			(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
 			(define name tsql_identifier)) (begin
