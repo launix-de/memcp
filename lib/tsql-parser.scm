@@ -1419,7 +1419,9 @@ never from the first row. Unknown expression types stay text in this first slice
 		(define native_plan (build_queryplan_term expanded planning_session tx))
 		(define identity (find (get_schema database tbl)
 			(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
-		(define generated (and identity (not (has? columns (identity "Field")))))
+		/* AND propagates SQL NULL and evaluates later terms. Missing declaration
+		metadata needs an explicit presence branch before reading its fields. */
+		(define generated (if (nil? identity) false (not (has? columns (identity "Field")))))
 		/* Completion is once per statement, outside the parallel row sink. */
 		(define plan (list (quote begin)
 			(list (quote define) (quote __tsql_stream_result) native_plan)
