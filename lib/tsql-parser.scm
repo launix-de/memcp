@@ -281,6 +281,11 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		"NVARCHAR" (tsql_cast_text_expr value dimensions true false)
 		"CHAR" (tsql_cast_text_expr value dimensions false true)
 		"NCHAR" (tsql_cast_text_expr value dimensions true true)
+		"DATE" (tsql_temporal_cast_expr value name 0)
+		"DATETIME" (tsql_temporal_cast_expr value name 0)
+		"DATETIME2" (tsql_temporal_cast_expr value name 0)
+		"SMALLDATETIME" (tsql_temporal_cast_expr value name 0)
+		"TIME" (tsql_temporal_cast_expr value name 0)
 		_ (error "unsupported conversion to " name)))
 	(list (quote sql_type_expr) formula name nil))))
 (define tsql_cast_decimal_expr (lambda (value type dimensions) (begin
@@ -341,7 +346,12 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 	(define length (if (empty_list? dimensions) 30 (car dimensions)))
 	(list (quote sql_compile_expr) (lambda (infos) (begin
 		(define info (car infos))
-		(define formula (sql_info_formula info))
+		(define source (sql_info_type info))
+		(define formula (if (tsql_temporal_type? source)
+			(list format_date (tsql_calendar_difference_formula info)
+				(match source "DATE" "%Y-%m-%d" "TIME" "%H:%i:%s"
+					"DATETIME2" "%Y-%m-%d %H:%i:%s.000" _ "%Y-%m-%d %H:%i:%s"))
+			(sql_info_formula info)))
 		(if (and (plain_literal_expr? formula) (sql_numeric_type? (sql_info_type info))
 			(not (equal? length -1)) (> (strlen (string formula)) length))
 			(error "numeric character conversion overflow") true)
@@ -382,16 +392,21 @@ configurable cutoff remain separate compatibility work. */
 		(concat (if (< hour 10) "0" "") hour (substr clock 2 6))) clock))
 	(define parsed (str_to_date (concat date " " clock) "%Y-%m-%d %H:%i:%s"))
 	(if (nil? parsed) (error "invalid datetime value") (unix_timestamp parsed))))))
-(define tsql_convert_expr (lambda (value type dimensions style)
-	(if (or (nil? style) (equal? style 0)) (tsql_cast_expr value type dimensions)
-		(begin
-			(tsql_decl_dimensions type dimensions)
-			(match (list type style)
-				'("DATETIME" 4) (list (quote from_unixtime) (list tsql_export_datetime_seconds value))
-				'(text_type 120) (if (has? '("VARCHAR" "NVARCHAR") text_type)
-					(tsql_cast_expr (list format_date value "%Y-%m-%d %H:%i:%s") text_type dimensions)
-					(error "unsupported CONVERT style for " text_type))
-				_ (error "unsupported CONVERT style: " style))))))
+(define tsql_convert_expr (lambda (value type dimensions style) (begin
+	(tsql_decl_dimensions type dimensions)
+	(match style
+		(symbol sql_null_style) (list (quote sql_type_expr) nil type nil)
+		_ (if (or (nil? style) (equal? style 0)) (tsql_cast_expr value type dimensions)
+			(tsql_temporal_type? type) (tsql_temporal_cast_expr value type style)
+			(has? '("VARCHAR" "NVARCHAR" "CHAR" "NCHAR") type)
+			(begin
+				(define pattern (tsql_temporal_style_pattern style true))
+				(list (quote sql_compile_expr) (lambda (infos) (begin
+					(define input (car infos))
+					(define formula (list format_date (tsql_calendar_difference_formula input) pattern))
+					(sql_info (list (if (has? '("CHAR" "NCHAR") type) tsql_cast_fixed_text tsql_cast_text)
+						formula (if (empty_list? dimensions) 30 (car dimensions)) (has? '("NVARCHAR" "NCHAR") type)) type nil))) value)))
+		(error "unsupported CONVERT style for " type)))))
 /* Aggregate contracts come from SQL syntax and the declared input type.
 The native reducers do not determine the frontend's SQL result contract. */
 (define tsql_aggregate_type (lambda (name input_type) (match name
@@ -441,6 +456,7 @@ operators supply the values; the result SQL contract is always explicit INT. */
 	"d" "day" "dd" "day" "day" "day"
 	"w" "weekday" "dw" "weekday" "weekday" "weekday"
 	"wk" "week" "ww" "week" "week" "week"
+	"isowk" "iso_week" "isoww" "iso_week" "iso_week" "iso_week"
 	"hh" "hour" "hour" "hour"
 	"n" "minute" "mi" "minute" "minute" "minute"
 	"s" "second" "ss" "second" "second" "second"
@@ -455,7 +471,7 @@ Numeric dates count days from 1900; native DATE/DATETIME values are Unix values.
 	(define text (sql_trim value))
 	(define anchored (if (regexp_test text "^[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?$")
 		(concat "1900-01-01 " text) text))
-	(define parsed (parse_date anchored))
+	(define parsed (parse_date (regexp_replace anchored "T" " ")))
 	(if (nil? parsed) (error "invalid calendar input") parsed)))))
 (define tsql_calendar_days (lambda (value) (if (nil? value) nil (begin
 	(if (and (>= value -53690) (< value 2958464)) true (error "numeric datetime conversion overflow"))
@@ -472,6 +488,22 @@ Numeric dates count days from 1900; native DATE/DATETIME values are Unix values.
 		(error "calendar input requires a declared date, number or text type; got " type)))))
 (define tsql_calendar_day_of_year (lambda (value)
 	(if (nil? value) nil (+ 1 (timestampdiff "DAY" (format_date value "%Y-01-01") value)))))
+/* Session input remains visible in the expression AST, so the common planner
+owns its domain/cache dependency. Only week and weekday consume DATEFIRST. */
+(define tsql_datefirst_expr (lambda ()
+	(list (quote sql_type_expr) (list (quote coalesceNil)
+		(list (quote session) "__tsql_datefirst") 7) "INT" nil)))
+(define tsql_datefirst_value (lambda (value)
+	(if (nil? value) (error "DATEFIRST requires an integer from 1 through 7")
+		(tsql_cast_integer value 1 7))))
+(define tsql_calendar_weekday (lambda (value first)
+	(if (nil? value) nil (+ 1 (mod (+ (extract_date value "WEEKDAY") 8 (- 0 first)) 7)))))
+(define tsql_calendar_week (lambda (value first) (if (nil? value) nil (begin
+	/* January first belongs to week one; later weeks begin on DATEFIRST. */
+	(define january (parse_date (format_date value "%Y-01-01")))
+	(+ 1 (intdiv (+ (- (tsql_calendar_day_of_year value) 1)
+		(- (tsql_calendar_weekday january first) 1)) 7))))))
+(define tsql_calendar_iso_week (lambda (value) (extract_date value "WEEK")))
 (define tsql_boundary_calculator (lambda (unit) (match unit
 	"year" (sql_builtins "YEAR") "month" tsql_calendar_month_index "quarter" tsql_calendar_quarter_index
 	_ (begin
@@ -500,8 +532,70 @@ No row-level datatype dispatch or alternate temporal representation is needed. *
 (define tsql_calendar_range (lambda (value minimum)
 	(if (nil? value) nil (if (and (>= (unix_timestamp value) minimum) (<= (unix_timestamp value) 253402300799))
 		value (error "calendar result overflow")))))
+/* Temporal contracts are compiled from SQL declarations. The native carrier
+is the existing Unix date value; subsecond precision remains deferred rather
+than introducing another runtime datatype or precision-emulation layer. */
+(define tsql_temporal_type? (lambda (type)
+	(has? '("DATE" "DATETIME" "DATETIME2" "SMALLDATETIME" "TIME") type)))
+(define tsql_calendar_time_only (lambda (value) (if (nil? value) nil
+	(date_add (parse_date "1900-01-01")
+		(intdiv (mod (+ (mod (unix_timestamp value) 86400) 86400) 86400) 1) "SECOND"))))
+(define tsql_calendar_small_datetime (lambda (value) (if (nil? value) nil (begin
+	(define seconds (unix_timestamp value))
+	(define rounded (date_add value (intdiv (- (* 60 (floor (/ (+ seconds 30) 60))) seconds) 1) "SECOND"))
+	(if (and (>= (unix_timestamp rounded) -2208988800) (<= (unix_timestamp rounded) 3453321540))
+		rounded (error "small datetime conversion overflow"))))))
+(define tsql_temporal_style_pattern (lambda (style output) (match style
+	1 (if output "%m/%d/%y" "%m/%d/%Y") 101 "%m/%d/%Y"
+	4 (if output "%d.%m.%y" "%d.%m.%Y") 104 "%d.%m.%Y"
+	12 (if output "%y%m%d" "%Y%m%d") 112 "%Y%m%d"
+	8 "%H:%i:%s" 108 "%H:%i:%s"
+	126 "%Y-%m-%dT%H:%i:%s"
+	23 "%Y-%m-%d" 20 "%Y-%m-%d %H:%i:%s" 120 "%Y-%m-%d %H:%i:%s"
+	21 (if output "%Y-%m-%d %H:%i:%s.000" "%Y-%m-%d %H:%i:%s")
+	121 (if output "%Y-%m-%d %H:%i:%s.000" "%Y-%m-%d %H:%i:%s")
+	_ (error "unsupported CONVERT style: " style))))
+(define tsql_temporal_style_text (lambda (value style) (if (nil? value) nil (begin
+	(define text (sql_trim value))
+	(define pattern (tsql_temporal_style_pattern style false))
+	(define text (if (has? '(1 12) style) (begin
+		(define offset (if (equal? style 12) 0 6))
+		(define year (substr text offset 2))
+		(if (regexp_test year "^[0-9]{2}$") true (error "invalid short calendar year"))
+		(concat (substr text 0 offset) (if (< (tsql_parse_integer year) 50) "20" "19")
+			year (substr text (+ offset 2)))) text))
+	(define value (if (has? '(21 121) style) (parse_date text) (str_to_date text pattern)))
+	(if (nil? value) (error "invalid styled calendar input") value)))))
+/* The current native carrier has whole seconds. Explicit conversions that
+would retain fractional clocks fail until a generic higher-precision carrier
+is available; accepting them here would silently lose the user's value. */
+(define tsql_calendar_cast_text (lambda (value) (if (nil? value) nil (begin
+	(if (regexp_test value "[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]*[1-9]")
+		(error "fractional temporal conversion is not implemented") value)))))
+(define tsql_temporal_cast_expr (lambda (value target style)
+	(list (quote sql_compile_expr) (lambda (infos) (begin
+		(define input (car infos))
+		(define source (sql_info_type input))
+		(define input (if (and (sql_text_type? source) (not (equal? target "DATE")))
+			(sql_info (list tsql_calendar_cast_text (sql_info_formula input)) source (sql_info_collation input)) input))
+		(if (and (sql_numeric_type? source) (not (has? '("DATETIME" "SMALLDATETIME") target)))
+			(error "numeric input is not convertible to " target) true)
+		(if (and (not (equal? style 0)) (not (equal? style 4)))
+			(tsql_temporal_style_pattern style false) true)
+		(define formula (if (and (sql_text_type? source) (not (equal? style 0)))
+			(if (equal? style 4) (list tsql_calendar_shift_seconds (parse_date "1970-01-01")
+				(list tsql_export_datetime_seconds (sql_info_formula input)))
+				(list tsql_temporal_style_text (sql_info_formula input) style))
+			(tsql_calendar_difference_formula input)))
+		(define converted (match target
+			"DATE" (list tsql_calendar_range (list date_trunc_day formula) -62135596800)
+			"TIME" (list tsql_calendar_time_only formula)
+			"SMALLDATETIME" (list tsql_calendar_small_datetime formula)
+			_ (list tsql_calendar_range formula (if (equal? target "DATETIME") -6847804800 -62135596800))))
+		(sql_info converted target nil))) value)))
 (define tsql_dateadd_expr (lambda (unit amount value) (begin
 	(define unit (tsql_calendar_unit unit))
+	(if (equal? unit "iso_week") (error "DATEADD does not support ISO week") true)
 	(define months (match unit "year" 12 "quarter" 3 "month" 1 _ nil))
 	(define seconds (match unit "second" 1 "minute" 60 "hour" 3600 "week" 604800 _ 86400))
 	(list (quote sql_compile_expr) (lambda (infos) (begin
@@ -512,30 +606,87 @@ No row-level datatype dispatch or alternate temporal representation is needed. *
 			(error "DATEADD requires a declared numeric interval"))
 		(if (and (equal? input_type "DATE") (has? '("hour" "minute" "second") unit))
 			(error "clock interval is not supported for DATE") true)
-		(define type (if (has? '("DATE" "DATETIME" "DATETIME2") input_type) input_type "DATETIME"))
+		(if (and (equal? input_type "TIME") (not (has? '("hour" "minute" "second") unit)))
+			(error "calendar interval is not supported for TIME") true)
+		(define type (if (tsql_temporal_type? input_type) input_type "DATETIME"))
 		(define minimum (if (equal? type "DATETIME") -6847804800 -62135596800))
 		(define integer (list tsql_cast_integer (sql_info_formula amount_info) -2147483648 2147483647))
 		(define formula (list (if months tsql_calendar_shift_months tsql_calendar_shift_seconds)
-			(tsql_calendar_formula input) (list (quote *) integer (coalesceNil months seconds))))
-		(sql_info (list tsql_calendar_range formula minimum) type nil))) amount value))))
+			(tsql_calendar_difference_formula input)
+			(list (quote *) integer (coalesceNil months seconds))))
+		(sql_info (match type
+			"TIME" (list tsql_calendar_time_only formula)
+			"SMALLDATETIME" (list tsql_calendar_small_datetime formula)
+			_ (list tsql_calendar_range formula minimum)) type nil))) amount value))))
+(define tsql_calendar_difference_formula (lambda (info)
+	(if (equal? (sql_info_type info) "TIME") (list tsql_calendar_text (sql_info_formula info))
+		(tsql_calendar_formula info))))
+(define tsql_calendar_scalar_expr (lambda (unit value)
+	(list (quote sql_compile_expr) (lambda (infos)
+		(sql_info (list (match unit "year" (sql_builtins "YEAR") "month" (sql_builtins "MONTH") _ (sql_builtins "DAY"))
+			(tsql_calendar_difference_formula (car infos))) "INT" nil)) value)))
+(define tsql_calendar_unavailable_part (lambda (value)
+	(if (nil? value) nil (error "calendar date part is not available for declared TIME"))))
+(define tsql_calendar_part_formula (lambda (unit info)
+	(if (equal? (sql_info_type info) "TIME")
+		(if (has? '("hour" "minute" "second") unit) (tsql_calendar_difference_formula info)
+			(list tsql_calendar_unavailable_part (sql_info_formula info)))
+		(tsql_calendar_formula info))))
 (define tsql_datediff_expr (lambda (unit first last type) (begin
-	(define boundary (tsql_boundary_calculator (tsql_calendar_unit unit)))
+	(define unit (tsql_calendar_unit unit))
+	(if (equal? unit "iso_week") (error "DATEDIFF does not support ISO week") true)
+	(define boundary (tsql_boundary_calculator unit))
 	(define minimum (if (equal? type "INT") -2147483648 (tsql_parse_integer "-9223372036854775808")))
 	(define maximum (if (equal? type "INT") 2147483647 (tsql_parse_integer "9223372036854775807")))
 	(list (quote sql_compile_expr) (lambda (infos) (begin
 		(define difference (list (quote -)
-			(list boundary (tsql_calendar_formula (cadr infos)))
-			(list boundary (tsql_calendar_formula (car infos)))))
+			(list boundary (tsql_calendar_difference_formula (cadr infos)))
+			(list boundary (tsql_calendar_difference_formula (car infos)))))
 		(sql_info (list tsql_cast_integer difference minimum maximum) type nil))) first last))))
 (define tsql_datepart_expr (lambda (unit value) (begin
-	(define part (match (tsql_calendar_unit unit)
+	(define unit (tsql_calendar_unit unit))
+	(define part (match unit
 		"year" (sql_builtins "YEAR") "quarter" (sql_builtins "QUARTER") "month" (sql_builtins "MONTH")
 		"day" (sql_builtins "DAY") "dayofyear" tsql_calendar_day_of_year "hour" (sql_builtins "HOUR")
 		"minute" (sql_builtins "MINUTE") "second" (sql_builtins "SECOND")
-		_ (error "DATEPART week and weekday require session first-day-of-week support")))
-	(list (quote sql_compile_expr) (lambda (infos)
-		(sql_info (list part (tsql_calendar_formula (car infos))) "INT" nil)) value))))
+		"weekday" tsql_calendar_weekday "week" tsql_calendar_week "iso_week" tsql_calendar_iso_week))
+	(if (has? '("week" "weekday") unit)
+		(list (quote sql_compile_expr) (lambda (infos)
+			(sql_info (list part (tsql_calendar_part_formula unit (car infos))
+				(list tsql_datefirst_value (sql_info_formula (cadr infos)))) "INT" nil)) value (tsql_datefirst_expr))
+		(list (quote sql_compile_expr) (lambda (infos)
+			(sql_info (list part (tsql_calendar_part_formula unit (car infos))) "INT" nil)) value)))))
 
+
+/* Calendar constructors compile their input contracts once and use the same
+native date value as columns and ordinary calendar arithmetic. */
+(define tsql_calendar_integer_formula (lambda (info)
+	(if (or (has? '("NULL" "BIT") (sql_info_type info)) (sql_numeric_type? (sql_info_type info))
+		(sql_text_type? (sql_info_type info)))
+		(list tsql_cast_integer (sql_info_formula info) -2147483648 2147483647)
+		(error "calendar argument requires an integer-convertible SQL declaration"))))
+(define tsql_calendar_from_parts (lambda (year month day)
+	(if (or (nil? year) (nil? month) (nil? day)) nil (begin
+		(if (and (>= year 1) (<= year 9999) (>= month 1) (<= month 12) (>= day 1) (<= day 31))
+			true (error "invalid date constructor argument"))
+		/* Native calendar shifts construct the value without a formatted string.
+		Overflow into the following month diagnoses an impossible calendar day. */
+		(define first (date_add (date_add (parse_date "0001-01-01") (intdiv (- year 1) 1) "YEAR")
+			(intdiv (- month 1) 1) "MONTH"))
+		(define value (date_add first (intdiv (- day 1) 1) "DAY"))
+		(if (equal? (extract_date value "MONTH") month) value (error "invalid date constructor value"))))))
+(define tsql_datefromparts_expr (lambda (year month day)
+	(list (quote sql_compile_expr) (lambda (infos)
+		(sql_info (cons tsql_calendar_from_parts (map infos tsql_calendar_integer_formula)) "DATE" nil)) year month day)))
+(define tsql_calendar_month_end (lambda (value amount)
+	(if (or (nil? value) (nil? amount)) nil (begin
+		(define shifted (tsql_calendar_shift_months value amount))
+		(define first (date_add (date_trunc_day shifted) (intdiv (- 1 (extract_date shifted "DAY")) 1) "DAY"))
+		(tsql_calendar_range (date_add (date_add first 1 "MONTH") -1 "DAY") -62135596800)))))
+(define tsql_eomonth_expr (lambda (value amount)
+	(list (quote sql_compile_expr) (lambda (infos)
+		(sql_info (list tsql_calendar_month_end (tsql_calendar_formula (car infos))
+			(tsql_calendar_integer_formula (cadr infos))) "DATE" nil)) value amount)))
 
 (define tsql_negate_expr (lambda (value)
 	(list (quote sql_compile_expr) (lambda (infos) (begin
@@ -954,6 +1105,26 @@ dimensions are metadata only and are absent from the executable plan. */
 		(list "name" name "kind" kind "size" size "precision" precision "scale" scale "flags" 1 "sql_type" type))))
 	((symbol union-block) _mode branches _order _limit _offset _facts) (tsql_result_columns (car branches) parameters)
 	_ (error "unsupported T-SQL result metadata shape"))))
+/* Format only the external result edge. Inner projections, ordering and native
+storage keep their Unix values. The declaration selects each formatter while
+compiling; the emitted row callback contains no SQL type tags or dispatch. */
+(define tsql_result_output_plan (lambda (plan descriptors)
+	(if (reduce descriptors (lambda (found column)
+		(or found (tsql_temporal_type? (column "sql_type")))) false)
+		(list (quote begin)
+			(list (quote define) (quote __tsql_raw_resultrow) (quote resultrow))
+			(list (quote define) (quote resultrow) (list (quote lambda) (list (quote row))
+				(list (quote __tsql_raw_resultrow)
+					(cons (quote list) (merge (map (produceN (count descriptors)) (lambda (index) (begin
+						(define column (nth descriptors index))
+						(define value (list (quote nth) (quote row) (+ 1 (* index 2))))
+						(define pattern (match (column "sql_type")
+							"DATE" "%Y-%m-%d" "TIME" "%H:%i:%s"
+							"DATETIME" "%Y-%m-%d %H:%i:%s" "DATETIME2" "%Y-%m-%d %H:%i:%s"
+							"SMALLDATETIME" "%Y-%m-%d %H:%i:%s" _ nil))
+						(list (column "name") (if pattern (list format_date value pattern) value))))))))))
+			plan)
+		plan)))
 
 (define tsql_builtins (lambda (name) (match name
 	"ISNULL" coalesceNil
@@ -1130,11 +1301,17 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define type tsql_declared_type) (define dimensions tsql_type_dimensions) ")")
 			(tsql_cast_expr value type dimensions))
 		(parser '((atom "CONVERT" true) "(" (define type tsql_declared_type) (define dimensions tsql_type_dimensions)
-			"," (define value tsql_expression) (? "," (define style tsql_int)) ")")
+			"," (define value tsql_expression) (? "," (define style (or tsql_int
+				(parser (atom "NULL" true) (quote sql_null_style))))) ")")
 			(tsql_convert_expr value type dimensions style))
 
-		(parser '((atom "GETDATE" true) "(" ")")
-			(list (quote sql_type_expr) (list (quote now)) "DATETIME" nil))
+		(parser '((define type (or
+			(parser (atom "GETDATE" true) "DATETIME")
+			(parser (atom "GETUTCDATE" true) "DATETIME")
+			(parser (atom "SYSDATETIME" true) "DATETIME2")
+			(parser (atom "SYSUTCDATETIME" true) "DATETIME2"))) "(" ")")
+			(list (quote sql_type_expr) (list (quote now)) type nil))
+		(parser (atom "@@DATEFIRST" true) (tsql_datefirst_expr))
 		(parser '((atom "DATEADD" true) "(" (define unit tsql_identifier) ","
 			(define amount tsql_expression) "," (define value tsql_expression) ")")
 			(tsql_dateadd_expr unit amount value))
@@ -1144,6 +1321,13 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(tsql_datediff_expr unit first last type))
 		(parser '((atom "DATEPART" true) "(" (define unit tsql_identifier) "," (define value tsql_expression) ")")
 			(tsql_datepart_expr unit value))
+		(parser '((atom "DATEFROMPARTS" true) "(" (define year tsql_expression) ","
+			(define month tsql_expression) "," (define day tsql_expression) ")") (tsql_datefromparts_expr year month day))
+		(parser '((atom "EOMONTH" true) "(" (define value tsql_expression)
+			(? "," (define amount tsql_expression)) ")") (tsql_eomonth_expr value (coalesceNil amount (list (quote sql_type_expr) 0 "INT" nil))))
+		(parser '((define unit (or (parser (atom "YEAR" true) "year")
+			(parser (atom "MONTH" true) "month") (parser (atom "DAY" true) "day")))
+			"(" (define value tsql_expression) ")") (tsql_calendar_scalar_expr unit value))
 
 		(parser '((atom "EXISTS" true) "(" (define sub tsql_select) ")") '('inner_select_exists sub))
 
@@ -1656,10 +1840,11 @@ a separator is recognized only on a physical line containing no SQL text. */
 	) (reduce terms tsql_fold_additive a)))
 	(define tsql_build_select_plan (lambda (query) (begin
 		(define expanded (sql_expand_views query policy))
-		(if describe (list (quote quote) (tsql_result_columns expanded parameters)) (list (quote !begin)
+		(define descriptors (tsql_result_columns expanded parameters))
+		(if describe (list (quote quote) descriptors) (list (quote !begin)
 			(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded))
-				(list (quote quote) (tsql_result_columns expanded parameters)))
-			(build_queryplan_term expanded planning_session tx))))))
+				(list (quote quote) descriptors))
+			(tsql_result_output_plan (build_queryplan_term expanded planning_session tx) descriptors))))))
 	/* INSERT SELECT consumes the existing planner's result stream and the native
 	insert operator. Identity allocation and constraints remain native. */
 	(define tsql_insert_select_plan (lambda (database tbl columns query) (begin
@@ -1933,6 +2118,10 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(parser '((atom "SET" true) (atom "NOCOUNT" true)
 			(define enabled (or (parser (atom "ON" true) true) (parser (atom "OFF" true) false))))
 			(lambda () (list (quote session) "__tsql_nocount" enabled)))
+		(parser '((atom "SET" true) (atom "DATEFIRST" true)
+			(define first (or tsql_int
+				(parser '((atom "@" true) (define name tsql_identifier_unquoted)) (parameter_expression name)))))
+			(lambda () (list (quote session) "__tsql_datefirst" (list tsql_datefirst_value (sql_type_formula '() first)))))
 		/* These ON modes are the frontend's fixed comparison and lexical rules.
 		Accept the declarations without adding state or branches to row execution;
 		OFF and other settings remain explicit unsupported syntax. */

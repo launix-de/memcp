@@ -43,7 +43,6 @@ test_cases:
   sql: SELECT GETDATE() AS legacy,SYSDATETIME() AS precise,CURRENT_TIMESTAMP AS standard
   expect:
     rows: 1
-  noncritical: true
 - name: Raw inserted default clocks retain their declared temporal values
   sql: SELECT created,precise,standard FROM tsql_clock_defaults WHERE id=1
   expect:
@@ -82,7 +81,6 @@ test_cases:
   sql: SELECT GETDATE(1) AS value
   expect:
     error: true
-  noncritical: true
 - name: Scalar subqueries cannot become default values
   sql: CREATE TABLE tsql_invalid_clock_default (value DATETIME DEFAULT (SELECT GETDATE()))
   expect:
@@ -138,28 +136,24 @@ test_cases:
     rows: 1
     data:
     - value: '2026-03-15'
-  noncritical: true
 - name: Two digit year below cutoff
   sql: SELECT DATEPART(year,CONVERT(DATETIME,N'01/02/49',1)) AS value
   expect:
     rows: 1
     data:
     - value: 2049
-  noncritical: true
 - name: Two digit year above cutoff
   sql: SELECT DATEPART(year,CONVERT(DATETIME,N'01/02/50',1)) AS value
   expect:
     rows: 1
     data:
     - value: 1950
-  noncritical: true
 - name: Compact canonical date
   sql: SELECT CONVERT(DATE,N'20260315',112) AS value
   expect:
     rows: 1
     data:
     - value: '2026-03-15'
-  noncritical: true
 - name: Month name default style
   sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'Mar 15 2018 12:00AM',100),120) AS value
   expect:
@@ -173,14 +167,12 @@ test_cases:
     rows: 1
     data:
     - value: '2026-03-15'
-  noncritical: true
 - name: Time conversion retains seconds
   sql: SELECT CAST(N'2026-03-15 12:13:14' AS TIME) AS value
   expect:
     rows: 1
     data:
     - value: '12:13:14'
-  noncritical: true
 - name: Datetime2 precision zero rounds
   sql: SELECT CONVERT(VARCHAR(19),CAST(N'2026-03-15 12:13:14.5000000' AS DATETIME2(0)),120) AS value
   expect:
@@ -215,28 +207,24 @@ test_cases:
     rows: 1
     data:
     - value: '1900-01-01 00:00:00'
-  noncritical: true
 - name: Temporal null conversion
   sql: SELECT CONVERT(DATETIME,NULL,120) AS value
   expect:
     rows: 1
     data:
     - value: null
-  noncritical: true
 - name: Null conversion style
   sql: SELECT CONVERT(DATETIME,N'2026-03-15',NULL) AS value
   expect:
     rows: 1
     data:
     - value: null
-  noncritical: true
 - name: Output local date style
   sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATETIME),104) AS value
   expect:
     rows: 1
     data:
     - value: 15.03.2026
-  noncritical: true
 - name: Day boundary versus elapsed day
   sql: SELECT DATEDIFF(day,N'2026-03-15 23:59:59',N'2026-03-16 00:00:00') AS value
   expect:
@@ -280,42 +268,36 @@ test_cases:
     rows: 1
     data:
     - value: '2026-02-28'
-  noncritical: true
 - name: Clamp leap day after year addition
   sql: SELECT DATEADD(year,1,CAST(N'2024-02-29' AS DATE)) AS value
   expect:
     rows: 1
     data:
     - value: '2025-02-28'
-  noncritical: true
 - name: Date add truncates numeric offset
   sql: SELECT CAST(DATEADD(day,1.9,N'2026-03-15') AS DATE) AS value
   expect:
     rows: 1
     data:
     - value: '2026-03-16'
-  noncritical: true
 - name: Time add wraps midnight
   sql: SELECT DATEADD(hour,1,CAST(N'23:00:00' AS TIME)) AS value
   expect:
     rows: 1
     data:
     - value: 00:00:00
-  noncritical: true
 - name: Small datetime second dead band
   sql: SELECT CONVERT(VARCHAR(19),DATEADD(second,-30,CAST(N'2026-03-15 12:00:00' AS SMALLDATETIME)),120) AS value
   expect:
     rows: 1
     data:
     - value: '2026-03-15 12:00:00'
-  noncritical: true
 - name: Small datetime negative second rounding
   sql: SELECT CONVERT(VARCHAR(19),DATEADD(second,-31,CAST(N'2026-03-15 12:00:00' AS SMALLDATETIME)),120) AS value
   expect:
     rows: 1
     data:
     - value: '2026-03-15 11:59:00'
-  noncritical: true
 - name: Current timestamp date addition type
   sql: SELECT DATEDIFF(day,GETDATE(),DATEADD(day,1,GETDATE())) AS value
   expect:
@@ -334,14 +316,12 @@ test_cases:
     rows: 1
     data:
     - value: 1
-  noncritical: true
 - name: Datepart ISO week across year
   sql: SELECT DATEPART(iso_week,N'2021-01-01') AS value
   expect:
     rows: 1
     data:
     - value: 53
-  noncritical: true
 - name: Datepart fractional nanoseconds
   sql: SELECT DATEPART(ns,N'2026-03-15 12:00:00.1234567') AS value
   expect:
@@ -439,28 +419,24 @@ test_cases:
     rows: 1
     data:
     - value: 2026
-  noncritical: true
 - name: Calendar part short MONTH
   sql: SELECT MONTH(N'2026-03-15') AS value
   expect:
     rows: 1
     data:
     - value: 3
-  noncritical: true
 - name: Calendar part short DAY
   sql: SELECT DAY(N'2026-03-15') AS value
   expect:
     rows: 1
     data:
     - value: 15
-  noncritical: true
 - name: Null formatted value
   sql: SELECT CONVERT(VARCHAR(10),NULL,104) AS value
   expect:
     rows: 1
     data:
     - value: null
-  noncritical: true
 - name: Legacy timestamp default format
   sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 12:13:14' AS DATETIME),0) AS value
   expect:
@@ -474,56 +450,48 @@ test_cases:
     rows: 1
     data:
     - value: 15.03.2026
-  noncritical: true
 - name: Format declared time value
   sql: SELECT CONVERT(VARCHAR(8),CAST(N'12:13:14' AS TIME),108) AS value
   expect:
     rows: 1
     data:
     - value: '12:13:14'
-  noncritical: true
 - name: Default date output format
   sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15' AS DATE)) AS value
   expect:
     rows: 1
     data:
     - value: '2026-03-15'
-  noncritical: true
 - name: Default time output format
   sql: SELECT CONVERT(VARCHAR(30),CAST(N'12:13:14' AS TIME)) AS value
   expect:
     rows: 1
     data:
     - value: '12:13:14'
-  noncritical: true
 - name: Default datetime2 output format
   sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 12:13:14' AS DATETIME2)) AS value
   expect:
     rows: 1
     data:
     - value: '2026-03-15 12:13:14.000'
-  noncritical: true
 - name: Date add uses declared column type
   sql: SELECT DATEADD(day,1,d) AS value FROM tsql_temporal_data
   expect:
     rows: 1
     data:
     - value: '2026-03-16'
-  noncritical: true
 - name: Datetime add uses declared column type
   sql: SELECT CONVERT(VARCHAR(19),DATEADD(minute,1,dt),120) AS value FROM tsql_temporal_data
   expect:
     rows: 1
     data:
     - value: '2026-03-15 12:14:14'
-  noncritical: true
 - name: Date formatting uses declared column type
   sql: SELECT CONVERT(VARCHAR(10),d,104) AS value FROM tsql_temporal_data
   expect:
     rows: 1
     data:
     - value: 15.03.2026
-  noncritical: true
 - name: Date boundary filter over stored columns
   sql: SELECT id AS value FROM tsql_temporal_data WHERE DATEDIFF(day,dt,N'2026-03-16')=1
   expect:
@@ -690,21 +658,18 @@ test_cases:
     rows: 1
     data:
     - value: 1900
-  noncritical: true
 - name: TIME MONTH alias defaults
   sql: SELECT MONTH(tm) AS value FROM tsql_fractional_data WHERE id=1
   expect:
     rows: 1
     data:
     - value: 1
-  noncritical: true
 - name: TIME DAY alias defaults
   sql: SELECT DAY(tm) AS value FROM tsql_fractional_data WHERE id=1
   expect:
     rows: 1
     data:
     - value: 1
-  noncritical: true
 - name: Typed TIME clock DATEPART works
   sql: SELECT DATEPART(ns,tm) AS value FROM tsql_fractional_data WHERE id=1
   expect:
@@ -718,14 +683,12 @@ test_cases:
     rows: 1
     data:
     - value: null
-  noncritical: true
 - name: NULL TIME YEAR alias remains NULL
   sql: SELECT YEAR(CAST(NULL AS TIME(7))) AS value
   expect:
     rows: 1
     data:
     - value: null
-  noncritical: true
 - name: Sub tick rounding carries correctly across the Unix epoch
   sql: SELECT CONVERT(VARCHAR(30),CAST(N'1969-12-31 23:59:59.99999995' AS DATETIME2(7)),126) AS value
   expect:
@@ -1007,6 +970,193 @@ test_cases:
 - name: Calendar large hours interval rejects an out of range result
   sql: SELECT DATEADD(hour,2147483647,N'1900-01-01')
   expect: {error: true}
+
+- name: Calendar week numbering starts at January first
+  sql: SELECT DATEPART(week,N'2026-01-01') AS first,DATEPART(wk,N'2026-01-04') AS following,DATEPART(isowk,N'2021-01-01') AS iso
+  expect: {rows: 1, data: [{first: 1, following: 2, iso: 53}]}
+- name: First weekday is an explicit session input with integer metadata
+  scm: |
+    (begin
+      (define sess (newsession))
+      (define output (newsession))
+      (define execute (lambda (text) (with_autocommit sess nil nil text (lambda (tx)
+        (tsql_execute_statement tx "memcp-tests" text sess
+          (lambda (row) (output "row" row)) (lambda fields nil))))))
+      (define query "SELECT @@DATEFIRST AS first,DATEPART(weekday,N'2026-03-15') AS weekday,DATEPART(week,N'2026-01-04') AS week,DATEPART(iso_week,N'2021-01-01') AS iso,DATEDIFF(week,N'2026-03-14',N'2026-03-15') AS difference")
+      (execute query)
+      (define initial (output "row"))
+      (execute "SET DATEFIRST 1") (execute query)
+      (define changed (output "row"))
+      (execute "SET DATEFIRST 7") (execute query)
+      (define restored (output "row"))
+      (and (equal? (initial "first") 7) (equal? (initial "weekday") 1) (equal? (initial "week") 2)
+        (equal? (changed "first") 1) (equal? (changed "weekday") 7) (equal? (changed "week") 1)
+        (equal? (changed "iso") 53) (equal? (changed "difference") 1)
+        (equal? (restored "weekday") 1) (equal? (restored "week") 2)))
+  expect: {result: true}
+- name: All seven first weekday settings retain calendar contracts
+  scm: |
+    (begin
+      (define sess (newsession))
+      (define output (newsession))
+      (define execute (lambda (text) (with_autocommit sess nil nil text (lambda (tx)
+        (tsql_execute_statement tx "memcp-tests" text sess
+          (lambda (row) (output "row" row)) (lambda fields nil))))))
+      (reduce '(1 2 3 4 5 6 7) (lambda (correct first) (begin
+        (execute (concat "SET DATEFIRST " first))
+        (execute "SELECT DATEPART(week,N'2007-04-21') AS week,DATEPART(dw,N'2007-04-21') AS day")
+        (define row (output "row"))
+        (and correct (equal? (row "week") (nth '(16 17 17 17 17 17 16) (- first 1)))
+          (equal? (row "day") (nth '(6 5 4 3 2 1 7) (- first 1)))))) true))
+  expect: {result: true}
+- name: First weekday setting rejects values below its range
+  sql: SET DATEFIRST 0
+  expect: {error: true}
+- name: First weekday setting rejects values above its range
+  sql: SET DATEFIRST 8
+  expect: {error: true}
+- name: Calendar null values propagate for all week forms
+  sql: SELECT DATEPART(week,NULL) AS week,DATEPART(dw,NULL) AS day,DATEPART(isoww,NULL) AS iso
+  expect: {rows: 1, data: [{week: null, day: null, iso: null}]}
+
+- name: Time declarations expose only clock date parts
+  sql: SELECT DATEPART(hh,CAST(N'12:13:14' AS TIME)) AS hour,DATEPART(mi,CAST(N'12:13:14' AS TIME)) AS minute,DATEPART(ss,CAST(N'12:13:14' AS TIME)) AS second
+  expect: {rows: 1, data: [{hour: 12, minute: 13, second: 14}]}
+- name: Calendar aliases use the declared time default date
+  sql: SELECT YEAR(CAST(N'12:13:14' AS TIME)) AS year,MONTH(CAST(N'12:13:14' AS TIME)) AS month,DAY(CAST(N'12:13:14' AS TIME)) AS day
+  expect: {rows: 1, data: [{year: 1900, month: 1, day: 1}]}
+- name: Time boundary arithmetic counts midnight crossings
+  sql: SELECT DATEDIFF(second,CAST(N'12:13:14' AS TIME),CAST(N'12:13:16' AS TIME)) AS seconds,DATEDIFF(day,CAST(N'12:13:14' AS TIME),CAST(N'23:59:59' AS TIME)) AS days
+  expect: {rows: 1, data: [{seconds: 2, days: 0}]}
+- name: Time text conversion selects a clock pattern at compile time
+  sql: SELECT CONVERT(VARCHAR(8),CAST(N'12:13:14' AS TIME),108) AS clock,CAST(CAST(N'12:13:14' AS TIME) AS VARCHAR(8)) AS default_clock
+  expect: {rows: 1, data: [{clock: '12:13:14', default_clock: '12:13:14'}]}
+- name: Iso temporal conversion uses the declared formatter
+  sql: SELECT CONVERT(VARCHAR(19),CAST(N'2026-03-15T12:13:14' AS DATETIME2),126) AS text
+  expect: {rows: 1, data: [{text: '2026-03-15T12:13:14'}]}
+- name: Date conversion discards the clock before temporal arithmetic
+  sql: SELECT DATEDIFF(second,CAST(N'2026-03-15 12:13:14' AS DATE),N'2026-03-15') AS seconds
+  expect: {rows: 1, data: [{seconds: 0}]}
+- name: Temporal numeric conversion rejects unsupported date contracts
+  sql: SELECT CAST(0 AS DATE)
+  expect: {error: true}
+- name: Temporal numeric conversion rejects unsupported time contracts
+  sql: SELECT CAST(0 AS TIME)
+  expect: {error: true}
+- name: Temporal numeric conversion rejects unsupported wide datetime contracts
+  sql: SELECT CAST(0 AS DATETIME2)
+  expect: {error: true}
+- name: Fractional temporal conversions fail rather than silently lose precision
+  sql: SELECT CAST(N'2026-03-15 12:13:14.123' AS DATETIME2(3))
+  expect: {error: true}
+- name: Fractional time conversions fail rather than silently lose precision
+  sql: SELECT CAST(N'12:13:14.123' AS TIME(3))
+  expect: {error: true}
+- name: Zero fractional seconds retain an exactly representable clock
+  sql: SELECT CAST(N'12:13:14.000' AS TIME(3)) AS clock
+  expect: {rows: 1, data: [{clock: '12:13:14'}]}
+- name: Temporal result formatting preserves duplicate projection aliases
+  scm: |
+    (begin
+      (define sess (newsession))
+      (define output (newsession))
+      (with_autocommit sess nil nil "temporal projection" (lambda (tx)
+        (tsql_execute_statement tx "memcp-tests"
+          "SELECT CAST(N'2026-03-15' AS DATE) AS value,CAST(N'12:13:14' AS TIME) AS value,3 AS value"
+          sess (lambda (row) (output "row" row)) (lambda fields nil))))
+      (equal? (output "row") '("value" "2026-03-15" "value" "12:13:14" "value" 3)))
+  expect: {result: true}
+- name: Temporal clocks expose their declared result contracts
+  sql: SELECT GETDATE() AS local_clock,GETUTCDATE() AS utc_clock,SYSDATETIME() AS precise_clock,SYSUTCDATETIME() AS precise_utc_clock
+  expect: {rows: 1}
+- name: Utc clock function rejects unexpected arguments
+  sql: SELECT GETUTCDATE(1)
+  expect: {error: true}
+- name: Precise clock function rejects unexpected arguments
+  sql: SELECT SYSDATETIME(1)
+  expect: {error: true}
+
+- name: Calendar date constructor preserves leap day and SQL DATE output
+  sql: SELECT DATEFROMPARTS(2024,2,29) AS leap,DATEFROMPARTS(1,1,1) AS minimum,DATEFROMPARTS(9999,12,31) AS maximum
+  expect: {rows: 1, data: [{leap: '2024-02-29', minimum: '0001-01-01', maximum: '9999-12-31'}]}
+- name: Calendar date constructor resolves argument contracts before arithmetic
+  sql: SELECT DATEDIFF(day,DATEFROMPARTS(YEAR(d),MONTH(d),DAY(d)),DATEADD(day,1,d)) AS days FROM tsql_temporal_data WHERE id=1
+  expect: {rows: 1, data: [{days: 1}]}
+- name: Calendar date constructor propagates NULL
+  sql: SELECT DATEFROMPARTS(NULL,2,29) AS year,DATEFROMPARTS(2024,NULL,29) AS month,DATEFROMPARTS(2024,2,NULL) AS day
+  expect: {rows: 1, data: [{year: null, month: null, day: null}]}
+- name: Calendar date constructor rejects invalid leap day
+  sql: SELECT DATEFROMPARTS(2023,2,29)
+  expect: {error: true}
+- name: Calendar date constructor rejects invalid months
+  sql: SELECT DATEFROMPARTS(2024,13,1)
+  expect: {error: true}
+- name: Calendar date constructor rejects invalid year
+  sql: SELECT DATEFROMPARTS(0,1,1)
+  expect: {error: true}
+- name: Calendar date constructor rejects temporal integer arguments
+  sql: SELECT DATEFROMPARTS(CAST(N'2024-01-01' AS DATE),1,1)
+  expect: {error: true}
+- name: Calendar month end returns DATE and accepts an optional offset
+  sql: SELECT EOMONTH(N'2024-02-03 12:13:14') AS leap,EOMONTH(N'2026-01-31',1) AS next,EOMONTH(N'2026-01-31',-1) AS previous
+  expect: {rows: 1, data: [{leap: '2024-02-29', next: '2026-02-28', previous: '2025-12-31'}]}
+- name: Calendar month end resolves native column declarations
+  sql: SELECT EOMONTH(d) AS date_end,EOMONTH(dt) AS datetime_end FROM tsql_temporal_data WHERE id=1
+  expect: {rows: 1, data: [{date_end: '2026-03-31', datetime_end: '2026-03-31'}]}
+- name: Calendar month end propagates NULL inputs
+  sql: SELECT EOMONTH(NULL) AS date_end,EOMONTH(N'2026-03-15',NULL) AS month_end
+  expect: {rows: 1, data: [{date_end: null, month_end: null}]}
+- name: Calendar month end retains the last representable month
+  sql: SELECT EOMONTH(N'9999-12-01') AS maximum,EOMONTH(N'0001-01-15') AS minimum
+  expect: {rows: 1, data: [{maximum: '9999-12-31', minimum: '0001-01-31'}]}
+- name: Calendar month end rejects year overflow
+  sql: SELECT EOMONTH(N'9999-12-01',1)
+  expect: {error: true}
+- name: Calendar month end rejects unrepresentable offset
+  sql: SELECT EOMONTH(N'2026-03-15',2147483648)
+  expect: {error: true}
+- name: Calendar month end rejects declared clock input
+  sql: SELECT EOMONTH(CAST(N'12:13:14' AS TIME))
+  expect: {error: true}
+
+- name: First weekday is evaluated from the declared batch parameter
+  sql: DECLARE @first INT=1; SET DATEFIRST @first; SELECT @@DATEFIRST AS first,DATEPART(weekday,N'2026-03-15') AS day
+  expect: {rows: 1, data: [{first: 1, day: 7}]}
+- name: First weekday survives a batch delimiter without retaining locals
+  sql: |
+    SET DATEFIRST 1
+    GO
+    SELECT @@DATEFIRST AS first,DATEPART(weekday,N'2026-03-15') AS day
+  expect: {rows: 1, data: [{first: 1, day: 7}]}
+- name: First weekday declaration rejects a NULL parameter
+  sql: DECLARE @first INT=NULL; SET DATEFIRST @first
+  expect: {error: true}
+- name: First weekday participates in native grouping cache domains
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_week_domain
+  - sql: CREATE TABLE tsql_week_domain (id INT,d DATE)
+  - sql: INSERT INTO tsql_week_domain VALUES(1,N'2026-03-15'),(2,N'2026-03-16')
+  scm: |
+    (begin
+      (define sess (newsession))
+      (define output (newsession))
+      (define execute (lambda (text) (begin
+        (map '(1 2 7) (lambda (day) (output (concat "day:" day) nil)))
+        (with_autocommit sess nil nil text (lambda (tx)
+          (tsql_execute_statement tx "memcp-tests" text sess
+            (lambda (row) (output (concat "day:" (row "day")) row)) (lambda fields nil))))
+        (list (output "day:1") (output "day:2") (output "day:7")))))
+      (define query "SELECT DATEPART(weekday,d) AS day,COUNT(*) AS n FROM tsql_week_domain GROUP BY DATEPART(weekday,d) ORDER BY DATEPART(weekday,d)")
+      (define sunday (execute query))
+      (execute "SET DATEFIRST 1")
+      (define monday (execute query))
+      (execute "SET DATEFIRST 7")
+      (define restored (execute query))
+      (and (equal? sunday (list '("day" 1 "n" 1) '("day" 2 "n" 1) nil))
+        (equal? monday (list '("day" 1 "n" 1) nil '("day" 7 "n" 1))) (equal? restored sunday)))
+  expect: {result: true}
+  cleanup:
+  - sql: DROP TABLE tsql_week_domain
 
 - sql: DROP TABLE IF EXISTS tsql_clock_defaults
   name: 'Fixture cleanup 001: DROP TABLE IF EXISTS tsql_clock_defaults'
