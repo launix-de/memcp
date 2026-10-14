@@ -14,9 +14,9 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 metadata:
-  # Recorded full-pair fixture cost fits this priority while allowing other
-  # suites to use a runner that previously finished its short pilot early.
-  performance_shard_weight: 49
+  # Reserve capacity for all seven fresh pairs, including the retained pilot.
+  # Balance both recorded CI cohorts; samples and timing gates stay unchanged.
+  performance_shard_weight: 137
   version: "1.0"
   description: "Unselective scalar ORDER LIMIT late projection"
   isolated: true
