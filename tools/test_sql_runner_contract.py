@@ -103,6 +103,20 @@ class ManagedDataDirectoryContractTest(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     find_free_port()
 
+    def test_free_port_probe_avoids_ephemeral_listener_offsets(self):
+        with mock.patch("run_sql_tests.Path.read_text", return_value="24001 24003"), \
+                mock.patch("run_sql_tests.random.sample", side_effect=lambda ports, count: ports[:count]) as sample:
+            port = find_free_port(24000, 24004)
+        self.assertEqual(port, 24000)
+        self.assertEqual(sample.call_args.args[0], [24000])
+
+    def test_free_port_probe_avoids_ephemeral_mysql_and_tds_offsets(self):
+        with mock.patch("run_sql_tests.Path.read_text", return_value="25000 27000"), \
+                mock.patch("run_sql_tests.random.sample", side_effect=lambda ports, count: ports[:count]) as sample:
+            with self.assertRaises(RuntimeError):
+                find_free_port(24000, 24004)
+        self.assertEqual(sample.call_args.args[0], [])
+
     def test_free_port_probe_returns_a_listenable_port(self):
         port = find_free_port()
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:

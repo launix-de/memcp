@@ -368,8 +368,8 @@ func (s *storageShard) residentMemoryLocked() memoryOwnerSnapshot {
 func visitColumnCaches(column any, nonblocking bool, visit func(any) bool) bool {
 	switch c := column.(type) {
 	case *StorageString:
-		if c.compressed {
-			return visit(c)
+		if cache := c.dictCache.Load(); cache != nil {
+			return visit(cache)
 		}
 	case *OverlayBlob:
 		if c.ram != nil && !visit(c.ram) {
@@ -415,8 +415,19 @@ func ownedColumnMemory(storage ColumnStorage) uint {
 	if storage == nil {
 		return 0
 	}
-	if proxy, ok := storage.(*StorageComputeProxy); ok {
-		return proxy.ownedMemory()
+	switch column := storage.(type) {
+	case *StorageComputeProxy:
+		return column.ownedMemory()
+	case *StorageString:
+		return column.payloadSize()
+	case *OverlayBlob:
+		size := uint(unsafe.Sizeof(*column)) + column.size
+		if column.ram != nil {
+			// The cache object survives eviction; its payload belongs to its
+			// separate registration. No pair of mutable size snapshots here.
+			size += uint(unsafe.Sizeof(*column.ram))
+		}
+		return size + ownedColumnMemory(column.Base)
 	}
 	size := storage.ComputeSize()
 	materialized := materializedDictionaryMemory(storage)
@@ -440,13 +451,10 @@ func ownedColumnMemory(storage ColumnStorage) uint {
 func materializedDictionaryMemory(storage any) uint {
 	switch typed := storage.(type) {
 	case *StorageString:
-		if !typed.compressed {
-			return 0
+		if cache := typed.dictCache.Load(); cache != nil {
+			return cache.computeSize()
 		}
-		typed.dictMu.RLock()
-		size := uint(len(typed.dictionary))
-		typed.dictMu.RUnlock()
-		return size
+		return 0
 	case *OverlayBlob:
 		if typed.Base == nil {
 			return 0
@@ -1788,33 +1796,57 @@ func (t *storageShard) propagateDeleteToNext(next *storageShard, oldRecid uint32
 	next.UpdateFunction(targetRecid, false, false, currentTx)()
 }
 
-func (t *storageShard) ColumnReaderTx(tx *TxContext, col string, alreadyLocked bool) func(uint32) scm.Scmer {
+// shardColumnReader is invocation-owned. Its main reader retains the same
+// prepared representation for main and computed delta rows; physical deltas
+// remain owned by the shard. Any decoded lease is released by its caller or tx.
+type shardColumnReader struct {
+	shard    *storageShard
+	main     ColumnReader
+	column   string
+	computed bool
+}
+
+func (r *shardColumnReader) GetValue(idx uint32) scm.Scmer {
+	if idx < r.shard.main_count || r.computed {
+		return r.main.GetValue(idx)
+	}
+	return r.shard.getDelta(int(idx-r.shard.main_count), r.column)
+}
+
+func (r *shardColumnReader) GetValueMulti(rows []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	for i, row := range rows {
+		target[i*stride] = r.GetValue(row)
+	}
+}
+
+func (r *shardColumnReader) GetValueRange(start, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	for i := uint32(0); i < count; i++ {
+		target[int(i)*stride] = r.GetValue(start + i)
+	}
+}
+
+func (r *shardColumnReader) release() { ReleaseColumnReader(r.main) }
+
+func (t *storageShard) ColumnReaderTx(tx *TxContext, col string, alreadyLocked bool, hints ColumnReadHints) ColumnReader {
 	// Computed readers recursively bind their input columns. A mutation scan
 	// initializes them while holding this shard's write lock, recorded explicitly
 	// on the transaction, so re-entering the RWMutex here would self-deadlock.
 	writeLocked := tx != nil && tx.HasShardWrite(t)
 	var cstorage ColumnStorage
 	if alreadyLocked && !writeLocked {
-		// Index setup may own only a read lock. Its columns must already be
-		// loaded; this path must neither acquire a lock nor attach runtime data.
 		cstorage = t.getColumnStorageRLocked(col)
 	} else {
 		cstorage = t.getColumnStorageOrPanic(col, writeLocked, tx)
 	}
-	reader := newCachedColumnReaderTx(cstorage, tx, alreadyLocked || writeLocked)
+	reader := newCachedColumnReaderTx(cstorage, tx, alreadyLocked || writeLocked, hints)
 	_, computed := cstorage.(*StorageComputeProxy)
-	return func(idx uint32) scm.Scmer {
-		if idx < t.main_count {
-			return reader.GetValue(idx)
-		}
-		// A computed column has no physical delta slot. Keep the transaction-
-		// bound reader so session-sensitive variants use the same binding for
-		// main and delta rows.
-		if computed {
-			return reader.GetValue(idx)
-		}
-		return t.getDelta(int(idx-t.main_count), col)
-	}
+	return &shardColumnReader{shard: t, main: reader, column: col, computed: computed}
 }
 
 // breakSentinel is the panic value injected by $break pseudo-column closures.
@@ -1877,6 +1909,7 @@ type ShardMapReducer struct {
 	mainMultiFuncs     []scm.JITStorageGetValueMultiFunc // batch targets resolved once for main-storage prefetch
 	mainValuesCompiled bool                              // every mainValueFuncs entry is available
 	mainBulkValues     []scm.Scmer                       // reusable row-major buffer for every physical map column
+	projectionRows     int                               // invocation-local largest already-consumed main batch
 	mainBulkBuffer     *mapReducerBulkBuffer             // non-nil when mainBulkValues belongs to a width bucket
 	colNames           []string                          // column names for delta getDelta access
 	isUpdate           []bool                            // true for $update columns
@@ -1975,13 +2008,14 @@ func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, ma
 	prepareMapReducerCallFrame(mr)
 	mr.mapReduceScmer = mapReduceFn
 	mr.mainCount = t.main_count
+	mr.projectionRows = 0
 	mr.shardWriteLocked = alreadyLocked
 	mr.directRead = true
 	mr.mainValuesCompiled = true
 
 	for i, colName := range cols {
 		mainCol := t.getColumnStorageOrPanic(colName, alreadyLocked, currentTx)
-		mainReader := newCachedColumnReaderTx(mainCol, currentTx, false)
+		mainReader := newCachedColumnReaderTx(mainCol, currentTx, false, ReadAuto|readOperatorOwned)
 		mr.mainCols[i] = mainCol
 		mr.mainBulkReaders[i] = mainReader
 		mr.mainValueFuncs[i] = compiledColumnGetValue(mainReader)
@@ -2007,6 +2041,11 @@ func (m *ShardMapReducer) prepareJITBufferReducer() {
 			return
 		}
 		valueType := column.JITValueType()
+		if prepared, ok := m.mainBulkReaders[index].(interface{ JITBatchValueType() uint8 }); ok {
+			valueType = prepared.JITBatchValueType()
+		} else if prepared, ok := m.mainBulkReaders[index].(interface{ JITValueType() uint8 }); ok {
+			valueType = prepared.JITValueType()
+		}
 		if valueType == scm.JITTypeUnknown {
 			return
 		}
@@ -2032,6 +2071,9 @@ func (m *ShardMapReducer) prepareJITBufferReducer() {
 // this outside shard locks for predicates that must run after global ordering.
 func (m *ShardMapReducer) MapOne(id uint32) scm.Scmer {
 	if m.directRead {
+		if id < m.mainCount {
+			m.prepareProjectionReaders(1)
+		}
 		m.loadDirectReadArgs(id, 0, false)
 		return m.mapProgram.Call(m.args[1:])
 	}
@@ -2320,7 +2362,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			continue
 		}
 		mainCol := mr.mainCols[i]
-		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx, false)
+		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx, false, ReadAuto|readOperatorOwned)
 		mr.mainBulkReaders[i] = mainReader
 		mr.mainMultiFuncs[i] = compiledColumnGetValueMulti(mainReader)
 		colName := mr.colNames[i]
@@ -2357,7 +2399,50 @@ func (t *storageShard) OpenMapper(cols []string, mapFn scm.Scmer, alreadyLocked 
 	return mr
 }
 
+// Projection payload demand is established before this batch preparation.
+// Batch preparation precedes row callbacks; explicit selected-point consumers
+// may prepare their first demanded short payload.
+func (m *ShardMapReducer) prepareProjectionReaders(rows int) {
+	if !m.directRead || rows <= m.projectionRows {
+		return
+	}
+	m.projectionRows = rows
+	changed := false
+	for i, col := range m.mainCols {
+		if col == nil || projectionColumnReadHints(col, rows, m.currentTx) != ReadDecoded {
+			continue
+		}
+		if _, ready := m.mainBulkReaders[i].(interface{ release() }); ready {
+			continue
+		}
+		reader := newCachedColumnReaderTx(col, m.currentTx, false, ReadDecoded)
+		m.mainBulkReaders[i] = reader
+		if i < len(m.mainValueFuncs) {
+			m.mainValueFuncs[i] = compiledColumnGetValue(reader)
+		}
+		if i < len(m.mainMultiFuncs) {
+			m.mainMultiFuncs[i] = compiledColumnGetValueMulti(reader)
+		}
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	m.mainValuesCompiled = true
+	for _, fn := range m.mainValueFuncs {
+		if fn == nil {
+			m.mainValuesCompiled = false
+			break
+		}
+	}
+	m.bufferReduceFn = nil
+	m.bufferReduceProc = nil
+	m.bufferValueTypes = nil
+	m.prepareJITBufferReducer()
+}
+
 func (m *ShardMapReducer) prefetchMainColumns(recids []uint32) {
+	m.prepareProjectionReaders(len(recids))
 	width := len(m.mainBulkReaders)
 	if width == 0 {
 		return
@@ -2536,6 +2621,9 @@ func (m *ShardMapReducer) processDirectReadBlock(acc scm.Scmer, recids []uint32)
 		}
 		if argument < 0 || argument >= len(m.args) {
 			panic("serial map-reducer argument outside callback columns")
+		}
+		if recids[len(recids)-1] < m.mainCount {
+			m.prepareProjectionReaders(1)
 		}
 		m.loadDirectReadArgs(recids[len(recids)-1], 0, false)
 		return m.args[argument]
@@ -2845,6 +2933,9 @@ func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32,
 // batches — that must happen after all shard locks are released.
 // Call FlushTriggerBatch() separately after the scan completes.
 func (m *ShardMapReducer) Close() {
+	for _, reader := range m.mainBulkReaders {
+		ReleaseColumnReader(reader)
+	}
 	if m.hasUpdateCol && m.currentTx != nil && m.currentTx.getShardTx(m.shard) != nil {
 		m.currentTx.RegisterTouchedShard(m.shard)
 	}
@@ -3988,28 +4079,36 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 					sortPerm = append(sortPerm, mainCount+uint32(i))
 				}
 			}
-			hybridsort.HybridSort(sortPerm, func(idA, idB uint32) bool {
-				for colIdx, colName := range idx.Cols {
-					var va, vb scm.Scmer
-					if idA < mainCount {
-						va = columnSnapshot[colName].GetValue(idA)
-					} else {
-						va = getDelta(int(idA-mainCount), colName)
-					}
-					if idB < mainCount {
-						vb = columnSnapshot[colName].GetValue(idB)
-					} else {
-						vb = getDelta(int(idB-mainCount), colName)
-					}
-					if idx.lessAt(colIdx, va, vb) {
-						return true
-					}
-					if idx.lessAt(colIdx, vb, va) {
-						return false
-					}
+			func() {
+				readers := make(map[string]ColumnReader, len(idx.Cols))
+				for _, name := range idx.Cols {
+					reader := columnSnapshot[name].GetCachedReader(ReadDecoded)
+					readers[name] = reader
+					defer ReleaseColumnReader(reader)
 				}
-				return false
-			})
+				hybridsort.HybridSort(sortPerm, func(idA, idB uint32) bool {
+					for colIdx, colName := range idx.Cols {
+						var va, vb scm.Scmer
+						if idA < mainCount {
+							va = readers[colName].GetValue(idA)
+						} else {
+							va = getDelta(int(idA-mainCount), colName)
+						}
+						if idB < mainCount {
+							vb = readers[colName].GetValue(idB)
+						} else {
+							vb = getDelta(int(idB-mainCount), colName)
+						}
+						if idx.lessAt(colIdx, va, vb) {
+							return true
+						}
+						if idx.lessAt(colIdx, vb, va) {
+							return false
+						}
+					}
+					return false
+				})
+			}()
 			break
 		}
 
@@ -4088,45 +4187,37 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 
 			var newcol ColumnStorage = new(StorageSCMER) // currently only scmer-storages
 			var i uint32
-			var reader ColumnReader
-			for {
-				// scan phase
-				reader = c.GetCachedReader() // must NOT use newCachedColumnReader: it strips OverlayBlob
-				newcol.prepare()
-				replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, newcol.scan)
-				i = uint32(len(rebuiltRowIDs))
-				newcol2 := newcol.proposeCompression(i)
-				if newcol2 == nil {
-					break // we found the optimal storage format
-				} else {
-					// redo scan phase with compression
-					//fmt.Printf("Compression with %T\n", newcol2)
-					newcol = newcol2
-				}
-			}
-			// build phase
-			// TODO: when source and target are both OverlayBlob, pass raw
-			// compressed blob data through instead of decompressing via
-			// GetValue and recompressing in build(). This avoids a full
-			// gzip round-trip per blob during rebuild.
-			if blob, ok := newcol.(*OverlayBlob); ok {
-				blob.schema = result.t.schema
-			}
-			newcol.init(i)
-			reader = c.GetCachedReader() // must NOT use newCachedColumnReader: it strips OverlayBlob
-			replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, newcol.build)
-			newcol.finish()
-
-			// LZ4 string dict compression: if the old column was a StorageString
-			// with zero reads in the last rebuild cycle, compress the new column's
-			// dictionary so it doesn't occupy RAM until actually needed.
-			if oldStr, ok := c.(*StorageString); ok {
-				if newStr, ok2 := newcol.(*StorageString); ok2 {
-					if oldStr.ReadCount() == 0 {
-						newStr.CompressDictionary()
+			func() {
+				// Both replay passes consume the complete selected main extent.
+				reader := c.GetCachedReader(ReadDecoded)
+				defer ReleaseColumnReader(reader)
+				for {
+					// scan phase
+					newcol.prepare()
+					replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, newcol.scan)
+					i = uint32(len(rebuiltRowIDs))
+					newcol2 := newcol.proposeCompression(i)
+					if newcol2 == nil {
+						break // we found the optimal storage format
+					} else {
+						// redo scan phase with compression
+						//fmt.Printf("Compression with %T\n", newcol2)
+						newcol = newcol2
 					}
 				}
-			}
+				// build phase
+				// TODO: when source and target are both OverlayBlob, pass raw
+				// compressed blob data through instead of decompressing via
+				// GetValue and recompressing in build(). This avoids a full
+				// gzip round-trip per blob during rebuild.
+				if blob, ok := newcol.(*OverlayBlob); ok {
+					blob.schema = result.t.schema
+				}
+				newcol.init(i)
+				replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, newcol.build)
+				newcol.finish()
+
+			}()
 
 			result.columns[col] = newcol
 			result.main_count = i
@@ -4176,8 +4267,11 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 					}
 				}
 				if allFound {
-					getters := idx.buildGetters(nil, nil)
-					idx.buildIndex(&idx.baseState, getters, nil)
+					func() {
+						getters := idx.buildGetters(nil, nil)
+						defer releaseIndexGetters(getters)
+						idx.buildIndex(&idx.baseState, getters, nil)
+					}()
 					GlobalCache.AddItem(idx, int64(idx.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
 				}
 			}

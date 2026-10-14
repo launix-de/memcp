@@ -18,6 +18,7 @@ package storage
 
 import "fmt"
 import "sync"
+import "github.com/pierrec/lz4/v4"
 import "bytes"
 import "unsafe"
 import "strings"
@@ -39,6 +40,17 @@ func buildStringColumn(values []string) *StorageString {
 		s.build(uint32(i), scm.NewString(v))
 	}
 	s.finish()
+	return rawStringFixture(s)
+}
+
+// rawStringFixture deliberately restores an unpublished raw baseline for
+// codec comparisons and historical format fixtures. Production finish uses LZ4.
+func rawStringFixture(s *StorageString) *StorageString {
+	s.dictionary = s.decodeDictionary()
+	s.textBuffer = nil
+	s.bufferHandles = false
+	s.compressedDict = nil
+	s.compressed = false
 	return s
 }
 
@@ -436,11 +448,11 @@ func TestCompressDictionaryRoundTrip(t *testing.T) {
 		}
 
 		col.CompressDictionary()
-		if !col.compressed {
+		if col.textBuffer == nil && !col.compressed {
 			t.Logf("group %d: compression did not activate (incompressible), skipping", gi)
 			continue
 		}
-		if len(col.compressedDict) == 0 {
+		if len(col.compressedDict) == 0 && col.textBuffer == nil {
 			t.Errorf("group %d: compressed flag set but compressedDict is empty", gi)
 		}
 
@@ -492,34 +504,42 @@ func TestEvictDictionary(t *testing.T) {
 	}
 	col := buildStringColumn(inputs)
 	col.CompressDictionary()
-	if !col.compressed {
+	if col.textBuffer == nil && !col.compressed {
 		t.Skip("compression did not activate")
 	}
 
-	// first read materializes
+	// A sparse/default read leaves the dictionary compressed.
 	want0 := inputs[0]
-	got0 := scm.String(col.GetValue(0))
-	if got0 != want0 {
-		t.Fatalf("first read: got %q, want %q", got0, want0)
+	if got := col.GetValue(0).String(); got != want0 {
+		t.Fatalf("sparse read: %q", got)
 	}
-	if len(col.dictionary) == 0 {
-		t.Fatal("dictionary should be materialized after read")
-	}
-
-	// evict
-	freed := col.EvictDictionary()
-	if freed <= 0 {
-		t.Errorf("EvictDictionary should return positive freed bytes, got %d", freed)
-	}
-	if len(col.dictionary) != 0 {
-		t.Error("dictionary should be empty after eviction")
+	if col.dictCache.Load() != nil {
+		t.Fatal("sparse read materialized full dictionary")
 	}
 
-	// read again → re-materialize
-	got0 = scm.String(col.GetValue(0))
-	if got0 != want0 {
-		t.Errorf("after evict+re-read: got %q, want %q", got0, want0)
+	reader := col.GetCachedReader(ReadDecoded)
+	if got := reader.GetValue(0).String(); got != want0 {
+		t.Fatalf("decoded read: %q", got)
 	}
+	if col.dictCache.Load() == nil {
+		t.Fatal("missing decoded dictionary")
+	}
+	if freed := col.EvictDictionary(); freed != 0 {
+		t.Fatal("evicted active reader")
+	}
+	ReleaseColumnReader(reader)
+	if freed := col.EvictDictionary(); freed <= 0 {
+		t.Fatalf("no release: %d", freed)
+	}
+	if col.dictCache.Load() != nil {
+		t.Fatal("dictionary not evicted")
+	}
+	reader = col.GetCachedReader(ReadDecoded)
+	defer ReleaseColumnReader(reader)
+	if got := reader.GetValue(0).String(); got != want0 {
+		t.Fatalf("after eviction: %q", got)
+	}
+
 }
 
 // TestCompressDictionaryNoopOnEmpty verifies CompressDictionary is a no-op
@@ -537,7 +557,7 @@ func TestCompressDictionaryNoopOnEmpty(t *testing.T) {
 	col.finish()
 
 	col.CompressDictionary()
-	if col.compressed {
+	if col.compressed || col.textBuffer != nil {
 		t.Error("CompressDictionary should not activate on empty dictionary")
 	}
 }
@@ -551,16 +571,17 @@ func TestCompressDictionaryIdempotent(t *testing.T) {
 	}
 	col := buildStringColumn(inputs)
 	col.CompressDictionary()
-	if !col.compressed {
+	if col.textBuffer == nil && !col.compressed {
 		t.Skip("compression did not activate")
 	}
-	origCompressed := make([]byte, len(col.compressedDict))
-	copy(origCompressed, col.compressedDict)
-
-	col.CompressDictionary() // second call — should be no-op
-	if !bytes.Equal(col.compressedDict, origCompressed) {
-		t.Error("second CompressDictionary changed the compressed data")
+	var before, after bytes.Buffer
+	col.Serialize(&before)
+	col.CompressDictionary()
+	col.Serialize(&after)
+	if !bytes.Equal(before.Bytes(), after.Bytes()) {
+		t.Fatal("second compression changed payload")
 	}
+
 }
 
 // TestSerializeDeserializeCompressed verifies the version 1 serialize/deserialize
@@ -572,7 +593,7 @@ func TestSerializeDeserializeCompressed(t *testing.T) {
 	}
 	col := buildStringColumn(inputs)
 	col.CompressDictionary()
-	if !col.compressed {
+	if col.textBuffer == nil && !col.compressed {
 		t.Skip("compression did not activate")
 	}
 
@@ -589,10 +610,10 @@ func TestSerializeDeserializeCompressed(t *testing.T) {
 	col2 := new(StorageString)
 	col2.Deserialize(reader)
 
-	if !col2.compressed {
+	if !col2.compressed && col2.textBuffer == nil {
 		t.Fatal("deserialized column should have compressed=true")
 	}
-	if len(col2.compressedDict) == 0 {
+	if len(col2.compressedDict) == 0 && col2.textBuffer == nil {
 		t.Fatal("deserialized column should have non-empty compressedDict")
 	}
 
@@ -605,9 +626,9 @@ func TestSerializeDeserializeCompressed(t *testing.T) {
 	}
 }
 
-// TestSerializeDeserializeUncompressed verifies version 1 format works for
-// uncompressed dictionaries (backward-compatible read path).
-func TestSerializeDeserializeUncompressed(t *testing.T) {
+// TestSerializeDeserializeRawSource verifies the current writer converts a
+// raw source without mutating its published representation.
+func TestSerializeDeserializeRawSource(t *testing.T) {
 	inputs := []string{"hello", "world", "hello", "world", "foo"}
 	col := buildStringColumn(inputs)
 	// do NOT compress
@@ -620,8 +641,8 @@ func TestSerializeDeserializeUncompressed(t *testing.T) {
 	col2 := new(StorageString)
 	col2.Deserialize(reader)
 
-	if col2.compressed {
-		t.Fatal("deserialized column should not be compressed")
+	if col2.textBuffer == nil || col2.dictionary != "" || col.dictionary == "" || col.textBuffer != nil {
+		t.Fatal("writer failed private raw-to-block conversion")
 	}
 	for i, want := range inputs {
 		got := scm.String(col2.GetValue(uint32(i)))
@@ -691,7 +712,7 @@ func TestConcurrentReadAfterCompress(t *testing.T) {
 	}
 	col := buildStringColumn(inputs)
 	col.CompressDictionary()
-	if !col.compressed {
+	if col.textBuffer == nil && !col.compressed {
 		t.Skip("compression did not activate")
 	}
 
@@ -872,4 +893,61 @@ func TestStringUUIDWithEmpty(t *testing.T) {
 		}
 	}
 	verifyStringBulkAgainstGetValue(t, "UUID with empty", c, len(values))
+}
+
+// Keep a real version-1 monolithic LZ4 fixture: current writers choose the
+// handle payload for ordinary text, so a current roundtrip alone is insufficient.
+func TestLegacyLZ4DictionaryReaderHints(t *testing.T) {
+	inputs := []string{strings.Repeat("legacy Prüfbericht Eins\n", 100), strings.Repeat("legacy Prüfbericht Zwei\n", 100)}
+	source := buildStringColumn(inputs)
+	original := source.dictionary
+	encoded := make([]byte, lz4.CompressBlockBound(len(original)))
+	var compressor lz4.Compressor
+	n, err := compressor.CompressBlock([]byte(original), encoded)
+	if err != nil || n == 0 {
+		t.Fatal("legacy fixture did not compress")
+	}
+	payload := make([]byte, 4+n)
+	binary.LittleEndian.PutUint32(payload, uint32(len(original)))
+	copy(payload[4:], encoded[:n])
+	var wire bytes.Buffer
+	wire.Write([]byte{20, 0, byte(source.format), 1, 0, 0, 0, 0, 1})
+	binary.Write(&wire, binary.LittleEndian, uint64(len(inputs)))
+	source.values.Serialize(&wire)
+	source.starts.Serialize(&wire)
+	source.lens.Serialize(&wire)
+	binary.Write(&wire, binary.LittleEndian, uint64(len(payload)))
+	wire.Write(payload)
+	var restored StorageString
+	restored.Deserialize(bytes.NewReader(wire.Bytes()[1:]))
+	if !restored.compressed || len(restored.dictionary) != 0 || restored.dictCache.Load() != nil {
+		t.Fatal("legacy file eagerly decoded")
+	}
+	var saved bytes.Buffer
+	restored.Serialize(&saved)
+	if saved.Bytes()[3] != 5 || restored.dictCache.Load() != nil || !restored.compressed {
+		t.Fatal("legacy save failed private V5 conversion")
+	}
+	var migrated StorageString
+	migrated.Deserialize(bytes.NewReader(saved.Bytes()[1:]))
+	if migrated.textBuffer == nil || migrated.GetValue(1).String() != inputs[1] {
+		t.Fatal("legacy compressed migration changed values")
+	}
+
+	reader := restored.GetCachedReader(ReadDecoded)
+	for i, want := range inputs {
+		if got := reader.GetValue(uint32(i)).String(); got != want {
+			t.Fatalf("legacy row %d", i)
+		}
+	}
+	if restored.dictCache.Load() == nil || len(restored.dictionary) != 0 || len(restored.compressedDict) != len(payload) {
+		t.Fatal("legacy decode bypassed shared cache")
+	}
+	if restored.EvictDictionary() != 0 {
+		t.Fatal("legacy cache evicted while leased")
+	}
+	ReleaseColumnReader(reader)
+	if restored.EvictDictionary() <= 0 {
+		t.Fatal("legacy cache not released")
+	}
 }

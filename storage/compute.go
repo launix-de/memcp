@@ -33,19 +33,102 @@ func requireStatelessComputedCallback(label string, callback scm.Scmer) {
 	}
 }
 
+// A prepared decoded representation must remain the actual scan input. The
+// direct storage emitter is only interchangeable when preparation owns no lease.
+func columnReaderRequiresBinding(col ColumnStorage, reader ColumnReader) bool {
+	if _, computed := col.(*StorageComputeProxy); computed {
+		return true
+	}
+	_, leased := reader.(interface{ release() })
+	return leased
+}
+
+// Dense comparisons of short values amortize one dictionary decode. Point,
+// membership and bigram-pruned probes keep optional cache reuse; report-sized
+// values never trigger eager full decoding from this filter preparation rule.
+func filterColumnReadHints(col ColumnStorage, access scanAccess, name string, rows uint32) ColumnReadHints {
+	if rows <= defaultScanBufferSize {
+		return ReadAuto
+	}
+	if overlay, ok := col.(*OverlayBlob); ok {
+		col = overlay.Base
+	}
+	s, ok := col.(*StorageString)
+	if !ok || s.textBuffer == nil || s.starts.count == 0 ||
+		uint64(s.textBuffer.DecodedSize()) > s.starts.count*256 {
+		return ReadAuto
+	}
+	dense := access.len() == 0
+	for i := 0; i < access.len(); i++ {
+		matcher := access.boundaryAnalyzer(i)
+		if matcher == LikeMatcher || matcher == RecSetMatcher || matcher == InMatcher {
+			return ReadAuto
+		}
+		if matcher == RangeMatcher && access.boundaryColumn(i) == name {
+			dense = true
+		}
+	}
+	if dense {
+		return ReadDecoded
+	}
+	return ReadAuto
+}
+
+// Projection-only decoding is considered only after the consumed row domain
+// is known. Short keys justify a decoded cache when repeated block work exceeds
+// its logical payload. A consumed point may admit a short-key dictionary up to
+// 1 MiB; larger dictionaries require an already-selected batch.
+func projectionColumnReadHints(col ColumnStorage, rows int, tx *TxContext) ColumnReadHints {
+	if rows <= 0 || tx == nil || !tx.queryActive.Load() {
+		return ReadAuto
+	}
+	if overlay, ok := col.(*OverlayBlob); ok {
+		col = overlay.Base
+	}
+	s, ok := col.(*StorageString)
+	if !ok || s.textBuffer == nil || s.starts.count == 0 || uint64(s.textBuffer.DecodedSize()) > s.starts.count*256 {
+		return ReadAuto
+	}
+	if s.textBuffer.DecodedSize() <= 1<<20 || uint64(rows)*4096 >= uint64(s.textBuffer.DecodedSize()) {
+		return ReadDecoded
+	}
+	return ReadAuto
+}
+
 // newCachedColumnReaderTx returns a per-goroutine ColumnReader for the given
 // storage and tx context. alreadyLocked records an existing read or write lock
 // on the owning shard; recursive computed inputs must not acquire it again.
 //
-// For StorageEnum this gives O(1) sequential decode; for others it's a no-op.
+// StorageEnum prepares a sequential cursor. StorageString resolves dictionary
+// hints and statement-owned decoded leases here, outside row loops.
 // Do not strip runtime overlays here: generic scan/read paths must still see
 // user-visible values (for example OverlayBlob must dereference its hash marker
 // back to the persisted blob payload after restart).
-func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked bool) ColumnReader {
+func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked bool, hints ColumnReadHints) ColumnReader {
+	operatorOwned := hints&readOperatorOwned != 0
+	hints &^= readOperatorOwned
 	if provider, ok := col.(TxColumnReaderProvider); ok {
-		return provider.GetCachedReaderTx(tx, alreadyLocked)
+		if operatorOwned {
+			hints |= readOperatorOwned
+		}
+		return provider.GetCachedReaderTx(tx, alreadyLocked, hints)
 	}
-	return col.GetCachedReader()
+	// Without a statement owner, automatic reads retain no shared decoded
+	// dictionary. Explicit ReadDecoded consumers own and release their reader.
+	if !operatorOwned && hints == ReadAuto && (tx == nil || !tx.queryActive.Load()) {
+		hints = ReadCompressed
+	}
+	reader := col.GetCachedReader(hints)
+	// Compressed readers never retain a shared decoded generation. Inner
+	// encodings may own an immutable private workspace; GC carries its values,
+	// so a row-bound point caller must not append a statement release per probe.
+	if leased, ok := reader.(interface{ release() }); ok && !operatorOwned && hints != ReadCompressed && tx != nil && tx.queryActive.Load() {
+		if !tx.retainQueryReader(leased.release) {
+			leased.release()
+			return col.GetCachedReader(ReadCompressed)
+		}
+	}
+	return reader
 }
 
 func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, dependencies []string) {

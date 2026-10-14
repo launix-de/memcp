@@ -241,6 +241,10 @@ func (b *bigramPostingBuilder) finish(universe uint32) compressedRecSet {
 }
 
 func buildBigramIndex(count uint32, reader ColumnReader) *bigramIndex {
+	if storage, ok := reader.(ColumnStorage); ok {
+		reader = storage.GetCachedReader(ReadCompressed)
+		defer ReleaseColumnReader(reader)
+	}
 	index := &bigramIndex{universe: count}
 	const readBatch = 1024
 	values := make([]scm.Scmer, readBatch)
@@ -251,6 +255,8 @@ func buildBigramIndex(count uint32, reader ColumnReader) *bigramIndex {
 	asciiPosting := make([]uint32, 1<<16)
 	unicodePostingByKey := make(map[uint64]uint32)
 	postings := make([]bigramPostingBuilder, 0)
+	var cursor scm.TextCursor
+	var scratch scm.TextScratch
 	for base := uint32(0); base < count; base += readBatch {
 		batchCount := uint32(readBatch)
 		if remaining := count - base; remaining < batchCount {
@@ -262,33 +268,49 @@ func buildBigramIndex(count uint32, reader ColumnReader) *bigramIndex {
 			if value.IsString() {
 				var previous rune
 				havePrevious := false
-				for _, current := range value.String() {
+				addKey := func(previous, current rune) {
+					key := normalizedBigramKey(previous, current)
+					var postingIndex uint32
+					if previous <= 255 && current <= 255 {
+						slot := &asciiPosting[uint16(previous)<<8|uint16(current)]
+						if *slot == 0 {
+							postingIndex = uint32(len(postings))
+							postings = append(postings, bigramPostingBuilder{key: key})
+							*slot = postingIndex + 1
+						} else {
+							postingIndex = *slot - 1
+						}
+					} else {
+						var exists bool
+						postingIndex, exists = unicodePostingByKey[key]
+						if !exists {
+							postingIndex = uint32(len(postings))
+							unicodePostingByKey[key] = postingIndex
+							postings = append(postings, bigramPostingBuilder{key: key})
+						}
+					}
+					postings[postingIndex].add(base+offset, wordCount)
+				}
+				addRune := func(current rune) {
 					current = normalizeBigramRune(current)
 					if havePrevious {
-						key := normalizedBigramKey(previous, current)
-						var postingIndex uint32
-						if previous <= 255 && current <= 255 {
-							slot := &asciiPosting[uint16(previous)<<8|uint16(current)]
-							if *slot == 0 {
-								postingIndex = uint32(len(postings))
-								postings = append(postings, bigramPostingBuilder{key: key})
-								*slot = postingIndex + 1
-							} else {
-								postingIndex = *slot - 1
-							}
-						} else {
-							var exists bool
-							postingIndex, exists = unicodePostingByKey[key]
-							if !exists {
-								postingIndex = uint32(len(postings))
-								unicodePostingByKey[key] = postingIndex
-								postings = append(postings, bigramPostingBuilder{key: key})
-							}
-						}
-						postings[postingIndex].add(base+offset, wordCount)
+						addKey(previous, current)
 					}
-					previous = current
-					havePrevious = true
+					previous, havePrevious = current, true
+				}
+				if value.IsBufferString() {
+					cursor.Reset(value)
+					for {
+						current, _, ok := cursor.NextRune(&scratch)
+						if !ok {
+							break
+						}
+						addRune(current)
+					}
+				} else {
+					for _, current := range value.String() {
+						addRune(current)
+					}
 				}
 			}
 			values[offset] = scm.NewNil()

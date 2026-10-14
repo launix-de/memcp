@@ -33,7 +33,7 @@ func TestFinishedMainStorageJITValueTypes(t *testing.T) {
 		{"nullable-int", []scm.Scmer{scm.NewInt(1), scm.NewNil()}, scm.JITTypeUnknown},
 		{"float", []scm.Scmer{scm.NewFloat(1.5), scm.NewFloat(7.25)}, scm.TagFloat},
 		{"nullable-float", []scm.Scmer{scm.NewFloat(1.5), scm.NewNil()}, scm.JITTypeUnknown},
-		{"string", []scm.Scmer{scm.NewString("alpha/path"), scm.NewString("beta path")}, scm.TagString},
+		{"string", []scm.Scmer{scm.NewString("alpha/path"), scm.NewString("beta path")}, scm.TagLZ4},
 		{"nullable-string", []scm.Scmer{scm.NewString("alpha/path"), scm.NewNil()}, scm.JITTypeUnknown},
 		{"constant", []scm.Scmer{scm.NewBool(true), scm.NewBool(true)}, scm.TagBool},
 	}

@@ -1404,7 +1404,9 @@ func (s *StorageSparse) Deserialize(f io.Reader) uint {
 	return uint(l)
 }
 
-func (s *StorageSparse) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
+func (s *StorageSparse) GetCachedReader(hints ColumnReadHints) ColumnReader {
+	return s.storageJITFunctions.reader(s)
+}
 
 func (s *StorageSparse) GetValue(i uint32) scm.Scmer {
 	var lower uint32 = 0

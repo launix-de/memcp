@@ -28,9 +28,15 @@ import "crypto/sha256"
 import "encoding/base64"
 import "encoding/binary"
 
-func isCompressedText(s Scmer) bool { tag := s.GetTag(); return tag == tagCString || tag == tagBString }
+func isCompressedText(s Scmer) bool {
+	tag := s.GetTag()
+	return tag == tagCString || tag == tagBString || tag == tagLZ4
+}
 
 func compressedTextLen(s Scmer) int {
+	if s.IsBufferString() {
+		return bufferStringLen(s)
+	}
 	if s.IsBString() {
 		return bstringEncoding(s).EncodedLen(int(auxVal(s.aux) & bstringLengthMask))
 	}
@@ -56,6 +62,10 @@ func makeOperatorView(s Scmer) (operatorStringView, bool) {
 // Writers consume bounded decoded chunks; no complete intermediate text is
 // allocated. BString emits complete Base64 groups using the standard encoder.
 func writeOperatorText(w io.Writer, s Scmer) {
+	if s.IsBufferString() {
+		writeBufferText(w, s)
+		return
+	}
 	if !isCompressedText(s) {
 		_, _ = io.WriteString(w, String(s))
 		return
@@ -85,6 +95,9 @@ func writeOperatorText(w io.Writer, s Scmer) {
 }
 
 func compressedTextCase(s Scmer, upper bool) Scmer {
+	if s.IsBufferString() {
+		return bufferCase(s, upper)
+	}
 	if s.IsCString() {
 		v, ok := makeStringView(s)
 		if ok && v.format != 0 {
@@ -145,6 +158,9 @@ func compressedTextCase(s Scmer, upper bool) Scmer {
 // All registered compressed alphabets are ASCII. Raw/unknown CString formats
 // retain the Unicode TrimSpace fallback. Direction 0 trims both ends.
 func compressedTextTrim(s Scmer, direction int) Scmer {
+	if s.IsBufferString() {
+		return bufferTrim(s, direction)
+	}
 	if isCompressedText(s) {
 		v, ok := makeOperatorView(s)
 		if ok && (v.format != 0 || v.base64 != "") {
@@ -178,6 +194,9 @@ func compressedTextTrim(s Scmer, direction int) Scmer {
 }
 
 func decodeTextHex(s Scmer) ([]byte, error) {
+	if s.IsBufferString() {
+		return decodeBufferHex(s)
+	}
 	if !isCompressedText(s) {
 		return hex.DecodeString(String(s))
 	}
@@ -247,11 +266,17 @@ func (v operatorStringView) decodeBase64Into(dst []byte, start int, fold bool) {
 // Base64 text is represented by its source bytes until an output consumer
 // actually needs encoded text. The Scmer pointer keeps that immutable string alive.
 func encodeTextBase64(s Scmer) Scmer {
+	if s.IsBufferString() {
+		return encodeBufferBase64(s)
+	}
 	text := String(s)
 	return NewBString(unsafe.StringData(text), len(text), false, false)
 }
 
 func encodeTextHex(s Scmer) Scmer {
+	if s.IsBufferString() {
+		return encodeBufferHex(s)
+	}
 	v, ok := makeOperatorView(s)
 	if !ok {
 		return NewString(hex.EncodeToString([]byte(String(s))))
@@ -315,6 +340,10 @@ func likeAlphabetPossible(v operatorStringView, pattern string, fold bool) bool 
 }
 
 func appendOperatorText(w *strings.Builder, s Scmer) {
+	if s.IsBufferString() {
+		appendBufferText(w, s)
+		return
+	}
 	if !isCompressedText(s) {
 		w.WriteString(String(s))
 		return
@@ -334,6 +363,10 @@ func appendOperatorText(w *strings.Builder, s Scmer) {
 }
 
 func (w *schemeTextWriter) writeCompressedText(s Scmer) {
+	if s.IsBufferString() {
+		hashBufferText(w, s)
+		return
+	}
 	// Small strings are faster through the existing scalar decoder; streaming
 	// setup pays off once it avoids a substantial intermediate allocation.
 	if compressedTextLen(s) < 128 {

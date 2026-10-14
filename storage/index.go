@@ -76,6 +76,7 @@ type computedRevision struct {
 // it evaluates the mapFn over the source column storages.
 type colGetter struct {
 	raw     ColumnReader    // non-nil for raw columns
+	source  ColumnStorage   // generation-owned source for operator-specific preparation
 	mapCols []ColumnReader  // non-nil for computed columns
 	mapFn   *scm.SerialProc // non-nil for computed columns; owned by this serial reader
 	mapArgs []scm.Scmer
@@ -101,6 +102,26 @@ func (g colGetter) get(recid uint32) scm.Scmer {
 		return g.mapFn.Call(g.mapArgs)
 	}
 	return g.raw.GetValue(recid)
+}
+
+// Persistent index boundaries must not retain a view into an evictable decoded
+// dictionary. Eligible raw text keeps its stable compressed handle. Other
+// string representations own a copied boundary rather than pinning the cache.
+func (g colGetter) persistentValue(recid uint32, tx *TxContext) scm.Scmer {
+	var value scm.Scmer
+	if g.source != nil {
+		// Index construction already owns the shard lock. Preserve that
+		// capability and the caller's visibility for computed source readers.
+		reader := newCachedColumnReaderTx(g.source, tx, true, ReadCompressed)
+		defer ReleaseColumnReader(reader)
+		value = reader.GetValue(recid)
+	} else {
+		value = g.get(recid)
+	}
+	if value.IsString() && !value.IsBufferString() {
+		return scm.NewString(strings.Clone(value.String()))
+	}
+	return value
 }
 
 type StorageIndex struct {
@@ -294,9 +315,19 @@ func (s *StorageIndex) usesNaturalAscendingOrder(col int) bool {
 	}
 }
 
+// Index getters own their prepared readers until their native caller finishes.
+// Release outside row loops, including warming/rebuild and failed preparation.
+func releaseIndexGetters(getters []colGetter) {
+	for _, getter := range getters {
+		ReleaseColumnReader(getter.raw)
+		releaseColumnReaders(getter.mapCols)
+	}
+}
+
 // buildGetters returns per-column value getters for this index, reading from the
 // shard under its currently-held read or write lock. Recursive computed
-// readers must use that same lock instead of entering it again.
+// readers must use that same lock instead of entering it again. The caller
+// releases all returned readers through releaseIndexGetters.
 func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGetter {
 	var getters []colGetter
 	if cap(storage) >= len(s.Cols) {
@@ -305,6 +336,12 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 	} else {
 		getters = make([]colGetter, len(s.Cols))
 	}
+	complete := false
+	defer func() {
+		if !complete {
+			releaseIndexGetters(getters)
+		}
+	}()
 	for i, col := range s.Cols {
 		if !s.columnIsSorted(i) && isScanPseudoColName(col) {
 			continue
@@ -312,22 +349,28 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 		if len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil() {
 			// computed column: read mapCols and apply mapFn
 			mapColReaders := make([]ColumnReader, len(s.ColMapCols[i]))
+			getters[i].mapCols = mapColReaders
 			for j, mc := range s.ColMapCols[i] {
 				if isScanPseudoColName(mc) {
 					mapColReaders[j] = ColumnReaderFunc(func(uint32) scm.Scmer { return scm.NewNil() })
 					continue
 				}
 				cs := s.t.getColumnStorageRLocked(mc)
-				mapColReaders[j] = newCachedColumnReaderTx(cs, tx, true)
+				mapColReaders[j] = newCachedColumnReaderTx(cs, tx, true, ReadAuto|readOperatorOwned)
 			}
 			mapFn := s.ColMapFn[i]
 			fn := scm.PrepareSerialProc(mapFn)
 			getters[i] = colGetter{mapCols: mapColReaders, mapFn: &fn, mapArgs: make([]scm.Scmer, len(mapColReaders))}
 		} else {
 			cs := s.t.getColumnStorageRLocked(col)
-			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true)}
+			hints := ReadAuto
+			if !s.columnIsSorted(i) {
+				hints = ReadCompressed
+			}
+			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true, hints|readOperatorOwned), source: cs}
 		}
 	}
+	complete = true
 	return getters
 }
 
@@ -539,7 +582,7 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 				if !proxy.isOrdered {
 					vals[i] = proxy.getValueRLocked(tx, recid)
 				} else {
-					vals[i] = s.t.ColumnReaderTx(tx, mc, true)(recid)
+					vals[i] = s.t.ColumnReaderTx(tx, mc, true, ReadAuto).GetValue(recid)
 				}
 			} else {
 				vals[i] = s.getDeltaValue(data, mc)
@@ -552,7 +595,7 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 		if !proxy.isOrdered {
 			return proxy.getValueRLocked(tx, recid)
 		}
-		return s.t.ColumnReaderTx(tx, s.Cols[colIdx], true)(recid)
+		return s.t.ColumnReaderTx(tx, s.Cols[colIdx], true, ReadAuto).GetValue(recid)
 	}
 	return s.getDeltaValue(data, s.Cols[colIdx])
 }
@@ -1097,7 +1140,11 @@ func rebuildRepartitionIndexes(candidates []*StorageIndex, shard *storageShard) 
 		if !index.hasAvailableColumnsRLocked() || indexHasComputedCol(shard, index) {
 			continue
 		}
-		index.buildIndex(&index.baseState, index.buildGetters(nil, nil), nil)
+		func() {
+			getters := index.buildGetters(nil, nil)
+			defer releaseIndexGetters(getters)
+			index.buildIndex(&index.baseState, getters, nil)
+		}()
 		warmed++
 	}
 }
@@ -1327,6 +1374,14 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 				continue // query-level overlay column: never read by the comparator below
 			}
 			hasSortCol[colIdx] = true
+			// Repeated random comparisons amortize one complete dictionary
+			// decode. Keep this lease through sorting and failure cleanup, never
+			// retain the decoded reader in the published index getters.
+			if g.source != nil {
+				reader := newCachedColumnReaderTx(g.source, tx, true, ReadDecoded)
+				defer ReleaseColumnReader(reader)
+				g.raw = reader
+			}
 			for i := uint32(0); i < s.t.main_count; i++ {
 				materialized[uint(i)*uint(numCols)+uint(colIdx)] = g.get(i)
 			}
@@ -1409,8 +1464,8 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 				if !s.columnIsSorted(i) {
 					continue
 				}
-				state.minVals[i] = g.get(tmp[0])
-				state.maxVals[i] = g.get(tmp[len(tmp)-1])
+				state.minVals[i] = g.persistentValue(tmp[0], tx)
+				state.maxVals[i] = g.persistentValue(tmp[len(tmp)-1], tx)
 			}
 		}
 	} else if s.t.main_count > 0 {
@@ -1421,8 +1476,8 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			if !s.columnIsSorted(i) {
 				continue
 			}
-			state.minVals[i] = g.get(0)
-			state.maxVals[i] = g.get(s.t.main_count - 1)
+			state.minVals[i] = g.persistentValue(0, tx)
+			state.maxVals[i] = g.persistentValue(s.t.main_count-1, tx)
 		}
 	}
 
@@ -1825,7 +1880,7 @@ func (s *StorageIndex) bindRowMatchers(tx *TxContext, bounds scanAccess, indexBo
 			if alignedWithIndex && colIdx < len(cols) {
 				reader = cols[colIdx].raw
 			} else if _, mapFn := bounds.boundaryMap(colIdx); !isScanPseudoColName(column) && mapFn.IsNil() {
-				reader = newCachedColumnReaderTx(s.t.getColumnStorageRLocked(column), tx, true)
+				reader = newCachedColumnReaderTx(s.t.getColumnStorageRLocked(column), tx, true, ReadCompressed)
 			}
 			hook = analyzer.Deploy(IndexDeployContext{
 				MainCount: s.t.main_count,
@@ -1861,6 +1916,16 @@ func (s *StorageIndex) bindColdRangeMatcher(tx *TxContext, bounds scanAccess, in
 		return nil
 	}
 	_, lastSorted, sortedMask, unboundedMask := s.boundKernel(bounds, cmpCols)
+	// This chosen cold-index path compares a main-generation extent. Prepare
+	// its actual comparison columns once; projection-only columns remain lazy.
+	// iterate owns these readers until the synchronous matcher has finished.
+	for col := 0; col < cmpCols; col++ {
+		if s.columnIsSorted(col) && cols[col].source != nil {
+			reader := newCachedColumnReaderTx(cols[col].source, tx, true, ReadDecoded)
+			ReleaseColumnReader(cols[col].raw)
+			cols[col].raw = reader
+		}
+	}
 	lowerInclusive, _ := effectiveBoundaryInclusiveness(bounds, indexBounds)
 	return []IndexRowMatcher{func(ids []uint32) []uint32 {
 		out := 0
@@ -1955,6 +2020,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBoundsValu
 	getterScratch.indexBounds.access = &getterScratch.access
 	indexBounds := &getterScratch.indexBounds
 	defer func() {
+		releaseIndexGetters(cols)
 		clear(getterScratch.getters[:])
 		getterScratch.access = scanAccess{}
 		getterScratch.indexBounds = scanIndexBounds{}

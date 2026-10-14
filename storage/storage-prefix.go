@@ -42,7 +42,56 @@ func (s *StoragePrefix) String() string {
 	return fmt.Sprintf("prefix[%s]-%s", s.prefixdictionary[1], s.values.String())
 }
 
-func (s *StoragePrefix) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
+func (s *StoragePrefix) GetCachedReader(hints ColumnReadHints) ColumnReader {
+	values := s.values.GetCachedReader(hints)
+	if _, prepared := values.(interface{ release() }); prepared {
+		return &prefixColumnReader{storage: s, values: values}
+	}
+	return s.storageJITFunctions.reader(s)
+}
+
+// Preparation must pass through to the immutable suffix generation. The
+// operator owns this child reader's lease; prefix assembly keeps its existing
+// batch arena so output values retain no scratch or dictionary-cache ownership.
+type prefixColumnReader struct {
+	storage *StoragePrefix
+	values  ColumnReader
+}
+
+func (r *prefixColumnReader) release()            { ReleaseColumnReader(r.values) }
+func (r *prefixColumnReader) JITValueType() uint8 { return r.storage.JITValueType() }
+
+func (r *prefixColumnReader) GetValue(row uint32) scm.Scmer {
+	inner := r.values.GetValue(row)
+	if inner.IsNil() {
+		return inner
+	}
+	index := int64(r.storage.prefixes.GetValueUInt(row)) + r.storage.prefixes.offset
+	if index < 0 || index >= int64(len(r.storage.prefixdictionary)) {
+		panic("prefix index out of range")
+	}
+	return scm.NewString(r.storage.prefixdictionary[index] + inner.String())
+}
+
+func (r *prefixColumnReader) GetValueRange(row, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	r.values.GetValueRange(row, count, target, stride)
+	indices := make([]scm.Scmer, count)
+	r.storage.prefixes.GetValueRange(row, count, indices, 1)
+	r.storage.applyPrefixInPlace(target, indices, count, stride)
+}
+
+func (r *prefixColumnReader) GetValueMulti(rows []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	r.values.GetValueMulti(rows, target, stride)
+	indices := make([]scm.Scmer, len(rows))
+	r.storage.prefixes.GetValueMulti(rows, indices, 1)
+	r.storage.applyPrefixInPlace(target, indices, uint32(len(rows)), stride)
+}
 
 func (s *StoragePrefix) GetValue(i uint32) scm.Scmer {
 	inner := s.values.GetValue(i)

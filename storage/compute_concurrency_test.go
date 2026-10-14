@@ -425,7 +425,7 @@ func TestUnfilteredComputeColumnReusesCompletePreparationUntilMutation(t *testin
 		t.Fatalf("post-insert repair invoked computor %d times, want 4 total", got)
 	}
 
-	reader := tbl.ActiveShards()[0].ColumnReaderTx(nil, "cached", false)
+	reader := tbl.ActiveShards()[0].ColumnReaderTx(nil, "cached", false, ReadAuto).GetValue
 	if got := reader(3).Int(); got != 80 {
 		t.Fatalf("repaired appended computed value = %d, want 80", got)
 	}

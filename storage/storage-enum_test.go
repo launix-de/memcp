@@ -134,9 +134,9 @@ func TestEnumGetCachedReader(t *testing.T) {
 	s := buildEnum(n, gen)
 
 	// GetCachedReader should return a cachedEnumReader, not self
-	reader := s.GetCachedReader()
+	reader := s.GetCachedReader(ReadCompressed)
 	if reader == ColumnReader(s) {
-		t.Fatal("GetCachedReader() returned self, expected cachedEnumReader wrapper")
+		t.Fatal("GetCachedReader(ReadCompressed) returned self, expected cachedEnumReader wrapper")
 	}
 	for i := 0; i < n; i++ {
 		got := reader.GetValue(uint32(i))
@@ -401,7 +401,7 @@ func TestEnumBulkMatchesGetValue(t *testing.T) {
 				valueMulti func([]uint32, []scm.Scmer, int)
 			}{
 				{"storage", s.GetValueRange, s.GetValueMulti},
-				{"cachedReader", s.GetCachedReader().GetValueRange, s.GetCachedReader().GetValueMulti},
+				{"cachedReader", s.GetCachedReader(ReadCompressed).GetValueRange, s.GetCachedReader(ReadCompressed).GetValueMulti},
 			}
 
 			for _, r := range readers {
@@ -524,7 +524,7 @@ func TestEnumConstantSuffixRandomAccess(t *testing.T) {
 		return scm.NewNil()
 	}
 	s := buildEnum(n, value)
-	reader := s.GetCachedReader()
+	reader := s.GetCachedReader(ReadCompressed)
 	for _, i := range []int{149998, 0, 65534, 65535, 70001, 70002, 70001, 149999, 70000, 1, 149998} {
 		for _, got := range []scm.Scmer{s.GetValue(uint32(i)), reader.GetValue(uint32(i))} {
 			if !scm.Equal(got, value(i)) {
@@ -541,7 +541,7 @@ func BenchmarkEnumConstantSuffixRandomAccess(b *testing.B) {
 		}
 		return scm.NewInt(0)
 	})
-	reader := s.GetCachedReader()
+	reader := s.GetCachedReader(ReadCompressed)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if got := reader.GetValue(uint32((uint64(i) * 7919) % 59999)); !scm.Equal(got, scm.NewInt(0)) {

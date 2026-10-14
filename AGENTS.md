@@ -109,6 +109,20 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- `StorageString.textBuffer` is constructed/loaded under
+  exclusive unpublished generation ownership, then remains immutable.
+  LZ4 Scmer handles retain the buffer header through a GC-visible pointer;
+  the header owns its bytes and block directory, with no shard, session,
+  transaction, or mutable decoder state. `scm.TextScratch` is exclusive to one
+  operator/reader invocation and reused outside row loops; no returned value
+  borrows its decoded bytes. `StorageString.bufferHandles` is computed under
+  the same unpublished ownership and is immutable; it distinguishes eligible
+  raw text from specialized inner encodings and oversized strings. New
+  dictionaries always use LZ4 blocks; live generations are never recompressed
+  in place. V5 writes block payloads without a flag; V0–V4 readers remain intact.
+  Saving a historical generation creates a private temporary block payload,
+  without mutating the published generation or admitting a decoded cache.
+
 - `storageShard.rollbackProtected` also reserves UNIQUE keys of hidden
   transaction-owned rows. DML key probes reject a foreign reservation with a
   serialization error; ordinary reads and DDL validation keep their visibility
@@ -116,6 +130,7 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   Commit, rollback, savepoint rollback and definite commit failure release
   reservations through the existing shard lock and rebuild visibility-forwarding
   protocol. No reservation directory is retained or persisted.
+
 - `table.Auto_increment` uses the same atomic reservation for native INSERT
   and `reserve_ids`, once per batch/block. Runtime counter snapshots and DDL
   updates are atomic; loading unpublished table objects owns initialization.
@@ -628,3 +643,70 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   the column set's validity through mutation. Busy DDL or eviction defers the
   operation rather than blocking. Every pin has panic-safe cleanup. Retirement
   runs on a query or maintenance caller, never the CacheManager owner goroutine.
+
+- `shardColumnReader` is invocation-owned and binds one prepared main reader,
+  a physical delta source and the existing computed-reader transaction binding.
+  `ColumnReaderTx` accepts an explicit representation hint and returns a
+  releasable reader; its function view cannot outlive the owning statement or
+  explicit lease. Sorted shard queues retain their readers through statement
+  teardown, not merely through queue construction.
+- `ShardMapReducer.projectionRows` is private to one serial mapper. It records
+  only an already-consumed point/batch extent. Projection cache preparation
+  cannot run before filtering or LIMIT establishes payload demand. Batch
+  preparation is outside row callbacks; an explicit selected-point consumer
+  may prepare its first demanded short payload. Replacing
+  a reader also replaces compiled scalar/bulk targets and resets typed reducer
+  specialization; ordinary delta readers keep their original visibility path.
+
+- `StorageString.textBuffer` is the immutable compressed dictionary of one
+  generation; ordinary raw text uses no additional `compressedDict` payload.
+  Encoded alphabets also use block compression; historical monolithic LZ4
+  retains its read-compatible payload until saving.
+  `StorageString.dictCache` atomically publishes one complete decoded generation.
+  Its `stringDictionaryCache` owns an exclusive `TypeStringDict` registration;
+  parent sizes subtract that child explicitly. `dictMu` protects admission and
+  prepared-reader leases outside row loops. Cleanup uses TryLock and declines
+  eviction while leased. Each decoded generation has its own registration
+  identity, so late deregistration cannot remove a replacement.
+  `ColumnReadHints` are resolved during reader preparation: bigram walks request
+  `ReadCompressed`, repeated sort comparisons request `ReadDecoded`, and
+  statement-bound `ReadAuto` only reuses an existing decoded generation.
+  Synchronous operators mark their reader ownership during preparation and
+  release all prepared readers on their existing completion/panic boundary;
+  marked `ReadDecoded` is operator-owned; unmarked statement readers
+  retain the existing `endQuery` release owner. A compressed inner encoding
+  without a compressed value handle uses one immutable reader-local decoding
+  workspace when no shared lease owner is available, never dictionary-manager
+  synchronization per row. Typed kernels consume the prepared reader's physical
+  tag, which does not determine SQL types.
+  Cold automatic bulk reads materialize only their selected rows into one
+  batch-owned arena, using existing invocation-local `TextScratch`; outputs
+  never borrow the scratch. Scalar probes and explicit compressed/bigram
+  consumers retain compressed handles. Prefix/overlay preparation propagates
+  child reader ownership rather than bypassing its representation or lease.
+  Computed readers retain existing child ColumnReaders and carry operator
+  ownership through their release chain. A complete materialized main binds its
+  own representation and leaves unused inputs unprepared. Partially cached
+  inputs keep optional cache reuse, since their consumed extent is not yet
+  established. Reader setup releases already bound children on failure. Later
+  main replacement or appended rows retain the existing delta/repair semantics.
+  Point repair carries the caller's existing shard-read capability and uses
+  compressed input access, without appending row-bound statement releases.
+  `batchStringReader.demandedWorkBytes` counts copying and compressed-block
+  replay for only already selected values at batch boundaries. Raw blocks add
+  no decode work. Once this demanded work covers the immutable dictionary,
+  its private `decoded` workspace replaces repeated batch copies; no shared
+  admission or statement bookkeeping is performed in scalar probes. Optional
+  `JITBatchValueType` describes only this prepared bulk representation at the
+  existing filter/reducer setup boundaries; scalar tags and SQL types remain
+  separate. The direct row-bound RecMap fallback keeps compressed readers;
+  selected-domain batch mappers own prepared dictionary work.
+  `shardqueue.sortReaders` owns comparison-only leases prepared after candidate
+  filtering for an actual local sort. Construction failure releases them; a
+  completed queue transfers ownership to its global/direct ordered consumer.
+  Completion, early LIMIT and panic/cancellation cleanup join producers and
+  release queued readers exactly once, including queues removed from the heap.
+  `TxContext.queryReaderReleases` is protected by its mutex and drained by
+  panic-safe `endQuery`; non-statement consumers release their prepared reader
+  explicitly. Usage timestamps change only during preparation. None of this
+  process-local cache or lease state is persisted.

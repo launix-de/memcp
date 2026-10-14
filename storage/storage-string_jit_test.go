@@ -27,7 +27,7 @@ import (
 func buildStorageString(values []scm.Scmer) *StorageString {
 	col := buildViaCompression(len(values), func(i int) scm.Scmer { return values[i] })
 	if ss, ok := col.(*StorageString); ok {
-		return ss
+		return rawStringFixture(ss)
 	}
 	// If compression chose a different type, force StorageString
 	s := new(StorageString)
@@ -40,7 +40,7 @@ func buildStorageString(values []scm.Scmer) *StorageString {
 		s.build(uint32(i), v)
 	}
 	s.finish()
-	return s
+	return rawStringFixture(s)
 }
 
 func TestStorageStringJITEmit(t *testing.T) {

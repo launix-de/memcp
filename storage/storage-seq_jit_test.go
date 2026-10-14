@@ -373,7 +373,7 @@ func TestStorageSeqIntegerRepresentation(t *testing.T) {
 	}
 	for name, col := range map[string]*StorageSeq{"built": s, "restored": &restored} {
 		t.Run(name, func(t *testing.T) {
-			for _, reader := range []bulkReadable{col, col.GetCachedReader()} {
+			for _, reader := range []bulkReadable{col, col.GetCachedReader(ReadCompressed)} {
 				for i, want := range values {
 					check(t, reader.GetValue(uint32(i)), want)
 				}

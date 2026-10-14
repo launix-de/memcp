@@ -83,6 +83,14 @@ func (s *StorageString) JITValueType() uint8 {
 	if s.stringHasNull() {
 		return scm.JITTypeUnknown
 	}
+	if s.bufferHandles {
+		// Empty entries retain TagString. A positive minimum length proves
+		// that every main-row value uses the selected compressed handle tag.
+		if s.lens.offset <= 0 {
+			return scm.JITTypeUnknown
+		}
+		return scm.TagLZ4
+	}
 	switch s.format {
 	case FormatRaw:
 		return scm.TagString
@@ -138,7 +146,7 @@ func (s *OverlayBlob) JITValueType() uint8 {
 	}
 	tag := s.Base.JITValueType()
 	switch tag {
-	case scm.TagCString, scm.TagBString:
+	case scm.TagCString, scm.TagBString, scm.TagLZ4:
 		// Resolving a blob marker materializes TagString, whereas an ordinary
 		// compressed value passes through unchanged.
 		return scm.JITTypeUnknown

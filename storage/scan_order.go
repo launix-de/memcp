@@ -424,6 +424,7 @@ type shardqueue struct {
 	candidateCount  int64
 	err             scanError
 	scols           []func(uint32) scm.Scmer // sort criteria column reader
+	sortReaders     []ColumnReader           // queue-owned comparison leases, retained through global merge
 	sortdirs        []func(...scm.Scmer) scm.Scmer
 	sortless        []func(scm.Scmer, scm.Scmer) bool
 	mapper          *ShardMapReducer
@@ -431,6 +432,15 @@ type shardqueue struct {
 	callbackCols    []string  // per-table map columns (for multi-table merge)
 	callback        scm.Scmer // per-table map function (for multi-table merge)
 	tableIdx        int       // index into scanOrderMulti tables slice; 0 for single-table scan_order
+}
+
+// A queue owns prepared comparison readers until its ordered consumer finishes.
+// Shard construction releases them on panic; successful construction transfers
+// them to global/direct consumption, including early LIMIT and cancellation.
+func (s *shardqueue) closeReaders() {
+	readers := s.sortReaders
+	s.sortReaders = nil
+	releaseColumnReaders(readers)
 }
 
 const directScanOrderColumns = 8
@@ -983,6 +993,39 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	var q globalqueue
 	resultChannels := make([]chan scanOrderResult, 0, len(tables))
 	doneChannels := make([]<-chan struct{}, 0, len(tables))
+	var ownedQueues []*shardqueue
+	defer func() {
+		// Producers have bounded result channels. On an early error, join them
+		// before draining uncollected ownership; no producer can outlive cleanup.
+		for _, done := range doneChannels {
+			<-done
+		}
+		for _, channel := range resultChannels {
+		drain:
+			for {
+				select {
+				case message, ok := <-channel:
+					if !ok {
+						break drain
+					}
+					if message.res != nil {
+						message.res.closeReaders()
+					}
+				default:
+					break drain
+				}
+			}
+		}
+		for _, queue := range ownedQueues {
+			queue.closeReaders()
+			if queue.mapper != nil {
+				queue.mapper.Close()
+			}
+			if queue.postOrderMapper != nil {
+				queue.postOrderMapper.Close()
+			}
+		}
+	}()
 	querySeq := querySeqFromTx(currentTx)
 	stats := make([]scanOrderStats, len(tables))
 
@@ -1177,6 +1220,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	for _, q_ := range resultChannels {
 		close(q_)
 		for msg := range q_ {
+			if msg.res != nil {
+				ownedQueues = append(ownedQueues, msg.res)
+			}
 			if msg.err.r != nil {
 				if scanErr.r == nil {
 					scanErr = msg.err
@@ -1455,6 +1501,7 @@ func flushDirectScanOrder(mapper *ShardMapReducer, accumulator scm.Scmer, stream
 }
 
 func consumeDirectScanOrder(queue *shardqueue, spec *scanOrderTableSpec, currentTx *TxContext, limitPartitionCols, offset, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) (scm.Scmer, bool, int64) {
+	defer queue.closeReaders()
 	if len(queue.items) == 0 {
 		return directScanOrderNullResult(spec.callbackCols, spec.callback, neutral, isOuter, notFoundValue), false, 0
 	}
@@ -1836,6 +1883,12 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 
 func (t *storageShard) scan_order(access scanAccess, conditionCols []string, condition scm.Scmer, acceptCols []string, accept scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
 	result = new(shardqueue)
+	complete := false
+	defer func() {
+		if !complete {
+			result.closeReaders()
+		}
+	}()
 	result.shard = t
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
@@ -1863,63 +1916,6 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 	adataset := make([]scm.Scmer, len(acceptCols))
 	for i := range adataset {
 		adataset[i] = scm.NewNil()
-	}
-
-	// prepare sort criteria so they can be queried easily
-	result.scols = make([]func(uint32) scm.Scmer, len(sortcols))
-	for i, scol := range sortcols {
-		if scol.IsCustom(TagRecSetOrder) {
-			order := (*recSetOrder)(scol.Custom(TagRecSetOrder))
-			result.scols[i] = func(idx uint32) scm.Scmer {
-				rank, ok := order.rank(t, idx)
-				if !ok {
-					return scm.NewInt(math.MaxInt64)
-				}
-				return scm.NewInt(rank)
-			}
-			continue
-		}
-		if scol.IsString() {
-			colname := scol.String()
-			result.scols[i] = t.ColumnReaderTx(currentTx, colname, false)
-			continue
-		}
-		if scol.IsProc() {
-			proc := scol.Proc()
-			var params []scm.Scmer
-			if proc.Params.IsSlice() {
-				params = proc.Params.Slice()
-			} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
-				params = arr
-			}
-			largs := make([]func(uint32) scm.Scmer, len(params))
-			for j, param := range params {
-				name := ""
-				if param.IsSymbol() {
-					name = param.String()
-				} else if sym, ok := param.Any().(scm.Symbol); ok {
-					name = string(sym)
-				} else {
-					name = scm.String(param)
-				}
-				if name == "$tx" {
-					txValue := scm.NewAny(currentTx)
-					largs[j] = func(uint32) scm.Scmer { return txValue }
-				} else {
-					largs[j] = t.ColumnReaderTx(currentTx, name, false)
-				}
-			}
-			procFn := scm.PrepareSerialProc(scol)
-			vals := make([]scm.Scmer, len(largs))
-			result.scols[i] = func(idx uint32) scm.Scmer {
-				for j, getter := range largs {
-					vals[j] = getter(idx)
-				}
-				return procFn.Call(vals)
-			}
-			continue
-		}
-		panic("unknown sort criteria: " + scm.String(scol))
 	}
 
 	adjustedSortdirs := sortdirs
@@ -1953,10 +1949,9 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false)
-			if _, ok := ccols[i].(*StorageComputeProxy); ok {
-				cNeedsCachedReader[i] = true
-			}
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned)
+			defer ReleaseColumnReader(cReaders[i])
+			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
 			reader := ColumnReader(ccols[i])
 			if cNeedsCachedReader[i] {
 				reader = cReaders[i]
@@ -1970,10 +1965,9 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 	aMultiFuncs := make([]scm.JITStorageGetValueMultiFunc, len(acceptCols))
 	for i, column := range acceptCols {
 		acols[i] = t.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
-		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx, false)
-		if _, ok := acols[i].(*StorageComputeProxy); ok {
-			aNeedsCachedReader[i] = true
-		}
+		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx, false, ReadAuto|readOperatorOwned)
+		defer ReleaseColumnReader(aReaders[i])
+		aNeedsCachedReader[i] = columnReaderRequiresBinding(acols[i], aReaders[i])
 		reader := ColumnReader(acols[i])
 		if aNeedsCachedReader[i] {
 			reader = aReaders[i]
@@ -2120,10 +2114,8 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 							for i, k := range conditionCols {
 								if conditionGetters[i] != nil {
 									cdataset[i] = conditionGetters[i](idx, 0)
-								} else if cNeedsCachedReader[i] {
-									cdataset[i] = cReaders[i].GetValue(idx)
 								} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
-									cdataset[i] = ccols[i].GetValue(idx)
+									cdataset[i] = cReaders[i].GetValue(idx)
 								} else {
 									cdataset[i] = t.getDelta(int(idx-t.main_count), k)
 								}
@@ -2176,10 +2168,8 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 						mainBufIdx++
 					} else {
 						for i, column := range acceptCols {
-							if aNeedsCachedReader[i] {
+							if _, isProxy := acols[i].(*StorageComputeProxy); isProxy {
 								adataset[i] = aReaders[i].GetValue(idx)
-							} else if _, isProxy := acols[i].(*StorageComputeProxy); isProxy {
-								adataset[i] = acols[i].GetValue(idx)
 							} else {
 								adataset[i] = t.getDelta(int(idx-t.main_count), column)
 							}
@@ -2213,7 +2203,74 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 		result.items = result.items[:resultN]
 	}()
 
-	// and now sort result!
+	// Bind comparison keys, then sort the already filtered candidate set.
+	// Comparison readers bind only after candidate filtering. The queue owns
+	// their lifetime through the global merge, including nil/parked transactions.
+	sortReadHints := ReadAuto | readOperatorOwned
+	if !resultAlreadySorted && len(result.items) > 1 {
+		sortReadHints = ReadDecoded | readOperatorOwned
+	}
+	// prepare sort criteria so they can be queried easily
+	result.scols = make([]func(uint32) scm.Scmer, len(sortcols))
+	for i, scol := range sortcols {
+		if scol.IsCustom(TagRecSetOrder) {
+			order := (*recSetOrder)(scol.Custom(TagRecSetOrder))
+			result.scols[i] = func(idx uint32) scm.Scmer {
+				rank, ok := order.rank(t, idx)
+				if !ok {
+					return scm.NewInt(math.MaxInt64)
+				}
+				return scm.NewInt(rank)
+			}
+			continue
+		}
+		if scol.IsString() {
+			colname := scol.String()
+			reader := t.ColumnReaderTx(currentTx, colname, false, sortReadHints)
+			result.sortReaders = append(result.sortReaders, reader)
+			result.scols[i] = reader.GetValue
+			continue
+		}
+		if scol.IsProc() {
+			proc := scol.Proc()
+			var params []scm.Scmer
+			if proc.Params.IsSlice() {
+				params = proc.Params.Slice()
+			} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
+				params = arr
+			}
+			largs := make([]func(uint32) scm.Scmer, len(params))
+			for j, param := range params {
+				name := ""
+				if param.IsSymbol() {
+					name = param.String()
+				} else if sym, ok := param.Any().(scm.Symbol); ok {
+					name = string(sym)
+				} else {
+					name = scm.String(param)
+				}
+				if name == "$tx" {
+					txValue := scm.NewAny(currentTx)
+					largs[j] = func(uint32) scm.Scmer { return txValue }
+				} else {
+					reader := t.ColumnReaderTx(currentTx, name, false, sortReadHints)
+					result.sortReaders = append(result.sortReaders, reader)
+					largs[j] = reader.GetValue
+				}
+			}
+			procFn := scm.PrepareSerialProc(scol)
+			vals := make([]scm.Scmer, len(largs))
+			result.scols[i] = func(idx uint32) scm.Scmer {
+				for j, getter := range largs {
+					vals[j] = getter(idx)
+				}
+				return procFn.Call(vals)
+			}
+			continue
+		}
+		panic("unknown sort criteria: " + scm.String(scol))
+	}
+
 	result.sortdirs = adjustedSortdirs
 	result.sortless = make([]func(scm.Scmer, scm.Scmer) bool, len(adjustedSortdirs))
 	for i, relation := range adjustedSortdirs {
@@ -2312,5 +2369,6 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 		}
 		result.items = pruned
 	}
+	complete = true
 	return
 }

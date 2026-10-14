@@ -223,6 +223,9 @@ func (v stringView) matchRange(start int, pattern string, fold bool) (bool, bool
 }
 
 func cstringSubstring(s Scmer, start, end int) Scmer {
+	if s.IsBufferString() {
+		return bufferSubstring(s, start, end)
+	}
 	v, ok := makeOperatorView(s)
 	if !ok {
 		return NewString(s.String()[start:end])
@@ -458,6 +461,9 @@ func compareCString(a, b Scmer, fold bool) (int, bool) {
 }
 
 func equalStringValues(a, b Scmer, fold bool) bool {
+	if (a.IsBufferString() || b.IsBufferString()) && (a.IsString() || a.IsSymbol()) && (b.IsString() || b.IsSymbol()) {
+		return equalBufferText(a, b, fold)
+	}
 	if a.GetTag() == tagCString || b.GetTag() == tagCString {
 		av, aok := makeStringView(a)
 		bv, bok := makeStringView(b)
@@ -493,6 +499,9 @@ func equalStringValues(a, b Scmer, fold bool) bool {
 // General collation deliberately keeps its historical leading-aa class and
 // binary ordering inside the non-letter class, including descending order.
 func generalCStringLess(a, b Scmer, reverse bool) (bool, bool) {
+	if (a.IsBufferString() || b.IsBufferString()) && (a.IsString() || a.IsSymbol()) && (b.IsString() || b.IsSymbol()) {
+		return generalBufferLess(a, b, reverse), true
+	}
 	av, ok := makeStringView(a)
 	if !ok {
 		return false, false
@@ -536,6 +545,9 @@ func generalCStringLess(a, b Scmer, reverse bool) (bool, bool) {
 // suffixes and wildcard backtracking possible without a decoded copy. For
 // literal contains, decode overlapping stack chunks to use strings.Contains.
 func strLikeCString(value Scmer, pattern, collation string) (bool, bool) {
+	if value.IsBufferString() {
+		return bufferLike(value, pattern, strings.Contains(strings.ToLower(collation), "_ci")), true
+	}
 	v, ok := makeOperatorView(value)
 	if !ok || (v.format == 0 && v.base64 == "") {
 		return false, false

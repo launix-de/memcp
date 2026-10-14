@@ -525,7 +525,7 @@ func BenchmarkFilterBufferLocalScan(b *testing.B) {
 			values[row] = scm.NewInt(int64(row + i))
 		}
 		storage := buildStorageInt(values)
-		readers[i] = newCachedColumnReaderTx(storage, nil, false)
+		readers[i] = newCachedColumnReaderTx(storage, nil, false, ReadAuto)
 		emitters[i] = storage.JITEmit
 		valueTypes[i] = storage.JITValueType()
 	}
@@ -714,7 +714,7 @@ func TestTypedFilterMixedMainDelta(t *testing.T) {
 	shard.inserts = [][]scm.Scmer{{scm.NewFloat(3.5)}, {scm.NewNil()}}
 	shard.mu.Unlock()
 	column := shard.getColumnStorageOrPanic("amount", false, nil)
-	readers := []ColumnReader{newCachedColumnReaderTx(column, nil, false)}
+	readers := []ColumnReader{newCachedColumnReaderTx(column, nil, false, ReadAuto)}
 	predicate := benchmarkMapReduceFusionProc(t, "(lambda (a) (> a 2))")
 	kernel := scm.CompileJITFilterBuffer(predicate.Proc(), []uint8{column.JITValueType()})
 	if kernel == nil {

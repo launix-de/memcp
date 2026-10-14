@@ -1020,7 +1020,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 							// Old shard has plain storage for this column — read values directly
 							func() {
 								defer oldShard.mu.RUnlock()
-								reader := oldShard.ColumnReaderTx(nil, col.Name, true)
+								reader := oldShard.ColumnReaderTx(nil, col.Name, true, ReadAuto).GetValue
 								for _, item := range items {
 									val := reader(uint32(item))
 									newProxy.setDeltaValueLocked(newIdx, val)
@@ -1047,7 +1047,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 						func() {
 							oldShard.mu.RLock()
 							defer oldShard.mu.RUnlock()
-							reader := oldShard.ColumnReaderTx(nil, col.Name, true)
+							reader := oldShard.ColumnReaderTx(nil, col.Name, true, ReadAuto).GetValue
 							for _, item := range items {
 								values[i] = reader(uint32(item))
 								i++

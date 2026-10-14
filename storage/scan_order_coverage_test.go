@@ -387,6 +387,103 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 	}
 }
 
+func TestOrderedComparisonReaderLifetime(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "torderedreaderownership")
+	tbl.CreateColumn("label", "TEXT", nil, nil)
+	inputs := []string{"report zebra", "report alpha", "report middle"}
+	values := make([][]scm.Scmer, len(inputs))
+	for i, value := range inputs {
+		values[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString(value)}
+	}
+	tbl.Insert([]string{"id", "label"}, values, nil, scm.NewNil(), false, nil)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
+	// Keep a genuine current compressed dictionary as this generation's
+	// comparison column rather than relying on adaptive format selection.
+	var source StorageString
+	source.prepare()
+	for i, value := range inputs {
+		source.scan(uint32(i), scm.NewString(value))
+	}
+	source.init(uint32(len(inputs)))
+	for i, value := range inputs {
+		source.build(uint32(i), scm.NewString(value))
+	}
+	source.finish()
+	shard.mu.Lock()
+	shard.columns["label"] = &source
+	shard.mu.Unlock()
+	_, order := persistableTestOrder(false)
+	sortcols := []scm.Scmer{scm.NewString("label")}
+	sortdirs := []func(...scm.Scmer) scm.Scmer{order}
+	run := func() *shardqueue {
+		return shard.scan_order(scanAccess{}, nil, trueCondition(), nil, scm.NewNil(),
+			sortcols, sortdirs, 0, 0, 2, nil, nil, nil)
+	}
+	queue := run()
+	if source.EvictDictionary() != 0 || queue.scols[0](queue.items[0]).String() != inputs[1] {
+		t.Fatal("shard return released the queue's comparison reader")
+	}
+	consumeDirectScanOrder(queue, &scanOrderTableSpec{callback: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		return scm.NewInt(1)
+	})}, nil, 0, 0, 1, scm.NewInt(0), false, scm.NewInt(0))
+	if source.EvictDictionary() <= 0 {
+		t.Fatal("early direct LIMIT retained the completed queue reader")
+	}
+	queue = run()
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("consumer panic was lost")
+			}
+		}()
+		consumeDirectScanOrder(queue, &scanOrderTableSpec{callback: scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+			panic("consumer failed")
+		})}, nil, 0, 0, 1, scm.NewInt(0), false, scm.NewInt(0))
+	}()
+	if source.EvictDictionary() <= 0 {
+		t.Fatal("consumer panic leaked the queue reader")
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("comparison panic was lost")
+			}
+		}()
+		shard.scan_order(scanAccess{}, nil, trueCondition(), nil, scm.NewNil(), sortcols,
+			[]func(...scm.Scmer) scm.Scmer{func(...scm.Scmer) scm.Scmer { panic("comparison failed") }},
+			0, 0, 2, nil, nil, nil)
+	}()
+	if source.EvictDictionary() <= 0 {
+		t.Fatal("comparison panic leaked the queue reader")
+	}
+	// Exercise the cross-shard consumer too: its heap may discard an exhausted
+	// queue before completion, so release ownership cannot live only in the heap.
+	for _, fail := range []bool{false, true} {
+		func() {
+			defer func() {
+				if recovered := recover(); (recovered != nil) != fail {
+					t.Fatalf("global consumer panic = %v, fail = %v", recovered, fail)
+				}
+			}()
+			spec := scanOrderTableSpec{table: tbl, condition: trueCondition(),
+				accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1),
+				sortcols:     sortcols, perTableOffset: -1, perTableLimit: -1,
+				callback: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+					if fail {
+						panic("global consumer failed")
+					}
+					return scm.NewInt(1)
+				})}
+			scanOrderMulti(nil, []scanOrderTableSpec{spec}, sortdirs, 0, 0, 1,
+				scm.NewInt(0), false, scm.NewInt(0))
+		}()
+		if source.EvictDictionary() <= 0 {
+			t.Fatal("global consumer completion retained its queue reader")
+		}
+	}
+}
+
 func TestDirectScanOrderOuterRowSupportsWideProjection(t *testing.T) {
 	columns := make([]string, directScanOrderColumns+1)
 	callback := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {

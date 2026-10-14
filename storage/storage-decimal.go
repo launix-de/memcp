@@ -110,7 +110,9 @@ func (s *StorageDecimal) String() string {
 	return fmt.Sprintf("decimal[1e%d %s]", s.scaleExp, s.inner.String())
 }
 
-func (s *StorageDecimal) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
+func (s *StorageDecimal) GetCachedReader(hints ColumnReadHints) ColumnReader {
+	return s.storageJITFunctions.reader(s)
+}
 
 func (s *StorageDecimal) GetValue(i uint32) scm.Scmer {
 	raw := s.inner.GetValueUInt(i)

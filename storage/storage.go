@@ -37,7 +37,7 @@ import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
 // ColumnReader provides sequential-access-optimized reads. Returned by
-// ColumnStorage.GetCachedReader(). Must not be shared between goroutines.
+// ColumnStorage.GetCachedReader(ReadCompressed). Must not be shared between goroutines.
 //
 // GetValueMulti and GetValueRange are bulk counterparts to GetValue that
 // amortize per-call overhead (interface dispatch, binary search, shared
@@ -61,6 +61,39 @@ type ColumnReader interface {
 	GetValue(uint32) scm.Scmer
 	GetValueMulti(recids []uint32, target []scm.Scmer, stride int)
 	GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int)
+}
+
+// ColumnReadHints describe operator demand, not a storage or SQL type. Hints
+// are resolved once during preparation; row and comparison loops do not change
+// shared cache state. ReadAuto borrows an existing decoded dictionary within a
+// statement, but never causes a full decode. ReadCompressed deliberately avoids
+// it (e.g. bigram walks). ReadDecoded amortizes decoding over repeated compares.
+type ColumnReadHints uint8
+
+const (
+	ReadAuto ColumnReadHints = iota
+	ReadCompressed
+	ReadDecoded
+)
+
+// readOperatorOwned records an existing synchronous operator's responsibility
+// to release its prepared reader. It permits decoded-cache reuse without a
+// statement owner; the representation hint remains the low bits above.
+const readOperatorOwned ColumnReadHints = 4
+
+// ReleaseColumnReader releases an optional prepared-reader lease. Readers
+// bound to a statement are released by endQuery. Other consumers must defer
+// this helper and stop using both the reader and its borrowed values first.
+func ReleaseColumnReader(reader ColumnReader) {
+	if leased, ok := reader.(interface{ release() }); ok {
+		leased.release()
+	}
+}
+
+func releaseColumnReaders(readers []ColumnReader) {
+	for _, reader := range readers {
+		ReleaseColumnReader(reader)
+	}
 }
 
 type ColumnReaderFunc func(uint32) scm.Scmer
@@ -96,7 +129,7 @@ func (f ColumnReaderFunc) GetValueRange(recid uint32, count uint32, target []scm
 // the legacy GetCachedReader path. The boolean records an already-held shard
 // lock and must propagate when binding computed-column dependencies.
 type TxColumnReaderProvider interface {
-	GetCachedReaderTx(*TxContext, bool) ColumnReader
+	GetCachedReaderTx(*TxContext, bool, ColumnReadHints) ColumnReader
 }
 
 func scmerToTxContext(v scm.Scmer) *TxContext {
@@ -212,8 +245,8 @@ type ColumnStorage interface {
 	GetJITGetValue() scm.JITStorageGetValueFunc
 	GetJITGetValueMulti() scm.JITStorageGetValueMultiFunc
 	GetJITGetValueRange() scm.JITStorageGetValueRangeFunc
-	GetCachedReader() ColumnReader // returns a per-goroutine cached reader for O(1) sequential access
-	String() string                // self-description
+	GetCachedReader(ColumnReadHints) ColumnReader // returns a per-goroutine cached reader for O(1) sequential access
+	String() string                               // self-description
 	scm.Sizable
 
 	// buildup functions 1) prepare 2) scan, 3) proposeCompression(), if != nil repeat at 1, 4) init, 5) build; all values are passed through twice

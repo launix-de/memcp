@@ -983,7 +983,7 @@ func TestShardRebuildUpdatePropagationUsesStableTranslation(t *testing.T) {
 	rebuilt.mu.RLock()
 	rowOneDeleted := rebuilt.deletions.Get(1)
 	rebuilt.mu.RUnlock()
-	got := rebuilt.ColumnReaderTx(nil, "payload", false)(2)
+	got := rebuilt.ColumnReaderTx(nil, "payload", false, ReadAuto).GetValue(2)
 	if !rowOneDeleted || got.String() != "two-updated" {
 		t.Fatalf("rebuilt update state = (deleted=%v, payload=%v), want (true, two-updated)", rowOneDeleted, got)
 	}
@@ -2756,7 +2756,13 @@ func TestIndexComputedReadersRespectHeldShardLock(t *testing.T) {
 				index.ColMapFn = []scm.Scmer{scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[0] })}
 			}
 			done := make(chan []colGetter, 1)
-			go func() { done <- index.buildGetters(nil, nil) }()
+			go func() {
+				getters := index.buildGetters(nil, nil)
+				// Sorting must keep the same lock capability while preparing its
+				// operator-specific reader and immutable boundary values.
+				index.buildIndex(&index.baseState, getters, nil)
+				done <- getters
+			}()
 			var getters []colGetter
 			select {
 			case getters = <-done:
@@ -2767,6 +2773,7 @@ func TestIndexComputedReadersRespectHeldShardLock(t *testing.T) {
 				getters = <-done
 				t.Error("index reader recursively acquired the held shard lock")
 			}
+			defer releaseIndexGetters(getters)
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
 			if got := getters[0].get(0); got.Int() != 14 {
@@ -2825,6 +2832,11 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 				upper: scm.NewString("row-00000001"), upperInclusive: true,
 			}})
 			shard.ensureScanAccessColumns(access, false, nil)
+			// The manual cleanup below exercises CacheManager-owned ledger
+			// internals. Pause/resume its existing worker, as other ownership
+			// tests do, so this test is the sole eviction caller.
+			GlobalCache.Stop()
+			defer resumeOwnershipTestCache()
 			var freed [numEvictableTypes]int64
 			if cleanup(shard, &freed) {
 				t.Fatal("eviction detached a prepared column while a read was active")
@@ -2834,6 +2846,7 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 				defer shard.mu.RUnlock()
 				index := &StorageIndex{t: shard, Cols: []string{"payload"}}
 				getters := index.buildGetters(nil, nil)
+				defer releaseIndexGetters(getters)
 				if got := getters[0].get(0).String(); got != "row-00000001" {
 					t.Fatalf("prepared index value = %q", got)
 				}
@@ -2846,7 +2859,7 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 			if engine == Safe {
 				release = shard.GetRead(nil)
 				shard.ensureScanAccessColumns(access, false, nil)
-				if got := shard.ColumnReaderTx(nil, "payload", false)(0).String(); got != "row-00000001" {
+				if got := shard.ColumnReaderTx(nil, "payload", false, ReadAuto).GetValue(0).String(); got != "row-00000001" {
 					t.Fatalf("durable value after eviction/reload = %q", got)
 				}
 			}
@@ -2924,7 +2937,7 @@ func TestNewShardRetainsComputedColumnDefinition(t *testing.T) {
 			shard.inserts = [][]scm.Scmer{{scm.NewInt(7)}, {scm.NewInt(11)}}
 			release := shard.GetRead(nil)
 			defer release.Release()
-			reader := shard.ColumnReaderTx(nil, "computed", false)
+			reader := shard.ColumnReaderTx(nil, "computed", false, ReadAuto).GetValue
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
 			for i, want := range []int{14, 22} {

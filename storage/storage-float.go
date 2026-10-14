@@ -316,7 +316,9 @@ func (s *StorageFloat) deserializeFloatV0(f io.Reader) uint {
 	return uint(l)
 }
 
-func (s *StorageFloat) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
+func (s *StorageFloat) GetCachedReader(hints ColumnReadHints) ColumnReader {
+	return s.storageJITFunctions.reader(s)
+}
 
 func (s *StorageFloat) GetValue(i uint32) scm.Scmer {
 	// NULL is encoded as NaN in SQL

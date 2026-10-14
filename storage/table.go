@@ -1098,7 +1098,7 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 				buf = make([]scm.Scmer, shard.main_count)
 			}
 			buf = buf[:shard.main_count]
-			reader := columnStorage.GetCachedReader()
+			reader := columnStorage.GetCachedReader(ReadCompressed)
 			reader.GetValueRange(0, shard.main_count, buf, 1)
 			for _, value := range buf {
 				frequencies.observe(value)
@@ -2183,7 +2183,7 @@ func (c *column) UpdateSanitizer() {
 	case "INT", "INTEGER", "BIGINT", "SMALLINT", "MEDIUMINT", "TINYINT":
 		inner = func(v scm.Scmer) scm.Scmer {
 			tag := v.GetTag()
-			if tag == scm.TagString || tag == scm.TagSymbol {
+			if tag == scm.TagString || tag == scm.TagSymbol || v.IsBufferString() {
 				s := v.String()
 				// MySQL-compatible: parse leading integer part of string (e.g. "2026-03-11" -> 2026)
 				i := 0
@@ -2206,7 +2206,7 @@ func (c *column) UpdateSanitizer() {
 	case "FLOAT", "DOUBLE", "REAL":
 		inner = func(v scm.Scmer) scm.Scmer {
 			tag := v.GetTag()
-			if tag == scm.TagString || tag == scm.TagSymbol {
+			if tag == scm.TagString || tag == scm.TagSymbol || v.IsBufferString() {
 				if _, err := strconv.ParseFloat(v.String(), 64); err != nil {
 					panic("cannot convert string to FLOAT for column " + name + ": " + v.String())
 				}
@@ -2217,7 +2217,7 @@ func (c *column) UpdateSanitizer() {
 		dims := c.Typdimensions
 		inner = func(v scm.Scmer) scm.Scmer {
 			tag := v.GetTag()
-			if tag == scm.TagString || tag == scm.TagSymbol {
+			if tag == scm.TagString || tag == scm.TagSymbol || v.IsBufferString() {
 				if _, err := strconv.ParseFloat(v.String(), 64); err != nil {
 					panic("cannot convert string to DECIMAL for column " + name + ": " + v.String())
 				}
@@ -3753,7 +3753,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 								}
 							}
 						} else {
-							params[i] = s.ColumnReaderTx(currentTx, p, false)(uid)
+							params[i] = s.ColumnReaderTx(currentTx, p, false, ReadAuto).GetValue(uid)
 						}
 					}
 					failure(uniq.Id, params) // notify about failure while unlocked

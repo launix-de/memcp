@@ -101,7 +101,7 @@ func (scanner *foldableCSEScanner) walk(location *Scmer, top int, guaranteed boo
 	}
 	if !value.IsSlice() {
 		switch value.GetTag() {
-		case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagNthLocalVar, tagCString, tagBString:
+		case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagNthLocalVar, tagCString, tagBString, tagLZ4:
 			return scanner.scalarInfo(value)
 		default:
 			return foldableCSEInfo{}
