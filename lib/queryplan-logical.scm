@@ -6808,6 +6808,17 @@ names in projections, predicates, and correlated subqueries. */
 			(qb_stages inner)
 			(qb_facts inner)))))
 
+/* Name binding has already expanded output aliases to their expressions.
+When distributing a projection over UNION, restore references to the new
+output slots; the UNION order belongs to that projection, not the old source. */
+(define union_wrapper_output_order (lambda (block)
+	(map (coalesceNil (qb_order block) '()) (lambda (item) (match item
+		'(expr direction) (begin
+			(define title (find (extract_assoc (qb_fields block) (lambda (title projected)
+				(if (equal? expr projected) title nil))) (lambda (title) (not (nil? title))) nil))
+			(list (if (nil? title) expr (list (quote get_column) nil false title false)) direction))
+		_ item)))))
+
 (define rewrite_query_block_over_union_source (lambda (block src)
 	(begin
 		(if (not (union_wrapper_rewrite_allowed? block))
@@ -6819,7 +6830,11 @@ names in projections, predicates, and correlated subqueries. */
 					(union_mode relation)
 					(map (union_branches relation) (lambda (branch)
 						(wrap_union_branch_query block (source_alias src) branch canonical_fields)))
-					(if (empty_list? (qb_order block)) (union_order relation) (qb_order block))
+					(if (empty_list? (qb_order block)) (union_order relation)
+						(equal? (union_mode relation) (quote all)) (union_wrapper_output_order block)
+						/* DISTINCT lowering does not yet preserve these computed output
+						order slots. Retain its explicit unsupported-shape rejection. */
+						(qb_order block))
 					(coalesceNil (qb_limit block) (union_limit relation))
 					(coalesceNil (qb_offset block) (union_offset relation))
 					(union_facts relation)))))))

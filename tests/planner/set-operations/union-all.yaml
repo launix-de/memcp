@@ -1150,6 +1150,44 @@ test_cases:
         - {prefix: null, suffix: 103}
         - {prefix: null, suffix: 103}
 
+  - name: Derived UNION restores computed projection order slots
+    sql: SELECT d.n+1 AS next_n FROM (SELECT 2 AS n UNION ALL SELECT 1 AS n) d ORDER BY next_n
+    expect:
+      rows: 2
+      data:
+      - next_n: 2
+      - next_n: 3
+  - name: Derived UNION orders by a computed descending slot
+    sql: SELECT d.n*2 AS twice FROM (SELECT 1 AS n UNION ALL SELECT 3 AS n UNION ALL SELECT 2 AS n) d ORDER BY twice DESC
+    expect:
+      rows: 3
+      data:
+      - twice: 6
+      - twice: 4
+      - twice: 2
+  - name: Derived UNION preserves projected NULL in output ordering
+    sql: SELECT d.n+1 AS next_n FROM (SELECT NULL AS n UNION ALL SELECT 2 AS n UNION ALL SELECT 1 AS n) d ORDER BY next_n
+    expect:
+      rows: 3
+      data:
+      - next_n: null
+      - next_n: 2
+      - next_n: 3
+
+  - name: Derived UNION DISTINCT rejects unsupported computed output order
+    sql: SELECT d.n+1 AS next_n FROM (SELECT 2 AS n UNION SELECT 1 AS n UNION SELECT 2 AS n) d ORDER BY next_n
+    expect:
+      error: true
+
+  - name: Derived UNION DISTINCT must preserve computed output ordering
+    sql: SELECT d.n+1 AS next_n FROM (SELECT 2 AS n UNION SELECT 1 AS n UNION SELECT 2 AS n) d ORDER BY next_n
+    expect:
+      rows: 2
+      data:
+      - next_n: 2
+      - next_n: 3
+    noncritical: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS ua_period"
   - sql: "DROP TABLE IF EXISTS ua_site"
