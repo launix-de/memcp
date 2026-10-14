@@ -312,12 +312,16 @@ control state. Every predicate/leaf gets the normal cancellable statement scope.
 		'("execute-dynamic" expression) (begin
 			(define text (statement "dynamic SQL text" false (lambda (tx)
 				(tsql_scalar_value schema expression session tx "dynamic" nil))))
-			(tsql_execute_dynamic schema text '() '() statement session resultrow resultfields))
+			(tsql_execute_dynamic schema text '() '() statement session resultrow resultfields
+				(lambda (result _status) result)))
 		_ (error "unsupported batch command")))))
-(define tsql_execute_command_batch (lambda (schema commands declarations supplied statement caller resultrow resultfields) (begin
+(define tsql_execute_command_batch (lambda (schema commands declarations supplied statement caller resultrow resultfields finish) (begin
 	(define scoped (tsql_scope_session caller (tsql_batch_contracts commands declarations) schema))
 	(map supplied (lambda (item) (scoped (concat "__tsql_parameter:" (car item)) (cadr item))))
-	(tsql_run_commands commands statement scoped resultrow resultfields))))
+	/* Completion and the declared INT return status are different contracts.
+	Evaluate the SQL commands before reading their lexical scope's status. */
+	(finish (tsql_run_commands commands statement scoped resultrow resultfields)
+		(coalesceNil ((tsql_identity_scope scoped) "__tsql_return_status") 0)))))
 (define tsql_execute_batches (lambda (schema text session statement resultrow resultfields) (begin
 	(session "schema" schema)
 	(session "__tsql_connection_session" (tsql_connection_session session))
@@ -329,7 +333,8 @@ control state. Every predicate/leaf gets the normal cancellable statement scope.
 			(list "syntax" (parse_tsql_batch schema (batch "text")) "repeat" (batch "repeat")))))))
 	(reduce batches (lambda (_result batch) (reduce (produceN (batch "repeat")) (lambda (_result _iteration) (begin
 		(define commands (cadr (batch "syntax")))
-		(tsql_execute_command_batch schema commands inherited supplied statement session resultrow resultfields))) 0)) 0))))
+		(tsql_execute_command_batch schema commands inherited supplied statement session resultrow resultfields
+			(lambda (result _status) result)))) 0)) 0))))
 (define tsql_execute_request (lambda (schema text session state sequence resultrow resultfields)
 	(with_query_request session state sequence text (lambda (statement)
 		(tsql_execute_batches schema text session statement resultrow resultfields)))))
@@ -362,7 +367,7 @@ statement owner, account, transaction session, arguments and output callbacks. *
 				(list (list (quote tsql_identity_scope) (quote session)) "__tsql_return_status") 0)))))))
 
 (registerprocedurelanguage "tsql-procedure" tsql_procedure_compile)
-(define tsql_execute_dynamic (lambda (schema text declarations values statement caller resultrow resultfields) (begin
+(define tsql_execute_dynamic (lambda (schema text declarations values statement caller resultrow resultfields finish) (begin
 	/* Text and bindings are scalar request inputs. Compilation and all relational
 	execution use the ordinary frontend and planner, with the same statement owner
 	and a new lexical scope. No caller local leaks into a nested dynamic batch. */
@@ -370,7 +375,7 @@ statement owner, account, transaction session, arguments and output callbacks. *
 	/* GO separates submitted scripts, but is not a statement in executed text. */
 	(define syntax (tsql_script_cache "get_or_compute" (json_encode (list schema text "dynamic")) nil
 		(lambda (_tx) (parse_tsql_batch schema text))))
-	(tsql_execute_command_batch schema (cadr syntax) declarations values statement caller resultrow resultfields))))
+	(tsql_execute_command_batch schema (cadr syntax) declarations values statement caller resultrow resultfields finish))))
 (define tsql_execute_parameterized (lambda (schema arguments statement caller resultrow resultfields) (begin
 	(define named (map (produceN (count arguments)) (lambda (i) (begin
 		(define arg (nth arguments i))
@@ -397,7 +402,8 @@ statement owner, account, transaction session, arguments and output callbacks. *
 			(if arg (list (car declaration) (tsql_scalar_value (caller "schema") (cadr arg) caller tx "assignment" (cadr declaration)))
 				(error "missing dynamic SQL input parameter: @" (car declaration)))))))
 		(list text contracts values)))))
-	(tsql_execute_dynamic schema (car binding) (cadr binding) (nth binding 2) statement caller resultrow resultfields))))
+	(tsql_execute_dynamic schema (car binding) (cadr binding) (nth binding 2) statement caller resultrow resultfields
+		(lambda (_result status) status)))))
 (define tsql_invoke_procedure (lambda (schema name arguments statement caller resultrow resultfields)
 	(if (equal? (toLower name) "sp_executesql")
 		(tsql_execute_parameterized (if (equal?? schema "sys") (caller "schema") schema)
@@ -406,7 +412,8 @@ statement owner, account, transaction session, arguments and output callbacks. *
 		(statement "metadata procedure" false (lambda (tx) (begin
 			(define values (map arguments (lambda (argument)
 				(list (car argument) (tsql_scalar_value (caller "schema") (cadr argument) caller tx "value" nil)))))
-			(tsql_execute_metadata schema name values (sql_policy (caller "username")) resultrow resultfields))))
+			(tsql_execute_metadata (if (equal?? schema "sys") (caller "schema") schema)
+				name values (sql_policy (caller "username")) resultrow resultfields))))
 		(begin
 			((sql_policy (caller "username")) schema name false)
 			/* One immutable native snapshot owns both the contract and callable.

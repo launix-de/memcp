@@ -716,4 +716,41 @@ test_cases:
   expect: {error: true}
   cleanup:
   - sql: DROP PROCEDURE IF EXISTS dbo.script_status_proc
+
+- name: System namespace column metadata uses the current database
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_sys_catalog
+  - sql: CREATE TABLE dbo.script_sys_catalog(id INT PRIMARY KEY,label NVARCHAR(16))
+  sql: EXEC sys.sp_columns @table_name=N'script_sys_catalog',@column_name=N'id'
+  expect: {rows: 1, data: [{TABLE_QUALIFIER: memcp-tests, COLUMN_NAME: id, TYPE_NAME: int}]}
+  cleanup:
+  - sql: DROP TABLE dbo.script_sys_catalog
+- name: System namespace key metadata uses actual native constraints
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_sys_catalog
+  - sql: CREATE TABLE dbo.script_sys_catalog(id INT PRIMARY KEY)
+  sql: EXEC sys.sp_pkeys @table_name=N'script_sys_catalog'
+  expect: {rows: 1, data: [{TABLE_QUALIFIER: memcp-tests, TABLE_NAME: script_sys_catalog, COLUMN_NAME: id}]}
+  cleanup:
+  - sql: DROP TABLE dbo.script_sys_catalog
+
+- name: Dynamic procedure status is independent of native insert completion
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_dynamic_status
+  - sql: CREATE TABLE dbo.script_dynamic_status(id INT PRIMARY KEY)
+  sql: DECLARE @status INT=-1; EXEC @status=sys.sp_executesql N'INSERT INTO dbo.script_dynamic_status VALUES(1),(2)'; SELECT @status AS status; SELECT COUNT(*) AS n FROM dbo.script_dynamic_status
+  expect: {rows: 2, data: [{status: 0}, {n: 2}]}
+  cleanup:
+  - sql: DROP TABLE dbo.script_dynamic_status
+- name: Dynamic statement execution retains native affected row completion
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_dynamic_completion
+  - sql: CREATE TABLE dbo.script_dynamic_completion(id INT PRIMARY KEY)
+  sql: EXEC(N'INSERT INTO dbo.script_dynamic_completion VALUES(1),(2)')
+  expect: {affected_rows: 2}
+  cleanup:
+  - sql: DROP TABLE dbo.script_dynamic_completion
+- name: A dynamic RETURN supplies its explicit integer procedure status
+  sql: DECLARE @status INT=0; EXEC @status=sys.sp_executesql N'RETURN 4; SELECT 99 AS unexpected'; SELECT @status AS status
+  expect: {rows: 1, data: [{status: 4}]}
 cleanup: []

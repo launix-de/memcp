@@ -78,6 +78,8 @@ JIT and performance suites run in CI; local work uses focused reproductions.
 variables, IF/BEGIN/END, persisted procedure definitions and parameter contracts,
 WHILE/BREAK/CONTINUE, RETURN and captured procedure status, dynamic EXEC,
 parameterized `sp_executesql`, TRY/CATCH, THROW and the current error context.
+Successful parameterized execution returns status zero independently of native
+DML row completion. System-qualified metadata procedures use the current database.
 Control expressions compile through the ordinary expression triples; SQL leaves
 use the shared planner and native statement/transaction lifecycle. Dynamic input
 bindings keep their declared SQL contract and their own lexical variable scope.
