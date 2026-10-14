@@ -568,27 +568,34 @@ user table merely to discard a newly constructed policy closure. */
 							(regex "\\b(?:LIKE|MATCH|JOIN|EXISTS|IN)\\b|\\(\\s*SELECT\\b" _) true
 							_ false))))
 					(if (or compile_diagnostic (not guarded_query))
-						(begin
-							/* Build the exact-cache compiler only for its own branch. Guarded
-							cache hits must not repeatedly optimize an unused closure. */
-							(define exact_compile (lambda (compile_tx) (begin
-								(define resolved_policy (sql_policy_spec_resolve policy))
-								(define options (if (and (list? parse_fn) (> (count parse_fn) 1)) (cadr parse_fn) '()))
-								(if (options "exact_guards") (begin
+						/* Select the producer before constructing its closure. The ordinary
+						exact producer remains identical to its guard-free implementation;
+						its cold optimizer must not compile an unused variant producer. */
+						(if (and (list? parse_fn) (> (count parse_fn) 1) ((cadr parse_fn) "exact_guards"))
+							(begin
+								(define exact_compile (lambda (compile_tx) (begin
+									(define resolved_policy (sql_policy_spec_resolve policy))
 									(define variant (sql_compile_queryplan_variant parse_fn schema parse_query resolved_policy session compile_tx))
 									(if (and (equal? (car variant) true) (empty_list? (nth variant 2)))
 										(cadr variant)
-										(sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query resolved_policy session compile_tx variant)))
+										(sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query resolved_policy session compile_tx variant)))))
+								(define compiled (if compile_diagnostic (exact_compile tx)
+									(queryplan_cache "get_or_compute" cache_key tx exact_compile)))
+								(if (list? compiled) (cadr compiled) compiled))
+							(begin
+								/* Build the exact-cache compiler only for its own branch. Guarded
+								cache hits must not repeatedly optimize an unused closure. */
+								(define exact_compile (lambda (compile_tx)
 									(begin
+										(define resolved_policy (sql_policy_spec_resolve policy))
 										(define compile_policy (sql_compile_table_policy resolved_policy))
 										(sql_queryplan_compile_formula compile_tx (sql_queryplan_bind_tx_calls
 											(sql_queryplan_bind_execution_session
 												(with_session session (lambda ()
-													(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx)))))))))))
-
-							(define compiled (if compile_diagnostic (exact_compile tx)
-								(queryplan_cache "get_or_compute" cache_key tx exact_compile)))
-							(if (list? compiled) (cadr compiled) compiled))
+													(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx)))))))))
+								(if compile_diagnostic
+									(exact_compile tx)
+									(queryplan_cache "get_or_compute" cache_key tx exact_compile))))
 						(begin
 							(define cached_entry (queryplan_cache "get_or_compute" cache_key tx
 								(lambda (compile_tx) (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query
