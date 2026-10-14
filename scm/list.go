@@ -131,6 +131,23 @@ func listExpressionCallName(head Scmer) (string, bool) {
 	return "", false
 }
 
+// literalListCount proves a compile-time extent only from numeric literal data.
+// ToInt also coerces symbols and expression lists; those are executable code,
+// not known cardinalities, and must keep their runtime producer bounds.
+func literalListCount(expr Scmer) int {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if !expr.IsInt() && !expr.IsFloat() {
+		return UnknownLength
+	}
+	count := int(ToInt(expr))
+	if count < 0 {
+		return UnknownLength
+	}
+	return count
+}
+
 func exactListLengthFromExpr(expr Scmer) int {
 	if stripped, ok := scmerStripSourceInfo(expr); ok {
 		expr = stripped
@@ -148,7 +165,7 @@ func exactListLengthFromExpr(expr Scmer) int {
 				return UnknownLength
 			case "!list":
 				if len(inner) >= 3 {
-					if count := int(ToInt(inner[2])); count >= 0 {
+					if count := literalListCount(inner[2]); count >= 0 {
 						return count
 					}
 				}
@@ -187,7 +204,7 @@ func exactListLengthFromExpr(expr Scmer) int {
 				return UnknownLength
 			case "produceN", "produceN_mut", "parallelN", "parallelN_mut":
 				if len(inner) >= 2 {
-					if count := int(ToInt(inner[1])); count >= 0 {
+					if count := literalListCount(inner[1]); count >= 0 {
 						return count
 					}
 				}
@@ -291,7 +308,7 @@ func exactAssocLengthFromExpr(expr Scmer) int {
 				return UnknownLength
 			case "!list":
 				if len(inner) >= 3 {
-					if count := int(ToInt(inner[2])); count >= 0 && count%2 == 0 {
+					if count := literalListCount(inner[2]); count >= 0 && count%2 == 0 {
 						return count / 2
 					}
 				}
@@ -1442,7 +1459,7 @@ func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 					if len(inner) == 2 {
 						if isym, ok := scmerSymbol(inner[0]); ok && isym == "produceN" {
 							// Fuse: (map (produceN N) fn) → (produceN N fn)
-							if count := int(ToInt(inner[1])); count > 0 {
+							if count := literalListCount(inner[1]); count > 0 {
 								return NewSlice([]Scmer{inner[0], inner[1], rv[2]}), setOptimizedCallElement(setOptimizedCallLength(td, count), elementType)
 							}
 							return NewSlice([]Scmer{inner[0], inner[1], rv[2]}), setOptimizedCallElement(td, elementType)
@@ -1545,7 +1562,7 @@ func optimizeProduceN(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *
 	result, td := oc.ApplyDefaultOptimization(v, useResult)
 	length := UnknownLength
 	if len(v) >= 2 {
-		if count := int(ToInt(v[1])); count > 0 {
+		if count := literalListCount(v[1]); count > 0 {
 			length = count
 		}
 	}
@@ -1574,7 +1591,7 @@ func optimizeParallelN(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, 
 	result, td := oc.ApplyDefaultOptimization(v, useResult)
 	length := UnknownLength
 	if len(v) >= 2 {
-		if count := int(ToInt(v[1])); count > 0 {
+		if count := literalListCount(v[1]); count > 0 {
 			length = count
 		}
 	}

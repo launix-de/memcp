@@ -803,3 +803,55 @@ func BenchmarkOptimizeInlinedNestedLambdaHelper(b *testing.B) {
 		}
 	}
 }
+
+func TestClosedProcedurePreservesCapturedDataAndCallables(t *testing.T) {
+	for name, captured := range map[string]Scmer{
+		"nested-list": NewSlice([]Scmer{NewString("id"), NewSlice([]Scmer{NewString("INT")})}),
+		"symbol":      NewSymbol("unbound_data_symbol"),
+		"empty-list":  NewSlice(nil),
+		"integer":     NewInt(17),
+		"string":      NewString("literal"),
+		"callable":    NewFunc(func(a ...Scmer) Scmer { return a[0] }),
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := &Env{Vars: Vars{Symbol("captured"): captured}, Outer: &Globalenv}
+			for _, source := range []string{`(lambda () captured)`, `(lambda () (outer 1 captured))`} {
+				original := Eval(Read("closed captured data", source), env)
+				closed := CloseProcedure(original)
+				if got := Apply(closed); !Equal(got, captured) {
+					t.Fatalf("closed capture returned %s, want %s", SerializeToString(got, env), SerializeToString(captured, env))
+				}
+			}
+		})
+	}
+	env := &Env{Vars: Vars{Symbol("captured"): NewSlice([]Scmer{NewString("id"), NewInt(7)})}, Outer: &Globalenv}
+	closed := CloseProcedure(Eval(Read("closed associative capture", `(lambda () (captured "id"))`), env))
+	if got := Apply(closed).Int(); got != 7 {
+		t.Fatalf("closed associative callable returned %d", got)
+	}
+}
+
+func TestDynamicProducerCardinalityRemainsRuntimeOwned(t *testing.T) {
+	env := newOptimizerTestEnv()
+	for _, source := range []string{
+		`(lambda (items) (map (produceN (count items)) (lambda (index) (nth items index))))`,
+		`(lambda (items) (parallelN (count items) (lambda (index) (nth items index))))`,
+	} {
+		optimized := optimizeTestSource(t, env, source)
+		fn := Eval(optimized, env)
+		for _, values := range [][]Scmer{nil, {NewInt(4)}, {NewInt(4), NewInt(9), NewInt(15)}} {
+			input := NewSlice(values)
+			if got := Apply(fn, input); !Equal(got, input) {
+				t.Fatalf("dynamic producer %s returned %s, want %s", source, String(got), String(input))
+			}
+		}
+	}
+	for _, source := range []string{`(produceN n)`, `(parallelN (+ n 1) f)`, `(!list p (+ n 1))`} {
+		if got := exactListLengthFromExpr(Read("unknown producer extent", source)); got != UnknownLength {
+			t.Fatalf("expression %s received static cardinality %d", source, got)
+		}
+	}
+	if got := exactListLengthFromExpr(Read("literal producer extent", `(produceN 3)`)); got != 3 {
+		t.Fatalf("literal producer cardinality = %d, want 3", got)
+	}
+}

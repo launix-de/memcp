@@ -217,8 +217,17 @@ func (jep *JITEntryPoint) callFunction(function func(...Scmer) Scmer, args []Scm
 	if stableArgs {
 		args = append([]Scmer(nil), args...)
 	}
-	if jep.Proc.Params.GetTag() == tagSlice {
-		paramCount := len(jep.Proc.Params.Slice())
+	params := jep.Proc.Params
+	for params.IsSourceInfo() {
+		params = params.SourceInfo().value
+	}
+	if params.IsSymbol() {
+		// Match the interpreter's variadic Scheme ABI: one owned list binding.
+		// The list may escape and callers may reuse their native input frame.
+		args = []Scmer{NewSlice(append([]Scmer(nil), args...))}
+	}
+	if params.GetTag() == tagSlice {
+		paramCount := len(params.Slice())
 		if len(args) > paramCount {
 			panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", paramCount, len(args)))
 		}
@@ -303,8 +312,8 @@ func attachProcJIT(proc *Proc, entry *JITEntryPoint) {
 		entry.JITArity = 0
 	case tagSymbol:
 		// A Scheme variadic parameter is one list binding, not the raw Go
-		// variadic slice. Keep it on the metadata path until the native prolog
-		// materializes that binding explicitly.
+		// variadic slice. The metadata path owns that list binding; a direct
+		// call must not bypass its materialization.
 		return
 	default:
 		return
@@ -3136,7 +3145,7 @@ func closeJITProcedureCaptures(expr Scmer, captureBase int, captures []Scmer, de
 	if depth == 0 && expr.IsNthLocalVar() {
 		index := int(expr.NthLocalVar()) - captureBase
 		if index >= 0 && index < len(captures) {
-			return captures[index]
+			return closedCaptureLiteral(captures[index])
 		}
 		return expr
 	}
@@ -3157,7 +3166,7 @@ func closeJITProcedureCaptures(expr Scmer, captureBase int, captures []Scmer, de
 		if validDepth && int(outerDepth) == depth && key.IsNthLocalVar() {
 			index := int(key.NthLocalVar()) - captureBase
 			if index >= 0 && index < len(captures) {
-				return captures[index]
+				return closedCaptureLiteral(captures[index])
 			}
 		}
 	}
