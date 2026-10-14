@@ -4,7 +4,7 @@
 # Native foreign-key admission: proposal for review
 
 **Design and executable specifications only. No new engine authority is
-implemented by this change.** Baseline: `2dc9c4acfcdc`.
+implemented by this change.** Baseline: `d72bfbfccb4b` (after the frontend identity and hint changes).
 
 ## Reuse the existing implementation
 
