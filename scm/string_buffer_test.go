@@ -8,6 +8,7 @@ import "bytes"
 import "testing"
 import "runtime"
 import "strings"
+import "math/rand"
 
 func TestStringBufferOperators(t *testing.T) {
 	texts := []string{"", "abc", "ABC", "aa-first", "A-FIRST", "Prüfbericht Gerät K Σ ς ſ", "k σ s", "\xffx\xe2\x82!", " \tÄpfel\u00a0", strings.Repeat("Prüfbericht Inventar 10420001\n", 2600), "ab%b_c\\", "123"}
@@ -147,5 +148,44 @@ func TestStringBufferIdentityComparison(t *testing.T) {
 	buffer.data = nil
 	if !Equal(value, value) || Less(value, value) || compareBufferText(value, value, true) != 0 || generalBufferLess(value, value, false) || generalBufferLess(value, value, true) {
 		t.Fatal("identical handle comparison decoded its payload")
+	}
+}
+
+// Literal blocks already expose immutable bytes to TextCursor. Codec scratch
+// must be required only for selected compressed blocks, including a value that
+// straddles a literal/compressed boundary.
+func TestStringBufferLiteralCursorNeedsNoScratch(t *testing.T) {
+	random := rand.New(rand.NewSource(4821))
+	literal := make([]byte, StringBufferBlockBytes)
+	if _, err := random.Read(literal); err != nil {
+		t.Fatal(err)
+	}
+	compressed := strings.Repeat("a", StringBufferBlockBytes)
+	buffer, _ := BuildCompressedStringBuffer([]string{string(literal), compressed})
+	if !buffer.rawBlocks[0] || buffer.rawBlocks[1] {
+		t.Fatal("mixed codec fixture did not retain literal and compressed blocks")
+	}
+	input := string(literal) + compressed
+	for _, span := range []struct {
+		start, length int
+		scratch       bool
+	}{
+		{0, 0, false}, {17, 34, false}, {0, StringBufferBlockBytes, false},
+		{StringBufferBlockBytes - 17, 34, true}, {StringBufferBlockBytes, StringBufferBlockBytes, true},
+	} {
+		value := NewBufferString(buffer, uint32(span.start), span.length)
+		if got := BufferStringRequiresScratch(value); got != span.scratch {
+			t.Fatalf("span (%d,%d) decoder requirement %v", span.start, span.length, got)
+		}
+		var scratch *TextScratch
+		if span.scratch {
+			scratch = new(TextScratch)
+		}
+		var cursor TextCursor
+		cursor.Reset(value)
+		output := make([]byte, span.length)
+		if cursor.Read(output, scratch) != span.length || string(output) != input[span.start:span.start+span.length] {
+			t.Fatal("cursor changed a literal or mixed-block value")
+		}
 	}
 }

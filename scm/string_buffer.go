@@ -113,8 +113,13 @@ func CompressStringBuffer(dictionary string) *CompressedStringBuffer {
 			panic(err)
 		}
 		b.blocks = append(b.blocks, uint32(len(b.data)))
-		b.rawBlocks = append(b.rawBlocks, n == 0)
-		if n == 0 {
+		// A bound-sized destination can return an LZ4 literal packet larger
+		// than its input. Keep the already supported raw block in that case;
+		// small or incompressible dictionaries need neither expansion nor a
+		// decoder workspace merely to expose their unchanged bytes.
+		literal := n == 0 || n >= len(block)
+		b.rawBlocks = append(b.rawBlocks, literal)
+		if literal {
 			b.data = append(b.data, block...)
 		} else {
 			b.data = append(b.data, encoded[:n]...)
@@ -143,6 +148,23 @@ func NewBufferString(b *CompressedStringBuffer, offset uint32, length int) Scmer
 func (s Scmer) IsBufferString() bool { return s.GetTag() == tagLZ4 }
 func bufferOf(s Scmer) *CompressedStringBuffer {
 	return (*CompressedStringBuffer)(unsafe.Pointer(s.ptr))
+}
+
+// BufferStringRequiresScratch reports codec work for this immutable value.
+// Literal blocks are directly readable by TextCursor with nil scratch.
+func BufferStringRequiresScratch(s Scmer) bool {
+	length := bufferStringLen(s)
+	if length == 0 {
+		return false
+	}
+	buffer := bufferOf(s)
+	start := int(bufferStringOffset(s))
+	for block, last := start/StringBufferBlockBytes, (start+length-1)/StringBufferBlockBytes; block <= last; block++ {
+		if !buffer.rawBlocks[block] {
+			return true
+		}
+	}
+	return false
 }
 
 func BufferStringLength(s Scmer) int    { return bufferStringLen(s) }

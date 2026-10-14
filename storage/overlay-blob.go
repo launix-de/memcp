@@ -385,9 +385,7 @@ func (s *OverlayBlob) readBlob(hash [32]byte) (scm.Scmer, bool) {
 // only a rebuild from an authoritative source can resolve that case.
 func (s *OverlayBlob) resolveBlob(v scm.Scmer) scm.Scmer {
 	if v.IsBufferString() {
-		var cursor scm.TextCursor
-		var scratch scm.TextScratch
-		value, inline := s.inlineBufferValue(v, &cursor, &scratch)
+		value, inline := s.resolveInlineBuffer(v)
 		if inline {
 			return value
 		}
@@ -486,9 +484,7 @@ func (s *OverlayBlob) resolveBlobUncached(v scm.Scmer) scm.Scmer {
 		return v
 	}
 	if v.IsBufferString() {
-		var cursor scm.TextCursor
-		var scratch scm.TextScratch
-		value, inline := s.inlineBufferValue(v, &cursor, &scratch)
+		value, inline := s.resolveInlineBuffer(v)
 		if inline {
 			return value
 		}
@@ -514,6 +510,17 @@ func (s *OverlayBlob) resolveBlobUncached(v scm.Scmer) scm.Scmer {
 		return scm.NewString(raw[1:])
 	}
 	panic("OverlayBlob: malformed reference encoding")
+}
+
+// Scalar literal blocks need neither decompression nor 64KiB zeroing.
+// Compressed blocks keep the existing private invocation-owned workspace.
+func (s *OverlayBlob) resolveInlineBuffer(v scm.Scmer) (scm.Scmer, bool) {
+	var cursor scm.TextCursor
+	if !scm.BufferStringRequiresScratch(v) {
+		return s.inlineBufferValue(v, &cursor, nil)
+	}
+	var scratch scm.TextScratch
+	return s.inlineBufferValue(v, &cursor, &scratch)
 }
 
 func (s *OverlayBlob) inlineBufferValue(v scm.Scmer, cursor *scm.TextCursor, scratch *scm.TextScratch) (scm.Scmer, bool) {
