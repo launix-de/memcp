@@ -111,6 +111,12 @@ func TestProcedureCatalogDDLCheckpointReloadAndReplace(t *testing.T) {
 		return scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return source })
 	}))
 	CreateProcedure(schema, "p", "procedure-catalog-test", "first", scm.NewSlice(nil), false)
+	if got := len(ShowProcedures(schema, "p").Slice()); got != 1 {
+		t.Fatalf("named source definition lookup returned %d rows", got)
+	}
+	if got := len(ShowProcedures(schema, "absent").Slice()); got != 0 {
+		t.Fatalf("absent source definition lookup returned %d rows", got)
+	}
 	for name, operation := range map[string]func(){
 		"duplicate":        func() { CreateProcedure(schema, "p", "procedure-catalog-test", "duplicate", scm.NewNil(), false) },
 		"unknown-language": func() { CreateProcedure(schema, "unknown", "absent-language", "source", scm.NewNil(), false) },
@@ -135,7 +141,7 @@ func TestProcedureCatalogDDLCheckpointReloadAndReplace(t *testing.T) {
 			operation()
 		})
 	}
-	if got := len(ShowProcedures(schema).Slice()); got != 1 {
+	if got := len(ShowProcedures(schema, "").Slice()); got != 1 {
 		t.Fatalf("failed DDL published %d procedures", got)
 	}
 	oldCallable := Procedure(schema, "p")
@@ -154,7 +160,7 @@ func TestProcedureCatalogDDLCheckpointReloadAndReplace(t *testing.T) {
 		t.Fatalf("replacement mutated an already-owned invocation: %q", got)
 	}
 	DropProcedure(schema, "p", false)
-	if !ShowProcedures(schema).IsSlice() || len(ShowProcedures(schema).Slice()) != 0 {
+	if !ShowProcedures(schema, "").IsSlice() || len(ShowProcedures(schema, "").Slice()) != 0 {
 		t.Fatal("dropped procedure is still listed")
 	}
 	if DropProcedure(schema, "p", true) {
@@ -207,7 +213,7 @@ func TestProcedurePublicAPIsLoadColdCatalogBeforeAccess(t *testing.T) {
 	}
 	checkTable()
 	cold()
-	if got := len(ShowProcedures(schema).Slice()); got != 1 {
+	if got := len(ShowProcedures(schema, "").Slice()); got != 1 {
 		t.Fatalf("cold procedure listing has %d definitions", got)
 	}
 	checkTable()
@@ -236,7 +242,7 @@ func TestProcedurePublicAPIsLoadColdCatalogBeforeAccess(t *testing.T) {
 	DropProcedure(schema, "added", false)
 	checkTable()
 	cold()
-	if got := len(ShowProcedures(schema).Slice()); got != 1 {
+	if got := len(ShowProcedures(schema, "").Slice()); got != 1 {
 		t.Fatalf("cold DROP did not survive restart: %d definitions", got)
 	}
 	checkTable()
@@ -271,5 +277,37 @@ func TestProcedureParametersFreezePortableDataAndExactIntegers(t *testing.T) {
 			}()
 			freezeProcedureParameters(scm.NewSlice([]scm.Scmer{invalid}))
 		}()
+	}
+}
+
+func TestProcedureCompilationDoesNotPublishIntoReplacedDatabase(t *testing.T) {
+	previousBasepath := Basepath
+	Basepath = t.TempDir()
+	defer func() { Basepath = previousBasepath }()
+	Init(scm.Globalenv)
+	LoadDatabases()
+	const schema = "procedure-replacement-test"
+	CreateDatabase(schema, false)
+	defer databases.Remove(schema)
+	started, resume := make(chan struct{}), make(chan struct{})
+	registerTriggerLanguage("procedure-replacement-test", scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		close(started)
+		<-resume
+		return scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewInt(7) })
+	}))
+	completed := make(chan any, 1)
+	go func() {
+		defer func() { completed <- recover() }()
+		CreateProcedure(schema, "retired", "procedure-replacement-test", "source", scm.NewNil(), false)
+	}()
+	<-started
+	DropDatabase(schema, false)
+	CreateDatabase(schema, false)
+	close(resume)
+	if failure := <-completed; failure == nil {
+		t.Fatal("source compilation acknowledged publication into a replaced database")
+	}
+	if len(ShowProcedures(schema, "").Slice()) != 0 {
+		t.Fatal("retired definition entered the replacement catalog")
 	}
 }

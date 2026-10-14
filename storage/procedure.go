@@ -127,6 +127,9 @@ func CreateProcedure(schema, name, language, source string, parameters scm.Scmer
 	definition.callable(schema)
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
+	if GetDatabase(schema) != db {
+		panic("database was replaced before procedure publication: " + schema)
+	}
 	db.schemalock.Lock()
 	if db.procedures.Get(name) != nil && !replace {
 		db.schemalock.Unlock()
@@ -145,6 +148,9 @@ func DropProcedure(schema, name string, ifexists bool) bool {
 	db.ensureLoaded()
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
+	if GetDatabase(schema) != db {
+		panic("database was replaced before procedure publication: " + schema)
+	}
 	db.schemalock.Lock()
 	if db.procedures.Get(name) == nil {
 		db.schemalock.Unlock()
@@ -171,13 +177,18 @@ func Procedure(schema, name string) scm.Scmer {
 	return definition.callable(schema)
 }
 
-func ShowProcedures(schema string) scm.Scmer {
+func ShowProcedures(schema, name string) scm.Scmer {
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("database does not exist: " + schema)
 	}
 	db.ensureLoaded()
-	definitions := db.procedures.GetAll()
+	var definitions []*ProcedureDescription
+	if name == "" {
+		definitions = db.procedures.GetAll()
+	} else if definition := db.procedures.Get(name); definition != nil {
+		definitions = []*ProcedureDescription{definition}
+	}
 	rows := make([]scm.Scmer, 0, len(definitions))
 	for _, definition := range definitions {
 		rows = append(rows, scm.NewSlice([]scm.Scmer{
@@ -211,7 +222,11 @@ func initProcedureBuiltins(en *scm.Env) {
 	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "resolves and regenerates a stored source procedure", HasSideEffects: true,
 		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "name"}}, Return: &scm.TypeDescriptor{Kind: "func"}}})
 	scm.Declare(en, &scm.Declaration{Name: "showprocedures", Fn: func(a ...scm.Scmer) scm.Scmer {
-		return ShowProcedures(a[0].String())
-	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "lists native stored procedure source declarations",
-		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}}, Return: &scm.TypeDescriptor{Kind: "list"}}})
+		name := ""
+		if len(a) > 1 {
+			name = a[1].String()
+		}
+		return ShowProcedures(a[0].String(), name)
+	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "lists native source declarations or looks up one named definition",
+		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "name", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "list"}}})
 }
