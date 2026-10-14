@@ -27,8 +27,9 @@ func initExpressionMetadata() {
 	Declare(&Globalenv, &Declaration{Name: "identity_predicate", Fn: func(a ...Scmer) Scmer {
 		return identityPredicate(a[0])
 	}, Type: &TypeDescriptor{Kind: "func", Description: "captures a value and returns an immutable predicate comparing its exact object header identity in constant time",
-		Params: []*TypeDescriptor{{Kind: "any", Label: "expected"}},
-		Return: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "any", Label: "actual"}}, Return: &TypeDescriptor{Kind: "bool"}},
+		Params:  []*TypeDescriptor{{Kind: "any", Label: "expected"}},
+		Return:  &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "any", Label: "actual"}}, Return: &TypeDescriptor{Kind: "bool"}},
+		JITEmit: jitEmitExpressionMetadataCall("identity_predicate"),
 	},
 	})
 	Declare(&Globalenv, &Declaration{Name: "expression_syntax", Fn: func(a ...Scmer) Scmer {

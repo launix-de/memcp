@@ -1963,3 +1963,18 @@ func TestJITIdentityPredicateAccountsForRetainedPayload(t *testing.T) {
 		t.Fatal("compiled capture did not include retained payload")
 	}
 }
+
+func TestJITIdentityPredicateFactoryUsesAccountedNativeBoundary(t *testing.T) {
+	factory := compileJITExpressionTestProc(t, `(lambda (expected) (identity_predicate expected))`)
+	expected := NewSlice([]Scmer{NewString("retained"), NewInt(7)})
+	predicate := Apply(factory, expected)
+	if !predicate.IsProc() || !Apply(predicate, expected).Bool() {
+		t.Fatal("native factory did not return the captured predicate")
+	}
+	if Apply(predicate, CloneOptimizerExpression(expected)).Bool() {
+		t.Fatal("native factory accepted a structurally equal replacement")
+	}
+	if ComputeSize(predicate) < ComputeSize(expected) {
+		t.Fatal("native factory lost retained payload accounting")
+	}
+}
