@@ -1,0 +1,53 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Native checked foreign key admission over existing rows
+  syntax: tsql
+  isolated: true
+setup:
+  - sql: DROP TABLE IF EXISTS dbo.fk_admit_valid
+  - sql: DROP TABLE IF EXISTS dbo.fk_admit_invalid
+  - sql: DROP TABLE IF EXISTS dbo.fk_admit_parent
+  - sql: CREATE TABLE dbo.fk_admit_parent (id INT PRIMARY KEY)
+  - sql: CREATE TABLE dbo.fk_admit_valid (id INT PRIMARY KEY, parent_id INT)
+  - sql: CREATE TABLE dbo.fk_admit_invalid (id INT PRIMARY KEY, parent_id INT)
+  - sql: INSERT INTO dbo.fk_admit_parent VALUES (1)
+  - sql: INSERT INTO dbo.fk_admit_valid VALUES (1,1),(2,NULL)
+  - sql: INSERT INTO dbo.fk_admit_invalid VALUES (1,99)
+test_cases:
+  - name: Existing valid references and NULL exemptions install a checked constraint
+    sql: ALTER TABLE dbo.fk_admit_valid WITH CHECK ADD CONSTRAINT fk_admit_valid_parent FOREIGN KEY (parent_id) REFERENCES dbo.fk_admit_parent (id)
+    noncritical: true
+  - name: Checked admission rejects future orphan writes
+    sql: INSERT INTO dbo.fk_admit_valid VALUES (3,99)
+    expect:
+      error: true
+      contains: foreign key constraint
+    noncritical: true
+  - name: Checked admission preserves preexisting rows
+    sql: SELECT id,parent_id FROM dbo.fk_admit_valid ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - {id: 1, parent_id: 1}
+        - {id: 2, parent_id: null}
+    noncritical: true
+  - name: Checked admission reports an actual old-row reference violation
+    sql: ALTER TABLE dbo.fk_admit_invalid WITH CHECK ADD CONSTRAINT fk_admit_invalid_parent FOREIGN KEY (parent_id) REFERENCES dbo.fk_admit_parent (id)
+    expect:
+      error: true
+      contains: foreign key constraint
+    noncritical: true
+  - name: Failed admission leaves no enforcement residue
+    sql: INSERT INTO dbo.fk_admit_invalid VALUES (2,98)
+  - name: Failed admission preserves existing data
+    sql: SELECT id,parent_id FROM dbo.fk_admit_invalid ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - {id: 1, parent_id: 99}
+        - {id: 2, parent_id: 98}
+cleanup:
+  - sql: DROP TABLE IF EXISTS dbo.fk_admit_valid
+  - sql: DROP TABLE IF EXISTS dbo.fk_admit_invalid
+  - sql: DROP TABLE IF EXISTS dbo.fk_admit_parent
