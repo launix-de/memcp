@@ -47,7 +47,7 @@ TOP/OFFSET; duplicate and NULL rows; numeric precedence; empty-result metadata;
 alias escaping and scope; and existing native multi-column ALTER defaults.
 Computed ORDER BY slots over derived UNIONs have shared-planner regressions.
 
-Five positive specifications remain noncritical because their existing common
+Six positive specifications remain noncritical because their existing common
 planner or completion paths are incomplete:
 
 1. DISTINCT with TOP over an inline multi-row source.
@@ -56,6 +56,9 @@ planner or completion paths are incomplete:
 4. GROUP BY/HAVING over an inline multi-row source.
 5. The affected-row total of INSERT SELECT over a distributed inline source.
    The fixture also checks that all inserted values remain queryable.
+6. Computed output ordering over a derived UNION DISTINCT. This shape still
+   fails explicitly; sorting, deduplication and windows need one correct native
+   contract before it becomes executable.
 
 For these follow-ups, extend the common logical/lowering or native completion
 contract. Preserve its domain, multiplicity, NULL-extension and cardinality

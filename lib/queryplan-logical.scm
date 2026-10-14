@@ -6830,7 +6830,11 @@ output slots; the UNION order belongs to that projection, not the old source. */
 					(union_mode relation)
 					(map (union_branches relation) (lambda (branch)
 						(wrap_union_branch_query block (source_alias src) branch canonical_fields)))
-					(if (empty_list? (qb_order block)) (union_order relation) (union_wrapper_output_order block))
+					(if (empty_list? (qb_order block)) (union_order relation)
+						(equal? (union_mode relation) (quote all)) (union_wrapper_output_order block)
+						/* DISTINCT lowering does not yet preserve these computed output
+						order slots. Retain its explicit unsupported-shape rejection. */
+						(qb_order block))
 					(coalesceNil (qb_limit block) (union_limit relation))
 					(coalesceNil (qb_offset block) (union_offset relation))
 					(union_facts relation)))))))
