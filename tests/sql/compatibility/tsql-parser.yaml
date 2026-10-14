@@ -763,7 +763,6 @@ test_cases:
     data:
     - session_id: null
       scoped_id: null
-  noncritical: true
 - name: Identity describe remains NUMERIC 38 zero even for empty output
   scm: "(begin (define fields (tds_describe \"memcp-tests\" \"SELECT TOP(0) @@IDENTITY AS value,SCOPE_IDENTITY()\
     \ AS scoped\" \"\" (newsession)))\n   (if (reduce fields (lambda (valid field) (and valid (equal? (field \"\

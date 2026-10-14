@@ -55,6 +55,10 @@ the parser exposes a pure metadata path for their result contract. */
 /* A separate frontend entrypoint keeps dialect decisions out of existing SQL
 execution paths. The cache, transaction owner and compiled evaluator are shared. */
 (define tsql_execute_statement (lambda (tx schema text session resultrow resultfields) (begin
+	/* Expose the active scope's scalar value through the ordinary session binding.
+	The common planner can then discover and bind this dependency like parameters;
+	an opaque scope-reader call would hide it from shared cache/domain analysis. */
+	(session "__tsql_scope_identity" ((tsql_identity_scope session) "__tsql_scope_identity"))
 	(define input (tsql_statement_text text))
 	(define username (coalesce (session "username") "root"))
 	(define declarations (coalesceNil (session "__tsql_parameter_declarations") (list)))
@@ -81,6 +85,8 @@ execution paths. The cache, transaction owner and compiled evaluator are shared.
 				query options may supply values, never replace either authority. */
 				(session "username" (req "username"))
 				(session "schema" schema)
+				/* One scope owner per submitted batch, never per native insert row. */
+				(session "__tsql_scope" (newsession))
 				(define output (newsession))
 				(define result (with_autocommit session (req "__session_state") (req "__query_seq") text
 					(lambda (tx) (tsql_execute_statement tx schema text session
@@ -138,6 +144,7 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 			(tsql_execute_statement tx (session "schema") sql session (lambda (_row) true) (lambda args true))))
 		(list "rows" 0 "transaction" (payload "action")))
 	"execute" (begin
+		(session "__tsql_scope" (newsession))
 		(tds_bind_parameters session (tds_bind_declarations (payload "database") (payload "declarations"))
 			(payload "parameters"))
 		(define output (newsession))

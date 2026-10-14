@@ -621,22 +621,57 @@ support exists; exact precision-limit emulation remains deferred. */
 	(define precision (if (empty_list? dimensions) 18 (car dimensions)))
 	(if (>= precision 19) (tsql_parse_integer "9223372036854775807")
 		(tsql_parse_integer (reduce (produceN precision) (lambda (text _index) (concat text "9")) ""))))))
+/* Scope ownership is supplied once by the batch/procedure runner. Direct SCM
+callers without a batch owner retain their explicitly supplied invocation scope.
+The shared connection owns @@IDENTITY; nested scope owners own SCOPE_IDENTITY.
+Neither SQL function infers its declared NUMERIC contract from the carrier. */
+(define tsql_identity_scope (lambda (session)
+	(coalesceNil (session "__tsql_scope") session)))
+(define tsql_read_identity (lambda (value)
+	(match value
+		'("unresolved" reason) (error "identity completion for " reason " is not supported yet")
+		'("value" value) value
+		_ nil)))
+(define tsql_identity_expr (lambda (scoped)
+	(list (quote sql_type_expr)
+		(list (quote tsql_read_identity)
+			(list (quote session) (if scoped "__tsql_scope_identity" "__tsql_identity")))
+		"NUMERIC" nil)))
+(define tsql_complete_identity (lambda (session value) (begin
+	(define state (list "value" value))
+	(session "__tsql_identity" state)
+	((tsql_identity_scope session) "__tsql_scope_identity" state)
+	true)))
+/* Streaming native sinks execute in parallel. Until the common sink exports a
+completion reduction, refuse identity reads rather than race a session write or
+read another writer's global allocator. The INSERT itself remains unchanged. */
+(define tsql_unresolved_identity (lambda (session reason) (begin
+	(define state (list "unresolved" reason))
+	(session "__tsql_identity" state)
+	((tsql_identity_scope session) "__tsql_scope_identity" state)
+	true)))
 /* Emit the existing native INSERT. VALUES and DEFAULT supply their bounded
 syntax batch; the existing SELECT result sink supplies one emitted row. Never
 scan/count/materialize SELECT input to reserve IDs, or rewind consumed blocks.
 The frontend checks the complete reserved block before any row publication.
 Explicit NULL must fail here: native auto_increment would otherwise allocate
-an unchecked replacement. Scope/session identity reporting is separate work. */
-(define tsql_native_insert_expr (lambda (database name columns values row_count) (begin
+an unchecked replacement. Completion uses only this invocation's reserved range. */
+(define tsql_native_insert_expr (lambda (database name columns values row_count capture_identity) (begin
 	(define relation (list (quote table) database name))
 	(define identity (find (get_schema database name)
 		(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
 	(define native_insert (lambda (names rows callback)
 		(list (quote insert) relation (list (quote quote) names) rows
 			'(list) nil false callback (quote tx))))
+	(define without_generated_identity (lambda (formula)
+		(if capture_identity
+			(list (quote begin)
+				(list (quote define) (quote __tsql_insert_result) formula)
+				(list (quote session) "__tsql_identity" nil)
+				(quote __tsql_insert_result)) formula)))
 	(define callback '('lambda '('id) '('session "last_insert_id" 'id)))
-	(if (nil? identity) (native_insert columns values callback)
-		(equal? row_count 0) (native_insert columns values nil)
+	(if (nil? identity) (without_generated_identity (native_insert columns values callback))
+		(equal? row_count 0) (without_generated_identity (native_insert columns values nil))
 		(begin
 			(define explicit (find (produceN (count columns))
 				(lambda (index) (equal?? (nth columns index) (identity "Field"))) nil))
@@ -646,7 +681,9 @@ an unchecked replacement. Scope/session identity reporting is separate work. */
 					'('reduce '__tsql_rows
 						'('lambda '('valid 'row)
 							'('if '('nil? '('nth 'row explicit)) '('error "IDENTITY cannot be assigned NULL") 'valid)) true)
-					(native_insert columns (quote __tsql_rows) callback))
+					'('define '__tsql_explicit_result (native_insert columns (quote __tsql_rows) callback))
+					(if capture_identity '('tsql_unresolved_identity 'session "explicit IDENTITY insertion") true)
+					'__tsql_explicit_result)
 				(begin
 					(define maximum (tsql_identity_maximum (identity "RawType") (identity "Dimensions")))
 					/* Batch extent comes from VALUES syntax or the existing sink's
@@ -661,7 +698,9 @@ an unchecked replacement. Scope/session identity reporting is separate work. */
 						'('if '('> '('cadr '__tsql_ids) maximum) '('error "IDENTITY exceeds the declared range") true)
 						'('define '__tsql_inserted (native_insert (cons (identity "Field") columns) own_rows nil))
 						/* Preserve completion only after successful native admission. */
-						'('if '('> '__tsql_inserted 0) '('session "last_insert_id" '('car '__tsql_ids)) true)
+						'('if '('> '__tsql_inserted 0) '('begin
+							'('session "last_insert_id" '('car '__tsql_ids))
+							(if capture_identity '('tsql_complete_identity 'session '('cadr '__tsql_ids)) true)) true)
 						'__tsql_inserted))))))))
 (define tsql_select_prefix (parser (? (atom "TOP" true)
 	(define top_count (or (parser '("(" (define n tsql_int) ")") n) sql_int)))
@@ -935,6 +974,9 @@ never from the first row. Unknown expression types stay text in this first slice
 
 		(parser (atom "NULL" true) (sql_null_literal))
 		(parser (atom "CURRENT_TIMESTAMP" true) (list (quote sql_type_expr) (list (quote now)) "DATETIME" nil))
+
+		(parser '((atom "SCOPE_IDENTITY" true) "(" ")") (tsql_identity_expr true))
+		(parser '((atom "@@IDENTITY" true)) (tsql_identity_expr false))
 
 		(parser '((atom "@" true) (define var tsql_identifier_unquoted)) (parameter_expression var))
 
@@ -1370,11 +1412,27 @@ never from the first row. Unknown expression types stay text in this first slice
 		(define insert_expr (tsql_native_insert_expr database tbl columns
 			(cons list '((cons list (map (produceN (count columns))
 				(lambda (i) (sql_type_formula '() (tsql_assignment_expr
-					'('nth 'item (+ (* i 2) 1)) (nth declarations i)))))))) 1))
+					'('nth 'item (+ (* i 2) 1)) (nth declarations i)))))))) 1 false))
 		(define expanded (sql_expand_views query policy))
 		(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
 			(error "INSERT column count does not match SELECT column count"))
-		(define plan (build_queryplan_term expanded planning_session tx))
+		(define native_plan (build_queryplan_term expanded planning_session tx))
+		(define identity (find (get_schema database tbl)
+			(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
+		/* AND propagates SQL NULL and evaluates later terms. Missing declaration
+		metadata needs an explicit presence branch before reading its fields. */
+		(define generated (if (nil? identity) false (not (has? columns (identity "Field")))))
+		/* Completion is once per statement, outside the parallel row sink. */
+		(define plan (list (quote begin)
+			(list (quote define) (quote __tsql_stream_result) native_plan)
+			(if generated
+				(list (quote if) (list (quote >) (quote __tsql_stream_result) 0)
+					(list (quote tsql_unresolved_identity) (quote session) "streaming INSERT")
+					(list (quote session) "__tsql_identity" nil))
+				(if identity
+					(list (quote tsql_unresolved_identity) (quote session) "explicit streaming IDENTITY insertion")
+					(list (quote session) "__tsql_identity" nil)))
+			(quote __tsql_stream_result)))
 		(define ordered (or
 			(and (query_block? query) (not (empty_list? (coalesceNil (qb_order query) '()))))
 			(and (union_block? query) (not (empty_list? (coalesceNil (union_order query) '()))))))
@@ -1406,7 +1464,7 @@ never from the first row. Unknown expression types stay text in this first slice
 			(if (reduce rows (lambda (found row) (or found (tsql_dataset_contains_inner_select row))) false)
 				(tsql_insert_select_plan database tbl columns (tsql_values_to_select_query database columns rows))
 				(tsql_native_insert_expr database tbl columns (sql_insert_values_expr (map rows (lambda (row) (map (produceN (count columns))
-					(lambda (i) (sql_type_formula (list) (tsql_assignment_expr (nth row i) (nth declarations i)))))))) (count rows)))
+					(lambda (i) (sql_type_formula (list) (tsql_assignment_expr (nth row i) (nth declarations i)))))))) (count rows) true))
 	)))
 	/* An all-default row is the native empty-column INSERT. Defaults and
 	generated values are filled by the same operator as ordinary insertion. */
@@ -1417,7 +1475,7 @@ never from the first row. Unknown expression types stay text in this first slice
 	) (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
-			(tsql_native_insert_expr database tbl '() '('list '(list)) 1))))
+			(tsql_native_insert_expr database tbl '() '('list '(list)) 1 true))))
 	(define tsql_insert_select (parser '(
 		(atom "INSERT" true) (atom "INTO" true)
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
