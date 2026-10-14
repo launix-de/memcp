@@ -427,4 +427,26 @@ test_cases:
     DROP PROCEDURE dbo.script_identity_child;
     DROP PROCEDURE dbo.script_identity_parent;
     DROP TABLE dbo.script_identity_scope;
+- name: Metadata EXEC arguments use ordinary declared variable expressions
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_exec_catalog
+  - sql: CREATE TABLE dbo.script_exec_catalog(id INT PRIMARY KEY,label NVARCHAR(16))
+  sql: |
+    DECLARE @table NVARCHAR(64)=N'script_exec_catalog';
+    EXEC dbo.sp_tables @table_name=@table;
+  expect:
+    rows: 1
+    data: [{TABLE_NAME: script_exec_catalog, TABLE_OWNER: dbo, TABLE_TYPE: TABLE}]
+- name: Metadata column EXEC uses the shared named argument dispatcher
+  sql: EXEC dbo.sp_columns @table_name=N'script_exec_catalog',@column_name=N'id'
+  expect:
+    rows: 1
+    data: [{COLUMN_NAME: id, TYPE_NAME: int}]
+- name: Metadata special column EXEC reports only the actual native constraint
+  sql: EXEC dbo.sp_special_columns @table_name=N'script_exec_catalog',@col_type=N'R'
+  expect:
+    rows: 1
+    data: [{COLUMN_NAME: id}]
+- name: Fixture cleanup removes metadata EXEC source table
+  sql: DROP TABLE dbo.script_exec_catalog
 cleanup: []
