@@ -173,9 +173,12 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 				(car target) (cdr target))) expr))
 		(sql_queryplan_compile_formula tx (sql_queryplan_bind_tx_calls
 			(sql_queryplan_bind_execution_session (sql_type_lower_annotations expr))))))))))
-(define tsql_scalar_value (lambda (schema text session tx mode target)
+(define tsql_scalar_value (lambda (schema text session tx mode target) (begin
+	/* Scalar control expressions use the same scope dependency as SELECT leaves.
+	Restore the caller owner before shared compilation after a child procedure. */
+	(session "__tsql_scope_identity" ((tsql_identity_scope session) "__tsql_scope_identity"))
 	((tsql_scalar_formula schema text (session "__tsql_parameter_declarations") mode target tx)
-		session tx (lambda (_row) (error "scalar expression emitted rows")) (lambda args true))))
+		session tx (lambda (_row) (error "scalar expression emitted rows")) (lambda args true)))))
 (define tsql_run_commands (lambda (commands statement session resultrow resultfields)
 	(reduce commands (lambda (_result command)
 		(tsql_run_command command statement session resultrow resultfields)) 0)))
@@ -265,7 +268,7 @@ statement owner, account, transaction session, arguments and output callbacks. *
 
 (registerprocedurelanguage "tsql-procedure" tsql_procedure_compile)
 (define tsql_invoke_procedure (lambda (schema name arguments statement caller resultrow resultfields)
-	(if (has? '("sp_tables" "sp_columns" "sp_pkeys" "sp_statistics" "sp_fkeys" "sp_datatype_info" "sp_datatype_info_100") (toLower name))
+	(if (has? '("sp_tables" "sp_columns" "sp_pkeys" "sp_statistics" "sp_fkeys" "sp_datatype_info" "sp_datatype_info_100" "sp_special_columns") (toLower name))
 		(statement "metadata procedure" false (lambda (tx) (begin
 			(define values (map arguments (lambda (argument)
 				(list (car argument) (tsql_scalar_value (caller "schema") (cadr argument) caller tx "value" nil)))))

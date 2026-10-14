@@ -383,7 +383,10 @@ test_cases:
     expect: {rows: 1, data: [{n: 8}]}
   - name: Consecutive result statements remain explicitly unsupported
     sql: SELECT 1 AS n; SELECT 2 AS n;
-    expect: {error: true}
+    # Retain the protected case identity; batches now emit both ordered results.
+    expect:
+      rows: 2
+      data: [{n: 1}, {n: 2}]
   - name: Invalid trailing statement cannot execute an earlier declaration
     sql: CREATE TABLE tsql_terminator_rejected (id INT); invalid_token
     expect: {error: true}

@@ -174,7 +174,7 @@ test_cases:
   sql: |
     DROP TABLE IF EXISTS dbo.script_rest;
     CREATE TABLE dbo.script_rest(id INT PRIMARY KEY, value INT);
-    INSERT dbo.script_rest VALUES(1,4);
+    INSERT INTO dbo.script_rest VALUES(1,4);
     UPDATE dbo.script_rest SET value=value+2 WHERE id=1;
     SELECT value FROM dbo.script_rest WHERE id=1;
     DROP TABLE dbo.script_rest;
@@ -248,12 +248,12 @@ test_cases:
       (session "username" "root")
       (define execute (lambda (text)
         (tsql_execute_request "memcp-tests" text session nil 0 (lambda (_row) true) (lambda args true))))
-      (execute "DROP TABLE IF EXISTS dbo.script_recovery; CREATE TABLE dbo.script_recovery(id INT PRIMARY KEY); INSERT dbo.script_recovery VALUES(1);")
+      (execute "DROP TABLE IF EXISTS dbo.script_recovery; CREATE TABLE dbo.script_recovery(id INT PRIMARY KEY); INSERT INTO dbo.script_recovery VALUES(1);")
       (execute "BEGIN TRANSACTION")
-      (define failed (try (lambda () (begin (execute "INSERT dbo.script_recovery VALUES(1)") false)) (lambda (_err) true)))
+      (define failed (try (lambda () (begin (execute "INSERT INTO dbo.script_recovery VALUES(1)") false)) (lambda (_err) true)))
       (define rejected (try (lambda () (begin (execute "SELECT 'ROLLBACK' AS value") false)) (lambda (_err) true)))
       (execute "/* recovery */ ROLLBACK TRANSACTION")
-      (execute "INSERT dbo.script_recovery VALUES(2); DROP TABLE dbo.script_recovery;")
+      (execute "INSERT INTO dbo.script_recovery VALUES(2); DROP TABLE dbo.script_recovery;")
       (and failed rejected (nil? (session "transaction"))))
   expect: {result: true}
 - name: Procedure declaration names use the frontend case-insensitive identity
@@ -280,7 +280,7 @@ test_cases:
     statements:
     - sql: DROP TABLE IF EXISTS dbo.script_wire
     - sql: CREATE TABLE dbo.script_wire(id INT PRIMARY KEY,value INT)
-    - sql: INSERT dbo.script_wire VALUES(1,2)
+    - sql: INSERT INTO dbo.script_wire VALUES(1,2)
     - sql: DECLARE @value INT=4; SET @value=@value+1; IF @value=5 BEGIN SELECT @value AS value END
       expect: {rows: 1, data: [{value: 5}]}
     - sql: DROP PROCEDURE IF EXISTS dbo.script_wire_proc
@@ -288,7 +288,7 @@ test_cases:
     - sql: EXEC dbo.script_wire_proc @id=1
       expect: {rows: 1, data: [{value: 5}]}
     - sql: BEGIN TRANSACTION
-    - sql: INSERT dbo.script_wire VALUES(1,9)
+    - sql: INSERT INTO dbo.script_wire VALUES(1,9)
       expect: {error: true}
     - sql: SELECT N'ROLLBACK' AS value
       expect: {error: true, contains: [aborted]}
@@ -307,14 +307,14 @@ test_cases:
   sql: |
     DROP TABLE IF EXISTS dbo.script_binding;
     CREATE TABLE dbo.script_binding(id INT PRIMARY KEY,value INT);
-    INSERT dbo.script_binding VALUES(1,4);
+    INSERT INTO dbo.script_binding VALUES(1,4);
     GO
     CREATE PROCEDURE dbo.script_binding_proc AS SELECT value FROM dbo.script_binding
     GO
     EXEC dbo.script_binding_proc;
     DROP TABLE dbo.script_binding;
     CREATE TABLE dbo.script_binding(id INT PRIMARY KEY,value INT);
-    INSERT dbo.script_binding VALUES(1,8);
+    INSERT INTO dbo.script_binding VALUES(1,8);
     EXEC dbo.script_binding_proc;
     DROP PROCEDURE dbo.script_binding_proc;
     DROP TABLE dbo.script_binding;
@@ -367,4 +367,64 @@ test_cases:
   expect: {rows: 1, data: [{value: 9}]}
 - name: Fixture cleanup deletes the restored source definition
   sql: DROP PROCEDURE dbo.script_persisted
+- name: Scalar variable and IF compilation observe the active batch identity
+  sql: |
+    DROP TABLE IF EXISTS dbo.script_identity_scope;
+    CREATE TABLE dbo.script_identity_scope(id INT IDENTITY,value INT);
+    INSERT INTO dbo.script_identity_scope(value) VALUES(10);
+    DECLARE @first NUMERIC = SCOPE_IDENTITY();
+    INSERT INTO dbo.script_identity_scope(value) VALUES(20);
+    DECLARE @second NUMERIC = NULL;
+    IF SCOPE_IDENTITY()=2 SET @second=SCOPE_IDENTITY();
+    SELECT @first AS first_value,@second AS second_value,SCOPE_IDENTITY() AS scoped,@@IDENTITY AS connection_value;
+  expect:
+    rows: 1
+    data: [{first_value: 1, second_value: 2, scoped: 2, connection_value: 2}]
+- name: GO resets scalar scope while retaining the same connection identity
+  sql: |
+    INSERT INTO dbo.script_identity_scope(value) VALUES(30);
+    GO
+    DECLARE @fresh NUMERIC = SCOPE_IDENTITY();
+    SELECT @fresh AS scoped,@@IDENTITY AS connection_value;
+  expect:
+    rows: 1
+    data: [{scoped: null, connection_value: 3}]
+- name: Nested procedures restore parent identity for scalar assignments and IF
+  sql: |
+    CREATE PROCEDURE dbo.script_identity_grandchild AS
+    INSERT INTO dbo.script_identity_scope(value) VALUES(60);
+    GO
+    CREATE PROCEDURE dbo.script_identity_child AS BEGIN
+      INSERT INTO dbo.script_identity_scope(value) VALUES(50);
+      DECLARE @before NUMERIC = SCOPE_IDENTITY();
+      EXEC dbo.script_identity_grandchild;
+      DECLARE @after NUMERIC = SCOPE_IDENTITY();
+      IF SCOPE_IDENTITY()=5 SET @after=SCOPE_IDENTITY();
+      SELECT @before AS before_value,@after AS after_value,@@IDENTITY AS connection_value;
+    END;
+    GO
+    CREATE PROCEDURE dbo.script_identity_parent AS BEGIN
+      INSERT INTO dbo.script_identity_scope(value) VALUES(40);
+      DECLARE @before NUMERIC = SCOPE_IDENTITY();
+      EXEC dbo.script_identity_child;
+      DECLARE @after NUMERIC = SCOPE_IDENTITY();
+      IF SCOPE_IDENTITY()=4 SET @after=SCOPE_IDENTITY();
+      SELECT @before AS before_value,@after AS after_value,@@IDENTITY AS connection_value;
+    END;
+    GO
+    EXEC dbo.script_identity_parent;
+    DECLARE @fresh NUMERIC=SCOPE_IDENTITY();
+    SELECT @fresh AS scoped,@@IDENTITY AS connection_value;
+  expect:
+    rows: 3
+    data:
+    - {before_value: 5, after_value: 5, connection_value: 6}
+    - {before_value: 4, after_value: 4, connection_value: 6}
+    - {scoped: null, connection_value: 6}
+- name: Fixture cleanup removes identity scope procedures and data
+  sql: |
+    DROP PROCEDURE dbo.script_identity_grandchild;
+    DROP PROCEDURE dbo.script_identity_child;
+    DROP PROCEDURE dbo.script_identity_parent;
+    DROP TABLE dbo.script_identity_scope;
 cleanup: []
