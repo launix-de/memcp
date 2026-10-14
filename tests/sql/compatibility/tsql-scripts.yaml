@@ -1,0 +1,126 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: T-SQL script boundaries and shared statement grammar
+  syntax: tsql
+  isolated: true
+setup: []
+test_cases:
+- name: GO separates physical batches and preserves repetition
+  scm: |
+    (equal? (tsql_script_batches "SELECT 1\nGO 3\nSELECT 2\nGO\n")
+      (list (list "text" "SELECT 1\n" "repeat" 3)
+        (list "text" "SELECT 2\n" "repeat" 1)))
+  expect: {result: true}
+- name: GO accepts CRLF and trailing comments
+  scm: |
+    (equal? (tsql_script_batches "SELECT 1\r\n go 2 -- repeat\r\nSELECT 2")
+      (list (list "text" "SELECT 1\r\n" "repeat" 2)
+        (list "text" "SELECT 2" "repeat" 1)))
+  expect: {result: true}
+- name: GO inside multiline literals never separates a batch
+  scm: |
+    (equal? (tsql_script_batches "SELECT N'first\nGO\nlast', 'a''b'\nGO\n")
+      (list (list "text" "SELECT N'first\nGO\nlast', 'a''b'\n" "repeat" 1)))
+  expect: {result: true}
+- name: Delimited identifiers protect separator text
+  scm: |
+    (equal? (tsql_script_batches "SELECT [a]]\nGO\nb], \"c\"\"\nGO\nd\"\nGO\n")
+      (list (list "text" "SELECT [a]]\nGO\nb], \"c\"\"\nGO\nd\"\n" "repeat" 1)))
+  expect: {result: true}
+- name: Nested block comments protect separator text
+  scm: |
+    (equal? (tsql_script_batches "/* outer\n/* inner */\nGO\n*/\nSELECT 1\nGO\n")
+      (list (list "text" "/* outer\n/* inner */\nGO\n*/\nSELECT 1\n" "repeat" 1)))
+  expect: {result: true}
+- name: Comments around a separator do not become SQL
+  scm: |
+    (equal? (tsql_script_batches "SELECT 1\n/* before */ GO /* after */\n")
+      (list (list "text" "SELECT 1\n" "repeat" 1)))
+  expect: {result: true}
+- name: GO appearing alongside SQL is ordinary statement text
+  scm: |
+    (equal? (tsql_script_batches "SELECT GO, GO_count FROM go_table\n")
+      (list (list "text" "SELECT GO, GO_count FROM go_table\n" "repeat" 1)))
+  expect: {result: true}
+- name: Empty script and leading separators produce no batches
+  scm: (empty_list? (tsql_script_batches "GO\n  GO 2\n"))
+  expect: {result: true}
+- name: GO rejects zero repetitions
+  scm: (tsql_script_batches "SELECT 1\nGO 0\n")
+  expect: {error: true}
+- name: GO rejects a repetition exceeding native integer range
+  scm: (tsql_script_batches "SELECT 1\nGO 9223372036854775808\n")
+  expect: {error: true}
+- name: Script rejects unterminated quoted values
+  scm: (tsql_script_batches "SELECT 'unfinished\nGO\n")
+  expect: {error: true}
+- name: Script rejects unterminated nested comments
+  scm: (tsql_script_batches "SELECT 1 /* outer /* inner */\nGO\n")
+  expect: {error: true}
+- name: Batch parses preceding DDL without prematurely binding later DML
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests"
+      "CREATE TABLE dbo.batch_new (id INT); INSERT INTO dbo.batch_new VALUES(1); SELECT id FROM dbo.batch_new")
+      (list "batch" (list
+        (list "statement" "CREATE TABLE dbo.batch_new (id INT)")
+        (list "statement" "INSERT INTO dbo.batch_new VALUES(1)")
+        (list "statement" "SELECT id FROM dbo.batch_new"))))
+  expect: {result: true}
+- name: Batch variables retain declared contracts independently of values
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests" "DECLARE @amount DECIMAL(12,2)=1, @label NVARCHAR(20); SET @amount=2.5")
+      (list "batch" (list
+        (list "declare" (list (list "amount" '("DECIMAL" 12 2) "1")
+          (list "label" '("NVARCHAR" 20) nil)))
+        (list "assign" "amount" "2.5"))))
+  expect: {result: true}
+- name: IF and nested blocks retain ordinary SELECT syntax
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests" "IF @enabled=1 BEGIN SELECT 2 AS n; IF 1=0 SELECT 3 AS n ELSE SELECT 4 AS n END ELSE SELECT 5 AS n")
+      (list "batch" (list (list "if" "@enabled=1"
+        (list "block" (list (list "statement" "SELECT 2 AS n")
+          (list "if" "1=0" (list "statement" "SELECT 3 AS n")
+            (list "statement" "SELECT 4 AS n"))))
+        (list "statement" "SELECT 5 AS n")))))
+  expect: {result: true}
+- name: EXEC arguments use shared expression and identifier grammar
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests" "EXEC dbo.inspect @table_name=N'a; ELSE', @owner=@who")
+      (list "batch" (list (list "execute" "memcp-tests" "inspect"
+        (list (list "table_name" "N'a; ELSE'") (list "owner" "@who"))))))
+  expect: {result: true}
+- name: Batch rejects malformed declaration dimensions
+  scm: (parse_tsql_batch "memcp-tests" "DECLARE @value DECIMAL(2,3)")
+  expect: {error: true}
+- name: Batch rejects unterminated block
+  scm: (parse_tsql_batch "memcp-tests" "IF 1=1 BEGIN SELECT 2")
+  expect: {error: true}
+- name: Batch rejects unsupported leaf SQL instead of splitting guesses
+  scm: (parse_tsql_batch "memcp-tests" "SELECT 1; UNSUPPORTED arbitrary text; SELECT 2")
+  expect: {error: true}
+- name: Procedure source captures the complete batch and parameter contracts
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests"
+      "CREATE PROCEDURE dbo.adjust @tenant INT=1, @value DECIMAL(12,2) OUTPUT AS BEGIN SET @value=@value+1; SELECT @tenant AS tenant END")
+      (list "batch" (list (list "create-procedure" "memcp-tests" "adjust"
+        (list (list "tenant" '("INT") "1" false)
+          (list "value" '("DECIMAL" 12 2) nil true))
+        "BEGIN SET @value=@value+1; SELECT @tenant AS tenant END" false))))
+  expect: {result: true}
+- name: Procedure declaration must start its batch
+  scm: (parse_tsql_batch "memcp-tests" "SELECT 1; CREATE PROCEDURE dbo.late AS SELECT 2")
+  expect: {error: true}
+- name: Procedure body may contain several ordinary statements without a block
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests" "CREATE OR ALTER PROC dbo.sequence AS SELECT 1; SELECT 2")
+      (list "batch" (list (list "create-procedure" "memcp-tests" "sequence"
+        '() "SELECT 1; SELECT 2" true))))
+  expect: {result: true}
+- name: A spanning comment closes before a physical separator line
+  scm: |
+    (equal? (tsql_script_batches "SELECT 1 /* first\nlast */ GO\nSELECT 2")
+      (list (list "text" "SELECT 1 /* first\nlast */" "repeat" 1)
+        (list "text" "SELECT 2" "repeat" 1)))
+  expect: {result: true}
+cleanup: []
