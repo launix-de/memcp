@@ -823,6 +823,16 @@ type optimizerProcReturnTemplate struct {
 	Sequence  procSequenceKind
 }
 
+// closedCaptureLiteral embeds a captured value as data in executable code.
+// Lists/dictionaries are also callable and symbols normally resolve bindings;
+// quoting preserves the value an ordinary lexical read would have returned.
+func closedCaptureLiteral(value Scmer) Scmer {
+	if value.IsSlice() || value.IsFastDict() || value.IsSymbol() || value.IsSourceInfo() {
+		return NewSlice([]Scmer{NewSymbol("quote"), value})
+	}
+	return value
+}
+
 // CloseProcedure snapshots explicit captures of a procedure without retaining
 // its request-local environment. The optimizer represents a capture from the
 // procedure's creation frame as (outer depth expr). Resolve only those forms in the
@@ -909,7 +919,7 @@ func closeProcedureCaptures(expression Scmer, callFrame *Env, bound map[Symbol]s
 		if _, local := bound[symbol]; !local {
 			if binding := callFrame.Outer.FindRead(symbol); binding != nil && binding != &Globalenv {
 				if captured, ok := binding.Vars[symbol]; ok {
-					return captured
+					return closedCaptureLiteral(captured)
 				}
 			}
 		}
@@ -923,7 +933,7 @@ func closeProcedureCaptures(expression Scmer, callFrame *Env, bound map[Symbol]s
 		if head, ok := scmerSymbol(items[0]); ok {
 			switch string(head) {
 			case "outer":
-				return Eval(expression, callFrame)
+				return closedCaptureLiteral(Eval(expression, callFrame))
 			case "lambda", "quote":
 				return expression
 			}

@@ -1864,3 +1864,13 @@ func TestJITNestedReduceBackedgesKeepOuterCaptures(t *testing.T) {
 		}
 	}
 }
+
+func TestJITClosedProcedurePreservesNestedDataCaptures(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (captured) (lambda () (lambda () captured)))`)
+	for _, value := range []Scmer{NewSymbol("literal_symbol"), NewSlice([]Scmer{NewString("id"), NewSlice([]Scmer{NewString("INT")})})} {
+		closed := CloseProcedure(Apply(compiled, value))
+		if got := Apply(Apply(closed)); !Equal(got, value) {
+			t.Fatalf("closed nested JIT capture returned %s, want %s", SerializeToString(got, &Globalenv), SerializeToString(value, &Globalenv))
+		}
+	}
+}

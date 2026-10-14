@@ -3136,7 +3136,7 @@ func closeJITProcedureCaptures(expr Scmer, captureBase int, captures []Scmer, de
 	if depth == 0 && expr.IsNthLocalVar() {
 		index := int(expr.NthLocalVar()) - captureBase
 		if index >= 0 && index < len(captures) {
-			return captures[index]
+			return closedCaptureLiteral(captures[index])
 		}
 		return expr
 	}
@@ -3157,7 +3157,7 @@ func closeJITProcedureCaptures(expr Scmer, captureBase int, captures []Scmer, de
 		if validDepth && int(outerDepth) == depth && key.IsNthLocalVar() {
 			index := int(key.NthLocalVar()) - captureBase
 			if index >= 0 && index < len(captures) {
-				return captures[index]
+				return closedCaptureLiteral(captures[index])
 			}
 		}
 	}
