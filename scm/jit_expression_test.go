@@ -1874,3 +1874,14 @@ func TestJITClosedProcedurePreservesNestedDataCaptures(t *testing.T) {
 		}
 	}
 }
+
+func TestJITDynamicProducerCardinalityRemainsRuntimeOwned(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (items)
+		(map (produceN (count items)) (lambda (index) (nth items index))))`)
+	for _, values := range [][]Scmer{nil, {NewInt(4)}, {NewInt(4), NewInt(9), NewInt(15)}} {
+		input := NewSlice(values)
+		if got := Apply(compiled, input); !Equal(got, input) {
+			t.Fatalf("dynamic native producer returned %s, want %s", String(got), String(input))
+		}
+	}
+}

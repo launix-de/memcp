@@ -830,3 +830,28 @@ func TestClosedProcedurePreservesCapturedDataAndCallables(t *testing.T) {
 		t.Fatalf("closed associative callable returned %d", got)
 	}
 }
+
+func TestDynamicProducerCardinalityRemainsRuntimeOwned(t *testing.T) {
+	env := newOptimizerTestEnv()
+	for _, source := range []string{
+		`(lambda (items) (map (produceN (count items)) (lambda (index) (nth items index))))`,
+		`(lambda (items) (parallelN (count items) (lambda (index) (nth items index))))`,
+	} {
+		optimized := optimizeTestSource(t, env, source)
+		fn := Eval(optimized, env)
+		for _, values := range [][]Scmer{nil, {NewInt(4)}, {NewInt(4), NewInt(9), NewInt(15)}} {
+			input := NewSlice(values)
+			if got := Apply(fn, input); !Equal(got, input) {
+				t.Fatalf("dynamic producer %s returned %s, want %s", source, String(got), String(input))
+			}
+		}
+	}
+	for _, source := range []string{`(produceN n)`, `(parallelN (+ n 1) f)`, `(!list p (+ n 1))`} {
+		if got := exactListLengthFromExpr(Read("unknown producer extent", source)); got != UnknownLength {
+			t.Fatalf("expression %s received static cardinality %d", source, got)
+		}
+	}
+	if got := exactListLengthFromExpr(Read("literal producer extent", `(produceN 3)`)); got != 3 {
+		t.Fatalf("literal producer cardinality = %d, want 3", got)
+	}
+}
