@@ -149,6 +149,50 @@ no SQL type wrapper survives into execution or storage. */
 	(? (define namespace tsql_identifier) ".") (define type tsql_column_type)
 ) (if (or (nil? namespace) (equal?? namespace "sys")) type
 		(error "unsupported type namespace: " namespace))))
+/* Catalog values describe SQL declarations. COL_LENGTH reads one immutable
+native column row; it never scans data or treats compressed bytes as SQL width. */
+(define tsql_declared_byte_length (lambda (column) (begin
+	(define type (toUpper (column "RawType")))
+	(define dimensions (column "Dimensions"))
+	(define width (if (empty_list? dimensions) 1 (car dimensions)))
+	(match type
+		"INT" 4 "INTEGER" 4 "BIGINT" 8 "SMALLINT" 2 "TINYINT" 1
+		"BIT" 1 "BOOLEAN" 1 "REAL" 4 "DOUBLE" 8 "MONEY" 8 "SMALLMONEY" 4
+		"DATE" 3 "DATETIME" 8 "SMALLDATETIME" 4 "UNIQUEIDENTIFIER" 16
+		"ROWVERSION" 8 "TIMESTAMP" 8 "TEXT" 16 "NTEXT" 16 "IMAGE" 16
+		_ (if (has? '("CHAR" "VARCHAR" "BINARY" "VARBINARY") type) width
+			(has? '("NCHAR" "NVARCHAR") type) (if (equal? width -1) -1 (* width 2))
+			(has? '("DECIMAL" "NUMERIC") type)
+			(if (<= width 9) 5 (<= width 19) 9 (<= width 28) 13 17)
+			(equal? type "FLOAT") (if (and (not (empty_list? dimensions)) (<= width 24)) 4 8)
+			(has? '("TIME" "DATETIME2" "DATETIMEOFFSET") type) (begin
+				(define precision (if (empty_list? dimensions) 7 width))
+				(+ (if (<= precision 2) 3 (<= precision 4) 4 5)
+					(match type "DATETIME2" 3 "DATETIMEOFFSET" 5 _ 0)))
+			nil)))))
+(define tsql_column_declaration_tuple (lambda (column)
+	(list (column "RawType") (coalesceNil (column "Dimensions") '())
+		(column "Null") (coalesceNil (column "Collation") ""))))
+/* Historical conversion and tightening require native admission/validation.
+The frontend accepts only unchanged contracts, text-width widening, same-scale
+numeric precision widening, and relaxed NULL policy. No frontend row scans. */
+(define tsql_compatible_column_declaration? (lambda (previous type dimensions nullable collation) (begin
+	(define previous_type (toUpper (previous "RawType")))
+	(define previous_dimensions (coalesceNil (previous "Dimensions") '()))
+	(and (equal? type previous_type)
+		(or nullable (not (previous "Null")))
+		(equal? collation (coalesceNil (previous "Collation") ""))
+		(if (expression_equal? dimensions previous_dimensions) true
+			(and (has? '("VARCHAR" "NVARCHAR" "VARBINARY") type)
+				(equal? (count dimensions) 1) (equal? (count previous_dimensions) 1))
+			(or (equal? (car dimensions) -1)
+				(and (not (equal? (car previous_dimensions) -1))
+					(>= (car dimensions) (car previous_dimensions))))
+			(and (has? '("DECIMAL" "NUMERIC") type)
+				(equal? (count dimensions) 2) (equal? (count previous_dimensions) 2))
+			(and (equal? (cadr dimensions) (cadr previous_dimensions))
+				(>= (car dimensions) (car previous_dimensions)))
+			false)))))
 (define tds_bind_declarations (lambda (_schema text)
 	(if (equal? (strtrim text) "") (list)
 		((parser (define declarations (+ (parser '(
@@ -326,14 +370,32 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 				(* 0.5 (simplify (concat "1e-" scale)))))
 			(list (quote sql_type_expr) (list tsql_assignment_decimal value threshold) type nil))
 		value))))
-(define tsql_insert_declarations (lambda (database table_name columns) (begin
+/* Only declaration consumers register these O(1) guards. The common cache
+recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. */
+(define tsql_declaration_contract (lambda (column)
+	(list (column "RawType") (coalesceNil (column "Dimensions") '())
+		(column "Null") (coalesceNil (column "Collation") "")
+		(column "Default") (coalesceNil (column "DefaultExpression") "") (column "Extra"))))
+(define tsql_declaration_matches? (lambda (column contract)
+	(if (nil? column) false (expression_equal? (tsql_declaration_contract column) contract))))
+(define tsql_column_description (lambda (database name column ignore_case) (begin
+	(define handle (table database name))
+	(if (nil? handle) nil (show handle "column" column ignore_case)))))
+(define tsql_target_column_declaration (lambda (database name column planning_session) (begin
+	(define declaration (tsql_column_description database name column true))
+	(if (nil? declaration) nil (begin
+		(planner_record_guard_condition
+			(list (quote tsql_declaration_matches?)
+				(list (quote tsql_column_description) database name (declaration "Field") false)
+				(list (quote quote) (tsql_declaration_contract declaration))) planning_session)
+		declaration)))))
+(define tsql_insert_declarations (lambda (database table_name columns planning_session) (begin
 	/* Resolve each target exactly once. Duplicate targets can overwrite an
 	already validated identity/default value in the native column vector. */
 	(if (equal? (count columns) (count (merge_unique (list (map columns toLower)))))
 		true (error "duplicate INSERT column"))
-	(define declarations (get_schema database table_name))
 	(map columns (lambda (name) (begin
-		(define declaration (find declarations (lambda (column) (equal?? (column "Field") name)) nil))
+		(define declaration (tsql_target_column_declaration database table_name name planning_session))
 		(if (nil? declaration) (error "unknown INSERT column: " name) declaration)))))))
 (define tsql_cast_text_expr (lambda (value dimensions national fixed) (begin
 	/* Resolve the operand at the shared compile boundary, where its sources
@@ -1122,6 +1184,19 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(? (atom "ORDER" true) (atom "BY" true) (define order_by (+ tsql_window_orderby_item ",")))
 	) (list (coalesce partition_by '()) (coalesce order_by '()))))
 
+	(define column_length_expr (lambda (relation column)
+		(list (quote sql_type_expr)
+			(list (lambda (relation column) (if (or (nil? relation) (nil? column)) nil (begin
+				(define object ((parser '( (? (define owner tsql_identifier) ".")
+					(define name tsql_identifier)) (list (if (or (nil? owner) (equal?? owner "dbo")) database owner) name)) relation))
+				(define object_schema (car object))
+				(define name (cadr object))
+				(if policy (policy object_schema name false) true)
+				(define handle (table object_schema name))
+				(define declaration (if (nil? handle) nil (show handle "column" column true)))
+				(if (nil? declaration) nil (tsql_declared_byte_length declaration))))) relation column)
+			"INT" nil)))
+
 	(define tsql_expression6 (parser (or
 
 		(parser '("(" (define sub tsql_select) ")") '('inner_select sub))
@@ -1132,6 +1207,9 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(parser '((atom "CONVERT" true) "(" (define type tsql_declared_type) (define dimensions tsql_type_dimensions)
 			"," (define value tsql_expression) (? "," (define style tsql_int)) ")")
 			(tsql_convert_expr value type dimensions style))
+
+		(parser '((atom "COL_LENGTH" true) "(" (define relation tsql_expression) ","
+			(define column tsql_expression) ")") (column_length_expr relation column))
 
 		(parser '((atom "GETDATE" true) "(" ")")
 			(list (quote sql_type_expr) (list (quote now)) "DATETIME" nil))
@@ -1568,9 +1646,8 @@ a separator is recognized only on a physical line containing no SQL text. */
 
 			(define target_schema (source_schema first_def))
 			(if policy (policy target_schema tbl true) true)
-			(define declarations (get_schema target_schema tbl))
 			(define assignments (merge (extract_assoc (merge cols) (lambda (title expression) (begin
-				(define declaration (find declarations (lambda (column) (equal?? (column "Field") title)) nil))
+				(define declaration (tsql_target_column_declaration target_schema tbl title planning_session))
 				(if (nil? declaration) (error "unknown UPDATE column: " title)
 					(equal? (declaration "Extra") "auto_increment") (error "IDENTITY column cannot be updated")
 					(list (declaration "Field") (tsql_assignment_expr expression declaration))))))))
@@ -1663,7 +1740,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 	/* INSERT SELECT consumes the existing planner's result stream and the native
 	insert operator. Identity allocation and constraints remain native. */
 	(define tsql_insert_select_plan (lambda (database tbl columns query) (begin
-		(define declarations (tsql_insert_declarations database tbl columns))
+		(define declarations (tsql_insert_declarations database tbl columns planning_session))
 		(define columns (map declarations (lambda (column) (column "Field"))))
 		(define insert_expr (tsql_native_insert_expr database tbl columns
 			(cons list '((cons list (map (produceN (count columns))
@@ -1713,7 +1790,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
 			(define declarations (tsql_insert_declarations database tbl
-				(coalesce columns (table_insertable_columns database tbl))))
+				(coalesce columns (table_insertable_columns database tbl)) planning_session))
 			(define columns (map declarations (lambda (column) (column "Field"))))
 			(if (reduce rows (lambda (valid row) (and valid (equal? (count row) (count columns)))) true)
 				true (error "INSERT column count does not match value count"))
@@ -1855,6 +1932,25 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(atom "ALTER" true) (atom "TABLE" true)
 		(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier)
 		(define changes (+ (or
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define column tsql_identifier)
+				(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
+				(? (atom "COLLATE" true) (define collation tsql_identifier))
+				(define nullable (or (parser '((atom "NOT" true) (atom "NULL" true)) false)
+					(parser (atom "NULL" true) true) (parser empty true)))
+			) (lambda (database name) (begin
+					(define handle (table database name))
+					(define previous (if (nil? handle) nil (show handle "column" column true)))
+					(if (nil? previous) (error "ALTER column does not exist: " column) true)
+					(define dimensions (tsql_decl_dimensions type dimensions))
+					(define type (tsql_storage_type type))
+					(define collation (coalesceNil collation (coalesceNil (previous "Collation") "")))
+					(if (tsql_compatible_column_declaration? previous type dimensions nullable collation) true
+						(error "ALTER COLUMN requires native validation or conversion"))
+					(list (quote !begin) (list (quote altercolumn) (list (quote table) database name)
+						(previous "Field") "declaration"
+						(list (quote quote) (list (list type dimensions nullable collation)
+							(tsql_column_declaration_tuple previous)))) true))))
+
 			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define key tsql_identifier))
 				(atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement "(" (define columns tsql_key_columns) ")" tsql_key_layout)
 				(lambda (database name) (begin

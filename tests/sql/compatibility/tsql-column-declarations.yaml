@@ -1,0 +1,133 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Compatible column alterations and declaration byte lengths
+  isolated: true
+setup:
+  - sql: DROP TABLE IF EXISTS tsql_decl_columns
+  - sql: DROP TABLE IF EXISTS tsql_decl_rebound
+  - sql: CREATE TABLE tsql_decl_rebound (id INT PRIMARY KEY, value NVARCHAR(2))
+  - sql: CREATE TABLE tsql_decl_columns (id INT PRIMARY KEY, label VARCHAR(3) NOT NULL DEFAULT 'old', national NVARCHAR(4), bytes VARBINARY(7), amount DECIMAL(8,2), required INT NOT NULL, unlimited VARCHAR(MAX), wide NVARCHAR(MAX))
+  - sql: INSERT INTO tsql_decl_columns (id,label,national,bytes,amount,required) VALUES (1,'old',N'Ä',0x00,12.50,8)
+test_cases:
+  - name: Scalar column getter borrows declared native metadata
+    scm: |
+      (begin
+        (define declaration (show (table "memcp-tests" "tsql_decl_columns") "column" "LABEL" true))
+        (and (equal? (declaration "RawType") "VARCHAR")
+          (equal? (declaration "Dimensions") '(3)) (not (declaration "Null"))))
+    expect: {result: true}
+  - name: Length uses declared bytes for ordinary and national text
+    sql: SELECT COL_LENGTH('dbo.tsql_decl_columns','label') AS label, COL_LENGTH('tsql_decl_columns','national') AS national, COL_LENGTH('tsql_decl_columns','bytes') AS bytes
+    expect: {rows: 1, data: [{label: 3, national: 8, bytes: 7}]}
+  - name: Fixed declarations and unlimited declarations have distinct lengths
+    sql: SELECT COL_LENGTH('tsql_decl_columns','id') AS integer_size, COL_LENGTH('tsql_decl_columns','amount') AS numeric_size, COL_LENGTH('tsql_decl_columns','unlimited') AS unlimited, COL_LENGTH('tsql_decl_columns','wide') AS wide
+    expect: {rows: 1, data: [{integer_size: 4, numeric_size: 5, unlimited: -1, wide: -1}]}
+  - name: Missing table or column and SQL null return null lengths
+    sql: SELECT COL_LENGTH('missing_table','label') AS missing_table, COL_LENGTH('tsql_decl_columns','missing') AS missing_column, COL_LENGTH(NULL,'label') AS absent, COL_LENGTH('tsql_decl_columns',NULL) AS absent_column
+    expect: {rows: 1, data: [{missing_table: null, missing_column: null, absent: null, absent_column: null}]}
+  - name: Prepare a cached assignment against the narrow declaration
+    sql: UPDATE tsql_decl_columns SET national=N'long replacement' WHERE id=1
+    expect: {affected_rows: 1}
+  - name: Narrow declaration initially truncates the supplied text
+    sql: SELECT national FROM tsql_decl_columns WHERE id=1
+    expect: {rows: 1, data: [{national: long}]}
+  - name: Widen existing text without rewriting rows
+    sql: ALTER TABLE tsql_decl_columns ALTER COLUMN label VARCHAR(20) NOT NULL
+    expect: {rows: 0}
+  - name: Widening publishes the complete declaration
+    scm: |
+      (begin
+        (define declaration (show (table "memcp-tests" "tsql_decl_columns") "column" "label"))
+        (and (equal? (declaration "Dimensions") '(20)) (not (declaration "Null"))
+          (equal? (declaration "Default") "old")))
+    expect: {result: true}
+  - name: Future assignments use the widened declaration
+    sql: INSERT INTO tsql_decl_columns (id,label,required) VALUES (2,'new longer value',4)
+    expect: {affected_rows: 1}
+  - name: Existing and new values survive compatible alteration
+    sql: SELECT id,label FROM tsql_decl_columns ORDER BY id
+    expect: {rows: 2, data: [{id: 1, label: old}, {id: 2, label: new longer value}]}
+  - name: Widen national text to an unlimited declaration
+    sql: ALTER TABLE tsql_decl_columns ALTER COLUMN national NVARCHAR(MAX) NULL
+    expect: {rows: 0}
+  - name: Cached assignments rebind after compatible declaration changes
+    sql: UPDATE tsql_decl_columns SET national=N'long replacement' WHERE id=1
+    expect: {affected_rows: 1}
+  - name: Rebound assignments use the entire widened width
+    sql: SELECT national FROM tsql_decl_columns WHERE id=1
+    expect: {rows: 1, data: [{national: long replacement}]}
+  - name: National width remains a declaration byte count
+    sql: SELECT COL_LENGTH('tsql_decl_columns','national') AS bytes
+    expect: {rows: 1, data: [{bytes: -1}]}
+  - name: Relax nullability without a historical scan
+    sql: ALTER TABLE tsql_decl_columns ALTER COLUMN required INT NULL
+    expect: {rows: 0}
+  - name: Relaxed nullability permits omitted values
+    sql: INSERT INTO tsql_decl_columns (id) VALUES (3)
+    expect: {affected_rows: 1}
+  - name: Original default remains on the altered column
+    sql: SELECT label,required FROM tsql_decl_columns WHERE id=3
+    expect: {rows: 1, data: [{label: old, required: null}]}
+  - name: Widen decimal precision without changing its scale
+    sql: ALTER TABLE tsql_decl_columns ALTER COLUMN amount DECIMAL(16,2) NULL
+    expect: {rows: 0}
+  - name: Decimal storage length follows the widened declaration
+    sql: SELECT COL_LENGTH('tsql_decl_columns','amount') AS bytes
+    expect: {rows: 1, data: [{bytes: 9}]}
+  - name: Omitted nullability follows the frontend nullable default
+    sql: ALTER TABLE tsql_decl_columns ALTER COLUMN label VARCHAR(24)
+    expect: {rows: 0}
+  - name: Omitted nullability permits a null assignment
+    sql: INSERT INTO tsql_decl_columns (id,label) VALUES (4,NULL)
+    expect: {affected_rows: 1}
+  - name: Text narrowing needs a native validation proof
+    sql: ALTER TABLE tsql_decl_columns ALTER COLUMN label VARCHAR(2) NOT NULL
+    expect: {error: true, contains: requires native validation}
+  - name: Nullability tightening needs a native validation proof
+    sql: ALTER TABLE tsql_decl_columns ALTER COLUMN required INT NOT NULL
+    expect: {error: true, contains: requires native validation}
+  - name: Changing a historical value type needs a native conversion proof
+    sql: ALTER TABLE tsql_decl_columns ALTER COLUMN required NVARCHAR(12) NULL
+    expect: {error: true, contains: requires native validation}
+  - name: Changing decimal scale needs a native conversion proof
+    sql: ALTER TABLE tsql_decl_columns ALTER COLUMN amount DECIMAL(16,3) NULL
+    expect: {error: true, contains: requires native validation}
+  - name: Primary key nullability cannot be relaxed
+    sql: ALTER TABLE tsql_decl_columns ALTER COLUMN id INT NULL
+    expect: {error: true}
+  - name: Missing columns fail without touching other declarations
+    sql: ALTER TABLE tsql_decl_columns ALTER COLUMN missing INT NULL
+    expect: {error: true}
+  - name: Incompatible collation changes are not silently accepted
+    sql: ALTER TABLE tsql_decl_columns ALTER COLUMN label VARCHAR(24) COLLATE bin NOT NULL
+    expect: {error: true, contains: requires native validation}
+  - name: Rejected changes retain the last complete declaration
+    sql: SELECT COL_LENGTH('tsql_decl_columns','label') AS bytes, COL_LENGTH('tsql_decl_columns','required') AS required
+    expect: {rows: 1, data: [{bytes: 24, required: 4}]}
+  - name: Cache a typed insert against a replaceable native table
+    sql: INSERT INTO tsql_decl_rebound VALUES (1,N'longer')
+    expect: {affected_rows: 1}
+  - name: Initial insert observes the original width
+    sql: SELECT value FROM tsql_decl_rebound WHERE id=1
+    expect: {rows: 1, data: [{value: lo}]}
+  - name: Retire the original native table
+    sql: DROP TABLE tsql_decl_rebound
+    expect: {rows: 0}
+  - name: Recreate the same logical name with a wider declaration
+    sql: CREATE TABLE tsql_decl_rebound (id INT PRIMARY KEY, value NVARCHAR(8))
+    expect: {rows: 0}
+  - name: Cached insert rebinds to the replacement table declaration
+    sql: INSERT INTO tsql_decl_rebound VALUES (1,N'longer')
+    expect: {affected_rows: 1}
+  - name: Replacement declaration reaches both storage and frontend cast
+    sql: SELECT value FROM tsql_decl_rebound WHERE id=1
+    expect: {rows: 1, data: [{value: longer}]}
+  - name: Repeated compatible alteration is idempotent
+    sql: ALTER TABLE tsql_decl_columns ALTER COLUMN national NVARCHAR(MAX) NULL
+    expect: {rows: 0}
+
+cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_decl_rebound
+  - sql: DROP TABLE IF EXISTS tsql_decl_columns

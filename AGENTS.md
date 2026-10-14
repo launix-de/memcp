@@ -109,6 +109,23 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- Complete ordinary-column declaration replacement is copy-on-write under the
+  existing table DDL and database schema ownership. The expected old declaration
+  is checked before publication. Existing batches retain immutable old
+  descriptors; successor batches use the new directory. Physical column storage,
+  native key identity and the table ID allocator remain shared. Computed/TEMP
+  columns and active cache lifecycle owners are excluded. Statistics and
+  partitioning feedback are advisory snapshots; late old-descriptor observations
+  may be discarded. This operation neither scans nor rewrites stored rows.
+
+- `tableColumnNamesSnapshot` freezes name-to-ordinal entries at declaration
+  publication. `tableShowColumnsSnapshotMetadata.columnRows` borrows the same
+  immutable full SHOW payload as its publication; invalidation publishes current
+  descriptions and reuse the same complete rendered cache. Single-column reads use the
+  directory and payload from one atomic snapshot, without locks, lazy rendering,
+  shard access or synchronization writes. These fields are runtime metadata and
+  are never persisted.
+
 - `tableShowColumnsSnapshotMetadata.constraints` contains immutable native key
   and foreign-key declarations, including copied column-name lists. The schema
   mutation owner or unpublished initialization constructs it as part of the

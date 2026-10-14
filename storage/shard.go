@@ -1281,6 +1281,7 @@ func isRuntimeComputedColumn(colDesc *column) bool {
 }
 
 func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext) func(...scm.Scmer) scm.Scmer {
+	declarations := t.t.columnDeclarations() // one immutable declaration contract for this callback
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
 		//fmt.Println("update/delete", a)
@@ -1299,8 +1300,8 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			var dualWriteRow [][]scm.Scmer           // captured for dual-write forwarding
 			// Build a row in schema-column order from a delta-ordered row buffer.
 			schemaRowFromDelta := func(deltaRow dataset) dataset {
-				row := make(dataset, len(t.t.Columns))
-				for i, colDesc := range t.t.Columns {
+				row := make(dataset, len(declarations))
+				for i, colDesc := range declarations {
 					if colidx, ok := t.deltaColumns[colDesc.Name]; ok && colidx < len(deltaRow) {
 						row[i] = deltaRow[colidx]
 					} else {
@@ -1357,8 +1358,8 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				// Build a complete row using schema columns (not only currently
 				// loaded shard columns). Otherwise UPDATEs on a subset of columns
 				// can write delta rows that miss PK/other fields.
-				d2 := make([]scm.Scmer, 0, len(t.t.Columns))
-				for _, colDesc := range t.t.Columns {
+				d2 := make([]scm.Scmer, 0, len(declarations))
+				for _, colDesc := range declarations {
 					if isRuntimeComputedColumn(colDesc) {
 						continue
 					}
@@ -1379,9 +1380,9 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					}
 				}
 				buildPayload := func() ([]string, []scm.Scmer) {
-					pCols := make([]string, 0, len(t.t.Columns))
-					pRow := make([]scm.Scmer, 0, len(t.t.Columns))
-					for _, colDesc := range t.t.Columns {
+					pCols := make([]string, 0, len(declarations))
+					pRow := make([]scm.Scmer, 0, len(declarations))
+					for _, colDesc := range declarations {
 						if isRuntimeComputedColumn(colDesc) {
 							continue
 						}
@@ -1408,7 +1409,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					}
 					newVal := changes[j+1]
 					// apply type sanitizer
-					for _, colDesc := range t.t.Columns {
+					for _, colDesc := range declarations {
 						if colDesc.Name == scm.String(changes[j]) && colDesc.sanitizer != nil {
 							newVal = colDesc.sanitizer(newVal)
 							break
@@ -1432,13 +1433,13 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow, currentTx)
 					})
 					// Write trigger-mutated schema values back to delta row layout.
-					for i, colDesc := range t.t.Columns {
+					for i, colDesc := range declarations {
 						if colidx, ok := t.deltaColumns[colDesc.Name]; ok && colidx < len(d2) && i < len(newSchemaRow) {
 							d2[colidx] = newSchemaRow[i]
 						}
 					}
 					// BEFORE triggers may change typed/NOT NULL columns; sanitize again.
-					for _, colDesc := range t.t.Columns {
+					for _, colDesc := range declarations {
 						if colDesc.sanitizer == nil {
 							continue
 						}
@@ -1645,8 +1646,8 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			// capture row data for triggers before deletion (outside lock for BEFORE trigger)
 			if withTrigger && len(t.t.Triggers) > 0 {
 				if alreadyLocked {
-					triggerDeletedRow = make(dataset, len(t.t.Columns))
-					for i, col := range t.t.Columns {
+					triggerDeletedRow = make(dataset, len(declarations))
+					for i, col := range declarations {
 						cs := t.getColumnStorageOrPanic(col.Name, true, nil)
 						if idx < t.main_count {
 							triggerDeletedRow[i] = cs.GetValue(idx)
@@ -1656,8 +1657,8 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					}
 				} else {
 					t.mu.RLock()
-					triggerDeletedRow = make(dataset, len(t.t.Columns))
-					for i, col := range t.t.Columns {
+					triggerDeletedRow = make(dataset, len(declarations))
+					for i, col := range declarations {
 						cs := t.getColumnStorageOrPanic(col.Name, true, nil)
 						if idx < t.main_count {
 							triggerDeletedRow[i] = cs.GetValue(idx)
@@ -3114,11 +3115,12 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 	var triggerInsertRows []dataset
 	t.insertDataset(columns, values, onFirstInsertId, validatedSchema, currentTx)
 	if fireTriggers && len(t.t.Triggers) > 0 {
+		declarations := t.t.columnDeclarations()
 		newRows := t.inserts[firstNewInsertIdx:]
 		triggerInsertRows = make([]dataset, len(newRows))
 		for i, deltaRow := range newRows {
-			row := make(dataset, len(t.t.Columns))
-			for j, colDesc := range t.t.Columns {
+			row := make(dataset, len(declarations))
+			for j, colDesc := range declarations {
 				if colidx, ok := t.deltaColumns[colDesc.Name]; ok && colidx < len(deltaRow) {
 					row[j] = deltaRow[colidx]
 				} else {
@@ -3198,9 +3200,11 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 // contract: must only be called inside full write mutex mu.Lock()
 func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext) {
 	snapshot := t.t.columnNamesSnapshot.Load()
-	declarations := t.t.Columns // private, unpublished constructors only
+	var declarations []*column
 	if snapshot != nil {
 		declarations = snapshot.declarations
+	} else {
+		declarations = t.t.Columns // private, unpublished constructors only
 	}
 	if validatedSchema == nil || validatedSchema != snapshot {
 		validateInsertColumns(columns, declarations)
