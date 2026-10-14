@@ -546,4 +546,346 @@ test_cases:
   name: 'Fixture cleanup 004: DROP VIEW IF EXISTS dbo.odbc_fixture_view'
 - sql: DROP TABLE IF EXISTS dbo.odbc_fixture
   name: 'Fixture cleanup 005: DROP TABLE IF EXISTS dbo.odbc_fixture'
+
+# Native metadata adapter coverage, independent of SQL procedure grammar.
+- name: Prepare native driver metadata fixture
+  sql: CREATE TABLE driver_metadata_native (id BIGINT NOT NULL, label VARCHAR(20), amount DECIMAL(12,2), d DATE)
+- name: Native metadata bound named table catalog
+  scm: (begin (define result (tsql_metadata_result "memcp-tests" "sp_tables" (list (list "@TABLE_NAME" "driver_metadata_native")
+    (list "table_type" "'TABLE'")) nil)) (map (result "rows") (lambda (row) (list (row "TABLE_NAME") (row "TABLE_TYPE")))))
+  expect:
+    result:
+    - - driver_metadata_native
+      - TABLE
+- name: Native metadata brackets escape literal underscore
+  scm: (begin (define result (tsql_metadata_result "memcp-tests" "sp_tables" (list (list "table_name" "driver[_]metadata[_]native"))
+    nil)) (map (result "rows") (lambda (row) (list (row "TABLE_NAME")))))
+  expect:
+    result:
+    - - driver_metadata_native
+- name: Native metadata exact mode keeps wildcard literal
+  scm: (begin (define result (tsql_metadata_result "memcp-tests" "sp_tables" (list (list "table_name" "driver%")
+    (list "fUsePattern" 0)) nil)) (map (result "rows") (lambda (row) (list (row "TABLE_NAME")))))
+  expect:
+    result: []
+- name: Native metadata exact mode folds identifier case
+  scm: (begin (define result (tsql_metadata_result "memcp-tests" "sp_tables" (list (list "table_name" "DRIVER_METADATA_NATIVE")
+    (list "fUsePattern" 0)) nil)) (map (result "rows") (lambda (row) (list (row "TABLE_NAME")))))
+  expect:
+    result:
+    - - driver_metadata_native
+- name: Native metadata column contracts do not need data
+  scm: (begin (define result (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "" "driver_metadata_native")
+    (list "ODBCVer" 3)) nil)) (map (result "rows") (lambda (row) (list (row "COLUMN_NAME") (row "TYPE_NAME") (row
+    "DATA_TYPE") (row "PRECISION") (row "SCALE") (row "ORDINAL_POSITION")))))
+  expect:
+    result:
+    - - id
+      - bigint
+      - -5
+      - 19
+      - 0
+      - 1
+    - - label
+      - varchar
+      - 12
+      - 20
+      - null
+      - 2
+    - - amount
+      - decimal
+      - 3
+      - 12
+      - 2
+      - 3
+    - - d
+      - date
+      - 91
+      - 10
+      - null
+      - 4
+- name: Native metadata legacy date descriptor
+  scm: (begin (define result (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_metadata_native")
+    (list "column_name" "d") (list "ODBCVer" 2)) nil)) (map (result "rows") (lambda (row) (list (row "DATA_TYPE")
+    (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB")))))
+  expect:
+    result:
+    - - 9
+      - 9
+      - 1
+- name: Native metadata owner mismatch returns no tables
+  scm: (begin (define result (tsql_metadata_result "memcp-tests" "sp_tables" (list (list "table_name" "driver_metadata_native")
+    (list "table_owner" "other_owner")) nil)) (map (result "rows") (lambda (row) (list (row "TABLE_NAME")))))
+  expect:
+    result: []
+- name: Native metadata rejects foreign database qualifier
+  scm: (tsql_metadata_result "memcp-tests" "sp_tables" (list (list "table_qualifier" "other_database")) nil)
+  expect:
+    error: true
+- name: Native metadata rejects unknown argument
+  scm: (tsql_metadata_result "memcp-tests" "sp_tables" (list (list "typo" "driver_metadata_native")) nil)
+  expect:
+    error: true
+- name: Native metadata rejects duplicate named and positional binding
+  scm: (tsql_metadata_result "memcp-tests" "sp_tables" (list (list "" "driver_metadata_native") (list "table_name"
+    "driver_metadata_native")) nil)
+  expect:
+    error: true
+- name: Native metadata rejects invalid ODBC version
+  scm: (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_metadata_native") (list
+    "ODBCVer" 4)) nil)
+  expect:
+    error: true
+- name: Native metadata checks authority before catalog access
+  scm: (tsql_metadata_result "memcp-tests" "sp_tables" (list) (lambda (_schema _table _write) (error "denied")))
+  expect:
+    error: true
+- name: Native metadata empty result still declares columns
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "absent_driver_metadata_table"))
+    nil)) (list (count (r "rows")) (map (r "columns") (lambda (c) (list (c "name") (c "kind"))))))
+  expect:
+    result:
+    - 0
+    - - - TABLE_QUALIFIER
+        - 231
+      - - TABLE_OWNER
+        - 231
+      - - TABLE_NAME
+        - 231
+      - - COLUMN_NAME
+        - 231
+      - - DATA_TYPE
+        - 38
+      - - TYPE_NAME
+        - 231
+      - - PRECISION
+        - 38
+      - - LENGTH
+        - 38
+      - - SCALE
+        - 38
+      - - RADIX
+        - 38
+      - - NULLABLE
+        - 38
+      - - REMARKS
+        - 231
+      - - COLUMN_DEF
+        - 231
+      - - SQL_DATA_TYPE
+        - 38
+      - - SQL_DATETIME_SUB
+        - 38
+      - - CHAR_OCTET_LENGTH
+        - 38
+      - - ORDINAL_POSITION
+        - 38
+      - - IS_NULLABLE
+        - 231
+- name: Publish driver metadata fixture new column
+  sql: ALTER TABLE driver_metadata_native ADD added SMALLINT
+- name: Native metadata sees DDL publication
+  scm: (begin (define result (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_metadata_native")
+    (list "column_name" "added")) nil)) (map (result "rows") (lambda (row) (list (row "COLUMN_NAME") (row "DATA_TYPE")
+    (row "ORDINAL_POSITION")))))
+  expect:
+    result:
+    - - added
+      - 5
+      - 5
+- name: Remove driver metadata fixture new column
+  sql: ALTER TABLE driver_metadata_native DROP COLUMN added
+- name: Native metadata observes column removal
+  scm: (begin (define result (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_metadata_native")
+    (list "column_name" "added")) nil)) (map (result "rows") (lambda (row) (list (row "COLUMN_NAME")))))
+  expect:
+    result: []
+- name: Remove native driver metadata fixture
+  sql: DROP TABLE driver_metadata_native
+- name: Native type info exposes declared integer precision
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_datatype_info_100" (list (list "" -5) (list "" 3))
+    nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION") (row "NUM_PREC_RADIX")))))
+  expect:
+    result:
+    - - bigint
+      - -5
+      - 19
+      - 10
+- name: Native type info uses ODBC three date identifier
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_datatype_info" (list (list "data_type" 91) (list
+    "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "SQL_DATA_TYPE")
+    (row "SQL_DATETIME_SUB")))))
+  expect:
+    result:
+    - - date
+      - 91
+      - 9
+      - 1
+- name: Native type info defaults to ODBC two
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_datatype_info" (list (list "data_type" 9)) nil))
+    (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE")))))
+  expect:
+    result:
+    - - date
+      - 9
+- name: Native type info unknown code returns real empty result
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_datatype_info_100" (list (list "data_type" 999))
+    nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME")))))
+  expect:
+    result: []
+- name: Native metadata rejects unknown procedure
+  scm: (tsql_metadata_result "memcp-tests" "unknown_driver_metadata" (list (list "table_name" "absent_driver_table")) nil)
+  expect:
+    error: true
+# Constraint metadata reuses one immutable native schema publication.
+- name: Prepare native composite driver key
+  sql: CREATE TABLE driver_keys_parent (a INT NOT NULL,b INT NOT NULL,CONSTRAINT PK_driver PRIMARY KEY(b,a))
+- name: Prepare native child driver key
+  sql: CREATE TABLE driver_keys_child (id INT PRIMARY KEY,pb INT,pa INT,rv ROWVERSION)
+- name: Prepare native nullable unique driver key
+  sql: CREATE TABLE driver_keys_unique (id INT NOT NULL,nullable_key INT,CONSTRAINT UQ_driver UNIQUE(nullable_key))
+- name: Publish native driver foreign key
+  scm: (createforeignkey (table "memcp-tests" "driver_keys_child") "FK_driver" (list "pb" "pa") (table "memcp-tests"
+    "driver_keys_parent") (list "b" "a") "cascade" "set null")
+  expect:
+    result: true
+- name: Native immutable metadata keeps key names and NULL policy
+  scm: (begin (define u (car ((show (table "memcp-tests" "driver_keys_unique") "constraints") "Unique"))) (list
+    (u "Id") (u "nulls_not_distinct")))
+  expect:
+    result:
+    - UQ_driver
+    - true
+- name: Driver primary key metadata keeps declaration order and public name
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_pkeys" (list (list "" "driver_keys_parent")) nil))
+    (map (r "rows") (lambda (row) (list (row "COLUMN_NAME") (row "KEY_SEQ") (row "PK_NAME")))))
+  expect:
+    result:
+    - - b
+      - 1
+      - PK_driver
+    - - a
+      - 2
+      - PK_driver
+- name: Driver primary key identifiers match case independently
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_pkeys" (list (list "table_name" "DRIVER_KEYS_PARENT"))
+    nil)) (map (r "rows") (lambda (row) (list (row "COLUMN_NAME")))))
+  expect:
+    result:
+    - - b
+    - - a
+- name: Driver unique constraint is not a fabricated primary key
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_pkeys" (list (list "table_name" "driver_keys_unique"))
+    nil)) (map (r "rows") (lambda (row) (list (row "COLUMN_NAME")))))
+  expect:
+    result: []
+- name: Driver statistics lists only real unique constraints
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_statistics" (list (list "table_name" "driver_keys_unique"))
+    nil)) (map (r "rows") (lambda (row) (list (row "INDEX_NAME") (row "TYPE") (row "COLUMN_NAME") (row "COLLATION")
+    (row "CARDINALITY") (row "PAGES")))))
+  expect:
+    result:
+    - - UQ_driver
+      - 3
+      - nullable_key
+      - null
+      - null
+      - null
+- name: Driver key metadata rejects foreign database qualifier
+  scm: (tsql_metadata_result "memcp-tests" "sp_pkeys" (list (list "table_name" "driver_keys_parent") (list "table_qualifier"
+    "other_database")) nil)
+  expect:
+    error: true
+- name: Driver exact index statistics stay explicit unsupported
+  scm: (tsql_metadata_result "memcp-tests" "sp_statistics" (list (list "table_name" "driver_keys_parent") (list
+    "accuracy" "E")) nil)
+  expect:
+    error: true
+- name: Driver foreign key metadata keeps columns and actions
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_fkeys" (list (list "fktable_name" "driver_keys_child"))
+    nil)) (map (r "rows") (lambda (row) (list (row "PKCOLUMN_NAME") (row "FKCOLUMN_NAME") (row "KEY_SEQ") (row "UPDATE_RULE")
+    (row "DELETE_RULE") (row "FK_NAME") (row "PK_NAME")))))
+  expect:
+    result:
+    - - b
+      - pb
+      - 1
+      - 0
+      - 2
+      - FK_driver
+      - PK_driver
+    - - a
+      - pa
+      - 2
+      - 0
+      - 2
+      - FK_driver
+      - PK_driver
+- name: Driver referenced-table lookup uses actual child declarations
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_fkeys" (list (list "pktable_name" "DRIVER_KEYS_PARENT"))
+    nil)) (map (r "rows") (lambda (row) (list (row "FKTABLE_NAME") (row "KEY_SEQ")))))
+  expect:
+    result:
+    - - driver_keys_child
+      - 1
+    - - driver_keys_child
+      - 2
+- name: Driver foreign key discovery requires table filter
+  scm: (tsql_metadata_result "memcp-tests" "sp_fkeys" (list) nil)
+  expect:
+    error: true
+- name: Driver special identifier keeps native composite key order
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_special_columns" (list (list "table_name" "driver_keys_parent"))
+    nil)) (map (r "rows") (lambda (row) (list (row "COLUMN_NAME") (row "PSEUDO_COLUMN")))))
+  expect:
+    result:
+    - - b
+      - 1
+    - - a
+      - 1
+- name: Driver special version column describes declared binary contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_special_columns" (list (list "table_name" "driver_keys_child")
+    (list "col_type" "V")) nil)) (map (r "rows") (lambda (row) (list (row "COLUMN_NAME") (row "DATA_TYPE") (row
+    "TYPE_NAME") (row "PRECISION") (row "LENGTH")))))
+  expect:
+    result:
+    - - rv
+      - -2
+      - rowversion
+      - 8
+      - 8
+- name: Driver special version discovery invents no columns
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_special_columns" (list (list "table_name" "driver_keys_parent")
+    (list "col_type" "V")) nil)) (map (r "rows") (lambda (row) (list (row "COLUMN_NAME")))))
+  expect:
+    result: []
+- name: Driver special columns reject invalid option
+  scm: (tsql_metadata_result "memcp-tests" "sp_special_columns" (list (list "table_name" "driver_keys_parent") (list
+    "col_type" "X")) nil)
+  expect:
+    error: true
+- name: Remove native driver foreign key
+  scm: (dropforeignkey (table "memcp-tests" "driver_keys_child") "FK_driver")
+  expect:
+    result: true
+- name: Driver metadata observes foreign key removal
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_fkeys" (list (list "fktable_name" "driver_keys_child"))
+    nil)) (map (r "rows") (lambda (row) (list (row "FK_NAME")))))
+  expect:
+    result: []
+- name: Remove native driver unique key
+  scm: (dropkey (table "memcp-tests" "driver_keys_unique") "UQ_driver")
+  expect:
+    result: true
+- name: Driver metadata observes unique key removal
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_statistics" (list (list "table_name" "driver_keys_unique"))
+    nil)) (map (r "rows") (lambda (row) (list (row "INDEX_NAME")))))
+  expect:
+    result: []
+- name: Remove driver constraint fixture driver_keys_child
+  sql: DROP TABLE driver_keys_child
+- name: Remove driver constraint fixture driver_keys_parent
+  sql: DROP TABLE driver_keys_parent
+- name: Remove driver constraint fixture driver_keys_unique
+  sql: DROP TABLE driver_keys_unique
 cleanup: []

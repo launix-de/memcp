@@ -65,7 +65,7 @@ func TestAddedDefaultOverlappingInsertAndRebuild(t *testing.T) {
 func TestAddedDefaultOverlappingGeneratedIDInsert(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "taddeddefaultid", 0)
 	tbl.Columns[0].AutoIncrement = true
-	tbl.publishShowColumnsSnapshot()
+	tbl.publishShowColumnsSnapshot(false)
 	started := make(chan struct{})
 	done := make(chan any, 1)
 	go func() {

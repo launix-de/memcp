@@ -421,7 +421,7 @@ existingLoop:
 		}
 		t.Unique = append(t.Unique, uniqueKey{Id: k.name, Cols: colNames})
 	}
-	t.publishShowColumnsSnapshot()
+	t.publishShowColumnsSnapshot(true)
 	t.schema.save()
 	return nil
 }

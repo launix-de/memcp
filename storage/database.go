@@ -686,7 +686,7 @@ func (db *database) ensureLoaded() {
 			}
 			t.publishTopologyLocked()
 			t.initializeLegacyPlannerRowEstimate()
-			t.publishShowColumnsSnapshot()
+			t.publishShowColumnsSnapshot(true)
 			t.restoreKeyFrequencies()
 			t.restoreFilterFeedback()
 		}
@@ -1080,7 +1080,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 					}
 				}
 			}
-			t.publishShowColumnsSnapshot()
+			t.publishShowColumnsSnapshot(false)
 			t.mu.Lock()
 			tableLocked = true
 
@@ -1811,7 +1811,7 @@ func (db *database) newTable(name string, pm PersistencyMode) *table {
 	t.Shards[0] = NewShard(t)
 	t.publishTopologyLocked()
 	t.Auto_increment = 0
-	t.publishShowColumnsSnapshot()
+	t.publishShowColumnsSnapshot(true)
 	return t
 }
 

@@ -830,3 +830,22 @@ func TestForeignKeyTriggerRestoresFinalValuePriority(t *testing.T) {
 		databases.Remove(name)
 	}
 }
+
+func TestForeignKeyRejectsDifferentSchemaOwners(t *testing.T) {
+	Init(scm.Globalenv)
+	child := &table{schema: &database{Name: "child_owner"}, Name: "child"}
+	parent := &table{schema: &database{Name: "parent_owner"}, Name: "parent"}
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		scm.Apply(scm.Globalenv.Vars["createforeignkey"], NewTableScmer(child), scm.NewString("fk"),
+			showStringSlice([]string{"id"}), NewTableScmer(parent), showStringSlice([]string{"id"}),
+			scm.NewString("restrict"), scm.NewString("restrict"))
+	}()
+	if failure == nil || fmt.Sprint(failure) != "foreign key endpoints must belong to the same schema" {
+		t.Fatalf("expected endpoint ownership error, got %v", failure)
+	}
+	if len(child.Foreign) != 0 || len(parent.Foreign) != 0 || len(child.Triggers) != 0 || len(parent.Triggers) != 0 {
+		t.Fatal("rejected FK changed an endpoint")
+	}
+}

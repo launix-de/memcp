@@ -109,6 +109,18 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- `tableShowColumnsSnapshotMetadata.constraints` contains immutable native key
+  and foreign-key declarations, including copied column-name lists. The schema
+  mutation owner or unpublished initialization constructs it as part of the
+  existing metadata publication. Maintenance and lazy refresh retain the prior
+  immutable value and use CAS to avoid replacing newer DDL. TEMP-column
+  invalidation retains constraints while marking rendered columns invalid.
+  `show(table, "constraints")` performs only an atomic snapshot read, never
+  traverses shards, acquires locks, or exposes automatic acceleration indexes.
+  The cacheline-sized outer snapshot is unchanged; this runtime metadata is not
+  persisted separately. Native FK endpoints must share one schema owner because
+  their existing persisted representation stores table names within that schema.
+
 - `StorageString.textBuffer` is constructed/loaded under
   exclusive unpublished generation ownership, then remains immutable.
   LZ4 Scmer handles retain the buffer header through a GC-visible pointer;

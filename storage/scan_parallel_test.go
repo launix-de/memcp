@@ -880,7 +880,7 @@ func TestTableStatisticsReadsPublishedSnapshotWithoutShardLock(t *testing.T) {
 	tbl := &table{schema: &database{Name: "table-statistics-test"}, Shards: []*storageShard{shard}}
 	shard.t = tbl
 	tbl.PlannerRowEstimate.value.Store(1)
-	tbl.publishShowColumnsSnapshot()
+	tbl.publishShowColumnsSnapshot(false)
 	if stats := tbl.statistics(); stats.rowCount != 1 || stats.sizeBytes != 0 {
 		t.Fatalf("startup statistics = %+v, want row estimate 1 before size collection", stats)
 	}
@@ -1147,7 +1147,7 @@ func TestReserveIDsExplicitInsertAndCallback(t *testing.T) {
 func TestReserveIDsRestartContract(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "treserveidrestart", 0)
 	tbl.Columns[0].AutoIncrement = true
-	tbl.publishShowColumnsSnapshot()
+	tbl.publishShowColumnsSnapshot(false)
 	tbl.schema.save()
 	reserve := scm.Globalenv.Vars["reserve_ids"]
 	block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(3)).Slice()
@@ -1221,7 +1221,7 @@ func TestReserveIDsConcurrentWithNativeInsert(t *testing.T) {
 func TestReserveIDsPersistedPrefixRecovery(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "treserveidprefix", 0)
 	tbl.Columns[0].AutoIncrement = true
-	tbl.publishShowColumnsSnapshot()
+	tbl.publishShowColumnsSnapshot(false)
 	tbl.schema.save()
 	reserve := scm.Globalenv.Vars["reserve_ids"]
 	block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(100)).Slice()

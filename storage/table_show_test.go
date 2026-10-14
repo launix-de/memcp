@@ -19,6 +19,7 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -188,13 +189,13 @@ func TestPlannerStatisticsUsesHashedImmutableSnapshot(t *testing.T) {
 		MaxEstimate:       scm.NewString("z"),
 	})
 	atomic.StoreUint64(&tbl.Columns[1].DistinctEstimate, 17)
-	tbl.publishShowColumnsSnapshot()
+	tbl.publishShowColumnsSnapshot(false)
 	publishedToken := tbl.PlannerStatsToken(true)
 	if publishedToken == 0 {
 		t.Fatal("published planner statistics have no dependency token")
 	}
 	publishedFingerprint := tbl.PlannerStatisticsFingerprint(true)
-	tbl.publishShowColumnsSnapshot()
+	tbl.publishShowColumnsSnapshot(false)
 	if tbl.PlannerStatsToken(true) == publishedToken {
 		t.Fatal("republished planner statistics retained their generation token")
 	}
@@ -301,7 +302,7 @@ func TestPlannerStatisticsFingerprintUsesMagnitudeBuckets(t *testing.T) {
 func BenchmarkPlannerStatisticsLookup(b *testing.B) {
 	tbl := showColumnsTestTable(256)
 	tbl.PlannerRowEstimate.value.Store(1_000_000)
-	tbl.publishShowColumnsSnapshot()
+	tbl.publishShowColumnsSnapshot(false)
 	target := scm.NewString("column_255")
 	plannerColumns, _ := tbl.PlannerStatistics().FastDict().Get(scm.NewString("columns"))
 	showColumns := tbl.ShowColumns().Slice()
@@ -345,7 +346,7 @@ func TestShowColumnsPublishesReplacementSnapshot(t *testing.T) {
 	tbl := showColumnsTestTable(1)
 	before := tbl.ShowColumns()
 	tbl.Columns[0].Comment = "updated"
-	tbl.publishShowColumnsSnapshot()
+	tbl.publishShowColumnsSnapshot(false)
 	after := tbl.ShowColumns()
 
 	if &before.Slice()[0] == &after.Slice()[0] {
@@ -360,7 +361,7 @@ func TestShowColumnsUsesExplicitStatisticsPublication(t *testing.T) {
 	tbl := showColumnsTestTable(1)
 	before := tbl.ShowColumns()
 	atomic.StoreUint64(&tbl.Columns[0].DistinctEstimate, 17)
-	tbl.publishShowColumnsSnapshot()
+	tbl.publishShowColumnsSnapshot(false)
 	after := tbl.ShowColumns()
 
 	if &before.Slice()[0] == &after.Slice()[0] {
@@ -375,7 +376,7 @@ func TestResolveColumnNameUsesSnapshotIndex(t *testing.T) {
 	tbl := showColumnsTestTable(3)
 	tbl.Columns[1].Name = "MixedCase"
 	tbl.Columns[2].Name = "Σ"
-	tbl.publishShowColumnsSnapshot()
+	tbl.publishShowColumnsSnapshot(false)
 
 	if got, ok := tbl.ResolveColumnName("MixedCase", false); !ok || got != "MixedCase" {
 		t.Fatalf("exact lookup = %q, %t; want MixedCase, true", got, ok)
@@ -449,7 +450,7 @@ func TestShowColumnsBoundsIntegerDistinctByPublishedDomain(t *testing.T) {
 				Confidence: 1, Source: "rebuild", NullCount: tc.nulls,
 				MinEstimate: scm.NewInt(tc.min), MaxEstimate: scm.NewInt(tc.max),
 			})
-			tbl.publishShowColumnsSnapshot()
+			tbl.publishShowColumnsSnapshot(false)
 			if got := showColumnProperty(tbl.ShowColumns().Slice()[0], "DistinctEstimate").Int(); got != int64(tc.want) {
 				t.Fatalf("SHOW distinct = %d, want %d", got, tc.want)
 			}
@@ -519,5 +520,159 @@ func TestUniqueConstraintNameSchemaRoundTrip(t *testing.T) {
 	}
 	if legacy.ConstraintName != "" || !legacy.matchesName("PRIMARY") || legacy.matchesName("") {
 		t.Fatal("legacy keys must retain their original name resolution")
+	}
+}
+
+func TestConstraintMetadataOwnsArraysAndRetainsInvalidatedColumns(t *testing.T) {
+	tbl := showColumnsTestTable(2)
+	tbl.Name = "child"
+	tbl.Unique[0].ConstraintName = "pk_public"
+	tbl.Unique[0].NullsNotDistinct = true
+	tbl.Foreign = []foreignKey{{Id: "fk", Tbl1: "child", Cols1: []string{"column_1"}, Tbl2: "parent", Cols2: []string{"id"}}}
+	tbl.publishShowColumnsSnapshot(true)
+	first := tbl.Constraints()
+	key := showColumnProperty(first, "Unique").Slice()[0]
+	fk := showColumnProperty(first, "ForeignKeys").Slice()[0]
+	tbl.Unique[0].Cols[0] = "renamed_key_column"
+	tbl.Foreign[0].Cols1[0] = "renamed_child_column"
+	if showColumnProperty(key, "Cols").Slice()[0].String() != "column_0" ||
+		showColumnProperty(fk, "LocalColumns").Slice()[0].String() != "column_1" ||
+		showColumnProperty(key, "constraint_name").String() != "pk_public" || !showColumnProperty(key, "nulls_not_distinct").Bool() {
+		t.Fatal("borrowed constraint value changed with its native declaration")
+	}
+	tbl.publishShowColumnsSnapshot(true)
+	second := tbl.Constraints()
+	tbl.invalidateShowColumnsSnapshot()
+	if got := tbl.Constraints(); &got.Slice()[0] != &second.Slice()[0] {
+		t.Fatal("temporary column invalidation erased immutable constraints")
+	}
+	tbl.ShowColumns()
+	tbl.PlannerStatistics()
+	if got := tbl.Constraints(); &got.Slice()[0] != &second.Slice()[0] {
+		t.Fatal("lazy column rendering regenerated the constraint directory")
+	}
+}
+
+func TestConstraintMetadataMaintenanceCannotReplaceNewDeclaration(t *testing.T) {
+	tbl := showColumnsTestTable(1)
+	tbl.Name = "child"
+	tbl.publishShowColumnsSnapshot(true)
+	old := tbl.showColumnsSnapshot.Load()
+	maintenance := tbl.buildShowColumnsSnapshot(17)
+	tbl.Foreign = []foreignKey{{Id: "fk", Tbl1: "child", Cols1: []string{"column_0"}, Tbl2: "parent", Cols2: []string{"id"}}}
+	tbl.publishShowColumnsSnapshot(true)
+	if tbl.showColumnsSnapshot.CompareAndSwap(old, maintenance) {
+		t.Fatal("maintenance replaced a newer constraint publication")
+	}
+	tbl.publishShowColumnsSnapshot(false)
+	if len(showColumnProperty(tbl.Constraints(), "ForeignKeys").Slice()) != 1 {
+		t.Fatal("maintenance rendering lost a current constraint")
+	}
+	encoded, err := json.Marshal(tbl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored table
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	restored.publishShowColumnsSnapshot(true)
+	if len(showColumnProperty(restored.Constraints(), "ForeignKeys").Slice()) != 1 {
+		t.Fatal("restoring native declarations did not reconstruct metadata")
+	}
+}
+
+func TestConstraintMetadataConcurrentForeignPublicationAndMaintenance(t *testing.T) {
+	tbl := showColumnsTestTable(1)
+	tbl.Name = "child"
+	tbl.schema = &database{Name: "constraint_publication"}
+	tbl.publishShowColumnsSnapshot(true)
+	var workers sync.WaitGroup
+	var published atomic.Int64
+	published.Store(-1)
+	workers.Add(7)
+	for reader := 0; reader < 4; reader++ {
+		go func() {
+			defer workers.Done()
+			for i := 0; i < 1000; i++ {
+				minimum := published.Load()
+				value := tbl.Constraints()
+				foreign := showColumnProperty(value, "ForeignKeys").Slice()
+				if minimum >= 0 && (len(foreign) != 1 || int64(scm.ToInt(showColumnProperty(foreign[0], "Id"))) < minimum) {
+					t.Error("invalidation restored an older FK declaration")
+					return
+				}
+				for _, key := range showColumnProperty(value, "Unique").Slice() {
+					if showColumnProperty(key, "Cols").Slice()[0].String() != "column_0" {
+						t.Error("reader observed an incomplete key declaration")
+						return
+					}
+				}
+			}
+		}()
+	}
+	go func() {
+		defer workers.Done()
+		for i := 0; i < 200; i++ {
+			// Native FK endpoint mutation owns schemalock, not a parent DDL lock.
+			tbl.schema.schemalock.Lock()
+			tbl.Foreign = []foreignKey{{Id: fmt.Sprint(i), Tbl1: "child", Cols1: []string{"column_0"}, Tbl2: "parent", Cols2: []string{"id"}}}
+			tbl.publishShowColumnsSnapshot(true)
+			published.Store(int64(i))
+			tbl.schema.schemalock.Unlock()
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		for i := 0; i < 200; i++ {
+			tbl.ddlMu.RLock()
+			tbl.publishShowColumnsSnapshot(false)
+			tbl.ddlMu.RUnlock()
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		for i := 0; i < 1000; i++ {
+			tbl.ddlMu.Lock()
+			tbl.invalidateShowColumnsSnapshot()
+			tbl.ddlMu.Unlock()
+		}
+	}()
+	workers.Wait()
+	if got := showColumnProperty(tbl.Constraints(), "ForeignKeys").Slice(); len(got) != 1 || showColumnProperty(got[0], "Id").String() != "199" {
+		t.Fatal("maintenance lost the final FK declaration")
+	}
+}
+
+func TestConstraintMetadataNativeDDLPublication(t *testing.T) {
+	child := setupScanParallelTestTable(t, "constraint_native_ddl")
+	parent, _ := CreateTable(child.schema.Name, "parent", Memory, false)
+	parent.CreateColumn("id", "INT", nil, nil)
+	create := scm.Globalenv.Vars["createforeignkey"]
+	drop := scm.Globalenv.Vars["dropforeignkey"]
+	for iteration := 0; iteration < 4; iteration++ {
+		name := fmt.Sprintf("extra_%d", iteration)
+		var writers sync.WaitGroup
+		writers.Add(2)
+		go func() {
+			defer writers.Done()
+			scm.Apply(create, NewTableScmer(child), scm.NewString("fk"), showStringSlice([]string{"id"}),
+				NewTableScmer(parent), showStringSlice([]string{"id"}), scm.NewString("restrict"), scm.NewString("restrict"))
+		}()
+		go func() {
+			defer writers.Done()
+			child.CreateColumn(name, "INT", nil, nil)
+		}()
+		writers.Wait()
+		for _, endpoint := range []*table{child, parent} {
+			if len(showColumnProperty(endpoint.Constraints(), "ForeignKeys").Slice()) != 1 {
+				t.Fatal("native FK or column publication lost endpoint metadata")
+			}
+		}
+		scm.Apply(drop, NewTableScmer(child), scm.NewString("fk"))
+		if len(showColumnProperty(child.Constraints(), "ForeignKeys").Slice()) != 0 ||
+			len(showColumnProperty(parent.Constraints(), "ForeignKeys").Slice()) != 0 {
+			t.Fatal("native DROP FOREIGN KEY did not publish both endpoints")
+		}
 	}
 }

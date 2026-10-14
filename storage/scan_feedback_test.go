@@ -255,7 +255,7 @@ func TestFilterFeedbackOnlyCompilationDoesNotEvaluateBoundaries(t *testing.T) {
 func TestFilterFeedbackCheckpoint(t *testing.T) {
 	tbl := feedbackTestTable(1000)
 	tbl.Name = "documents"
-	tbl.publishShowColumnsSnapshot()
+	tbl.publishShowColumnsSnapshot(false)
 	key := &filterObservation{key: "contains-word", family: "name:contains", length: 4, generation: tbl.plannerStatsToken.Load()}
 	tbl.topology.Load().shards[0].filterFeedback.observe(key, 1000, 123, 1000)
 	tbl.publishFilterFeedback(key)
@@ -270,7 +270,7 @@ func TestFilterFeedbackCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored.plannerStatsToken.Store(9)
-	restored.publishShowColumnsSnapshot()
+	restored.publishShowColumnsSnapshot(false)
 	restored.restoreFilterFeedback()
 	value, source, known := restored.filterSelectivity(key)
 	if !known || value != .123 || source != "historical_scan_feedback" {
@@ -284,7 +284,7 @@ func TestFilterFeedbackCheckpoint(t *testing.T) {
 		t.Fatal("retained decode buffer")
 	}
 	restored.Collation = "utf8mb4_bin"
-	restored.publishShowColumnsSnapshot()
+	restored.publishShowColumnsSnapshot(false)
 	if _, _, known := restored.filterSelectivity(key); known {
 		t.Fatal("incompatible schema reused feedback")
 	}
