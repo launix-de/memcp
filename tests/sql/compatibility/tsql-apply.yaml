@@ -1,0 +1,233 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: T-SQL APPLY through common logical joins and aggregate domains
+  syntax: tsql
+  isolated: true
+setup:
+  - sql: DROP TABLE IF EXISTS tsql_apply_keywords
+  - sql: DROP TABLE IF EXISTS tsql_apply_inner
+  - sql: DROP TABLE IF EXISTS tsql_apply_outer
+  - sql: CREATE TABLE tsql_apply_outer (id INT PRIMARY KEY, lookup_key INT)
+  - sql: CREATE TABLE tsql_apply_inner (id INT PRIMARY KEY, lookup_key INT, amount INT)
+  - sql: CREATE TABLE tsql_apply_keywords (id INT PRIMARY KEY, apply INT)
+  - sql: INSERT INTO tsql_apply_keywords VALUES (1,17)
+  - sql: INSERT INTO tsql_apply_outer VALUES (1,7),(2,7),(3,NULL),(4,9),(5,12)
+  - sql: INSERT INTO tsql_apply_inner VALUES (10,7,4),(11,7,NULL),(12,9,6),(13,NULL,8)
+test_cases:
+  - name: APPLY remains an unquoted declared column and table alias
+    sql: SELECT apply.apply AS n FROM tsql_apply_keywords apply
+    expect:
+      rows: 1
+      data: [{n: 17}]
+  - name: APPLY remains an unquoted projection alias beside the FROM operator
+    sql: >-
+      SELECT q.apply FROM tsql_apply_outer p
+      CROSS APPLY (SELECT p.id AS apply) q ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{apply: 1}, {apply: 2}, {apply: 3}, {apply: 4}, {apply: 5}]
+  - name: CROSS APPLY retains inner multiplicity and repeated outer bindings
+    sql: >-
+      SELECT p.id, q.child_id, q.amount FROM tsql_apply_outer p
+      CROSS APPLY (SELECT c.id AS child_id, c.amount FROM tsql_apply_inner c
+                   WHERE c.lookup_key=p.lookup_key) q
+      ORDER BY p.id, q.child_id
+    expect:
+      rows: 5
+      data:
+        - {id: 1, child_id: 10, amount: 4}
+        - {id: 1, child_id: 11, amount: null}
+        - {id: 2, child_id: 10, amount: 4}
+        - {id: 2, child_id: 11, amount: null}
+        - {id: 4, child_id: 12, amount: 6}
+  - name: OUTER APPLY preserves missing rows and real nullable projections
+    sql: >-
+      SELECT p.id, q.amount, q.child_id, q.marker FROM tsql_apply_outer p
+      OUTER APPLY (SELECT c.amount, c.id AS child_id, 1 AS marker
+                   FROM tsql_apply_inner c WHERE c.lookup_key=p.lookup_key) q
+      ORDER BY p.id, q.child_id
+    expect:
+      rows: 7
+      data:
+        - {id: 1, amount: 4, child_id: 10, marker: 1}
+        - {id: 1, amount: null, child_id: 11, marker: 1}
+        - {id: 2, amount: 4, child_id: 10, marker: 1}
+        - {id: 2, amount: null, child_id: 11, marker: 1}
+        - {id: 3, amount: null, child_id: null, marker: null}
+        - {id: 4, amount: 6, child_id: 12, marker: 1}
+        - {id: 5, amount: null, child_id: null, marker: null}
+  - name: OUTER APPLY aggregates retain the empty-domain row
+    sql: >-
+      SELECT p.id, q.n, q.largest, q.total FROM tsql_apply_outer p
+      OUTER APPLY (SELECT COUNT(*) AS n, MAX(c.amount) AS largest, SUM(c.amount) AS total
+                   FROM tsql_apply_inner c WHERE c.lookup_key=p.lookup_key) q
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - {id: 1, n: 2, largest: 4, total: 4}
+        - {id: 2, n: 2, largest: 4, total: 4}
+        - {id: 3, n: 0, largest: null, total: null}
+        - {id: 4, n: 1, largest: 6, total: 6}
+        - {id: 5, n: 0, largest: null, total: null}
+  - name: CROSS APPLY aggregates produce one row even for empty input
+    sql: >-
+      SELECT p.id, q.n FROM tsql_apply_outer p
+      CROSS APPLY (SELECT COUNT(*) AS n FROM tsql_apply_inner c
+                   WHERE c.lookup_key=p.lookup_key AND c.amount>4) q
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{id: 1, n: 0}, {id: 2, n: 0}, {id: 3, n: 0}, {id: 4, n: 1}, {id: 5, n: 0}]
+  - name: APPLY aggregate formulas preserve DISTINCT and SQL NULL counting
+    sql: >-
+      SELECT p.id, q.n, q.distinct_n FROM tsql_apply_outer p
+      CROSS APPLY (SELECT COUNT(c.amount) AS n, COUNT(DISTINCT c.amount) AS distinct_n
+                   FROM tsql_apply_inner c WHERE c.lookup_key=p.lookup_key) q
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{id: 1, n: 1, distinct_n: 1}, {id: 2, n: 1, distinct_n: 1}, {id: 3, n: 0, distinct_n: 0}, {id: 4, n: 1, distinct_n: 1}, {id: 5, n: 0, distinct_n: 0}]
+  - name: APPLY DISTINCT retains numeric zero while excluding NULL
+    sql: >-
+      SELECT p.id, q.n FROM tsql_apply_outer p
+      CROSS APPLY (SELECT COUNT(DISTINCT CASE WHEN c.amount IS NULL THEN NULL ELSE c.amount-c.amount END) AS n
+                   FROM tsql_apply_inner c WHERE c.lookup_key=p.lookup_key) q
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{id: 1, n: 1}, {id: 2, n: 1}, {id: 3, n: 0}, {id: 4, n: 1}, {id: 5, n: 0}]
+  - name: CROSS APPLY constant projection reuses the current left binding
+    sql: SELECT p.id, q.next_id FROM tsql_apply_outer p CROSS APPLY (SELECT p.id+1 AS next_id) q ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{id: 1, next_id: 2}, {id: 2, next_id: 3}, {id: 3, next_id: 4}, {id: 4, next_id: 5}, {id: 5, next_id: 6}]
+  - name: APPLY output aliases and column alias lists bind case insensitively
+    sql: >-
+      SELECT p.id, Q.VALUE FROM tsql_apply_outer p
+      CROSS APPLY (SELECT c.amount FROM tsql_apply_inner c WHERE c.id=p.id+9) q(value)
+      ORDER BY p.id
+    expect:
+      rows: 4
+      data: [{id: 1, VALUE: 4}, {id: 2, VALUE: null}, {id: 3, VALUE: 6}, {id: 4, VALUE: 8}]
+  - name: APPLY wildcard exports retain their declared columns
+    sql: >-
+      SELECT p.id AS parent_id, q.id AS child_id, q.amount FROM tsql_apply_outer p
+      CROSS APPLY (SELECT c.* FROM tsql_apply_inner c WHERE c.id=p.id+9) q
+      ORDER BY p.id
+    expect:
+      rows: 4
+      data: [{parent_id: 1, child_id: 10, amount: 4}, {parent_id: 2, child_id: 11, amount: null}, {parent_id: 3, child_id: 12, amount: 6}, {parent_id: 4, child_id: 13, amount: 8}]
+  - name: APPLY aggregate domain follows the complete derived-left projection
+    sql: >-
+      SELECT p.id, q.n FROM
+      (SELECT id, lookup_key+2 AS k FROM tsql_apply_outer) p
+      CROSS APPLY (SELECT COUNT(*) AS n FROM tsql_apply_inner c WHERE c.lookup_key=p.k) q
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{id: 1, n: 1}, {id: 2, n: 1}, {id: 3, n: 0}, {id: 4, n: 0}, {id: 5, n: 0}]
+  - name: APPLY aggregate domain includes outer payload values beyond the equality key
+    sql: >-
+      SELECT p.id, q.total FROM tsql_apply_outer p
+      CROSS APPLY (SELECT SUM(c.amount*p.id) AS total FROM tsql_apply_inner c
+                   WHERE c.lookup_key=p.lookup_key) q ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{id: 1, total: 4}, {id: 2, total: 8}, {id: 3, total: null}, {id: 4, total: 24}, {id: 5, total: null}]
+  - name: Nested APPLY retains its lexical ancestor binding
+    sql: >-
+      SELECT p.id FROM tsql_apply_outer p WHERE EXISTS
+      (SELECT 1 FROM tsql_apply_inner c
+       CROSS APPLY (SELECT d.id FROM tsql_apply_inner d
+                    WHERE d.id=c.id AND d.lookup_key=p.lookup_key) q)
+      ORDER BY p.id
+    expect:
+      rows: 3
+      data: [{id: 1}, {id: 2}, {id: 4}]
+  - name: Chained APPLY bindings consume preceding exported projections
+    sql: >-
+      SELECT p.id, r.child_id FROM tsql_apply_outer p
+      CROSS APPLY (SELECT p.id+9 AS wanted_id) q
+      CROSS APPLY (SELECT c.id AS child_id FROM tsql_apply_inner c WHERE c.id=q.wanted_id) r
+      ORDER BY p.id
+    expect:
+      rows: 4
+      data: [{id: 1, child_id: 10}, {id: 2, child_id: 11}, {id: 3, child_id: 12}, {id: 4, child_id: 13}]
+  - name: APPLY aggregates are decorrelated into the common logical operator model
+    sql: >-
+      EXPLAIN IR SELECT p.id, q.n, q.largest FROM tsql_apply_outer p
+      OUTER APPLY (SELECT COUNT(*) AS n, MAX(c.amount) AS largest FROM tsql_apply_inner c
+                   WHERE c.lookup_key=p.lookup_key) q
+    expect:
+      contains: [query-block, group-stage, stage-output]
+      not_contains: [dependent-subquery, inner_select, '.grp:', scan_order]
+  - name: APPLY compiled code removes frontend type and compiler annotations
+    scm: >-
+      (not (regexp_test (string (parse_tsql "memcp-tests"
+        "SELECT p.id,q.next_id FROM tsql_apply_outer p CROSS APPLY (SELECT p.id+1 AS next_id) q"
+        nil nil nil)) "sql_compile_expr|sql_type_expr|dependent-subquery|inner_select"))
+    expect: {result: true}
+  - name: APPLY metadata uses the declared outer column contract
+    scm: >-
+      (begin
+        (define field (car (tds_describe "memcp-tests"
+          "SELECT q.next_id FROM tsql_apply_outer p CROSS APPLY (SELECT p.id+1 AS next_id) q"
+          "" (newsession))))
+        (and (equal? (field "sql_type") "INT") (equal? (field "size") 4)))
+    expect: {result: true}
+  - name: Nested APPLY metadata retains its declared lexical ancestor type
+    scm: >-
+      (begin
+        (define field (car (tds_describe "memcp-tests"
+          "SELECT (SELECT MAX(q.n) FROM tsql_apply_inner c CROSS APPLY (SELECT p.id+1 AS n) q) AS total FROM tsql_apply_outer p"
+          "" (newsession))))
+        (and (equal? (field "sql_type") "INT") (equal? (field "size") 4)))
+    expect: {result: true}
+  - name: Nested scalar aggregate consumes the current APPLY ancestor value
+    sql: >-
+      SELECT p.id, (SELECT MAX(q.n) FROM tsql_apply_inner c
+                    CROSS APPLY (SELECT p.id+1 AS n) q) AS total
+      FROM tsql_apply_outer p ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{id: 1, total: 2}, {id: 2, total: 3}, {id: 3, total: 4}, {id: 4, total: 5}, {id: 5, total: 6}]
+    # Open common-planner gap: ancestor-only aggregate payload after flattening.
+    noncritical: true
+  - name: Nested APPLY bare-column metadata retains its ancestor declaration
+    scm: >-
+      (begin
+        (define field (car (tds_describe "memcp-tests"
+          "SELECT (SELECT MAX(q.n) FROM tsql_apply_inner c CROSS APPLY (SELECT p.id AS n) q) AS total FROM tsql_apply_outer p"
+          "" (newsession))))
+        (and (equal? (field "sql_type") "INT") (equal? (field "size") 4)))
+    expect: {result: true}
+  - name: APPLY cannot reference a source to its right
+    sql: >-
+      SELECT p.id FROM tsql_apply_outer p
+      CROSS APPLY (SELECT c.id FROM tsql_apply_inner c WHERE c.id=r.id) q
+      CROSS JOIN tsql_apply_inner r
+    expect: {error: true}
+  - name: APPLY cannot recursively reference its own exported column
+    sql: SELECT q.v FROM tsql_apply_outer p CROSS APPLY (SELECT q.v AS v) q
+    expect: {error: true}
+  - name: Ordinary derived tables retain their nonlateral scope
+    sql: >-
+      SELECT p.id FROM tsql_apply_outer p
+      JOIN (SELECT c.id FROM tsql_apply_inner c WHERE c.lookup_key=p.lookup_key) q ON 1=1
+    expect: {error: true}
+  - name: APPLY rejects a duplicate source alias
+    sql: SELECT p.id FROM tsql_apply_outer p CROSS APPLY (SELECT 1 AS x) p
+    expect: {error: true}
+  - name: Partitioned TOP in APPLY is explicitly unsupported
+    sql: >-
+      SELECT p.id, q.child_id FROM tsql_apply_outer p
+      OUTER APPLY (SELECT TOP(1) c.id AS child_id FROM tsql_apply_inner c
+                   WHERE c.lookup_key=p.lookup_key ORDER BY c.id) q
+    expect: {error: true}
+cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_apply_keywords
+  - sql: DROP TABLE IF EXISTS tsql_apply_inner
+  - sql: DROP TABLE IF EXISTS tsql_apply_outer

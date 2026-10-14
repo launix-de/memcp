@@ -297,21 +297,22 @@ heterogeneous branches require a frontend-assigned contract or casts. */
 		(sql_info nil "any" nil))))
 /* A derived column keeps its producer's SQL contract and its own reference.
 This resolves metadata only; the logical planner still owns projection rewrite. */
-(define sql_projection_column_info (lambda (relation original col col_ignorecase)
+(define sql_projection_column_info (lambda (relation original col col_ignorecase outer_sources)
 	(begin
 		(define titles (queryplan_result_titles relation))
 		(define index (find (produceN (count titles)) (lambda (index)
 			(if col_ignorecase (equal?? (nth titles index) col) (equal? (nth titles index) col))) nil))
-		(define info (if (nil? index) (sql_info nil "any" nil) (sql_projection_info_at relation index '())))
+		(define info (if (nil? index) (sql_info nil "any" nil) (sql_projection_info_at relation index outer_sources)))
 		(sql_info original (sql_info_type info) (sql_info_collation info)))))
 
 /* Catalog type/collation for a base-table column, name canonicalized. Only a
 resolved base table is rewritten: derived-table / stage-output columns and any
 column whose name does not resolve are returned verbatim so downstream lowering
 keeps its existing (ignorecase-flagged) resolution for them. */
-(define sql_source_column_info (lambda (src original tblvar col col_ignorecase)
+(define sql_source_column_info (lambda (sources src original tblvar col col_ignorecase)
 	(if (not (source_is_base_table? src))
-		(sql_projection_column_info (source_relation src) original col col_ignorecase)
+		(sql_projection_column_info (source_relation src) original col col_ignorecase
+			(if (source_lateral? src) (source_prefix_for_alias sources (source_alias src)) '()))
 		(begin
 			(define canonical (source_column_name src col col_ignorecase))
 			(if (nil? canonical)
@@ -342,7 +343,7 @@ keeps its existing (ignorecase-flagged) resolution for them. */
 				(define src (source_for_alias sources default_alias alias alias_ic))
 				(if (nil? src)
 					(sql_info reference "any" nil)
-					(sql_source_column_info src reference alias column column_ic)))))))
+					(sql_source_column_info sources src reference alias column column_ic)))))))
 
 /* Comparison: BOOLEAN. Preserve plain operators for direct scan bounds;
 computed text comparisons use the compile-time selected Less relation. The

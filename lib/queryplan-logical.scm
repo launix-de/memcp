@@ -781,6 +781,17 @@ prepare stage creates. */
 (define source_join_expr (lambda (src)
 	(match src '(_alias _schema _relation _outer join) join _ nil)))
 
+(define source_lateral? (lambda (src)
+	(begin
+		(define relation (source_relation src))
+		(and (query_block? relation) (qassoc_get (qb_facts relation) (quote lateral) false)))))
+
+(define source_prefix_for_alias (lambda (sources alias)
+	(match (coalesceNil sources '())
+		(cons src rest) (if (equal? (source_alias src) alias) '()
+			(cons src (source_prefix_for_alias rest alias)))
+		_ '())))
+
 (define source_with_relation (lambda (src relation)
 	(match src
 		'(alias schema _relation outer join) (list alias schema relation outer join)
@@ -4021,6 +4032,24 @@ without separately proving two-valued semantics. */
 			source_condition))
 		(list (cons source logical_extra_sources) projection stage))))
 
+/* A lateral aggregate without GROUP/HAVING returns one row per complete
+outer binding, including empty input. Bundle its bounded scalar projection so
+the existing aggregate-domain rewrite collects all payloads into one stage. */
+(define make_lateral_aggregate_stage_source (lambda (alias inner outer_sources ctx)
+	(begin
+		(if (or (not (empty_list? (qb_group inner))) (not (nil? (qb_having inner))))
+			(neumann_fail "untangle_query" "lateral GROUP BY/HAVING needs relational domain lifting") true)
+		(define values (extract_assoc (qb_fields inner) (lambda (_title expr) expr)))
+		(define bundled (make_query_block (qb_schema inner) (qb_sources inner)
+			(list "values" (cons (quote list) values)) (qb_where inner)
+			'() nil '() nil nil (qb_hidden inner) (qb_stages inner) (qb_facts inner)))
+		(define rewritten (btw2025_resolve_dependent_subquery
+			(make_dependent_subquery_marker (quote scalar) nil bundled outer_sources) ctx))
+		(define projection (merge (map
+			(zip (binding_field_titles (qb_fields inner)) (cdr (nth rewritten 0)))
+			(lambda (pair) (list (car pair) (cadr pair))))))
+		(list (nth rewritten 2) projection (car (nth rewritten 1))))))
+
 (define direct_source_order_item? (lambda (src item)
 	(match item
 		'(expr _dir) (match expr
@@ -5907,19 +5936,27 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 		(cons head tail) (cons head (bind_group_expr_tail scopes fields tail path all_strings 0))
 		_ expr)))
 
-(define bind_query_source_relations (lambda (sources path all_strings index)
-	(match (coalesceNil sources '())
-		(cons src rest) (begin
+(define bind_query_source_relations (lambda (entries outer_scopes visible_entries path all_strings index)
+	(match (coalesceNil entries '())
+		(cons entry rest) (begin
+			(define src (binding_entry_source entry))
 			(define relation (normalize_query_ast (source_relation src)))
+			/* Lateral inputs see preceding sources, never themselves or later
+			siblings. Ordinary derived relations retain their closed SQL scope. */
+			(define scopes (if (source_lateral? src) (cons visible_entries outer_scopes) '()))
+			(define bound_source (source_with_relation src
+				(if (or (query_block? relation) (union_block? relation))
+					(if (and (query_block? relation) (not (derived_block_needs_operator? relation)))
+						(bind_query_block_names relation scopes (binding_path path "derived" index) all_strings)
+						(bind_query_names_at relation scopes (binding_path path "derived" index) all_strings))
+					relation)))
+			(define bound_entry (list (binding_entry_name entry) bound_source
+				(binding_entry_columns entry) (binding_entry_catalog_known? entry)))
 			(cons
-				(source_with_relation src
-					(if (or (query_block? relation) (union_block? relation))
-						/* MariaDB FROM subqueries are non-lateral. */
-						(if (and (query_block? relation) (not (derived_block_needs_operator? relation)))
-							(bind_query_block_names relation '() (binding_path path "derived" index) all_strings)
-							(bind_query_names_at relation '() (binding_path path "derived" index) all_strings))
-						relation))
-				(bind_query_source_relations rest path all_strings (+ index 1))))
+				bound_entry
+				(bind_query_source_relations rest outer_scopes
+					(if (nil? visible_entries) nil (append visible_entries bound_entry))
+					path all_strings (+ index 1))))
 		_ '())))
 
 (define bind_query_source_joins (lambda (entries outer_scopes visible_entries path all_strings index)
@@ -6057,12 +6094,14 @@ expressions are values in their own right and stay untouched. */
 
 (define bind_query_block_names (lambda (block outer_scopes path all_strings)
 	(begin
-		(define relation_bound_sources (bind_query_source_relations (qb_sources block) path all_strings 0))
-		(define duplicate_alias (duplicate_source_alias relation_bound_sources))
+		(define duplicate_alias (duplicate_source_alias (qb_sources block)))
 		(if (nil? duplicate_alias)
 			true
 			(neumann_fail "bind_query_names" (concat "duplicate relation alias: " duplicate_alias)))
-		(define entries (binding_scope_entries relation_bound_sources outer_scopes path all_strings 0))
+		(define entries (bind_query_source_relations
+			(binding_scope_entries (qb_sources block) outer_scopes path all_strings 0)
+			outer_scopes (if (reduce (qb_sources block) (lambda (found src)
+				(or found (source_lateral? src))) false) '() nil) path all_strings 0))
 		(define sources (bind_query_source_joins entries outer_scopes '() path all_strings 0))
 		(define scopes (cons entries outer_scopes))
 		(define fields (bind_query_fields (qb_fields block) scopes path all_strings 0))
@@ -6241,13 +6280,24 @@ that actually owns the title consumes the reference. */
 		(cons _title (cons expr _rest)) expr
 		_ nil)))
 
-(define null_extend_projection_fields (lambda (fields)
+(define null_extend_projection_fields (lambda (fields presence)
 	(begin
-		(define presence (first_projection_expr fields))
 		(if (nil? presence)
 			fields
 			(map_assoc (coalesceNil fields '()) (lambda (_title expr)
 				(list (quote if) (list (quote nil?) presence) nil expr)))))))
+
+/* A nullable output is not a row-presence witness. Lateral projections may
+even contain only constants. Use the existing non-null primary key when
+available, including when that key is not exported by the derived relation. */
+(define derived_projection_presence (lambda (src alias fields lateral)
+	(begin
+		(define keys (source_primary_key_columns src))
+		(match keys
+			(cons key _rest) (list (quote get_column) alias false key false)
+			_ (if lateral
+				(neumann_fail "untangle_query" "lateral outer projection needs a non-null row-presence key")
+				(first_projection_expr fields))))))
 
 (define literal_true? (lambda (expr)
 	(match expr
@@ -6286,7 +6336,7 @@ that actually owns the title consumes the reference. */
 		(source_outer? src)
 		(source_join_expr src))))
 
-(define flatten_source_list (lambda (sources ctx)
+(define flatten_source_list (lambda (sources ctx preceding)
 	(if (empty_list? sources)
 		(list '() '() '() '())
 		(begin
@@ -6299,7 +6349,8 @@ that actually owns the title consumes the reference. */
 			as a base table -- compiled once, no per-branch recompilation. */
 			(define relation (if (literal_only_union_block? raw_relation)
 				(literal_union_relation raw_relation) raw_relation))
-			(define tail (flatten_source_list rest ctx))
+			(define tail (flatten_source_list rest ctx
+				(if (nil? preceding) nil (append preceding src))))
 			(define tail_sources (nth tail 0))
 			(define tail_rewrites (nth tail 1))
 			(define tail_wheres (nth tail 2))
@@ -6316,11 +6367,21 @@ that actually owns the title consumes the reference. */
 					(neumann_fail "untangle_query" "FROM union-block needs union logical lowering before source flattening")
 					(begin
 						(define alias (source_alias src))
-						(define inner (untangle_query relation ctx))
+						(define lateral (source_lateral? src))
+						(define lateral_sources (if lateral (merge (list preceding
+							(uctx_get ctx (quote outer-sources) '()))) '()))
+						(if (and lateral (or (not (nil? (qb_limit relation)))
+							(not (nil? (qb_offset relation)))
+							(expr_contains_window? (list (qb_fields relation) (qb_hidden relation)))))
+							(neumann_fail "untangle_query" "lateral ORDER/LIMIT or windows need partitioned domain lowering") true)
+						(define inner (untangle_query relation (if lateral
+							(make_uctx ctx (list (list (quote outer-sources) lateral_sources))) ctx)))
 						(if (derived_block_needs_operator? inner)
 							(if (grouped_derived_relation? inner)
 								(begin
-									(define staged (make_grouped_derived_stage_source src alias inner))
+									(define staged (if lateral
+										(make_lateral_aggregate_stage_source alias inner lateral_sources ctx)
+										(make_grouped_derived_stage_source src alias inner)))
 									(list
 										(merge (list
 											(nth staged 0)
@@ -6365,7 +6426,8 @@ that actually owns the title consumes the reference. */
 											(define projection (rebind_derived_stage_expr stage_rebinding
 												(requalify_single_source_fields inner_alias alias (qb_fields inner))))
 											(define effective_projection (if (source_outer? src)
-												(null_extend_projection_fields projection)
+												(null_extend_projection_fields projection
+													(derived_projection_presence only_inner alias projection lateral))
 												projection))
 											(define inner_where (requalify_single_source_expr inner_alias alias (qb_where inner)))
 											/* The ON predicate tests real rows from the right relation, before
@@ -6400,7 +6462,8 @@ that actually owns the title consumes the reference. */
 													(define projection (rebind_derived_stage_expr stage_rebinding
 														(requalify_single_source_fields inner_alias alias (qb_fields inner))))
 													(define effective_projection (if (source_outer? src)
-														(null_extend_projection_fields projection)
+														(null_extend_projection_fields projection
+															(derived_projection_presence only_inner alias projection lateral))
 														projection))
 													(define inner_where (requalify_single_source_expr inner_alias alias (qb_where inner)))
 													/* ON sees candidate rows; only consumers above the LEFT JOIN
@@ -6829,16 +6892,21 @@ names in projections, predicates, and correlated subqueries. */
 								handles removing sorter-style joins whose output is unused. */
 								(define outer_direct_consumers (reduce
 									(coalesceNil (qb_sources block) '())
-									(lambda (acc src) (if (nil? (source_join_expr src))
-										acc
-										(cons (source_join_expr src) acc)))
+									(lambda (acc src) (begin
+										(define with_join (if (nil? (source_join_expr src)) acc
+											(cons (source_join_expr src) acc)))
+										/* A lateral relation reads its prefix even without ON.
+										Keep those exports until their dependency is eliminated. */
+										(if (source_lateral? src) (cons (source_relation src) with_join) with_join)))
 									(filter
 										(list (qb_fields block) (qb_where block) (qb_group block)
 											(qb_having block) (qb_order block) (qb_hidden block))
 										(lambda (x) (not (nil? x))))))
 								(define prepruned_sources (prune_unreferenced_derived_fields
 									(qb_sources block) outer_direct_consumers))
-								(define flattened_sources (flatten_source_list prepruned_sources child_ctx))
+								(define flattened_sources (flatten_source_list prepruned_sources child_ctx
+									(if (reduce prepruned_sources (lambda (found src)
+										(or found (source_lateral? src))) false) '() nil)))
 								(define raw_flattened_source_list (nth flattened_sources 0))
 								/* Existing logical stages may already retain the source as a
 								correlation domain. Only eliminate bindings before any stages
@@ -6861,8 +6929,11 @@ names in projections, predicates, and correlated subqueries. */
 									(filter rewrites literal_derived_rewrite?) inherited_literal_rewrites)))
 								(define fold_literal_rewrites (not (empty_list? carried_literal_rewrites)))
 								(define active_rewrites (merge (list rewrites inherited_literal_rewrites)))
-								(define source_where_terms (nth flattened_sources 2))
-								(define source_stages (nth flattened_sources 3))
+								(define source_where_terms (rewrite_derived_ref_chain active_rewrites (nth flattened_sources 2)))
+								/* A later lateral stage can consume a preceding derived
+								projection. Apply the same closure to its domain, lookup keys,
+								predicates and metadata, not just the enclosing SELECT fields. */
+								(define source_stages (rewrite_derived_ref_chain active_rewrites (nth flattened_sources 3)))
 								/* Derived references are already bound. Rewrite them once, then
 								prune unused row-preserving lookups before their join expressions
 								can create decorrelation stages. */

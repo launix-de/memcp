@@ -491,10 +491,12 @@ test_cases:
   expect:
     error: true
   noncritical: true
+# The formerly unsupported constant APPLY shape now checks the actual result.
 - name: Unsupported APPLY
-  sql: SELECT a.id FROM tsql_data a CROSS APPLY (SELECT 1 AS value) b
+  sql: SELECT a.id FROM tsql_data a CROSS APPLY (SELECT 1 AS value) b ORDER BY a.id
   expect:
-    error: true
+    rows: 4
+    data: [{id: 1}, {id: 2}, {id: 3}, {id: 4}]
 - name: TSQL CREATE TABLE with IDENTITY
   sql: CREATE TABLE dbo.tsql_copy (id INT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(MAX))
   expect:
