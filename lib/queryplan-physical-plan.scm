@@ -13517,7 +13517,10 @@ compile repeats Scheme closure optimization even when no domain was changed. */
 		guards; unrelated statistics decisions remain in their original planner
 		session and cannot become a declaration error. This uses the same existing
 		collector/binding protocol, without a second cache or row-loop guard. */
-		(define collected (and planning_session (planning_session "__memcp_queryplan_guard_conditions")))
+		/* AND has three-valued semantics: nil does not short-circuit the next
+		operand. Optional callables need an explicit absence check. */
+		(define collected (if (nil? planning_session) nil
+			(planning_session "__memcp_queryplan_guard_conditions")))
 		(define compile_session (if collected planning_session
 			(sql_queryplan_compile_session (coalesceNil planning_session (newsession)) tx)))
 		(define comparison_declarations (filter (sql_mutation_contract_declarations all_defs (cons (coalesceNil condition true) (source_join_exprs all_defs))) (lambda (item) (not (nil? item)))))
