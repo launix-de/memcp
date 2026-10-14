@@ -163,3 +163,72 @@ func TestProcedureCompilerUsesOrdinarySchemeClosureAndJITBoundary(t *testing.T) 
 		t.Fatalf("ordinary compiled source callable = %d, want 12", got)
 	}
 }
+
+func TestProcedurePublicAPIsLoadColdCatalogBeforeAccess(t *testing.T) {
+	previousBasepath := Basepath
+	Basepath = t.TempDir()
+	defer func() { Basepath = previousBasepath }()
+	Init(scm.Globalenv)
+	LoadDatabases()
+	const schema = "procedure-cold-api-test"
+	CreateDatabase(schema, false)
+	defer databases.Remove(schema)
+	CreateTable(schema, "preserved", Safe, false)
+	// A constant source compiler deliberately performs no catalog lookup.
+	// Public procedure APIs themselves must load a restored database.
+	registerTriggerLanguage("procedure-cold-api-test", scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		source := a[0]
+		return scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return source })
+	}))
+	CreateProcedure(schema, "existing", "procedure-cold-api-test", "existing-source", scm.NewNil(), false)
+	backend := GetDatabase(schema).persistence
+	cold := func() {
+		db := newDatabase()
+		db.Name, db.persistence, db.srState = schema, backend, COLD
+		databases.Set(schema, db)
+	}
+	checkTable := func() {
+		if GetDatabase(schema).tables.Get("preserved") == nil {
+			t.Fatal("procedure catalog operation lost an existing table")
+		}
+	}
+	cold()
+	if got := scm.Apply(Procedure(schema, "existing")).String(); got != "existing-source" {
+		t.Fatalf("cold procedure lookup = %q", got)
+	}
+	checkTable()
+	cold()
+	if got := len(ShowProcedures(schema).Slice()); got != 1 {
+		t.Fatalf("cold procedure listing has %d definitions", got)
+	}
+	checkTable()
+	cold()
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("cold duplicate CREATE was accepted")
+			}
+		}()
+		CreateProcedure(schema, "existing", "procedure-cold-api-test", "wrong", scm.NewNil(), false)
+	}()
+	checkTable()
+	cold()
+	CreateProcedure(schema, "added", "procedure-cold-api-test", "acknowledged-source", scm.NewNil(), false)
+	checkTable()
+	cold()
+	if got := scm.Apply(Procedure(schema, "added")).String(); got != "acknowledged-source" {
+		t.Fatalf("acknowledged CREATE did not survive restart: %q", got)
+	}
+	if got := scm.Apply(Procedure(schema, "existing")).String(); got != "existing-source" {
+		t.Fatalf("CREATE lost existing definition: %q", got)
+	}
+	checkTable()
+	cold()
+	DropProcedure(schema, "added", false)
+	checkTable()
+	cold()
+	if got := len(ShowProcedures(schema).Slice()); got != 1 {
+		t.Fatalf("cold DROP did not survive restart: %d definitions", got)
+	}
+	checkTable()
+}

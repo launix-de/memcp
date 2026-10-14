@@ -75,6 +75,7 @@ func CreateProcedure(schema, name, language, source string, parameters scm.Scmer
 	if db == nil {
 		panic("database does not exist: " + schema)
 	}
+	db.ensureLoaded()
 	if name == "" || language == "" || source == "" {
 		panic("procedure name, language and source must not be empty")
 	}
@@ -100,6 +101,7 @@ func DropProcedure(schema, name string, ifexists bool) bool {
 	if db == nil {
 		panic("database does not exist: " + schema)
 	}
+	db.ensureLoaded()
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	db.schemalock.Lock()
@@ -120,6 +122,7 @@ func Procedure(schema, name string) scm.Scmer {
 	if db == nil {
 		panic("database does not exist: " + schema)
 	}
+	db.ensureLoaded()
 	definition := db.procedures.Get(name)
 	if definition == nil {
 		panic("procedure does not exist: " + name)
@@ -132,6 +135,7 @@ func ShowProcedures(schema string) scm.Scmer {
 	if db == nil {
 		panic("database does not exist: " + schema)
 	}
+	db.ensureLoaded()
 	definitions := db.procedures.GetAll()
 	rows := make([]scm.Scmer, 0, len(definitions))
 	for _, definition := range definitions {
