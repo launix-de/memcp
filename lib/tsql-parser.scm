@@ -337,6 +337,17 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 				(* 0.5 (simplify (concat "1e-" scale)))))
 			(list (quote sql_type_expr) (list tsql_assignment_decimal value threshold) type nil))
 		value))))
+/* DEFAULT is frontend syntax for the existing column declaration. Share this
+translation between explicit INSERT cells and UPDATE assignments; omitted
+INSERT columns continue through the native default mechanism unchanged. */
+(define tsql_default_assignment_expr (lambda (declaration)
+	(if (equal?? (declaration "DefaultExpression") "CURRENT_TIMESTAMP")
+		(list (quote sql_type_expr) (list (quote now)) "DATETIME" nil)
+		(and (nil? (declaration "Default")) (not (declaration "Null")))
+		(error "nonnullable column has no usable DEFAULT: " (declaration "Field"))
+		(list (quote sql_type_expr) (declaration "Default") (declaration "Type") (declaration "Collation")))))
+(define tsql_assignment_value (lambda (expression declaration)
+	(if (equal?? expression (quote sql_default)) (tsql_default_assignment_expr declaration) expression)))
 (define tsql_insert_declarations (lambda (database table_name columns) (begin
 	/* Resolve each target exactly once. Duplicate targets can overwrite an
 	already validated identity/default value in the native column vector. */
@@ -1749,57 +1760,96 @@ a separator is recognized only on a physical line containing no SQL text. */
 		tsql_select_core
 	)))
 
-	(define tsql_update (parser '(
-		(atom "UPDATE" true)
-		(define tbldefs (+ tabledefs ","))
-		(atom "SET" true)
-		(define cols (+ (or
-			(parser '(tsql_identifier "." (define title tsql_identifier) "=" (define e tsql_expression)) '(title e))
-			(parser '((define title tsql_identifier) "=" (define e tsql_expression)) '(title e))
-		) ","))
-		(? '(
-			(atom "WHERE" true)
-			(define condition tsql_expression)
-		))
-
-		(? tsql_query_hints)
-	) (lambda () (begin
-			(define all_defs (merge tbldefs))
-			(define first_def (car all_defs))
-			(define tbl (match first_def '(_ _ t _ _) t))
-			(define tblalias (match first_def '(id _ _ _ _) id))
-
-			(define target_schema (source_schema first_def))
-			(if policy (policy target_schema tbl true) true)
-			(define declarations (get_schema target_schema tbl))
-			(define assignments (merge (extract_assoc (merge cols) (lambda (title expression) (begin
+	/* A mutation target may name a FROM alias. Resolve that alias before checking
+	write permission; the grammar never creates a fictitious table for it. */
+	(define tsql_write_target (parser '(
+		(? (define target_schema tsql_schema_identifier) ".")
+		(define target_name tsql_identifier)
+		(? tsql_table_hints)
+	) (list target_schema target_name)))
+	(define tsql_write_source (lambda (target sources) (match target
+		'(target_schema target_name) (begin
+			(define alias_match (if target_schema nil (find sources (lambda (src)
+				(equal?? (source_alias src) target_name)) nil)))
+			(define table_matches (filter sources (lambda (src) (and
+				(source_is_base_table? src)
+				(equal? (source_schema src) (coalesceNil target_schema schema))
+				(equal?? (source_relation src) target_name)))))
+			(define table_match (if (empty_list? table_matches) nil
+				(equal? (count table_matches) 1) (car table_matches)
+				(find table_matches (lambda (src) (equal?? (source_alias src) target_name)) nil)))
+			(if (and (nil? alias_match) (> (count table_matches) 1) (nil? table_match))
+				(error "ambiguous write target: " target_name) true)
+			(define source (coalesceNil alias_match table_match
+				(list target_name (coalesceNil target_schema schema) target_name false nil)))
+			(if (source_is_base_table? source) source (error "write target must be a base table"))))))
+	(define tsql_write_sources (lambda (target sources)
+		(if (has? sources target) sources (cons target sources))))
+	(define tsql_write_limit (parser (or
+		(parser '((atom "TOP" true) "(" (define n tsql_int) ")")
+			(if (< n 0) (error "DML TOP must be nonnegative") n))
+		(parser empty nil))))
+	(define tsql_update_assignment (parser '(
+		(? (define qualifier tsql_identifier) ".")
+		(define title tsql_identifier)
+		(define op (or (parser "+=" "add") (parser "-=" "subtract")
+			(parser "*=" "multiply") (parser "/=" "divide") (parser "%=" "modulo")
+			(parser "=" "assign")))
+		(define expression (or (parser (atom "DEFAULT" true) (quote sql_default)) tsql_expression))
+	) (list title qualifier op expression)))
+	(define tsql_update_values (lambda (target cols) (begin
+		(define declarations (get_schema (source_schema target) (source_relation target)))
+		(define names (map cols (lambda (col) (toLower (car col)))))
+		(if (equal? (count names) (count (merge_unique (list names)))) true
+			(error "duplicate UPDATE assignment"))
+		(merge (map cols (lambda (col) (match col
+			'(title qualifier op expression) (begin
+				(if (or (nil? qualifier) (equal?? qualifier (source_alias target))) true
+					(error "assignment qualifier must name the write target"))
 				(define declaration (find declarations (lambda (column) (equal?? (column "Field") title)) nil))
 				(if (nil? declaration) (error "unknown UPDATE column: " title)
-					(equal? (declaration "Extra") "auto_increment") (error "IDENTITY column cannot be updated")
-					(list (declaration "Field") (tsql_assignment_expr expression declaration))))))))
-			(build_dml_plan target_schema tbl tblalias all_defs assignments (coalesceNil condition true) order limit offset planning_session tx)
-	))))
-
-	(define tsql_delete (parser '(
-		(atom "DELETE" true)
-		(atom "FROM" true)
-
-		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
-		(? tsql_table_hints)
-		(? '(
-			(atom "WHERE" true)
-			(define condition tsql_expression)
-		))
-
+					(equal? (declaration "Extra") "auto_increment") (error "IDENTITY column cannot be updated") true)
+				(define value (if (equal?? expression (quote sql_default))
+					(if (equal? op "assign")
+						(tsql_default_assignment_expr declaration)
+						(error "DEFAULT requires simple assignment")) expression))
+				(define old (list (quote get_column) (source_alias target) false (declaration "Field") false))
+				(define assigned (match op "assign" value
+					"add" (tsql_add_expr old value)
+					"subtract" (tsql_fold_additive old (list "sub" value))
+					_ (tsql_fold_multiplicative old (list op value))))
+				(list (declaration "Field") (tsql_assignment_expr assigned declaration))))))))))
+	(define tsql_update (parser '(
+		(atom "UPDATE" true)
+		(define limit tsql_write_limit)
+		(define target tsql_write_target)
+		(atom "SET" true)
+		(define cols (+ tsql_update_assignment ","))
+		(? (atom "FROM" true) (define from (+ tabledefs ",")))
+		(? (atom "WHERE" true) (define condition tsql_expression))
 		(? tsql_query_hints)
 	) (lambda () (begin
-
-			(if policy (policy (coalesce schema2 schema) tbl true) true)
-
-			(define del_schema (coalesce schema2 schema))
-			(define del_defs (list (list tbl del_schema tbl false nil)))
-			(build_dml_plan del_schema tbl nil del_defs nil (coalesceNil condition true) order limit offset planning_session tx)
-	))))
+			(define sources (merge (coalesceNil from '())))
+			(define target (tsql_write_source target sources))
+			(if policy (policy (source_schema target) (source_relation target) true) true)
+			(build_dml_plan (source_schema target) (source_relation target) (source_alias target)
+				(tsql_write_sources target sources) (tsql_update_values target cols)
+				(coalesceNil condition true) nil limit nil planning_session tx)))))
+	(define tsql_delete (parser '(
+		(atom "DELETE" true)
+		(define limit tsql_write_limit)
+		(? (atom "FROM" true))
+		(define target tsql_write_target)
+		(? (atom "FROM" true) (define from (+ tabledefs ",")))
+		(? (atom "WHERE" true) (define condition tsql_expression))
+		(? tsql_query_hints)
+	) (lambda () (begin
+			(define sources (merge (coalesceNil from '())))
+			(define target (tsql_write_source target sources))
+			(if policy (policy (source_schema target) (source_relation target) true) true)
+			(build_dml_plan (source_schema target) (source_relation target) (source_alias target)
+				(tsql_write_sources target sources) nil (coalesceNil condition true)
+				nil limit nil planning_session tx)))))
 
 	(define tsql_truncate (parser '(
 		(atom "TRUNCATE" true) (? (atom "TABLE" true))
@@ -1814,6 +1864,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 	))))
 
 	(define tsql_insert_literal_cell (parser (or
+		(parser (atom "DEFAULT" true) (quote sql_default))
 		(parser "?" (quote sql_insert_placeholder))
 		tsql_literal)))
 
@@ -1908,8 +1959,19 @@ a separator is recognized only on a physical line containing no SQL text. */
 				plan (list (quote __insert_count) "count"))
 			(list (quote begin)
 				(list (quote set) (quote resultrow) (list (quote lambda) (list (quote item)) insert_expr)) plan)))))
+	/* INSERT TOP constrains the existing source query's final window. It does
+	not count, materialize, or reserve IDs for rows which the planner will skip. */
+	(define tsql_insert_limit_query (lambda (query limit)
+		(if (nil? limit) query (match query
+			((symbol query-block) db sources fields where group having order old_limit offset hidden stages facts)
+			(make_query_block db sources fields where group having order
+				(if (nil? old_limit) limit (min old_limit limit)) offset hidden stages facts)
+			((symbol union-block) mode branches order old_limit offset facts)
+			(list (quote union-block) mode branches order
+				(if (nil? old_limit) limit (min old_limit limit)) offset facts)
+			_ (error "INSERT TOP requires a SELECT source")))))
 	(define tsql_insert_into (parser '(
-		(atom "INSERT" true) (? (atom "INTO" true))
+		(atom "INSERT" true) (define limit tsql_write_limit) (? (atom "INTO" true))
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
 		(? "(" (define columns (+ tsql_identifier ",")) ")")
 		(atom "VALUES" true) (define rows (+ tsql_insert_values_row ","))
@@ -1921,30 +1983,39 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define columns (map declarations (lambda (column) (column "Field"))))
 			(if (reduce rows (lambda (valid row) (and valid (equal? (count row) (count columns)))) true)
 				true (error "INSERT column count does not match value count"))
+			/* VALUES is a syntax-bounded batch. Limit that batch before native ID
+			reservation; SELECT limits stay in the shared logical query block. */
+			(define rows (map (if (nil? limit) rows (slice rows 0 limit)) (lambda (row)
+				(map (produceN (count columns)) (lambda (i)
+					(tsql_assignment_value (nth row i) (nth declarations i)))))))
 			(if (reduce rows (lambda (found row) (or found (tsql_dataset_contains_inner_select row))) false)
 				(tsql_insert_select_plan database tbl columns (tsql_values_to_select_query database columns rows))
 				(tsql_native_insert_expr database tbl columns (sql_insert_values_expr (map rows (lambda (row) (map (produceN (count columns))
-					(lambda (i) (sql_type_formula (list) (tsql_assignment_expr (nth row i) (nth declarations i)))))))) (count rows) true))
+					(lambda (i) (sql_type_formula (list) (tsql_assignment_expr
+						(nth row i) (nth declarations i)))))))) (count rows) true))
 	))))
 	/* An all-default row is the native empty-column INSERT. Defaults and
 	generated values are filled by the same operator as ordinary insertion. */
 	(define tsql_insert_default (parser '(
-		(atom "INSERT" true) (? (atom "INTO" true))
+		(atom "INSERT" true) (define limit tsql_write_limit) (? (atom "INTO" true))
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
 		(atom "DEFAULT" true) (atom "VALUES" true)
 	) (lambda () (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
-			(tsql_native_insert_expr database tbl '() '('list '(list)) 1 true)))))
+			(tsql_native_insert_expr database tbl '()
+				(if (equal?? limit 0) '('list) '('list '(list)))
+				(if (equal?? limit 0) 0 1) true)))))
 	(define tsql_insert_select (parser '(
-		(atom "INSERT" true) (? (atom "INTO" true))
+		(atom "INSERT" true) (define limit tsql_write_limit) (? (atom "INTO" true))
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
 		(? "(" (define columns (+ tsql_identifier ",")) ")")
 		(define query tsql_select)
 	) (lambda () (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
-			(tsql_insert_select_plan database tbl (coalesce columns (table_insertable_columns database tbl)) query)
+			(tsql_insert_select_plan database tbl (coalesce columns (table_insertable_columns database tbl))
+				(tsql_insert_limit_query query limit))
 	))))
 	/* Only UNIQUE declarations publish native keys. Ordinary acceleration
 	declarations carry no catalog state: the common planner owns autoindexes. */

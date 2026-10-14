@@ -1,0 +1,589 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  description: Native write targets, joins, bounded mutations and assignment syntax
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS write_rejected
+- sql: CREATE TABLE write_rejected(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO write_rejected VALUES(2,10)
+- sql: DROP TABLE IF EXISTS write_ambiguous
+- sql: CREATE TABLE write_ambiguous(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO write_ambiguous VALUES(2,10)
+- sql: DROP TABLE IF EXISTS write_target
+- sql: DROP TABLE IF EXISTS write_source
+- sql: CREATE TABLE write_target(id INT PRIMARY KEY,value INT DEFAULT 7,label NVARCHAR(30)
+    DEFAULT N'new',tiny TINYINT)
+- sql: CREATE TABLE write_source(id INT PRIMARY KEY,target_id INT,value INT)
+- sql: INSERT INTO write_target VALUES(1,10,N'a',2),(2,20,N'b',3),(3,30,NULL,NULL)
+- sql: INSERT INTO write_source VALUES(1,1,4),(2,2,5),(3,2,5)
+- sql: DROP TABLE IF EXISTS write_contract
+- sql: CREATE TABLE write_contract(id INT IDENTITY PRIMARY KEY,value INT NOT NULL
+    DEFAULT 8,label NVARCHAR(30),clock DATETIME DEFAULT GETDATE())
+- sql: INSERT INTO write_contract(value,label) VALUES(10,N'x'),(20,NULL)
+- sql: DROP TABLE IF EXISTS write_composite
+- sql: CREATE TABLE write_composite(tenant INT,id INT,value INT,PRIMARY KEY(tenant,id))
+- sql: INSERT INTO write_composite VALUES(1,1,10),(2,1,20)
+- sql: DROP TABLE IF EXISTS write_return
+- sql: CREATE TABLE write_return(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO write_return VALUES(1,10),(2,20)
+- sql: DROP TABLE IF EXISTS write_null_target
+- sql: DROP TABLE IF EXISTS write_null_distinct
+- sql: DROP TABLE IF EXISTS write_null_equal
+- sql: CREATE TABLE write_null_target(id INT PRIMARY KEY,code INT,value INT)
+- sql: CREATE TABLE write_null_distinct(id INT PRIMARY KEY,code INT,value INT)
+- sql: CREATE TABLE write_null_equal(id INT PRIMARY KEY,code INT UNIQUE,value INT)
+- sql: INSERT INTO write_null_target VALUES(1,NULL,10)
+- sql: INSERT INTO write_null_distinct VALUES(1,NULL,1),(2,NULL,2)
+- sql: INSERT INTO write_null_equal VALUES(1,NULL,3)
+- sql: DROP TABLE IF EXISTS write_halloween
+- sql: CREATE TABLE write_halloween(id INT PRIMARY KEY,match_key INT)
+- sql: INSERT INTO write_halloween VALUES(1,1)
+- sql: DROP TABLE IF EXISTS write_self
+- sql: CREATE TABLE write_self(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO write_self VALUES(1,10),(2,20)
+- sql: DROP TABLE IF EXISTS write_limit
+- sql: CREATE TABLE write_limit(id INT IDENTITY PRIMARY KEY,value INT DEFAULT 7)
+- sql: DROP TABLE IF EXISTS write_defaults
+- sql: CREATE TABLE write_defaults(id INT PRIMARY KEY,value INT DEFAULT 7,label NVARCHAR(20)
+    DEFAULT N'new',nullable_value INT,clock DATETIME DEFAULT GETDATE())
+- sql: DROP TABLE IF EXISTS write_merge
+- sql: CREATE TABLE write_merge(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO write_merge VALUES(1,10),(2,20)
+test_cases:
+- name: UPDATE alias resolves its actual native target
+  sql: UPDATE t SET value=s.value FROM write_target AS t JOIN write_source AS s ON
+    t.id=s.id WHERE t.id=1
+  expect:
+    affected_rows: 1
+- name: Joined update changes only the target row
+  sql: SELECT id,value FROM write_target ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 4
+    - id: 2
+      value: 20
+    - id: 3
+      value: 30
+- name: Repeated source matches update one native target once
+  sql: UPDATE t SET value=t.value+1 FROM write_ambiguous t JOIN write_source s ON
+    t.id=s.target_id WHERE t.id=2
+  expect:
+    affected_rows: 1
+  noncritical: true
+- name: Repeated source matches cannot apply an increment twice
+  sql: SELECT value FROM write_ambiguous WHERE id=2
+  expect:
+    rows: 1
+    data:
+    - value: 11
+  noncritical: true
+- name: UPDATE target need not be listed in FROM
+  sql: UPDATE write_target SET value=s.value+1 FROM write_source s WHERE write_target.id=s.id
+    AND write_target.id=1
+  expect:
+    affected_rows: 1
+- name: Unchanged UPDATE counts matched native rows
+  sql: UPDATE write_target SET value=value WHERE id=1
+  expect:
+    affected_rows: 1
+  noncritical: true
+- name: Self join honors the specified mutation target alias
+  sql: UPDATE dst SET value=src.value FROM write_target src JOIN write_target dst
+    ON dst.id=3 AND src.id=1
+  expect:
+    affected_rows: 1
+  noncritical: true
+- name: Self join changes its declared target
+  sql: SELECT id,value FROM write_target ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 5
+    - id: 2
+      value: 20
+    - id: 3
+      value: 5
+  noncritical: true
+- name: Compound + assignment uses declared numeric expressions
+  sql: UPDATE write_target SET value+=2 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: Compound + assignment stores its result
+  sql: SELECT value FROM write_target WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: Compound - assignment uses declared numeric expressions
+  sql: UPDATE write_target SET value-=1 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: Compound - assignment stores its result
+  sql: SELECT value FROM write_target WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 6
+- name: Compound * assignment uses declared numeric expressions
+  sql: UPDATE write_target SET value*=3 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: Compound * assignment stores its result
+  sql: SELECT value FROM write_target WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 18
+- name: Compound / assignment uses declared numeric expressions
+  sql: UPDATE write_target SET value/=2 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: Compound / assignment stores its result
+  sql: SELECT value FROM write_target WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: Compound % assignment uses declared numeric expressions
+  sql: UPDATE write_target SET value%=4 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: Compound % assignment stores its result
+  sql: SELECT value FROM write_target WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Compound text addition uses declared collation
+  sql: UPDATE write_target SET label+=N'x' WHERE id=1
+  expect:
+    affected_rows: 1
+- name: Compound text addition persists its result
+  sql: SELECT label FROM write_target WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - label: ax
+- name: Joined mutation fixtures preserve source changes
+  sql: UPDATE write_source SET value=6 WHERE id=3
+  expect:
+    affected_rows: 1
+- name: Different source matches still update the target once
+  sql: UPDATE t SET value=s.value FROM write_ambiguous t JOIN write_source s ON t.id=s.target_id
+    WHERE t.id=2
+  expect:
+    affected_rows: 1
+  noncritical: true
+- name: Ambiguous source match selects one valid source value
+  sql: SELECT CASE WHEN value IN(5,6) THEN 1 ELSE 0 END AS valid FROM write_ambiguous
+    WHERE id=2
+  expect:
+    rows: 1
+    data:
+    - valid: 1
+  noncritical: true
+- name: Grouped source relation feeds one native target mutation
+  sql: UPDATE t SET value=s.total FROM write_target t JOIN (SELECT target_id,SUM(value)
+    AS total FROM write_source GROUP BY target_id) s ON t.id=s.target_id WHERE t.id=2
+  expect:
+    affected_rows: 1
+- name: Grouped source assignments persist their aggregate value
+  sql: SELECT value FROM write_target WHERE id=2
+  expect:
+    rows: 1
+    data:
+    - value: 11
+- name: Left joined native targets preserve unmatched rows
+  sql: UPDATE t SET value=COALESCE(s.value,0) FROM write_target t LEFT JOIN write_source
+    s ON t.id=s.id AND s.id=0 WHERE t.id=3
+  expect:
+    affected_rows: 1
+- name: Left joined missing source uses declared fallback
+  sql: SELECT value FROM write_target WHERE id=3
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: Explicit transaction starts before joined mutation
+  sql: BEGIN TRANSACTION
+  expect:
+    affected_rows: 0
+  session_id: write-forms-transaction
+- name: Joined mutation participates in existing native transaction
+  sql: UPDATE t SET value=15 FROM write_target t JOIN write_source s ON t.id=s.id
+    WHERE t.id=2
+  expect:
+    affected_rows: 1
+  session_id: write-forms-transaction
+- name: Joined mutation rollback uses existing transaction lifetime
+  sql: ROLLBACK TRANSACTION
+  expect:
+    affected_rows: 0
+  session_id: write-forms-transaction
+- name: Joined mutation rollback restores prior native values
+  sql: SELECT value FROM write_target WHERE id=2
+  expect:
+    rows: 1
+    data:
+    - value: 11
+  session_id: write-forms-transaction
+- name: UPDATE DEFAULT reuses native declared column defaults
+  sql: UPDATE write_target SET value=DEFAULT,label=DEFAULT,tiny=DEFAULT WHERE id=1
+  expect:
+    affected_rows: 1
+- name: UPDATE DEFAULT includes nullable missing defaults
+  sql: SELECT value,label,tiny FROM write_target WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 7
+      label: new
+      tiny: null
+- name: UPDATE TOP zero leaves rows untouched
+  sql: UPDATE TOP(0) write_target SET value=99
+  expect:
+    affected_rows: 0
+- name: UPDATE TOP limits native affected rows
+  sql: UPDATE TOP(1) write_target SET value=99
+  expect:
+    affected_rows: 1
+- name: UPDATE TOP stores one bounded mutation
+  sql: SELECT COUNT(*) AS n FROM write_target WHERE value=99
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: DELETE TOP zero accepts FROM
+  sql: DELETE TOP(0) FROM write_target
+  expect:
+    affected_rows: 0
+- name: DELETE alias FROM a unique join mutates its target once
+  sql: DELETE t FROM write_target t JOIN write_source s ON t.id=s.id WHERE t.id=2
+  expect:
+    affected_rows: 1
+- name: DELETE FROM alias FROM joins resolves native target
+  sql: DELETE FROM t FROM write_target t JOIN write_source s ON t.id=s.id WHERE t.id=1
+  expect:
+    affected_rows: 1
+- name: DELETE accepts target without FROM
+  sql: DELETE write_target WHERE id=3
+  expect:
+    affected_rows: 1
+- name: All native target deletions are visible
+  sql: SELECT COUNT(*) AS n FROM write_target
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: Unknown update target alias fails
+  sql: UPDATE unknown SET value=1 FROM write_target t
+  expect:
+    error: true
+- name: Unknown assignment qualifier fails
+  sql: UPDATE t SET other.value=1 FROM write_target t
+  expect:
+    error: true
+- name: Duplicate update assignment fails
+  sql: UPDATE write_target SET value=1,value=2
+  expect:
+    error: true
+- name: Negative DML TOP fails
+  sql: DELETE TOP(-1) FROM write_target
+  expect:
+    error: true
+- name: DML TOP requires parentheses
+  sql: UPDATE TOP 1 write_target SET value=1
+  expect:
+    error: true
+- name: DML TOP PERCENT remains explicit unsupported
+  sql: DELETE TOP(50) PERCENT FROM write_target
+  expect:
+    error: true
+- name: UPDATE IDENTITY target rejects explicit assignment
+  sql: UPDATE write_contract SET id=9 WHERE id=1
+  expect:
+    error: true
+- name: Compound NULL values preserve declared arithmetic semantics
+  sql: UPDATE write_contract SET label+=N'x' WHERE id=2
+  expect:
+    affected_rows: 1
+  noncritical: true
+- name: Default expressions use the declared native clock contract
+  sql: UPDATE write_contract SET value=DEFAULT,clock=DEFAULT WHERE id=1
+  expect:
+    affected_rows: 1
+- name: Default expression writes retain nonnull datetime
+  sql: SELECT value,CASE WHEN clock IS NOT NULL THEN 1 ELSE 0 END AS present FROM
+    write_contract WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 8
+      present: 1
+- name: UPDATE TOP larger than match count respects predicate
+  sql: UPDATE TOP(20) write_contract SET value=30 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: DELETE TOP limits native target rows
+  sql: DELETE TOP(1) write_contract
+  expect:
+    affected_rows: 1
+- name: DELETE TOP leaves its remaining row
+  sql: SELECT COUNT(*) AS n FROM write_contract
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: Joined updates deduplicate the complete composite native key
+  sql: UPDATE t SET value=25 FROM write_composite t JOIN write_source s ON t.id=s.id
+    WHERE t.tenant=2
+  expect:
+    affected_rows: 1
+- name: Composite native mutation retains its tenant boundary
+  sql: SELECT tenant,value FROM write_composite ORDER BY tenant
+  expect:
+    rows: 2
+    data:
+    - tenant: 1
+      value: 10
+    - tenant: 2
+      value: 25
+- name: Composite joined DELETE mutates only its full target key
+  sql: DELETE t FROM write_composite t JOIN write_source s ON t.id=s.id WHERE t.tenant=1
+  expect:
+    affected_rows: 1
+- name: Composite joined DELETE retains another tenant
+  sql: SELECT tenant,value FROM write_composite
+  expect:
+    rows: 1
+    data:
+    - tenant: 2
+      value: 25
+- name: UPDATE OUTPUT needs actual claimed old and new row images
+  sql: UPDATE write_return SET value=value+1 OUTPUT deleted.value AS old_value,inserted.value
+    AS new_value WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - old_value: 10
+      new_value: 11
+  noncritical: true
+- name: INSERT OUTPUT needs generated native inserted row images
+  sql: INSERT INTO write_return(id,value) OUTPUT inserted.id AS id VALUES(3,30)
+  expect:
+    rows: 1
+    data:
+    - id: 3
+  noncritical: true
+- name: DELETE OUTPUT needs actual claimed deleted row images
+  sql: DELETE FROM write_return OUTPUT deleted.id AS id WHERE id=2
+  expect:
+    rows: 1
+    data:
+    - id: 2
+  noncritical: true
+- name: MERGE matched update uses a consistent native match domain
+  sql: MERGE INTO write_merge AS t USING write_source AS s ON t.id=s.id WHEN MATCHED
+    THEN UPDATE SET value=s.value;
+  expect:
+    affected_rows: 2
+  noncritical: true
+- name: MERGE rejects several sources updating one target
+  sql: MERGE INTO write_merge AS t USING write_source AS s ON t.id=s.target_id WHEN
+    MATCHED THEN UPDATE SET value=s.value;
+  expect:
+    error: true
+    contains: multiple source rows
+  noncritical: true
+- name: Qualified object cannot select an arbitrary self join alias
+  sql: UPDATE dbo.write_return SET value=1 FROM write_return a JOIN write_return b
+    ON a.id=b.id
+  expect:
+    error: true
+    contains: ambiguous write target
+- name: Unsafe fanout UPDATE fails before native mutation
+  sql: UPDATE t SET value=1 FROM write_rejected t JOIN write_source s ON t.id=s.target_id
+  expect:
+    error: true
+    contains: one proven source match
+- name: Unsafe fanout DELETE fails before native mutation
+  sql: DELETE t FROM write_rejected t JOIN write_source s ON t.id=s.target_id
+  expect:
+    error: true
+    contains: one proven source match
+- name: Unsafe joined mutation retains target values
+  sql: SELECT value FROM write_rejected WHERE id=2
+  expect:
+    rows: 1
+    data:
+    - value: 10
+- name: DEFAULT compound assignment is rejected
+  sql: UPDATE write_return SET value+=DEFAULT
+  expect:
+    error: true
+    contains: DEFAULT requires simple assignment
+- name: Narrowing compound assignment uses declared numeric range
+  sql: UPDATE write_return SET id+=2147483647 WHERE id=1
+  expect:
+    error: true
+    contains: integer conversion overflow
+- name: Native distinct NULL key retains its generic declaration
+  scm: (createkey (table "memcp-tests" "write_null_distinct") "nullable_key" true
+    '("code") nil '("nulls_not_distinct" false))
+  expect:
+    result: true
+- name: Null safe lookup honors distinct native NULL keys
+  scm: "(begin\n  (define t '(\"t\" \"memcp-tests\" \"write_null_target\" false nil))\n\
+    \  (define s '(\"s\" \"memcp-tests\" \"write_null_distinct\" false nil))\n  (define\
+    \ scol (list (quote get_column) \"s\" false \"code\" false))\n  (define tcol (list\
+    \ (quote get_column) \"t\" false \"code\" false))\n  (source_is_unique_lookup_from_sources?\
+    \ (list t s) \"t\" (list t) s '()\n    (list (quote or) (list (quote equal??)\
+    \ scol tcol)\n      (list (quote and) (list (quote nil?) scol) (list (quote nil?)\
+    \ tcol)))))"
+  expect:
+    result: false
+- name: Null safe lookup honors equal native NULL keys
+  scm: "(begin\n  (define t '(\"t\" \"memcp-tests\" \"write_null_target\" false nil))\n\
+    \  (define s '(\"s\" \"memcp-tests\" \"write_null_equal\" false nil))\n  (define\
+    \ scol (list (quote get_column) \"s\" false \"code\" false))\n  (define tcol (list\
+    \ (quote get_column) \"t\" false \"code\" false))\n  (source_is_unique_lookup_from_sources?\
+    \ (list t s) \"t\" (list t) s '()\n    (list (quote or) (list (quote equal??)\
+    \ scol tcol)\n      (list (quote and) (list (quote nil?) scol) (list (quote nil?)\
+    \ tcol)))))"
+  expect:
+    result: true
+- name: Nullable distinct NULL source cannot authorize repeated mutation
+  sql: UPDATE t SET value=s.value FROM write_null_target t JOIN write_null_distinct
+    s ON t.code=s.code OR (t.code IS NULL AND s.code IS NULL)
+  expect:
+    error: true
+    contains: one proven source match
+- name: Rejected nullable source leaves its native target unchanged
+  sql: SELECT value FROM write_null_target
+  expect:
+    rows: 1
+    data:
+    - value: 10
+- name: Changing a joined target binding mutates its frozen native identity once
+  sql: UPDATE t SET match_key=s.id+1 FROM write_halloween t JOIN write_source s ON
+    t.match_key=s.id
+  expect:
+    affected_rows: 1
+  noncritical: true
+- name: Changed join binding cannot cascade across later source probes
+  sql: SELECT match_key FROM write_halloween
+  expect:
+    rows: 1
+    data:
+    - match_key: 2
+  noncritical: true
+- name: Self join can mutate columns disjoint from its source readset
+  sql: UPDATE dst SET value=25 FROM write_self src JOIN write_self dst ON dst.id=2
+    AND src.id=1
+  expect:
+    affected_rows: 1
+- name: Disjoint self join honors its declared target alias
+  sql: SELECT id,value FROM write_self ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 10
+    - id: 2
+      value: 25
+- name: INSERT TOP zero reserves no VALUES rows
+  sql: INSERT TOP(0) INTO write_limit(value) VALUES(10),(20)
+  expect:
+    affected_rows: 0
+- name: INSERT TOP bounds its native VALUES batch
+  sql: INSERT TOP(1) INTO write_limit(value) VALUES(10),(20)
+  expect:
+    affected_rows: 1
+- name: INSERT TOP zero suppresses its native default row
+  sql: INSERT TOP(0) INTO write_limit DEFAULT VALUES
+  expect:
+    affected_rows: 0
+- name: INSERT TOP allows one all default row
+  sql: INSERT TOP(3) INTO write_limit DEFAULT VALUES
+  expect:
+    affected_rows: 1
+- name: INSERT TOP bounds a native SELECT stream
+  sql: INSERT TOP(1) INTO write_limit(value) SELECT value FROM write_source
+  expect:
+    affected_rows: 1
+- name: INSERT TOP respects a tighter SELECT TOP source
+  sql: INSERT TOP(2) INTO write_limit(value) SELECT TOP(1) value FROM write_source
+  expect:
+    affected_rows: 1
+- name: INSERT TOP zero suppresses a SELECT stream
+  sql: INSERT TOP(0) INTO write_limit(value) SELECT value FROM write_source
+  expect:
+    affected_rows: 0
+- name: INSERT TOP reserves only consumed native IDs
+  sql: SELECT COUNT(*) AS n,MIN(id) AS first_id,MAX(id) AS last_id FROM write_limit
+  expect:
+    rows: 1
+    data:
+    - n: 4
+      first_id: 1
+      last_id: 4
+- name: INSERT DML TOP requires parentheses
+  sql: INSERT TOP 1 INTO write_limit(value) VALUES(10)
+  expect:
+    error: true
+- name: INSERT DML TOP rejects negative counts
+  sql: INSERT TOP(-1) INTO write_limit(value) VALUES(10)
+  expect:
+    error: true
+- name: Explicit DEFAULT cells reuse native column declarations
+  sql: INSERT INTO write_defaults VALUES(1,DEFAULT,DEFAULT,DEFAULT,DEFAULT),(2,20,N'explicit',NULL,DEFAULT)
+  expect:
+    affected_rows: 2
+- name: Explicit DEFAULT cells retain typed values and clock expressions
+  sql: SELECT id,value,label,nullable_value,CASE WHEN clock IS NOT NULL THEN 1 ELSE
+    0 END AS has_clock FROM write_defaults ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 7
+      label: new
+      nullable_value: null
+      has_clock: 1
+    - id: 2
+      value: 20
+      label: explicit
+      nullable_value: null
+      has_clock: 1
+- name: UPDATE DEFAULT cannot synthesize NULL for a required native column
+  sql: UPDATE write_return SET id=DEFAULT WHERE id=1
+  expect:
+    error: true
+    contains: nonnullable column has no usable DEFAULT
+- name: INSERT DEFAULT cannot synthesize NULL for a required native column
+  sql: INSERT INTO write_return(id,value) VALUES(DEFAULT,10)
+  expect:
+    error: true
+    contains: nonnullable column has no usable DEFAULT
+cleanup:
+- sql: DROP TABLE IF EXISTS write_merge
+- sql: DROP TABLE IF EXISTS write_defaults
+- sql: DROP TABLE IF EXISTS write_limit
+- sql: DROP TABLE IF EXISTS write_self
+- sql: DROP TABLE IF EXISTS write_halloween
+- sql: DROP TABLE IF EXISTS write_rejected
+- sql: DROP TABLE IF EXISTS write_null_target
+- sql: DROP TABLE IF EXISTS write_null_distinct
+- sql: DROP TABLE IF EXISTS write_null_equal
+- sql: DROP TABLE IF EXISTS write_ambiguous
+- sql: DROP TABLE IF EXISTS write_return
+- sql: DROP TABLE IF EXISTS write_composite
+- sql: DROP TABLE IF EXISTS write_contract
+- sql: DROP TABLE IF EXISTS write_source
+- sql: DROP TABLE IF EXISTS write_target

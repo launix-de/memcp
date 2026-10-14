@@ -11842,11 +11842,12 @@ every title. */
 	(map_assoc (coalesceNil cols '()) (lambda (_title expr)
 		(lower_column_expr_for_alias src expr)))))
 
-(define dml_target_source (lambda (sources target_schema target_tbl)
+(define dml_target_source (lambda (sources target_schema target_tbl target_alias)
 	(reduce (coalesceNil sources '()) (lambda (found src)
 		(if (not (nil? found))
 			found
 			(if (and (source_is_base_table? src)
+				(or (nil? target_alias) (equal?? (source_alias src) target_alias))
 				(and (equal? (source_schema src) target_schema)
 					(equal? (source_relation src) target_tbl)))
 				src
@@ -11961,7 +11962,7 @@ every title. */
 						(nth target_rows_symbols i))))))
 			target_rows_plans))))
 
-(define lower_multi_source_dml_query_block (lambda (block target_schema target_tbl)
+(define lower_multi_source_dml_query_block (lambda (block target_schema target_tbl stages)
 	(begin
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
 			(neumann_fail "build_queryplan" "DML over grouped query-block is not implemented yet")
@@ -11972,7 +11973,8 @@ every title. */
 		(define sources (qb_sources block))
 		(define scan_plan (query_block_join_plan block sources))
 		(define first_alias (source_alias (car sources)))
-		(define target_src (dml_target_source sources target_schema target_tbl))
+		(define target_src (dml_target_source sources target_schema target_tbl
+			(qassoc_get (qb_facts block) (quote dml_target_alias) nil)))
 		(if (nil? target_src)
 			(neumann_fail "build_queryplan" "DML target relation mismatch")
 			true)
@@ -11981,11 +11983,52 @@ every title. */
 		(define delete_mode (empty_list? (coalesceNil cols '())))
 		(define update_ref (list (quote get_column) target_alias false "$update" false))
 		(define cond (dml_preserve_driver_membership_probe target_schema (coalesceNil (qb_where block) true)))
+		/* The native mutation callback belongs to one target identity. A joined
+		row stream is safe only when every additional source is a proven 0:1
+		lookup from that target. Reuse the existing key/stage proof, never collect
+		an unbounded Scheme relation or mutate once per ambiguous source match. */
+		(if (and (not (source_outer? target_src))
+			(ordered_join_sources_are_unique_lookups_acc sources first_alias stages
+				(combine_where_terms (source_join_exprs sources) cond)
+				(list target_src) (filter sources (lambda (src)
+					(not (equal?? (source_alias src) target_alias)))))) true
+			(neumann_fail "build_queryplan" "joined mutation requires one proven source match per target"))
+
+		/* A later nested source probe must not see this statement move its own
+		join key into another source match (Halloween effect). Until the native
+		target domain is frozen, reject assignments which change that binding. */
+		(define other_aliases (filter (source_aliases sources) (lambda (alias)
+			(not (equal?? alias target_alias)))))
+		(define target_join_terms (filter (split_and_terms
+			(combine_where_terms (source_join_exprs sources) cond)) (lambda (term)
+				(and (expr_refs_alias? first_alias target_alias term)
+					(expr_refs_any_alias? first_alias other_aliases term)))))
+		(define bound_target_columns (merge_unique (map target_join_terms (lambda (term)
+			(extract_columns_for_join_alias sources first_alias target_alias term)))))
+		(if (reduce (extract_assoc (coalesceNil cols '()) (lambda (title _expr) title))
+			(lambda (safe title) (and safe (not (contains? bound_target_columns title)))) true) true
+			(neumann_fail "build_queryplan" "joined UPDATE cannot change its target join columns yet"))
+
 		(define needed_exprs (merge (list
 			(dml_assignment_exprs cols)
 			(list cond)
 			(list update_ref)
 			(source_join_exprs sources))))
+		/* Prepared stages have their own immutable input. Direct aliases of the
+		mutation table do not: changing a column read through another alias would
+		make a later nested probe consume this statement's new values. */
+		(define target_writes (extract_assoc (coalesceNil cols '()) (lambda (title _expr) title)))
+		(if (reduce sources (lambda (safe src) (and safe
+			(or (not (and (source_is_base_table? src)
+				(equal? (source_schema src) target_schema) (equal? (source_relation src) target_tbl)
+				(not (equal?? (source_alias src) target_alias))))
+				(begin
+					(define reads (merge_unique (map needed_exprs (lambda (expr)
+						(extract_columns_for_join_alias sources first_alias (source_alias src) expr)))))
+					(reduce target_writes (lambda (disjoint col)
+						(and disjoint (not (contains? reads col)))) true))))) true) true
+			(neumann_fail "build_queryplan" "self joined UPDATE needs a frozen source snapshot for overlapping columns"))
+
 		(define update_fn (lower_column_expr_for_join sources first_alias update_ref))
 		(define update_values (if delete_mode
 			nil
@@ -12070,14 +12113,14 @@ every title. */
 				0
 				false)))))
 
-(define lower_dml_query_block_core (lambda (block target_schema target_tbl)
+(define lower_dml_query_block_core (lambda (block target_schema target_tbl stages)
 	(if (single_source? (qb_sources block))
 		(lower_single_source_dml_query_block block target_schema target_tbl)
-		(lower_multi_source_dml_query_block block target_schema target_tbl))))
+		(lower_multi_source_dml_query_block block target_schema target_tbl stages))))
 
 (define lower_dml_query_block_with_stages (lambda (block target_schema target_tbl)
 	(if (empty_list? (qb_stages block))
-		(lower_dml_query_block_core block target_schema target_tbl)
+		(lower_dml_query_block_core block target_schema target_tbl (qb_stages block))
 		(begin
 			(define stage_catalog (query_block_stage_catalog block))
 			(define stage_lookup (query_block_stage_lookup block))
@@ -12085,7 +12128,7 @@ every title. */
 			(cons (quote begin)
 				(merge (list
 					(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup (qb_stages block))
-					(list (lower_dml_query_block_core (query_block_without_stages_after_prepare_using stage_lookup block) target_schema target_tbl)))))))))
+					(list (lower_dml_query_block_core (query_block_without_stages_after_prepare_using stage_lookup block) target_schema target_tbl (qb_stages block))))))))))
 
 (define lower_multi_target_delete_with_stages (lambda (block target_specs)
 	(if (empty_list? (qb_stages block))
@@ -13397,7 +13440,7 @@ compile repeats Scheme closure optimization even when no domain was changed. */
 (define build_queryplan_term (lambda (query planning_session tx)
 	(neumann_compile_pipeline query planning_session tx)))
 
-(define build_dml_plan (lambda (schema tbl _tblalias all_defs cols condition order limit offset planning_session tx)
+(define build_dml_plan (lambda (schema tbl tblalias all_defs cols condition order limit offset planning_session tx)
 	(begin
 		(define query (make_query_block
 			schema
@@ -13409,7 +13452,7 @@ compile repeats Scheme closure optimization even when no domain was changed. */
 			limit
 			offset
 			'() '()
-			(list (list (quote dml) true))))
+			(list (list (quote dml) true) (list (quote dml_target_alias) tblalias))))
 		(neumann_compile_ir_pipeline
 			(ir_with_return (decorrelate_logical_query query) (list (quote dml) schema tbl))
 			planning_session tx))))

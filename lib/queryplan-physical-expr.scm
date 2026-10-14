@@ -4178,6 +4178,12 @@ coercion and collations do not have the same ordering proof. */
 		(define key_sets (unique_lookup_key_sets src stages))
 		(define lookup_condition (lookup_probe_condition_from_sources
 			sources default_alias bound_sources src condition))
+		/* A nullable UNIQUE key with distinct NULLs is not unique under a
+		null-safe equality. Use the published native declaration; cardinality
+		estimates and observed NULL counts cannot establish this contract. */
+		(define native_source (and (source_is_base_table? src) (not (group_stage? stage))))
+		(define key_descriptions (if native_source
+			((show (source_schema src) (source_relation src) "constraints") "Unique") '()))
 		(or
 			(join_optimizer_at_most_one_unbound_source? stages src)
 			(reduce key_sets (lambda (unique key_cols)
@@ -4185,7 +4191,14 @@ coercion and collations do not have the same ordering proof. */
 					(and (not (empty_list? key_cols))
 						(reduce key_cols (lambda (complete key_col)
 							(and complete (reduce (split_and_terms lookup_condition)
-								(lambda (found term) (or found (unique_lookup_join_term? default_alias src key_col term))) false)))
+								(lambda (found term) (or found (and
+									(unique_lookup_join_term? default_alias src key_col term)
+									(or (not (nil? (equality_term_operands term)))
+										(not native_source)
+										(source_column_guaranteed_nonnull? src key_col)
+										(reduce key_descriptions (lambda (equal_nulls key)
+											(or equal_nulls (and (equal? (key "Cols") key_cols)
+												(key "nulls_not_distinct")))) false))))) false)))
 							true))))
 				false)))))
 
