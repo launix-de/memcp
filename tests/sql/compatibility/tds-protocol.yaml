@@ -100,7 +100,7 @@ test_cases:
       expect:
         error: true
         contains:
-        - unbound
+        - undeclared T-SQL parameter
     - sql: SELECT 1/0 AS value
       expect:
         error: true

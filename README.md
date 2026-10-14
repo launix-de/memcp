@@ -105,8 +105,21 @@ T-SQL mode currently covers bracket/double-quoted identifiers, Unicode literals,
 TOP, OFFSET/FETCH and basic DDL/DML through native defaults, constraints and
 auto-increment. Enable TDS with `--tds-port=1433 --tds-database=<existing database>`.
 The transport is the separate [go-tdsstack](https://github.com/launix-de/go-tdsstack)
-module. RPC parameter binding, metadata procedures, pure prepared-statement
-descriptions, exact dialect type semantics and script batch import remain open.
+module. RPC parameters bind through frontend declarations, including binary
+bytes and numeric coefficients. Pure SELECT descriptions expose column and
+parameter contracts without executing the query. National character declarations
+retain their original schema types; assignment and cast width uses UTF-16 units.
+Integer division uses the declared operand types and rejects zero divisors.
+
+TDS binary results preserve arbitrary bytes, empty values and NULL. Direct
+DECIMAL/NUMERIC columns, parameters and casts expose their declared precision
+and scale. Integer expression results retain the native signed 64-bit range
+when sent as zero-scale NUMERIC, including values beyond floating precision.
+Scaled casts use the existing numeric precision; exact DECIMAL(38,s), computed
+decimal precision propagation, temporal parameters, output parameters, and
+text/numeric-to-binary encoding remain open. Computed decimal results without
+known dimensions currently retain approximate numeric transport. Metadata
+procedures and script batch import are separate follow-ups.
 T-SQL plans retain the existing plan cache and JIT; the dialect currently uses
 exact query text, as its literal syntax differs from the shared lexer.
 

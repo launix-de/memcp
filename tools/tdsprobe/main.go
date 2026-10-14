@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -113,6 +114,17 @@ func execute(ctx context.Context, conn *sql.Conn, stmt statement) error {
 	args := make([]any, len(stmt.Parameters))
 	for i, p := range stmt.Parameters {
 		v := p.Value
+		if encoded, ok := v.(map[string]any); ok {
+			text, ok := encoded["binary_hex"].(string)
+			if !ok || len(encoded) != 1 {
+				return fmt.Errorf("parameter %s has an unsupported payload", p.Name)
+			}
+			var err error
+			v, err = hex.DecodeString(text)
+			if err != nil {
+				return err
+			}
+		}
 		if n, ok := v.(json.Number); ok {
 			if strings.ContainsAny(string(n), ".eE") {
 				f, err := n.Float64()
@@ -215,6 +227,15 @@ func checkError(want expectation, err error) error {
 }
 
 func equalValue(actual, expected any) bool {
+	if encoded, ok := expected.(map[string]any); ok {
+		text, ok := encoded["binary_hex"].(string)
+		if !ok || len(encoded) != 1 {
+			return false
+		}
+		want, err := hex.DecodeString(text)
+		got, ok := actual.([]byte)
+		return err == nil && ok && bytes.Equal(got, want)
+	}
 	if n, ok := expected.(json.Number); ok {
 		switch v := actual.(type) {
 		case int64:

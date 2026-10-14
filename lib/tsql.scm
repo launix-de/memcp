@@ -5,6 +5,41 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 (define tsql_queryplan_cache (newcachemap))
 (define tsql_statement_text strtrim)
 
+/* Transport tuples describe bytes and unscaled coefficients only. Their SQL
+meaning is chosen here from the request's declaration, not in the Go bridge. */
+(define tds_parameter_value (lambda (parameter) (begin
+	(define value (parameter "value"))
+	(define wire (parameter "type"))
+	(if (nil? value) nil
+		(has? '(106 108) (wire "kind")) (begin
+			(define coefficient (value "coefficient"))
+			(define scale (wire "scale"))
+			(if (and (string? coefficient) (regexp_test coefficient "^-?(?:0|[1-9][0-9]*)$")
+				(>= scale 0) (<= scale (wire "precision")) (<= (wire "precision") 38)) true
+				(error "invalid numeric parameter payload"))
+			(if (equal? scale 0) (tsql_parse_integer coefficient) (begin
+				(define negative (equal? (substr coefficient 0 1) "-"))
+				(define digits (if negative (substr coefficient 1) coefficient))
+				(define padded (concat (string_repeat "0" (max 0 (+ 1 (- scale (strlen digits))))) digits))
+				(define point (- (strlen padded) scale))
+				(tsql_numeric_input (concat (if negative "-" "") (substr padded 0 point) "." (substr padded point))))))
+		value))))
+(define tds_result_value (lambda (descriptor value) (if (nil? value) nil
+	(match (descriptor "kind")
+		165 (list "bytes" value)
+		108 (begin
+			(define scale (descriptor "scale"))
+			/* A zero-scale SQL contract keeps native integer IDs exact. Scaled
+			coefficients currently use the existing native numeric precision. */
+			(define coefficient (if (equal? scale 0) value
+				(round (* value (simplify (concat "1e" scale))))))
+			(list "coefficient" (string (tsql_cast_integer coefficient
+				(tsql_parse_integer "-9223372036854775808") (tsql_parse_integer "9223372036854775807")))))
+		231 (string value)
+		109 (list "floating" value)
+		38 (intdiv value 1)
+		_ value))))
+
 /* Bind at the request boundary, not in storage or row loops. NULL is a supplied
 value; the wire descriptor and SQL declaration own the type independently. */
 (define tds_bind_parameters (lambda (session declarations parameters) (begin
@@ -28,13 +63,17 @@ value; the wire descriptor and SQL declaration own the type independently. */
 		(define contract (cadr declaration))
 		(define parameter (named name))
 		(define wire (parameter "type"))
-		(if (not (has? '(31 38 104 109 167 175 231 239) (wire "kind")))
+		(if (not (has? '(31 38 104 106 108 109 165 167 173 175 231 239) (wire "kind")))
 			(error "unsupported T-SQL parameter wire type: " (wire "kind")) true)
 		/* A supplied NULL needs no numeric representation or conversion. Its SQL
 		contract still comes exclusively from the declaration. */
+		(define source_type (match (wire "kind")
+			38 "BIGINT" 104 "BIT" 106 "DECIMAL" 108 "NUMERIC" 109 "FLOAT"
+			165 "VARBINARY" 173 "BINARY" 167 "VARCHAR" 175 "CHAR" 231 "NVARCHAR" 239 "NCHAR" _ "NULL"))
 		(define converted (if (nil? (parameter "value")) nil
 			(eval (sql_type_lower_annotations
-				(tsql_cast_expr (list (quote quote) (parameter "value")) (car contract) (cdr contract))))))
+				(tsql_cast_expr (list (quote sql_type_expr) (list (quote quote) (tds_parameter_value parameter)) source_type nil)
+					(car contract) (cdr contract))))))
 		(list (concat "__tsql_parameter:" name) converted)))))
 	/* All declarations and values are validated before installing this request. */
 	(map values (lambda (item) (session (car item) (cadr item))))
@@ -152,7 +191,7 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 			(tsql_execute_statement tx (payload "database") (payload "text") session
 				(lambda (values) (row (map (output "descriptors") (lambda (descriptor) (begin
 					(define value (values (descriptor "name")))
-					(if (nil? value) nil (if (equal? (descriptor "kind") 231) (string value) (if (equal? (descriptor "kind") 38) (intdiv value 1) value))))))))
+					(tds_result_value descriptor value))))))
 				(lambda (_names descriptors) (begin
 					(output "descriptors" descriptors)
 					(fields descriptors)))))))
