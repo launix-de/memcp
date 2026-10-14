@@ -70,6 +70,9 @@ value; the wire descriptor and SQL declaration own the type independently. */
 		(define source_type (match (wire "kind")
 			38 "BIGINT" 104 "BIT" 106 "DECIMAL" 108 "NUMERIC" 109 "FLOAT"
 			165 "VARBINARY" 173 "BINARY" 167 "VARCHAR" 175 "CHAR" 231 "NVARCHAR" 239 "NCHAR" _ "NULL"))
+		(if (and (not (nil? (parameter "value"))) (tsql_binary_type? source_type)
+			(not (tsql_binary_type? (car contract))))
+			(error "binary parameter conversion is not implemented") true)
 		(define converted (if (nil? (parameter "value")) nil
 			(eval (sql_type_lower_annotations
 				(tsql_cast_expr (list (quote sql_type_expr) (list (quote quote) (tds_parameter_value parameter)) source_type nil)

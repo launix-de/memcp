@@ -162,6 +162,19 @@ test_cases:
           (list (list "name" "v" "flags" 0 "type" (list "kind" 165 "size" 20) "value" (hex2bin "0080FF"))))
         (expression_equal? (s "__tsql_parameter:v") (hex2bin "0080")))
     expect: {result: true}
+  - name: Binary parameter bytes cannot become numeric text by their runtime carrier
+    scm: |
+      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v INT")
+        (list (list "name" "v" "flags" 0 "type" (list "kind" 165 "size" 2) "value" "12")))
+    expect: {error: true}
+  - name: Binary transport null still binds a different declared target
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v INT")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 165 "size" 20) "value" nil)))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {result: true}
   - name: Binary fixed-width cast pads with zero bytes
     sql: SELECT CAST(0x4180 AS BINARY(4))=0x41800000 AS value
     expect: {rows: 1, data: [{value: true}]}

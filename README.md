@@ -120,6 +120,8 @@ decimal precision propagation, temporal parameters, output parameters, and
 text/numeric-to-binary encoding remain open. Computed decimal results without
 known dimensions currently retain approximate numeric transport. Metadata
 procedures and script batch import are separate follow-ups.
+Non-NULL binary RPC inputs currently require a binary declaration; their native
+string carrier is never interpreted as numeric or character text.
 T-SQL plans retain the existing plan cache and JIT; the dialect currently uses
 exact query text, as its literal syntax differs from the shared lexer.
 
