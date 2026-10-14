@@ -181,6 +181,24 @@ Descriptor types below are frontend contracts, including for empty results. */
 	(if policy (policy schema true false) true)
 	(filter (coalesceNil (show schema) '()) (lambda (name)
 		(and (not (internal_column_name? name)) (tsql_metadata_match name pattern patterns)))))))
+/* Enumerate declaration columns directly, preserving their ordinal. */
+(define tsql_metadata_key_columns (lambda (columns make_row) (begin
+	(define walk (lambda (remaining ordinal) (match remaining
+		(cons column rest) (cons (make_row column ordinal) (walk rest (+ ordinal 1)))
+		_ '())))
+	(walk columns 1))))
+(define tsql_metadata_foreign_columns (lambda (local remote make_row) (begin
+	(define walk (lambda (left right ordinal) (match left
+		(cons column rest) (match right
+			(cons other others) (cons (make_row column other ordinal) (walk rest others (+ ordinal 1)))
+			_ (error "foreign key declaration column count differs"))
+		'() (if (empty_list? right) '() (error "foreign key declaration column count differs"))
+		_ (error "invalid foreign key column declaration"))))
+	(walk local remote 1))))
+(define tsql_metadata_constraints (lambda (schema name) (show (table schema name) "constraints")))
+(define tsql_metadata_key_name (lambda (key)
+	(if (equal? (key "constraint_name") "") (key "Id") (key "constraint_name"))))
+(define tsql_metadata_fk_rule (lambda (mode) (match mode "cascade" 0 "set null" 2 "set default" 3 _ 1)))
 (define tsql_metadata_descriptors (lambda (names integers)
 	(map names (lambda (name)
 		(if (has? integers name) (list "name" name "kind" 38 "size" 4 "flags" 1)
@@ -202,11 +220,16 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 		"real" '("real" 7 24 4 nil 2 nil)
 		"float" '("float" 6 53 8 nil 2 nil)
 		"double" '("float" 6 53 8 nil 2 nil)
+		"money" '("money" 3 19 8 4 10 nil)
+		"smallmoney" '("smallmoney" 3 10 4 4 10 nil)
+		"uniqueidentifier" '("uniqueidentifier" -11 36 16 nil nil nil)
 		"date" (list "date" (if (equal? version 2) 9 91) 10 6 nil nil 1)
 		"datetime" (list "datetime" (if (equal? version 2) 11 93) 23 16 3 nil 3)
 		"smalldatetime" (list "smalldatetime" (if (equal? version 2) 11 93) 16 16 0 nil 3)
 		"rowversion" '("rowversion" -2 8 8 nil nil nil)
-		"timestamp" '("rowversion" -2 8 8 nil nil nil)
+		"timestamp" (begin
+			(define scale (if (empty_list? dimensions) 6 (car dimensions)))
+			(list "datetime2" (if (equal? version 2) 11 93) (if (> scale 0) (+ 20 scale) 19) 16 scale nil 3))
 		_ (if (has? '("decimal" "numeric") type)
 			(begin
 				(define precision (if (empty_list? dimensions) 18 (car dimensions)))
@@ -261,11 +284,15 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 		"sp_datatype_info_100" '("data_type" "odbcver")
 		"sp_tables" '("table_name" "table_owner" "table_qualifier" "table_type" "fusepattern")
 		"sp_columns" '("table_name" "table_owner" "table_qualifier" "column_name" "odbcver")
+		"sp_pkeys" '("table_name" "table_owner" "table_qualifier")
+		"sp_statistics" '("table_name" "table_owner" "table_qualifier" "index_name" "is_unique" "accuracy")
+		"sp_fkeys" '("pktable_name" "pktable_owner" "pktable_qualifier" "fktable_name" "fktable_owner" "fktable_qualifier")
+		"sp_special_columns" '("table_name" "table_owner" "qualifier" "col_type" "scope" "nullable" "odbcver")
 		_ (error "unsupported metadata procedure: " procedure)))
 	(define options (tsql_metadata_arguments arguments names))
 	/* Never silently substitute another database. Policy executes before catalog
 	access, and every table access below belongs to this authenticated database. */
-	(map '("table_qualifier" "pktable_qualifier" "fktable_qualifier") (lambda (key)
+	(map '("table_qualifier" "pktable_qualifier" "fktable_qualifier" "qualifier") (lambda (key)
 		(if (or (nil? (options key)) (equal?? schema (options key))) true
 			(error "metadata qualifier is not the current database"))))
 	(if policy (policy schema true false) true)
@@ -288,12 +315,81 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 			(define rows (if (tsql_metadata_match "dbo" owner true)
 				(merge (map (tsql_metadata_table_names schema (options "table_name") true policy) (lambda (name) (begin
 					(define columns (filter (show (table schema name)) (lambda (column) (not (internal_column_name? (column "Field"))))))
-					(filter (map (produceN (count columns)) (lambda (i)
-						(tsql_metadata_column_row schema name (nth columns i) (+ i 1) version)))
-						(lambda (row) (tsql_metadata_match (row "COLUMN_NAME") (options "column_name") true))))))) '()))
+					(map (filter (produceN (count columns)) (lambda (i)
+						(tsql_metadata_match ((nth columns i) "Field") (options "column_name") true)))
+						(lambda (i) (tsql_metadata_column_row schema name (nth columns i) (+ i 1) version))))))) '()))
 			(list '("TABLE_QUALIFIER" "TABLE_OWNER" "TABLE_NAME" "COLUMN_NAME" "DATA_TYPE" "TYPE_NAME" "PRECISION" "LENGTH" "SCALE" "RADIX" "NULLABLE" "REMARKS" "COLUMN_DEF" "SQL_DATA_TYPE" "SQL_DATETIME_SUB" "CHAR_OCTET_LENGTH" "ORDINAL_POSITION" "IS_NULLABLE")
 				'("DATA_TYPE" "PRECISION" "LENGTH" "SCALE" "RADIX" "NULLABLE" "SQL_DATA_TYPE" "SQL_DATETIME_SUB" "CHAR_OCTET_LENGTH" "ORDINAL_POSITION") rows))
-		_ (error "unsupported metadata procedure: " procedure)))
+		"sp_special_columns" (begin
+			(if (options "table_name") true (error "sp_special_columns requires a table name"))
+			(define kind (toUpper (coalesceNil (options "col_type") "R")))
+			(define scope (toUpper (coalesceNil (options "scope") "T")))
+			(define nullable (toUpper (coalesceNil (options "nullable") "U")))
+			(if (and (has? '("R" "V") kind) (has? '("C" "T" "S") scope) (has? '("O" "U") nullable)) true
+				(error "unsupported special-column option"))
+			(define rows (if (equal?? owner "dbo") (merge (map (tsql_metadata_table_names schema (options "table_name") false policy) (lambda (name) (begin
+				(define columns (show (table schema name)))
+				(define keys ((tsql_metadata_constraints schema name) "Unique"))
+				(define primary (find keys (lambda (key) (equal? (key "Id") "PRIMARY"))))
+				(define candidate (coalesceNil primary (find keys (lambda (key)
+					(reduce (key "Cols") (lambda (valid col) (and valid (not ((find columns (lambda (column) (equal? (column "Field") col))) "Null")))) true)))))
+				(define names (if (equal? kind "V")
+					(map (filter columns (lambda (column) (equal?? (column "RawType") "ROWVERSION"))) (lambda (column) (column "Field")))
+					(if candidate (candidate "Cols") '())))
+				(map (filter names (lambda (col) (or (equal? nullable "U")
+					(not ((find columns (lambda (column) (equal? (column "Field") col))) "Null"))))) (lambda (col) (begin
+						(define column (find columns (lambda (column) (equal? (column "Field") col))))
+						(define contract (tsql_metadata_type column version))
+						(list "SCOPE" (match scope "C" 0 "T" 1 "S" 2) "COLUMN_NAME" col "DATA_TYPE" (nth contract 1)
+							"TYPE_NAME" (car contract) "PRECISION" (nth contract 2) "LENGTH" (nth contract 3) "SCALE" (nth contract 4) "PSEUDO_COLUMN" 1)))))))) '()))
+			(list '("SCOPE" "COLUMN_NAME" "DATA_TYPE" "TYPE_NAME" "PRECISION" "LENGTH" "SCALE" "PSEUDO_COLUMN")
+				'("SCOPE" "DATA_TYPE" "PRECISION" "LENGTH" "SCALE" "PSEUDO_COLUMN") rows))
+		"sp_pkeys" (begin
+			(if (nil? (options "table_name")) (error "sp_pkeys requires a table name") true)
+			(define rows (if (equal?? owner "dbo")
+				(merge (map (tsql_metadata_table_names schema (options "table_name") false policy) (lambda (name) (begin
+					(define keys ((tsql_metadata_constraints schema name) "Unique"))
+					(merge (map (filter keys (lambda (key) (equal? (key "Id") "PRIMARY"))) (lambda (key)
+						(tsql_metadata_key_columns (key "Cols") (lambda (column ordinal)
+							(list "TABLE_QUALIFIER" schema "TABLE_OWNER" "dbo" "TABLE_NAME" name "COLUMN_NAME" column
+								"KEY_SEQ" ordinal "PK_NAME" (tsql_metadata_key_name key))))))))))) '()))
+			(list '("TABLE_QUALIFIER" "TABLE_OWNER" "TABLE_NAME" "COLUMN_NAME" "KEY_SEQ" "PK_NAME") '("KEY_SEQ") rows))
+		"sp_statistics" (begin
+			(if (nil? (options "table_name")) (error "sp_statistics requires a table name") true)
+			(if (has? '(nil "Y" "N") (options "is_unique")) true (error "unsupported unique filter"))
+			(if (has? '(nil "Q") (options "accuracy")) true (error "unsupported statistics accuracy"))
+			(define rows (if (equal?? owner "dbo")
+				(merge (map (tsql_metadata_table_names schema (options "table_name") false policy) (lambda (name) (begin
+					(define keys ((tsql_metadata_constraints schema name) "Unique"))
+					(merge (map (filter keys (lambda (key) (tsql_metadata_match (tsql_metadata_key_name key) (options "index_name") true))) (lambda (key)
+						(tsql_metadata_key_columns (key "Cols") (lambda (column ordinal)
+							/* ODBC OTHER describes the logical key, not a physical index
+							technology. Counts, pages and physical ordering are unknown. */
+							(list "TABLE_QUALIFIER" schema "TABLE_OWNER" "dbo" "TABLE_NAME" name "NON_UNIQUE" 0 "INDEX_QUALIFIER" schema
+								"INDEX_NAME" (tsql_metadata_key_name key) "TYPE" 3 "SEQ_IN_INDEX" ordinal "COLUMN_NAME" column
+								"COLLATION" nil "CARDINALITY" nil "PAGES" nil "FILTER_CONDITION" nil)))))))))) '()))
+			(list '("TABLE_QUALIFIER" "TABLE_OWNER" "TABLE_NAME" "NON_UNIQUE" "INDEX_QUALIFIER" "INDEX_NAME" "TYPE" "SEQ_IN_INDEX" "COLUMN_NAME" "COLLATION" "CARDINALITY" "PAGES" "FILTER_CONDITION")
+				'("NON_UNIQUE" "TYPE" "SEQ_IN_INDEX" "CARDINALITY" "PAGES") rows))
+		"sp_fkeys" (begin
+			(define parent (options "pktable_name"))
+			(define child (options "fktable_name"))
+			(if (or parent child) true (error "sp_fkeys requires a table filter"))
+			(define rows (if (and (equal?? (coalesceNil (options "pktable_owner") "dbo") "dbo")
+				(equal?? (coalesceNil (options "fktable_owner") "dbo") "dbo"))
+				(merge (map (tsql_metadata_table_names schema child false policy) (lambda (name) (begin
+					(define keys ((tsql_metadata_constraints schema name) "ForeignKeys"))
+					(merge (map (filter keys (lambda (key) (and (equal? (key "Role") "referencing")
+						(tsql_metadata_match (key "OtherTable") parent false)))) (lambda (key) (begin
+							(define referenced (table schema (key "OtherTable")))
+							(define candidate (if referenced (find ((show referenced "constraints") "Unique")
+								(lambda (unique) (equal? (unique "Cols") (key "OtherColumns")))) nil))
+							(tsql_metadata_foreign_columns (key "LocalColumns") (key "OtherColumns") (lambda (column other ordinal)
+								(list "PKTABLE_QUALIFIER" schema "PKTABLE_OWNER" "dbo" "PKTABLE_NAME" (key "OtherTable") "PKCOLUMN_NAME" other
+									"FKTABLE_QUALIFIER" schema "FKTABLE_OWNER" "dbo" "FKTABLE_NAME" name "FKCOLUMN_NAME" column "KEY_SEQ" ordinal
+									"UPDATE_RULE" (tsql_metadata_fk_rule (key "UpdateMode")) "DELETE_RULE" (tsql_metadata_fk_rule (key "DeleteMode"))
+									"FK_NAME" (key "Id") "PK_NAME" (if candidate (tsql_metadata_key_name candidate) nil) "DEFERRABILITY" 7))))))))))) '()))
+			(list '("PKTABLE_QUALIFIER" "PKTABLE_OWNER" "PKTABLE_NAME" "PKCOLUMN_NAME" "FKTABLE_QUALIFIER" "FKTABLE_OWNER" "FKTABLE_NAME" "FKCOLUMN_NAME" "KEY_SEQ" "UPDATE_RULE" "DELETE_RULE" "FK_NAME" "PK_NAME" "DEFERRABILITY")
+				'("KEY_SEQ" "UPDATE_RULE" "DELETE_RULE" "DEFERRABILITY") rows))))
 	(list "columns" (tsql_metadata_descriptors (car result) (cadr result)) "rows" (nth result 2)))))
 (define tsql_execute_metadata (lambda (schema procedure arguments policy resultrow resultfields) (begin
 	(define result (tsql_metadata_result schema procedure arguments policy))

@@ -274,5 +274,56 @@ test_cases:
         value: driver_rpc_catalog
       expect:
         rows: 0
+- name: Native driver RPC lists only semantic constraints
+  tds:
+    statements:
+    - sql: CREATE TABLE driver_rpc_parent (a INT NOT NULL,b INT NOT NULL,CONSTRAINT PK_rpc PRIMARY KEY(b,a))
+    - sql: CREATE TABLE driver_rpc_unique (id INT NOT NULL,CONSTRAINT UQ_rpc UNIQUE(id))
+    - sql: sp_pkeys
+      parameters:
+      - name: table_name
+        value: driver_rpc_parent
+      expect:
+        rows: 2
+        data:
+        - COLUMN_NAME: b
+          KEY_SEQ: 1
+          PK_NAME: PK_rpc
+        - COLUMN_NAME: a
+          KEY_SEQ: 2
+          PK_NAME: PK_rpc
+    - sql: sp_pkeys
+      parameters:
+      - name: table_name
+        value: driver_rpc_unique
+      expect:
+        rows: 0
+    - sql: sp_statistics
+      parameters:
+      - name: table_name
+        value: driver_rpc_unique
+      expect:
+        rows: 1
+        data:
+        - INDEX_NAME: UQ_rpc
+          TYPE: 3
+          NON_UNIQUE: 0
+          COLLATION: null
+          CARDINALITY: null
+          PAGES: null
+    - sql: sp_fkeys
+      parameters:
+      - name: pktable_name
+        value: driver_rpc_parent
+      expect:
+        rows: 0
+    - sql: DROP TABLE driver_rpc_unique
+    - sql: DROP TABLE driver_rpc_parent
+    - sql: sp_statistics
+      parameters:
+      - name: table_name
+        value: driver_rpc_unique
+      expect:
+        rows: 0
 cleanup:
 - sql: DROP TABLE IF EXISTS tds_protocol_basic
