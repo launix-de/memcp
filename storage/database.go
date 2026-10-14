@@ -343,11 +343,7 @@ func (d *database) ComputeSize() uint {
 	}
 	if d.procedures != nil {
 		for _, definition := range d.procedures.GetAll() {
-			sz += uint(len(definition.Name) + len(definition.Source) + len(definition.Language))
-			sz += scm.ComputeSize(definition.Parameters)
-			if fn := definition.compiled.Load(); fn != nil {
-				sz += scm.ComputeSize(*fn)
-			}
+			sz += definition.ComputeSize()
 		}
 	}
 	return sz

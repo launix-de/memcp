@@ -9,6 +9,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/launix-de/memcp/scm"
 )
@@ -26,6 +27,17 @@ type ProcedureDescription struct {
 	compile    sync.Once
 	compiled   atomic.Pointer[scm.Scmer]
 	compileErr any
+}
+
+// ComputeSize includes the retained declaration and its transient callable.
+// Catalog diagnostics own this traversal; query and metadata lookup do not.
+func (p *ProcedureDescription) ComputeSize() uint {
+	size := uint(unsafe.Sizeof(*p)) + uint(len(p.Name)+len(p.Source)+len(p.Language))
+	size += scm.ComputeSize(p.Parameters) - uint(unsafe.Sizeof(p.Parameters))
+	if fn := p.compiled.Load(); fn != nil {
+		size += scm.ComputeSize(*fn)
+	}
+	return size
 }
 
 func (p *ProcedureDescription) callable(schema string) scm.Scmer {
