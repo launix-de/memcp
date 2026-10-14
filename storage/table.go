@@ -24,6 +24,7 @@ import "math/bits"
 import "sync"
 import "time"
 import "errors"
+import "slices"
 import "unsafe"
 import "strconv"
 import "strings"
@@ -1045,7 +1046,7 @@ func (t *table) collectStatisticsFromShards(shards []*storageShard) {
 	for {
 		current := t.showColumnsSnapshot.Load()
 		if current == nil {
-			replacement := t.buildShowColumnsSnapshot(uint(stats.rowCount))
+			replacement := t.buildShowColumnsSnapshot(uint(stats.rowCount), nil)
 			replacement.metadata.statistics = stats
 			if t.showColumnsSnapshot.CompareAndSwap(nil, replacement) {
 				t.columnNamesSnapshot.Store(replacement.metadata.columnNames)
@@ -1054,7 +1055,7 @@ func (t *table) collectStatisticsFromShards(shards []*storageShard) {
 			}
 			continue
 		}
-		replacement := t.buildShowColumnsSnapshot(uint(stats.rowCount))
+		replacement := t.buildShowColumnsSnapshot(uint(stats.rowCount), current.metadata.columnNames)
 		replacement.metadata.statistics = stats
 		if t.showColumnsSnapshot.CompareAndSwap(current, replacement) {
 			t.columnNamesSnapshot.Store(replacement.metadata.columnNames)
@@ -1612,24 +1613,28 @@ func (t *table) metadataMemory() uint {
 		size += uint(unsafe.Sizeof(*edge))
 	}
 	size += uint(cap(t.Columns)) * uint(unsafe.Sizeof((*column)(nil)))
-	var initialPayloads map[scm.Scmer]struct{}
+	var declarationPayloads map[scm.Scmer]struct{}
 	for _, c := range t.Columns {
-		size += uint(unsafe.Sizeof(*c)) + uint(len(c.Name))
+		size += uint(unsafe.Sizeof(*c)) + uint(len(c.Name)+len(c.Typ)+len(c.Collation)+len(c.Comment)+len(c.DefaultExpression))
+		size += uint(cap(c.Typdimensions)) * uint(unsafe.Sizeof(int(0)))
 		// As with shard bookkeeping, map entry/bucket overhead is an estimate.
 		size += 64 * uint(len(c.InitialValues))
 		for uuid := range c.InitialValues {
 			size += uint(len(uuid))
 		}
-		if len(c.InitialValues) != 0 {
-			if initialPayloads == nil {
-				initialPayloads = make(map[scm.Scmer]struct{})
+		// SHOW borrows these declaration payloads. Charge their retained data
+		// once at the column owner, including a shared frozen ADD/default value.
+		for _, value := range []scm.Scmer{c.Default, c.OnUpdate, c.InitialValue} {
+			bytes := scm.ComputeSize(value)
+			if bytes <= uint(unsafe.Sizeof(value)) {
+				continue
 			}
-			if _, charged := initialPayloads[c.InitialValue]; !charged {
-				initialPayloads[c.InitialValue] = struct{}{}
-				// The column size already includes the inline Scmer field.
-				if bytes := scm.ComputeSize(c.InitialValue); bytes > uint(unsafe.Sizeof(c.InitialValue)) {
-					size += bytes - uint(unsafe.Sizeof(c.InitialValue))
-				}
+			if declarationPayloads == nil {
+				declarationPayloads = make(map[scm.Scmer]struct{})
+			}
+			if _, charged := declarationPayloads[value]; !charged {
+				declarationPayloads[value] = struct{}{}
+				size += bytes - uint(unsafe.Sizeof(value))
 			}
 		}
 
@@ -1640,12 +1645,32 @@ func (t *table) metadataMemory() uint {
 	}
 	if names := t.columnNamesSnapshot.Load(); names != nil {
 		size += uint(cap(names.declarations)) * uint(unsafe.Sizeof((*column)(nil)))
+		// Ordinals extend the existing name-directory entries. Names still
+		// borrow column strings; there is no second column lookup directory.
+		size += uint(len(names.exact)+len(names.folded)) * uint(unsafe.Sizeof(int(0)))
 	}
 	if snapshot := t.showColumnsSnapshot.Load(); snapshot != nil && snapshot.metadata != nil {
 		size += uint(unsafe.Sizeof(*snapshot.metadata))
 		if snapshot.metadata.columns != nil {
 			// Names borrow the column strings; charge only the new pointer array.
 			size += uint(cap(snapshot.metadata.columns.names)) * uint(unsafe.Sizeof(""))
+		}
+		if rows := snapshot.metadata.columnRows; !rows.IsNil() {
+			// SHOW and point reads borrow the same row arrays. Property labels
+			// are package constants; names/defaults/type declarations belong to
+			// columns. Only row arrays, dimension arrays and formatted type text
+			// are owned by this render, charged once through this shared payload.
+			size += uint(cap(rows.Slice())) * uint(unsafe.Sizeof(scm.Scmer{}))
+			for _, row := range rows.Slice() {
+				fields := row.Slice()
+				size += uint(cap(fields)) * uint(unsafe.Sizeof(scm.Scmer{}))
+				// column.show publishes Type at 3 and Dimensions at 9.
+				dimensions := fields[9].Slice()
+				size += uint(cap(dimensions)) * uint(unsafe.Sizeof(scm.Scmer{}))
+				if len(dimensions) != 0 {
+					size += uint(len(fields[3].String()))
+				}
+			}
 		}
 		if snapshot.metadata.constraints != emptyTableConstraints {
 			// The field is already included in the wrapper; only its retained
@@ -1748,6 +1773,7 @@ type tableShowColumnsSnapshotMetadata struct {
 	columnNames               *tableColumnNamesSnapshot
 	statistics                *tableStatisticsSnapshot
 	constraints               scm.Scmer // immutable declarations, replaced only by schema-owned DDL
+	columnRows                scm.Scmer // same full SHOW payload, retained during rendered-value invalidation
 }
 
 func plannerFingerprintMix(fingerprint, value uint64) uint64 {
@@ -1819,8 +1845,15 @@ type tableShowColumnsMetadata struct {
 
 type tableColumnNamesSnapshot struct {
 	declarations []*column // immutable directory; column fields retain existing ownership
-	exact        map[string]string
-	folded       map[string]string
+	exact        map[string]tableColumnName
+	folded       map[string]tableColumnName
+}
+
+// Name and ordinal are frozen together at declaration publication. The ordinal
+// addresses the matching full SHOW payload, never mutable column fields.
+type tableColumnName struct {
+	name    string
+	ordinal int
 }
 
 func foldIdentifier(name string) string {
@@ -1843,16 +1876,19 @@ func foldIdentifier(name string) string {
 	return strings.ToLower(name)
 }
 
-func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnapshot {
-	result := make([]scm.Scmer, len(t.Columns))
-	plannerColumns := scm.NewFastDictValue(len(t.Columns))
+func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableColumnNamesSnapshot) *tableShowColumnsSnapshot {
+	if columnNames == nil {
+		columnNames = t.buildColumnNamesSnapshot() // unpublished constructor or schema mutation owner
+	}
+	columns := columnNames.declarations
+	result := make([]scm.Scmer, len(columns))
+	plannerColumns := scm.NewFastDictValue(len(columns))
 	plannerColumnsFingerprint := uint64(0x6a09e667f3bcc909)
-	names := make([]string, len(t.Columns))
-	distinctEstimates := make([]uint64, len(t.Columns))
-	plannerStatistics := make([]*columnPlannerStatistics, len(t.Columns))
-	columnNames := t.buildColumnNamesSnapshot()
+	names := make([]string, len(columns))
+	distinctEstimates := make([]uint64, len(columns))
+	plannerStatistics := make([]*columnPlannerStatistics, len(columns))
 	filterSchema := plannerFingerprintString(0x1d26d8e71, t.Collation)
-	for i, c := range t.Columns {
+	for i, c := range columns {
 		names[i] = c.Name
 		filterSchema = plannerFingerprintString(filterSchema, c.Name)
 		filterSchema = plannerFingerprintString(filterSchema, c.Typ)
@@ -1908,6 +1944,7 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 				plannerStatistics: plannerStatistics,
 			},
 			columnNames: columnNames,
+			columnRows:  scm.NewSlice(result),
 			constraints: emptyTableConstraints,
 		},
 	}
@@ -1919,13 +1956,14 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 }
 
 func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {
-	exact := make(map[string]string, len(t.Columns))
-	folded := make(map[string]string, len(t.Columns))
-	for _, c := range t.Columns {
-		exact[c.Name] = c.Name
+	exact := make(map[string]tableColumnName, len(t.Columns))
+	folded := make(map[string]tableColumnName, len(t.Columns))
+	for i, c := range t.Columns {
+		entry := tableColumnName{name: c.Name, ordinal: i}
+		exact[c.Name] = entry
 		foldedName := foldIdentifier(c.Name)
 		if _, exists := folded[foldedName]; !exists {
-			folded[foldedName] = c.Name
+			folded[foldedName] = entry
 		}
 	}
 	return &tableColumnNamesSnapshot{declarations: append([]*column(nil), t.Columns...), exact: exact, folded: folded}
@@ -2008,7 +2046,7 @@ func (t *table) Constraints() scm.Scmer {
 func (t *table) publishShowColumnsSnapshot(constraintsChanged bool) scm.Scmer {
 	for {
 		current := t.showColumnsSnapshot.Load()
-		snapshot := t.buildShowColumnsSnapshot(t.CountEstimate())
+		snapshot := t.buildShowColumnsSnapshot(t.CountEstimate(), nil)
 		if constraintsChanged {
 			snapshot.metadata.constraints = t.buildConstraintMetadata()
 			t.columnNamesSnapshot.Store(snapshot.metadata.columnNames)
@@ -2033,24 +2071,42 @@ func (t *table) publishShowColumnsSnapshot(constraintsChanged bool) scm.Scmer {
 
 func (t *table) invalidateShowColumnsSnapshot() {
 	names := t.publishColumnNamesSnapshot()
-	// Preserve constraint lifetime when a TEMP column invalidates rendered column
-	// descriptions. Getters refresh nil value/plannerValue through the existing
-	// lazy path; constraint reads retain the complete immutable declaration set.
+	// Invalidation already constructs complete declarations for point reads.
+	// Publish that complete render too: lazy readers must never reconstruct
+	// mutable declarations without their DDL owner or pay a second render.
 	for {
 		current := t.showColumnsSnapshot.Load()
-		metadata := &tableShowColumnsSnapshotMetadata{columnNames: names, constraints: emptyTableConstraints}
-		if current != nil {
-			*metadata = *current.metadata
-			metadata.columnNames = names
-		}
-		// Native FK publication owns the schema lock, while TEMP invalidation
-		// owns the table DDL lock. Preserve a declaration published between
-		// loading the current snapshot and publishing its invalidation marker.
-		if t.showColumnsSnapshot.CompareAndSwap(current, &tableShowColumnsSnapshot{metadata: metadata}) {
+		snapshot := t.buildShowColumnsSnapshot(t.CountEstimate(), names)
+		if t.showColumnsSnapshot.CompareAndSwap(current, snapshot) {
 			break
 		}
 	}
 	t.publishPlannerStatsToken()
+}
+
+// ShowColumn borrows one immutable SHOW row from the same publication as its
+// name directory. Lookup is O(1) in column count, with no locks, shard access,
+// counters or lazy rendering. Constructors and DDL publish descriptions before
+// exposing the table; an unpublished/missing declaration returns nil.
+func (t *table) ShowColumn(name string, ignoreCase bool) scm.Scmer {
+	if t == nil {
+		return scm.NewNil()
+	}
+	snapshot := t.showColumnsSnapshot.Load()
+	if snapshot == nil || snapshot.metadata == nil || snapshot.metadata.columnNames == nil {
+		return scm.NewNil()
+	}
+	names := snapshot.metadata.columnNames
+	resolved, ok := names.exact[name]
+	if !ok && ignoreCase {
+		resolved, ok = names.folded[foldIdentifier(name)]
+	}
+	if ok {
+		if rows := snapshot.metadata.columnRows; !rows.IsNil() && resolved.ordinal < len(rows.Slice()) {
+			return rows.Slice()[resolved.ordinal]
+		}
+	}
+	return scm.NewNil()
 }
 
 // ResolveColumnName reads immutable DDL metadata without scanning SHOW rows.
@@ -2063,11 +2119,11 @@ func (t *table) ResolveColumnName(name string, ignoreCase bool) (string, bool) {
 		snapshot = t.publishColumnNamesSnapshot()
 	}
 	if resolved, ok := snapshot.exact[name]; ok {
-		return resolved, true
+		return resolved.name, true
 	}
 	if ignoreCase {
 		resolved, ok := snapshot.folded[foldIdentifier(name)]
-		return resolved, ok
+		return resolved.name, ok
 	}
 	return "", false
 }
@@ -2926,6 +2982,167 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 	return t.createColumnDDLLocked(name, typ, typdimensions, extrainfo, nil)
 }
 
+// cloneStoredColumnDeclaration preserves immutable persistence/default data.
+// Mutable cache/computation authority is excluded by its callers. Statistics and
+// traffic remain advisory snapshots, never moved authority or synchronization.
+func cloneStoredColumnDeclaration(current *column) *column {
+	replacement := &column{
+		Name: current.Name, Typ: current.Typ, Typdimensions: append([]int(nil), current.Typdimensions...),
+		PartitioningScore: current.PartitioningScore,
+		AutoIncrement:     current.AutoIncrement, Default: current.Default,
+		DefaultExpression: current.DefaultExpression,
+		InitialValue:      current.InitialValue, InitialValues: current.InitialValues,
+		OnUpdate: current.OnUpdate, AllowNull: current.AllowNull,
+		Collation: current.Collation, Comment: current.Comment,
+		sanitizer: current.sanitizer,
+	}
+	replacement.partitioningTraffic.Store(current.partitioningTraffic.Load())
+	atomic.StoreUint64(&replacement.DistinctEstimate, atomic.LoadUint64(&current.DistinctEstimate))
+	atomic.StoreUint64(&replacement.RowEstimate, atomic.LoadUint64(&current.RowEstimate))
+	replacement.PlannerStats.Store(current.PlannerStats.Load())
+	return replacement
+}
+
+// AlterColumn keeps the existing single-property API while using the same
+// schema owner and immutable stored-column publication as complete declarations.
+// Cache/computed columns retain their existing descriptor/lifecycle identity.
+func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
+	if operation == "drop" {
+		return scm.NewBool(t.DropColumn(name))
+	}
+	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+	t.ddlMu.Lock()
+	defer t.ddlMu.Unlock()
+	t.schema.schemalock.Lock()
+	metadataLocked := true
+	defer func() {
+		if metadataLocked {
+			t.schema.schemalock.Unlock()
+		}
+	}()
+	for index, current := range t.Columns {
+		if current.Name != name {
+			continue
+		}
+		result := scm.NewBool(true)
+		if operation == "auto_increment" && scm.ToInt(value) > 1 {
+			// This is the existing allocator update; no column clone owns it.
+			atomic.StoreUint64(&t.Auto_increment, uint64(scm.ToInt(value)))
+		} else {
+			replacement := current
+			if !current.IsTemp && !isRuntimeComputedColumn(current) {
+				if atomic.LoadInt64(&current.cacheUsers) != 0 {
+					panic("column declaration has an active cache lifecycle owner")
+				}
+				replacement = cloneStoredColumnDeclaration(current)
+			}
+			if operation == "auto_increment" {
+				replacement.AutoIncrement = scm.ToBool(value)
+			} else {
+				if replacement != current && (operation == "type" || operation == "dimensions" || operation == "null") {
+					replacement.sanitizer = nil
+				}
+				result = scm.NewBool(scm.ToBool(replacement.Alter(operation, value)))
+				if replacement != current && (operation == "type" || operation == "dimensions" || operation == "null") {
+					replacement.UpdateSanitizer()
+				}
+			}
+			if replacement != current {
+				columns := append([]*column(nil), t.Columns...)
+				columns[index] = replacement
+				t.Columns = columns
+			}
+		}
+		t.publishShowColumnsSnapshot(true)
+		metadataLocked = false
+		t.finishSchemaMutationLocked(t.schemaSaveMode())
+		return result
+	}
+	panic("column " + t.schema.Name + "." + t.Name + "." + name + " does not exist")
+}
+
+// AlterColumnDeclaration replaces an ordinary stored column's complete
+// declaration. The frontend proves value-domain compatibility; storage compares
+// its expected declaration under existing DDL/schema ownership, so concurrent
+// ALTER cannot invalidate that proof. Existing batches retain their old immutable
+// descriptor. Physical storages, native keys and the table ID allocator are not
+// replaced. Runtime statistics and partitioning traffic are advisory snapshots;
+// late observations on the old descriptor may be discarded.
+func (t *table) AlterColumnDeclaration(name string, declaration, expected scm.Scmer) bool {
+	decode := func(value scm.Scmer) (string, []int, bool, string) {
+		if !value.IsSlice() || len(value.Slice()) != 4 {
+			panic("column declaration requires type, dimensions, nullability and collation")
+		}
+		parts := value.Slice()
+		if !parts[0].IsString() || !parts[1].IsSlice() || !parts[2].IsBool() || !parts[3].IsString() {
+			panic("invalid column declaration shape")
+		}
+		dimensions := make([]int, len(parts[1].Slice()))
+		for i, dimension := range parts[1].Slice() {
+			if !dimension.IsInt() {
+				panic("column declaration dimensions must be integers")
+			}
+			dimensions[i] = int(dimension.Int())
+		}
+		return parts[0].String(), dimensions, parts[2].Bool(), parts[3].String()
+	}
+	typ, dimensions, nullable, collation := decode(declaration)
+	previousType, previousDimensions, previousNullable, previousCollation := decode(expected)
+	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+	t.ddlMu.Lock()
+	defer t.ddlMu.Unlock()
+	t.schema.schemalock.Lock()
+	metadataLocked := true
+	defer func() {
+		if metadataLocked {
+			t.schema.schemalock.Unlock()
+		}
+	}()
+	for index, current := range t.Columns {
+		if current.Name != name {
+			continue
+		}
+		if current.IsTemp || isRuntimeComputedColumn(current) {
+			panic("computed or temporary column declarations require their native lifecycle")
+		}
+		// A replay of an already applied declaration is idempotent, even when
+		// its cached proof describes the predecessor. It changes no authority.
+		if current.Typ == typ && current.AllowNull == nullable && current.Collation == collation && slices.Equal(current.Typdimensions, dimensions) {
+			return true
+		}
+		if current.Typ != previousType || current.AllowNull != previousNullable || current.Collation != previousCollation || !slices.Equal(current.Typdimensions, previousDimensions) {
+			panic("column declaration changed before ALTER publication")
+		}
+		if nullable {
+			for _, key := range t.Unique {
+				if key.Id == "PRIMARY" && slices.Contains(key.Cols, name) {
+					panic("primary key column cannot allow NULL")
+				}
+			}
+		}
+		// Cache lifecycle authority belongs only to computed/TEMP declarations,
+		// excluded above. Never clone a live pin or move its release obligation.
+		if atomic.LoadInt64(&current.cacheUsers) != 0 {
+			panic("column declaration has an active cache lifecycle owner")
+		}
+		replacement := cloneStoredColumnDeclaration(current)
+		replacement.Typ = typ
+		replacement.Typdimensions = dimensions
+		replacement.AllowNull = nullable
+		replacement.Collation = collation
+		replacement.sanitizer = nil
+		replacement.UpdateSanitizer()
+		columns := append([]*column(nil), t.Columns...)
+		columns[index] = replacement
+		t.Columns = columns
+		t.publishShowColumnsSnapshot(true)
+		metadataLocked = false // finishSchemaMutationLocked releases schema ownership.
+		t.finishSchemaMutationLocked(t.schemaSaveMode())
+		return true
+	}
+	panic("column " + t.schema.Name + "." + t.Name + "." + name + " does not exist")
+}
+
 func (t *table) dropColumnDDLLocked(name string) bool {
 	t.schema.schemalock.Lock()
 	var removedCol *column
@@ -2953,7 +3170,7 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 			if c.IsTemp {
 				t.invalidateShowColumnsSnapshot()
 			} else {
-				t.publishShowColumnsSnapshot(false)
+				t.publishShowColumnsSnapshot(true)
 			}
 			t.finishSchemaMutationLocked(t.schemaSaveMode())
 			// Fire lifecycle hooks after unlock so dependents (e.g. prejoin caches)

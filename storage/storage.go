@@ -3219,41 +3219,20 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
-			db := t.schema
-			requireTableMaintenance(db.Name, t.Name, maintenanceAlter)
-			for i, c := range t.Columns {
-				if c.Name == scm.String(a[1]) {
-					switch scm.String(a[2]) {
-					case "drop":
-						ok := t.DropColumn(scm.String(a[1]))
-						db.save()
-						return scm.NewBool(ok)
-					case "auto_increment":
-						ai := scm.ToInt(a[3])
-						if ai > 1 {
-							atomic.StoreUint64(&t.Auto_increment, uint64(ai))
-							db.save()
-							return scm.NewBool(true)
-						}
-						t.Columns[i].AutoIncrement = scm.ToBool(a[3])
-						t.publishShowColumnsSnapshot(false)
-						db.save()
-						return scm.NewBool(true)
-					default:
-						ok := t.Columns[i].Alter(scm.String(a[2]), a[3])
-						t.publishShowColumnsSnapshot(false)
-						db.save()
-						return scm.NewBool(scm.ToBool(ok))
-					}
+			if scm.String(a[2]) == "declaration" {
+				if !a[3].IsSlice() || len(a[3].Slice()) != 2 {
+					panic("declaration ALTER requires new and expected declarations")
 				}
+				parts := a[3].Slice()
+				return scm.NewBool(t.AlterColumnDeclaration(scm.String(a[1]), parts[0], parts[1]))
 			}
-			panic("column " + t.schema.Name + "." + t.Name + "." + scm.String(a[1]) + " does not exist")
+			return t.AlterColumn(scm.String(a[1]), scm.String(a[2]), a[3])
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "alters a column",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "alters a column", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
 				{Kind: "string", Label: "column", Description: "name of the column"},
-				{Kind: "string", Label: "operation", Description: "one of drop|type|collation|auto_increment|comment"},
+				{Kind: "string", Label: "operation", Description: "one of drop|type|dimensions|null|default|default_expression|collation|auto_increment|comment|temp|declaration"},
 				{Kind: "any", Label: "parameter", Description: "name of the column to drop or value of the parameter"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
@@ -4008,6 +3987,9 @@ func Init(en scm.Env) {
 				} else {
 					t = TableFromScmer(a[0])
 				}
+				if (len(a) == 3 || len(a) == 4) && a[1].IsString() && a[1].String() == "column" {
+					return t.ShowColumn(a[2].String(), len(a) == 4 && a[3].Bool())
+				}
 				if len(a) == 1 {
 					return t.ShowColumns()
 				}
@@ -4227,12 +4209,12 @@ func Init(en scm.Env) {
 			}
 			panic("invalid call of show")
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show table_handle) lists the memoized column defs\n(show table_handle true) returns table metadata\n(show table_handle \"statistics\") returns index statistics\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns INFORMATION_SCHEMA index statistics\n(show schema tbl \"indexes\") returns MySQL SHOW INDEX rows",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show table_handle) lists the memoized column defs\n(show table_handle true) returns table metadata\n(show table_handle \"column\" name [ignore_case]) borrows one immutable column description or returns nil\n(show table_handle \"statistics\") returns index statistics\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns INFORMATION_SCHEMA index statistics\n(show schema tbl \"indexes\") returns MySQL SHOW INDEX rows",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string|table|recset", Label: "schema_or_table", Description: "(optional) database name or resolved table/recset handle", Optional: true},
-				{Kind: "string|bool", Label: "table_or_property", Description: "(optional) table name, true for full info, or \"statistics\" for a handle", Optional: true},
-				{Kind: "int|bool|string", Label: "property", Description: "(optional) shard index (int), true for full table info, or \"statistics\"", Optional: true},
-				{Kind: "bool", Label: "full", Description: "(optional) true to include columns and indexes in shard detail", Optional: true},
+				{Kind: "string|bool", Label: "table_or_property", Description: "(optional) table name, true for full info, or \"statistics\"/\"column\" for a handle", Optional: true},
+				{Kind: "int|bool|string", Label: "property", Description: "(optional) shard index, column name, or table metadata selector", Optional: true},
+				{Kind: "bool", Label: "full_or_ignore_case", Description: "(optional) full shard details, or case-insensitive column-name lookup for a column selector", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any", Transfer: false},
 		},
