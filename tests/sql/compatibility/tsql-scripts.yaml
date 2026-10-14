@@ -123,4 +123,19 @@ test_cases:
       (list (list "text" "SELECT 1 /* first\nlast */" "repeat" 1)
         (list "text" "SELECT 2" "repeat" 1)))
   expect: {result: true}
+- name: Native source procedure is callable from the Scheme frontend
+  scm: |
+    (begin
+      (registerprocedurelanguage "add-constant" (lambda (source context)
+        (lambda (value) (+ value (simplify source)))))
+      (dropprocedure "memcp-tests" "script_source_example" true)
+      (createprocedure "memcp-tests" "script_source_example" "add-constant" "7" '())
+      (define original (procedure "memcp-tests" "script_source_example"))
+      (define first (original 5))
+      (createprocedure "memcp-tests" "script_source_example" "add-constant" "9" '() true)
+      (define second ((procedure "memcp-tests" "script_source_example") 5))
+      (define retained (original 5))
+      (dropprocedure "memcp-tests" "script_source_example")
+      (and (equal? first 12) (equal? second 14) (equal? retained 12)))
+  expect: {result: true}
 cleanup: []
