@@ -164,7 +164,18 @@ func DropProcedure(schema, name string, ifexists bool) bool {
 	return true
 }
 
-func Procedure(schema, name string) scm.Scmer {
+// procedureDeclaration returns invocation-owned data from one immutable entry.
+// It never performs another catalog lookup or retains request bindings.
+func procedureDeclaration(definition *ProcedureDescription) scm.Scmer {
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewString("name"), scm.NewString(definition.Name),
+		scm.NewString("language"), scm.NewString(definition.Language),
+		scm.NewString("source"), scm.NewString(definition.Source),
+		scm.NewString("parameters"), scm.CloneOptimizerExpression(definition.Parameters),
+	})
+}
+
+func Procedure(schema, name string, withDeclaration bool) scm.Scmer {
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("database does not exist: " + schema)
@@ -174,7 +185,14 @@ func Procedure(schema, name string) scm.Scmer {
 	if definition == nil {
 		panic("procedure does not exist: " + name)
 	}
-	return definition.callable(schema)
+	callable := definition.callable(schema)
+	if withDeclaration {
+		// Binding and execution must consume the same immutable definition even
+		// if concurrent DDL replaces or drops its name after this lookup.
+		return scm.NewSlice([]scm.Scmer{scm.NewString("callable"), callable,
+			scm.NewString("declaration"), procedureDeclaration(definition)})
+	}
+	return callable
 }
 
 func ShowProcedures(schema, name string) scm.Scmer {
@@ -191,12 +209,7 @@ func ShowProcedures(schema, name string) scm.Scmer {
 	}
 	rows := make([]scm.Scmer, 0, len(definitions))
 	for _, definition := range definitions {
-		rows = append(rows, scm.NewSlice([]scm.Scmer{
-			scm.NewString("name"), scm.NewString(definition.Name),
-			scm.NewString("language"), scm.NewString(definition.Language),
-			scm.NewString("source"), scm.NewString(definition.Source),
-			scm.NewString("parameters"), scm.CloneOptimizerExpression(definition.Parameters),
-		}))
+		rows = append(rows, procedureDeclaration(definition))
 	}
 	sort.Slice(rows, func(i, j int) bool { return scm.String(rows[i].Slice()[1]) < scm.String(rows[j].Slice()[1]) })
 	return scm.NewSlice(rows)
@@ -218,9 +231,9 @@ func initProcedureBuiltins(en *scm.Env) {
 	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "drops a stored procedure definition", HasSideEffects: true,
 		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "name"}, {Kind: "bool", Label: "if_exists", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
 	scm.Declare(en, &scm.Declaration{Name: "procedure", Fn: func(a ...scm.Scmer) scm.Scmer {
-		return Procedure(a[0].String(), a[1].String())
+		return Procedure(a[0].String(), a[1].String(), len(a) > 2 && a[2].Bool())
 	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "resolves and regenerates a stored source procedure", HasSideEffects: true,
-		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "name"}}, Return: &scm.TypeDescriptor{Kind: "func"}}})
+		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "name"}, {Kind: "bool", Label: "with_declaration", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
 	scm.Declare(en, &scm.Declaration{Name: "showprocedures", Fn: func(a ...scm.Scmer) scm.Scmer {
 		name := ""
 		if len(a) > 1 {

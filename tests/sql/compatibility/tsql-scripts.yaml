@@ -472,4 +472,44 @@ test_cases:
   expect: {error: true}
 - name: Fixture cleanup removes database context procedure
   sql: DROP PROCEDURE dbo.script_context
+- name: Zero variable initializers are present syntax data
+  sql: DECLARE @zero INT=0; SELECT @zero AS value
+  expect: {rows: 1, data: [{value: 0}]}
+- name: Zero procedure defaults are present syntax data
+  sql: |
+    CREATE PROCEDURE dbo.script_zero_default @value INT=0 AS SELECT @value AS value;
+    GO
+    EXEC dbo.script_zero_default;
+    DROP PROCEDURE dbo.script_zero_default;
+  expect: {rows: 1, data: [{value: 0}]}
+- name: Procedure replacement during argument binding retains one source snapshot
+  scm: |
+    (begin
+      (define base (newsession))
+      (base "username" "root")
+      (base "schema" "memcp-tests")
+      (base "__tsql_parameter_declarations" (list (list "argument" (list "INT"))))
+      (base "__tsql_parameter:argument" 7)
+      (define state (newsession))
+      (define results (newsession))
+      (dropprocedure "memcp-tests" "script_snapshot_binding" true)
+      (createprocedure "memcp-tests" "script_snapshot_binding" "tsql-procedure"
+        "SELECT @value+1 AS value" (list (list "value" (list "INT") nil false)) false)
+      (define caller (lambda args (begin
+        (match args
+          '("__tsql_parameter:argument") (if (state "replaced") true (begin
+            (state "replaced" true)
+            (createprocedure "memcp-tests" "script_snapshot_binding" "tsql-procedure"
+              "SELECT @value+100 AS value" (list (list "value" (list "INT") nil false)) true)))
+          _ true)
+        (apply base args))))
+      (with_query_request base nil 0 "snapshot invocation" (lambda (statement)
+        (tsql_invoke_procedure "memcp-tests" "script_snapshot_binding" (list (list "" "@argument"))
+          statement caller (lambda (row) (results "first" (row "value"))) (lambda args true))))
+      (with_query_request base nil 0 "replacement invocation" (lambda (statement)
+        (tsql_invoke_procedure "memcp-tests" "script_snapshot_binding" (list (list "" "7"))
+          statement base (lambda (row) (results "second" (row "value"))) (lambda args true))))
+      (dropprocedure "memcp-tests" "script_snapshot_binding")
+      (and (state "replaced") (equal? (results "first") 8) (equal? (results "second") 107))))
+  expect: {result: true}
 cleanup: []

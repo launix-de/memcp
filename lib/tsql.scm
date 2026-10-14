@@ -198,7 +198,7 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 		'("declare" declarations) (begin
 			(reduce declarations (lambda (_result declaration) (begin
 				(define name (car declaration))
-				(define value (if (nth declaration 2)
+				(define value (if (not (nil? (nth declaration 2)))
 					(statement "variable initializer" false (lambda (tx)
 						(tsql_scalar_value schema (nth declaration 2) session tx "assignment" (cadr declaration)))) nil))
 				(session (concat "__tsql_parameter:" name) value))) nil)
@@ -275,9 +275,11 @@ statement owner, account, transaction session, arguments and output callbacks. *
 			(tsql_execute_metadata schema name values (sql_policy (caller "username")) resultrow resultfields))))
 		(begin
 			((sql_policy (caller "username")) schema name false)
-			(define definition (statement "procedure lookup" false (lambda (_tx)
-				(find (showprocedures schema (toLower name)) (lambda (_definition) true) nil))))
-			(if definition true (error "procedure does not exist: " name))
+			/* One immutable native snapshot owns both the contract and callable.
+			Replacing the catalog name during argument binding cannot mix versions. */
+			(define snapshot (statement "procedure lookup" false (lambda (_tx)
+				(procedure schema (toLower name) true))))
+			(define definition (snapshot "declaration"))
 			(if (equal? (definition "language") "tsql-procedure") true
 				(error "procedure language cannot execute in this frontend"))
 			(define declarations (definition "parameters"))
@@ -297,10 +299,10 @@ statement owner, account, transaction session, arguments and output callbacks. *
 				/* Compile the argument's own expression triple against the declared
 				parameter contract before evaluation; runtime carriers never set SQL types. */
 				(define expression (if supplied (cadr supplied)
-					(nth declaration 2) (nth declaration 2)
+					(not (nil? (nth declaration 2))) (nth declaration 2)
 					(error "missing procedure argument: @" name)))
 				(list name (tsql_scalar_value (caller "schema") expression caller tx "assignment" (cadr declaration)))))))))
-			((procedure schema (definition "name")) statement caller values resultrow resultfields)))))
+			((snapshot "callable") statement caller values resultrow resultfields)))))
 
 (define tsql_http_query (lambda (req res schema) (begin
 	(define stored (mysql_auth (req "username")))
