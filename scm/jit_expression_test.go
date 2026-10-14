@@ -1885,3 +1885,48 @@ func TestJITDynamicProducerCardinalityRemainsRuntimeOwned(t *testing.T) {
 		}
 	}
 }
+
+func TestJITVariadicClosuresReceiveOwnedArgumentLists(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (parent contracts owner_schema) (begin
+		(define local (newsession))
+		(if owner_schema (local "schema" owner_schema) true)
+		(local "contracts" contracts)
+		(local "scope" (newsession))
+		(local "connection" parent)
+		(lambda args (match args
+			'() (merge_unique (list (filter (local) (lambda (key)
+				(not (has? '("scope" "connection") key)))) (filter (parent) (lambda (key)
+				(not (or (strlike key "local:%") (equal? key "contracts")
+					(has? '("scope" "connection") key) (and owner_schema (equal? key "schema"))))))))
+			'(key) (if (or (strlike key "local:%") (equal? key "contracts")
+				(has? '("scope" "connection") key) (and owner_schema (equal? key "schema"))) (local key) (parent key))
+			'(key value) (if (or (strlike key "local:%") (equal? key "contracts")
+				(has? '("scope" "connection") key) (and owner_schema (equal? key "schema"))) (local key value) (parent key value))
+			_ (apply parent args)))))`)
+	parent := NewSession()
+	Apply(parent, NewString("schema"), NewString("example"))
+	proxy := Apply(compiled, parent, NewSlice(nil), NewNil())
+	if !proxy.IsProc() || proxy.Proc().JITCode == 0 {
+		t.Fatal("variadic regression must exercise a native compiled closure")
+	}
+	if got := Apply(proxy, NewString("schema")); !Equal(got, NewString("example")) {
+		t.Fatalf("variadic closure read returned %s", String(got))
+	}
+	Apply(proxy, NewString("local:value"), NewInt(7))
+	if got := Apply(proxy, NewString("local:value")); !Equal(got, NewInt(7)) {
+		t.Fatalf("variadic closure write returned %s", String(got))
+	}
+}
+
+func TestJITVariadicArgumentDataDoesNotBorrowCallerFrames(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda args (reverse (reverse args)))`)
+	args := []Scmer{NewInt(4), NewString("retained")}
+	retained := Apply(compiled, args...)
+	args[0] = NewInt(99)
+	if want := NewSlice([]Scmer{NewInt(4), NewString("retained")}); !Equal(retained, want) {
+		t.Fatalf("variadic result borrowed a mutable caller frame: %s", String(retained))
+	}
+	if got := Apply(compiled); !Equal(got, NewSlice(nil)) {
+		t.Fatalf("empty variadic binding = %s", String(got))
+	}
+}
