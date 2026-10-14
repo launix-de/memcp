@@ -72,6 +72,30 @@ time limits. Expected-error cases prove rejection only; they do not prove that
 the corresponding successful statement is supported. Full regression, native
 JIT and performance suites run in CI; local work uses focused reproductions.
 
+## Procedural-control coverage and follow-ups
+
+`tests/sql/compatibility/tsql-scripts.yaml` covers batch separators, lexical
+variables, IF/BEGIN/END, persisted procedure definitions and parameter contracts,
+WHILE/BREAK/CONTINUE, RETURN and captured procedure status, dynamic EXEC,
+parameterized `sp_executesql`, TRY/CATCH, THROW and the current error context.
+Control expressions compile through the ordinary expression triples; SQL leaves
+use the shared planner and native statement/transaction lifecycle. Dynamic input
+bindings keep their declared SQL contract and their own lexical variable scope.
+
+The control follow-up also protects shared scalar aggregation across rollback:
+multiple aggregates reduce into a state bounded by the SELECT descriptors,
+using the existing native parallel scan. Transaction-local states must not fill
+shared computed groups, and their local recipe names must match their readers.
+The existing single-aggregate reduction remains unboxed.
+
+Remaining procedural work includes output parameter bindings, broader error
+metadata and RAISERROR, cursor declarations/execution, and connection/database
+context across nested invocations and batch separators. The current error
+number/state contract is supplied for explicit THROW and division by zero;
+other native failures retain their message without inventing an error code.
+Prepared and persisted plans must retain schema guards across later DDL.
+These are compatibility gaps, not a reason to add another execution engine.
+
 ## Installation readiness
 
 Passing these language suites does not establish that a complete installer
