@@ -1493,7 +1493,7 @@ class SuiteIsolationContractTest(unittest.TestCase):
                     }, "memcp-tests")
                 self.assertEqual(bool(result), status == 200)
                 self.assertEqual(post.call_count, 2)
-                self.assertEqual(post.call_args.kwargs["data"], '(settings "ScanDebugging" false)')
+                self.assertEqual(post.call_args.kwargs["data"], b'(settings "ScanDebugging" false)')
 
     def test_case_cleanup_runs_after_partial_setup(self) -> None:
         runner = SQLTestRunner("http://localhost:1")
@@ -1665,10 +1665,10 @@ class ScanDebuggingClusterContractTest(unittest.TestCase):
             def request(_url, *, data, **_kwargs):
                 nonlocal flag
                 requests_seen.append(data)
-                if data == '(settings "ScanDebugging")':
+                if data == b'(settings "ScanDebugging")':
                     value = flag
                 else:
-                    flag = data.endswith('true)')
+                    flag = data.endswith(b'true)')
                     value = True
                 return SimpleNamespace(text=str(value).lower(), raise_for_status=lambda: None)
 
@@ -1688,8 +1688,8 @@ class ScanDebuggingClusterContractTest(unittest.TestCase):
             self.assertCountEqual(active, [str(p) for p in specs])
             self.assertFalse(flag)
             self.assertEqual(requests_seen, [
-                '(settings "ScanDebugging")', '(settings "ScanDebugging" true)',
-                '(settings "ScanDebugging")', '(settings "ScanDebugging" false)',
+                b'(settings "ScanDebugging")', b'(settings "ScanDebugging" true)',
+                b'(settings "ScanDebugging")', b'(settings "ScanDebugging" false)',
             ])
 
     def test_exception_restores_the_original_setting_and_owner(self):
@@ -1701,7 +1701,7 @@ class ScanDebuggingClusterContractTest(unittest.TestCase):
                 with scan_debugging_cluster("http://localhost:1"):
                     raise RuntimeError("worker failed")
             self.assertEqual(os.environ["MEMCP_TEST_SCAN_DEBUGGING_MANAGED"], "parent")
-            self.assertEqual(request.call_args.kwargs["data"], '(settings "ScanDebugging" false)')
+            self.assertEqual(request.call_args.kwargs["data"], b'(settings "ScanDebugging" false)')
 
     def test_preexisting_enabled_diagnostics_are_not_disabled(self):
         with mock.patch("run_sql_tests.requests.post", return_value=
@@ -1709,7 +1709,7 @@ class ScanDebuggingClusterContractTest(unittest.TestCase):
             with scan_debugging_cluster("http://localhost:1"):
                 pass
         self.assertEqual([call.kwargs["data"] for call in request.call_args_list],
-                         ['(settings "ScanDebugging")'] * 2)
+                         [b'(settings "ScanDebugging")'] * 2)
 
     def test_cluster_metadata_rejects_string_booleans(self):
         with tempfile.TemporaryDirectory() as tmp:
