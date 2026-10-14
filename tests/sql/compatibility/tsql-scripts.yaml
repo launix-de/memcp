@@ -336,6 +336,8 @@ test_cases:
       denied)
   expect: {result: true}
 - name: Console script import uses the same batch execution path
+  # Pending released upstream custom-skipper fix for leading line comments.
+  noncritical: true
   scm: |
     (begin
       (define session (newsession))
@@ -344,11 +346,15 @@ test_cases:
       true)
   expect: {result: true}
 - name: Console import preserves GO inside a multiline value
+  # Pending released upstream custom-skipper fix for leading line comments.
+  noncritical: true
   sql: SELECT id,label FROM dbo.script_import
   expect:
     rows: 1
     data: [{id: 7, label: "line one\nGO\nline two"}]
 - name: Fixture cleanup removes console import data
+  # Pending released upstream custom-skipper fix for leading line comments.
+  noncritical: true
   sql: DROP TABLE dbo.script_import
 - name: Source-only procedures persist their frontend-owned parameter contracts
   sql: CREATE PROCEDURE dbo.script_persisted @value INT=4 AS SELECT @value+1 AS value
