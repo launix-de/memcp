@@ -524,7 +524,9 @@ The two options which change uniqueness/admission remain explicit contracts. */
 (define tsql_check_index_options (lambda (options unique) (match options
 	(cons _ _) (begin
 		(if (and unique (options "IGNORE_DUP_KEY")) (error "IGNORE_DUP_KEY=ON requires native duplicate suppression") true)
-		(if (and unique (options "DROP_EXISTING")) (error "DROP_EXISTING=ON requires native atomic key replacement") true)
+		/* Even an ordinary acceleration declaration may replace a UNIQUE index.
+		Reject replacement until the native key operation owns that transition. */
+		(if (options "DROP_EXISTING") (error "DROP_EXISTING=ON requires native atomic key replacement") true)
 		true)
 	_ true)))
 (define tsql_key_layout (parser '((? (define options tsql_index_options)) (? tsql_index_location))

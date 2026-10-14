@@ -236,6 +236,21 @@ test_cases:
   expect:
     error: true
     contains: DROP_EXISTING
+- name: Ordinary declaration cannot silently replace a native unique key
+  sql: CREATE INDEX uq_hint ON tsql_hint_unique(value) WITH (DROP_EXISTING=ON)
+  expect:
+    error: true
+    contains: DROP_EXISTING
+- name: Rejected ordinary replacement preserves native unique enforcement
+  sql: INSERT INTO tsql_hint_unique VALUES(6,9)
+  expect:
+    error: true
+    contains: Duplicate entry
+- name: Ordinary index replacement also requires native atomic support
+  sql: CREATE INDEX replacement ON tsql_hint_rows(value) WITH (DROP_EXISTING=ON)
+  expect:
+    error: true
+    contains: DROP_EXISTING
 - name: Index disable cannot silently bypass a constraint
   sql: ALTER INDEX uq_hint ON tsql_hint_unique DISABLE
   expect:
