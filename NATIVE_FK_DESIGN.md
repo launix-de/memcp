@@ -58,11 +58,75 @@ an expected-error test because ALTER syntax is rejected does not prove FK
 validation. New specifications therefore include successful installation and
 post-install enforcement; rejection cases require an FK-specific error.
 
-## Candidate A: native transaction-owned logical-key claims
+## Preferred direction: partitioned, CAS-published logical-key claims
 
-Extend the existing logical-key guard directory with optional, transient
-shared-reference and exclusive-key-change authority. This is a proposal, not
-an existing API. Tables without relevant FKs allocate no claim directory;
+The earlier 64-stripe lifetime-claim proposal is not approved. A stripe may
+route a directory lookup, but must not grant exclusive transaction authority
+over unrelated keys that happen to hash into it. Physical shards alone cannot
+own this authority: a referenced key can be reached from several child shards,
+and rebuild, repartition and rollback can change its physical location.
+
+Partition an optional directory by logical key hash, with a separate atomic
+claim state for each relevant key/comparison domain. This is a runtime adjunct
+to the existing native candidate key, not another persisted constraint or row
+index. Directory partitioning limits allocation/publication contention; normal
+claim acquisition for an existing entry updates only that entry. No table,
+shard or directory mutex is held across the transaction. No claim operation is
+added to SELECT, planner metadata, or unrelated tables.
+
+Each immutable published state describes shared reference owners and an
+optional exclusive key-change owner, identified by transaction ID. Batch setup
+deduplicates requested keys; CAS admits a compatible state, or returns a
+retryable serialization conflict. A child batch sharing the same parent key
+can coexist with other child batches. Only a conflicting parent-key mutation
+needs incompatible authority. Authority is not a membership proof: the
+existing transaction-visible parent probe still decides whether the row exists.
+
+The ownership state and its transaction journal must agree even on admission
+failure, trigger failure and cancellation. A journal entry records the acquired
+entry identity, role and savepoint/reentrancy delta. Concurrent tasks belonging
+to one transaction use its existing transaction-state ownership; a reusable
+TxContext pointer is not an owner ID. Release follows the existing durable
+outcome or completed visibility undo, never precedes it.
+
+Directory retirement needs an explicit protocol too. An ownerless entry is
+first CAS-marked retired; a concurrent acquirer either wins admission before
+retirement or observes the retired state and retries lookup. Only then may
+directory publication unlink that exact entry. Retained native pointers keep
+the immutable retired object alive. Never reset/reuse a live entry in place,
+nor retain every historically referenced key until the table is dropped.
+
+### Comparison and performance gates before implementation
+
+- Reuse the real native key comparison contract. Hash collisions must resolve
+  in the directory and must not establish equality. The existing coercing
+  equality admits overlapping representation domains; merely applying
+  `HashKey` to a runtime value is unsound. An exact canonical key is permissible
+  only where equality/hash compatibility is proved. Otherwise protection must
+  overlap conservatively, with the possible false-conflict cost documented.
+  SQL datatype and collation decisions remain in frontend compilation.
+- Do not replace the old 64 mutexes with 64 exclusive CAS owners: that keeps
+  the same unrelated-key contention for the complete transaction lifetime.
+- A naive immutable owner vector copies all concurrent owners on each CAS.
+  Benchmark hot-parent workloads before selecting that representation; a CAS
+  is not automatically cheap or allocation-free. Any alternative count/owner
+  representation must still prove reentrancy, cancellation and savepoint undo.
+- Admission is a native write-batch operation. Do not add per-row shared
+  counter writes, per-reference goroutines, frontend scans, or an unbounded
+  Scheme collection of relational keys.
+- Test entry retirement versus admission, hash collisions, shared hot-parent
+  batches, unrelated-key progress, same-key parent mutation and transaction-ID
+  reuse in addition to the transaction/rebuild schedules below.
+
+This is a design refinement for architecture review, not authorization to
+implement a new directory, comparison contract or transaction journal.
+
+## Transaction lifetime requirements shared by all candidates
+
+Retain the existing native key definitions and generated enforcement programs;
+the missing support is optional, transient shared-reference and exclusive
+key-change authority. This is a proposal, not an existing directory or API.
+Tables without relevant FKs allocate no claim directory;
 ordinary SELECT, planner metadata and read loops perform no claim operations.
 
 A child acquires shared parent-key authority **before** the native existence
@@ -75,7 +139,7 @@ from hashes or claim ownership. User-trigger changes require final native
 admission for actual NEW values before publication.
 
 Claims use logical table/key-column identity and tuple values, not physical
-record or shard IDs. Native batch preparation deduplicates the required stripe
+record or shard IDs. Native batch preparation deduplicates the required claim
 set; broad/coercing domains conservatively overlap. A conflicting foreign owner
 causes a retryable serialization failure; it does not wait with shard locks,
 UNIQUE guards or a parked transaction holding a mutex. Shared references can
@@ -91,13 +155,11 @@ abort, savepoint rollback, full rollback and session reset clean up exactly
 once. Nil-transaction native calls need equivalent invocation-owned cleanup.
 CASCADE/SET NULL use the existing transaction and native mutation callbacks.
 
-An atomic stripe state needs a reviewed ownership/count representation and
+An atomic claim state needs a reviewed ownership/count representation and
 bounded acquisition retry policy. Merely replacing a mutex with an atomic
 counter does not provide shared owners, reentrancy, savepoints or safe undo.
-False conflicts from 64 stripes and conservative equality can be significant
-for large FK batches: measure them before selecting this representation. An
-exact-key claim directory is a larger separately reviewed alternative, not an
-implicit part of this proposal.
+Conservative equality can still cause false conflicts; measure the supported
+comparison domains before claiming independent-key parallelism.
 
 ### Other candidates and limits
 
