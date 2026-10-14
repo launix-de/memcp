@@ -1930,3 +1930,36 @@ func TestJITVariadicArgumentDataDoesNotBorrowCallerFrames(t *testing.T) {
 		t.Fatalf("empty variadic binding = %s", String(got))
 	}
 }
+
+func TestJITIdentityPredicateRetainsCapturedDatumAfterASTClone(t *testing.T) {
+	expected := NewSlice([]Scmer{NewString("field"), NewInt(7)})
+	predicate := identityPredicate(expected)
+	cloned := CloneOptimizerExpression(NewSlice([]Scmer{predicate, NewSymbol("actual")}))
+	compiled := compileJITExpressionTestProc(t, `(lambda (predicate actual) (predicate actual))`)
+	if !Apply(compiled, cloned.Slice()[0], expected).Bool() {
+		t.Fatal("native JIT predicate lost the captured datum")
+	}
+	if Apply(compiled, cloned.Slice()[0], CloneOptimizerExpression(expected)).Bool() {
+		t.Fatal("native JIT predicate accepted a replacement datum")
+	}
+}
+
+func TestJITIdentityPredicateAccountsForRetainedPayload(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires native JIT")
+	}
+	expected := NewSlice([]Scmer{NewString("retained"), NewInt(7)})
+	predicate := identityPredicate(expected)
+	clonedBody := CloneOptimizerExpression(predicate.Proc().Body)
+	predicate.Proc().Body = clonedBody
+	compiled := CompileJIT(predicate, true)
+	if !compiled.IsProc() || compiled.Proc().Compiled == nil || compiled.Proc().Compiled.CodeLen == 0 {
+		t.Fatal("capture predicate did not produce native machine code")
+	}
+	if !Apply(compiled, expected).Bool() || Apply(compiled, CloneOptimizerExpression(expected)).Bool() {
+		t.Fatal("compiled capture lost original identity")
+	}
+	if ComputeSize(compiled) < ComputeSize(expected) {
+		t.Fatal("compiled capture did not include retained payload")
+	}
+}

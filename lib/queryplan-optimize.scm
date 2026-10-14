@@ -5574,7 +5574,7 @@ a different preparation/materialization contract and must keep its own cost. */
 				(define bound_keys (filter keys (lambda (col)
 					(reduce (split_and_terms probe_condition) (lambda (found term)
 						(or found (unique_lookup_join_term? default_alias src col term))) false))))
-				(define point (source_is_unique_lookup_from_sources? sources default_alias bound src stages condition))
+				(define point (source_is_unique_lookup_from_sources? sources default_alias bound src stages condition nil false))
 				(define per_invocation (if point 1
 					(/ base_rows (reduce bound_keys (lambda (distinct col)
 						/* Correlated key columns do not justify multiplying NDVs.

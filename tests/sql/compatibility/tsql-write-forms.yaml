@@ -52,6 +52,48 @@ setup:
 - sql: DROP TABLE IF EXISTS write_merge
 - sql: CREATE TABLE write_merge(id INT PRIMARY KEY,value INT)
 - sql: INSERT INTO write_merge VALUES(1,10),(2,20)
+- sql: DROP TABLE IF EXISTS write_guard_source
+- sql: DROP TABLE IF EXISTS write_guard_update
+- sql: DROP TABLE IF EXISTS write_guard_delete
+- sql: CREATE TABLE write_guard_source(id INT PRIMARY KEY,code INT,CONSTRAINT unique_write_source
+    UNIQUE(code))
+- sql: CREATE TABLE write_guard_update(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE write_guard_delete(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO write_guard_source VALUES(1,1),(2,2)
+- sql: INSERT INTO write_guard_update VALUES(1,10)
+- sql: INSERT INTO write_guard_delete VALUES(1,20)
+- sql: DROP TABLE IF EXISTS write_guard_common_source
+- sql: DROP TABLE IF EXISTS write_guard_common
+- sql: CREATE TABLE write_guard_common_source(id INT PRIMARY KEY,code INT,CONSTRAINT
+    unique_write_common UNIQUE(code))
+- sql: CREATE TABLE write_guard_common(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO write_guard_common_source VALUES(1,1),(2,2)
+- sql: INSERT INTO write_guard_common VALUES(1,10)
+- sql: DROP TABLE IF EXISTS write_guard_null_source
+- sql: DROP TABLE IF EXISTS write_guard_null_target
+- sql: CREATE TABLE write_guard_null_source(id INT PRIMARY KEY,code INT,CONSTRAINT
+    unique_write_null UNIQUE(code))
+- sql: CREATE TABLE write_guard_null_target(id INT PRIMARY KEY,code INT,value INT)
+- sql: INSERT INTO write_guard_null_source VALUES(1,NULL)
+- sql: INSERT INTO write_guard_null_target VALUES(1,NULL,10)
+- sql: DROP TABLE IF EXISTS write_guard_text_source
+- sql: DROP TABLE IF EXISTS write_guard_text_target
+- sql: DROP TABLE IF EXISTS write_guard_float_source
+- sql: DROP TABLE IF EXISTS write_guard_float_target
+- sql: CREATE TABLE write_guard_text_source(code VARCHAR(20) PRIMARY KEY,value INT)
+- sql: CREATE TABLE write_guard_text_target(id INT PRIMARY KEY,code VARCHAR(20),value
+    INT)
+- sql: INSERT INTO write_guard_text_source VALUES('row',1),('ROW',2)
+- sql: INSERT INTO write_guard_text_target VALUES(1,'row',10)
+- sql: CREATE TABLE write_guard_float_source(id BIGINT PRIMARY KEY,value INT)
+- sql: CREATE TABLE write_guard_float_target(id INT PRIMARY KEY,probe FLOAT,value
+    INT)
+- sql: INSERT INTO write_guard_float_source VALUES(9007199254740992,1),(9007199254740993,2)
+- sql: INSERT INTO write_guard_float_target VALUES(1,9007199254740992.0,10)
+- sql: DROP TABLE IF EXISTS write_guard_empty_source
+- sql: DROP TABLE IF EXISTS write_guard_empty_target
+- sql: CREATE TABLE write_guard_empty_source(id INT,value INT)
+- sql: CREATE TABLE write_guard_empty_target(id INT,value INT)
 test_cases:
 - name: UPDATE alias resolves its actual native target
   sql: UPDATE t SET value=s.value FROM write_target AS t JOIN write_source AS s ON
@@ -445,7 +487,7 @@ test_cases:
     \ (quote get_column) \"t\" false \"code\" false))\n  (source_is_unique_lookup_from_sources?\
     \ (list t s) \"t\" (list t) s '()\n    (list (quote or) (list (quote equal??)\
     \ scol tcol)\n      (list (quote and) (list (quote nil?) scol) (list (quote nil?)\
-    \ tcol)))))"
+    \ tcol))) nil false))"
   expect:
     result: false
 - name: Null safe lookup honors equal native NULL keys
@@ -455,7 +497,7 @@ test_cases:
     \ (quote get_column) \"t\" false \"code\" false))\n  (source_is_unique_lookup_from_sources?\
     \ (list t s) \"t\" (list t) s '()\n    (list (quote or) (list (quote equal??)\
     \ scol tcol)\n      (list (quote and) (list (quote nil?) scol) (list (quote nil?)\
-    \ tcol)))))"
+    \ tcol))) nil false))"
   expect:
     result: true
 - name: Nullable distinct NULL source cannot authorize repeated mutation
@@ -571,7 +613,208 @@ test_cases:
   expect:
     error: true
     contains: nonnullable column has no usable DEFAULT
+- name: A cached UPDATE records its native source unique contract
+  sql: UPDATE t SET value=value+1 FROM write_guard_update t JOIN write_guard_source
+    s ON t.id=s.code
+  expect:
+    affected_rows: 1
+- name: A cached DELETE records its native source unique contract
+  sql: DELETE t FROM write_guard_delete t JOIN write_guard_source s ON t.id=s.code
+  expect:
+    affected_rows: 1
+- name: Restore the delete target before its cached invocation
+  sql: INSERT INTO write_guard_delete VALUES(1,20)
+  expect:
+    affected_rows: 1
+- name: Dropping a source unique declaration invalidates its cached write proof
+  sql: ALTER TABLE write_guard_source DROP CONSTRAINT unique_write_source
+  expect:
+    affected_rows: 0
+- name: Dropped source uniqueness permits distinct rows with the same join key
+  sql: INSERT INTO write_guard_source VALUES(3,1)
+  expect:
+    affected_rows: 1
+- name: Cached UPDATE cannot retain a dropped single match proof
+  sql: UPDATE t SET value=value+1 FROM write_guard_update t JOIN write_guard_source
+    s ON t.id=s.code
+  expect:
+    error: true
+    contains: one proven source match
+- name: Rejected cached UPDATE leaves its target unchanged
+  sql: SELECT value FROM write_guard_update
+  expect:
+    rows: 1
+    data:
+    - value: 11
+- name: Cached DELETE cannot retain a dropped single match proof
+  sql: DELETE t FROM write_guard_delete t JOIN write_guard_source s ON t.id=s.code
+  expect:
+    error: true
+    contains: one proven source match
+- name: Rejected cached DELETE leaves its target visible
+  sql: SELECT value FROM write_guard_delete
+  expect:
+    rows: 1
+    data:
+    - value: 20
+- name: mysql native joined UPDATE caches its source contract
+  sql: UPDATE write_guard_common, write_guard_common_source SET value=value+1 WHERE
+    write_guard_common.id=write_guard_common_source.code
+  syntax: mysql
+  expect:
+    affected_rows: 1
+- name: psql native joined UPDATE caches its source contract
+  sql: UPDATE write_guard_common, write_guard_common_source SET value=value+1 WHERE
+    write_guard_common.id=write_guard_common_source.code
+  syntax: psql
+  expect:
+    affected_rows: 1
+- name: Drop the source key used by both common frontend caches
+  sql: ALTER TABLE write_guard_common_source DROP CONSTRAINT unique_write_common
+  expect:
+    affected_rows: 0
+- name: Common source can gain fanout after its key is dropped
+  sql: INSERT INTO write_guard_common_source VALUES(3,1)
+  expect:
+    affected_rows: 1
+- name: mysql cached joined UPDATE refuses a dropped native proof
+  sql: UPDATE write_guard_common, write_guard_common_source SET value=value+1 WHERE
+    write_guard_common.id=write_guard_common_source.code
+  syntax: mysql
+  expect:
+    error: true
+    contains: one proven source match
+- name: psql cached joined UPDATE refuses a dropped native proof
+  sql: UPDATE write_guard_common, write_guard_common_source SET value=value+1 WHERE
+    write_guard_common.id=write_guard_common_source.code
+  syntax: psql
+  expect:
+    error: true
+    contains: one proven source match
+- name: Rejected common frontend writes leave the target unchanged
+  sql: SELECT value FROM write_guard_common
+  expect:
+    rows: 1
+    data:
+    - value: 12
+- name: A cached null safe write requires equal NULL uniqueness
+  sql: UPDATE t SET value=value+1 FROM write_guard_null_target t JOIN write_guard_null_source
+    s ON t.code=s.code OR (t.code IS NULL AND s.code IS NULL)
+  expect:
+    affected_rows: 1
+- name: Retire the original equal NULL declaration
+  sql: ALTER TABLE write_guard_null_source DROP CONSTRAINT unique_write_null
+  expect:
+    affected_rows: 0
+- name: Replace source uniqueness with distinct NULL semantics
+  scm: (createkey (table "memcp-tests" "write_guard_null_source") "unique_write_null"
+    true '("code") nil '("nulls_not_distinct" false))
+  expect:
+    result: true
+- name: A distinct NULL source can publish another NULL key
+  sql: INSERT INTO write_guard_null_source VALUES(2,NULL)
+  expect:
+    affected_rows: 1
+- name: Cached null safe UPDATE cannot retain old key options
+  sql: UPDATE t SET value=value+1 FROM write_guard_null_target t JOIN write_guard_null_source
+    s ON t.code=s.code OR (t.code IS NULL AND s.code IS NULL)
+  expect:
+    error: true
+    contains: one proven source match
+- name: A rejected stale null equality proof leaves its target unchanged
+  sql: SELECT value FROM write_guard_null_target
+  expect:
+    rows: 1
+    data:
+    - value: 11
+- name: text comparison cannot authorize mutation from a different native key relation
+  sql: UPDATE t SET value=t.value+1 FROM write_guard_text_target t JOIN write_guard_text_source
+    s ON t.code=s.code
+  expect:
+    error: true
+    contains: one proven source match
+- name: text unsafe key proof leaves the target unchanged
+  sql: SELECT value FROM write_guard_text_target
+  expect:
+    rows: 1
+    data:
+    - value: 10
+- name: text comparison needs a native frozen target domain for one mutation
+  sql: UPDATE t SET value=t.value+1 FROM write_guard_text_target t JOIN write_guard_text_source
+    s ON t.code=s.code
+  expect:
+    affected_rows: 1
+  noncritical: true
+- name: text future target domain applies its increment once
+  sql: SELECT value FROM write_guard_text_target
+  expect:
+    rows: 1
+    data:
+    - value: 11
+  noncritical: true
+- name: float comparison cannot authorize mutation from a different native key relation
+  sql: UPDATE t SET value=t.value+1 FROM write_guard_float_target t JOIN write_guard_float_source
+    s ON t.probe=s.id
+  expect:
+    error: true
+    contains: one proven source match
+- name: float unsafe key proof leaves the target unchanged
+  sql: SELECT value FROM write_guard_float_target
+  expect:
+    rows: 1
+    data:
+    - value: 10
+- name: float comparison needs a native frozen target domain for one mutation
+  sql: UPDATE t SET value=t.value+1 FROM write_guard_float_target t JOIN write_guard_float_source
+    s ON t.probe=s.id
+  expect:
+    affected_rows: 1
+  noncritical: true
+- name: float future target domain applies its increment once
+  sql: SELECT value FROM write_guard_float_target
+  expect:
+    rows: 1
+    data:
+    - value: 11
+  noncritical: true
+- name: Frontend numeric literal terminals are distinct from Boolean syntax nodes
+  scm: (map '(0 1 true false) (lambda (literal) (sql_info_type (sql_expr_info '()
+    literal))))
+  expect:
+    result:
+    - BIGINT
+    - BIGINT
+    - BOOLEAN
+    - BOOLEAN
+- name: An actual empty native target cannot produce an unproved joined mutation
+  sql: UPDATE e SET value=s.value FROM write_guard_empty_target e JOIN write_guard_empty_source
+    s ON e.id=s.id
+  expect:
+    affected_rows: 0
+- name: Empty target does not suppress source column binding errors
+  sql: UPDATE e SET value=s.missing FROM write_guard_empty_target e JOIN write_guard_empty_source
+    s ON e.id=s.id
+  expect:
+    error: true
+- name: Empty target does not suppress invalid assignment columns
+  sql: UPDATE e SET missing=s.value FROM write_guard_empty_target e JOIN write_guard_empty_source
+    s ON e.id=s.id
+  expect:
+    error: true
 cleanup:
+- sql: DROP TABLE IF EXISTS write_guard_empty_source
+- sql: DROP TABLE IF EXISTS write_guard_empty_target
+- sql: DROP TABLE IF EXISTS write_guard_text_source
+- sql: DROP TABLE IF EXISTS write_guard_text_target
+- sql: DROP TABLE IF EXISTS write_guard_float_source
+- sql: DROP TABLE IF EXISTS write_guard_float_target
+- sql: DROP TABLE IF EXISTS write_guard_null_source
+- sql: DROP TABLE IF EXISTS write_guard_null_target
+- sql: DROP TABLE IF EXISTS write_guard_common_source
+- sql: DROP TABLE IF EXISTS write_guard_common
+- sql: DROP TABLE IF EXISTS write_guard_source
+- sql: DROP TABLE IF EXISTS write_guard_update
+- sql: DROP TABLE IF EXISTS write_guard_delete
 - sql: DROP TABLE IF EXISTS write_merge
 - sql: DROP TABLE IF EXISTS write_defaults
 - sql: DROP TABLE IF EXISTS write_limit

@@ -574,11 +574,15 @@ user table merely to discard a newly constructed policy closure. */
 							(define exact_compile (lambda (compile_tx) (begin
 								(define resolved_policy (sql_policy_spec_resolve policy))
 								(define options (if (and (list? parse_fn) (> (count parse_fn) 1)) (cadr parse_fn) '()))
-								(if (options "exact_guards") (begin
-									(define variant (sql_compile_queryplan_variant parse_fn schema parse_query resolved_policy session compile_tx))
-									(if (and (equal? (car variant) true) (empty_list? (nth variant 2)))
-										(cadr variant)
-										(sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query resolved_policy session compile_tx variant)))
+								/* Joined mutation proofs are schema contracts, including for parsers
+								which do not request declaration casts through an envelope. */
+								(if (or (options "exact_guards") (match (toUpper parse_query)
+									(regex "^\\s*(?:UPDATE|DELETE)\\b" _) true
+									_ false)) (begin
+										(define variant (sql_compile_queryplan_variant parse_fn schema parse_query resolved_policy session compile_tx))
+										(if (and (equal? (car variant) true) (empty_list? (nth variant 2)))
+											(cadr variant)
+											(sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query resolved_policy session compile_tx variant)))
 									(begin
 										(define compile_policy (sql_compile_table_policy resolved_policy))
 										(sql_queryplan_compile_formula compile_tx (sql_queryplan_bind_tx_calls

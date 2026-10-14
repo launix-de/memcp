@@ -444,13 +444,21 @@ must not change the logical join tree's leaf order.
 
 The Scheme query-plan cache may hold several lazily compiled physical plans for
 one normalized SELECT shape. DDL, DML, and transaction control retain exact
-cache entries because their formulas may intentionally operate on the request
-session. This is a polymorphic cache entry, not a second planner and not a
-storage-engine query cache.
+query keys because their formulas may intentionally operate on the request
+session. An exact DML entry may use the same variant dispatcher to validate
+immutable declaration contracts before invoking a cached plan; it must not
+normalize away its request/session semantics. This is a polymorphic cache entry,
+not a second planner and not a storage-engine query cache.
 
 Only SELECT shapes which reach a parameter- or statistics-dependent planner
-decision use polymorphic entries. Shapes without a tipping decision retain the
-smaller exact cache path.
+decision use normalized polymorphic entries. An exact plan with no declaration
+guards or preparations retains its direct callable fast path. Joined mutation
+proofs must capture the actual immutable key/nullability declarations they
+consume and invalidate when those declarations change. A separately loaded
+revision token cannot establish that it describes the captured metadata.
+Snapshot identity guards retain their datum outside cloneable quoted AST lists,
+perform constant-time header comparisons, and expose their retained payload to
+ordinary query-cache size accounting.
 
 Every parameter- or statistics-dependent cost-model tipping decision must
 record the executable condition under which its chosen alternative remains

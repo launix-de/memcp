@@ -19,6 +19,7 @@ package scm
 import (
 	"fmt"
 	"math"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -354,5 +355,45 @@ func TestAssocMergeKeepsCompiledEntryAuthoritative(t *testing.T) {
 		if got := Apply(result, NewString("key")); !Equal(got, NewInt(99)) {
 			t.Fatalf("%s compiled merger result = %s, want 99", name, String(got))
 		}
+	}
+}
+
+func TestIdentityPredicateRetainsOriginalDatumThroughASTClone(t *testing.T) {
+	expected := NewSlice([]Scmer{NewString("field"), NewInt(7)})
+	predicate := identityPredicate(expected)
+	cloned := CloneOptimizerExpression(NewSlice([]Scmer{predicate, NewSymbol("actual")}))
+	if cloned.Slice()[0] != predicate {
+		t.Fatal("AST clone replaced the retained native predicate")
+	}
+	if !Apply(cloned.Slice()[0], expected).Bool() {
+		t.Fatal("predicate lost the original datum")
+	}
+	if Apply(cloned.Slice()[0], CloneOptimizerExpression(expected)).Bool() {
+		t.Fatal("predicate accepted a structurally equal replacement")
+	}
+	compiled := Eval(Optimize(Read(t.Name(), `(lambda (predicate actual) (predicate actual))`), &Globalenv, nil), &Globalenv)
+	if !Apply(compiled, cloned.Slice()[0], expected).Bool() || Apply(compiled, cloned.Slice()[0], CloneOptimizerExpression(expected)).Bool() {
+		t.Fatal("optimized invocation changed datum identity")
+	}
+}
+
+func TestIdentityPredicateAccountsForRetainedPayload(t *testing.T) {
+	small := NewSlice([]Scmer{NewString("x")})
+	large := NewSlice([]Scmer{NewString(strings.Repeat("x", 4096))})
+	smallPredicate, largePredicate := identityPredicate(small), identityPredicate(large)
+	if got, want := ComputeSize(largePredicate)-ComputeSize(smallPredicate), ComputeSize(large)-ComputeSize(small); got != want {
+		t.Fatalf("predicate retained-size growth = %d, want %d", got, want)
+	}
+	clonedBody := CloneOptimizerExpression(largePredicate.Proc().Body)
+	if clonedBody.Slice()[1] != largePredicate.Proc().Body.Slice()[1] {
+		t.Fatal("AST clone replaced the opaque captured value")
+	}
+	// Keep only the predicate and obtain its datum after collection: the opaque
+	// reference is the owning root, not a registry or an external Go closure.
+	large = NewNil()
+	runtime.GC()
+	retained := largePredicate.Proc().Body.Slice()[1].Any().(*expectedValueRef).value
+	if !Apply(largePredicate, retained).Bool() {
+		t.Fatal("collection invalidated a captured value")
 	}
 }

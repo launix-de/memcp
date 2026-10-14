@@ -96,7 +96,10 @@ to DECIMAL (MySQL). Temporal/mixed arithmetic stays "any" for now. */
 (define sql_type_of_literal (lambda (v)
 	(if (nil? v) "NULL"
 		(if (string? v) "VARCHAR"
-			(if (or (equal? v true) (equal? v false)) "BOOLEAN"
+			/* These are parser AST terminals, not runtime column values. Scalar
+			equality also equates numeric zero/one with booleans; syntax identity
+			must keep the frontend's numeric terminal contract intact. */
+			(if (or (expression_equal? v true) (expression_equal? v false)) "BOOLEAN"
 				(if (number? v) (if (equal? v (floor v)) "BIGINT" "DOUBLE")
 					"any"))))))
 

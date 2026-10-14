@@ -5853,7 +5853,7 @@ columns cannot change group cardinality because the primary key is unique. */
 			(and (not (physical_expr_refs_any_alias?
 				sources default_alias (source_aliases rest_sources) downstream_condition))
 				(ordered_join_sources_are_unique_lookups_acc
-					sources default_alias stages final_condition (list (car sources)) rest_sources))))))
+					sources default_alias stages final_condition (list (car sources)) rest_sources nil false))))))
 
 (define source_alias_in_sources? (lambda (alias sources)
 	(reduce (coalesceNil sources '()) (lambda (found src)
@@ -5890,7 +5890,7 @@ columns cannot change group cardinality because the primary key is unique. */
 			(late_projection_sources_preserve_rows_acc stages sources rest prelimit_sources default_alias final_condition
 				(cons src bound_sources))
 			(if (and (source_outer? src)
-				(source_is_unique_lookup_from_sources? sources default_alias bound_sources src stages final_condition))
+				(source_is_unique_lookup_from_sources? sources default_alias bound_sources src stages final_condition nil false))
 				(late_projection_sources_preserve_rows_acc stages sources rest prelimit_sources default_alias final_condition
 					(cons src bound_sources))
 				false))
@@ -5900,19 +5900,29 @@ columns cannot change group cardinality because the primary key is unique. */
 	(late_projection_sources_preserve_rows_acc
 		stages sources sources prelimit_sources default_alias final_condition '())))
 
-(define ordered_join_sources_are_unique_lookups_acc (lambda (sources default_alias stages condition bound_sources remaining_sources)
-	(match (coalesceNil remaining_sources '())
-		(cons src rest) (and
-			(source_is_unique_lookup_from_sources? sources default_alias bound_sources src stages condition)
-			(ordered_join_sources_are_unique_lookups_acc
-				sources default_alias stages condition (cons src bound_sources) rest))
-		_ true)))
+(define ordered_join_sources_are_unique_lookups_acc (lambda (sources default_alias stages condition bound_sources remaining_sources planning_session membership_equivalent)
+	(if (empty_list? remaining_sources) true
+		(begin
+			/* Mutation cardinality is a logical dependency proof: the physical
+			scan order may encounter a source before another source which binds
+			its unique key. Cost/order proofs retain their ordered contract. */
+			(define src (if membership_equivalent
+				(find remaining_sources (lambda (candidate)
+					(source_is_unique_lookup_from_sources? sources default_alias bound_sources candidate stages condition planning_session true)) nil)
+				(car remaining_sources)))
+			(and (not (nil? src))
+				(or membership_equivalent
+					(source_is_unique_lookup_from_sources? sources default_alias bound_sources src stages condition planning_session false))
+				(ordered_join_sources_are_unique_lookups_acc sources default_alias stages condition
+					(cons src bound_sources)
+					(filter remaining_sources (lambda (candidate) (not (equal? candidate src))))
+					planning_session membership_equivalent))))))
 
 (define downstream_sources_at_most_one_driver_row? (lambda (sources default_alias final_condition stages)
 	(if (empty_list? sources)
 		true
 		(ordered_join_sources_are_unique_lookups_acc
-			sources default_alias stages final_condition (list (car sources)) (cdr sources)))))
+			sources default_alias stages final_condition (list (car sources)) (cdr sources) nil false))))
 
 (define driver_limit_cannot_brake? (lambda (sources default_alias final_condition offset_value limit_value stages planning_session)
 	(begin
@@ -11962,6 +11972,28 @@ every title. */
 						(nth target_rows_symbols i))))))
 			target_rows_plans))))
 
+/* A direct self source tied through the same native primary key is the
+same physical row as its target. A changed non-key value cannot become the
+source of another target; a prepared membership stage may further restrict this
+identity. Other self aliases still require a frozen source snapshot. */
+(define mutation_same_target_identity? (lambda (sources default_alias target src condition planning_session)
+	(begin
+		(define constraints (show (source_schema src) (source_relation src) "constraints"))
+		(planner_record_guard_condition (list (identity_predicate constraints)
+			(planner_guard_runtime_binding
+				(list (quote show) (source_schema src) (source_relation src) "constraints") planning_session '())) planning_session)
+		(define primary (find (constraints "Unique") (lambda (key) (equal? (key "Id") "PRIMARY")) nil))
+		(and (not (nil? primary)) (not (empty_list? (primary "Cols")))
+			(reduce (primary "Cols") (lambda (covered column) (and covered
+				(reduce (split_and_terms condition) (lambda (found term) (or found
+					(match (equality_term_operands term)
+						'(left right) (or
+							(and (equal? (unique_lookup_column_name src left) column)
+								(equal? (unique_lookup_column_name target right) column))
+							(and (equal? (unique_lookup_column_name src right) column)
+								(equal? (unique_lookup_column_name target left) column)))
+						_ false))) false))) true)))))
+
 (define lower_multi_source_dml_query_block (lambda (block target_schema target_tbl stages)
 	(begin
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
@@ -11987,69 +12019,83 @@ every title. */
 		row stream is safe only when every additional source is a proven 0:1
 		lookup from that target. Reuse the existing key/stage proof, never collect
 		an unbounded Scheme relation or mutate once per ambiguous source match. */
-		(if (and (not (source_outer? target_src))
+		(define proven_sources (and (not (source_outer? target_src))
 			(ordered_join_sources_are_unique_lookups_acc sources first_alias stages
 				(combine_where_terms (source_join_exprs sources) cond)
 				(list target_src) (filter sources (lambda (src)
-					(not (equal?? (source_alias src) target_alias)))))) true
-			(neumann_fail "build_queryplan" "joined mutation requires one proven source match per target"))
+					(not (equal?? (source_alias src) target_alias))))
+				(planner_context_session (qb_facts block)) true)))
+		/* An actual empty visible target domain cannot produce a joined write.
+		The native presence operator owns visibility, cancellation and tx; this
+		is not a statistics proof and does not collect a relation just to reject
+		its unsafe nonempty counterpart. Name/type binding already ran above. */
+		(if (not proven_sources)
+			(list (quote if)
+				(compile_scan_plan (quote scan_exists) (physical_query_tx_symbol)
+					(source_table_expr target_src) '(list) (list (quote lambda) '() true))
+				(list (quote error) "build_queryplan: joined mutation requires one proven source match per target")
+				0)
+			(begin
 
-		/* A later nested source probe must not see this statement move its own
-		join key into another source match (Halloween effect). Until the native
-		target domain is frozen, reject assignments which change that binding. */
-		(define other_aliases (filter (source_aliases sources) (lambda (alias)
-			(not (equal?? alias target_alias)))))
-		(define target_join_terms (filter (split_and_terms
-			(combine_where_terms (source_join_exprs sources) cond)) (lambda (term)
-				(and (expr_refs_alias? first_alias target_alias term)
-					(expr_refs_any_alias? first_alias other_aliases term)))))
-		(define bound_target_columns (merge_unique (map target_join_terms (lambda (term)
-			(extract_columns_for_join_alias sources first_alias target_alias term)))))
-		(if (reduce (extract_assoc (coalesceNil cols '()) (lambda (title _expr) title))
-			(lambda (safe title) (and safe (not (contains? bound_target_columns title)))) true) true
-			(neumann_fail "build_queryplan" "joined UPDATE cannot change its target join columns yet"))
+				/* A later nested source probe must not see this statement move its own
+				join key into another source match (Halloween effect). Until the native
+				target domain is frozen, reject assignments which change that binding. */
+				(define other_aliases (filter (source_aliases sources) (lambda (alias)
+					(not (equal?? alias target_alias)))))
+				(define target_join_terms (filter (split_and_terms
+					(combine_where_terms (source_join_exprs sources) cond)) (lambda (term)
+						(and (expr_refs_alias? first_alias target_alias term)
+							(expr_refs_any_alias? first_alias other_aliases term)))))
+				(define bound_target_columns (merge_unique (map target_join_terms (lambda (term)
+					(extract_columns_for_join_alias sources first_alias target_alias term)))))
+				(if (reduce (extract_assoc (coalesceNil cols '()) (lambda (title _expr) title))
+					(lambda (safe title) (and safe (not (contains? bound_target_columns title)))) true) true
+					(neumann_fail "build_queryplan" "joined UPDATE cannot change its target join columns yet"))
 
-		(define needed_exprs (merge (list
-			(dml_assignment_exprs cols)
-			(list cond)
-			(list update_ref)
-			(source_join_exprs sources))))
-		/* Prepared stages have their own immutable input. Direct aliases of the
-		mutation table do not: changing a column read through another alias would
-		make a later nested probe consume this statement's new values. */
-		(define target_writes (extract_assoc (coalesceNil cols '()) (lambda (title _expr) title)))
-		(if (reduce sources (lambda (safe src) (and safe
-			(or (not (and (source_is_base_table? src)
-				(equal? (source_schema src) target_schema) (equal? (source_relation src) target_tbl)
-				(not (equal?? (source_alias src) target_alias))))
-				(begin
-					(define reads (merge_unique (map needed_exprs (lambda (expr)
-						(extract_columns_for_join_alias sources first_alias (source_alias src) expr)))))
-					(reduce target_writes (lambda (disjoint col)
-						(and disjoint (not (contains? reads col)))) true))))) true) true
-			(neumann_fail "build_queryplan" "self joined UPDATE needs a frozen source snapshot for overlapping columns"))
+				(define needed_exprs (merge (list
+					(dml_assignment_exprs cols)
+					(list cond)
+					(list update_ref)
+					(source_join_exprs sources))))
+				/* Prepared stages have their own immutable input. Direct aliases of the
+				mutation table do not: changing a column read through another alias would
+				make a later nested probe consume this statement's new values. */
+				(define target_writes (extract_assoc (coalesceNil cols '()) (lambda (title _expr) title)))
+				(if (reduce sources (lambda (safe src) (and safe
+					(or (not (and (source_is_base_table? src)
+						(equal? (source_schema src) target_schema) (equal? (source_relation src) target_tbl)
+						(not (equal?? (source_alias src) target_alias))))
+						(mutation_same_target_identity? sources first_alias target_src src
+							(combine_where_terms (source_join_exprs sources) cond)
+							(planner_context_session (qb_facts block)))
+						(begin
+							(define reads (merge_unique (map needed_exprs (lambda (expr)
+								(extract_columns_for_join_alias sources first_alias (source_alias src) expr)))))
+							(reduce target_writes (lambda (disjoint col)
+								(and disjoint (not (contains? reads col)))) true))))) true) true
+					(neumann_fail "build_queryplan" "self joined UPDATE needs a frozen source snapshot for overlapping columns"))
 
-		(define update_fn (lower_column_expr_for_join sources first_alias update_ref))
-		(define update_values (if delete_mode
-			nil
-			(cons (quote list) (map_assoc (coalesceNil cols '()) (lambda (_title expr)
-				(lower_column_expr_for_join sources first_alias expr))))))
-		(define row_expr (if delete_mode
-			(list (quote if) (list update_fn) 1 0)
-			(list (quote if) (list update_fn update_values) 1 0)))
-		(build_join_scan_reduce_using_recipe
-			(qb_schema block)
-			sources
-			scan_plan
-			first_alias
-			needed_exprs
-			cond
-			row_expr
-			'()
-			0
-			-1
-			true nil nil (qb_stages block)
-			(quote +) 0 (quote +) nil (qb_facts block)))))
+				(define update_fn (lower_column_expr_for_join sources first_alias update_ref))
+				(define update_values (if delete_mode
+					nil
+					(cons (quote list) (map_assoc (coalesceNil cols '()) (lambda (_title expr)
+						(lower_column_expr_for_join sources first_alias expr))))))
+				(define row_expr (if delete_mode
+					(list (quote if) (list update_fn) 1 0)
+					(list (quote if) (list update_fn update_values) 1 0)))
+				(build_join_scan_reduce_using_recipe
+					(qb_schema block)
+					sources
+					scan_plan
+					first_alias
+					needed_exprs
+					cond
+					row_expr
+					'()
+					0
+					-1
+					true nil nil (qb_stages block)
+					(quote +) 0 (quote +) nil (qb_facts block)))))))
 
 (define lower_single_source_dml_query_block (lambda (block target_schema target_tbl)
 	(begin
@@ -12119,16 +12165,18 @@ every title. */
 		(lower_multi_source_dml_query_block block target_schema target_tbl stages))))
 
 (define lower_dml_query_block_with_stages (lambda (block target_schema target_tbl)
-	(if (empty_list? (qb_stages block))
-		(lower_dml_query_block_core block target_schema target_tbl (qb_stages block))
-		(begin
-			(define stage_catalog (query_block_stage_catalog block))
-			(define stage_lookup (query_block_stage_lookup block))
-			(define dependency_graph (stage_dependency_graph stage_lookup))
-			(cons (quote begin)
-				(merge (list
-					(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup (qb_stages block))
-					(list (lower_dml_query_block_core (query_block_without_stages_after_prepare_using stage_lookup block) target_schema target_tbl (qb_stages block))))))))))
+	(begin
+		(define stage_catalog (query_block_stage_catalog block))
+		(if (empty_list? (qb_stages block))
+			(lower_dml_query_block_core block target_schema target_tbl stage_catalog)
+			(begin
+				(define stage_lookup (query_block_stage_lookup block))
+				(define dependency_graph (stage_dependency_graph stage_lookup))
+				(cons (quote begin)
+					(merge (list
+						(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup (qb_stages block))
+						(list (lower_dml_query_block_core (query_block_without_stages_after_prepare_using stage_lookup block)
+							target_schema target_tbl stage_catalog))))))))))
 
 (define lower_multi_target_delete_with_stages (lambda (block target_specs)
 	(if (empty_list? (qb_stages block))

@@ -24,6 +24,13 @@ import "strings"
 
 // These operations expose language metadata, independent of SQL or storage.
 func initExpressionMetadata() {
+	Declare(&Globalenv, &Declaration{Name: "identity_predicate", Fn: func(a ...Scmer) Scmer {
+		return identityPredicate(a[0])
+	}, Type: &TypeDescriptor{Kind: "func", Description: "captures a value and returns an immutable predicate comparing its exact object header identity in constant time",
+		Params: []*TypeDescriptor{{Kind: "any", Label: "expected"}},
+		Return: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "any", Label: "actual"}}, Return: &TypeDescriptor{Kind: "bool"}},
+	},
+	})
 	Declare(&Globalenv, &Declaration{Name: "expression_syntax", Fn: func(a ...Scmer) Scmer {
 		return ExpressionSyntax(a[0])
 	}, Type: &TypeDescriptor{Kind: "func", Description: "exposes source-independent AST data with named special forms",
@@ -58,6 +65,32 @@ func initExpressionMetadata() {
 		Params: []*TypeDescriptor{{Kind: "any", Label: "callable"}}, Return: &TypeDescriptor{Kind: "bool"},
 		JITEmit: jitEmitExpressionMetadataCall("expression_foldable?"),
 	},
+	})
+}
+
+// expectedValueRef retains one immutable value outside AST list containers.
+// Generic Any/Proc sizing sees its complete payload during cold accounting;
+// comparison and AST cloning never traverse or copy that payload.
+type expectedValueRef struct {
+	value Scmer
+}
+
+func (r *expectedValueRef) ComputeSize() uint {
+	return goAllocOverhead + ComputeSize(r.value)
+}
+
+// This comparator has no hidden Go captures. The ordinary procedure body owns
+// the opaque reference, preserving both GC lifetime and inclusive accounting.
+var compareExpectedValue = NewFunc(func(a ...Scmer) Scmer {
+	return NewBool(a[0].Any().(*expectedValueRef).value == a[1])
+})
+
+func identityPredicate(expected Scmer) Scmer {
+	return NewProcStruct(Proc{
+		Params: NewSlice([]Scmer{NewSymbol("actual")}),
+		Body: NewSlice([]Scmer{compareExpectedValue,
+			NewAny(&expectedValueRef{value: expected}), NewNthLocalVar(0)}),
+		En: &Globalenv, NumVars: 1, NumberedOnly: true,
 	})
 }
 

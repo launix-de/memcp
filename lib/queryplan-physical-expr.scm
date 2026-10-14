@@ -4170,20 +4170,71 @@ coercion and collations do not have the same ordering proof. */
 (define lookup_probe_condition (lambda (sources default_alias driver lookup condition)
 	(lookup_probe_condition_from_sources sources default_alias (list driver) lookup condition)))
 
-(define source_is_unique_lookup_from_sources? (lambda (sources default_alias bound_sources src stages condition)
+/* Mutation admission requires key-membership equivalence, not just the
+cost model's useful point-lookup estimate. Reuse frontend expression triples;
+text collations, approximate/coercing numeric domains and opaque contracts need
+an explicit stronger proof before they may authorize a native row mutation. */
+(define mutation_lookup_binding_equivalent? (lambda (sources src columns key_col term planning_session)
+	(begin
+		(define operands (coalesceNil (equality_term_operands term) (null_safe_equality_operands term)))
+		(define probe (if (equal? (unique_lookup_column_name src (car operands)) key_col)
+			(cadr operands) (car operands)))
+		(define declaration (find columns (lambda (column)
+			(equal?? (column "Field") key_col)) '("RawType" "any")))
+		/* Capture referenced declarations before asking the existing frontend
+		compiler for the probe's contract. A concurrent publication invalidates
+		this variant; no runtime Scmer carrier chooses SQL comparison semantics. */
+		(map (filter sources (lambda (source)
+			(and (source_is_base_table? source)
+				(not (physical_helper_relation? (source_relation source)))
+				(not (equal?? (source_schema source) "information_schema"))
+				(expr_refs_alias? (source_alias (car sources)) (source_alias source) probe))))
+			(lambda (source) (begin
+				(define snapshot (get_schema (source_schema source) (source_relation source)))
+				(planner_record_guard_condition (list (identity_predicate snapshot)
+					(planner_guard_runtime_binding
+						(list (quote get_schema) (source_schema source) (source_relation source)) planning_session '())) planning_session))))
+		(define key_type (toUpper (coalesceNil (declaration "RawType") "any")))
+		(define probe_type (sql_info_type (sql_expr_info sources probe)))
+		(define integral? (lambda (type)
+			(contains? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT" "MEDIUMINT") type)))
+		(and (integral? key_type) (integral? probe_type)))))
+
+(define source_is_unique_lookup_from_sources? (lambda (sources default_alias bound_sources src stages condition planning_session membership_equivalent)
 	(begin
 		(define stage (coalesceNil
 			(source_stage_output_stage stages src)
 			(stage_for_group_cache_source stages src)))
-		(define key_sets (unique_lookup_key_sets src stages))
 		(define lookup_condition (lookup_probe_condition_from_sources
 			sources default_alias bound_sources src condition))
 		/* A nullable UNIQUE key with distinct NULLs is not unique under a
 		null-safe equality. Use the published native declaration; cardinality
 		estimates and observed NULL counts cannot establish this contract. */
-		(define native_source (and (source_is_base_table? src) (not (group_stage? stage))))
-		(define key_descriptions (if native_source
-			((show (source_schema src) (source_relation src) "constraints") "Unique") '()))
+		(define native_source (and (source_is_base_table? src)
+			(not (physical_helper_relation? (source_relation src)))
+			(not (equal?? (source_schema src) "information_schema"))
+			(not (group_stage? stage))))
+		/* Capture and consume the same published objects: a separately read token
+		could validate a proof made from an older declaration. The cold factory
+		retains these immutable objects without quoted-data cloning; the existing
+		variant dispatcher checks only their headers before invoking this plan. */
+		(define constraints (if native_source
+			(show (source_schema src) (source_relation src) "constraints") nil))
+		(define columns (if native_source
+			(get_schema (source_schema src) (source_relation src)) '()))
+		(if (and native_source (not (nil? planning_session))) (begin
+			(planner_record_guard_condition
+				(list (identity_predicate constraints)
+					(planner_guard_runtime_binding
+						(list (quote show) (source_schema src) (source_relation src) "constraints") planning_session '())) planning_session)
+			(planner_record_guard_condition
+				(list (identity_predicate columns)
+					(planner_guard_runtime_binding
+						(list (quote get_schema) (source_schema src) (source_relation src)) planning_session '())) planning_session)) true)
+		(define key_descriptions (if native_source (constraints "Unique") '()))
+		(define key_sets (if native_source
+			(map key_descriptions (lambda (key) (key "Cols")))
+			(unique_lookup_key_sets src stages)))
 		(or
 			(join_optimizer_at_most_one_unbound_source? stages src)
 			(reduce key_sets (lambda (unique key_cols)
@@ -4193,9 +4244,12 @@ coercion and collations do not have the same ordering proof. */
 							(and complete (reduce (split_and_terms lookup_condition)
 								(lambda (found term) (or found (and
 									(unique_lookup_join_term? default_alias src key_col term)
+									(or (not membership_equivalent) (not native_source)
+										(mutation_lookup_binding_equivalent? sources src columns key_col term planning_session))
 									(or (not (nil? (equality_term_operands term)))
 										(not native_source)
-										(source_column_guaranteed_nonnull? src key_col)
+										(not ((find columns (lambda (column)
+											(equal?? (column "Field") key_col)) '("Null" true)) "Null"))
 										(reduce key_descriptions (lambda (equal_nulls key)
 											(or equal_nulls (and (equal? (key "Cols") key_cols)
 												(key "nulls_not_distinct")))) false))))) false)))
@@ -4204,7 +4258,7 @@ coercion and collations do not have the same ordering proof. */
 
 (define source_is_unique_lookup? (lambda (sources default_alias driver src stages condition)
 	(source_is_unique_lookup_from_sources?
-		sources default_alias (list driver) src stages condition)))
+		sources default_alias (list driver) src stages condition nil false)))
 
 (define order_expr_unique_lookup_source (lambda (sources driver default_alias expr stages condition)
 	(begin
@@ -4321,7 +4375,7 @@ not the null-safe domain equality used for session and grouped bindings. */
 					_ false)))) false))))
 
 (define order_prefix_distinguishes_source_rows? (lambda (all_sources src default_alias items stages condition bound_sources)
-	(or (source_is_unique_lookup_from_sources? all_sources default_alias bound_sources src stages condition)
+	(or (source_is_unique_lookup_from_sources? all_sources default_alias bound_sources src stages condition nil false)
 		(reduce (unique_lookup_key_sets src stages) (lambda (unique keys)
 			(or unique (and (not (empty_list? keys))
 				(reduce keys (lambda (covered col)
@@ -4349,7 +4403,7 @@ not the null-safe domain equality used for session and grouped bindings. */
 							(combine_where condition (source_join_expr (car sources))))
 						(and (not (empty_list? bound_sources))
 							(source_is_unique_lookup_from_sources?
-								all_sources default_alias bound_sources (car sources) stages condition)))
+								all_sources default_alias bound_sources (car sources) stages condition nil false)))
 						(order_items_follow_join_tree_acc? all_sources (cdr sources) default_alias order_items stages condition
 							(cons (car sources) bound_sources)))
 					(and (or (empty_list? remaining)
