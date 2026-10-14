@@ -900,7 +900,8 @@ dimensions are metadata only and are absent from the executable plan. */
 	((symbol session) key) (begin
 		(define declaration (find parameters (lambda (item) (equal? key (concat "__tsql_parameter:" (car item)))) nil))
 		(if declaration (cdr (cadr declaration))
-			(if (has? '("__tsql_scope_identity" "__tsql_identity") key) '(38 0) nil)))
+			(equal? key "schema") '(128)
+			(has? '("__tsql_scope_identity" "__tsql_identity") key) '(38 0) nil))
 	((symbol get_column) alias alias_ic column column_ic) (begin
 		(define info (sql_get_column_info sources alias alias_ic column column_ic))
 		(match (sql_info_formula info)
@@ -1178,6 +1179,10 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(parser (atom "NULL" true) (sql_null_literal))
 		(parser (atom "CURRENT_TIMESTAMP" true) (list (quote sql_type_expr) (list (quote now)) "DATETIME" nil))
 
+		/* Current database is invocation context, bound by the shared planner.
+		Its SQL declaration is independent of the session value carrier. */
+		(parser '((atom "DB_NAME" true) "(" ")")
+			(list (quote sql_type_expr) (list (quote session) "schema") "NVARCHAR" '("utf8mb4_general_ci" 4)))
 		(parser '((atom "SCOPE_IDENTITY" true) "(" ")") (tsql_identity_expr true))
 		(parser '((atom "@@IDENTITY" true)) (tsql_identity_expr false))
 

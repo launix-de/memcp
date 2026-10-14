@@ -449,4 +449,27 @@ test_cases:
     data: [{COLUMN_NAME: id}]
 - name: Fixture cleanup removes metadata EXEC source table
   sql: DROP TABLE dbo.script_exec_catalog
+- name: Current database expression uses the active batch context
+  sql: DECLARE @db NVARCHAR(128)=DB_NAME(); SELECT @db AS value
+  expect: {rows: 1, data: [{value: memcp-tests}]}
+- name: Database context declarations remain exact for empty results
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (define column (car (tds_describe "memcp-tests" "SELECT TOP(0) DB_NAME() AS value" "" session)))
+      (and (equal? (column "sql_type") "NVARCHAR") (equal? (column "kind") 231)
+        (equal? (column "size") 256)))
+  expect: {result: true}
+- name: Stored procedure resolves its database through the caller execution context
+  sql: |
+    CREATE PROCEDURE dbo.script_context AS DECLARE @db NVARCHAR(128)=DB_NAME(); SELECT @db AS value;
+    GO
+    EXEC dbo.script_context;
+  expect: {rows: 1, data: [{value: memcp-tests}]}
+- name: Database identifier lookup stays explicitly unsupported
+  sql: SELECT DB_NAME(1) AS value
+  expect: {error: true}
+- name: Fixture cleanup removes database context procedure
+  sql: DROP PROCEDURE dbo.script_context
 cleanup: []
