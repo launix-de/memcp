@@ -1,0 +1,305 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  description: Inline report sources, projection aliases and their native query contracts
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS tsql_report_items
+- sql: CREATE TABLE tsql_report_items (id INT PRIMARY KEY, category INT, amount INT)
+- sql: INSERT INTO tsql_report_items VALUES (1,10,7),(2,10,9),(3,20,5)
+- sql: DROP TABLE IF EXISTS tsql_report_sink
+- sql: CREATE TABLE tsql_report_sink (id INT PRIMARY KEY, amount INT)
+test_cases:
+- name: Assignment aliases select values rather than comparisons
+  sql: SELECT code=id, [Total amount]=amount+1 FROM tsql_report_items ORDER BY code
+  expect:
+    rows: 3
+    data:
+    - code: 1
+      Total amount: 8
+    - code: 2
+      Total amount: 10
+    - code: 3
+      Total amount: 6
+- name: Quoted assignment aliases preserve presentation names
+  sql: SELECT 'it''s a code'=7, "Wide name"=9
+  expect:
+    rows: 1
+    data:
+    - it's a code: 7
+      Wide name: 9
+- name: String aliases without AS preserve escaped quotes
+  sql: SELECT amount 'it''s a total' FROM tsql_report_items WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - it's a total: 7
+- name: Aliases remain visible to ORDER BY
+  sql: SELECT amount 'total' FROM tsql_report_items ORDER BY total DESC
+  expect:
+    rows: 3
+    data:
+    - total: 9
+    - total: 7
+    - total: 5
+- name: Output aliases are not visible to input WHERE
+  sql: SELECT report_only=amount FROM tsql_report_items WHERE report_only=7
+  expect:
+    error: true
+- name: Explicit ALL preserves duplicate values
+  sql: SELECT ALL category FROM tsql_report_items ORDER BY category
+  expect:
+    rows: 3
+    data:
+    - category: 10
+    - category: 10
+    - category: 20
+- name: ALL cannot combine with DISTINCT
+  sql: SELECT ALL DISTINCT category FROM tsql_report_items
+  expect:
+    error: true
+- name: Inline rows retain column aliases
+  sql: SELECT v.code,v.label FROM (VALUES (2,'b'),(1,'a')) AS v(code,label) ORDER BY v.code
+  expect:
+    rows: 2
+    data:
+    - code: 1
+      label: a
+    - code: 2
+      label: b
+- name: Inline rows accept alias without AS
+  sql: SELECT v.code FROM (VALUES (3),(1)) v(code) ORDER BY v.code
+  expect:
+    rows: 2
+    data:
+    - code: 1
+    - code: 3
+- name: Inline rows preserve duplicates
+  sql: SELECT v.code FROM (VALUES (2),(2),(1)) AS v(code) ORDER BY v.code
+  expect:
+    rows: 3
+    data:
+    - code: 1
+    - code: 2
+    - code: 2
+- name: Inline NULL and zero remain different
+  sql: SELECT v.code FROM (VALUES (NULL),(0),(1)) AS v(code) ORDER BY v.code
+  expect:
+    rows: 3
+    data:
+    - code: null
+    - code: 0
+    - code: 1
+- name: Inline rows support DISTINCT and TOP together
+  sql: SELECT DISTINCT TOP (2) v.code FROM (VALUES (3),(1),(1),(2)) AS v(code) ORDER BY v.code
+  expect:
+    rows: 2
+    data:
+    - code: 1
+    - code: 2
+  noncritical: true
+- name: Inline filters precede TOP
+  sql: SELECT TOP (1) v.code FROM (VALUES (1),(3),(2)) AS v(code) WHERE v.code>1 ORDER BY v.code
+  expect:
+    rows: 1
+    data:
+    - code: 2
+- name: Inline sources join native tables
+  sql: SELECT i.id,v.label FROM tsql_report_items i INNER JOIN (VALUES (10,'group a'),(20,'group b')) AS v(category,label)
+    ON i.category=v.category ORDER BY i.id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      label: group a
+    - id: 2
+      label: group a
+    - id: 3
+      label: group b
+  noncritical: true
+- name: Inline sources retain outer join NULL extension
+  sql: SELECT i.id,v.label FROM tsql_report_items i LEFT JOIN (VALUES (10,'group a')) AS v(category,label) ON i.category=v.category
+    ORDER BY i.id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      label: group a
+    - id: 2
+      label: group a
+    - id: 3
+      label: null
+  noncritical: true
+- name: Inline sources group and apply HAVING
+  sql: SELECT category=v.category,total=SUM(v.amount) FROM (VALUES (10,2),(10,3),(20,1)) AS v(category,amount) GROUP
+    BY v.category HAVING SUM(v.amount)>2 ORDER BY category
+  expect:
+    rows: 1
+    data:
+    - category: 10
+      total: 5
+  noncritical: true
+- name: Inline cells use declared numeric precedence
+  sql: SELECT v.code+1 AS next_code FROM (VALUES (2),('3')) AS v(code) ORDER BY next_code
+  expect:
+    rows: 2
+    data:
+    - next_code: 3
+    - next_code: 4
+- name: Inline NULL columns default to integer contract
+  sql: SELECT v.code+1 AS next_code FROM (VALUES (NULL),(NULL)) AS v(code)
+  expect:
+    rows: 2
+    data:
+    - next_code: null
+    - next_code: null
+- name: Inline numeric widening retains BIGINT arithmetic
+  sql: SELECT v.code+1 AS next_code FROM (VALUES (1),(CAST(2147483648 AS BIGINT))) AS v(code) ORDER BY next_code
+  expect:
+    rows: 2
+    data:
+    - next_code: 2
+    - next_code: 2147483649
+- name: Inline numeric precedence rejects invalid text
+  sql: SELECT v.code FROM (VALUES (1),('bad')) AS v(code)
+  expect:
+    error: true
+- name: Inline sources reject unequal row widths
+  sql: SELECT * FROM (VALUES (1,2),(3)) AS v(a,b)
+  expect:
+    error: true
+- name: Inline sources reject missing column aliases
+  sql: SELECT * FROM (VALUES (1)) AS v
+  expect:
+    error: true
+- name: Inline sources reject too few aliases
+  sql: SELECT * FROM (VALUES (1,2)) AS v(a)
+  expect:
+    error: true
+- name: Inline sources reject too many aliases
+  sql: SELECT * FROM (VALUES (1)) AS v(a,b)
+  expect:
+    error: true
+- name: Inline sources reject duplicate case-insensitive aliases
+  sql: SELECT * FROM (VALUES (1,2)) AS v(code,Code)
+  expect:
+    error: true
+- name: DEFAULT remains restricted to INSERT
+  sql: SELECT * FROM (VALUES (DEFAULT)) AS v(code)
+  expect:
+    error: true
+- name: Inline values cannot be empty
+  sql: SELECT * FROM (VALUES) AS v(code)
+  expect:
+    error: true
+- name: Inline SELECT feeds native INSERT sink
+  sql: INSERT INTO tsql_report_sink SELECT v.id,v.amount FROM (VALUES (11,3),(12,5)) AS v(id,amount)
+  expect:
+    affected_rows: 2
+  noncritical: true
+- name: Native inserted inline rows stay queryable
+  sql: SELECT id,amount FROM tsql_report_sink ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 11
+      amount: 3
+    - id: 12
+      amount: 5
+- name: Inline metadata resolves numeric type without rows
+  scm: (begin (define s (newsession)) (s "username" "root") (define fields (tds_describe "memcp-tests" "SELECT TOP (0)
+    v.code+1 AS code FROM (VALUES (2),('3')) AS v(code)" "" s)) (if (equal? ((car fields) "sql_type") "INT") true (error
+    "inline column lost its declared numeric contract")))
+  expect:
+    result: true
+- name: Inline source filters use the input scope
+  sql: SELECT v.code FROM (VALUES (1),(3),(2)) AS v(code) WHERE v.code>1 ORDER BY v.code
+  expect:
+    rows: 2
+    data:
+    - code: 2
+    - code: 3
+- name: Inline sources use native OFFSET and FETCH
+  sql: SELECT v.code FROM (VALUES (3),(1),(2)) AS v(code) ORDER BY v.code OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
+  expect:
+    rows: 1
+    data:
+    - code: 2
+- name: Inline numeric coercion is independent of row order
+  sql: SELECT v.code FROM (VALUES ('3'),(2)) AS v(code) ORDER BY v.code
+  expect:
+    rows: 2
+    data:
+    - code: 2
+    - code: 3
+- name: Inline quoted names retain identifier escaping
+  sql: SELECT [lookup rows].[a]]b] FROM (VALUES (2),(1)) AS [lookup rows]([a]]b]) ORDER BY [lookup rows].[a]]b]
+  expect:
+    rows: 2
+    data:
+    - a]b: 1
+    - a]b: 2
+- name: Inline expressions reuse declared arithmetic
+  sql: SELECT v.code FROM (VALUES (1+2),(5-1)) AS v(code) ORDER BY v.code
+  expect:
+    rows: 2
+    data:
+    - code: 3
+    - code: 4
+- name: Parenthesized comparison remains an expression
+  sql: SELECT (1=1) AS matches
+  expect:
+    rows: 1
+    data:
+    - matches: true
+- name: Assignment aliases preserve aggregate contracts
+  sql: SELECT total=SUM(amount) FROM tsql_report_items
+  expect:
+    rows: 1
+    data:
+    - total: 21
+- name: Shared common type helper retains COALESCE conversions
+  sql: SELECT COALESCE(NULL,'3',2)+1 AS code
+  expect:
+    rows: 1
+    data:
+    - code: 4
+- name: COALESCE still rejects an undeclared all-NULL type
+  sql: SELECT COALESCE(NULL,NULL) AS code
+  expect:
+    error: true
+- name: Native ALTER adds multiple defaulted columns
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_report_alter
+  - sql: CREATE TABLE tsql_report_alter (id INT PRIMARY KEY)
+  - sql: INSERT INTO tsql_report_alter VALUES (1)
+  - sql: ALTER TABLE tsql_report_alter ADD flag SMALLINT NOT NULL DEFAULT -1, amount INT NOT NULL DEFAULT 0
+  sql: SELECT id,flag,amount FROM tsql_report_alter
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      flag: -1
+      amount: 0
+- name: Inline metadata preserves the promoted BIGINT contract
+  scm: (begin (define s (newsession)) (s "username" "root") (define fields (tds_describe "memcp-tests" "SELECT TOP (0)
+    v.code FROM (VALUES (1),(CAST(2147483648 AS BIGINT))) AS v(code)" "" s)) (if (equal? ((car fields) "sql_type") "BIGINT")
+    true (error "inline metadata ignored the wider SQL declaration")))
+  expect:
+    result: true
+- name: Inline queries retain logical phase boundaries
+  sql: EXPLAIN IR SELECT v.code FROM (VALUES (1),(2)) AS v(code)
+  expect:
+    result_contains:
+    - union-block
+    result_not_contains:
+    - dependent-subquery
+    - inner_select
+    - scan_order
+    - '.grp:'
+cleanup:
+- sql: DROP TABLE IF EXISTS tsql_report_alter
+- sql: DROP TABLE IF EXISTS tsql_report_sink
+- sql: DROP TABLE IF EXISTS tsql_report_items

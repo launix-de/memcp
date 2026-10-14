@@ -837,32 +837,39 @@ Only the selected native operation survives the shared compile boundary. */
 The shared lazy coalesce operator remains responsible for evaluation; this
 callback consumes SQL triples and leaves only converted formulas in the plan.
 Dimension merging and exact decimal precision are separate frontend work. */
-(define tsql_coalesce_expr (lambda (arguments)
-	(cons (quote sql_compile_expr) (cons (lambda (infos) (begin
-		(if (< (count infos) 2) (error "COALESCE requires at least two arguments") true)
-		(define types (map infos (lambda (info) (tsql_addition_type (sql_info_type info)))))
-		(define active (filter types (lambda (type) (not (equal? type "NULL")))))
-		(if (empty_list? active) (error "COALESCE requires a declared non-NULL type") true)
-		(define target (coalesceNil
+/* A common SQL contract for bounded syntax values. This is compile-time
+metadata, shared by COALESCE and inline row constructors. It neither samples
+runtime values nor stores a second relational representation. */
+(define tsql_common_value_infos (lambda (infos null_type) (begin
+	(define types (map infos (lambda (info) (tsql_addition_type (sql_info_type info)))))
+	(define active (filter types (lambda (type) (not (equal? type "NULL")))))
+	(define target (if (empty_list? active) (coalesceNil null_type (error "a declared non-NULL type is required"))
+		(coalesceNil
 			(find (merge (list tsql_addition_numeric_types tsql_addition_text_types))
 				(lambda (type) (has? active type)) nil)
 			(if (reduce active (lambda (same type) (and same (equal? type (car active)))) true)
-				(car active) (error "unsupported COALESCE type combination"))))
-		(define formulas (map infos (lambda (info) (begin
-			(define type (tsql_addition_type (sql_info_type info)))
-			(define formula (sql_info_formula info))
-			(if (or (equal? type "NULL") (equal? type target)) formula
-				(and (has? tsql_addition_numeric_types target)
-					(or (has? tsql_addition_numeric_types type) (has? tsql_addition_text_types type)))
-				(if (has? '("DECIMAL" "MONEY" "SMALLMONEY") target)
-					(list tsql_cast_float formula)
-					(sql_type_lower_annotations (tsql_cast_expr formula target '())))
-				(and (has? tsql_addition_text_types target) (has? tsql_addition_text_types type)) formula
-				(error "unsupported implicit COALESCE conversion from " type " to " target))))))
-		(sql_info (cons (quote coalesceNil) formulas) target
-			(if (has? tsql_addition_text_types target)
-				(reduce infos (lambda (collation info) (sql_merge_collation collation (sql_info_collation info))) nil)
-				nil)))) arguments))))
+				(car active) (error "unsupported common SQL type combination")))))
+	(define collation (if (has? tsql_addition_text_types target)
+		(reduce infos (lambda (collation info)
+			(sql_merge_collation collation (sql_info_collation info))) nil) nil))
+	(map infos (lambda (info) (begin
+		(define type (tsql_addition_type (sql_info_type info)))
+		(define formula (sql_info_formula info))
+		(define converted (if (or (equal? type "NULL") (equal? type target)) formula
+			(and (has? tsql_addition_numeric_types target)
+				(or (has? tsql_addition_numeric_types type) (has? tsql_addition_text_types type)))
+			(if (has? '("DECIMAL" "MONEY" "SMALLMONEY") target)
+				(list tsql_cast_float formula)
+				(sql_type_lower_annotations (tsql_cast_expr formula target '())))
+			(and (has? tsql_addition_text_types target) (has? tsql_addition_text_types type)) formula
+			(error "unsupported implicit conversion from " type " to " target)))
+		(sql_info converted target collation)))))))
+(define tsql_coalesce_expr (lambda (arguments)
+	(cons (quote sql_compile_expr) (cons (lambda (infos) (begin
+		(if (< (count infos) 2) (error "COALESCE requires at least two arguments") true)
+		(define converted (tsql_common_value_infos infos nil))
+		(sql_info (cons (quote coalesceNil) (map converted sql_info_formula))
+			(sql_info_type (car converted)) (sql_info_collation (car converted))))) arguments))))
 
 /* Explicit wire descriptors come from the existing SQL expression metadata,
 never from the first row. Unknown expression types stay text in this first slice. */
@@ -1189,6 +1196,15 @@ dimensions are metadata only and are absent from the executable plan. */
 
 	(define tabledef (parser (or
 
+		/* VALUES is syntax data, lowered to the same logical SELECT/UNION
+		blocks as other inline relations. The common planner owns joins,
+		grouping, ordering, limits and physical execution. */
+		(parser '("(" (atom "VALUES" true)
+			(define rows (+ (parser '("(" (define row (+ tsql_expression ",")) ")") row) ","))
+			")" (? (atom "AS" true)) (define id tsql_identifier)
+			"(" (define aliases (+ tsql_identifier ",")) ")")
+			(list id schema (tsql_inline_values_query aliases rows) false nil))
+
 		(parser '((atom "(" true) (define query tsql_select) (atom ")" true) (atom "AS" true) (define id tsql_identifier) "(" (define aliases (+ tsql_identifier ",")) ")")
 			(list id schema (tsql_apply_derived_column_aliases query aliases) false nil))
 		(parser '((atom "(" true) (define query tsql_select) (atom ")" true) (define id tsql_identifier) "(" (define aliases (+ tsql_identifier ",")) ")")
@@ -1326,12 +1342,34 @@ dimensions are metadata only and are absent from the executable plan. */
 		)
 	))
 
+	(define tsql_inline_values_query (lambda (aliases rows) (begin
+		(define width (count aliases))
+		(if (reduce rows (lambda (valid row) (and valid (equal? (count row) width))) true)
+			true (error "inline VALUES requires equal row and alias widths"))
+		(if (equal? width (count (merge_unique (list (map aliases toLower))))) true
+			(error "duplicate inline VALUES column alias"))
+		/* The bounded syntax matrix supplies every column's declaration.
+		Only formulas and ordinary logical queries enter planning. */
+		(define columns (map (produceN width) (lambda (index)
+			(tsql_common_value_infos (map rows (lambda (row)
+				(sql_expr_info '() (nth row index)))) "INT"))))
+		(define branches (map (produceN (count rows)) (lambda (row_index)
+			(tsql_values_row_query schema aliases (map columns (lambda (column) (begin
+				(define info (nth column row_index))
+				(list (quote sql_type_expr) (sql_info_formula info)
+					(sql_info_type info) (sql_info_collation info)))))))))
+		(match branches (cons only '()) only
+			_ (list (quote union-block) (quote all) branches nil nil nil '())))))
+
 	(define tsql_select_core (parser '(
 		(atom "SELECT" true)
 
-		(define distinct (? (atom "DISTINCT" true)))
+		(define distinct (or (parser (atom "DISTINCT" true) true)
+			(parser (? (atom "ALL" true)) false)))
 		(define prefix_limit tsql_select_prefix)
 		(define cols (+ (or
+			/* Assignment aliases must precede expression comparisons. */
+			(parser '((define title (or tsql_identifier tsql_string)) "=" (define e tsql_expression)) '(title e))
 			(parser "*" '("*" '((quote get_column) nil false "*" false)))
 			(parser '((define tbl tsql_identifier_quoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
 			(parser '((define tbl tsql_identifier_unquoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
@@ -1339,6 +1377,7 @@ dimensions are metadata only and are absent from the executable plan. */
 			(parser '((define e tsql_expression) (atom "AS" true) (define title tsql_string)) '(title e))
 
 			(parser '((define e tsql_expression) (define title tsql_identifier)) '(title e))
+			(parser '((define e tsql_expression) (define title tsql_string)) '(title e))
 
 			(parser (define captured (capture tsql_expression)) '((extract_title_or_sql captured) (car (cdr captured))))
 		) ","))
