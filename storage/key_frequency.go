@@ -350,5 +350,5 @@ func (t *table) restoreKeyFrequencies() {
 			break
 		}
 	}
-	t.publishShowColumnsSnapshot()
+	t.publishShowColumnsSnapshot(false)
 }

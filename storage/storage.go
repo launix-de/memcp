@@ -2596,7 +2596,7 @@ func Init(en scm.Env) {
 				}
 			}
 			validateUniqueConstraintNames(newTable.Unique)
-			newTable.publishShowColumnsSnapshot()
+			newTable.publishShowColumnsSnapshot(true)
 
 			db.schemalock.Lock()
 			existing := db.tables.Get(tblName)
@@ -2636,18 +2636,25 @@ func Init(en scm.Env) {
 				if t2 := newTable.schema.GetTable(fk.Tbl2); t2 != nil {
 					t2.Foreign = append(t2.Foreign, fk)
 					installFKTriggers(newTable.schema, newTable, t2, fk)
+					t2.publishShowColumnsSnapshot(true)
 				}
 			}
 			// add constraints that are added onto us (forward-declared FKs)
+			forwardedConstraints := false
 			for _, t2 := range newTable.schema.tables.GetAll() {
 				if t2 != newTable {
 					for _, foreign := range t2.Foreign {
 						if foreign.Tbl2 == newTable.Name {
 							newTable.Foreign = append(newTable.Foreign, foreign)
+							forwardedConstraints = true
 							installFKTriggers(newTable.schema, t2, newTable, foreign)
 						}
 					}
 				}
+			}
+			// Only new incoming declarations need another metadata publication.
+			if forwardedConstraints {
+				newTable.publishShowColumnsSnapshot(true)
 			}
 			mode := newTable.schemaSaveMode()
 			if newTable.isEphemeralQueryTable() {
@@ -2891,7 +2898,7 @@ func Init(en scm.Env) {
 			for i, key := range t.Unique {
 				if key.matchesName(name) {
 					t.Unique = append(t.Unique[:i], t.Unique[i+1:]...)
-					t.publishShowColumnsSnapshot()
+					t.publishShowColumnsSnapshot(true)
 					t.schema.saveLockedAndUnlock(t.schemaSaveMode())
 					return scm.NewBool(true)
 				}
@@ -2933,6 +2940,7 @@ func Init(en scm.Env) {
 						}
 					}
 					tbl.Foreign = kept
+					tbl.publishShowColumnsSnapshot(true)
 				}
 				removeMetadata(t)
 				if parent != nil && parent != t {
@@ -2980,9 +2988,12 @@ func Init(en scm.Env) {
 			k := foreignKey{id, t1.Name, cols1, t2.Name, cols2, getForeignKeyMode(a[5]), getForeignKeyMode(a[6])}
 			t1.Foreign = append(t1.Foreign, k)
 			t2.Foreign = append(t2.Foreign, k)
-
 			// auto-generate system triggers for FK enforcement
 			installFKTriggers(db, t1, t2, k)
+			t1.publishShowColumnsSnapshot(true)
+			if t2 != t1 {
+				t2.publishShowColumnsSnapshot(true)
+			}
 
 			db.saveLockedAndUnlock(schemaSaveModeForDurability(t1.PersistencyMode == Safe || t2.PersistencyMode == Safe))
 
@@ -3225,12 +3236,12 @@ func Init(en scm.Env) {
 							return scm.NewBool(true)
 						}
 						t.Columns[i].AutoIncrement = scm.ToBool(a[3])
-						t.publishShowColumnsSnapshot()
+						t.publishShowColumnsSnapshot(false)
 						db.save()
 						return scm.NewBool(true)
 					default:
 						ok := t.Columns[i].Alter(scm.String(a[2]), a[3])
-						t.publishShowColumnsSnapshot()
+						t.publishShowColumnsSnapshot(false)
 						db.save()
 						return scm.NewBool(scm.ToBool(ok))
 					}
@@ -4001,6 +4012,9 @@ func Init(en scm.Env) {
 					return t.ShowColumns()
 				}
 				if len(a) == 2 {
+					if a[1].IsString() && scm.String(a[1]) == "constraints" {
+						return t.Constraints()
+					}
 					if a[1].IsString() && scm.String(a[1]) == "statistics" {
 						return showBuildIndexRows(t.schema, t, false)
 					}
@@ -4077,6 +4091,9 @@ func Init(en scm.Env) {
 				t := db.GetTable(scm.String(a[1]))
 				if t == nil {
 					panic("show3: table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+				if a[2].IsString() && scm.String(a[2]) == "constraints" {
+					return t.Constraints()
 				}
 				// (show schema tbl "statistics"|"indexes") → index metadata
 				if a[2].IsString() && scm.String(a[2]) == "statistics" {
@@ -5609,7 +5626,7 @@ func createTableKey(t *table, key uniqueKey, currentTx *TxContext) bool {
 		}
 	}
 	t.Unique = append(t.Unique, key)
-	t.publishShowColumnsSnapshot()
+	t.publishShowColumnsSnapshot(true)
 	t.schema.saveLockedAndUnlock(t.schemaSaveMode())
 	return true
 }

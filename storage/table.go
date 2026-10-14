@@ -1641,9 +1641,19 @@ func (t *table) metadataMemory() uint {
 	if names := t.columnNamesSnapshot.Load(); names != nil {
 		size += uint(cap(names.declarations)) * uint(unsafe.Sizeof((*column)(nil)))
 	}
-	if snapshot := t.showColumnsSnapshot.Load(); snapshot != nil && snapshot.metadata != nil && snapshot.metadata.columns != nil {
-		// Names borrow the column strings; charge only the new pointer array.
-		size += uint(cap(snapshot.metadata.columns.names)) * uint(unsafe.Sizeof(""))
+	if snapshot := t.showColumnsSnapshot.Load(); snapshot != nil && snapshot.metadata != nil {
+		size += uint(unsafe.Sizeof(*snapshot.metadata))
+		if snapshot.metadata.columns != nil {
+			// Names borrow the column strings; charge only the new pointer array.
+			size += uint(cap(snapshot.metadata.columns.names)) * uint(unsafe.Sizeof(""))
+		}
+		if snapshot.metadata.constraints != emptyTableConstraints {
+			// The field is already included in the wrapper; only its retained
+			// payload belongs here. Empty metadata is one shared package value.
+			if bytes := scm.ComputeSize(snapshot.metadata.constraints); bytes > uint(unsafe.Sizeof(scm.Scmer{})) {
+				size += bytes - uint(unsafe.Sizeof(scm.Scmer{}))
+			}
+		}
 	}
 	return size
 }
@@ -1737,6 +1747,7 @@ type tableShowColumnsSnapshotMetadata struct {
 	columns                   *tableShowColumnsMetadata
 	columnNames               *tableColumnNamesSnapshot
 	statistics                *tableStatisticsSnapshot
+	constraints               scm.Scmer // immutable declarations, replaced only by schema-owned DDL
 }
 
 func plannerFingerprintMix(fingerprint, value uint64) uint64 {
@@ -1897,10 +1908,12 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 				plannerStatistics: plannerStatistics,
 			},
 			columnNames: columnNames,
+			constraints: emptyTableConstraints,
 		},
 	}
 	if current := t.showColumnsSnapshot.Load(); current != nil {
 		snapshot.metadata.statistics = current.metadata.statistics
+		snapshot.metadata.constraints = current.metadata.constraints
 	}
 	return snapshot
 }
@@ -1924,17 +1937,111 @@ func (t *table) publishColumnNamesSnapshot() *tableColumnNamesSnapshot {
 	return snapshot
 }
 
-func (t *table) publishShowColumnsSnapshot() scm.Scmer {
-	snapshot := t.buildShowColumnsSnapshot(t.CountEstimate())
-	t.columnNamesSnapshot.Store(snapshot.metadata.columnNames)
-	t.showColumnsSnapshot.Store(snapshot)
-	t.publishPlannerStatsToken()
-	return snapshot.value
+// Constraint descriptions are declaration metadata, not access-index catalogs.
+// The complete value owns all its column-name slices. It is built only by an
+// unpublished constructor/load or the database schema mutation owner.
+var emptyTableConstraints = scm.NewSlice([]scm.Scmer{
+	scm.NewString("Unique"), scm.NewSlice(nil),
+	scm.NewString("ForeignKeys"), scm.NewSlice(nil),
+})
+
+func (t *table) buildConstraintMetadata() scm.Scmer {
+	if len(t.Unique) == 0 && len(t.Foreign) == 0 {
+		return emptyTableConstraints
+	}
+	keys := make([]scm.Scmer, len(t.Unique))
+	for i, key := range t.Unique {
+		keys[i] = scm.NewSlice([]scm.Scmer{
+			scm.NewString("Id"), scm.NewString(key.Id),
+			scm.NewString("Cols"), showStringSlice(key.Cols),
+			scm.NewString("constraint_name"), scm.NewString(key.ConstraintName),
+			scm.NewString("nulls_not_distinct"), scm.NewBool(key.NullsNotDistinct),
+		})
+	}
+	foreign := make([]scm.Scmer, 0, len(t.Foreign))
+	// Self references can occur twice in the existing native endpoint directory.
+	// List each declaration once, without changing that enforcement directory.
+	seen := make(map[[3]string]bool, len(t.Foreign))
+	for _, key := range t.Foreign {
+		identity := [3]string{key.Id, key.Tbl1, key.Tbl2}
+		if seen[identity] {
+			continue
+		}
+		seen[identity] = true
+		role, other := "referenced", key.Tbl1
+		local, remote := key.Cols2, key.Cols1
+		if key.Tbl1 == t.Name {
+			role, other = "referencing", key.Tbl2
+			local, remote = key.Cols1, key.Cols2
+		}
+		foreign = append(foreign, scm.NewSlice([]scm.Scmer{
+			scm.NewString("Id"), scm.NewString(key.Id),
+			scm.NewString("Role"), scm.NewString(role),
+			scm.NewString("LocalColumns"), showStringSlice(local),
+			scm.NewString("OtherTable"), scm.NewString(other),
+			scm.NewString("OtherColumns"), showStringSlice(remote),
+			scm.NewString("UpdateMode"), scm.NewString(showForeignKeyMode(key.Updatemode)),
+			scm.NewString("DeleteMode"), scm.NewString(showForeignKeyMode(key.Deletemode)),
+		}))
+	}
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewString("Unique"), scm.NewSlice(keys),
+		scm.NewString("ForeignKeys"), scm.NewSlice(foreign),
+	})
+}
+
+// Constraints borrows one immutable catalog publication. It never acquires a
+// schema/table/shard lock, visits storage, rebuilds metadata, or updates counters.
+func (t *table) Constraints() scm.Scmer {
+	if t != nil {
+		if snapshot := t.showColumnsSnapshot.Load(); snapshot != nil && !snapshot.metadata.constraints.IsNil() {
+			return snapshot.metadata.constraints
+		}
+	}
+	return emptyTableConstraints
+}
+
+// publishShowColumnsSnapshot constructs declarations only when its caller owns
+// database schema mutation (or an unpublished constructor/load). Maintenance and
+// lazy refresh carry forward immutable constraint metadata; they never inspect
+// mutable Foreign slices or acquire a catalog lock.
+func (t *table) publishShowColumnsSnapshot(constraintsChanged bool) scm.Scmer {
+	for {
+		current := t.showColumnsSnapshot.Load()
+		snapshot := t.buildShowColumnsSnapshot(t.CountEstimate())
+		if constraintsChanged {
+			snapshot.metadata.constraints = t.buildConstraintMetadata()
+			t.columnNamesSnapshot.Store(snapshot.metadata.columnNames)
+			t.showColumnsSnapshot.Store(snapshot)
+		} else {
+			// A maintenance/lazy render must not overwrite a newer declaration.
+			if !t.showColumnsSnapshot.CompareAndSwap(current, snapshot) {
+				continue
+			}
+			var oldNames *tableColumnNamesSnapshot
+			if current != nil {
+				oldNames = current.metadata.columnNames
+			}
+			// DDL can already have published its new name directory while building
+			// its full snapshot. Never replace that directory with an older render.
+			t.columnNamesSnapshot.CompareAndSwap(oldNames, snapshot.metadata.columnNames)
+		}
+		t.publishPlannerStatsToken()
+		return snapshot.value
+	}
 }
 
 func (t *table) invalidateShowColumnsSnapshot() {
-	t.publishColumnNamesSnapshot()
-	t.showColumnsSnapshot.Store(nil)
+	names := t.publishColumnNamesSnapshot()
+	// Preserve constraint lifetime when a TEMP column invalidates rendered column
+	// descriptions. Getters refresh nil value/plannerValue through the existing
+	// lazy path; constraint reads retain the complete immutable declaration set.
+	metadata := &tableShowColumnsSnapshotMetadata{columnNames: names, constraints: emptyTableConstraints}
+	if current := t.showColumnsSnapshot.Load(); current != nil {
+		*metadata = *current.metadata
+		metadata.columnNames = names
+	}
+	t.showColumnsSnapshot.Store(&tableShowColumnsSnapshot{metadata: metadata})
 	t.publishPlannerStatsToken()
 }
 
@@ -1962,10 +2069,10 @@ func (t *table) ShowColumns() scm.Scmer {
 		return scm.NewNil()
 	}
 	snapshot := t.showColumnsSnapshot.Load()
-	if snapshot != nil {
+	if snapshot != nil && !snapshot.value.IsNil() {
 		return snapshot.value
 	}
-	return t.publishShowColumnsSnapshot()
+	return t.publishShowColumnsSnapshot(false)
 }
 
 // PlannerStatistics returns one immutable, atomically published catalog value.
@@ -1977,10 +2084,10 @@ func (t *table) PlannerStatistics() scm.Scmer {
 	}
 	for {
 		snapshot := t.showColumnsSnapshot.Load()
-		if snapshot != nil {
+		if snapshot != nil && !snapshot.plannerValue.IsNil() {
 			return snapshot.plannerValue
 		}
-		t.publishShowColumnsSnapshot()
+		t.publishShowColumnsSnapshot(false)
 	}
 }
 
@@ -1993,13 +2100,13 @@ func (t *table) PlannerStatisticsFingerprint(includeFeedback bool) uint64 {
 	}
 	for {
 		snapshot := t.showColumnsSnapshot.Load()
-		if snapshot != nil {
+		if snapshot != nil && !snapshot.plannerValue.IsNil() {
 			if includeFeedback {
 				return plannerFingerprintMix(snapshot.plannerFingerprint, t.filterFeedbackFingerprint())
 			}
 			return snapshot.plannerFingerprint
 		}
-		t.publishShowColumnsSnapshot()
+		t.publishShowColumnsSnapshot(false)
 	}
 }
 
@@ -2618,7 +2725,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		}
 		t.Columns = append(t.Columns, cp)
 		// Publish the directory before releasing the initialized shards.
-		t.publishShowColumnsSnapshot()
+		t.publishShowColumnsSnapshot(len(uniqueKeys) != 0)
 		return cp, true
 	}
 	if len(uniqueKeys) != 0 {
@@ -2791,7 +2898,7 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 		}
 		t.invalidateShowColumnsSnapshot()
 	} else {
-		t.publishShowColumnsSnapshot()
+		t.publishShowColumnsSnapshot(true)
 	}
 	mode := t.schemaSaveMode()
 	if cp.IsTemp {
@@ -2838,7 +2945,7 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 			if c.IsTemp {
 				t.invalidateShowColumnsSnapshot()
 			} else {
-				t.publishShowColumnsSnapshot()
+				t.publishShowColumnsSnapshot(false)
 			}
 			t.finishSchemaMutationLocked(t.schemaSaveMode())
 			// Fire lifecycle hooks after unlock so dependents (e.g. prejoin caches)
