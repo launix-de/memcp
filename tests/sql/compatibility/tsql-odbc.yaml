@@ -546,7 +546,6 @@ test_cases:
   name: 'Fixture cleanup 004: DROP VIEW IF EXISTS dbo.odbc_fixture_view'
 - sql: DROP TABLE IF EXISTS dbo.odbc_fixture
   name: 'Fixture cleanup 005: DROP TABLE IF EXISTS dbo.odbc_fixture'
-cleanup: []
 
 # Native metadata adapter coverage, independent of SQL procedure grammar.
 - name: Prepare native driver metadata fixture
@@ -738,3 +737,4 @@ cleanup: []
   scm: (tsql_metadata_result "memcp-tests" "unknown_driver_metadata" (list (list "table_name" "absent_driver_table")) nil)
   expect:
     error: true
+cleanup: []

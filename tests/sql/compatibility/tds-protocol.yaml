@@ -184,8 +184,6 @@ test_cases:
   name: 'Fixture cleanup 002: DROP USER IF EXISTS tds_limited'
 - sql: DROP USER IF EXISTS 'tds;=brace} user'
   name: 'Fixture cleanup 003: DROP USER IF EXISTS ''tds;=brace} user'''
-cleanup:
-- sql: DROP TABLE IF EXISTS tds_protocol_basic
 
 # Metadata RPC goes through the same frontend adapter as SQL procedure calls.
 - name: Native metadata RPC describes persisted declarations and empty catalogs
@@ -276,3 +274,5 @@ cleanup:
         value: driver_rpc_catalog
       expect:
         rows: 0
+cleanup:
+- sql: DROP TABLE IF EXISTS tds_protocol_basic
