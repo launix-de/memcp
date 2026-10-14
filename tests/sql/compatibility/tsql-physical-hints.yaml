@@ -1,0 +1,366 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  description: T-SQL physical preferences are advisory; only real constraints use native keys
+setup:
+- sql: DROP TABLE IF EXISTS tsql_hint_column
+- sql: DROP TABLE IF EXISTS tsql_hint_invalid
+- sql: DROP TABLE IF EXISTS tsql_hint_layout
+- sql: DROP TABLE IF EXISTS tsql_hint_rows
+- sql: DROP TABLE IF EXISTS tsql_hint_unique
+- sql: CREATE TABLE tsql_hint_rows(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE tsql_hint_unique(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO tsql_hint_rows VALUES(1,7),(2,7)
+- sql: INSERT INTO tsql_hint_unique VALUES(1,9)
+test_cases:
+- name: Table hint accepts read isolation
+  sql: SELECT id,value FROM tsql_hint_rows WITH (READUNCOMMITTED) WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Table hint accepts explicit alias
+  sql: SELECT id,value FROM tsql_hint_rows AS h WITH (NOLOCK) WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Table hint accepts implicit alias
+  sql: SELECT id,value FROM tsql_hint_rows h WITH (ROWLOCK, UPDLOCK) WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Table hint accepts legacy hint
+  sql: SELECT id,value FROM tsql_hint_rows (NOLOCK) WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Table hint accepts several indexes
+  sql: SELECT id,value FROM tsql_hint_rows WITH (INDEX ([missing ix],0)) WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Table hint accepts index equality
+  sql: SELECT id,value FROM tsql_hint_rows WITH (INDEX = ([missing ix])) WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Table hint accepts parameterized seek
+  sql: SELECT id,value FROM tsql_hint_rows WITH (FORCESEEK ([missing ix] (id,value))) WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Table hint accepts seek and index
+  sql: SELECT id,value FROM tsql_hint_rows WITH (FORCESEEK, INDEX (not_created)) WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Table hint accepts scan and isolation
+  sql: SELECT id,value FROM tsql_hint_rows WITH (FORCESCAN, READCOMMITTEDLOCK) WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Table hint accepts space separated hints
+  sql: SELECT id,value FROM tsql_hint_rows WITH (NOLOCK ROWLOCK) WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Hints survive qualified joined source parsing
+  sql: SELECT h.id,h.value FROM [dbo].[tsql_hint_rows] AS h WITH (INDEX(0)) INNER JOIN tsql_hint_rows AS r WITH
+    (FORCESEEK) ON h.id=r.id WHERE h.id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Query access preferences stay advisory
+  sql: SELECT id,value FROM tsql_hint_rows WHERE id=1 OPTION (HASH JOIN, FORCE ORDER, MAXDOP 1, RECOMPILE)
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Query group and union preferences stay advisory
+  sql: SELECT id,value FROM tsql_hint_rows WHERE id=1 OPTION (HASH GROUP, MERGE UNION, FAST 1, MAXRECURSION 100)
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Query named advisory hints accept strings
+  sql: SELECT id,value FROM tsql_hint_rows WHERE id=1 OPTION (USE HINT (N'DISABLE_OPTIMIZER_ROWGOAL'), OPTIMIZE
+    FOR UNKNOWN)
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Query table hint reuses ordinary hint grammar
+  sql: SELECT h.id,h.value FROM tsql_hint_rows h WHERE h.id=1 OPTION (TABLE HINT (h, FORCESEEK, INDEX (not_created)))
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Hints disappear before the common logical planner
+  scm: (equal? (parse_tsql "memcp-tests" "EXPLAIN IR SELECT id,value FROM tsql_hint_rows WHERE id=1" nil nil nil)
+    (parse_tsql "memcp-tests" "EXPLAIN IR SELECT id,value FROM tsql_hint_rows WITH(INDEX(not_created),NOLOCK) WHERE
+    id=1 OPTION(MAXDOP 1,RECOMPILE)" nil nil nil))
+  expect:
+    result: true
+- name: Malformed or semantic unknown table hint is rejected
+  sql: SELECT id FROM tsql_hint_rows WITH (NOT_A_HINT)
+  expect:
+    error: true
+- name: Malformed or semantic empty table hint is rejected
+  sql: SELECT id FROM tsql_hint_rows WITH ()
+  expect:
+    error: true
+- name: Malformed or semantic bad seek parentheses is rejected
+  sql: SELECT id FROM tsql_hint_rows WITH (FORCESEEK (not_created ()))
+  expect:
+    error: true
+- name: Malformed or semantic unknown query hint is rejected
+  sql: SELECT id FROM tsql_hint_rows OPTION (NOT_A_HINT)
+  expect:
+    error: true
+- name: Malformed or semantic empty query hint is rejected
+  sql: SELECT id FROM tsql_hint_rows OPTION ()
+  expect:
+    error: true
+- name: Malformed or semantic constraint bypass is rejected
+  sql: SELECT id FROM tsql_hint_rows WITH (IGNORE_CONSTRAINTS)
+  expect:
+    error: true
+- name: Malformed or semantic trigger bypass is rejected
+  sql: SELECT id FROM tsql_hint_rows WITH (IGNORE_TRIGGERS)
+  expect:
+    error: true
+- name: Ordinary index DDL emits no storage operations
+  scm: (equal? (parse_tsql "memcp-tests" "CREATE NONCLUSTERED INDEX accel ON tsql_hint_rows(value DESC) INCLUDE(id)
+    WHERE value>0 WITH(FILLFACTOR=80,ONLINE=ON,MAXDOP=2) ON [PRIMARY]" nil nil nil) true)
+  expect:
+    result: true
+- name: Ordinary acceleration index accepts duplicates
+  sql: CREATE INDEX accel ON tsql_hint_rows(value)
+  expect:
+    affected_rows: 0
+- name: Ordinary acceleration index can be declared repeatedly
+  sql: CREATE CLUSTERED INDEX accel ON tsql_hint_rows(value) WITH (DATA_COMPRESSION=PAGE)
+  expect:
+    affected_rows: 0
+- name: Ignored acceleration declaration preserves duplicate writes
+  sql: INSERT INTO tsql_hint_rows VALUES(3,7)
+  expect:
+    affected_rows: 1
+- name: Ordinary index rebuild remains advisory
+  sql: ALTER INDEX accel ON tsql_hint_rows REBUILD WITH (ONLINE=ON (WAIT_AT_LOW_PRIORITY(MAX_DURATION=1 MINUTES,ABORT_AFTER_WAIT=SELF)),MAXDOP=2)
+  expect:
+    affected_rows: 0
+- name: All index reorganization remains advisory
+  sql: ALTER INDEX ALL ON tsql_hint_rows REORGANIZE WITH (LOB_COMPACTION=ON)
+  expect:
+    affected_rows: 0
+- name: Dropped ignored index requires no metadata record
+  sql: DROP INDEX IF EXISTS accel ON tsql_hint_rows WITH (ONLINE=ON)
+  expect:
+    affected_rows: 0
+  noncritical: true
+- name: Physical option typo is rejected
+  sql: CREATE INDEX bad ON tsql_hint_rows(value) WITH (NOT_AN_OPTION=ON)
+  expect:
+    error: true
+- name: Ordinary index rejects an unknown table
+  sql: CREATE INDEX bad ON tsql_hint_missing(value)
+  expect:
+    error: true
+- name: Ordinary index rejects an unknown key column
+  sql: CREATE INDEX bad ON tsql_hint_rows(missing)
+  expect:
+    error: true
+- name: Ordinary index rejects an unknown include column
+  sql: CREATE INDEX bad ON tsql_hint_rows(value) INCLUDE(missing)
+  expect:
+    error: true
+- name: Unique physical layout still creates a native constraint
+  sql: CREATE UNIQUE NONCLUSTERED INDEX uq_hint ON tsql_hint_unique(value DESC) INCLUDE(id) WITH (IGNORE_DUP_KEY=OFF,FILLFACTOR=75,DATA_COMPRESSION=PAGE)
+    ON [PRIMARY]
+  expect:
+    affected_rows: 0
+- name: Native constraint enforces the unique index declaration
+  sql: INSERT INTO tsql_hint_unique VALUES(2,9)
+  expect:
+    error: true
+    contains: Duplicate entry
+- name: Unique layout rebuild cannot weaken enforcement
+  sql: ALTER INDEX uq_hint ON tsql_hint_unique REBUILD WITH (FILLFACTOR=60)
+  expect:
+    affected_rows: 0
+- name: Unique layout rebuild retains the native constraint
+  sql: INSERT INTO tsql_hint_unique VALUES(3,9)
+  expect:
+    error: true
+    contains: Duplicate entry
+- name: Duplicate suppression is a semantic option and is rejected
+  sql: CREATE UNIQUE INDEX uq_ignore ON tsql_hint_unique(value) WITH (IGNORE_DUP_KEY=ON)
+  expect:
+    error: true
+    contains: IGNORE_DUP_KEY
+- name: Filtered uniqueness cannot be ignored
+  sql: CREATE UNIQUE INDEX uq_filtered ON tsql_hint_unique(value) WHERE id>0
+  expect:
+    error: true
+    contains: filtered UNIQUE
+- name: Unique replacement requires native atomic replacement support
+  sql: CREATE UNIQUE INDEX uq_hint ON tsql_hint_unique(id) WITH (DROP_EXISTING=ON)
+  expect:
+    error: true
+    contains: DROP_EXISTING
+- name: Index disable cannot silently bypass a constraint
+  sql: ALTER INDEX uq_hint ON tsql_hint_unique DISABLE
+  expect:
+    error: true
+    contains: DISABLE
+- name: Index drop is explicit until native constraint-safe removal exists
+  sql: DROP INDEX uq_hint ON tsql_hint_unique
+  expect:
+    error: true
+    contains: native constraint-safe key removal
+- name: Drop index removes a real native unique constraint
+  sql: DROP INDEX uq_hint ON tsql_hint_unique
+  expect:
+    affected_rows: 0
+  noncritical: true
+- name: Dropped native unique constraint permits the formerly conflicting tuple
+  sql: INSERT INTO tsql_hint_unique VALUES(2,9)
+  expect:
+    affected_rows: 1
+  noncritical: true
+- name: Unsupported drop retains native unique enforcement
+  sql: INSERT INTO tsql_hint_unique VALUES(3,9)
+  expect:
+    error: true
+    contains: Duplicate entry
+- name: Rejected unique writes preserve the original native row
+  sql: SELECT id,value FROM tsql_hint_unique
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 9
+- name: Drop index cannot remove a primary key
+  sql: DROP INDEX [PRIMARY] ON tsql_hint_rows
+  expect:
+    error: true
+    contains: PRIMARY
+- name: Native primary key remains after rejected physical drop
+  sql: INSERT INTO tsql_hint_rows VALUES(1,99)
+  expect:
+    error: true
+    contains: Duplicate entry
+- name: Inline table key ignores physical layout while preserving constraint name
+  sql: CREATE TABLE tsql_hint_layout(id INT NOT NULL,value INT,CONSTRAINT pk_layout PRIMARY KEY NONCLUSTERED(id
+    DESC) WITH(PAD_INDEX=OFF,FILLFACTOR=75) ON [PRIMARY],CONSTRAINT uq_layout UNIQUE CLUSTERED(value) WITH(IGNORE_DUP_KEY=OFF,ONLINE=OFF))
+    ON [PRIMARY]
+  expect:
+    affected_rows: 0
+- name: Inline physical layout permits ordinary native inserts
+  sql: INSERT INTO tsql_hint_layout VALUES(1,9)
+  expect:
+    affected_rows: 1
+- name: Inline physical layout still enforces primary key
+  sql: INSERT INTO tsql_hint_layout VALUES(1,10)
+  expect:
+    error: true
+    contains: Duplicate entry
+- name: Inline physical layout still enforces unique key
+  sql: INSERT INTO tsql_hint_layout VALUES(2,9)
+  expect:
+    error: true
+    contains: Duplicate entry
+- name: Inline duplicate suppression cannot weaken uniqueness
+  sql: CREATE TABLE tsql_hint_invalid(id INT PRIMARY KEY WITH(IGNORE_DUP_KEY=ON))
+  expect:
+    error: true
+    contains: IGNORE_DUP_KEY
+- name: Column primary key consumes physical options
+  sql: CREATE TABLE tsql_hint_column(id INT PRIMARY KEY CLUSTERED WITH(FILLFACTOR=80) ON [PRIMARY],value INT)
+  expect:
+    affected_rows: 0
+- name: Added native unique constraint ignores physical layout
+  sql: ALTER TABLE tsql_hint_column ADD CONSTRAINT uq_column UNIQUE NONCLUSTERED(value DESC) WITH(IGNORE_DUP_KEY=OFF,ONLINE=OFF)
+    ON [PRIMARY]
+  expect:
+    affected_rows: 0
+- name: Update target table accepts advisory hints
+  sql: UPDATE tsql_hint_rows WITH(ROWLOCK,UPDLOCK) SET value=8 WHERE id=1 OPTION (MAXDOP 1)
+  expect:
+    affected_rows: 1
+- name: Hinted update uses native DML
+  sql: SELECT id,value FROM tsql_hint_rows WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 8
+- name: Delete target table accepts advisory hints
+  sql: DELETE FROM tsql_hint_rows WITH(ROWLOCK) WHERE id=3 OPTION (MAXDOP 1)
+  expect:
+    affected_rows: 1
+- name: Hinted delete uses native DML
+  sql: SELECT COUNT(*) AS n FROM tsql_hint_rows
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: Hint keywords remain available as quoted output names
+  sql: SELECT 1 AS [WITH],2 AS [OPTION]
+  expect:
+    rows: 1
+    data:
+    - WITH: 1
+      OPTION: 2
+- name: Discarded table hints preserve the read access policy
+  scm: (parse_tsql "memcp-tests" "SELECT id FROM tsql_hint_rows WITH(NOLOCK)" (lambda (_db _table _write) (error
+    "read access denied")) nil nil)
+  expect:
+    error: true
+    contains: read access denied
+- name: Ignored acceleration declarations preserve the write access policy
+  scm: (parse_tsql "memcp-tests" "CREATE INDEX private_hint ON tsql_hint_rows(value)" (lambda (_db _table write)
+    (if write (error "write access denied") true)) nil nil)
+  expect:
+    error: true
+    contains: write access denied
+- name: Ignored index maintenance preserves the write access policy
+  scm: (parse_tsql "memcp-tests" "ALTER INDEX private_hint ON tsql_hint_rows REBUILD" (lambda (_db _table write)
+    (if write (error "write access denied") true)) nil nil)
+  expect:
+    error: true
+    contains: write access denied
+cleanup:
+- sql: DROP TABLE IF EXISTS tsql_hint_unique
+- sql: DROP TABLE IF EXISTS tsql_hint_rows
+- sql: DROP TABLE IF EXISTS tsql_hint_layout
+- sql: DROP TABLE IF EXISTS tsql_hint_invalid
+- sql: DROP TABLE IF EXISTS tsql_hint_column

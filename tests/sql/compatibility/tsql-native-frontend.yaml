@@ -919,7 +919,6 @@ test_cases:
       data:
       - id: 1
         label: pending
-    noncritical: true
 
   - name: Insert without into accepts the dialect statement spelling
     sql: INSERT tsql_native_copy (id,name) VALUES (99,N'optional keyword')
