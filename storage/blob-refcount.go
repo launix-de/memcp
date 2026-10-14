@@ -87,6 +87,10 @@ func (db *database) ensureBlobTable() *table {
 	t = db.newTable(".blobs", Safe)
 	t.createColumnLocked("hash", "TEXT", nil, nil, false)
 	t.createColumnLocked("refcount", "INT", nil, nil, false)
+	// The private constructor starts with an empty declaration snapshot. Publish
+	// the complete column directory under its existing schema owner before the
+	// table becomes visible to INSERT and UPDATE batches.
+	t.publishShowColumnsSnapshot(true)
 	db.tables.Set(t.Name, t)
 	db.saveLockedAndUnlock(schemaSaveFsync)
 	state.table.Store(t)
