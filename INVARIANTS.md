@@ -1299,3 +1299,16 @@ collected per operation/batch, never in source-row loops. Hysteresis must preven
 merge/split churn. Empty-cell coalescing and redundant plateau-cursor retirement
 are semantic simplifications; they are not a replacement for this general cost
 policy, nonempty-range merging, or cold-anchor rebasing.
+
+### Native stored source procedures
+
+- `database.procedures` publishes immutable source definitions through the
+  existing lock-free catalog. CREATE/DROP use database schema ownership and
+  the existing durable schema checkpoint. Name, source, language and frontend
+  parameter contracts are persisted; compiled callables, sessions and
+  transactions are never serialized. Source compilation runs outside catalog
+  locks and schema loading, using the registered source-language compiler and
+  ordinary closure/JIT boundary. Each immutable definition publishes its
+  compiled callable once; replacement leaves active invocations intact.
+  Frontend-generated bodies retain the shared planner's schema guards and
+  accept invocation bindings explicitly.

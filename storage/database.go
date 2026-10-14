@@ -33,6 +33,9 @@ type database struct {
 	Name        string                                     `json:"name"`
 	persistence PersistenceEngine                          `json:"-"`
 	tables      *NonLockingReadMap.ReadMap[string, *table] `json:"-"`
+	// Immutable source definitions use the same lock-free catalog as tables.
+	// DDL publishes under schemalock; compiled code is transient per definition.
+	procedures *NonLockingReadMap.ReadMap[string, *ProcedureDescription] `json:"-"`
 	// loadOnce is the database-wide lazy-load barrier. The MySQL and HTTP
 	// listeners may issue the first queries concurrently; none may observe a
 	// partially decoded table catalog.
@@ -98,6 +101,7 @@ func (db *database) blobRefState() *blobRefState {
 func newDatabase() *database {
 	return &database{
 		tables:      NonLockingReadMap.NewReadMap[string, *table](),
+		procedures:  NonLockingReadMap.NewReadMap[string, *ProcedureDescription](),
 		blobRefs:    new(blobRefState),
 		committedTx: make(map[string]uint64),
 	}
@@ -290,16 +294,25 @@ func normalizeTempLookupName(dbName string, name string) string {
 // Custom JSON to persist private tables field
 func (d *database) MarshalJSON() ([]byte, error) {
 	type persist struct {
-		Name   string                                     `json:"name"`
-		Tables *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
+		Name       string                                     `json:"name"`
+		Tables     *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
+		Procedures []*ProcedureDescription                    `json:"procedures,omitempty"`
 	}
-	return json.Marshal(persist{Name: d.Name, Tables: d.tables})
+	definitions := make([]*ProcedureDescription, 0)
+	if d.procedures != nil {
+		for _, definition := range d.procedures.GetAll() {
+			definitions = append(definitions, definition)
+		}
+	}
+	sort.Slice(definitions, func(i, j int) bool { return definitions[i].Name < definitions[j].Name })
+	return json.Marshal(persist{Name: d.Name, Tables: d.tables, Procedures: definitions})
 }
 
 func (d *database) UnmarshalJSON(data []byte) error {
 	type persist struct {
-		Name   string                                     `json:"name"`
-		Tables *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
+		Name       string                                     `json:"name"`
+		Tables     *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
+		Procedures []*ProcedureDescription                    `json:"procedures,omitempty"`
 	}
 	var p persist
 	if err := json.Unmarshal(data, &p); err != nil {
@@ -307,6 +320,13 @@ func (d *database) UnmarshalJSON(data []byte) error {
 	}
 	d.Name = p.Name
 	d.tables = p.Tables
+	d.procedures = NonLockingReadMap.NewReadMap[string, *ProcedureDescription]()
+	for _, definition := range p.Procedures {
+		if definition == nil || definition.Name == "" || definition.Language == "" || definition.Source == "" || d.procedures.Get(definition.Name) != nil {
+			return fmt.Errorf("invalid stored procedure source definition")
+		}
+		d.procedures.Set(definition.Name, definition)
+	}
 	if d.tables == nil {
 		d.tables = NonLockingReadMap.NewReadMap[string, *table]()
 	}
@@ -320,6 +340,15 @@ func (d *database) ComputeSize() uint {
 	var sz uint = 16 * 8 // heuristic
 	for _, t := range d.tables.GetAll() {
 		sz += t.ComputeSize()
+	}
+	if d.procedures != nil {
+		for _, definition := range d.procedures.GetAll() {
+			sz += uint(len(definition.Name) + len(definition.Source) + len(definition.Language))
+			sz += scm.ComputeSize(definition.Parameters)
+			if fn := definition.compiled.Load(); fn != nil {
+				sz += scm.ComputeSize(*fn)
+			}
+		}
 	}
 	return sz
 }
@@ -652,6 +681,7 @@ func (db *database) ensureLoaded() {
 			panic(err)
 		}
 		db.tables = tmp.tables
+		db.procedures = tmp.procedures
 		// restore back-references; do not touch on-disk columns yet
 		for _, t := range db.tables.GetAll() {
 			t.schema = db

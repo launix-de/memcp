@@ -143,6 +143,17 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   reservations through the existing shard lock and rebuild visibility-forwarding
   protocol. No reservation directory is retained or persisted.
 
+- `database.procedures` publishes immutable source definitions through the
+  existing lock-free catalog. CREATE/DROP use database schema ownership and
+  the existing durable schema checkpoint. Name, source, language and frontend
+  parameter contracts are persisted; compiled callables, sessions and
+  transactions are never serialized. Source compilation runs outside catalog
+  locks and schema loading, using the registered source-language compiler and
+  ordinary closure/JIT boundary. Each immutable definition publishes its
+  compiled callable once; replacement leaves active invocations intact.
+  Frontend-generated bodies retain the shared planner's schema guards and
+  accept invocation bindings explicitly.
+
 - `table.Auto_increment` uses the same atomic reservation for native INSERT
   and `reserve_ids`, once per batch/block. Runtime counter snapshots and DDL
   updates are atomic; loading unpublished table objects owns initialization.
