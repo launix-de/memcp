@@ -210,9 +210,10 @@ test_cases:
     error: true
 - name: IF does not dispatch arbitrary procedure text
   # Unselected EXEC must not look up or invoke a procedure.
-  sql: IF 1=0 EXEC unknown_installation_procedure
+  sql: IF 1=0 EXEC unknown_installation_procedure ELSE SELECT 5 AS n
   expect:
-    affected_rows: 0
+    rows: 1
+    data: [{n: 5}]
 - name: Cached IF catalog conditions observe create and drop
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_if_catalog
