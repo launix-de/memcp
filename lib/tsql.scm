@@ -153,6 +153,154 @@ execution paths. The cache, transaction owner and compiled evaluator are shared.
 		_ (previous req res)))))
 (service_registry "T-SQL Frontend" (list (arg "api-port" (env "PORT" "4321")) "/tsql/[database]" "POST, NDJSON"))
 
+/* Driver catalogs adapt existing declarations and constraints. They never
+inspect user rows, enumerate automatic access indexes, or retain a second catalog.
+Descriptor types below are frontend contracts, including for empty results. */
+(define tsql_metadata_arguments (lambda (arguments names) (begin
+	(define bind (lambda (remaining index values) (match remaining
+		(cons argument rest) (begin
+			(define supplied (toLower (car argument)))
+			(define supplied (if (and (> (strlen supplied) 0) (equal? (substr supplied 0 1) "@")) (substr supplied 1) supplied))
+			(define name (if (equal? supplied "")
+				(if (< index (count names)) (nth names index) (error "too many metadata arguments")) supplied))
+			(if (has? names name) true (error "unknown metadata argument: " name))
+			(if (has? (extract_assoc values (lambda (key _value) key)) name)
+				(error "duplicate metadata argument") true)
+			(bind rest (+ index 1) (append values name (cadr argument))))
+		_ values)))
+	(bind arguments 0 '()))))
+(define tsql_metadata_match (lambda (name pattern patterns)
+	(if (nil? pattern) true
+		patterns (begin
+			/* ODBC's literal wildcard spellings use the existing LIKE engine. */
+			(define escaped (replace (replace pattern "[_]" "\\_") "[%]" "\\%"))
+			(if (regexp_test escaped "\\[") (error "unsupported metadata bracket pattern")
+				(strlike name escaped "utf8mb4_general_ci")))
+		(equal?? name pattern))))
+(define tsql_metadata_table_names (lambda (schema pattern patterns policy) (begin
+	(if policy (policy schema true false) true)
+	(filter (coalesceNil (show schema) '()) (lambda (name)
+		(and (not (internal_column_name? name)) (tsql_metadata_match name pattern patterns)))))))
+(define tsql_metadata_descriptors (lambda (names integers)
+	(map names (lambda (name)
+		(if (has? integers name) (list "name" name "kind" 38 "size" 4 "flags" 1)
+			(list "name" name "kind" 231 "size" 8000 "flags" 1))))))
+/* (type name, ODBC code, precision, byte length, scale, radix, datetime subtype).
+Only declarations decide these values: an empty or all-NULL table is identical. */
+(define tsql_metadata_type (lambda (column version) (begin
+	(define dimensions (column "Dimensions"))
+	(define length (if (empty_list? dimensions) 1 (car dimensions)))
+	(define type (toLower (column "RawType")))
+	(match type
+		"bigint" '("bigint" -5 19 8 0 10 nil)
+		"int" '("int" 4 10 4 0 10 nil)
+		"integer" '("int" 4 10 4 0 10 nil)
+		"smallint" '("smallint" 5 5 2 0 10 nil)
+		"tinyint" '("tinyint" -6 3 1 0 10 nil)
+		"boolean" '("bit" -7 1 1 0 nil nil)
+		"bit" '("bit" -7 1 1 0 nil nil)
+		"real" '("real" 7 24 4 nil 2 nil)
+		"float" '("float" 6 53 8 nil 2 nil)
+		"double" '("float" 6 53 8 nil 2 nil)
+		"date" (list "date" (if (equal? version 2) 9 91) 10 6 nil nil 1)
+		"datetime" (list "datetime" (if (equal? version 2) 11 93) 23 16 3 nil 3)
+		"smalldatetime" (list "smalldatetime" (if (equal? version 2) 11 93) 16 16 0 nil 3)
+		"rowversion" '("rowversion" -2 8 8 nil nil nil)
+		"timestamp" '("rowversion" -2 8 8 nil nil nil)
+		_ (if (has? '("decimal" "numeric") type)
+			(begin
+				(define precision (if (empty_list? dimensions) 18 (car dimensions)))
+				(define scale (if (< (count dimensions) 2) 0 (cadr dimensions)))
+				(list type (if (equal? type "decimal") 3 2) precision
+					(if (<= precision 9) 5 (<= precision 19) 9 (<= precision 28) 13 17) scale 10 nil))
+			(has? '("varchar" "char" "nvarchar" "nchar" "binary" "varbinary") type)
+			(list type (match type "varchar" 12 "char" 1 "nvarchar" -9 "nchar" -8 "binary" -2 "varbinary" -3)
+				length (if (and (> length 0) (has? '("nvarchar" "nchar") type)) (* length 2) length) nil nil nil)
+			(error "unsupported metadata declaration type: " type))))))
+(define tsql_metadata_column_row (lambda (schema name column ordinal version) (begin
+	(define contract (tsql_metadata_type column version))
+	(define subtype (nth contract 6))
+	(define type (car contract))
+	(list "TABLE_QUALIFIER" schema "TABLE_OWNER" "dbo" "TABLE_NAME" name
+		"COLUMN_NAME" (column "Field") "DATA_TYPE" (nth contract 1) "TYPE_NAME" type
+		"PRECISION" (nth contract 2) "LENGTH" (nth contract 3) "SCALE" (nth contract 4)
+		"RADIX" (nth contract 5) "NULLABLE" (if (column "Null") 1 0)
+		"REMARKS" (if (equal? (column "Comment") "") nil (column "Comment"))
+		"COLUMN_DEF" (if (equal? (column "DefaultExpression") "") (column "Default") (column "DefaultExpression"))
+		"SQL_DATA_TYPE" (if subtype 9 (nth contract 1)) "SQL_DATETIME_SUB" subtype
+		"CHAR_OCTET_LENGTH" (if (has? '("varchar" "char" "nvarchar" "nchar" "binary" "varbinary") type) (nth contract 3) nil)
+		"ORDINAL_POSITION" ordinal "IS_NULLABLE" (if (column "Null") "YES" "NO")))))
+/* Type info is a frontend declaration catalog, not a registry of runtime tags. */
+(define tsql_metadata_type_info (lambda (options version) (begin
+	(define definitions (list (list "bigint" '()) (list "int" '()) (list "smallint" '()) (list "tinyint" '())
+		(list "bit" '()) (list "real" '()) (list "float" '()) (list "decimal" '(38 0)) (list "numeric" '(38 0))
+		(list "varchar" '(8000)) (list "char" '(8000)) (list "date" '())))
+	(define rows (map definitions (lambda (definition) (begin
+		(define contract (tsql_metadata_type (list "RawType" (car definition) "Dimensions" (cadr definition)) version))
+		(define type (car contract))
+		(define character (has? '("varchar" "char") type))
+		(define decimal (has? '("decimal" "numeric") type))
+		(list "TYPE_NAME" type "DATA_TYPE" (nth contract 1) "PRECISION" (nth contract 2)
+			"LITERAL_PREFIX" (if (or character (equal? type "date")) "'" nil)
+			"LITERAL_SUFFIX" (if (or character (equal? type "date")) "'" nil)
+			"CREATE_PARAMS" (if character "length" decimal "precision,scale" nil)
+			"NULLABLE" 1 "CASE_SENSITIVE" (if character 1 0) "SEARCHABLE" 3
+			"UNSIGNED_ATTRIBUTE" (if (equal? type "tinyint") 1 (has? '("bigint" "int" "smallint" "decimal" "numeric" "real" "float") type) 0 nil)
+			"MONEY" 0 "AUTO_INCREMENT" (if (has? '("bigint" "int" "smallint" "tinyint") type) 1 0)
+			"LOCAL_TYPE_NAME" type "MINIMUM_SCALE" (nth contract 4) "MAXIMUM_SCALE" (if decimal 38 (nth contract 4))
+			"SQL_DATA_TYPE" (if (nth contract 6) 9 (nth contract 1)) "SQL_DATETIME_SUB" (nth contract 6)
+			"NUM_PREC_RADIX" (nth contract 5) "INTERVAL_PRECISION" nil)))))
+	(list '("TYPE_NAME" "DATA_TYPE" "PRECISION" "LITERAL_PREFIX" "LITERAL_SUFFIX" "CREATE_PARAMS" "NULLABLE" "CASE_SENSITIVE" "SEARCHABLE" "UNSIGNED_ATTRIBUTE" "MONEY" "AUTO_INCREMENT" "LOCAL_TYPE_NAME" "MINIMUM_SCALE" "MAXIMUM_SCALE" "SQL_DATA_TYPE" "SQL_DATETIME_SUB" "NUM_PREC_RADIX" "INTERVAL_PRECISION")
+		'("DATA_TYPE" "PRECISION" "NULLABLE" "CASE_SENSITIVE" "SEARCHABLE" "UNSIGNED_ATTRIBUTE" "MONEY" "AUTO_INCREMENT" "MINIMUM_SCALE" "MAXIMUM_SCALE" "SQL_DATA_TYPE" "SQL_DATETIME_SUB" "NUM_PREC_RADIX" "INTERVAL_PRECISION")
+		(filter rows (lambda (row) (or (nil? (options "data_type")) (equal? (options "data_type") 0) (equal? (row "DATA_TYPE") (options "data_type")))))))))
+(define tsql_metadata_result (lambda (schema procedure arguments policy) (begin
+	(define procedure (toLower procedure))
+	(define procedure (if (and (>= (strlen procedure) 4) (equal? (substr procedure 0 4) "sys.")) (substr procedure 4) procedure))
+	(define names (match procedure
+		"sp_datatype_info" '("data_type" "odbcver")
+		"sp_datatype_info_100" '("data_type" "odbcver")
+		"sp_tables" '("table_name" "table_owner" "table_qualifier" "table_type" "fusepattern")
+		"sp_columns" '("table_name" "table_owner" "table_qualifier" "column_name" "odbcver")
+		_ (error "unsupported metadata procedure: " procedure)))
+	(define options (tsql_metadata_arguments arguments names))
+	/* Never silently substitute another database. Policy executes before catalog
+	access, and every table access below belongs to this authenticated database. */
+	(map '("table_qualifier" "pktable_qualifier" "fktable_qualifier") (lambda (key)
+		(if (or (nil? (options key)) (equal?? schema (options key))) true
+			(error "metadata qualifier is not the current database"))))
+	(if policy (policy schema true false) true)
+	(define owner (coalesceNil (options "table_owner") "dbo"))
+	(define version (coalesceNil (options "odbcver") 2))
+	(if (has? '(2 3) version) true (error "unsupported ODBC version"))
+	(define result (match procedure
+		"sp_datatype_info" (tsql_metadata_type_info options version)
+		"sp_datatype_info_100" (tsql_metadata_type_info options version)
+		"sp_tables" (begin
+			(define filter_type (options "table_type"))
+			(define types (if (nil? filter_type) '("TABLE")
+				(map (split filter_type ",") (lambda (value) (toUpper (replace (strtrim value) "'" ""))))))
+			(define rows (if (and (tsql_metadata_match "dbo" owner true) (has? types "TABLE"))
+				(map (tsql_metadata_table_names schema (options "table_name") (not (equal? (coalesceNil (options "fusepattern") 1) 0)) policy)
+					(lambda (name) (list "TABLE_QUALIFIER" schema "TABLE_OWNER" "dbo" "TABLE_NAME" name "TABLE_TYPE" "TABLE" "REMARKS" nil))) '()))
+			(list '("TABLE_QUALIFIER" "TABLE_OWNER" "TABLE_NAME" "TABLE_TYPE" "REMARKS") '() rows))
+		"sp_columns" (begin
+			(if (nil? (options "table_name")) (error "sp_columns requires a table name") true)
+			(define rows (if (tsql_metadata_match "dbo" owner true)
+				(merge (map (tsql_metadata_table_names schema (options "table_name") true policy) (lambda (name) (begin
+					(define columns (filter (show (table schema name)) (lambda (column) (not (internal_column_name? (column "Field"))))))
+					(filter (map (produceN (count columns)) (lambda (i)
+						(tsql_metadata_column_row schema name (nth columns i) (+ i 1) version)))
+						(lambda (row) (tsql_metadata_match (row "COLUMN_NAME") (options "column_name") true))))))) '()))
+			(list '("TABLE_QUALIFIER" "TABLE_OWNER" "TABLE_NAME" "COLUMN_NAME" "DATA_TYPE" "TYPE_NAME" "PRECISION" "LENGTH" "SCALE" "RADIX" "NULLABLE" "REMARKS" "COLUMN_DEF" "SQL_DATA_TYPE" "SQL_DATETIME_SUB" "CHAR_OCTET_LENGTH" "ORDINAL_POSITION" "IS_NULLABLE")
+				'("DATA_TYPE" "PRECISION" "LENGTH" "SCALE" "RADIX" "NULLABLE" "SQL_DATA_TYPE" "SQL_DATETIME_SUB" "CHAR_OCTET_LENGTH" "ORDINAL_POSITION") rows))
+		_ (error "unsupported metadata procedure: " procedure)))
+	(list "columns" (tsql_metadata_descriptors (car result) (cadr result)) "rows" (nth result 2)))))
+(define tsql_execute_metadata (lambda (schema procedure arguments policy resultrow resultfields) (begin
+	(define result (tsql_metadata_result schema procedure arguments policy))
+	(resultfields (map (result "columns") (lambda (column) (column "name"))) (result "columns"))
+	(map (result "rows") resultrow)
+	0)))
+
 /* Network callbacks use the same accounts, transaction owner and SQL execution
 path as the other frontends. Wire actions are interpreted here, never in scm/. */
 (define tds_frontend (lambda (event session payload row fields state sequence) (match event
@@ -204,7 +352,19 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 			(list "rows" (if (number? result) result 0) "no_count" true)
 			(if (number? result) (list "rows" result) nil)))
 	"describe" (tds_describe (payload "database") (payload "text") (payload "declarations") session)
-	"metadata" (error "T-SQL metadata procedures are not implemented yet")
+	"metadata" (begin
+		(define arguments (map (payload "parameters") (lambda (parameter) (begin
+			(if (equal? (parameter "flags") 0) true (error "metadata output parameters are unsupported"))
+			(if (has? '(31 38 104 167 175 231 239) ((parameter "type") "kind")) true
+				(error "unsupported metadata argument wire type"))
+			(list (parameter "name") (parameter "value"))))))
+		(define result (tsql_metadata_result (session "schema") (payload "procedure") arguments (sql_policy (session "username"))))
+		(fields (result "columns"))
+		(map (result "rows") (lambda (values)
+			(row (map (result "columns") (lambda (column) (begin
+				(define value (values (column "name")))
+				(if (nil? value) nil (equal? (column "kind") 231) (string value) (intdiv value 1))))))))
+		(list "rows" (count (result "rows"))))
 	_ (error "unknown TDS frontend callback"))))
 (if (arg "tds-port" nil) (begin
 	(define port (arg "tds-port" nil))

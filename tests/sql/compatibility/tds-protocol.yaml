@@ -186,3 +186,93 @@ test_cases:
   name: 'Fixture cleanup 003: DROP USER IF EXISTS ''tds;=brace} user'''
 cleanup:
 - sql: DROP TABLE IF EXISTS tds_protocol_basic
+
+# Metadata RPC goes through the same frontend adapter as SQL procedure calls.
+- name: Native metadata RPC describes persisted declarations and empty catalogs
+  tds:
+    statements:
+    - sql: CREATE TABLE driver_rpc_catalog (id BIGINT NOT NULL, label VARCHAR(12), amount DECIMAL(10,2))
+    - sql: sp_tables
+      parameters:
+      - name: table_name
+        value: driver_rpc_catalog
+      expect:
+        rows: 1
+        data:
+        - TABLE_NAME: driver_rpc_catalog
+          TABLE_TYPE: TABLE
+    - sql: sp_columns
+      parameters:
+      - name: table_name
+        value: driver_rpc_catalog
+      - name: column_name
+        value: id
+      expect:
+        rows: 1
+        data:
+        - COLUMN_NAME: id
+          DATA_TYPE: -5
+          TYPE_NAME: bigint
+          NULLABLE: 0
+    - sql: sp_columns
+      parameters:
+      - name: table_name
+        value: absent_driver_rpc_catalog
+      expect:
+        rows: 0
+        columns:
+        - TABLE_QUALIFIER
+        - TABLE_OWNER
+        - TABLE_NAME
+        - COLUMN_NAME
+        - DATA_TYPE
+        - TYPE_NAME
+        - PRECISION
+        - LENGTH
+        - SCALE
+        - RADIX
+        - NULLABLE
+        - REMARKS
+        - COLUMN_DEF
+        - SQL_DATA_TYPE
+        - SQL_DATETIME_SUB
+        - CHAR_OCTET_LENGTH
+        - ORDINAL_POSITION
+        - IS_NULLABLE
+    - sql: sp_datatype_info_100
+      parameters:
+      - name: data_type
+        value: -5
+      - name: ODBCVer
+        value: 3
+      expect:
+        rows: 1
+        data:
+        - TYPE_NAME: bigint
+          DATA_TYPE: -5
+          PRECISION: 19
+    - sql: sp_tables
+      parameters:
+      - name: table_qualifier
+        value: foreign_driver_database
+      expect:
+        error: true
+        contains:
+        - current database
+    - sql: sp_columns
+      parameters:
+      - name: table_name
+        value: driver_rpc_catalog
+      - name: ODBCVer
+        value: 4
+      expect:
+        error: true
+        contains:
+        - ODBC version
+    - sql: DROP TABLE driver_rpc_catalog
+    - sql: sp_tables
+      parameters:
+      - name: table_name
+        value: driver_rpc_catalog
+      expect:
+        rows: 0
