@@ -2036,12 +2036,20 @@ func (t *table) invalidateShowColumnsSnapshot() {
 	// Preserve constraint lifetime when a TEMP column invalidates rendered column
 	// descriptions. Getters refresh nil value/plannerValue through the existing
 	// lazy path; constraint reads retain the complete immutable declaration set.
-	metadata := &tableShowColumnsSnapshotMetadata{columnNames: names, constraints: emptyTableConstraints}
-	if current := t.showColumnsSnapshot.Load(); current != nil {
-		*metadata = *current.metadata
-		metadata.columnNames = names
+	for {
+		current := t.showColumnsSnapshot.Load()
+		metadata := &tableShowColumnsSnapshotMetadata{columnNames: names, constraints: emptyTableConstraints}
+		if current != nil {
+			*metadata = *current.metadata
+			metadata.columnNames = names
+		}
+		// Native FK publication owns the schema lock, while TEMP invalidation
+		// owns the table DDL lock. Preserve a declaration published between
+		// loading the current snapshot and publishing its invalidation marker.
+		if t.showColumnsSnapshot.CompareAndSwap(current, &tableShowColumnsSnapshot{metadata: metadata}) {
+			break
+		}
 	}
-	t.showColumnsSnapshot.Store(&tableShowColumnsSnapshot{metadata: metadata})
 	t.publishPlannerStatsToken()
 }
 

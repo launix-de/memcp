@@ -588,12 +588,20 @@ func TestConstraintMetadataConcurrentForeignPublicationAndMaintenance(t *testing
 	tbl.schema = &database{Name: "constraint_publication"}
 	tbl.publishShowColumnsSnapshot(true)
 	var workers sync.WaitGroup
-	workers.Add(6)
+	var published atomic.Int64
+	published.Store(-1)
+	workers.Add(7)
 	for reader := 0; reader < 4; reader++ {
 		go func() {
 			defer workers.Done()
 			for i := 0; i < 1000; i++ {
+				minimum := published.Load()
 				value := tbl.Constraints()
+				foreign := showColumnProperty(value, "ForeignKeys").Slice()
+				if minimum >= 0 && (len(foreign) != 1 || int64(scm.ToInt(showColumnProperty(foreign[0], "Id"))) < minimum) {
+					t.Error("invalidation restored an older FK declaration")
+					return
+				}
 				for _, key := range showColumnProperty(value, "Unique").Slice() {
 					if showColumnProperty(key, "Cols").Slice()[0].String() != "column_0" {
 						t.Error("reader observed an incomplete key declaration")
@@ -610,6 +618,7 @@ func TestConstraintMetadataConcurrentForeignPublicationAndMaintenance(t *testing
 			tbl.schema.schemalock.Lock()
 			tbl.Foreign = []foreignKey{{Id: fmt.Sprint(i), Tbl1: "child", Cols1: []string{"column_0"}, Tbl2: "parent", Cols2: []string{"id"}}}
 			tbl.publishShowColumnsSnapshot(true)
+			published.Store(int64(i))
 			tbl.schema.schemalock.Unlock()
 		}
 	}()
@@ -619,6 +628,14 @@ func TestConstraintMetadataConcurrentForeignPublicationAndMaintenance(t *testing
 			tbl.ddlMu.RLock()
 			tbl.publishShowColumnsSnapshot(false)
 			tbl.ddlMu.RUnlock()
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		for i := 0; i < 1000; i++ {
+			tbl.ddlMu.Lock()
+			tbl.invalidateShowColumnsSnapshot()
+			tbl.ddlMu.Unlock()
 		}
 	}()
 	workers.Wait()
