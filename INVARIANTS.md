@@ -458,7 +458,14 @@ consume and invalidate when those declarations change. A separately loaded
 revision token cannot establish that it describes the captured metadata.
 Snapshot identity guards retain their datum outside cloneable quoted AST lists,
 perform constant-time header comparisons, and expose their retained payload to
-ordinary query-cache size accounting.
+ordinary query-cache size accounting. Column-declaration guards compare only
+consumed type, dimensions, nullability and collation through published point
+metadata. Statistics publication must not invalidate a declaration contract.
+Direct DML recipes use the same compile-local guard protocol for mutation
+semantics only; a cost/statistics change must not become a schema-contract error.
+Comparison proofs retain frontend operand triples before binding removes
+Boolean callback annotations. Executable constants must never reconstruct a
+SQL type after that boundary.
 
 Every parameter- or statistics-dependent cost-model tipping decision must
 record the executable condition under which its chosen alternative remains

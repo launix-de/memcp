@@ -94,6 +94,17 @@ setup:
 - sql: DROP TABLE IF EXISTS write_guard_empty_target
 - sql: CREATE TABLE write_guard_empty_source(id INT,value INT)
 - sql: CREATE TABLE write_guard_empty_target(id INT,value INT)
+- sql: DROP TABLE IF EXISTS write_guard_trigger_event
+- sql: DROP TABLE IF EXISTS write_guard_trigger_audit
+- sql: DROP TABLE IF EXISTS write_guard_trigger_source
+- sql: DROP TABLE IF EXISTS write_guard_trigger_target
+- sql: CREATE TABLE write_guard_trigger_event(id INT PRIMARY KEY)
+- sql: CREATE TABLE write_guard_trigger_audit(value INT)
+- sql: CREATE TABLE write_guard_trigger_source(id INT PRIMARY KEY,code INT,amount
+    INT,CONSTRAINT unique_write_trigger_source UNIQUE(code))
+- sql: CREATE TABLE write_guard_trigger_target(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO write_guard_trigger_source VALUES(1,1,1)
+- sql: INSERT INTO write_guard_trigger_target VALUES(1,20)
 test_cases:
 - name: UPDATE alias resolves its actual native target
   sql: UPDATE t SET value=s.value FROM write_target AS t JOIN write_source AS s ON
@@ -487,7 +498,7 @@ test_cases:
     \ (quote get_column) \"t\" false \"code\" false))\n  (source_is_unique_lookup_from_sources?\
     \ (list t s) \"t\" (list t) s '()\n    (list (quote or) (list (quote equal??)\
     \ scol tcol)\n      (list (quote and) (list (quote nil?) scol) (list (quote nil?)\
-    \ tcol))) nil false))"
+    \ tcol))) nil false '()))"
   expect:
     result: false
 - name: Null safe lookup honors equal native NULL keys
@@ -497,7 +508,7 @@ test_cases:
     \ (quote get_column) \"t\" false \"code\" false))\n  (source_is_unique_lookup_from_sources?\
     \ (list t s) \"t\" (list t) s '()\n    (list (quote or) (list (quote equal??)\
     \ scol tcol)\n      (list (quote and) (list (quote nil?) scol) (list (quote nil?)\
-    \ tcol))) nil false))"
+    \ tcol))) nil false '()))"
   expect:
     result: true
 - name: Nullable distinct NULL source cannot authorize repeated mutation
@@ -777,6 +788,29 @@ test_cases:
     data:
     - value: 11
   noncritical: true
+- name: An integral valued FLOAT literal retains its approximate frontend contract
+  sql: UPDATE t SET value=t.value+1 FROM write_guard_float_target t JOIN write_guard_float_source
+    s ON s.id=9007199254740992e0
+  expect:
+    error: true
+    contains: one proven source match
+- name: Rejected approximate literal cannot expand a native integer key match
+  sql: SELECT value FROM write_guard_float_target
+  expect:
+    rows: 1
+    data:
+    - value: 10
+- name: A declared exact integer literal selects one native large key
+  sql: UPDATE t SET value=t.value+1 FROM write_guard_float_target t JOIN write_guard_float_source
+    s ON s.id=9007199254740992
+  expect:
+    affected_rows: 1
+- name: Large exact integer key mutation changes its target once
+  sql: SELECT value FROM write_guard_float_target
+  expect:
+    rows: 1
+    data:
+    - value: 11
 - name: Frontend numeric literal terminals are distinct from Boolean syntax nodes
   scm: (map '(0 1 true false) (lambda (literal) (sql_info_type (sql_expr_info '()
     literal))))
@@ -801,7 +835,76 @@ test_cases:
     s ON e.id=s.id
   expect:
     error: true
+- name: A language-defined trigger retains its joined source contract
+  syntax: mysql
+  sql: CREATE TRIGGER write_guard_trigger_mutation AFTER INSERT ON write_guard_trigger_event
+    FOR EACH ROW BEGIN UPDATE write_guard_trigger_target t JOIN write_guard_trigger_source
+    s ON t.id=s.code SET value=t.value+s.amount; END
+  expect:
+    affected_rows: 1
+- name: Record actual trigger target mutations
+  syntax: mysql
+  sql: CREATE TRIGGER write_guard_trigger_changes AFTER UPDATE ON write_guard_trigger_target
+    FOR EACH ROW BEGIN INSERT INTO write_guard_trigger_audit (`value`) VALUES(NEW.`value`);
+    END
+  expect:
+    affected_rows: 1
+- name: Refresh source statistics without changing the declaration contract
+  scm: (rebuild (table "memcp-tests" "write_guard_trigger_source") true false)
+- name: Refresh target statistics without invalidating inline mutation contracts
+  scm: (rebuild (table "memcp-tests" "write_guard_trigger_target") true false)
+- name: Initial trigger invocation has one declared source match
+  sql: INSERT INTO write_guard_trigger_event VALUES(1)
+  expect:
+    affected_rows: 1
+- name: Initial joined trigger increments its target once
+  sql: SELECT value FROM write_guard_trigger_target
+  expect:
+    rows: 1
+    data:
+    - value: 21
+- name: Language trigger source regenerates its runtime guard after restart
+  action: restart
+- name: A restored language trigger uses current declaration snapshots
+  sql: INSERT INTO write_guard_trigger_event VALUES(2)
+  expect:
+    affected_rows: 1
+- name: Restored trigger updates its target once
+  sql: SELECT value FROM write_guard_trigger_target
+  expect:
+    rows: 1
+    data:
+    - value: 22
+- name: Remove a unique source declaration used by an inline trigger
+  sql: ALTER TABLE write_guard_trigger_source DROP CONSTRAINT unique_write_trigger_source
+  expect:
+    affected_rows: 0
+- name: A changed trigger source can now have several matches
+  sql: INSERT INTO write_guard_trigger_source VALUES(2,1,2)
+  expect:
+    affected_rows: 1
+- name: An inline trigger cannot silently use a stale unique source proof
+  sql: INSERT INTO write_guard_trigger_event VALUES(3)
+  expect:
+    error: true
+    contains: declaration contract
+- name: Rejected stale inline trigger leaves its target unchanged
+  sql: SELECT value FROM write_guard_trigger_target
+  expect:
+    rows: 1
+    data:
+    - value: 22
+- name: A stale inline source proof cannot execute extra native update triggers
+  sql: SELECT COUNT(*) AS n FROM write_guard_trigger_audit
+  expect:
+    rows: 1
+    data:
+    - n: 2
 cleanup:
+- sql: DROP TABLE IF EXISTS write_guard_trigger_event
+- sql: DROP TABLE IF EXISTS write_guard_trigger_audit
+- sql: DROP TABLE IF EXISTS write_guard_trigger_source
+- sql: DROP TABLE IF EXISTS write_guard_trigger_target
 - sql: DROP TABLE IF EXISTS write_guard_empty_source
 - sql: DROP TABLE IF EXISTS write_guard_empty_target
 - sql: DROP TABLE IF EXISTS write_guard_text_source
