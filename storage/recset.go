@@ -595,7 +595,7 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count))
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned)
 			defer ReleaseColumnReader(cReaders[i])
 			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
 		}
@@ -627,16 +627,21 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 	singleExactLike := access.len() == 1 && singleLikeBoundaryCoversCondition(conditionCols, condition, access, 0)
 	exactLikeMain := false
 	builder := newRecSetShardBuilder(t, visibleUpper, completeTraversal, t.main_count)
-	evaluate := func(idx uint32) bool {
+	evaluate := func(idx uint32, prepared []scm.Scmer) bool {
 		if idx >= visibleUpper {
 			return false
 		}
-		if acidMode {
-			if !currentTx.IsVisible(t, idx) {
+		// Prepared main rows were already checked under this collector's
+		// existing shard read capability. Do not repeat transaction lookup or
+		// visibility work; deltas and scalar/exact paths retain their check.
+		if prepared == nil {
+			if acidMode {
+				if !currentTx.IsVisible(t, idx) {
+					return false
+				}
+			} else if t.deletions.Get(uint(idx)) {
 				return false
 			}
-		} else if t.deletions.Get(uint(idx)) {
-			return false
 		}
 		if conditionAlwaysTrue || idx < t.main_count && exactLikeMain && singleExactLike {
 			return true
@@ -645,6 +650,8 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 			for i, c := range cReaders {
 				if getter := conditionGetters[i]; getter != nil {
 					cdataset[i] = getter(idx, 0)
+				} else if prepared != nil {
+					cdataset[i] = prepared[i]
 				} else if cNeedsCachedReader[i] {
 					cdataset[i] = c.GetValue(idx)
 				} else {
@@ -667,13 +674,64 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
 	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
 	var feedbackCandidates int64
+	// Residual inputs belong to the already selected candidate batch. Reuse
+	// the ordinary readers' bulk preparation so compressed text is decoded
+	// once per batch rather than once for every scalar predicate invocation.
+	// The buffers and readers are private to this collector; exact LIKE hooks,
+	// invisible rows, deltas and pseudo-column getters retain their old path.
+	var mainRows []uint32
+	var positions []int
+	var prepared []scm.Scmer
 	t.iterateIndexMatchAware(currentTx, access, maxInsertIndex, buf, true, &exactLikeMain, func(batch []uint32) bool {
 		feedbackCandidates += int64(len(batch))
-		for _, idx := range batch {
+		mainRows = mainRows[:0]
+		prepareMain := !conditionAlwaysTrue && len(cReaders) != 0 &&
+			!(exactLikeMain && singleExactLike) && len(batch) > 1
+		if prepareMain {
+			if cap(positions) < len(batch) {
+				positions = make([]int, len(batch))
+			} else {
+				positions = positions[:len(batch)]
+				clear(positions)
+			}
+			for position, idx := range batch {
+				if idx >= t.main_count || idx >= visibleUpper ||
+					acidMode && !currentTx.IsVisible(t, idx) || !acidMode && t.deletions.Get(uint(idx)) {
+					continue
+				}
+				positions[position] = len(mainRows) + 1
+				mainRows = append(mainRows, idx)
+			}
+		}
+		if len(mainRows) != 0 {
+			width := len(cReaders)
+			length := len(mainRows) * width
+			if cap(prepared) < length {
+				prepared = make([]scm.Scmer, length)
+			} else {
+				prepared = prepared[:length]
+			}
+			for col, reader := range cReaders {
+				if conditionGetters[col] == nil {
+					reader.GetValueMulti(mainRows, prepared[col:], width)
+				}
+			}
+		}
+		for position, idx := range batch {
 			if idx >= visibleUpper {
 				continue
 			}
-			builder.add(idx, evaluate(idx))
+			if prepareMain && idx < t.main_count && positions[position] == 0 {
+				// Excluded main rows must not be fetched or checked again.
+				builder.add(idx, false)
+				continue
+			}
+			var values []scm.Scmer
+			if prepareMain && positions[position] != 0 {
+				start := (positions[position] - 1) * len(cReaders)
+				values = prepared[start : start+len(cReaders)]
+			}
+			builder.add(idx, evaluate(idx, values))
 		}
 		return true
 	})

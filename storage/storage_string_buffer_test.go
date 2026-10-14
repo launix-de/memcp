@@ -1349,3 +1349,61 @@ func TestComputedScalarJITPreservesDefaultReadCapabilities(t *testing.T) {
 		t.Fatalf("native scalar ABI lost its default read capability: value=%v calls=%d locked=%v hints=%d", value, source.calls, source.locked, source.hints)
 	}
 }
+
+// RecSet residuals consume only visible main candidates through the existing
+// bulk reader. Delta NULLs retain native visibility without forcing a decoded
+// cache or passing lazy compressed handles to every scalar text predicate.
+func TestRecSetResidualPreparesVisibleTextBatch(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "recset_prepared_text")
+	tbl.CreateColumn("label", "TEXT", nil, nil)
+	rows := make([][]scm.Scmer, 64)
+	for i := range rows {
+		label := scm.NewString(fmt.Sprintf("rejected Gerätebericht %d", i))
+		if i%4 == 0 {
+			label = scm.NewString(fmt.Sprintf("accepted Gerätebericht %d", i))
+		}
+		if i == 7 {
+			label = scm.NewNil()
+		}
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), label}
+	}
+	tbl.Insert([]string{"id", "label"}, rows, nil, scm.NewNil(), false, nil)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
+	stored := shard.getColumnStorageOrPanic("label", false, nil)
+	if overlay, ok := stored.(*OverlayBlob); ok {
+		stored = overlay.Base
+	}
+	text, ok := stored.(*StorageString)
+	if !ok || text.textBuffer == nil || !text.bufferHandles {
+		t.Fatal("fixture must provide a cold compressed text generation")
+	}
+	shard.mu.Lock()
+	shard.deletions.Set(0, true)
+	shard.mu.Unlock()
+	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{
+		{scm.NewInt(64), scm.NewString("accepted delta")},
+		{scm.NewInt(65), scm.NewNil()},
+	}, nil, scm.NewNil(), false, nil)
+	priorReads := text.ReadCount()
+	condition := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		if values[0].IsBufferString() {
+			t.Fatal("RecSet residual bypassed its prepared text batch")
+		}
+		return scm.NewBool(!values[0].IsNil() && strings.HasPrefix(values[0].String(), "accepted"))
+	})
+	got := tbl.scanRecSet(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"label"}, condition)
+	if got.count != 16 || text.dictCache.Load() != nil || text.ReadCount()-priorReads != 63 {
+		t.Fatalf("count=%d decoded cache=%v main reads=%d", got.count, text.dictCache.Load(), text.ReadCount()-priorReads)
+	}
+	// A transaction-local delete must also be excluded before touching its
+	// main value, without changing the shared deletion bitmap.
+	tx := NewTxContext(TxACID)
+	defer tx.Rollback()
+	tx.AddToDeleteMask(shard, 4)
+	priorReads = text.ReadCount()
+	acid := tbl.scanRecSet(tx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"label"}, condition)
+	if acid.count != 15 || text.ReadCount()-priorReads != 62 || shard.deletions.Get(4) {
+		t.Fatalf("ACID count=%d main reads=%d shared delete=%v", acid.count, text.ReadCount()-priorReads, shard.deletions.Get(4))
+	}
+}
