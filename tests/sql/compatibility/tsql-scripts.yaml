@@ -512,4 +512,245 @@ test_cases:
       (dropprocedure "memcp-tests" "script_snapshot_binding")
       (and (state "replaced") (equal? (results "first") 8) (equal? (results "second") 107))))
   expect: {result: true}
+- name: WHILE repeats typed scalar assignments
+  sql: DECLARE @n INT=0; WHILE @n<4 SET @n=@n+1; SELECT @n AS value
+  expect: {rows: 1, data: [{value: 4}]}
+- name: False WHILE predicates never resolve unused SQL leaves
+  sql: WHILE 1=0 SELECT missing FROM unknown_table; SELECT 8 AS value
+  expect: {rows: 1, data: [{value: 8}]}
+- name: WHILE streams each selected leaf through the normal result callback
+  sql: DECLARE @n INT=0; WHILE @n<3 BEGIN SET @n=@n+1; SELECT @n AS value; END
+  expect: {rows: 3, data: [{value: 1}, {value: 2}, {value: 3}]}
+- name: CONTINUE skips the remaining current iteration
+  sql: |
+    DECLARE @n INT=0; DECLARE @total INT=0;
+    WHILE @n<5 BEGIN
+      SET @n=@n+1;
+      IF @n=3 CONTINUE;
+      SET @total=@total+@n;
+    END;
+    SELECT @n AS iterations,@total AS total;
+  expect: {rows: 1, data: [{iterations: 5, total: 12}]}
+- name: BREAK exits its loop and resumes the enclosing batch
+  sql: |
+    DECLARE @n INT=0;
+    WHILE 1=1 BEGIN SET @n=@n+1; IF @n=3 BREAK; SELECT @n AS value; END;
+    SELECT @n AS value;
+  expect: {rows: 3, data: [{value: 1}, {value: 2}, {value: 3}]}
+- name: Nested BREAK exits only the innermost loop
+  sql: |
+    DECLARE @outer INT=0; DECLARE @inner INT=0; DECLARE @total INT=0;
+    WHILE @outer<3 BEGIN
+      SET @outer=@outer+1; SET @inner=0;
+      WHILE 1=1 BEGIN SET @inner=@inner+1; IF @inner=2 BREAK; SET @total=@total+1; END;
+      SET @total=@total+10;
+    END;
+    SELECT @outer AS iterations,@inner AS inner_value,@total AS total;
+  expect: {rows: 1, data: [{iterations: 3, inner_value: 2, total: 33}]}
+- name: Nested CONTINUE is consumed by its own loop
+  sql: |
+    DECLARE @outer INT=0; DECLARE @inner INT=0; DECLARE @total INT=0;
+    WHILE @outer<2 BEGIN
+      SET @outer=@outer+1; SET @inner=0;
+      WHILE @inner<3 BEGIN SET @inner=@inner+1; IF @inner=2 CONTINUE; SET @total=@total+1; END;
+      SET @total=@total+10;
+    END;
+    SELECT @total AS total;
+  expect: {rows: 1, data: [{total: 24}]}
+- name: Loop-local declarations keep their declared SQL contracts
+  sql: |
+    DECLARE @n INT=0;
+    WHILE @n<2 BEGIN DECLARE @text VARCHAR(8)='a'; SET @text=@text+'b'; SET @n=@n+1; END;
+    SELECT @text AS value;
+  expect: {rows: 1, data: [{value: ab}]}
+- name: NULL WHILE predicates select no iteration
+  sql: DECLARE @n INT=NULL; WHILE @n>0 SET @n=@n-1; SELECT 5 AS value
+  expect: {rows: 1, data: [{value: 5}]}
+- name: BREAK outside a loop is rejected before execution
+  sql: IF 1=0 BREAK; SELECT 1 AS value
+  expect: {error: true}
+- name: CONTINUE outside a loop is rejected before execution
+  sql: CONTINUE
+  expect: {error: true}
+- name: WHILE requires a Boolean expression contract
+  sql: WHILE 0 BREAK
+  expect: {error: true}
+- name: WHILE rejects relational scalar fallback
+  sql: WHILE EXISTS(SELECT 1) BREAK
+  expect: {error: true}
+- name: Loop writes use the same native explicit transaction
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_loop_rows
+  - sql: CREATE TABLE dbo.script_loop_rows(id INT PRIMARY KEY,value INT)
+  sql: |
+    BEGIN TRANSACTION;
+    DECLARE @n INT=0;
+    WHILE @n<3 BEGIN SET @n=@n+1; INSERT INTO dbo.script_loop_rows VALUES(@n,@n*2); END;
+    SELECT COUNT(*) AS total_rows,SUM(value) AS total FROM dbo.script_loop_rows;
+    ROLLBACK TRANSACTION;
+    SELECT COUNT(*) AS remaining FROM dbo.script_loop_rows;
+  expect: {rows: 2, data: [{total_rows: 3, total: 12}, {remaining: 0}]}
+  cleanup:
+  - sql: DROP TABLE dbo.script_loop_rows
+- name: Stored source procedures execute scoped loops
+  sql: |
+    CREATE PROCEDURE dbo.script_loop_proc @limit INT AS BEGIN
+      DECLARE @n INT=0; WHILE @n<@limit SET @n=@n+1; SELECT @n AS value;
+    END;
+    GO
+    EXEC dbo.script_loop_proc 3;
+    EXEC dbo.script_loop_proc 1;
+    DROP PROCEDURE dbo.script_loop_proc;
+  expect: {rows: 2, data: [{value: 3}, {value: 1}]}
+- name: Keyword variable names remain ordinary scoped variables
+  sql: DECLARE @outer INT=0,@inner INT=2,@limit INT=3; SET @outer=@inner+@limit; SELECT @outer AS value
+  expect: {rows: 1, data: [{value: 5}]}
+- name: Whitespace cannot split a variable identifier
+  sql: DECLARE @ outer INT=1; SELECT 1 AS value
+  expect: {error: true}
+- name: RETURN ends the current batch before later statements
+  sql: SELECT 2 AS value; RETURN 7; SELECT 9 AS value
+  expect: {rows: 1, data: [{value: 2}]}
+- name: RETURN leaves all nested loops and blocks
+  sql: WHILE 1=1 BEGIN WHILE 1=1 BEGIN SELECT 3 AS value; RETURN; END; SELECT 8 AS value; END; SELECT 9 AS value
+  expect: {rows: 1, data: [{value: 3}]}
+- name: Procedure RETURN does not stop its caller batch
+  sql: |
+    CREATE PROCEDURE dbo.script_return_proc AS BEGIN SELECT 4 AS value; RETURN 6; SELECT 8 AS value; END;
+    GO
+    EXEC dbo.script_return_proc; SELECT 5 AS value; DROP PROCEDURE dbo.script_return_proc;
+  expect: {rows: 2, data: [{value: 4}, {value: 5}]}
+- name: RETURN rejects overflowing integer status
+  sql: RETURN 2147483648
+  expect: {error: true}
+- name: Parenthesized dynamic EXEC uses the ordinary query planner
+  sql: EXEC(N'SELECT 7 AS value')
+  expect: {rows: 1, data: [{value: 7}]}
+- name: Dynamic EXEC resolves a typed text variable
+  sql: DECLARE @text NVARCHAR(40)=N'SELECT 8 AS value'; EXEC(@text)
+  expect: {rows: 1, data: [{value: 8}]}
+- name: Dynamic EXEC has an independent variable scope
+  sql: DECLARE @n INT=4; EXEC(N'SELECT @n AS value')
+  expect: {error: true}
+- name: Dynamic EXEC rejects a numeric SQL contract
+  sql: DECLARE @n INT=4; EXEC(@n)
+  expect: {error: true}
+- name: Nested dynamic batches preserve their connection owner
+  sql: EXEC(N'EXEC(N''SELECT 9 AS value'')'); SELECT 10 AS value
+  expect: {rows: 2, data: [{value: 9}, {value: 10}]}
+- name: Dynamic batches share explicit transaction visibility and undo
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_dynamic_rows
+  - sql: CREATE TABLE dbo.script_dynamic_rows(id INT PRIMARY KEY)
+  sql: BEGIN TRANSACTION; EXEC(N'INSERT INTO dbo.script_dynamic_rows VALUES(1)'); SELECT id FROM dbo.script_dynamic_rows; ROLLBACK TRANSACTION; SELECT id FROM dbo.script_dynamic_rows
+  expect: {rows: 1, data: [{id: 1}]}
+  cleanup:
+  - sql: DROP TABLE dbo.script_dynamic_rows
+- name: Dynamic SQL input parameters retain explicit declaration contracts
+  sql: EXEC sp_executesql N'SELECT @n/2 AS value',N'@n INT',5
+  expect: {rows: 1, data: [{value: 2}]}
+- name: Dynamic SQL accepts named input bindings in either order
+  sql: EXEC sys.sp_executesql @params=N'@n INT',@stmt=N'SELECT @n+1 AS value',@n=4
+  expect: {rows: 1, data: [{value: 5}]}
+- name: Dynamic SQL rejects missing declared input parameters
+  sql: EXEC sp_executesql N'SELECT @n AS value',N'@n INT'
+  expect: {error: true}
+- name: Dynamic SQL rejects duplicate parameter bindings
+  sql: EXEC sp_executesql N'SELECT @n AS value',N'@n INT',@n=1,@n=2
+  expect: {error: true}
+- name: Successful TRY skips CATCH
+  sql: BEGIN TRY SELECT 3 AS value; END TRY BEGIN CATCH SELECT 8 AS value; END CATCH; SELECT 4 AS value
+  expect: {rows: 2, data: [{value: 3}, {value: 4}]}
+- name: CATCH observes an explicit thrown error contract
+  sql: BEGIN TRY THROW 50001,N'fixture failure',7; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS number,ERROR_MESSAGE() AS message,ERROR_STATE() AS state; END CATCH
+  expect: {rows: 1, data: [{number: 50001, message: fixture failure, state: 7}]}
+- name: CATCH uses the same typed batch variables
+  sql: DECLARE @n INT=0; BEGIN TRY SET @n=2; THROW 50002,N'fixture failure',1; SET @n=9; END TRY BEGIN CATCH SET @n=@n+1; END CATCH; SELECT @n AS value
+  expect: {rows: 1, data: [{value: 3}]}
+- name: Catching division by zero reports its frontend error code
+  sql: BEGIN TRY SELECT 1/0 AS value; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS number; END CATCH
+  expect: {rows: 1, data: [{number: 8134}]}
+- name: Nested CATCH restores its enclosing error context
+  sql: BEGIN TRY THROW 50003,N'outer error',1; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS number; BEGIN TRY THROW 50004,N'inner error',2; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS number; END CATCH; SELECT ERROR_NUMBER() AS number; END CATCH
+  expect: {rows: 3, data: [{number: 50003}, {number: 50004}, {number: 50003}]}
+- name: Parameterless THROW rethrows the original error
+  sql: BEGIN TRY BEGIN TRY THROW 50005,N'original error',3; END TRY BEGIN CATCH THROW; END CATCH; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS number,ERROR_STATE() AS state; END CATCH
+  expect: {rows: 1, data: [{number: 50005, state: 3}]}
+- name: Error functions are NULL outside CATCH
+  sql: SELECT ERROR_NUMBER() AS number,ERROR_MESSAGE() AS message,ERROR_STATE() AS state
+  expect: {rows: 1, data: [{number: null, message: null, state: null}]}
+- name: THROW validates the public error number range
+  sql: THROW 49999,N'fixture failure',1
+  expect: {error: true}
+- name: THROW validates the public error state range
+  sql: THROW 50006,N'fixture failure',256
+  expect: {error: true}
+- name: Parameterless THROW requires an active CATCH
+  sql: THROW
+  expect: {error: true}
+- name: CATCH can roll back a failed explicit transaction
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_catch_rows
+  - sql: CREATE TABLE dbo.script_catch_rows(id INT PRIMARY KEY)
+  sql: BEGIN TRANSACTION; BEGIN TRY INSERT INTO dbo.script_catch_rows VALUES(1); THROW 50007,N'fixture failure',1; END TRY BEGIN CATCH ROLLBACK TRANSACTION; END CATCH; SELECT id FROM dbo.script_catch_rows
+  expect: {rows: 0}
+  cleanup:
+  - sql: DROP TABLE dbo.script_catch_rows
+- name: EXEC captures an explicit procedure return status
+  sql: |
+    CREATE PROCEDURE dbo.script_status_proc AS BEGIN RETURN 6; END;
+    GO
+    DECLARE @status INT=0; EXEC @status=dbo.script_status_proc; SELECT @status AS value; DROP PROCEDURE dbo.script_status_proc;
+  expect: {rows: 1, data: [{value: 6}]}
+- name: A procedure without RETURN has status zero
+  sql: |
+    CREATE PROCEDURE dbo.script_status_proc AS BEGIN SELECT 8 AS value; END;
+    GO
+    DECLARE @status INT=9; EXEC @status=dbo.script_status_proc; SELECT @status AS value; DROP PROCEDURE dbo.script_status_proc;
+  expect: {rows: 2, data: [{value: 8}, {value: 0}]}
+- name: Captured return status obeys the callers declared target type
+  sql: |
+    CREATE PROCEDURE dbo.script_status_proc AS BEGIN RETURN 256; END;
+    GO
+    DECLARE @status TINYINT; EXEC @status=dbo.script_status_proc;
+  expect: {error: true}
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_status_proc
+
+- name: System namespace column metadata uses the current database
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_sys_catalog
+  - sql: CREATE TABLE dbo.script_sys_catalog(id INT PRIMARY KEY,label NVARCHAR(16))
+  sql: EXEC sys.sp_columns @table_name=N'script_sys_catalog',@column_name=N'id'
+  expect: {rows: 1, data: [{TABLE_QUALIFIER: memcp-tests, COLUMN_NAME: id, TYPE_NAME: int}]}
+  cleanup:
+  - sql: DROP TABLE dbo.script_sys_catalog
+- name: System namespace key metadata uses actual native constraints
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_sys_catalog
+  - sql: CREATE TABLE dbo.script_sys_catalog(id INT PRIMARY KEY)
+  sql: EXEC sys.sp_pkeys @table_name=N'script_sys_catalog'
+  expect: {rows: 1, data: [{TABLE_QUALIFIER: memcp-tests, TABLE_NAME: script_sys_catalog, COLUMN_NAME: id}]}
+  cleanup:
+  - sql: DROP TABLE dbo.script_sys_catalog
+
+- name: Dynamic procedure status is independent of native insert completion
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_dynamic_status
+  - sql: CREATE TABLE dbo.script_dynamic_status(id INT PRIMARY KEY)
+  sql: DECLARE @status INT=-1; EXEC @status=sys.sp_executesql N'INSERT INTO dbo.script_dynamic_status VALUES(1),(2)'; SELECT @status AS status; SELECT COUNT(*) AS n FROM dbo.script_dynamic_status
+  expect: {rows: 2, data: [{status: 0}, {n: 2}]}
+  cleanup:
+  - sql: DROP TABLE dbo.script_dynamic_status
+- name: Dynamic statement execution retains native affected row completion
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_dynamic_completion
+  - sql: CREATE TABLE dbo.script_dynamic_completion(id INT PRIMARY KEY)
+  sql: EXEC(N'INSERT INTO dbo.script_dynamic_completion VALUES(1),(2)')
+  expect: {affected_rows: 2}
+  cleanup:
+  - sql: DROP TABLE dbo.script_dynamic_completion
+- name: A dynamic RETURN supplies its explicit integer procedure status
+  sql: DECLARE @status INT=0; EXEC @status=sys.sp_executesql N'RETURN 4; SELECT 99 AS unexpected'; SELECT @status AS status
+  expect: {rows: 1, data: [{status: 4}]}
 cleanup: []

@@ -126,6 +126,8 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 				(error "duplicate variable declaration: @" name) true)
 			(append contracts (list name (cadr declaration))))) contracts)
 		'("block" commands) (tsql_batch_contracts commands contracts)
+		'("while" _condition body) (tsql_batch_contracts (list body) contracts)
+		'("try" body recovery) (tsql_batch_contracts (merge (list body recovery)) contracts)
 		'("if" _condition yes no) (tsql_batch_contracts (if no (list yes no) (list yes)) contracts)
 		_ contracts)) inherited)))
 (define tsql_scope_session (lambda (parent contracts owner_schema) (begin
@@ -134,6 +136,7 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 	(local "__tsql_parameter_declarations" contracts)
 	(local "__tsql_scope" (newsession))
 	(local "__tsql_connection_session" (tsql_connection_session parent))
+	(local "__tsql_error_context" nil)
 	/* Parameters are lexical batch/procedure locals; account, transaction and
 	connection state remain owned by the original session. Nested invocations
 	do not overwrite a caller's local variables or identity owner. */
@@ -141,13 +144,13 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 		'() (merge_unique (list (filter (local) (lambda (key)
 			(not (has? '("__tsql_scope" "__tsql_connection_session") key)))) (filter (parent) (lambda (key)
 				(not (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
-					(has? '("__tsql_scope" "__tsql_connection_session") key)
+					(or (has? '("__tsql_scope" "__tsql_connection_session") key) (strlike key "__tsql_error_%"))
 					(and owner_schema (equal? key "schema"))))))))
 		'(key) (if (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
-			(has? '("__tsql_scope" "__tsql_connection_session") key)
+			(or (has? '("__tsql_scope" "__tsql_connection_session") key) (strlike key "__tsql_error_%"))
 			(and owner_schema (equal? key "schema"))) (local key) (parent key))
 		'(key value) (if (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
-			(has? '("__tsql_scope" "__tsql_connection_session") key)
+			(or (has? '("__tsql_scope" "__tsql_connection_session") key) (strlike key "__tsql_error_%"))
 			(and owner_schema (equal? key "schema"))) (local key value) (parent key value))
 		_ (apply parent args))))))
 (define tsql_scalar_expression_allowed? (lambda (expr) (match expr
@@ -168,6 +171,9 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 			(error "batch scalar expression requires a relational plan"))
 		(if (and (equal? mode "predicate") (not (equal? (toUpper (sql_info_type info)) "BOOLEAN")))
 			(error "IF requires a Boolean predicate") true)
+		(if (and (equal? mode "dynamic")
+			(not (has? tsql_addition_text_types (toUpper (sql_info_type info)))))
+			(error "dynamic SQL requires a declared text expression") true)
 		(define expr (if (equal? mode "assignment")
 			(sql_type_formula '() (tsql_cast_expr (list (quote sql_type_expr) expr (sql_info_type info) (sql_info_collation info))
 				(car target) (cdr target))) expr))
@@ -181,7 +187,55 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 		session tx (lambda (_row) (error "scalar expression emitted rows")) (lambda args true)))))
 (define tsql_run_commands (lambda (commands statement session resultrow resultfields)
 	(reduce commands (lambda (_result command)
-		(tsql_run_command command statement session resultrow resultfields)) 0)))
+		(if ((tsql_identity_scope session) "__tsql_transfer") _result
+			(tsql_run_command command statement session resultrow resultfields))) 0)))
+/* Procedural iterations have data dependencies; independent SQL work still uses
+the shared parallel planner. The existing sequential loop carries only frontend
+control state. Every predicate/leaf gets the normal cancellable statement scope. */
+(define tsql_run_loop (lambda (condition body statement session resultrow resultfields) (begin
+	(define scope (tsql_identity_scope session))
+	(cadr (for (list false 0)
+		(lambda (stopped _result) (if stopped false
+			(statement condition false (lambda (tx)
+				(tsql_scalar_value (session "schema") condition session tx "predicate" nil)))))
+		(lambda (_stopped _result) (begin
+			(define result (tsql_run_command body statement session resultrow resultfields))
+			(match (scope "__tsql_transfer")
+				"break" (begin (scope "__tsql_transfer" nil) (list true result))
+				"continue" (begin (scope "__tsql_transfer" nil) (list false result))
+				nil (list false result)
+				_ (list true result)))))))))
+(define tsql_error_value (lambda (context name)
+	(if (nil? context) nil (context name))))
+(define tsql_install_error_context (lambda (session context) (begin
+	(session "__tsql_error_context" context)
+	/* Expose scalar inputs through the ordinary execution-session boundary. The
+	shared planner binds their current values, rather than discovering an opaque
+	error-record reader in the SQL expression. Updates occur only at CATCH edges. */
+	(session "__tsql_error_number" (tsql_error_value context "number"))
+	(session "__tsql_error_message" (tsql_error_value context "message"))
+	(session "__tsql_error_state" (tsql_error_value context "state")))))
+(define tsql_run_try (lambda (body recovery statement session resultrow resultfields)
+	(try (lambda () (tsql_run_commands body statement session resultrow resultfields))
+		(lambda (err) (begin
+			/* The request owner checks cancellation before entering CATCH. Its
+			recovery capability admits this boundary, never an aborted-tx write. */
+			(statement "catch boundary" true (lambda (_tx) true))
+			(define previous (session "__tsql_error_context"))
+			(define context (match err
+				'("tsql-error" number message state)
+				(list "error" err "number" number "message" message "state" state)
+				_ (list "error" err "number" nil "message" (string err) "state" nil)))
+			(tsql_install_error_context session context)
+			/* Consume the recovery result before restoring the enclosing context.
+			The eager argument boundary makes this dependency explicit instead of
+			letting a single-use local be substituted after the session update. */
+			(try (lambda ()
+				((lambda (result) (begin
+					(tsql_install_error_context session previous)
+					result))
+					(tsql_run_commands recovery statement session resultrow resultfields)))
+				(lambda (cause) (begin (tsql_install_error_context session previous) (error cause)))))))))
 (define tsql_run_command (lambda (command statement session resultrow resultfields) (begin
 	(define schema (session "schema"))
 	(match command
@@ -190,6 +244,28 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 		'("recovery" text) (statement text true (lambda (tx)
 			(tsql_execute_statement tx schema text session resultrow resultfields)))
 		'("block" commands) (tsql_run_commands commands statement session resultrow resultfields)
+		'("while" condition body) (tsql_run_loop condition body statement session resultrow resultfields)
+		'("try" body recovery) (tsql_run_try body recovery statement session resultrow resultfields)
+		'("break") (begin ((tsql_identity_scope session) "__tsql_transfer" "break") 0)
+		'("continue") (begin ((tsql_identity_scope session) "__tsql_transfer" "continue") 0)
+		'("return" text) (begin
+			(define status (if (nil? text) 0
+				(statement "return status" false (lambda (tx)
+					(coalesceNil (tsql_scalar_value schema text session tx "assignment" '("INT") ) 0)))))
+			(define scope (tsql_identity_scope session))
+			(scope "__tsql_return_status" status)
+			(scope "__tsql_transfer" "return")
+			status)
+		'("throw" arguments) (statement "throw" false (lambda (tx)
+			(if (nil? arguments)
+				(begin (define context (session "__tsql_error_context"))
+					(if (nil? context) (error "THROW requires an active CATCH") (error (context "error"))))
+				(begin
+					(define number (tsql_scalar_value schema (car arguments) session tx "assignment" '("INT")))
+					(define message (tsql_scalar_value schema (cadr arguments) session tx "assignment" '("NVARCHAR" -1)))
+					(define state (tsql_scalar_value schema (nth arguments 2) session tx "assignment" '("INT")))
+					(if (or (nil? number) (< number 50000) (nil? state) (< state 0) (> state 255) (nil? message))
+						(error "invalid THROW arguments") (tsql_raise_error number message state))))))
 		'("if" condition yes no) (begin
 			(define selected (statement condition false (lambda (tx)
 				(tsql_scalar_value schema condition session tx "predicate" nil))))
@@ -222,10 +298,33 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 			(dropprocedure owner (if definition (definition "name") name) ignore)
 			0)))
 		'("execute" owner name arguments) (tsql_invoke_procedure owner name arguments statement session resultrow resultfields)
+		'("execute-status" owner name arguments target) (begin
+			(define declaration (find (session "__tsql_parameter_declarations") (lambda (item) (equal? (car item) target)) nil))
+			(if declaration true (error "undeclared return status variable: @" target))
+			(define status (tsql_invoke_procedure owner name arguments statement session resultrow resultfields))
+			(define contract (cadr declaration))
+			/* The procedure frontend declares its return status INT. Conversion
+			uses that contract, never the dynamic carrier of the returned value. */
+			(define value (eval (sql_type_lower_annotations (tsql_cast_expr
+				(list (quote sql_type_expr) (list (quote quote) status) "INT" nil) (car contract) (cdr contract)))))
+			(session (concat "__tsql_parameter:" target) value)
+			0)
+		'("execute-dynamic" expression) (begin
+			(define text (statement "dynamic SQL text" false (lambda (tx)
+				(tsql_scalar_value schema expression session tx "dynamic" nil))))
+			(tsql_execute_dynamic schema text '() '() statement session resultrow resultfields
+				(lambda (result _status) result)))
 		_ (error "unsupported batch command")))))
+(define tsql_execute_command_batch (lambda (schema commands declarations supplied statement caller resultrow resultfields finish) (begin
+	(define scoped (tsql_scope_session caller (tsql_batch_contracts commands declarations) schema))
+	(map supplied (lambda (item) (scoped (concat "__tsql_parameter:" (car item)) (cadr item))))
+	/* Completion and the declared INT return status are different contracts.
+	Evaluate the SQL commands before reading their lexical scope's status. */
+	(finish (tsql_run_commands commands statement scoped resultrow resultfields)
+		(coalesceNil ((tsql_identity_scope scoped) "__tsql_return_status") 0)))))
 (define tsql_execute_batches (lambda (schema text session statement resultrow resultfields) (begin
 	(session "schema" schema)
-	(session "__tsql_connection_session" session)
+	(session "__tsql_connection_session" (tsql_connection_session session))
 	(define inherited (coalesceNil (session "__tsql_parameter_declarations") '()))
 	(define supplied (map inherited (lambda (declaration)
 		(list (car declaration) (session (concat "__tsql_parameter:" (car declaration)))))))
@@ -234,9 +333,8 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 			(list "syntax" (parse_tsql_batch schema (batch "text")) "repeat" (batch "repeat")))))))
 	(reduce batches (lambda (_result batch) (reduce (produceN (batch "repeat")) (lambda (_result _iteration) (begin
 		(define commands (cadr (batch "syntax")))
-		(define scoped (tsql_scope_session session (tsql_batch_contracts commands inherited) nil))
-		(map supplied (lambda (item) (scoped (concat "__tsql_parameter:" (car item)) (cadr item))))
-		(tsql_run_commands commands statement scoped resultrow resultfields))) 0)) 0))))
+		(tsql_execute_command_batch schema commands inherited supplied statement session resultrow resultfields
+			(lambda (result _status) result)))) 0)) 0))))
 (define tsql_execute_request (lambda (schema text session state sequence resultrow resultfields)
 	(with_query_request session state sequence text (lambda (statement)
 		(tsql_execute_batches schema text session statement resultrow resultfields)))))
@@ -264,15 +362,58 @@ statement owner, account, transaction session, arguments and output callbacks. *
 				(list (quote session) (list (quote concat) "__tsql_parameter:" (list (quote car) (quote item)))
 					(list (quote cadr) (quote item)))))
 			(list (quote tsql_run_commands) (list (quote quote) commands) (quote statement) (quote session)
-				(quote resultrow) (quote resultfields))))))))
+				(quote resultrow) (quote resultfields))
+			(list (quote coalesceNil)
+				(list (list (quote tsql_identity_scope) (quote session)) "__tsql_return_status") 0)))))))
 
 (registerprocedurelanguage "tsql-procedure" tsql_procedure_compile)
+(define tsql_execute_dynamic (lambda (schema text declarations values statement caller resultrow resultfields finish) (begin
+	/* Text and bindings are scalar request inputs. Compilation and all relational
+	execution use the ordinary frontend and planner, with the same statement owner
+	and a new lexical scope. No caller local leaks into a nested dynamic batch. */
+	(if (nil? text) (error "dynamic SQL text cannot be NULL") true)
+	/* GO separates submitted scripts, but is not a statement in executed text. */
+	(define syntax (tsql_script_cache "get_or_compute" (json_encode (list schema text "dynamic")) nil
+		(lambda (_tx) (parse_tsql_batch schema text))))
+	(tsql_execute_command_batch schema (cadr syntax) declarations values statement caller resultrow resultfields finish))))
+(define tsql_execute_parameterized (lambda (schema arguments statement caller resultrow resultfields) (begin
+	(define named (map (produceN (count arguments)) (lambda (i) (begin
+		(define arg (nth arguments i))
+		(define name (car arg))
+		(list (if (equal? name "") (if (< i 2) (nth '("stmt" "params") i) "") name) (cadr arg))))))
+	(define stmt (find named (lambda (arg) (equal? (car arg) "stmt")) nil))
+	(define params (find named (lambda (arg) (equal? (car arg) "params")) nil))
+	(if (nil? stmt) (error "dynamic SQL requires @stmt") true)
+	(if (> (count (filter named (lambda (arg) (has? '("stmt" "params") (car arg)))))
+		(+ 1 (if params 1 0))) (error "duplicate dynamic SQL text or declarations") true)
+	(define supplied (filter named (lambda (arg) (not (has? '("stmt" "params") (car arg))))))
+	(define binding (statement "dynamic parameter binding" false (lambda (tx) (begin
+		(define text (tsql_scalar_value (caller "schema") (cadr stmt) caller tx "dynamic" nil))
+		(define contracts (if params (tds_bind_declarations schema
+			(tsql_scalar_value (caller "schema") (cadr params) caller tx "dynamic" nil)) '()))
+		(if (equal? (count supplied) (count contracts)) true (error "dynamic SQL parameter count differs from declarations"))
+		(define inputs (map (produceN (count supplied)) (lambda (i) (begin
+			(define arg (nth supplied i))
+			(list (if (equal? (car arg) "") (car (nth contracts i)) (car arg)) (cadr arg))))))
+		(define names (map inputs car))
+		(if (equal? (count names) (count (merge_unique (list names)))) true (error "duplicate dynamic SQL input parameter"))
+		(define values (map contracts (lambda (declaration) (begin
+			(define arg (find inputs (lambda (arg) (equal? (car arg) (car declaration))) nil))
+			(if arg (list (car declaration) (tsql_scalar_value (caller "schema") (cadr arg) caller tx "assignment" (cadr declaration)))
+				(error "missing dynamic SQL input parameter: @" (car declaration)))))))
+		(list text contracts values)))))
+	(tsql_execute_dynamic schema (car binding) (cadr binding) (nth binding 2) statement caller resultrow resultfields
+		(lambda (_result status) status)))))
 (define tsql_invoke_procedure (lambda (schema name arguments statement caller resultrow resultfields)
-	(if (has? '("sp_tables" "sp_columns" "sp_pkeys" "sp_statistics" "sp_fkeys" "sp_datatype_info" "sp_datatype_info_100" "sp_special_columns") (toLower name))
+	(if (equal? (toLower name) "sp_executesql")
+		(tsql_execute_parameterized (if (equal?? schema "sys") (caller "schema") schema)
+			arguments statement caller resultrow resultfields)
+		(has? '("sp_tables" "sp_columns" "sp_pkeys" "sp_statistics" "sp_fkeys" "sp_datatype_info" "sp_datatype_info_100" "sp_special_columns") (toLower name))
 		(statement "metadata procedure" false (lambda (tx) (begin
 			(define values (map arguments (lambda (argument)
 				(list (car argument) (tsql_scalar_value (caller "schema") (cadr argument) caller tx "value" nil)))))
-			(tsql_execute_metadata schema name values (sql_policy (caller "username")) resultrow resultfields))))
+			(tsql_execute_metadata (if (equal?? schema "sys") (caller "schema") schema)
+				name values (sql_policy (caller "username")) resultrow resultfields))))
 		(begin
 			((sql_policy (caller "username")) schema name false)
 			/* One immutable native snapshot owns both the contract and callable.

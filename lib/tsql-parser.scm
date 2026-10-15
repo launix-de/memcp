@@ -81,12 +81,21 @@ The negative accumulator also represents the minimum int64 without overflow. */
 	(atom "DELETE" true)
 	(atom "COMMIT" true)
 	(atom "ROLLBACK" true)
+	(atom "WHILE" true)
+	(atom "BREAK" true)
+	(atom "CONTINUE" true)
+	(atom "RETURN" true)
+	(atom "THROW" true)
 
 )))
 (define tsql_identifier_quoted (parser (or
 	(parser '("[" (define id (regex "(?:[^\\]]|\\]\\])+" false false)) "]") (replace id "]]" "]"))
 	(parser '("\"" (define id (regex "(?:[^\"]|\"\")+" false false)) "\"") (replace id "\"\"" "\"")))))
 (define tsql_identifier (parser (or tsql_identifier_quoted tsql_identifier_unquoted)))
+/* The @ prefix makes this a variable token; SQL keywords need no identifier
+escaping here. Consume it as one token so whitespace cannot split the name. */
+(define tsql_variable_name (parser (define name (regex "@[a-zA-Z_][a-zA-Z0-9_]*"))
+	(toLower (substr name 1))))
 (define tsql_string_token (parser '((define national (or
 	(parser (atom "N'" true) true) (parser (atom "'" false) false)))
 	(define value (regex "(?:''|[^'])*" false false)) (atom "'" false false))
@@ -143,7 +152,7 @@ no SQL type wrapper survives into execution or storage. */
 (define tds_bind_declarations (lambda (_schema text)
 	(if (equal? (strtrim text) "") (list)
 		((parser (define declarations (+ (parser '(
-			"@" (define name tsql_identifier_unquoted)
+			(define name tsql_variable_name)
 			(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
 		) (list (toLower name) (cons type (tsql_decl_dimensions type dimensions)))) ","))
 			declarations "^(?:/\\*.*?\\*/|--[^\r\n]*(?:[\r\n]|$)|[\r\n\t ]+)+") text))))
@@ -813,15 +822,17 @@ Only the selected native operation survives the shared compile boundary. */
 			(sql_merge_collation collation (sql_info_collation info))) nil))))))
 (define tsql_add_expr (lambda (left right)
 	(list (quote sql_compile_expr) tsql_compile_addition left right)))
+(define tsql_raise_error (lambda (number message state)
+	(error (list "tsql-error" number message state))))
 (define tsql_integer_divide (lambda (left right)
 	(if (or (nil? left) (nil? right)) nil
-		(equal? right 0) (error "division by zero")
+		(equal? right 0) (tsql_raise_error 8134 "division by zero" 1)
 		(and (equal? left (tsql_parse_integer "-9223372036854775808")) (equal? right -1))
 		(error "integer division overflow")
 		(intdiv left right))))
 (define tsql_fractional_divide (lambda (left right)
 	(if (or (nil? left) (nil? right)) nil
-		(equal? right 0) (error "division by zero")
+		(equal? right 0) (tsql_raise_error 8134 "division by zero" 1)
 		(/ left right))))
 (define tsql_divide_expr (lambda (left right)
 	(list (quote sql_compile_expr) (lambda (infos) (begin
@@ -1184,9 +1195,14 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(parser '((atom "DB_NAME" true) "(" ")")
 			(list (quote sql_type_expr) (list (quote session) "schema") "NVARCHAR" '("utf8mb4_general_ci" 4)))
 		(parser '((atom "SCOPE_IDENTITY" true) "(" ")") (tsql_identity_expr true))
+		(parser '((define name (or (parser (atom "ERROR_MESSAGE" true) '("message" "NVARCHAR"))
+			(parser (atom "ERROR_NUMBER" true) '("number" "INT"))
+			(parser (atom "ERROR_STATE" true) '("state" "INT")))) "(" ")")
+			(list (quote sql_type_expr) (list (quote session)
+				(concat "__tsql_error_" (car name))) (cadr name) nil))
 		(parser '((atom "@@IDENTITY" true)) (tsql_identity_expr false))
 
-		(parser '((atom "@" true) (define var tsql_identifier_unquoted)) (parameter_expression var))
+		(parser (define var tsql_variable_name) (parameter_expression var))
 
 		(parser '((atom "LEFT" true) "(" (define s tsql_expression) "," (define n tsql_expression) ")") '((quote sql_substr) s 1 n))
 
@@ -1941,7 +1957,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			/* Control grammar captures the ordinary leaf grammar without compiling its
 			statement yet. Earlier DDL in a batch must publish before later DML binds.
 			Control nodes are syntax data, not another query or transaction engine. */
-			(define tsql_script_variable (parser '("@" (define name tsql_identifier_unquoted)) (toLower name)))
+			(define tsql_script_variable tsql_variable_name)
 			(define tsql_script_declaration (parser '(
 				(define name tsql_script_variable) (? (atom "AS" true))
 				(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
@@ -1954,6 +1970,19 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(parser (define value (capture tsql_expression)) (list "" (car value))))))
 			(define tsql_script_command (parser (or
 				(parser (define statement (capture tsql_rollback)) (list "recovery" (strtrim (car statement))))
+				(parser '((atom "BEGIN" true) (atom "TRY" true) (define body (* tsql_script_item empty))
+					(atom "END" true) (atom "TRY" true) (atom "BEGIN" true) (atom "CATCH" true)
+					(define recovery (* tsql_script_item empty)) (atom "END" true) (atom "CATCH" true))
+					(list "try" body recovery))
+				(parser '((atom "WHILE" true) (define condition (capture tsql_expression))
+					(define body tsql_script_command)) (list "while" (car condition) body))
+				(parser (atom "BREAK" true) (list "break"))
+				(parser (atom "CONTINUE" true) (list "continue"))
+				(parser '((atom "RETURN" true) (? (define value (capture tsql_expression))))
+					(list "return" (if value (car value) nil)))
+				(parser '((atom "THROW" true) (? (define arguments
+					'((capture tsql_expression) "," (capture tsql_expression) "," (capture tsql_expression)))))
+					(list "throw" (if arguments (list (car (nth arguments 0)) (car (nth arguments 2)) (car (nth arguments 4))) nil)))
 				(parser '((atom "IF" true) (define condition (capture tsql_expression))
 					(define yes tsql_script_command)
 					(? (atom "ELSE" true) (define no tsql_script_command)))
@@ -1968,6 +1997,14 @@ a separator is recognized only on a physical line containing no SQL text. */
 					(define ignore (? (atom "IF" true) (atom "EXISTS" true)))
 					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier))
 					(list "drop-procedure" (coalesce owner schema) name (if ignore true false)))
+				(parser '((or (atom "EXEC" true) (atom "EXECUTE" true))
+					"(" (define text (capture tsql_expression)) ")")
+					(list "execute-dynamic" (car text)))
+				(parser '((or (atom "EXEC" true) (atom "EXECUTE" true))
+					(define status tsql_script_variable) "="
+					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
+					(define arguments (* tsql_script_exec_argument ",")))
+					(list "execute-status" (coalesce owner schema) name arguments status))
 				(parser '((or (atom "EXEC" true) (atom "EXECUTE" true))
 					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
 					(define arguments (* tsql_script_exec_argument ",")))
@@ -1995,7 +2032,19 @@ a separator is recognized only on a physical line containing no SQL text. */
 		((parser '((* ";") (define command command_parser) (* ";")) (if (string? command) command (command)) "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s))
 )))
 
+(define tsql_validate_script_control (lambda (commands loop_depth)
+	(map commands (lambda (command) (match command
+		'("block" body) (tsql_validate_script_control body loop_depth)
+		'("if" _condition yes no) (tsql_validate_script_control (if no (list yes no) (list yes)) loop_depth)
+		'("while" _condition body) (tsql_validate_script_control (list body) (+ loop_depth 1))
+		'("try" body recovery) (tsql_validate_script_control (merge (list body recovery)) loop_depth)
+		'("break") (if (> loop_depth 0) true (error "BREAK requires an enclosing WHILE"))
+		'("continue") (if (> loop_depth 0) true (error "CONTINUE requires an enclosing WHILE"))
+		_ true)))))
+
 (define parse_tsql_batch (lambda (schema text) (begin
 	(define syntax (newsession))
 	(syntax "__tsql_script_syntax" true)
-	(parse_tsql schema text nil syntax nil))))
+	(define parsed (parse_tsql schema text nil syntax nil))
+	(tsql_validate_script_control (cadr parsed) 0)
+	parsed)))

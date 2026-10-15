@@ -1129,3 +1129,56 @@ test_cases:
 
   - name: "Cleanup nested trigger aggregate source"
     sql: "DROP TABLE IF EXISTS cache_parent"
+
+  # Transaction-local scalar states must not publish undoable rows into a
+  # shared computed group, including when several aggregates share one scan.
+  - name: "Multiple scalar aggregates read transaction-local rows"
+    session_id: scalar-group-rollback
+    setup:
+      - sql: "DROP TABLE IF EXISTS scalar_group_rollback"
+      - sql: "CREATE TABLE scalar_group_rollback(id INT PRIMARY KEY, amount INT)"
+      - sql: "INSERT INTO scalar_group_rollback VALUES(1,10)"
+      - sql: "BEGIN"
+      - sql: "INSERT INTO scalar_group_rollback VALUES(2,20),(3,NULL)"
+    sql: "SELECT COUNT(*) AS n, COUNT(amount) AS nonnull, SUM(amount) AS total, AVG(amount) AS average, MIN(amount) AS lo, MAX(amount) AS hi FROM scalar_group_rollback"
+    expect:
+      rows: 1
+      data: [{n: 3, nonnull: 2, total: 30, average: 15, lo: 10, hi: 20}]
+    cleanup:
+      - sql: "ROLLBACK"
+
+  - name: "Scalar aggregate cache contains only committed rows after rollback"
+    session_id: scalar-group-rollback
+    sql: "SELECT COUNT(*) AS n, COUNT(amount) AS nonnull, SUM(amount) AS total, AVG(amount) AS average, MIN(amount) AS lo, MAX(amount) AS hi FROM scalar_group_rollback"
+    expect:
+      rows: 1
+      data: [{n: 1, nonnull: 1, total: 10, average: 10, lo: 10, hi: 10}]
+    cleanup:
+      - sql: "DROP TABLE scalar_group_rollback"
+
+  - name: "Empty transaction-local scalar state keeps aggregate neutral values"
+    session_id: scalar-group-empty
+    setup:
+      - sql: "DROP TABLE IF EXISTS scalar_group_empty"
+      - sql: "CREATE TABLE scalar_group_empty(id INT PRIMARY KEY, amount INT)"
+      - sql: "BEGIN"
+    sql: "SELECT COUNT(*) AS n, COUNT(amount) AS nonnull, SUM(amount) AS total, AVG(amount) AS average, MIN(amount) AS lo, MAX(amount) AS hi FROM scalar_group_empty"
+    expect:
+      rows: 1
+      data: [{n: 0, nonnull: 0, total: null, average: null, lo: null, hi: null}]
+    cleanup:
+      - sql: "ROLLBACK"
+      - sql: "DROP TABLE scalar_group_empty"
+
+  - name: "Single scalar SUM uses the same local recipe name as its reader"
+    session_id: scalar-sum-local-name
+    setup:
+      - sql: "DROP TABLE IF EXISTS scalar_sum_local_name"
+      - sql: "CREATE TABLE scalar_sum_local_name(id INT PRIMARY KEY, amount INT)"
+      - sql: "INSERT INTO scalar_sum_local_name VALUES(1,10),(2,20)"
+      - sql: "BEGIN"
+    sql: "SELECT SUM(amount) AS total FROM scalar_sum_local_name"
+    expect: {rows: 1, data: [{total: 30}]}
+    cleanup:
+      - sql: "ROLLBACK"
+      - sql: "DROP TABLE scalar_sum_local_name"

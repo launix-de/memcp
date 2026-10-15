@@ -7909,11 +7909,8 @@ otherwise unnecessary one-entry associative group. */
 		(define keys '(1))
 		(define key_names (group_key_cols keys))
 		(define ags (gs_aggregates stage))
-		(define scalar_parts (ungrouped_aggregate_parts keys key_names ags))
-		(if (nil? scalar_parts)
-			(neumann_fail "build_queryplan" "query-local scalar aggregate requires exactly one aggregate")
-			true)
-		(define ag (cadr scalar_parts))
+		(if (empty_list? ags)
+			(neumann_fail "build_queryplan" "query-local scalar stage requires an aggregate") true)
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define membership_parts (base_group_membership_parts src condition (gs_facts stage)))
 		(define membership_expr (car membership_parts))
@@ -7921,10 +7918,15 @@ otherwise unnecessary one-entry associative group. */
 		(define membership_var (symbol "__group_membership_recset"))
 		(define source_expr (if (nil? membership_expr) (source_table_expr src) membership_var))
 		(define aggregate_state (symbol "__aggregate_state"))
-		(define aggregate_col (aggregate_col_name_using src ag))
-		(define rowassoc_expr (runtime_cons_list_expr (list
-			(car key_names) 1
-			aggregate_col (aggregate_finalize_expr ag aggregate_state))))
+		/* The state is bounded by the SELECT's aggregate descriptors, never by
+		input cardinality. Keep the existing unboxed single-aggregate path. */
+		(define rowassoc_expr (runtime_cons_list_expr (merge (list
+			(list (car key_names) 1)
+			(merge (map (produceN (count ags)) (lambda (i) (begin
+				(define ag (nth ags i))
+				(list (aggregate_col_name ag)
+					(aggregate_finalize_expr ag (if (equal? (count ags) 1)
+						aggregate_state (list (quote nth) aggregate_state i))))))))))))
 		(define having_expr (replace_direct_group_expr alias keys key_names ags
 			(coalesceNil (gs_having stage) true)))
 		(define offset_expr (coalesceNil offset_value 0))
@@ -7932,7 +7934,7 @@ otherwise unnecessary one-entry associative group. */
 		(define emit_expr (list (quote resultrow)
 			(direct_group_result_assoc_expr alias keys key_names ags fields)))
 		(define state_plan (build_base_ungrouped_aggregate_state_plan
-			schema tbl alias source_expr effective_condition ag))
+			schema tbl alias source_expr effective_condition ags))
 		(define plan (list
 			(list (quote lambda) (list aggregate_state)
 				(list (quote begin)
@@ -8003,33 +8005,57 @@ otherwise unnecessary one-entry associative group. */
 			merge_groups
 			false))))
 
-(define build_base_ungrouped_aggregate_state_plan (lambda (schema tbl alias table_expr condition ag)
-	(match ag
-		(cons agg_expr (cons agg_reduce (cons agg_neutral _rest))) (begin
+(define build_base_ungrouped_aggregate_state_plan (lambda (schema tbl alias table_expr condition ags)
+	(match ags
+		(list ag) (match ag
+			(cons agg_expr (cons agg_reduce (cons agg_neutral _rest))) (begin
+				(define src (list alias schema tbl false nil))
+				(define filtercols (extract_columns_for_alias src condition))
+				(define mapcols (if (equal? ag aggregate_count_descriptor)
+					'()
+					(extract_columns_for_alias src agg_expr)))
+				(define mapped_expr (if (equal? ag aggregate_count_descriptor)
+					1
+					(aggregate_map_value_expr ag (lower_column_expr_for_alias src agg_expr))))
+				(compile_scan_plan (quote scan)
+					(physical_query_tx_symbol)
+					table_expr
+					(cons (quote list) filtercols)
+					(list (quote lambda)
+						(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+						(lower_column_expr_for_alias src condition))
+					(cons (quote list) mapcols)
+					(scan_mapreduce_expr
+						(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+						agg_reduce
+						mapped_expr)
+					agg_neutral
+					(aggregate_shard_combine ag)
+					false))
+			_ (neumann_fail "build_queryplan" "ungrouped base aggregate expects aggregate descriptor"))
+		_ (begin
 			(define src (list alias schema tbl false nil))
 			(define filtercols (extract_columns_for_alias src condition))
-			(define mapcols (if (equal? ag aggregate_count_descriptor)
-				'()
-				(extract_columns_for_alias src agg_expr)))
-			(define mapped_expr (if (equal? ag aggregate_count_descriptor)
-				1
-				(aggregate_map_value_expr ag (lower_column_expr_for_alias src agg_expr))))
+			(define mapcols (merge_unique (map ags (lambda (ag)
+				(extract_columns_for_alias src (car ag))))))
+			(define state_expr (runtime_cons_list_expr (map (produceN (count ags)) (lambda (i) (begin
+				(define ag (nth ags i))
+				(list (nth ag 1) (list (quote nth) (quote __scan_acc) i)
+					(aggregate_map_value_expr ag (lower_column_expr_for_alias src (car ag)))))))))
 			(compile_scan_plan (quote scan)
-				(physical_query_tx_symbol)
-				table_expr
+				(physical_query_tx_symbol) table_expr
 				(cons (quote list) filtercols)
 				(list (quote lambda)
 					(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 					(lower_column_expr_for_alias src condition))
 				(cons (quote list) mapcols)
-				(scan_mapreduce_expr
-					(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-					agg_reduce
-					mapped_expr)
-				agg_neutral
-				(aggregate_shard_combine ag)
-				false))
-		_ (neumann_fail "build_queryplan" "ungrouped base aggregate expects aggregate descriptor"))))
+				(list (quote lambda)
+					(cons (quote __scan_acc) (map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col))))
+					state_expr)
+				(runtime_cons_list_expr (map ags (lambda (ag) (nth ag 2))))
+				(list (quote lambda) (list (quote old) (quote new))
+					(aggregate_payload_merge_expr ags 0))
+				false)))))
 
 /* Match the complete scalar group subtree before lowering it. A constant
 group key plus exactly one aggregate is a scalar reduction: carrying that
@@ -8140,7 +8166,7 @@ query transaction; DML-trigger replacement plans pass it through explicitly. */
 				(define aggregate_col (aggregate_col_name_using src ag))
 				(build_ungrouped_aggregate_insert_plan schema grouptbl key_name aggregate_col ag
 					(build_base_ungrouped_aggregate_state_plan
-						schema tbl alias source_expr effective_condition ag)
+						schema tbl alias source_expr effective_condition (list ag))
 					true nil))))
 		(if (nil? membership_expr)
 			plan
