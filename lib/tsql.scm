@@ -251,11 +251,12 @@ control state. Every predicate/leaf gets the normal cancellable statement scope.
 /* Message formatting is frontend syntax over a bounded argument list. The
 ordinary expression compiler owns each substitution's declared SQL contract. */
 (define tsql_message_parts (parser (define parts (* (or
-	(parser (define text (regex "[^%]+")) (list "text" text))
-	(parser "%%" '("text" "%"))
-	(parser "%I64d" '("BIGINT"))
-	(parser (or "%d" "%i") '("INT"))
-	(parser "%s" '("NVARCHAR" -1))) empty)) parts ""))
+	(parser (define text (regex "[^%]+" false false)) (list "text" text))
+	/* Format markers are case-sensitive prefixes. SQL word terminals would
+	incorrectly reject alphabetic text immediately following a conversion. */
+	(parser (define marker (regex "%%|%I64d|%[di]|%s" false false))
+		(match marker "%%" '("text" "%") "%I64d" '("BIGINT")
+			"%s" '("NVARCHAR" -1) _ '("INT")))) empty)) parts ""))
 (define tsql_run_raiserror (lambda (arguments statement session) (begin
 	(if (and (>= (count arguments) 3) (<= (count arguments) 23)) true
 		(error "RAISERROR requires message, severity, state and at most twenty substitutions"))

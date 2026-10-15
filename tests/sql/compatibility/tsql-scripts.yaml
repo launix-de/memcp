@@ -1078,6 +1078,19 @@ test_cases:
   sql: RAISERROR(N'fixture error',16,1)
   expect:
     error: true
+- name: Message markers accept adjacent alphabetic text and escaped percent
+  sql: BEGIN TRY RAISERROR(N'%ditems %sX %I64dunits %%',16,1,2,N'a',3); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect:
+    rows: 1
+    data: [{message: '2items aX 3units %'}]
+- name: Message format markers preserve case sensitivity
+  sql: RAISERROR(N'%S',16,1,N'text')
+  expect: {error: true}
+- name: Error context keywords retain case insensitive terminal contracts
+  sql: BEGIN TRY RAISERROR(N'mixed',15,7); END TRY BEGIN CATCH SELECT eRrOr_MeSsAgE() AS message,eRrOr_NuMbEr() AS number,eRrOr_StAtE() AS state,eRrOr_SeVeRiTy() AS severity; END CATCH
+  expect:
+    rows: 1
+    data: [{message: mixed, number: 50000, state: 7, severity: 15}]
 - name: RAISERROR rejects missing substitution arguments
   sql: RAISERROR(N'missing %s',16,1)
   expect:
