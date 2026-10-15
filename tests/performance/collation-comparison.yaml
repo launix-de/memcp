@@ -21,8 +21,8 @@ setup:
         100000)
 test_cases:
   - name: "Unicode general_ci ordered range with index construction and ten reuses"
-    sql: SELECT id FROM perf_ci_label WHERE label > 'label-école-150000' AND label < 'label-école-160000' ORDER BY label LIMIT 4
-    expect:
+    sql: &ordered_unicode_query SELECT id FROM perf_ci_label WHERE label > 'label-école-150000' AND label < 'label-école-160000' ORDER BY label LIMIT 4
+    expect: &ordered_unicode_rows
       rows: 4
       data:
         - {id: 50001}
@@ -32,6 +32,17 @@ test_cases:
     warmup: 0
     timing_samples: 11
     timing_aggregation: total
-    threshold_ms: 10000
+    timing_group: ordered_unicode_range
+    threshold_ms: 5000
+  # Keep the original cold-plus-ten phase visible, then amortize isolated
+  # scheduling/collection pauses over more requests without repeating setup.
+  - name: Unicode general_ci ordered range steady repetitions
+    sql: *ordered_unicode_query
+    expect: *ordered_unicode_rows
+    warmup: 0
+    timing_samples: 490
+    timing_aggregation: total
+    timing_group: ordered_unicode_range
+    threshold_ms: 5000
 cleanup:
   - sql: DROP TABLE IF EXISTS perf_ci_label

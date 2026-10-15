@@ -426,7 +426,43 @@ func jitEmitSpecialBoolFold(takeWhen bool) func(*JITContext, []Scmer, []JITValue
 
 // Value and branch contexts share SQL-3VL evaluation and short-circuit rules.
 // Only decisive TRUE/FALSE may skip operands; UNKNOWN must keep evaluating.
+// Every short-circuit exit rejoins the same outer allocator state. Operand
+// temporaries may have been produced only on the continuing edge, so their
+// spill roots cannot escape into a subsequent call's stack map. Keep only the
+// pointer-free bool/NULL result across the existing register boundary.
 func jitEmitBoolFold(ctx *JITContext, args []Scmer, result JITValueDesc, takeWhen bool, condition *jitConditionTargets) JITValueDesc {
+	if len(args) == 0 {
+		return jitEmitBoolFoldBody(ctx, args, result, takeWhen, condition)
+	}
+	outerEnv := ctx.Env
+	stableEnv := ctx.StabilizeJITEnv(outerEnv, true)
+	boundary := ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true})
+	ctx.Env = stableEnv
+	if condition != nil {
+		// Preserve branch lowering: filters need only an outgoing edge, not a
+		// boxed boolean written to memory and immediately read back.
+		yes, no := ctx.ReserveLabel(), ctx.ReserveLabel()
+		jitEmitBoolFoldBody(ctx, args, JITValueDesc{Loc: LocAny}, takeWhen, &jitConditionTargets{yes, no})
+		ctx.Env = outerEnv
+		ctx.MarkLabel(yes)
+		boundary.Restore(ctx)
+		ctx.EmitJmp(condition.yes)
+		ctx.MarkLabel(no)
+		boundary.Restore(ctx)
+		ctx.EmitJmp(condition.no)
+		return JITValueDesc{}
+	}
+	saved := JITValueDesc{Loc: LocStackPair, StackOff: ctx.AllocStack(16), NoHeapPointer: true}
+	value := jitEmitBoolFoldBody(ctx, args, JITValueDesc{Loc: LocAny}, takeWhen, nil)
+	saved.Type = value.Type
+	ctx.EmitStoreScmerToStack(value, saved.StackOff)
+	ctx.FreeDesc(&value)
+	ctx.Env = outerEnv
+	boundary.Restore(ctx)
+	return jitPlaceScmerIntoTarget(ctx, saved, result)
+}
+
+func jitEmitBoolFoldBody(ctx *JITContext, args []Scmer, result JITValueDesc, takeWhen bool, condition *jitConditionTargets) JITValueDesc {
 	identity := !takeWhen
 	if len(args) == 0 {
 		imm := NewBool(identity)

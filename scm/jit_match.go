@@ -704,6 +704,16 @@ func jitCompileMatch(ctx *JITContext, list []Scmer, sliceBase Reg, result JITVal
 	} else {
 		target = jitEnsureResultPair(ctx, result)
 	}
+	// Every arm writes this fixed destination. Nested condition boundaries may
+	// release ordinary homes, but must not let branch temporaries evict it.
+	if target.Loc == LocRegPair {
+		ctx.ProtectReg(target.Reg)
+		ctx.ProtectReg(target.Reg2)
+		defer func() {
+			ctx.UnprotectReg(target.Reg2)
+			ctx.UnprotectReg(target.Reg)
+		}()
+	}
 	endLabel := ctx.ReserveLabel()
 	branchState := ctx.SnapshotAllocState()
 	hasBranch := false
