@@ -7445,28 +7445,6 @@ propagation because NOT reverses FALSE. */
 					(qb_order block) (qb_limit block) (qb_offset block) (qb_hidden block)
 					(qb_stages block) (qb_facts block))
 				(list (list (quote null_rejected_aliases) rejected))))))))
-/* Closed scalar whitelist: volatile/UDF evaluation is not a reusable
-contribution. More expression families require an explicit purity contract. */
-
-(define contribution_pure_expr? (lambda (expr)
-	(if (query_session_read? expr)
-		(string? (cadr (query_session_read_expr expr)))
-		(match expr
-			((symbol get_column) _alias _ci _column _cci) true
-			/* SQL builtin resolution may retain either its symbol or procedure.
-			The zero-argument timestamp overload reads the clock and stays out. */
-			((symbol unix_timestamp) value) (contribution_pure_expr? value)
-			(cons head tail) (and
-				(or (and (symbol? head)
-					(contains? '("and" "or" "not" "equal?" "equal??" "<" "<=" ">" ">="
-						"coalesceNil" "if" "nil?" "+" "-" "*" "/" "min" "max" "sql_in" "list"
-						"sql_not" "date_add" "str_to_date" "format_date" "from_unixtime") (string head)))
-					(contains? (list + - * / min max equal? equal?? < <= > >= coalesceNil nil? sql_in sql_not not list
-						date_add str_to_date format_date from_unixtime) head)
-					(and (equal? head unix_timestamp) (equal? (count tail) 1)))
-				(reduce tail (lambda (ok item) (and ok (contribution_pure_expr? item))) true))
-			_ (or (nil? expr) (number? expr) (string? expr) (expression_equal? expr true) (expression_equal? expr false))))))
-
 (define contribution_stage_sources (lambda (stage)
 	(if (query_block? (gs_input stage)) (qb_sources (gs_input stage)) (list (gs_input stage)))))
 

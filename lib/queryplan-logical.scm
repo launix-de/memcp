@@ -6336,6 +6336,77 @@ available, including when that key is not exported by the derived relation. */
 		(source_outer? src)
 		(source_join_expr src))))
 
+/* Closed scalar whitelist: volatile/UDF evaluation is not a reusable
+contribution. More expression families require an explicit purity contract. */
+
+(define contribution_pure_expr? (lambda (expr)
+	(if (query_session_read? expr)
+		(string? (cadr (query_session_read_expr expr)))
+		(match expr
+			((symbol get_column) _alias _ci _column _cci) true
+			/* SQL builtin resolution may retain either its symbol or procedure.
+			The zero-argument timestamp overload reads the clock and stays out. */
+			((symbol unix_timestamp) value) (contribution_pure_expr? value)
+			(cons head tail) (and
+				(or (and (symbol? head)
+					(contains? '("and" "or" "not" "equal?" "equal??" "<" "<=" ">" ">="
+						"coalesceNil" "if" "nil?" "+" "-" "*" "/" "min" "max" "sql_in" "list"
+						"sql_not" "date_add" "str_to_date" "format_date" "from_unixtime") (string head)))
+					(contains? (list + - * / min max equal? equal?? < <= > >= coalesceNil nil? sql_in sql_not not list
+						date_add str_to_date format_date from_unixtime) head)
+					(and (equal? head unix_timestamp) (equal? (count tail) 1)))
+				(reduce tail (lambda (ok item) (and ok (contribution_pure_expr? item))) true))
+			_ (or (nil? expr) (number? expr) (string? expr) (expression_equal? expr true) (expression_equal? expr false))))))
+
+/* Eliminating a zero-source JOIN is safe only when its projection is a
+constant or positional-parameter row. Recognize typed literals without losing
+their SQL contracts, and keep parameter reads invocation-bound. Clocks, mutable
+SQL variables and arbitrary executable expressions still need a relation operator.
+This proof is separate from the literal-rows optimization, whose correlation
+domain contract is narrower. */
+(define constant_derived_projection_expr? (lambda (expr)
+	(match expr
+		((symbol sql_type_expr) value _type _collation) (constant_derived_projection_expr? value)
+		((quote sql_type_expr) value _type _collation) (constant_derived_projection_expr? value)
+		((symbol session) key) (and (string? key) (regexp_test key "^v[0-9]+$"))
+		((quote session) key) (and (string? key) (regexp_test key "^v[0-9]+$"))
+		_ (or (logical_literal_value? expr) (logical_sql_null_literal? expr)))))
+
+/* LEFT projection substitution repeats ON for its exported values. Reuse
+the common closed purity proof on a separate expression-only copy; the actual
+projection keeps all frontend type/collation annotations. Only positional input
+bindings are stable here, unlike mutable SQL session variables. */
+(define constant_derived_join_predicate? (lambda (expr)
+	(and (reduce (query_expr_session_reads expr) (lambda (valid read)
+		(and valid (match read ((symbol session) key)
+			(and (string? key) (regexp_test key "^v[0-9]+$")) _ false))) true)
+		(contribution_pure_expr? (fold_single_literal_expr '() (sql_type_lower_annotations expr))))))
+
+(define flatten_constant_derived_join (lambda (src inner tail) (begin
+	(if (and (literal_true? (coalesceNil (qb_where inner) true))
+		(empty_list? (qb_order inner)) (empty_list? (qb_hidden inner))
+		(empty_list? (qb_stages inner))
+		(reduce (extract_assoc (qb_fields inner) (lambda (_name expr) expr))
+			(lambda (valid expr) (and valid (constant_derived_projection_expr? expr))) true))
+		true (neumann_fail "untangle_query" "zero-source derived JOIN requires a literal or positional-parameter projection"))
+	(define alias (source_alias src))
+	(define projection (qb_fields inner))
+	(define matched (coalesceNil (rewrite_derived_ref alias projection (source_join_expr src)) true))
+	(if (and (source_outer? src) (not (constant_derived_join_predicate? matched)))
+		(neumann_fail "untangle_query" "constant derived LEFT JOIN needs a repeatable ON predicate") true)
+	/* The right row exists independently of its nullable payload. ON selects
+	that one candidate; a LEFT JOIN keeps every left row and NULL-extends only
+	its exported values. No filter may cross that outer-join boundary. */
+	(define effective_projection (if (source_outer? src)
+		(map_assoc projection (lambda (_name expr) (list (quote if) matched expr (sql_null_literal))))
+		projection))
+	(list
+		(rewrite_sources_join_for_derived alias effective_projection (nth tail 0))
+		(cons (list alias effective_projection)
+			(map (nth tail 1) (lambda (rewrite) (rewrite_derived_ref alias effective_projection rewrite))))
+		(if (source_outer? src) (nth tail 2) (cons matched (nth tail 2)))
+		(nth tail 3)))))
+
 (define flatten_source_list (lambda (sources ctx preceding)
 	(if (empty_list? sources)
 		(list '() '() '() '())
@@ -6411,7 +6482,7 @@ available, including when that key is not exported by the derived relation. */
 								(define inner_sources (coalesceNil (qb_sources inner) '()))
 								(if (empty_list? inner_sources)
 									(if (or (source_outer? src) (not (nil? (source_join_expr src))))
-										(neumann_fail "untangle_query" "zero-source derived JOIN needs constant-relation support")
+										(flatten_constant_derived_join src inner tail)
 										(list
 											(rewrite_sources_join_for_derived alias (qb_fields inner) tail_sources)
 											(cons (list alias (qb_fields inner)) tail_rewrites)

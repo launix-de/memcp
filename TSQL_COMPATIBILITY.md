@@ -47,18 +47,33 @@ TOP/OFFSET; duplicate and NULL rows; numeric precedence; empty-result metadata;
 alias escaping and scope; and existing native multi-column ALTER defaults.
 Computed ORDER BY slots over derived UNIONs have shared-planner regressions.
 
-Six positive specifications remain noncritical because their existing common
+Five positive specifications remain noncritical because their existing common
 planner or completion paths are incomplete:
 
 1. DISTINCT with TOP over an inline multi-row source.
 2. An inline multi-row source joined to a native table.
-3. Outer-join NULL extension for a one-row inline source.
-4. GROUP BY/HAVING over an inline multi-row source.
-5. The affected-row total of INSERT SELECT over a distributed inline source.
+3. GROUP BY/HAVING over an inline multi-row source.
+4. The affected-row total of INSERT SELECT over a distributed inline source.
    The fixture also checks that all inserted values remain queryable.
-6. Computed output ordering over a derived UNION DISTINCT. This shape still
+5. Computed output ordering over a derived UNION DISTINCT. This shape still
    fails explicitly; sorting, deduplication and windows need one correct native
    contract before it becomes executable.
+
+Single-row literal sources now share the ordinary logical derived-source
+rewrite for INNER and LEFT JOIN. The match predicate, rather than any nullable
+payload, determines NULL extension. Subsequent joins, WHERE, aggregates and
+correlated subqueries consume the rewritten projection, including its declared
+SQL type and invocation-bound positional parameters. No extra physical source,
+frontend-managed row collection or storage change is needed.
+
+This rewrite requires a literal/positional-parameter projection, no inner
+filter, ordering, hidden expressions or logical stages, and no grouping, windows
+or row-limit barrier. LEFT JOIN also requires a repeatable ON expression, proved
+by the existing shared scalar purity check; clocks, random functions and mutable
+session variables are rejected rather than independently deciding each output
+column's NULL extension.
+Executable projections and more general derived sources still need their own
+shared relational proof; they must not be duplicated as scalar evaluations.
 
 For these follow-ups, extend the common logical/lowering or native completion
 contract. Preserve its domain, multiplicity, NULL-extension and cardinality
