@@ -434,36 +434,31 @@ func jitEmitBoolFold(ctx *JITContext, args []Scmer, result JITValueDesc, takeWhe
 	if len(args) == 0 {
 		return jitEmitBoolFoldBody(ctx, args, result, takeWhen, condition)
 	}
-	saved := JITValueDesc{Loc: LocStackPair, StackOff: ctx.AllocStack(16), NoHeapPointer: true}
 	outerEnv := ctx.Env
 	stableEnv := ctx.StabilizeJITEnv(outerEnv, true)
 	boundary := ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true})
 	ctx.Env = stableEnv
+	if condition != nil {
+		// Preserve branch lowering: filters need only an outgoing edge, not a
+		// boxed boolean written to memory and immediately read back.
+		yes, no := ctx.ReserveLabel(), ctx.ReserveLabel()
+		jitEmitBoolFoldBody(ctx, args, JITValueDesc{Loc: LocAny}, takeWhen, &jitConditionTargets{yes, no})
+		ctx.Env = outerEnv
+		ctx.MarkLabel(yes)
+		boundary.Restore(ctx)
+		ctx.EmitJmp(condition.yes)
+		ctx.MarkLabel(no)
+		boundary.Restore(ctx)
+		ctx.EmitJmp(condition.no)
+		return JITValueDesc{}
+	}
+	saved := JITValueDesc{Loc: LocStackPair, StackOff: ctx.AllocStack(16), NoHeapPointer: true}
 	value := jitEmitBoolFoldBody(ctx, args, JITValueDesc{Loc: LocAny}, takeWhen, nil)
 	saved.Type = value.Type
 	ctx.EmitStoreScmerToStack(value, saved.StackOff)
 	ctx.FreeDesc(&value)
 	ctx.Env = outerEnv
 	boundary.Restore(ctx)
-	if condition != nil {
-		boolean := jitCondToBool(ctx, &saved)
-		if ctx.emitBooleanFlagsJump(&boolean, condition.yes, condition.no) {
-			return JITValueDesc{}
-		}
-		if boolean.Loc == LocImm {
-			if boolean.Imm.Bool() {
-				ctx.EmitJmp(condition.yes)
-			} else {
-				ctx.EmitJmp(condition.no)
-			}
-		} else {
-			ctx.EmitCmpRegImm32(boolean.Reg, 0)
-			ctx.EmitJump(CondNotEqual, condition.yes)
-			ctx.EmitJmp(condition.no)
-			ctx.FreeDesc(&boolean)
-		}
-		return JITValueDesc{}
-	}
 	return jitPlaceScmerIntoTarget(ctx, saved, result)
 }
 
