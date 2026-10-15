@@ -4,7 +4,7 @@
 # Native foreign-key admission: proposal for review
 
 **Design and executable specifications only. No new engine authority is
-implemented by this change.** Baseline: `d72bfbfccb4b` (after the frontend identity and hint changes).
+implemented by this change.** Review baseline: `0001cd7ff` (after the shared request and procedural frontend integration).
 
 ## Reuse the existing implementation
 
@@ -185,10 +185,15 @@ read-only validation state. Names and layout require architecture review.
    comparison contract using native declarations. SQL assignment/type rules
    remain compile-time frontend decisions. Cross-database references and
    unsupported matching/deferred actions must fail explicitly.
-2. Publish one provisional native enforcement edge at a DML batch-admission
-   boundary, before scanning old data. It belongs to the same canonical native
-   FK definition; it is not yet a successful public/durable ADD. Every later
-   relevant mutation uses the edge, claims and existing generated programs.
+2. Register the candidate with existing native mutation/dependency machinery
+   at a batch-admission boundary, before scanning old data. It belongs to the
+   same canonical FK definition, but has **no enforcement authority** before
+   successful public/durable ADD. A candidate that later fails validation must
+   not have rejected an otherwise legal child or parent mutation. Merely
+   running its generated checking programs while calling the edge provisional
+   violates this requirement. Observation/enrolment must let DML continue and
+   invalidate or retry the candidate proof when necessary; it must not impose
+   a new candidate-only transaction conflict on user writes.
 3. Enrol pre-boundary in-flight mutations and rollback-restorable values.
    Existing transaction/lifetime bookkeeping must close the gap between
    entering a native write and observing the new edge. An epoch read without
@@ -211,7 +216,13 @@ read-only validation state. Names and layout require architecture review.
    an old validator publish against replacement logical objects.
 
 The registration boundary, metadata publication and durable-error handling are
-still open implementation work, not proved by this sketch. Reusing
+still open implementation work, not proved by this sketch. In particular, no
+existing API has been identified that atomically upgrades observation-only
+candidate dependencies to the already enforced native FK definition while
+covering older parked writes and their undo. A shared epoch, a pre-publication
+checking trigger, or a validation scan alone does not supply that missing
+operation. Failed candidates must leave both the catalog and concurrent DML
+outcomes as if no enforcement declaration had been installed. Reusing
 `contributionRevision` alone is insufficient: it neither retains reference
 authority through parked transactions nor closes the final publication gap.
 Already existing unchecked definitions must not become trusted merely on
@@ -245,7 +256,8 @@ sides: child-check/parent-delete/child-publication; opposite ordering; tentative
 parent rollback; deleted-child rollback; own child-delete then parent-delete;
 savepoint repeated references; CASCADE/SET NULL and failing user triggers;
 final NEW mutation; concurrent CREATE/ADD/DROP; validation versus existing parked
-writes; rebuild/repartition; commit failure/unknown durable outcome; restart;
+writes; a failing candidate concurrent with an otherwise legal orphan insert or
+parent removal (the candidate must not reject either write); rebuild/repartition; commit failure/unknown durable outcome; restart;
 NULL/composite/coercing equality and independent-key progress. Ordinary reads
 must complete while an affected writer/validator is paused. Go race-detector
 tests complement, not replace, these logical schedules and Native JIT results.
