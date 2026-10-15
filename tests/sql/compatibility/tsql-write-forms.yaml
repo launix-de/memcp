@@ -586,12 +586,39 @@ test_cases:
     - n: 4
       first_id: 1
       last_id: 4
+- name: INSERT TOP bounds VALUES without the optional INTO keyword
+  sql: INSERT TOP(1) write_limit(value) VALUES(91),(91)
+  expect:
+    affected_rows: 1
+- name: INSERT TOP bounds SELECT without the optional INTO keyword
+  sql: INSERT TOP(1) write_limit(value) SELECT 93 FROM write_source
+  expect:
+    affected_rows: 1
+- name: INSERT TOP zero suppresses DEFAULT VALUES without INTO
+  sql: INSERT TOP(0) write_limit DEFAULT VALUES
+  expect:
+    affected_rows: 0
+- name: Optional INTO preserves bounded native rows and identity reservation
+  sql: SELECT COUNT(*) AS n,MIN(id) AS first_id,MAX(id) AS last_id,MIN(value) AS first_value,MAX(value) AS last_value
+    FROM write_limit WHERE value>=90
+  expect:
+    rows: 1
+    data:
+    - n: 2
+      first_id: 5
+      last_id: 6
+      first_value: 91
+      last_value: 93
 - name: INSERT DML TOP requires parentheses
   sql: INSERT TOP 1 INTO write_limit(value) VALUES(10)
   expect:
     error: true
 - name: INSERT DML TOP rejects negative counts
   sql: INSERT TOP(-1) INTO write_limit(value) VALUES(10)
+  expect:
+    error: true
+- name: Optional INTO does not accept unparenthesized INSERT TOP
+  sql: INSERT TOP 1 write_limit(value) VALUES(10)
   expect:
     error: true
 - name: Explicit DEFAULT cells reuse native column declarations
