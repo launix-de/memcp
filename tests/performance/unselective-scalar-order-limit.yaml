@@ -14,9 +14,9 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 metadata:
-  # Reserve capacity for all seven fresh pairs, including the retained pilot.
-  # Balance both recorded CI cohorts; samples and timing gates stay unchanged.
-  performance_shard_weight: 137
+  # All seven fresh pairs can consume eleven minutes on a slower CI runner.
+  # Keep this suite on its own shard; samples and timing gates stay unchanged.
+  performance_shard_weight: 200
   version: "1.0"
   description: "Unselective scalar ORDER LIMIT late projection"
   isolated: true
