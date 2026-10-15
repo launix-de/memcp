@@ -637,10 +637,8 @@ test_cases:
   sql: INSERT dbo.tsql_copy VALUES (10,N'implicit values')
   expect:
     affected_rows: 1
-  noncritical: true
 - name: TSQL INSERT SELECT resolves omitted target columns
   sql: INSERT dbo.tsql_copy SELECT id+10,name FROM dbo.tsql_data WHERE id=1
-  noncritical: true
 - name: Implicit target columns preserve names and values
   sql: SELECT id,name FROM dbo.tsql_copy WHERE id>=10 ORDER BY id
   expect:
@@ -650,7 +648,6 @@ test_cases:
       name: implicit values
     - id: 11
       name: Alice
-  noncritical: true
 - name: Implicit target columns still enforce value arity
   sql: INSERT dbo.tsql_copy VALUES (12)
   expect:

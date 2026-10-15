@@ -1705,7 +1705,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(list (quote begin)
 				(list (quote set) (quote resultrow) (list (quote lambda) (list (quote item)) insert_expr)) plan)))))
 	(define tsql_insert_into (parser '(
-		(atom "INSERT" true) (atom "INTO" true)
+		(atom "INSERT" true) (? (atom "INTO" true))
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
 		(? "(" (define columns (+ tsql_identifier ",")) ")")
 		(atom "VALUES" true) (define rows (+ tsql_insert_values_row ","))
@@ -1733,7 +1733,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(if policy (policy database tbl true) true)
 			(tsql_native_insert_expr database tbl '() '('list '(list)) 1 true)))))
 	(define tsql_insert_select (parser '(
-		(atom "INSERT" true) (atom "INTO" true)
+		(atom "INSERT" true) (? (atom "INTO" true))
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
 		(? "(" (define columns (+ tsql_identifier ",")) ")")
 		(define query tsql_select)
