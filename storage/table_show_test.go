@@ -691,6 +691,27 @@ func TestConstraintMetadataMaintenanceCannotReplaceNewDeclaration(t *testing.T) 
 	}
 }
 
+func TestStatisticsPublicationPreservesNewerColumnDirectory(t *testing.T) {
+	tbl := showColumnsTestTable(1)
+	tbl.publishShowColumnsSnapshot(true)
+	// DDL publishes the initialized INSERT/name directory before its full SHOW
+	// snapshot. Pause that publication between the two existing atomic stores.
+	tbl.Columns = append(tbl.Columns, &column{Name: "added", Typ: "INT", AllowNull: true})
+	newNames := tbl.publishColumnNamesSnapshot()
+	tbl.collectStatisticsFromShards(nil)
+	if tbl.columnNamesSnapshot.Load() != newNames {
+		t.Fatal("statistics replaced the newer declaration directory")
+	}
+	if name, exists := tbl.ResolveColumnName("added", false); !exists || name != "added" {
+		t.Fatal("statistics made the newly published column disappear")
+	}
+	// Finish the same DDL publication and verify point reads agree with INSERT.
+	tbl.publishShowColumnsSnapshot(true)
+	if tbl.ShowColumn("added", false).IsNil() {
+		t.Fatal("completed DDL lost its column description")
+	}
+}
+
 func TestConstraintMetadataConcurrentForeignPublicationAndMaintenance(t *testing.T) {
 	tbl := showColumnsTestTable(1)
 	tbl.Name = "child"

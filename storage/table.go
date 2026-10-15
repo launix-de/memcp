@@ -1049,7 +1049,7 @@ func (t *table) collectStatisticsFromShards(shards []*storageShard) {
 			replacement := t.buildShowColumnsSnapshot(uint(stats.rowCount), nil)
 			replacement.metadata.statistics = stats
 			if t.showColumnsSnapshot.CompareAndSwap(nil, replacement) {
-				t.columnNamesSnapshot.Store(replacement.metadata.columnNames)
+				t.columnNamesSnapshot.CompareAndSwap(nil, replacement.metadata.columnNames)
 				t.publishPlannerStatsToken()
 				return
 			}
@@ -1058,7 +1058,9 @@ func (t *table) collectStatisticsFromShards(shards []*storageShard) {
 		replacement := t.buildShowColumnsSnapshot(uint(stats.rowCount), current.metadata.columnNames)
 		replacement.metadata.statistics = stats
 		if t.showColumnsSnapshot.CompareAndSwap(current, replacement) {
-			t.columnNamesSnapshot.Store(replacement.metadata.columnNames)
+			// Statistics retain the existing immutable directory. DDL may already
+			// have published its successor before its full SHOW snapshot; never
+			// replace that newer INSERT/name contract with this older generation.
 			t.publishPlannerStatsToken()
 			return
 		}
