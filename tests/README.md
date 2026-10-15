@@ -81,9 +81,34 @@ extends that limit. Suspect totals receive the usual complete isolated-fixture
 old/new verification, with medians taken across whole workload totals. Independent
 latency tests keep their existing median-per-request policy.
 
+Short fixed-total cases must contain enough repeated work that one scheduling
+pause or garbage collection does not dominate the total. Reuse the fixture;
+include the first execution and validate every response. Select the count from
+baseline timings before A/B measurement, then freeze the same count for both
+revisions and all verification pairs. Do not force collection, discard slow
+samples, or retry until a green result appears.
+
+The scan-kernel suite measures 1001 SQL requests and 101 direct SCM scans per
+case. Typed-filter totals use 101 scans/transactional requests and 1001 cached
+SQL requests. Literal dead-branch coverage measures 51 requests; cached
+range-first cases measure 501. The two longer range-first mapping cases retain
+11 requests. These counts amortize fixed disturbances without repeating the
+expensive table setup. Existing one-shot cache-fill tests remain separate;
+replacing their work with cache hits would change what they protect. Every
+existing result assertion, absolute budget, and 20% A/B gate remains in force.
+
 - `sql/dml/insert-values-template.yaml`: Bulk INSERT literals, session bindings and computed cells.
 - `performance/bulk-insert-compile.yaml`: Cold compilation of parameterized bulk INSERT rows.
-- `performance/jit-scan-kernel-compile.yaml`: Full column scans including per-invocation filter and reducer compilation; one cold request plus three repetitions.
+- `performance/jit-scan-kernel-compile.yaml`: Full column scans including per-invocation filter and reducer compilation; one cold request plus 1000 SQL or 100 SCM repetitions.
+
+Compile-time guards execute `EXPLAIN COMPILE` eleven times against the same
+fixture. Each request builds a complete new plan; these are not reads of an
+execution-plan cache. Planner and phase timing limits apply to the arithmetic
+mean of all eleven measurements, including the first and any collection pause.
+Structural metrics use the maximum, so no oversized plan can disappear in an
+average. A compilation error or missing requested metric fails the test.
+`--log-times` retains every raw metrics object as `COMPILE_TIME` output. Machine
+scaling and all existing per-compilation budgets remain unchanged.
 
 ## Diagnose a red timing check
 

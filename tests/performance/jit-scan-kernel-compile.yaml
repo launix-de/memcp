@@ -21,14 +21,14 @@ test_cases:
   sql: SELECT COUNT(*) AS cnt, SUM(value) AS total FROM kernel_values WHERE value > 127
   expect: {rows: 1, data: [{cnt: 59872, total: 1799961872}]}
   warmup: 0
-  timing_samples: 4
+  timing_samples: 1001
   timing_aggregation: total
   threshold_ms: 5000
 - name: 'Perf: SQL arithmetic comparison and reducer'
   sql: SELECT SUM(value + weight) AS total FROM kernel_values WHERE value + weight > 255
   expect: {rows: 1, data: [{total: 3599983616}]}
   warmup: 0
-  timing_samples: 4
+  timing_samples: 1001
   timing_aggregation: total
   threshold_ms: 5000
 - name: 'Perf: full scan compiles typed filter buffer'
@@ -38,7 +38,7 @@ test_cases:
       '() (lambda (acc) (+ acc 1)) 0 + false)
   expect: {result: 59872}
   warmup: 0
-  timing_samples: 4
+  timing_samples: 101
   timing_aggregation: total
   threshold_ms: 5000
 - name: 'Perf: repeated materialized comparisons in typed scan'
@@ -50,7 +50,7 @@ test_cases:
       '() (lambda (acc) (+ acc 1)) 0 + false)
   expect: {result: 60000}
   warmup: 0
-  timing_samples: 4
+  timing_samples: 101
   timing_aggregation: total
   threshold_ms: 5000
 - name: 'Perf: nested boolean branches in typed scan'
@@ -62,7 +62,7 @@ test_cases:
       '() (lambda (acc) (+ acc 1)) 0 + false)
   expect: {result: 25000}
   warmup: 0
-  timing_samples: 4
+  timing_samples: 101
   timing_aggregation: total
   threshold_ms: 5000
 - name: 'Perf: floating comparison branches in typed scan'
@@ -74,7 +74,7 @@ test_cases:
       '() (lambda (acc) (+ acc 1)) 0 + false)
   expect: {result: 59999}
   warmup: 0
-  timing_samples: 4
+  timing_samples: 101
   timing_aggregation: total
   threshold_ms: 5000
 - name: Reject missing scan column
