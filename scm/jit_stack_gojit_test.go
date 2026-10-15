@@ -22,6 +22,9 @@ package scm
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"math/bits"
+	"regexp"
 	"runtime"
 	"testing"
 	"time"
@@ -964,5 +967,67 @@ func TestJITRecursiveSelfBindingAcrossSharedNumberedScopes(t *testing.T) {
 	callback := Eval(jitBindLambdaSelfValues(body, "visit", 1), env)
 	if got := Apply(callback, NewInt(7)).Int(); got != 8 {
 		t.Fatalf("self capture returned %d, want 8", got)
+	}
+}
+
+// A byte-walker's branches may skip a spill instruction. Outer weighted homes
+// must therefore keep one placement across the entire regex region rather than
+// become path-local spills whose pointer map later revives a discarded value.
+func TestJITRegexBranchesPreserveOuterHomes(t *testing.T) {
+	for _, capture := range []bool{false, true} {
+		for _, free := range []int{5, 6, 7} {
+			t.Run(fmt.Sprintf("capture=%t/free=%d", capture, free), func(t *testing.T) {
+				code := make([]byte, 1<<18)
+				ctx := newJITStackMapTestContext(code)
+				ctx.AllRegs = jitDefaultFreeGPRegs() | 1<<uint(RegRAX) | 1<<uint(RegRBX)
+				ctx.FreeRegs = ctx.AllRegs
+				ctx.RegisterBank = jitNativeRegisterBank
+				ctx.SliceBase = RegR12
+				ctx.W = ctx
+				homes := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 2, Cost: 10}}, Count: 1})
+				if homes.Available == 0 {
+					t.Fatal("fixture did not allocate a weighted home")
+				}
+				value := JITValueDesc{Loc: LocRegPair, Type: tagString, Reg: homes.Registers[0], Reg2: homes.Registers[1]}
+				ctx.BindReg(value.Reg, &value)
+				ctx.BindReg(value.Reg2, &value)
+				held := make([]JITValueDesc, 0, 16)
+				for bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) > free {
+					r := ctx.AllocReg()
+					held = append(held, JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: r, RelocatablePointer: true})
+					ctx.BindReg(r, &held[len(held)-1])
+				}
+				// Use stable descriptors: append must not invalidate registered owners.
+				for i := range held {
+					ctx.BindReg(held[i].Reg, &held[i])
+				}
+				input := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: ctx.AllocStack(16), Rooted: true}
+				pattern := regexp.MustCompile(`\b[a-zA-Z_][a-zA-Z0-9_]*\b`)
+				if capture {
+					failed := ctx.ReserveLabel()
+					captures := jitEmitConstantRegexpCaptures(ctx, pattern, input, failed)
+					for i, capture := range captures {
+						root := jitStackRoot{base: jitStackRootFrameSP, offset: capture.StackOff - ctx.DynamicSP}
+						if _, ok := ctx.StackRoots[root]; !ok {
+							t.Fatalf("capture %d lost its GC root at the region boundary", i)
+						}
+					}
+					ctx.MarkLabel(failed)
+				} else {
+					jitEmitConstantRegexpPredicate(ctx, pattern, input)
+				}
+				for i := range held {
+					wantReg := held[i].Reg
+					ctx.SyncDesc(&held[i])
+					if held[i].Loc != LocReg || held[i].Reg != wantReg {
+						t.Fatalf("branch-local regex spill changed outer temporary %d: %#v", i, held[i])
+					}
+				}
+				ctx.SyncDesc(&value)
+				if value.Loc != LocRegPair || value.Reg != homes.Registers[0] || value.Reg2 != homes.Registers[1] {
+					t.Fatalf("branch-local regex spill changed outer home: %#v", value)
+				}
+			})
+		}
 	}
 }

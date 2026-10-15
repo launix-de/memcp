@@ -18,7 +18,6 @@ package scm
 
 import (
 	"fmt"
-	"math/bits"
 	"regexp"
 	"regexp/syntax"
 )
@@ -1338,6 +1337,9 @@ func jitRegexCaptureTargets(ctx *JITContext, count int) []JITValueDesc {
 	targets := make([]JITValueDesc, count)
 	for index := range targets {
 		off := ctx.AllocStack(16)
+		// The boundary snapshot must already own every capture root. Failed
+		// branches can skip its producer and later invocations can reuse slots.
+		ctx.PrepareScmerStackTarget(off)
 		targets[index] = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: off, Rooted: true}
 	}
 	return targets
@@ -1400,40 +1402,25 @@ func jitEmitConstantRegexpPredicate(ctx *JITContext, pattern *regexp.Regexp, val
 	result := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: ctx.AllocStack(8), NoHeapPointer: true}
 	ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false), NoHeapPointer: true}, result.StackOff)
 	value = ctx.stabilizeForNested(value)
-	if bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) < 6 {
-		outer := ctx.PreserveOuterRegs()
-		success := ctx.ReserveLabel()
-		fail := ctx.ReserveLabel()
-		invalid := ctx.ReserveLabel()
-		done := ctx.ReserveLabel()
-		jitEmitNativeRegex(ctx, program, value, nil, success, fail, invalid, nil, false)
-		ctx.MarkLabel(success)
-		ctx.RestoreOuterRegs(outer)
-		ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true), NoHeapPointer: true}, result.StackOff)
-		ctx.EmitJmp(done)
-		ctx.MarkLabel(fail)
-		ctx.RestoreOuterRegs(outer)
-		ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false), NoHeapPointer: true}, result.StackOff)
-		ctx.EmitJmp(done)
-		ctx.MarkLabel(invalid)
-		ctx.RestoreOuterRegs(outer)
-		ctx.EmitGoPanic("regex expects string")
-		ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false), NoHeapPointer: true}, result.StackOff)
-		ctx.MarkLabel(done)
-		return result
-	}
+	// Word-boundary and character-class branches can need more than six
+	// scratch registers. Spill outer owners before any conditional branch;
+	// otherwise a skipped spill can later be reintroduced as a stale GC root.
+	outer := ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true})
 	success := ctx.ReserveLabel()
 	fail := ctx.ReserveLabel()
 	invalid := ctx.ReserveLabel()
 	done := ctx.ReserveLabel()
 	jitEmitNativeRegex(ctx, program, value, nil, success, fail, invalid, nil, false)
 	ctx.MarkLabel(success)
+	ctx.RestoreOuterRegs(outer)
 	ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true), NoHeapPointer: true}, result.StackOff)
 	ctx.EmitJmp(done)
 	ctx.MarkLabel(fail)
+	ctx.RestoreOuterRegs(outer)
 	ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false), NoHeapPointer: true}, result.StackOff)
 	ctx.EmitJmp(done)
 	ctx.MarkLabel(invalid)
+	ctx.RestoreOuterRegs(outer)
 	ctx.EmitGoPanic("regex expects string")
 	ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false), NoHeapPointer: true}, result.StackOff)
 	ctx.MarkLabel(done)
@@ -1446,23 +1433,11 @@ func jitEmitConstantRegexpPredicate(ctx *JITContext, pattern *regexp.Regexp, val
 func jitEmitConstantRegexpCaptures(ctx *JITContext, pattern *regexp.Regexp, value JITValueDesc, failLabel JITLabel) []JITValueDesc {
 	program := jitCompileRegexProgram(pattern)
 	captures := jitRegexCaptureTargets(ctx, program.captures)
-	// A capture match can sit below an if/match result and an inlined callback,
-	// leaving too few registers for the byte walker's cursor, end and scan
-	// state. The input and captures are stable stack values, so preserve the
-	// outer register bank only under pressure and restore it on every outgoing
-	// edge of this self-contained control-flow region.
+	// A regex is a branching register-allocation region, independently of the
+	// apparent free-register count. Captures are rooted before the snapshot;
+	// restore all outer owners on every outgoing edge.
 	value = ctx.stabilizeForNested(value)
-	if bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) >= 6 {
-		success := ctx.ReserveLabel()
-		invalid := ctx.ReserveLabel()
-		jitEmitNativeRegex(ctx, program, value, captures, success, failLabel, invalid, nil, false)
-		ctx.MarkLabel(invalid)
-		ctx.EmitGoPanic("regex expects string")
-		ctx.EmitJmp(failLabel)
-		ctx.MarkLabel(success)
-		return captures
-	}
-	outer := ctx.PreserveOuterRegs()
+	outer := ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true})
 	success := ctx.ReserveLabel()
 	failed := ctx.ReserveLabel()
 	invalid := ctx.ReserveLabel()
