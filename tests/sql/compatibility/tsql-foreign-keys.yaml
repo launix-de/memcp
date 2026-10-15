@@ -308,12 +308,42 @@ test_cases:
   sql: ALTER TABLE dbo.tsql_fk_alter WITH CHECK ADD CONSTRAINT FK_alter_parent FOREIGN KEY (a,b) REFERENCES dbo.tsql_fk_parent
     ([First],[Second])
   noncritical: true
+- name: ALTER admission and child enforcement form one checked workflow
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_fk_checked_insert
+  - sql: DROP TABLE IF EXISTS dbo.tsql_fk_checked_parent
+  - sql: CREATE TABLE dbo.tsql_fk_checked_parent (a INT,b INT,PRIMARY KEY(a,b))
+  - sql: CREATE TABLE dbo.tsql_fk_checked_insert (id INT PRIMARY KEY,a INT,b INT)
+  - sql: ALTER TABLE dbo.tsql_fk_checked_insert WITH CHECK ADD CONSTRAINT FK_checked_insert FOREIGN KEY (a,b) REFERENCES dbo.tsql_fk_checked_parent (a,b)
+  sql: INSERT dbo.tsql_fk_checked_insert VALUES (1,7,70)
+  expect:
+    error: true
+    contains: foreign key constraint
+  cleanup:
+  - scm: (dropforeignkey (table "memcp-tests" "tsql_fk_checked_insert") "FK_checked_insert")
+  - sql: DROP TABLE IF EXISTS dbo.tsql_fk_checked_insert
+  - sql: DROP TABLE IF EXISTS dbo.tsql_fk_checked_parent
+  noncritical: true
 - name: ALTER foreign key enforces child writes
+  # The ALTER syntax probe above is noncritical. Establish its native fixture
+  # independently so this critical DML assertion cannot pass on a parser error.
+  # The complete ALTER-to-INSERT workflow remains visible in its own case.
+  setup:
+  - sql: CREATE TABLE dbo.tsql_fk_enforcement_parent ([First] INT,[Second] INT,PRIMARY KEY([First],[Second]))
+  - scm: |
+      (if (find ((show (table "memcp-tests" "tsql_fk_alter") "constraints") "ForeignKeys")
+            (lambda (key) (equal? (key "Id") "FK_alter_parent")))
+        true
+        (createforeignkey (table "memcp-tests" "tsql_fk_alter") "FK_alter_parent" '("a" "b")
+          (table "memcp-tests" "tsql_fk_enforcement_parent") '("First" "Second") "restrict" "restrict"))
   sql: INSERT dbo.tsql_fk_alter VALUES (1,7,70)
   expect:
     error: true
+    contains: foreign key constraint
 - name: DROP CONSTRAINT resolves constraint casing and removes enforcement
   sql: ALTER TABLE dbo.tsql_fk_alter DROP CONSTRAINT fk_ALTER_parent
+- name: Release independent native enforcement fixture
+  sql: DROP TABLE dbo.tsql_fk_enforcement_parent
 - name: DROP removes the actual immutable metadata relationship
   sql: sp_fkeys @fktable_name=N'tsql_fk_alter'
   expect:
