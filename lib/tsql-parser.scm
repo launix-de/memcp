@@ -1309,11 +1309,11 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(parser (atom "NULL" true) (quote sql_null_style))))) ")")
 			(tsql_convert_expr value type dimensions style))
 
-		(parser '((define type (or
-			(parser (atom "GETDATE" true) "DATETIME")
-			(parser (atom "GETUTCDATE" true) "DATETIME")
-			(parser (atom "SYSDATETIME" true) "DATETIME2")
-			(parser (atom "SYSUTCDATETIME" true) "DATETIME2"))) "(" ")")
+		/* Atom result values encode constant contracts directly, so keyword
+		alternatives do not need their own parser generators. */
+		(parser '((define type (or (atom "GETDATE" true true "DATETIME")
+			(atom "GETUTCDATE" true true "DATETIME") (atom "SYSDATETIME" true true "DATETIME2")
+			(atom "SYSUTCDATETIME" true true "DATETIME2"))) "(" ")")
 			(list (quote sql_type_expr) (list (quote now)) type nil))
 		(parser (atom "@@DATEFIRST" true) (tsql_datefirst_expr))
 		(parser '((atom "DATEADD" true) "(" (define unit tsql_identifier) ","
@@ -1329,8 +1329,8 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define month tsql_expression) "," (define day tsql_expression) ")") (tsql_datefromparts_expr year month day))
 		(parser '((atom "EOMONTH" true) "(" (define value tsql_expression)
 			(? "," (define amount tsql_expression)) ")") (tsql_eomonth_expr value (coalesceNil amount (list (quote sql_type_expr) 0 "INT" nil))))
-		(parser '((define unit (or (parser (atom "YEAR" true) "year")
-			(parser (atom "MONTH" true) "month") (parser (atom "DAY" true) "day")))
+		(parser '((define unit (or (atom "YEAR" true true "year")
+			(atom "MONTH" true true "month") (atom "DAY" true true "day")))
 			"(" (define value tsql_expression) ")") (tsql_calendar_scalar_expr unit value))
 
 		(parser '((atom "EXISTS" true) "(" (define sub tsql_select) ")") '('inner_select_exists sub))

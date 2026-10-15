@@ -1075,6 +1075,25 @@ test_cases:
 - name: Temporal clocks expose their declared result contracts
   sql: SELECT GETDATE() AS local_clock,GETUTCDATE() AS utc_clock,SYSDATETIME() AS precise_clock,SYSUTCDATETIME() AS precise_utc_clock
   expect: {rows: 1}
+- name: Calendar function terminals preserve mixed-case result contracts
+  scm: |
+    (equal? (map (tds_describe "memcp-tests"
+      "SELECT gEtDaTe(),gEtUtCdAtE(),sYsDaTeTiMe(),sYsUtCdAtEtImE(),yEaR(NULL),mOnTh(NULL),dAy(NULL)"
+      "" (newsession)) (lambda (column) (column "sql_type")))
+      '("DATETIME" "DATETIME" "DATETIME2" "DATETIME2" "INT" "INT" "INT"))
+  expect: {result: true}
+- name: Calendar function terminals preserve mixed-case scalar values
+  sql: SELECT yEaR(N'2026-03-15') AS yr,mOnTh(N'2026-03-15') AS mon,dAy(N'2026-03-15') AS dy
+  expect: {rows: 1, data: [{yr: 2026, mon: 3, dy: 15}]}
+- name: Clock function terminals require a complete function name
+  sql: SELECT GETUTCDATE_suffix()
+  expect: {error: true}
+- name: Calendar function terminals require a complete function name
+  sql: SELECT YEAR_suffix(N'2026-03-15')
+  expect: {error: true}
+- name: Precise UTC clock function rejects unexpected arguments
+  sql: SELECT SYSUTCDATETIME(1)
+  expect: {error: true}
 - name: Utc clock function rejects unexpected arguments
   sql: SELECT GETUTCDATE(1)
   expect: {error: true}
