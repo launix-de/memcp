@@ -4233,19 +4233,19 @@ an explicit stronger proof before they may authorize a native row mutation. */
 			(not (physical_helper_relation? (source_relation src)))
 			(not (equal?? (source_schema src) "information_schema"))
 			(not (group_stage? stage))))
-		/* Capture and consume the same published objects: a separately read token
-		could validate a proof made from an older declaration. The cold factory
-		retains these immutable objects without quoted-data cloning; the existing
-		variant dispatcher checks only their headers before invoking this plan. */
+		/* Capture and consume the same published declaration. Compare its
+		consumed key values, not an opaque publication identity or FK metadata. */
 		(define constraints (if native_source
 			(show (source_schema src) (source_relation src) "constraints") nil))
 		(define columns (if native_source
 			(get_schema (source_schema src) (source_relation src)) '()))
 		(if (and native_source (not (nil? planning_session)))
 			(planner_record_guard_condition
-				(list (identity_predicate constraints)
-					(planner_guard_runtime_binding
-						(list (quote show) (source_schema src) (source_relation src) "constraints") planning_session '())) planning_session) true)
+				(list (quote expression_equal?)
+					(list (quote sql_mutation_key_contract)
+						(planner_guard_runtime_binding
+							(list (quote show) (source_schema src) (source_relation src) "constraints") planning_session '()) false)
+					(list (quote quote) (sql_mutation_key_contract constraints false))) planning_session) true)
 		(define key_descriptions (if native_source (constraints "Unique") '()))
 		(define key_sets (if native_source
 			(map key_descriptions (lambda (key) (key "Cols")))

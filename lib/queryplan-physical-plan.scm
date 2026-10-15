@@ -11979,9 +11979,11 @@ identity. Other self aliases still require a frozen source snapshot. */
 (define mutation_same_target_identity? (lambda (sources default_alias target src condition planning_session)
 	(begin
 		(define constraints (show (source_schema src) (source_relation src) "constraints"))
-		(planner_record_guard_condition (list (identity_predicate constraints)
-			(planner_guard_runtime_binding
-				(list (quote show) (source_schema src) (source_relation src) "constraints") planning_session '())) planning_session)
+		(planner_record_guard_condition (list (quote expression_equal?)
+			(list (quote sql_mutation_key_contract)
+				(planner_guard_runtime_binding
+					(list (quote show) (source_schema src) (source_relation src) "constraints") planning_session '()) true)
+			(list (quote quote) (sql_mutation_key_contract constraints true))) planning_session)
 		(define primary (find (constraints "Unique") (lambda (key) (equal? (key "Id") "PRIMARY")) nil))
 		(and (not (nil? primary)) (not (empty_list? (primary "Cols")))
 			(reduce (primary "Cols") (lambda (covered column) (and covered

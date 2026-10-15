@@ -456,9 +456,10 @@ guards or preparations retains its direct callable fast path. Joined mutation
 proofs must capture the actual immutable key/nullability declarations they
 consume and invalidate when those declarations change. A separately loaded
 revision token cannot establish that it describes the captured metadata.
-Snapshot identity guards retain their datum outside cloneable quoted AST lists,
-perform constant-time header comparisons, and expose their retained payload to
-ordinary query-cache size accounting. Column-declaration guards compare only
+Key guards retain only the consumed primary-key role, column lists and
+NULL-uniqueness policy as ordinary serializable values. They must not depend on
+snapshot identity, unrelated constraint labels or foreign-key metadata.
+Column-declaration guards compare only
 consumed type, dimensions, nullability and collation through published point
 metadata. Statistics publication must not invalidate a declaration contract.
 Direct DML recipes use the same compile-local guard protocol for mutation

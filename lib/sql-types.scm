@@ -547,6 +547,16 @@ Unannotated scalar terminals have no trustworthy integer syntax contract. */
 /* Comparison contracts depend on declarations, never statistics in SHOW.
 The native point description shares its immutable publication with type lookup;
 only the consumed bounded fields participate in the warm guard. */
+/* Guards retain the key semantics consumed by mutation admission as ordinary
+serializable values. Constraint labels, FK declarations, snapshot identities
+and statistics are not part of a uniqueness proof. Metadata enumeration costs
+O(k) for the k declared keys and never reads shard data or automatic indexes. */
+(define sql_mutation_key_contract (lambda (constraints primary_only)
+	(if (nil? constraints) nil
+		(map (filter (coalesceNil (constraints "Unique") '()) (lambda (key)
+			(or (not primary_only) (equal? (key "Id") "PRIMARY"))))
+			(lambda (key) (list (equal? (key "Id") "PRIMARY") (key "Cols")
+				(if (key "nulls_not_distinct") true false)))))))
 (define sql_mutation_column_contract (lambda (column)
 	(if (nil? column) nil (list (column "RawType")
 		(coalesceNil (column "Dimensions") '()) (column "Null")

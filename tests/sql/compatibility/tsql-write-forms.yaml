@@ -900,6 +900,33 @@ test_cases:
     rows: 1
     data:
     - n: 2
+- name: Mutation key contracts use serializable semantics instead of snapshot identity
+  scm: |
+    (begin
+      (define before (list "Unique" (list
+        (list "Id" "uk_old" "Cols" '("code") "nulls_not_distinct" false "constraint_name" "old label")) "Foreign" '()))
+      (define after (list "Unique" (list
+        (list "Id" "uk_new" "Cols" '("code") "nulls_not_distinct" false "constraint_name" "new label"))
+        "Foreign" (list (list "Name" "unrelated"))))
+      (define expected (sql_mutation_key_contract before false))
+      (and (expression_equal? expected (sql_mutation_key_contract after false))
+        (expression_equal? expected (clone_optimizer_expression expected))
+        (not (equal? (json_encode expected) ""))))
+  expect:
+    result: true
+- name: Mutation key contracts retain NULL policy columns and primary role
+  scm: |
+    (begin
+      (define describe (lambda (id columns nulls)
+        (list "Unique" (list (list "Id" id "Cols" columns "nulls_not_distinct" nulls)))))
+      (define initial (sql_mutation_key_contract (describe "PRIMARY" '("id") false) false))
+      (and
+        (not (expression_equal? initial (sql_mutation_key_contract (describe "PRIMARY" '("other") false) false)))
+        (not (expression_equal? initial (sql_mutation_key_contract (describe "PRIMARY" '("id") true) false)))
+        (not (expression_equal? initial (sql_mutation_key_contract (describe "secondary" '("id") false) false)))
+        (empty_list? (sql_mutation_key_contract (describe "secondary" '("id") false) true))))
+  expect:
+    result: true
 cleanup:
 - sql: DROP TABLE IF EXISTS write_guard_trigger_event
 - sql: DROP TABLE IF EXISTS write_guard_trigger_audit
