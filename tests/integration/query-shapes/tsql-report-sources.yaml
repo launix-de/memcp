@@ -131,7 +131,6 @@ test_cases:
       label: group a
     - id: 3
       label: null
-  noncritical: true
 - name: Inline sources group and apply HAVING
   sql: SELECT category=v.category,total=SUM(v.amount) FROM (VALUES (10,2),(10,3),(20,1)) AS v(category,amount) GROUP
     BY v.category HAVING SUM(v.amount)>2 ORDER BY category
@@ -299,6 +298,144 @@ test_cases:
     - inner_select
     - scan_order
     - '.grp:'
+- name: Single inline row inner join filters the native source
+  sql: SELECT i.id,v.label FROM tsql_report_items i INNER JOIN (VALUES (10,'matched')) v(category,label) ON i.category=v.category ORDER BY i.id
+  expect:
+    rows: 2
+    data: [{id: 1, label: matched}, {id: 2, label: matched}]
+- name: Single inline row true outer join preserves left multiplicity
+  sql: SELECT i.id,v.label FROM tsql_report_items i LEFT JOIN (VALUES ('matched')) v(label) ON 1=1 ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, label: matched}, {id: 2, label: matched}, {id: 3, label: matched}]
+- name: Single inline row false outer join extends every right column
+  sql: SELECT i.id,v.code,v.label FROM tsql_report_items i LEFT JOIN (VALUES (10,'matched')) v(code,label) ON 1=0 ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, code: null, label: null}, {id: 2, code: null, label: null}, {id: 3, code: null, label: null}]
+- name: Single inline row unknown ON does not count as a match
+  sql: SELECT i.id,v.code FROM tsql_report_items i LEFT JOIN (VALUES (10)) v(code) ON i.category=NULL ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, code: null}, {id: 2, code: null}, {id: 3, code: null}]
+- name: Nullable inline payload is not used as a presence witness
+  sql: SELECT i.id,v.payload,v.marker FROM tsql_report_items i LEFT JOIN (VALUES (NULL,7)) v(payload,marker) ON i.category=10 ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, payload: null, marker: 7}, {id: 2, payload: null, marker: 7}, {id: 3, payload: null, marker: null}]
+- name: Single NULL inline row participates in a matching join
+  sql: SELECT i.id,v.marker FROM tsql_report_items i INNER JOIN (VALUES (NULL,7)) v(payload,marker) ON v.payload IS NULL ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, marker: 7}, {id: 2, marker: 7}, {id: 3, marker: 7}]
+- name: WHERE consumes the NULL extended inline projection
+  sql: SELECT i.id FROM tsql_report_items i LEFT JOIN (VALUES (10)) v(category) ON i.category=v.category WHERE v.category IS NULL
+  expect:
+    rows: 1
+    data: [{id: 3}]
+- name: Later native joins consume the NULL extended inline projection
+  sql: SELECT i.id,j.id AS related FROM tsql_report_items i LEFT JOIN (VALUES (10)) v(category) ON i.category=v.category LEFT JOIN tsql_report_items j ON j.category=v.category AND j.id=2 ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, related: 2}, {id: 2, related: 2}, {id: 3, related: null}]
+- name: Two single inline joins retain independent match conditions
+  sql: SELECT i.id,a.marker AS first_marker,b.marker AS second_marker FROM tsql_report_items i LEFT JOIN (VALUES (10,1)) a(category,marker) ON i.category=a.category LEFT JOIN (VALUES (2)) b(marker) ON a.marker=1 ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, first_marker: 1, second_marker: 2}, {id: 2, first_marker: 1, second_marker: 2}, {id: 3, first_marker: null, second_marker: null}]
+- name: Single inline join retains declared text concatenation
+  sql: SELECT i.id,v.label+N'!' AS label FROM tsql_report_items i LEFT JOIN (VALUES (N'ä')) v(label) ON i.category=10 ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, label: 'ä!'}, {id: 2, label: 'ä!'}, {id: 3, label: null}]
+- name: Single inline join retains declared integer division
+  sql: SELECT i.id,v.amount/2 AS amount FROM tsql_report_items i LEFT JOIN (VALUES (7)) v(amount) ON i.category=10 ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, amount: 3}, {id: 2, amount: 3}, {id: 3, amount: null}]
+- name: Single inline join preserves the native empty input
+  sql: SELECT i.id,v.code FROM tsql_report_items i LEFT JOIN (VALUES (7)) v(code) ON 1=1 WHERE i.id=99
+  expect:
+    rows: 0
+- name: Single inline join feeds ordinary native aggregation
+  sql: SELECT COUNT(v.code) AS matched,SUM(v.code) AS total FROM tsql_report_items i LEFT JOIN (VALUES (7)) v(code) ON i.category=10
+  expect:
+    rows: 1
+    data: [{matched: 2, total: 14}]
+- name: Single inline join expands right source wildcard
+  sql: SELECT v.* FROM tsql_report_items i LEFT JOIN (VALUES (10,'matched')) v(category,label) ON i.category=v.category ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{category: 10, label: matched}, {category: 10, label: matched}, {category: null, label: null}]
+- name: Constant derived join shares SQL frontend logical lowering
+  syntax: sql
+  sql: SELECT i.id,v.code FROM tsql_report_items i LEFT JOIN (SELECT 7 AS code) v ON i.category=10 ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, code: 7}, {id: 2, code: 7}, {id: 3, code: null}]
+- name: Constant derived join shares psql frontend logical lowering
+  syntax: psql
+  sql: SELECT i.id,v.code FROM tsql_report_items i LEFT JOIN (SELECT 7 AS code) v ON i.category=10 ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, code: 7}, {id: 2, code: 7}, {id: 3, code: null}]
+- name: Single inline join keeps physical artifacts out of logical IR
+  sql: EXPLAIN IR SELECT i.id,v.code FROM tsql_report_items i LEFT JOIN (VALUES (7)) v(code) ON i.category=10
+  expect:
+    result_contains: [query-block]
+    result_not_contains: [dependent-subquery, inner_select, scan_order, '.grp:']
+- name: Cached constant derived join binds the next literal value
+  syntax: sql
+  sql: SELECT i.id,v.code FROM tsql_report_items i LEFT JOIN (SELECT 9 AS code) v ON i.category=10 ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, code: 9}, {id: 2, code: 9}, {id: 3, code: null}]
+- name: Cached constant derived join preserves a NULL binding
+  syntax: sql
+  sql: SELECT i.id,v.code FROM tsql_report_items i LEFT JOIN (SELECT NULL AS code) v ON i.category=10 ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, code: null}, {id: 2, code: null}, {id: 3, code: null}]
+- name: Constant source join proof rejects mutable and executable projections
+  scm: (begin (if (and (constant_derived_projection_expr? (list (quote session) "v1")) (not (constant_derived_projection_expr? (list (quote session) "application_value"))) (not (constant_derived_projection_expr? (list (quote now)))) (not (constant_derived_projection_expr? (list (quote +) 1 2)))) true (error "constant source projection proof accepted an executable expression")))
+  expect:
+    result: true
+- name: Correlated aggregate consumes the NULL extended inline key
+  sql: SELECT i.id,(SELECT SUM(j.amount) FROM tsql_report_items j WHERE j.category=v.category) AS total FROM tsql_report_items i LEFT JOIN (VALUES (10)) v(category) ON i.category=v.category ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, total: 16}, {id: 2, total: 16}, {id: 3, total: null}]
+- name: Parameterized constant join carries its full aggregate domain
+  syntax: sql
+  sql: SELECT i.id,(SELECT SUM(j.amount) FROM tsql_report_items j WHERE j.category=v.category) AS total FROM tsql_report_items i LEFT JOIN (SELECT 10 AS category) v ON i.category=v.category ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, total: 16}, {id: 2, total: 16}, {id: 3, total: null}]
+- name: Rebound constant join does not reuse a different aggregate binding
+  syntax: sql
+  sql: SELECT i.id,(SELECT SUM(j.amount) FROM tsql_report_items j WHERE j.category=v.category) AS total FROM tsql_report_items i LEFT JOIN (SELECT 20 AS category) v ON i.category=v.category ORDER BY i.id
+  expect:
+    rows: 3
+    data: [{id: 1, total: null}, {id: 2, total: null}, {id: 3, total: 5}]
+- name: Constant outer join rejects volatile ON instead of extending columns inconsistently
+  syntax: sql
+  sql: SELECT i.id,v.code,v.marker FROM tsql_report_items i LEFT JOIN (SELECT 7 AS code,9 AS marker) v ON RAND()>0.5
+  expect:
+    error: true
+- name: Constant outer join applies the same volatility guard in psql
+  syntax: psql
+  sql: SELECT i.id,v.code,v.marker FROM tsql_report_items i LEFT JOIN (SELECT 7 AS code,9 AS marker) v ON RANDOM()>0.5
+  expect:
+    error: true
+- name: Constant outer join rejects mutable session input in ON
+  syntax: sql
+  sql: SELECT i.id,v.code,v.marker FROM tsql_report_items i LEFT JOIN (SELECT 7 AS code,9 AS marker) v ON @application_value=1
+  expect:
+    error: true
+- name: Constant outer join purity proves positional inputs but rejects clocks and mutable state
+  scm: (if (and (constant_derived_join_predicate? (list (quote equal??) (list (quote session) "v1") 10)) (not (constant_derived_join_predicate? (list (quote equal??) (list (quote session) "application_value") 10))) (not (constant_derived_join_predicate? (list (quote now))))) true (error "constant source join predicate proof accepted mutable or volatile input"))
+  expect:
+    result: true
 cleanup:
 - sql: DROP TABLE IF EXISTS tsql_report_alter
 - sql: DROP TABLE IF EXISTS tsql_report_sink
