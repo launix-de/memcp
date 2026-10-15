@@ -1128,6 +1128,12 @@ test_cases:
 - name: First weekday is evaluated from the declared batch parameter
   sql: DECLARE @first INT=1; SET DATEFIRST @first; SELECT @@DATEFIRST AS first,DATEPART(weekday,N'2026-03-15') AS day
   expect: {rows: 1, data: [{first: 1, day: 7}]}
+- name: First weekday parameter uses the shared variable token for keyword names
+  sql: DECLARE @return INT=1; SET DATEFIRST @return; SELECT @@DATEFIRST AS first,DATEPART(weekday,N'2026-03-15') AS day
+  expect: {rows: 1, data: [{first: 1, day: 7}]}
+- name: First weekday parameter rejects whitespace inside its variable token
+  sql: DECLARE @first INT=1; SET DATEFIRST @ first
+  expect: {error: true}
 - name: First weekday survives a batch delimiter without retaining locals
   sql: |
     SET DATEFIRST 1

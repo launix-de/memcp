@@ -2124,7 +2124,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(lambda () (list (quote session) "__tsql_nocount" enabled)))
 		(parser '((atom "SET" true) (atom "DATEFIRST" true)
 			(define first (or tsql_int
-				(parser '((atom "@" true) (define name tsql_identifier_unquoted)) (parameter_expression name)))))
+				(parser (define name tsql_variable_name) (parameter_expression name)))))
 			(lambda () (list (quote session) "__tsql_datefirst" (list tsql_datefirst_value (sql_type_formula '() first)))))
 		/* These ON modes are the frontend's fixed comparison and lexical rules.
 		Accept the declarations without adding state or branches to row execution;
