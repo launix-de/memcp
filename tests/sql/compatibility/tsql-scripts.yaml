@@ -753,4 +753,557 @@ test_cases:
 - name: A dynamic RETURN supplies its explicit integer procedure status
   sql: DECLARE @status INT=0; EXEC @status=sys.sp_executesql N'RETURN 4; SELECT 99 AS unexpected'; SELECT @status AS status
   expect: {rows: 1, data: [{status: 4}]}
+
+- name: OUTPUT copies an input and output parameter back to its caller
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT OUTPUT AS BEGIN SET @value=@value+3; END
+  sql: DECLARE @n INT=4; EXEC dbo.script_output_proc @n OUTPUT; SELECT @n AS value
+  expect:
+    rows: 1
+    data:
+    - value: 7
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: Named OUT bindings retain the callers distinct variable name
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT OUTPUT AS BEGIN SET @value=@value+3; END
+  sql: DECLARE @n INT=4; EXEC dbo.script_output_proc @value=@n OUT; SELECT @n AS value
+  expect:
+    rows: 1
+    data:
+    - value: 7
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: Output declaration without call OUTPUT leaves the caller unchanged
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT OUTPUT AS BEGIN SET @value=@value+3; END
+  sql: DECLARE @n INT=4; EXEC dbo.script_output_proc @n; SELECT @n AS value
+  expect:
+    rows: 1
+    data:
+    - value: 4
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: Output declarations accept literal input without copying it back
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT OUTPUT AS BEGIN SET @value=@value+3; END
+  sql: EXEC dbo.script_output_proc 4; SELECT 1 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: OUTPUT propagates an explicitly assigned NULL
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT OUTPUT AS BEGIN SET @value=NULL; END
+  sql: DECLARE @n INT=4; EXEC dbo.script_output_proc @n OUTPUT; SELECT @n AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: OUTPUT accepts an initially NULL caller variable
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT OUTPUT AS BEGIN SET @value=9; END
+  sql: DECLARE @n INT; EXEC dbo.script_output_proc @n OUTPUT; SELECT @n AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: OUTPUT copies values before exposing a captured return status
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT OUTPUT AS BEGIN SET @value=@value+3; RETURN 6; SET @value=90; END
+  sql: DECLARE @n INT=4,@status INT; EXEC @status=dbo.script_output_proc @n OUTPUT; SELECT @n AS value,@status AS status
+  expect:
+    rows: 1
+    data:
+    - value: 7
+      status: 6
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: OUTPUT conversion follows the caller declared text width
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value NVARCHAR(12) OUTPUT AS BEGIN SET @value=N'abcdef'; END
+  sql: DECLARE @n NVARCHAR(3)=N''; EXEC dbo.script_output_proc @n OUTPUT; SELECT @n AS value
+  expect:
+    rows: 1
+    data:
+    - value: abc
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: OUTPUT overflow is rejected by the caller declared integer contract
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT OUTPUT AS BEGIN SET @value=256; END
+  sql: DECLARE @n TINYINT=1; EXEC dbo.script_output_proc @n OUTPUT
+  expect:
+    error: true
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: OUTPUT requires a declared caller variable
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT OUTPUT AS BEGIN SET @value=@value+3; END
+  sql: EXEC dbo.script_output_proc @missing OUTPUT
+  expect:
+    error: true
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: OUTPUT does not accept a constant destination
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT OUTPUT AS BEGIN SET @value=@value+3; END
+  sql: EXEC dbo.script_output_proc 4 OUTPUT
+  expect:
+    error: true
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: OUTPUT does not accept a computed destination
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT OUTPUT AS BEGIN SET @value=@value+3; END
+  sql: DECLARE @n INT=4; EXEC dbo.script_output_proc @n+1 OUTPUT
+  expect:
+    error: true
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: OUTPUT requires a matching output parameter declaration
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT AS BEGIN SET @value=@value+3; END
+  sql: DECLARE @n INT=4; EXEC dbo.script_output_proc @n OUTPUT
+  expect:
+    error: true
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: OUTPUT argument errors are detected before the procedure body runs
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT AS BEGIN SET @value=99; END
+  sql: DECLARE @n INT=4; BEGIN TRY EXEC dbo.script_output_proc @n OUTPUT; END TRY BEGIN CATCH SELECT @n AS value; END CATCH
+  expect:
+    rows: 1
+    data:
+    - value: 4
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: Procedure DEFAULT chooses the declared initializer
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT=8 OUTPUT AS BEGIN SELECT @value AS value; END
+  sql: EXEC dbo.script_output_proc DEFAULT
+  expect:
+    rows: 1
+    data:
+    - value: 8
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: Named DEFAULT chooses the declared initializer
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT=8 AS BEGIN SELECT @value AS value; END
+  sql: EXEC dbo.script_output_proc @value=DEFAULT
+  expect:
+    rows: 1
+    data:
+    - value: 8
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: DEFAULT requires a declared initializer
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @value INT AS BEGIN SET @value=@value+3; END
+  sql: EXEC dbo.script_output_proc DEFAULT
+  expect:
+    error: true
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: Procedure arguments allow positional input followed by named output
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @delta INT,@value INT OUTPUT AS BEGIN SET @value=@value+@delta; END
+  sql: DECLARE @n INT=4; EXEC dbo.script_output_proc 2,@value=@n OUTPUT; SELECT @n AS value
+  expect:
+    rows: 1
+    data:
+    - value: 6
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: Procedure arguments reject positional input after named binding
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+  - sql: CREATE PROCEDURE dbo.script_output_proc @delta INT,@value INT OUTPUT AS BEGIN SET @value=@value+@delta; END
+  sql: DECLARE @n INT=4; EXEC dbo.script_output_proc @delta=2,@n OUTPUT
+  expect:
+    error: true
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
+- name: Nested procedure OUTPUT bindings use separate lexical locals
+  sql: 'CREATE PROCEDURE dbo.script_output_inner @value INT OUTPUT AS SET @value=@value+2;
+
+    GO
+
+    CREATE PROCEDURE dbo.script_output_outer @value INT OUTPUT AS BEGIN EXEC dbo.script_output_inner @value OUTPUT; SET @value=@value+3;
+    END;
+
+    GO
+
+    DECLARE @n INT=4; EXEC dbo.script_output_outer @n OUTPUT; SELECT @n AS value'
+  expect:
+    rows: 1
+    data:
+    - value: 9
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_outer
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_inner
+- name: Dynamic OUTPUT binds declared inputs and copies the final value
+  sql: DECLARE @n INT=4; EXEC sp_executesql N'SET @x=@x+3',N'@x INT OUTPUT',@x=@n OUTPUT; SELECT @n AS value
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: Dynamic OUT accepts positional variable binding
+  sql: DECLARE @n INT=4; EXEC sys.sp_executesql N'SET @x=@x+3',N'@x INT OUT',@n OUT; SELECT @n AS value
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: Dynamic output declaration may be called as input only
+  sql: DECLARE @n INT=4; EXEC sp_executesql N'SET @x=@x+3',N'@x INT OUTPUT',@x=@n; SELECT @n AS value
+  expect:
+    rows: 1
+    data:
+    - value: 4
+- name: Dynamic OUTPUT uses the caller declared return conversion
+  sql: DECLARE @n NVARCHAR(3)=N''; EXEC sp_executesql N'SET @x=N''abcdef''',N'@x NVARCHAR(12) OUTPUT',@x=@n OUTPUT; SELECT @n AS value
+  expect:
+    rows: 1
+    data:
+    - value: abc
+- name: Dynamic OUTPUT completion remains separate from return status
+  sql: DECLARE @n INT=4,@status INT; EXEC @status=sp_executesql N'SET @x=@x+3; RETURN 5',N'@x INT OUTPUT',@x=@n OUTPUT; SELECT @n AS
+    value,@status AS status
+  expect:
+    rows: 1
+    data:
+    - value: 7
+      status: 5
+- name: Repeated dynamic OUTPUT invocations bind fresh scalar values
+  sql: DECLARE @n INT=1; EXEC sp_executesql N'SET @x=@x+1',N'@x INT OUTPUT',@x=@n OUTPUT; EXEC sp_executesql N'SET @x=@x+1',N'@x INT
+    OUTPUT',@x=@n OUTPUT; SELECT @n AS value
+  expect:
+    rows: 1
+    data:
+    - value: 3
+- name: Dynamic OUTPUT requires an output declaration
+  sql: DECLARE @n INT; EXEC sp_executesql N'SET @x=3',N'@x INT',@x=@n OUTPUT
+  expect:
+    error: true
+- name: Dynamic OUTPUT requires a declared destination
+  sql: EXEC sp_executesql N'SET @x=3',N'@x INT OUTPUT',@x=@missing OUTPUT
+  expect:
+    error: true
+- name: Dynamic SQL text cannot be an OUTPUT argument
+  sql: DECLARE @text NVARCHAR(40)=N'SELECT 1'; EXEC sp_executesql @stmt=@text OUTPUT
+  expect:
+    error: true
+- name: Metadata procedures do not silently accept OUTPUT arguments
+  sql: DECLARE @n INT; EXEC sys.sp_columns @table_name=@n OUTPUT
+  expect:
+    error: true
+- name: RAISERROR exposes its declared message severity and state
+  sql: BEGIN TRY RAISERROR(N'fixture error',16,7); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS number,ERROR_MESSAGE() AS message,ERROR_SEVERITY()
+    AS severity,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - number: 50000
+      message: fixture error
+      severity: 16
+      state: 7
+- name: RAISERROR formats text integer and percent substitutions
+  sql: BEGIN TRY RAISERROR(N'item %s has %d units (100%%)',16,1,N'box',3); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END
+    CATCH
+  expect:
+    rows: 1
+    data:
+    - message: item box has 3 units (100%)
+- name: RAISERROR accepts a declared message variable
+  sql: DECLARE @message NVARCHAR(32)=N'fixture error'; BEGIN TRY RAISERROR(@message,12,2); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_SEVERITY() AS severity; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: fixture error
+      severity: 12
+- name: RAISERROR normalizes a negative state to one
+  sql: BEGIN TRY RAISERROR(N'fixture error',16,-1); END TRY BEGIN CATCH SELECT ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - state: 1
+- name: Parameterless THROW preserves RAISERROR severity and state
+  sql: BEGIN TRY BEGIN TRY RAISERROR(N'fixture error',13,4); END TRY BEGIN CATCH THROW; END CATCH; END TRY BEGIN CATCH SELECT ERROR_SEVERITY()
+    AS severity,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - severity: 13
+      state: 4
+- name: Existing THROW exposes severity sixteen
+  sql: BEGIN TRY THROW 50001,N'fixture error',2; END TRY BEGIN CATCH SELECT ERROR_SEVERITY() AS severity; END CATCH
+  expect:
+    rows: 1
+    data:
+    - severity: 16
+- name: Error severity is NULL outside its CATCH
+  sql: SELECT ERROR_SEVERITY() AS severity
+  expect:
+    rows: 1
+    data:
+    - severity: null
+- name: RAISERROR without a CATCH remains an error
+  sql: RAISERROR(N'fixture error',16,1)
+  expect:
+    error: true
+- name: Message markers accept adjacent alphabetic text and escaped percent
+  sql: BEGIN TRY RAISERROR(N'%ditems %sX %I64dunits %%',16,1,2,N'a',3); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect:
+    rows: 1
+    data: [{message: '2items aX 3units %'}]
+- name: Message format markers preserve case sensitivity
+  sql: RAISERROR(N'%S',16,1,N'text')
+  expect: {error: true}
+- name: Error context keywords retain case insensitive terminal contracts
+  sql: BEGIN TRY RAISERROR(N'mixed',15,7); END TRY BEGIN CATCH SELECT eRrOr_MeSsAgE() AS message,eRrOr_NuMbEr() AS number,eRrOr_StAtE() AS state,eRrOr_SeVeRiTy() AS severity; END CATCH
+  expect:
+    rows: 1
+    data: [{message: mixed, number: 50000, state: 7, severity: 15}]
+- name: RAISERROR rejects missing substitution arguments
+  sql: RAISERROR(N'missing %s',16,1)
+  expect:
+    error: true
+- name: RAISERROR rejects unsupported numeric message catalogs
+  sql: RAISERROR(50001,16,1)
+  expect:
+    error: true
+- name: RAISERROR rejects state values exceeding the declared range
+  sql: RAISERROR(N'fixture error',16,256)
+  expect:
+    error: true
+
+- name: RAISERROR accepts signed integer and exact large integer substitutions
+  sql: DECLARE @large BIGINT=9007199254740993; BEGIN TRY RAISERROR(N'%i:%I64d',16,1,-3,@large); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: -3:9007199254740993
+- name: RAISERROR integer substitutions reject declared floating expressions
+  sql: RAISERROR(N'%d',16,1,3.5)
+  expect:
+    error: true
+- name: RAISERROR string substitutions reject declared integer expressions
+  sql: RAISERROR(N'%s',16,1,3)
+  expect:
+    error: true
+- name: Nested CATCH restores the enclosing RAISERROR severity
+  sql: BEGIN TRY RAISERROR(N'outer',12,1); END TRY BEGIN CATCH SELECT ERROR_SEVERITY() AS severity; BEGIN TRY RAISERROR(N'inner',17,1);
+    END TRY BEGIN CATCH SELECT ERROR_SEVERITY() AS severity; END CATCH; SELECT ERROR_SEVERITY() AS severity; END CATCH; SELECT ERROR_SEVERITY()
+    AS severity
+  expect:
+    rows: 4
+    data:
+    - severity: 12
+    - severity: 17
+    - severity: 12
+    - severity: null
+- name: Caught RAISERROR does not abort the callers explicit native transaction
+  sql: BEGIN TRANSACTION; INSERT INTO dbo.script_output_rows VALUES(1); BEGIN TRY RAISERROR(N'notice of rejected step',16,1); END TRY
+    BEGIN CATCH SELECT ERROR_NUMBER() AS number; END CATCH; INSERT INTO dbo.script_output_rows VALUES(2); COMMIT; SELECT id FROM dbo.script_output_rows
+    ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - number: 50000
+    - id: 1
+    - id: 2
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_output_rows
+  - sql: CREATE TABLE dbo.script_output_rows(id INT PRIMARY KEY)
+  cleanup:
+  - sql: DROP TABLE dbo.script_output_rows
+- name: Persisted procedure retains its output declaration
+  sql: CREATE PROCEDURE dbo.script_output_persisted @value INT OUTPUT AS SET @value=@value+3
+- name: Restart before regenerating an output procedure callable
+  action: restart
+- name: Restored procedure regenerates typed output copy bindings
+  sql: DECLARE @n INT=4; EXEC dbo.script_output_persisted @n OUTPUT; SELECT @n AS value
+  expect:
+    rows: 1
+    data:
+    - value: 7
+  cleanup:
+  - sql: DROP PROCEDURE dbo.script_output_persisted
+- name: Informational RAISERROR skips CATCH and allows subsequent statements
+  sql: BEGIN TRY RAISERROR(N'progress',10,1); SELECT 4 AS value; END TRY BEGIN CATCH SELECT 9 AS value; END CATCH
+  expect:
+    rows: 1
+    data:
+    - value: 4
+  noncritical: true
+- name: RAISERROR supports width and zero padding in message substitutions
+  sql: BEGIN TRY RAISERROR(N'%05d',16,1,3); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '00003'
+  noncritical: true
+
+- name: Dynamic parameter declarations reject duplicate formal names
+  sql: EXEC sp_executesql N'SELECT @n AS value',N'@n INT,@n INT',@n=1
+  expect:
+    error: true
+- name: Procedure declarations reject duplicate formal parameters
+  sql: CREATE PROCEDURE dbo.script_duplicate_output @n INT,@n INT OUTPUT AS SELECT @n AS value
+  expect:
+    error: true
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_duplicate_output
+- name: Multiple OUTPUT parameters preserve distinct caller declarations
+  setup:
+  - sql: CREATE OR ALTER PROCEDURE dbo.script_multiple_output @a INT OUTPUT,@b NVARCHAR(12) OUTPUT AS BEGIN SET @a=7; SET @b=N'abcdef';
+      END
+  sql: DECLARE @number BIGINT=1,@text NVARCHAR(3)=N''; EXEC dbo.script_multiple_output @b=@text OUTPUT,@a=@number OUT; SELECT @number
+    AS number,@text AS text
+  expect:
+    rows: 1
+    data:
+    - number: 7
+      text: abc
+  cleanup:
+  - sql: DROP PROCEDURE dbo.script_multiple_output
+
+- name: Procedure parameter defaults cannot read caller locals
+  sql: CREATE PROCEDURE dbo.script_default_scope @value INT=@caller AS SELECT @value AS value
+  expect:
+    error: true
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_default_scope
+- name: Procedure parameter defaults cannot invoke scalar functions
+  sql: CREATE PROCEDURE dbo.script_default_scope @value INT=ABS(-3) AS SELECT @value AS value
+  expect:
+    error: true
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_default_scope
+- name: Procedure literal defaults retain explicit signs and NULL
+  setup:
+  - sql: CREATE PROCEDURE dbo.script_default_scope @negative INT=-3,@positive INT=+4,@empty INT=NULL AS SELECT @negative AS negative,@positive
+      AS positive,@empty AS empty
+  sql: EXEC dbo.script_default_scope DEFAULT,DEFAULT,DEFAULT
+  expect:
+    rows: 1
+    data:
+    - negative: -3
+      positive: 4
+      empty: null
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_default_scope
+- name: Failed OUTPUT conversion leaves every caller binding untouched
+  setup:
+  - sql: CREATE PROCEDURE dbo.script_failed_output @a INT OUTPUT,@b INT OUTPUT AS BEGIN SET @a=7; SET @b=256; END
+  sql: DECLARE @first INT=1,@second TINYINT=2; BEGIN TRY EXEC dbo.script_failed_output @first OUTPUT,@second OUTPUT; END TRY BEGIN CATCH
+    SELECT @first AS first_value,@second AS second_value; END CATCH
+  expect:
+    rows: 1
+    data:
+    - first_value: 1
+      second_value: 2
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_failed_output
+- name: Dynamic declarations cannot follow a named text argument positionally
+  sql: EXEC sp_executesql @stmt=N'SELECT @n AS value',N'@n INT',1
+  expect:
+    error: true
+- name: Output values are lexical scalars while native procedure DML rolls back
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_output_transaction
+  - sql: CREATE TABLE dbo.script_output_transaction(id INT PRIMARY KEY)
+  - sql: CREATE PROCEDURE dbo.script_output_transaction_proc @value INT OUTPUT AS BEGIN INSERT INTO dbo.script_output_transaction VALUES(7);
+      SET @value=9; END
+  sql: DECLARE @n INT=1; BEGIN TRANSACTION; EXEC dbo.script_output_transaction_proc @n OUTPUT; ROLLBACK TRANSACTION; SELECT @n AS value;
+    SELECT COUNT(*) AS n FROM dbo.script_output_transaction
+  expect:
+    rows: 2
+    data:
+    - value: 9
+    - n: 0
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_output_transaction_proc
+  - sql: DROP TABLE dbo.script_output_transaction
+
+- name: Unary plus keeps a negative declared operand and integer division
+  sql: DECLARE @n INT=-5; SELECT +@n AS value,(+@n)/2 AS divided,+NULL AS empty
+  expect:
+    rows: 1
+    data:
+    - value: -5
+      divided: -2
+      empty: null
+- name: Unary plus rejects a declared character operand
+  sql: SELECT +CAST(N'3' AS NVARCHAR(4)) AS value
+  expect:
+    error: true
+
+- name: A called error helper sees the enclosing CATCH context
+  setup:
+  - sql: CREATE PROCEDURE dbo.script_error_helper AS SELECT ERROR_NUMBER() AS number,ERROR_SEVERITY() AS severity,ERROR_STATE() AS state
+  sql: BEGIN TRY RAISERROR(N'outer',13,4); END TRY BEGIN CATCH EXEC dbo.script_error_helper; END CATCH
+  expect:
+    rows: 1
+    data:
+    - number: 50000
+      severity: 13
+      state: 4
+  cleanup:
+  - sql: DROP PROCEDURE dbo.script_error_helper
+- name: A nested procedure CATCH restores its inherited error context
+  setup:
+  - sql: CREATE PROCEDURE dbo.script_error_helper AS BEGIN BEGIN TRY RAISERROR(N'inner',17,2); END TRY BEGIN CATCH SELECT ERROR_SEVERITY()
+      AS severity; END CATCH; SELECT ERROR_SEVERITY() AS severity; END
+  sql: BEGIN TRY RAISERROR(N'outer',13,4); END TRY BEGIN CATCH SELECT ERROR_SEVERITY() AS severity; EXEC dbo.script_error_helper; SELECT
+    ERROR_SEVERITY() AS severity; END CATCH
+  expect:
+    rows: 4
+    data:
+    - severity: 13
+    - severity: 17
+    - severity: 13
+    - severity: 13
+  cleanup:
+  - sql: DROP PROCEDURE dbo.script_error_helper
+- name: A later procedure call does not retain a completed CATCH context
+  setup:
+  - sql: CREATE PROCEDURE dbo.script_error_helper AS SELECT ERROR_SEVERITY() AS severity
+  sql: BEGIN TRY RAISERROR(N'outer',13,4); END TRY BEGIN CATCH EXEC dbo.script_error_helper; END CATCH; EXEC dbo.script_error_helper
+  expect:
+    rows: 2
+    data:
+    - severity: 13
+    - severity: null
+  cleanup:
+  - sql: DROP PROCEDURE dbo.script_error_helper
+
 cleanup: []

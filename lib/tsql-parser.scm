@@ -149,13 +149,19 @@ no SQL type wrapper survives into execution or storage. */
 	(? (define namespace tsql_identifier) ".") (define type tsql_column_type)
 ) (if (or (nil? namespace) (equal?? namespace "sys")) type
 		(error "unsupported type namespace: " namespace))))
+(define tsql_unique_parameters (lambda (parameters) (begin
+	(define names (map parameters car))
+	(if (equal? (count names) (count (merge_unique (list names)))) parameters
+		(error "duplicate procedure parameter declaration")))))
 (define tds_bind_declarations (lambda (_schema text)
 	(if (equal? (strtrim text) "") (list)
 		((parser (define declarations (+ (parser '(
 			(define name tsql_variable_name)
 			(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
-		) (list (toLower name) (cons type (tsql_decl_dimensions type dimensions)))) ","))
-			declarations "^(?:/\\*.*?\\*/|--[^\r\n]*(?:[\r\n]|$)|[\r\n\t ]+)+") text))))
+			(define output (? (or (atom "OUTPUT" true) (atom "OUT" true))))
+		) (if output (list (toLower name) (cons type (tsql_decl_dimensions type dimensions)) true)
+				(list (toLower name) (cons type (tsql_decl_dimensions type dimensions))))) ","))
+			(tsql_unique_parameters declarations) "^(?:/\\*.*?\\*/|--[^\r\n]*(?:[\r\n]|$)|[\r\n\t ]+)+") text))))
 /* Identity eligibility is a declaration-time dialect rule. Allocate values
 with the existing native auto_increment option, without another allocator or
 runtime SQL type checks. Numeric declarations may only have zero scale. */
@@ -688,6 +694,14 @@ native date value as columns and ordinary calendar arithmetic. */
 		(sql_info (list tsql_calendar_month_end (tsql_calendar_formula (car infos))
 			(tsql_calendar_integer_formula (cadr infos))) "DATE" nil)) value amount)))
 
+(define tsql_numeric_operand_type? (lambda (type)
+	(or (has? '("NULL" "any" "MONEY" "SMALLMONEY") type)
+		(and (sql_numeric_type? type) (not (has? '("BOOLEAN" "BOOL" "BIT") type))))))
+(define tsql_positive_expr (lambda (value)
+	(list (quote sql_compile_expr) (lambda (infos) (begin
+		(define info (car infos))
+		(if (tsql_numeric_operand_type? (sql_info_type info)) info
+			(error "unary plus requires a numeric operand")))) value)))
 (define tsql_negate_expr (lambda (value)
 	(list (quote sql_compile_expr) (lambda (infos) (begin
 		(define info (car infos))
@@ -701,8 +715,7 @@ native date value as columns and ordinary calendar arithmetic. */
 				(< minimum 0) (equal? (tsql_cast_integer operand minimum maximum) minimum))
 				(error "unary integer conversion overflow") true)
 			_ true)
-		(if (or (has? '("NULL" "any" "MONEY" "SMALLMONEY") type)
-			(and (sql_numeric_type? type) (not (has? '("BOOLEAN" "BOOL" "BIT") type)))) true
+		(if (tsql_numeric_operand_type? type) true
 			(error "unary minus requires a numeric operand"))
 		(sql_info (list (quote -) 0 formula) (if (equal? type "TINYINT") "SMALLINT" type) nil))) value)))
 (define tsql_key_placement (parser (? (or (atom "CLUSTERED" true) (atom "NONCLUSTERED" true)))))
@@ -1280,6 +1293,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(parser '((define expr tsql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
 		(parser '((define expr tsql_expression6) (atom "IS" true) (atom "NOT" true) (atom "NULL" true)) '('not '('nil? expr)))
 		tsql_expression6
+		(parser '("+" (define expr tsql_expression6)) (tsql_positive_expr expr))
 		(parser '("-" (define expr tsql_expression6)) (tsql_negate_expr expr))
 	)))
 
@@ -1383,11 +1397,12 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(parser '((atom "DB_NAME" true) "(" ")")
 			(list (quote sql_type_expr) (list (quote session) "schema") "NVARCHAR" '("utf8mb4_general_ci" 4)))
 		(parser '((atom "SCOPE_IDENTITY" true) "(" ")") (tsql_identity_expr true))
-		(parser '((define name (or (parser (atom "ERROR_MESSAGE" true) '("message" "NVARCHAR"))
-			(parser (atom "ERROR_NUMBER" true) '("number" "INT"))
-			(parser (atom "ERROR_STATE" true) '("state" "INT")))) "(" ")")
+		(parser '((define name (or (atom "ERROR_MESSAGE" true true "message")
+			(atom "ERROR_NUMBER" true true "number")
+			(atom "ERROR_STATE" true true "state")
+			(atom "ERROR_SEVERITY" true true "severity"))) "(" ")")
 			(list (quote sql_type_expr) (list (quote session)
-				(concat "__tsql_error_" (car name))) (cadr name) nil))
+				(concat "__tsql_error_" name)) (if (equal? name "message") "NVARCHAR" "INT") nil))
 		(parser '((atom "@@IDENTITY" true)) (tsql_identity_expr false))
 
 		(parser (define var tsql_variable_name) (parameter_expression var))
@@ -2157,10 +2172,15 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(? "=" (define initializer (capture tsql_expression)))
 			) (list name (cons type (tsql_decl_dimensions type dimensions))
 					(if initializer (car initializer) nil))))
+			(define tsql_script_exec_value (parser (or
+				(parser '((define variable tsql_script_variable) (or (atom "OUTPUT" true) (atom "OUT" true)))
+					(list "output" variable))
+				(parser (atom "DEFAULT" true) (list "default"))
+				(parser (define value (capture tsql_expression)) (car value)))))
 			(define tsql_script_exec_argument (parser (or
-				(parser '((define name tsql_script_variable) "=" (define value (capture tsql_expression)))
-					(list name (car value)))
-				(parser (define value (capture tsql_expression)) (list "" (car value))))))
+				(parser '((define name tsql_script_variable) "=" (define value tsql_script_exec_value))
+					(list name value))
+				(parser (define value tsql_script_exec_value) (list "" value)))))
 			(define tsql_script_command (parser (or
 				(parser (define statement (capture tsql_rollback)) (list "recovery" (strtrim (car statement))))
 				(parser '((atom "BEGIN" true) (atom "TRY" true) (define body (* tsql_script_item empty))
@@ -2173,6 +2193,8 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(parser (atom "CONTINUE" true) (list "continue"))
 				(parser '((atom "RETURN" true) (? (define value (capture tsql_expression))))
 					(list "return" (if value (car value) nil)))
+				(parser '((atom "RAISERROR" true) "(" (define arguments (+ (capture tsql_expression) ",")) ")")
+					(list "raiserror" (map arguments car)))
 				(parser '((atom "THROW" true) (? (define arguments
 					'((capture tsql_expression) "," (capture tsql_expression) "," (capture tsql_expression)))))
 					(list "throw" (if arguments (list (car (nth arguments 0)) (car (nth arguments 2)) (car (nth arguments 4))) nil)))
@@ -2206,9 +2228,14 @@ a separator is recognized only on a physical line containing no SQL text. */
 			)))
 			(define tsql_script_item (parser '((* ";") (define command tsql_script_command) (* ";")) command))
 			(define tsql_script_procedure_parameter (parser '(
-				(define declaration tsql_script_declaration)
+				(define name tsql_script_variable) (? (atom "AS" true))
+				(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
+				/* Procedure defaults are literal declarations, unlike DECLARE
+				initializers; they cannot capture an invocation's caller locals. */
+				(? "=" (define initializer (capture (or tsql_literal (parser '("+" (define value tsql_number)) value)))))
 				(define output (? (or (atom "OUTPUT" true) (atom "OUT" true))))
-			) (append declaration (if output true false))))
+			) (list name (cons type (tsql_decl_dimensions type dimensions))
+					(if initializer (car initializer) nil) (if output true false))))
 			(define tsql_script_procedure (parser '(
 				(atom "CREATE" true) (define replace (? (atom "OR" true) (atom "ALTER" true)))
 				(or (atom "PROCEDURE" true) (atom "PROC" true))
@@ -2216,7 +2243,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(define parameters (* tsql_script_procedure_parameter ","))
 				(atom "AS" true) (define body (capture (+ tsql_script_item empty)))
 			) (list "batch" (list (list "create-procedure" (coalesce owner schema) name
-					parameters (strtrim (car body)) (if replace true false))))))
+					(tsql_unique_parameters parameters) (strtrim (car body)) (if replace true false))))))
 			(define script_parser (parser (define batch (or tsql_script_procedure
 				(parser '((* ";") (define commands (* tsql_script_item empty)) (* ";"))
 					(list "batch" commands)))) batch "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
