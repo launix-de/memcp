@@ -25,6 +25,12 @@ test_cases:
     12:13:14.1234568',N'2026-03-15 12:13:14.007',N'12:13:14.1234568')
   name: 'Fixture setup 007: INSERT INTO tsql_fractional_data VALUES (1,N''2026-03-15 12:13:14.1234567'',N''2026-03-15
     12:13:14.003'''
+- name: Fixture setup for declared temporal result output
+  sql: DROP TABLE IF EXISTS tsql_temporal_output
+- name: Fixture table for declared temporal result output
+  sql: CREATE TABLE tsql_temporal_output(id INT PRIMARY KEY,tm TIME,d DATE,dt DATETIME)
+- name: Fixture rows for declared temporal result output
+  sql: INSERT INTO tsql_temporal_output VALUES(1,N'12:13:14',N'2026-03-15',N'2026-03-15 12:13:14'),(2,NULL,NULL,NULL),(3,N'00:00:00',N'2026-03-16',N'2026-03-16 00:00:00')
 - name: Clock defaults are evaluated by a later insert rather than create
   scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define output (newsession))\n\
     \    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx\n        (sql_queryplan_compile_formula\
@@ -1157,6 +1163,35 @@ test_cases:
   expect: {result: true}
   cleanup:
   - sql: DROP TABLE tsql_week_domain
+
+- name: Stored TIME text retains its declared result value
+  sql: SELECT tm FROM tsql_temporal_output WHERE id=1
+  expect: {rows: 1, data: [{tm: '12:13:14'}]}
+- name: Stored TIME midnight retains its declared result value
+  sql: SELECT tm AS clock FROM tsql_temporal_output WHERE id=3
+  expect: {rows: 1, data: [{clock: '00:00:00'}]}
+- name: Nullable stored temporal values remain NULL at the result edge
+  sql: SELECT tm AS clock,d AS date,dt AS datetime FROM tsql_temporal_output WHERE id=2
+  expect: {rows: 1, data: [{clock: null, date: null, datetime: null}]}
+- name: Stored dates retain their declared result formats beside TIME
+  sql: SELECT tm AS clock,d AS date,dt AS datetime FROM tsql_temporal_output WHERE id=1
+  expect: {rows: 1, data: [{clock: '12:13:14', date: '2026-03-15', datetime: '2026-03-15 12:13:14'}]}
+- name: Stored TIME extraction and explicit conversion share the result contract
+  sql: SELECT DATEPART(hour,tm) AS hour,CAST(tm AS VARCHAR(8)) AS text FROM tsql_temporal_output WHERE id=1
+  expect: {rows: 1, data: [{hour: 12, text: '12:13:14'}]}
+- name: Stored TIME output retains ordinal values for duplicate aliases
+  scm: |
+    (begin
+      (define sess (newsession))
+      (define output (newsession))
+      (with_autocommit sess nil nil "stored time projection" (lambda (tx)
+        (tsql_execute_statement tx "memcp-tests"
+          "SELECT tm AS value,d AS value,dt AS value FROM tsql_temporal_output WHERE id=1"
+          sess (lambda (row) (output "row" row)) (lambda fields nil))))
+      (equal? (output "row") '("value" "12:13:14" "value" "2026-03-15" "value" "2026-03-15 12:13:14")))
+  expect: {result: true}
+- name: Fixture cleanup for declared temporal result output
+  sql: DROP TABLE tsql_temporal_output
 
 - sql: DROP TABLE IF EXISTS tsql_clock_defaults
   name: 'Fixture cleanup 001: DROP TABLE IF EXISTS tsql_clock_defaults'

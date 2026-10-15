@@ -1122,7 +1122,11 @@ compiling; the emitted row callback contains no SQL type tags or dispatch. */
 							"DATE" "%Y-%m-%d" "TIME" "%H:%i:%s"
 							"DATETIME" "%Y-%m-%d %H:%i:%s" "DATETIME2" "%Y-%m-%d %H:%i:%s"
 							"SMALLDATETIME" "%Y-%m-%d %H:%i:%s" _ nil))
-						(list (column "name") (if pattern (list format_date value pattern) value))))))))))
+						/* Stored TIME may be plain clock text. Choose its existing
+						anchor conversion from the declared type at compile time. */
+						(define calendar_value (if (equal? (column "sql_type") "TIME")
+							(list tsql_calendar_text value) value))
+						(list (column "name") (if pattern (list format_date calendar_value pattern) value))))))))))
 			plan)
 		plan)))
 
