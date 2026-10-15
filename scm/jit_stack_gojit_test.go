@@ -1031,3 +1031,60 @@ func TestJITRegexBranchesPreserveOuterHomes(t *testing.T) {
 		}
 	}
 }
+
+// A skipped operand must not revive an expired spill from an earlier region.
+// Check the map at the next call rather than relying on a lucky GC schedule.
+func TestJITShortCircuitReleasesOperandRoots(t *testing.T) {
+	for _, expression := range []string{
+		`(and gate (jit_test_operand_root))`,
+		`(or gate (jit_test_operand_root))`,
+		`(if (and gate (jit_test_operand_root)) true false)`,
+		`(if (or gate (jit_test_operand_root)) true false)`,
+	} {
+		t.Run(expression, func(t *testing.T) {
+			var operandRoot jitStackRoot
+			var produced, inspected bool
+			declarationsForTest := []*Declaration{
+				{Name: "jit_test_operand_root", Fn: func(...Scmer) Scmer { return NewBool(true) },
+					Type: &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "bool"},
+						JITEmit: func(ctx *JITContext, _ []Scmer, _ []JITValueDesc, _ JITValueDesc) JITValueDesc {
+							off := ctx.AllocSpill(16)
+							ctx.EmitStoreImm32Mem(ctx.FrameReg, off, 0)
+							ctx.setStackPointer(jitStackRootFrameBP, off, true)
+							operandRoot = jitStackRoot{base: jitStackRootFrameBP, offset: off}
+							produced = true
+							return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true), NoHeapPointer: true}
+						}}},
+				{Name: "jit_test_after_operand", Fn: func(...Scmer) Scmer { return NewBool(true) },
+					Type: &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "bool"},
+						JITEmit: func(ctx *JITContext, _ []Scmer, _ []JITValueDesc, _ JITValueDesc) JITValueDesc {
+							if !produced {
+								t.Fatal("operand was not compiled")
+							}
+							if _, live := ctx.StackRoots[operandRoot]; live {
+								t.Errorf("expired operand root %v survives the short-circuit join", operandRoot)
+							}
+							inspected = true
+							return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true), NoHeapPointer: true}
+						}}},
+			}
+			for _, declaration := range declarationsForTest {
+				Declare(&Globalenv, declaration)
+				defer func(d *Declaration) {
+					delete(Globalenv.Vars, Symbol(d.Name))
+					delete(declarations, d.Name)
+					delete(declarationsByFunction, FunctionIdentity(d.Fn))
+				}(declaration)
+			}
+			compiled := compileJITExpressionTestProc(t, `(lambda (gate) (begin `+expression+` (jit_test_after_operand)))`)
+			if !inspected {
+				t.Fatal("join was not inspected")
+			}
+			for _, gate := range []bool{false, true} {
+				if got := Apply(compiled, NewBool(gate)); !got.IsBool() || !got.Bool() {
+					t.Fatalf("gate %t: %s", gate, String(got))
+				}
+			}
+		})
+	}
+}
