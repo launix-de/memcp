@@ -105,13 +105,34 @@ using the existing native parallel scan. Transaction-local states must not fill
 shared computed groups, and their local recipe names must match their readers.
 The existing single-aggregate reduction remains unboxed.
 
-Remaining procedural work includes output parameter bindings, broader error
-metadata and RAISERROR, cursor declarations/execution, and connection/database
-context across nested invocations and batch separators. The current error
-number/state contract is supplied for explicit THROW and division by zero;
-other native failures retain their message without inventing an error code.
-Prepared and persisted plans must retain schema guards across later DDL.
-These are compatibility gaps, not a reason to add another execution engine.
+Output parameter completion now covers stored procedures and `sp_executesql`:
+`OUTPUT`/`OUT` copies a declared parameter back only when the call requests it,
+using the callee's source contract and the caller's target contract. Input and
+output values are isolated per lexical invocation; NULL, explicit RETURN,
+DEFAULT arguments and source-only persistence retain those contracts. Shared
+argument binding validates destinations before executing the procedure body.
+No caller session or executable closure is serialized.
+
+Catchable `RAISERROR` message text with severity 11 through 18 uses the current
+TRY/CATCH request boundary. `ERROR_SEVERITY()` joins the existing error context;
+parameterless THROW preserves it. Error-reporting procedures inherit their
+caller's CATCH context, and nested handlers restore it locally. Simple `%s`, `%d`, `%i`, `%I64d` and `%%`
+formats use declared expression contracts. Raising a frontend message after its
+scalar-binding statement does not mark a successful native transaction statement
+as failed. Numeric message catalogs, message options, exact long-message truncation and privileged/fatal
+severities remain unsupported. Informational severity delivery and extended
+format flags/width/precision have positive noncritical specifications. Direct
+RPC output-value tokens and structured wire error details need separate connector
+coverage; SQL batch OUTPUT bindings do not establish those wire contracts.
+
+Remaining procedural work includes cursors, SELECT assignment from relational
+queries, broader error metadata, informational messages and complete message
+formatting, and connection/database context across nested invocations and batch
+separators. The current number/state contract is supplied for explicit THROW,
+RAISERROR and division by zero; other native failures retain their message
+without an invented error code. Prepared and persisted plans must retain schema
+guards across later DDL. These are compatibility gaps, not a reason to add
+another execution engine.
 
 ## Installation readiness
 
