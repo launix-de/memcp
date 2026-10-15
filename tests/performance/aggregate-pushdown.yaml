@@ -53,12 +53,13 @@ test_cases:
               '("id" "access_id") fact_rows)
             (rebuild)
             {rows})
-    # One cold request followed by ten warm requests is the A/B workload.
+    # Retain the cold request and ten initial reuses as separate raw phases;
+    # further reuses keep a single collection from dominating the total.
     timing_group: fk-partition-count
     timing_aggregation: total
     warmup: 0
     timing_samples: 1
-    sql: |
+    sql: &ap_fk_count_query |
       SELECT COUNT(*) AS total
       FROM ap_fact fact
       WHERE COALESCE((
@@ -79,7 +80,7 @@ test_cases:
             WHERE access.id = fact.access_id
             LIMIT 1
           ), FALSE)
-    expect:
+    expect: &ap_fk_count_expect
       rows: 1
 
   - name: "Perf: aggregate pushdown warm FK partition count"
@@ -87,18 +88,18 @@ test_cases:
     timing_aggregation: total
     warmup: 0
     timing_samples: 10
-    sql: |
-      SELECT COUNT(*) AS total
-      FROM ap_fact fact
-      WHERE COALESCE((
-        SELECT access.allowed
-        FROM ap_access access
-        WHERE access.id = fact.access_id
-        LIMIT 1
-      ), FALSE)
-    threshold_ms: 30000
-    expect:
-      rows: 1
+    sql: *ap_fk_count_query
+    threshold_ms: 15000
+    expect: *ap_fk_count_expect
+
+  - name: "Perf: aggregate pushdown steady FK partition count"
+    timing_group: fk-partition-count
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 990
+    sql: *ap_fk_count_query
+    threshold_ms: 15000
+    expect: *ap_fk_count_expect
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ap_fact"
