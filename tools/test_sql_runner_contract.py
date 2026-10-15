@@ -39,6 +39,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from run_sql_tests import (  # noqa: E402
+    COMPILE_TIMING_SAMPLES,
     PERFORMANCE_ARCH_ENV,
     PERFORMANCE_CALIBRATION_ROUNDS,
     PERFORMANCE_MEASURED_NS_ENV,
@@ -929,6 +930,82 @@ class PerformanceScaleContractTest(unittest.TestCase):
         with mock.patch.dict("os.environ", {}, clear=True):
             publish_performance_scale(calibration)
             self.assertEqual(load_performance_scale(), calibration)
+
+
+class CompileBudgetSamplingTests(unittest.TestCase):
+    def measure(self, phases, *, nodes=None, missing=None, error=None,
+                phase_budget=28, planner_budget=0, scale=1):
+        self.assertEqual(len(phases), COMPILE_TIMING_SAMPLES)
+        runner = SQLTestRunner("http://localhost:1", log_times=True,
+                               performance_calibration={"scale": scale})
+        compile_calls = []
+
+        def execute(database, query, *args, **kwargs):
+            if query.startswith("EXPLAIN COMPILE "):
+                index = len(compile_calls)
+                compile_calls.append(query)
+                metrics = {"recipe_emit_ns": phases[index] * 1_000_000,
+                           "planner_total_ns": phases[index] * 1_000_000,
+                           "plan_nodes": nodes[index] if nodes else 1}
+                if index == missing:
+                    del metrics["recipe_emit_ns"]
+                return SimpleNamespace(status_code=200,
+                                       text="Error: failed compilation" if index == error else json.dumps(metrics),
+                                       headers={})
+            return SimpleNamespace(status_code=200, text='{"n":1}', headers={})
+
+        output = io.StringIO()
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", False), \
+                mock.patch.object(runner, "execute_sql", side_effect=execute), \
+                redirect_stdout(output):
+            passed = runner.run_test_case({
+                "name": "full compile measurements", "sql": "SELECT 1 AS n",
+                "max_plan_size": 0, "max_planner_time_ms": planner_budget,
+                "max_compile_phase_ms": {"recipe_emit_ns": phase_budget},
+                "max_compile_metrics": {"plan_nodes": 10},
+                "expect": {"rows": 1, "data": [{"n": 1}]},
+            }, "memcp-tests")
+        return passed, len(compile_calls), output.getvalue()
+
+    def test_single_pause_is_included_in_the_mean(self):
+        passed, calls, output = self.measure([70] + [10] * 10)
+        self.assertTrue(passed)
+        self.assertEqual(calls, 11)
+        self.assertIn('"recipe_emit_ns":70000000', output)
+
+    def test_systematic_slowdown_still_fails(self):
+        passed, calls, output = self.measure([30] * 11)
+        self.assertFalse(passed)
+        self.assertEqual(calls, 11)
+        self.assertIn("Compile phase recipe_emit_ns too slow", output)
+
+    def test_structural_outlier_is_never_averaged_away(self):
+        passed, _, output = self.measure([10] * 11, nodes=[11] + [1] * 10)
+        self.assertFalse(passed)
+        self.assertIn("Compile metric plan_nodes too large", output)
+
+    def test_missing_phase_in_any_sample_fails(self):
+        passed, _, output = self.measure([10] * 11, missing=3)
+        self.assertFalse(passed)
+        self.assertIn("did not report phase recipe_emit_ns", output)
+
+    def test_failed_sample_stops_without_retry(self):
+        passed, calls, output = self.measure([10] * 11, error=3)
+        self.assertFalse(passed)
+        self.assertEqual(calls, 4)
+        self.assertIn("EXPLAIN COMPILE failed", output)
+
+    def test_machine_scaling_still_applies_once(self):
+        self.assertTrue(self.measure([40] * 11, scale=2)[0])
+        self.assertFalse(self.measure([60] * 11, scale=2)[0])
+
+    def test_planner_total_uses_the_same_complete_samples(self):
+        self.assertTrue(self.measure([800] + [10] * 10,
+                                     phase_budget=1000, planner_budget=100)[0])
+        passed, _, output = self.measure([130] * 11, phase_budget=1000,
+                                         planner_budget=100)
+        self.assertFalse(passed)
+        self.assertIn("Planner too slow", output)
 
 
 class FailureAttributionContractTest(unittest.TestCase):
@@ -2435,6 +2512,24 @@ class ColdWarmTotalContractTests(unittest.TestCase):
                 self.assertEqual(result["time_ms"], 300)
                 self.assertEqual(result["candidate_ms"], cold + warm)
                 self.assertEqual(result["threshold_ms"], 360)
+                self.assertEqual(result["passed"], passed)
+
+    def test_long_workload_keeps_one_collection_and_rejects_repeated_slowdown(self):
+        # One cold call plus 1000 reuses: a single 20ms collection is retained,
+        # but cannot dominate the verdict. A 21% systematic slowdown must fail.
+        def workload(role, cold, warm):
+            trial = self.trial(role, cold, warm)
+            reused = trial["results"]["tests/performance/a.yaml::warm"]
+            reused.update(repetitions=1000, time_per_repetition_ms=warm / 1000)
+            return trial
+
+        for cold, warm, passed in ((60, 1000, True), (48.4, 1210, False)):
+            with self.subTest(cold=cold, warm=warm), \
+                    mock.patch("run_sql_tests.load_perf_regression_waivers", return_value={}):
+                result = next(iter(summarize_performance_fixtures(
+                    [workload("A", 40, 1000), workload("B", cold, warm)], 1).values()))
+                self.assertEqual(result["candidate_ms"], cold + warm)
+                self.assertEqual(result["threshold_ms"], 1248)
                 self.assertEqual(result["passed"], passed)
 
     def test_total_runner_records_sum_and_average_without_warmup(self):

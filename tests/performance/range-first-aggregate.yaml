@@ -1,10 +1,11 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # Correlated latest-row lookups across several reporting periods.
-# Workload: one cold request plus ten reuses, with no discarded warmup.
+# Cache-reuse workloads include one cold request and 500 reuses.
+# The two longer repeated-mapping workloads keep their eleven measured calls.
 
 metadata:
-  # Measured JIT verification: about 268 seconds for all seven pairs,
-  # including process startup; scheduling weights use 15-second units.
+  # Budget for seven independent fixture pairs, including process startup.
+  # Extra cached requests reuse each fixture instead of repeating its setup.
   performance_shard_weight: 18
   version: "1.0"
   description: "Range-first scalar values inside a period aggregate"
@@ -78,7 +79,7 @@ test_cases:
         - {period_id: 8, total: 20000}
     timing_aggregation: total
     warmup: 0
-    timing_samples: 11
+    timing_samples: 501
     threshold_ms: 10000
 
   - name: "Aggregate with several dependent scalar lookups"
@@ -106,7 +107,7 @@ test_cases:
         - {period_id: 2, total: 20000}
     timing_aggregation: total
     warmup: 0
-    timing_samples: 11
+    timing_samples: 501
     threshold_ms: 10000
 
   - name: "Dependent second range lookup reuses first row values"
@@ -138,7 +139,7 @@ test_cases:
         - {period_id: 2, total: 20000}
     timing_aggregation: total
     warmup: 0
-    timing_samples: 11
+    timing_samples: 501
     threshold_ms: 10000
 
   - name: "Period aggregates over deep account histories"
@@ -162,7 +163,7 @@ test_cases:
         - {period_id: 4, total: 65536}
     timing_aggregation: total
     warmup: 0
-    timing_samples: 11
+    timing_samples: 501
     threshold_ms: 10000
 
   - name: "Repeated range-first batches over deep account histories"

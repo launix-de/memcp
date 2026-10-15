@@ -59,7 +59,7 @@ test_cases:
     expect: {result: 29508}
     performance_rows: 60000
     warmup: 0
-    timing_samples: 4
+    timing_samples: 101
     timing_aggregation: total
     threshold_ms: 1000
   - name: "Perf: small indexed range keeps dynamic filtering"
@@ -72,7 +72,7 @@ test_cases:
     expect: {result: 100}
     performance_rows: 60000
     warmup: 0
-    timing_samples: 4
+    timing_samples: 101
     timing_aggregation: total
     threshold_ms: 1000
   - name: "Perf: RecSet candidates with typed residual filter"
@@ -86,7 +86,7 @@ test_cases:
     expect: {result: 29508}
     performance_rows: 60000
     warmup: 0
-    timing_samples: 4
+    timing_samples: 101
     timing_aggregation: total
     threshold_ms: 1000
   - name: "Perf: SQL indexed range with wide residual"
@@ -94,7 +94,7 @@ test_cases:
     expect: {data: [{n: 29508}]}
     performance_rows: 60000
     warmup: 0
-    timing_samples: 4
+    timing_samples: 1001
     timing_aggregation: total
     threshold_ms: 1000
   - name: "Perf: transactional SQL indexed range with wide residual"
@@ -105,7 +105,7 @@ test_cases:
     expect: {data: [{n: 29508}]}
     performance_rows: 60000
     warmup: 0
-    timing_samples: 4
+    timing_samples: 101
     timing_aggregation: total
     threshold_ms: 1000
   - name: "Point aggregate stays correct"

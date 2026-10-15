@@ -235,6 +235,9 @@ PERFORMANCE_CALIBRATION_SAMPLES = 5
 PERFORMANCE_SCALE_MIN = 1.0
 PERFORMANCE_SCALE_MAX = 16.0
 PLANNER_TIME_TOLERANCE_FACTOR = 1.2
+# Repeat full, uncached EXPLAIN COMPILE passes on the same fixture. Timing
+# budgets apply to their mean; structural limits apply to every pass.
+COMPILE_TIMING_SAMPLES = 11
 PERFORMANCE_CALIBRATION_ROUNDS = {
     "x86_64": 32,
     "aarch64": 16,
@@ -1810,29 +1813,40 @@ class SQLTestRunner:
                     and not test_case.get("expect", {}).get("error")):
                 qhead = query.lstrip().upper()
                 if qhead.startswith("SELECT") or qhead.startswith("WITH"):
-                    try:
-                        compile_resp = self.execute_sql(database, "EXPLAIN COMPILE " + query, auth_header,
-                                                        active_syntax, session_id=session_id, timeout=sql_timeout)
-                    except Exception:
-                        compile_resp = None
-                    if compile_resp is None or compile_resp.status_code != 200 or "Error" in compile_resp.text[:64]:
-                        return self._record_fail(name, "EXPLAIN COMPILE failed", query, compile_resp,
-                                                 test_case.get("expect"), is_noncritical)
-                    compile_rows = self.parse_jsonl_response(compile_resp)
-                    metrics = compile_rows[0] if compile_rows else {}
-                    planner_time_ms = float(metrics.get("planner_total_ns", 0)) / 1_000_000.0
+                    compile_sample_count = COMPILE_TIMING_SAMPLES if (
+                        planner_time_limit_ms > 0 or compile_phase_limits_ms
+                    ) else 1
+                    compile_samples = []
+                    for _ in range(compile_sample_count):
+                        try:
+                            compile_resp = self.execute_sql(database, "EXPLAIN COMPILE " + query, auth_header,
+                                                            active_syntax, session_id=session_id, timeout=sql_timeout)
+                        except Exception:
+                            compile_resp = None
+                        if compile_resp is None or compile_resp.status_code != 200 or "Error" in compile_resp.text[:64]:
+                            return self._record_fail(name, "EXPLAIN COMPILE failed", query, compile_resp,
+                                                     test_case.get("expect"), is_noncritical)
+                        compile_rows = self.parse_jsonl_response(compile_resp)
+                        metrics = compile_rows[0] if compile_rows else {}
+                        compile_samples.append(metrics)
+                    if self.log_times:
+                        print(f"COMPILE_TIME samples={json.dumps(compile_samples, separators=(',', ':'))} name={name}")
+                    planner_time_ms = statistics.mean(
+                        float(metrics.get("planner_total_ns", 0)) for metrics in compile_samples
+                    ) / 1_000_000.0
                     if planner_time_limit_ms > 0 and planner_time_ms > planner_time_limit_ms:
                         diag = self._run_on_fail(test_case, database)
                         return self._record_fail(
                             name,
                             f"Planner too slow: {planner_time_ms:.1f}ms > {planner_time_limit_ms:.0f}ms "
                             f"({planner_time_budget_ms:.0f}ms budget + "
-                            f"{(PLANNER_TIME_TOLERANCE_FACTOR - 1) * 100:.0f}% tolerance)",
+                            f"{(PLANNER_TIME_TOLERANCE_FACTOR - 1) * 100:.0f}% tolerance; "
+                            f"mean of {compile_sample_count} full compilations)",
                             query, compile_resp, test_case.get("expect"), is_noncritical,
                             planner_time_ms, planner_time_limit_ms, diag,
                         )
                     for phase, limit_ms_value in compile_phase_limits_ms.items():
-                        if phase not in metrics:
+                        if any(phase not in metrics for metrics in compile_samples):
                             return self._record_fail(
                                 name, f"EXPLAIN COMPILE did not report phase {phase}",
                                 query, compile_resp, test_case.get("expect"), is_noncritical,
@@ -1840,23 +1854,26 @@ class SQLTestRunner:
                         limit_ms = scaled_compile_time_limit_ms(
                             float(limit_ms_value), self.performance_calibration
                         )
-                        phase_time_ms = float(metrics[phase]) / 1_000_000.0
+                        phase_time_ms = statistics.mean(
+                            float(metrics[phase]) for metrics in compile_samples
+                        ) / 1_000_000.0
                         if phase_time_ms > limit_ms:
                             diag = self._run_on_fail(test_case, database)
                             return self._record_fail(
                                 name,
                                 f"Compile phase {phase} too slow: "
-                                f"{phase_time_ms:.1f}ms > {limit_ms:.0f}ms",
+                                f"{phase_time_ms:.1f}ms > {limit_ms:.0f}ms "
+                                f"(mean of {compile_sample_count} full compilations)",
                                 query, compile_resp, test_case.get("expect"), is_noncritical,
                                 phase_time_ms, limit_ms, diag,
                             )
                     for metric, limit_value in compile_metric_limits.items():
-                        if metric not in metrics:
+                        if any(metric not in metrics for metrics in compile_samples):
                             return self._record_fail(
                                 name, f"EXPLAIN COMPILE did not report metric {metric}",
                                 query, compile_resp, test_case.get("expect"), is_noncritical,
                             )
-                        metric_value = float(metrics[metric])
+                        metric_value = max(float(metrics[metric]) for metrics in compile_samples)
                         metric_limit = float(limit_value)
                         if metric_value > metric_limit:
                             diag = self._run_on_fail(test_case, database)

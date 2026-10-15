@@ -1,4 +1,5 @@
 # Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # One-row literal parameters must remove dead scalar-subquery branches before
 # decorrelation constructs work for them.
 
@@ -47,7 +48,7 @@ test_cases:
         - {hindex: 1, pindex: 0, total: 5000}
     timing_aggregation: total
     warmup: 0
-    timing_samples: 3
+    timing_samples: 51
     threshold_ms: 200
 
   - name: "Cached period literals retain their values"
