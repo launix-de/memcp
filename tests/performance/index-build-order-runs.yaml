@@ -25,12 +25,13 @@ setup:
       (rebuild))
 test_cases:
 - name: Compound index over many short reverse runs and ten reuses
-  sql: SELECT id, stamp FROM index_run_interleaved t WHERE kind='post' AND status='publish' ORDER BY t.stamp DESC, t.id DESC LIMIT 10
+  sql: &ordered_run_1_query SELECT id, stamp FROM index_run_interleaved t WHERE kind='post' AND status='publish' ORDER BY t.stamp DESC, t.id DESC LIMIT 10
   warmup: 0
   timing_samples: 11
   timing_aggregation: total
-  threshold_ms: 2000
-  expect:
+  timing_group: ordered_run_1
+  threshold_ms: 500
+  expect: &ordered_run_1_rows
     data:
     - {id: 21990, stamp: 21989}
     - {id: 21979, stamp: 21978}
@@ -42,13 +43,22 @@ test_cases:
     - {id: 21913, stamp: 21912}
     - {id: 21902, stamp: 21901}
     - {id: 21891, stamp: 21890}
+- name: Compound index steady repetitions for short runs
+  sql: *ordered_run_1_query
+  expect: *ordered_run_1_rows
+  warmup: 0
+  timing_samples: 490
+  timing_aggregation: total
+  timing_group: ordered_run_1
+  threshold_ms: 1500
 - name: Compound index over two long reverse runs and ten reuses
-  sql: SELECT id, stamp FROM index_run_blocks t WHERE kind='post' AND status='publish' ORDER BY t.stamp DESC, t.id DESC LIMIT 10
+  sql: &ordered_run_2_query SELECT id, stamp FROM index_run_blocks t WHERE kind='post' AND status='publish' ORDER BY t.stamp DESC, t.id DESC LIMIT 10
   warmup: 0
   timing_samples: 11
   timing_aggregation: total
-  threshold_ms: 2000
-  expect:
+  timing_group: ordered_run_2
+  threshold_ms: 500
+  expect: &ordered_run_2_rows
     data:
     - {id: 2000, stamp: 1999}
     - {id: 1999, stamp: 1998}
@@ -60,13 +70,22 @@ test_cases:
     - {id: 1993, stamp: 1992}
     - {id: 1992, stamp: 1991}
     - {id: 1991, stamp: 1990}
+- name: Compound index steady repetitions for long runs
+  sql: *ordered_run_2_query
+  expect: *ordered_run_2_rows
+  warmup: 0
+  timing_samples: 490
+  timing_aggregation: total
+  timing_group: ordered_run_2
+  threshold_ms: 1500
 - name: Compound index over shuffled rows and ten reuses
-  sql: SELECT id, stamp FROM index_run_shuffled t WHERE kind='post' AND status='publish' ORDER BY t.stamp DESC, t.id DESC LIMIT 10
+  sql: &ordered_run_3_query SELECT id, stamp FROM index_run_shuffled t WHERE kind='post' AND status='publish' ORDER BY t.stamp DESC, t.id DESC LIMIT 10
   warmup: 0
   timing_samples: 11
   timing_aggregation: total
-  threshold_ms: 2000
-  expect:
+  timing_group: ordered_run_3
+  threshold_ms: 500
+  expect: &ordered_run_3_rows
     data:
     - {id: 21990, stamp: 21989}
     - {id: 21979, stamp: 21978}
@@ -78,6 +97,14 @@ test_cases:
     - {id: 21913, stamp: 21912}
     - {id: 21902, stamp: 21901}
     - {id: 21891, stamp: 21890}
+- name: Compound index steady repetitions for shuffled rows
+  sql: *ordered_run_3_query
+  expect: *ordered_run_3_rows
+  warmup: 0
+  timing_samples: 490
+  timing_aggregation: total
+  timing_group: ordered_run_3
+  threshold_ms: 1500
 cleanup:
 - sql: DROP TABLE IF EXISTS index_run_interleaved
 - sql: DROP TABLE IF EXISTS index_run_blocks

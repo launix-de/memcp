@@ -97,6 +97,13 @@ expensive table setup. Existing one-shot cache-fill tests remain separate;
 replacing their work with cache hits would change what they protect. Every
 existing result assertion, absolute budget, and 20% A/B gate remains in force.
 
+Ordered Unicode and compound-index measurements retain their original cold
+request plus ten reuses as a named phase and add 490 further requests against
+the same fixture/query. Each pair shares `timing_group`: the 20% gate compares
+all 501 requests, while both raw phases remain visible. Their absolute budgets
+are split between the phases, preserving the previous combined limit. No setup
+or cold compilation is discarded, and every response is validated.
+
 - `sql/dml/insert-values-template.yaml`: Bulk INSERT literals, session bindings and computed cells.
 - `performance/bulk-insert-compile.yaml`: Cold compilation of parameterized bulk INSERT rows.
 - `performance/jit-scan-kernel-compile.yaml`: Full column scans including per-invocation filter and reducer compilation; one cold request plus 1000 SQL or 100 SCM repetitions.
