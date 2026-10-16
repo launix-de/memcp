@@ -704,4 +704,30 @@ test_cases:
   setup:
   - sql: DROP TABLE IF EXISTS dbo.ddl_quoted_alias
   sql: DROP TYPE dbo.[ALIAS.with]] SPACE]
+- name: Source contract setup removes a previous table
+  sql: DROP TABLE IF EXISTS dbo.ddl_source_contract
+- name: Source contract setup removes a previous alias
+  sql: DROP TYPE IF EXISTS dbo.ddl_source_float
+- name: Source contract native initial declaration
+  sql: CREATE TABLE dbo.ddl_source_contract(value INT)
+- name: Source contract initial insertion
+  sql: INSERT dbo.ddl_source_contract VALUES(5)
+- name: Source contract caches native integer division
+  sql: SELECT value/2 AS result FROM dbo.ddl_source_contract
+  expect: {rows: 1, data: [{result: 2}]}
+- name: Source contract retires the native table
+  sql: DROP TABLE dbo.ddl_source_contract
+- name: Source contract creates a floating alias
+  sql: CREATE TYPE dbo.ddl_source_float FROM FLOAT
+- name: Source contract publishes an alias column under the old table name
+  sql: CREATE TABLE dbo.ddl_source_contract(value dbo.ddl_source_float)
+- name: Source contract cached insertion observes the alias
+  sql: INSERT dbo.ddl_source_contract VALUES(5)
+- name: Source contract cached SELECT rebinds its actual column
+  sql: SELECT value/2 AS result FROM dbo.ddl_source_contract
+  expect: {rows: 1, data: [{result: 2.5}]}
+- name: Source contract cleanup removes the table
+  sql: DROP TABLE dbo.ddl_source_contract
+- name: Source contract cleanup removes the alias
+  sql: DROP TYPE dbo.ddl_source_float
 cleanup: []
