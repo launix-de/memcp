@@ -110,7 +110,7 @@ execution paths. The cache, transaction owner and compiled evaluator are shared.
 	(define parser (lambda (database text policy planning tx) (begin
 		(planning "__tsql_parameter_declarations" declarations)
 		(parse_tsql database text policy planning tx))))
-	(define formula (cached_parse tsql_queryplan_cache (list parser) schema input
+	(define formula (cached_parse tsql_queryplan_cache (list parser (list "exact_guards" true)) schema input
 		(list (quote sql-policy-for) username) cache_scope session false tx))
 	(sql_execute_formula session tx formula resultrow resultfields))))
 

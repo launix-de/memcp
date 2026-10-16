@@ -18,6 +18,7 @@ metadata:
   isolated: true
 setup:
   - sql: "DROP TABLE IF EXISTS cg_rows"
+  - sql: "DROP TABLE IF EXISTS cg_decl_contract"
   - sql: "CREATE TABLE cg_rows (id INT PRIMARY KEY, label TEXT)"
   - sql: "INSERT INTO cg_rows VALUES (1, 'needle-a'), (2, 'needle-b'), (3, 'other-a'), (4, 'other-b')"
   - scm: "(rebuild (table \"memcp-tests\" \"cg_rows\") true false)"
@@ -671,6 +672,87 @@ test_cases:
       rows: 1
       result_contains: ["true"]
 
+  - name: Exact cache opt-in guards recompile only when their declared dependency changes
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define state (newsession))
+        (define sess (newsession))
+        (state "contract" 10) (state "compiles" 0)
+        (define parser (lambda (_schema _sql _policy planning _tx) (begin
+          (define value (state "contract"))
+          (state "compiles" (+ (state "compiles") 1))
+          (planner_record_guard_condition
+            (list (quote expression_equal?) (list state "contract") value) planning)
+          (list (quote quote) value))))
+        (define execute (lambda () (sql_execute_formula sess nil
+          (cached_parse cache (list parser (list "exact_guards" true)) "memcp-tests"
+            "exact contract probe" nil "root" sess false nil)
+          (lambda (_row) nil) (lambda (_fields) nil))))
+        (define first (execute)) (define warm (execute))
+        (state "contract" 20)
+        (define changed (execute)) (define changed_warm (execute))
+        (state "contract" 10)
+        (define restored (execute))
+        (and (equal? first 10) (equal? warm 10) (equal? changed 20)
+          (equal? changed_warm 20) (equal? restored 10) (equal? (state "compiles") 2)))
+    expect: {result: true}
+  - name: Opt-in exact formulas without dependencies keep a direct warm callable
+    scm: |
+      (begin
+        (define cache (newcachemap)) (define sess (newsession)) (define state (newsession))
+        (state "compiles" 0)
+        (define parser (lambda (_schema _sql _policy _planning _tx) (begin
+          (state "compiles" (+ (state "compiles") 1)) (list (quote quote) 42))))
+        (define formula (cached_parse cache (list parser (list "exact_guards" true))
+          "memcp-tests" "exact unguarded probe" nil "root" sess false nil))
+        (define warm (cached_parse cache (list parser (list "exact_guards" true))
+          "memcp-tests" "exact unguarded probe" nil "root" sess false nil))
+        (and (not (list? (cache (car (cache))))) (equal? (state "compiles") 1)
+          (equal? (sql_execute_formula sess nil formula (lambda (_row) nil) (lambda (_fields) nil)) 42)
+          (equal? (sql_execute_formula sess nil warm (lambda (_row) nil) (lambda (_fields) nil)) 42)))
+    expect: {result: true}
+  - name: Existing parser envelopes retain their direct exact cache path
+    scm: |
+      (begin
+        (define cache (newcachemap)) (define sess (newsession)) (define state (newsession))
+        (state "compiles" 0)
+        (define parser (lambda (_schema _sql _policy _planning _tx) (begin
+          (state "compiles" (+ (state "compiles") 1)) (list (quote quote) 23))))
+        (define formula (cached_parse cache (list parser) "memcp-tests" "existing exact probe" nil "root" sess false nil))
+        (define warm (cached_parse cache (list parser) "memcp-tests" "existing exact probe" nil "root" sess false nil))
+        (and (not (list? (cache (car (cache))))) (equal? (state "compiles") 1)
+          (equal? (sql_execute_formula sess nil formula (lambda (_row) nil) (lambda (_fields) nil)) 23)
+          (equal? (sql_execute_formula sess nil warm (lambda (_row) nil) (lambda (_fields) nil)) 23)))
+    expect: {result: true}
+
+  - name: Exact dependency guards recompile typed native DML after width alteration
+    scm: |
+      (begin
+        (eval (parse_tsql "memcp-tests" "CREATE TABLE cg_decl_contract (id INT PRIMARY KEY, value NVARCHAR(2))" nil (newsession) nil))
+        (eval (parse_tsql "memcp-tests" "INSERT INTO cg_decl_contract VALUES (1,N'old')" nil (newsession) nil))
+        (define cache (newcachemap)) (define sess (newsession))
+        (define parser (lambda (schema text policy planning tx) (begin
+          (define dimensions ((nth (show (table schema "cg_decl_contract")) 1) "Dimensions"))
+          (planner_record_guard_condition
+            (list (quote expression_equal?)
+              (list (quote get_assoc) (list (quote nth) (list (quote show) (list (quote table) schema "cg_decl_contract")) 1) "Dimensions")
+              (list (quote quote) dimensions)) planning)
+          (parse_tsql schema text policy planning tx))))
+        (define execute (lambda () (sql_execute_formula sess nil
+          (cached_parse cache (list parser (list "exact_guards" true)) "memcp-tests"
+            "UPDATE cg_decl_contract SET value=N'longer' WHERE id=1" nil "root" sess false nil)
+          (lambda (_row) nil) (lambda (_fields) nil))))
+        (execute)
+        (altercolumn (table "memcp-tests" "cg_decl_contract") "value" "dimensions" '(8))
+        (execute)
+        (define value (scan_lookup nil (table "memcp-tests" "cg_decl_contract")
+          (list 372734710317056 (scan_boundary "equal" "id" 0 0 true true "" false) "value") '(1)))
+        (droptable "memcp-tests" "cg_decl_contract" true)
+        (equal? value "longer"))
+    expect: {result: true}
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS cg_decl_contract"
   - sql: "DROP TABLE IF EXISTS cg_rows"
   - sql: "DROP TABLE IF EXISTS cg_dml_rows"

@@ -16,7 +16,7 @@
 metadata:
   # All seven fresh pairs can consume eleven minutes on a slower CI runner.
   # Keep this suite on its own shard; samples and timing gates stay unchanged.
-  performance_shard_weight: 200
+  performance_shard_weight: 224
   version: "1.0"
   description: "Unselective scalar ORDER LIMIT late projection"
   isolated: true

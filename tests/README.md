@@ -104,6 +104,11 @@ all 501 requests, while both raw phases remain visible. Their absolute budgets
 are split between the phases, preserving the previous combined limit. No setup
 or cold compilation is discarded, and every response is validated.
 
+The FK-partition count and selective unique-point probes follow the same rule:
+their original first eleven/four requests remain visible, followed by enough
+identical requests for 1001/1000 measured calls. The combined absolute budgets
+and 20% group gates remain unchanged; no collection or first query is removed.
+
 - `sql/dml/insert-values-template.yaml`: Bulk INSERT literals, session bindings and computed cells.
 - `performance/bulk-insert-compile.yaml`: Cold compilation of parameterized bulk INSERT rows.
 - `performance/jit-scan-kernel-compile.yaml`: Full column scans including per-invocation filter and reducer compilation; one cold request plus 1000 SQL or 100 SCM repetitions.
@@ -233,8 +238,8 @@ is 1. Weights balance measured fixture costs across all six runners under the
 unchanged 15-minute limit. CI artifacts include process startup and both roles;
 incomplete verification runs are projected to all seven pairs when updating
 their weights. This avoids reserving a runner for a short suite while placing
-several longer verification runs together. Weights are rounded to 15-second units; they
-only guide scheduling, and source/measurement times remain reported. This changes
+several longer verification runs together. Weights are relative reservations for
+complete cohorts; they only guide scheduling, and source/measurement times remain reported. This changes
 neither test coverage nor any query, setup or regression budget. The KPI workload
 keeps its measured cold board and the next seven measured boards, without twenty
 additional discarded warmups. Normal tenant hierarchy checks use one complete

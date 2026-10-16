@@ -70,6 +70,115 @@ func TestShowColumnsReusesImmutableSnapshot(t *testing.T) {
 	}
 }
 
+func TestShowColumnBorrowsPublishedDescription(t *testing.T) {
+	tbl := showColumnsTestTable(2)
+	tbl.Columns[0].Name = "MixedCase"
+	tbl.Columns[1].Name = "Σ"
+	tbl.publishShowColumnsSnapshot(false)
+	rows := tbl.ShowColumns().Slice()
+	for _, name := range []string{"MixedCase", "mixedcase", "MIXEDCASE"} {
+		got := tbl.ShowColumn(name, true)
+		if got.IsNil() || &got.Slice()[0] != &rows[0].Slice()[0] {
+			t.Fatalf("lookup %q did not borrow the published column description", name)
+		}
+	}
+	if !tbl.ShowColumn("mixedcase", false).IsNil() || !tbl.ShowColumn("missing", true).IsNil() {
+		t.Fatal("exact or missing lookup returned a different column")
+	}
+	if got := tbl.ShowColumn("ς", true); got.IsNil() || showColumnProperty(got, "Field").String() != "Σ" {
+		t.Fatal("column description lookup disagrees with native Unicode name resolution")
+	}
+	if !((*table)(nil)).ShowColumn("missing", true).IsNil() {
+		t.Fatal("nil table returned a column description")
+	}
+}
+
+func TestShowColumnReadsWithoutTableOrShardOwnership(t *testing.T) {
+	tbl := showColumnsTestTable(1)
+	tbl.publishShowColumnsSnapshot(false)
+	shard := &storageShard{t: tbl}
+	tbl.Shards = []*storageShard{shard}
+	tbl.ddlMu.Lock()
+	defer tbl.ddlMu.Unlock()
+	tbl.mu.Lock()
+	defer tbl.mu.Unlock()
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	done := make(chan scm.Scmer, 1)
+	go func() { done <- tbl.ShowColumn("column_0", true) }()
+	select {
+	case got := <-done:
+		if got.IsNil() {
+			t.Fatal("published column description is missing")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("column metadata lookup waited for table or shard ownership")
+	}
+}
+
+func TestShowColumnInvalidationPublishesCurrentDeclaration(t *testing.T) {
+	tbl := showColumnsTestTable(1)
+	tbl.publishShowColumnsSnapshot(false)
+	before := tbl.ShowColumn("column_0", false)
+	tbl.Columns[0].Name = "replacement"
+	tbl.Columns[0].Typdimensions = []int{512}
+	tbl.invalidateShowColumnsSnapshot()
+	if !tbl.ShowColumn("column_0", false).IsNil() {
+		t.Fatal("old name survived metadata invalidation")
+	}
+	after := tbl.ShowColumn("replacement", false)
+	if after.IsNil() || showColumnProperty(after, "Type").String() != "VARCHAR(512)" {
+		t.Fatal("lookup needs lazy rendering or retained the old declaration")
+	}
+	if showColumnProperty(before, "Field").String() != "column_0" {
+		t.Fatal("publication changed the retained previous description")
+	}
+}
+
+func TestShowColumnExactNameWinsFoldedCollision(t *testing.T) {
+	tbl := showColumnsTestTable(2)
+	tbl.Columns[0].Name = "Name"
+	tbl.Columns[1].Name = "name"
+	tbl.Columns[1].Typdimensions = []int{31}
+	tbl.publishShowColumnsSnapshot(false)
+	if got := showColumnProperty(tbl.ShowColumn("name", true), "Type").String(); got != "VARCHAR(31)" {
+		t.Fatalf("exact name lost to a folded collision: %s", got)
+	}
+	if got := showColumnProperty(tbl.ShowColumn("NAME", true), "Field").String(); got != "Name" {
+		t.Fatalf("folded lookup changed native first-declaration resolution: %s", got)
+	}
+}
+
+func TestShowColumnKeepsOnePublicationDuringReplacement(t *testing.T) {
+	tbl := showColumnsTestTable(1)
+	before := tbl.buildShowColumnsSnapshot(0, nil)
+	tbl.Columns[0].Typdimensions = []int{31}
+	tbl.Columns[0].AllowNull = false
+	after := tbl.buildShowColumnsSnapshot(0, nil)
+	tbl.showColumnsSnapshot.Store(before)
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for range 1000 {
+				row := tbl.ShowColumn("column_0", false)
+				typ := showColumnProperty(row, "Type").String()
+				nullable := showColumnProperty(row, "Null").Bool()
+				if !((typ == "VARCHAR(255)" && nullable) || (typ == "VARCHAR(31)" && !nullable)) {
+					t.Errorf("mixed metadata publication: %s, nullable=%t", typ, nullable)
+					return
+				}
+			}
+		}()
+	}
+	for range 1000 {
+		tbl.showColumnsSnapshot.Store(after)
+		tbl.showColumnsSnapshot.Store(before)
+	}
+	readers.Wait()
+}
+
 func TestCountEstimateIsLockFreeAndPersisted(t *testing.T) {
 	tbl := showColumnsTestTable(1)
 	tbl.PlannerRowEstimate.value.Store(73)
@@ -558,7 +667,7 @@ func TestConstraintMetadataMaintenanceCannotReplaceNewDeclaration(t *testing.T) 
 	tbl.Name = "child"
 	tbl.publishShowColumnsSnapshot(true)
 	old := tbl.showColumnsSnapshot.Load()
-	maintenance := tbl.buildShowColumnsSnapshot(17)
+	maintenance := tbl.buildShowColumnsSnapshot(17, nil)
 	tbl.Foreign = []foreignKey{{Id: "fk", Tbl1: "child", Cols1: []string{"column_0"}, Tbl2: "parent", Cols2: []string{"id"}}}
 	tbl.publishShowColumnsSnapshot(true)
 	if tbl.showColumnsSnapshot.CompareAndSwap(old, maintenance) {
@@ -579,6 +688,27 @@ func TestConstraintMetadataMaintenanceCannotReplaceNewDeclaration(t *testing.T) 
 	restored.publishShowColumnsSnapshot(true)
 	if len(showColumnProperty(restored.Constraints(), "ForeignKeys").Slice()) != 1 {
 		t.Fatal("restoring native declarations did not reconstruct metadata")
+	}
+}
+
+func TestStatisticsPublicationPreservesNewerColumnDirectory(t *testing.T) {
+	tbl := showColumnsTestTable(1)
+	tbl.publishShowColumnsSnapshot(true)
+	// DDL publishes the initialized INSERT/name directory before its full SHOW
+	// snapshot. Pause that publication between the two existing atomic stores.
+	tbl.Columns = append(tbl.Columns, &column{Name: "added", Typ: "INT", AllowNull: true})
+	newNames := tbl.publishColumnNamesSnapshot()
+	tbl.collectStatisticsFromShards(nil)
+	if tbl.columnNamesSnapshot.Load() != newNames {
+		t.Fatal("statistics replaced the newer declaration directory")
+	}
+	if name, exists := tbl.ResolveColumnName("added", false); !exists || name != "added" {
+		t.Fatal("statistics made the newly published column disappear")
+	}
+	// Finish the same DDL publication and verify point reads agree with INSERT.
+	tbl.publishShowColumnsSnapshot(true)
+	if tbl.ShowColumn("added", false).IsNil() {
+		t.Fatal("completed DDL lost its column description")
 	}
 }
 
@@ -674,5 +804,111 @@ func TestConstraintMetadataNativeDDLPublication(t *testing.T) {
 			len(showColumnProperty(parent.Constraints(), "ForeignKeys").Slice()) != 0 {
 			t.Fatal("native DROP FOREIGN KEY did not publish both endpoints")
 		}
+	}
+}
+
+func columnDeclarationTestTuple(row scm.Scmer) scm.Scmer {
+	return scm.NewSlice([]scm.Scmer{
+		showColumnProperty(row, "RawType"), showColumnProperty(row, "Dimensions"),
+		showColumnProperty(row, "Null"), showColumnProperty(row, "Collation"),
+	})
+}
+
+func TestAlterColumnDeclarationRetainsOldContractAndPersistence(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "tcolumndeclarationpersist", 3)
+	tbl.CreateColumn("label", "VARCHAR", []int{3}, []scm.Scmer{scm.NewString("default"), scm.NewString("old"), scm.NewString("null"), scm.NewBool(false)})
+	old := tbl.columnDeclarations()[2]
+	before := tbl.ShowColumn("label", false)
+	declaration := scm.NewSlice([]scm.Scmer{scm.NewString("VARCHAR"), scm.NewSlice([]scm.Scmer{scm.NewInt(25)}), scm.NewBool(true), scm.NewString(old.Collation)})
+	if !tbl.AlterColumnDeclaration("label", declaration, columnDeclarationTestTuple(before)) {
+		t.Fatal("declaration replacement failed")
+	}
+	if old.Typdimensions[0] != 3 || old.AllowNull || old.sanitizer(scm.NewString("abcdef")).String() != "abc" {
+		t.Fatal("ALTER changed the contract retained by an earlier native batch")
+	}
+	after := tbl.ShowColumn("label", false)
+	if showColumnProperty(after, "Dimensions").Slice()[0].Int() != 25 || !showColumnProperty(after, "Null").Bool() || showColumnProperty(after, "Default").String() != "old" {
+		t.Fatal("ALTER did not publish the complete declaration with its original default")
+	}
+	tbl.Insert([]string{"id", "payload", "label"}, [][]scm.Scmer{{scm.NewInt(4), scm.NewString("inserted"), scm.NewString("longer text")}}, nil, scm.NewNil(), false, nil)
+	restored := reloadTableFromPersistence(t, "tcolumndeclarationpersist", persistence)
+	row := restored.ShowColumn("label", false)
+	if showColumnProperty(row, "Dimensions").Slice()[0].Int() != 25 || !showColumnProperty(row, "Null").Bool() || showColumnProperty(row, "Default").String() != "old" {
+		t.Fatal("complete declaration did not survive persistence reload")
+	}
+}
+
+func TestAlterColumnDeclarationChecksExpectedContractBeforeMutation(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tcolumndeclarationprecondition", 0)
+	before := tbl.ShowColumn("payload", false)
+	expected := columnDeclarationTestTuple(before)
+	declaration := scm.NewSlice([]scm.Scmer{scm.NewString("TEXT"), scm.NewSlice(nil), scm.NewBool(false), showColumnProperty(before, "Collation")})
+	tbl.AlterColumnDeclaration("payload", declaration, expected)
+	panicked := false
+	func() {
+		defer func() { panicked = recover() != nil }()
+		tbl.AlterColumnDeclaration("payload", expected, expected)
+	}()
+	if !panicked || showColumnProperty(tbl.ShowColumn("payload", false), "Null").Bool() {
+		t.Fatal("stale compatibility proof overwrote a concurrent declaration")
+	}
+	// Failed publication must release DDL and schema ownership.
+	tbl.AlterColumnDeclaration("payload", expected, declaration)
+}
+
+func TestAlterColumnDeclarationOverlapsNativeInsertAndPointReaders(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tcolumndeclarationconcurrent", 0)
+	tbl.CreateColumn("label", "VARCHAR", []int{1}, nil)
+	started := make(chan struct{})
+	done := make(chan any, 2)
+	go func() {
+		defer func() { done <- recover() }()
+		close(started)
+		for id := int64(1); id <= 40; id++ {
+			tbl.Insert([]string{"id", "payload", "label"}, [][]scm.Scmer{{scm.NewInt(id), scm.NewString("payload"), scm.NewString("x")}}, nil, scm.NewNil(), false, nil)
+			if row := tbl.ShowColumn("label", false); showColumnProperty(row, "RawType").String() != "VARCHAR" || len(showColumnProperty(row, "Dimensions").Slice()) != 1 {
+				panic("mixed column declaration")
+			}
+		}
+	}()
+	<-started
+	go func() {
+		defer func() { done <- recover() }()
+		for iteration := 0; iteration < 40; iteration++ {
+			tbl.AlterColumn("label", "comment", scm.NewString(fmt.Sprintf("description-%d", iteration)))
+		}
+	}()
+	for width := int64(2); width <= 20; width++ {
+		before := tbl.ShowColumn("label", false)
+		declaration := scm.NewSlice([]scm.Scmer{scm.NewString("VARCHAR"), scm.NewSlice([]scm.Scmer{scm.NewInt(width)}), scm.NewBool(true), showColumnProperty(before, "Collation")})
+		tbl.AlterColumnDeclaration("label", declaration, columnDeclarationTestTuple(before))
+	}
+	for range 2 {
+		if failure := <-done; failure != nil {
+			t.Fatalf("overlapping native insert/legacy ALTER failed: %v", failure)
+		}
+	}
+	assertInitializedColumn(t, tbl, "label", scm.NewString("x"), 40)
+}
+
+func TestShowColumnMetadataCountsBorrowedDefaultOnce(t *testing.T) {
+	tbl := showColumnsTestTable(1)
+	tbl.publishShowColumnsSnapshot(false)
+	before := tbl.metadataMemory()
+	value := scm.NewString(fmt.Sprintf("%040000d", 1))
+	tbl.Columns[0].Default = value
+	tbl.publishShowColumnsSnapshot(false)
+	after := tbl.metadataMemory()
+	if delta := after - before; delta < uint(len(value.String())) || delta > uint(len(value.String())+64) {
+		t.Fatalf("one borrowed default charged %d bytes, want one retained payload", delta)
+	}
+	tbl.Columns[0].InitialValue = value
+	tbl.Columns[0].InitialValues = map[string]columnInitialExtent{"original": {}}
+	shared := tbl.metadataMemory()
+	if shared <= after || shared-after >= uint(len(value.String())) {
+		t.Fatal("the same frozen default was charged again for its ADD extent")
+	}
+	if row := tbl.ShowColumn("column_0", false); showColumnProperty(row, "Default") != value {
+		t.Fatal("point description no longer borrows the column default")
 	}
 }

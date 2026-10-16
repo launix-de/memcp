@@ -444,13 +444,29 @@ must not change the logical join tree's leaf order.
 
 The Scheme query-plan cache may hold several lazily compiled physical plans for
 one normalized SELECT shape. DDL, DML, and transaction control retain exact
-cache entries because their formulas may intentionally operate on the request
-session. This is a polymorphic cache entry, not a second planner and not a
-storage-engine query cache.
+query keys because their formulas may intentionally operate on the request
+session. An exact DML entry may use the same variant dispatcher to validate
+immutable declaration contracts before invoking a cached plan; it must not
+normalize away its request/session semantics. This is a polymorphic cache entry,
+not a second planner and not a storage-engine query cache.
 
 Only SELECT shapes which reach a parameter- or statistics-dependent planner
-decision use polymorphic entries. Shapes without a tipping decision retain the
-smaller exact cache path.
+decision use normalized polymorphic entries. An exact plan with no declaration
+guards or preparations retains its direct callable fast path. Joined mutation
+proofs must capture the actual immutable key/nullability declarations they
+consume and invalidate when those declarations change. A separately loaded
+revision token cannot establish that it describes the captured metadata.
+Key guards retain only the consumed primary-key role, column lists and
+NULL-uniqueness policy as ordinary serializable values. They must not depend on
+snapshot identity, unrelated constraint labels or foreign-key metadata.
+Column-declaration guards compare only
+consumed type, dimensions, nullability and collation through published point
+metadata. Statistics publication must not invalidate a declaration contract.
+Direct DML recipes use the same compile-local guard protocol for mutation
+semantics only; a cost/statistics change must not become a schema-contract error.
+Comparison proofs retain frontend operand triples before binding removes
+Boolean callback annotations. Executable constants must never reconstruct a
+SQL type after that boundary.
 
 Every parameter- or statistics-dependent cost-model tipping decision must
 record the executable condition under which its chosen alternative remains
