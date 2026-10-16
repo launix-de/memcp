@@ -66,30 +66,30 @@ setup:
               i i i i i i i i)))))
         (define make_docs (lambda (n file_count)
           (map (produceN n) (lambda (i) (list i (mod i file_count) i i i i i i i i i)))))
-        (insert (table "memcp-tests" "pc_files_small") '("id" "filename" "search" "f1" "f2" "f3" "f4" "f5" "f6" "f7" "f8") (make_files 1000))
-        (insert (table "memcp-tests" "pc_docs_small") '("id" "file_id" "sort_key" "p1" "p2" "p3" "p4" "p5" "p6" "p7" "p8") (make_docs 4000 1000))
-        (insert (table "memcp-tests" "pc_files_large") '("id" "filename" "search" "f1" "f2" "f3" "f4" "f5" "f6" "f7" "f8") (make_files 5000))
-        (insert (table "memcp-tests" "pc_docs_large") '("id" "file_id" "sort_key" "p1" "p2" "p3" "p4" "p5" "p6" "p7" "p8") (make_docs 20000 5000))
-        (insert (table "memcp-tests" "pc_doc_meta") '("id" "label")
+        (insert (table "memcp-tests" false "pc_files_small" false) '("id" "filename" "search" "f1" "f2" "f3" "f4" "f5" "f6" "f7" "f8") (make_files 1000))
+        (insert (table "memcp-tests" false "pc_docs_small" false) '("id" "file_id" "sort_key" "p1" "p2" "p3" "p4" "p5" "p6" "p7" "p8") (make_docs 4000 1000))
+        (insert (table "memcp-tests" false "pc_files_large" false) '("id" "filename" "search" "f1" "f2" "f3" "f4" "f5" "f6" "f7" "f8") (make_files 5000))
+        (insert (table "memcp-tests" false "pc_docs_large" false) '("id" "file_id" "sort_key" "p1" "p2" "p3" "p4" "p5" "p6" "p7" "p8") (make_docs 20000 5000))
+        (insert (table "memcp-tests" false "pc_doc_meta" false) '("id" "label")
           (map (produceN 5000) (lambda (i) (list i (concat "meta-" (string i))))))
-        (insert (table "memcp-tests" "pc_acl_domain") '("id" "direct_flag")
+        (insert (table "memcp-tests" false "pc_acl_domain" false) '("id" "direct_flag")
           (map (produceN 5000) (lambda (i) (list i (if (equal? (mod i 11) 0) 1 0)))))
-        (insert (table "memcp-tests" "pc_acl_assignment") '("domain_id" "actor_id" "allowed")
+        (insert (table "memcp-tests" false "pc_acl_assignment" false) '("domain_id" "actor_id" "allowed")
           (map (produceN 2500) (lambda (i) (list (* i 2) 7 1))))
-        (insert (table "memcp-tests" "pc_acl_override") '("domain_id" "actor_id" "allowed")
+        (insert (table "memcp-tests" false "pc_acl_override" false) '("domain_id" "actor_id" "allowed")
           (map (produceN 1667) (lambda (i) (list (* i 3) 7 1))))
-        (insert (table "memcp-tests" "pc_events") '("id" "entity_key" "event_time" "kind")
+        (insert (table "memcp-tests" false "pc_events" false) '("id" "entity_key" "event_time" "kind")
           (map (produceN 10000) (lambda (i)
             (list i (if (>= i 9990) "key:1" (concat "noise:" (string i))) i
               (if (equal? (mod i 2) 0) "root" "leaf")))))
-        (insert (table "memcp-tests" "pc_keys") '("id" "enabled")
+        (insert (table "memcp-tests" false "pc_keys" false) '("id" "enabled")
           (list (list 1 1) (list 2 0))))
   - scm: |
-      (insert (table "memcp-tests" "pc_docs_million") '("id" "file_id" "sort_key" "p1")
+      (insert (table "memcp-tests" false "pc_docs_million" false) '("id" "file_id" "sort_key" "p1")
         (map (produceN 250000) (lambda (i) (list i (mod i 5000) i i))))
   - scm: "(rebuild)"
   - scm: |
-      (insert (table "memcp-tests" "pc_files_text") '("id" "filename" "search")
+      (insert (table "memcp-tests" false "pc_files_text" false) '("id" "filename" "search")
         (map (produceN 100000) (lambda (i)
           (list i
             (concat (if (equal? (mod i 10) 0)
@@ -98,22 +98,22 @@ setup:
             (concat (string_repeat (if (equal? (mod i 7) 0) "c" "x") 96) (string i))))))
   - scm: "(rebuild)"
   - scm: |
-      (insert (table "memcp-tests" "pc_docs_million") '("id" "file_id" "sort_key" "p1")
+      (insert (table "memcp-tests" false "pc_docs_million" false) '("id" "file_id" "sort_key" "p1")
         (map (produceN 250000) (lambda (i)
           (list (+ i 250000) (mod (+ i 250000) 5000) (+ i 250000) (+ i 250000)))))
   - scm: "(rebuild)"
   - scm: |
-      (insert (table "memcp-tests" "pc_docs_million") '("id" "file_id" "sort_key" "p1")
+      (insert (table "memcp-tests" false "pc_docs_million" false) '("id" "file_id" "sort_key" "p1")
         (map (produceN 250000) (lambda (i)
           (list (+ i 500000) (mod (+ i 500000) 5000) (+ i 500000) (+ i 500000)))))
   - scm: "(rebuild)"
   - scm: |
-      (insert (table "memcp-tests" "pc_docs_million") '("id" "file_id" "sort_key" "p1")
+      (insert (table "memcp-tests" false "pc_docs_million" false) '("id" "file_id" "sort_key" "p1")
         (map (produceN 250000) (lambda (i)
           (list (+ i 750000) (mod (+ i 750000) 5000) (+ i 750000) (+ i 750000)))))
   - scm: "(rebuild)"
   - scm: |
-      (insert (table "memcp-tests" "pc_files_wide") '("id" "filename" "search")
+      (insert (table "memcp-tests" false "pc_files_wide" false) '("id" "filename" "search")
         (map (produceN 5000) (lambda (i)
           (list i
             (concat (string_repeat (if (equal? (mod i 10) 0) "c" "x") 8192) (string i))
@@ -123,11 +123,11 @@ setup:
   # by small application lookup tables without perturbing the large rebuilds.
   - scm: |
       (begin
-        (insert (table "memcp-tests" "pc_lookup_outer") '("id" "lookup_id")
+        (insert (table "memcp-tests" false "pc_lookup_outer" false) '("id" "lookup_id")
           (list (list 1 10) (list 2 20) (list 3 30) (list 4 nil)))
-        (insert (table "memcp-tests" "pc_lookup_values") '("lookup_id" "value" "score")
+        (insert (table "memcp-tests" false "pc_lookup_values" false) '("lookup_id" "value" "score")
           (list (list 10 "ten" 100) (list 20 "twenty" 200) (list 30 nil 300)))
-        (insert (table "memcp-tests" "pc_lookup_composite") '("tenant_id" "lookup_id" "score")
+        (insert (table "memcp-tests" false "pc_lookup_composite" false) '("tenant_id" "lookup_id" "score")
           (list (list 1 10 100) (list 2 10 900) (list 1 20 200))))
 
 cleanup:

@@ -62,7 +62,7 @@ test_cases:
       tm: null
   noncritical: true
 - name: Force exact clock compression
-  scm: (rebuild (table "memcp-tests" "tsql_clock_recovery") true false)
+  scm: (rebuild (table "memcp-tests" false "tsql_clock_recovery" false) true false)
 - name: Publish exact clock column files
   syntax: mysql
   sql: SHUTDOWN

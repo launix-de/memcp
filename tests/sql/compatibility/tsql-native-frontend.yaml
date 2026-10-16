@@ -432,7 +432,7 @@ test_cases:
       (expression_equal?
         (parse_tsql "memcp-tests" "CREATE UNIQUE NONCLUSTERED INDEX uq_pair ON [dbo].[tsql_index_rows] ([tenant] DESC,[code] ASC)" nil nil nil)
         (list (quote if)
-          (list (quote createkey) (list (quote table) "memcp-tests" "tsql_index_rows") "uq_pair" true
+          (list (quote createkey) (list (quote table) "memcp-tests" false "tsql_index_rows" false) "uq_pair" true
             (list (quote list) "tenant" "Code") (quote tx) (list (quote list) "nulls_not_distinct" true))
           true (list (quote error) "index already exists: " "uq_pair")))
     expect: {result: true}
@@ -1624,7 +1624,7 @@ test_cases:
     sql: SELECT COUNT(*) AS n FROM tsql_identity_tiny_limit
     expect: {rows: 1, data: [{n: 0}]}
   - name: Failed generated batch never rewinds a consumed reservation
-    scm: '(reserve_ids (table "memcp-tests" "tsql_identity_tiny_limit") 1)'
+    scm: '(reserve_ids (table "memcp-tests" false "tsql_identity_tiny_limit" false) 1)'
     expect: {result: [257,257]}
   - name: Explicit identity NULL cannot bypass generated bounds
     sql: INSERT INTO tsql_identity_tiny_limit(id,value) VALUES (NULL,3)
@@ -1815,7 +1815,7 @@ test_cases:
       - sql: CREATE TABLE tsql_identity_completion_trigger(id INT IDENTITY,value INT)
     scm: |
       (begin
-        (createtrigger (table "memcp-tests" "tsql_identity_completion_trigger")
+        (createtrigger (table "memcp-tests" false "tsql_identity_completion_trigger" false)
           "tsql_identity_abort" "before_insert" "" ""
           (lambda (OLD NEW session tx) (error "intentional admission abort")) false)
         (define s (newsession))
@@ -1838,7 +1838,7 @@ test_cases:
       - sql: DROP TABLE IF EXISTS tsql_identity_perf_source
       - sql: CREATE TABLE tsql_identity_perf_source(id INT,value INT)
       - sql: CREATE TABLE tsql_identity_perf_target(id INT IDENTITY,value INT)
-      - scm: '(insert (table "memcp-tests" "tsql_identity_perf_source") ''("id" "value") (map (produceN {rows}) (lambda (i) (list i (+ i 10)))))'
+      - scm: '(insert (table "memcp-tests" false "tsql_identity_perf_source" false) ''("id" "value") (map (produceN {rows}) (lambda (i) (list i (+ i 10)))))'
     scm: |
       (begin
         (define s (newsession))
@@ -1859,7 +1859,7 @@ test_cases:
       - sql: DROP TABLE IF EXISTS tsql_identity_perf_source
       - sql: CREATE TABLE tsql_identity_perf_source(id INT,value INT)
       - sql: CREATE TABLE tsql_identity_perf_target(id INT IDENTITY,value INT)
-      - scm: '(insert (table "memcp-tests" "tsql_identity_perf_source") ''("id" "value") (map (produceN 1024) (lambda (i) (list i (+ i 10)))))'
+      - scm: '(insert (table "memcp-tests" false "tsql_identity_perf_source" false) ''("id" "value") (map (produceN 1024) (lambda (i) (list i (+ i 10)))))'
       - sql: INSERT INTO tsql_identity_perf_target(value) SELECT value FROM tsql_identity_perf_source ORDER BY id
       - sql: INSERT INTO tsql_identity_perf_target(value) SELECT value FROM tsql_identity_perf_source ORDER BY id
       - sql: INSERT INTO tsql_identity_perf_target(value) SELECT value FROM tsql_identity_perf_source ORDER BY id

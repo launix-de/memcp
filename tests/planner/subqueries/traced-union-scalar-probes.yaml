@@ -149,7 +149,7 @@ test_cases:
         (define guard (sql_queryplan_compile_formula nil
           (sql_queryplan_guard_from_session planning)))
         (define original (guard sess nil nil nil))
-        (createcolumn (table "memcp-tests" "trace_key_guard")
+        (createcolumn (table "memcp-tests" false "trace_key_guard" false)
           "unrelated_aggregate" "INT" '() '("temp" true) '("id") (lambda (id) (+ id 1)))
         (define published (guard sess nil nil nil))
         (droptable "memcp-tests" "trace_key_guard")
@@ -280,7 +280,7 @@ test_cases:
           (list stage) (list first second) planning))
         (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))
         (define original (guard (newsession) nil nil nil))
-        (insert (table "memcp-tests" "presence_preparation_fact") '("id") (list (list 4)))
+        (insert (table "memcp-tests" false "presence_preparation_fact" false) '("id") (list (list 4)))
         (define changed (guard (newsession) nil nil nil))
         (if (and original (not changed)
           (equal? (qassoc_get cost 'build_ns 0) (* 3 planner_group_relation_build_row_ns))) true
@@ -362,7 +362,7 @@ test_cases:
   - name: Shared truth producer preserves ordered keyset fusion
     scm: |
       (begin
-        (define recipe (scheme "(session \"get_or_compute_scoped\" (tx_query tx) (concat \"__projected_scalar_recset_fusion:\" (serialize (list (session \"actor\")))) tx (lambda (tx) (begin (define local_carrier (scan_recset tx (table \"memcp-tests\" \"trace_ref_dense\") '() '() '(\"id\") (lambda (id) (equal? id (session \"actor\"))))) (recset_project_join tx local_carrier '(\"asset_id\") (table \"memcp-tests\" \"trace_asset\") '(\"id\")))))"))
+        (define recipe (scheme "(session \"get_or_compute_scoped\" (tx_query tx) (concat \"__projected_scalar_recset_fusion:\" (serialize (list (session \"actor\")))) tx (lambda (tx) (begin (define local_carrier (scan_recset tx (table \"memcp-tests\" false \"trace_ref_dense\" false) '() '() '(\"id\") (lambda (id) (equal? id (session \"actor\"))))) (recset_project_join tx local_carrier '(\"asset_id\") (table \"memcp-tests\" false \"trace_asset\" false) '(\"id\")))))"))
         (define scan (cons 'scan_order (merge (list (list 'tx recipe) (produceN 10)))))
         (define factored (deduplicate_projected_truth_recipes (list 'list scan scan)))
         (define fused (lower_ordered_keyset_scans factored))
@@ -381,20 +381,20 @@ test_cases:
       (begin
         (define src '("a" "memcp-tests" "trace_asset" false nil))
         (define input (source_table_expr src))
-        (define narrow (scheme "(scan_recset nil (table \"memcp-tests\" \"trace_asset\") '() '() '(\"id\") (lambda (id) (equal? id 1)))"))
-        (define absent (scheme "(scan_recset nil (table \"memcp-tests\" \"trace_asset\") '() '() '(\"id\") (lambda (id) (equal? id -1)))"))
+        (define narrow (scheme "(scan_recset nil (table \"memcp-tests\" false \"trace_asset\" false) '() '() '(\"id\") (lambda (id) (equal? id 1)))"))
+        (define absent (scheme "(scan_recset nil (table \"memcp-tests\" false \"trace_asset\" false) '() '() '(\"id\") (lambda (id) (equal? id -1)))"))
         (list
           (recset_count (eval (join_truth_access_source '() src input (list nil narrow))))
           (recset_count (eval (join_truth_access_source '() src input (list absent))))
           (equal? (eval (join_truth_access_source '() src input (list nil)))
-                  (table "memcp-tests" "trace_asset"))))
+                  (table "memcp-tests" false "trace_asset" false))))
     expect: {data: [[1, 0, true]]}
 
   - name: Join truth projection uses exact current carrier and keeps physical identities
     scm: |
       (begin
-        (define lookup (table "memcp-tests" "trace_ref_dense"))
-        (define driver (table "memcp-tests" "trace_asset"))
+        (define lookup (table "memcp-tests" false "trace_ref_dense" false))
+        (define driver (table "memcp-tests" false "trace_asset" false))
         (define narrow (scan_recset nil lookup '() '() '("id") (lambda (id) (equal? id 1))))
         (define broad (scan_recset nil lookup '() '() '() (lambda () true)))
         (define absent (scan_recset nil lookup '() '() '("id") (lambda (id) (equal? id -1))))
@@ -407,8 +407,8 @@ test_cases:
   - name: Bounded join truth probes do not force a rejected producer
     scm: |
       (begin
-        (define lookup (table "memcp-tests" "trace_ref_dense"))
-        (define driver (table "memcp-tests" "trace_asset"))
+        (define lookup (table "memcp-tests" false "trace_ref_dense" false))
+        (define driver (table "memcp-tests" false "trace_asset" false))
         (nil? (join_truth_project_if_cheaper nil
           (lambda () (error "bounded probes must keep their existing access"))
           lookup '("asset_id") driver '("id") 1)))
@@ -424,8 +424,8 @@ test_cases:
       (begin
         (define src '("a" "memcp-tests" "trace_asset" false nil))
         (define lookup '("d" "memcp-tests" "trace_ref_dense" false nil))
-        (define driver (table "memcp-tests" "trace_asset"))
-        (define relation (table "memcp-tests" "trace_ref_dense"))
+        (define driver (table "memcp-tests" false "trace_asset" false))
+        (define relation (table "memcp-tests" false "trace_ref_dense" false))
         (define predicate (list 'equal?? (list 'get_column "d" false "id" false) 2))
         (define carrier (scan_recset nil relation '() '() '("id") (lambda (id) (equal? id 2))))
         (define session (newsession))

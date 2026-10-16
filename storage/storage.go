@@ -941,23 +941,36 @@ func Init(en scm.Env) {
 	})
 
 	scm.Declare(&en, &scm.Declaration{
+		Name: "restore_storage_code",
+		Fn:   func(a ...scm.Scmer) scm.Scmer { return upgradePersistedTableCalls(a[0]) },
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "upgrade persisted native call shapes before compiling a restored definition; quoted data stays unchanged",
+			Params: []*scm.TypeDescriptor{{Kind: "any", Label: "definition"}},
+			Return: &scm.TypeDescriptor{Kind: "any"}},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
 		Name: "table",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
+			if len(a) != 4 {
+				panic("table expects database, database_ignorecase, name, name_ignorecase")
+			}
+			db := GetDatabase(scm.String(a[0]), a[1].Bool())
 			if db == nil {
 				return scm.NewNil()
 			}
-			t := db.GetTable(scm.String(a[1]))
+			t := db.GetTable(scm.String(a[2]), a[3].Bool())
 			if t == nil {
 				return scm.NewNil()
 			}
 			return NewTableScmer(t)
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "resolves a schema+table name pair into a table handle",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "resolves database and table identifiers with explicit comparison policies into a table handle",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", Label: "schema"},
+				{Kind: "string", Label: "database"},
+				{Kind: "bool", Label: "database_ignorecase"},
 				{Kind: "string", Label: "table"},
+				{Kind: "bool", Label: "table_ignorecase"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "table"},
 		},
@@ -2607,15 +2620,7 @@ func Init(en scm.Env) {
 			db.schemalock.Lock()
 			existing := db.tables.Get(tblName)
 			if nameIgnoreCase {
-				if names := db.foldedTableNames.Load(); names != nil {
-					if spelling, found := (*names)[foldIdentifier(tblName)]; found {
-						if spelling == "" {
-							db.schemalock.Unlock()
-							panic("ambiguous table name: " + tblName)
-						}
-						existing = db.tables.Get(spelling)
-					}
-				}
+				existing = db.GetTable(tblName, true)
 			}
 			if existing != nil {
 				// Keep the hot ifnotexists path free of schema saves. Planner-created
@@ -3476,7 +3481,7 @@ func Init(en scm.Env) {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
 					scm.NewSymbol("tx"),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(baseSchema), scm.NewString(baseTable.Name)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(baseSchema), scm.NewBool(false), scm.NewString(baseTable.Name), scm.NewBool(false)}),
 					accessSchema,
 					accessValues,
 					filterCols,
@@ -3497,7 +3502,7 @@ func Init(en scm.Env) {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
 					scm.NewSymbol("tx"),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(ktSchema), scm.NewString(ktName)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(ktSchema), scm.NewBool(false), scm.NewString(ktName), scm.NewBool(false)}),
 					accessSchema,
 					accessValues,
 					filterCols,
@@ -3515,7 +3520,7 @@ func Init(en scm.Env) {
 				values := append([]scm.Scmer{scm.NewSymbol("list")}, getAssocs(dictSym, baseCols)...)
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("insert"),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(ktSchema), scm.NewString(ktName)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(ktSchema), scm.NewBool(false), scm.NewString(ktName), scm.NewBool(false)}),
 					scanFilterCols(ktCols),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"),
 						scm.NewSlice(values)}),
@@ -3974,28 +3979,6 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
-		Name: "resolve_table_name",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				return scm.NewNil()
-			}
-			name, ok := db.ResolveTableName(scm.String(a[1]), scm.ToBool(a[2]))
-			if !ok {
-				return scm.NewNil()
-			}
-			return scm.NewString(name)
-		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "resolve a table spelling from immutable namespace metadata",
-			Params: []*scm.TypeDescriptor{
-				{Kind: "string", Label: "schema"},
-				{Kind: "string", Label: "table"},
-				{Kind: "bool", Label: "ignorecase"},
-			},
-			Return: &scm.TypeDescriptor{Kind: "string|nil", Transfer: false},
-		},
-	})
-	scm.Declare(&en, &scm.Declaration{
 		Name: "resolve_column_name",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -4026,6 +4009,9 @@ func Init(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "show",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if len(a) != 0 && a[0].IsNil() {
+				return scm.NewNil()
+			}
 			// table-based overloads: (show table) / (show recset) → columns,
 			// (show table "statistics") / (show recset "statistics") → index stats, etc.
 			if len(a) >= 1 && (a[0].IsCustom(TagTable) || a[0].IsCustom(TagRecSet)) {
@@ -4044,6 +4030,12 @@ func Init(en scm.Env) {
 				if len(a) == 2 {
 					if a[1].IsString() && scm.String(a[1]) == "memory" {
 						return showBuildMemory(t.residentMemory())
+					}
+					if a[1].IsString() && a[1].String() == "name" {
+						if name := t.publishedName.Load(); name != nil {
+							return scm.NewString(*name)
+						}
+						return scm.NewNil()
 					}
 					if a[1].IsString() && scm.String(a[1]) == "constraints" {
 						return t.Constraints()
@@ -4263,10 +4255,10 @@ func Init(en scm.Env) {
 			}
 			panic("invalid call of show")
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "show databases/tables/columns/shards\n\n(show schema tbl \"memory\") / (show table_handle \"memory\") explicitly traverses resident owners: data_size_bytes + index_size_bytes = size_bytes; data includes metadata, temporary columns, dictionaries and blob caches. Cold data is never loaded.\n(show schema tbl \"constraints\") / (show table_handle \"constraints\") borrows immutable unique/foreign-key declarations in O(1), without storage traversal.\n(show) lists database names\n(show schema) lists table names\n(show table_handle) lists the memoized column defs\n(show table_handle true) returns table metadata\n(show table_handle \"column\" name [ignore_case]) borrows one immutable column description or returns nil\n(show table_handle \"statistics\") returns index statistics\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns full diagnostic assoc {columns,meta,shards,triggers} plus all memory fields\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns INFORMATION_SCHEMA index statistics\n(show schema tbl \"indexes\") returns MySQL SHOW INDEX rows",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "show databases/tables/columns/shards\n\n(show schema tbl \"memory\") / (show table_handle \"memory\") explicitly traverses resident owners: data_size_bytes + index_size_bytes = size_bytes; data includes metadata, temporary columns, dictionaries and blob caches. Cold data is never loaded.\n(show schema tbl \"constraints\") / (show table_handle \"constraints\") borrows immutable unique/foreign-key declarations in O(1), without storage traversal.\n(show) lists database names\n(show schema) lists table names\n(show table_handle) lists the memoized column defs\n(show table_handle \"name\") returns the immutable published name\n(show table_handle true) returns table metadata\n(show table_handle \"column\" name [ignore_case]) borrows one immutable column description or returns nil\n(show table_handle \"statistics\") returns index statistics\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns full diagnostic assoc {columns,meta,shards,triggers} plus all memory fields\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns INFORMATION_SCHEMA index statistics\n(show schema tbl \"indexes\") returns MySQL SHOW INDEX rows",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string|table|recset", Label: "schema_or_table", Description: "(optional) database name or resolved table/recset handle", Optional: true},
-				{Kind: "string|bool", Label: "table_or_property", Description: "(optional) table name, true for full info, or \"memory\"/\"constraints\"/\"statistics\"/\"column\" for a handle", Optional: true},
+				{Kind: "string|bool", Label: "table_or_property", Description: "(optional) table name, true for full info, or \"name\"/\"memory\"/\"constraints\"/\"statistics\"/\"column\" for a handle", Optional: true},
 				{Kind: "int|bool|string", Label: "property", Description: "(optional) shard index, column name, or table metadata selector", Optional: true},
 				{Kind: "bool", Label: "full_or_ignore_case", Description: "(optional) full shard details, or case-insensitive column-name lookup for a column selector", Optional: true},
 			},

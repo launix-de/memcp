@@ -337,7 +337,45 @@ func (d *database) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-var databases = NonLockingReadMap.NewReadMap[string, *database]()
+// Database namespace writes publish the folded secondary index with the
+// existing exact catalog. Only DDL takes namespaceMu; all lookups are reads of
+// immutable publications. Empty spellings denote an ambiguous folded name.
+type databaseDirectory struct {
+	*NonLockingReadMap.ReadMap[string, *database]
+	namespaceMu sync.Mutex
+	folded      atomic.Pointer[map[string]string]
+}
+
+func (d *databaseDirectory) Set(name string, db *database) *database {
+	d.namespaceMu.Lock()
+	defer d.namespaceMu.Unlock()
+	previous := d.ReadMap.Set(name, db)
+	d.publishNames()
+	return previous
+}
+
+func (d *databaseDirectory) Remove(name string) *database {
+	d.namespaceMu.Lock()
+	defer d.namespaceMu.Unlock()
+	previous := d.ReadMap.Remove(name)
+	d.publishNames()
+	return previous
+}
+
+func (d *databaseDirectory) publishNames() {
+	names := make(map[string]string)
+	for _, db := range d.GetAll() {
+		key := foldIdentifier(db.Name)
+		if _, exists := names[key]; exists {
+			names[key] = ""
+		} else {
+			names[key] = db.Name
+		}
+	}
+	d.folded.Store(&names)
+}
+
+var databases = &databaseDirectory{ReadMap: NonLockingReadMap.NewReadMap[string, *database]()}
 var Basepath string = "data"
 
 func (d *database) ComputeSize() uint {
@@ -756,29 +794,101 @@ func (db *database) publishTableNamesLocked() {
 	db.foldedTableNames.Store(&names)
 }
 
-// ResolveTableName selects a caller-specified identifier comparison policy.
-// It reads only published metadata and adds no work to scans or ordinary lookup.
-func (db *database) ResolveTableName(name string, ignoreCase bool) (string, bool) {
-	db.ensureLoaded()
-	if !ignoreCase {
-		return name, db.tables.Get(name) != nil
-	}
-	if names := db.foldedTableNames.Load(); names != nil {
-		canonical, exists := (*names)[foldIdentifier(name)]
-		if exists && canonical == "" {
-			panic("ambiguous table name: " + name)
-		}
-		return canonical, exists
-	}
-	return "", false
-}
-
 // invalidatePersistedPlannerCodeAfterLoad drops executable code derived from a
 // physical query plan. Planner-owned CACHE tables contain no durable rows, and
 // the current createtable guard supplies their authoritative oninit callback on
 // first use. Retaining an older callback across a physical operator ABI change
 // would execute stale generated code before that guard can refresh it.
+// upgradePersistedTableCalls runs only while loading unpublished executable
+// definitions. It changes the old native table-call ABI, never SQL syntax or
+// row values. Quoted data stays opaque; the live builtin accepts only the new
+// interface. New Proc identities discard any obsolete compiled/optimizer state.
+func upgradePersistedTableCalls(value scm.Scmer) scm.Scmer {
+	if value.IsSourceInfo() {
+		inner := value.WithoutSourceInfo()
+		if restored := upgradePersistedTableCalls(inner); restored != inner {
+			return restored
+		}
+		return value
+	}
+	if value.IsProc() {
+		proc := value.Proc()
+		if callHeadIs(proc.Params, "table") {
+			return value
+		}
+		if proc.Params.IsSlice() {
+			for _, param := range proc.Params.Slice() {
+				if callHeadIs(param, "table") {
+					return value // table is a lexical parameter, not the native builtin
+				}
+			}
+		}
+		body := upgradePersistedTableCalls(proc.Body)
+		if body == proc.Body {
+			return value
+		}
+		return scm.NewProcStruct(scm.Proc{Params: proc.Params, Body: body, En: proc.En,
+			NumVars: proc.NumVars, NumberedOnly: proc.NumberedOnly})
+	}
+	if !value.IsSlice() {
+		return value
+	}
+	items := value.Slice()
+	if len(items) == 3 && callHeadIs(items[0], "lambda") {
+		if callHeadIs(items[1], "table") {
+			return value
+		}
+		if params := items[1].WithoutSourceInfo(); params.IsSlice() {
+			for _, param := range params.Slice() {
+				if callHeadIs(param, "table") {
+					return value
+				}
+			}
+		}
+	}
+	if len(items) > 0 && callHeadIs(items[0], "quote") {
+		return value
+	}
+	if len(items) == 3 && callHeadIs(items[0], "table") {
+		return scm.NewSlice([]scm.Scmer{items[0], upgradePersistedTableCalls(items[1]),
+			scm.NewBool(false), upgradePersistedTableCalls(items[2]), scm.NewBool(false)})
+	}
+	var replacement []scm.Scmer
+	for i, item := range items {
+		rewritten := upgradePersistedTableCalls(item)
+		if rewritten != item {
+			if replacement == nil {
+				replacement = append([]scm.Scmer(nil), items...)
+			}
+			replacement[i] = rewritten
+		}
+	}
+	if replacement != nil {
+		return scm.NewSlice(replacement)
+	}
+	return value
+}
+
 func invalidatePersistedPlannerCodeAfterLoad(t *table) {
+	if t.OnInit != nil {
+		restored := upgradePersistedTableCalls(*t.OnInit)
+		t.OnInit = &restored
+	}
+	for _, col := range t.Columns {
+		col.OnUpdate = upgradePersistedTableCalls(col.OnUpdate)
+		col.OrcFilterFn = upgradePersistedTableCalls(col.OrcFilterFn)
+		col.OrcMapReduceFn = upgradePersistedTableCalls(col.OrcMapReduceFn)
+	}
+	for i := range t.Triggers {
+		trigger := &t.Triggers[i]
+		trigger.Func = upgradePersistedTableCalls(trigger.Func)
+		if trigger.Language == "scheme" && trigger.Source != "" {
+			definition := scm.Read("stored trigger", trigger.Source)
+			if restored := upgradePersistedTableCalls(definition); restored != definition {
+				trigger.Source = scm.SerializeToString(restored, &scm.Globalenv)
+			}
+		}
+	}
 	if t.isEphemeralQueryTable() {
 		t.OnInit = nil
 	}
@@ -790,8 +900,22 @@ func (db *database) GetRead(_ *TxContext) ReadAccess { db.ensureLoaded(); return
 func (db *database) GetExclusive() func()            { db.ensureLoaded(); db.srState = WRITE; return func() {} }
 
 // helper to fetch a table with lazy db load
-func (db *database) GetTable(name string) *table {
+func (db *database) GetTable(name string, ignoreCase ...bool) *table {
 	db.ensureLoaded()
+	if len(ignoreCase) != 0 && ignoreCase[0] {
+		names := db.foldedTableNames.Load()
+		if names == nil {
+			return nil
+		}
+		canonical, exists := (*names)[foldIdentifier(name)]
+		if !exists {
+			return nil
+		}
+		if canonical == "" {
+			panic("ambiguous table name: " + name)
+		}
+		name = canonical
+	}
 	if t := db.tables.Get(name); t != nil {
 		return t
 	}
@@ -1239,7 +1363,21 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 	}
 }
 
-func GetDatabase(schema string) *database {
+func GetDatabase(schema string, ignoreCase ...bool) *database {
+	if len(ignoreCase) != 0 && ignoreCase[0] {
+		names := databases.folded.Load()
+		if names == nil {
+			return nil
+		}
+		canonical, exists := (*names)[foldIdentifier(schema)]
+		if !exists {
+			return nil
+		}
+		if canonical == "" {
+			panic("ambiguous database name: " + schema)
+		}
+		schema = canonical
+	}
 	return databases.Get(schema)
 }
 
@@ -1991,6 +2129,7 @@ func RenameTable(schema, oldname, newname string) {
 	}
 	db.tables.Remove(oldname)
 	t.Name = newname
+	t.publishedName.Store(&newname)
 	db.tables.Set(newname, t)
 	db.publishTableNamesLocked()
 	db.saveLockedAndUnlock(t.schemaSaveMode())

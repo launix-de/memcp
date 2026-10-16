@@ -426,7 +426,7 @@ test_cases:
     \  (drop_sql_type_alias \"memcp-tests\" \"catalog_transient_alias\" false nil)\n  (create_sql_type_alias \"memcp-tests\"\
     \ \"catalog_transient_alias\" \"INT\" '() true nil)\n  (define rejected (try (lambda () (begin\n    (sql_execute_formula\
     \ session nil formula (lambda row true) (lambda fields true)) false)) (lambda (_) true)))\n  (if (and rejected\
-    \ (nil? (resolve_table_name \"memcp-tests\" \"catalog_stale_alias\" false))) true\n    (error \"cached CREATE published\
+    \ (nil? (table \"memcp-tests\" false \"catalog_stale_alias\" false))) true\n    (error \"cached CREATE published\
     \ an obsolete alias declaration\")))\n"
   expect:
     result: true
@@ -465,7 +465,7 @@ test_cases:
 - name: Named default is part of the existing column snapshot
   scm: |
     (begin
-      (define c (show (table "memcp-tests" "ddl_native_defaults") "column" "value" false))
+      (define c (show (table "memcp-tests" false "ddl_native_defaults" false) "column" "value" false))
       (and (equal? (c "DefaultName") "DF value]native") (equal? (c "Default") 10)))
   expect: {result: true}
 - name: Qualified INSERT consumes the native defaults
@@ -541,7 +541,7 @@ test_cases:
   setup:
   - sql: DROP TABLE IF EXISTS dbo.ddl_alias_primary
   - sql: CREATE TABLE dbo.ddl_alias_primary(value dbo.ddl_alias_text,PRIMARY KEY(value))
-  scm: (not ((show (table "memcp-tests" "ddl_alias_primary") "column" "value" false) "Null"))
+  scm: (not ((show (table "memcp-tests" false "ddl_alias_primary" false) "column" "value" false) "Null"))
   expect: {result: true}
   cleanup:
   - sql: DROP TABLE dbo.ddl_alias_primary
@@ -555,7 +555,7 @@ test_cases:
 - name: Native metadata preserves the original qualified alias
   scm: |
     (begin
-      (define column (show (table "memcp-tests" "ddl_alias_values") "column" "label" false))
+      (define column (show (table "memcp-tests" false "ddl_alias_values" false) "column" "label" false))
       (and (equal? (column "RawType") "[memcp-tests].[dbo].[ddl_alias_text]")
         (expression_equal? (column "Dimensions") '(8)) (column "Null")))
   expect: {result: true}

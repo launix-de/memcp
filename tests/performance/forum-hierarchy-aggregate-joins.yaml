@@ -24,7 +24,7 @@ setup:
   - sql: "CREATE TABLE forum_hierarchy_posts (postID INT PRIMARY KEY, authorID INT, datePosted BIGINT) ENGINE=sloppy"
   - sql: "CREATE TABLE forum_hierarchy_users (userID INT PRIMARY KEY, username VARCHAR(32)) ENGINE=sloppy"
   - scm: |
-      (insert (table "memcp-tests" "forum_hierarchy_forums")
+      (insert (table "memcp-tests" false "forum_hierarchy_forums" false)
         '("forumID" "title" "description" "forumType" "parentID" "heritage" "order" "gameID" "threadCount")
         (map (produceN 10000) (lambda (i)
           (begin
@@ -36,21 +36,21 @@ setup:
                 (concat "/root/" (string id) "/"))
               (mod id 100) (mod id 50) (mod id 17))))))
   - scm: |
-      (insert (table "memcp-tests" "forum_hierarchy_threads")
+      (insert (table "memcp-tests" false "forum_hierarchy_threads" false)
         '("threadID" "forumID" "postCount" "lastPostID")
         (map (produceN 33669) (lambda (i)
           (begin
             (define id (+ i 1))
             (list id (+ 1 (mod i 10000)) (+ 1 (mod i 40)) id)))))
   - scm: |
-      (insert (table "memcp-tests" "forum_hierarchy_posts")
+      (insert (table "memcp-tests" false "forum_hierarchy_posts" false)
         '("postID" "authorID" "datePosted")
         (map (produceN 33669) (lambda (i)
           (begin
             (define id (+ i 1))
             (list id (+ 1 (mod i 1000)) (+ 1700000000 id))))))
   - scm: |
-      (insert (table "memcp-tests" "forum_hierarchy_users")
+      (insert (table "memcp-tests" false "forum_hierarchy_users" false)
         '("userID" "username")
         (map (produceN 1000) (lambda (i)
           (list (+ i 1) (concat "user" (string (+ i 1)))))))
@@ -235,10 +235,10 @@ test_cases:
     scm: |
       (begin
         (define tx (session "__memcp_tx"))
-        (define forums (table "memcp-tests" "forum_hierarchy_forums"))
-        (define threads (table "memcp-tests" "forum_hierarchy_threads"))
-        (define posts (table "memcp-tests" "forum_hierarchy_posts"))
-        (define users (table "memcp-tests" "forum_hierarchy_users"))
+        (define forums (table "memcp-tests" false "forum_hierarchy_forums" false))
+        (define threads (table "memcp-tests" false "forum_hierarchy_threads" false))
+        (define posts (table "memcp-tests" false "forum_hierarchy_posts" false))
+        (define users (table "memcp-tests" false "forum_hierarchy_users" false))
         (define selected_heritage
           (scan tx forums (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("forumID") (scheme "(lambda (forumID) (equal? forumID 8))") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("forumID") (scheme "(lambda (forumID) (equal? forumID 8))") '()) 3 5)))) '("forumID") (lambda (forumID) (equal? forumID 8))
             '("heritage") (lambda (_old heritage) heritage)

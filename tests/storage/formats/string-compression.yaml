@@ -346,7 +346,7 @@ test_cases:
       - sql: "DROP TABLE IF EXISTS sc_compare"
       - sql: "CREATE TABLE sc_compare (id INT, val TEXT)"
       - scm: |
-          (insert (table "memcp-tests" "sc_compare") '("id" "val")
+          (insert (table "memcp-tests" false "sc_compare" false) '("id" "val")
             (map (produceN 4096) (lambda (i)
               (list i (concat "abcdef0123456789abcdef0123456789" (string i))))))
       - scm: "(rebuild)"
@@ -451,7 +451,7 @@ test_cases:
       - sql: "DROP TABLE IF EXISTS sc_b64perf"
       - sql: "CREATE TABLE sc_b64perf (id INT, val TEXT, stamp TEXT)"
       - scm: |
-          (insert (table "memcp-tests" "sc_b64perf") '("id" "val" "stamp")
+          (insert (table "memcp-tests" false "sc_b64perf" false) '("id" "val" "stamp")
             (map (produceN 4096) (lambda (i)
               (list i (base64_encode (concat (string_repeat "x" 1024) (string i)))
                 (concat "2026-09-09T12:34:56." (string i) "+02:00")))))

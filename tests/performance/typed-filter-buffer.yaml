@@ -20,7 +20,7 @@ setup:
   - sql: "CREATE TABLE typed_filter_wide (c0 INT, c1 INT, c2 INT, c3 INT, c4 INT, c5 INT, c6 INT, c7 INT, c8 INT, c9 INT, c10 INT, c11 INT, c12 INT, c13 INT, c14 INT, c15 INT) ENGINE=sloppy"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "typed_filter_wide")
+        (insert (table "memcp-tests" false "typed_filter_wide" false)
           (map (produceN 16) (lambda (c) (concat "c" c)))
           (map (produceN 60000) (lambda (i)
             (map (produceN 16) (lambda (c) (+ (mod (* i i 7919) 60000) c))))))
@@ -29,7 +29,7 @@ setup:
   - sql: "CREATE TABLE typed_filter_buffer (a INT, b INT, c INT) ENGINE=sloppy"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "typed_filter_buffer")
+        (insert (table "memcp-tests" false "typed_filter_buffer" false)
           '("a" "b" "c")
           (map (produceN 60000) (lambda (i) (list i 2 3))))
         (rebuild))
@@ -53,7 +53,7 @@ test_cases:
     scm: |
       (begin
         (define access (eval (compile_scan_access '("c0") (scheme "(lambda (c0) (< c0 30000))"))))
-        (scan nil (table "memcp-tests" "typed_filter_wide") (car access) (cadr access)
+        (scan nil (table "memcp-tests" false "typed_filter_wide" false) (car access) (cadr access)
           '("c0" "c1" "c2" "c3" "c4" "c5" "c6" "c7" "c8" "c9" "c10" "c11" "c12" "c13" "c14" "c15") (lambda (c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15) (and (< c0 c1) (< c2 c3) (< c4 c5) (< c6 c7) (< c8 c9) (< c10 c11) (< c12 c13) (< c14 c15)))
           '() (lambda (acc) (+ acc 1)) 0 + false))
     expect: {result: 29508}
@@ -66,7 +66,7 @@ test_cases:
     scm: |
       (begin
         (define access (eval (compile_scan_access '("c0") (scheme "(lambda (c0) (< c0 1))"))))
-        (scan nil (table "memcp-tests" "typed_filter_wide") (car access) (cadr access)
+        (scan nil (table "memcp-tests" false "typed_filter_wide" false) (car access) (cadr access)
           '("c0" "c1" "c2" "c3" "c4" "c5" "c6" "c7" "c8" "c9" "c10" "c11" "c12" "c13" "c14" "c15") (lambda (c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15) (and (< c0 c1) (< c2 c3) (< c4 c5) (< c6 c7) (< c8 c9) (< c10 c11) (< c12 c13) (< c14 c15)))
           '() (lambda (acc) (+ acc 1)) 0 + false))
     expect: {result: 100}
@@ -79,7 +79,7 @@ test_cases:
     scm: |
       (begin
         (define access (eval (compile_scan_access '("c0") (scheme "(lambda (c0) (< c0 30000))"))))
-        (define selected (scan_recset nil (table "memcp-tests" "typed_filter_wide") (car access) (cadr access) '("c0") (lambda (c0) (< c0 30000))))
+        (define selected (scan_recset nil (table "memcp-tests" false "typed_filter_wide" false) (car access) (cadr access) '("c0") (lambda (c0) (< c0 30000))))
         (scan nil selected '() '()
           '("c0" "c1" "c2" "c3" "c4" "c5" "c6" "c7" "c8" "c9" "c10" "c11" "c12" "c13" "c14" "c15") (lambda (c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15) (and (< c0 c1) (< c2 c3) (< c4 c5) (< c6 c7) (< c8 c9) (< c10 c11) (< c12 c13) (< c14 c15)))
           '() (lambda (acc) (+ acc 1)) 0 + false))

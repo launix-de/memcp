@@ -51,9 +51,15 @@ func TableFromScmer(s scm.Scmer) *table {
 	return (*table)(s.Custom(TagTable))
 }
 
-// String implements serialization for table pointers: (table "schema" "name")
+// String implements serialization for table pointers: (table "schema" false "name" false)
 func (t *table) String() string {
-	return "(table \"" + t.schema.Name + "\" \"" + t.Name + "\")"
+	var name string
+	if published := t.publishedName.Load(); published != nil {
+		name = *published
+	} else {
+		name = t.Name // unpublished constructors own the fallback
+	}
+	return "(table " + strconv.Quote(t.schema.Name) + " false " + strconv.Quote(name) + " false)"
 }
 
 type dataset []scm.Scmer
@@ -663,7 +669,10 @@ type table struct {
 	// ownership protects it; it is never read by queries or INSERT. A nil map
 	// means a restored older schema has no complete history and ADD retains the
 	// conservative recovery path. New tables persist an empty, tracked map.
-	DroppedColumns      map[string]bool `json:"dropped_columns"`
+	DroppedColumns map[string]bool `json:"dropped_columns"`
+	// The name is initialized before table publication and replaced by RENAME
+	// under schema ownership. Metadata reads never race the mutable Name field.
+	publishedName       atomic.Pointer[string]
 	columnNamesSnapshot atomic.Pointer[tableColumnNamesSnapshot]
 	plannerStatsToken   atomic.Uint64 // process-unique dependency token for cached cost plans
 	// cacheGeneration changes whenever a reconstructible Cache-engine shard is
@@ -1637,6 +1646,10 @@ func (t *table) evict(mode evictionMode, currentSize int64, freedByType *[numEvi
 // Schema metadata belongs to the table, never to every referencing shard.
 func (t *table) metadataMemory() uint {
 	size := uint(unsafe.Sizeof(*t)) + uint(len(t.Name))
+	if t.publishedName.Load() != nil {
+		// The published descriptor shares Name's string payload.
+		size += uint(unsafe.Sizeof(""))
+	}
 	if locks := t.uniqueWrites.Load(); locks != nil {
 		size += uint(unsafe.Sizeof(*locks))
 	}
@@ -1992,6 +2005,12 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 }
 
 func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {
+	if t.publishedName.Load() == nil {
+		// The first column-directory publication belongs to the unpublished
+		// constructor/load. Later publications retain RENAME's immutable name.
+		name := t.Name
+		t.publishedName.CompareAndSwap(nil, &name)
+	}
 	exact := make(map[string]tableColumnName, len(t.Columns))
 	folded := make(map[string]tableColumnName, len(t.Columns))
 	for i, c := range t.Columns {
@@ -2006,6 +2025,7 @@ func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {
 }
 
 func (t *table) publishColumnNamesSnapshot() *tableColumnNamesSnapshot {
+
 	snapshot := t.buildColumnNamesSnapshot()
 	t.columnNamesSnapshot.Store(snapshot)
 	return snapshot

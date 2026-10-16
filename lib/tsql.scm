@@ -26,7 +26,7 @@ The stable scope retains gates, not requests, transactions or executable plans. 
 	(define database tsql_identifier) "." (define owner tsql_identifier) "." (define name tsql_identifier)
 ) (if (equal?? owner "dbo") (list database name) (error "unsupported alias owner: " owner))))
 (define tsql_read_type_alias (lambda (database name)
-	(scan nil (table "system" "tsql_types")
+	(scan nil (table "system" false "tsql_types" false)
 		(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false))
 		(list database) '("name") (lambda (candidate) (equal?? candidate name))
 		'("id" "name" "base_type" "dimensions" "nullable")
@@ -92,7 +92,7 @@ the common binder consumes the temporary callback before planning. */
 		(define native_dimensions (tsql_decl_dimensions native_type dimensions))
 		(if (has? '("TIMESTAMP" "ROWVERSION") native_type) (error "generated versions cannot be alias base types") true)
 		(if (tsql_find_type_alias database name nil) (error "alias type already exists: " name) true)
-		(insert (table "system" "tsql_types") '("database" "name" "base_type" "dimensions" "nullable")
+		(insert (table "system" false "tsql_types" false) '("database" "name" "base_type" "dimensions" "nullable")
 			(list (list database name native_type (json_encode native_dimensions) nullable)))
 		true)))))
 (define drop_sql_type_alias (lambda (database name ifexists tx)
@@ -105,7 +105,7 @@ the common binder consumes the temporary callback before planning. */
 			(define dependent (find (show database) (lambda (relation)
 				(find (show database relation) (lambda (column) (equal?? (column "RawType") qualified)))) nil))
 			(if dependent (error "alias type is used by table: " dependent) true)
-			(scan nil (table "system" "tsql_types")
+			(scan nil (table "system" false "tsql_types" false)
 				(list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false))
 				(list (alias "id")) '() (lambda () true) '("$update")
 				(lambda (count remove) (begin (remove) (+ count 1))) 0 +)
@@ -168,7 +168,7 @@ the common binder consumes the temporary callback before planning. */
 			'("column" column_name type dimensions attributes)
 			(list column_name type dimensions (tsql_publish_alias_attributes type attributes))))))
 		(reduce published_columns (lambda (_ column) (match column '(column_name type dimensions attributes)
-			(if (sql_create_column (table database name) column_name type dimensions
+			(if (sql_create_column (table database false name false) column_name type dimensions
 				(merge (sql_add_column_attributes attributes) '("name_ignorecase" true))) true
 				(error "column already exists: " column_name)))) true))))
 	(if (find columns (lambda (column) (has_assoc? (nth column 4) "__tsql_alias_id")))
@@ -767,7 +767,7 @@ Descriptor types below are frontend contracts, including for empty results. */
 		'() (if (empty_list? right) '() (error "foreign key declaration column count differs"))
 		_ (error "invalid foreign key column declaration"))))
 	(walk local remote 1))))
-(define tsql_metadata_constraints (lambda (schema name) (show (table schema name) "constraints")))
+(define tsql_metadata_constraints (lambda (schema name) (show (table schema false name false) "constraints")))
 (define tsql_metadata_key_name (lambda (key)
 	(if (equal? (key "constraint_name") "") (key "Id") (key "constraint_name"))))
 (define tsql_metadata_fk_rule (lambda (mode) (match mode "cascade" 0 "set null" 2 "set default" 3 _ 1)))
@@ -886,7 +886,7 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 			(if (nil? (options "table_name")) (error "sp_columns requires a table name") true)
 			(define rows (if (tsql_metadata_match "dbo" owner true)
 				(merge (map (tsql_metadata_table_names schema (options "table_name") true policy) (lambda (name) (begin
-					(define columns (filter (show (table schema name)) (lambda (column) (not (internal_column_name? (column "Field"))))))
+					(define columns (filter (show (table schema false name false)) (lambda (column) (not (internal_column_name? (column "Field"))))))
 					(map (filter (produceN (count columns)) (lambda (i)
 						(tsql_metadata_match ((nth columns i) "Field") (options "column_name") true)))
 						(lambda (i) (tsql_metadata_column_row schema name (nth columns i) (+ i 1) version))))))) '()))
@@ -900,7 +900,7 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 			(if (and (has? '("R" "V") kind) (has? '("C" "T" "S") scope) (has? '("O" "U") nullable)) true
 				(error "unsupported special-column option"))
 			(define rows (if (equal?? owner "dbo") (merge (map (tsql_metadata_table_names schema (options "table_name") false policy) (lambda (name) (begin
-				(define columns (show (table schema name)))
+				(define columns (show (table schema false name false)))
 				(define keys ((tsql_metadata_constraints schema name) "Unique"))
 				(define primary (find keys (lambda (key) (equal? (key "Id") "PRIMARY"))))
 				(define candidate (coalesceNil primary (find keys (lambda (key)
@@ -952,7 +952,7 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 					(define keys ((tsql_metadata_constraints schema name) "ForeignKeys"))
 					(merge (map (filter keys (lambda (key) (and (equal? (key "Role") "referencing")
 						(tsql_metadata_match (key "OtherTable") parent false)))) (lambda (key) (begin
-							(define referenced (table schema (key "OtherTable")))
+							(define referenced (table schema false (key "OtherTable") false))
 							(define candidate (if referenced (find ((show referenced "constraints") "Unique")
 								(lambda (unique) (equal? (unique "Cols") (key "OtherColumns")))) nil))
 							(tsql_metadata_foreign_columns (key "LocalColumns") (key "OtherColumns") (lambda (column other ordinal)

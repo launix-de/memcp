@@ -27,30 +27,30 @@ setup:
   - sql: "CREATE TABLE lookup_invalidation_driver (id INT PRIMARY KEY, source_id INT)"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "lookup_invalidation_source") '("id" "val")
+        (insert (table "memcp-tests" false "lookup_invalidation_source" false) '("id" "val")
           (map (produceN 8000) (lambda (i) (list (+ i 1) (+ i 10))))
           '() (lambda () true) false)
-        (insert (table "memcp-tests" "lookup_invalidation_driver") '("id" "source_id")
+        (insert (table "memcp-tests" false "lookup_invalidation_driver" false) '("id" "source_id")
           (map (produceN 8000) (lambda (i) (list (+ i 1) (+ i 1))))
           '() (lambda () true) false)
-        (rebuild (table "memcp-tests" "lookup_invalidation_source") true false)
-        (rebuild (table "memcp-tests" "lookup_invalidation_driver") true false))
+        (rebuild (table "memcp-tests" false "lookup_invalidation_source" false) true false)
+        (rebuild (table "memcp-tests" false "lookup_invalidation_driver" false) true false))
 
 test_cases:
   - name: "Build and warm the canonical lookup cache"
     scm: |
       (begin
         (createcolumn
-          (table "memcp-tests" "lookup_invalidation_driver")
+          (table "memcp-tests" false "lookup_invalidation_driver" false)
           ".lookup:value" "INT" '() '("temp" true)
           '("source_id")
           (lambda (source_id)
-            (scan nil (table "memcp-tests" "lookup_invalidation_source")
+            (scan nil (table "memcp-tests" false "lookup_invalidation_source" false)
               (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list source_id)
               '("id") (lambda (id) (equal? id (outer 1 source_id)))
               '("val") (lambda (acc val) val)
               0 (lambda (old value) value) false)))
-        (scan nil (table "memcp-tests" "lookup_invalidation_driver")
+        (scan nil (table "memcp-tests" false "lookup_invalidation_driver" false)
           (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5)))) '() (lambda () true)
           '(".lookup:value") (lambda (acc value) (+ acc value))
           0 + false))
@@ -77,7 +77,7 @@ test_cases:
       # Leave appended rows in delta: prepared proxies still cache their values,
       # and repeated preparation must not recount the complete retained map.
       - scm: |
-          (insert (table "memcp-tests" "lookup_accounting_driver") '("id")
+          (insert (table "memcp-tests" false "lookup_accounting_driver" false) '("id")
             (map (produceN 8000) (lambda (i) (list (+ i 1)))))
     cleanup:
       - sql: "DROP TABLE IF EXISTS lookup_accounting_driver"
@@ -90,11 +90,11 @@ test_cases:
     scm: |
       (!begin
         (define prepare (lambda ()
-          (createcolumn (table "memcp-tests" "lookup_accounting_driver")
+          (createcolumn (table "memcp-tests" false "lookup_accounting_driver" false)
             ".account:value" "INT" '() '("temp" true)
             '("id") (lambda (id) id))))
         (reduce (produceN 64) (lambda (acc i) (!begin (prepare) true)) true)
-        (scan nil (table "memcp-tests" "lookup_accounting_driver")
+        (scan nil (table "memcp-tests" false "lookup_accounting_driver" false)
           (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5))))
           (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5))))
           '() (lambda () true)

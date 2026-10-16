@@ -57,7 +57,7 @@ x-json-setup: &json_setup
                   "{\"sku\":\"sku-" (mod (+ i 2) 1024) "\",\"qty\":3}]}"))
               (list (+ i 1) (json_parse_bson text) text)))))
         (define inserted
-          (insert (table "{database}" "json_perf_documents")
+          (insert (table "{database}" false "json_perf_documents" false)
             '("id" "doc" "doc_text") rows))
         (rebuild)
         (define mem (memstats))

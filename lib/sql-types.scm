@@ -363,7 +363,7 @@ Derived columns already carry their producer's expression contract. */
 			(define src (source_for_alias sources
 				(if (empty_list? sources) nil (source_alias (car sources))) alias alias_ic))
 			(if (nil? src) nil (not (source_is_base_table? src)) nil (begin
-				(define handle (table (source_schema src) (source_relation src)))
+				(define handle (table (source_schema src) false (source_relation src) false))
 				(if (nil? handle) nil (show handle "column" column column_ic)))))
 		_ nil))
 	(define resolved (compiler info declaration))
@@ -603,7 +603,7 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 					(not (physical_helper_relation? (source_relation src)))
 					(not (equal?? (source_schema src) "information_schema")))
 					(begin
-						(define handle (table (source_schema src) (source_relation src)))
+						(define handle (table (source_schema src) false (source_relation src) false))
 						(define declaration (if handle (show handle "column" col col_ic) nil))
 						(list (source_schema src) (source_relation src)
 							(if declaration (declaration "Field") col)

@@ -20,7 +20,7 @@ evaluate to a one-argument callback. Runtime dispatch never reads this table. */
 (if (has? (show "system") "storage_failure_hooks") true (begin
 	(print "creating table system.storage_failure_hooks")
 	(eval (parse_sql "system" "CREATE TABLE storage_failure_hooks(name text, enabled boolean, classes text, cooldown_seconds int, source text, UNIQUE KEY uniq_name (name)) ENGINE=SAFE" (lambda (schema tblname write) true)))
-	(insert (table "system" "storage_failure_hooks")
+	(insert (table "system" false "storage_failure_hooks" false)
 		'("name" "enabled" "classes" "cooldown_seconds" "source")
 		(list
 			(list "syslog-process" false "*" 300
@@ -30,7 +30,7 @@ evaluate to a one-argument callback. Runtime dispatch never reads this table. */
 ))
 
 (define storage_failure_hook_rows (lambda ()
-	(scan nil (table "system" "storage_failure_hooks") '(369435906932736) '()
+	(scan nil (table "system" false "storage_failure_hooks" false) '(369435906932736) '()
 		'() (lambda () true)
 		'("name" "enabled" "classes" "cooldown_seconds" "source")
 		(lambda (rows name enabled classes cooldown_seconds source)
@@ -89,7 +89,7 @@ evaluate to a one-argument callback. Runtime dispatch never reads this table. */
 	(if enabled
 		(register_storage_failure_hook name classes cooldown_seconds callback)
 		true)
-	(define updated (scan nil (table "system" "storage_failure_hooks") '(369435906932736) '()
+	(define updated (scan nil (table "system" false "storage_failure_hooks" false) '(369435906932736) '()
 		'("name") (lambda (existing_name) (equal? existing_name name))
 		'("$update") (lambda (count $update) (begin
 			($update (list "enabled" enabled "classes" classes_text
@@ -97,7 +97,7 @@ evaluate to a one-argument callback. Runtime dispatch never reads this table. */
 			(+ count 1)))
 		0 +))
 	(if (equal? updated 0)
-		(insert (table "system" "storage_failure_hooks")
+		(insert (table "system" false "storage_failure_hooks" false)
 			'("name" "enabled" "classes" "cooldown_seconds" "source")
 			(list (list name enabled classes_text cooldown_seconds source)))
 		true)
@@ -106,7 +106,7 @@ evaluate to a one-argument callback. Runtime dispatch never reads this table. */
 )))
 
 (define storage_failure_hook_delete (lambda (name) (begin
-	(scan nil (table "system" "storage_failure_hooks") '(369435906932736) '()
+	(scan nil (table "system" false "storage_failure_hooks" false) '(369435906932736) '()
 		'("name") (lambda (existing_name) (equal? existing_name name))
 		'("$update") (lambda (count $update) (begin ($update) (+ count 1)))
 		0 +)

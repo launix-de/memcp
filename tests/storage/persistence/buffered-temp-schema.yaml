@@ -30,7 +30,7 @@ test_cases:
   - name: "Temporary column is published immediately"
     scm: &create_computed_column |
       (createcolumn
-        (table "memcp-tests" "buffered_schema_base")
+        (table "memcp-tests" false "buffered_schema_base" false)
         "cached_value" "int" '() '("temp" true)
         '("id") (lambda (id) (* id 2)))
 
@@ -47,7 +47,7 @@ test_cases:
   - name: "Temporary ordered column metadata is published immediately"
     scm: &create_ordered_column |
       (createcolumn
-        (table "memcp-tests" "buffered_schema_base")
+        (table "memcp-tests" false "buffered_schema_base" false)
         "ordered_position" "int" '()
         (list
           "temp" true
@@ -81,7 +81,7 @@ test_cases:
           (list "engine" "cache" "oninit"
             (lambda ()
               (insert
-                (table "memcp-tests" ".buffered_schema_cache")
+                (table "memcp-tests" false ".buffered_schema_cache" false)
                 (list "cache_key")
                 (list (list seed))
                 (list)
@@ -107,7 +107,7 @@ test_cases:
           (list "engine" "memory" "oninit"
             (lambda ()
               (insert
-                (table "memcp-tests" "buffered_schema_memory")
+                (table "memcp-tests" false "buffered_schema_memory" false)
                 (list "value")
                 (list (list seed))
                 (list)

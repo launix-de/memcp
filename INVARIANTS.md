@@ -1208,6 +1208,17 @@ stable phase ranges in a dedicated refactoring PR so review can distinguish
 behavior changes from relocation and A/B compile-time measurements remain
 meaningful.
 
+### Native table identifier binding
+
+All frontends and generated Scheme use the single native form
+`(table database database_ignorecase name name_ignorecase)`. The frontend
+supplies comparison policies; native lookup uses the existing exact catalog
+and its published folded-name index. Ambiguous folded bindings fail even when
+an exact spelling exists. Canonical spellings are available through
+`(show handle "name")`; no separate name resolver or catalog traversal is needed.
+The optimizer must not fold a table lookup into a retained handle: DROP/CREATE
+and RENAME can change the namespace binding of a cached expression.
+
 ### SQL compile-time type and collation ownership
 
 - SQL datatypes must NEVER be inherited from the SCM runtime type. The SQL

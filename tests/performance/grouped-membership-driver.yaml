@@ -14,20 +14,14 @@ setup:
 - sql: DROP TABLE IF EXISTS gd_tiny
 - sql: CREATE TABLE gd_tiny (k INT, quantity INT) ENGINE=memory
 - sql: INSERT INTO gd_tiny VALUES (1,400),(2,10),(NULL,400)
-- scm: (rebuild (table "memcp-tests" "gd_tiny") true false)
+- scm: (rebuild (table "memcp-tests" false "gd_tiny" false) true false)
 - sql: DROP TABLE IF EXISTS gd_customer
 - sql: DROP TABLE IF EXISTS gd_orders
 - sql: DROP TABLE IF EXISTS gd_lineitem
 - sql: CREATE TABLE gd_customer (c_custkey INT, c_name VARCHAR(32)) ENGINE=memory
 - sql: CREATE TABLE gd_orders (o_orderkey INT, o_custkey INT, o_totalprice INT) ENGINE=memory
 - sql: CREATE TABLE gd_lineitem (l_orderkey INT, l_quantity INT) ENGINE=memory
-- scm: "(begin\n (insert (table \"memcp-tests\" \"gd_customer\") '(\"c_custkey\" \"c_name\")\n  (map (produceN 128)\
-    \ (lambda (i) (list (+ 1 i) (concat \"customer\" (string (+ 1 i)))))))\n (insert (table \"memcp-tests\" \"gd_orders\"\
-    ) '(\"o_orderkey\" \"o_custkey\" \"o_totalprice\")\n  (map (produceN 1024) (lambda (i) (list (+ 1 i) (+ 1 (mod\
-    \ i 128)) (+ 1001 i)))))\n (insert (table \"memcp-tests\" \"gd_lineitem\") '(\"l_orderkey\" \"l_quantity\")\n\
-    \  (map (produceN 8192) (lambda (i) (list (+ 1 (mod i 1024)) (if (equal? (mod i 128) 0) 50 1)))))\n (rebuild\
-    \ (table \"memcp-tests\" \"gd_customer\") true false)\n (rebuild (table \"memcp-tests\" \"gd_orders\") true\
-    \ false)\n (rebuild (table \"memcp-tests\" \"gd_lineitem\") true false) true)"
+- scm: "(begin\n (insert (table \"memcp-tests\" false \"gd_customer\" false) '(\"c_custkey\" \"c_name\")\n  (map (produceN 128) (lambda (i) (list (+ 1 i) (concat \"customer\" (string (+ 1 i)))))))\n (insert (table \"memcp-tests\" false \"gd_orders\" false) '(\"o_orderkey\" \"o_custkey\" \"o_totalprice\")\n  (map (produceN 1024) (lambda (i) (list (+ 1 i) (+ 1 (mod i 128)) (+ 1001 i)))))\n (insert (table \"memcp-tests\" false \"gd_lineitem\" false) '(\"l_orderkey\" \"l_quantity\")\n  (map (produceN 8192) (lambda (i) (list (+ 1 (mod i 1024)) (if (equal? (mod i 128) 0) 50 1)))))\n (rebuild (table \"memcp-tests\" false \"gd_customer\" false) true false)\n (rebuild (table \"memcp-tests\" false \"gd_orders\" false) true false)\n (rebuild (table \"memcp-tests\" false \"gd_lineitem\" false) true false) true)"
 test_cases:
 - name: Grouped IN HAVING preserves outer aggregate
   sql: "SELECT c.c_name, c.c_custkey, o.o_orderkey, o.o_totalprice, SUM(l.l_quantity) AS quantity\nFROM gd_customer\

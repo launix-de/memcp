@@ -12,12 +12,12 @@ setup:
 - sql: CREATE TABLE qa_orders(o_orderkey INT, o_custkey INT, o_comment VARCHAR(64)) ENGINE=memory
 - scm: |-
     (begin
-     (insert (table "memcp-tests" "qa_customer") '("c_custkey") (map (produceN 512) (lambda (i) (list (+ i 1)))))
-     (insert (table "memcp-tests" "qa_orders") '("o_orderkey" "o_custkey" "o_comment")
+     (insert (table "memcp-tests" false "qa_customer" false) '("c_custkey") (map (produceN 512) (lambda (i) (list (+ i 1)))))
+     (insert (table "memcp-tests" false "qa_orders" false) '("o_orderkey" "o_custkey" "o_comment")
       (map (produceN 8192) (lambda (i) (list (if (equal? (mod i 17) 0) nil (+ i 1))
        (if (equal? (mod i 19) 0) nil (+ 1 (mod i 600)))
        (if (equal? (mod i 23) 0) nil (if (equal? (mod i 7) 0) "special pending requests" "ordinary"))))))
-     (insert (table "memcp-tests" "qa_customer") '("c_custkey") (list (list 1001) (list 1002))) true)
+     (insert (table "memcp-tests" false "qa_customer" false) '("c_custkey") (list (list 1001) (list 1002))) true)
 - sql: DROP TABLE IF EXISTS seq_null_values
 - sql: CREATE TABLE seq_null_values(id INT, v INT) ENGINE=memory
 - sql: INSERT INTO seq_null_values VALUES(1,1),(2,NULL),(3,2),(4,3),(5,NULL),(6,4),(7,-5),(8,NULL),(9,-4),(10,-3)
@@ -54,8 +54,7 @@ test_cases:
     data:
     - o_custkey: 3
 - name: Rebuild all regression tables
-  scm: (begin (rebuild (table "memcp-tests" "seq_null_values") true false) (rebuild (table "memcp-tests"
-    "qa_customer") true false) (rebuild (table "memcp-tests" "qa_orders") true false) true)
+  scm: (begin (rebuild (table "memcp-tests" false "seq_null_values" false) true false) (rebuild (table "memcp-tests" false "qa_customer" false) true false) (rebuild (table "memcp-tests" false "qa_orders" false) true false) true)
   expect:
     data:
     - true

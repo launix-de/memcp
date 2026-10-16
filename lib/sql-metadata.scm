@@ -559,6 +559,6 @@ relations are deliberately resolved by the single public get_schema dispatcher. 
 			table_source)))
 		(define tbl_resolved (scan-table-source tbl))
 		/* materialized subqueries produce list expressions — pass as-is; real tables get (table schema name) */
-		(define tbl_arg (if (string? tbl_resolved) (list 'table schema tbl_resolved) tbl_resolved))
+		(define tbl_arg (if (string? tbl_resolved) (list 'table schema false tbl_resolved false) tbl_resolved))
 		(merge (list scanfn '(session "__memcp_tx") tbl_arg) rest))
 ))))

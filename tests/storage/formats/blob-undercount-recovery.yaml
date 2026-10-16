@@ -10,8 +10,8 @@ setup:
   - sql: "CREATE TABLE blob_owner_b (id INT, payload TEXT)"
   - sql: "INSERT INTO blob_owner_a VALUES (1, REPEAT('A', 6000)), (2, REPEAT('B', 6000)), (3, REPEAT('C', 6000))"
   - sql: "INSERT INTO blob_owner_b SELECT * FROM blob_owner_a"
-  - scm: '(rebuild (table "memcp-tests" "blob_owner_a") true false)'
-  - scm: '(rebuild (table "memcp-tests" "blob_owner_b") true false)'
+  - scm: '(rebuild (table "memcp-tests" false "blob_owner_a" false) true false)'
+  - scm: '(rebuild (table "memcp-tests" false "blob_owner_b" false) true false)'
 test_cases:
   - name: "Explicit inventory reports shared blob references without missing files"
     scm: |

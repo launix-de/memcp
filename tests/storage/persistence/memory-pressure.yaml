@@ -14,7 +14,7 @@ setup:
 
 test_cases:
   - name: "MP: persist the scan lifetime fixture"
-    scm: '(rebuild (table "memcp-tests" "mp_scan_lifetime") true false)'
+    scm: '(rebuild (table "memcp-tests" false "mp_scan_lifetime" false) true false)'
 
   # A table-lock wait pauses scan_exists after column preparation and before
   # index access. The normal cache budget forces the same eviction as external
@@ -30,7 +30,7 @@ test_cases:
             (define access (eval (compile_scan_access '("mandant" "standort") predicate)))
             (with_autocommit session (req "__session_state") (req "__query_seq") "mp prepared EXISTS"
               (lambda (tx)
-                (scan_exists tx (table "memcp-tests" "mp_scan_lifetime")
+                (scan_exists tx (table "memcp-tests" false "mp_scan_lifetime" false)
                   (car access) (cadr access) '("mandant" "standort") (eval predicate)))))
         background: true
         timeout: 15
@@ -76,7 +76,7 @@ test_cases:
       (begin
         (define predicate (scheme "(lambda (id) (if (equal?? id 1) (error \"expected scan failure\") false))"))
         (define access (eval (compile_scan_access '("id") predicate)))
-        (scan_exists nil (table "memcp-tests" "mp_scan_lifetime")
+        (scan_exists nil (table "memcp-tests" false "mp_scan_lifetime" false)
           (car access) (cadr access) '("id") (eval predicate)))
     expect:
       error: true
@@ -110,7 +110,7 @@ test_cases:
               (sha256 (concat "s6:" i))
               (sha256 (concat "s7:" i))
               (sha256 (concat "s8:" i)))))
-        (insert (table "memcp-tests" "mp_pressure") '("id" "a" "b" "c" "d" "e" "f")
+        (insert (table "memcp-tests" false "mp_pressure" false) '("id" "a" "b" "c" "d" "e" "f")
           (parallelN 4001 (lambda (i) (list i
             (imod (* i 54321) 999983)
             (imod (* i 12347) 999979)
@@ -262,7 +262,7 @@ test_cases:
   - name: "MP: create temp computed column"
     scm: |
       (begin
-        (createcolumn (table "memcp-tests" "mp_pressure") "tmp_sum" "any" '() '("temp" true)
+        (createcolumn (table "memcp-tests" false "mp_pressure" false) "tmp_sum" "any" '() '("temp" true)
           '("a" "b") (lambda (a b) (+ a b)))
         "ok")
     expect: {}

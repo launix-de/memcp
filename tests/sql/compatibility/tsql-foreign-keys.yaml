@@ -269,7 +269,7 @@ test_cases:
     contains: drop the foreign key constraint
   noncritical: true
 - name: Native candidate-key removal protects strict references
-  scm: (dropkey (table "memcp-tests" "tsql_fk_parent") "PRIMARY")
+  scm: (dropkey (table "memcp-tests" false "tsql_fk_parent" false) "PRIMARY")
   expect:
     error: true
     contains: drop the foreign key constraint
@@ -320,7 +320,7 @@ test_cases:
     error: true
     contains: foreign key constraint
   cleanup:
-  - scm: (dropforeignkey (table "memcp-tests" "tsql_fk_checked_insert") "FK_checked_insert")
+  - scm: (dropforeignkey (table "memcp-tests" false "tsql_fk_checked_insert" false) "FK_checked_insert")
   - sql: DROP TABLE IF EXISTS dbo.tsql_fk_checked_insert
   - sql: DROP TABLE IF EXISTS dbo.tsql_fk_checked_parent
   noncritical: true
@@ -331,11 +331,11 @@ test_cases:
   setup:
   - sql: CREATE TABLE dbo.tsql_fk_enforcement_parent ([First] INT,[Second] INT,PRIMARY KEY([First],[Second]))
   - scm: |
-      (if (find ((show (table "memcp-tests" "tsql_fk_alter") "constraints") "ForeignKeys")
+      (if (find ((show (table "memcp-tests" false "tsql_fk_alter" false) "constraints") "ForeignKeys")
             (lambda (key) (equal? (key "Id") "FK_alter_parent")))
         true
-        (createforeignkey (table "memcp-tests" "tsql_fk_alter") "FK_alter_parent" '("a" "b")
-          (table "memcp-tests" "tsql_fk_enforcement_parent") '("First" "Second") "restrict" "restrict"))
+        (createforeignkey (table "memcp-tests" false "tsql_fk_alter" false) "FK_alter_parent" '("a" "b")
+          (table "memcp-tests" false "tsql_fk_enforcement_parent" false) '("First" "Second") "restrict" "restrict"))
   sql: INSERT dbo.tsql_fk_alter VALUES (1,7,70)
   expect:
     error: true

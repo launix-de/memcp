@@ -69,67 +69,67 @@ setup:
   - sql: "CREATE TABLE so_perf_org_players (org_id INT, player_id INT) ENGINE=memory"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "so_perf_plots") '("id" "created_at")
+        (insert (table "memcp-tests" false "so_perf_plots" false) '("id" "created_at")
           (map (produceN 120000) (lambda (i)
             (list (+ i 1) i))))
-        (insert (table "memcp-tests" "so_perf_plot_links") '("plot_id" "table_2_id")
+        (insert (table "memcp-tests" false "so_perf_plot_links" false) '("plot_id" "table_2_id")
           (map (produceN 120000) (lambda (i)
             (list (+ i 1) (if (equal? i 0) "target" "noise")))))
-        (insert (table "memcp-tests" "so_perf_bars") '("id" "baz_id")
+        (insert (table "memcp-tests" false "so_perf_bars" false) '("id" "baz_id")
           (map (produceN 8192) (lambda (i)
             (list (+ i 1) (if (< i 16) 13266 (+ i 20000))))))
-        (insert (table "memcp-tests" "so_perf_foos") '("id" "bar_id")
+        (insert (table "memcp-tests" false "so_perf_foos" false) '("id" "bar_id")
           (map (produceN 120000) (lambda (i)
             (list (+ i 1) (if (< i 160) (+ 1 (floor (/ i 10))) 17)))))
-        (insert (table "memcp-tests" "so_perf_products") '("id" "unique_id" "project_1")
+        (insert (table "memcp-tests" false "so_perf_products" false) '("id" "unique_id" "project_1")
           (map (produceN 20000) (lambda (i)
             (list (+ i 1) (concat "product-" (string (+ i 1)))
               (if (>= i 19000) 1 0)))))
-        (insert (table "memcp-tests" "so_perf_images") '("id" "product_unique_id")
+        (insert (table "memcp-tests" false "so_perf_images" false) '("id" "product_unique_id")
           (map (produceN 120000) (lambda (i)
             (list (+ i 1) (concat "product-" (string (+ 1 (mod i 20000))))))))
-        (insert (table "memcp-tests" "so_perf_accounts") '("id" "project_id")
+        (insert (table "memcp-tests" false "so_perf_accounts" false) '("id" "project_id")
           (map (produceN 5000) (lambda (i)
             (list (+ i 1) (if (< i 50) 7 8)))))
-        (insert (table "memcp-tests" "so_perf_transactions") '("id" "account_id" "amount" "created_at")
+        (insert (table "memcp-tests" false "so_perf_transactions" false) '("id" "account_id" "amount" "created_at")
           (map (produceN 120000) (lambda (i)
             (list (+ i 1) (+ 1 (mod i 5000)) 1.25 i))))
-        (insert (table "memcp-tests" "so_perf_search") '("id" "body" "updated_at")
+        (insert (table "memcp-tests" false "so_perf_search" false) '("id" "body" "updated_at")
           (map (produceN 120000) (lambda (i)
             (list (+ i 1) (if (equal? (mod i 1000) 0)
               "prefix-key_middle-suffix" "unrelated text") i))))
-        (insert (table "memcp-tests" "so_perf_a") '("apk")
+        (insert (table "memcp-tests" false "so_perf_a" false) '("apk")
           (map (produceN 10000) (lambda (i) (list (+ i 1)))))
-        (insert (table "memcp-tests" "so_perf_b") '("bpk" "ak")
+        (insert (table "memcp-tests" false "so_perf_b" false) '("bpk" "ak")
           (map (produceN 30000) (lambda (i)
             (list (+ i 1) (+ 1 (mod i 10000))))))
-        (insert (table "memcp-tests" "so_perf_c") '("bk")
+        (insert (table "memcp-tests" false "so_perf_c" false) '("bk")
           (map (produceN 30000) (lambda (i) (list (+ i 1)))))
-        (insert (table "memcp-tests" "so_perf_d") '("bk")
+        (insert (table "memcp-tests" false "so_perf_d" false) '("bk")
           (map (produceN 30000) (lambda (i) (list (+ i 1)))))
-        (insert (table "memcp-tests" "so_perf_nodes") '("id" "serial")
+        (insert (table "memcp-tests" false "so_perf_nodes" false) '("id" "serial")
           (map (produceN 10) (lambda (i)
             (list (+ i 1) (if (equal? i 0) "TEST0000003" (concat "node-" i))))))
-        (insert (table "memcp-tests" "so_perf_sensors") '("id" "type")
+        (insert (table "memcp-tests" false "so_perf_sensors" false) '("id" "type")
           (map (produceN 100) (lambda (i)
             (list (+ i 1) (if (equal? i 99) "ca1" "other")))))
-        (insert (table "memcp-tests" "so_perf_measures") '("id" "node_id" "sensor_id" "ts" "val")
+        (insert (table "memcp-tests" false "so_perf_measures" false) '("id" "node_id" "sensor_id" "ts" "val")
           (map (produceN 120000) (lambda (i)
             (list (+ i 1) 1 (+ 1 (mod i 99)) i (mod i 1000)))))
-        (insert (table "memcp-tests" "so_perf_t1") '("pid" "otherpid" "col1")
+        (insert (table "memcp-tests" false "so_perf_t1" false) '("pid" "otherpid" "col1")
           (map (produceN 120000) (lambda (i) (list (+ i 1) nil (+ i 1)))))
-        (insert (table "memcp-tests" "so_perf_t2") '("pid")
+        (insert (table "memcp-tests" false "so_perf_t2" false) '("pid")
           (map (produceN 30000) (lambda (i) (list (+ i 1)))))
-        (insert (table "memcp-tests" "so_perf_t3") '("pid")
+        (insert (table "memcp-tests" false "so_perf_t3" false) '("pid")
           (map (produceN 30000) (lambda (i) (list (+ i 30001)))))
-        (insert (table "memcp-tests" "so_perf_players") '("player_id" "business_name" "first_name" "last_name")
+        (insert (table "memcp-tests" false "so_perf_players" false) '("player_id" "business_name" "first_name" "last_name")
           (map (produceN 10000) (lambda (i)
             (list (+ i 1) (concat "business-" i) (concat "first-" i) (concat "last-" i)))))
-        (insert (table "memcp-tests" "so_perf_performance") '("player_id" "hashed_player_id" "fps_score" "year")
+        (insert (table "memcp-tests" false "so_perf_performance" false) '("player_id" "hashed_player_id" "fps_score" "year")
           (map (produceN 70000) (lambda (i)
             (list (+ 1 (mod i 10000)) (concat "hash-" (string (+ 1 (mod i 10000))))
               (mod i 100) (+ 2007 (* 3 (floor (/ i 10000))))))))
-        (insert (table "memcp-tests" "so_perf_org_players") '("org_id" "player_id")
+        (insert (table "memcp-tests" false "so_perf_org_players" false) '("org_id" "player_id")
           (map (produceN 10000) (lambda (i)
             (list (if (< i 6000) 1 99) (+ i 1)))))
         (rebuild)
@@ -150,8 +150,8 @@ test_cases:
   - name: "SO 50367835 handwritten scan_join_order"
     scm: |
       (begin
-        (define plots (table "memcp-tests" "so_perf_plots"))
-        (define links (table "memcp-tests" "so_perf_plot_links"))
+        (define plots (table "memcp-tests" false "so_perf_plots" false))
+        (define links (table "memcp-tests" false "so_perf_plot_links" false))
         (define found
           (scan_join_order (session "__memcp_tx")
             (list plots links)
@@ -180,8 +180,8 @@ test_cases:
   - name: "SO 6037843 handwritten scan_join_order"
     scm: |
       (begin
-        (define foos (table "memcp-tests" "so_perf_foos"))
-        (define bars (table "memcp-tests" "so_perf_bars"))
+        (define foos (table "memcp-tests" false "so_perf_foos" false))
+        (define bars (table "memcp-tests" false "so_perf_bars" false))
         (define found
           (scan_join_order (session "__memcp_tx")
             (list foos bars)
@@ -214,8 +214,8 @@ test_cases:
     scm: |
       (begin
         (define tx (session "__memcp_tx"))
-        (define images (table "memcp-tests" "so_perf_images"))
-        (define products (table "memcp-tests" "so_perf_products"))
+        (define images (table "memcp-tests" false "so_perf_images" false))
+        (define products (table "memcp-tests" false "so_perf_products" false))
         (define selected_products
           (scan_recset tx products (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))") '()) 3 5)))) '("project_1")
             (lambda (project_1) (equal? project_1 1))))
@@ -233,8 +233,8 @@ test_cases:
     scm: |
       (begin
         (define tx (session "__memcp_tx"))
-        (define images (table "memcp-tests" "so_perf_images"))
-        (define products (table "memcp-tests" "so_perf_products"))
+        (define images (table "memcp-tests" false "so_perf_images" false))
+        (define products (table "memcp-tests" false "so_perf_products" false))
         (define selected_products
           (scan_recset tx products (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))") '()) 3 5)))) '("project_1")
             (lambda (project_1) (equal? project_1 1))))
@@ -249,8 +249,8 @@ test_cases:
   - name: "SO 73024688 handwritten scan_join_order"
     scm: |
       (begin
-        (define images (table "memcp-tests" "so_perf_images"))
-        (define products (table "memcp-tests" "so_perf_products"))
+        (define images (table "memcp-tests" false "so_perf_images" false))
+        (define products (table "memcp-tests" false "so_perf_products" false))
         (define found
           (scan_join_order (session "__memcp_tx")
             (list images products)
@@ -273,8 +273,8 @@ test_cases:
     scm: |
       (begin
         (define tx (session "__memcp_tx"))
-        (define accounts (table "memcp-tests" "so_perf_accounts"))
-        (define transactions (table "memcp-tests" "so_perf_transactions"))
+        (define accounts (table "memcp-tests" false "so_perf_accounts" false))
+        (define transactions (table "memcp-tests" false "so_perf_transactions" false))
         (define selected_accounts
           (scan_recset tx accounts (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("project_id") (scheme "(lambda (project_id) (equal? project_id 7))") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("project_id") (scheme "(lambda (project_id) (equal? project_id 7))") '()) 3 5)))) '("project_id")
             (lambda (project_id) (equal? project_id 7))))
@@ -309,10 +309,10 @@ test_cases:
   - name: "SO 79644544 handwritten four-way scan_join_order"
     scm: |
       (begin
-        (define a (table "memcp-tests" "so_perf_a"))
-        (define b (table "memcp-tests" "so_perf_b"))
-        (define c (table "memcp-tests" "so_perf_c"))
-        (define d (table "memcp-tests" "so_perf_d"))
+        (define a (table "memcp-tests" false "so_perf_a" false))
+        (define b (table "memcp-tests" false "so_perf_b" false))
+        (define c (table "memcp-tests" false "so_perf_c" false))
+        (define d (table "memcp-tests" false "so_perf_d" false))
         (define minimum
           (scan_join_order (session "__memcp_tx")
             (list a b c d)
@@ -333,10 +333,10 @@ test_cases:
     scm: |
       (begin
         (define tx (session "__memcp_tx"))
-        (define a (table "memcp-tests" "so_perf_a"))
-        (define b (table "memcp-tests" "so_perf_b"))
-        (define c (table "memcp-tests" "so_perf_c"))
-        (define d (table "memcp-tests" "so_perf_d"))
+        (define a (table "memcp-tests" false "so_perf_a" false))
+        (define b (table "memcp-tests" false "so_perf_b" false))
+        (define c (table "memcp-tests" false "so_perf_c" false))
+        (define d (table "memcp-tests" false "so_perf_d" false))
         (define minimum
           (scan_order_batch_accept tx a
             '(369435906932736) '() (lambda (a_batch)
@@ -368,9 +368,9 @@ test_cases:
   - name: "SO 79550978 handwritten scan_join_order"
     scm: |
       (begin
-        (define measures (table "memcp-tests" "so_perf_measures"))
-        (define nodes (table "memcp-tests" "so_perf_nodes"))
-        (define sensors (table "memcp-tests" "so_perf_sensors"))
+        (define measures (table "memcp-tests" false "so_perf_measures" false))
+        (define nodes (table "memcp-tests" false "so_perf_nodes" false))
+        (define sensors (table "memcp-tests" false "so_perf_sensors" false))
         (define found
           (scan_join_order (session "__memcp_tx")
             (list measures nodes sensors)
@@ -393,9 +393,9 @@ test_cases:
     scm: |
       (begin
         (define tx (session "__memcp_tx"))
-        (define nodes (table "memcp-tests" "so_perf_nodes"))
-        (define sensors (table "memcp-tests" "so_perf_sensors"))
-        (define measures (table "memcp-tests" "so_perf_measures"))
+        (define nodes (table "memcp-tests" false "so_perf_nodes" false))
+        (define sensors (table "memcp-tests" false "so_perf_sensors" false))
+        (define measures (table "memcp-tests" false "so_perf_measures" false))
         (define selected_nodes
           (scan_recset tx nodes (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("serial") (scheme "(lambda (serial) (equal? serial \"TEST0000003\"))") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("serial") (scheme "(lambda (serial) (equal? serial \"TEST0000003\"))") '()) 3 5)))) '("serial")
             (lambda (serial) (equal? serial "TEST0000003"))))
@@ -432,9 +432,9 @@ test_cases:
     scm: |
       (begin
         (define tx (session "__memcp_tx"))
-        (define t1 (table "memcp-tests" "so_perf_t1"))
-        (define t2 (table "memcp-tests" "so_perf_t2"))
-        (define t3 (table "memcp-tests" "so_perf_t3"))
+        (define t1 (table "memcp-tests" false "so_perf_t1" false))
+        (define t2 (table "memcp-tests" false "so_perf_t2" false))
+        (define t3 (table "memcp-tests" false "so_perf_t3" false))
         (define all_t1 (scan_recset tx t1 (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5)))) '() (lambda () true)))
         (define nonnull_t2
           (scan_recset tx t2 (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("pid") (scheme "(lambda (pid) (not (nil? pid)))") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("pid") (scheme "(lambda (pid) (not (nil? pid)))") '()) 3 5)))) '("pid") (lambda (pid) (not (nil? pid)))))
@@ -465,9 +465,9 @@ test_cases:
     scm: |
       (begin
         (define tx (session "__memcp_tx"))
-        (define org_players (table "memcp-tests" "so_perf_org_players"))
-        (define performance (table "memcp-tests" "so_perf_performance"))
-        (define players (table "memcp-tests" "so_perf_players"))
+        (define org_players (table "memcp-tests" false "so_perf_org_players" false))
+        (define performance (table "memcp-tests" false "so_perf_performance" false))
+        (define players (table "memcp-tests" false "so_perf_players" false))
         (define selected_org
           (scan_recset tx org_players (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("org_id") (scheme "(lambda (org_id) (equal? org_id 1))") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("org_id") (scheme "(lambda (org_id) (equal? org_id 1))") '()) 3 5)))) '("org_id")
             (lambda (org_id) (equal? org_id 1))))

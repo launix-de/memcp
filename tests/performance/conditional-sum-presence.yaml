@@ -16,11 +16,11 @@ setup:
 - sql: CREATE TABLE csp_access (user_id INT, tenant_id INT) ENGINE=memory
 - scm: |-
     (begin
-     (insert (table "memcp-tests" "csp_user") '("ID")
+     (insert (table "memcp-tests" false "csp_user" false) '("ID")
       (map (produceN 1000) (lambda (i) (list (+ i 1)))))
-     (insert (table "memcp-tests" "csp_tenant") '("ID" "multiStandort" "multiAbteilung" "multiPruefung")
+     (insert (table "memcp-tests" false "csp_tenant" false) '("ID" "multiStandort" "multiAbteilung" "multiPruefung")
       (map (produceN 20) (lambda (i) (list (+ i 1) true true true))))
-     (insert (table "memcp-tests" "csp_access") '("user_id" "tenant_id")
+     (insert (table "memcp-tests" false "csp_access" false) '("user_id" "tenant_id")
       (map (produceN 20000) (lambda (i) (list (+ (floor (/ i 20)) 1) (+ (mod i 20) 1))))))
 test_cases:
 - name: conditional_sum_presence_cold_plus_ten_reuses

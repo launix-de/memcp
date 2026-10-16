@@ -1085,7 +1085,7 @@ projection and BIND layers already surface as an unbound variable. */
 ))
 (define rdf_relation_targets (lambda (schema subj pred) (begin
 	(define out (newsession))
-	(scan nil (table schema "rdf") (list 369436443803648 (scan_boundary "equal" "p" 0 0 true true "" false) (scan_boundary "equal" "s" 1 1 true true "" false)) (list pred subj) '() (lambda () true) '("o") (lambda (acc o) (begin (out o true) acc)))
+	(scan nil (table schema false "rdf" false) (list 369436443803648 (scan_boundary "equal" "p" 0 0 true true "" false) (scan_boundary "equal" "s" 1 1 true true "" false)) (list pred subj) '() (lambda () true) '("o") (lambda (acc o) (begin (out o true) acc)))
 	(out)
 )))
 (define rdf_path_targets (lambda (schema start pred include_self) (begin
@@ -1139,7 +1139,7 @@ projection and BIND layers already surface as an unbound variable. */
 		/* Avoid replaying idempotent DDL on every RDF read. Besides being wasted
 		work, concurrent CREATE IF NOT EXISTS requests can publish a fresh table
 		generation while a point/index plan is being compiled. */
-		(if (table schema "rdf") true
+		(if (table schema false "rdf" false) true
 			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf (s TEXT, p TEXT, o TEXT, UNIQUE KEY rdf_spo (s, p, o))" (lambda (schema tblname write) true))))
 		(define info (show schema "rdf" true))
 		(define unique_keys ((info "meta") "Unique"))
@@ -1153,14 +1153,14 @@ projection and BIND layers already surface as an unbound variable. */
 				/* Old RDF tables predate set semantics. Remove only duplicate physical
 				rows before installing the key; the first occurrence remains untouched. */
 				(define seen (newsession))
-				(scan nil (table schema "rdf") '() '() '() (lambda () true)
+				(scan nil (table schema false "rdf" false) '() '() '() (lambda () true)
 					'("s" "p" "o" "$update")
 					(lambda (acc s p o $update) (begin
 						(define identity (json_encode (list s p o)))
 						(if (seen identity) ($update) (seen identity true))
 						acc)))
-				(createkey (table schema "rdf") "rdf_spo" true '("s" "p" "o"))))
-		(define rdf_table (table schema "rdf"))
+				(createkey (table schema false "rdf" false) "rdf_spo" true '("s" "p" "o"))))
+		(define rdf_table (table schema false "rdf" false))
 		/* Key the one-time migration by the table handle rather than the schema
 		name, so DROP/CREATE receives a fresh migration pass in the same process. */
 		(rdf_table_migrations "get_or_compute_scoped" rdf_table "legacy-type-predicate"
@@ -1169,9 +1169,9 @@ projection and BIND layers already surface as an unbound variable. */
 ))
 (define rdf_ensure_named_table (lambda (schema)
 	(begin
-		(if (table schema "rdf_named") true
+		(if (table schema false "rdf_named" false) true
 			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf_named (g TEXT, s TEXT, p TEXT, o TEXT, UNIQUE KEY rdf_gspo (g, s, p, o))" (lambda (schema tblname write) true))))
-		(if (table schema "rdf_graphs") true
+		(if (table schema false "rdf_graphs" false) true
 			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf_graphs (g TEXT, UNIQUE KEY rdf_graph_name (g))" (lambda (schema tblname write) true)))))
 ))
 (define rdf_graph_exists (lambda (schema graph)
@@ -1179,7 +1179,7 @@ projection and BIND layers already surface as an unbound variable. */
 		(rdf_ensure_named_table schema)
 		(define found (newsession))
 		(found "value" false)
-		(scan nil (table schema "rdf_graphs")
+		(scan nil (table schema false "rdf_graphs" false)
 			(list 369436175368192 (scan_boundary "equal" "g" 0 0 true true "" false))
 			(list graph) '() (lambda () true) '("g")
 			(lambda (acc _g) (begin (found "value" true) acc)))
@@ -1189,7 +1189,7 @@ projection and BIND layers already surface as an unbound variable. */
 	(begin
 		(rdf_ensure_named_table schema)
 		(if (rdf_graph_exists schema graph) nil
-			(insert (table schema "rdf_graphs") '("g") (list (list graph)) '() (lambda () true))))
+			(insert (table schema false "rdf_graphs" false) '("g") (list (list graph)) '() (lambda () true))))
 ))
 (define rdf_create_graph_entry (lambda (schema graph silent)
 	(if (rdf_graph_exists schema graph)
@@ -1199,7 +1199,7 @@ projection and BIND layers already surface as an unbound variable. */
 (define rdf_unregister_graph (lambda (schema graph)
 	(begin
 		(rdf_ensure_named_table schema)
-		(scan nil (table schema "rdf_graphs")
+		(scan nil (table schema false "rdf_graphs" false)
 			(list 369436175368192 (scan_boundary "equal" "g" 0 0 true true "" false))
 			(list graph) '() (lambda () true) '("$update")
 			(lambda (acc $update) (begin ($update) acc)))
@@ -1208,12 +1208,12 @@ projection and BIND layers already surface as an unbound variable. */
 (define rdf_insert_triples (lambda (schema triples)
 	(if (equal? triples '())
 		nil
-		(insert (table schema "rdf") '("s" "p" "o") triples '() (lambda () true))
+		(insert (table schema false "rdf" false) '("s" "p" "o") triples '() (lambda () true))
 	)
 ))
 (define rdf_delete_triples (lambda (schema triples) (begin
 	(map triples (lambda (triple) (match triple '(subj pred obj)
-		(scan nil (table schema "rdf") (list 369436712239104 (scan_boundary "equal" "o" 0 0 true true "" false) (scan_boundary "equal" "p" 1 1 true true "" false) (scan_boundary "equal" "s" 2 2 true true "" false)) (list obj pred subj) '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update) acc)))
+		(scan nil (table schema false "rdf" false) (list 369436712239104 (scan_boundary "equal" "o" 0 0 true true "" false) (scan_boundary "equal" "p" 1 1 true true "" false) (scan_boundary "equal" "s" 2 2 true true "" false)) (list obj pred subj) '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update) acc)))
 	)))
 	nil
 )))
@@ -1222,23 +1222,23 @@ projection and BIND layers already surface as an unbound variable. */
 		(rdf_ensure_named_table schema)
 		(rdf_register_graph schema graph)
 		(if (equal? triples '()) nil
-			(insert (table schema "rdf_named") '("g" "s" "p" "o")
+			(insert (table schema false "rdf_named" false) '("g" "s" "p" "o")
 				(map triples (lambda (triple) (cons graph triple))) '() (lambda () true))))
 ))
 (define rdf_clear_default_data (lambda (schema)
 	(begin
 		(rdf_ensure_table schema)
-		(scan nil (table schema "rdf") '() '() '() (lambda () true) '("$update")
+		(scan nil (table schema false "rdf" false) '() '() '() (lambda () true) '("$update")
 			(lambda (acc $update) (begin ($update) acc)))
 		nil)
 ))
 (define rdf_clear_all_named_data (lambda (schema drop_graphs)
 	(begin
 		(rdf_ensure_named_table schema)
-		(scan nil (table schema "rdf_named") '() '() '() (lambda () true) '("$update")
+		(scan nil (table schema false "rdf_named" false) '() '() '() (lambda () true) '("$update")
 			(lambda (acc $update) (begin ($update) acc)))
 		(if drop_graphs
-			(scan nil (table schema "rdf_graphs") '() '() '() (lambda () true) '("$update")
+			(scan nil (table schema false "rdf_graphs" false) '() '() '() (lambda () true) '("$update")
 				(lambda (acc $update) (begin ($update) acc))) nil)
 		nil)
 ))
@@ -1250,13 +1250,13 @@ projection and BIND layers already surface as an unbound variable. */
 		(if (equal? graph "__rdf_default_graph__")
 			(begin
 				(rdf_ensure_table schema)
-				(scan nil (table schema "rdf") '() '() '() (lambda () true) '("s" "p" "o")
+				(scan nil (table schema false "rdf" false) '() '() '() (lambda () true) '("s" "p" "o")
 					(lambda (acc s p o) (begin
 						(rows (count_state "n") (list s p o))
 						(count_state "n" (+ (count_state "n") 1)) acc))))
 			(begin
 				(rdf_ensure_named_table schema)
-				(scan nil (table schema "rdf_named")
+				(scan nil (table schema false "rdf_named" false)
 					(list 369436175368192 (scan_boundary "equal" "g" 0 0 true true "" false))
 					(list graph) '() (lambda () true) '("s" "p" "o")
 					(lambda (acc s p o) (begin
@@ -1292,7 +1292,7 @@ projection and BIND layers already surface as an unbound variable. */
 	(begin
 		(rdf_ensure_named_table schema)
 		(map triples (lambda (triple) (match triple '(subj pred obj)
-			(scan nil (table schema "rdf_named")
+			(scan nil (table schema false "rdf_named" false)
 				(list 369436980674560
 					(scan_boundary "equal" "o" 0 0 true true "" false)
 					(scan_boundary "equal" "p" 1 1 true true "" false)
@@ -1305,7 +1305,7 @@ projection and BIND layers already surface as an unbound variable. */
 (define rdf_clear_graph_data (lambda (schema graph)
 	(begin
 		(rdf_ensure_named_table schema)
-		(scan nil (table schema "rdf_named")
+		(scan nil (table schema false "rdf_named" false)
 			(list 369436175368192 (scan_boundary "equal" "g" 0 0 true true "" false))
 			(list graph) '() (lambda () true) '("$update")
 			(lambda (acc $update) (begin ($update) acc)))

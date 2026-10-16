@@ -292,11 +292,11 @@ test_cases:
       - sql: "CREATE TABLE nc_recmap_target (id INT, value INT)"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "nc_recmap_driver") '("id" "middle_id")
+            (insert (table "memcp-tests" false "nc_recmap_driver" false) '("id" "middle_id")
               (map (produceN 200) (lambda (i) (list i (mod i 50)))))
-            (insert (table "memcp-tests" "nc_recmap_middle") '("id" "target_id")
+            (insert (table "memcp-tests" false "nc_recmap_middle" false) '("id" "target_id")
               (map (produceN 50) (lambda (i) (list i i))))
-            (insert (table "memcp-tests" "nc_recmap_target") '("id" "value")
+            (insert (table "memcp-tests" false "nc_recmap_target" false) '("id" "value")
               (map (produceN 50) (lambda (i) (list i 4))))
             (rebuild))
     sql: |
@@ -331,11 +331,11 @@ test_cases:
       - sql: "CREATE TABLE nc_projection_target (id INT, value VARCHAR(20))"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "nc_projection_driver") '("id" "middle_id")
+            (insert (table "memcp-tests" false "nc_projection_driver" false) '("id" "middle_id")
               (map (produceN 200) (lambda (i) (list i (mod i 50)))))
-            (insert (table "memcp-tests" "nc_projection_middle") '("id" "target_id")
+            (insert (table "memcp-tests" false "nc_projection_middle" false) '("id" "target_id")
               (map (produceN 50) (lambda (i) (list i i))))
-            (insert (table "memcp-tests" "nc_projection_target") '("id" "value")
+            (insert (table "memcp-tests" false "nc_projection_target" false) '("id" "value")
               (map (produceN 50) (lambda (i) (list i (if (>= i 45) "4" "(")))))
             (rebuild))
     sql: |

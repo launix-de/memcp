@@ -36,8 +36,8 @@ setup:
         (1, 1, 10, 1),
         (2, 1, 20, 5),
         (3, 2, 10, 9)
-  - scm: '(rebuild (table "memcp-tests" "u3_main") true true)'
-  - scm: '(rebuild (table "memcp-tests" "u3_dyn") true true)'
+  - scm: '(rebuild (table "memcp-tests" false "u3_main" false) true true)'
+  - scm: '(rebuild (table "memcp-tests" false "u3_dyn" false) true true)'
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS u3_dyn"
@@ -46,7 +46,7 @@ cleanup:
 test_cases:
   - name: "legacy system-table scan shape stays accepted"
     scm: |
-      (scan nil (table "system" "user")
+      (scan nil (table "system" false "user" false)
         (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)
         '("username") (lambda (acc u) u)
         "" (lambda (a b) b))

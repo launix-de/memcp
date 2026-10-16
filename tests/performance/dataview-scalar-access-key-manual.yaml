@@ -34,17 +34,17 @@ setup:
   - sql: "CREATE TABLE dataview_abo (id INT PRIMARY KEY, user_id INT, beneficiary INT, abo_type INT, KEY dataview_abo_user (abo_type, user_id), KEY dataview_abo_beneficiary (abo_type, beneficiary)) ENGINE=memory"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "dataview_product") '("id" "selling_id" "abo_type")
+        (insert (table "memcp-tests" false "dataview_product" false) '("id" "selling_id" "abo_type")
           (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ (mod i 4) 1)))))
-        (insert (table "memcp-tests" "dataview_selling") '("id" "old_key" "sold_at" "total")
+        (insert (table "memcp-tests" false "dataview_selling" false) '("id" "old_key" "sold_at" "total")
           (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1) (* (+ i 1) 10)))))
-        (insert (table "memcp-tests" "dataview_conversion") '("id" "selling_id" "user_id")
+        (insert (table "memcp-tests" false "dataview_conversion" false) '("id" "selling_id" "user_id")
           (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1)))))
-        (insert (table "memcp-tests" "dataview_import_user") '("id" "vu_id" "customer_id")
+        (insert (table "memcp-tests" false "dataview_import_user" false) '("id" "vu_id" "customer_id")
           (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1)))))
-        (insert (table "memcp-tests" "dataview_customer") '("id" "description")
+        (insert (table "memcp-tests" false "dataview_customer" false) '("id" "description")
           (map (produceN 20000) (lambda (i) (list (+ i 1) (concat "Customer " i)))))
-        (insert (table "memcp-tests" "dataview_abo") '("id" "user_id" "beneficiary" "abo_type")
+        (insert (table "memcp-tests" false "dataview_abo" false) '("id" "user_id" "beneficiary" "abo_type")
           (map (produceN 20000) (lambda (i)
             (list (+ i 1) (+ i 1) (+ i 1) (+ (mod i 4) 1)))))
         (rebuild)
