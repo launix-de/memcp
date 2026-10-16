@@ -600,6 +600,15 @@ test_cases:
 - name: Alias INSERT SELECT stored ordinary values
   sql: SELECT number,label FROM dbo.ddl_alias_values WHERE id=11
   expect: {rows: 1, data: [{number: 7, label: text}]}
+- name: Alias window ordering uses native columns after contract compilation
+  sql: SELECT id,ROW_NUMBER() OVER(ORDER BY number,id) AS rn FROM dbo.ddl_alias_values ORDER BY id
+  expect: {rows: 3, data: [{id: 1, rn: 1}, {id: 2, rn: 2}, {id: 11, rn: 3}]}
+- name: Alias window lag retains the numeric argument contract
+  sql: SELECT id,LAG(number) OVER(ORDER BY id)+1 AS value FROM dbo.ddl_alias_values ORDER BY id
+  expect: {rows: 3, data: [{id: 1, value: null}, {id: 2, value: 7}, {id: 11, value: 8}]}
+- name: Alias window lead retains the character argument contract
+  sql: SELECT id,LEAD(label) OVER(ORDER BY id)+N'!' AS value FROM dbo.ddl_alias_values ORDER BY id
+  expect: {rows: 3, data: [{id: 1, value: '12345678!'}, {id: 2, value: 'text!'}, {id: 11, value: null}]}
 - name: In-use text alias cannot be dropped
   sql: DROP TYPE dbo.ddl_alias_text
   expect: {error: true}

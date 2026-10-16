@@ -4052,7 +4052,15 @@ coercion and collations do not have the same ordering proof. */
 		_ expr)))
 
 (define order_column_for_alias (lambda (src expr)
+	/* Window specifications contain lists of expressions below their syntax
+	node. Consume frontend contracts with the source still available, just as
+	window aggregates do, before requiring an existing native column. */
 	(match expr
+		((symbol sql_type_expr) formula _type _collation) (order_column_for_alias src formula)
+		((symbol sql_compile_column) _compiler _expression)
+		(order_column_for_alias src (sql_type_formula (list src) expr))
+		(cons (symbol sql_compile_expr) _arguments)
+		(order_column_for_alias src (sql_type_formula (list src) expr))
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
 			(resolve_physical_column_name src col col_ignorecase)
 			(neumann_fail "build_queryplan" "ORDER BY references a different source"))
