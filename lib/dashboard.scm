@@ -304,16 +304,17 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 					(define uniques (if (nil? raw_uniques) nil (filter raw_uniques (lambda (u) (not (nil? u))))))
 					(define unique_items (if (or (nil? uniques) (equal? (count uniques) 0)) "[]"
 						(dashboard_json_array (map uniques (lambda (u)
-							(json_encode_assoc (list
-								"id" (u "Id") "name" (if (equal? (u "constraint_name") "") (u "Id") (u "constraint_name"))
-								"cols" (u "Cols") "nulls_not_distinct" (u "nulls_not_distinct")))
+							(concat "{\"id\":" (json_encode (u "Id"))
+								",\"name\":" (json_encode (if (equal? (u "constraint_name") "") (u "Id") (u "constraint_name")))
+								",\"cols\":" (json_encode (u "Cols"))
+								",\"nulls_not_distinct\":" (json_encode (u "nulls_not_distinct")) "}")
 						)))
 					))
 					(define foreign_items (dashboard_json_array (map (constraints "ForeignKeys") (lambda (fk)
-						(json_encode_assoc (list
-							"id" (fk "Id") "role" (fk "Role")
-							"cols" (fk "LocalColumns") "other_table" (fk "OtherTable") "other_cols" (fk "OtherColumns")
-							"on_update" (fk "UpdateMode") "on_delete" (fk "DeleteMode")))))))
+						(concat "{\"id\":" (json_encode (fk "Id")) ",\"role\":" (json_encode (fk "Role"))
+							",\"cols\":" (json_encode (fk "LocalColumns")) ",\"other_table\":" (json_encode (fk "OtherTable"))
+							",\"other_cols\":" (json_encode (fk "OtherColumns"))
+							",\"on_update\":" (json_encode (fk "UpdateMode")) ",\"on_delete\":" (json_encode (fk "DeleteMode")) "}")))))
 					/* partition schema */
 					(define raw_partitions (meta "Partitions"))
 					(define partitions (if (nil? raw_partitions) nil (filter raw_partitions (lambda (p) (not (nil? p))))))

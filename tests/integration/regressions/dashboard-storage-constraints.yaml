@@ -14,6 +14,9 @@ setup:
     REFERENCES dash_storage_parent (id) ON DELETE CASCADE ON UPDATE RESTRICT)
 - sql: INSERT INTO dash_storage_parent VALUES (1)
 - sql: INSERT INTO dash_storage_child VALUES (1,1,10)
+- sql: DROP TABLE IF EXISTS dash_storage_composite
+- sql: CREATE TABLE dash_storage_composite (tenant INT, id INT, a INT, b INT,
+    PRIMARY KEY (tenant,id), UNIQUE KEY uq_dash_pair (a,b), UNIQUE KEY uq_dash_single (a))
 - sql: DROP TABLE IF EXISTS dash_storage_metadata
 - sql: CREATE TABLE dash_storage_metadata (id INT PRIMARY KEY, payload TEXT) ENGINE=MEMORY
 - scm: |
@@ -68,6 +71,8 @@ test_cases:
       (define unique (car (filter (meta "uniques") (lambda (u) (equal? (u "id") "uq`code")))))
       (define fk (car (meta "foreign_keys")))
       (if (and (equal? (unique "name") "uq`code") (equal? (fk "id") "fk`parent")
+        (equal? (unique "cols") '("code")) (equal? (fk "cols") '("parent_id"))
+        (equal? (fk "other_cols") '("id"))
         (equal? (fk "role") "referencing") (equal? (fk "other_table") "dash_storage_parent")
         (equal? (fk "on_delete") "cascade") (equal? (fk "on_update") "restrict")
         (equal? (data "size_bytes") (+ (data "data_size_bytes") (data "index_size_bytes")))) true
@@ -84,6 +89,19 @@ test_cases:
       (define fk (car ((data "meta") "foreign_keys")))
       (if (and (equal? (fk "role") "referenced") (equal? (fk "other_table") "dash_storage_child")) true
         (error "incoming foreign key has wrong owner")))
+- name: Composite primary and unique keys retain every ordered column
+  scm: |-
+    (begin
+      (define response (newsession))
+      (http_handler
+        (list "path" "/dashboard/api/db/memcp-tests/dash_storage_composite" "username" "root" "password" "admin" "__session" (newsession))
+        (list "header" (lambda (name value) true) "status" (lambda (code) (response "status" code))
+          "print" (lambda (body) (response "body" body))))
+      (define keys (((json_decode (response "body")) "meta") "uniques"))
+      (define columns (lambda (name) ((car (filter keys (lambda (key) (equal? (key "id") name)))) "cols")))
+      (if (and (equal? (count keys) 3) (equal? (columns "PRIMARY") '("tenant" "id"))
+        (equal? (columns "uq_dash_pair") '("a" "b")) (equal? (columns "uq_dash_single") '("a"))) true
+        (error "dashboard lost composite constraint columns")))
 - name: Duplicate values fail before dropping unique constraint
   sql: INSERT INTO dash_storage_child VALUES (2,1,10)
   expect:
@@ -123,6 +141,7 @@ test_cases:
       (define data (json_decode (response "body")))
       (if (empty_list? ((data "meta") "uniques")) true (error "primary key remained visible")))
 cleanup:
+- sql: DROP TABLE IF EXISTS dash_storage_composite
 - sql: DROP TABLE IF EXISTS dash_storage_metadata
 - sql: DROP TABLE IF EXISTS dash_storage_child
 - sql: DROP TABLE IF EXISTS dash_storage_parent
