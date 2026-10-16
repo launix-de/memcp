@@ -2267,8 +2267,9 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(? tsql_index_location)
 	) (lambda () (begin
 			(if policy (policy (coalesce schema2 schema) name true) true)
-			(define columns (tsql_table_primary_columns (map columns (lambda (column)
-				(tsql_prepare_column (coalesce schema2 schema) column)))))
+			/* Explicit PRIMARY KEY policy precedes inherited alias nullability. */
+			(define columns (map (tsql_table_primary_columns columns) (lambda (column)
+				(tsql_prepare_column (coalesce schema2 schema) column))))
 			(list (quote tsql_create_relation) (coalesce schema2 schema) name
 				(cons (quote list) (map columns tsql_identity_native_column))
 				(tsql_identity_table_options columns) (if ifnotexists true false) (quote tx))))))

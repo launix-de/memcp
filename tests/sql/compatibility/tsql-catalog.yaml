@@ -537,6 +537,19 @@ test_cases:
   sql: CREATE TYPE dbo.ddl_alias_number FROM SMALLINT NOT NULL
 - name: Text alias inherits its declared national width
   sql: CREATE TYPE dbo.ddl_alias_text FROM NVARCHAR(8) NULL
+- name: Table PRIMARY KEY overrides inherited alias nullability
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.ddl_alias_primary
+  - sql: CREATE TABLE dbo.ddl_alias_primary(value dbo.ddl_alias_text,PRIMARY KEY(value))
+  scm: (not ((show (table "memcp-tests" "ddl_alias_primary") "column" "value" false) "Null"))
+  expect: {result: true}
+  cleanup:
+  - sql: DROP TABLE dbo.ddl_alias_primary
+- name: Explicit NULL remains invalid for an alias PRIMARY KEY
+  sql: CREATE TABLE dbo.ddl_alias_primary(value dbo.ddl_alias_text NULL,PRIMARY KEY(value))
+  expect: {error: true}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS dbo.ddl_alias_primary
 - name: Alias defaults and explicit nullability share native columns
   sql: CREATE TABLE dbo.ddl_alias_values(id INT PRIMARY KEY, number dbo.ddl_alias_number DEFAULT (2+3), label dbo.ddl_alias_text DEFAULT N'text')
 - name: Native metadata preserves the original qualified alias
@@ -628,4 +641,22 @@ test_cases:
   sql: DROP TABLE dbo.ddl_alias_values
 - name: Remove numeric alias fixture
   sql: DROP TYPE dbo.ddl_alias_number
+- name: Decimal alias rounding uses frontend scale conversion
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.ddl_alias_decimal
+  - sql: DROP TYPE IF EXISTS dbo.ddl_alias_decimal_type
+  - sql: CREATE TYPE dbo.ddl_alias_decimal_type FROM NUMERIC(6,2)
+  - sql: CREATE TABLE dbo.ddl_alias_decimal(value dbo.ddl_alias_decimal_type)
+  - sql: INSERT dbo.ddl_alias_decimal VALUES(123.456)
+  sql: SELECT value FROM dbo.ddl_alias_decimal
+  expect: {rows: 1, data: [{value: 123.46}]}
+- name: Decimal alias rejects overflow caused by rounding
+  sql: INSERT dbo.ddl_alias_decimal VALUES(9999.995)
+  expect: {error: true}
+- name: Rejected decimal alias insertion leaves native rows unchanged
+  sql: SELECT value FROM dbo.ddl_alias_decimal
+  expect: {rows: 1, data: [{value: 123.46}]}
+  cleanup:
+  - sql: DROP TABLE dbo.ddl_alias_decimal
+  - sql: DROP TYPE dbo.ddl_alias_decimal_type
 cleanup: []
