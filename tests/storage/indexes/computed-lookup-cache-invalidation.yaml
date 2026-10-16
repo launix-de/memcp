@@ -33,12 +33,12 @@ test_cases:
   - name: "Create the first canonical lookup cache"
     scm: |
       (createcolumn
-        (table "memcp-tests" "lookup_cache_file")
+        (table "memcp-tests" false "lookup_cache_file" false)
         ".lookup:folder_stamp" "INT" '() '("temp" true)
         '("folder_id")
         (lambda (folder_id)
           (scan nil
-            (table "memcp-tests" "lookup_cache_folder")
+            (table "memcp-tests" false "lookup_cache_folder" false)
             (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list folder_id)
             '("id") (lambda (id) (equal? id (outer 1 folder_id)))
             '("stamp") (lambda (acc stamp) stamp)
@@ -47,12 +47,12 @@ test_cases:
   - name: "Create a fused lookup cache reading multiple source columns"
     scm: |
       (createcolumn
-        (table "memcp-tests" "lookup_cache_file")
+        (table "memcp-tests" false "lookup_cache_file" false)
         ".lookup:folder_pair" "INT" '() '("temp" true)
         '("folder_id")
         (lambda (folder_id)
           (scan nil
-            (table "memcp-tests" "lookup_cache_folder")
+            (table "memcp-tests" false "lookup_cache_folder" false)
             (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list folder_id)
             '("id") (lambda (id) (equal? id (outer 1 folder_id)))
             '("stamp" "label_code") (lambda (acc stamp label_code) (+ stamp label_code))
@@ -61,12 +61,12 @@ test_cases:
   - name: "Create a lookup cache depending on another lookup cache"
     scm: |
       (createcolumn
-        (table "memcp-tests" "lookup_cache_document")
+        (table "memcp-tests" false "lookup_cache_document" false)
         ".lookup:file_folder_stamp" "INT" '() '("temp" true)
         '("file_id")
         (lambda (file_id)
           (scan nil
-            (table "memcp-tests" "lookup_cache_file")
+            (table "memcp-tests" false "lookup_cache_file" false)
             (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list file_id)
             '("id") (lambda (id) (equal? id (outer 1 file_id)))
             '(".lookup:folder_stamp") (lambda (acc folder_stamp) folder_stamp)
@@ -75,12 +75,12 @@ test_cases:
   - name: "Create a nested cache from the fused lookup output"
     scm: |
       (createcolumn
-        (table "memcp-tests" "lookup_cache_document")
+        (table "memcp-tests" false "lookup_cache_document" false)
         ".lookup:file_folder_pair" "INT" '() '("temp" true)
         '("file_id")
         (lambda (file_id)
           (scan nil
-            (table "memcp-tests" "lookup_cache_file")
+            (table "memcp-tests" false "lookup_cache_file" false)
             (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list file_id)
             '("id") (lambda (id) (equal? id (outer 1 file_id)))
             '(".lookup:folder_pair") (lambda (acc folder_pair) folder_pair)

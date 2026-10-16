@@ -30,7 +30,7 @@ setup:
       ) ENGINE=safe
   - scm: |
       (begin
-        (insert (table "memcp-tests" "mcr_entry") '("id" "bucket" "amount" "state")
+        (insert (table "memcp-tests" false "mcr_entry" false) '("id" "bucket" "amount" "state")
           (map (produceN 35) (lambda (i)
             (list (+ i 1) (mod i 4) (* (+ i 1) 10) "original"))))
         (rebuild)
@@ -114,7 +114,7 @@ test_cases:
           total_amount: 6345
 
   - name: "Rebuild recovered main and delta shards"
-    scm: '(rebuild (table "memcp-tests" "mcr_entry") true true)'
+    scm: '(rebuild (table "memcp-tests" false "mcr_entry" false) true true)'
 
   - name: "Publish rebuilt recovery generation"
     sql: "SHUTDOWN"

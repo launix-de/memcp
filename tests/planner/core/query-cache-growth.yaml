@@ -21,7 +21,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS cg_decl_contract"
   - sql: "CREATE TABLE cg_rows (id INT PRIMARY KEY, label TEXT)"
   - sql: "INSERT INTO cg_rows VALUES (1, 'needle-a'), (2, 'needle-b'), (3, 'other-a'), (4, 'other-b')"
-  - scm: "(rebuild (table \"memcp-tests\" \"cg_rows\") true false)"
+  - scm: "(rebuild (table \"memcp-tests\" false \"cg_rows\" false) true false)"
 test_cases:
   - name: Literal IN arrays share one shape across lengths and whitespace
     scm: |-
@@ -328,9 +328,9 @@ test_cases:
         (define entry (car (cache (car (cache)))))
         (define first_variants (count (entry "variants")))
         (define first_guard (car (car (entry "variants"))))
-        (insert (table "memcp-tests" "cg_rows") '("id" "label")
+        (insert (table "memcp-tests" false "cg_rows" false) '("id" "label")
           (map (produceN 4096) (lambda (i) (list (+ i 10) (concat "other-" i)))))
-        (rebuild (table "memcp-tests" "cg_rows") true false)
+        (rebuild (table "memcp-tests" false "cg_rows" false) true false)
         (define guard_after_growth
           ((sql_queryplan_compile_formula nil first_guard)
             sess nil (lambda (_row) nil) (lambda (_fields) nil)))
@@ -364,9 +364,9 @@ test_cases:
         (define entry (car (cache (car (cache)))))
         (define first_variants (count (entry "variants")))
         (define first_guard (car (car (entry "variants"))))
-        (insert (table "memcp-tests" "cg_rows") '("id" "label")
+        (insert (table "memcp-tests" false "cg_rows" false) '("id" "label")
           (map (produceN 4096) (lambda (i) (list (+ i 10000) (concat "other-" i)))))
-        (rebuild (table "memcp-tests" "cg_rows") true false)
+        (rebuild (table "memcp-tests" false "cg_rows" false) true false)
         (define guard_after_growth
           ((sql_queryplan_compile_formula nil first_guard)
             sess nil (lambda (_row) nil) (lambda (_fields) nil)))
@@ -578,7 +578,7 @@ test_cases:
     setup:
       - sql: "DROP TABLE IF EXISTS cg_dml_rows"
       - sql: "CREATE TABLE cg_dml_rows (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
-      - scm: '(rebuild (table "memcp-tests" "cg_dml_rows") true false)'
+      - scm: '(rebuild (table "memcp-tests" false "cg_dml_rows" false) true false)'
     scm: |
       (begin
         (define sess (newsession))
@@ -607,9 +607,9 @@ test_cases:
       - sql: "CREATE TABLE cg_dml_rows (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "cg_dml_rows") '("id" "col")
+            (insert (table "memcp-tests" false "cg_dml_rows" false) '("id" "col")
               (map (produceN 500) (lambda (i) (list i (* i 2)))))
-            (rebuild (table "memcp-tests" "cg_dml_rows") true false)
+            (rebuild (table "memcp-tests" false "cg_dml_rows" false) true false)
             true)
     scm: |
       (begin
@@ -646,9 +646,9 @@ test_cases:
       - sql: "CREATE TABLE cg_dml_rows (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "cg_dml_rows") '("id" "col")
+            (insert (table "memcp-tests" false "cg_dml_rows" false) '("id" "col")
               (map (produceN 250) (lambda (i) (list i i))))
-            (rebuild (table "memcp-tests" "cg_dml_rows") true false)
+            (rebuild (table "memcp-tests" false "cg_dml_rows" false) true false)
             true)
     scm: |
       (begin
@@ -733,10 +733,10 @@ test_cases:
         (eval (parse_tsql "memcp-tests" "INSERT INTO cg_decl_contract VALUES (1,N'old')" nil (newsession) nil))
         (define cache (newcachemap)) (define sess (newsession))
         (define parser (lambda (schema text policy planning tx) (begin
-          (define dimensions ((nth (show (table schema "cg_decl_contract")) 1) "Dimensions"))
+          (define dimensions ((nth (show (table schema false "cg_decl_contract" false)) 1) "Dimensions"))
           (planner_record_guard_condition
             (list (quote expression_equal?)
-              (list (quote get_assoc) (list (quote nth) (list (quote show) (list (quote table) schema "cg_decl_contract")) 1) "Dimensions")
+              (list (quote get_assoc) (list (quote nth) (list (quote show) (list (quote table) schema false "cg_decl_contract" false)) 1) "Dimensions")
               (list (quote quote) dimensions)) planning)
           (parse_tsql schema text policy planning tx))))
         (define execute (lambda () (sql_execute_formula sess nil
@@ -744,9 +744,9 @@ test_cases:
             "UPDATE cg_decl_contract SET value=N'longer' WHERE id=1" nil "root" sess false nil)
           (lambda (_row) nil) (lambda (_fields) nil))))
         (execute)
-        (altercolumn (table "memcp-tests" "cg_decl_contract") "value" "dimensions" '(8))
+        (altercolumn (table "memcp-tests" false "cg_decl_contract" false) "value" "dimensions" '(8))
         (execute)
-        (define value (scan_lookup nil (table "memcp-tests" "cg_decl_contract")
+        (define value (scan_lookup nil (table "memcp-tests" false "cg_decl_contract" false)
           (list 372734710317056 (scan_boundary "equal" "id" 0 0 true true "" false) "value") '(1)))
         (droptable "memcp-tests" "cg_decl_contract" true)
         (equal? value "longer"))

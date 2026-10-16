@@ -193,7 +193,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(define psql_setval_command (lambda (seq_name val is_called)
 		(match (replace seq_name "\"" "")
 			(regex "^[^.]+\\.(.*)_(.*?)_seq\\z" _ tbl col)
-			'((quote altercolumn) '((quote table) schema tbl) col "auto_increment"
+			'((quote altercolumn) '((quote table) schema false tbl false) col "auto_increment"
 				'((quote if) is_called
 					val
 					'((quote if) '((quote >) val 1) '((quote -) val 1) 1)))
@@ -844,7 +844,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(set updaterows2 (if (nil? updaterows3) nil (merge updaterows3)))
 			(set updatecols (if (nil? updaterows3) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
-			'('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
+			'('insert '('table (coalesce schema2 schema) false tbl false) (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
 				(if (or do_nothing (and ignoreexists (nil? updaterows3)))
 					'((quote lambda) '() 0)
 					(if ignoreexists '('lambda '() true) (if (nil? updaterows3) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
@@ -883,7 +883,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
 			'('begin
-				'('set 'resultrow '('lambda '('item) '('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))) false '('lambda '('id) '('session "last_insert_id" 'id)))))
+				'('set 'resultrow '('lambda '('item) '('insert '('table (coalesce schema2 schema) false tbl false) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))) false '('lambda '('id) '('session "last_insert_id" 'id)))))
 				(build_queryplan_term (sql_expand_views inner policy) planning_session tx)
 			)
 	)))
@@ -979,13 +979,13 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(define id (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier))
 		(define alters (+ (or
 			/* TODO */
-			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ psql_identifier ",")) ")") (lambda (tbl) '('createkey '('table schema tbl) "PRIMARY" true (cons (quote list) cols) '(session "__memcp_tx"))))
+			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ psql_identifier ",")) ")") (lambda (tbl) '('createkey '('table schema false tbl false) "PRIMARY" true (cons (quote list) cols) '(session "__memcp_tx"))))
 			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define key psql_identifier)) (atom "UNIQUE" true)
 				(define equalnulls psql_unique_null_policy) "(" (define cols (+ psql_identifier ",")) ")")
-				(lambda (tbl) (list (quote createkey) (list (quote table) schema tbl)
+				(lambda (tbl) (list (quote createkey) (list (quote table) schema false tbl false)
 					(coalesce key (reduce cols (lambda (a b) (concat a "_" b)) tbl)) true
 					(cons (quote list) cols) '(session "__memcp_tx") (list (quote list) "nulls_not_distinct" equalnulls))))
-			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ psql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) "(" (define cols2 (+ psql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode psql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode psql_foreign_key_mode))) (lambda (tbl) '('createforeignkey '('table schema tbl) id (cons (quote list) cols1) '('table schema tbl2) (cons (quote list) cols2) updatemode deletemode)))
+			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ psql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) "(" (define cols2 (+ psql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode psql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode psql_foreign_key_mode))) (lambda (tbl) '('createforeignkey '('table schema false tbl false) id (cons (quote list) cols1) '('table schema false tbl2 false) (cons (quote list) cols2) updatemode deletemode)))
 			/*
 			(parser '((atom "ADD" true) (atom "UNIQUE" true) (atom "KEY" true) (define id psql_identifier) "(" (define cols (+ psql_identifier ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
 			(parser '((atom "ADD" true) (atom "KEY" true) psql_identifier "(" (+ psql_identifier ",") ")" (? (atom "USING" true) (atom "BTREE" true))) nil) /* ignore index definitions */
@@ -998,25 +998,25 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					(parser empty '((quote list)))
 				))
 				(define typeparams psql_column_attributes)
-			) (lambda (id) '((quote createcolumn) '('table schema id) col type dimensions (cons 'list (sql_add_column_attributes typeparams)))))
+			) (lambda (id) '((quote createcolumn) '('table schema false id false) col type dimensions (cons 'list (sql_add_column_attributes typeparams)))))
 			(parser '((atom "OWNER" true) (atom "TO" true) (define owner psql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define cname psql_identifier)) (lambda (id) true))
-			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col psql_identifier)) (lambda (id) '((quote altertable) '('table schema id) "drop" col)))
-			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) '('table schema id) "engine" "memory")))
-			(parser '((atom "ENGINE" true) "=" (atom "CACHE" true)) (lambda (id) '((quote altertable) '('table schema id) "engine" "cache")))
-			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) '('table schema id) "engine" "sloppy")))
-			(parser '((atom "ENGINE" true) "=" (atom "LOGGING" true)) (lambda (id) '((quote altertable) '('table schema id) "engine" "logged")))
-			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) (lambda (id) '((quote altertable) '('table schema id) "engine" "safe")))
-			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) (lambda (id) '((quote altertable) '('table schema id) "engine" "safe")))
-			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) (lambda (id) '((quote altertable) '('table schema id) "engine" "safe")))
-			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) '('table schema id) "collation" collation)))
-			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) '('table schema id) "auto_increment" ai)))
+			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col psql_identifier)) (lambda (id) '((quote altertable) '('table schema false id false) "drop" col)))
+			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) '('table schema false id false) "engine" "memory")))
+			(parser '((atom "ENGINE" true) "=" (atom "CACHE" true)) (lambda (id) '((quote altertable) '('table schema false id false) "engine" "cache")))
+			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) '('table schema false id false) "engine" "sloppy")))
+			(parser '((atom "ENGINE" true) "=" (atom "LOGGING" true)) (lambda (id) '((quote altertable) '('table schema false id false) "engine" "logged")))
+			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) (lambda (id) '((quote altertable) '('table schema false id false) "engine" "safe")))
+			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) (lambda (id) '((quote altertable) '('table schema false id false) "engine" "safe")))
+			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) (lambda (id) '((quote altertable) '('table schema false id false) "engine" "safe")))
+			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) '('table schema false id false) "collation" collation)))
+			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) '('table schema false id false) "auto_increment" ai)))
 			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col psql_identifier) (define body (or /* ALTER COLUMN */
 				/* Type and default changes */
-				(parser '((atom "TYPE" true) (define type psql_identifier) (define dimensions (or (parser '("(" (define a psql_int) "," (define b psql_int) ")") '((quote list) a b)) (parser '("(" (define a psql_int) ")") '((quote list) a)) (parser empty '((quote list))))) ) (lambda (col) (lambda (id) '('!begin '((quote altercolumn) '('table schema id) col "type" type) '((quote altercolumn) '('table schema id) col "dimensions" dimensions)))))
-				(parser '((atom "SET" true) (atom "DEFAULT" true) (define def psql_expression)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema id) col "default" def))))
-				(parser '((atom "DROP" true) (atom "DEFAULT" true)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema id) col "default" nil))))
-				(parser '((atom "COLLATE" true) (define coll psql_identifier)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema id) col "collation" coll))))
+				(parser '((atom "TYPE" true) (define type psql_identifier) (define dimensions (or (parser '("(" (define a psql_int) "," (define b psql_int) ")") '((quote list) a b)) (parser '("(" (define a psql_int) ")") '((quote list) a)) (parser empty '((quote list))))) ) (lambda (col) (lambda (id) '('!begin '((quote altercolumn) '('table schema false id false) col "type" type) '((quote altercolumn) '('table schema false id false) col "dimensions" dimensions)))))
+				(parser '((atom "SET" true) (atom "DEFAULT" true) (define def psql_expression)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false) col "default" def))))
+				(parser '((atom "DROP" true) (atom "DEFAULT" true)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false) col "default" nil))))
+				(parser '((atom "COLLATE" true) (define coll psql_identifier)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false) col "collation" coll))))
 			))) (body col))
 		) ","))
 	) (cons '!begin (map alters (lambda (alter) (alter id))))))
@@ -1056,7 +1056,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(? (atom "NO" true) (atom "MAXVALUE" true))
 			(? (atom "CACHE" true) psql_expression)
 			")")
-			(match target '(schema2 id) '((quote altercolumn) '((quote table) (coalesce schema2 schema) id) col "auto_increment" true)))
+			(match target '(schema2 id) '((quote altercolumn) '((quote table) (coalesce schema2 schema) false id false) col "auto_increment" true)))
 		(parser '((atom "ALTER" true) (atom "TABLE" true) (? (atom "ONLY" true))
 			(define target (or
 				(parser '((define schema2 psql_identifier) "." (define id psql_identifier)) '(schema2 id))
@@ -1064,7 +1064,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			))
 			(atom "ALTER" true) (atom "COLUMN" true) (define col psql_identifier)
 			(atom "SET" true) (atom "DEFAULT" true) (atom "nextval" true) "(" psql_string "::" (atom "regclass" true) ")")
-			(match target '(schema2 id) '((quote altercolumn) '((quote table) (coalesce schema2 schema) id) col "auto_increment" true)))
+			(match target '(schema2 id) '((quote altercolumn) '((quote table) (coalesce schema2 schema) false id false) col "auto_increment" true)))
 		psql_alter_table
 		psql_update
 		psql_delete
@@ -1112,35 +1112,35 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				'((? (atom "WITH" true)) (? (or (atom "SUPERUSER" true) (atom "LOGIN" true))) (atom "PASSWORD" true) (define password psql_expression))
 		)))
 			(begin (if policy (policy "system" true true) true)
-				'('insert '('table "system" "user") '(list "username" "password" "admin") '(list '(list username '('password password) false)) '(list) '((quote lambda) '() '((quote error) "user already exists")))
+				'('insert '('table "system" false "user" false) '(list "username" "password" "admin") '(list '(list username '('password password) false)) '(list) '((quote lambda) '() '((quote error) "user already exists")))
 		))
 		/* ALTER USER password: MySQL (IDENTIFIED BY) and PostgreSQL (WITH PASSWORD / PASSWORD) */
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier)
 			(? (atom "WITH" true))
 			(atom "PASSWORD" true) (define password psql_expression))
 			(begin (if policy (policy "system" true true) true)
-				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "password" '('password password))) '__scan_acc)) nil nil false)
+				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false) '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "password" '('password password))) '__scan_acc)) nil nil false)
 		))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier)
 			(atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))
 			(begin (if policy (policy "system" true true) true)
-				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "password" '('password password))) '__scan_acc)) nil nil false)
+				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false) '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "password" '('password password))) '__scan_acc)) nil nil false)
 		))
 		/* ALTER USER SUPERUSER / NOSUPERUSER — PostgreSQL admin grant */
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier) (atom "SUPERUSER" true))
 			(begin (if policy (policy "system" true true) true)
-				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" true)) '__scan_acc)) nil nil false)
+				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false) '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" true)) '__scan_acc)) nil nil false)
 		))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier) (atom "NOSUPERUSER" true))
 			(begin (if policy (policy "system" true true) true)
-				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" '('protected_sql_admin_revoke_value username))) '__scan_acc)) nil nil false)
+				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false) '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" '('protected_sql_admin_revoke_value username))) '__scan_acc)) nil nil false)
 		))
 		/* DROP USER/ROLE [IF EXISTS] — cascade-deletes access entries then the user row */
 		(parser '((atom "DROP" true) (or (atom "USER" true) (atom "ROLE" true)) (? (atom "IF" true) (atom "EXISTS" true)) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				(cons '!begin (list
 					'((quote protect_sql_root_admin) username "drop")
-					(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "access")
+					(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "access" false)
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
@@ -1148,7 +1148,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 						0
 						(quote +)
 						false)
-					(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "user")
+					(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false)
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
@@ -1163,28 +1163,28 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* GRANT ALL [PRIVILEGES] ON *.* TO user -> set admin true */
 		(parser '((atom "GRANT" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" true)) '__scan_acc)) nil nil false)
+				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false) '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" true)) '__scan_acc)) nil nil false)
 		))
 		/* REVOKE ALL [PRIVILEGES] ON *.* FROM user -> set admin false */
 		(parser '((atom "REVOKE" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "FROM" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" '('protected_sql_admin_revoke_value username))) '__scan_acc)) nil nil false)
+				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false) '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" '('protected_sql_admin_revoke_value username))) '__scan_acc)) nil nil false)
 		))
 		/* GRANT <any> ON DATABASE db TO user (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'('insert '('table "system" "access") '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
+				'('insert '('table "system" false "access" false) '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
 		))
 		/* GRANT <any> ON SCHEMA db TO user (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'('insert '('table "system" "access") '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
+				'('insert '('table "system" false "access" false) '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
 		))
 		/* GRANT ALL PRIVILEGES ON ALL DATABASES is non-standard; ignore */
 		/* Treat GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA db TO user as db-level access (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "ALL" true) (atom "TABLES" true) (atom "IN" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'('insert '('table "system" "access") '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
+				'('insert '('table "system" false "access" false) '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
 		))
 
 		/* REVOKE syntax (PostgreSQL-style) -> mirror GRANT behavior */
@@ -1193,7 +1193,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(begin (if policy (policy "system" true true) true)
 				(compile_scan_plan (quote scan)
 					'(session "__memcp_tx")
-					'('table "system" "access")
+					'('table "system" false "access" false)
 					'(list "username" "database")
 					'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 					'(list "$update")
@@ -1207,7 +1207,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(begin (if policy (policy "system" true true) true)
 				(compile_scan_plan (quote scan)
 					'(session "__memcp_tx")
-					'('table "system" "access")
+					'('table "system" false "access" false)
 					'(list "username" "database")
 					'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 					'(list "$update")
@@ -1221,7 +1221,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(begin (if policy (policy "system" true true) true)
 				(compile_scan_plan (quote scan)
 					'(session "__memcp_tx")
-					'('table "system" "access")
+					'('table "system" false "access" false)
 					'(list "username" "database")
 					'((quote lambda) '('username 'database) '((quote and) '((quote equal?) (quote username) username) '((quote equal?) (quote database) db)))
 					'(list "$update")
@@ -1231,7 +1231,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					false
 		)))
 
-		(parser '((atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) (atom "INDEX" true) (define id psql_identifier) (atom "ON" true) (define tbl (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) (? (atom "USING" true) psql_identifier) "(" (define cols (+ psql_identifier ",")) ")" (define equalnulls psql_unique_null_policy)) (if unique '('createkey '('table schema tbl) id unique (cons (quote list) cols) '(session "__memcp_tx") (list (quote list) "nulls_not_distinct" equalnulls)) (if equalnulls (error "NULLS NOT DISTINCT requires a unique index") true)))
+		(parser '((atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) (atom "INDEX" true) (define id psql_identifier) (atom "ON" true) (define tbl (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) (? (atom "USING" true) psql_identifier) "(" (define cols (+ psql_identifier ",")) ")" (define equalnulls psql_unique_null_policy)) (if unique '('createkey '('table schema false tbl false) id unique (cons (quote list) cols) '(session "__memcp_tx") (list (quote list) "nulls_not_distinct" equalnulls)) (if equalnulls (error "NULLS NOT DISTINCT requires a unique index") true)))
 		/* Preserve acceptance of unsupported physical index hints, but never discard a NULL policy. */
 		(parser (define ignored_index (regex "^[\\r\\n\\t ]*CREATE INDEX (?s:.*)\\z"))
 			(if (empty_list? (regexp_matches ignored_index "(?i)\\bNULLS\\b")) true
@@ -1424,7 +1424,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(if (empty_list? rows)
 		false
 		(begin
-			(insert (table schema tbl) columns (reverse rows))
+			(insert (table schema false tbl false) columns (reverse rows))
 			(state "copy_rows" '())
 			(state "copy_rows_count" 0)
 			true))

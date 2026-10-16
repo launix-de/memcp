@@ -78,7 +78,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(try
 			(lambda ()
 				(begin
-					(define handle (table schema tbl))
+					(define handle (table schema false tbl false))
 					(if handle (show handle) (show schema tbl))))
 			(lambda (_e) '())))))
 

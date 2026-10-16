@@ -14,7 +14,7 @@ test_cases:
   - name: Scalar column getter borrows declared native metadata
     scm: |
       (begin
-        (define declaration (show (table "memcp-tests" "tsql_decl_columns") "column" "LABEL" true))
+        (define declaration (show (table "memcp-tests" false "tsql_decl_columns" false) "column" "LABEL" true))
         (and (equal? (declaration "RawType") "VARCHAR")
           (equal? (declaration "Dimensions") '(3)) (not (declaration "Null"))))
     expect: {result: true}
@@ -39,7 +39,7 @@ test_cases:
   - name: Widening publishes the complete declaration
     scm: |
       (begin
-        (define declaration (show (table "memcp-tests" "tsql_decl_columns") "column" "label"))
+        (define declaration (show (table "memcp-tests" false "tsql_decl_columns" false) "column" "label"))
         (and (equal? (declaration "Dimensions") '(20)) (not (declaration "Null"))
           (equal? (declaration "Default") "old")))
     expect: {result: true}

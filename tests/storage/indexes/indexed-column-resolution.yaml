@@ -156,7 +156,7 @@ setup:
       (begin
         (define cols (map (produceN 128) (lambda (i) (concat "column_" (+ i 1)))))
         (define vals (map (produceN 128) (lambda (i) (+ i 1))))
-        (insert (table "memcp-tests" "resolver_values")
+        (insert (table "memcp-tests" false "resolver_values" false)
           (cons "id" cols)
           (list (cons 1 vals))))
 

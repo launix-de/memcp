@@ -15,7 +15,7 @@ setup:
   - sql: CREATE TABLE perf_ci_label (id INT PRIMARY KEY, label TEXT COLLATE utf8mb4_general_ci) ENGINE=sloppy
   - scm: |
       (begin
-        (insert (table "memcp-tests" "perf_ci_label") '("id" "label")
+        (insert (table "memcp-tests" false "perf_ci_label" false) '("id" "label")
           (map (produceN 100000) (lambda (i) (list i (concat "label-ÉCOLE-" (+ i 100000))))))
         (rebuild)
         100000)

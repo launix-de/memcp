@@ -125,8 +125,8 @@ test_cases:
             (define consumer (newsession))
             (with_autocommit consumer nil 0 "scalar cache consumer" (lambda (tx)
               (begin
-                (initialize_cache_table tx (table "memcp-tests" ".cache-scalar-lifecycle")
-                  (list (table "memcp-tests" "es_cache_tx"))
+                (initialize_cache_table tx (table "memcp-tests" false ".cache-scalar-lifecycle" false)
+                  (list (table "memcp-tests" false "es_cache_tx" false))
                   (lambda (_tx) true)
                   (lambda (tx) (sql_execute_formula consumer tx fill (lambda (_row) true) (lambda (_fields) true)))
                   (lambda (_tx) true))
@@ -135,8 +135,8 @@ test_cases:
       - sql: "SELECT k0 FROM `.cache-scalar-lifecycle`"
         expect: {rows: 1, contains: ["1"]}
       - scm: |
-          (initialize_cache_table nil (table "memcp-tests" ".cache-scalar-lifecycle")
-            (list (table "memcp-tests" "es_cache_tx"))
+          (initialize_cache_table nil (table "memcp-tests" false ".cache-scalar-lifecycle" false)
+            (list (table "memcp-tests" false "es_cache_tx" false))
             (lambda (_tx) (error "ready scalar cache must not register again"))
             (lambda (_tx) (error "ready scalar cache must not fill again"))
             (lambda (_tx) true))

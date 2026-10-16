@@ -26,13 +26,13 @@ setup:
 - sql: CREATE TABLE mf_userMandant (ID int, user int, mandant int, standort int) ENGINE=MEMORY
 - scm: |-
     (begin
-     (insert (table "memcp-tests" "mf_mandant") '("ID" "name") (map (produceN 100) (lambda (i) (list (+ i 1) (concat "tenant-" i)))))
-     (insert (table "memcp-tests" "mf_standort") '("ID" "name" "mandant") (map (produceN 1000) (lambda (i) (list (+ i 1) (concat "site-" i) (+ 1 (mod i 100))))))
-     (insert (table "memcp-tests" "mf_userMandant") '("ID" "user" "mandant" "standort") (list (list 1 7 1 nil) (list 2 7 2 nil)))
-     (insert (table "memcp-tests" "mf_pruefung") '("ID" "name" "mandant") (map (produceN 100) (lambda (i) (list (+ i 1) (concat "audit-" i) (+ i 1)))))
-     (insert (table "memcp-tests" "mf_pruefung") '("ID" "name" "mandant") (list (list 101 "unused-audit-1" 1) (list 102 "unused-audit-2" 2)))
-     (insert (table "memcp-tests" "mf_dokument") '("ID" "mandant" "standort" "pruefung") (map (produceN 100000) (lambda (i) (list (+ i 1) (+ 1 (mod i 100)) (+ 1 (mod i 1000)) (+ 1 (mod i 100))))))
-     (map '("mf_mandant" "mf_standort" "mf_userMandant" "mf_dokument") (lambda (t) (rebuild (table "memcp-tests" t) true false)))
+     (insert (table "memcp-tests" false "mf_mandant" false) '("ID" "name") (map (produceN 100) (lambda (i) (list (+ i 1) (concat "tenant-" i)))))
+     (insert (table "memcp-tests" false "mf_standort" false) '("ID" "name" "mandant") (map (produceN 1000) (lambda (i) (list (+ i 1) (concat "site-" i) (+ 1 (mod i 100))))))
+     (insert (table "memcp-tests" false "mf_userMandant" false) '("ID" "user" "mandant" "standort") (list (list 1 7 1 nil) (list 2 7 2 nil)))
+     (insert (table "memcp-tests" false "mf_pruefung" false) '("ID" "name" "mandant") (map (produceN 100) (lambda (i) (list (+ i 1) (concat "audit-" i) (+ i 1)))))
+     (insert (table "memcp-tests" false "mf_pruefung" false) '("ID" "name" "mandant") (list (list 101 "unused-audit-1" 1) (list 102 "unused-audit-2" 2)))
+     (insert (table "memcp-tests" false "mf_dokument" false) '("ID" "mandant" "standort" "pruefung") (map (produceN 100000) (lambda (i) (list (+ i 1) (+ 1 (mod i 100)) (+ 1 (mod i 1000)) (+ 1 (mod i 100))))))
+     (map '("mf_mandant" "mf_standort" "mf_userMandant" "mf_dokument") (lambda (t) (rebuild (table "memcp-tests" false t false) true false)))
      true)
 test_cases:
 - name: 'Perf: tenant picker over document ACL membership'

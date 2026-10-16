@@ -34,14 +34,14 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (* i 3)))))
-            (insert (table "{database}" "dcp_main") '("id" "payload") rows)
+            (insert (table "{database}" false "dcp_main" false) '("id" "payload") rows)
             (set detail_n (* {rows} 2))
             (set details (map (produceN detail_n) (lambda (i)
               (list
                 i
                 (floor (/ i 2))
                 (+ 1 (* i 5))))))
-            (insert (table "{database}" "perf_detail") '("id" "parent" "val") details)
+            (insert (table "{database}" false "perf_detail" false) '("id" "parent" "val") details)
             (rebuild)
             "ok")
     sql: |

@@ -96,17 +96,17 @@ The negative accumulator also represents the minimum int64 without overflow. */
 column names; views remain definitions in the existing system.views table.
 Only consumed name bindings enter the shared plan guards, never catalog epochs. */
 (define tsql_view_name (lambda (database name)
-	(scan nil (table "system" "views")
+	(scan nil (table "system" false "views" false)
 		(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false))
 		(list database) '("name") (lambda (candidate) (equal?? candidate name)) '("name")
 		(lambda (acc canonical) (if (nil? acc) canonical (error "ambiguous view name: " name)))
 		nil (lambda (a b) (if (nil? a) b (nil? b) a (error "ambiguous view name: " name))))))
 (define tsql_relation_name (lambda (database name)
-	(coalesceNil (resolve_table_name database name true) (tsql_view_name database name) name)))
+	(coalesceNil (show (table database false name true) "name") (tsql_view_name database name) name)))
 (define tsql_table_name (lambda (database name planning_session) (begin
-	(define canonical (resolve_table_name database name true))
+	(define canonical (show (table database false name true) "name"))
 	(planner_record_guard_condition
-		(list (quote equal?) (list (quote resolve_table_name) database name true) canonical)
+		(list (quote equal?) (list (quote show) (list (quote table) database false name true) "name") canonical)
 		planning_session)
 	(coalesceNil canonical name))))
 (define tsql_create_relation (lambda (database name columns options ifnotexists tx) (begin
@@ -121,7 +121,7 @@ Only consumed name bindings enter the shared plan guards, never catalog epochs. 
 		'("column" _name _type _dimensions attributes) (has_assoc? attributes "__tsql_alias_id") _ false)))
 		(tsql_type_ddl database tx publish) (publish)))))
 (define tsql_create_view_definition (lambda (tx database name dialect text query mode) (begin
-	(if (resolve_table_name database name true) (error "a table already owns this relation name: " name) true)
+	(if (show (table database false name true) "name") (error "a table already owns this relation name: " name) true)
 	(define existing (tsql_view_name database name))
 	(if (and (nil? existing) (equal? mode "alter")) (error "view does not exist: " name) true)
 	(create_sql_view tx database (coalesceNil existing name) dialect text query
@@ -446,7 +446,7 @@ recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. 
 (define tsql_declaration_matches? (lambda (column contract)
 	(if (nil? column) false (expression_equal? (tsql_declaration_contract column) contract))))
 (define tsql_column_description (lambda (database name column ignore_case planning_session) (begin
-	(define handle (table database name))
+	(define handle (table database false name false))
 	(if (nil? handle) nil (tsql_effective_column (show handle "column" column ignore_case) planning_session)))))
 (define tsql_target_column_declaration (lambda (database name column planning_session) (begin
 	(define declaration (tsql_column_description database name column true planning_session))
@@ -1025,7 +1025,7 @@ The frontend checks the complete reserved block before any row publication.
 Explicit NULL must fail here: native auto_increment would otherwise allocate
 an unchecked replacement. Completion uses only this invocation's reserved range. */
 (define tsql_native_insert_expr (lambda (database name columns values row_count capture_identity) (begin
-	(define relation (list (quote table) database name))
+	(define relation (list (quote table) database false name false))
 	(define identity (find (get_schema database name)
 		(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
 	(define native_insert (lambda (names rows callback)
@@ -1443,9 +1443,9 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(define object ((parser '( (? (define owner tsql_identifier) ".")
 					(define name tsql_identifier)) (list (if (or (nil? owner) (equal?? owner "dbo")) database owner) name)) relation))
 				(define object_schema (car object))
-				(define name (coalesceNil (resolve_table_name object_schema (cadr object) true) (cadr object)))
+				(define name (coalesceNil (show (table object_schema false (cadr object) true) "name") (cadr object)))
 				(if policy (policy object_schema name false) true)
-				(define handle (table object_schema name))
+				(define handle (table object_schema false name false))
 				(define declaration (if (nil? handle) nil (tsql_effective_column (show handle "column" column true) nil)))
 				(if (nil? declaration) nil (tsql_declared_byte_length declaration))))) relation column)
 			"INT" nil)))
@@ -2195,7 +2195,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(reduce columns (lambda (seen name)
 				(if (has? seen name) (error "duplicate index column: " name) (cons name seen))) '())
 			(if (not unique) true (list (quote if)
-				(list (quote createkey) (list (quote table) database tbl) name true
+				(list (quote createkey) (list (quote table) database false tbl false) name true
 					(cons (quote list) columns) (quote tx) (list (quote list) "nulls_not_distinct" true))
 				true (list (quote error) "index already exists: " name)))))))
 	(define tsql_alter_index (parser '(
@@ -2286,7 +2286,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(define nullable (or (parser '((atom "NOT" true) (atom "NULL" true)) false)
 					(parser (atom "NULL" true) true) (parser empty true)))
 			) (lambda (database name) (begin
-					(define handle (table database name))
+					(define handle (table database false name false))
 					(define previous (if (nil? handle) nil (show handle "column" column true)))
 					(if (nil? previous) (error "ALTER column does not exist: " column) true)
 					(define dimensions (tsql_decl_dimensions type dimensions))
@@ -2294,7 +2294,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 					(define collation (coalesceNil collation (coalesceNil (previous "Collation") "")))
 					(if (tsql_compatible_column_declaration? previous type dimensions nullable collation) true
 						(error "ALTER COLUMN requires native validation or conversion"))
-					(list (quote !begin) (list (quote altercolumn) (list (quote table) database name)
+					(list (quote !begin) (list (quote altercolumn) (list (quote table) database false name false)
 						(previous "Field") "declaration"
 						(list (quote quote) (list (list type dimensions nullable collation)
 							(tsql_column_declaration_tuple previous)))) true))))
@@ -2307,13 +2307,13 @@ a separator is recognized only on a physical line containing no SQL text. */
 					(if (reduce columns (lambda (valid column) (and valid
 						(not ((find (show database name) (lambda (meta) (equal? (meta "Field") column))) "Null")))) true)
 						true (error "ADD PRIMARY KEY currently requires NOT NULL columns"))
-					(list (quote createkey) (list (quote table) database name) "PRIMARY" true
+					(list (quote createkey) (list (quote table) database false name false) "PRIMARY" true
 						(cons (quote list) columns) (quote tx)
 						(cons (quote list) (if key (list "constraint_name" key) '()))))))
 			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define key tsql_identifier)
 				(atom "UNIQUE" true) tsql_key_placement "(" (define columns tsql_key_columns) ")" tsql_key_layout)
 				(lambda (database name)
-					(list (quote createkey) (list (quote table) database name) key true
+					(list (quote createkey) (list (quote table) database false name false) key true
 						(cons (quote list) columns) (quote tx)
 						(list (quote list) "nulls_not_distinct" true "constraint_name" key))))
 			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define key tsql_identifier))
@@ -2326,7 +2326,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 						(eval (sql_type_formula '() (tsql_assignment_expr
 							(list (quote quote) (default "default")) declaration))) nil))
 					(list (quote !begin)
-						(list (quote altercolumn) (list (quote table) database name)
+						(list (quote altercolumn) (list (quote table) database false name false)
 							(declaration "Field") "add_default"
 							(list (quote quote) (list value (coalesceNil (default "default_expression") "")
 								(coalesceNil key (concat "DF_" name "_" (declaration "Field")))))) true))))
@@ -2347,7 +2347,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(define columns (+ tsql_identifier ",")))
 				(lambda (database name)
 					(cons (quote !begin) (map columns (lambda (col)
-						(list (quote altertable) (list (quote table) database name)
+						(list (quote altertable) (list (quote table) database false name false)
 							(if ifexists "drop_if_exists" "drop")
 							(coalesceNil (resolve_column_name database name col true) col)))))))
 			(parser '((atom "DROP" true) (atom "CONSTRAINT" true)
@@ -2355,9 +2355,9 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(define keys (+ tsql_identifier ",")))
 				(lambda (database name) (cons (quote !begin) (map keys (lambda (key)
 					(list (quote if) (list (quote or)
-						(list (quote altercolumn) (list (quote table) database name) key "drop_default" nil)
-						(list (quote dropforeignkey) (list (quote table) database name) key)
-						(list (quote dropkey) (list (quote table) database name) key (quote tx)))
+						(list (quote altercolumn) (list (quote table) database false name false) key "drop_default" nil)
+						(list (quote dropforeignkey) (list (quote table) database false name false) key)
+						(list (quote dropkey) (list (quote table) database false name false) key (quote tx)))
 						true (if ifexists true (list (quote error) "constraint does not exist: " key))))))))
 		) ","))
 	) (lambda () (begin

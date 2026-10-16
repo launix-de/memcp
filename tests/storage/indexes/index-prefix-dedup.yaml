@@ -28,7 +28,7 @@ test_cases:
     setup:
       - scm: |
           (begin
-            (insert (table "memcp-tests" "idx_nopfx") '("a" "b" "c")
+            (insert (table "memcp-tests" false "idx_nopfx" false) '("a" "b" "c")
               (map (produceN 200) (lambda (i) (list i (* i 2) (* i 5)))))
             (rebuild))
     sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx"
@@ -156,7 +156,7 @@ test_cases:
     setup:
       - scm: |
           (begin
-            (insert (table "memcp-tests" "idx_rev") '("p" "q" "r")
+            (insert (table "memcp-tests" false "idx_rev" false) '("p" "q" "r")
               (map (produceN 200) (lambda (i) (list i (* i 4) (* i 9)))))
             (rebuild))
     sql: "SELECT COUNT(*) AS cnt FROM idx_rev"
@@ -262,7 +262,7 @@ test_cases:
     setup:
       - scm: |
           (begin
-            (insert (table "memcp-tests" "idx_nonoverlap") '("x" "y" "z")
+            (insert (table "memcp-tests" false "idx_nonoverlap" false) '("x" "y" "z")
               (map (produceN 200) (lambda (i) (list i (* i 3) (* i 7)))))
             (rebuild))
     sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap"
@@ -553,7 +553,7 @@ test_cases:
   - name: "Populate DESC prefix fixture in delta"
     scm: |
       (begin
-        (define target (table "memcp-tests" "idx_desc_delta_prefix"))
+        (define target (table "memcp-tests" false "idx_desc_delta_prefix" false))
         (insert target '("id" "tenant" "label")
           (map (produceN 200)
             (lambda (i) (list i 1 (concat "value-" i))))))

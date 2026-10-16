@@ -20,7 +20,7 @@ setup:
   - { sql: "CREATE TABLE added_psql_empty_defaults (id INT PRIMARY KEY) ENGINE=SAFE" }
   - { sql: "INSERT INTO added_defaults VALUES(1)" }
   - { sql: "INSERT INTO added_psql_defaults VALUES(1)" }
-  - { scm: '(begin (rebuild (table "memcp-tests" "added_defaults")) (rebuild (table "memcp-tests" "added_psql_defaults")))' }
+  - { scm: '(begin (rebuild (table "memcp-tests" false "added_defaults" false)) (rebuild (table "memcp-tests" false "added_psql_defaults" false)))' }
   - { sql: "INSERT INTO added_defaults VALUES(2)" }
   - { sql: "INSERT INTO added_psql_defaults VALUES(2)" }
   - { sql: "CREATE TABLE default_test (id INT, flag BOOLEAN DEFAULT FALSE) ENGINE=MEMORY" }
@@ -316,7 +316,7 @@ test_cases:
     expect: {rows: 1, data: [{cnt: 1}]}
 
   - name: "Rebuild stores the initialized values in the new generation"
-    scm: '(rebuild (table "memcp-tests" "added_defaults") true false)'
+    scm: '(rebuild (table "memcp-tests" false "added_defaults" false) true false)'
 
   - name: "Shutdown after persisting the rebuilt generation"
     sql: "SHUTDOWN"

@@ -49,10 +49,10 @@ setup:
   - sql: "INSERT INTO nms_small_document VALUES (1, 1), (2, 2)"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "nms_file") '("id" "uploaded_at")
+        (insert (table "memcp-tests" false "nms_file" false) '("id" "uploaded_at")
           (map (produceN 4000) (lambda (i)
             (list (+ i 1) (+ i 1)))))
-        (insert (table "memcp-tests" "nms_document")
+        (insert (table "memcp-tests" false "nms_document" false)
           '("id" "file_id" "location_id" "document_year" "department_id" "audit_id")
           (map (produceN 4000) (lambda (i)
             (list (+ i 1) (+ i 1) (+ (mod i 4) 1)

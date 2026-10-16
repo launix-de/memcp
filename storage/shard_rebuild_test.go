@@ -748,8 +748,8 @@ func TestRegisteredCreateTableTriggerRunsOnCreate(t *testing.T) {
 		scm.NewSymbol("insert"),
 		scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("table"),
-			scm.NewString("tcreatetabletrigger"),
-			scm.NewString(".hook"),
+			scm.NewString("tcreatetabletrigger"), scm.NewBool(false),
+			scm.NewString(".hook"), scm.NewBool(false),
 		}),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("id")}),
 		scm.NewSlice([]scm.Scmer{

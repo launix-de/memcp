@@ -58,9 +58,9 @@ setup:
         (define previous (settings "ShardSize"))
         (try (lambda () (begin
           (settings "ShardSize" 250)
-          (insert (table "memcp-tests" "ua_parallel") '("ID")
+          (insert (table "memcp-tests" false "ua_parallel" false) '("ID")
             (map (produceN 1001) (lambda (i) (list (+ i 1)))))
-          (rebuild (table "memcp-tests" "ua_parallel") true false)
+          (rebuild (table "memcp-tests" false "ua_parallel" false) true false)
           (settings "ShardSize" previous) true))
           (lambda (failure) (begin (settings "ShardSize" previous) (error failure)))))
 
@@ -77,17 +77,17 @@ setup:
   - sql: "INSERT INTO ua_access VALUES (7, 1), (8, NULL)"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "ua_period") '("id" "tenant_id")
+        (insert (table "memcp-tests" false "ua_period" false) '("id" "tenant_id")
           (map (produceN 128) (lambda (i) (list (+ i 1) (+ i 1)))))
-        (insert (table "memcp-tests" "ua_tenant") '("id")
+        (insert (table "memcp-tests" false "ua_tenant" false) '("id")
           (map (produceN 128) (lambda (i) (list (+ i 1)))))
-        (insert (table "memcp-tests" "ua_site") '("id")
+        (insert (table "memcp-tests" false "ua_site" false) '("id")
           (map (produceN 16) (lambda (i) (list (+ i 1)))))
-        (insert (table "memcp-tests" "ua_fact") '("period_id" "site_id")
+        (insert (table "memcp-tests" false "ua_fact" false) '("period_id" "site_id")
           (map (produceN 65536) (lambda (i)
             (list (+ 1 (mod (floor (/ i 16)) 128)) (+ 1 (mod i 16))))))
         (map '("ua_period" "ua_tenant" "ua_site" "ua_fact" "ua_access")
-          (lambda (name) (rebuild (table "memcp-tests" name) true false))))
+          (lambda (name) (rebuild (table "memcp-tests" false name false) true false))))
 
 test_cases:
 

@@ -27,12 +27,12 @@ fixture_setup: &stmc_fixture
   - scm: |
       (begin
         (define file_count 50000)
-        (insert (table "memcp-tests" "stmc_file") '("id" "name" "body")
+        (insert (table "memcp-tests" false "stmc_file" false) '("id" "name" "body")
           (map (produceN file_count) (lambda (i)
             (list i "file" (concat
               (if (< i 5000) "needle" "unrelated")
               (string_repeat "padding-" 512))))))
-        (insert (table "memcp-tests" "stmc_document")
+        (insert (table "memcp-tests" false "stmc_document" false)
           '("id" "file_id" "rank_value" "domain_id"
             "value01" "value02" "value03" "value04"
             "value05" "value06" "value07" "value08"
@@ -41,11 +41,11 @@ fixture_setup: &stmc_fixture
           (map (produceN 100000) (lambda (i)
             (list i (mod i file_count) i (mod i 16)
               i i i i i i i i i i i i i i i i))))
-        (insert (table "memcp-tests" "stmc_acl") '("id" "allowed")
+        (insert (table "memcp-tests" false "stmc_acl" false) '("id" "allowed")
           (map (produceN 16) (lambda (i) (list i (mod i 2)))))
-        (rebuild (table "memcp-tests" "stmc_file") true false)
-        (rebuild (table "memcp-tests" "stmc_document") true false)
-        (rebuild (table "memcp-tests" "stmc_acl") true false))
+        (rebuild (table "memcp-tests" false "stmc_file" false) true false)
+        (rebuild (table "memcp-tests" false "stmc_document" false) true false)
+        (rebuild (table "memcp-tests" false "stmc_acl" false) true false))
   - sql: "SELECT COUNT(*) FROM stmc_file WHERE body LIKE '%needle%'"
   - sql: "SELECT COUNT(*) FROM stmc_file WHERE body LIKE '%needle%'"
   # Exercise ordinary adaptive-index activation before measuring the page.
@@ -82,17 +82,17 @@ setup:
   - sql: "CREATE TABLE stmc_acl (id INT PRIMARY KEY, allowed INT) ENGINE=memory"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "stmc_file") '("id" "name" "body")
+        (insert (table "memcp-tests" false "stmc_file" false) '("id" "name" "body")
           (map (produceN 6000) (lambda (i)
             (list i "file" (concat
               (if (< i 60) "needle" "unrelated") (string_repeat "padding-" 512))))))
-        (insert (table "memcp-tests" "stmc_document") '("id" "file_id" "rank_value" "domain_id")
+        (insert (table "memcp-tests" false "stmc_document" false) '("id" "file_id" "rank_value" "domain_id")
           (map (produceN 12000) (lambda (i) (list i (mod i 6000) i (mod i 16)))))
-        (insert (table "memcp-tests" "stmc_acl") '("id" "allowed")
+        (insert (table "memcp-tests" false "stmc_acl" false) '("id" "allowed")
           (map (produceN 16) (lambda (i) (list i (mod i 2)))))
-        (rebuild (table "memcp-tests" "stmc_file") true false)
-        (rebuild (table "memcp-tests" "stmc_document") true false)
-        (rebuild (table "memcp-tests" "stmc_acl") true false))
+        (rebuild (table "memcp-tests" false "stmc_file" false) true false)
+        (rebuild (table "memcp-tests" false "stmc_document" false) true false)
+        (rebuild (table "memcp-tests" false "stmc_acl" false) true false))
   - sql: "SELECT COUNT(*) FROM stmc_file WHERE body LIKE '%needle%'"
   - sql: "SELECT COUNT(*) FROM stmc_file WHERE body LIKE '%needle%'"
   # Exercise the ordinary adaptive-index activation before checking its work

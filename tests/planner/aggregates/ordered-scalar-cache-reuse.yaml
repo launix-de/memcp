@@ -24,14 +24,14 @@ setup:
     coordinate)) ENGINE=memory
 - scm: |
     (begin
-      (insert (table "memcp-tests" "ds_entity") '("id" "category")
+      (insert (table "memcp-tests" false "ds_entity" false) '("id" "category")
         (map (produceN 1000) (lambda (i) (list (+ i 1) (mod (+ i 1) 2)))))
-      (insert (table "memcp-tests" "ds_history") '("id" "entity_id" "coordinate" "quantity" "end_value" "kind")
+      (insert (table "memcp-tests" false "ds_history" false) '("id" "entity_id" "coordinate" "quantity" "end_value" "kind")
         (map (produceN 1000) (lambda (i) (list (+ i 1) (+ i 1) 0 1 nil "P"))))
-      (insert (table "memcp-tests" "ds_history") '("id" "entity_id" "coordinate" "quantity" "end_value" "kind")
+      (insert (table "memcp-tests" false "ds_history" false) '("id" "entity_id" "coordinate" "quantity" "end_value" "kind")
         (map (produceN 50) (lambda (i) (list (+ i 1001) (* (+ i 1) 20) 20 3 50 "P"))))
-      (rebuild (table "memcp-tests" "ds_entity"))
-      (rebuild (table "memcp-tests" "ds_history"))
+      (rebuild (table "memcp-tests" false "ds_entity" false))
+      (rebuild (table "memcp-tests" false "ds_history" false))
       true)
 - sql: DROP TABLE IF EXISTS ds_invoice
 - sql: CREATE TABLE ds_invoice (entity_id INT, amount INT, coordinate INT) ENGINE=memory
@@ -39,7 +39,7 @@ setup:
 - sql: DROP TABLE IF EXISTS ds_list
 - sql: CREATE TABLE ds_list (entity_id INT) ENGINE=memory
 - scm: |
-    (insert (table "memcp-tests" "ds_list") '("entity_id")
+    (insert (table "memcp-tests" false "ds_list" false) '("entity_id")
       (map (produceN 831) (lambda (i) (list (+ i 1)))))
 - sql: DROP TABLE IF EXISTS ds_kind
 - sql: CREATE TABLE ds_kind (name VARCHAR(10) PRIMARY KEY, active BOOL) ENGINE=memory
@@ -50,12 +50,12 @@ setup:
 - sql: CREATE TABLE cache_page_item (id INT PRIMARY KEY, asset_id INT) ENGINE=memory
 - scm: |
     (begin
-      (insert (table "memcp-tests" "cache_page_asset") '("id" "uploaded_at")
+      (insert (table "memcp-tests" false "cache_page_asset" false) '("id" "uploaded_at")
         (map (produceN 4096) (lambda (i) (list (+ i 1) (if (equal? i 0) nil (+ i 1))))))
-      (insert (table "memcp-tests" "cache_page_item") '("id" "asset_id")
+      (insert (table "memcp-tests" false "cache_page_item" false) '("id" "asset_id")
         (map (produceN 4097) (lambda (i) (list (+ i 1) (if (equal? i 4096) 9000 (+ i 1))))))
-      (rebuild (table "memcp-tests" "cache_page_asset"))
-      (rebuild (table "memcp-tests" "cache_page_item")))
+      (rebuild (table "memcp-tests" false "cache_page_asset" false))
+      (rebuild (table "memcp-tests" false "cache_page_item" false)))
 test_cases:
 - name: Literal optional filter is folded before subquery decorrelation
   sql: |-

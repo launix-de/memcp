@@ -33,8 +33,7 @@ test_cases:
     UQ_nullable UNIQUE(nullable_key))
   name: 'Fixture setup 010: CREATE TABLE dbo.odbc_keys_unique (id INT NOT NULL, nullable_key INT, CONSTRAINT UQ_id
     UNIQUE(id), C'
-- scm: (createforeignkey (table "memcp-tests" "odbc_keys_child") "FK_parent" (list "p_second" "p_first") (table
-    "memcp-tests" "odbc_keys_parent") (list "second" "first") "cascade" "set null")
+- scm: (createforeignkey (table "memcp-tests" false "odbc_keys_child" false) "FK_parent" (list "p_second" "p_first") (table "memcp-tests" false "odbc_keys_parent" false) (list "second" "first") "cascade" "set null")
   name: 'Fixture setup 011: (createforeignkey (table "memcp-tests" "odbc_keys_child") "FK_parent" (list "p_second"
     "p_first") (t'
 - name: Direct base columns retain precise provenance and nullability
@@ -517,7 +516,7 @@ test_cases:
     rows: 0
   noncritical: true
 - name: Metadata tracks a dropped foreign key immediately
-  scm: (dropforeignkey (table "memcp-tests" "odbc_keys_child") "FK_parent")
+  scm: (dropforeignkey (table "memcp-tests" false "odbc_keys_child" false) "FK_parent")
   expect:
     result: true
 - name: Dropped foreign key metadata does not survive in snapshots
@@ -526,7 +525,7 @@ test_cases:
     rows: 0
   noncritical: true
 - name: Metadata tracks dropped unique keys
-  scm: (dropkey (table "memcp-tests" "odbc_keys_unique") "UQ_nullable")
+  scm: (dropkey (table "memcp-tests" false "odbc_keys_unique" false) "UQ_nullable")
   expect:
     result: true
 - name: Dropped unique index metadata disappears
@@ -745,13 +744,11 @@ test_cases:
 - name: Prepare native nullable unique driver key
   sql: CREATE TABLE driver_keys_unique (id INT NOT NULL,nullable_key INT,CONSTRAINT UQ_driver UNIQUE(nullable_key))
 - name: Publish native driver foreign key
-  scm: (createforeignkey (table "memcp-tests" "driver_keys_child") "FK_driver" (list "pb" "pa") (table "memcp-tests"
-    "driver_keys_parent") (list "b" "a") "cascade" "set null")
+  scm: (createforeignkey (table "memcp-tests" false "driver_keys_child" false) "FK_driver" (list "pb" "pa") (table "memcp-tests" false "driver_keys_parent" false) (list "b" "a") "cascade" "set null")
   expect:
     result: true
 - name: Native immutable metadata keeps key names and NULL policy
-  scm: (begin (define u (car ((show (table "memcp-tests" "driver_keys_unique") "constraints") "Unique"))) (list
-    (u "Id") (u "nulls_not_distinct")))
+  scm: (begin (define u (car ((show (table "memcp-tests" false "driver_keys_unique" false) "constraints") "Unique"))) (list (u "Id") (u "nulls_not_distinct")))
   expect:
     result:
     - UQ_driver
@@ -865,7 +862,7 @@ test_cases:
   expect:
     error: true
 - name: Remove native driver foreign key
-  scm: (dropforeignkey (table "memcp-tests" "driver_keys_child") "FK_driver")
+  scm: (dropforeignkey (table "memcp-tests" false "driver_keys_child" false) "FK_driver")
   expect:
     result: true
 - name: Driver metadata observes foreign key removal
@@ -874,7 +871,7 @@ test_cases:
   expect:
     result: []
 - name: Remove native driver unique key
-  scm: (dropkey (table "memcp-tests" "driver_keys_unique") "UQ_driver")
+  scm: (dropkey (table "memcp-tests" false "driver_keys_unique" false) "UQ_driver")
   expect:
     result: true
 - name: Driver metadata observes unique key removal

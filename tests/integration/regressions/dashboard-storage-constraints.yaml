@@ -20,7 +20,7 @@ setup:
 - sql: DROP TABLE IF EXISTS dash_storage_metadata
 - sql: CREATE TABLE dash_storage_metadata (id INT PRIMARY KEY, payload TEXT) ENGINE=MEMORY
 - scm: |
-    (insert (table "memcp-tests" "dash_storage_metadata") '("id" "payload")
+    (insert (table "memcp-tests" false "dash_storage_metadata" false) '("id" "payload")
       (map (produceN 8192) (lambda (i) (list i (concat "payload-" i)))))
 test_cases:
 - name: Planner constraint metadata stays independent of retained delta payload

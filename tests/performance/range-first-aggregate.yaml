@@ -22,15 +22,15 @@ setup:
   - sql: "CREATE TABLE rfa_type (name VARCHAR(10) PRIMARY KEY, active BOOL) ENGINE=memory"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "rfa_account") '("id")
+        (insert (table "memcp-tests" false "rfa_account" false) '("id")
           (map (produceN 10000) (lambda (i) (list (+ i 1)))))
-        (insert (table "memcp-tests" "rfa_event") '("id" "account_id" "changed_at" "quantity" "category_name")
+        (insert (table "memcp-tests" false "rfa_event" false) '("id" "account_id" "changed_at" "quantity" "category_name")
           (map (produceN 20000) (lambda (i)
             (list (+ i 1) (+ (floor (/ i 2)) 1)
               (if (equal? (mod i 2) 0) 70 90)
               (if (equal? (mod i 2) 0) 1 2)
               (if (equal? (mod i 2) 0) "A" "B")))))
-        (insert (table "memcp-tests" "rfa_type") '("name" "active")
+        (insert (table "memcp-tests" false "rfa_type" false) '("name" "active")
           (list (list "A" true) (list "B" true)))
         (rebuild)
         20000)
@@ -41,9 +41,9 @@ setup:
   - sql: "CREATE TABLE rfa_deep_event (id INT PRIMARY KEY, account_id INT, changed_at INT, quantity INT) ENGINE=memory"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "rfa_deep_account") '("id")
+        (insert (table "memcp-tests" false "rfa_deep_account" false) '("id")
           (map (produceN 512) (lambda (i) (list i))))
-        (insert (table "memcp-tests" "rfa_deep_event") '("id" "account_id" "changed_at" "quantity")
+        (insert (table "memcp-tests" false "rfa_deep_event" false) '("id" "account_id" "changed_at" "quantity")
           (map (produceN 65536) (lambda (i)
             (list i (floor (/ i 128)) (mod i 128) (+ 1 (mod i 128))))))
         (rebuild)
@@ -169,12 +169,12 @@ test_cases:
   - name: "Repeated range-first batches over deep account histories"
     scm: |
       (begin
-        (define target (table "memcp-tests" "rfa_deep_event"))
+        (define target (table "memcp-tests" false "rfa_deep_event" false))
         (define mapper (recmap_range_first_mapper nil target '("account_id") "changed_at" "<="
           (lambda (id) (list id 95))))
         (define total (reduce (produceN 64) (lambda (total request)
           (+ total (recset_count (recmap_image
-            (scan_recmap nil (table "memcp-tests" "rfa_deep_account") '() '() '()
+            (scan_recmap nil (table "memcp-tests" false "rfa_deep_account" false) '() '() '()
               (lambda () true) '("id") mapper target))))) 0))
         (if (equal? total 32768) true (error "range-first batches lost source matches")))
     expect: {data: [true]}
@@ -186,8 +186,8 @@ test_cases:
   - name: "Range-first mapping materializes values without per-row key frames"
     scm: |
       (begin
-        (define source (table "memcp-tests" "rfa_account"))
-        (define target (table "memcp-tests" "rfa_event"))
+        (define source (table "memcp-tests" false "rfa_account" false))
+        (define target (table "memcp-tests" false "rfa_event" false))
         (define mapping (scan_recmap nil source '() '() '() (lambda () true) '("id")
           (recmap_range_first_mapper nil target '("account_id") "changed_at" "<="
             (lambda (id) (list id 95))) target))

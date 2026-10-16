@@ -24,7 +24,7 @@ test_cases:
       - sql: "CREATE TABLE inlike (id INT, name VARCHAR(100), val INT)"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "inlike") '("id" "name" "val")
+            (insert (table "memcp-tests" false "inlike" false) '("id" "name" "val")
               (map (produceN 200) (lambda (i)
                 (list i (concat "item" i) (* i 5)))))
             (rebuild))
@@ -210,9 +210,9 @@ test_cases:
       - sql: "CREATE TABLE in_sparse (id BIGINT, bucket BIGINT) ENGINE=sloppy"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "in_sparse") '("id" "bucket")
+            (insert (table "memcp-tests" false "in_sparse" false) '("id" "bucket")
               (map (produceN 50000) (lambda (i) (list i (mod i 10000)))))
-            (rebuild (table "memcp-tests" "in_sparse") true false))
+            (rebuild (table "memcp-tests" false "in_sparse" false) true false))
     sql: "SELECT COUNT(*) AS cnt FROM in_sparse"
     expect: {data: [{cnt: 50000}]}
 
@@ -273,11 +273,11 @@ test_cases:
       - sql: "CREATE TABLE in_partitioned_text (id INT, name TEXT) ENGINE=sloppy"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "in_partitioned_text") '("id" "name")
+            (insert (table "memcp-tests" false "in_partitioned_text" false) '("id" "name")
               (map (produceN 512) (lambda (i)
                 (list i (if (< i 3) (nth '("cron" "home" "theme_patterns_cache") i) (concat "option-" i))))))
-            (rebuild (table "memcp-tests" "in_partitioned_text") true false)
-            (partitiontable (table "memcp-tests" "in_partitioned_text") (list (list "name" (list "option-200" "option-400")))))
+            (rebuild (table "memcp-tests" false "in_partitioned_text" false) true false)
+            (partitiontable (table "memcp-tests" false "in_partitioned_text" false) (list (list "name" (list "option-200" "option-400")))))
     sql: "SELECT COUNT(*) AS cnt FROM in_partitioned_text"
     expect: {data: [{cnt: 512}]}
 

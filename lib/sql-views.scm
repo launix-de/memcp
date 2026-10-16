@@ -30,7 +30,7 @@ derived SELECT before untangle_query sees the complete query. */
 	(if (> (sql_view_catalog_state "count") 0)
 		(begin
 			(define normalized_query (toLower query))
-			(define references_view (scan nil (table "system" "views")
+			(define references_view (scan nil (table "system" false "views" false)
 				'(369435906932736) '()
 				'("name")
 				(lambda (name) (> (count (split normalized_query (toLower name))) 1))
@@ -58,7 +58,7 @@ derived SELECT before untangle_query sees the complete query. */
 			_ (error "view column aliases currently require one query block")))))
 
 (define sql_find_view (lambda (schema name)
-	(scan nil (table "system" "views")
+	(scan nil (table "system" false "views" false)
 		(list 369436443803648 (scan_boundary "equal" "database" 0 0 true true "" false) (scan_boundary "equal" "name" 1 1 true true "" false)) (list schema name)
 		'() (lambda () true)
 		'("dialect" "sql" "ir")
@@ -79,7 +79,7 @@ derived SELECT before untangle_query sees the complete query. */
 								(if (string? relation)
 									(begin
 										(if policy (policy source_schema relation false) true)
-										(if (has? (show source_schema) relation)
+										(if (table source_schema false relation false)
 											relation
 											(begin
 												(define view (sql_find_view source_schema relation))
@@ -93,7 +93,7 @@ derived SELECT before untangle_query sees the complete query. */
 														(define stored_ir (nth view 2))
 														(if (nil? stored_ir)
 															(error (concat "view " key " has no parsed IR"))
-															(expand_node (json_decode_scmer stored_ir) (cons key stack))))))))
+															(expand_node (restore_storage_code (json_decode_scmer stored_ir)) (cons key stack))))))))
 									(expand_node relation stack)))
 							(list alias source_schema expanded_relation outer (expand_node join_condition stack)))
 						_ (error "invalid query source while expanding views"))))
@@ -120,7 +120,7 @@ derived SELECT before untangle_query sees the complete query. */
 
 (define create_sql_view (lambda (tx schema name dialect sql ir mode) (begin
 	(define serialized_ir (json_encode ir))
-	(define existing (scan tx (table "system" "views")
+	(define existing (scan tx (table "system" false "views" false)
 		(list 369436443803648 (scan_boundary "equal" "database" 0 0 true true "" false) (scan_boundary "equal" "name" 1 1 true true "" false)) (list schema name)
 		'() (lambda () true)
 		'() (lambda (acc) (+ acc 1)) 0 +))
@@ -128,7 +128,7 @@ derived SELECT before untangle_query sees the complete query. */
 		(if (> existing 0)
 			(match mode
 				"replace"
-				(scan tx (table "system" "views")
+				(scan tx (table "system" false "views" false)
 					(list 369436443803648 (scan_boundary "equal" "database" 0 0 true true "" false) (scan_boundary "equal" "name" 1 1 true true "" false)) (list schema name)
 					'() (lambda () true)
 					'("$update")
@@ -138,7 +138,7 @@ derived SELECT before untangle_query sees the complete query. */
 					0 +)
 				"ignore" 0
 				_ (error (concat "view " schema "." name " already exists")))
-			(insert (table "system" "views")
+			(insert (table "system" false "views" false)
 				'("database" "name" "dialect" "sql" "ir")
 				(list (list schema name dialect sql serialized_ir)))))
 	(if (or (equal? existing 0) (equal? mode "replace"))
@@ -151,7 +151,7 @@ derived SELECT before untangle_query sees the complete query. */
 	result)))
 
 (define drop_sql_view (lambda (tx schema name if_exists) (begin
-	(define removed (scan tx (table "system" "views")
+	(define removed (scan tx (table "system" false "views" false)
 		(list 369436443803648 (scan_boundary "equal" "database" 0 0 true true "" false) (scan_boundary "equal" "name" 1 1 true true "" false)) (list schema name)
 		'() (lambda () true)
 		'("$update")
@@ -170,13 +170,13 @@ metadata. */
 (define drop_sql_database (lambda (tx schema if_exists) (begin
 	(define dropped (dropdatabase schema if_exists))
 	(if dropped (begin
-		(scan tx (table "system" "access")
+		(scan tx (table "system" false "access" false)
 			(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false)) (list schema)
 			'() (lambda () true)
 			'("$update")
 			(lambda (acc $update) (begin ($update) (+ acc 1)))
 			0 +)
-		(define removed_views (scan tx (table "system" "views")
+		(define removed_views (scan tx (table "system" false "views" false)
 			(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false)) (list schema)
 			'() (lambda () true)
 			'("$update")

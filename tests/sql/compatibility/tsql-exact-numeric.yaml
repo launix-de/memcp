@@ -75,7 +75,7 @@ test_cases:
       amount: 12.35
   noncritical: true
 - name: Direct engine insertion accepts the native carrier without dialect validation
-  scm: (insert (table "memcp-tests" "tsql_assignment_bounds") '("id" "tiny") (list (list 9 256)))
+  scm: (insert (table "memcp-tests" false "tsql_assignment_bounds" false) '("id" "tiny") (list (list 9 256)))
   expect:
     result: 1
 - name: Remove the direct native insertion before further dialect tests

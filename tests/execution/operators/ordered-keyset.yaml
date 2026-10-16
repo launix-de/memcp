@@ -9,8 +9,7 @@ setup:
 - sql: CREATE TABLE ordered_key_item (id INT PRIMARY KEY, owner_id INT, stamp INT) ENGINE=memory
 - sql: CREATE TABLE ordered_key_grant (owner_id INT) ENGINE=memory
 - sql: INSERT INTO ordered_key_grant VALUES (1),(1),(2),(NULL)
-- scm: "(begin\n (insert (table \"memcp-tests\" \"ordered_key_item\") '(\"id\" \"owner_id\" \"stamp\")\n  (map (produceN\
-    \ 10000) (lambda (i) (list (+ i 1) (+ 1 (mod i 100)) i))))\n (rebuild))"
+- scm: "(begin\n (insert (table \"memcp-tests\" false \"ordered_key_item\" false) '(\"id\" \"owner_id\" \"stamp\")\n  (map (produceN 10000) (lambda (i) (list (+ i 1) (+ 1 (mod i 100)) i))))\n (rebuild))"
 test_cases:
 - name: cold ordered dynamic keys preserve duplicates and NULL semantics
   sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
@@ -124,8 +123,7 @@ test_cases:
     - id: 9701
 - name: a long delta prefix refills bounded cursor pages past OFFSET
   setup:
-  - scm: (insert (table "memcp-tests" "ordered_key_item") '("id" "owner_id" "stamp") (map (produceN 128) (lambda
-      (i) (list (+ 20000 i) 1 (+ 80000 i)))))
+  - scm: (insert (table "memcp-tests" false "ordered_key_item" false) '("id" "owner_id" "stamp") (map (produceN 128) (lambda (i) (list (+ 20000 i) 1 (+ 80000 i)))))
   sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
     LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 5 OFFSET 64
   expect:
@@ -148,8 +146,8 @@ test_cases:
 - name: native prefix cold and indexed paths retain residual filtering
   scm: |
     (begin
-      (define target (table "memcp-tests" "ordered_key_item"))
-      (define keys (scan_recset nil (table "memcp-tests" "ordered_key_grant")
+      (define target (table "memcp-tests" false "ordered_key_item" false))
+      (define keys (scan_recset nil (table "memcp-tests" false "ordered_key_grant" false)
         '() '() '() (lambda () true)))
       (map (produceN 4) (lambda (iteration)
         (begin
@@ -169,9 +167,7 @@ test_cases:
   expect:
     rows: 0
 - name: invalid native key widths fail explicitly
-  scm: "(scan_order_keys nil (list (table \"memcp-tests\" \"ordered_key_item\")\n (scan_recset nil (table \"memcp-tests\"\
-    \ \"ordered_key_grant\") '() '() '() (lambda () true))\n '() '(\"owner_id\")) '() '() '() (lambda () true) '(\"\
-    stamp\") (list >) 0 0 5 '(\"id\") (lambda (acc id) (+ acc id)) 0)"
+  scm: "(scan_order_keys nil (list (table \"memcp-tests\" false \"ordered_key_item\" false)\n (scan_recset nil (table \"memcp-tests\" false \"ordered_key_grant\" false) '() '() '() (lambda () true))\n '() '(\"owner_id\")) '() '() '() (lambda () true) '(\"stamp\") (list >) 0 0 5 '(\"id\") (lambda (acc id) (+ acc id)) 0)"
   expect:
     error: true
 cleanup:

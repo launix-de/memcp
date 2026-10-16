@@ -43,18 +43,18 @@ test_cases:
                   (+ inserted (insert target cols
                     (map (produceN amount) (lambda (local)
                       (rowfn (+ first local)))))))) 0)))
-            (insert_batches (table "memcp-tests" "fact_group_limit_foundations")
+            (insert_batches (table "memcp-tests" false "fact_group_limit_foundations" false)
               '("foundation_id" "foundation_display_name") 64
               (lambda (i) (list (+ i 1)
                 (if (equal? i 0) "American Online Giving Foundation, Inc"
                   (concat "Foundation " (string (+ i 1)))))))
-            (insert_batches (table "memcp-tests" "fact_group_limit_transferables")
+            (insert_batches (table "memcp-tests" false "fact_group_limit_transferables" false)
               '("transferable_id" "company_id" "transferable_effective_timestamp" "transferable_code")
               transferable_rows (lambda (i) (list (+ i 1)
                 (+ 1 (mod i 2000))
                 (+ 1667260800 (* 86400 (mod i 365)))
                 (concat "DR" (string (+ i 1))))))
-            (insert_batches (table "memcp-tests" "fact_group_limit_facts")
+            (insert_batches (table "memcp-tests" false "fact_group_limit_facts" false)
               '("donation_id" "company_id" "foundation_id"
                 "donation_transferable_id" "donation_currency" "donation_source" "transaction_date"
                 "transferable_amount" "fees_management_fee" "fees_merchant_fee")

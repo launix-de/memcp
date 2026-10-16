@@ -27,7 +27,7 @@ test_cases:
   - name: "Filtered non-lazy range evaluates matching delta rows"
     scm: |
       (createcolumn
-        (table "memcp-tests" "computed_delta_rows")
+        (table "memcp-tests" false "computed_delta_rows" false)
         "filtered_amount" "INT" '() '("temp" true)
         '("amount")
         (lambda (amount) (* amount 10))
@@ -55,7 +55,7 @@ test_cases:
   - name: "Unfiltered non-lazy range evaluates every delta row"
     scm: |
       (createcolumn
-        (table "memcp-tests" "computed_delta_rows")
+        (table "memcp-tests" false "computed_delta_rows" false)
         "amount_copy" "INT" '() '("temp" true)
         '("amount")
         (lambda (amount) amount))
