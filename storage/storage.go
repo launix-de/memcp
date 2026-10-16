@@ -4709,7 +4709,10 @@ func Init(en scm.Env) {
 		Name: "newcachemap",
 
 		Fn: NewCacheMap,
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "Creates a new cachemap. Returns a threadsafe key-value function with LRU eviction under memory pressure: (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys, (cachemap \"get_or_compute\" key producer) computes one value for concurrent misses of the same key.",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Creates a threadsafe cache with LRU eviction. (cache key value) stores, (cache key) reads or calls the constructor factory(key), (cache) lists keys. (cache key query_state factory) reads or calls factory(), sharing concurrent misses. The access-local factory overrides the constructor factory; failures are retried.",
+			Params: []*scm.TypeDescriptor{{Kind: "func", Label: "factory", Optional: true,
+				Params: []*scm.TypeDescriptor{{Kind: "any", Label: "key"}},
+				Return: &scm.TypeDescriptor{Kind: "any"}}},
 			Return: cacheMapCallableType,
 		},
 	})

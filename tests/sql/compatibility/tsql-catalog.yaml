@@ -739,4 +739,43 @@ test_cases:
   sql: DROP TABLE dbo.ddl_source_contract
 - name: Source contract cleanup removes the alias
   sql: DROP TYPE dbo.ddl_source_float
+- name: Alias lookup caches one compiler session and reloads in the next
+  scm: |
+    (begin
+      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" true nil)
+      (create_sql_type_alias "memcp-tests" "ddl_session_alias" "INT" '() true nil)
+      (define first (newsession))
+      (define initial (tsql_find_type_alias "memcp-tests" "ddl_session_alias" first))
+      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" false nil)
+      (create_sql_type_alias "memcp-tests" "ddl_session_alias" "FLOAT" '() true nil)
+      (define retained (tsql_find_type_alias "memcp-tests" "ddl_session_alias" first))
+      (define second (sql_queryplan_compile_session first nil))
+      (define refreshed (tsql_find_type_alias "memcp-tests" "ddl_session_alias" second))
+      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" false nil)
+      (and (equal? (initial "id") (retained "id"))
+        (equal? (retained "base_type") "INT")
+        (not (equal? (initial "id") (refreshed "id")))
+        (equal? (refreshed "base_type") "FLOAT")))
+  expect: {result: true}
+- name: Absent alias is cached locally and discovered by a new compiler session
+  scm: |
+    (begin
+      (drop_sql_type_alias "memcp-tests" "ddl_session_missing" true nil)
+      (define first (newsession))
+      (define absent (tsql_find_type_alias "memcp-tests" "ddl_session_missing" first))
+      (create_sql_type_alias "memcp-tests" "ddl_session_missing" "SMALLINT" '() true nil)
+      (define retained (tsql_find_type_alias "memcp-tests" "ddl_session_missing" first))
+      (define fresh (tsql_find_type_alias "memcp-tests" "ddl_session_missing" (newsession)))
+      (drop_sql_type_alias "memcp-tests" "ddl_session_missing" false nil)
+      (and (nil? absent) (nil? retained) (equal? (fresh "base_type") "SMALLINT")))
+  expect: {result: true}
+- name: Alias cache keys preserve Unicode identifier spelling
+  scm: |
+    (begin
+      (drop_sql_type_alias "memcp-tests" "ddl_İ" true nil)
+      (create_sql_type_alias "memcp-tests" "ddl_İ" "INT" '() true nil)
+      (define declaration (tsql_find_type_alias "memcp-tests" "ddl_İ" (newsession)))
+      (drop_sql_type_alias "memcp-tests" "ddl_İ" false nil)
+      (equal? (declaration "name") "ddl_İ"))
+  expect: {result: true}
 cleanup: []

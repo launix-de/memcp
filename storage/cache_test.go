@@ -16,7 +16,9 @@ Copyright (C) 2026  MemCP Contributors
 */
 package storage
 
+import "sync"
 import "time"
+import "sync/atomic"
 import "testing"
 import "container/heap"
 import "github.com/launix-de/memcp/scm"
@@ -310,6 +312,91 @@ func TestRangePreparationFailureIsRetried(t *testing.T) {
 	cache.prepareCache("range", nil, nil, prepare)
 	if calls != 2 {
 		t.Fatalf("failed preparation was retained or successful retry was lost: %d", calls)
+	}
+}
+
+// Factories run outside the cache lock and concurrent misses share one result.
+// The second key is written while the factory is paused, so lock ownership is
+// tested without relying on a sleep or on scheduler speed.
+func TestCacheMapConstructorFactorySharesConcurrentMiss(t *testing.T) {
+	var calls atomic.Int64
+	started, release := make(chan struct{}), make(chan struct{})
+	cache := NewCacheMap(scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return args[0]
+	}))
+	var readers sync.WaitGroup
+	results := make(chan scm.Scmer, 16)
+	for range 16 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			results <- scm.Apply(cache, scm.NewString("shared"))
+		}()
+	}
+	<-started
+	scm.Apply(cache, scm.NewString("other"), scm.NewInt(9))
+	close(release)
+	readers.Wait()
+	close(results)
+	for value := range results {
+		if scm.String(value) != "shared" {
+			t.Fatalf("factory received the wrong key: %v", value)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("concurrent misses ran the constructor factory %d times", calls.Load())
+	}
+}
+
+func TestCacheMapFactoriesRetryFailuresAndRetainNil(t *testing.T) {
+	var calls int
+	cache := NewCacheMap(scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		calls++
+		if calls == 1 {
+			panic("factory failed")
+		}
+		return scm.NewNil()
+	}))
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != "factory failed" {
+				t.Fatalf("factory panic was not forwarded: %v", recovered)
+			}
+		}()
+		scm.Apply(cache, scm.NewString("missing"))
+	}()
+	for range 2 {
+		if !scm.Apply(cache, scm.NewString("missing")).IsNil() {
+			t.Fatal("factory nil was not preserved")
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("failed value was cached or nil was recomputed: %d factory calls", calls)
+	}
+}
+
+func TestCacheMapAccessFactoryOverridesConstructorAndStoresCallables(t *testing.T) {
+	constructor := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewInt(1) })
+	local := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewInt(2) })
+	cache := NewCacheMap(constructor)
+	key := scm.NewString("key")
+	if scm.Apply(cache, key, scm.NewNil(), local).Int() != 2 {
+		t.Fatal("access-local factory did not override the constructor")
+	}
+	if scm.Apply(cache, key).Int() != 2 {
+		t.Fatal("constructor replaced the cached value")
+	}
+	scm.Apply(cache, key, constructor)
+	if !scm.Apply(cache, key).IsNativeFunc() {
+		t.Fatal("two-argument setter treated the stored callable as a factory")
+	}
+	other := NewCacheMap(constructor)
+	if scm.Apply(other, key).Int() != 1 {
+		t.Fatal("independent cache instances shared values")
 	}
 }
 

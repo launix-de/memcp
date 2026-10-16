@@ -2521,10 +2521,10 @@ would still have to project that value over the segment. */
 			memoized_lowered)))
 )
 
-(define range_group_cache_mutexes (newcachemap))
+(define range_group_cache_mutexes (newcachemap (lambda (_key) (mutex))))
 
 (define range_group_cache_mutex (lambda (name)
-	(range_group_cache_mutexes "get_or_compute" name (lambda () (mutex)))))
+	(range_group_cache_mutexes name)))
 
 /* Named runtime boundaries keep EXPLAIN and profiles legible while the
 generated recipes remain ordinary Scheme. */

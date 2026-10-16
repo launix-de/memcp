@@ -25,7 +25,7 @@ The stable scope retains gates, not requests, transactions or executable plans. 
 (define tsql_alias_name_parts (parser '(
 	(define database tsql_identifier) "." (define owner tsql_identifier) "." (define name tsql_identifier)
 ) (if (equal?? owner "dbo") (list database name) (error "unsupported alias owner: " owner))))
-(define tsql_find_type_alias (lambda (database name)
+(define tsql_read_type_alias (lambda (database name)
 	(scan nil (table "system" "tsql_types")
 		(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false))
 		(list database) '("name") (lambda (candidate) (equal?? candidate name))
@@ -33,20 +33,32 @@ The stable scope retains gates, not requests, transactions or executable plans. 
 		(lambda (_ id canonical base dimensions nullable)
 			(list "id" id "name" canonical "base_type" base "dimensions" (json_decode dimensions) "nullable" nullable))
 		nil (lambda (a b) (if (nil? a) b (nil? b) a (error "ambiguous alias type: " name))))))
-(define tsql_alias_declaration (lambda (type)
+/* Alias memoization belongs to one compiler session. Scoped values are not
+copied into a later compilation, connection session, or executable plan. DDL
+and execution-time declaration checks read the authoritative table directly.
+Keys retain their spelling: Unicode lowercasing is not the same equivalence
+relation as the case-insensitive declaration lookup. */
+(define tsql_type_alias_cache (lambda (planning_session)
+	(planning_session "get_or_compute_scoped" planning_session "__tsql_type_alias_cache"
+		(lambda () (newcachemap (lambda (key)
+			(match (json_decode key) '(database name) (tsql_read_type_alias database name))))))))
+(define tsql_find_type_alias (lambda (database name planning_session)
+	(if (nil? planning_session) (tsql_read_type_alias database name)
+		((tsql_type_alias_cache planning_session) (json_encode (list database name))))))
+(define tsql_alias_declaration (lambda (type planning_session)
 	(if (equal? (substr type 0 1) "[") (begin
 		(define parts (tsql_alias_name_parts type))
-		(coalesceNil (tsql_find_type_alias (car parts) (cadr parts))
+		(coalesceNil (tsql_find_type_alias (car parts) (cadr parts) planning_session)
 			(error "alias type no longer exists: " type))) nil)))
-(define tsql_effective_column (lambda (column)
+(define tsql_effective_column (lambda (column planning_session)
 	(if (nil? column) nil (begin
-		(define alias (tsql_alias_declaration (column "RawType")))
+		(define alias (tsql_alias_declaration (column "RawType") planning_session))
 		(if (nil? alias) column
 			(set_assoc (set_assoc (set_assoc (set_assoc column "DeclaredType" (column "RawType"))
 				"RawType" (alias "base_type")) "Type" (alias "base_type")) "AliasId" (alias "id")))))))
 (define tsql_type_alias_matches? (lambda (type identity) (begin
 	(define parts (tsql_alias_name_parts type))
-	(define alias (tsql_find_type_alias (car parts) (cadr parts)))
+	(define alias (tsql_find_type_alias (car parts) (cadr parts) nil))
 	(if (nil? alias) false (equal? (alias "id") identity)))))
 (define tsql_guard_type_alias (lambda (type identity planning_session)
 	(planner_record_guard_condition (list (quote tsql_type_alias_matches?) type identity) planning_session)))
@@ -55,7 +67,7 @@ have expanded. Persisted parser definitions retain the context-free compiler;
 the common binder consumes the temporary callback before planning. */
 (define tsql_column_compiler (lambda (planning_session) (lambda (info declaration)
 	(if (nil? declaration) info (begin
-		(define alias (tsql_alias_declaration (declaration "RawType")))
+		(define alias (tsql_alias_declaration (declaration "RawType") planning_session))
 		(if (nil? alias) info (begin
 			(tsql_guard_type_alias (declaration "RawType") (alias "id") planning_session)
 			(sql_info (sql_info_formula info) (alias "base_type")
@@ -79,13 +91,13 @@ the common binder consumes the temporary callback before planning. */
 		(define native_type (toUpper base))
 		(define native_dimensions (tsql_decl_dimensions native_type dimensions))
 		(if (has? '("TIMESTAMP" "ROWVERSION") native_type) (error "generated versions cannot be alias base types") true)
-		(if (tsql_find_type_alias database name) (error "alias type already exists: " name) true)
+		(if (tsql_find_type_alias database name nil) (error "alias type already exists: " name) true)
 		(insert (table "system" "tsql_types") '("database" "name" "base_type" "dimensions" "nullable")
 			(list (list database name native_type (json_encode native_dimensions) nullable)))
 		true)))))
 (define drop_sql_type_alias (lambda (database name ifexists tx)
 	(tsql_type_ddl database tx (lambda () (begin
-		(define alias (tsql_find_type_alias database name))
+		(define alias (tsql_find_type_alias database name nil))
 		(if (nil? alias) (if ifexists false (error "alias type does not exist: " name)) (begin
 			(define qualified (tsql_qualified_type database (alias "name")))
 			/* Enumerating declarations is DROP TYPE work, never query costing or
@@ -104,7 +116,7 @@ the common binder consumes the temporary callback before planning. */
 	"SMALLINT" "TINYINT" "BIT" "REAL" "MONEY" "SMALLMONEY" "DATE" "DATETIME" "SMALLDATETIME"
 	"ROWVERSION" "TIMESTAMP" "UNIQUEIDENTIFIER" "TEXT" "NTEXT" "IMAGE"))
 (define tsql_schema_type_parts (parser (define parts (+ tsql_identifier ".")) parts))
-(define tsql_resolve_schema_type (lambda (database type dimensions) (begin
+(define tsql_resolve_schema_type (lambda (database type dimensions planning_session) (begin
 	(define parts (tsql_schema_type_parts type))
 	(define native (match parts
 		'(name) (if (has? tsql_native_types (toUpper name)) (toUpper name) nil)
@@ -119,11 +131,11 @@ the common binder consumes the temporary callback before planning. */
 					(error "alias must belong to the target database"))
 				_ (error "invalid alias type name")))
 			(if (empty_list? dimensions) true (error "alias dimensions cannot be overridden"))
-			(define alias (coalesceNil (tsql_find_type_alias database name) (error "unknown type: " name)))
+			(define alias (coalesceNil (tsql_find_type_alias database name planning_session) (error "unknown type: " name)))
 			(merge (list "type" (tsql_qualified_type database (alias "name"))) alias))))))
 (define tsql_prepare_column (lambda (database definition planning_session) (match definition
 	'((symbol list) "column" name type dimensions attributes) (begin
-		(define contract (tsql_resolve_schema_type database type (cdr dimensions)))
+		(define contract (tsql_resolve_schema_type database type (cdr dimensions) planning_session))
 		(if (contract "id") (tsql_guard_type_alias (contract "type") (contract "id") planning_session) true)
 		(define base (coalesceNil (contract "base_type") (contract "type")))
 		(define native_dimensions (contract "dimensions"))
@@ -145,7 +157,7 @@ the common binder consumes the temporary callback before planning. */
 	_ definition)))
 (define tsql_publish_alias_attributes (lambda (type attributes) (begin
 	(if (has_assoc? attributes "__tsql_alias_id")
-		(if (equal? ((tsql_alias_declaration type) "id") (attributes "__tsql_alias_id")) true
+		(if (equal? ((tsql_alias_declaration type nil) "id") (attributes "__tsql_alias_id")) true
 			(error "alias declaration changed before DDL execution")) true)
 	(merge (extract_assoc attributes (lambda (key value)
 		(if (equal? key "__tsql_alias_id") '() (list key value))))))))
@@ -321,7 +333,7 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 	_ true)))
 (define tsql_scalar_formula (lambda (schema text contracts mode target tx) (begin
 	(define key (json_encode (list schema text contracts mode target)))
-	(tsql_scalar_cache "get_or_compute" key tx (lambda (tx) (begin
+	(tsql_scalar_cache key tx (lambda (tx) (begin
 		(define planning (newsession))
 		(planning "__tsql_parameter_declarations" contracts)
 		(planning "__tsql_expression_only" true)
@@ -534,7 +546,7 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 	(define inherited (coalesceNil (session "__tsql_parameter_declarations") '()))
 	(define supplied (map inherited (lambda (declaration)
 		(list (car declaration) (session (concat "__tsql_parameter:" (car declaration)))))))
-	(define batches (tsql_script_cache "get_or_compute" (json_encode (list schema text)) nil
+	(define batches (tsql_script_cache (json_encode (list schema text)) nil
 		(lambda (_tx) (map (tsql_script_batches text) (lambda (batch)
 			(list "syntax" (parse_tsql_batch schema (batch "text")) "repeat" (batch "repeat")))))))
 	(reduce batches (lambda (_result batch) (reduce (produceN (batch "repeat")) (lambda (_result _iteration) (begin
@@ -580,7 +592,7 @@ statement owner, account, transaction session, arguments and output callbacks. *
 	and a new lexical scope. No caller local leaks into a nested dynamic batch. */
 	(if (nil? text) (error "dynamic SQL text cannot be NULL") true)
 	/* GO separates submitted scripts, but is not a statement in executed text. */
-	(define syntax (tsql_script_cache "get_or_compute" (json_encode (list schema text "dynamic")) nil
+	(define syntax (tsql_script_cache (json_encode (list schema text "dynamic")) nil
 		(lambda (_tx) (parse_tsql_batch schema text))))
 	(tsql_execute_command_batch schema (cadr syntax) declarations values statement caller resultrow resultfields finish))))
 /* Bind call syntax against formal and caller declarations before execution.

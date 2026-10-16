@@ -445,17 +445,17 @@ recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. 
 		(column "Default") (coalesceNil (column "DefaultExpression") "") (column "Extra"))))
 (define tsql_declaration_matches? (lambda (column contract)
 	(if (nil? column) false (expression_equal? (tsql_declaration_contract column) contract))))
-(define tsql_column_description (lambda (database name column ignore_case) (begin
+(define tsql_column_description (lambda (database name column ignore_case planning_session) (begin
 	(define handle (table database name))
-	(if (nil? handle) nil (tsql_effective_column (show handle "column" column ignore_case))))))
+	(if (nil? handle) nil (tsql_effective_column (show handle "column" column ignore_case) planning_session)))))
 (define tsql_target_column_declaration (lambda (database name column planning_session) (begin
-	(define declaration (tsql_column_description database name column true))
+	(define declaration (tsql_column_description database name column true planning_session))
 	(if (nil? declaration) nil (begin
 		(if (declaration "AliasId")
 			(tsql_guard_type_alias (declaration "DeclaredType") (declaration "AliasId") planning_session) true)
 		(planner_record_guard_condition
 			(list (quote tsql_declaration_matches?)
-				(list (quote tsql_column_description) database name (declaration "Field") false)
+				(list (quote tsql_column_description) database name (declaration "Field") false nil)
 				(list (quote quote) (tsql_declaration_contract declaration))) planning_session)
 		declaration)))))
 (define tsql_insert_declarations (lambda (database table_name columns planning_session) (begin	/* Resolve each target exactly once. Duplicate targets can overwrite an
@@ -1446,7 +1446,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(define name (coalesceNil (resolve_table_name object_schema (cadr object) true) (cadr object)))
 				(if policy (policy object_schema name false) true)
 				(define handle (table object_schema name))
-				(define declaration (if (nil? handle) nil (tsql_effective_column (show handle "column" column true))))
+				(define declaration (if (nil? handle) nil (tsql_effective_column (show handle "column" column true) nil)))
 				(if (nil? declaration) nil (tsql_declared_byte_length declaration))))) relation column)
 			"INT" nil)))
 
@@ -2320,7 +2320,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(atom "DEFAULT" true) (define default tsql_default_value)
 				(atom "FOR" true) (define column tsql_identifier))
 				(lambda (database name) (begin
-					(define declaration (tsql_column_description database name column true))
+					(define declaration (tsql_column_description database name column true nil))
 					(if (nil? declaration) (error "DEFAULT column does not exist: " column) true)
 					(define value (if (has_assoc? default "default")
 						(eval (sql_type_formula '() (tsql_assignment_expr
