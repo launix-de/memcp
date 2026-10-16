@@ -689,4 +689,19 @@ test_cases:
   sql: DROP TABLE dbo.ddl_alias_cached
 - name: Remove cached alias declaration fixture
   sql: DROP TYPE dbo.ddl_alias_cached_type
+- name: Quoted alias names preserve dots spaces and escaped brackets
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.ddl_quoted_alias
+  - sql: DROP TYPE IF EXISTS dbo.[alias.with]] space]
+  - sql: CREATE TYPE dbo.[alias.with]] space] FROM INT
+  sql: CREATE TABLE dbo.ddl_quoted_alias(value [alias.with]] space])
+- name: Quoted aliases use the declared scalar contract
+  setup:
+  - sql: INSERT dbo.ddl_quoted_alias VALUES(5)
+  sql: SELECT value+1 AS result FROM dbo.ddl_quoted_alias
+  expect: {rows: 1, data: [{result: 6}]}
+- name: Quoted alias removal resolves the original name without reparsing punctuation
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.ddl_quoted_alias
+  sql: DROP TYPE dbo.[ALIAS.with]] SPACE]
 cleanup: []

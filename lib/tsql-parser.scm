@@ -189,9 +189,10 @@ no SQL type wrapper survives into execution or storage. */
 contracts keep their existing native-type grammar until alias contracts there
 can be bound for the full procedure lifetime. */
 (define tsql_schema_type (parser (define parts (+ tsql_identifier "."))
-	(if (equal? (count parts) 1) (toUpper (car parts))
-		(reduce parts (lambda (prefix part)
-			(concat prefix (if (equal? prefix "") "" ".") "[" (replace part "]" "]]") "]")) ""))))
+	/* Preserve token boundaries, including an unqualified quoted alias whose
+	name itself contains dots, whitespace or closing brackets. */
+	(reduce parts (lambda (prefix part)
+		(concat prefix (if (equal? prefix "") "" ".") "[" (replace part "]" "]]") "]")) "")))
 (define tsql_unique_parameters (lambda (parameters) (begin
 	(define names (map parameters car))
 	(if (equal? (count names) (count (merge_unique (list names)))) parameters
