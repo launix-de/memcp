@@ -11134,7 +11134,7 @@ canonical prejoin remains the reusable warm-cache path. */
 			(list (quote not)
 				(list (quote try)
 					(list (quote lambda) '()
-						(list (quote show) (qb_schema block) prejoin_relation true))
+						(list (quote show) (qb_schema block) prejoin_relation "constraints"))
 					(list (quote lambda) (list (quote _missing_relation)) false)))
 			direct_plan
 			prejoin_plan))))

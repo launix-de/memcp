@@ -912,3 +912,40 @@ func TestShowColumnMetadataCountsBorrowedDefaultOnce(t *testing.T) {
 		t.Fatal("point description no longer borrows the column default")
 	}
 }
+
+// Planner selectors must remain usable while diagnostic storage owners are busy.
+// Exercise the actual builtin dispatcher, not only the metadata methods.
+func TestShowPlannerSelectorsDoNotAcquireDiagnosticOwnership(t *testing.T) {
+	Init(scm.Globalenv)
+	tbl := showColumnsTestTable(2)
+	tbl.publishShowColumnsSnapshot(true)
+	shard := &storageShard{t: tbl}
+	tbl.Shards = []*storageShard{shard}
+	show := scm.Globalenv.Vars["show"]
+	handle := NewTableScmer(tbl)
+
+	tbl.ddlMu.Lock()
+	tbl.mu.Lock()
+	shard.mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 100 {
+			scm.Apply(show, handle)
+			scm.Apply(show, handle, scm.NewString("column"), scm.NewString("column_0"))
+			scm.Apply(show, handle, scm.NewString("constraints"))
+		}
+	}()
+	select {
+	case <-done:
+		shard.mu.Unlock()
+		tbl.mu.Unlock()
+		tbl.ddlMu.Unlock()
+	case <-time.After(time.Second):
+		shard.mu.Unlock()
+		tbl.mu.Unlock()
+		tbl.ddlMu.Unlock()
+		<-done
+		t.Fatal("planner show selector waited for diagnostic/table ownership")
+	}
+}

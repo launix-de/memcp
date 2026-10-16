@@ -123,7 +123,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* Resident table total includes metadata and all child allocations. Never use
 eviction registrations or planner snapshots as a substitute for resident RAM. */
 (define dashboard_table_size (lambda (db tbl)
-	((show db tbl true) "size_bytes")
+	((show db tbl "memory") "size_bytes")
 ))
 
 /* helper: join list of JSON strings into a JSON array */
@@ -299,13 +299,21 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 							"size_bytes" (s "size_bytes")
 						))
 					)))
-					(define raw_uniques (meta "Unique"))
+					(define constraints (show dbname tblname "constraints"))
+					(define raw_uniques (constraints "Unique"))
 					(define uniques (if (nil? raw_uniques) nil (filter raw_uniques (lambda (u) (not (nil? u))))))
 					(define unique_items (if (or (nil? uniques) (equal? (count uniques) 0)) "[]"
 						(dashboard_json_array (map uniques (lambda (u)
-							(concat "{\"id\":" (json_encode (u "Id")) ",\"cols\":" (json_encode (u "Cols")) "}")
+							(json_encode_assoc (list
+								"id" (u "Id") "name" (if (equal? (u "constraint_name") "") (u "Id") (u "constraint_name"))
+								"cols" (u "Cols") "nulls_not_distinct" (u "nulls_not_distinct")))
 						)))
 					))
+					(define foreign_items (dashboard_json_array (map (constraints "ForeignKeys") (lambda (fk)
+						(json_encode_assoc (list
+							"id" (fk "Id") "role" (fk "Role")
+							"cols" (fk "LocalColumns") "other_table" (fk "OtherTable") "other_cols" (fk "OtherColumns")
+							"on_update" (fk "UpdateMode") "on_delete" (fk "DeleteMode")))))))
 					/* partition schema */
 					(define raw_partitions (meta "Partitions"))
 					(define partitions (if (nil? raw_partitions) nil (filter raw_partitions (lambda (p) (not (nil? p))))))
@@ -329,7 +337,10 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 					))
 					/* build JSON manually to nest arrays inside object */
 					(dashboard_send_json res (concat
-						"{\"columns\":" (dashboard_json_array col_items)
+						"{\"size_bytes\":" (json_encode (tblinfo "size_bytes"))
+						",\"data_size_bytes\":" (json_encode (tblinfo "data_size_bytes"))
+						",\"index_size_bytes\":" (json_encode (tblinfo "index_size_bytes"))
+						",\"columns\":" (dashboard_json_array col_items)
 						",\"shards\":" (dashboard_json_array shard_items)
 						",\"triggers\":" trigger_items
 						",\"meta\":{\"engine\":" (json_encode (meta "Engine"))
@@ -341,6 +352,7 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 						",\"can_alter\":" (json_encode (meta "CanAlter"))
 						",\"can_change_engine\":" (json_encode (meta "CanChangeEngine"))
 						",\"uniques\":" unique_items
+						",\"foreign_keys\":" foreign_items
 						",\"partitions\":" partition_items "}}"
 					))
 				)))
@@ -355,7 +367,7 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 						(define shards (tblinfo "shards"))
 						(define col_count (if (nil? cols) 0 (count cols)))
 						(define shard_count (if (nil? shards) 0 (count shards)))
-						(define total_size (dashboard_table_size dbname tbl))
+						(define total_size (tblinfo "size_bytes"))
 						(define all_cold (if (nil? shards) true
 							(reduce shards (lambda (acc s) (and acc (equal? (s "state") "nil"))) true)))
 						(define row_count (if all_cold nil
@@ -368,6 +380,8 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 							"shards" shard_count
 							"rows" row_count
 							"size_bytes" total_size
+							"data_size_bytes" (tblinfo "data_size_bytes")
+							"index_size_bytes" (tblinfo "index_size_bytes")
 							"maintenance_class" (meta "MaintenanceClass")
 							"can_drop" (meta "CanDrop")
 							"can_truncate" (meta "CanTruncate")

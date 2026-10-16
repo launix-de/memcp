@@ -3269,8 +3269,8 @@ The ordinary NDV estimate remains preferable when it is tighter. */
 		(try
 			(lambda ()
 				(begin
-					(define info (show (source_schema src) (source_relation src) true))
-					(define foreign_keys (coalesceNil ((info "meta") "ForeignKeys") '()))
+					(define info (show (source_schema src) (source_relation src) "constraints"))
+					(define foreign_keys (coalesceNil (info "ForeignKeys") '()))
 					(filter (map foreign_keys (lambda (foreign_key)
 						(if (and (equal? (foreign_key "Role") "referencing")
 							(equal? (foreign_key "LocalColumns") columns))
