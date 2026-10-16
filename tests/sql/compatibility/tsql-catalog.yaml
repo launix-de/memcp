@@ -423,8 +423,8 @@ test_cases:
   - sql: CREATE TYPE dbo.catalog_transient_alias FROM INT
   scm: "(begin\n  (define session (newsession))\n  (define formula (sql_queryplan_compile_formula nil\n    (parse_tsql\
     \ \"memcp-tests\" \"CREATE TABLE dbo.catalog_stale_alias(value dbo.catalog_transient_alias)\" nil session nil)))\n\
-    \  (drop_sql_type_alias \"memcp-tests\" \"catalog_transient_alias\" false)\n  (create_sql_type_alias \"memcp-tests\"\
-    \ \"catalog_transient_alias\" \"INT\" '() true)\n  (define rejected (try (lambda () (begin\n    (sql_execute_formula\
+    \  (drop_sql_type_alias \"memcp-tests\" \"catalog_transient_alias\" false nil)\n  (create_sql_type_alias \"memcp-tests\"\
+    \ \"catalog_transient_alias\" \"INT\" '() true nil)\n  (define rejected (try (lambda () (begin\n    (sql_execute_formula\
     \ session nil formula (lambda row true) (lambda fields true)) false)) (lambda (_) true)))\n  (if (and rejected\
     \ (nil? (resolve_table_name \"memcp-tests\" \"catalog_stale_alias\" false))) true\n    (error \"cached CREATE published\
     \ an obsolete alias declaration\")))\n"
