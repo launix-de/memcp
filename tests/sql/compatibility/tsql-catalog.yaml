@@ -659,4 +659,34 @@ test_cases:
   cleanup:
   - sql: DROP TABLE dbo.ddl_alias_decimal
   - sql: DROP TYPE dbo.ddl_alias_decimal_type
+- name: Remove previous cached alias fixture
+  sql: DROP TABLE IF EXISTS dbo.ddl_alias_cached
+- name: Remove previous cached alias declaration
+  sql: DROP TYPE IF EXISTS dbo.ddl_alias_cached_type
+- name: First cached alias has an integer SQL contract
+  sql: CREATE TYPE dbo.ddl_alias_cached_type FROM INT
+- name: Bind CREATE to the first alias definition
+  sql: CREATE TABLE dbo.ddl_alias_cached(value dbo.ddl_alias_cached_type)
+- name: Insert the first alias value
+  sql: INSERT dbo.ddl_alias_cached VALUES(5)
+- name: Cache integer division through an alias
+  sql: SELECT value/2 AS result FROM dbo.ddl_alias_cached
+  expect: {rows: 1, data: [{result: 2}]}
+- name: Retire the first cached alias table
+  sql: DROP TABLE dbo.ddl_alias_cached
+- name: Retire the first cached alias declaration
+  sql: DROP TYPE dbo.ddl_alias_cached_type
+- name: Recreated alias has a different SQL contract
+  sql: CREATE TYPE dbo.ddl_alias_cached_type FROM FLOAT
+- name: Cached CREATE rebinds its consumed alias definition
+  sql: CREATE TABLE dbo.ddl_alias_cached(value dbo.ddl_alias_cached_type)
+- name: Cached INSERT rebinds the replacement alias contract
+  sql: INSERT dbo.ddl_alias_cached VALUES(5)
+- name: Cached expression uses the replacement SQL type regardless of numeric carrier
+  sql: SELECT value/2 AS result FROM dbo.ddl_alias_cached
+  expect: {rows: 1, data: [{result: 2.5}]}
+- name: Remove cached alias table fixture
+  sql: DROP TABLE dbo.ddl_alias_cached
+- name: Remove cached alias declaration fixture
+  sql: DROP TYPE dbo.ddl_alias_cached_type
 cleanup: []

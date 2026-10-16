@@ -44,13 +44,36 @@ The stable scope retains gates, not requests, transactions or executable plans. 
 		(if (nil? alias) column
 			(set_assoc (set_assoc (set_assoc (set_assoc column "DeclaredType" (column "RawType"))
 				"RawType" (alias "base_type")) "Type" (alias "base_type")) "AliasId" (alias "id")))))))
-(define tsql_compile_column (lambda (info declaration)
+(define tsql_type_alias_matches? (lambda (type identity) (begin
+	(define parts (tsql_alias_name_parts type))
+	(define alias (tsql_find_type_alias (car parts) (cadr parts)))
+	(if (nil? alias) false (equal? (alias "id") identity)))))
+(define tsql_guard_type_alias (lambda (type identity planning_session)
+	(planner_record_guard_condition (list (quote tsql_type_alias_matches?) type identity) planning_session)))
+/* Context is attached only to a consuming compilation, after stored views
+have expanded. Persisted parser definitions retain the context-free compiler;
+the common binder consumes the temporary callback before planning. */
+(define tsql_column_compiler (lambda (planning_session) (lambda (info declaration)
 	(if (nil? declaration) info (begin
 		(define alias (tsql_alias_declaration (declaration "RawType")))
-		(if (nil? alias) info
+		(if (nil? alias) info (begin
+			(tsql_guard_type_alias (declaration "RawType") (alias "id") planning_session)
 			(sql_info (sql_info_formula info) (alias "base_type")
 				(if (sql_text_type? (alias "base_type"))
-					(list (coalesce (declaration "Collation") "utf8mb4_general_ci") 2) nil)))))))
+					(list (coalesce (declaration "Collation") "utf8mb4_general_ci") 2) nil)))))))))
+(define tsql_compile_column (tsql_column_compiler nil))
+(define tsql_bind_column_compilers (lambda (node compiler) (match node
+	((symbol quote) _datum) node
+	((symbol sql_compile_column) _previous expression) (list (quote sql_compile_column) compiler expression)
+	(cons _head _tail) (map node (lambda (item) (tsql_bind_column_compilers item compiler)))
+	_ node)))
+(define tsql_build_dml_plan (lambda (schema name alias sources columns condition order limit offset planning_session tx) (begin
+	(define compiler (tsql_column_compiler planning_session))
+	(build_dml_plan schema name alias
+		(tsql_bind_column_compilers sources compiler)
+		(tsql_bind_column_compilers columns compiler)
+		(tsql_bind_column_compilers condition compiler)
+		(tsql_bind_column_compilers order compiler) limit offset planning_session tx))))
 (define create_sql_type_alias (lambda (database name base dimensions nullable tx)
 	(tsql_type_ddl database tx (lambda () (begin
 		(define native_type (toUpper base))
@@ -98,9 +121,10 @@ The stable scope retains gates, not requests, transactions or executable plans. 
 			(if (empty_list? dimensions) true (error "alias dimensions cannot be overridden"))
 			(define alias (coalesceNil (tsql_find_type_alias database name) (error "unknown type: " name)))
 			(merge (list "type" (tsql_qualified_type database (alias "name"))) alias))))))
-(define tsql_prepare_column (lambda (database definition) (match definition
+(define tsql_prepare_column (lambda (database definition planning_session) (match definition
 	'((symbol list) "column" name type dimensions attributes) (begin
 		(define contract (tsql_resolve_schema_type database type (cdr dimensions)))
+		(if (contract "id") (tsql_guard_type_alias (contract "type") (contract "id") planning_session) true)
 		(define base (coalesceNil (contract "base_type") (contract "type")))
 		(define native_dimensions (contract "dimensions"))
 		(define options (cdr attributes))

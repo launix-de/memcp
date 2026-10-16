@@ -450,6 +450,8 @@ recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. 
 (define tsql_target_column_declaration (lambda (database name column planning_session) (begin
 	(define declaration (tsql_column_description database name column true))
 	(if (nil? declaration) nil (begin
+		(if (declaration "AliasId")
+			(tsql_guard_type_alias (declaration "DeclaredType") (declaration "AliasId") planning_session) true)
 		(planner_record_guard_condition
 			(list (quote tsql_declaration_matches?)
 				(list (quote tsql_column_description) database name (declaration "Field") false)
@@ -1970,7 +1972,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define sources (merge (coalesceNil from '())))
 			(define target (tsql_write_source target sources))
 			(if policy (policy (source_schema target) (source_relation target) true) true)
-			(build_dml_plan (source_schema target) (source_relation target) (source_alias target)
+			(tsql_build_dml_plan (source_schema target) (source_relation target) (source_alias target)
 				(tsql_write_sources target sources) (tsql_update_values target cols)
 				(coalesceNil condition true) nil limit nil planning_session tx)))))
 	(define tsql_delete (parser '(
@@ -1985,7 +1987,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define sources (merge (coalesceNil from '())))
 			(define target (tsql_write_source target sources))
 			(if policy (policy (source_schema target) (source_relation target) true) true)
-			(build_dml_plan (source_schema target) (source_relation target) (source_alias target)
+			(tsql_build_dml_plan (source_schema target) (source_relation target) (source_alias target)
 				(tsql_write_sources target sources) nil (coalesceNil condition true)
 				nil limit nil planning_session tx)))))
 
@@ -1998,7 +2000,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define trunc_schema (coalesce schema2 schema))
 			(cons '!begin (list
 				(list (quote checktablemaintenance) trunc_schema tbl "truncate")
-				(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil planning_session tx)))
+				(tsql_build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil planning_session tx)))
 	))))
 
 	(define tsql_insert_literal_cell (parser (or
@@ -2052,7 +2054,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 		) (list op value)) empty true))
 	) (reduce terms tsql_fold_additive a)))
 	(define tsql_build_select_plan (lambda (query) (begin
-		(define expanded (sql_expand_views query policy))
+		(define expanded (tsql_bind_column_compilers (sql_expand_views query policy) (tsql_column_compiler planning_session)))
 		(define descriptors (tsql_result_columns expanded parameters))
 		(if describe (list (quote quote) descriptors) (list (quote !begin)
 			(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded))
@@ -2067,7 +2069,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(cons list '((cons list (map (produceN (count columns))
 				(lambda (i) (sql_type_formula '() (tsql_assignment_expr
 					'('nth 'item (+ (* i 2) 1)) (nth declarations i)))))))) 1 false))
-		(define expanded (sql_expand_views query policy))
+		(define expanded (tsql_bind_column_compilers (sql_expand_views query policy) (tsql_column_compiler planning_session)))
 		(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
 			(error "INSERT column count does not match SELECT column count"))
 		(define native_plan (build_queryplan_term expanded planning_session tx))
@@ -2269,7 +2271,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(if policy (policy (coalesce schema2 schema) name true) true)
 			/* Explicit PRIMARY KEY policy precedes inherited alias nullability. */
 			(define columns (map (tsql_table_primary_columns columns) (lambda (column)
-				(tsql_prepare_column (coalesce schema2 schema) column))))
+				(tsql_prepare_column (coalesce schema2 schema) column planning_session))))
 			(list (quote tsql_create_relation) (coalesce schema2 schema) name
 				(cons (quote list) (map columns tsql_identity_native_column))
 				(tsql_identity_table_options columns) (if ifnotexists true false) (quote tx))))))
@@ -2338,7 +2340,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 							(cons (quote list) (map columns (lambda (column)
 								(match column '(col type dimensions attributes)
 									(tsql_prepare_column database (list (quote list) "column" col type dimensions
-										(cons (quote list) attributes))))))) (quote tx)))))
+										(cons (quote list) attributes)) planning_session))))) (quote tx)))))
 			(parser '((atom "DROP" true) (atom "COLUMN" true)
 				(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
 				(define columns (+ tsql_identifier ",")))
