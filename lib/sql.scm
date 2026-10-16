@@ -551,7 +551,7 @@ user table merely to discard a newly constructed policy closure. */
 			/* Compile diagnostics measure true misses and must not turn their own
 			previous result into a cache hit. The inspected query is never run. */
 			/* A hit needs only the retained dispatcher. Construct miss producers
-			after this lookup; get_or_compute still serializes concurrent misses. */
+			after this lookup; the getter still serializes concurrent misses. */
 			(define cached_entry (if compile_diagnostic nil (queryplan_cache cache_key)))
 			(define formula (if (not (nil? cached_entry))
 				/* Guarded entries retain (entry dispatcher); exact entries are
@@ -582,7 +582,7 @@ user table merely to discard a newly constructed policy closure. */
 										(cadr variant)
 										(sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query resolved_policy session compile_tx variant)))))
 								(define compiled (if compile_diagnostic (exact_compile tx)
-									(queryplan_cache "get_or_compute" cache_key tx exact_compile)))
+									(queryplan_cache cache_key tx exact_compile)))
 								(if (list? compiled) (cadr compiled) compiled))
 							(begin
 								/* Build the exact-cache compiler only for its own branch. Guarded
@@ -597,9 +597,9 @@ user table merely to discard a newly constructed policy closure. */
 													(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx)))))))))
 								(if compile_diagnostic
 									(exact_compile tx)
-									(queryplan_cache "get_or_compute" cache_key tx exact_compile))))
+									(queryplan_cache cache_key tx exact_compile))))
 						(begin
-							(define cached_entry (queryplan_cache "get_or_compute" cache_key tx
+							(define cached_entry (queryplan_cache cache_key tx
 								(lambda (compile_tx) (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query
 									(sql_policy_spec_resolve policy) session compile_tx nil))))
 							(cadr cached_entry))))))

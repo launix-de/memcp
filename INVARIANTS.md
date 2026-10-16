@@ -1225,6 +1225,10 @@ meaningful.
   consumes this annotation before logical rewrites and physical lowering,
   including references produced by wildcard expansion. Alias definitions are
   frontend-owned data in ordinary system tables, not runtime storage types.
+- Alias-definition memoization belongs to one planner compilation session.
+  Its cache and factory must not enter executable plans, persisted definitions,
+  connection sessions, or later compiler sessions. A new compilation reads the
+  authoritative system table again, including after a prior negative lookup.
 
 ### Native generated-ID blocks
 
