@@ -98,7 +98,6 @@ test_cases:
     data:
     - mixedid: 1
       MIXEDTITLE: good
-  noncritical: true
 - name: Uppercase view alias resolves qualified star
   sql: SELECT MIXEDVIEW.* FROM dbo.mixedview
   expect:
@@ -106,7 +105,6 @@ test_cases:
     data:
     - MixedId: 1
       MixedTitle: good
-  noncritical: true
 - name: ODBC discovers mixed-case view columns using lowercase patterns
   sql: sp_columns @table_name=N'mixedview',@column_name=N'mixedid',@ODBCVer=3
   expect:
@@ -120,22 +118,20 @@ test_cases:
   sql: CREATE VIEW dbo.MIXEDVIEW AS SELECT Tenant FROM dbo.key_semantics
   expect:
     error: true
-  noncritical: true
 - name: A table cannot shadow an existing view under another spelling
   sql: CREATE TABLE dbo.mixedview (Id INT)
   expect:
     error: true
-  noncritical: true
 - name: A view cannot shadow an existing table under another spelling
   sql: CREATE VIEW dbo.KEY_SEMANTICS AS SELECT Id FROM dbo.key_semantics
   expect:
     error: true
-  noncritical: true
 - name: Drop resolves the mixed-case view spelling
   sql: DROP VIEW dbo.mixedview
-  noncritical: true
-# Keep the visibility check independent of unsupported folded-name DROP.
+# Exercise declared-spelling DROP independently after the folded-spelling DROP.
 - name: Drop the declared view spelling before checking visibility
+  setup:
+  - sql: CREATE OR ALTER VIEW dbo.MixedView AS SELECT Id AS MixedId,Title AS MixedTitle FROM dbo.key_semantics
   sql: DROP VIEW dbo.MixedView
 - name: Dropped views do not remain visible through another spelling
   sql: SELECT mixedid FROM dbo.MixedView
@@ -145,7 +141,6 @@ test_cases:
   sql: CREATE TABLE dbo.NamingFixture (Id INT PRIMARY KEY, CompanyId INT NOT NULL, Title NVARCHAR(20))
 - name: Insert resolves a table and columns with different identifier case
   sql: INSERT INTO dbo.namingfixture (ID,companyid,TITLE) VALUES (1,2,N'first')
-  noncritical: true
 - name: Select resolves table and columns while preserving output labels
   sql: SELECT id,COMPANYID,title FROM dbo.NAMINGFIXTURE
   expect:
@@ -154,7 +149,6 @@ test_cases:
     - id: 1
       COMPANYID: 2
       title: first
-  noncritical: true
 - name: Qualified star resolves case-independent source aliases
   sql: SELECT NAMINGFIXTURE.* FROM dbo.namingfixture
   expect:
@@ -163,7 +157,6 @@ test_cases:
     - Id: 1
       CompanyId: 2
       Title: first
-  noncritical: true
 - name: Object lookup resolves case-independent table spelling
   sql: SELECT CASE WHEN OBJECT_ID(N'dbo.namingfixture')=OBJECT_ID(N'dbo.NamingFixture') THEN 1 ELSE 0 END AS same_object,COL_LENGTH(N'dbo.NAMINGFIXTURE',N'title')
     AS length
@@ -175,10 +168,8 @@ test_cases:
   noncritical: true
 - name: Update resolves assignment columns with different case
   sql: UPDATE dbo.NAMINGFIXTURE SET TITLE=N'updated',companyid=3 WHERE ID=1
-  noncritical: true
 - name: Update accepts different case for its source alias
   sql: UPDATE F SET title=N'aliased' FROM dbo.namingfixture AS f WHERE f.ID=1
-  noncritical: true
 - name: Canonical storage spelling survives case-independent DML
   sql: SELECT Id,CompanyId,Title FROM dbo.NamingFixture
   expect:
@@ -187,26 +178,20 @@ test_cases:
     - Id: 1
       CompanyId: 3
       Title: aliased
-  noncritical: true
 - name: Create cannot publish a folded table-name collision
   sql: CREATE TABLE dbo.NAMINGFIXTURE (Id INT)
   expect:
     error: true
-  noncritical: true
 - name: Alter resolves the table name and retains the new column spelling
   sql: ALTER TABLE dbo.namingfixture ADD Added SMALLINT
-  noncritical: true
 - name: Alter cannot publish a folded column-name collision
   sql: ALTER TABLE dbo.NAMINGFIXTURE ADD title INT
   expect:
     error: true
-  noncritical: true
 - name: Dropping a column resolves case-independent spelling
   sql: ALTER TABLE dbo.NAMINGFIXTURE DROP COLUMN aDdEd
-  noncritical: true
 - name: Delete resolves case-independent table and column names
   sql: DELETE FROM dbo.namingfixture WHERE ID=1
-  noncritical: true
 - name: Delete affected the real table
   sql: SELECT COUNT(*) AS n FROM dbo.NamingFixture
   expect:
@@ -215,7 +200,6 @@ test_cases:
     - n: 0
 - name: Implicit INSERT columns still use canonical declarations
   sql: INSERT INTO dbo.NAMINGFIXTURE VALUES (2,4,N'second')
-  noncritical: true
 - name: Unsupported truncate fails before changing data
   sql: TRUNCATE TABLE dbo.namingfixture
   expect:
@@ -228,7 +212,6 @@ test_cases:
     - Id: 2
       CompanyId: 4
       Title: second
-  noncritical: true
 - name: Drop resolves current canonical table spelling
   sql: DROP TABLE dbo.NAMINGFIXTURE
 - name: A recreated table retains its newly declared spelling

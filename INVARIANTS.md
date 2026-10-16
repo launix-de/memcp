@@ -1218,6 +1218,13 @@ meaningful.
   `collation` are used for SQL compile-time decisions such as selecting
   collations for storage operators, compiling casts, or reporting type errors;
   they must not survive as runtime type wrappers or checks in storage operators.
+- A frontend may attach a `sql_compile_column` declaration compiler to a column
+  reference. The shared name binder supplies its immutable native point
+  description and expression triple. The callback must preserve the column
+  expression; only its declared type and collation may change. The binder
+  consumes this annotation before logical rewrites and physical lowering,
+  including references produced by wildcard expansion. Alias definitions are
+  frontend-owned data in ordinary system tables, not runtime storage types.
 
 ### Native generated-ID blocks
 

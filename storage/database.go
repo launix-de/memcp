@@ -33,6 +33,10 @@ type database struct {
 	Name        string                                     `json:"name"`
 	persistence PersistenceEngine                          `json:"-"`
 	tables      *NonLockingReadMap.ReadMap[string, *table] `json:"-"`
+	// Name-only metadata, rebuilt under schemalock at namespace publication.
+	// Readers never retain tables or traverse the catalog. An empty spelling
+	// records an ambiguous folded name; exact-case frontends are unaffected.
+	foldedTableNames atomic.Pointer[map[string]string] `json:"-"`
 	// Immutable source definitions use the same lock-free catalog as tables.
 	// DDL publishes under schemalock; compiled code is transient per definition.
 	procedures *NonLockingReadMap.ReadMap[string, *ProcedureDescription] `json:"-"`
@@ -661,6 +665,7 @@ func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
 // ensureLoaded loads schema.json into the database struct exactly once.
 func (db *database) ensureLoaded() {
 	db.loadOnce.Do(func() {
+		defer db.publishTableNamesLocked()
 		db.initializeTransactionLog()
 		if db.srState != COLD {
 			return
@@ -731,6 +736,41 @@ func (db *database) ensureLoaded() {
 			}
 		}
 	})
+}
+
+// publishTableNamesLocked owns schema membership (or an unpublished database).
+// Names are immutable scalar copies, not pointers to mutable table descriptors.
+func (db *database) publishTableNamesLocked() {
+	names := make(map[string]string)
+	for _, t := range db.tables.GetAll() {
+		if t.isHiddenFromShowTables() {
+			continue
+		}
+		folded := foldIdentifier(t.Name)
+		if _, exists := names[folded]; exists {
+			names[folded] = ""
+		} else {
+			names[folded] = t.Name
+		}
+	}
+	db.foldedTableNames.Store(&names)
+}
+
+// ResolveTableName selects a caller-specified identifier comparison policy.
+// It reads only published metadata and adds no work to scans or ordinary lookup.
+func (db *database) ResolveTableName(name string, ignoreCase bool) (string, bool) {
+	db.ensureLoaded()
+	if !ignoreCase {
+		return name, db.tables.Get(name) != nil
+	}
+	if names := db.foldedTableNames.Load(); names != nil {
+		canonical, exists := (*names)[foldIdentifier(name)]
+		if exists && canonical == "" {
+			panic("ambiguous table name: " + name)
+		}
+		return canonical, exists
+	}
+	return "", false
 }
 
 // invalidatePersistedPlannerCodeAfterLoad drops executable code derived from a
@@ -1820,6 +1860,9 @@ func (db *database) createTableLocked(name string, pm PersistencyMode, ifnotexis
 	if existing := db.tables.Set(name, t); existing != nil {
 		panic("Table " + name + " already exists")
 	}
+	if !t.isHiddenFromShowTables() {
+		db.publishTableNamesLocked()
+	}
 	return t, true
 }
 
@@ -1885,6 +1928,9 @@ func DropTable(schema, name string, ifexists bool) {
 		requireTableMaintenance(schema, name, maintenanceDrop)
 	}
 	db.tables.Remove(name)
+	if !t.isHiddenFromShowTables() {
+		db.publishTableNamesLocked()
+	}
 	if name == ".blobs" {
 		db.blobRefState().table.Store(nil)
 	}
@@ -1946,6 +1992,7 @@ func RenameTable(schema, oldname, newname string) {
 	db.tables.Remove(oldname)
 	t.Name = newname
 	db.tables.Set(newname, t)
+	db.publishTableNamesLocked()
 	db.saveLockedAndUnlock(t.schemaSaveMode())
 }
 

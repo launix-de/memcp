@@ -394,6 +394,17 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   cache registration; persistent computors retain no transaction. Cache
   eviction uses nonblocking access and lifetime pins, without DDL locks.
 
+- `database.foldedTableNames` is an immutable name-only directory published
+  atomically under existing schema ownership at visible namespace changes and
+  before lazy-load completion. Empty entries denote ambiguous folded spellings.
+  Exact lookups and row execution do not consult it; hidden planner cache tables
+  neither enter this directory nor trigger its reconstruction.
+- `column.DefaultName` is optional persisted declaration metadata owned by the
+  existing default. CREATE and ALTER use existing DDL locks, immutable column
+  replacement and SHOW publication. Adding/replacing/removing a named default
+  publishes its value, expression and name together; row execution ignores the
+  name. No parallel default catalog or default evaluator is introduced.
+
 ### Scheme AST and Codegen Quoting (lib/queryplan.scm and lib/queryplan-*.scm)
 - Build AST as data: most builder blocks use a single leading quote `'(...)` so nested lists are data, not executed at construction.
 - Lambdas: embed as `'((quote lambda) (param-list) body)` where:
