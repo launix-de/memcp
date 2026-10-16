@@ -5743,12 +5743,14 @@ fix). */
 
 (define star_expr_alias (lambda (expr)
 	(match expr
+		((symbol sql_compile_column) _compiler column) (star_expr_alias column)
 		((symbol get_column) tblvar _ "*" _) tblvar
 		((quote get_column) tblvar _ "*" _) tblvar
 		_ false)))
 
 (define star_expr? (lambda (expr)
 	(match expr
+		((symbol sql_compile_column) _compiler column) (star_expr? column)
 		((symbol get_column) _ _ "*" _) true
 		((quote get_column) _ _ "*" _) true
 		_ false)))
@@ -5768,7 +5770,13 @@ base-table schema silently produces empty result metadata for derived.*. */
 		(cons title (cons expr rest)) (begin
 			(define requested_alias (star_expr_alias expr))
 			(if (star_expr? expr)
-				(merge (list (expand_star_for_sources sources requested_alias) (expand_query_block_fields sources rest)))
+				(merge (list
+					(match expr
+						((symbol sql_compile_column) compiler _column)
+						(merge (extract_assoc (expand_star_for_sources sources requested_alias)
+							(lambda (name column) (list name (list (quote sql_compile_column) compiler column)))))
+						_ (expand_star_for_sources sources requested_alias))
+					(expand_query_block_fields sources rest)))
 				(cons title (cons expr (expand_query_block_fields sources rest)))))
 		_ '())))
 

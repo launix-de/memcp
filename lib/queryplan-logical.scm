@@ -5853,6 +5853,11 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 
 (define bind_query_expr (lambda (scopes expr path all_strings)
 	(match expr
+		((symbol sql_compile_column) compiler expression) (begin
+			(define bound (bind_query_expr scopes expression path all_strings))
+			(define info (sql_compile_column_info (map (merge scopes) binding_entry_source) compiler bound))
+			(if (expression_equal? info (sql_expr_info (map (merge scopes) binding_entry_source) bound)) bound
+				(list (quote sql_type_expr) (sql_info_formula info) (sql_info_type info) (sql_info_collation info))))
 		(cons (symbol sql_compile_expr) (cons compiler arguments)) (begin
 			/* Freeze frontend contracts in their producing SQL scope before
 			derived/group rewrites move expressions to different source scopes.
@@ -5910,6 +5915,11 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 
 (define bind_group_expr (lambda (scopes fields expr path all_strings)
 	(match expr
+		((symbol sql_compile_column) compiler expression) (begin
+			(define bound (bind_group_expr scopes fields expression path all_strings))
+			(define info (sql_compile_column_info (map (merge scopes) binding_entry_source) compiler bound))
+			(if (expression_equal? info (sql_expr_info (map (merge scopes) binding_entry_source) bound)) bound
+				(list (quote sql_type_expr) (sql_info_formula info) (sql_info_type info) (sql_info_collation info))))
 		((symbol inner_select) _subquery) (bind_query_expr scopes expr path all_strings)
 		((quote inner_select) _subquery) (bind_query_expr scopes expr path all_strings)
 		((symbol inner_select_exists) _subquery) (bind_query_expr scopes expr path all_strings)
@@ -6037,6 +6047,17 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 
 (define bind_query_fields (lambda (fields scopes path all_strings index)
 	(match (coalesceNil fields '())
+		(cons title (cons ((symbol sql_compile_column) compiler column) rest))
+		(if (star_expr? column) (begin
+			(define bound (bind_query_expr scopes column path all_strings))
+			(define expanded (expand_star_for_sources (map (car scopes) binding_entry_source) (star_expr_alias bound)))
+			(merge (list
+				(bind_query_fields (merge (extract_assoc expanded (lambda (name reference)
+					(list name (list (quote sql_compile_column) compiler reference))))) scopes path all_strings index)
+				(bind_query_fields rest scopes path all_strings (+ index 1)))))
+			(cons title (cons (bind_query_expr scopes (list (quote sql_compile_column) compiler column)
+				(binding_path path "field" index) all_strings)
+				(bind_query_fields rest scopes path all_strings (+ index 1)))))
 		(cons title (cons expr rest)) (cons title (cons
 			(bind_query_expr scopes expr (binding_path path "field" index) all_strings)
 			(bind_query_fields rest scopes path all_strings (+ index 1))))

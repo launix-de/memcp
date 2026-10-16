@@ -353,6 +353,23 @@ keeps its existing (ignorecase-flagged) resolution for them. */
 					(sql_info reference "any" nil)
 					(sql_source_column_info sources src reference alias column column_ic)))))))
 
+/* Frontend declaration resolution runs after the common name binder. Give
+the compiler the existing immutable point description, not runtime values.
+Derived columns already carry their producer's expression contract. */
+(define sql_compile_column_info (lambda (sources compiler expression) (begin
+	(define info (sql_expr_info sources expression))
+	(define declaration (match (sql_info_formula info)
+		((symbol get_column) alias alias_ic column column_ic) (begin
+			(define src (source_for_alias sources
+				(if (empty_list? sources) nil (source_alias (car sources))) alias alias_ic))
+			(if (nil? src) nil (not (source_is_base_table? src)) nil (begin
+				(define handle (table (source_schema src) (source_relation src)))
+				(if (nil? handle) nil (show handle "column" column column_ic)))))
+		_ nil))
+	(define resolved (compiler info declaration))
+	(if (expression_equal? (sql_info_formula info) (sql_info_formula resolved)) resolved
+		(error "a column declaration compiler must preserve the column expression")))))
+
 /* Comparison: BOOLEAN. Preserve plain operators for direct scan bounds;
 computed text comparisons use the compile-time selected Less relation. The
 merged collation remains in the info slot for other compiler consumers. */
@@ -440,6 +457,8 @@ the conditions are booleans and would otherwise pollute the merge. */
 		The callback is a compiler, never an executable SQL operator. */
 		(cons (symbol sql_compile_expr) (cons compiler arguments))
 		(compiler (map arguments (lambda (argument) (sql_expr_info sources argument))))
+		((symbol sql_compile_column) compiler expression)
+		(sql_compile_column_info sources compiler expression)
 		((symbol session) _key) (sql_info expr "any" nil)
 		((symbol session_globalvar) _key) (sql_info expr "any" nil)
 		((symbol lambda) _params _body) (sql_info expr "any" nil)
@@ -514,6 +533,7 @@ Unannotated scalar terminals have no trustworthy integer syntax contract. */
 	(match expr
 		((symbol sql_type_expr) _formula _type _collation) true
 		((symbol get_column) _alias _alias_ic _column _column_ic) true
+		((symbol sql_compile_column) _compiler _column) true
 		/* A callback's declared result type alone does not establish exact key
 		membership for computed probes (integer arithmetic may overflow). */
 		(cons (symbol sql_compile_expr) _arguments) false

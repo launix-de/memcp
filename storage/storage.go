@@ -856,11 +856,12 @@ func Init(en scm.Env) {
 		Label:       "options",
 		Description: "table options as an alternating key/value list",
 		Keys: map[string]*scm.TypeDescriptor{
-			"auto_increment": {Kind: "int", Label: "auto_increment", Description: "first automatically assigned value; must be non-negative"},
-			"charset":        {Kind: "string", Label: "charset", Description: "default character set name"},
-			"collation":      {Kind: "string", Label: "collation", Description: "default collation name"},
-			"comment":        {Kind: "string", Label: "comment", Description: "user-visible table comment"},
-			"engine":         {Kind: "string", Label: "engine", Description: "storage engine: safe, logged, sloppy, memory, or cache"},
+			"auto_increment":  {Kind: "int", Label: "auto_increment", Description: "first automatically assigned value; must be non-negative"},
+			"charset":         {Kind: "string", Label: "charset", Description: "default character set name"},
+			"collation":       {Kind: "string", Label: "collation", Description: "default collation name"},
+			"comment":         {Kind: "string", Label: "comment", Description: "user-visible table comment"},
+			"engine":          {Kind: "string", Label: "engine", Description: "storage engine: safe, logged, sloppy, memory, or cache"},
+			"name_ignorecase": {Kind: "bool", Description: "check existing namespace membership without identifier case during creation"},
 			"oninit": {
 				Kind:        "func",
 				Label:       "oninit",
@@ -880,6 +881,8 @@ func Init(en scm.Env) {
 			"comment":            {Kind: "string", Label: "comment", Description: "user-visible column comment"},
 			"default":            {Kind: "any", Label: "default", Description: "literal value used when an insert omits the column"},
 			"default_expression": {Kind: "string", Label: "default_expression", Description: "expression evaluated when an insert omits the column"},
+			"default_name":       {Kind: "string", Label: "default_name", Description: "optional public name of the existing column default"},
+			"name_ignorecase":    {Kind: "bool", Description: "check column namespace membership without identifier case during creation"},
 			"fill_existing":      {Kind: "bool", Label: "fill_existing", Description: "ADD-time initialization: true (default) fills existing rows with the declared default; false keeps existing nullable rows NULL. Future INSERT defaults are unchanged"},
 			"dependencies":       {Kind: "list", Description: "logical source tables whose changes invalidate a computed payload"},
 			"filtercols":         columnList("filtercols", "columns supplied to filter before computing a value"),
@@ -2501,6 +2504,7 @@ func Init(en scm.Env) {
 			collation := ""
 			charset := ""
 			comment := ""
+			nameIgnoreCase := false
 			oninit := scm.NewNil()
 			for i := 0; i+1 < len(options); i += 2 {
 				key := scm.String(options[i])
@@ -2514,6 +2518,8 @@ func Init(en scm.Env) {
 					charset = scm.String(val)
 				case "comment":
 					comment = scm.String(val)
+				case "name_ignorecase":
+					nameIgnoreCase = scm.ToBool(val)
 				case "auto_increment":
 					nextAutoIncrement, _ := strconv.ParseUint(scm.String(val), 0, 64)
 					if nextAutoIncrement > 0 {
@@ -2600,6 +2606,17 @@ func Init(en scm.Env) {
 
 			db.schemalock.Lock()
 			existing := db.tables.Get(tblName)
+			if nameIgnoreCase {
+				if names := db.foldedTableNames.Load(); names != nil {
+					if spelling, found := (*names)[foldIdentifier(tblName)]; found {
+						if spelling == "" {
+							db.schemalock.Unlock()
+							panic("ambiguous table name: " + tblName)
+						}
+						existing = db.tables.Get(spelling)
+					}
+				}
+			}
 			if existing != nil {
 				// Keep the hot ifnotexists path free of schema saves. Planner-created
 				// helper tables deliberately re-issue createtable on every query; if
@@ -2625,11 +2642,20 @@ func Init(en scm.Env) {
 
 			// Lock before publication. Every if-not-exists observer therefore waits
 			// until oninit and registered create-table triggers have both completed.
+			for _, c := range newTable.Columns {
+				if c.DefaultName != "" && (newTable.hasDeclarationName(c.DefaultName, c, true) || db.hasDeclarationNameLocked(c.DefaultName, nil)) {
+					db.schemalock.Unlock()
+					panic("declaration name already exists: " + c.DefaultName)
+				}
+			}
 			newTable.creationMu.Lock()
 			if prev := db.tables.Set(tblName, newTable); prev != nil {
 				newTable.creationMu.Unlock()
 				db.schemalock.Unlock()
 				panic("Table " + tblName + " already exists")
+			}
+			if !newTable.isHiddenFromShowTables() {
+				db.publishTableNamesLocked()
 			}
 
 			for _, fk := range newTable.Foreign {
@@ -3232,7 +3258,7 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
 				{Kind: "string", Label: "column", Description: "name of the column"},
-				{Kind: "string", Label: "operation", Description: "one of drop|type|dimensions|null|default|default_expression|collation|auto_increment|comment|temp|declaration"},
+				{Kind: "string", Label: "operation", Description: "one of drop|type|dimensions|null|default|default_expression|default_declaration|add_default|drop_default|collation|auto_increment|comment|temp|declaration"},
 				{Kind: "any", Label: "parameter", Description: "name of the column to drop or value of the parameter"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
@@ -3945,6 +3971,28 @@ func Init(en scm.Env) {
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Returns memory available to the process in bytes (physical RAM capped by cgroup v2 memory.max)",
 			Return: &scm.TypeDescriptor{Kind: "number"},
 			Const:  true,
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "resolve_table_name",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				return scm.NewNil()
+			}
+			name, ok := db.ResolveTableName(scm.String(a[1]), scm.ToBool(a[2]))
+			if !ok {
+				return scm.NewNil()
+			}
+			return scm.NewString(name)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "resolve a table spelling from immutable namespace metadata",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", Label: "schema"},
+				{Kind: "string", Label: "table"},
+				{Kind: "bool", Label: "ignorecase"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "string|nil", Transfer: false},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -5630,6 +5678,11 @@ func createTableKey(t *table, key uniqueKey, currentTx *TxContext) bool {
 			t.schema.schemalock.Unlock()
 			return false
 		}
+	}
+	if (key.ConstraintName != "" && t.schema.hasDeclarationNameLocked(key.ConstraintName, nil)) ||
+		(t.hasDeclarationName(key.Id, nil, true)) {
+		t.schema.schemalock.Unlock()
+		panic("declaration name already exists: " + key.Id)
 	}
 	t.Unique = append(t.Unique, key)
 	t.publishShowColumnsSnapshot(true)

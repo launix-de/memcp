@@ -5,6 +5,139 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 (define tsql_queryplan_cache (newcachemap))
 (define tsql_statement_text strtrim)
 
+/* Alias declarations are ordinary, durable frontend data, like SQL views.
+The native column keeps the qualified alias spelling in its existing RawType.
+Only this frontend interprets the declaration; storage has no alias registry. */
+(if (has? (show "system") "tsql_types") true
+	(eval (parse_sql "system" "CREATE TABLE tsql_types (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, `database` VARCHAR(255) NOT NULL, name VARCHAR(255) NOT NULL, base_type VARCHAR(255) NOT NULL, dimensions TEXT NOT NULL, nullable BOOLEAN NOT NULL, UNIQUE KEY alias_name (`database`,name)) ENGINE=SAFE"
+		(lambda (_schema _table _write) true))))
+
+/* These gates coordinate alias schema DDL only. Reads and DML never acquire
+them. CREATE/DROP TYPE and publishing columns which use aliases share one gate
+per database, preventing a DROP between dependency checking and publication.
+The stable scope retains gates, not requests, transactions or executable plans. */
+(define tsql_type_ddl_gates (newsession))
+(define tsql_type_ddl_scope (newsession))
+(define tsql_type_ddl (lambda (database tx operation)
+	((tsql_type_ddl_gates "get_or_compute_scoped" tsql_type_ddl_scope database (lambda () (mutex))) tx operation)))
+(define tsql_qualified_type (lambda (database name)
+	(concat "[" (replace database "]" "]]") "].[dbo].[" (replace name "]" "]]") "]")))
+(define tsql_alias_name_parts (parser '(
+	(define database tsql_identifier) "." (define owner tsql_identifier) "." (define name tsql_identifier)
+) (if (equal?? owner "dbo") (list database name) (error "unsupported alias owner: " owner))))
+(define tsql_find_type_alias (lambda (database name)
+	(scan nil (table "system" "tsql_types")
+		(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false))
+		(list database) '("name") (lambda (candidate) (equal?? candidate name))
+		'("id" "name" "base_type" "dimensions" "nullable")
+		(lambda (_ id canonical base dimensions nullable)
+			(list "id" id "name" canonical "base_type" base "dimensions" (json_decode dimensions) "nullable" nullable))
+		nil (lambda (a b) (if (nil? a) b (nil? b) a (error "ambiguous alias type: " name))))))
+(define tsql_alias_declaration (lambda (type)
+	(if (equal? (substr type 0 1) "[") (begin
+		(define parts (tsql_alias_name_parts type))
+		(coalesceNil (tsql_find_type_alias (car parts) (cadr parts))
+			(error "alias type no longer exists: " type))) nil)))
+(define tsql_effective_column (lambda (column)
+	(if (nil? column) nil (begin
+		(define alias (tsql_alias_declaration (column "RawType")))
+		(if (nil? alias) column
+			(set_assoc (set_assoc (set_assoc (set_assoc column "DeclaredType" (column "RawType"))
+				"RawType" (alias "base_type")) "Type" (alias "base_type")) "AliasId" (alias "id")))))))
+(define tsql_compile_column (lambda (info declaration)
+	(if (nil? declaration) info (begin
+		(define alias (tsql_alias_declaration (declaration "RawType")))
+		(if (nil? alias) info
+			(sql_info (sql_info_formula info) (alias "base_type")
+				(if (sql_text_type? (alias "base_type"))
+					(list (coalesce (declaration "Collation") "utf8mb4_general_ci") 2) nil)))))))
+(define create_sql_type_alias (lambda (database name base dimensions nullable)
+	(tsql_type_ddl database nil (lambda () (begin
+		(define native_type (toUpper base))
+		(define native_dimensions (tsql_decl_dimensions native_type dimensions))
+		(if (has? '("TIMESTAMP" "ROWVERSION") native_type) (error "generated versions cannot be alias base types") true)
+		(if (tsql_find_type_alias database name) (error "alias type already exists: " name) true)
+		(insert (table "system" "tsql_types") '("database" "name" "base_type" "dimensions" "nullable")
+			(list (list database name native_type (json_encode native_dimensions) nullable)))
+		true)))))
+(define drop_sql_type_alias (lambda (database name ifexists)
+	(tsql_type_ddl database nil (lambda () (begin
+		(define alias (tsql_find_type_alias database name))
+		(if (nil? alias) (if ifexists false (error "alias type does not exist: " name)) (begin
+			(define qualified (tsql_qualified_type database (alias "name")))
+			/* Enumerating declarations is DROP TYPE work, never query costing or
+			row execution. The database gate excludes concurrent alias consumers. */
+			(define dependent (find (show database) (lambda (relation)
+				(find (show database relation) (lambda (column) (equal?? (column "RawType") qualified)))) nil))
+			(if dependent (error "alias type is used by table: " dependent) true)
+			(scan nil (table "system" "tsql_types")
+				(list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false))
+				(list (alias "id")) '() (lambda () true) '("$update")
+				(lambda (count remove) (begin (remove) (+ count 1))) 0 +)
+			true)))))))
+
+(define tsql_native_types '("VARCHAR" "CHAR" "NVARCHAR" "NCHAR" "BINARY" "VARBINARY"
+	"DECIMAL" "NUMERIC" "FLOAT" "TIME" "DATETIME2" "DATETIMEOFFSET" "INT" "INTEGER" "BIGINT"
+	"SMALLINT" "TINYINT" "BIT" "REAL" "MONEY" "SMALLMONEY" "DATE" "DATETIME" "SMALLDATETIME"
+	"ROWVERSION" "TIMESTAMP" "UNIQUEIDENTIFIER" "TEXT" "NTEXT" "IMAGE"))
+(define tsql_schema_type_parts (parser (define parts (+ tsql_identifier ".")) parts))
+(define tsql_resolve_schema_type (lambda (database type dimensions) (begin
+	(define parts (tsql_schema_type_parts type))
+	(define native (match parts
+		'(name) (if (has? tsql_native_types (toUpper name)) (toUpper name) nil)
+		'(owner name) (if (equal?? owner "sys") (toUpper name) nil)
+		_ nil))
+	(if native (list "type" native "dimensions" (tsql_decl_dimensions native dimensions) "nullable" true)
+		(begin
+			(define name (match parts
+				'(name) name
+				'(owner name) (if (equal?? owner "dbo") name (error "unsupported alias owner: " owner))
+				'(catalog owner name) (if (and (equal? catalog database) (equal?? owner "dbo")) name
+					(error "alias must belong to the target database"))
+				_ (error "invalid alias type name")))
+			(if (empty_list? dimensions) true (error "alias dimensions cannot be overridden"))
+			(define alias (coalesceNil (tsql_find_type_alias database name) (error "unknown type: " name)))
+			(merge (list "type" (tsql_qualified_type database (alias "name"))) alias))))))
+(define tsql_prepare_column (lambda (database definition) (match definition
+	'((symbol list) "column" name type dimensions attributes) (begin
+		(define contract (tsql_resolve_schema_type database type (cdr dimensions)))
+		(define base (coalesceNil (contract "base_type") (contract "type")))
+		(define native_dimensions (contract "dimensions"))
+		(define options (cdr attributes))
+		(define null_options (if (or (nil? (contract "id")) (has_assoc? options "null")) options
+			(append options "null" (contract "nullable"))))
+		(if (and (contract "id") (null_options "auto_increment"))
+			(error "IDENTITY alias declarations are not yet supported") true)
+		(define identity_options (tsql_identity_attributes base native_dimensions null_options))
+		/* Frozen defaults use the same frontend conversion as explicit writes.
+		The existing native default field remains their only persisted value. */
+		(define default_options (if (and (has_assoc? identity_options "default")
+			(or (contract "id") (has? '("NVARCHAR" "NCHAR") base)))
+			(set_assoc identity_options "default" (eval (sql_type_formula '()
+				(tsql_cast_expr (list (quote quote) (identity_options "default")) base native_dimensions)))) identity_options))
+		(define published_options (if (contract "id") (append default_options "__tsql_alias_id" (contract "id")) default_options))
+		(list (quote list) "column" name (tsql_storage_type (contract "type"))
+			(cons (quote list) native_dimensions) (cons (quote list) published_options)))
+	_ definition)))
+(define tsql_publish_alias_attributes (lambda (type attributes) (begin
+	(if (has_assoc? attributes "__tsql_alias_id")
+		(if (equal? ((tsql_alias_declaration type) "id") (attributes "__tsql_alias_id")) true
+			(error "alias declaration changed before DDL execution")) true)
+	(merge (extract_assoc attributes (lambda (key value)
+		(if (equal? key "__tsql_alias_id") '() (list key value))))))))
+(define tsql_add_columns (lambda (database name columns tx) (begin
+	(define publish (lambda () (begin
+		/* Validate every alias identity before changing any column. */
+		(define published_columns (map columns (lambda (column) (match column
+			'("column" column_name type dimensions attributes)
+			(list column_name type dimensions (tsql_publish_alias_attributes type attributes))))))
+		(reduce published_columns (lambda (_ column) (match column '(column_name type dimensions attributes)
+			(if (sql_create_column (table database name) column_name type dimensions
+				(merge (sql_add_column_attributes attributes) '("name_ignorecase" true))) true
+				(error "column already exists: " column_name)))) true))))
+	(if (find columns (lambda (column) (has_assoc? (nth column 4) "__tsql_alias_id")))
+		(tsql_type_ddl database tx publish) (publish)))))
+
 /* Transport tuples describe bytes and unscaled coefficients only. Their SQL
 meaning is chosen here from the request's declaration, not in the Go bridge. */
 (define tds_parameter_value (lambda (parameter) (begin
