@@ -2385,14 +2385,14 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(lambda () (begin
 				(if (or (nil? owner) (equal?? owner "dbo")) true (error "unsupported type owner: " owner))
 				(if policy (policy schema true true) true)
-				(list (quote create_sql_type_alias) schema name base (list (quote quote) dimensions) nullable))))
+				(list (quote create_sql_type_alias) schema name base (list (quote quote) dimensions) nullable (quote tx)))))
 		(parser '((atom "DROP" true) (atom "TYPE" true)
 			(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
 			(? (define owner tsql_identifier) ".") (define name tsql_identifier))
 			(lambda () (begin
 				(if (or (nil? owner) (equal?? owner "dbo")) true (error "unsupported type owner: " owner))
 				(if policy (policy schema true true) true)
-				(list (quote drop_sql_type_alias) schema name (if ifexists true false)))))
+				(list (quote drop_sql_type_alias) schema name (if ifexists true false) (quote tx)))))
 		(parser '((atom "CREATE" true) (atom "DATABASE" true)
 			(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
 			(define name tsql_identifier)) (lambda () (begin

@@ -51,8 +51,8 @@ The stable scope retains gates, not requests, transactions or executable plans. 
 			(sql_info (sql_info_formula info) (alias "base_type")
 				(if (sql_text_type? (alias "base_type"))
 					(list (coalesce (declaration "Collation") "utf8mb4_general_ci") 2) nil)))))))
-(define create_sql_type_alias (lambda (database name base dimensions nullable)
-	(tsql_type_ddl database nil (lambda () (begin
+(define create_sql_type_alias (lambda (database name base dimensions nullable tx)
+	(tsql_type_ddl database tx (lambda () (begin
 		(define native_type (toUpper base))
 		(define native_dimensions (tsql_decl_dimensions native_type dimensions))
 		(if (has? '("TIMESTAMP" "ROWVERSION") native_type) (error "generated versions cannot be alias base types") true)
@@ -60,8 +60,8 @@ The stable scope retains gates, not requests, transactions or executable plans. 
 		(insert (table "system" "tsql_types") '("database" "name" "base_type" "dimensions" "nullable")
 			(list (list database name native_type (json_encode native_dimensions) nullable)))
 		true)))))
-(define drop_sql_type_alias (lambda (database name ifexists)
-	(tsql_type_ddl database nil (lambda () (begin
+(define drop_sql_type_alias (lambda (database name ifexists tx)
+	(tsql_type_ddl database tx (lambda () (begin
 		(define alias (tsql_find_type_alias database name))
 		(if (nil? alias) (if ifexists false (error "alias type does not exist: " name)) (begin
 			(define qualified (tsql_qualified_type database (alias "name")))
