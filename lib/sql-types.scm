@@ -649,6 +649,7 @@ Retain annotation-free sources/stage graphs instead of cloning every node
 for frontends that have emitted no contracts. Quoted syntax stays opaque. */
 (define sql_type_annotation_replacement (lambda (node)
 	(match node
+		((symbol sql_compile_column) _compiler _expression) (list (sql_type_formula '() node))
 		((symbol sql_type_expr) _formula _type _collation) (list (sql_type_formula '() node))
 		(cons (symbol sql_compile_expr) _arguments) (list (sql_type_formula '() node))
 		((symbol quote) _datum) nil
