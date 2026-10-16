@@ -1,11 +1,12 @@
 # Copyright (C) 2023-2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Regression test for large lookup-style GROUP BY queries observed in manual
 # build traces. Data and names are synthetic and anonymized.
 
 metadata:
   # Million-row cold fixtures are rebuilt for every A/B verification pair.
-  # Keep this suite on its own worker instead of delaying verification behind KPI.
-  performance_shard_weight: 64
+  # Reserve the complete fourteen-role cohort separately from the KPI fixture.
+  performance_shard_weight: 192
   version: "1.0"
   description: "Large lookup GROUP BY performance"
   isolated: true
