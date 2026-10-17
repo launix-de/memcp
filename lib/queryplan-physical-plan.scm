@@ -7458,7 +7458,7 @@ the physical read set so a predicate never runs before that source is bound. */
 									(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
 									(cons (quote and) (cons
 										(lower_column_expr_for_alias src condition)
-										(scalar_first_probe_key_terms sources default_alias src keys lookup_keys))))
+										(scalar_first_probe_key_terms sources default_alias src keys lookup_keys false))))
 								(cons (quote list) order_cols)
 								(cons (quote list) dirs)
 								0 order_offset 1
@@ -9465,7 +9465,8 @@ only the structural work counts are specific to this operator. */
 				(extract_columns_for_alias src (nth ag 0)))))))
 		(define filtercols (merge_unique (list condition_cols key_cols)))
 		(define key_terms (scalar_first_probe_key_terms
-			all_sources default_alias src keys lookup_keys))
+			all_sources default_alias src keys lookup_keys
+			(qassoc_get (gs_facts stage) (quote nulls_not_distinct) false)))
 		(define payload_expr (runtime_cons_list_expr (map ags (lambda (ag)
 			(if (equal? ag aggregate_count_descriptor)
 				1

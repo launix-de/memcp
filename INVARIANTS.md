@@ -940,6 +940,13 @@ the window result is shared, or the value must survive as a computed column.
 Correlated window functions must include the outer domain keys in their
 partitioning. Otherwise different outer bindings mix into the same window.
 
+Window partition identities use NULLS NOT DISTINCT, including every component
+of a composite partition. Their logical group-stage records this with the
+`nulls_not_distinct` fact; physical aggregate probes must consume the same
+contract as the stage rejoin. This does not change SQL equality in correlated
+subqueries, EXISTS or IN. Keep this semantic choice in planning, without runtime
+SQL type checks or changes to native storage operators.
+
 ## Cost Model and Physical Lowering
 
 Lowering decisions must become cost-aware and explicit. Do not add scattered
