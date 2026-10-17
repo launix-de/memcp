@@ -1239,6 +1239,7 @@ dimensions are metadata only and are absent from the executable plan. */
 	((symbol tsql_cast_binary) _value length _fixed) (list length)
 	((symbol tsql_cast_text) _value length _national) (list length)
 	((symbol tsql_cast_fixed_text) _value length _national) (list length)
+	((symbol tsql_cast_numeric_text) _value length _national _fixed _asterisk _boolean) (list length)
 	((symbol hex2bin) hex) (if (string? hex) (list (intdiv (strlen hex) 2)) nil)
 	((symbol session) key) (begin
 		(define declaration (find parameters (lambda (item) (equal? key (concat "__tsql_parameter:" (car item)))) nil))

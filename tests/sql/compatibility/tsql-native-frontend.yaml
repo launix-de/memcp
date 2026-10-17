@@ -2923,6 +2923,27 @@ test_cases:
       data:
       - number: 245
         message: invalid integer text
+  - name: Ordinary numeric text cast widths survive empty result metadata
+    scm: "(begin\n (define session (newsession)) (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
+      ) (session \"wire_metadata\" true)\n (define output (newsession))\n (tds_frontend \"execute\" session (list\
+      \ \"database\" \"memcp-tests\" \"parameters\" (list) \"declarations\" \"\" \"text\" \"SELECT CAST(12 AS\
+      \ NVARCHAR(5)) AS n,CONVERT(NVARCHAR(7),12) AS c,CAST(CAST(1 AS BIT) AS NCHAR(3)) AS b WHERE 1=0\")\n \
+      \ (lambda (_row) (output \"row\" true)) (lambda (fields) (output \"fields\" fields)) nil nil)\n (and (nil?\
+      \ (output \"row\"))\n  (equal? (map (output \"fields\") (lambda (field) (field \"kind\"))) '(231 231 231))\n\
+      \  (equal? (map (output \"fields\") (lambda (field) (field \"size\"))) '(10 14 6))))"
+    expect:
+      result: true
+  - name: Ordinary numeric text cast widths survive NULL result metadata
+    scm: "(begin\n (define session (newsession)) (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
+      ) (session \"wire_metadata\" true)\n (define output (newsession))\n (tds_frontend \"execute\" session (list\
+      \ \"database\" \"memcp-tests\" \"parameters\" (list) \"declarations\" \"\" \"text\" \"SELECT CAST(CAST(NULL\
+      \ AS INT) AS NVARCHAR(5)) AS n,CONVERT(NVARCHAR(7),CAST(NULL AS BIGINT)) AS c,CAST(CAST(NULL AS BIT) AS\
+      \ NCHAR(3)) AS b WHERE 1=0\")\n  (lambda (_row) (output \"row\" true)) (lambda (fields) (output \"fields\"\
+      \ fields)) nil nil)\n (and (nil? (output \"row\"))\n  (equal? (map (output \"fields\") (lambda (field)\
+      \ (field \"kind\"))) '(231 231 231))\n  (equal? (map (output \"fields\") (lambda (field) (field \"size\"\
+      ))) '(10 14 6))))"
+    expect:
+      result: true
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
   - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion
