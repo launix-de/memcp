@@ -1488,9 +1488,13 @@ The existing DECIMAL(p,s) cases still need the full declaration contract. */
 			/* Check the rounded quotient before multiplication, including MIN. */
 			(if (or (< rounded (intdiv minimum factor)) (> rounded (intdiv maximum factor)))
 				(tsql_raise_error 8115 "integer rounding overflow" 1) (* rounded factor))))))
+/* Module-owned immutable powers cover every finite decimal unit used here.
+Dynamic lengths only index this table; constant lengths become plan literals. */
+(define tsql_round_real_factors (map (produceN 632) (lambda (index)
+	(simplify (concat "1e" (- 308 index))))))
 (define tsql_round_real_factor (lambda (places)
 	(if (or (nil? places) (< places -308) (> places 323)) nil
-		(simplify (concat "1e" (- 0 places))))))
+		(nth tsql_round_real_factors (+ places 308)))))
 (define tsql_round_real (lambda (value places mode factor)
 	(if (or (nil? value) (nil? places) (nil? mode)) nil
 		(> places 323) value
