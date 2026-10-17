@@ -6224,6 +6224,14 @@ Only flattenable FROM relations share the latter two with their parent. */
 			_ acc))
 		expr)))
 
+/* Flattening visits the right suffix first, but consumers apply its rewrites
+left to right. Close every later projection over an eliminated alias now:
+otherwise a later substitution can reintroduce a reference whose rule has
+already been consumed. Bound alias identities keep nested scopes separate. */
+(define prepend_derived_rewrite (lambda (alias projection rewrites)
+	(cons (list alias projection)
+		(map rewrites (lambda (rewrite) (rewrite_derived_ref alias projection rewrite))))))
+
 /* Aggregate arguments below a window node can retain an unqualified output
 alias after name binding. Resolve that alias against a flattened derived
 projection before the physical base-source alias is applied. Only a projection
@@ -6402,8 +6410,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 		projection))
 	(list
 		(rewrite_sources_join_for_derived alias effective_projection (nth tail 0))
-		(cons (list alias effective_projection)
-			(map (nth tail 1) (lambda (rewrite) (rewrite_derived_ref alias effective_projection rewrite))))
+		(prepend_derived_rewrite alias effective_projection (nth tail 1))
 		(if (source_outer? src) (nth tail 2) (cons matched (nth tail 2)))
 		(nth tail 3)))))
 
@@ -6457,7 +6464,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 										(merge (list
 											(nth staged 0)
 											(rewrite_sources_join_for_derived alias (nth staged 1) tail_sources)))
-										(cons (list alias (nth staged 1)) tail_rewrites)
+										(prepend_derived_rewrite alias (nth staged 1) tail_rewrites)
 										tail_wheres
 										(cons (nth staged 2) (merge (list (qb_stages inner) tail_stages)))))
 								(if (ordered_limited_derived_supported? inner src)
@@ -6466,7 +6473,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 										(define requalified_inner_stages (requalify_stages_for_derived (source_alias (car (qb_sources inner))) alias (qb_stages inner)))
 										(list
 											(merge (list (nth staged 0) tail_sources))
-											(cons (list alias (nth staged 1)) tail_rewrites)
+											(prepend_derived_rewrite alias (nth staged 1) tail_rewrites)
 											(cons (nth staged 2) tail_wheres)
 											(cons (nth staged 3) (merge (list requalified_inner_stages tail_stages)))))
 									(if (or (source_outer? src) (not (nil? (source_join_expr src))))
@@ -6475,7 +6482,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 											(define staged (make_limited_derived_stage_source alias inner relation))
 											(list
 												(cons (nth staged 0) tail_sources)
-												(cons (list alias (nth staged 1)) tail_rewrites)
+												(prepend_derived_rewrite alias (nth staged 1) tail_rewrites)
 												tail_wheres
 												(cons (nth staged 2) (merge (list (qb_stages inner) tail_stages))))))))
 							(begin
@@ -6485,7 +6492,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 										(flatten_constant_derived_join src inner tail)
 										(list
 											(rewrite_sources_join_for_derived alias (qb_fields inner) tail_sources)
-											(cons (list alias (qb_fields inner)) tail_rewrites)
+											(prepend_derived_rewrite alias (qb_fields inner) tail_rewrites)
 											(cons (qb_where inner) tail_wheres)
 											(merge (list (qb_stages inner) tail_stages))))
 									(if (equal? (count inner_sources) 1)
@@ -6520,7 +6527,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 														(source_outer? src)
 														joined_condition)
 													(rewrite_sources_join_for_derived alias effective_projection tail_sources))
-												(cons (list alias effective_projection) tail_rewrites)
+												(prepend_derived_rewrite alias effective_projection tail_rewrites)
 												(if (nil? parent_condition) tail_wheres (cons parent_condition tail_wheres))
 												(merge (list (nth stage_rebinding 0) tail_stages))))
 										(if (or (source_outer? src) (not (nil? (source_join_expr src))))
@@ -6554,13 +6561,13 @@ bindings are stable here, unlike mutable SQL session variables. */
 															(list derived_base_source)
 															derived_stage_sources
 															(rewrite_sources_join_for_derived alias effective_projection tail_sources)))
-														(cons (list alias effective_projection) tail_rewrites)
+														(prepend_derived_rewrite alias effective_projection tail_rewrites)
 														tail_wheres
 														(merge (list (nth stage_rebinding 0) tail_stages))))
 												(neumann_fail "untangle_query" "multi-source derived JOIN needs relation-unit lowering"))
 											(list
 												(merge (list inner_sources (rewrite_sources_join_for_derived alias (qb_fields inner) tail_sources)))
-												(cons (list alias (qb_fields inner)) tail_rewrites)
+												(prepend_derived_rewrite alias (qb_fields inner) tail_rewrites)
 												(cons (qb_where inner) tail_wheres)
 												(merge (list (qb_stages inner) tail_stages)))))))))
 ))))))
