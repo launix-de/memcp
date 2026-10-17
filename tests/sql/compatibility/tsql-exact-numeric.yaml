@@ -1026,9 +1026,9 @@ test_cases:
     error: true
 - name: ROUND columns bind dynamic lengths and truncation once per input
   setup:
-  - DROP TABLE IF EXISTS tsql_round_inputs
-  - CREATE TABLE tsql_round_inputs (id INT PRIMARY KEY,v BIGINT,places INT,mode INT)
-  - INSERT tsql_round_inputs VALUES (1,125,-1,0),(2,-125,-1,1),(3,NULL,0,0),(4,99,NULL,0)
+  - sql: DROP TABLE IF EXISTS tsql_round_inputs
+  - sql: CREATE TABLE tsql_round_inputs (id INT PRIMARY KEY,v BIGINT,places INT,mode INT)
+  - sql: INSERT tsql_round_inputs VALUES (1,125,-1,0),(2,-125,-1,1),(3,NULL,0,0),(4,99,NULL,0)
   sql: SELECT id,ROUND(v,places,mode) AS value FROM tsql_round_inputs ORDER BY id
   expect:
     rows: 4
@@ -1042,37 +1042,31 @@ test_cases:
     - id: 4
       value: null
   cleanup:
-  - DROP TABLE tsql_round_inputs
+  - sql: DROP TABLE tsql_round_inputs
 - name: ROUND empty descriptions preserve each declared return family
-  scm: |-
-    (begin
-      (define fields (tds_describe "memcp-tests"
-        "SELECT TOP(0) ROUND(CAST(NULL AS TINYINT),0) AS t,ROUND(CAST(NULL AS SMALLINT),0) AS s,ROUND(CAST(NULL AS INT),0) AS i,ROUND(CAST(NULL AS BIGINT),0) AS b,ROUND(CAST(NULL AS REAL),0) AS r,ROUND(CAST(NULL AS FLOAT),0) AS f,ROUND(CAST(NULL AS SMALLMONEY),0) AS sm,ROUND(CAST(NULL AS MONEY),0) AS m" "" (newsession)))
-      (if (and
-        (equal? (map fields (lambda (field) (field "sql_type"))) '("INT" "INT" "INT" "BIGINT" "FLOAT" "FLOAT" "MONEY" "MONEY"))
-        (equal? (map fields (lambda (field) (field "kind"))) '(38 38 38 38 109 109 110 110))
-        (equal? (map fields (lambda (field) (field "size"))) '(4 4 4 8 8 8 8 8))) true
-        (error "ROUND result family or width was not compiled from its declaration")))
+  scm: "(begin\n  (define fields (tds_describe \"memcp-tests\"\n    \"SELECT TOP(0) ROUND(CAST(NULL AS TINYINT),0) AS t,ROUND(CAST(NULL\
+    \ AS SMALLINT),0) AS s,ROUND(CAST(NULL AS INT),0) AS i,ROUND(CAST(NULL AS BIGINT),0) AS b,ROUND(CAST(NULL AS REAL),0) AS r,ROUND(CAST(NULL\
+    \ AS FLOAT),0) AS f,ROUND(CAST(NULL AS SMALLMONEY),0) AS sm,ROUND(CAST(NULL AS MONEY),0) AS m\" \"\" (newsession)))\n  (if\
+    \ (and\n    (equal? (map fields (lambda (field) (field \"sql_type\"))) '(\"INT\" \"INT\" \"INT\" \"BIGINT\" \"FLOAT\" \"FLOAT\"\
+    \ \"MONEY\" \"MONEY\"))\n    (equal? (map fields (lambda (field) (field \"kind\"))) '(38 38 38 38 109 109 110 110))\n    (equal?\
+    \ (map fields (lambda (field) (field \"size\"))) '(4 4 4 8 8 8 8 8))) true\n    (error \"ROUND result family or width was not\
+    \ compiled from its declaration\")))"
   expect:
     result: true
 - name: ROUND executable formulas contain no compiletime type wrappers
-  scm: |-
-    (begin
-      (define formula (sql_type_formula '() (tsql_builtin_expr "ROUND"
-        (list (tsql_cast_expr 125 "BIGINT" '()) -1))))
-      (if (and (not (contains? (expression_syntax formula) "sql_type_expr"))
-        (not (contains? (expression_syntax formula) "sql_compile_expr"))
-        (equal? (eval formula) 130)) true
-        (error "ROUND leaked annotations into executable arithmetic")))
+  scm: "(begin\n  (define formula (sql_type_formula '() (tsql_builtin_expr \"ROUND\"\n    (list (tsql_cast_expr 125 \"BIGINT\"\
+    \ '()) -1))))\n  (if (and (not (contains? (expression_syntax formula) \"sql_type_expr\"))\n    (not (contains? (expression_syntax\
+    \ formula) \"sql_compile_expr\"))\n    (equal? (eval formula) 130)) true\n    (error \"ROUND leaked annotations into executable\
+    \ arithmetic\")))"
   expect:
     result: true
 - name: ROUND portable view binds ordinary projected integer declarations
   setup:
-  - DROP VIEW IF EXISTS tsql_round_view
-  - DROP TABLE IF EXISTS tsql_round_inputs
-  - CREATE TABLE tsql_round_inputs (id INT PRIMARY KEY,v BIGINT,places INT,mode INT)
-  - INSERT tsql_round_inputs VALUES (1,125,-1,0),(2,-125,-1,1),(3,NULL,0,0),(4,99,NULL,0)
-  - CREATE VIEW tsql_round_view AS SELECT id,ROUND(v,places,mode) AS value FROM tsql_round_inputs
+  - sql: DROP VIEW IF EXISTS tsql_round_view
+  - sql: DROP TABLE IF EXISTS tsql_round_inputs
+  - sql: CREATE TABLE tsql_round_inputs (id INT PRIMARY KEY,v BIGINT,places INT,mode INT)
+  - sql: INSERT tsql_round_inputs VALUES (1,125,-1,0),(2,-125,-1,1),(3,NULL,0,0),(4,99,NULL,0)
+  - sql: CREATE VIEW tsql_round_view AS SELECT id,ROUND(v,places,mode) AS value FROM tsql_round_inputs
   sql: SELECT id,value FROM tsql_round_view ORDER BY id
   expect:
     rows: 4
@@ -1086,13 +1080,13 @@ test_cases:
     - id: 4
       value: null
   cleanup:
-  - DROP VIEW tsql_round_view
-  - DROP TABLE tsql_round_inputs
+  - sql: DROP VIEW tsql_round_view
+  - sql: DROP TABLE tsql_round_inputs
 - name: ROUND floating columns use bounded dynamic decimal units
   setup:
-  - DROP TABLE IF EXISTS tsql_round_real_inputs
-  - CREATE TABLE tsql_round_real_inputs (id INT PRIMARY KEY,v FLOAT,places INT,mode INT)
-  - INSERT tsql_round_real_inputs VALUES (1,1.25,1,0),(2,-1.25,1,1),(3,1250,-2,0),(4,1.25,2147483647,0),(5,1.25,-2147483648,0),(6,1.25,NULL,0)
+  - sql: DROP TABLE IF EXISTS tsql_round_real_inputs
+  - sql: CREATE TABLE tsql_round_real_inputs (id INT PRIMARY KEY,v FLOAT,places INT,mode INT)
+  - sql: INSERT tsql_round_real_inputs VALUES (1,1.25,1,0),(2,-1.25,1,1),(3,1250,-2,0),(4,1.25,2147483647,0),(5,1.25,-2147483648,0),(6,1.25,NULL,0)
   sql: SELECT id,ROUND(v,places,mode) AS value FROM tsql_round_real_inputs ORDER BY id
   expect:
     rows: 6
@@ -1110,7 +1104,7 @@ test_cases:
     - id: 6
       value: null
   cleanup:
-  - DROP TABLE tsql_round_real_inputs
+  - sql: DROP TABLE tsql_round_real_inputs
 - name: MONEY conversion preserves positive half
   sql: SELECT CAST(12.34565 AS MONEY) AS value
   expect:
