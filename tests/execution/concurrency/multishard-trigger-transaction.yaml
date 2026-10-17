@@ -36,10 +36,10 @@ setup:
       ) ENGINE=safe
   - scm: |
       (begin
-        (insert (table "memcp-tests" "mtt_file") '("id" "uploaded_at")
+        (insert (table "memcp-tests" false "mtt_file" false) '("id" "uploaded_at")
           (map (produceN 35) (lambda (i)
             (list (+ i 1) (* (+ i 1) 100)))))
-        (insert (table "memcp-tests" "mtt_entry") '("id" "file_id" "amount" "state")
+        (insert (table "memcp-tests" false "mtt_entry" false) '("id" "file_id" "amount" "state")
           (map (produceN 35) (lambda (i)
             (list (+ i 1) (+ i 1) (* (+ i 1) 10) "original"))))
         (rebuild)

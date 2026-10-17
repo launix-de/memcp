@@ -15,7 +15,7 @@ setup:
 - scm: |
     (begin
       (map '("index_run_interleaved" "index_run_blocks" "index_run_shuffled") (lambda (name)
-        (insert (table "memcp-tests" name) '("id" "stamp" "kind" "status")
+        (insert (table "memcp-tests" false name false) '("id" "stamp" "kind" "status")
           (map (produceN 22000) (lambda (i)
             (begin
               (define value (if (equal? name "index_run_shuffled") (mod (* i 7919) 22000) i))

@@ -21,17 +21,17 @@ setup:
 - sql: CREATE TABLE wpbench_term_relationships (object_id BIGINT, term_taxonomy_id BIGINT,
     PRIMARY KEY (object_id, term_taxonomy_id)) ENGINE=sloppy
 - scm: |
-    (insert (table "memcp-tests" "wpbench_posts") '("ID" "post_type" "post_status" "post_date")
+    (insert (table "memcp-tests" false "wpbench_posts" false) '("ID" "post_type" "post_status" "post_date")
       (map (produceN 22062) (lambda (i) (list (+ i 1) (if (< i 200) "product" "post") "publish" i))))
 - scm: |
-    (insert (table "memcp-tests" "wpbench_comments") '("comment_ID" "comment_post_ID" "comment_approved" "comment_type")
+    (insert (table "memcp-tests" false "wpbench_comments" false) '("comment_ID" "comment_post_ID" "comment_approved" "comment_type")
       (map (produceN 6001) (lambda (i) (list (+ i 1) (+ i 1) "1" "comment"))))
 - scm: |
-    (insert (table "memcp-tests" "wpbench_postmeta") '("meta_id" "post_id" "meta_key" "meta_value")
+    (insert (table "memcp-tests" false "wpbench_postmeta" false) '("meta_id" "post_id" "meta_key" "meta_value")
       (map (produceN 60000) (lambda (i) (list (+ i 1) (+ 1 (mod i 22062))
         (if (< (mod i 10) 2) "_yoast_wpseo_linkdex" "other") "99"))))
 - scm: |
-    (insert (table "memcp-tests" "wpbench_term_relationships") '("object_id" "term_taxonomy_id")
+    (insert (table "memcp-tests" false "wpbench_term_relationships" false) '("object_id" "term_taxonomy_id")
       (map (produceN 44124) (lambda (i) (list (+ 1 (mod i 22062))
         (if (< i 22062) 1 (+ 41 (mod (mod i 22062) 120)))))))
 - scm: (rebuild)

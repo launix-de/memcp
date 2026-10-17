@@ -71,14 +71,14 @@ setup:
   - sql: "SET @bqm_actor = 7"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "bqm_file") (list "id" "filename" "search")
+        (insert (table "memcp-tests" false "bqm_file" false) (list "id" "filename" "search")
           (map (produceN 20000) (lambda (i)
             (list (+ i 1)
               (if (equal? (mod (+ i 1) 2) 0) "C-file" "other")
               (if (< i 512)
                 (if (equal? (mod (+ i 1) 3) 0) "needle-C-search" "needle-other")
                 (if (equal? (mod (+ i 1) 3) 0) "C-search" "other"))))))
-        (insert (table "memcp-tests" "bqm_document")
+        (insert (table "memcp-tests" false "bqm_document" false)
           (list "id" "standort_id" "file_id" "mandant_id" "inventory_no")
           (map (produceN 40000) (lambda (i)
             (list (+ i 1) (+ (mod i 4) 1) (+ (mod i 20000) 1)
@@ -86,13 +86,13 @@ setup:
               (if (equal? (mod i 100) 0)
                 (concat "inv-special-" (string i))
                 (concat "inventory-" (string i)))))))
-        (rebuild (table "memcp-tests" "bqm_document") true false)
-        (rebuild (table "memcp-tests" "bqm_file") true false)
-        (rebuild (table "memcp-tests" "bqm_standort") true false)
-        (rebuild (table "memcp-tests" "bqm_unused_lookup") true false)
-        (rebuild (table "memcp-tests" "bqm_mandant_assignment") true false)
-        (rebuild (table "memcp-tests" "bqm_standort_assignment") true false)
-        (rebuild (table "memcp-tests" "bqm_projection_assignment") true false)
+        (rebuild (table "memcp-tests" false "bqm_document" false) true false)
+        (rebuild (table "memcp-tests" false "bqm_file" false) true false)
+        (rebuild (table "memcp-tests" false "bqm_standort" false) true false)
+        (rebuild (table "memcp-tests" false "bqm_unused_lookup" false) true false)
+        (rebuild (table "memcp-tests" false "bqm_mandant_assignment" false) true false)
+        (rebuild (table "memcp-tests" false "bqm_standort_assignment" false) true false)
+        (rebuild (table "memcp-tests" false "bqm_projection_assignment" false) true false)
         40000)
 
 test_cases:

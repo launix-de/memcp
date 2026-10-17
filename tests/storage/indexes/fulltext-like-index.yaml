@@ -69,7 +69,7 @@ test_cases:
               (list 18 "Herbert" "Krause" "1976-11-13")
               (list 19 "Ute" "Schulze" "1989-09-21")
               (list 20 "Dieter" "Huber" "1972-02-08")))
-            (insert (table "memcp-tests" "ft_customers") '("id" "vorname" "nachname" "birthdate") rows))
+            (insert (table "memcp-tests" false "ft_customers" false) '("id" "vorname" "nachname" "birthdate") rows))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM ft_customers"
     expect:
@@ -104,7 +104,7 @@ test_cases:
   - name: "Exact point probes keep LIKE as a residual filter"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "ft_customers"))
+        (define tbl (table "memcp-tests" false "ft_customers" false))
         (define probe (lambda (id)
           (begin
             (define condition (eval (list
@@ -183,7 +183,7 @@ test_cases:
                   22777 "Hans Klausner"
                   29999 "Klausmüller Gerd"
                   _ (concat "Person_" i))))))
-            (insert (table "memcp-tests" "ft_large") '("id" "name") rows))
+            (insert (table "memcp-tests" false "ft_large" false) '("id" "name") rows))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large"
     expect:
@@ -575,7 +575,7 @@ test_cases:
                 0 "Animal"
                 1 "Person"
                 _ "Object")))))
-            (insert (table "memcp-tests" "ft_alternating") '("id" "name") rows))
+            (insert (table "memcp-tests" false "ft_alternating" false) '("id" "name") rows))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM ft_alternating"
     expect:
@@ -635,7 +635,7 @@ test_cases:
               (concat "!Klaus-" i)
               (if (< i 105) (concat "Klaus-" i) (concat "Person-" i)))
             (concat "!zzzz-" i)))))
-        (insert (table "memcp-tests" "ft_matchset") (list "id" "name" "tag") rows)
+        (insert (table "memcp-tests" false "ft_matchset" false) (list "id" "name" "tag") rows)
         (rebuild)
         30000)
 
@@ -646,7 +646,7 @@ test_cases:
   - name: "LIKE match set remains exact through warmup"
     scm: |
       (begin
-        (set tbl (table "memcp-tests" "ft_matchset"))
+        (set tbl (table "memcp-tests" false "ft_matchset" false))
         (set condition (eval (list
           'lambda (list 'search)
           (list 'strlike 'search "%zzzz%" "utf8mb4_general_ci"))))
@@ -662,7 +662,7 @@ test_cases:
   - name: "LIKE match sets keep collation semantics separate"
     scm: |
       (begin
-        (set tbl (table "memcp-tests" "ft_matchset"))
+        (set tbl (table "memcp-tests" false "ft_matchset" false))
         (set binary-condition (eval (list
           'lambda (list 'name)
           (list 'strlike 'name "%klaus%" "utf8mb4_bin"))))
@@ -680,7 +680,7 @@ test_cases:
       - sql: "INSERT INTO ft_matchset (id, name, tag) VALUES (30000, 'klaus-delta', 'delta')"
     scm: |
       (begin
-        (set tbl (table "memcp-tests" "ft_matchset"))
+        (set tbl (table "memcp-tests" false "ft_matchset" false))
         (set binary-condition (eval (list
           'lambda (list 'name)
           (list 'strlike 'name "%klaus%" "utf8mb4_bin"))))
@@ -709,7 +709,7 @@ test_cases:
   - name: "Insert multi-shard LIKE candidate data"
     setup:
       - scm: |
-          (insert (table "memcp-tests" "ft_multishard") '("id" "search")
+          (insert (table "memcp-tests" false "ft_multishard" false) '("id" "search")
             (map (produceN 96) (lambda (i)
               (list i (if (equal? (mod i 31) 0)
                 (concat "Casino hit " i)

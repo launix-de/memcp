@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Trigger persistence tests
 # Verifies that triggers (user-visible and internal hidden) survive server restarts.
 # Internal prejoin triggers use the code-generator pattern: values are baked into the
@@ -64,7 +66,7 @@ test_cases:
   - name: "Create source-defined Scheme trigger"
     scm: |
       (createtrigger
-        (table "memcp-tests" "tp_scheme")
+        (table "memcp-tests" false "tp_scheme" false)
         "tp_scheme_add7"
         "before_insert"
         "(lambda (OLD NEW session tx) (set_assoc NEW \"val\" (+ (get_assoc NEW \"val\") 7)))"
@@ -188,7 +190,7 @@ test_cases:
   - name: "Persist trigger source whose frontend is not loaded"
     scm: |
       (createtrigger
-        (table "memcp-tests" "tp_unknown_language")
+        (table "memcp-tests" false "tp_unknown_language" false)
         "tp_unknown_language_trigger"
         "before_insert"
         "opaque source"

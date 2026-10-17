@@ -498,3 +498,53 @@ func TestAddedDefaultExpressionSurvivesNilConstantOption(t *testing.T) {
 	}
 	assertInitializedColumn(t, tbl, "created", value, 2)
 }
+
+func TestNamedDefaultUsesPublishedColumnDeclaration(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "tnameddefault", 0)
+	tbl.CreateColumn("flag", "INT", nil, []scm.Scmer{
+		scm.NewString("default"), scm.NewInt(7),
+		scm.NewString("default_name"), scm.NewString("DF_flag"),
+	})
+	before := tbl.showColumnsSnapshot.Load()
+	if tbl.Columns[2].DefaultName != "DF_flag" {
+		t.Fatal("CREATE did not retain the native default name")
+	}
+	if !scm.ToBool(tbl.AlterColumn("df_FLAG", "drop_default", scm.NewNil())) {
+		t.Fatal("DROP did not resolve the named default")
+	}
+	if scm.ToBool(tbl.AlterColumn("DF_flag", "drop_default", scm.NewNil())) {
+		t.Fatal("DROP reported a removed default as present")
+	}
+	if tbl.Columns[2].hasDefault() || tbl.Columns[2].DefaultName != "" {
+		t.Fatal("DROP left a competing default declaration")
+	}
+	if before == tbl.showColumnsSnapshot.Load() {
+		t.Fatal("DROP did not publish a new metadata snapshot")
+	}
+	if name := showColumnProperty(before.value.Slice()[2], "DefaultName"); scm.String(name) != "DF_flag" {
+		t.Fatal("DROP mutated a retained default snapshot")
+	}
+	declaration := scm.NewSlice([]scm.Scmer{scm.NewInt(0), scm.NewString(""), scm.NewString("DF_zero")})
+	tbl.AlterColumn("flag", "add_default", declaration)
+	requirePanic(t, func() { tbl.AlterColumn("flag", "add_default", declaration) })
+	requirePanic(t, func() {
+		tbl.CreateColumn("duplicate", "INT", nil, []scm.Scmer{
+			scm.NewString("default"), scm.NewInt(4),
+			scm.NewString("default_name"), scm.NewString("DF_zero"),
+		})
+	})
+	// No rows exist: rejection must be a declaration conflict, not a data duplicate.
+	requirePanic(t, func() {
+		createTableKey(tbl, uniqueKey{Id: "different_id", ConstraintName: "df_ZERO", Cols: []string{"id"}}, nil)
+	})
+	requirePanic(t, func() {
+		createTableKey(tbl, uniqueKey{Id: "DF_zero", Cols: []string{"id"}}, nil)
+	})
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("omitted")}}, nil, scm.NewNil(), false, nil)
+	assertInitializedColumn(t, tbl, "flag", scm.NewInt(0), 1)
+	restored := reloadTableFromPersistence(t, "tnameddefault", persistence)
+	if restored.Columns[2].DefaultName != "DF_zero" {
+		t.Fatal("default name did not survive schema recovery")
+	}
+	assertInitializedColumn(t, restored, "flag", scm.NewInt(0), 1)
+}

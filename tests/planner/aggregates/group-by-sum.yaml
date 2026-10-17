@@ -70,7 +70,7 @@ test_cases:
       - sql: |
           INSERT INTO tbl_mix (a, b) VALUES
           (1, 10), (2, 20), (3, 30), (4, 40)
-      - scm: "(rebuild (table \"memcp-tests\" \"tbl_mix\"))"
+      - scm: "(rebuild (table \"memcp-tests\" false \"tbl_mix\" false))"
       - sql: |
           INSERT INTO tbl_mix (a, b) VALUES
           (5, 50), (6, 60), (7, 70), (8, 80)

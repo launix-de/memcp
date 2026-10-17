@@ -294,12 +294,12 @@ test_cases:
   - name: "Build a computed cache over a mutable source"
     scm: |
       (createcolumn
-        (table "memcp-tests" "scp_middle_cache")
+        (table "memcp-tests" false "scp_middle_cache" false)
         "total" "INT" '() '("temp" true)
         '("id")
         (lambda (id)
           (scan nil
-            (table "memcp-tests" "scp_source")
+            (table "memcp-tests" false "scp_source" false)
             (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)
             '("amount") (lambda (acc amount) (+ acc amount))
             0 +)))
@@ -307,12 +307,12 @@ test_cases:
   - name: "Build a second computed cache over the first cache"
     scm: |
       (createcolumn
-        (table "memcp-tests" "scp_outer_cache")
+        (table "memcp-tests" false "scp_outer_cache" false)
         "doubled_total" "INT" '() '("temp" true)
         '("id")
         (lambda (id)
           (scan nil
-            (table "memcp-tests" "scp_middle_cache")
+            (table "memcp-tests" false "scp_middle_cache" false)
             (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)
             '("total") (lambda (acc total) (+ acc (* total 2)))
             0 +)))
@@ -346,13 +346,13 @@ test_cases:
   - name: "A computed column may prepare a dependent column on the same table"
     scm: |
       (createcolumn
-        (table "memcp-tests" "scp_middle_cache")
+        (table "memcp-tests" false "scp_middle_cache" false)
         "nested_outer" "INT" '() '("temp" true)
         '("id")
         (lambda (id)
           (begin
             (createcolumn
-              (table "memcp-tests" "scp_middle_cache")
+              (table "memcp-tests" false "scp_middle_cache" false)
               "nested_inner" "INT" '() '("temp" true)
               '("id")
               (lambda (inner_id) (+ inner_id 1)))

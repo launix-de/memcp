@@ -56,21 +56,32 @@ type cacheMapFlight struct {
 
 var cacheMapCallableType = &scm.TypeDescriptor{Kind: "func", Label: "cachemap", Description: "thread-safe cache accessor",
 	Params: []*scm.TypeDescriptor{
-		{Kind: "any", Label: "key_or_operation", Description: "cache key, or get_or_compute", Optional: true},
-		{Kind: "any", Label: "value_or_key", Description: "value to store, or key for get_or_compute", Optional: true},
-		{Kind: "func", CallsOnce: true, Label: "producer", Description: "zero-argument value producer used by get_or_compute", Optional: true, Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any", Label: "value"}},
+		{Kind: "any", Label: "key", Description: "cache key", Optional: true},
+		{Kind: "any", Label: "value_or_query_state", Description: "value to store, or query state when supplying a factory", Optional: true},
+		{Kind: "func", CallsOnce: true, Label: "factory", Description: "zero-argument factory used on a cache miss", Optional: true, Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any", Label: "value"}},
 	},
-	Return: &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "cached value, previous value, or key list depending on the operation"},
+	Return: &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "cached value, stored value, or key list depending on the operation"},
 }
 
 var cacheMapCallableTypeID = scm.RegisterCallableType(cacheMapCallableType)
 
 // NewCacheMap creates a new cachemap and returns a Scheme function.
 // (cachemap key value) — set entry
-// (cachemap key) — get entry (or nil)
+// (cachemap key) — get entry, using the optional constructor factory(key) on a miss
 // (cachemap) — list all keys
-// (cachemap "get_or_compute" key tx producer) — get or run producer once per key
+// (cachemap key queryState factory) — get or run factory() once per concurrent miss
+// The access-local factory overrides the constructor factory only on a miss.
+// A cached nil is a hit; failures are not cached. Factories run outside cache locks.
+// Each constructor owns an independent cache, whose lifetime is chosen by its caller.
 func NewCacheMap(a ...scm.Scmer) scm.Scmer {
+	if len(a) > 1 {
+		panic("newcachemap: expected an optional factory")
+	}
+	factory := scm.NewNil()
+	if len(a) == 1 {
+		factory = a[0]
+	}
+	// The constructor factory is immutable and retained only by this accessor.
 	cm := &cacheMap{
 		entries: make(map[string]*cacheMapEntry),
 		flights: make(map[string]*cacheMapFlight),
@@ -93,7 +104,13 @@ func NewCacheMap(a ...scm.Scmer) scm.Scmer {
 			entry, ok := cm.entries[key]
 			cm.mu.RUnlock()
 			if !ok {
-				return scm.NewNil()
+				if factory.IsNil() {
+					return scm.NewNil()
+				}
+				cacheKey := a[0]
+				return cm.getOrCompute(key, scm.NewNil(), scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+					return scm.Apply(factory, cacheKey)
+				}))
 			}
 			entry.lastUsed.Store(time.Now().UnixNano())
 			return entry.value
@@ -104,17 +121,9 @@ func NewCacheMap(a ...scm.Scmer) scm.Scmer {
 			cm.store(key, value)
 			return value
 		case 3:
-			if scm.String(a[0]) != "get_or_compute" {
-				panic("cachemap: unknown 3-argument operation")
-			}
-			return cm.getOrCompute(scm.String(a[1]), scm.NewNil(), a[2])
-		case 4:
-			if scm.String(a[0]) != "get_or_compute" {
-				panic("cachemap: unknown 4-argument operation")
-			}
-			return cm.getOrCompute(scm.String(a[1]), a[2], a[3])
+			return cm.getOrCompute(scm.String(a[0]), a[1], a[2])
 		default:
-			panic("cachemap: expected 0, 1, 2, 3, or 4 arguments")
+			panic("cachemap: expected 0, 1, 2, or 3 arguments")
 		}
 	}, cacheMapCallableTypeID)
 }

@@ -25,16 +25,16 @@ setup:
 - sql: INSERT INTO acl_access (ID,user,acl_tenant,acl_site) VALUES (1,7,NULL,NULL),(2,8,1,NULL)
 - scm: |-
     (begin
-      (insert (table "memcp-tests" "acl_file") '("ID")
+      (insert (table "memcp-tests" false "acl_file" false) '("ID")
         (map (produceN 800001) (lambda (i) (list (+ i 1)))))
-      (insert (table "memcp-tests" "acl_tenant") '("ID")
+      (insert (table "memcp-tests" false "acl_tenant" false) '("ID")
         (map (produceN 100) (lambda (i) (list (+ i 1)))))
-      (insert (table "memcp-tests" "acl_site") '("ID" "acl_tenant")
+      (insert (table "memcp-tests" false "acl_site" false) '("ID" "acl_tenant")
         (map (produceN 1000) (lambda (i) (list (+ i 1) (+ 1 (mod i 100))))))
-      (insert (table "memcp-tests" "acl_document") '("ID" "file" "acl_site")
+      (insert (table "memcp-tests" false "acl_document" false) '("ID" "file" "acl_site")
         (map (produceN 800000) (lambda (i) (list (+ i 1) (+ i 1) (+ 1 (mod i 1000))))))
       (map '("acl_document" "acl_site" "acl_tenant" "acl_file" "acl_dav" "acl_access")
-        (lambda (name) (rebuild (table "memcp-tests" name) true false))))
+        (lambda (name) (rebuild (table "memcp-tests" false name false) true false))))
 - sql: DROP TABLE IF EXISTS acl_text_file
 - sql: CREATE TABLE acl_text_file (ID VARCHAR(30) COLLATE utf8mb4_general_ci, ordinal INT) ENGINE=memory
 - sql: DROP TABLE IF EXISTS acl_text_ref

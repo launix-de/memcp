@@ -23,7 +23,7 @@ test_cases:
     scm: |
       (begin
         (set b (map (produceN 61000) (lambda (i) (list i i (concat "t" i)))))
-        (insert (table "memcp-tests" "rpc_data") (list "id" "val" "tag") b)
+        (insert (table "memcp-tests" false "rpc_data" false) (list "id" "val" "tag") b)
         61000)
 
   - name: "RC: verify initial count"
@@ -36,14 +36,14 @@ test_cases:
   # ---- Parallel group: rebuild + concurrent DML ----
   - name: "RC: rebuild (triggers repartition)"
     parallel: repart
-    scm: '(rebuild (table "memcp-tests" "rpc_data") false true)'
+    scm: '(rebuild (table "memcp-tests" false "rpc_data" false) false true)'
 
   - name: "RC: concurrent INSERT 200 rows"
     parallel: repart
     scm: |
       (begin
         (set b (map (produceN 200) (lambda (i) (list (+ i 100000) (+ i 100000) (concat "new" i)))))
-        (insert (table "memcp-tests" "rpc_data") (list "id" "val" "tag") b)
+        (insert (table "memcp-tests" false "rpc_data" false) (list "id" "val" "tag") b)
         200)
 
   - name: "RC: concurrent DELETE 50 rows"
@@ -134,7 +134,7 @@ test_cases:
 
   # ---- Second rebuild to verify stability ----
   - name: "RC: second rebuild"
-    scm: '(rebuild (table "memcp-tests" "rpc_data") false true)'
+    scm: '(rebuild (table "memcp-tests" false "rpc_data" false) false true)'
 
   - name: "RC: count after second rebuild"
     sql: "SELECT COUNT(*) AS cnt FROM rpc_data"
@@ -167,11 +167,11 @@ test_cases:
         scm: |
           (begin
             (set b (map (produceN 61000) (lambda (i) (list i i (concat "t" i)))))
-            (insert (table "memcp-tests" "rpc_data") (list "id" "val" "tag") b)
+            (insert (table "memcp-tests" false "rpc_data" false) (list "id" "val" "tag") b)
             61000)
       - name: "RC-del: rebuild"
         parallel: repart_del
-        scm: '(rebuild (table "memcp-tests" "rpc_data") false true)'
+        scm: '(rebuild (table "memcp-tests" false "rpc_data" false) false true)'
       - name: "RC-del: concurrent DELETE 50"
         parallel: repart_del
         sql: "DELETE FROM rpc_data WHERE id >= 60950 AND id < 61000"
@@ -209,11 +209,11 @@ test_cases:
         scm: |
           (begin
             (set b (map (produceN 61000) (lambda (i) (list i i (concat "t" i)))))
-            (insert (table "memcp-tests" "rpc_data") (list "id" "val" "tag") b)
+            (insert (table "memcp-tests" false "rpc_data" false) (list "id" "val" "tag") b)
             61000)
       - name: "RC-repeat: rebuild"
         parallel: repart_repeat
-        scm: '(rebuild (table "memcp-tests" "rpc_data") false true)'
+        scm: '(rebuild (table "memcp-tests" false "rpc_data" false) false true)'
       - name: "RC-repeat: concurrent UPDATE 50"
         parallel: repart_repeat
         sql: "UPDATE rpc_data SET val = -999, tag = 'updated' WHERE id >= 60900 AND id < 60950"
@@ -229,7 +229,7 @@ test_cases:
         scm: |
           (begin
             (set b (map (produceN 200) (lambda (i) (list (+ i 100000) (+ i 100000) (concat "new" i)))))
-            (insert (table "memcp-tests" "rpc_data") (list "id" "val" "tag") b)
+            (insert (table "memcp-tests" false "rpc_data" false) (list "id" "val" "tag") b)
             200)
       - name: "RC-repeat: count after ops"
         sql: "SELECT COUNT(*) AS cnt FROM rpc_data"

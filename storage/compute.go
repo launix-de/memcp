@@ -902,14 +902,14 @@ func (t *table) registerORCTriggers(name string) {
 			// Invalidate from composite sort key onwards via validMask scan
 			switch timing {
 			case AfterInsert:
-				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewString(t.Name)})
+				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
 				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("NEW")})
 			case AfterDelete:
-				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewString(t.Name)})
+				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
 				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("OLD")})
 			case AfterUpdate:
 				// For UPDATE: invalidate from both OLD and NEW positions
-				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewString(t.Name)})
+				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
 				body = scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("begin"),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("OLD")}),
@@ -918,7 +918,7 @@ func (t *table) registerORCTriggers(name string) {
 			}
 		} else {
 			// No sort key: full column invalidation
-			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewString(t.Name)})
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
 			body = scm.NewSlice([]scm.Scmer{
 				scm.NewSymbol("invalidatecolumn"),
 				tblExpr,
@@ -952,8 +952,20 @@ func scanTableReference(expr scm.Scmer) (tableRef, bool) {
 	}
 	if expr.IsSlice() {
 		items := expr.Slice()
-		if len(items) == 3 && callHeadIs(items[0], "table") {
-			return tableRef{schema: scm.String(items[1]), table: scm.String(items[2])}, true
+		if len(items) == 5 && callHeadIs(items[0], "table") {
+			schema, name := scm.String(items[1]), scm.String(items[3])
+			if items[2].Bool() || items[4].Bool() {
+				db := GetDatabase(schema, items[2].Bool())
+				if db == nil {
+					return tableRef{}, false
+				}
+				t := db.GetTable(name, items[4].Bool())
+				if t == nil || t.publishedName.Load() == nil {
+					return tableRef{}, false
+				}
+				return tableRef{schema: db.Name, table: *t.publishedName.Load()}, true
+			}
+			return tableRef{schema: schema, table: name}, true
 		}
 	}
 	if expr.IsSymbol() {
@@ -1694,7 +1706,7 @@ func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inpu
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("$incr"), valueExpr})}),
 	})
 
-	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)})
+	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)})
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
 		scm.NewSymbol("session"),
@@ -1823,7 +1835,7 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 		})
 		invalidateBody := scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)}),
 			scm.NewString(colName),
 		})
 		// Build (and (equal? (get_assoc "OLD" "srcCol1") (get_assoc "NEW" "srcCol1")) ...)
@@ -1861,7 +1873,7 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 		// Fallback: full invalidation.
 		return scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)}),
 			scm.NewString(colName),
 		})
 	}
@@ -1908,7 +1920,7 @@ func buildInvalidateScan(targetSchema, targetTable, colName string, srcCols, inp
 	// Build result col list: '("$invalidate:colName")
 	invColName := "$invalidate:" + colName
 
-	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)})
+	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)})
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
 		scm.NewSymbol("session"),
@@ -1944,7 +1956,7 @@ func buildSelectiveInvalidationBody(targetSchema, targetTable, colName string, s
 		// Fallback: full invalidation
 		return scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)}),
 			scm.NewString(colName),
 		})
 	}
@@ -1971,7 +1983,7 @@ func buildInvalidateORCScan(targetSchema, targetTable, colName string, sortCols,
 		copy(parts[1:], mapParams)
 		sortKeyExpr = scm.NewSlice(parts)
 	}
-	tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)})
+	tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)})
 	mapReduceParams := append([]scm.Scmer{scm.NewSymbol("acc")}, mapParams...)
 	mapReduceBody := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("begin"),
@@ -2007,7 +2019,7 @@ func buildSelectiveORCInvalidationBody(targetSchema, targetTable, colName string
 	default:
 		return scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)}),
 			scm.NewString(colName),
 		})
 	}
@@ -2035,8 +2047,8 @@ func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable
 	}
 	tblExpr := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("table"),
-		scm.NewString(targetTable.schema.Name),
-		scm.NewString(targetTable.Name),
+		scm.NewString(targetTable.schema.Name), scm.NewBool(false),
+		scm.NewString(targetTable.Name), scm.NewBool(false),
 	})
 	srcTable.AddTrigger(TriggerDescription{
 		Name:     triggerName,
@@ -2171,7 +2183,7 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 					// scan layout: [fn, tx, table, accessSchema, accessValues,
 					// filterCols, filter, mapCols, mapreduce, ...]
 					mapColsIdx, mapReduceIdx := 7, 8
-					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(t.Name)})
+					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
 					if isConstantOneAggregate(scanNode[mapReduceIdx]) {
 						body = scm.NewSlice([]scm.Scmer{
 							scm.NewSymbol("invalidatecolumn"),
@@ -2190,7 +2202,7 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 				} else {
 					// Opaque scans have no proven reverse mapping. They must retain the
 					// complete invalidation fallback for correctness.
-					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(t.Name)})
+					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
 					body = scm.NewSlice([]scm.Scmer{
 						scm.NewSymbol("invalidatecolumn"),
 						tblExpr,
@@ -2321,7 +2333,7 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 			if srcTable.reuseComputeDependencyTrigger(triggerName, t, acquireTarget, releaseTarget) {
 				continue
 			}
-			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(t.Name)})
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
 			body := scm.NewSlice([]scm.Scmer{
 				scm.NewSymbol("invalidatecolumn"),
 				tblExpr,

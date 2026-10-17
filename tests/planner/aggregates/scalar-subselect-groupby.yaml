@@ -116,8 +116,8 @@ test_cases:
   - name: "Scalar RecMap probe survives a source rebuild before output"
     scm: |
       (begin
-        (define source (table "memcp-tests" "ssg_trips"))
-        (define target (table "memcp-tests" "ssg_drivers"))
+        (define source (table "memcp-tests" false "ssg_trips" false))
+        (define target (table "memcp-tests" false "ssg_drivers" false))
         (define mapping (scan_recmap nil source '() '() '() (lambda () true)
           '("driver_id") (recmap_equi_first_mapper nil target '("ID") nil) target))
         (rebuild source true false)
@@ -132,8 +132,8 @@ test_cases:
       - sql: "INSERT INTO ssg_trips VALUES (4, 2, 10)"
     scm: |
       (begin
-        (define source (table "memcp-tests" "ssg_trips"))
-        (define target (table "memcp-tests" "ssg_drivers"))
+        (define source (table "memcp-tests" false "ssg_trips" false))
+        (define target (table "memcp-tests" false "ssg_drivers" false))
         (define mapping (scan_recmap nil source '() '() '() (lambda () true)
           '("driver_id") (recmap_equi_first_mapper nil target '("ID") nil) target))
         (define value_mapper (recmap_value_mapper nil mapping '("name")

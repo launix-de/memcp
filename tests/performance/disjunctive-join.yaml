@@ -15,10 +15,10 @@ setup:
     VARCHAR(32)) ENGINE=memory
 - scm: |-
     (begin
-     (insert (table "memcp-tests" "qa_part") '("p_partkey" "p_brand" "p_container" "p_size")
+     (insert (table "memcp-tests" false "qa_part" false) '("p_partkey" "p_brand" "p_container" "p_size")
       (map (produceN 128) (lambda (i) (list (+ i 1) (nth '("Brand#12" "Brand#23" "Brand#34") (mod i 3))
        (nth '("SM CASE" "MED BAG" "LG CASE") (mod i 3)) (+ 1 (mod i 16))))))
-     (insert (table "memcp-tests" "qa_lineitem") '("l_partkey" "l_quantity" "l_extendedprice" "l_discount" "l_shipmode" "l_shipinstruct")
+     (insert (table "memcp-tests" false "qa_lineitem" false) '("l_partkey" "l_quantity" "l_extendedprice" "l_discount" "l_shipmode" "l_shipinstruct")
       (map (produceN 1024) (lambda (i) (list (+ 1 (mod i 128)) (mod i 35) (+ 100 (mod i 10)) 0
        (if (equal? (mod i 5) 0) "AIR" "SHIP") (if (equal? (mod i 7) 0) "OTHER" "DELIVER IN PERSON")))))
      (rebuild true false) true)

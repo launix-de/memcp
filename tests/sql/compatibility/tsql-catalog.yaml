@@ -17,21 +17,16 @@ test_cases:
   name: 'Fixture setup 003: DROP TABLE IF EXISTS dbo.catalog_items'
 - sql: DROP TYPE IF EXISTS dbo.catalog_flag
   name: 'Fixture setup 004: DROP TYPE IF EXISTS dbo.catalog_flag'
-  noncritical: true
 - sql: DROP TYPE IF EXISTS dbo.catalog_text
   name: 'Fixture setup 005: DROP TYPE IF EXISTS dbo.catalog_text'
-  noncritical: true
 - sql: CREATE TYPE dbo.catalog_flag FROM SMALLINT NOT NULL
   name: 'Fixture setup 006: CREATE TYPE dbo.catalog_flag FROM SMALLINT NOT NULL'
-  noncritical: true
 - sql: CREATE TYPE dbo.catalog_text FROM NVARCHAR(24) NULL
   name: 'Fixture setup 007: CREATE TYPE dbo.catalog_text FROM NVARCHAR(24) NULL'
-  noncritical: true
 - sql: CREATE TABLE dbo.catalog_items (id INT PRIMARY KEY, flag dbo.catalog_flag, title dbo.catalog_text, amount
     DECIMAL(12,2), fixed NCHAR(4), unlimited NVARCHAR(MAX))
   name: 'Fixture setup 008: CREATE TABLE dbo.catalog_items (id INT PRIMARY KEY, flag dbo.catalog_flag, title dbo.catalog_text,
     a'
-  noncritical: true
 - sql: DROP TABLE IF EXISTS dbo.catalog_saved_ids
   name: 'Fixture setup 009: DROP TABLE IF EXISTS dbo.catalog_saved_ids'
 - sql: CREATE TABLE dbo.catalog_saved_ids (table_id INT,alias_id INT)
@@ -45,7 +40,6 @@ test_cases:
     INT,CONSTRAINT UQ_catalog_constraint_id UNIQUE(id))
   name: 'Fixture setup 013: CREATE TABLE dbo.catalog_constraints (id INT NOT NULL,value INT CONSTRAINT [DF value]]escaped]
     DEFAU'
-  noncritical: true
 - sql: DROP TABLE IF EXISTS dbo.catalog_nullable_unique
   name: 'Fixture setup 014: DROP TABLE IF EXISTS dbo.catalog_nullable_unique'
 - sql: CREATE TABLE dbo.catalog_nullable_unique (id INT,value INT,CONSTRAINT UQ_catalog_nullable_fixture UNIQUE(value))
@@ -155,30 +149,24 @@ test_cases:
   noncritical: true
 - name: Sys native and current database alias qualification
   sql: ALTER TABLE dbo.catalog_items ADD qualified [memcp-tests].[dbo].[catalog_text]
-  noncritical: true
 - name: Qualified alias dimensions remain available
   sql: SELECT COL_LENGTH(N'dbo.catalog_items',N'qualified') AS size
   expect:
     rows: 1
     data:
     - size: 48
-  noncritical: true
 - name: Remove qualified alias before counting
   sql: ALTER TABLE dbo.catalog_items DROP COLUMN qualified
-  noncritical: true
 - name: Sys native declarations retain their dimensions
   sql: ALTER TABLE dbo.catalog_items ADD native [sys].[nvarchar](12)
-  noncritical: true
 - name: Qualified native dimensions remain available
   sql: SELECT COL_LENGTH(N'dbo.catalog_items',N'native') AS size
   expect:
     rows: 1
     data:
     - size: 24
-  noncritical: true
 - name: Remove qualified native before counting
   sql: ALTER TABLE dbo.catalog_items DROP COLUMN native
-  noncritical: true
 - name: Sys alias declarations are rejected
   sql: ALTER TABLE dbo.catalog_items ADD invalid [sys].[catalog_text]
   expect:
@@ -217,7 +205,6 @@ test_cases:
       fixed: 8
       amount: 9
       unlimited: -1
-  noncritical: true
 - name: Cross database metadata does not bypass the active database
   sql: SELECT TYPE_ID(N'otherdb.dbo.catalog_flag') AS type_id, COL_LENGTH(N'otherdb.dbo.catalog_items',N'id') AS
     size
@@ -229,7 +216,6 @@ test_cases:
   noncritical: true
 - name: Insert through alias declarations
   sql: INSERT INTO dbo.catalog_items (id,flag,title,amount,fixed) VALUES (1,-1,N'Hello',12.345,N'ab')
-  noncritical: true
 - name: Numeric dimensions are enforced
   sql: SELECT flag,title,amount FROM dbo.catalog_items WHERE id=1
   expect:
@@ -238,7 +224,6 @@ test_cases:
     - flag: -1
       title: Hello
       amount: 12.35
-  noncritical: true
 - name: Alias nullability is enforced
   sql: INSERT INTO dbo.catalog_items (id,flag) VALUES (2,NULL)
   expect:
@@ -259,14 +244,12 @@ test_cases:
   sql: CREATE TABLE dbo.invalid_alias (id NVARCHAR(4001))
   expect:
     error: true
-  noncritical: true
 - name: Invalid decimal scale fails
   sql: CREATE TABLE dbo.invalid_alias (id DECIMAL(2,3))
   expect:
     error: true
 - name: Add columns through the persisted alias
   sql: ALTER TABLE dbo.catalog_items ADD extra dbo.catalog_text
-  noncritical: true
 - name: Cached joined catalog queries see newly added columns
   sql: SELECT COUNT(*) AS n FROM sys.columns AS c JOIN sys.types AS t ON c.user_type_id=t.user_type_id WHERE c.object_id=OBJECT_ID(N'dbo.catalog_items')
     AND t.is_user_defined=1
@@ -288,10 +271,8 @@ test_cases:
     rows: 1
     data:
     - size: 48
-  noncritical: true
 - name: Drop alias column
   sql: ALTER TABLE dbo.catalog_items DROP COLUMN extra
-  noncritical: true
 - name: Cached joined catalog queries see dropped columns
   sql: SELECT COUNT(*) AS n FROM sys.columns AS c JOIN sys.types AS t ON c.user_type_id=t.user_type_id WHERE c.object_id=OBJECT_ID(N'dbo.catalog_items')
     AND t.is_user_defined=1
@@ -313,7 +294,6 @@ test_cases:
     rows: 1
     data:
     - size: null
-  noncritical: true
 - name: Truthful engine property
   sql: SELECT SERVERPROPERTY(N'Edition') AS edition,SERVERPROPERTY(N'UnknownProperty') AS missing
   expect:
@@ -350,17 +330,14 @@ test_cases:
   noncritical: true
 - name: Named default fills only omitted values
   sql: INSERT dbo.catalog_constraints(id) VALUES (1)
-  noncritical: true
 - name: Named default executes its real calculator
   sql: SELECT value FROM dbo.catalog_constraints WHERE id=1
   expect:
     rows: 1
     data:
     - value: 4
-  noncritical: true
 - name: DROP named DEFAULT resolves escaped spelling and casing
   sql: ALTER TABLE dbo.catalog_constraints DROP CONSTRAINT [df VALUE]]escaped]
-  noncritical: true
 - name: Dropped default disappears from the catalog
   sql: SELECT COUNT(*) AS value FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'dbo.catalog_constraints')
   expect:
@@ -370,22 +347,21 @@ test_cases:
   noncritical: true
 - name: Dropped default no longer fills omitted values
   sql: INSERT dbo.catalog_constraints(id) VALUES (2)
-  noncritical: true
 - name: Removed default preserves ordinary NULL insertion
   sql: SELECT value FROM dbo.catalog_constraints WHERE id=2
   expect:
     rows: 1
     data:
     - value: null
-  noncritical: true
 - name: ALTER ADD named DEFAULT binds an existing column
   sql: ALTER TABLE dbo.catalog_constraints ADD CONSTRAINT DF_catalog_replacement DEFAULT (7) FOR value
-  noncritical: true
 - name: Duplicate DEFAULT on one column is rejected
   sql: ALTER TABLE dbo.catalog_constraints ADD CONSTRAINT DF_catalog_duplicate DEFAULT 8 FOR value
   expect:
     error: true
 - name: Constraint names collide across DEFAULT and UNIQUE kinds
+  setup:
+  - sql: UPDATE dbo.catalog_constraints SET nullable=id
   sql: ALTER TABLE dbo.catalog_constraints ADD CONSTRAINT df_CATALOG_replacement UNIQUE(nullable)
   expect:
     error: true
@@ -404,15 +380,12 @@ test_cases:
   sql: CREATE TABLE dbo.catalog_rejected_constraint (id INT DEFAULT 1 DEFAULT 2)
   expect:
     error: true
-  noncritical: true
 - name: ALTER adds a genuinely enforced named UNIQUE
   setup:
   - sql: UPDATE dbo.catalog_constraints SET nullable=id
   sql: ALTER TABLE dbo.catalog_constraints ADD CONSTRAINT UQ_catalog_nullable UNIQUE(nullable)
-  noncritical: true
 - name: Nullable UNIQUE accepts its first NULL
   sql: INSERT dbo.catalog_nullable_unique(id,value) VALUES (1,NULL)
-  noncritical: true
 - name: Nullable UNIQUE rejects a repeated NULL key
   sql: INSERT dbo.catalog_nullable_unique(id,value) VALUES (2,NULL)
   expect:
@@ -423,10 +396,8 @@ test_cases:
   sql: INSERT dbo.catalog_nullable_unique(id,value) VALUES (4,42)
   expect:
     error: true
-  noncritical: true
 - name: DROP named UNIQUE removes its actual enforcement
   sql: ALTER TABLE dbo.catalog_constraints DROP CONSTRAINT uq_CATALOG_nullable
-  noncritical: true
 - name: Dropped named UNIQUE leaves no catalog definition
   sql: SELECT COUNT(*) AS value FROM sys.key_constraints WHERE name=N'UQ_catalog_nullable'
   expect:
@@ -452,29 +423,25 @@ test_cases:
   - sql: CREATE TYPE dbo.catalog_transient_alias FROM INT
   scm: "(begin\n  (define session (newsession))\n  (define formula (sql_queryplan_compile_formula nil\n    (parse_tsql\
     \ \"memcp-tests\" \"CREATE TABLE dbo.catalog_stale_alias(value dbo.catalog_transient_alias)\" nil session nil)))\n\
-    \  (drop_sql_type_alias \"memcp-tests\" \"catalog_transient_alias\" false)\n  (create_sql_type_alias \"memcp-tests\"\
-    \ \"catalog_transient_alias\" \"INT\" '() true)\n  (define rejected (try (lambda () (begin\n    (sql_execute_formula\
+    \  (drop_sql_type_alias \"memcp-tests\" \"catalog_transient_alias\" false nil)\n  (create_sql_type_alias \"memcp-tests\"\
+    \ \"catalog_transient_alias\" \"INT\" '() true nil)\n  (define rejected (try (lambda () (begin\n    (sql_execute_formula\
     \ session nil formula (lambda row true) (lambda fields true)) false)) (lambda (_) true)))\n  (if (and rejected\
-    \ (nil? (sql_object_id \"memcp-tests\" \"catalog_stale_alias\"))) true\n    (error \"cached CREATE published\
+    \ (nil? (table \"memcp-tests\" false \"catalog_stale_alias\" false))) true\n    (error \"cached CREATE published\
     \ an obsolete alias declaration\")))\n"
   expect:
     result: true
-  noncritical: true
 - sql: DROP TABLE IF EXISTS dbo.catalog_stale_alias
   name: Fixture cleanup for Cached CREATE cannot use an alias identity replaced after binding (1)
 - sql: DROP TYPE IF EXISTS dbo.catalog_transient_alias
   name: Fixture cleanup for Cached CREATE cannot use an alias identity replaced after binding (2)
-  noncritical: true
 - name: Restored named defaults continue to execute after restart
   sql: INSERT dbo.catalog_constraints(id) VALUES (3)
-  noncritical: true
 - name: Restored named DEFAULT keeps declaration metadata and calculator
   sql: SELECT value FROM dbo.catalog_constraints WHERE id=3
   expect:
     rows: 1
     data:
     - value: 7
-  noncritical: true
 - sql: DROP TABLE IF EXISTS aa_catalog_other_frontend
   name: 'Fixture cleanup 001: DROP TABLE IF EXISTS aa_catalog_other_frontend'
 - sql: DROP TABLE IF EXISTS dbo.catalog_nullable_unique
@@ -489,8 +456,447 @@ test_cases:
   name: 'Fixture cleanup 006: DROP TABLE IF EXISTS dbo.catalog_items'
 - sql: DROP TYPE IF EXISTS dbo.catalog_flag
   name: 'Fixture cleanup 007: DROP TYPE IF EXISTS dbo.catalog_flag'
-  noncritical: true
 - sql: DROP TYPE IF EXISTS dbo.catalog_text
   name: 'Fixture cleanup 008: DROP TYPE IF EXISTS dbo.catalog_text'
-  noncritical: true
+- name: Remove previous native DDL fixture
+  sql: DROP TABLE IF EXISTS dbo.ddl_native_defaults
+- name: Qualified CREATE retains ordinary native columns and named constant defaults
+  sql: CREATE TABLE [memcp-tests].dbo.ddl_native_defaults (id INT PRIMARY KEY, value INT CONSTRAINT [DF value]]native] DEFAULT ((2+3)*2), label NVARCHAR(12) DEFAULT (N'initial'))
+- name: Named default is part of the existing column snapshot
+  scm: |
+    (begin
+      (define c (show (table "memcp-tests" false "ddl_native_defaults" false) "column" "value" false))
+      (and (equal? (c "DefaultName") "DF value]native") (equal? (c "Default") 10)))
+  expect: {result: true}
+- name: Qualified INSERT consumes the native defaults
+  sql: INSERT [memcp-tests].dbo.ddl_native_defaults(id) VALUES (1)
+  expect: {affected_rows: 1}
+- name: Constant defaults preserve their computed values
+  sql: SELECT id,value,label FROM dbo.ddl_native_defaults
+  expect: {rows: 1, data: [{id: 1, value: 10, label: initial}]}
+- name: Drop resolves the original escaped default name without case
+  sql: ALTER TABLE dbo.ddl_native_defaults DROP CONSTRAINT [df VALUE]]NATIVE]
+- name: A dropped default stops filling later inserts
+  sql: INSERT dbo.ddl_native_defaults(id) VALUES (2)
+- name: Alter adds a default to the existing column declaration
+  sql: ALTER TABLE [memcp-tests].dbo.ddl_native_defaults ADD CONSTRAINT DF_replacement DEFAULT (3+4) FOR VALUE
+- name: A second default cannot replace a live declaration
+  sql: ALTER TABLE dbo.ddl_native_defaults ADD DEFAULT 9 FOR value
+  expect: {error: true}
+- name: Default alteration leaves existing rows unchanged
+  sql: SELECT id,value FROM dbo.ddl_native_defaults ORDER BY id
+  expect: {rows: 2, data: [{id: 1, value: 10}, {id: 2, value: null}]}
+- name: Future inserts use the replacement default
+  sql: INSERT dbo.ddl_native_defaults(id) VALUES (3)
+- name: Replacement default reaches native insertion
+  sql: SELECT value FROM dbo.ddl_native_defaults WHERE id=3
+  expect: {rows: 1, data: [{value: 7}]}
+- name: Qualified ALTER adds several ordinary columns
+  sql: ALTER TABLE [memcp-tests].dbo.ddl_native_defaults ADD Added INT, Extra VARCHAR(8)
+- name: Case folded ADD cannot publish a second declaration
+  sql: ALTER TABLE dbo.ddl_native_defaults ADD added BIGINT
+  expect: {error: true}
+- name: DROP COLUMN resolves several canonical spellings
+  sql: ALTER TABLE dbo.ddl_native_defaults DROP COLUMN aDDeD,eXTRA
+- name: Conditional DROP COLUMN accepts missing declarations
+  sql: ALTER TABLE dbo.ddl_native_defaults DROP COLUMN IF EXISTS Added,Extra
+- name: Conditional DROP CONSTRAINT accepts a removed default
+  sql: ALTER TABLE dbo.ddl_native_defaults DROP CONSTRAINT IF EXISTS DF_replacement,DF_replacement
+- name: Unconditional DROP CONSTRAINT rejects missing declarations
+  sql: ALTER TABLE dbo.ddl_native_defaults DROP CONSTRAINT DF_replacement
+  expect: {error: true}
+- name: Duplicate defaults fail before table publication
+  sql: CREATE TABLE dbo.ddl_duplicate_defaults(id INT DEFAULT 1 DEFAULT 2)
+  expect: {error: true}
+- name: Volatile compound defaults are not frozen during CREATE
+  sql: CREATE TABLE dbo.ddl_duplicate_defaults(id DATETIME DEFAULT DATEADD(day,1,GETDATE()))
+  expect: {error: true}
+- name: Remove previous view alteration fixture
+  sql: DROP VIEW IF EXISTS dbo.DdlNativeView
+- name: Create view for native ALTER
+  sql: CREATE VIEW dbo.DdlNativeView AS SELECT id,value FROM dbo.ddl_native_defaults
+- name: ALTER VIEW resolves its existing mixed case spelling
+  sql: ALTER VIEW dbo.ddlnativeview AS SELECT id,value+1 AS value FROM dbo.ddl_native_defaults
+- name: Altered view resolves folded columns through the shared planner
+  sql: SELECT ID,VALUE FROM dbo.DDLNATIVEVIEW WHERE id=3
+  expect: {rows: 1, data: [{ID: 3, VALUE: 8}]}
+- name: ALTER VIEW does not create a missing definition
+  sql: ALTER VIEW dbo.absent_ddl_view AS SELECT 1 AS value
+  expect: {error: true}
+- name: Remove altered view using its canonical spelling
+  sql: DROP VIEW IF EXISTS dbo.ddlnativeview
+- name: Remove native DDL fixture
+  sql: DROP TABLE dbo.ddl_native_defaults
+- name: Remove previous alias expression fixture
+  sql: DROP TABLE IF EXISTS dbo.ddl_alias_values
+- name: Remove previous numeric alias fixture
+  sql: DROP TYPE IF EXISTS dbo.ddl_alias_number
+- name: Remove previous text alias fixture
+  sql: DROP TYPE IF EXISTS dbo.ddl_alias_text
+- name: Numeric alias uses ordinary persisted frontend data
+  sql: CREATE TYPE dbo.ddl_alias_number FROM SMALLINT NOT NULL
+- name: Text alias inherits its declared national width
+  sql: CREATE TYPE dbo.ddl_alias_text FROM NVARCHAR(8) NULL
+- name: Table PRIMARY KEY overrides inherited alias nullability
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.ddl_alias_primary
+  - sql: CREATE TABLE dbo.ddl_alias_primary(value dbo.ddl_alias_text,PRIMARY KEY(value))
+  scm: (not ((show (table "memcp-tests" false "ddl_alias_primary" false) "column" "value" false) "Null"))
+  expect: {result: true}
+  cleanup:
+  - sql: DROP TABLE dbo.ddl_alias_primary
+- name: Explicit NULL remains invalid for an alias PRIMARY KEY
+  sql: CREATE TABLE dbo.ddl_alias_primary(value dbo.ddl_alias_text NULL,PRIMARY KEY(value))
+  expect: {error: true}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS dbo.ddl_alias_primary
+- name: Alias defaults and explicit nullability share native columns
+  sql: CREATE TABLE dbo.ddl_alias_values(id INT PRIMARY KEY, number dbo.ddl_alias_number DEFAULT (2+3), label dbo.ddl_alias_text DEFAULT N'text')
+- name: Native metadata preserves the original qualified alias
+  scm: |
+    (begin
+      (define column (show (table "memcp-tests" false "ddl_alias_values" false) "column" "label" false))
+      (and (equal? (column "RawType") "[memcp-tests].[dbo].[ddl_alias_text]")
+        (expression_equal? (column "Dimensions") '(8)) (column "Null")))
+  expect: {result: true}
+- name: Column catalog reports alias names and underlying native contracts
+  sql: EXEC sp_columns @table_name=N'ddl_alias_values',@ODBCVer=3
+  expect:
+    rows: 3
+    data:
+    - {COLUMN_NAME: id, TYPE_NAME: int, DATA_TYPE: 4, PRECISION: 10, LENGTH: 4, NULLABLE: 0, IS_NULLABLE: "NO", ORDINAL_POSITION: 1}
+    - {COLUMN_NAME: number, TYPE_NAME: ddl_alias_number, DATA_TYPE: 5, PRECISION: 5, LENGTH: 2, SCALE: 0, NULLABLE: 0, IS_NULLABLE: "NO", ORDINAL_POSITION: 2}
+    - {COLUMN_NAME: label, TYPE_NAME: ddl_alias_text, DATA_TYPE: -9, PRECISION: 8, LENGTH: 16, CHAR_OCTET_LENGTH: 16, NULLABLE: 1, IS_NULLABLE: "YES", ORDINAL_POSITION: 3}
+- name: Alias key discovery uses native composite keys and declaration widths
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.ddl_alias_metadata_key
+  - sql: CREATE TABLE dbo.ddl_alias_metadata_key(number dbo.ddl_alias_number,label dbo.ddl_alias_text,PRIMARY KEY(number,label))
+  sql: EXEC sp_special_columns @table_name=N'ddl_alias_metadata_key',@nullable=N'O',@ODBCVer=3
+  expect:
+    rows: 2
+    data:
+    - {COLUMN_NAME: number, TYPE_NAME: ddl_alias_number, DATA_TYPE: 5, PRECISION: 5, LENGTH: 2, SCALE: 0}
+    - {COLUMN_NAME: label, TYPE_NAME: ddl_alias_text, DATA_TYPE: -9, PRECISION: 8, LENGTH: 16}
+  cleanup:
+  - sql: DROP TABLE dbo.ddl_alias_metadata_key
+- name: Alias column catalog preserves explicit column nullability overrides
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.ddl_alias_metadata_nulls
+  - sql: CREATE TABLE dbo.ddl_alias_metadata_nulls(number dbo.ddl_alias_number NULL,label dbo.ddl_alias_text NOT NULL)
+  sql: EXEC sp_columns @table_name=N'ddl_alias_metadata_nulls',@ODBCVer=3
+  expect:
+    rows: 2
+    data:
+    - {COLUMN_NAME: number, TYPE_NAME: ddl_alias_number, DATA_TYPE: 5, LENGTH: 2, NULLABLE: 1, IS_NULLABLE: "YES"}
+    - {COLUMN_NAME: label, TYPE_NAME: ddl_alias_text, DATA_TYPE: -9, LENGTH: 16, CHAR_OCTET_LENGTH: 16, NULLABLE: 0, IS_NULLABLE: "NO"}
+  cleanup:
+  - sql: DROP TABLE dbo.ddl_alias_metadata_nulls
+- name: Empty alias projections have declaration based wire types
+  scm: |
+    (begin
+      (define s (newsession))
+      (s "__tsql_describe" true)
+      (define columns (eval (parse_tsql "memcp-tests" "SELECT number,label FROM dbo.ddl_alias_values" nil s nil)))
+      (and (equal? ((car columns) "kind") 38) (equal? ((cadr columns) "kind") 231)
+        (equal? ((cadr columns) "size") 16)))
+  expect: {result: true}
+- name: Frozen alias defaults use native omitted column insertion
+  sql: INSERT dbo.ddl_alias_values(id) VALUES (1)
+- name: Alias projection and concatenation use declared SQL contracts
+  sql: SELECT v.number,v.label+N'!' AS text FROM dbo.ddl_alias_values AS v WHERE v.id=1
+  expect: {rows: 1, data: [{number: 5, text: 'text!'}]}
+- name: Alias numeric assignment rejects overflow before writing
+  sql: INSERT dbo.ddl_alias_values(id,number) VALUES (2,32768)
+  expect: {error: true}
+- name: Alias nullability is checked by the existing native column
+  sql: INSERT dbo.ddl_alias_values(id,number) VALUES (2,NULL)
+  expect: {error: true}
+- name: Alias assignments and native storage preserve integer values
+  sql: INSERT dbo.ddl_alias_values(id,number,label) VALUES (2,7,N'123456789')
+- name: Alias text conversion respects the declaration
+  sql: SELECT label FROM dbo.ddl_alias_values WHERE id=2
+  expect: {rows: 1, data: [{label: '12345678'}]}
+- name: Compound UPDATE resolves the original alias operand at compile time
+  sql: UPDATE dbo.ddl_alias_values SET number+=1 WHERE id=1
+- name: Star projection resolves aliases without runtime type wrappers
+  sql: SELECT * FROM dbo.ddl_alias_values WHERE id=1
+  expect: {rows: 1, data: [{id: 1, number: 6, label: text}]}
+- name: Derived aliases keep the producer contract
+  sql: SELECT d.label+N'!' AS text,d.number+1 AS number FROM (SELECT label,number FROM dbo.ddl_alias_values WHERE id=1) AS d
+  expect: {rows: 1, data: [{text: 'text!', number: 7}]}
+- name: Alias GROUP BY and ordered output use the shared planner
+  sql: SELECT number,COUNT(*) AS n FROM dbo.ddl_alias_values GROUP BY number ORDER BY number
+  expect: {rows: 2, data: [{number: 6, n: 1}, {number: 7, n: 1}]}
+- name: INSERT SELECT consumes alias contracts through the native row sink
+  sql: INSERT dbo.ddl_alias_values(id,number,label) SELECT id+10,number+1,label FROM dbo.ddl_alias_values WHERE id=1
+- name: Alias INSERT SELECT stored ordinary values
+  sql: SELECT number,label FROM dbo.ddl_alias_values WHERE id=11
+  expect: {rows: 1, data: [{number: 7, label: text}]}
+- name: Alias window ordering uses native columns after contract compilation
+  sql: SELECT id,ROW_NUMBER() OVER(ORDER BY number,id) AS rn FROM dbo.ddl_alias_values ORDER BY id
+  expect: {rows: 3, data: [{id: 1, rn: 1}, {id: 2, rn: 2}, {id: 11, rn: 3}]}
+- name: Alias window lag retains the numeric argument contract
+  sql: SELECT id,LAG(number) OVER(ORDER BY id)+1 AS value FROM dbo.ddl_alias_values ORDER BY id
+  expect: {rows: 3, data: [{id: 1, value: null}, {id: 2, value: 7}, {id: 11, value: 8}]}
+- name: Alias window lead retains the character argument contract
+  sql: SELECT id,LEAD(label) OVER(ORDER BY id)+N'!' AS value FROM dbo.ddl_alias_values ORDER BY id
+  expect: {rows: 3, data: [{id: 1, value: '12345678!'}, {id: 2, value: 'text!'}, {id: 11, value: null}]}
+- name: In-use text alias cannot be dropped
+  sql: DROP TYPE dbo.ddl_alias_text
+  expect: {error: true}
+- name: Remove previous alias view fixture
+  sql: DROP VIEW IF EXISTS dbo.DdlAliasView
+- name: Alias view persists logical SQL through the existing view catalog
+  sql: CREATE VIEW dbo.DdlAliasView AS SELECT number,label FROM dbo.ddl_alias_values
+- name: Alias declarations survive a graceful restart
+  sql: SHUTDOWN
+  syntax: mysql
+- name: Restored alias data and casts retain their contracts
+  sql: SELECT number+1 AS number,label+N'!' AS text FROM dbo.ddl_alias_values WHERE id=1
+  expect: {rows: 1, data: [{number: 7, text: 'text!'}]}
+- name: Restored alias view resolves the producer contract
+  sql: SELECT number+1 AS number,label+N'!' AS text FROM dbo.DDLALIASVIEW WHERE number=6
+  expect: {rows: 1, data: [{number: 7, text: 'text!'}]}
+- name: Remove restored alias view
+  sql: DROP VIEW dbo.ddlaliasview
+- name: Restored alias defaults remain native defaults
+  sql: INSERT dbo.ddl_alias_values(id) VALUES (3)
+- name: Restored alias default values are unchanged
+  sql: SELECT number,label FROM dbo.ddl_alias_values WHERE id=3
+  expect: {rows: 1, data: [{number: 5, label: text}]}
+- name: Native base type qualifiers work in column declarations
+  sql: ALTER TABLE dbo.ddl_alias_values ADD native [sys].[nvarchar](12)
+- name: Alias DROP resolves a folded public spelling after dependency removal
+  sql: ALTER TABLE dbo.ddl_alias_values DROP COLUMN label
+- name: Unused text alias is removable without touching storage types
+  sql: DROP TYPE dbo.DDL_ALIAS_TEXT
+- name: Conditional type DROP accepts a missing alias
+  sql: DROP TYPE IF EXISTS dbo.ddl_alias_text
+- name: Declaration compilers cannot replace a column expression
+  scm: |
+    (try (lambda () (begin
+      (sql_compile_column_info '() (lambda (info declaration) (sql_info 123 "INT" nil))
+        (list (quote get_column) nil false "missing" false)) false)) (lambda (_) true))
+  expect: {result: true}
+- name: Remove alias expression fixture
+  sql: DROP TABLE dbo.ddl_alias_values
+- name: Remove numeric alias fixture
+  sql: DROP TYPE dbo.ddl_alias_number
+- name: Decimal alias rounding uses frontend scale conversion
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.ddl_alias_decimal
+  - sql: DROP TYPE IF EXISTS dbo.ddl_alias_decimal_type
+  - sql: CREATE TYPE dbo.ddl_alias_decimal_type FROM NUMERIC(6,2)
+  - sql: CREATE TABLE dbo.ddl_alias_decimal(value dbo.ddl_alias_decimal_type)
+  - sql: INSERT dbo.ddl_alias_decimal VALUES(123.456)
+  sql: SELECT value FROM dbo.ddl_alias_decimal
+  expect: {rows: 1, data: [{value: 123.46}]}
+- name: Decimal alias rejects overflow caused by rounding
+  sql: INSERT dbo.ddl_alias_decimal VALUES(9999.995)
+  expect: {error: true}
+- name: Rejected decimal alias insertion leaves native rows unchanged
+  sql: SELECT value FROM dbo.ddl_alias_decimal
+  expect: {rows: 1, data: [{value: 123.46}]}
+  cleanup:
+  - sql: DROP TABLE dbo.ddl_alias_decimal
+  - sql: DROP TYPE dbo.ddl_alias_decimal_type
+- name: Remove previous cached alias fixture
+  sql: DROP TABLE IF EXISTS dbo.ddl_alias_cached
+- name: Remove previous cached alias declaration
+  sql: DROP TYPE IF EXISTS dbo.ddl_alias_cached_type
+- name: First cached alias has an integer SQL contract
+  sql: CREATE TYPE dbo.ddl_alias_cached_type FROM INT
+- name: Bind CREATE to the first alias definition
+  sql: CREATE TABLE dbo.ddl_alias_cached(value dbo.ddl_alias_cached_type)
+- name: Column catalog binds the first alias contract in a fresh metadata context
+  sql: EXEC sp_columns @table_name=N'ddl_alias_cached',@ODBCVer=3
+  expect: {rows: 1, data: [{COLUMN_NAME: value, TYPE_NAME: ddl_alias_cached_type, DATA_TYPE: 4, LENGTH: 4}]}
+- name: Insert the first alias value
+  sql: INSERT dbo.ddl_alias_cached VALUES(5)
+- name: Cache integer division through an alias
+  sql: SELECT value/2 AS result FROM dbo.ddl_alias_cached
+  expect: {rows: 1, data: [{result: 2}]}
+- name: Retire the first cached alias table
+  sql: DROP TABLE dbo.ddl_alias_cached
+- name: Retire the first cached alias declaration
+  sql: DROP TYPE dbo.ddl_alias_cached_type
+- name: Recreated alias has a different SQL contract
+  sql: CREATE TYPE dbo.ddl_alias_cached_type FROM FLOAT
+- name: Cached CREATE rebinds its consumed alias definition
+  sql: CREATE TABLE dbo.ddl_alias_cached(value dbo.ddl_alias_cached_type)
+- name: Column catalog reloads a replaced alias in its next metadata context
+  sql: EXEC sp_columns @table_name=N'ddl_alias_cached',@ODBCVer=3
+  expect: {rows: 1, data: [{COLUMN_NAME: value, TYPE_NAME: ddl_alias_cached_type, DATA_TYPE: 6, LENGTH: 8}]}
+- name: Cached INSERT rebinds the replacement alias contract
+  sql: INSERT dbo.ddl_alias_cached VALUES(5)
+- name: Cached expression uses the replacement SQL type regardless of numeric carrier
+  sql: SELECT value/2 AS result FROM dbo.ddl_alias_cached
+  expect: {rows: 1, data: [{result: 2.5}]}
+- name: Remove cached alias table fixture
+  sql: DROP TABLE dbo.ddl_alias_cached
+- name: Remove cached alias declaration fixture
+  sql: DROP TYPE dbo.ddl_alias_cached_type
+- name: Quoted alias names preserve dots spaces and escaped brackets
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.ddl_quoted_alias
+  - sql: DROP TYPE IF EXISTS dbo.[alias.with]] space]
+  - sql: CREATE TYPE dbo.[alias.with]] space] FROM INT
+  sql: CREATE TABLE dbo.ddl_quoted_alias(value [alias.with]] space])
+- name: Column catalog preserves quoted alias punctuation without qualification
+  sql: EXEC sp_columns @table_name=N'ddl_quoted_alias',@ODBCVer=3
+  expect: {rows: 1, data: [{COLUMN_NAME: value, TYPE_NAME: 'alias.with] space', DATA_TYPE: 4, LENGTH: 4}]}
+- name: Quoted aliases use the declared scalar contract
+  setup:
+  - sql: INSERT dbo.ddl_quoted_alias VALUES(5)
+  sql: SELECT value+1 AS result FROM dbo.ddl_quoted_alias
+  expect: {rows: 1, data: [{result: 6}]}
+- name: Quoted alias removal resolves the original name without reparsing punctuation
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.ddl_quoted_alias
+  sql: DROP TYPE dbo.[ALIAS.with]] SPACE]
+- name: Source contract setup removes a previous table
+  sql: DROP TABLE IF EXISTS dbo.ddl_source_contract
+- name: Source contract setup removes a previous alias
+  sql: DROP TYPE IF EXISTS dbo.ddl_source_float
+- name: Source contract native initial declaration
+  sql: CREATE TABLE dbo.ddl_source_contract(value INT)
+- name: Source contract initial insertion
+  sql: INSERT dbo.ddl_source_contract VALUES(5)
+- name: Source contract caches native integer division
+  sql: SELECT value/2 AS result FROM dbo.ddl_source_contract
+  expect: {rows: 1, data: [{result: 2}]}
+- name: Source contract retires the native table
+  sql: DROP TABLE dbo.ddl_source_contract
+- name: Source contract creates a floating alias
+  sql: CREATE TYPE dbo.ddl_source_float FROM FLOAT
+- name: Source contract publishes an alias column under the old table name
+  sql: CREATE TABLE dbo.ddl_source_contract(value dbo.ddl_source_float)
+- name: Source contract cached insertion observes the alias
+  sql: INSERT dbo.ddl_source_contract VALUES(5)
+- name: Source contract cached SELECT rebinds its actual column
+  sql: SELECT value/2 AS result FROM dbo.ddl_source_contract
+  expect: {rows: 1, data: [{result: 2.5}]}
+- name: Source contract cleanup removes the table
+  sql: DROP TABLE dbo.ddl_source_contract
+- name: Source contract cleanup removes the alias
+  sql: DROP TYPE dbo.ddl_source_float
+- name: Alias lookup caches one compiler session and reloads in the next
+  scm: |
+    (begin
+      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" true nil)
+      (create_sql_type_alias "memcp-tests" "ddl_session_alias" "INT" '() true nil)
+      (define first (newsession))
+      (define initial (tsql_find_type_alias "memcp-tests" "ddl_session_alias" first))
+      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" false nil)
+      (create_sql_type_alias "memcp-tests" "ddl_session_alias" "FLOAT" '() true nil)
+      (define retained (tsql_find_type_alias "memcp-tests" "ddl_session_alias" first))
+      (define second (sql_queryplan_compile_session first nil))
+      (define refreshed (tsql_find_type_alias "memcp-tests" "ddl_session_alias" second))
+      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" false nil)
+      (and (equal? (initial "id") (retained "id"))
+        (equal? (retained "base_type") "INT")
+        (not (equal? (initial "id") (refreshed "id")))
+        (equal? (refreshed "base_type") "FLOAT")))
+  expect: {result: true}
+- name: Absent alias is cached locally and discovered by a new compiler session
+  scm: |
+    (begin
+      (drop_sql_type_alias "memcp-tests" "ddl_session_missing" true nil)
+      (define first (newsession))
+      (define absent (tsql_find_type_alias "memcp-tests" "ddl_session_missing" first))
+      (create_sql_type_alias "memcp-tests" "ddl_session_missing" "SMALLINT" '() true nil)
+      (define retained (tsql_find_type_alias "memcp-tests" "ddl_session_missing" first))
+      (define fresh (tsql_find_type_alias "memcp-tests" "ddl_session_missing" (newsession)))
+      (drop_sql_type_alias "memcp-tests" "ddl_session_missing" false nil)
+      (and (nil? absent) (nil? retained) (equal? (fresh "base_type") "SMALLINT")))
+  expect: {result: true}
+- name: Alias cache keys preserve Unicode identifier spelling
+  scm: |
+    (begin
+      (drop_sql_type_alias "memcp-tests" "ddl_İ" true nil)
+      (create_sql_type_alias "memcp-tests" "ddl_İ" "INT" '() true nil)
+      (define declaration (tsql_find_type_alias "memcp-tests" "ddl_İ" (newsession)))
+      (drop_sql_type_alias "memcp-tests" "ddl_İ" false nil)
+      (equal? (declaration "name") "ddl_İ"))
+  expect: {result: true}
+- name: Alias creation rejects an absent database context
+  scm: (create_sql_type_alias "" "ddl_absent_owner" "INT" '() true nil)
+  expect: {error: true, contains: "database does not exist"}
+- name: Rejected alias creation leaves no catalog entry
+  scm: (nil? (tsql_find_type_alias "" "ddl_absent_owner" nil))
+  expect: {result: true}
+- name: Conditional alias removal still requires an existing database
+  scm: (drop_sql_type_alias "" "ddl_absent_owner" true nil)
+  expect: {error: true, contains: "database does not exist"}
+- name: Transactional alias creation is rejected before publishing metadata
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (tx_begin session)
+      (define rejected (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "CREATE TYPE dbo.ddl_tx_creation FROM INT" session nil 0
+          (lambda (_row) true) (lambda args true))
+        false)) (lambda (failure) (strlike (concat failure) "%alias DDL inside explicit transactions%"))))
+      (tx_rollback session)
+      (and rejected (nil? (tsql_find_type_alias "memcp-tests" "ddl_tx_creation" nil))))
+  expect: {result: true}
+- name: Transactional alias removal preserves the committed declaration
+  scm: |
+    (begin
+      (create_sql_type_alias "memcp-tests" "ddl_tx_removal" "INT" '() true nil)
+      (define session (newsession))
+      (session "username" "root")
+      (tx_begin session)
+      (define rejected (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "DROP TYPE dbo.ddl_tx_removal" session nil 0
+          (lambda (_row) true) (lambda args true))
+        false)) (lambda (failure) (strlike (concat failure) "%alias DDL inside explicit transactions%"))))
+      (tx_rollback session)
+      (define retained (tsql_find_type_alias "memcp-tests" "ddl_tx_removal" nil))
+      (drop_sql_type_alias "memcp-tests" "ddl_tx_removal" false nil)
+      (and rejected (not (nil? retained))))
+  expect: {result: true}
+# This isolated suite ends by replacing only its own database. Restore that
+# database even when an assertion raises, so later suites receive a usable target.
+- name: Database lifecycle retires aliases across all SQL frontends
+  scm: |
+    (begin
+      (define tx nil)
+      (define session (newsession))
+      (define outcome (try (lambda () (begin
+        (map (list (list parse_sql "`memcp-tests`") (list parse_psql "\"memcp-tests\"")
+          (list parse_tsql "[memcp-tests]")) (lambda (frontend) (begin
+          (define parse (car frontend))
+          (define quoted_name (cadr frontend))
+          (create_sql_type_alias "memcp-tests" "ddl_lifecycle_alias" "INT" '() true nil)
+          (eval (parse "memcp-tests" (concat "CREATE DATABASE IF NOT EXISTS " quoted_name) nil (newsession) nil))
+          (if (tsql_find_type_alias "memcp-tests" "ddl_lifecycle_alias" nil) true
+            (error "existing-database create removed its alias"))
+          (define rejected (try (lambda () (begin
+            (eval (parse "memcp-tests" (concat "CREATE DATABASE " quoted_name) nil (newsession) nil))
+            false)) (lambda (_failure) true)))
+          (if (and rejected (tsql_find_type_alias "memcp-tests" "ddl_lifecycle_alias" nil)) true
+            (error "failed database create changed its alias"))
+          (eval (parse "memcp-tests" (concat "DROP DATABASE " quoted_name) nil (newsession) nil))
+          (if (nil? (tsql_find_type_alias "memcp-tests" "ddl_lifecycle_alias" nil)) true
+            (error "database drop retained its alias"))
+          (eval (parse "memcp-tests" (concat "CREATE DATABASE " quoted_name) nil (newsession) nil))
+          (create_sql_type_alias "memcp-tests" "ddl_lifecycle_alias" "INT" '() true nil)
+          /* Model a crash between physical DROP and frontend catalog cleanup.
+          Privileged native DDL intentionally bypasses the SQL lifecycle. */
+          (dropdatabase "memcp-tests" false)
+          (define failed_drop (try (lambda () (begin
+            (eval (parse "memcp-tests" (concat "DROP DATABASE " quoted_name) nil (newsession) nil))
+            false)) (lambda (_failure) true)))
+          (if (and failed_drop (tsql_find_type_alias "memcp-tests" "ddl_lifecycle_alias" nil)) true
+            (error "failed database drop changed its alias"))
+          (eval (parse "memcp-tests" (concat "CREATE DATABASE " quoted_name) nil (newsession) nil))
+          (if (nil? (tsql_find_type_alias "memcp-tests" "ddl_lifecycle_alias" nil)) true
+            (error "database recreation inherited an orphan alias")))))
+        true)) (lambda (failure) (list failure))))
+      (createdatabase "memcp-tests" true)
+      (drop_sql_type_alias "memcp-tests" "ddl_lifecycle_alias" true nil)
+      (if (equal? outcome true) true (error (car outcome))))
+  expect: {result: true}
 cleanup: []

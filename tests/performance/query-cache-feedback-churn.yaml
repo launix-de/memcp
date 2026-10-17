@@ -10,18 +10,18 @@ setup:
   - sql: "DROP TABLE IF EXISTS qfc_access"
   - sql: "CREATE TABLE qfc_access (viewer INT, domain_id INT) ENGINE=sloppy"
   - sql: "INSERT INTO qfc_access VALUES (999,NULL),(998,998),(997,999)"
-  - scm: '(rebuild (table "memcp-tests" "qfc_access") true false)'
+  - scm: '(rebuild (table "memcp-tests" false "qfc_access" false) true false)'
   - sql: "DROP TABLE IF EXISTS qfc_clock"
   - sql: "CREATE TABLE qfc_clock (id INT PRIMARY KEY) ENGINE=sloppy"
   - sql: "INSERT INTO qfc_clock (id) VALUES (999)"
-  - scm: '(rebuild (table "memcp-tests" "qfc_clock") true false)'
+  - scm: '(rebuild (table "memcp-tests" false "qfc_clock" false) true false)'
   - sql: "DROP TABLE IF EXISTS qfc_document"
   - sql: "CREATE TABLE qfc_document (id INT PRIMARY KEY, category INT) ENGINE=sloppy"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "qfc_document") '("id" "category")
+        (insert (table "memcp-tests" false "qfc_document" false) '("id" "category")
           (map (produceN 1000) (lambda (i) (list i (mod i 10)))))
-        (rebuild (table "memcp-tests" "qfc_document") true false)
+        (rebuild (table "memcp-tests" false "qfc_document" false) true false)
         (globalvars "qfc_sequence" 1000))
 test_cases:
   - name: "ACL counts share a cost regime across different named session bindings"
@@ -145,7 +145,7 @@ test_cases:
         (map (produceN 16) (lambda (i) (begin
           (session "learned_cutoff" (+ start i))
           (define access (eval access_program))
-          (scan_recset nil (table "memcp-tests" "qfc_document") (car access)
+          (scan_recset nil (table "memcp-tests" false "qfc_document" false) (car access)
             (map (cadr access) (lambda (v) (eval v))) '("category") (eval callback))
           (run))))
         (if (equal? (rows "n") 34) true (error "ordered cache churn changed results")))

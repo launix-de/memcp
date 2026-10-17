@@ -354,7 +354,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 						inequality has been derived; it is not permission to omit that input.
 						Budget zero is essential: guards never sample or run a filter. */
 						(define read_expr (list (quote scan_selectivity_estimate) nil
-							(list (quote table) (source_schema src) (source_relation src))
+							(list (quote table) (source_schema src) false (source_relation src) false)
 							(list (quote quote) (car access)) (cons (quote list) (cadr access))
 							(list (quote quote) '()) (list (quote lambda) '() true) 0))
 						/* Provenance matters too: a prior from other LIKE words may be
@@ -389,7 +389,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 								(planner_bind_session_values callback planning_session) true)))
 							(define values (map (nth access 1) (lambda (value) (eval value))))
 							(planner_record_filter_feedback_guard src cols callback planning_session)
-							(scan_selectivity_estimate nil (table (source_schema src) (source_relation src))
+							(scan_selectivity_estimate nil (table (source_schema src) false (source_relation src) false)
 								(nth access 0) values
 								cols (eval callback) 0)))
 						(lambda (_e) nil))))))))
@@ -521,7 +521,7 @@ observed output cardinality. The physical producer stays outside logical IR. */
 					(planner_guard_runtime_binding
 						(list (quote qassoc_get)
 							(list (quote scan_selectivity_estimate) nil
-								(list (quote table) (source_schema src) (source_relation src))
+								(list (quote table) (source_schema src) false (source_relation src) false)
 								(planner_quoted_value (car access)) (cons (quote list) (cadr access))
 								(planner_quoted_value '()) (list (quote lambda) '() true) 0)
 							(planner_quoted_value (quote value)) fallback) planning_session nil))))))))
@@ -1869,9 +1869,9 @@ particular star shape. */
 (define planner_record_table_statistics_guards (lambda (sources planning_session)
 	(reduce (filter sources source_is_base_table?) (lambda (_ src)
 		(begin
-			(define table_value (table (source_schema src) (source_relation src)))
+			(define table_value (table (source_schema src) false (source_relation src) false))
 			(define table_expr
-				(list (quote table) (source_schema src) (source_relation src)))
+				(list (quote table) (source_schema src) false (source_relation src) false))
 			(planner_record_statistics_dependency
 				table_expr (table_planner_statistics table_value) planning_session))) nil)))
 
@@ -3088,7 +3088,7 @@ floor avoids pretending that an unseen word is impossible. */
 			/* Storage already publishes one immutable, lock-free statistics
 			snapshot per table. Reading it directly keeps this metadata lookup
 			independent of request/session scope. */
-			(table_planner_statistics (table schema relation)))
+			(table_planner_statistics (table schema false relation false)))
 		(lambda (_e) nil))))
 
 (define planner_table_row_count (lambda (schema relation)
@@ -3121,7 +3121,7 @@ floor avoids pretending that an unseen word is impossible. */
 							(lower_column_expr_for_alias src condition)) planning_session)
 					(define estimate (scan_selectivity_estimate
 						tx
-						(table (source_schema src) (source_relation src))
+						(table (source_schema src) false (source_relation src) false)
 						(nth access 0)
 						values
 						filtercols

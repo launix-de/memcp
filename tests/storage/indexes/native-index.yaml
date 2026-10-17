@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Tests for physical sort by hottest index (Native index).
 # After rebuild, the hottest index's data is physically sorted,
 # so no in-memory index structure is needed (zero memory cost).
@@ -18,7 +20,7 @@ test_cases:
       - sql: "CREATE TABLE native_idx (id INT, val INT, name VARCHAR(50))"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "native_idx") '("id" "val" "name")
+            (insert (table "memcp-tests" false "native_idx" false) '("id" "val" "name")
               (map (produceN 200) (lambda (i)
                 (list i (* i 7) (concat "row" i)))))
             (rebuild))

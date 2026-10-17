@@ -14,8 +14,7 @@ setup:
   - sql: INSERT INTO sm_ref VALUES (1,10,'needle','plain'),(2,40,'plain','needle'),(3,30,'needle','needle'),(4,40,'needle','plain'),(5,50,'needle','plain'),(6,60,NULL,NULL)
   - sql: INSERT INTO sm_item VALUES (101,1,1),(102,2,1),(103,3,1),(104,4,2),(105,5,2),(106,6,1),(107,3,1)
   - sql: INSERT INTO sm_member VALUES (7,1),(9,2)
-  - scm: (begin (rebuild (table "memcp-tests" "sm_ref") true false) (rebuild (table "memcp-tests" "sm_item")
-      true false))
+  - scm: (begin (rebuild (table "memcp-tests" false "sm_ref" false) true false) (rebuild (table "memcp-tests" false "sm_item" false) true false))
 test_cases:
   - name: Initial exact ordered window
     sql: &ordered_window |-

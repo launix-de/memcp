@@ -36,6 +36,7 @@ func TestComputeProxyRestoresPersistedProcedures(t *testing.T) {
 	for _, encoded := range []string{
 		`[{"symbol":"lambda"},[{"symbol":"value"}],[{"symbol":"*"},{"symbol":"value"},2]]`,
 		`[{"symbol":"lambda"},[{"symbol":"value"}],[{"symbol":"*"},{"var":0},2],1]`,
+		`[{"symbol":"lambda"},[{"symbol":"value"}],[{"symbol":"if"},false,[{"symbol":"table"},"memcp-tests","items"],[{"symbol":"*"},{"symbol":"value"},2]]]`,
 		`[{"symbol":"lambda"}`, // corrupt JSON must fail, not become a nil computor
 	} {
 		for version := uint8(0); version <= 2; version++ {
@@ -70,6 +71,12 @@ func TestComputeProxyRestoresPersistedProcedures(t *testing.T) {
 				var proxy StorageComputeProxy
 				if got := proxy.Deserialize(&wire); got != 1 {
 					t.Fatalf("restored count = %d, want 1", got)
+				}
+				if strings.Contains(encoded, `"symbol":"table"`) {
+					call := proxy.computor.Proc().Body.Slice()[2].Slice()
+					if len(call) != 5 || call[2].Bool() || call[4].Bool() {
+						t.Fatal("historical computor did not migrate its native table call")
+					}
 				}
 				for _, value := range []int64{5, 100, -3} {
 					if got := scm.Apply(proxy.computor, scm.NewInt(value)); !scm.Equal(got, scm.NewInt(value*2)) {
@@ -145,7 +152,7 @@ func nestedScanAst(schema, table, outerParam string) scm.Scmer {
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("session"), scm.NewString("__memcp_tx")}),
-		scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(schema), scm.NewString(table)}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(schema), scm.NewBool(false), scm.NewString(table), scm.NewBool(false)}),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), newScanAccessSchema(scanAccessConsumerScan, nil, -1)}),
 		listAst(),
 		listAst(scm.NewString("ref_id")),
@@ -169,8 +176,8 @@ func TestExtractScanJoinInfoIncludesDynamicTablePlan(t *testing.T) {
 		nestedScanAst("dynamic_dependency", "acl", "driver_id"),
 		scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("table"),
-			scm.NewString("dynamic_dependency"),
-			scm.NewString("driver"),
+			scm.NewString("dynamic_dependency"), scm.NewBool(false),
+			scm.NewString("driver"), scm.NewBool(false),
 		}),
 	})
 	computor := scm.NewSlice([]scm.Scmer{
@@ -285,7 +292,7 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 	src.CreateColumn("val", "INT", nil, nil)
 
 	computorSource := `(lambda (ref_id)
-		(scan nil (table "tlookuptrigger" "src")
+		(scan nil (table "tlookuptrigger" false "src" false)
 			'(369435906932736) '()
 			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 ref_id)))
 			'("val") (lambda (acc val) val)
@@ -331,7 +338,7 @@ func TestQualifiedLookupComputeTriggerUsesPhysicalTargetColumn(t *testing.T) {
 	base.Insert([]string{"ref_id", "cached"}, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
 
 	computorSource := `(lambda (base.ref_id)
-		(scan nil (table "tqualifiedlookuptrigger" "src")
+		(scan nil (table "tqualifiedlookuptrigger" false "src" false)
 			'(369435906932736) '()
 			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 base.ref_id)))
 			'("val") (lambda (acc val) val)
@@ -358,7 +365,7 @@ func TestQualifiedLookupComputeTriggerUsesPhysicalTargetColumn(t *testing.T) {
 
 func TestExtractScanJoinInfoUsesCompiledAccessWhenResidualIsEmpty(t *testing.T) {
 	source := `(lambda (ref_id)
-		(scan nil (table "tcompileddependency" "src")
+		(scan nil (table "tcompileddependency" false "src" false)
 			'()
 			(list ref_id)
 			'() (lambda () true)
@@ -385,7 +392,7 @@ func TestExplicitReadDependenciesSurvivePrunedFilters(t *testing.T) {
 		for _, dynamicValues := range []bool{false, true} {
 			t.Run(fmt.Sprintf("residual=%t/dynamic_values=%t", residual, dynamicValues), func(t *testing.T) {
 				computor := scm.Read(t.Name(), `(lambda (ref_id)
-					(scan nil (table "tcompileddependency" "src")
+					(scan nil (table "tcompileddependency" false "src" false)
 						'() (list ref_id 1)
 						'() (lambda () true)
 						'("value") (lambda (acc value) value)

@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # StorageEnum (rANS entropy coding) test suite
 # Exercises enum detection, compression, value correctness, serialization,
 # and DML on compressed enum columns.
@@ -168,7 +170,7 @@ test_cases:
       (begin
         (set b (map (produceN 10000) (lambda (i)
           (if (equal? 99 (- i (* 100 (floor (/ i 100))))) (list i 1) (list i 0)))))
-        (insert (table "memcp-tests" "se_bulk") '("id" "category") b)
+        (insert (table "memcp-tests" false "se_bulk" false) '("id" "category") b)
         10000)
 
   - name: "Bulk: verify cell id=0 (should be 0)"
@@ -577,7 +579,7 @@ test_cases:
     scm: |
       (begin
         (set b (map (produceN 30) (lambda (i) (list i 42))))
-        (insert (table "memcp-tests" "se_single") '("id" "val") b)
+        (insert (table "memcp-tests" false "se_single" false) '("id" "val") b)
         30)
 
   - name: "Single: verify cell id=0"
@@ -627,7 +629,7 @@ test_cases:
                       (if (< i 196)
                         (list i "pink")
                         (list i "black")))))))))))
-        (insert (table "memcp-tests" "se_max8") '("id" "color") b)
+        (insert (table "memcp-tests" false "se_max8" false) '("id" "color") b)
         200)
 
   - name: "Max8: verify red"
@@ -958,7 +960,7 @@ test_cases:
           (if (equal? i 1) (list i "x")
             (if (equal? i 2) (list i "yz")
               (list i ""))))))
-        (insert (table "memcp-tests" "se_overflow_chunk") '("id" "note") b)
+        (insert (table "memcp-tests" false "se_overflow_chunk" false) '("id" "note") b)
         70000)
 
   - name: "Overflow: count total before compression"

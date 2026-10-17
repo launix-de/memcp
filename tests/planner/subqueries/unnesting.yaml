@@ -206,7 +206,7 @@ test_cases:
           name: "Bob"
   - name: "Derived LEFT JOIN preserves point boundary in ON condition"
     setup:
-      - scm: '(rebuild (table "memcp-tests" "unn_ref") true false)'
+      - scm: '(rebuild (table "memcp-tests" false "unn_ref" false) true false)'
       - sql: "DELETE FROM system_statistic.scans WHERE schema = 'memcp-tests' AND `table` = 'unn_ref'"
     sql: |
       SELECT m.id, r.ref_descr

@@ -537,6 +537,77 @@ def revision_specific_scm(test_case: Dict[str, Any], spec_file: str) -> str:
     return matches[0]
 
 
+def table_abi_fixture_sources(spec_file: str, spec: Dict[str, Any]) -> Dict[str, str]:
+    """Use old SCM fixture source only when its exact lookup ABI is equivalent.
+
+    A/B still uses the candidate's SQL, assertions, workload and timing policy.
+    The old binary executes its own source, without a wrapper in measured code.
+    Unrelated source changes and folded lookups cannot match this migration.
+    """
+    if PERF_AB_MODE != "record" or os.environ.get("PERF_FIXTURE_ROLE") != "A":
+        return {}
+    worktree = os.environ.get("MEMCP_TEST_WORKTREE")
+    if not worktree:
+        raise ValueError("baseline fixtures require MEMCP_TEST_WORKTREE")
+    relative = performance_case_key(spec_file, "").split("::", 1)[0]
+    revision_spec = Path(worktree) / relative
+    if not revision_spec.is_file():
+        return {}
+    old_spec = yaml.safe_load(revision_spec.read_text()) or {}
+
+    def sources(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "scm" and isinstance(item, str):
+                    yield item
+                else:
+                    yield from sources(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from sources(item)
+
+    def tokens(source, remove_markers=False):
+        # Strings/comments are indivisible: never rewrite their contents.
+        parts = [match.group() for match in re.finditer(
+            r'"(?:\\.|[^"\\])*"|;[^\n]*|/\*.*?\*/|[()\']|[^\s()\'";]+',
+            source, re.DOTALL,
+        ) if not match.group().startswith((";", "/*"))]
+        if remove_markers:
+            ends, stack = {}, []
+            for i, part in enumerate(parts):
+                if part == "(":
+                    stack.append(i)
+                elif part == ")" and stack:
+                    ends[stack.pop()] = i + 1
+
+            def argument_end(i):
+                while i < len(parts) and parts[i] == "'":
+                    i += 1
+                return ends.get(i, i + 1)
+
+            markers = set()
+            for i in range(len(parts) - 6):
+                head = 2 if parts[i:i+2] == ["(", "table"] else (
+                    4 if parts[i:i+4] == ["(", "list", "'", "table"] else 0)
+                if not head:
+                    continue
+                database_flag = argument_end(i + head)
+                table_flag = argument_end(database_flag + 1)
+                if (table_flag + 1 < len(parts) and parts[database_flag] == "false"
+                        and parts[table_flag:table_flag+2] == ["false", ")"]):
+                    markers.update((database_flag, table_flag))
+            parts = [part for i, part in enumerate(parts) if i not in markers]
+        return tuple(parts)
+
+    old_sources = {tokens(source): source for source in sources(old_spec)}
+    result = {}
+    for source in sources(spec):
+        before, after = tokens(source), tokens(source, True)
+        if before != after and after in old_sources:
+            result[source] = old_sources[after]
+    return result
+
+
 def performance_regression_pct(test_case: Dict[str, Any], metadata: Dict[str, Any]) -> float:
     value = test_case.get(
         "max_regression_pct",
@@ -771,6 +842,7 @@ class SQLTestRunner:
         self.log_times = log_times  # emit QUERY_TIME ns=... lines for A/B benchmarking
         self.fail_fast = fail_fast
         self.current_spec_file = None
+        self._table_abi_sources = {}
         self._config_loaded = False
         self.performance_calibration = performance_calibration or load_performance_scale()
         self._perf_round_setup_barrier = None
@@ -987,7 +1059,7 @@ class SQLTestRunner:
                     if resp and resp.status_code == 200:
                         parts.append(f"[SQL] {step['sql'][:80]}\n       → {resp.text.strip()[:500]}")
                 elif "scm" in step:
-                    resp = requests.post(f"{self.base_url}/scm", data=step["scm"].encode("utf-8"), headers=self.auth_header, timeout=5)
+                    resp = requests.post(f"{self.base_url}/scm", data=self._table_abi_sources.get(step["scm"], step["scm"]).encode("utf-8"), headers=self.auth_header, timeout=5)
                     if resp and resp.status_code == 200:
                         parts.append(f"[SCM] {step['scm'][:80]}\n       → {resp.text.strip()[:500]}")
                 elif "psql" in step:
@@ -1448,7 +1520,7 @@ class SQLTestRunner:
                         if resp.status_code != 200 or "Error" in resp.text:
                             return fail_setup("Setup SQL failed", sql_code, resp)
                 elif "scm" in step:
-                    scm = step["scm"]
+                    scm = self._table_abi_sources.get(step["scm"], step["scm"])
                     if is_perf_test:
                         scm = scm.replace("{rows}", str(perf_rows)).replace("{database}", database)
                     url = f"{self.base_url}/scm"
@@ -1502,6 +1574,7 @@ class SQLTestRunner:
             scm_code = revision_specific_scm(
                 test_case, self.current_spec_file or "",
             )
+            scm_code = self._table_abi_sources.get(scm_code, scm_code)
         except (OSError, ValueError, yaml.YAMLError) as exc:
             return self._record_fail(
                 name, str(exc), None, None, None, is_noncritical,
@@ -1576,7 +1649,7 @@ class SQLTestRunner:
                 step_timeout = int(step.get("timeout", 30))
                 if "scm" in step:
                     url = f"{self.base_url}/scm"
-                    return requests.post(url, data=step["scm"].encode("utf-8"), headers=self.auth_header, timeout=step_timeout)
+                    return requests.post(url, data=self._table_abi_sources.get(step["scm"], step["scm"]).encode("utf-8"), headers=self.auth_header, timeout=step_timeout)
                 else:
                     return self.execute_sql(database, step["sql"],
                                             session_id=step.get("session_id"),
@@ -2239,7 +2312,7 @@ class SQLTestRunner:
                     print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
                     return False
             elif "scm" in step:
-                scm_code = step["scm"]
+                scm_code = self._table_abi_sources.get(step["scm"], step["scm"])
                 try:
                     url = f"{self.base_url}/scm"
                     with performance_server_gate():
@@ -2291,6 +2364,7 @@ class SQLTestRunner:
                             session_id=session_id, timeout=int(step.get("timeout", 30)),
                         )
                     elif "scm" in step:
+                        statement = self._table_abi_sources.get(statement, statement)
                         headers = dict(self.auth_header)
                         if session_id:
                             headers["X-Session-Id"] = session_id
@@ -2359,6 +2433,7 @@ class SQLTestRunner:
             spec = yaml.safe_load(f) or {}
         metadata = spec.get('metadata', {}) or {}
         self.current_spec_file = spec_file
+        self._table_abi_sources = table_abi_fixture_sources(spec_file, spec)
         self.suite_metadata = metadata
         self.suite_syntax = self._normalize_syntax(metadata.get("syntax"))
         self.current_suite_setup = spec.get('setup') or []
@@ -2372,6 +2447,7 @@ class SQLTestRunner:
             spec = yaml.safe_load(f)
 
         self.current_spec_file = spec_file
+        self._table_abi_sources = table_abi_fixture_sources(spec_file, spec)
         metadata = spec.get('metadata', {})
         self.suite_metadata = metadata or {}
         self.suite_syntax = self._normalize_syntax(self.suite_metadata.get("syntax"))

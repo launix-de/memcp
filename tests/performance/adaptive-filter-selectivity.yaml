@@ -14,10 +14,10 @@ fixture_setup: &afs_fixture
   - sql: "CREATE TABLE afs_fact (id INT PRIMARY KEY, dimension_id INT, amount INT) ENGINE=sloppy"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "afs_dimension") '("id" "label")
+        (insert (table "memcp-tests" false "afs_dimension" false) '("id" "label")
           (map (produceN 2000) (lambda (i)
             (list i (if (< i 1800) "very-common-long-pattern" "other")))))
-        (insert (table "memcp-tests" "afs_fact") '("id" "dimension_id" "amount")
+        (insert (table "memcp-tests" false "afs_fact" false) '("id" "dimension_id" "amount")
           (map (produceN {rows}) (lambda (i) (list i (mod i 2000) 1))))
         (rebuild))
   - sql: "SELECT COUNT(*) FROM afs_dimension WHERE label LIKE '%very-common-long-pattern%'"
@@ -78,10 +78,10 @@ test_cases:
       - sql: "CREATE TABLE frequency_fact (id INT PRIMARY KEY, dimension_id INT, batch_id INT, amount INT) ENGINE=memory"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "frequency_dimension") '("id" "owner_id")
+            (insert (table "memcp-tests" false "frequency_dimension" false) '("id" "owner_id")
               (map (produceN 100000) (lambda (i)
                 (list i (if (< (mod i 20) 19) 1 (+ 2 (mod (floor (/ i 20)) 99)))))))
-            (insert (table "memcp-tests" "frequency_fact") '("id" "dimension_id" "batch_id" "amount")
+            (insert (table "memcp-tests" false "frequency_fact" false) '("id" "dimension_id" "batch_id" "amount")
               (map (produceN 800000) (lambda (i) (list i (mod i 100000) (mod i 100) 1))))
             (rebuild))
     performance_rows: 800000

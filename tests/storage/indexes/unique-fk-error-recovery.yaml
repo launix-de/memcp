@@ -60,7 +60,7 @@ test_cases:
       data: [{n: 3}]
 
   - name: "Compress both tables before repeating the error path"
-    scm: '(begin (rebuild (table "memcp-tests" "unique_fk_parent") true false) (rebuild (table "memcp-tests" "unique_fk_child") true false))'
+    scm: '(begin (rebuild (table "memcp-tests" false "unique_fk_parent" false) true false) (rebuild (table "memcp-tests" false "unique_fk_child" false) true false))'
 
   - name: "rebuilt: FK error after both unique keys passed"
     sql: "INSERT INTO unique_fk_child VALUES (3,999,'candidate-3')"

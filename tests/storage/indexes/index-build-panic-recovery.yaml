@@ -8,9 +8,9 @@ setup:
   - sql: "CREATE TABLE index_panic_rows (id INT, value INT) ENGINE=memory"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "index_panic_rows") '("id" "value")
+        (insert (table "memcp-tests" false "index_panic_rows" false) '("id" "value")
           (map (produceN 128) (lambda (i) (list i (- 128 i)))))
-        (rebuild (table "memcp-tests" "index_panic_rows") true false))
+        (rebuild (table "memcp-tests" false "index_panic_rows" false) true false))
 test_cases:
   - name: "Repeated column-read failures do not poison the index lock"
     timeout: 10
@@ -18,14 +18,14 @@ test_cases:
       (begin
         (define fail (newsession))
         (fail "enabled" true)
-        (createcolumn (table "memcp-tests" "index_panic_rows")
+        (createcolumn (table "memcp-tests" false "index_panic_rows" false)
           "computed_value" "INT" '() (list "temp" true "filtercols" (list) "filter" (lambda () false))
           '("value") (lambda (value)
             (if (and (fail "enabled") (equal? value 64))
               (error "intentional index column failure") value)))
         (define access (eval (compile_scan_access '() (lambda () true))))
         (define query (lambda ()
-          (scan_order nil (table "memcp-tests" "index_panic_rows")
+          (scan_order nil (table "memcp-tests" false "index_panic_rows" false)
             (car access) (cadr access) '() (lambda () true)
             '("computed_value") '(<) 0 0 3 '("id")
             (lambda (acc id) (+ acc id)) 0 false)))

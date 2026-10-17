@@ -41,7 +41,7 @@ setup:
         (set discounts '(0.04 0.05 0.06 0.07 0.08))
         (set rows (map (produceN 5000) (lambda (i)
           (list i 100.01 (nth discounts (- i (* 5 (floor (/ i 5))))) 10.00 "1994-06-15"))))
-        (insert (table "memcp-tests" "psql_decimal_range")
+        (insert (table "memcp-tests" false "psql_decimal_range" false)
           '("id" "extended_price" "discount" "quantity" "ship_date") rows)
         5000)
 
