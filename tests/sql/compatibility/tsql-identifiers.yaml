@@ -473,6 +473,56 @@ test_cases:
   expect:
     error: true
     contains: native constraint-safe key removal
+- name: Relative default owner references resolve against the CREATE target context
+  scm: |
+    (begin
+      (define formula (parse_tsql "memcp-tests" "CREATE TABLE [other_catalog].[dbo].[child](id INT,parent_id INT,FOREIGN KEY(parent_id) REFERENCES [dbo].[parent](id))"
+        (lambda (database _name _write)
+          (if (equal? database "other_catalog") true (error "unresolved policy database"))) nil nil))
+      (and (equal? (cadr formula) "other_catalog")
+        (equal? (nth formula 2) "child")
+        (expression_equal? (nth (nth formula 3) 3)
+          (list (quote list) "foreign" nil (list (quote list) "parent_id") "parent"
+            (list (quote list) "id") nil nil))
+        (not (regexp_test (string formula) "tsql_default_owner|tsql_qualifier_database"))))
+  expect:
+    result: true
+- name: Unqualified references retain the CREATE target context
+  scm: |
+    (begin
+      (define formula (parse_tsql "memcp-tests" "CREATE TABLE [other_catalog].[dbo].[child](id INT,parent_id INT,FOREIGN KEY(parent_id) REFERENCES [parent](id))"
+        (lambda (database _name _write)
+          (if (equal? database "other_catalog") true (error "unresolved policy database"))) nil nil))
+      (and (equal? (cadr formula) "other_catalog")
+        (equal? (nth formula 2) "child")
+        (expression_equal? (nth (nth formula 3) 3)
+          (list (quote list) "foreign" nil (list (quote list) "parent_id") "parent"
+            (list (quote list) "id") nil nil))
+        (not (regexp_test (string formula) "tsql_default_owner|tsql_qualifier_database"))))
+  expect:
+    result: true
+- name: Explicit matching database references retain the existing native FK contract
+  scm: |
+    (begin
+      (define formula (parse_tsql "memcp-tests" "CREATE TABLE [other_catalog].[dbo].[child](id INT,parent_id INT,FOREIGN KEY(parent_id) REFERENCES [other_catalog].[dbo].[parent](id))"
+        (lambda (database _name _write)
+          (if (equal? database "other_catalog") true (error "unresolved policy database"))) nil nil))
+      (and (equal? (cadr formula) "other_catalog")
+        (equal? (nth formula 2) "child")
+        (expression_equal? (nth (nth formula 3) 3)
+          (list (quote list) "foreign" nil (list (quote list) "parent_id") "parent"
+            (list (quote list) "id") nil nil))
+        (not (regexp_test (string formula) "tsql_default_owner|tsql_qualifier_database"))))
+  expect:
+    result: true
+- name: Explicit request database references remain cross database errors in another CREATE context
+  scm: |
+    (try (lambda () (begin
+      (parse_tsql "memcp-tests" "CREATE TABLE [other_catalog].[dbo].[child](id INT,parent_id INT,FOREIGN KEY(parent_id) REFERENCES [memcp-tests].[dbo].[parent](id))" nil nil nil)
+      false))
+      (lambda (message) (equal? message "cross-database foreign keys are not supported")))
+  expect:
+    result: true
 - name: Qualified cleanup resolves each original native object
   sql: DROP TABLE [memcp-tests].[dbo].[tsql_qualified_child]
   cleanup:
