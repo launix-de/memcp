@@ -2156,10 +2156,10 @@ class SQLTestRunner:
                         return False
 
         if "affected_rows" in expect:
-            expected = expect["affected_rows"]
-            if results and results and "affected_rows" in results[0]:
-                return results[0]["affected_rows"] == expected
-            return True
+            if (not results or not isinstance(results[0], dict)
+                    or "affected_rows" not in results[0]
+                    or results[0]["affected_rows"] != expect["affected_rows"]):
+                return False
 
         if results is None:
             return False
@@ -2187,6 +2187,8 @@ class SQLTestRunner:
                 if not isinstance(results[i], dict):
                     return False
                 for k, v in row.items():
+                    if k not in results[i]:
+                        return False
                     if isinstance(v, float) and isinstance(results[i].get(k), (int, float)):
                         if abs(results[i][k] - v) > 0.01:
                             return False
