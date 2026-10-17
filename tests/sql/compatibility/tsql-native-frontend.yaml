@@ -3,6 +3,7 @@
 metadata:
   version: '1.0'
   syntax: tsql
+  requires_tds: true
   description: T-SQL grammar reuses native DDL, defaults and query planning
 setup:
   - sql: DROP TABLE IF EXISTS tsql_setup_memo
@@ -3225,6 +3226,587 @@ test_cases:
     - *id002
     - *id003
     - *id004
+
+  # Integer/binary conversions use declared SQL contracts, including carrier boundaries.
+  - name: Binary integer tinyint to binary width 1
+    sql: SELECT CASE WHEN CAST(CAST(219 AS TINYINT) AS BINARY(1))=0xdb THEN 1 ELSE 0
+      END AS same_bytes,LEN(CAST(CAST(219 AS TINYINT) AS BINARY(1))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 1
+  - name: Binary integer tinyint to binary width 3
+    sql: SELECT CASE WHEN CAST(CAST(219 AS TINYINT) AS BINARY(3))=0x0000db THEN 1 ELSE
+      0 END AS same_bytes,LEN(CAST(CAST(219 AS TINYINT) AS BINARY(3))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 3
+  - name: Binary integer tinyint to varbinary width 1
+    sql: SELECT CASE WHEN CAST(CAST(219 AS TINYINT) AS VARBINARY(1))=0xdb THEN 1 ELSE
+      0 END AS same_bytes,LEN(CAST(CAST(219 AS TINYINT) AS VARBINARY(1))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 1
+  - name: Binary integer tinyint to varbinary width 3
+    sql: SELECT CASE WHEN CAST(CAST(219 AS TINYINT) AS VARBINARY(3))=0xdb THEN 1 ELSE
+      0 END AS same_bytes,LEN(CAST(CAST(219 AS TINYINT) AS VARBINARY(3))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 1
+  - name: Binary integer smallint to binary width 1
+    sql: SELECT CASE WHEN CAST(CAST(-12345 AS SMALLINT) AS BINARY(1))=0xc7 THEN 1 ELSE
+      0 END AS same_bytes,LEN(CAST(CAST(-12345 AS SMALLINT) AS BINARY(1))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 1
+  - name: Binary integer smallint to binary width 4
+    sql: SELECT CASE WHEN CAST(CAST(-12345 AS SMALLINT) AS BINARY(4))=0x0000cfc7 THEN
+      1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(-12345 AS SMALLINT) AS BINARY(4))) AS
+      byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 4
+  - name: Binary integer smallint to varbinary width 1
+    sql: SELECT CASE WHEN CAST(CAST(-12345 AS SMALLINT) AS VARBINARY(1))=0xc7 THEN 1
+      ELSE 0 END AS same_bytes,LEN(CAST(CAST(-12345 AS SMALLINT) AS VARBINARY(1))) AS
+      byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 1
+  - name: Binary integer smallint to varbinary width 4
+    sql: SELECT CASE WHEN CAST(CAST(-12345 AS SMALLINT) AS VARBINARY(4))=0xcfc7 THEN
+      1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(-12345 AS SMALLINT) AS VARBINARY(4)))
+      AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 2
+  - name: Binary integer int to binary width 3
+    sql: SELECT CASE WHEN CAST(CAST(-123456789 AS INT) AS BINARY(3))=0xa432eb THEN 1
+      ELSE 0 END AS same_bytes,LEN(CAST(CAST(-123456789 AS INT) AS BINARY(3))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 3
+  - name: Binary integer int to binary width 6
+    sql: SELECT CASE WHEN CAST(CAST(-123456789 AS INT) AS BINARY(6))=0x0000f8a432eb
+      THEN 1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(-123456789 AS INT) AS BINARY(6)))
+      AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 6
+  - name: Binary integer int to varbinary width 3
+    sql: SELECT CASE WHEN CAST(CAST(-123456789 AS INT) AS VARBINARY(3))=0xa432eb THEN
+      1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(-123456789 AS INT) AS VARBINARY(3)))
+      AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 3
+  - name: Binary integer int to varbinary width 6
+    sql: SELECT CASE WHEN CAST(CAST(-123456789 AS INT) AS VARBINARY(6))=0xf8a432eb THEN
+      1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(-123456789 AS INT) AS VARBINARY(6)))
+      AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 4
+  - name: Binary integer bigint to binary width 7
+    sql: SELECT CASE WHEN CAST(CAST(9223372036854775807 AS BIGINT) AS BINARY(7))=0xffffffffffffff
+      THEN 1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(9223372036854775807 AS BIGINT) AS
+      BINARY(7))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 7
+  - name: Binary integer bigint to binary width 10
+    sql: SELECT CASE WHEN CAST(CAST(9223372036854775807 AS BIGINT) AS BINARY(10))=0x00007fffffffffffffff
+      THEN 1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(9223372036854775807 AS BIGINT) AS
+      BINARY(10))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 10
+  - name: Binary integer bigint to varbinary width 7
+    sql: SELECT CASE WHEN CAST(CAST(9223372036854775807 AS BIGINT) AS VARBINARY(7))=0xffffffffffffff
+      THEN 1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(9223372036854775807 AS BIGINT) AS
+      VARBINARY(7))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 7
+  - name: Binary integer bigint to varbinary width 10
+    sql: SELECT CASE WHEN CAST(CAST(9223372036854775807 AS BIGINT) AS VARBINARY(10))=0x7fffffffffffffff
+      THEN 1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(9223372036854775807 AS BIGINT) AS
+      VARBINARY(10))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 8
+  - name: Binary integer tinyint decodes 0
+    sql: SELECT CAST(0x00 AS TINYINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 0
+  - name: Binary integer tinyint decodes 127
+    sql: SELECT CAST(0x7f AS TINYINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 127
+  - name: Binary integer tinyint decodes 255
+    sql: SELECT CAST(0xff AS TINYINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 255
+  - name: Binary integer smallint decodes 0
+    sql: SELECT CAST(0x0000 AS SMALLINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 0
+  - name: Binary integer smallint decodes 32767
+    sql: SELECT CAST(0x7fff AS SMALLINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 32767
+  - name: Binary integer smallint decodes -32768
+    sql: SELECT CAST(0x8000 AS SMALLINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -32768
+  - name: Binary integer smallint decodes -1
+    sql: SELECT CAST(0xffff AS SMALLINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -1
+  - name: Binary integer short unsigned bytes to smallint
+    sql: SELECT CONVERT(SMALLINT,0xFF) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 255
+  - name: Binary integer int decodes 0
+    sql: SELECT CAST(0x00000000 AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 0
+  - name: Binary integer int decodes 2147483647
+    sql: SELECT CAST(0x7fffffff AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 2147483647
+  - name: Binary integer int decodes -2147483648
+    sql: SELECT CAST(0x80000000 AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -2147483648
+  - name: Binary integer int decodes -1
+    sql: SELECT CAST(0xffffffff AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -1
+  - name: Binary integer short unsigned bytes to int
+    sql: SELECT CONVERT(INT,0xFF) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 255
+  - name: Binary integer bigint decodes 0
+    sql: SELECT CAST(0x0000000000000000 AS BIGINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 0
+  - name: Binary integer bigint decodes 9223372036854775807
+    sql: SELECT CAST(0x7fffffffffffffff AS BIGINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 9223372036854775807
+  - name: Binary integer bigint decodes -9223372036854775808
+    sql: SELECT CAST(0x8000000000000000 AS BIGINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -9223372036854775808
+  - name: Binary integer bigint decodes -1
+    sql: SELECT CAST(0xffffffffffffffff AS BIGINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -1
+  - name: Binary integer short unsigned bytes to bigint
+    sql: SELECT CONVERT(BIGINT,0xFF) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 255
+  - name: Binary integer null binary to tinyint
+    sql: SELECT CAST(CAST(NULL AS VARBINARY(8)) AS TINYINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer null binary to smallint
+    sql: SELECT CAST(CAST(NULL AS VARBINARY(8)) AS SMALLINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer null binary to int
+    sql: SELECT CAST(CAST(NULL AS VARBINARY(8)) AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer null binary to bigint
+    sql: SELECT CAST(CAST(NULL AS VARBINARY(8)) AS BIGINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer null integer to binary(6)
+    sql: SELECT CONVERT(BINARY(6),CAST(NULL AS INT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer null integer to varbinary(6)
+    sql: SELECT CONVERT(VARBINARY(6),CAST(NULL AS INT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer bigint minimum encoding
+    sql: SELECT CASE WHEN CONVERT(VARBINARY(8),CAST(-9223372036854775808 AS BIGINT))=0x8000000000000000
+      THEN 1 ELSE 0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Binary integer default binary cast width
+    sql: SELECT LEN(CAST(CAST(17 AS SMALLINT) AS BINARY)) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - byte_count: 30
+  - name: Binary integer default variable cast keeps source width
+    sql: SELECT LEN(CAST(CAST(17 AS SMALLINT) AS VARBINARY)) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - byte_count: 2
+  - name: Binary integer max variable cast keeps source width
+    sql: SELECT LEN(CONVERT(VARBINARY(MAX),CAST(17 AS BIGINT),0)) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - byte_count: 8
+  - name: Binary integer negative source uses native width before zero padding
+    sql: SELECT CASE WHEN CAST(CAST(-1 AS INT) AS BINARY(6))=0x0000FFFFFFFF THEN 1 ELSE
+      0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Binary integer column contracts choose the source byte width
+    sql: SELECT CASE WHEN CAST(t AS VARBINARY(8))=0xDB THEN 1 ELSE 0 END AS tiny_bytes,CASE
+      WHEN CAST(s AS BINARY(4))=0x0000CFC7 THEN 1 ELSE 0 END AS small_bytes FROM binary_integer_input
+      WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - tiny_bytes: 1
+        small_bytes: 1
+    setup:
+    - sql: DROP TABLE IF EXISTS binary_integer_input
+    - sql: CREATE TABLE binary_integer_input(id INT PRIMARY KEY,t TINYINT,s SMALLINT,i
+        INT,b BIGINT,raw VARBINARY(16))
+    - sql: INSERT INTO binary_integer_input VALUES(1,219,-12345,-123456789,-9223372036854775808,0x8123456789ABCDEF),(2,NULL,NULL,NULL,NULL,NULL)
+  - name: Binary integer column signed bigint roundtrip
+    sql: SELECT CAST(CAST(b AS VARBINARY(8)) AS BIGINT) AS value FROM binary_integer_input
+      WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - value: -9223372036854775808
+  - name: Binary integer column binary signed bigint decode
+    sql: SELECT CAST(raw AS BIGINT) AS value FROM binary_integer_input WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - value: -9141386507638288913
+  - name: Binary integer nullable column roundtrip
+    sql: SELECT CAST(CAST(b AS BINARY(8)) AS BIGINT) AS value FROM binary_integer_input
+      WHERE id=2
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer derived source retains its declared integer type
+    sql: SELECT CASE WHEN CAST(d.value AS VARBINARY(8))=0xCFC7 THEN 1 ELSE 0 END AS
+      value FROM (SELECT CAST(-12345 AS SMALLINT) AS value) d
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Binary integer derived binary contract decodes signed bits
+    sql: SELECT CAST(d.value AS INT) AS value FROM (SELECT CAST(0x89ABCDEF AS BINARY(4))
+      AS value) d
+    expect:
+      rows: 1
+      data:
+      - value: -1985229329
+  - name: Binary integer binary input preserves right truncation
+    sql: SELECT CASE WHEN CAST(0x01020304 AS BINARY(2))=0x0102 THEN 1 ELSE 0 END AS
+      value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Binary integer binary input preserves right zero padding
+    sql: SELECT CASE WHEN CAST(0x0102 AS BINARY(4))=0x01020000 THEN 1 ELSE 0 END AS
+      value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Binary integer text source remains explicitly unsupported
+    sql: SELECT CAST('17' AS VARBINARY(4))
+    expect:
+      error: true
+      contains: binary conversion from VARCHAR is not implemented
+  - name: Binary integer date source remains explicitly unsupported
+    sql: SELECT CAST(CAST('2026-01-02' AS DATE) AS BINARY(8))
+    expect:
+      error: true
+      contains: binary conversion from DATE is not implemented
+  - name: Binary integer float source remains explicitly unsupported
+    sql: SELECT CAST(CAST(17 AS FLOAT) AS BINARY(8))
+    expect:
+      error: true
+      contains: binary conversion from FLOAT is not implemented
+  - name: Binary integer invalid width is rejected
+    sql: SELECT CAST(CAST(17 AS INT) AS BINARY(0))
+    expect:
+      error: true
+      contains: invalid length for BINARY
+  - name: Binary integer inner integer range is checked before encoding
+    sql: SELECT CAST(CAST(256 AS TINYINT) AS BINARY(1))
+    expect:
+      error: true
+      contains: integer conversion overflow
+  - name: Binary integer null convert style short circuits an invalid source
+    sql: SELECT CONVERT(VARBINARY(8),CAST(256 AS TINYINT),NULL) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer overwide tinyint decode stays explicitly unsupported
+    sql: SELECT CAST(0x0101 AS TINYINT) AS value
+    expect:
+      error: true
+      contains: overwide binary integer conversion is not implemented
+  - name: Binary integer overwide smallint decode stays explicitly unsupported
+    sql: SELECT CAST(0x010101 AS SMALLINT) AS value
+    expect:
+      error: true
+      contains: overwide binary integer conversion is not implemented
+  - name: Binary integer overwide int decode stays explicitly unsupported
+    sql: SELECT CAST(0x0101010101 AS INT) AS value
+    expect:
+      error: true
+      contains: overwide binary integer conversion is not implemented
+  - name: Binary integer overwide bigint decode stays explicitly unsupported
+    sql: SELECT CAST(0x010101010101010101 AS BIGINT) AS value
+    expect:
+      error: true
+      contains: overwide binary integer conversion is not implemented
+  - name: Binary integer equal runtime carriers retain distinct declaration widths
+    setup:
+    - sql: INSERT INTO binary_integer_input VALUES(3,1,1,1,1,0xFF)
+    sql: SELECT LEN(CAST(t AS VARBINARY(8))) AS tiny_width,LEN(CAST(s AS VARBINARY(8)))
+      AS small_width,LEN(CAST(i AS VARBINARY(8))) AS int_width,LEN(CAST(b AS VARBINARY(8)))
+      AS big_width FROM binary_integer_input WHERE id=3
+    expect:
+      rows: 1
+      data:
+      - tiny_width: 1
+        small_width: 2
+        int_width: 4
+        big_width: 8
+  - name: Binary integer decoder uses actual byte extent rather than maximum declaration
+      width
+    sql: SELECT CAST(raw AS BIGINT) AS value FROM binary_integer_input WHERE id=3
+    expect:
+      rows: 1
+      data:
+      - value: 255
+  - name: Binary integer empty native binary payload decodes as zero
+    setup:
+    - scm: (insert (table "memcp-tests" "binary_integer_input") '("id" "raw") (list
+        (list 4 "")))
+    sql: SELECT CAST(raw AS BIGINT) AS value FROM binary_integer_input WHERE id=4
+    expect:
+      rows: 1
+      data:
+      - value: 0
+  - name: Binary integer compile callback retains only a plain typed formula
+    scm: |-
+      (begin
+        (define value (tsql_cast_expr 219 "TINYINT" (list)))
+        (define info (sql_expr_info (list) (tsql_cast_expr value "VARBINARY" (list 8))))
+        (and (equal? (sql_info_type info) "VARBINARY") (nil? (sql_info_collation info))
+          (expression_equal? (sql_info_formula info)
+            (list 'tsql_integer_to_binary (list 'tsql_cast_integer 219 0 255) 1 8 false))
+          (equal? (bin2hex (eval (sql_info_formula info))) "db")))
+    expect:
+      result: true
+  - name: Binary integer empty result metadata retains declared widths and types
+    scm: |-
+      (begin
+        (define session (newsession))
+        (session "username" "root")
+        (session "schema" "memcp-tests")
+        (session "wire_metadata" true)
+        (define output (newsession))
+        (tds_frontend "execute" session
+          (list "database" "memcp-tests" "parameters" (list) "declarations" ""
+            "text" "SELECT CAST(CAST(17 AS TINYINT) AS VARBINARY(5)) AS tiny_value,CAST(CAST(17 AS INT) AS BINARY(6)) AS fixed_value,CAST(0x8000000000000000 AS BIGINT) AS big_value WHERE 1=0")
+          (lambda (values) (output "row" true))
+          (lambda (fields) (output "fields" fields)) nil nil)
+        (and (nil? (output "row"))
+          (equal? (map (output "fields") (lambda (field) (field "size"))) '(5 6 8))
+          (equal? (map (output "fields") (lambda (field) (field "kind"))) '(165 165 38))
+          (equal? (map (output "fields") (lambda (field) (field "sql_type"))) '("VARBINARY" "BINARY" "BIGINT"))))
+    expect:
+      result: true
+  - name: Binary integer stored compile recipe fixture uses native views
+    setup:
+    - sql: DROP VIEW IF EXISTS binary_integer_view
+    sql: CREATE VIEW binary_integer_view AS SELECT CAST(CAST(b AS VARBINARY(8)) AS BIGINT)
+      AS restored,CAST(t AS BINARY(3)) AS padded FROM binary_integer_input WHERE id=1
+  - name: Binary integer stored compile recipes retain exact signed bits
+    sql: SELECT restored,CASE WHEN padded=0x0000DB THEN 1 ELSE 0 END AS same_bytes FROM
+      binary_integer_view
+    expect:
+      rows: 1
+      data:
+      - restored: -9223372036854775808
+        same_bytes: 1
+  - name: Binary integer stored compile recipes survive a durable restart
+    action: restart
+  - name: Binary integer restored compile recipes retain exact signed bits
+    sql: SELECT restored,CASE WHEN padded=0x0000DB THEN 1 ELSE 0 END AS same_bytes FROM
+      binary_integer_view
+    expect:
+      rows: 1
+      data:
+      - restored: -9223372036854775808
+        same_bytes: 1
+  - name: Binary integer restored column bytes decode without text transport
+    sql: SELECT CAST(raw AS BIGINT) AS value FROM binary_integer_input WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - value: -9141386507638288913
+  - name: Binary integer remove stored recipe fixture
+    sql: DROP VIEW binary_integer_view
+    cleanup:
+    - sql: DROP TABLE binary_integer_input
+  - name: Binary integer real TDS encodes a signed integer RPC parameter
+    tds:
+      statements:
+      - sql: SELECT CONVERT(VARBINARY(8),CAST(@value AS BIGINT)) AS encoded,CAST(CAST(@value
+          AS BIGINT) AS BINARY(10)) AS padded
+        parameters:
+        - name: value
+          value: -9223372036854775808
+        expect:
+          rows: 1
+          columns:
+          - encoded
+          - padded
+          data:
+          - encoded:
+              binary_hex: '8000000000000000'
+            padded:
+              binary_hex: 00008000000000000000
+  - name: Binary integer real TDS decodes and returns binary RPC bytes
+    tds:
+      statements:
+      - sql: SELECT CAST(@token AS BIGINT) AS decoded,CAST(@token AS VARBINARY(8)) AS
+          retained
+        parameters:
+        - name: token
+          value:
+            binary_hex: 7fffffffffffffff
+        expect:
+          rows: 1
+          columns:
+          - decoded
+          - retained
+          data:
+          - decoded: 9223372036854775807
+            retained:
+              binary_hex: 7fffffffffffffff
+  - name: Binary integer real TDS distinguishes empty bytes from SQL null
+    tds:
+      statements:
+      - sql: SELECT CAST(@empty AS BIGINT) AS empty_value,CAST(@empty AS VARBINARY(8))
+          AS empty_bytes,CAST(CAST(NULL AS VARBINARY(8)) AS BIGINT) AS missing_value,CAST(CAST(NULL
+          AS BIGINT) AS VARBINARY(8)) AS missing_bytes
+        parameters:
+        - name: empty
+          value:
+            binary_hex: ''
+        expect:
+          rows: 1
+          columns:
+          - empty_value
+          - empty_bytes
+          - missing_value
+          - missing_bytes
+          data:
+          - empty_value: 0
+            empty_bytes:
+              binary_hex: ''
+            missing_value: null
+            missing_bytes: null
+
 
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_null_money

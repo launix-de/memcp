@@ -176,8 +176,15 @@ test_cases:
   sql: SELECT CONVERT(VARBINARY(8),N'ÿ')
   expect:
     error: true
-- name: Numeric to binary conversion fails explicitly
+- name: Integer to binary conversion preserves its declared byte
   sql: SELECT CAST(65 AS BINARY(1))
+  expect:
+    rows: 1
+    data:
+    - "CAST(65 AS BINARY(1))": A
+# Integral encoding is supported; retain the negative contract for approximate numbers.
+- name: Numeric to binary conversion fails explicitly
+  sql: SELECT CAST(CAST(65 AS FLOAT) AS BINARY(1))
   expect:
     error: true
 - name: Fixed binary max dimensions fail explicitly
