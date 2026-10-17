@@ -2134,6 +2134,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(define query (sql_apply_view_column_aliases (nth captured 1) aliases))
 			(if (tsql_view_has_metadata_scalar? query)
 				(error "COL_LENGTH in stored views requires a consuming compile policy") true)
+			/* Resolve declared expression contracts before replacing a definition.
+			The bound tree is validation only; persist the portable parser IR. */
+			(bind_query_names (sql_expand_views query policy) '())
 			(list (quote create_sql_view)
 				(list (quote session) "__memcp_tx")
 				view_schema id "tsql" (nth captured 0) (list (quote quote) query)
