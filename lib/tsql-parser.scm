@@ -334,11 +334,11 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		"NVARCHAR" (tsql_cast_text_expr value dimensions true false)
 		"CHAR" (tsql_cast_text_expr value dimensions false true)
 		"NCHAR" (tsql_cast_text_expr value dimensions true true)
-		"DATE" (tsql_temporal_cast_expr value name 0)
-		"DATETIME" (tsql_temporal_cast_expr value name 0)
-		"DATETIME2" (tsql_temporal_cast_expr value name 0)
-		"SMALLDATETIME" (tsql_temporal_cast_expr value name 0)
-		"TIME" (tsql_temporal_cast_expr value name 0)
+		"DATE" (tsql_temporal_cast_expr value name 0 dimensions)
+		"DATETIME" (tsql_temporal_cast_expr value name 0 dimensions)
+		"DATETIME2" (tsql_temporal_cast_expr value name 0 dimensions)
+		"SMALLDATETIME" (tsql_temporal_cast_expr value name 0 dimensions)
+		"TIME" (tsql_temporal_cast_expr value name 0 dimensions)
 		_ (error "unsupported conversion to " name)))
 	(list (quote sql_type_expr) formula name nil))))
 (define tsql_decimal_compiler (lambda (type dims) (lambda (infos) (begin
@@ -487,9 +487,11 @@ configurable cutoff remain separate compatibility work. */
 (define tsql_convert_expr (lambda (value type dimensions style) (begin
 	(tsql_decl_dimensions type dimensions)
 	(match style
-		(symbol sql_null_style) (list (quote sql_type_expr) nil type nil)
+		(symbol sql_null_style) (if (tsql_temporal_type? type)
+		(tsql_temporal_cast_expr (list (quote sql_type_expr) nil "NULL" nil) type 0 dimensions)
+		(list (quote sql_type_expr) nil type nil))
 		_ (if (or (nil? style) (equal? style 0)) (tsql_cast_expr value type dimensions)
-			(tsql_temporal_type? type) (tsql_temporal_cast_expr value type style)
+			(tsql_temporal_type? type) (tsql_temporal_cast_expr value type style dimensions)
 			(has? '("VARCHAR" "NVARCHAR" "CHAR" "NCHAR") type)
 			(begin
 				(define pattern (tsql_temporal_style_pattern style true))
@@ -662,7 +664,8 @@ is available; accepting them here would silently lose the user's value. */
 (define tsql_calendar_cast_text (lambda (value) (if (nil? value) nil (begin
 	(if (regexp_test value "[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]*[1-9]")
 		(error "fractional temporal conversion is not implemented") value)))))
-(define tsql_temporal_compiler (lambda (target style) (lambda (infos) (begin
+(define tsql_temporal_compiler (lambda (target style dimensions) (lambda (infos) (begin
+	(tsql_decl_dimensions target dimensions)
 	(define input (car infos))
 	(define source (sql_info_type input))
 	/* A shared Unix carrier never authorizes incompatible SQL contracts. */
@@ -686,8 +689,9 @@ is available; accepting them here would silently lose the user's value. */
 		"SMALLDATETIME" (list tsql_calendar_small_datetime formula)
 		_ (list tsql_calendar_range formula (if (equal? target "DATETIME") -6847804800 -62135596800))))
 	(sql_info converted target nil)))))
-(define tsql_temporal_cast_expr (lambda (value target style)
-	(list (quote sql_compile_expr) (list (quote tsql_temporal_compiler) target style) value)))
+(define tsql_temporal_cast_expr (lambda (value target style dimensions)
+	(list (quote sql_compile_expr)
+		(list (quote tsql_temporal_compiler) target style (list (quote quote) dimensions)) value)))
 (define tsql_dateadd_compiler (lambda (unit months seconds) (lambda (infos) (begin
 	(define input (cadr infos))
 	(define input_type (sql_info_type input))
@@ -1166,6 +1170,7 @@ The shared expression compiler still owns the SQL type; these additional wire
 dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
+	((symbol sql_compile_expr) ((symbol tsql_temporal_compiler) _target _style ((symbol quote) dimensions)) _value) dimensions
 	((symbol tsql_cast_decimal) _value precision scale) (list precision scale)
 	((symbol tsql_read_identity) _state) '(38 0)
 	((symbol tsql_cast_binary) _value length _fixed) (list length)
@@ -1204,10 +1209,17 @@ dimensions are metadata only and are absent from the executable plan. */
 		(define kind (if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type) 38
 			numeric 108 (tsql_binary_type? type) 165
 			(has? '("FLOAT" "DOUBLE" "REAL" "DECIMAL" "NUMERIC") type) 109
-			(has? '("BOOLEAN" "BOOL" "BIT") type) 104 231))
+			(has? '("BOOLEAN" "BOOL" "BIT") type) 104
+			(equal? type "DATE") 40 (equal? type "TIME") 41 (equal? type "DATETIME2") 42
+			(has? '("DATETIME" "SMALLDATETIME") type) 111 231))
 		(define precision (if numeric (car dimensions) 0))
-		(define scale (if numeric (cadr dimensions) 0))
+		(define scale (if numeric (cadr dimensions)
+			(has? '("TIME" "DATETIME2") type) (if (empty_list? dimensions) 7 (car dimensions)) 0))
 		(define size (match kind
+			40 3
+			41 (if (<= scale 2) 3 (<= scale 4) 4 5)
+			42 (+ 3 (if (<= scale 2) 3 (<= scale 4) 4 5))
+			111 (if (equal? type "SMALLDATETIME") 4 8)
 			108 (if (<= precision 9) 5 (<= precision 19) 9 (<= precision 28) 13 17)
 			165 (if (equal? type "ROWVERSION") 8
 				(and (not (empty_list? dimensions)) (> (car dimensions) 0)) (car dimensions) 65535)
@@ -1226,7 +1238,9 @@ compiling; the emitted row callback contains no SQL type tags or dispatch. */
 		(or found (tsql_temporal_type? (column "sql_type")))) false)
 		(list (quote begin)
 			(list (quote define) (quote __tsql_raw_resultrow) (quote resultrow))
-			(list (quote define) (quote resultrow) (list (quote lambda) (list (quote row))
+			(list (quote define) (quote resultrow)
+				(list (quote if) (list (quote session) "wire_metadata") (quote __tsql_raw_resultrow)
+					(list (quote lambda) (list (quote row))
 				(list (quote __tsql_raw_resultrow)
 					(cons (quote list) (merge (map (produceN (count descriptors)) (lambda (index) (begin
 						(define column (nth descriptors index))
@@ -1239,7 +1253,7 @@ compiling; the emitted row callback contains no SQL type tags or dispatch. */
 						anchor conversion from the declared type at compile time. */
 						(define calendar_value (if (equal? (column "sql_type") "TIME")
 							(list tsql_calendar_text value) value))
-						(list (column "name") (if pattern (list format_date calendar_value pattern) value))))))))))
+						(list (column "name") (if pattern (list format_date calendar_value pattern) value)))))))))))
 			plan)
 		plan)))
 

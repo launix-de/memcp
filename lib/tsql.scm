@@ -65,8 +65,33 @@ until those contracts can be represented by the existing date primitives. */
 				(tsql_numeric_input (concat (if negative "-" "") (substr padded 0 point) "." (substr padded point))))))
 		(has? '(40 41 42 43 111) (wire "kind")) (tds_temporal_parameter_value wire value)
 		value))))
+/* Convert only the external result edge to the existing neutral transport
+payload. The shared plan and stored columns retain their normal Unix values.
+Floor is required before 1970: truncating a negative partial day changes both
+its date and clock. SQL declarations select the descriptor before any rows. */
+(define tds_temporal_result_value (lambda (descriptor value) (begin
+	(define kind (descriptor "kind"))
+	(define seconds (unix_timestamp (if (equal? kind 41) (tsql_calendar_text value) value)))
+	(define day (intdiv (floor (/ seconds 86400)) 1))
+	(define clock (- seconds (* day 86400)))
+	(define legacy (equal? kind 111))
+	(define short (and legacy (equal? (descriptor "size") 4)))
+	(if (equal? kind 41) true
+		(and (>= seconds (if legacy (if short -2208988800 -6847804800) -62135596800))
+			(<= seconds (if short 3453321540 253402300799))) true
+		(error "calendar wire result overflow"))
+	(if (and short (not (equal? (mod clock 60) 0)))
+		(error "small datetime wire result requires whole minutes") true)
+	(list "days" (if (equal? kind 41) 0 (+ day (if legacy 25567 719162)))
+		"ticks" (if (equal? kind 40) 0 short (intdiv clock 60)
+			(* clock (if legacy 300 (nth '(1 10 100 1000 10000 100000 1000000 10000000) (descriptor "scale")))))
+		"offset" 0))))
 (define tds_result_value (lambda (descriptor value) (if (nil? value) nil
 	(match (descriptor "kind")
+		40 (tds_temporal_result_value descriptor value)
+		41 (tds_temporal_result_value descriptor value)
+		42 (tds_temporal_result_value descriptor value)
+		111 (tds_temporal_result_value descriptor value)
 		165 (list "bytes" value)
 		108 (begin
 			(define scale (descriptor "scale"))
