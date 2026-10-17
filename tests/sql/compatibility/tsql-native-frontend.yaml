@@ -490,8 +490,10 @@ test_cases:
     expect: {rows: 2, data: [{id: 1, value: null}, {id: 3, value: 0}]}
   - name: National default strings accept leading lexical whitespace
     scm: |
-      (tsql_default_literal "   N'spaces'")
-    expect: {result: spaces}
+      (begin
+        (define info (sql_expr_info (list) (tsql_default_literal "   N'spaces'")))
+        (list (eval (sql_info_formula info)) (sql_info_type info) (sql_info_collation info)))
+    expect: {result: [spaces, NVARCHAR, null]}
   - name: National string prefix must stay adjacent to the opening quote
     sql: SELECT N 'not adjacent' AS value
     expect: {error: true}

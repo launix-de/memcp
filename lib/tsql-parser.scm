@@ -1409,11 +1409,14 @@ dimensions are metadata only and are absent from the executable plan. */
 						((symbol query-block) _schema inner_sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
 						(begin
 							(define inner_expression ((expand_query_block_fields inner_sources fields) bound_column))
+							(define inner_scope (merge (list inner_sources
+								(if (source_lateral? src) (source_prefix_for_alias sources (source_alias src)) '()))))
 							/* Derived outputs consume the same declared conversion formula as
-							direct outputs; row values never supply result dimensions. */
-							(coalesceNil (tsql_result_dimensions inner_sources inner_expression parameters)
-								(tsql_result_dimensions inner_sources
-									(sql_info_formula (sql_expr_info inner_sources inner_expression)) parameters)))
+							direct outputs, retaining the producer's permitted lateral scope.
+							Row values never supply result dimensions. */
+							(coalesceNil (tsql_result_dimensions inner_scope inner_expression parameters)
+								(tsql_result_dimensions inner_scope
+									(sql_info_formula (sql_expr_info inner_scope inner_expression)) parameters)))
 						_ nil)))
 			_ nil))
 	_ nil)))
