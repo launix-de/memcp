@@ -898,7 +898,8 @@ test_cases:
       /* Failed reservations can leave gaps. Rewinding would race other writers. */
       (if (equal? (reserve_ids (table "memcp-tests" false "tsql_identity_limit" false) 1) '(257 257))
         true (error "failed identity batch rewound its consumed reservation"))
-      (execute "INSERT INTO dbo.tsql_identity_limit(id,value) VALUES (255,3)")
+      (execute "SET IDENTITY_INSERT dbo.tsql_identity_limit ON")
+          (execute "INSERT INTO dbo.tsql_identity_limit(id,value) VALUES (255,3)")
       (define updated (try (lambda () (begin
         (execute "UPDATE dbo.tsql_identity_limit SET id=1") false)) (lambda (_) true)))
       (if updated true (error "identity was writable through UPDATE"))

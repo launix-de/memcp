@@ -1253,16 +1253,59 @@ read another writer's global allocator. The INSERT itself remains unchanged. */
 	(session "__tsql_identity" state)
 	((tsql_identity_scope session) "__tsql_scope_identity" state)
 	true)))
+/* This setting owns no IDs or schema state. It retains the existing logical
+handle so a replacement table cannot inherit authority from a reused name.
+The current directory/name and column descriptors remain native metadata. */
+(define tsql_identity_mode_live? (lambda (mode)
+	(if (nil? mode) false (begin
+		(define handle (cadr mode))
+		(define current (table (car mode) false (show handle "name") false))
+		(if (identical? current handle)
+			(begin (define declaration (show handle "column" (nth mode 2) false))
+				(if (nil? declaration) false (equal? (declaration "Extra") "auto_increment"))) false)))))
+(define tsql_set_identity_insert (lambda (session database name enabled) (begin
+	((sql_policy (coalesceNil (session "username") "root")) database name true)
+	(define handle (table database false name true))
+	(if (nil? handle) (tsql_raise_error 208 "IDENTITY_INSERT target does not exist" 1) true)
+	(define identity (find (show handle) (lambda (column) (equal? (column "Extra") "auto_increment")) nil))
+	(if (nil? identity) (tsql_raise_error 8106 "IDENTITY_INSERT requires an IDENTITY column" 1) true)
+	(define previous (session "__tsql_identity_insert"))
+	(define same (if (nil? previous) false (identical? handle (cadr previous))))
+	(if enabled
+		(begin
+			(if (if same false (tsql_identity_mode_live? previous))
+				(tsql_raise_error 8107 "IDENTITY_INSERT is already ON for another table" 1) true)
+			(session "__tsql_identity_insert" (list database handle (identity "Field"))))
+		same (session "__tsql_identity_insert" nil) true)
+	0)))
+(define tsql_check_identity_insert (lambda (session handle explicit_columns supplied) (begin
+	(define mode (session "__tsql_identity_insert"))
+	(define enabled (if (nil? mode) false (identical? handle (cadr mode))))
+	(if supplied
+		(if (and explicit_columns enabled) true
+			(tsql_raise_error 544 "explicit IDENTITY values require a column list and IDENTITY_INSERT ON" 1))
+		enabled (tsql_raise_error 545 "IDENTITY_INSERT ON requires an explicit IDENTITY value" 1) true))))
+/* Only compile-time declarations choose identity policy and value bounds.
+The statement binds one native handle before either its source or allocator;
+parallel SELECT sinks borrow it without session-setting probes per row. */
+(define tsql_insert_identity (lambda (database name planning_session) (begin
+	(define identity (find (get_schema database name)
+		(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
+	(if identity (tsql_target_column_declaration database name (identity "Field") planning_session) nil))))
+(define tsql_identity_insert_statement (lambda (database name identity explicit_columns columns body)
+	(list (quote begin)
+		(list (quote define) (quote __tsql_insert_target) (list (quote table) database false name false))
+		(if identity
+			(list (quote tsql_check_identity_insert) (quote session) (quote __tsql_insert_target)
+				explicit_columns (has? columns (identity "Field"))) true)
+		body)))
 /* Emit the existing native INSERT. VALUES and DEFAULT supply their bounded
 syntax batch; the existing SELECT result sink supplies one emitted row. Never
 scan/count/materialize SELECT input to reserve IDs, or rewind consumed blocks.
 The frontend checks the complete reserved block before any row publication.
 Explicit NULL must fail here: native auto_increment would otherwise allocate
 an unchecked replacement. Completion uses only this invocation's reserved range. */
-(define tsql_native_insert_expr (lambda (database name columns values row_count capture_identity) (begin
-	(define relation (list (quote table) database false name false))
-	(define identity (find (get_schema database name)
-		(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
+(define tsql_native_insert_expr (lambda (relation identity columns values row_count capture_identity) (begin
 	(define native_insert (lambda (names rows callback)
 		(list (quote insert) relation (list (quote quote) names) rows
 			'(list) nil false callback (quote tx))))
@@ -2372,10 +2415,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(tsql_result_output_plan (build_queryplan_term expanded planning_session tx) descriptors))))))
 	/* INSERT SELECT consumes the existing planner's result stream and the native
 	insert operator. Identity allocation and constraints remain native. */
-	(define tsql_insert_select_plan (lambda (database tbl columns query) (begin
+	(define tsql_insert_select_plan (lambda (database tbl columns explicit_columns query) (begin
 		(define declarations (tsql_insert_declarations database tbl columns planning_session))
 		(define columns (map declarations (lambda (column) (column "Field"))))
-		(define insert_expr (tsql_native_insert_expr database tbl columns
+		(define identity (tsql_insert_identity database tbl planning_session))
+		(define insert_expr (tsql_native_insert_expr (quote __tsql_insert_target) identity columns
 			(cons list '((cons list (map (produceN (count columns))
 				(lambda (i) (sql_type_formula '() (tsql_assignment_expr
 					'('nth 'item (+ (* i 2) 1)) (nth declarations i)))))))) 1 false))
@@ -2383,8 +2427,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
 			(error "INSERT column count does not match SELECT column count"))
 		(define native_plan (build_queryplan_term expanded planning_session tx))
-		(define identity (find (get_schema database tbl)
-			(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
+
 		/* AND propagates SQL NULL and evaluates later terms. Missing declaration
 		metadata needs an explicit presence branch before reading its fields. */
 		(define generated (if (nil? identity) false (not (has? columns (identity "Field")))))
@@ -2402,7 +2445,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(define ordered (or
 			(and (query_block? query) (not (empty_list? (coalesceNil (qb_order query) '()))))
 			(and (union_block? query) (not (empty_list? (coalesceNil (union_order query) '()))))))
-		(if ordered
+		(tsql_identity_insert_statement database tbl identity explicit_columns columns (if ordered
 			(list (quote begin)
 				(list (quote set) (quote __insert_count) (list (quote newsession)))
 				(list (quote __insert_count) "count" 0)
@@ -2413,7 +2456,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 						(quote __inserted))))
 				plan (list (quote __insert_count) "count"))
 			(list (quote begin)
-				(list (quote set) (quote resultrow) (list (quote lambda) (list (quote item)) insert_expr)) plan)))))
+				(list (quote set) (quote resultrow) (list (quote lambda) (list (quote item)) insert_expr)) plan))))))
 	/* INSERT TOP constrains the existing source query's final window. It does
 	not count, materialize, or reserve IDs for rows which the planner will skip. */
 	(define tsql_insert_limit_query (lambda (query limit)
@@ -2434,8 +2477,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(define database (coalesce schema2 schema))
 			(define tbl (tsql_table_name database tbl planning_session))
 			(if policy (policy database tbl true) true)
+			(define explicit_columns (not (nil? columns)))
+			(define identity (tsql_insert_identity database tbl planning_session))
 			(define declarations (tsql_insert_declarations database tbl
-				(coalesce columns (table_insertable_columns database tbl)) planning_session))
+				(coalesce columns (filter (table_insertable_columns database tbl) (lambda (name)
+					(if identity (not (equal?? name (identity "Field"))) true)))) planning_session))
 			(define columns (map declarations (lambda (column) (column "Field"))))
 			(if (reduce rows (lambda (valid row) (and valid (equal? (count row) (count columns)))) true)
 				true (error "INSERT column count does not match value count"))
@@ -2445,10 +2491,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(map (produceN (count columns)) (lambda (i)
 					(tsql_assignment_value (nth row i) (nth declarations i)))))))
 			(if (reduce rows (lambda (found row) (or found (tsql_dataset_contains_inner_select row))) false)
-				(tsql_insert_select_plan database tbl columns (tsql_values_to_select_query database columns rows))
-				(tsql_native_insert_expr database tbl columns (sql_insert_values_expr (map rows (lambda (row) (map (produceN (count columns))
-					(lambda (i) (sql_type_formula (list) (tsql_assignment_expr
-						(nth row i) (nth declarations i)))))))) (count rows) true))
+				(tsql_insert_select_plan database tbl columns explicit_columns (tsql_values_to_select_query database columns rows))
+				(tsql_identity_insert_statement database tbl identity explicit_columns columns
+					(tsql_native_insert_expr (quote __tsql_insert_target) identity columns (sql_insert_values_expr (map rows (lambda (row) (map (produceN (count columns))
+						(lambda (i) (sql_type_formula (list) (tsql_assignment_expr
+							(nth row i) (nth declarations i)))))))) (count rows) true)))
 	))))
 	/* An all-default row is the native empty-column INSERT. Defaults and
 	generated values are filled by the same operator as ordinary insertion. */
@@ -2460,9 +2507,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(define database (coalesce schema2 schema))
 			(define tbl (tsql_table_name database tbl planning_session))
 			(if policy (policy database tbl true) true)
-			(tsql_native_insert_expr database tbl '()
-				(if (equal?? limit 0) '('list) '('list '(list)))
-				(if (equal?? limit 0) 0 1) true)))))
+			(define identity (tsql_insert_identity database tbl planning_session))
+			(tsql_identity_insert_statement database tbl identity false '()
+				(tsql_native_insert_expr (quote __tsql_insert_target) identity '()
+					(if (equal?? limit 0) '('list) '('list '(list)))
+					(if (equal?? limit 0) 0 1) true))))))
 	(define tsql_insert_select (parser '(
 		(atom "INSERT" true) (define limit tsql_write_limit) (? (atom "INTO" true))
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
@@ -2472,7 +2521,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(define database (coalesce schema2 schema))
 			(define tbl (tsql_table_name database tbl planning_session))
 			(if policy (policy database tbl true) true)
-			(tsql_insert_select_plan database tbl (coalesce columns (table_insertable_columns database tbl))
+			(define identity (tsql_insert_identity database tbl planning_session))
+			(tsql_insert_select_plan database tbl (coalesce columns
+				(filter (table_insertable_columns database tbl) (lambda (name)
+					(if identity (not (equal?? name (identity "Field"))) true)))) (not (nil? columns))
 				(tsql_insert_limit_query query limit))
 	))))
 	/* Only UNIQUE declarations publish native keys. Ordinary acceleration
@@ -2732,6 +2784,13 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(if policy (policy database name true) true)
 				(list (quote drop_sql_view) (list (quote session) "__memcp_tx")
 					database name (if ifexists true false)))))
+		(parser '((atom "SET" true) (atom "IDENTITY_INSERT" true)
+			(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier)
+			(define enabled (or (parser (atom "ON" true) true) (parser (atom "OFF" true) false))))
+			(lambda () (begin
+				(define database (coalesce schema2 schema))
+				(if policy (policy database name true) true)
+				(list (quote tsql_set_identity_insert) (quote session) database name enabled))))
 		(parser '((atom "SET" true) (atom "NOCOUNT" true)
 			(define enabled (or (parser (atom "ON" true) true) (parser (atom "OFF" true) false))))
 			(lambda () (list (quote session) "__tsql_nocount" enabled)))

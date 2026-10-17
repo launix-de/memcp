@@ -583,7 +583,14 @@ test_cases:
     expect: {error: true}
   - name: native unique constraint remains enforced
     sql: INSERT INTO [dbo].[tsql_native] ([id]) VALUES (1)
-    expect: {error: true}
+    expect:
+      error: true
+      contains: unique
+    session_id: identity-contract-151
+    setup:
+    - sql: SET IDENTITY_INSERT tsql_native ON
+    cleanup:
+    - sql: SET IDENTITY_INSERT tsql_native OFF
   - name: unsupported identity increments fail explicitly
     sql: CREATE TABLE [tsql_wrong_identity] ([id] INT IDENTITY(10,2))
     expect: {error: true}
@@ -1562,7 +1569,12 @@ test_cases:
     sql: SELECT id,value FROM tsql_seeded_identity ORDER BY id
     expect: {rows: 2, data: [{id: 50, value: 7}, {id: 51, value: 8}]}
   - name: Native seeded identity explicit values advance the existing allocator
-    sql: INSERT INTO tsql_seeded_identity VALUES (100,9)
+    sql: INSERT INTO tsql_seeded_identity(id,value) VALUES (100,9)
+    session_id: identity-contract-373
+    setup:
+    - sql: SET IDENTITY_INSERT tsql_seeded_identity ON
+    cleanup:
+    - sql: SET IDENTITY_INSERT tsql_seeded_identity OFF
   - name: Native seeded identity reuses the advanced allocator
     sql: INSERT INTO tsql_seeded_identity (value) VALUES (10)
   - name: Native seeded identity explicit maximum controls the next value
@@ -1636,13 +1648,33 @@ test_cases:
     expect: {result: [257,257]}
   - name: Explicit identity NULL cannot bypass generated bounds
     sql: INSERT INTO tsql_identity_tiny_limit(id,value) VALUES (NULL,3)
-    expect: {error: true}
+    expect:
+      error: true
+      contains: IDENTITY cannot be assigned NULL
+    session_id: identity-contract-398
+    setup:
+    - sql: SET IDENTITY_INSERT tsql_identity_tiny_limit ON
+    cleanup:
+    - sql: SET IDENTITY_INSERT tsql_identity_tiny_limit OFF
   - name: Explicit identity overflow uses ordinary assignment narrowing
     sql: INSERT INTO tsql_identity_tiny_limit(id,value) VALUES (256,3)
-    expect: {error: true}
+    expect:
+      error: true
+    session_id: identity-contract-399
+    setup:
+    - sql: SET IDENTITY_INSERT tsql_identity_tiny_limit ON
+    cleanup:
+    - sql: SET IDENTITY_INSERT tsql_identity_tiny_limit OFF
   - name: Explicit batch identity NULL rejects all supplied rows
     sql: INSERT INTO tsql_identity_tiny_limit(id,value) VALUES (1,4),(NULL,5)
-    expect: {error: true}
+    expect:
+      error: true
+      contains: IDENTITY cannot be assigned NULL
+    session_id: identity-contract-400
+    setup:
+    - sql: SET IDENTITY_INSERT tsql_identity_tiny_limit ON
+    cleanup:
+    - sql: SET IDENTITY_INSERT tsql_identity_tiny_limit OFF
   - name: Invalid explicit identity batch publishes no valid prefix
     sql: SELECT COUNT(*) AS n FROM tsql_identity_tiny_limit
     expect: {rows: 1, data: [{n: 0}]}
@@ -1663,10 +1695,23 @@ test_cases:
     expect: {rows: 1, data: [{id: 255, value: 9}]}
   - name: Explicit streaming identity NULL rejects before native allocation
     sql: INSERT INTO tsql_identity_select_limit(id,value) SELECT CAST(NULL AS TINYINT),11
-    expect: {error: true}
+    expect:
+      error: true
+      contains: IDENTITY cannot be assigned NULL
+    session_id: identity-contract-406
+    setup:
+    - sql: SET IDENTITY_INSERT tsql_identity_select_limit ON
+    cleanup:
+    - sql: SET IDENTITY_INSERT tsql_identity_select_limit OFF
   - name: Explicit streaming identity overflow rejects before native insertion
     sql: INSERT INTO tsql_identity_select_limit(id,value) SELECT 256,11
-    expect: {error: true}
+    expect:
+      error: true
+    session_id: identity-contract-407
+    setup:
+    - sql: SET IDENTITY_INSERT tsql_identity_select_limit ON
+    cleanup:
+    - sql: SET IDENTITY_INSERT tsql_identity_select_limit OFF
   - name: Multirow streaming identity overflow rolls back its inserted prefix
     setup:
       - sql: DROP TABLE IF EXISTS tsql_identity_stream_rollback

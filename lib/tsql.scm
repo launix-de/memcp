@@ -302,12 +302,15 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 		'("try" body recovery) (tsql_batch_contracts (merge (list body recovery)) contracts)
 		'("if" _condition yes no) (tsql_batch_contracts (if no (list yes no) (list yes)) contracts)
 		_ contracts)) inherited)))
-(define tsql_scope_session (lambda (parent contracts owner_schema) (begin
+(define tsql_scope_session (lambda (parent contracts owner_schema module_settings) (begin
 	(define local (newsession))
 	(if owner_schema (local "schema" owner_schema) true)
 	(local "__tsql_parameter_declarations" contracts)
 	(local "__tsql_scope" (newsession))
 	(local "__tsql_connection_session" (tsql_connection_session parent))
+	/* Module changes shadow their caller, including an explicit local OFF.
+	Ordinary batches delegate the setting so GO retains connection state. */
+	(if module_settings (local "__tsql_identity_insert" (parent "__tsql_identity_insert")) true)
 	/* Error-reporting procedures inherit the enclosing immutable CATCH context.
 	A nested CATCH still installs and restores only this invocation's fields. */
 	(define error_context (parent "__tsql_error_context"))
@@ -320,13 +323,16 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 			(not (has? '("__tsql_scope" "__tsql_connection_session") key)))) (filter (parent) (lambda (key)
 				(not (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
 					(or (has? '("__tsql_scope" "__tsql_connection_session") key) (strlike key "__tsql_error_%"))
-					(and owner_schema (equal? key "schema"))))))))
+					(and owner_schema (equal? key "schema"))
+					(and module_settings (equal? key "__tsql_identity_insert"))))))))
 		'(key) (if (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
 			(or (has? '("__tsql_scope" "__tsql_connection_session") key) (strlike key "__tsql_error_%"))
-			(and owner_schema (equal? key "schema"))) (local key) (parent key))
+			(and owner_schema (equal? key "schema"))
+			(and module_settings (equal? key "__tsql_identity_insert"))) (local key) (parent key))
 		'(key value) (if (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
 			(or (has? '("__tsql_scope" "__tsql_connection_session") key) (strlike key "__tsql_error_%"))
-			(and owner_schema (equal? key "schema"))) (local key value) (parent key value))
+			(and owner_schema (equal? key "schema"))
+			(and module_settings (equal? key "__tsql_identity_insert"))) (local key value) (parent key value))
 		_ (apply parent args))))))
 (define tsql_scalar_expression_allowed? (lambda (expr) (match expr
 	((symbol quote) _value) true
@@ -591,8 +597,8 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 			(tsql_execute_dynamic schema text '() '() statement session resultrow resultfields
 				(lambda (result _status _scoped) result)))
 		_ (error "unsupported batch command")))))
-(define tsql_execute_command_batch (lambda (schema commands declarations supplied statement caller resultrow resultfields finish) (begin
-	(define scoped (tsql_scope_session caller (tsql_batch_contracts commands declarations) schema))
+(define tsql_execute_command_batch (lambda (schema commands declarations supplied statement caller resultrow resultfields module_settings finish) (begin
+	(define scoped (tsql_scope_session caller (tsql_batch_contracts commands declarations) schema module_settings))
 	(map supplied (lambda (item) (scoped (concat "__tsql_parameter:" (car item)) (cadr item))))
 	/* Completion and the declared INT return status are different contracts.
 	Evaluate the SQL commands before reading their lexical scope's status. */
@@ -609,7 +615,7 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 			(list "syntax" (parse_tsql_batch schema (batch "text")) "repeat" (batch "repeat")))))))
 	(reduce batches (lambda (_result batch) (reduce (produceN (batch "repeat")) (lambda (_result _iteration) (begin
 		(define commands (cadr (batch "syntax")))
-		(tsql_execute_command_batch schema commands inherited supplied statement session resultrow resultfields
+		(tsql_execute_command_batch schema commands inherited supplied statement session resultrow resultfields false
 			(lambda (result _status _scoped) result)))) 0)) 0))))
 (define tsql_execute_request (lambda (schema text session state sequence resultrow resultfields)
 	(with_query_request session state sequence text (lambda (statement)
@@ -632,7 +638,7 @@ statement owner, account, transaction session, arguments and output callbacks. *
 		(list (quote statement) (quote caller) (quote values) (quote resultrow) (quote resultfields) (quote finish))
 		(list (quote begin)
 			(list (quote define) (quote session)
-				(list (quote tsql_scope_session) (quote caller) (list (quote quote) contracts) schema))
+				(list (quote tsql_scope_session) (quote caller) (list (quote quote) contracts) schema true))
 			(list (quote session) "schema" schema)
 			(list (quote map) (quote values) (list (quote lambda) (list (quote item))
 				(list (quote session) (list (quote concat) "__tsql_parameter:" (list (quote car) (quote item)))
@@ -652,7 +658,7 @@ statement owner, account, transaction session, arguments and output callbacks. *
 	/* GO separates submitted scripts, but is not a statement in executed text. */
 	(define syntax (tsql_script_cache (json_encode (list schema text "dynamic")) nil
 		(lambda (_tx) (parse_tsql_batch schema text))))
-	(tsql_execute_command_batch schema (cadr syntax) declarations values statement caller resultrow resultfields finish))))
+	(tsql_execute_command_batch schema (cadr syntax) declarations values statement caller resultrow resultfields true finish))))
 /* Bind call syntax against formal and caller declarations before execution.
 Only parameter-sized scalar tuples are collected; relational SQL stays native. */
 (define tsql_check_call_order (lambda (arguments)
