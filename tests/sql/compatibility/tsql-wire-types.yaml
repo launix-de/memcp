@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
   syntax: tsql
-  description: Declared binary and numeric contracts at the TDS boundary
+  description: Declared binary, numeric and temporal contracts at the TDS boundary
   requires_tds: true
   isolated: true
 setup:
@@ -293,7 +293,528 @@ test_cases:
             - {name: t, value: 'Grüße 🐘'}
             - {name: n, value: 9007199254740993}
           expect: {rows: 1, data: [{number: '9007199254740993', bytes: {binary_hex: '0080ff'}, label: 'Grüße 🐘'}]}
+  - name: Date RPC binds the first supported calendar day
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATE")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 40 "size" 3 "scale" 0)
+              "value" (list "days" 0 "ticks" 0 "offset" 0))))
+        (equal? (format_date (s "__tsql_parameter:v") "%Y-%m-%d %H:%i:%s") "0001-01-01 00:00:00"))
+    expect: {result: true}
+  - name: Date RPC binds the last supported calendar day
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATE")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 40 "size" 3 "scale" 0)
+              "value" (list "days" 3652058 "ticks" 0 "offset" 0))))
+        (equal? (format_date (s "__tsql_parameter:v") "%Y-%m-%d %H:%i:%s") "9999-12-31 00:00:00"))
+    expect: {result: true}
+  - name: Datetime2 RPC interprets scale-seven wire seconds
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME2(7)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "size" 8 "scale" 7)
+              "value" (list "days" 719162 "ticks" 452960000000 "offset" 0))))
+        (equal? (format_date (s "__tsql_parameter:v") "%Y-%m-%d %H:%i:%s") "1970-01-01 12:34:56"))
+    expect: {result: true}
+  - name: Datetime2 RPC accepts the last whole second
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME2(0)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "size" 6 "scale" 0)
+              "value" (list "days" 3652058 "ticks" 86399 "offset" 0))))
+        (equal? (format_date (s "__tsql_parameter:v") "%Y-%m-%d %H:%i:%s") "9999-12-31 23:59:59"))
+    expect: {result: true}
+  - name: Legacy datetime RPC reads signed pre-epoch days
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 111 "size" 8 "scale" 0)
+              "value" (list "days" -53690 "ticks" 0 "offset" 0))))
+        (equal? (format_date (s "__tsql_parameter:v") "%Y-%m-%d %H:%i:%s") "1753-01-01 00:00:00"))
+    expect: {result: true}
+  - name: Legacy datetime RPC converts 300 ticks per second
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 111 "size" 8 "scale" 0)
+              "value" (list "days" 25567 "ticks" 13588800 "offset" 0))))
+        (equal? (format_date (s "__tsql_parameter:v") "%Y-%m-%d %H:%i:%s") "1970-01-01 12:34:56"))
+    expect: {result: true}
+  - name: Short datetime RPC reads minutes since midnight
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v SMALLDATETIME")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 111 "size" 4 "scale" 0)
+              "value" (list "days" 0 "ticks" 1 "offset" 0))))
+        (equal? (format_date (s "__tsql_parameter:v") "%Y-%m-%d %H:%i:%s") "1900-01-01 00:01:00"))
+    expect: {result: true}
+  - name: Short datetime RPC accepts its last minute
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v SMALLDATETIME")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 111 "size" 4 "scale" 0)
+              "value" (list "days" 65535 "ticks" 1439 "offset" 0))))
+        (equal? (format_date (s "__tsql_parameter:v") "%Y-%m-%d %H:%i:%s") "2079-06-06 23:59:00"))
+    expect: {result: true}
+  - name: DATE RPC preserves typed NULL
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATE")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 40 "size" 3 "scale" 0)
+              "value" nil)))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {result: true}
+  - name: TIME(7) RPC preserves typed NULL
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v TIME(7)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 41 "size" 5 "scale" 7)
+              "value" nil)))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {result: true}
+  - name: DATETIME2(7) RPC preserves typed NULL
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME2(7)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "size" 8 "scale" 7)
+              "value" nil)))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {result: true}
+  - name: DATETIMEOFFSET(7) RPC preserves typed NULL
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIMEOFFSET(7)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 43 "size" 10 "scale" 7)
+              "value" nil)))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {result: true}
+  - name: DATETIME RPC preserves typed NULL
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 111 "size" 8 "scale" 0)
+              "value" nil)))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {result: true}
+  - name: SMALLDATETIME RPC preserves typed NULL
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v SMALLDATETIME")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 111 "size" 4 "scale" 0)
+              "value" nil)))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {result: true}
+  - name: Date RPC rejects a day outside the declared calendar
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATE")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 40 "size" 3 "scale" 0)
+              "value" (list "days" 3652059 "ticks" 0 "offset" 0))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: temporal parameter calendar overflow}
+  - name: Datetime2 RPC rejects a clock outside one day
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME2(7)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "size" 8 "scale" 7)
+              "value" (list "days" 719162 "ticks" 864000000000 "offset" 0))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: temporal parameter clock overflow}
+  - name: Time RPC rejects a nonzero day field
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v TIME(0)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 41 "size" 3 "scale" 0)
+              "value" (list "days" 1 "ticks" 1 "offset" 0))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: invalid time parameter day}
+  - name: Legacy datetime RPC rejects a day before its minimum
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 111 "size" 8 "scale" 0)
+              "value" (list "days" -53691 "ticks" 0 "offset" 0))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: temporal parameter calendar overflow}
+  - name: Short datetime RPC rejects an oversized clock
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v SMALLDATETIME")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 111 "size" 4 "scale" 0)
+              "value" (list "days" 0 "ticks" 1440 "offset" 0))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: temporal parameter clock overflow}
+  - name: Datetime2 RPC refuses subsecond truncation
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME2(7)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "size" 8 "scale" 7)
+              "value" (list "days" 719162 "ticks" 1 "offset" 0))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: fractional temporal parameter}
+  - name: Legacy datetime RPC refuses subsecond truncation
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 111 "size" 8 "scale" 0)
+              "value" (list "days" 25567 "ticks" 1 "offset" 0))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: fractional temporal parameter}
+  - name: Time RPC refuses subsecond truncation
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v TIME(7)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 41 "size" 5 "scale" 7)
+              "value" (list "days" 0 "ticks" 1 "offset" 0))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: fractional temporal parameter}
+  - name: Datetime2 RPC validates scale independently of payload
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME2(7)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "size" 8 "scale" 8)
+              "value" (list "days" 719162 "ticks" 0 "offset" 0))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: invalid temporal parameter scale}
+  - name: Legacy datetime RPC validates its wire width
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 111 "size" 5 "scale" 0)
+              "value" (list "days" 25567 "ticks" 0 "offset" 0))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: invalid legacy temporal parameter size}
+  - name: Date RPC cannot be inferred to an integer from Unix storage
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v INT")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 40 "size" 3 "scale" 0)
+              "value" (list "days" 719162 "ticks" 0 "offset" 0))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: temporal parameter conversion}
+  - name: Datetime2 to datetime RPC retains target calendar bounds
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "size" 6 "scale" 0)
+              "value" (list "days" 0 "ticks" 0 "offset" 0))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: calendar result overflow}
+  - name: Offset RPC refuses losing original offset -840
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIMEOFFSET(7)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 43 "size" 10 "scale" 7)
+              "value" (list "days" 719162 "ticks" 0 "offset" -840))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: offset temporal parameter preservation}
+  - name: Offset RPC refuses losing original offset -60
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIMEOFFSET(7)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 43 "size" 10 "scale" 7)
+              "value" (list "days" 719162 "ticks" 0 "offset" -60))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: offset temporal parameter preservation}
+  - name: Offset RPC refuses losing original offset 0
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIMEOFFSET(7)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 43 "size" 10 "scale" 7)
+              "value" (list "days" 719162 "ticks" 0 "offset" 0))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: offset temporal parameter preservation}
+  - name: Offset RPC refuses losing original offset 90
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIMEOFFSET(7)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 43 "size" 10 "scale" 7)
+              "value" (list "days" 719162 "ticks" 0 "offset" 90))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: offset temporal parameter preservation}
+  - name: Offset RPC refuses losing original offset 840
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIMEOFFSET(7)")
+            (list (list "name" "v" "flags" 0 "type" (list "kind" 43 "size" 10 "scale" 7)
+              "value" (list "days" 719162 "ticks" 0 "offset" 840))))
+        (nil? (s "__tsql_parameter:v")))
+    expect: {error: true, contains: offset temporal parameter preservation}
+  - name: Time RPC uses the existing anchored clock carrier
+    scm: |-
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v TIME(7)")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 41 "size" 5 "scale" 7)
+            "value" (list "days" 0 "ticks" 863990000000 "offset" 0))))
+        (equal? (format_date (s "__tsql_parameter:v") "%Y-%m-%d %H:%i:%s") "1900-01-01 23:59:59"))
+    expect:
+      result: true
+  - name: Temporal RPC validates all parameters before session publication
+    scm: |-
+      (begin
+        (define s (newsession))
+        (s "__tsql_parameter:id" 99)
+        (try (lambda ()
+          (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@id INT,@v DATETIME2(7)")
+            (list (list "name" "id" "flags" 0 "type" (list "kind" 38 "size" 4) "value" 7)
+              (list "name" "v" "flags" 0 "type" (list "kind" 42 "size" 8 "scale" 7)
+                "value" (list "days" 719162 "ticks" 1 "offset" 0))))) (lambda (_err) nil))
+        (and (equal? (s "__tsql_parameter:id") 99)
+          (nil? (s "__tsql_parameter_declarations"))))
+    expect:
+      result: true
+  - name: Native TDS temporal RPC inputs preserve declared calendar and clock values
+    tds:
+      statements:
+      - sql: SELECT @d AS d,@tm AS tm,@dt AS dt,@dt2 AS dt2
+        parameters:
+        - name: d
+          value:
+            temporal_type: date
+            value: '2026-03-15'
+        - name: tm
+          value:
+            temporal_type: time
+            value: '12:34:56'
+        - name: dt
+          value:
+            temporal_type: datetime
+            value: '2026-03-15T12:34:56Z'
+        - name: dt2
+          value:
+            temporal_type: datetime2
+            value: '2026-03-15T12:34:56Z'
+        expect:
+          rows: 1
+          data:
+          - d: '2026-03-15'
+            tm: '12:34:56'
+            dt: '2026-03-15 12:34:56'
+            dt2: '2026-03-15 12:34:56'
+      - sql: SELECT @d AS first,@dt2 AS last
+        prepare: true
+        parameters:
+        - name: d
+          value:
+            temporal_type: date
+            value: '0001-01-01'
+        - name: dt2
+          value:
+            temporal_type: datetime2
+            value: '9999-12-31T23:59:59Z'
+        expect:
+          rows: 1
+          data:
+          - first: '0001-01-01'
+            last: '9999-12-31 23:59:59'
+  - name: Native temporal RPC writes reuse typed native assignment and ordering
+    tds:
+      statements:
+      - sql: DROP TABLE IF EXISTS tsql_wire_clock
+      - sql: CREATE TABLE tsql_wire_clock(id INT PRIMARY KEY,d DATE,dt DATETIME2(7),tm TIME(7),sm SMALLDATETIME)
+      - sql: INSERT INTO tsql_wire_clock VALUES(1,@d,@dt,@tm,@sm)
+        parameters:
+        - name: d
+          value:
+            temporal_type: date
+            value: '2026-03-15'
+        - name: dt
+          value:
+            temporal_type: datetime2
+            value: '2026-03-15T12:34:56Z'
+        - name: tm
+          value:
+            temporal_type: time
+            value: '12:34:56'
+        - name: sm
+          value:
+            temporal_type: datetime
+            value: '2026-03-15T12:34:45Z'
+      - sql: SELECT d,dt,tm,sm FROM tsql_wire_clock ORDER BY dt
+        expect:
+          rows: 1
+          data:
+          - d: '2026-03-15'
+            dt: '2026-03-15 12:34:56'
+            tm: '12:34:56'
+            sm: '2026-03-15 12:35:00'
+      - sql: UPDATE tsql_wire_clock SET dt=@dt WHERE id=1
+        prepare: true
+        parameters:
+        - name: dt
+          value:
+            temporal_type: datetime2
+            value: '2026-03-16T01:02:03Z'
+      - sql: SELECT dt FROM tsql_wire_clock WHERE id=1
+        expect:
+          rows: 1
+          data:
+          - dt: '2026-03-16 01:02:03'
+      - sql: DROP TABLE tsql_wire_clock
+  - name: Native TDS temporal RPC refuses fractional and offset loss before execution
+    tds:
+      statements:
+      - sql: SELECT @v AS value
+        parameters:
+        - name: v
+          value:
+            temporal_type: datetime2
+            value: '2026-03-15T12:34:56.1234567Z'
+        expect:
+          error: true
+          contains:
+          - fractional temporal parameter
+      - sql: SELECT @v AS value
+        parameters:
+        - name: v
+          value:
+            temporal_type: datetime
+            value: '2026-03-15T12:34:56.007Z'
+        expect:
+          error: true
+          contains:
+          - fractional temporal parameter
+      - sql: SELECT @v AS value
+        parameters:
+        - name: v
+          value:
+            temporal_type: time
+            value: '12:34:56.1234567'
+        expect:
+          error: true
+          contains:
+          - fractional temporal parameter
+      - sql: SELECT @v AS value
+        parameters:
+        - name: v
+          value:
+            temporal_type: datetimeoffset
+            value: '2026-03-15T12:34:56+05:30'
+        expect:
+          error: true
+          contains:
+          - offset temporal parameter preservation
+      - sql: SELECT 7 AS value
+        expect:
+          rows: 1
+          data:
+          - value: 7
+  - name: Temporal RPC wire scales zero through seven use their declared clock units
+    scm: |-
+      (reduce '(0 1 2 3 4 5 6 7) (lambda (valid scale) (begin
+        (define s (newsession))
+        (define factor (tsql_parse_integer (concat "1" (string_repeat "0" scale))))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME2(7)")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "scale" scale)
+            "value" (list "days" 719162 "ticks" (* 45296 factor) "offset" 0))))
+        (and valid (equal? (format_date (s "__tsql_parameter:v") "%Y-%m-%d %H:%i:%s") "1970-01-01 12:34:56")))) true)
+    expect:
+      result: true
+  - name: Date transport converts to a declared text target using its date contract
+    scm: |-
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v VARCHAR(30)")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 40 "size" 3)
+            "value" (list "days" 719162 "ticks" 0 "offset" 0))))
+        (equal? (s "__tsql_parameter:v") "1970-01-01"))
+    expect:
+      result: true
+  - name: Temporal transport refuses malformed fields before SQL conversion
+    scm: |-
+      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v DATE")
+        (list (list "name" "v" "flags" 0 "type" (list "kind" 40 "size" 3)
+          "value" (list "days" "719162" "ticks" 0 "offset" 0))))
+    expect:
+      error: true
+      contains: invalid temporal parameter fields
+  - name: Date transport rejects an unexpected original offset
+    scm: |-
+      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v DATE")
+        (list (list "name" "v" "flags" 0 "type" (list "kind" 40 "size" 3)
+          "value" (list "days" 719162 "ticks" 0 "offset" 60))))
+    expect:
+      error: true
+      contains: unexpected temporal parameter offset
+  - name: Offset transport rejects values outside the fourteen-hour range
+    scm: |-
+      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v DATETIMEOFFSET(7)")
+        (list (list "name" "v" "flags" 0 "type" (list "kind" 43 "size" 10 "scale" 7)
+          "value" (list "days" 719162 "ticks" 0 "offset" 841))))
+    expect:
+      error: true
+      contains: temporal parameter offset overflow
+  - name: Date to time cast rejects incompatible declared temporal types
+    sql: SELECT CAST(CAST('1970-01-01' AS DATE) AS TIME) AS value
+    expect:
+      error: true
+      contains: incompatible temporal conversion
+  - name: Time to date cast rejects incompatible declared temporal types
+    sql: SELECT CAST(CAST('12:34:56' AS TIME) AS DATE) AS value
+    expect:
+      error: true
+      contains: incompatible temporal conversion
+  - name: Date RPC refuses a time declaration despite a shared native carrier
+    scm: |-
+      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v TIME(0)")
+        (list (list "name" "v" "flags" 0 "type" (list "kind" 40 "size" 3)
+          "value" (list "days" 719162 "ticks" 0 "offset" 0))))
+    expect:
+      error: true
+      contains: incompatible temporal conversion
+  - name: Time RPC refuses a date declaration despite a shared native carrier
+    scm: |-
+      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v DATE")
+        (list (list "name" "v" "flags" 0 "type" (list "kind" 41 "scale" 0)
+          "value" (list "days" 0 "ticks" 45296 "offset" 0))))
+    expect:
+      error: true
+      contains: incompatible temporal conversion
+  - name: Time RPC converts to datetime using the declared default date
+    scm: |-
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 41 "scale" 0)
+            "value" (list "days" 0 "ticks" 45296 "offset" 0))))
+        (equal? (format_date (s "__tsql_parameter:v") "%Y-%m-%d %H:%i:%s") "1900-01-01 12:34:56"))
+    expect:
+      result: true
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_wire_contract
   - sql: DROP TABLE IF EXISTS tsql_wire_text
   - sql: DROP TABLE IF EXISTS tsql_wire_version_contract
+  - sql: DROP TABLE IF EXISTS tsql_wire_clock

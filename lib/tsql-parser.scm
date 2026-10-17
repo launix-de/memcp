@@ -371,7 +371,9 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 		(error "generated version column cannot be assigned explicitly")
 		(has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type)
 		(tsql_cast_expr value type '())
-		(has? '("NVARCHAR" "NCHAR") type)
+		/* Minute rounding belongs to the declared assignment contract, before
+		the existing sink receives the native calendar value. */
+		(has? '("NVARCHAR" "NCHAR" "SMALLDATETIME") type)
 		(tsql_cast_expr value type (declaration "Dimensions"))
 		(has? '("DECIMAL" "NUMERIC") type) (begin
 			(define dimensions (declaration "Dimensions"))
@@ -654,6 +656,10 @@ is available; accepting them here would silently lose the user's value. */
 	(list (quote sql_compile_expr) (lambda (infos) (begin
 		(define input (car infos))
 		(define source (sql_info_type input))
+		/* A shared Unix carrier never authorizes incompatible SQL contracts. */
+		(if (or (and (equal? source "DATE") (equal? target "TIME"))
+			(and (equal? source "TIME") (equal? target "DATE")))
+			(error "incompatible temporal conversion from " source " to " target) true)
 		(define input (if (and (sql_text_type? source) (not (equal? target "DATE")))
 			(sql_info (list tsql_calendar_cast_text (sql_info_formula input)) source (sql_info_collation input)) input))
 		(if (and (sql_numeric_type? source) (not (has? '("DATETIME" "SMALLDATETIME") target)))
