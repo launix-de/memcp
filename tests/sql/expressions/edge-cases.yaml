@@ -280,7 +280,8 @@ test_cases:
         - MixedCase: 456
 
   # === NUMERIC EDGE CASES ===
-  - name: "Large integer literal retains native precision"
+  # Preserve the historical regression ID; the result must now retain every digit.
+  - name: "Very large number (precision loss expected)"
     sql: "SELECT 999999999999999999 AS big_number"
     expect:
       rows: 1
