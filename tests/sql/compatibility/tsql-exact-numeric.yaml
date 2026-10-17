@@ -1111,4 +1111,448 @@ test_cases:
       value: null
   cleanup:
   - DROP TABLE tsql_round_real_inputs
+- name: MONEY conversion preserves positive half
+  sql: SELECT CAST(12.34565 AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.3457
+- name: MONEY conversion preserves negative half
+  sql: SELECT CAST(-12.34565 AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12.3457
+- name: MONEY conversion preserves zero
+  sql: SELECT CAST(0 AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: MONEY conversion preserves NULL
+  sql: SELECT CAST(NULL AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: MONEY conversion preserves numeric text
+  sql: SELECT CAST(N'1234.5678' AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1234.5678
+- name: MONEY conversion preserves currency text
+  sql: SELECT CAST(N'$1,234.5678' AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1234.5678
+- name: MONEY conversion preserves bit one
+  sql: SELECT CAST(CAST(1 AS BIT) AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: MONEY conversion preserves bit zero
+  sql: SELECT CAST(CAST(0 AS BIT) AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: SMALLMONEY conversion preserves positive half
+  sql: SELECT CAST(12.34565 AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.3457
+- name: SMALLMONEY conversion preserves negative half
+  sql: SELECT CAST(-12.34565 AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12.3457
+- name: SMALLMONEY conversion preserves zero
+  sql: SELECT CAST(0 AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: SMALLMONEY conversion preserves NULL
+  sql: SELECT CAST(NULL AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: SMALLMONEY conversion preserves numeric text
+  sql: SELECT CAST(N'1234.5678' AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1234.5678
+- name: SMALLMONEY conversion preserves currency text
+  sql: SELECT CAST(N'$1,234.5678' AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1234.5678
+- name: SMALLMONEY conversion preserves bit one
+  sql: SELECT CAST(CAST(1 AS BIT) AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: SMALLMONEY conversion preserves bit zero
+  sql: SELECT CAST(CAST(0 AS BIT) AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: Small currency upper bound
+  sql: SELECT CAST(N'214748.3647' AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 214748.3647
+- name: Small currency lower bound
+  sql: SELECT CAST(N'-214748.3648' AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -214748.3648
+- name: Small currency rounding below upper bound
+  sql: SELECT CAST(N'214748.36474' AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 214748.3647
+- name: Small currency rejects rounding overflow
+  sql: SELECT CAST(214748.36475 AS SMALLMONEY) AS value
+  expect:
+    error: true
+- name: Small currency rejects negative rounding overflow
+  sql: SELECT CAST(-214748.36485 AS SMALLMONEY) AS value
+  expect:
+    error: true
+- name: Small currency rejects upper overflow
+  sql: SELECT CAST(214749 AS SMALLMONEY) AS value
+  expect:
+    error: true
+- name: Small currency rejects invalid text
+  sql: SELECT CAST(N'not money' AS SMALLMONEY) AS value
+  expect:
+    error: true
+- name: MONEY to integer rounds 12.75
+  sql: SELECT CAST(CAST(12.75 AS MONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 13
+- name: MONEY to integer rounds -12.75
+  sql: SELECT CAST(CAST(-12.75 AS MONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -13
+- name: MONEY to integer rounds 2.5
+  sql: SELECT CAST(CAST(2.5 AS MONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 3
+- name: MONEY to integer rounds -2.5
+  sql: SELECT CAST(CAST(-2.5 AS MONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -3
+- name: MONEY character style 0
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS MONEY),0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.57'
+- name: MONEY character style 1
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS MONEY),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -1,234.57
+- name: MONEY character style 2
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS MONEY),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.5678'
+- name: MONEY character style 126
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS MONEY),126) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.5678'
+- name: MONEY character style 999
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS MONEY),999) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.57'
+- name: MONEY default character cast uses two places
+  sql: SELECT CAST(CAST(12.3456 AS MONEY) AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.35'
+- name: SMALLMONEY to integer rounds 12.75
+  sql: SELECT CAST(CAST(12.75 AS SMALLMONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 13
+- name: SMALLMONEY to integer rounds -12.75
+  sql: SELECT CAST(CAST(-12.75 AS SMALLMONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -13
+- name: SMALLMONEY to integer rounds 2.5
+  sql: SELECT CAST(CAST(2.5 AS SMALLMONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 3
+- name: SMALLMONEY to integer rounds -2.5
+  sql: SELECT CAST(CAST(-2.5 AS SMALLMONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -3
+- name: SMALLMONEY character style 0
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS SMALLMONEY),0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.57'
+- name: SMALLMONEY character style 1
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS SMALLMONEY),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -1,234.57
+- name: SMALLMONEY character style 2
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS SMALLMONEY),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.5678'
+- name: SMALLMONEY character style 126
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS SMALLMONEY),126) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.5678'
+- name: SMALLMONEY character style 999
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS SMALLMONEY),999) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.57'
+- name: SMALLMONEY default character cast uses two places
+  sql: SELECT CAST(CAST(12.3456 AS SMALLMONEY) AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.35'
+- name: Currency text zero padding
+  sql: SELECT CONVERT(VARCHAR(40),CAST(0 AS MONEY),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '0.00'
+- name: Currency text rounded negative zero
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-0.0049 AS MONEY),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '0.00'
+- name: Currency text grouping carry
+  sql: SELECT CONVERT(VARCHAR(40),CAST(999.9950 AS MONEY),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1,000.00
+- name: Currency text negative grouping carry
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-999.9950 AS MONEY),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -1,000.00
+- name: Currency fixed national text pads after formatting
+  sql: SELECT CAST(CAST(12.3 AS MONEY) AS NCHAR(8)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.30   '
+- name: Currency VARCHAR width failure is explicit
+  sql: SELECT CAST(CAST(12.34 AS MONEY) AS VARCHAR(3)) AS value
+  expect:
+    error: true
+- name: Currency NVARCHAR width failure is explicit
+  sql: SELECT CAST(CAST(12.34 AS MONEY) AS NVARCHAR(3)) AS value
+  expect:
+    error: true
+- name: Currency CHAR width failure is explicit
+  sql: SELECT CAST(CAST(12.34 AS MONEY) AS CHAR(3)) AS value
+  expect:
+    error: true
+- name: Currency NCHAR width failure is explicit
+  sql: SELECT CAST(CAST(12.34 AS MONEY) AS NCHAR(3)) AS value
+  expect:
+    error: true
+- name: Currency NULL style remains NULL
+  sql: SELECT CONVERT(VARCHAR(40),CAST(12.3 AS MONEY),NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Float conversion still truncates toward zero
+  sql: SELECT CAST(CAST(-12.75 AS FLOAT) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12
+- name: Currency conversion rejects undeclared BINARY semantics
+  sql: SELECT CAST(CAST(0x3132 AS BINARY(2)) AS MONEY) AS value
+  expect:
+    error: true
+- name: Currency conversion rejects undeclared VARBINARY semantics
+  sql: SELECT CAST(CAST(0x3132 AS VARBINARY(2)) AS MONEY) AS value
+  expect:
+    error: true
+- name: Stored calendar factory keeps its pattern argument contract
+  scm: (begin (define info ((tsql_styled_text_compiler "%Y-%m-%d %H:%i:%s" "VARCHAR" (list 19)) (list (sql_info 1704164645 "DATETIME"
+    nil)))) (list (sql_info_type info) (eval (sql_info_formula info))))
+  expect:
+    result:
+    - VARCHAR
+    - '2024-01-02 03:04:05'
+- name: Remove previous currency declaration fixture
+  sql: DROP TABLE IF EXISTS money_contract_values
+- name: Prepare native currency columns
+  sql: CREATE TABLE money_contract_values (id INT PRIMARY KEY, amount MONEY, small_amount SMALLMONEY, omitted MONEY DEFAULT 1.23456)
+- name: Insert ordinary currency values through the shared sink
+  sql: INSERT INTO money_contract_values(id,amount,small_amount) VALUES (1,12.34565,-12.34565)
+- name: Declared currency assignments round before native insertion
+  sql: SELECT amount,small_amount,omitted FROM money_contract_values WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - amount: 12.3457
+      small_amount: -12.3457
+      omitted: 1.2346
+- name: Update ordinary currency values through the shared sink
+  sql: UPDATE money_contract_values SET amount=-2.55555,small_amount=2.55555 WHERE id=1
+- name: Declared currency update uses the same conversion
+  sql: SELECT amount,small_amount FROM money_contract_values WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - amount: -2.5556
+      small_amount: 2.5556
+- name: Currency column text uses its declared source contract
+  sql: SELECT CONVERT(VARCHAR(40),amount,2) AS value FROM money_contract_values WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: '-2.5556'
+- name: Empty currency result declares nullable wire types
+  scm: (map (tds_describe "memcp-tests" "SELECT TOP 0 amount,small_amount FROM money_contract_values" "" (newsession)) (lambda
+    (c) (list (c "kind") (c "size") (c "precision") (c "scale") (c "sql_type"))))
+  expect:
+    result:
+    - - 110
+      - 8
+      - 19
+      - 4
+      - MONEY
+    - - 110
+      - 4
+      - 10
+      - 4
+      - SMALLMONEY
+- name: MONEY wire input keeps implicit scale for positive
+  scm: (begin (define s (newsession)) (tds_bind_parameters s (list (list "p" (list "MONEY"))) (list (list "name" "p" "flags" 0
+    "type" (list "kind" 110 "size" 8 "scale" 0) "value" 123456))) (s "__tsql_parameter:p"))
+  expect:
+    result: 12.3456
+- name: MONEY wire input keeps implicit scale for negative
+  scm: (begin (define s (newsession)) (tds_bind_parameters s (list (list "p" (list "MONEY"))) (list (list "name" "p" "flags" 0
+    "type" (list "kind" 110 "size" 8 "scale" 0) "value" -123456))) (s "__tsql_parameter:p"))
+  expect:
+    result: -12.3456
+- name: MONEY wire input keeps implicit scale for NULL
+  scm: (begin (define s (newsession)) (tds_bind_parameters s (list (list "p" (list "MONEY"))) (list (list "name" "p" "flags" 0
+    "type" (list "kind" 110 "size" 8 "scale" 0) "value" nil))) (s "__tsql_parameter:p"))
+  expect:
+    result: null
+- name: SMALLMONEY wire input keeps implicit scale for positive
+  scm: (begin (define s (newsession)) (tds_bind_parameters s (list (list "p" (list "SMALLMONEY"))) (list (list "name" "p" "flags"
+    0 "type" (list "kind" 110 "size" 4 "scale" 0) "value" 123456))) (s "__tsql_parameter:p"))
+  expect:
+    result: 12.3456
+- name: SMALLMONEY wire input keeps implicit scale for negative
+  scm: (begin (define s (newsession)) (tds_bind_parameters s (list (list "p" (list "SMALLMONEY"))) (list (list "name" "p" "flags"
+    0 "type" (list "kind" 110 "size" 4 "scale" 0) "value" -123456))) (s "__tsql_parameter:p"))
+  expect:
+    result: -12.3456
+- name: SMALLMONEY wire input keeps implicit scale for NULL
+  scm: (begin (define s (newsession)) (tds_bind_parameters s (list (list "p" (list "SMALLMONEY"))) (list (list "name" "p" "flags"
+    0 "type" (list "kind" 110 "size" 4 "scale" 0) "value" nil))) (s "__tsql_parameter:p"))
+  expect:
+    result: null
+- name: Currency wire input rejects invalid byte width
+  scm: (tds_bind_parameters (newsession) (list (list "p" (list "MONEY"))) (list (list "name" "p" "flags" 0 "type" (list "kind"
+    110 "size" 5) "value" nil)))
+  expect:
+    error: true
+- name: Currency output emits an integer coefficient
+  scm: (list (tds_result_value (list "kind" 110 "size" 8) 12.3456) (tds_result_value (list "kind" 110 "size" 4) -12.3456) (tds_result_value
+    (list "kind" 110 "size" 8) nil))
+  expect:
+    result:
+    - 123456
+    - -123456
+    - null
+- name: Prepare styled currency view
+  sql: CREATE VIEW money_styled_contract AS SELECT CONVERT(NVARCHAR(40),amount,2) AS value FROM money_contract_values WHERE id=1
+- name: Stored currency conversion retains declared style
+  sql: SELECT value FROM money_styled_contract
+  expect:
+    rows: 1
+    data:
+    - value: '-2.5556'
+- name: Styled currency view preserves its declared text width
+  scm: (map (tds_describe "memcp-tests" "SELECT TOP 0 value FROM money_styled_contract" "" (newsession)) (lambda (c) (list (c "size")
+    (c "sql_type"))))
+  expect:
+    result:
+    - - 80
+      - NVARCHAR
+- name: Remove styled currency view
+  sql: DROP VIEW money_styled_contract
+- name: Prepare native national and currency defaults
+  sql: "CREATE TABLE money_native_defaults (id INT PRIMARY KEY, label NVARCHAR(8) DEFAULT N'Gr\xFC\xDFe', amount MONEY DEFAULT\
+    \ N'$12.34565')"
+- name: Omit columns through the ordinary native default path
+  sql: INSERT INTO money_native_defaults (id) VALUES (1)
+- name: National text and typed currency defaults share native insertion
+  sql: SELECT label,amount FROM money_native_defaults
+  expect:
+    rows: 1
+    data:
+    - label: "Gr\xFC\xDFe"
+      amount: 12.3457
+- name: Remove native default fixture
+  sql: DROP TABLE money_native_defaults
+- name: Remove native currency columns
+  sql: DROP TABLE money_contract_values
+
 cleanup: []
