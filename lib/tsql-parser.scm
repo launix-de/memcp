@@ -555,14 +555,16 @@ cancellation and unsupported operations are never successful NULL casts. */
 	(define numeric (sql_numeric_type? source))
 	(define text (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT") source))
 	(define absent (equal? source "NULL"))
+	(define binary_text (and (tsql_binary_type? source)
+		(or (has? '(1 2) style) (equal? style (quote sql_null_style)))))
 	(if (and (sql_numeric_type? type) (not (or numeric text absent)))
 		(error "conversion from " source " to " type " is not implemented") true)
 	(if (and (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type)
-		(not (or numeric text absent (tsql_temporal_type? source) (and (has? '(1 2 sql_null_style) style) (tsql_binary_type? source)))))
+		(not (or numeric text absent (tsql_temporal_type? source) binary_text)))
 		(error "conversion from " source " to " type " is not implemented") true)
 	(if (and (not (nil? style)) (not (equal? style 0)) (not (equal? style (quote sql_null_style)))
 		(has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type)
-		(not (or absent (tsql_temporal_type? source) (and (has? '(1 2 sql_null_style) style) (tsql_binary_type? source)))))
+		(not (or absent (tsql_temporal_type? source) binary_text)))
 		(error "styled text conversion requires a declared temporal input") true)
 	/* Feed the existing compiler a declared local, not an executable SQL type
 	wrapper. Only its expr slot enters the emitted invocation lambda. */
