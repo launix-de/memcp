@@ -728,9 +728,9 @@ than introducing another runtime datatype or precision-emulation layer. */
 would retain fractional clocks fail until a generic higher-precision carrier
 is available; accepting them here would silently lose the user's value. */
 (define tsql_calendar_cast_text (lambda (value) (if (nil? value) nil (begin
-	(if (and (regexp_test value "[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]*[1-9]")
-		(not (nil? (parse_date (regexp_replace (sql_trim value) "T" " ")))))
-		(error "fractional temporal conversion is not implemented") value)))))
+	(if (regexp_test value "[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]*[1-9]")
+		(if (nil? (tsql_calendar_text value)) value
+			(error "fractional temporal conversion is not implemented")) value)))))
 (define tsql_temporal_compiler (lambda (target style) (lambda (infos) (begin
 	(define input (car infos))
 	(define source (sql_info_type input))

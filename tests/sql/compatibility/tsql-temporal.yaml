@@ -1352,4 +1352,14 @@ test_cases:
       b: null
       c: null
       d: null
+- name: TRY clock-only TIME refuses unsupported fractional carriers
+  sql: SELECT TRY_CAST(N'12:13:14.123' AS TIME(3)) AS value
+  expect:
+    error: true
+    contains: fractional
+- name: TRY clock-only datetime refuses unsupported fractional carriers
+  sql: SELECT TRY_CAST(N'12:13:14.123' AS DATETIME2(3)) AS value
+  expect:
+    error: true
+    contains: fractional
 cleanup: []
