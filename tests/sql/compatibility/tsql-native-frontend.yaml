@@ -1362,11 +1362,22 @@ test_cases:
       (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v INT")
         (list (list "name" "v" "flags" 1 "type" (list "kind" 38 "size" 4) "value" 7)))
     expect: {error: true}
+  # Retain this historical regression identity for unsupported fractional input.
   - name: RPC temporal wire inputs remain explicit unsupported types
     scm: |
       (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v DATETIME2(7)")
-        (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "scale" 7) "value" nil)))
-    expect: {error: true}
+        (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "scale" 7)
+          "value" (list "days" 719162 "ticks" 1 "offset" 0))))
+    expect: {error: true, contains: fractional temporal parameter}
+  - name: RPC temporal NULL retains its declared contract
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME2(7)")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "scale" 7) "value" nil)))
+        (and (nil? (s "__tsql_parameter:v"))
+          (expression_equal? (s "__tsql_parameter_declarations") (list (list "v" (list "DATETIME2" 7))))))
+    expect: {result: true}
   - name: Pure prepare description retains types without parameter values
     scm: |
       (begin
