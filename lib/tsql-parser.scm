@@ -1291,6 +1291,8 @@ dimensions are metadata only and are absent from the executable plan. */
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
 	((symbol tsql_quotename) _value _delimiter) '(258)
 	((symbol tsql_parsename) _value _piece) '(128)
+	(cons (symbol sql_compile_expr) (cons ((symbol tsql_identifier_function_compiler) name) _arguments))
+	(if (equal? name "QUOTENAME") '(258) '(128))
 	((symbol sql_compile_expr) ((symbol tsql_try_conversion_compiler) type ((symbol quote) dimensions) _style _bounded) _value)
 	(tsql_decl_dimensions type (if (and (empty_list? dimensions)
 		(has? '("VARCHAR" "NVARCHAR" "CHAR" "NCHAR" "BINARY" "VARBINARY") type)) '(30) dimensions))
