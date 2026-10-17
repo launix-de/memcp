@@ -778,4 +778,42 @@ test_cases:
       (drop_sql_type_alias "memcp-tests" "ddl_İ" false nil)
       (equal? (declaration "name") "ddl_İ"))
   expect: {result: true}
+- name: Alias creation rejects an absent database context
+  scm: (create_sql_type_alias "" "ddl_absent_owner" "INT" '() true nil)
+  expect: {error: true, contains: "database does not exist"}
+- name: Rejected alias creation leaves no catalog entry
+  scm: (nil? (tsql_find_type_alias "" "ddl_absent_owner" nil))
+  expect: {result: true}
+- name: Conditional alias removal still requires an existing database
+  scm: (drop_sql_type_alias "" "ddl_absent_owner" true nil)
+  expect: {error: true, contains: "database does not exist"}
+- name: Transactional alias creation is rejected before publishing metadata
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (tx_begin session)
+      (define rejected (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "CREATE TYPE dbo.ddl_tx_creation FROM INT" session nil 0
+          (lambda (_row) true) (lambda args true))
+        false)) (lambda (failure) (strlike (concat failure) "%alias DDL inside explicit transactions%"))))
+      (tx_rollback session)
+      (and rejected (nil? (tsql_find_type_alias "memcp-tests" "ddl_tx_creation" nil))))
+  expect: {result: true}
+- name: Transactional alias removal preserves the committed declaration
+  scm: |
+    (begin
+      (create_sql_type_alias "memcp-tests" "ddl_tx_removal" "INT" '() true nil)
+      (define session (newsession))
+      (session "username" "root")
+      (tx_begin session)
+      (define rejected (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "DROP TYPE dbo.ddl_tx_removal" session nil 0
+          (lambda (_row) true) (lambda args true))
+        false)) (lambda (failure) (strlike (concat failure) "%alias DDL inside explicit transactions%"))))
+      (tx_rollback session)
+      (define retained (tsql_find_type_alias "memcp-tests" "ddl_tx_removal" nil))
+      (drop_sql_type_alias "memcp-tests" "ddl_tx_removal" false nil)
+      (and rejected (not (nil? retained))))
+  expect: {result: true}
 cleanup: []

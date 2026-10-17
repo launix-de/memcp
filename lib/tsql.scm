@@ -18,8 +18,15 @@ per database, preventing a DROP between dependency checking and publication.
 The stable scope retains gates, not requests, transactions or executable plans. */
 (define tsql_type_ddl_gates (newsession))
 (define tsql_type_ddl_scope (newsession))
-(define tsql_type_ddl (lambda (database tx operation)
-	((tsql_type_ddl_gates "get_or_compute_scoped" tsql_type_ddl_scope database (lambda () (mutex))) tx operation)))
+(define tsql_type_ddl (lambda (database tx operation) (begin
+	/* Catalog-row writes and native column publication do not yet share a
+	transactional DDL contract. Refuse transaction-local DDL before either one
+	changes, matching the frontend's source-procedure DDL restriction. */
+	(if (tx_requires_query_local_cache tx) (error "alias DDL inside explicit transactions is not supported") true)
+	/* Alias declarations require an existing database just like native DDL.
+	This catalog enumeration is DDL-only, never a planner or row-loop lookup. */
+	(if (nil? (show database)) (error "database does not exist: " database) true)
+	((tsql_type_ddl_gates "get_or_compute_scoped" tsql_type_ddl_scope database (lambda () (mutex))) tx operation))))
 (define tsql_qualified_type (lambda (database name)
 	(concat "[" (replace database "]" "]]") "].[dbo].[" (replace name "]" "]]") "]")))
 (define tsql_alias_name_parts (parser '(
