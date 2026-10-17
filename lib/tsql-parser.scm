@@ -298,15 +298,15 @@ fast path avoids splitting the ordinary short numeric/text conversions. */
 (define tsql_cast_text (lambda (value length national) (if (nil? value) nil (begin
 	(define text (string value))
 	(if (or (equal? length -1) (<= (strlen text) length)) text
+		national (utf16_prefix text length)
 		(cadr (reduce (split text "") (lambda (prefix character) (begin
-			(define units (if national (if (equal? (strlen character) 4) 2 1) (strlen character)))
+			(define units (strlen character))
 			(if (< (car prefix) units) (list 0 (cadr prefix))
 				(list (- (car prefix) units) (concat (cadr prefix) character)))))
 			(list length ""))))))))
 (define tsql_cast_fixed_text (lambda (value length national) (if (nil? value) nil (begin
 	(define text (tsql_cast_text value length national))
-	(define units (if national (reduce (split text "") (lambda (count character)
-		(+ count (if (equal? (strlen character) 4) 2 1))) 0) (strlen text)))
+	(define units (if national (utf16_length text) (strlen text)))
 	(concat text (string_repeat " " (- length units)))))))
 /* A cast keeps its syntax-declared SQL type until the shared expression
 compiler consumes the (expr, type, collation) contract. Runtime values do not
@@ -841,6 +841,45 @@ shared planning. Binary-string combinations need a verified alignment contract. 
 	(sql_info formula result_type nil)))))
 (define tsql_bit_expr (lambda (operation arguments)
 	(cons (quote sql_compile_expr) (cons (list (quote tsql_bit_compiler) operation) arguments))))
+/* Text construction is selected from declared SQL contracts. Runtime helpers
+only handle values; no SCM carrier selects a SQL type or character encoding. */
+(define tsql_character_type? (lambda (type)
+	(has? '("NULL" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type)))
+(define tsql_quote_name (lambda (value delimiter)
+	(if (or (nil? value) (nil? delimiter)) nil
+		/* At most three UTF8 bytes per UTF16 unit; refuse long inputs before decoding. */
+		(> (strlen value) 384) nil (> (utf16_length value) 128) nil
+		(begin
+			(define pair (match delimiter "'" '("'" "'") "\"" '("\"" "\"")
+				"[" '("[" "]") "]" '("[" "]") "(" '("(" ")") ")" '("(" ")")
+				"{" '("{" "}") "}" '("{" "}") "<" '("<" ">") ">" '("<" ">")
+				"`" '("`" "`") _ nil))
+			(if (nil? pair) nil
+				(concat (car pair) (replace value (cadr pair) (concat (cadr pair) (cadr pair))) (cadr pair)))))))
+(define tsql_compile_quotename (lambda (infos) (begin
+	(define converted (map infos (lambda (info) (begin
+		(define type (sql_info_type info))
+		/* Integral arguments have the ordinary implicit character contract.
+		Fractional, temporal and binary formatting need their complete declarations. */
+		(if (tsql_character_type? type) (sql_info_formula info)
+			(has? '("TINYINT" "SMALLINT" "INT" "INTEGER" "BIGINT") type)
+			(sql_type_formula '() (tsql_cast_expr
+				(list (quote sql_type_expr) (sql_info_formula info) type (sql_info_collation info)) "NVARCHAR" '(-1)))
+			(error "text construction input conversion is not implemented for " type))))))
+	/* Do not convert to sysname width here: overlong source must return NULL,
+	not become an apparently valid truncated identifier. */
+	(sql_info (cons (quote tsql_quote_name) converted) "NVARCHAR" (sql_info_collation (car infos))))))
+(define tsql_space (lambda (amount)
+	(if (or (nil? amount) (< amount 0)) nil (string_repeat " " (min amount 8000)))))
+(define tsql_compile_space (lambda (infos) (begin
+	(define info (car infos))
+	(define type (sql_info_type info))
+	(if (or (tsql_character_type? type)
+		(has? '("TINYINT" "SMALLINT" "INT" "INTEGER" "BIGINT" "DECIMAL" "NUMERIC" "FLOAT" "REAL") type)) true
+		(error "space count conversion is not implemented for " type))
+	(define amount (sql_type_formula '() (tsql_cast_expr
+		(list (quote sql_type_expr) (sql_info_formula info) type (sql_info_collation info)) "INT" '())))
+	(sql_info (list (quote tsql_space) amount) "VARCHAR" '("utf8mb4_general_ci" 4)))))
 (define tsql_positive_expr (lambda (value)
 	(list (quote sql_compile_expr) (quote tsql_compile_positive) value)))
 (define tsql_compile_negate (lambda (infos) (begin
@@ -1211,7 +1250,11 @@ The shared expression compiler still owns the SQL type; these additional wire
 dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
+	(cons (symbol sql_compile_expr) _arguments)
+	(tsql_result_dimensions sources (sql_type_formula sources expression) parameters)
 	((symbol tsql_cast_decimal) _value precision scale) (list precision scale)
+	((symbol tsql_quote_name) _value _delimiter) '(258)
+	((symbol tsql_space) _amount) '(8000)
 	((symbol tsql_read_identity) _state) '(38 0)
 	((symbol tsql_cast_binary) _value length _fixed) (list length)
 	((symbol tsql_cast_text) _value length _national) (list length)
@@ -1500,6 +1543,12 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '((define operation (or (parser (atom "LEFT_SHIFT" true) "left")
 			(parser (atom "RIGHT_SHIFT" true) "right"))) "(" (define value tsql_expression)
 			"," (define amount tsql_expression) ")") (tsql_bit_expr operation (list value amount)))
+		(parser '((atom "QUOTENAME" true) "(" (define value tsql_expression)
+			(? "," (define delimiter tsql_expression)) ")")
+			(list (quote sql_compile_expr) (quote tsql_compile_quotename) value
+				(coalesceNil delimiter (list (quote sql_type_expr) "[" "NVARCHAR" nil))))
+		(parser '((atom "SPACE" true) "(" (define amount tsql_expression) ")")
+			(list (quote sql_compile_expr) (quote tsql_compile_space) amount))
 		(parser '((atom "CAST" true) "(" (define value tsql_expression) (atom "AS" true)
 			(define type tsql_declared_type) (define dimensions tsql_type_dimensions) ")")
 			(tsql_cast_expr value type dimensions))

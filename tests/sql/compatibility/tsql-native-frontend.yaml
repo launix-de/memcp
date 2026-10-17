@@ -3035,6 +3035,492 @@ test_cases:
           - complemented: 36
             missing: null
 
+  - name: Text construction QUOTENAME default brackets
+    sql: SELECT QUOTENAME(N'part]tail') AS value
+    expect:
+      rows: 1
+      data:
+      - value: '[part]]tail]'
+  - name: Text construction QUOTENAME empty identifier
+    sql: SELECT QUOTENAME(N'') AS value
+    expect:
+      rows: 1
+      data:
+      - value: '[]'
+  - name: Text construction QUOTENAME left bracket
+    sql: SELECT QUOTENAME(N'a[b]c',N'[') AS value
+    expect:
+      rows: 1
+      data:
+      - value: '[a[b]]c]'
+  - name: Text construction QUOTENAME right bracket
+    sql: SELECT QUOTENAME(N'a[b]c',N']') AS value
+    expect:
+      rows: 1
+      data:
+      - value: '[a[b]]c]'
+  - name: Text construction QUOTENAME single quote
+    sql: SELECT QUOTENAME(N'a''b',N'''') AS value
+    expect:
+      rows: 1
+      data:
+      - value: '''a''''b'''
+  - name: Text construction QUOTENAME double quote
+    sql: SELECT QUOTENAME(N'a"b',N'"') AS value
+    expect:
+      rows: 1
+      data:
+      - value: '"a""b"'
+  - name: Text construction QUOTENAME left parenthesis
+    sql: SELECT QUOTENAME(N'a(b)c',N'(') AS value
+    expect:
+      rows: 1
+      data:
+      - value: (a(b))c)
+  - name: Text construction QUOTENAME right parenthesis
+    sql: SELECT QUOTENAME(N'a(b)c',N')') AS value
+    expect:
+      rows: 1
+      data:
+      - value: (a(b))c)
+  - name: Text construction QUOTENAME left brace
+    sql: SELECT QUOTENAME(N'a{b}c',N'{') AS value
+    expect:
+      rows: 1
+      data:
+      - value: '{a{b}}c}'
+  - name: Text construction QUOTENAME right brace
+    sql: SELECT QUOTENAME(N'a{b}c',N'}') AS value
+    expect:
+      rows: 1
+      data:
+      - value: '{a{b}}c}'
+  - name: Text construction QUOTENAME left angle
+    sql: SELECT QUOTENAME(N'a<b>c',N'<') AS value
+    expect:
+      rows: 1
+      data:
+      - value: <a<b>>c>
+  - name: Text construction QUOTENAME right angle
+    sql: SELECT QUOTENAME(N'a<b>c',N'>') AS value
+    expect:
+      rows: 1
+      data:
+      - value: <a<b>>c>
+  - name: Text construction QUOTENAME backtick
+    sql: SELECT QUOTENAME(N'a`b',N'`') AS value
+    expect:
+      rows: 1
+      data:
+      - value: '`a``b`'
+  - name: Text construction QUOTENAME invalid delimiter
+    sql: SELECT QUOTENAME(N'x',N'x') AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction QUOTENAME empty delimiter
+    sql: SELECT QUOTENAME(N'x',N'') AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction QUOTENAME several delimiters
+    sql: SELECT QUOTENAME(N'x',N'[]') AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction QUOTENAME NULL input
+    sql: SELECT QUOTENAME(CAST(NULL AS NVARCHAR(40))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction QUOTENAME NULL delimiter
+    sql: SELECT QUOTENAME(N'x',CAST(NULL AS NCHAR(1))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction QUOTENAME 128 ASCII
+    sql: SELECT QUOTENAME(N'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+      AS value
+    expect:
+      rows: 1
+      data:
+      - value: '[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]'
+  - name: Text construction QUOTENAME 129 ASCII
+    sql: SELECT QUOTENAME(N'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+      AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction QUOTENAME 128 BMP
+    sql: SELECT QUOTENAME(N'雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪')
+      AS value
+    expect:
+      rows: 1
+      data:
+      - value: '[雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪]'
+  - name: Text construction QUOTENAME 129 BMP
+    sql: SELECT QUOTENAME(N'雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪雪')
+      AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction QUOTENAME 64 supplementary
+    sql: SELECT QUOTENAME(N'😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀') AS value
+    expect:
+      rows: 1
+      data:
+      - value: '[😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀]'
+  - name: Text construction QUOTENAME 65 supplementary
+    sql: SELECT QUOTENAME(N'😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀') AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction QUOTENAME maximal escape expansion
+    sql: SELECT QUOTENAME(N']]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]')
+      AS value
+    expect:
+      rows: 1
+      data:
+      - value: '[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]'
+  - name: Text construction SPACE normal
+    sql: SELECT SPACE(3) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '   '
+  - name: Text construction SPACE zero
+    sql: SELECT SPACE(0) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Text construction SPACE negative
+    sql: SELECT SPACE(-1) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction SPACE NULL
+    sql: SELECT SPACE(CAST(NULL AS INT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction SPACE maximum INT count is bounded
+    scm: |-
+      (begin
+        (define output (newsession))
+        (define caller (newsession))
+        (caller "username" "root")
+        (with_autocommit caller nil nil "text construction scalar" (lambda (tx)
+          (tsql_execute_statement tx "memcp-tests" "SELECT SPACE(CAST(2147483647 AS INT)) AS value" caller
+            (lambda (row) (output "value" (row "value"))) (lambda fields true))))
+        (equal? (output "value") (string_repeat " " 8000)))
+    expect:
+      result: true
+  - name: Text construction SPACE fractional count uses the existing integer cast
+    sql: SELECT SPACE(CAST(2.9 AS FLOAT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '  '
+  - name: Text construction QUOTENAME empty metadata is NVARCHAR258
+    scm: |-
+      (begin
+        (define field (car (tds_describe "memcp-tests" "SELECT QUOTENAME(CAST(NULL AS NVARCHAR(10))) AS value WHERE 1=0" "" (newsession))))
+        (and (equal? (field "sql_type") "NVARCHAR") (equal? (field "kind") 231) (equal? (field "size") 516)))
+    expect:
+      result: true
+  - name: Text construction SPACE empty metadata remains VARCHAR
+    scm: |-
+      (begin
+        (define field (car (tds_describe "memcp-tests" "SELECT SPACE(CAST(NULL AS BIGINT)) AS value WHERE 1=0" "" (newsession))))
+        (and (equal? (field "sql_type") "VARCHAR") (equal? (field "size") 8000)))
+    expect:
+      result: true
+  - name: Text construction QUOTENAME compiler retains input collation
+    scm: |-
+      (begin
+        (define info ((sql_expression_compiler (quote tsql_compile_quotename))
+          (list (sql_info "Mixed]Name" "NVARCHAR" '("utf8mb4_bin" 0)) (sql_info "[" "NVARCHAR" nil))))
+        (and (equal? (sql_info_type info) "NVARCHAR") (equal? (sql_info_collation info) '("utf8mb4_bin" 0))))
+    expect:
+      result: true
+  - name: Text construction native source fixture
+    setup:
+    - sql: DROP VIEW IF EXISTS text_construct_view
+    - sql: DROP TABLE IF EXISTS text_construct_input
+    sql: CREATE TABLE text_construct_input(id INT PRIMARY KEY,label NVARCHAR(50),amount INT)
+    expect:
+      rows: 0
+  - name: Text construction populate native input
+    sql: INSERT text_construct_input VALUES(1,N'a]雪',3),(2,NULL,NULL)
+    expect:
+      affected_rows: 2
+  - name: Text construction native column values and typed nulls
+    sql: SELECT id,QUOTENAME(label) AS quoted,SPACE(amount) AS padded FROM text_construct_input ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        quoted: '[a]]雪]'
+        padded: '   '
+      - id: 2
+        quoted: null
+        padded: null
+  - name: Text construction create portable view
+    sql: CREATE VIEW text_construct_view AS SELECT id,QUOTENAME(label) AS quoted,SPACE(amount) AS padded FROM text_construct_input
+    expect:
+      affected_rows: 1
+  - name: Text construction stored view uses ordinary native input
+    sql: SELECT quoted,padded FROM text_construct_view WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - quoted: '[a]]雪]'
+        padded: '   '
+  - name: Text construction durable view restart
+    action: restart
+    expect:
+      success: true
+  - name: Text construction restored view retains data and compilation
+    sql: SELECT quoted,padded FROM text_construct_view WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - quoted: '[a]]雪]'
+        padded: '   '
+  - name: Text construction restore retains empty result metadata
+    scm: |-
+      (equal? (map (tds_describe "memcp-tests" "SELECT quoted,padded FROM text_construct_view WHERE 1=0" "" (newsession))
+        (lambda (field) (list (field "sql_type") (field "size")))) (list (list "NVARCHAR" 516) (list "VARCHAR" 8000)))
+    expect:
+      result: true
+  - name: Text construction remove portable view fixture
+    sql: DROP VIEW text_construct_view
+    expect:
+      affected_rows: 1
+  - name: Text construction remove native input fixture
+    sql: DROP TABLE text_construct_input
+    expect:
+      rows: 0
+  - name: Text construction real TDS quotes a Unicode RPC parameter
+    tds:
+      statements:
+      - sql: SELECT QUOTENAME(@name) AS quoted,SPACE(CAST(3 AS INT)) AS padded
+        parameters:
+        - name: name
+          value: a]雪
+        expect:
+          rows: 1
+          columns:
+          - quoted
+          - padded
+          data:
+          - quoted: '[a]]雪]'
+            padded: '   '
+  - name: Text construction real TDS returns typed NULL and empty columns
+    tds:
+      statements:
+      - sql: SELECT QUOTENAME(CAST(NULL AS NVARCHAR(20))) AS quoted,SPACE(CAST(NULL AS INT)) AS padded
+        expect:
+          rows: 1
+          columns:
+          - quoted
+          - padded
+          data:
+          - quoted: null
+            padded: null
+      - sql: SELECT QUOTENAME(CAST(NULL AS NVARCHAR(20))) AS quoted,SPACE(CAST(NULL AS INT)) AS padded WHERE 1=0
+        expect:
+          rows: 0
+          columns:
+          - quoted
+          - padded
+  - name: Text construction QUOTENAME implicit integer
+    sql: SELECT QUOTENAME(123) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '[123]'
+  - name: Text construction QUOTENAME implicit signed integer
+    sql: SELECT QUOTENAME(CAST(-219 AS SMALLINT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '[-219]'
+  - name: Text construction QUOTENAME implicit exact large integer
+    sql: SELECT QUOTENAME(CAST(9223372036854775807 AS BIGINT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '[9223372036854775807]'
+  - name: Text construction QUOTENAME typed numeric NULL
+    sql: SELECT QUOTENAME(CAST(NULL AS INT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction QUOTENAME invalid numeric delimiter converts to text
+    sql: SELECT QUOTENAME(N'x',123) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction SPACE implicit numeric text
+    sql: SELECT SPACE(N'3') AS value
+    expect:
+      rows: 1
+      data:
+      - value: '   '
+  - name: Text construction SPACE decimal count truncates
+    sql: SELECT SPACE(CAST(3.9 AS DECIMAL(8,1))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '   '
+  - name: Text construction SPACE negative fractional count converts before sign rule
+    sql: SELECT SPACE(CAST(-0.9 AS FLOAT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Text construction SPACE nullable text converts before execution
+    sql: SELECT SPACE(CAST(NULL AS NVARCHAR(20))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction SPACE invalid integer text still errors
+    sql: SELECT SPACE(N'bad') AS value
+    expect:
+      error: true
+      contains: invalid integer text
+  - name: Text construction QUOTENAME binary conversion remains explicit unsupported
+    sql: SELECT QUOTENAME(0x1234) AS value
+    expect:
+      error: true
+      contains: text construction input conversion is not implemented
+  - name: Text construction SPACE binary conversion remains explicit unsupported
+    sql: SELECT SPACE(0x1234) AS value
+    expect:
+      error: true
+      contains: space count conversion is not implemented
+
+  - name: Text construction national cast NVARCHAR avoids a partial leading supplementary
+      scalar
+    sql: SELECT CAST(N'😀x' AS NVARCHAR(1)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Text construction national cast NVARCHAR preserves a complete supplementary
+      scalar
+    sql: SELECT CAST(N'😀x' AS NVARCHAR(2)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 😀
+  - name: Text construction national cast NVARCHAR preserves a BMP prefix before a partial
+      pair
+    sql: SELECT CAST(N'a😀z' AS NVARCHAR(2)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: a
+  - name: Text construction national cast NVARCHAR keeps a complete pair after a BMP
+      prefix
+    sql: SELECT CAST(N'a😀z' AS NVARCHAR(3)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: a😀
+  - name: Text construction national cast NVARCHAR counts combining marks independently
+    sql: SELECT CAST(N'éx' AS NVARCHAR(1)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: e
+  - name: Text construction national cast NVARCHAR keeps a complete combining sequence
+    sql: SELECT CAST(N'éx' AS NVARCHAR(2)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: é
+  - name: Text construction national cast NVARCHAR MAX retains supplementary text
+    sql: SELECT CAST(N'a😀z' AS NVARCHAR(MAX)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: a😀z
+  - name: Text construction national cast NCHAR pads after refusing a partial leading
+      pair
+    sql: SELECT CAST(N'😀x' AS NCHAR(1)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ' '
+  - name: Text construction national cast NCHAR pads according to UTF16 units
+    sql: SELECT CAST(N'😀' AS NCHAR(3)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '😀 '
+  - name: Text construction national cast NCHAR pads BMP text by units rather than bytes
+    sql: SELECT CAST(N'雪' AS NCHAR(2)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '雪 '
+  - name: Text construction national cast NCHAR pads a combining sequence
+    sql: SELECT CAST(N'é' AS NCHAR(3)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 'é '
+  - name: Text construction national cast NVARCHAR retains a declared nullable input
+    sql: SELECT CAST(CAST(NULL AS NVARCHAR(20)) AS NVARCHAR(1)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction national cast NCHAR retains a declared nullable input
+    sql: SELECT CAST(CAST(NULL AS NVARCHAR(20)) AS NCHAR(3)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Text construction national casts apply to native nullable columns
+    setup:
+    - sql: DROP TABLE IF EXISTS text_national_cast
+    - sql: CREATE TABLE text_national_cast(id INT, label NVARCHAR(20))
+    - sql: INSERT INTO text_national_cast VALUES (1,N'a😀z'),(2,N'éx'),(3,NULL)
+    sql: SELECT id, CAST(label AS NVARCHAR(2)) AS short_value, CAST(label AS NCHAR(3))
+      AS fixed_value FROM text_national_cast ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        short_value: a
+        fixed_value: a😀
+      - id: 2
+        short_value: é
+        fixed_value: éx
+      - id: 3
+        short_value: null
+        fixed_value: null
+    cleanup:
+    - sql: DROP TABLE text_national_cast
+
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
   - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion

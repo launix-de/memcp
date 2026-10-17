@@ -1351,4 +1351,19 @@ test_cases:
   expect:
     result: true
 
+- name: Text construction dynamic SQL consumes a quoted identifier
+  sql: DECLARE @label NVARCHAR(258)=QUOTENAME(N'field]tag'); EXEC(N'SELECT 19 AS '+@label)
+  expect:
+    rows: 1
+    data:
+    - field]tag: 19
+- name: Text construction quoted literal keeps statement punctuation as data
+  sql: DECLARE @literal NVARCHAR(258)=QUOTENAME(N'x''; SELECT 999 AS extra;--',N''''); EXEC(N'SELECT '+@literal+N'
+    AS value')
+  expect:
+    rows: 1
+    data:
+    - value: x'; SELECT 999 AS extra;--
+
+
 cleanup: []
