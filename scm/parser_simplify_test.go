@@ -55,6 +55,66 @@ func TestSimplifyStillParsesNumbers(t *testing.T) {
 	}
 }
 
+func TestSimplifyIntegerLiterals(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  int64
+	}{
+		{"0", 0}, {"-0", 0}, {"+0", 0},
+		{"1", 1}, {"-1", -1}, {"+12", 12},
+		{"00012", 12}, {"-00012", -12},
+		{"9007199254740993", 9007199254740993},
+		{"-9007199254740993", -9007199254740993},
+		{"9223372036854775807", math.MaxInt64},
+		{"-9223372036854775808", math.MinInt64},
+	} {
+		t.Run(test.input, func(t *testing.T) {
+			value := Simplify(test.input)
+			if !value.IsInt() || value.Int() != test.want {
+				t.Fatalf("Simplify(%q) = %v (tag %d), want integer %d", test.input, value, value.GetTag(), test.want)
+			}
+		})
+	}
+}
+
+func TestSimplifyFloatLiteralForms(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  float64
+	}{
+		{"1.0", 1}, {"1.", 1}, {".25", .25}, {"12.5", 12.5},
+		{"1e2", 100}, {"1E-2", .01}, {"0x1p4", 16},
+		{"-0.0", math.Copysign(0, -1)}, {"-0e0", math.Copysign(0, -1)},
+		{"9223372036854775808", 9223372036854775808.0},
+		{"-9223372036854775809", -9223372036854775809.0},
+		{"NaN", math.NaN()}, {"Inf", math.Inf(1)}, {"-Inf", math.Inf(-1)},
+	} {
+		t.Run(test.input, func(t *testing.T) {
+			value := Simplify(test.input)
+			if !value.IsFloat() {
+				t.Fatalf("Simplify(%q) tag = %d, want float", test.input, value.GetTag())
+			}
+			got := value.Float()
+			if math.IsNaN(test.want) {
+				if !math.IsNaN(got) {
+					t.Fatalf("Simplify(%q) = %v, want NaN", test.input, got)
+				}
+			} else if got != test.want || math.Signbit(got) != math.Signbit(test.want) {
+				t.Fatalf("Simplify(%q) = %v, want %v with the same sign", test.input, got, test.want)
+			}
+		})
+	}
+}
+
+func TestSimplifyLeavesOtherTextUnchanged(t *testing.T) {
+	for _, input := range []string{"", "text", "+", "-", "1e", "0x10", " 12", "12 ", "1,2", "１２"} {
+		value := Simplify(input)
+		if !value.IsString() || value.String() != input {
+			t.Fatalf("Simplify(%q) = %v (tag %d), want unchanged text", input, value, value.GetTag())
+		}
+	}
+}
+
 func TestReadIntegerLiterals(t *testing.T) {
 	for _, test := range []struct {
 		input string

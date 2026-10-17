@@ -55,6 +55,10 @@ func Simplify(s string) Scmer {
 			return value
 		}
 	}
+	// Preserve decimal integers before the floating-point fallback loses bits.
+	if integer, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return NewInt(integer)
+	}
 	if f, err := strconv.ParseFloat(s, 64); err == nil {
 		return NewFloat(f)
 	}
