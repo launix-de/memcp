@@ -978,7 +978,7 @@ test_cases:
     - COLUMN_NAME: label
       TYPE_NAME: nvarchar
       PRECISION: 17
-# Compiled callback restoration for persisted view IR comes from the identifier-resolution block.
+# Persisted view IR still loses lexical bindings of frontend compiler callbacks.
 - name: Computed view metadata does not evaluate failing expressions
   noncritical: true
   sql: EXEC sp_columns @table_name=N'view_catalog_computed'
@@ -993,7 +993,7 @@ test_cases:
       PRECISION: 11
       LENGTH: 22
     - COLUMN_NAME: never_evaluate
-# Compiled callback restoration for persisted view IR comes from the identifier-resolution block.
+# Persisted view IR still loses lexical bindings of frontend compiler callbacks.
 - name: Outer view projections conservatively retain nullable provenance
   noncritical: true
   sql: EXEC sp_columns @table_name=N'view_catalog_outer'
