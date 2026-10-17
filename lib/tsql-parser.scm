@@ -287,6 +287,46 @@ runtime and storage hot paths; do not substitute float64 for exact casts. */
 	(define bytes (if (or (equal? length -1) (<= (strlen value) length)) value (substr value 0 length)))
 	(if (and fixed (< (strlen bytes) length))
 		(concat bytes (string_repeat (hex2bin "00") (- length (strlen bytes)))) bytes)))))
+/* Integer binary contracts use at most sixteen hexadecimal digits. The SQL
+compiler supplies widths; no runtime value tag chooses a conversion rule.
+Complementing the nonnegative magnitude avoids negating the int64 minimum. */
+(define tsql_integer_width (lambda (type) (match type
+	"TINYINT" 1 "SMALLINT" 2 "INT" 4 "INTEGER" 4 "BIGINT" 8 _ nil)))
+(define tsql_integer_hex (lambda (value digits negative)
+	(if (equal? digits 0) "" (concat
+		(tsql_integer_hex (intdiv value 16) (- digits 1) negative)
+		(substr "0123456789abcdef" (if negative (- 15 (mod value 16)) (mod value 16)) 1)))))
+(define tsql_integer_to_binary (lambda (value width length fixed) (if (nil? value) nil (begin
+	(define negative (< value 0))
+	(define magnitude (if negative (- 0 (+ value 1)) value))
+	(define bytes (hex2bin (tsql_integer_hex magnitude (* 2 width) negative)))
+	(define kept (if (or (equal? length -1) (>= length width)) bytes
+		(substr bytes (- width length) length)))
+	(if (and fixed (> length width))
+		(concat (string_repeat (hex2bin "00") (- length width)) kept) kept)))))
+(define tsql_hex_digit_integer (lambda (digit) (match digit
+	"0" 0 "1" 1 "2" 2 "3" 3 "4" 4 "5" 5 "6" 6 "7" 7
+	"8" 8 "9" 9 "a" 10 "b" 11 "c" 12 "d" 13 "e" 14 "f" 15
+	_ (error "invalid binary hexadecimal digit"))))
+(define tsql_binary_to_integer (lambda (value width signed) (if (nil? value) nil (begin
+	/* Oversized inputs need a separately verified source-kind truncation contract.
+	Do not silently guess which bytes the original dialect would discard. */
+	(define count (strlen value))
+	(if (> count width) (error "overwide binary integer conversion is not implemented") true)
+	(define hex (bin2hex value))
+	/* Seed the sign in the first nibble, before multiplication can overflow.
+	Short inputs are zero extended; a full signed width uses two's complement. */
+	(reduce_range (strlen hex) (lambda (acc index) (begin
+		(define digit (tsql_hex_digit_integer (substr hex index 1)))
+		(if (and signed (equal? count width) (equal? index 0) (>= digit 8))
+			(- digit 16) (+ (* acc 16) digit)))) 0)))))
+(define tsql_integer_compiler (lambda (type minimum maximum) (lambda (infos) (begin
+	(define input (car infos))
+	(sql_info (if (tsql_binary_type? (sql_info_type input))
+		(list (quote tsql_binary_to_integer) (sql_info_formula input) (tsql_integer_width type) (< minimum 0))
+		(list (quote tsql_cast_integer) (sql_info_formula input) minimum maximum)) type nil)))))
+(define tsql_cast_integer_expr (lambda (value type minimum maximum)
+	(list (quote sql_compile_expr) (list (quote tsql_integer_compiler) type minimum maximum) value)))
 (define tsql_cast_bit (lambda (value)
 	(if (nil? value) nil
 		(if (and (string? value) (equal? (toUpper (sql_trim value)) "TRUE")) true
@@ -316,11 +356,11 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 	(define name (toUpper type))
 	(tsql_decl_dimensions name dimensions)
 	(define formula (match name
-		"INT" (list (quote tsql_cast_integer) value -2147483648 2147483647)
-		"INTEGER" (list (quote tsql_cast_integer) value -2147483648 2147483647)
-		"SMALLINT" (list (quote tsql_cast_integer) value -32768 32767)
-		"TINYINT" (list (quote tsql_cast_integer) value 0 255)
-		"BIGINT" (list (quote tsql_cast_integer) value (tsql_parse_integer "-9223372036854775808") (tsql_parse_integer "9223372036854775807"))
+		"INT" (tsql_cast_integer_expr value name -2147483648 2147483647)
+		"INTEGER" (tsql_cast_integer_expr value name -2147483648 2147483647)
+		"SMALLINT" (tsql_cast_integer_expr value name -32768 32767)
+		"TINYINT" (tsql_cast_integer_expr value name 0 255)
+		"BIGINT" (tsql_cast_integer_expr value name (tsql_parse_integer "-9223372036854775808") (tsql_parse_integer "9223372036854775807"))
 		"FLOAT" (list (quote tsql_cast_float) value)
 		/* Approximate types use native floating precision. Binary32 rounding and
 		dialect precision boundaries remain noncritical compatibility work. */
@@ -353,11 +393,14 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 	(list (quote sql_compile_expr) (list (quote tsql_decimal_compiler) type (list (quote quote) dims)) value))))
 (define tsql_binary_compiler (lambda (length fixed) (lambda (infos) (begin
 	(define input (car infos))
-	/* Text requires its declared encoding, and numeric values have another
-	padding direction. Refuse those shapes rather than guess from strings. */
-	(if (or (tsql_binary_type? (sql_info_type input)) (has? '("NULL" "any") (sql_info_type input))) true
+	(define width (tsql_integer_width (sql_info_type input)))
+	/* Text requires its declared encoding; other numeric contracts retain their
+	explicit unsupported result, independently of the SCM value representation. */
+	(if (or width (tsql_binary_type? (sql_info_type input)) (has? '("NULL" "any") (sql_info_type input))) true
 		(error "binary conversion from " (sql_info_type input) " is not implemented"))
-	(sql_info (list (quote tsql_cast_binary) (sql_info_formula input) length fixed)
+	(sql_info (if width
+		(list (quote tsql_integer_to_binary) (sql_info_formula input) width length fixed)
+		(list (quote tsql_cast_binary) (sql_info_formula input) length fixed))
 		(if fixed "BINARY" "VARBINARY") nil)))))
 (define tsql_cast_binary_expr (lambda (value dimensions fixed) (begin
 	(define length (car (tsql_decl_dimensions (if fixed "BINARY" "VARBINARY")
@@ -1163,6 +1206,7 @@ dimensions are metadata only and are absent from the executable plan. */
 	((symbol tsql_cast_decimal) _value precision scale) (list precision scale)
 	((symbol tsql_read_identity) _state) '(38 0)
 	((symbol tsql_cast_binary) _value length _fixed) (list length)
+	((symbol tsql_integer_to_binary) _value _width length _fixed) (list length)
 	((symbol tsql_cast_text) _value length _national) (list length)
 	((symbol tsql_cast_fixed_text) _value length _national) (list length)
 	((symbol hex2bin) hex) (if (string? hex) (list (intdiv (strlen hex) 2)) nil)
