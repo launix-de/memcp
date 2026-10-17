@@ -634,13 +634,16 @@ test_cases:
     data:
     - n: 2
 - name: TSQL INSERT VALUES resolves omitted target columns
-  sql: INSERT dbo.tsql_copy VALUES (10,N'implicit values')
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_implicit_columns
+  - sql: CREATE TABLE tsql_implicit_columns(id INT PRIMARY KEY,name NVARCHAR(MAX))
+  sql: INSERT dbo.tsql_implicit_columns VALUES (10,N'implicit values')
   expect:
     affected_rows: 1
 - name: TSQL INSERT SELECT resolves omitted target columns
-  sql: INSERT dbo.tsql_copy SELECT id+10,name FROM dbo.tsql_data WHERE id=1
+  sql: INSERT dbo.tsql_implicit_columns SELECT id+10,name FROM dbo.tsql_data WHERE id=1
 - name: Implicit target columns preserve names and values
-  sql: SELECT id,name FROM dbo.tsql_copy WHERE id>=10 ORDER BY id
+  sql: SELECT id,name FROM dbo.tsql_implicit_columns WHERE id>=10 ORDER BY id
   expect:
     rows: 2
     data:
@@ -649,9 +652,54 @@ test_cases:
     - id: 11
       name: Alice
 - name: Implicit target columns still enforce value arity
-  sql: INSERT dbo.tsql_copy VALUES (12)
+  sql: INSERT dbo.tsql_implicit_columns VALUES (12)
   expect:
     error: true
+  cleanup:
+  - sql: DROP TABLE tsql_implicit_columns
+- name: Omitted identity target columns leave allocation to the native sink
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_implicit_identity
+  - sql: CREATE TABLE tsql_implicit_identity(id INT IDENTITY(30,1) PRIMARY KEY,value INT,label NVARCHAR(20))
+  sql: INSERT tsql_implicit_identity VALUES(7,N'first')
+  expect: {affected_rows: 1}
+- name: Omitted identity target columns also bind SELECT outputs
+  sql: INSERT tsql_implicit_identity SELECT 8,N'second'
+  expect: {affected_rows: 1}
+- name: Omitted identity VALUES and SELECT preserve native consecutive IDs
+  sql: SELECT id,value,label FROM tsql_implicit_identity ORDER BY id
+  expect: {rows: 2,data: [{id: 30,value: 7,label: first},{id: 31,value: 8,label: second}]}
+- name: Omitted target columns cannot supply an explicit identity value
+  sql: INSERT tsql_implicit_identity VALUES(100,9,N'not written')
+  expect: {error: true,contains: ['column count']}
+- name: Omitted SELECT columns cannot supply an explicit identity value
+  sql: INSERT tsql_implicit_identity SELECT 100,9,N'not written'
+  expect: {error: true}
+- name: Nullable ordinary columns still participate in the implicit arity contract
+  sql: INSERT tsql_implicit_identity VALUES(9)
+  expect: {error: true,contains: ['column count']}
+- name: Rejected implicit identity input reserves no native ID block
+  sql: INSERT tsql_implicit_identity VALUES(9,N'third')
+  expect: {affected_rows: 1}
+- name: Rejected implicit rows leave stored values and allocator unchanged
+  sql: SELECT id,value,label FROM tsql_implicit_identity WHERE id>=32 ORDER BY id
+  expect: {rows: 1,data: [{id: 32,value: 9,label: third}]}
+  cleanup:
+  - sql: DROP TABLE tsql_implicit_identity
+- name: Implicit target binding skips a version declaration
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_implicit_version
+  - sql: CREATE TABLE tsql_implicit_version(id INT IDENTITY PRIMARY KEY,value INT,version TIMESTAMP)
+  sql: INSERT tsql_implicit_version VALUES(7)
+  expect: {affected_rows: 1}
+- name: Version declarations do not shift ordinary positional inputs
+  sql: SELECT id,value FROM tsql_implicit_version
+  expect: {rows: 1,data: [{id: 1,value: 7}]}
+- name: Implicit inputs cannot supply an identity and version payload positionally
+  sql: INSERT tsql_implicit_version VALUES(99,7,0x0102030405060708)
+  expect: {error: true,contains: ['column count']}
+  cleanup:
+  - sql: DROP TABLE tsql_implicit_version
 - name: Describe empty SELECT preserves declared integer metadata
   scm: "(begin\n  (define s (newsession))\n  (s \"username\" \"root\")\n  (define fields (tds_describe \"memcp-tests\"\
     \ \"SELECT TOP (0) id FROM dbo.tsql_data\" \"\" s))\n  (if (and (equal? (count fields) 1) (equal? ((car fields)\

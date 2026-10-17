@@ -411,6 +411,15 @@ recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. 
 				(list (quote tsql_column_description) database name (declaration "Field") false)
 				(list (quote quote) (tsql_declaration_contract declaration))) planning_session)
 		declaration)))))
+/* An omitted target list supplies only writable ordinary columns. Generated
+identity/version declarations are frontend policy; their native storage and
+allocation stay unchanged. Other dialects keep their own implicit-list rules. */
+(define tsql_insert_target_columns (lambda (database name)
+	(map (filter (get_schema database name) (lambda (column)
+		(and (not (internal_column_name? (column "Field")))
+			(not (equal? (column "Extra") "auto_increment"))
+			(not (equal?? (column "RawType") "ROWVERSION")))))
+		(lambda (column) (column "Field")))))
 (define tsql_insert_declarations (lambda (database table_name columns planning_session) (begin	/* Resolve each target exactly once. Duplicate targets can overwrite an
 	already validated identity/default value in the native column vector. */
 	(if (equal? (count columns) (count (merge_unique (list (map columns toLower)))))
@@ -2059,7 +2068,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
 			(define declarations (tsql_insert_declarations database tbl
-				(coalesce columns (table_insertable_columns database tbl)) planning_session))
+				(coalesce columns (tsql_insert_target_columns database tbl)) planning_session))
 			(define columns (map declarations (lambda (column) (column "Field"))))
 			(if (reduce rows (lambda (valid row) (and valid (equal? (count row) (count columns)))) true)
 				true (error "INSERT column count does not match value count"))
@@ -2094,7 +2103,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 	) (lambda () (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
-			(tsql_insert_select_plan database tbl (coalesce columns (table_insertable_columns database tbl))
+			(tsql_insert_select_plan database tbl (coalesce columns (tsql_insert_target_columns database tbl))
 				(tsql_insert_limit_query query limit))
 	))))
 	/* Only UNIQUE declarations publish native keys. Ordinary acceleration
