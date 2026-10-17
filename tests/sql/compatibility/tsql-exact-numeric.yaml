@@ -1055,9 +1055,9 @@ test_cases:
     result: true
 - name: ROUND executable formulas contain no compiletime type wrappers
   scm: "(begin\n  (define formula (sql_type_formula '() (tsql_builtin_expr \"ROUND\"\n    (list (tsql_cast_expr 125 \"BIGINT\"\
-    \ '()) -1))))\n  (if (and (not (contains? (expression_syntax formula) \"sql_type_expr\"))\n    (not (contains? (expression_syntax\
-    \ formula) \"sql_compile_expr\"))\n    (equal? (eval formula) 130)) true\n    (error \"ROUND leaked annotations into executable\
-    \ arithmetic\")))"
+    \ '()) -1))))\n  (if (and (not (regexp_test (string formula) \"sql_type_expr|sql_compile_expr\"))\n    (expression_equal? (cadr\
+    \ (car formula))\n      (list (quote round_value) (quote round_length) (quote round_function)))\n    (equal? (eval formula)\
+    \ 130)) true\n    (error \"ROUND lost its parameters or leaked annotations into executable arithmetic\")))\n"
   expect:
     result: true
 - name: ROUND portable view binds ordinary projected integer declarations

@@ -1550,7 +1550,7 @@ Dynamic lengths only index this table; constant lengths become plan literals. */
 					(if (equal? type "BIGINT") tsql_round_int64_maximum 2147483647))
 				(list (if monetary (quote tsql_round_money) (quote tsql_round_real))
 					(quote round_value) (quote round_length) (quote round_function) factor)))
-			(sql_info (list (list (quote lambda) '(round_value round_length round_function) body)
+			(sql_info (list (list (quote lambda) (list (quote round_value) (quote round_length) (quote round_function)) body)
 				(sql_info_formula input) (sql_info_formula places) (sql_info_formula mode))
 				(if integer (if (equal? type "BIGINT") "BIGINT" "INT") monetary "MONEY" "FLOAT") nil))))))
 
