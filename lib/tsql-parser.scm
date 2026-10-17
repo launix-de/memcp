@@ -1461,8 +1461,97 @@ compiling; the emitted row callback contains no SQL type tags or dispatch. */
 	(define info (car infos))
 	(sql_info (sql_info_formula info) (sql_info_type info) (list name 0))))))
 
+/* ROUND owns SQL length, truncation and return-width rules at this frontend
+compile boundary. Integer inputs never pass through floating-point scaling.
+The existing DECIMAL(p,s) cases still need the full declaration contract. */
+(define tsql_round_int64_minimum (tsql_parse_integer "-9223372036854775808"))
+(define tsql_round_int64_maximum (tsql_parse_integer "9223372036854775807"))
+(define tsql_round_integer_powers '(1 10 100 1000 10000 100000 1000000 10000000 100000000
+	1000000000 10000000000 100000000000 1000000000000 10000000000000 100000000000000
+	1000000000000000 10000000000000000 100000000000000000 1000000000000000000))
+(define tsql_round_integer_factor (lambda (places)
+	(if (or (nil? places) (>= places 0) (<= places -19)) nil
+		(nth tsql_round_integer_powers (- 0 places)))))
+(define tsql_round_integer (lambda (value places mode factor minimum maximum)
+	(if (or (nil? value) (nil? places) (nil? mode)) nil
+		(>= places 0) value
+		(< places -19) 0
+		(equal? places -19) (if (or (not (equal? mode 0))
+			(and (> value -5000000000000000000) (< value 5000000000000000000))) 0
+			(tsql_raise_error 8115 "integer rounding overflow" 1))
+		(begin
+			(define quotient (intdiv value factor))
+			(define remainder (mod value factor))
+			(define half (intdiv factor 2))
+			(define rounded (+ quotient (if (not (equal? mode 0)) 0
+				(>= remainder half) 1 (<= remainder (- 0 half)) -1 0)))
+			/* Check the rounded quotient before multiplication, including MIN. */
+			(if (or (< rounded (intdiv minimum factor)) (> rounded (intdiv maximum factor)))
+				(tsql_raise_error 8115 "integer rounding overflow" 1) (* rounded factor))))))
+(define tsql_round_real_factor (lambda (places)
+	(if (or (nil? places) (< places -308) (> places 323)) nil
+		(simplify (concat "1e" (- 0 places))))))
+(define tsql_round_real (lambda (value places mode factor)
+	(if (or (nil? value) (nil? places) (nil? mode)) nil
+		(> places 323) value
+		(< places -308) 0
+		(equal? value 0) 0
+		/* Finer-than-representation rounding must not overflow while scaling. */
+		(and (< factor 1) (or (> value (* tsql_float_max factor))
+			(< value (- 0 (* tsql_float_max factor))))) value
+		(begin
+			(define scaled (/ value factor))
+			(define rounded (if (equal? mode 0) (round scaled)
+				(< scaled 0) (ceil scaled) (floor scaled)))
+			(define result (* rounded factor))
+			(if (and (>= result (- 0 tsql_float_max)) (<= result tsql_float_max)) result
+				(tsql_raise_error 8115 "floating rounding overflow" 1))))))
+(define tsql_round_money (lambda (value places mode factor)
+	(if (or (nil? value) (nil? places) (nil? mode)) nil
+		(begin
+			(define coefficient (tsql_money_coefficient value false))
+			(define rounded (tsql_round_integer coefficient (- places 4) mode factor
+				tsql_round_int64_minimum tsql_round_int64_maximum))
+			(tsql_cast_money (/ rounded 10000) false)))))
+(define tsql_compile_round (lambda (infos) (begin
+	(if (or (equal? (count infos) 2) (equal? (count infos) 3)) true
+		(error "ROUND requires value, length and optional function"))
+	(define input (car infos))
+	(define type (tsql_addition_type (sql_info_type input)))
+	/* Preserve the existing limited decimal path until precision and scale
+	are carried by the common compile-time declaration contract. */
+	(if (equal? type "DECIMAL") (sql_call_info (sql_builtins "ROUND") infos)
+		(begin
+			(define integer (has? '("NULL" "TINYINT" "SMALLINT" "INT" "BIGINT") type))
+			(define monetary (has? '("MONEY" "SMALLMONEY") type))
+			(if (or integer monetary (has? '("FLOAT" "REAL") type)) true
+				(error "ROUND requires a supported declared numeric input"))
+			(define places (tsql_convert_value_info (cadr infos) "INT" nil))
+			(define mode (if (equal? (count infos) 3)
+				(tsql_convert_value_info (nth infos 2) "INT" nil) (sql_info 0 "INT" nil)))
+			(define folded (try (lambda () (list true (tryfold (sql_info_formula places))))
+				(lambda (_cause) (list false nil))))
+			(define known (car folded))
+			(define length (if known (cadr folded) (quote round_length)))
+			(define adjusted_length (if monetary (if known (if (nil? length) nil (- length 4))
+				(list (quote -) length 4)) length))
+			(define factor_helper (if (or integer monetary) (quote tsql_round_integer_factor) (quote tsql_round_real_factor)))
+			(define factor (if known
+				(if (or integer monetary) (tsql_round_integer_factor adjusted_length) (tsql_round_real_factor adjusted_length))
+				(list factor_helper adjusted_length)))
+			(define body (if integer
+				(list (quote tsql_round_integer) (quote round_value) (quote round_length) (quote round_function) factor
+					(if (equal? type "BIGINT") tsql_round_int64_minimum -2147483648)
+					(if (equal? type "BIGINT") tsql_round_int64_maximum 2147483647))
+				(list (if monetary (quote tsql_round_money) (quote tsql_round_real))
+					(quote round_value) (quote round_length) (quote round_function) factor)))
+			(sql_info (list (list (quote lambda) '(round_value round_length round_function) body)
+				(sql_info_formula input) (sql_info_formula places) (sql_info_formula mode))
+				(if integer (if (equal? type "BIGINT") "BIGINT" "INT") monetary "MONEY" "FLOAT") nil))))))
+
 (define tsql_builtin_compiler (lambda (name) (lambda (infos)
-	(sql_call_info (coalesce (tsql_builtins name) (error "unknown function " name)) infos))))
+	(if (equal? name "ROUND") (tsql_compile_round infos)
+		(sql_call_info (coalesce (tsql_builtins name) (error "unknown function " name)) infos)))))
 
 (define tsql_builtin_expr (lambda (name arguments) (begin
 	(if (tsql_builtins name) true (error "unknown function " name))
