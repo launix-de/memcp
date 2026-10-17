@@ -368,3 +368,37 @@ func TestCallbackDescriptionsDoNotRepeatStructuredSignatures(t *testing.T) {
 		inspect(name, declaration.Type)
 	}
 }
+
+func TestValidateNullableCallbackContracts(t *testing.T) {
+	old := declarations
+	declarations = make(map[string]*Declaration, len(old)+1)
+	for name, declaration := range old {
+		declarations[name] = declaration
+	}
+	defer func() { declarations = old }()
+	declarations["nullable_callback_test"] = &Declaration{
+		Name: "nullable_callback_test",
+		Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{
+			{Kind: "func|nil", Params: []*TypeDescriptor{{Kind: "string"}}, Return: &TypeDescriptor{Kind: "bool"}},
+		}, Return: &TypeDescriptor{Kind: "bool"}},
+	}
+	for _, tc := range []struct{ source, failure string }{
+		{"(nullable_callback_test (lambda (line) true))", ""},
+		{"(nullable_callback_test nil)", ""},
+		{"(nullable_callback_test (lambda (line missing) true))", "callback provides at most 1 arguments"},
+		{"(nullable_callback_test (lambda (line) 42))", "callback should return bool"},
+	} {
+		t.Run(tc.source, func(t *testing.T) {
+			defer func() {
+				failure := recover()
+				if tc.failure == "" && failure != nil {
+					t.Fatalf("unexpected validation error: %v", failure)
+				}
+				if tc.failure != "" && (failure == nil || !strings.Contains(fmt.Sprint(failure), tc.failure)) {
+					t.Errorf("failure = %v, want %q", failure, tc.failure)
+				}
+			}()
+			Validate(Read("nullable callback contract", tc.source), "bool")
+		})
+	}
+}

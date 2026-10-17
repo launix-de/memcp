@@ -357,4 +357,8 @@ test_cases:
 - name: Text input fixture cleanup
   syntax: tsql
   sql: DROP TABLE dbo.tsdump_text_input
+- name: Nullable load handler retains compile-time arity checks
+  scm: (load (streamString "x") (lambda (line missing) true) nil "bom")
+  expect:
+    error: true
 cleanup: []
