@@ -1,4 +1,5 @@
 # Copyright (C) 2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Protocol-level SPARQL 1.1 Query Results JSON coverage for SPA clients.
 
@@ -92,6 +93,20 @@ test_cases:
     sparql: |
       SELECT ?number WHERE {
         BIND(7.0 AS ?number)
+      }
+    expect:
+      rows: 1
+      content_type: "application/sparql-results+json"
+      result_contains:
+        - '"datatype":"http://www.w3.org/2001/XMLSchema#decimal"'
+        - '"value":"7"'
+
+  - name: "Explicit decimal lexical integer preserves its declared result datatype"
+    headers:
+      Accept: "application/sparql-results+json"
+    sparql: |
+      SELECT ?number WHERE {
+        BIND("7"^^<http://www.w3.org/2001/XMLSchema#decimal> AS ?number)
       }
     expect:
       rows: 1

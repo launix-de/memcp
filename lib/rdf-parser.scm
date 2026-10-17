@@ -51,7 +51,9 @@ consumer stage. */
 	(if (regexp_test datatype "(?:#|:)integer$")
 		(json_decode_scmer value)
 		(if (regexp_test datatype "(?:#|:)(?:decimal|double|float)$")
-			(simplify value)
+			/* The declaration selects the existing floating carrier. Normalize only
+			potential int64 lexemes; larger/invalid inputs retain their old fallback. */
+			(simplify (if (regexp_test value "^[+-]?0*[0-9]{1,19}$") (concat value ".0") value))
 			(if (regexp_test datatype "(?:#|:)boolean$")
 				(equal? (toLower value) "true")
 				value)))
