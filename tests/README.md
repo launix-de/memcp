@@ -246,6 +246,13 @@ additional discarded warmups. Normal tenant hierarchy checks use one complete
 5000-row period of the sparse keys; performance runs retain the full 800k source
 tables, and the normal query, row assertions and time limits remain unchanged.
 
+Calibrate relative shard weights from complete A/B process costs, including
+preparation and snapshot clones. For suites observed entering verification,
+reserve all fourteen processes; use the larger ordinary/JIT estimate because
+both configurations share the same weights. These are observed-cost estimates,
+not a guarantee that every future regression fits the shard deadline. Preserve
+the full suite list and measurement protocol when rebalancing.
+
 Suites with identical top-level preparation inputs share one import. Snapshots
 are temporary and deleted on success or failure; they are not committed,
 uploaded, or placed in GitHub caches. Import, mutation and storage-construction

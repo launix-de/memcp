@@ -19,7 +19,7 @@
 # delivery-note serialization.
 
 metadata:
-  performance_shard_weight: 4
+  performance_shard_weight: 26
   version: "1.0"
   description: "Complete nested JSON/BSON serialization without pagination"
   isolated: true
