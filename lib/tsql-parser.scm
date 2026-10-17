@@ -1565,8 +1565,44 @@ Dynamic lengths only index this table; constant lengths become plan literals. */
 				(sql_info_formula input) (sql_info_formula places) (sql_info_formula mode))
 				(if integer (if (equal? type "BIGINT") "BIGINT" "INT") monetary "MONEY" "FLOAT") nil))))))
 
+/* Integer ABS keeps native precision and checks the declared result range.
+Other scalar return families are selected by the frontend compiler below. */
+(define tsql_integer_absolute (lambda (value minimum)
+	(if (nil? value) nil (equal? value minimum)
+		(tsql_raise_error 8115 "integer absolute overflow" 1)
+		(< value 0) (- 0 value) value)))
+(define tsql_compile_numeric_scalar (lambda (name infos) (begin
+	(if (equal? (count infos) 1) true (error name " requires one argument"))
+	(define input (car infos))
+	(define type (tsql_addition_type (sql_info_type input)))
+	/* DECIMAL result precision and scale require the pending declaration
+	contract. Preserve that existing path without claiming its completion. */
+	(if (equal? type "DECIMAL") (sql_call_info (sql_builtins name) infos)
+		(begin
+			(define integer (has? '("NULL" "TINYINT" "SMALLINT" "INT" "BIGINT") type))
+			(define money (has? '("MONEY" "SMALLMONEY") type))
+			(define floating (or (has? '("FLOAT" "REAL" "BIT") type)
+				(has? tsql_addition_text_types type)))
+			(if (or integer money floating) true
+				(error name " requires a declared numeric input"))
+			(define value (sql_info_formula (if floating
+				(tsql_convert_value_info input "FLOAT" nil) input)))
+			/* MATCH evaluates the operand once and protects generic floor/ceil
+			from NULL. SQL types never depend on the resulting value carrier. */
+			(define formula (if integer
+				(if (equal? name "ABS") (list (quote tsql_integer_absolute) value
+					(if (equal? type "BIGINT") (tsql_parse_integer "-9223372036854775808") -2147483648)) value)
+				(list (quote match) value (quote nil) nil (quote scalar_value)
+					(if (equal? name "ABS")
+						(list (quote if) (list (quote <) (quote scalar_value) 0)
+							(list (quote -) 0 (quote scalar_value)) (quote scalar_value))
+						(list (if (equal? name "FLOOR") (quote floor) (quote ceil)) (quote scalar_value))))))
+			(sql_info (if money (list (quote tsql_cast_money) formula false) formula)
+				(if integer (if (equal? type "BIGINT") "BIGINT" "INT") money "MONEY" "FLOAT") nil))))))
+
 (define tsql_builtin_compiler (lambda (name) (lambda (infos)
 	(if (equal? name "ROUND") (tsql_compile_round infos)
+		(has? '("ABS" "FLOOR" "CEILING") name) (tsql_compile_numeric_scalar name infos)
 		(sql_call_info (coalesce (tsql_builtins name) (error "unknown function " name)) infos)))))
 
 (define tsql_builtin_expr (lambda (name arguments) (begin
