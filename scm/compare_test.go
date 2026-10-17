@@ -17,7 +17,158 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package scm
 
 import "math"
+import "unsafe"
+import "strings"
 import "testing"
+
+func strictIdentityCases() []struct {
+	name string
+	a, b Scmer
+	want bool
+} {
+	a, b := new(int64), new(int64)
+	first := NewCustom(120, unsafe.Pointer(a))
+	text := NewString(strings.Clone("same text"))
+	items := NewSlice([]Scmer{NewInt(1)})
+	nan := NewFloat(math.Float64frombits(0x7ff8000000000001))
+	return []struct {
+		name string
+		a, b Scmer
+		want bool
+	}{
+		{"same custom pointer", first, first, true},
+		{"different custom pointers", first, NewCustom(120, unsafe.Pointer(b)), false},
+		{"different custom tags", first, NewCustom(121, unsafe.Pointer(a)), false},
+		{"zero custom payload", first, NewCustomID(120, unsafe.Pointer(a), 0), true},
+		{"same custom payload", NewCustomID(120, unsafe.Pointer(a), 7), NewCustomID(120, unsafe.Pointer(a), 7), true},
+		{"different custom payload", NewCustomID(120, unsafe.Pointer(a), 7), NewCustomID(120, unsafe.Pointer(a), 8), false},
+		{"integer", NewInt(1), NewInt(1), true},
+		{"integer and float", NewInt(1), NewFloat(1), false},
+		{"different float zero bits", NewFloat(0), NewFloat(math.Copysign(0, -1)), false},
+		{"same NaN bits", nan, nan, true},
+		{"different NaN bits", nan, NewFloat(math.Float64frombits(0x7ff8000000000002)), false},
+		{"nil", NewNil(), NewNil(), true},
+		{"nil and false", NewNil(), NewBool(false), false},
+		{"same text backing", text, text, true},
+		{"equal distinct text", text, NewString(strings.Clone("same text")), false},
+		{"same list backing", items, items, true},
+		{"equal distinct lists", items, NewSlice([]Scmer{NewInt(1)}), false},
+	}
+}
+
+func TestStrictValueIdentity(t *testing.T) {
+	declaration := declarations["identical?"]
+	if declaration == nil {
+		t.Fatal("identical? is not declared")
+	}
+	for _, tc := range strictIdentityCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			got := declaration.Fn(tc.a, tc.b)
+			if !got.IsBool() || got.Bool() != tc.want {
+				t.Fatalf("identity = %v, want %v", got.Bool(), tc.want)
+			}
+		})
+	}
+	if !Equal(NewInt(1), NewFloat(1)) || !Equal(NewNil(), NewBool(false)) {
+		t.Fatal("ordinary value equality changed")
+	}
+}
+
+func TestStrictValueIdentityIsNotFoldable(t *testing.T) {
+	declaration := declarations["identical?"]
+	if declaration == nil || declaration.IsFoldable() {
+		t.Fatal("identity must be declared without constant folding")
+	}
+	for _, source := range []string{"(identical? 1 1)", "(identical? '(1) '(1))"} {
+		if optimized := Optimize(Read(t.Name(), source), &Globalenv, nil); optimized.WithoutSourceInfo().IsBool() {
+			t.Fatalf("identity comparison folded to a reconstructed literal: %s", source)
+		}
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("tryfold accepted reference identity: %s", source)
+				}
+			}()
+			TryFold(Read(t.Name(), source), &Globalenv)
+		}()
+	}
+}
+
+func TestStrictValueIdentityArity(t *testing.T) {
+	for _, source := range []string{"(identical?)", "(identical? 1)", "(identical? 1 1 1)"} {
+		t.Run(source, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("invalid argument count accepted")
+				}
+			}()
+			Validate(Read(t.Name(), source), "bool")
+		})
+	}
+}
+
+func TestJITStrictValueIdentity(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, "(lambda (a b) (identical? a b))")
+	for _, tc := range strictIdentityCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Apply(compiled, tc.a, tc.b)
+			if !got.IsBool() || got.Bool() != tc.want {
+				t.Fatalf("native identity = %v, want %v", got.Bool(), tc.want)
+			}
+		})
+	}
+	requireNoDynamicJITCalls(t, compiled)
+	t.Logf("opaque argument call coverage: %+v", compiled.Proc().Compiled.Coverage)
+
+}
+
+func TestJITStrictValueIdentityGeneratedCustom(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires native JIT execution")
+	}
+	const name = "jit_test_strict_custom_identity"
+	original := declarations["identical?"]
+	inlined := false
+	declaration := &Declaration{Name: name,
+		Fn: func(args ...Scmer) Scmer { return original.Fn(args...) },
+		Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"},
+			JITEmit: func(ctx *JITContext, source []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				// Only this fixture promises custom-tag inputs. Production admission
+				// remains unchanged; the tested emitter is the generated declaration.
+				for i := range args {
+					args[i].Type = 120
+				}
+				before := ctx.Coverage.InlinedCalls
+				out := original.Type.JITEmit(ctx, source, args, result)
+				inlined = ctx.Coverage.InlinedCalls > before
+				return out
+			}},
+	}
+	titles := declaration_titles
+	Declare(&Globalenv, declaration)
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
+		declaration_titles = titles
+	}()
+	compiled := compileJITExpressionTestProc(t, "(lambda (a b) (jit_test_strict_custom_identity a b))")
+	if !inlined {
+		t.Fatal("custom inputs did not exercise the generated comparison body")
+	}
+	for _, tc := range strictIdentityCases() {
+		if !tc.a.IsCustom(120) || !tc.b.IsCustom(120) {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Apply(compiled, tc.a, tc.b); !got.IsBool() || got.Bool() != tc.want {
+				t.Fatalf("generated identity = %v, want %v", got.Bool(), tc.want)
+			}
+		})
+	}
+	requireNoDynamicJITCalls(t, compiled)
+	t.Logf("generated custom call coverage: %+v", compiled.Proc().Compiled.Coverage)
+}
 
 func TestLessInt64Exact(t *testing.T) {
 	values := []int64{-1 << 63, -1<<63 + 1, -9007199254740993, -9007199254740992, -1, 0, 1, 9007199254740992, 9007199254740993, 1<<63 - 2, 1<<63 - 1}
