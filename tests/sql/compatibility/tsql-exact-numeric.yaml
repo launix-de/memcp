@@ -585,28 +585,24 @@ test_cases:
     rows: 1
     data:
     - value: -13
-  noncritical: true
 - name: Money default character style
   sql: SELECT CAST(CAST(12.3456 AS MONEY) AS VARCHAR(40)) AS value
   expect:
     rows: 1
     data:
     - value: '12.35'
-  noncritical: true
 - name: Money comma character style
   sql: SELECT CONVERT(VARCHAR(40),CAST(-1234567.1234 AS MONEY),1) AS value
   expect:
     rows: 1
     data:
     - value: -1,234,567.12
-  noncritical: true
 - name: Small money ROUND promotes
   sql: SELECT CONVERT(VARCHAR(40),ROUND(CAST(12.3456 AS SMALLMONEY),2),2) AS value
   expect:
     rows: 1
     data:
     - value: '12.3500'
-  noncritical: true
 - name: Float arithmetic precedence
   sql: SELECT CAST(0.1+CAST(0.2 AS FLOAT) AS DECIMAL(5,2)) AS value
   expect:
