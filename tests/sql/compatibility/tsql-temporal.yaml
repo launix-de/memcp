@@ -1728,4 +1728,32 @@ test_cases:
     data:
     - value: '12'
 
+- name: Legacy style roundtrip retains single digit day and hour
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,CONVERT(VARCHAR(30),CAST(N'2026-03-05 13:02:00' AS DATETIME),100),100),120)
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-05 13:02:00'
+- name: Legacy default input shares canonical month parser
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'Mar 5 2026 1:02PM',0),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-05 13:02:00'
+- name: Legacy month parser rejects nonexistent leap day
+  sql: SELECT CONVERT(DATETIME,N'Feb 29 2026 12:00AM',100) AS value
+  expect:
+    error: true
+- name: Legacy month parser rejects nonexistent thirty first day
+  sql: SELECT CONVERT(DATETIME,N'Apr 31 2026 12:00AM',100) AS value
+  expect:
+    error: true
+- name: Legacy month parser retains a real leap day
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'Feb 29 2024 12:00AM',100),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2024-02-29 00:00:00'
+
 cleanup: []
