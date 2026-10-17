@@ -101,7 +101,8 @@ jobs:
           # The reviewed runner measures old then new on independent
           # fixtures. Only suspect timings get fixed old/new verification pairs,
           # after the complete initial pass; original samples stay included.
-          (cd candidate && env \
+          cd candidate
+          exec env \
             PERF_BASELINE_FILE="$baseline" \
             PERF_BASELINE_SEED="$seed" \
             PERF_REPEAT=1000 \
@@ -109,7 +110,7 @@ jobs:
             PERF_AB_JITTER_MS=50 \
             PERF_SETUP_MAX_TIME_SEC=120 \
             PERF_REGRESSION_WAIVERS_FILE="$GITHUB_WORKSPACE/perf-regression-waivers.txt" \
-            python3 -u "$runner" --perf-ab "$GITHUB_WORKSPACE/base" "$GITHUB_WORKSPACE/candidate")
+            python3 -u "$runner" --perf-ab "$GITHUB_WORKSPACE/base" "$GITHUB_WORKSPACE/candidate"
 
       - name: Upload measured base
         if: always()

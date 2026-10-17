@@ -3379,6 +3379,55 @@ def performance_shard_paths(paths: List[Path]) -> List[Path]:
     return sorted(shards[index])
 
 
+def run_performance_process(command, **kwargs):
+    """Own one disposable fixture's whole process group until it has stopped.
+
+    Workflow cancellation must reach this owner directly. Signals during Popen
+    are deferred until its process has been assigned, so even that spawn window
+    cannot leak a child. Normal completion also retires stray descendants before
+    another fixture or diagnostic may start. This owns no caller's server.
+    """
+    process = None
+    pending_signal = None
+    cleaning_up = False
+
+    def interrupted(signum, _frame):
+        nonlocal pending_signal
+        pending_signal = signum
+        if process is not None and not cleaning_up:
+            raise SystemExit(128 + signum)
+
+    signals = (signal.SIGINT, signal.SIGTERM)
+    previous = {signum: signal.getsignal(signum) for signum in signals}
+    try:
+        for signum in signals:
+            signal.signal(signum, interrupted)
+        process = subprocess.Popen(command, start_new_session=True, **kwargs)
+        if pending_signal is not None:
+            raise SystemExit(128 + pending_signal)
+        # Observe exit without reaping: the leader must retain its PID/group
+        # identity until killpg retires the whole private group, even if this
+        # owner is paused for an arbitrary time between observation and cleanup.
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+    finally:
+        # Cleanup itself must finish even if cancellation escalates. These are
+        # private temporary A/B stores, so abort never needs to publish a store.
+        cleaning_up = True
+        try:
+            if process is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=5)
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+    if pending_signal is not None:
+        raise SystemExit(128 + pending_signal)
+    return subprocess.CompletedProcess(command, process.returncode)
+
+
 def validate_reusable_fixture(spec: Dict[str, Any]) -> None:
     metadata = spec.get("metadata", {})
     if metadata.get("reuse_fixture") is not True or metadata.get("restart_after_setup") is not True:
@@ -3436,7 +3485,7 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
         raise ValueError("trusted performance seed cases are missing from both roles")
     all_suite_paths = suite_paths
     suite_paths = performance_shard_paths(suite_paths)
-    manifest = {"schema_version": 1, "runner_sha256": hashlib.sha256(runner.read_bytes()).hexdigest(),
+    manifest = {"schema_version": 1, "completed": False, "runner_sha256": hashlib.sha256(runner.read_bytes()).hexdigest(),
                 "seed_sha256": hashlib.sha256(seed.read_bytes()).hexdigest(),
                 "binaries": {role: {"path": str(tree / "memcp"),
                     "sha256": hashlib.sha256((tree / "memcp").read_bytes()).hexdigest(),
@@ -3486,7 +3535,7 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
         started = time.monotonic()
         log_path = artifacts / (name + ".log")
         with log_path.open("w") as log:
-            result = subprocess.run([sys.executable, "-u", str(runner), str(suite),
+            result = run_performance_process([sys.executable, "-u", str(runner), str(suite),
                                      "--log-times", "--fail-fast"],
                                     cwd=candidate, env=env, stdout=log, stderr=subprocess.STDOUT)
         print(log_path.read_text(), end="", flush=True)
@@ -3536,7 +3585,7 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
             print(f"PERF_FIXTURE {name}: {tree}", flush=True)
             measured_started = time.monotonic()
             with log_path.open("w") as log:
-                result = subprocess.run(command, cwd=candidate, env=env, stdout=log, stderr=subprocess.STDOUT)
+                result = run_performance_process(command, cwd=candidate, env=env, stdout=log, stderr=subprocess.STDOUT)
             save_event({"stage": "process", "suite": str(suite), "role": role,
                         "elapsed_ms": (time.monotonic() - measured_started) * 1000})
             print(log_path.read_text(), end="", flush=True)
@@ -3643,6 +3692,9 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
             enforce_recovered_query_budgets(suite, trials, summary)
             classify_identical_execution(summary)
             report(summary)
+        # Publish completion only after every owned fixture has stopped.
+        manifest["completed"] = True
+        (artifacts / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         return all(value["passed"] for key, value in complete.items() if key != "schema_version")
 
 

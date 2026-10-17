@@ -2048,7 +2048,7 @@ class PerformanceFixtureContractTests(unittest.TestCase):
         with mock.patch("run_sql_tests.PERF_BASELINE_FILE", str(self.output)), \
                 mock.patch("run_sql_tests.PERF_BASELINE_SEED", str(self.seed)), \
                 mock.patch("run_sql_tests.PERF_AB_JITTER_MS", 50), \
-                mock.patch("run_sql_tests.subprocess.run", side_effect=self.subprocess), \
+                mock.patch("run_sql_tests.run_performance_process", side_effect=self.subprocess), \
                 redirect_stdout(io.StringIO()):
             return run_performance_ab(self.base, self.candidate, self.suites)
 
@@ -2473,6 +2473,20 @@ class PerformanceFixtureContractTests(unittest.TestCase):
 
 
 
+    def test_completion_is_published_for_a_complete_regression(self):
+        self.durations = lambda suite, role, index: 100 if role == "A" else 200
+        self.assertFalse(self.run_experiment())
+        manifest = json.loads(self.output.with_suffix(".trials").joinpath("manifest.json").read_text())
+        self.assertIs(manifest["completed"], True)
+
+    def test_fixture_error_cannot_publish_completion(self):
+        self.exit_code = 1
+        with self.assertRaises(RuntimeError):
+            self.run_experiment()
+        manifest = json.loads(self.output.with_suffix(".trials").joinpath("manifest.json").read_text())
+        self.assertIs(manifest["completed"], False)
+
+
 class ColdWarmTotalContractTests(unittest.TestCase):
     def test_total_keeps_the_cold_request(self):
         self.assertEqual(performance_measurement_ns([100] + [2] * 10, "total"), 120)
@@ -2720,6 +2734,81 @@ sys.exit(result.returncode)
         )
         self.assertEqual(result.returncode, 7)
 
+    def test_group_leader_remains_waitable_until_group_is_retired(self):
+        import run_sql_tests as runner
+        original_killpg = os.killpg
+        leader = []
+
+        def retire(pid, signum):
+            leader.append(pid)
+            status = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+            self.assertIsNotNone(status, "leader must exit before group retirement")
+            self.assertEqual(status.si_pid, pid)
+            self.assertEqual(status.si_status, 7)
+            self.assertEqual(Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1].split()[0], "Z")
+            original_killpg(pid, signum)
+
+        with mock.patch.object(runner.os, "killpg", side_effect=retire):
+            result = runner.run_performance_process(
+                [sys.executable, "-c", "raise SystemExit(7)"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(len(leader), 1)
+        with self.assertRaises(ChildProcessError):
+            os.waitid(os.P_PID, leader[0], os.WEXITED | os.WNOWAIT | os.WNOHANG)
+
+    def test_group_retirement_precedes_the_only_reaping_wait(self):
+        import run_sql_tests as runner
+        events = []
+        process = mock.Mock(pid=12345)
+
+        def reap(**kwargs):
+            events.append("reap")
+            process.returncode = 7
+            return 7
+
+        process.wait.side_effect = reap
+        with mock.patch.object(runner.subprocess, "Popen", return_value=process), \
+                mock.patch.object(runner.os, "waitid", side_effect=lambda *_: events.append("observe")) as observe, \
+                mock.patch.object(runner.os, "killpg", side_effect=lambda *_: events.append("retire")):
+            result = runner.run_performance_process(["fixture"])
+        self.assertEqual(events, ["observe", "retire", "reap"])
+        observe.assert_called_once_with(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+        process.wait.assert_called_once_with(timeout=5)
+        process.poll.assert_not_called()
+        self.assertEqual(result.returncode, 7)
+
+    def test_first_cancellation_during_successful_cleanup_is_preserved(self):
+        import run_sql_tests as runner
+        process = mock.Mock(pid=12345)
+        process.wait.return_value = 0
+        previous = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
+        with mock.patch.object(runner.subprocess, "Popen", return_value=process), \
+                mock.patch.object(runner.os, "waitid"), \
+                mock.patch.object(runner.os, "killpg", side_effect=lambda *_: signal.raise_signal(signal.SIGTERM)):
+            with self.assertRaises(SystemExit) as caught:
+                runner.run_performance_process(["fixture"])
+        self.assertEqual(caught.exception.code, 143)
+        process.wait.assert_called_once_with(timeout=5)
+        for signum, handler in previous.items():
+            self.assertIs(signal.getsignal(signum), handler)
+
+    def test_failed_wait_keeps_original_error_and_cleans_group(self):
+        import run_sql_tests as runner
+        process = mock.Mock(pid=12345)
+        process.wait.return_value = 0
+        previous = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
+        with mock.patch.object(runner.subprocess, "Popen", return_value=process), \
+                mock.patch.object(runner.os, "waitid", side_effect=RuntimeError("fixture wait failed")), \
+                mock.patch.object(runner.os, "killpg", side_effect=lambda *_: signal.raise_signal(signal.SIGTERM)) as kill:
+            with self.assertRaisesRegex(RuntimeError, "fixture wait failed"):
+                runner.run_performance_process(["fixture"])
+        kill.assert_called_once_with(process.pid, signal.SIGKILL)
+        process.wait.assert_called_once_with(timeout=5)
+        for signum, handler in previous.items():
+            self.assertIs(signal.getsignal(signum), handler)
+
     def test_workflow_entry_delivers_signals_directly_to_runner(self):
         import yaml
         for filename in ("performance.yml", "jit-performance.yml"):
@@ -2734,7 +2823,7 @@ sys.exit(result.returncode)
                 stub.write_text(f"#!{sys.executable}\nimport os,time\nfrom pathlib import Path\nPath({str(marker)!r}).write_text(str(os.getpid()))\ntime.sleep(60)\n")
                 stub.chmod(0o700)
                 workflow = yaml.safe_load((self.repository / ".github/workflows" / filename).read_text())
-                step = next(step for job in workflow["jobs"].values() for step in job.get("steps", []) if step.get("id") == "measure")
+                step = next(step for job in workflow["jobs"].values() for step in job.get("steps", []) if step.get("name", "").startswith("Measure ") and "--perf-ab" in step.get("run", ""))
                 owner = subprocess.Popen(["bash", "-e", "-c", step["run"]], cwd=workspace,
                     env=dict(os.environ, GITHUB_WORKSPACE=str(workspace), PATH=str(workspace / "bin") + ":" + os.environ["PATH"]),
                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -2750,6 +2839,40 @@ sys.exit(result.returncode)
                     except ProcessLookupError:
                         pass
                     owner.wait(timeout=5)
+
+
+class PerformanceDiagnosticEligibilityContractTest(unittest.TestCase):
+    def test_profile_requires_complete_nonpending_regression(self):
+        import yaml
+        repository = Path(__file__).resolve().parents[1]
+        workflow = yaml.safe_load((repository / ".github/workflows/jit-performance.yml").read_text())
+        step = next(step for job in workflow["jobs"].values() for step in job.get("steps", [])
+                    if step.get("name") == "Profile failing JIT performance suites")
+        for completed, pending, passed, expected in (
+                (False, False, False, False), (True, True, False, False),
+                (True, False, False, True), (True, False, True, False)):
+            with self.subTest(completed=completed, pending=pending, passed=passed):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    (root / "candidate").mkdir()
+                    (root / "bin").mkdir()
+                    trials = root / "jit-perf-baseline.trials"
+                    trials.mkdir()
+                    (trials / "manifest.json").write_text(json.dumps({"completed": completed}))
+                    (root / "jit-perf-baseline.json").write_text(json.dumps({
+                        "tests/performance/case.yaml::sample": {
+                            "passed": passed, "verification_pending": pending}}))
+                    marker = root / "profile-started"
+                    stub = root / "bin/python3"
+                    stub.write_text(f"#!{sys.executable}\nimport os,sys\nfrom pathlib import Path\n"
+                                    f"if sys.argv[1]=='-': os.execv({sys.executable!r},[{sys.executable!r}]+sys.argv[1:])\n"
+                                    f"Path({str(marker)!r}).write_text('started')\n")
+                    stub.chmod(0o700)
+                    result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root,
+                        env=dict(os.environ, GITHUB_WORKSPACE=str(root), PATH=str(root / "bin")+":"+os.environ["PATH"]),
+                        capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(marker.exists(), expected)
 
 
 if __name__ == "__main__":
