@@ -1748,4 +1748,13 @@ test_cases:
     data:
     - value: O'Brien
 
+- name: Hex conversion invalid input keeps a structured conversion error
+  sql: BEGIN TRY SELECT CONVERT(VARBINARY(4),N'0xGG',1) AS value; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS number,ERROR_SEVERITY()
+    AS severity; END CATCH
+  expect:
+    rows: 1
+    data:
+    - number: 8114
+      severity: 16
+
 cleanup: []
