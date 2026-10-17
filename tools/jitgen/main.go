@@ -734,6 +734,9 @@ func nativeCallBoundaryReason(fn *ssa.Function) string {
 				case *ssa.MakeClosure:
 					return "escaping or recursive Go closure"
 				case *ssa.Call:
+					if callee := value.Call.StaticCallee(); callee != nil && goCallSignatureNeedsArrayBoundary(callee.Signature) {
+						return "stack-assigned array in Go call"
+					}
 					for _, arg := range value.Call.Args {
 						if _, ok := arg.(*ssa.Function); ok {
 							return "static Go callback value"
@@ -1790,6 +1793,50 @@ func goCallWordCount(t types.Type) int {
 	}
 }
 
+// goCallHasStackArray checks the Go ABIInternal register-assignment boundary,
+// independently of the packed memory widths used by goCallWordCount. Arrays
+// with more than one element (including fields of structs) are stack-assigned;
+// the current generic call emitter only maps register results and flat words.
+func goCallHasStackArray(t types.Type) bool {
+	if targetSizes.Sizeof(t) == 0 {
+		return false
+	}
+	switch value := t.Underlying().(type) {
+	case *types.Array:
+		return value.Len() > 1 || (value.Len() == 1 && goCallHasStackArray(value.Elem()))
+	case *types.Struct:
+		for i := 0; i < value.NumFields(); i++ {
+			if goCallHasStackArray(value.Field(i).Type()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func goCallSignatureNeedsArrayBoundary(signature *types.Signature) bool {
+	if receiver := signature.Recv(); receiver != nil && goCallHasStackArray(receiver.Type()) {
+		return true
+	}
+	for i := 0; i < signature.Params().Len(); i++ {
+		if goCallHasStackArray(signature.Params().At(i).Type()) {
+			return true
+		}
+	}
+	for i := 0; i < signature.Results().Len(); i++ {
+		resultType := signature.Results().At(i).Type()
+		// A single large aggregate already uses the existing heap-pointer
+		// wrapper; only direct register-shaped results need rejection here.
+		if signature.Results().Len() == 1 && goCallWordCount(resultType) == 0 {
+			continue
+		}
+		if goCallHasStackArray(resultType) {
+			return true
+		}
+	}
+	return false
+}
+
 func goCallPointerMask(t types.Type) uint8 {
 	switch u := t.Underlying().(type) {
 	case *types.Basic:
@@ -1964,6 +2011,9 @@ func isForwardingMergeClosure(fn *ssa.Function) bool {
 func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args []ssa.Value) bool {
 	funcExpr, ok := g.staticFuncExpr(callee)
 	if !ok {
+		return false
+	}
+	if goCallSignatureNeedsArrayBoundary(callee.Signature) {
 		return false
 	}
 	sig := callee.Signature

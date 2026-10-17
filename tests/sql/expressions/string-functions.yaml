@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 metadata:
   version: "1.0"
   description: "String functions: SUBSTR, LEFT, RIGHT, REPLACE, TRIM, CHAR_LENGTH"
@@ -205,6 +208,24 @@ test_cases:
       rows: 1
       data:
         - s: "cd"
+
+  - name: Compiled hash functions preserve native array result contracts
+    scm: |
+      (begin
+        (define compiled (jit (close_procedure (eval (optimize
+          (list (quote lambda) (list (quote value))
+            (list (quote list) (list (quote md5) (quote value))
+              (list (quote sha1) (quote value)) (list (quote sha256) (quote value)))))))))
+        (and (equal? (compiled "abc")
+          (list "900150983cd24fb0d6963f7d28e17f72"
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"))
+          (equal? (compiled "")
+            (list "d41d8cd98f00b204e9800998ecf8427e"
+              "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+              "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"))))
+    expect:
+      result: true
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS fn_str_test"
