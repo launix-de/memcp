@@ -1545,4 +1545,41 @@ test_cases:
 - name: Remove native currency columns
   sql: DROP TABLE money_contract_values
 
+- name: MONEY unary negation preserves positive contract
+  sql: SELECT -CAST(12.3456 AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12.3456
+- name: MONEY unary negation preserves negative contract
+  sql: SELECT -CAST(-12.3456 AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.3456
+- name: MONEY unary negation preserves NULL contract
+  sql: SELECT -CAST(NULL AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: SMALLMONEY unary negation preserves positive contract
+  sql: SELECT -CAST(12.3456 AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12.3456
+- name: SMALLMONEY unary negation preserves negative contract
+  sql: SELECT -CAST(-12.3456 AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.3456
+- name: SMALLMONEY unary negation preserves NULL contract
+  sql: SELECT -CAST(NULL AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+
 cleanup: []

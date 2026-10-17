@@ -293,7 +293,9 @@ Reject an out-of-range conversion before intdiv can wrap its sign. */
 (define tsql_money_coefficient (lambda (value small) (if (nil? value) nil (begin
 	(define scaled (round (* (sql_decimal_output (tsql_numeric_input value) 4) 10000)))
 	(define limit (simplify "9223372036854775808.0"))
-	(if (or (< scaled (- 0 limit)) (>= scaled limit))
+	/* At either 64-bit endpoint the float carrier cannot distinguish the
+	last valid coefficient from an adjacent overflow. Refuse that ambiguity. */
+	(if (or (<= scaled (- 0 limit)) (>= scaled limit))
 		(tsql_raise_error 8115 "currency conversion overflow" 1) true)
 	(define coefficient (intdiv scaled 1))
 	(if (and small (or (< coefficient -2147483648) (> coefficient 2147483647)))
@@ -926,7 +928,10 @@ native date value as columns and ordinary calendar arithmetic. */
 		_ true)
 	(if (tsql_numeric_operand_type? type) true
 		(error "unary minus requires a numeric operand"))
-	(sql_info (list (quote -) 0 formula) (if (equal? type "TINYINT") "SMALLINT" type) nil))))
+	(define negated (list (quote -) 0 formula))
+	(sql_info (if (has? '("MONEY" "SMALLMONEY") type)
+		(list (quote tsql_cast_money) negated (equal? type "SMALLMONEY")) negated)
+		(if (equal? type "TINYINT") "SMALLINT" type) nil))))
 (define tsql_negate_expr (lambda (value)
 	(list (quote sql_compile_expr) (quote tsql_compile_negate) value)))
 (define tsql_key_placement (parser (? (or (atom "CLUSTERED" true) (atom "NONCLUSTERED" true)))))
