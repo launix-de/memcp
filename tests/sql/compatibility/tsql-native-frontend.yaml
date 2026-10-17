@@ -3182,7 +3182,7 @@ test_cases:
     sql: SELECT CONVERT(VARCHAR(8),0xAABB,3)
     expect:
       error: true
-  - name: Hex conversions TRY cannot hide unsupported binary style
+  - name: Hex conversions unsupported TRY binary style remains an explicit mode boundary
     sql: SELECT TRY_CONVERT(VARBINARY(4),'ABCD',3)
     expect:
       error: true
@@ -3301,15 +3301,43 @@ test_cases:
     - sql: DROP VIEW tsql_hex_portable
       syntax: tsql
   - name: Hex conversions empty descriptors
-    scm: (begin (define fields (tds_describe "memcp-tests" "SELECT CONVERT(VARBINARY(3),NULL,1) AS bytes,CONVERT(NVARCHAR(5),CAST(NULL
-      AS VARBINARY(3)),2) AS label WHERE 1=0" "" (newsession)))) (and (equal? (map fields (lambda (f) (f "sql_type")))
-      (list "VARBINARY" "NVARCHAR")) (equal? (map fields (lambda (f) (f "size"))) (list 3 10))))
+    scm: |-
+      (begin
+        (define fields (tds_describe "memcp-tests" "SELECT CONVERT(VARBINARY(3),NULL,1) AS bytes,CONVERT(NVARCHAR(5),CAST(NULL AS VARBINARY(3)),2) AS label WHERE 1=0" "" (newsession)))
+        (and
+          (equal? (map fields (lambda (field) (field "sql_type"))) '("VARBINARY" "NVARCHAR"))
+          (equal? (map fields (lambda (field) (field "size"))) '(3 10))))
     expect:
       result: true
+
   - name: Hex conversions derived descriptor widths
-    scm: (begin (define fields (tds_describe "memcp-tests" "SELECT TOP(0) q.bytes,q.label FROM (SELECT CONVERT(VARBINARY(3),'0xAA',1)
-      AS bytes,CONVERT(NVARCHAR(5),0xBB,2) AS label) q" "" (newsession)))) (and (equal? (map fields (lambda (f) (f
-      "sql_type"))) (list "VARBINARY" "NVARCHAR")) (equal? (map fields (lambda (f) (f "size"))) (list 3 10))))
+    scm: |-
+      (begin
+        (define fields (tds_describe "memcp-tests" "SELECT TOP(0) q.bytes,q.label FROM (SELECT CONVERT(VARBINARY(3),'0xAA',1) AS bytes,CONVERT(NVARCHAR(5),0xBB,2) AS label) q" "" (newsession)))
+        (and
+          (equal? (map fields (lambda (field) (field "sql_type"))) '("VARBINARY" "NVARCHAR"))
+          (equal? (map fields (lambda (field) (field "size"))) '(3 10))))
+    expect:
+      result: true
+
+
+  - name: Hex conversion NULL styles retain typed null values
+    sql: SELECT CONVERT(VARBINARY(3),N'not-hex',NULL) AS a,TRY_CONVERT(VARBINARY(3),N'not-hex',NULL) AS b,CONVERT(NVARCHAR(5),0xAABB,NULL)
+      AS c,TRY_CONVERT(NVARCHAR(5),0xAABB,NULL) AS d
+    expect:
+      rows: 1
+      data:
+      - a: null
+        b: null
+        c: null
+        d: null
+  - name: Hex conversion NULL styles retain every declared descriptor
+    scm: |-
+      (begin
+        (define fields (tds_describe "memcp-tests" "SELECT CONVERT(VARBINARY(3),N'not-hex',NULL) AS a,TRY_CONVERT(VARBINARY(3),N'not-hex',NULL) AS b,CONVERT(NVARCHAR(5),0xAABB,NULL) AS c,TRY_CONVERT(NVARCHAR(5),0xAABB,NULL) AS d WHERE 1=0" "" (newsession)))
+        (and
+          (equal? (map fields (lambda (field) (field "sql_type"))) '("VARBINARY" "VARBINARY" "NVARCHAR" "NVARCHAR"))
+          (equal? (map fields (lambda (field) (field "size"))) '(3 3 10 10))))
     expect:
       result: true
 

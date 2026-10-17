@@ -330,8 +330,8 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		"BIT" (list (quote tsql_cast_bit) value)
 		"DECIMAL" (tsql_cast_decimal_expr value name dimensions)
 		"NUMERIC" (tsql_cast_decimal_expr value name dimensions)
-		"BINARY" (tsql_cast_binary_expr value dimensions true)
-		"VARBINARY" (tsql_cast_binary_expr value dimensions false)
+		"BINARY" (tsql_cast_binary_expr value dimensions true 0)
+		"VARBINARY" (tsql_cast_binary_expr value dimensions false 0)
 		"VARCHAR" (tsql_cast_text_expr value dimensions false false)
 		"NVARCHAR" (tsql_cast_text_expr value dimensions true false)
 		"CHAR" (tsql_cast_text_expr value dimensions false true)
@@ -353,18 +353,39 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 (define tsql_cast_decimal_expr (lambda (value type dimensions) (begin
 	(define dims (tsql_decl_dimensions type dimensions))
 	(list (quote sql_compile_expr) (list (quote tsql_decimal_compiler) type (list (quote quote) dims)) value))))
-(define tsql_binary_compiler (lambda (length fixed) (lambda (infos) (begin
+/* Hex styles are frontend conversions, independent of the byte storage.
+Validate the complete input before truncation, then decode only needed bytes. */
+(define tsql_hex_to_binary (lambda (value prefix length) (if (nil? value) nil (begin
+	(if (and prefix (or (< (strlen value) 2) (not (equal? (substr value 0 2) "0x"))))
+		(tsql_raise_error 8114 "invalid hexadecimal prefix" 1) true)
+	(define hex (if prefix (substr value 2) value))
+	(if (or (not (equal? (mod (strlen hex) 2) 0)) (not (regexp_test hex "^[0-9A-Fa-f]*$")))
+		(tsql_raise_error 8114 "invalid hexadecimal input" 1) true)
+	(hex2bin (if (equal? length -1) hex (substr hex 0 (min (strlen hex) (* 2 length)))))))))
+(define tsql_binary_to_hex (lambda (value prefix length) (if (nil? value) nil (begin
+	/* Bound formatting before encoding a potentially large binary value.
+	Odd text widths need one final byte; the ordinary text cast truncates it. */
+	(define available (if (equal? length -1) -1 (max 0 (- length (if prefix 2 0)))))
+	(define bytes (if (equal? available -1) value
+		(substr value 0 (min (strlen value) (intdiv (+ available 1) 2)))))
+	(concat (if prefix "0x" "") (toUpper (bin2hex bytes)))))))
+(define tsql_binary_compiler (lambda (length fixed style) (lambda (infos) (begin
 	(define input (car infos))
-	/* Text requires its declared encoding, and numeric values have another
-	padding direction. Refuse those shapes rather than guess from strings. */
-	(if (or (tsql_binary_type? (sql_info_type input)) (has? '("NULL" "any") (sql_info_type input))) true
+	(define source (sql_info_type input))
+	/* Style zero keeps the existing byte contract. Hex styles require a
+	declared character input; their spelling never selects an SQL type. */
+	(if (if (equal? style 0) (or (tsql_binary_type? source) (has? '("NULL" "any") source))
+		(or (sql_text_type? source) (equal? source "NULL"))) true
 		(error "binary conversion from " (sql_info_type input) " is not implemented"))
-	(sql_info (list (quote tsql_cast_binary) (sql_info_formula input) length fixed)
+	(define formula (if (equal? style 0) (sql_info_formula input)
+		(list (quote tsql_hex_to_binary) (sql_info_formula input) (equal? style 1) length)))
+	(sql_info (list (quote tsql_cast_binary) formula length fixed)
 		(if fixed "BINARY" "VARBINARY") nil)))))
-(define tsql_cast_binary_expr (lambda (value dimensions fixed) (begin
+(define tsql_cast_binary_expr (lambda (value dimensions fixed style) (begin
+	(if (has? '(0 1 2) style) true (error "unsupported binary conversion style"))
 	(define length (car (tsql_decl_dimensions (if fixed "BINARY" "VARBINARY")
 		(if (empty_list? dimensions) '(30) dimensions))))
-	(list (quote sql_compile_expr) (list (quote tsql_binary_compiler) length fixed) value))))
+	(list (quote sql_compile_expr) (list (quote tsql_binary_compiler) length fixed style) value))))
 /* Assignment contracts come from native column declarations at compile time.
 Integer narrowing is an ordinary frontend cast. Existing native decimal scale
 normalization remains in use; this guard rejects overflow, including carry from
@@ -490,22 +511,26 @@ configurable cutoff remain separate compatibility work. */
 		(concat (if (< hour 10) "0" "") hour (substr clock 2 6))) clock))
 	(define parsed (str_to_date (concat date " " clock) "%Y-%m-%d %H:%i:%s"))
 	(if (nil? parsed) (tsql_raise_error 241 "invalid datetime value" 1) (unix_timestamp parsed))))))
-(define tsql_styled_text_compiler (lambda (pattern type dimensions) (lambda (infos) (begin
+(define tsql_styled_text_compiler (lambda (style type dimensions) (lambda (infos) (begin
 	(define input (car infos))
-	(define formula (list format_date (tsql_calendar_difference_formula input) pattern))
+	(define length (if (empty_list? dimensions) 30 (car dimensions)))
+	(define formula (if (tsql_binary_type? (sql_info_type input)) (begin
+		(if (has? '(1 2) style) true (error "unsupported binary conversion style"))
+		(list (quote tsql_binary_to_hex) (sql_info_formula input) (equal? style 1) length))
+		(list format_date (tsql_calendar_difference_formula input) (tsql_temporal_style_pattern style true))))
 	(sql_info (list (if (has? '("CHAR" "NCHAR") type) tsql_cast_fixed_text tsql_cast_text)
-		formula (if (empty_list? dimensions) 30 (car dimensions)) (has? '("NVARCHAR" "NCHAR") type)) type nil)))))
+		formula length (has? '("NVARCHAR" "NCHAR") type)) type nil)))))
 (define tsql_convert_expr (lambda (value type dimensions style) (begin
 	(tsql_decl_dimensions type dimensions)
 	(match style
-		(symbol sql_null_style) (list (quote sql_type_expr) nil type nil)
+		(symbol sql_null_style) (tsql_cast_expr (list (quote sql_type_expr) nil "NULL" nil) type dimensions)
 		_ (if (or (nil? style) (equal? style 0)) (tsql_cast_expr value type dimensions)
 			(tsql_temporal_type? type) (tsql_temporal_cast_expr value type style)
+			(has? '("BINARY" "VARBINARY") type)
+			(tsql_cast_binary_expr value dimensions (equal? type "BINARY") style)
 			(has? '("VARCHAR" "NVARCHAR" "CHAR" "NCHAR") type)
-			(begin
-				(define pattern (tsql_temporal_style_pattern style true))
-				(list (quote sql_compile_expr) (list (quote tsql_styled_text_compiler) pattern type (list (quote quote) dimensions)) value)))
-		(error "unsupported CONVERT style for " type)))))
+			(list (quote sql_compile_expr) (list (quote tsql_styled_text_compiler) style type (list (quote quote) dimensions)) value)
+			(error "unsupported CONVERT style for " type))))))
 /* TRY converts only a validated conversion recipe. The operand is a strict
 argument outside the catch closure, so its own errors are never conversion
 failures. Unsupported fractional, high-scale and bounded-input contracts
@@ -533,10 +558,11 @@ cancellation and unsupported operations are never successful NULL casts. */
 	(if (and (sql_numeric_type? type) (not (or numeric text absent)))
 		(error "conversion from " source " to " type " is not implemented") true)
 	(if (and (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type)
-		(not (or numeric text absent (tsql_temporal_type? source))))
+		(not (or numeric text absent (tsql_temporal_type? source) (and (has? '(1 2 sql_null_style) style) (tsql_binary_type? source)))))
 		(error "conversion from " source " to " type " is not implemented") true)
 	(if (and (not (nil? style)) (not (equal? style 0)) (not (equal? style (quote sql_null_style)))
-		(has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type) (not (or absent (tsql_temporal_type? source))))
+		(has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type)
+		(not (or absent (tsql_temporal_type? source) (and (has? '(1 2 sql_null_style) style) (tsql_binary_type? source)))))
 		(error "styled text conversion requires a declared temporal input") true)
 	/* Feed the existing compiler a declared local, not an executable SQL type
 	wrapper. Only its expr slot enters the emitted invocation lambda. */
@@ -1231,6 +1257,9 @@ The shared expression compiler still owns the SQL type; these additional wire
 dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
+	((symbol sql_compile_expr) ((symbol tsql_binary_compiler) length _fixed _style) _value) (list length)
+	((symbol sql_compile_expr) ((symbol tsql_styled_text_compiler) _style _type ((symbol quote) dimensions)) _value)
+	(if (empty_list? dimensions) '(30) dimensions)
 	((symbol sql_compile_expr) ((symbol tsql_try_conversion_compiler) type ((symbol quote) dimensions) _style _bounded) _value)
 	(tsql_decl_dimensions type (if (and (empty_list? dimensions)
 		(has? '("VARCHAR" "NVARCHAR" "CHAR" "NCHAR" "BINARY" "VARBINARY") type)) '(30) dimensions))
