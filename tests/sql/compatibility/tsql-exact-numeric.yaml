@@ -2507,7 +2507,7 @@ test_cases:
 - name: ABS compiles a plain exact integer formula
   scm: (begin (define info (sql_expr_info (list) (tsql_builtin_expr "ABS" (list (tsql_cast_expr (tsql_parse_integer "9007199254740993")
     "BIGINT" (list)))))) (define syntax (json_encode (expression_syntax (sql_info_formula info)))) (list (sql_info_type info) (string
-    (eval (sql_info_formula info))) (not (contains? syntax "sql_type_expr")) (not (contains? syntax "sql_compile_expr"))))
+    (eval (sql_info_formula info))) (not (strlike syntax "%sql_type_expr%")) (not (strlike syntax "%sql_compile_expr%"))))
   expect:
     result:
     - BIGINT
@@ -2517,7 +2517,7 @@ test_cases:
 - name: FLOOR compiles a plain exact integer formula
   scm: (begin (define info (sql_expr_info (list) (tsql_builtin_expr "FLOOR" (list (tsql_cast_expr (tsql_parse_integer "9007199254740993")
     "BIGINT" (list)))))) (define syntax (json_encode (expression_syntax (sql_info_formula info)))) (list (sql_info_type info) (string
-    (eval (sql_info_formula info))) (not (contains? syntax "sql_type_expr")) (not (contains? syntax "sql_compile_expr"))))
+    (eval (sql_info_formula info))) (not (strlike syntax "%sql_type_expr%")) (not (strlike syntax "%sql_compile_expr%"))))
   expect:
     result:
     - BIGINT
@@ -2527,7 +2527,7 @@ test_cases:
 - name: CEILING compiles a plain exact integer formula
   scm: (begin (define info (sql_expr_info (list) (tsql_builtin_expr "CEILING" (list (tsql_cast_expr (tsql_parse_integer "9007199254740993")
     "BIGINT" (list)))))) (define syntax (json_encode (expression_syntax (sql_info_formula info)))) (list (sql_info_type info) (string
-    (eval (sql_info_formula info))) (not (contains? syntax "sql_type_expr")) (not (contains? syntax "sql_compile_expr"))))
+    (eval (sql_info_formula info))) (not (strlike syntax "%sql_type_expr%")) (not (strlike syntax "%sql_compile_expr%"))))
   expect:
     result:
     - BIGINT
