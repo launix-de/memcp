@@ -92,25 +92,15 @@ test_cases:
       standard: null
   noncritical: true
 - name: A retained compiled scalar clock is sampled on each execution
-  scm: |
-    (begin
-      (define s (newsession))
-      (define formula (sql_queryplan_compile_formula nil
-        (parse_tsql "memcp-tests" "SELECT GETDATE() AS legacy,SYSDATETIME() AS precise" nil s nil)))
-      (define execute (lambda () (begin
-        (define output (newsession))
-        (with_autocommit s nil nil "SELECT clocks" (lambda (tx)
-          (sql_execute_formula s tx formula (lambda (row) (output "row" row)) (lambda fields true))))
-        (output "row"))))
-      (define before (execute))
-      (sleep 1.05)
-      (define after (execute))
-      (if (and (> (- (unix_timestamp (after "legacy")) (unix_timestamp (before "legacy"))) 0)
-          (> (- (unix_timestamp (after "precise")) (unix_timestamp (before "precise"))) 0)) true
-        (error "compiled clock was folded into a cached literal")))
+  scm: "(begin\n  (define s (newsession))\n  (define formula (sql_queryplan_compile_formula nil\n    (parse_tsql\
+    \ \"memcp-tests\" \"SELECT GETDATE() AS legacy,SYSDATETIME() AS precise\" nil s nil)))\n  (define execute (lambda\
+    \ () (begin\n    (define output (newsession))\n    (with_autocommit s nil nil \"SELECT clocks\" (lambda (tx)\n\
+    \      (sql_execute_formula s tx formula (lambda (row) (output \"row\" row)) (lambda fields true))))\n    (output\
+    \ \"row\"))))\n  (define before (execute))\n  (sleep 0.02)\n  (define after (execute))\n  (if (and (> (tsql_datediff\
+    \ \"millisecond\" (before \"legacy\") (after \"legacy\")) 0)\n      (> (tsql_datediff \"microsecond\" (before\
+    \ \"precise\") (after \"precise\")) 0)) true\n    (error \"compiled clock was folded into a cached literal\"\
+    )))\n"
   noncritical: true
-  expect:
-    result: true
 - name: Clock functions reject unexpected arguments
   sql: SELECT GETDATE(1) AS value
   expect:
@@ -123,21 +113,14 @@ test_cases:
   setup:
   - sql: DROP TABLE IF EXISTS tsql_compound_clock_default
   - sql: CREATE TABLE tsql_compound_clock_default (id INT,value DATETIME DEFAULT DATEADD(day,1,GETDATE()))
-  scm: |
-    (begin
-      (define session (newsession))
-      (define run (lambda (sql) (begin
-        (define output (newsession))
-        (with_autocommit session nil nil sql (lambda (tx)
-          (sql_execute_formula session tx (sql_queryplan_compile_formula tx (parse_tsql "memcp-tests" sql nil session tx))
-            (lambda (row) (output "row" row)) (lambda fields true))))
-        (output "row"))))
-      (sleep 1.05)
-      (define cutoff (run "SELECT CONVERT(VARCHAR(30),DATEADD(day,1,GETDATE()),121) AS value"))
-      (run "INSERT tsql_compound_clock_default(id) VALUES (1)")
-      (define inserted (run "SELECT CONVERT(VARCHAR(30),value,121) AS value FROM tsql_compound_clock_default WHERE id=1"))
-      (if (>= (- (unix_timestamp (inserted "value")) (unix_timestamp (cutoff "value"))) 0) true
-        (error "compound default froze its clock during CREATE")))
+  scm: "(begin\n  (define session (newsession))\n  (define run (lambda (sql) (begin\n    (define output (newsession))\n\
+    \    (with_autocommit session nil nil sql (lambda (tx)\n      (sql_execute_formula session tx (sql_queryplan_compile_formula\
+    \ tx (parse_tsql \"memcp-tests\" sql nil session tx))\n        (lambda (row) (output \"row\" row)) (lambda fields\
+    \ true))))\n    (output \"row\"))))\n  (sleep 1.05)\n  (define cutoff (run \"SELECT CONVERT(VARCHAR(30),DATEADD(day,1,GETDATE()),121)\
+    \ AS value\"))\n  (run \"INSERT tsql_compound_clock_default(id) VALUES (1)\")\n  (define inserted (run \"SELECT\
+    \ CONVERT(VARCHAR(30),value,121) AS value FROM tsql_compound_clock_default WHERE id=1\"))\n  (if (>= (tsql_datediff\
+    \ \"second\" (cutoff \"value\") (inserted \"value\")) 0) true\n    (error \"compound default froze its clock\
+    \ during CREATE\")))\n"
   expect:
     result: true
   noncritical: true
@@ -1811,5 +1794,25 @@ test_cases:
   sql: CREATE TABLE tsql_invalid_clock_default(value DATETIME2 DEFAULT SYSDATETIME(1))
   expect:
     error: true
+
+- name: Retained compiled clocks remain fresh across whole second executions
+  scm: |
+    (begin
+      (define s (newsession))
+      (define formula (sql_queryplan_compile_formula nil
+        (parse_tsql "memcp-tests" "SELECT GETDATE() AS legacy,SYSDATETIME() AS precise" nil s nil)))
+      (define execute (lambda () (begin
+        (define output (newsession))
+        (with_autocommit s nil nil "SELECT clocks" (lambda (tx)
+          (sql_execute_formula s tx formula (lambda (row) (output "row" row)) (lambda fields true))))
+        (output "row"))))
+      (define before (execute))
+      (sleep 1.05)
+      (define after (execute))
+      (if (and (> (- (unix_timestamp (after "legacy")) (unix_timestamp (before "legacy"))) 0)
+          (> (- (unix_timestamp (after "precise")) (unix_timestamp (before "precise"))) 0)) true
+        (error "compiled clock was folded into a cached literal")))
+  expect:
+    result: true
 
 cleanup: []
