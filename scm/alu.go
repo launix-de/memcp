@@ -35,6 +35,17 @@ import (
 )
 
 func sqlLiteralArithmetic(a, b Scmer, subtract bool) Scmer {
+	// Keep an exact native result when it fits; overflow retains the fallback.
+	if a.IsInt() && b.IsInt() {
+		left, right := a.Int(), b.Int()
+		if subtract {
+			if (right >= 0 && left >= math.MinInt64+right) || (right < 0 && left <= math.MaxInt64+right) {
+				return NewInt(left - right)
+			}
+		} else if (right >= 0 && left <= math.MaxInt64-right) || (right < 0 && left >= math.MinInt64-right) {
+			return NewInt(left + right)
+		}
+	}
 	left, leftOK := new(big.Rat).SetString(strconv.FormatFloat(a.Float(), 'g', -1, 64))
 	right, rightOK := new(big.Rat).SetString(strconv.FormatFloat(b.Float(), 'g', -1, 64))
 	if !leftOK || !rightOK {
