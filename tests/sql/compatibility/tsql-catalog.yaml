@@ -559,6 +559,38 @@ test_cases:
       (and (equal? (column "RawType") "[memcp-tests].[dbo].[ddl_alias_text]")
         (expression_equal? (column "Dimensions") '(8)) (column "Null")))
   expect: {result: true}
+- name: Column catalog reports alias names and underlying native contracts
+  sql: EXEC sp_columns @table_name=N'ddl_alias_values',@ODBCVer=3
+  expect:
+    rows: 3
+    data:
+    - {COLUMN_NAME: id, TYPE_NAME: int, DATA_TYPE: 4, PRECISION: 10, LENGTH: 4, NULLABLE: 0, IS_NULLABLE: "NO", ORDINAL_POSITION: 1}
+    - {COLUMN_NAME: number, TYPE_NAME: ddl_alias_number, DATA_TYPE: 5, PRECISION: 5, LENGTH: 2, SCALE: 0, NULLABLE: 0, IS_NULLABLE: "NO", ORDINAL_POSITION: 2}
+    - {COLUMN_NAME: label, TYPE_NAME: ddl_alias_text, DATA_TYPE: -9, PRECISION: 8, LENGTH: 16, CHAR_OCTET_LENGTH: 16, NULLABLE: 1, IS_NULLABLE: "YES", ORDINAL_POSITION: 3}
+- name: Alias key discovery uses native composite keys and declaration widths
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.ddl_alias_metadata_key
+  - sql: CREATE TABLE dbo.ddl_alias_metadata_key(number dbo.ddl_alias_number,label dbo.ddl_alias_text,PRIMARY KEY(number,label))
+  sql: EXEC sp_special_columns @table_name=N'ddl_alias_metadata_key',@nullable=N'O',@ODBCVer=3
+  expect:
+    rows: 2
+    data:
+    - {COLUMN_NAME: number, TYPE_NAME: ddl_alias_number, DATA_TYPE: 5, PRECISION: 5, LENGTH: 2, SCALE: 0}
+    - {COLUMN_NAME: label, TYPE_NAME: ddl_alias_text, DATA_TYPE: -9, PRECISION: 8, LENGTH: 16}
+  cleanup:
+  - sql: DROP TABLE dbo.ddl_alias_metadata_key
+- name: Alias column catalog preserves explicit column nullability overrides
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.ddl_alias_metadata_nulls
+  - sql: CREATE TABLE dbo.ddl_alias_metadata_nulls(number dbo.ddl_alias_number NULL,label dbo.ddl_alias_text NOT NULL)
+  sql: EXEC sp_columns @table_name=N'ddl_alias_metadata_nulls',@ODBCVer=3
+  expect:
+    rows: 2
+    data:
+    - {COLUMN_NAME: number, TYPE_NAME: ddl_alias_number, DATA_TYPE: 5, LENGTH: 2, NULLABLE: 1, IS_NULLABLE: "YES"}
+    - {COLUMN_NAME: label, TYPE_NAME: ddl_alias_text, DATA_TYPE: -9, LENGTH: 16, CHAR_OCTET_LENGTH: 16, NULLABLE: 0, IS_NULLABLE: "NO"}
+  cleanup:
+  - sql: DROP TABLE dbo.ddl_alias_metadata_nulls
 - name: Empty alias projections have declaration based wire types
   scm: |
     (begin
@@ -676,6 +708,9 @@ test_cases:
   sql: CREATE TYPE dbo.ddl_alias_cached_type FROM INT
 - name: Bind CREATE to the first alias definition
   sql: CREATE TABLE dbo.ddl_alias_cached(value dbo.ddl_alias_cached_type)
+- name: Column catalog binds the first alias contract in a fresh metadata context
+  sql: EXEC sp_columns @table_name=N'ddl_alias_cached',@ODBCVer=3
+  expect: {rows: 1, data: [{COLUMN_NAME: value, TYPE_NAME: ddl_alias_cached_type, DATA_TYPE: 4, LENGTH: 4}]}
 - name: Insert the first alias value
   sql: INSERT dbo.ddl_alias_cached VALUES(5)
 - name: Cache integer division through an alias
@@ -689,6 +724,9 @@ test_cases:
   sql: CREATE TYPE dbo.ddl_alias_cached_type FROM FLOAT
 - name: Cached CREATE rebinds its consumed alias definition
   sql: CREATE TABLE dbo.ddl_alias_cached(value dbo.ddl_alias_cached_type)
+- name: Column catalog reloads a replaced alias in its next metadata context
+  sql: EXEC sp_columns @table_name=N'ddl_alias_cached',@ODBCVer=3
+  expect: {rows: 1, data: [{COLUMN_NAME: value, TYPE_NAME: ddl_alias_cached_type, DATA_TYPE: 6, LENGTH: 8}]}
 - name: Cached INSERT rebinds the replacement alias contract
   sql: INSERT dbo.ddl_alias_cached VALUES(5)
 - name: Cached expression uses the replacement SQL type regardless of numeric carrier
@@ -704,6 +742,9 @@ test_cases:
   - sql: DROP TYPE IF EXISTS dbo.[alias.with]] space]
   - sql: CREATE TYPE dbo.[alias.with]] space] FROM INT
   sql: CREATE TABLE dbo.ddl_quoted_alias(value [alias.with]] space])
+- name: Column catalog preserves quoted alias punctuation without qualification
+  sql: EXEC sp_columns @table_name=N'ddl_quoted_alias',@ODBCVer=3
+  expect: {rows: 1, data: [{COLUMN_NAME: value, TYPE_NAME: 'alias.with] space', DATA_TYPE: 4, LENGTH: 4}]}
 - name: Quoted aliases use the declared scalar contract
   setup:
   - sql: INSERT dbo.ddl_quoted_alias VALUES(5)
