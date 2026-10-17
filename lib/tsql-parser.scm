@@ -1588,9 +1588,9 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(parser '((atom "(" true) (define query tsql_select) (atom ")" true) (atom "AS" true) (define id tsql_identifier)) '(id schema query false nil))
 		(parser '((atom "(" true) (define query tsql_select) (atom ")" true) (define id tsql_identifier)) '(id schema query false nil))
 
-		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
+		(parser '((define schema tsql_schema_identifier) (define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define schema tsql_schema_identifier) (define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define schema tsql_schema_identifier) (define tbl tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
 		(parser '((define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
 		(parser '((define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
 		(parser '((define tbl tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
@@ -1840,7 +1840,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 	/* A mutation target may name a FROM alias. Resolve that alias before checking
 	write permission; the grammar never creates a fictitious table for it. */
 	(define tsql_write_target (parser '(
-		(? (define target_schema tsql_schema_identifier) ".")
+		(? (define target_schema tsql_schema_identifier))
 		(define target_name tsql_identifier)
 		(? tsql_table_hints)
 	) (list target_schema target_name)))
@@ -1930,7 +1930,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 	(define tsql_truncate (parser '(
 		(atom "TRUNCATE" true) (? (atom "TABLE" true))
 
-		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
+		(? (define schema2 tsql_schema_identifier)) (define tbl tsql_identifier)
 	) (lambda () (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(define trunc_schema (coalesce schema2 schema))
@@ -1961,7 +1961,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(atom "VIEW" true)
 		(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
 		(define target (or
-			(parser '((define schema2 tsql_schema_identifier) "." (define id tsql_identifier)) '(schema2 id))
+			(parser '((define schema2 tsql_schema_identifier) (define id tsql_identifier)) '(schema2 id))
 			(parser (define id tsql_identifier) '(nil id))))
 		(define aliases (? (parser '("(" (define columns (+ tsql_identifier ",")) ")") columns)))
 		(atom "AS" true)
@@ -1975,8 +1975,17 @@ a separator is recognized only on a physical line containing no SQL text. */
 				view_schema id "tsql" (nth captured 0) (list (quote quote) query)
 				(if replace "replace" (if ifnotexists "ignore" "error"))))))))
 
-	(define tsql_schema_identifier (parser (define owner tsql_identifier)
-		(if (equal?? owner "dbo") database owner)))
+	/* This one prefix grammar consumes its final separator in every caller.
+	Resolve only the default owner in a database-qualified name: MemCP has one
+	native relation namespace per database, not a parallel SQL schema registry.
+	The complete long form must match before validating its owner so ordinary
+	two-part names can still backtrack to their existing native mapping. */
+	(define tsql_schema_identifier (parser (or
+		(parser '((define catalog tsql_identifier) "." (define owner tsql_identifier) ".")
+			(if (equal?? owner "dbo") catalog (error "unsupported qualified owner: " owner)))
+		(parser '((define catalog tsql_identifier) "." ".") catalog)
+		(parser '((define owner tsql_identifier) ".")
+			(if (equal?? owner "dbo") database owner)))))
 	(define tsql_expression3 (parser '(
 		(define a tsql_expression4)
 		(define terms (* (parser '(
@@ -2048,7 +2057,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			_ (error "INSERT TOP requires a SELECT source")))))
 	(define tsql_insert_into (parser '(
 		(atom "INSERT" true) (define limit tsql_write_limit) (? (atom "INTO" true))
-		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
+		(? (define schema2 tsql_schema_identifier)) (define tbl tsql_identifier)
 		(? "(" (define columns (+ tsql_identifier ",")) ")")
 		(atom "VALUES" true) (define rows (+ tsql_insert_values_row ","))
 	) (lambda () (begin
@@ -2074,7 +2083,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 	generated values are filled by the same operator as ordinary insertion. */
 	(define tsql_insert_default (parser '(
 		(atom "INSERT" true) (define limit tsql_write_limit) (? (atom "INTO" true))
-		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
+		(? (define schema2 tsql_schema_identifier)) (define tbl tsql_identifier)
 		(atom "DEFAULT" true) (atom "VALUES" true)
 	) (lambda () (begin
 			(define database (coalesce schema2 schema))
@@ -2084,7 +2093,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(if (equal?? limit 0) 0 1) true)))))
 	(define tsql_insert_select (parser '(
 		(atom "INSERT" true) (define limit tsql_write_limit) (? (atom "INTO" true))
-		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
+		(? (define schema2 tsql_schema_identifier)) (define tbl tsql_identifier)
 		(? "(" (define columns (+ tsql_identifier ",")) ")")
 		(define query tsql_select)
 	) (lambda () (begin
@@ -2098,7 +2107,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 	(define tsql_create_index (parser '(
 		(atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) tsql_key_placement
 		(atom "INDEX" true) (define name tsql_identifier) (atom "ON" true)
-		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
+		(? (define schema2 tsql_schema_identifier)) (define tbl tsql_identifier)
 		"(" (define columns tsql_key_columns) ")"
 		(? (atom "INCLUDE" true) "(" (define included (+ tsql_identifier ",")) ")")
 		(? (atom "WHERE" true) (define predicate tsql_expression))
@@ -2126,7 +2135,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 				true (list (quote error) "index already exists: " name)))))))
 	(define tsql_alter_index (parser '(
 		(atom "ALTER" true) (atom "INDEX" true) (or (atom "ALL" true) tsql_identifier) (atom "ON" true)
-		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
+		(? (define schema2 tsql_schema_identifier)) (define tbl tsql_identifier)
 		(define action (regex "(?:REBUILD|REORGANIZE|DISABLE)\\b" true))
 		(? (atom "PARTITION" true) "=" (or tsql_int (atom "ALL" true)))
 		(? (define options tsql_index_options))
@@ -2140,7 +2149,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(atom "DROP" true) (atom "INDEX" true)
 		(? (atom "IF" true) (atom "EXISTS" true))
 		(define name tsql_identifier) (atom "ON" true)
-		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
+		(? (define schema2 tsql_schema_identifier)) (define tbl tsql_identifier)
 		(? tsql_index_options)
 	) (lambda () (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
@@ -2171,16 +2180,16 @@ a separator is recognized only on a physical line containing no SQL text. */
 	(define foreign_key_definition (parser '(
 		(? (atom "CONSTRAINT" true) (define name tsql_identifier))
 		(atom "FOREIGN" true) (atom "KEY" true) "(" (define columns (+ tsql_identifier ",")) ")"
-		(atom "REFERENCES" true) (? tsql_schema_identifier ".") (define target tsql_identifier)
+		(atom "REFERENCES" true) (? (define target_schema tsql_schema_identifier)) (define target tsql_identifier)
 		"(" (define target_columns (+ tsql_identifier ",")) ")"
 		(? (atom "ON" true) (atom "DELETE" true) (define deletemode tsql_foreign_key_mode))
 		(? (atom "ON" true) (atom "UPDATE" true) (define updatemode tsql_foreign_key_mode))
 	) (list (quote list) "foreign" name (cons (quote list) columns) target
-			(cons (quote list) target_columns) updatemode deletemode)))
+			(cons (quote list) target_columns) updatemode deletemode target_schema)))
 	(define tsql_create_table (parser '(
 		(atom "CREATE" true) (atom "TABLE" true)
 		(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
-		(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier)
+		(? (define schema2 tsql_schema_identifier)) (define name tsql_identifier)
 		"(" (define columns (+ (or
 			/* Placement and direction are physical index preferences. Logical
 			uniqueness uses native keys; MemCP selects its own columnar access. */
@@ -2198,13 +2207,23 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(? tsql_index_location)
 	) (lambda () (begin
 			(if policy (policy (coalesce schema2 schema) name true) true)
+			/* Native FK endpoints share the CREATE target database. Preserve the
+			parsed qualifier until here, then pass only the existing native FK
+			declaration to sql_create_table; never silently discard another owner. */
+			(define target_database (coalesce schema2 schema))
+			(define columns (map columns (lambda (definition) (match definition
+				((symbol list) "foreign" key key_columns target target_columns update_mode delete_mode target_schema)
+				(if (or (nil? target_schema) (equal? target_schema target_database))
+					(list (quote list) "foreign" key key_columns target target_columns update_mode delete_mode)
+					(error "cross-database foreign keys are not supported"))
+				_ definition))))
 			(define columns (tsql_table_primary_columns columns))
 			(list (quote sql_create_table) (coalesce schema2 schema) name
 				(cons (quote list) (map columns tsql_identity_native_column))
 				(tsql_identity_table_options columns) (if ifnotexists true false) (quote tx))))))
 	(define tsql_alter_table (parser '(
 		(atom "ALTER" true) (atom "TABLE" true)
-		(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier)
+		(? (define schema2 tsql_schema_identifier)) (define name tsql_identifier)
 		(define changes (+ (or
 			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define column tsql_identifier)
 				(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
@@ -2291,12 +2310,12 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(list (quote drop_sql_database) (list (quote session) "__memcp_tx") name (if ifexists true false)))))
 		(parser '((atom "DROP" true) (atom "TABLE" true)
 			(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
-			(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier))
+			(? (define schema2 tsql_schema_identifier)) (define name tsql_identifier))
 			(lambda () (begin (if policy (policy (coalesce schema2 schema) name true) true)
 				(list (quote droptable) (coalesce schema2 schema) name (if ifexists true false)))))
 		(parser '((atom "DROP" true) (atom "VIEW" true)
 			(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
-			(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier))
+			(? (define schema2 tsql_schema_identifier)) (define name tsql_identifier))
 			(lambda () (begin (if policy (policy (coalesce schema2 schema) name true) true)
 				(list (quote drop_sql_view) (list (quote session) "__memcp_tx")
 					(coalesce schema2 schema) name (if ifexists true false)))))
@@ -2376,18 +2395,18 @@ a separator is recognized only on a physical line containing no SQL text. */
 					(list "assign" name (car value)))
 				(parser '((atom "DROP" true) (or (atom "PROCEDURE" true) (atom "PROC" true))
 					(define ignore (? (atom "IF" true) (atom "EXISTS" true)))
-					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier))
+					(? (define owner tsql_schema_identifier)) (define name tsql_identifier))
 					(list "drop-procedure" (coalesce owner schema) name (if ignore true false)))
 				(parser '((or (atom "EXEC" true) (atom "EXECUTE" true))
 					"(" (define text (capture tsql_expression)) ")")
 					(list "execute-dynamic" (car text)))
 				(parser '((or (atom "EXEC" true) (atom "EXECUTE" true))
 					(define status tsql_script_variable) "="
-					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
+					(? (define owner tsql_schema_identifier)) (define name tsql_identifier)
 					(define arguments (* tsql_script_exec_argument ",")))
 					(list "execute-status" (coalesce owner schema) name arguments status))
 				(parser '((or (atom "EXEC" true) (atom "EXECUTE" true))
-					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
+					(? (define owner tsql_schema_identifier)) (define name tsql_identifier)
 					(define arguments (* tsql_script_exec_argument ",")))
 					(list "execute" (coalesce owner schema) name arguments))
 				(parser (define statement (capture p)) (list "statement" (strtrim (car statement))))
@@ -2405,7 +2424,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define tsql_script_procedure (parser '(
 				(atom "CREATE" true) (define replace (? (atom "OR" true) (atom "ALTER" true)))
 				(or (atom "PROCEDURE" true) (atom "PROC" true))
-				(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
+				(? (define owner tsql_schema_identifier)) (define name tsql_identifier)
 				(define parameters (* tsql_script_procedure_parameter ","))
 				(atom "AS" true) (define body (capture (+ tsql_script_item empty)))
 			) (list "batch" (list (list "create-procedure" (coalesce owner schema) name

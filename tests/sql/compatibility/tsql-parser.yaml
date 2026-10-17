@@ -339,7 +339,6 @@ test_cases:
     rows: 1
     data:
     - id: 1
-  noncritical: true
 - name: TSQL DISTINCT
   sql: SELECT DISTINCT name FROM tsql_data ORDER BY name
   expect:
