@@ -8789,6 +8789,32 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\t%s.Loc = LocNone", xVal.goVar)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		} else if v.Op == token.XOR {
+			// Copy the left operand so aliased and multiply-used inputs retain
+			// their ownership. All backends already implement register XOR.
+			yVal := g.resolveValue(v.Y)
+			g.emit("ctx.EnsureDescsTogether(&%s, &%s)", xVal.goVar, yVal.goVar)
+			dv := g.allocDesc()
+			g.emit("var %s JITValueDesc", dv)
+			g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
+			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() ^ %s.Imm.Int())}", dv, xVal.goVar, yVal.goVar)
+			g.emit("} else {")
+			g.emit("\txorResult := ctx.AllocRegExcept(%s.Reg, %s.Reg)", xVal.goVar, yVal.goVar)
+			g.emit("\tctx.EmitMovToReg(xorResult, %s)", xVal.goVar)
+			g.emit("\tif %s.Loc == LocReg {", yVal.goVar)
+			g.emit("\t\tctx.EmitXorInt64(xorResult, %s.Reg)", yVal.goVar)
+			g.emit("\t} else {")
+			g.emit("\t\txorOther := ctx.AllocRegExcept(xorResult)")
+			g.emit("\t\tctx.EmitMovToReg(xorOther, %s)", yVal.goVar)
+			g.emit("\t\tctx.EmitXorInt64(xorResult, xorOther)")
+			g.emit("\t\tctx.FreeReg(xorOther)")
+			g.emit("\t}")
+			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: xorResult}", dv)
+			g.emit("}")
+			if narrowUnsigned {
+				g.emitNormalizeUnsignedNarrow(dv, resBits)
+			}
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		} else if v.Op == token.OR {
 			// Bitwise OR
 			dv := g.allocDesc()

@@ -1201,6 +1201,27 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (int? -42) true "negative integer literal is an int")
 	(assert (equal? (intdiv 9007199254740993 1) 9007199254740993) true "integer literal division preserves precision")
 
+
+	/* Exact bit operators share one carrier; source-language widths stay outside SCM. */
+	(assert (bit_and 219 46) 10 "integer bit intersection")
+	(assert (bit_or 219 46) 255 "integer bit union")
+	(assert (bit_xor 219 46) 245 "integer bit exclusive union")
+	(assert (bit_not -9223372036854775808) 9223372036854775807 "integer bit complement preserves endpoints")
+	(assert (bit_shift_left 1 63) -9223372036854775808 "integer left shift preserves the sign bit")
+	(assert (bit_shift_right -1 1) 9223372036854775807 "integer right shift is logical")
+	(assert (bit_shift_left 1 64) 0 "integer shift does not mask a large count")
+	(assert (nil? (bit_and nil 1)) true "integer bits preserve nil")
+	(assert ((jit (lambda (a b) (bit_and a b))) 219 46) 10 "jit integer AND")
+	(assert ((jit (lambda (a b) (bit_or a b))) 219 46) 255 "jit integer OR")
+	(assert ((jit (lambda (a b) (bit_xor a b))) -9223372036854775808 -1) 9223372036854775807 "jit integer XOR preserves endpoints")
+	(assert ((jit (lambda (a) (bit_xor a a))) 219) 0 "jit integer XOR aliases")
+	(assert ((jit (lambda (a b) (+ (bit_xor a b) a))) 219 46) 464 "jit integer XOR retains multiply used input")
+	(assert ((jit (lambda (a) (bit_not a))) -9223372036854775808) 9223372036854775807 "jit integer complement")
+	(assert ((jit (lambda (a n) (bit_shift_left a n))) 1 63) -9223372036854775808 "jit integer left shift")
+	(assert ((jit (lambda (a n) (bit_shift_right a n))) -1 1) 9223372036854775807 "jit integer logical right shift")
+	(assert ((jit (lambda (a n) (bit_shift_left a n))) 1 64) 0 "jit integer large shift")
+	(assert (nil? ((jit (lambda (a b) (bit_xor a b))) nil 1)) true "jit integer XOR nil")
+
 	/* Test for + */
 	(assert (+ 1 2) 3 "1 + 2 should be 3")
 	(assert (+ 1 2 3) 6 "1 + 2 + 3 should be 6")

@@ -1046,3 +1046,27 @@ func enabled(args ...Scmer) Scmer { return NewBool(JITEnabled()) }
 		t.Fatalf("generator baked in its own build flag:\n%s", code)
 	}
 }
+
+func TestIntegerXorUsesExistingNativeEmitter(t *testing.T) {
+	for _, expression := range []string{"a[0].Int() ^ a[1].Int()", "a[0].Int() ^ -1", "a[0].Int() ^ a[0].Int()", "(a[0].Int() ^ a[1].Int()) + a[0].Int()"} {
+		fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func NewInt(int64) Scmer
+func (Scmer) Int() int64
+func xor(a ...Scmer) Scmer { return NewInt(`+expression+`) }
+`, "xor")
+		code, errMsg := generateClosure("xor", fn, nil)
+		if errMsg != "" {
+			t.Fatal(errMsg)
+		}
+		if !strings.Contains(code, "ctx.EmitXorInt64") {
+			t.Fatalf("missing native XOR: %s", code)
+		}
+		if !strings.Contains(code, "ctx.EnsureDescsTogether(") {
+			t.Fatalf("XOR operands can evict each other while reloading: %s", code)
+		}
+		if !strings.Contains(code, "xorResult := ctx.AllocRegExcept") {
+			t.Fatalf("XOR did not preserve source register ownership: %s", code)
+		}
+	}
+}
