@@ -2936,7 +2936,7 @@ test_cases:
       error: true
       contains: unsupported implicit conversion
   - name: IIF checks unselected result declarations even without rows
-    sql: SELECT IIF(id=1,a,CAST(NULL AS VARBINARY(4))) AS value FROM tsql_condition_input WHERE id<0
+    sql: SELECT IIF(id=1,a,CAST(NULL AS DATE)) AS value FROM tsql_condition_input WHERE id<0
     expect:
       error: true
       contains: unsupported implicit conversion
@@ -3990,6 +3990,37 @@ test_cases:
   - name: Binary conditional fixed sources retain their declared padding
     sql: SELECT ISNULL(CAST(NULL AS INT),CAST(0x2A AS BINARY(2))) AS padded_bytes,ISNULL(CAST(NULL AS INT),CAST(42 AS BINARY(2))) AS padded_number
     expect: {rows: 1,data: [{padded_bytes: 10752,padded_number: 42}]}
+
+
+  - name: Binary conditional empty source accepts the declared integer conversion
+    sql: SELECT IIF(id=1,a,CAST(NULL AS VARBINARY(4))) AS value FROM tsql_condition_input WHERE id<0
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_condition_input
+    - sql: CREATE TABLE tsql_condition_input(id INT PRIMARY KEY,a INT)
+    - sql: INSERT tsql_condition_input VALUES(1,10),(2,NULL)
+    expect:
+      rows: 0
+      data: []
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_condition_input
+
+  - name: Binary conditional empty source retains the declared integer descriptor
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests"
+          "SELECT IIF(id=1,a,CAST(NULL AS VARBINARY(4))) AS value FROM tsql_condition_input WHERE id<0"
+          "" (newsession)))
+        (and (equal? (count fields) 1)
+          (equal? ((car fields) "sql_type") "INT")
+          (equal? ((car fields) "size") 4)))
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_condition_input
+    - sql: CREATE TABLE tsql_condition_input(id INT PRIMARY KEY,a INT)
+    - sql: INSERT tsql_condition_input VALUES(1,10),(2,NULL)
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_condition_input
 
 
 cleanup:
