@@ -3,6 +3,7 @@
 metadata:
   version: '1.0'
   syntax: tsql
+  requires_tds: true
   description: T-SQL grammar reuses native DDL, defaults and query planning
 setup:
   - sql: DROP TABLE IF EXISTS tsql_setup_memo
@@ -1143,7 +1144,7 @@ test_cases:
       (begin
         (define info (sql_expr_info (list) (tsql_cast_expr "42" "SMALLINT" (list))))
         (and (equal? (sql_info_type info) "SMALLINT")
-          (expression_equal? (sql_info_formula info) (list tsql_cast_integer "42" -32768 32767))
+          (expression_equal? (sql_info_formula info) (list (quote tsql_cast_integer) "42" -32768 32767))
           (equal? (eval (sql_info_formula info)) 42)))
     expect: {result: true}
   - name: bit cast emits only its conversion without boolean markers
@@ -1151,7 +1152,7 @@ test_cases:
       (begin
         (define info (sql_expr_info (list) (tsql_cast_expr "1" "BIT" (list))))
         (and (equal? (sql_info_type info) "BIT")
-          (expression_equal? (sql_info_formula info) (list tsql_cast_bit "1"))
+          (expression_equal? (sql_info_formula info) (list (quote tsql_cast_bit) "1"))
           (equal? (eval (sql_info_formula info)) true)))
     expect: {result: true}
   - name: float cast emits only its conversion without type markers
@@ -1159,7 +1160,7 @@ test_cases:
       (begin
         (define info (sql_expr_info (list) (tsql_cast_expr 1 "FLOAT" (list))))
         (and (equal? (sql_info_type info) "FLOAT")
-          (expression_equal? (sql_info_formula info) (list tsql_cast_float 1))
+          (expression_equal? (sql_info_formula info) (list (quote tsql_cast_float) 1))
           (equal? (eval (sql_info_formula info)) 1)))
     expect: {result: true}
   - name: outer cast declaration determines nested conversion type
@@ -1169,7 +1170,7 @@ test_cases:
           (tsql_cast_expr (tsql_cast_expr "42" "SMALLINT" (list)) "FLOAT" (list))))
         (and (equal? (sql_info_type info) "FLOAT")
           (expression_equal? (sql_info_formula info)
-            (list tsql_cast_float (list tsql_cast_integer "42" -32768 32767)))
+            (list (quote tsql_cast_float) (list (quote tsql_cast_integer) "42" -32768 32767)))
           (equal? (eval (sql_info_formula info)) 42)))
     expect: {result: true}
   - name: case and coalesce merge declared cast types rather than helper contracts
@@ -1253,7 +1254,7 @@ test_cases:
         (define typed (sql_type_query_block block (list)))
         (define result ((qassoc_get (qb_facts typed) (quote result-types) nil) "value"))
         (and (equal? (sql_info_type result) "INT")
-          (expression_equal? ((qb_fields typed) "value") (list tsql_cast_integer nil -2147483648 2147483647))))
+          (expression_equal? ((qb_fields typed) "value") (list (quote tsql_cast_integer) nil -2147483648 2147483647))))
     expect: {result: true}
   - name: conversion inside window input uses the existing window planner
     sql: SELECT [id], SUM(CAST([amount] AS INT)) OVER () AS total FROM [tsql_native] ORDER BY [id]
@@ -1274,7 +1275,7 @@ test_cases:
           (tsql_window_expr "SUM" (list (tsql_cast_expr "42" "SMALLINT" (list))) (list))))
         (and (equal? (sql_info_type info) "INT")
           (expression_equal? (sql_info_formula info)
-            (list (quote window_func) "SUM" (list (list tsql_cast_integer "42" -32768 32767)) (list)))))
+            (list (quote window_func) "SUM" (list (list (quote tsql_cast_integer) "42" -32768 32767)) (list)))))
     expect: {result: true}
   - name: executable window plan contains no frontend type annotations
     scm: |
@@ -2076,6 +2077,1119 @@ test_cases:
       - sql: INSERT INTO tsql_identity_explicit_completion(id,value) VALUES(100,2)
     sql: SELECT @@IDENTITY AS id
     expect: {rows: 1, data: [{id: null}]}
+# Stored logical views retain portable frontend compiler contracts.
+  - name: Stored view compilers preserve independent character widths
+    setup:
+    - sql: DROP TABLE IF EXISTS portable_contract_input
+    - sql: CREATE TABLE portable_contract_input(id INT PRIMARY KEY,note NVARCHAR(20),code INT,day_value DATE)
+    - sql: INSERT INTO portable_contract_input VALUES (1,N'pending',13,NULL),(2,NULL,NULL,NULL),(3,N'pending',228,NULL)
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT CAST(note AS NVARCHAR(3)) AS short_text,CAST(note AS VARCHAR(5))
+        AS wide_text FROM portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - short_text: pen
+        wide_text: pendi
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view compilers retain decimal precision and scale
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT CAST(code AS DECIMAL(6,2)) AS value FROM portable_contract_input
+        WHERE id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - value: 13
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view compilers preserve integer and bit cast operators
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT CAST(code AS SMALLINT) AS value,CAST(code AS BIT) AS enabled
+        FROM portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - value: 13
+        enabled: true
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view compilers retain comparison operators
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT CASE WHEN code>12 AND code<14 THEN 1 ELSE 0 END AS value FROM
+        portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - value: 1
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view conditionals retain branch count and lazy evaluation
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT CASE WHEN code=0 THEN 1/0 WHEN code=13 THEN 7 ELSE 9 END AS
+        value FROM portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - value: 7
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view fallback retains its declared contract
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT COALESCE(code,7) AS value FROM portable_contract_input WHERE
+        id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - value: 13
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view character functions retain global implementations
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT LEN(note) AS n,UPPER(note) AS upper_text,REPLACE(note,'pend','end')
+        AS replaced FROM portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - n: 7
+        upper_text: PENDING
+        replaced: ending
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view numeric callbacks retain unary and division contracts
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT +code AS positive,-code AS negative,code/2 AS divided,NCHAR(code+52)
+        AS letter FROM portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - positive: 13
+        negative: -13
+        divided: 6
+        letter: A
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view aggregate compilers preserve the input declaration
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT SUM(code) AS total,AVG(code) AS mean,MIN(code) AS minimum,MAX(code)
+        AS maximum FROM portable_contract_input
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - total: 241
+        mean: 120
+        minimum: 13
+        maximum: 228
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view window compilers preserve argument presence
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT id,COUNT(*) OVER() AS total,SUM(code) OVER() AS sum_value
+        FROM portable_contract_input
+    sql: SELECT * FROM portable_contract_view ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        total: 3
+        sum_value: 241
+      - id: 2
+        total: 3
+        sum_value: 241
+      - id: 3
+        total: 3
+        sum_value: 241
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view calendar callbacks retain unit and constructor contracts
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT YEAR(DATEFROMPARTS(2024,2,29)) AS y,DATEPART(month,DATEFROMPARTS(2024,2,29))
+        AS m,DATEDIFF(day,DATEFROMPARTS(2024,2,28),DATEFROMPARTS(2024,3,1)) AS days,DAY(EOMONTH(DATEFROMPARTS(2024,2,1)))
+        AS last_day
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - y: 2024
+        m: 2
+        days: 2
+        last_day: 29
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view temporal casts retain style and calendar interval
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT CONVERT(VARCHAR(10),DATEADD(day,1,CONVERT(DATE,'20240228',112)),23)
+        AS value
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - value: '2024-02-29'
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view contracts reject invalid declared conversions
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT CAST(day_value AS VARBINARY(3)) AS value FROM portable_contract_input
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      error: true
+      contains: binary conversion from DATE is not implemented
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view restart fixture retains explicit output aliases
+    sql: CREATE VIEW portable_restart_view([Short Label],[Next Id]) AS SELECT CAST(note AS NVARCHAR(3)),id+1 FROM
+      portable_contract_input WHERE id=1
+  - name: Stored view compile recipes survive durable catalog restart
+    action: restart
+  - name: Cold restored view compilers preserve aliases and captured dimensions
+    sql: SELECT [Short Label],[Next Id] FROM portable_restart_view
+    expect:
+      rows: 1
+      data:
+      - Short Label: pen
+        Next Id: 2
+  - name: Remove restored view compile recipe fixture
+    sql: DROP VIEW portable_restart_view
+  - name: Stored view binary factories preserve fixed and varying byte widths
+    setup:
+    - sql: CREATE VIEW portable_contract_bytes AS SELECT CASE WHEN CAST(0x010203 AS BINARY(5))=0x0102030000 THEN 1
+        ELSE 0 END AS fixed_width,CASE WHEN CAST(0x010203 AS VARBINARY(2))=0x0102 THEN 1 ELSE 0 END AS varying_width
+    sql: SELECT * FROM portable_contract_bytes
+    expect:
+      rows: 1
+      data:
+      - fixed_width: 1
+        varying_width: 1
+    cleanup:
+    - sql: DROP VIEW portable_contract_bytes
+  - name: Stored view weekday factories bind DATEFIRST at each invocation
+    setup:
+    - sql: CREATE VIEW portable_contract_weekday AS SELECT DATEPART(weekday,DATEFROMPARTS(2024,1,1)) AS weekday_value
+    scm: |
+      (begin
+        (define session (newsession))
+        (define result (newsession))
+        (session "username" "root")
+        (session "schema" "memcp-tests")
+        (tsql_execute_request "memcp-tests" "SET DATEFIRST 7" session nil 0 (lambda (row) true) (lambda args true))
+        (tsql_execute_request "memcp-tests" "SELECT * FROM portable_contract_weekday" session nil 0
+          (lambda (row) (result "first" (row "weekday_value"))) (lambda args true))
+        (tsql_execute_request "memcp-tests" "SET DATEFIRST 1" session nil 0 (lambda (row) true) (lambda args true))
+        (tsql_execute_request "memcp-tests" "SELECT * FROM portable_contract_weekday" session nil 0
+          (lambda (row) (result "second" (row "weekday_value"))) (lambda args true))
+        (and (equal? (result "first") 2) (equal? (result "second") 1)))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP VIEW portable_contract_weekday
+  - name: Stored view compile recipes preserve base table policy
+    setup:
+    - sql: CREATE VIEW portable_contract_policy AS SELECT CAST(note AS NVARCHAR(3)) AS value FROM portable_contract_input
+    scm: |-
+      (try (lambda () (begin
+          (parse_tsql "memcp-tests" "SELECT * FROM portable_contract_policy"
+            (lambda (database name write) (if (equal? name "portable_contract_input") (error "portable base access denied") true)) (newsession) nil)
+          false)) (lambda (err) (equal? err "portable base access denied")))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP VIEW portable_contract_policy
+  - name: Stored view typed null casts remain declarations without runtime tags
+    setup:
+    - sql: CREATE VIEW portable_contract_nulls AS SELECT CAST(NULL AS INT) AS absent_int,CAST(NULL AS NVARCHAR(7))
+        AS absent_text
+    sql: SELECT * FROM portable_contract_nulls
+    expect:
+      rows: 1
+      data:
+      - absent_int: null
+        absent_text: null
+    cleanup:
+    - sql: DROP VIEW portable_contract_nulls
+  - name: Stored view logical compiler slots contain only portable factory syntax
+    setup:
+    - sql: CREATE VIEW portable_contract_recipes AS SELECT CASE WHEN code>0 THEN CAST(note AS NVARCHAR(3)) ELSE NCHAR(65)
+        END AS value FROM portable_contract_input
+    scm: |-
+      (begin
+          (define ir (nth (sql_find_view "memcp-tests" "portable_contract_recipes") 2))
+          (and (not (regexp_test ir "NthLocalVar|lambda|\"var\""))
+            (not (regexp_test (string (parse_tsql "memcp-tests" "SELECT * FROM portable_contract_recipes" nil (newsession) nil)) "sql_compile_expr|sql_compile_column|tsql_text_compiler"))))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP VIEW portable_contract_recipes
+  - name: Direct metadata scalar retains its current declaration policy
+    sql: SELECT COL_LENGTH(N'portable_contract_input',N'note') AS width
+    expect:
+      rows: 1
+      data:
+      - width: 40
+  - name: Stored metadata scalar refuses to persist an account callback
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_metadata_scalar
+    sql: CREATE VIEW portable_metadata_scalar AS SELECT COL_LENGTH(N'portable_contract_input',N'note') AS width
+    expect:
+      error: true
+      contains: COL_LENGTH in stored views requires a consuming compile policy
+  - name: Rejected metadata scalar view is never published
+    expect:
+      result: true
+    scm: (nil? (sql_find_view "memcp-tests" "portable_metadata_scalar"))
+  - name: Shared mysql consumer compiles stored frontend contracts
+    setup:
+    - sql: CREATE VIEW portable_shared_contract AS SELECT CAST(note AS NVARCHAR(3)) AS label,code+1 AS next_code FROM
+        portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_shared_contract
+    syntax: mysql
+    expect:
+      rows: 1
+      data:
+      - label: pen
+        next_code: 14
+    cleanup:
+    - sql: DROP VIEW portable_shared_contract
+  - name: Shared psql consumer compiles stored frontend contracts
+    setup:
+    - sql: CREATE VIEW portable_shared_contract AS SELECT CAST(note AS NVARCHAR(3)) AS label,code+1 AS next_code FROM
+        portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_shared_contract
+    syntax: psql
+    expect:
+      rows: 1
+      data:
+      - label: pen
+        next_code: 14
+    cleanup:
+    - sql: DROP VIEW portable_shared_contract
+  - name: Stored view explicit ASC collation survives the tsql consumer
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_ordered_contract
+    - sql: DROP TABLE IF EXISTS portable_order_source
+    - sql: CREATE TABLE portable_order_source(note NVARCHAR(8))
+    - sql: INSERT INTO portable_order_source VALUES(N'a'),(N'Z'),(N'b')
+    - sql: CREATE VIEW portable_ordered_contract AS SELECT TOP 1 note FROM portable_order_source ORDER BY note COLLATE
+        bin ASC
+    sql: SELECT note FROM portable_ordered_contract
+    syntax: tsql
+    expect:
+      rows: 1
+      data:
+      - note: Z
+    cleanup:
+    - sql: DROP VIEW portable_ordered_contract
+    - sql: DROP TABLE portable_order_source
+  - name: Stored view explicit DESC collation survives the tsql consumer
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_ordered_contract
+    - sql: DROP TABLE IF EXISTS portable_order_source
+    - sql: CREATE TABLE portable_order_source(note NVARCHAR(8))
+    - sql: INSERT INTO portable_order_source VALUES(N'a'),(N'Z'),(N'b')
+    - sql: CREATE VIEW portable_ordered_contract AS SELECT TOP 1 note FROM portable_order_source ORDER BY note COLLATE
+        bin DESC
+    sql: SELECT note FROM portable_ordered_contract
+    syntax: tsql
+    expect:
+      rows: 1
+      data:
+      - note: b
+    cleanup:
+    - sql: DROP VIEW portable_ordered_contract
+    - sql: DROP TABLE portable_order_source
+  - name: Stored view explicit ASC collation survives the mysql consumer
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_ordered_contract
+    - sql: DROP TABLE IF EXISTS portable_order_source
+    - sql: CREATE TABLE portable_order_source(note NVARCHAR(8))
+    - sql: INSERT INTO portable_order_source VALUES(N'a'),(N'Z'),(N'b')
+    - sql: CREATE VIEW portable_ordered_contract AS SELECT TOP 1 note FROM portable_order_source ORDER BY note COLLATE
+        bin ASC
+    sql: SELECT note FROM portable_ordered_contract
+    syntax: mysql
+    expect:
+      rows: 1
+      data:
+      - note: Z
+    cleanup:
+    - sql: DROP VIEW portable_ordered_contract
+    - sql: DROP TABLE portable_order_source
+  - name: Stored view explicit DESC collation survives the mysql consumer
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_ordered_contract
+    - sql: DROP TABLE IF EXISTS portable_order_source
+    - sql: CREATE TABLE portable_order_source(note NVARCHAR(8))
+    - sql: INSERT INTO portable_order_source VALUES(N'a'),(N'Z'),(N'b')
+    - sql: CREATE VIEW portable_ordered_contract AS SELECT TOP 1 note FROM portable_order_source ORDER BY note COLLATE
+        bin DESC
+    sql: SELECT note FROM portable_ordered_contract
+    syntax: mysql
+    expect:
+      rows: 1
+      data:
+      - note: b
+    cleanup:
+    - sql: DROP VIEW portable_ordered_contract
+    - sql: DROP TABLE portable_order_source
+  - name: Stored view explicit ASC collation survives the psql consumer
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_ordered_contract
+    - sql: DROP TABLE IF EXISTS portable_order_source
+    - sql: CREATE TABLE portable_order_source(note NVARCHAR(8))
+    - sql: INSERT INTO portable_order_source VALUES(N'a'),(N'Z'),(N'b')
+    - sql: CREATE VIEW portable_ordered_contract AS SELECT TOP 1 note FROM portable_order_source ORDER BY note COLLATE
+        bin ASC
+    sql: SELECT note FROM portable_ordered_contract
+    syntax: psql
+    expect:
+      rows: 1
+      data:
+      - note: Z
+    cleanup:
+    - sql: DROP VIEW portable_ordered_contract
+    - sql: DROP TABLE portable_order_source
+  - name: Stored view explicit DESC collation survives the psql consumer
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_ordered_contract
+    - sql: DROP TABLE IF EXISTS portable_order_source
+    - sql: CREATE TABLE portable_order_source(note NVARCHAR(8))
+    - sql: INSERT INTO portable_order_source VALUES(N'a'),(N'Z'),(N'b')
+    - sql: CREATE VIEW portable_ordered_contract AS SELECT TOP 1 note FROM portable_order_source ORDER BY note COLLATE
+        bin DESC
+    sql: SELECT note FROM portable_ordered_contract
+    syntax: psql
+    expect:
+      rows: 1
+      data:
+      - note: b
+    cleanup:
+    - sql: DROP VIEW portable_ordered_contract
+    - sql: DROP TABLE portable_order_source
+  - name: Canonical compiler point metadata distinguishes case-colliding native columns
+    setup:
+    - sql: DROP TABLE IF EXISTS portable_case_contract
+    - scm: (createtable "memcp-tests" "portable_case_contract" (list (list "column" "value" "VARCHAR" (list 8) (list
+        "collate" "bin")) (list "column" "VALUE" "INT" (list) (list))) (list) false nil)
+    scm: |
+      (begin
+        (define sources (list (list "c" "memcp-tests" "portable_case_contract" false nil)))
+        (define lower (sql_expr_info sources (list (quote get_column) "c" false "value" false)))
+        (define upper (sql_expr_info sources (list (quote get_column) "c" false "VALUE" false)))
+        (and (equal? (sql_info_type lower) "VARCHAR") (equal? (sql_info_collation lower) '("bin" 2))
+          (equal? (sql_info_type upper) "INT") (nil? (sql_info_collation upper))
+          (expression_equal? (sql_info_formula lower) (list (quote get_column) "c" false "value" false))
+          (expression_equal? (sql_info_formula upper) (list (quote get_column) "c" false "VALUE" false))))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP TABLE portable_case_contract
+  - name: Remove portable view source fixture
+    sql: DROP TABLE portable_contract_input
+
+
+  # A cached procedure consumes the current portable view declaration at each call.
+  - name: Portable view procedure creation has an explicit DDL completion
+    setup:
+      - sql: DROP PROCEDURE IF EXISTS portable_lifecycle_read
+      - sql: DROP VIEW IF EXISTS portable_lifecycle_view
+      - sql: DROP TABLE IF EXISTS portable_lifecycle_input
+      - sql: CREATE TABLE portable_lifecycle_input (id INT PRIMARY KEY,note NVARCHAR(20),code INT)
+      - sql: INSERT INTO portable_lifecycle_input VALUES (1,N'pending',13),(2,N'other',21)
+      - sql: CREATE VIEW portable_lifecycle_view AS SELECT id,CAST(note AS NVARCHAR(3)) AS label,code+1 AS adjusted FROM portable_lifecycle_input
+    sql: CREATE PROCEDURE portable_lifecycle_read @row_id INT AS SELECT label,adjusted FROM portable_lifecycle_view WHERE id=@row_id
+    expect:
+      rows: 1
+      data: [{affected_rows: 0}]
+  - name: Portable view procedure reads its first declared compile contract
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      rows: 1
+      data: [{label: pen, adjusted: 14}]
+  - name: Portable view cached procedure retains invocation parameter bindings
+    sql: EXEC portable_lifecycle_read @row_id=2
+    expect:
+      rows: 1
+      data: [{label: oth, adjusted: 22}]
+  - name: Portable view alter rejects a missing definition
+    setup:
+      - sql: DROP VIEW IF EXISTS portable_lifecycle_absent
+    sql: ALTER VIEW portable_lifecycle_absent AS SELECT 1 AS value
+    expect:
+      error: true
+      contains: does not exist
+  - name: Portable view alter never publishes a missing definition
+    scm: (nil? (sql_find_view "memcp-tests" "portable_lifecycle_absent"))
+    expect: {result: true}
+  - name: Portable view alter rejects invalid output aliases before publication
+    sql: ALTER VIEW portable_lifecycle_view(first,second) AS SELECT code FROM portable_lifecycle_input
+    expect:
+      error: true
+      contains: view column alias count does not match its output columns
+  - name: Portable view cached procedure survives rejected definition replacement
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      rows: 1
+      data: [{label: pen, adjusted: 14}]
+  - name: Portable view alter rejects create-only existence options
+    sql: ALTER VIEW IF NOT EXISTS portable_lifecycle_view AS SELECT 1 AS value
+    expect:
+      error: true
+      contains: ALTER VIEW does not accept IF NOT EXISTS
+  - name: Portable view cached procedure sees altered width and calculation
+    setup:
+      - sql: ALTER VIEW portable_lifecycle_view AS SELECT id,CAST(note AS VARCHAR(5)) AS label,code+20 AS adjusted FROM portable_lifecycle_input
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      rows: 1
+      data: [{label: pendi, adjusted: 33}]
+  - name: Portable view cached procedure sees create or alter replacement
+    setup:
+      - sql: CREATE OR ALTER VIEW portable_lifecycle_view AS SELECT id,CAST(note AS NVARCHAR(3)) AS label,code+40 AS adjusted FROM portable_lifecycle_input
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      rows: 1
+      data: [{label: pen, adjusted: 53}]
+  - name: Portable view cached procedure rejects a dropped definition
+    setup:
+      - sql: DROP VIEW portable_lifecycle_view
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      error: true
+  - name: Portable view cached procedure sees a recreated compile contract
+    setup:
+      - sql: CREATE OR ALTER VIEW portable_lifecycle_view AS SELECT id,CAST(note AS NVARCHAR(2)) AS label,code+100 AS adjusted FROM portable_lifecycle_input
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      rows: 1
+      data: [{label: pe, adjusted: 113}]
+  - name: Portable view procedure definitions survive a durable restart
+    action: restart
+  - name: Portable view restored procedure uses the recreated compile contract
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      rows: 1
+      data: [{label: pe, adjusted: 113}]
+  - name: Portable view restored procedure sees a later altered contract
+    setup:
+      - sql: ALTER VIEW portable_lifecycle_view AS SELECT id,CAST(note AS VARCHAR(4)) AS label,code+200 AS adjusted FROM portable_lifecycle_input
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      rows: 1
+      data: [{label: pend, adjusted: 213}]
+  - name: Portable view restored procedure keeps independent invocation bindings
+    sql: EXEC portable_lifecycle_read @row_id=2
+    expect:
+      rows: 1
+      data: [{label: othe, adjusted: 221}]
+  - name: Remove portable view procedure lifecycle fixture
+    sql: DROP PROCEDURE portable_lifecycle_read
+    expect:
+      rows: 1
+      data: [{affected_rows: 0}]
+    cleanup:
+      - sql: DROP VIEW portable_lifecycle_view
+      - sql: DROP TABLE portable_lifecycle_input
+
+  # Integer/binary conversions use declared SQL contracts, including carrier boundaries.
+  - name: Binary integer tinyint to binary width 1
+    sql: SELECT CASE WHEN CAST(CAST(219 AS TINYINT) AS BINARY(1))=0xdb THEN 1 ELSE 0
+      END AS same_bytes,LEN(CAST(CAST(219 AS TINYINT) AS BINARY(1))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 1
+  - name: Binary integer tinyint to binary width 3
+    sql: SELECT CASE WHEN CAST(CAST(219 AS TINYINT) AS BINARY(3))=0x0000db THEN 1 ELSE
+      0 END AS same_bytes,LEN(CAST(CAST(219 AS TINYINT) AS BINARY(3))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 3
+  - name: Binary integer tinyint to varbinary width 1
+    sql: SELECT CASE WHEN CAST(CAST(219 AS TINYINT) AS VARBINARY(1))=0xdb THEN 1 ELSE
+      0 END AS same_bytes,LEN(CAST(CAST(219 AS TINYINT) AS VARBINARY(1))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 1
+  - name: Binary integer tinyint to varbinary width 3
+    sql: SELECT CASE WHEN CAST(CAST(219 AS TINYINT) AS VARBINARY(3))=0xdb THEN 1 ELSE
+      0 END AS same_bytes,LEN(CAST(CAST(219 AS TINYINT) AS VARBINARY(3))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 1
+  - name: Binary integer smallint to binary width 1
+    sql: SELECT CASE WHEN CAST(CAST(-12345 AS SMALLINT) AS BINARY(1))=0xc7 THEN 1 ELSE
+      0 END AS same_bytes,LEN(CAST(CAST(-12345 AS SMALLINT) AS BINARY(1))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 1
+  - name: Binary integer smallint to binary width 4
+    sql: SELECT CASE WHEN CAST(CAST(-12345 AS SMALLINT) AS BINARY(4))=0x0000cfc7 THEN
+      1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(-12345 AS SMALLINT) AS BINARY(4))) AS
+      byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 4
+  - name: Binary integer smallint to varbinary width 1
+    sql: SELECT CASE WHEN CAST(CAST(-12345 AS SMALLINT) AS VARBINARY(1))=0xc7 THEN 1
+      ELSE 0 END AS same_bytes,LEN(CAST(CAST(-12345 AS SMALLINT) AS VARBINARY(1))) AS
+      byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 1
+  - name: Binary integer smallint to varbinary width 4
+    sql: SELECT CASE WHEN CAST(CAST(-12345 AS SMALLINT) AS VARBINARY(4))=0xcfc7 THEN
+      1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(-12345 AS SMALLINT) AS VARBINARY(4)))
+      AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 2
+  - name: Binary integer int to binary width 3
+    sql: SELECT CASE WHEN CAST(CAST(-123456789 AS INT) AS BINARY(3))=0xa432eb THEN 1
+      ELSE 0 END AS same_bytes,LEN(CAST(CAST(-123456789 AS INT) AS BINARY(3))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 3
+  - name: Binary integer int to binary width 6
+    sql: SELECT CASE WHEN CAST(CAST(-123456789 AS INT) AS BINARY(6))=0x0000f8a432eb
+      THEN 1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(-123456789 AS INT) AS BINARY(6)))
+      AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 6
+  - name: Binary integer int to varbinary width 3
+    sql: SELECT CASE WHEN CAST(CAST(-123456789 AS INT) AS VARBINARY(3))=0xa432eb THEN
+      1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(-123456789 AS INT) AS VARBINARY(3)))
+      AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 3
+  - name: Binary integer int to varbinary width 6
+    sql: SELECT CASE WHEN CAST(CAST(-123456789 AS INT) AS VARBINARY(6))=0xf8a432eb THEN
+      1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(-123456789 AS INT) AS VARBINARY(6)))
+      AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 4
+  - name: Binary integer bigint to binary width 7
+    sql: SELECT CASE WHEN CAST(CAST(9223372036854775807 AS BIGINT) AS BINARY(7))=0xffffffffffffff
+      THEN 1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(9223372036854775807 AS BIGINT) AS
+      BINARY(7))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 7
+  - name: Binary integer bigint to binary width 10
+    sql: SELECT CASE WHEN CAST(CAST(9223372036854775807 AS BIGINT) AS BINARY(10))=0x00007fffffffffffffff
+      THEN 1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(9223372036854775807 AS BIGINT) AS
+      BINARY(10))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 10
+  - name: Binary integer bigint to varbinary width 7
+    sql: SELECT CASE WHEN CAST(CAST(9223372036854775807 AS BIGINT) AS VARBINARY(7))=0xffffffffffffff
+      THEN 1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(9223372036854775807 AS BIGINT) AS
+      VARBINARY(7))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 7
+  - name: Binary integer bigint to varbinary width 10
+    sql: SELECT CASE WHEN CAST(CAST(9223372036854775807 AS BIGINT) AS VARBINARY(10))=0x7fffffffffffffff
+      THEN 1 ELSE 0 END AS same_bytes,LEN(CAST(CAST(9223372036854775807 AS BIGINT) AS
+      VARBINARY(10))) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - same_bytes: 1
+        byte_count: 8
+  - name: Binary integer tinyint decodes 0
+    sql: SELECT CAST(0x00 AS TINYINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 0
+  - name: Binary integer tinyint decodes 127
+    sql: SELECT CAST(0x7f AS TINYINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 127
+  - name: Binary integer tinyint decodes 255
+    sql: SELECT CAST(0xff AS TINYINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 255
+  - name: Binary integer smallint decodes 0
+    sql: SELECT CAST(0x0000 AS SMALLINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 0
+  - name: Binary integer smallint decodes 32767
+    sql: SELECT CAST(0x7fff AS SMALLINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 32767
+  - name: Binary integer smallint decodes -32768
+    sql: SELECT CAST(0x8000 AS SMALLINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -32768
+  - name: Binary integer smallint decodes -1
+    sql: SELECT CAST(0xffff AS SMALLINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -1
+  - name: Binary integer short unsigned bytes to smallint
+    sql: SELECT CONVERT(SMALLINT,0xFF) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 255
+  - name: Binary integer int decodes 0
+    sql: SELECT CAST(0x00000000 AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 0
+  - name: Binary integer int decodes 2147483647
+    sql: SELECT CAST(0x7fffffff AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 2147483647
+  - name: Binary integer int decodes -2147483648
+    sql: SELECT CAST(0x80000000 AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -2147483648
+  - name: Binary integer int decodes -1
+    sql: SELECT CAST(0xffffffff AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -1
+  - name: Binary integer short unsigned bytes to int
+    sql: SELECT CONVERT(INT,0xFF) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 255
+  - name: Binary integer bigint decodes 0
+    sql: SELECT CAST(0x0000000000000000 AS BIGINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 0
+  - name: Binary integer bigint decodes 9223372036854775807
+    sql: SELECT CAST(0x7fffffffffffffff AS BIGINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 9223372036854775807
+  - name: Binary integer bigint decodes -9223372036854775808
+    sql: SELECT CAST(0x8000000000000000 AS BIGINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -9223372036854775808
+  - name: Binary integer bigint decodes -1
+    sql: SELECT CAST(0xffffffffffffffff AS BIGINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -1
+  - name: Binary integer short unsigned bytes to bigint
+    sql: SELECT CONVERT(BIGINT,0xFF) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 255
+  - name: Binary integer null binary to tinyint
+    sql: SELECT CAST(CAST(NULL AS VARBINARY(8)) AS TINYINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer null binary to smallint
+    sql: SELECT CAST(CAST(NULL AS VARBINARY(8)) AS SMALLINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer null binary to int
+    sql: SELECT CAST(CAST(NULL AS VARBINARY(8)) AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer null binary to bigint
+    sql: SELECT CAST(CAST(NULL AS VARBINARY(8)) AS BIGINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer null integer to binary(6)
+    sql: SELECT CONVERT(BINARY(6),CAST(NULL AS INT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer null integer to varbinary(6)
+    sql: SELECT CONVERT(VARBINARY(6),CAST(NULL AS INT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer bigint minimum encoding
+    sql: SELECT CASE WHEN CONVERT(VARBINARY(8),CAST(-9223372036854775808 AS BIGINT))=0x8000000000000000
+      THEN 1 ELSE 0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Binary integer default binary cast width
+    sql: SELECT LEN(CAST(CAST(17 AS SMALLINT) AS BINARY)) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - byte_count: 30
+  - name: Binary integer default variable cast keeps source width
+    sql: SELECT LEN(CAST(CAST(17 AS SMALLINT) AS VARBINARY)) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - byte_count: 2
+  - name: Binary integer max variable cast keeps source width
+    sql: SELECT LEN(CONVERT(VARBINARY(MAX),CAST(17 AS BIGINT),0)) AS byte_count
+    expect:
+      rows: 1
+      data:
+      - byte_count: 8
+  - name: Binary integer negative source uses native width before zero padding
+    sql: SELECT CASE WHEN CAST(CAST(-1 AS INT) AS BINARY(6))=0x0000FFFFFFFF THEN 1 ELSE
+      0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Binary integer column contracts choose the source byte width
+    sql: SELECT CASE WHEN CAST(t AS VARBINARY(8))=0xDB THEN 1 ELSE 0 END AS tiny_bytes,CASE
+      WHEN CAST(s AS BINARY(4))=0x0000CFC7 THEN 1 ELSE 0 END AS small_bytes FROM binary_integer_input
+      WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - tiny_bytes: 1
+        small_bytes: 1
+    setup:
+    - sql: DROP TABLE IF EXISTS binary_integer_input
+    - sql: CREATE TABLE binary_integer_input(id INT PRIMARY KEY,t TINYINT,s SMALLINT,i
+        INT,b BIGINT,raw VARBINARY(16))
+    - sql: INSERT INTO binary_integer_input VALUES(1,219,-12345,-123456789,-9223372036854775808,0x8123456789ABCDEF),(2,NULL,NULL,NULL,NULL,NULL)
+  - name: Binary integer column signed bigint roundtrip
+    sql: SELECT CAST(CAST(b AS VARBINARY(8)) AS BIGINT) AS value FROM binary_integer_input
+      WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - value: -9223372036854775808
+  - name: Binary integer column binary signed bigint decode
+    sql: SELECT CAST(raw AS BIGINT) AS value FROM binary_integer_input WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - value: -9141386507638288913
+  - name: Binary integer nullable column roundtrip
+    sql: SELECT CAST(CAST(b AS BINARY(8)) AS BIGINT) AS value FROM binary_integer_input
+      WHERE id=2
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer derived source retains its declared integer type
+    sql: SELECT CASE WHEN CAST(d.value AS VARBINARY(8))=0xCFC7 THEN 1 ELSE 0 END AS
+      value FROM (SELECT CAST(-12345 AS SMALLINT) AS value) d
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Binary integer derived binary contract decodes signed bits
+    sql: SELECT CAST(d.value AS INT) AS value FROM (SELECT CAST(0x89ABCDEF AS BINARY(4))
+      AS value) d
+    expect:
+      rows: 1
+      data:
+      - value: -1985229329
+  - name: Binary integer binary input preserves right truncation
+    sql: SELECT CASE WHEN CAST(0x01020304 AS BINARY(2))=0x0102 THEN 1 ELSE 0 END AS
+      value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Binary integer binary input preserves right zero padding
+    sql: SELECT CASE WHEN CAST(0x0102 AS BINARY(4))=0x01020000 THEN 1 ELSE 0 END AS
+      value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Binary integer text source remains explicitly unsupported
+    sql: SELECT CAST('17' AS VARBINARY(4))
+    expect:
+      error: true
+      contains: binary conversion from VARCHAR is not implemented
+  - name: Binary integer date source remains explicitly unsupported
+    sql: SELECT CAST(CAST('2026-01-02' AS DATE) AS BINARY(8))
+    expect:
+      error: true
+      contains: binary conversion from DATE is not implemented
+  - name: Binary integer float source remains explicitly unsupported
+    sql: SELECT CAST(CAST(17 AS FLOAT) AS BINARY(8))
+    expect:
+      error: true
+      contains: binary conversion from FLOAT is not implemented
+  - name: Binary integer invalid width is rejected
+    sql: SELECT CAST(CAST(17 AS INT) AS BINARY(0))
+    expect:
+      error: true
+      contains: invalid length for BINARY
+  - name: Binary integer inner integer range is checked before encoding
+    sql: SELECT CAST(CAST(256 AS TINYINT) AS BINARY(1))
+    expect:
+      error: true
+      contains: integer conversion overflow
+  - name: Binary integer null convert style short circuits an invalid source
+    sql: SELECT CONVERT(VARBINARY(8),CAST(256 AS TINYINT),NULL) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary integer overwide tinyint decode stays explicitly unsupported
+    sql: SELECT CAST(0x0101 AS TINYINT) AS value
+    expect:
+      error: true
+      contains: overwide binary integer conversion is not implemented
+  - name: Binary integer overwide smallint decode stays explicitly unsupported
+    sql: SELECT CAST(0x010101 AS SMALLINT) AS value
+    expect:
+      error: true
+      contains: overwide binary integer conversion is not implemented
+  - name: Binary integer overwide int decode stays explicitly unsupported
+    sql: SELECT CAST(0x0101010101 AS INT) AS value
+    expect:
+      error: true
+      contains: overwide binary integer conversion is not implemented
+  - name: Binary integer overwide bigint decode stays explicitly unsupported
+    sql: SELECT CAST(0x010101010101010101 AS BIGINT) AS value
+    expect:
+      error: true
+      contains: overwide binary integer conversion is not implemented
+  - name: Binary integer equal runtime carriers retain distinct declaration widths
+    setup:
+    - sql: INSERT INTO binary_integer_input VALUES(3,1,1,1,1,0xFF)
+    sql: SELECT LEN(CAST(t AS VARBINARY(8))) AS tiny_width,LEN(CAST(s AS VARBINARY(8)))
+      AS small_width,LEN(CAST(i AS VARBINARY(8))) AS int_width,LEN(CAST(b AS VARBINARY(8)))
+      AS big_width FROM binary_integer_input WHERE id=3
+    expect:
+      rows: 1
+      data:
+      - tiny_width: 1
+        small_width: 2
+        int_width: 4
+        big_width: 8
+  - name: Binary integer decoder uses actual byte extent rather than maximum declaration
+      width
+    sql: SELECT CAST(raw AS BIGINT) AS value FROM binary_integer_input WHERE id=3
+    expect:
+      rows: 1
+      data:
+      - value: 255
+  - name: Binary integer empty native binary payload decodes as zero
+    setup:
+    - scm: (insert (table "memcp-tests" "binary_integer_input") '("id" "raw") (list
+        (list 4 "")))
+    sql: SELECT CAST(raw AS BIGINT) AS value FROM binary_integer_input WHERE id=4
+    expect:
+      rows: 1
+      data:
+      - value: 0
+  - name: Binary integer compile callback retains only a plain typed formula
+    scm: |-
+      (begin
+        (define value (tsql_cast_expr 219 "TINYINT" (list)))
+        (define info (sql_expr_info (list) (tsql_cast_expr value "VARBINARY" (list 8))))
+        (and (equal? (sql_info_type info) "VARBINARY") (nil? (sql_info_collation info))
+          (expression_equal? (sql_info_formula info)
+            (list 'tsql_integer_to_binary (list 'tsql_cast_integer 219 0 255) 1 8 false))
+          (equal? (bin2hex (eval (sql_info_formula info))) "db")))
+    expect:
+      result: true
+  - name: Binary integer empty result metadata retains declared widths and types
+    scm: |-
+      (begin
+        (define session (newsession))
+        (session "username" "root")
+        (session "schema" "memcp-tests")
+        (session "wire_metadata" true)
+        (define output (newsession))
+        (tds_frontend "execute" session
+          (list "database" "memcp-tests" "parameters" (list) "declarations" ""
+            "text" "SELECT CAST(CAST(17 AS TINYINT) AS VARBINARY(5)) AS tiny_value,CAST(CAST(17 AS INT) AS BINARY(6)) AS fixed_value,CAST(0x8000000000000000 AS BIGINT) AS big_value WHERE 1=0")
+          (lambda (values) (output "row" true))
+          (lambda (fields) (output "fields" fields)) nil nil)
+        (and (nil? (output "row"))
+          (equal? (map (output "fields") (lambda (field) (field "size"))) '(5 6 8))
+          (equal? (map (output "fields") (lambda (field) (field "kind"))) '(165 165 38))
+          (equal? (map (output "fields") (lambda (field) (field "sql_type"))) '("VARBINARY" "BINARY" "BIGINT"))))
+    expect:
+      result: true
+  - name: Binary integer stored compile recipe fixture uses native views
+    setup:
+    - sql: DROP VIEW IF EXISTS binary_integer_view
+    sql: CREATE VIEW binary_integer_view AS SELECT CAST(CAST(b AS VARBINARY(8)) AS BIGINT)
+      AS restored,CAST(t AS BINARY(3)) AS padded FROM binary_integer_input WHERE id=1
+  - name: Binary integer stored compile recipes retain exact signed bits
+    sql: SELECT restored,CASE WHEN padded=0x0000DB THEN 1 ELSE 0 END AS same_bytes FROM
+      binary_integer_view
+    expect:
+      rows: 1
+      data:
+      - restored: -9223372036854775808
+        same_bytes: 1
+  - name: Binary integer stored compile recipes survive a durable restart
+    action: restart
+  - name: Binary integer restored compile recipes retain exact signed bits
+    sql: SELECT restored,CASE WHEN padded=0x0000DB THEN 1 ELSE 0 END AS same_bytes FROM
+      binary_integer_view
+    expect:
+      rows: 1
+      data:
+      - restored: -9223372036854775808
+        same_bytes: 1
+  - name: Binary integer restored column bytes decode without text transport
+    sql: SELECT CAST(raw AS BIGINT) AS value FROM binary_integer_input WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - value: -9141386507638288913
+  - name: Binary integer remove stored recipe fixture
+    sql: DROP VIEW binary_integer_view
+    cleanup:
+    - sql: DROP TABLE binary_integer_input
+  - name: Binary integer real TDS encodes a signed integer RPC parameter
+    tds:
+      statements:
+      - sql: SELECT CONVERT(VARBINARY(8),CAST(@value AS BIGINT)) AS encoded,CAST(CAST(@value
+          AS BIGINT) AS BINARY(10)) AS padded
+        parameters:
+        - name: value
+          value: -9223372036854775808
+        expect:
+          rows: 1
+          columns:
+          - encoded
+          - padded
+          data:
+          - encoded:
+              binary_hex: '8000000000000000'
+            padded:
+              binary_hex: 00008000000000000000
+  - name: Binary integer real TDS decodes and returns binary RPC bytes
+    tds:
+      statements:
+      - sql: SELECT CAST(@token AS BIGINT) AS decoded,CAST(@token AS VARBINARY(8)) AS
+          retained
+        parameters:
+        - name: token
+          value:
+            binary_hex: 7fffffffffffffff
+        expect:
+          rows: 1
+          columns:
+          - decoded
+          - retained
+          data:
+          - decoded: 9223372036854775807
+            retained:
+              binary_hex: 7fffffffffffffff
+  - name: Binary integer real TDS distinguishes empty bytes from SQL null
+    tds:
+      statements:
+      - sql: SELECT CAST(@empty AS BIGINT) AS empty_value,CAST(@empty AS VARBINARY(8))
+          AS empty_bytes,CAST(CAST(NULL AS VARBINARY(8)) AS BIGINT) AS missing_value,CAST(CAST(NULL
+          AS BIGINT) AS VARBINARY(8)) AS missing_bytes
+        parameters:
+        - name: empty
+          value:
+            binary_hex: ''
+        expect:
+          rows: 1
+          columns:
+          - empty_value
+          - empty_bytes
+          - missing_value
+          - missing_bytes
+          data:
+          - empty_value: 0
+            empty_bytes:
+              binary_hex: ''
+            missing_value: null
+            missing_bytes: null
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
   - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion

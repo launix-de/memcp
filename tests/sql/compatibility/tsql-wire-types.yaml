@@ -178,8 +178,12 @@ test_cases:
   - name: Binary fixed-width cast pads with zero bytes
     sql: SELECT CAST(0x4180 AS BINARY(4))=0x41800000 AS value
     expect: {rows: 1, data: [{value: true}]}
-  - name: Binary conversion refuses unsupported numeric encoding
+  - name: Binary conversion encodes the declared integer in big endian order
     sql: SELECT CAST(256 AS BINARY(2)) AS value
+    expect: {rows: 1, data: [{value: "\u0001\u0000"}]}
+  # Integral encoding is supported; approximate encoding remains unsupported.
+  - name: Binary conversion refuses unsupported numeric encoding
+    sql: SELECT CAST(CAST(256 AS FLOAT) AS BINARY(2)) AS value
     expect: {error: true}
   - name: Binary conversion refuses guessing a national text encoding
     sql: SELECT CAST(N'ä' AS VARBINARY(4)) AS value

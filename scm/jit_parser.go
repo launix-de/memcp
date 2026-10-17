@@ -517,11 +517,14 @@ func (builder *jitParserBuilder) finishRule(ruleID int) {
 	}
 	lambda := CloneOptimizerExpression(NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(params), rule.generator}))
 	action := Eval(Optimize(lambda, outer, nil), outer)
-	if jitEnabled && jitRequiredLocalSlots(rule.generator, len(params)) <= len(params) {
-		if compiled := jitCompileModeDeferred(true, action); compiled.IsProc() && compiled.Proc() != nil && compiled.Proc().Compiled != nil {
-			action = compiled
-			rule.compiledAction = compiled.Proc().Compiled
-			rule.compiledAction.DebugName = fmt.Sprintf("parser action %d", ruleID)
+	if jitEnabled {
+		requiredSlots, _ := jitRequiredLocalSlots(rule.generator, len(params))
+		if requiredSlots <= len(params) {
+			if compiled := jitCompileModeDeferred(true, action); compiled.IsProc() && compiled.Proc() != nil && compiled.Proc().Compiled != nil {
+				action = compiled
+				rule.compiledAction = compiled.Proc().Compiled
+				rule.compiledAction.DebugName = fmt.Sprintf("parser action %d", ruleID)
+			}
 		}
 	}
 	if !builder.inlineActions {
