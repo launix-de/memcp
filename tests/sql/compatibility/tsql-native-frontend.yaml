@@ -3308,6 +3308,27 @@ test_cases:
   - name: Remove identifier function durable view fixture
     sql: DROP VIEW identifier_function_restart
 
+  - name: Identifier function widths survive derived table contracts
+    scm: |-
+      (begin
+        (define fields (tds_describe "memcp-tests" "SELECT TOP(0) q.quoted,q.component FROM (SELECT QUOTENAME(N'a]b') AS quoted,PARSENAME(N'x.y',1) AS component) q" "" (newsession)))
+        (and (equal? (map fields (lambda (f) (f "sql_type"))) '("NVARCHAR" "NVARCHAR"))
+          (equal? (map fields (lambda (f) (f "size"))) '(516 256))))
+    expect:
+      result: true
+  - name: Identifier function widths survive stored view contracts
+    scm: |-
+      (begin
+        (define fields (tds_describe "memcp-tests" "SELECT TOP(0) quoted,component FROM identifier_metadata_view" "" (newsession)))
+        (and (equal? (map fields (lambda (f) (f "sql_type"))) '("NVARCHAR" "NVARCHAR"))
+          (equal? (map fields (lambda (f) (f "size"))) '(516 256))))
+    expect:
+      result: true
+    setup:
+    - sql: CREATE VIEW identifier_metadata_view AS SELECT QUOTENAME(N'a]b') AS quoted,PARSENAME(N'x.y',1) AS component
+    cleanup:
+    - sql: DROP VIEW identifier_metadata_view
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
   - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion
