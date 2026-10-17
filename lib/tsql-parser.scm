@@ -8,12 +8,12 @@ The negative accumulator also represents the minimum int64 without overflow. */
 (define tsql_parse_integer (lambda (text) (begin
 	(define trimmed (sql_trim text))
 	(if (equal? trimmed "") 0 (begin
-		(if (regexp_test trimmed "^[+-]?[0-9]+$") true (error "invalid integer text"))
+		(if (regexp_test trimmed "^[+-]?[0-9]+$") true (tsql_raise_error 245 "invalid integer text" 1))
 		(define negative (equal? (substr trimmed 0 1) "-"))
 		(define digits (regexp_replace trimmed "^[+-]?0*" ""))
 		(define bound (if negative "9223372036854775808" "9223372036854775807"))
 		(if (or (> (strlen digits) 19) (and (equal? (strlen digits) 19) (> digits bound)))
-			(error "integer conversion overflow") true)
+			(tsql_raise_error 8115 "integer conversion overflow" 1) true)
 		(define coefficient (reduce (produceN (strlen digits)) (lambda (acc i)
 			(- (* acc 10) (intdiv (simplify (substr digits i 1)) 1))) 0))
 		(if negative coefficient (- 0 coefficient)))))))
@@ -252,24 +252,26 @@ the frontend's compile-time type system. Keep precision/scale out of the Scheme
 runtime and storage hot paths; do not substitute float64 for exact casts. */
 (define tsql_float_max (simplify "1.7976931348623157e308"))
 (define tsql_numeric_input (lambda (value)
-	(if (number? value) (if (and (>= value (- 0 tsql_float_max)) (<= value tsql_float_max)) value (error "floating conversion overflow"))
+	(if (number? value) (if (and (>= value (- 0 tsql_float_max)) (<= value tsql_float_max)) value (tsql_raise_error 8115 "floating conversion overflow" 1))
 		(if (string? value) (begin
 			(define text (sql_trim value))
 			(if (equal? text "") 0
 				(if (regexp_test text "^[+-]?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
 					(begin (define number (simplify text))
 						(if (and (number? number) (>= number (- 0 tsql_float_max)) (<= number tsql_float_max)) number
-							(error "floating conversion overflow")))
-					(error "invalid numeric text"))))
+							(tsql_raise_error 8115 "floating conversion overflow" 1)))
+					(tsql_raise_error 8114 "invalid numeric text" 1))))
 			(if (equal? value true) 1 (if (equal? value false) 0 (error "unsupported numeric conversion")))))))
 (define tsql_cast_integer (lambda (value minimum maximum)
 	(if (nil? value) nil (begin
 		(define integer (if (string? value) (tsql_parse_integer value)
 			(if (int? value) value (intdiv (tsql_numeric_input value) 1))))
 		(if (or (nil? integer) (< integer minimum) (> integer maximum))
-			(error "integer conversion overflow") integer)))))
+			(tsql_raise_error 8115 "integer conversion overflow" 1) integer)))))
 (define tsql_cast_float (lambda (value) (if (nil? value) nil (simplify (tsql_numeric_input value)))))
 (define tsql_cast_decimal (lambda (value precision scale) (if (nil? value) nil (begin
+	(if (and (string? value) (equal? (sql_trim value) ""))
+		(tsql_raise_error 8114 "invalid numeric text" 1) true)
 	/* The declaration selects the integer carrier for scale zero. Preserve an
 	already integral input rather than route it through floating-point round. */
 	(define number (if (and (string? value) (regexp_test (sql_trim value) "^[+-]?[0-9]+$"))
@@ -281,7 +283,7 @@ runtime and storage hot paths; do not substitute float64 for exact casts. */
 			(error "decimal scale exceeds native numeric precision"))))
 	(define bound (simplify (concat "1e" (- precision scale))))
 	(if (and (> converted (- 0 bound)) (< converted bound)) converted
-		(error "decimal conversion overflow"))))))
+		(tsql_raise_error 8115 "decimal conversion overflow" 1))))))
 (define tsql_cast_binary (lambda (value length fixed) (if (nil? value) nil (begin
 	(if (string? value) true (error "numeric binary conversion is not implemented"))
 	(define bytes (if (or (equal? length -1) (<= (strlen value) length)) value (substr value 0 length)))
@@ -369,7 +371,7 @@ normalization remains in use; this guard rejects overflow, including carry from
 rounding, before native insertion. Full precision-limit emulation is deferred. */
 (define tsql_assignment_decimal (lambda (value threshold) (if (nil? value) nil (begin
 	(define number (tsql_numeric_input value))
-	(if (or (>= number threshold) (<= number (- 0 threshold))) (error "decimal conversion overflow") number)))))
+	(if (or (>= number threshold) (<= number (- 0 threshold))) (tsql_raise_error 8115 "decimal conversion overflow" 1) number)))))
 (define tsql_assignment_expr (lambda (value declaration) (begin
 	(define type (toUpper (declaration "RawType")))
 	(if (equal? type "ROWVERSION")
@@ -423,13 +425,15 @@ recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. 
 	(map columns (lambda (name) (begin
 		(define declaration (tsql_target_column_declaration database table_name name planning_session))
 		(if (nil? declaration) (error "unknown INSERT column: " name) declaration)))))))
-/* Numeric text must fit its declared output width. Select this helper from
-SQL input metadata; a native carrier never decides the conversion policy. */
-(define tsql_cast_numeric_text (lambda (value length national fixed)
+/* Numeric text width and Boolean spelling follow the declared input type.
+Only the small integer family uses the ASCII overflow marker; BIGINT and
+national text retain their conversion error. Runtime carriers select no type. */
+(define tsql_cast_numeric_text (lambda (value length national fixed asterisk boolean)
 	(if (nil? value) nil (begin
-		(if (and (not (equal? length -1)) (> (strlen (string value)) length))
-			(error "numeric character conversion overflow") true)
-		((if fixed tsql_cast_fixed_text tsql_cast_text) value length national)))))
+		(define text (string (if boolean (if value 1 0) value)))
+		(define text (if (and (not (equal? length -1)) (> (strlen text) length))
+			(if asterisk "*" (tsql_raise_error 8115 "numeric character conversion overflow" 1)) text))
+		((if fixed tsql_cast_fixed_text tsql_cast_text) text length national)))))
 (define tsql_text_compiler (lambda (length national fixed) (lambda (infos) (begin
 	(define info (car infos))
 	(define source (sql_info_type info))
@@ -439,7 +443,9 @@ SQL input metadata; a native carrier never decides the conversion policy. */
 				"DATETIME2" "%Y-%m-%d %H:%i:%s.000" _ "%Y-%m-%d %H:%i:%s"))
 		(sql_info_formula info)))
 	(define converted (if (sql_numeric_type? source)
-		(list (quote tsql_cast_numeric_text) formula length national fixed)
+		(list (quote tsql_cast_numeric_text) formula length national fixed
+			(and (not national) (has? '("TINYINT" "SMALLINT" "INT" "INTEGER") source))
+			(has? '("BIT" "BOOL" "BOOLEAN") source))
 		(list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national)))
 	(sql_info converted
 		(if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR")
@@ -473,17 +479,17 @@ configurable cutoff remain separate compatibility work. */
 (define tsql_export_datetime_seconds (lambda (value) (if (nil? value) nil (begin
 	(define text (toUpper (sql_trim (string value))))
 	(if (regexp_test text "^[0-9]{2}[.-][0-9]{2}[.-][0-9]{2}( [0-9]{2}:[0-9]{2}:[0-9]{2}( (AM|PM))?)?$")
-		true (error "invalid day/month/year datetime text"))
+		true (tsql_raise_error 241 "invalid day/month/year datetime text" 1))
 	(define year (substr text 6 2))
 	(define date (concat (if (< (tsql_parse_integer year) 50) "20" "19") year "-" (substr text 3 2) "-" (substr text 0 2)))
 	(define clock (if (equal? (strlen text) 8) "00:00:00" (substr text 9 8)))
 	(define clock (if (> (strlen text) 17) (begin
 		(define hour (tsql_parse_integer (substr clock 0 2)))
-		(if (> hour 12) (error "invalid twelve-hour datetime text") true)
+		(if (> hour 12) (tsql_raise_error 241 "invalid twelve-hour datetime text" 1) true)
 		(define hour (+ (mod hour 12) (if (equal? (substr text 18 2) "PM") 12 0)))
 		(concat (if (< hour 10) "0" "") hour (substr clock 2 6))) clock))
 	(define parsed (str_to_date (concat date " " clock) "%Y-%m-%d %H:%i:%s"))
-	(if (nil? parsed) (error "invalid datetime value") (unix_timestamp parsed))))))
+	(if (nil? parsed) (tsql_raise_error 241 "invalid datetime value" 1) (unix_timestamp parsed))))))
 (define tsql_styled_text_compiler (lambda (pattern type dimensions) (lambda (infos) (begin
 	(define input (car infos))
 	(define formula (list format_date (tsql_calendar_difference_formula input) pattern))
@@ -502,15 +508,22 @@ configurable cutoff remain separate compatibility work. */
 		(error "unsupported CONVERT style for " type)))))
 /* TRY converts only a validated conversion recipe. The operand is a strict
 argument outside the catch closure, so its own errors are never conversion
-failures. Native representation limits remain explicit errors before that
-closure; neither SQL declarations nor unsupported operations are guessed from
-runtime values or error-message text. */
+failures. Unsupported fractional, high-scale and bounded-input contracts
+remain explicit errors. Only deliberate frontend conversion errors are caught;
+neither SQL declarations nor error classes are guessed from runtime carriers
+or error-message text. */
 (define tsql_try_cast_input (lambda (value national) (if (nil? value) true (begin
 	(define limit (if national 4000 8000))
 	(define units (if (and national (> (strlen value) limit))
 		(reduce (split value "") (lambda (units character)
 			(+ units (if (equal? (strlen character) 4) 2 1))) 0) (strlen value)))
 	(if (> units limit) (error "TRY_CAST input length exceeds the supported limit") true)))))
+/* Reuse the frontend's structured SQL errors. Unexpected helper failures,
+cancellation and unsupported operations are never successful NULL casts. */
+(define tsql_try_conversion_error (lambda (cause) (match cause
+	'("tsql-error" number _message _state)
+	(if (has? '(245 8114 8115 241 242) number) nil (error cause))
+	_ (error cause))))
 (define tsql_try_conversion_compiler (lambda (type dimensions style bounded_input) (lambda (infos) (begin
 	(define input (car infos))
 	(define source (sql_info_type input))
@@ -536,16 +549,15 @@ runtime values or error-message text. */
 		(> (cadr (tsql_decl_dimensions type dimensions)) 15)))
 	(define body (if unsupported_scale (sql_info_formula converted)
 		(list (quote try) (list (quote lambda) '() (sql_info_formula converted))
-			(list (quote lambda) (list (quote conversion_error)) nil))))
-	(define checks (if (equal? style (quote sql_null_style)) '()
-		(merge
-			(if (and bounded_input text) (list (list (quote tsql_try_cast_input) operand
-				(has? '("NCHAR" "NVARCHAR" "NTEXT") source))) '())
-			(if (and text (tsql_temporal_type? type) (not (equal? type "DATE")))
-				(list (list (quote tsql_calendar_cast_text) operand)) '()))))
+			(list (quote lambda) (list (quote conversion_error))
+				(list (quote tsql_try_conversion_error) (quote conversion_error))))))
+	(define checks (if (and bounded_input text (not (equal? style (quote sql_null_style))))
+		(list (list (quote tsql_try_cast_input) operand (has? '("NCHAR" "NVARCHAR" "NTEXT") source))) '()))
 	(sql_info (list (list (quote lambda) (list operand)
 		(cons (quote begin) (append checks body))) (sql_info_formula input))
-		(sql_info_type converted) (sql_info_collation converted))))))
+		(sql_info_type converted)
+		(if (and text (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type))
+			(sql_info_collation input) (sql_info_collation converted)))))))
 (define tsql_try_convert_expr (lambda (value type dimensions style bounded_input) (begin
 	(tsql_decl_dimensions type dimensions)
 	(list (quote sql_compile_expr) (list (quote tsql_try_conversion_compiler)
@@ -617,9 +629,9 @@ Numeric dates count days from 1900; native DATE/DATETIME values are Unix values.
 	(define anchored (if (regexp_test text "^[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?$")
 		(concat "1900-01-01 " text) text))
 	(define parsed (parse_date (regexp_replace anchored "T" " ")))
-	(if (nil? parsed) (error "invalid calendar input") parsed)))))
+	(if (nil? parsed) (tsql_raise_error 241 "invalid calendar input" 1) parsed)))))
 (define tsql_calendar_days (lambda (value) (if (nil? value) nil (begin
-	(if (and (>= value -53690) (< value 2958464)) true (error "numeric datetime conversion overflow"))
+	(if (and (>= value -53690) (< value 2958464)) true (tsql_raise_error 242 "numeric datetime conversion overflow" 1))
 	(define days (intdiv value 1))
 	(define seconds (intdiv (* (- value days) 86400) 1))
 	(date_add (date_add (parse_date "1900-01-01") days "DAY") seconds "SECOND")))))
@@ -676,7 +688,7 @@ No row-level datatype dispatch or alternate temporal representation is needed. *
 	(date_add (date_add value days "DAY") (intdiv (- amount (* days 86400)) 1) "SECOND")))))
 (define tsql_calendar_range (lambda (value minimum)
 	(if (nil? value) nil (if (and (>= (unix_timestamp value) minimum) (<= (unix_timestamp value) 253402300799))
-		value (error "calendar result overflow")))))
+		value (tsql_raise_error 242 "calendar result overflow" 1)))))
 /* Temporal contracts are compiled from SQL declarations. The native carrier
 is the existing Unix date value; subsecond precision remains deferred rather
 than introducing another runtime datatype or precision-emulation layer. */
@@ -689,7 +701,7 @@ than introducing another runtime datatype or precision-emulation layer. */
 	(define seconds (unix_timestamp value))
 	(define rounded (date_add value (intdiv (- (* 60 (floor (/ (+ seconds 30) 60))) seconds) 1) "SECOND"))
 	(if (and (>= (unix_timestamp rounded) -2208988800) (<= (unix_timestamp rounded) 3453321540))
-		rounded (error "small datetime conversion overflow"))))))
+		rounded (tsql_raise_error 242 "small datetime conversion overflow" 1))))))
 (define tsql_temporal_style_pattern (lambda (style output) (match style
 	1 (if output "%m/%d/%y" "%m/%d/%Y") 101 "%m/%d/%Y"
 	4 (if output "%d.%m.%y" "%d.%m.%Y") 104 "%d.%m.%Y"
@@ -705,17 +717,19 @@ than introducing another runtime datatype or precision-emulation layer. */
 	(define pattern (tsql_temporal_style_pattern style false))
 	(define text (if (has? '(1 12) style) (begin
 		(define offset (if (equal? style 12) 0 6))
+		(if (< (strlen text) (+ offset 2)) (tsql_raise_error 241 "invalid short calendar year" 1) true)
 		(define year (substr text offset 2))
-		(if (regexp_test year "^[0-9]{2}$") true (error "invalid short calendar year"))
+		(if (regexp_test year "^[0-9]{2}$") true (tsql_raise_error 241 "invalid short calendar year" 1))
 		(concat (substr text 0 offset) (if (< (tsql_parse_integer year) 50) "20" "19")
 			year (substr text (+ offset 2)))) text))
 	(define value (if (has? '(21 121) style) (parse_date text) (str_to_date text pattern)))
-	(if (nil? value) (error "invalid styled calendar input") value)))))
+	(if (nil? value) (tsql_raise_error 241 "invalid styled calendar input" 1) value)))))
 /* The current native carrier has whole seconds. Explicit conversions that
 would retain fractional clocks fail until a generic higher-precision carrier
 is available; accepting them here would silently lose the user's value. */
 (define tsql_calendar_cast_text (lambda (value) (if (nil? value) nil (begin
-	(if (regexp_test value "[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]*[1-9]")
+	(if (and (regexp_test value "[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]*[1-9]")
+		(not (nil? (parse_date (regexp_replace (sql_trim value) "T" " ")))))
 		(error "fractional temporal conversion is not implemented") value)))))
 (define tsql_temporal_compiler (lambda (target style) (lambda (infos) (begin
 	(define input (car infos))
@@ -1217,6 +1231,9 @@ The shared expression compiler still owns the SQL type; these additional wire
 dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
+	((symbol sql_compile_expr) ((symbol tsql_try_conversion_compiler) type ((symbol quote) dimensions) _style _bounded) _value)
+	(tsql_decl_dimensions type (if (and (empty_list? dimensions)
+		(has? '("VARCHAR" "NVARCHAR" "CHAR" "NCHAR" "BINARY" "VARBINARY") type)) '(30) dimensions))
 	((symbol tsql_cast_decimal) _value precision scale) (list precision scale)
 	((symbol tsql_read_identity) _state) '(38 0)
 	((symbol tsql_cast_binary) _value length _fixed) (list length)

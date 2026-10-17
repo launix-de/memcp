@@ -341,6 +341,28 @@ test_cases:
           rows: 1
           data:
           - value: 7
+  - name: TRY dimensioned decimals use numeric wire output in direct and prepared queries
+    tds:
+      statements:
+      - sql: SELECT TRY_CAST(N'12.34' AS DECIMAL(8,2)) AS value
+        expect:
+          rows: 1
+          data:
+          - value: '12.34'
+      - sql: SELECT TRY_CAST(@raw AS DECIMAL(8,2)) AS value
+        prepare: true
+        parameters:
+        - name: raw
+          value: '12.34'
+        expect:
+          rows: 1
+          data:
+          - value: '12.34'
+      - sql: SELECT TRY_CAST(N'12.34' AS DECIMAL(8,2)) AS value WHERE 1=0
+        expect:
+          rows: 0
+          columns:
+          - value
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_wire_contract
   - sql: DROP TABLE IF EXISTS tsql_wire_text

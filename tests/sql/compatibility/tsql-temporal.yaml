@@ -1336,4 +1336,20 @@ test_cases:
   expect:
     error: true
     contains: conversion
+- name: TRY rejects malformed fractional calendars as invalid input
+  sql: SELECT TRY_CAST(N'not-a-date 12:13:14.1' AS DATETIME2(0)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY short year styles reject incomplete input without helper panics
+  sql: SELECT TRY_CONVERT(DATE,N'x',1) AS a,TRY_CONVERT(DATE,N'x',12) AS b,TRY_CONVERT(DATE,N'',1) AS c,TRY_CONVERT(DATE,N'',12)
+    AS d
+  expect:
+    rows: 1
+    data:
+    - a: null
+      b: null
+      c: null
+      d: null
 cleanup: []

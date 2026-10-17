@@ -2828,6 +2828,101 @@ test_cases:
         absent: null
   - name: Remove TRY conversion restart fixture
     sql: DROP VIEW try_conversion_restart
+  - name: Column contracts select ASCII integer and Boolean conversion policies
+    sql: SELECT CAST(narrow_value AS VARCHAR(2)) AS a,TRY_CAST(wide_value AS VARCHAR(2)) AS b,CAST(flag AS NVARCHAR(4))
+      AS c FROM try_text_policy ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - a: '*'
+        b: null
+        c: '1'
+      - a: '*'
+        b: null
+        c: '0'
+      - a: null
+        b: null
+        c: null
+    setup:
+    - sql: CREATE TABLE try_text_policy(id INT PRIMARY KEY,narrow_value INT,wide_value BIGINT,flag BIT)
+    - sql: INSERT INTO try_text_policy VALUES(1,1234,1234,1),(2,-1234,-1234,0),(3,NULL,NULL,NULL)
+    cleanup:
+    - sql: DROP TABLE try_text_policy
+  - name: TRY NULL style preserves declared character collation
+    scm: "(begin\n (define info (sql_expr_info (list) (tsql_try_convert_expr\n  (list (quote sql_type_expr) \"\
+      box\" \"NVARCHAR\" '(\"en_ci\" 0)) \"NVARCHAR\" '(8) (quote sql_null_style) false)))\n (and (equal? (sql_info_type\
+      \ info) \"NVARCHAR\") (equal? (sql_info_collation info) '(\"en_ci\" 0)) (nil? (eval (sql_info_formula info)))))"
+    expect:
+      result: true
+  - name: TRY does not recover unexpected converter failures
+    scm: "(begin\n (define info (sql_expr_info (list) (tsql_try_convert_expr 7 \"INT\" (list) nil false)))\n\
+      \ (eval (list (list (quote lambda) (list (quote tsql_cast_integer)) (sql_info_formula info))\n  (lambda\
+      \ (_value _minimum _maximum) (error \"unexpected-converter-failure\")))))"
+    expect:
+      error: true
+      contains: unexpected-converter-failure
+  - name: TRY recovers only explicit supported conversion error numbers
+    scm: "(and\n (nil? (tsql_try_conversion_error '(\"tsql-error\" 245 \"bad integer\" 1)))\n (nil? (tsql_try_conversion_error\
+      \ '(\"tsql-error\" 8114 \"bad numeric\" 1)))\n (nil? (tsql_try_conversion_error '(\"tsql-error\" 8115 \"\
+      overflow\" 1)))\n (nil? (tsql_try_conversion_error '(\"tsql-error\" 241 \"bad calendar\" 1)))\n (nil? (tsql_try_conversion_error\
+      \ '(\"tsql-error\" 242 \"calendar range\" 1)))\n (try (lambda () (begin (tsql_try_conversion_error '(\"\
+      tsql-error\" 8134 \"not a conversion\" 1)) false))\n  (lambda (cause) (expression_equal? cause '(\"tsql-error\"\
+      \ 8134 \"not a conversion\" 1)))))"
+    expect:
+      result: true
+  - name: TRY target dimensions remain exact on empty output
+    scm: "(begin\n (define session (newsession)) (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
+      ) (session \"wire_metadata\" true)\n (define output (newsession))\n (tds_frontend \"execute\" session (list\
+      \ \"database\" \"memcp-tests\" \"parameters\" (list) \"declarations\" \"\" \"text\" \"SELECT TRY_CAST(N'12.34'\
+      \ AS DECIMAL(8,2)) AS d,TRY_CAST(N'x' AS NVARCHAR(5)) AS n,TRY_CAST(0x01 AS VARBINARY(5)) AS b,TRY_CAST(N'x'\
+      \ AS NVARCHAR) AS dn,TRY_CAST(0x01 AS VARBINARY) AS db WHERE 1=0\")\n  (lambda (_row) (output \"row\" true))\
+      \ (lambda (fields) (output \"fields\" fields)) nil nil)\n (and (nil? (output \"row\"))\n  (equal? (map\
+      \ (output \"fields\") (lambda (field) (field \"kind\"))) '(108 231 165 231 165))\n  (equal? (map (output\
+      \ \"fields\") (lambda (field) (field \"size\"))) '(5 10 5 60 30))\n  (equal? ((car (output \"fields\"))\
+      \ \"precision\") 8) (equal? ((car (output \"fields\")) \"scale\") 2)))"
+    expect:
+      result: true
+    setup: []
+    cleanup: []
+  - name: TRY target dimensions remain exact on NULL values
+    scm: "(begin\n (define session (newsession)) (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
+      ) (session \"wire_metadata\" true)\n (define output (newsession))\n (tds_frontend \"execute\" session (list\
+      \ \"database\" \"memcp-tests\" \"parameters\" (list) \"declarations\" \"\" \"text\" \"SELECT TRY_CAST(NULL\
+      \ AS DECIMAL(8,2)) AS d,TRY_CONVERT(NVARCHAR(5),NULL,NULL) AS n,TRY_CAST(NULL AS VARBINARY(5)) AS b,TRY_CAST(NULL\
+      \ AS NVARCHAR) AS dn,TRY_CAST(NULL AS VARBINARY) AS db WHERE 1=0\")\n  (lambda (_row) (output \"row\" true))\
+      \ (lambda (fields) (output \"fields\" fields)) nil nil)\n (and (nil? (output \"row\"))\n  (equal? (map\
+      \ (output \"fields\") (lambda (field) (field \"kind\"))) '(108 231 165 231 165))\n  (equal? (map (output\
+      \ \"fields\") (lambda (field) (field \"size\"))) '(5 10 5 60 30))\n  (equal? ((car (output \"fields\"))\
+      \ \"precision\") 8) (equal? ((car (output \"fields\")) \"scale\") 2)))"
+    expect:
+      result: true
+    setup: []
+    cleanup: []
+  - name: TRY target dimensions remain exact on portable view
+    scm: "(begin\n (define session (newsession)) (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
+      ) (session \"wire_metadata\" true)\n (define output (newsession))\n (tds_frontend \"execute\" session (list\
+      \ \"database\" \"memcp-tests\" \"parameters\" (list) \"declarations\" \"\" \"text\" \"SELECT * FROM try_dimensions_view\
+      \ WHERE 1=0\")\n  (lambda (_row) (output \"row\" true)) (lambda (fields) (output \"fields\" fields)) nil\
+      \ nil)\n (and (nil? (output \"row\"))\n  (equal? (map (output \"fields\") (lambda (field) (field \"kind\"\
+      ))) '(108 231 165 231 165))\n  (equal? (map (output \"fields\") (lambda (field) (field \"size\"))) '(5\
+      \ 10 5 60 30))\n  (equal? ((car (output \"fields\")) \"precision\") 8) (equal? ((car (output \"fields\"\
+      )) \"scale\") 2)))"
+    expect:
+      result: true
+    setup:
+    - sql: CREATE VIEW try_dimensions_view AS SELECT TRY_CAST(N'12.34' AS DECIMAL(8,2)) AS d,TRY_CAST(N'x' AS
+        NVARCHAR(5)) AS n,TRY_CAST(0x01 AS VARBINARY(5)) AS b,TRY_CAST(N'x' AS NVARCHAR) AS dn,TRY_CAST(0x01
+        AS VARBINARY) AS db
+    cleanup:
+    - sql: DROP VIEW try_dimensions_view
+  - name: Conversion failures retain structured catch number and message
+    sql: BEGIN TRY SELECT CAST(N'bad' AS INT) AS value; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS number,ERROR_MESSAGE()
+      AS message; END CATCH
+    expect:
+      rows: 1
+      data:
+      - number: 245
+        message: invalid integer text
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
   - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion

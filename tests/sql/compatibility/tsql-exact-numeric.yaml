@@ -936,4 +936,65 @@ test_cases:
   expect:
     error: true
     contains: overflow
+- name: Small integer ASCII width uses a single marker and fixed padding
+  sql: SELECT CAST(1234 AS VARCHAR(2)) AS a,CONVERT(CHAR(3),-1234) AS b,TRY_CAST(CAST(1234 AS SMALLINT) AS
+    VARCHAR(2)) AS c,TRY_CONVERT(VARCHAR(1),CAST(255 AS TINYINT)) AS d
+  expect:
+    rows: 1
+    data:
+    - a: '*'
+      b: '*  '
+      c: '*'
+      d: '*'
+- name: BIGINT ASCII overflow remains a conversion failure
+  sql: SELECT TRY_CAST(CAST(1234 AS BIGINT) AS VARCHAR(2)) AS a,TRY_CONVERT(CHAR(2),CAST(-1234 AS BIGINT))
+    AS b
+  expect:
+    rows: 1
+    data:
+    - a: null
+      b: null
+- name: Ordinary BIGINT ASCII overflow remains an error
+  sql: SELECT CAST(CAST(1234 AS BIGINT) AS VARCHAR(2)) AS value
+  expect:
+    error: true
+    contains: overflow
+- name: Numeric text conversion NULL and declared Boolean spelling
+  sql: SELECT CAST(CAST(1 AS BIT) AS VARCHAR(4)) AS a,TRY_CAST(CAST(0 AS BIT) AS NVARCHAR(4)) AS b,CONVERT(CHAR(3),CAST(1
+    AS BIT)) AS c,TRY_CONVERT(VARCHAR(2),CAST(NULL AS INT)) AS d
+  expect:
+    rows: 1
+    data:
+    - a: '1'
+      b: '0'
+      c: '1  '
+      d: null
+- name: National numeric text widths reject rather than use ASCII marker
+  sql: SELECT TRY_CAST(-1234 AS NVARCHAR(2)) AS a,TRY_CONVERT(NCHAR(2),1234) AS b,TRY_CAST(CAST(12.34 AS DECIMAL(6,2))
+    AS VARCHAR(2)) AS c
+  expect:
+    rows: 1
+    data:
+    - a: null
+      b: null
+      c: null
+- name: TRY decimal text rejects empty and whitespace input
+  sql: SELECT TRY_CAST(N'' AS DECIMAL(8,2)) AS a,TRY_CONVERT(NUMERIC(8,2),N'   ') AS b,TRY_CAST(N'' AS INT)
+    AS c
+  expect:
+    rows: 1
+    data:
+    - a: null
+      b: null
+      c: 0
+- name: Ordinary decimal casts reject empty numeric text
+  sql: SELECT CAST(N'' AS DECIMAL(8,2)) AS value
+  expect:
+    error: true
+    contains: invalid numeric text
+- name: Ordinary numeric casts reject whitespace numeric text
+  sql: SELECT CONVERT(NUMERIC(8,2),N'   ') AS value
+  expect:
+    error: true
+    contains: invalid numeric text
 cleanup: []
