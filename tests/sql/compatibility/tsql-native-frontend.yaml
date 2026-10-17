@@ -2609,6 +2609,374 @@ test_cases:
       - sql: DROP VIEW portable_lifecycle_view
       - sql: DROP TABLE portable_lifecycle_input
 
+  - name: Searched CASE converts the chosen text to its declared numeric precedence
+    sql: SELECT CASE WHEN 1=1 THEN N'12' ELSE 7 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 12
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_condition_input
+    - sql: CREATE TABLE tsql_condition_input(id INT PRIMARY KEY,a INT,txt NVARCHAR(20),money_index MONEY)
+    - sql: INSERT INTO tsql_condition_input VALUES(1,10,N'3',1.9),(2,NULL,NULL,NULL)
+    - sql: DROP TABLE IF EXISTS tsql_count_input
+    - sql: CREATE TABLE tsql_count_input(id INT PRIMARY KEY,note NVARCHAR(20))
+    - sql: INSERT INTO tsql_count_input VALUES(1,N'pending'),(2,NULL),(3,N'pending')
+  - name: Simple CASE converts result arms with the same declared numeric contract
+    sql: SELECT CASE 2 WHEN 1 THEN 7 WHEN 2 THEN N'12' ELSE 9 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 12
+  - name: CASE rejects nonboolean searched conditions
+    sql: SELECT CASE WHEN 1 THEN 7 ELSE 9 END AS value
+    expect:
+      error: true
+      contains: Boolean
+  - name: CASE rejects all untyped NULL result arms
+    sql: SELECT CASE WHEN 1=1 THEN NULL ELSE NULL END AS value
+    expect:
+      error: true
+      contains: declared non-NULL
+  - name: CASE uses all result arms when selecting the numeric contract
+    sql: SELECT CASE WHEN 1=0 THEN 7 ELSE N'bad' END AS value
+    expect:
+      error: true
+      contains: integer
+  - name: CASE without ELSE retains a typed NULL result
+    sql: SELECT CASE WHEN 1=0 THEN 7 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: IIF selects true false and unknown outcomes
+    sql: SELECT IIF(2>1,N'yes',N'no') AS a,IIF(1>2,7,9) AS b,IIF(1=NULL,7,9) AS c
+    expect:
+      rows: 1
+      data:
+      - a: 'yes'
+        b: 9
+        c: 9
+  - name: IIF converts both result arms using numeric precedence
+    sql: SELECT IIF(1=1,N'12',7)+3 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 15
+  - name: IIF accepts typed NULL branches
+    sql: SELECT IIF(1=1,CAST(NULL AS INT),CAST(NULL AS INT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: IIF rejects all untyped NULL branches
+    sql: SELECT IIF(1=1,NULL,NULL) AS value
+    expect:
+      error: true
+      contains: declared non-NULL
+  - name: IIF rejects a numeric condition
+    sql: SELECT IIF(1,7,9) AS value
+    expect:
+      error: true
+      contains: Boolean
+  - name: IIF rejects missing arguments
+    sql: SELECT IIF(1=1,7) AS value
+    expect:
+      error: true
+      contains: unknown function
+  - name: IIF rejects extra arguments
+    sql: SELECT IIF(1=1,7,9,11) AS value
+    expect:
+      error: true
+      contains: unknown function
+  - name: CHOOSE uses one based ordinals and truncates fractional indexes
+    sql: SELECT CHOOSE(1,N'one',N'two') AS a,CHOOSE(2.9,N'one',N'two') AS b
+    expect:
+      rows: 1
+      data:
+      - a: one
+        b: two
+  - name: CHOOSE returns NULL for missing and out of range indexes
+    sql: SELECT CHOOSE(0,N'one',N'two') AS a,CHOOSE(3,N'one',N'two') AS b,CHOOSE(-1,N'one',N'two') AS c,CHOOSE(NULL,N'one',N'two')
+      AS d
+    expect:
+      rows: 1
+      data:
+      - a: null
+        b: null
+        c: null
+        d: null
+  - name: CHOOSE converts selected values according to all declared arms
+    sql: SELECT CHOOSE(1,N'12',7)+3 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 15
+  - name: CHOOSE keeps a selected typed NULL
+    sql: SELECT CHOOSE(1,CAST(NULL AS INT),7) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: CHOOSE rejects a temporal ordinal instead of interpreting its Unix carrier
+    sql: SELECT CHOOSE(CAST('2026-01-01' AS DATE),N'one',N'two') AS value
+    expect:
+      error: true
+      contains: integer
+  - name: CHOOSE rejects an absent value list
+    sql: SELECT CHOOSE(1) AS value
+    expect:
+      error: true
+      contains: unknown function
+  - name: CHOOSE rejects all untyped NULL alternatives
+    sql: SELECT CHOOSE(1,NULL,NULL) AS value
+    expect:
+      error: true
+      contains: declared non-NULL
+  - name: Conditional branches use current row values in native scans
+    sql: SELECT id,CASE WHEN id=1 THEN txt ELSE a END+1 AS case_value,IIF(id=1,txt,a)+1 AS if_value,CHOOSE(id,txt,a)+1
+      AS choice_value FROM tsql_condition_input ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        case_value: 4
+        if_value: 4
+        choice_value: 4
+      - id: 2
+        case_value: null
+        if_value: null
+        choice_value: null
+  - name: Conditional expressions remain usable inside native aggregates
+    sql: SELECT SUM(IIF(id=1,txt,a)) AS if_total,SUM(CASE WHEN id=1 THEN txt ELSE a END) AS case_total,SUM(CHOOSE(id,txt,a))
+      AS choice_total FROM tsql_condition_input
+    expect:
+      rows: 1
+      data:
+      - if_total: 3
+        case_total: 3
+        choice_total: 3
+  - name: COUNT_BIG counts rows nonnull values and distinct values
+    sql: SELECT COUNT_BIG(*) AS rows_count,COUNT_BIG(note) AS filled,COUNT_BIG(DISTINCT note) AS distinct_count FROM
+      tsql_count_input
+    expect:
+      rows: 1
+      data:
+      - rows_count: 3
+        filled: 2
+        distinct_count: 1
+  - name: COUNT_BIG ALL uses the same native nonnull count
+    sql: SELECT COUNT_BIG(ALL note) AS value FROM tsql_count_input
+    expect:
+      rows: 1
+      data:
+      - value: 2
+  - name: COUNT_BIG returns zero on an empty input
+    sql: SELECT COUNT_BIG(*) AS a,COUNT_BIG(note) AS b,COUNT_BIG(DISTINCT note) AS c FROM tsql_count_input WHERE id<0
+    expect:
+      rows: 1
+      data:
+      - a: 0
+        b: 0
+        c: 0
+  - name: Native count windows retain NULL partition membership
+    sql: SELECT id,COUNT(*) OVER (PARTITION BY note) AS native_count,COUNT_BIG(*) OVER (PARTITION BY note) AS big_count
+      FROM tsql_count_input ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        native_count: 2
+        big_count: 2
+      - id: 2
+        native_count: 1
+        big_count: 1
+      - id: 3
+        native_count: 2
+        big_count: 2
+    noncritical: true
+  - name: COUNT_BIG rejects unsupported distinct star syntax
+    sql: SELECT COUNT_BIG(DISTINCT *) AS value FROM tsql_count_input
+    expect:
+      error: true
+      contains: Parser failed
+  - name: COUNT_BIG rejects absent arguments
+    sql: SELECT COUNT_BIG() AS value FROM tsql_count_input
+    expect:
+      error: true
+      contains: unknown function
+  - name: Empty conditional and count descriptions preserve SQL contracts
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests"
+          "SELECT TOP(0) CASE WHEN id=1 THEN txt ELSE a END AS c,IIF(id=1,txt,a) AS i,CHOOSE(id,txt,a) AS h,COUNT_BIG(*) OVER () AS n FROM tsql_condition_input" "" (newsession)))
+        (map fields (lambda (field) (field "sql_type"))))
+    expect:
+      result:
+      - INT
+      - INT
+      - INT
+      - BIGINT
+  - name: IIF skips an unselected scalar division on current rows
+    sql: SELECT id,IIF(id=1,10/(id-2),7) AS value FROM tsql_condition_input ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: -10
+      - id: 2
+        value: 7
+  - name: CHOOSE skips unselected scalar divisions on current rows
+    sql: SELECT id,CHOOSE(id,7,10/(id-1)) AS value FROM tsql_condition_input ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: 7
+      - id: 2
+        value: 10
+  - name: Nested conditional forms retain the chosen integer contract
+    sql: SELECT IIF(1=1,CHOOSE(1,N'12',7),CASE WHEN 1=1 THEN 9 ELSE 2 END) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 12
+  - name: Conditional Unicode metadata follows all declared result arms
+    scm: |
+      (map (tds_describe "memcp-tests"
+        "SELECT TOP(0) CASE WHEN id=1 THEN N'x' ELSE 'y' END AS c,IIF(id=1,'x',N'y') AS i,CHOOSE(id,'x',N'y') AS h FROM tsql_condition_input" "" (newsession))
+        (lambda (field) (field "sql_type")))
+    expect:
+      result:
+      - NVARCHAR
+      - NVARCHAR
+      - NVARCHAR
+  - name: COUNT and COUNT_BIG preserve distinct declared metadata
+    scm: |
+      (map (tds_describe "memcp-tests"
+        "SELECT COUNT(*) AS n,COUNT_BIG(*) AS b,COUNT_BIG(note) AS v,COUNT_BIG(DISTINCT note) AS d FROM tsql_count_input" "" (newsession))
+        (lambda (field) (field "sql_type")))
+    expect:
+      result:
+      - INT
+      - BIGINT
+      - BIGINT
+      - BIGINT
+  - name: COUNT_BIG nonnull partitions and global windows use the existing planner
+    sql: SELECT id,COUNT_BIG(*) OVER (PARTITION BY note) AS grouped,COUNT_BIG(*) OVER () AS total,COUNT_BIG(ALL note)
+      OVER () AS filled FROM tsql_count_input WHERE note IS NOT NULL ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        grouped: 2
+        total: 2
+        filled: 2
+      - id: 3
+        grouped: 2
+        total: 2
+        filled: 2
+  - name: COUNT_BIG participates in grouped HAVING without an alternate aggregate path
+    sql: SELECT note,COUNT_BIG(*) AS total FROM tsql_count_input WHERE note IS NOT NULL GROUP BY note HAVING COUNT_BIG(*)>1
+    expect:
+      rows: 1
+      data:
+      - note: pending
+        total: 2
+  - name: Conditional scalar subqueries remain shared logical queries
+    sql: SELECT id,IIF(id=1,(SELECT MAX(a) FROM tsql_condition_input),7) AS value,CHOOSE(id,(SELECT MAX(a) FROM tsql_condition_input),7)
+      AS choice FROM tsql_condition_input ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: 10
+        choice: 10
+      - id: 2
+        value: 7
+        choice: 7
+  - name: Conditional expressions feed native INSERT SELECT conversions
+    sql: INSERT INTO tsql_conditional_copy(id,value) SELECT id,IIF(id=1,txt,a) FROM tsql_condition_input
+    expect:
+      affected_rows: 2
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_conditional_copy
+    - sql: CREATE TABLE tsql_conditional_copy(id INT PRIMARY KEY,value INT)
+  - name: Searched CASE skips an unselected scalar division on current rows
+    sql: SELECT id,CASE WHEN id=1 THEN 10/(id-2) ELSE 7 END AS value FROM tsql_condition_input ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: -10
+      - id: 2
+        value: 7
+  - name: Conditional expressions compile to ordinary formulas without SQL wrappers
+    scm: |
+      (not (regexp_test (string (parse_tsql "memcp-tests" "SELECT CASE WHEN id=1 THEN txt ELSE a END AS c,IIF(id=1,txt,a) AS i,CHOOSE(id,txt,a) AS h,COUNT_BIG(*) OVER () AS n FROM tsql_condition_input" nil nil nil)) "sql_type_expr|sql_compile_expr"))
+    expect:
+      result: true
+  - name: CHOOSE converts money indexes with their declared integer rounding rule
+    sql: SELECT CHOOSE(money_index,N'first',N'second') AS money_value,CHOOSE(CAST(1.9 AS DECIMAL(2,1)),N'first',N'second')
+      AS decimal_value FROM tsql_condition_input WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - money_value: second
+        decimal_value: first
+  - name: CHOOSE rejects an index outside the implicit integer range
+    sql: SELECT CHOOSE(CAST(2147483648 AS BIGINT),N'first',N'second') AS value
+    expect:
+      error: true
+      contains: integer conversion overflow
+  - name: CASE checks unselected result declarations even without rows
+    sql: SELECT CASE WHEN id=1 THEN a ELSE CAST('2026-01-01' AS DATE) END AS value FROM tsql_condition_input WHERE
+      id<0
+    expect:
+      error: true
+      contains: unsupported implicit conversion
+  - name: IIF checks unselected result declarations even without rows
+    sql: SELECT IIF(id=1,a,CAST(NULL AS VARBINARY(4))) AS value FROM tsql_condition_input WHERE id<0
+    expect:
+      error: true
+      contains: unsupported implicit conversion
+  - name: Conditional EXISTS predicates keep their Boolean syntax contract
+    sql: SELECT CASE WHEN EXISTS(SELECT 1) THEN 7 ELSE 9 END AS a,IIF(NOT EXISTS(SELECT 1 WHERE 1=0),7,9) AS b
+    expect:
+      rows: 1
+      data:
+      - a: 7
+        b: 7
+  - name: Conditional literal membership preserves NULL and negation semantics
+    sql: SELECT CASE WHEN 1 IN(1,2) THEN 7 ELSE 9 END AS a,IIF(3 IN(1,NULL),7,9) AS b,IIF(2 NOT IN(1),7,9) AS c
+    expect:
+      rows: 1
+      data:
+      - a: 7
+        b: 9
+        c: 7
+  - name: Conditional subquery membership remains on the shared decorrelation path
+    sql: SELECT CASE WHEN 1 IN(SELECT 1) THEN 7 ELSE 9 END AS a,IIF(2 NOT IN(SELECT 1),7,9) AS b
+    expect:
+      rows: 1
+      data:
+      - a: 7
+        b: 7
+  - name: Inserted conditional values retain ordinary native data
+    sql: SELECT id,value FROM tsql_conditional_copy ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: 3
+      - id: 2
+        value: null
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_conditional_copy
+    - sql: DROP TABLE IF EXISTS tsql_condition_input
+    - sql: DROP TABLE IF EXISTS tsql_count_input
+
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
   - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion

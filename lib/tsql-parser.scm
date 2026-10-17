@@ -135,6 +135,10 @@ Only the consuming compilation creates callbacks; SQL operands stay separate. */
 		(sql_comparison_info head left_info right_info)))
 	(sql_info (if (equal? op "ne") (list (quote sql_not) (sql_info_formula comparison))
 		(sql_info_formula comparison)) "BOOLEAN" (sql_info_collation comparison))))))
+/* Predicate syntax supplies its Boolean contract before the shared logical
+markers are decorrelated. No executable annotation survives SQL compilation. */
+(define tsql_predicate_expr (lambda (formula)
+	(list (quote sql_type_expr) formula "BOOLEAN" nil)))
 (define tsql_comparison_expr (lambda (op left right)
 	(list (quote sql_compile_expr) (list (quote tsql_comparison_compiler) op) left right)))
 (define tsql_column_type (parser (define name tsql_identifier) (toUpper name)))
@@ -1153,6 +1157,45 @@ runtime values nor stores a second relational representation. */
 (define tsql_coalesce_expr (lambda (arguments)
 	(cons (quote sql_compile_expr) (cons (quote tsql_compile_coalesce) arguments))))
 
+/* Conditional value contracts use the same declared precedence as COALESCE.
+Conditions and result values remain visible to the shared binder/decorrelator;
+the compile callback emits one ordinary variadic IF, without a runtime type
+wrapper or a second evaluator. Exact decimal dimensions remain separate work. */
+(define tsql_case_expr (lambda (conditions otherwise) (begin
+	(define size (count conditions))
+	(cons (quote sql_compile_expr) (cons (lambda (infos) (begin
+		(define predicates (slice infos 0 size))
+		(if (reduce predicates (lambda (valid info)
+			(and valid (equal? (sql_info_type info) "BOOLEAN"))) true)
+			true (error "CASE/IIF requires a Boolean condition"))
+		(define values (tsql_common_value_infos (slice infos size (count infos)) nil))
+		(sql_info (cons (quote if) (append
+			(merge (map (produceN size) (lambda (i)
+				(list (sql_info_formula (nth predicates i)) (sql_info_formula (nth values i))))))
+			(sql_info_formula (nth values size))))
+			(sql_info_type (car values)) (sql_info_collation (car values)))))
+		(append (merge (list (map conditions car) (map conditions cadr))) otherwise))))))
+/* CHOOSE is a scalar selection, not an eager list of SQL values. Native MATCH
+binds the converted ordinal once and evaluates only its chosen value. SQL
+contracts are resolved for every value before this ordinary expression exists. */
+(define tsql_choose_expr (lambda (index values)
+	(cons (quote sql_compile_expr) (cons (lambda (infos) (begin
+		(define index_info (car infos))
+		(define index_type (tsql_addition_type (sql_info_type index_info)))
+		(if (or (equal? index_type "NULL") (has? tsql_addition_numeric_types index_type)
+			(has? tsql_addition_text_types index_type)) true
+			(error "CHOOSE requires an implicitly convertible integer index"))
+		(define branches (tsql_common_value_infos (cdr infos) nil))
+		(define ordinal (sql_type_lower_annotations
+			(tsql_cast_expr (if (has? '("MONEY" "SMALLMONEY") index_type)
+				(list (quote round) (sql_info_formula index_info)) (sql_info_formula index_info)) "INT" '())))
+		(sql_info (cons (quote match) (cons ordinal (merge (list
+			(merge (map (produceN (count branches)) (lambda (i)
+				(list (+ i 1) (sql_info_formula (nth branches i))))))
+			(list (quote _) nil)))))
+			(sql_info_type (car branches)) (sql_info_collation (car branches)))))
+		(cons index values)))))
+
 /* Explicit wire descriptors come from the existing SQL expression metadata,
 never from the first row. Unknown expression types stay text in this first slice. */
 /* Width/scale originate in declaration syntax, never in the first output row.
@@ -1369,11 +1412,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 
 	(define tsql_expression2 (parser (or
 
-		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub tsql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
+		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub tsql_select) ")") (list (quote not) (tsql_predicate_expr (list (quote inner_select_exists) sub))))
 		(parser '((atom "NOT" true) (define expr tsql_expression2)) '('sql_not expr))
 
-		(parser '((define a tsql_expression3) (atom "IN" true) "(" (define sub tsql_select) ")") '('inner_select_in a sub))
-		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub tsql_select) ")") (list (quote not) (list (quote inner_select_in) a sub)))
+		(parser '((define a tsql_expression3) (atom "IN" true) "(" (define sub tsql_select) ")") (tsql_predicate_expr '('inner_select_in a sub)))
+		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub tsql_select) ")") (list (quote not) (tsql_predicate_expr (list (quote inner_select_in) a sub))))
 
 		(parser '((define a tsql_expression3) (atom "COLLATE" true) (define collation tsql_identifier) "=" (define b tsql_expression2)) '('equal_collate a b collation))
 		(parser '((define a tsql_expression3) (atom "COLLATE" true) (define collation tsql_identifier) "<>" (define b tsql_expression2)) '('notequal_collate a b collation))
@@ -1392,8 +1435,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '((define a tsql_expression3) (atom "LIKE" true) (define b tsql_expression2)) '('strlike a b "utf8mb4_general_ci"))
 		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b tsql_expression2)) '('sql_not '('strlike a b "utf8mb4_general_ci")))
 
-		(parser '((define a tsql_expression3) (atom "IN" true) (define b tsql_in_values)) '('sql_in b a))
-		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "IN" true) (define b tsql_in_values)) (list (quote sql_not) (list (quote sql_in) b a)))
+		(parser '((define a tsql_expression3) (atom "IN" true) (define b tsql_in_values)) (tsql_predicate_expr '('sql_in b a)))
+		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "IN" true) (define b tsql_in_values)) (list (quote sql_not) (tsql_predicate_expr (list (quote sql_in) b a))))
 
 		(parser '((define a tsql_expression3) (atom "BETWEEN" true) (define low tsql_expression3) (atom "AND" true) (define high tsql_expression3)) (list (quote and) (list (quote >=) a low) (list (quote <=) a high)))
 		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "BETWEEN" true) (define low tsql_expression3) (atom "AND" true) (define high tsql_expression3)) (list (quote sql_not) (list (quote and) (list (quote >=) a low) (list (quote <=) a high))))
@@ -1420,6 +1463,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '("+" (define expr tsql_expression6)) (tsql_positive_expr expr))
 		(parser '("-" (define expr tsql_expression6)) (tsql_negate_expr expr))
 	)))
+
+	/* Both count spellings emit the same native COUNT descriptor. Only the
+	frontend result contract differs; ALL uses its ordinary non-NULL input. */
+	(define tsql_count_type (parser (or (atom "COUNT" true true "INT")
+		(atom "COUNT_BIG" true true "BIGINT"))))
 
 	(define tsql_window_orderby_item (parser '(
 		(define col tsql_expression)
@@ -1478,25 +1526,32 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(atom "MONTH" true true "month") (atom "DAY" true true "day")))
 			"(" (define value tsql_expression) ")") (tsql_calendar_scalar_expr unit value))
 
-		(parser '((atom "EXISTS" true) "(" (define sub tsql_select) ")") '('inner_select_exists sub))
+		(parser '((atom "EXISTS" true) "(" (define sub tsql_select) ")") (tsql_predicate_expr '('inner_select_exists sub)))
 
-		(parser '((atom "CASE" true) (define conditions (+ (parser '((atom "WHEN" true) (define a tsql_expression) (atom "THEN" true) (define b tsql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch tsql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
+		(parser '((atom "CASE" true) (define conditions (+ (parser '((atom "WHEN" true) (define a tsql_expression) (atom "THEN" true) (define b tsql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch tsql_expression)) (atom "END" true)) (tsql_case_expr conditions elsebranch))
 
-		(parser '((atom "CASE" true) (define expr tsql_expression) (define conditions (+ (parser '((atom "WHEN" true) (define a tsql_expression) (atom "THEN" true) (define b tsql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch tsql_expression)) (atom "END" true)) (merge '((quote if)) (merge (extract_assoc (merge conditions) (lambda (a b) (list (tsql_comparison_expr "eq" expr a) b)))) '(elsebranch)))
+		(parser '((atom "CASE" true) (define expr tsql_expression) (define conditions (+ (parser '((atom "WHEN" true) (define a tsql_expression) (atom "THEN" true) (define b tsql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch tsql_expression)) (atom "END" true)) (tsql_case_expr (map conditions (lambda (condition)
+			(list (tsql_comparison_expr "eq" expr (car condition)) (cadr condition)))) elsebranch))
 
-		(parser '((atom "COUNT" true) "(" "*" ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "COUNT" (list) _over))
-		(parser '((atom "COUNT" true) "(" (define e tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "COUNT" (list e) _over))
+		(parser '((atom "IIF" true) "(" (define condition tsql_expression) ","
+			(define yes tsql_expression) "," (define no tsql_expression) ")")
+			(tsql_case_expr (list (list condition yes)) no))
+		(parser '((atom "CHOOSE" true) "(" (define index tsql_expression) ","
+			(define values (+ tsql_expression ",")) ")") (tsql_choose_expr index values))
+
+		(parser '((define count_type tsql_count_type) "(" "*" ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (list (quote sql_type_expr) (tsql_window_expr "COUNT" (list) _over) count_type nil))
+		(parser '((define count_type tsql_count_type) "(" (? (atom "ALL" true)) (define e tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (list (quote sql_type_expr) (tsql_window_expr "COUNT" (list e) _over) count_type nil))
 		(parser '((atom "SUM" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "SUM" (list s) _over))
 		(parser '((atom "AVG" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "AVG" (list s) _over))
 		(parser '((atom "MIN" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "MIN" (list s) _over))
 		(parser '((atom "MAX" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "MAX" (list s) _over))
 
-		(parser '((atom "COUNT" true) "(" (atom "DISTINCT" true) (define e tsql_expression) ")")
-			'('sql_type_expr '('count_distinct e) "INT" nil))
-		(parser '((atom "COUNT" true) "(" "*" ")")
-			'('sql_type_expr '((quote aggregate) 1 (quote +) 0) "INT" nil))
-		(parser '((atom "COUNT" true) "(" (define e tsql_expression) ")")
-			'('sql_type_expr '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0) "INT" nil))
+		(parser '((define count_type tsql_count_type) "(" (atom "DISTINCT" true) (define e tsql_expression) ")")
+			'('sql_type_expr '('count_distinct e) count_type nil))
+		(parser '((define count_type tsql_count_type) "(" "*" ")")
+			'('sql_type_expr '((quote aggregate) 1 (quote +) 0) count_type nil))
+		(parser '((define count_type tsql_count_type) "(" (? (atom "ALL" true)) (define e tsql_expression) ")")
+			'('sql_type_expr '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0) count_type nil))
 		(parser '((atom "SUM" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "SUM")) (tsql_aggregate_expr "SUM" '('aggregate s (car d) (cadr d)) s)))
 		(parser '((atom "AVG" true) "(" (define s tsql_expression) ")")
 			(tsql_aggregate_expr "AVG" (sql_avg_expr s (sql_aggregates "SUM") (sql_aggregates "COUNT")) s))
