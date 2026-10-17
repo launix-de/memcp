@@ -2000,8 +2000,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '("(" (define dataset (* tsql_expression ",")) ")") dataset))))
 
 	(define tsql_create_view (parser '(
-		(atom "CREATE" true)
-		(define replace (? (atom "OR" true) (atom "ALTER" true)))
+		(define mode (or
+			(parser '((atom "CREATE" true) (define replace (? (atom "OR" true) (atom "ALTER" true))))
+				(if replace "replace" "error"))
+			(parser (atom "ALTER" true) "alter")))
 		(atom "VIEW" true)
 		(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
 		(define target (or
@@ -2013,13 +2015,15 @@ that context explicitly; stored views refuse this scalar before publication. */
 	) (lambda () (match target '(schema2 id) (begin
 			(define view_schema (coalesce schema2 schema))
 			(if policy (policy view_schema id true) true)
+			(if (and (equal? mode "alter") ifnotexists)
+				(error "ALTER VIEW does not accept IF NOT EXISTS") true)
 			(define query (sql_apply_view_column_aliases (nth captured 1) aliases))
 			(if (tsql_view_has_metadata_scalar? query)
 				(error "COL_LENGTH in stored views requires a consuming compile policy") true)
 			(list (quote create_sql_view)
 				(list (quote session) "__memcp_tx")
 				view_schema id "tsql" (nth captured 0) (list (quote quote) query)
-				(if replace "replace" (if ifnotexists "ignore" "error"))))))))
+				(if (and ifnotexists (equal? mode "error")) "ignore" mode)))))))
 
 	(define tsql_schema_identifier (parser (define owner tsql_identifier)
 		(if (equal?? owner "dbo") database owner)))
