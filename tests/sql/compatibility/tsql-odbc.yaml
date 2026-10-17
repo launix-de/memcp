@@ -893,10 +893,14 @@ test_cases:
 - name: Remove previous driver declaration matrix
   sql: DROP TABLE IF EXISTS driver_type_matrix
 - name: Prepare empty driver declaration matrix
-  sql: CREATE TABLE driver_type_matrix (d DATE, dt DATETIME, sd SMALLDATETIME, t0 TIME(0), t3 TIME(3), t7 TIME(7), tdefault TIME,
-    dt20 DATETIME2(0), dt23 DATETIME2(3), dt27 DATETIME2(7), dt2default DATETIME2, dto0 DATETIMEOFFSET(0), dto3 DATETIMEOFFSET(3),
-    dto7 DATETIMEOFFSET(7), dtodefault DATETIMEOFFSET, coefficient DECIMAL(12,2), widecoefficient NUMERIC(38,4), cash MONEY, smallcash
-    SMALLMONEY, guid UNIQUEIDENTIFIER, fixedbytes BINARY(4), bytes VARBINARY(9), national NVARCHAR(10), nationalfixed NCHAR(5))
+  sql: CREATE TABLE driver_type_matrix (d DATE, dt DATETIME, sd SMALLDATETIME, t0 TIME(0), t1 TIME(1), t2 TIME(2), t3 TIME(3),
+    t4 TIME(4), t5 TIME(5), t6 TIME(6), t7 TIME(7), tdefault TIME, dt20 DATETIME2(0), dt21 DATETIME2(1), dt22 DATETIME2(2), dt23
+    DATETIME2(3), dt24 DATETIME2(4), dt25 DATETIME2(5), dt26 DATETIME2(6), dt27 DATETIME2(7), dt2default DATETIME2, dto0 DATETIMEOFFSET(0),
+    dto1 DATETIMEOFFSET(1), dto2 DATETIMEOFFSET(2), dto3 DATETIMEOFFSET(3), dto4 DATETIMEOFFSET(4), dto5 DATETIMEOFFSET(5), dto6
+    DATETIMEOFFSET(6), dto7 DATETIMEOFFSET(7), dtodefault DATETIMEOFFSET, unlimitedtext VARCHAR(MAX), unlimitednational NVARCHAR(MAX),
+    unlimitedbytes VARBINARY(MAX), longtext TEXT, longnational NTEXT, longbytes IMAGE, coefficient DECIMAL(12,2), widecoefficient
+    NUMERIC(38,4), cash MONEY, smallcash SMALLMONEY, guid UNIQUEIDENTIFIER, fixedbytes BINARY(4), bytes VARBINARY(9), national
+    NVARCHAR(10), nationalfixed NCHAR(5))
 - name: Empty DATE column keeps its driver contract
   scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
     "d") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION") (row
@@ -953,6 +957,34 @@ test_cases:
       - -154
       - null
       - null
+- name: Empty TIME(1) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "t1") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION") (row
+    "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - time
+      - -154
+      - 10
+      - 10
+      - 1
+      - -154
+      - null
+      - null
+- name: Empty TIME(2) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "t2") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION") (row
+    "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - time
+      - -154
+      - 11
+      - 10
+      - 2
+      - -154
+      - null
+      - null
 - name: Empty TIME(3) column keeps its driver contract
   scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
     "t3") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION") (row
@@ -964,6 +996,48 @@ test_cases:
       - 12
       - 10
       - 3
+      - -154
+      - null
+      - null
+- name: Empty TIME(4) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "t4") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION") (row
+    "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - time
+      - -154
+      - 13
+      - 10
+      - 4
+      - -154
+      - null
+      - null
+- name: Empty TIME(5) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "t5") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION") (row
+    "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - time
+      - -154
+      - 14
+      - 10
+      - 5
+      - -154
+      - null
+      - null
+- name: Empty TIME(6) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "t6") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION") (row
+    "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - time
+      - -154
+      - 15
+      - 10
+      - 6
       - -154
       - null
       - null
@@ -1009,6 +1083,34 @@ test_cases:
       - 9
       - 3
       - null
+- name: Empty DATETIME2(1) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "dt21") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - datetime2
+      - 93
+      - 21
+      - 16
+      - 1
+      - 9
+      - 3
+      - null
+- name: Empty DATETIME2(2) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "dt22") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - datetime2
+      - 93
+      - 22
+      - 16
+      - 2
+      - 9
+      - 3
+      - null
 - name: Empty DATETIME2(3) column keeps its driver contract
   scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
     "dt23") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
@@ -1020,6 +1122,48 @@ test_cases:
       - 23
       - 16
       - 3
+      - 9
+      - 3
+      - null
+- name: Empty DATETIME2(4) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "dt24") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - datetime2
+      - 93
+      - 24
+      - 16
+      - 4
+      - 9
+      - 3
+      - null
+- name: Empty DATETIME2(5) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "dt25") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - datetime2
+      - 93
+      - 25
+      - 16
+      - 5
+      - 9
+      - 3
+      - null
+- name: Empty DATETIME2(6) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "dt26") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - datetime2
+      - 93
+      - 26
+      - 16
+      - 6
       - 9
       - 3
       - null
@@ -1065,6 +1209,34 @@ test_cases:
       - -155
       - null
       - null
+- name: Empty DATETIMEOFFSET(1) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "dto1") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - datetimeoffset
+      - -155
+      - 28
+      - 20
+      - 1
+      - -155
+      - null
+      - null
+- name: Empty DATETIMEOFFSET(2) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "dto2") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - datetimeoffset
+      - -155
+      - 29
+      - 20
+      - 2
+      - -155
+      - null
+      - null
 - name: Empty DATETIMEOFFSET(3) column keeps its driver contract
   scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
     "dto3") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
@@ -1076,6 +1248,48 @@ test_cases:
       - 30
       - 20
       - 3
+      - -155
+      - null
+      - null
+- name: Empty DATETIMEOFFSET(4) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "dto4") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - datetimeoffset
+      - -155
+      - 31
+      - 20
+      - 4
+      - -155
+      - null
+      - null
+- name: Empty DATETIMEOFFSET(5) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "dto5") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - datetimeoffset
+      - -155
+      - 32
+      - 20
+      - 5
+      - -155
+      - null
+      - null
+- name: Empty DATETIMEOFFSET(6) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "dto6") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - datetimeoffset
+      - -155
+      - 33
+      - 20
+      - 6
       - -155
       - null
       - null
@@ -1107,6 +1321,90 @@ test_cases:
       - -155
       - null
       - null
+- name: Empty VARCHAR(MAX) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "unlimitedtext") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - varchar
+      - 12
+      - 0
+      - 0
+      - null
+      - 12
+      - null
+      - 0
+- name: Empty NVARCHAR(MAX) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "unlimitednational") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row
+    "PRECISION") (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - nvarchar
+      - -9
+      - 0
+      - 0
+      - null
+      - -9
+      - null
+      - 0
+- name: Empty VARBINARY(MAX) column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "unlimitedbytes") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - varbinary
+      - -3
+      - 0
+      - 0
+      - null
+      - -3
+      - null
+      - 0
+- name: Empty TEXT column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "longtext") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - text
+      - -1
+      - 2147483647
+      - 2147483647
+      - null
+      - -1
+      - null
+      - 2147483647
+- name: Empty NTEXT column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "longnational") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - ntext
+      - -10
+      - 1073741823
+      - 2147483646
+      - null
+      - -10
+      - null
+      - 2147483646
+- name: Empty IMAGE column keeps its driver contract
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "longbytes") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
+    (row "LENGTH") (row "SCALE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB") (row "CHAR_OCTET_LENGTH")))))
+  expect:
+    result:
+    - - image
+      - -4
+      - 2147483647
+      - 2147483647
+      - null
+      - -4
+      - null
+      - 2147483647
 - name: Empty DECIMAL(12,2) column keeps its driver contract
   scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
     "coefficient") (list "ODBCVer" 3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION")
@@ -1250,6 +1548,85 @@ test_cases:
     - - 11
       - 9
       - 3
+    - - 11
+      - 9
+      - 3
+    - - 11
+      - 9
+      - 3
+    - - 11
+      - 9
+      - 3
+    - - 11
+      - 9
+      - 3
+    - - 11
+      - 9
+      - 3
+- name: Legacy clock t% keeps its dedicated driver type code
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "t%") (list "ODBCVer" 2)) nil)) (map (r "rows") (lambda (row) (list (row "DATA_TYPE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB")))))
+  expect:
+    result:
+    - - -154
+      - -154
+      - null
+    - - -154
+      - -154
+      - null
+    - - -154
+      - -154
+      - null
+    - - -154
+      - -154
+      - null
+    - - -154
+      - -154
+      - null
+    - - -154
+      - -154
+      - null
+    - - -154
+      - -154
+      - null
+    - - -154
+      - -154
+      - null
+    - - -154
+      - -154
+      - null
+- name: Legacy clock dto% keeps its dedicated driver type code
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "driver_type_matrix") (list "column_name"
+    "dto%") (list "ODBCVer" 2)) nil)) (map (r "rows") (lambda (row) (list (row "DATA_TYPE") (row "SQL_DATA_TYPE") (row "SQL_DATETIME_SUB")))))
+  expect:
+    result:
+    - - -155
+      - -155
+      - null
+    - - -155
+      - -155
+      - null
+    - - -155
+      - -155
+      - null
+    - - -155
+      - -155
+      - null
+    - - -155
+      - -155
+      - null
+    - - -155
+      - -155
+      - null
+    - - -155
+      - -155
+      - null
+    - - -155
+      - -155
+      - null
+    - - -155
+      - -155
+      - null
 - name: National nvarchar appears in the declaration type catalog
   scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_datatype_info_100" (list (list "data_type" -9) (list "ODBCVer"
     3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION") (row "LITERAL_PREFIX")
@@ -1468,6 +1845,48 @@ test_cases:
       - 7
       - 9
       - 3
+      - null
+- name: Long value text type info does not advertise ordinary comparisons
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_datatype_info_100" (list (list "data_type" -1) (list "ODBCVer"
+    3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION") (row "LITERAL_PREFIX")
+    (row "LITERAL_SUFFIX") (row "CREATE_PARAMS") (row "SEARCHABLE") (row "AUTO_INCREMENT")))))
+  expect:
+    result:
+    - - text
+      - -1
+      - 2147483647
+      - ''''
+      - ''''
+      - null
+      - 1
+      - null
+- name: Long value ntext type info does not advertise ordinary comparisons
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_datatype_info_100" (list (list "data_type" -10) (list "ODBCVer"
+    3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION") (row "LITERAL_PREFIX")
+    (row "LITERAL_SUFFIX") (row "CREATE_PARAMS") (row "SEARCHABLE") (row "AUTO_INCREMENT")))))
+  expect:
+    result:
+    - - ntext
+      - -10
+      - 1073741823
+      - ''''
+      - ''''
+      - null
+      - 1
+      - null
+- name: Long value image type info does not advertise ordinary comparisons
+  scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_datatype_info_100" (list (list "data_type" -4) (list "ODBCVer"
+    3)) nil)) (map (r "rows") (lambda (row) (list (row "TYPE_NAME") (row "DATA_TYPE") (row "PRECISION") (row "LITERAL_PREFIX")
+    (row "LITERAL_SUFFIX") (row "CREATE_PARAMS") (row "SEARCHABLE") (row "AUTO_INCREMENT")))))
+  expect:
+    result:
+    - - image
+      - -4
+      - 2147483647
+      - 0x
+      - null
+      - null
+      - 0
       - null
 - name: Complete declaration catalog is ordered by driver type code
   scm: (begin (define r (tsql_metadata_result "memcp-tests" "sp_datatype_info" (list (list "ODBCVer" 3)) nil)) (define codes (map

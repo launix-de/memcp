@@ -611,7 +611,9 @@ Transfer length describes the driver's default C representation, not compressed
 or physical column storage. Only declarations decide these values. */
 (define tsql_metadata_type (lambda (column version) (begin
 	(define dimensions (column "Dimensions"))
-	(define length (if (empty_list? dimensions) 1 (car dimensions)))
+	(define width (if (empty_list? dimensions) 1 (car dimensions)))
+	/* The declaration's MAX sentinel is not an ODBC length. */
+	(define length (if (equal? width -1) 0 width))
 	(define type (toLower (column "RawType")))
 	(match type
 		"bigint" '("bigint" -5 19 8 0 10 nil)
@@ -627,6 +629,9 @@ or physical column storage. Only declarations decide these values. */
 		"money" '("money" 3 19 21 4 10 nil)
 		"smallmoney" '("smallmoney" 3 10 12 4 10 nil)
 		"uniqueidentifier" '("uniqueidentifier" -11 36 16 nil nil nil)
+		"text" '("text" -1 2147483647 2147483647 nil nil nil)
+		"ntext" '("ntext" -10 1073741823 2147483646 nil nil nil)
+		"image" '("image" -4 2147483647 2147483647 nil nil nil)
 		"date" (list "date" (if (equal? version 2) 9 91) 10 6 0 nil 1)
 		"datetime" (list "datetime" (if (equal? version 2) 11 93) 23 16 3 nil 3)
 		"smalldatetime" (list "smalldatetime" (if (equal? version 2) 11 93) 16 16 0 nil 3)
@@ -661,7 +666,7 @@ or physical column storage. Only declarations decide these values. */
 		"REMARKS" (if (equal? (column "Comment") "") nil (column "Comment"))
 		"COLUMN_DEF" (if (equal? (column "DefaultExpression") "") (column "Default") (column "DefaultExpression"))
 		"SQL_DATA_TYPE" (if subtype 9 (nth contract 1)) "SQL_DATETIME_SUB" subtype
-		"CHAR_OCTET_LENGTH" (if (has? '("varchar" "char" "nvarchar" "nchar" "binary" "varbinary") type) (nth contract 3) nil)
+		"CHAR_OCTET_LENGTH" (if (has? '("varchar" "char" "nvarchar" "nchar" "binary" "varbinary" "text" "ntext" "image") type) (nth contract 3) nil)
 		"ORDINAL_POSITION" ordinal "IS_NULLABLE" (if (column "Null") "YES" "NO")))))
 /* Type info is a frontend declaration catalog, not a registry of runtime tags. */
 (define tsql_metadata_type_info (lambda (options version) (begin
@@ -670,13 +675,15 @@ or physical column storage. Only declarations decide these values. */
 		(list "money" '()) (list "smallmoney" '()) (list "uniqueidentifier" '())
 		(list "varchar" '(8000)) (list "char" '(8000)) (list "nvarchar" '(4000)) (list "nchar" '(4000))
 		(list "binary" '(8000)) (list "varbinary" '(8000))
+		(list "text" '()) (list "ntext" '()) (list "image" '())
 		(list "date" '()) (list "datetime" '()) (list "smalldatetime" '())
 		(list "datetime2" '(7)) (list "time" '(7)) (list "datetimeoffset" '(7))))
 	(define rows (map definitions (lambda (definition) (begin
 		(define contract (tsql_metadata_type (list "RawType" (car definition) "Dimensions" (cadr definition)) version))
 		(define type (car contract))
-		(define character (has? '("varchar" "char" "nvarchar" "nchar") type))
-		(define binary (has? '("binary" "varbinary") type))
+		(define character (has? '("varchar" "char" "nvarchar" "nchar" "text" "ntext") type))
+		(define binary (has? '("binary" "varbinary" "image") type))
+		(define long_value (has? '("text" "ntext" "image") type))
 		(define calendar (has? '("date" "datetime" "smalldatetime" "datetime2" "time" "datetimeoffset") type))
 		(define scaled_calendar (has? '("datetime2" "time" "datetimeoffset") type))
 		(define decimal (has? '("decimal" "numeric") type))
@@ -686,8 +693,10 @@ or physical column storage. Only declarations decide these values. */
 		(list "TYPE_NAME" type "DATA_TYPE" (nth contract 1) "PRECISION" (nth contract 2)
 			"LITERAL_PREFIX" (if quoted "'" binary "0x" nil)
 			"LITERAL_SUFFIX" (if quoted "'" nil)
-			"CREATE_PARAMS" (if (or character binary) "length" decimal "precision,scale" scaled_calendar "scale" nil)
-			"NULLABLE" 1 "CASE_SENSITIVE" (if character 1 0) "SEARCHABLE" 3
+			"CREATE_PARAMS" (if (and (or character binary) (not long_value)) "length" decimal "precision,scale" scaled_calendar "scale" nil)
+			"NULLABLE" 1 "CASE_SENSITIVE" (if character 1 0)
+			/* ODBC predicate capabilities: none=0, LIKE-only=1, full=3. */
+			"SEARCHABLE" (match type "image" 0 "text" 1 "ntext" 1 _ 3)
 			"UNSIGNED_ATTRIBUTE" (if (equal? type "tinyint") 1 numeric 0 nil)
 			"MONEY" (if money 1 0) "AUTO_INCREMENT" (if (has? '("bigint" "int" "smallint" "tinyint") type) 1 numeric 0 nil)
 			"LOCAL_TYPE_NAME" type "MINIMUM_SCALE" (if scaled_calendar 0 (nth contract 4))
