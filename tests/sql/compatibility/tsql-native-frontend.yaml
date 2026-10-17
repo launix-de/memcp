@@ -4460,6 +4460,16 @@ test_cases:
     sql: SELECT CONVERT(VARBINARY(4),0x1234,2)
     expect:
       error: true
+  - name: Hex conversions reject hexadecimal-looking binary input
+    sql: SELECT CONVERT(VARBINARY(4),0x4142,2) AS value
+    expect:
+      error: true
+      contains: binary conversion from
+  - name: Hex TRY conversions reject prefixed hexadecimal-looking binary input
+    sql: SELECT TRY_CONVERT(VARBINARY(4),0x30784142,1) AS value
+    expect:
+      error: true
+      contains: binary conversion from
   - name: Hex conversions zero width binary declarations remain invalid
     sql: SELECT CONVERT(VARBINARY(0),'AA',2)
     expect:

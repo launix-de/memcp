@@ -375,7 +375,7 @@ Validate the complete input before truncation, then decode only needed bytes. */
 	/* Style zero keeps the existing byte contract. Hex styles require a
 	declared character input; their spelling never selects an SQL type. */
 	(if (if (equal? style 0) (or (tsql_binary_type? source) (has? '("NULL" "any") source))
-		(or (sql_text_type? source) (equal? source "NULL"))) true
+		(has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT" "NULL") source)) true
 		(error "binary conversion from " (sql_info_type input) " is not implemented"))
 	(define formula (if (equal? style 0) (sql_info_formula input)
 		(list (quote tsql_hex_to_binary) (sql_info_formula input) (equal? style 1) length)))
