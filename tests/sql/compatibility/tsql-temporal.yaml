@@ -166,7 +166,6 @@ test_cases:
     rows: 1
     data:
     - value: '2018-03-15 00:00:00'
-  noncritical: true
 - name: Default string temporal conversion
   sql: SELECT CAST(N'2026-03-15 12:13:14' AS DATE) AS value
   expect:
@@ -449,7 +448,6 @@ test_cases:
     rows: 1
     data:
     - value: Mar 15 2026 12:13PM
-  noncritical: true
 - name: Format declared date value
   sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATE),104) AS value
   expect:
