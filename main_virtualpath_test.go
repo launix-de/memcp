@@ -355,7 +355,7 @@ func TestLoadGzipDecodeFailure(t *testing.T) {
 func TestLoadLegacyCalls(t *testing.T) {
 	for _, count := range []int{1, 2, 3} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
-			stream := &loadTestStream{Reader: strings.NewReader("A\nB")}
+			stream := &loadTestStream{Reader: strings.NewReader("\xff\xfeA\x00\nB")}
 			var got []string
 			args := []scm.Scmer{scm.NewAny(stream)}
 			if count > 1 {
@@ -365,12 +365,12 @@ func TestLoadLegacyCalls(t *testing.T) {
 				args = append(args, scm.NewString("\n"))
 			}
 			result := getLoad("")(args...)
-			want := []string{"A\nB"}
+			want := []string{"\xff\xfeA\x00\nB"}
 			if count == 1 {
 				got = []string{result.String()}
 			}
 			if count == 3 {
-				want = []string{"A\n", "B"}
+				want = []string{"\xff\xfeA\x00\n", "B"}
 			}
 			if fmt.Sprint(got) != fmt.Sprint(want) {
 				t.Errorf("got %q, want %q", got, want)
@@ -380,4 +380,34 @@ func TestLoadLegacyCalls(t *testing.T) {
 			}
 		})
 	}
+}
+
+type loadFailReader struct{}
+
+func (loadFailReader) Read([]byte) (int, error) { return 0, fmt.Errorf("input read failed") }
+
+func TestLoadInputErrorBeforeHandler(t *testing.T) {
+	called := false
+	defer func() {
+		if failure := recover(); failure == nil || !strings.Contains(fmt.Sprint(failure), "input read failed") {
+			t.Errorf("failure = %v", failure)
+		}
+		if called {
+			t.Error("handler called after read failure")
+		}
+	}()
+	getLoad("")(scm.NewAny(loadFailReader{}), scm.NewFunc(func(...scm.Scmer) scm.Scmer { called = true; return scm.NewBool(true) }), scm.NewNil(), scm.NewString("bom"))
+}
+
+func TestLoadBorrowedReaderHandlerPanic(t *testing.T) {
+	stream := &loadTestStream{Reader: strings.NewReader("A")}
+	defer func() {
+		if failure := recover(); fmt.Sprint(failure) != "handler panic" {
+			t.Errorf("failure = %v", failure)
+		}
+		if stream.closed {
+			t.Error("load closed borrowed reader during handler panic")
+		}
+	}()
+	getLoad("")(scm.NewAny(stream), scm.NewFunc(func(...scm.Scmer) scm.Scmer { panic("handler panic") }), scm.NewNil(), scm.NewString("bom"))
 }
