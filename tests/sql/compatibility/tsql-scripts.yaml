@@ -1306,4 +1306,24 @@ test_cases:
   cleanup:
   - sql: DROP PROCEDURE dbo.script_error_helper
 
+- name: Quoted deployment identifiers execute through the existing dynamic batch path
+  sql: DECLARE @name NVARCHAR(80)=N'field]name'; DECLARE @sql NVARCHAR(400)=N'SELECT 7 AS '+QUOTENAME(@name); EXEC(@sql)
+  expect:
+    rows: 1
+    data:
+    - field]name: 7
+- name: Multipart deployment names compose with identifier quoting
+  sql: DECLARE @name NVARCHAR(128)=N'[owner].[field.name]'; DECLARE @sql NVARCHAR(400)=N'SELECT 9 AS '+QUOTENAME(PARSENAME(@name,1));
+    EXEC sys.sp_executesql @sql
+  expect:
+    rows: 1
+    data:
+    - field.name: 9
+- name: Quoted value delimiters preserve dynamic SQL string literals
+  sql: DECLARE @sql NVARCHAR(400)=N'SELECT '+QUOTENAME(N'O''Brien',N'''')+N' AS value'; EXEC(@sql)
+  expect:
+    rows: 1
+    data:
+    - value: O'Brien
+
 cleanup: []

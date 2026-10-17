@@ -2974,6 +2974,199 @@ test_cases:
         (equal? (map (output "fields") (lambda (field) (field "size"))) '(10 14 6))))
     expect:
       result: true
+  - name: Identifier quoting escapes the closing bracket
+    sql: SELECT QUOTENAME(N'a]b') AS value,QUOTENAME(N'a[b') AS opening
+    expect:
+      rows: 1
+      data:
+      - value: '[a]]b]'
+        opening: '[a[b]'
+  - name: Identifier quoting accepts either side of paired delimiters
+    sql: SELECT QUOTENAME(N'a>b',N'<') AS a,QUOTENAME(N'a>b',N'>') AS b,QUOTENAME(N'a)b',N'(') AS c,QUOTENAME(N'a}b',N'}')
+      AS d
+    expect:
+      rows: 1
+      data:
+      - a: <a>>b>
+        b: <a>>b>
+        c: (a))b)
+        d: '{a}}b}'
+  - name: Identifier quoting escapes symmetric delimiters
+    sql: SELECT QUOTENAME(N'a"b',N'"') AS a,QUOTENAME(N'a''b',N'''') AS b,QUOTENAME(N'a`b',N'`') AS c
+    expect:
+      rows: 1
+      data:
+      - a: '"a""b"'
+        b: '''a''''b'''
+        c: '`a``b`'
+  - name: Identifier quoting preserves empty text and spaces
+    sql: SELECT QUOTENAME(N'') AS a,QUOTENAME(N' a ') AS b
+    expect:
+      rows: 1
+      data:
+      - a: '[]'
+        b: '[ a ]'
+  - name: Identifier quoting preserves national and supplementary text
+    sql: SELECT QUOTENAME(N'Ä🐘') AS value
+    expect:
+      rows: 1
+      data:
+      - value: '[Ä🐘]'
+  - name: Identifier quoting propagates explicitly supplied nulls
+    sql: SELECT QUOTENAME(NULL) AS a,QUOTENAME(N'x',NULL) AS b
+    expect:
+      rows: 1
+      data:
+      - a: null
+        b: null
+  - name: Identifier quoting rejects invalid delimiter values with null
+    sql: SELECT QUOTENAME(N'x',N'xx') AS a,QUOTENAME(N'x',N'') AS b,QUOTENAME(N'x',N'!') AS c
+    expect:
+      rows: 1
+      data:
+      - a: null
+        b: null
+        c: null
+  - name: Identifier quoting enforces the sysname bound without truncation
+    sql: SELECT QUOTENAME(N'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')
+      AS accepted,QUOTENAME(N'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')
+      AS rejected
+    expect:
+      rows: 1
+      data:
+      - accepted: '[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx]'
+        rejected: null
+  - name: Identifier quoting counts national code units rather than UTF8 bytes
+    sql: SELECT QUOTENAME(N'ääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääää')
+      AS accepted,QUOTENAME(N'🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘🐘') AS rejected
+    expect:
+      rows: 1
+      data:
+      - accepted: '[ääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääää]'
+        rejected: null
+  - name: Identifier quoting preserves all doubled closing brackets
+    sql: SELECT QUOTENAME(N']]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]')
+      AS value
+    expect:
+      rows: 1
+      data:
+      - value: '[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]'
+  - name: Identifier quoting converts a declared integer input
+    sql: SELECT QUOTENAME(42) AS value,QUOTENAME(CAST(1 AS BIT)) AS bit_value
+    expect:
+      rows: 1
+      data:
+      - value: '[42]'
+        bit_value: '[1]'
+  - name: Identifier quoting requires an input
+    sql: SELECT QUOTENAME()
+    expect:
+      error: true
+  - name: Identifier quoting rejects excess arguments
+    sql: SELECT QUOTENAME(N'x',N'[',N']')
+    expect:
+      error: true
+  - name: Identifier quoting refuses implicit binary text interpretation
+    sql: SELECT QUOTENAME(0x0041)
+    expect:
+      error: true
+  - name: Multipart names are selected from the right
+    sql: SELECT PARSENAME(N'host.db.owner.item',1) AS a,PARSENAME(N'host.db.owner.item',2) AS b,PARSENAME(N'host.db.owner.item',3)
+      AS c,PARSENAME(N'host.db.owner.item',4) AS d
+    expect:
+      rows: 1
+      data:
+      - a: item
+        b: owner
+        c: db
+        d: host
+  - name: Multipart names retain numeric and keyword components
+    sql: SELECT PARSENAME(N'10.20.30.40',1) AS a,PARSENAME(N'alpha.from',1) AS b
+    expect:
+      rows: 1
+      data:
+      - a: '40'
+        b: from
+  - name: Multipart names decode existing identifier escaping
+    sql: SELECT PARSENAME(N'[tenant.db].[own]]er]."it""em"',1) AS a,PARSENAME(N'[tenant.db].[own]]er]."it""em"',2)
+      AS b,PARSENAME(N'[tenant.db].[own]]er]."it""em"',3) AS c
+    expect:
+      rows: 1
+      data:
+      - a: it"em
+        b: own]er
+        c: tenant.db
+  - name: Multipart names preserve omitted schema positions
+    sql: SELECT PARSENAME(N'db..item',1) AS a,PARSENAME(N'db..item',2) AS b,PARSENAME(N'db..item',3) AS c,PARSENAME(N'item',2)
+      AS d
+    expect:
+      rows: 1
+      data:
+      - a: item
+        b: null
+        c: db
+        d: null
+  - name: Multipart names reject invalid positions and null inputs
+    sql: SELECT PARSENAME(N'a.b',0) AS a,PARSENAME(N'a.b',5) AS b,PARSENAME(NULL,1) AS c,PARSENAME(N'a.b',NULL) AS
+      d
+    expect:
+      rows: 1
+      data:
+      - a: null
+        b: null
+        c: null
+        d: null
+  - name: Multipart names reject malformed quoting and empty object components
+    sql: SELECT PARSENAME(N'[unclosed',1) AS a,PARSENAME(N'a.b.',2) AS b,PARSENAME(N'a.b.c.d.e',1) AS c,PARSENAME(N'[]',1)
+      AS d
+    expect:
+      rows: 1
+      data:
+      - a: null
+        b: null
+        c: null
+        d: null
+  - name: Multipart names apply sysname bounds only to the selected part
+    sql: SELECT PARSENAME(N'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.item',1)
+      AS a,PARSENAME(N'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.item',2)
+      AS b
+    expect:
+      rows: 1
+      data:
+      - a: item
+        b: null
+  - name: Multipart names support national delimited components
+    sql: SELECT PARSENAME(N'[Ä].[🐘]',1) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 🐘
+  - name: Multipart names convert the declared position argument
+    sql: SELECT PARSENAME(N'owner.item',N'2') AS value
+    expect:
+      rows: 1
+      data:
+      - value: owner
+  - name: Multipart names reject invalid integer position text
+    sql: SELECT PARSENAME(N'owner.item',N'bad')
+    expect:
+      error: true
+  - name: Multipart names require exactly two arguments
+    sql: SELECT PARSENAME(N'item')
+    expect:
+      error: true
+  - name: Identifier function metadata is independent of rows
+    scm: "(begin\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP(0) QUOTENAME(NULL) AS q,PARSENAME(NULL,1)\
+      \ AS p\" \"\" (newsession)))\n  (and (equal? (map fields (lambda (f) (f \"sql_type\"))) '(\"NVARCHAR\" \"NVARCHAR\"\
+      ))\n    (equal? (map fields (lambda (f) (f \"size\"))) '(516 256))))"
+    expect:
+      result: true
+  - name: Identifier function compiler markers disappear before execution
+    scm: "(not (regexp_test (string (parse_tsql \"memcp-tests\"\n  \"SELECT QUOTENAME(N'a]b'),PARSENAME(N'x.y',1)\"\
+      \ nil nil nil)) \"sql_type_expr|sql_compile_expr\"))"
+    expect:
+      result: true
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
   - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion
