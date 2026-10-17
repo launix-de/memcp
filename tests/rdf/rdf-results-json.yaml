@@ -81,9 +81,23 @@ test_cases:
       rows: 1
       content_type: "application/sparql-results+json"
       result_contains:
-        - '"datatype":"http://www.w3.org/2001/XMLSchema#decimal"'
+        - '"datatype":"http://www.w3.org/2001/XMLSchema#integer"'
         - '"value":"7"'
         - '"datatype":"http://www.w3.org/2001/XMLSchema#boolean"'
         - '"value":"true"'
+
+  - name: "Decimal lexical form retains its declared result datatype"
+    headers:
+      Accept: "application/sparql-results+json"
+    sparql: |
+      SELECT ?number WHERE {
+        BIND(7.0 AS ?number)
+      }
+    expect:
+      rows: 1
+      content_type: "application/sparql-results+json"
+      result_contains:
+        - '"datatype":"http://www.w3.org/2001/XMLSchema#decimal"'
+        - '"value":"7"'
 
 cleanup: []
