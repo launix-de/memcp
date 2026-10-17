@@ -739,7 +739,7 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 	} else if params.IsSymbol() && numVars < 1 {
 		numVars = 1
 	}
-	numVars = jitRequiredLocalSlots(body, numVars)
+	numVars, _ = jitRequiredLocalSlots(body, numVars)
 	argExprs := make([]Scmer, 0, 16)
 	argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), params}))
 	argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), body}))

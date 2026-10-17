@@ -19,7 +19,8 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/denisenkom/go-mssqldb"
+	tdsclient "github.com/denisenkom/go-mssqldb"
+	"github.com/golang-sql/civil"
 )
 
 type config struct {
@@ -110,19 +111,59 @@ func run() error {
 	return nil
 }
 
+// These explicit client contracts ask the driver to send actual temporal RPC
+// fields. Plain strings would exercise only text-to-calendar SQL conversion.
+func temporalParameter(encoded map[string]any) (any, error) {
+	kind, ok := encoded["temporal_type"].(string)
+	text, textOK := encoded["value"].(string)
+	if !ok || !textOK || len(encoded) != 2 {
+		return nil, fmt.Errorf("invalid temporal probe parameter")
+	}
+	layout := time.RFC3339Nano
+	switch kind {
+	case "date":
+		layout = "2006-01-02"
+	case "time":
+		layout = "15:04:05.999999999"
+	case "datetime", "datetime2", "datetimeoffset":
+	default:
+		return nil, fmt.Errorf("unsupported temporal probe contract: %s", kind)
+	}
+	value, err := time.Parse(layout, text)
+	if err != nil {
+		return nil, err
+	}
+	switch kind {
+	case "date":
+		return civil.DateOf(value), nil
+	case "time":
+		return civil.TimeOf(value), nil
+	case "datetime":
+		return tdsclient.DateTime1(value), nil
+	case "datetime2":
+		return civil.DateTimeOf(value), nil
+	default:
+		return tdsclient.DateTimeOffset(value), nil
+	}
+}
+
 func execute(ctx context.Context, conn *sql.Conn, stmt statement) error {
 	args := make([]any, len(stmt.Parameters))
 	for i, p := range stmt.Parameters {
 		v := p.Value
 		if encoded, ok := v.(map[string]any); ok {
-			text, ok := encoded["binary_hex"].(string)
-			if !ok || len(encoded) != 1 {
-				return fmt.Errorf("parameter %s has an unsupported payload", p.Name)
-			}
 			var err error
-			v, err = hex.DecodeString(text)
+			if _, temporal := encoded["temporal_type"]; temporal {
+				v, err = temporalParameter(encoded)
+			} else {
+				text, ok := encoded["binary_hex"].(string)
+				if !ok || len(encoded) != 1 {
+					return fmt.Errorf("parameter %s has an unsupported payload", p.Name)
+				}
+				v, err = hex.DecodeString(text)
+			}
 			if err != nil {
-				return err
+				return fmt.Errorf("parameter %s: %w", p.Name, err)
 			}
 		}
 		if n, ok := v.(json.Number); ok {
@@ -228,6 +269,26 @@ func checkError(want expectation, err error) error {
 
 func equalValue(actual, expected any) bool {
 	if encoded, ok := expected.(map[string]any); ok {
+		if kind, ok := encoded["temporal_type"].(string); ok {
+			text, textOK := encoded["value"].(string)
+			got, typed := actual.(time.Time)
+			if !textOK || !typed || len(encoded) != 2 {
+				return false
+			}
+			switch kind {
+			case "date":
+				want, err := time.Parse("2006-01-02", text)
+				return err == nil && got.Equal(want)
+			case "time":
+				want, err := time.Parse("15:04:05.999999999", text)
+				return err == nil && civil.TimeOf(got) == civil.TimeOf(want)
+			case "datetime", "datetime2", "smalldatetime":
+				want, err := time.Parse(time.RFC3339Nano, text)
+				return err == nil && got.Equal(want)
+			default:
+				return false
+			}
+		}
 		text, ok := encoded["binary_hex"].(string)
 		if !ok || len(encoded) != 1 {
 			return false

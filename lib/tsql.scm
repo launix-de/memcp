@@ -5,8 +5,48 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 (define tsql_queryplan_cache (newcachemap))
 (define tsql_statement_text strtrim)
 
-/* Transport tuples describe bytes and unscaled coefficients only. Their SQL
-meaning is chosen here from the request's declaration, not in the Go bridge. */
+/* The transport exposes integer day/clock fields, never a SQL runtime type.
+Validate their declaration-specific units once per parameter. The current native
+calendar carrier keeps whole seconds; refuse fractional loss and offset loss
+until those contracts can be represented by the existing date primitives. */
+(define tds_temporal_parameter_value (lambda (wire value) (begin
+	(define kind (wire "kind"))
+	(define days (value "days"))
+	(define ticks (value "ticks"))
+	(define offset (value "offset"))
+	(if (and (int? days) (int? ticks) (int? offset)) true
+		(error "invalid temporal parameter fields"))
+	(define legacy (equal? kind 111))
+	(define short (and legacy (equal? (wire "size") 4)))
+	(if (and legacy (not (has? '(4 8) (wire "size"))))
+		(error "invalid legacy temporal parameter size") true)
+	(define factor (if (has? '(41 42 43) kind) (begin
+		(define scale (wire "scale"))
+		(if (and (int? scale) (>= scale 0) (<= scale 7)) true
+			(error "invalid temporal parameter scale"))
+		(tsql_parse_integer (concat "1" (string_repeat "0" scale))))
+		legacy (if short 1 300) 1))
+	(if (and (equal? kind 41) (not (equal? days 0)))
+		(error "invalid time parameter day") true)
+	(if (and (>= days (if legacy (if short 0 -53690) 0))
+		(<= days (if legacy (if short 65535 2958463) 3652058))) true
+		(error "temporal parameter calendar overflow"))
+	(if (and (>= ticks 0) (< ticks (if short 1440 (* 86400 factor)))
+		(or (not (equal? kind 40)) (equal? ticks 0))) true
+		(error "temporal parameter clock overflow"))
+	(if (and (equal? kind 43) (or (< offset -840) (> offset 840)))
+		(error "temporal parameter offset overflow") true)
+	(if (equal? kind 43)
+		(error "offset temporal parameter preservation is not implemented")
+		(not (equal? offset 0)) (error "unexpected temporal parameter offset") true)
+	(if (equal? (mod ticks factor) 0) true
+		(error "fractional temporal parameter precision is not implemented"))
+	(define seconds (if short (* ticks 60) (intdiv ticks factor)))
+	(define date (tsql_calendar_shift_seconds
+		(date_add (parse_date (if (or legacy (equal? kind 41)) "1900-01-01" "0001-01-01")) days "DAY") seconds))
+	/* TIME uses the frontend's existing clock-text carrier at the boundary;
+	other temporal contracts retain the normal native Unix calendar value. */
+	(if (equal? kind 41) (format_date date "%H:%i:%s") date))))
 (define tds_parameter_value (lambda (parameter) (begin
 	(define value (parameter "value"))
 	(define wire (parameter "type"))
@@ -23,9 +63,43 @@ meaning is chosen here from the request's declaration, not in the Go bridge. */
 				(define padded (concat (string_repeat "0" (max 0 (+ 1 (- scale (strlen digits))))) digits))
 				(define point (- (strlen padded) scale))
 				(tsql_numeric_input (concat (if negative "-" "") (substr padded 0 point) "." (substr padded point))))))
+		(has? '(40 41 42 43 111) (wire "kind")) (tds_temporal_parameter_value wire value)
 		value))))
+/* Convert only the external result edge to the existing neutral transport
+payload. The shared plan and stored columns retain their normal Unix values.
+Floor is required before 1970: truncating a negative partial day changes both
+its date and clock. SQL declarations select the descriptor before any rows. */
+(define tds_temporal_result_value (lambda (descriptor value) (begin
+	(define kind (descriptor "kind"))
+	/* A string is an existing text representation of this declared SQL type,
+	not a source for choosing its type. Check before the generic Unix adapter
+	can discard a fraction; native Unix/date values need no text round trip.
+	DATE intentionally discards its clock under the declared DATE contract. */
+	(define textual (string? value))
+	(define checked (if (and textual (not (equal? kind 40)))
+		(tsql_calendar_cast_text value) value))
+	(define seconds (unix_timestamp (if (and textual (equal? kind 41))
+		(tsql_calendar_text checked) checked)))
+	(define day (intdiv (floor (/ seconds 86400)) 1))
+	(define clock (- seconds (* day 86400)))
+	(define legacy (equal? kind 111))
+	(define short (and legacy (equal? (descriptor "size") 4)))
+	(if (equal? kind 41) true
+		(and (>= seconds (if legacy (if short -2208988800 -6847804800) -62135596800))
+			(<= seconds (if short 3453321540 253402300799))) true
+		(error "calendar wire result overflow"))
+	(if (and short (not (equal? (mod clock 60) 0)))
+		(error "small datetime wire result requires whole minutes") true)
+	(list "days" (if (equal? kind 41) 0 (+ day (if legacy 25567 719162)))
+		"ticks" (if (equal? kind 40) 0 short (intdiv clock 60)
+			(* clock (if legacy 300 (nth '(1 10 100 1000 10000 100000 1000000 10000000) (descriptor "scale")))))
+		"offset" 0))))
 (define tds_result_value (lambda (descriptor value) (if (nil? value) nil
 	(match (descriptor "kind")
+		40 (tds_temporal_result_value descriptor value)
+		41 (tds_temporal_result_value descriptor value)
+		42 (tds_temporal_result_value descriptor value)
+		111 (tds_temporal_result_value descriptor value)
 		165 (list "bytes" value)
 		108 (begin
 			(define scale (descriptor "scale"))
@@ -63,16 +137,21 @@ value; the wire descriptor and SQL declaration own the type independently. */
 		(define contract (cadr declaration))
 		(define parameter (named name))
 		(define wire (parameter "type"))
-		(if (not (has? '(31 38 104 106 108 109 165 167 173 175 231 239) (wire "kind")))
+		(if (not (has? '(31 38 40 41 42 43 104 106 108 109 111 165 167 173 175 231 239) (wire "kind")))
 			(error "unsupported T-SQL parameter wire type: " (wire "kind")) true)
 		/* A supplied NULL needs no numeric representation or conversion. Its SQL
 		contract still comes exclusively from the declaration. */
 		(define source_type (match (wire "kind")
 			38 "BIGINT" 104 "BIT" 106 "DECIMAL" 108 "NUMERIC" 109 "FLOAT"
+			40 "DATE" 41 "TIME" 42 "DATETIME2" 43 "DATETIMEOFFSET"
+			111 (if (equal? (wire "size") 4) "SMALLDATETIME" "DATETIME")
 			165 "VARBINARY" 173 "BINARY" 167 "VARCHAR" 175 "CHAR" 231 "NVARCHAR" 239 "NCHAR" _ "NULL"))
 		(if (and (not (nil? (parameter "value"))) (tsql_binary_type? source_type)
 			(not (tsql_binary_type? (car contract))))
 			(error "binary parameter conversion is not implemented") true)
+		(if (and (not (nil? (parameter "value"))) (tsql_temporal_type? source_type)
+			(not (or (tsql_temporal_type? (car contract)) (sql_text_type? (car contract)))))
+			(error "temporal parameter conversion is not implemented") true)
 		(define converted (if (nil? (parameter "value")) nil
 			(eval (sql_type_lower_annotations
 				(tsql_cast_expr (list (quote sql_type_expr) (list (quote quote) (tds_parameter_value parameter)) source_type nil)
