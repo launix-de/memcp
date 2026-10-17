@@ -1118,10 +1118,35 @@ Only the selected native operation survives the shared compile boundary. */
 (define tsql_fold_additive (lambda (acc term) (match term
 	'("add" value) (tsql_add_expr acc value)
 	_ (sql_fold_additive_term acc term))))
-/* NULL fallback has the same declared precedence as other T-SQL expressions.
-The shared lazy coalesce operator remains responsible for evaluation; this
-callback consumes SQL triples and leaves only converted formulas in the plan.
-Dimension merging and exact decimal precision are separate frontend work. */
+/* Implicit conversions consume declared contracts, including BIT's Boolean
+carrier. Width/scale are not reconstructed from runtime values; unresolved
+character dimensions retain the existing unbounded text conversion contract. */
+(define tsql_convert_value_info (lambda (info type collation) (begin
+	(define source (tsql_addition_type (sql_info_type info)))
+	(define target (tsql_addition_type type))
+	(define formula (sql_info_formula info))
+	(define formula (if (and (equal? source "BIT") (not (equal? target "BIT")))
+		(list (quote match) formula (quote nil) nil (quote true) 1 (quote false) 0) formula))
+	/* Monetary source declarations round when converted to integers; other
+	numerics truncate. MATCH preserves NULL and evaluates the source once. */
+	(define formula (if (and (has? '("MONEY" "SMALLMONEY") source)
+		(has? '("BIGINT" "INT" "SMALLINT" "TINYINT") target))
+		(list (quote match) formula (quote nil) nil (quote value) (list (quote round) (quote value))) formula))
+	(define typed (list (quote sql_type_expr) formula
+		(if (equal? source "BIT") "INT" (sql_info_type info)) (sql_info_collation info)))
+	(define converted (if (or (equal? source "NULL") (equal? source target)) formula
+		(and (has? tsql_addition_text_types target) (has? tsql_addition_text_types source)) formula
+		(and (has? tsql_addition_text_types target) (has? tsql_addition_numeric_types source))
+		(list (quote tsql_cast_text) formula -1 (has? '("NVARCHAR" "NCHAR") target))
+		(and (has? tsql_addition_numeric_types target)
+			(or (has? tsql_addition_numeric_types source) (has? tsql_addition_text_types source)))
+		(if (has? '("DECIMAL" "MONEY" "SMALLMONEY") target)
+			(list (quote tsql_cast_float) formula)
+			(sql_type_lower_annotations (tsql_cast_expr typed target '())))
+		(tsql_temporal_type? target)
+		(sql_type_lower_annotations (tsql_cast_expr typed target '()))
+		(error "unsupported implicit conversion from " source " to " target)))
+	(sql_info converted type collation))))
 /* A common SQL contract for bounded syntax values. This is compile-time
 metadata, shared by COALESCE and inline row constructors. It neither samples
 runtime values nor stores a second relational representation. */
@@ -1137,18 +1162,11 @@ runtime values nor stores a second relational representation. */
 	(define collation (if (has? tsql_addition_text_types target)
 		(reduce infos (lambda (collation info)
 			(sql_merge_collation collation (sql_info_collation info))) nil) nil))
-	(map infos (lambda (info) (begin
-		(define type (tsql_addition_type (sql_info_type info)))
-		(define formula (sql_info_formula info))
-		(define converted (if (or (equal? type "NULL") (equal? type target)) formula
-			(and (has? tsql_addition_numeric_types target)
-				(or (has? tsql_addition_numeric_types type) (has? tsql_addition_text_types type)))
-			(if (has? '("DECIMAL" "MONEY" "SMALLMONEY") target)
-				(list tsql_cast_float formula)
-				(sql_type_lower_annotations (tsql_cast_expr formula target '())))
-			(and (has? tsql_addition_text_types target) (has? tsql_addition_text_types type)) formula
-			(error "unsupported implicit conversion from " type " to " target)))
-		(sql_info converted target collation)))))))
+	(map infos (lambda (info) (tsql_convert_value_info info target collation))))))
+/* NULL fallback has the same declared precedence as other T-SQL expressions.
+The shared lazy coalesce operator remains responsible for evaluation; this
+callback consumes SQL triples and leaves only converted formulas in the plan.
+Dimension merging and exact decimal precision are separate frontend work. */
 (define tsql_compile_coalesce (lambda (infos) (begin
 	(if (< (count infos) 2) (error "COALESCE requires at least two arguments") true)
 	(define converted (tsql_common_value_infos infos nil))
@@ -1157,45 +1175,100 @@ runtime values nor stores a second relational representation. */
 (define tsql_coalesce_expr (lambda (arguments)
 	(cons (quote sql_compile_expr) (cons (quote tsql_compile_coalesce) arguments))))
 
+/* ISNULL keeps its first declared contract, unlike COALESCE precedence.
+A literal NULL takes the replacement contract; two literal NULLs use INT.
+Only replacement evaluation is lazy, while compatibility is checked for every
+row shape at compilation. Width/scale propagation remains separate work; an
+unknown text width must not silently become CAST's default length of thirty. */
+(define tsql_compile_isnull (lambda (infos) (begin
+	(if (equal? (count infos) 2) true (error "ISNULL requires two arguments"))
+	(define first (car infos))
+	(define replacement (cadr infos))
+	(define contract (if (equal? (sql_info_type first) "NULL") replacement first))
+	(define type (if (equal? (sql_info_type contract) "NULL") "INT" (sql_info_type contract)))
+	(define converted (tsql_convert_value_info replacement type (sql_info_collation contract)))
+	(sql_info (list (quote coalesceNil) (sql_info_formula first) (sql_info_formula converted))
+		type (sql_info_collation contract)))))
+(define tsql_isnull_expr (lambda (arguments)
+	(cons (quote sql_compile_expr) (cons (quote tsql_compile_isnull) arguments))))
+/* NULLIF compares converted declared operands but returns its original first
+contract. Scalar text equality must consume the selected collation explicitly;
+there is no scan-bound operator to supply it for this conditional expression. */
+(define tsql_compile_nullif (lambda (infos) (begin
+	(if (equal? (count infos) 2) true (error "NULLIF requires two arguments"))
+	(define first (car infos))
+	(if (has? '("NULL" "any") (sql_info_type first))
+		(error "NULLIF requires a declared first type") true)
+	(define values (tsql_common_value_infos infos nil))
+	(define first_value (car values))
+	(define collation (if (and (has? tsql_addition_text_types (sql_info_type first_value))
+		(nil? (sql_info_collation first_value))) "utf8mb4_general_ci" (sql_collation_name first_value)))
+	(define comparison (list (quote sql_compare)
+		(sql_info_formula first_value) (sql_info_formula (cadr values))
+		(collate collation false) "equal??"))
+	(sql_info (list (quote if) comparison nil (sql_info_formula first))
+		(sql_info_type first) (sql_info_collation first)))))
+(define tsql_nullif_expr (lambda (arguments)
+	(cons (quote sql_compile_expr) (cons (quote tsql_compile_nullif) arguments))))
+
 /* Conditional value contracts use the same declared precedence as COALESCE.
 Conditions and result values remain visible to the shared binder/decorrelator;
 the compile callback emits one ordinary variadic IF, without a runtime type
 wrapper or a second evaluator. Exact decimal dimensions remain separate work. */
+(define tsql_case_compiler (lambda (size) (lambda (infos) (begin
+	(define predicates (slice infos 0 size))
+	(if (reduce predicates (lambda (valid info)
+		(and valid (equal? (sql_info_type info) "BOOLEAN"))) true)
+		true (error "CASE/IIF requires a Boolean condition"))
+	(define values (tsql_common_value_infos (slice infos size (count infos)) nil))
+	(sql_info (cons (quote if) (append
+		(merge (map (produceN size) (lambda (i)
+			(list (sql_info_formula (nth predicates i)) (sql_info_formula (nth values i))))))
+		(sql_info_formula (nth values size))))
+		(sql_info_type (car values)) (sql_info_collation (car values)))))))
 (define tsql_case_expr (lambda (conditions otherwise) (begin
 	(define size (count conditions))
-	(cons (quote sql_compile_expr) (cons (lambda (infos) (begin
-		(define predicates (slice infos 0 size))
-		(if (reduce predicates (lambda (valid info)
-			(and valid (equal? (sql_info_type info) "BOOLEAN"))) true)
-			true (error "CASE/IIF requires a Boolean condition"))
-		(define values (tsql_common_value_infos (slice infos size (count infos)) nil))
-		(sql_info (cons (quote if) (append
-			(merge (map (produceN size) (lambda (i)
-				(list (sql_info_formula (nth predicates i)) (sql_info_formula (nth values i))))))
-			(sql_info_formula (nth values size))))
-			(sql_info_type (car values)) (sql_info_collation (car values)))))
+	(cons (quote sql_compile_expr) (cons (list (quote tsql_case_compiler) size)
 		(append (merge (list (map conditions car) (map conditions cadr))) otherwise))))))
 /* CHOOSE is a scalar selection, not an eager list of SQL values. Native MATCH
 binds the converted ordinal once and evaluates only its chosen value. SQL
 contracts are resolved for every value before this ordinary expression exists. */
+(define tsql_compile_choose (lambda (infos) (begin
+	(define index_info (car infos))
+	(define index_type (tsql_addition_type (sql_info_type index_info)))
+	(if (or (equal? index_type "NULL") (has? tsql_addition_numeric_types index_type)
+		(has? tsql_addition_text_types index_type)) true
+		(error "CHOOSE requires an implicitly convertible integer index"))
+	(define branches (tsql_common_value_infos (cdr infos) nil))
+	(define ordinal (sql_type_lower_annotations
+		(tsql_cast_expr (if (has? '("MONEY" "SMALLMONEY") index_type)
+			(list (quote round) (sql_info_formula index_info)) (sql_info_formula index_info)) "INT" '())))
+	(sql_info (cons (quote match) (cons ordinal (merge (list
+		(merge (map (produceN (count branches)) (lambda (i)
+			(list (+ i 1) (sql_info_formula (nth branches i))))))
+		(list (quote _) nil)))))
+		(sql_info_type (car branches)) (sql_info_collation (car branches))))))
 (define tsql_choose_expr (lambda (index values)
-	(cons (quote sql_compile_expr) (cons (lambda (infos) (begin
-		(define index_info (car infos))
-		(define index_type (tsql_addition_type (sql_info_type index_info)))
-		(if (or (equal? index_type "NULL") (has? tsql_addition_numeric_types index_type)
-			(has? tsql_addition_text_types index_type)) true
-			(error "CHOOSE requires an implicitly convertible integer index"))
-		(define branches (tsql_common_value_infos (cdr infos) nil))
-		(define ordinal (sql_type_lower_annotations
-			(tsql_cast_expr (if (has? '("MONEY" "SMALLMONEY") index_type)
-				(list (quote round) (sql_info_formula index_info)) (sql_info_formula index_info)) "INT" '())))
-		(sql_info (cons (quote match) (cons ordinal (merge (list
-			(merge (map (produceN (count branches)) (lambda (i)
-				(list (+ i 1) (sql_info_formula (nth branches i))))))
-			(list (quote _) nil)))))
-			(sql_info_type (car branches)) (sql_info_collation (car branches)))))
+	(cons (quote sql_compile_expr) (cons (quote tsql_compile_choose)
 		(cons index values)))))
 
+/* Bind the shared logical tree for metadata only. No physical plan, compiled
+row evaluator or native mutation is constructed by this analysis path. The
+caller's policy remains explicit through every nested view expansion. */
+(define tsql_describe_sources (lambda (node) (match node
+	((symbol quote) _datum) node
+	(cons (symbol query-block) _tail) (begin
+		(map (qb_sources node) (lambda (source)
+			(if (and (source_is_base_table? source)
+				(nil? (table (source_schema source) false (source_relation source) false)))
+				(error "description table does not exist: " (source_relation source)) true)))
+		(map (cdr node) tsql_describe_sources)
+		node)
+	(cons _head _tail) (begin (map node tsql_describe_sources) node)
+	_ node)))
+(define tsql_describe_query (lambda (query policy planning_session)
+	(bind_query_names (tsql_bind_column_compilers
+		(tsql_describe_sources (sql_expand_views query policy)) (tsql_column_compiler planning_session)) '())))
 /* Explicit wire descriptors come from the existing SQL expression metadata,
 never from the first row. Unknown expression types stay text in this first slice. */
 /* Width/scale originate in declaration syntax, never in the first output row.
@@ -1292,7 +1365,6 @@ compiling; the emitted row callback contains no SQL type tags or dispatch. */
 	(cons (quote sql_compile_expr) (cons (list (quote tsql_builtin_compiler) name) arguments)))))
 
 (define tsql_builtins (lambda (name) (match name
-	"ISNULL" coalesceNil
 	"LEN" (lambda (value) (if (nil? value) nil (strlen (sql_rtrim value))))
 	_ (if (has? '("ABS" "CEILING" "FLOOR" "ROUND" "SQRT" "UPPER" "LOWER" "REPLACE" "SUBSTRING" "CONCAT" "YEAR" "MONTH" "DAY") name)
 		(sql_builtins name) nil))))
@@ -1572,7 +1644,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 
 		(parser '((atom "COALESCE" true) "(" (define args (* tsql_expression ",")) ")") (tsql_coalesce_expr args))
 
-		(parser '((atom "NULLIF" true) "(" (define a tsql_expression) "," (define b tsql_expression) ")") '((quote if) '((quote equal??) a b) nil a))
+		(parser '((atom "ISNULL" true) "(" (define args (* tsql_expression ",")) ")") (tsql_isnull_expr args))
+		(parser '((atom "NULLIF" true) "(" (define args (* tsql_expression ",")) ")") (tsql_nullif_expr args))
 		(parser '((atom "NCHAR" true) "(" (define value tsql_expression) ")") (tsql_nchar_expr value))
 
 		(parser (atom "NULL" true) (sql_null_literal))

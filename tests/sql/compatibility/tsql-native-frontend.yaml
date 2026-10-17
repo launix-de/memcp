@@ -2977,6 +2977,169 @@ test_cases:
     - sql: DROP TABLE IF EXISTS tsql_count_input
 
 
+  - name: ISNULL converts a selected textual replacement to the first numeric declaration
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_null_contract_input
+      - scm: |
+          (eval (parse_sql "memcp-tests"
+            "CREATE TABLE tsql_null_contract_input(id INT PRIMARY KEY,i SMALLINT,txt NVARCHAR(8) COLLATE utf8mb4_general_ci,cs NVARCHAR(8) COLLATE bin,natural NVARCHAR(8) COLLATE en_ci)"
+            nil (newsession) nil))
+      - sql: INSERT tsql_null_contract_input VALUES(1,7,N'A',N'A',N'a2'),(2,NULL,NULL,NULL,NULL)
+      - sql: DROP TABLE IF EXISTS tsql_null_money
+      - sql: CREATE TABLE tsql_null_money(id INT PRIMARY KEY,m MONEY,s SMALLMONEY)
+      - sql: INSERT tsql_null_money VALUES(1,1.9,-1.9),(2,2.5,-2.5),(3,NULL,NULL)
+    sql: SELECT ISNULL(CAST(NULL AS INT),N'42') AS value
+    expect: {rows: 1,data: [{value: 42}]}
+  - name: ISNULL numeric replacement follows the first integer declaration
+    sql: SELECT ISNULL(CAST(NULL AS SMALLINT),3.9) AS value
+    expect: {rows: 1,data: [{value: 3}]}
+  - name: ISNULL rejects selected replacement overflow at the first integer width
+    sql: SELECT ISNULL(CAST(NULL AS TINYINT),256) AS value
+    expect: {error: true,contains: overflow}
+  - name: ISNULL rejects invalid selected numeric replacement text
+    sql: SELECT ISNULL(CAST(NULL AS INT),N'bad') AS value
+    expect: {error: true,contains: integer}
+  - name: ISNULL leaves a nonnull first integer unchanged
+    sql: SELECT ISNULL(CAST(7 AS SMALLINT),3.9) AS value
+    expect: {rows: 1,data: [{value: 7}]}
+  - name: ISNULL literal NULL adopts the replacement text declaration
+    sql: SELECT ISNULL(NULL,N'42') AS value
+    expect: {rows: 1,data: [{value: '42'}]}
+  - name: ISNULL all literal NULL values retain NULL
+    sql: SELECT ISNULL(NULL,NULL) AS value
+    expect: {rows: 1,data: [{value: null}]}
+  - name: ISNULL selected text replacement uses the declared bit conversion
+    sql: SELECT ISNULL(CAST(NULL AS BIT),N'true') AS value
+    expect: {rows: 1,data: [{value: true}]}
+  - name: ISNULL converts row dependent replacements before native aggregation
+    sql: SELECT SUM(ISNULL(i,N'12')) AS value FROM tsql_null_contract_input
+    expect: {rows: 1,data: [{value: 19}]}
+  - name: ISNULL rejects absent arguments
+    sql: SELECT ISNULL() AS value
+    expect: {error: true}
+  - name: ISNULL rejects excess arguments
+    sql: SELECT ISNULL(NULL,1,2) AS value
+    expect: {error: true}
+  - name: ISNULL empty result metadata uses first types and literal NULL exceptions
+    scm: |
+      (map (tds_describe "memcp-tests"
+        "SELECT TOP(0) ISNULL(i,3.9) AS a,ISNULL(NULL,N'42') AS b,ISNULL(NULL,NULL) AS c FROM tsql_null_contract_input"
+        "" (newsession)) (lambda (field) (field "sql_type")))
+    expect: {result: [SMALLINT,NVARCHAR,INT]}
+  - name: ISNULL rejects an incompatible declared replacement even without rows
+    sql: SELECT ISNULL(i,CAST('2026-01-01' AS DATE)) AS value FROM tsql_null_contract_input WHERE id<0
+    expect: {error: true}
+  - name: NULLIF keeps the first value when operands differ
+    sql: SELECT NULLIF(CAST(7 AS SMALLINT),9) AS value
+    expect: {rows: 1,data: [{value: 7}]}
+  - name: NULLIF compares mixed numeric and textual declarations by numeric precedence
+    sql: SELECT NULLIF(2,N'2') AS a,NULLIF(N'2',2) AS b
+    expect: {rows: 1,data: [{a: null,b: null}]}
+  - name: NULLIF validates mixed numeric comparison text
+    sql: SELECT NULLIF(N'bad',2) AS value
+    expect: {error: true,contains: integer}
+  - name: NULLIF respects case insensitive native text declarations
+    sql: SELECT id,NULLIF(txt,N'a') AS value FROM tsql_null_contract_input ORDER BY id
+    expect: {rows: 2,data: [{id: 1,value: null},{id: 2,value: null}]}
+  - name: NULLIF respects bytewise native text declarations
+    sql: SELECT id,NULLIF(cs,N'a') AS value FROM tsql_null_contract_input ORDER BY id
+    expect: {rows: 2,data: [{id: 1,value: A},{id: 2,value: null}]}
+  - name: NULLIF retains typed NULL input
+    sql: SELECT NULLIF(CAST(NULL AS INT),1) AS value
+    expect: {rows: 1,data: [{value: null}]}
+  - name: NULLIF rejects an untyped first NULL
+    sql: SELECT NULLIF(NULL,1) AS value
+    expect: {error: true}
+  - name: NULLIF empty result metadata retains its first declaration
+    scm: |
+      (map (tds_describe "memcp-tests"
+        "SELECT TOP(0) NULLIF(i,9) AS a,NULLIF(txt,N'a') AS b FROM tsql_null_contract_input"
+        "" (newsession)) (lambda (field) (field "sql_type")))
+    expect: {result: [SMALLINT,NVARCHAR]}
+  - name: NULLIF remains usable inside typed CASE and native aggregates
+    sql: SELECT SUM(ISNULL(NULLIF(i,7),CAST(2 AS SMALLINT))) AS value FROM tsql_null_contract_input
+    expect: {rows: 1,data: [{value: 4}]}
+  - name: ISNULL character replacement obeys the first declared width
+    sql: SELECT ISNULL(CAST(NULL AS NVARCHAR(2)),N'long') AS value
+    expect: {rows: 1,data: [{value: lo}]}
+    noncritical: true
+  - name: ISNULL character column replacement obeys its declaration width
+    sql: SELECT ISNULL(txt,N'long replacement') AS value FROM tsql_null_contract_input WHERE id=2
+    expect: {rows: 1,data: [{value: 'long rep'}]}
+    noncritical: true
+
+  - name: ISNULL lazily evaluates a row dependent numeric replacement
+    sql: SELECT id,ISNULL(i,10/(id-1)) AS value FROM tsql_null_contract_input ORDER BY id
+    expect: {rows: 2,data: [{id: 1,value: 7},{id: 2,value: 10}]}
+  - name: ISNULL converts a numeric replacement into the first text contract
+    sql: SELECT id,ISNULL(txt,42) AS value FROM tsql_null_contract_input ORDER BY id
+    expect: {rows: 2,data: [{id: 1,value: A},{id: 2,value: '42'}]}
+  - name: ISNULL converts a declared Boolean replacement to an integer
+    sql: SELECT ISNULL(CAST(NULL AS INT),CAST(1 AS BIT)) AS value
+    expect: {rows: 1,data: [{value: 1}]}
+  - name: ISNULL converts a declared Boolean replacement to text
+    sql: SELECT ISNULL(CAST(NULL AS NVARCHAR(8)),CAST(1 AS BIT)) AS value
+    expect: {rows: 1,data: [{value: '1'}]}
+  - name: NULLIF compares a declared Boolean and integer through their numeric contract
+    sql: SELECT NULLIF(CAST(1 AS BIT),1) AS value
+    expect: {rows: 1,data: [{value: null}]}
+  - name: CASE implicit conversions use the declared Boolean carrier
+    sql: SELECT id,CASE WHEN id=1 THEN CAST(1 AS BIT) ELSE 7 END AS value FROM tsql_null_contract_input ORDER BY id
+    expect: {rows: 2,data: [{id: 1,value: 1},{id: 2,value: 7}]}
+  - name: COALESCE implicit conversion uses the declared Boolean carrier
+    sql: SELECT COALESCE(CAST(NULL AS INT),CAST(1 AS BIT)) AS value
+    expect: {rows: 1,data: [{value: 1}]}
+  - name: NULLIF rejects absent arguments
+    sql: SELECT NULLIF() AS value
+    expect: {error: true}
+  - name: NULLIF rejects excess arguments
+    sql: SELECT NULLIF(1,2,3) AS value
+    expect: {error: true}
+
+  - name: NULLIF literal text keeps the existing case insensitive frontend default
+    sql: SELECT NULLIF(N'A',N'a') AS value
+    expect: {rows: 1,data: [{value: null}]}
+  - name: NULLIF binary operands keep bytewise equality
+    sql: SELECT NULLIF(0x41,0x61) AS value
+    expect: {rows: 1,data: [{value: 'A'}]}
+
+  - name: NULLIF scalar comparison follows the native natural text ordering
+    sql: SELECT NULLIF(natural,N'a02') AS value FROM tsql_null_contract_input WHERE id=1
+    expect: {rows: 1,data: [{value: null}]}
+  - name: Native filtering and NULLIF agree for declared natural text ordering
+    sql: SELECT COUNT(*) AS value FROM tsql_null_contract_input WHERE natural=N'a02'
+    expect: {rows: 1,data: [{value: 1}]}
+  - name: ISNULL binary replacement can convert to a declared integer
+    sql: SELECT ISNULL(CAST(NULL AS INT),0x2A) AS value
+    expect: {rows: 1,data: [{value: 42}]}
+    noncritical: true
+
+  - name: ISNULL monetary replacements round to the first integer contract
+    sql: SELECT id,ISNULL(CAST(NULL AS INT),m) AS positive,ISNULL(CAST(NULL AS INT),s) AS negative FROM tsql_null_money ORDER BY id
+    expect:
+      rows: 3
+      data: [{id: 1,positive: 2,negative: -2},{id: 2,positive: 3,negative: -3},{id: 3,positive: null,negative: null}]
+  - name: ISNULL monetary replacements retain integer range checking after rounding
+    sql: SELECT ISNULL(CAST(NULL AS TINYINT),s) AS value FROM tsql_null_money WHERE id=1
+    expect: {error: true,contains: overflow}
+
+  - name: Nested NULL functions retain the first native text collation
+    sql: SELECT NULLIF(ISNULL(cs,N'a'),N'a') AS value FROM tsql_null_contract_input WHERE id=1
+    expect: {rows: 1,data: [{value: A}]}
+  - name: NULL function compiler contracts disappear before native execution
+    scm: |
+      (not (regexp_test (string (parse_tsql "memcp-tests"
+        "SELECT ISNULL(i,3.9) AS a,NULLIF(txt,N'a') AS b FROM tsql_null_contract_input"
+        nil nil nil)) "sql_type_expr|sql_compile_expr|tsql_convert_value_info"))
+    expect: {result: true}
+
+  - name: ISNULL monetary rounding checks the upper integer bound after rounding
+    setup:
+    - sql: INSERT tsql_null_money VALUES(4,255.6,255.6)
+    sql: SELECT ISNULL(CAST(NULL AS TINYINT),m) AS value FROM tsql_null_money WHERE id=4
+    expect: {error: true,contains: overflow}
+
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
   - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion
