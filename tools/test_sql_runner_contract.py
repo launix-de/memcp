@@ -1132,6 +1132,38 @@ class FailureAttributionContractTest(unittest.TestCase):
         self.assertEqual(runner.failed_critical, 1)
 
 
+class ResponseExpectationContractTest(unittest.TestCase):
+    def matches(self, expect, results) -> bool:
+        response = SimpleNamespace(status_code=200, text=json.dumps(results), headers={})
+        return SQLTestRunner("http://unused").validate_expectation(
+            {"expect": expect}, response, results)
+
+    def test_affected_rows_requires_a_completion_record(self) -> None:
+        for results in (None, [], [{}], [{"value": 0}], [0], ["affected_rows"]):
+            with self.subTest(results=results):
+                self.assertFalse(self.matches({"affected_rows": 0}, results))
+
+    def test_affected_rows_compares_the_declared_count(self) -> None:
+        for count in (0, 1, 7):
+            with self.subTest(count=count):
+                self.assertTrue(self.matches({"affected_rows": count}, [{"affected_rows": count}]))
+                self.assertFalse(self.matches({"affected_rows": count + 1}, [{"affected_rows": count}]))
+
+    def test_affected_rows_does_not_skip_row_count_assertions(self) -> None:
+        self.assertTrue(self.matches({"affected_rows": 0, "rows": 1}, [{"affected_rows": 0}]))
+        self.assertFalse(self.matches({"affected_rows": 0, "rows": 0}, [{"affected_rows": 0}]))
+
+    def test_affected_rows_does_not_skip_data_assertions(self) -> None:
+        result = [{"affected_rows": 2, "status": "done"}]
+        self.assertTrue(self.matches({"affected_rows": 2, "data": [{"status": "done"}]}, result))
+        self.assertFalse(self.matches({"affected_rows": 2, "data": [{"status": "missing"}]}, result))
+
+    def test_expected_null_requires_the_named_field(self) -> None:
+        self.assertTrue(self.matches({"data": [{"nullable": None}]}, [{"nullable": None}]))
+        self.assertFalse(self.matches({"data": [{"nullable": None}]}, [{}]))
+        self.assertFalse(self.matches({"data": [{"nullable": None}]}, [{"nullable": 0}]))
+
+
 class ErrorResponseContractTest(unittest.TestCase):
     def test_missing_response_is_not_a_sql_error(self) -> None:
         self.assertFalse(is_error_response(None))
