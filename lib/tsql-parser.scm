@@ -981,10 +981,11 @@ an unchecked replacement. Completion uses only this invocation's reserved range.
 			'(list) nil false callback (quote tx))))
 	(define without_generated_identity (lambda (formula)
 		(if capture_identity
-			(list (quote begin)
-				(list (quote define) (quote __tsql_insert_result) formula)
-				(list (quote session) "__tsql_identity" nil)
-				(quote __tsql_insert_result)) formula)))
+			/* MATCH evaluates the native call before its completion mutation.
+			A single-use DEFINE may be substituted into the later return expression. */
+			(list (quote match) formula (quote __tsql_insert_result)
+				(list (quote begin) (list (quote session) "__tsql_identity" nil)
+					(quote __tsql_insert_result))) formula)))
 	(define callback '('lambda '('id) '('session "last_insert_id" 'id)))
 	(if (nil? identity) (without_generated_identity (native_insert columns values callback))
 		(equal? row_count 0) (without_generated_identity (native_insert columns values nil))
@@ -997,9 +998,11 @@ an unchecked replacement. Completion uses only this invocation's reserved range.
 					'('reduce '__tsql_rows
 						'('lambda '('valid 'row)
 							'('if '('nil? '('nth 'row explicit)) '('error "IDENTITY cannot be assigned NULL") 'valid)) true)
-					'('define '__tsql_explicit_result (native_insert columns (quote __tsql_rows) callback))
-					(if capture_identity '('tsql_unresolved_identity 'session "explicit IDENTITY insertion") true)
-					'__tsql_explicit_result)
+					(match (native_insert columns (quote __tsql_rows) callback) explicit_insert
+						(if capture_identity
+							'('match explicit_insert '__tsql_explicit_result
+								'('begin '('tsql_unresolved_identity 'session "explicit IDENTITY insertion")
+									'__tsql_explicit_result)) explicit_insert)))
 				(begin
 					(define maximum (tsql_identity_maximum (identity "RawType") (identity "Dimensions")))
 					/* Batch extent comes from VALUES syntax or the existing sink's
@@ -2010,16 +2013,16 @@ a separator is recognized only on a physical line containing no SQL text. */
 		metadata needs an explicit presence branch before reading its fields. */
 		(define generated (if (nil? identity) false (not (has? columns (identity "Field")))))
 		/* Completion is once per statement, outside the parallel row sink. */
-		(define plan (list (quote begin)
-			(list (quote define) (quote __tsql_stream_result) native_plan)
-			(if generated
-				(list (quote if) (list (quote >) (quote __tsql_stream_result) 0)
-					(list (quote tsql_unresolved_identity) (quote session) "streaming INSERT")
-					(list (quote session) "__tsql_identity" nil))
-				(if identity
-					(list (quote tsql_unresolved_identity) (quote session) "explicit streaming IDENTITY insertion")
-					(list (quote session) "__tsql_identity" nil)))
-			(quote __tsql_stream_result)))
+		(define plan (list (quote match) native_plan (quote __tsql_stream_result)
+			(list (quote begin)
+				(if generated
+					(list (quote if) (list (quote >) (quote __tsql_stream_result) 0)
+						(list (quote tsql_unresolved_identity) (quote session) "streaming INSERT")
+						(list (quote session) "__tsql_identity" nil))
+					(if identity
+						(list (quote tsql_unresolved_identity) (quote session) "explicit streaming IDENTITY insertion")
+						(list (quote session) "__tsql_identity" nil)))
+				(quote __tsql_stream_result))))
 		(define ordered (or
 			(and (query_block? query) (not (empty_list? (coalesceNil (qb_order query) '()))))
 			(and (union_block? query) (not (empty_list? (coalesceNil (union_order query) '()))))))
