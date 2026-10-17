@@ -71,7 +71,15 @@ Floor is required before 1970: truncating a negative partial day changes both
 its date and clock. SQL declarations select the descriptor before any rows. */
 (define tds_temporal_result_value (lambda (descriptor value) (begin
 	(define kind (descriptor "kind"))
-	(define seconds (unix_timestamp (if (equal? kind 41) (tsql_calendar_text value) value)))
+	/* A string is an existing text representation of this declared SQL type,
+	not a source for choosing its type. Check before the generic Unix adapter
+	can discard a fraction; native Unix/date values need no text round trip.
+	DATE intentionally discards its clock under the declared DATE contract. */
+	(define textual (string? value))
+	(define checked (if (and textual (not (equal? kind 40)))
+		(tsql_calendar_cast_text value) value))
+	(define seconds (unix_timestamp (if (and textual (equal? kind 41))
+		(tsql_calendar_text checked) checked)))
 	(define day (intdiv (floor (/ seconds 86400)) 1))
 	(define clock (- seconds (* day 86400)))
 	(define legacy (equal? kind 111))

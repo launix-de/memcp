@@ -1224,6 +1224,59 @@ test_cases:
     expect:
       error: true
       contains: whole minutes
+  - name: Calendar wire refuses fractional raw datetime2 output
+    tds:
+      statements:
+      - sql: DROP TABLE IF EXISTS tsql_wire_raw_datetime2
+      - sql: CREATE TABLE tsql_wire_raw_datetime2(id INT PRIMARY KEY,v DATETIME2(7))
+      - sql: INSERT INTO tsql_wire_raw_datetime2 VALUES(1,N'2026-03-15 12:34:56.1')
+      - sql: SELECT v FROM tsql_wire_raw_datetime2
+        expect:
+          error: true
+          contains:
+          - fractional temporal conversion
+      - sql: DROP TABLE tsql_wire_raw_datetime2
+  - name: Calendar wire refuses fractional raw time output
+    tds:
+      statements:
+      - sql: DROP TABLE IF EXISTS tsql_wire_raw_time
+      - sql: CREATE TABLE tsql_wire_raw_time(id INT PRIMARY KEY,v TIME(7))
+      - sql: INSERT INTO tsql_wire_raw_time VALUES(1,N'12:34:56.1')
+      - sql: SELECT v FROM tsql_wire_raw_time
+        expect:
+          error: true
+          contains:
+          - fractional temporal conversion
+      - sql: DROP TABLE tsql_wire_raw_time
+  - name: Calendar wire stored whole and zero-fraction clocks remain typed
+    tds:
+      statements:
+      - sql: DROP TABLE IF EXISTS tsql_wire_raw_clocks
+      - sql: CREATE TABLE tsql_wire_raw_clocks(id INT PRIMARY KEY,dt DATETIME2(7),tm TIME(7))
+      - sql: INSERT INTO tsql_wire_raw_clocks VALUES(1,N'2026-03-15 12:34:56',N'12:34:56'),(2,N'2026-03-15 12:34:56.000',N'12:34:56.000')
+      - sql: SELECT dt,tm FROM tsql_wire_raw_clocks ORDER BY id
+        expect:
+          rows: 2
+          data:
+          - &id001
+            dt:
+              temporal_type: datetime2
+              value: '2026-03-15T12:34:56Z'
+            tm:
+              temporal_type: time
+              value: '12:34:56'
+          - *id001
+      - sql: DROP TABLE tsql_wire_raw_clocks
+  - name: Calendar wire DATE still discards a fractional clock by its declared contract
+    tds:
+      statements:
+      - sql: SELECT CAST(N'2026-03-15 12:34:56.1' AS DATE) AS day
+        expect:
+          rows: 1
+          data:
+          - day:
+              temporal_type: date
+              value: '2026-03-15'
 cleanup:
   - sql: DROP VIEW IF EXISTS tsql_wire_calendar_view
   - sql: DROP TABLE IF EXISTS tsql_wire_calendar_output
