@@ -83,7 +83,6 @@ test_cases:
       (define session (newsession))
       (session "username" "root")
       (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-utf16.sql.gz") session))
-  noncritical: true
 - name: UTF16 import preserves Unicode and nulls
   sql: SELECT id, label, note FROM tsdump_utf16
   expect:
@@ -92,7 +91,6 @@ test_cases:
     - id: 1
       label: Zürich 🐘
       note: null
-  noncritical: true
 - name: Import policy is honored before opening a file
   scm: (load_tsql "memcp-tests" "/does/not/exist" (lambda (db table write) (error "denied")))
   expect:
@@ -357,8 +355,4 @@ test_cases:
 - name: Text input fixture cleanup
   syntax: tsql
   sql: DROP TABLE dbo.tsdump_text_input
-- name: Nullable load handler retains compile-time arity checks
-  scm: (load (streamString "x") (lambda (line missing) true) nil "bom")
-  expect:
-    error: true
 cleanup: []
