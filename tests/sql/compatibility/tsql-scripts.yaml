@@ -1173,7 +1173,6 @@ test_cases:
     rows: 1
     data:
     - message: '00003'
-  noncritical: true
 
 - name: Dynamic parameter declarations reject duplicate formal names
   sql: EXEC sp_executesql N'SELECT @n AS value',N'@n INT,@n INT',@n=1
@@ -1345,5 +1344,41 @@ test_cases:
       (list "batch" (list (list "statement" "SELECT 1")
         (list "execute" "memcp-tests" "inspect" (list (list "value" "2"))))))
   expect: {result: true}
+
+- name: Message numeric flags preserve sign before zero padding
+  sql: BEGIN TRY RAISERROR(N'%05d:%+05i:% 5d',16,1,-3,3,3); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect: {rows: 1, data: [{message: '-0003:+0003:    3'}]}
+- name: Message left justification overrides zero padding
+  sql: BEGIN TRY RAISERROR(N'[%0-5d]',16,1,3); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect: {rows: 1, data: [{message: '[3    ]'}]}
+- name: Message integer precision overrides zero field padding
+  sql: BEGIN TRY RAISERROR(N'[%08.4d]:[%.0i]',16,1,-3,0); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect: {rows: 1, data: [{message: '[   -0003]:[]'}]}
+- name: Message text formatting counts declared national character units
+  sql: BEGIN TRY RAISERROR(N'[%6.3s]:[%-4s]',16,1,N'äbcde',N'ö'); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect: {rows: 1, data: [{message: '[   äbc]:[ö   ]'}]}
+- name: Message fixed width preserves minimum bigint exactly
+  sql: DECLARE @n BIGINT=-9223372036854775808; BEGIN TRY RAISERROR(N'%021I64d',16,1,@n); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect: {rows: 1, data: [{message: '-09223372036854775808'}]}
+- name: Message width does not change substitution type validation
+  sql: RAISERROR(N'%05d',16,1,N'3')
+  expect: {error: true}
+- name: Unsupported dynamic format widths fail explicitly
+  sql: RAISERROR(N'%*d',16,1,5,3)
+  expect: {error: true}
+- name: Message padding rejects an unbounded requested allocation
+  sql: RAISERROR(N'%999999999d',16,1,3)
+  expect: {error: true}
+
+- name: Message zero string precision produces an empty padded field
+  sql: BEGIN TRY RAISERROR(N'[%.s]:[%3.0s]',16,1,N'text',N'abc'); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect: {rows: 1, data: [{message: '[]:[   ]'}]}
+
+- name: Message width counts a supplementary national character as two units
+  sql: BEGIN TRY RAISERROR(N'[%4s]',16,1,N'😀'); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect: {rows: 1, data: [{message: '[  😀]'}]}
+- name: Message precision rejects an unbounded requested allocation
+  sql: RAISERROR(N'%.2048d',16,1,3)
+  expect: {error: true}
 
 cleanup: []
