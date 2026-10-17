@@ -746,4 +746,346 @@ test_cases:
   name: 'Fixture cleanup 005: DROP TABLE IF EXISTS dbo.exact_default_probe'
 - sql: DROP TABLE tsql_exact_data
   name: 'Fixture cleanup 006: DROP TABLE tsql_exact_data'
+- name: ROUND integer positive tie rounds away from zero
+  sql: SELECT ROUND(15,-1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 20
+- name: ROUND integer negative tie rounds away from zero
+  sql: SELECT ROUND(-15,-1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -20
+- name: ROUND integer positive truncation differs from rounding
+  sql: SELECT ROUND(15,-1,1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 10
+- name: ROUND integer negative truncation moves toward zero
+  sql: SELECT ROUND(-15,-1,1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -10
+- name: ROUND any nonzero function selects truncation
+  sql: SELECT ROUND(15,-1,-7) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 10
+- name: ROUND positive integer length retains its input
+  sql: SELECT ROUND(CAST('-2147483648' AS INT),8) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -2147483648
+- name: ROUND integer zero handles the widest negative length
+  sql: SELECT ROUND(0,-2147483648) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: ROUND integer extreme negative length returns zero
+  sql: SELECT ROUND(123,-2147483648) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: ROUND integer extreme positive length retains its input
+  sql: SELECT ROUND(123,2147483647) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 123
+- name: ROUND integer rounding retains the upper valid hundred
+  sql: SELECT ROUND(2147483647,-2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2147483600
+- name: ROUND integer rounding retains the lower valid hundred
+  sql: SELECT ROUND(CAST('-2147483648' AS INT),-2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -2147483600
+- name: ROUND tiny integer result can grow within the promoted contract
+  sql: SELECT ROUND(CAST(255 AS TINYINT),-1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 260
+- name: ROUND small integer result can grow within the promoted contract
+  sql: SELECT ROUND(CAST(32767 AS SMALLINT),-1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 32770
+- name: ROUND big integer upper endpoint retains every digit
+  sql: SELECT ROUND(CAST(9223372036854775807 AS BIGINT),0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9223372036854775807
+- name: ROUND big integer lower endpoint retains every digit
+  sql: SELECT ROUND(CAST('-9223372036854775808' AS BIGINT),0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -9223372036854775808
+- name: ROUND big integer upper valid hundred remains exact
+  sql: SELECT ROUND(CAST(9223372036854775807 AS BIGINT),-2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9223372036854775800
+- name: ROUND big integer lower valid hundred remains exact
+  sql: SELECT ROUND(CAST('-9223372036854775808' AS BIGINT),-2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -9223372036854775800
+- name: ROUND big integer long truncation returns zero
+  sql: SELECT ROUND(CAST(9223372036854775807 AS BIGINT),-19,1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: ROUND big integer length beyond its digits returns zero
+  sql: SELECT ROUND(CAST('-9223372036854775808' AS BIGINT),-20) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: ROUND big integer long result below the half boundary is zero
+  sql: SELECT ROUND(CAST(4999999999999999999 AS BIGINT),-19) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: ROUND untyped NULL keeps the ordinary integer contract
+  sql: SELECT ROUND(NULL,1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ROUND typed integer NULL propagates
+  sql: SELECT ROUND(CAST(NULL AS BIGINT),-1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ROUND NULL length propagates
+  sql: SELECT ROUND(15,CAST(NULL AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ROUND NULL function propagates
+  sql: SELECT ROUND(15,0,CAST(NULL AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ROUND text length is converted using the declared integer contract
+  sql: SELECT ROUND(15,CAST('-1' AS VARCHAR(3))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 20
+- name: ROUND floating positive half rounds away from zero
+  sql: SELECT ROUND(CAST(1.25 AS FLOAT),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1.3
+- name: ROUND floating negative half rounds away from zero
+  sql: SELECT ROUND(CAST(-1.25 AS FLOAT),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -1.3
+- name: ROUND floating truncation keeps its sign
+  sql: SELECT ROUND(CAST(-1.25 AS FLOAT),1,1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -1.2
+- name: ROUND floating negative length rounds the integral part
+  sql: SELECT ROUND(CAST(1250 AS FLOAT),-2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1300
+- name: ROUND floating extreme positive length retains its input
+  sql: SELECT ROUND(CAST(1.25 AS FLOAT),2147483647) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1.25
+- name: ROUND floating extreme negative length returns zero
+  sql: SELECT ROUND(CAST(-1.25 AS FLOAT),-2147483648) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: ROUND floating large integral values do not overflow an integer carrier
+  sql: SELECT ROUND(CAST(1e100 AS FLOAT),0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1.0e+100
+- name: ROUND floating typed NULL propagates
+  sql: SELECT ROUND(CAST(NULL AS FLOAT),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ROUND real values use the floating return family
+  sql: SELECT ROUND(CAST(12.75 AS REAL),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.8
+- name: ROUND money rounds at two places
+  sql: SELECT ROUND(CAST(12.3456 AS MONEY),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.35
+- name: ROUND money negative truncation keeps two places
+  sql: SELECT ROUND(CAST(-12.3456 AS MONEY),2,1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12.34
+- name: ROUND money length finer than its fixed scale retains the value
+  sql: SELECT ROUND(CAST(12.3456 AS MONEY),2147483647) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.3456
+- name: ROUND small money rounding promotes beyond the input range
+  sql: SELECT ROUND(CAST(214748.3647 AS SMALLMONEY),-5) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 200000
+- name: ROUND money typed NULL propagates
+  sql: SELECT ROUND(CAST(NULL AS SMALLMONEY),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ROUND rejects positive integer rounding overflow
+  sql: SELECT ROUND(2147483647,-1) AS value
+  expect:
+    error: true
+- name: ROUND rejects negative integer rounding overflow
+  sql: SELECT ROUND(CAST('-2147483648' AS INT),-1) AS value
+  expect:
+    error: true
+- name: ROUND rejects positive big integer rounding overflow
+  sql: SELECT ROUND(CAST(9223372036854775807 AS BIGINT),-1) AS value
+  expect:
+    error: true
+- name: ROUND rejects negative big integer rounding overflow
+  sql: SELECT ROUND(CAST('-9223372036854775808' AS BIGINT),-1) AS value
+  expect:
+    error: true
+- name: ROUND rejects an unrepresentable nineteen digit positive result
+  sql: SELECT ROUND(CAST(5000000000000000000 AS BIGINT),-19) AS value
+  expect:
+    error: true
+- name: ROUND rejects an unrepresentable nineteen digit negative result
+  sql: SELECT ROUND(CAST('-5000000000000000000' AS BIGINT),-19) AS value
+  expect:
+    error: true
+- name: ROUND rejects a length outside the declared integer range
+  sql: SELECT ROUND(15,CAST(2147483648 AS BIGINT)) AS value
+  expect:
+    error: true
+- name: ROUND rejects a function outside the declared integer range
+  sql: SELECT ROUND(15,0,CAST(2147483648 AS BIGINT)) AS value
+  expect:
+    error: true
+- name: ROUND rejects a calendar source before runtime arithmetic
+  sql: SELECT ROUND(CAST(N'2026-03-15' AS DATE),0) AS value
+  expect:
+    error: true
+- name: ROUND rejects missing length
+  sql: SELECT ROUND(15) AS value
+  expect:
+    error: true
+- name: ROUND rejects extra arguments
+  sql: SELECT ROUND(15,0,0,0) AS value
+  expect:
+    error: true
+- name: ROUND columns bind dynamic lengths and truncation once per input
+  setup:
+  - DROP TABLE IF EXISTS tsql_round_inputs
+  - CREATE TABLE tsql_round_inputs (id INT PRIMARY KEY,v BIGINT,places INT,mode INT)
+  - INSERT tsql_round_inputs VALUES (1,125,-1,0),(2,-125,-1,1),(3,NULL,0,0),(4,99,NULL,0)
+  sql: SELECT id,ROUND(v,places,mode) AS value FROM tsql_round_inputs ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      value: 130
+    - id: 2
+      value: -120
+    - id: 3
+      value: null
+    - id: 4
+      value: null
+  cleanup:
+  - DROP TABLE tsql_round_inputs
+- name: ROUND empty descriptions preserve each declared return family
+  scm: |-
+    (begin
+      (define fields (tds_describe "memcp-tests"
+        "SELECT TOP(0) ROUND(CAST(NULL AS TINYINT),0) AS t,ROUND(CAST(NULL AS SMALLINT),0) AS s,ROUND(CAST(NULL AS INT),0) AS i,ROUND(CAST(NULL AS BIGINT),0) AS b,ROUND(CAST(NULL AS REAL),0) AS r,ROUND(CAST(NULL AS FLOAT),0) AS f,ROUND(CAST(NULL AS SMALLMONEY),0) AS sm,ROUND(CAST(NULL AS MONEY),0) AS m" "" (newsession)))
+      (if (and
+        (equal? (map fields (lambda (field) (field "sql_type"))) '("INT" "INT" "INT" "BIGINT" "FLOAT" "FLOAT" "MONEY" "MONEY"))
+        (equal? (map fields (lambda (field) (field "kind"))) '(38 38 38 38 109 109 110 110))
+        (equal? (map fields (lambda (field) (field "size"))) '(4 4 4 8 8 8 8 8))) true
+        (error "ROUND result family or width was not compiled from its declaration")))
+  expect:
+    result: true
+- name: ROUND executable formulas contain no compiletime type wrappers
+  scm: |-
+    (begin
+      (define formula (sql_type_formula '() (tsql_builtin_expr "ROUND"
+        (list (tsql_cast_expr 125 "BIGINT" '()) -1))))
+      (if (and (not (contains? (expression_syntax formula) "sql_type_expr"))
+        (not (contains? (expression_syntax formula) "sql_compile_expr"))
+        (equal? (eval formula) 130)) true
+        (error "ROUND leaked annotations into executable arithmetic")))
+  expect:
+    result: true
+- name: ROUND portable view binds ordinary projected integer declarations
+  setup:
+  - DROP VIEW IF EXISTS tsql_round_view
+  - DROP TABLE IF EXISTS tsql_round_inputs
+  - CREATE TABLE tsql_round_inputs (id INT PRIMARY KEY,v BIGINT,places INT,mode INT)
+  - INSERT tsql_round_inputs VALUES (1,125,-1,0),(2,-125,-1,1),(3,NULL,0,0),(4,99,NULL,0)
+  - CREATE VIEW tsql_round_view AS SELECT id,ROUND(v,places,mode) AS value FROM tsql_round_inputs
+  sql: SELECT id,value FROM tsql_round_view ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      value: 130
+    - id: 2
+      value: -120
+    - id: 3
+      value: null
+    - id: 4
+      value: null
+  cleanup:
+  - DROP VIEW tsql_round_view
+  - DROP TABLE tsql_round_inputs
 cleanup: []
