@@ -177,7 +177,7 @@ try {
             $before = $db->query('SELECT id FROM php_session_count ORDER BY id')->fetchAll(PDO::FETCH_COLUMN);
             $maintenance = new PDO('memcp:dbname=memcp-tests', 'root', 'admin', [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
             $maintenance->exec("SET syntax='scheme'");
-            $maintenance->query('(rebuild (table "memcp-tests" "php_session_count") true false)')->closeCursor();
+            $maintenance->query('(rebuild (table "memcp-tests" false "php_session_count" false) true false)')->closeCursor();
             $after = $db->query('SELECT id FROM php_session_count ORDER BY id')->fetchAll(PDO::FETCH_COLUMN);
             check($before === $after, 'INT types must survive sequence compression');
             $payload = ['first' => reset($after), 'last' => end($after)];
