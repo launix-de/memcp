@@ -1917,7 +1917,12 @@ func foldIdentifier(name string) string {
 				}
 				// ASCII and non-ASCII members of one SimpleFold class must use
 				// the same representative (for example K and the Kelvin sign).
-				b.WriteRune(unicode.ToLower(canonical))
+				// Only normalize ASCII representatives: Unicode lowercasing can
+				// merge separate classes, such as dotted I and ASCII i.
+				if canonical >= 'A' && canonical <= 'Z' {
+					canonical += 'a' - 'A'
+				}
+				b.WriteRune(canonical)
 			}
 			return b.String()
 		}
