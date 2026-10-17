@@ -2389,13 +2389,19 @@ that context explicitly; stored views refuse this scalar before publication. */
 	(define tsql_insert_select_plan (lambda (database tbl columns query) (begin
 		(define declarations (tsql_insert_declarations database tbl columns planning_session))
 		(define columns (map declarations (lambda (column) (column "Field"))))
-		(define insert_expr (tsql_native_insert_expr database tbl columns
-			(cons list '((cons list (map (produceN (count columns))
-				(lambda (i) (sql_type_formula '() (tsql_assignment_expr
-					'('nth 'item (+ (* i 2) 1)) (nth declarations i)))))))) 1 false))
 		(define expanded (sql_expand_views query policy))
 		(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
 			(error "INSERT column count does not match SELECT column count"))
+		(define insert_expr (tsql_native_insert_expr database tbl columns
+			(cons list '((cons list (map (produceN (count columns))
+				(lambda (i) (begin
+					/* The row tuple is only a value accessor. Its SQL contract
+					comes from the existing logical projection compiler. */
+					(define info (sql_projection_info_at expanded i '()))
+					(sql_type_formula '() (tsql_assignment_expr
+						(list (quote sql_type_expr) '('nth 'item (+ (* i 2) 1))
+							(sql_info_type info) (sql_info_collation info))
+						(nth declarations i))))))))) 1 false))
 		(define native_plan (build_queryplan_term expanded planning_session tx))
 		(define identity (find (get_schema database tbl)
 			(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
