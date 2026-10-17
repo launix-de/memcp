@@ -28,7 +28,7 @@ test_cases:
 
   - name: "Create persistent scalar computed column"
     scm: |
-      (createcolumn (table "memcp-tests" "sr_data") "doubled" "INT" '() '()
+      (createcolumn (table "memcp-tests" false "sr_data" false) "doubled" "INT" '() '()
         '("amount") (lambda (amount) (* amount 2)))
 
   - name: "Baseline: scalar computed values are cached"

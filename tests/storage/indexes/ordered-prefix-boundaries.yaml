@@ -11,7 +11,7 @@ setup:
 - sql: CREATE TABLE ordered_prefix_posts (id INT PRIMARY KEY, kind VARCHAR(20), status
     VARCHAR(20), stamp INT) ENGINE=sloppy
 - scm: |-
-    (insert (table "memcp-tests" "ordered_prefix_posts") '("id" "kind" "status" "stamp")
+    (insert (table "memcp-tests" false "ordered_prefix_posts" false) '("id" "kind" "status" "stamp")
       (map (produceN 22000) (lambda (i)
         (list (+ i 1) (if (< i 2000) "post" "revision")
           (if (< i 2000) (if (equal? (mod i 2) 0) "publish" "private") (if (equal? i 21999) "leaked" "inherit")) i))))

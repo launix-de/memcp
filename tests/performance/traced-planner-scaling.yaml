@@ -70,15 +70,15 @@ test_cases:
     setup:
       - scm: |
           (begin
-            (rebuild (table "memcp-tests" "tps_prop") true false)
-            (rebuild (table "memcp-tests" "tps_parent") true false)
-            (rebuild (table "memcp-tests" "tps_assignment") true false))
+            (rebuild (table "memcp-tests" false "tps_prop" false) true false)
+            (rebuild (table "memcp-tests" false "tps_parent" false) true false)
+            (rebuild (table "memcp-tests" false "tps_assignment" false) true false))
       - sql: *rebuild_cache_query
       - scm: |
           (begin
-            (rebuild (table "memcp-tests" "tps_prop") true false)
-            (rebuild (table "memcp-tests" "tps_parent") true false)
-            (rebuild (table "memcp-tests" "tps_assignment") true false))
+            (rebuild (table "memcp-tests" false "tps_prop" false) true false)
+            (rebuild (table "memcp-tests" false "tps_parent" false) true false)
+            (rebuild (table "memcp-tests" false "tps_assignment" false) true false))
     warmup: 0
     timing_samples: 1
     threshold_ms: 5000

@@ -18,7 +18,7 @@ test_cases:
           (equal? (psql_import_plan "memcp-tests" nil
             "CREATE DATABASE dump_source WITH ENCODING = 'UTF8'"
             (sql_policy "root") nil)
-            (list "dump_source" (list (quote createdatabase) "memcp-tests" true)))
+            (list "dump_source" (list (quote create_sql_database) (quote tx) "memcp-tests" true nil nil)))
           true (error "quoted encoding changed the retargeted import plan"))))
 
   - name: "Import plan parses multiple database options with lookahead"
@@ -27,7 +27,7 @@ test_cases:
         (equal? (psql_import_plan "memcp-tests" nil
           "CREATE DATABASE dump_source WITH TEMPLATE = template0 ENCODING = 'UTF8' LOCALE = 'de_DE.UTF-8'"
           (sql_policy "root") nil)
-          (list "dump_source" (list (quote createdatabase) "memcp-tests" true)))
+          (list "dump_source" (list (quote create_sql_database) (quote tx) "memcp-tests" true nil nil)))
         true (error "database options changed the retargeted import plan"))
 
   - name: "Import plan rejects unterminated quoted database options"

@@ -849,3 +849,31 @@ func TestForeignKeyRejectsDifferentSchemaOwners(t *testing.T) {
 		t.Fatal("rejected FK changed an endpoint")
 	}
 }
+
+// A lifecycle callback may retire dependent columns on the same source table.
+// Its DDL rights must end before invoking arbitrary dependency maintenance.
+func TestDropColumnLifecycleReleasesDDLOwnership(t *testing.T) {
+	for _, migration := range []bool{false, true} {
+		t.Run(fmt.Sprint(migration), func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "tdroplifecycle", 0)
+			called, unlocked := false, false
+			tbl.AddTrigger(TriggerDescription{Name: "check_ddl_owner", Timing: AfterDropColumn,
+				Func: scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+					called = true
+					unlocked = tbl.ddlMu.TryLock()
+					if unlocked {
+						tbl.ddlMu.Unlock()
+					}
+					return scm.NewNil()
+				})})
+			if migration {
+				tbl.dropColumnForMigration("payload")
+			} else {
+				tbl.DropColumn("payload")
+			}
+			if !called || !unlocked {
+				t.Fatalf("DROP lifecycle ran under DDL ownership: called=%v unlocked=%v", called, unlocked)
+			}
+		})
+	}
+}

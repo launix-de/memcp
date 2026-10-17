@@ -16,12 +16,12 @@ setup:
   - sql: "CREATE TABLE reddit_mysql_account (id INT PRIMARY KEY, age INT, gender VARCHAR(8)) ENGINE=memory"
   - sql: "CREATE TABLE reddit_mysql_test2 (id INT PRIMARY KEY, account_id INT, active BOOLEAN) ENGINE=memory"
   - scm: |
-      (insert (table "memcp-tests" "reddit_mysql_account") '("id" "age" "gender")
+      (insert (table "memcp-tests" false "reddit_mysql_account" false) '("id" "age" "gender")
         (map (produceN 700000) (lambda (i)
           (list (+ i 1) (+ 10 (mod i 80))
             (if (equal? (mod i 2) 0) "MALE" "FEMALE")))))
   - scm: |
-      (insert (table "memcp-tests" "reddit_mysql_test2") '("id" "account_id" "active")
+      (insert (table "memcp-tests" false "reddit_mysql_test2" false) '("id" "account_id" "active")
         (map (produceN 1000000) (lambda (i)
           (list (+ i 1) (+ 1 (mod i 700000))
             (not (equal? (mod i 3) 0))))))
@@ -77,11 +77,11 @@ test_cases:
         (define found
           (scan_join_order (session "__memcp_tx")
             (list
-              (table "memcp-tests" "reddit_mysql_test2")
-              (table "memcp-tests" "reddit_mysql_account"))
+              (table "memcp-tests" false "reddit_mysql_test2" false)
+              (table "memcp-tests" false "reddit_mysql_account" false))
             (map (list
-              (table "memcp-tests" "reddit_mysql_test2")
-              (table "memcp-tests" "reddit_mysql_account")) (lambda (_) (list 369435906932736))) '() (list (list "id" "active") (list "age" "gender"))
+              (table "memcp-tests" false "reddit_mysql_test2" false)
+              (table "memcp-tests" false "reddit_mysql_account" false)) (lambda (_) (list 369435906932736))) '() (list (list "id" "active") (list "age" "gender"))
             (list
               (lambda (id active) (and (> id 0) (equal? active true)))
               (lambda (age gender)

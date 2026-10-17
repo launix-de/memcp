@@ -92,6 +92,40 @@ The negative accumulator also represents the minimum int64 without overflow. */
 	(parser '("[" (define id (regex "(?:[^\\]]|\\]\\])+" false false)) "]") (replace id "]]" "]"))
 	(parser '("\"" (define id (regex "(?:[^\"]|\"\")+" false false)) "\"") (replace id "\"\"" "\"")))))
 (define tsql_identifier (parser (or tsql_identifier_quoted tsql_identifier_unquoted)))
+/* Resolve spelling at the frontend boundary. Native metadata owns table and
+column names; views remain definitions in the existing system.views table.
+Only consumed name bindings enter the shared plan guards, never catalog epochs. */
+(define tsql_view_name (lambda (database name)
+	(scan nil (table "system" false "views" false)
+		(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false))
+		(list database) '("name") (lambda (candidate) (equal?? candidate name)) '("name")
+		(lambda (acc canonical) (if (nil? acc) canonical (error "ambiguous view name: " name)))
+		nil (lambda (a b) (if (nil? a) b (nil? b) a (error "ambiguous view name: " name))))))
+(define tsql_relation_name (lambda (database name)
+	(coalesceNil (show (table database false name true) "name") (tsql_view_name database name) name)))
+(define tsql_table_name (lambda (database name planning_session) (begin
+	(define canonical (show (table database false name true) "name"))
+	(planner_record_guard_condition
+		(list (quote equal?) (list (quote show) (list (quote table) database false name true) "name") canonical)
+		planning_session)
+	(coalesceNil canonical name))))
+(define tsql_create_relation (lambda (database name columns options ifnotexists tx) (begin
+	(if (tsql_view_name database name) (error "a view already owns this relation name: " name) true)
+	(define publish (lambda () (begin
+		(define published_columns (map columns (lambda (column) (match column
+			'("column" column_name type dimensions attributes)
+			(list "column" column_name type dimensions (tsql_publish_alias_attributes type attributes))
+			_ column))))
+		(sql_create_table database name published_columns (merge options '("name_ignorecase" true)) ifnotexists tx))))
+	(if (find columns (lambda (column) (match column
+		'("column" _name _type _dimensions attributes) (has_assoc? attributes "__tsql_alias_id") _ false)))
+		(tsql_type_ddl database tx publish) (publish)))))
+(define tsql_create_view_definition (lambda (tx database name dialect text query mode) (begin
+	(if (show (table database false name true) "name") (error "a table already owns this relation name: " name) true)
+	(define existing (tsql_view_name database name))
+	(if (and (nil? existing) (equal? mode "alter")) (error "view does not exist: " name) true)
+	(create_sql_view tx database (coalesceNil existing name) dialect text query
+		(if (equal? mode "alter") "replace" mode)))))
 /* The @ prefix makes this a variable token; SQL keywords need no identifier
 escaping here. Consume it as one token so whitespace cannot split the name. */
 (define tsql_variable_name (parser (define name (regex "@[a-zA-Z_][a-zA-Z0-9_]*"))
@@ -104,8 +138,10 @@ escaping here. Consume it as one token so whitespace cannot split the name. */
 (define tsql_text_literal (parser (define token tsql_string_token)
 	(list (quote sql_type_expr) (car token) (if (cadr token) "NVARCHAR" "VARCHAR") nil)))
 (define tsql_column (parser (or
-	(parser '((define alias tsql_identifier) "." (define name tsql_identifier)) '('get_column alias true name true))
-	(parser (define name tsql_identifier) '('get_column nil true name true)))))
+	(parser '((define alias tsql_identifier) "." (define name tsql_identifier))
+		(list (quote sql_compile_column) tsql_compile_column '('get_column alias true name true)))
+	(parser (define name tsql_identifier)
+		(list (quote sql_compile_column) tsql_compile_column '('get_column nil true name true))))))
 (define tsql_hex_literal (parser (define value sql_hex_literal)
 	(list (quote sql_type_expr) value "VARBINARY" nil)))
 (define tsql_literal (parser (or
@@ -152,6 +188,14 @@ Only the consuming compilation creates callbacks; SQL operands stay separate. */
 	(? (define namespace tsql_identifier) ".") (define type tsql_column_type)
 ) (if (or (nil? namespace) (equal?? namespace "sys")) type
 		(error "unsupported type namespace: " namespace))))
+/* Column declarations additionally admit persisted alias names. Cast/RPC
+contracts keep their existing native-type grammar until alias contracts there
+can be bound for the full procedure lifetime. */
+(define tsql_schema_type (parser (define parts (+ tsql_identifier "."))
+	/* Preserve token boundaries, including an unqualified quoted alias whose
+	name itself contains dots, whitespace or closing brackets. */
+	(reduce parts (lambda (prefix part)
+		(concat prefix (if (equal? prefix "") "" ".") "[" (replace part "]" "]]") "]")) "")))
 (define tsql_unique_parameters (lambda (parameters) (begin
 	(define names (map parameters car))
 	(if (equal? (count names) (count (merge_unique (list names)))) parameters
@@ -397,6 +441,7 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 	(define type (toUpper (declaration "RawType")))
 	(if (equal? type "ROWVERSION")
 		(error "generated version column cannot be assigned explicitly")
+		(declaration "AliasId") (tsql_cast_expr value type (declaration "Dimensions"))
 		(has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type)
 		(tsql_cast_expr value type '())
 		(has? '("NVARCHAR" "NCHAR") type)
@@ -428,15 +473,17 @@ recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. 
 		(column "Default") (coalesceNil (column "DefaultExpression") "") (column "Extra"))))
 (define tsql_declaration_matches? (lambda (column contract)
 	(if (nil? column) false (expression_equal? (tsql_declaration_contract column) contract))))
-(define tsql_column_description (lambda (database name column ignore_case) (begin
-	(define handle (table database name))
-	(if (nil? handle) nil (show handle "column" column ignore_case)))))
+(define tsql_column_description (lambda (database name column ignore_case planning_session) (begin
+	(define handle (table database false name false))
+	(if (nil? handle) nil (tsql_effective_column (show handle "column" column ignore_case) planning_session)))))
 (define tsql_target_column_declaration (lambda (database name column planning_session) (begin
-	(define declaration (tsql_column_description database name column true))
+	(define declaration (tsql_column_description database name column true planning_session))
 	(if (nil? declaration) nil (begin
+		(if (declaration "AliasId")
+			(tsql_guard_type_alias (declaration "DeclaredType") (declaration "AliasId") planning_session) true)
 		(planner_record_guard_condition
 			(list (quote tsql_declaration_matches?)
-				(list (quote tsql_column_description) database name (declaration "Field") false)
+				(list (quote tsql_column_description) database name (declaration "Field") false nil)
 				(list (quote quote) (tsql_declaration_contract declaration))) planning_session)
 		declaration)))))
 (define tsql_insert_declarations (lambda (database table_name columns planning_session) (begin	/* Resolve each target exactly once. Duplicate targets can overwrite an
@@ -1088,7 +1135,7 @@ The two options which change uniqueness/admission remain explicit contracts. */
 (define tsql_clock_default (parser (or
 	(parser '("(" tsql_clock_default ")") true)
 	'((atom "GETDATE" true) "(" ")") (atom "CURRENT_TIMESTAMP" true))))
-(define tsql_column_attributes (parser (define attrs (* (or
+(define tsql_column_attributes (lambda (default_parser) (parser (define attrs (* (or
 	(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement tsql_key_layout)
 		(if key (list "primary" true "null" false "constraint_name" key) '("primary" true "null" false)))
 	(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "UNIQUE" true) tsql_key_placement tsql_key_layout)
@@ -1099,9 +1146,14 @@ The two options which change uniqueness/admission remain explicit contracts. */
 		(if (and (or (nil? seed) (>= seed 1)) (or (nil? increment) (equal? increment 1)))
 			(list "auto_increment" true "identity_seed" (coalesceNil seed 1))
 			(error "IDENTITY currently requires a positive seed and increment 1")))
-	(parser '((atom "DEFAULT" true) tsql_clock_default) '("default_expression" "CURRENT_TIMESTAMP"))
-	(parser '((atom "DEFAULT" true) (define value tsql_default_literal)) '("default" value))
+	(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier))
+		(atom "DEFAULT" true) (define value default_parser))
+		(merge value (if key (list "default_name" key) '())))
+	(parser '((atom "COLLATE" true) (define collation tsql_identifier)) (list "collate" collation))
 ))) (begin
+		(if (> (count (filter attrs (lambda (attr)
+			(or (has_assoc? attr "default") (has_assoc? attr "default_expression"))))) 1)
+			(error "multiple DEFAULT declarations") true)
 		(if (and (find attrs (lambda (attr) (attr "auto_increment")))
 			(find attrs (lambda (attr) (attr "null"))))
 			(error "IDENTITY column was declared NULL") true)
@@ -1111,7 +1163,7 @@ The two options which change uniqueness/admission remain explicit contracts. */
 		(if (and (> (count (filter attrs (lambda (attr) (or (attr "primary") (attr "unique"))))) 1)
 			(find attrs (lambda (attr) (not (nil? (attr "constraint_name"))))))
 			(error "Multiple inline key declarations with constraint names are not supported") true)
-		(merge attrs))))
+		(merge attrs)))))
 /* PRIMARY KEY nullability is a frontend decision expressed through native
 column options; the engine does not infer SQL semantics from the key ID. */
 (define tsql_table_primary_columns (lambda (definitions) (begin
@@ -1208,7 +1260,7 @@ The frontend checks the complete reserved block before any row publication.
 Explicit NULL must fail here: native auto_increment would otherwise allocate
 an unchecked replacement. Completion uses only this invocation's reserved range. */
 (define tsql_native_insert_expr (lambda (database name columns values row_count capture_identity) (begin
-	(define relation (list (quote table) database name))
+	(define relation (list (quote table) database false name false))
 	(define identity (find (get_schema database name)
 		(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
 	(define native_insert (lambda (names rows callback)
@@ -1375,6 +1427,7 @@ never from the first row. Unknown expression types stay text in this first slice
 The shared expression compiler still owns the SQL type; these additional wire
 dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
+	((symbol sql_compile_column) _compiler column) (tsql_result_dimensions sources column parameters)
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
 	((symbol tsql_parsename) _value _piece) '(128)
 	(cons (symbol sql_compile_expr) (cons (symbol tsql_compile_quotename) _arguments)) '(258)
@@ -1548,7 +1601,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(define object_schema (car object))
 		(define name (cadr object))
 		(if policy (policy object_schema name false) true)
-		(define handle (table object_schema name))
+		(define handle (table object_schema false name true))
 		(define declaration (if (nil? handle) nil (show handle "column" column true)))
 		(if (nil? declaration) nil (tsql_declared_byte_length declaration))))))
 
@@ -1579,6 +1632,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 
 	(define extract_title_or_sql (lambda (captured_result)
 		(match (car (cdr captured_result))
+			((symbol sql_compile_column) _compiler ((symbol get_column) _alias _alias_ic column _column_ic)) column
 			'((symbol get_column) nil _ col _) col
 			'((symbol get_column) tblvar _ col _) col
 			_ (begin
@@ -1869,6 +1923,13 @@ that context explicitly; stored views refuse this scalar before publication. */
 				_ (error "APPLY currently requires a SELECT query"))
 			outer nil))))
 
+	(define tsql_read_source (lambda (alias database name) (begin
+		(define canonical (tsql_relation_name database name))
+		(planner_record_guard_condition
+			(list (quote equal?) (list (quote tsql_relation_name) database name) canonical)
+			planning_session)
+		(if policy (policy database canonical false) true)
+		(list alias database canonical false nil))))
 	(define tabledef (parser (or
 
 		/* VALUES is syntax data, lowered to the same logical SELECT/UNION
@@ -1887,12 +1948,12 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '((atom "(" true) (define query tsql_select) (atom ")" true) (atom "AS" true) (define id tsql_identifier)) '(id schema query false nil))
 		(parser '((atom "(" true) (define query tsql_select) (atom ")" true) (define id tsql_identifier)) '(id schema query false nil))
 
-		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
-		(parser '((define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define tbl tsql_identifier) (? tsql_table_hints)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
+		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (tsql_read_source id schema tbl))
+		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (tsql_read_source id schema tbl))
+		(parser '((define schema tsql_schema_identifier) (atom "." true) (define tbl tsql_identifier) (? tsql_table_hints)) (tsql_read_source tbl schema tbl))
+		(parser '((define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (tsql_read_source id schema tbl))
+		(parser '((define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (tsql_read_source id schema tbl))
+		(parser '((define tbl tsql_identifier) (? tsql_table_hints)) (tsql_read_source tbl schema tbl))
 	)))
 
 	(define from nil)
@@ -2045,9 +2106,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(define cols (+ (or
 			/* Assignment aliases must precede expression comparisons. */
 			(parser '((define title (or tsql_identifier tsql_string)) "=" (define e tsql_expression)) '(title e))
-			(parser "*" '("*" '((quote get_column) nil false "*" false)))
-			(parser '((define tbl tsql_identifier_quoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
-			(parser '((define tbl tsql_identifier_unquoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
+			(parser "*" (list "*" (list (quote sql_compile_column) tsql_compile_column (list (quote get_column) nil false "*" false))))
+			(parser '((define tbl tsql_identifier_quoted) "." "*")
+				(list "*" (list (quote sql_compile_column) tsql_compile_column '('get_column tbl true "*" false))))
+			(parser '((define tbl tsql_identifier_unquoted) "." "*")
+				(list "*" (list (quote sql_compile_column) tsql_compile_column '('get_column tbl true "*" false))))
 			(parser '((define e tsql_expression) (atom "AS" true) (define title tsql_identifier)) '(title e))
 			(parser '((define e tsql_expression) (atom "AS" true) (define title tsql_string)) '(title e))
 
@@ -2158,7 +2221,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(if (and (nil? alias_match) (> (count table_matches) 1) (nil? table_match))
 				(error "ambiguous write target: " target_name) true)
 			(define source (coalesceNil alias_match table_match
-				(list target_name (coalesceNil target_schema schema) target_name false nil)))
+				(list target_name (coalesceNil target_schema schema)
+					(tsql_table_name (coalesceNil target_schema schema) target_name planning_session) false nil)))
 			(if (source_is_base_table? source) source (error "write target must be a base table"))))))
 	(define tsql_write_sources (lambda (target sources)
 		(if (has? sources target) sources (cons target sources))))
@@ -2190,7 +2254,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(if (equal? op "assign")
 						(tsql_default_assignment_expr declaration)
 						(error "DEFAULT requires simple assignment")) expression))
-				(define old (list (quote get_column) (source_alias target) false (declaration "Field") false))
+				(define old (list (quote sql_compile_column) tsql_compile_column
+					(list (quote get_column) (source_alias target) false (declaration "Field") false)))
 				(if (has? '("and" "or" "xor") op) (tsql_bit_assignment_type (declaration "Type")) true)
 				(define assigned (match op "assign" value
 					"add" (tsql_add_expr old value)
@@ -2211,7 +2276,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(define sources (merge (coalesceNil from '())))
 			(define target (tsql_write_source target sources))
 			(if policy (policy (source_schema target) (source_relation target) true) true)
-			(build_dml_plan (source_schema target) (source_relation target) (source_alias target)
+			(tsql_build_dml_plan (source_schema target) (source_relation target) (source_alias target)
 				(tsql_write_sources target sources) (tsql_update_values target cols)
 				(coalesceNil condition true) nil limit nil planning_session tx)))))
 	(define tsql_delete (parser '(
@@ -2226,7 +2291,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(define sources (merge (coalesceNil from '())))
 			(define target (tsql_write_source target sources))
 			(if policy (policy (source_schema target) (source_relation target) true) true)
-			(build_dml_plan (source_schema target) (source_relation target) (source_alias target)
+			(tsql_build_dml_plan (source_schema target) (source_relation target) (source_alias target)
 				(tsql_write_sources target sources) nil (coalesceNil condition true)
 				nil limit nil planning_session tx)))))
 
@@ -2239,7 +2304,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(define trunc_schema (coalesce schema2 schema))
 			(cons '!begin (list
 				(list (quote checktablemaintenance) trunc_schema tbl "truncate")
-				(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil planning_session tx)))
+				(tsql_build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil planning_session tx)))
 	))))
 
 	(define tsql_insert_literal_cell (parser (or
@@ -2279,13 +2344,16 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(define query (sql_apply_view_column_aliases (nth captured 1) aliases))
 			(if (tsql_view_has_metadata_scalar? query)
 				(error "COL_LENGTH in stored views requires a consuming compile policy") true)
-			(list (quote create_sql_view)
+			(list (quote tsql_create_view_definition)
 				(list (quote session) "__memcp_tx")
 				view_schema id "tsql" (nth captured 0) (list (quote quote) query)
 				(if (and ifnotexists (equal? mode "error")) "ignore" mode)))))))
 
-	(define tsql_schema_identifier (parser (define owner tsql_identifier)
-		(if (equal?? owner "dbo") database owner)))
+	/* A database-qualified dbo owner is still one native database. No second
+	catalog or SQL-specific namespace is introduced into storage. */
+	(define tsql_schema_identifier (parser (or
+		(parser '((define owner tsql_identifier) "." (atom "dbo" true)) owner)
+		(parser (define owner tsql_identifier) (if (equal?? owner "dbo") database owner)))))
 	(define tsql_expression3 (parser '(
 		(define a tsql_expression4)
 		(define terms (* (parser '(
@@ -2296,7 +2364,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		) (list op value)) empty true))
 	) (reduce terms tsql_fold_additive a)))
 	(define tsql_build_select_plan (lambda (query) (begin
-		(define expanded (sql_expand_views query policy))
+		(define expanded (tsql_bind_column_compilers (sql_expand_views query policy) (tsql_column_compiler planning_session)))
 		(define descriptors (tsql_result_columns expanded parameters))
 		(if describe (list (quote quote) descriptors) (list (quote !begin)
 			(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded))
@@ -2311,7 +2379,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(cons list '((cons list (map (produceN (count columns))
 				(lambda (i) (sql_type_formula '() (tsql_assignment_expr
 					'('nth 'item (+ (* i 2) 1)) (nth declarations i)))))))) 1 false))
-		(define expanded (sql_expand_views query policy))
+		(define expanded (tsql_bind_column_compilers (sql_expand_views query policy) (tsql_column_compiler planning_session)))
 		(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
 			(error "INSERT column count does not match SELECT column count"))
 		(define native_plan (build_queryplan_term expanded planning_session tx))
@@ -2364,6 +2432,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(atom "VALUES" true) (define rows (+ tsql_insert_values_row ","))
 	) (lambda () (begin
 			(define database (coalesce schema2 schema))
+			(define tbl (tsql_table_name database tbl planning_session))
 			(if policy (policy database tbl true) true)
 			(define declarations (tsql_insert_declarations database tbl
 				(coalesce columns (table_insertable_columns database tbl)) planning_session))
@@ -2389,6 +2458,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(atom "DEFAULT" true) (atom "VALUES" true)
 	) (lambda () (begin
 			(define database (coalesce schema2 schema))
+			(define tbl (tsql_table_name database tbl planning_session))
 			(if policy (policy database tbl true) true)
 			(tsql_native_insert_expr database tbl '()
 				(if (equal?? limit 0) '('list) '('list '(list)))
@@ -2400,6 +2470,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(define query tsql_select)
 	) (lambda () (begin
 			(define database (coalesce schema2 schema))
+			(define tbl (tsql_table_name database tbl planning_session))
 			(if policy (policy database tbl true) true)
 			(tsql_insert_select_plan database tbl (coalesce columns (table_insertable_columns database tbl))
 				(tsql_insert_limit_query query limit))
@@ -2417,6 +2488,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(? tsql_index_location)
 	) (lambda () (begin
 			(define database (coalesce schema2 schema))
+			(define tbl (tsql_table_name database tbl planning_session))
 			(if policy (policy database tbl true) true)
 			(if (and unique predicate) (error "filtered UNIQUE requires native filtered-key support") true)
 			(tsql_check_index_options options unique)
@@ -2432,7 +2504,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(reduce columns (lambda (seen name)
 				(if (has? seen name) (error "duplicate index column: " name) (cons name seen))) '())
 			(if (not unique) true (list (quote if)
-				(list (quote createkey) (list (quote table) database tbl) name true
+				(list (quote createkey) (list (quote table) database false tbl false) name true
 					(cons (quote list) columns) (quote tx) (list (quote list) "nulls_not_distinct" true))
 				true (list (quote error) "index already exists: " name)))))))
 	(define tsql_alter_index (parser '(
@@ -2464,21 +2536,18 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '((atom "NO" true) (atom "ACTION" true)) "restrict")
 		(parser (atom "CASCADE" true) "cascade")
 		(parser '((atom "SET" true) (atom "NULL" true)) "set null"))))
+	/* Constant defaults compile through the same declared expression contracts
+	as DML. Folding must succeed: volatile expressions are never sampled at DDL
+	time. The existing native clock marker remains the explicit dynamic default. */
+	(define tsql_default_value (parser (or
+		(parser tsql_clock_default '("default_expression" "CURRENT_TIMESTAMP"))
+		(parser (define expression tsql_expression)
+			(list "default" (tryfold (sql_type_formula '() expression)))))))
+	(define column_attributes (tsql_column_attributes tsql_default_value))
 	(define column_definition (parser '(
-		(define name tsql_identifier) (define type tsql_column_type)
-		(define dimensions tsql_type_dimensions) (define attributes tsql_column_attributes)
-	) (begin
-			(define dimensions (tsql_decl_dimensions type dimensions))
-			/* Keep literal defaults in the existing native default option, after
-			frontend conversion. No additional default registry or storage type
-			semantics are introduced for national text declarations. */
-			(define attributes (if (has? '("NVARCHAR" "NCHAR") type)
-				(merge (extract_assoc attributes (lambda (key value)
-					(list key (if (equal? key "default")
-						(eval (sql_type_lower_annotations (tsql_cast_expr (list (quote quote) value) type dimensions))) value)))))
-				attributes))
-			(list name (tsql_storage_type type) (cons (quote list) dimensions)
-				(tsql_identity_attributes type dimensions attributes)))))
+		(define name tsql_identifier) (define type tsql_schema_type)
+		(define dimensions tsql_type_dimensions) (define attributes column_attributes)
+	) (list name type (cons (quote list) dimensions) attributes)))
 	(define foreign_key_definition (parser '(
 		(? (atom "CONSTRAINT" true) (define name tsql_identifier))
 		(atom "FOREIGN" true) (atom "KEY" true) "(" (define columns (+ tsql_identifier ",")) ")"
@@ -2501,7 +2570,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "UNIQUE" true) tsql_key_placement
 				"(" (define keys tsql_key_columns) ")" tsql_key_layout)
 				(list (quote list) "unique" (coalesce key (reduce keys (lambda (a b) (concat a "_" b)) name)) (cons (quote list) keys)
-					(list (quote list) "nulls_not_distinct" true)))
+					(cons (quote list) (merge '("nulls_not_distinct" true)
+						(if key (list "constraint_name" key) '())))))
 			foreign_key_definition
 			(parser (define column column_definition) (match column '(name type dimensions attributes)
 				(list (quote list) "column" name type dimensions (cons (quote list) attributes))))
@@ -2509,8 +2579,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(? tsql_index_location)
 	) (lambda () (begin
 			(if policy (policy (coalesce schema2 schema) name true) true)
-			(define columns (tsql_table_primary_columns columns))
-			(list (quote sql_create_table) (coalesce schema2 schema) name
+			/* Explicit PRIMARY KEY policy precedes inherited alias nullability. */
+			(define columns (map (tsql_table_primary_columns columns) (lambda (column)
+				(tsql_prepare_column (coalesce schema2 schema) column planning_session))))
+			(list (quote tsql_create_relation) (coalesce schema2 schema) name
 				(cons (quote list) (map columns tsql_identity_native_column))
 				(tsql_identity_table_options columns) (if ifnotexists true false) (quote tx))))))
 	(define tsql_alter_table (parser '(
@@ -2523,7 +2595,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(define nullable (or (parser '((atom "NOT" true) (atom "NULL" true)) false)
 					(parser (atom "NULL" true) true) (parser empty true)))
 			) (lambda (database name) (begin
-					(define handle (table database name))
+					(define handle (table database false name false))
 					(define previous (if (nil? handle) nil (show handle "column" column true)))
 					(if (nil? previous) (error "ALTER column does not exist: " column) true)
 					(define dimensions (tsql_decl_dimensions type dimensions))
@@ -2531,7 +2603,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(define collation (coalesceNil collation (coalesceNil (previous "Collation") "")))
 					(if (tsql_compatible_column_declaration? previous type dimensions nullable collation) true
 						(error "ALTER COLUMN requires native validation or conversion"))
-					(list (quote !begin) (list (quote altercolumn) (list (quote table) database name)
+					(list (quote !begin) (list (quote altercolumn) (list (quote table) database false name false)
 						(previous "Field") "declaration"
 						(list (quote quote) (list (list type dimensions nullable collation)
 							(tsql_column_declaration_tuple previous)))) true))))
@@ -2544,15 +2616,29 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(if (reduce columns (lambda (valid column) (and valid
 						(not ((find (show database name) (lambda (meta) (equal? (meta "Field") column))) "Null")))) true)
 						true (error "ADD PRIMARY KEY currently requires NOT NULL columns"))
-					(list (quote createkey) (list (quote table) database name) "PRIMARY" true
+					(list (quote createkey) (list (quote table) database false name false) "PRIMARY" true
 						(cons (quote list) columns) (quote tx)
 						(cons (quote list) (if key (list "constraint_name" key) '()))))))
 			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define key tsql_identifier)
 				(atom "UNIQUE" true) tsql_key_placement "(" (define columns tsql_key_columns) ")" tsql_key_layout)
 				(lambda (database name)
-					(list (quote createkey) (list (quote table) database name) key true
+					(list (quote createkey) (list (quote table) database false name false) key true
 						(cons (quote list) columns) (quote tx)
-						(list (quote list) "nulls_not_distinct" true))))
+						(list (quote list) "nulls_not_distinct" true "constraint_name" key))))
+			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define key tsql_identifier))
+				(atom "DEFAULT" true) (define default tsql_default_value)
+				(atom "FOR" true) (define column tsql_identifier))
+				(lambda (database name) (begin
+					(define declaration (tsql_column_description database name column true nil))
+					(if (nil? declaration) (error "DEFAULT column does not exist: " column) true)
+					(define value (if (has_assoc? default "default")
+						(eval (sql_type_formula '() (tsql_assignment_expr
+							(list (quote quote) (default "default")) declaration))) nil))
+					(list (quote !begin)
+						(list (quote altercolumn) (list (quote table) database false name false)
+							(declaration "Field") "add_default"
+							(list (quote quote) (list value (coalesceNil (default "default_expression") "")
+								(coalesceNil key (concat "DF_" name "_" (declaration "Field")))))) true))))
 			(parser '((atom "ADD" true) (define columns (+ column_definition ",")))
 				(lambda (database name)
 					(begin
@@ -2560,21 +2646,34 @@ that context explicitly; stored views refuse this scalar before publication. */
 						Reject this form instead of manufacturing a parallel allocator. */
 						(if (find columns (lambda (column) ((nth column 3) "auto_increment")))
 							(error "ALTER ADD IDENTITY requires native historical-row initialization") true)
-						(cons (quote !begin) (map columns (lambda (column)
-							(match column '(col type dimensions attributes)
-								(list (quote sql_create_column) (list (quote table) database name)
-									col type dimensions (cons (quote list) (sql_add_column_attributes attributes))))))))))
-			(parser '((atom "DROP" true) (atom "COLUMN" true) (define col tsql_identifier))
+						(list (quote tsql_add_columns) database name
+							(cons (quote list) (map columns (lambda (column)
+								(match column '(col type dimensions attributes)
+									(tsql_prepare_column database (list (quote list) "column" col type dimensions
+										(cons (quote list) attributes)) planning_session))))) (quote tx)))))
+			(parser '((atom "DROP" true) (atom "COLUMN" true)
+				(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
+				(define columns (+ tsql_identifier ",")))
 				(lambda (database name)
-					(list (quote altertable) (list (quote table) database name) "drop" col)))
-			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define key tsql_identifier))
-				(lambda (database name) (list (quote or)
-					(list (quote dropforeignkey) (list (quote table) database name) key)
-					(list (quote dropkey) (list (quote table) database name) key))))
+					(cons (quote !begin) (map columns (lambda (col)
+						(list (quote altertable) (list (quote table) database false name false)
+							(if ifexists "drop_if_exists" "drop")
+							(coalesceNil (resolve_column_name database name col true) col)))))))
+			(parser '((atom "DROP" true) (atom "CONSTRAINT" true)
+				(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
+				(define keys (+ tsql_identifier ",")))
+				(lambda (database name) (cons (quote !begin) (map keys (lambda (key)
+					(list (quote if) (list (quote or)
+						(list (quote altercolumn) (list (quote table) database false name false) key "drop_default" nil)
+						(list (quote dropforeignkey) (list (quote table) database false name false) key)
+						(list (quote dropkey) (list (quote table) database false name false) key (quote tx)))
+						true (if ifexists true (list (quote error) "constraint does not exist: " key))))))))
 		) ","))
 	) (lambda () (begin
-			(if policy (policy (coalesce schema2 schema) name true) true)
-			(cons (quote !begin) (map changes (lambda (change) (change (coalesce schema2 schema) name))))))))
+			(define database (coalesce schema2 schema))
+			(define name (tsql_table_name database name planning_session))
+			(if policy (policy database name true) true)
+			(cons (quote !begin) (map changes (lambda (change) (change database name))))))))
 	(define tsql_transaction_keyword (if script_syntax
 		(parser (or (atom "TRAN" true) (atom "TRANSACTION" true)))
 		(parser (? (or (atom "TRAN" true) (atom "TRANSACTION" true))))))
@@ -2591,11 +2690,27 @@ that context explicitly; stored views refuse this scalar before publication. */
 			'(lambda () ('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy) planning_session tx)) (settings "ExplainWidth"))))))
 		tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete tsql_truncate
 		tsql_create_view tsql_create_table tsql_alter_table tsql_create_index tsql_alter_index tsql_drop_index
+		(parser '((atom "CREATE" true) (atom "TYPE" true)
+			(? (define owner tsql_identifier) ".") (define name tsql_identifier)
+			(atom "FROM" true) (define base tsql_declared_type) (define dimensions tsql_type_dimensions)
+			(define nullable (or (parser '((atom "NOT" true) (atom "NULL" true)) false)
+				(parser (atom "NULL" true) true) (parser empty true))))
+			(lambda () (begin
+				(if (or (nil? owner) (equal?? owner "dbo")) true (error "unsupported type owner: " owner))
+				(if policy (policy schema true true) true)
+				(list (quote create_sql_type_alias) schema name base (list (quote quote) dimensions) nullable (quote tx)))))
+		(parser '((atom "DROP" true) (atom "TYPE" true)
+			(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
+			(? (define owner tsql_identifier) ".") (define name tsql_identifier))
+			(lambda () (begin
+				(if (or (nil? owner) (equal?? owner "dbo")) true (error "unsupported type owner: " owner))
+				(if policy (policy schema true true) true)
+				(list (quote drop_sql_type_alias) schema name (if ifexists true false) (quote tx)))))
 		(parser '((atom "CREATE" true) (atom "DATABASE" true)
 			(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
 			(define name tsql_identifier)) (lambda () (begin
 				(if policy (policy "system" true true) true)
-				(list (quote createdatabase) name (if ifnotexists true false) nil nil))))
+				(list (quote create_sql_database) (quote tx) name (if ifnotexists true false) nil nil))))
 		(parser '((atom "DROP" true) (atom "DATABASE" true)
 			(define ifexists (? (atom "IF" true) (atom "EXISTS" true))) (define name tsql_identifier))
 			(lambda () (begin (if policy (policy "system" true true) true)
@@ -2603,14 +2718,20 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '((atom "DROP" true) (atom "TABLE" true)
 			(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
 			(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier))
-			(lambda () (begin (if policy (policy (coalesce schema2 schema) name true) true)
-				(list (quote droptable) (coalesce schema2 schema) name (if ifexists true false)))))
+			(lambda () (begin
+				(define database (coalesce schema2 schema))
+				(define name (tsql_table_name database name planning_session))
+				(if policy (policy database name true) true)
+				(list (quote droptable) database name (if ifexists true false)))))
 		(parser '((atom "DROP" true) (atom "VIEW" true)
 			(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
 			(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier))
-			(lambda () (begin (if policy (policy (coalesce schema2 schema) name true) true)
+			(lambda () (begin
+				(define database (coalesce schema2 schema))
+				(define name (coalesceNil (tsql_view_name database name) name))
+				(if policy (policy database name true) true)
 				(list (quote drop_sql_view) (list (quote session) "__memcp_tx")
-					(coalesce schema2 schema) name (if ifexists true false)))))
+					database name (if ifexists true false)))))
 		(parser '((atom "SET" true) (atom "NOCOUNT" true)
 			(define enabled (or (parser (atom "ON" true) true) (parser (atom "OFF" true) false))))
 			(lambda () (list (quote session) "__tsql_nocount" enabled)))

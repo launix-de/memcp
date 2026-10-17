@@ -46,7 +46,7 @@ test_cases:
     sql: ALTER TABLE added_declared_key ADD CONSTRAINT added_pk PRIMARY KEY CLUSTERED (id)
     expect: {rows: 0}
   - name: Native createkey accepts a public name through its options
-    scm: '(if (createkey (table "memcp-tests" "added_declared_key") "other_key" true (list "id") nil (list "constraint_name" "other_declared_name")) true (error "native key creation failed"))'
+    scm: '(if (createkey (table "memcp-tests" false "added_declared_key" false) "other_key" true (list "id") nil (list "constraint_name" "other_declared_name")) true (error "native key creation failed"))'
     expect: {}
   - name: Duplicate public declaration names are rejected before publication
     sql: CREATE TABLE conflicting_declared_key (id INT CONSTRAINT alias PRIMARY KEY, value INT CONSTRAINT ALIAS UNIQUE)
@@ -55,7 +55,7 @@ test_cases:
     sql: SELECT id FROM conflicting_declared_key
     expect: {error: true}
   - name: Native createkey refuses an alias already used by another key
-    scm: '(if (createkey (table "memcp-tests" "added_declared_key") "conflicting_key" true (list "id") nil (list "constraint_name" "ADDED_PK")) (error "ambiguous alias was published") true)'
+    scm: '(if (createkey (table "memcp-tests" false "added_declared_key" false) "conflicting_key" true (list "id") nil (list "constraint_name" "ADDED_PK")) (error "ambiguous alias was published") true)'
     expect: {}
   - name: Restart preserves native schema and key declarations
     action: restart
@@ -86,7 +86,7 @@ test_cases:
     sql: ALTER TABLE inline_declared_key DROP CONSTRAINT INLINE_UQ
     expect: {rows: 0}
   - name: A native option name can also be dropped after restart
-    scm: '(if (dropkey (table "memcp-tests" "added_declared_key") "OTHER_DECLARED_NAME") true (error "native public name did not survive restart"))'
+    scm: '(if (dropkey (table "memcp-tests" false "added_declared_key" false) "OTHER_DECLARED_NAME") true (error "native public name did not survive restart"))'
     expect: {}
 cleanup:
   - sql: DROP TABLE IF EXISTS conflicting_declared_key

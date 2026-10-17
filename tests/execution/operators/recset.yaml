@@ -56,16 +56,16 @@ setup:
   - scm: |
       (begin
         (define rows (produceN 4096 (lambda (i) (list (+ i 1) (mod i 8)))))
-        (insert (table "memcp-tests" "recset_adaptive") '("id" "value") rows '() (lambda () true) false))
+        (insert (table "memcp-tests" false "recset_adaptive" false) '("id" "value") rows '() (lambda () true) false))
   - scm: |
       (begin
         (define rows (produceN 20000 (lambda (i)
           (list (+ i 1) (if (equal? (mod i 997) 0) nil (mod i 10000)) (mod i 17) (if (< i 5000) 1 0)))))
-        (insert (table "memcp-tests" "recset_project_source") '("id" "k1" "k2" "selected") rows '() (lambda () true) false))
+        (insert (table "memcp-tests" false "recset_project_source" false) '("id" "k1" "k2" "selected") rows '() (lambda () true) false))
   - scm: |
       (begin
         (define rows (produceN 40000 (lambda (i) (list (+ i 1) (mod i 10000) (mod i 17)))))
-        (insert (table "memcp-tests" "recset_project_target") '("id" "k1" "k2") rows '() (lambda () true) false))
+        (insert (table "memcp-tests" false "recset_project_target" false) '("id" "k1" "k2") rows '() (lambda () true) false))
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS recset_project_target"
@@ -79,7 +79,7 @@ test_cases:
   - name: "scan_recset builds a query-local subset"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define rs (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -90,7 +90,7 @@ test_cases:
   - name: "scan accepts recset as table-like source"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define rs (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -110,7 +110,7 @@ test_cases:
       - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'recset_items'"
       - scm: |
           (begin
-            (define tbl (table "memcp-tests" "recset_items"))
+            (define tbl (table "memcp-tests" false "recset_items" false))
             (define rs (scan_recset nil tbl
               (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
               (lambda (tenant) (equal? tenant 1))))
@@ -134,7 +134,7 @@ test_cases:
   - name: "$recset_contains probes current table row without exposing recid"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define rs (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -152,7 +152,7 @@ test_cases:
   - name: "$recset_contains handles multiple recsets in one scan"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define tenant1 (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -173,8 +173,8 @@ test_cases:
   - name: "$recset_contains is table-scoped"
     scm: |
       (begin
-        (define source (table "memcp-tests" "recset_items"))
-        (define other (table "memcp-tests" "recset_other"))
+        (define source (table "memcp-tests" false "recset_items" false))
+        (define other (table "memcp-tests" false "recset_other" false))
         (define rs (scan_recset nil source
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -192,7 +192,7 @@ test_cases:
   - name: "scan_order supports $recset_contains filter"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define rs (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -215,7 +215,7 @@ test_cases:
       - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'recset_items'"
       - scm: |
           (begin
-            (define tbl (table "memcp-tests" "recset_items"))
+            (define tbl (table "memcp-tests" false "recset_items" false))
             (define rs (scan_recset nil tbl
               (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
               (lambda (tenant) (equal? tenant 1))))
@@ -240,7 +240,7 @@ test_cases:
   - name: "scan_order keeps repeated $recset_contains calls exact"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define tenant1 (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -264,7 +264,7 @@ test_cases:
   - name: "scan_order keeps $recset_contains OR semantics exact"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define tenant1 (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -288,7 +288,7 @@ test_cases:
   - name: "scan_exists accepts recset as table-like source"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define rs (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -305,7 +305,7 @@ test_cases:
   - name: "scan_exists uses recset membership on base table"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define tenant1 (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -322,7 +322,7 @@ test_cases:
   - name: "scan_recset intersects recset membership before reading columns"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define tenant1 (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -336,7 +336,7 @@ test_cases:
   - name: "scan_batch applies recset membership to every lookup batch"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define tenant1 (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -355,7 +355,7 @@ test_cases:
   - name: "scan_order accepts recset as table-like source"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define rs (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -376,7 +376,7 @@ test_cases:
   - name: "scan_order_multi accepts recset branches"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define rs1 (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -407,8 +407,8 @@ test_cases:
   - name: "recset_project_join projects source keys to target recids"
     scm: |
       (begin
-        (define links (table "memcp-tests" "recset_link"))
-        (define items (table "memcp-tests" "recset_items"))
+        (define links (table "memcp-tests" false "recset_link" false))
+        (define items (table "memcp-tests" false "recset_items" false))
         (define link_rs (scan_recset nil links
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -429,8 +429,8 @@ test_cases:
   - name: "recset_project_join output can be ordered"
     scm: |
       (begin
-        (define links (table "memcp-tests" "recset_link"))
-        (define items (table "memcp-tests" "recset_items"))
+        (define links (table "memcp-tests" false "recset_link" false))
+        (define items (table "memcp-tests" false "recset_items" false))
         (define link_rs (scan_recset nil links
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -476,7 +476,7 @@ test_cases:
   - name: "recset key index provides immutable scalar lookup"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define selected (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -492,7 +492,7 @@ test_cases:
   - name: "recset key index accepts a union and composite keys"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define tenant1 (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -513,7 +513,7 @@ test_cases:
   - name: "recset key index rejects lookup arity mismatch"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define selected (scan_recset nil tbl (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
         (define lookup (recset_key_index nil selected '("tenant" "active")))
         (lookup 1))
@@ -523,7 +523,7 @@ test_cases:
   - name: "recset_union combines same-table recsets without duplicates"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define tenant1 (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -547,7 +547,7 @@ test_cases:
   - name: "adaptive recset algebra covers every representation pairing"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_adaptive"))
+        (define tbl (table "memcp-tests" false "recset_adaptive" false))
         (define full (scan_recset nil tbl (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
         (define empty (scan_recset nil tbl (car (eval (compile_scan_access '() (scheme "(lambda () false)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () false)")))) '() (lambda () false)))
         (define positive (scan_recset nil tbl (car (eval (compile_scan_access '("id") (scheme "(lambda (id) (> id 4086))")))) (cadr (eval (compile_scan_access '("id") (scheme "(lambda (id) (> id 4086))")))) '("id") (lambda (id) (> id 4086))))
@@ -591,7 +591,7 @@ test_cases:
   - name: "recset_not complements against visible same-table rows"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define tenant1 (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -606,7 +606,7 @@ test_cases:
   - name: "recset_difference subtracts every following operand"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define full (scan_recset nil tbl (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
         (define tenant1 (scan_recset nil tbl (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant") (lambda (tenant) (equal? tenant 1))))
         (define active (scan_recset nil tbl (car (eval (compile_scan_access '("active") (scheme "(lambda (value) (equal? value 1))")))) (cadr (eval (compile_scan_access '("active") (scheme "(lambda (value) (equal? value 1))")))) '("active") (lambda (value) (equal? value 1))))
@@ -626,8 +626,8 @@ test_cases:
   - name: "recset_union rejects recsets from different tables"
     scm: |
       (begin
-        (define left (scan_recset nil (table "memcp-tests" "recset_items") (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
-        (define right (scan_recset nil (table "memcp-tests" "recset_other") (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
+        (define left (scan_recset nil (table "memcp-tests" false "recset_items" false) (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
+        (define right (scan_recset nil (table "memcp-tests" false "recset_other" false) (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
         (recset_union nil (list left right)))
     expect:
       error: true
@@ -635,8 +635,8 @@ test_cases:
   - name: "recset_intersect rejects recsets from different tables"
     scm: |
       (begin
-        (define left (scan_recset nil (table "memcp-tests" "recset_items") (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
-        (define right (scan_recset nil (table "memcp-tests" "recset_other") (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
+        (define left (scan_recset nil (table "memcp-tests" false "recset_items" false) (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
+        (define right (scan_recset nil (table "memcp-tests" false "recset_other" false) (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
         (recset_intersect nil (list left right)))
     expect:
       error: true
@@ -644,8 +644,8 @@ test_cases:
   - name: "recset_difference rejects recsets from different tables"
     scm: |
       (begin
-        (define left (scan_recset nil (table "memcp-tests" "recset_items") (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
-        (define right (scan_recset nil (table "memcp-tests" "recset_other") (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
+        (define left (scan_recset nil (table "memcp-tests" false "recset_items" false) (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
+        (define right (scan_recset nil (table "memcp-tests" false "recset_other" false) (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
         (recset_difference nil (list left right)))
     expect:
       error: true
@@ -653,8 +653,8 @@ test_cases:
   - name: "large recset projection keeps one-column duplicates and nulls exact"
     scm: |
       (begin
-        (define source (table "memcp-tests" "recset_project_source"))
-        (define target (table "memcp-tests" "recset_project_target"))
+        (define source (table "memcp-tests" false "recset_project_source" false))
+        (define target (table "memcp-tests" false "recset_project_target" false))
         (define selected (scan_recset nil source (car (eval (compile_scan_access '("selected") (scheme "(lambda (v) (equal? v 1))")))) (cadr (eval (compile_scan_access '("selected") (scheme "(lambda (v) (equal? v 1))")))) '("selected") (lambda (v) (equal? v 1))))
         (define projected (recset_project_join nil selected '("k1") target '("k1")))
         (if (equal? (recset_count projected) 19976)
@@ -664,8 +664,8 @@ test_cases:
   - name: "large recset projection keeps composite keys exact"
     scm: |
       (begin
-        (define source (table "memcp-tests" "recset_project_source"))
-        (define target (table "memcp-tests" "recset_project_target"))
+        (define source (table "memcp-tests" false "recset_project_source" false))
+        (define target (table "memcp-tests" false "recset_project_target" false))
         (define selected (scan_recset nil source (car (eval (compile_scan_access '("selected") (scheme "(lambda (v) (equal? v 1))")))) (cadr (eval (compile_scan_access '("selected") (scheme "(lambda (v) (equal? v 1))")))) '("selected") (lambda (v) (equal? v 1))))
         (define projected (recset_project_join nil selected '("k1" "k2") target '("k1" "k2")))
         (if (equal? (recset_count projected) 4994)
@@ -675,7 +675,7 @@ test_cases:
   - name: "show forwards recset to base table metadata"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define rs (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
@@ -689,7 +689,7 @@ test_cases:
   - name: "recset scan rejects mutation callbacks"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "recset_items"))
+        (define tbl (table "memcp-tests" false "recset_items" false))
         (define rs (scan_recset nil tbl
           (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))

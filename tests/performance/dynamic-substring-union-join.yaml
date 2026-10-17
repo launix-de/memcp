@@ -24,7 +24,7 @@ setup:
   - sql: "CREATE TABLE dynamic_substring_risk_checks (instruction_id INT PRIMARY KEY, hold_flag INT) ENGINE=sloppy"
   - scm: |
       (map (produceN 6) (lambda (batch)
-        (insert (table "memcp-tests" "dynamic_substring_transactions")
+        (insert (table "memcp-tests" false "dynamic_substring_transactions" false)
           '("id" "instruction_id" "batch_id" "entity_id" "timestamp_seg" "category_code")
           (map (produceN 100000) (lambda (offset)
             (begin
@@ -36,7 +36,7 @@ setup:
                 (mod i 21800)
                 (nth '("A" "B" "C" "D") (mod i 4)))))))))
   - scm: |
-      (insert (table "memcp-tests" "dynamic_substring_config_v1")
+      (insert (table "memcp-tests" false "dynamic_substring_config_v1" false)
         '("id" "unit_id" "instruction_id" "cat_list" "hold_cat_list" "job_expression")
         (map (produceN 44000) (lambda (i)
           (list i (mod i 48) (mod i 18400)
@@ -44,13 +44,13 @@ setup:
             (if (equal? (mod i 5) 0) "A,B" "C,D")
             (if (equal? (mod i 4) 0) "0 20 * * ? *" "other")))))
   - scm: |
-      (insert (table "memcp-tests" "dynamic_substring_config_v2")
+      (insert (table "memcp-tests" false "dynamic_substring_config_v2" false)
         '("id" "unit_id" "instruction_id" "cat_list" "hold_cat_list" "job_expression")
         (map (produceN 1000) (lambda (i)
           (list i 100 (mod i 18400) "A,C" "B,D"
             (if (equal? (mod i 2) 0) "0 20 * * ? *" "other")))))
   - scm: |
-      (insert (table "memcp-tests" "dynamic_substring_config_all")
+      (insert (table "memcp-tests" false "dynamic_substring_config_all" false)
         '("id" "unit_id" "instruction_id" "cat_list" "hold_cat_list" "job_expression")
         (map (produceN 45000) (lambda (i)
           (if (< i 44000)
@@ -63,7 +63,7 @@ setup:
                 (if (equal? (mod j 2) 0) "0 20 * * ? *" "other")))
               (- i 44000))))))
   - scm: |
-      (insert (table "memcp-tests" "dynamic_substring_risk_checks")
+      (insert (table "memcp-tests" false "dynamic_substring_risk_checks" false)
         '("instruction_id" "hold_flag")
         (map (produceN 18400) (lambda (i)
           (list i (if (equal? (mod i 40) 0) 0 1)))))

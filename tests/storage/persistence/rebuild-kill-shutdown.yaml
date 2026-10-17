@@ -16,11 +16,11 @@ setup:
   # MEMORY table returns COUNT(*) = 0 before KILL_QUERY can cancel the scan.
   - sql: "CREATE TABLE rks_scan (id INT PRIMARY KEY) ENGINE=SAFE"
   - scm: |
-      (insert (table "memcp-tests" "rks_rows") '("id" "payload")
+      (insert (table "memcp-tests" false "rks_rows" false) '("id" "payload")
         (map (produceN 20000) (lambda (i)
           (list (+ i 1) (concat "payload-" (+ i 1))))))
   - scm: |
-      (insert (table "memcp-tests" "rks_scan") '("id")
+      (insert (table "memcp-tests" false "rks_scan" false) '("id")
         (map (produceN 800) (lambda (i) (list (+ i 1)))))
 
 test_cases:
@@ -67,7 +67,7 @@ test_cases:
 
   - name: "Add a WAL-backed delta generation"
     scm: |
-      (insert (table "memcp-tests" "rks_rows") '("id" "payload")
+      (insert (table "memcp-tests" false "rks_rows" false) '("id" "payload")
         (map (produceN 2000) (lambda (i)
           (list (+ i 20001) (concat "delta-" (+ i 20001))))))
 
@@ -94,7 +94,7 @@ test_cases:
               checksum: 242011000
 
   - name: "Rebuild immediately after query cancellation"
-    scm: '(rebuild (table "memcp-tests" "rks_rows") true false)'
+    scm: '(rebuild (table "memcp-tests" false "rks_rows" false) true false)'
     timeout: 20
 
   - name: "Rebuilt generation remains exact"
@@ -119,7 +119,7 @@ test_cases:
 
   - name: "Rebuild interrupted by hard process crash"
     parallel: rks_crash_rebuild
-    scm: '(rebuild (table "memcp-tests" "rks_rows") true false)'
+    scm: '(rebuild (table "memcp-tests" false "rks_rows" false) true false)'
     expect:
       interrupted_ok: true
 
@@ -141,7 +141,7 @@ test_cases:
           checksum: 242011000
 
   - name: "Second rebuild succeeds after crash recovery"
-    scm: '(rebuild (table "memcp-tests" "rks_rows") true false)'
+    scm: '(rebuild (table "memcp-tests" false "rks_rows" false) true false)'
     timeout: 20
 
   - name: "Warm a computed result index before shutdown"

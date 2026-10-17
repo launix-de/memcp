@@ -29,7 +29,7 @@ setup:
         state VARCHAR(16) NOT NULL
       ) ENGINE=safe
   - scm: |
-      (insert (table "memcp-tests" "mtr_entry") '("id" "bucket" "amount" "state")
+      (insert (table "memcp-tests" false "mtr_entry" false) '("id" "bucket" "amount" "state")
         (map (produceN 35) (lambda (i)
           (list (+ i 1) (mod i 4) (* (+ i 1) 10) "original"))))
   - scm: '(rebuild)'

@@ -18,10 +18,10 @@ setup:
 - sql: CREATE TABLE prefix_grant (owner_id INT, actor_id INT) ENGINE=sloppy
 - scm: |
     (begin
-      (insert (table "memcp-tests" "prefix_event") '("id" "owner_id" "stamp" "active")
+      (insert (table "memcp-tests" false "prefix_event" false) '("id" "owner_id" "stamp" "active")
         (map (produceN 800000) (lambda (i)
           (list (+ i 1) (+ 1 (mod i 100)) i (if (equal? (mod i 7) 0) 0 1)))))
-      (insert (table "memcp-tests" "prefix_grant") '("owner_id" "actor_id")
+      (insert (table "memcp-tests" false "prefix_grant" false) '("owner_id" "actor_id")
         (merge (list (list (list 1 1) (list 1 1) (list 2 2) (list 3 2) (list 4 2))
           (map (produceN 40) (lambda (i) (list (+ i 1) 3)))
           (map (produceN 100) (lambda (i) (list (+ i 1) 4))))))
@@ -36,7 +36,7 @@ setup:
         (map (produceN 800000) (lambda (i)
           (list (+ i 1) (if (< (mod i 20) 19) 1 (+ 2 (mod (floor (/ i 20)) 99))) i))))
       (map '("frequency_event_hot" "frequency_event_rare") (lambda (name)
-        (insert (table "memcp-tests" name) '("id" "owner_id" "stamp") frequency_rows)))
+        (insert (table "memcp-tests" false name false) '("id" "owner_id" "stamp") frequency_rows)))
       (rebuild))
 test_cases:
 - name: 'Perf: one dynamic equality prefix'

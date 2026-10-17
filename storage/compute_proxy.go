@@ -1219,6 +1219,7 @@ func (p *StorageComputeProxy) deserializeComputeProxyV0(f io.Reader) uint {
 	if err := json.Unmarshal(computorBuf, &p.computor); err != nil {
 		panic(fmt.Errorf("StorageComputeProxy: decode computor: %w", err))
 	}
+	p.computor = upgradePersistedTableCalls(p.computor)
 
 	// compressed flag
 	var compressedFlag uint8

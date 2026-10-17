@@ -59,7 +59,7 @@ x-delivery-setup: &delivery_setup
         (define item_count (* delivery_count 8))
         (define serial_count (* item_count 3))
         (define inserted_deliveries
-          (insert (table "{database}" "json_perf_delivery_notes")
+          (insert (table "{database}" false "json_perf_delivery_notes" false)
             '("id" "note_number" "customer_name" "delivery_date" "status")
             (map (produceN delivery_count) (lambda (i)
               (list (+ i 1)
@@ -68,7 +68,7 @@ x-delivery-setup: &delivery_setup
                 (+ 1700000000 i)
                 (if (equal? (mod i 5) 0) "open" "shipped"))))))
         (define inserted_items
-          (insert (table "{database}" "json_perf_delivery_items")
+          (insert (table "{database}" false "json_perf_delivery_items" false)
             '("id" "delivery_note_id" "sku" "quantity" "unit_price")
             (map (produceN item_count) (lambda (i)
               (list (+ i 1)
@@ -77,7 +77,7 @@ x-delivery-setup: &delivery_setup
                 (+ (mod i 7) 1)
                 (+ (mod (* i 37) 10000) 100))))))
         (define inserted_serials
-          (insert (table "{database}" "json_perf_serial_numbers")
+          (insert (table "{database}" false "json_perf_serial_numbers" false)
             '("id" "delivery_item_id" "serial_number")
             (map (produceN serial_count) (lambda (i)
               (list (+ i 1)

@@ -30,7 +30,7 @@ derived SELECT before untangle_query sees the complete query. */
 	(if (> (sql_view_catalog_state "count") 0)
 		(begin
 			(define normalized_query (toLower query))
-			(define references_view (scan nil (table "system" "views")
+			(define references_view (scan nil (table "system" false "views" false)
 				'(369435906932736) '()
 				'("name")
 				(lambda (name) (> (count (split normalized_query (toLower name))) 1))
@@ -58,7 +58,7 @@ derived SELECT before untangle_query sees the complete query. */
 			_ (error "view column aliases currently require one query block")))))
 
 (define sql_find_view (lambda (schema name)
-	(scan nil (table "system" "views")
+	(scan nil (table "system" false "views" false)
 		(list 369436443803648 (scan_boundary "equal" "database" 0 0 true true "" false) (scan_boundary "equal" "name" 1 1 true true "" false)) (list schema name)
 		'() (lambda () true)
 		'("dialect" "sql" "ir")
@@ -79,7 +79,7 @@ derived SELECT before untangle_query sees the complete query. */
 								(if (string? relation)
 									(begin
 										(if policy (policy source_schema relation false) true)
-										(if (has? (show source_schema) relation)
+										(if (table source_schema false relation false)
 											relation
 											(begin
 												(define view (sql_find_view source_schema relation))
@@ -93,7 +93,7 @@ derived SELECT before untangle_query sees the complete query. */
 														(define stored_ir (nth view 2))
 														(if (nil? stored_ir)
 															(error (concat "view " key " has no parsed IR"))
-															(expand_node (json_decode_scmer stored_ir) (cons key stack))))))))
+															(expand_node (restore_storage_code (json_decode_scmer stored_ir)) (cons key stack))))))))
 									(expand_node relation stack)))
 							(list alias source_schema expanded_relation outer (expand_node join_condition stack)))
 						_ (error "invalid query source while expanding views"))))
@@ -122,14 +122,14 @@ derived SELECT before untangle_query sees the complete query. */
 missing definition. Validate that contract before publishing catalog data. */
 (define create_sql_view (lambda (tx schema name dialect sql ir mode) (begin
 	(define serialized_ir (json_encode ir))
-	(define existing (scan tx (table "system" "views")
+	(define existing (scan tx (table "system" false "views" false)
 		(list 369436443803648 (scan_boundary "equal" "database" 0 0 true true "" false) (scan_boundary "equal" "name" 1 1 true true "" false)) (list schema name)
 		'() (lambda () true)
 		'() (lambda (acc) (+ acc 1)) 0 +))
 	(define result
 		(if (> existing 0)
 			(if (has? '("replace" "alter") mode)
-				(scan tx (table "system" "views")
+				(scan tx (table "system" false "views" false)
 					(list 369436443803648 (scan_boundary "equal" "database" 0 0 true true "" false) (scan_boundary "equal" "name" 1 1 true true "" false)) (list schema name)
 					'() (lambda () true)
 					'("$update")
@@ -141,7 +141,7 @@ missing definition. Validate that contract before publishing catalog data. */
 				(error (concat "view " schema "." name " already exists")))
 			(if (equal? mode "alter")
 				(error (concat "view " schema "." name " does not exist"))
-				(insert (table "system" "views")
+				(insert (table "system" false "views" false)
 					'("database" "name" "dialect" "sql" "ir")
 					(list (list schema name dialect sql serialized_ir))))))
 	(if (or (equal? existing 0) (has? '("replace" "alter") mode))
@@ -154,7 +154,7 @@ missing definition. Validate that contract before publishing catalog data. */
 	result)))
 
 (define drop_sql_view (lambda (tx schema name if_exists) (begin
-	(define removed (scan tx (table "system" "views")
+	(define removed (scan tx (table "system" false "views" false)
 		(list 369436443803648 (scan_boundary "equal" "database" 0 0 true true "" false) (scan_boundary "equal" "name" 1 1 true true "" false)) (list schema name)
 		'() (lambda () true)
 		'("$update")
@@ -167,27 +167,59 @@ missing definition. Validate that contract before publishing catalog data. */
 			removed)
 		(if if_exists 0 (error (concat "view " schema "." name " does not exist")))))))
 
+/* SQL database lifecycle and alias declaration publication share one DDL
+gate per database. Ordinary reads and DML never acquire it. The stable scope
+retains gates, not requests, transactions or executable plans.
+Privileged native createdatabase/dropdatabase intentionally bypass this SQL
+catalog contract; their callers own any frontend metadata cleanup. */
+(define sql_database_ddl_gates (newsession))
+(define sql_database_ddl_scope (newsession))
+(define sql_database_ddl (lambda (schema tx operation)
+	((sql_database_ddl_gates "get_or_compute_scoped" sql_database_ddl_scope schema (lambda () (mutex))) tx operation)))
+
+/* Alias definitions are ordinary frontend rows, not native schema objects.
+The catalog is optional when the t-sql module has not been loaded. Deletions
+use native autocommit so their WAL is durable before a new namespace appears. */
+(define sql_remove_database_type_aliases (lambda (schema) (begin
+	(define aliases (table "system" false "tsql_types" false))
+	(if aliases
+		(scan nil aliases
+			(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false)) (list schema)
+			'() (lambda () true) '("$update")
+			(lambda (acc remove) (begin (remove) (+ acc 1))) 0 +)
+		0))))
+
+(define create_sql_database (lambda (tx schema if_not_exists options source)
+	(sql_database_ddl schema tx (lambda () (begin
+		/* A crash can leave alias rows after the physical DROP. Retire them
+		while the namespace is still absent, before native CREATE publishes it.
+		An existing namespace, including IF NOT EXISTS, keeps its declarations. */
+		(if (nil? (show schema)) (sql_remove_database_type_aliases schema) true)
+		(createdatabase schema if_not_exists options source))))))
+
 /* Drop the physical database before cleaning its catalog rows. This ordering
 prevents a refused or failed protected-schema drop from changing access or view
 metadata. */
-(define drop_sql_database (lambda (tx schema if_exists) (begin
-	(define dropped (dropdatabase schema if_exists))
-	(if dropped (begin
-		(scan tx (table "system" "access")
-			(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false)) (list schema)
-			'() (lambda () true)
-			'("$update")
-			(lambda (acc $update) (begin ($update) (+ acc 1)))
-			0 +)
-		(define removed_views (scan tx (table "system" "views")
-			(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false)) (list schema)
-			'() (lambda () true)
-			'("$update")
-			(lambda (acc $update) (begin ($update) (+ acc 1)))
-			0 +))
-		(if (> removed_views 0) (begin
-			(sql_view_catalog_set_count (max 0 (- (sql_view_catalog_state "count") removed_views)))
-			(sql_view_catalog_changed)
+(define drop_sql_database (lambda (tx schema if_exists)
+	(sql_database_ddl schema tx (lambda () (begin
+		(define dropped (dropdatabase schema if_exists))
+		(if dropped (begin
+			(sql_remove_database_type_aliases schema)
+			(scan tx (table "system" false "access" false)
+				(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false)) (list schema)
+				'() (lambda () true)
+				'("$update")
+				(lambda (acc $update) (begin ($update) (+ acc 1)))
+				0 +)
+			(define removed_views (scan tx (table "system" false "views" false)
+				(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false)) (list schema)
+				'() (lambda () true)
+				'("$update")
+				(lambda (acc $update) (begin ($update) (+ acc 1)))
+				0 +))
+			(if (> removed_views 0) (begin
+				(sql_view_catalog_set_count (max 0 (- (sql_view_catalog_state "count") removed_views)))
+				(sql_view_catalog_changed)
+			) true)
 		) true)
-	) true)
-	dropped)))
+		dropped)))))

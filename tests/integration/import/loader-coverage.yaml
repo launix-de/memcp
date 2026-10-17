@@ -105,7 +105,7 @@ test_cases:
 
   - name: "seed enum-shaped imported column"
     scm: |
-      (insert (table "memcp-tests" "loader_psql_partial") '("id" "active" "note")
+      (insert (table "memcp-tests" false "loader_psql_partial" false) '("id" "active" "note")
         (map (produceN 100) (lambda (i)
           (list (+ i 1) (not (equal? i 99)) (concat "base-" (+ i 1))))))
 

@@ -87,11 +87,11 @@ test_cases:
       - sql: "CREATE TABLE exists_point_acl (ID INT PRIMARY KEY, child_id INT, principal_id INT)"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "exists_point_parent") (list "ID" "payload")
+            (insert (table "memcp-tests" false "exists_point_parent" false) (list "ID" "payload")
               (map (produceN 2000) (lambda (i) (list (+ i 1) i))))
-            (insert (table "memcp-tests" "exists_point_child") (list "ID" "parent_id")
+            (insert (table "memcp-tests" false "exists_point_child" false) (list "ID" "parent_id")
               (map (produceN 2000) (lambda (i) (list (+ i 1) (+ i 1)))))
-            (insert (table "memcp-tests" "exists_point_acl") (list "ID" "child_id" "principal_id")
+            (insert (table "memcp-tests" false "exists_point_acl" false) (list "ID" "child_id" "principal_id")
               (map (produceN 2000) (lambda (i) (list (+ i 1) (+ i 1) 7)))))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM exists_point_parent"
@@ -221,9 +221,9 @@ test_cases:
       - sql: "CREATE TABLE exists_point_dav (ID INT PRIMARY KEY, content_id INT)"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "exists_point_location") (list "ID" "tenant_id")
+            (insert (table "memcp-tests" false "exists_point_location" false) (list "ID" "tenant_id")
               (map (produceN 2000) (lambda (i) (list (+ i 1) (+ (mod i 200) 1)))))
-            (insert (table "memcp-tests" "exists_point_tenant") (list "ID")
+            (insert (table "memcp-tests" false "exists_point_tenant" false) (list "ID")
               (map (produceN 200) (lambda (i) (list (+ i 1))))))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM exists_point_location"
@@ -381,7 +381,7 @@ test_cases:
         (define plan (serialize (optimize
           (compile_scan_plan 'scan
             nil
-            (list 'table "memcp-tests" "exists_orders")
+            (list 'table "memcp-tests" false "exists_orders" false)
             (list "customer_id" "total")
             (list 'lambda (list 'customer_id 'total)
               (list 'and (list 'equal?? 'customer_id 1) (list '> 'total 150)))
@@ -402,7 +402,7 @@ test_cases:
         (define plan (serialize (optimize
           (compile_scan_plan 'scan
             nil
-            (list 'table "memcp-tests" "exists_orders")
+            (list 'table "memcp-tests" false "exists_orders" false)
             (list "customer_id")
             (list 'lambda (list 'customer_id) (list 'equal?? 'customer_id 1))
             (list "ID")
@@ -420,7 +420,7 @@ test_cases:
         (define plan (serialize (optimize
           (compile_scan_plan 'scan
             nil
-            (list 'table "memcp-tests" "exists_orders")
+            (list 'table "memcp-tests" false "exists_orders" false)
             (list "customer_id")
             (list 'lambda (list 'customer_id) (list 'equal?? 'customer_id 1))
             (list "ID")

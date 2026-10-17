@@ -18,11 +18,11 @@ setup:
   - sql: "CREATE TABLE grc_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "grc_events")
+        (insert (table "memcp-tests" false "grc_events" false)
           '("id" "tenant_id" "happened_at" "amount")
           (map (produceN 6000) (lambda (i)
             (list (+ i 1) (+ 1 (mod i 2)) i 2))))
-        (insert (table "memcp-tests" "grc_windows")
+        (insert (table "memcp-tests" false "grc_windows" false)
           '("id" "tenant_id" "range_from" "range_to")
           (list (list 1 2 0 1000) (list 2 2 500 1500)
             (list 3 1 1000 3000) (list 4 1 0 3000)))
@@ -37,10 +37,10 @@ setup:
   - sql: "INSERT INTO grc_mixed_history VALUES (1,1,0,10),(2,2,0,20),(3,3,0,30),(4,2,15,40)"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "grc_mixed_entity") '("id" "category" "amount")
+        (insert (table "memcp-tests" false "grc_mixed_entity" false) '("id" "category" "amount")
           (map (produceN 4000) (lambda (i) (list (+ i 10) 1 (mod i 30)))))
-        (rebuild (table "memcp-tests" "grc_mixed_entity"))
-        (rebuild (table "memcp-tests" "grc_mixed_history")) true)
+        (rebuild (table "memcp-tests" false "grc_mixed_entity" false))
+        (rebuild (table "memcp-tests" false "grc_mixed_history" false)) true)
 
   - scm: |
       (globalvars "__test_group_cache_cells" (lambda (query binding)
@@ -59,8 +59,8 @@ setup:
           (define caches (merge_unique (list (collect plan))))
           (sort (map caches (lambda (cache)
             (list (group_cache_relation cache)
-              (if (nil? (table (group_cache_schema cache) (group_cache_relation cache))) 0
-                (scan_estimate (table (group_cache_schema cache) (group_cache_relation cache)))))))
+              (if (nil? (table (group_cache_schema cache) false (group_cache_relation cache) false)) 0
+                (scan_estimate (table (group_cache_schema cache) false (group_cache_relation cache) false))))))
             (lambda (a b) (< (car a) (car b)))))))
   - scm: |
       (globalvars "__test_group_cache_warm" (lambda (query binding)
@@ -138,7 +138,7 @@ test_cases:
         (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:admission-snapshot" (list (list 'snapshot 0))))
         (define first (group_cache_execute cache 1 nil (lambda () 17) (lambda () (error "first use built a cache")) nil))
         (and (equal? first 17)
-          (nil? (table "memcp-tests" ".grp:admission-snapshot"))
+          (nil? (table "memcp-tests" false ".grp:admission-snapshot" false))
           (group_cache_work_paid? nil ".grp:admission-snapshot" 1)))
     expect:
       result: true
@@ -178,7 +178,7 @@ test_cases:
       (begin
         (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:unpaid-point" (list (list 'point 'k))))
         (define value (group_cache_point cache "agg_value" 1000000000000 (lambda () '(7)) nil (lambda () '()) (lambda () 17)))
-        (and (equal? value 17) (nil? (table "memcp-tests" ".grp:unpaid-point"))
+        (and (equal? value 17) (nil? (table "memcp-tests" false ".grp:unpaid-point" false))
           (group_cache_work_paid? nil ".grp:unpaid-point" 1)))
     expect:
       result: true
@@ -188,11 +188,11 @@ test_cases:
       (!begin
         (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
         (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-admission-dependencies" (list (list 'point 'k))))
-        (define sources (lambda () (list (table "memcp-tests" "grc_cache_dependency"))))
+        (define sources (lambda () (list (table "memcp-tests" false "grc_cache_dependency" false))))
         (define first (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 79)))
-        (rebuild (table "memcp-tests" "grc_cache_dependency"))
+        (rebuild (table "memcp-tests" false "grc_cache_dependency" false))
         (define warm (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () (error "rebuild discarded value"))))
-        (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 1)))
+        (insert (table "memcp-tests" false "grc_cache_dependency" false) '("id") (list (list 1)))
         (define changed (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 83)))
         (if (equal? warm first) (list first changed) (error "rebuild changed point")))
     expect:
@@ -613,7 +613,7 @@ test_cases:
             (define filter (lower_column_expr_for_alias source expression))
             (define joined (lower_column_expr_for_join (list source) "e" expression))
             (if (not (equal? filter joined)) (error "membership callback lowering differs") true)
-            (serialize (compile_scan_plan 'scan_recset nil '('table "memcp-tests" "grc_events")
+            (serialize (compile_scan_plan 'scan_recset nil '('table "memcp-tests" false "grc_events" false)
               '('quote '("$recset_contains"))
               (list 'lambda (list recset_contains_callback_symbol) filter))))
         )
@@ -806,11 +806,11 @@ test_cases:
       - sql: "CREATE TABLE grc_multi_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "grc_multi_events")
+            (insert (table "memcp-tests" false "grc_multi_events" false)
               '("id" "tenant_id" "happened_at" "amount")
               (map (produceN 6000) (lambda (i)
                 (list (+ i 1) (+ 1 (mod i 2)) i 2))))
-            (insert (table "memcp-tests" "grc_multi_windows")
+            (insert (table "memcp-tests" false "grc_multi_windows" false)
               '("id" "tenant_id" "range_from" "range_to")
               (list (list 1 2 0 1000) (list 2 2 500 1500)
                 (list 3 1 1000 3000) (list 4 1 0 3000)))
@@ -919,11 +919,11 @@ test_cases:
       - sql: "CREATE TABLE grc_upgrade_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "grc_upgrade_events")
+            (insert (table "memcp-tests" false "grc_upgrade_events" false)
               '("id" "tenant_id" "happened_at")
               (map (produceN 6000) (lambda (i)
                 (list (+ i 1) (+ 1 (mod i 2)) i))))
-            (insert (table "memcp-tests" "grc_upgrade_windows")
+            (insert (table "memcp-tests" false "grc_upgrade_windows" false)
               '("id" "tenant_id" "range_from" "range_to")
               (list (list 1 2 0 1000) (list 2 2 500 1500)
                 (list 3 1 1000 3000) (list 4 1 0 3000)))
@@ -1246,11 +1246,11 @@ test_cases:
       - sql: "CREATE TABLE grc_2d_windows (id INT PRIMARY KEY, tenant_id INT, time_from INT, time_to INT, score_from INT, score_to INT) ENGINE=memory"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "grc_2d_events")
+            (insert (table "memcp-tests" false "grc_2d_events" false)
               '("id" "tenant_id" "happened_at" "score" "amount")
               (map (produceN 6000) (lambda (i)
                 (list (+ i 1) (+ 1 (mod i 2)) i (mod i 10) 2))))
-            (insert (table "memcp-tests" "grc_2d_windows")
+            (insert (table "memcp-tests" false "grc_2d_windows" false)
               '("id" "tenant_id" "time_from" "time_to" "score_from" "score_to")
               (list (list 1 1 1000 3000 2 5)
                 (list 2 1 1500 3500 4 9)
@@ -1370,15 +1370,15 @@ test_cases:
           (!begin
             (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
             (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-snapshot-dml" (list (list 'snapshot 'axis))))
-            (define sources (lambda () (list (table "memcp-tests" "grc_cache_dependency"))))
+            (define sources (lambda () (list (table "memcp-tests" false "grc_cache_dependency" false))))
             (define changes (lambda (lo hi) (error "stale anchor survived DML")))
             (define values (lambda (keys) (error "stale delta after DML")))
             (define direct (lambda () (error "unexpected fallback")))
             (define first (snapshot_group_cache cache "value" (lambda () '()) nil 1 4 sources (lambda () '(1 10)) changes values direct))
-            (rebuild (table "memcp-tests" "grc_cache_dependency"))
-            (rebuild (table "memcp-tests" (group_cache_relation cache)))
+            (rebuild (table "memcp-tests" false "grc_cache_dependency" false))
+            (rebuild (table "memcp-tests" false (group_cache_relation cache) false))
             (define warm (snapshot_group_cache cache "value" (lambda () '()) nil 1 4 sources (lambda () (error "rebuild discarded snapshot")) changes values direct))
-            (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 4)))
+            (insert (table "memcp-tests" false "grc_cache_dependency" false) '("id") (list (list 4)))
             (define next (snapshot_group_cache cache "value" (lambda () '()) nil 2 4 sources (lambda () '(1 99)) changes values direct))
             (if (equal? warm 10) (list first next) (error "rebuild changed snapshot")))
         )
@@ -1417,7 +1417,7 @@ test_cases:
       (begin
         (define actual
           (!begin
-            (define source (table "memcp-tests" "grc_cache_dependency"))
+            (define source (table "memcp-tests" false "grc_cache_dependency" false))
             (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-rejected-snapshot" (list (list 'snapshot 'axis))))
             (define sources (lambda () (list source)))
             (define rejected (try (lambda ()
@@ -1526,13 +1526,13 @@ test_cases:
           (!begin
             (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
             (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-snapshot-dependencies" (list (list 'point 'k) (list 'snapshot 'axis))))
-            (define sources (lambda () (list (table "memcp-tests" "grc_cache_dependency"))))
+            (define sources (lambda () (list (table "memcp-tests" false "grc_cache_dependency" false))))
             (define bad (lambda () (error "unexpected fallback")))
             (define changes (lambda (lo hi) (error "stale snapshot used for delta")))
             (define evaluate (lambda (keys) (error "stale snapshot used for evaluation")))
             (define a (snapshot_group_cache cache "value" (lambda () '(1)) nil 0 4 sources (lambda () '(1 17)) changes evaluate bad))
             (define b (snapshot_group_cache cache "value" (lambda () '(2)) nil 0 4 sources (lambda () '(1 19)) changes evaluate bad))
-            (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 3)))
+            (insert (table "memcp-tests" false "grc_cache_dependency" false) '("id") (list (list 3)))
             (define c (snapshot_group_cache cache "value" (lambda () '(1)) nil 0 4 sources (lambda () '(1 23)) changes evaluate bad))
             (if (equal? b 19) (list a c) (error "fixed domains collided")))
         )
@@ -1647,7 +1647,7 @@ test_cases:
       (begin
         (define actual
           (!begin
-            (define source (table "memcp-tests" "grc_cache_dependency"))
+            (define source (table "memcp-tests" false "grc_cache_dependency" false))
             (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-barrier-snapshot" (list (list 'snapshot 0))))
             (define sources (lambda () (list source)))
             (define rejected (try (lambda ()
@@ -1723,10 +1723,10 @@ test_cases:
           (!begin
             (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
             (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-null-dependencies" (list (list 'point 'k))))
-            (define sources (lambda () (list (table "memcp-tests" "grc_cache_dependency"))))
+            (define sources (lambda () (list (table "memcp-tests" false "grc_cache_dependency" false))))
             (define a (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 43)))
             (define b (group_cache_value cache "value" (lambda () '(8)) nil sources (lambda () 47)))
-            (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 2)))
+            (insert (table "memcp-tests" false "grc_cache_dependency" false) '("id") (list (list 2)))
             (define c (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () nil)))
             (define d (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () (error "cached NULL was recomputed"))))
             (if (equal? a 43) (list b c d) (error "first binding changed")))
@@ -1744,11 +1744,11 @@ test_cases:
           (!begin
             (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
             (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-dependencies" (list (list 'point 'k))))
-            (define sources (lambda () (list (table "memcp-tests" "grc_cache_dependency"))))
+            (define sources (lambda () (list (table "memcp-tests" false "grc_cache_dependency" false))))
             (define first (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 79)))
-            (rebuild (table "memcp-tests" "grc_cache_dependency"))
+            (rebuild (table "memcp-tests" false "grc_cache_dependency" false))
             (define warm (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () (error "rebuild discarded value"))))
-            (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 1)))
+            (insert (table "memcp-tests" false "grc_cache_dependency" false) '("id") (list (list 1)))
             (define changed (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 83)))
             (if (equal? warm first) (list first changed) (error "rebuild changed point")))
         )
@@ -1763,7 +1763,7 @@ test_cases:
       (begin
         (define actual
           (!begin
-            (define source (table "memcp-tests" "grc_cache_dependency"))
+            (define source (table "memcp-tests" false "grc_cache_dependency" false))
             (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-barrier-point" (list (list 'point 0))))
             (define sources (lambda () (list source)))
             (define rejected (try (lambda ()
@@ -1899,14 +1899,14 @@ test_cases:
       - sql: "CREATE TABLE grc_topology_source (id INT PRIMARY KEY) ENGINE=memory"
       - scm: |
           (!begin
-            (insert (table "memcp-tests" "grc_topology_source") '("id")
+            (insert (table "memcp-tests" false "grc_topology_source" false) '("id")
               (map (produceN 64) (lambda (i) (list i))))
-            (rebuild (table "memcp-tests" "grc_topology_source") true false))
+            (rebuild (table "memcp-tests" false "grc_topology_source" false) true false))
       - sql: "DELETE FROM grc_topology_source WHERE id < 10"
       - sql: "INSERT INTO grc_topology_source VALUES (100), (101)"
     scm: |
       (!begin
-        (define source (table "memcp-tests" "grc_topology_source"))
+        (define source (table "memcp-tests" false "grc_topology_source" false))
         (define sources (lambda () (list source)))
         (define snapshot (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-topology-snapshot"
           (list (list 'snapshot 0))))
@@ -1921,8 +1921,8 @@ test_cases:
         (define initial_point (group_cache_value point "value" (lambda () '(10)) nil sources count_rows))
         (group_cache_value point "value" (lambda () '(20)) nil sources count_rows)
         (probe 20 forbidden)
-        (define snapshot_table (table "memcp-tests" (group_cache_relation snapshot)))
-        (define point_table (table "memcp-tests" (group_cache_relation point)))
+        (define snapshot_table (table "memcp-tests" false (group_cache_relation snapshot) false))
+        (define point_table (table "memcp-tests" false (group_cache_relation point) false))
         /* Source has real delta inserts and tombstones; cache rows are deltas too. */
         (rebuild source true false)
         (rebuild snapshot_table true false)
@@ -1952,10 +1952,10 @@ test_cases:
       - sql: "CREATE TABLE grc_retention_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
       - scm: |
           (!begin
-            (insert (table "memcp-tests" "grc_retention_events")
+            (insert (table "memcp-tests" false "grc_retention_events" false)
               '("id" "tenant_id" "happened_at" "amount")
               (map (produceN 6000) (lambda (i) (list (+ i 1) 1 0 nil))))
-            (insert (table "memcp-tests" "grc_retention_windows")
+            (insert (table "memcp-tests" false "grc_retention_windows" false)
               '("id" "tenant_id" "range_from" "range_to")
               (map (produceN 64) (lambda (i) (list (+ i 1) 1 (+ 10 i) (+ 11 i)))))
             (rebuild) true)
@@ -1977,7 +1977,7 @@ test_cases:
         (define names (merge_unique (list (collect (parse_sql "memcp-tests" query nil (newsession) nil)))))
         (globalvars "__test_retention_names" names)
         (define sizes (map names (lambda (name)
-          (scan nil (table "memcp-tests" name) '() '() '() (lambda () true)
+          (scan nil (table "memcp-tests" false name false) '() '() '() (lambda () true)
             '() scan_count 0 + false))))
         (if (and (not (empty_list? sizes))
           (reduce sizes (lambda (ok n) (and ok (> n 0) (<= n 3))) true)) true
@@ -2017,7 +2017,7 @@ test_cases:
   - name: "deleted rows restore empty aggregate semantics after rebuild"
     setup:
       - sql: "DELETE FROM grc_retention_events WHERE id=6001"
-      - scm: '(rebuild (table "memcp-tests" "grc_retention_events"))'
+      - scm: '(rebuild (table "memcp-tests" false "grc_retention_events" false))'
     sql: |
       SELECT w.id,
         (SELECT COUNT(*) FROM grc_retention_events e
@@ -2035,7 +2035,7 @@ test_cases:
     scm: |
       (begin
         (define sizes (map (globalvars "__test_retention_names") (lambda (name)
-          (scan nil (table "memcp-tests" name) '() '() '() (lambda () true)
+          (scan nil (table "memcp-tests" false name false) '() '() '() (lambda () true)
             '() scan_count 0 + false))))
         (if (and (not (empty_list? sizes))
           (reduce sizes (lambda (ok n) (and ok (equal? n 2))) true)) true
@@ -2084,7 +2084,7 @@ test_cases:
   - name: "first board establishes complete populated range coverage"
     setup:
       - scm: |
-          (insert (table "memcp-tests" "grc_retention_events")
+          (insert (table "memcp-tests" false "grc_retention_events" false)
             '("id" "tenant_id" "happened_at" "amount")
             (map (produceN 64) (lambda (i) (list (+ 7000 i) 1 (+ 10 i) 1))))
     sql: |
@@ -2131,7 +2131,7 @@ test_cases:
             (lambda () (!begin (calls "full" (+ (calls "full") 1)) '(1 10 2 20)))
             (lambda (lo hi) '()) (lambda (keys) (error "empty delta evaluated"))
             (lambda () (error "unexpected fallback"))) values)) '()))
-        (define rows (scan nil (table "memcp-tests" ".grp:retention-snapshot")
+        (define rows (scan nil (table "memcp-tests" false ".grp:retention-snapshot" false)
           '() '() '() (lambda () true) '() scan_count 0 + false))
         (if (and (equal? (calls "full") 1) (equal? rows 2)
           (reduce values (lambda (ok n) (and ok (equal? n 30))) true)
@@ -2153,7 +2153,7 @@ test_cases:
         (and (equal? value 30)
           (nil? (group_cache_read_cell cache '(1 63) "total" nil))
           (equal? (group_cache_read_cell cache '(1 63) "other" nil) '(99))
-          (equal? (discard_cache_value nil (table "memcp-tests" ".grp:retention-snapshot")
+          (equal? (discard_cache_value nil (table "memcp-tests" false ".grp:retention-snapshot" false)
             (group_cache_dimension_names cache) '(1 63) "other" '(98)) 0)
           (equal? (group_cache_read_cell cache '(1 63) "other" nil) '(99)))))
     expect: {data: [true]}
@@ -2163,10 +2163,10 @@ test_cases:
       (!begin
         (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-snapshot"
           (list (list 'point 'tenant) (list 'snapshot 'time))))
-        (define retired (discard_cache_value nil (table "memcp-tests" ".grp:retention-snapshot")
+        (define retired (discard_cache_value nil (table "memcp-tests" false ".grp:retention-snapshot" false)
           (group_cache_dimension_names cache) '(1 63) "other" '(99)))
         (and (equal? retired 1)
-          (equal? (scan nil (table "memcp-tests" ".grp:retention-snapshot")
+          (equal? (scan nil (table "memcp-tests" false ".grp:retention-snapshot" false)
             '() '() '() (lambda () true) '() scan_count 0 + false) 2)
           (not (nil? (group_cache_read_cell cache '(1 0) "total" nil)))
           (not (nil? (group_cache_read_cell cache '(1 64) "total" nil))))))
@@ -2174,7 +2174,7 @@ test_cases:
 
   - name: "retained snapshot values survive physical compaction"
     setup:
-      - scm: '(rebuild (table "memcp-tests" ".grp:retention-snapshot"))'
+      - scm: '(rebuild (table "memcp-tests" false ".grp:retention-snapshot" false))'
     scm: |
       (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-snapshot"
         (list (list 'point 'tenant) (list 'snapshot 'time))) "total" (lambda () '(1)) nil 64 4
@@ -2185,12 +2185,12 @@ test_cases:
 
   - name: "cache retirement rejects application tables"
     scm: |
-      (discard_cache_value nil (table "memcp-tests" "grc_events") '("id") '(1) "amount" 2)
+      (discard_cache_value nil (table "memcp-tests" false "grc_events" false) '("id") '(1) "amount" 2)
     expect: {error: true}
 
   - name: "cache retirement rejects incomplete coordinates"
     scm: |
-      (discard_cache_value nil (table "memcp-tests" ".grp:retention-snapshot") '("snapshot_0") '(64) "total" '(1))
+      (discard_cache_value nil (table "memcp-tests" false ".grp:retention-snapshot" false) '("snapshot_0") '(64) "total" '(1))
     expect: {error: true}
 
   - name: "snapshot retention preserves all coordinates of the active SQL request"

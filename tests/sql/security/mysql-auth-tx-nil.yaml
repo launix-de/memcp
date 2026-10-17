@@ -19,7 +19,7 @@ test_cases:
     scm: |
       (if
         (equal?
-          (scan nil (table "system" "user")
+          (scan nil (table "system" false "user" false)
             (list 369436175368192 (scan_boundary "equal" "username" 0 0 true true "" false)) '("auth_scan_nil_repro")
             '() (lambda () true)
             '("password")
@@ -41,7 +41,7 @@ test_cases:
     scm: |
       (if
         (equal?
-          (scan_lookup nil (table "system" "user")
+          (scan_lookup nil (table "system" false "user" false)
             (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") '("auth_scan_nil_repro"))
           (password "secret123"))
         "ok"

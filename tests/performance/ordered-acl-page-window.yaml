@@ -46,29 +46,29 @@ fixture_setup: &ordered_acl_fixture
       ) ENGINE=sloppy
   - scm: |
       (begin
-        (insert (table "memcp-tests" "oap_tenant") '("id" "direct_flag")
+        (insert (table "memcp-tests" false "oap_tenant" false) '("id" "direct_flag")
           (map (produceN 128) (lambda (i)
             (list (+ i 1) (if (equal? (mod i 8) 0) 1 0)))))
-        (insert (table "memcp-tests" "oap_site") '("id" "tenant_id" "name" "direct_flag")
+        (insert (table "memcp-tests" false "oap_site" false) '("id" "tenant_id" "name" "direct_flag")
           (map (produceN 1024) (lambda (i)
             (list (+ i 1) (+ (mod i 128) 1) (concat "site-" (string i))
               (if (equal? (mod i 16) 0) 1 0)))))
-        (insert (table "memcp-tests" "oap_year") '("id" "name")
+        (insert (table "memcp-tests" false "oap_year" false) '("id" "name")
           (map (produceN 32) (lambda (i)
             (list (+ i 1) (concat "year-" (string i))))))
-        (insert (table "memcp-tests" "oap_department") '("id" "name")
+        (insert (table "memcp-tests" false "oap_department" false) '("id" "name")
           (map (produceN 256) (lambda (i)
             (list (+ i 1) (concat "department-" (string i))))))
-        (insert (table "memcp-tests" "oap_audit") '("id" "name")
+        (insert (table "memcp-tests" false "oap_audit" false) '("id" "name")
           (map (produceN 512) (lambda (i)
             (list (+ i 1) (concat "audit-" (string i))))))
-        (insert (table "memcp-tests" "oap_assignment")
+        (insert (table "memcp-tests" false "oap_assignment" false)
           '("id" "site_id" "tenant_id" "actor_id" "allowed")
           (map (produceN 640) (lambda (i)
             (if (< i 512)
               (list (+ i 1) (+ (* i 2) 1) nil 7 true)
               (list (+ i 1) 0 (+ (- i 512) 1) 7 true)))))
-        (insert (table "memcp-tests" "oap_document")
+        (insert (table "memcp-tests" false "oap_document" false)
           '("id" "year_id" "site_id" "department_id" "audit_id" "payload")
           (map (produceN {rows}) (lambda (i)
             (list (+ i 1) (+ (mod i 32) 1) (+ (mod i 1024) 1)
@@ -278,29 +278,29 @@ test_cases:
           ) ENGINE=sloppy
       - scm: |
           (begin
-            (insert (table "memcp-tests" "oap_tenant") '("id" "direct_flag")
+            (insert (table "memcp-tests" false "oap_tenant" false) '("id" "direct_flag")
               (map (produceN 128) (lambda (i)
                 (list (+ i 1) (if (equal? (mod i 8) 0) 1 0)))))
-            (insert (table "memcp-tests" "oap_site") '("id" "tenant_id" "name" "direct_flag")
+            (insert (table "memcp-tests" false "oap_site" false) '("id" "tenant_id" "name" "direct_flag")
               (map (produceN 1024) (lambda (i)
                 (list (+ i 1) (+ (mod i 128) 1) (concat "site-" (string i))
                   (if (equal? (mod i 16) 0) 1 0)))))
-            (insert (table "memcp-tests" "oap_year") '("id" "name")
+            (insert (table "memcp-tests" false "oap_year" false) '("id" "name")
               (map (produceN 32) (lambda (i)
                 (list (+ i 1) (concat "year-" (string i))))))
-            (insert (table "memcp-tests" "oap_department") '("id" "name")
+            (insert (table "memcp-tests" false "oap_department" false) '("id" "name")
               (map (produceN 256) (lambda (i)
                 (list (+ i 1) (concat "department-" (string i))))))
-            (insert (table "memcp-tests" "oap_audit") '("id" "name")
+            (insert (table "memcp-tests" false "oap_audit" false) '("id" "name")
               (map (produceN 512) (lambda (i)
                 (list (+ i 1) (concat "audit-" (string i))))))
-            (insert (table "memcp-tests" "oap_assignment")
+            (insert (table "memcp-tests" false "oap_assignment" false)
               '("id" "site_id" "tenant_id" "actor_id" "allowed")
               (map (produceN 640) (lambda (i)
                 (if (< i 512)
                   (list (+ i 1) (+ (* i 2) 1) nil 7 true)
                   (list (+ i 1) 0 (+ (- i 512) 1) 7 true)))))
-            (insert (table "memcp-tests" "oap_document")
+            (insert (table "memcp-tests" false "oap_document" false)
               '("id" "year_id" "site_id" "department_id" "audit_id" "payload")
               (map (produceN {rows}) (lambda (i)
                 (list (+ i 1) (+ (mod i 32) 1) (+ (mod i 1024) 1)
@@ -309,8 +309,7 @@ test_cases:
             (rebuild))
       - sql: DROP TABLE IF EXISTS oap_file
       - sql: CREATE TABLE oap_file (id INT PRIMARY KEY, uploaded_at BIGINT) ENGINE=sloppy
-      - scm: "(begin\n  (insert (table \"memcp-tests\" \"oap_file\") '(\"id\" \"uploaded_at\")\n    (map (produceN {rows})\
-          \ (lambda (i)\n      (list (+ i 1) (+ 1700000000 (floor (/ i 16)))))))\n  (rebuild))"
+      - scm: "(begin\n  (insert (table \"memcp-tests\" false \"oap_file\" false) '(\"id\" \"uploaded_at\")\n    (map (produceN {rows}) (lambda (i)\n      (list (+ i 1) (+ 1700000000 (floor (/ i 16)))))))\n  (rebuild))"
     sql: |
       SELECT page.*
       FROM (

@@ -17,6 +17,9 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import "testing"
+import "strings"
+
+import "github.com/launix-de/memcp/scm"
 
 import "github.com/launix-de/NonLockingReadMap"
 
@@ -104,4 +107,247 @@ func TestDropRefusesInternalObjectsBeforeMutation(t *testing.T) {
 	if databases.Get("system") != db {
 		t.Fatal("protected database was removed")
 	}
+}
+
+func TestPublishedFoldedTableNames(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tfoldednames", 0)
+	db := tbl.schema
+	before := db.foldedTableNames.Load()
+	created, _ := CreateTable(db.Name, "MixedName", Safe, false)
+	if db.GetTable("mIXEDnAME", true) != created {
+		t.Fatal("shared table lookup did not resolve its folded spelling")
+	}
+	if db.GetTable("mixedname", false) != nil {
+		t.Fatal("folded lookup changed exact-case namespace semantics")
+	}
+	if _, exists := (*before)["mixedname"]; exists {
+		t.Fatal("namespace publication mutated a retained snapshot")
+	}
+	RenameTable(db.Name, "MixedName", "Renamed")
+	if db.GetTable("MIXEDNAME", true) != nil {
+		t.Fatal("rename retained an obsolete name")
+	}
+	if db.GetTable("renamed", true) != created || *created.publishedName.Load() != "Renamed" {
+		t.Fatal("rename did not publish its new spelling")
+	}
+	CreateTable(db.Name, "RENAMED", Safe, false)
+	requirePanic(t, func() { db.GetTable("Renamed", true) })
+	if db.GetTable("Renamed", false) != created {
+		t.Fatal("ambiguous folded names affected an exact-case caller")
+	}
+	DropTable(db.Name, "RENAMED", false)
+	if db.GetTable("RENAMED", true) != created {
+		t.Fatal("DROP did not remove the folded-name ambiguity")
+	}
+	DropTable(db.Name, "Renamed", false)
+	if db.GetTable("renamed", true) != nil {
+		t.Fatal("DROP retained a removed table")
+	}
+	unicodeTable, _ := CreateTable(db.Name, "Key", Safe, false)
+	if db.GetTable("KEY", true) != unicodeTable {
+		t.Fatal("folded namespace does not match the existing Unicode identifier policy")
+	}
+}
+
+func TestPublishedDatabaseIdentifierPolicy(t *testing.T) {
+	first, second := newDatabase(), newDatabase()
+	first.Name, second.Name = "CaseCatalog", "CASECATALOG"
+	databases.Set(first.Name, first)
+	defer databases.Remove(first.Name)
+	if GetDatabase("casecatalog", true) != first || GetDatabase("casecatalog", false) != nil {
+		t.Fatal("database comparison policy was not respected")
+	}
+	before := databases.folded.Load()
+	databases.Set(second.Name, second)
+	defer databases.Remove(second.Name)
+	requirePanic(t, func() { GetDatabase("CaseCatalog", true) })
+	if GetDatabase("CaseCatalog", false) != first {
+		t.Fatal("folded ambiguity changed the exact catalog")
+	}
+	databases.Remove(second.Name)
+	if GetDatabase("CASECATALOG", true) != first {
+		t.Fatal("database removal did not remove folded ambiguity")
+	}
+	if (*before)["casecatalog"] != first.Name {
+		t.Fatal("database publication mutated an existing snapshot")
+	}
+}
+
+func TestFoldIdentifierPreservesSimpleFoldClasses(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"Identifier", "IDENTIFIER"},
+		{"Key", "KEY"},
+		{"ſource", "SOURCE"},
+		{"Σ", "ς"},
+		{"Å", "å"},
+		{"Identifierİ", "identifieri"},
+		{"IdentifierI", "identifierı"},
+	} {
+		if got, want := foldIdentifier(pair[0]) == foldIdentifier(pair[1]), strings.EqualFold(pair[0], pair[1]); got != want {
+			t.Errorf("foldIdentifier(%q) == foldIdentifier(%q) = %t, want %t", pair[0], pair[1], got, want)
+		}
+	}
+	if got := foldIdentifier("Key"); got != "key" {
+		t.Fatalf("ASCII folding convention changed for Kelvin class: %q", got)
+	}
+}
+
+func TestIdentifierDirectoriesKeepDottedIDistinct(t *testing.T) {
+	unicodeDB, asciiDB := newDatabase(), newDatabase()
+	unicodeDB.Name, asciiDB.Name = "UnicodeFoldİ", "UnicodeFoldi"
+	for _, db := range []*database{unicodeDB, asciiDB} {
+		// This fixture owns an already loaded, unpublished directory and needs
+		// no persistence or lazy-load work to exercise metadata lookup.
+		db.loadOnce.Do(func() {})
+		previous := databases.Get(db.Name)
+		t.Cleanup(func() {
+			databases.Remove(db.Name)
+			if previous != nil {
+				databases.Set(db.Name, previous)
+			}
+		})
+	}
+
+	databases.Set(unicodeDB.Name, unicodeDB)
+	if GetDatabase("unicodefoldi", true) != nil {
+		t.Fatal("database lookup merged dotted I with ASCII i")
+	}
+	databases.Set(asciiDB.Name, asciiDB)
+	if GetDatabase("UNICODEFOLDİ", true) != unicodeDB || GetDatabase("UNICODEFOLDI", true) != asciiDB {
+		t.Fatal("distinct database fold classes collided")
+	}
+
+	unicodeTable := &table{Name: "Identifierİ", schema: unicodeDB}
+	unicodeDB.tables.Set(unicodeTable.Name, unicodeTable)
+	unicodeDB.publishTableNamesLocked()
+	if unicodeDB.GetTable("identifieri", true) != nil {
+		t.Fatal("table lookup merged dotted I with ASCII i")
+	}
+	asciiTable := &table{Name: "Identifieri", schema: unicodeDB}
+	unicodeDB.tables.Set(asciiTable.Name, asciiTable)
+	unicodeDB.publishTableNamesLocked()
+	if unicodeDB.GetTable("IDENTIFIERİ", true) != unicodeTable || unicodeDB.GetTable("IDENTIFIERI", true) != asciiTable {
+		t.Fatal("distinct table fold classes collided")
+	}
+
+	columns := showColumnsTestTable(1)
+	columns.Columns[0].Name = "Identifierİ"
+	columns.publishShowColumnsSnapshot(false)
+	if !columns.ShowColumn("identifieri", true).IsNil() {
+		t.Fatal("column metadata lookup merged dotted I with ASCII i")
+	}
+	if _, exists := columns.ResolveColumnName("identifieri", true); exists {
+		t.Fatal("column-name lookup merged dotted I with ASCII i")
+	}
+	columns.Columns = append(columns.Columns, &column{Name: "Identifieri", Typ: "VARCHAR", AllowNull: true})
+	columns.publishShowColumnsSnapshot(false)
+	for _, name := range []string{"Identifierİ", "Identifieri"} {
+		if got := showColumnProperty(columns.ShowColumn(strings.ToUpper(name), true), "Field"); got.IsNil() || got.String() != name {
+			t.Fatalf("distinct column fold classes collided: lookup %q returned %v", name, got)
+		}
+		if got, exists := columns.ResolveColumnName(strings.ToUpper(name), true); !exists || got != name {
+			t.Fatalf("distinct column-name fold classes collided: lookup %q returned %q, %t", name, got, exists)
+		}
+	}
+}
+
+func TestPersistedTableCallABIUpgradePreservesData(t *testing.T) {
+	legacy := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"),
+		scm.NewString("memcp-tests"), scm.NewString("items")})
+	quoted := scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), legacy})
+	if upgradePersistedTableCalls(quoted) != quoted {
+		t.Fatal("ABI upgrade rewrote a quoted data value")
+	}
+	original := scm.NewProcStruct(scm.Proc{Params: scm.NewSlice(nil), Body: legacy, En: &scm.Globalenv})
+	restored := upgradePersistedTableCalls(original)
+	body := restored.Proc().Body.Slice()
+	if len(body) != 5 || body[2].Bool() || body[4].Bool() || scm.String(body[3]) != "items" {
+		t.Fatal("stored executable table reference did not migrate to explicit policies")
+	}
+	if len(original.Proc().Body.Slice()) != 3 {
+		t.Fatal("ABI upgrade mutated the source definition")
+	}
+	if upgradePersistedTableCalls(restored) != restored {
+		t.Fatal("ABI upgrade did not preserve a current definition")
+	}
+	shadowed := scm.NewProcStruct(scm.Proc{Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("table")}),
+		Body: legacy, En: &scm.Globalenv})
+	if upgradePersistedTableCalls(shadowed) != shadowed {
+		t.Fatal("ABI upgrade rewrote an invocation of a lexical parameter")
+	}
+
+	definition := &table{Name: "items", OnInit: &original,
+		Triggers: []TriggerDescription{{Language: "scheme", Source: "(lambda () (table \"memcp-tests\" \"items\"))"}}}
+	invalidatePersistedPlannerCodeAfterLoad(definition)
+	if len(definition.OnInit.Proc().Body.Slice()) != 5 {
+		t.Fatal("load did not upgrade the existing initialization callback")
+	}
+	source := scm.Read("upgraded trigger", definition.Triggers[0].Source).WithoutSourceInfo().Slice()
+	if len(source[2].WithoutSourceInfo().Slice()) != 5 {
+		t.Fatal("load did not upgrade the authoritative Scheme trigger source")
+	}
+}
+
+func TestPersistedTableCallABIUpgradeRespectsLocalBindings(t *testing.T) {
+	for _, source := range []string{
+		`(lambda () (begin (define table (lambda (a b) (+ a b))) (table 1 2)))`,
+		`(lambda () (begin (set table (lambda (a b) (+ a b))) (table 1 2)))`,
+		`(lambda () (begin (define unused (!begin (define table (lambda (a b) (+ a b))) 0)) (table 1 2)))`,
+		`(lambda () (begin (define table (lambda (a b) (if (equal? a 0) b (table (- a 1) (+ b 1))))) (table 1 2)))`,
+		`(lambda () (match (lambda (a b) (+ a b)) table (table 1 2)))`,
+	} {
+		t.Run(source, func(t *testing.T) {
+			original := scm.Read("local table binding", source)
+			restored := upgradePersistedTableCalls(original)
+			if value := scm.Apply(scm.Eval(restored, &scm.Globalenv)); value.Int() != 3 {
+				t.Fatalf("restored local call = %s, want 3", scm.String(value))
+			}
+		})
+	}
+}
+
+func TestPersistedTableCallABIUpgradeRetainsNativeBindings(t *testing.T) {
+	en := scm.Env{Vars: scm.Vars{scm.Symbol("table"): scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		if len(args) != 4 || args[1].Bool() || args[3].Bool() {
+			t.Fatal("native reference did not receive explicit exact-name policies")
+		}
+		return scm.NewInt(42)
+	})}, Outer: &scm.Globalenv}
+	for _, source := range []string{
+		`(lambda () (begin (define before (table "memcp-tests" "items")) (define table (lambda (a b) (+ a b))) (+ before (table 1 2))))`,
+		`(lambda () (+ (begin (define table (lambda (a b) (+ a b))) (table 1 2)) (table "memcp-tests" "items")))`,
+		`(lambda () (begin (define table (table "memcp-tests" "items")) (+ table 3)))`,
+		`(lambda () (+ 3 (if false (define table (lambda (a b) (+ a b))) (table "memcp-tests" "items"))))`,
+		`(lambda () (+ 3 (match table (eval table) (table "memcp-tests" "items"))))`,
+		`(lambda () (match nil (eval (table "memcp-tests" "items")) 3 _ 45))`,
+		`(lambda () (match (list 42) (list (eval (table "memcp-tests" "items"))) 45 _ 0))`,
+	} {
+		t.Run(source, func(t *testing.T) {
+			restored := upgradePersistedTableCalls(scm.Read("native table binding", source))
+			if value := scm.Apply(scm.Eval(restored, &en)); value.Int() != 45 {
+				t.Fatalf("restored native/local result = %s, want 45", scm.String(value))
+			}
+		})
+	}
+}
+
+func TestPersistedTableCallABIUpgradeRetainsCapturedBinding(t *testing.T) {
+	original := scm.Eval(scm.Read("captured table", `(begin
+		(define table (lambda (a b) (+ a b)))
+		(lambda () (table 1 2)))`), &scm.Globalenv)
+	if restored := upgradePersistedTableCalls(original); restored != original {
+		t.Fatal("restored callback replaced a lexical capture of table")
+	}
+	if value := scm.Apply(original); value.Int() != 3 {
+		t.Fatalf("captured call = %s, want 3", scm.String(value))
+	}
+}
+
+func TestPersistedTableCallABIUpgradeRejectsAmbiguousRebinding(t *testing.T) {
+	// Either arm can run in the same scope. Guessing a callable's ABI here
+	// could corrupt an unrelated function; require an explicit source update.
+	original := scm.Read("conditional table binding", `(lambda (condition) (begin
+		(if condition (define table (lambda (a b) (+ a b))))
+		(table 1 2)))`)
+	requirePanic(t, func() { upgradePersistedTableCalls(original) })
 }

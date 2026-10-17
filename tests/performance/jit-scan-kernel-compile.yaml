@@ -13,9 +13,9 @@ setup:
 - sql: CREATE TABLE kernel_values (value INT, weight INT) ENGINE=sloppy
 - scm: |
     (begin
-      (insert (table "memcp-tests" "kernel_values") '("value" "weight")
+      (insert (table "memcp-tests" false "kernel_values" false) '("value" "weight")
         (map (produceN 60000) (lambda (i) (list i (+ i 1)))))
-      (rebuild (table "memcp-tests" "kernel_values") true false))
+      (rebuild (table "memcp-tests" false "kernel_values" false) true false))
 test_cases:
 - name: 'Perf: SQL range count and sum'
   sql: SELECT COUNT(*) AS cnt, SUM(value) AS total FROM kernel_values WHERE value > 127
@@ -33,7 +33,7 @@ test_cases:
   threshold_ms: 5000
 - name: 'Perf: full scan compiles typed filter buffer'
   scm: |
-    (scan nil (table "memcp-tests" "kernel_values") '() '()
+    (scan nil (table "memcp-tests" false "kernel_values" false) '() '()
       '("value") (lambda (v) (> v 127))
       '() (lambda (acc) (+ acc 1)) 0 + false)
   expect: {result: 59872}
@@ -43,7 +43,7 @@ test_cases:
   threshold_ms: 5000
 - name: 'Perf: repeated materialized comparisons in typed scan'
   scm: |
-    (scan nil (table "memcp-tests" "kernel_values") '() '()
+    (scan nil (table "memcp-tests" false "kernel_values" false) '() '()
       '("value" "weight")
       (lambda (v w) (and (> v -1) (< v 60000) (> w 0) (< w 60001)
         (>= v 0) (<= v 59999) (>= w 1) (<= w 60000)))
@@ -55,7 +55,7 @@ test_cases:
   threshold_ms: 5000
 - name: 'Perf: nested boolean branches in typed scan'
   scm: |
-    (scan nil (table "memcp-tests" "kernel_values") '() '()
+    (scan nil (table "memcp-tests" false "kernel_values" false) '() '()
       '("value" "weight")
       (lambda (v w) (or (and (< v 10000) (> w 0))
         (and (>= v 30000) (< w 45001))))
@@ -67,7 +67,7 @@ test_cases:
   threshold_ms: 5000
 - name: 'Perf: floating comparison branches in typed scan'
   scm: |
-    (scan nil (table "memcp-tests" "kernel_values") '() '()
+    (scan nil (table "memcp-tests" false "kernel_values" false) '() '()
       '("value" "weight")
       (lambda (v w) (and (< v 60000.5) (> w 0.5) (< w 60001.5)
         (> v -0.5) (>= v 0.5) (<= w 60000.5)))

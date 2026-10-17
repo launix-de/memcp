@@ -711,9 +711,9 @@ test_cases:
         (sql_execute_formula sess nil first_formula resultrow (lambda (_fields) nil))
         (define entry (car (cache (car (cache)))))
         (define variants_after_first (count (entry "variants")))
-        (insert (table "memcp-tests" "ps_guard_right") '("id")
+        (insert (table "memcp-tests" false "ps_guard_right" false) '("id")
           (map (produceN 500) (lambda (i) (list (+ i 2)))))
-        (rebuild (table "memcp-tests" "ps_guard_right") true false)
+        (rebuild (table "memcp-tests" false "ps_guard_right" false) true false)
         (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
         (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
         (if (and (equal? variants_after_first 1) (equal? (count (entry "variants")) 2))
@@ -734,7 +734,7 @@ test_cases:
         /* ORDER BY fixes the left driver here. Rebuilding the right table changes
         its physical generation, but cannot change the winning plan. */
         (define query "SELECT l.id FROM ps_guard_left l JOIN ps_guard_right r ON r.id = l.rhs ORDER BY l.id")
-        (define right_table (table "memcp-tests" "ps_guard_right"))
+        (define right_table (table "memcp-tests" false "ps_guard_right" false))
         (rebuild right_table true false)
         (define first_statistics (table_planner_statistics right_table))
         (sql_execute_formula sess nil
@@ -774,9 +774,9 @@ test_cases:
         (sql_execute_formula sess nil first_formula resultrow (lambda (_fields) nil))
         (define entry (car (cache (car (cache)))))
         (define variants_after_first (count (entry "variants")))
-        (insert (table "memcp-tests" "ps_guard_many") '("id")
+        (insert (table "memcp-tests" false "ps_guard_many" false) '("id")
           (map (produceN 500) (lambda (i) (list (+ i 2)))))
-        (rebuild (table "memcp-tests" "ps_guard_many") true false)
+        (rebuild (table "memcp-tests" false "ps_guard_many" false) true false)
         (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
         (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
         (if (and (equal? variants_after_first 1) (equal? (count (entry "variants")) 2))

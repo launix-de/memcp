@@ -561,9 +561,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(list "d" "memcp-tests" "graph_d" false nil)))
 	(define test_physical_scan_signature (lambda (expr)
 		(match expr
-			((symbol scan) _tx ((symbol table) _schema relation) _access_schema _access_values _filtercols _filterfn _mapcols mapreduce _init _combine outer)
+			((symbol scan) _tx ((symbol table) _schema _database_ignorecase relation _table_ignorecase) _access_schema _access_values _filtercols _filterfn _mapcols mapreduce _init _combine outer)
 			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapreduce))
-			((symbol scan_order) _tx ((symbol table) _schema relation) _access_schema _access_values _filtercols _filterfn _sortcols _sortdirs _brake _offset _limit _mapcols mapreduce _init outer)
+			((symbol scan_order) _tx ((symbol table) _schema _database_ignorecase relation _table_ignorecase) _access_schema _access_values _filtercols _filterfn _sortcols _sortdirs _brake _offset _limit _mapcols mapreduce _init outer)
 			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapreduce))
 			(cons head tail) (concat (test_physical_scan_signature head) (test_physical_scan_signature tail))
 			_ "")))
@@ -1798,7 +1798,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		4
 		"length hook: count folds parallelN length")
 	/* scan callback ownership: mapreduce accumulator enables _mut inside its body */
-	(assert (serialize (optimize '('scan nil '('table "db" "tbl") '(quote '(369435906932736)) '(list) '("x") '('lambda '('x) true) '("x") '('lambda '('acc 'x) '(set_assoc 'acc 'x true)) '(list) nil false))) "(scan nil (table \"db\" \"tbl\") (quote (369435906932736)) '() (\"x\") (lambda (x) true 1) (\"x\") (lambda (acc x) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: mapreduce acc enables set_assoc_mut")
+	(assert (serialize (optimize '('scan nil '('table "db" false "tbl" false) '(quote '(369435906932736)) '(list) '("x") '('lambda '('x) true) '("x") '('lambda '('acc 'x) '(set_assoc 'acc 'x true)) '(list) nil false))) "(scan nil (table \"db\" false \"tbl\" false) (quote (369435906932736)) '() (\"x\") (lambda (x) true 1) (\"x\") (lambda (acc x) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: mapreduce acc enables set_assoc_mut")
 	(define opt_merge_unique_ser (serialize (optimize
 		(list 'lambda
 			(list 'a 'b 'c)
@@ -3415,7 +3415,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define sf_cm (newcachemap))
 	(define sf_calls (newsession))
 	(define sf_values (parallelN 8 (lambda (i)
-		(sf_cm "get_or_compute" "shared" (lambda () (begin
+		(sf_cm "shared" nil (lambda () (begin
 			(sf_calls (string i) true)
 			(sleep 0.02)
 			123))))))
@@ -3423,9 +3423,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (count (sf_calls)) 1 "cachemap singleflight runs one producer")
 	/* failed producers are not cached and a later caller can retry */
 	(assert (try
-		(lambda () (begin (sf_cm "get_or_compute" "retry" (lambda () (car (sf_calls "missing")))) false))
+		(lambda () (begin (sf_cm "retry" nil (lambda () (car (sf_calls "missing")))) false))
 		(lambda (e) true)) true "cachemap singleflight forwards producer panic")
-	(assert (sf_cm "get_or_compute" "retry" (lambda () 77)) 77 "cachemap singleflight retries after panic")
+	(assert (sf_cm "retry" nil (lambda () 77)) 77 "cachemap singleflight retries after panic")
+
+	/* A constructor factory receives the key and is also used after a prior
+	miss on another key. Access-local factories remain zero-argument thunks. */
+	(define factory_calls (newsession))
+	(define factory_cache (newcachemap (lambda (key) (begin
+		(factory_calls key (+ 1 (coalesceNil (factory_calls key) 0)))
+		(if (equal? key "missing") nil (concat "loaded:" key))))))
+	(assert (factory_cache "a") "loaded:a" "cache constructor factory receives key")
+	(assert (factory_cache "a") "loaded:a" "cache constructor factory result reused")
+	(assert (factory_calls "a") 1 "cache constructor factory runs once on a hit")
+	(assert (factory_cache "missing") nil "cache constructor preserves nil result")
+	(assert (factory_cache "missing") nil "cache constructor reuses nil result")
+	(assert (factory_calls "missing") 1 "cache constructor caches absent values")
+	(assert (factory_cache "override" nil (lambda () 456)) 456 "access factory overrides constructor")
+	(assert (factory_calls "override") nil "overridden constructor was not called")
+	(assert (factory_cache "override") 456 "access factory result reused by plain getter")
 
 	/* query_expr_alias_set is the planner JIT coverage target. Native compilation
 	is atomic, so a compiled descriptor means every expression in the function was

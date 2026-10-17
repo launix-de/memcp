@@ -339,17 +339,17 @@ def initialize(client: HttpClient, backend_config: dict[str, object] | None = No
 	client.sql("CREATE TRIGGER drill_trigger_source_ai AFTER INSERT ON drill_trigger_source FOR EACH ROW INSERT INTO drill_trigger_guard(marker) SELECT 1")
 	values = ",".join(f"({i},{i % 4},{i * 10},'seed')" for i in range(1, 31))
 	client.sql(f"INSERT INTO drill_entry VALUES {values}")
-	client.scm(f'(rebuild (table "{DATABASE}" "drill_entry") true true)', timeout=120)
+	client.scm(f'(rebuild (table "{DATABASE}" false "drill_entry" false) true true)', timeout=120)
 	# Give a rebuild enough work that SIGKILL can hit publication/catch-up rather
 	# than merely killing an idle process after a tiny rebuild has completed.
 	client.scm('(settings "ShardSize" 1000)')
 	client.sql("CREATE TABLE drill_rebuild (id INT PRIMARY KEY, payload BIGINT NOT NULL) ENGINE=safe")
 	client.scm(
-		f'(insert (table "{DATABASE}" "drill_rebuild") \'("id" "payload") '
+		f'(insert (table "{DATABASE}" false "drill_rebuild" false) \'("id" "payload") '
 		f'(map (produceN {rebuild_rows}) (lambda (i) (list (+ i 1) (+ i 1)))))',
 		timeout=120,
 	)
-	client.scm(f'(rebuild (table "{DATABASE}" "drill_rebuild") true true)', timeout=120)
+	client.scm(f'(rebuild (table "{DATABASE}" false "drill_rebuild" false) true true)', timeout=120)
 
 
 def initialize_atomicity(client: HttpClient, rows: int,
@@ -358,11 +358,11 @@ def initialize_atomicity(client: HttpClient, rows: int,
 	client.scm('(settings "ShardSize" 100)')
 	client.sql("CREATE TABLE drill_atomic (id INT PRIMARY KEY, x INT NOT NULL) ENGINE=safe")
 	client.scm(
-		f'(insert (table "{DATABASE}" "drill_atomic") \'("id" "x") '
+		f'(insert (table "{DATABASE}" false "drill_atomic" false) \'("id" "x") '
 		f'(map (produceN {rows}) (lambda (i) (list (+ i 1) 0))))',
 		timeout=300,
 	)
-	client.scm(f'(rebuild (table "{DATABASE}" "drill_atomic") true true)', timeout=300)
+	client.scm(f'(rebuild (table "{DATABASE}" false "drill_atomic" false) true true)', timeout=300)
 	expect(
 		atomic_signature(client),
 		{"row_count": rows, "min_x": 0, "max_x": 0, "x_sum": 0},
@@ -389,12 +389,12 @@ def initialize_schema_race(client: HttpClient, rows: int,
 		extra_columns + ") ENGINE=safe"
 	)
 	client.scm(
-		f'(insert (table "{DATABASE}" "drill_schema_race") \'("id" "payload") '
+		f'(insert (table "{DATABASE}" false "drill_schema_race" false) \'("id" "payload") '
 		f'(map (produceN {rows}) (lambda (i) (list (+ i 1) (+ i 1)))))',
 		timeout=300,
 	)
 	client.scm('(settings "ShardSize" 100)')
-	client.scm(f'(rebuild (table "{DATABASE}" "drill_schema_race") true true)', timeout=300)
+	client.scm(f'(rebuild (table "{DATABASE}" false "drill_schema_race" false) true true)', timeout=300)
 	wanted = {"row_count": rows, "id_sum": rows * (rows + 1) // 2}
 	expect(schema_race_signature(client), wanted, "schema-race fixture")
 	return wanted
@@ -417,7 +417,7 @@ def run_schema_race(server: OwnedServer, rounds: int, wanted: dict[str, int],
 			start.wait()
 			for _ in range(rounds):
 				client.scm(
-					f'(rebuild (table "{DATABASE}" "drill_schema_race") true false)',
+					f'(rebuild (table "{DATABASE}" false "drill_schema_race" false) true false)',
 					timeout=300,
 				)
 		except Exception as error:
@@ -689,7 +689,7 @@ def run_rebuild_crash(server: OwnedServer, wanted: dict[str, int], rng: random.R
 
 	def rebuild() -> None:
 		try:
-			result.append(client.scm(f'(rebuild (table "{DATABASE}" "drill_entry") true true)', timeout=120))
+			result.append(client.scm(f'(rebuild (table "{DATABASE}" false "drill_entry" false) true true)', timeout=120))
 		except Exception as error:
 			result.append(error)
 
@@ -736,7 +736,7 @@ def run_soak(server: OwnedServer, workers: int, operations: int,
 		try:
 			start.wait()
 			while not stop_rebuild.wait(0.01):
-				client.scm(f'(rebuild (table "{DATABASE}" "drill_entry") true false)', timeout=120)
+				client.scm(f'(rebuild (table "{DATABASE}" false "drill_entry" false) true false)', timeout=120)
 		except Exception as error:
 			failures.append(f"rebuilder: {error}")
 

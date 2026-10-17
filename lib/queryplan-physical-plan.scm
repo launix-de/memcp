@@ -1610,10 +1610,10 @@ get_column refs to the source) are excluded automatically too. */
 (define group_cache_partition_hint (lambda (schema tbl alias key col_name)
 	(match key
 		((symbol get_column) tblvar _tbl_ignorecase col _col_ignorecase) (if (equal? tblvar alias)
-			(list col_name (list (quote shardcolumn) (list (quote table) schema tbl) col))
+			(list col_name (list (quote shardcolumn) (list (quote table) schema false tbl false) col))
 			'())
 		((quote get_column) tblvar _tbl_ignorecase col _col_ignorecase) (if (equal? tblvar alias)
-			(list col_name (list (quote shardcolumn) (list (quote table) schema tbl) col))
+			(list col_name (list (quote shardcolumn) (list (quote table) schema false tbl false) col))
 			'())
 		_ '())))
 
@@ -1623,8 +1623,8 @@ get_column refs to the source) are excluded automatically too. */
 			(group_cache_partition_hint schema tbl alias (nth keys i) (nth key_names i))))))
 		(if (or (not (source_is_base_table? src)) (empty_list? hints))
 			nil
-			(list (quote partitiontable) (list (quote table) schema grouptbl) (cons (quote list) hints)
-				(list (quote table) schema tbl))))))
+			(list (quote partitiontable) (list (quote table) schema false grouptbl false) (cons (quote list) hints)
+				(list (quote table) schema false tbl false))))))
 
 (define boolean_recset_domain_source (lambda (input keys)
 	(if (not (query_block? input))
@@ -1919,7 +1919,7 @@ outer joins. */
 				(if query_input
 					(map (produceN (count ags)) (lambda (i)
 						(list (quote createcolumn)
-							(list (quote table) schema grouptbl)
+							(list (quote table) schema false grouptbl false)
 							(nth aggregate_cols i)
 							"any"
 							(quoted_runtime_list '())
@@ -1985,13 +1985,13 @@ outer joins. */
 				(merge (list ensure_agg_columns agg_plans computed_order_plans))))
 			(define base_group_fill (symbol "__group_base_fill"))
 			(define base_group_fill_call (list base_group_fill (physical_query_tx_symbol)))
-			(define finalize_group_fill (list (quote rebuild) (list (quote table) schema grouptbl) true false))
+			(define finalize_group_fill (list (quote rebuild) (list (quote table) schema false grouptbl false) true false))
 			(define partition_plan (group_cache_partition_plan schema tbl alias src grouptbl keys key_names))
 			(define initial_fill_expr (if (nil? base_group_into_plan)
 				nil
 				(list (quote initialize_cache_table)
 					(physical_query_tx_symbol)
-					(list (quote table) schema grouptbl)
+					(list (quote table) schema false grouptbl false)
 					(list (quote list) (source_table_expr src))
 					(list (quote lambda) (list (physical_query_tx_symbol))
 						(cons (quote !begin) (filter (list partition_plan aggregate_prepare_expr cleanup_plan) (lambda (expr) (not (nil? expr))))))
@@ -2725,7 +2725,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 				(list (quote car)
 					(compile_scan_plan (quote scan_order)
 						(physical_query_tx_symbol)
-						(list (quote table) schema relation)
+						(list (quote table) schema false relation false)
 						(quoted_runtime_list '())
 						(list (quote lambda) '() true)
 						(quoted_runtime_list sortcols)
@@ -3725,16 +3725,16 @@ outer CASE/short-circuit expression must keep its existing row-bound probe. */
 		(define middle (nth candidate 3))
 		(define target (nth candidate 6))
 		(define driver_rows (coalesceNil (planner_source_row_count driver)
-			(scan_estimate (table (source_schema driver) (source_relation driver)))))
+			(scan_estimate (table (source_schema driver) false (source_relation driver) false))))
 		(define window (nested_scalar_recmap_window candidate))
 		(define selected_rows (if (nil? window) driver_rows
 			(min driver_rows (nth window 4))))
 		(define middle_rows (min selected_rows
 			(coalesceNil (planner_source_row_count middle)
-				(scan_estimate (table (source_schema middle) (source_relation middle))))))
+				(scan_estimate (table (source_schema middle) false (source_relation middle) false)))))
 		(define target_rows (min middle_rows
 			(coalesceNil (planner_source_row_count target)
-				(scan_estimate (table (source_schema target) (source_relation target))))))
+				(scan_estimate (table (source_schema target) false (source_relation target) false)))))
 		(list selected_rows middle_rows target_rows))))
 
 (define nested_scalar_recmap_costs_for_rows (lambda (driver_rows middle_rows target_rows windowed)
@@ -5682,7 +5682,7 @@ fix). */
 					(list (quote literal_union_dedupe_rows) rows) rows))
 			(if (information_schema_source? (source_schema src) (source_relation src))
 				(list (quote information_schema_rows) (source_schema src) (source_relation src))
-				(list (quote table) (source_schema src) (source_relation src)))))))
+				(list (quote table) (source_schema src) false (source_relation src) false))))))
 
 (define source_table_expr_using (lambda (stages src)
 	(begin
@@ -5743,12 +5743,14 @@ fix). */
 
 (define star_expr_alias (lambda (expr)
 	(match expr
+		((symbol sql_compile_column) _compiler column) (star_expr_alias column)
 		((symbol get_column) tblvar _ "*" _) tblvar
 		((quote get_column) tblvar _ "*" _) tblvar
 		_ false)))
 
 (define star_expr? (lambda (expr)
 	(match expr
+		((symbol sql_compile_column) _compiler column) (star_expr? column)
 		((symbol get_column) _ _ "*" _) true
 		((quote get_column) _ _ "*" _) true
 		_ false)))
@@ -5768,7 +5770,13 @@ base-table schema silently produces empty result metadata for derived.*. */
 		(cons title (cons expr rest)) (begin
 			(define requested_alias (star_expr_alias expr))
 			(if (star_expr? expr)
-				(merge (list (expand_star_for_sources sources requested_alias) (expand_query_block_fields sources rest)))
+				(merge (list
+					(match expr
+						((symbol sql_compile_column) compiler _column)
+						(merge (extract_assoc (expand_star_for_sources sources requested_alias)
+							(lambda (name column) (list name (list (quote sql_compile_column) compiler column)))))
+						_ (expand_star_for_sources sources requested_alias))
+					(expand_query_block_fields sources rest)))
 				(cons title (cons expr (expand_query_block_fields sources rest)))))
 		_ '())))
 
@@ -6157,7 +6165,7 @@ lookup for each ordered driver candidate. */
 			(list (quote lambda) (list probe_var)
 				(compile_scan_plan (quote scan_exists)
 					(physical_query_tx_symbol)
-					(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
+					(list (quote table) (group_cache_schema cache) false (group_cache_relation cache) false)
 					(cons (quote list) filtercols)
 					(list (quote lambda) (map filtercols symbol)
 						(list (quote and)
@@ -6179,7 +6187,7 @@ lookup for each ordered driver candidate. */
 							(define cache (group_stage_cache stage))
 							(list
 								(list (quote table)
-									(group_cache_schema cache) (group_cache_relation cache))
+									(group_cache_schema cache) false (group_cache_relation cache) false)
 								"k0"
 								(membership_cache_key_probe_expr stage)
 								(quote group_cache_probe)))
@@ -9570,7 +9578,7 @@ operator being calibrated. */
 							(list (quote try)
 								(list (quote lambda) '()
 									(list cache_promise "value"
-										(list (quote table) cache_schema cache_relation)))
+										(list (quote table) cache_schema false cache_relation false)))
 								(list (quote lambda) (list (quote __direct_group_cache_error))
 									(list cache_promise "fail" (quote __direct_group_cache_error))))
 							(list (quote if)
@@ -9597,7 +9605,7 @@ the costgen threshold. */
 			(list "engine" "sloppy") true)
 		(define claim (newsession))
 		(claim "build" (and (number? threshold_ns) (>= elapsed_ns threshold_ns)))
-		(insert (table "system_statistic" "group_cache_candidates")
+		(insert (table "system_statistic" false "group_cache_candidates" false)
 			'("canonical_name" "accumulated_ns")
 			(list (list canonical_name (if (and (number? threshold_ns) (>= elapsed_ns threshold_ns)) 0 elapsed_ns)))
 			'("accumulated_ns" "NEW.accumulated_ns" "$update")
@@ -9614,7 +9622,7 @@ the costgen threshold. */
 
 (define group_cache_candidate_delete (lambda (current_tx canonical_name)
 	(begin
-		(define candidates (table "system_statistic" "group_cache_candidates"))
+		(define candidates (table "system_statistic" false "group_cache_candidates" false))
 		(if (nil? candidates)
 			0
 			(scan current_tx candidates
@@ -9691,8 +9699,8 @@ the costgen threshold. */
 		(define elapsed_ns (list (quote __direct_group_usage) canonical_name))
 		(define cache_lookup (list (quote try)
 			(list (quote lambda) '()
-				(list (quote table) (group_stage_cache_schema stage)
-					(group_stage_cache_relation stage)))
+				(list (quote table) (group_stage_cache_schema stage) false
+					(group_stage_cache_relation stage) false))
 			(list (quote lambda) (list (quote __group_cache_lookup_error))
 				(list (quote error) (quote __group_cache_lookup_error)))))
 		(list (quote if) (list (quote nil?) cache_lookup)
@@ -9730,8 +9738,8 @@ carrier remains on the measured direct path and is never built eagerly. */
 						(list (quote lambda) '()
 							(list cache_promise "value"
 								(list (quote table)
-									(group_stage_cache_schema stage)
-									(group_stage_cache_relation stage))))
+									(group_stage_cache_schema stage) false
+									(group_stage_cache_relation stage) false)))
 						(list (quote lambda) (list (quote __direct_group_warm_cache_error))
 							(list cache_promise "fail" (quote __direct_group_warm_cache_error))))
 					(list (quote if)
@@ -10893,7 +10901,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 
 (define prejoin_insert_expr (lambda (schema table_name column_names values)
 	(list (quote insert)
-		(list (quote table) schema table_name)
+		(list (quote table) schema false table_name false)
 		(cons (quote list) column_names)
 		(list (quote list) (cons (quote list) values))
 		(quoted_runtime_list '())
@@ -10970,7 +10978,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(list (quote equal?) (nth params i) (list (quote get_assoc) dict_symbol (nth key_cols i))))))
 		(compile_scan_plan (quote scan)
 			(physical_query_tx_symbol)
-			(list (quote table) (qb_schema block) table_name)
+			(list (quote table) (qb_schema block) false table_name false)
 			(cons (quote list) cache_cols)
 			(list (quote lambda) params (combine_where_terms terms true))
 			(quoted_runtime_list (list "$update"))
@@ -10988,7 +10996,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 
 (define prejoin_create_trigger_plan (lambda (src name timing body)
 	(list (quote createtrigger)
-		(list (quote table) (source_schema src) (source_relation src))
+		(list (quote table) (source_schema src) false (source_relation src) false)
 		name timing "" "" (prejoin_deferred_trigger body) false)))
 
 (define prejoin_trigger_registration_plans (lambda (block table_name)
@@ -11029,7 +11037,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 				(list (quote lambda) (list (quote __scan_acc) value_symbol) value_symbol)
 				nil reduce_expr false)))
 		(list (quote createcolumn)
-			(list (quote table) (qb_schema block) table_name)
+			(list (quote table) (qb_schema block) false table_name false)
 			(prejoin_column_name sources alias col)
 			"any"
 			(quoted_runtime_list '())
@@ -11078,7 +11086,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define fields (expand_query_block_fields sources (qb_fields block)))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
 		(define table_name (prejoin_table_name block default_alias))
-		(define table_expr (list (quote table) (qb_schema block) table_name))
+		(define table_expr (list (quote table) (qb_schema block) false table_name false))
 		(define initialize (list (quote initialize_cache_table)
 			(physical_query_tx_symbol)
 			table_expr
@@ -12030,7 +12038,7 @@ identity. Other self aliases still require a frozen source snapshot. */
 				(list (quote expression_equal?)
 					(list (quote sql_mutation_column_contract)
 						(planner_guard_runtime_binding (list (quote show)
-							(list (quote table) (car declaration) (cadr declaration)) "column" (nth declaration 2) false)
+							(list (quote table) (car declaration) false (cadr declaration) false) "column" (nth declaration 2) false)
 							mutation_session '()))
 					(list (quote quote) (nth declaration 3)))
 				mutation_session)))
@@ -12152,7 +12160,7 @@ identity. Other self aliases still require a frozen source snapshot. */
 		(if (and (empty_list? order_items) (not bounded))
 			(compile_scan_plan (quote scan)
 				(physical_query_tx_symbol)
-				(list (quote table) target_schema target_tbl)
+				(list (quote table) target_schema false target_tbl false)
 				(cons (quote list) filtercols)
 				filter_expr
 				(cons (quote list) mapcols)
@@ -12162,7 +12170,7 @@ identity. Other self aliases still require a frozen source snapshot. */
 				false)
 			(compile_scan_plan (quote scan_order)
 				(physical_query_tx_symbol)
-				(list (quote table) target_schema target_tbl)
+				(list (quote table) target_schema false target_tbl false)
 				(cons (quote list) filtercols)
 				filter_expr
 				(cons (quote list) ordercols)
@@ -13134,7 +13142,7 @@ preparation prefix into that producer cannot hide a local binding. */
 (define projected_truth_recipe_fixed_coordinate? (lambda (expr)
 	(match expr
 		'(quote _value) true
-		'(table schema tbl) (and (string? schema) (string? tbl))
+		'(table schema _database_ignorecase tbl _table_ignorecase) (and (string? schema) (string? tbl))
 		(cons head tail) (and (equal? head 'list) (reduce tail (lambda (ok item) (and ok (string? item))) true))
 		_ (string? expr))))
 
@@ -14542,7 +14550,7 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 				(define name (car cached))
 				(define ready (if count_mode
 					(list (quote resolve_column_name) (source_schema driver) (source_relation driver) name false)
-					(list (quote table) (qb_schema block) name)))
+					(list (quote table) (qb_schema block) false name false)))
 				(define warm_plan (list (quote !begin) (nth cached 1)
 					(list (quote define) accepted (nth cached 2))
 					(if count_mode (semijoin_count_output block (nth spec 6) accepted) output)))
@@ -14550,9 +14558,9 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 				(define decision_id (concat "semijoin_carrier:" (stable_structural_hash
 					(list (source_schema driver) (source_relation driver) (source_schema lookup) (source_relation lookup)
 						(nth spec 2) (nth spec 3) (nth spec 4) count_mode) true)))
-				(define driver_table (table (source_schema driver) (source_relation driver)))
-				(define lookup_table (table (source_schema lookup) (source_relation lookup)))
-				(define cache_table (if count_mode driver_table (table (qb_schema block) name)))
+				(define driver_table (table (source_schema driver) false (source_relation driver) false))
+				(define lookup_table (table (source_schema lookup) false (source_relation lookup) false))
+				(define cache_table (if count_mode driver_table (table (qb_schema block) false name false)))
 				(define is_ready (if count_mode
 					(not (nil? (resolve_column_name (source_schema driver) (source_relation driver) name false)))
 					(not (nil? cache_table))))
@@ -14611,7 +14619,7 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 
 (define semijoin_split_filter_wins? (lambda (src indexed residual_width execution_session)
 	(begin
-		(define input_rows (scan_estimate (table (source_schema src) (source_relation src))))
+		(define input_rows (scan_estimate (table (source_schema src) false (source_relation src) false)))
 		(define selectivity (reduce indexed (lambda (value term)
 			(* value (join_optimizer_expr_selectivity (list src) (source_alias src) term execution_session))) 1))
 		(define matching_rows (* input_rows selectivity))
@@ -14623,8 +14631,8 @@ carrier. Guard this crossover as well as the runtime cache/direct decision. */
 (define semijoin_root_preferred? (lambda (spec cache_name)
 	(if (not (nth spec 5)) true
 		(begin
-			(define driver (table (source_schema (car spec)) (source_relation (car spec))))
-			(define lookup (table (source_schema (cadr spec)) (source_relation (cadr spec))))
+			(define driver (table (source_schema (car spec)) false (source_relation (car spec)) false))
+			(define lookup (table (source_schema (cadr spec)) false (source_relation (cadr spec)) false))
 			(if (or (nil? driver) (nil? lookup)) false
 				(or (and (not (nil? cache_name))
 					(not (nil? (resolve_column_name (source_schema (car spec)) (source_relation (car spec)) cache_name false)))
@@ -14655,7 +14663,7 @@ this also avoids preparing a whole computed column for a small subset. */
 
 (define group_cache_work_paid? (lambda (tx name threshold_ns)
 	(begin
-		(define candidates (table "system_statistic" "group_cache_candidates"))
+		(define candidates (table "system_statistic" false "group_cache_candidates" false))
 		(if (nil? candidates) false
 			(scan tx candidates
 				(list 369436175368192 (scan_boundary "equal" "canonical_name" 0 0 true true "" false)) (list name)
