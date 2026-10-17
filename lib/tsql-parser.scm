@@ -200,8 +200,9 @@ can be bound for the full procedure lifetime. */
 	(define names (map parameters car))
 	(if (equal? (count names) (count (merge_unique (list names)))) parameters
 		(error "duplicate procedure parameter declaration")))))
-/* Catalog values describe SQL declarations. COL_LENGTH reads one immutable
-native column row; it never scans data or treats compressed bytes as SQL width. */
+/* Catalog values describe SQL declarations. COL_LENGTH uses native point
+metadata and the frontend alias catalog; application values and compressed
+widths never determine a declared SQL width. */
 (define tsql_declared_byte_length (lambda (column) (begin
 	(define type (toUpper (column "RawType")))
 	(define dimensions (column "Dimensions"))
@@ -1655,7 +1656,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(if policy (policy object_schema name false) true)
 		(define handle (table object_schema false name true))
 		(define declaration (if (nil? handle) nil (show handle "column" column true)))
-		(if (nil? declaration) nil (tsql_declared_byte_length declaration))))))
+		(if (nil? declaration) nil
+			(tsql_declared_byte_length (tsql_effective_column declaration nil)))))))
 
 (define tsql_view_has_metadata_scalar? (lambda (node) (match node
 	((symbol quote) _datum) false
