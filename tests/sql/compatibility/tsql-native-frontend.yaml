@@ -2610,48 +2610,64 @@ test_cases:
       - sql: DROP TABLE portable_lifecycle_input
 
   - name: TRY conversion compile triples retain NULL target types and collation
-    scm: "(begin\n  (define integer (sql_expr_info (list) (tsql_try_convert_expr nil \"INT\" (list) nil false)))\n\
-      \  (define text (sql_expr_info (list) (tsql_try_convert_expr\n    (list (quote sql_type_expr) \"box\" \"\
-      NVARCHAR\" '(\"en_ci\" 0)) \"NVARCHAR\" '(8) nil false)))\n  (and (equal? (sql_info_type integer) \"INT\"\
-      ) (nil? (eval (sql_info_formula integer)))\n    (equal? (sql_info_type text) \"NVARCHAR\") (equal? (sql_info_collation\
-      \ text) '(\"en_ci\" 0))\n    (not (regexp_test (string (sql_info_formula text)) \"sql_type_expr|sql_compile_expr\"\
-      ))))"
+    scm: |-
+      (begin
+        (define integer (sql_expr_info (list) (tsql_try_convert_expr nil "INT" (list) nil false)))
+        (define text (sql_expr_info (list) (tsql_try_convert_expr
+          (list (quote sql_type_expr) "box" "NVARCHAR" '("en_ci" 0)) "NVARCHAR" '(8) nil false)))
+        (and (equal? (sql_info_type integer) "INT") (nil? (eval (sql_info_formula integer)))
+          (equal? (sql_info_type text) "NVARCHAR") (equal? (sql_info_collation text) '("en_ci" 0))
+          (not (regexp_test (string (sql_info_formula text)) "sql_type_expr|sql_compile_expr"))))
     expect:
       result: true
   - name: TRY conversion operand evaluation occurs exactly once before recovery
-    scm: "(begin\n  (define observed (newsession))\n  (define operand (lambda () (begin (observed \"calls\" (+\
-      \ 1 (coalesceNil (observed \"calls\") 0))) \"invalid\")))\n  (define info (sql_expr_info (list) (tsql_try_convert_expr\n\
-      \    (list (quote sql_type_expr) (list operand) \"NVARCHAR\" nil) \"INT\" (list) nil false)))\n  (and (nil?\
-      \ (eval (sql_info_formula info))) (equal? (observed \"calls\") 1)))"
+    scm: |-
+      (begin
+        (define observed (newsession))
+        (define operand (lambda () (begin (observed "calls" (+ 1 (coalesceNil (observed "calls") 0))) "invalid")))
+        (define info (sql_expr_info (list) (tsql_try_convert_expr
+          (list (quote sql_type_expr) (list operand) "NVARCHAR" nil) "INT" (list) nil false)))
+        (and (nil? (eval (sql_info_formula info))) (equal? (observed "calls") 1)))
     expect:
       result: true
   - name: TRY conversion input failures stay outside the recovery closure
-    scm: "(begin\n  (define observed (newsession))\n  (define operand (lambda () (begin (observed \"calls\" (+\
-      \ 1 (coalesceNil (observed \"calls\") 0))) (error \"operand failure\"))))\n  (define info (sql_expr_info\
-      \ (list) (tsql_try_convert_expr\n    (list (quote sql_type_expr) (list operand) \"NVARCHAR\" nil) \"INT\"\
-      \ (list) nil false)))\n  (and (try (lambda () (begin (eval (sql_info_formula info)) false)) (lambda (_cause)\
-      \ true))\n    (equal? (observed \"calls\") 1)))"
+    scm: |-
+      (begin
+        (define observed (newsession))
+        (define operand (lambda () (begin (observed "calls" (+ 1 (coalesceNil (observed "calls") 0))) (error "operand failure"))))
+        (define info (sql_expr_info (list) (tsql_try_convert_expr
+          (list (quote sql_type_expr) (list operand) "NVARCHAR" nil) "INT" (list) nil false)))
+        (and (try (lambda () (begin (eval (sql_info_formula info)) false)) (lambda (_cause) true))
+          (equal? (observed "calls") 1)))
     expect:
       result: true
   - name: TRY conversion wire descriptors follow target declarations on empty results
-    scm: "(begin\n  (define session (newsession))\n  (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
-      ) (session \"wire_metadata\" true)\n  (define output (newsession))\n  (tds_frontend \"execute\" session\n\
-      \    (list \"database\" \"memcp-tests\" \"parameters\" (list) \"declarations\" \"\"\n      \"text\" \"\
-      SELECT TRY_CAST(NULL AS SMALLINT) AS narrow,TRY_CONVERT(INT,N'bad') AS absent,TRY_CAST(NULL AS BIT) AS\
-      \ flag WHERE 1=0\")\n    (lambda (_row) (output \"row\" true)) (lambda (fields) (output \"fields\" fields))\
-      \ nil nil)\n  (and (nil? (output \"row\"))\n    (equal? (map (output \"fields\") (lambda (field) (field\
-      \ \"kind\"))) '(38 38 104))\n    (equal? (map (output \"fields\") (lambda (field) (field \"size\"))) '(2\
-      \ 4 1))))"
+    scm: |-
+      (begin
+        (define session (newsession))
+        (session "username" "root") (session "schema" "memcp-tests") (session "wire_metadata" true)
+        (define output (newsession))
+        (tds_frontend "execute" session
+          (list "database" "memcp-tests" "parameters" (list) "declarations" ""
+            "text" "SELECT TRY_CAST(NULL AS SMALLINT) AS narrow,TRY_CONVERT(INT,N'bad') AS absent,TRY_CAST(NULL AS BIT) AS flag WHERE 1=0")
+          (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil)
+        (and (nil? (output "row"))
+          (equal? (map (output "fields") (lambda (field) (field "kind"))) '(38 38 104))
+          (equal? (map (output "fields") (lambda (field) (field "size"))) '(2 4 1))))
     expect:
       result: true
   - name: TRY conversion prepared parameters use their declared frontend contracts
-    scm: "(begin\n  (define session (newsession))\n  (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
-      ) (session \"wire_metadata\" true)\n  (define output (newsession))\n  (tds_frontend \"execute\" session\n\
-      \    (list \"database\" \"memcp-tests\" \"parameters\" (list\n      (list \"name\" \"@raw\" \"flags\" 0\
-      \ \"type\" (list \"kind\" 231 \"size\" 24) \"value\" \"42\"))\n      \"declarations\" \"@raw nvarchar(12)\"\
-      \ \"text\" \"SELECT TRY_CAST(@raw AS SMALLINT) AS value\")\n    (lambda (row) (output \"row\" row)) (lambda\
-      \ (fields) (output \"fields\" fields)) nil nil)\n  (and (equal? (output \"row\") '(42)) (equal? ((car (output\
-      \ \"fields\")) \"size\") 2)))"
+    scm: |-
+      (begin
+        (define session (newsession))
+        (session "username" "root") (session "schema" "memcp-tests") (session "wire_metadata" true)
+        (define output (newsession))
+        (tds_frontend "execute" session
+          (list "database" "memcp-tests" "parameters" (list
+            (list "name" "@raw" "flags" 0 "type" (list "kind" 231 "size" 24) "value" "42"))
+            "declarations" "@raw nvarchar(12)" "text" "SELECT TRY_CAST(@raw AS SMALLINT) AS value")
+          (lambda (row) (output "row" row)) (lambda (fields) (output "fields" fields)) nil nil)
+        (and (equal? (output "row") '(42)) (equal? ((car (output "fields")) "size") 2)))
     expect:
       result: true
   - name: TRY conversions use native column and derived projection contracts
@@ -2849,64 +2865,75 @@ test_cases:
     cleanup:
     - sql: DROP TABLE try_text_policy
   - name: TRY NULL style preserves declared character collation
-    scm: "(begin\n (define info (sql_expr_info (list) (tsql_try_convert_expr\n  (list (quote sql_type_expr) \"\
-      box\" \"NVARCHAR\" '(\"en_ci\" 0)) \"NVARCHAR\" '(8) (quote sql_null_style) false)))\n (and (equal? (sql_info_type\
-      \ info) \"NVARCHAR\") (equal? (sql_info_collation info) '(\"en_ci\" 0)) (nil? (eval (sql_info_formula info)))))"
+    scm: |-
+      (begin
+       (define info (sql_expr_info (list) (tsql_try_convert_expr
+        (list (quote sql_type_expr) "box" "NVARCHAR" '("en_ci" 0)) "NVARCHAR" '(8) (quote sql_null_style) false)))
+       (and (equal? (sql_info_type info) "NVARCHAR") (equal? (sql_info_collation info) '("en_ci" 0)) (nil? (eval (sql_info_formula info)))))
     expect:
       result: true
   - name: TRY does not recover unexpected converter failures
-    scm: "(begin\n (define info (sql_expr_info (list) (tsql_try_convert_expr 7 \"INT\" (list) nil false)))\n\
-      \ (eval (list (list (quote lambda) (list (quote tsql_cast_integer)) (sql_info_formula info))\n  (lambda\
-      \ (_value _minimum _maximum) (error \"unexpected-converter-failure\")))))"
+    scm: |-
+      (begin
+       (define info (sql_expr_info (list) (tsql_try_convert_expr 7 "INT" (list) nil false)))
+       (eval (list (list (quote lambda) (list (quote tsql_cast_integer)) (sql_info_formula info))
+        (lambda (_value _minimum _maximum) (error "unexpected-converter-failure")))))
     expect:
       error: true
       contains: unexpected-converter-failure
   - name: TRY recovers only explicit supported conversion error numbers
-    scm: "(and\n (nil? (tsql_try_conversion_error '(\"tsql-error\" 245 \"bad integer\" 1)))\n (nil? (tsql_try_conversion_error\
-      \ '(\"tsql-error\" 8114 \"bad numeric\" 1)))\n (nil? (tsql_try_conversion_error '(\"tsql-error\" 8115 \"\
-      overflow\" 1)))\n (nil? (tsql_try_conversion_error '(\"tsql-error\" 241 \"bad calendar\" 1)))\n (nil? (tsql_try_conversion_error\
-      \ '(\"tsql-error\" 242 \"calendar range\" 1)))\n (try (lambda () (begin (tsql_try_conversion_error '(\"\
-      tsql-error\" 8134 \"not a conversion\" 1)) false))\n  (lambda (cause) (expression_equal? cause '(\"tsql-error\"\
-      \ 8134 \"not a conversion\" 1)))))"
+    scm: |-
+      (and
+       (nil? (tsql_try_conversion_error '("tsql-error" 245 "bad integer" 1)))
+       (nil? (tsql_try_conversion_error '("tsql-error" 8114 "bad numeric" 1)))
+       (nil? (tsql_try_conversion_error '("tsql-error" 8115 "overflow" 1)))
+       (nil? (tsql_try_conversion_error '("tsql-error" 241 "bad calendar" 1)))
+       (nil? (tsql_try_conversion_error '("tsql-error" 242 "calendar range" 1)))
+       (try (lambda () (begin (tsql_try_conversion_error '("tsql-error" 8134 "not a conversion" 1)) false))
+        (lambda (cause) (expression_equal? cause '("tsql-error" 8134 "not a conversion" 1)))))
     expect:
       result: true
   - name: TRY target dimensions remain exact on empty output
-    scm: "(begin\n (define session (newsession)) (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
-      ) (session \"wire_metadata\" true)\n (define output (newsession))\n (tds_frontend \"execute\" session (list\
-      \ \"database\" \"memcp-tests\" \"parameters\" (list) \"declarations\" \"\" \"text\" \"SELECT TRY_CAST(N'12.34'\
-      \ AS DECIMAL(8,2)) AS d,TRY_CAST(N'x' AS NVARCHAR(5)) AS n,TRY_CAST(0x01 AS VARBINARY(5)) AS b,TRY_CAST(N'x'\
-      \ AS NVARCHAR) AS dn,TRY_CAST(0x01 AS VARBINARY) AS db WHERE 1=0\")\n  (lambda (_row) (output \"row\" true))\
-      \ (lambda (fields) (output \"fields\" fields)) nil nil)\n (and (nil? (output \"row\"))\n  (equal? (map\
-      \ (output \"fields\") (lambda (field) (field \"kind\"))) '(108 231 165 231 165))\n  (equal? (map (output\
-      \ \"fields\") (lambda (field) (field \"size\"))) '(5 10 5 60 30))\n  (equal? ((car (output \"fields\"))\
-      \ \"precision\") 8) (equal? ((car (output \"fields\")) \"scale\") 2)))"
+    scm: |-
+      (begin
+       (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests") (session "wire_metadata" true)
+       (define output (newsession))
+       (tds_frontend "execute" session (list "database" "memcp-tests" "parameters" (list) "declarations" "" "text" "SELECT TRY_CAST(N'12.34' AS DECIMAL(8,2)) AS d,TRY_CAST(N'x' AS NVARCHAR(5)) AS n,TRY_CAST(0x01 AS VARBINARY(5)) AS b,TRY_CAST(N'x' AS NVARCHAR) AS dn,TRY_CAST(0x01 AS VARBINARY) AS db WHERE 1=0")
+        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil)
+       (and (nil? (output "row"))
+        (equal? (map (output "fields") (lambda (field) (field "kind"))) '(108 231 165 231 165))
+        (equal? (map (output "fields") (lambda (field) (field "size"))) '(5 10 5 60 30))
+        (equal? ((car (output "fields")) "precision") 8) (equal? ((car (output "fields")) "scale") 2)))
     expect:
       result: true
     setup: []
     cleanup: []
   - name: TRY target dimensions remain exact on NULL values
-    scm: "(begin\n (define session (newsession)) (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
-      ) (session \"wire_metadata\" true)\n (define output (newsession))\n (tds_frontend \"execute\" session (list\
-      \ \"database\" \"memcp-tests\" \"parameters\" (list) \"declarations\" \"\" \"text\" \"SELECT TRY_CAST(NULL\
-      \ AS DECIMAL(8,2)) AS d,TRY_CONVERT(NVARCHAR(5),NULL,NULL) AS n,TRY_CAST(NULL AS VARBINARY(5)) AS b,TRY_CAST(NULL\
-      \ AS NVARCHAR) AS dn,TRY_CAST(NULL AS VARBINARY) AS db WHERE 1=0\")\n  (lambda (_row) (output \"row\" true))\
-      \ (lambda (fields) (output \"fields\" fields)) nil nil)\n (and (nil? (output \"row\"))\n  (equal? (map\
-      \ (output \"fields\") (lambda (field) (field \"kind\"))) '(108 231 165 231 165))\n  (equal? (map (output\
-      \ \"fields\") (lambda (field) (field \"size\"))) '(5 10 5 60 30))\n  (equal? ((car (output \"fields\"))\
-      \ \"precision\") 8) (equal? ((car (output \"fields\")) \"scale\") 2)))"
+    scm: |-
+      (begin
+       (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests") (session "wire_metadata" true)
+       (define output (newsession))
+       (tds_frontend "execute" session (list "database" "memcp-tests" "parameters" (list) "declarations" "" "text" "SELECT TRY_CAST(NULL AS DECIMAL(8,2)) AS d,TRY_CONVERT(NVARCHAR(5),NULL,NULL) AS n,TRY_CAST(NULL AS VARBINARY(5)) AS b,TRY_CAST(NULL AS NVARCHAR) AS dn,TRY_CAST(NULL AS VARBINARY) AS db WHERE 1=0")
+        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil)
+       (and (nil? (output "row"))
+        (equal? (map (output "fields") (lambda (field) (field "kind"))) '(108 231 165 231 165))
+        (equal? (map (output "fields") (lambda (field) (field "size"))) '(5 10 5 60 30))
+        (equal? ((car (output "fields")) "precision") 8) (equal? ((car (output "fields")) "scale") 2)))
     expect:
       result: true
     setup: []
     cleanup: []
   - name: TRY target dimensions remain exact on portable view
-    scm: "(begin\n (define session (newsession)) (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
-      ) (session \"wire_metadata\" true)\n (define output (newsession))\n (tds_frontend \"execute\" session (list\
-      \ \"database\" \"memcp-tests\" \"parameters\" (list) \"declarations\" \"\" \"text\" \"SELECT * FROM try_dimensions_view\
-      \ WHERE 1=0\")\n  (lambda (_row) (output \"row\" true)) (lambda (fields) (output \"fields\" fields)) nil\
-      \ nil)\n (and (nil? (output \"row\"))\n  (equal? (map (output \"fields\") (lambda (field) (field \"kind\"\
-      ))) '(108 231 165 231 165))\n  (equal? (map (output \"fields\") (lambda (field) (field \"size\"))) '(5\
-      \ 10 5 60 30))\n  (equal? ((car (output \"fields\")) \"precision\") 8) (equal? ((car (output \"fields\"\
-      )) \"scale\") 2)))"
+    scm: |-
+      (begin
+       (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests") (session "wire_metadata" true)
+       (define output (newsession))
+       (tds_frontend "execute" session (list "database" "memcp-tests" "parameters" (list) "declarations" "" "text" "SELECT * FROM try_dimensions_view WHERE 1=0")
+        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil)
+       (and (nil? (output "row"))
+        (equal? (map (output "fields") (lambda (field) (field "kind"))) '(108 231 165 231 165))
+        (equal? (map (output "fields") (lambda (field) (field "size"))) '(5 10 5 60 30))
+        (equal? ((car (output "fields")) "precision") 8) (equal? ((car (output "fields")) "scale") 2)))
     expect:
       result: true
     setup:
@@ -2924,24 +2951,27 @@ test_cases:
       - number: 245
         message: invalid integer text
   - name: Ordinary numeric text cast widths survive empty result metadata
-    scm: "(begin\n (define session (newsession)) (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
-      ) (session \"wire_metadata\" true)\n (define output (newsession))\n (tds_frontend \"execute\" session (list\
-      \ \"database\" \"memcp-tests\" \"parameters\" (list) \"declarations\" \"\" \"text\" \"SELECT CAST(12 AS\
-      \ NVARCHAR(5)) AS n,CONVERT(NVARCHAR(7),12) AS c,CAST(CAST(1 AS BIT) AS NCHAR(3)) AS b WHERE 1=0\")\n \
-      \ (lambda (_row) (output \"row\" true)) (lambda (fields) (output \"fields\" fields)) nil nil)\n (and (nil?\
-      \ (output \"row\"))\n  (equal? (map (output \"fields\") (lambda (field) (field \"kind\"))) '(231 231 231))\n\
-      \  (equal? (map (output \"fields\") (lambda (field) (field \"size\"))) '(10 14 6))))"
+    scm: |-
+      (begin
+       (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests") (session "wire_metadata" true)
+       (define output (newsession))
+       (tds_frontend "execute" session (list "database" "memcp-tests" "parameters" (list) "declarations" "" "text" "SELECT CAST(12 AS NVARCHAR(5)) AS n,CONVERT(NVARCHAR(7),12) AS c,CAST(CAST(1 AS BIT) AS NCHAR(3)) AS b WHERE 1=0")
+        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil)
+       (and (nil? (output "row"))
+        (equal? (map (output "fields") (lambda (field) (field "kind"))) '(231 231 231))
+        (equal? (map (output "fields") (lambda (field) (field "size"))) '(10 14 6))))
     expect:
       result: true
   - name: Ordinary numeric text cast widths survive NULL result metadata
-    scm: "(begin\n (define session (newsession)) (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
-      ) (session \"wire_metadata\" true)\n (define output (newsession))\n (tds_frontend \"execute\" session (list\
-      \ \"database\" \"memcp-tests\" \"parameters\" (list) \"declarations\" \"\" \"text\" \"SELECT CAST(CAST(NULL\
-      \ AS INT) AS NVARCHAR(5)) AS n,CONVERT(NVARCHAR(7),CAST(NULL AS BIGINT)) AS c,CAST(CAST(NULL AS BIT) AS\
-      \ NCHAR(3)) AS b WHERE 1=0\")\n  (lambda (_row) (output \"row\" true)) (lambda (fields) (output \"fields\"\
-      \ fields)) nil nil)\n (and (nil? (output \"row\"))\n  (equal? (map (output \"fields\") (lambda (field)\
-      \ (field \"kind\"))) '(231 231 231))\n  (equal? (map (output \"fields\") (lambda (field) (field \"size\"\
-      ))) '(10 14 6))))"
+    scm: |-
+      (begin
+       (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests") (session "wire_metadata" true)
+       (define output (newsession))
+       (tds_frontend "execute" session (list "database" "memcp-tests" "parameters" (list) "declarations" "" "text" "SELECT CAST(CAST(NULL AS INT) AS NVARCHAR(5)) AS n,CONVERT(NVARCHAR(7),CAST(NULL AS BIGINT)) AS c,CAST(CAST(NULL AS BIT) AS NCHAR(3)) AS b WHERE 1=0")
+        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil)
+       (and (nil? (output "row"))
+        (equal? (map (output "fields") (lambda (field) (field "kind"))) '(231 231 231))
+        (equal? (map (output "fields") (lambda (field) (field "size"))) '(10 14 6))))
     expect:
       result: true
 cleanup:
