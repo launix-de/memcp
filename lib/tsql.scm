@@ -308,9 +308,13 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 	(local "__tsql_parameter_declarations" contracts)
 	(local "__tsql_scope" (newsession))
 	(local "__tsql_connection_session" (tsql_connection_session parent))
-	/* Module changes shadow their caller, including an explicit local OFF.
-	Ordinary batches delegate the setting so GO retains connection state. */
-	(if module_settings (local "__tsql_identity_insert" (parent "__tsql_identity_insert")) true)
+	/* Existing runtime SET options inherit once per module invocation. Writes
+	stay local even for OFF/nil, so return and error unwinding restore the caller
+	without a shared-session save/restore race. Ordinary batches delegate these
+	options, retaining their connection state across GO and subsequent requests. */
+	(define module_keys (if module_settings
+		'("__tsql_identity_insert" "__tsql_datefirst" "__tsql_nocount") '()))
+	(map module_keys (lambda (key) (local key (parent key))))
 	/* Error-reporting procedures inherit the enclosing immutable CATCH context.
 	A nested CATCH still installs and restores only this invocation's fields. */
 	(define error_context (parent "__tsql_error_context"))
@@ -324,15 +328,15 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 				(not (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
 					(or (has? '("__tsql_scope" "__tsql_connection_session") key) (strlike key "__tsql_error_%"))
 					(and owner_schema (equal? key "schema"))
-					(and module_settings (equal? key "__tsql_identity_insert"))))))))
+					(has? module_keys key)))))))
 		'(key) (if (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
 			(or (has? '("__tsql_scope" "__tsql_connection_session") key) (strlike key "__tsql_error_%"))
 			(and owner_schema (equal? key "schema"))
-			(and module_settings (equal? key "__tsql_identity_insert"))) (local key) (parent key))
+			(has? module_keys key)) (local key) (parent key))
 		'(key value) (if (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
 			(or (has? '("__tsql_scope" "__tsql_connection_session") key) (strlike key "__tsql_error_%"))
 			(and owner_schema (equal? key "schema"))
-			(and module_settings (equal? key "__tsql_identity_insert"))) (local key value) (parent key value))
+			(has? module_keys key)) (local key value) (parent key value))
 		_ (apply parent args))))))
 (define tsql_scalar_expression_allowed? (lambda (expr) (match expr
 	((symbol quote) _value) true

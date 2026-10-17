@@ -1757,4 +1757,139 @@ test_cases:
     - number: 8114
       severity: 16
 
+- name: Module settings dynamic EXEC restores the caller weekday origin
+  sql: SET DATEFIRST 7; EXEC(N'SET DATEFIRST 1'); SELECT @@DATEFIRST AS first
+  expect:
+    rows: 1
+    data:
+    - first: 7
+- name: Module settings dynamic EXEC inherits its caller weekday origin
+  sql: SET DATEFIRST 2; EXEC(N'SELECT @@DATEFIRST AS first')
+  expect:
+    rows: 1
+    data:
+    - first: 2
+- name: Module settings parameterized dynamic execution restores the caller weekday origin
+  sql: SET DATEFIRST 7; EXEC sp_executesql N'SET DATEFIRST 1'; SELECT @@DATEFIRST AS first
+  expect:
+    rows: 1
+    data:
+    - first: 7
+- name: Module settings nested dynamic execution restores each enclosing value
+  sql: SET DATEFIRST 7; EXEC(N'SET DATEFIRST 2; EXEC(N''SET DATEFIRST 3''); SELECT @@DATEFIRST AS first'); SELECT @@DATEFIRST
+    AS first
+  expect:
+    rows: 2
+    data:
+    - first: 2
+    - first: 7
+- name: Module settings procedure observes its local weekday origin
+  sql: SET DATEFIRST 7; EXEC dbo.script_module_week; SELECT @@DATEFIRST AS first,DATEPART(weekday,N'2026-03-15') AS day
+  expect:
+    rows: 2
+    data:
+    - first: 1
+      day: 7
+    - first: 7
+      day: 1
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_module_week
+  - sql: CREATE PROCEDURE dbo.script_module_week AS SET DATEFIRST 1; SELECT @@DATEFIRST AS first,DATEPART(weekday,N'2026-03-15')
+      AS day
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_module_week
+- name: Module settings cached procedure calls inherit each invocation independently
+  sql: SET DATEFIRST 2; EXEC dbo.script_module_inherit; SET DATEFIRST 5; EXEC dbo.script_module_inherit
+  expect:
+    rows: 2
+    data:
+    - first: 2
+    - first: 5
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_module_inherit
+  - sql: CREATE PROCEDURE dbo.script_module_inherit AS SELECT @@DATEFIRST AS first
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_module_inherit
+- name: Module settings procedure RETURN preserves the caller setting
+  sql: SET DATEFIRST 7; EXEC dbo.script_module_return; SELECT @@DATEFIRST AS first
+  expect:
+    rows: 1
+    data:
+    - first: 7
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_module_return
+  - sql: CREATE PROCEDURE dbo.script_module_return AS SET DATEFIRST 1; RETURN 4; SET DATEFIRST 3
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_module_return
+- name: Module settings procedure failure preserves the caller setting
+  sql: SET DATEFIRST 7; BEGIN TRY EXEC dbo.script_module_throw END TRY BEGIN CATCH SELECT @@DATEFIRST AS first END CATCH
+  expect:
+    rows: 1
+    data:
+    - first: 7
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_module_throw
+  - sql: CREATE PROCEDURE dbo.script_module_throw AS SET DATEFIRST 1; THROW 50001,N'module failure',1
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_module_throw
+- name: Module settings dynamic failure preserves the caller setting
+  sql: SET DATEFIRST 7; BEGIN TRY EXEC(N'SET DATEFIRST 1; THROW 50001,N''dynamic failure'',1') END TRY BEGIN CATCH SELECT
+    @@DATEFIRST AS first END CATCH
+  expect:
+    rows: 1
+    data:
+    - first: 7
+- name: Module settings ordinary BEGIN blocks retain session settings
+  sql: SET DATEFIRST 7; BEGIN SET DATEFIRST 1 END; SELECT @@DATEFIRST AS first
+  expect:
+    rows: 1
+    data:
+    - first: 1
+- name: Module settings GO retains connection settings
+  sql: 'SET DATEFIRST 2
+
+    GO
+
+    SELECT @@DATEFIRST AS first'
+  expect:
+    rows: 1
+    data:
+    - first: 2
+- name: Module settings dynamic RETURN preserves the caller setting
+  sql: SET DATEFIRST 7; EXEC(N'SET DATEFIRST 1; RETURN; SET DATEFIRST 3'); SELECT @@DATEFIRST AS first
+  expect:
+    rows: 1
+    data:
+    - first: 7
+- name: Module settings dynamic NOCOUNT preserves enabled caller
+  scm: "(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (tsql_execute_request \"memcp-tests\"\
+    \n    \"SET NOCOUNT ON; EXEC(N'SET NOCOUNT OFF')\"\n    session nil 0 (lambda (_row) true) (lambda args true))\n  (equal?\
+    \ (session \"__tsql_nocount\") true))"
+  expect:
+    result: true
+- name: Module settings dynamic NOCOUNT preserves disabled caller
+  scm: "(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (tsql_execute_request \"memcp-tests\"\
+    \n    \"SET NOCOUNT OFF; EXEC(N'SET NOCOUNT ON')\"\n    session nil 0 (lambda (_row) true) (lambda args true))\n  (equal?\
+    \ (session \"__tsql_nocount\") false))"
+  expect:
+    result: true
+- name: Module settings procedure NOCOUNT preserves its caller
+  scm: "(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (tsql_execute_request \"memcp-tests\"\
+    \ \"SET NOCOUNT ON; EXEC dbo.script_module_nocount\"\n    session nil 0 (lambda (_row) true) (lambda args true))\n  (equal?\
+    \ (session \"__tsql_nocount\") true))"
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_module_nocount
+  - sql: CREATE PROCEDURE dbo.script_module_nocount AS SET NOCOUNT OFF
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_module_nocount
+  expect:
+    result: true
+- name: Module settings retain top level values across requests
+  scm: "(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (tsql_execute_request \"memcp-tests\"\
+    \ \"SET NOCOUNT ON; SET DATEFIRST 2\"\n    session nil 0 (lambda (_row) true) (lambda args true))\n  (tsql_execute_request\
+    \ \"memcp-tests\" \"EXEC(N'SET NOCOUNT OFF; SET DATEFIRST 3')\"\n    session nil 0 (lambda (_row) true) (lambda args true))\n\
+    \  (and (equal? (session \"__tsql_nocount\") true)\n    (equal? (session \"__tsql_datefirst\") 2)))"
+  expect:
+    result: true
+
 cleanup: []
