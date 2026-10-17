@@ -584,6 +584,42 @@ Descriptor types below are frontend contracts, including for empty results. */
 	(if policy (policy schema true false) true)
 	(filter (coalesceNil (show schema) '()) (lambda (name)
 		(and (not (internal_column_name? name)) (tsql_metadata_match name pattern patterns)))))))
+/* View definitions stay in the existing system catalog. This transient answer
+joins object names only; native key procedures keep enumerating native tables. */
+(define tsql_metadata_relations (lambda (schema pattern patterns policy) (begin
+	(define native (map (tsql_metadata_table_names schema pattern patterns policy)
+		(lambda (name) (list name "TABLE"))))
+	(define views (if (> (sql_view_catalog_state "count") 0)
+		(scan nil (table "system" "views")
+			(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false))
+			(list schema) '("name") (lambda (name) (tsql_metadata_match name pattern patterns))
+			'("name") (lambda (acc name) (cons (list name "VIEW") acc))
+			'() (lambda (a b) (merge (list a b)))) '()))
+	(sort (merge (list native views)) (lambda (left right)
+		(if (equal? (cadr left) (cadr right)) (< (car left) (car right)) (< (cadr left) (cadr right))))))))
+/* Describe a logical view projection, never its rows. Native declarations can
+supply direct projection nullability and dimensions, but not a view default,
+identity, key or comment. Unknown expression widths must not become width one. */
+(define tsql_metadata_view_columns (lambda (schema name policy) (begin
+	(define query (tsql_describe_query
+		(make_query_block schema (list (list name schema name false nil))
+			(list "*" (list (quote get_column) nil false "*" false))
+			nil nil nil nil nil nil '() '() '()) policy))
+	(define sources (qb_sources query))
+	(map (tsql_result_entries query true) (lambda (entry) (begin
+		(define expression (nth entry 1))
+		(define info (nth entry 2))
+		(define origin (nth entry 3))
+		(define type (sql_info_type info))
+		(define dimensions (coalesceNil (tsql_result_dimensions sources expression '())
+			(tsql_result_dimensions sources (sql_info_formula info) '()) '()))
+		(if (and (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "BINARY" "VARBINARY" "DECIMAL" "NUMERIC") type)
+			(or (empty_list? dimensions)
+				(not (reduce dimensions (lambda (known dimension) (and known (not (nil? dimension)))) true))))
+			(error "view expression declaration dimensions are unavailable") true)
+		(list "Field" (car entry) "RawType" type "Dimensions" dimensions
+			"Null" (if origin (or (source_outer? (car origin)) ((cadr origin) "Null")) true)
+			"Comment" "" "DefaultExpression" "" "Default" nil)))))))
 /* Enumerate declaration columns directly, preserving their ordinal. */
 (define tsql_metadata_key_columns (lambda (columns make_row) (begin
 	(define walk (lambda (remaining ordinal) (match remaining
@@ -834,17 +870,22 @@ parameter contracts also need their binder before they can be advertised. */
 		"sp_datatype_info_100" (tsql_metadata_type_info options version)
 		"sp_tables" (begin
 			(define filter_type (options "table_type"))
-			(define types (if (nil? filter_type) '("TABLE")
+			(define types (if (nil? filter_type) '("TABLE" "VIEW")
 				(map (split filter_type ",") (lambda (value) (toUpper (replace (strtrim value) "'" ""))))))
-			(define rows (if (and (tsql_metadata_match "dbo" owner true) (has? types "TABLE"))
-				(map (tsql_metadata_table_names schema (options "table_name") (not (equal? (coalesceNil (options "fusepattern") 1) 0)) policy)
-					(lambda (name) (list "TABLE_QUALIFIER" schema "TABLE_OWNER" "dbo" "TABLE_NAME" name "TABLE_TYPE" "TABLE" "REMARKS" nil))) '()))
+			(define rows (if (tsql_metadata_match "dbo" owner true)
+				(map (filter (tsql_metadata_relations schema (options "table_name")
+					(not (equal? (coalesceNil (options "fusepattern") 1) 0)) policy)
+					(lambda (relation) (has? types (cadr relation))))
+					(lambda (relation) (list "TABLE_QUALIFIER" schema "TABLE_OWNER" "dbo"
+						"TABLE_NAME" (car relation) "TABLE_TYPE" (cadr relation) "REMARKS" nil))) '()))
 			(list '("TABLE_QUALIFIER" "TABLE_OWNER" "TABLE_NAME" "TABLE_TYPE" "REMARKS") '() rows))
 		"sp_columns" (begin
 			(if (nil? (options "table_name")) (error "sp_columns requires a table name") true)
 			(define rows (if (tsql_metadata_match "dbo" owner true)
-				(merge (map (tsql_metadata_table_names schema (options "table_name") true policy) (lambda (name) (begin
-					(define columns (filter (show (table schema name)) (lambda (column) (not (internal_column_name? (column "Field"))))))
+				(merge (map (tsql_metadata_relations schema (options "table_name") true policy) (lambda (relation) (begin
+					(define name (car relation))
+					(define columns (if (equal? (cadr relation) "VIEW") (tsql_metadata_view_columns schema name policy)
+						(filter (show (table schema name)) (lambda (column) (not (internal_column_name? (column "Field")))))))
 					(map (filter (produceN (count columns)) (lambda (i)
 						(tsql_metadata_match ((nth columns i) "Field") (options "column_name") true)))
 						(lambda (i) (tsql_metadata_column_row schema name (nth columns i) (+ i 1) version))))))) '()))

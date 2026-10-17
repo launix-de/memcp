@@ -1134,7 +1134,22 @@ runtime values nor stores a second relational representation. */
 		(define converted (tsql_common_value_infos infos nil))
 		(sql_info (cons (quote coalesceNil) (map converted sql_info_formula))
 			(sql_info_type (car converted)) (sql_info_collation (car converted))))) arguments))))
-
+/* Bind the shared logical tree for metadata only. No physical plan, compiled
+row evaluator or native mutation is constructed by this analysis path. The
+caller's policy remains explicit through every nested view expansion. */
+(define tsql_describe_sources (lambda (node) (match node
+	((symbol quote) _datum) node
+	(cons (symbol query-block) _tail) (begin
+		(map (qb_sources node) (lambda (source)
+			(if (and (source_is_base_table? source)
+				(nil? (table (source_schema source) (source_relation source))))
+				(error "description table does not exist: " (source_relation source)) true)))
+		(map (cdr node) tsql_describe_sources)
+		node)
+	(cons _head _tail) (begin (map node tsql_describe_sources) node)
+	_ node)))
+(define tsql_describe_query (lambda (query policy)
+	(bind_query_names (tsql_describe_sources (sql_expand_views query policy)) '())))
 /* Explicit wire descriptors come from the existing SQL expression metadata,
 never from the first row. Unknown expression types stay text in this first slice. */
 /* Width/scale originate in declaration syntax, never in the first output row.
@@ -1160,8 +1175,7 @@ dimensions are metadata only and are absent from the executable plan. */
 				(define src (source_for_alias sources (if (empty_list? sources) nil (source_alias (car sources))) bound_alias false))
 				(if (nil? src) nil (source_is_base_table? src)
 					(begin
-						(define metadata (find (get_schema (source_schema src) (source_relation src))
-							(lambda (item) (equal? (item "Field") bound_column)) nil))
+						(define metadata (show (table (source_schema src) (source_relation src)) "column" bound_column false))
 						(if metadata (metadata "Dimensions") nil))
 					(match (source_relation src)
 						((symbol query-block) _schema inner_sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
@@ -1171,14 +1185,33 @@ dimensions are metadata only and are absent from the executable plan. */
 	_ nil)))
 /* Provenance is a declaration fact. Computed values never inherit a base
 column's editability, and an outer source remains nullable after binding. */
-(define tsql_result_origin (lambda (sources info) (match (sql_info_formula info)
+(define tsql_result_origin (lambda (sources info follow_derived) (match (sql_info_formula info)
 	((symbol get_column) alias alias_ic name name_ic) (begin
 		(define source (source_for_alias sources (if (empty_list? sources) nil (source_alias (car sources))) alias alias_ic))
-		(if (and source (source_is_base_table? source)) (begin
-			(define handle (table (source_schema source) (source_relation source)))
-			(define column (if handle (show handle "column" name name_ic) nil))
-			(if column (list source column) nil)) nil))
+		(if (nil? source) nil
+			(source_is_base_table? source) (begin
+				(define handle (table (source_schema source) (source_relation source)))
+				(define column (if handle (show handle "column" name name_ic) nil))
+				(if column (list source column) nil))
+			follow_derived (match (source_relation source)
+				((symbol query-block) _schema inner_sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
+				(begin
+					(define expression ((expand_query_block_fields inner_sources fields) name))
+					(define origin (tsql_result_origin inner_sources (sql_expr_info inner_sources expression) true))
+					(if (and origin (source_outer? source))
+						(list (car origin) (set_assoc (cadr origin) "Null" true)) origin))
+				_ nil)
+			nil))
 	_ nil)))
+/* Both client adapters consume the same expression triples. Following a view's
+native declaration is permitted only for its column catalog, never to infer
+editability or keys for a derived result. */
+(define tsql_result_entries (lambda (query follow_derived) (match query
+	((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
+	(extract_assoc (expand_query_block_fields sources fields) (lambda (name expression) (begin
+		(define info (sql_expr_info sources expression))
+		(list name expression info (tsql_result_origin sources info follow_derived)))))
+	_ (error "unsupported result projection contract"))))
 (define tsql_result_flags (lambda (origin editable) (if (nil? origin) '(1 nil) (begin
 	(define source (car origin))
 	(define column (cadr origin))
@@ -1209,10 +1242,7 @@ row or supplied parameter value exists. */
 (define tsql_result_columns (lambda (query parameters) (match query
 	((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
 	(begin
-		(define projected (expand_query_block_fields sources fields))
-		(define entries (extract_assoc projected (lambda (name expression) (begin
-			(define info (sql_expr_info sources expression))
-			(list name expression info (tsql_result_origin sources info))))))
+		(define entries (tsql_result_entries query false))
 		(define origins (map entries (lambda (entry) (nth entry 3))))
 		(define keys (if (and (equal? (count sources) 1) (source_is_base_table? (car sources)))
 			(source_primary_key_columns (car sources)) '()))
@@ -2042,26 +2072,13 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define value tsql_expression4)
 		) (list op value)) empty true))
 	) (reduce terms tsql_fold_additive a)))
-	(define tsql_describe_sources (lambda (node) (match node
-		((symbol quote) _datum) node
-		(cons (symbol query-block) _tail) (begin
-			(map (qb_sources node) (lambda (source)
-				(if (and (source_is_base_table? source)
-					(nil? (table (source_schema source) (source_relation source))))
-					(error "description table does not exist: " (source_relation source)) true)))
-			(map (cdr node) tsql_describe_sources)
-			node)
-		(cons _head _tail) (begin (map node tsql_describe_sources) node)
-		_ node)))
-	(define tsql_describe_query (lambda (query)
-		(bind_query_names (tsql_describe_sources (sql_expand_views query policy)) '())))
 	(define tsql_describe_dml (lambda (database sources values condition) (begin
 		(define bound (tsql_describe_query (make_query_block database sources values condition
-			nil nil nil nil nil '() '() '())))
+			nil nil nil nil nil '() '() '()) policy))
 		(define fields (tsql_result_columns bound parameters))
 		(if (list? fields) (list (quote quote) '()) (error "invalid prepared mutation contract")))))
 	(define tsql_build_select_plan (lambda (query) (begin
-		(define expanded (if describe (tsql_describe_query query) (sql_expand_views query policy)))
+		(define expanded (if describe (tsql_describe_query query policy) (sql_expand_views query policy)))
 		(define descriptors (tsql_result_columns expanded parameters))
 		(if analyze_parameters (list (quote quote) expanded)
 			describe (list (quote quote) descriptors) (list (quote !begin)
@@ -2081,7 +2098,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
 			(error "INSERT column count does not match SELECT column count"))
 		(if describe (begin
-			(define checked (tsql_describe_query expanded))
+			(define checked (tsql_describe_query expanded policy))
 			/* Bind the source contract before accepting a pure prepared mutation. */
 			(define checked_fields (tsql_result_columns checked parameters))
 			(if (equal? (count checked_fields) (count declarations)) (list (quote quote) '())
