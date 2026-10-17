@@ -25,6 +25,7 @@ import (
 	"go/token"
 	"go/types"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -1044,5 +1045,60 @@ func enabled(args ...Scmer) Scmer { return NewBool(JITEnabled()) }
 	}
 	if !strings.Contains(code, "GoFuncAddr(JITEnabled)") {
 		t.Fatalf("generator baked in its own build flag:\n%s", code)
+	}
+}
+
+func TestIntegerXorUsesExistingNativeEmitter(t *testing.T) {
+	for _, expression := range []string{"a[0].Int() ^ a[1].Int()", "a[0].Int() ^ -1", "a[0].Int() ^ a[0].Int()", "(a[0].Int() ^ a[1].Int()) + a[0].Int()"} {
+		fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func NewInt(int64) Scmer
+func (Scmer) Int() int64
+func xor(a ...Scmer) Scmer { return NewInt(`+expression+`) }
+`, "xor")
+		code, errMsg := generateClosure("xor", fn, nil)
+		if errMsg != "" {
+			t.Fatal(errMsg)
+		}
+		if !strings.Contains(code, "ctx.EmitXorInt64") {
+			t.Fatalf("missing native XOR: %s", code)
+		}
+		if !strings.Contains(code, "ctx.EnsureDescsTogether(") {
+			t.Fatalf("XOR operands can evict each other while reloading: %s", code)
+		}
+		if !strings.Contains(code, "xorResult := ctx.AllocRegExcept") {
+			t.Fatalf("XOR did not preserve source register ownership: %s", code)
+		}
+	}
+}
+
+func TestInlinedBooleanHelperKeepsBranchFlags(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+ type Scmer struct{}
+ func NewInt(int64) Scmer
+ func (Scmer) Int() int64
+ func positive(value Scmer) bool { return value.Int() > 0 }
+ func choose(a ...Scmer) Scmer {
+	if positive(a[0]) { return NewInt(1) }
+	return NewInt(0)
+ }
+ `, "choose")
+	code, errMsg := generateClosure("choose", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	match := regexp.MustCompile(`(\w+) = ctx.DeferBooleanFlags\(`).FindStringSubmatch(code)
+	if len(match) != 2 {
+		t.Fatalf("helper did not return lazy comparison flags:\n%s", code)
+	}
+	if strings.Contains(code, "ctx.EnsureDesc(&"+match[1]+")") {
+		t.Fatalf("inlined helper return materializes flags before its branch:\n%s", code)
+	}
+	condition := regexp.MustCompile(`(?m)^\s*(d[0-9]+) (?::=|=) ` + match[1] + `\n`).FindStringSubmatch(code)
+	if len(condition) != 2 {
+		t.Fatalf("helper result not directly consumed by branch:\n%s", code)
+	}
+	if !strings.Contains(code, "ctx.SyncDesc(&"+condition[1]+")") || strings.Contains(code, "ctx.EnsureDesc(&"+condition[1]+")") {
+		t.Fatalf("branch materializes its lazy comparison flags:\n%s", code)
 	}
 }

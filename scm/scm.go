@@ -1294,7 +1294,7 @@ func init() {
 				ctx.FreeDesc(&d6)
 				ctx.ReclaimUntrackedRegs()
 				d8 := d7
-				ctx.EnsureDesc(&d8)
+				ctx.SyncDesc(&d8)
 				if d8.Loc != LocImm && d8.Loc != LocFlags {
 					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
@@ -1373,7 +1373,7 @@ func init() {
 				ctx.FreeDesc(&d12)
 				ctx.ReclaimUntrackedRegs()
 				d14 := d13
-				ctx.EnsureDesc(&d14)
+				ctx.SyncDesc(&d14)
 				if d14.Loc != LocImm && d14.Loc != LocFlags {
 					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
@@ -1555,7 +1555,7 @@ func init() {
 				ctx.FreeDesc(&d20)
 				ctx.ReclaimUntrackedRegs()
 				d23 := d21
-				ctx.EnsureDesc(&d23)
+				ctx.SyncDesc(&d23)
 				if d23.Loc != LocImm && d23.Loc != LocFlags {
 					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
@@ -2302,7 +2302,7 @@ func init() {
 				}
 				ctx.ReclaimUntrackedRegs()
 				d68 := d67
-				ctx.EnsureDesc(&d68)
+				ctx.SyncDesc(&d68)
 				if d68.Loc != LocImm && d68.Loc != LocFlags {
 					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
@@ -2394,7 +2394,7 @@ func init() {
 				ctx.FreeDesc(&d73)
 				ctx.ReclaimUntrackedRegs()
 				d75 := d74
-				ctx.EnsureDesc(&d75)
+				ctx.SyncDesc(&d75)
 				if d75.Loc != LocImm && d75.Loc != LocFlags {
 					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
@@ -2858,7 +2858,7 @@ func init() {
 				ctx.FreeDesc(&d104)
 				ctx.ReclaimUntrackedRegs()
 				d106 := d105
-				ctx.EnsureDesc(&d106)
+				ctx.SyncDesc(&d106)
 				if d106.Loc != LocImm && d106.Loc != LocFlags {
 					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
@@ -3243,7 +3243,7 @@ func init() {
 					}
 					ctx.FreeDesc(&d2)
 					d4 = d3
-					ctx.EnsureDesc(&d4)
+					ctx.SyncDesc(&d4)
 					if d4.Loc != LocImm && d4.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -3669,7 +3669,7 @@ func init() {
 					}
 					ctx.FreeDesc(&d2)
 					d4 = d3
-					ctx.EnsureDesc(&d4)
+					ctx.SyncDesc(&d4)
 					if d4.Loc != LocImm && d4.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -3798,7 +3798,7 @@ func init() {
 						ctx.BindReg(r3, &d13)
 					}
 					d14 = d13
-					ctx.EnsureDesc(&d14)
+					ctx.SyncDesc(&d14)
 					if d14.Loc != LocImm && d14.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -4405,7 +4405,7 @@ func init() {
 				ctx.FreeDesc(&d15)
 				ctx.ReclaimUntrackedRegs()
 				d17 := d16
-				ctx.EnsureDesc(&d17)
+				ctx.SyncDesc(&d17)
 				if d17.Loc != LocImm && d17.Loc != LocFlags {
 					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
@@ -4584,7 +4584,7 @@ func init() {
 				}
 				ctx.ReclaimUntrackedRegs()
 				d27 := d26
-				ctx.EnsureDesc(&d27)
+				ctx.SyncDesc(&d27)
 				if d27.Loc != LocImm && d27.Loc != LocFlags {
 					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
@@ -4742,7 +4742,7 @@ func init() {
 				ctx.FreeDesc(&d37)
 				ctx.ReclaimUntrackedRegs()
 				d39 := d38
-				ctx.EnsureDesc(&d39)
+				ctx.SyncDesc(&d39)
 				if d39.Loc != LocImm && d39.Loc != LocFlags {
 					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
@@ -11117,7 +11117,7 @@ Patterns can be any of:
 					}
 					ctx.FreeDesc(&d2)
 					d4 = d3
-					ctx.EnsureDesc(&d4)
+					ctx.SyncDesc(&d4)
 					if d4.Loc != LocImm && d4.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -11531,7 +11531,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d33)
 					ctx.ReclaimUntrackedRegs()
 					d35 = d34
-					ctx.EnsureDesc(&d35)
+					ctx.SyncDesc(&d35)
 					if d35.Loc != LocImm && d35.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -12119,7 +12119,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d76)
 					ctx.ReclaimUntrackedRegs()
 					d78 = d77
-					ctx.EnsureDesc(&d78)
+					ctx.SyncDesc(&d78)
 					if d78.Loc != LocImm && d78.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -12398,7 +12398,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d92)
 					ctx.ReclaimUntrackedRegs()
 					d94 = d93
-					ctx.EnsureDesc(&d94)
+					ctx.SyncDesc(&d94)
 					if d94.Loc != LocImm && d94.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -12986,7 +12986,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d135)
 					ctx.ReclaimUntrackedRegs()
 					d137 = d136
-					ctx.EnsureDesc(&d137)
+					ctx.SyncDesc(&d137)
 					if d137.Loc != LocImm && d137.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -13265,7 +13265,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d151)
 					ctx.ReclaimUntrackedRegs()
 					d153 = d152
-					ctx.EnsureDesc(&d153)
+					ctx.SyncDesc(&d153)
 					if d153.Loc != LocImm && d153.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -13853,7 +13853,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d194)
 					ctx.ReclaimUntrackedRegs()
 					d196 = d195
-					ctx.EnsureDesc(&d196)
+					ctx.SyncDesc(&d196)
 					if d196.Loc != LocImm && d196.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -14132,7 +14132,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d210)
 					ctx.ReclaimUntrackedRegs()
 					d212 = d211
-					ctx.EnsureDesc(&d212)
+					ctx.SyncDesc(&d212)
 					if d212.Loc != LocImm && d212.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -14720,7 +14720,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d253)
 					ctx.ReclaimUntrackedRegs()
 					d255 = d254
-					ctx.EnsureDesc(&d255)
+					ctx.SyncDesc(&d255)
 					if d255.Loc != LocImm && d255.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -14999,7 +14999,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d269)
 					ctx.ReclaimUntrackedRegs()
 					d271 = d270
-					ctx.EnsureDesc(&d271)
+					ctx.SyncDesc(&d271)
 					if d271.Loc != LocImm && d271.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -15587,7 +15587,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d312)
 					ctx.ReclaimUntrackedRegs()
 					d314 = d313
-					ctx.EnsureDesc(&d314)
+					ctx.SyncDesc(&d314)
 					if d314.Loc != LocImm && d314.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -15866,7 +15866,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d328)
 					ctx.ReclaimUntrackedRegs()
 					d330 = d329
-					ctx.EnsureDesc(&d330)
+					ctx.SyncDesc(&d330)
 					if d330.Loc != LocImm && d330.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -16454,7 +16454,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d371)
 					ctx.ReclaimUntrackedRegs()
 					d373 = d372
-					ctx.EnsureDesc(&d373)
+					ctx.SyncDesc(&d373)
 					if d373.Loc != LocImm && d373.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -16733,7 +16733,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d387)
 					ctx.ReclaimUntrackedRegs()
 					d389 = d388
-					ctx.EnsureDesc(&d389)
+					ctx.SyncDesc(&d389)
 					if d389.Loc != LocImm && d389.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -17321,7 +17321,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d430)
 					ctx.ReclaimUntrackedRegs()
 					d432 = d431
-					ctx.EnsureDesc(&d432)
+					ctx.SyncDesc(&d432)
 					if d432.Loc != LocImm && d432.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -17600,7 +17600,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d446)
 					ctx.ReclaimUntrackedRegs()
 					d448 = d447
-					ctx.EnsureDesc(&d448)
+					ctx.SyncDesc(&d448)
 					if d448.Loc != LocImm && d448.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -18188,7 +18188,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d489)
 					ctx.ReclaimUntrackedRegs()
 					d491 = d490
-					ctx.EnsureDesc(&d491)
+					ctx.SyncDesc(&d491)
 					if d491.Loc != LocImm && d491.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -18467,7 +18467,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d505)
 					ctx.ReclaimUntrackedRegs()
 					d507 = d506
-					ctx.EnsureDesc(&d507)
+					ctx.SyncDesc(&d507)
 					if d507.Loc != LocImm && d507.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -19055,7 +19055,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d548)
 					ctx.ReclaimUntrackedRegs()
 					d550 = d549
-					ctx.EnsureDesc(&d550)
+					ctx.SyncDesc(&d550)
 					if d550.Loc != LocImm && d550.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -19334,7 +19334,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d564)
 					ctx.ReclaimUntrackedRegs()
 					d566 = d565
-					ctx.EnsureDesc(&d566)
+					ctx.SyncDesc(&d566)
 					if d566.Loc != LocImm && d566.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -19922,7 +19922,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d607)
 					ctx.ReclaimUntrackedRegs()
 					d609 = d608
-					ctx.EnsureDesc(&d609)
+					ctx.SyncDesc(&d609)
 					if d609.Loc != LocImm && d609.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -20201,7 +20201,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d623)
 					ctx.ReclaimUntrackedRegs()
 					d625 = d624
-					ctx.EnsureDesc(&d625)
+					ctx.SyncDesc(&d625)
 					if d625.Loc != LocImm && d625.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -20789,7 +20789,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d666)
 					ctx.ReclaimUntrackedRegs()
 					d668 = d667
-					ctx.EnsureDesc(&d668)
+					ctx.SyncDesc(&d668)
 					if d668.Loc != LocImm && d668.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -21068,7 +21068,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d682)
 					ctx.ReclaimUntrackedRegs()
 					d684 = d683
-					ctx.EnsureDesc(&d684)
+					ctx.SyncDesc(&d684)
 					if d684.Loc != LocImm && d684.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -21656,7 +21656,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d725)
 					ctx.ReclaimUntrackedRegs()
 					d727 = d726
-					ctx.EnsureDesc(&d727)
+					ctx.SyncDesc(&d727)
 					if d727.Loc != LocImm && d727.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -21935,7 +21935,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d741)
 					ctx.ReclaimUntrackedRegs()
 					d743 = d742
-					ctx.EnsureDesc(&d743)
+					ctx.SyncDesc(&d743)
 					if d743.Loc != LocImm && d743.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -22523,7 +22523,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d784)
 					ctx.ReclaimUntrackedRegs()
 					d786 = d785
-					ctx.EnsureDesc(&d786)
+					ctx.SyncDesc(&d786)
 					if d786.Loc != LocImm && d786.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -22693,7 +22693,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d801)
 					ctx.ReclaimUntrackedRegs()
 					d803 = d802
-					ctx.EnsureDesc(&d803)
+					ctx.SyncDesc(&d803)
 					if d803.Loc != LocImm && d803.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -23605,7 +23605,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d870)
 					ctx.ReclaimUntrackedRegs()
 					d872 = d871
-					ctx.EnsureDesc(&d872)
+					ctx.SyncDesc(&d872)
 					if d872.Loc != LocImm && d872.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -24100,7 +24100,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d917)
 					ctx.ReclaimUntrackedRegs()
 					d919 = d918
-					ctx.EnsureDesc(&d919)
+					ctx.SyncDesc(&d919)
 					if d919.Loc != LocImm && d919.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -25012,7 +25012,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d986)
 					ctx.ReclaimUntrackedRegs()
 					d988 = d987
-					ctx.EnsureDesc(&d988)
+					ctx.SyncDesc(&d988)
 					if d988.Loc != LocImm && d988.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -25507,7 +25507,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1033)
 					ctx.ReclaimUntrackedRegs()
 					d1035 = d1034
-					ctx.EnsureDesc(&d1035)
+					ctx.SyncDesc(&d1035)
 					if d1035.Loc != LocImm && d1035.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -26419,7 +26419,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1102)
 					ctx.ReclaimUntrackedRegs()
 					d1104 = d1103
-					ctx.EnsureDesc(&d1104)
+					ctx.SyncDesc(&d1104)
 					if d1104.Loc != LocImm && d1104.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -26914,7 +26914,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1149)
 					ctx.ReclaimUntrackedRegs()
 					d1151 = d1150
-					ctx.EnsureDesc(&d1151)
+					ctx.SyncDesc(&d1151)
 					if d1151.Loc != LocImm && d1151.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -27826,7 +27826,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1218)
 					ctx.ReclaimUntrackedRegs()
 					d1220 = d1219
-					ctx.EnsureDesc(&d1220)
+					ctx.SyncDesc(&d1220)
 					if d1220.Loc != LocImm && d1220.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -28321,7 +28321,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1265)
 					ctx.ReclaimUntrackedRegs()
 					d1267 = d1266
-					ctx.EnsureDesc(&d1267)
+					ctx.SyncDesc(&d1267)
 					if d1267.Loc != LocImm && d1267.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -29233,7 +29233,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1334)
 					ctx.ReclaimUntrackedRegs()
 					d1336 = d1335
-					ctx.EnsureDesc(&d1336)
+					ctx.SyncDesc(&d1336)
 					if d1336.Loc != LocImm && d1336.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -29728,7 +29728,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1381)
 					ctx.ReclaimUntrackedRegs()
 					d1383 = d1382
-					ctx.EnsureDesc(&d1383)
+					ctx.SyncDesc(&d1383)
 					if d1383.Loc != LocImm && d1383.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -30640,7 +30640,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1450)
 					ctx.ReclaimUntrackedRegs()
 					d1452 = d1451
-					ctx.EnsureDesc(&d1452)
+					ctx.SyncDesc(&d1452)
 					if d1452.Loc != LocImm && d1452.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -31135,7 +31135,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1497)
 					ctx.ReclaimUntrackedRegs()
 					d1499 = d1498
-					ctx.EnsureDesc(&d1499)
+					ctx.SyncDesc(&d1499)
 					if d1499.Loc != LocImm && d1499.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -32047,7 +32047,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1566)
 					ctx.ReclaimUntrackedRegs()
 					d1568 = d1567
-					ctx.EnsureDesc(&d1568)
+					ctx.SyncDesc(&d1568)
 					if d1568.Loc != LocImm && d1568.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -32542,7 +32542,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1613)
 					ctx.ReclaimUntrackedRegs()
 					d1615 = d1614
-					ctx.EnsureDesc(&d1615)
+					ctx.SyncDesc(&d1615)
 					if d1615.Loc != LocImm && d1615.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -33454,7 +33454,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1682)
 					ctx.ReclaimUntrackedRegs()
 					d1684 = d1683
-					ctx.EnsureDesc(&d1684)
+					ctx.SyncDesc(&d1684)
 					if d1684.Loc != LocImm && d1684.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -33949,7 +33949,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1729)
 					ctx.ReclaimUntrackedRegs()
 					d1731 = d1730
-					ctx.EnsureDesc(&d1731)
+					ctx.SyncDesc(&d1731)
 					if d1731.Loc != LocImm && d1731.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -34861,7 +34861,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1798)
 					ctx.ReclaimUntrackedRegs()
 					d1800 = d1799
-					ctx.EnsureDesc(&d1800)
+					ctx.SyncDesc(&d1800)
 					if d1800.Loc != LocImm && d1800.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -35356,7 +35356,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1845)
 					ctx.ReclaimUntrackedRegs()
 					d1847 = d1846
-					ctx.EnsureDesc(&d1847)
+					ctx.SyncDesc(&d1847)
 					if d1847.Loc != LocImm && d1847.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -36268,7 +36268,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1914)
 					ctx.ReclaimUntrackedRegs()
 					d1916 = d1915
-					ctx.EnsureDesc(&d1916)
+					ctx.SyncDesc(&d1916)
 					if d1916.Loc != LocImm && d1916.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -36763,7 +36763,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1961)
 					ctx.ReclaimUntrackedRegs()
 					d1963 = d1962
-					ctx.EnsureDesc(&d1963)
+					ctx.SyncDesc(&d1963)
 					if d1963.Loc != LocImm && d1963.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -37675,7 +37675,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d2030)
 					ctx.ReclaimUntrackedRegs()
 					d2032 = d2031
-					ctx.EnsureDesc(&d2032)
+					ctx.SyncDesc(&d2032)
 					if d2032.Loc != LocImm && d2032.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -38170,7 +38170,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d2077)
 					ctx.ReclaimUntrackedRegs()
 					d2079 = d2078
-					ctx.EnsureDesc(&d2079)
+					ctx.SyncDesc(&d2079)
 					if d2079.Loc != LocImm && d2079.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -39082,7 +39082,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d2146)
 					ctx.ReclaimUntrackedRegs()
 					d2148 = d2147
-					ctx.EnsureDesc(&d2148)
+					ctx.SyncDesc(&d2148)
 					if d2148.Loc != LocImm && d2148.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -39577,7 +39577,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d2193)
 					ctx.ReclaimUntrackedRegs()
 					d2195 = d2194
-					ctx.EnsureDesc(&d2195)
+					ctx.SyncDesc(&d2195)
 					if d2195.Loc != LocImm && d2195.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -40489,7 +40489,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d2262)
 					ctx.ReclaimUntrackedRegs()
 					d2264 = d2263
-					ctx.EnsureDesc(&d2264)
+					ctx.SyncDesc(&d2264)
 					if d2264.Loc != LocImm && d2264.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -41125,7 +41125,7 @@ Patterns can be any of:
 					}
 					ctx.FreeDesc(&d2)
 					d4 = d3
-					ctx.EnsureDesc(&d4)
+					ctx.SyncDesc(&d4)
 					if d4.Loc != LocImm && d4.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}

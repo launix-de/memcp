@@ -412,7 +412,7 @@ query generation is the scope that releases them after execution. */
 (define make_stage_output_relation (lambda (stage_id)
 	(list (quote stage-output) stage_id)))
 
-(define logical_op (lambda (node) (if (and (list? node) (not (nil? node))) (car node) nil)))
+(define logical_op (lambda (node) (if (and (list? node) (not (empty_list? node))) (car node) nil)))
 (define query_block? (lambda (node) (equal? (logical_op node) (quote query-block))))
 (define group_stage? (lambda (node) (equal? (logical_op node) (quote group-stage))))
 (define union_block? (lambda (node) (equal? (logical_op node) (quote union-block))))
@@ -5859,7 +5859,7 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 			Only compile-time annotations remain; executable lowering consumes them. */
 			(define bound (bind_query_expr_tail scopes arguments path all_strings 0))
 			(define sources (map (merge scopes) binding_entry_source))
-			(define info (compiler (map bound (lambda (argument) (sql_expr_info sources argument)))))
+			(define info ((sql_expression_compiler compiler) (map bound (lambda (argument) (sql_expr_info sources argument)))))
 			(define formula (sql_info_formula info))
 			/* A fixed frontend BOOLEAN operator already carries this contract.
 			Keep its predicate AST visible to the shared logical extractors. */

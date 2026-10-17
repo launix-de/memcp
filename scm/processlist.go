@@ -658,7 +658,7 @@ func init_processlist() {
 					}
 					ctx.FreeDesc(&d4)
 					d6 = d5
-					ctx.EnsureDesc(&d6)
+					ctx.SyncDesc(&d6)
 					if d6.Loc != LocImm && d6.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -883,7 +883,7 @@ func init_processlist() {
 						ctx.BindReg(r3, &d31)
 					}
 					d32 = d31
-					ctx.EnsureDesc(&d32)
+					ctx.SyncDesc(&d32)
 					if d32.Loc != LocImm && d32.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -1562,7 +1562,7 @@ func init_processlist() {
 					}
 					ctx.FreeDesc(&d133)
 					d135 = d134
-					ctx.EnsureDesc(&d135)
+					ctx.SyncDesc(&d135)
 					if d135.Loc != LocImm && d135.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -2021,7 +2021,7 @@ func init_processlist() {
 					}
 					ctx.FreeDesc(&d0)
 					d2 = d1
-					ctx.EnsureDesc(&d2)
+					ctx.SyncDesc(&d2)
 					if d2.Loc != LocImm && d2.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
