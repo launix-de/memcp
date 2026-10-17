@@ -488,8 +488,8 @@ configurable cutoff remain separate compatibility work. */
 	(tsql_decl_dimensions type dimensions)
 	(match style
 		(symbol sql_null_style) (if (tsql_temporal_type? type)
-		(tsql_temporal_cast_expr (list (quote sql_type_expr) nil "NULL" nil) type 0 dimensions)
-		(list (quote sql_type_expr) nil type nil))
+			(tsql_temporal_cast_expr (list (quote sql_type_expr) nil "NULL" nil) type 0 dimensions)
+			(list (quote sql_type_expr) nil type nil))
 		_ (if (or (nil? style) (equal? style 0)) (tsql_cast_expr value type dimensions)
 			(tsql_temporal_type? type) (tsql_temporal_cast_expr value type style dimensions)
 			(has? '("VARCHAR" "NVARCHAR" "CHAR" "NCHAR") type)
@@ -1243,19 +1243,19 @@ compiling; the emitted row callback contains no SQL type tags or dispatch. */
 			(list (quote define) (quote resultrow)
 				(list (quote if) (list (quote session) "wire_metadata") (quote __tsql_raw_resultrow)
 					(list (quote lambda) (list (quote row))
-				(list (quote __tsql_raw_resultrow)
-					(cons (quote list) (merge (map (produceN (count descriptors)) (lambda (index) (begin
-						(define column (nth descriptors index))
-						(define value (list (quote nth) (quote row) (+ 1 (* index 2))))
-						(define pattern (match (column "sql_type")
-							"DATE" "%Y-%m-%d" "TIME" "%H:%i:%s"
-							"DATETIME" "%Y-%m-%d %H:%i:%s" "DATETIME2" "%Y-%m-%d %H:%i:%s"
-							"SMALLDATETIME" "%Y-%m-%d %H:%i:%s" _ nil))
-						/* Stored TIME may be plain clock text. Choose its existing
-						anchor conversion from the declared type at compile time. */
-						(define calendar_value (if (equal? (column "sql_type") "TIME")
-							(list tsql_calendar_text value) value))
-						(list (column "name") (if pattern (list format_date calendar_value pattern) value)))))))))))
+						(list (quote __tsql_raw_resultrow)
+							(cons (quote list) (merge (map (produceN (count descriptors)) (lambda (index) (begin
+								(define column (nth descriptors index))
+								(define value (list (quote nth) (quote row) (+ 1 (* index 2))))
+								(define pattern (match (column "sql_type")
+									"DATE" "%Y-%m-%d" "TIME" "%H:%i:%s"
+									"DATETIME" "%Y-%m-%d %H:%i:%s" "DATETIME2" "%Y-%m-%d %H:%i:%s"
+									"SMALLDATETIME" "%Y-%m-%d %H:%i:%s" _ nil))
+								/* Stored TIME may be plain clock text. Choose its existing
+								anchor conversion from the declared type at compile time. */
+								(define calendar_value (if (equal? (column "sql_type") "TIME")
+									(list tsql_calendar_text value) value))
+								(list (column "name") (if pattern (list format_date calendar_value pattern) value)))))))))))
 			plan)
 		plan)))
 
