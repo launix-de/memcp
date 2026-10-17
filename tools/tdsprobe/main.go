@@ -269,6 +269,26 @@ func checkError(want expectation, err error) error {
 
 func equalValue(actual, expected any) bool {
 	if encoded, ok := expected.(map[string]any); ok {
+		if kind, ok := encoded["temporal_type"].(string); ok {
+			text, textOK := encoded["value"].(string)
+			got, typed := actual.(time.Time)
+			if !textOK || !typed || len(encoded) != 2 {
+				return false
+			}
+			switch kind {
+			case "date":
+				want, err := time.Parse("2006-01-02", text)
+				return err == nil && got.Equal(want)
+			case "time":
+				want, err := time.Parse("15:04:05.999999999", text)
+				return err == nil && civil.TimeOf(got) == civil.TimeOf(want)
+			case "datetime", "datetime2", "smalldatetime":
+				want, err := time.Parse(time.RFC3339Nano, text)
+				return err == nil && got.Equal(want)
+			default:
+				return false
+			}
+		}
 		text, ok := encoded["binary_hex"].(string)
 		if !ok || len(encoded) != 1 {
 			return false

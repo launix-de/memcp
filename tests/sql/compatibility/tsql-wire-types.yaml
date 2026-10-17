@@ -14,6 +14,14 @@ setup:
   - sql: INSERT INTO tsql_wire_text (id,value,fixed) VALUES (1,N'🐘X',N'Ä'),(2,N'🐘XY',N'🐘XY')
   - sql: DROP TABLE IF EXISTS tsql_wire_version_contract
   - sql: CREATE TABLE tsql_wire_version_contract (id INT PRIMARY KEY, rv TIMESTAMP)
+  - sql: DROP VIEW IF EXISTS tsql_wire_calendar_view
+  - sql: DROP TABLE IF EXISTS tsql_wire_calendar_output
+  - sql: CREATE TABLE tsql_wire_calendar_output(id INT PRIMARY KEY,d DATE,tm TIME(0),dt0
+      DATETIME2(0),dt7 DATETIME2(7),legacy DATETIME,small SMALLDATETIME)
+  - sql: INSERT INTO tsql_wire_calendar_output VALUES(1,'1969-12-31','23:59:59','1969-12-31
+      23:59:59','1969-12-31 23:59:59','1969-12-31 23:59:59','1969-12-31 23:59:00'),(2,NULL,NULL,NULL,NULL,NULL,NULL)
+  - sql: CREATE VIEW tsql_wire_calendar_view AS SELECT d,tm,dt0,dt7,legacy,small FROM
+      tsql_wire_calendar_output
 test_cases:
   - name: Version keyword alias preserves its distinct native declaration
     scm: |
@@ -813,7 +821,281 @@ test_cases:
         (equal? (format_date (s "__tsql_parameter:v") "%Y-%m-%d %H:%i:%s") "1900-01-01 12:34:56"))
     expect:
       result: true
+  - name: Calendar wire descriptors use declared calendar contracts
+    scm: "(begin\n (define fields (tds_describe \"memcp-tests\" \"SELECT CAST(NULL AS DATE) AS d,CAST(NULL AS\
+      \ DATETIME) AS dt,CAST(NULL AS SMALLDATETIME) AS sm,CAST(NULL AS DATETIME2(7)) AS dt2,CAST(NULL AS TIME(7))\
+      \ AS tm\" \"\" (newsession)))\n (and (equal? (map fields (lambda (column) (column \"kind\"))) '(40 111\
+      \ 111 42 41))\n      (equal? (map fields (lambda (column) (column \"size\"))) '(3 8 4 8 5))\n      (equal?\
+      \ (map fields (lambda (column) (column \"scale\"))) '(0 0 0 7 7))))"
+    expect:
+      result: true
+  - name: Calendar wire all supported clock scales survive CAST metadata
+    scm: "(reduce (produceN 8) (lambda (valid scale) (begin\n (define fields (tds_describe \"memcp-tests\" (concat\
+      \ \"SELECT CAST(NULL AS TIME(\" scale \")) AS tm,CAST(NULL AS DATETIME2(\" scale \")) AS dt\") \"\" (newsession)))\n\
+      \ (define width (if (<= scale 2) 3 (<= scale 4) 4 5))\n (and valid (equal? (map fields (lambda (column)\
+      \ (column \"kind\"))) '(41 42))\n      (equal? (map fields (lambda (column) (column \"scale\"))) (list\
+      \ scale scale))\n      (equal? (map fields (lambda (column) (column \"size\"))) (list width (+ width 3))))))\
+      \ true)"
+    expect:
+      result: true
+  - name: Calendar wire stored and view declarations retain clock scale
+    scm: "(reduce '(\"tsql_wire_calendar_output\" \"tsql_wire_calendar_view\") (lambda (valid name) (begin\n\
+      \ (define fields (tds_describe \"memcp-tests\" (concat \"SELECT TOP (0) d,tm,dt0,dt7,legacy,small FROM\
+      \ \" name) \"\" (newsession)))\n (and valid (equal? (map fields (lambda (column) (column \"kind\"))) '(40\
+      \ 41 42 42 111 111))\n      (equal? (map fields (lambda (column) (column \"scale\"))) '(0 0 0 7 0 0))\n\
+      \      (equal? (map fields (lambda (column) (column \"size\"))) '(3 3 6 8 8 4))))) true)"
+    expect:
+      result: true
+  - name: Calendar wire date epoch payload
+    scm: "(begin\n (define descriptor (car (tds_describe \"memcp-tests\" \"SELECT CAST(NULL AS DATE) AS v\" \"\
+      \" (newsession))))\n (define value (tds_result_value descriptor (parse_date \"1970-01-01\")))\n (and (equal?\
+      \ (value \"days\") 719162) (equal? (value \"ticks\") 0) (equal? (value \"offset\") 0)))"
+    expect:
+      result: true
+  - name: Calendar wire date minimum payload
+    scm: "(begin\n (define descriptor (car (tds_describe \"memcp-tests\" \"SELECT CAST(NULL AS DATE) AS v\" \"\
+      \" (newsession))))\n (define value (tds_result_value descriptor (parse_date \"0001-01-01\")))\n (and (equal?\
+      \ (value \"days\") 0) (equal? (value \"ticks\") 0) (equal? (value \"offset\") 0)))"
+    expect:
+      result: true
+  - name: Calendar wire date maximum payload
+    scm: "(begin\n (define descriptor (car (tds_describe \"memcp-tests\" \"SELECT CAST(NULL AS DATE) AS v\" \"\
+      \" (newsession))))\n (define value (tds_result_value descriptor (parse_date \"9999-12-31\")))\n (and (equal?\
+      \ (value \"days\") 3652058) (equal? (value \"ticks\") 0) (equal? (value \"offset\") 0)))"
+    expect:
+      result: true
+  - name: Calendar wire negative Unix day floor payload
+    scm: "(begin\n (define descriptor (car (tds_describe \"memcp-tests\" \"SELECT CAST(NULL AS DATETIME2(7))\
+      \ AS v\" \"\" (newsession))))\n (define value (tds_result_value descriptor (parse_date \"1969-12-31 23:59:59\"\
+      )))\n (and (equal? (value \"days\") 719161) (equal? (value \"ticks\") 863990000000) (equal? (value \"offset\"\
+      ) 0)))"
+    expect:
+      result: true
+  - name: Calendar wire legacy epoch payload
+    scm: "(begin\n (define descriptor (car (tds_describe \"memcp-tests\" \"SELECT CAST(NULL AS DATETIME) AS v\"\
+      \ \"\" (newsession))))\n (define value (tds_result_value descriptor (parse_date \"1900-01-01 00:00:00\"\
+      )))\n (and (equal? (value \"days\") 0) (equal? (value \"ticks\") 0) (equal? (value \"offset\") 0)))"
+    expect:
+      result: true
+  - name: Calendar wire legacy negative day payload
+    scm: "(begin\n (define descriptor (car (tds_describe \"memcp-tests\" \"SELECT CAST(NULL AS DATETIME) AS v\"\
+      \ \"\" (newsession))))\n (define value (tds_result_value descriptor (parse_date \"1753-01-01 23:59:59\"\
+      )))\n (and (equal? (value \"days\") -53690) (equal? (value \"ticks\") 25919700) (equal? (value \"offset\"\
+      ) 0)))"
+    expect:
+      result: true
+  - name: Calendar wire short legacy units payload
+    scm: "(begin\n (define descriptor (car (tds_describe \"memcp-tests\" \"SELECT CAST(NULL AS SMALLDATETIME)\
+      \ AS v\" \"\" (newsession))))\n (define value (tds_result_value descriptor (parse_date \"1969-12-31 23:59:00\"\
+      )))\n (and (equal? (value \"days\") 25566) (equal? (value \"ticks\") 1439) (equal? (value \"offset\") 0)))"
+    expect:
+      result: true
+  - name: Calendar wire typed NULL stays absent from calendar payload
+    scm: "(reduce '(\"DATE\" \"DATETIME\" \"SMALLDATETIME\" \"TIME(7)\" \"DATETIME2(0)\") (lambda (valid type)\n\
+      \ (and valid (nil? (tds_result_value (car (tds_describe \"memcp-tests\" (concat \"SELECT CAST(NULL AS \"\
+      \ type \") AS v\") \"\" (newsession))) nil)))) true)"
+    expect:
+      result: true
+  - name: Calendar wire real client scans distinct temporal kinds
+    tds:
+      statements:
+      - sql: SELECT CAST('0001-01-01' AS DATE) AS first,CAST('9999-12-31 23:59:59' AS DATETIME2(7)) AS last,CAST('1753-01-01
+          23:59:59' AS DATETIME) AS legacy,CAST('1969-12-31 23:59:00' AS SMALLDATETIME) AS small,CAST('23:59:59'
+          AS TIME(7)) AS clock,CAST(NULL AS DATETIME2(0)) AS missing,N'1969-12-31' AS text
+        expect:
+          rows: 1
+          data:
+          - first:
+              temporal_type: date
+              value: '0001-01-01'
+            last:
+              temporal_type: datetime2
+              value: '9999-12-31T23:59:59Z'
+            legacy:
+              temporal_type: datetime
+              value: '1753-01-01T23:59:59Z'
+            small:
+              temporal_type: smalldatetime
+              value: '1969-12-31T23:59:00Z'
+            clock:
+              temporal_type: time
+              value: '23:59:59'
+            missing: null
+            text: '1969-12-31'
+  - name: Calendar wire real client reads tsql_wire_calendar_output
+    tds:
+      statements:
+      - sql: SELECT d,tm,dt0,dt7,legacy,small FROM tsql_wire_calendar_output WHERE id=1
+        expect:
+          rows: 1
+          data:
+          - d:
+              temporal_type: date
+              value: '1969-12-31'
+            tm:
+              temporal_type: time
+              value: '23:59:59'
+            dt0:
+              temporal_type: datetime2
+              value: '1969-12-31T23:59:59Z'
+            dt7:
+              temporal_type: datetime2
+              value: '1969-12-31T23:59:59Z'
+            legacy:
+              temporal_type: datetime
+              value: '1969-12-31T23:59:59Z'
+            small:
+              temporal_type: smalldatetime
+              value: '1969-12-31T23:59:00Z'
+  - name: Calendar wire real client reads tsql_wire_calendar_view
+    tds:
+      statements:
+      - sql: SELECT d,tm,dt0,dt7,legacy,small FROM tsql_wire_calendar_view WHERE d IS NOT NULL
+        expect:
+          rows: 1
+          data:
+          - d:
+              temporal_type: date
+              value: '1969-12-31'
+            tm:
+              temporal_type: time
+              value: '23:59:59'
+            dt0:
+              temporal_type: datetime2
+              value: '1969-12-31T23:59:59Z'
+            dt7:
+              temporal_type: datetime2
+              value: '1969-12-31T23:59:59Z'
+            legacy:
+              temporal_type: datetime
+              value: '1969-12-31T23:59:59Z'
+            small:
+              temporal_type: smalldatetime
+              value: '1969-12-31T23:59:00Z'
+  - name: Calendar wire real client reads empty and NULL-only descriptors
+    tds:
+      statements:
+      - sql: SELECT TOP (0) d,tm,dt0,dt7,legacy,small FROM tsql_wire_calendar_output
+        expect:
+          rows: 0
+          columns:
+          - d
+          - tm
+          - dt0
+          - dt7
+          - legacy
+          - small
+      - sql: SELECT d,tm,dt0,dt7,legacy,small FROM tsql_wire_calendar_output WHERE id=2
+        expect:
+          rows: 1
+          data:
+          - d: null
+            tm: null
+            dt0: null
+            dt7: null
+            legacy: null
+            small: null
+  - name: Calendar wire prepared RPC returns native calendar parameters
+    tds:
+      statements:
+      - sql: SELECT @d AS d,@tm AS tm,@dt AS dt
+        prepare: true
+        parameters:
+        - name: d
+          value:
+            temporal_type: date
+            value: '1969-12-31'
+        - name: tm
+          value:
+            temporal_type: time
+            value: '23:59:59'
+        - name: dt
+          value:
+            temporal_type: datetime2
+            value: '1969-12-31T23:59:59Z'
+        expect:
+          rows: 1
+          data:
+          - d:
+              temporal_type: date
+              value: '1969-12-31'
+            tm:
+              temporal_type: time
+              value: '23:59:59'
+            dt:
+              temporal_type: datetime2
+              value: '1969-12-31T23:59:59Z'
+  - name: Calendar wire REST then wire 0
+    sql: SELECT CAST('1969-12-30' AS DATE) AS d,CAST('1969-12-30 12:13:14' AS DATETIME2(7)) AS dt
+    expect:
+      rows: 1
+      data:
+      - d: '1969-12-30'
+        dt: '1969-12-30 12:13:14'
+  - name: Calendar wire REST then wire 1
+    tds:
+      statements:
+      - sql: SELECT CAST('1969-12-30' AS DATE) AS d,CAST('1969-12-30 12:13:14' AS DATETIME2(7)) AS dt
+        expect:
+          rows: 1
+          data:
+          - d:
+              temporal_type: date
+              value: '1969-12-30'
+            dt:
+              temporal_type: datetime2
+              value: '1969-12-30T12:13:14Z'
+  - name: Calendar wire REST then wire 2
+    sql: SELECT CAST('1969-12-30' AS DATE) AS d,CAST('1969-12-30 12:13:14' AS DATETIME2(7)) AS dt
+    expect:
+      rows: 1
+      data:
+      - d: '1969-12-30'
+        dt: '1969-12-30 12:13:14'
+  - name: Calendar wire wire then REST 0
+    tds:
+      statements:
+      - sql: SELECT CAST('1969-12-29' AS DATE) AS d,CAST('1969-12-29 12:13:14' AS DATETIME2(7)) AS dt
+        expect:
+          rows: 1
+          data:
+          - d:
+              temporal_type: date
+              value: '1969-12-29'
+            dt:
+              temporal_type: datetime2
+              value: '1969-12-29T12:13:14Z'
+  - name: Calendar wire wire then REST 1
+    sql: SELECT CAST('1969-12-29' AS DATE) AS d,CAST('1969-12-29 12:13:14' AS DATETIME2(7)) AS dt
+    expect:
+      rows: 1
+      data:
+      - d: '1969-12-29'
+        dt: '1969-12-29 12:13:14'
+  - name: Calendar wire wire then REST 2
+    tds:
+      statements:
+      - sql: SELECT CAST('1969-12-29' AS DATE) AS d,CAST('1969-12-29 12:13:14' AS DATETIME2(7)) AS dt
+        expect:
+          rows: 1
+          data:
+          - d:
+              temporal_type: date
+              value: '1969-12-29'
+            dt:
+              temporal_type: datetime2
+              value: '1969-12-29T12:13:14Z'
+  - name: Calendar wire fractional input is still rejected rather than rounded silently
+    tds:
+      statements:
+      - sql: SELECT CAST('2026-03-15 12:34:56.1' AS DATETIME2(7)) AS value
+        expect:
+          error: true
+          contains:
+          - fractional temporal conversion
 cleanup:
+  - sql: DROP VIEW IF EXISTS tsql_wire_calendar_view
+  - sql: DROP TABLE IF EXISTS tsql_wire_calendar_output
   - sql: DROP TABLE IF EXISTS tsql_wire_contract
   - sql: DROP TABLE IF EXISTS tsql_wire_text
   - sql: DROP TABLE IF EXISTS tsql_wire_version_contract

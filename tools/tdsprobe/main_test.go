@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/golang-sql/civil"
 )
@@ -60,5 +61,31 @@ func TestTemporalParameterUsesExplicitDriverContracts(t *testing.T) {
 		if _, err := temporalParameter(encoded); err == nil {
 			t.Fatal("invalid probe contract accepted", encoded)
 		}
+	}
+}
+
+func TestTemporalExpectationsRequireTypedCalendarValues(t *testing.T) {
+	for _, test := range []struct{ kind, text string }{
+		{"date", "0001-01-01"},
+		{"date", "1969-12-31"},
+		{"time", "23:59:59"},
+		{"datetime", "1753-01-01T00:00:00Z"},
+		{"datetime2", "9999-12-31T23:59:59Z"},
+		{"smalldatetime", "1900-01-01T00:00:00Z"},
+	} {
+		layout := time.RFC3339Nano
+		if test.kind == "date" {
+			layout = "2006-01-02"
+		} else if test.kind == "time" {
+			layout = "15:04:05.999999999"
+		}
+		value, err := time.Parse(layout, test.text)
+		want := map[string]any{"temporal_type": test.kind, "value": test.text}
+		if err != nil || !equalValue(value, want) || equalValue(test.text, want) || equalValue(nil, want) || equalValue(value.Add(time.Second), want) {
+			t.Fatalf("typed temporal expectation %v accepted a wrong carrier/value", want)
+		}
+	}
+	if equalValue(time.Time{}, map[string]any{"temporal_type": "unknown", "value": "0001-01-01"}) || equalValue(time.Time{}, map[string]any{"temporal_type": "date", "value": "invalid"}) {
+		t.Fatal("invalid temporal expectation accepted")
 	}
 }
