@@ -564,6 +564,111 @@ test_cases:
     expect:
       error: true
 
+  - name: "SQL: Derived star exports its declared input columns"
+    syntax: mysql
+    sql: "SELECT d.ID FROM (SELECT * FROM nr_outer) d WHERE d.ID = 1"
+    expect: {rows: 1, data: [{ID: 1}]}
+
+  - name: "SQL: Qualified derived star exports its own source"
+    syntax: mysql
+    sql: "SELECT d.inner_only FROM (SELECT I.* FROM nr_inner i) d WHERE d.ID = 10"
+    expect: {rows: 1, data: [{inner_only: 201}]}
+
+  - name: "SQL: Nested derived stars retain projection scope"
+    syntax: mysql
+    sql: "SELECT d.file_id FROM (SELECT m.* FROM (SELECT * FROM nr_outer) m) d WHERE d.ID = 2"
+    expect: {rows: 1, data: [{file_id: 20}]}
+
+  - name: "SQL: Derived union star exports first branch columns"
+    syntax: mysql
+    sql: "SELECT d.ID FROM (SELECT * FROM nr_outer UNION ALL SELECT * FROM nr_outer) d WHERE d.ID = 1"
+    expect: {rows: 2, data: [{ID: 1}, {ID: 1}]}
+
+  - name: "SQL: Derived star does not expose unprojected base columns"
+    syntax: mysql
+    sql: "SELECT d.outer_only FROM (SELECT x.* FROM (SELECT ID FROM nr_outer) x) d"
+    expect: {error: true}
+
+  - name: "SQL: Derived star keeps ambiguous input columns invalid"
+    syntax: mysql
+    sql: "SELECT ID FROM (SELECT * FROM nr_inner) i JOIN (SELECT * FROM nr_other) o ON TRUE"
+    expect: {error: true}
+
+  - name: "SQL: Derived star rejects an unknown source alias"
+    syntax: mysql
+    sql: "SELECT d.ID FROM (SELECT missing.* FROM nr_outer o) d"
+    expect: {error: true}
+
+  - name: "PSQL: Derived star exports its declared input columns"
+    syntax: postgresql
+    sql: "SELECT d.ID FROM (SELECT * FROM nr_outer) d WHERE d.ID = 1"
+    expect: {rows: 1, data: [{ID: 1}]}
+
+  - name: "PSQL: Qualified derived star exports its own source"
+    syntax: postgresql
+    sql: "SELECT d.inner_only FROM (SELECT I.* FROM nr_inner i) d WHERE d.ID = 10"
+    expect: {rows: 1, data: [{inner_only: 201}]}
+
+  - name: "PSQL: Nested derived stars retain projection scope"
+    syntax: postgresql
+    sql: "SELECT d.file_id FROM (SELECT m.* FROM (SELECT * FROM nr_outer) m) d WHERE d.ID = 2"
+    expect: {rows: 1, data: [{file_id: 20}]}
+
+  - name: "PSQL: Derived union star exports first branch columns"
+    syntax: postgresql
+    sql: "SELECT d.ID FROM (SELECT * FROM nr_outer UNION ALL SELECT * FROM nr_outer) d WHERE d.ID = 1"
+    expect: {rows: 2, data: [{ID: 1}, {ID: 1}]}
+
+  - name: "PSQL: Derived star does not expose unprojected base columns"
+    syntax: postgresql
+    sql: "SELECT d.outer_only FROM (SELECT x.* FROM (SELECT ID FROM nr_outer) x) d"
+    expect: {error: true}
+
+  - name: "PSQL: Derived star keeps ambiguous input columns invalid"
+    syntax: postgresql
+    sql: "SELECT ID FROM (SELECT * FROM nr_inner) i JOIN (SELECT * FROM nr_other) o ON TRUE"
+    expect: {error: true}
+
+  - name: "PSQL: Derived star rejects an unknown source alias"
+    syntax: postgresql
+    sql: "SELECT d.ID FROM (SELECT missing.* FROM nr_outer o) d"
+    expect: {error: true}
+
+  - name: "T-SQL: Derived star exports its declared input columns"
+    syntax: tsql
+    sql: "SELECT d.ID FROM (SELECT * FROM nr_outer) d WHERE d.ID = 1"
+    expect: {rows: 1, data: [{ID: 1}]}
+
+  - name: "T-SQL: Qualified derived star exports its own source"
+    syntax: tsql
+    sql: "SELECT d.inner_only FROM (SELECT I.* FROM nr_inner i) d WHERE d.ID = 10"
+    expect: {rows: 1, data: [{inner_only: 201}]}
+
+  - name: "T-SQL: Nested derived stars retain projection scope"
+    syntax: tsql
+    sql: "SELECT d.file_id FROM (SELECT m.* FROM (SELECT * FROM nr_outer) m) d WHERE d.ID = 2"
+    expect: {rows: 1, data: [{file_id: 20}]}
+
+  - name: "T-SQL: Derived union star exports first branch columns"
+    syntax: tsql
+    sql: "SELECT d.ID FROM (SELECT * FROM nr_outer UNION ALL SELECT * FROM nr_outer) d WHERE d.ID = 1"
+    expect: {rows: 2, data: [{ID: 1}, {ID: 1}]}
+
+  - name: "T-SQL: Derived star does not expose unprojected base columns"
+    syntax: tsql
+    sql: "SELECT d.outer_only FROM (SELECT x.* FROM (SELECT ID FROM nr_outer) x) d"
+    expect: {error: true}
+
+  - name: "T-SQL: Derived star keeps ambiguous input columns invalid"
+    syntax: tsql
+    sql: "SELECT ID FROM (SELECT * FROM nr_inner) i JOIN (SELECT * FROM nr_other) o ON TRUE"
+    expect: {error: true}
+
+  - name: "T-SQL: Derived star rejects an unknown source alias"
+    syntax: tsql
+    sql: "SELECT d.ID FROM (SELECT missing.* FROM nr_outer o) d"
+    expect: {error: true}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS nr_alias_conflict"
   - sql: "DROP TABLE IF EXISTS nr_leaf"
