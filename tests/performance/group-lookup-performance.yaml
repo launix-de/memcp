@@ -6,7 +6,7 @@
 metadata:
   # Million-row cold fixtures are rebuilt for every A/B verification pair.
   # Reserve the complete fourteen-role cohort separately from the KPI fixture.
-  performance_shard_weight: 192
+  performance_shard_weight: 19
   version: "1.0"
   description: "Large lookup GROUP BY performance"
   isolated: true
