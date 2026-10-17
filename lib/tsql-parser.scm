@@ -1171,6 +1171,8 @@ dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
 	((symbol sql_compile_expr) ((symbol tsql_temporal_compiler) _target _style ((symbol quote) dimensions)) _value) dimensions
+	((symbol sql_compile_expr) ((symbol tsql_dateadd_compiler) _unit _months _seconds) _amount value)
+	(tsql_result_dimensions sources value parameters)
 	((symbol tsql_cast_decimal) _value precision scale) (list precision scale)
 	((symbol tsql_read_identity) _state) '(38 0)
 	((symbol tsql_cast_binary) _value length _fixed) (list length)

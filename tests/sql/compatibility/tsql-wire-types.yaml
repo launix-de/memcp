@@ -628,10 +628,18 @@ test_cases:
         expect:
           rows: 1
           data:
-          - d: '2026-03-15'
-            tm: '12:34:56'
-            dt: '2026-03-15 12:34:56'
-            dt2: '2026-03-15 12:34:56'
+          - d:
+              temporal_type: date
+              value: '2026-03-15'
+            tm:
+              temporal_type: time
+              value: '12:34:56'
+            dt:
+              temporal_type: datetime
+              value: '2026-03-15T12:34:56Z'
+            dt2:
+              temporal_type: datetime2
+              value: '2026-03-15T12:34:56Z'
       - sql: SELECT @d AS first,@dt2 AS last
         prepare: true
         parameters:
@@ -646,8 +654,12 @@ test_cases:
         expect:
           rows: 1
           data:
-          - first: '0001-01-01'
-            last: '9999-12-31 23:59:59'
+          - first:
+              temporal_type: date
+              value: '0001-01-01'
+            last:
+              temporal_type: datetime2
+              value: '9999-12-31T23:59:59Z'
   - name: Native temporal RPC writes reuse typed native assignment and ordering
     tds:
       statements:
@@ -675,10 +687,18 @@ test_cases:
         expect:
           rows: 1
           data:
-          - d: '2026-03-15'
-            dt: '2026-03-15 12:34:56'
-            tm: '12:34:56'
-            sm: '2026-03-15 12:35:00'
+          - d:
+              temporal_type: date
+              value: '2026-03-15'
+            dt:
+              temporal_type: datetime2
+              value: '2026-03-15T12:34:56Z'
+            tm:
+              temporal_type: time
+              value: '12:34:56'
+            sm:
+              temporal_type: smalldatetime
+              value: '2026-03-15T12:35:00Z'
       - sql: UPDATE tsql_wire_clock SET dt=@dt WHERE id=1
         prepare: true
         parameters:
@@ -690,7 +710,9 @@ test_cases:
         expect:
           rows: 1
           data:
-          - dt: '2026-03-16 01:02:03'
+          - dt:
+              temporal_type: datetime2
+              value: '2026-03-16T01:02:03Z'
       - sql: DROP TABLE tsql_wire_clock
   - name: Native TDS temporal RPC refuses fractional and offset loss before execution
     tds:
@@ -1093,6 +1115,115 @@ test_cases:
           error: true
           contains:
           - fractional temporal conversion
+  - name: Calendar wire CONVERT styles retain declared result scale
+    scm: "(begin\n (define fields (tds_describe \"memcp-tests\" \"SELECT CONVERT(DATETIME2(0),N'31.12.1969',104)\
+      \ AS dt,CONVERT(TIME(3),N'12:34:56',NULL) AS tm\" \"\" (newsession)))\n (and (equal? (map fields (lambda\
+      \ (column) (column \"kind\"))) '(42 41))\n      (equal? (map fields (lambda (column) (column \"scale\"\
+      ))) '(0 3))\n      (equal? (map fields (lambda (column) (column \"size\"))) '(6 4))))"
+    expect:
+      result: true
+  - name: Calendar wire DATEADD retains its declared input clock precision
+    scm: "(begin\n (define fields (tds_describe \"memcp-tests\" \"SELECT DATEADD(second,1,CAST(NULL AS DATETIME2(2)))\
+      \ AS dt,DATEADD(second,1,CAST(NULL AS TIME(4))) AS tm\" \"\" (newsession)))\n (and (equal? (map fields\
+      \ (lambda (column) (column \"kind\"))) '(42 41))\n      (equal? (map fields (lambda (column) (column \"\
+      scale\"))) '(2 4))))"
+    expect:
+      result: true
+  - name: Calendar wire real client decodes every whole-second clock scale
+    tds:
+      statements:
+      - sql: SELECT CAST('23:59:59' AS TIME(0)) AS tm,CAST('1969-12-31 23:59:59' AS DATETIME2(0)) AS dt
+        expect:
+          rows: 1
+          data:
+          - tm:
+              temporal_type: time
+              value: '23:59:59'
+            dt:
+              temporal_type: datetime2
+              value: '1969-12-31T23:59:59Z'
+      - sql: SELECT CAST('23:59:59' AS TIME(1)) AS tm,CAST('1969-12-31 23:59:59' AS DATETIME2(1)) AS dt
+        expect:
+          rows: 1
+          data:
+          - tm:
+              temporal_type: time
+              value: '23:59:59'
+            dt:
+              temporal_type: datetime2
+              value: '1969-12-31T23:59:59Z'
+      - sql: SELECT CAST('23:59:59' AS TIME(2)) AS tm,CAST('1969-12-31 23:59:59' AS DATETIME2(2)) AS dt
+        expect:
+          rows: 1
+          data:
+          - tm:
+              temporal_type: time
+              value: '23:59:59'
+            dt:
+              temporal_type: datetime2
+              value: '1969-12-31T23:59:59Z'
+      - sql: SELECT CAST('23:59:59' AS TIME(3)) AS tm,CAST('1969-12-31 23:59:59' AS DATETIME2(3)) AS dt
+        expect:
+          rows: 1
+          data:
+          - tm:
+              temporal_type: time
+              value: '23:59:59'
+            dt:
+              temporal_type: datetime2
+              value: '1969-12-31T23:59:59Z'
+      - sql: SELECT CAST('23:59:59' AS TIME(4)) AS tm,CAST('1969-12-31 23:59:59' AS DATETIME2(4)) AS dt
+        expect:
+          rows: 1
+          data:
+          - tm:
+              temporal_type: time
+              value: '23:59:59'
+            dt:
+              temporal_type: datetime2
+              value: '1969-12-31T23:59:59Z'
+      - sql: SELECT CAST('23:59:59' AS TIME(5)) AS tm,CAST('1969-12-31 23:59:59' AS DATETIME2(5)) AS dt
+        expect:
+          rows: 1
+          data:
+          - tm:
+              temporal_type: time
+              value: '23:59:59'
+            dt:
+              temporal_type: datetime2
+              value: '1969-12-31T23:59:59Z'
+      - sql: SELECT CAST('23:59:59' AS TIME(6)) AS tm,CAST('1969-12-31 23:59:59' AS DATETIME2(6)) AS dt
+        expect:
+          rows: 1
+          data:
+          - tm:
+              temporal_type: time
+              value: '23:59:59'
+            dt:
+              temporal_type: datetime2
+              value: '1969-12-31T23:59:59Z'
+      - sql: SELECT CAST('23:59:59' AS TIME(7)) AS tm,CAST('1969-12-31 23:59:59' AS DATETIME2(7)) AS dt
+        expect:
+          rows: 1
+          data:
+          - tm:
+              temporal_type: time
+              value: '23:59:59'
+            dt:
+              temporal_type: datetime2
+              value: '1969-12-31T23:59:59Z'
+  - name: Calendar wire direct legacy output rejects out-of-range dates
+    scm: (tds_result_value (car (tds_describe "memcp-tests" "SELECT CAST(NULL AS DATETIME) AS v" "" (newsession)))
+      (parse_date "1752-12-31"))
+    expect:
+      error: true
+      contains: calendar wire result overflow
+  - name: Calendar wire direct short output refuses minute truncation
+    scm: (tds_result_value (car (tds_describe "memcp-tests" "SELECT CAST(NULL AS SMALLDATETIME) AS v" "" (newsession)))
+      (parse_date "1969-12-31 23:59:01"))
+    expect:
+      error: true
+      contains: whole minutes
 cleanup:
   - sql: DROP VIEW IF EXISTS tsql_wire_calendar_view
   - sql: DROP TABLE IF EXISTS tsql_wire_calendar_output
