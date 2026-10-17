@@ -721,21 +721,33 @@ no supplied value, physical plan, cache binding or marker is executed. */
 	(concat (toLower type) (if (empty_list? dimensions) ""
 		(concat "(" (reduce dimensions (lambda (text value)
 			(concat text (if (equal? text "") "" ",") (if (equal? value -1) "max" (string value)))) "") ")")))))
-(define tsql_parameter_system_type (lambda (type) (match type
-	"BIGINT" 127 "INT" 56 "INTEGER" 56 "SMALLINT" 52 "TINYINT" 48
-	"BIT" 104 "BOOLEAN" 104 "REAL" 59 "FLOAT" 62 "DECIMAL" 106 "NUMERIC" 108
-	"CHAR" 175 "VARCHAR" 167 "NCHAR" 239 "NVARCHAR" 231 "BINARY" 173 "VARBINARY" 165
-	"DATE" 40 "TIME" 41 "SMALLDATETIME" 58 "DATETIME" 61 "DATETIME2" 42
-	"MONEY" 60 "SMALLMONEY" 122 "UNIQUEIDENTIFIER" 36
-	_ (error "parameter declaration has no supported native type contract: " type))))
+/* Input parameter metadata follows the declared protocol type and width.
+The result text adapter deliberately serves a different output contract.
+FLOAT(p) casts do not yet retain their precision here; temporal and alias
+parameter contracts also need their binder before they can be advertised. */
+(define tsql_parameter_transport (lambda (column) (begin
+	(define type (column "RawType"))
+	(define ids (match type
+		"BIGINT" '(127 38) "INT" '(56 38) "INTEGER" '(56 38)
+		"SMALLINT" '(52 38) "TINYINT" '(48 38) "BIT" '(104 104)
+		"REAL" '(59 109)
+		"DECIMAL" '(106 106) "NUMERIC" '(108 108)
+		"MONEY" '(60 110) "SMALLMONEY" '(122 110)
+		"CHAR" '(175 175) "VARCHAR" '(167 167)
+		"NCHAR" '(239 239) "NVARCHAR" '(231 231)
+		"BINARY" '(173 173) "VARBINARY" '(165 165)
+		_ (error "unsupported parameter transport contract: " type)))
+	(define length (tsql_declared_byte_length column))
+	(list "system_type" (car ids) "kind" (cadr ids)
+		"size" (if (equal? length -1) 65535 length)))))
 (define tsql_parameter_description (lambda (specification ordinal) (match specification
 	'(name spelling type dimensions) (begin
 		(define dimensions (tsql_decl_dimensions type dimensions))
 		(define column (list "RawType" type "Dimensions" dimensions))
 		(define contract (tsql_metadata_type column 3))
-		(define wire (tsql_wire_contract type dimensions))
+		(define wire (tsql_parameter_transport column))
 		(list "parameter_ordinal" ordinal "name" (concat "@" spelling)
-			"suggested_system_type_id" (tsql_parameter_system_type type)
+			"suggested_system_type_id" (wire "system_type")
 			"suggested_system_type_name" (tsql_parameter_type_name type dimensions)
 			"suggested_max_length" (tsql_declared_byte_length column)
 			"suggested_precision" (if (or (sql_numeric_type? type) (has? '("MONEY" "SMALLMONEY") type)) (nth contract 2) 0)
