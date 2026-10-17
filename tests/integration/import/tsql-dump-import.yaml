@@ -302,8 +302,6 @@ test_cases:
         (parse_tsql "system" "CREATE DATABASE tsdump_escape_database" (lambda args true) planning nil)
         false)) (lambda (failure) (strlike (concat failure) "%outside destination%"))))
   expect: {result: true}
-cleanup: []
-
 - name: Text input fixture starts empty
   syntax: tsql
   sql: DROP TABLE IF EXISTS dbo.tsdump_text_input
@@ -359,3 +357,4 @@ cleanup: []
 - name: Text input fixture cleanup
   syntax: tsql
   sql: DROP TABLE dbo.tsdump_text_input
+cleanup: []
