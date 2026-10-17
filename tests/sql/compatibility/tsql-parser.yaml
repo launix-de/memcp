@@ -16,25 +16,25 @@ test_cases:
   - sql: CREATE TABLE tsql_data(id INT PRIMARY KEY,name NVARCHAR(50),val INT)
   - sql: INSERT tsql_data VALUES(1,N'Alice',10),(2,N'Bob',30),(3,N'Charlie',50),(4,N'Alice',20)
 - name: Set query right TOP zero leaves the left branch
-  sql: SELECT 7 AS value UNION ALL SELECT TOP(0) 9 AS value
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT TOP(0) 9 AS value FROM tsql_data WHERE id=1
   expect: {rows: 1, data: [{value: 7}]}
 - name: Set query left TOP zero leaves the right branch
-  sql: SELECT TOP(0) 7 AS value UNION ALL SELECT 9 AS value
+  sql: SELECT TOP(0) 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT 9 AS value FROM tsql_data WHERE id=1
   expect: {rows: 1, data: [{value: 9}]}
 - name: Set query does not apply the right TOP to all branches
-  sql: SELECT 7 AS value UNION ALL SELECT TOP(2) id AS value FROM tsql_data WHERE id>=3 ORDER BY value
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT TOP(2) id AS value FROM tsql_data WHERE id>=3 ORDER BY value
   expect: {rows: 3, data: [{value: 3},{value: 4},{value: 7}]}
 - name: Set query mixed distinct then all retains the final duplicate
-  sql: SELECT 7 AS value UNION SELECT 7 AS value UNION ALL SELECT 7 AS value
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT 7 AS value FROM tsql_data WHERE id=1
   expect: {rows: 2, data: [{value: 7},{value: 7}]}
 - name: Set query mixed all then distinct removes prior duplicates
-  sql: SELECT 7 AS value UNION ALL SELECT 7 AS value UNION SELECT 7 AS value
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT 7 AS value FROM tsql_data WHERE id=1 UNION SELECT 7 AS value FROM tsql_data WHERE id=1
   expect: {rows: 1, data: [{value: 7}]}
 - name: Set query homogeneous all keeps every branch
-  sql: SELECT 7 AS value UNION ALL SELECT 7 AS value UNION ALL SELECT 7 AS value
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT 7 AS value FROM tsql_data WHERE id=1
   expect: {rows: 3, data: [{value: 7},{value: 7},{value: 7}]}
 - name: Set query homogeneous distinct removes every duplicate
-  sql: SELECT 7 AS value UNION SELECT 7 AS value UNION SELECT 7 AS value
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION SELECT 7 AS value FROM tsql_data WHERE id=1 UNION SELECT 7 AS value FROM tsql_data WHERE id=1
   expect: {rows: 1, data: [{value: 7}]}
 - name: Set query final order belongs to the whole union
   sql: SELECT TOP(1) id AS value FROM tsql_data WHERE id=3 UNION ALL SELECT TOP(1) id AS value FROM tsql_data WHERE id=1 ORDER BY value DESC
@@ -43,22 +43,22 @@ test_cases:
   sql: SELECT TOP(1) id AS value FROM tsql_data WHERE id=1 UNION ALL SELECT TOP(1) id AS value FROM tsql_data WHERE id=3 ORDER BY value OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
   expect: {rows: 1, data: [{value: 3}]}
 - name: Set query offset applies after the complete union
-  sql: SELECT 7 AS value UNION ALL SELECT 3 AS value UNION ALL SELECT 9 AS value ORDER BY value OFFSET 1 ROWS
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT 3 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT 9 AS value FROM tsql_data WHERE id=1 ORDER BY value OFFSET 1 ROWS
   expect: {rows: 2, data: [{value: 7},{value: 9}]}
 - name: Set query parenthesized all branch remains below outer distinct
-  sql: SELECT 7 AS value UNION (SELECT 7 AS value UNION ALL SELECT 7 AS value)
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION (SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT 7 AS value FROM tsql_data WHERE id=1)
   expect: {rows: 1, data: [{value: 7}]}
 - name: Set query parenthesized distinct branch remains below outer all
-  sql: SELECT 7 AS value UNION ALL (SELECT 7 AS value UNION SELECT 7 AS value)
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL (SELECT 7 AS value FROM tsql_data WHERE id=1 UNION SELECT 7 AS value FROM tsql_data WHERE id=1)
   expect: {rows: 2, data: [{value: 7},{value: 7}]}
 - name: Set query parenthesized ordered TOP keeps its local boundary
-  sql: SELECT 7 AS value UNION ALL (SELECT TOP(1) id AS value FROM tsql_data ORDER BY id DESC) ORDER BY value
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL (SELECT TOP(1) id AS value FROM tsql_data ORDER BY id DESC) ORDER BY value
   expect: {rows: 2, data: [{value: 4},{value: 7}]}
 - name: Set query rejects order before an unparenthesized union
-  sql: SELECT id AS value FROM tsql_data ORDER BY value UNION ALL SELECT 7 AS value
+  sql: SELECT id AS value FROM tsql_data ORDER BY value UNION ALL SELECT 7 AS value FROM tsql_data WHERE id=1
   expect: {error: true}
 - name: Set query rejects offset without a final order
-  sql: SELECT 7 AS value UNION ALL SELECT 9 AS value OFFSET 1 ROWS
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT 9 AS value FROM tsql_data WHERE id=1 OFFSET 1 ROWS
   expect: {error: true}
 - name: Set query retains the single select TOP OFFSET exclusion
   sql: SELECT TOP(1) id FROM tsql_data ORDER BY id OFFSET 1 ROWS
@@ -67,7 +67,7 @@ test_cases:
   sql: SELECT TOP(2) id AS value FROM tsql_data ORDER BY id DESC
   expect: {rows: 2, data: [{value: 4},{value: 3}]}
 - name: Set query final alias comes from its first branch
-  sql: SELECT 7 AS first_value UNION ALL SELECT 3 AS other_value ORDER BY first_value
+  sql: SELECT 7 AS first_value FROM tsql_data WHERE id=1 UNION ALL SELECT 3 AS other_value FROM tsql_data WHERE id=1 ORDER BY first_value
   expect: {rows: 2, data: [{first_value: 3},{first_value: 7}]}
 - name: Set query final hints leave the same logical operator structure
   scm: |
