@@ -118,6 +118,8 @@ derived SELECT before untangle_query sees the complete query. */
 		(expand_node query '())
 		query))))
 
+/* The alter mode shares replacement and invalidation, but never creates a
+missing definition. Validate that contract before publishing catalog data. */
 (define create_sql_view (lambda (tx schema name dialect sql ir mode) (begin
 	(define serialized_ir (json_encode ir))
 	(define existing (scan tx (table "system" "views")
@@ -126,8 +128,7 @@ derived SELECT before untangle_query sees the complete query. */
 		'() (lambda (acc) (+ acc 1)) 0 +))
 	(define result
 		(if (> existing 0)
-			(match mode
-				"replace"
+			(if (has? '("replace" "alter") mode)
 				(scan tx (table "system" "views")
 					(list 369436443803648 (scan_boundary "equal" "database" 0 0 true true "" false) (scan_boundary "equal" "name" 1 1 true true "" false)) (list schema name)
 					'() (lambda () true)
@@ -136,12 +137,14 @@ derived SELECT before untangle_query sees the complete query. */
 						($update (list "dialect" dialect "sql" sql "ir" serialized_ir))
 						(+ acc 1)))
 					0 +)
-				"ignore" 0
-				_ (error (concat "view " schema "." name " already exists")))
-			(insert (table "system" "views")
-				'("database" "name" "dialect" "sql" "ir")
-				(list (list schema name dialect sql serialized_ir)))))
-	(if (or (equal? existing 0) (equal? mode "replace"))
+				(equal? mode "ignore") 0
+				(error (concat "view " schema "." name " already exists")))
+			(if (equal? mode "alter")
+				(error (concat "view " schema "." name " does not exist"))
+				(insert (table "system" "views")
+					'("database" "name" "dialect" "sql" "ir")
+					(list (list schema name dialect sql serialized_ir))))))
+	(if (or (equal? existing 0) (has? '("replace" "alter") mode))
 		(begin
 			(if (equal? existing 0)
 				(sql_view_catalog_set_count (+ (sql_view_catalog_state "count") 1))
