@@ -97,7 +97,7 @@ test_cases:
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
-      (list (failure "INSERT identity_mode_a(value) VALUES(CAST('bad' AS INT))")
+      (list (failure "DECLARE @bad NVARCHAR(10)=N'bad'; INSERT identity_mode_a(value) VALUES(CAST(@bad AS INT))")
         (failure "INSERT identity_mode_a DEFAULT VALUES")
         ((run "SELECT COUNT(*) AS n FROM identity_mode_a") "n")
         (reserve_ids (table "memcp-tests" false "identity_mode_a" false) 1))

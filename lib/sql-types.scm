@@ -326,7 +326,7 @@ keeps its existing (ignorecase-flagged) resolution for them. */
 			(if (nil? canonical)
 				(sql_info original "any" nil)
 				(begin
-					(define handle (table (source_schema src) (source_relation src)))
+					(define handle (table (source_schema src) false (source_relation src) false))
 					(define meta (if (nil? handle) nil (show handle "column" canonical false)))
 					(define type (if (nil? meta) "any" (toUpper (coalesceNil (meta "RawType") "any"))))
 					(define collname (if (nil? meta) nil (meta "Collation")))

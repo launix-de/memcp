@@ -1291,7 +1291,15 @@ parallel SELECT sinks borrow it without session-setting probes per row. */
 (define tsql_insert_identity (lambda (database name planning_session) (begin
 	(define identity (find (get_schema database name)
 		(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
-	(if identity (tsql_target_column_declaration database name (identity "Field") planning_session) nil))))
+	(if identity (tsql_target_column_declaration database name (identity "Field") planning_session)
+		(begin
+			/* Absence consumes a fact about every declaration, not only the
+			provided targets. Enumerate their immutable metadata, never rows:
+			DROP/CREATE or ADD may introduce identity beside unchanged targets. */
+			(planner_record_guard_condition
+				(list (quote nil?) (list (quote find) (list (quote get_schema) database name)
+					'(lambda (column) (equal? (column "Extra") "auto_increment")) nil)) planning_session)
+			nil)))))
 (define tsql_identity_insert_statement (lambda (database name identity explicit_columns columns body)
 	(list (quote begin)
 		(list (quote define) (quote __tsql_insert_target) (list (quote table) database false name false))
