@@ -115,25 +115,32 @@ compile boundary. Byte equality reuses the native collation-aware operator;
 no SQL type wrapper survives into execution or storage. */
 (define tsql_binary_type? (lambda (type)
 	(has? '("BINARY" "VARBINARY" "IMAGE" "ROWVERSION") type)))
+/* Stored logical expressions carry global compiler names or factory syntax.
+Only the consuming compilation creates callbacks; SQL operands stay separate. */
+(define tsql_comparison_compiler (lambda (op) (lambda (infos) (begin
+	(define left_info (car infos))
+	(define right_info (cadr infos))
+	(define left_type (sql_info_type left_info))
+	(define right_type (sql_info_type right_info))
+	(define head (match op "eq" (quote equal??) "ne" (quote equal??)
+		"lt" (quote <) "gt" (quote >) "le" (quote <=) "ge" (quote >=)))
+	(define comparison (if (and
+		(or (tsql_binary_type? left_type) (equal? left_type "NULL"))
+		(or (tsql_binary_type? right_type) (equal? right_type "NULL"))
+		(or (tsql_binary_type? left_type) (tsql_binary_type? right_type)))
+		(sql_info (if (has? '("eq" "ne") op)
+			(list (quote equal_collate) (sql_info_formula left_info) (sql_info_formula right_info) "bin")
+			(list (quote sql_compare) (sql_info_formula left_info) (sql_info_formula right_info)
+				(collate "bin" false) (string head))) "BOOLEAN" nil)
+		(sql_comparison_info head left_info right_info)))
+	(sql_info (if (equal? op "ne") (list (quote sql_not) (sql_info_formula comparison))
+		(sql_info_formula comparison)) "BOOLEAN" (sql_info_collation comparison))))))
+/* Predicate syntax supplies its Boolean contract before the shared logical
+markers are decorrelated. No executable annotation survives SQL compilation. */
+(define tsql_predicate_expr (lambda (formula)
+	(list (quote sql_type_expr) formula "BOOLEAN" nil)))
 (define tsql_comparison_expr (lambda (op left right)
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define left_info (car infos))
-		(define right_info (cadr infos))
-		(define left_type (sql_info_type left_info))
-		(define right_type (sql_info_type right_info))
-		(define head (match op "eq" (quote equal??) "ne" (quote equal??)
-			"lt" (quote <) "gt" (quote >) "le" (quote <=) "ge" (quote >=)))
-		(define comparison (if (and
-			(or (tsql_binary_type? left_type) (equal? left_type "NULL"))
-			(or (tsql_binary_type? right_type) (equal? right_type "NULL"))
-			(or (tsql_binary_type? left_type) (tsql_binary_type? right_type)))
-			(sql_info (if (has? '("eq" "ne") op)
-				(list (quote equal_collate) (sql_info_formula left_info) (sql_info_formula right_info) "bin")
-				(list (quote sql_compare) (sql_info_formula left_info) (sql_info_formula right_info)
-					(collate "bin" false) (string head))) "BOOLEAN" nil)
-			(sql_comparison_info head left_info right_info)))
-		(sql_info (if (equal? op "ne") (list (quote sql_not) (sql_info_formula comparison))
-			(sql_info_formula comparison)) "BOOLEAN" (sql_info_collation comparison)))) left right)))
+	(list (quote sql_compile_expr) (list (quote tsql_comparison_compiler) op) left right)))
 (define tsql_column_type (parser (define name tsql_identifier) (toUpper name)))
 (define tsql_storage_type (lambda (name)
 	/* Text declarations remain native metadata. Storage chooses its value
@@ -284,6 +291,46 @@ runtime and storage hot paths; do not substitute float64 for exact casts. */
 	(define bytes (if (or (equal? length -1) (<= (strlen value) length)) value (substr value 0 length)))
 	(if (and fixed (< (strlen bytes) length))
 		(concat bytes (string_repeat (hex2bin "00") (- length (strlen bytes)))) bytes)))))
+/* Integer binary contracts use at most sixteen hexadecimal digits. The SQL
+compiler supplies widths; no runtime value tag chooses a conversion rule.
+Complementing the nonnegative magnitude avoids negating the int64 minimum. */
+(define tsql_integer_width (lambda (type) (match type
+	"TINYINT" 1 "SMALLINT" 2 "INT" 4 "INTEGER" 4 "BIGINT" 8 _ nil)))
+(define tsql_integer_hex (lambda (value digits negative)
+	(if (equal? digits 0) "" (concat
+		(tsql_integer_hex (intdiv value 16) (- digits 1) negative)
+		(substr "0123456789abcdef" (if negative (- 15 (mod value 16)) (mod value 16)) 1)))))
+(define tsql_integer_to_binary (lambda (value width length fixed) (if (nil? value) nil (begin
+	(define negative (< value 0))
+	(define magnitude (if negative (- 0 (+ value 1)) value))
+	(define bytes (hex2bin (tsql_integer_hex magnitude (* 2 width) negative)))
+	(define kept (if (or (equal? length -1) (>= length width)) bytes
+		(substr bytes (- width length) length)))
+	(if (and fixed (> length width))
+		(concat (string_repeat (hex2bin "00") (- length width)) kept) kept)))))
+(define tsql_hex_digit_integer (lambda (digit) (match digit
+	"0" 0 "1" 1 "2" 2 "3" 3 "4" 4 "5" 5 "6" 6 "7" 7
+	"8" 8 "9" 9 "a" 10 "b" 11 "c" 12 "d" 13 "e" 14 "f" 15
+	_ (error "invalid binary hexadecimal digit"))))
+(define tsql_binary_to_integer (lambda (value width signed) (if (nil? value) nil (begin
+	/* Oversized inputs need a separately verified source-kind truncation contract.
+	Do not silently guess which bytes the original dialect would discard. */
+	(define count (strlen value))
+	(if (> count width) (error "overwide binary integer conversion is not implemented") true)
+	(define hex (bin2hex value))
+	/* Seed the sign in the first nibble, before multiplication can overflow.
+	Short inputs are zero extended; a full signed width uses two's complement. */
+	(reduce_range (strlen hex) (lambda (acc index) (begin
+		(define digit (tsql_hex_digit_integer (substr hex index 1)))
+		(if (and signed (equal? count width) (equal? index 0) (>= digit 8))
+			(- digit 16) (+ (* acc 16) digit)))) 0)))))
+(define tsql_integer_compiler (lambda (type minimum maximum) (lambda (infos) (begin
+	(define input (car infos))
+	(sql_info (if (tsql_binary_type? (sql_info_type input))
+		(list (quote tsql_binary_to_integer) (sql_info_formula input) (tsql_integer_width type) (< minimum 0))
+		(list (quote tsql_cast_integer) (sql_info_formula input) minimum maximum)) type nil)))))
+(define tsql_cast_integer_expr (lambda (value type minimum maximum)
+	(list (quote sql_compile_expr) (list (quote tsql_integer_compiler) type minimum maximum) value)))
 (define tsql_cast_bit (lambda (value)
 	(if (nil? value) nil
 		(if (and (string? value) (equal? (toUpper (sql_trim value)) "TRUE")) true
@@ -313,16 +360,16 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 	(define name (toUpper type))
 	(tsql_decl_dimensions name dimensions)
 	(define formula (match name
-		"INT" (list tsql_cast_integer value -2147483648 2147483647)
-		"INTEGER" (list tsql_cast_integer value -2147483648 2147483647)
-		"SMALLINT" (list tsql_cast_integer value -32768 32767)
-		"TINYINT" (list tsql_cast_integer value 0 255)
-		"BIGINT" (list tsql_cast_integer value (tsql_parse_integer "-9223372036854775808") (tsql_parse_integer "9223372036854775807"))
-		"FLOAT" (list tsql_cast_float value)
+		"INT" (tsql_cast_integer_expr value name -2147483648 2147483647)
+		"INTEGER" (tsql_cast_integer_expr value name -2147483648 2147483647)
+		"SMALLINT" (tsql_cast_integer_expr value name -32768 32767)
+		"TINYINT" (tsql_cast_integer_expr value name 0 255)
+		"BIGINT" (tsql_cast_integer_expr value name (tsql_parse_integer "-9223372036854775808") (tsql_parse_integer "9223372036854775807"))
+		"FLOAT" (list (quote tsql_cast_float) value)
 		/* Approximate types use native floating precision. Binary32 rounding and
 		dialect precision boundaries remain noncritical compatibility work. */
-		"REAL" (list tsql_cast_float value)
-		"BIT" (list tsql_cast_bit value)
+		"REAL" (list (quote tsql_cast_float) value)
+		"BIT" (list (quote tsql_cast_bit) value)
 		"DECIMAL" (tsql_cast_decimal_expr value name dimensions)
 		"NUMERIC" (tsql_cast_decimal_expr value name dimensions)
 		"BINARY" (tsql_cast_binary_expr value dimensions true)
@@ -338,26 +385,31 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		"TIME" (tsql_temporal_cast_expr value name 0)
 		_ (error "unsupported conversion to " name)))
 	(list (quote sql_type_expr) formula name nil))))
+(define tsql_decimal_compiler (lambda (type dims) (lambda (infos) (begin
+	(define input (car infos))
+	(define input_type (sql_info_type input))
+	(if (or (sql_numeric_type? input_type)
+		(has? '("NULL" "any" "MONEY" "SMALLMONEY" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT") input_type)) true
+		(error "decimal conversion from " input_type " is not implemented"))
+	(sql_info (list (quote tsql_cast_decimal) (sql_info_formula input) (car dims) (cadr dims)) type nil)))))
 (define tsql_cast_decimal_expr (lambda (value type dimensions) (begin
 	(define dims (tsql_decl_dimensions type dimensions))
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define input (car infos))
-		(define input_type (sql_info_type input))
-		(if (or (sql_numeric_type? input_type)
-			(has? '("NULL" "any" "MONEY" "SMALLMONEY" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT") input_type)) true
-			(error "decimal conversion from " input_type " is not implemented"))
-		(sql_info (list (quote tsql_cast_decimal) (sql_info_formula input) (car dims) (cadr dims)) type nil))) value))))
+	(list (quote sql_compile_expr) (list (quote tsql_decimal_compiler) type (list (quote quote) dims)) value))))
+(define tsql_binary_compiler (lambda (length fixed) (lambda (infos) (begin
+	(define input (car infos))
+	(define width (tsql_integer_width (sql_info_type input)))
+	/* Text requires its declared encoding; other numeric contracts retain their
+	explicit unsupported result, independently of the SCM value representation. */
+	(if (or width (tsql_binary_type? (sql_info_type input)) (has? '("NULL" "any") (sql_info_type input))) true
+		(error "binary conversion from " (sql_info_type input) " is not implemented"))
+	(sql_info (if width
+		(list (quote tsql_integer_to_binary) (sql_info_formula input) width length fixed)
+		(list (quote tsql_cast_binary) (sql_info_formula input) length fixed))
+		(if fixed "BINARY" "VARBINARY") nil)))))
 (define tsql_cast_binary_expr (lambda (value dimensions fixed) (begin
 	(define length (car (tsql_decl_dimensions (if fixed "BINARY" "VARBINARY")
 		(if (empty_list? dimensions) '(30) dimensions))))
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define input (car infos))
-		/* Text requires its declared encoding, and numeric values have another
-		padding direction. Refuse those shapes rather than guess from strings. */
-		(if (or (tsql_binary_type? (sql_info_type input)) (has? '("NULL" "any") (sql_info_type input))) true
-			(error "binary conversion from " (sql_info_type input) " is not implemented"))
-		(sql_info (list (quote tsql_cast_binary) (sql_info_formula input) length fixed)
-			(if fixed "BINARY" "VARBINARY") nil))) value))))
+	(list (quote sql_compile_expr) (list (quote tsql_binary_compiler) length fixed) value))))
 /* Assignment contracts come from native column declarations at compile time.
 Integer narrowing is an ordinary frontend cast. Existing native decimal scale
 normalization remains in use; this guard rejects overflow, including carry from
@@ -379,7 +431,7 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 			(define scale (if (< (count dimensions) 2) 0 (cadr dimensions)))
 			(define threshold (- (simplify (concat "1e" (- precision scale)))
 				(* 0.5 (simplify (concat "1e-" scale)))))
-			(list (quote sql_type_expr) (list tsql_assignment_decimal value threshold) type nil))
+			(list (quote sql_type_expr) (list (quote tsql_assignment_decimal) value threshold) type nil))
 		value))))
 /* DEFAULT is frontend syntax for the existing column declaration. Share this
 translation between explicit INSERT cells and UPDATE assignments; omitted
@@ -418,40 +470,42 @@ recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. 
 	(map columns (lambda (name) (begin
 		(define declaration (tsql_target_column_declaration database table_name name planning_session))
 		(if (nil? declaration) (error "unknown INSERT column: " name) declaration)))))))
+(define tsql_text_compiler (lambda (length national fixed) (lambda (infos) (begin
+	(define info (car infos))
+	(define source (sql_info_type info))
+	(define formula (if (tsql_temporal_type? source)
+		(list format_date (tsql_calendar_difference_formula info)
+			(match source "DATE" "%Y-%m-%d" "TIME" "%H:%i:%s"
+				"DATETIME2" "%Y-%m-%d %H:%i:%s.000" _ "%Y-%m-%d %H:%i:%s"))
+		(sql_info_formula info)))
+	(if (and (plain_literal_expr? formula) (sql_numeric_type? (sql_info_type info))
+		(not (equal? length -1)) (> (strlen (string formula)) length))
+		(error "numeric character conversion overflow") true)
+	(sql_info (list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national)
+		(if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR")
+		(sql_info_collation info))))))
 (define tsql_cast_text_expr (lambda (value dimensions national fixed) (begin
 	/* Resolve the operand at the shared compile boundary, where its sources
 	and SQL contract are known. A parser-local walk would lose column types. */
 	(define length (if (empty_list? dimensions) 30 (car dimensions)))
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define info (car infos))
-		(define source (sql_info_type info))
-		(define formula (if (tsql_temporal_type? source)
-			(list format_date (tsql_calendar_difference_formula info)
-				(match source "DATE" "%Y-%m-%d" "TIME" "%H:%i:%s"
-					"DATETIME2" "%Y-%m-%d %H:%i:%s.000" _ "%Y-%m-%d %H:%i:%s"))
-			(sql_info_formula info)))
-		(if (and (plain_literal_expr? formula) (sql_numeric_type? (sql_info_type info))
-			(not (equal? length -1)) (> (strlen (string formula)) length))
-			(error "numeric character conversion overflow") true)
-		(sql_info (list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national)
-			(if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR")
-			(sql_info_collation info)))) value))))
+	(list (quote sql_compile_expr) (list (quote tsql_text_compiler) length national fixed) value))))
 /* The default character contract is NCHAR(1), without a supplementary-character
 collation. SQL conversion and range decisions stay here; the runtime operator
 only encodes Unicode scalars. Isolated surrogate code units are unsupported. */
 (define tsql_nchar (lambda (value round_input) (if (nil? value) nil (begin
 	(define code (tsql_cast_integer (if round_input (round value) value) -2147483648 2147483647))
 	(if (or (< code 0) (> code 65535)) nil (unicode_char code))))))
+(define tsql_compile_nchar (lambda (infos) (begin
+	(define info (car infos))
+	(define type (tsql_addition_type (sql_info_type info)))
+	/* Implicit INT conversion is a SQL decision. Money rounds; other numeric
+	inputs truncate. Temporal carriers never become integer codes. */
+	(if (has? '("NULL" "BIT" "TINYINT" "SMALLINT" "INT" "BIGINT" "REAL" "FLOAT"
+		"DECIMAL" "MONEY" "SMALLMONEY" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type) true
+		(error "NCHAR requires an implicitly convertible integer expression"))
+	(sql_info (list tsql_nchar (sql_info_formula info) (has? '("MONEY" "SMALLMONEY") type)) "NCHAR" nil))))
 (define tsql_nchar_expr (lambda (value)
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define info (car infos))
-		(define type (tsql_addition_type (sql_info_type info)))
-		/* Implicit INT conversion is a SQL decision. Money rounds; other numeric
-		inputs truncate. Temporal carriers never become integer codes. */
-		(if (has? '("NULL" "BIT" "TINYINT" "SMALLINT" "INT" "BIGINT" "REAL" "FLOAT"
-			"DECIMAL" "MONEY" "SMALLMONEY" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type) true
-			(error "NCHAR requires an implicitly convertible integer expression"))
-		(sql_info (list tsql_nchar (sql_info_formula info) (has? '("MONEY" "SMALLMONEY") type)) "NCHAR" nil))) value)))
+	(list (quote sql_compile_expr) (quote tsql_compile_nchar) value)))
 /* Export-style day/month/year spelling is a frontend concern. Parse into Unix
 seconds with the existing date primitives; no temporal runtime type is added.
 Two-digit years use the default 1950..2049 window. Fractional precision and the
@@ -470,6 +524,11 @@ configurable cutoff remain separate compatibility work. */
 		(concat (if (< hour 10) "0" "") hour (substr clock 2 6))) clock))
 	(define parsed (str_to_date (concat date " " clock) "%Y-%m-%d %H:%i:%s"))
 	(if (nil? parsed) (error "invalid datetime value") (unix_timestamp parsed))))))
+(define tsql_styled_text_compiler (lambda (pattern type dimensions) (lambda (infos) (begin
+	(define input (car infos))
+	(define formula (list format_date (tsql_calendar_difference_formula input) pattern))
+	(sql_info (list (if (has? '("CHAR" "NCHAR") type) tsql_cast_fixed_text tsql_cast_text)
+		formula (if (empty_list? dimensions) 30 (car dimensions)) (has? '("NVARCHAR" "NCHAR") type)) type nil)))))
 (define tsql_convert_expr (lambda (value type dimensions style) (begin
 	(tsql_decl_dimensions type dimensions)
 	(match style
@@ -479,11 +538,7 @@ configurable cutoff remain separate compatibility work. */
 			(has? '("VARCHAR" "NVARCHAR" "CHAR" "NCHAR") type)
 			(begin
 				(define pattern (tsql_temporal_style_pattern style true))
-				(list (quote sql_compile_expr) (lambda (infos) (begin
-					(define input (car infos))
-					(define formula (list format_date (tsql_calendar_difference_formula input) pattern))
-					(sql_info (list (if (has? '("CHAR" "NCHAR") type) tsql_cast_fixed_text tsql_cast_text)
-						formula (if (empty_list? dimensions) 30 (car dimensions)) (has? '("NVARCHAR" "NCHAR") type)) type nil))) value)))
+				(list (quote sql_compile_expr) (list (quote tsql_styled_text_compiler) pattern type (list (quote quote) dimensions)) value)))
 		(error "unsupported CONVERT style for " type)))))
 /* Aggregate contracts come from SQL syntax and the declared input type.
 The native reducers do not determine the frontend's SQL result contract. */
@@ -504,24 +559,26 @@ The native reducers do not determine the frontend's SQL result contract. */
 	(sql_info (if (and (equal? name "AVG") (has? '("INT" "BIGINT") type))
 		(sql_type_formula '() (tsql_cast_expr formula type '())) formula) type
 		(if (sql_text_type? type) collation nil))))
+(define tsql_aggregate_compiler (lambda (name) (lambda (infos)
+	(tsql_aggregate_result name (sql_info_formula (car infos))
+		(tsql_aggregate_type name (sql_info_type (cadr infos)))
+		(sql_info_collation (cadr infos))))))
 (define tsql_aggregate_expr (lambda (name formula value)
-	(list (quote sql_compile_expr) (lambda (infos)
-		(tsql_aggregate_result name (sql_info_formula (car infos))
-			(tsql_aggregate_type name (sql_info_type (cadr infos)))
-			(sql_info_collation (cadr infos)))) formula value)))
+	(list (quote sql_compile_expr) (list (quote tsql_aggregate_compiler) name) formula value)))
 /* Preserve the native window AST for logical stage construction. Its result
 contract is compiled from resolved input triples, never from an empty scope. */
+(define tsql_window_compiler (lambda (name has_input) (lambda (infos) (begin
+	(define input_type (if (not has_input) "any" (sql_info_type (cadr infos))))
+	(define type (tsql_aggregate_type name input_type))
+	(define formula (match (sql_info_formula (car infos))
+		((symbol window_func) function _arguments specification)
+		(list (quote window_func) function (map (cdr infos) sql_info_formula) specification)
+		_ (sql_info_formula (car infos))))
+	(tsql_aggregate_result name formula type
+		(if (not has_input) nil (sql_info_collation (cadr infos))))))))
 (define tsql_window_expr (lambda (name args over)
 	(cons (quote sql_compile_expr)
-		(cons (lambda (infos) (begin
-			(define input_type (if (empty_list? args) "any" (sql_info_type (cadr infos))))
-			(define type (tsql_aggregate_type name input_type))
-			(define formula (match (sql_info_formula (car infos))
-				((symbol window_func) function _arguments specification)
-				(list (quote window_func) function (map (cdr infos) sql_info_formula) specification)
-				_ (sql_info_formula (car infos))))
-			(tsql_aggregate_result name formula type
-				(if (empty_list? args) nil (sql_info_collation (cadr infos))))))
+		(cons (list (quote tsql_window_compiler) name (not (empty_list? args)))
 			(cons (list (quote window_func) name args over) args)))))
 /* Calendar units are syntax, resolved once by the frontend. DATEDIFF counts
 crossed boundaries rather than complete elapsed intervals. Native date/Unix
@@ -650,59 +707,62 @@ is available; accepting them here would silently lose the user's value. */
 (define tsql_calendar_cast_text (lambda (value) (if (nil? value) nil (begin
 	(if (regexp_test value "[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]*[1-9]")
 		(error "fractional temporal conversion is not implemented") value)))))
+(define tsql_temporal_compiler (lambda (target style) (lambda (infos) (begin
+	(define input (car infos))
+	(define source (sql_info_type input))
+	(define input (if (and (sql_text_type? source) (not (equal? target "DATE")))
+		(sql_info (list tsql_calendar_cast_text (sql_info_formula input)) source (sql_info_collation input)) input))
+	(if (and (sql_numeric_type? source) (not (has? '("DATETIME" "SMALLDATETIME") target)))
+		(error "numeric input is not convertible to " target) true)
+	(if (and (not (equal? style 0)) (not (equal? style 4)))
+		(tsql_temporal_style_pattern style false) true)
+	(define formula (if (and (sql_text_type? source) (not (equal? style 0)))
+		(if (equal? style 4) (list tsql_calendar_shift_seconds (parse_date "1970-01-01")
+			(list tsql_export_datetime_seconds (sql_info_formula input)))
+			(list tsql_temporal_style_text (sql_info_formula input) style))
+		(tsql_calendar_difference_formula input)))
+	(define converted (match target
+		"DATE" (list tsql_calendar_range (list date_trunc_day formula) -62135596800)
+		"TIME" (list tsql_calendar_time_only formula)
+		"SMALLDATETIME" (list tsql_calendar_small_datetime formula)
+		_ (list tsql_calendar_range formula (if (equal? target "DATETIME") -6847804800 -62135596800))))
+	(sql_info converted target nil)))))
 (define tsql_temporal_cast_expr (lambda (value target style)
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define input (car infos))
-		(define source (sql_info_type input))
-		(define input (if (and (sql_text_type? source) (not (equal? target "DATE")))
-			(sql_info (list tsql_calendar_cast_text (sql_info_formula input)) source (sql_info_collation input)) input))
-		(if (and (sql_numeric_type? source) (not (has? '("DATETIME" "SMALLDATETIME") target)))
-			(error "numeric input is not convertible to " target) true)
-		(if (and (not (equal? style 0)) (not (equal? style 4)))
-			(tsql_temporal_style_pattern style false) true)
-		(define formula (if (and (sql_text_type? source) (not (equal? style 0)))
-			(if (equal? style 4) (list tsql_calendar_shift_seconds (parse_date "1970-01-01")
-				(list tsql_export_datetime_seconds (sql_info_formula input)))
-				(list tsql_temporal_style_text (sql_info_formula input) style))
-			(tsql_calendar_difference_formula input)))
-		(define converted (match target
-			"DATE" (list tsql_calendar_range (list date_trunc_day formula) -62135596800)
-			"TIME" (list tsql_calendar_time_only formula)
-			"SMALLDATETIME" (list tsql_calendar_small_datetime formula)
-			_ (list tsql_calendar_range formula (if (equal? target "DATETIME") -6847804800 -62135596800))))
-		(sql_info converted target nil))) value)))
+	(list (quote sql_compile_expr) (list (quote tsql_temporal_compiler) target style) value)))
+(define tsql_dateadd_compiler (lambda (unit months seconds) (lambda (infos) (begin
+	(define input (cadr infos))
+	(define input_type (sql_info_type input))
+	(define amount_info (car infos))
+	(if (or (equal? (sql_info_type amount_info) "NULL") (sql_numeric_type? (sql_info_type amount_info))) true
+		(error "DATEADD requires a declared numeric interval"))
+	(if (and (equal? input_type "DATE") (has? '("hour" "minute" "second") unit))
+		(error "clock interval is not supported for DATE") true)
+	(if (and (equal? input_type "TIME") (not (has? '("hour" "minute" "second") unit)))
+		(error "calendar interval is not supported for TIME") true)
+	(define type (if (tsql_temporal_type? input_type) input_type "DATETIME"))
+	(define minimum (if (equal? type "DATETIME") -6847804800 -62135596800))
+	(define integer (list (quote tsql_cast_integer) (sql_info_formula amount_info) -2147483648 2147483647))
+	(define formula (list (if months tsql_calendar_shift_months tsql_calendar_shift_seconds)
+		(tsql_calendar_difference_formula input)
+		(list (quote *) integer (coalesceNil months seconds))))
+	(sql_info (match type
+		"TIME" (list tsql_calendar_time_only formula)
+		"SMALLDATETIME" (list tsql_calendar_small_datetime formula)
+		_ (list tsql_calendar_range formula minimum)) type nil)))))
 (define tsql_dateadd_expr (lambda (unit amount value) (begin
 	(define unit (tsql_calendar_unit unit))
 	(if (equal? unit "iso_week") (error "DATEADD does not support ISO week") true)
 	(define months (match unit "year" 12 "quarter" 3 "month" 1 _ nil))
 	(define seconds (match unit "second" 1 "minute" 60 "hour" 3600 "week" 604800 _ 86400))
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define input (cadr infos))
-		(define input_type (sql_info_type input))
-		(define amount_info (car infos))
-		(if (or (equal? (sql_info_type amount_info) "NULL") (sql_numeric_type? (sql_info_type amount_info))) true
-			(error "DATEADD requires a declared numeric interval"))
-		(if (and (equal? input_type "DATE") (has? '("hour" "minute" "second") unit))
-			(error "clock interval is not supported for DATE") true)
-		(if (and (equal? input_type "TIME") (not (has? '("hour" "minute" "second") unit)))
-			(error "calendar interval is not supported for TIME") true)
-		(define type (if (tsql_temporal_type? input_type) input_type "DATETIME"))
-		(define minimum (if (equal? type "DATETIME") -6847804800 -62135596800))
-		(define integer (list tsql_cast_integer (sql_info_formula amount_info) -2147483648 2147483647))
-		(define formula (list (if months tsql_calendar_shift_months tsql_calendar_shift_seconds)
-			(tsql_calendar_difference_formula input)
-			(list (quote *) integer (coalesceNil months seconds))))
-		(sql_info (match type
-			"TIME" (list tsql_calendar_time_only formula)
-			"SMALLDATETIME" (list tsql_calendar_small_datetime formula)
-			_ (list tsql_calendar_range formula minimum)) type nil))) amount value))))
+	(list (quote sql_compile_expr) (list (quote tsql_dateadd_compiler) unit months seconds) amount value))))
 (define tsql_calendar_difference_formula (lambda (info)
 	(if (equal? (sql_info_type info) "TIME") (list tsql_calendar_text (sql_info_formula info))
 		(tsql_calendar_formula info))))
+(define tsql_calendar_scalar_compiler (lambda (unit) (lambda (infos)
+	(sql_info (list (match unit "year" (sql_builtins "YEAR") "month" (sql_builtins "MONTH") _ (sql_builtins "DAY"))
+		(tsql_calendar_difference_formula (car infos))) "INT" nil))))
 (define tsql_calendar_scalar_expr (lambda (unit value)
-	(list (quote sql_compile_expr) (lambda (infos)
-		(sql_info (list (match unit "year" (sql_builtins "YEAR") "month" (sql_builtins "MONTH") _ (sql_builtins "DAY"))
-			(tsql_calendar_difference_formula (car infos))) "INT" nil)) value)))
+	(list (quote sql_compile_expr) (list (quote tsql_calendar_scalar_compiler) unit) value)))
 (define tsql_calendar_unavailable_part (lambda (value)
 	(if (nil? value) nil (error "calendar date part is not available for declared TIME"))))
 (define tsql_calendar_part_formula (lambda (unit info)
@@ -710,30 +770,33 @@ is available; accepting them here would silently lose the user's value. */
 		(if (has? '("hour" "minute" "second") unit) (tsql_calendar_difference_formula info)
 			(list tsql_calendar_unavailable_part (sql_info_formula info)))
 		(tsql_calendar_formula info))))
-(define tsql_datediff_expr (lambda (unit first last type) (begin
-	(define unit (tsql_calendar_unit unit))
-	(if (equal? unit "iso_week") (error "DATEDIFF does not support ISO week") true)
+(define tsql_datediff_compiler (lambda (unit type) (begin
 	(define boundary (tsql_boundary_calculator unit))
 	(define minimum (if (equal? type "INT") -2147483648 (tsql_parse_integer "-9223372036854775808")))
 	(define maximum (if (equal? type "INT") 2147483647 (tsql_parse_integer "9223372036854775807")))
-	(list (quote sql_compile_expr) (lambda (infos) (begin
+	(lambda (infos) (begin
 		(define difference (list (quote -)
 			(list boundary (tsql_calendar_difference_formula (cadr infos)))
 			(list boundary (tsql_calendar_difference_formula (car infos)))))
-		(sql_info (list tsql_cast_integer difference minimum maximum) type nil))) first last))))
-(define tsql_datepart_expr (lambda (unit value) (begin
+		(sql_info (list (quote tsql_cast_integer) difference minimum maximum) type nil))))))
+(define tsql_datediff_expr (lambda (unit first last type) (begin
 	(define unit (tsql_calendar_unit unit))
+	(if (equal? unit "iso_week") (error "DATEDIFF does not support ISO week") true)
+	(list (quote sql_compile_expr) (list (quote tsql_datediff_compiler) unit type) first last))))
+(define tsql_datepart_compiler (lambda (unit) (begin
 	(define part (match unit
 		"year" (sql_builtins "YEAR") "quarter" (sql_builtins "QUARTER") "month" (sql_builtins "MONTH")
 		"day" (sql_builtins "DAY") "dayofyear" tsql_calendar_day_of_year "hour" (sql_builtins "HOUR")
 		"minute" (sql_builtins "MINUTE") "second" (sql_builtins "SECOND")
 		"weekday" tsql_calendar_weekday "week" tsql_calendar_week "iso_week" tsql_calendar_iso_week))
-	(if (has? '("week" "weekday") unit)
-		(list (quote sql_compile_expr) (lambda (infos)
-			(sql_info (list part (tsql_calendar_part_formula unit (car infos))
-				(list tsql_datefirst_value (sql_info_formula (cadr infos)))) "INT" nil)) value (tsql_datefirst_expr))
-		(list (quote sql_compile_expr) (lambda (infos)
-			(sql_info (list part (tsql_calendar_part_formula unit (car infos))) "INT" nil)) value)))))
+	(lambda (infos) (sql_info
+		(merge (list (list part (tsql_calendar_part_formula unit (car infos)))
+			(if (has? '("week" "weekday") unit)
+				(list (list tsql_datefirst_value (sql_info_formula (cadr infos)))) '()))) "INT" nil)))))
+(define tsql_datepart_expr (lambda (unit value) (begin
+	(define unit (tsql_calendar_unit unit))
+	(merge (list (list (quote sql_compile_expr) (list (quote tsql_datepart_compiler) unit) value)
+		(if (has? '("week" "weekday") unit) (list (tsql_datefirst_expr)) '()))))))
 
 
 /* Calendar constructors compile their input contracts once and use the same
@@ -753,43 +816,47 @@ native date value as columns and ordinary calendar arithmetic. */
 			(intdiv (- month 1) 1) "MONTH"))
 		(define value (date_add first (intdiv (- day 1) 1) "DAY"))
 		(if (equal? (extract_date value "MONTH") month) value (error "invalid date constructor value"))))))
+(define tsql_compile_datefromparts (lambda (infos)
+	(sql_info (cons tsql_calendar_from_parts (map infos tsql_calendar_integer_formula)) "DATE" nil)))
 (define tsql_datefromparts_expr (lambda (year month day)
-	(list (quote sql_compile_expr) (lambda (infos)
-		(sql_info (cons tsql_calendar_from_parts (map infos tsql_calendar_integer_formula)) "DATE" nil)) year month day)))
+	(list (quote sql_compile_expr) (quote tsql_compile_datefromparts) year month day)))
 (define tsql_calendar_month_end (lambda (value amount)
 	(if (or (nil? value) (nil? amount)) nil (begin
 		(define shifted (tsql_calendar_shift_months value amount))
 		(define first (date_add (date_trunc_day shifted) (intdiv (- 1 (extract_date shifted "DAY")) 1) "DAY"))
 		(tsql_calendar_range (date_add (date_add first 1 "MONTH") -1 "DAY") -62135596800)))))
+(define tsql_compile_eomonth (lambda (infos)
+	(sql_info (list tsql_calendar_month_end (tsql_calendar_formula (car infos))
+		(tsql_calendar_integer_formula (cadr infos))) "DATE" nil)))
 (define tsql_eomonth_expr (lambda (value amount)
-	(list (quote sql_compile_expr) (lambda (infos)
-		(sql_info (list tsql_calendar_month_end (tsql_calendar_formula (car infos))
-			(tsql_calendar_integer_formula (cadr infos))) "DATE" nil)) value amount)))
+	(list (quote sql_compile_expr) (quote tsql_compile_eomonth) value amount)))
 
 (define tsql_numeric_operand_type? (lambda (type)
 	(or (has? '("NULL" "any" "MONEY" "SMALLMONEY") type)
 		(and (sql_numeric_type? type) (not (has? '("BOOLEAN" "BOOL" "BIT") type))))))
+(define tsql_compile_positive (lambda (infos) (begin
+	(define info (car infos))
+	(if (tsql_numeric_operand_type? (sql_info_type info)) info
+		(error "unary plus requires a numeric operand")))))
 (define tsql_positive_expr (lambda (value)
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define info (car infos))
-		(if (tsql_numeric_operand_type? (sql_info_type info)) info
-			(error "unary plus requires a numeric operand")))) value)))
+	(list (quote sql_compile_expr) (quote tsql_compile_positive) value)))
+(define tsql_compile_negate (lambda (infos) (begin
+	(define info (car infos))
+	(define formula (sql_info_formula info))
+	(define type (sql_info_type info))
+	/* Diagnose constant conversion overflow using the declared range.
+	Column-bearing operands are resolved by the shared compiler first. */
+	(match formula
+		'(conversion operand minimum maximum)
+		(if (and (or (equal? conversion (quote tsql_cast_integer)) (equal? conversion tsql_cast_integer)) (plain_literal_expr? operand)
+			(< minimum 0) (equal? (tsql_cast_integer operand minimum maximum) minimum))
+			(error "unary integer conversion overflow") true)
+		_ true)
+	(if (tsql_numeric_operand_type? type) true
+		(error "unary minus requires a numeric operand"))
+	(sql_info (list (quote -) 0 formula) (if (equal? type "TINYINT") "SMALLINT" type) nil))))
 (define tsql_negate_expr (lambda (value)
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define info (car infos))
-		(define formula (sql_info_formula info))
-		(define type (sql_info_type info))
-		/* Diagnose constant conversion overflow using the declared range.
-		Column-bearing operands are resolved by the shared compiler first. */
-		(match formula
-			'(conversion operand minimum maximum)
-			(if (and (equal? conversion tsql_cast_integer) (plain_literal_expr? operand)
-				(< minimum 0) (equal? (tsql_cast_integer operand minimum maximum) minimum))
-				(error "unary integer conversion overflow") true)
-			_ true)
-		(if (tsql_numeric_operand_type? type) true
-			(error "unary minus requires a numeric operand"))
-		(sql_info (list (quote -) 0 formula) (if (equal? type "TINYINT") "SMALLINT" type) nil))) value)))
+	(list (quote sql_compile_expr) (quote tsql_compile_negate) value)))
 (define tsql_key_placement (parser (? (or (atom "CLUSTERED" true) (atom "NONCLUSTERED" true)))))
 (define tsql_key_columns (parser (define columns (+ (parser '(
 	(define name tsql_identifier) (? (or (atom "ASC" true) (atom "DESC" true)))) name) ",")) columns))
@@ -1057,7 +1124,7 @@ Only the selected native operation survives the shared compile boundary. */
 		(if numeric nil (reduce infos (lambda (collation info)
 			(sql_merge_collation collation (sql_info_collation info))) nil))))))
 (define tsql_add_expr (lambda (left right)
-	(list (quote sql_compile_expr) tsql_compile_addition left right)))
+	(list (quote sql_compile_expr) (quote tsql_compile_addition) left right)))
 (define tsql_raise_error (lambda (number message state)
 	(error (list "tsql-error" number message state))))
 (define tsql_integer_divide (lambda (left right)
@@ -1070,33 +1137,62 @@ Only the selected native operation survives the shared compile boundary. */
 	(if (or (nil? left) (nil? right)) nil
 		(equal? right 0) (tsql_raise_error 8134 "division by zero" 1)
 		(/ left right))))
+(define tsql_compile_divide (lambda (infos) (begin
+	(define types (map infos (lambda (info) (tsql_addition_type (sql_info_type info)))))
+	(define active (filter types (lambda (type) (not (equal? type "NULL")))))
+	(define target (if (empty_list? active) "INT"
+		(find tsql_addition_numeric_types (lambda (type) (has? active type)) nil)))
+	(if (or (nil? target) (equal? target "BIT")
+		(not (reduce active (lambda (valid type) (and valid
+			(or (has? tsql_addition_numeric_types type) (has? tsql_addition_text_types type)))) true)))
+		(error "unsupported SQL operands for /") true)
+	(define integer (has? '("BIGINT" "INT" "SMALLINT" "TINYINT") target))
+	(define operands (map infos (lambda (info)
+		(if (has? tsql_addition_text_types (tsql_addition_type (sql_info_type info)))
+			(sql_type_formula '() (tsql_cast_expr (sql_info_formula info)
+				(if integer target "FLOAT") '())) (sql_info_formula info)))))
+	(define formula (cons (if integer (quote tsql_integer_divide) (quote tsql_fractional_divide)) operands))
+	(sql_info (if integer (sql_type_formula '() (tsql_cast_expr formula target '())) formula) target nil))))
 (define tsql_divide_expr (lambda (left right)
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define types (map infos (lambda (info) (tsql_addition_type (sql_info_type info)))))
-		(define active (filter types (lambda (type) (not (equal? type "NULL")))))
-		(define target (if (empty_list? active) "INT"
-			(find tsql_addition_numeric_types (lambda (type) (has? active type)) nil)))
-		(if (or (nil? target) (equal? target "BIT")
-			(not (reduce active (lambda (valid type) (and valid
-				(or (has? tsql_addition_numeric_types type) (has? tsql_addition_text_types type)))) true)))
-			(error "unsupported SQL operands for /") true)
-		(define integer (has? '("BIGINT" "INT" "SMALLINT" "TINYINT") target))
-		(define operands (map infos (lambda (info)
-			(if (has? tsql_addition_text_types (tsql_addition_type (sql_info_type info)))
-				(sql_type_formula '() (tsql_cast_expr (sql_info_formula info)
-					(if integer target "FLOAT") '())) (sql_info_formula info)))))
-		(define formula (cons (if integer (quote tsql_integer_divide) (quote tsql_fractional_divide)) operands))
-		(sql_info (if integer (sql_type_formula '() (tsql_cast_expr formula target '())) formula) target nil))) left right)))
+	(list (quote sql_compile_expr) (quote tsql_compile_divide) left right)))
 (define tsql_fold_multiplicative (lambda (acc term) (match term
 	'("divide" value) (tsql_divide_expr acc value)
 	_ (sql_fold_multiplicative_term acc term))))
 (define tsql_fold_additive (lambda (acc term) (match term
 	'("add" value) (tsql_add_expr acc value)
 	_ (sql_fold_additive_term acc term))))
-/* NULL fallback has the same declared precedence as other T-SQL expressions.
-The shared lazy coalesce operator remains responsible for evaluation; this
-callback consumes SQL triples and leaves only converted formulas in the plan.
-Dimension merging and exact decimal precision are separate frontend work. */
+/* Implicit conversions consume declared contracts, including BIT's Boolean
+carrier. Width/scale are not reconstructed from runtime values; unresolved
+character dimensions retain the existing unbounded text conversion contract. */
+(define tsql_convert_value_info (lambda (info type collation) (begin
+	(define source (tsql_addition_type (sql_info_type info)))
+	(define target (tsql_addition_type type))
+	(define formula (sql_info_formula info))
+	(define formula (if (and (equal? source "BIT") (not (equal? target "BIT")))
+		(list (quote match) formula (quote nil) nil (quote true) 1 (quote false) 0) formula))
+	/* Monetary source declarations round when converted to integers; other
+	numerics truncate. MATCH preserves NULL and evaluates the source once. */
+	(define formula (if (and (has? '("MONEY" "SMALLMONEY") source)
+		(has? '("BIGINT" "INT" "SMALLINT" "TINYINT") target))
+		(list (quote match) formula (quote nil) nil (quote value) (list (quote round) (quote value))) formula))
+	(define typed (list (quote sql_type_expr) formula
+		(if (equal? source "BIT") "INT" (sql_info_type info)) (sql_info_collation info)))
+	(define converted (if (or (equal? source "NULL") (equal? source target)) formula
+		(and (has? tsql_addition_text_types target) (has? tsql_addition_text_types source)) formula
+		(and (has? tsql_addition_text_types target) (has? tsql_addition_numeric_types source))
+		(list (quote tsql_cast_text) formula -1 (has? '("NVARCHAR" "NCHAR") target))
+		(and (has? tsql_addition_numeric_types target)
+			(or (has? tsql_addition_numeric_types source) (has? tsql_addition_text_types source)
+				/* The existing integer cast selects byte decoding from the SQL
+				declaration; the same payload declared as text remains decimal text. */
+				(and (has? '("BINARY" "VARBINARY") source) (tsql_integer_width target))))
+		(if (has? '("DECIMAL" "MONEY" "SMALLMONEY") target)
+			(list (quote tsql_cast_float) formula)
+			(sql_type_lower_annotations (tsql_cast_expr typed target '())))
+		(tsql_temporal_type? target)
+		(sql_type_lower_annotations (tsql_cast_expr typed target '()))
+		(error "unsupported implicit conversion from " source " to " target)))
+	(sql_info converted type collation))))
 /* A common SQL contract for bounded syntax values. This is compile-time
 metadata, shared by COALESCE and inline row constructors. It neither samples
 runtime values nor stores a second relational representation. */
@@ -1112,24 +1208,95 @@ runtime values nor stores a second relational representation. */
 	(define collation (if (has? tsql_addition_text_types target)
 		(reduce infos (lambda (collation info)
 			(sql_merge_collation collation (sql_info_collation info))) nil) nil))
-	(map infos (lambda (info) (begin
-		(define type (tsql_addition_type (sql_info_type info)))
-		(define formula (sql_info_formula info))
-		(define converted (if (or (equal? type "NULL") (equal? type target)) formula
-			(and (has? tsql_addition_numeric_types target)
-				(or (has? tsql_addition_numeric_types type) (has? tsql_addition_text_types type)))
-			(if (has? '("DECIMAL" "MONEY" "SMALLMONEY") target)
-				(list tsql_cast_float formula)
-				(sql_type_lower_annotations (tsql_cast_expr formula target '())))
-			(and (has? tsql_addition_text_types target) (has? tsql_addition_text_types type)) formula
-			(error "unsupported implicit conversion from " type " to " target)))
-		(sql_info converted target collation)))))))
+	(map infos (lambda (info) (tsql_convert_value_info info target collation))))))
+/* NULL fallback has the same declared precedence as other T-SQL expressions.
+The shared lazy coalesce operator remains responsible for evaluation; this
+callback consumes SQL triples and leaves only converted formulas in the plan.
+Dimension merging and exact decimal precision are separate frontend work. */
+(define tsql_compile_coalesce (lambda (infos) (begin
+	(if (< (count infos) 2) (error "COALESCE requires at least two arguments") true)
+	(define converted (tsql_common_value_infos infos nil))
+	(sql_info (cons (quote coalesceNil) (map converted sql_info_formula))
+		(sql_info_type (car converted)) (sql_info_collation (car converted))))))
 (define tsql_coalesce_expr (lambda (arguments)
-	(cons (quote sql_compile_expr) (cons (lambda (infos) (begin
-		(if (< (count infos) 2) (error "COALESCE requires at least two arguments") true)
-		(define converted (tsql_common_value_infos infos nil))
-		(sql_info (cons (quote coalesceNil) (map converted sql_info_formula))
-			(sql_info_type (car converted)) (sql_info_collation (car converted))))) arguments))))
+	(cons (quote sql_compile_expr) (cons (quote tsql_compile_coalesce) arguments))))
+
+/* ISNULL keeps its first declared contract, unlike COALESCE precedence.
+A literal NULL takes the replacement contract; two literal NULLs use INT.
+Only replacement evaluation is lazy, while compatibility is checked for every
+row shape at compilation. Width/scale propagation remains separate work; an
+unknown text width must not silently become CAST's default length of thirty. */
+(define tsql_compile_isnull (lambda (infos) (begin
+	(if (equal? (count infos) 2) true (error "ISNULL requires two arguments"))
+	(define first (car infos))
+	(define replacement (cadr infos))
+	(define contract (if (equal? (sql_info_type first) "NULL") replacement first))
+	(define type (if (equal? (sql_info_type contract) "NULL") "INT" (sql_info_type contract)))
+	(define converted (tsql_convert_value_info replacement type (sql_info_collation contract)))
+	(sql_info (list (quote coalesceNil) (sql_info_formula first) (sql_info_formula converted))
+		type (sql_info_collation contract)))))
+(define tsql_isnull_expr (lambda (arguments)
+	(cons (quote sql_compile_expr) (cons (quote tsql_compile_isnull) arguments))))
+/* NULLIF compares converted declared operands but returns its original first
+contract. Scalar text equality must consume the selected collation explicitly;
+there is no scan-bound operator to supply it for this conditional expression. */
+(define tsql_compile_nullif (lambda (infos) (begin
+	(if (equal? (count infos) 2) true (error "NULLIF requires two arguments"))
+	(define first (car infos))
+	(if (has? '("NULL" "any") (sql_info_type first))
+		(error "NULLIF requires a declared first type") true)
+	(define values (tsql_common_value_infos infos nil))
+	(define first_value (car values))
+	(define collation (if (and (has? tsql_addition_text_types (sql_info_type first_value))
+		(nil? (sql_info_collation first_value))) "utf8mb4_general_ci" (sql_collation_name first_value)))
+	(define comparison (list (quote sql_compare)
+		(sql_info_formula first_value) (sql_info_formula (cadr values))
+		(collate collation false) "equal??"))
+	(sql_info (list (quote if) comparison nil (sql_info_formula first))
+		(sql_info_type first) (sql_info_collation first)))))
+(define tsql_nullif_expr (lambda (arguments)
+	(cons (quote sql_compile_expr) (cons (quote tsql_compile_nullif) arguments))))
+
+/* Conditional value contracts use the same declared precedence as COALESCE.
+Conditions and result values remain visible to the shared binder/decorrelator;
+the compile callback emits one ordinary variadic IF, without a runtime type
+wrapper or a second evaluator. Exact decimal dimensions remain separate work. */
+(define tsql_case_compiler (lambda (size) (lambda (infos) (begin
+	(define predicates (slice infos 0 size))
+	(if (reduce predicates (lambda (valid info)
+		(and valid (equal? (sql_info_type info) "BOOLEAN"))) true)
+		true (error "CASE/IIF requires a Boolean condition"))
+	(define values (tsql_common_value_infos (slice infos size (count infos)) nil))
+	(sql_info (cons (quote if) (append
+		(merge (map (produceN size) (lambda (i)
+			(list (sql_info_formula (nth predicates i)) (sql_info_formula (nth values i))))))
+		(sql_info_formula (nth values size))))
+		(sql_info_type (car values)) (sql_info_collation (car values)))))))
+(define tsql_case_expr (lambda (conditions otherwise) (begin
+	(define size (count conditions))
+	(cons (quote sql_compile_expr) (cons (list (quote tsql_case_compiler) size)
+		(append (merge (list (map conditions car) (map conditions cadr))) otherwise))))))
+/* CHOOSE is a scalar selection, not an eager list of SQL values. Native MATCH
+binds the converted ordinal once and evaluates only its chosen value. SQL
+contracts are resolved for every value before this ordinary expression exists. */
+(define tsql_compile_choose (lambda (infos) (begin
+	(define index_info (car infos))
+	(define index_type (tsql_addition_type (sql_info_type index_info)))
+	(if (or (equal? index_type "NULL") (has? tsql_addition_numeric_types index_type)
+		(has? tsql_addition_text_types index_type)) true
+		(error "CHOOSE requires an implicitly convertible integer index"))
+	(define branches (tsql_common_value_infos (cdr infos) nil))
+	(define ordinal (sql_type_lower_annotations
+		(tsql_cast_expr (if (has? '("MONEY" "SMALLMONEY") index_type)
+			(list (quote round) (sql_info_formula index_info)) (sql_info_formula index_info)) "INT" '())))
+	(sql_info (cons (quote match) (cons ordinal (merge (list
+		(merge (map (produceN (count branches)) (lambda (i)
+			(list (+ i 1) (sql_info_formula (nth branches i))))))
+		(list (quote _) nil)))))
+		(sql_info_type (car branches)) (sql_info_collation (car branches))))))
+(define tsql_choose_expr (lambda (index values)
+	(cons (quote sql_compile_expr) (cons (quote tsql_compile_choose)
+		(cons index values)))))
 
 /* Explicit wire descriptors come from the existing SQL expression metadata,
 never from the first row. Unknown expression types stay text in this first slice. */
@@ -1141,6 +1308,7 @@ dimensions are metadata only and are absent from the executable plan. */
 	((symbol tsql_cast_decimal) _value precision scale) (list precision scale)
 	((symbol tsql_read_identity) _state) '(38 0)
 	((symbol tsql_cast_binary) _value length _fixed) (list length)
+	((symbol tsql_integer_to_binary) _value _width length _fixed) (list length)
 	((symbol tsql_cast_text) _value length _national) (list length)
 	((symbol tsql_cast_fixed_text) _value length _national) (list length)
 	((symbol hex2bin) hex) (if (string? hex) (list (intdiv (strlen hex) 2)) nil)
@@ -1215,7 +1383,20 @@ compiling; the emitted row callback contains no SQL type tags or dispatch. */
 			plan)
 		plan)))
 
+(define tsql_collation_compiler (lambda (name) (lambda (infos) (begin
+	(define info (car infos))
+	(sql_info (sql_info_formula info) (sql_info_type info) (list name 0))))))
+
+(define tsql_builtin_compiler (lambda (name) (lambda (infos)
+	(sql_call_info (coalesce (tsql_builtins name) (error "unknown function " name)) infos))))
+
+(define tsql_builtin_expr (lambda (name arguments) (begin
+	(if (tsql_builtins name) true (error "unknown function " name))
+	(cons (quote sql_compile_expr) (cons (list (quote tsql_builtin_compiler) name) arguments)))))
+
 (define tsql_builtins (lambda (name) (match name
+	/* First-class callers retain lazy fallback; SQL calls use the declared
+	ISNULL compiler contract rather than this scalar operator alias. */
 	"ISNULL" coalesceNil
 	"LEN" (lambda (value) (if (nil? value) nil (strlen (sql_rtrim value))))
 	_ (if (has? '("ABS" "CEILING" "FLOOR" "ROUND" "SQRT" "UPPER" "LOWER" "REPLACE" "SUBSTRING" "CONCAT" "YEAR" "MONTH" "DAY") name)
@@ -1269,6 +1450,25 @@ a separator is recognized only on a physical line containing no SQL text. */
 (define tsql_connection_session (lambda (session)
 	(coalesceNil (session "__tsql_connection_session") session)))
 
+/* Metadata scalars require the current consuming policy. Direct queries pass
+that context explicitly; stored views refuse this scalar before publication. */
+(define tsql_column_length (lambda (database policy relation column)
+	(if (or (nil? relation) (nil? column)) nil (begin
+		(define object ((parser '( (? (define owner tsql_identifier) ".")
+			(define name tsql_identifier)) (list (if (or (nil? owner) (equal?? owner "dbo")) database owner) name)) relation))
+		(define object_schema (car object))
+		(define name (cadr object))
+		(if policy (policy object_schema name false) true)
+		(define handle (table object_schema name))
+		(define declaration (if (nil? handle) nil (show handle "column" column true)))
+		(if (nil? declaration) nil (tsql_declared_byte_length declaration))))))
+
+(define tsql_view_has_metadata_scalar? (lambda (node) (match node
+	((symbol quote) _datum) false
+	(cons (symbol tsql_column_length) _arguments) true
+	(cons _head _tail) (not (nil? (find node tsql_view_has_metadata_scalar? nil)))
+	_ false)))
+
 (define parse_tsql (lambda (database s policy planning_session tx) (begin
 	(define schema database)
 	(define parse_started_ns (nanotime))
@@ -1317,11 +1517,11 @@ a separator is recognized only on a physical line containing no SQL text. */
 
 	(define tsql_expression2 (parser (or
 
-		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub tsql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
+		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub tsql_select) ")") (list (quote not) (tsql_predicate_expr (list (quote inner_select_exists) sub))))
 		(parser '((atom "NOT" true) (define expr tsql_expression2)) '('sql_not expr))
 
-		(parser '((define a tsql_expression3) (atom "IN" true) "(" (define sub tsql_select) ")") '('inner_select_in a sub))
-		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub tsql_select) ")") (list (quote not) (list (quote inner_select_in) a sub)))
+		(parser '((define a tsql_expression3) (atom "IN" true) "(" (define sub tsql_select) ")") (tsql_predicate_expr '('inner_select_in a sub)))
+		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub tsql_select) ")") (list (quote not) (tsql_predicate_expr (list (quote inner_select_in) a sub))))
 
 		(parser '((define a tsql_expression3) (atom "COLLATE" true) (define collation tsql_identifier) "=" (define b tsql_expression2)) '('equal_collate a b collation))
 		(parser '((define a tsql_expression3) (atom "COLLATE" true) (define collation tsql_identifier) "<>" (define b tsql_expression2)) '('notequal_collate a b collation))
@@ -1340,8 +1540,8 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(parser '((define a tsql_expression3) (atom "LIKE" true) (define b tsql_expression2)) '('strlike a b "utf8mb4_general_ci"))
 		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b tsql_expression2)) '('sql_not '('strlike a b "utf8mb4_general_ci")))
 
-		(parser '((define a tsql_expression3) (atom "IN" true) (define b tsql_in_values)) '('sql_in b a))
-		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "IN" true) (define b tsql_in_values)) (list (quote sql_not) (list (quote sql_in) b a)))
+		(parser '((define a tsql_expression3) (atom "IN" true) (define b tsql_in_values)) (tsql_predicate_expr '('sql_in b a)))
+		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "IN" true) (define b tsql_in_values)) (list (quote sql_not) (tsql_predicate_expr (list (quote sql_in) b a))))
 
 		(parser '((define a tsql_expression3) (atom "BETWEEN" true) (define low tsql_expression3) (atom "AND" true) (define high tsql_expression3)) (list (quote and) (list (quote >=) a low) (list (quote <=) a high)))
 		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "BETWEEN" true) (define low tsql_expression3) (atom "AND" true) (define high tsql_expression3)) (list (quote sql_not) (list (quote and) (list (quote >=) a low) (list (quote <=) a high))))
@@ -1369,6 +1569,11 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(parser '("-" (define expr tsql_expression6)) (tsql_negate_expr expr))
 	)))
 
+	/* Both count spellings emit the same native COUNT descriptor. Only the
+	frontend result contract differs; ALL uses its ordinary non-NULL input. */
+	(define tsql_count_type (parser (or (atom "COUNT" true true "INT")
+		(atom "COUNT_BIG" true true "BIGINT"))))
+
 	(define tsql_window_orderby_item (parser '(
 		(define col tsql_expression)
 		(define dir (or
@@ -1385,16 +1590,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 
 	(define column_length_expr (lambda (relation column)
 		(list (quote sql_type_expr)
-			(list (lambda (relation column) (if (or (nil? relation) (nil? column)) nil (begin
-				(define object ((parser '( (? (define owner tsql_identifier) ".")
-					(define name tsql_identifier)) (list (if (or (nil? owner) (equal?? owner "dbo")) database owner) name)) relation))
-				(define object_schema (car object))
-				(define name (cadr object))
-				(if policy (policy object_schema name false) true)
-				(define handle (table object_schema name))
-				(define declaration (if (nil? handle) nil (show handle "column" column true)))
-				(if (nil? declaration) nil (tsql_declared_byte_length declaration))))) relation column)
-			"INT" nil)))
+			(list (quote tsql_column_length) database policy relation column) "INT" nil)))
 
 	(define tsql_expression6 (parser (or
 
@@ -1435,25 +1631,32 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(atom "MONTH" true true "month") (atom "DAY" true true "day")))
 			"(" (define value tsql_expression) ")") (tsql_calendar_scalar_expr unit value))
 
-		(parser '((atom "EXISTS" true) "(" (define sub tsql_select) ")") '('inner_select_exists sub))
+		(parser '((atom "EXISTS" true) "(" (define sub tsql_select) ")") (tsql_predicate_expr '('inner_select_exists sub)))
 
-		(parser '((atom "CASE" true) (define conditions (+ (parser '((atom "WHEN" true) (define a tsql_expression) (atom "THEN" true) (define b tsql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch tsql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
+		(parser '((atom "CASE" true) (define conditions (+ (parser '((atom "WHEN" true) (define a tsql_expression) (atom "THEN" true) (define b tsql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch tsql_expression)) (atom "END" true)) (tsql_case_expr conditions elsebranch))
 
-		(parser '((atom "CASE" true) (define expr tsql_expression) (define conditions (+ (parser '((atom "WHEN" true) (define a tsql_expression) (atom "THEN" true) (define b tsql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch tsql_expression)) (atom "END" true)) (merge '((quote if)) (merge (extract_assoc (merge conditions) (lambda (a b) (list (tsql_comparison_expr "eq" expr a) b)))) '(elsebranch)))
+		(parser '((atom "CASE" true) (define expr tsql_expression) (define conditions (+ (parser '((atom "WHEN" true) (define a tsql_expression) (atom "THEN" true) (define b tsql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch tsql_expression)) (atom "END" true)) (tsql_case_expr (map conditions (lambda (condition)
+			(list (tsql_comparison_expr "eq" expr (car condition)) (cadr condition)))) elsebranch))
 
-		(parser '((atom "COUNT" true) "(" "*" ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "COUNT" (list) _over))
-		(parser '((atom "COUNT" true) "(" (define e tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "COUNT" (list e) _over))
+		(parser '((atom "IIF" true) "(" (define condition tsql_expression) ","
+			(define yes tsql_expression) "," (define no tsql_expression) ")")
+			(tsql_case_expr (list (list condition yes)) no))
+		(parser '((atom "CHOOSE" true) "(" (define index tsql_expression) ","
+			(define values (+ tsql_expression ",")) ")") (tsql_choose_expr index values))
+
+		(parser '((define count_type tsql_count_type) "(" "*" ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (list (quote sql_type_expr) (tsql_window_expr "COUNT" (list) _over) count_type nil))
+		(parser '((define count_type tsql_count_type) "(" (? (atom "ALL" true)) (define e tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (list (quote sql_type_expr) (tsql_window_expr "COUNT" (list e) _over) count_type nil))
 		(parser '((atom "SUM" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "SUM" (list s) _over))
 		(parser '((atom "AVG" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "AVG" (list s) _over))
 		(parser '((atom "MIN" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "MIN" (list s) _over))
 		(parser '((atom "MAX" true) "(" (define s tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr "MAX" (list s) _over))
 
-		(parser '((atom "COUNT" true) "(" (atom "DISTINCT" true) (define e tsql_expression) ")")
-			'('sql_type_expr '('count_distinct e) "INT" nil))
-		(parser '((atom "COUNT" true) "(" "*" ")")
-			'('sql_type_expr '((quote aggregate) 1 (quote +) 0) "INT" nil))
-		(parser '((atom "COUNT" true) "(" (define e tsql_expression) ")")
-			'('sql_type_expr '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0) "INT" nil))
+		(parser '((define count_type tsql_count_type) "(" (atom "DISTINCT" true) (define e tsql_expression) ")")
+			'('sql_type_expr '('count_distinct e) count_type nil))
+		(parser '((define count_type tsql_count_type) "(" "*" ")")
+			'('sql_type_expr '((quote aggregate) 1 (quote +) 0) count_type nil))
+		(parser '((define count_type tsql_count_type) "(" (? (atom "ALL" true)) (define e tsql_expression) ")")
+			'('sql_type_expr '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0) count_type nil))
 		(parser '((atom "SUM" true) "(" (define s tsql_expression) ")") (begin (define d (sql_aggregates "SUM")) (tsql_aggregate_expr "SUM" '('aggregate s (car d) (cadr d)) s)))
 		(parser '((atom "AVG" true) "(" (define s tsql_expression) ")")
 			(tsql_aggregate_expr "AVG" (sql_avg_expr s (sql_aggregates "SUM") (sql_aggregates "COUNT")) s))
@@ -1474,7 +1677,8 @@ a separator is recognized only on a physical line containing no SQL text. */
 
 		(parser '((atom "COALESCE" true) "(" (define args (* tsql_expression ",")) ")") (tsql_coalesce_expr args))
 
-		(parser '((atom "NULLIF" true) "(" (define a tsql_expression) "," (define b tsql_expression) ")") '((quote if) '((quote equal??) a b) nil a))
+		(parser '((atom "ISNULL" true) "(" (define args (* tsql_expression ",")) ")") (tsql_isnull_expr args))
+		(parser '((atom "NULLIF" true) "(" (define args (* tsql_expression ",")) ")") (tsql_nullif_expr args))
 		(parser '((atom "NCHAR" true) "(" (define value tsql_expression) ")") (tsql_nchar_expr value))
 
 		(parser (atom "NULL" true) (sql_null_literal))
@@ -1505,7 +1709,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(begin (define d (sql_aggregates (toUpper fn)))
 				(if (not (nil? d))
 					'('aggregate (car args) (car d) (cadr d))
-					(cons (coalesce (tsql_builtins (toUpper fn)) (error "unknown function " fn)) args))))
+					(tsql_builtin_expr (toUpper fn) args))))
 
 		(parser "?" (begin
 			(define n (placeholder_counter "n"))
@@ -1564,7 +1768,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(make_query_block db sources
 					(map_assoc (expand_query_block_fields sources fields) (lambda (_title expr)
 						(if (star_expr? expr) expr
-							(list (quote sql_compile_expr) (lambda (infos) (car infos)) expr))))
+							(list (quote sql_compile_expr) (quote car) expr))))
 					condition group having order limit offset hidden stages
 					(qassoc_set facts (quote lateral) true))
 				_ (error "APPLY currently requires a SELECT query"))
@@ -1791,7 +1995,8 @@ a separator is recognized only on a physical line containing no SQL text. */
 						(parser (atom "ASC" true) <)
 						(parser empty <)
 					))
-				) (list col (if coll (collate coll (equal? direction_desc >)) direction_desc)))
+				) (list (if coll
+						(list (quote sql_compile_expr) (list (quote tsql_collation_compiler) coll) col) col) direction_desc))
 
 				(atom "," true)
 			))
@@ -1956,8 +2161,10 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(parser '("(" (define dataset (* tsql_expression ",")) ")") dataset))))
 
 	(define tsql_create_view (parser '(
-		(atom "CREATE" true)
-		(define replace (? (atom "OR" true) (atom "ALTER" true)))
+		(define mode (or
+			(parser '((atom "CREATE" true) (define replace (? (atom "OR" true) (atom "ALTER" true))))
+				(if replace "replace" "error"))
+			(parser (atom "ALTER" true) "alter")))
 		(atom "VIEW" true)
 		(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
 		(define target (or
@@ -1969,11 +2176,18 @@ a separator is recognized only on a physical line containing no SQL text. */
 	) (lambda () (match target '(schema2 id) (begin
 			(define view_schema (coalesce schema2 schema))
 			(if policy (policy view_schema id true) true)
+			(if (and (equal? mode "alter") ifnotexists)
+				(error "ALTER VIEW does not accept IF NOT EXISTS") true)
 			(define query (sql_apply_view_column_aliases (nth captured 1) aliases))
+			(if (tsql_view_has_metadata_scalar? query)
+				(error "COL_LENGTH in stored views requires a consuming compile policy") true)
+			/* Resolve declared expression contracts before replacing a definition.
+			The bound tree is validation only; persist the portable parser IR. */
+			(bind_query_names (sql_expand_views query policy) '())
 			(list (quote create_sql_view)
 				(list (quote session) "__memcp_tx")
 				view_schema id "tsql" (nth captured 0) (list (quote quote) query)
-				(if replace "replace" (if ifnotexists "ignore" "error"))))))))
+				(if (and ifnotexists (equal? mode "error")) "ignore" mode)))))))
 
 	(define tsql_schema_identifier (parser (define owner tsql_identifier)
 		(if (equal?? owner "dbo") database owner)))
