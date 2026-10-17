@@ -74,7 +74,8 @@ test_cases:
   noncritical: true
 - name: Imported compound primary key enforces uniqueness
   expect:
-    result: true
+    error: true
+    contains: Duplicate entry
   setup:
   - syntax: tsql
     sql: DROP TABLE IF EXISTS tsdump_key_probe
@@ -86,10 +87,8 @@ test_cases:
       (define s (newsession))
       (s "username" "root")
       (load_tsql "memcp-tests" (streamString "CREATE TABLE dbo.tsdump_key_probe(tenant INT,id INT IDENTITY,name NVARCHAR(30),PRIMARY KEY(tenant,id)); SET IDENTITY_INSERT dbo.tsdump_key_probe ON; INSERT dbo.tsdump_key_probe(tenant,id,name) VALUES(1,7,N'first');") s)
-      (try (lambda () (begin
-        (tsql_execute_request "memcp-tests" "INSERT dbo.tsdump_key_probe(tenant,id,name) VALUES(1,7,N'duplicate')" s nil 0
-          (lambda (_row) true) (lambda fields true)) false))
-        (lambda (cause) (strlike (string cause) "%Duplicate entry%"))))
+      (tsql_execute_request "memcp-tests" "INSERT dbo.tsdump_key_probe(tenant,id,name) VALUES(1,7,N'duplicate')" s nil 0
+        (lambda (_row) true) (lambda fields true)))
 - name: Compressed UTF16 export is decoded without data loss
   scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-utf16.sql.gz") (sql_policy "root"))
   noncritical: true
@@ -141,28 +140,27 @@ test_cases:
     error: true
 - name: Normal frontend does not silently ignore identity switching
   expect:
-    result:
-    - 8
-    - 544
+    error: true
+    contains: IDENTITY_INSERT
   setup:
   - syntax: tsql
     sql: DROP TABLE IF EXISTS tsdump_mode_probe
+  - scm: |-
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (load_tsql "memcp-tests" (streamString "CREATE TABLE dbo.tsdump_mode_probe(id INT IDENTITY,value INT); SET IDENTITY_INSERT dbo.tsdump_mode_probe ON; INSERT dbo.tsdump_mode_probe(id,value) VALUES(7,3); SET IDENTITY_INSERT dbo.tsdump_mode_probe OFF; INSERT dbo.tsdump_mode_probe(value) VALUES(4);") s)
+        (define out (newsession))
+        (tsql_execute_request "memcp-tests" "SELECT id FROM dbo.tsdump_mode_probe WHERE value=4" s nil 0
+          (lambda (row) (out "row" row)) (lambda fields true))
+        (if (equal? ((out "row") "id") 8) true (error "import did not advance native identity"))
+        (if (nil? (s "__tsql_identity_insert")) true (error "import did not disable identity insertion"))
+        true)
   cleanup:
   - syntax: tsql
     sql: DROP TABLE tsdump_mode_probe
-  scm: |-
-    (begin
-      (define s (newsession))
-      (s "username" "root")
-      (load_tsql "memcp-tests" (streamString "CREATE TABLE dbo.tsdump_mode_probe(id INT IDENTITY,value INT); SET IDENTITY_INSERT dbo.tsdump_mode_probe ON; INSERT dbo.tsdump_mode_probe(id,value) VALUES(7,3); SET IDENTITY_INSERT dbo.tsdump_mode_probe OFF; INSERT dbo.tsdump_mode_probe(value) VALUES(4);") s)
-      (define out (newsession))
-      (tsql_execute_request "memcp-tests" "SELECT id FROM dbo.tsdump_mode_probe WHERE value=4" s nil 0
-        (lambda (row) (out "row" row)) (lambda fields true))
-      (define denied (try (lambda () (begin
-        (tsql_execute_request "memcp-tests" "INSERT dbo.tsdump_mode_probe(id,value) VALUES(9,5)" s nil 0
-          (lambda (_row) true) (lambda fields true)) 0))
-        (lambda (cause) (match cause '("tsql-error" number _message _state) number _ (error cause)))))
-      (list ((out "row") "id") denied))
+  syntax: tsql
+  sql: INSERT dbo.tsdump_mode_probe(id,value) VALUES(9,5)
 - sql: DROP TABLE IF EXISTS tsdump_identity_observation
   name: 'Fixture cleanup 001: DROP TABLE IF EXISTS tsdump_identity_observation'
 - sql: DROP TABLE IF EXISTS tsdump_identity
