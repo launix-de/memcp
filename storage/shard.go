@@ -596,8 +596,9 @@ func (u *storageShard) load(t *table) {
 			var maxVal uint64
 			for _, row := range u.inserts {
 				if colIdx < len(row) && !row[colIdx].IsNil() {
-					if v := uint64(scm.ToInt(row[colIdx])); v > maxVal {
-						maxVal = v
+					// Match live INSERT: only positive explicit IDs advance the counter.
+					if v := scm.ToInt(row[colIdx]); v > 0 && uint64(v) > maxVal {
+						maxVal = uint64(v)
 					}
 				}
 			}
