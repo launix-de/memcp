@@ -389,8 +389,11 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 		(tsql_execute_batches schema text session statement resultrow resultfields)))))
 /* Console imports accept the same textual script as REST and the connector.
 The caller supplies its ordinary authenticated session; file I/O stays in load. */
-(define load_tsql (lambda (schema stream session)
-	(tsql_execute_request schema (load stream) session nil 0 print (lambda args true))))
+(define load_tsql (lambda (schema stream session) (begin
+	/* Reject an unauthorized destination before reading the caller's source.
+	Individual statements still use the ordinary table-level policy. */
+	((sql_policy (session "username")) schema true false)
+	(tsql_execute_request schema (load stream) session nil 0 print (lambda args true)))))
 /* Source compilers capture definitions only. Execution receives the caller's
 statement owner, account, transaction session, arguments and output callbacks. */
 (define tsql_procedure_compile (lambda (source context) (begin
@@ -536,8 +539,10 @@ Only parameter-sized scalar tuples are collected; relational SQL stays native. *
 				(define output (newsession))
 				(define result (tsql_execute_request schema text session (req "__session_state") (req "__query_seq")
 					(lambda (values) (begin (output "rows" true) ((res "jsonl") values)))
-					(lambda args true)))
-				(if (and (not (output "rows")) (number? result))
+					(lambda args (output "fields" true))))
+				/* An empty result set still has a declared field contract. Its
+				procedure return status must not become an affected-row record. */
+				(if (and (not (or (output "rows") (output "fields"))) (number? result))
 					((res "jsonl") (list "affected_rows" result)) true)
 			) text)) (lambda (err) (begin
 					(error_log (concat err) schema (req "username") text)
@@ -660,11 +665,12 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 (define tsql_metadata_type_info (lambda (options version) (begin
 	(define definitions (list (list "bigint" '()) (list "int" '()) (list "smallint" '()) (list "tinyint" '())
 		(list "bit" '()) (list "real" '()) (list "float" '()) (list "decimal" '(38 0)) (list "numeric" '(38 0))
-		(list "varchar" '(8000)) (list "char" '(8000)) (list "date" '())))
+		(list "varchar" '(8000)) (list "char" '(8000))
+		(list "nvarchar" '(4000)) (list "nchar" '(4000)) (list "date" '())))
 	(define rows (map definitions (lambda (definition) (begin
 		(define contract (tsql_metadata_type (list "RawType" (car definition) "Dimensions" (cadr definition)) version))
 		(define type (car contract))
-		(define character (has? '("varchar" "char") type))
+		(define character (has? '("varchar" "char" "nvarchar" "nchar") type))
 		(define decimal (has? '("decimal" "numeric") type))
 		(list "TYPE_NAME" type "DATA_TYPE" (nth contract 1) "PRECISION" (nth contract 2)
 			"LITERAL_PREFIX" (if (or character (equal? type "date")) "'" nil)

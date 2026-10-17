@@ -6,6 +6,23 @@ metadata:
   isolated: true
 setup: []
 test_cases:
+- name: Authenticated console import runs an ordinary UTF8 script
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-script-basic.sql") session)
+      true)
+  expect: {result: true}
+- name: Console import preserves batch variables and quoted GO text
+  syntax: tsql
+  sql: SELECT id,label FROM dbo.script_import
+  expect:
+    rows: 1
+    data: [{id: 7, label: "line one\nGO\nline two"}]
+- name: Remove the ordinary console import fixture
+  syntax: tsql
+  sql: DROP TABLE dbo.script_import
 - sql: DROP TABLE IF EXISTS tsdump_identity_observation
   name: 'Fixture setup 001: DROP TABLE IF EXISTS tsdump_identity_observation'
 - sql: DROP TABLE IF EXISTS tsdump_identity
@@ -17,7 +34,12 @@ test_cases:
 - sql: DROP TABLE IF EXISTS tsdump_conditional
   name: 'Fixture setup 005: DROP TABLE IF EXISTS tsdump_conditional'
 - name: Load GO-delimited export into selected target
-  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-export.sql") (sql_policy "root"))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-export.sql") session))
+
   noncritical: true
 - name: Multiline conditional declarations and ELSE data preserve target confinement
   sql: SELECT id,label FROM tsdump_conditional
@@ -78,7 +100,12 @@ test_cases:
   expect:
     error: true
 - name: Compressed UTF16 export is decoded without data loss
-  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-utf16.sql.gz") (sql_policy "root"))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-utf16.sql.gz") session))
+
   noncritical: true
 - name: UTF16 import preserves Unicode and nulls
   sql: SELECT id, label, note FROM tsdump_utf16
@@ -90,11 +117,23 @@ test_cases:
       note: null
   noncritical: true
 - name: Import policy is honored before opening a file
-  scm: (load_tsql "memcp-tests" "/does/not/exist" (lambda (db table write) (error "denied")))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "import_denied")
+      (try (lambda () (begin
+        (load_tsql "memcp-tests" "/does/not/exist" session)
+        false)) (lambda (failure) (strlike (concat failure) "%access denied%"))))
+
   expect:
-    error: true
+    result: true
 - name: Unsupported import statement stops execution
-  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-unsupported.sql") (sql_policy "root"))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-unsupported.sql") session))
+
   expect:
     error: true
 - name: Statements after an unsupported statement are not executed
@@ -105,7 +144,12 @@ test_cases:
     - n: 0
   noncritical: true
 - name: Uncommitted import transaction is rejected
-  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-uncommitted.sql") (sql_policy "root"))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-uncommitted.sql") session))
+
   expect:
     error: true
 - name: Uncommitted imported rows are rolled back

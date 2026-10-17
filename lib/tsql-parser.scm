@@ -2347,6 +2347,16 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(parser '((define name tsql_script_variable) "=" (define value tsql_script_exec_value))
 					(list name value))
 				(parser (define value tsql_script_exec_value) (list "" value)))))
+			/* The optional EXEC spelling is restricted to the first batch item.
+			Both spellings produce the same invocation data and use one executor. */
+			(define tsql_script_invocation (parser (or
+				(parser '((define status tsql_script_variable) "="
+					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
+					(define arguments (* tsql_script_exec_argument ",")))
+					(list "execute-status" (coalesce owner schema) name arguments status))
+				(parser '((? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
+					(define arguments (* tsql_script_exec_argument ",")))
+					(list "execute" (coalesce owner schema) name arguments)))))
 			(define tsql_script_command (parser (or
 				(parser (define statement (capture tsql_rollback)) (list "recovery" (strtrim (car statement))))
 				(parser '((atom "BEGIN" true) (atom "TRY" true) (define body (* tsql_script_item empty))
@@ -2382,14 +2392,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 					"(" (define text (capture tsql_expression)) ")")
 					(list "execute-dynamic" (car text)))
 				(parser '((or (atom "EXEC" true) (atom "EXECUTE" true))
-					(define status tsql_script_variable) "="
-					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
-					(define arguments (* tsql_script_exec_argument ",")))
-					(list "execute-status" (coalesce owner schema) name arguments status))
-				(parser '((or (atom "EXEC" true) (atom "EXECUTE" true))
-					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
-					(define arguments (* tsql_script_exec_argument ",")))
-					(list "execute" (coalesce owner schema) name arguments))
+					(define invocation tsql_script_invocation)) invocation)
 				(parser (define statement (capture p)) (list "statement" (strtrim (car statement))))
 			)))
 			(define tsql_script_item (parser '((* ";") (define command tsql_script_command) (* ";")) command))
@@ -2411,8 +2414,9 @@ a separator is recognized only on a physical line containing no SQL text. */
 			) (list "batch" (list (list "create-procedure" (coalesce owner schema) name
 					(tsql_unique_parameters parameters) (strtrim (car body)) (if replace true false))))))
 			(define script_parser (parser (define batch (or tsql_script_procedure
-				(parser '((* ";") (define commands (* tsql_script_item empty)) (* ";"))
-					(list "batch" commands)))) batch "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
+				(parser '((* ";") (? (define first (or tsql_script_command tsql_script_invocation)))
+					(define commands (* tsql_script_item empty)) (* ";"))
+					(list "batch" (if first (cons first commands) commands))))) batch "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
 
 			(script_parser s))
 		((parser '((* ";") (define command command_parser) (* ";")) (if (string? command) command (command)) "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s))

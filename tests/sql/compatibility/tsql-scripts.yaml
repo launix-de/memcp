@@ -1306,4 +1306,41 @@ test_cases:
   cleanup:
   - sql: DROP PROCEDURE dbo.script_error_helper
 
+- name: First batch statement may invoke a procedure without EXEC
+  setup:
+  - sql: CREATE PROCEDURE dbo.script_implicit_call @value INT AS SELECT @value AS value
+  sql: dbo.script_implicit_call @value=7; SELECT 8 AS value
+  expect:
+    rows: 2
+    data: [{value: 7}, {value: 8}]
+  cleanup:
+  - sql: DROP PROCEDURE dbo.script_implicit_call
+- name: GO restores the optional EXEC position
+  setup:
+  - sql: CREATE PROCEDURE dbo.script_implicit_call @value INT AS SELECT @value AS value
+  sql: |
+    dbo.script_implicit_call 3
+    GO
+    dbo.script_implicit_call 4
+  expect:
+    rows: 2
+    data: [{value: 3}, {value: 4}]
+  cleanup:
+  - sql: DROP PROCEDURE dbo.script_implicit_call
+- name: A later statement requires EXEC for a procedure call
+  scm: (parse_tsql_batch "memcp-tests" "SELECT 1; dbo.script_implicit_call 2")
+  expect: {error: true}
+- name: A conditional procedure call requires EXEC
+  scm: (parse_tsql_batch "memcp-tests" "IF 1=1 dbo.script_implicit_call 2")
+  expect: {error: true}
+- name: A nested block procedure call requires EXEC
+  scm: (parse_tsql_batch "memcp-tests" "BEGIN dbo.script_implicit_call 2 END")
+  expect: {error: true}
+- name: Explicit calls after ordinary statements retain the same invocation node
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests" "SELECT 1; EXEC dbo.inspect @value=2")
+      (list "batch" (list (list "statement" "SELECT 1")
+        (list "execute" "memcp-tests" "inspect" (list (list "value" "2"))))))
+  expect: {result: true}
+
 cleanup: []
