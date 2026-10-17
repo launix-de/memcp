@@ -1170,7 +1170,6 @@ test_cases:
     rows: 1
     data:
     - message: '00003'
-  noncritical: true
 
 - name: Dynamic parameter declarations reject duplicate formal names
   sql: EXEC sp_executesql N'SELECT @n AS value',N'@n INT,@n INT',@n=1
@@ -1365,5 +1364,368 @@ test_cases:
     data:
     - value: x'; SELECT 999 AS extra;--
 
+
+- name: Message formatting zero padding follows a negative sign
+  sql: BEGIN TRY RAISERROR(N'%06d',16,3,-23); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '-00023'
+      state: 3
+- name: Message formatting plus padding follows the explicit sign
+  sql: BEGIN TRY RAISERROR(N'%+06d',16,3,23); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '+00023'
+      state: 3
+- name: Message formatting left alignment overrides zero padding
+  sql: BEGIN TRY RAISERROR(N'%-06d',16,3,23); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '23    '
+      state: 3
+- name: Message formatting blank prefixes a positive integer
+  sql: BEGIN TRY RAISERROR(N'% d',16,3,23); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: ' 23'
+      state: 3
+- name: Message formatting explicit plus overrides blank
+  sql: BEGIN TRY RAISERROR(N'%+ d',16,3,23); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '+23'
+      state: 3
+- name: Message formatting negative signs override a blank flag
+  sql: BEGIN TRY RAISERROR(N'% d',16,3,-23); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '-23'
+      state: 3
+- name: Message formatting decimal alternate flag is ignored
+  sql: BEGIN TRY RAISERROR(N'%#i',16,3,23); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '23'
+      state: 3
+- name: Message formatting integer precision supplies minimum digits
+  sql: BEGIN TRY RAISERROR(N'%.5i',16,3,23); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '00023'
+      state: 3
+- name: Message formatting integer precision disables width zero padding
+  sql: BEGIN TRY RAISERROR(N'%08.4d',16,3,23); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '    0023'
+      state: 3
+- name: Message formatting integer precision excludes the sign
+  sql: BEGIN TRY RAISERROR(N'%+.4d',16,3,23); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '+0023'
+      state: 3
+- name: Message formatting zero integer precision emits no zero digit
+  sql: BEGIN TRY RAISERROR(N'<%.0d>',16,3,0); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <>
+      state: 3
+- name: Message formatting bare precision means zero
+  sql: BEGIN TRY RAISERROR(N'<%.d>',16,3,0); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <>
+      state: 3
+- name: Message formatting sign survives an empty zero conversion
+  sql: BEGIN TRY RAISERROR(N'<%+.0d>',16,3,0); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <+>
+      state: 3
+- name: Message formatting width never truncates integer output
+  sql: BEGIN TRY RAISERROR(N'%2d',16,3,12345); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '12345'
+      state: 3
+- name: Message formatting string precision precedes width
+  sql: BEGIN TRY RAISERROR(N'<%8.3s>',16,3,N'alpha'); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <     alp>
+      state: 3
+- name: Message formatting string left alignment follows precision
+  sql: BEGIN TRY RAISERROR(N'<%-8.3s>',16,3,N'alpha'); END TRY BEGIN CATCH SELECT
+    ERROR_MESSAGE() AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <alp     >
+      state: 3
+- name: Message formatting string zero flag does not replace spaces
+  sql: BEGIN TRY RAISERROR(N'<%05s>',16,3,N'x'); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <    x>
+      state: 3
+- name: Message formatting string alternate sign flags do not change text
+  sql: BEGIN TRY RAISERROR(N'<%+#5s>',16,3,N'x'); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <    x>
+      state: 3
+- name: Message formatting star width and precision precede the value
+  sql: BEGIN TRY RAISERROR(N'<%*.*s>',16,3,8,3,N'alpha'); END TRY BEGIN CATCH SELECT
+    ERROR_MESSAGE() AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <     alp>
+      state: 3
+- name: Message formatting star precision alone retains following argument order
+  sql: BEGIN TRY RAISERROR(N'%.*s:%d',16,3,2,N'alpha',7); END TRY BEGIN CATCH SELECT
+    ERROR_MESSAGE() AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: al:7
+      state: 3
+- name: Message formatting star width applies before sign-aware zeros
+  sql: BEGIN TRY RAISERROR(N'%0*d',16,3,6,-23); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '-00023'
+      state: 3
+- name: Message formatting negative star width requests left alignment
+  sql: BEGIN TRY RAISERROR(N'<%0*d>',16,3,-6,23); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <23    >
+      state: 3
+- name: Message formatting negative star precision is omitted
+  sql: BEGIN TRY RAISERROR(N'%06.*d',16,3,-2,23); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '000023'
+      state: 3
+- name: Message formatting BMP string precision measures characters
+  sql: BEGIN TRY RAISERROR(N'<%5.2s>',16,3,N'雪Axy'); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <   雪A>
+      state: 3
+- name: Message formatting combining marks consume separate UTF16 units
+  sql: BEGIN TRY RAISERROR(N'<%4.2s>',16,3,N'éx'); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <  é>
+      state: 3
+- name: Message formatting whole supplementary pairs retain their field width
+  sql: BEGIN TRY RAISERROR(N'<%4.2s>',16,3,N'😀x'); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <  😀>
+      state: 3
+- name: Message formatting escaped percent consumes no substitution argument
+  sql: BEGIN TRY RAISERROR(N'%%:%03d:%%:%s',16,3,7,N'x'); END TRY BEGIN CATCH SELECT
+    ERROR_MESSAGE() AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '%:007:%:x'
+      state: 3
+- name: Message formatting empty string precision stays empty
+  sql: BEGIN TRY RAISERROR(N'<%3.0s>',16,3,N'abc'); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
+    AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <   >
+      state: 3
+- name: Message formatting typed NULL text retains the existing null representation
+  sql: BEGIN TRY RAISERROR(N'<%8s>',16,3,CAST(NULL AS NVARCHAR(20))); END TRY BEGIN
+    CATCH SELECT ERROR_MESSAGE() AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <  (null)>
+      state: 3
+- name: Message formatting bigint minimum has exact magnitude and precision
+  sql: BEGIN TRY RAISERROR(N'%.20I64d',16,3,CAST(-9223372036854775808 AS BIGINT));
+    END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message,ERROR_STATE() AS state;
+    END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: -09223372036854775808
+      state: 3
+- name: Message formatting bigint maximum uses exact sign-aware padding
+  sql: BEGIN TRY RAISERROR(N'%+022I64d',16,3,CAST(9223372036854775807 AS BIGINT));
+    END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message,ERROR_STATE() AS state;
+    END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: +009223372036854775807
+      state: 3
+- name: Message formatting parameter declarations retain star argument contracts
+  sql: DECLARE @width INT=8,@precision INT=3,@label NVARCHAR(20)=N'alpha'; BEGIN TRY
+    RAISERROR(N'<%*.*s>',16,3,@width,@precision,@label); END TRY BEGIN CATCH SELECT
+    ERROR_MESSAGE() AS message,ERROR_STATE() AS state; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: <     alp>
+      state: 3
+- name: Message formatting missing star width is explicit
+  sql: RAISERROR(N'%*d',16,1)
+  expect:
+    error: true
+    contains: missing RAISERROR substitution
+- name: Message formatting missing star precision is explicit
+  sql: RAISERROR(N'%.*s',16,1)
+  expect:
+    error: true
+    contains: missing RAISERROR substitution
+- name: Message formatting missing value after both stars is explicit
+  sql: RAISERROR(N'%*.*s',16,1,4,2)
+  expect:
+    error: true
+    contains: missing RAISERROR substitution
+- name: Message formatting floating star width fails its declared contract
+  sql: RAISERROR(N'%*d',16,1,2.5,3)
+  expect:
+    error: true
+    contains: message substitution requires a declared integer argument
+- name: Message formatting text star precision fails its declared contract
+  sql: RAISERROR(N'%.*s',16,1,N'2',N'alpha')
+  expect:
+    error: true
+    contains: message substitution requires a declared integer argument
+- name: Message formatting floating integer value still fails its declared contract
+  sql: RAISERROR(N'%05d',16,1,2.5)
+  expect:
+    error: true
+    contains: message substitution requires a declared integer argument
+- name: Message formatting numeric string value still fails its declared contract
+  sql: RAISERROR(N'%5.2s',16,1,3)
+  expect:
+    error: true
+    contains: message substitution requires a declared text argument
+- name: Message formatting stored procedure retains variable bindings
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS message_format_fixture
+  - sql: CREATE PROCEDURE message_format_fixture @width INT,@label NVARCHAR(20) AS
+      BEGIN TRY RAISERROR(N'<%*.3s>',16,3,@width,@label); END TRY BEGIN CATCH SELECT
+      ERROR_MESSAGE() AS message,ERROR_STATE() AS state; END CATCH
+  sql: EXEC message_format_fixture @width=8,@label=N'alpha'
+  expect:
+    rows: 1
+    data:
+    - message: <     alp>
+      state: 3
+  cleanup:
+  - sql: DROP PROCEDURE message_format_fixture
+
+- name: Message formatting rejects an unsupported conversion before a later marker
+  sql: RAISERROR(N'%unknown d',16,1,3)
+  expect:
+    error: true
+- name: Message formatting rejects a trailing percent
+  sql: RAISERROR(N'broken%',16,1,3)
+  expect:
+    error: true
+- name: Message formatting rejects invalid precision text before a valid marker
+  sql: RAISERROR(N'%.x d',16,1,3)
+  expect:
+    error: true
+- name: Message formatting rejects an unsupported length prefix before a valid marker
+  sql: RAISERROR(N'%ll d',16,1,3)
+  expect:
+    error: true
+
+- name: Message formatting oversized literal width fails before padding
+  sql: RAISERROR(N'%2147483647d',16,1,3)
+  expect:
+    error: true
+    contains: RAISERROR field width above 2047 is not implemented
+- name: Message formatting oversized dynamic width fails before padding
+  sql: DECLARE @width INT=2147483647; RAISERROR(N'%*d',16,1,@width,3)
+  expect:
+    error: true
+    contains: RAISERROR field width above 2047 is not implemented
+- name: Message formatting minimum signed dynamic width fails before negation
+  sql: DECLARE @width INT=-2147483648; RAISERROR(N'%*d',16,1,@width,3)
+  expect:
+    error: true
+    contains: RAISERROR field width above 2047 is not implemented
+- name: Message formatting oversized dynamic integer precision fails before padding
+  sql: DECLARE @precision INT=2147483647; RAISERROR(N'%.*I64d',16,1,@precision,CAST(3
+    AS BIGINT))
+  expect:
+    error: true
+    contains: RAISERROR integer precision above 2047 is not implemented
+- name: Message formatting maximum string precision does not allocate a precision-sized
+    buffer
+  sql: DECLARE @precision INT=2147483647; BEGIN TRY RAISERROR(N'%.*s',16,1,@precision,N'alpha');
+    END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: alpha
+- name: Message formatting minimum negative precision is omitted without negation
+  sql: DECLARE @precision INT=-2147483648; BEGIN TRY RAISERROR(N'%.*d',16,1,@precision,23);
+    END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect:
+    rows: 1
+    data:
+    - message: '23'
 
 cleanup: []
