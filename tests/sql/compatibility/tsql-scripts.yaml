@@ -1381,4 +1381,27 @@ test_cases:
   sql: RAISERROR(N'%.2048d',16,1,3)
   expect: {error: true}
 
+- name: Native batches preserve consecutive command completions and later result metadata
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_native_done
+  - sql: CREATE TABLE dbo.script_native_done(id INT PRIMARY KEY,value INT)
+  tds:
+    statements:
+    - sql: INSERT dbo.script_native_done VALUES(1,2),(2,4); UPDATE dbo.script_native_done SET value=value+1; DELETE FROM dbo.script_native_done WHERE id=2;
+      expect: {rows: 0}
+    - sql: SELECT id,value FROM dbo.script_native_done
+      expect: {rows: 1,data: [{id: 1,value: 3}]}
+    - sql: SET NOCOUNT ON; INSERT dbo.script_native_done VALUES(3,9); UPDATE dbo.script_native_done SET value=value+1 WHERE id=3; SET NOCOUNT OFF;
+      expect: {rows: 0}
+    - sql: SELECT id,value FROM dbo.script_native_done ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 3},{id: 3,value: 10}]}
+    - sql: BEGIN TRANSACTION; INSERT dbo.script_native_done VALUES(4,11); COMMIT;
+      expect: {rows: 0}
+    - sql: SELECT TOP(0) value FROM dbo.script_native_done
+      expect: {rows: 0,columns: [value]}
+    - sql: SELECT value FROM dbo.script_native_done WHERE id=4
+      expect: {rows: 1,data: [{value: 11}]}
+  cleanup:
+  - sql: DROP TABLE dbo.script_native_done
+
 cleanup: []
