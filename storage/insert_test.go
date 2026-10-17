@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 package storage
 
 import "fmt"
+import "math"
 import "sync"
 import "time"
 import "runtime"
@@ -384,5 +385,55 @@ waiting:
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("waiter did not resume")
+	}
+}
+
+// Recovery must reconstruct the same allocator high-water mark as live INSERT,
+// while retaining every explicitly supplied row, including nonpositive IDs.
+func TestInsertAutoIncrementWALReplayPreservesSignedIDs(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		ids  []int64
+		last uint64
+	}{
+		{"negative", []int64{-1}, 0},
+		{"minimum", []int64{math.MinInt64}, 0},
+		{"zero", []int64{0}, 0},
+		{"mixed", []int64{-1, 41, math.MinInt64, 0, 7}, 41},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			name := "tautoidreplay" + test.name
+			tbl, persistence := createDurabilityTestTable(t, name, 0)
+			tbl.Columns[0].AutoIncrement = true
+			tbl.publishShowColumnsSnapshot(false)
+			tbl.schema.save()
+			rows := make([][]scm.Scmer, len(test.ids))
+			for i, id := range test.ids {
+				rows[i] = []scm.Scmer{scm.NewInt(id), scm.NewString("explicit")}
+			}
+			tbl.Insert([]string{"id", "payload"}, rows, nil, scm.NewNil(), false, nil)
+			if got := atomic.LoadUint64(&tbl.Auto_increment); got != test.last {
+				t.Fatalf("live counter = %d, want %d", got, test.last)
+			}
+
+			for restart := 0; restart < 2; restart++ {
+				tbl = reloadTableFromPersistence(t, name, persistence)
+				wantLast := test.last + uint64(restart)
+				if got := atomic.LoadUint64(&tbl.Auto_increment); got != wantLast {
+					t.Fatalf("restart %d counter = %d, want %d", restart+1, got, wantLast)
+				}
+				wantRows := uint(len(rows) + restart)
+				if got := tbl.CountExact(); got != wantRows {
+					t.Fatalf("restart %d recovered %d rows, want %d", restart+1, got, wantRows)
+				}
+				var generated int64
+				tbl.Insert([]string{"payload"}, [][]scm.Scmer{{scm.NewString("generated")}}, nil,
+					scm.NewNil(), false, func(id int64) { generated = id })
+				if generated != int64(wantLast+1) || tbl.CountExact() != wantRows+1 {
+					t.Fatalf("restart %d generated %d with %d rows, want ID %d and %d rows",
+						restart+1, generated, tbl.CountExact(), wantLast+1, wantRows+1)
+				}
+			}
+		})
 	}
 }
