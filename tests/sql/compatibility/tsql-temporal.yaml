@@ -968,6 +968,9 @@ test_cases:
   expect: {rows: 1, data: [{value: -2026}]}
 - name: Calendar nested text cast resolves the source declaration
   sql: SELECT CAST(CAST(DATEADD(day,1,dt) AS VARCHAR(19)) AS NVARCHAR(19)) AS value FROM tsql_temporal_data WHERE id=1
+  expect: {rows: 1, data: [{value: 'Mar 16 2026 12:13PM'}]}
+- name: Calendar explicit ISO style preserves seconds through a nested text cast
+  sql: SELECT CAST(CONVERT(VARCHAR(19),DATEADD(day,1,dt),120) AS NVARCHAR(19)) AS value FROM tsql_temporal_data WHERE id=1
   expect: {rows: 1, data: [{value: '2026-03-16 12:13:14'}]}
 
 - name: Calendar large minutes interval cannot wrap a native duration
