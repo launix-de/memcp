@@ -70,7 +70,7 @@ import struct
 from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 # CPU measurement helpers
 NUM_CPUS = multiprocessing.cpu_count()
@@ -1071,6 +1071,38 @@ class SQLTestRunner:
         except Exception:
             pass
 
+    def _report_request_exception(self, operation: str, exc: Exception, headers: Optional[Dict[str, str]]) -> None:
+        # Failure-only diagnostics: never poll processes or format exception
+        # details on the successful measured path. Do not log request bodies.
+        detail = str(exc)
+        request_headers = getattr(getattr(exc, "request", None), "headers", {}) or {}
+        secrets = [self.password] + [value for source in (headers or {}, request_headers)
+                                    for key, value in source.items()
+                                    if str(key).lower() in ("authorization", "proxy-authorization", "cookie")]
+        for secret in secrets:
+            if secret:
+                detail = detail.replace(str(secret), "[redacted]")
+        detail = re.sub(r"(https?://)[^/\s]*@", r"\1[redacted]@", detail)
+        detail = re.sub(r"\?[^\s'\"<>)]*", "?[redacted]", detail)
+        child_status = "server_child=not-owned"
+        child = _owned_memcp_process
+        try:
+            target = urlsplit(self.base_url)
+            owned = (child is not None and target.hostname in ("localhost", "127.0.0.1", "::1")
+                     and target.port == get_memcp_api_port(child))
+        except ValueError:
+            owned = False
+        if owned:
+            try:
+                returncode = child.poll()
+                state = "running" if returncode is None else "exited"
+                child_status = f"pid={child.pid} state={state} returncode={returncode}"
+            except Exception as status_error:
+                child_status = f"pid={child.pid} child_status=unavailable ({type(status_error).__name__})"
+        print(f"    {operation} transport failure: {type(exc).__name__} "
+              f"response=absent timeout={str(isinstance(exc, requests.Timeout)).lower()} "
+              f"{child_status} detail={json.dumps(detail[:2000])}", flush=True)
+
     def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None, session_id: Optional[str] = None, timeout: int = 10, params: Optional[list] = None, retry_on_connection_failure: Optional[bool] = None) -> Optional[requests.Response]:
         self._test_context.request_timed_out = False
         # proactively ensure database exists (works for connect-only too)
@@ -1099,6 +1131,7 @@ class SQLTestRunner:
                 return requests.post(url, data=body, headers=headers, timeout=timeout)
             except Exception as exc:
                 self._test_context.request_timed_out = isinstance(exc, requests.Timeout)
+                self._report_request_exception("SQL", exc, headers)
                 if not retry_on_connection_failure:
                     return None
                 # parse port from base_url
@@ -1132,7 +1165,7 @@ class SQLTestRunner:
             return requests.post(url, data=body, headers=headers, timeout=timeout)
         except Exception as e:
             self._test_context.request_timed_out = isinstance(e, requests.Timeout)
-            print(f"Error executing SPARQL: {e}")
+            self._report_request_exception("SPARQL", e, auth_header or self.auth_header)
             return None
 
     def load_ttl(self, database: str, ttl_data: str) -> bool:
@@ -1701,6 +1734,7 @@ class SQLTestRunner:
                                          headers=auth_header, timeout=sql_timeout)
                 except requests.RequestException as exc:
                     self._test_context.request_timed_out = isinstance(exc, requests.Timeout)
+                    self._report_request_exception("SCM", exc, auth_header)
                     return None
             if is_sparql:
                 return self.execute_sparql(database, query, auth_header, timeout=sql_timeout)

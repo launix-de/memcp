@@ -24,6 +24,7 @@ import os
 import json
 import io
 from contextlib import redirect_stdout
+import concurrent.futures
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import itertools
 import requests
@@ -1131,6 +1132,194 @@ class FailureAttributionContractTest(unittest.TestCase):
         self.assertIn("Too slow:", output)
         self.assertIn("result assertions passed", output)
         self.assertEqual(runner.failed_critical, 1)
+
+
+class TransportFailureDiagnosticsContractTest(unittest.TestCase):
+    def runner(self, url="http://localhost:23456"):
+        runner = SQLTestRunner(url, password="private-password")
+        runner.ensure_database = mock.Mock()
+        return runner
+
+    def child(self, returncode=None, port=23456):
+        return SimpleNamespace(pid=24680, args=["./memcp", f"--api-port={port}"],
+                               poll=mock.Mock(return_value=returncode))
+
+    def sql_failure(self, runner, exception, child):
+        output = io.StringIO()
+        with mock.patch("run_sql_tests._owned_memcp_process", child), \
+                mock.patch("run_sql_tests.requests.post", side_effect=exception) as post, \
+                mock.patch("run_sql_tests.wait_for_memcp") as wait, redirect_stdout(output):
+            response = runner.execute_sql("memcp-tests", "SELECT 1", retry_on_connection_failure=False)
+        self.assertIsNone(response)
+        post.assert_called_once()
+        wait.assert_not_called()
+        return output.getvalue()
+
+    def fixture(self, operation, response, child, role="B"):
+        runner = self.runner()
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {"PERF_FIXTURE_TRIAL": "1", "PERF_FIXTURE_ROLE": role}), \
+                mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                mock.patch("run_sql_tests._owned_memcp_process", child), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.requests.post", side_effect=[response]) as post, \
+                redirect_stdout(output):
+            result = runner.run_test_case(dict(
+                {"name": "transport diagnostic", "threshold_ms": 1000,
+                 "timing_samples": 1, "warmup": 0, "expect": {"rows": 1}}, **operation), "memcp-tests")
+        post.assert_called_once()
+        return result, output.getvalue(), runner
+
+    def test_sql_transport_loss_reports_exception_and_owned_signal_exit(self):
+        child = self.child(-9)
+        output = self.sql_failure(self.runner(), requests.ConnectionError("connection reset"), child)
+        self.assertIn("SQL transport failure: ConnectionError", output)
+        self.assertIn("connection reset", output)
+        self.assertIn("response=absent timeout=false", output)
+        self.assertIn("pid=24680 state=exited returncode=-9", output)
+        self.assertNotIn("OOM", output)
+        child.poll.assert_called_once()
+
+    def test_actual_owned_child_exit_code_is_observed_without_another_process(self):
+        with subprocess.Popen([sys.executable, "-c", "raise SystemExit(7)", "--api-port=23456"]) as child:
+            self.assertEqual(child.wait(timeout=3), 7)
+            output = self.sql_failure(self.runner(), requests.ConnectionError("peer closed"), child)
+            self.assertIn(f"pid={child.pid} state=exited returncode=7", output)
+
+    def test_sparql_request_uses_the_same_failure_only_diagnostics(self):
+        child = self.child()
+        runner = self.runner()
+        output = io.StringIO()
+        with mock.patch("run_sql_tests._owned_memcp_process", child), \
+                mock.patch("run_sql_tests.requests.post", side_effect=requests.ConnectionError("peer closed")) as post, \
+                redirect_stdout(output):
+            self.assertIsNone(runner.execute_sparql("memcp-tests", "SELECT ?s WHERE {?s ?p ?o}"))
+        post.assert_called_once()
+        child.poll.assert_called_once()
+        self.assertIn("SPARQL transport failure: ConnectionError", output.getvalue())
+
+    def test_scm_fixture_transport_failure_stays_critical_without_recovery(self):
+        child = self.child(7)
+        result, output, runner = self.fixture({"scm": "true"}, requests.ConnectionError("peer closed"), child, "A")
+        self.assertFalse(result)
+        self.assertEqual(runner.failed_critical, 1)
+        self.assertEqual(runner.perf_results, {})
+        self.assertIn("SCM transport failure: ConnectionError", output)
+        self.assertIn("peer closed", output)
+        self.assertIn("state=exited returncode=7", output)
+        self.assertIn("Invalid measured sample: 1", output)
+        self.assertNotIn("PERF_BASELINE_UNAVAILABLE", output)
+        child.poll.assert_called_once()
+
+    def test_baseline_timeout_retains_existing_recovery_classification(self):
+        child = self.child()
+        result, output, runner = self.fixture({"scm": "true"}, requests.ReadTimeout("read stalled"), child, "A")
+        self.assertTrue(result)
+        failure = next(iter(runner.perf_results.values()))["baseline_failure"]
+        self.assertEqual(failure["kind"], "timeout")
+        self.assertIn("SCM transport failure: ReadTimeout", output)
+        self.assertIn("response=absent timeout=true", output)
+        self.assertIn("pid=24680 state=running returncode=None", output)
+        child.poll.assert_called_once()
+
+    def test_actual_sql_error_keeps_http_evidence_without_transport_polling(self):
+        child = self.child()
+        response = SimpleNamespace(status_code=500, text="Error: invalid expression", headers={})
+        result, output, runner = self.fixture({"sql": "SELECT invalid"}, response, child)
+        self.assertFalse(result)
+        self.assertIn("HTTP 500: Error: invalid expression", output)
+        self.assertNotIn("transport failure", output)
+        self.assertEqual(runner.failed_critical, 1)
+        child.poll.assert_not_called()
+
+    def test_successful_requests_do_not_poll_or_print_transport_diagnostics(self):
+        for operation in ({"sql": "SELECT 1"}, {"scm": "true"}):
+            with self.subTest(operation=operation):
+                child = self.child()
+                response = SimpleNamespace(status_code=200, text="true", headers={})
+                result, output, _ = self.fixture(operation, response, child)
+                self.assertTrue(result)
+                self.assertNotIn("transport failure", output)
+                child.poll.assert_not_called()
+
+    def test_missing_or_unrelated_owner_never_supplies_a_child_status(self):
+        for url, child in (("http://localhost:23456", None),
+                           ("http://localhost:23456", self.child(-9, 23457)),
+                           ("http://remote.invalid:23456", self.child(-9))):
+            with self.subTest(url=url, child=child):
+                output = self.sql_failure(self.runner(url), requests.ConnectionError("lost"), child)
+                self.assertIn("server_child=not-owned", output)
+                self.assertNotIn("pid=24680", output)
+                if child:
+                    child.poll.assert_not_called()
+
+    def test_child_status_failure_cannot_replace_original_transport_failure(self):
+        child = self.child()
+        child.poll.side_effect = ChildProcessError("status unavailable")
+        output = self.sql_failure(self.runner(), requests.ConnectionError("original loss"), child)
+        self.assertIn("original loss", output)
+        self.assertIn("child_status=unavailable (ChildProcessError)", output)
+
+    def test_error_detail_redacts_credentials_and_query_values(self):
+        runner = self.runner()
+        request = requests.Request("POST", "http://user:private-password@localhost:23456/sql/memcp-tests?v1=query-secret",
+                                   headers={"Authorization": "Bearer token-secret", "Cookie": "cookie-secret"}).prepare()
+        request.headers["Authorization"] = "Bearer token-secret"
+        detail = ("connection reset at http://user:private-password@localhost:23456/sql/memcp-tests?v1=query-secret "
+                  "with url: /sql/memcp-tests?v1=relative-secret; "
+                  "Bearer token-secret cookie-secret")
+        output = self.sql_failure(runner, requests.ConnectionError(detail, request=request), None)
+        self.assertIn("connection reset", output)
+        for secret in ("private-password", "query-secret", "relative-secret", "token-secret", "cookie-secret"):
+            self.assertNotIn(secret, output)
+
+    def test_request_construction_failure_also_redacts_known_headers(self):
+        runner = self.runner()
+        runner.auth_header = {"Authorization": "Bearer token-secret", "Cookie": "cookie-secret"}
+        output = self.sql_failure(runner, requests.exceptions.InvalidHeader("invalid Bearer token-secret cookie-secret"), None)
+        self.assertIn("InvalidHeader", output)
+        self.assertNotIn("token-secret", output)
+        self.assertNotIn("cookie-secret", output)
+
+    def test_invalid_header_name_cannot_mask_the_request_exception(self):
+        runner = self.runner()
+        runner.auth_header = {7: "invalid header"}
+        output = self.sql_failure(runner, requests.exceptions.InvalidHeader("Header name must be a string"), None)
+        self.assertIn("InvalidHeader", output)
+        self.assertIn("Header name must be a string", output)
+
+    def test_diagnostic_detail_is_bounded_and_cannot_insert_log_lines(self):
+        output = self.sql_failure(self.runner(), requests.ConnectionError("first\nforged line\x1b[31m" + "x" * 10000), None)
+        self.assertIn("first\\nforged line", output)
+        self.assertNotIn("\x1b", output)
+        self.assertLess(len(output), 3000)
+
+    def test_concurrent_failures_keep_thread_local_timeout_classification(self):
+        runner = self.runner()
+        barrier = threading.Barrier(2)
+        output = []
+
+        def fail(_url, **kwargs):
+            barrier.wait(timeout=3)
+            if kwargs["data"] == b"SELECT 1":
+                raise requests.ReadTimeout("first request")
+            raise requests.ConnectionError("second request")
+
+        def execute(query):
+            response = runner.execute_sql("memcp-tests", query, retry_on_connection_failure=False)
+            return response, runner._test_context.request_timed_out
+
+        with mock.patch("run_sql_tests._owned_memcp_process", None), \
+                mock.patch("run_sql_tests.requests.post", side_effect=fail), \
+                mock.patch("builtins.print", side_effect=lambda *args, **kwargs: output.append(" ".join(map(str, args)))), \
+                concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(execute, "SELECT 1")
+            second = executor.submit(execute, "SELECT 2")
+            self.assertEqual(first.result(timeout=3), (None, True))
+            self.assertEqual(second.result(timeout=3), (None, False))
+        self.assertTrue(any("ReadTimeout" in line and "timeout=true" in line for line in output))
+        self.assertTrue(any("ConnectionError" in line and "timeout=false" in line for line in output))
 
 
 class ErrorResponseContractTest(unittest.TestCase):
