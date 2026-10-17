@@ -942,15 +942,39 @@ func upgradePersistedTableCalls(value scm.Scmer) scm.Scmer {
 				replace(1, rewritten)
 				bound = next
 			}
+			var restorePattern func(scm.Scmer) scm.Scmer
+			restorePattern = func(value scm.Scmer) scm.Scmer {
+				pattern := value.WithoutSourceInfo()
+				if !pattern.IsSlice() || len(pattern.Slice()) == 0 {
+					return value
+				}
+				parts := pattern.Slice()
+				if callHeadIs(parts[0], "eval") {
+					rewritten, _ := restore(value, bound)
+					return rewritten
+				}
+				if callHeadIs(parts[0], "quote") || callHeadIs(parts[0], "symbol") || callHeadIs(parts[0], "ignorecase") {
+					return value
+				}
+				var rewritten []scm.Scmer
+				for i, part := range parts {
+					if next := restorePattern(part); next != part {
+						if rewritten == nil {
+							rewritten = append([]scm.Scmer(nil), parts...)
+						}
+						rewritten[i] = next
+					}
+				}
+				if rewritten != nil {
+					return scm.NewSlice(rewritten)
+				}
+				return value
+			}
 			for i := 2; i < len(items); i += 2 {
 				body, branchScope := i, bound
 				if i+1 < len(items) {
 					body = i + 1
-					pattern := items[i].WithoutSourceInfo()
-					if pattern.IsSlice() && len(pattern.Slice()) > 0 && callHeadIs(pattern.Slice()[0], "eval") {
-						rewritten, _ := restore(items[i], bound)
-						replace(i, rewritten)
-					}
+					replace(i, restorePattern(items[i]))
 					if patternBindsTable(items[i]) {
 						branchScope = local
 					}

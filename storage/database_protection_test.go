@@ -320,6 +320,7 @@ func TestPersistedTableCallABIUpgradeRetainsNativeBindings(t *testing.T) {
 		`(lambda () (+ 3 (if false (define table (lambda (a b) (+ a b))) (table "memcp-tests" "items"))))`,
 		`(lambda () (+ 3 (match table (eval table) (table "memcp-tests" "items"))))`,
 		`(lambda () (match nil (eval (table "memcp-tests" "items")) 3 _ 45))`,
+		`(lambda () (match (list 42) (list (eval (table "memcp-tests" "items"))) 45 _ 0))`,
 	} {
 		t.Run(source, func(t *testing.T) {
 			restored := upgradePersistedTableCalls(scm.Read("native table binding", source))
