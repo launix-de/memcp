@@ -1149,6 +1149,152 @@ class ErrorResponseContractTest(unittest.TestCase):
         self.assertTrue(is_error_response(response))
 
 
+class TransportFailureDiagnosticsContractTest(unittest.TestCase):
+    def make_runner(self, base_url="http://localhost:4321"):
+        runner = SQLTestRunner(base_url)
+        runner.ensure_database = lambda _database: None
+        return runner
+
+    def test_failed_request_reports_exception_and_actual_owned_exit_status(self):
+        for status, expected in ((None, "running"), (0, "exit_status=0"),
+                                 (-9, "exit_status=-9")):
+            with self.subTest(status=status):
+                runner = self.make_runner()
+                child = mock.Mock(pid=12345, args=["./memcp", "--api-port=4321"])
+                child.poll.return_value = status
+                output = io.StringIO()
+                with mock.patch("run_sql_tests._owned_memcp_process", child), \
+                        mock.patch("run_sql_tests.requests.post", side_effect=requests.ConnectionError("peer closed")), \
+                        redirect_stdout(output):
+                    response = runner.execute_sql("memcp-tests", "INSERT INTO items VALUES(1)")
+                self.assertIsNone(response)
+                self.assertIn("requests.exceptions.ConnectionError: peer closed", output.getvalue())
+                self.assertIn("pid=12345", output.getvalue())
+                self.assertIn(expected, output.getvalue())
+                child.poll.assert_called_once_with()
+
+    def test_successful_request_does_not_poll_or_report_the_owned_child(self):
+        runner = self.make_runner()
+        child = mock.Mock(pid=12345, args=["./memcp", "--api-port=4321"])
+        response = SimpleNamespace(status_code=200, text='{"n":1}')
+        output = io.StringIO()
+        with mock.patch("run_sql_tests._owned_memcp_process", child), \
+                mock.patch("run_sql_tests.requests.post", return_value=response), \
+                redirect_stdout(output):
+            self.assertIs(runner.execute_sql("memcp-tests", "SELECT 1 AS n"), response)
+        child.poll.assert_not_called()
+        self.assertEqual(output.getvalue(), "")
+
+    def test_connect_only_timeout_is_not_attributed_to_a_discovered_process(self):
+        runner = self.make_runner()
+        output = io.StringIO()
+        with mock.patch("run_sql_tests._owned_memcp_process", None), \
+                mock.patch("run_sql_tests.find_memcp_pid") as discover, \
+                mock.patch("run_sql_tests.requests.post", side_effect=requests.ReadTimeout("read deadline")), \
+                redirect_stdout(output):
+            response = runner.execute_sql("memcp-tests", "SELECT 1", retry_on_connection_failure=False)
+        self.assertIsNone(response)
+        self.assertTrue(runner._test_context.request_timed_out)
+        self.assertIn("requests.exceptions.ReadTimeout: read deadline", output.getvalue())
+        self.assertIn("no matching runner-managed child", output.getvalue())
+        discover.assert_not_called()
+
+    def test_other_endpoint_never_polls_the_owned_child(self):
+        for base_url in ("http://localhost:4322", "http://remote.invalid:4321"):
+            with self.subTest(base_url=base_url):
+                runner = self.make_runner(base_url)
+                child = mock.Mock(pid=12345, args=["./memcp", "--api-port=4321"])
+                output = io.StringIO()
+                with mock.patch("run_sql_tests._owned_memcp_process", child), \
+                        mock.patch("run_sql_tests.requests.post", side_effect=requests.ConnectionError("refused")), \
+                        redirect_stdout(output):
+                    runner.execute_sql("memcp-tests", "SELECT 1", retry_on_connection_failure=False)
+                self.assertIn("no matching runner-managed child", output.getvalue())
+                child.poll.assert_not_called()
+
+    def test_failed_process_poll_preserves_the_original_transport_exception(self):
+        runner = self.make_runner()
+        child = mock.Mock(pid=12345, args=["./memcp", "--api-port=4321"])
+        child.poll.side_effect = OSError("status unavailable")
+        output = io.StringIO()
+        with mock.patch("run_sql_tests._owned_memcp_process", child), \
+                mock.patch("run_sql_tests.requests.post", side_effect=requests.ConnectionError("peer closed")), \
+                redirect_stdout(output):
+            response = runner.execute_sql("memcp-tests", "SELECT 1", retry_on_connection_failure=False)
+        self.assertIsNone(response)
+        self.assertIn("ConnectionError: peer closed", output.getvalue())
+        self.assertIn("OSError: status unavailable", output.getvalue())
+
+    def test_parallel_failures_keep_timeout_classification_invocation_local(self):
+        runner = self.make_runner()
+        runner._test_context.request_timed_out = "main invocation"
+        results = {}
+        barrier = threading.Barrier(2)
+
+        def fail_request(_url, *, data, **_kwargs):
+            barrier.wait(timeout=5)
+            if data == b"SELECT timeout":
+                raise requests.ReadTimeout("timed worker")
+            raise requests.ConnectionError("closed worker")
+
+        def worker(query):
+            response = runner.execute_sql("memcp-tests", query, retry_on_connection_failure=False)
+            results[query] = (response, runner._test_context.request_timed_out)
+
+        output = io.StringIO()
+        with mock.patch("run_sql_tests._owned_memcp_process", None), \
+                mock.patch("run_sql_tests.requests.post", side_effect=fail_request), \
+                redirect_stdout(output):
+            workers = [threading.Thread(target=worker, args=(query,))
+                       for query in ("SELECT timeout", "SELECT closed")]
+            for thread in workers:
+                thread.start()
+            for thread in workers:
+                thread.join(timeout=10)
+                self.assertFalse(thread.is_alive())
+        self.assertEqual(results, {"SELECT timeout": (None, True), "SELECT closed": (None, False)})
+        self.assertEqual(runner._test_context.request_timed_out, "main invocation")
+        self.assertIn("ReadTimeout: timed worker", output.getvalue())
+        self.assertIn("ConnectionError: closed worker", output.getvalue())
+
+    def test_measured_scm_transport_loss_still_fails_with_owned_child_diagnostics(self):
+        runner = self.make_runner()
+        child = mock.Mock(pid=12345, args=["./memcp", "--api-port=4321"])
+        child.poll.return_value = -9
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {"PERF_FIXTURE_TRIAL": "1", "PERF_FIXTURE_ROLE": "A"}), \
+                mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests._owned_memcp_process", child), \
+                mock.patch("run_sql_tests.requests.post", side_effect=requests.ConnectionError("sample disconnected")) as post, \
+                redirect_stdout(output):
+            passed = runner.run_test_case({
+                "name": "SCM transport failure", "scm": "true", "threshold_ms": 1000,
+                "timing_samples": 2, "warmup": 0, "expect": {"rows": 1},
+            }, "memcp-tests")
+        self.assertFalse(passed)
+        self.assertEqual(runner.failed_critical, 1)
+        self.assertEqual(runner.perf_results, {})
+        post.assert_called_once()
+        self.assertIn("Measured sample failed", output.getvalue())
+        self.assertIn("ConnectionError: sample disconnected", output.getvalue())
+        self.assertIn("exit_status=-9", output.getvalue())
+        child.poll.assert_called_once_with()
+
+    def test_sparql_error_reports_the_same_owned_process_status(self):
+        runner = self.make_runner()
+        child = mock.Mock(pid=12345, args=["./memcp", "--api-port=4321"])
+        child.poll.return_value = 2
+        output = io.StringIO()
+        with mock.patch("run_sql_tests._owned_memcp_process", child), \
+                mock.patch("run_sql_tests.requests.post", side_effect=requests.ConnectionError("query disconnected")), \
+                redirect_stdout(output):
+            self.assertIsNone(runner.execute_sparql("memcp-tests", "SELECT * WHERE {}"))
+        self.assertIn("ConnectionError: query disconnected", output.getvalue())
+        self.assertIn("exit_status=2", output.getvalue())
+
+
 class InterruptedRequestContractTest(unittest.TestCase):
     def test_only_read_only_sql_is_safe_to_replay(self) -> None:
         for query in (

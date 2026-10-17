@@ -70,7 +70,7 @@ import struct
 from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 # CPU measurement helpers
 NUM_CPUS = multiprocessing.cpu_count()
@@ -1071,6 +1071,32 @@ class SQLTestRunner:
         except Exception:
             pass
 
+    def _report_transport_failure(self, exc: Exception) -> None:
+        """Report only failed requests; successful timing samples do no process polling.
+
+        Keep timeout classification invocation-local as before. Snapshot only our
+        managed child for this local endpoint, without discovering other processes
+        or inferring why a child exited from a missing HTTP response.
+        """
+        self._test_context.request_timed_out = isinstance(exc, requests.Timeout)
+        child_detail = "no matching runner-managed child"
+        proc = _owned_memcp_process
+        try:
+            endpoint = urlsplit(self.base_url)
+            if (proc is not None and endpoint.hostname in ("localhost", "127.0.0.1", "::1")
+                    and get_memcp_api_port(proc) == endpoint.port):
+                try:
+                    status = proc.poll()
+                    child_detail = (f"managed child pid={proc.pid} running" if status is None
+                                    else f"managed child pid={proc.pid} exit_status={status}")
+                except Exception as poll_error:
+                    child_detail = (f"managed child pid={proc.pid} status unavailable: "
+                                    f"{type(poll_error).__name__}: {poll_error}")
+        except ValueError:
+            pass  # A malformed endpoint must not mask the original request failure.
+        error_type = f"{type(exc).__module__}.{type(exc).__qualname__}"
+        print(f"    Transport failure at {self.base_url}: {error_type}: {exc}; {child_detail}", flush=True)
+
     def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None, session_id: Optional[str] = None, timeout: int = 10, params: Optional[list] = None, retry_on_connection_failure: Optional[bool] = None) -> Optional[requests.Response]:
         self._test_context.request_timed_out = False
         # proactively ensure database exists (works for connect-only too)
@@ -1098,7 +1124,7 @@ class SQLTestRunner:
             try:
                 return requests.post(url, data=body, headers=headers, timeout=timeout)
             except Exception as exc:
-                self._test_context.request_timed_out = isinstance(exc, requests.Timeout)
+                self._report_transport_failure(exc)
                 if not retry_on_connection_failure:
                     return None
                 # parse port from base_url
@@ -1131,8 +1157,7 @@ class SQLTestRunner:
             body = query.encode("utf-8") if isinstance(query, str) else query
             return requests.post(url, data=body, headers=headers, timeout=timeout)
         except Exception as e:
-            self._test_context.request_timed_out = isinstance(e, requests.Timeout)
-            print(f"Error executing SPARQL: {e}")
+            self._report_transport_failure(e)
             return None
 
     def load_ttl(self, database: str, ttl_data: str) -> bool:
@@ -1700,7 +1725,7 @@ class SQLTestRunner:
                     return requests.post(f"{self.base_url}/scm", data=query.encode("utf-8"),
                                          headers=auth_header, timeout=sql_timeout)
                 except requests.RequestException as exc:
-                    self._test_context.request_timed_out = isinstance(exc, requests.Timeout)
+                    self._report_transport_failure(exc)
                     return None
             if is_sparql:
                 return self.execute_sparql(database, query, auth_header, timeout=sql_timeout)
