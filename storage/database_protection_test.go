@@ -208,3 +208,66 @@ func TestPersistedTableCallABIUpgradePreservesData(t *testing.T) {
 		t.Fatal("load did not upgrade the authoritative Scheme trigger source")
 	}
 }
+
+func TestPersistedTableCallABIUpgradeRespectsLocalBindings(t *testing.T) {
+	for _, source := range []string{
+		`(lambda () (begin (define table (lambda (a b) (+ a b))) (table 1 2)))`,
+		`(lambda () (begin (set table (lambda (a b) (+ a b))) (table 1 2)))`,
+		`(lambda () (begin (define unused (!begin (define table (lambda (a b) (+ a b))) 0)) (table 1 2)))`,
+		`(lambda () (begin (define table (lambda (a b) (if (equal? a 0) b (table (- a 1) (+ b 1))))) (table 1 2)))`,
+		`(lambda () (match (lambda (a b) (+ a b)) table (table 1 2)))`,
+	} {
+		t.Run(source, func(t *testing.T) {
+			original := scm.Read("local table binding", source)
+			restored := upgradePersistedTableCalls(original)
+			if value := scm.Apply(scm.Eval(restored, &scm.Globalenv)); value.Int() != 3 {
+				t.Fatalf("restored local call = %s, want 3", scm.String(value))
+			}
+		})
+	}
+}
+
+func TestPersistedTableCallABIUpgradeRetainsNativeBindings(t *testing.T) {
+	en := scm.Env{Vars: scm.Vars{scm.Symbol("table"): scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		if len(args) != 4 || args[1].Bool() || args[3].Bool() {
+			t.Fatal("native reference did not receive explicit exact-name policies")
+		}
+		return scm.NewInt(42)
+	})}, Outer: &scm.Globalenv}
+	for _, source := range []string{
+		`(lambda () (begin (define before (table "memcp-tests" "items")) (define table (lambda (a b) (+ a b))) (+ before (table 1 2))))`,
+		`(lambda () (+ (begin (define table (lambda (a b) (+ a b))) (table 1 2)) (table "memcp-tests" "items")))`,
+		`(lambda () (begin (define table (table "memcp-tests" "items")) (+ table 3)))`,
+		`(lambda () (+ 3 (if false (define table (lambda (a b) (+ a b))) (table "memcp-tests" "items"))))`,
+		`(lambda () (+ 3 (match table (eval table) (table "memcp-tests" "items"))))`,
+		`(lambda () (match nil (eval (table "memcp-tests" "items")) 3 _ 45))`,
+	} {
+		t.Run(source, func(t *testing.T) {
+			restored := upgradePersistedTableCalls(scm.Read("native table binding", source))
+			if value := scm.Apply(scm.Eval(restored, &en)); value.Int() != 45 {
+				t.Fatalf("restored native/local result = %s, want 45", scm.String(value))
+			}
+		})
+	}
+}
+
+func TestPersistedTableCallABIUpgradeRetainsCapturedBinding(t *testing.T) {
+	original := scm.Eval(scm.Read("captured table", `(begin
+		(define table (lambda (a b) (+ a b)))
+		(lambda () (table 1 2)))`), &scm.Globalenv)
+	if restored := upgradePersistedTableCalls(original); restored != original {
+		t.Fatal("restored callback replaced a lexical capture of table")
+	}
+	if value := scm.Apply(original); value.Int() != 3 {
+		t.Fatalf("captured call = %s, want 3", scm.String(value))
+	}
+}
+
+func TestPersistedTableCallABIUpgradeRejectsAmbiguousRebinding(t *testing.T) {
+	// Either arm can run in the same scope. Guessing a callable's ABI here
+	// could corrupt an unrelated function; require an explicit source update.
+	original := scm.Read("conditional table binding", `(lambda (condition) (begin
+		(if condition (define table (lambda (a b) (+ a b))))
+		(table 1 2)))`)
+	requirePanic(t, func() { upgradePersistedTableCalls(original) })
+}

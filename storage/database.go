@@ -804,69 +804,186 @@ func (db *database) publishTableNamesLocked() {
 // row values. Quoted data stays opaque; the live builtin accepts only the new
 // interface. New Proc identities discard any obsolete compiled/optimizer state.
 func upgradePersistedTableCalls(value scm.Scmer) scm.Scmer {
-	if value.IsSourceInfo() {
-		inner := value.WithoutSourceInfo()
-		if restored := upgradePersistedTableCalls(inner); restored != inner {
-			return restored
+	bindsTable := func(params scm.Scmer) bool {
+		params = params.WithoutSourceInfo()
+		if callHeadIs(params, "table") {
+			return true
 		}
-		return value
-	}
-	if value.IsProc() {
-		proc := value.Proc()
-		if callHeadIs(proc.Params, "table") {
-			return value
-		}
-		if proc.Params.IsSlice() {
-			for _, param := range proc.Params.Slice() {
-				if callHeadIs(param, "table") {
-					return value // table is a lexical parameter, not the native builtin
-				}
-			}
-		}
-		body := upgradePersistedTableCalls(proc.Body)
-		if body == proc.Body {
-			return value
-		}
-		return scm.NewProcStruct(scm.Proc{Params: proc.Params, Body: body, En: proc.En,
-			NumVars: proc.NumVars, NumberedOnly: proc.NumberedOnly})
-	}
-	if !value.IsSlice() {
-		return value
-	}
-	items := value.Slice()
-	if len(items) == 3 && callHeadIs(items[0], "lambda") {
-		if callHeadIs(items[1], "table") {
-			return value
-		}
-		if params := items[1].WithoutSourceInfo(); params.IsSlice() {
+		if params.IsSlice() {
 			for _, param := range params.Slice() {
 				if callHeadIs(param, "table") {
-					return value
+					return true
 				}
 			}
 		}
+		return false
 	}
-	if len(items) > 0 && callHeadIs(items[0], "quote") {
-		return value
-	}
-	if len(items) == 3 && callHeadIs(items[0], "table") {
-		return scm.NewSlice([]scm.Scmer{items[0], upgradePersistedTableCalls(items[1]),
-			scm.NewBool(false), upgradePersistedTableCalls(items[2]), scm.NewBool(false)})
-	}
-	var replacement []scm.Scmer
-	for i, item := range items {
-		rewritten := upgradePersistedTableCalls(item)
-		if rewritten != item {
-			if replacement == nil {
-				replacement = append([]scm.Scmer(nil), items...)
-			}
-			replacement[i] = rewritten
+	var patternBindsTable func(scm.Scmer) bool
+	patternBindsTable = func(pattern scm.Scmer) bool {
+		pattern = pattern.WithoutSourceInfo()
+		if callHeadIs(pattern, "table") {
+			return true
 		}
+		if pattern.IsSlice() {
+			parts := pattern.Slice()
+			if len(parts) > 0 && (callHeadIs(parts[0], "quote") || callHeadIs(parts[0], "symbol") || callHeadIs(parts[0], "ignorecase") || callHeadIs(parts[0], "eval")) {
+				return false // literal/reference patterns do not introduce a binding
+			}
+			for _, part := range parts {
+				if patternBindsTable(part) {
+					return true
+				}
+			}
+		}
+		return false
 	}
-	if replacement != nil {
-		return scm.NewSlice(replacement)
+	// Scope state belongs only to this cold definition transformation.
+	// BEGIN owns a scope; !BEGIN and argument evaluation share their caller's.
+	// DEFINE and SET bind only after their initializer, while a lambda initializer
+	// can recursively refer to the binding established before its invocation.
+	const (
+		native = iota
+		local
+		conditional
+	)
+	join := func(a, b int) int {
+		if a == b {
+			return a
+		}
+		return conditional
 	}
-	return value
+	var restore func(scm.Scmer, int) (scm.Scmer, int)
+	restore = func(value scm.Scmer, scope int) (scm.Scmer, int) {
+		if scope == local {
+			return value, local
+		}
+		if value.IsSourceInfo() {
+			inner := value.WithoutSourceInfo()
+			if rewritten, bound := restore(inner, scope); rewritten != inner {
+				return rewritten, bound
+			} else {
+				return value, bound
+			}
+		}
+		if value.IsProc() {
+			proc := value.Proc()
+			if bindsTable(proc.Params) {
+				return value, scope
+			}
+			if proc.En != nil {
+				if owner := proc.En.FindRead(scm.Symbol("table")); owner != nil && owner.Vars[scm.Symbol("table")] != scm.Globalenv.Vars[scm.Symbol("table")] {
+					return value, scope // retained lexical capture, not the builtin
+				}
+			}
+			body, _ := restore(proc.Body, scope)
+			if body == proc.Body {
+				return value, scope
+			}
+			return scm.NewProcStruct(scm.Proc{Params: proc.Params, Body: body, En: proc.En,
+				NumVars: proc.NumVars, NumberedOnly: proc.NumberedOnly}), scope
+		}
+		if !value.IsSlice() || len(value.Slice()) == 0 {
+			return value, scope
+		}
+		items := value.Slice()
+		if callHeadIs(items[0], "quote") {
+			return value, scope
+		}
+		var replacement []scm.Scmer
+		replace := func(i int, rewritten scm.Scmer) {
+			if rewritten != items[i] {
+				if replacement == nil {
+					replacement = append([]scm.Scmer(nil), items...)
+				}
+				replacement[i] = rewritten
+			}
+		}
+		bound := scope
+		switch {
+		case len(items) == 3 && callHeadIs(items[0], "lambda"):
+			if !bindsTable(items[1]) {
+				body, _ := restore(items[2], scope)
+				replace(2, body)
+			}
+		case len(items) == 3 && (callHeadIs(items[0], "define") || callHeadIs(items[0], "set")):
+			declaresTable := callHeadIs(items[1], "table")
+			initializer := items[2].WithoutSourceInfo()
+			recursive := initializer.IsProc() || (initializer.IsSlice() && len(initializer.Slice()) > 0 && callHeadIs(initializer.Slice()[0], "lambda"))
+			initialScope := scope
+			if declaresTable && recursive {
+				initialScope = local
+			}
+			rewritten, next := restore(items[2], initialScope)
+			replace(2, rewritten)
+			bound = next
+			if declaresTable {
+				bound = local
+			}
+		case callHeadIs(items[0], "if"):
+			// Alternatives do not execute in sequence. Retain their possible
+			// outgoing bindings, and never guess across a conditional rebinding.
+			branchScopes := make([]int, 0, len(items)/2+1)
+			for i := 1; i < len(items); i += 2 {
+				rewritten, next := restore(items[i], bound)
+				replace(i, rewritten)
+				bound = next
+				if i+1 < len(items) {
+					rewritten, next = restore(items[i+1], bound)
+					replace(i+1, rewritten)
+					branchScopes = append(branchScopes, next)
+				}
+			}
+			for _, branch := range branchScopes {
+				bound = join(bound, branch)
+			}
+		case callHeadIs(items[0], "match") || callHeadIs(items[0], "match_mut"):
+			if len(items) > 1 {
+				rewritten, next := restore(items[1], bound)
+				replace(1, rewritten)
+				bound = next
+			}
+			for i := 2; i < len(items); i += 2 {
+				body, branchScope := i, bound
+				if i+1 < len(items) {
+					body = i + 1
+					pattern := items[i].WithoutSourceInfo()
+					if pattern.IsSlice() && len(pattern.Slice()) > 0 && callHeadIs(pattern.Slice()[0], "eval") {
+						rewritten, _ := restore(items[i], bound)
+						replace(i, rewritten)
+					}
+					if patternBindsTable(items[i]) {
+						branchScope = local
+					}
+				}
+				rewritten, _ := restore(items[body], branchScope)
+				replace(body, rewritten)
+			}
+		default:
+			for i, item := range items {
+				rewritten, next := restore(item, bound)
+				replace(i, rewritten)
+				bound = next
+			}
+			if callHeadIs(items[0], "begin") || callHeadIs(items[0], "begin_mut") {
+				bound = scope // declarations in this nested scope do not escape
+			}
+		}
+		if len(items) == 3 && callHeadIs(items[0], "table") {
+			if scope == conditional {
+				panic("cannot upgrade a table call after conditional rebinding; update the stored definition explicitly")
+			}
+			if replacement != nil {
+				items = replacement
+			}
+			return scm.NewSlice([]scm.Scmer{items[0], items[1], scm.NewBool(false), items[2], scm.NewBool(false)}), bound
+		}
+		if replacement != nil {
+			return scm.NewSlice(replacement), bound
+		}
+		return value, bound
+	}
+	restored, _ := restore(value, native)
+	return restored
 }
 
 func invalidatePersistedPlannerCodeAfterLoad(t *table) {
