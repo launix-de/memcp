@@ -78,7 +78,11 @@ test_cases:
   expect:
     error: true
 - name: Compressed UTF16 export is decoded without data loss
-  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-utf16.sql.gz") (sql_policy "root"))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-utf16.sql.gz") session))
   noncritical: true
 - name: UTF16 import preserves Unicode and nulls
   sql: SELECT id, label, note FROM tsdump_utf16
@@ -299,3 +303,59 @@ test_cases:
         false)) (lambda (failure) (strlike (concat failure) "%outside destination%"))))
   expect: {result: true}
 cleanup: []
+
+- name: Text input fixture starts empty
+  syntax: tsql
+  sql: DROP TABLE IF EXISTS dbo.tsdump_text_input
+- name: Text input uses ordinary native columns
+  syntax: tsql
+  sql: CREATE TABLE dbo.tsdump_text_input(id INT PRIMARY KEY,label NVARCHAR(80))
+- name: UTF16 big-endian stream uses the ordinary import path
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (streamString (base64_decode "/v8ASQBOAFMARQBSAFQAIABkAGIAbwAuAHQAcwBkAHUAbQBwAF8AdABlAHgAdABfAGkAbgBwAHUAdAAgAFYAQQBMAFUARQBTACgAMQAsAE4AJwBaAPwAcgBpAGMAaAAg2D3cGAAnACkAOw==")) session)
+      true)
+  expect:
+    result: true
+- name: Big-endian import preserves astral text
+  syntax: tsql
+  sql: SELECT id,label FROM dbo.tsdump_text_input
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      label: Zürich 🐘
+- name: Malformed UTF16 stops before any SQL executes
+  scm: |
+    (try (lambda () (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (streamString (base64_decode "//5JAE4AUwBFAFIAVAAgAGQAYgBvAC4AdABzAGQAdQBtAHAAXwB0AGUAeAB0AF8AaQBuAHAAdQB0ACAAVgBBAEwAVQBFAFMAKAAyACwATgAnAHAAYQByAHQAaQBhAGwAJwApADsAIQ==")) session)
+      false)) (lambda (failure) (strlike (concat failure) "%odd UTF-16%")))
+  expect:
+    result: true
+- name: Malformed input publishes no partial insert
+  syntax: tsql
+  sql: SELECT COUNT(*) AS n FROM dbo.tsdump_text_input
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: UTF32 is rejected as an unsupported input encoding
+  scm: |
+    (try (lambda () (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (streamString (base64_decode "//4AAEEAAAA=")) session)
+      false)) (lambda (failure) (strlike (concat failure) "%UTF-32%")))
+  expect:
+    result: true
+- name: Generic load accepts explicit encoding and omitted handlers
+  scm: (equal? (load (streamString (base64_decode "AEE=")) nil nil "utf-16be") "A")
+  expect:
+    result: true
+- name: Text input fixture cleanup
+  syntax: tsql
+  sql: DROP TABLE dbo.tsdump_text_input

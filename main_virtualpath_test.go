@@ -21,6 +21,9 @@ import "archive/zip"
 import "bytes"
 import "compress/gzip"
 import "io"
+import "fmt"
+import "strings"
+import "encoding/hex"
 import "os"
 import "path/filepath"
 import "testing"
@@ -184,4 +187,166 @@ func TestWatchInitialErrorsPropagate(t *testing.T) {
 			getWatch(dir)(scm.NewString("watched"), scm.NewFunc(func(...scm.Scmer) scm.Scmer { panic("initial callback failed") }))
 		})
 	}
+}
+
+// loadTestStream records ownership and deliberately returns one byte per read.
+// A decoder cannot assume that a BOM or surrogate pair arrives in one Read.
+type loadTestStream struct {
+	io.Reader
+	closed bool
+}
+
+func (s *loadTestStream) Read(p []byte) (int, error) {
+	if len(p) > 1 {
+		p = p[:1]
+	}
+	return s.Reader.Read(p)
+}
+
+func (s *loadTestStream) Close() error { s.closed = true; return nil }
+
+func TestLoadTextEncoding(t *testing.T) {
+	for _, tc := range []struct {
+		name, hex, encoding, want, failure string
+	}{
+		{"utf8", "41c3bcf09f9098", "bom", "Aü🐘", ""},
+		{"utf8-bom-retained", "efbbbf41", "bom", "\ufeffA", ""},
+		{"utf16le", "fffe4100fc003dd818dc", "bom", "Aü🐘", ""},
+		{"utf16be", "feff004100fcd83ddc18", "bom", "Aü🐘", ""},
+		{"explicit-le", "4100fc003dd818dc", "utf-16le", "Aü🐘", ""},
+		{"explicit-be", "004100fcd83ddc18", "utf-16be", "Aü🐘", ""},
+		{"explicit-le-bom", "fffe4100", "utf-16le", "A", ""},
+		{"explicit-be-bom", "feff0041", "utf-16be", "A", ""},
+		{"embedded-bom", "fffe4100fffe4200", "bom", "A\ufeffB", ""},
+		{"replacement-is-data", "fffefdff", "bom", "�", ""},
+		{"empty", "", "bom", "", ""},
+		{"bom-only", "fffe", "bom", "", ""},
+		{"raw-default", "fffe4100", "", "\xff\xfeA\x00", ""},
+		{"odd-byte", "fffe410042", "bom", "", "odd UTF-16"},
+		{"high-surrogate", "fffe00d8", "bom", "", "surrogate"},
+		{"low-surrogate", "fffe00dc", "bom", "", "surrogate"},
+		{"nonpair", "fffe00d84100", "bom", "", "surrogate"},
+		{"reversed-pair", "fffe00dc00d8", "bom", "", "surrogate"},
+		{"utf32le", "fffe000041000000", "bom", "", "UTF-32"},
+		{"utf32be", "0000feff00000041", "bom", "", "UTF-32"},
+		{"wrong-le-bom", "feff0041", "utf-16le", "", "byte order"},
+		{"wrong-be-bom", "fffe4100", "utf-16be", "", "byte order"},
+		{"unknown-encoding", "41", "latin-guess", "", "encoding"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := hex.DecodeString(tc.hex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream := &loadTestStream{Reader: bytes.NewReader(data)}
+			defer func() {
+				failure := recover()
+				if tc.failure == "" && failure != nil {
+					t.Fatalf("unexpected failure: %v", failure)
+				}
+				if tc.failure != "" && (failure == nil || !strings.Contains(fmt.Sprint(failure), tc.failure)) {
+					t.Errorf("failure = %v, want %q", failure, tc.failure)
+				}
+				if stream.closed {
+					t.Error("load closed a borrowed reader")
+				}
+			}()
+			got := getLoad("")(scm.NewAny(stream), scm.NewNil(), scm.NewNil(), scm.NewString(tc.encoding))
+			if tc.failure == "" && got.String() != tc.want {
+				t.Errorf("got %q, want %q", got.String(), tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadDecodedHandlers(t *testing.T) {
+	for _, delimiter := range []scm.Scmer{scm.NewNil(), scm.NewString("\n")} {
+		t.Run(fmt.Sprint(delimiter), func(t *testing.T) {
+			data := []byte{0xff, 0xfe, 'A', 0, '\n', 0, 'B', 0}
+			var lines []string
+			callback := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { lines = append(lines, a[0].String()); return scm.NewBool(true) })
+			getLoad("")(scm.NewAny(bytes.NewReader(data)), callback, delimiter, scm.NewString("bom"))
+			want := []string{"A\nB"}
+			if !delimiter.IsNil() {
+				want = []string{"A\n", "B"}
+			}
+			if fmt.Sprint(lines) != fmt.Sprint(want) {
+				t.Errorf("lines = %q, want %q", lines, want)
+			}
+		})
+	}
+	for _, data := range [][]byte{{0xff, 0xfe, 'A', 0, '\n', 0, 0}, {0xff, 0xfe, 0, 0xd8}} {
+		t.Run(fmt.Sprintf("malformed-%x", data), func(t *testing.T) {
+			calls := 0
+			defer func() {
+				if recover() == nil {
+					t.Error("malformed input succeeded")
+				}
+				if calls != 0 {
+					t.Errorf("handler ran %d times before decode failure", calls)
+				}
+			}()
+			getLoad("")(scm.NewAny(bytes.NewReader(data)), scm.NewFunc(func(...scm.Scmer) scm.Scmer { calls++; return scm.NewBool(true) }), scm.NewString("\n"), scm.NewString("bom"))
+		})
+	}
+}
+
+func TestLoadFileOwnership(t *testing.T) {
+	// Inspect only this test's filename; other parallel tests may open descriptors.
+	if _, err := os.ReadDir("/proc/self/fd"); err != nil {
+		t.Skip("descriptor inspection unavailable")
+	}
+	dir := t.TempDir()
+	filename := filepath.Join(dir, "owned.txt.gz")
+	writeGzipFile(t, filename, []byte{0xff, 0xfe, 'A', 0})
+	for _, panics := range []bool{false, true} {
+		func() {
+			defer func() {
+				if (recover() != nil) != panics {
+					t.Error("unexpected callback panic state")
+				}
+			}()
+			callback := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+				if panics {
+					panic("callback failed")
+				}
+				return scm.NewBool(true)
+			})
+			getLoad(dir)(scm.NewString("owned.txt.gz"), callback, scm.NewNil(), scm.NewString("bom"))
+		}()
+		entries, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			name, _ := os.Readlink(filepath.Join("/proc/self/fd", entry.Name()))
+			if name == filename {
+				t.Errorf("load leaked owned file descriptor %s", entry.Name())
+			}
+		}
+	}
+}
+
+func TestLoadGzipDecodeFailure(t *testing.T) {
+	dir := t.TempDir()
+	filename := filepath.Join(dir, "broken.sql.gz")
+	writeGzipFile(t, filename, []byte{0xff, 0xfe, 'A', 0})
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[len(data)-8] ^= 1 // corrupt the checksum, retaining a readable payload
+	if err := os.WriteFile(filename, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	defer func() {
+		if recover() == nil {
+			t.Error("corrupt gzip succeeded")
+		}
+		if calls != 0 {
+			t.Error("handler saw partial input before gzip failure")
+		}
+	}()
+	getLoad(dir)(scm.NewString("broken.sql.gz"), scm.NewFunc(func(...scm.Scmer) scm.Scmer { calls++; return scm.NewBool(true) }), scm.NewNil(), scm.NewString("bom"))
 }
