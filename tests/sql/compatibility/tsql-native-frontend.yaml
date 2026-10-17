@@ -2076,6 +2076,82 @@ test_cases:
       - sql: INSERT INTO tsql_identity_explicit_completion(id,value) VALUES(100,2)
     sql: SELECT @@IDENTITY AS id
     expect: {rows: 1, data: [{id: null}]}
+  - name: Identity observation precedes completion for VALUES
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_source
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_sink
+    - sql: CREATE TABLE tsql_identity_observe_source(id INT IDENTITY PRIMARY KEY,value
+        INT)
+    - sql: CREATE TABLE tsql_identity_observe_sink(value NUMERIC(38,0))
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_sink
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_source
+    sql: INSERT tsql_identity_observe_source(value) VALUES(10),(20); INSERT tsql_identity_observe_sink(value)
+      VALUES(@@IDENTITY); SELECT value AS observed,@@IDENTITY AS after_insert,SCOPE_IDENTITY()
+      AS scoped FROM tsql_identity_observe_sink
+    expect:
+      rows: 1
+      data:
+      - observed: 2
+        after_insert: null
+        scoped: 2
+  - name: Identity observation precedes completion for SELECT
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_source
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_sink
+    - sql: CREATE TABLE tsql_identity_observe_source(id INT IDENTITY PRIMARY KEY,value
+        INT)
+    - sql: CREATE TABLE tsql_identity_observe_sink(value NUMERIC(38,0))
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_sink
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_source
+    sql: INSERT tsql_identity_observe_source(value) VALUES(10),(20); INSERT tsql_identity_observe_sink(value)
+      SELECT @@IDENTITY; SELECT value AS observed,@@IDENTITY AS after_insert,SCOPE_IDENTITY()
+      AS scoped FROM tsql_identity_observe_sink
+    expect:
+      rows: 1
+      data:
+      - observed: 2
+        after_insert: null
+        scoped: 2
+  - name: Identity observation precedes completion for ordered SELECT
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_source
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_sink
+    - sql: CREATE TABLE tsql_identity_observe_source(id INT IDENTITY PRIMARY KEY,value
+        INT)
+    - sql: CREATE TABLE tsql_identity_observe_sink(value NUMERIC(38,0))
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_sink
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_source
+    sql: INSERT tsql_identity_observe_source(value) VALUES(10),(20); INSERT tsql_identity_observe_sink(value)
+      SELECT TOP(1) @@IDENTITY FROM tsql_identity_observe_source ORDER BY id; SELECT
+      value AS observed,@@IDENTITY AS after_insert,SCOPE_IDENTITY() AS scoped FROM tsql_identity_observe_sink
+    expect:
+      rows: 1
+      data:
+      - observed: 2
+        after_insert: null
+        scoped: 2
+  - name: Identity observation is retained after a failed nonidentity insert
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_source
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_sink
+    - sql: CREATE TABLE tsql_identity_observe_source(id INT IDENTITY PRIMARY KEY,value
+        INT)
+    - sql: CREATE TABLE tsql_identity_observe_sink(value NUMERIC(38,0) UNIQUE)
+    - sql: INSERT tsql_identity_observe_sink VALUES(9)
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_sink
+    - sql: DROP TABLE IF EXISTS tsql_identity_observe_source
+    sql: INSERT tsql_identity_observe_source(value) VALUES(10),(20); BEGIN TRY INSERT
+      tsql_identity_observe_sink(value) VALUES(9); END TRY BEGIN CATCH SELECT @@IDENTITY
+      AS retained,SCOPE_IDENTITY() AS scoped; END CATCH
+    expect:
+      rows: 1
+      data:
+      - retained: 2
+        scoped: 2
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
   - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion
