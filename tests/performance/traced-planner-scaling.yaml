@@ -14,7 +14,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 metadata:
-  performance_shard_weight: 2
+  performance_shard_weight: 6
   version: "1.0"
   description: "Trace-derived planner scaling and preparation ownership budgets"
   isolated: true
