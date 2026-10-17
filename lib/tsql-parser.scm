@@ -1909,64 +1909,15 @@ that context explicitly; stored views refuse this scalar before publication. */
 
 	(define offset nil)
 
-	(define tsql_select_order (lambda (query) (match query
-		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) order
-		_ nil
-	)))
-
-	(define tsql_select_limit (lambda (query) (match query
-		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) limit
-		_ nil
-	)))
-
-	(define tsql_select_offset (lambda (query) (match query
-		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) offset
-		_ nil
-	)))
-
-	(define tsql_select_clear_stage (lambda (query) (match query
-		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts)
-		(list (quote query-block) schema tables fields condition group having nil nil nil '() '() '())
-		_ query
-	)))
-
-	(define tsql_union_all_parts (lambda (query)
-		(match query
-			((symbol union-block) (symbol all) branches order limit offset facts) (list branches order limit offset)
-			_ nil)))
-
-	(define tsql_union_distinct_parts (lambda (query)
-		(match query
-			((symbol union-block) (symbol distinct) branches order limit offset facts) (list branches order limit offset)
-			_ nil)))
-
-	(define tsql_union_all_query (lambda (left right) (begin
-		(define right_parts (tsql_union_all_parts right))
-		(if (nil? right_parts)
-			(list (quote union-block)
-				(quote all)
-				(list left (tsql_select_clear_stage right))
-				(tsql_select_order right)
-				(tsql_select_limit right)
-				(tsql_select_offset right)
-				'())
-			(match right_parts '(branches order limit offset)
-				(list (quote union-block) (quote all) (cons left branches) order limit offset '())))
-	)))
-
-	(define tsql_union_distinct_query (lambda (left right) (begin
-		(define right_parts (tsql_union_distinct_parts right))
-		(if (nil? right_parts)
-			(list (quote union-block)
-				(quote distinct)
-				(list left (tsql_select_clear_stage right))
-				(tsql_select_order right)
-				(tsql_select_limit right)
-				(tsql_select_offset right)
-				'())
-			(match right_parts '(branches order limit offset)
-				(list (quote union-block) (quote distinct) (cons left branches) order limit offset '())))
-	)))
+	/* UNION is left associative. Flatten only an adjacent union with the same
+	mode and no intervening result window; every branch keeps its own TOP. */
+	(define tsql_union_query (lambda (mode left right) (begin
+		(define branches (match left
+			((symbol union-block) previous branches order limit offset facts)
+			(if (and (equal? previous mode) (nil? order) (nil? limit) (nil? offset)
+				(empty_list? facts)) (append branches right) (list left right))
+			_ (list left right)))
+		(list (quote union-block) mode branches nil nil nil '()))))
 
 	(define tsql_inner_select_kind (lambda (sym) (begin
 		(if (equal?? sym "inner_select")
@@ -2011,7 +1962,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(match datasets
 			(cons only '()) (tsql_values_row_query schema2 coldesc only)
 			(cons first rest) (reduce rest (lambda (acc row)
-				(tsql_union_all_query acc (tsql_values_row_query schema2 coldesc row)))
+				(tsql_union_query (quote all) acc (tsql_values_row_query schema2 coldesc row)))
 				(tsql_values_row_query schema2 coldesc first))
 			_ (error "INSERT VALUES requires at least one row")
 		)
@@ -2078,6 +2029,59 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(define having tsql_expression)
 		)
 
+	) (begin
+			(define projected_exprs (extract_assoc (merge cols) (lambda (_title expr) expr)))
+			(define sources (if (nil? from) '() (merge from)))
+
+			(define distinct_preserved_by_group (and distinct
+				(and (not (nil? group))
+					(and (not (empty_list? group))
+						(reduce group (lambda (preserved expr)
+							(and preserved (contains? projected_exprs expr))) true)))))
+			(list (quote query-block) schema sources (merge cols) condition
+				(if (and distinct (not distinct_preserved_by_group)) projected_exprs group)
+				having
+				nil prefix_limit nil '() '()
+				(merge (list
+					/* The common name binder resolves all joined/derived sources.
+					HAVING names belong to the input scope in this frontend. */
+					(list (list (quote having_input_scope) true))
+					(if distinct (list (list (quote select_distinct) true)) '())))))))
+
+	/* Parentheses delimit query expressions. Keep this parser-only bit until
+	the trailing window has been attached; it never enters logical planning. */
+	(define tsql_select_branch (parser (or
+		(parser (define query tsql_select_core) (list query false))
+		(parser '("(" (define query tsql_select) ")") (list query true)))))
+	(define tsql_select_window (lambda (query order suffix_stage parenthesized) (begin
+		(if (and suffix_stage (nil? order)) (error "OFFSET requires ORDER BY") true)
+		(if (and (nil? order) (nil? suffix_stage)) query (begin
+			/* An outer window over a bracketed query is an ordinary derived source.
+			Its inner TOP/order remains a semantic boundary for the shared planner. */
+			(define query (if parenthesized (make_query_block schema
+				(list (list "__tsql_window_source" schema query false nil))
+				(merge (map (queryplan_result_titles query) (lambda (title)
+					(list title (list (quote get_column) "__tsql_window_source" false title false)))))
+				true nil nil nil nil nil '() '() '()) query))
+			(match query
+				((symbol query-block) database sources fields condition group having previous_order limit offset hidden stages facts)
+				(begin
+					(if (and suffix_stage (not (nil? limit))) (error "TOP cannot be combined with OFFSET") true)
+					(make_query_block database sources fields condition group having order
+						(if suffix_stage (car suffix_stage) limit)
+						(if suffix_stage (cadr suffix_stage) offset) hidden stages facts))
+				((symbol union-block) mode branches previous_order limit offset facts)
+				(list (quote union-block) mode branches order
+					(if suffix_stage (car suffix_stage) limit)
+					(if suffix_stage (cadr suffix_stage) offset) facts)))))))
+	(define tsql_select (parser '(
+		(define left tsql_select_branch)
+		(define terms (* (parser '(
+			(atom "UNION" true)
+			(define mode (or (parser (atom "ALL" true) (quote all)) (parser empty (quote distinct))))
+			(define right tsql_select_branch)
+		) (list mode (car right))) empty true))
+
 		(?
 			(atom "ORDER" true)
 			(atom "BY" true)
@@ -2100,42 +2104,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(define suffix_stage tsql_select_suffix)
 		(? tsql_query_hints)
 
-	) (begin
-			(if (and suffix_stage (nil? order)) (error "OFFSET requires ORDER BY") true)
-			(if (and suffix_stage (not (nil? prefix_limit))) (error "TOP cannot be combined with OFFSET") true)
-			(define projected_exprs (extract_assoc (merge cols) (lambda (_title expr) expr)))
-			(define sources (if (nil? from) '() (merge from)))
-
-			(define distinct_preserved_by_group (and distinct
-				(and (not (nil? group))
-					(and (not (empty_list? group))
-						(reduce group (lambda (preserved expr)
-							(and preserved (contains? projected_exprs expr))) true)))))
-			(list (quote query-block) schema sources (merge cols) condition
-				(if (and distinct (not distinct_preserved_by_group)) projected_exprs group)
-				having
-				order (if (nil? prefix_limit) (if suffix_stage (car suffix_stage) limit) prefix_limit)
-				(if suffix_stage (cadr suffix_stage) offset) '() '()
-				(merge (list
-					/* The common name binder resolves all joined/derived sources.
-					HAVING names belong to the input scope in this frontend. */
-					(list (list (quote having_input_scope) true))
-					(if distinct (list (list (quote select_distinct) true)) '())))))))
-
-	(define tsql_select (parser (or
-		(parser '(
-			(define left tsql_select_core)
-			(atom "UNION" true)
-			(atom "ALL" true)
-			(define right tsql_select)
-		) (tsql_union_all_query left right))
-		(parser '(
-			(define left tsql_select_core)
-			(atom "UNION" true)
-			(define right tsql_select)
-		) (tsql_union_distinct_query left right))
-		tsql_select_core
-	)))
+	) (tsql_select_window
+			(reduce terms (lambda (query term) (tsql_union_query (car term) query (cadr term))) (car left))
+			order suffix_stage (and (empty_list? terms) (cadr left)))))
 
 	/* A mutation target may name a FROM alias. Resolve that alias before checking
 	write permission; the grammar never creates a fictitious table for it. */
