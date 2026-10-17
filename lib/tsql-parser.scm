@@ -1277,7 +1277,11 @@ dimensions are metadata only and are absent from the executable plan. */
 						(if metadata (metadata "Dimensions") nil))
 					(match (source_relation src)
 						((symbol query-block) _schema inner_sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
-						(tsql_result_dimensions inner_sources ((expand_query_block_fields inner_sources fields) bound_column) parameters)
+						/* Resolve compiler recipes in the same lexical prefix as their
+						declared types; ordinary derived relations stay closed. */
+						(tsql_result_dimensions (if (source_lateral? src)
+							(merge (list inner_sources (source_prefix_for_alias sources (source_alias src)))) inner_sources)
+							((expand_query_block_fields inner_sources fields) bound_column) parameters)
 						_ nil)))
 			_ nil))
 	_ nil)))
