@@ -38,20 +38,29 @@ test_cases:
   name: 'Fixture setup 011: (createforeignkey (table "memcp-tests" "odbc_keys_child") "FK_parent" (list "p_second"
     "p_first") (t'
 - name: Direct base columns retain precise provenance and nullability
-  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_describe_only\" true)\n  (define descriptions (eval (parse_tsql\
-    \ \"memcp-tests\" \"SELECT TOP 0 id AS alias_id,p_first,rv FROM odbc_keys_child FOR BROWSE\" nil s nil)))\n\
-    \  (define id (car descriptions))\n  (define rv (nth descriptions 2))\n  (if (and (id \"updatable\") (not (id\
-    \ \"nullable\")) (id \"key\") (id \"browse\")\n      (equal? (id \"source\") '(\"memcp-tests\" \"odbc_keys_child\"\
-    \ \"id\"))\n      (not (rv \"updatable\")) (rv \"rowversion\")) true\n    (error \"direct base declaration was\
-    \ lost in result metadata\")))\n"
+  scm: |
+    (begin
+      (define descriptions (tds_describe "memcp-tests"
+        "SELECT TOP 0 id AS alias_id,p_first,rv FROM odbc_keys_child FOR BROWSE" "" (newsession)))
+      (define id (car descriptions))
+      (define rv (nth descriptions 2))
+      (if (and (id "updatable") (not (id "nullable")) (id "key") (id "browse")
+          (equal? (id "source") '("memcp-tests" "odbc_keys_child" "id"))
+          (not (rv "updatable")) (rv "rowversion")) true
+        (error "direct base declaration was lost in result metadata")))
+
   noncritical: true
 - name: Computed projections and outer joins remain read only
-  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_describe_only\" true)\n  (define computed (car (eval (parse_tsql\
-    \ \"memcp-tests\" \"SELECT TOP 0 id+1 AS computed FROM odbc_keys_child\" nil s nil))))\n  (define joined (car\
-    \ (eval (parse_tsql \"memcp-tests\" \"SELECT TOP 0 p.first FROM odbc_keys_child c LEFT JOIN odbc_keys_parent\
-    \ p ON p.first=c.p_first\" nil s nil))))\n  (if (and (not (computed \"updatable\")) (nil? (computed \"source\"\
-    ))\n      (not (joined \"updatable\")) (joined \"nullable\")) true\n    (error \"unproven projection was marked\
-    \ editable\")))\n"
+  scm: |
+    (begin
+      (define computed (car (tds_describe "memcp-tests"
+        "SELECT TOP 0 id+1 AS computed FROM odbc_keys_child" "" (newsession))))
+      (define joined (car (tds_describe "memcp-tests"
+        "SELECT TOP 0 p.first FROM odbc_keys_child c LEFT JOIN odbc_keys_parent p ON p.first=c.p_first" "" (newsession))))
+      (if (and (not (computed "updatable")) (nil? (computed "source"))
+          (not (joined "updatable")) (joined "nullable")) true
+        (error "unproven projection was marked editable")))
+
   noncritical: true
 - name: Aliased primary key and expression support explicit browse
   sql: SELECT TOP 0 id AS alias_id,p_first+1 AS computed FROM odbc_keys_child FOR BROWSE
@@ -88,7 +97,6 @@ test_cases:
       TABLE_NAME: odbc_fixture
       TABLE_TYPE: TABLE
       REMARKS: null
-  noncritical: true
 - name: Table and view enumeration respects real object kinds
   sql: EXEC sp_tables @table_name=N'odbc_fixture%'
   expect:
@@ -103,21 +111,18 @@ test_cases:
   sql: sp_tables @table_name=N'odbc%', @fUsePattern=0
   expect:
     rows: 0
-  noncritical: true
 - name: Case independent exact metadata identifiers
   sql: sp_tables @table_name=N'ODBC_FIXTURE', @fUsePattern=0
   expect:
     rows: 1
     data:
     - TABLE_NAME: odbc_fixture
-  noncritical: true
 - name: Bracket metadata patterns support literal underscore
   sql: sp_tables @table_name=N'odbc[_]fixture'
   expect:
     rows: 1
     data:
     - TABLE_NAME: odbc_fixture
-  noncritical: true
 - name: Foreign database metadata qualifiers are rejected
   sql: sp_tables @table_qualifier=N'otherdb'
   expect:
@@ -169,7 +174,6 @@ test_cases:
       SQL_DATA_TYPE: 9
       SQL_DATETIME_SUB: 1
       ORDINAL_POSITION: 4
-  noncritical: true
 - name: Legacy ODBC column date identifier
   sql: sp_columns N'odbc_fixture',N'dbo',N'memcp-tests',N'd',2
   expect:
@@ -179,7 +183,6 @@ test_cases:
       DATA_TYPE: 9
       SQL_DATA_TYPE: 9
       SQL_DATETIME_SUB: 1
-  noncritical: true
 - name: Column pattern filtering retains physical declaration ordinal
   sql: sp_columns @table_name=N'odbc_fixture', @column_name=N'am%'
   expect:
@@ -187,7 +190,6 @@ test_cases:
     data:
     - COLUMN_NAME: amount
       ORDINAL_POSITION: 3
-  noncritical: true
 - name: Invalid ODBC version is rejected
   sql: sp_columns @table_name=N'odbc_fixture', @ODBCVer=4
   expect:
@@ -206,7 +208,6 @@ test_cases:
       PRECISION: 19
       SQL_DATA_TYPE: -5
       NUM_PREC_RADIX: 10
-  noncritical: true
 - name: Actual legacy type-info batch form accepts one positional argument
   sql: sp_datatype_info_100 -5
   expect:
@@ -215,7 +216,6 @@ test_cases:
     - TYPE_NAME: bigint
       DATA_TYPE: -5
       PRECISION: 19
-  noncritical: true
 - name: Unicode type-info describes character dimensions
   sql: sp_datatype_info @data_type=-9,@ODBCVer=3
   expect:
@@ -226,7 +226,6 @@ test_cases:
       PRECISION: 4000
       LITERAL_PREFIX: ''''
       CREATE_PARAMS: length
-  noncritical: true
 - name: Native date type-info uses ODBC 3 identifier
   sql: sp_datatype_info_100 91,3
   expect:
@@ -235,12 +234,25 @@ test_cases:
     - TYPE_NAME: date
       SQL_DATETIME_SUB: 1
       SQL_DATA_TYPE: 9
-  noncritical: true
+- name: Fixed Unicode type-info retains character width
+  sql: sp_datatype_info_100 -8,3
+  expect:
+    rows: 1
+    data:
+    - TYPE_NAME: nchar
+      DATA_TYPE: -8
+      PRECISION: 4000
+      LITERAL_PREFIX: "'"
+      CREATE_PARAMS: length
+- name: Empty driver metadata retains its integer return status
+  sql: DECLARE @status INT; EXEC @status=sp_pkeys N'absent_odbc_keys'; SELECT @status AS status
+  expect:
+    rows: 1
+    data: [{status: 0}]
 - name: Unsupported type-info code returns a genuine empty result
   sql: sp_datatype_info_100 999,3
   expect:
     rows: 0
-  noncritical: true
 - name: Metadata follows ALTER rather than retaining old rows
   sql: ALTER TABLE dbo.odbc_fixture ADD added SMALLINT
 - name: Metadata observes newly published column
@@ -251,14 +263,12 @@ test_cases:
     - COLUMN_NAME: added
       DATA_TYPE: 5
       ORDINAL_POSITION: 5
-  noncritical: true
 - name: Remove metadata fixture addition
   sql: ALTER TABLE dbo.odbc_fixture DROP COLUMN added
 - name: Metadata observes removed column
   sql: sp_columns @table_name=N'odbc_fixture',@column_name=N'added'
   expect:
     rows: 0
-  noncritical: true
 - name: Real ODBC prepare probe infers a cast parameter without executing SQL
   sql: sp_describe_undeclared_parameters N'SELECT CAST(@PRM0001 AS BIGINT) AS probe_value'
   expect:
@@ -340,7 +350,6 @@ test_cases:
     data:
     - COLUMN_NAME: id
       DATA_TYPE: -5
-  noncritical: true
 - name: Description cannot inspect foreign databases
   sql: sp_describe_undeclared_parameters N'SELECT id FROM [otherdb].dbo.odbc_fixture WHERE id=@p'
   expect:
@@ -399,22 +408,18 @@ test_cases:
     - COLUMN_NAME: first
       KEY_SEQ: 2
       PK_NAME: PRIMARY
-  noncritical: true
 - name: Case independent key lookup
   sql: sp_pkeys @table_name=N'ODBC_KEYS_PARENT'
   expect:
     rows: 2
-  noncritical: true
 - name: Unique keys do not become fabricated primary keys
   sql: sp_pkeys N'odbc_keys_unique'
   expect:
     rows: 0
-  noncritical: true
 - name: Missing key tables return an empty result
   sql: sp_pkeys N'absent_odbc_keys'
   expect:
     rows: 0
-  noncritical: true
 - name: Key metadata rejects foreign database access
   sql: sp_pkeys N'odbc_keys_parent',N'dbo',N'otherdb'
   expect:
@@ -434,12 +439,10 @@ test_cases:
       COLUMN_NAME: nullable_key
       NON_UNIQUE: 0
       TYPE: 3
-  noncritical: true
 - name: Index names accept bound wildcard patterns
   sql: sp_statistics N'odbc_keys_parent',N'dbo',N'memcp-tests',N'PRI%'
   expect:
     rows: 2
-  noncritical: true
 - name: Exact statistics requests fail explicitly
   sql: sp_statistics @table_name=N'odbc_keys_parent',@accuracy=N'E'
   expect:
@@ -454,7 +457,6 @@ test_cases:
       PSEUDO_COLUMN: 1
     - COLUMN_NAME: first
       DATA_TYPE: 4
-  noncritical: true
 - name: Special row identifier uses actual non-null unique keys
   sql: sp_special_columns @table_name=N'odbc_keys_unique'
   expect:
@@ -462,7 +464,6 @@ test_cases:
     data:
     - COLUMN_NAME: id
       TYPE_NAME: int
-  noncritical: true
 - name: Generated row version is identified with native binary metadata
   sql: sp_special_columns N'odbc_keys_child',N'dbo',@qualifier=N'memcp-tests',@col_type=N'V',@scope=N'T',@nullable=N'U',@ODBCVer=3
   expect:
@@ -474,12 +475,10 @@ test_cases:
       PRECISION: 8
       LENGTH: 8
       PSEUDO_COLUMN: 1
-  noncritical: true
 - name: Ordinary columns are not invented row versions
   sql: sp_special_columns @table_name=N'odbc_keys_parent',@col_type=N'V'
   expect:
     rows: 0
-  noncritical: true
 - name: Invalid special column options fail
   sql: sp_special_columns @table_name=N'odbc_keys_parent',@col_type=N'X'
   expect:
@@ -501,12 +500,10 @@ test_cases:
     - PKCOLUMN_NAME: first
       FKCOLUMN_NAME: p_first
       KEY_SEQ: 2
-  noncritical: true
 - name: Referenced table metadata finds referencing relationships
   sql: sp_fkeys @pktable_name=N'ODBC_KEYS_PARENT'
   expect:
     rows: 2
-  noncritical: true
 - name: Foreign key discovery requires an explicit table filter
   sql: sp_fkeys
   expect:
@@ -515,7 +512,6 @@ test_cases:
   sql: sp_fkeys @pktable_name=N'odbc_keys_unique'
   expect:
     rows: 0
-  noncritical: true
 - name: Metadata tracks a dropped foreign key immediately
   scm: (dropforeignkey (table "memcp-tests" "odbc_keys_child") "FK_parent")
   expect:
@@ -524,7 +520,6 @@ test_cases:
   sql: sp_fkeys @fktable_name=N'odbc_keys_child'
   expect:
     rows: 0
-  noncritical: true
 - name: Metadata tracks dropped unique keys
   scm: (dropkey (table "memcp-tests" "odbc_keys_unique") "UQ_nullable")
   expect:
@@ -535,7 +530,6 @@ test_cases:
     rows: 1
     data:
     - INDEX_NAME: UQ_id
-  noncritical: true
 - sql: DROP TABLE IF EXISTS dbo.odbc_keys_child
   name: 'Fixture cleanup 001: DROP TABLE IF EXISTS dbo.odbc_keys_child'
 - sql: DROP TABLE IF EXISTS dbo.odbc_keys_parent

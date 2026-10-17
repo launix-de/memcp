@@ -1554,7 +1554,7 @@ test_cases:
     sql: SELECT id,value FROM tsql_seeded_identity ORDER BY id
     expect: {rows: 2, data: [{id: 50, value: 7}, {id: 51, value: 8}]}
   - name: Native seeded identity explicit values advance the existing allocator
-    sql: INSERT INTO tsql_seeded_identity VALUES (100,9)
+    sql: INSERT INTO tsql_seeded_identity(id,value) VALUES (100,9)
   - name: Native seeded identity reuses the advanced allocator
     sql: INSERT INTO tsql_seeded_identity (value) VALUES (10)
   - name: Native seeded identity explicit maximum controls the next value

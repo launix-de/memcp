@@ -7,6 +7,9 @@ metadata:
   requires_tds: true
 setup: []
 test_cases:
+- name: Submitted UTF8 scripts accept a leading byte order mark
+  sql: "\uFEFFSELECT 9 AS value"
+  expect: {rows: 1, data: [{value: 9}]}
 - name: GO separates physical batches and preserves repetition
   scm: |
     (equal? (tsql_script_batches "SELECT 1\nGO 3\nSELECT 2\nGO\n")
@@ -1170,7 +1173,6 @@ test_cases:
     rows: 1
     data:
     - message: '00003'
-  noncritical: true
 
 - name: Dynamic parameter declarations reject duplicate formal names
   sql: EXEC sp_executesql N'SELECT @n AS value',N'@n INT,@n INT',@n=1
@@ -1305,5 +1307,101 @@ test_cases:
     - severity: null
   cleanup:
   - sql: DROP PROCEDURE dbo.script_error_helper
+
+- name: First batch statement may invoke a procedure without EXEC
+  setup:
+  - sql: CREATE PROCEDURE dbo.script_implicit_call @value INT AS SELECT @value AS value
+  sql: dbo.script_implicit_call @value=7; SELECT 8 AS value
+  expect:
+    rows: 2
+    data: [{value: 7}, {value: 8}]
+  cleanup:
+  - sql: DROP PROCEDURE dbo.script_implicit_call
+- name: GO restores the optional EXEC position
+  setup:
+  - sql: CREATE PROCEDURE dbo.script_implicit_call @value INT AS SELECT @value AS value
+  sql: |
+    dbo.script_implicit_call 3
+    GO
+    dbo.script_implicit_call 4
+  expect:
+    rows: 2
+    data: [{value: 3}, {value: 4}]
+  cleanup:
+  - sql: DROP PROCEDURE dbo.script_implicit_call
+- name: A later statement requires EXEC for a procedure call
+  scm: (parse_tsql_batch "memcp-tests" "SELECT 1; dbo.script_implicit_call 2")
+  expect: {error: true}
+- name: A conditional procedure call requires EXEC
+  scm: (parse_tsql_batch "memcp-tests" "IF 1=1 dbo.script_implicit_call 2")
+  expect: {error: true}
+- name: A nested block procedure call requires EXEC
+  scm: (parse_tsql_batch "memcp-tests" "BEGIN dbo.script_implicit_call 2 END")
+  expect: {error: true}
+- name: Explicit calls after ordinary statements retain the same invocation node
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests" "SELECT 1; EXEC dbo.inspect @value=2")
+      (list "batch" (list (list "statement" "SELECT 1")
+        (list "execute" "memcp-tests" "inspect" (list (list "value" "2"))))))
+  expect: {result: true}
+
+- name: Message numeric flags preserve sign before zero padding
+  sql: BEGIN TRY RAISERROR(N'%05d:%+05i:% 5d',16,1,-3,3,3); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect: {rows: 1, data: [{message: '-0003:+0003:    3'}]}
+- name: Message left justification overrides zero padding
+  sql: BEGIN TRY RAISERROR(N'[%0-5d]',16,1,3); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect: {rows: 1, data: [{message: '[3    ]'}]}
+- name: Message integer precision overrides zero field padding
+  sql: BEGIN TRY RAISERROR(N'[%08.4d]:[%.0i]',16,1,-3,0); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect: {rows: 1, data: [{message: '[   -0003]:[]'}]}
+- name: Message text formatting counts declared national character units
+  sql: BEGIN TRY RAISERROR(N'[%6.3s]:[%-4s]',16,1,N'äbcde',N'ö'); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect: {rows: 1, data: [{message: '[   äbc]:[ö   ]'}]}
+- name: Message fixed width preserves minimum bigint exactly
+  sql: DECLARE @n BIGINT=-9223372036854775808; BEGIN TRY RAISERROR(N'%021I64d',16,1,@n); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect: {rows: 1, data: [{message: '-09223372036854775808'}]}
+- name: Message width does not change substitution type validation
+  sql: RAISERROR(N'%05d',16,1,N'3')
+  expect: {error: true}
+- name: Unsupported dynamic format widths fail explicitly
+  sql: RAISERROR(N'%*d',16,1,5,3)
+  expect: {error: true}
+- name: Message padding rejects an unbounded requested allocation
+  sql: RAISERROR(N'%999999999d',16,1,3)
+  expect: {error: true}
+
+- name: Message zero string precision produces an empty padded field
+  sql: BEGIN TRY RAISERROR(N'[%.s]:[%3.0s]',16,1,N'text',N'abc'); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect: {rows: 1, data: [{message: '[]:[   ]'}]}
+
+- name: Message width counts a supplementary national character as two units
+  sql: BEGIN TRY RAISERROR(N'[%4s]',16,1,N'😀'); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
+  expect: {rows: 1, data: [{message: '[  😀]'}]}
+- name: Message precision rejects an unbounded requested allocation
+  sql: RAISERROR(N'%.2048d',16,1,3)
+  expect: {error: true}
+
+- name: Native batches preserve consecutive command completions and later result metadata
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_native_done
+  - sql: CREATE TABLE dbo.script_native_done(id INT PRIMARY KEY,value INT)
+  tds:
+    statements:
+    - sql: INSERT dbo.script_native_done VALUES(1,2),(2,4); UPDATE dbo.script_native_done SET value=value+1; DELETE FROM dbo.script_native_done WHERE id=2;
+      expect: {rows: 0}
+    - sql: SELECT id,value FROM dbo.script_native_done
+      expect: {rows: 1,data: [{id: 1,value: 3}]}
+    - sql: SET NOCOUNT ON; INSERT dbo.script_native_done VALUES(3,9); UPDATE dbo.script_native_done SET value=value+1 WHERE id=3; SET NOCOUNT OFF;
+      expect: {rows: 0}
+    - sql: SELECT id,value FROM dbo.script_native_done ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 3},{id: 3,value: 10}]}
+    - sql: BEGIN TRANSACTION; INSERT dbo.script_native_done VALUES(4,11); COMMIT;
+      expect: {rows: 0}
+    - sql: SELECT TOP(0) value FROM dbo.script_native_done
+      expect: {rows: 0,columns: [value]}
+    - sql: SELECT value FROM dbo.script_native_done WHERE id=4
+      expect: {rows: 1,data: [{value: 11}]}
+  cleanup:
+  - sql: DROP TABLE dbo.script_native_done
 
 cleanup: []

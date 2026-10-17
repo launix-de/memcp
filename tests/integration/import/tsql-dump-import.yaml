@@ -6,6 +6,118 @@ metadata:
   isolated: true
 setup: []
 test_cases:
+- name: Create independent console transaction fixture
+  syntax: tsql
+  sql: CREATE TABLE dbo.tsdump_console_lifecycle (id INT PRIMARY KEY,label NVARCHAR(80))
+- name: Console import commits a completed explicit transaction
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (streamString "BEGIN TRANSACTION; INSERT dbo.tsdump_console_lifecycle VALUES(1,N'committed'); COMMIT;") session)
+      (nil? (session "transaction")))
+  expect: {result: true}
+- name: Committed console data is visible to a new request
+  syntax: tsql
+  sql: SELECT label FROM dbo.tsdump_console_lifecycle WHERE id=1
+  expect: {rows: 1, data: [{label: committed}]}
+- name: Console import rejects and releases an unfinished transaction
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (try (lambda () (begin
+        (load_tsql "memcp-tests" (streamString "BEGIN TRANSACTION; INSERT dbo.tsdump_console_lifecycle VALUES(2,N'unfinished');") session)
+        false)) (lambda (failure)
+          (and (nil? (session "transaction")) (strlike (concat failure) "%unfinished import transaction%")))))
+  expect: {result: true}
+- name: Unfinished console changes are rolled back
+  syntax: tsql
+  sql: SELECT COUNT(*) AS n FROM dbo.tsdump_console_lifecycle WHERE id=2
+  expect: {rows: 1, data: [{n: 0}]}
+- name: Runtime failure rolls back only the import transaction
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (try (lambda () (begin
+        (load_tsql "memcp-tests" (streamString "INSERT dbo.tsdump_console_lifecycle VALUES(3,N'autocommit'); BEGIN TRANSACTION; INSERT dbo.tsdump_console_lifecycle VALUES(4,N'rolled back'); THROW 51000,N'import failure marker',1;") session)
+        false)) (lambda (failure)
+          (and (nil? (session "transaction")) (strlike (concat failure) "%import failure marker%")))))
+  expect: {result: true}
+- name: Import failure preserves completed autocommit statements
+  syntax: tsql
+  sql: SELECT id,label FROM dbo.tsdump_console_lifecycle WHERE id IN (3,4) ORDER BY id
+  expect: {rows: 1, data: [{id: 3, label: autocommit}]}
+- name: Console import leaves a caller transaction under caller ownership
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (tx_begin session)
+      (load_tsql "memcp-tests" (streamString "INSERT dbo.tsdump_console_lifecycle VALUES(5,N'caller owned');") session)
+      (define owned (not (nil? (session "transaction"))))
+      (tx_rollback session)
+      owned)
+  expect: {result: true}
+- name: Caller rollback removes imported changes
+  syntax: tsql
+  sql: SELECT COUNT(*) AS n FROM dbo.tsdump_console_lifecycle WHERE id=5
+  expect: {rows: 1, data: [{n: 0}]}
+- name: A failed import does not take over a caller transaction
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (tx_begin session)
+      (define retained (try (lambda () (begin
+        (load_tsql "memcp-tests" (streamString "THROW 51000,N'caller failure marker',1;") session)
+        false)) (lambda (failure)
+          (and (not (nil? (session "transaction"))) (strlike (concat failure) "%caller failure marker%")))))
+      (tx_rollback session)
+      retained)
+  expect: {result: true}
+- name: Compressed UTF8 streams use the existing stream adapters
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (zcat (gzip (streamString "INSERT dbo.tsdump_console_lifecycle VALUES(6,N'Zürich 🐘');"))) session)
+      true)
+  expect: {result: true}
+- name: Compressed UTF8 import preserves Unicode
+  syntax: tsql
+  sql: SELECT label FROM dbo.tsdump_console_lifecycle WHERE id=6
+  expect: {rows: 1, data: [{label: "Zürich 🐘"}]}
+- name: Console import accepts a leading UTF8 byte order mark
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (streamString (concat (unicode_char 65279) "INSERT dbo.tsdump_console_lifecycle VALUES(7,N'BOM');")) session)
+      true)
+  expect: {result: true}
+- name: A byte order mark within a value remains data
+  syntax: tsql
+  sql: "SELECT N'\uFEFF' AS value"
+  expect: {rows: 1, data: [{value: "\uFEFF"}]}
+- name: Authenticated console import runs an ordinary UTF8 script
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-script-basic.sql") session)
+      true)
+  expect: {result: true}
+- name: Console import preserves batch variables and quoted GO text
+  syntax: tsql
+  sql: SELECT id,label FROM dbo.script_import
+  expect:
+    rows: 1
+    data: [{id: 7, label: "line one\nGO\nline two"}]
+- name: Remove the ordinary console import fixture
+  syntax: tsql
+  sql: DROP TABLE dbo.script_import
 - sql: DROP TABLE IF EXISTS tsdump_identity_observation
   name: 'Fixture setup 001: DROP TABLE IF EXISTS tsdump_identity_observation'
 - sql: DROP TABLE IF EXISTS tsdump_identity
@@ -17,7 +129,12 @@ test_cases:
 - sql: DROP TABLE IF EXISTS tsdump_conditional
   name: 'Fixture setup 005: DROP TABLE IF EXISTS tsdump_conditional'
 - name: Load GO-delimited export into selected target
-  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-export.sql") (sql_policy "root"))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-export.sql") session))
+
   noncritical: true
 - name: Multiline conditional declarations and ELSE data preserve target confinement
   sql: SELECT id,label FROM tsdump_conditional
@@ -78,7 +195,12 @@ test_cases:
   expect:
     error: true
 - name: Compressed UTF16 export is decoded without data loss
-  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-utf16.sql.gz") (sql_policy "root"))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-utf16.sql.gz") session))
+
   noncritical: true
 - name: UTF16 import preserves Unicode and nulls
   sql: SELECT id, label, note FROM tsdump_utf16
@@ -90,31 +212,47 @@ test_cases:
       note: null
   noncritical: true
 - name: Import policy is honored before opening a file
-  scm: (load_tsql "memcp-tests" "/does/not/exist" (lambda (db table write) (error "denied")))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "import_denied")
+      (try (lambda () (begin
+        (load_tsql "memcp-tests" "/does/not/exist" session)
+        false)) (lambda (failure)
+          (if (strlike (concat failure) "%access denied%") (error (concat failure)) false))))
+
   expect:
     error: true
 - name: Unsupported import statement stops execution
-  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-unsupported.sql") (sql_policy "root"))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-unsupported.sql") session))
+
   expect:
     error: true
 - name: Statements after an unsupported statement are not executed
-  sql: SELECT COUNT(*) AS n FROM tsdump_items WHERE id = 998
+  sql: SELECT COUNT(*) AS n FROM tsdump_console_lifecycle WHERE id = 998
   expect:
     rows: 1
     data:
     - n: 0
-  noncritical: true
 - name: Uncommitted import transaction is rejected
-  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-uncommitted.sql") (sql_policy "root"))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-uncommitted.sql") session))
+
   expect:
     error: true
 - name: Uncommitted imported rows are rolled back
-  sql: SELECT COUNT(*) AS n FROM tsdump_items WHERE id = 999
+  sql: SELECT COUNT(*) AS n FROM tsdump_console_lifecycle WHERE id = 999
   expect:
     rows: 1
     data:
     - n: 0
-  noncritical: true
 - name: Import rejects references outside destination and source alias
   scm: "(begin\n  (define s (newsession))\n  (s \"tsql_import_target\" \"memcp-tests\")\n  (s \"tsql_import_source\"\
     \ \"export_source\")\n  (parse_tsql \"memcp-tests\" \"SELECT * FROM [other_db].[dbo].[tsdump_items]\" (sql_policy\
@@ -141,4 +279,7 @@ test_cases:
   name: 'Fixture cleanup 004: DROP TABLE IF EXISTS tsdump_utf16'
 - sql: DROP TABLE IF EXISTS tsdump_conditional
   name: 'Fixture cleanup 005: DROP TABLE IF EXISTS tsdump_conditional'
+- name: Drop independent console transaction fixture
+  syntax: tsql
+  sql: DROP TABLE dbo.tsdump_console_lifecycle
 cleanup: []

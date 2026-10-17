@@ -252,11 +252,38 @@ control state. Every predicate/leaf gets the normal cancellable statement scope.
 ordinary expression compiler owns each substitution's declared SQL contract. */
 (define tsql_message_parts (parser (define parts (* (or
 	(parser (define text (regex "[^%]+" false false)) (list "text" text))
-	/* Format markers are case-sensitive prefixes. SQL word terminals would
-	incorrectly reject alphabetic text immediately following a conversion. */
-	(parser (define marker (regex "%%|%I64d|%[di]|%s" false false))
-		(match marker "%%" '("text" "%") "%I64d" '("BIGINT")
-			"%s" '("NVARCHAR" -1) _ '("INT")))) empty)) parts ""))
+	(parser (atom "%%" false false) '("text" "%"))
+	/* Conversions are prefixes, not SQL words. Keep flags and dimensions as
+	format metadata; the substitution contract still comes from SQL compilation. */
+	(parser '("%" (define flags (regex "[-+ 0]*" false false))
+		(define width (regex "[0-9]*" false false))
+		(define precision (? (parser '("." (define digits (regex "[0-9]*" false false)))
+			(if (equal? digits "") 0 (tsql_parse_integer digits)))))
+		(define kind (regex "I64d|[dis]" false false)))
+		(list "value" (match kind "I64d" '("BIGINT") "s" '("NVARCHAR" -1) _ '("INT"))
+			flags (if (equal? width "") 0 (tsql_parse_integer width)) precision))) empty)) parts ""))
+/* Formatting operates on an already compiled scalar, never its runtime type.
+Signed values keep their textual magnitude, including the minimum BIGINT.
+The bounded message field cannot request unbounded temporary padding. */
+(define tsql_message_value (lambda (value contract flags width precision) (begin
+	(if (or (> width 2047) (and precision (> precision 2047)))
+		(error "message format width or precision exceeds the supported limit") true)
+	(define text (coalesceNil value "(null)"))
+	(define integer (and (not (nil? value)) (not (equal? (car contract) "NVARCHAR"))))
+	(define negative (and integer (equal? (substr (string text) 0 1) "-")))
+	(define sign (if negative "-" (not integer) "" (strlike flags "%+%") "+" (strlike flags "% %") " " ""))
+	(define digits (if negative (substr (string text) 1) (string text)))
+	(define digits (if (and (not (nil? precision)) (not (nil? value)))
+		(if integer
+			(if (and (equal? precision 0) (equal? digits "0")) ""
+				(concat (string_repeat "0" (max 0 (- precision (strlen digits)))) digits))
+			(tsql_cast_text digits precision true)) digits))
+	(define units (if integer (strlen digits) (reduce (split digits "") (lambda (n character)
+		(+ n (if (equal? (strlen character) 4) 2 1))) 0)))
+	(define padding (max 0 (- width (+ units (strlen sign)))))
+	(if (strlike flags "%-%") (concat sign digits (string_repeat " " padding))
+		(and integer (nil? precision) (strlike flags "%0%")) (concat sign (string_repeat "0" padding) digits)
+		(concat (string_repeat " " padding) sign digits)))))
 (define tsql_run_raiserror (lambda (arguments statement session) (begin
 	(if (and (>= (count arguments) 3) (<= (count arguments) 23)) true
 		(error "RAISERROR requires message, severity, state and at most twenty substitutions"))
@@ -274,12 +301,12 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 		(define formatted (reduce (tsql_message_parts text) (lambda (result part)
 			(match part
 				'("text" text) (list (concat (car result) text) (cadr result))
-				_ (begin
+				'("value" contract flags width precision) (begin
 					(define index (cadr result))
 					(if (< index (count arguments)) true (error "missing RAISERROR substitution"))
 					(define value (tsql_scalar_value schema (nth arguments index) session tx
-						(if (equal? (car part) "NVARCHAR") "message-text" "message-integer") part))
-					(list (concat (car result) (coalesceNil value "(null)")) (+ index 1))))) (list "" 3)))
+						(if (equal? (car contract) "NVARCHAR") "message-text" "message-integer") contract))
+					(list (concat (car result) (tsql_message_value value contract flags width precision)) (+ index 1))))) (list "" 3)))
 		(list "tsql-error" 50000 (car formatted) (if (< state 0) 1 state) severity)))))
 	/* Raising after scalar binding keeps a frontend message from marking a
 	successful native transaction statement as failed. RAISERROR is not DML. */
@@ -389,8 +416,23 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 		(tsql_execute_batches schema text session statement resultrow resultfields)))))
 /* Console imports accept the same textual script as REST and the connector.
 The caller supplies its ordinary authenticated session; file I/O stays in load. */
-(define load_tsql (lambda (schema stream session)
-	(tsql_execute_request schema (load stream) session nil 0 print (lambda args true))))
+(define load_tsql (lambda (schema stream session) (begin
+	/* Reject an unauthorized destination before reading the caller's source.
+	Individual statements still use the ordinary table-level policy. */
+	((sql_policy (session "username")) schema true false)
+	/* An import borrows an existing caller transaction. Otherwise it owns only
+	explicit transactions opened by this script, and must release them on failure
+	or unfinished input. Completed autocommit statements retain their commits. */
+	(define caller_transaction (session "transaction"))
+	(define outcome (try (lambda ()
+		(list true (tsql_execute_request schema (load stream) session nil 0 print (lambda args true))))
+		(lambda (failure) (list false failure))))
+	(define unfinished (and (nil? caller_transaction) (session "transaction")))
+	/* Cleanup runs once, outside the request's catch: a persistence failure
+	during rollback must propagate rather than retry the same native cleanup. */
+	(if unfinished (tx_rollback session) true)
+	(if (not (car outcome)) (error (cadr outcome))
+		unfinished (error "unfinished import transaction") (cadr outcome)))))
 /* Source compilers capture definitions only. Execution receives the caller's
 statement owner, account, transaction session, arguments and output callbacks. */
 (define tsql_procedure_compile (lambda (source context) (begin
@@ -536,8 +578,10 @@ Only parameter-sized scalar tuples are collected; relational SQL stays native. *
 				(define output (newsession))
 				(define result (tsql_execute_request schema text session (req "__session_state") (req "__query_seq")
 					(lambda (values) (begin (output "rows" true) ((res "jsonl") values)))
-					(lambda args true)))
-				(if (and (not (output "rows")) (number? result))
+					(lambda args (output "fields" true))))
+				/* An empty result set still has a declared field contract. Its
+				procedure return status must not become an affected-row record. */
+				(if (and (not (or (output "rows") (output "fields"))) (number? result))
 					((res "jsonl") (list "affected_rows" result)) true)
 			) text)) (lambda (err) (begin
 					(error_log (concat err) schema (req "username") text)
@@ -660,11 +704,12 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 (define tsql_metadata_type_info (lambda (options version) (begin
 	(define definitions (list (list "bigint" '()) (list "int" '()) (list "smallint" '()) (list "tinyint" '())
 		(list "bit" '()) (list "real" '()) (list "float" '()) (list "decimal" '(38 0)) (list "numeric" '(38 0))
-		(list "varchar" '(8000)) (list "char" '(8000)) (list "date" '())))
+		(list "varchar" '(8000)) (list "char" '(8000))
+		(list "nvarchar" '(4000)) (list "nchar" '(4000)) (list "date" '())))
 	(define rows (map definitions (lambda (definition) (begin
 		(define contract (tsql_metadata_type (list "RawType" (car definition) "Dimensions" (cadr definition)) version))
 		(define type (car contract))
-		(define character (has? '("varchar" "char") type))
+		(define character (has? '("varchar" "char" "nvarchar" "nchar") type))
 		(define decimal (has? '("decimal" "numeric") type))
 		(list "TYPE_NAME" type "DATA_TYPE" (nth contract 1) "PRECISION" (nth contract 2)
 			"LITERAL_PREFIX" (if (or character (equal? type "date")) "'" nil)

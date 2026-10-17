@@ -411,6 +411,15 @@ recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. 
 				(list (quote tsql_column_description) database name (declaration "Field") false)
 				(list (quote quote) (tsql_declaration_contract declaration))) planning_session)
 		declaration)))))
+/* An omitted target list supplies only writable ordinary columns. Generated
+identity/version declarations are frontend policy; their native storage and
+allocation stay unchanged. Other dialects keep their own implicit-list rules. */
+(define tsql_insert_target_columns (lambda (database name)
+	(map (filter (get_schema database name) (lambda (column)
+		(and (not (internal_column_name? (column "Field")))
+			(not (equal? (column "Extra") "auto_increment"))
+			(not (equal?? (column "RawType") "ROWVERSION")))))
+		(lambda (column) (column "Field")))))
 (define tsql_insert_declarations (lambda (database table_name columns planning_session) (begin	/* Resolve each target exactly once. Duplicate targets can overwrite an
 	already validated identity/default value in the native column vector. */
 	(if (equal? (count columns) (count (merge_unique (list (map columns toLower)))))
@@ -1249,6 +1258,10 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(cons (list "text" text "repeat" repetitions) (car state))) '() '() '() false))
 		(list (car state) (cons (concat line newline) (nth state 1)) '() '() false)))))
 (define tsql_script_batches (lambda (text) (begin
+	/* A UTF8 export may begin with a byte order mark. Strip that one transport
+	marker only; the same character within SQL literals remains ordinary data. */
+	(define text (if (and (>= (strlen text) 3) (equal? (substr text 0 3) (unicode_char 65279)))
+		(substr text 3) text))
 	(define state (reduce (tsql_script_tokens text) (lambda (state token)
 		(match token
 			'("newline" newline) (tsql_script_flush_line state newline)
@@ -2055,7 +2068,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
 			(define declarations (tsql_insert_declarations database tbl
-				(coalesce columns (table_insertable_columns database tbl)) planning_session))
+				(coalesce columns (tsql_insert_target_columns database tbl)) planning_session))
 			(define columns (map declarations (lambda (column) (column "Field"))))
 			(if (reduce rows (lambda (valid row) (and valid (equal? (count row) (count columns)))) true)
 				true (error "INSERT column count does not match value count"))
@@ -2090,7 +2103,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 	) (lambda () (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
-			(tsql_insert_select_plan database tbl (coalesce columns (table_insertable_columns database tbl))
+			(tsql_insert_select_plan database tbl (coalesce columns (tsql_insert_target_columns database tbl))
 				(tsql_insert_limit_query query limit))
 	))))
 	/* Only UNIQUE declarations publish native keys. Ordinary acceleration
@@ -2347,6 +2360,16 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(parser '((define name tsql_script_variable) "=" (define value tsql_script_exec_value))
 					(list name value))
 				(parser (define value tsql_script_exec_value) (list "" value)))))
+			/* The optional EXEC spelling is restricted to the first batch item.
+			Both spellings produce the same invocation data and use one executor. */
+			(define tsql_script_invocation (parser (or
+				(parser '((define status tsql_script_variable) "="
+					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
+					(define arguments (* tsql_script_exec_argument ",")))
+					(list "execute-status" (coalesce owner schema) name arguments status))
+				(parser '((? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
+					(define arguments (* tsql_script_exec_argument ",")))
+					(list "execute" (coalesce owner schema) name arguments)))))
 			(define tsql_script_command (parser (or
 				(parser (define statement (capture tsql_rollback)) (list "recovery" (strtrim (car statement))))
 				(parser '((atom "BEGIN" true) (atom "TRY" true) (define body (* tsql_script_item empty))
@@ -2382,14 +2405,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 					"(" (define text (capture tsql_expression)) ")")
 					(list "execute-dynamic" (car text)))
 				(parser '((or (atom "EXEC" true) (atom "EXECUTE" true))
-					(define status tsql_script_variable) "="
-					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
-					(define arguments (* tsql_script_exec_argument ",")))
-					(list "execute-status" (coalesce owner schema) name arguments status))
-				(parser '((or (atom "EXEC" true) (atom "EXECUTE" true))
-					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier)
-					(define arguments (* tsql_script_exec_argument ",")))
-					(list "execute" (coalesce owner schema) name arguments))
+					(define invocation tsql_script_invocation)) invocation)
 				(parser (define statement (capture p)) (list "statement" (strtrim (car statement))))
 			)))
 			(define tsql_script_item (parser '((* ";") (define command tsql_script_command) (* ";")) command))
@@ -2411,8 +2427,9 @@ a separator is recognized only on a physical line containing no SQL text. */
 			) (list "batch" (list (list "create-procedure" (coalesce owner schema) name
 					(tsql_unique_parameters parameters) (strtrim (car body)) (if replace true false))))))
 			(define script_parser (parser (define batch (or tsql_script_procedure
-				(parser '((* ";") (define commands (* tsql_script_item empty)) (* ";"))
-					(list "batch" commands)))) batch "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
+				(parser '((* ";") (? (define first (or tsql_script_command tsql_script_invocation)))
+					(define commands (* tsql_script_item empty)) (* ";"))
+					(list "batch" (if first (cons first commands) commands))))) batch "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
 
 			(script_parser s))
 		((parser '((* ";") (define command command_parser) (* ";")) (if (string? command) command (command)) "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s))
