@@ -22,28 +22,28 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package main
 
-import "archive/tar"
-import "archive/zip"
-import "bytes"
-import "compress/gzip"
-import "os"
-import "os/exec"
 import "io"
+import "os"
 import "fmt"
 import "flag"
+import "path"
+import "sync"
 import "time"
 import "bufio"
-import "sync"
-import "syscall"
+import "bytes"
+import "os/exec"
 import "runtime"
-import "io/ioutil"
 import "strings"
+import "syscall"
+import "io/ioutil"
 import "os/signal"
+import "archive/tar"
+import "archive/zip"
 import "crypto/rand"
-import "path"
+import "compress/gzip"
 import "path/filepath"
-import "runtime/pprof"
 import "runtime/debug"
+import "runtime/pprof"
 import "github.com/google/uuid"
 import "github.com/fsnotify/fsnotify"
 import "github.com/launix-de/memcp/scm"
@@ -1030,9 +1030,7 @@ func setupIO(wd string) {
 		Name: "shutdown",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			if scm.ReplInstance != nil {
-				scm.ReplInstance.Close()
-			} else {
+			if !scm.CloseRepl() {
 				// no-repl mode: send SIGTERM to self to unblock signal wait
 				syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 			}
@@ -1531,10 +1529,7 @@ func exitroutine() {
 		exitsignal <- true
 		exitable.Wait()
 		fmt.Println("Exit procedure...")
-		if scm.ReplInstance != nil {
-			// in case it dosen't exit properly
-			scm.ReplInstance.Close()
-		}
+		scm.CloseRepl()
 		fmt.Println("finalizing storage...")
 		func() {
 			defer func() {

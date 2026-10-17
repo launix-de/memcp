@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023, 2026  Carl-Philip Hänsch
 Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 
     This program is free software: you can redistribute it and/or modify
@@ -18,17 +18,17 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 
 package scm
 
-import (
-	"bytes"
-	"fmt"
-	"github.com/chzyer/readline"
-	"io"
-	"log"
-	"os"
-	"regexp"
-	"runtime/debug"
-	"strings"
-)
+import "io"
+import "os"
+import "fmt"
+import "log"
+import "sync"
+import "bytes"
+import "regexp"
+import "strings"
+import "sync/atomic"
+import "runtime/debug"
+import "github.com/chzyer/readline"
 
 const newprompt = "\033[32m>\033[0m "
 const contprompt = "\033[32m.\033[0m "
@@ -75,10 +75,42 @@ func (en *Env) Do(line []rune, pos int) (newLine [][]rune, offset int) {
 	return
 }
 
-var ReplInstance *readline.Instance
+// The REPL owns its cancellation wrapper, not the caller's stdin descriptor.
+// Readline wraps that reader again; closing its outer buffer does not cancel
+// a pending read. Every close route must release our reader before waiting
+// for the terminal. The once protects this single lifecycle, never query IO.
+type replOwner struct {
+	instance *readline.Instance
+	input    *readline.CancelableStdin
+	once     sync.Once
+}
+
+func (r *replOwner) close() {
+	r.once.Do(func() {
+		r.input.Close()
+		r.instance.Close()
+	})
+}
+
+// Publish only complete owners. A loaded owner stays alive through close;
+// only its REPL defer removes that same publication after cleanup finishes.
+var activeRepl atomic.Pointer[replOwner]
+
+// CloseRepl closes the active REPL, if present. Concurrent and deferred calls
+// share the same cancellation/terminal owner without closing foreign stdin.
+func CloseRepl() bool {
+	owner := activeRepl.Load()
+	if owner == nil {
+		return false
+	}
+	owner.close()
+	return true
+}
 
 func Repl(en *Env) {
+	input := readline.NewCancelableStdin(readline.Stdin)
 	l, err := readline.NewEx(&readline.Config{
+		Stdin:             input,
 		Prompt:            newprompt,
 		HistoryFile:       ".memcp-history.tmp",
 		AutoComplete:      en,
@@ -87,11 +119,14 @@ func Repl(en *Env) {
 		HistorySearchFold: true,
 	})
 	if err != nil {
+		input.Close()
 		panic(err)
 	}
-	ReplInstance = l
-	defer l.Close()
-	l.CaptureExitSignal()
+	owner := &replOwner{instance: l, input: input}
+	activeRepl.Store(owner)
+	defer activeRepl.CompareAndSwap(owner, nil)
+	defer owner.close()
+	readline.CaptureExitSignal(func() { CloseRepl() })
 
 	oldline := ""
 	for {
@@ -144,7 +179,6 @@ func Repl(en *Env) {
 			l.SetPrompt(newprompt)
 		}()
 	}
-	ReplInstance = nil
 }
 
 var errorlog *log.Logger
