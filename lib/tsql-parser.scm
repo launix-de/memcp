@@ -139,9 +139,9 @@ escaping here. Consume it as one token so whitespace cannot split the name. */
 	(list (quote sql_type_expr) (car token) (if (cadr token) "NVARCHAR" "VARCHAR") nil)))
 (define tsql_column (parser (or
 	(parser '((define alias tsql_identifier) "." (define name tsql_identifier))
-		(list (quote sql_compile_column) tsql_compile_column '('get_column alias true name true)))
+		(list (quote sql_compile_column) (quote tsql_compile_column) '('get_column alias true name true)))
 	(parser (define name tsql_identifier)
-		(list (quote sql_compile_column) tsql_compile_column '('get_column nil true name true))))))
+		(list (quote sql_compile_column) (quote tsql_compile_column) '('get_column nil true name true))))))
 (define tsql_hex_literal (parser (define value sql_hex_literal)
 	(list (quote sql_type_expr) value "VARBINARY" nil)))
 (define tsql_literal (parser (or
@@ -2157,11 +2157,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(define cols (+ (or
 			/* Assignment aliases must precede expression comparisons. */
 			(parser '((define title (or tsql_identifier tsql_string)) "=" (define e tsql_expression)) '(title e))
-			(parser "*" (list "*" (list (quote sql_compile_column) tsql_compile_column (list (quote get_column) nil false "*" false))))
+			(parser "*" (list "*" (list (quote sql_compile_column) (quote tsql_compile_column) (list (quote get_column) nil false "*" false))))
 			(parser '((define tbl tsql_identifier_quoted) "." "*")
-				(list "*" (list (quote sql_compile_column) tsql_compile_column '('get_column tbl true "*" false))))
+				(list "*" (list (quote sql_compile_column) (quote tsql_compile_column) '('get_column tbl true "*" false))))
 			(parser '((define tbl tsql_identifier_unquoted) "." "*")
-				(list "*" (list (quote sql_compile_column) tsql_compile_column '('get_column tbl true "*" false))))
+				(list "*" (list (quote sql_compile_column) (quote tsql_compile_column) '('get_column tbl true "*" false))))
 			(parser '((define e tsql_expression) (atom "AS" true) (define title tsql_identifier)) '(title e))
 			(parser '((define e tsql_expression) (atom "AS" true) (define title tsql_string)) '(title e))
 
@@ -2305,7 +2305,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(if (equal? op "assign")
 						(tsql_default_assignment_expr declaration)
 						(error "DEFAULT requires simple assignment")) expression))
-				(define old (list (quote sql_compile_column) tsql_compile_column
+				(define old (list (quote sql_compile_column) (quote tsql_compile_column)
 					(list (quote get_column) (source_alias target) false (declaration "Field") false)))
 				(if (has? '("and" "or" "xor") op) (tsql_bit_assignment_type (declaration "Type")) true)
 				(define assigned (match op "assign" value

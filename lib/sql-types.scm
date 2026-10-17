@@ -366,7 +366,7 @@ Derived columns already carry their producer's expression contract. */
 				(define handle (table (source_schema src) false (source_relation src) false))
 				(if (nil? handle) nil (show handle "column" column column_ic)))))
 		_ nil))
-	(define resolved (compiler info declaration))
+	(define resolved ((sql_expression_compiler compiler) info declaration))
 	(if (expression_equal? (sql_info_formula info) (sql_info_formula resolved)) resolved
 		(error "a column declaration compiler must preserve the column expression")))))
 
