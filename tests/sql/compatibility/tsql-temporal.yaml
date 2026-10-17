@@ -51,7 +51,6 @@ test_cases:
           (>= (- (unix_timestamp (row "precise")) (unix_timestamp (cutoff "precise"))) 0)
           (>= (- (unix_timestamp (row "standard")) (unix_timestamp (cutoff "created"))) 0)) true
         (error "clock default was frozen while creating the table")))
-  noncritical: true
   expect:
     result: true
 - name: Raw current clocks preserve native temporal output
@@ -62,7 +61,7 @@ test_cases:
   sql: SELECT created,precise,standard FROM tsql_clock_defaults WHERE id=1
   expect:
     rows: 1
-  noncritical: true
+
 - name: Clock default expressions remain schema expressions
   scm: |
     (begin
@@ -76,12 +75,11 @@ test_cases:
           (equal? (precise "RawType") "DATETIME2")
           (equal? (precise "Dimensions") '(7))) true
         (error "clock default lost its native expression or declared type")))
-  noncritical: true
   expect:
     result: true
 - name: An omitted clock default accepts explicit NULL unchanged
   sql: INSERT tsql_clock_defaults (id,created,precise,standard) VALUES (2,NULL,NULL,NULL)
-  noncritical: true
+
 - name: Explicit null clocks are not replaced by defaults
   sql: SELECT created,precise,standard FROM tsql_clock_defaults WHERE id=2
   expect:
@@ -90,7 +88,7 @@ test_cases:
     - created: null
       precise: null
       standard: null
-  noncritical: true
+
 - name: A retained compiled scalar clock is sampled on each execution
   scm: "(begin\n  (define s (newsession))\n  (define formula (sql_queryplan_compile_formula nil\n    (parse_tsql\
     \ \"memcp-tests\" \"SELECT GETDATE() AS legacy,SYSDATETIME() AS precise\" nil s nil)))\n  (define execute (lambda\
@@ -142,12 +140,12 @@ test_cases:
   syntax: mysql
 - name: Restarted clock defaults still evaluate during insert
   sql: INSERT tsql_clock_defaults (id) VALUES (3)
-  noncritical: true
+
 - name: Restarted stored clock values have native temporal output
   sql: SELECT created,precise,standard FROM tsql_clock_defaults WHERE id=3
   expect:
     rows: 1
-  noncritical: true
+
 - name: Legacy export style
   sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'15-03-18 00:00:00 AM',4),120) AS value
   expect:
