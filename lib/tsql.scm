@@ -106,9 +106,13 @@ execution paths. The cache, transaction owner and compiled evaluator are shared.
 	(define declarations (coalesceNil (session "__tsql_parameter_declarations") (list)))
 	/* Cache identity includes the complete immutable declaration contract. Values
 	remain invocation inputs; differently typed calls cannot reuse wrong metadata. */
-	(define cache_scope (json_encode (list username declarations)))
+	(define import_target (session "tsql_import_target"))
+	(define import_source (session "tsql_import_source"))
+	(define cache_scope (json_encode (list username declarations import_target import_source)))
 	(define parser (lambda (database text policy planning tx) (begin
 		(planning "__tsql_parameter_declarations" declarations)
+		(planning "tsql_import_target" import_target)
+		(planning "tsql_import_source" import_source)
 		(parse_tsql database text policy planning tx))))
 	(define formula (cached_parse tsql_queryplan_cache (list parser (list "exact_guards" true)) schema input
 		(list (quote sql-policy-for) username) cache_scope session false tx))
@@ -336,12 +340,19 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 			(session (concat "__tsql_parameter:" name) value)
 			0)
 		'("create-procedure" owner name parameters source replace) (statement "procedure definition" false (lambda (tx) (begin
+			/* Stored procedure source is not yet normalized for import aliases or
+			checked dependencies. Reject before catalog publication; ordinary
+			procedure creation still uses its existing source compiler. */
+			(if (session "tsql_import_target")
+				(error "retargeted procedure definitions are not supported") true)
 			(if (session "transaction") (error "procedure DDL inside explicit transactions is not supported") true)
+			(define owner (tsql_qualifier_database owner schema session))
 			((sql_policy (session "username")) owner name true)
 			(createprocedure owner (toLower name) "tsql-procedure" source parameters replace)
 			0)))
 		'("drop-procedure" owner name ignore) (statement "procedure deletion" false (lambda (_tx) (begin
 			(if (session "transaction") (error "procedure DDL inside explicit transactions is not supported") true)
+			(define owner (tsql_qualifier_database owner schema session))
 			((sql_policy (session "username")) owner name true)
 			(define definition (find (showprocedures owner (toLower name)) (lambda (_definition) true) nil))
 			(dropprocedure owner (if definition (definition "name") name) ignore)
@@ -384,13 +395,36 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 		(define commands (cadr (batch "syntax")))
 		(tsql_execute_command_batch schema commands inherited supplied statement session resultrow resultfields
 			(lambda (result _status _scoped) result)))) 0)) 0))))
+/* Frontend scopes borrow names; the native request still owns the original
+connection session and its reusable transaction record. */
 (define tsql_execute_request (lambda (schema text session state sequence resultrow resultfields)
-	(with_query_request session state sequence text (lambda (statement)
+	(with_query_request (tsql_connection_session session) state sequence text (lambda (statement)
 		(tsql_execute_batches schema text session statement resultrow resultfields)))))
 /* Console imports accept the same textual script as REST and the connector.
 The caller supplies its ordinary authenticated session; file I/O stays in load. */
-(define load_tsql (lambda (schema stream session)
-	(tsql_execute_request schema (load stream) session nil 0 print (lambda args true))))
+/* The two import names belong to one invocation. Other state, notably the
+account and existing transaction, remains on the ordinary caller session. */
+(define tsql_import_scope (lambda (schema parent) (begin
+	(define names (newsession))
+	(names "tsql_import_target" schema)
+	(names "__tsql_connection_session" (tsql_connection_session parent))
+	(define own? (lambda (key) (has? '("tsql_import_target" "tsql_import_source" "__tsql_connection_session") key)))
+	(lambda args (match args
+		'() (merge_unique (list (names) (filter (parent) (lambda (key) (not (own? key))))))
+		'(key) (if (own? key) (names key) (parent key))
+		'(key value) (if (own? key) (names key value) (parent key value))
+		_ (apply parent args))))))
+/* USE declares one source alias during import; it never selects that database.
+Literal contents are untouched and all following statements keep the target. */
+(define tsql_import_database (lambda (session name) (begin
+	(define source (session "tsql_import_source"))
+	(if (equal? name (session "tsql_import_target")) 0
+		(nil? source) (begin (session "tsql_import_source" name) 0)
+		(equal? source name) 0
+		(error "import cannot select a second source database: " name)))))
+(define load_tsql (lambda (schema stream session) (begin
+	((sql_policy (session "username")) schema true false)
+	(tsql_execute_request schema (load stream) (tsql_import_scope schema session) nil 0 print (lambda args true)))))
 /* Source compilers capture definitions only. Execution receives the caller's
 statement owner, account, transaction session, arguments and output callbacks. */
 (define tsql_procedure_compile (lambda (source context) (begin
@@ -495,11 +529,17 @@ Only parameter-sized scalar tuples are collected; relational SQL stays native. *
 	(tsql_execute_dynamic schema (car binding) (map (cadr binding) (lambda (item) (list (car item) (cadr item))))
 		(car bound) statement caller resultrow resultfields
 		(lambda (_result status scoped) (begin (tsql_copy_outputs (cadr bound) scoped statement caller) status))))))
-(define tsql_invoke_procedure (lambda (schema name arguments statement caller resultrow resultfields)
+(define tsql_invoke_procedure (lambda (schema name arguments statement caller resultrow resultfields) (begin
+	(define metadata_call (has? '("sp_tables" "sp_columns" "sp_pkeys" "sp_statistics" "sp_fkeys" "sp_datatype_info" "sp_datatype_info_100" "sp_special_columns") (toLower name)))
+	/* sys is a virtual owner only for supported system calls. Other owners
+	use the same import binding as ordinary SQL, before any invocation runs. */
+	(define schema (if (and (equal?? schema "sys")
+		(or metadata_call (equal? (toLower name) "sp_executesql"))) (caller "schema")
+		(tsql_qualifier_database schema (caller "schema") caller)))
 	(if (equal? (toLower name) "sp_executesql")
 		(tsql_execute_parameterized (if (equal?? schema "sys") (caller "schema") schema)
 			arguments statement caller resultrow resultfields)
-		(has? '("sp_tables" "sp_columns" "sp_pkeys" "sp_statistics" "sp_fkeys" "sp_datatype_info" "sp_datatype_info_100" "sp_special_columns") (toLower name))
+		metadata_call
 		(statement "metadata procedure" false (lambda (tx) (begin
 			(define values (map arguments (lambda (argument) (begin
 				(match (cadr argument) (cons _head _tail) (error "metadata parameters are input-only") _ true)
@@ -516,7 +556,7 @@ Only parameter-sized scalar tuples are collected; relational SQL stays native. *
 				(error "procedure language cannot execute in this frontend"))
 			(define binding (tsql_bind_call arguments (definition "parameters") statement caller))
 			((snapshot "callable") statement caller (car binding) resultrow resultfields
-				(lambda (status scoped) (begin (tsql_copy_outputs (cadr binding) scoped statement caller) status)))))))
+				(lambda (status scoped) (begin (tsql_copy_outputs (cadr binding) scoped statement caller) status))))))))
 
 (define tsql_http_query (lambda (req res schema) (begin
 	(define stored (mysql_auth (req "username")))
@@ -531,6 +571,8 @@ Only parameter-sized scalar tuples are collected; relational SQL stays native. *
 				query options may supply values, never replace either authority. */
 				(session "username" (req "username"))
 				(session "schema" schema)
+				(session "tsql_import_target" nil)
+				(session "tsql_import_source" nil)
 				/* One scope owner per submitted batch, never per native insert row. */
 				(session "__tsql_scope" (newsession))
 				(define output (newsession))
