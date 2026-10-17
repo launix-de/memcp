@@ -3149,7 +3149,11 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 
 	condVar := g.allocDesc()
 	g.emit("%s := %s", condVar, cond.goVar)
-	g.emit("ctx.EnsureDesc(&%s)", condVar)
+	if cond.marker == "_flags" {
+		g.emit("ctx.SyncDesc(&%s)", condVar)
+	} else {
+		g.emit("ctx.EnsureDesc(&%s)", condVar)
+	}
 	if cond.marker == "_flags" {
 		g.emit("if %s.Loc != LocImm && %s.Loc != LocFlags {", condVar, condVar)
 		g.emit("\tpanic(\"jit: fused If condition is neither LocImm nor LocFlags\")")
@@ -4129,7 +4133,13 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 			if ret, ok := instr.(*ssa.Return); ok && !isMultiBlock {
 				// Single-block: capture return value directly, no code emitted
 				if len(ret.Results) == 1 {
-					singleBlockResult = g.resolveValue(ret.Results[0])
+					if value, ok := g.vals[ret.Results[0].Name()]; ok && value.marker == "_flags" {
+						// A returned comparison remains owned by its descriptor. The
+						// caller's branch can consume it without boxing/materializing.
+						singleBlockResult = value
+					} else {
+						singleBlockResult = g.resolveValue(ret.Results[0])
+					}
 				} else if len(ret.Results) > 1 {
 					values := make([]genVal, len(ret.Results))
 					for i, returned := range ret.Results {
@@ -9015,7 +9025,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		// Phi-backed conditions may be LocStack at BB entry.
 		condVar := g.allocDesc()
 		g.emit("%s := %s", condVar, cond.goVar)
-		g.emit("ctx.EnsureDesc(&%s)", condVar)
+		if cond.marker == "_flags" {
+			g.emit("ctx.SyncDesc(&%s)", condVar)
+		} else {
+			g.emit("ctx.EnsureDesc(&%s)", condVar)
+		}
 		if cond.marker == "_flags" {
 			g.emit("if %s.Loc != LocImm && %s.Loc != LocFlags {", condVar, condVar)
 			g.emit("\tpanic(\"jit: fused If condition is neither LocImm nor LocFlags\")")

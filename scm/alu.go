@@ -2670,7 +2670,7 @@ func init_alu() {
 					}
 					ctx.FreeDesc(&d43)
 					d45 = d44
-					ctx.EnsureDesc(&d45)
+					ctx.SyncDesc(&d45)
 					if d45.Loc != LocImm && d45.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -3411,7 +3411,7 @@ func init_alu() {
 					}
 					ctx.FreeDesc(&d43)
 					d45 = d44
-					ctx.EnsureDesc(&d45)
+					ctx.SyncDesc(&d45)
 					if d45.Loc != LocImm && d45.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -3894,7 +3894,7 @@ func init_alu() {
 						ctx.BindReg(r0, &d5)
 					}
 					d6 = d5
-					ctx.EnsureDesc(&d6)
+					ctx.SyncDesc(&d6)
 					if d6.Loc != LocImm && d6.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -4030,7 +4030,7 @@ func init_alu() {
 						ctx.BindReg(r2, &d23)
 					}
 					d24 = d23
-					ctx.EnsureDesc(&d24)
+					ctx.SyncDesc(&d24)
 					if d24.Loc != LocImm && d24.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -4544,7 +4544,7 @@ func init_alu() {
 					}
 					ctx.FreeDesc(&d20)
 					d22 = d21
-					ctx.EnsureDesc(&d22)
+					ctx.SyncDesc(&d22)
 					if d22.Loc != LocImm && d22.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -4640,7 +4640,7 @@ func init_alu() {
 					}
 					ctx.FreeDesc(&d35)
 					d37 = d36
-					ctx.EnsureDesc(&d37)
+					ctx.SyncDesc(&d37)
 					if d37.Loc != LocImm && d37.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -5107,7 +5107,7 @@ func init_alu() {
 					}
 					ctx.FreeDesc(&d93)
 					d95 = d94
-					ctx.EnsureDesc(&d95)
+					ctx.SyncDesc(&d95)
 					if d95.Loc != LocImm && d95.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -6478,7 +6478,7 @@ func init_alu() {
 						ctx.BindReg(r2, &d10)
 					}
 					d11 = d10
-					ctx.EnsureDesc(&d11)
+					ctx.SyncDesc(&d11)
 					if d11.Loc != LocImm && d11.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -7141,7 +7141,7 @@ func init_alu() {
 					}
 					ctx.FreeDesc(&d104)
 					d106 = d105
-					ctx.EnsureDesc(&d106)
+					ctx.SyncDesc(&d106)
 					if d106.Loc != LocImm && d106.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -7288,7 +7288,7 @@ func init_alu() {
 					}
 					ctx.FreeDesc(&d143)
 					d145 = d144
-					ctx.EnsureDesc(&d145)
+					ctx.SyncDesc(&d145)
 					if d145.Loc != LocImm && d145.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -7854,7 +7854,7 @@ func init_alu() {
 					}
 					ctx.FreeDesc(&d243)
 					d245 = d244
-					ctx.EnsureDesc(&d245)
+					ctx.SyncDesc(&d245)
 					if d245.Loc != LocImm && d245.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -8039,7 +8039,7 @@ func init_alu() {
 					}
 					ctx.FreeDesc(&d301)
 					d303 = d302
-					ctx.EnsureDesc(&d303)
+					ctx.SyncDesc(&d303)
 					if d303.Loc != LocImm && d303.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -9022,7 +9022,7 @@ func init_alu() {
 						ctx.BindReg(r2, &d11)
 					}
 					d12 = d11
-					ctx.EnsureDesc(&d12)
+					ctx.SyncDesc(&d12)
 					if d12.Loc != LocImm && d12.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -10118,7 +10118,7 @@ func init_alu() {
 					}
 					ctx.FreeDesc(&d253)
 					d255 = d254
-					ctx.EnsureDesc(&d255)
+					ctx.SyncDesc(&d255)
 					if d255.Loc != LocImm && d255.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -10278,7 +10278,7 @@ func init_alu() {
 					}
 					ctx.FreeDesc(&d298)
 					d300 = d299
-					ctx.EnsureDesc(&d300)
+					ctx.SyncDesc(&d300)
 					if d300.Loc != LocImm && d300.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -11072,7 +11072,7 @@ func init_alu() {
 						ctx.BindReg(r17, &d516)
 					}
 					d517 = d516
-					ctx.EnsureDesc(&d517)
+					ctx.SyncDesc(&d517)
 					if d517.Loc != LocImm && d517.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -11247,7 +11247,7 @@ func init_alu() {
 						ctx.BindReg(r18, &d578)
 					}
 					d579 = d578
-					ctx.EnsureDesc(&d579)
+					ctx.SyncDesc(&d579)
 					if d579.Loc != LocImm && d579.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -11484,7 +11484,7 @@ func init_alu() {
 						ctx.BindReg(r19, &d644)
 					}
 					d645 = d644
-					ctx.EnsureDesc(&d645)
+					ctx.SyncDesc(&d645)
 					if d645.Loc != LocImm && d645.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -11670,7 +11670,7 @@ func init_alu() {
 						ctx.BindReg(r20, &d712)
 					}
 					d713 = d712
-					ctx.EnsureDesc(&d713)
+					ctx.SyncDesc(&d713)
 					if d713.Loc != LocImm && d713.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -11891,7 +11891,7 @@ func init_alu() {
 					}
 					ctx.FreeDesc(&d782)
 					d784 = d783
-					ctx.EnsureDesc(&d784)
+					ctx.SyncDesc(&d784)
 					if d784.Loc != LocImm && d784.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -12088,7 +12088,7 @@ func init_alu() {
 						ctx.BindReg(r24, &d856)
 					}
 					d857 = d856
-					ctx.EnsureDesc(&d857)
+					ctx.SyncDesc(&d857)
 					if d857.Loc != LocImm && d857.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -12385,7 +12385,7 @@ func init_alu() {
 						ctx.BindReg(r27, &d934)
 					}
 					d935 = d934
-					ctx.EnsureDesc(&d935)
+					ctx.SyncDesc(&d935)
 					if d935.Loc != LocImm && d935.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -12996,7 +12996,7 @@ func init_alu() {
 						ctx.BindReg(r30, &d1106)
 					}
 					d1107 = d1106
-					ctx.EnsureDesc(&d1107)
+					ctx.SyncDesc(&d1107)
 					if d1107.Loc != LocImm && d1107.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -13227,7 +13227,7 @@ func init_alu() {
 						ctx.BindReg(r31, &d1196)
 					}
 					d1197 = d1196
-					ctx.EnsureDesc(&d1197)
+					ctx.SyncDesc(&d1197)
 					if d1197.Loc != LocImm && d1197.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -13694,7 +13694,7 @@ func init_alu() {
 						ctx.BindReg(r2, &d6)
 					}
 					d7 = d6
-					ctx.EnsureDesc(&d7)
+					ctx.SyncDesc(&d7)
 					if d7.Loc != LocImm && d7.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -14049,7 +14049,7 @@ func init_alu() {
 						ctx.BindReg(r5, &d56)
 					}
 					d57 = d56
-					ctx.EnsureDesc(&d57)
+					ctx.SyncDesc(&d57)
 					if d57.Loc != LocImm && d57.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -14637,7 +14637,7 @@ func init_alu() {
 						ctx.BindReg(r2, &d6)
 					}
 					d7 = d6
-					ctx.EnsureDesc(&d7)
+					ctx.SyncDesc(&d7)
 					if d7.Loc != LocImm && d7.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -14992,7 +14992,7 @@ func init_alu() {
 						ctx.BindReg(r5, &d56)
 					}
 					d57 = d56
-					ctx.EnsureDesc(&d57)
+					ctx.SyncDesc(&d57)
 					if d57.Loc != LocImm && d57.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -15862,7 +15862,7 @@ func init_alu() {
 						ctx.BindReg(r0, &d44)
 					}
 					d45 = d44
-					ctx.EnsureDesc(&d45)
+					ctx.SyncDesc(&d45)
 					if d45.Loc != LocImm && d45.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -16258,7 +16258,7 @@ func init_alu() {
 					}
 					ctx.FreeDesc(&d127)
 					d129 = d128
-					ctx.EnsureDesc(&d129)
+					ctx.SyncDesc(&d129)
 					if d129.Loc != LocImm && d129.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -16374,7 +16374,7 @@ func init_alu() {
 						ctx.BindReg(r3, &d165)
 					}
 					d166 = d165
-					ctx.EnsureDesc(&d166)
+					ctx.SyncDesc(&d166)
 					if d166.Loc != LocImm && d166.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -16591,7 +16591,7 @@ func init_alu() {
 						ctx.BindReg(r4, &d209)
 					}
 					d211 = d209
-					ctx.EnsureDesc(&d211)
+					ctx.SyncDesc(&d211)
 					if d211.Loc != LocImm && d211.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -16802,7 +16802,7 @@ func init_alu() {
 						ctx.BindReg(r6, &d259)
 					}
 					d260 = d259
-					ctx.EnsureDesc(&d260)
+					ctx.SyncDesc(&d260)
 					if d260.Loc != LocImm && d260.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -16947,7 +16947,7 @@ func init_alu() {
 						ctx.BindReg(r7, &d310)
 					}
 					d311 = d310
-					ctx.EnsureDesc(&d311)
+					ctx.SyncDesc(&d311)
 					if d311.Loc != LocImm && d311.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -17546,7 +17546,7 @@ func init_alu() {
 						ctx.BindReg(r0, &d44)
 					}
 					d45 = d44
-					ctx.EnsureDesc(&d45)
+					ctx.SyncDesc(&d45)
 					if d45.Loc != LocImm && d45.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -20176,7 +20176,7 @@ func init_alu() {
 						ctx.BindReg(r0, &d20)
 					}
 					d21 = d20
-					ctx.EnsureDesc(&d21)
+					ctx.SyncDesc(&d21)
 					if d21.Loc != LocImm && d21.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -20626,7 +20626,7 @@ func init_alu() {
 						ctx.BindReg(r1, &d109)
 					}
 					d110 = d109
-					ctx.EnsureDesc(&d110)
+					ctx.SyncDesc(&d110)
 					if d110.Loc != LocImm && d110.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -20744,7 +20744,7 @@ func init_alu() {
 						ctx.BindReg(r2, &d147)
 					}
 					d148 = d147
-					ctx.EnsureDesc(&d148)
+					ctx.SyncDesc(&d148)
 					if d148.Loc != LocImm && d148.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -20866,7 +20866,7 @@ func init_alu() {
 						ctx.BindReg(r3, &d187)
 					}
 					d188 = d187
-					ctx.EnsureDesc(&d188)
+					ctx.SyncDesc(&d188)
 					if d188.Loc != LocImm && d188.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -21879,7 +21879,7 @@ func init_alu() {
 						ctx.BindReg(r2, &d5)
 					}
 					d6 = d5
-					ctx.EnsureDesc(&d6)
+					ctx.SyncDesc(&d6)
 					if d6.Loc != LocImm && d6.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -22759,7 +22759,7 @@ func init_alu() {
 						ctx.BindReg(r2, &d5)
 					}
 					d6 = d5
-					ctx.EnsureDesc(&d6)
+					ctx.SyncDesc(&d6)
 					if d6.Loc != LocImm && d6.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -23983,7 +23983,7 @@ func init_alu() {
 						ctx.BindReg(r0, &d14)
 					}
 					d15 = d14
-					ctx.EnsureDesc(&d15)
+					ctx.SyncDesc(&d15)
 					if d15.Loc != LocImm && d15.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -24103,7 +24103,7 @@ func init_alu() {
 						ctx.BindReg(r1, &d31)
 					}
 					d33 = d31
-					ctx.EnsureDesc(&d33)
+					ctx.SyncDesc(&d33)
 					if d33.Loc != LocImm && d33.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -24183,7 +24183,7 @@ func init_alu() {
 						ctx.BindReg(r2, &d51)
 					}
 					d52 = d51
-					ctx.EnsureDesc(&d52)
+					ctx.SyncDesc(&d52)
 					if d52.Loc != LocImm && d52.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -24397,7 +24397,7 @@ func init_alu() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					d81 = d79
-					ctx.EnsureDesc(&d81)
+					ctx.SyncDesc(&d81)
 					if d81.Loc != LocImm && d81.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -24793,7 +24793,7 @@ func init_alu() {
 					ctx.FreeDesc(&d102)
 					ctx.ReclaimUntrackedRegs()
 					d107 = d106
-					ctx.EnsureDesc(&d107)
+					ctx.SyncDesc(&d107)
 					if d107.Loc != LocImm && d107.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -25440,7 +25440,7 @@ func init_alu() {
 						ctx.BindReg(r0, &d15)
 					}
 					d16 = d15
-					ctx.EnsureDesc(&d16)
+					ctx.SyncDesc(&d16)
 					if d16.Loc != LocImm && d16.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -25699,7 +25699,7 @@ func init_alu() {
 					ctx.FreeDesc(&d48)
 					ctx.FreeDesc(&d50)
 					d52 = d51
-					ctx.EnsureDesc(&d52)
+					ctx.SyncDesc(&d52)
 					if d52.Loc != LocImm && d52.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -26201,7 +26201,7 @@ func init_alu() {
 						ctx.BindReg(r0, &d12)
 					}
 					d13 = d12
-					ctx.EnsureDesc(&d13)
+					ctx.SyncDesc(&d13)
 					if d13.Loc != LocImm && d13.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
