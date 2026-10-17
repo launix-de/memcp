@@ -32,19 +32,28 @@ test_cases:
 - name: Fixture rows for declared temporal result output
   sql: INSERT INTO tsql_temporal_output VALUES(1,N'12:13:14',N'2026-03-15',N'2026-03-15 12:13:14'),(2,NULL,NULL,NULL),(3,N'00:00:00',N'2026-03-16',N'2026-03-16 00:00:00')
 - name: Clock defaults are evaluated by a later insert rather than create
-  scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define output (newsession))\n\
-    \    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx\n        (sql_queryplan_compile_formula\
-    \ tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda (row) (output \"row\" row)) (lambda fields\
-    \ true))))\n    (output \"row\"))))\n  (execute \"CREATE TABLE tsql_clock_defaults (id INT PRIMARY KEY, created\
-    \ DATETIME DEFAULT ((GETDATE())), precise DATETIME2(7) DEFAULT SYSDATETIME(), standard DATETIME DEFAULT CURRENT_TIMESTAMP)\"\
-    )\n  (sleep 1.05)\n  (define cutoff (execute \"SELECT CONVERT(VARCHAR(30),GETDATE(),121) AS created,CONVERT(VARCHAR(30),SYSDATETIME(),121)\
-    \ AS precise\"))\n  (execute \"INSERT tsql_clock_defaults (id) VALUES (1)\")\n  (define row (execute \"SELECT\
-    \ CONVERT(VARCHAR(30),created,121) AS created,CONVERT(VARCHAR(30),precise,121) AS precise,CONVERT(VARCHAR(30),standard,121)\
-    \ AS standard FROM tsql_clock_defaults WHERE id=1\"))\n  (if (and (>= (tsql_datediff \"second\" (cutoff \"created\"\
-    ) (row \"created\")) 0)\n      (>= (tsql_datediff \"second\" (cutoff \"precise\") (row \"precise\")) 0)\n  \
-    \    (>= (tsql_datediff \"second\" (cutoff \"created\") (row \"standard\")) 0)) true\n    (error \"clock default\
-    \ was frozen while creating the table\")))\n"
+  scm: |
+    (begin
+      (define s (newsession))
+      (define execute (lambda (sql) (begin
+        (define output (newsession))
+        (with_autocommit s nil nil sql (lambda (tx)
+          (sql_execute_formula s tx
+            (sql_queryplan_compile_formula tx (parse_tsql "memcp-tests" sql nil s tx))
+            (lambda (row) (output "row" row)) (lambda fields true))))
+        (output "row"))))
+      (execute "CREATE TABLE tsql_clock_defaults (id INT PRIMARY KEY, created DATETIME DEFAULT ((GETDATE())), precise DATETIME2(7) DEFAULT SYSDATETIME(), standard DATETIME DEFAULT CURRENT_TIMESTAMP)")
+      (sleep 1.05)
+      (define cutoff (execute "SELECT CONVERT(VARCHAR(30),GETDATE(),121) AS created,CONVERT(VARCHAR(30),SYSDATETIME(),121) AS precise"))
+      (execute "INSERT tsql_clock_defaults (id) VALUES (1)")
+      (define row (execute "SELECT CONVERT(VARCHAR(30),created,121) AS created,CONVERT(VARCHAR(30),precise,121) AS precise,CONVERT(VARCHAR(30),standard,121) AS standard FROM tsql_clock_defaults WHERE id=1"))
+      (if (and (>= (- (unix_timestamp (row "created")) (unix_timestamp (cutoff "created"))) 0)
+          (>= (- (unix_timestamp (row "precise")) (unix_timestamp (cutoff "precise"))) 0)
+          (>= (- (unix_timestamp (row "standard")) (unix_timestamp (cutoff "created"))) 0)) true
+        (error "clock default was frozen while creating the table")))
   noncritical: true
+  expect:
+    result: true
 - name: Raw current clocks preserve native temporal output
   sql: SELECT GETDATE() AS legacy,SYSDATETIME() AS precise,CURRENT_TIMESTAMP AS standard
   expect:
@@ -55,12 +64,21 @@ test_cases:
     rows: 1
   noncritical: true
 - name: Clock default expressions remain schema expressions
-  scm: "(begin\n  (define cols (tsql_get_schema \"memcp-tests\" \"tsql_clock_defaults\"))\n  (define find_column\
-    \ (lambda (name) (find cols (lambda (col) (equal? (col \"Field\") name)) nil)))\n  (if (and (equal? ((find_column\
-    \ \"created\") \"DefaultExpression\") \"GETDATE()\")\n      (equal? ((find_column \"precise\") \"DefaultExpression\"\
-    ) \"SYSDATETIME()\")\n      (equal? ((find_column \"standard\") \"DefaultExpression\") \"GETDATE()\")) true\n\
-    \    (error \"clock default was serialized as a creation-time literal\")))\n"
+  scm: |
+    (begin
+      (define relation (table "memcp-tests" "tsql_clock_defaults"))
+      (define created (show relation "column" "created" false))
+      (define precise (show relation "column" "precise" false))
+      (define standard (show relation "column" "standard" false))
+      (if (and (equal? (created "DefaultExpression") "CURRENT_TIMESTAMP")
+          (equal? (precise "DefaultExpression") "CURRENT_TIMESTAMP")
+          (equal? (standard "DefaultExpression") "CURRENT_TIMESTAMP")
+          (equal? (precise "RawType") "DATETIME2")
+          (equal? (precise "Dimensions") '(7))) true
+        (error "clock default lost its native expression or declared type")))
   noncritical: true
+  expect:
+    result: true
 - name: An omitted clock default accepts explicit NULL unchanged
   sql: INSERT tsql_clock_defaults (id,created,precise,standard) VALUES (2,NULL,NULL,NULL)
   noncritical: true
@@ -74,15 +92,25 @@ test_cases:
       standard: null
   noncritical: true
 - name: A retained compiled scalar clock is sampled on each execution
-  scm: "(begin\n  (define s (newsession))\n  (define formula (sql_queryplan_compile_formula nil\n    (parse_tsql\
-    \ \"memcp-tests\" \"SELECT GETDATE() AS legacy,SYSDATETIME() AS precise\" nil s nil)))\n  (define execute (lambda\
-    \ () (begin\n    (define output (newsession))\n    (with_autocommit s nil nil \"SELECT clocks\" (lambda (tx)\n\
-    \      (sql_execute_formula s tx formula (lambda (row) (output \"row\" row)) (lambda fields true))))\n    (output\
-    \ \"row\"))))\n  (define before (execute))\n  (sleep 0.02)\n  (define after (execute))\n  (if (and (> (tsql_datediff\
-    \ \"millisecond\" (before \"legacy\") (after \"legacy\")) 0)\n      (> (tsql_datediff \"microsecond\" (before\
-    \ \"precise\") (after \"precise\")) 0)) true\n    (error \"compiled clock was folded into a cached literal\"\
-    )))\n"
+  scm: |
+    (begin
+      (define s (newsession))
+      (define formula (sql_queryplan_compile_formula nil
+        (parse_tsql "memcp-tests" "SELECT GETDATE() AS legacy,SYSDATETIME() AS precise" nil s nil)))
+      (define execute (lambda () (begin
+        (define output (newsession))
+        (with_autocommit s nil nil "SELECT clocks" (lambda (tx)
+          (sql_execute_formula s tx formula (lambda (row) (output "row" row)) (lambda fields true))))
+        (output "row"))))
+      (define before (execute))
+      (sleep 1.05)
+      (define after (execute))
+      (if (and (> (- (unix_timestamp (after "legacy")) (unix_timestamp (before "legacy"))) 0)
+          (> (- (unix_timestamp (after "precise")) (unix_timestamp (before "precise"))) 0)) true
+        (error "compiled clock was folded into a cached literal")))
   noncritical: true
+  expect:
+    result: true
 - name: Clock functions reject unexpected arguments
   sql: SELECT GETDATE(1) AS value
   expect:
@@ -95,14 +123,21 @@ test_cases:
   setup:
   - sql: DROP TABLE IF EXISTS tsql_compound_clock_default
   - sql: CREATE TABLE tsql_compound_clock_default (id INT,value DATETIME DEFAULT DATEADD(day,1,GETDATE()))
-  scm: "(begin\n  (define session (newsession))\n  (define run (lambda (sql) (begin\n    (define output (newsession))\n\
-    \    (with_autocommit session nil nil sql (lambda (tx)\n      (sql_execute_formula session tx (sql_queryplan_compile_formula\
-    \ tx (parse_tsql \"memcp-tests\" sql nil session tx))\n        (lambda (row) (output \"row\" row)) (lambda fields\
-    \ true))))\n    (output \"row\"))))\n  (sleep 1.05)\n  (define cutoff (run \"SELECT CONVERT(VARCHAR(30),DATEADD(day,1,GETDATE()),121)\
-    \ AS value\"))\n  (run \"INSERT tsql_compound_clock_default(id) VALUES (1)\")\n  (define inserted (run \"SELECT\
-    \ CONVERT(VARCHAR(30),value,121) AS value FROM tsql_compound_clock_default WHERE id=1\"))\n  (if (>= (tsql_datediff\
-    \ \"second\" (cutoff \"value\") (inserted \"value\")) 0) true\n    (error \"compound default froze its clock\
-    \ during CREATE\")))\n"
+  scm: |
+    (begin
+      (define session (newsession))
+      (define run (lambda (sql) (begin
+        (define output (newsession))
+        (with_autocommit session nil nil sql (lambda (tx)
+          (sql_execute_formula session tx (sql_queryplan_compile_formula tx (parse_tsql "memcp-tests" sql nil session tx))
+            (lambda (row) (output "row" row)) (lambda fields true))))
+        (output "row"))))
+      (sleep 1.05)
+      (define cutoff (run "SELECT CONVERT(VARCHAR(30),DATEADD(day,1,GETDATE()),121) AS value"))
+      (run "INSERT tsql_compound_clock_default(id) VALUES (1)")
+      (define inserted (run "SELECT CONVERT(VARCHAR(30),value,121) AS value FROM tsql_compound_clock_default WHERE id=1"))
+      (if (>= (- (unix_timestamp (inserted "value")) (unix_timestamp (cutoff "value"))) 0) true
+        (error "compound default froze its clock during CREATE")))
   expect:
     result: true
   noncritical: true
@@ -1756,5 +1791,25 @@ test_cases:
     rows: 1
     data:
     - value: '2024-02-29 00:00:00'
+
+- name: Whole second precise clock default uses the native declaration
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_clock_declaration
+  - sql: CREATE TABLE tsql_clock_declaration(id INT,value DATETIME2(7) DEFAULT ((SYSDATETIME())))
+  scm: |
+    (begin
+      (define declaration (show (table "memcp-tests" "tsql_clock_declaration") "column" "value" false))
+      (if (and (equal? (declaration "DefaultExpression") "CURRENT_TIMESTAMP")
+          (equal? (declaration "RawType") "DATETIME2")
+          (equal? (declaration "Dimensions") '(7))) true
+        (error "precise clock default did not retain its native declaration")))
+  expect:
+    result: true
+  cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_clock_declaration
+- name: Precise clock default rejects arguments
+  sql: CREATE TABLE tsql_invalid_clock_default(value DATETIME2 DEFAULT SYSDATETIME(1))
+  expect:
+    error: true
 
 cleanup: []
