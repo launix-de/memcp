@@ -2153,16 +2153,13 @@ drifting on source-join pairs or residual outer references. */
 (define stage_source_outer? (lambda (outer_sources)
 	(not (empty_list? outer_sources))))
 
-/* A session-variable domain component is not a per-row correlation: the
-decorrelated stage was built for exactly this session value (not a value that
-varies per outer row), so this equality is a tautology by construction and
-must hold even when the session value is nil. Every other domain component is
-a genuine per-row correlation, where SQL NULL semantics correctly reject a
-nil-to-nil match. equal?? already follows those SQL semantics ((equal? nil
-nil) is nil, not true), which is exactly why the tautological case needs its
-own null-safe check instead of silently failing whenever the session variable
-is unset. */
-(define make_exists_stage_join_condition (lambda (stage_alias key_names outer_domain)
+/* A session-variable domain is the stage's own binding, so its rejoin is a
+NULL-safe identity even when unset. Genuine row correlations keep SQL equality:
+NULL = NULL is UNKNOWN. Window partitions instead request nulls_not_distinct
+because their keys identify GROUP BY partitions, including NULL components.
+The canonical OR form retains the keyed-lookup proof without changing ordinary
+correlation, IN or EXISTS semantics. */
+(define make_exists_stage_join_condition (lambda (stage_alias key_names outer_domain nulls_not_distinct)
 	(if (empty_list? outer_domain)
 		true
 		(combine_where_terms
@@ -2170,7 +2167,7 @@ is unset. */
 				(begin
 					(define domain_value (nth outer_domain i))
 					(define key_expr (list (quote get_column) stage_alias false (nth key_names i) false))
-					(if (query_session_read? domain_value)
+					(if (or nulls_not_distinct (query_session_read? domain_value))
 						(list (quote or)
 							(list (quote equal??) key_expr domain_value)
 							(list (quote and) (list (quote nil?) key_expr) (list (quote nil?) domain_value)))
@@ -2180,7 +2177,7 @@ is unset. */
 (define make_positive_in_join_condition (lambda (input stage_alias key_names lookup_keys probe match_ag)
 	(combine_where_terms
 		(list
-			(make_exists_stage_join_condition stage_alias key_names lookup_keys)
+			(make_exists_stage_join_condition stage_alias key_names lookup_keys false)
 			(list (quote not) (list (quote nil?) probe))
 			(list (quote >) (membership_count_expr input stage_alias match_ag) 0))
 		true)))
@@ -2265,7 +2262,7 @@ physical membership probe. */
 
 (define make_stage_lookup_condition (lambda (stage_alias key_names outer_domain post_condition)
 	(combine_where
-		(make_exists_stage_join_condition stage_alias key_names outer_domain)
+		(make_exists_stage_join_condition stage_alias key_names outer_domain false)
 		post_condition)))
 
 (define source_is_stage_output? (lambda (src)
@@ -3035,7 +3032,7 @@ general recursive boolean proof above. */
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
+			(make_exists_stage_join_condition stage_alias key_names lookup_keys false)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
 		(list
 			(list (quote >)
@@ -3262,7 +3259,7 @@ general recursive boolean proof above. */
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias (group_key_cols keys) lookup_keys)))
+			(make_exists_stage_join_condition stage_alias (group_key_cols keys) lookup_keys false)))
 		(list
 			(list (quote >)
 				(list (quote coalesceNil)
@@ -3456,7 +3453,7 @@ without separately proving two-valued semantics. */
 			(or truth_membership (not semijoin_where))
 			(if semijoin_where
 				(make_positive_in_join_condition (gs_input stage) stage_alias key_names (list probe) probe aggregate_count_descriptor)
-				(make_exists_stage_join_condition stage_alias key_names (list probe)))))
+				(make_exists_stage_join_condition stage_alias key_names (list probe) false))))
 		(define null_source (list
 			null_stage_alias
 			(group_stage_schema null_stage)
@@ -3584,13 +3581,13 @@ without separately proving two-valued semantics. */
 			(or truth_membership (not semijoin_where))
 			(if semijoin_where
 				(make_positive_in_join_condition (gs_input stage) stage_alias key_names lookup_keys probe aggregate_count_descriptor)
-				(make_exists_stage_join_condition stage_alias key_names lookup_keys))))
+				(make_exists_stage_join_condition stage_alias key_names lookup_keys false))))
 		(define null_source (list
 			null_stage_alias
 			(group_stage_schema null_stage)
 			(make_stage_output_relation null_stage_id)
 			true
-			(make_exists_stage_join_condition null_stage_alias null_key_names domain_lookup_keys)))
+			(make_exists_stage_join_condition null_stage_alias null_key_names domain_lookup_keys false)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
 		(if semijoin_where
 			(list true (list stage) (list source))
@@ -3640,7 +3637,7 @@ without separately proving two-valued semantics. */
 			(gs_input stage) input_alias stage_alias keys key_names ags (coalesceNil (gs_having stage) true)))
 		(define join_condition (combine_where_terms
 			(list
-				(make_exists_stage_join_condition stage_alias (list (nth key_names key_idx)) (list probe))
+				(make_exists_stage_join_condition stage_alias (list (nth key_names key_idx)) (list probe) false)
 				(list (quote not) (list (quote nil?) probe))
 				having_expr)
 			true))
@@ -3914,7 +3911,7 @@ without separately proving two-valued semantics. */
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
+			(make_exists_stage_join_condition stage_alias key_names lookup_keys false)))
 		(define output_exprs (map values_for_inner (lambda (value_for_inner)
 			(scalar_once_value_expr stage_input stage_alias
 				(scalar_once_descriptor value_for_inner order_for_inner (qb_offset inner))))))
@@ -4337,7 +4334,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
+			(make_exists_stage_join_condition stage_alias key_names lookup_keys false)))
 		(define output_exprs (map (produceN (count value_ags)) (lambda (i)
 			(begin
 				(define output_ag (nth value_ags i))
@@ -4799,6 +4796,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(list
 				(list (quote condition) true)
 				(list (quote purpose) (quote window_partition_aggregate))
+				(list (quote nulls_not_distinct) true)
 				(list (quote merge-aggregate-extensions) true)
 				(list (quote domain) outer_domain)
 				(list (quote lookup-keys) outer_domain)
@@ -4813,7 +4811,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(source_schema src)
 			(make_stage_output_relation stage_id)
 			true
-			(make_exists_stage_join_condition stage_alias key_names outer_domain)))
+			(make_exists_stage_join_condition stage_alias key_names outer_domain true)))
 		(list
 			(window_aggregate_value_expr stage_input fn canonical_args ags stage_alias)
 			(list stage)

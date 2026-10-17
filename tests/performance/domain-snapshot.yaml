@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
-  performance_shard_weight: 14
+  performance_shard_weight: 103
   version: "1.0"
   description: "Shared state aggregates across ordered parameter domains"
   isolated: true
@@ -818,11 +818,11 @@ test_cases:
                 (list 'range-point-keys (list foreign)) (list 'range-point-domain (list parent))
                 (list 'lookup-keys (list parent axis)))))
             (define output (list "selected" "memcp-tests" (make_stage_output_relation (gs_id stage)) true
-              (make_exists_stage_join_condition "selected" (group_key_cols (gs_keys stage)) (gs_domain stage))))
+              (make_exists_stage_join_condition "selected" (group_key_cols (gs_keys stage)) (gs_domain stage) false)))
             (define raw_stage (make_group_stage "raw-cut" source (gs_domain stage)
               (list foreign coordinate) (gs_aggregates stage) nil '() '() 1 nil (gs_facts stage)))
             (define raw_output (list "selected" "memcp-tests" (make_stage_output_relation (gs_id raw_stage)) true
-              (make_exists_stage_join_condition "selected" (group_key_cols (gs_keys raw_stage)) (gs_domain raw_stage))))
+              (make_exists_stage_join_condition "selected" (group_key_cols (gs_keys raw_stage)) (gs_domain raw_stage) false)))
             (define proofs (ordered_binding_cuts (list stage) driver (list axis)))
             (define binding (lower_group_cache_binding driver axis proofs))
             (define read ((eval (list 'lambda (list 'tx 'session)

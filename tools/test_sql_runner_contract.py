@@ -2125,7 +2125,7 @@ class PerformanceFixtureContractTests(unittest.TestCase):
 
     def test_shards_cover_each_suite_once_and_reject_invalid_indices(self):
         paths = [Path(f"suite-{index}") for index in range(13)]
-        for count in (4, 6):
+        for count in (4, 6, 7):
             with self.subTest(count=count):
                 assigned = []
                 for index in range(count):
@@ -2150,7 +2150,7 @@ class PerformanceFixtureContractTests(unittest.TestCase):
             path = self.root / f"weighted-{index:02d}.yaml"
             path.write_text(json.dumps({"metadata": {"performance_shard_weight": 64 if index < 2 else 1}}))
             paths.append(path)
-        for count in (4, 6):
+        for count, expected_sizes in ((4, [6, 6]), (6, [3, 3, 3, 3]), (7, [3, 3, 2, 2, 2])):
             with self.subTest(count=count):
                 shards = []
                 for index in range(count):
@@ -2158,7 +2158,7 @@ class PerformanceFixtureContractTests(unittest.TestCase):
                         shards.append(performance_shard_paths(paths))
                 self.assertCountEqual([path for shard in shards for path in shard], paths)
                 self.assertEqual(shards[:2], [[paths[0]], [paths[1]]])
-                self.assertEqual([len(shard) for shard in shards[2:]], [6, 6] if count == 4 else [3, 3, 3, 3])
+                self.assertEqual([len(shard) for shard in shards[2:]], expected_sizes)
         for bad in (0, -1, True, 1.5, "64"):
             paths[0].write_text(json.dumps({"metadata": {"performance_shard_weight": bad}}))
             with self.subTest(bad=bad), self.assertRaises(ValueError):
