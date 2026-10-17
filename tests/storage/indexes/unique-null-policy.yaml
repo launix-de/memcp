@@ -237,8 +237,7 @@ test_cases:
   sql: INSERT INTO nkd_main_psql VALUES (2,NULL)
   expect: *id001
 - name: psql published key option visible in native metadata
-  scm: (if ((nth ((show (table "memcp-tests" "nkd_main_psql") true) "Unique") 1) "nulls_not_distinct") true (error
-    "missing native NULL equality option"))
+  scm: (if ((nth ((show (table "memcp-tests" false "nkd_main_psql" false) true) "Unique") 1) "nulls_not_distinct") true (error "missing native NULL equality option"))
 - name: Declare nkd_main_tsql
   syntax: tsql
   sql: CREATE TABLE nkd_main_tsql (id INT PRIMARY KEY, v INT UNIQUE)
@@ -254,8 +253,7 @@ test_cases:
   sql: INSERT INTO nkd_main_tsql VALUES (2,NULL)
   expect: *id001
 - name: tsql published key option visible in native metadata
-  scm: (if ((nth ((show (table "memcp-tests" "nkd_main_tsql") true) "Unique") 1) "nulls_not_distinct") true (error
-    "missing native NULL equality option"))
+  scm: (if ((nth ((show (table "memcp-tests" false "nkd_main_tsql" false) true) "Unique") 1) "nulls_not_distinct") true (error "missing native NULL equality option"))
 - name: Persist key policy through ordinary shutdown
   sql: SHUTDOWN
   restart_timeout: 300

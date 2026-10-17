@@ -26,6 +26,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(if (equal? val1 val2) (teststat "success" (+ (teststat "success") 1)) (print "failed test "(teststat "count")": " errormsg))
 	)))
 
+
+	/* Generic UTF16 units preserve whole Unicode scalars at prefix boundaries. */
+	(assert (utf16_length "a雪😀") 4 "UTF16 counts supplementary pairs")
+	(assert (utf16_prefix "a😀z" 2) "a" "UTF16 prefix avoids splitting a pair")
+	(assert (utf16_prefix "a😀z" 3) "a😀" "UTF16 prefix retains a complete pair")
+	(assert (nil? (utf16_length nil)) true "UTF16 length preserves nil")
+	(assert (nil? (utf16_prefix "x" nil)) true "UTF16 prefix preserves nil limit")
+	(assert ((jit (lambda (text) (utf16_length text))) "a雪😀") 4 "jit UTF16 unit count")
+	(assert ((jit (lambda (text limit) (utf16_prefix text limit))) "a😀z" 2) "a" "jit UTF16 prefix avoids a half pair")
+	(assert ((jit (lambda (text limit) (utf16_prefix text limit))) "a😀z" 3) "a😀" "jit UTF16 prefix preserves whole pair")
+	(assert (nil? ((jit (lambda (text) (utf16_length text))) nil)) true "jit UTF16 length nil")
+
 	/* equal? */
 	(assert (unicode_char 65) "A" "encode ASCII scalar")
 	(assert (unicode_char 8364) "€" "encode three-byte UTF-8 scalar")
@@ -549,9 +561,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(list "d" "memcp-tests" "graph_d" false nil)))
 	(define test_physical_scan_signature (lambda (expr)
 		(match expr
-			((symbol scan) _tx ((symbol table) _schema relation) _access_schema _access_values _filtercols _filterfn _mapcols mapreduce _init _combine outer)
+			((symbol scan) _tx ((symbol table) _schema _database_ignorecase relation _table_ignorecase) _access_schema _access_values _filtercols _filterfn _mapcols mapreduce _init _combine outer)
 			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapreduce))
-			((symbol scan_order) _tx ((symbol table) _schema relation) _access_schema _access_values _filtercols _filterfn _sortcols _sortdirs _brake _offset _limit _mapcols mapreduce _init outer)
+			((symbol scan_order) _tx ((symbol table) _schema _database_ignorecase relation _table_ignorecase) _access_schema _access_values _filtercols _filterfn _sortcols _sortdirs _brake _offset _limit _mapcols mapreduce _init outer)
 			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapreduce))
 			(cons head tail) (concat (test_physical_scan_signature head) (test_physical_scan_signature tail))
 			_ "")))
@@ -1201,6 +1213,27 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (int? -42) true "negative integer literal is an int")
 	(assert (equal? (intdiv 9007199254740993 1) 9007199254740993) true "integer literal division preserves precision")
 
+
+	/* Exact bit operators share one carrier; source-language widths stay outside SCM. */
+	(assert (bit_and 219 46) 10 "integer bit intersection")
+	(assert (bit_or 219 46) 255 "integer bit union")
+	(assert (bit_xor 219 46) 245 "integer bit exclusive union")
+	(assert (bit_not -9223372036854775808) 9223372036854775807 "integer bit complement preserves endpoints")
+	(assert (bit_shift_left 1 63) -9223372036854775808 "integer left shift preserves the sign bit")
+	(assert (bit_shift_right -1 1) 9223372036854775807 "integer right shift is logical")
+	(assert (bit_shift_left 1 64) 0 "integer shift does not mask a large count")
+	(assert (nil? (bit_and nil 1)) true "integer bits preserve nil")
+	(assert ((jit (lambda (a b) (bit_and a b))) 219 46) 10 "jit integer AND")
+	(assert ((jit (lambda (a b) (bit_or a b))) 219 46) 255 "jit integer OR")
+	(assert ((jit (lambda (a b) (bit_xor a b))) -9223372036854775808 -1) 9223372036854775807 "jit integer XOR preserves endpoints")
+	(assert ((jit (lambda (a) (bit_xor a a))) 219) 0 "jit integer XOR aliases")
+	(assert ((jit (lambda (a b) (+ (bit_xor a b) a))) 219 46) 464 "jit integer XOR retains multiply used input")
+	(assert ((jit (lambda (a) (bit_not a))) -9223372036854775808) 9223372036854775807 "jit integer complement")
+	(assert ((jit (lambda (a n) (bit_shift_left a n))) 1 63) -9223372036854775808 "jit integer left shift")
+	(assert ((jit (lambda (a n) (bit_shift_right a n))) -1 1) 9223372036854775807 "jit integer logical right shift")
+	(assert ((jit (lambda (a n) (bit_shift_left a n))) 1 64) 0 "jit integer large shift")
+	(assert (nil? ((jit (lambda (a b) (bit_xor a b))) nil 1)) true "jit integer XOR nil")
+
 	/* Test for + */
 	(assert (+ 1 2) 3 "1 + 2 should be 3")
 	(assert (+ 1 2 3) 6 "1 + 2 + 3 should be 6")
@@ -1765,7 +1798,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		4
 		"length hook: count folds parallelN length")
 	/* scan callback ownership: mapreduce accumulator enables _mut inside its body */
-	(assert (serialize (optimize '('scan nil '('table "db" "tbl") '(quote '(369435906932736)) '(list) '("x") '('lambda '('x) true) '("x") '('lambda '('acc 'x) '(set_assoc 'acc 'x true)) '(list) nil false))) "(scan nil (table \"db\" \"tbl\") (quote (369435906932736)) '() (\"x\") (lambda (x) true 1) (\"x\") (lambda (acc x) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: mapreduce acc enables set_assoc_mut")
+	(assert (serialize (optimize '('scan nil '('table "db" false "tbl" false) '(quote '(369435906932736)) '(list) '("x") '('lambda '('x) true) '("x") '('lambda '('acc 'x) '(set_assoc 'acc 'x true)) '(list) nil false))) "(scan nil (table \"db\" false \"tbl\" false) (quote (369435906932736)) '() (\"x\") (lambda (x) true 1) (\"x\") (lambda (acc x) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: mapreduce acc enables set_assoc_mut")
 	(define opt_merge_unique_ser (serialize (optimize
 		(list 'lambda
 			(list 'a 'b 'c)
@@ -3382,7 +3415,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define sf_cm (newcachemap))
 	(define sf_calls (newsession))
 	(define sf_values (parallelN 8 (lambda (i)
-		(sf_cm "get_or_compute" "shared" (lambda () (begin
+		(sf_cm "shared" nil (lambda () (begin
 			(sf_calls (string i) true)
 			(sleep 0.02)
 			123))))))
@@ -3390,9 +3423,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (count (sf_calls)) 1 "cachemap singleflight runs one producer")
 	/* failed producers are not cached and a later caller can retry */
 	(assert (try
-		(lambda () (begin (sf_cm "get_or_compute" "retry" (lambda () (car (sf_calls "missing")))) false))
+		(lambda () (begin (sf_cm "retry" nil (lambda () (car (sf_calls "missing")))) false))
 		(lambda (e) true)) true "cachemap singleflight forwards producer panic")
-	(assert (sf_cm "get_or_compute" "retry" (lambda () 77)) 77 "cachemap singleflight retries after panic")
+	(assert (sf_cm "retry" nil (lambda () 77)) 77 "cachemap singleflight retries after panic")
+
+	/* A constructor factory receives the key and is also used after a prior
+	miss on another key. Access-local factories remain zero-argument thunks. */
+	(define factory_calls (newsession))
+	(define factory_cache (newcachemap (lambda (key) (begin
+		(factory_calls key (+ 1 (coalesceNil (factory_calls key) 0)))
+		(if (equal? key "missing") nil (concat "loaded:" key))))))
+	(assert (factory_cache "a") "loaded:a" "cache constructor factory receives key")
+	(assert (factory_cache "a") "loaded:a" "cache constructor factory result reused")
+	(assert (factory_calls "a") 1 "cache constructor factory runs once on a hit")
+	(assert (factory_cache "missing") nil "cache constructor preserves nil result")
+	(assert (factory_cache "missing") nil "cache constructor reuses nil result")
+	(assert (factory_calls "missing") 1 "cache constructor caches absent values")
+	(assert (factory_cache "override" nil (lambda () 456)) 456 "access factory overrides constructor")
+	(assert (factory_calls "override") nil "overridden constructor was not called")
+	(assert (factory_cache "override") 456 "access factory result reused by plain getter")
 
 	/* query_expr_alias_set is the planner JIT coverage target. Native compilation
 	is atomic, so a compiled descriptor means every expression in the function was

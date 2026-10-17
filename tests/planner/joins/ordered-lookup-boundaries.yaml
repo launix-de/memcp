@@ -11,10 +11,10 @@ setup:
   - sql: "INSERT INTO olb_lookup VALUES (999, 1)"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "olb_driver") '("id" "label")
+        (insert (table "memcp-tests" false "olb_driver" false) '("id" "label")
           (map (produceN 1000) (lambda (i) (list i "ordinary"))))
-        (rebuild (table "memcp-tests" "olb_driver") true false)
-        (rebuild (table "memcp-tests" "olb_lookup") true false))
+        (rebuild (table "memcp-tests" false "olb_driver" false) true false)
+        (rebuild (table "memcp-tests" false "olb_lookup" false) true false))
 test_cases:
   - name: "Exclusive lower bound rejects an otherwise matching unique lookup"
     sql: "SELECT a.id FROM olb_lookup a JOIN olb_driver b ON b.id=a.id WHERE a.id > 999 AND b.label IS NOT NULL ORDER BY a.id LIMIT 2"

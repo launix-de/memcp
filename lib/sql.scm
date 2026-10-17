@@ -66,7 +66,7 @@ snapshot through the stable handle for the rest of this compile only. */
 			(if write
 				(if policy (policy schema tbl true) true)
 				(begin
-					(define handle (table schema tbl))
+					(define handle (table schema false tbl false))
 					(if (and handle (catalog handle))
 						true
 						(begin
@@ -551,7 +551,7 @@ user table merely to discard a newly constructed policy closure. */
 			/* Compile diagnostics measure true misses and must not turn their own
 			previous result into a cache hit. The inspected query is never run. */
 			/* A hit needs only the retained dispatcher. Construct miss producers
-			after this lookup; get_or_compute still serializes concurrent misses. */
+			after this lookup; the getter still serializes concurrent misses. */
 			(define cached_entry (if compile_diagnostic nil (queryplan_cache cache_key)))
 			(define formula (if (not (nil? cached_entry))
 				/* Guarded entries retain (entry dispatcher); exact entries are
@@ -582,7 +582,7 @@ user table merely to discard a newly constructed policy closure. */
 										(cadr variant)
 										(sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query resolved_policy session compile_tx variant)))))
 								(define compiled (if compile_diagnostic (exact_compile tx)
-									(queryplan_cache "get_or_compute" cache_key tx exact_compile)))
+									(queryplan_cache cache_key tx exact_compile)))
 								(if (list? compiled) (cadr compiled) compiled))
 							(begin
 								/* Build the exact-cache compiler only for its own branch. Guarded
@@ -597,9 +597,9 @@ user table merely to discard a newly constructed policy closure. */
 													(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx)))))))))
 								(if compile_diagnostic
 									(exact_compile tx)
-									(queryplan_cache "get_or_compute" cache_key tx exact_compile))))
+									(queryplan_cache cache_key tx exact_compile))))
 						(begin
-							(define cached_entry (queryplan_cache "get_or_compute" cache_key tx
+							(define cached_entry (queryplan_cache cache_key tx
 								(lambda (compile_tx) (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query
 									(sql_policy_spec_resolve policy) session compile_tx nil))))
 							(cadr cached_entry))))))
@@ -619,7 +619,7 @@ if the user is not allowed to access this property, the function will throw an e
 */
 (define sql_policy (lambda (username)
 	(begin
-		(define is_admin (scan_lookup nil (table "system" "user")
+		(define is_admin (scan_lookup nil (table "system" false "user" false)
 			(list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "admin") (list username)))
 		(if is_admin (lambda (schema tblname write) true) /* admin -> allow all */
 			/* else: complicated policy */
@@ -628,7 +628,7 @@ if the user is not allowed to access this property, the function will throw an e
 					/* Allow virtual INFORMATION_SCHEMA for all users */
 					(if (equal?? schema "information_schema") true (begin
 						/* Database-level check via system.access */
-						(define has_access (scan_lookup nil (table "system" "access")
+						(define has_access (scan_lookup nil (table "system" false "access" false)
 							(list 371635467059200
 								(scan_boundary "equal" "username" 0 0 true true "" false)
 								(scan_boundary "equal" "database" 1 1 true true "" false)) (list username schema)))
@@ -648,7 +648,7 @@ if the user is not allowed to access this property, the function will throw an e
 (if (has? (show "system") "user") true (begin
 	(print "creating table system.user")
 	(eval (parse_sql "system" "CREATE TABLE `user`(username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" (lambda (schema tblname write) true)))
-	(insert (table "system" "user") '("username" "password" "admin") '('("root" (password (arg "root-password" "admin")) true)))
+	(insert (table "system" false "user" false) '("username" "password" "admin") '('("root" (password (arg "root-password" "admin")) true)))
 ))
 
 /* migration: older instances may miss the admin column; add it and mark all existing users as admin */
@@ -657,8 +657,8 @@ if the user is not allowed to access this property, the function will throw an e
 		(if (has? (map (show "system" "user") (lambda (col) (get_assoc col "Field"))) "admin")
 			true
 			(begin
-				(createcolumn (table "system" "user") "admin" "boolean" '() '())
-				(scan nil (table "system" "user") '(369435906932736) '() '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update '("admin" true)) acc)))
+				(createcolumn (table "system" false "user" false) "admin" "boolean" '() '())
+				(scan nil (table "system" false "user" false) '(369435906932736) '() '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update '("admin" true)) acc)))
 			)
 		)
 	) true)
@@ -668,7 +668,7 @@ if the user is not allowed to access this property, the function will throw an e
 (try (lambda () (begin
 	(if (has? (show "system") "user") (begin
 		(if (has? (map (show "system" "user") (lambda (col) (get_assoc col "Field"))) "id")
-			(migratedropcolumn (table "system" "user") "id")
+			(migratedropcolumn (table "system" false "user" false) "id")
 			true)
 	) true)
 )) (lambda (e) true))
@@ -676,7 +676,7 @@ if the user is not allowed to access this property, the function will throw an e
 /* migration: ensure root always has admin=true */
 (try (lambda () (begin
 	(if (has? (show "system") "user")
-		(scan nil (table "system" "user") (list 369436175368192 (scan_boundary "equal" "username" 0 0 true true "" false)) '("root") '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update '("admin" true)) acc)))
+		(scan nil (table "system" false "user" false) (list 369436175368192 (scan_boundary "equal" "username" 0 0 true true "" false)) '("root") '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update '("admin" true)) acc)))
 		true)
 )) (lambda (e) true))
 
@@ -702,7 +702,7 @@ qry    — query text (pass "" when unknown) */
 	(error_log_counter "count" (+ (error_log_counter "count") 1))
 	(if (settings "ErrorQueryLog") (begin
 		(try (lambda () (begin
-			(insert (table "system_statistic" "errors")
+			(insert (table "system_statistic" false "errors" false)
 				'("datetime" "database" "user" "query" "error")
 				(list (list (now) db usr qry (concat errmsg))))
 			/* trimming moved to 15-minute cron in dashboard.scm */
@@ -730,7 +730,7 @@ the latter is expanded before logical planning and never materialized. */
 ))
 
 (sql_view_catalog_set_count
-	(scan nil (table "system" "views") '(369435906932736) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
+	(scan nil (table "system" false "views" false) '(369435906932736) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
 
 /* Bootstrap owns these fixed catalog constraints. Do not suppress failures:
 without them repeated grants create duplicate accounts and ambiguous authentication. */
@@ -741,7 +741,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 	(set old_handler http_handler)
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan_lookup nil (table "system" "user") (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list (req "username"))))
+		(set pw (scan_lookup nil (table "system" false "user" false) (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list (req "username"))))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
@@ -786,7 +786,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 	)))
 	(define handle_query_postgres (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan_lookup nil (table "system" "user") (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list (req "username"))))
+		(set pw (scan_lookup nil (table "system" false "user" false) (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list (req "username"))))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
@@ -847,7 +847,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 	/* handler for raw Scheme code execution (global, no schema) */
 	(define handle_scm (lambda (req res code) (begin
 		/* check for password - must be admin */
-		(set pw (scan_lookup nil (table "system" "user")
+		(set pw (scan_lookup nil (table "system" false "user" false)
 			(list 373834222010370 (scan_boundary "equal" "username" 0 0 true true "" false) "password" "admin")
 			(list (req "username") (lambda (password admin) (list password admin)))))
 		(if (and pw (equal? (car pw) (password (req "password"))) (car (cdr pw)))
@@ -919,7 +919,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 
 /* shared callbacks for mysql protocol (TCP and Unix socket) */
 (set mysql_auth (lambda (username_)
-	(scan_lookup nil (table "system" "user") (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list username_))))
+	(scan_lookup nil (table "system" false "user" false) (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list username_))))
 (set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
 
 /* Top-level so the interpreter compiles this body once instead of rebuilding a

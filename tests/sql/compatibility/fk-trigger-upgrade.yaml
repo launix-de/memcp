@@ -22,7 +22,7 @@ test_cases:
     scm: |
       (begin
         (createtrigger
-          (table "memcp-tests" "fk_upgrade_child")
+          (table "memcp-tests" false "fk_upgrade_child" false)
           "__fk_fk_upgrade_ref_child_insert"
           "before_insert"
           ""
@@ -33,7 +33,7 @@ test_cases:
               NEW))
           false)
         (createtrigger
-          (table "memcp-tests" "fk_upgrade_child")
+          (table "memcp-tests" false "fk_upgrade_child" false)
           "__fk_fk_upgrade_ref_child_update"
           "before_update"
           ""
@@ -44,7 +44,7 @@ test_cases:
               NEW))
           false)
         (createtrigger
-          (table "memcp-tests" "fk_upgrade_parent")
+          (table "memcp-tests" false "fk_upgrade_parent" false)
           "__fk_fk_upgrade_ref_parent_delete"
           "before_delete"
           ""
@@ -53,7 +53,7 @@ test_cases:
             (__fk_on_parent_delete "memcp-tests" "fk_upgrade_child" '("parent_id") (list (get_assoc OLD "id")) "fk_upgrade_ref" "CASCADE"))
           false)
         (createtrigger
-          (table "memcp-tests" "fk_upgrade_parent")
+          (table "memcp-tests" false "fk_upgrade_parent" false)
           "__fk_fk_upgrade_ref_parent_update"
           "after_update"
           ""

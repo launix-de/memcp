@@ -666,15 +666,15 @@ test_cases:
       - sql: "CREATE TABLE ord_read_permission (id INT PRIMARY KEY, principal_id INT, label_id INT)"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "ord_read_doc") (list "id" "file_id" "label_id" "rank_value")
+            (insert (table "memcp-tests" false "ord_read_doc" false) (list "id" "file_id" "label_id" "rank_value")
               (map (produceN 20000) (lambda (i)
                 (list (+ i 1) (+ i 1) (+ (mod i 100) 1) (- 20000 i)))))
-            (insert (table "memcp-tests" "ord_read_file") (list "id" "filename")
+            (insert (table "memcp-tests" false "ord_read_file" false) (list "id" "filename")
               (map (produceN 20000) (lambda (i)
                 (list (+ i 1) (if (equal? (mod i 3) 0) "needle" "other")))))
-            (insert (table "memcp-tests" "ord_read_label") (list "id" "name")
+            (insert (table "memcp-tests" false "ord_read_label" false) (list "id" "name")
               (map (produceN 100) (lambda (i) (list (+ i 1) (concat "label_" (+ i 1))))))
-            (insert (table "memcp-tests" "ord_read_permission") (list "id" "principal_id" "label_id")
+            (insert (table "memcp-tests" false "ord_read_permission" false) (list "id" "principal_id" "label_id")
               (map (produceN 50) (lambda (i) (list (+ i 1) 7 (+ i 1))))))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM ord_read_doc"
@@ -839,7 +839,7 @@ test_cases:
           (begin
             (set rows (map (produceN 200000) (lambda (i)
               (list i (* 7 (- (* i 31337) (* (floor (/ (* i 31337) 200000)) 200000))) (floor (/ i 40000))))))
-            (insert (table "memcp-tests" "ord_stress") (list "id" "val" "grp") rows))
+            (insert (table "memcp-tests" false "ord_stress" false) (list "id" "val" "grp") rows))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM ord_stress"
     expect:
@@ -1086,9 +1086,9 @@ test_cases:
       - sql: "CREATE TABLE ord_join_order_lookup (driver_id INT, enabled INT)"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "ord_join_order_driver") '("id" "lookup_id" "score")
+            (insert (table "memcp-tests" false "ord_join_order_driver" false) '("id" "lookup_id" "score")
               (map (produceN 2000) (lambda (i) (list (+ i 1) (+ i 1) i))))
-            (insert (table "memcp-tests" "ord_join_order_lookup") '("driver_id" "enabled")
+            (insert (table "memcp-tests" false "ord_join_order_lookup" false) '("driver_id" "enabled")
               (map (produceN 2000) (lambda (i)
                 (list (+ i 1) (if (equal? i 0) 1 0)))))
             (rebuild)

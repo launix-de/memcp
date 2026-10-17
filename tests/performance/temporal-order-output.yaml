@@ -10,7 +10,7 @@ setup:
 - sql: CREATE TABLE temporal_order_page (id BIGINT PRIMARY KEY, stamp DATETIME, title VARCHAR(64), kind VARCHAR(20), status VARCHAR(20)) ENGINE=sloppy
 - scm: |
     (begin
-      (insert (table "memcp-tests" "temporal_order_page") '("id" "stamp" "title" "kind" "status")
+      (insert (table "memcp-tests" false "temporal_order_page" false) '("id" "stamp" "title" "kind" "status")
         (map (produceN 22000) (lambda (i)
           (list (+ i 1) (sql_temporal_output (+ 1577836800 (* i 3600)) "DATETIME" "UTC")
             (concat "Article " i) (if (equal? (mod i 11) 0) "post" "revision") "publish"))))

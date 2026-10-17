@@ -29,22 +29,22 @@ setup:
   - sql: "CREATE TABLE imc_override (domain_id INT, actor_id INT, allowed INT)"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "imc_file") '("id" "filename" "search")
+        (insert (table "memcp-tests" false "imc_file" false) '("id" "filename" "search")
           (map (produceN 640) (lambda (i)
             (list i
               (concat "file-" (string i))
               (if (equal? (mod i 256) 0)
                 (concat "prefix-klaus-suffix-" (string i))
                 (string_repeat "kl--la--au--us--" 128))))))
-        (insert (table "memcp-tests" "imc_document") '("id" "file_id" "sort_key")
+        (insert (table "memcp-tests" false "imc_document" false) '("id" "file_id" "sort_key")
           (map (produceN 1250) (lambda (i) (list i (mod i 640) i))))
-        (insert (table "memcp-tests" "imc_acl") '("document_id" "allowed")
+        (insert (table "memcp-tests" false "imc_acl" false) '("document_id" "allowed")
           (map (produceN 1250) (lambda (i) (list i 1))))
-        (insert (table "memcp-tests" "imc_domain") '("id" "direct_flag")
+        (insert (table "memcp-tests" false "imc_domain" false) '("id" "direct_flag")
           (map (produceN 640) (lambda (i) (list i (if (equal? (mod i 11) 0) 1 0)))))
-        (insert (table "memcp-tests" "imc_assignment") '("domain_id" "actor_id" "allowed")
+        (insert (table "memcp-tests" false "imc_assignment" false) '("domain_id" "actor_id" "allowed")
           (map (produceN 320) (lambda (i) (list (* i 2) 7 1))))
-        (insert (table "memcp-tests" "imc_override") '("domain_id" "actor_id" "allowed")
+        (insert (table "memcp-tests" false "imc_override" false) '("domain_id" "actor_id" "allowed")
           (map (produceN 214) (lambda (i) (list (* i 3) 7 1))))
         (rebuild))
   # Two scans cross the normal adaptive-index savings threshold. The EXPLAIN
@@ -74,7 +74,7 @@ test_cases:
           (list (col "r" "k") (col "r" "epoch") (col "r" "actor"))
           (list (list 1 '+ 0)) nil '() '() nil nil
           (list (list 'lookup-keys (list (col "d" "k") (list 'session "epoch") (list 'session "actor"))))))
-        (define batch (scan_recset nil (table "memcp-tests" "imc_projection_key")
+        (define batch (scan_recset nil (table "memcp-tests" false "imc_projection_key" false)
           '() '() '("enabled") (lambda (enabled) (equal? enabled 1))))
         (define run (lambda (direction epoch actor) (begin
           (define invocation (newsession))

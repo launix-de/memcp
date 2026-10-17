@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Parallel projection planner coverage
 # Verifies that independent scalar subselects in the SELECT list are
 # lowered to a parallel_map projection and still return correct results.
@@ -24,7 +26,7 @@ test_cases:
       (begin
         (define tables '("pp_data_1" "pp_data_2" "pp_data_3" "pp_data_4"))
         (map tables (lambda (tbl)
-          (insert (table "memcp-tests" tbl) '("id" "score")
+          (insert (table "memcp-tests" false tbl false) '("id" "score")
             (map (produceN 30000) (lambda (i) (list i (* i 7)))))))
         (* 4 30000))
 

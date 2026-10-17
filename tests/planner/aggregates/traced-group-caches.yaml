@@ -65,7 +65,7 @@ setup:
       (begin
         (define rows (map (produceN 2000) (lambda (i)
           (list (+ i 1) (if (< i 1000) 10 20)))))
-        (insert (table "memcp-tests" "trace_partition_document")
+        (insert (table "memcp-tests" false "trace_partition_document" false)
           '("id" "reference_id") rows)
         2000)
   - sql: |
@@ -112,16 +112,16 @@ setup:
             (if (equal? 0 (- i (* 2 (floor (/ i 2))))) 10 20)
             (+ 1 (- i (* 3 (floor (/ i 3)))))
             (+ i 1)))))
-        (insert (table "memcp-tests" "trace_multi_owner")
+        (insert (table "memcp-tests" false "trace_multi_owner" false)
           '("id" "enabled") owners)
-        (insert (table "memcp-tests" "trace_multi_document")
+        (insert (table "memcp-tests" false "trace_multi_document" false)
           '("id" "access_id" "tenant_id" "owner_id") documents)
         2400)
   - scm: |
       (begin
-        (rebuild (table "memcp-tests" "trace_multi_document") true false)
-        (rebuild (table "memcp-tests" "trace_multi_access") true false)
-        (rebuild (table "memcp-tests" "trace_multi_tenant") true false))
+        (rebuild (table "memcp-tests" false "trace_multi_document" false) true false)
+        (rebuild (table "memcp-tests" false "trace_multi_access" false) true false)
+        (rebuild (table "memcp-tests" false "trace_multi_tenant" false) true false))
 
 test_cases:
   - name: "Aggregate partitioning compares the eligible bulk boolean carrier"

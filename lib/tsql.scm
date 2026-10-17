@@ -5,6 +5,178 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 (define tsql_queryplan_cache (newcachemap))
 (define tsql_statement_text strtrim)
 
+/* Alias declarations are ordinary, durable frontend data, like SQL views.
+The native column keeps the qualified alias spelling in its existing RawType.
+Only this frontend interprets the declaration; storage has no alias registry. */
+(if (has? (show "system") "tsql_types") true
+	(eval (parse_sql "system" "CREATE TABLE tsql_types (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, `database` VARCHAR(255) NOT NULL, name VARCHAR(255) NOT NULL, base_type VARCHAR(255) NOT NULL, dimensions TEXT NOT NULL, nullable BOOLEAN NOT NULL, UNIQUE KEY alias_name (`database`,name)) ENGINE=SAFE"
+		(lambda (_schema _table _write) true))))
+
+/* Alias DDL and database lifecycle share the common SQL DDL gate. Reads and
+DML never acquire it; the database must still exist once ownership is held. */
+(define tsql_type_ddl (lambda (database tx operation) (begin
+	/* Catalog-row writes and native column publication do not yet share a
+	transactional DDL contract. Refuse transaction-local DDL before either one
+	changes, matching the frontend's source-procedure DDL restriction. */
+	(if (tx_requires_query_local_cache tx) (error "alias DDL inside explicit transactions is not supported") true)
+	(sql_database_ddl database tx (lambda () (begin
+		/* This catalog enumeration is DDL-only, never a planner lookup. */
+		(if (nil? (show database)) (error "database does not exist: " database) true)
+		(operation)))))))
+(define tsql_qualified_type (lambda (database name)
+	(concat "[" (replace database "]" "]]") "].[dbo].[" (replace name "]" "]]") "]")))
+(define tsql_alias_name_parts (parser '(
+	(define database tsql_identifier) "." (define owner tsql_identifier) "." (define name tsql_identifier)
+) (if (equal?? owner "dbo") (list database name) (error "unsupported alias owner: " owner))))
+(define tsql_read_type_alias (lambda (database name)
+	(scan nil (table "system" false "tsql_types" false)
+		(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false))
+		(list database) '("name") (lambda (candidate) (equal?? candidate name))
+		'("id" "name" "base_type" "dimensions" "nullable")
+		(lambda (_ id canonical base dimensions nullable)
+			(list "id" id "name" canonical "base_type" base "dimensions" (json_decode dimensions) "nullable" nullable))
+		nil (lambda (a b) (if (nil? a) b (nil? b) a (error "ambiguous alias type: " name))))))
+/* Alias memoization belongs to one compiler session. Scoped values are not
+copied into a later compilation, connection session, or executable plan. DDL
+and execution-time declaration checks read the authoritative table directly.
+Keys retain their spelling: Unicode lowercasing is not the same equivalence
+relation as the case-insensitive declaration lookup. */
+(define tsql_type_alias_cache (lambda (planning_session)
+	(planning_session "get_or_compute_scoped" planning_session "__tsql_type_alias_cache"
+		(lambda () (newcachemap (lambda (key)
+			(match (json_decode key) '(database name) (tsql_read_type_alias database name))))))))
+(define tsql_find_type_alias (lambda (database name planning_session)
+	(if (nil? planning_session) (tsql_read_type_alias database name)
+		((tsql_type_alias_cache planning_session) (json_encode (list database name))))))
+(define tsql_alias_declaration (lambda (type planning_session)
+	(if (equal? (substr type 0 1) "[") (begin
+		(define parts (tsql_alias_name_parts type))
+		(coalesceNil (tsql_find_type_alias (car parts) (cadr parts) planning_session)
+			(error "alias type no longer exists: " type))) nil)))
+(define tsql_effective_column (lambda (column planning_session)
+	(if (nil? column) nil (begin
+		(define alias (tsql_alias_declaration (column "RawType") planning_session))
+		(if (nil? alias) column
+			(set_assoc (set_assoc (set_assoc (set_assoc column "DeclaredType" (column "RawType"))
+				"RawType" (alias "base_type")) "Type" (alias "base_type")) "AliasId" (alias "id")))))))
+(define tsql_type_alias_matches? (lambda (type identity) (begin
+	(define parts (tsql_alias_name_parts type))
+	(define alias (tsql_find_type_alias (car parts) (cadr parts) nil))
+	(if (nil? alias) false (equal? (alias "id") identity)))))
+(define tsql_guard_type_alias (lambda (type identity planning_session)
+	(planner_record_guard_condition (list (quote tsql_type_alias_matches?) type identity) planning_session)))
+/* Context is attached only to a consuming compilation, after stored views
+have expanded. Persisted parser definitions retain the context-free compiler;
+the common binder consumes the temporary callback before planning. */
+(define tsql_column_compiler (lambda (planning_session) (lambda (info declaration)
+	(if (nil? declaration) info (begin
+		(define alias (tsql_alias_declaration (declaration "RawType") planning_session))
+		(if (nil? alias) info (begin
+			(tsql_guard_type_alias (declaration "RawType") (alias "id") planning_session)
+			(sql_info (sql_info_formula info) (alias "base_type")
+				(if (sql_text_type? (alias "base_type"))
+					(list (coalesce (declaration "Collation") "utf8mb4_general_ci") 2) nil)))))))))
+(define tsql_compile_column (tsql_column_compiler nil))
+(define tsql_bind_column_compilers (lambda (node compiler) (match node
+	((symbol quote) _datum) node
+	((symbol sql_compile_column) _previous expression) (list (quote sql_compile_column) compiler expression)
+	(cons _head _tail) (map node (lambda (item) (tsql_bind_column_compilers item compiler)))
+	_ node)))
+(define tsql_build_dml_plan (lambda (schema name alias sources columns condition order limit offset planning_session tx) (begin
+	(define compiler (tsql_column_compiler planning_session))
+	(build_dml_plan schema name alias
+		(tsql_bind_column_compilers sources compiler)
+		(tsql_bind_column_compilers columns compiler)
+		(tsql_bind_column_compilers condition compiler)
+		(tsql_bind_column_compilers order compiler) limit offset planning_session tx))))
+(define create_sql_type_alias (lambda (database name base dimensions nullable tx)
+	(tsql_type_ddl database tx (lambda () (begin
+		(define native_type (toUpper base))
+		(define native_dimensions (tsql_decl_dimensions native_type dimensions))
+		(if (has? '("TIMESTAMP" "ROWVERSION") native_type) (error "generated versions cannot be alias base types") true)
+		(if (tsql_find_type_alias database name nil) (error "alias type already exists: " name) true)
+		(insert (table "system" false "tsql_types" false) '("database" "name" "base_type" "dimensions" "nullable")
+			(list (list database name native_type (json_encode native_dimensions) nullable)))
+		true)))))
+(define drop_sql_type_alias (lambda (database name ifexists tx)
+	(tsql_type_ddl database tx (lambda () (begin
+		(define alias (tsql_find_type_alias database name nil))
+		(if (nil? alias) (if ifexists false (error "alias type does not exist: " name)) (begin
+			(define qualified (tsql_qualified_type database (alias "name")))
+			/* Enumerating declarations is DROP TYPE work, never query costing or
+			row execution. The database gate excludes concurrent alias consumers. */
+			(define dependent (find (show database) (lambda (relation)
+				(find (show database relation) (lambda (column) (equal?? (column "RawType") qualified)))) nil))
+			(if dependent (error "alias type is used by table: " dependent) true)
+			(scan nil (table "system" false "tsql_types" false)
+				(list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false))
+				(list (alias "id")) '() (lambda () true) '("$update")
+				(lambda (count remove) (begin (remove) (+ count 1))) 0 +)
+			true)))))))
+
+(define tsql_native_types '("VARCHAR" "CHAR" "NVARCHAR" "NCHAR" "BINARY" "VARBINARY"
+	"DECIMAL" "NUMERIC" "FLOAT" "TIME" "DATETIME2" "DATETIMEOFFSET" "INT" "INTEGER" "BIGINT"
+	"SMALLINT" "TINYINT" "BIT" "REAL" "MONEY" "SMALLMONEY" "DATE" "DATETIME" "SMALLDATETIME"
+	"ROWVERSION" "TIMESTAMP" "UNIQUEIDENTIFIER" "TEXT" "NTEXT" "IMAGE"))
+(define tsql_schema_type_parts (parser (define parts (+ tsql_identifier ".")) parts))
+(define tsql_resolve_schema_type (lambda (database type dimensions planning_session) (begin
+	(define parts (tsql_schema_type_parts type))
+	(define native (match parts
+		'(name) (if (has? tsql_native_types (toUpper name)) (toUpper name) nil)
+		'(owner name) (if (equal?? owner "sys") (toUpper name) nil)
+		_ nil))
+	(if native (list "type" native "dimensions" (tsql_decl_dimensions native dimensions) "nullable" true)
+		(begin
+			(define name (match parts
+				'(name) name
+				'(owner name) (if (equal?? owner "dbo") name (error "unsupported alias owner: " owner))
+				'(catalog owner name) (if (and (equal? catalog database) (equal?? owner "dbo")) name
+					(error "alias must belong to the target database"))
+				_ (error "invalid alias type name")))
+			(if (empty_list? dimensions) true (error "alias dimensions cannot be overridden"))
+			(define alias (coalesceNil (tsql_find_type_alias database name planning_session) (error "unknown type: " name)))
+			(merge (list "type" (tsql_qualified_type database (alias "name"))) alias))))))
+(define tsql_prepare_column (lambda (database definition planning_session) (match definition
+	'((symbol list) "column" name type dimensions attributes) (begin
+		(define contract (tsql_resolve_schema_type database type (cdr dimensions) planning_session))
+		(if (contract "id") (tsql_guard_type_alias (contract "type") (contract "id") planning_session) true)
+		(define base (coalesceNil (contract "base_type") (contract "type")))
+		(define native_dimensions (contract "dimensions"))
+		(define options (cdr attributes))
+		(define null_options (if (or (nil? (contract "id")) (has_assoc? options "null")) options
+			(append options "null" (contract "nullable"))))
+		(if (and (contract "id") (null_options "auto_increment"))
+			(error "IDENTITY alias declarations are not yet supported") true)
+		(define identity_options (tsql_identity_attributes base native_dimensions null_options))
+		/* Frozen defaults use the same frontend conversion as explicit writes.
+		The existing native default field remains their only persisted value. */
+		(define default_options (if (and (has_assoc? identity_options "default")
+			(or (contract "id") (has? '("NVARCHAR" "NCHAR") base)))
+			(set_assoc identity_options "default" (eval (sql_type_formula '()
+				(tsql_cast_expr (list (quote quote) (identity_options "default")) base native_dimensions)))) identity_options))
+		(define published_options (if (contract "id") (append default_options "__tsql_alias_id" (contract "id")) default_options))
+		(list (quote list) "column" name (tsql_storage_type (contract "type"))
+			(cons (quote list) native_dimensions) (cons (quote list) published_options)))
+	_ definition)))
+(define tsql_publish_alias_attributes (lambda (type attributes) (begin
+	(if (has_assoc? attributes "__tsql_alias_id")
+		(if (equal? ((tsql_alias_declaration type nil) "id") (attributes "__tsql_alias_id")) true
+			(error "alias declaration changed before DDL execution")) true)
+	(merge (extract_assoc attributes (lambda (key value)
+		(if (equal? key "__tsql_alias_id") '() (list key value))))))))
+(define tsql_add_columns (lambda (database name columns tx) (begin
+	(define publish (lambda () (begin
+		/* Validate every alias identity before changing any column. */
+		(define published_columns (map columns (lambda (column) (match column
+			'("column" column_name type dimensions attributes)
+			(list column_name type dimensions (tsql_publish_alias_attributes type attributes))))))
+		(reduce published_columns (lambda (_ column) (match column '(column_name type dimensions attributes)
+			(if (sql_create_column (table database false name false) column_name type dimensions
+				(merge (sql_add_column_attributes attributes) '("name_ignorecase" true))) true
+				(error "column already exists: " column_name)))) true))))
+	(if (find columns (lambda (column) (has_assoc? (nth column 4) "__tsql_alias_id")))
+		(tsql_type_ddl database tx publish) (publish)))))
+
 /* Transport tuples describe bytes and unscaled coefficients only. Their SQL
 meaning is chosen here from the request's declaration, not in the Go bridge. */
 (define tds_parameter_value (lambda (parameter) (begin
@@ -130,12 +302,19 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 		'("try" body recovery) (tsql_batch_contracts (merge (list body recovery)) contracts)
 		'("if" _condition yes no) (tsql_batch_contracts (if no (list yes no) (list yes)) contracts)
 		_ contracts)) inherited)))
-(define tsql_scope_session (lambda (parent contracts owner_schema) (begin
+(define tsql_scope_session (lambda (parent contracts owner_schema module_settings) (begin
 	(define local (newsession))
 	(if owner_schema (local "schema" owner_schema) true)
 	(local "__tsql_parameter_declarations" contracts)
 	(local "__tsql_scope" (newsession))
 	(local "__tsql_connection_session" (tsql_connection_session parent))
+	/* Existing runtime SET options inherit once per module invocation. Writes
+	stay local even for OFF/nil, so return and error unwinding restore the caller
+	without a shared-session save/restore race. Ordinary batches delegate these
+	options, retaining their connection state across GO and subsequent requests. */
+	(define module_keys (if module_settings
+		'("__tsql_identity_insert" "__tsql_datefirst" "__tsql_nocount") '()))
+	(map module_keys (lambda (key) (local key (parent key))))
 	/* Error-reporting procedures inherit the enclosing immutable CATCH context.
 	A nested CATCH still installs and restores only this invocation's fields. */
 	(define error_context (parent "__tsql_error_context"))
@@ -148,13 +327,16 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 			(not (has? '("__tsql_scope" "__tsql_connection_session") key)))) (filter (parent) (lambda (key)
 				(not (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
 					(or (has? '("__tsql_scope" "__tsql_connection_session") key) (strlike key "__tsql_error_%"))
-					(and owner_schema (equal? key "schema"))))))))
+					(and owner_schema (equal? key "schema"))
+					(has? module_keys key)))))))
 		'(key) (if (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
 			(or (has? '("__tsql_scope" "__tsql_connection_session") key) (strlike key "__tsql_error_%"))
-			(and owner_schema (equal? key "schema"))) (local key) (parent key))
+			(and owner_schema (equal? key "schema"))
+			(has? module_keys key)) (local key) (parent key))
 		'(key value) (if (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
 			(or (has? '("__tsql_scope" "__tsql_connection_session") key) (strlike key "__tsql_error_%"))
-			(and owner_schema (equal? key "schema"))) (local key value) (parent key value))
+			(and owner_schema (equal? key "schema"))
+			(has? module_keys key)) (local key value) (parent key value))
 		_ (apply parent args))))))
 (define tsql_scalar_expression_allowed? (lambda (expr) (match expr
 	((symbol quote) _value) true
@@ -164,7 +346,7 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 	_ true)))
 (define tsql_scalar_formula (lambda (schema text contracts mode target tx) (begin
 	(define key (json_encode (list schema text contracts mode target)))
-	(tsql_scalar_cache "get_or_compute" key tx (lambda (tx) (begin
+	(tsql_scalar_cache key tx (lambda (tx) (begin
 		(define planning (newsession))
 		(planning "__tsql_parameter_declarations" contracts)
 		(planning "__tsql_expression_only" true)
@@ -254,9 +436,57 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 	(parser (define text (regex "[^%]+" false false)) (list "text" text))
 	/* Format markers are case-sensitive prefixes. SQL word terminals would
 	incorrectly reject alphabetic text immediately following a conversion. */
-	(parser (define marker (regex "%%|%I64d|%[di]|%s" false false))
-		(match marker "%%" '("text" "%") "%I64d" '("BIGINT")
-			"%s" '("NVARCHAR" -1) _ '("INT")))) empty)) parts ""))
+	(parser "%%" '("text" "%"))
+	(parser '("%" (define flags (regex "[-+0# ]*" false false))
+		(? (define width (regex "(?:\\*|[1-9][0-9]*)" false false)))
+		(? "." (define precision (regex "(?:\\*|[0-9]*)" false false)))
+		(define marker (regex "(?:I64d|[dis])" false false)))
+		(list "format" (match marker "I64d" '("BIGINT") "s" '("NVARCHAR" -1) _ '("INT"))
+			flags width precision))) empty)) parts ""))
+(define tsql_message_argument (lambda (arguments index schema session tx contract) (begin
+	(if (< index (count arguments)) true (error "missing RAISERROR substitution"))
+	(tsql_scalar_value schema (nth arguments index) session tx
+		(if (equal? (car contract) "NVARCHAR") "message-text" "message-integer") contract))))
+(define tsql_message_bound (lambda (token arguments index schema session tx) (begin
+	(define value (if (nil? token) nil (equal? token "*")
+		(tsql_message_argument arguments index schema session tx '("INT"))
+		(equal? token "") 0 (tsql_parse_integer token)))
+	(if (and (not (nil? token)) (nil? value)) (error "invalid RAISERROR format bound") true)
+	(list value (+ index (if (equal? token "*") 1 0))))))
+(define tsql_message_field (lambda (value contract flags raw_width raw_precision) (begin
+	(define requested_width (coalesceNil raw_width 0))
+	/* Exact truncation also charges hidden substitution storage. Until that
+	contract is modeled, refuse oversized fields before allocating their padding. */
+	(if (or (> requested_width 2047) (< requested_width -2047))
+		(error "RAISERROR field width above 2047 is not implemented") true)
+	(define left (or (< requested_width 0) (regexp_test flags "-")))
+	(define width (if (< requested_width 0) (- 0 requested_width) requested_width))
+	(define precision (if (and (not (nil? raw_precision)) (< raw_precision 0)) nil raw_precision))
+	(define text (coalesceNil value "(null)"))
+	(define field (if (or (nil? value) (equal? (car contract) "NVARCHAR")) (begin
+		(define prefix (if (nil? precision) text (utf16_prefix text precision)))
+		(if (and (not (nil? precision)) (< (utf16_length prefix) (min (utf16_length text) precision)))
+			(error "RAISERROR precision splitting a supplementary pair is not implemented") true)
+		(list "" prefix))
+		(begin
+			(if (and (not (nil? precision)) (> precision 2047))
+				(error "RAISERROR integer precision above 2047 is not implemented") true)
+			(define negative (< value 0))
+			/* Remove the printed sign instead of negating the signed minimum. */
+			(define raw_digits (if negative (substr (string value) 1) (string value)))
+			(define digits (if (and (equal? precision 0) (equal? value 0)) "" raw_digits))
+			(define sign (if negative "-" (regexp_test flags "\\+") "+" (regexp_test flags " ") " " ""))
+			(list sign (concat (string_repeat "0" (max 0 (- (coalesceNil precision 1) (strlen digits)))) digits)))))
+	(define sign (car field))
+	(define body (cadr field))
+	(define units (+ (strlen sign) (utf16_length body)))
+	(if (> units 2047) (error "RAISERROR formatted field above 2047 is not implemented") true)
+	(define padding (max 0 (- width units)))
+	(define zero (and (not left) (nil? precision) (not (nil? value))
+		(not (equal? (car contract) "NVARCHAR")) (regexp_test flags "0")))
+	(if left (concat sign body (string_repeat " " padding))
+		zero (concat sign (string_repeat "0" padding) body)
+		(concat (string_repeat " " padding) sign body)))))
 (define tsql_run_raiserror (lambda (arguments statement session) (begin
 	(if (and (>= (count arguments) 3) (<= (count arguments) 23)) true
 		(error "RAISERROR requires message, severity, state and at most twenty substitutions"))
@@ -274,12 +504,15 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 		(define formatted (reduce (tsql_message_parts text) (lambda (result part)
 			(match part
 				'("text" text) (list (concat (car result) text) (cadr result))
-				_ (begin
-					(define index (cadr result))
-					(if (< index (count arguments)) true (error "missing RAISERROR substitution"))
-					(define value (tsql_scalar_value schema (nth arguments index) session tx
-						(if (equal? (car part) "NVARCHAR") "message-text" "message-integer") part))
-					(list (concat (car result) (coalesceNil value "(null)")) (+ index 1))))) (list "" 3)))
+				'("format" contract flags width precision) (begin
+					(define width_value (tsql_message_bound width arguments (cadr result) schema session tx))
+					(define precision_value (tsql_message_bound precision arguments (cadr width_value) schema session tx))
+					(define index (cadr precision_value))
+					(define value (tsql_message_argument arguments index schema session tx contract))
+					(list (concat (car result) (tsql_message_field value contract flags
+						(car width_value) (car precision_value))) (+ index 1))))) (list "" 3)))
+		(if (> (utf16_length (car formatted)) 2047)
+			(error "RAISERROR message truncation above 2047 is not implemented") true)
 		(list "tsql-error" 50000 (car formatted) (if (< state 0) 1 state) severity)))))
 	/* Raising after scalar binding keeps a frontend message from marking a
 	successful native transaction statement as failed. RAISERROR is not DML. */
@@ -328,9 +561,13 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 						(tsql_scalar_value schema (nth declaration 2) session tx "assignment" (cadr declaration)))) nil))
 				(session (concat "__tsql_parameter:" name) value))) nil)
 			0)
-		'("assign" name text) (begin
+		'("assign" name operation text) (begin
 			(define declaration (find (session "__tsql_parameter_declarations") (lambda (item) (equal? (car item) name)) nil))
 			(if declaration true (error "undeclared variable: @" name))
+			(if operation (tsql_bit_assignment_type (car (cadr declaration))) true)
+			/* Compound syntax uses the existing scalar compiler and assignment cast.
+			The parsed variable identifier is syntax, never caller-provided SQL text. */
+			(define text (if operation (concat "@" name " " operation " (" text ")") text))
 			(define value (statement text false (lambda (tx)
 				(tsql_scalar_value schema text session tx "assignment" (cadr declaration)))))
 			(session (concat "__tsql_parameter:" name) value)
@@ -364,8 +601,8 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 			(tsql_execute_dynamic schema text '() '() statement session resultrow resultfields
 				(lambda (result _status _scoped) result)))
 		_ (error "unsupported batch command")))))
-(define tsql_execute_command_batch (lambda (schema commands declarations supplied statement caller resultrow resultfields finish) (begin
-	(define scoped (tsql_scope_session caller (tsql_batch_contracts commands declarations) schema))
+(define tsql_execute_command_batch (lambda (schema commands declarations supplied statement caller resultrow resultfields module_settings finish) (begin
+	(define scoped (tsql_scope_session caller (tsql_batch_contracts commands declarations) schema module_settings))
 	(map supplied (lambda (item) (scoped (concat "__tsql_parameter:" (car item)) (cadr item))))
 	/* Completion and the declared INT return status are different contracts.
 	Evaluate the SQL commands before reading their lexical scope's status. */
@@ -377,12 +614,12 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 	(define inherited (coalesceNil (session "__tsql_parameter_declarations") '()))
 	(define supplied (map inherited (lambda (declaration)
 		(list (car declaration) (session (concat "__tsql_parameter:" (car declaration)))))))
-	(define batches (tsql_script_cache "get_or_compute" (json_encode (list schema text)) nil
+	(define batches (tsql_script_cache (json_encode (list schema text)) nil
 		(lambda (_tx) (map (tsql_script_batches text) (lambda (batch)
 			(list "syntax" (parse_tsql_batch schema (batch "text")) "repeat" (batch "repeat")))))))
 	(reduce batches (lambda (_result batch) (reduce (produceN (batch "repeat")) (lambda (_result _iteration) (begin
 		(define commands (cadr (batch "syntax")))
-		(tsql_execute_command_batch schema commands inherited supplied statement session resultrow resultfields
+		(tsql_execute_command_batch schema commands inherited supplied statement session resultrow resultfields false
 			(lambda (result _status _scoped) result)))) 0)) 0))))
 (define tsql_execute_request (lambda (schema text session state sequence resultrow resultfields)
 	(with_query_request session state sequence text (lambda (statement)
@@ -405,7 +642,7 @@ statement owner, account, transaction session, arguments and output callbacks. *
 		(list (quote statement) (quote caller) (quote values) (quote resultrow) (quote resultfields) (quote finish))
 		(list (quote begin)
 			(list (quote define) (quote session)
-				(list (quote tsql_scope_session) (quote caller) (list (quote quote) contracts) schema))
+				(list (quote tsql_scope_session) (quote caller) (list (quote quote) contracts) schema true))
 			(list (quote session) "schema" schema)
 			(list (quote map) (quote values) (list (quote lambda) (list (quote item))
 				(list (quote session) (list (quote concat) "__tsql_parameter:" (list (quote car) (quote item)))
@@ -423,9 +660,9 @@ statement owner, account, transaction session, arguments and output callbacks. *
 	and a new lexical scope. No caller local leaks into a nested dynamic batch. */
 	(if (nil? text) (error "dynamic SQL text cannot be NULL") true)
 	/* GO separates submitted scripts, but is not a statement in executed text. */
-	(define syntax (tsql_script_cache "get_or_compute" (json_encode (list schema text "dynamic")) nil
+	(define syntax (tsql_script_cache (json_encode (list schema text "dynamic")) nil
 		(lambda (_tx) (parse_tsql_batch schema text))))
-	(tsql_execute_command_batch schema (cadr syntax) declarations values statement caller resultrow resultfields finish))))
+	(tsql_execute_command_batch schema (cadr syntax) declarations values statement caller resultrow resultfields true finish))))
 /* Bind call syntax against formal and caller declarations before execution.
 Only parameter-sized scalar tuples are collected; relational SQL stays native. */
 (define tsql_check_call_order (lambda (arguments)
@@ -598,7 +835,7 @@ Descriptor types below are frontend contracts, including for empty results. */
 		'() (if (empty_list? right) '() (error "foreign key declaration column count differs"))
 		_ (error "invalid foreign key column declaration"))))
 	(walk local remote 1))))
-(define tsql_metadata_constraints (lambda (schema name) (show (table schema name) "constraints")))
+(define tsql_metadata_constraints (lambda (schema name) (show (table schema false name false) "constraints")))
 (define tsql_metadata_key_name (lambda (key)
 	(if (equal? (key "constraint_name") "") (key "Id") (key "constraint_name"))))
 (define tsql_metadata_fk_rule (lambda (mode) (match mode "cascade" 0 "set null" 2 "set default" 3 _ 1)))
@@ -607,12 +844,14 @@ Descriptor types below are frontend contracts, including for empty results. */
 		(if (has? integers name) (list "name" name "kind" 38 "size" 4 "flags" 1)
 			(list "name" name "kind" 231 "size" 8000 "flags" 1))))))
 /* (type name, ODBC code, precision, byte length, scale, radix, datetime subtype).
-Only declarations decide these values: an empty or all-NULL table is identical. */
+Only declarations decide these values: an empty or all-NULL table is identical.
+Metadata consumers resolve aliases through the same local declaration factory
+as expressions; public type names retain the original alias spelling. */
 (define tsql_metadata_type (lambda (column version) (begin
 	(define dimensions (column "Dimensions"))
 	(define length (if (empty_list? dimensions) 1 (car dimensions)))
 	(define type (toLower (column "RawType")))
-	(match type
+	(define contract (match type
 		"bigint" '("bigint" -5 19 8 0 10 nil)
 		"int" '("int" 4 10 4 0 10 nil)
 		"integer" '("int" 4 10 4 0 10 nil)
@@ -642,13 +881,16 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 			(has? '("varchar" "char" "nvarchar" "nchar" "binary" "varbinary") type)
 			(list type (match type "varchar" 12 "char" 1 "nvarchar" -9 "nchar" -8 "binary" -2 "varbinary" -3)
 				length (if (and (> length 0) (has? '("nvarchar" "nchar") type)) (* length 2) length) nil nil nil)
-			(error "unsupported metadata declaration type: " type))))))
+			(error "unsupported metadata declaration type: " type))))
+	(define declared (column "DeclaredType"))
+	(if (nil? declared) contract
+		(cons (cadr (tsql_alias_name_parts declared)) (cdr contract))))))
 (define tsql_metadata_column_row (lambda (schema name column ordinal version) (begin
 	(define contract (tsql_metadata_type column version))
 	(define subtype (nth contract 6))
-	(define type (car contract))
+	(define type (toLower (column "RawType")))
 	(list "TABLE_QUALIFIER" schema "TABLE_OWNER" "dbo" "TABLE_NAME" name
-		"COLUMN_NAME" (column "Field") "DATA_TYPE" (nth contract 1) "TYPE_NAME" type
+		"COLUMN_NAME" (column "Field") "DATA_TYPE" (nth contract 1) "TYPE_NAME" (car contract)
 		"PRECISION" (nth contract 2) "LENGTH" (nth contract 3) "SCALE" (nth contract 4)
 		"RADIX" (nth contract 5) "NULLABLE" (if (column "Null") 1 0)
 		"REMARKS" (if (equal? (column "Comment") "") nil (column "Comment"))
@@ -702,6 +944,9 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 	(define owner (coalesceNil (options "table_owner") "dbo"))
 	(define version (coalesceNil (options "odbcver") 2))
 	(if (has? '(2 3) version) true (error "unsupported ODBC version"))
+	/* One metadata request owns its alias factory; neither connection sessions
+	nor later requests retain resolved or negatively cached declarations. */
+	(define planning_session (newsession))
 	(define result (match procedure
 		"sp_datatype_info" (tsql_metadata_type_info options version)
 		"sp_datatype_info_100" (tsql_metadata_type_info options version)
@@ -717,7 +962,9 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 			(if (nil? (options "table_name")) (error "sp_columns requires a table name") true)
 			(define rows (if (tsql_metadata_match "dbo" owner true)
 				(merge (map (tsql_metadata_table_names schema (options "table_name") true policy) (lambda (name) (begin
-					(define columns (filter (show (table schema name)) (lambda (column) (not (internal_column_name? (column "Field"))))))
+					(define columns (map (filter (show (table schema false name false))
+						(lambda (column) (not (internal_column_name? (column "Field")))))
+						(lambda (column) (tsql_effective_column column planning_session))))
 					(map (filter (produceN (count columns)) (lambda (i)
 						(tsql_metadata_match ((nth columns i) "Field") (options "column_name") true)))
 						(lambda (i) (tsql_metadata_column_row schema name (nth columns i) (+ i 1) version))))))) '()))
@@ -731,7 +978,8 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 			(if (and (has? '("R" "V") kind) (has? '("C" "T" "S") scope) (has? '("O" "U") nullable)) true
 				(error "unsupported special-column option"))
 			(define rows (if (equal?? owner "dbo") (merge (map (tsql_metadata_table_names schema (options "table_name") false policy) (lambda (name) (begin
-				(define columns (show (table schema name)))
+				(define columns (map (show (table schema false name false))
+					(lambda (column) (tsql_effective_column column planning_session))))
 				(define keys ((tsql_metadata_constraints schema name) "Unique"))
 				(define primary (find keys (lambda (key) (equal? (key "Id") "PRIMARY"))))
 				(define candidate (coalesceNil primary (find keys (lambda (key)
@@ -783,7 +1031,7 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 					(define keys ((tsql_metadata_constraints schema name) "ForeignKeys"))
 					(merge (map (filter keys (lambda (key) (and (equal? (key "Role") "referencing")
 						(tsql_metadata_match (key "OtherTable") parent false)))) (lambda (key) (begin
-							(define referenced (table schema (key "OtherTable")))
+							(define referenced (table schema false (key "OtherTable") false))
 							(define candidate (if referenced (find ((show referenced "constraints") "Unique")
 								(lambda (unique) (equal? (unique "Cols") (key "OtherColumns")))) nil))
 							(tsql_metadata_foreign_columns (key "LocalColumns") (key "OtherColumns") (lambda (column other ordinal)

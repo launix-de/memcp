@@ -72,19 +72,24 @@ start_server base base-fill
 "${mysql_args[@]}" -D memcp-tests < candidate/tests/storage/persistence/upgrade-fill.sql
 curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
   (begin
-    (createcolumn (table "memcp-tests" "up_compute") "doubled" "INT" (quote ()) (quote ())
+    /* This adapter runs only against predecessor binaries. The candidate has
+    one four-argument table interface; old releases had two arguments. */
+    (define fixture_table (lambda (database name)
+      (coalesceNil (apply table (list database false name false))
+        (apply table (list database name)))))
+    (createcolumn (fixture_table "memcp-tests" "up_compute") "doubled" "INT" (quote ()) (quote ())
       (quote ("val")) (lambda (val) (* val 2)))
-    (insert (table "memcp-tests" "up_group_events")
+    (insert (fixture_table "memcp-tests" "up_group_events")
       (quote ("id" "tenant_id" "happened_at" "amount"))
       (map (produceN 6000) (lambda (i)
         (list (+ i 1) (+ 1 (mod i 2)) i (+ 1 (mod i 17))))))
-    (insert (table "memcp-tests" "up_group_windows")
+    (insert (fixture_table "memcp-tests" "up_group_windows")
       (quote ("id" "tenant_id" "range_to"))
       (list (list 1 2 1000) (list 2 2 1500)
         (list 3 1 3000) (list 4 1 3000)))
-    (insert (table "memcp-tests" "up_helper_file") (quote ("id" "stamp"))
+    (insert (fixture_table "memcp-tests" "up_helper_file") (quote ("id" "stamp"))
       (map (produceN 4000) (lambda (i) (list (+ i 1) (+ i 1)))))
-    (insert (table "memcp-tests" "up_helper_driver") (quote ("id" "file_id"))
+    (insert (fixture_table "memcp-tests" "up_helper_driver") (quote ("id" "file_id"))
       (map (produceN 4000) (lambda (i) (list (+ i 1) (+ i 1)))))
     (rebuild)
     true)

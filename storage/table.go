@@ -51,9 +51,15 @@ func TableFromScmer(s scm.Scmer) *table {
 	return (*table)(s.Custom(TagTable))
 }
 
-// String implements serialization for table pointers: (table "schema" "name")
+// String implements serialization for table pointers: (table "schema" false "name" false)
 func (t *table) String() string {
-	return "(table \"" + t.schema.Name + "\" \"" + t.Name + "\")"
+	var name string
+	if published := t.publishedName.Load(); published != nil {
+		name = *published
+	} else {
+		name = t.Name // unpublished constructors own the fallback
+	}
+	return "(table " + strconv.Quote(t.schema.Name) + " false " + strconv.Quote(name) + " false)"
 }
 
 type dataset []scm.Scmer
@@ -112,16 +118,18 @@ type column struct {
 	AutoIncrement        bool
 	Default              scm.Scmer
 	DefaultExpression    string
-	InitialValue         scm.Scmer                      `json:"initial_value,omitempty"`
-	InitialValues        map[string]columnInitialExtent `json:"initial_values,omitempty"`
-	OnUpdate             scm.Scmer
-	AllowNull            bool
-	IsTemp               bool // columns with IsTemp may be removed without consequences
-	Collation            string
-	Comment              string
-	sanitizer            func(scm.Scmer) scm.Scmer
-	lastAccessed         int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
-	cacheUsers           int64 // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
+	// Optional declaration label; owned and published with the existing default.
+	DefaultName   string                         `json:"default_name,omitempty"`
+	InitialValue  scm.Scmer                      `json:"initial_value,omitempty"`
+	InitialValues map[string]columnInitialExtent `json:"initial_values,omitempty"`
+	OnUpdate      scm.Scmer
+	AllowNull     bool
+	IsTemp        bool // columns with IsTemp may be removed without consequences
+	Collation     string
+	Comment       string
+	sanitizer     func(scm.Scmer) scm.Scmer
+	lastAccessed  int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
+	cacheUsers    int64 // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
 
 	// Statistics — updated at rebuild time, O(1) access for query planning.
 	// DistinctEstimate is the sum of per-shard DistinctCount() (upper bound).
@@ -144,6 +152,36 @@ type column struct {
 
 func (c *column) hasDefault() bool {
 	return !c.Default.IsNil() || c.DefaultExpression != ""
+}
+
+// Named defaults share the existing declaration namespace, not a second catalog.
+// Callers own schemalock; this is DDL admission only, never an execution check.
+func (t *table) hasDeclarationName(name string, excluded *column, includeKeyIDs bool) bool {
+	for _, c := range t.Columns {
+		if c != excluded && c.DefaultName != "" && strings.EqualFold(c.DefaultName, name) {
+			return true
+		}
+	}
+	for _, key := range t.Unique {
+		if (includeKeyIDs && strings.EqualFold(key.Id, name)) || (key.ConstraintName != "" && strings.EqualFold(key.ConstraintName, name)) {
+			return true
+		}
+	}
+	for _, key := range t.Foreign {
+		if key.Tbl1 == t.Name && strings.EqualFold(key.Id, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func (db *database) hasDeclarationNameLocked(name string, excluded *column) bool {
+	for _, t := range db.tables.GetAll() {
+		if t.hasDeclarationName(name, excluded, false) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *column) defaultValue() scm.Scmer {
@@ -631,7 +669,10 @@ type table struct {
 	// ownership protects it; it is never read by queries or INSERT. A nil map
 	// means a restored older schema has no complete history and ADD retains the
 	// conservative recovery path. New tables persist an empty, tracked map.
-	DroppedColumns      map[string]bool `json:"dropped_columns"`
+	DroppedColumns map[string]bool `json:"dropped_columns"`
+	// The name is initialized before table publication and replaced by RENAME
+	// under schema ownership. Metadata reads never race the mutable Name field.
+	publishedName       atomic.Pointer[string]
 	columnNamesSnapshot atomic.Pointer[tableColumnNamesSnapshot]
 	plannerStatsToken   atomic.Uint64 // process-unique dependency token for cached cost plans
 	// cacheGeneration changes whenever a reconstructible Cache-engine shard is
@@ -1605,6 +1646,10 @@ func (t *table) evict(mode evictionMode, currentSize int64, freedByType *[numEvi
 // Schema metadata belongs to the table, never to every referencing shard.
 func (t *table) metadataMemory() uint {
 	size := uint(unsafe.Sizeof(*t)) + uint(len(t.Name))
+	if t.publishedName.Load() != nil {
+		// The published descriptor shares Name's string payload.
+		size += uint(unsafe.Sizeof(""))
+	}
 	if locks := t.uniqueWrites.Load(); locks != nil {
 		size += uint(unsafe.Sizeof(*locks))
 	}
@@ -1617,7 +1662,7 @@ func (t *table) metadataMemory() uint {
 	size += uint(cap(t.Columns)) * uint(unsafe.Sizeof((*column)(nil)))
 	var declarationPayloads map[scm.Scmer]struct{}
 	for _, c := range t.Columns {
-		size += uint(unsafe.Sizeof(*c)) + uint(len(c.Name)+len(c.Typ)+len(c.Collation)+len(c.Comment)+len(c.DefaultExpression))
+		size += uint(unsafe.Sizeof(*c)) + uint(len(c.Name)+len(c.Typ)+len(c.Collation)+len(c.Comment)+len(c.DefaultExpression)+len(c.DefaultName))
 		size += uint(cap(c.Typdimensions)) * uint(unsafe.Sizeof(int(0)))
 		// As with shard bookkeeping, map entry/bucket overhead is an estimate.
 		size += 64 * uint(len(c.InitialValues))
@@ -1870,6 +1915,13 @@ func foldIdentifier(name string) string {
 						canonical = folded
 					}
 				}
+				// ASCII and non-ASCII members of one SimpleFold class must use
+				// the same representative (for example K and the Kelvin sign).
+				// Only normalize ASCII representatives: Unicode lowercasing can
+				// merge separate classes, such as dotted I and ASCII i.
+				if canonical >= 'A' && canonical <= 'Z' {
+					canonical += 'a' - 'A'
+				}
 				b.WriteRune(canonical)
 			}
 			return b.String()
@@ -1958,6 +2010,12 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 }
 
 func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {
+	if t.publishedName.Load() == nil {
+		// The first column-directory publication belongs to the unpublished
+		// constructor/load. Later publications retain RENAME's immutable name.
+		name := t.Name
+		t.publishedName.CompareAndSwap(nil, &name)
+	}
 	exact := make(map[string]tableColumnName, len(t.Columns))
 	folded := make(map[string]tableColumnName, len(t.Columns))
 	for i, c := range t.Columns {
@@ -1972,6 +2030,7 @@ func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {
 }
 
 func (t *table) publishColumnNamesSnapshot() *tableColumnNamesSnapshot {
+
 	snapshot := t.buildColumnNamesSnapshot()
 	t.columnNamesSnapshot.Store(snapshot)
 	return snapshot
@@ -2261,6 +2320,7 @@ func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint,
 		scm.NewString("Key"), scm.NewString(keyType),
 		scm.NewString("Default"), c.Default,
 		scm.NewString("DefaultExpression"), scm.NewString(c.DefaultExpression),
+		scm.NewString("DefaultName"), scm.NewString(c.DefaultName),
 		scm.NewString("Extra"), scm.NewString(extra),
 		scm.NewString("Privileges"), scm.NewString("select,insert,update,references"),
 		scm.NewString("Comment"), scm.NewString(c.Comment),
@@ -2506,11 +2566,26 @@ func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 	case "default":
 		c.Default = val
 		c.DefaultExpression = ""
+		c.DefaultName = ""
 		return c.Default
 	case "default_expression":
 		c.Default = scm.NewNil()
 		c.DefaultExpression = scm.String(val)
+		c.DefaultName = ""
 		return scm.NewString(c.DefaultExpression)
+	case "add_default", "default_declaration":
+		if key == "add_default" && (c.hasDefault() || c.DefaultName != "") {
+			panic("column already has a default")
+		}
+		parts := mustScmerSlice(val, "default declaration")
+		if len(parts) != 3 || !parts[1].IsString() || !parts[2].IsString() {
+			panic("default declaration requires value, expression and name")
+		}
+		c.Default, c.DefaultExpression, c.DefaultName = parts[0], parts[1].String(), parts[2].String()
+		return c.Default
+	case "drop_default":
+		c.Default, c.DefaultExpression, c.DefaultName = scm.NewNil(), "", ""
+		return scm.NewBool(true)
 	case "null":
 		c.AllowNull = scm.ToBool(val)
 		c.UpdateSanitizer()
@@ -2710,8 +2785,14 @@ func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique, null
 // held. It does not persist schema.json yet; callers must follow up with a
 // single saveLockedAndUnlock once the whole DDL mutation is complete.
 func (t *table) createColumnLocked(name string, typ string, typdimensions []int, extrainfo []scm.Scmer, initializeExisting bool) (*column, bool) {
+	ignoreCase := false
+	for i := 0; i+1 < len(extrainfo); i += 2 {
+		if scm.String(extrainfo[i]) == "name_ignorecase" {
+			ignoreCase = scm.ToBool(extrainfo[i+1])
+		}
+	}
 	for _, c := range t.Columns {
-		if c.Name == name {
+		if c.Name == name || (ignoreCase && strings.EqualFold(c.Name, name)) {
 			return nil, false // column already exists
 		}
 	}
@@ -2741,6 +2822,8 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			nullsNotDistinct = scm.ToBool(extrainfo[i+1])
 		case "fill_existing":
 			fillExisting = scm.ToBool(extrainfo[i+1])
+		case "name_ignorecase":
+			// Consumed by namespace admission above, never a row property.
 		case "auto_increment":
 			c.AutoIncrement = scm.ToBool(extrainfo[i+1])
 		case "null":
@@ -2749,6 +2832,8 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.Default = extrainfo[i+1]
 		case "default_expression":
 			c.DefaultExpression = scm.String(extrainfo[i+1])
+		case "default_name":
+			c.DefaultName = scm.String(extrainfo[i+1])
 		case "update":
 			c.OnUpdate = extrainfo[i+1]
 		case "comment":
@@ -2771,6 +2856,20 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 	}
 	if len(uniqueKeys) != 0 {
 		validateUniqueConstraintNames(append(append([]uniqueKey(nil), t.Unique...), uniqueKeys...))
+	}
+	if c.DefaultName != "" {
+		conflict := t.hasDeclarationName(c.DefaultName, nil, true)
+		for _, key := range uniqueKeys {
+			conflict = conflict || key.matchesName(c.DefaultName)
+		}
+		// An unpublished CREATE definition is checked against other tables at
+		// its atomic namespace publication. ADD already owns schema membership.
+		if t.schema.tables.Get(t.Name) == t {
+			conflict = conflict || t.schema.hasDeclarationNameLocked(c.DefaultName, nil)
+		}
+		if conflict {
+			panic("declaration name already exists: " + c.DefaultName)
+		}
 	}
 	c.UpdateSanitizer()
 	if !initializeExisting && !c.IsTemp && c.hasDefault() {
@@ -2993,6 +3092,7 @@ func cloneStoredColumnDeclaration(current *column) *column {
 		PartitioningScore: current.PartitioningScore,
 		AutoIncrement:     current.AutoIncrement, Default: current.Default,
 		DefaultExpression: current.DefaultExpression,
+		DefaultName:       current.DefaultName,
 		InitialValue:      current.InitialValue, InitialValues: current.InitialValues,
 		OnUpdate: current.OnUpdate, AllowNull: current.AllowNull,
 		Collation: current.Collation, Comment: current.Comment,
@@ -3023,7 +3123,8 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 		}
 	}()
 	for index, current := range t.Columns {
-		if current.Name != name {
+		if (operation != "drop_default" && current.Name != name) ||
+			(operation == "drop_default" && (current.DefaultName == "" || !strings.EqualFold(current.DefaultName, name))) {
 			continue
 		}
 		result := scm.NewBool(true)
@@ -3045,6 +3146,13 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 					replacement.sanitizer = nil
 				}
 				result = scm.NewBool(scm.ToBool(replacement.Alter(operation, value)))
+				if replacement.DefaultName != "" && replacement.DefaultName != current.DefaultName &&
+					t.schema.hasDeclarationNameLocked(replacement.DefaultName, current) {
+					panic("declaration name already exists: " + replacement.DefaultName)
+				}
+				if operation == "add_default" || operation == "default_declaration" {
+					result = scm.NewBool(true)
+				}
 				if replacement != current && (operation == "type" || operation == "dimensions" || operation == "null") {
 					replacement.UpdateSanitizer()
 				}
@@ -3059,6 +3167,9 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 		metadataLocked = false
 		t.finishSchemaMutationLocked(t.schemaSaveMode())
 		return result
+	}
+	if operation == "drop_default" {
+		return scm.NewBool(false)
 	}
 	panic("column " + t.schema.Name + "." + t.Name + "." + name + " does not exist")
 }
@@ -3175,9 +3286,6 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 				t.publishShowColumnsSnapshot(true)
 			}
 			t.finishSchemaMutationLocked(t.schemaSaveMode())
-			// Fire lifecycle hooks after unlock so dependents (e.g. prejoin caches)
-			// can invalidate without lock-ordering cycles.
-			t.ExecuteTableLifecycleTriggers(AfterDropColumn, nil)
 			// deregister temp column AFTER releasing schemalock
 			if removedCol.IsTemp {
 				GlobalCache.Remove(removedCol)
@@ -3191,15 +3299,22 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 
 func (t *table) DropColumn(name string) bool {
 	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
-	t.ddlMu.Lock()
-	defer t.ddlMu.Unlock()
-	return t.dropColumnDDLLocked(name)
+	return t.dropColumnForMigration(name)
 }
 
 func (t *table) dropColumnForMigration(name string) bool {
-	t.ddlMu.Lock()
-	defer t.ddlMu.Unlock()
-	return t.dropColumnDDLLocked(name)
+	dropped := func() bool {
+		t.ddlMu.Lock()
+		defer t.ddlMu.Unlock()
+		return t.dropColumnDDLLocked(name)
+	}()
+	// Dependency callbacks can retire other columns on this same table.
+	// Publication and persistence finish first; callbacks own neither schema
+	// nor table DDL rights, so their existing native DDL cannot self-deadlock.
+	if dropped {
+		t.ExecuteTableLifecycleTriggers(AfterDropColumn, nil)
+	}
+	return dropped
 }
 
 func (t *table) DropColumnIfExists(name string) bool {

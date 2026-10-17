@@ -9,9 +9,9 @@ setup:
   - sql: "CREATE TABLE fif_rows (id INT PRIMARY KEY, label TEXT)"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "fif_rows") '("id" "label")
+        (insert (table "memcp-tests" false "fif_rows" false) '("id" "label")
           (map (produceN 1000) (lambda (i) (list i (if (< i 10) "needle" "unrelated")))))
-        (rebuild (table "memcp-tests" "fif_rows") true false))
+        (rebuild (table "memcp-tests" false "fif_rows" false) true false))
 cleanup:
   - sql: "DROP TABLE fif_rows"
 
@@ -19,7 +19,7 @@ test_cases:
   - name: "Complete indexed scan reports input work independently from output rows"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "fif_rows"))
+        (define tbl (table "memcp-tests" false "fif_rows" false))
         (define callback (quote (lambda (id) (and (>= id 900) (or (equal? id 905) (equal? id 915))))))
         (define access (eval (compile_scan_access '("id") callback)))
         (define values (map (cadr access) (lambda (v) (eval v))))
@@ -48,7 +48,7 @@ test_cases:
   - name: "Complete LIKE RecSet retains index-reduced work after learning"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "fif_rows"))
+        (define tbl (table "memcp-tests" false "fif_rows" false))
         (define callback (quote (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))
         (define access (eval (compile_scan_access '("label") callback)))
         (define values (map (cadr access) (lambda (v) (eval v))))
@@ -68,7 +68,7 @@ test_cases:
   - name: "Restricted RecSets cannot overwrite whole-table work observations"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "fif_rows"))
+        (define tbl (table "memcp-tests" false "fif_rows" false))
         (define callback (quote (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))
         (define access (eval (compile_scan_access '("label") callback)))
         (define values (map (cadr access) (lambda (v) (eval v))))
@@ -87,7 +87,7 @@ test_cases:
   - name: "Rebuild retains result hints but invalidates physical access work"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "fif_rows"))
+        (define tbl (table "memcp-tests" false "fif_rows" false))
         (rebuild tbl true false)
         (define access (eval (compile_scan_access '("label")
           (quote (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))))
@@ -102,7 +102,7 @@ test_cases:
   - name: "Membership cost guard preserves learned zero instead of reverting to a text prior"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "fif_rows"))
+        (define tbl (table "memcp-tests" false "fif_rows" false))
         (define callback (quote (lambda (label) (strlike label "%absent%" "utf8mb4_general_ci"))))
         (define access (eval (compile_scan_access '("label") callback)))
         (scan_recset nil tbl (car access) (map (cadr access) (lambda (v) (eval v))) '("label") (eval callback))

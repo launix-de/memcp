@@ -32,7 +32,7 @@ test_cases:
   - name: "MLR: create failing computed projection"
     scm: |
       (createcolumn
-        (table "memcp-tests" "mutation_lock_rows")
+        (table "memcp-tests" false "mutation_lock_rows" false)
         "failing_value" "INT" '() '("temp" true)
         '("value")
         (lambda (value) (error "expected projection failure")))

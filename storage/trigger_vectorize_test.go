@@ -69,7 +69,7 @@ func TestVectorizeTriggerDeletePattern(t *testing.T) {
 	scanBody := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
 		scm.NewNil(),
-		scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString("mydb"), scm.NewString(".prejoin:mytable")}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString("mydb"), scm.NewBool(false), scm.NewString(".prejoin:mytable"), scm.NewBool(false)}),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), newScanAccessSchema(scanAccessConsumerScan, nil, -1)}),
 		listAst(),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("grp")}),

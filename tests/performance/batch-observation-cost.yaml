@@ -17,16 +17,16 @@ setup:
       (begin
         (define hit (string_repeat "commonneedle-" 512))
         (define miss (string_repeat "co--om--mm--mo--on--nn--ne--ee--ed--dl--le--" 170))
-        (insert (table "memcp-tests" "boc_file") '("id" "filename" "body")
+        (insert (table "memcp-tests" false "boc_file" false) '("id" "filename" "body")
           (map (produceN 20000) (lambda (i)
             (list i "file" (if (equal? (mod i 2) 0) hit miss)))))
-        (insert (table "memcp-tests" "boc_document") '("id" "file_id" "rank_value" "domain_id")
+        (insert (table "memcp-tests" false "boc_document" false) '("id" "file_id" "rank_value" "domain_id")
           (map (produceN 20000) (lambda (i) (list i i i (mod i 16)))))
-        (insert (table "memcp-tests" "boc_acl") '("id" "allowed")
+        (insert (table "memcp-tests" false "boc_acl" false) '("id" "allowed")
           (map (produceN 16) (lambda (i) (list i 1))))
-        (rebuild (table "memcp-tests" "boc_file") true false)
-        (rebuild (table "memcp-tests" "boc_document") true false)
-        (rebuild (table "memcp-tests" "boc_acl") true false))
+        (rebuild (table "memcp-tests" false "boc_file" false) true false)
+        (rebuild (table "memcp-tests" false "boc_document" false) true false)
+        (rebuild (table "memcp-tests" false "boc_acl" false) true false))
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS boc_document"
@@ -120,7 +120,7 @@ test_cases:
   - name: "A complete scan learns the source LIKE selectivity"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "boc_file"))
+        (define tbl (table "memcp-tests" false "boc_file" false))
         (define callback (list 'lambda (list 'x)
           (list 'strlike 'x "%commonneedle%" "utf8mb4_general_ci")))
         (define access (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("body") callback '()) 3 5))))

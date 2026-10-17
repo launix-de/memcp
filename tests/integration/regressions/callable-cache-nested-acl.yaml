@@ -33,7 +33,7 @@ setup:
   - sql: "INSERT INTO cca_tenant VALUES (1, 1, FALSE), (2, 2, FALSE)"
   - sql: "INSERT INTO cca_domain VALUES (1, 1, FALSE), (2, 2, FALSE), (3, 1, TRUE), (4, 1, FALSE)"
   - scm: |
-      (insert (table "memcp-tests" "cca_item") '("id" "domain_id" "bucket_id" "sort_key")
+      (insert (table "memcp-tests" false "cca_item" false) '("id" "domain_id" "bucket_id" "sort_key")
         (map (produceN 8) (lambda (i)
           (list (+ i 1) (+ (mod i 4) 1) 7 (- 8 i)))))
   - sql: "INSERT INTO cca_access VALUES (1, 101, NULL, NULL, NULL, TRUE), (2, 202, 2, 2, 2, TRUE)"
@@ -109,9 +109,9 @@ test_cases:
   - name: "Grow beyond the correlated carrier crossover"
     scm: |
       (begin
-        (insert (table "memcp-tests" "cca_item") '("id" "domain_id" "bucket_id" "sort_key")
+        (insert (table "memcp-tests" false "cca_item" false) '("id" "domain_id" "bucket_id" "sort_key")
           (list (list 9 1 7 -1) (list 10 2 7 -2) (list 11 3 7 -3) (list 12 4 7 -4)))
-        (rebuild (table "memcp-tests" "cca_item") true false))
+        (rebuild (table "memcp-tests" false "cca_item" false) true false))
 
   - <<: *deep_acl
     name: "Warm cached ACL query rebinds the restricted actor"
@@ -140,11 +140,11 @@ test_cases:
       - sql: "INSERT INTO ccp_access VALUES (1, 7, 1, NULL), (2, 9, NULL, NULL)"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "ccp_site") '("id" "tenant_id")
+            (insert (table "memcp-tests" false "ccp_site" false) '("id" "tenant_id")
               (map (produceN 126) (lambda (i) (list (+ i 3) (+ (mod i 2) 1)))))
-            (insert (table "memcp-tests" "ccp_document") '("id" "site_id" "file_id")
+            (insert (table "memcp-tests" false "ccp_document" false) '("id" "site_id" "file_id")
               (map (produceN 32000) (lambda (i) (list (+ i 1) (+ (mod i 128) 1) (+ i 1)))))
-            (insert (table "memcp-tests" "ccp_file") '("id" "uploaded_at")
+            (insert (table "memcp-tests" false "ccp_file" false) '("id" "uploaded_at")
               (map (produceN 32000) (lambda (i) (list (+ i 1) (+ i 1)))))
             (rebuild))
     session_id: "ccp-limited"

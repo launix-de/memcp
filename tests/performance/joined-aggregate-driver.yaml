@@ -24,21 +24,21 @@ setup:
   - sql: CREATE TABLE ja_lineitem (l_part INT, l_supplier INT, l_order INT, l_price INT, l_quantity INT) ENGINE=memory
   - scm: |-
       (begin
-        (insert (table "memcp-tests" "ja_part") '("p_id" "p_name")
+        (insert (table "memcp-tests" false "ja_part" false) '("p_id" "p_name")
           (map (produceN 256) (lambda (i) (list (+ i 1)
             (if (equal? (mod i 8) 0) "green part" "ordinary part")))))
-        (insert (table "memcp-tests" "ja_supplier") '("s_id" "s_nation")
+        (insert (table "memcp-tests" false "ja_supplier" false) '("s_id" "s_nation")
           (map (produceN 32) (lambda (i) (list (+ i 1) (mod i 4)))))
-        (insert (table "memcp-tests" "ja_nation") '("n_id" "n_name")
+        (insert (table "memcp-tests" false "ja_nation" false) '("n_id" "n_name")
           (map (produceN 4) (lambda (i) (list i (concat "nation" (string i))))))
-        (insert (table "memcp-tests" "ja_partsupp") '("ps_part" "ps_supplier" "ps_cost")
+        (insert (table "memcp-tests" false "ja_partsupp" false) '("ps_part" "ps_supplier" "ps_cost")
           (map (produceN 1024) (lambda (i) (begin
             (define part_id (+ 1 (mod i 256)))
             (define supplier_id (+ 1 (mod (+ (- part_id 1) (* 7 (floor (/ i 256)))) 32)))
             (list part_id supplier_id (+ 1 (mod supplier_id 5)))))))
-        (insert (table "memcp-tests" "ja_orders") '("o_id" "o_year")
+        (insert (table "memcp-tests" false "ja_orders" false) '("o_id" "o_year")
           (map (produceN 1024) (lambda (i) (list (+ i 1) (+ 1992 (mod (floor (/ i 32)) 4))))))
-        (insert (table "memcp-tests" "ja_lineitem") '("l_part" "l_supplier" "l_order" "l_price" "l_quantity")
+        (insert (table "memcp-tests" false "ja_lineitem" false) '("l_part" "l_supplier" "l_order" "l_price" "l_quantity")
           (map (produceN 8192) (lambda (i) (begin
             (define part_id (+ 1 (mod i 256)))
             (list part_id (+ 1 (mod (+ (- part_id 1) (* 7 (mod (floor (/ i 256)) 4))) 32))

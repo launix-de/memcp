@@ -209,7 +209,7 @@ test_cases:
   - name: KPI projected columns require a costed reusable scalar lookup
     setup:
       - scm: |-
-          (insert (table "memcp-tests" "nac_kpi_offer") '("id" "created" "customer")
+          (insert (table "memcp-tests" false "nac_kpi_offer" false) '("id" "created" "customer")
            (map (produceN 2000) (lambda (i) (list (+ i 100) 1000 9))))
       - sql: INSERT INTO nac_kpi_item VALUES (4, NULL, 7)
     scm: |-

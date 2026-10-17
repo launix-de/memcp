@@ -1225,4 +1225,155 @@ test_cases:
 - sql: DROP TABLE tsql_fractional_data
   name: 'Fixture cleanup 003: DROP TABLE tsql_fractional_data'
 
+- name: Calendar factories retain normalized aliases in compiler markers
+  scm: |
+    (map '("dd" "wk" "ww" "hh" "mi") (lambda (unit)
+      (list
+        (nth (cadr (tsql_dateadd_expr unit 1 "2026-03-15")) 1)
+        (nth (cadr (tsql_datediff_expr unit "2026-03-15" "2026-03-16" "INT")) 1)
+        (nth (cadr (tsql_datepart_expr unit "2026-03-15")) 1))))
+  expect:
+    data: [[[day, day, day], [week, week, week], [week, week, week], [hour, hour, hour], [minute, minute, minute]]]
+- name: Date difference aliases retain independent boundary constants
+  sql: SELECT DATEDIFF(dd,N'2026-03-15',N'2026-03-16') AS days,DATEDIFF(wk,N'2026-03-15',N'2026-03-16') AS weeks,DATEDIFF(hh,N'2026-03-15',N'2026-03-16') AS hours,DATEDIFF_BIG(mi,N'2026-03-15',N'2026-03-16') AS minutes
+  expect:
+    rows: 1
+    data: [{days: 1, weeks: 0, hours: 24, minutes: 1440}]
+- name: Date part aliases retain their normalized compile contracts
+  sql: SELECT DATEPART(hh,N'2026-03-15 12:13:14') AS hours,DATEPART(mi,N'2026-03-15 12:13:14') AS minutes,DATEPART(ss,N'2026-03-15 12:13:14') AS seconds
+  expect:
+    rows: 1
+    data: [{hours: 12, minutes: 13, seconds: 14}]
+- name: Date addition accepts normalized clock aliases for declared time
+  sql: SELECT CONVERT(VARCHAR(8),DATEADD(hh,1,CAST(N'12:13:14' AS TIME)),108) AS value
+  expect:
+    rows: 1
+    data: [{value: '13:13:14'}]
+
+- name: Union branches keep separate repeated calendar closures
+  sql: SELECT DATEDIFF(dd,N'2026-03-15',N'2026-03-16') AS amount,DATEDIFF(dd,N'2026-03-15',N'2026-03-16') AS duplicate UNION ALL SELECT DATEDIFF(hh,N'2026-03-15',N'2026-03-16'),DATEDIFF(hh,N'2026-03-15',N'2026-03-16') ORDER BY amount
+  expect:
+    rows: 2
+    data: [{amount: 1, duplicate: 1}, {amount: 24, duplicate: 24}]
+- name: Nested union branch consumers retain branch-local calendar values
+  sql: SELECT derived.amount+derived.duplicate AS total FROM (SELECT DATEDIFF(dd,N'2026-03-15',N'2026-03-16') AS amount,DATEDIFF(dd,N'2026-03-15',N'2026-03-16') AS duplicate) derived UNION ALL SELECT derived.amount+derived.duplicate FROM (SELECT DATEDIFF(hh,N'2026-03-15',N'2026-03-16') AS amount,DATEDIFF(hh,N'2026-03-15',N'2026-03-16') AS duplicate) derived ORDER BY total
+  expect:
+    rows: 2
+    data: [{total: 2}, {total: 48}]
+
+- name: TRY_CAST keeps whole-second declared datetime output
+  sql: SELECT CONVERT(VARCHAR(19),TRY_CAST(N'2026-03-15 12:13:14' AS DATETIME2(0)),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14'
+- name: TRY_CONVERT parses existing compact calendar styles
+  sql: SELECT CONVERT(VARCHAR(10),TRY_CONVERT(DATE,N'20260315',112),23) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15'
+- name: TRY_CONVERT reuses existing day month year styles
+  sql: SELECT CONVERT(VARCHAR(10),TRY_CONVERT(DATE,N'15.03.2026',104),23) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15'
+- name: TRY temporal conversions return NULL for malformed calendars
+  sql: SELECT TRY_CAST(N'not-a-date' AS DATE) AS first_value,TRY_CONVERT(DATETIME,N'not-a-date',120) AS second_value
+  expect:
+    rows: 1
+    data:
+    - first_value: null
+      second_value: null
+- name: TRY temporal conversions return NULL for invalid calendar days
+  sql: SELECT TRY_CONVERT(DATE,N'2026-02-30',23) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY temporal conversions return NULL for legacy date range overflow
+  sql: SELECT TRY_CAST(3000000 AS DATETIME) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY_CONVERT retains typed NULL calendars
+  sql: SELECT TRY_CONVERT(DATE,NULL,112) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY_CONVERT NULL style yields a typed temporal NULL
+  sql: SELECT TRY_CONVERT(DATE,N'not-a-date',NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY_CONVERT formats declared calendar sources with existing styles
+  sql: SELECT TRY_CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATE),112) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '20260315'
+- name: TRY_CAST refuses unsupported fractional temporal carriers
+  sql: SELECT TRY_CAST(N'2026-03-15 12:13:14.123' AS DATETIME2(3)) AS value
+  expect:
+    error: true
+    contains: fractional
+- name: TRY_CONVERT refuses unsupported fractional temporal carriers
+  sql: SELECT TRY_CONVERT(DATETIME2(3),N'2026-03-15 12:13:14.123',121) AS value
+  expect:
+    error: true
+    contains: fractional
+- name: TRY_CAST rejects forbidden numeric to DATE contracts
+  sql: SELECT TRY_CAST(1 AS DATE) AS value
+  expect:
+    error: true
+    contains: convertible
+- name: TRY_CONVERT rejects unsupported date to integer contracts
+  sql: SELECT TRY_CONVERT(INT,CAST(N'2026-03-15' AS DATE)) AS value
+  expect:
+    error: true
+    contains: conversion
+- name: TRY rejects malformed fractional calendars as invalid input
+  sql: SELECT TRY_CAST(N'not-a-date 12:13:14.1' AS DATETIME2(0)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY short year styles reject incomplete input without helper panics
+  sql: SELECT TRY_CONVERT(DATE,N'x',1) AS a,TRY_CONVERT(DATE,N'x',12) AS b,TRY_CONVERT(DATE,N'',1) AS c,TRY_CONVERT(DATE,N'',12)
+    AS d
+  expect:
+    rows: 1
+    data:
+    - a: null
+      b: null
+      c: null
+      d: null
+- name: TRY clock-only TIME refuses unsupported fractional carriers
+  sql: SELECT TRY_CAST(N'12:13:14.123' AS TIME(3)) AS value
+  expect:
+    error: true
+    contains: fractional
+- name: TRY clock-only datetime refuses unsupported fractional carriers
+  sql: SELECT TRY_CAST(N'12:13:14.123' AS DATETIME2(3)) AS value
+  expect:
+    error: true
+    contains: fractional
+
+- name: CONVERT keeps temporal style 101 beside binary hex styles
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATETIME),101) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 03/15/2026
+- name: CONVERT keeps temporal style 121 beside binary hex styles
+  sql: SELECT CONVERT(VARCHAR(23),CAST(N'2026-03-15 12:13:14' AS DATETIME2(0)),121) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.000'
+
 cleanup: []

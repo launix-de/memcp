@@ -59,13 +59,13 @@ setup:
                 (if (>= id 9974)
                   (list id "narrow_b" "narrow_b:1" id)
                   (list id "noise" (concat "noise:" id) id))))))))
-        (insert (table "memcp-tests" "membership_event")
+        (insert (table "memcp-tests" false "membership_event" false)
           '("ID" "entity_kind" "entity_key" "event_time") events)
-        (insert (table "memcp-tests" "membership_narrow_key_a")
+        (insert (table "memcp-tests" false "membership_narrow_key_a" false)
           '("ID" "enabled") (list (list 1 1) (list 2 0)))
-        (insert (table "memcp-tests" "membership_narrow_key_b")
+        (insert (table "memcp-tests" false "membership_narrow_key_b" false)
           '("ID" "enabled") (list (list 1 1) (list 2 0)))
-        (insert (table "memcp-tests" "membership_broad_key")
+        (insert (table "memcp-tests" false "membership_broad_key" false)
           '("ID" "enabled")
           (map (produceN 8000) (lambda (i) (list (+ i 1) 1))))
         true)
@@ -901,25 +901,25 @@ test_cases:
           (begin
             (define long_search (reduce (produceN 192) (lambda (text _i)
               (concat text "common searchable text ")) ""))
-            (insert (table "memcp-tests" "in_batch_file") '("ID" "flag" "search")
+            (insert (table "memcp-tests" false "in_batch_file" false) '("ID" "flag" "search")
               (map (produceN 8000) (lambda (i)
                 (list (+ i 1) 1 long_search))))
-            (insert (table "memcp-tests" "in_batch_doc") '("ID" "file_id" "sort_key")
+            (insert (table "memcp-tests" false "in_batch_doc" false) '("ID" "file_id" "sort_key")
               (map (produceN 10000) (lambda (i)
                 (list (+ i 1) (if (< i 8000) (+ i 1) (- i 7999)) (- 10000 i)))))
             /* All candidate keys match flag=1, but none occurs in this driver.
             This deliberately breaks the uniform-FK assumption which cannot be
             repaired by more accurate source-local selectivity statistics. */
-            (insert (table "memcp-tests" "in_skew_doc") '("ID" "file_id" "sort_key")
+            (insert (table "memcp-tests" false "in_skew_doc" false) '("ID" "file_id" "sort_key")
               (map (produceN 100000) (lambda (i)
                 (list (+ i 1) 9000 (- 100000 i)))))
-            (insert (table "memcp-tests" "in_skew_acl") '("ID" "document_id" "allowed")
+            (insert (table "memcp-tests" false "in_skew_acl" false) '("ID" "document_id" "allowed")
               (map (produceN 10000) (lambda (i)
                 (list (+ i 1) (+ i 1) 1))))
-            (rebuild (table "memcp-tests" "in_batch_file") true false)
-            (rebuild (table "memcp-tests" "in_batch_doc") true false)
-            (rebuild (table "memcp-tests" "in_skew_doc") true false)
-            (rebuild (table "memcp-tests" "in_skew_acl") true false)
+            (rebuild (table "memcp-tests" false "in_batch_file" false) true false)
+            (rebuild (table "memcp-tests" false "in_batch_doc" false) true false)
+            (rebuild (table "memcp-tests" false "in_skew_doc" false) true false)
+            (rebuild (table "memcp-tests" false "in_skew_acl" false) true false)
             true)
     steps:
       - sql: |
@@ -1120,7 +1120,7 @@ test_cases:
             (define entry (car (cache (car (cache)))))
             (define guard (car (car (entry "variants"))))
             (define cold_guard (eval_guard guard sess nil))
-            (rebuild (table "memcp-tests" "in_dv_file") true false)
+            (rebuild (table "memcp-tests" false "in_dv_file" false) true false)
             (define rebuilt_guard (eval_guard guard sess nil))
             (if (and cold_guard (not rebuilt_guard))
               "ok"
@@ -2662,7 +2662,7 @@ test_cases:
       - sql: "INSERT INTO worker_file VALUES (10, 'x-one', ''), (20, '', 'x-two')"
       - sql: "INSERT INTO worker_item VALUES (100, 10, 7, 70), (200, 20, 8, 80)"
       - scm: |
-          (partitiontable (table "memcp-tests" "worker_item")
+          (partitiontable (table "memcp-tests" false "worker_item" false)
             (list "ID" (list 150)))
     sql: |
       SELECT i.ID
@@ -2783,10 +2783,10 @@ test_cases:
       - sql: "CREATE TABLE in_prefilter_doc (ID INT PRIMARY KEY, file_id INT, tenant INT, sort_key INT)"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "in_prefilter_file") '("ID" "filename" "search")
+            (insert (table "memcp-tests" false "in_prefilter_file" false) '("ID" "filename" "search")
               (map (produceN 20000) (lambda (i)
                 (list (+ i 1) (concat "asset-" i) (concat "broad needle text " i)))))
-            (insert (table "memcp-tests" "in_prefilter_doc") '("ID" "file_id" "tenant" "sort_key")
+            (insert (table "memcp-tests" false "in_prefilter_doc" false) '("ID" "file_id" "tenant" "sort_key")
               (map (produceN 20000) (lambda (i)
                 (list (+ i 1) (+ i 1)
                   (if (>= i 19900) 7 (if (>= i 19148) 8 9)) i))))

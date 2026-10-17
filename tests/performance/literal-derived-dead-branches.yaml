@@ -17,9 +17,9 @@ setup:
   - sql: "CREATE TABLE ldb_lookup (id INT PRIMARY KEY, event_id INT) ENGINE=memory"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "ldb_event") '("id" "amount")
+        (insert (table "memcp-tests" false "ldb_event" false) '("id" "amount")
           (map (produceN 10000) (lambda (i) (list (+ i 1) 1))))
-        (insert (table "memcp-tests" "ldb_lookup") '("id" "event_id")
+        (insert (table "memcp-tests" false "ldb_lookup" false) '("id" "event_id")
           (map (produceN 10000) (lambda (i) (list (+ i 1) (+ i 1)))))
         10000)
 

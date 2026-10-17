@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Tests for ORC (ordered-reduce computed) columns.
 # Phase 1: full recompute only (Mode A — InvalidateAll on any mutation).
 #
@@ -39,7 +41,7 @@ test_cases:
 
   - name: "Materialize rank column via createcolumn ORC"
     scm: |
-      (createcolumn (table "memcp-tests" "orc_rank") "rank" "INT" '()
+      (createcolumn (table "memcp-tests" false "orc_rank" false) "rank" "INT" '()
         (list
           "sortcols"  '("score")
           "sortdirs"  (list false)
@@ -92,7 +94,7 @@ test_cases:
 
   - name: "Materialize running_total column via createcolumn ORC"
     scm: |
-      (createcolumn (table "memcp-tests" "orc_sales") "running_total" "INT" '()
+      (createcolumn (table "memcp-tests" false "orc_sales" false) "running_total" "INT" '()
         (list
           "sortcols"  '("day")
           "sortdirs"  (list false)

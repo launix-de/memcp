@@ -10,11 +10,7 @@ setup:
     amount INT)
 - sql: CREATE TABLE nested_metric_catalog (id INT PRIMARY KEY, kind INT)
 - sql: INSERT INTO nested_metric_catalog VALUES (1,1),(2,2)
-- scm: "(begin\n  (insert (table \"memcp-tests\" \"nested_metric_entity\") '(\"id\")\n    (map (produceN\
-    \ 2) (lambda (i) (list (+ i 1)))))\n  (insert (table \"memcp-tests\" \"nested_metric_history\") '(\"\
-    parent_id\" \"valid_at\" \"started_at\" \"category_id\" \"amount\")\n    (merge (map (produceN 2)\
-    \ (lambda (i) (list\n      (list (+ i 1) 10 (+ 10 (* 12 (mod i 2))) (+ 1 (mod i 2)) 1)\n      (list\
-    \ (+ i 1) 20 (+ 10 (* 12 (mod i 2))) 2 3)))))))\n"
+- scm: "(begin\n  (insert (table \"memcp-tests\" false \"nested_metric_entity\" false) '(\"id\")\n    (map (produceN 2) (lambda (i) (list (+ i 1)))))\n  (insert (table \"memcp-tests\" false \"nested_metric_history\" false) '(\"parent_id\" \"valid_at\" \"started_at\" \"category_id\" \"amount\")\n    (merge (map (produceN 2) (lambda (i) (list\n      (list (+ i 1) 10 (+ 10 (* 12 (mod i 2))) (+ 1 (mod i 2)) 1)\n      (list (+ i 1) 20 (+ 10 (* 12 (mod i 2))) 2 3)))))))\n"
 test_cases:
 - name: Nested upper bound keeps each entity's history domain
   sql: "SELECT p.n, COALESCE((SELECT SUM((SELECT h.amount FROM nested_metric_history h\n  WHERE h.parent_id=e.id\

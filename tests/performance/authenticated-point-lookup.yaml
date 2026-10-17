@@ -19,9 +19,9 @@ setup:
   - sql: "INSERT INTO authenticated_point_item (id, payload) VALUES (7, 'seven')"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "composite_lookup_target") '("tenant_id" "lookup_id" "payload")
+        (insert (table "memcp-tests" false "composite_lookup_target" false) '("tenant_id" "lookup_id" "payload")
           (map (produceN 1024) (lambda (i) (list (mod i 16) i i))))
-        (insert (table "memcp-tests" "composite_lookup_driver") '("seq" "tenant_id" "lookup_id")
+        (insert (table "memcp-tests" false "composite_lookup_driver" false) '("seq" "tenant_id" "lookup_id")
           (map (produceN 20000) (lambda (i)
             (begin
               (define lookup_id (mod i 1024))

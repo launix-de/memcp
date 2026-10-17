@@ -6,7 +6,9 @@
 # (at your option) any later version.
 
 metadata:
-  performance_shard_weight: 2
+  # Include the cost of all fourteen fresh verification processes when
+  # distributing whole suites. Workloads and timing gates stay unchanged.
+  performance_shard_weight: 36
   version: "1.0"
   description: "Cold construction plus repeated overlapping group range-cache probes"
   isolated: true
@@ -21,12 +23,12 @@ setup:
   - sql: "CREATE TABLE grc_perf_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "grc_perf_events")
+        (insert (table "memcp-tests" false "grc_perf_events" false)
           '("id" "tenant_id" "happened_at" "amount")
           (map (produceN {rows}) (lambda (i)
             (list (+ i 1) 1
               (mod (* i 7919) {rows}) (+ 1 (mod i 17))))))
-        (insert (table "memcp-tests" "grc_perf_windows")
+        (insert (table "memcp-tests" false "grc_perf_windows" false)
           '("id" "tenant_id" "range_from" "range_to")
           (merge (map (produceN 45) (lambda (from_index)
             (map (produceN (- 45 from_index)) (lambda (offset)
@@ -78,11 +80,11 @@ test_cases:
       - sql: "CREATE TABLE grc_sparse_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
       - scm: |
           (!begin
-            (insert (table "memcp-tests" "grc_sparse_windows")
+            (insert (table "memcp-tests" false "grc_sparse_windows" false)
               '("id" "tenant_id" "range_from" "range_to")
               (map (produceN 128) (lambda (i)
                 (list (+ i 1) 1 (+ {rows} i) (+ {rows} i 1)))))
-            (rebuild (table "memcp-tests" "grc_sparse_windows")) true)
+            (rebuild (table "memcp-tests" false "grc_sparse_windows" false)) true)
     sql: |
       SELECT w.id,
         (SELECT COUNT(*) FROM grc_perf_events e
@@ -112,17 +114,17 @@ test_cases:
       - sql: "CREATE TABLE grc_write_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
       - scm: |
           (!begin
-            (insert (table "memcp-tests" "grc_write_events")
+            (insert (table "memcp-tests" false "grc_write_events" false)
               '("id" "tenant_id" "happened_at" "amount")
               (map (produceN 6000) (lambda (i) (list (+ i 1) 1 i 2))))
-            (insert (table "memcp-tests" "grc_write_windows")
+            (insert (table "memcp-tests" false "grc_write_windows" false)
               '("id" "tenant_id" "range_from" "range_to")
               (merge (map (produceN 45) (lambda (from_index)
                 (map (produceN (- 45 from_index)) (lambda (offset)
                   (list (+ 1 (+ (* from_index 45) (- offset (/ (* from_index (- from_index 1)) 2))))
                     1 (* from_index 100) (* (+ from_index offset 1) 100))))))))
-            (rebuild (table "memcp-tests" "grc_write_events"))
-            (rebuild (table "memcp-tests" "grc_write_windows"))
+            (rebuild (table "memcp-tests" false "grc_write_events" false))
+            (rebuild (table "memcp-tests" false "grc_write_windows" false))
             (define counter (newsession))
             (counter "request" (newsession))
             (counter "plans" (newcachemap))

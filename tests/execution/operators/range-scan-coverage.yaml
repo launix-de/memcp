@@ -48,7 +48,7 @@ test_cases:
             (* i 3)
             (nth '("alpha" "beta" "gamma" "delta") (- i (* 4 (floor (/ i 4)))))
             (+ 1.0 (* i 0.5))))))
-        (insert (table "memcp-tests" "rs_data") '("id" "val" "category" "price") rows)
+        (insert (table "memcp-tests" false "rs_data" false) '("id" "val" "category" "price") rows)
         200)
 
   - name: "Unrebuilt column statistics remain explicitly unknown"
@@ -125,7 +125,7 @@ test_cases:
     setup:
       - sql: "CREATE TABLE null_point_index (id INT PRIMARY KEY, nullable_key INT) ENGINE=memory"
       - scm: |
-          (insert (table "memcp-tests" "null_point_index") '("id" "nullable_key")
+          (insert (table "memcp-tests" false "null_point_index" false) '("id" "nullable_key")
             (map (produceN 200) (lambda (i)
               (list i (if (equal? i 137) nil i)))))
     sql: "SELECT COUNT(*) AS cnt FROM null_point_index"
@@ -488,10 +488,10 @@ test_cases:
       - sql: "CREATE TABLE ordered_join_fact (id INT PRIMARY KEY, dim_id INT)"
     scm: |
       (begin
-        (insert (table "memcp-tests" "ordered_join_dim") '("id" "filter_id")
+        (insert (table "memcp-tests" false "ordered_join_dim" false) '("id" "filter_id")
           (map (produceN 8192) (lambda (i)
             (list (+ i 1) (if (< i 16) 13266 (+ i 20000))))))
-        (insert (table "memcp-tests" "ordered_join_fact") '("id" "dim_id")
+        (insert (table "memcp-tests" false "ordered_join_fact" false) '("id" "dim_id")
           (map (produceN 20000) (lambda (i)
             (list (+ i 1) (if (< i 160) (+ 1 (floor (/ i 10))) 17)))))
         (rebuild)
@@ -570,14 +570,14 @@ test_cases:
   - name: "Insert selective text RecSet fixture"
     scm: |
       (begin
-        (insert (table "memcp-tests" "selective_text_dim") '("id" "label")
+        (insert (table "memcp-tests" false "selective_text_dim" false) '("id" "label")
           (map (produceN 4) (lambda (i)
             (list i (nth '("zero" "one" "two" "three") i)))))
-        (insert (table "memcp-tests" "selective_text_driver") '("id" "dim_id" "search")
+        (insert (table "memcp-tests" false "selective_text_driver" false) '("id" "dim_id" "search")
           (map (produceN 2048) (lambda (i)
             (list i (mod i 4)
               (if (< i 8) (concat "asset-needle-" i) (concat "asset-other-" i))))))
-        (insert (table "memcp-tests" "selective_text_peer") '("id")
+        (insert (table "memcp-tests" false "selective_text_peer" false) '("id")
           (map (produceN 100) (lambda (i) (list i))))
         (rebuild)
         2048)
@@ -899,7 +899,7 @@ test_cases:
   - name: "Insert physical pushdown driver rows"
     scm: |
       (insert
-        (table "memcp-tests" "pushdown_main")
+        (table "memcp-tests" false "pushdown_main" false)
         '("id" "lookup_id" "payload")
         (map (produceN 10000) (lambda (i)
           (list (+ i 1) (+ 1 (- i (* 2 (floor (/ i 2))))) (concat "row-" i)))))
@@ -986,7 +986,7 @@ test_cases:
 
   - name: "Rebuild publishes confidence null fraction and min max"
     setup:
-      - scm: '(rebuild (table "memcp-tests" "rs_data") true false)'
+      - scm: '(rebuild (table "memcp-tests" false "rs_data" false) true false)'
     scm: |
       (begin
         (define idcol (car (get_schema "memcp-tests" "rs_data")))
@@ -1021,8 +1021,8 @@ test_cases:
 
   - name: "Planner statistics expose nullable distribution"
     setup:
-      - scm: '(rebuild (table "memcp-tests" "stats_contract_parent") true false)'
-      - scm: '(rebuild (table "memcp-tests" "stats_contract_child") true false)'
+      - scm: '(rebuild (table "memcp-tests" false "stats_contract_parent" false) true false)'
+      - scm: '(rebuild (table "memcp-tests" false "stats_contract_child" false) true false)'
     scm: |
       (begin
         (define nullablecol (nth (get_schema "memcp-tests" "stats_contract_child") 3))
@@ -1063,7 +1063,7 @@ test_cases:
       (begin
         (set rows (map (produceN 100) (lambda (i)
           (list (floor (/ i 10)) (- i (* 10 (floor (/ i 10)))) (* i i)))))
-        (insert (table "memcp-tests" "rs_multi") '("a" "b" "c") rows)
+        (insert (table "memcp-tests" false "rs_multi" false) '("a" "b" "c") rows)
         100)
 
   - name: "Multi-col: range on first key"

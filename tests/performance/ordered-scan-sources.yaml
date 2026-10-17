@@ -122,9 +122,9 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (- i (* 100 (floor (/ i 100)))) (* i 71)))))
-            (insert (table "{database}" "pb_order_fact") '("id" "category" "value") rows)
+            (insert (table "{database}" false "pb_order_fact" false) '("id" "category" "value") rows)
             (set dims (map (produceN 100) (lambda (i) (list i (concat "cat_" i)))))
-            (insert (table "{database}" "pb_order_dim") '("cat_id" "label") dims)
+            (insert (table "{database}" false "pb_order_dim" false) '("cat_id" "label") dims)
             (rebuild)
             "ok")
     sql: |
