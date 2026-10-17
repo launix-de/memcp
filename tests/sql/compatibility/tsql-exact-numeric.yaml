@@ -1582,4 +1582,297 @@ test_cases:
     data:
     - value: null
 
+- name: Streaming currency assignment retains numeric syntax contract
+  setup:
+  - &id001
+    sql: DROP TABLE IF EXISTS tsql_numeric_sink_source
+  - &id002
+    sql: DROP TABLE IF EXISTS tsql_numeric_sink_target
+  - &id003
+    sql: CREATE TABLE tsql_numeric_sink_source (id INT PRIMARY KEY,m MONEY,sm SMALLMONEY,txt NVARCHAR(32),n INT,b VARBINARY(2),d
+      DATE)
+  - &id004
+    sql: INSERT tsql_numeric_sink_source VALUES (1,12.34565,-12.34565,N'$23.45675',42,0x3132,NULL),(2,NULL,NULL,NULL,NULL,NULL,NULL)
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT 1,1.23456
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 1.2346
+  cleanup: &id005
+  - &id006
+    sql: DROP TABLE tsql_numeric_sink_target
+  - &id007
+    sql: DROP TABLE tsql_numeric_sink_source
+- name: Streaming currency assignment retains national text syntax contract
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT 1,N'$12.34565'
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 12.3457
+  cleanup: *id005
+- name: Streaming currency assignment retains explicit money source
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT 1,CAST(12.34565 AS MONEY)
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 12.3457
+  cleanup: *id005
+- name: Streaming currency assignment retains explicit small money source
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT 1,CAST(-12.34565 AS SMALLMONEY)
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: -12.3457
+  cleanup: *id005
+- name: Streaming currency assignment retains native integer column
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT id,n FROM tsql_numeric_sink_source WHERE id=1
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 42
+  cleanup: *id005
+- name: Streaming currency assignment retains native text column
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount SMALLMONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT id,txt FROM tsql_numeric_sink_source WHERE id=1
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 23.4568
+  cleanup: *id005
+- name: Streaming currency assignment retains native money column
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT id,m FROM tsql_numeric_sink_source WHERE id=1
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 12.3457
+  cleanup: *id005
+- name: Streaming currency assignment retains native small money column
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT id,sm FROM tsql_numeric_sink_source WHERE id=1
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: -12.3457
+  cleanup: *id005
+- name: Streaming currency assignment retains untyped null syntax contract
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT 1,NULL
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: null
+  cleanup: *id005
+- name: Streaming currency assignment retains typed null money source
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT 1,CAST(NULL AS MONEY)
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: null
+  cleanup: *id005
+- name: Streaming currency assignment retains null native money column
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT 1,m FROM tsql_numeric_sink_source WHERE id=2
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: null
+  cleanup: *id005
+- name: Streaming currency assignment retains logical view source declarations
+  setup:
+  - sql: DROP VIEW IF EXISTS tsql_numeric_sink_view
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: CREATE VIEW tsql_numeric_sink_view AS SELECT id,m AS value FROM tsql_numeric_sink_source WHERE id=1
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT id,value FROM tsql_numeric_sink_view
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 12.3457
+  cleanup:
+  - sql: DROP VIEW tsql_numeric_sink_view
+  - *id006
+  - *id007
+- name: Streaming currency assignment rejects binary source declaration without mutation
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target VALUES (99,88.5)
+  scm: "(begin\n  (define session (newsession))\n  (session \"schema\" \"memcp-tests\")\n  (session \"username\" \"root\")\n  (define\
+    \ failed (try (lambda () (begin\n    (tsql_execute_request \"memcp-tests\" \"INSERT tsql_numeric_sink_target (id,amount) SELECT\
+    \ id,CAST(b AS BINARY(2)) FROM tsql_numeric_sink_source WHERE id=1\" session nil 0\n      (lambda (_row) true) (lambda args\
+    \ true))\n    false)) (lambda (cause) (regexp_test (string cause) \"currency conversion from BINARY is not implemented\"))))\n\
+    \  (define observed (newsession))\n  (tsql_execute_request \"memcp-tests\"\n    \"SELECT COUNT(*) AS n,MIN(id) AS low,MAX(id)\
+    \ AS high,SUM(amount) AS total FROM tsql_numeric_sink_target\"\n    session nil 0 (lambda (row) (observed \"summary\" row))\
+    \ (lambda args true))\n  (define row (observed \"summary\"))\n  (if (and failed (not (nil? row)) (equal? (row \"n\") 1)\n \
+    \   (equal? (row \"low\") 99) (equal? (row \"high\") 99) (equal? (row \"total\") 88.5)) true\n    (error \"streaming assignment\
+    \ did not preserve the source contract or existing native rows\")))"
+  expect:
+    result: true
+  cleanup: *id005
+- name: Streaming currency assignment rejects variable binary source declaration without mutation
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target VALUES (99,88.5)
+  scm: "(begin\n  (define session (newsession))\n  (session \"schema\" \"memcp-tests\")\n  (session \"username\" \"root\")\n  (define\
+    \ failed (try (lambda () (begin\n    (tsql_execute_request \"memcp-tests\" \"INSERT tsql_numeric_sink_target (id,amount) SELECT\
+    \ id,b FROM tsql_numeric_sink_source WHERE id=1\" session nil 0\n      (lambda (_row) true) (lambda args true))\n    false))\
+    \ (lambda (cause) (regexp_test (string cause) \"currency conversion from VARBINARY is not implemented\"))))\n  (define observed\
+    \ (newsession))\n  (tsql_execute_request \"memcp-tests\"\n    \"SELECT COUNT(*) AS n,MIN(id) AS low,MAX(id) AS high,SUM(amount)\
+    \ AS total FROM tsql_numeric_sink_target\"\n    session nil 0 (lambda (row) (observed \"summary\" row)) (lambda args true))\n\
+    \  (define row (observed \"summary\"))\n  (if (and failed (not (nil? row)) (equal? (row \"n\") 1)\n    (equal? (row \"low\"\
+    ) 99) (equal? (row \"high\") 99) (equal? (row \"total\") 88.5)) true\n    (error \"streaming assignment did not preserve the\
+    \ source contract or existing native rows\")))"
+  expect:
+    result: true
+  cleanup: *id005
+- name: Streaming currency assignment rejects calendar source declaration without mutation
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target VALUES (99,88.5)
+  scm: "(begin\n  (define session (newsession))\n  (session \"schema\" \"memcp-tests\")\n  (session \"username\" \"root\")\n  (define\
+    \ failed (try (lambda () (begin\n    (tsql_execute_request \"memcp-tests\" \"INSERT tsql_numeric_sink_target (id,amount) SELECT\
+    \ id,d FROM tsql_numeric_sink_source WHERE id=1\" session nil 0\n      (lambda (_row) true) (lambda args true))\n    false))\
+    \ (lambda (cause) (regexp_test (string cause) \"currency conversion from DATE is not implemented\"))))\n  (define observed\
+    \ (newsession))\n  (tsql_execute_request \"memcp-tests\"\n    \"SELECT COUNT(*) AS n,MIN(id) AS low,MAX(id) AS high,SUM(amount)\
+    \ AS total FROM tsql_numeric_sink_target\"\n    session nil 0 (lambda (row) (observed \"summary\" row)) (lambda args true))\n\
+    \  (define row (observed \"summary\"))\n  (if (and failed (not (nil? row)) (equal? (row \"n\") 1)\n    (equal? (row \"low\"\
+    ) 99) (equal? (row \"high\") 99) (equal? (row \"total\") 88.5)) true\n    (error \"streaming assignment did not preserve the\
+    \ source contract or existing native rows\")))"
+  expect:
+    result: true
+  cleanup: *id005
+- name: Streaming currency assignment rejects invalid character payload without mutation
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target VALUES (99,88.5)
+  scm: "(begin\n  (define session (newsession))\n  (session \"schema\" \"memcp-tests\")\n  (session \"username\" \"root\")\n  (define\
+    \ failed (try (lambda () (begin\n    (tsql_execute_request \"memcp-tests\" \"INSERT tsql_numeric_sink_target (id,amount) SELECT\
+    \ 2,N'bad money'\" session nil 0\n      (lambda (_row) true) (lambda args true))\n    false)) (lambda (cause) (regexp_test\
+    \ (string cause) \"invalid currency text\"))))\n  (define observed (newsession))\n  (tsql_execute_request \"memcp-tests\"\n\
+    \    \"SELECT COUNT(*) AS n,MIN(id) AS low,MAX(id) AS high,SUM(amount) AS total FROM tsql_numeric_sink_target\"\n    session\
+    \ nil 0 (lambda (row) (observed \"summary\" row)) (lambda args true))\n  (define row (observed \"summary\"))\n  (if (and failed\
+    \ (not (nil? row)) (equal? (row \"n\") 1)\n    (equal? (row \"low\") 99) (equal? (row \"high\") 99) (equal? (row \"total\"\
+    ) 88.5)) true\n    (error \"streaming assignment did not preserve the source contract or existing native rows\")))"
+  expect:
+    result: true
+  cleanup: *id005
+- name: Streaming currency assignment rejects small currency range overflow without mutation
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount SMALLMONEY)
+  - sql: INSERT tsql_numeric_sink_target VALUES (99,88.5)
+  scm: "(begin\n  (define session (newsession))\n  (session \"schema\" \"memcp-tests\")\n  (session \"username\" \"root\")\n  (define\
+    \ failed (try (lambda () (begin\n    (tsql_execute_request \"memcp-tests\" \"INSERT tsql_numeric_sink_target (id,amount) SELECT\
+    \ 2,300000\" session nil 0\n      (lambda (_row) true) (lambda args true))\n    false)) (lambda (cause) (regexp_test (string\
+    \ cause) \"small currency conversion overflow\"))))\n  (define observed (newsession))\n  (tsql_execute_request \"memcp-tests\"\
+    \n    \"SELECT COUNT(*) AS n,MIN(id) AS low,MAX(id) AS high,SUM(amount) AS total FROM tsql_numeric_sink_target\"\n    session\
+    \ nil 0 (lambda (row) (observed \"summary\" row)) (lambda args true))\n  (define row (observed \"summary\"))\n  (if (and failed\
+    \ (not (nil? row)) (equal? (row \"n\") 1)\n    (equal? (row \"low\") 99) (equal? (row \"high\") 99) (equal? (row \"total\"\
+    ) 88.5)) true\n    (error \"streaming assignment did not preserve the source contract or existing native rows\")))"
+  expect:
+    result: true
+  cleanup: *id005
+
 cleanup: []
