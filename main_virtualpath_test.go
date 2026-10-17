@@ -302,8 +302,13 @@ func TestLoadFileOwnership(t *testing.T) {
 	}
 	dir := t.TempDir()
 	filename := filepath.Join(dir, "owned.txt.gz")
-	writeGzipFile(t, filename, []byte{0xff, 0xfe, 'A', 0})
-	for _, panics := range []bool{false, true} {
+	for _, mode := range []string{"raw", "text", "callback-panic", "decode-error"} {
+		data := []byte{0xff, 0xfe, 'A', 0}
+		if mode == "decode-error" {
+			data = []byte{0xff, 0xfe, 'A'}
+		}
+		writeGzipFile(t, filename, data)
+		panics := mode == "callback-panic" || mode == "decode-error"
 		func() {
 			defer func() {
 				if (recover() != nil) != panics {
@@ -311,12 +316,16 @@ func TestLoadFileOwnership(t *testing.T) {
 				}
 			}()
 			callback := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
-				if panics {
+				if mode == "callback-panic" {
 					panic("callback failed")
 				}
 				return scm.NewBool(true)
 			})
-			getLoad(dir)(scm.NewString("owned.txt.gz"), callback, scm.NewNil(), scm.NewString("bom"))
+			encoding := "bom"
+			if mode == "raw" {
+				encoding = ""
+			}
+			getLoad(dir)(scm.NewString("owned.txt.gz"), callback, scm.NewNil(), scm.NewString(encoding))
 		}()
 		entries, err := os.ReadDir("/proc/self/fd")
 		if err != nil {

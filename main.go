@@ -627,7 +627,7 @@ func decodeLoadText(data []byte, encoding string) (string, error) {
 	if encoding != "bom" && encoding != "utf-16le" && encoding != "utf-16be" {
 		return "", fmt.Errorf("unsupported load text encoding %q", encoding)
 	}
-	if bytes.HasPrefix(data, []byte{0xff, 0xfe, 0, 0}) || bytes.HasPrefix(data, []byte{0, 0, 0xfe, 0xff}) {
+	if encoding == "bom" && (bytes.HasPrefix(data, []byte{0xff, 0xfe, 0, 0}) || bytes.HasPrefix(data, []byte{0, 0, 0xfe, 0xff})) {
 		return "", fmt.Errorf("UTF-32 load text is unsupported")
 	}
 	little := bytes.HasPrefix(data, []byte{0xff, 0xfe})
