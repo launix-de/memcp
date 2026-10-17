@@ -6873,7 +6873,7 @@ names in projections, predicates, and correlated subqueries. */
 		(make_query_block
 			(qb_schema inner)
 			(qb_sources inner)
-			(logical_union_projection_with_titles canonical_fields (qb_fields inner))
+			(logical_union_projection_with_titles canonical_fields (logical_relation_fields inner))
 			(qb_where inner)
 			(qb_group inner)
 			(qb_having inner)
@@ -6889,7 +6889,7 @@ names in projections, predicates, and correlated subqueries. */
 		(cons first_branch _rest) (begin
 			(define normalized (normalize_query_ast first_branch))
 			(if (query_block? normalized)
-				(qb_fields normalized)
+				(logical_relation_fields normalized)
 				(neumann_fail "untangle_query" "FROM UNION wrapper expects query-block branches")))
 		_ '())))
 
