@@ -123,10 +123,11 @@ test_cases:
       (session "username" "import_denied")
       (try (lambda () (begin
         (load_tsql "memcp-tests" "/does/not/exist" session)
-        false)) (lambda (failure) (strlike (concat failure) "%access denied%"))))
+        false)) (lambda (failure)
+          (if (strlike (concat failure) "%access denied%") (error (concat failure)) false))))
 
   expect:
-    result: true
+    error: true
 - name: Unsupported import statement stops execution
   scm: |
     (begin
