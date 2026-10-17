@@ -1909,13 +1909,21 @@ that context explicitly; stored views refuse this scalar before publication. */
 
 	(define offset nil)
 
+	/* A nested set expression is a normal derived relation. This preserves its
+	duplicate/window boundary using the shared binder and planner. */
+	(define tsql_query_from_source (lambda (query) (make_query_block schema
+		(list (list "__tsql_query_source" schema query false nil))
+		(merge (map (queryplan_result_titles query) (lambda (title)
+			(list title (list (quote get_column) "__tsql_query_source" false title false)))))
+		true nil nil nil nil nil '() '() '())))
 	/* UNION is left associative. Flatten only an adjacent union with the same
 	mode and no intervening result window; every branch keeps its own TOP. */
 	(define tsql_union_query (lambda (mode left right) (begin
 		(define branches (match left
 			((symbol union-block) previous branches order limit offset facts)
 			(if (and (equal? previous mode) (nil? order) (nil? limit) (nil? offset)
-				(empty_list? facts)) (append branches right) (list left right))
+				(empty_list? facts)) (append branches right)
+				(list left right))
 			_ (list left right)))
 		(list (quote union-block) mode branches nil nil nil '()))))
 
@@ -2058,11 +2066,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(if (and (nil? order) (nil? suffix_stage)) query (begin
 			/* An outer window over a bracketed query is an ordinary derived source.
 			Its inner TOP/order remains a semantic boundary for the shared planner. */
-			(define query (if parenthesized (make_query_block schema
-				(list (list "__tsql_window_source" schema query false nil))
-				(merge (map (queryplan_result_titles query) (lambda (title)
-					(list title (list (quote get_column) "__tsql_window_source" false title false)))))
-				true nil nil nil nil nil '() '() '()) query))
+			(define query (if parenthesized (tsql_query_from_source query) query))
 			(match query
 				((symbol query-block) database sources fields condition group having previous_order limit offset hidden stages facts)
 				(begin

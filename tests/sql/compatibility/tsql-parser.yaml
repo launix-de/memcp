@@ -75,6 +75,15 @@ test_cases:
       (parse_tsql "memcp-tests" "EXPLAIN IR SELECT TOP(1) id FROM tsql_data UNION ALL SELECT TOP(1) id FROM tsql_data ORDER BY id" nil nil nil)
       (parse_tsql "memcp-tests" "EXPLAIN IR SELECT TOP(1) id FROM tsql_data UNION ALL SELECT TOP(1) id FROM tsql_data ORDER BY id OPTION(MAXDOP 1,RECOMPILE)" nil nil nil))
   expect: {result: true}
+- name: Set query outer order retains an inner ordered TOP boundary
+  sql: (SELECT TOP(2) id AS value FROM tsql_data ORDER BY id DESC) ORDER BY value
+  expect: {rows: 2, data: [{value: 3},{value: 4}]}
+- name: Set query outer offset retains an inner ordered TOP boundary
+  sql: (SELECT TOP(2) id AS value FROM tsql_data ORDER BY id DESC) ORDER BY value OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
+  expect: {rows: 1, data: [{value: 4}]}
+- name: Set query parenthesized star keeps its declared native columns
+  sql: (SELECT * FROM tsql_data WHERE id=3) ORDER BY id
+  expect: {rows: 1, data: [{id: 3,name: Charlie,val: 50}]}
 - sql: DROP VIEW IF EXISTS dbo.tsql_view
   name: 'Fixture setup 001: DROP VIEW IF EXISTS dbo.tsql_view'
 - sql: DROP TABLE IF EXISTS dbo.tsql_copy
