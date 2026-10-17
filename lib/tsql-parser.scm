@@ -550,7 +550,7 @@ bounded month directory is frontend syntax, not a second temporal carrier. */
 	(if (regexp_test text "^[A-Z]{3} [0-9]{1,2} [0-9]{4} [0-9]{1,2}:[0-9]{2}(AM|PM)$")
 		true (error "invalid month-name calendar input"))
 	(match (split text " ")
-		(month day year clock) (begin
+		'(month day year clock) (begin
 			(define month_index (find (produceN 12) (lambda (index)
 				(equal? month (toUpper (nth tsql_calendar_month_names index)))) nil))
 			(if (nil? month_index) (error "invalid calendar month") true)
@@ -626,7 +626,7 @@ syntax selects a source-dependent style through the separate factory below. */
 (define tsql_styled_text_compiler (lambda (pattern type dimensions) (lambda (infos) (begin
 	(define input (car infos))
 	(define formula (list format_date (tsql_calendar_difference_formula input) pattern))
-	(sql_info (list (if (has? '("CHAR" "NCHAR") type) tsql_cast_fixed_text tsql_cast_text)
+	(sql_info (list (if (has? '("CHAR" "NCHAR") type) (quote tsql_cast_fixed_text) (quote tsql_cast_text))
 		formula (if (empty_list? dimensions) 30 (car dimensions)) (has? '("NVARCHAR" "NCHAR") type)) type nil)))))
 (define tsql_convert_text_compiler (lambda (style type dimensions) (lambda (infos) (begin
 	(define input (car infos))
@@ -1447,8 +1447,8 @@ dimensions are metadata only and are absent from the executable plan. */
 				(define src (source_for_alias sources (if (empty_list? sources) nil (source_alias (car sources))) bound_alias false))
 				(if (nil? src) nil (source_is_base_table? src)
 					(begin
-						(define metadata (find (get_schema (source_schema src) (source_relation src))
-							(lambda (item) (equal? (item "Field") bound_column)) nil))
+						(define handle (table (source_schema src) (source_relation src)))
+						(define metadata (if (nil? handle) nil (show handle "column" bound_column false)))
 						(if metadata (metadata "Dimensions") nil))
 					(match (source_relation src)
 						((symbol query-block) _schema inner_sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
