@@ -7,10 +7,21 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 
 /* Transport tuples describe bytes and unscaled coefficients only. Their SQL
 meaning is chosen here from the request's declaration, not in the Go bridge. */
+(define tds_money_small? (lambda (wire) (match (wire "size")
+	4 true 8 false _ (error "invalid currency parameter byte width"))))
 (define tds_parameter_value (lambda (parameter) (begin
 	(define value (parameter "value"))
 	(define wire (parameter "type"))
 	(if (nil? value) nil
+		(equal? (wire "kind") 110) (begin
+			(define small (tds_money_small? wire))
+			/* This checks the codec's integer payload contract. The descriptor,
+			not the carrier, selected the fixed-scale SQL declaration above. */
+			(if (and (int? value) (or (not small) (and (>= value -2147483648) (<= value 2147483647)))) true
+				(error "invalid currency parameter coefficient"))
+			(define number (/ value 10000))
+			(if (equal? (tsql_money_coefficient number small) value) number
+				(error "currency parameter exceeds native numeric precision")))
 		(has? '(106 108) (wire "kind")) (begin
 			(define coefficient (value "coefficient"))
 			(define scale (wire "scale"))
@@ -27,6 +38,7 @@ meaning is chosen here from the request's declaration, not in the Go bridge. */
 (define tds_result_value (lambda (descriptor value) (if (nil? value) nil
 	(match (descriptor "kind")
 		165 (list "bytes" value)
+		110 (tsql_money_coefficient value (equal? (descriptor "size") 4))
 		108 (begin
 			(define scale (descriptor "scale"))
 			/* A zero-scale SQL contract keeps native integer IDs exact. Scaled
@@ -63,12 +75,13 @@ value; the wire descriptor and SQL declaration own the type independently. */
 		(define contract (cadr declaration))
 		(define parameter (named name))
 		(define wire (parameter "type"))
-		(if (not (has? '(31 38 104 106 108 109 165 167 173 175 231 239) (wire "kind")))
+		(if (not (has? '(31 38 104 106 108 109 110 165 167 173 175 231 239) (wire "kind")))
 			(error "unsupported T-SQL parameter wire type: " (wire "kind")) true)
 		/* A supplied NULL needs no numeric representation or conversion. Its SQL
 		contract still comes exclusively from the declaration. */
 		(define source_type (match (wire "kind")
 			38 "BIGINT" 104 "BIT" 106 "DECIMAL" 108 "NUMERIC" 109 "FLOAT"
+			110 (if (tds_money_small? wire) "SMALLMONEY" "MONEY")
 			165 "VARBINARY" 173 "BINARY" 167 "VARCHAR" 175 "CHAR" 231 "NVARCHAR" 239 "NCHAR" _ "NULL"))
 		(if (and (not (nil? (parameter "value"))) (tsql_binary_type? source_type)
 			(not (tsql_binary_type? (car contract))))

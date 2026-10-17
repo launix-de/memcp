@@ -286,6 +286,62 @@ runtime and storage hot paths; do not substitute float64 for exact casts. */
 	(define bound (simplify (concat "1e" (- precision scale))))
 	(if (and (> converted (- 0 bound)) (< converted bound)) converted
 		(error "decimal conversion overflow"))))))
+/* Currency declarations have fixed scale four. Values remain ordinary native
+numbers; only formatting and transport use an unscaled integer coefficient.
+The float carrier cannot preserve every coefficient at the 64-bit endpoints.
+Reject an out-of-range conversion before intdiv can wrap its sign. */
+(define tsql_money_coefficient (lambda (value small) (if (nil? value) nil (begin
+	(define scaled (round (* (sql_decimal_output (tsql_numeric_input value) 4) 10000)))
+	(define limit (simplify "9223372036854775808.0"))
+	(if (or (< scaled (- 0 limit)) (>= scaled limit))
+		(tsql_raise_error 8115 "currency conversion overflow" 1) true)
+	(define coefficient (intdiv scaled 1))
+	(if (and small (or (< coefficient -2147483648) (> coefficient 2147483647)))
+		(tsql_raise_error 8115 "small currency conversion overflow" 1) coefficient)))))
+(define tsql_cast_money (lambda (value small)
+	(if (nil? value) nil (/ (tsql_money_coefficient value small) 10000))))
+(define tsql_money_text_input (lambda (value) (if (nil? value) nil (begin
+	(define text (sql_trim value))
+	(if (or (equal? text "")
+		(regexp_test text "^(?:[+-]?\\p{Sc}?|\\p{Sc}[+-]?)(?:[0-9][0-9,]*(?:\\.[0-9]*)?|\\.[0-9]+)$")) true
+		(tsql_raise_error 235 "invalid currency text" 1))
+	(tsql_numeric_input (regexp_replace (replace text "," "") "\\p{Sc}" ""))))))
+(define tsql_money_compiler (lambda (small) (lambda (infos) (begin
+	(define input (car infos))
+	(define type (sql_info_type input))
+	(if (or (sql_numeric_type? type) (sql_text_type? type) (has? '("MONEY" "SMALLMONEY" "NULL") type)) true
+		(error "currency conversion from " type " is not implemented"))
+	(define formula (sql_info_formula input))
+	(sql_info (list (quote tsql_cast_money)
+		(if (sql_text_type? type) (list (quote tsql_money_text_input) formula) formula) small)
+		(if small "SMALLMONEY" "MONEY") nil)))))
+(define tsql_cast_money_expr (lambda (value small)
+	(list (quote sql_compile_expr) (list (quote tsql_money_compiler) small) value)))
+/* These bounded strings describe a scale-four currency value, not a second
+numeric representation. Split before taking absolute values so the signed
+64-bit minimum never needs to be negated. */
+(define tsql_money_group_digits (lambda (text)
+	(if (<= (strlen text) 3) text
+		(concat (tsql_money_group_digits (substr text 0 (- (strlen text) 3))) "," (substr text (- (strlen text) 3))))))
+(define tsql_money_text (lambda (value style) (if (nil? value) nil (begin
+	(define coefficient (tsql_money_coefficient value false))
+	(define four (has? '(2 126) style))
+	(define units (if four coefficient (begin
+		(define quotient (intdiv coefficient 100))
+		(define remainder (mod coefficient 100))
+		(+ quotient (if (>= remainder 50) 1 (<= remainder -50) -1 0)))))
+	(define factor (if four 10000 100))
+	(define whole (intdiv units factor))
+	(define fraction (mod units factor))
+	(define digits (string (if (< whole 0) (- 0 whole) whole)))
+	(define tail (string (if (< fraction 0) (- 0 fraction) fraction)))
+	(concat (if (< units 0) "-" "") (if (equal? style 1) (tsql_money_group_digits digits) digits)
+		"." (string_repeat "0" (- (if four 4 2) (strlen tail))) tail)))))
+(define tsql_cast_money_text (lambda (value style length national fixed) (if (nil? value) nil (begin
+	(define text (tsql_money_text value style))
+	(if (and (not (equal? length -1)) (> (strlen text) length))
+		(tsql_raise_error 8115 "currency character conversion overflow" 1) true)
+	((if fixed tsql_cast_fixed_text tsql_cast_text) text length national)))))
 (define tsql_cast_binary (lambda (value length fixed) (if (nil? value) nil (begin
 	(if (string? value) true (error "numeric binary conversion is not implemented"))
 	(define bytes (if (or (equal? length -1) (<= (strlen value) length)) value (substr value 0 length)))
@@ -328,7 +384,10 @@ Complementing the nonnegative magnitude avoids negating the int64 minimum. */
 	(define input (car infos))
 	(sql_info (if (tsql_binary_type? (sql_info_type input))
 		(list (quote tsql_binary_to_integer) (sql_info_formula input) (tsql_integer_width type) (< minimum 0))
-		(list (quote tsql_cast_integer) (sql_info_formula input) minimum maximum)) type nil)))))
+		(list (quote tsql_cast_integer)
+			(if (has? '("MONEY" "SMALLMONEY") (sql_info_type input))
+				(list (quote tsql_money_integer) (sql_info_formula input)) (sql_info_formula input)) minimum maximum)) type nil)))))
+(define tsql_money_integer (lambda (value) (if (nil? value) nil (round value))))
 (define tsql_cast_integer_expr (lambda (value type minimum maximum)
 	(list (quote sql_compile_expr) (list (quote tsql_integer_compiler) type minimum maximum) value)))
 (define tsql_cast_bit (lambda (value)
@@ -369,6 +428,8 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		/* Approximate types use native floating precision. Binary32 rounding and
 		dialect precision boundaries remain noncritical compatibility work. */
 		"REAL" (list (quote tsql_cast_float) value)
+		"MONEY" (tsql_cast_money_expr value false)
+		"SMALLMONEY" (tsql_cast_money_expr value true)
 		"BIT" (list (quote tsql_cast_bit) value)
 		"DECIMAL" (tsql_cast_decimal_expr value name dimensions)
 		"NUMERIC" (tsql_cast_decimal_expr value name dimensions)
@@ -425,6 +486,7 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 		(tsql_cast_expr value type '())
 		(has? '("NVARCHAR" "NCHAR") type)
 		(tsql_cast_expr value type (declaration "Dimensions"))
+		(has? '("MONEY" "SMALLMONEY") type) (tsql_cast_expr value type '())
 		(has? '("DECIMAL" "NUMERIC") type) (begin
 			(define dimensions (declaration "Dimensions"))
 			(define precision (if (empty_list? dimensions) 18 (car dimensions)))
@@ -481,7 +543,9 @@ recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. 
 	(if (and (plain_literal_expr? formula) (sql_numeric_type? (sql_info_type info))
 		(not (equal? length -1)) (> (strlen (string formula)) length))
 		(error "numeric character conversion overflow") true)
-	(sql_info (list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national)
+	(sql_info (if (has? '("MONEY" "SMALLMONEY") source)
+		(list (quote tsql_cast_money_text) formula 0 length national fixed)
+		(list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national))
 		(if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR")
 		(sql_info_collation info))))))
 (define tsql_cast_text_expr (lambda (value dimensions national fixed) (begin
@@ -524,11 +588,16 @@ configurable cutoff remain separate compatibility work. */
 		(concat (if (< hour 10) "0" "") hour (substr clock 2 6))) clock))
 	(define parsed (str_to_date (concat date " " clock) "%Y-%m-%d %H:%i:%s"))
 	(if (nil? parsed) (error "invalid datetime value") (unix_timestamp parsed))))))
-(define tsql_styled_text_compiler (lambda (pattern type dimensions) (lambda (infos) (begin
+(define tsql_styled_text_compiler (lambda (style type dimensions) (lambda (infos) (begin
 	(define input (car infos))
-	(define formula (list format_date (tsql_calendar_difference_formula input) pattern))
-	(sql_info (list (if (has? '("CHAR" "NCHAR") type) tsql_cast_fixed_text tsql_cast_text)
-		formula (if (empty_list? dimensions) 30 (car dimensions)) (has? '("NVARCHAR" "NCHAR") type)) type nil)))))
+	(define length (if (empty_list? dimensions) 30 (car dimensions)))
+	(define national (has? '("NVARCHAR" "NCHAR") type))
+	(define fixed (has? '("CHAR" "NCHAR") type))
+	(sql_info (if (has? '("MONEY" "SMALLMONEY") (sql_info_type input))
+		(list (quote tsql_cast_money_text) (sql_info_formula input) style length national fixed)
+		(list (if fixed tsql_cast_fixed_text tsql_cast_text)
+			(list format_date (tsql_calendar_difference_formula input) (tsql_temporal_style_pattern style true))
+			length national)) type nil)))))
 (define tsql_convert_expr (lambda (value type dimensions style) (begin
 	(tsql_decl_dimensions type dimensions)
 	(match style
@@ -536,10 +605,8 @@ configurable cutoff remain separate compatibility work. */
 		_ (if (or (nil? style) (equal? style 0)) (tsql_cast_expr value type dimensions)
 			(tsql_temporal_type? type) (tsql_temporal_cast_expr value type style)
 			(has? '("VARCHAR" "NVARCHAR" "CHAR" "NCHAR") type)
-			(begin
-				(define pattern (tsql_temporal_style_pattern style true))
-				(list (quote sql_compile_expr) (list (quote tsql_styled_text_compiler) pattern type (list (quote quote) dimensions)) value)))
-		(error "unsupported CONVERT style for " type)))))
+			(list (quote sql_compile_expr) (list (quote tsql_styled_text_compiler) style type (list (quote quote) dimensions)) value)
+			(error "unsupported CONVERT style for " type))))))
 /* Aggregate contracts come from SQL syntax and the declared input type.
 The native reducers do not determine the frontend's SQL result contract. */
 (define tsql_aggregate_type (lambda (name input_type) (match name
@@ -916,7 +983,7 @@ The two options which change uniqueness/admission remain explicit contracts. */
 	(tsql_check_index_options options true)))
 (define tsql_default_literal (parser (or
 	(parser '("(" (define value tsql_default_literal) ")") value)
-	(parser (define value tsql_literal) (sql_type_lower_annotations value)))))
+	(parser (define value tsql_literal) value))))
 (define tsql_clock_default (parser (or
 	(parser '("(" tsql_clock_default ")") true)
 	'((atom "GETDATE" true) "(" ")") (atom "CURRENT_TIMESTAMP" true))))
@@ -1341,13 +1408,15 @@ dimensions are metadata only and are absent from the executable plan. */
 		(define dimensions (coalesceNil (tsql_result_dimensions sources expression parameters)
 			(tsql_result_dimensions sources (sql_info_formula info) parameters) '()))
 		(define numeric (and (has? '("DECIMAL" "NUMERIC") type) (>= (count dimensions) 2)))
+		(define money (has? '("MONEY" "SMALLMONEY") type))
 		(define kind (if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type) 38
-			numeric 108 (tsql_binary_type? type) 165
+			money 110 numeric 108 (tsql_binary_type? type) 165
 			(has? '("FLOAT" "DOUBLE" "REAL" "DECIMAL" "NUMERIC") type) 109
 			(has? '("BOOLEAN" "BOOL" "BIT") type) 104 231))
-		(define precision (if numeric (car dimensions) 0))
-		(define scale (if numeric (cadr dimensions) 0))
+		(define precision (if money (if (equal? type "SMALLMONEY") 10 19) numeric (car dimensions) 0))
+		(define scale (if money 4 numeric (cadr dimensions) 0))
 		(define size (match kind
+			110 (if (equal? type "SMALLMONEY") 4 8)
 			108 (if (<= precision 9) 5 (<= precision 19) 9 (<= precision 28) 13 17)
 			165 (if (equal? type "ROWVERSION") 8
 				(and (not (empty_list? dimensions)) (> (car dimensions) 0)) (car dimensions) 65535)
@@ -2372,14 +2441,13 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(define dimensions tsql_type_dimensions) (define attributes tsql_column_attributes)
 	) (begin
 			(define dimensions (tsql_decl_dimensions type dimensions))
-			/* Keep literal defaults in the existing native default option, after
-			frontend conversion. No additional default registry or storage type
-			semantics are introduced for national text declarations. */
-			(define attributes (if (has? '("NVARCHAR" "NCHAR") type)
-				(merge (extract_assoc attributes (lambda (key value)
-					(list key (if (equal? key "default")
-						(eval (sql_type_lower_annotations (tsql_cast_expr (list (quote quote) value) type dimensions))) value)))))
-				attributes))
+			/* Retain the literal's SQL contract until its target is known, then
+			store the ordinary value in the existing native default option. */
+			(define attributes (merge (extract_assoc attributes (lambda (key value)
+				(list key (if (equal? key "default")
+					(if (has? '("NVARCHAR" "NCHAR" "MONEY" "SMALLMONEY") type)
+						(eval (sql_type_lower_annotations (tsql_cast_expr value type dimensions)))
+						(sql_type_lower_annotations value)) value))))))
 			(list name (tsql_storage_type type) (cons (quote list) dimensions)
 				(tsql_identity_attributes type dimensions attributes)))))
 	(define foreign_key_definition (parser '(
