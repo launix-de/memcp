@@ -233,8 +233,8 @@ or group state during preparation. All seven verification pairs still rerun
 every case, including initially successful cases.
 
 `metadata.performance_shard_weight` is a positive integer used only to distribute
-whole suites across six runners for each native/JIT configuration. The default
-is 1. Weights balance measured fixture costs across all six runners under the
+whole suites across seven runners for each native/JIT configuration. The default
+is 1. Weights balance measured fixture costs across all seven runners under the
 unchanged 15-minute limit. CI artifacts include process startup and both roles;
 incomplete verification runs are projected to all seven pairs when updating
 their weights. This avoids reserving a runner for a short suite while placing
@@ -247,11 +247,25 @@ additional discarded warmups. Normal tenant hierarchy checks use one complete
 tables, and the normal query, row assertions and time limits remain unchanged.
 
 Calibrate relative shard weights from complete A/B process costs, including
-preparation and snapshot clones. For suites observed entering verification,
-reserve all fourteen processes; use the larger ordinary/JIT estimate because
-both configurations share the same weights. These are observed-cost estimates,
-not a guarantee that every future regression fits the shard deadline. Preserve
-the full suite list and measurement protocol when rebalancing.
+preparation and snapshot clones. Reserve all fourteen processes for every known
+verification family, including `unique-insert`; use the larger ordinary/JIT
+estimate because both configurations share the same weights. Before balancing,
+check that their summed costs fit the runner count times the unchanged deadline:
+weights cannot supply missing execution capacity.
+
+The current calibration covers observed verification of
+`adaptive-filter-selectivity`, `domain-snapshot`, `group-range-cache`,
+`range-first-aggregate`, `temporal-order-output`, `tenant-document-navigation`,
+`unselective-scalar-order-limit` and `unique-insert`. Maximum clean observed
+old/new process costs, projected to fourteen processes for these eight families
+and two for the other suites, total 5659.10 seconds across all 54 suites.
+Six 900-second slots cannot fit that envelope, even without orchestration.
+The seven-slot weights project a maximum of 836.87 seconds, leaving 63.13
+seconds for orchestration and further variation; the largest observed
+successful orchestration overhead was 12.53 seconds. These are estimates from
+observed cohorts, not a guarantee for future cost growth or additional suites
+entering verification. Preserve the full suite list and measurement protocol
+when rebalancing.
 
 Suites with identical top-level preparation inputs share one import. Snapshots
 are temporary and deleted on success or failure; they are not committed,

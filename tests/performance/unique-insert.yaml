@@ -9,7 +9,7 @@
 metadata:
   # Prioritize the seven fresh WAL-backed verification pairs over cheap suites.
   # This changes scheduling only; workloads and timing gates stay unchanged.
-  performance_shard_weight: 28
+  performance_shard_weight: 199
   version: "1.0"
   description: "Performance tests: unique key inserts"
   isolated: true
