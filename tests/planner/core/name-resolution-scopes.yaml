@@ -571,7 +571,7 @@ test_cases:
 
   - name: "SQL: Qualified derived star exports its own source"
     syntax: mysql
-    sql: "SELECT d.inner_only FROM (SELECT I.* FROM nr_inner i) d WHERE d.ID = 10"
+    sql: "SELECT d.inner_only FROM (SELECT i.* FROM nr_inner i) d WHERE d.ID = 10"
     expect: {rows: 1, data: [{inner_only: 201}]}
 
   - name: "SQL: Nested derived stars retain projection scope"
@@ -606,7 +606,7 @@ test_cases:
 
   - name: "PSQL: Qualified derived star exports its own source"
     syntax: postgresql
-    sql: "SELECT d.inner_only FROM (SELECT I.* FROM nr_inner i) d WHERE d.ID = 10"
+    sql: "SELECT d.inner_only FROM (SELECT i.* FROM nr_inner i) d WHERE d.ID = 10"
     expect: {rows: 1, data: [{inner_only: 201}]}
 
   - name: "PSQL: Nested derived stars retain projection scope"
@@ -641,7 +641,7 @@ test_cases:
 
   - name: "T-SQL: Qualified derived star exports its own source"
     syntax: tsql
-    sql: "SELECT d.inner_only FROM (SELECT I.* FROM nr_inner i) d WHERE d.ID = 10"
+    sql: "SELECT d.inner_only FROM (SELECT i.* FROM nr_inner i) d WHERE d.ID = 10"
     expect: {rows: 1, data: [{inner_only: 201}]}
 
   - name: "T-SQL: Nested derived stars retain projection scope"

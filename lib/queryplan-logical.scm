@@ -5672,14 +5672,46 @@ outputs: this normalization covers joined and derived projection values. */
 			(field_expr_by_title rest title ignorecase))
 		_ nil)))
 
+(define star_expr_alias (lambda (expr)
+	(match expr
+		((symbol get_column) tblvar _ "*" _) tblvar
+		((quote get_column) tblvar _ "*" _) tblvar
+		_ false)))
+
+(define star_expr? (lambda (expr)
+	(match expr
+		((symbol get_column) _ _ "*" _) true
+		((quote get_column) _ _ "*" _) true
+		_ false)))
+
+/* Star expansion must use each source's SQL-visible exported columns. A source
+may be a base table, table function, query block, or union; consulting only the
+base-table schema silently produces empty result metadata for derived.*. */
+(define expand_star_for_sources (lambda (sources requested_alias)
+	(merge (map (coalesceNil sources '()) (lambda (src)
+		(if (or (nil? requested_alias) (equal? requested_alias (source_alias src)))
+			(merge (map (binding_source_columns src) (lambda (col)
+				(list col (list (quote get_column) (source_alias src) false col false)))))
+			'()))))))
+
+(define expand_query_block_fields (lambda (sources fields)
+	(match (coalesceNil fields '())
+		(cons title (cons expr rest)) (begin
+			(define requested_alias (star_expr_alias expr))
+			(if (star_expr? expr)
+				(merge (list (expand_star_for_sources sources requested_alias) (expand_query_block_fields sources rest)))
+				(cons title (cons expr (expand_query_block_fields sources rest)))))
+		_ '())))
+
 /* Derived relations expose their projection, not every column of the base
-sources that replace them during logical flattening. Keep that SQL scope
-available while nested queries are decorrelated. */
+sources that replace them during logical flattening. Expand stars before the
+parent builds its binding catalog: the star marker is not an exported column.
+Keep that SQL scope available while nested queries are decorrelated. */
 (define logical_relation_fields (lambda (relation)
 	(begin
 		(define normalized (normalize_query_ast relation))
 		(if (query_block? normalized)
-			(qb_fields normalized)
+			(expand_query_block_fields (qb_sources normalized) (qb_fields normalized))
 			(if (union_block? normalized)
 				(match (union_branches normalized)
 					(cons branch _rest) (logical_relation_fields branch)
