@@ -424,7 +424,7 @@ Literal contents are untouched and all following statements keep the target. */
 		(error "import cannot select a second source database: " name)))))
 (define load_tsql (lambda (schema stream session) (begin
 	((sql_policy (session "username")) schema true false)
-	(tsql_execute_request schema (load stream) (tsql_import_scope schema session) nil 0 print (lambda args true)))))
+	(tsql_execute_request schema (load stream nil nil "bom") (tsql_import_scope schema session) nil 0 print (lambda args true)))))
 /* Source compilers capture definitions only. Execution receives the caller's
 statement owner, account, transaction session, arguments and output callbacks. */
 (define tsql_procedure_compile (lambda (source context) (begin

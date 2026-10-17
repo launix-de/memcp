@@ -211,6 +211,7 @@ func TestLoadTextEncoding(t *testing.T) {
 	}{
 		{"utf8", "41c3bcf09f9098", "bom", "Aü🐘", ""},
 		{"utf8-bom-retained", "efbbbf41", "bom", "\ufeffA", ""},
+		{"no-endian-guess", "41004200", "bom", "A\x00B\x00", ""},
 		{"utf16le", "fffe4100fc003dd818dc", "bom", "Aü🐘", ""},
 		{"utf16be", "feff004100fcd83ddc18", "bom", "Aü🐘", ""},
 		{"explicit-le", "4100fc003dd818dc", "utf-16le", "Aü🐘", ""},
@@ -349,4 +350,34 @@ func TestLoadGzipDecodeFailure(t *testing.T) {
 		}
 	}()
 	getLoad(dir)(scm.NewString("broken.sql.gz"), scm.NewFunc(func(...scm.Scmer) scm.Scmer { calls++; return scm.NewBool(true) }), scm.NewNil(), scm.NewString("bom"))
+}
+
+func TestLoadLegacyCalls(t *testing.T) {
+	for _, count := range []int{1, 2, 3} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			stream := &loadTestStream{Reader: strings.NewReader("A\nB")}
+			var got []string
+			args := []scm.Scmer{scm.NewAny(stream)}
+			if count > 1 {
+				args = append(args, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { got = append(got, a[0].String()); return scm.NewBool(true) }))
+			}
+			if count > 2 {
+				args = append(args, scm.NewString("\n"))
+			}
+			result := getLoad("")(args...)
+			want := []string{"A\nB"}
+			if count == 1 {
+				got = []string{result.String()}
+			}
+			if count == 3 {
+				want = []string{"A\n", "B"}
+			}
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Errorf("got %q, want %q", got, want)
+			}
+			if stream.closed {
+				t.Error("legacy load closed a borrowed reader")
+			}
+		})
+	}
 }
