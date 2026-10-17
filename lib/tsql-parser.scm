@@ -1252,23 +1252,6 @@ contracts are resolved for every value before this ordinary expression exists. *
 	(cons (quote sql_compile_expr) (cons (quote tsql_compile_choose)
 		(cons index values)))))
 
-/* Bind the shared logical tree for metadata only. No physical plan, compiled
-row evaluator or native mutation is constructed by this analysis path. The
-caller's policy remains explicit through every nested view expansion. */
-(define tsql_describe_sources (lambda (node) (match node
-	((symbol quote) _datum) node
-	(cons (symbol query-block) _tail) (begin
-		(map (qb_sources node) (lambda (source)
-			(if (and (source_is_base_table? source)
-				(nil? (table (source_schema source) false (source_relation source) false)))
-				(error "description table does not exist: " (source_relation source)) true)))
-		(map (cdr node) tsql_describe_sources)
-		node)
-	(cons _head _tail) (begin (map node tsql_describe_sources) node)
-	_ node)))
-(define tsql_describe_query (lambda (query policy planning_session)
-	(bind_query_names (tsql_bind_column_compilers
-		(tsql_describe_sources (sql_expand_views query policy)) (tsql_column_compiler planning_session)) '())))
 /* Explicit wire descriptors come from the existing SQL expression metadata,
 never from the first row. Unknown expression types stay text in this first slice. */
 /* Width/scale originate in declaration syntax, never in the first output row.
