@@ -1362,4 +1362,18 @@ test_cases:
   expect:
     error: true
     contains: fractional
+
+- name: CONVERT keeps temporal style 101 beside binary hex styles
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATETIME),101) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 03/15/2026
+- name: CONVERT keeps temporal style 121 beside binary hex styles
+  sql: SELECT CONVERT(VARCHAR(23),CAST(N'2026-03-15 12:13:14' AS DATETIME2(0)),121) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.000'
+
 cleanup: []
