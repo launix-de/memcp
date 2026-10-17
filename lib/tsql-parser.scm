@@ -535,13 +535,43 @@ recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. 
 	(map columns (lambda (name) (begin
 		(define declaration (tsql_target_column_declaration database table_name name planning_session))
 		(if (nil? declaration) (error "unknown INSERT column: " name) declaration)))))))
+/* English legacy calendar text uses the existing Unix date primitives. The
+bounded month directory is frontend syntax, not a second temporal carrier. */
+(define tsql_calendar_month_names '("Jan" "Feb" "Mar" "Apr" "May" "Jun" "Jul" "Aug" "Sep" "Oct" "Nov" "Dec"))
+(define tsql_calendar_month_output (lambda (value) (if (nil? value) nil (begin
+	(define hour (extract_date value "HOUR"))
+	(define clock (if (equal? (mod hour 12) 0) 12 (mod hour 12)))
+	(define day (extract_date value "DAY"))
+	(concat (nth tsql_calendar_month_names (- (extract_date value "MONTH") 1)) " "
+		(if (< day 10) " " "") day " " (format_date value "%Y") " "
+		(if (< clock 10) " " "") clock ":" (format_date value "%i") (if (< hour 12) "AM" "PM"))))))
+(define tsql_calendar_month_input (lambda (value) (if (nil? value) nil (begin
+	(define text (regexp_replace (toUpper (sql_trim value)) "\\s+" " "))
+	(if (regexp_test text "^[A-Z]{3} [0-9]{1,2} [0-9]{4} [0-9]{1,2}:[0-9]{2}(AM|PM)$")
+		true (error "invalid month-name calendar input"))
+	(match (split text " ")
+		(month day year clock) (begin
+			(define month_index (find (produceN 12) (lambda (index)
+				(equal? month (toUpper (nth tsql_calendar_month_names index)))) nil))
+			(if (nil? month_index) (error "invalid calendar month") true)
+			(define hour (tsql_parse_integer (substr clock 0 (- (strlen clock) 5))))
+			(if (and (>= hour 1) (<= hour 12)) true (error "invalid twelve-hour calendar clock"))
+			(define hour (+ (mod hour 12) (if (equal? (substr clock (- (strlen clock) 2)) "PM") 12 0)))
+			(define month (+ month_index 1))
+			(define date (concat year "-" (if (< month 10) "0" "") month "-"
+				(if (equal? (strlen day) 1) "0" "") day " "
+				(if (< hour 10) "0" "") hour ":" (substr clock (- (strlen clock) 4) 2) ":00"))
+			(define parsed (str_to_date date "%Y-%m-%d %H:%i:%s"))
+			(if (nil? parsed) (error "invalid calendar date") parsed)))))))
 (define tsql_text_compiler (lambda (length national fixed) (lambda (infos) (begin
 	(define info (car infos))
 	(define source (sql_info_type info))
 	(define formula (if (tsql_temporal_type? source)
-		(list format_date (tsql_calendar_difference_formula info)
-			(match source "DATE" "%Y-%m-%d" "TIME" "%H:%i:%s"
-				"DATETIME2" "%Y-%m-%d %H:%i:%s.000" _ "%Y-%m-%d %H:%i:%s"))
+		(if (has? '("DATETIME" "SMALLDATETIME") source)
+			(list (quote tsql_calendar_month_output) (tsql_calendar_difference_formula info))
+			(list format_date (tsql_calendar_difference_formula info)
+				(match source "DATE" "%Y-%m-%d" "TIME" "%H:%i:%s"
+					"DATETIME2" "%Y-%m-%d %H:%i:%s.000" _ "%Y-%m-%d %H:%i:%s")))
 		(sql_info_formula info)))
 	(if (and (plain_literal_expr? formula) (sql_numeric_type? (sql_info_type info))
 		(not (equal? length -1)) (> (strlen (string formula)) length))
@@ -600,11 +630,22 @@ syntax selects a source-dependent style through the separate factory below. */
 		formula (if (empty_list? dimensions) 30 (car dimensions)) (has? '("NVARCHAR" "NCHAR") type)) type nil)))))
 (define tsql_convert_text_compiler (lambda (style type dimensions) (lambda (infos) (begin
 	(define input (car infos))
-	(if (has? '("MONEY" "SMALLMONEY") (sql_info_type input))
+	(define source (sql_info_type input))
+	(define length (if (empty_list? dimensions) 30 (car dimensions)))
+	(define national (has? '("NVARCHAR" "NCHAR") type))
+	(define fixed (has? '("CHAR" "NCHAR") type))
+	(if (has? '("MONEY" "SMALLMONEY") source)
 		(sql_info (list (quote tsql_cast_money_text) (sql_info_formula input) style
-			(if (empty_list? dimensions) 30 (car dimensions))
-			(has? '("NVARCHAR" "NCHAR") type) (has? '("CHAR" "NCHAR") type)) type nil)
-		((tsql_styled_text_compiler (tsql_temporal_style_pattern style true) type dimensions) infos))))))
+			length national fixed) type nil)
+		(tsql_temporal_type? source) (if (equal? style 100)
+			(if (has? '("DATETIME" "SMALLDATETIME") source)
+				((tsql_text_compiler length national fixed) infos)
+				(error "month-name output style requires a legacy calendar declaration"))
+			(and (equal? source "TIME") (has? '(102 103 105 110 111) style))
+			(error "date-only output style requires a calendar date")
+			((tsql_styled_text_compiler (tsql_temporal_style_pattern style true) type dimensions) infos))
+		(tsql_binary_type? source) (error "unsupported binary-to-character style")
+		((tsql_text_compiler length national fixed) infos))))))
 (define tsql_convert_expr (lambda (value type dimensions style) (begin
 	(tsql_decl_dimensions type dimensions)
 	(match style
@@ -678,10 +719,11 @@ operators supply the values; the result SQL contract is always explicit INT. */
 Numeric dates count days from 1900; native DATE/DATETIME values are Unix values. */
 (define tsql_calendar_text (lambda (value) (if (nil? value) nil (begin
 	(define text (sql_trim value))
-	(define anchored (if (regexp_test text "^[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?$")
-		(concat "1900-01-01 " text) text))
-	(define parsed (parse_date (regexp_replace anchored "T" " ")))
-	(if (nil? parsed) (error "invalid calendar input") parsed)))))
+	(if (regexp_test text "^[A-Za-z]{3}\\s") (tsql_calendar_month_input text) (begin
+		(define anchored (if (regexp_test text "^[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?$")
+			(concat "1900-01-01 " text) text))
+		(define parsed (parse_date (regexp_replace anchored "T" " ")))
+		(if (nil? parsed) (error "invalid calendar input") parsed)))))))
 (define tsql_calendar_days (lambda (value) (if (nil? value) nil (begin
 	(if (and (>= value -53690) (< value 2958464)) true (error "numeric datetime conversion overflow"))
 	(define days (intdiv value 1))
@@ -756,6 +798,8 @@ than introducing another runtime datatype or precision-emulation layer. */
 		rounded (error "small datetime conversion overflow"))))))
 (define tsql_temporal_style_pattern (lambda (style output) (match style
 	1 (if output "%m/%d/%y" "%m/%d/%Y") 101 "%m/%d/%Y"
+	102 "%Y.%m.%d" 103 "%d/%m/%Y" 105 "%d-%m-%Y"
+	110 "%m-%d-%Y" 111 "%Y/%m/%d"
 	4 (if output "%d.%m.%y" "%d.%m.%Y") 104 "%d.%m.%Y"
 	12 (if output "%y%m%d" "%Y%m%d") 112 "%Y%m%d"
 	8 "%H:%i:%s" 108 "%H:%i:%s"
@@ -764,17 +808,18 @@ than introducing another runtime datatype or precision-emulation layer. */
 	21 (if output "%Y-%m-%d %H:%i:%s.000" "%Y-%m-%d %H:%i:%s")
 	121 (if output "%Y-%m-%d %H:%i:%s.000" "%Y-%m-%d %H:%i:%s")
 	_ (error "unsupported CONVERT style: " style))))
-(define tsql_temporal_style_text (lambda (value style) (if (nil? value) nil (begin
-	(define text (sql_trim value))
-	(define pattern (tsql_temporal_style_pattern style false))
-	(define text (if (has? '(1 12) style) (begin
-		(define offset (if (equal? style 12) 0 6))
-		(define year (substr text offset 2))
-		(if (regexp_test year "^[0-9]{2}$") true (error "invalid short calendar year"))
-		(concat (substr text 0 offset) (if (< (tsql_parse_integer year) 50) "20" "19")
-			year (substr text (+ offset 2)))) text))
-	(define value (if (has? '(21 121) style) (parse_date text) (str_to_date text pattern)))
-	(if (nil? value) (error "invalid styled calendar input") value)))))
+(define tsql_temporal_style_text (lambda (value style) (if (nil? value) nil
+	(equal? style 100) (tsql_calendar_month_input value) (begin
+		(define text (sql_trim value))
+		(define pattern (tsql_temporal_style_pattern style false))
+		(define text (if (has? '(1 12) style) (begin
+			(define offset (if (equal? style 12) 0 6))
+			(define year (substr text offset 2))
+			(if (regexp_test year "^[0-9]{2}$") true (error "invalid short calendar year"))
+			(concat (substr text 0 offset) (if (< (tsql_parse_integer year) 50) "20" "19")
+				year (substr text (+ offset 2)))) text))
+		(define value (if (has? '(21 121) style) (parse_date text) (str_to_date text pattern)))
+		(if (nil? value) (error "invalid styled calendar input") value)))))
 /* The current native carrier has whole seconds. Explicit conversions that
 would retain fractional clocks fail until a generic higher-precision carrier
 is available; accepting them here would silently lose the user's value. */
@@ -788,7 +833,7 @@ is available; accepting them here would silently lose the user's value. */
 		(sql_info (list tsql_calendar_cast_text (sql_info_formula input)) source (sql_info_collation input)) input))
 	(if (and (sql_numeric_type? source) (not (has? '("DATETIME" "SMALLDATETIME") target)))
 		(error "numeric input is not convertible to " target) true)
-	(if (and (not (equal? style 0)) (not (equal? style 4)))
+	(if (not (has? '(0 4 100) style))
 		(tsql_temporal_style_pattern style false) true)
 	(define formula (if (and (sql_text_type? source) (not (equal? style 0)))
 		(if (equal? style 4) (list tsql_calendar_shift_seconds (parse_date "1970-01-01")
