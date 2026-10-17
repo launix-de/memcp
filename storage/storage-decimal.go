@@ -952,7 +952,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		}
 		ctx.FreeDesc(&d48)
 		d50 = d49
-		ctx.EnsureDesc(&d50)
+		ctx.SyncDesc(&d50)
 		if d50.Loc != scm.LocImm && d50.Loc != scm.LocFlags {
 			panic("jit: fused If condition is neither scm.LocImm nor scm.LocFlags")
 		}
@@ -1088,7 +1088,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		}
 		ctx.FreeDesc(&d81)
 		d83 = d82
-		ctx.EnsureDesc(&d83)
+		ctx.SyncDesc(&d83)
 		if d83.Loc != scm.LocImm && d83.Loc != scm.LocFlags {
 			panic("jit: fused If condition is neither scm.LocImm nor scm.LocFlags")
 		}

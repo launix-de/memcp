@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
 # Minimal combined-operator SELECT lowering test
 
 metadata:
@@ -47,3 +48,14 @@ test_cases:
       data:
         - name: "two"
         - name: "one"
+
+  - name: "Logical operator inspection accepts empty and atomic operands"
+    scm: |
+      (and
+        (equal? (map (list nil (list) 42 "atom" (quote atom)) logical_op) (list nil nil nil nil nil))
+        (equal? (map (list '(query-block) '(group-stage) '(union-block) '(window-stage)) logical_op)
+          '(query-block group-stage union-block window-stage))
+        (not (group_stage? (list)))
+        (expression_equal? (canonical_aggregate_recipe '(lambda () 7)) '(lambda () 7)))
+    expect:
+      result: true

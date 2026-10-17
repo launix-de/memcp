@@ -412,7 +412,7 @@ query generation is the scope that releases them after execution. */
 (define make_stage_output_relation (lambda (stage_id)
 	(list (quote stage-output) stage_id)))
 
-(define logical_op (lambda (node) (if (and (list? node) (not (nil? node))) (car node) nil)))
+(define logical_op (lambda (node) (if (and (list? node) (not (empty_list? node))) (car node) nil)))
 (define query_block? (lambda (node) (equal? (logical_op node) (quote query-block))))
 (define group_stage? (lambda (node) (equal? (logical_op node) (quote group-stage))))
 (define union_block? (lambda (node) (equal? (logical_op node) (quote union-block))))
@@ -5672,14 +5672,51 @@ outputs: this normalization covers joined and derived projection values. */
 			(field_expr_by_title rest title ignorecase))
 		_ nil)))
 
+/* Star qualifiers carry the same exact/folded identifier contract as ordinary
+column references. Resolve that contract before a derived export catalog loses
+its original source scope; never infer it from the alias spelling. */
+(define star_expr_matches_source? (lambda (expr src)
+	(match expr
+		((symbol sql_compile_column) _compiler column) (star_expr_matches_source? column src)
+		((symbol get_column) alias ignorecase "*" _)
+		(or (nil? alias) (if ignorecase (equal?? alias (source_alias src)) (equal? alias (source_alias src))))
+		((quote get_column) alias ignorecase "*" _)
+		(or (nil? alias) (if ignorecase (equal?? alias (source_alias src)) (equal? alias (source_alias src))))
+		_ false)))
+
+(define star_expr? (lambda (expr)
+	(match expr
+		((symbol get_column) _ _ "*" _) true
+		((quote get_column) _ _ "*" _) true
+		_ false)))
+
+/* Star expansion must use each source's SQL-visible exported columns. A source
+may be a base table, table function, query block, or union; consulting only the
+base-table schema silently produces empty result metadata for derived.*. */
+(define expand_star_for_sources (lambda (sources expr)
+	(merge (map (coalesceNil sources '()) (lambda (src)
+		(if (star_expr_matches_source? expr src)
+			(merge (map (binding_source_columns src) (lambda (col)
+				(list col (list (quote get_column) (source_alias src) false col false)))))
+			'()))))))
+
+(define expand_query_block_fields (lambda (sources fields)
+	(match (coalesceNil fields '())
+		(cons title (cons expr rest)) (begin
+			(if (star_expr? expr)
+				(merge (list (expand_star_for_sources sources expr) (expand_query_block_fields sources rest)))
+				(cons title (cons expr (expand_query_block_fields sources rest)))))
+		_ '())))
+
 /* Derived relations expose their projection, not every column of the base
-sources that replace them during logical flattening. Keep that SQL scope
-available while nested queries are decorrelated. */
+sources that replace them during logical flattening. Expand stars before the
+parent builds its binding catalog: the star marker is not an exported column.
+Keep that SQL scope available while nested queries are decorrelated. */
 (define logical_relation_fields (lambda (relation)
 	(begin
 		(define normalized (normalize_query_ast relation))
 		(if (query_block? normalized)
-			(qb_fields normalized)
+			(expand_query_block_fields (qb_sources normalized) (qb_fields normalized))
 			(if (union_block? normalized)
 				(match (union_branches normalized)
 					(cons branch _rest) (logical_relation_fields branch)
@@ -5859,7 +5896,7 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 			Only compile-time annotations remain; executable lowering consumes them. */
 			(define bound (bind_query_expr_tail scopes arguments path all_strings 0))
 			(define sources (map (merge scopes) binding_entry_source))
-			(define info (compiler (map bound (lambda (argument) (sql_expr_info sources argument)))))
+			(define info ((sql_expression_compiler compiler) (map bound (lambda (argument) (sql_expr_info sources argument)))))
 			(define formula (sql_info_formula info))
 			/* A fixed frontend BOOLEAN operator already carries this contract.
 			Keep its predicate AST visible to the shared logical extractors. */
@@ -6841,7 +6878,7 @@ names in projections, predicates, and correlated subqueries. */
 		(make_query_block
 			(qb_schema inner)
 			(qb_sources inner)
-			(logical_union_projection_with_titles canonical_fields (qb_fields inner))
+			(logical_union_projection_with_titles canonical_fields (logical_relation_fields inner))
 			(qb_where inner)
 			(qb_group inner)
 			(qb_having inner)
@@ -6857,7 +6894,7 @@ names in projections, predicates, and correlated subqueries. */
 		(cons first_branch _rest) (begin
 			(define normalized (normalize_query_ast first_branch))
 			(if (query_block? normalized)
-				(qb_fields normalized)
+				(logical_relation_fields normalized)
 				(neumann_fail "untangle_query" "FROM UNION wrapper expects query-block branches")))
 		_ '())))
 

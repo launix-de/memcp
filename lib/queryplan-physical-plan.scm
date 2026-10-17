@@ -5741,37 +5741,6 @@ fix). */
 (define query_block_has_aggregates? (lambda (block)
 	(not (empty_list? (stage_aggregates_for_fields (qb_fields block))))))
 
-(define star_expr_alias (lambda (expr)
-	(match expr
-		((symbol get_column) tblvar _ "*" _) tblvar
-		((quote get_column) tblvar _ "*" _) tblvar
-		_ false)))
-
-(define star_expr? (lambda (expr)
-	(match expr
-		((symbol get_column) _ _ "*" _) true
-		((quote get_column) _ _ "*" _) true
-		_ false)))
-
-/* Star expansion must use each source's SQL-visible exported columns. A source
-may be a base table, table function, query block, or union; consulting only the
-base-table schema silently produces empty result metadata for derived.*. */
-(define expand_star_for_sources (lambda (sources requested_alias)
-	(merge (map (coalesceNil sources '()) (lambda (src)
-		(if (or (nil? requested_alias) (equal? requested_alias (source_alias src)))
-			(merge (map (binding_source_columns src) (lambda (col)
-				(list col (list (quote get_column) (source_alias src) false col false)))))
-			'()))))))
-
-(define expand_query_block_fields (lambda (sources fields)
-	(match (coalesceNil fields '())
-		(cons title (cons expr rest)) (begin
-			(define requested_alias (star_expr_alias expr))
-			(if (star_expr? expr)
-				(merge (list (expand_star_for_sources sources requested_alias) (expand_query_block_fields sources rest)))
-				(cons title (cons expr (expand_query_block_fields sources rest)))))
-		_ '())))
-
 /* SQL permits columns functionally dependent on a grouped primary key. Expand
 qualified stars before group lowering and carry the selected source columns as
 keys when that source's complete primary key is already grouped. Adding those
@@ -5782,11 +5751,7 @@ columns cannot change group cardinality because the primary key is unique. */
 			true
 			(if (string? title_or_expr)
 				false
-				(and (star_expr? title_or_expr)
-					(begin
-						(define requested_alias (star_expr_alias title_or_expr))
-						(or (nil? requested_alias)
-							(equal? requested_alias (source_alias src)))))))) false)))
+				(star_expr_matches_source? title_or_expr src)))) false)))
 
 (define source_primary_key_grouped? (lambda (block src)
 	(begin
@@ -11787,38 +11752,40 @@ physical decision and preserve its runtime recompile gate. */
 									stage_catalog (qb_facts block)))))
 ))))))
 
-(define zero_source_field_expr_key (lambda (expr)
-	(serialize expr)))
+(define zero_source_shared_field_symbol (lambda (ordinal)
+	(symbol (concat "__zero_source_field_" ordinal))))
 
-(define zero_source_shared_field_symbol (lambda (key)
-	(symbol (concat "__zero_source_field_" (fnv_hash key)))))
-
-/* A source-free SELECT evaluates its projection once. Logical stage interning
-can make hundreds of output aliases reference the same scalar marker; lower
-that marker once as well instead of rebuilding the same physical recipe for
-every title. */
+/* A source-free SELECT evaluates its projection once. Serialization omits
+closure captures, so it cannot establish expression identity. Collect exact
+AST entries (count, first field ordinal, representative) in the existing
+compile-local catalog, then freeze its lookup before constructing code.
+The ordinal names are lexical temporaries, never semantic cache identities. */
 (define lower_zero_source_result_expr (lambda (fields)
 	(begin
-		(define counts (reduce (extract_assoc fields (lambda (_title expr) expr))
-			(lambda (result expr)
-				(begin
-					(define key (zero_source_field_expr_key expr))
-					(set_assoc result key (+ (get_assoc result key 0) 1)))) '()))
-		(define repeated (filter (extract_assoc counts (lambda (key count)
-			(if (> count 1) key nil))) (lambda (key) (not (nil? key)))))
-		(define definitions (map repeated (lambda (key)
-			(begin
-				(define expr (reduce (extract_assoc fields (lambda (_title candidate) candidate))
-					(lambda (found candidate) (if (not (nil? found)) found
-						(if (equal? (zero_source_field_expr_key candidate) key) candidate nil))) nil))
-				(list (quote define) (zero_source_shared_field_symbol key)
-					(lower_scalar_marker_expr expr))))))
+		(define expressions (extract_assoc fields (lambda (_title expr) expr)))
+		(define catalog (make_structural_catalog (quote ast)))
+		(define representatives (reverse (reduce (produceN (count expressions))
+			(lambda (result ordinal) (begin
+				(define expr (nth expressions ordinal))
+				(define previous (catalog expr))
+				(if previous
+					(begin
+						(catalog expr (list (+ (car previous) 1) (cadr previous) (nth previous 2)))
+						result)
+					(begin
+						(catalog expr (list 1 ordinal expr))
+						(cons expr result))))) (list))))
+		(define lookup (catalog))
+		(define repeated (filter representatives (lambda (expr) (> (car (lookup expr)) 1))))
+		(define definitions (map repeated (lambda (expr)
+			(match (lookup expr) '(_count ordinal representative)
+				(list (quote define) (zero_source_shared_field_symbol ordinal)
+					(lower_scalar_marker_expr representative))))))
 		(define row (list (quote resultrow) (cons (quote list)
 			(map_assoc fields (lambda (_title expr)
-				(begin
-					(define key (zero_source_field_expr_key expr))
-					(if (> (get_assoc counts key 0) 1)
-						(zero_source_shared_field_symbol key)
+				(match (lookup expr) '(count ordinal _representative)
+					(if (> count 1)
+						(zero_source_shared_field_symbol ordinal)
 						(lower_scalar_marker_expr expr))))))))
 		(if (empty_list? definitions) row
 			(cons (quote !begin) (append definitions row))))))
