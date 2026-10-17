@@ -514,17 +514,17 @@ runtime errors are never caught and classified by their message text. */
 	(if (if quoting (has? '(1 2) (count infos)) (equal? (count infos) 2)) true
 		(error name " has an invalid argument count"))
 	(define text_info (car infos))
-	(if (tsql_binary_type? (sql_info_type text_info))
-		(error name " binary input conversion is not implemented") true)
 	/* Reuse the existing type-directed text compiler, including numeric/bit and
-	calendar spelling. The callback reads declarations, never SCM value tags. */
-	(define text (sql_info_formula ((tsql_text_compiler -1 true false) (list text_info))))
+	calendar spelling. Known text retains its native handle, allowing QUOTENAME
+	to reject oversized compressed input without decoding it. */
+	(define compile_text (lambda (info) (begin
+		(define type (sql_info_type info))
+		(if (tsql_binary_type? type) (error name " binary input conversion is not implemented")
+			(or (sql_text_type? type) (equal? type "NULL")) (sql_info_formula info)
+			(sql_info_formula ((tsql_text_compiler -1 true false) (list info)))))))
+	(define text (compile_text text_info))
 	(define other (if (equal? (count infos) 1) "["
-		quoting (begin
-			(define info (cadr infos))
-			(if (tsql_binary_type? (sql_info_type info))
-				(error name " binary delimiter conversion is not implemented") true)
-			(sql_info_formula ((tsql_text_compiler -1 true false) (list info))))
+		quoting (compile_text (cadr infos))
 		(sql_type_formula '() (tsql_cast_expr
 			(list (quote sql_type_expr) (sql_info_formula (cadr infos)) (sql_info_type (cadr infos)) (sql_info_collation (cadr infos)))
 			"INT" '()))))

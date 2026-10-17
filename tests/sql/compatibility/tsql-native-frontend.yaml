@@ -3171,7 +3171,13 @@ test_cases:
       result: true
 
   - name: Identifier functions resolve national column contracts
-    sql: SELECT id,QUOTENAME(note) AS value,PARSENAME(note,1) AS part FROM tsql_setup_memo ORDER BY id
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_identifier_values
+    - sql: CREATE TABLE tsql_identifier_values(id INT PRIMARY KEY,note NVARCHAR(200))
+    - sql: INSERT INTO tsql_identifier_values VALUES(1,N'pending'),(2,NULL),(3,N'pending')
+    cleanup:
+    - sql: DROP TABLE tsql_identifier_values
+    sql: SELECT id,QUOTENAME(note) AS value,PARSENAME(note,1) AS part FROM tsql_identifier_values ORDER BY id
     expect:
       rows: 3
       data:
@@ -3185,13 +3191,25 @@ test_cases:
         value: '[pending]'
         part: pending
   - name: Identifier functions retain SQL types through derived projections
-    sql: SELECT QUOTENAME(note) AS value FROM (SELECT note FROM tsql_setup_memo WHERE id=1) q
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_identifier_values
+    - sql: CREATE TABLE tsql_identifier_values(id INT PRIMARY KEY,note NVARCHAR(200))
+    - sql: INSERT INTO tsql_identifier_values VALUES(1,N'pending'),(2,NULL),(3,N'pending')
+    cleanup:
+    - sql: DROP TABLE tsql_identifier_values
+    sql: SELECT QUOTENAME(note) AS value FROM (SELECT note FROM tsql_identifier_values WHERE id=1) q
     expect:
       rows: 1
       data:
       - value: '[pending]'
   - name: Identifier functions compose with native grouping
-    sql: SELECT QUOTENAME(note) AS value,COUNT(*) AS n FROM tsql_setup_memo GROUP BY note ORDER BY value
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_identifier_values
+    - sql: CREATE TABLE tsql_identifier_values(id INT PRIMARY KEY,note NVARCHAR(200))
+    - sql: INSERT INTO tsql_identifier_values VALUES(1,N'pending'),(2,NULL),(3,N'pending')
+    cleanup:
+    - sql: DROP TABLE tsql_identifier_values
+    sql: SELECT QUOTENAME(note) AS value,COUNT(*) AS n FROM tsql_identifier_values GROUP BY note ORDER BY value
     expect:
       rows: 2
       data:
@@ -3200,7 +3218,13 @@ test_cases:
       - value: '[pending]'
         n: 2
   - name: Identifier functions compose with native scalar aggregates
-    sql: SELECT QUOTENAME(MAX(note)) AS value FROM tsql_setup_memo
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_identifier_values
+    - sql: CREATE TABLE tsql_identifier_values(id INT PRIMARY KEY,note NVARCHAR(200))
+    - sql: INSERT INTO tsql_identifier_values VALUES(1,N'pending'),(2,NULL),(3,N'pending')
+    cleanup:
+    - sql: DROP TABLE tsql_identifier_values
+    sql: SELECT QUOTENAME(MAX(note)) AS value FROM tsql_identifier_values
     expect:
       rows: 1
       data:
