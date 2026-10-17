@@ -11796,14 +11796,16 @@ physical decision and preserve its runtime recompile gate. */
 /* A source-free SELECT evaluates its projection once. Logical stage interning
 can make hundreds of output aliases reference the same scalar marker; lower
 that marker once as well instead of rebuilding the same physical recipe for
-every title. */
+every title. Known volatile calls retain one evaluation per occurrence, using
+exactly the same compile-time guard as scalar-probe hoisting. */
 (define lower_zero_source_result_expr (lambda (fields)
 	(begin
 		(define counts (reduce (extract_assoc fields (lambda (_title expr) expr))
 			(lambda (result expr)
-				(begin
-					(define key (zero_source_field_expr_key expr))
-					(set_assoc result key (+ (get_assoc result key 0) 1)))) '()))
+				(if (scalar_access_probe_expr_volatile? expr) result
+					(begin
+						(define key (zero_source_field_expr_key expr))
+						(set_assoc result key (+ (get_assoc result key 0) 1))))) '()))
 		(define repeated (filter (extract_assoc counts (lambda (key count)
 			(if (> count 1) key nil))) (lambda (key) (not (nil? key)))))
 		(define definitions (map repeated (lambda (key)
@@ -11817,7 +11819,8 @@ every title. */
 			(map_assoc fields (lambda (_title expr)
 				(begin
 					(define key (zero_source_field_expr_key expr))
-					(if (> (get_assoc counts key 0) 1)
+					(if (and (not (scalar_access_probe_expr_volatile? expr))
+						(> (get_assoc counts key 0) 1))
 						(zero_source_shared_field_symbol key)
 						(lower_scalar_marker_expr expr))))))))
 		(if (empty_list? definitions) row

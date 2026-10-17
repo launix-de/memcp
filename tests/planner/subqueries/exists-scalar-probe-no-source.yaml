@@ -130,6 +130,101 @@ test_cases:
       data:
         - has_access: 1
 
+  - name: Source-free UUID occurrences stay independent in executable IR
+    scm: |
+      (begin
+        (define expression (list (quote uuid)))
+        (expression_equal?
+          (lower_zero_source_result_expr (list "first" expression "second" expression))
+          (list (quote resultrow) (list (quote list) "first" expression "second" expression))))
+    expect:
+      result: true
+
+  - name: Source-free nested UUID occurrences stay independent in executable IR
+    scm: |
+      (begin
+        (define expression (list (quote concat) "token:" (list (quote uuid))))
+        (expression_equal?
+          (lower_zero_source_result_expr (list "first" expression "second" expression))
+          (list (quote resultrow) (list (quote list) "first" expression "second" expression))))
+    expect:
+      result: true
+
+  - name: Source-free projection reuses the existing volatile-call guard
+    scm: |
+      (reduce (list (list (quote sql_rand)) (list (quote randomBytes) 8))
+        (lambda (valid expression)
+          (and valid (expression_equal?
+            (lower_zero_source_result_expr (list "first" expression "second" expression))
+            (list (quote resultrow) (list (quote list) "first" expression "second" expression))))) true)
+    expect:
+      result: true
+
+  - name: Source-free UUID projection executes each occurrence independently
+    scm: |
+      (begin
+        (define expression (list (quote uuid)))
+        (define plan (lower_zero_source_result_expr (list "first" expression "second" expression)))
+        (define output (newsession))
+        ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
+          (lambda (row) (output "row" row)))
+        (define row (output "row"))
+        (and (regexp_test (row "first") "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+          (regexp_test (row "second") "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+          (not (equal? (row "first") (row "second")))))
+    expect:
+      result: true
+
+  - name: Reused source-free UUID plan evaluates fresh values on every invocation
+    scm: |
+      (begin
+        (define expression (list (quote uuid)))
+        (define plan (lower_zero_source_result_expr (list "first" expression "second" expression)))
+        (define compiled (jit (close_procedure
+          (eval (optimize (list (quote lambda) (list (quote resultrow)) plan))))))
+        (define first (newsession))
+        (define second (newsession))
+        (compiled (lambda (row) (first "row" row)))
+        (compiled (lambda (row) (second "row" row)))
+        (define values (list ((first "row") "first") ((first "row") "second")
+          ((second "row") "first") ((second "row") "second")))
+        (equal? (count (merge_unique (list values))) 4))
+    expect:
+      result: true
+
+  - name: Source-free opaque expression retains its existing shared evaluation
+    scm: |
+      (begin
+        (define calls (newsession))
+        (define value (lambda () (begin (calls "count" (+ 1 (coalesceNil (calls "count") 0))) 7)))
+        (define expression (list value))
+        (define plan (lower_zero_source_result_expr (list "first" expression "second" expression)))
+        (define output (newsession))
+        ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
+          (lambda (row) (output "row" row)))
+        (and (equal? ((output "row") "first") 7) (equal? ((output "row") "second") 7)
+          (equal? (calls "count") 1)))
+    expect:
+      result: true
+
+  - name: Source-free shared opaque values coexist with independent UUID calls
+    scm: |
+      (begin
+        (define calls (newsession))
+        (define value (lambda () (begin (calls "count" (+ 1 (coalesceNil (calls "count") 0))) 7)))
+        (define stable (list value))
+        (define volatile (list (quote uuid)))
+        (define plan (lower_zero_source_result_expr
+          (list "first" stable "second" stable "first_id" volatile "second_id" volatile)))
+        (define output (newsession))
+        ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
+          (lambda (row) (output "row" row)))
+        (define row (output "row"))
+        (and (equal? (row "first") 7) (equal? (row "second") 7) (equal? (calls "count") 1)
+          (not (equal? (row "first_id") (row "second_id")))))
+    expect:
+      result: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS espn_share"
   - sql: "DROP TABLE IF EXISTS espn_parent"
