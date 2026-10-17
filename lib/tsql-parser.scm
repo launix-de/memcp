@@ -955,8 +955,10 @@ only handle values; no SCM carrier selects a SQL type or character encoding. */
 handles until sysname bounds have been checked. */
 (define tsql_identifier_text (lambda (info) (begin
 	(define type (sql_info_type info))
-	(if (or (sql_text_type? type) (equal? type "NULL")) (sql_info_formula info)
-		(tsql_binary_type? type) (error "text construction input conversion is not implemented for " type)
+	/* The shared text family includes byte strings. Identifier input must
+	reject those before admitting character handles without conversion. */
+	(if (tsql_binary_type? type) (error "text construction input conversion is not implemented for " type)
+		(or (sql_text_type? type) (equal? type "NULL")) (sql_info_formula info)
 		(sql_info_formula ((tsql_text_compiler -1 true false) (list info)))))))
 (define tsql_compile_quotename (lambda (infos)
 	(sql_info (cons (quote tsql_quote_name) (map infos tsql_identifier_text))
