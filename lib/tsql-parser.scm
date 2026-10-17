@@ -1165,30 +1165,75 @@ dimensions are metadata only and are absent from the executable plan. */
 						_ nil)))
 			_ nil))
 	_ nil)))
+/* Provenance is a declaration fact. Computed values never inherit a base
+column's editability, and an outer source remains nullable after binding. */
+(define tsql_result_origin (lambda (sources info) (match (sql_info_formula info)
+	((symbol get_column) alias alias_ic name name_ic) (begin
+		(define source (source_for_alias sources (if (empty_list? sources) nil (source_alias (car sources))) alias alias_ic))
+		(if (and source (source_is_base_table? source)) (begin
+			(define handle (table (source_schema source) (source_relation source)))
+			(define column (if handle (show handle "column" name name_ic) nil))
+			(if column (list source column) nil)) nil))
+	_ nil)))
+(define tsql_result_flags (lambda (origin editable) (if (nil? origin) '(1 nil) (begin
+	(define source (car origin))
+	(define column (cadr origin))
+	(define identity (equal? (column "Extra") "auto_increment"))
+	(define version (equal?? (column "RawType") "ROWVERSION"))
+	(list (+ (if (or (source_outer? source) (column "Null")) 1 0)
+		(if (and editable (not (or identity version))) 4 0) (if identity 16 0))
+		(if version 80 0))))))
+/* Wire shapes come only from a declared SQL contract, including when no
+row or supplied parameter value exists. */
+(define tsql_wire_contract (lambda (type dimensions) (begin
+	(define numeric (and (has? '("DECIMAL" "NUMERIC") type) (>= (count dimensions) 2)))
+	(define kind (if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type) 38
+		numeric 108 (tsql_binary_type? type) 165
+		(has? '("FLOAT" "DOUBLE" "REAL" "DECIMAL" "NUMERIC") type) 109
+		(has? '("BOOLEAN" "BOOL" "BIT") type) 104 231))
+	(define precision (if numeric (car dimensions) 0))
+	(define scale (if numeric (cadr dimensions) 0))
+	(define size (match kind
+		108 (if (<= precision 9) 5 (<= precision 19) 9 (<= precision 28) 13 17)
+		165 (if (equal? type "ROWVERSION") 8
+			(and (not (empty_list? dimensions)) (> (car dimensions) 0)) (car dimensions) 65535)
+		231 (if (and (has? '("NVARCHAR" "NCHAR") type) (not (empty_list? dimensions)))
+			(if (equal? (car dimensions) -1) 65535 (* 2 (car dimensions))) 8000)
+		104 1
+		_ (match type "TINYINT" 1 "SMALLINT" 2 "INT" 4 "INTEGER" 4 _ 8)))
+	(list "kind" kind "size" size "precision" precision "scale" scale))))
 (define tsql_result_columns (lambda (query parameters) (match query
 	((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
-	(extract_assoc (expand_query_block_fields sources fields) (lambda (name expression) (begin
-		(define info (sql_expr_info sources expression))
-		(define type (sql_info_type info))
-		(define dimensions (coalesceNil (tsql_result_dimensions sources expression parameters)
-			(tsql_result_dimensions sources (sql_info_formula info) parameters) '()))
-		(define numeric (and (has? '("DECIMAL" "NUMERIC") type) (>= (count dimensions) 2)))
-		(define kind (if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type) 38
-			numeric 108 (tsql_binary_type? type) 165
-			(has? '("FLOAT" "DOUBLE" "REAL" "DECIMAL" "NUMERIC") type) 109
-			(has? '("BOOLEAN" "BOOL" "BIT") type) 104 231))
-		(define precision (if numeric (car dimensions) 0))
-		(define scale (if numeric (cadr dimensions) 0))
-		(define size (match kind
-			108 (if (<= precision 9) 5 (<= precision 19) 9 (<= precision 28) 13 17)
-			165 (if (equal? type "ROWVERSION") 8
-				(and (not (empty_list? dimensions)) (> (car dimensions) 0)) (car dimensions) 65535)
-			231 (if (and (has? '("NVARCHAR" "NCHAR") type) (not (empty_list? dimensions)))
-				(if (equal? (car dimensions) -1) 65535 (* 2 (car dimensions))) 8000)
-			104 1
-			_ (match type "TINYINT" 1 "SMALLINT" 2 "INT" 4 "INTEGER" 4 _ 8)))
-		(list "name" name "kind" kind "size" size "precision" precision "scale" scale "flags" 1 "sql_type" type))))
-	((symbol union-block) _mode branches _order _limit _offset _facts) (tsql_result_columns (car branches) parameters)
+	(begin
+		(define projected (expand_query_block_fields sources fields))
+		(define entries (extract_assoc projected (lambda (name expression) (begin
+			(define info (sql_expr_info sources expression))
+			(list name expression info (tsql_result_origin sources info))))))
+		(define origins (map entries (lambda (entry) (nth entry 3))))
+		(define keys (if (and (equal? (count sources) 1) (source_is_base_table? (car sources)))
+			(source_primary_key_columns (car sources)) '()))
+		(define direct_names (map (filter origins (lambda (origin) (not (nil? origin))))
+			(lambda (origin) ((cadr origin) "Field"))))
+		(define editable (and (equal? (count sources) 1) (not (empty_list? keys))
+			(empty_list? (coalesceNil _group '())) (empty_list? (coalesceNil _stages '()))
+			(not (source_outer? (car sources)))
+			(reduce keys (lambda (valid key) (and valid (has? direct_names key))) true)))
+		(map entries (lambda (entry) (begin
+			(define name (car entry))
+			(define expression (nth entry 1))
+			(define info (nth entry 2))
+			(define origin (nth entry 3))
+			(define flags (tsql_result_flags origin editable))
+			(define type (sql_info_type info))
+			(define dimensions (coalesceNil (tsql_result_dimensions sources expression parameters)
+				(tsql_result_dimensions sources (sql_info_formula info) parameters) '()))
+			(define wire (tsql_wire_contract type dimensions))
+			(merge wire (list "name" name "flags" (car flags) "user_type" (coalesceNil (cadr flags) 0) "sql_type" type)
+				(if origin (list "source" (list (source_schema (car origin)) "dbo"
+					(source_relation (car origin)) ((cadr origin) "Field"))) '()))))))
+	((symbol union-block) _mode branches _order _limit _offset _facts)
+	(map (tsql_result_columns (car branches) parameters) (lambda (column)
+		(set_assoc (set_assoc (set_assoc column "flags" 1) "source" nil) "user_type" 0)))
 	_ (error "unsupported T-SQL result metadata shape"))))
 /* Format only the external result edge. Inner projections, ordering and native
 storage keep their Unix values. The declaration selects each formatter while
@@ -1276,11 +1321,14 @@ a separator is recognized only on a physical line containing no SQL text. */
 	(define describe (frontend_options "__tsql_describe"))
 	(define script_syntax (frontend_options "__tsql_script_syntax"))
 	(define expression_only (frontend_options "__tsql_expression_only"))
+	(define analyze_parameters (frontend_options "__tsql_parameter_analysis"))
 	(define parameters (coalesceNil (frontend_options "__tsql_parameter_declarations") (list)))
-	(define parameter_expression (lambda (name) (begin
+	(define parameter_expression (lambda (name spelling) (begin
 		(define name (toLower name))
 		(define declaration (filter parameters (lambda (item) (equal? (car item) name))))
 		(if script_syntax (list (quote tsql_batch_variable) name)
+			(and analyze_parameters (empty_list? declaration))
+			(list (quote sql_type_expr) (list (quote tsql_unbound_parameter) name spelling) "any" nil)
 			(empty_list? declaration) (error "undeclared T-SQL parameter: @" name)
 			(list (quote sql_type_expr) (list (quote session) (concat "__tsql_parameter:" name))
 				(car (cadr (car declaration))) nil)))))
@@ -1493,7 +1541,8 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(concat "__tsql_error_" name)) (if (equal? name "message") "NVARCHAR" "INT") nil))
 		(parser '((atom "@@IDENTITY" true)) (tsql_identity_expr false))
 
-		(parser (define var tsql_variable_name) (parameter_expression var))
+		(parser (define token (capture tsql_variable_name))
+			(parameter_expression (nth token 1) (substr (car token) 1)))
 
 		(parser '((atom "LEFT" true) "(" (define s tsql_expression) "," (define n tsql_expression) ")") '((quote sql_substr) s 1 n))
 
@@ -1908,9 +1957,12 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define sources (merge (coalesceNil from '())))
 			(define target (tsql_write_source target sources))
 			(if policy (policy (source_schema target) (source_relation target) true) true)
-			(build_dml_plan (source_schema target) (source_relation target) (source_alias target)
-				(tsql_write_sources target sources) (tsql_update_values target cols)
-				(coalesceNil condition true) nil limit nil planning_session tx)))))
+			(define values (tsql_update_values target cols))
+			(if describe (tsql_describe_dml (source_schema target) (tsql_write_sources target sources)
+				values (coalesceNil condition true))
+				(build_dml_plan (source_schema target) (source_relation target) (source_alias target)
+					(tsql_write_sources target sources) values
+					(coalesceNil condition true) nil limit nil planning_session tx))))))
 	(define tsql_delete (parser '(
 		(atom "DELETE" true)
 		(define limit tsql_write_limit)
@@ -1923,9 +1975,11 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define sources (merge (coalesceNil from '())))
 			(define target (tsql_write_source target sources))
 			(if policy (policy (source_schema target) (source_relation target) true) true)
-			(build_dml_plan (source_schema target) (source_relation target) (source_alias target)
-				(tsql_write_sources target sources) nil (coalesceNil condition true)
-				nil limit nil planning_session tx)))))
+			(if describe (tsql_describe_dml (source_schema target) (tsql_write_sources target sources)
+				(list "__prepare" (list (quote sql_type_expr) 1 "INT" nil)) (coalesceNil condition true))
+				(build_dml_plan (source_schema target) (source_relation target) (source_alias target)
+					(tsql_write_sources target sources) nil (coalesceNil condition true)
+					nil limit nil planning_session tx))))))
 
 	(define tsql_truncate (parser '(
 		(atom "TRUNCATE" true) (? (atom "TABLE" true))
@@ -1984,13 +2038,32 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define value tsql_expression4)
 		) (list op value)) empty true))
 	) (reduce terms tsql_fold_additive a)))
+	(define tsql_describe_sources (lambda (node) (match node
+		((symbol quote) _datum) node
+		(cons (symbol query-block) _tail) (begin
+			(map (qb_sources node) (lambda (source)
+				(if (and (source_is_base_table? source)
+					(nil? (table (source_schema source) (source_relation source))))
+					(error "description table does not exist: " (source_relation source)) true)))
+			(map (cdr node) tsql_describe_sources)
+			node)
+		(cons _head _tail) (begin (map node tsql_describe_sources) node)
+		_ node)))
+	(define tsql_describe_query (lambda (query)
+		(bind_query_names (tsql_describe_sources (sql_expand_views query policy)) '())))
+	(define tsql_describe_dml (lambda (database sources values condition) (begin
+		(define bound (tsql_describe_query (make_query_block database sources values condition
+			nil nil nil nil nil '() '() '())))
+		(define fields (tsql_result_columns bound parameters))
+		(if (list? fields) (list (quote quote) '()) (error "invalid prepared mutation contract")))))
 	(define tsql_build_select_plan (lambda (query) (begin
-		(define expanded (sql_expand_views query policy))
+		(define expanded (if describe (tsql_describe_query query) (sql_expand_views query policy)))
 		(define descriptors (tsql_result_columns expanded parameters))
-		(if describe (list (quote quote) descriptors) (list (quote !begin)
-			(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded))
-				(list (quote quote) descriptors))
-			(tsql_result_output_plan (build_queryplan_term expanded planning_session tx) descriptors))))))
+		(if analyze_parameters (list (quote quote) expanded)
+			describe (list (quote quote) descriptors) (list (quote !begin)
+				(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded))
+					(list (quote quote) descriptors))
+				(tsql_result_output_plan (build_queryplan_term expanded planning_session tx) descriptors))))))
 	/* INSERT SELECT consumes the existing planner's result stream and the native
 	insert operator. Identity allocation and constraints remain native. */
 	(define tsql_insert_select_plan (lambda (database tbl columns query) (begin
@@ -2003,38 +2076,44 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(define expanded (sql_expand_views query policy))
 		(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
 			(error "INSERT column count does not match SELECT column count"))
-		(define native_plan (build_queryplan_term expanded planning_session tx))
-		(define identity (find (get_schema database tbl)
-			(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
-		/* AND propagates SQL NULL and evaluates later terms. Missing declaration
-		metadata needs an explicit presence branch before reading its fields. */
-		(define generated (if (nil? identity) false (not (has? columns (identity "Field")))))
-		/* Completion is once per statement, outside the parallel row sink. */
-		(define plan (list (quote begin)
-			(list (quote define) (quote __tsql_stream_result) native_plan)
-			(if generated
-				(list (quote if) (list (quote >) (quote __tsql_stream_result) 0)
-					(list (quote tsql_unresolved_identity) (quote session) "streaming INSERT")
-					(list (quote session) "__tsql_identity" nil))
-				(if identity
-					(list (quote tsql_unresolved_identity) (quote session) "explicit streaming IDENTITY insertion")
-					(list (quote session) "__tsql_identity" nil)))
-			(quote __tsql_stream_result)))
-		(define ordered (or
-			(and (query_block? query) (not (empty_list? (coalesceNil (qb_order query) '()))))
-			(and (union_block? query) (not (empty_list? (coalesceNil (union_order query) '()))))))
-		(if ordered
-			(list (quote begin)
-				(list (quote set) (quote __insert_count) (list (quote newsession)))
-				(list (quote __insert_count) "count" 0)
-				(list (quote set) (quote resultrow) (list (quote lambda) (list (quote item))
+		(if describe (begin
+			(define checked (tsql_describe_query expanded))
+			/* Bind the source contract before accepting a pure prepared mutation. */
+			(define checked_fields (tsql_result_columns checked parameters))
+			(if (equal? (count checked_fields) (count declarations)) (list (quote quote) '())
+				(error "invalid prepared INSERT source"))) (begin
+				(define native_plan (build_queryplan_term expanded planning_session tx))
+				(define identity (find (get_schema database tbl)
+					(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
+				/* AND propagates SQL NULL and evaluates later terms. Missing declaration
+				metadata needs an explicit presence branch before reading its fields. */
+				(define generated (if (nil? identity) false (not (has? columns (identity "Field")))))
+				/* Completion is once per statement, outside the parallel row sink. */
+				(define plan (list (quote begin)
+					(list (quote define) (quote __tsql_stream_result) native_plan)
+					(if generated
+						(list (quote if) (list (quote >) (quote __tsql_stream_result) 0)
+							(list (quote tsql_unresolved_identity) (quote session) "streaming INSERT")
+							(list (quote session) "__tsql_identity" nil))
+						(if identity
+							(list (quote tsql_unresolved_identity) (quote session) "explicit streaming IDENTITY insertion")
+							(list (quote session) "__tsql_identity" nil)))
+					(quote __tsql_stream_result)))
+				(define ordered (or
+					(and (query_block? query) (not (empty_list? (coalesceNil (qb_order query) '()))))
+					(and (union_block? query) (not (empty_list? (coalesceNil (union_order query) '()))))))
+				(if ordered
 					(list (quote begin)
-						(list (quote set) (quote __inserted) insert_expr)
-						(list (quote __insert_count) "count" (list (quote +) (list (quote __insert_count) "count") (quote __inserted)))
-						(quote __inserted))))
-				plan (list (quote __insert_count) "count"))
-			(list (quote begin)
-				(list (quote set) (quote resultrow) (list (quote lambda) (list (quote item)) insert_expr)) plan)))))
+						(list (quote set) (quote __insert_count) (list (quote newsession)))
+						(list (quote __insert_count) "count" 0)
+						(list (quote set) (quote resultrow) (list (quote lambda) (list (quote item))
+							(list (quote begin)
+								(list (quote set) (quote __inserted) insert_expr)
+								(list (quote __insert_count) "count" (list (quote +) (list (quote __insert_count) "count") (quote __inserted)))
+								(quote __inserted))))
+						plan (list (quote __insert_count) "count"))
+					(list (quote begin)
+						(list (quote set) (quote resultrow) (list (quote lambda) (list (quote item)) insert_expr)) plan)))))))
 	/* INSERT TOP constrains the existing source query's final window. It does
 	not count, materialize, or reserve IDs for rows which the planner will skip. */
 	(define tsql_insert_limit_query (lambda (query limit)
@@ -2066,9 +2145,15 @@ a separator is recognized only on a physical line containing no SQL text. */
 					(tsql_assignment_value (nth row i) (nth declarations i)))))))
 			(if (reduce rows (lambda (found row) (or found (tsql_dataset_contains_inner_select row))) false)
 				(tsql_insert_select_plan database tbl columns (tsql_values_to_select_query database columns rows))
-				(tsql_native_insert_expr database tbl columns (sql_insert_values_expr (map rows (lambda (row) (map (produceN (count columns))
-					(lambda (i) (sql_type_formula (list) (tsql_assignment_expr
-						(nth row i) (nth declarations i)))))))) (count rows) true))
+				(begin
+					(define typed_rows (map rows (lambda (row) (map (produceN (count columns))
+						(lambda (i) (tsql_assignment_expr (nth row i) (nth declarations i)))))))
+					(if describe (tsql_describe_dml database '()
+						(merge (map typed_rows (lambda (row)
+							(merge (map (produceN (count columns)) (lambda (i)
+								(list (nth columns i) (nth row i)))))))) true)
+						(tsql_native_insert_expr database tbl columns (sql_insert_values_expr
+							(map typed_rows (lambda (row) (map row (lambda (value) (sql_type_formula '() value)))))) (count rows) true))))
 	))))
 	/* An all-default row is the native empty-column INSERT. Defaults and
 	generated values are filled by the same operator as ordinary insertion. */
@@ -2079,9 +2164,12 @@ a separator is recognized only on a physical line containing no SQL text. */
 	) (lambda () (begin
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
-			(tsql_native_insert_expr database tbl '()
-				(if (equal?? limit 0) '('list) '('list '(list)))
-				(if (equal?? limit 0) 0 1) true)))))
+			(if describe (begin
+				(get_schema database tbl)
+				(list (quote quote) '()))
+				(tsql_native_insert_expr database tbl '()
+					(if (equal?? limit 0) '('list) '('list '(list)))
+					(if (equal?? limit 0) 0 1) true))))))
 	(define tsql_insert_select (parser '(
 		(atom "INSERT" true) (define limit tsql_write_limit) (? (atom "INTO" true))
 		(? (define schema2 tsql_schema_identifier) ".") (define tbl tsql_identifier)
@@ -2305,7 +2393,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(lambda () (list (quote session) "__tsql_nocount" enabled)))
 		(parser '((atom "SET" true) (atom "DATEFIRST" true)
 			(define first (or tsql_int
-				(parser (define name tsql_variable_name) (parameter_expression name)))))
+				(parser (define name tsql_variable_name) (parameter_expression name name)))))
 			(lambda () (list (quote session) "__tsql_datefirst" (list tsql_datefirst_value (sql_type_formula '() first)))))
 		/* These ON modes are the frontend's fixed comparison and lexical rules.
 		Accept the declarations without adding state or branches to row execution;
@@ -2323,8 +2411,11 @@ a separator is recognized only on a physical line containing no SQL text. */
 	)))
 
 
-	(define command_parser (if describe
-		(parser (define query tsql_select) (lambda () (tsql_build_select_plan query))) (parser (or p (parser empty (lambda () ""))))))
+	(define command_parser (if analyze_parameters
+		(parser (define query tsql_select) (lambda () (tsql_build_select_plan query)))
+		describe (parser (or (parser (define query tsql_select) (lambda () (tsql_build_select_plan query)))
+			tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete))
+		(parser (or p (parser empty (lambda () ""))))))
 	(if expression_only
 		((parser (define expression tsql_expression) (sql_expr_info '() expression) "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 		script_syntax (begin

@@ -83,9 +83,9 @@ value; the wire descriptor and SQL declaration own the type independently. */
 	(session "__tsql_parameter_declarations" declarations)
 	true)))
 
-/* Description parses and resolves SQL contracts without running the compiled
-statement. SELECT bypasses physical planning; mutations are refused here until
-the parser exposes a pure metadata path for their result contract. */
+/* Description binds names and expression contracts without physical planning
+or execution. A single mutation without OUTPUT has an empty result contract;
+its ordinary grammar still validates declarations and input expressions. */
 (define tds_describe (lambda (schema text declarations session) (begin
 	(define planning (newsession))
 	(planning "__tsql_parameter_declarations" (tds_bind_declarations schema declarations))
@@ -499,7 +499,7 @@ Only parameter-sized scalar tuples are collected; relational SQL stays native. *
 	(if (equal? (toLower name) "sp_executesql")
 		(tsql_execute_parameterized (if (equal?? schema "sys") (caller "schema") schema)
 			arguments statement caller resultrow resultfields)
-		(has? '("sp_tables" "sp_columns" "sp_pkeys" "sp_statistics" "sp_fkeys" "sp_datatype_info" "sp_datatype_info_100" "sp_special_columns") (toLower name))
+		(has? '("sp_describe_undeclared_parameters" "sp_tables" "sp_columns" "sp_pkeys" "sp_statistics" "sp_fkeys" "sp_datatype_info" "sp_datatype_info_100" "sp_special_columns") (toLower name))
 		(statement "metadata procedure" false (lambda (tx) (begin
 			(define values (map arguments (lambda (argument) (begin
 				(match (cadr argument) (cons _head _tail) (error "metadata parameters are input-only") _ true)
@@ -679,10 +679,112 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 	(list '("TYPE_NAME" "DATA_TYPE" "PRECISION" "LITERAL_PREFIX" "LITERAL_SUFFIX" "CREATE_PARAMS" "NULLABLE" "CASE_SENSITIVE" "SEARCHABLE" "UNSIGNED_ATTRIBUTE" "MONEY" "AUTO_INCREMENT" "LOCAL_TYPE_NAME" "MINIMUM_SCALE" "MAXIMUM_SCALE" "SQL_DATA_TYPE" "SQL_DATETIME_SUB" "NUM_PREC_RADIX" "INTERVAL_PRECISION")
 		'("DATA_TYPE" "PRECISION" "NULLABLE" "CASE_SENSITIVE" "SEARCHABLE" "UNSIGNED_ATTRIBUTE" "MONEY" "AUTO_INCREMENT" "MINIMUM_SCALE" "MAXIMUM_SCALE" "SQL_DATA_TYPE" "SQL_DATETIME_SUB" "NUM_PREC_RADIX" "INTERVAL_PRECISION")
 		(filter rows (lambda (row) (or (nil? (options "data_type")) (equal? (options "data_type") 0) (equal? (row "DATA_TYPE") (options "data_type")))))))))
+/* Undeclared parameters are parsed by the ordinary grammar, then inferred
+from its bound declaration contracts. Probe markers are analysis-only data:
+no supplied value, physical plan, cache binding or marker is executed. */
+(define tsql_parameter_probe (lambda (expression) (match expression
+	((symbol sql_type_expr) value _type _collation) (tsql_parameter_probe value)
+	((symbol tsql_unbound_parameter) name spelling) (list name spelling)
+	_ nil)))
+(define tsql_parameter_cast_head? (lambda (head)
+	(or (has? (list (quote tsql_cast_text) (quote tsql_cast_fixed_text) (quote tsql_cast_binary)
+		(quote tsql_cast_decimal)) head)
+		(expression_equal? head tsql_cast_integer) (expression_equal? head tsql_cast_float)
+		(expression_equal? head tsql_cast_bit))))
+(define tsql_parameter_analysis_join (lambda (left right)
+	(list (merge (list (car left) (car right))) (merge (list (cadr left) (cadr right))))))
+(define tsql_parameter_candidates (lambda (node sources declarations) (match node
+	((symbol quote) _datum) (list '() '())
+	((symbol tsql_unbound_parameter) name spelling) (list (list (list name spelling)) '())
+	(cons _head _tail) (begin
+		(define scope (if (query_block? node) (merge (list (qb_sources node) sources)) sources))
+		(define own (match node
+			((symbol sql_type_expr) formula type _collation) (match formula
+				(cons head (cons operand _arguments)) (begin
+					(define parameter (tsql_parameter_probe operand))
+					(if (and parameter (tsql_parameter_cast_head? head))
+						(list (list (car parameter) (cadr parameter) type
+							(coalesceNil (tsql_result_dimensions scope formula declarations) '()))) '()))
+				_ '())
+			'(head left right) (if (has? (list (quote equal?) (quote equal??)) head) (begin
+				(define parameter (coalesceNil (tsql_parameter_probe left) (tsql_parameter_probe right)))
+				(define known (if (tsql_parameter_probe left) right left))
+				(define info (sql_expr_info scope known))
+				(if (and parameter (not (has? '("any" "NULL") (sql_info_type info))))
+					(list (list (car parameter) (cadr parameter) (sql_info_type info)
+						(coalesceNil (tsql_result_dimensions scope known declarations) '()))) '())) '())
+			_ '()))
+		(reduce (map node (lambda (item) (tsql_parameter_candidates item scope declarations)))
+			tsql_parameter_analysis_join (list '() own)))
+	_ (list '() '()))))
+(define tsql_parameter_type_name (lambda (type dimensions)
+	(concat (toLower type) (if (empty_list? dimensions) ""
+		(concat "(" (reduce dimensions (lambda (text value)
+			(concat text (if (equal? text "") "" ",") (if (equal? value -1) "max" (string value)))) "") ")")))))
+(define tsql_parameter_system_type (lambda (type) (match type
+	"BIGINT" 127 "INT" 56 "INTEGER" 56 "SMALLINT" 52 "TINYINT" 48
+	"BIT" 104 "BOOLEAN" 104 "REAL" 59 "FLOAT" 62 "DECIMAL" 106 "NUMERIC" 108
+	"CHAR" 175 "VARCHAR" 167 "NCHAR" 239 "NVARCHAR" 231 "BINARY" 173 "VARBINARY" 165
+	"DATE" 40 "TIME" 41 "SMALLDATETIME" 58 "DATETIME" 61 "DATETIME2" 42
+	"MONEY" 60 "SMALLMONEY" 122 "UNIQUEIDENTIFIER" 36
+	_ (error "parameter declaration has no supported native type contract: " type))))
+(define tsql_parameter_description (lambda (specification ordinal) (match specification
+	'(name spelling type dimensions) (begin
+		(define dimensions (tsql_decl_dimensions type dimensions))
+		(define column (list "RawType" type "Dimensions" dimensions))
+		(define contract (tsql_metadata_type column 3))
+		(define wire (tsql_wire_contract type dimensions))
+		(list "parameter_ordinal" ordinal "name" (concat "@" spelling)
+			"suggested_system_type_id" (tsql_parameter_system_type type)
+			"suggested_system_type_name" (tsql_parameter_type_name type dimensions)
+			"suggested_max_length" (tsql_declared_byte_length column)
+			"suggested_precision" (if (or (sql_numeric_type? type) (has? '("MONEY" "SMALLMONEY") type)) (nth contract 2) 0)
+			"suggested_scale" (coalesceNil (nth contract 4) 0)
+			"suggested_user_type_id" nil "suggested_user_type_database" nil
+			"suggested_user_type_schema" nil "suggested_user_type_name" nil
+			"suggested_assembly_qualified_type_name" nil "suggested_xml_collection_id" nil
+			"suggested_xml_collection_database" nil "suggested_xml_collection_schema" nil
+			"suggested_xml_collection_name" nil "suggested_is_xml_document" 0
+			"suggested_is_case_sensitive" 0 "suggested_is_fixed_length_clr_type" 0
+			"suggested_is_input" 1 "suggested_is_output" 0 "formal_parameter_name" nil
+			"suggested_tds_type_id" (wire "kind") "suggested_tds_length" (wire "size"))))))
+(define tsql_describe_parameters (lambda (schema text parameter_text policy) (begin
+	(define declarations (tds_bind_declarations schema (coalesceNil parameter_text "")))
+	(define planning (newsession))
+	(planning "__tsql_parameter_declarations" declarations)
+	(planning "__tsql_parameter_analysis" true)
+	(planning "__tsql_describe" true)
+	(define query (match (parse_tsql schema text policy planning nil)
+		((symbol quote) query) query _ (error "parameter description requires a single SELECT")))
+	(define analysis (tsql_parameter_candidates query '() declarations))
+	(define unknowns (reduce (car analysis) (lambda (entries parameter)
+		(if (find entries (lambda (entry) (equal? (car entry) (car parameter)))) entries
+			(append entries parameter))) '()))
+	(define specifications (map unknowns (lambda (parameter) (begin
+		(define candidates (filter (cadr analysis) (lambda (entry) (equal? (car entry) (car parameter)))))
+		(if (empty_list? candidates) (error "cannot infer parameter: @" (cadr parameter)) true)
+		(define first (car candidates))
+		(if (reduce candidates (lambda (same entry)
+			(and same (equal? (nth first 2) (nth entry 2))
+				(expression_equal? (nth first 3) (nth entry 3)))) true) true
+			(error "conflicting parameter declarations: @" (cadr parameter)))
+		(list (car parameter) (cadr parameter) (nth first 2) (nth first 3))))))
+	/* Re-run the ordinary pure description with the inferred declarations.
+	No probe can reach the expression compiler used for execution. */
+	(define validation (newsession))
+	(validation "__tsql_describe" true)
+	(validation "__tsql_parameter_declarations" (merge (list declarations
+		(map specifications (lambda (entry) (list (car entry) (cons (nth entry 2) (nth entry 3))))))))
+	(define checked (parse_tsql schema text policy validation nil))
+	(if (list? checked)
+		(map (produceN (count specifications)) (lambda (i) (tsql_parameter_description (nth specifications i) (+ i 1))))
+		(error "invalid inferred parameter statement")))))
+
 (define tsql_metadata_result (lambda (schema procedure arguments policy) (begin
 	(define procedure (toLower procedure))
 	(define procedure (if (and (>= (strlen procedure) 4) (equal? (substr procedure 0 4) "sys.")) (substr procedure 4) procedure))
 	(define names (match procedure
+		"sp_describe_undeclared_parameters" '("tsql" "params")
 		"sp_datatype_info" '("data_type" "odbcver")
 		"sp_datatype_info_100" '("data_type" "odbcver")
 		"sp_tables" '("table_name" "table_owner" "table_qualifier" "table_type" "fusepattern")
@@ -703,6 +805,19 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 	(define version (coalesceNil (options "odbcver") 2))
 	(if (has? '(2 3) version) true (error "unsupported ODBC version"))
 	(define result (match procedure
+		"sp_describe_undeclared_parameters" (begin
+			(if (nil? (options "tsql")) (error "parameter description requires statement text") true)
+			(define rows (tsql_describe_parameters schema (options "tsql") (options "params") policy))
+			(list '("parameter_ordinal" "name" "suggested_system_type_id" "suggested_system_type_name"
+				"suggested_max_length" "suggested_precision" "suggested_scale" "suggested_user_type_id"
+				"suggested_user_type_database" "suggested_user_type_schema" "suggested_user_type_name"
+				"suggested_assembly_qualified_type_name" "suggested_xml_collection_id" "suggested_xml_collection_database"
+				"suggested_xml_collection_schema" "suggested_xml_collection_name" "suggested_is_xml_document"
+				"suggested_is_case_sensitive" "suggested_is_fixed_length_clr_type" "suggested_is_input" "suggested_is_output"
+				"formal_parameter_name" "suggested_tds_type_id" "suggested_tds_length")
+				'("parameter_ordinal" "suggested_system_type_id" "suggested_max_length" "suggested_precision" "suggested_scale"
+					"suggested_user_type_id" "suggested_xml_collection_id" "suggested_is_xml_document" "suggested_is_case_sensitive"
+					"suggested_is_fixed_length_clr_type" "suggested_is_input" "suggested_is_output" "suggested_tds_type_id" "suggested_tds_length") rows))
 		"sp_datatype_info" (tsql_metadata_type_info options version)
 		"sp_datatype_info_100" (tsql_metadata_type_info options version)
 		"sp_tables" (begin
