@@ -164,27 +164,59 @@ derived SELECT before untangle_query sees the complete query. */
 			removed)
 		(if if_exists 0 (error (concat "view " schema "." name " does not exist")))))))
 
+/* SQL database lifecycle and alias declaration publication share one DDL
+gate per database. Ordinary reads and DML never acquire it. The stable scope
+retains gates, not requests, transactions or executable plans.
+Privileged native createdatabase/dropdatabase intentionally bypass this SQL
+catalog contract; their callers own any frontend metadata cleanup. */
+(define sql_database_ddl_gates (newsession))
+(define sql_database_ddl_scope (newsession))
+(define sql_database_ddl (lambda (schema tx operation)
+	((sql_database_ddl_gates "get_or_compute_scoped" sql_database_ddl_scope schema (lambda () (mutex))) tx operation)))
+
+/* Alias definitions are ordinary frontend rows, not native schema objects.
+The catalog is optional when the t-sql module has not been loaded. Deletions
+use native autocommit so their WAL is durable before a new namespace appears. */
+(define sql_remove_database_type_aliases (lambda (schema) (begin
+	(define aliases (table "system" false "tsql_types" false))
+	(if aliases
+		(scan nil aliases
+			(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false)) (list schema)
+			'() (lambda () true) '("$update")
+			(lambda (acc remove) (begin (remove) (+ acc 1))) 0 +)
+		0))))
+
+(define create_sql_database (lambda (tx schema if_not_exists options source)
+	(sql_database_ddl schema tx (lambda () (begin
+		/* A crash can leave alias rows after the physical DROP. Retire them
+		while the namespace is still absent, before native CREATE publishes it.
+		An existing namespace, including IF NOT EXISTS, keeps its declarations. */
+		(if (nil? (show schema)) (sql_remove_database_type_aliases schema) true)
+		(createdatabase schema if_not_exists options source))))))
+
 /* Drop the physical database before cleaning its catalog rows. This ordering
 prevents a refused or failed protected-schema drop from changing access or view
 metadata. */
-(define drop_sql_database (lambda (tx schema if_exists) (begin
-	(define dropped (dropdatabase schema if_exists))
-	(if dropped (begin
-		(scan tx (table "system" false "access" false)
-			(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false)) (list schema)
-			'() (lambda () true)
-			'("$update")
-			(lambda (acc $update) (begin ($update) (+ acc 1)))
-			0 +)
-		(define removed_views (scan tx (table "system" false "views" false)
-			(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false)) (list schema)
-			'() (lambda () true)
-			'("$update")
-			(lambda (acc $update) (begin ($update) (+ acc 1)))
-			0 +))
-		(if (> removed_views 0) (begin
-			(sql_view_catalog_set_count (max 0 (- (sql_view_catalog_state "count") removed_views)))
-			(sql_view_catalog_changed)
+(define drop_sql_database (lambda (tx schema if_exists)
+	(sql_database_ddl schema tx (lambda () (begin
+		(define dropped (dropdatabase schema if_exists))
+		(if dropped (begin
+			(sql_remove_database_type_aliases schema)
+			(scan tx (table "system" false "access" false)
+				(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false)) (list schema)
+				'() (lambda () true)
+				'("$update")
+				(lambda (acc $update) (begin ($update) (+ acc 1)))
+				0 +)
+			(define removed_views (scan tx (table "system" false "views" false)
+				(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false)) (list schema)
+				'() (lambda () true)
+				'("$update")
+				(lambda (acc $update) (begin ($update) (+ acc 1)))
+				0 +))
+			(if (> removed_views 0) (begin
+				(sql_view_catalog_set_count (max 0 (- (sql_view_catalog_state "count") removed_views)))
+				(sql_view_catalog_changed)
+			) true)
 		) true)
-	) true)
-	dropped)))
+		dropped)))))
