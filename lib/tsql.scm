@@ -606,8 +606,9 @@ Descriptor types below are frontend contracts, including for empty results. */
 	(map names (lambda (name)
 		(if (has? integers name) (list "name" name "kind" 38 "size" 4 "flags" 1)
 			(list "name" name "kind" 231 "size" 8000 "flags" 1))))))
-/* (type name, ODBC code, precision, byte length, scale, radix, datetime subtype).
-Only declarations decide these values: an empty or all-NULL table is identical. */
+/* (type name, ODBC code, precision, transfer length, scale, radix, datetime subtype).
+Transfer length describes the driver's default C representation, not compressed
+or physical column storage. Only declarations decide these values. */
 (define tsql_metadata_type (lambda (column version) (begin
 	(define dimensions (column "Dimensions"))
 	(define length (if (empty_list? dimensions) 1 (car dimensions)))
@@ -623,22 +624,28 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 		"real" '("real" 7 24 4 nil 2 nil)
 		"float" '("float" 6 53 8 nil 2 nil)
 		"double" '("float" 6 53 8 nil 2 nil)
-		"money" '("money" 3 19 8 4 10 nil)
-		"smallmoney" '("smallmoney" 3 10 4 4 10 nil)
+		"money" '("money" 3 19 21 4 10 nil)
+		"smallmoney" '("smallmoney" 3 10 12 4 10 nil)
 		"uniqueidentifier" '("uniqueidentifier" -11 36 16 nil nil nil)
-		"date" (list "date" (if (equal? version 2) 9 91) 10 6 nil nil 1)
+		"date" (list "date" (if (equal? version 2) 9 91) 10 6 0 nil 1)
 		"datetime" (list "datetime" (if (equal? version 2) 11 93) 23 16 3 nil 3)
 		"smalldatetime" (list "smalldatetime" (if (equal? version 2) 11 93) 16 16 0 nil 3)
 		"rowversion" '("rowversion" -2 8 8 nil nil nil)
 		"timestamp" (begin
 			(define scale (if (empty_list? dimensions) 6 (car dimensions)))
 			(list "datetime2" (if (equal? version 2) 11 93) (if (> scale 0) (+ 20 scale) 19) 16 scale nil 3))
-		_ (if (has? '("decimal" "numeric") type)
+		_ (if (has? '("time" "datetime2" "datetimeoffset") type)
+			(begin
+				(define scale (if (empty_list? dimensions) 7 (car dimensions)))
+				(define code (match type "time" -154 "datetimeoffset" -155 _ (if (equal? version 2) 11 93)))
+				(define precision (+ (match type "time" 8 "datetimeoffset" 26 _ 19) (if (> scale 0) (+ scale 1) 0)))
+				(list type code precision (match type "time" 10 "datetimeoffset" 20 _ 16) scale nil
+					(if (equal? type "datetime2") 3 nil)))
+			(has? '("decimal" "numeric") type)
 			(begin
 				(define precision (if (empty_list? dimensions) 18 (car dimensions)))
 				(define scale (if (< (count dimensions) 2) 0 (cadr dimensions)))
-				(list type (if (equal? type "decimal") 3 2) precision
-					(if (<= precision 9) 5 (<= precision 19) 9 (<= precision 28) 13 17) scale 10 nil))
+				(list type (if (equal? type "decimal") 3 2) precision (+ precision 2) scale 10 nil))
 			(has? '("varchar" "char" "nvarchar" "nchar" "binary" "varbinary") type)
 			(list type (match type "varchar" 12 "char" 1 "nvarchar" -9 "nchar" -8 "binary" -2 "varbinary" -3)
 				length (if (and (> length 0) (has? '("nvarchar" "nchar") type)) (* length 2) length) nil nil nil)
@@ -660,25 +667,37 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 (define tsql_metadata_type_info (lambda (options version) (begin
 	(define definitions (list (list "bigint" '()) (list "int" '()) (list "smallint" '()) (list "tinyint" '())
 		(list "bit" '()) (list "real" '()) (list "float" '()) (list "decimal" '(38 0)) (list "numeric" '(38 0))
-		(list "varchar" '(8000)) (list "char" '(8000)) (list "date" '())))
+		(list "money" '()) (list "smallmoney" '()) (list "uniqueidentifier" '())
+		(list "varchar" '(8000)) (list "char" '(8000)) (list "nvarchar" '(4000)) (list "nchar" '(4000))
+		(list "binary" '(8000)) (list "varbinary" '(8000))
+		(list "date" '()) (list "datetime" '()) (list "smalldatetime" '())
+		(list "datetime2" '(7)) (list "time" '(7)) (list "datetimeoffset" '(7))))
 	(define rows (map definitions (lambda (definition) (begin
 		(define contract (tsql_metadata_type (list "RawType" (car definition) "Dimensions" (cadr definition)) version))
 		(define type (car contract))
-		(define character (has? '("varchar" "char") type))
+		(define character (has? '("varchar" "char" "nvarchar" "nchar") type))
+		(define binary (has? '("binary" "varbinary") type))
+		(define calendar (has? '("date" "datetime" "smalldatetime" "datetime2" "time" "datetimeoffset") type))
+		(define scaled_calendar (has? '("datetime2" "time" "datetimeoffset") type))
 		(define decimal (has? '("decimal" "numeric") type))
+		(define money (has? '("money" "smallmoney") type))
+		(define numeric (or decimal money (has? '("bigint" "int" "smallint" "tinyint" "real" "float") type)))
+		(define quoted (or character calendar (equal? type "uniqueidentifier")))
 		(list "TYPE_NAME" type "DATA_TYPE" (nth contract 1) "PRECISION" (nth contract 2)
-			"LITERAL_PREFIX" (if (or character (equal? type "date")) "'" nil)
-			"LITERAL_SUFFIX" (if (or character (equal? type "date")) "'" nil)
-			"CREATE_PARAMS" (if character "length" decimal "precision,scale" nil)
+			"LITERAL_PREFIX" (if quoted "'" binary "0x" nil)
+			"LITERAL_SUFFIX" (if quoted "'" nil)
+			"CREATE_PARAMS" (if (or character binary) "length" decimal "precision,scale" scaled_calendar "scale" nil)
 			"NULLABLE" 1 "CASE_SENSITIVE" (if character 1 0) "SEARCHABLE" 3
-			"UNSIGNED_ATTRIBUTE" (if (equal? type "tinyint") 1 (has? '("bigint" "int" "smallint" "decimal" "numeric" "real" "float") type) 0 nil)
-			"MONEY" 0 "AUTO_INCREMENT" (if (has? '("bigint" "int" "smallint" "tinyint") type) 1 0)
-			"LOCAL_TYPE_NAME" type "MINIMUM_SCALE" (nth contract 4) "MAXIMUM_SCALE" (if decimal 38 (nth contract 4))
+			"UNSIGNED_ATTRIBUTE" (if (equal? type "tinyint") 1 numeric 0 nil)
+			"MONEY" (if money 1 0) "AUTO_INCREMENT" (if (has? '("bigint" "int" "smallint" "tinyint") type) 1 numeric 0 nil)
+			"LOCAL_TYPE_NAME" type "MINIMUM_SCALE" (if scaled_calendar 0 (nth contract 4))
+			"MAXIMUM_SCALE" (if decimal 38 scaled_calendar 7 (nth contract 4))
 			"SQL_DATA_TYPE" (if (nth contract 6) 9 (nth contract 1)) "SQL_DATETIME_SUB" (nth contract 6)
 			"NUM_PREC_RADIX" (nth contract 5) "INTERVAL_PRECISION" nil)))))
 	(list '("TYPE_NAME" "DATA_TYPE" "PRECISION" "LITERAL_PREFIX" "LITERAL_SUFFIX" "CREATE_PARAMS" "NULLABLE" "CASE_SENSITIVE" "SEARCHABLE" "UNSIGNED_ATTRIBUTE" "MONEY" "AUTO_INCREMENT" "LOCAL_TYPE_NAME" "MINIMUM_SCALE" "MAXIMUM_SCALE" "SQL_DATA_TYPE" "SQL_DATETIME_SUB" "NUM_PREC_RADIX" "INTERVAL_PRECISION")
 		'("DATA_TYPE" "PRECISION" "NULLABLE" "CASE_SENSITIVE" "SEARCHABLE" "UNSIGNED_ATTRIBUTE" "MONEY" "AUTO_INCREMENT" "MINIMUM_SCALE" "MAXIMUM_SCALE" "SQL_DATA_TYPE" "SQL_DATETIME_SUB" "NUM_PREC_RADIX" "INTERVAL_PRECISION")
-		(filter rows (lambda (row) (or (nil? (options "data_type")) (equal? (options "data_type") 0) (equal? (row "DATA_TYPE") (options "data_type")))))))))
+		(sort (filter rows (lambda (row) (or (nil? (options "data_type")) (equal? (options "data_type") 0) (equal? (row "DATA_TYPE") (options "data_type")))))
+			(lambda (left right) (< (left "DATA_TYPE") (right "DATA_TYPE"))))))))
 (define tsql_metadata_result (lambda (schema procedure arguments policy) (begin
 	(define procedure (toLower procedure))
 	(define procedure (if (and (>= (strlen procedure) 4) (equal? (substr procedure 0 4) "sys.")) (substr procedure 4) procedure))
