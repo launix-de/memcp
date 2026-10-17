@@ -2679,7 +2679,8 @@ test_cases:
       data:
       - label: box
     setup:
-    - sql: CREATE TABLE try_conversion_collation(value NVARCHAR(8) COLLATE en_ci)
+    - scm: (createtable "memcp-tests" "try_conversion_collation" (list (list "column" "value" "NVARCHAR" (list
+        8) (list "collate" "en_ci"))) (list) false nil)
     - sql: INSERT INTO try_conversion_collation VALUES(N'box')
     cleanup:
     - sql: DROP TABLE try_conversion_collation
@@ -2726,6 +2727,48 @@ test_cases:
     - sql: UPDATE try_conversion_write SET value=TRY_CAST(raw_value AS INT)
     cleanup:
     - sql: DROP TABLE try_conversion_write
+  - name: TRY conversions participate in native grouping keys
+    sql: SELECT TRY_CAST(raw_value AS INT) AS value,COUNT(*) AS entries FROM try_conversion_group GROUP BY TRY_CAST(raw_value
+      AS INT) ORDER BY value
+    expect:
+      rows: 2
+      data:
+      - value: null
+        entries: 1
+      - value: 12
+        entries: 2
+    setup:
+    - sql: CREATE TABLE try_conversion_group(raw_value NVARCHAR(12))
+    - sql: INSERT INTO try_conversion_group VALUES(N'12'),(N'12'),(N'bad')
+    cleanup:
+    - sql: DROP TABLE try_conversion_group
+  - name: TRY conversions feed native window aggregate inputs
+    sql: SELECT id,SUM(TRY_CAST(raw_value AS INT)) OVER () AS total FROM try_conversion_group ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        total: 15
+      - id: 2
+        total: 15
+      - id: 3
+        total: 15
+    setup:
+    - sql: CREATE TABLE try_conversion_group(id INT PRIMARY KEY,raw_value NVARCHAR(12))
+    - sql: INSERT INTO try_conversion_group VALUES(1,N'12'),(2,N'3'),(3,N'bad')
+    cleanup:
+    - sql: DROP TABLE try_conversion_group
+  - name: TRY conversions consume the existing scalar subquery plan
+    sql: SELECT TRY_CAST((SELECT raw_value FROM try_conversion_scalar WHERE id=1) AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 12
+    setup:
+    - sql: CREATE TABLE try_conversion_scalar(id INT PRIMARY KEY,raw_value NVARCHAR(12))
+    - sql: INSERT INTO try_conversion_scalar VALUES(1,N'12')
+    cleanup:
+    - sql: DROP TABLE try_conversion_scalar
   - name: TRY conversion portable views compile through tsql consumers
     sql: SELECT * FROM try_conversion_portable
     expect:

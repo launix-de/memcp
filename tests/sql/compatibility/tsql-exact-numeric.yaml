@@ -829,7 +829,7 @@ test_cases:
       national_value: 😀
       shortened: abc
 - name: TRY numeric text overflow returns NULL instead of truncating digits
-  sql: SELECT TRY_CAST(1234 AS VARCHAR(2)) AS value
+  sql: SELECT TRY_CAST(1234 AS NVARCHAR(2)) AS value
   expect:
     rows: 1
     data:
@@ -874,7 +874,7 @@ test_cases:
   sql: SELECT TRY_CONVERT(INT,CAST(N'bad' AS INT)) AS value
   expect:
     error: true
-    contains: conversion
+    contains: invalid integer text
 - name: TRY_CONVERT NULL style returns a typed NULL
   sql: SELECT TRY_CONVERT(INT,N'12',NULL) AS numeric_value,TRY_CONVERT(NVARCHAR(8),N'box',NULL) AS text_value
   expect:
@@ -932,7 +932,7 @@ test_cases:
     data:
     - value: 12
 - name: Ordinary numeric text casts keep their existing overflow failure
-  sql: SELECT CAST(1234 AS VARCHAR(2)) AS value
+  sql: SELECT CAST(1234 AS NVARCHAR(2)) AS value
   expect:
     error: true
     contains: overflow
