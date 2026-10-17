@@ -1041,7 +1041,8 @@ The two options which change uniqueness/admission remain explicit contracts. */
 	(parser (define value tsql_literal) value))))
 (define tsql_clock_default (parser (or
 	(parser '("(" tsql_clock_default ")") true)
-	'((atom "GETDATE" true) "(" ")") (atom "CURRENT_TIMESTAMP" true))))
+	'((atom "GETDATE" true) "(" ")") '((atom "SYSDATETIME" true) "(" ")")
+	(atom "CURRENT_TIMESTAMP" true))))
 (define tsql_column_attributes (parser (define attrs (* (or
 	(parser '((? (atom "CONSTRAINT" true) (define key tsql_identifier)) (atom "PRIMARY" true) (atom "KEY" true) tsql_key_placement tsql_key_layout)
 		(if key (list "primary" true "null" false "constraint_name" key) '("primary" true "null" false)))
