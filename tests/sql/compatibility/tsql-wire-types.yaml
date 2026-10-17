@@ -363,6 +363,50 @@ test_cases:
           rows: 0
           columns:
           - value
+
+  - name: Hex conversions use real prepared character and binary bindings
+    tds:
+      statements:
+      - sql: SELECT CONVERT(VARBINARY(4),@text,1) AS bytes,CONVERT(NVARCHAR(8),@bytes,2) AS label
+        prepare: true
+        parameters:
+        - name: text
+          value: '0x00FF'
+        - name: bytes
+          value:
+            binary_hex: 10a0
+        expect:
+          rows: 1
+          data:
+          - bytes:
+              binary_hex: 00ff
+            label: 10A0
+      - sql: SELECT TRY_CONVERT(VARBINARY(4),@text,2) AS bytes
+        prepare: true
+        parameters:
+        - name: text
+          value: GG
+        expect:
+          rows: 1
+          data:
+          - bytes: null
+  - name: Hex conversion typed nulls and empty wire columns remain declared
+    tds:
+      statements:
+      - sql: SELECT CONVERT(VARBINARY(3),NULL,1) AS bytes,CONVERT(NVARCHAR(5),CAST(NULL AS VARBINARY(3)),2) AS label
+        expect:
+          rows: 1
+          data:
+          - bytes: null
+            label: null
+      - sql: SELECT CONVERT(VARBINARY(3),NULL,1) AS bytes,CONVERT(NVARCHAR(5),CAST(NULL AS VARBINARY(3)),2) AS label
+          WHERE 1=0
+        expect:
+          rows: 0
+          columns:
+          - bytes
+          - label
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_wire_contract
   - sql: DROP TABLE IF EXISTS tsql_wire_text

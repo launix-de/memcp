@@ -60,6 +60,12 @@ setup:
   - sql: DROP TABLE IF EXISTS [tsql_native]
   - sql: CREATE TABLE [dbo].[tsql_native] ([id] INT IDENTITY(1,1) PRIMARY KEY, [name] NVARCHAR(80), [amount] INT NOT NULL DEFAULT (7))
   - sql: INSERT INTO [dbo].[tsql_native] ([name]) VALUES (N'Grüße'), (N'O''Brien')
+  - sql: DROP TABLE IF EXISTS tsql_hex_copy
+  - sql: DROP TABLE IF EXISTS tsql_hex_input
+  - sql: CREATE TABLE tsql_hex_input(id INT PRIMARY KEY,hex NVARCHAR(20),bytes VARBINARY(4))
+  - sql: INSERT tsql_hex_input VALUES(1,N'0x00Ff',0x00FF),(2,N'0x10A0',0x10A0),(3,NULL,NULL)
+  - sql: CREATE TABLE tsql_hex_copy(id INT PRIMARY KEY,bytes VARBINARY(4))
+
 test_cases:
   - name: Setup text uses national character control codes
     sql: SELECT N'first'+NCHAR(13)+NCHAR(10)+N'second' AS value
@@ -2974,7 +2980,342 @@ test_cases:
         (equal? (map (output "fields") (lambda (field) (field "size"))) '(10 14 6))))
     expect:
       result: true
+
+  - name: Hex conversions decode prefixed binary text
+    sql: SELECT CASE WHEN CONVERT(VARBINARY(8),'0x00AaFf',1)=0x00AAFF THEN 1 ELSE 0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Hex conversions decode prefix free binary text
+    sql: SELECT CASE WHEN CONVERT(VARBINARY(8),'00AaFf',2)=0x00AAFF THEN 1 ELSE 0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Hex conversions decode national hex digits
+    sql: SELECT CASE WHEN CONVERT(VARBINARY(8),N'0x00FF',1)=0x00FF THEN 1 ELSE 0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Hex conversions fixed binary pads zeros on the right
+    sql: SELECT CASE WHEN CONVERT(BINARY(5),'0x00FF',1)=0x00FF000000 THEN 1 ELSE 0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Hex conversions varying binary retains its actual decoded length
+    sql: SELECT CASE WHEN CONVERT(VARBINARY(5),'00FF',2)=0x00FF THEN 1 ELSE 0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Hex conversions prefixed binary truncates on the right
+    sql: SELECT CASE WHEN CONVERT(BINARY(2),'0x00112233',1)=0x0011 THEN 1 ELSE 0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Hex conversions prefix free binary truncates on the right
+    sql: SELECT CASE WHEN CONVERT(VARBINARY(2),'00112233',2)=0x0011 THEN 1 ELSE 0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Hex conversions empty prefixed text decodes to empty bytes
+    sql: SELECT CASE WHEN CONVERT(VARBINARY(4),'0x',1)=0x THEN 1 ELSE 0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Hex conversions empty prefix free text decodes to empty bytes
+    sql: SELECT CASE WHEN CONVERT(VARBINARY(4),'',2)=0x THEN 1 ELSE 0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Hex conversions empty fixed binary receives only zero padding
+    sql: SELECT CASE WHEN CONVERT(BINARY(3),'',2)=0x000000 THEN 1 ELSE 0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Hex conversions binary declarations preserve null values
+    sql: SELECT CONVERT(VARBINARY(4),CAST(NULL AS VARCHAR(10)),1) AS a,CONVERT(BINARY(4),CAST(NULL AS NVARCHAR(10)),2)
+      AS b
+    expect:
+      rows: 1
+      data:
+      - a: null
+        b: null
+  - name: Hex conversions format prefixed uppercase hexadecimal
+    sql: SELECT CONVERT(VARCHAR(20),0x00aaff,1) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '0x00AAFF'
+  - name: Hex conversions format prefix free uppercase hexadecimal
+    sql: SELECT CONVERT(VARCHAR(20),0x00aaff,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 00AAFF
+  - name: Hex conversions fixed character output pads spaces
+    sql: SELECT CONVERT(CHAR(8),0xaabb,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 'AABB    '
+  - name: Hex conversions character output truncates at its declared width
+    sql: SELECT CONVERT(VARCHAR(3),0xaabb,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: AAB
+  - name: Hex conversions prefix counts toward the target width
+    sql: SELECT CONVERT(VARCHAR(5),0xaabb,1) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '0xAAB'
+  - name: Hex conversions national character output preserves hexadecimal digits
+    sql: SELECT CONVERT(NVARCHAR(8),0xaabb,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: AABB
+  - name: Hex conversions fixed national character output pads spaces
+    sql: SELECT CONVERT(NCHAR(7),0xaabb,1) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '0xAABB '
+  - name: Hex conversions empty bytes format without a prefix in style two
+    sql: SELECT CONVERT(VARCHAR(8),0x,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Hex conversions empty bytes retain a prefix in style one
+    sql: SELECT CONVERT(VARCHAR(8),0x,1) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 0x
+  - name: Hex conversions ordinary zero style text output retains the existing path
+    sql: SELECT CONVERT(VARCHAR(8),0x4142,0) AS value
+    expect:
+      rows: 1
+      data:
+      - value: AB
+  - name: Hex conversions odd prefixed digits
+    sql: SELECT CONVERT(VARBINARY(1),N'0x123',1) AS value
+    expect:
+      error: true
+      contains: invalid hexadecimal
+  - name: Hex conversions odd prefix free digits
+    sql: SELECT CONVERT(VARBINARY(1),N'123',2) AS value
+    expect:
+      error: true
+      contains: invalid hexadecimal
+  - name: Hex conversions invalid hexadecimal digits
+    sql: SELECT CONVERT(VARBINARY(1),N'GG',2) AS value
+    expect:
+      error: true
+      contains: invalid hexadecimal
+  - name: Hex conversions missing required prefix
+    sql: SELECT CONVERT(VARBINARY(1),N'1234',1) AS value
+    expect:
+      error: true
+      contains: invalid hexadecimal
+  - name: Hex conversions unexpected prefix in style two
+    sql: SELECT CONVERT(VARBINARY(1),N'0x1234',2) AS value
+    expect:
+      error: true
+      contains: invalid hexadecimal
+  - name: Hex conversions trailing whitespace
+    sql: SELECT CONVERT(VARBINARY(1),N'AA ',2) AS value
+    expect:
+      error: true
+      contains: invalid hexadecimal
+  - name: Hex conversions leading whitespace
+    sql: SELECT CONVERT(VARBINARY(1),N' AA',2) AS value
+    expect:
+      error: true
+      contains: invalid hexadecimal
+  - name: Hex conversions invalid suffix past target truncation
+    sql: SELECT CONVERT(VARBINARY(1),N'AABBZZ',2) AS value
+    expect:
+      error: true
+      contains: invalid hexadecimal
+  - name: Hex conversions TRY recovers only malformed binary text
+    sql: SELECT TRY_CONVERT(VARBINARY(8),N'0xGG',1) AS a,TRY_CONVERT(VARBINARY(8),N'123',2) AS b
+    expect:
+      rows: 1
+      data:
+      - a: null
+        b: null
+  - name: Hex conversions TRY shares the successful binary conversion
+    sql: SELECT CASE WHEN TRY_CONVERT(VARBINARY(4),'00AA',2)=0x00AA THEN 1 ELSE 0 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Hex conversions TRY accepts a declared binary source for hex text
+    sql: SELECT TRY_CONVERT(VARCHAR(8),0xaabb,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: AABB
+  - name: Hex conversions formatted binary null retains the declared text type
+    sql: SELECT CONVERT(NVARCHAR(8),CAST(NULL AS VARBINARY(8)),2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Hex conversions invalid binary style
+    sql: SELECT CONVERT(VARBINARY(4),'ABCD',3)
+    expect:
+      error: true
+  - name: Hex conversions invalid binary output style
+    sql: SELECT CONVERT(VARCHAR(8),0xAABB,3)
+    expect:
+      error: true
+  - name: Hex conversions TRY cannot hide unsupported binary style
+    sql: SELECT TRY_CONVERT(VARBINARY(4),'ABCD',3)
+    expect:
+      error: true
+  - name: Hex conversions numeric source cannot pretend to be hexadecimal text
+    sql: SELECT CONVERT(VARBINARY(4),1234,2)
+    expect:
+      error: true
+  - name: Hex conversions binary source cannot pretend to be hexadecimal text
+    sql: SELECT CONVERT(VARBINARY(4),0x1234,2)
+    expect:
+      error: true
+  - name: Hex conversions zero width binary declarations remain invalid
+    sql: SELECT CONVERT(VARBINARY(0),'AA',2)
+    expect:
+      error: true
+  - name: Hex conversions TRY leaves input expression errors outside conversion recovery
+    sql: SELECT TRY_CONVERT(VARBINARY(8),CAST(CAST(N'bad' AS INT) AS NVARCHAR(20)),2)
+    expect:
+      error: true
+      contains: invalid integer text
+  - name: Hex conversions MAX conversion keeps every decoded byte
+    sql: SELECT LEN(CONVERT(VARBINARY(MAX),'000102030405060708090A0B0C0D0E0F',2)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 16
+  - name: Hex conversions default binary conversion width remains thirty
+    sql: SELECT LEN(CONVERT(BINARY,'AA',2)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 30
+  - name: Hex conversions native declared columns choose text and byte recipes
+    sql: SELECT id,CONVERT(VARCHAR(8),bytes,2) AS encoded,CASE WHEN CONVERT(VARBINARY(4),hex,1)=bytes THEN 1 ELSE
+      0 END AS same FROM tsql_hex_input ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        encoded: 00FF
+        same: 1
+      - id: 2
+        encoded: 10A0
+        same: 1
+      - id: 3
+        encoded: null
+        same: 0
+  - name: Hex conversions insert native decoded rows
+    sql: INSERT tsql_hex_copy VALUES(1,CONVERT(VARBINARY(4),N'0x00FF',1)),(2,CONVERT(VARBINARY(4),N'0x10A0',1)),(3,NULL)
+    expect:
+      affected_rows: 3
+  - name: Hex conversions read native inserted decoded rows
+    sql: SELECT id,CONVERT(VARCHAR(8),bytes,2) AS value FROM tsql_hex_copy ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        value: 00FF
+      - id: 2
+        value: 10A0
+      - id: 3
+        value: null
+  - name: Hex conversions update native decoded bytes
+    sql: UPDATE tsql_hex_copy SET bytes=CONVERT(VARBINARY(4),'0xF00D',1) WHERE id=1
+    expect:
+      affected_rows: 1
+  - name: Hex conversions read native updated decoded bytes
+    sql: SELECT CONVERT(VARCHAR(8),bytes,2) AS value FROM tsql_hex_copy WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - value: F00D
+  - name: Hex conversions portable view consumed by tsql
+    sql: SELECT * FROM tsql_hex_portable
+    syntax: tsql
+    setup:
+    - sql: DROP VIEW IF EXISTS tsql_hex_portable
+      syntax: tsql
+    - sql: CREATE VIEW tsql_hex_portable AS SELECT CONVERT(VARCHAR(8),CONVERT(VARBINARY(4),'0x00FF',1),2) AS value
+      syntax: tsql
+    expect:
+      rows: 1
+      data:
+      - value: 00FF
+    cleanup:
+    - sql: DROP VIEW tsql_hex_portable
+      syntax: tsql
+  - name: Hex conversions portable view consumed by sql
+    sql: SELECT * FROM tsql_hex_portable
+    syntax: sql
+    setup:
+    - sql: DROP VIEW IF EXISTS tsql_hex_portable
+      syntax: tsql
+    - sql: CREATE VIEW tsql_hex_portable AS SELECT CONVERT(VARCHAR(8),CONVERT(VARBINARY(4),'0x00FF',1),2) AS value
+      syntax: tsql
+    expect:
+      rows: 1
+      data:
+      - value: 00FF
+    cleanup:
+    - sql: DROP VIEW tsql_hex_portable
+      syntax: tsql
+  - name: Hex conversions portable view consumed by psql
+    sql: SELECT * FROM tsql_hex_portable
+    syntax: psql
+    setup:
+    - sql: DROP VIEW IF EXISTS tsql_hex_portable
+      syntax: tsql
+    - sql: CREATE VIEW tsql_hex_portable AS SELECT CONVERT(VARCHAR(8),CONVERT(VARBINARY(4),'0x00FF',1),2) AS value
+      syntax: tsql
+    expect:
+      rows: 1
+      data:
+      - value: 00FF
+    cleanup:
+    - sql: DROP VIEW tsql_hex_portable
+      syntax: tsql
+  - name: Hex conversions empty descriptors
+    scm: (begin (define fields (tds_describe "memcp-tests" "SELECT CONVERT(VARBINARY(3),NULL,1) AS bytes,CONVERT(NVARCHAR(5),CAST(NULL
+      AS VARBINARY(3)),2) AS label WHERE 1=0" "" (newsession)))) (and (equal? (map fields (lambda (f) (f "sql_type")))
+      (list "VARBINARY" "NVARCHAR")) (equal? (map fields (lambda (f) (f "size"))) (list 3 10))))
+    expect:
+      result: true
+  - name: Hex conversions derived descriptor widths
+    scm: (begin (define fields (tds_describe "memcp-tests" "SELECT TOP(0) q.bytes,q.label FROM (SELECT CONVERT(VARBINARY(3),'0xAA',1)
+      AS bytes,CONVERT(NVARCHAR(5),0xBB,2) AS label) q" "" (newsession)))) (and (equal? (map fields (lambda (f) (f
+      "sql_type"))) (list "VARBINARY" "NVARCHAR")) (equal? (map fields (lambda (f) (f "size"))) (list 3 10))))
+    expect:
+      result: true
+
 cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_hex_copy
+  - sql: DROP TABLE IF EXISTS tsql_hex_input
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
   - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_http
