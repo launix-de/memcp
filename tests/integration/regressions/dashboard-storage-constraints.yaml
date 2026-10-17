@@ -1,0 +1,147 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Dashboard resident RAM and declarative constraints use explicit show
+    selectors
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS dash_storage_child
+- sql: DROP TABLE IF EXISTS dash_storage_parent
+- sql: CREATE TABLE dash_storage_parent (id INT PRIMARY KEY)
+- sql: CREATE TABLE dash_storage_child (id INT PRIMARY KEY, parent_id INT, code INT,
+    UNIQUE KEY `uq``code` (code), CONSTRAINT `fk``parent` FOREIGN KEY (parent_id)
+    REFERENCES dash_storage_parent (id) ON DELETE CASCADE ON UPDATE RESTRICT)
+- sql: INSERT INTO dash_storage_parent VALUES (1)
+- sql: INSERT INTO dash_storage_child VALUES (1,1,10)
+- sql: DROP TABLE IF EXISTS dash_storage_composite
+- sql: CREATE TABLE dash_storage_composite (tenant INT, id INT, a INT, b INT,
+    PRIMARY KEY (tenant,id), UNIQUE KEY uq_dash_pair (a,b), UNIQUE KEY uq_dash_single (a))
+- sql: DROP TABLE IF EXISTS dash_storage_metadata
+- sql: CREATE TABLE dash_storage_metadata (id INT PRIMARY KEY, payload TEXT) ENGINE=MEMORY
+- scm: |
+    (insert (table "memcp-tests" "dash_storage_metadata") '("id" "payload")
+      (map (produceN 8192) (lambda (i) (list i (concat "payload-" i)))))
+test_cases:
+- name: Planner constraint metadata stays independent of retained delta payload
+  warmup: 0
+  timing_samples: 11
+  timing_aggregation: total
+  threshold_ms: 5000
+  scm: |
+    (begin
+      (define results (map (produceN 32) (lambda (i)
+        (source_unique_key_sets (list (string i) "memcp-tests" "dash_storage_metadata" false nil)))))
+      (if (and (equal? (count results) 32)
+        (reduce results (lambda (ok keys) (and ok (contains? keys '("id")))) true)) true
+        (error "planner lost unique constraint metadata")))
+- name: Database API exposes balanced resident RAM for each table
+  scm: |-
+    (begin
+      (define response (newsession))
+      (http_handler
+        (list "path" "/dashboard/api/db/memcp-tests" "username" "root" "password" "admin" "__session" (newsession))
+        (list "header" (lambda (name value) true) "status" (lambda (code) (response "status" code))
+          "print" (lambda (body) (response "body" body))))
+      (define data (json_decode (response "body")))
+      (define row (car (filter data (lambda (r) (equal? (r "name") "dash_storage_child")))))
+      (if (and (> (row "data_size_bytes") 0)
+        (equal? (row "size_bytes") (+ (row "data_size_bytes") (row "index_size_bytes")))) true
+        (error "dashboard table RAM does not balance")))
+- name: Database overview still returns valid JSON
+  scm: |-
+    (begin
+      (define response (newsession))
+      (http_handler
+        (list "path" "/dashboard/api/databases" "username" "root" "password" "admin" "__session" (newsession))
+        (list "header" (lambda (name value) true) "status" (lambda (code) (response "status" code))
+          "print" (lambda (body) (response "body" body))))
+      (define data (json_decode (response "body")))
+      (if (> (count data) 0) true (error "database overview is empty")))
+- name: Table API includes unique names and outgoing foreign-key rules
+  scm: |-
+    (begin
+      (define response (newsession))
+      (http_handler
+        (list "path" "/dashboard/api/db/memcp-tests/dash_storage_child" "username" "root" "password" "admin" "__session" (newsession))
+        (list "header" (lambda (name value) true) "status" (lambda (code) (response "status" code))
+          "print" (lambda (body) (response "body" body))))
+      (define data (json_decode (response "body")))
+      (define meta (data "meta"))
+      (define unique (car (filter (meta "uniques") (lambda (u) (equal? (u "id") "uq`code")))))
+      (define fk (car (meta "foreign_keys")))
+      (if (and (equal? (unique "name") "uq`code") (equal? (fk "id") "fk`parent")
+        (equal? (unique "cols") '("code")) (equal? (fk "cols") '("parent_id"))
+        (equal? (fk "other_cols") '("id"))
+        (equal? (fk "role") "referencing") (equal? (fk "other_table") "dash_storage_parent")
+        (equal? (fk "on_delete") "cascade") (equal? (fk "on_update") "restrict")
+        (equal? (data "size_bytes") (+ (data "data_size_bytes") (data "index_size_bytes")))) true
+        (error "dashboard constraint metadata incomplete")))
+- name: Referenced table identifies incoming foreign keys
+  scm: |-
+    (begin
+      (define response (newsession))
+      (http_handler
+        (list "path" "/dashboard/api/db/memcp-tests/dash_storage_parent" "username" "root" "password" "admin" "__session" (newsession))
+        (list "header" (lambda (name value) true) "status" (lambda (code) (response "status" code))
+          "print" (lambda (body) (response "body" body))))
+      (define data (json_decode (response "body")))
+      (define fk (car ((data "meta") "foreign_keys")))
+      (if (and (equal? (fk "role") "referenced") (equal? (fk "other_table") "dash_storage_child")) true
+        (error "incoming foreign key has wrong owner")))
+- name: Composite primary and unique keys retain every ordered column
+  scm: |-
+    (begin
+      (define response (newsession))
+      (http_handler
+        (list "path" "/dashboard/api/db/memcp-tests/dash_storage_composite" "username" "root" "password" "admin" "__session" (newsession))
+        (list "header" (lambda (name value) true) "status" (lambda (code) (response "status" code))
+          "print" (lambda (body) (response "body" body))))
+      (define keys (((json_decode (response "body")) "meta") "uniques"))
+      (define columns (lambda (name) ((car (filter keys (lambda (key) (equal? (key "id") name)))) "cols")))
+      (if (and (equal? (count keys) 3) (equal? (columns "PRIMARY") '("tenant" "id"))
+        (equal? (columns "uq_dash_pair") '("a" "b")) (equal? (columns "uq_dash_single") '("a"))) true
+        (error "dashboard lost composite constraint columns")))
+- name: Duplicate values fail before dropping unique constraint
+  sql: INSERT INTO dash_storage_child VALUES (2,1,10)
+  expect:
+    error: true
+- name: Missing parent fails before dropping foreign key
+  sql: INSERT INTO dash_storage_child VALUES (2,999,20)
+  expect:
+    error: true
+- name: Drop quoted unique constraint through SQL API
+  sql: ALTER TABLE `dash_storage_child` DROP INDEX `uq``code`
+- name: Drop quoted foreign key through SQL API
+  sql: ALTER TABLE `dash_storage_child` DROP FOREIGN KEY `fk``parent`
+- name: Table API reflects constraint removal immediately
+  scm: |-
+    (begin
+      (define response (newsession))
+      (http_handler
+        (list "path" "/dashboard/api/db/memcp-tests/dash_storage_child" "username" "root" "password" "admin" "__session" (newsession))
+        (list "header" (lambda (name value) true) "status" (lambda (code) (response "status" code))
+          "print" (lambda (body) (response "body" body))))
+      (define data (json_decode (response "body")))
+      (define meta (data "meta"))
+      (if (and (equal? (count (meta "uniques")) 1) (empty_list? (meta "foreign_keys"))) true
+        (error "dashboard retains dropped constraints")))
+- name: Both constraints are actually removed
+  sql: INSERT INTO dash_storage_child VALUES (2,999,10)
+- name: Primary key uses native DROP INDEX rather than no-op DROP PRIMARY KEY
+  sql: ALTER TABLE `dash_storage_child` DROP INDEX `PRIMARY`
+- name: Primary key removal updates the dashboard
+  scm: |-
+    (begin
+      (define response (newsession))
+      (http_handler
+        (list "path" "/dashboard/api/db/memcp-tests/dash_storage_child" "username" "root" "password" "admin" "__session" (newsession))
+        (list "header" (lambda (name value) true) "status" (lambda (code) (response "status" code))
+          "print" (lambda (body) (response "body" body))))
+      (define data (json_decode (response "body")))
+      (if (empty_list? ((data "meta") "uniques")) true (error "primary key remained visible")))
+cleanup:
+- sql: DROP TABLE IF EXISTS dash_storage_composite
+- sql: DROP TABLE IF EXISTS dash_storage_metadata
+- sql: DROP TABLE IF EXISTS dash_storage_child
+- sql: DROP TABLE IF EXISTS dash_storage_parent

@@ -3994,6 +3994,9 @@ func Init(en scm.Env) {
 					return t.ShowColumns()
 				}
 				if len(a) == 2 {
+					if a[1].IsString() && scm.String(a[1]) == "memory" {
+						return showBuildMemory(t.residentMemory())
+					}
 					if a[1].IsString() && scm.String(a[1]) == "constraints" {
 						return t.Constraints()
 					}
@@ -4040,14 +4043,14 @@ func Init(en scm.Env) {
 						}
 						engine := showEngineStr(t)
 						stats := t.statistics()
-						rows = append(rows, scm.NewSlice([]scm.Scmer{
+						memory := showBuildMemory(t.residentMemory()).Slice()
+						rows = append(rows, scm.NewSlice(append(memory, []scm.Scmer{
 							scm.NewString("name"), scm.NewString(t.Name),
 							scm.NewString("engine"), scm.NewString(engine),
 							scm.NewString("row_count"), scm.NewInt(stats.rowCount),
-							scm.NewString("size_bytes"), scm.NewInt(int64(t.residentMemory().total())),
 							scm.NewString("collation"), scm.NewString(t.Collation),
 							scm.NewString("comment"), scm.NewString(t.Comment),
-						}))
+						}...)))
 					}
 					return scm.NewSlice(rows)
 				}
@@ -4073,6 +4076,9 @@ func Init(en scm.Env) {
 				t := db.GetTable(scm.String(a[1]))
 				if t == nil {
 					panic("show3: table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+				if a[2].IsString() && scm.String(a[2]) == "memory" {
+					return showBuildMemory(t.residentMemory())
 				}
 				if a[2].IsString() && scm.String(a[2]) == "constraints" {
 					return t.Constraints()
@@ -4102,13 +4108,13 @@ func Init(en scm.Env) {
 							scm.NewString("priority"), scm.NewInt(int64(tr.Priority)),
 						}))
 					}
-					return scm.NewSlice([]scm.Scmer{
+					memory := showBuildMemory(t.residentMemory()).Slice()
+					return scm.NewSlice(append(memory, []scm.Scmer{
 						scm.NewString("columns"), t.ShowColumns(),
-						scm.NewString("size_bytes"), scm.NewInt(int64(t.residentMemory().total())),
 						scm.NewString("meta"), showBuildMeta(db, t),
 						scm.NewString("shards"), scm.NewSlice(shardRows),
 						scm.NewString("triggers"), scm.NewSlice(triggerRows),
-					})
+					}...))
 				}
 				// (show schema tbl N) → shard N overview
 				if a[2].IsInt() || a[2].IsFloat() {
@@ -4209,10 +4215,10 @@ func Init(en scm.Env) {
 			}
 			panic("invalid call of show")
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show table_handle) lists the memoized column defs\n(show table_handle true) returns table metadata\n(show table_handle \"column\" name [ignore_case]) borrows one immutable column description or returns nil\n(show table_handle \"statistics\") returns index statistics\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns INFORMATION_SCHEMA index statistics\n(show schema tbl \"indexes\") returns MySQL SHOW INDEX rows",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "show databases/tables/columns/shards\n\n(show schema tbl \"memory\") / (show table_handle \"memory\") explicitly traverses resident owners: data_size_bytes + index_size_bytes = size_bytes; data includes metadata, temporary columns, dictionaries and blob caches. Cold data is never loaded.\n(show schema tbl \"constraints\") / (show table_handle \"constraints\") borrows immutable unique/foreign-key declarations in O(1), without storage traversal.\n(show) lists database names\n(show schema) lists table names\n(show table_handle) lists the memoized column defs\n(show table_handle true) returns table metadata\n(show table_handle \"column\" name [ignore_case]) borrows one immutable column description or returns nil\n(show table_handle \"statistics\") returns index statistics\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns full diagnostic assoc {columns,meta,shards,triggers} plus all memory fields\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns INFORMATION_SCHEMA index statistics\n(show schema tbl \"indexes\") returns MySQL SHOW INDEX rows",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string|table|recset", Label: "schema_or_table", Description: "(optional) database name or resolved table/recset handle", Optional: true},
-				{Kind: "string|bool", Label: "table_or_property", Description: "(optional) table name, true for full info, or \"statistics\"/\"column\" for a handle", Optional: true},
+				{Kind: "string|bool", Label: "table_or_property", Description: "(optional) table name, true for full info, or \"memory\"/\"constraints\"/\"statistics\"/\"column\" for a handle", Optional: true},
 				{Kind: "int|bool|string", Label: "property", Description: "(optional) shard index, column name, or table metadata selector", Optional: true},
 				{Kind: "bool", Label: "full_or_ignore_case", Description: "(optional) full shard details, or case-insensitive column-name lookup for a column selector", Optional: true},
 			},
@@ -5507,6 +5513,22 @@ func showBuildMeta(db *database, t *table) scm.Scmer {
 		scm.NewString("CanRename"), scm.NewBool(maintenance.canRename),
 		scm.NewString("CanAlter"), scm.NewBool(maintenance.canAlter),
 		scm.NewString("CanChangeEngine"), scm.NewBool(maintenance.canChangeEngine),
+	})
+}
+
+// showBuildMemory is an explicit diagnostic view, never a planner getter.
+// Data includes all non-index owners (also metadata and caches), so data plus
+// indexes equals the resident total from one observation. No cold data is loaded.
+func showBuildMemory(memory memoryOwnerSnapshot) scm.Scmer {
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewString("size_bytes"), scm.NewInt(int64(memory.total())),
+		scm.NewString("data_size_bytes"), scm.NewInt(int64(memory.total() - memory.indexes)),
+		scm.NewString("index_size_bytes"), scm.NewInt(int64(memory.indexes)),
+		scm.NewString("base_size_bytes"), scm.NewInt(int64(memory.base)),
+		scm.NewString("temp_column_size_bytes"), scm.NewInt(int64(memory.tempColumns)),
+		scm.NewString("dictionary_size_bytes"), scm.NewInt(int64(memory.stringDictionaries)),
+		scm.NewString("blob_cache_size_bytes"), scm.NewInt(int64(memory.blobCaches)),
+		scm.NewString("metadata_size_bytes"), scm.NewInt(int64(memory.metadata)),
 	})
 }
 

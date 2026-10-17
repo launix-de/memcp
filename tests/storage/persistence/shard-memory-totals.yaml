@@ -30,6 +30,26 @@ test_cases:
           (error "shard total omits index memory")))
     expect:
       result_contains: ["true"]
+  - name: "Explicit memory selector partitions resident table RAM"
+    scm: |
+      (begin
+        (define m (show "memcp-tests" "ram_totals" "memory"))
+        (if (and (> (m "index_size_bytes") 0)
+          (equal? (m "size_bytes") (+ (m "data_size_bytes") (m "index_size_bytes")))
+          (equal? (m "data_size_bytes") (+ (m "base_size_bytes") (m "temp_column_size_bytes")
+            (m "dictionary_size_bytes") (m "blob_cache_size_bytes") (m "metadata_size_bytes")))) true
+          (error "table memory categories do not partition resident RAM")))
+  - name: "Table handle supports explicit memory diagnostics"
+    scm: |
+      (begin
+        (define t (table "memcp-tests" "ram_totals"))
+        (define m (show t "memory"))
+        (if (and (> (m "data_size_bytes") 0)
+          (equal? (m "size_bytes") ((show "memcp-tests" "ram_totals" "memory") "size_bytes"))) true
+          (error "handle memory diagnostics disagree")))
+  - name: "Memory diagnostics reject missing tables"
+    scm: '(show "memcp-tests" "ram_totals_missing" "memory")'
+    expect: {error: true}
   - name: "Temporary column remains part of shard RAM"
     scm: |
       (begin
@@ -47,6 +67,8 @@ test_cases:
       (begin
         (define rows (show "memcp-tests" true))
         (define tbl (car (filter rows (lambda (r) (equal? (r "name") "ram_totals")))))
+        (if (equal? (tbl "size_bytes") (+ (tbl "data_size_bytes") (tbl "index_size_bytes"))) true
+          (error "table listing omits memory breakdown"))
         (define shards ((show "memcp-tests" "ram_totals" true) "shards"))
         (if (>= (tbl "size_bytes") (reduce shards (lambda (n s) (+ n (s "size_bytes"))) 0)) true
           (error "table total is stale or incomplete")))
@@ -110,6 +132,8 @@ test_cases:
       (begin
         (define t (show "memcp-tests" "ram_multishard" true))
         (define shards (t "shards"))
+        (if (equal? (t "size_bytes") (+ (t "data_size_bytes") (t "index_size_bytes"))) true
+          (error "full table diagnostics omit memory breakdown"))
         (if (and (> (count shards) 1)
           (> (reduce shards (lambda (n s) (+ n (s "index_size_bytes"))) 0) 0)
           (> (reduce shards (lambda (n s) (+ n (s "temp_column_size_bytes"))) 0) 0)
@@ -126,6 +150,9 @@ test_cases:
       (begin
         (define first (show "memcp-tests" "ram_multishard" true))
         (define second (show "memcp-tests" "ram_multishard" true))
+        (define memory (show "memcp-tests" "ram_multishard" "memory"))
+        (if (equal? (memory "size_bytes") (second "size_bytes")) true
+          (error "memory-only diagnostics reload cold payloads"))
         (if (and
           (> (count (filter (first "shards") (lambda (s) (equal? (s "state") "COLD")))) 0)
           (equal? (first "size_bytes") (second "size_bytes"))) true

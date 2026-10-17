@@ -1262,8 +1262,8 @@ work before decorrelation has even started. */
 			(define unique_keys (try
 				(lambda ()
 					(begin
-						(define info (show (source_schema src) (source_relation src) true))
-						(map ((info "meta") "Unique") (lambda (unique_key)
+						(define info (show (source_schema src) (source_relation src) "constraints"))
+						(map (info "Unique") (lambda (unique_key)
 							(unique_key "Cols")))))
 				(lambda (_e) '())))
 			(merge_unique (list

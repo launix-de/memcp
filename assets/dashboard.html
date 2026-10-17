@@ -411,8 +411,9 @@ body{display:flex;flex-direction:column}
 <h2 id="tables-title" style="margin:0">Tables</h2>
 <button class="btn-warn" id="btn-create-table">+ Create Table</button>
 </div>
+<p style="color:#888;font-size:.8rem">Resident RAM estimates. Data includes compressed columns, deltas, metadata and caches. Data + indexes = total; cold data on disk is excluded. Sizes in MiB; hover for exact bytes.</p>
 <table class="browse-table" id="tbl-tables">
-<thead><tr><th>Name</th><th>Engine</th><th class="r">Columns</th><th class="r">Shards</th><th class="r">Rows</th><th class="r">Size</th><th>Actions</th></tr></thead>
+<thead><tr><th>Name</th><th>Engine</th><th class="r">Columns</th><th class="r">Shards</th><th class="r">Rows</th><th class="r">Data RAM</th><th class="r">Index RAM</th><th class="r">Total RAM</th><th>Actions</th></tr></thead>
 <tbody></tbody>
 </table>
 </div>
@@ -510,6 +511,14 @@ body{display:flex;flex-direction:column}
 <h3>Columns</h3>
 <table class="browse-table" id="tbl-columns">
 <thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>Key</th><th>Actions</th></tr></thead>
+<tbody></tbody>
+</table>
+</div>
+<div class="detail-section">
+<p id="table-memory" style="color:#888;font-size:.8rem"></p>
+<h3>Constraints</h3>
+<table class="browse-table" id="tbl-constraints">
+<thead><tr><th>Name</th><th>Type</th><th>Columns</th><th>Reference</th><th>ON UPDATE</th><th>ON DELETE</th><th>Actions</th></tr></thead>
 <tbody></tbody>
 </table>
 </div>
@@ -691,6 +700,14 @@ if(bytes>=1073741824)return(bytes/1073741824).toFixed(1)+" GB";
 if(bytes>=1048576)return(bytes/1048576).toFixed(0)+" MB";
 if(bytes>=1024)return(bytes/1024).toFixed(0)+" KB";
 return bytes+" B";
+}
+function memoryCell(bytes){
+bytes=Number(bytes)||0;
+return "<td class='r' title='"+bytes+" bytes'>"+(bytes/1048576).toFixed(3)+" MiB</td>";
+}
+function quoteSQLIdentifier(name){return "`"+String(name).replace(/`/g,"``")+"`";}
+function constraintDropSQL(table,name,foreign){
+return "ALTER TABLE "+quoteSQLIdentifier(table)+(foreign?" DROP FOREIGN KEY ":" DROP INDEX ")+quoteSQLIdentifier(name);
 }
 function esc(s){var d=document.createElement("span");d.textContent=String(s);return d.innerHTML}
 function attr(s){return esc(s).replace(/'/g,"&#39;").replace(/\"/g,"&quot;")}
@@ -1779,9 +1796,9 @@ var d=data[i];
 var dbn=esc(encodeURIComponent(dbname)),tn=esc(encodeURIComponent(d.name));
 var showTableMaintenance=d.maintenance_class==="user";
 var destructiveActions=(showTableMaintenance&&d.can_truncate?" <button class='btn-warn' data-trunctbl='"+esc(d.name)+"'>Truncate</button>":"")+(showTableMaintenance&&d.can_drop?" <button class='btn-danger' data-droptbl='"+esc(d.name)+"'>Drop</button>":"");
-h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dbn+"/@"+tn+"'\" title='"+esc(d.name)+"'>"+esc(truncName(d.name))+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows===null?"<span style=\"color:#888\">N/A</span>":d.rows)+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-querytbl='"+esc(d.name)+"'>Query</button>"+destructiveActions+"</td></tr>";
+h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dbn+"/@"+tn+"'\" title='"+esc(d.name)+"'>"+esc(truncName(d.name))+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows===null?"<span style=\"color:#888\">N/A</span>":d.rows)+"</td>"+memoryCell(d.data_size_bytes)+memoryCell(d.index_size_bytes)+memoryCell(d.size_bytes)+"<td class='action-cell'><button class='btn-warn' data-querytbl='"+esc(d.name)+"'>Query</button>"+destructiveActions+"</td></tr>";
 }
-tb.innerHTML=h||"<tr><td colspan='7' style='color:#888;text-align:center'>No tables</td></tr>";
+tb.innerHTML=h||"<tr><td colspan='9' style='color:#888;text-align:center'>No tables</td></tr>";
 tb.querySelectorAll("[data-trunctbl]").forEach(function(btn){
 btn.onclick=function(e){e.stopPropagation();var tbl=btn.getAttribute("data-trunctbl");if(window.confirm("Truncate table '"+tbl+"'? All data will be deleted."))execSQL(dbname,"TRUNCATE TABLE `"+tbl+"`",function(){route()})};
 });
@@ -1796,6 +1813,7 @@ btn.onclick=function(e){e.stopPropagation();openConsole(dbname,"SELECT * FROM `"
 function renderDetail(data,dbname,tblname){
 /* meta cards */
 var meta=data.meta||{};
+document.getElementById("table-memory").textContent="Resident RAM: data "+((data.data_size_bytes||0)/1048576).toFixed(3)+" MiB + indexes "+((data.index_size_bytes||0)/1048576).toFixed(3)+" MiB = total "+((data.size_bytes||0)/1048576).toFixed(3)+" MiB. Data includes metadata and caches; hover over table-list sizes for exact bytes.";
 /* engine: display name → SQL keyword */
 var engines=[
 {v:"safe",sql:"SAFE"},
@@ -1849,6 +1867,32 @@ ch+="<tr><td>"+esc(c.name)+"</td><td>"+esc(c.type)+"</td><td>"+(c.nullable?"<spa
 document.querySelector("#tbl-columns tbody").innerHTML=ch||"<tr><td colspan='5' style='color:#888;text-align:center'>No columns</td></tr>";
 document.querySelectorAll("#tbl-columns [data-dropcol]").forEach(function(btn){
 btn.onclick=function(){var col=btn.getAttribute("data-dropcol");if(window.confirm("Drop column '"+col+"' from "+tblname+"? This cannot be undone!"))execSQL(dbname,"ALTER TABLE `"+tblname+"` DROP COLUMN `"+col+"`",function(){route()})};
+});
+/* Constraints come from show's immutable declaration snapshot. Incoming foreign
+   keys are displayed too; deletion must target their declaring table. */
+var constraints=[];
+(meta.uniques||[]).forEach(function(u){
+constraints.push({name:u.name||u.id,id:u.id,type:u.id==="PRIMARY"?"PRIMARY KEY":"UNIQUE"+(u.nulls_not_distinct?" (NULLS NOT DISTINCT)":""),cols:u.cols,table:tblname,foreign:false});
+});
+(meta.foreign_keys||[]).forEach(function(fk){
+var incoming=fk.role==="referenced";
+constraints.push({name:fk.id,id:fk.id,type:incoming?"FOREIGN KEY (incoming)":"FOREIGN KEY",cols:fk.cols,
+reference:fk.other_table+" ("+(fk.other_cols||[]).join(", ")+")",update:fk.on_update,del:fk.on_delete,
+table:incoming?fk.other_table:tblname,foreign:true,incoming:incoming});
+});
+var constraintBody=document.querySelector("#tbl-constraints tbody");
+constraintBody.innerHTML=constraints.map(function(c,i){
+/* Incoming declarations may belong to a table with different maintenance rights.
+   Its own structure view exposes the delete action with that table's rights. */
+var action=meta.can_alter&&!c.incoming?"<button class='btn-danger' data-dropconstraint='"+i+"'>Drop</button>":"";
+return "<tr><td>"+esc(c.name)+"</td><td>"+esc(c.type)+"</td><td>"+esc((c.cols||[]).join(", "))+"</td><td>"+esc(c.reference||"")+"</td><td>"+esc(c.update||"")+"</td><td>"+esc(c.del||"")+"</td><td class='action-cell'>"+action+"</td></tr>";
+}).join("")||"<tr><td colspan='7' style='color:#888;text-align:center'>No constraints</td></tr>";
+constraintBody.querySelectorAll("[data-dropconstraint]").forEach(function(btn){
+btn.onclick=function(){
+var c=constraints[Number(btn.getAttribute("data-dropconstraint"))];
+if(window.confirm("Drop constraint '"+c.name+"' from "+c.table+"?"))
+execSQL(dbname,constraintDropSQL(c.table,c.id,c.foreign),function(){route()});
+};
 });
 /* shards - clickable to shard detail, with partition range columns if applicable */
 var shards=data.shards||[];
