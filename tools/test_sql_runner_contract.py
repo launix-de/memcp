@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import itertools
 import requests
 import signal
+import subprocess
 import socket
 import sys
 import tempfile
@@ -2606,6 +2607,149 @@ class RAMAbortOwnershipContractTest(unittest.TestCase):
             runner.trip_ram_abort("repeated")
             proc.kill.assert_called_once_with()
             discover.assert_not_called()
+
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "POSIX process-group ownership")
+class PerformanceProcessOwnershipContractTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.repository = Path(__file__).resolve().parents[1]
+
+    def wait_ready(self, owner, path):
+        deadline = time.monotonic() + 5
+        while not path.exists():
+            if owner.poll() is not None:
+                self.fail("fixture owner exited before ready: " + str(owner.returncode))
+            if time.monotonic() >= deadline:
+                self.fail("fixture did not become ready")
+            time.sleep(0.01)
+
+    def alive(self, pid):
+        try:
+            # A killed orphan can await PID1 reaping, but cannot run or write.
+            return Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1].split()[0] != "Z"
+        except FileNotFoundError:
+            return False
+
+    def owned_tree(self, signum=None, during_spawn=False, success=False):
+        grandchild = ("import os,signal,sys,time; from pathlib import Path; "
+                      "signal.signal(signal.SIGINT,signal.SIG_IGN); "
+                      "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+                      "Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)")
+        fixture = """
+import os,signal,subprocess,sys,time
+from pathlib import Path
+root=Path(sys.argv[1])
+signal.signal(signal.SIGINT,signal.SIG_IGN)
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+(root/'group').write_text(str(os.getpgrp()))
+(root/'parent').write_text(str(os.getpid()))
+subprocess.Popen([sys.executable,'-c',sys.argv[2],str(root/'descendant')])
+while not (root/'descendant').exists(): time.sleep(.01)
+if sys.argv[3]=='success': sys.exit(0)
+time.sleep(60)
+"""
+        owner_code = """
+import os,signal,subprocess,sys,time
+from pathlib import Path
+import run_sql_tests as runner
+root=Path(sys.argv[1])
+if sys.argv[2]=='spawn':
+    original=runner.subprocess.Popen
+    def spawning(*args,**kwargs):
+        process=original(*args,**kwargs)
+        while not (root/'descendant').exists(): time.sleep(.01)
+        os.kill(os.getpid(),signal.SIGTERM)
+        return process
+    runner.subprocess.Popen=spawning
+with (root/'output').open('w') as log:
+    result=runner.run_performance_process(
+        [sys.executable,'-c',sys.argv[3],str(root),sys.argv[4],sys.argv[5]],
+        cwd=sys.argv[6],env=os.environ.copy(),stdout=log,stderr=subprocess.STDOUT)
+sys.exit(result.returncode)
+"""
+        owner = subprocess.Popen(
+            [sys.executable, "-c", owner_code, str(self.directory),
+             "spawn" if during_spawn else "normal", fixture, grandchild,
+             "success" if success else "wait", str(self.repository)],
+            cwd=self.repository, start_new_session=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.wait_ready(owner, self.directory / "descendant")
+            if signum is not None:
+                owner.send_signal(signum)
+            self.assertEqual(owner.wait(timeout=5), 0 if success else 128 + (signum or signal.SIGTERM))
+            for name in ("parent", "descendant"):
+                pid = int((self.directory / name).read_text())
+                deadline = time.monotonic() + 2
+                while self.alive(pid) and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertFalse(self.alive(pid), f"owned {name} still running after owner returned")
+        finally:
+            groups = [owner.pid]
+            if (self.directory / "group").exists():
+                groups.append(int((self.directory / "group").read_text()))
+            for group in groups:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            owner.wait(timeout=5)
+
+    def test_term_cleans_running_fixture_and_descendant(self):
+        self.owned_tree(signal.SIGTERM)
+
+    def test_interrupt_cleans_running_fixture_and_descendant(self):
+        self.owned_tree(signal.SIGINT)
+
+    def test_signal_during_spawn_does_not_lose_child_ownership(self):
+        self.owned_tree(during_spawn=True)
+
+    def test_successful_fixture_cannot_leave_background_descendant(self):
+        self.owned_tree(success=True)
+
+    def test_normal_nonzero_exit_is_preserved(self):
+        import run_sql_tests as runner
+        result = runner.run_performance_process(
+            [sys.executable, "-c", "raise SystemExit(7)"], stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.assertEqual(result.returncode, 7)
+
+    def test_workflow_entry_delivers_signals_directly_to_runner(self):
+        import yaml
+        for filename in ("performance.yml", "jit-performance.yml"):
+            with self.subTest(workflow=filename):
+                workspace = self.directory / filename
+                (workspace / "candidate").mkdir(parents=True)
+                (workspace / "base/tests/performance").mkdir(parents=True)
+                (workspace / "base/tests/performance/ci-workloads.json").write_text("{}")
+                (workspace / "bin").mkdir()
+                marker = workspace / "runner-pid"
+                stub = workspace / "bin/python3"
+                stub.write_text(f"#!{sys.executable}\nimport os,time\nfrom pathlib import Path\nPath({str(marker)!r}).write_text(str(os.getpid()))\ntime.sleep(60)\n")
+                stub.chmod(0o700)
+                workflow = yaml.safe_load((self.repository / ".github/workflows" / filename).read_text())
+                step = next(step for job in workflow["jobs"].values() for step in job.get("steps", []) if step.get("id") == "measure")
+                owner = subprocess.Popen(["bash", "-e", "-c", step["run"]], cwd=workspace,
+                    env=dict(os.environ, GITHUB_WORKSPACE=str(workspace), PATH=str(workspace / "bin") + ":" + os.environ["PATH"]),
+                    start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    self.wait_ready(owner, marker)
+                    self.assertEqual(int(marker.read_text()), owner.pid,
+                                     "entry shell must hand signal ownership to the runner")
+                    owner.terminate()
+                    self.assertEqual(owner.wait(timeout=3), -signal.SIGTERM)
+                finally:
+                    try:
+                        os.killpg(owner.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    owner.wait(timeout=5)
 
 
 if __name__ == "__main__":
