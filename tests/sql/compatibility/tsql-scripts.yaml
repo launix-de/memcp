@@ -7,6 +7,9 @@ metadata:
   requires_tds: true
 setup: []
 test_cases:
+- name: Submitted UTF8 scripts accept a leading byte order mark
+  sql: "\uFEFFSELECT 9 AS value"
+  expect: {rows: 1, data: [{value: 9}]}
 - name: GO separates physical batches and preserves repetition
   scm: |
     (equal? (tsql_script_batches "SELECT 1\nGO 3\nSELECT 2\nGO\n")

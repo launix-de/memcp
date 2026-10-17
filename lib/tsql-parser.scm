@@ -1249,6 +1249,10 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(cons (list "text" text "repeat" repetitions) (car state))) '() '() '() false))
 		(list (car state) (cons (concat line newline) (nth state 1)) '() '() false)))))
 (define tsql_script_batches (lambda (text) (begin
+	/* A UTF8 export may begin with a byte order mark. Strip that one transport
+	marker only; the same character within SQL literals remains ordinary data. */
+	(define text (if (and (>= (strlen text) 3) (equal? (substr text 0 3) (unicode_char 65279)))
+		(substr text 3) text))
 	(define state (reduce (tsql_script_tokens text) (lambda (state token)
 		(match token
 			'("newline" newline) (tsql_script_flush_line state newline)

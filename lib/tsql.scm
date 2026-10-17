@@ -393,7 +393,19 @@ The caller supplies its ordinary authenticated session; file I/O stays in load. 
 	/* Reject an unauthorized destination before reading the caller's source.
 	Individual statements still use the ordinary table-level policy. */
 	((sql_policy (session "username")) schema true false)
-	(tsql_execute_request schema (load stream) session nil 0 print (lambda args true)))))
+	/* An import borrows an existing caller transaction. Otherwise it owns only
+	explicit transactions opened by this script, and must release them on failure
+	or unfinished input. Completed autocommit statements retain their commits. */
+	(define caller_transaction (session "transaction"))
+	(define outcome (try (lambda ()
+		(list true (tsql_execute_request schema (load stream) session nil 0 print (lambda args true))))
+		(lambda (failure) (list false failure))))
+	(define unfinished (and (nil? caller_transaction) (session "transaction")))
+	/* Cleanup runs once, outside the request's catch: a persistence failure
+	during rollback must propagate rather than retry the same native cleanup. */
+	(if unfinished (tx_rollback session) true)
+	(if (not (car outcome)) (error (cadr outcome))
+		unfinished (error "unfinished import transaction") (cadr outcome)))))
 /* Source compilers capture definitions only. Execution receives the caller's
 statement owner, account, transaction session, arguments and output callbacks. */
 (define tsql_procedure_compile (lambda (source context) (begin
