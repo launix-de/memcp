@@ -472,6 +472,64 @@ only encodes Unicode scalars. Isolated surrogate code units are unsupported. */
 	(sql_info (list tsql_nchar (sql_info_formula info) (has? '("MONEY" "SMALLMONEY") type)) "NCHAR" nil))))
 (define tsql_nchar_expr (lambda (value)
 	(list (quote sql_compile_expr) (quote tsql_compile_nchar) value)))
+/* Identifier utilities consume text, not catalog objects. Keep escaping and
+multipart syntax in this frontend; neither function resolves a native table.
+The sysname bound is in UTF-16 code units, independently of UTF-8 storage. */
+(define tsql_sysname? (lambda (text)
+	(or (<= (strlen text) 128)
+		(and (<= (strlen text) 384)
+			(<= (reduce (split text "") (lambda (units character)
+				(+ units (if (equal? (strlen character) 4) 2 1))) 0) 128)))))
+(define tsql_quotename (lambda (text delimiter)
+	(if (or (nil? text) (nil? delimiter)) nil
+		(not (tsql_sysname? text)) nil
+		(begin
+			(define pair (match delimiter
+				"[" '("[" "]") "]" '("[" "]")
+				"(" '("(" ")") ")" '("(" ")")
+				"{" '("{" "}") "}" '("{" "}")
+				"<" '("<" ">") ">" '("<" ">")
+				"\"" '("\"" "\"") "'" '("'" "'") "`" '("`" "`") _ nil))
+			(if pair (concat (car pair) (replace text (cadr pair) (concat (cadr pair) (cadr pair))) (cadr pair)) nil)))))
+/* Reuse the SQL identifier unescaper for quoted parts. The scalar utility also
+accepts numeric and keyword components, without treating them as SQL tokens.
+An explicit full-input alternative returns NULL for malformed names; parser or
+runtime errors are never caught and classified by their message text. */
+(define tsql_name_parts (parser (or
+	(parser '((define parts (+ (or tsql_identifier_quoted
+		(regex "[\\p{L}\\p{N}_@$#]+") (parser empty nil)) "."))
+		(regex "\\z" false false)) parts)
+	(parser (regex "(?s).*" false false) nil))))
+(define tsql_parsename (lambda (text piece)
+	(if (or (nil? text) (nil? piece)) nil
+		(or (< piece 1) (> piece 4)) nil
+		(begin
+			(define parts (tsql_name_parts text))
+			(if (or (nil? parts) (> (count parts) 4) (nil? (car (reverse parts))) (> piece (count parts))) nil
+				(begin
+					(define part (nth parts (- (count parts) piece)))
+					(if (and part (tsql_sysname? part)) part nil)))))))
+(define tsql_identifier_function_compiler (lambda (name) (lambda (infos) (begin
+	(define quoting (equal? name "QUOTENAME"))
+	(if (if quoting (has? '(1 2) (count infos)) (equal? (count infos) 2)) true
+		(error name " has an invalid argument count"))
+	(define text_info (car infos))
+	(if (tsql_binary_type? (sql_info_type text_info))
+		(error name " binary input conversion is not implemented") true)
+	/* Reuse the existing type-directed text compiler, including numeric/bit and
+	calendar spelling. The callback reads declarations, never SCM value tags. */
+	(define text (sql_info_formula ((tsql_text_compiler -1 true false) (list text_info))))
+	(define other (if (equal? (count infos) 1) "["
+		quoting (begin
+			(define info (cadr infos))
+			(if (tsql_binary_type? (sql_info_type info))
+				(error name " binary delimiter conversion is not implemented") true)
+			(sql_info_formula ((tsql_text_compiler -1 true false) (list info))))
+		(sql_type_formula '() (tsql_cast_expr
+			(list (quote sql_type_expr) (sql_info_formula (cadr infos)) (sql_info_type (cadr infos)) (sql_info_collation (cadr infos)))
+			"INT" '()))))
+	(sql_info (list (if quoting (quote tsql_quotename) (quote tsql_parsename)) text other)
+		"NVARCHAR" (sql_info_collation text_info))))))
 /* Export-style day/month/year spelling is a frontend concern. Parse into Unix
 seconds with the existing date primitives; no temporal runtime type is added.
 Two-digit years use the default 1950..2049 window. Fractional precision and the
@@ -1231,6 +1289,8 @@ The shared expression compiler still owns the SQL type; these additional wire
 dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
+	((symbol tsql_quotename) _value _delimiter) '(258)
+	((symbol tsql_parsename) _value _piece) '(128)
 	((symbol sql_compile_expr) ((symbol tsql_try_conversion_compiler) type ((symbol quote) dimensions) _style _bounded) _value)
 	(tsql_decl_dimensions type (if (and (empty_list? dimensions)
 		(has? '("VARCHAR" "NVARCHAR" "CHAR" "NCHAR" "BINARY" "VARBINARY") type)) '(30) dimensions))
@@ -1320,8 +1380,11 @@ compiling; the emitted row callback contains no SQL type tags or dispatch. */
 	(sql_call_info (coalesce (tsql_builtins name) (error "unknown function " name)) infos))))
 
 (define tsql_builtin_expr (lambda (name arguments) (begin
-	(if (tsql_builtins name) true (error "unknown function " name))
-	(cons (quote sql_compile_expr) (cons (list (quote tsql_builtin_compiler) name) arguments)))))
+	(if (has? '("QUOTENAME" "PARSENAME") name)
+		(cons (quote sql_compile_expr) (cons (list (quote tsql_identifier_function_compiler) name) arguments))
+		(begin
+			(if (tsql_builtins name) true (error "unknown function " name))
+			(cons (quote sql_compile_expr) (cons (list (quote tsql_builtin_compiler) name) arguments)))))))
 
 (define tsql_builtins (lambda (name) (match name
 	"ISNULL" coalesceNil

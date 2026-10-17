@@ -363,6 +363,39 @@ test_cases:
           rows: 0
           columns:
           - value
+  - name: Identifier functions use actual prepared TDS text bindings
+    tds:
+      statements:
+      - sql: SELECT QUOTENAME(@raw) AS quoted,PARSENAME(@raw,1) AS component
+        prepare: true
+        parameters:
+        - name: raw
+          value: a]b
+        expect:
+          rows: 1
+          data:
+          - quoted: '[a]]b]'
+            component: null
+      - sql: SELECT QUOTENAME(@raw) AS quoted,PARSENAME(@raw,1) AS component
+        prepare: true
+        parameters:
+        - name: raw
+          value: owner.item
+        expect:
+          rows: 1
+          data:
+          - quoted: '[owner.item]'
+            component: item
+  - name: Identifier functions preserve typed NULLs over TDS
+    tds:
+      statements:
+      - sql: SELECT QUOTENAME(NULL) AS quoted,PARSENAME(NULL,1) AS component
+        expect:
+          rows: 1
+          data:
+          - quoted: null
+            component: null
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_wire_contract
   - sql: DROP TABLE IF EXISTS tsql_wire_text

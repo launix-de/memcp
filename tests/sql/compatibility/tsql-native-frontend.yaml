@@ -3156,16 +3156,110 @@ test_cases:
     expect:
       error: true
   - name: Identifier function metadata is independent of rows
-    scm: "(begin\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP(0) QUOTENAME(NULL) AS q,PARSENAME(NULL,1)\
-      \ AS p\" \"\" (newsession)))\n  (and (equal? (map fields (lambda (f) (f \"sql_type\"))) '(\"NVARCHAR\" \"NVARCHAR\"\
-      ))\n    (equal? (map fields (lambda (f) (f \"size\"))) '(516 256))))"
+    scm: |-
+      (begin
+        (define fields (tds_describe "memcp-tests" "SELECT TOP(0) QUOTENAME(NULL) AS q,PARSENAME(NULL,1) AS p" "" (newsession)))
+        (and (equal? (map fields (lambda (f) (f "sql_type"))) '("NVARCHAR" "NVARCHAR"))
+          (equal? (map fields (lambda (f) (f "size"))) '(516 256))))
     expect:
       result: true
   - name: Identifier function compiler markers disappear before execution
-    scm: "(not (regexp_test (string (parse_tsql \"memcp-tests\"\n  \"SELECT QUOTENAME(N'a]b'),PARSENAME(N'x.y',1)\"\
-      \ nil nil nil)) \"sql_type_expr|sql_compile_expr\"))"
+    scm: |-
+      (not (regexp_test (string (parse_tsql "memcp-tests"
+        "SELECT QUOTENAME(N'a]b'),PARSENAME(N'x.y',1)" nil nil nil)) "sql_type_expr|sql_compile_expr"))
     expect:
       result: true
+
+  - name: Identifier functions resolve national column contracts
+    sql: SELECT id,QUOTENAME(note) AS value,PARSENAME(note,1) AS part FROM tsql_setup_memo ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        value: '[pending]'
+        part: pending
+      - id: 2
+        value: null
+        part: null
+      - id: 3
+        value: '[pending]'
+        part: pending
+  - name: Identifier functions retain SQL types through derived projections
+    sql: SELECT QUOTENAME(note) AS value FROM (SELECT note FROM tsql_setup_memo WHERE id=1) q
+    expect:
+      rows: 1
+      data:
+      - value: '[pending]'
+  - name: Identifier functions compose with native grouping
+    sql: SELECT QUOTENAME(note) AS value,COUNT(*) AS n FROM tsql_setup_memo GROUP BY note ORDER BY value
+    expect:
+      rows: 2
+      data:
+      - value: null
+        n: 1
+      - value: '[pending]'
+        n: 2
+  - name: Identifier functions compose with native scalar aggregates
+    sql: SELECT QUOTENAME(MAX(note)) AS value FROM tsql_setup_memo
+    expect:
+      rows: 1
+      data:
+      - value: '[pending]'
+  - name: Identifier functions compile every UNION branch
+    sql: SELECT QUOTENAME(N'x') AS value UNION ALL SELECT QUOTENAME(N'y') AS value
+    expect:
+      rows: 2
+      data:
+      - value: '[x]'
+      - value: '[y]'
+  - name: Identifier function portable view supports tsql consumers
+    syntax: tsql
+    setup:
+    - sql: DROP VIEW IF EXISTS identifier_function_portable
+      syntax: tsql
+    - sql: CREATE VIEW identifier_function_portable AS SELECT QUOTENAME(N'a]b') AS quoted,PARSENAME(N'x.y',1) AS component
+      syntax: tsql
+    sql: SELECT * FROM identifier_function_portable
+    expect:
+      rows: 1
+      data:
+      - quoted: '[a]]b]'
+        component: y
+    cleanup:
+    - sql: DROP VIEW identifier_function_portable
+      syntax: tsql
+  - name: Identifier function portable view supports mysql consumers
+    syntax: mysql
+    setup:
+    - sql: DROP VIEW IF EXISTS identifier_function_portable
+      syntax: tsql
+    - sql: CREATE VIEW identifier_function_portable AS SELECT QUOTENAME(N'a]b') AS quoted,PARSENAME(N'x.y',1) AS component
+      syntax: tsql
+    sql: SELECT * FROM identifier_function_portable
+    expect:
+      rows: 1
+      data:
+      - quoted: '[a]]b]'
+        component: y
+    cleanup:
+    - sql: DROP VIEW identifier_function_portable
+      syntax: tsql
+  - name: Identifier function portable view supports psql consumers
+    syntax: psql
+    setup:
+    - sql: DROP VIEW IF EXISTS identifier_function_portable
+      syntax: tsql
+    - sql: CREATE VIEW identifier_function_portable AS SELECT QUOTENAME(N'a]b') AS quoted,PARSENAME(N'x.y',1) AS component
+      syntax: tsql
+    sql: SELECT * FROM identifier_function_portable
+    expect:
+      rows: 1
+      data:
+      - quoted: '[a]]b]'
+        component: y
+    cleanup:
+    - sql: DROP VIEW identifier_function_portable
+      syntax: tsql
 
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
