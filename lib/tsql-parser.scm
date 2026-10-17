@@ -1182,7 +1182,10 @@ character dimensions retain the existing unbounded text conversion contract. */
 		(and (has? tsql_addition_text_types target) (has? tsql_addition_numeric_types source))
 		(list (quote tsql_cast_text) formula -1 (has? '("NVARCHAR" "NCHAR") target))
 		(and (has? tsql_addition_numeric_types target)
-			(or (has? tsql_addition_numeric_types source) (has? tsql_addition_text_types source)))
+			(or (has? tsql_addition_numeric_types source) (has? tsql_addition_text_types source)
+				/* The existing integer cast selects byte decoding from the SQL
+				declaration; the same payload declared as text remains decimal text. */
+				(and (has? '("BINARY" "VARBINARY") source) (tsql_integer_width target))))
 		(if (has? '("DECIMAL" "MONEY" "SMALLMONEY") target)
 			(list (quote tsql_cast_float) formula)
 			(sql_type_lower_annotations (tsql_cast_expr typed target '())))

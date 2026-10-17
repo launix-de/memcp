@@ -3112,7 +3112,6 @@ test_cases:
   - name: ISNULL binary replacement can convert to a declared integer
     sql: SELECT ISNULL(CAST(NULL AS INT),0x2A) AS value
     expect: {rows: 1,data: [{value: 42}]}
-    noncritical: true
 
   - name: ISNULL monetary replacements round to the first integer contract
     sql: SELECT id,ISNULL(CAST(NULL AS INT),m) AS positive,ISNULL(CAST(NULL AS INT),s) AS negative FROM tsql_null_money ORDER BY id
@@ -3806,6 +3805,191 @@ test_cases:
               binary_hex: ''
             missing_value: null
             missing_bytes: null
+
+
+  - name: Binary conditional conversions use declared payload identity
+    sql: SELECT ISNULL(CAST(NULL AS INT),0x3432) AS bytes_value,ISNULL(CAST(NULL AS INT),'42') AS text_value
+    expect:
+      rows: 1
+      data:
+      - bytes_value: 13362
+        text_value: 42
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_binary_conditional
+    - sql: CREATE TABLE tsql_binary_conditional(id INT PRIMARY KEY,v INT,b VARBINARY(8))
+    - sql: INSERT tsql_binary_conditional VALUES(1,7,0xFFFFFFFFFFFFFFFF),(2,NULL,0x2A),(3,NULL,NULL)
+  - name: Binary conditional replacement respects each integer width
+    sql: SELECT ISNULL(CAST(NULL AS TINYINT),0xFF) AS tiny,ISNULL(CAST(NULL AS SMALLINT),0xFFFF) AS small,ISNULL(CAST(NULL AS INT),0xFFFF) AS widened,ISNULL(CAST(NULL
+      AS BIGINT),0xFFFFFFFFFFFFFFFF) AS big
+    expect:
+      rows: 1
+      data:
+      - tiny: 255
+        small: -1
+        widened: 65535
+        big: -1
+  - name: Binary conditional replacement preserves the signed integer minimum
+    sql: SELECT ISNULL(CAST(NULL AS BIGINT),0x8000000000000000) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -9223372036854775808
+  - name: Binary conditional coalesce selects the declared integer contract
+    sql: SELECT COALESCE(CAST(NULL AS INT),0x2A) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 42
+  - name: Binary conditional coalesce converts a typed binary null
+    sql: SELECT COALESCE(CAST(NULL AS VARBINARY(4)),CAST(257 AS SMALLINT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 257
+  - name: Binary conditional case converts its selected byte arm
+    sql: SELECT CASE WHEN 1=1 THEN 0x2A ELSE CAST(7 AS INT) END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 42
+  - name: Binary conditional iif converts its selected byte arm
+    sql: SELECT IIF(1=1,0x2A,CAST(7 AS INT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 42
+  - name: Binary conditional choose converts its selected byte arm
+    sql: SELECT CHOOSE(2,CAST(7 AS INT),0x2A) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 42
+  - name: Binary conditional nullif compares converted operands
+    sql: SELECT NULLIF(CAST(42 AS INT),0x2A) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary conditional nullif preserves its first binary contract
+    sql: SELECT CAST(NULLIF(0x2A,CAST(43 AS INT)) AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 42
+  - name: Binary conditional native columns keep lazy replacement evaluation
+    sql: SELECT id,ISNULL(v,b) AS value FROM tsql_binary_conditional ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        value: 7
+      - id: 2
+        value: 42
+      - id: 3
+        value: null
+  - name: Binary conditional native aggregation consumes converted values
+    sql: SELECT SUM(ISNULL(v,b)) AS value FROM tsql_binary_conditional
+    expect:
+      rows: 1
+      data:
+      - value: 49
+  - name: Binary conditional native predicates consume converted values
+    sql: SELECT id FROM tsql_binary_conditional WHERE ISNULL(v,b)=42 ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 2
+  - name: Binary conditional typed binary null remains null
+    sql: SELECT ISNULL(CAST(NULL AS INT),CAST(NULL AS VARBINARY(4))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Binary conditional unused byte conversion remains lazy
+    sql: SELECT ISNULL(CAST(7 AS INT),0x010203040506070809) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 7
+  - name: Binary conditional invalid text still fails
+    sql: SELECT ISNULL(CAST(NULL AS INT),'not-an-integer') AS value
+    expect:
+      error: true
+  - name: Binary conditional empty descriptors retain declared widths
+    scm: "(begin\n  (define fields (tds_describe \"memcp-tests\" \"SELECT ISNULL(CAST(NULL AS INT),0x2A) AS a,COALESCE(CAST(NULL AS SMALLINT),0x2A)\
+      \ AS b,IIF(1=1,0x2A,CAST(7 AS BIGINT)) AS c WHERE 1=0\" \"\" (newsession)))\n  (and (equal? (map fields (lambda (field) (field \"sql_type\"\
+      ))) '(\"INT\" \"SMALLINT\" \"BIGINT\"))\n    (equal? (map fields (lambda (field) (field \"size\"))) '(4 2 8))))"
+    expect:
+      result: true
+  - name: Binary conditional stored view consumed by sql
+    sql: SELECT id,value FROM tsql_binary_conditional_view ORDER BY id
+    syntax: sql
+    setup:
+    - sql: DROP VIEW IF EXISTS tsql_binary_conditional_view
+      syntax: tsql
+    - sql: CREATE VIEW tsql_binary_conditional_view AS SELECT id,ISNULL(v,b) AS value FROM tsql_binary_conditional
+      syntax: tsql
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        value: 7
+      - id: 2
+        value: 42
+      - id: 3
+        value: null
+    cleanup:
+    - sql: DROP VIEW IF EXISTS tsql_binary_conditional_view
+      syntax: tsql
+  - name: Binary conditional stored view consumed by psql
+    sql: SELECT id,value FROM tsql_binary_conditional_view ORDER BY id
+    syntax: psql
+    setup:
+    - sql: DROP VIEW IF EXISTS tsql_binary_conditional_view
+      syntax: tsql
+    - sql: CREATE VIEW tsql_binary_conditional_view AS SELECT id,ISNULL(v,b) AS value FROM tsql_binary_conditional
+      syntax: tsql
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        value: 7
+      - id: 2
+        value: 42
+      - id: 3
+        value: null
+    cleanup:
+    - sql: DROP VIEW IF EXISTS tsql_binary_conditional_view
+      syntax: tsql
+  - name: Binary conditional fixture cleanup
+    sql: DROP TABLE tsql_binary_conditional
+
+  - name: Binary conditional image requires an explicit conversion
+    sql: SELECT ISNULL(CAST(NULL AS INT),payload) AS value FROM tsql_binary_conditional_image
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_binary_conditional_image
+    - sql: CREATE TABLE tsql_binary_conditional_image(payload IMAGE)
+    - sql: INSERT tsql_binary_conditional_image VALUES(0x2A)
+    expect:
+      error: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_binary_conditional_image
+  - name: Binary conditional explicit image conversion retains the native byte path
+    sql: SELECT ISNULL(CAST(NULL AS INT),CAST(payload AS VARBINARY(4))) AS value FROM tsql_binary_conditional_image
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_binary_conditional_image
+    - sql: CREATE TABLE tsql_binary_conditional_image(payload IMAGE)
+    - sql: INSERT tsql_binary_conditional_image VALUES(0x2A)
+    expect:
+      rows: 1
+      data:
+      - value: 42
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_binary_conditional_image
+
+  - name: Binary conditional fixed sources retain their declared padding
+    sql: SELECT ISNULL(CAST(NULL AS INT),CAST(0x2A AS BINARY(2))) AS padded_bytes,ISNULL(CAST(NULL AS INT),CAST(42 AS BINARY(2))) AS padded_number
+    expect: {rows: 1,data: [{padded_bytes: 10752,padded_number: 42}]}
 
 
 cleanup:
