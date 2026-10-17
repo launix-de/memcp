@@ -1365,6 +1365,9 @@ compiling; the emitted row callback contains no SQL type tags or dispatch. */
 	(cons (quote sql_compile_expr) (cons (list (quote tsql_builtin_compiler) name) arguments)))))
 
 (define tsql_builtins (lambda (name) (match name
+	/* First-class callers retain lazy fallback; SQL calls use the declared
+	ISNULL compiler contract rather than this scalar operator alias. */
+	"ISNULL" coalesceNil
 	"LEN" (lambda (value) (if (nil? value) nil (strlen (sql_rtrim value))))
 	_ (if (has? '("ABS" "CEILING" "FLOOR" "ROUND" "SQRT" "UPPER" "LOWER" "REPLACE" "SUBSTRING" "CONCAT" "YEAR" "MONTH" "DAY") name)
 		(sql_builtins name) nil))))
