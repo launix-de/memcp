@@ -2249,8 +2249,7 @@ test_cases:
   - name: Stored view contracts reject invalid declared conversions
     setup:
     - sql: DROP VIEW IF EXISTS portable_contract_view
-    - sql: CREATE VIEW portable_contract_view AS SELECT CAST(day_value AS VARBINARY(3)) AS value FROM portable_contract_input
-    sql: SELECT * FROM portable_contract_view
+    sql: CREATE VIEW portable_contract_view AS SELECT CAST(day_value AS VARBINARY(3)) AS value FROM portable_contract_input
     expect:
       error: true
       contains: binary conversion from DATE is not implemented
