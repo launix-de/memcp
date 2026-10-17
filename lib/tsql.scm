@@ -779,12 +779,14 @@ Descriptor types below are frontend contracts, including for empty results. */
 		(if (has? integers name) (list "name" name "kind" 38 "size" 4 "flags" 1)
 			(list "name" name "kind" 231 "size" 8000 "flags" 1))))))
 /* (type name, ODBC code, precision, byte length, scale, radix, datetime subtype).
-Only declarations decide these values: an empty or all-NULL table is identical. */
+Only declarations decide these values: an empty or all-NULL table is identical.
+Metadata consumers resolve aliases through the same local declaration factory
+as expressions; public type names retain the original alias spelling. */
 (define tsql_metadata_type (lambda (column version) (begin
 	(define dimensions (column "Dimensions"))
 	(define length (if (empty_list? dimensions) 1 (car dimensions)))
 	(define type (toLower (column "RawType")))
-	(match type
+	(define contract (match type
 		"bigint" '("bigint" -5 19 8 0 10 nil)
 		"int" '("int" 4 10 4 0 10 nil)
 		"integer" '("int" 4 10 4 0 10 nil)
@@ -814,13 +816,16 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 			(has? '("varchar" "char" "nvarchar" "nchar" "binary" "varbinary") type)
 			(list type (match type "varchar" 12 "char" 1 "nvarchar" -9 "nchar" -8 "binary" -2 "varbinary" -3)
 				length (if (and (> length 0) (has? '("nvarchar" "nchar") type)) (* length 2) length) nil nil nil)
-			(error "unsupported metadata declaration type: " type))))))
+			(error "unsupported metadata declaration type: " type))))
+	(define declared (column "DeclaredType"))
+	(if (nil? declared) contract
+		(cons (cadr (tsql_alias_name_parts declared)) (cdr contract))))))
 (define tsql_metadata_column_row (lambda (schema name column ordinal version) (begin
 	(define contract (tsql_metadata_type column version))
 	(define subtype (nth contract 6))
-	(define type (car contract))
+	(define type (toLower (column "RawType")))
 	(list "TABLE_QUALIFIER" schema "TABLE_OWNER" "dbo" "TABLE_NAME" name
-		"COLUMN_NAME" (column "Field") "DATA_TYPE" (nth contract 1) "TYPE_NAME" type
+		"COLUMN_NAME" (column "Field") "DATA_TYPE" (nth contract 1) "TYPE_NAME" (car contract)
 		"PRECISION" (nth contract 2) "LENGTH" (nth contract 3) "SCALE" (nth contract 4)
 		"RADIX" (nth contract 5) "NULLABLE" (if (column "Null") 1 0)
 		"REMARKS" (if (equal? (column "Comment") "") nil (column "Comment"))
@@ -874,6 +879,9 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 	(define owner (coalesceNil (options "table_owner") "dbo"))
 	(define version (coalesceNil (options "odbcver") 2))
 	(if (has? '(2 3) version) true (error "unsupported ODBC version"))
+	/* One metadata request owns its alias factory; neither connection sessions
+	nor later requests retain resolved or negatively cached declarations. */
+	(define planning_session (newsession))
 	(define result (match procedure
 		"sp_datatype_info" (tsql_metadata_type_info options version)
 		"sp_datatype_info_100" (tsql_metadata_type_info options version)
@@ -889,7 +897,9 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 			(if (nil? (options "table_name")) (error "sp_columns requires a table name") true)
 			(define rows (if (tsql_metadata_match "dbo" owner true)
 				(merge (map (tsql_metadata_table_names schema (options "table_name") true policy) (lambda (name) (begin
-					(define columns (filter (show (table schema false name false)) (lambda (column) (not (internal_column_name? (column "Field"))))))
+					(define columns (map (filter (show (table schema false name false))
+						(lambda (column) (not (internal_column_name? (column "Field")))))
+						(lambda (column) (tsql_effective_column column planning_session))))
 					(map (filter (produceN (count columns)) (lambda (i)
 						(tsql_metadata_match ((nth columns i) "Field") (options "column_name") true)))
 						(lambda (i) (tsql_metadata_column_row schema name (nth columns i) (+ i 1) version))))))) '()))
@@ -903,7 +913,8 @@ Only declarations decide these values: an empty or all-NULL table is identical. 
 			(if (and (has? '("R" "V") kind) (has? '("C" "T" "S") scope) (has? '("O" "U") nullable)) true
 				(error "unsupported special-column option"))
 			(define rows (if (equal?? owner "dbo") (merge (map (tsql_metadata_table_names schema (options "table_name") false policy) (lambda (name) (begin
-				(define columns (show (table schema false name false)))
+				(define columns (map (show (table schema false name false))
+					(lambda (column) (tsql_effective_column column planning_session))))
 				(define keys ((tsql_metadata_constraints schema name) "Unique"))
 				(define primary (find keys (lambda (key) (equal? (key "Id") "PRIMARY"))))
 				(define candidate (coalesceNil primary (find keys (lambda (key)
