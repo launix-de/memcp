@@ -1225,4 +1225,40 @@ test_cases:
 - sql: DROP TABLE tsql_fractional_data
   name: 'Fixture cleanup 003: DROP TABLE tsql_fractional_data'
 
+- name: Calendar factories retain normalized aliases in compiler markers
+  scm: |
+    (map '("dd" "wk" "ww" "hh" "mi") (lambda (unit)
+      (list
+        (nth (cadr (tsql_dateadd_expr unit 1 "2026-03-15")) 1)
+        (nth (cadr (tsql_datediff_expr unit "2026-03-15" "2026-03-16" "INT")) 1)
+        (nth (cadr (tsql_datepart_expr unit "2026-03-15")) 1))))
+  expect:
+    data: [[[day, day, day], [week, week, week], [week, week, week], [hour, hour, hour], [minute, minute, minute]]]
+- name: Date difference aliases retain independent boundary constants
+  sql: SELECT DATEDIFF(dd,N'2026-03-15',N'2026-03-16') AS days,DATEDIFF(wk,N'2026-03-15',N'2026-03-16') AS weeks,DATEDIFF(hh,N'2026-03-15',N'2026-03-16') AS hours,DATEDIFF_BIG(mi,N'2026-03-15',N'2026-03-16') AS minutes
+  expect:
+    rows: 1
+    data: [{days: 1, weeks: 0, hours: 24, minutes: 1440}]
+- name: Date part aliases retain their normalized compile contracts
+  sql: SELECT DATEPART(hh,N'2026-03-15 12:13:14') AS hours,DATEPART(mi,N'2026-03-15 12:13:14') AS minutes,DATEPART(ss,N'2026-03-15 12:13:14') AS seconds
+  expect:
+    rows: 1
+    data: [{hours: 12, minutes: 13, seconds: 14}]
+- name: Date addition accepts normalized clock aliases for declared time
+  sql: SELECT CONVERT(VARCHAR(8),DATEADD(hh,1,CAST(N'12:13:14' AS TIME)),108) AS value
+  expect:
+    rows: 1
+    data: [{value: '13:13:14'}]
+
+- name: Union branches keep separate repeated calendar closures
+  sql: SELECT DATEDIFF(dd,N'2026-03-15',N'2026-03-16') AS amount,DATEDIFF(dd,N'2026-03-15',N'2026-03-16') AS duplicate UNION ALL SELECT DATEDIFF(hh,N'2026-03-15',N'2026-03-16'),DATEDIFF(hh,N'2026-03-15',N'2026-03-16') ORDER BY amount
+  expect:
+    rows: 2
+    data: [{amount: 1, duplicate: 1}, {amount: 24, duplicate: 24}]
+- name: Nested union branch consumers retain branch-local calendar values
+  sql: SELECT derived.amount+derived.duplicate AS total FROM (SELECT DATEDIFF(dd,N'2026-03-15',N'2026-03-16') AS amount,DATEDIFF(dd,N'2026-03-15',N'2026-03-16') AS duplicate) derived UNION ALL SELECT derived.amount+derived.duplicate FROM (SELECT DATEDIFF(hh,N'2026-03-15',N'2026-03-16') AS amount,DATEDIFF(hh,N'2026-03-15',N'2026-03-16') AS duplicate) derived ORDER BY total
+  expect:
+    rows: 2
+    data: [{total: 2}, {total: 48}]
+
 cleanup: []
