@@ -73,14 +73,18 @@ func jitParkCallArgument(ctx *JITContext, value *JITValueDesc) bool {
 // This file contains architecture-independent Scheme expression lowering. It
 // operates on JITValueDesc values and the common register-bank/emitter API;
 // instruction encoding and ABI frame construction remain architecture-owned.
-func jitRequiredLocalSlots(expr Scmer, minimum int) int {
-	return jitRequiredLocalSlotsAtDepth(expr, minimum, 0)
+// firstAssignment identifies writable invocation slots in the same traversal.
+// Input arguments may be borrowed only when their slots remain immutable.
+func jitRequiredLocalSlots(expr Scmer, minimum int) (required, firstAssignment int) {
+	firstAssignment = -1
+	required = jitRequiredLocalSlotsAtDepth(expr, minimum, 0, &firstAssignment)
+	return
 }
 
 // begin and match share the invocation's numbered frame, whereas outer may
 // address a different invocation. Counting those foreign slots as local space
 // makes each nested closure reserve its parent's captures again.
-func jitRequiredLocalSlotsAtDepth(expr Scmer, minimum, depth int) int {
+func jitRequiredLocalSlotsAtDepth(expr Scmer, minimum, depth int, firstAssignment *int) int {
 	for expr.IsSourceInfo() {
 		expr = expr.SourceInfo().value
 	}
@@ -103,7 +107,7 @@ func jitRequiredLocalSlotsAtDepth(expr Scmer, minimum, depth int) int {
 			if len(items) == 3 {
 				levels, valid := outerDepthLiteral(items[1])
 				if valid && levels <= int64(depth) {
-					return jitRequiredLocalSlotsAtDepth(items[2], minimum, depth-int(levels))
+					return jitRequiredLocalSlotsAtDepth(items[2], minimum, depth-int(levels), firstAssignment)
 				}
 			}
 			return minimum
@@ -111,16 +115,28 @@ func jitRequiredLocalSlotsAtDepth(expr Scmer, minimum, depth int) int {
 			depth++
 		case SyntaxBeginMut, SyntaxMatch:
 			if len(items) > 1 {
-				minimum = jitRequiredLocalSlotsAtDepth(items[1], minimum, depth)
+				minimum = jitRequiredLocalSlotsAtDepth(items[1], minimum, depth, firstAssignment)
 				for _, item := range items[2:] {
-					minimum = jitRequiredLocalSlotsAtDepth(item, minimum, depth+1)
+					minimum = jitRequiredLocalSlotsAtDepth(item, minimum, depth+1, firstAssignment)
 				}
 			}
 			return minimum
 		}
 	}
+	if len(items) == 3 && scmerIsSymbol(items[0], "setN") {
+		target := items[1]
+		if stripped, ok := scmerStripSourceInfo(target); ok {
+			target = stripped
+		}
+		if target.IsNthLocalVar() {
+			index := int(target.NthLocalVar())
+			if *firstAssignment < 0 || index < *firstAssignment {
+				*firstAssignment = index
+			}
+		}
+	}
 	for _, item := range items {
-		minimum = jitRequiredLocalSlotsAtDepth(item, minimum, depth)
+		minimum = jitRequiredLocalSlotsAtDepth(item, minimum, depth, firstAssignment)
 	}
 	return minimum
 }
@@ -3728,12 +3744,21 @@ func JITEmitProcInlineWithOuter(ctx *JITContext, proc *Proc, outer *JITEnv, args
 
 // Share lexical binding between value-producing and truth-filtering callbacks.
 func jitProcInlineEnv(ctx *JITContext, proc *Proc, outer *JITEnv, args []JITValueDesc) *JITEnv {
-	localCount := jitRequiredLocalSlots(proc.Body, proc.NumVars)
+	localCount, firstAssignment := jitRequiredLocalSlots(proc.Body, proc.NumVars)
 	if localCount < len(args) {
 		localCount = len(args)
 	}
 	numbered := make([]JITValueDesc, localCount)
 	copy(numbered, args)
+	if firstAssignment >= 0 && firstAssignment < len(args) {
+		// A rebinding belongs to this invocation, never to its caller's argument
+		// descriptors. Establish homes before conditional execution can begin.
+		for index, arg := range args {
+			off := ctx.AllocStack(16)
+			ctx.EmitStoreScmerToStack(arg, off)
+			numbered[index] = JITValueDesc{Loc: LocStackPair, Type: arg.Type, StackOff: off, NoHeapPointer: arg.NoHeapPointer, Rooted: true}
+		}
+	}
 	for index := len(args); index < len(numbered); index++ {
 		off := ctx.AllocStack(16)
 		nilValue := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil(), NoHeapPointer: true}
