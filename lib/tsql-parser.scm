@@ -1402,7 +1402,13 @@ dimensions are metadata only and are absent from the executable plan. */
 						(if metadata (metadata "Dimensions") nil))
 					(match (source_relation src)
 						((symbol query-block) _schema inner_sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
-						(tsql_result_dimensions inner_sources ((expand_query_block_fields inner_sources fields) bound_column) parameters)
+						(begin
+							(define inner_expression ((expand_query_block_fields inner_sources fields) bound_column))
+							/* Derived outputs consume the same declared conversion formula as
+							direct outputs; row values never supply result dimensions. */
+							(coalesceNil (tsql_result_dimensions inner_sources inner_expression parameters)
+								(tsql_result_dimensions inner_sources
+									(sql_info_formula (sql_expr_info inner_sources inner_expression)) parameters)))
 						_ nil)))
 			_ nil))
 	_ nil)))
