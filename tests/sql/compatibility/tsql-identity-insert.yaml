@@ -1305,6 +1305,56 @@ test_cases:
     result:
     - true
     - 0
+- name: Explicit negative identity imports preserve native WAL recovery
+  session_id: identity-replay-owner
+  setup:
+  - sql: DROP TABLE IF EXISTS identity_replay_negative
+  - sql: DROP TABLE IF EXISTS identity_replay_mixed
+  - sql: CREATE TABLE identity_replay_negative(id INT IDENTITY PRIMARY KEY,value INT)
+  - sql: CREATE TABLE identity_replay_mixed(id INT IDENTITY PRIMARY KEY,value INT)
+  - sql: SET IDENTITY_INSERT identity_replay_negative ON
+  - sql: INSERT identity_replay_negative(id,value) VALUES(-99,1)
+  - sql: SET IDENTITY_INSERT identity_replay_negative OFF
+  - sql: SET IDENTITY_INSERT identity_replay_mixed ON
+  sql: INSERT identity_replay_mixed(id,value) VALUES(-1,1),(41,2)
+  expect:
+    affected_rows: 2
+  cleanup:
+  - sql: SET IDENTITY_INSERT identity_replay_mixed OFF
+- name: Restart committed explicit identity values through native persistence
+  syntax: mysql
+  sql: SHUTDOWN
+- name: Negative imported IDs do not advance the positive generator after restart
+  sql: INSERT identity_replay_negative(value) VALUES(3)
+  expect:
+    affected_rows: 1
+- name: Mixed imported IDs preserve the positive high water after restart
+  sql: INSERT identity_replay_mixed(value) VALUES(3)
+  expect:
+    affected_rows: 1
+- name: Recovered negative import keeps its row and starts generated IDs at one
+  sql: SELECT id,value FROM identity_replay_negative ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: -99
+      value: 1
+    - id: 1
+      value: 3
+- name: Recovered mixed import advances once through the same native allocator
+  sql: SELECT id,value FROM identity_replay_mixed ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: -1
+      value: 1
+    - id: 41
+      value: 2
+    - id: 42
+      value: 3
+  cleanup:
+  - sql: DROP TABLE identity_replay_mixed
+  - sql: DROP TABLE identity_replay_negative
 cleanup:
 - sql: DROP PROCEDURE IF EXISTS identity_mode_proc
 - sql: DROP TABLE IF EXISTS identity_mode_a
