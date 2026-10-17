@@ -17,6 +17,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import "testing"
+import "strings"
 
 import "github.com/launix-de/memcp/scm"
 
@@ -169,6 +170,84 @@ func TestPublishedDatabaseIdentifierPolicy(t *testing.T) {
 	}
 	if (*before)["casecatalog"] != first.Name {
 		t.Fatal("database publication mutated an existing snapshot")
+	}
+}
+
+func TestFoldIdentifierPreservesSimpleFoldClasses(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"Identifier", "IDENTIFIER"},
+		{"Key", "KEY"},
+		{"ſource", "SOURCE"},
+		{"Σ", "ς"},
+		{"Å", "å"},
+		{"Identifierİ", "identifieri"},
+		{"IdentifierI", "identifierı"},
+	} {
+		if got, want := foldIdentifier(pair[0]) == foldIdentifier(pair[1]), strings.EqualFold(pair[0], pair[1]); got != want {
+			t.Errorf("foldIdentifier(%q) == foldIdentifier(%q) = %t, want %t", pair[0], pair[1], got, want)
+		}
+	}
+	if got := foldIdentifier("Key"); got != "key" {
+		t.Fatalf("ASCII folding convention changed for Kelvin class: %q", got)
+	}
+}
+
+func TestIdentifierDirectoriesKeepDottedIDistinct(t *testing.T) {
+	unicodeDB, asciiDB := newDatabase(), newDatabase()
+	unicodeDB.Name, asciiDB.Name = "UnicodeFoldİ", "UnicodeFoldi"
+	for _, db := range []*database{unicodeDB, asciiDB} {
+		// This fixture owns an already loaded, unpublished directory and needs
+		// no persistence or lazy-load work to exercise metadata lookup.
+		db.loadOnce.Do(func() {})
+		previous := databases.Get(db.Name)
+		t.Cleanup(func() {
+			databases.Remove(db.Name)
+			if previous != nil {
+				databases.Set(db.Name, previous)
+			}
+		})
+	}
+
+	databases.Set(unicodeDB.Name, unicodeDB)
+	if GetDatabase("unicodefoldi", true) != nil {
+		t.Fatal("database lookup merged dotted I with ASCII i")
+	}
+	databases.Set(asciiDB.Name, asciiDB)
+	if GetDatabase("UNICODEFOLDİ", true) != unicodeDB || GetDatabase("UNICODEFOLDI", true) != asciiDB {
+		t.Fatal("distinct database fold classes collided")
+	}
+
+	unicodeTable := &table{Name: "Identifierİ", schema: unicodeDB}
+	unicodeDB.tables.Set(unicodeTable.Name, unicodeTable)
+	unicodeDB.publishTableNamesLocked()
+	if unicodeDB.GetTable("identifieri", true) != nil {
+		t.Fatal("table lookup merged dotted I with ASCII i")
+	}
+	asciiTable := &table{Name: "Identifieri", schema: unicodeDB}
+	unicodeDB.tables.Set(asciiTable.Name, asciiTable)
+	unicodeDB.publishTableNamesLocked()
+	if unicodeDB.GetTable("IDENTIFIERİ", true) != unicodeTable || unicodeDB.GetTable("IDENTIFIERI", true) != asciiTable {
+		t.Fatal("distinct table fold classes collided")
+	}
+
+	columns := showColumnsTestTable(1)
+	columns.Columns[0].Name = "Identifierİ"
+	columns.publishShowColumnsSnapshot(false)
+	if !columns.ShowColumn("identifieri", true).IsNil() {
+		t.Fatal("column metadata lookup merged dotted I with ASCII i")
+	}
+	if _, exists := columns.ResolveColumnName("identifieri", true); exists {
+		t.Fatal("column-name lookup merged dotted I with ASCII i")
+	}
+	columns.Columns = append(columns.Columns, &column{Name: "Identifieri", Typ: "VARCHAR", AllowNull: true})
+	columns.publishShowColumnsSnapshot(false)
+	for _, name := range []string{"Identifierİ", "Identifieri"} {
+		if got := showColumnProperty(columns.ShowColumn(strings.ToUpper(name), true), "Field"); got.IsNil() || got.String() != name {
+			t.Fatalf("distinct column fold classes collided: lookup %q returned %v", name, got)
+		}
+		if got, exists := columns.ResolveColumnName(strings.ToUpper(name), true); !exists || got != name {
+			t.Fatalf("distinct column-name fold classes collided: lookup %q returned %q, %t", name, got, exists)
+		}
 	}
 }
 
