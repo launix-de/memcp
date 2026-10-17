@@ -3285,6 +3285,29 @@ test_cases:
     - sql: DROP VIEW identifier_function_portable
       syntax: tsql
 
+  - name: Identifier function durable view fixture
+    sql: CREATE VIEW identifier_function_restart AS SELECT QUOTENAME(N'a]b') AS quoted,PARSENAME(N'x.y',1) AS component
+  - name: Identifier function factories survive a real durable restart
+    action: restart
+  - name: Restored identifier view compiles through the ordinary SQL consumer
+    syntax: mysql
+    sql: SELECT * FROM identifier_function_restart
+    expect:
+      rows: 1
+      data:
+      - quoted: '[a]]b]'
+        component: y
+  - name: Restored identifier view compiles through the psql consumer
+    syntax: psql
+    sql: SELECT * FROM identifier_function_restart
+    expect:
+      rows: 1
+      data:
+      - quoted: '[a]]b]'
+        component: y
+  - name: Remove identifier function durable view fixture
+    sql: DROP VIEW identifier_function_restart
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
   - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion
