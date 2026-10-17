@@ -1875,4 +1875,664 @@ test_cases:
     result: true
   cleanup: *id005
 
+- name: ABS preserves byte input
+  sql: SELECT ABS(CAST(255 AS TINYINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 255
+- name: ABS preserves small signed input
+  sql: SELECT ABS(CAST(-32768 AS SMALLINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 32768
+- name: ABS preserves integer input
+  sql: SELECT ABS(CAST(-12 AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12
+- name: ABS preserves untyped NULL
+  sql: SELECT ABS(NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ABS preserves floating NULL
+  sql: SELECT ABS(CAST(NULL AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ABS preserves currency NULL
+  sql: SELECT ABS(CAST(NULL AS MONEY)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ABS preserves bit NULL
+  sql: SELECT ABS(CAST(NULL AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ABS retains every digit of positive wide integer
+  sql: SELECT CAST(ABS(CAST(9007199254740993 AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9007199254740993'
+- name: ABS retains every digit of negative wide integer
+  sql: SELECT CAST(ABS(CAST(CAST('-9007199254740993' AS BIGINT) AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9007199254740993'
+- name: ABS retains every digit of maximum wide integer
+  sql: SELECT CAST(ABS(CAST(9223372036854775807 AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9223372036854775807'
+- name: ABS computes positive float
+  sql: SELECT ABS(CAST(12.75 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.75
+- name: ABS computes negative float
+  sql: SELECT ABS(CAST(-12.75 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.75
+- name: ABS computes real input
+  sql: SELECT ABS(CAST(12.75 AS REAL)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.75
+- name: ABS computes numeric character input
+  sql: SELECT ABS(CAST(N'-12.75' AS VARCHAR(20))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.75
+- name: ABS accepts declared bit 0
+  sql: SELECT ABS(CAST(0 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: ABS accepts declared bit 1
+  sql: SELECT ABS(CAST(1 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: ABS retains currency type for MONEY 12.3456
+  sql: SELECT CONVERT(VARCHAR(40),ABS(CAST(12.3456 AS MONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.3456'
+- name: ABS retains currency type for MONEY -12.3456
+  sql: SELECT CONVERT(VARCHAR(40),ABS(CAST(-12.3456 AS MONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.3456'
+- name: ABS retains currency type for SMALLMONEY 12.3456
+  sql: SELECT CONVERT(VARCHAR(40),ABS(CAST(12.3456 AS SMALLMONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.3456'
+- name: ABS retains currency type for SMALLMONEY -12.3456
+  sql: SELECT CONVERT(VARCHAR(40),ABS(CAST(-12.3456 AS SMALLMONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.3456'
+- name: ABS rejects missing argument
+  sql: SELECT ABS() AS value
+  expect:
+    error: true
+- name: ABS rejects extra argument
+  sql: SELECT ABS(1,2) AS value
+  expect:
+    error: true
+- name: ABS rejects calendar input
+  sql: SELECT ABS(CAST('2024-01-02' AS DATE)) AS value
+  expect:
+    error: true
+- name: ABS empty output follows declared return families
+  scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) ABS(CAST(NULL AS TINYINT)) AS c0,ABS(CAST(NULL AS SMALLINT)) AS c1,ABS(CAST(NULL
+    AS INT)) AS c2,ABS(CAST(NULL AS BIGINT)) AS c3,ABS(CAST(NULL AS REAL)) AS c4,ABS(CAST(NULL AS FLOAT)) AS c5,ABS(CAST(NULL AS
+    MONEY)) AS c6,ABS(CAST(NULL AS SMALLMONEY)) AS c7,ABS(CAST(NULL AS BIT)) AS c8" "" (newsession)) (lambda (c) (list (c "sql_type")
+    (c "kind") (c "size"))))
+  expect:
+    result:
+    - - INT
+      - 38
+      - 4
+    - - INT
+      - 38
+      - 4
+    - - INT
+      - 38
+      - 4
+    - - BIGINT
+      - 38
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+    - - MONEY
+      - 110
+      - 8
+    - - MONEY
+      - 110
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+- name: ABS native columns preserve values NULL and declared promotion
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_scalar_values
+  - sql: CREATE TABLE tsql_scalar_values (id INT PRIMARY KEY,n BIGINT,x FLOAT,m SMALLMONEY)
+  - sql: INSERT tsql_scalar_values VALUES(1,-9007199254740993,-12.75,-12.3456),(2,NULL,NULL,NULL)
+  sql: SELECT id,CAST(ABS(n) AS VARCHAR(32)) AS n,ABS(x) AS x,CONVERT(VARCHAR(40),ABS(m),2) AS m FROM tsql_scalar_values ORDER
+    BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      n: '9007199254740993'
+      x: 12.75
+      m: '12.3456'
+    - id: 2
+      n: null
+      x: null
+      m: null
+  cleanup:
+  - sql: DROP TABLE tsql_scalar_values
+- name: ABS stored view retains ordinary declared source
+  sql: SELECT value FROM tsql_scalar_view
+  expect:
+    rows: 1
+    data:
+    - value: '12.3456'
+  setup:
+  - sql: DROP VIEW IF EXISTS tsql_scalar_view
+  - sql: CREATE VIEW tsql_scalar_view AS SELECT CONVERT(VARCHAR(40),ABS(CAST(-12.3456 AS SMALLMONEY)),2) AS value
+  cleanup:
+  - sql: DROP VIEW IF EXISTS tsql_scalar_view
+- name: FLOOR preserves byte input
+  sql: SELECT FLOOR(CAST(255 AS TINYINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 255
+- name: FLOOR preserves small signed input
+  sql: SELECT FLOOR(CAST(-32768 AS SMALLINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -32768
+- name: FLOOR preserves integer input
+  sql: SELECT FLOOR(CAST(-12 AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12
+- name: FLOOR preserves untyped NULL
+  sql: SELECT FLOOR(NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: FLOOR preserves floating NULL
+  sql: SELECT FLOOR(CAST(NULL AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: FLOOR preserves currency NULL
+  sql: SELECT FLOOR(CAST(NULL AS MONEY)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: FLOOR preserves bit NULL
+  sql: SELECT FLOOR(CAST(NULL AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: FLOOR retains every digit of positive wide integer
+  sql: SELECT CAST(FLOOR(CAST(9007199254740993 AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9007199254740993'
+- name: FLOOR retains every digit of negative wide integer
+  sql: SELECT CAST(FLOOR(CAST(CAST('-9007199254740993' AS BIGINT) AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-9007199254740993'
+- name: FLOOR retains every digit of maximum wide integer
+  sql: SELECT CAST(FLOOR(CAST(9223372036854775807 AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9223372036854775807'
+- name: FLOOR retains minimum wide integer
+  sql: SELECT CAST(FLOOR(CAST('-9223372036854775808' AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-9223372036854775808'
+- name: FLOOR computes positive float
+  sql: SELECT FLOOR(CAST(12.75 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12
+- name: FLOOR computes negative float
+  sql: SELECT FLOOR(CAST(-12.75 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -13
+- name: FLOOR computes real input
+  sql: SELECT FLOOR(CAST(12.75 AS REAL)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12
+- name: FLOOR computes numeric character input
+  sql: SELECT FLOOR(CAST(N'-12.75' AS VARCHAR(20))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -13
+- name: FLOOR accepts declared bit 0
+  sql: SELECT FLOOR(CAST(0 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: FLOOR accepts declared bit 1
+  sql: SELECT FLOOR(CAST(1 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: FLOOR retains currency type for MONEY 12.3456
+  sql: SELECT CONVERT(VARCHAR(40),FLOOR(CAST(12.3456 AS MONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.0000'
+- name: FLOOR retains currency type for MONEY -12.3456
+  sql: SELECT CONVERT(VARCHAR(40),FLOOR(CAST(-12.3456 AS MONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-13.0000'
+- name: FLOOR retains currency type for SMALLMONEY 12.3456
+  sql: SELECT CONVERT(VARCHAR(40),FLOOR(CAST(12.3456 AS SMALLMONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.0000'
+- name: FLOOR retains currency type for SMALLMONEY -12.3456
+  sql: SELECT CONVERT(VARCHAR(40),FLOOR(CAST(-12.3456 AS SMALLMONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-13.0000'
+- name: FLOOR rejects missing argument
+  sql: SELECT FLOOR() AS value
+  expect:
+    error: true
+- name: FLOOR rejects extra argument
+  sql: SELECT FLOOR(1,2) AS value
+  expect:
+    error: true
+- name: FLOOR rejects calendar input
+  sql: SELECT FLOOR(CAST('2024-01-02' AS DATE)) AS value
+  expect:
+    error: true
+- name: FLOOR empty output follows declared return families
+  scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) FLOOR(CAST(NULL AS TINYINT)) AS c0,FLOOR(CAST(NULL AS SMALLINT)) AS c1,FLOOR(CAST(NULL
+    AS INT)) AS c2,FLOOR(CAST(NULL AS BIGINT)) AS c3,FLOOR(CAST(NULL AS REAL)) AS c4,FLOOR(CAST(NULL AS FLOAT)) AS c5,FLOOR(CAST(NULL
+    AS MONEY)) AS c6,FLOOR(CAST(NULL AS SMALLMONEY)) AS c7,FLOOR(CAST(NULL AS BIT)) AS c8" "" (newsession)) (lambda (c) (list (c
+    "sql_type") (c "kind") (c "size"))))
+  expect:
+    result:
+    - - INT
+      - 38
+      - 4
+    - - INT
+      - 38
+      - 4
+    - - INT
+      - 38
+      - 4
+    - - BIGINT
+      - 38
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+    - - MONEY
+      - 110
+      - 8
+    - - MONEY
+      - 110
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+- name: FLOOR native columns preserve values NULL and declared promotion
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_scalar_values
+  - sql: CREATE TABLE tsql_scalar_values (id INT PRIMARY KEY,n BIGINT,x FLOAT,m SMALLMONEY)
+  - sql: INSERT tsql_scalar_values VALUES(1,-9007199254740993,-12.75,-12.3456),(2,NULL,NULL,NULL)
+  sql: SELECT id,CAST(FLOOR(n) AS VARCHAR(32)) AS n,FLOOR(x) AS x,CONVERT(VARCHAR(40),FLOOR(m),2) AS m FROM tsql_scalar_values
+    ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      n: '-9007199254740993'
+      x: -13
+      m: '-13.0000'
+    - id: 2
+      n: null
+      x: null
+      m: null
+  cleanup:
+  - sql: DROP TABLE tsql_scalar_values
+- name: FLOOR stored view retains ordinary declared source
+  sql: SELECT value FROM tsql_scalar_view
+  expect:
+    rows: 1
+    data:
+    - value: '-13.0000'
+  setup:
+  - sql: DROP VIEW IF EXISTS tsql_scalar_view
+  - sql: CREATE VIEW tsql_scalar_view AS SELECT CONVERT(VARCHAR(40),FLOOR(CAST(-12.3456 AS SMALLMONEY)),2) AS value
+  cleanup:
+  - sql: DROP VIEW IF EXISTS tsql_scalar_view
+- name: CEILING preserves byte input
+  sql: SELECT CEILING(CAST(255 AS TINYINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 255
+- name: CEILING preserves small signed input
+  sql: SELECT CEILING(CAST(-32768 AS SMALLINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -32768
+- name: CEILING preserves integer input
+  sql: SELECT CEILING(CAST(-12 AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12
+- name: CEILING preserves untyped NULL
+  sql: SELECT CEILING(NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: CEILING preserves floating NULL
+  sql: SELECT CEILING(CAST(NULL AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: CEILING preserves currency NULL
+  sql: SELECT CEILING(CAST(NULL AS MONEY)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: CEILING preserves bit NULL
+  sql: SELECT CEILING(CAST(NULL AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: CEILING retains every digit of positive wide integer
+  sql: SELECT CAST(CEILING(CAST(9007199254740993 AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9007199254740993'
+- name: CEILING retains every digit of negative wide integer
+  sql: SELECT CAST(CEILING(CAST(CAST('-9007199254740993' AS BIGINT) AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-9007199254740993'
+- name: CEILING retains every digit of maximum wide integer
+  sql: SELECT CAST(CEILING(CAST(9223372036854775807 AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9223372036854775807'
+- name: CEILING retains minimum wide integer
+  sql: SELECT CAST(CEILING(CAST('-9223372036854775808' AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-9223372036854775808'
+- name: CEILING computes positive float
+  sql: SELECT CEILING(CAST(12.75 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 13
+- name: CEILING computes negative float
+  sql: SELECT CEILING(CAST(-12.75 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12
+- name: CEILING computes real input
+  sql: SELECT CEILING(CAST(12.75 AS REAL)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 13
+- name: CEILING computes numeric character input
+  sql: SELECT CEILING(CAST(N'-12.75' AS VARCHAR(20))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12
+- name: CEILING accepts declared bit 0
+  sql: SELECT CEILING(CAST(0 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: CEILING accepts declared bit 1
+  sql: SELECT CEILING(CAST(1 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: CEILING retains currency type for MONEY 12.3456
+  sql: SELECT CONVERT(VARCHAR(40),CEILING(CAST(12.3456 AS MONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '13.0000'
+- name: CEILING retains currency type for MONEY -12.3456
+  sql: SELECT CONVERT(VARCHAR(40),CEILING(CAST(-12.3456 AS MONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-12.0000'
+- name: CEILING retains currency type for SMALLMONEY 12.3456
+  sql: SELECT CONVERT(VARCHAR(40),CEILING(CAST(12.3456 AS SMALLMONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '13.0000'
+- name: CEILING retains currency type for SMALLMONEY -12.3456
+  sql: SELECT CONVERT(VARCHAR(40),CEILING(CAST(-12.3456 AS SMALLMONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-12.0000'
+- name: CEILING rejects missing argument
+  sql: SELECT CEILING() AS value
+  expect:
+    error: true
+- name: CEILING rejects extra argument
+  sql: SELECT CEILING(1,2) AS value
+  expect:
+    error: true
+- name: CEILING rejects calendar input
+  sql: SELECT CEILING(CAST('2024-01-02' AS DATE)) AS value
+  expect:
+    error: true
+- name: CEILING empty output follows declared return families
+  scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) CEILING(CAST(NULL AS TINYINT)) AS c0,CEILING(CAST(NULL AS SMALLINT)) AS
+    c1,CEILING(CAST(NULL AS INT)) AS c2,CEILING(CAST(NULL AS BIGINT)) AS c3,CEILING(CAST(NULL AS REAL)) AS c4,CEILING(CAST(NULL
+    AS FLOAT)) AS c5,CEILING(CAST(NULL AS MONEY)) AS c6,CEILING(CAST(NULL AS SMALLMONEY)) AS c7,CEILING(CAST(NULL AS BIT)) AS c8"
+    "" (newsession)) (lambda (c) (list (c "sql_type") (c "kind") (c "size"))))
+  expect:
+    result:
+    - - INT
+      - 38
+      - 4
+    - - INT
+      - 38
+      - 4
+    - - INT
+      - 38
+      - 4
+    - - BIGINT
+      - 38
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+    - - MONEY
+      - 110
+      - 8
+    - - MONEY
+      - 110
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+- name: CEILING native columns preserve values NULL and declared promotion
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_scalar_values
+  - sql: CREATE TABLE tsql_scalar_values (id INT PRIMARY KEY,n BIGINT,x FLOAT,m SMALLMONEY)
+  - sql: INSERT tsql_scalar_values VALUES(1,-9007199254740993,-12.75,-12.3456),(2,NULL,NULL,NULL)
+  sql: SELECT id,CAST(CEILING(n) AS VARCHAR(32)) AS n,CEILING(x) AS x,CONVERT(VARCHAR(40),CEILING(m),2) AS m FROM tsql_scalar_values
+    ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      n: '-9007199254740993'
+      x: -12
+      m: '-12.0000'
+    - id: 2
+      n: null
+      x: null
+      m: null
+  cleanup:
+  - sql: DROP TABLE tsql_scalar_values
+- name: CEILING stored view retains ordinary declared source
+  sql: SELECT value FROM tsql_scalar_view
+  expect:
+    rows: 1
+    data:
+    - value: '-12.0000'
+  setup:
+  - sql: DROP VIEW IF EXISTS tsql_scalar_view
+  - sql: CREATE VIEW tsql_scalar_view AS SELECT CONVERT(VARCHAR(40),CEILING(CAST(-12.3456 AS SMALLMONEY)),2) AS value
+  cleanup:
+  - sql: DROP VIEW IF EXISTS tsql_scalar_view
+- name: ABS rejects INT minimum overflow
+  sql: SELECT ABS(CAST('-2147483648' AS INT)) AS value
+  expect:
+    error: true
+- name: ABS rejects BIGINT minimum overflow
+  sql: SELECT ABS(CAST('-9223372036854775808' AS BIGINT)) AS value
+  expect:
+    error: true
+- name: ABS small currency minimum promotes safely
+  sql: SELECT CONVERT(VARCHAR(40),ABS(CAST(-214748.3648 AS SMALLMONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '214748.3648'
+- name: ABS floating magnitude remains outside integer range 1e100
+  sql: SELECT ABS(CAST(1e100 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1.0e+100
+- name: ABS floating magnitude remains outside integer range -1e100
+  sql: SELECT ABS(CAST(-1e100 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1.0e+100
+- name: ABS compiles a plain exact integer formula
+  scm: (begin (define info (sql_expr_info (list) (tsql_builtin_expr "ABS" (list (tsql_cast_expr (tsql_parse_integer "9007199254740993")
+    "BIGINT" (list)))))) (define syntax (json_encode (expression_syntax (sql_info_formula info)))) (list (sql_info_type info) (string
+    (eval (sql_info_formula info))) (not (contains? syntax "sql_type_expr")) (not (contains? syntax "sql_compile_expr"))))
+  expect:
+    result:
+    - BIGINT
+    - '9007199254740993'
+    - true
+    - true
+- name: FLOOR compiles a plain exact integer formula
+  scm: (begin (define info (sql_expr_info (list) (tsql_builtin_expr "FLOOR" (list (tsql_cast_expr (tsql_parse_integer "9007199254740993")
+    "BIGINT" (list)))))) (define syntax (json_encode (expression_syntax (sql_info_formula info)))) (list (sql_info_type info) (string
+    (eval (sql_info_formula info))) (not (contains? syntax "sql_type_expr")) (not (contains? syntax "sql_compile_expr"))))
+  expect:
+    result:
+    - BIGINT
+    - '9007199254740993'
+    - true
+    - true
+- name: CEILING compiles a plain exact integer formula
+  scm: (begin (define info (sql_expr_info (list) (tsql_builtin_expr "CEILING" (list (tsql_cast_expr (tsql_parse_integer "9007199254740993")
+    "BIGINT" (list)))))) (define syntax (json_encode (expression_syntax (sql_info_formula info)))) (list (sql_info_type info) (string
+    (eval (sql_info_formula info))) (not (contains? syntax "sql_type_expr")) (not (contains? syntax "sql_compile_expr"))))
+  expect:
+    result:
+    - BIGINT
+    - '9007199254740993'
+    - true
+    - true
+
 cleanup: []
