@@ -791,6 +791,56 @@ native date value as columns and ordinary calendar arithmetic. */
 	(define info (car infos))
 	(if (tsql_numeric_operand_type? (sql_info_type info)) info
 		(error "unary plus requires a numeric operand")))))
+/* Bit-pattern widths come exclusively from the SQL declaration. The generic
+integer operators know no SQL types; portable compiler slots disappear before
+shared planning. Binary-string combinations need a verified alignment contract. */
+(define tsql_bit_contract (lambda (type) (match type
+	"TINYINT" '(8 255 0) "SMALLINT" '(16 65535 32768)
+	"INT" '(32 4294967295 2147483648) "INTEGER" '(32 4294967295 2147483648)
+	"BIGINT" '(64 -1 0) "BIT" '(1 1 0) "NULL" '(32 4294967295 2147483648)
+	_ (error "bit operation requires declared integer operands"))))
+(define tsql_bit_assignment_type (lambda (type)
+	(if (equal? (tsql_addition_type type) "BIT") (error "bit compound assignment requires an integer target") true)))
+(define tsql_bit_normalize (lambda (value mask sign)
+	(if (nil? value) nil (- (bit_xor (bit_and value mask) sign) sign))))
+(define tsql_bit_boolean (lambda (value) (if (nil? value) nil (if value 1 0))))
+(define tsql_bit_shift (lambda (value amount width mask sign left)
+	(if (or (nil? value) (nil? amount)) nil
+		(or (>= amount width) (<= amount (- 0 width))) 0
+		(begin
+			(define reverse (< amount 0))
+			(define distance (if reverse (- 0 amount) amount))
+			(define unsigned (bit_and value mask))
+			(define shifted (if (if reverse (not left) left)
+				(bit_shift_left unsigned distance) (bit_shift_right unsigned distance)))
+			(tsql_bit_normalize shifted mask sign)))))
+(define tsql_bit_formula (lambda (info)
+	(if (equal? (tsql_addition_type (sql_info_type info)) "BIT")
+		(list (quote tsql_bit_boolean) (sql_info_formula info)) (sql_info_formula info))))
+(define tsql_bit_compiler (lambda (operation) (lambda (infos) (begin
+	(define types (map infos (lambda (info) (tsql_addition_type (sql_info_type info)))))
+	(map types tsql_bit_contract)
+	(define shift (has? '("left" "right") operation))
+	(if (and shift (has? types "BIT")) (error "shift requires declared integer operands") true)
+	(define type (if (or shift (equal? operation "not")) (car types)
+		(coalesceNil (find '("BIGINT" "INT" "INTEGER" "SMALLINT" "TINYINT" "BIT")
+			(lambda (candidate) (has? types candidate)) nil) "INT")))
+	(define result_type (if (equal? type "NULL") "INT"
+		(and (equal? type "BIT") (not (equal? operation "not"))) "TINYINT" type))
+	(define contract (tsql_bit_contract result_type))
+	(define mask (cadr contract))
+	(define sign (nth contract 2))
+	(define formulas (map infos tsql_bit_formula))
+	(define formula (if shift
+		(list (quote tsql_bit_shift) (car formulas) (cadr formulas) (car contract) mask sign (equal? operation "left"))
+		(and (equal? operation "not") (equal? type "BIT")) (list (quote sql_not) (sql_info_formula (car infos)))
+		(begin
+			(define raw (cons (match operation "and" (quote bit_and) "or" (quote bit_or)
+				"xor" (quote bit_xor) "not" (quote bit_not)) formulas))
+			(if (equal? result_type "BIGINT") raw (list (quote tsql_bit_normalize) raw mask sign)))))
+	(sql_info formula result_type nil)))))
+(define tsql_bit_expr (lambda (operation arguments)
+	(cons (quote sql_compile_expr) (cons (list (quote tsql_bit_compiler) operation) arguments))))
 (define tsql_positive_expr (lambda (value)
 	(list (quote sql_compile_expr) (quote tsql_compile_positive) value)))
 (define tsql_compile_negate (lambda (infos) (begin
@@ -1113,7 +1163,8 @@ Only the selected native operation survives the shared compile boundary. */
 	_ (sql_fold_multiplicative_term acc term))))
 (define tsql_fold_additive (lambda (acc term) (match term
 	'("add" value) (tsql_add_expr acc value)
-	_ (sql_fold_additive_term acc term))))
+	'(operation value) (if (has? '("and" "or" "xor" "left" "right") operation)
+		(tsql_bit_expr operation (list acc value)) (sql_fold_additive_term acc term)))))
 /* NULL fallback has the same declared precedence as other T-SQL expressions.
 The shared lazy coalesce operator remains responsible for evaluation; this
 callback consumes SQL triples and leaves only converted formulas in the plan.
@@ -1413,13 +1464,16 @@ that context explicitly; stored views refuse this scalar before publication. */
 		) (list op value)) empty true))
 	) (reduce terms tsql_fold_multiplicative a)))
 
-	(define tsql_expression5 (parser (or
-		(parser '((define expr tsql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
-		(parser '((define expr tsql_expression6) (atom "IS" true) (atom "NOT" true) (atom "NULL" true)) '('not '('nil? expr)))
+	(define tsql_unary_expression (parser (or
+		(parser '("~" (define expr tsql_unary_expression)) (tsql_bit_expr "not" (list expr)))
+		/* Signed literals must retain the exact lexer carrier before generic unary syntax. */
 		tsql_expression6
-		(parser '("+" (define expr tsql_expression6)) (tsql_positive_expr expr))
-		(parser '("-" (define expr tsql_expression6)) (tsql_negate_expr expr))
-	)))
+		(parser '("+" (define expr tsql_unary_expression)) (tsql_positive_expr expr))
+		(parser '("-" (define expr tsql_unary_expression)) (tsql_negate_expr expr)))))
+	(define tsql_expression5 (parser (or
+		(parser '((define expr tsql_unary_expression) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
+		(parser '((define expr tsql_unary_expression) (atom "IS" true) (atom "NOT" true) (atom "NULL" true)) '('not '('nil? expr)))
+		tsql_unary_expression)))
 
 	(define tsql_window_orderby_item (parser '(
 		(define col tsql_expression)
@@ -1443,6 +1497,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 
 		(parser '("(" (define sub tsql_select) ")") '('inner_select sub))
 		(parser '("(" (define a tsql_expression) ")") a)
+		(parser '((define operation (or (parser (atom "LEFT_SHIFT" true) "left")
+			(parser (atom "RIGHT_SHIFT" true) "right"))) "(" (define value tsql_expression)
+			"," (define amount tsql_expression) ")") (tsql_bit_expr operation (list value amount)))
 		(parser '((atom "CAST" true) "(" (define value tsql_expression) (atom "AS" true)
 			(define type tsql_declared_type) (define dimensions tsql_type_dimensions) ")")
 			(tsql_cast_expr value type dimensions))
@@ -1915,6 +1972,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(define title tsql_identifier)
 		(define op (or (parser "+=" "add") (parser "-=" "subtract")
 			(parser "*=" "multiply") (parser "/=" "divide") (parser "%=" "modulo")
+			(parser "&=" "and") (parser "|=" "or") (parser "^=" "xor")
 			(parser "=" "assign")))
 		(define expression (or (parser (atom "DEFAULT" true) (quote sql_default)) tsql_expression))
 	) (list title qualifier op expression)))
@@ -1934,10 +1992,12 @@ that context explicitly; stored views refuse this scalar before publication. */
 						(tsql_default_assignment_expr declaration)
 						(error "DEFAULT requires simple assignment")) expression))
 				(define old (list (quote get_column) (source_alias target) false (declaration "Field") false))
+				(if (has? '("and" "or" "xor") op) (tsql_bit_assignment_type (declaration "Type")) true)
 				(define assigned (match op "assign" value
 					"add" (tsql_add_expr old value)
 					"subtract" (tsql_fold_additive old (list "sub" value))
-					_ (tsql_fold_multiplicative old (list op value))))
+					_ (if (has? '("and" "or" "xor") op) (tsql_bit_expr op (list old value))
+						(tsql_fold_multiplicative old (list op value)))))
 				(list (declaration "Field") (tsql_assignment_expr assigned declaration))))))))))
 	(define tsql_update (parser '(
 		(atom "UPDATE" true)
@@ -2030,7 +2090,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 	(define tsql_expression3 (parser '(
 		(define a tsql_expression4)
 		(define terms (* (parser '(
-			(define op (or (parser "+" "add") (parser "-" "sub")))
+			(define op (or (parser "+" "add") (parser "-" "sub")
+				(parser "<<" "left") (parser ">>" "right")
+				(parser "&" "and") (parser "|" "or") (parser "^" "xor")))
 			(define value tsql_expression4)
 		) (list op value)) empty true))
 	) (reduce terms tsql_fold_additive a)))
@@ -2422,8 +2484,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(list "block" commands))
 				(parser '((atom "DECLARE" true) (define declarations (+ tsql_script_declaration ",")))
 					(list "declare" declarations))
-				(parser '((atom "SET" true) (define name tsql_script_variable) "=" (define value (capture tsql_expression)))
-					(list "assign" name (car value)))
+				(parser '((atom "SET" true) (define name tsql_script_variable)
+					(define operation (or (parser "&=" "&") (parser "|=" "|") (parser "^=" "^") (parser "=" nil)))
+					(define value (capture tsql_expression)))
+					(list "assign" name operation (car value)))
 				(parser '((atom "DROP" true) (or (atom "PROCEDURE" true) (atom "PROC" true))
 					(define ignore (? (atom "IF" true) (atom "EXISTS" true)))
 					(? (define owner tsql_schema_identifier) ".") (define name tsql_identifier))

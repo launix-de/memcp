@@ -3,6 +3,7 @@
 metadata:
   version: '1.0'
   syntax: tsql
+  requires_tds: true
   description: T-SQL grammar reuses native DDL, defaults and query planning
 setup:
   - sql: DROP TABLE IF EXISTS tsql_setup_memo
@@ -2608,6 +2609,431 @@ test_cases:
     cleanup:
       - sql: DROP VIEW portable_lifecycle_view
       - sql: DROP TABLE portable_lifecycle_input
+
+  - name: Bitmask integer AND
+    sql: SELECT 219 & 46 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 10
+  - name: Bitmask integer OR
+    sql: SELECT 219 | 46 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 255
+  - name: Bitmask integer XOR
+    sql: SELECT 219 ^ 46 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 245
+  - name: Bitmask integer complement
+    sql: SELECT ~CAST(219 AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -220
+  - name: Bitmask tiny complement retains one byte
+    sql: SELECT ~CAST(219 AS TINYINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 36
+  - name: Bitmask small complement retains signed width
+    sql: SELECT ~CAST(-219 AS SMALLINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 218
+  - name: Bitmask big complement remains exact
+    sql: SELECT ~CAST(-9223372036854775808 AS BIGINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 9223372036854775807
+  - name: Bitmask AND and OR associate left to right
+    sql: SELECT 1 | 2 & 4 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 0
+  - name: Bitmask addition and AND have equal precedence
+    sql: SELECT 8 & 3 + 1 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Bitmask addition and XOR have equal precedence
+    sql: SELECT 7 ^ 3 + 1 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 5
+  - name: Bitmask multiplication binds above AND
+    sql: SELECT 7 & 3 * 2 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 6
+  - name: Bitmask parentheses override equal precedence
+    sql: SELECT 1 | (2 & 4) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 1
+  - name: Bitmask comparison consumes a bitmask expression
+    sql: SELECT CASE WHEN 219 & 2 = 2 THEN 17 ELSE 9 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 17
+  - name: Bitmask nullable AND
+    sql: SELECT CAST(NULL AS INT) & 3 AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Bitmask nullable OR
+    sql: SELECT 3 | CAST(NULL AS BIGINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Bitmask nullable XOR
+    sql: SELECT CAST(NULL AS SMALLINT) ^ 3 AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Bitmask nullable complement
+    sql: SELECT ~CAST(NULL AS TINYINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Bitmask signed wide AND stays exact
+    sql: SELECT CAST(-9223372036854775808 AS BIGINT) & CAST(-1 AS BIGINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: -9223372036854775808
+  - name: Bitmask signed wide XOR stays exact
+    sql: SELECT CAST(-9223372036854775808 AS BIGINT) ^ CAST(-1 AS BIGINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 9223372036854775807
+  - name: Bitmask equal physical carriers retain tiny width
+    sql: SELECT ~flag AS value FROM (SELECT CAST(1 AS TINYINT) AS flag) d
+    expect:
+      rows: 1
+      data:
+      - value: 254
+  - name: Bitmask equal physical carriers retain int width
+    sql: SELECT ~flag AS value FROM (SELECT CAST(1 AS INT) AS flag) d
+    expect:
+      rows: 1
+      data:
+      - value: -2
+  - name: Bitmask left shift
+    sql: SELECT CAST(37 AS INT) << 3 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 296
+  - name: Bitmask right shift
+    sql: SELECT CAST(296 AS INT) >> 3 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 37
+  - name: Bitmask left shift function
+    sql: SELECT LEFT_SHIFT(CAST(37 AS INT),3) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 296
+  - name: Bitmask right shift function
+    sql: SELECT RIGHT_SHIFT(CAST(296 AS INT),3) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 37
+  - name: Bitmask logical int right shift
+    sql: SELECT CAST(-1 AS INT) >> 1 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 2147483647
+  - name: Bitmask logical small right shift
+    sql: SELECT CAST(-1 AS SMALLINT) >> 1 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 32767
+  - name: Bitmask logical wide right shift
+    sql: SELECT CAST(-1 AS BIGINT) >> 1 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 9223372036854775807
+  - name: Bitmask tiny left shift drops high bits
+    sql: SELECT CAST(219 AS TINYINT) << 1 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 182
+  - name: Bitmask int sign bit left shift
+    sql: SELECT CAST(1 AS INT) << 31 AS value
+    expect:
+      rows: 1
+      data:
+      - value: -2147483648
+  - name: Bitmask wide sign bit left shift
+    sql: SELECT CAST(1 AS BIGINT) << 63 AS value
+    expect:
+      rows: 1
+      data:
+      - value: -9223372036854775808
+  - name: Bitmask shift by declared width clears value
+    sql: SELECT CAST(-1 AS SMALLINT) >> 16 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 0
+  - name: Bitmask shift beyond declared width clears value
+    sql: SELECT CAST(-1 AS INT) << 43 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 0
+  - name: Bitmask negative left shift reverses direction
+    sql: SELECT LEFT_SHIFT(CAST(296 AS INT),-3) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 37
+  - name: Bitmask negative right shift reverses direction
+    sql: SELECT RIGHT_SHIFT(CAST(37 AS INT),-3) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 296
+  - name: Bitmask negative maximum width shift cannot overflow magnitude
+    sql: SELECT LEFT_SHIFT(CAST(1 AS BIGINT),CAST(-9223372036854775808 AS BIGINT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 0
+  - name: Bitmask nullable shifted value
+    sql: SELECT CAST(NULL AS INT) << 2 AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Bitmask nullable shift count
+    sql: SELECT CAST(3 AS INT) >> CAST(NULL AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Bitmask shift and addition associate left to right
+    sql: SELECT CAST(1 AS INT) << 2 + 1 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 5
+  - name: Bitmask addition before equal precedence shift
+    sql: SELECT 3 + 1 << 2 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 16
+  - name: Bitmask zero count preserves exact signed wide value
+    sql: SELECT CAST(-9223372036854775808 AS BIGINT) >> 0 AS value
+    expect:
+      rows: 1
+      data:
+      - value: -9223372036854775808
+  - name: Bitmask decimal operands are rejected
+    sql: SELECT CAST(3 AS DECIMAL(8,2)) & 1 AS value
+    expect:
+      error: true
+  - name: Bitmask approximate operands are rejected
+    sql: SELECT CAST(3 AS FLOAT) | 1 AS value
+    expect:
+      error: true
+  - name: Bitmask two binary operands are rejected
+    sql: SELECT 0x12 & 0x34 AS value
+    expect:
+      error: true
+  - name: Bitmask decimal shift count is rejected
+    sql: SELECT LEFT_SHIFT(CAST(3 AS INT),CAST(1 AS DECIMAL(8,2))) AS value
+    expect:
+      error: true
+  - name: Bitmask complement precedes IS NULL
+    sql: SELECT ~CAST(NULL AS INT) IS NULL AS value
+    expect:
+      rows: 1
+      data:
+      - value: true
+  - name: Bitmask nested complement retains declared width
+    sql: SELECT ~~CAST(219 AS TINYINT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 219
+  - name: Bitmask complement accepts a signed operand
+    sql: SELECT ~-CAST(219 AS INT) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 218
+  - name: Bitmask BIT operands convert by declared contract
+    sql: SELECT CAST(1 AS BIT) & CAST(0 AS BIT) AS a,CAST(1 AS BIT) | CAST(0 AS BIT) AS b,~CAST(1 AS BIT) AS c
+    expect:
+      rows: 1
+      data:
+      - a: 0
+        b: 1
+        c: false
+  - name: Bitmask create native flag fixture
+    sql: CREATE TABLE bitmask_columns(id INT PRIMARY KEY,flags INT,small_flags SMALLINT,tiny_flags TINYINT,wide_flags
+      BIGINT,note NVARCHAR(20))
+    expect:
+      rows: 0
+      data: []
+    setup:
+    - sql: DROP VIEW IF EXISTS bitmask_stored_view
+    - sql: DROP TABLE IF EXISTS bitmask_columns
+  - name: Bitmask populate native flag fixture
+    sql: INSERT bitmask_columns VALUES(1,219,-1,219,-9223372036854775808,N'bad'),(2,NULL,NULL,NULL,NULL,N'bad')
+    expect:
+      rows: 1
+      data:
+      - affected_rows: 2
+  - name: Bitmask native flag columns preserve NULL and declared widths
+    sql: SELECT id,flags & 46 AS masked,small_flags >> 1 AS unsigned_small,tiny_flags << 1 AS clipped,wide_flags ^
+      CAST(-1 AS BIGINT) AS wide FROM bitmask_columns ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        masked: 10
+        unsigned_small: 32767
+        clipped: 182
+        wide: 9223372036854775807
+      - id: 2
+        masked: null
+        unsigned_small: null
+        clipped: null
+        wide: null
+  - name: Bitmask native flag filter uses the shared planner
+    sql: SELECT id FROM bitmask_columns WHERE flags & 2 = 2 ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 1
+  - name: Bitmask native flag projection retains lazy branch evaluation
+    sql: SELECT CASE WHEN id=1 THEN flags & 46 ELSE CAST(note AS INT) END AS value FROM bitmask_columns WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - value: 10
+  - name: Bitmask unused branches still validate SQL operand types
+    sql: SELECT CASE WHEN 1=1 THEN 7 ELSE CAST(3 AS FLOAT) & 1 END AS value
+    expect:
+      error: true
+      contains: bit operation requires declared integer operands
+  - name: Bitmask unsupported binary mixing fails explicitly
+    sql: SELECT 0x12 & CAST(3 AS INT) AS value
+    expect:
+      error: true
+      contains: bit operation requires declared integer operands
+  - name: Bitmask empty results retain declared output types
+    scm: |-
+      (equal? (map (tds_describe "memcp-tests"
+        "SELECT TOP (0) tiny_flags & CAST(1 AS TINYINT) AS a,small_flags ^ CAST(1 AS SMALLINT) AS b,flags | 1 AS c,wide_flags >> 1 AS d,~CAST(1 AS BIT) AS e FROM bitmask_columns"
+        "" (newsession)) (lambda (field) (field "sql_type")))
+        '("TINYINT" "SMALLINT" "INT" "BIGINT" "BIT"))
+    expect:
+      result: true
+  - name: Bitmask final native code contains expressions only
+    scm: |-
+      (not (regexp_test (string (parse_tsql "memcp-tests"
+        "SELECT flags & 46 AS value FROM bitmask_columns" nil nil nil))
+        "sql_type_expr|sql_compile_expr|tsql_bit_compiler"))
+    expect:
+      result: true
+  - name: Bitmask stored view keeps portable bit compiler contracts
+    sql: CREATE VIEW bitmask_stored_view AS SELECT id,flags & 46 AS masked,tiny_flags << 1 AS clipped,wide_flags ^
+      CAST(-1 AS BIGINT) AS wide FROM bitmask_columns
+    expect:
+      rows: 1
+      data:
+      - affected_rows: 1
+  - name: Bitmask stored view evaluates native flag columns
+    sql: SELECT masked,clipped,wide FROM bitmask_stored_view WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - masked: 10
+        clipped: 182
+        wide: 9223372036854775807
+  - name: Bitmask durable restart restores compiler factories
+    action: restart
+    expect:
+      success: true
+  - name: Bitmask restored view preserves flag widths and values
+    sql: SELECT masked,clipped,wide FROM bitmask_stored_view WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - masked: 10
+        clipped: 182
+        wide: 9223372036854775807
+  - name: Bitmask remove stored bit view fixture
+    sql: DROP VIEW bitmask_stored_view
+    expect:
+      rows: 1
+      data:
+      - affected_rows: 1
+  - name: Bitmask remove native flag fixture
+    sql: DROP TABLE bitmask_columns
+    expect:
+      rows: 0
+      data: []
+  - name: Bitmask real TDS RPC preserves signed wide bit results
+    tds:
+      statements:
+      - sql: SELECT CAST(@value AS BIGINT) ^ CAST(-1 AS BIGINT) AS complemented,CAST(@value AS BIGINT) >> 63 AS shifted
+        parameters:
+        - name: value
+          value: -9223372036854775808
+        expect:
+          rows: 1
+          columns:
+          - complemented
+          - shifted
+          data:
+          - complemented: 9223372036854775807
+            shifted: 1
+  - name: Bitmask real TDS RPC retains narrow and NULL result contracts
+    tds:
+      statements:
+      - sql: SELECT ~CAST(@value AS TINYINT) AS complemented,CAST(NULL AS INT) & 7 AS missing
+        parameters:
+        - name: value
+          value: 219
+        expect:
+          rows: 1
+          columns:
+          - complemented
+          - missing
+          data:
+          - complemented: 36
+            missing: null
 
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe

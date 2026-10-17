@@ -74,7 +74,7 @@ test_cases:
       (list "batch" (list
         (list "declare" (list (list "amount" '("DECIMAL" 12 2) "1")
           (list "label" '("NVARCHAR" 20) nil)))
-        (list "assign" "amount" "2.5"))))
+        (list "assign" "amount" nil "2.5"))))
   expect: {result: true}
 - name: IF and nested blocks retain ordinary SELECT syntax
   scm: |
@@ -1305,5 +1305,50 @@ test_cases:
     - severity: null
   cleanup:
   - sql: DROP PROCEDURE dbo.script_error_helper
+
+- name: Bitmask local variable &= uses its declared assignment
+  sql: DECLARE @flags INT=219; SET @flags &= 46; SELECT @flags AS value
+  expect:
+    rows: 1
+    data:
+    - value: 10
+- name: Bitmask local variable |= uses its declared assignment
+  sql: DECLARE @flags INT=219; SET @flags |= 46; SELECT @flags AS value
+  expect:
+    rows: 1
+    data:
+    - value: 255
+- name: Bitmask local variable ^= uses its declared assignment
+  sql: DECLARE @flags INT=219; SET @flags ^= 46; SELECT @flags AS value
+  expect:
+    rows: 1
+    data:
+    - value: 245
+- name: Bitmask local variable NULL assignment remains NULL
+  sql: DECLARE @flags INT=219; SET @flags &= CAST(NULL AS INT); SELECT @flags AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Bitmask BIT variable compound assignment rejects its declared target
+  sql: DECLARE @flags BIT=1; SET @flags &= 0
+  expect:
+    error: true
+    contains: bit compound assignment requires an integer target
+- name: Bitmask NULL BIT variable still rejects compound assignment
+  sql: DECLARE @flags BIT=NULL; SET @flags ^= 1
+  expect:
+    error: true
+    contains: bit compound assignment requires an integer target
+- name: Bitmask narrowing variable assignment uses the existing declared range
+  sql: DECLARE @flags TINYINT=255; SET @flags ^= 256
+  expect:
+    error: true
+    contains: integer conversion overflow
+- name: Bitmask variable compound syntax retains its operator in the ordinary control AST
+  scm: |-
+    (equal? (parse_tsql_batch "memcp-tests" "SET @flags &= 3") (list "batch" (list (list "assign" "flags" "&" "3"))))
+  expect:
+    result: true
 
 cleanup: []

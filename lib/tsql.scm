@@ -328,9 +328,13 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 						(tsql_scalar_value schema (nth declaration 2) session tx "assignment" (cadr declaration)))) nil))
 				(session (concat "__tsql_parameter:" name) value))) nil)
 			0)
-		'("assign" name text) (begin
+		'("assign" name operation text) (begin
 			(define declaration (find (session "__tsql_parameter_declarations") (lambda (item) (equal? (car item) name)) nil))
 			(if declaration true (error "undeclared variable: @" name))
+			(if operation (tsql_bit_assignment_type (car (cadr declaration))) true)
+			/* Compound syntax uses the existing scalar compiler and assignment cast.
+			The parsed variable identifier is syntax, never caller-provided SQL text. */
+			(define text (if operation (concat "@" name " " operation " (" text ")") text))
 			(define value (statement text false (lambda (tx)
 				(tsql_scalar_value schema text session tx "assignment" (cadr declaration)))))
 			(session (concat "__tsql_parameter:" name) value)
