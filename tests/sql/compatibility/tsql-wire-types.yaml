@@ -293,6 +293,109 @@ test_cases:
             - {name: t, value: 'Grüße 🐘'}
             - {name: n, value: 9007199254740993}
           expect: {rows: 1, data: [{number: '9007199254740993', bytes: {binary_hex: '0080ff'}, label: 'Grüße 🐘'}]}
+  - name: TRY conversions preserve declared NULL and small integer wire output
+    tds:
+      statements:
+      - sql: SELECT TRY_CAST(N'42' AS SMALLINT) AS value,TRY_CONVERT(INT,N'bad') AS absent
+        expect:
+          rows: 1
+          data:
+          - value: 42
+            absent: null
+  - name: TRY conversions bind successful and failed prepared text parameters
+    tds:
+      statements:
+      - sql: SELECT TRY_CAST(@raw AS INT) AS value
+        prepare: true
+        parameters:
+        - name: raw
+          value: '24'
+        expect:
+          rows: 1
+          data:
+          - value: 24
+      - sql: SELECT TRY_CAST(@raw AS INT) AS value
+        prepare: true
+        parameters:
+        - name: raw
+          value: bad
+        expect:
+          rows: 1
+          data:
+          - value: null
+  - name: TRY input failures remain client errors and permit connection reuse
+    tds:
+      statements:
+      - sql: SELECT TRY_CAST(1/0 AS INT) AS value
+        expect:
+          error: true
+          contains:
+          - division by zero
+      - sql: SELECT TRY_CONVERT(INT,CAST(N'bad' AS INT)) AS value
+        expect:
+          error: true
+          contains:
+          - invalid integer text
+      - sql: SELECT TRY_CONVERT(INT,N'7') AS value
+        expect:
+          rows: 1
+          data:
+          - value: 7
+  - name: TRY dimensioned decimals use numeric wire output in direct and prepared queries
+    tds:
+      statements:
+      - sql: SELECT TRY_CAST(N'12.34' AS DECIMAL(8,2)) AS value
+        expect:
+          rows: 1
+          data:
+          - value: '12.34'
+      - sql: SELECT TRY_CAST(@raw AS DECIMAL(8,2)) AS value
+        prepare: true
+        parameters:
+        - name: raw
+          value: '12.34'
+        expect:
+          rows: 1
+          data:
+          - value: '12.34'
+      - sql: SELECT TRY_CAST(N'12.34' AS DECIMAL(8,2)) AS value WHERE 1=0
+        expect:
+          rows: 0
+          columns:
+          - value
+  - name: Identifier functions use actual prepared TDS text bindings
+    tds:
+      statements:
+      - sql: SELECT QUOTENAME(@raw) AS quoted,PARSENAME(@raw,1) AS component
+        prepare: true
+        parameters:
+        - name: raw
+          value: a]b
+        expect:
+          rows: 1
+          data:
+          - quoted: '[a]]b]'
+            component: null
+      - sql: SELECT QUOTENAME(@raw) AS quoted,PARSENAME(@raw,1) AS component
+        prepare: true
+        parameters:
+        - name: raw
+          value: owner.item
+        expect:
+          rows: 1
+          data:
+          - quoted: '[owner.item]'
+            component: item
+  - name: Identifier functions preserve typed NULLs over TDS
+    tds:
+      statements:
+      - sql: SELECT QUOTENAME(NULL) AS quoted,PARSENAME(NULL,1) AS component
+        expect:
+          rows: 1
+          data:
+          - quoted: null
+            component: null
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_wire_contract
   - sql: DROP TABLE IF EXISTS tsql_wire_text

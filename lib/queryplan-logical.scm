@@ -412,7 +412,7 @@ query generation is the scope that releases them after execution. */
 (define make_stage_output_relation (lambda (stage_id)
 	(list (quote stage-output) stage_id)))
 
-(define logical_op (lambda (node) (if (and (list? node) (not (nil? node))) (car node) nil)))
+(define logical_op (lambda (node) (if (and (list? node) (not (empty_list? node))) (car node) nil)))
 (define query_block? (lambda (node) (equal? (logical_op node) (quote query-block))))
 (define group_stage? (lambda (node) (equal? (logical_op node) (quote group-stage))))
 (define union_block? (lambda (node) (equal? (logical_op node) (quote union-block))))
