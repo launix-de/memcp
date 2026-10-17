@@ -2401,7 +2401,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
 			(define name tsql_identifier)) (lambda () (begin
 				(if policy (policy "system" true true) true)
-				(list (quote createdatabase) name (if ifnotexists true false) nil nil))))
+				(list (quote create_sql_database) (quote tx) name (if ifnotexists true false) nil nil))))
 		(parser '((atom "DROP" true) (atom "DATABASE" true)
 			(define ifexists (? (atom "IF" true) (atom "EXISTS" true))) (define name tsql_identifier))
 			(lambda () (begin (if policy (policy "system" true true) true)

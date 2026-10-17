@@ -1091,9 +1091,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier)
 			(? (atom "WITH" true) (* (or psql_identifier "=" psql_expression))))
-			(begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false))) )
+			(begin (if policy (policy "system" true true) true) '((quote create_sql_database) (quote tx) id (if ifnot true false) nil nil)) )
 		(parser '((atom "CREATE" true) (atom "SCHEMA" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier))
-			(begin (if policy (policy "system" true true) true) '((quote createdatabase) id true)) )
+			(begin (if policy (policy "system" true true) true) '((quote create_sql_database) (quote tx) id true nil nil)) )
 		(parser (regex "^[\\r\\n\\t ]*ALTER DATABASE (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*ALTER SCHEMA (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*ALTER FUNCTION (?s:.*)\\z") true)
@@ -1511,7 +1511,7 @@ substring replace (which is the historical behaviour). */
 
 (define psql_import_createdatabase_name (lambda (plan)
 	(match plan
-		(cons op (cons id tail)) (if (equal? op (quote createdatabase)) id nil)
+		((symbol create_sql_database) _tx id _if_not_exists _options _source) id
 		nil)
 ))
 
@@ -1525,7 +1525,7 @@ substring replace (which is the historical behaviour). */
 	(define raw_plan (parse_psql schema command policy nil tx))
 	(define created_schema (psql_import_createdatabase_name raw_plan))
 	(if created_schema
-		(list (coalesce dump_schema created_schema) '((quote createdatabase) schema true))
+		(list (coalesce dump_schema created_schema) '((quote create_sql_database) (quote tx) schema true nil nil))
 		(if (psql_import_dropdatabase raw_plan)
 			(list dump_schema true)
 			(list dump_schema

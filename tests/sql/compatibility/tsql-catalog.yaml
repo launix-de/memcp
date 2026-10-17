@@ -816,4 +816,46 @@ test_cases:
       (drop_sql_type_alias "memcp-tests" "ddl_tx_removal" false nil)
       (and rejected (not (nil? retained))))
   expect: {result: true}
+# This isolated suite ends by replacing only its own database. Restore that
+# database even when an assertion raises, so later suites receive a usable target.
+- name: Database lifecycle retires aliases across all SQL frontends
+  scm: |
+    (begin
+      (define tx nil)
+      (define session (newsession))
+      (define outcome (try (lambda () (begin
+        (map (list (list parse_sql "`memcp-tests`") (list parse_psql "\"memcp-tests\"")
+          (list parse_tsql "[memcp-tests]")) (lambda (frontend) (begin
+          (define parse (car frontend))
+          (define quoted_name (cadr frontend))
+          (create_sql_type_alias "memcp-tests" "ddl_lifecycle_alias" "INT" '() true nil)
+          (eval (parse "memcp-tests" (concat "CREATE DATABASE IF NOT EXISTS " quoted_name) nil (newsession) nil))
+          (if (tsql_find_type_alias "memcp-tests" "ddl_lifecycle_alias" nil) true
+            (error "existing-database create removed its alias"))
+          (define rejected (try (lambda () (begin
+            (eval (parse "memcp-tests" (concat "CREATE DATABASE " quoted_name) nil (newsession) nil))
+            false)) (lambda (_failure) true)))
+          (if (and rejected (tsql_find_type_alias "memcp-tests" "ddl_lifecycle_alias" nil)) true
+            (error "failed database create changed its alias"))
+          (eval (parse "memcp-tests" (concat "DROP DATABASE " quoted_name) nil (newsession) nil))
+          (if (nil? (tsql_find_type_alias "memcp-tests" "ddl_lifecycle_alias" nil)) true
+            (error "database drop retained its alias"))
+          (eval (parse "memcp-tests" (concat "CREATE DATABASE " quoted_name) nil (newsession) nil))
+          (create_sql_type_alias "memcp-tests" "ddl_lifecycle_alias" "INT" '() true nil)
+          /* Model a crash between physical DROP and frontend catalog cleanup.
+          Privileged native DDL intentionally bypasses the SQL lifecycle. */
+          (dropdatabase "memcp-tests" false)
+          (define failed_drop (try (lambda () (begin
+            (eval (parse "memcp-tests" (concat "DROP DATABASE " quoted_name) nil (newsession) nil))
+            false)) (lambda (_failure) true)))
+          (if (and failed_drop (tsql_find_type_alias "memcp-tests" "ddl_lifecycle_alias" nil)) true
+            (error "failed database drop changed its alias"))
+          (eval (parse "memcp-tests" (concat "CREATE DATABASE " quoted_name) nil (newsession) nil))
+          (if (nil? (tsql_find_type_alias "memcp-tests" "ddl_lifecycle_alias" nil)) true
+            (error "database recreation inherited an orphan alias")))))
+        true)) (lambda (failure) (list failure))))
+      (createdatabase "memcp-tests" true)
+      (drop_sql_type_alias "memcp-tests" "ddl_lifecycle_alias" true nil)
+      (if (equal? outcome true) true (error (car outcome))))
+  expect: {result: true}
 cleanup: []
