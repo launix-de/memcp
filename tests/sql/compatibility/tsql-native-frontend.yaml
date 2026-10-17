@@ -585,7 +585,7 @@ test_cases:
     sql: INSERT INTO [dbo].[tsql_native] ([id]) VALUES (1)
     expect:
       error: true
-      contains: unique
+      contains: Duplicate entry
     session_id: identity-contract-151
     setup:
     - sql: SET IDENTITY_INSERT tsql_native ON
@@ -2126,7 +2126,9 @@ test_cases:
       - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion
       - sql: CREATE TABLE tsql_identity_explicit_completion(id INT IDENTITY,value INT)
       - sql: INSERT INTO tsql_identity_explicit_completion(value) VALUES(1)
+      - sql: SET IDENTITY_INSERT tsql_identity_explicit_completion ON
       - sql: INSERT INTO tsql_identity_explicit_completion(id,value) VALUES(100,2)
+      - sql: SET IDENTITY_INSERT tsql_identity_explicit_completion OFF
     sql: SELECT @@IDENTITY AS id
     expect: {rows: 1, data: [{id: null}]}
 # Stored logical views retain portable frontend compiler contracts.
