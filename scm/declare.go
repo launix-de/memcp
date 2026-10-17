@@ -909,12 +909,16 @@ func FormatTypeSignature(td *TypeDescriptor) string {
 }
 
 func hasTypeKind(kinds, wanted string) bool {
-	for _, kind := range strings.Split(kinds, "|") {
+	for {
+		kind, rest, more := strings.Cut(kinds, "|")
 		if kind == wanted {
 			return true
 		}
+		if !more {
+			return false
+		}
+		kinds = rest
 	}
-	return false
 }
 
 func replaceTypeKind(kinds, wanted, replacement string) string {
