@@ -493,7 +493,7 @@ test_cases:
       (begin
         (define info (sql_expr_info (list) (tsql_default_literal "   N'spaces'")))
         (list (eval (sql_info_formula info)) (sql_info_type info) (sql_info_collation info)))
-    expect: {result: [spaces, NVARCHAR, null]}
+    expect: {result: [spaces, NVARCHAR, [utf8mb4_general_ci, 4]]}
   - name: National string prefix must stay adjacent to the opening quote
     sql: SELECT N 'not adjacent' AS value
     expect: {error: true}
