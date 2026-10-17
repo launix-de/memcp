@@ -849,7 +849,7 @@ func TestJITNestedExpressionSpillsProtectedOuterValues(t *testing.T) {
 				fn := CompileJITStorageGetValue(func(ctx *JITContext, _, target JITValueDesc) JITValueDesc {
 					off := ctx.AllocStack(16)
 					sumOff := ctx.AllocStack(8)
-					localCount := jitRequiredLocalSlots(proc.Body, proc.NumVars)
+					localCount, _ := jitRequiredLocalSlots(proc.Body, proc.NumVars)
 					locals := make([]JITValueDesc, localCount)
 					localsOff := ctx.AllocStack(int32(localCount * 16))
 					for i := range locals {

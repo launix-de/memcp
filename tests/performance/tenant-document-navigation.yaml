@@ -6,7 +6,7 @@
 # full-year table is unused there; performance mode retains both 800k fixtures.
 metadata:
   # Account for all seven fresh pairs and their native startup/fixture costs.
-  performance_shard_weight: 144
+  performance_shard_weight: 162
   reuse_fixture: true
   restart_after_setup: true
   description: Restricted tenant hierarchy with correlated document membership and counts; 800k documents, 100 tenants,
