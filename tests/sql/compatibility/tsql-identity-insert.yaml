@@ -1305,7 +1305,7 @@ test_cases:
     result:
     - true
     - 0
-- name: Explicit negative identity imports preserve native WAL recovery
+- name: Explicit negative identity imports preserve native restart recovery
   session_id: identity-replay-owner
   setup:
   - sql: DROP TABLE IF EXISTS identity_replay_negative
