@@ -423,6 +423,13 @@ recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. 
 	(map columns (lambda (name) (begin
 		(define declaration (tsql_target_column_declaration database table_name name planning_session))
 		(if (nil? declaration) (error "unknown INSERT column: " name) declaration)))))))
+/* Numeric text must fit its declared output width. Select this helper from
+SQL input metadata; a native carrier never decides the conversion policy. */
+(define tsql_cast_numeric_text (lambda (value length national fixed)
+	(if (nil? value) nil (begin
+		(if (and (not (equal? length -1)) (> (strlen (string value)) length))
+			(error "numeric character conversion overflow") true)
+		((if fixed tsql_cast_fixed_text tsql_cast_text) value length national)))))
 (define tsql_text_compiler (lambda (length national fixed) (lambda (infos) (begin
 	(define info (car infos))
 	(define source (sql_info_type info))
@@ -431,10 +438,10 @@ recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. 
 			(match source "DATE" "%Y-%m-%d" "TIME" "%H:%i:%s"
 				"DATETIME2" "%Y-%m-%d %H:%i:%s.000" _ "%Y-%m-%d %H:%i:%s"))
 		(sql_info_formula info)))
-	(if (and (plain_literal_expr? formula) (sql_numeric_type? (sql_info_type info))
-		(not (equal? length -1)) (> (strlen (string formula)) length))
-		(error "numeric character conversion overflow") true)
-	(sql_info (list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national)
+	(define converted (if (sql_numeric_type? source)
+		(list (quote tsql_cast_numeric_text) formula length national fixed)
+		(list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national)))
+	(sql_info converted
 		(if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR")
 		(sql_info_collation info))))))
 (define tsql_cast_text_expr (lambda (value dimensions national fixed) (begin
@@ -493,6 +500,56 @@ configurable cutoff remain separate compatibility work. */
 				(define pattern (tsql_temporal_style_pattern style true))
 				(list (quote sql_compile_expr) (list (quote tsql_styled_text_compiler) pattern type (list (quote quote) dimensions)) value)))
 		(error "unsupported CONVERT style for " type)))))
+/* TRY converts only a validated conversion recipe. The operand is a strict
+argument outside the catch closure, so its own errors are never conversion
+failures. Native representation limits remain explicit errors before that
+closure; neither SQL declarations nor unsupported operations are guessed from
+runtime values or error-message text. */
+(define tsql_try_cast_input (lambda (value national) (if (nil? value) true (begin
+	(define limit (if national 4000 8000))
+	(define units (if (and national (> (strlen value) limit))
+		(reduce (split value "") (lambda (units character)
+			(+ units (if (equal? (strlen character) 4) 2 1))) 0) (strlen value)))
+	(if (> units limit) (error "TRY_CAST input length exceeds the supported limit") true)))))
+(define tsql_try_conversion_compiler (lambda (type dimensions style bounded_input) (lambda (infos) (begin
+	(define input (car infos))
+	(define source (sql_info_type input))
+	(define numeric (sql_numeric_type? source))
+	(define text (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT") source))
+	(define absent (equal? source "NULL"))
+	(if (and (sql_numeric_type? type) (not (or numeric text absent)))
+		(error "conversion from " source " to " type " is not implemented") true)
+	(if (and (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type)
+		(not (or numeric text absent (tsql_temporal_type? source))))
+		(error "conversion from " source " to " type " is not implemented") true)
+	(if (and (not (nil? style)) (not (equal? style 0)) (not (equal? style (quote sql_null_style)))
+		(has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type) (not (or absent (tsql_temporal_type? source))))
+		(error "styled text conversion requires a declared temporal input") true)
+	/* Feed the existing compiler a declared local, not an executable SQL type
+	wrapper. Only its expr slot enters the emitted invocation lambda. */
+	(define operand (quote try_value))
+	(define converted (sql_expr_info '() (tsql_convert_expr
+		(list (quote sql_type_expr) operand source (sql_info_collation input)) type dimensions style)))
+	/* Preserve the existing unsupported high-scale CAST contract. In
+	particular its native precision error must not silently become NULL. */
+	(define unsupported_scale (and (has? '("DECIMAL" "NUMERIC") type)
+		(> (cadr (tsql_decl_dimensions type dimensions)) 15)))
+	(define body (if unsupported_scale (sql_info_formula converted)
+		(list (quote try) (list (quote lambda) '() (sql_info_formula converted))
+			(list (quote lambda) (list (quote conversion_error)) nil))))
+	(define checks (if (equal? style (quote sql_null_style)) '()
+		(merge
+			(if (and bounded_input text) (list (list (quote tsql_try_cast_input) operand
+				(has? '("NCHAR" "NVARCHAR" "NTEXT") source))) '())
+			(if (and text (tsql_temporal_type? type) (not (equal? type "DATE")))
+				(list (list (quote tsql_calendar_cast_text) operand)) '()))))
+	(sql_info (list (list (quote lambda) (list operand)
+		(cons (quote begin) (append checks body))) (sql_info_formula input))
+		(sql_info_type converted) (sql_info_collation converted))))))
+(define tsql_try_convert_expr (lambda (value type dimensions style bounded_input) (begin
+	(tsql_decl_dimensions type dimensions)
+	(list (quote sql_compile_expr) (list (quote tsql_try_conversion_compiler)
+		type (list (quote quote) dimensions) (list (quote quote) style) bounded_input) value))))
 /* Aggregate contracts come from SQL syntax and the declared input type.
 The native reducers do not determine the frontend's SQL result contract. */
 (define tsql_aggregate_type (lambda (name input_type) (match name
@@ -1443,6 +1500,13 @@ that context explicitly; stored views refuse this scalar before publication. */
 
 		(parser '("(" (define sub tsql_select) ")") '('inner_select sub))
 		(parser '("(" (define a tsql_expression) ")") a)
+		(parser '((atom "TRY_CAST" true) "(" (define value tsql_expression) (atom "AS" true)
+			(define type tsql_declared_type) (define dimensions tsql_type_dimensions) ")")
+			(tsql_try_convert_expr value type dimensions nil true))
+		(parser '((atom "TRY_CONVERT" true) "(" (define type tsql_declared_type) (define dimensions tsql_type_dimensions)
+			"," (define value tsql_expression) (? "," (define style (or tsql_int
+				(parser (atom "NULL" true) (quote sql_null_style))))) ")")
+			(tsql_try_convert_expr value type dimensions style false))
 		(parser '((atom "CAST" true) "(" (define value tsql_expression) (atom "AS" true)
 			(define type tsql_declared_type) (define dimensions tsql_type_dimensions) ")")
 			(tsql_cast_expr value type dimensions))

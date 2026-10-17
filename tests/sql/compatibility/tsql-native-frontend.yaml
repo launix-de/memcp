@@ -2609,6 +2609,182 @@ test_cases:
       - sql: DROP VIEW portable_lifecycle_view
       - sql: DROP TABLE portable_lifecycle_input
 
+  - name: TRY conversion compile triples retain NULL target types and collation
+    scm: "(begin\n  (define integer (sql_expr_info (list) (tsql_try_convert_expr nil \"INT\" (list) nil false)))\n\
+      \  (define text (sql_expr_info (list) (tsql_try_convert_expr\n    (list (quote sql_type_expr) \"box\" \"\
+      NVARCHAR\" '(\"en_ci\" 0)) \"NVARCHAR\" '(8) nil false)))\n  (and (equal? (sql_info_type integer) \"INT\"\
+      ) (nil? (eval (sql_info_formula integer)))\n    (equal? (sql_info_type text) \"NVARCHAR\") (equal? (sql_info_collation\
+      \ text) '(\"en_ci\" 0))\n    (not (regexp_test (string (sql_info_formula text)) \"sql_type_expr|sql_compile_expr\"\
+      ))))"
+    expect:
+      result: true
+  - name: TRY conversion operand evaluation occurs exactly once before recovery
+    scm: "(begin\n  (define observed (newsession))\n  (define operand (lambda () (begin (observed \"calls\" (+\
+      \ 1 (coalesceNil (observed \"calls\") 0))) \"invalid\")))\n  (define info (sql_expr_info (list) (tsql_try_convert_expr\n\
+      \    (list (quote sql_type_expr) (list operand) \"NVARCHAR\" nil) \"INT\" (list) nil false)))\n  (and (nil?\
+      \ (eval (sql_info_formula info))) (equal? (observed \"calls\") 1)))"
+    expect:
+      result: true
+  - name: TRY conversion input failures stay outside the recovery closure
+    scm: "(begin\n  (define observed (newsession))\n  (define operand (lambda () (begin (observed \"calls\" (+\
+      \ 1 (coalesceNil (observed \"calls\") 0))) (error \"operand failure\"))))\n  (define info (sql_expr_info\
+      \ (list) (tsql_try_convert_expr\n    (list (quote sql_type_expr) (list operand) \"NVARCHAR\" nil) \"INT\"\
+      \ (list) nil false)))\n  (and (try (lambda () (begin (eval (sql_info_formula info)) false)) (lambda (_cause)\
+      \ true))\n    (equal? (observed \"calls\") 1)))"
+    expect:
+      result: true
+  - name: TRY conversion wire descriptors follow target declarations on empty results
+    scm: "(begin\n  (define session (newsession))\n  (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
+      ) (session \"wire_metadata\" true)\n  (define output (newsession))\n  (tds_frontend \"execute\" session\n\
+      \    (list \"database\" \"memcp-tests\" \"parameters\" (list) \"declarations\" \"\"\n      \"text\" \"\
+      SELECT TRY_CAST(NULL AS SMALLINT) AS narrow,TRY_CONVERT(INT,N'bad') AS absent,TRY_CAST(NULL AS BIT) AS\
+      \ flag WHERE 1=0\")\n    (lambda (_row) (output \"row\" true)) (lambda (fields) (output \"fields\" fields))\
+      \ nil nil)\n  (and (nil? (output \"row\"))\n    (equal? (map (output \"fields\") (lambda (field) (field\
+      \ \"kind\"))) '(38 38 104))\n    (equal? (map (output \"fields\") (lambda (field) (field \"size\"))) '(2\
+      \ 4 1))))"
+    expect:
+      result: true
+  - name: TRY conversion prepared parameters use their declared frontend contracts
+    scm: "(begin\n  (define session (newsession))\n  (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
+      ) (session \"wire_metadata\" true)\n  (define output (newsession))\n  (tds_frontend \"execute\" session\n\
+      \    (list \"database\" \"memcp-tests\" \"parameters\" (list\n      (list \"name\" \"@raw\" \"flags\" 0\
+      \ \"type\" (list \"kind\" 231 \"size\" 24) \"value\" \"42\"))\n      \"declarations\" \"@raw nvarchar(12)\"\
+      \ \"text\" \"SELECT TRY_CAST(@raw AS SMALLINT) AS value\")\n    (lambda (row) (output \"row\" row)) (lambda\
+      \ (fields) (output \"fields\" fields)) nil nil)\n  (and (equal? (output \"row\") '(42)) (equal? ((car (output\
+      \ \"fields\")) \"size\") 2)))"
+    expect:
+      result: true
+  - name: TRY conversions use native column and derived projection contracts
+    sql: SELECT id,TRY_CAST(raw_value AS INT) AS parsed FROM (SELECT id,raw_value FROM try_conversion_source)
+      AS src ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        parsed: 12
+      - id: 2
+        parsed: null
+      - id: 3
+        parsed: null
+    setup:
+    - sql: CREATE TABLE try_conversion_source(id INT PRIMARY KEY,raw_value NVARCHAR(16))
+    - sql: INSERT INTO try_conversion_source VALUES(1,N'12'),(2,N'bad'),(3,NULL)
+    cleanup:
+    - sql: DROP TABLE try_conversion_source
+  - name: TRY conversions retain source collation on column projections
+    sql: SELECT TRY_CAST(value AS NVARCHAR(8)) AS label FROM try_conversion_collation WHERE TRY_CAST(value AS
+      NVARCHAR(8))=N'BOX'
+    expect:
+      rows: 1
+      data:
+      - label: box
+    setup:
+    - sql: CREATE TABLE try_conversion_collation(value NVARCHAR(8) COLLATE en_ci)
+    - sql: INSERT INTO try_conversion_collation VALUES(N'box')
+    cleanup:
+    - sql: DROP TABLE try_conversion_collation
+  - name: TRY conversion values flow through the native insert path
+    sql: SELECT id,value FROM try_conversion_write ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: 12
+      - id: 2
+        value: null
+    setup:
+    - sql: CREATE TABLE try_conversion_write(id INT PRIMARY KEY,value INT)
+    - sql: INSERT INTO try_conversion_write VALUES(1,TRY_CAST(N'12' AS INT)),(2,TRY_CONVERT(INT,N'bad'))
+    cleanup:
+    - sql: DROP TABLE try_conversion_write
+  - name: TRY conversion projections flow through native INSERT SELECT
+    sql: SELECT id,value FROM try_conversion_write ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: 12
+      - id: 2
+        value: null
+    setup:
+    - sql: CREATE TABLE try_conversion_write(id INT PRIMARY KEY,value INT)
+    - sql: INSERT INTO try_conversion_write SELECT 1,TRY_CAST(N'12' AS INT) UNION ALL SELECT 2,TRY_CONVERT(INT,N'bad')
+    cleanup:
+    - sql: DROP TABLE try_conversion_write
+  - name: TRY conversion values flow through native update assignments
+    sql: SELECT id,value FROM try_conversion_write ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: null
+      - id: 2
+        value: 24
+    setup:
+    - sql: CREATE TABLE try_conversion_write(id INT PRIMARY KEY,value INT,raw_value NVARCHAR(16))
+    - sql: INSERT INTO try_conversion_write VALUES(1,12,N'bad'),(2,12,N'24')
+    - sql: UPDATE try_conversion_write SET value=TRY_CAST(raw_value AS INT)
+    cleanup:
+    - sql: DROP TABLE try_conversion_write
+  - name: TRY conversion portable views compile through tsql consumers
+    sql: SELECT * FROM try_conversion_portable
+    expect:
+      rows: 1
+      data:
+      - parsed: 12
+        absent: null
+    syntax: tsql
+    setup:
+    - sql: CREATE VIEW try_conversion_portable AS SELECT TRY_CAST(N'12' AS INT) AS parsed,TRY_CONVERT(INT,N'bad')
+        AS absent
+      syntax: tsql
+    cleanup:
+    - sql: DROP VIEW try_conversion_portable
+      syntax: tsql
+  - name: TRY conversion portable views compile through mysql consumers
+    sql: SELECT * FROM try_conversion_portable
+    expect:
+      rows: 1
+      data:
+      - parsed: 12
+        absent: null
+    syntax: mysql
+    setup:
+    - sql: CREATE VIEW try_conversion_portable AS SELECT TRY_CAST(N'12' AS INT) AS parsed,TRY_CONVERT(INT,N'bad')
+        AS absent
+      syntax: tsql
+    cleanup:
+    - sql: DROP VIEW try_conversion_portable
+      syntax: tsql
+  - name: TRY conversion portable views compile through psql consumers
+    sql: SELECT * FROM try_conversion_portable
+    expect:
+      rows: 1
+      data:
+      - parsed: 12
+        absent: null
+    syntax: psql
+    setup:
+    - sql: CREATE VIEW try_conversion_portable AS SELECT TRY_CAST(N'12' AS INT) AS parsed,TRY_CONVERT(INT,N'bad')
+        AS absent
+      syntax: tsql
+    cleanup:
+    - sql: DROP VIEW try_conversion_portable
+      syntax: tsql
+  - name: TRY conversion view restart fixture
+    sql: CREATE VIEW try_conversion_restart AS SELECT TRY_CAST(N'12' AS INT) AS parsed,TRY_CONVERT(INT,N'bad')
+      AS absent
+  - name: TRY conversion compiler factories survive durable restart
+    action: restart
+  - name: TRY conversion restored view recompiles portable callbacks
+    sql: SELECT * FROM try_conversion_restart
+    expect:
+      rows: 1
+      data:
+      - parsed: 12
+        absent: null
+  - name: Remove TRY conversion restart fixture
+    sql: DROP VIEW try_conversion_restart
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
   - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion

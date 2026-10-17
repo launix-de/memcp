@@ -746,4 +746,194 @@ test_cases:
   name: 'Fixture cleanup 005: DROP TABLE IF EXISTS dbo.exact_default_probe'
 - sql: DROP TABLE tsql_exact_data
   name: 'Fixture cleanup 006: DROP TABLE tsql_exact_data'
+- name: TRY_CAST converts bounded declared integer targets
+  sql: SELECT TRY_CAST(N'255' AS TINYINT) AS tiny_value,TRY_CAST(N'-32768' AS SMALLINT) AS small_value,TRY_CAST(N'2147483647'
+    AS INT) AS int_value,TRY_CAST(N'9223372036854775807' AS BIGINT) AS big_value
+  expect:
+    rows: 1
+    data:
+    - tiny_value: 255
+      small_value: -32768
+      int_value: 2147483647
+      big_value: 9223372036854775807
+- name: TRY_CONVERT converts integer boundaries
+  sql: SELECT TRY_CONVERT(BIGINT,N'-9223372036854775808') AS minimum,TRY_CONVERT(SMALLINT,N'32767') AS maximum
+  expect:
+    rows: 1
+    data:
+    - minimum: -9223372036854775808
+      maximum: 32767
+- name: TRY conversions return NULL for malformed integer text
+  sql: SELECT TRY_CAST(N'12x' AS INT) AS first_value,TRY_CONVERT(BIGINT,N'1.5') AS second_value
+  expect:
+    rows: 1
+    data:
+    - first_value: null
+      second_value: null
+- name: TRY conversions return NULL at integer overflow boundaries
+  sql: SELECT TRY_CAST(N'256' AS TINYINT) AS tiny_value,TRY_CAST(N'-32769' AS SMALLINT) AS small_value,TRY_CONVERT(INT,N'2147483648')
+    AS int_value,TRY_CONVERT(BIGINT,N'9223372036854775808') AS big_value
+  expect:
+    rows: 1
+    data:
+    - tiny_value: null
+      small_value: null
+      int_value: null
+      big_value: null
+- name: TRY conversions preserve typed NULL inputs
+  sql: SELECT TRY_CAST(NULL AS INT) AS integer_value,TRY_CONVERT(DECIMAL(8,2),NULL) AS decimal_value,TRY_CAST(NULL
+    AS NVARCHAR(8)) AS text_value
+  expect:
+    rows: 1
+    data:
+    - integer_value: null
+      decimal_value: null
+      text_value: null
+- name: TRY conversions reuse existing floating decimal and Boolean casts
+  sql: SELECT TRY_CAST(N'1.25' AS FLOAT) AS approximate,TRY_CONVERT(DECIMAL(8,2),N'12.345') AS scaled,TRY_CAST(N'false'
+    AS BIT) AS flag
+  expect:
+    rows: 1
+    data:
+    - approximate: 1.25
+      scaled: 12.35
+      flag: false
+- name: TRY conversions reject malformed numbers without hiding declarations
+  sql: SELECT TRY_CAST(N'bad' AS FLOAT) AS approximate,TRY_CONVERT(DECIMAL(8,2),N'bad') AS scaled,TRY_CAST(N'not-a-flag'
+    AS BIT) AS flag
+  expect:
+    rows: 1
+    data:
+    - approximate: null
+      scaled: null
+      flag: null
+- name: TRY decimal conversion returns NULL for declared precision overflow
+  sql: SELECT TRY_CAST(N'1000' AS DECIMAL(5,2)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY conversions keep numeric input truncation semantics
+  sql: SELECT TRY_CAST(CAST(-1.9 AS FLOAT) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -1
+- name: TRY character conversions reuse fixed width and Unicode rules
+  sql: SELECT TRY_CAST(N'box' AS NCHAR(5)) AS fixed_value,TRY_CONVERT(NVARCHAR(2),N'😀x') AS national_value,TRY_CAST(N'abcdef'
+    AS VARCHAR(3)) AS shortened
+  expect:
+    rows: 1
+    data:
+    - fixed_value: 'box  '
+      national_value: 😀
+      shortened: abc
+- name: TRY numeric text overflow returns NULL instead of truncating digits
+  sql: SELECT TRY_CAST(1234 AS VARCHAR(2)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY binary conversions preserve byte contracts
+  sql: SELECT CASE WHEN TRY_CAST(0x010203 AS BINARY(5))=0x0102030000 THEN 1 ELSE 0 END AS fixed_value,CASE
+    WHEN TRY_CONVERT(VARBINARY(2),0x010203)=0x0102 THEN 1 ELSE 0 END AS shortened
+  expect:
+    rows: 1
+    data:
+    - fixed_value: 1
+      shortened: 1
+- name: TRY conversions reject unsupported text to binary declarations
+  sql: SELECT TRY_CAST(N'12' AS VARBINARY(2)) AS value
+  expect:
+    error: true
+    contains: conversion
+- name: TRY conversions reject unsupported binary to numeric declarations
+  sql: SELECT TRY_CONVERT(INT,0x0102) AS value
+  expect:
+    error: true
+    contains: conversion
+- name: TRY conversions validate target dimensions before recovery
+  sql: SELECT TRY_CAST(N'1' AS DECIMAL(2,3)) AS value
+  expect:
+    error: true
+- name: TRY conversions keep unsupported decimal precision carriers explicit
+  sql: SELECT TRY_CAST(N'1' AS DECIMAL(38,38)) AS value
+  expect:
+    error: true
+    contains: precision
+- name: TRY conversions reject an unsupported target contract
+  sql: SELECT TRY_CAST(1 AS XML) AS value
+  expect:
+    error: true
+- name: TRY_CAST does not swallow errors in its input expression
+  sql: SELECT TRY_CAST(1/0 AS INT) AS value
+  expect:
+    error: true
+    contains: division by zero
+- name: TRY_CONVERT does not swallow nested input conversion errors
+  sql: SELECT TRY_CONVERT(INT,CAST(N'bad' AS INT)) AS value
+  expect:
+    error: true
+    contains: conversion
+- name: TRY_CONVERT NULL style returns a typed NULL
+  sql: SELECT TRY_CONVERT(INT,N'12',NULL) AS numeric_value,TRY_CONVERT(NVARCHAR(8),N'box',NULL) AS text_value
+  expect:
+    rows: 1
+    data:
+    - numeric_value: null
+      text_value: null
+- name: TRY_CONVERT preserves operand errors even for NULL style
+  sql: SELECT TRY_CONVERT(INT,1/0,NULL) AS value
+  expect:
+    error: true
+    contains: division by zero
+- name: TRY_CONVERT does not hide unsupported styles
+  sql: SELECT TRY_CONVERT(DATE,N'2026-03-15',999) AS value
+  expect:
+    error: true
+    contains: style
+- name: TRY_CONVERT keeps existing literal style syntax explicit
+  sql: DECLARE @style INT=112; SELECT TRY_CONVERT(DATE,N'20260315',@style) AS value
+  expect:
+    error: true
+- name: TRY conversions participate in searched CASE and predicates
+  sql: SELECT CASE WHEN TRY_CAST(N'bad' AS INT) IS NULL THEN TRY_CONVERT(INT,N'7') ELSE 9 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: TRY conversions bind declared batch parameters
+  sql: DECLARE @raw NVARCHAR(12)=N'15'; SELECT TRY_CAST(@raw AS SMALLINT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 15
+- name: TRY_CAST enforces its bounded varying input limit
+  scm: (eval (sql_type_formula (list) (tsql_try_convert_expr (list (quote sql_type_expr) (string_repeat "1"
+    4001) "NVARCHAR" nil) "INT" (list) nil true)))
+  expect:
+    error: true
+    contains: length
+- name: TRY_CAST counts supplementary characters in its input limit
+  scm: (eval (sql_type_formula (list) (tsql_try_convert_expr (list (quote sql_type_expr) (string_repeat "😀"
+    2001) "NVARCHAR" nil) "NVARCHAR" (list -1) nil true)))
+  expect:
+    error: true
+    contains: length
+- name: TRY_CAST permits supplementary text exactly at its input limit
+  scm: (begin (define value (string_repeat "😀" 2000)) (equal? (eval (sql_type_formula (list) (tsql_try_convert_expr
+    (list (quote sql_type_expr) value "NVARCHAR" nil) "NVARCHAR" (list -1) nil true))) value))
+  expect:
+    result: true
+- name: TRY decimal conversions allow ordinary values in wide declarations
+  sql: SELECT TRY_CAST(N'12' AS DECIMAL(19,0)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12
+- name: Ordinary numeric text casts keep their existing overflow failure
+  sql: SELECT CAST(1234 AS VARCHAR(2)) AS value
+  expect:
+    error: true
+    contains: overflow
 cleanup: []
