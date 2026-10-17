@@ -413,6 +413,10 @@ recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. 
 		declaration)))))
 (define tsql_insert_declarations (lambda (database table_name columns planning_session) (begin	/* Resolve each target exactly once. Duplicate targets can overwrite an
 	already validated identity/default value in the native column vector. */
+	/* An empty vector has no column lookup that could reject an absent table. */
+	(if (empty_list? columns)
+		(if (table database table_name) true
+			(error "INSERT target table does not exist: " table_name)) true)
 	(if (equal? (count columns) (count (merge_unique (list (map columns toLower)))))
 		true (error "duplicate INSERT column"))
 	(map columns (lambda (name) (begin
@@ -2165,7 +2169,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define database (coalesce schema2 schema))
 			(if policy (policy database tbl true) true)
 			(if describe (begin
-				(get_schema database tbl)
+				(tsql_insert_declarations database tbl '() planning_session)
 				(list (quote quote) '()))
 				(tsql_native_insert_expr database tbl '()
 					(if (equal?? limit 0) '('list) '('list '(list)))
