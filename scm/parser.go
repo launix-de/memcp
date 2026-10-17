@@ -56,7 +56,8 @@ func Simplify(s string) Scmer {
 		}
 	}
 	// Preserve decimal integers before the floating-point fallback loses bits.
-	if integer, err := strconv.ParseInt(s, 10, 64); err == nil {
+	// Signed zero keeps its existing floating representation and sign bit.
+	if integer, err := strconv.ParseInt(s, 10, 64); err == nil && (integer != 0 || s[0] != '-') {
 		return NewInt(integer)
 	}
 	if f, err := strconv.ParseFloat(s, 64); err == nil {

@@ -60,7 +60,7 @@ func TestSimplifyIntegerLiterals(t *testing.T) {
 		input string
 		want  int64
 	}{
-		{"0", 0}, {"-0", 0}, {"+0", 0},
+		{"0", 0}, {"+0", 0},
 		{"1", 1}, {"-1", -1}, {"+12", 12},
 		{"00012", 12}, {"-00012", -12},
 		{"9007199254740993", 9007199254740993},
@@ -84,6 +84,8 @@ func TestSimplifyFloatLiteralForms(t *testing.T) {
 	}{
 		{"1.0", 1}, {"1.", 1}, {".25", .25}, {"12.5", 12.5},
 		{"1e2", 100}, {"1E-2", .01}, {"0x1p4", 16},
+		{"-0", math.Copysign(0, -1)}, {"-00", math.Copysign(0, -1)},
+		{"-0000", math.Copysign(0, -1)},
 		{"-0.0", math.Copysign(0, -1)}, {"-0e0", math.Copysign(0, -1)},
 		{"9223372036854775808", 9223372036854775808.0},
 		{"-9223372036854775809", -9223372036854775809.0},
@@ -120,7 +122,7 @@ func TestReadIntegerLiterals(t *testing.T) {
 		input string
 		want  int64
 	}{
-		{"0", 0}, {"1", 1}, {"-1", -1}, {"00012", 12},
+		{"0", 0}, {"-0", 0}, {"-00", 0}, {"1", 1}, {"-1", -1}, {"00012", 12},
 		{"9007199254740993", 9007199254740993},
 		{"-9007199254740993", -9007199254740993},
 		{"9223372036854775807", math.MaxInt64},
@@ -143,7 +145,7 @@ func TestReadFloatAndOperatorTokens(t *testing.T) {
 			if !value.IsFloat() {
 				t.Fatalf("Read(%q) tag = %d, want float", input+suffix, value.GetTag())
 			}
-			if input == "-0.0" && !math.Signbit(value.Float()) {
+			if value.Float() == 0 && input[0] == '-' && !math.Signbit(value.Float()) {
 				t.Fatal("floating negative zero lost its sign")
 			}
 		}
@@ -163,6 +165,16 @@ func TestReadIntegerConstantFolding(t *testing.T) {
 		value := Optimize(Read(t.Name(), input), &Globalenv, nil)
 		if !value.IsInt() || value.Int() != 9007199254740993 {
 			t.Fatalf("Optimize(%s) = %v, want exact integer", input, value)
+		}
+	}
+}
+
+func TestJITSimplifySignedZero(t *testing.T) {
+	fn := compileJITExpressionTestProc(t, "(lambda (text) (simplify text))")
+	for _, text := range []string{"-0", "-00", "-0000", "-0.0", "-0e0"} {
+		value := Apply(fn, NewString(text))
+		if !value.IsFloat() || value.Float() != 0 || !math.Signbit(value.Float()) {
+			t.Fatalf("compiled Simplify(%q) = %v (tag %d), want signed floating zero", text, value, value.GetTag())
 		}
 	}
 }
