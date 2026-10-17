@@ -5672,10 +5672,16 @@ outputs: this normalization covers joined and derived projection values. */
 			(field_expr_by_title rest title ignorecase))
 		_ nil)))
 
-(define star_expr_alias (lambda (expr)
+/* Star qualifiers carry the same exact/folded identifier contract as ordinary
+column references. Resolve that contract before a derived export catalog loses
+its original source scope; never infer it from the alias spelling. */
+(define star_expr_matches_source? (lambda (expr src)
 	(match expr
-		((symbol get_column) tblvar _ "*" _) tblvar
-		((quote get_column) tblvar _ "*" _) tblvar
+		((symbol sql_compile_column) _compiler column) (star_expr_matches_source? column src)
+		((symbol get_column) alias ignorecase "*" _)
+		(or (nil? alias) (if ignorecase (equal?? alias (source_alias src)) (equal? alias (source_alias src))))
+		((quote get_column) alias ignorecase "*" _)
+		(or (nil? alias) (if ignorecase (equal?? alias (source_alias src)) (equal? alias (source_alias src))))
 		_ false)))
 
 (define star_expr? (lambda (expr)
@@ -5687,9 +5693,9 @@ outputs: this normalization covers joined and derived projection values. */
 /* Star expansion must use each source's SQL-visible exported columns. A source
 may be a base table, table function, query block, or union; consulting only the
 base-table schema silently produces empty result metadata for derived.*. */
-(define expand_star_for_sources (lambda (sources requested_alias)
+(define expand_star_for_sources (lambda (sources expr)
 	(merge (map (coalesceNil sources '()) (lambda (src)
-		(if (or (nil? requested_alias) (equal? requested_alias (source_alias src)))
+		(if (star_expr_matches_source? expr src)
 			(merge (map (binding_source_columns src) (lambda (col)
 				(list col (list (quote get_column) (source_alias src) false col false)))))
 			'()))))))
@@ -5697,9 +5703,8 @@ base-table schema silently produces empty result metadata for derived.*. */
 (define expand_query_block_fields (lambda (sources fields)
 	(match (coalesceNil fields '())
 		(cons title (cons expr rest)) (begin
-			(define requested_alias (star_expr_alias expr))
 			(if (star_expr? expr)
-				(merge (list (expand_star_for_sources sources requested_alias) (expand_query_block_fields sources rest)))
+				(merge (list (expand_star_for_sources sources expr) (expand_query_block_fields sources rest)))
 				(cons title (cons expr (expand_query_block_fields sources rest)))))
 		_ '())))
 

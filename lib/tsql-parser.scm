@@ -2005,8 +2005,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 			/* Assignment aliases must precede expression comparisons. */
 			(parser '((define title (or tsql_identifier tsql_string)) "=" (define e tsql_expression)) '(title e))
 			(parser "*" '("*" '((quote get_column) nil false "*" false)))
-			(parser '((define tbl tsql_identifier_quoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
-			(parser '((define tbl tsql_identifier_unquoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
+			(parser '((define tbl tsql_identifier_quoted) "." "*") '("*" '((quote get_column) tbl true "*" false)))
+			(parser '((define tbl tsql_identifier_unquoted) "." "*") '("*" '((quote get_column) tbl true "*" false)))
 			(parser '((define e tsql_expression) (atom "AS" true) (define title tsql_identifier)) '(title e))
 			(parser '((define e tsql_expression) (atom "AS" true) (define title tsql_string)) '(title e))
 

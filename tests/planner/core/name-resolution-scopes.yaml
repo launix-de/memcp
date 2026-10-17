@@ -669,6 +669,66 @@ test_cases:
     sql: "SELECT d.ID FROM (SELECT missing.* FROM nr_outer o) d"
     expect: {error: true}
 
+  - name: "T-SQL: Folded qualified star retains native output names"
+    syntax: tsql
+    sql: "SELECT I.* FROM nr_inner i WHERE i.ID=10"
+    expect: {rows: 1, data: [{ID: 10, inner_only: 201, shared: 2001, label: ten}]}
+
+  - name: "T-SQL: Bracketed qualified star uses the same identifier contract"
+    syntax: tsql
+    sql: "SELECT [I].* FROM nr_inner [i] WHERE i.ID=10"
+    expect: {rows: 1, data: [{ID: 10, inner_only: 201, shared: 2001, label: ten}]}
+
+  - name: "T-SQL: Quoted qualified star uses the same identifier contract"
+    syntax: tsql
+    sql: 'SELECT "I".* FROM nr_inner "i" WHERE i.ID=10'
+    expect: {rows: 1, data: [{ID: 10, inner_only: 201, shared: 2001, label: ten}]}
+
+  - name: "T-SQL: Derived folded star exports its declared input columns"
+    syntax: tsql
+    sql: "SELECT d.inner_only FROM (SELECT I.* FROM nr_inner i) d WHERE d.ID=10"
+    expect: {rows: 1, data: [{inner_only: 201}]}
+
+  - name: "T-SQL: Derived bracketed star exports its declared input columns"
+    syntax: tsql
+    sql: "SELECT d.inner_only FROM (SELECT [I].* FROM nr_inner [i]) d WHERE d.ID=20"
+    expect: {rows: 1, data: [{inner_only: 202}]}
+
+  - name: "T-SQL: Nested folded stars preserve each projection scope"
+    syntax: tsql
+    sql: "SELECT d.inner_only FROM (SELECT M.* FROM (SELECT I.* FROM nr_inner i) m) d WHERE d.ID=10"
+    expect: {rows: 1, data: [{inner_only: 201}]}
+
+  - name: "T-SQL: Union folded stars export first branch column names"
+    syntax: tsql
+    sql: "SELECT d.inner_only FROM (SELECT I.* FROM nr_inner i UNION ALL SELECT J.* FROM nr_inner j) d WHERE d.ID=10"
+    expect: {rows: 2, data: [{inner_only: 201}, {inner_only: 201}]}
+
+  - name: "T-SQL: Folded star cannot restore an unprojected source column"
+    syntax: tsql
+    sql: "SELECT d.inner_only FROM (SELECT I.* FROM (SELECT ID FROM nr_inner) i) d"
+    expect: {error: true}
+
+  - name: "T-SQL: Unknown folded star remains an invalid source reference"
+    syntax: tsql
+    sql: "SELECT MISSING.* FROM nr_inner i"
+    expect: {error: true}
+
+  - name: "PSQL: Quoted derived stars preserve exact alias case"
+    syntax: postgresql
+    sql: 'SELECT d.inner_only FROM (SELECT "I".* FROM nr_inner "I") d WHERE d.ID=10'
+    expect: {rows: 1, data: [{inner_only: 201}]}
+
+  - name: "PSQL: Quoted derived stars cannot fold a different alias"
+    syntax: postgresql
+    sql: 'SELECT d.inner_only FROM (SELECT "I".* FROM nr_inner "i") d'
+    expect: {error: true}
+
+  - name: "SQL: Quoted derived stars cannot fold a different alias"
+    syntax: mysql
+    sql: "SELECT d.inner_only FROM (SELECT `I`.* FROM nr_inner `i`) d"
+    expect: {error: true}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS nr_alias_conflict"
   - sql: "DROP TABLE IF EXISTS nr_leaf"

@@ -5751,11 +5751,7 @@ columns cannot change group cardinality because the primary key is unique. */
 			true
 			(if (string? title_or_expr)
 				false
-				(and (star_expr? title_or_expr)
-					(begin
-						(define requested_alias (star_expr_alias title_or_expr))
-						(or (nil? requested_alias)
-							(equal? requested_alias (source_alias src)))))))) false)))
+				(star_expr_matches_source? title_or_expr src)))) false)))
 
 (define source_primary_key_grouped? (lambda (block src)
 	(begin
