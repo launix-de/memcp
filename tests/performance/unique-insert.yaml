@@ -95,7 +95,9 @@ test_cases:
     threshold_ms: 5000
 
   - name: "Perf: Concurrent single-row UNIQUE INSERT"
-    performance_rows: 128
+    # One larger invocation amortizes incidental pauses without repeating the
+    # same primary keys. Preserve four writers, SAFE commits and exact counts.
+    performance_rows: 1024
     setup:
       - sql: "DROP TABLE IF EXISTS perf_concurrent_insert"
       - sql: "CREATE TABLE perf_concurrent_insert (id INT PRIMARY KEY, val INT) ENGINE=safe"
@@ -111,7 +113,7 @@ test_cases:
     threshold_ms: 10000
     expect:
       rows: 1
-      data: [[128, 128, 128, 128]]
+      data: [[1024, 1024, 1024, 1024]]
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS perf_concurrent_insert"

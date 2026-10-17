@@ -260,12 +260,24 @@ The current calibration covers observed verification of
 old/new process costs, projected to fourteen processes for these eight families
 and two for the other suites, total 5659.10 seconds across all 54 suites.
 Six 900-second slots cannot fit that envelope, even without orchestration.
-The seven-slot weights project a maximum of 836.87 seconds, leaving 63.13
-seconds for orchestration and further variation; the largest observed
-successful orchestration overhead was 12.53 seconds. These are estimates from
-observed cohorts, not a guarantee for future cost growth or additional suites
-entering verification. Preserve the full suite list and measurement protocol
-when rebalancing.
+The original seven-slot weights project a maximum of 836.87 seconds. The
+concurrent single-row UNIQUE case now performs 1024 inserts per writer in one
+invocation, preserving four writers, SAFE durability and exact worker counts.
+It keeps the 10000-ms threshold, one timing sample and zero warmups. Repeating
+unchanged mutation samples would reuse primary keys rather than repeat an
+equivalent workload.
+
+Fixed fresh-process observations on one local persistent filesystem measured
+128 inserts per writer at 566.94/568.00 ms and 1024 at 4500.78 ms. Charging the
+full observed 3933.83-ms increase to each of fourteen verification processes
+adds 55.07 seconds to the UNIQUE shard: its projection rises from 800.53 to
+855.61 seconds. The resulting envelope totals 5714.17 seconds and leaves
+44.39 seconds before the unchanged deadline; the largest observed successful
+orchestration overhead was 12.53 seconds. This extrapolates local workload
+cost onto historical CI process costs; it does not prove a CI regression's
+cause or statistically establish future variance. These are estimates, not a
+guarantee for future cost growth or additional suites entering verification.
+Preserve the full suite list and measurement protocol when rebalancing.
 
 Suites with identical top-level preparation inputs share one import. Snapshots
 are temporary and deleted on success or failure; they are not committed,
