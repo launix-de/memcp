@@ -26,6 +26,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(if (equal? val1 val2) (teststat "success" (+ (teststat "success") 1)) (print "failed test "(teststat "count")": " errormsg))
 	)))
 
+
+	/* Generic UTF16 units preserve whole Unicode scalars at prefix boundaries. */
+	(assert (utf16_length "a雪😀") 4 "UTF16 counts supplementary pairs")
+	(assert (utf16_prefix "a😀z" 2) "a" "UTF16 prefix avoids splitting a pair")
+	(assert (utf16_prefix "a😀z" 3) "a😀" "UTF16 prefix retains a complete pair")
+	(assert (nil? (utf16_length nil)) true "UTF16 length preserves nil")
+	(assert (nil? (utf16_prefix "x" nil)) true "UTF16 prefix preserves nil limit")
+	(assert ((jit (lambda (text) (utf16_length text))) "a雪😀") 4 "jit UTF16 unit count")
+	(assert ((jit (lambda (text limit) (utf16_prefix text limit))) "a😀z" 2) "a" "jit UTF16 prefix avoids a half pair")
+	(assert ((jit (lambda (text limit) (utf16_prefix text limit))) "a😀z" 3) "a😀" "jit UTF16 prefix preserves whole pair")
+	(assert (nil? ((jit (lambda (text) (utf16_length text))) nil)) true "jit UTF16 length nil")
+
 	/* equal? */
 	(assert (unicode_char 65) "A" "encode ASCII scalar")
 	(assert (unicode_char 8364) "€" "encode three-byte UTF-8 scalar")

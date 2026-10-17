@@ -319,3 +319,68 @@ func TestComputeSizeBorrowedStrings(t *testing.T) {
 		t.Fatalf("valid string tags produced diagnostics: %s", output)
 	}
 }
+
+func TestUTF16LengthAndPrefixContracts(t *testing.T) {
+	for _, test := range []struct {
+		text   string
+		units  int64
+		prefix []string
+	}{
+		{"", 0, []string{"", "", "", "", ""}},
+		{"abcd", 4, []string{"", "a", "ab", "abc", "abcd"}},
+		{"雪€", 2, []string{"", "雪", "雪€", "雪€", "雪€"}},
+		{"a😀z", 4, []string{"", "a", "a", "a😀", "a😀z"}},
+		{"😀x", 3, []string{"", "", "😀", "😀x", "😀x"}},
+		{"e\u0301", 2, []string{"", "e", "e\u0301", "e\u0301", "e\u0301"}},
+	} {
+		buffer, offsets := BuildCompressedStringBuffer([]string{test.text})
+		for _, value := range []Scmer{NewString(test.text), NewBufferString(buffer, offsets[0], len(test.text))} {
+			if got := declarations["utf16_length"].Fn(value); !got.IsInt() || got.Int() != test.units {
+				t.Fatalf("UTF16 length of %q = %v, want %d", test.text, got, test.units)
+			}
+			for limit, want := range test.prefix {
+				if got := declarations["utf16_prefix"].Fn(value, NewInt(int64(limit))); got.String() != want {
+					t.Fatalf("UTF16 prefix of %q at %d = %q, want %q", test.text, limit, got.String(), want)
+				}
+			}
+			if got := declarations["utf16_prefix"].Fn(value, NewInt(9223372036854775807)); got.String() != test.text {
+				t.Fatalf("unbounded prefix changed %q", test.text)
+			}
+		}
+	}
+	for _, name := range []string{"utf16_length", "utf16_prefix"} {
+		if got := declarations[name].Fn(NewNil(), NewInt(2)); !got.IsNil() {
+			t.Fatalf("%s lost nil", name)
+		}
+	}
+	if got := declarations["utf16_prefix"].Fn(NewString("x"), NewNil()); !got.IsNil() {
+		t.Fatal("nil prefix limit did not propagate")
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("negative prefix limit was accepted")
+		}
+	}()
+	declarations["utf16_prefix"].Fn(NewString("x"), NewInt(-1))
+}
+
+func TestUTF16CompiledStringContracts(t *testing.T) {
+	length := CompileJIT(NewProcStruct(*calibrationProcedure("(lambda (text) (utf16_length text))")), true)
+	prefix := CompileJIT(NewProcStruct(*calibrationProcedure("(lambda (text limit) (utf16_prefix text limit))")), true)
+	text := strings.Repeat("雪😀a", 9000)
+	buffer, offsets := BuildCompressedStringBuffer([]string{text})
+	for _, value := range []Scmer{NewString(text), NewBufferString(buffer, offsets[0], len(text))} {
+		if got := Apply(length, value); !got.IsInt() || got.Int() != 36000 {
+			t.Fatalf("compiled Unicode unit count = %v", got)
+		}
+		if got := Apply(prefix, value, NewInt(2)); got.String() != "雪" {
+			t.Fatalf("compiled prefix split supplementary scalar: %q", got.String())
+		}
+		if got := Apply(prefix, value, NewInt(4)); got.String() != "雪😀a" {
+			t.Fatalf("compiled prefix lost complete scalars: %q", got.String())
+		}
+	}
+	if !Apply(length, NewNil()).IsNil() || !Apply(prefix, NewString("x"), NewNil()).IsNil() {
+		t.Fatal("compiled Unicode helpers lost nil")
+	}
+}
