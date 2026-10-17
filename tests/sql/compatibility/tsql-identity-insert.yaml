@@ -1234,6 +1234,77 @@ test_cases:
     - 4
   cleanup:
   - sql: DROP VIEW IF EXISTS identity_mode_view
+- name: Implicit identity VALUES and SELECT omit only the declared generator
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS identity_mode_proc
+  - sql: DROP TABLE IF EXISTS identity_mode_a
+  - sql: DROP TABLE IF EXISTS identity_mode_b
+  - sql: DROP TABLE IF EXISTS identity_mode_plain
+  - sql: CREATE TABLE identity_mode_a(id INT IDENTITY PRIMARY KEY,value INT DEFAULT 7)
+  - sql: CREATE TABLE identity_mode_b(id INT IDENTITY PRIMARY KEY,value INT)
+  - sql: CREATE TABLE identity_mode_plain(value INT)
+  scm: |-
+    (begin
+      (define s (newsession))
+      (s "username" "root")
+      (s "schema" "memcp-tests")
+      (define run (lambda (text) (begin
+        (define out (newsession))
+        (tsql_execute_request "memcp-tests" text s nil 0
+          (lambda (row) (out "row" row)) (lambda fields true))
+        (out "row"))))
+      (define failure (lambda (text) (try
+        (lambda () (begin (run text) (error "expected failure")))
+        (lambda (cause) (match cause
+          '("tsql-error" number _message _state) number
+          _ (error "unexpected failure" cause))))))
+      (run "INSERT identity_mode_a VALUES(4)")
+      (run "INSERT identity_mode_a SELECT 5")
+      (run "SET IDENTITY_INSERT identity_mode_a ON")
+      (list ((run "SELECT id FROM identity_mode_a WHERE value=4") "id")
+        ((run "SELECT id FROM identity_mode_a WHERE value=5") "id")
+        (failure "INSERT identity_mode_a VALUES(6)")
+        (failure "INSERT identity_mode_a SELECT 7"))
+    )
+  expect:
+    result:
+    - 1
+    - 2
+    - 545
+    - 545
+- name: Implicit identity input cannot smuggle an explicit ID through extra values
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS identity_mode_proc
+  - sql: DROP TABLE IF EXISTS identity_mode_a
+  - sql: DROP TABLE IF EXISTS identity_mode_b
+  - sql: DROP TABLE IF EXISTS identity_mode_plain
+  - sql: CREATE TABLE identity_mode_a(id INT IDENTITY PRIMARY KEY,value INT DEFAULT 7)
+  - sql: CREATE TABLE identity_mode_b(id INT IDENTITY PRIMARY KEY,value INT)
+  - sql: CREATE TABLE identity_mode_plain(value INT)
+  scm: |-
+    (begin
+      (define s (newsession))
+      (s "username" "root")
+      (s "schema" "memcp-tests")
+      (define run (lambda (text) (begin
+        (define out (newsession))
+        (tsql_execute_request "memcp-tests" text s nil 0
+          (lambda (row) (out "row" row)) (lambda fields true))
+        (out "row"))))
+      (define failure (lambda (text) (try
+        (lambda () (begin (run text) (error "expected failure")))
+        (lambda (cause) (match cause
+          '("tsql-error" number _message _state) number
+          _ (error "unexpected failure" cause))))))
+      (run "SET IDENTITY_INSERT identity_mode_a ON")
+      (define rejected (try (lambda () (begin (run "INSERT identity_mode_a VALUES(9,4)") false))
+        (lambda (cause) (strlike (string cause) "%column count%"))))
+      (list rejected ((run "SELECT COUNT(*) AS n FROM identity_mode_a") "n"))
+    )
+  expect:
+    result:
+    - true
+    - 0
 cleanup:
 - sql: DROP PROCEDURE IF EXISTS identity_mode_proc
 - sql: DROP TABLE IF EXISTS identity_mode_a
