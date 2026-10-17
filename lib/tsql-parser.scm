@@ -309,11 +309,12 @@ Reject an out-of-range conversion before intdiv can wrap its sign. */
 (define tsql_money_compiler (lambda (small) (lambda (infos) (begin
 	(define input (car infos))
 	(define type (sql_info_type input))
-	(if (or (sql_numeric_type? type) (sql_text_type? type) (has? '("MONEY" "SMALLMONEY" "NULL") type)) true
+	(define character (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT") type))
+	(if (or (sql_numeric_type? type) character (has? '("MONEY" "SMALLMONEY" "NULL") type)) true
 		(error "currency conversion from " type " is not implemented"))
 	(define formula (sql_info_formula input))
 	(sql_info (list (quote tsql_cast_money)
-		(if (sql_text_type? type) (list (quote tsql_money_text_input) formula) formula) small)
+		(if character (list (quote tsql_money_text_input) formula) formula) small)
 		(if small "SMALLMONEY" "MONEY") nil)))))
 (define tsql_cast_money_expr (lambda (value small)
 	(list (quote sql_compile_expr) (list (quote tsql_money_compiler) small) value)))
@@ -588,16 +589,20 @@ configurable cutoff remain separate compatibility work. */
 		(concat (if (< hour 10) "0" "") hour (substr clock 2 6))) clock))
 	(define parsed (str_to_date (concat date " " clock) "%Y-%m-%d %H:%i:%s"))
 	(if (nil? parsed) (error "invalid datetime value") (unix_timestamp parsed))))))
-(define tsql_styled_text_compiler (lambda (style type dimensions) (lambda (infos) (begin
+/* Persisted view IR retains this pattern-based factory contract. New CONVERT
+syntax selects a source-dependent style through the separate factory below. */
+(define tsql_styled_text_compiler (lambda (pattern type dimensions) (lambda (infos) (begin
 	(define input (car infos))
-	(define length (if (empty_list? dimensions) 30 (car dimensions)))
-	(define national (has? '("NVARCHAR" "NCHAR") type))
-	(define fixed (has? '("CHAR" "NCHAR") type))
-	(sql_info (if (has? '("MONEY" "SMALLMONEY") (sql_info_type input))
-		(list (quote tsql_cast_money_text) (sql_info_formula input) style length national fixed)
-		(list (if fixed tsql_cast_fixed_text tsql_cast_text)
-			(list format_date (tsql_calendar_difference_formula input) (tsql_temporal_style_pattern style true))
-			length national)) type nil)))))
+	(define formula (list format_date (tsql_calendar_difference_formula input) pattern))
+	(sql_info (list (if (has? '("CHAR" "NCHAR") type) tsql_cast_fixed_text tsql_cast_text)
+		formula (if (empty_list? dimensions) 30 (car dimensions)) (has? '("NVARCHAR" "NCHAR") type)) type nil)))))
+(define tsql_convert_text_compiler (lambda (style type dimensions) (lambda (infos) (begin
+	(define input (car infos))
+	(if (has? '("MONEY" "SMALLMONEY") (sql_info_type input))
+		(sql_info (list (quote tsql_cast_money_text) (sql_info_formula input) style
+			(if (empty_list? dimensions) 30 (car dimensions))
+			(has? '("NVARCHAR" "NCHAR") type) (has? '("CHAR" "NCHAR") type)) type nil)
+		((tsql_styled_text_compiler (tsql_temporal_style_pattern style true) type dimensions) infos))))))
 (define tsql_convert_expr (lambda (value type dimensions style) (begin
 	(tsql_decl_dimensions type dimensions)
 	(match style
@@ -605,7 +610,7 @@ configurable cutoff remain separate compatibility work. */
 		_ (if (or (nil? style) (equal? style 0)) (tsql_cast_expr value type dimensions)
 			(tsql_temporal_type? type) (tsql_temporal_cast_expr value type style)
 			(has? '("VARCHAR" "NVARCHAR" "CHAR" "NCHAR") type)
-			(list (quote sql_compile_expr) (list (quote tsql_styled_text_compiler) style type (list (quote quote) dimensions)) value)
+			(list (quote sql_compile_expr) (list (quote tsql_convert_text_compiler) style type (list (quote quote) dimensions)) value)
 			(error "unsupported CONVERT style for " type))))))
 /* Aggregate contracts come from SQL syntax and the declared input type.
 The native reducers do not determine the frontend's SQL result contract. */
