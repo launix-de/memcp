@@ -3140,6 +3140,93 @@ test_cases:
     expect: {error: true,contains: overflow}
 
 
+  - name: Portable conditional view stores explicit CASE factory constants
+    setup:
+    - &id002
+      sql: DROP VIEW IF EXISTS tsql_conditional_portable_count
+    - &id003
+      sql: DROP VIEW IF EXISTS tsql_conditional_portable_view
+    - &id004
+      sql: DROP TABLE IF EXISTS tsql_conditional_portable_rows
+    - sql: CREATE TABLE tsql_conditional_portable_rows(id INT PRIMARY KEY,a INT)
+    - sql: INSERT INTO tsql_conditional_portable_rows VALUES(1,7),(2,NULL)
+    sql: CREATE VIEW tsql_conditional_portable_view AS SELECT id,CASE WHEN id=1 THEN N'2' WHEN id=2 THEN N'4' ELSE
+      N'0' END AS branches,IIF(id=1,a,CAST(9 AS SMALLINT)) AS chosen,CHOOSE(id,10,20) AS ordinal,ISNULL(a,N'12') AS
+      fallback,NULLIF(a,7) AS difference FROM tsql_conditional_portable_rows
+  - name: Portable conditional view preserves independent lazy result contracts
+    sql: SELECT * FROM tsql_conditional_portable_view ORDER BY id
+    expect:
+      rows: 2
+      data: &id001
+      - id: 1
+        branches: '2'
+        chosen: 7
+        ordinal: 10
+        fallback: 7
+        difference: null
+      - id: 2
+        branches: '4'
+        chosen: 9
+        ordinal: 20
+        fallback: 12
+        difference: null
+  - name: Portable conditional counts store one shared native aggregate recipe
+    sql: CREATE VIEW tsql_conditional_portable_count AS SELECT COUNT(*) AS ordinary,COUNT_BIG(*) AS wide,COUNT_BIG(a)
+      AS filled FROM tsql_conditional_portable_rows
+  - name: Portable conditional count view retains native cardinalities
+    sql: SELECT * FROM tsql_conditional_portable_count
+    expect:
+      rows: 1
+      data:
+      - ordinary: 2
+        wide: 2
+        filled: 1
+  - name: Portable conditional empty view descriptors retain declared result families
+    scm: "(list\n\t(map (tds_describe \"memcp-tests\" \"SELECT TOP(0) branches,chosen,ordinal,fallback,difference\
+      \ FROM tsql_conditional_portable_view\" \"\" (newsession))\n\t (lambda (field) (field \"sql_type\")))\n\t(map\
+      \ (tds_describe \"memcp-tests\" \"SELECT TOP(0) * FROM tsql_conditional_portable_count\" \"\" (newsession))\n\
+      \t (lambda (field) (field \"sql_type\"))))"
+    expect:
+      result:
+      - - NVARCHAR
+        - INT
+        - INT
+        - INT
+        - INT
+      - - INT
+        - BIGINT
+        - BIGINT
+  - name: Portable conditional definitions survive durable restart
+    action: restart
+  - name: Portable conditional restored CASE and NULL expressions compile from globals
+    sql: SELECT * FROM tsql_conditional_portable_view ORDER BY id
+    expect:
+      rows: 2
+      data: *id001
+  - name: Portable conditional restored count view retains its wide contracts
+    sql: SELECT * FROM tsql_conditional_portable_count
+    expect:
+      rows: 1
+      data:
+      - ordinary: 2
+        wide: 2
+        filled: 1
+  - name: Portable conditional replacement rejects incompatible declared arms
+    sql: CREATE OR ALTER VIEW tsql_conditional_portable_view AS SELECT IIF(id=1,7,CAST(N'2026-01-01' AS DATE)) AS
+      value FROM tsql_conditional_portable_rows
+    expect:
+      error: true
+      contains: unsupported implicit conversion
+  - name: Portable conditional failed replacement preserves the prior definition
+    sql: SELECT * FROM tsql_conditional_portable_view ORDER BY id
+    expect:
+      rows: 2
+      data: *id001
+    cleanup:
+    - *id002
+    - *id003
+    - *id004
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
   - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion
