@@ -130,6 +130,109 @@ test_cases:
       data:
         - has_access: 1
 
+  - name: Repeated source-free expression is evaluated exactly once
+    scm: |-
+      (begin
+      (define calls (newsession))
+      (define value (lambda () (begin (calls "count" (+ 1 (coalesceNil (calls "count") 0))) 7)))
+      (define expression (list value))
+      (define fields (list "a" expression "b" expression))
+
+      (define plan (lower_zero_source_result_expr fields))
+      (define output (newsession))
+      ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
+       (lambda (row) (output "row" row)))
+      (define row (output "row"))
+      (and (equal? (row "a") 7) (equal? (row "b") 7) (equal? (calls "count") 1)))
+    expect:
+      result: true
+  - name: Source-free projection distinguishes closures with identical bodies
+    scm: |-
+      (begin
+      (define factory (lambda (captured) (lambda () captured)))
+      (define first (list (factory 1)))
+      (define second (list (factory 2)))
+      (define fields (list "a" first "b" second "a2" first "b2" second))
+
+      (define plan (lower_zero_source_result_expr fields))
+      (define output (newsession))
+      ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
+       (lambda (row) (output "row" row)))
+      (define row (output "row"))
+      (and (equal? (row "a") 1) (equal? (row "a2") 1)
+       (equal? (row "b") 2) (equal? (row "b2") 2)))
+    expect:
+      result: true
+  - name: Source-free expression identity preserves literal types and null
+    scm: |-
+      (begin
+      (define fields (list "missing" nil "zero" 0 "text" "1" "number" 1))
+
+      (define plan (lower_zero_source_result_expr fields))
+      (define output (newsession))
+      ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
+       (lambda (row) (output "row" row)))
+      (define row (output "row"))
+      (and (equal? (count row) 8) (nil? (row "missing")) (number? (row "zero")) (equal? (row "zero") 0)
+       (string? (row "text")) (number? (row "number"))))
+    expect:
+      result: true
+  - name: Source annotations preserve exact expression sharing
+    scm: |-
+      (begin
+      (define calls (newsession))
+      (define value (lambda () (begin (calls "count" (+ 1 (coalesceNil (calls "count") 0))) 9)))
+      (define expression (list value))
+      (define fields (list "a" expression "b" (source "projection-test" 2 3 expression)))
+
+      (define plan (lower_zero_source_result_expr fields))
+      (define output (newsession))
+      ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
+       (lambda (row) (output "row" row)))
+      (define row (output "row"))
+      (and (equal? (row "a") 9) (equal? (row "b") 9) (equal? (calls "count") 1)))
+    expect:
+      result: true
+  - name: Colliding closure hashes remain distinct through frozen AST lookup
+    scm: |-
+      (begin
+      (define factory (lambda (captured) (lambda () captured)))
+      (define expressions (map (produceN 6) (lambda (value) (list (factory value)))))
+      (define forced (make_structural_catalog true))
+      (reduce (produceN 6) (lambda (_ index) (forced (nth expressions index) index)) nil)
+      (define lookup (forced))
+      (define fields (reduce (produceN 6) (lambda (fields index)
+       (merge fields (list (concat "a" index) (nth expressions index)
+        (concat "b" index) (nth expressions index)))) (list)))
+
+      (define plan (lower_zero_source_result_expr fields))
+      (define output (newsession))
+      ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
+       (lambda (row) (output "row" row)))
+      (define row (output "row"))
+      (reduce (produceN 6) (lambda (correct index)
+       (and correct (number? (lookup (nth expressions index))) (equal? (lookup (nth expressions index)) index)
+        (equal? (row (concat "a" index)) index)
+        (equal? (row (concat "b" index)) index))) true))
+    expect:
+      result: true
+  - name: Shared source-free IR defines each exact expression once
+    scm: |-
+      (begin
+      (define factory (lambda (captured) (lambda () captured)))
+      (define first (list (factory 1)))
+      (define second (list (factory 2)))
+      (define plan (lower_zero_source_result_expr (list "a" first "b" second "a2" first "b2" second)))
+      (match plan
+       (cons (symbol !begin) tail)
+       (and (equal? (count tail) 3)
+        (match (car tail) ((symbol define) _name value) (equal? value first) _ false)
+        (match (cadr tail) ((symbol define) _name value) (equal? value second) _ false)
+        (match (nth tail 2) ((symbol resultrow) _values) true _ false))
+       _ false))
+    expect:
+      result: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS espn_share"
   - sql: "DROP TABLE IF EXISTS espn_parent"

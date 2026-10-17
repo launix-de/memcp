@@ -1143,7 +1143,7 @@ test_cases:
       (begin
         (define info (sql_expr_info (list) (tsql_cast_expr "42" "SMALLINT" (list))))
         (and (equal? (sql_info_type info) "SMALLINT")
-          (expression_equal? (sql_info_formula info) (list tsql_cast_integer "42" -32768 32767))
+          (expression_equal? (sql_info_formula info) (list (quote tsql_cast_integer) "42" -32768 32767))
           (equal? (eval (sql_info_formula info)) 42)))
     expect: {result: true}
   - name: bit cast emits only its conversion without boolean markers
@@ -1151,7 +1151,7 @@ test_cases:
       (begin
         (define info (sql_expr_info (list) (tsql_cast_expr "1" "BIT" (list))))
         (and (equal? (sql_info_type info) "BIT")
-          (expression_equal? (sql_info_formula info) (list tsql_cast_bit "1"))
+          (expression_equal? (sql_info_formula info) (list (quote tsql_cast_bit) "1"))
           (equal? (eval (sql_info_formula info)) true)))
     expect: {result: true}
   - name: float cast emits only its conversion without type markers
@@ -1159,7 +1159,7 @@ test_cases:
       (begin
         (define info (sql_expr_info (list) (tsql_cast_expr 1 "FLOAT" (list))))
         (and (equal? (sql_info_type info) "FLOAT")
-          (expression_equal? (sql_info_formula info) (list tsql_cast_float 1))
+          (expression_equal? (sql_info_formula info) (list (quote tsql_cast_float) 1))
           (equal? (eval (sql_info_formula info)) 1)))
     expect: {result: true}
   - name: outer cast declaration determines nested conversion type
@@ -1169,7 +1169,7 @@ test_cases:
           (tsql_cast_expr (tsql_cast_expr "42" "SMALLINT" (list)) "FLOAT" (list))))
         (and (equal? (sql_info_type info) "FLOAT")
           (expression_equal? (sql_info_formula info)
-            (list tsql_cast_float (list tsql_cast_integer "42" -32768 32767)))
+            (list (quote tsql_cast_float) (list (quote tsql_cast_integer) "42" -32768 32767)))
           (equal? (eval (sql_info_formula info)) 42)))
     expect: {result: true}
   - name: case and coalesce merge declared cast types rather than helper contracts
@@ -1253,7 +1253,7 @@ test_cases:
         (define typed (sql_type_query_block block (list)))
         (define result ((qassoc_get (qb_facts typed) (quote result-types) nil) "value"))
         (and (equal? (sql_info_type result) "INT")
-          (expression_equal? ((qb_fields typed) "value") (list tsql_cast_integer nil -2147483648 2147483647))))
+          (expression_equal? ((qb_fields typed) "value") (list (quote tsql_cast_integer) nil -2147483648 2147483647))))
     expect: {result: true}
   - name: conversion inside window input uses the existing window planner
     sql: SELECT [id], SUM(CAST([amount] AS INT)) OVER () AS total FROM [tsql_native] ORDER BY [id]
@@ -1274,7 +1274,7 @@ test_cases:
           (tsql_window_expr "SUM" (list (tsql_cast_expr "42" "SMALLINT" (list))) (list))))
         (and (equal? (sql_info_type info) "INT")
           (expression_equal? (sql_info_formula info)
-            (list (quote window_func) "SUM" (list (list tsql_cast_integer "42" -32768 32767)) (list)))))
+            (list (quote window_func) "SUM" (list (list (quote tsql_cast_integer) "42" -32768 32767)) (list)))))
     expect: {result: true}
   - name: executable window plan contains no frontend type annotations
     scm: |
@@ -2076,7 +2076,1159 @@ test_cases:
       - sql: INSERT INTO tsql_identity_explicit_completion(id,value) VALUES(100,2)
     sql: SELECT @@IDENTITY AS id
     expect: {rows: 1, data: [{id: null}]}
+# Stored logical views retain portable frontend compiler contracts.
+  - name: Stored view compilers preserve independent character widths
+    setup:
+    - sql: DROP TABLE IF EXISTS portable_contract_input
+    - sql: CREATE TABLE portable_contract_input(id INT PRIMARY KEY,note NVARCHAR(20),code INT,day_value DATE)
+    - sql: INSERT INTO portable_contract_input VALUES (1,N'pending',13,NULL),(2,NULL,NULL,NULL),(3,N'pending',228,NULL)
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT CAST(note AS NVARCHAR(3)) AS short_text,CAST(note AS VARCHAR(5))
+        AS wide_text FROM portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - short_text: pen
+        wide_text: pendi
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view compilers retain decimal precision and scale
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT CAST(code AS DECIMAL(6,2)) AS value FROM portable_contract_input
+        WHERE id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - value: 13
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view compilers preserve integer and bit cast operators
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT CAST(code AS SMALLINT) AS value,CAST(code AS BIT) AS enabled
+        FROM portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - value: 13
+        enabled: true
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view compilers retain comparison operators
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT CASE WHEN code>12 AND code<14 THEN 1 ELSE 0 END AS value FROM
+        portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - value: 1
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view conditionals retain branch count and lazy evaluation
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT CASE WHEN code=0 THEN 1/0 WHEN code=13 THEN 7 ELSE 9 END AS
+        value FROM portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - value: 7
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view fallback retains its declared contract
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT COALESCE(code,7) AS value FROM portable_contract_input WHERE
+        id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - value: 13
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view character functions retain global implementations
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT LEN(note) AS n,UPPER(note) AS upper_text,REPLACE(note,'pend','end')
+        AS replaced FROM portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - n: 7
+        upper_text: PENDING
+        replaced: ending
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view numeric callbacks retain unary and division contracts
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT +code AS positive,-code AS negative,code/2 AS divided,NCHAR(code+52)
+        AS letter FROM portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - positive: 13
+        negative: -13
+        divided: 6
+        letter: A
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view aggregate compilers preserve the input declaration
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT SUM(code) AS total,AVG(code) AS mean,MIN(code) AS minimum,MAX(code)
+        AS maximum FROM portable_contract_input
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - total: 241
+        mean: 120
+        minimum: 13
+        maximum: 228
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view window compilers preserve argument presence
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT id,COUNT(*) OVER() AS total,SUM(code) OVER() AS sum_value
+        FROM portable_contract_input
+    sql: SELECT * FROM portable_contract_view ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        total: 3
+        sum_value: 241
+      - id: 2
+        total: 3
+        sum_value: 241
+      - id: 3
+        total: 3
+        sum_value: 241
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view calendar callbacks retain unit and constructor contracts
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT YEAR(DATEFROMPARTS(2024,2,29)) AS y,DATEPART(month,DATEFROMPARTS(2024,2,29))
+        AS m,DATEDIFF(day,DATEFROMPARTS(2024,2,28),DATEFROMPARTS(2024,3,1)) AS days,DAY(EOMONTH(DATEFROMPARTS(2024,2,1)))
+        AS last_day
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - y: 2024
+        m: 2
+        days: 2
+        last_day: 29
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view temporal casts retain style and calendar interval
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    - sql: CREATE VIEW portable_contract_view AS SELECT CONVERT(VARCHAR(10),DATEADD(day,1,CONVERT(DATE,'20240228',112)),23)
+        AS value
+    sql: SELECT * FROM portable_contract_view
+    expect:
+      rows: 1
+      data:
+      - value: '2024-02-29'
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view contracts reject invalid declared conversions
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+    sql: CREATE VIEW portable_contract_view AS SELECT CAST(day_value AS VARBINARY(3)) AS value FROM portable_contract_input
+    expect:
+      error: true
+      contains: binary conversion from DATE is not implemented
+    cleanup:
+    - sql: DROP VIEW IF EXISTS portable_contract_view
+  - name: Stored view restart fixture retains explicit output aliases
+    sql: CREATE VIEW portable_restart_view([Short Label],[Next Id]) AS SELECT CAST(note AS NVARCHAR(3)),id+1 FROM
+      portable_contract_input WHERE id=1
+  - name: Stored view compile recipes survive durable catalog restart
+    action: restart
+  - name: Cold restored view compilers preserve aliases and captured dimensions
+    sql: SELECT [Short Label],[Next Id] FROM portable_restart_view
+    expect:
+      rows: 1
+      data:
+      - Short Label: pen
+        Next Id: 2
+  - name: Remove restored view compile recipe fixture
+    sql: DROP VIEW portable_restart_view
+  - name: Stored view binary factories preserve fixed and varying byte widths
+    setup:
+    - sql: CREATE VIEW portable_contract_bytes AS SELECT CASE WHEN CAST(0x010203 AS BINARY(5))=0x0102030000 THEN 1
+        ELSE 0 END AS fixed_width,CASE WHEN CAST(0x010203 AS VARBINARY(2))=0x0102 THEN 1 ELSE 0 END AS varying_width
+    sql: SELECT * FROM portable_contract_bytes
+    expect:
+      rows: 1
+      data:
+      - fixed_width: 1
+        varying_width: 1
+    cleanup:
+    - sql: DROP VIEW portable_contract_bytes
+  - name: Stored view weekday factories bind DATEFIRST at each invocation
+    setup:
+    - sql: CREATE VIEW portable_contract_weekday AS SELECT DATEPART(weekday,DATEFROMPARTS(2024,1,1)) AS weekday_value
+    scm: |
+      (begin
+        (define session (newsession))
+        (define result (newsession))
+        (session "username" "root")
+        (session "schema" "memcp-tests")
+        (tsql_execute_request "memcp-tests" "SET DATEFIRST 7" session nil 0 (lambda (row) true) (lambda args true))
+        (tsql_execute_request "memcp-tests" "SELECT * FROM portable_contract_weekday" session nil 0
+          (lambda (row) (result "first" (row "weekday_value"))) (lambda args true))
+        (tsql_execute_request "memcp-tests" "SET DATEFIRST 1" session nil 0 (lambda (row) true) (lambda args true))
+        (tsql_execute_request "memcp-tests" "SELECT * FROM portable_contract_weekday" session nil 0
+          (lambda (row) (result "second" (row "weekday_value"))) (lambda args true))
+        (and (equal? (result "first") 2) (equal? (result "second") 1)))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP VIEW portable_contract_weekday
+  - name: Stored view compile recipes preserve base table policy
+    setup:
+    - sql: CREATE VIEW portable_contract_policy AS SELECT CAST(note AS NVARCHAR(3)) AS value FROM portable_contract_input
+    scm: |-
+      (try (lambda () (begin
+          (parse_tsql "memcp-tests" "SELECT * FROM portable_contract_policy"
+            (lambda (database name write) (if (equal? name "portable_contract_input") (error "portable base access denied") true)) (newsession) nil)
+          false)) (lambda (err) (equal? err "portable base access denied")))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP VIEW portable_contract_policy
+  - name: Stored view typed null casts remain declarations without runtime tags
+    setup:
+    - sql: CREATE VIEW portable_contract_nulls AS SELECT CAST(NULL AS INT) AS absent_int,CAST(NULL AS NVARCHAR(7))
+        AS absent_text
+    sql: SELECT * FROM portable_contract_nulls
+    expect:
+      rows: 1
+      data:
+      - absent_int: null
+        absent_text: null
+    cleanup:
+    - sql: DROP VIEW portable_contract_nulls
+  - name: Stored view logical compiler slots contain only portable factory syntax
+    setup:
+    - sql: CREATE VIEW portable_contract_recipes AS SELECT CASE WHEN code>0 THEN CAST(note AS NVARCHAR(3)) ELSE NCHAR(65)
+        END AS value FROM portable_contract_input
+    scm: |-
+      (begin
+          (define ir (nth (sql_find_view "memcp-tests" "portable_contract_recipes") 2))
+          (and (not (regexp_test ir "NthLocalVar|lambda|\"var\""))
+            (not (regexp_test (string (parse_tsql "memcp-tests" "SELECT * FROM portable_contract_recipes" nil (newsession) nil)) "sql_compile_expr|sql_compile_column|tsql_text_compiler"))))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP VIEW portable_contract_recipes
+  - name: Direct metadata scalar retains its current declaration policy
+    sql: SELECT COL_LENGTH(N'portable_contract_input',N'note') AS width
+    expect:
+      rows: 1
+      data:
+      - width: 40
+  - name: Stored metadata scalar refuses to persist an account callback
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_metadata_scalar
+    sql: CREATE VIEW portable_metadata_scalar AS SELECT COL_LENGTH(N'portable_contract_input',N'note') AS width
+    expect:
+      error: true
+      contains: COL_LENGTH in stored views requires a consuming compile policy
+  - name: Rejected metadata scalar view is never published
+    expect:
+      result: true
+    scm: (nil? (sql_find_view "memcp-tests" "portable_metadata_scalar"))
+  - name: Shared mysql consumer compiles stored frontend contracts
+    setup:
+    - sql: CREATE VIEW portable_shared_contract AS SELECT CAST(note AS NVARCHAR(3)) AS label,code+1 AS next_code FROM
+        portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_shared_contract
+    syntax: mysql
+    expect:
+      rows: 1
+      data:
+      - label: pen
+        next_code: 14
+    cleanup:
+    - sql: DROP VIEW portable_shared_contract
+  - name: Shared psql consumer compiles stored frontend contracts
+    setup:
+    - sql: CREATE VIEW portable_shared_contract AS SELECT CAST(note AS NVARCHAR(3)) AS label,code+1 AS next_code FROM
+        portable_contract_input WHERE id=1
+    sql: SELECT * FROM portable_shared_contract
+    syntax: psql
+    expect:
+      rows: 1
+      data:
+      - label: pen
+        next_code: 14
+    cleanup:
+    - sql: DROP VIEW portable_shared_contract
+  - name: Stored view explicit ASC collation survives the tsql consumer
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_ordered_contract
+    - sql: DROP TABLE IF EXISTS portable_order_source
+    - sql: CREATE TABLE portable_order_source(note NVARCHAR(8))
+    - sql: INSERT INTO portable_order_source VALUES(N'a'),(N'Z'),(N'b')
+    - sql: CREATE VIEW portable_ordered_contract AS SELECT TOP 1 note FROM portable_order_source ORDER BY note COLLATE
+        bin ASC
+    sql: SELECT note FROM portable_ordered_contract
+    syntax: tsql
+    expect:
+      rows: 1
+      data:
+      - note: Z
+    cleanup:
+    - sql: DROP VIEW portable_ordered_contract
+    - sql: DROP TABLE portable_order_source
+  - name: Stored view explicit DESC collation survives the tsql consumer
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_ordered_contract
+    - sql: DROP TABLE IF EXISTS portable_order_source
+    - sql: CREATE TABLE portable_order_source(note NVARCHAR(8))
+    - sql: INSERT INTO portable_order_source VALUES(N'a'),(N'Z'),(N'b')
+    - sql: CREATE VIEW portable_ordered_contract AS SELECT TOP 1 note FROM portable_order_source ORDER BY note COLLATE
+        bin DESC
+    sql: SELECT note FROM portable_ordered_contract
+    syntax: tsql
+    expect:
+      rows: 1
+      data:
+      - note: b
+    cleanup:
+    - sql: DROP VIEW portable_ordered_contract
+    - sql: DROP TABLE portable_order_source
+  - name: Stored view explicit ASC collation survives the mysql consumer
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_ordered_contract
+    - sql: DROP TABLE IF EXISTS portable_order_source
+    - sql: CREATE TABLE portable_order_source(note NVARCHAR(8))
+    - sql: INSERT INTO portable_order_source VALUES(N'a'),(N'Z'),(N'b')
+    - sql: CREATE VIEW portable_ordered_contract AS SELECT TOP 1 note FROM portable_order_source ORDER BY note COLLATE
+        bin ASC
+    sql: SELECT note FROM portable_ordered_contract
+    syntax: mysql
+    expect:
+      rows: 1
+      data:
+      - note: Z
+    cleanup:
+    - sql: DROP VIEW portable_ordered_contract
+    - sql: DROP TABLE portable_order_source
+  - name: Stored view explicit DESC collation survives the mysql consumer
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_ordered_contract
+    - sql: DROP TABLE IF EXISTS portable_order_source
+    - sql: CREATE TABLE portable_order_source(note NVARCHAR(8))
+    - sql: INSERT INTO portable_order_source VALUES(N'a'),(N'Z'),(N'b')
+    - sql: CREATE VIEW portable_ordered_contract AS SELECT TOP 1 note FROM portable_order_source ORDER BY note COLLATE
+        bin DESC
+    sql: SELECT note FROM portable_ordered_contract
+    syntax: mysql
+    expect:
+      rows: 1
+      data:
+      - note: b
+    cleanup:
+    - sql: DROP VIEW portable_ordered_contract
+    - sql: DROP TABLE portable_order_source
+  - name: Stored view explicit ASC collation survives the psql consumer
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_ordered_contract
+    - sql: DROP TABLE IF EXISTS portable_order_source
+    - sql: CREATE TABLE portable_order_source(note NVARCHAR(8))
+    - sql: INSERT INTO portable_order_source VALUES(N'a'),(N'Z'),(N'b')
+    - sql: CREATE VIEW portable_ordered_contract AS SELECT TOP 1 note FROM portable_order_source ORDER BY note COLLATE
+        bin ASC
+    sql: SELECT note FROM portable_ordered_contract
+    syntax: psql
+    expect:
+      rows: 1
+      data:
+      - note: Z
+    cleanup:
+    - sql: DROP VIEW portable_ordered_contract
+    - sql: DROP TABLE portable_order_source
+  - name: Stored view explicit DESC collation survives the psql consumer
+    setup:
+    - sql: DROP VIEW IF EXISTS portable_ordered_contract
+    - sql: DROP TABLE IF EXISTS portable_order_source
+    - sql: CREATE TABLE portable_order_source(note NVARCHAR(8))
+    - sql: INSERT INTO portable_order_source VALUES(N'a'),(N'Z'),(N'b')
+    - sql: CREATE VIEW portable_ordered_contract AS SELECT TOP 1 note FROM portable_order_source ORDER BY note COLLATE
+        bin DESC
+    sql: SELECT note FROM portable_ordered_contract
+    syntax: psql
+    expect:
+      rows: 1
+      data:
+      - note: b
+    cleanup:
+    - sql: DROP VIEW portable_ordered_contract
+    - sql: DROP TABLE portable_order_source
+  - name: Canonical compiler point metadata distinguishes case-colliding native columns
+    setup:
+    - sql: DROP TABLE IF EXISTS portable_case_contract
+    - scm: (createtable "memcp-tests" "portable_case_contract" (list (list "column" "value" "VARCHAR" (list 8) (list
+        "collate" "bin")) (list "column" "VALUE" "INT" (list) (list))) (list) false nil)
+    scm: |
+      (begin
+        (define sources (list (list "c" "memcp-tests" "portable_case_contract" false nil)))
+        (define lower (sql_expr_info sources (list (quote get_column) "c" false "value" false)))
+        (define upper (sql_expr_info sources (list (quote get_column) "c" false "VALUE" false)))
+        (and (equal? (sql_info_type lower) "VARCHAR") (equal? (sql_info_collation lower) '("bin" 2))
+          (equal? (sql_info_type upper) "INT") (nil? (sql_info_collation upper))
+          (expression_equal? (sql_info_formula lower) (list (quote get_column) "c" false "value" false))
+          (expression_equal? (sql_info_formula upper) (list (quote get_column) "c" false "VALUE" false))))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP TABLE portable_case_contract
+  - name: Remove portable view source fixture
+    sql: DROP TABLE portable_contract_input
+
+
+  # A cached procedure consumes the current portable view declaration at each call.
+  - name: Portable view procedure creation has an explicit DDL completion
+    setup:
+      - sql: DROP PROCEDURE IF EXISTS portable_lifecycle_read
+      - sql: DROP VIEW IF EXISTS portable_lifecycle_view
+      - sql: DROP TABLE IF EXISTS portable_lifecycle_input
+      - sql: CREATE TABLE portable_lifecycle_input (id INT PRIMARY KEY,note NVARCHAR(20),code INT)
+      - sql: INSERT INTO portable_lifecycle_input VALUES (1,N'pending',13),(2,N'other',21)
+      - sql: CREATE VIEW portable_lifecycle_view AS SELECT id,CAST(note AS NVARCHAR(3)) AS label,code+1 AS adjusted FROM portable_lifecycle_input
+    sql: CREATE PROCEDURE portable_lifecycle_read @row_id INT AS SELECT label,adjusted FROM portable_lifecycle_view WHERE id=@row_id
+    expect:
+      rows: 1
+      data: [{affected_rows: 0}]
+  - name: Portable view procedure reads its first declared compile contract
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      rows: 1
+      data: [{label: pen, adjusted: 14}]
+  - name: Portable view cached procedure retains invocation parameter bindings
+    sql: EXEC portable_lifecycle_read @row_id=2
+    expect:
+      rows: 1
+      data: [{label: oth, adjusted: 22}]
+  - name: Portable view alter rejects a missing definition
+    setup:
+      - sql: DROP VIEW IF EXISTS portable_lifecycle_absent
+    sql: ALTER VIEW portable_lifecycle_absent AS SELECT 1 AS value
+    expect:
+      error: true
+      contains: does not exist
+  - name: Portable view alter never publishes a missing definition
+    scm: (nil? (sql_find_view "memcp-tests" "portable_lifecycle_absent"))
+    expect: {result: true}
+  - name: Portable view alter rejects invalid output aliases before publication
+    sql: ALTER VIEW portable_lifecycle_view(first,second) AS SELECT code FROM portable_lifecycle_input
+    expect:
+      error: true
+      contains: view column alias count does not match its output columns
+  - name: Portable view cached procedure survives rejected definition replacement
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      rows: 1
+      data: [{label: pen, adjusted: 14}]
+  - name: Portable view alter rejects create-only existence options
+    sql: ALTER VIEW IF NOT EXISTS portable_lifecycle_view AS SELECT 1 AS value
+    expect:
+      error: true
+      contains: ALTER VIEW does not accept IF NOT EXISTS
+  - name: Portable view cached procedure sees altered width and calculation
+    setup:
+      - sql: ALTER VIEW portable_lifecycle_view AS SELECT id,CAST(note AS VARCHAR(5)) AS label,code+20 AS adjusted FROM portable_lifecycle_input
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      rows: 1
+      data: [{label: pendi, adjusted: 33}]
+  - name: Portable view cached procedure sees create or alter replacement
+    setup:
+      - sql: CREATE OR ALTER VIEW portable_lifecycle_view AS SELECT id,CAST(note AS NVARCHAR(3)) AS label,code+40 AS adjusted FROM portable_lifecycle_input
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      rows: 1
+      data: [{label: pen, adjusted: 53}]
+  - name: Portable view cached procedure rejects a dropped definition
+    setup:
+      - sql: DROP VIEW portable_lifecycle_view
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      error: true
+  - name: Portable view cached procedure sees a recreated compile contract
+    setup:
+      - sql: CREATE OR ALTER VIEW portable_lifecycle_view AS SELECT id,CAST(note AS NVARCHAR(2)) AS label,code+100 AS adjusted FROM portable_lifecycle_input
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      rows: 1
+      data: [{label: pe, adjusted: 113}]
+  - name: Portable view procedure definitions survive a durable restart
+    action: restart
+  - name: Portable view restored procedure uses the recreated compile contract
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      rows: 1
+      data: [{label: pe, adjusted: 113}]
+  - name: Portable view restored procedure sees a later altered contract
+    setup:
+      - sql: ALTER VIEW portable_lifecycle_view AS SELECT id,CAST(note AS VARCHAR(4)) AS label,code+200 AS adjusted FROM portable_lifecycle_input
+    sql: EXEC portable_lifecycle_read @row_id=1
+    expect:
+      rows: 1
+      data: [{label: pend, adjusted: 213}]
+  - name: Portable view restored procedure keeps independent invocation bindings
+    sql: EXEC portable_lifecycle_read @row_id=2
+    expect:
+      rows: 1
+      data: [{label: othe, adjusted: 221}]
+  - name: Remove portable view procedure lifecycle fixture
+    sql: DROP PROCEDURE portable_lifecycle_read
+    expect:
+      rows: 1
+      data: [{affected_rows: 0}]
+    cleanup:
+      - sql: DROP VIEW portable_lifecycle_view
+      - sql: DROP TABLE portable_lifecycle_input
+
+  - name: Searched CASE converts the chosen text to its declared numeric precedence
+    sql: SELECT CASE WHEN 1=1 THEN N'12' ELSE 7 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 12
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_condition_input
+    - sql: CREATE TABLE tsql_condition_input(id INT PRIMARY KEY,a INT,txt NVARCHAR(20),money_index MONEY)
+    - sql: INSERT INTO tsql_condition_input VALUES(1,10,N'3',1.9),(2,NULL,NULL,NULL)
+    - sql: DROP TABLE IF EXISTS tsql_count_input
+    - sql: CREATE TABLE tsql_count_input(id INT PRIMARY KEY,note NVARCHAR(20))
+    - sql: INSERT INTO tsql_count_input VALUES(1,N'pending'),(2,NULL),(3,N'pending')
+  - name: Simple CASE converts result arms with the same declared numeric contract
+    sql: SELECT CASE 2 WHEN 1 THEN 7 WHEN 2 THEN N'12' ELSE 9 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: 12
+  - name: CASE rejects nonboolean searched conditions
+    sql: SELECT CASE WHEN 1 THEN 7 ELSE 9 END AS value
+    expect:
+      error: true
+      contains: Boolean
+  - name: CASE rejects all untyped NULL result arms
+    sql: SELECT CASE WHEN 1=1 THEN NULL ELSE NULL END AS value
+    expect:
+      error: true
+      contains: declared non-NULL
+  - name: CASE uses all result arms when selecting the numeric contract
+    sql: SELECT CASE WHEN 1=0 THEN 7 ELSE N'bad' END AS value
+    expect:
+      error: true
+      contains: integer
+  - name: CASE without ELSE retains a typed NULL result
+    sql: SELECT CASE WHEN 1=0 THEN 7 END AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: IIF selects true false and unknown outcomes
+    sql: SELECT IIF(2>1,N'yes',N'no') AS a,IIF(1>2,7,9) AS b,IIF(1=NULL,7,9) AS c
+    expect:
+      rows: 1
+      data:
+      - a: 'yes'
+        b: 9
+        c: 9
+  - name: IIF converts both result arms using numeric precedence
+    sql: SELECT IIF(1=1,N'12',7)+3 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 15
+  - name: IIF accepts typed NULL branches
+    sql: SELECT IIF(1=1,CAST(NULL AS INT),CAST(NULL AS INT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: IIF rejects all untyped NULL branches
+    sql: SELECT IIF(1=1,NULL,NULL) AS value
+    expect:
+      error: true
+      contains: declared non-NULL
+  - name: IIF rejects a numeric condition
+    sql: SELECT IIF(1,7,9) AS value
+    expect:
+      error: true
+      contains: Boolean
+  - name: IIF rejects missing arguments
+    sql: SELECT IIF(1=1,7) AS value
+    expect:
+      error: true
+      contains: unknown function
+  - name: IIF rejects extra arguments
+    sql: SELECT IIF(1=1,7,9,11) AS value
+    expect:
+      error: true
+      contains: unknown function
+  - name: CHOOSE uses one based ordinals and truncates fractional indexes
+    sql: SELECT CHOOSE(1,N'one',N'two') AS a,CHOOSE(2.9,N'one',N'two') AS b
+    expect:
+      rows: 1
+      data:
+      - a: one
+        b: two
+  - name: CHOOSE returns NULL for missing and out of range indexes
+    sql: SELECT CHOOSE(0,N'one',N'two') AS a,CHOOSE(3,N'one',N'two') AS b,CHOOSE(-1,N'one',N'two') AS c,CHOOSE(NULL,N'one',N'two')
+      AS d
+    expect:
+      rows: 1
+      data:
+      - a: null
+        b: null
+        c: null
+        d: null
+  - name: CHOOSE converts selected values according to all declared arms
+    sql: SELECT CHOOSE(1,N'12',7)+3 AS value
+    expect:
+      rows: 1
+      data:
+      - value: 15
+  - name: CHOOSE keeps a selected typed NULL
+    sql: SELECT CHOOSE(1,CAST(NULL AS INT),7) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: CHOOSE rejects a temporal ordinal instead of interpreting its Unix carrier
+    sql: SELECT CHOOSE(CAST('2026-01-01' AS DATE),N'one',N'two') AS value
+    expect:
+      error: true
+      contains: integer
+  - name: CHOOSE rejects an absent value list
+    sql: SELECT CHOOSE(1) AS value
+    expect:
+      error: true
+      contains: unknown function
+  - name: CHOOSE rejects all untyped NULL alternatives
+    sql: SELECT CHOOSE(1,NULL,NULL) AS value
+    expect:
+      error: true
+      contains: declared non-NULL
+  - name: Conditional branches use current row values in native scans
+    sql: SELECT id,CASE WHEN id=1 THEN txt ELSE a END+1 AS case_value,IIF(id=1,txt,a)+1 AS if_value,CHOOSE(id,txt,a)+1
+      AS choice_value FROM tsql_condition_input ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        case_value: 4
+        if_value: 4
+        choice_value: 4
+      - id: 2
+        case_value: null
+        if_value: null
+        choice_value: null
+  - name: Conditional expressions remain usable inside native aggregates
+    sql: SELECT SUM(IIF(id=1,txt,a)) AS if_total,SUM(CASE WHEN id=1 THEN txt ELSE a END) AS case_total,SUM(CHOOSE(id,txt,a))
+      AS choice_total FROM tsql_condition_input
+    expect:
+      rows: 1
+      data:
+      - if_total: 3
+        case_total: 3
+        choice_total: 3
+  - name: COUNT_BIG counts rows nonnull values and distinct values
+    sql: SELECT COUNT_BIG(*) AS rows_count,COUNT_BIG(note) AS filled,COUNT_BIG(DISTINCT note) AS distinct_count FROM
+      tsql_count_input
+    expect:
+      rows: 1
+      data:
+      - rows_count: 3
+        filled: 2
+        distinct_count: 1
+  - name: COUNT_BIG ALL uses the same native nonnull count
+    sql: SELECT COUNT_BIG(ALL note) AS value FROM tsql_count_input
+    expect:
+      rows: 1
+      data:
+      - value: 2
+  - name: COUNT_BIG returns zero on an empty input
+    sql: SELECT COUNT_BIG(*) AS a,COUNT_BIG(note) AS b,COUNT_BIG(DISTINCT note) AS c FROM tsql_count_input WHERE id<0
+    expect:
+      rows: 1
+      data:
+      - a: 0
+        b: 0
+        c: 0
+  - name: Native count windows retain NULL partition membership
+    sql: SELECT id,COUNT(*) OVER (PARTITION BY note) AS native_count,COUNT_BIG(*) OVER (PARTITION BY note) AS big_count
+      FROM tsql_count_input ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        native_count: 2
+        big_count: 2
+      - id: 2
+        native_count: 1
+        big_count: 1
+      - id: 3
+        native_count: 2
+        big_count: 2
+    noncritical: true
+  - name: COUNT_BIG rejects unsupported distinct star syntax
+    sql: SELECT COUNT_BIG(DISTINCT *) AS value FROM tsql_count_input
+    expect:
+      error: true
+      contains: Parser failed
+  - name: COUNT_BIG rejects absent arguments
+    sql: SELECT COUNT_BIG() AS value FROM tsql_count_input
+    expect:
+      error: true
+      contains: unknown function
+  - name: Empty conditional and count descriptions preserve SQL contracts
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests"
+          "SELECT TOP(0) CASE WHEN id=1 THEN txt ELSE a END AS c,IIF(id=1,txt,a) AS i,CHOOSE(id,txt,a) AS h,COUNT_BIG(*) OVER () AS n FROM tsql_condition_input" "" (newsession)))
+        (map fields (lambda (field) (field "sql_type"))))
+    expect:
+      result:
+      - INT
+      - INT
+      - INT
+      - BIGINT
+  - name: IIF skips an unselected scalar division on current rows
+    sql: SELECT id,IIF(id=1,10/(id-2),7) AS value FROM tsql_condition_input ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: -10
+      - id: 2
+        value: 7
+  - name: CHOOSE skips unselected scalar divisions on current rows
+    sql: SELECT id,CHOOSE(id,7,10/(id-1)) AS value FROM tsql_condition_input ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: 7
+      - id: 2
+        value: 10
+  - name: Nested conditional forms retain the chosen integer contract
+    sql: SELECT IIF(1=1,CHOOSE(1,N'12',7),CASE WHEN 1=1 THEN 9 ELSE 2 END) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 12
+  - name: Conditional Unicode metadata follows all declared result arms
+    scm: |
+      (map (tds_describe "memcp-tests"
+        "SELECT TOP(0) CASE WHEN id=1 THEN N'x' ELSE 'y' END AS c,IIF(id=1,'x',N'y') AS i,CHOOSE(id,'x',N'y') AS h FROM tsql_condition_input" "" (newsession))
+        (lambda (field) (field "sql_type")))
+    expect:
+      result:
+      - NVARCHAR
+      - NVARCHAR
+      - NVARCHAR
+  - name: COUNT and COUNT_BIG preserve distinct declared metadata
+    scm: |
+      (map (tds_describe "memcp-tests"
+        "SELECT COUNT(*) AS n,COUNT_BIG(*) AS b,COUNT_BIG(note) AS v,COUNT_BIG(DISTINCT note) AS d FROM tsql_count_input" "" (newsession))
+        (lambda (field) (field "sql_type")))
+    expect:
+      result:
+      - INT
+      - BIGINT
+      - BIGINT
+      - BIGINT
+  - name: COUNT_BIG nonnull partitions and global windows use the existing planner
+    sql: SELECT id,COUNT_BIG(*) OVER (PARTITION BY note) AS grouped,COUNT_BIG(*) OVER () AS total,COUNT_BIG(ALL note)
+      OVER () AS filled FROM tsql_count_input WHERE note IS NOT NULL ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        grouped: 2
+        total: 2
+        filled: 2
+      - id: 3
+        grouped: 2
+        total: 2
+        filled: 2
+  - name: COUNT_BIG participates in grouped HAVING without an alternate aggregate path
+    sql: SELECT note,COUNT_BIG(*) AS total FROM tsql_count_input WHERE note IS NOT NULL GROUP BY note HAVING COUNT_BIG(*)>1
+    expect:
+      rows: 1
+      data:
+      - note: pending
+        total: 2
+  - name: Conditional scalar subqueries remain shared logical queries
+    sql: SELECT id,IIF(id=1,(SELECT MAX(a) FROM tsql_condition_input),7) AS value,CHOOSE(id,(SELECT MAX(a) FROM tsql_condition_input),7)
+      AS choice FROM tsql_condition_input ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: 10
+        choice: 10
+      - id: 2
+        value: 7
+        choice: 7
+  - name: Conditional expressions feed native INSERT SELECT conversions
+    sql: INSERT INTO tsql_conditional_copy(id,value) SELECT id,IIF(id=1,txt,a) FROM tsql_condition_input
+    expect:
+      affected_rows: 2
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_conditional_copy
+    - sql: CREATE TABLE tsql_conditional_copy(id INT PRIMARY KEY,value INT)
+  - name: Searched CASE skips an unselected scalar division on current rows
+    sql: SELECT id,CASE WHEN id=1 THEN 10/(id-2) ELSE 7 END AS value FROM tsql_condition_input ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: -10
+      - id: 2
+        value: 7
+  - name: Conditional expressions compile to ordinary formulas without SQL wrappers
+    scm: |
+      (not (regexp_test (string (parse_tsql "memcp-tests" "SELECT CASE WHEN id=1 THEN txt ELSE a END AS c,IIF(id=1,txt,a) AS i,CHOOSE(id,txt,a) AS h,COUNT_BIG(*) OVER () AS n FROM tsql_condition_input" nil nil nil)) "sql_type_expr|sql_compile_expr"))
+    expect:
+      result: true
+  - name: CHOOSE converts money indexes with their declared integer rounding rule
+    sql: SELECT CHOOSE(money_index,N'first',N'second') AS money_value,CHOOSE(CAST(1.9 AS DECIMAL(2,1)),N'first',N'second')
+      AS decimal_value FROM tsql_condition_input WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - money_value: second
+        decimal_value: first
+  - name: CHOOSE rejects an index outside the implicit integer range
+    sql: SELECT CHOOSE(CAST(2147483648 AS BIGINT),N'first',N'second') AS value
+    expect:
+      error: true
+      contains: integer conversion overflow
+  - name: CASE checks unselected result declarations even without rows
+    sql: SELECT CASE WHEN id=1 THEN a ELSE CAST('2026-01-01' AS DATE) END AS value FROM tsql_condition_input WHERE
+      id<0
+    expect:
+      error: true
+      contains: unsupported implicit conversion
+  - name: IIF checks unselected result declarations even without rows
+    sql: SELECT IIF(id=1,a,CAST(NULL AS VARBINARY(4))) AS value FROM tsql_condition_input WHERE id<0
+    expect:
+      error: true
+      contains: unsupported implicit conversion
+  - name: Conditional EXISTS predicates keep their Boolean syntax contract
+    sql: SELECT CASE WHEN EXISTS(SELECT 1) THEN 7 ELSE 9 END AS a,IIF(NOT EXISTS(SELECT 1 WHERE 1=0),7,9) AS b
+    expect:
+      rows: 1
+      data:
+      - a: 7
+        b: 7
+  - name: Conditional literal membership preserves NULL and negation semantics
+    sql: SELECT CASE WHEN 1 IN(1,2) THEN 7 ELSE 9 END AS a,IIF(3 IN(1,NULL),7,9) AS b,IIF(2 NOT IN(1),7,9) AS c
+    expect:
+      rows: 1
+      data:
+      - a: 7
+        b: 9
+        c: 7
+  - name: Conditional subquery membership remains on the shared decorrelation path
+    sql: SELECT CASE WHEN 1 IN(SELECT 1) THEN 7 ELSE 9 END AS a,IIF(2 NOT IN(SELECT 1),7,9) AS b
+    expect:
+      rows: 1
+      data:
+      - a: 7
+        b: 7
+  - name: Inserted conditional values retain ordinary native data
+    sql: SELECT id,value FROM tsql_conditional_copy ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: 3
+      - id: 2
+        value: null
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_conditional_copy
+    - sql: DROP TABLE IF EXISTS tsql_condition_input
+    - sql: DROP TABLE IF EXISTS tsql_count_input
+
+
+  - name: ISNULL converts a selected textual replacement to the first numeric declaration
+    setup:
+      - sql: DROP TABLE IF EXISTS tsql_null_contract_input
+      - scm: |
+          (eval (parse_sql "memcp-tests"
+            "CREATE TABLE tsql_null_contract_input(id INT PRIMARY KEY,i SMALLINT,txt NVARCHAR(8) COLLATE utf8mb4_general_ci,cs NVARCHAR(8) COLLATE bin,natural NVARCHAR(8) COLLATE en_ci)"
+            nil (newsession) nil))
+      - sql: INSERT tsql_null_contract_input VALUES(1,7,N'A',N'A',N'a2'),(2,NULL,NULL,NULL,NULL)
+      - sql: DROP TABLE IF EXISTS tsql_null_money
+      - sql: CREATE TABLE tsql_null_money(id INT PRIMARY KEY,m MONEY,s SMALLMONEY)
+      - sql: INSERT tsql_null_money VALUES(1,1.9,-1.9),(2,2.5,-2.5),(3,NULL,NULL)
+    sql: SELECT ISNULL(CAST(NULL AS INT),N'42') AS value
+    expect: {rows: 1,data: [{value: 42}]}
+  - name: ISNULL numeric replacement follows the first integer declaration
+    sql: SELECT ISNULL(CAST(NULL AS SMALLINT),3.9) AS value
+    expect: {rows: 1,data: [{value: 3}]}
+  - name: ISNULL rejects selected replacement overflow at the first integer width
+    sql: SELECT ISNULL(CAST(NULL AS TINYINT),256) AS value
+    expect: {error: true,contains: overflow}
+  - name: ISNULL rejects invalid selected numeric replacement text
+    sql: SELECT ISNULL(CAST(NULL AS INT),N'bad') AS value
+    expect: {error: true,contains: integer}
+  - name: ISNULL leaves a nonnull first integer unchanged
+    sql: SELECT ISNULL(CAST(7 AS SMALLINT),3.9) AS value
+    expect: {rows: 1,data: [{value: 7}]}
+  - name: ISNULL literal NULL adopts the replacement text declaration
+    sql: SELECT ISNULL(NULL,N'42') AS value
+    expect: {rows: 1,data: [{value: '42'}]}
+  - name: ISNULL all literal NULL values retain NULL
+    sql: SELECT ISNULL(NULL,NULL) AS value
+    expect: {rows: 1,data: [{value: null}]}
+  - name: ISNULL selected text replacement uses the declared bit conversion
+    sql: SELECT ISNULL(CAST(NULL AS BIT),N'true') AS value
+    expect: {rows: 1,data: [{value: true}]}
+  - name: ISNULL converts row dependent replacements before native aggregation
+    sql: SELECT SUM(ISNULL(i,N'12')) AS value FROM tsql_null_contract_input
+    expect: {rows: 1,data: [{value: 19}]}
+  - name: ISNULL rejects absent arguments
+    sql: SELECT ISNULL() AS value
+    expect: {error: true}
+  - name: ISNULL rejects excess arguments
+    sql: SELECT ISNULL(NULL,1,2) AS value
+    expect: {error: true}
+  - name: ISNULL empty result metadata uses first types and literal NULL exceptions
+    scm: |
+      (map (tds_describe "memcp-tests"
+        "SELECT TOP(0) ISNULL(i,3.9) AS a,ISNULL(NULL,N'42') AS b,ISNULL(NULL,NULL) AS c FROM tsql_null_contract_input"
+        "" (newsession)) (lambda (field) (field "sql_type")))
+    expect: {result: [SMALLINT,NVARCHAR,INT]}
+  - name: ISNULL rejects an incompatible declared replacement even without rows
+    sql: SELECT ISNULL(i,CAST('2026-01-01' AS DATE)) AS value FROM tsql_null_contract_input WHERE id<0
+    expect: {error: true}
+  - name: NULLIF keeps the first value when operands differ
+    sql: SELECT NULLIF(CAST(7 AS SMALLINT),9) AS value
+    expect: {rows: 1,data: [{value: 7}]}
+  - name: NULLIF compares mixed numeric and textual declarations by numeric precedence
+    sql: SELECT NULLIF(2,N'2') AS a,NULLIF(N'2',2) AS b
+    expect: {rows: 1,data: [{a: null,b: null}]}
+  - name: NULLIF validates mixed numeric comparison text
+    sql: SELECT NULLIF(N'bad',2) AS value
+    expect: {error: true,contains: integer}
+  - name: NULLIF respects case insensitive native text declarations
+    sql: SELECT id,NULLIF(txt,N'a') AS value FROM tsql_null_contract_input ORDER BY id
+    expect: {rows: 2,data: [{id: 1,value: null},{id: 2,value: null}]}
+  - name: NULLIF respects bytewise native text declarations
+    sql: SELECT id,NULLIF(cs,N'a') AS value FROM tsql_null_contract_input ORDER BY id
+    expect: {rows: 2,data: [{id: 1,value: A},{id: 2,value: null}]}
+  - name: NULLIF retains typed NULL input
+    sql: SELECT NULLIF(CAST(NULL AS INT),1) AS value
+    expect: {rows: 1,data: [{value: null}]}
+  - name: NULLIF rejects an untyped first NULL
+    sql: SELECT NULLIF(NULL,1) AS value
+    expect: {error: true}
+  - name: NULLIF empty result metadata retains its first declaration
+    scm: |
+      (map (tds_describe "memcp-tests"
+        "SELECT TOP(0) NULLIF(i,9) AS a,NULLIF(txt,N'a') AS b FROM tsql_null_contract_input"
+        "" (newsession)) (lambda (field) (field "sql_type")))
+    expect: {result: [SMALLINT,NVARCHAR]}
+  - name: NULLIF remains usable inside typed CASE and native aggregates
+    sql: SELECT SUM(ISNULL(NULLIF(i,7),CAST(2 AS SMALLINT))) AS value FROM tsql_null_contract_input
+    expect: {rows: 1,data: [{value: 4}]}
+  - name: ISNULL character replacement obeys the first declared width
+    sql: SELECT ISNULL(CAST(NULL AS NVARCHAR(2)),N'long') AS value
+    expect: {rows: 1,data: [{value: lo}]}
+    noncritical: true
+  - name: ISNULL character column replacement obeys its declaration width
+    sql: SELECT ISNULL(txt,N'long replacement') AS value FROM tsql_null_contract_input WHERE id=2
+    expect: {rows: 1,data: [{value: 'long rep'}]}
+    noncritical: true
+
+  - name: ISNULL lazily evaluates a row dependent numeric replacement
+    sql: SELECT id,ISNULL(i,10/(id-1)) AS value FROM tsql_null_contract_input ORDER BY id
+    expect: {rows: 2,data: [{id: 1,value: 7},{id: 2,value: 10}]}
+  - name: ISNULL converts a numeric replacement into the first text contract
+    sql: SELECT id,ISNULL(txt,42) AS value FROM tsql_null_contract_input ORDER BY id
+    expect: {rows: 2,data: [{id: 1,value: A},{id: 2,value: '42'}]}
+  - name: ISNULL converts a declared Boolean replacement to an integer
+    sql: SELECT ISNULL(CAST(NULL AS INT),CAST(1 AS BIT)) AS value
+    expect: {rows: 1,data: [{value: 1}]}
+  - name: ISNULL converts a declared Boolean replacement to text
+    sql: SELECT ISNULL(CAST(NULL AS NVARCHAR(8)),CAST(1 AS BIT)) AS value
+    expect: {rows: 1,data: [{value: '1'}]}
+  - name: NULLIF compares a declared Boolean and integer through their numeric contract
+    sql: SELECT NULLIF(CAST(1 AS BIT),1) AS value
+    expect: {rows: 1,data: [{value: null}]}
+  - name: CASE implicit conversions use the declared Boolean carrier
+    sql: SELECT id,CASE WHEN id=1 THEN CAST(1 AS BIT) ELSE 7 END AS value FROM tsql_null_contract_input ORDER BY id
+    expect: {rows: 2,data: [{id: 1,value: 1},{id: 2,value: 7}]}
+  - name: COALESCE implicit conversion uses the declared Boolean carrier
+    sql: SELECT COALESCE(CAST(NULL AS INT),CAST(1 AS BIT)) AS value
+    expect: {rows: 1,data: [{value: 1}]}
+  - name: NULLIF rejects absent arguments
+    sql: SELECT NULLIF() AS value
+    expect: {error: true}
+  - name: NULLIF rejects excess arguments
+    sql: SELECT NULLIF(1,2,3) AS value
+    expect: {error: true}
+
+  - name: NULLIF literal text keeps the existing case insensitive frontend default
+    sql: SELECT NULLIF(N'A',N'a') AS value
+    expect: {rows: 1,data: [{value: null}]}
+  - name: NULLIF binary operands keep bytewise equality
+    sql: SELECT NULLIF(0x41,0x61) AS value
+    expect: {rows: 1,data: [{value: 'A'}]}
+
+  - name: NULLIF scalar comparison follows the native natural text ordering
+    sql: SELECT NULLIF(natural,N'a02') AS value FROM tsql_null_contract_input WHERE id=1
+    expect: {rows: 1,data: [{value: null}]}
+  - name: Native filtering and NULLIF agree for declared natural text ordering
+    sql: SELECT COUNT(*) AS value FROM tsql_null_contract_input WHERE natural=N'a02'
+    expect: {rows: 1,data: [{value: 1}]}
+  - name: ISNULL binary replacement can convert to a declared integer
+    sql: SELECT ISNULL(CAST(NULL AS INT),0x2A) AS value
+    expect: {rows: 1,data: [{value: 42}]}
+    noncritical: true
+
+  - name: ISNULL monetary replacements round to the first integer contract
+    sql: SELECT id,ISNULL(CAST(NULL AS INT),m) AS positive,ISNULL(CAST(NULL AS INT),s) AS negative FROM tsql_null_money ORDER BY id
+    expect:
+      rows: 3
+      data: [{id: 1,positive: 2,negative: -2},{id: 2,positive: 3,negative: -3},{id: 3,positive: null,negative: null}]
+  - name: ISNULL monetary replacements retain integer range checking after rounding
+    sql: SELECT ISNULL(CAST(NULL AS TINYINT),s) AS value FROM tsql_null_money WHERE id=1
+    expect: {error: true,contains: overflow}
+
+  - name: Nested NULL functions retain the first native text collation
+    sql: SELECT NULLIF(ISNULL(cs,N'a'),N'a') AS value FROM tsql_null_contract_input WHERE id=1
+    expect: {rows: 1,data: [{value: A}]}
+  - name: NULL function compiler contracts disappear before native execution
+    scm: |
+      (not (regexp_test (string (parse_tsql "memcp-tests"
+        "SELECT ISNULL(i,3.9) AS a,NULLIF(txt,N'a') AS b FROM tsql_null_contract_input"
+        nil nil nil)) "sql_type_expr|sql_compile_expr|tsql_convert_value_info"))
+    expect: {result: true}
+
+  - name: ISNULL monetary rounding checks the upper integer bound after rounding
+    setup:
+    - sql: INSERT tsql_null_money VALUES(4,255.6,255.6)
+    sql: SELECT ISNULL(CAST(NULL AS TINYINT),m) AS value FROM tsql_null_money WHERE id=4
+    expect: {error: true,contains: overflow}
+
+
+  - name: Portable conditional view stores explicit CASE factory constants
+    setup:
+    - &id002
+      sql: DROP VIEW IF EXISTS tsql_conditional_portable_count
+    - &id003
+      sql: DROP VIEW IF EXISTS tsql_conditional_portable_view
+    - &id004
+      sql: DROP TABLE IF EXISTS tsql_conditional_portable_rows
+    - sql: CREATE TABLE tsql_conditional_portable_rows(id INT PRIMARY KEY,a INT)
+    - sql: INSERT INTO tsql_conditional_portable_rows VALUES(1,7),(2,NULL)
+    sql: CREATE VIEW tsql_conditional_portable_view AS SELECT id,CASE WHEN id=1 THEN N'2' WHEN id=2 THEN N'4' ELSE
+      N'0' END AS branches,IIF(id=1,a,CAST(9 AS SMALLINT)) AS chosen,CHOOSE(id,10,20) AS ordinal,ISNULL(a,N'12') AS
+      fallback,NULLIF(a,7) AS difference FROM tsql_conditional_portable_rows
+  - name: Portable conditional view preserves independent lazy result contracts
+    sql: SELECT * FROM tsql_conditional_portable_view ORDER BY id
+    expect:
+      rows: 2
+      data: &id001
+      - id: 1
+        branches: '2'
+        chosen: 7
+        ordinal: 10
+        fallback: 7
+        difference: null
+      - id: 2
+        branches: '4'
+        chosen: 9
+        ordinal: 20
+        fallback: 12
+        difference: null
+  - name: Portable conditional counts store one shared native aggregate recipe
+    sql: CREATE VIEW tsql_conditional_portable_count AS SELECT COUNT(*) AS ordinary,COUNT_BIG(*) AS wide,COUNT_BIG(a)
+      AS filled FROM tsql_conditional_portable_rows
+  - name: Portable conditional count view retains native cardinalities
+    sql: SELECT * FROM tsql_conditional_portable_count
+    expect:
+      rows: 1
+      data:
+      - ordinary: 2
+        wide: 2
+        filled: 1
+  - name: Portable conditional empty view descriptors retain declared result families
+    scm: "(list\n\t(map (tds_describe \"memcp-tests\" \"SELECT TOP(0) branches,chosen,ordinal,fallback,difference\
+      \ FROM tsql_conditional_portable_view\" \"\" (newsession))\n\t (lambda (field) (field \"sql_type\")))\n\t(map\
+      \ (tds_describe \"memcp-tests\" \"SELECT TOP(0) * FROM tsql_conditional_portable_count\" \"\" (newsession))\n\
+      \t (lambda (field) (field \"sql_type\"))))"
+    expect:
+      result:
+      - - NVARCHAR
+        - INT
+        - INT
+        - INT
+        - INT
+      - - INT
+        - BIGINT
+        - BIGINT
+  - name: Portable conditional definitions survive durable restart
+    action: restart
+  - name: Portable conditional restored CASE and NULL expressions compile from globals
+    sql: SELECT * FROM tsql_conditional_portable_view ORDER BY id
+    expect:
+      rows: 2
+      data: *id001
+  - name: Portable conditional restored count view retains its wide contracts
+    sql: SELECT * FROM tsql_conditional_portable_count
+    expect:
+      rows: 1
+      data:
+      - ordinary: 2
+        wide: 2
+        filled: 1
+  - name: Portable conditional replacement rejects incompatible declared arms
+    sql: CREATE OR ALTER VIEW tsql_conditional_portable_view AS SELECT IIF(id=1,7,CAST(N'2026-01-01' AS DATE)) AS
+      value FROM tsql_conditional_portable_rows
+    expect:
+      error: true
+      contains: unsupported implicit conversion
+  - name: Portable conditional failed replacement preserves the prior definition
+    sql: SELECT * FROM tsql_conditional_portable_view ORDER BY id
+    expect:
+      rows: 2
+      data: *id001
+    cleanup:
+    - *id002
+    - *id003
+    - *id004
+
 cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_null_money
+  - sql: DROP TABLE IF EXISTS tsql_null_contract_input
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_probe
   - sql: DROP TABLE IF EXISTS tsql_identity_explicit_completion
   - sql: DROP TABLE IF EXISTS tsql_identity_functions_http

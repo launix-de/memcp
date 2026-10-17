@@ -1682,7 +1682,7 @@ func TestJITRequiredLocalSlotsRespectInvocation(t *testing.T) {
 		{"match parent invocation", NewSlice([]Scmer{NewSymbol("match"), NewNil(), NewNil(), outer(2, wide)}), 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := jitRequiredLocalSlots(tc.body, 2); got != tc.want {
+			if got, _ := jitRequiredLocalSlots(tc.body, 2); got != tc.want {
 				t.Fatalf("required slots = %d, want %d", got, tc.want)
 			}
 		})
@@ -1928,5 +1928,109 @@ func TestJITVariadicArgumentDataDoesNotBorrowCallerFrames(t *testing.T) {
 	}
 	if got := Apply(compiled); !Equal(got, NewSlice(nil)) {
 		t.Fatalf("empty variadic binding = %s", String(got))
+	}
+}
+
+func TestJITOptimizedParameterRebindingInGeneratedSyntax(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	for _, body := range []string{
+		`(begin (define unit (toUpper unit)) unit)`,
+		`(begin (define unit (toUpper unit)) (list unit))`,
+		`(begin (define unit (toUpper unit))
+			(if (equal? unit "SKIP") (error "unsupported unit") true)
+			(list "compiler" (list "factory" unit kind) first last))`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			source := `(lambda (unit first last kind) ` + body + `)`
+			expression := Optimize(Read(t.Name(), source), &Globalenv, nil)
+			t.Log("optimized:", SerializeToString(expression, &Globalenv))
+			proc := Eval(expression, &Globalenv)
+			args := []Scmer{NewString("wk"), NewInt(1), NewInt(2), NewString("INT")}
+			want := Apply(proc, args...)
+			original := append([]Scmer(nil), args...)
+			got := Apply(jitCompile(proc), args...)
+			if !slices.Equal(args, original) {
+				t.Fatal("native rebinding changed the caller's argument slice")
+			}
+			if !Equal(got, want) {
+				t.Fatalf("native rebinding = %s, interpreter = %s", String(got), String(want))
+			}
+		})
+	}
+}
+
+func TestJITConditionalParameterRebindingKeepsCaller(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (unit normalize)
+		(if normalize (begin (define unit (toUpper unit)) unit) unit))`)
+	for _, normalize := range []bool{false, true} {
+		args := []Scmer{NewString("wk"), NewBool(normalize)}
+		want := "wk"
+		if normalize {
+			want = "WK"
+		}
+		if got := Apply(compiled, args...); !Equal(got, NewString(want)) {
+			t.Fatalf("normalize=%v returned %s, want %s", normalize, String(got), want)
+		}
+		if !Equal(args[0], NewString("wk")) {
+			t.Fatal("conditional rebinding changed the caller's argument")
+		}
+	}
+}
+
+func TestJITInlineParameterRebindingKeepsCaller(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (unit)
+		(list ((lambda (unit) (begin (define unit (toUpper unit)) unit)) unit) unit))`)
+	want := NewSlice([]Scmer{NewString("WK"), NewString("wk")})
+	if got := Apply(compiled, NewString("wk")); !Equal(got, want) {
+		t.Fatalf("inline rebinding = %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITLocalAssignmentsRespectInvocationScope(t *testing.T) {
+	assignment := NewSlice([]Scmer{NewSymbol("setN"), NewNthLocalVar(0), NewInt(7)})
+	for _, test := range []struct {
+		name  string
+		body  Scmer
+		write int
+	}{
+		{"own parameter", assignment, 0},
+		{"quoted syntax", NewSlice([]Scmer{NewSymbol("quote"), assignment}), -1},
+		{"nested lambda", NewSlice([]Scmer{NewSymbol("lambda"), NewSlice([]Scmer{NewSymbol("value")}), assignment}), -1},
+		{"parser syntax", NewSlice([]Scmer{NewSymbol("parser"), assignment}), -1},
+		{"foreign frame", NewSlice([]Scmer{NewSymbol("outer"), NewInt(1), assignment}), -1},
+		{"shared begin frame", NewSlice([]Scmer{NewSymbol("begin"), NewSlice([]Scmer{NewSymbol("outer"), NewInt(1), assignment})}), 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, write := jitRequiredLocalSlots(test.body, 1)
+			if write != test.write {
+				t.Fatalf("first assignment = %d, want %d", write, test.write)
+			}
+		})
+	}
+}
+
+func TestJITReadOnlyParametersKeepBorrowedFrame(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	proc := Eval(Optimize(Read(t.Name(), `(lambda (value) value)`), &Globalenv, nil), &Globalenv)
+	private := *proc.Proc()
+	// One additional invocation local requires the existing owned-frame path.
+	private.NumVars++
+	borrowed := jitCompile(proc)
+	owned := jitCompile(NewProcStruct(private))
+	if borrowed.Proc().Compiled == nil || owned.Proc().Compiled == nil {
+		t.Fatal("both parameter access paths must remain native")
+	}
+	if borrowed.Proc().Compiled.StackFrameSize >= owned.Proc().Compiled.StackFrameSize {
+		t.Fatalf("read-only frame = %d, owned frame = %d; input borrowing was lost",
+			borrowed.Proc().Compiled.StackFrameSize, owned.Proc().Compiled.StackFrameSize)
+	}
+	for _, callable := range []Scmer{borrowed, owned} {
+		if got := Apply(callable, NewString("unchanged")); !Equal(got, NewString("unchanged")) {
+			t.Fatalf("parameter read returned %s", String(got))
+		}
 	}
 }
