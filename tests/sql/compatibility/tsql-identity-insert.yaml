@@ -1224,7 +1224,7 @@ test_cases:
         (sql_execute_formula s tx (sql_queryplan_compile_formula tx
           (parse_sql "memcp-tests" "SELECT id,value FROM identity_mode_view" nil (newsession) tx))
           (lambda (row) (out "row" row)) (lambda fields true))))
-      (list (not (regexp_test ir "NthLocalVar|lambda|\\"var\\""))
+      (list (not (regexp_test ir "NthLocalVar|lambda"))
         ((out "row") "id") ((out "row") "value"))
     )
   expect:

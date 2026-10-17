@@ -1298,7 +1298,8 @@ parallel SELECT sinks borrow it without session-setting probes per row. */
 			DROP/CREATE or ADD may introduce identity beside unchanged targets. */
 			(planner_record_guard_condition
 				(list (quote nil?) (list (quote find) (list (quote get_schema) database name)
-					'(lambda (column) (equal? (column "Extra") "auto_increment")) nil)) planning_session)
+					(list (quote lambda) (list (quote column))
+						(list (quote equal?) (list (quote column) "Extra") "auto_increment")) nil)) planning_session)
 			nil)))))
 (define tsql_identity_insert_statement (lambda (database name identity explicit_columns columns body)
 	(list (quote begin)
