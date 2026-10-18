@@ -544,7 +544,7 @@ test_cases:
   - name: Persisted order symbols select the same explicit column collation
     scm: |
       (begin
-        (define source (list "c" "memcp-tests" "stf_ci" false))
+        (define source (list "c" "memcp-tests" "stf_ci" false nil))
         (define column (list (quote sql_type_expr)
           (list (quote get_column) "c" false "nm" false) "VARCHAR" (list "bin" 0)))
         (define order (sql_type_order_item (list source) (list column (quote <))))

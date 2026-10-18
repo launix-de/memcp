@@ -6090,10 +6090,10 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 		(cons title (cons ((symbol sql_compile_column) compiler column) rest))
 		(if (star_expr? column) (begin
 			(define bound (bind_query_expr scopes column path all_strings))
-			(define expanded (expand_star_for_sources (map (car scopes) binding_entry_source) (star_expr_alias bound)))
+			(define expanded (expand_star_for_sources (map (car scopes) binding_entry_source)
+				(list (quote sql_compile_column) compiler bound)))
 			(merge (list
-				(bind_query_fields (merge (extract_assoc expanded (lambda (name reference)
-					(list name (list (quote sql_compile_column) compiler reference))))) scopes path all_strings index)
+				(bind_query_fields expanded scopes path all_strings index)
 				(bind_query_fields rest scopes path all_strings (+ index 1)))))
 			(cons title (cons (bind_query_expr scopes (list (quote sql_compile_column) compiler column)
 				(binding_path path "field" index) all_strings)
