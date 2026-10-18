@@ -1277,7 +1277,7 @@ test_cases:
   - sql: SET @nav_actor=8
   - sql: SET @nav_list=20
   - scm: |
-      (insert (table "memcp-tests" "nav_selection") '("list" "item")
+      (insert (table "memcp-tests" false "nav_selection" false) '("list" "item")
         (map (produceN 4096) (lambda (i) (list 20 (+ i 1)))))
   sql: *flow_query_3
   expect:

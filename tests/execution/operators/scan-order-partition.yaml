@@ -34,7 +34,7 @@ test_cases:
       (begin
         (set s (newsession))
         (s "cnt" 0)
-        (scan_order (session "__memcp_tx") (table "memcp-tests" "part_test")
+        (scan_order (session "__memcp_tx") (table "memcp-tests" false "part_test" false)
           (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)
           '("dept" "salary") '(< >)
           1 0 1
@@ -48,7 +48,7 @@ test_cases:
       (begin
         (set s (newsession))
         (s "cnt" 0)
-        (scan_order (session "__memcp_tx") (table "memcp-tests" "part_test")
+        (scan_order (session "__memcp_tx") (table "memcp-tests" false "part_test" false)
           (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)
           '("dept" "salary") '(< >)
           1 0 2
@@ -62,7 +62,7 @@ test_cases:
       (begin
         (set s (newsession))
         (s "cnt" 0)
-        (scan_order (session "__memcp_tx") (table "memcp-tests" "part_test")
+        (scan_order (session "__memcp_tx") (table "memcp-tests" false "part_test" false)
           (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)
           '("dept" "salary") '(< >)
           1 1 1
@@ -76,7 +76,7 @@ test_cases:
       (begin
         (set s (newsession))
         (s "cnt" 0)
-        (scan_order (session "__memcp_tx") (table "memcp-tests" "part_test")
+        (scan_order (session "__memcp_tx") (table "memcp-tests" false "part_test" false)
           (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)
           '("salary") '(>)
           0 0 2
@@ -90,7 +90,7 @@ test_cases:
       (begin
         (set s (newsession))
         (s "cnt" 0)
-        (scan_order (session "__memcp_tx") (table "memcp-tests" "part_test")
+        (scan_order (session "__memcp_tx") (table "memcp-tests" false "part_test" false)
           (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)
           '("dept" "salary") '(< >)
           1 0 1

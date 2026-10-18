@@ -116,3 +116,44 @@ func TestAwaitCreationInitializationCachesGenuineFailure(t *testing.T) {
 		t.Fatalf("OnInit should only run once for a cached genuine failure, ran %d times", calls)
 	}
 }
+
+func TestCreateTableAmbiguousNameReleasesSchemaOwnership(t *testing.T) {
+	for _, ifNotExists := range []bool{false, true} {
+		name := "ordinary"
+		if ifNotExists {
+			name = "if_not_exists"
+		}
+		t.Run(name, func(t *testing.T) {
+			base, _ := createDurabilityTestTable(t, "tcreateambiguous", 0)
+			db := base.schema
+			first, _ := CreateTable(db.Name, "Foo", Memory, false)
+			second, _ := CreateTable(db.Name, "foo", Memory, false)
+			create := scm.Globalenv.Vars[scm.Symbol("createtable")]
+			var failure any
+			func() {
+				defer func() { failure = recover() }()
+				scm.Apply(create, scm.NewString(db.Name), scm.NewString("FOO"),
+					scm.NewSlice(nil), scm.NewSlice([]scm.Scmer{
+						scm.NewString("name_ignorecase"), scm.NewBool(true),
+					}), scm.NewBool(ifNotExists))
+			}()
+			// Inspect ownership directly so a regression fails without hanging
+			// another DDL operation or the test fixture's cleanup.
+			if !db.schemalock.TryLock() {
+				db.schemalock.Unlock()
+				t.Fatal("ambiguous CREATE retained database schema ownership")
+			}
+			db.schemalock.Unlock()
+			if failure != "ambiguous table name: FOO" {
+				t.Fatalf("CREATE failure = %v, want the original ambiguity error", failure)
+			}
+			if db.tables.Get("Foo") != first || db.tables.Get("foo") != second || db.tables.Get("FOO") != nil {
+				t.Fatal("rejected CREATE changed the namespace")
+			}
+			if !scm.Apply(create, scm.NewString(db.Name), scm.NewString("unrelated"),
+				scm.NewSlice(nil), scm.NewSlice(nil)).Bool() {
+				t.Fatal("unrelated CREATE did not complete after the rejected declaration")
+			}
+		})
+	}
+}

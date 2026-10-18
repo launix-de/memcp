@@ -22,7 +22,7 @@ test_cases:
     setup:
       - sql: "DROP TABLE IF EXISTS dlc_bench"
       - sql: "CREATE TABLE dlc_bench (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
-      - scm: '(rebuild (table "memcp-tests" "dlc_bench") true false)'
+      - scm: '(rebuild (table "memcp-tests" false "dlc_bench" false) true false)'
     scm: |
       (begin
         (define sess (newsession))
@@ -54,9 +54,9 @@ test_cases:
       - sql: "CREATE TABLE dlc_bench (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "dlc_bench") '("id" "col")
+            (insert (table "memcp-tests" false "dlc_bench" false) '("id" "col")
               (map (produceN 500) (lambda (i) (list i (* i 2)))))
-            (rebuild (table "memcp-tests" "dlc_bench") true false)
+            (rebuild (table "memcp-tests" false "dlc_bench" false) true false)
             true)
     scm: |
       (begin
@@ -96,9 +96,9 @@ test_cases:
       - sql: "CREATE TABLE dlc_bench (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "dlc_bench") '("id" "col")
+            (insert (table "memcp-tests" false "dlc_bench" false) '("id" "col")
               (map (produceN 250) (lambda (i) (list i i))))
-            (rebuild (table "memcp-tests" "dlc_bench") true false)
+            (rebuild (table "memcp-tests" false "dlc_bench" false) true false)
             true)
     scm: |
       (begin

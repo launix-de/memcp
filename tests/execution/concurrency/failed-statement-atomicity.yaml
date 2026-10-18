@@ -38,7 +38,7 @@ setup:
       ) ENGINE=safe
   - scm: |
       (begin
-        (insert (table "memcp-tests" "fsa_item") '("id" "code" "amount")
+        (insert (table "memcp-tests" false "fsa_item" false) '("id" "code" "amount")
           (map (produceN 25) (lambda (i)
             (list (+ i 1) (concat "code-" (+ i 1)) (* (+ i 1) 10)))))
         (rebuild)

@@ -111,6 +111,14 @@ parameter contracts without executing the query. National character declarations
 retain their original schema types; assignment and cast width uses UTF-16 units.
 Integer division uses the declared operand types and rejects zero divisors.
 
+Schema DDL retains declared identifier spelling while resolving table, view and
+column references without case sensitivity. Named defaults use the existing
+native column defaults, including ALTER ADD/DROP. CREATE TYPE ... FROM stores
+scalar alias definitions in `system.tsql_types`; columns retain their qualified
+alias declaration while the frontend resolves expression types, dimensions,
+nullability and casts. Alias contracts for RPC/procedure parameters and CAST,
+historical column conversions, and complete system-object catalogs remain open.
+
 TDS binary results preserve arbitrary bytes, empty values and NULL. Direct
 DECIMAL/NUMERIC columns, parameters and casts expose their declared precision
 and scale. Integer expression results retain the native signed 64-bit range
@@ -119,7 +127,7 @@ Scaled casts use the existing numeric precision; exact DECIMAL(38,s), computed
 decimal precision propagation, temporal parameters, output parameters, and
 text/numeric-to-binary encoding remain open. Computed decimal results without
 known dimensions currently retain approximate numeric transport. Metadata
-procedures and script batch import are separate follow-ups.
+discovery remains partial; scripts use the shared request/statement lifecycle.
 Non-NULL binary RPC inputs currently require a binary declaration; their native
 string carrier is never interpreted as numeric or character text.
 T-SQL plans retain the existing plan cache and JIT; the dialect currently uses

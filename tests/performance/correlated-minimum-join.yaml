@@ -19,16 +19,7 @@ setup:
 - sql: DROP TABLE IF EXISTS cm_partsupp
 - sql: CREATE TABLE cm_partsupp (ps_part INT, ps_supplier INT, ps_cost INT) ENGINE=memory
 - sql: INSERT INTO cm_region VALUES (0,'EUROPE'),(1,'ASIA')
-- scm: "(begin\n (insert (table \"memcp-tests\" \"cm_nation\") '(\"n_id\" \"n_region\" \"n_name\")\n  (map (produceN\
-    \ 8) (lambda (i) (list i (mod i 2) (concat \"nation\" i)))))\n (insert (table \"memcp-tests\" \"cm_supplier\"\
-    ) '(\"s_id\" \"s_nation\" \"s_name\" \"s_acctbal\")\n  (map (produceN 64) (lambda (i) (list i (mod i 8) (concat\
-    \ \"supplier\" i) (mod i 16)))))\n (insert (table \"memcp-tests\" \"cm_part\") '(\"p_id\" \"p_size\" \"p_type\"\
-    )\n  (map (produceN 2048) (lambda (i) (list (+ 1 i) (if (equal? (mod i 16) 0) 15 10)\n   (if (equal? (mod i\
-    \ 3) 0) \"SMALL BRASS\" \"TIN\")))))\n (insert (table \"memcp-tests\" \"cm_partsupp\") '(\"ps_part\" \"ps_supplier\"\
-    \ \"ps_cost\")\n  (map (produceN 8192) (lambda (i) (begin\n   (define part (mod i 2048)) (define slot (floor\
-    \ (/ i 2048)))\n   (list (+ part 1) (mod (+ part (* slot 7)) 64) (+ 10 slot))))))\n (map '(\"region\" \"nation\"\
-    \ \"supplier\" \"part\" \"partsupp\") (lambda (name)\n  (rebuild (table \"memcp-tests\" (concat \"cm_\" name))\
-    \ true false))) true)"
+- scm: "(begin\n (insert (table \"memcp-tests\" false \"cm_nation\" false) '(\"n_id\" \"n_region\" \"n_name\")\n  (map (produceN 8) (lambda (i) (list i (mod i 2) (concat \"nation\" i)))))\n (insert (table \"memcp-tests\" false \"cm_supplier\" false) '(\"s_id\" \"s_nation\" \"s_name\" \"s_acctbal\")\n  (map (produceN 64) (lambda (i) (list i (mod i 8) (concat \"supplier\" i) (mod i 16)))))\n (insert (table \"memcp-tests\" false \"cm_part\" false) '(\"p_id\" \"p_size\" \"p_type\")\n  (map (produceN 2048) (lambda (i) (list (+ 1 i) (if (equal? (mod i 16) 0) 15 10)\n   (if (equal? (mod i 3) 0) \"SMALL BRASS\" \"TIN\")))))\n (insert (table \"memcp-tests\" false \"cm_partsupp\" false) '(\"ps_part\" \"ps_supplier\" \"ps_cost\")\n  (map (produceN 8192) (lambda (i) (begin\n   (define part (mod i 2048)) (define slot (floor (/ i 2048)))\n   (list (+ part 1) (mod (+ part (* slot 7)) 64) (+ 10 slot))))))\n (map '(\"region\" \"nation\" \"supplier\" \"part\" \"partsupp\") (lambda (name)\n  (rebuild (table \"memcp-tests\" false (concat \"cm_\" name) false) true false))) true)"
 test_cases:
 - name: Correlated regional minimum preserves all selected parts
   sql: "SELECT p.p_id, s.s_id, ps.ps_cost\nFROM cm_part p, cm_supplier s, cm_partsupp ps, cm_nation n, cm_region\

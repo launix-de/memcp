@@ -140,15 +140,15 @@ test_cases:
       - sql: "CREATE TABLE mcw_acl (id INT PRIMARY KEY, allowed INT) ENGINE=sloppy"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "mcw_docs") '("id" "file_id" "site_id")
+            (insert (table "memcp-tests" false "mcw_docs" false) '("id" "file_id" "site_id")
               (map (produceN 2000) (lambda (i) (list i (mod i 100) (mod i 8)))))
-            (insert (table "memcp-tests" "mcw_files") '("id" "name" "content")
+            (insert (table "memcp-tests" false "mcw_files" false) '("id" "name" "content")
               (map (produceN 100) (lambda (i) (list i (if (< i 5) "needle" "ordinary") "ordinary"))))
-            (insert (table "memcp-tests" "mcw_acl") '("id" "allowed")
+            (insert (table "memcp-tests" false "mcw_acl" false) '("id" "allowed")
               (map (produceN 8) (lambda (i) (list i 1))))
-            (rebuild (table "memcp-tests" "mcw_docs"))
-            (rebuild (table "memcp-tests" "mcw_files"))
-            (rebuild (table "memcp-tests" "mcw_acl")))
+            (rebuild (table "memcp-tests" false "mcw_docs" false))
+            (rebuild (table "memcp-tests" false "mcw_files" false))
+            (rebuild (table "memcp-tests" false "mcw_acl" false)))
     scm: |
       (begin
         (define planning (newsession))

@@ -64,11 +64,11 @@ setup:
   - scm: |
       (begin
         (insert
-          (table "memcp-tests" "dtl_group_parent")
+          (table "memcp-tests" false "dtl_group_parent" false)
           '("ID" "label")
           (map (produceN 1201) (lambda (i) (list (+ i 1) (concat "parent-" (+ i 1))))))
         (insert
-          (table "memcp-tests" "dtl_group_child")
+          (table "memcp-tests" false "dtl_group_child" false)
           '("ID" "parent_id" "amount")
           (map (produceN 200) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1)))))
         true)
@@ -86,11 +86,11 @@ setup:
           (list "engine" "memory")
           true)
         (insert
-          (table "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc")
+          (table "memcp-tests" false ".grp:dtl_global_access:c686880da9e520fc" false)
           (list "k0")
           (list (list 1) (list 2) (list 3) (list 4)))
         (createcolumn
-          (table "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc")
+          (table "memcp-tests" false ".grp:dtl_global_access:c686880da9e520fc" false)
           "agg_f0d39398d80eb9d2"
           "any"
           (list)

@@ -38,7 +38,7 @@ setup:
       ) ENGINE=safe
   - scm: |
       (begin
-        (insert (table "memcp-tests" "patr_entry") '("id" "bucket" "amount" "state")
+        (insert (table "memcp-tests" false "patr_entry" false) '("id" "bucket" "amount" "state")
           (map (produceN 25) (lambda (i)
             (list (+ i 1) (mod i 4) (* (+ i 1) 10) "original"))))
         (rebuild)

@@ -47,7 +47,7 @@ test_cases:
 
   - name: "Create ORC column with nested source scan"
     scm: |
-      (createcolumn (table "memcp-tests" "orc_dep_base") "running" "INT" '()
+      (createcolumn (table "memcp-tests" false "orc_dep_base" false) "running" "INT" '()
         (list
           "sortcols"  '("sortk")
           "sortdirs"  (list false)
@@ -56,7 +56,7 @@ test_cases:
           "mapreducefn" (lambda (acc $set ref_id)
                         (begin
                           (define value
-                            (scan nil (table "memcp-tests" "orc_dep_src")
+                            (scan nil (table "memcp-tests" false "orc_dep_src" false)
                               (list 369436175368192 (scan_boundary "equal" "ref_id" 0 0 true true "" false)) (list ref_id)
                               '("ref_id")
                             (lambda (src.ref_id) (equal? src.ref_id (outer 1 ref_id)))
@@ -144,7 +144,7 @@ test_cases:
 
   - name: "Create ORC column with non-analyzable nested scan filter"
     scm: |
-      (createcolumn (table "memcp-tests" "orc_dep_fb_base") "running" "INT" '()
+      (createcolumn (table "memcp-tests" false "orc_dep_fb_base" false) "running" "INT" '()
         (list
           "sortcols"  '("sortk")
           "sortdirs"  (list false)
@@ -153,7 +153,7 @@ test_cases:
           "mapreducefn" (lambda (acc $set ref_id)
                         (begin
                           (define value
-                            (scan nil (table "memcp-tests" "orc_dep_fb_src")
+                            (scan nil (table "memcp-tests" false "orc_dep_fb_src" false)
                               '(369435906932736) '()
                               '("ref_id")
                             (lambda (src.ref_id) (equal? (+ src.ref_id 0) (outer 1 ref_id)))

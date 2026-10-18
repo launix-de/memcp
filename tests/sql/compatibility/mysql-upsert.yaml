@@ -239,7 +239,7 @@ test_cases:
 
   - name: "Rebuild option indexes before another generated-PK upsert"
     setup:
-      - scm: '(rebuild (table "memcp-tests" "upsert_options") true false)'
+      - scm: '(rebuild (table "memcp-tests" false "upsert_options" false) true false)'
     sql: |
       INSERT INTO upsert_options (option_name, option_value, alias)
       VALUES ('theme-cache', 'updated-again', 'theme'), ('new-cache', 'new', NULL)

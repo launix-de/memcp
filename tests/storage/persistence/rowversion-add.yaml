@@ -20,7 +20,7 @@ test_cases:
   name: 'Fixture setup 005: INSERT tsql_rv_add_main VALUES (1)'
   noncritical: true
 - name: Publish main generation
-  scm: (rebuild (table "memcp-tests" "tsql_rv_add_main") true false)
+  scm: (rebuild (table "memcp-tests" false "tsql_rv_add_main" false) true false)
 - name: Main rows reject generated ADD
   sql: ALTER TABLE tsql_rv_add_main ADD added_rv ROWVERSION PRIMARY KEY
   expect:

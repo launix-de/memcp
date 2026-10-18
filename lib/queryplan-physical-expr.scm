@@ -799,7 +799,7 @@ retained or joined. */
 		(define output (nth proof 3))
 		(define condition (combine_where_terms (nth proof 4) true))
 		(define cache (group_stage_cache property))
-		(define carrier (list (quote table) (group_cache_schema cache) (group_cache_relation cache)))
+		(define carrier (list (quote table) (group_cache_schema cache) false (group_cache_relation cache) false))
 		(list (quote !begin)
 			(lower_group_stage_prepare_using all_stages all_stages property true nil)
 			(list (quote define) (quote __property_candidates)
@@ -815,7 +815,7 @@ retained or joined. */
 		/* Bind the entity key before entering compiled scan callbacks. */
 		(list (list (quote lambda) (list (quote __property_key))
 			(compile_scan_plan (quote scan) (physical_query_tx_symbol)
-				(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
+				(list (quote table) (group_cache_schema cache) false (group_cache_relation cache) false)
 				(quoted_runtime_list (list "k0"))
 				'('lambda '('__key) '('equal?? '__key '__property_key))
 				(quoted_runtime_list (list column)) '('lambda '('acc 'value) 'value)
@@ -1830,7 +1830,7 @@ through to reach the base table -- src already is it. */
 			(if prepared nil (lower_group_stage_prepare_using stage_catalog stage_catalog physical_stage true nil))
 			(compile_scan_plan (quote scan_order)
 				(physical_query_tx_symbol)
-				(list (quote table) cache_schema cache_relation)
+				(list (quote table) cache_schema false cache_relation false)
 				(cons (quote list) (list "k0"))
 				(list (quote lambda) (list (quote __kt_k0))
 					(list (quote equal??) (quote __kt_k0) resolved_lookup_key))
@@ -2225,7 +2225,7 @@ the emitter and failing after the ordinary carrier has been discarded. */
 								stage_catalog stage_catalog physical_stage true nil))
 						(compile_scan_plan (quote scan_recset)
 							(physical_query_tx_symbol)
-							(list (quote table) cache_schema cache_relation)
+							(list (quote table) cache_schema false cache_relation false)
 							(quoted_runtime_list filtercols)
 							(list (quote lambda) (map filtercols symbol)
 								(combine_where_terms (cons value_condition domain_conditions) true)))
@@ -2521,10 +2521,10 @@ would still have to project that value over the segment. */
 			memoized_lowered)))
 )
 
-(define range_group_cache_mutexes (newcachemap))
+(define range_group_cache_mutexes (newcachemap (lambda (_key) (mutex))))
 
 (define range_group_cache_mutex (lambda (name)
-	(range_group_cache_mutexes "get_or_compute" name (lambda () (mutex)))))
+	(range_group_cache_mutexes name)))
 
 /* Named runtime boundaries keep EXPLAIN and profiles legible while the
 generated recipes remain ordinary Scheme. */
@@ -2842,7 +2842,7 @@ choices. */
 			(aggregate_shard_combine runtime_ag)
 			false))
 		(list (quote createcolumn)
-			(list (quote table) schema cache_name)
+			(list (quote table) schema false cache_name false)
 			(range_group_state_col_name stage ag)
 			"any"
 			(quoted_runtime_list '())
@@ -2854,7 +2854,7 @@ choices. */
 
 (define range_cache_insert_expr (lambda (schema cache_name columns row tx_expr)
 	(list (quote insert)
-		(list (quote table) schema cache_name)
+		(list (quote table) schema false cache_name false)
 		(cons (quote list) columns)
 		(list (quote list) (cons (quote list) row))
 		(quoted_runtime_list '())
@@ -2882,7 +2882,7 @@ choices. */
 		(define boundary_symbols (map boundary_names symbol))
 		(compile_scan_plan (quote scan)
 			tx_expr
-			(list (quote table) schema cache_name)
+			(list (quote table) schema false cache_name false)
 			(cons (quote list) columns)
 			(list (quote lambda) params
 				(combine_where_terms (merge (list
@@ -2908,7 +2908,7 @@ choices. */
 		(define to_symbol (nth boundary_symbols (+ offset 3)))
 		(compile_scan_plan (quote scan)
 			tx_expr
-			(list (quote table) schema cache_name)
+			(list (quote table) schema false cache_name false)
 			(cons (quote list) columns)
 			(list (quote lambda) params
 				(combine_where_terms (merge (list
@@ -2928,7 +2928,7 @@ choices. */
 (define range_cache_domain_exists_expr (lambda (schema cache_name key_names point_values tx_expr equality)
 	(compile_scan_plan (quote scan_exists)
 		tx_expr
-		(list (quote table) schema cache_name)
+		(list (quote table) schema false cache_name false)
 		(cons (quote list) key_names)
 		(list (quote lambda) (map key_names symbol)
 			(combine_where_terms
@@ -2945,7 +2945,7 @@ Never substitute a nullable/filtered count, a zero sum or a row estimate here. *
 		(begin
 			(define columns (merge (list key_names boundary_names (list occupancy))))
 			(compile_scan_plan (quote scan_exists) tx_expr
-				(list (quote table) schema cache_name)
+				(list (quote table) schema false cache_name false)
 				(cons (quote list) columns)
 				(list (quote lambda) (map columns symbol)
 					(combine_where_terms (merge (list
@@ -2985,7 +2985,7 @@ remain installed; no table, aggregate definition or dependency trigger is lost. 
 			(define left (mapIndex boundary_names (lambda (i _) (list (quote nth) (quote __left) i))))
 			(define right (mapIndex boundary_names (lambda (i _) (list (quote nth) (quote __right) i))))
 			(define cells (compile_scan_plan (quote scan) tx_expr
-				(list (quote table) schema cache_name)
+				(list (quote table) schema false cache_name false)
 				(cons (quote list) columns)
 				(list (quote lambda) (map columns symbol)
 					(combine_where_terms (merge (list
@@ -3119,7 +3119,7 @@ remain installed; no table, aggregate definition or dependency trigger is lost. 
 		(define scan_expr (compile_scan_plan (quote scan_join_order)
 			tx_expr
 			(list (quote list) (source_table_expr outer_src)
-				(list (quote table) schema cache_name))
+				(list (quote table) schema false cache_name false))
 			(quoted_runtime_list (list valid_cols '()))
 			(list (quote list)
 				(list (quote lambda) (map valid_cols (lambda (col)
@@ -3197,7 +3197,7 @@ remain installed; no table, aggregate definition or dependency trigger is lost. 
 			(list (quote range_group_cache_mutex) cache_name)
 			(list (quote lambda) '()
 				(list (quote !begin)
-					(list (quote prepare_cache) (list (quote table) schema cache_name)
+					(list (quote prepare_cache) (list (quote table) schema false cache_name false)
 						preparation_key sources (quoted_runtime_list '())
 						(list (quote lambda) (list (quote __previous))
 							(cons (quote !begin) (merge (list
@@ -3383,7 +3383,7 @@ preparation reuse, ensuring newly occupied cells are refined before reading. */
 					(list (quote range_group_cache_mutex) cache_name)
 					(list (quote lambda) '()
 						(list (quote prepare_cache)
-							(list (quote table) (source_schema (gs_input base_stage)) cache_name)
+							(list (quote table) (source_schema (gs_input base_stage)) false cache_name false)
 							batch_preparation_key (list (quote list) (source_table_expr outer_src))
 							(list (quote list) (source_table_expr (gs_input base_stage)))
 							(list (quote lambda) (list (quote __complete))
@@ -3420,7 +3420,7 @@ preparation reuse, ensuring newly occupied cells are refined before reading. */
 						(nth bound 2) (nth bound 3))))))))
 		(define exact_terms (range_cache_boundary_equal_terms boundary_symbols
 			(range_cache_flatten_bounds bounds)))
-		(define table_expr (list (quote table) schema cache_name))
+		(define table_expr (list (quote table) schema false cache_name false))
 		(define merged_state (compile_scan_plan (quote scan)
 			tx_expr table_expr
 			(cons (quote list) filter_columns)
@@ -4052,7 +4052,15 @@ coercion and collations do not have the same ordering proof. */
 		_ expr)))
 
 (define order_column_for_alias (lambda (src expr)
+	/* Window specifications contain lists of expressions below their syntax
+	node. Consume frontend contracts with the source still available, just as
+	window aggregates do, before requiring an existing native column. */
 	(match expr
+		((symbol sql_type_expr) formula _type _collation) (order_column_for_alias src formula)
+		((symbol sql_compile_column) _compiler _expression)
+		(order_column_for_alias src (sql_type_formula (list src) expr))
+		(cons (symbol sql_compile_expr) _arguments)
+		(order_column_for_alias src (sql_type_formula (list src) expr))
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
 			(resolve_physical_column_name src col col_ignorecase)
 			(neumann_fail "build_queryplan" "ORDER BY references a different source"))
@@ -4180,7 +4188,7 @@ formulas never use this path because their original frontend triples matter. */
 			(if (and source (source_is_base_table? source)
 				(not (physical_helper_relation? (source_relation source)))
 				(not (equal?? (source_schema source) "information_schema"))) (begin
-					(define handle (table (source_schema source) (source_relation source)))
+					(define handle (table (source_schema source) false (source_relation source) false))
 					(define declaration (if handle (show handle "column" col col_ic) nil))
 					(if (nil? declaration) nil (begin
 						(planner_record_guard_condition (list (quote expression_equal?)
@@ -4557,7 +4565,7 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 		(define valuecols (extract_columns_for_alias group_src value_expr))
 		(compile_scan_plan (quote scan_order)
 			(physical_query_tx_symbol)
-			(list (quote table) schema grouptbl)
+			(list (quote table) schema false grouptbl false)
 			(cons (quote list) filtercols)
 			(list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat grouptbl "." col))))
@@ -4665,7 +4673,7 @@ cache identity or a logical fallback. */
 			(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
 			(compile_scan_plan (quote scan_exists)
 				(physical_query_tx_symbol)
-				(list (quote table) (group_stage_cache_schema stage) (group_stage_cache_relation stage))
+				(list (quote table) (group_stage_cache_schema stage) false (group_stage_cache_relation stage) false)
 				(cons (quote list) filtercols)
 				(list (quote lambda)
 					(map filtercols symbol)
@@ -4745,7 +4753,7 @@ would lose nested-stage and join semantics. */
 				(lower_column_expr_for_join sources default_alias (nth lookup_keys i))))))
 		(compile_scan_plan (quote scan_exists)
 			(physical_query_tx_symbol)
-			(list (quote table) cache_schema (group_stage_cache_relation stage))
+			(list (quote table) cache_schema false (group_stage_cache_relation stage) false)
 			(cons (quote list) filter_key_names)
 			(list (quote lambda)
 				(map filter_key_names symbol)
@@ -5273,7 +5281,7 @@ alternative is a raw RecSet or direct probe. */
 		(prepared_group_cache_expr stage
 			(compile_scan_plan (quote scan_recset)
 				(physical_query_tx_symbol)
-				(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
+				(list (quote table) (group_cache_schema cache) false (group_cache_relation cache) false)
 				(list (quote list))
 				(list (quote lambda) '() true))))))
 
@@ -5304,7 +5312,7 @@ alternative is a raw RecSet or direct probe. */
 						(physical_query_tx_symbol)
 						(compile_scan_plan (quote scan_recset)
 							(physical_query_tx_symbol)
-							(list (quote table) cache_schema cache_relation)
+							(list (quote table) cache_schema false cache_relation false)
 							(cons (quote list) filtercols)
 							(list (quote lambda)
 								(map filtercols symbol)
@@ -5651,7 +5659,7 @@ still rechecks current data and autoindex statistics. */
 		(define cols (extract_columns_for_alias src condition))
 		(define estimate_expr (compile_scan_plan (quote scan_selectivity_estimate)
 			(physical_query_tx_symbol)
-			(list (quote table) (source_schema src) (source_relation src))
+			(list (quote table) (source_schema src) false (source_relation src) false)
 			(cons (quote list) cols)
 			(list (quote lambda)
 				(map cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
@@ -5720,7 +5728,7 @@ candidate RecSet. */
 							(list (quote equal?)
 								(list
 									(list (quote table_planner_statistics)
-										(list (quote table) (source_schema src) (source_relation src)))
+										(list (quote table) (source_schema src) false (source_relation src) false))
 									"row_count")
 								rows) planning_session)
 						nil))) nil)
@@ -5833,7 +5841,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 						(list (quote equal?)
 							(list
 								(list (quote table_planner_statistics)
-									(list (quote table) (source_schema src) (source_relation src)))
+									(list (quote table) (source_schema src) false (source_relation src) false))
 								"row_count")
 							source_rows) planning_session)
 					nil)
@@ -7059,7 +7067,7 @@ initialization and eviction ownership. Dimensions describe keys, never owners. *
 		/* A missing/invalid payload evaluates to nil. It is filled under source
 		read locks; native dependency triggers invalidate it on logical writes.
 		The callback is stateless and retains no request or normalized bindings. */
-		(createcolumn (table (group_cache_schema cache) (group_cache_relation cache))
+		(createcolumn (table (group_cache_schema cache) false (group_cache_relation cache) false)
 			payload "any" '() (list "temp" true "dependencies" sources
 				"filtercols" '() "filter" (lambda () false)) '() (lambda () nil))
 		true)))
@@ -7070,7 +7078,7 @@ initialization and eviction ownership. Dimensions describe keys, never owners. *
 
 (define group_cache_read_cell (lambda (cache coordinates payload tx)
 	(!begin
-		(define carrier (table (group_cache_schema cache) (group_cache_relation cache)))
+		(define carrier (table (group_cache_schema cache) false (group_cache_relation cache) false))
 		(if (or (nil? carrier) (nil? (resolve_column_name (group_cache_schema cache) (group_cache_relation cache) payload false))) nil
 			(scan tx carrier (group_cache_cell_access (group_cache_dimension_names cache))
 				coordinates '() (lambda () true)
@@ -7078,7 +7086,7 @@ initialization and eviction ownership. Dimensions describe keys, never owners. *
 
 (define group_cache_write_cell (lambda (cache coordinates payload value tx)
 	(!begin
-		(define carrier (table (group_cache_schema cache) (group_cache_relation cache)))
+		(define carrier (table (group_cache_schema cache) false (group_cache_relation cache) false))
 		(insert carrier (group_cache_dimension_names cache) (list coordinates)
 			'() (lambda () true) false nil tx)
 		(scan tx carrier (group_cache_cell_access (group_cache_dimension_names cache))
@@ -7090,7 +7098,7 @@ producer may publish its already computed scalar after paying the extra storage
 cost. Building additional state (snapshot contributions) waits for a later call. */
 (define group_cache_execute (lambda (cache threshold tx direct cached retain)
 	(if (tx_requires_query_local_cache tx) (direct)
-		(if (or (not (nil? (table (group_cache_schema cache) (group_cache_relation cache))))
+		(if (or (not (nil? (table (group_cache_schema cache) false (group_cache_relation cache) false)))
 			(group_cache_work_paid? tx (group_cache_relation cache) threshold))
 			(!begin
 				(define result (cached))
@@ -7253,7 +7261,7 @@ NULL is UNKNOWN. Keep SQL collation for non-NULL values. */
 				(list (quote not)
 					(compile_scan_plan (quote scan_exists)
 						(physical_query_tx_symbol)
-						(list (quote table) schema grouptbl)
+						(list (quote table) schema false grouptbl false)
 						(cons (quote list) cols)
 						(list (quote lambda)
 							params
@@ -7629,7 +7637,7 @@ ever-larger subtrees. */
 		(define src (list grouptbl schema grouptbl false nil))
 		(define cols (extract_columns_for_alias src expr))
 		(list (quote createcolumn)
-			(list (quote table) schema grouptbl)
+			(list (quote table) schema false grouptbl false)
 			(group_computed_order_col_name expr)
 			"any"
 			(quoted_runtime_list '())
@@ -7695,7 +7703,7 @@ every group row and its canonical identity stays independent of bound values. */
 
 (define build_group_constant_key_insert_plan (lambda (schema grouptbl)
 	(list (quote insert)
-		(list (quote table) schema grouptbl)
+		(list (quote table) schema false grouptbl false)
 		(quoted_runtime_list (list "k0"))
 		(list (quote list) (list (quote list) 1))
 		(quoted_runtime_list '())
@@ -7704,7 +7712,7 @@ every group row and its canonical identity stays independent of bound values. */
 
 (define build_group_session_key_insert_plan (lambda (schema grouptbl key_names keys)
 	(list (quote insert)
-		(list (quote table) schema grouptbl)
+		(list (quote table) schema false grouptbl false)
 		(cons (quote list) key_names)
 		(list (quote list) (cons (quote list) keys))
 		(quoted_runtime_list '())
@@ -7747,7 +7755,7 @@ every group row and its canonical identity stays independent of bound values. */
 		(define filtercols (merge_unique (list group_key_cols_for_scan condition_cols order_cols)))
 		(define mapcols (merge_unique (list valuecols)))
 		(list (quote createcolumn)
-			(list (quote table) schema grouptbl)
+			(list (quote table) schema false grouptbl false)
 			agg_col
 			"any"
 			(quoted_runtime_list '())
@@ -7757,7 +7765,7 @@ every group row and its canonical identity stays independent of bound values. */
 				(map key_names (lambda (col) (symbol col)))
 				(compile_scan_plan (quote scan_order)
 					nil
-					(list (quote table) schema tbl)
+					(list (quote table) schema false tbl false)
 					(cons (quote list) filtercols)
 					(list (quote lambda)
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
@@ -7805,7 +7813,7 @@ every group row and its canonical identity stays independent of bound values. */
 				(group_insert_finish_expr schema grouptbl keys key_names agg_cols true (physical_query_tx_symbol)))
 			(compile_scan_plan (quote scan_order)
 				(physical_query_tx_symbol)
-				(list (quote table) schema tbl)
+				(list (quote table) schema false tbl false)
 				(cons (quote list) filtercols)
 				(list (quote lambda)
 					(map filtercols (lambda (col) (symbol (concat alias "." col))))
@@ -7881,7 +7889,7 @@ every group row and its canonical identity stays independent of bound values. */
 					/* Persistent computed columns read committed storage independently
 					from the request which first creates or later repairs them. */
 					nil
-					(list (quote table) schema tbl)
+					(list (quote table) schema false tbl false)
 					(cons (quote list) filtercols)
 					(list (quote lambda)
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
@@ -7899,7 +7907,7 @@ every group row and its canonical identity stays independent of bound values. */
 					false)))
 			(define aggregate_value_expr (aggregate_finalize_expr ag aggregate_state_expr))
 			(merge (list (list (quote createcolumn)
-				(list (quote table) schema grouptbl)
+				(list (quote table) schema false grouptbl false)
 				agg_col
 				"any"
 				(list (quote list))
@@ -8164,7 +8172,7 @@ state through an assoc and one-element payload lists adds no semantics. */
 		(list
 			(list (quote lambda) (list (quote aggregate_state))
 				(list (quote insert)
-					(list (quote table) schema grouptbl)
+					(list (quote table) schema false grouptbl false)
 					(cons (quote list) (list key_name aggregate_col))
 					(list (quote list) (list (quote list) 1
 						(aggregate_finalize_expr ag (quote aggregate_state))))
@@ -8468,7 +8476,7 @@ slot per syntactically repeated COUNT. */
 			(lambda (i) (query_session_read? (nth keys i)))))
 		(compile_scan_plan (quote scan)
 			write_tx
-			(list (quote table) schema grouptbl)
+			(list (quote table) schema false grouptbl false)
 			(quoted_runtime_list (map bound_indices (lambda (i) (nth key_names i))))
 			(list (quote lambda) (map bound_indices (lambda (i) (nth key_symbols i)))
 				(combine_where_terms (map bound_indices (lambda (i)
@@ -8517,7 +8525,7 @@ consumer recomputes every group with a separate scan of the source. */
 			(symbol (concat "__seed_group_value_" i)))))
 		(compile_scan_plan (quote scan)
 			write_tx
-			(list (quote table) schema grouptbl)
+			(list (quote table) schema false grouptbl false)
 			(quoted_runtime_list key_names)
 			(list (quote lambda) key_symbols
 				(list (quote has_assoc?) grouped_expr (runtime_cons_list_expr key_symbols)))
@@ -8536,7 +8544,7 @@ consumer recomputes every group with a separate scan of the source. */
 (define group_insert_batches_expr (lambda (schema grouptbl key_names value_cols computed_values grouped_expr write_tx)
 	(begin
 		(define insert_plan (list (quote group_insert_batches)
-			(list (quote table) schema grouptbl)
+			(list (quote table) schema false grouptbl false)
 			(cons (quote list) (merge (list key_names value_cols)))
 			(group_upsert_collision_cols value_cols computed_values)
 			(group_upsert_collision_lambda value_cols computed_values)
@@ -8836,7 +8844,7 @@ canonical projection, using the existing cache-admission accounting. */
 				(define matching_rows (planner_row_count_after_selectivity driver (qb_sources input)
 					(source_alias driver) (qb_where input) nil planning_session))
 				(if (or (not (number? matching_rows))
-					(not (scalar_group_projection_wins? (table (source_schema driver) (source_relation driver))
+					(not (scalar_group_projection_wins? (table (source_schema driver) false (source_relation driver) false)
 						matching_rows (count columns) (count ags)))) direct_plan
 					(begin
 						(define projected_input (make_query_block (qb_schema input) (list driver) '()
@@ -8852,13 +8860,13 @@ canonical projection, using the existing cache-admission accounting. */
 									(cons (quote !begin) (merge (list
 										(map (nth spec 3) (lambda (col) (scalar_group_projection_column spec col)))
 										(list true)))))))
-							(list (list (quote insert) (list (quote table) (qb_schema input) grouptbl)
+							(list (list (quote insert) (list (quote table) (qb_schema input) false grouptbl false)
 								(quoted_runtime_list (merge (list key_names aggregate_cols)))
 								(list (quote list) (cons (quote list) (cons 1 aggregate_values)))
 								(group_upsert_collision_cols aggregate_cols false)
 								(group_upsert_collision_lambda aggregate_cols false) true nil (physical_query_tx_symbol)))))))
 						(define driver_table (source_table_expr driver))
-						(define costs (scalar_group_projection_costs (table (source_schema driver) (source_relation driver))
+						(define costs (scalar_group_projection_costs (table (source_schema driver) false (source_relation driver) false)
 							matching_rows (count columns) (count ags)))
 						(define ready_expr (list (quote scalar_group_projection_ready?) (source_schema driver)
 							(source_relation driver) (quoted_runtime_list columns)))
@@ -9229,8 +9237,8 @@ once and every base-only leaf remains a vectorized domain scan. */
 		(if (reduce pairs (lambda (bad p) (or bad (nil? p))) false)
 			nil
 			(list (quote register_keytable_cleanup)
-				(list (quote table) schema tbl)
-				(list (quote table) schema grouptbl)
+				(list (quote table) schema false tbl false)
+				(list (quote table) schema false grouptbl false)
 				alias
 				(cons (quote list) (map pairs (lambda (p) (cons (quote list) p)))))))))
 
@@ -10168,7 +10176,7 @@ query closure nor a physical row identity can survive in the stored payload. */
 		(define access (cons (compiled_scan_access_header (+ slot 1) "" 0 -1)
 			(merge (list (cdr (group_cache_cell_access names))
 				(list (scan_boundary "range" "snapshot_0" (if before -1 slot) (if before slot -1) true true "bin" false))))))
-		(scan_order tx (table (group_cache_schema cache) (group_cache_relation cache))
+		(scan_order tx (table (group_cache_schema cache) false (group_cache_relation cache) false)
 			access (merge (list fixed (list coordinate)))
 			(list payload) (lambda (state) (not (nil? state)))
 			'("snapshot_0") (list (collate "bin" before)) 0 0 1
@@ -10233,7 +10241,7 @@ Choose between those two using actual affected-key work, not distance. */
 			(or (nil? tx) (not (and
 				(equal? (nth (cadr nearest) 6) (tx_connection_id tx))
 				(equal? (nth (cadr nearest) 7) (tx_query tx))))))
-			(discard_cache_value tx (table (group_cache_schema cache) (group_cache_relation cache))
+			(discard_cache_value tx (table (group_cache_schema cache) false (group_cache_relation cache) false)
 				(group_cache_dimension_names cache) (merge (list fixed (list (car nearest))))
 				payload (cadr nearest)) true)
 		true)))
@@ -10313,7 +10321,7 @@ old snapshot cells intact; only the new disjoint children need new state. */
 							(if (range_domain_unbounded_to? domain) false (list (quote nil?) (nth bound 3)))
 							(list (quote not) (range_cache_cut_less_expr (nth bound 0) (nth bound 1) (nth bound 2) (nth bound 3))))))))
 				(define read_cells (compile_scan_plan (quote scan) (physical_query_tx_symbol)
-					(list (quote table) schema name)
+					(list (quote table) schema false name false)
 					(quoted_runtime_list (merge (list partition_names boundary_names)))
 					(list (quote lambda) (merge (list (map partition_names symbol) boundary_symbols))
 						(combine_where_terms (merge (list

@@ -37,20 +37,20 @@ setup:
   - scm: |
       (begin
       (define rows (produceN 4096 (lambda (i) (list (+ i 1) true i))))
-      (insert (table "memcp-tests" "drcv_warm_index") '("id" "acl_visible" "sort_key") rows '() (lambda () true) false)
-      (rebuild (table "memcp-tests" "drcv_warm_index") true false))
+      (insert (table "memcp-tests" false "drcv_warm_index" false) '("id" "acl_visible" "sort_key") rows '() (lambda () true) false)
+      (rebuild (table "memcp-tests" false "drcv_warm_index" false) true false))
   - scm: |
       (begin
-      (rebuild (table "memcp-tests" "drcv_domain") true false)
-      (rebuild (table "memcp-tests" "drcv_tenant") true false)
-      (rebuild (table "memcp-tests" "drcv_item") true false)
-      (rebuild (table "memcp-tests" "drcv_access") true false))
+      (rebuild (table "memcp-tests" false "drcv_domain" false) true false)
+      (rebuild (table "memcp-tests" false "drcv_tenant" false) true false)
+      (rebuild (table "memcp-tests" false "drcv_item" false) true false)
+      (rebuild (table "memcp-tests" false "drcv_access" false) true false))
 
 test_cases:
   - name: "A warm longer base index cannot consume a request-local RecSet boundary"
     scm: |
       (begin
-      (define tbl (table "memcp-tests" "drcv_warm_index"))
+      (define tbl (table "memcp-tests" false "drcv_warm_index" false))
       (define warm (lambda ()
         (scan_order nil tbl
           (car (eval (compile_scan_access '("acl_visible") (scheme "(lambda (acl_visible) (equal? acl_visible true))")))) (cadr (eval (compile_scan_access '("acl_visible") (scheme "(lambda (acl_visible) (equal? acl_visible true))")))) '("acl_visible")
@@ -83,7 +83,7 @@ test_cases:
   - name: "Build a RecSet before deleting one of its rows"
     scm: |
       (begin
-      (define tbl (table "memcp-tests" "drcv_item"))
+      (define tbl (table "memcp-tests" false "drcv_item" false))
       (define before_delete
         (scan_recset nil tbl
           (car (eval (compile_scan_access '("bucket_id") (scheme "(lambda (bucket_id) (equal? bucket_id 7))")))) (cadr (eval (compile_scan_access '("bucket_id") (scheme "(lambda (bucket_id) (equal? bucket_id 7))")))) '("bucket_id")

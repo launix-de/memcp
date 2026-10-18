@@ -14,7 +14,7 @@ test_cases:
   - name: Scalar column getter borrows declared native metadata
     scm: |
       (begin
-        (define declaration (show (table "memcp-tests" "tsql_decl_columns") "column" "LABEL" true))
+        (define declaration (show (table "memcp-tests" false "tsql_decl_columns" false) "column" "LABEL" true))
         (and (equal? (declaration "RawType") "VARCHAR")
           (equal? (declaration "Dimensions") '(3)) (not (declaration "Null"))))
     expect: {result: true}
@@ -39,7 +39,7 @@ test_cases:
   - name: Widening publishes the complete declaration
     scm: |
       (begin
-        (define declaration (show (table "memcp-tests" "tsql_decl_columns") "column" "label"))
+        (define declaration (show (table "memcp-tests" false "tsql_decl_columns" false) "column" "label"))
         (and (equal? (declaration "Dimensions") '(20)) (not (declaration "Null"))
           (equal? (declaration "Default") "old")))
     expect: {result: true}
@@ -127,6 +127,447 @@ test_cases:
   - name: Repeated compatible alteration is idempotent
     sql: ALTER TABLE tsql_decl_columns ALTER COLUMN national NVARCHAR(MAX) NULL
     expect: {rows: 0}
+
+  - name: Built-in name type retains original declaration and resolved dimensions
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME)
+    scm: |-
+      (begin
+        (define c (show (table "memcp-tests" false "tsql_builtin_names" false) "column" "name" false))
+        (and (equal? (c "RawType") "SYSNAME") (equal? (c "Dimensions") '(128)) (not (c "Null"))))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type default column rejects explicit NULL
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME)
+    sql: INSERT tsql_builtin_names(id,name) VALUES(1,NULL)
+    expect:
+      error: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type explicit nullable column accepts NULL
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME NULL)
+    - sql: INSERT tsql_builtin_names(id,name) VALUES(1,NULL)
+    sql: SELECT name FROM tsql_builtin_names
+    expect:
+      rows: 1
+      data:
+      - name: null
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type explicit nonnullable column rejects NULL
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME NOT NULL)
+    sql: INSERT tsql_builtin_names(id,name) VALUES(1,NULL)
+    expect:
+      error: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type missing nonnullable value is rejected
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME)
+    sql: INSERT tsql_builtin_names(id) VALUES(1)
+    expect:
+      error: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type uses the existing column default
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME DEFAULT N'first')
+    - sql: INSERT tsql_builtin_names(id) VALUES(1)
+    sql: SELECT name FROM tsql_builtin_names
+    expect:
+      rows: 1
+      data:
+      - name: first
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type stores Unicode text independently of identifier grammar
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME)
+    - sql: INSERT tsql_builtin_names(id,name) VALUES(1,N'Grüße . [item]')
+    sql: SELECT name FROM tsql_builtin_names
+    expect:
+      rows: 1
+      data:
+      - name: Grüße . [item]
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Explicit national conversion stores the bounded name capacity
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME)
+    - sql: INSERT tsql_builtin_names(id,name) VALUES(1,CAST(N'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+        AS NVARCHAR(128)))
+    sql: SELECT name FROM tsql_builtin_names
+    expect:
+      rows: 1
+      data:
+      - name: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Explicit national conversion preserves a supplementary character
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME)
+    - sql: INSERT tsql_builtin_names(id,name) VALUES(1,CAST(N'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa🙂b'
+        AS NVARCHAR(128)))
+    sql: SELECT name FROM tsql_builtin_names
+    expect:
+      rows: 1
+      data:
+      - name: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa🙂
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type nullable ADD reuses sparse historical values
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY)
+    - sql: INSERT tsql_builtin_names VALUES(1)
+    - sql: ALTER TABLE tsql_builtin_names ADD name SYSNAME NULL
+    sql: SELECT name FROM tsql_builtin_names
+    expect:
+      rows: 1
+      data:
+      - name: null
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type ADD applies the declared existing default
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY)
+    - sql: INSERT tsql_builtin_names VALUES(1)
+    - sql: ALTER TABLE tsql_builtin_names ADD name SYSNAME DEFAULT N'added'
+    sql: SELECT name FROM tsql_builtin_names
+    expect:
+      rows: 1
+      data:
+      - name: added
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type rejects a length override
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    sql: CREATE TABLE tsql_builtin_names(id INT,name SYSNAME(5))
+    expect:
+      error: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type rejects MAX override
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    sql: CREATE TABLE tsql_builtin_names(id INT,name SYSNAME(MAX))
+    expect:
+      error: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type rejects an explicit fixed alias capacity
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    sql: CREATE TABLE tsql_builtin_names(id INT,name SYSNAME(128))
+    expect:
+      error: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type rejects identity on its text contract
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    sql: CREATE TABLE tsql_builtin_names(name SYSNAME IDENTITY)
+    expect:
+      error: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type qualified system spelling preserves the declaration
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name [sys].[SySnAmE])
+    scm: |-
+      (begin
+        (define c (show (table "memcp-tests" false "tsql_builtin_names" false) "column" "name" false))
+        (and (equal? (c "RawType") "[sys].[SYSNAME]") (equal? (c "Dimensions") '(128)) (not (c "Null"))))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type uninitialized variable remains NULL
+    sql: DECLARE @name SYSNAME; SELECT @name AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Built-in name type variable initializer and assignment use national text
+    sql: DECLARE @name SYSNAME=N'Ä'; SET @name=N'Ö'; SELECT @name AS value
+    expect:
+      rows: 1
+      data:
+      - value: Ö
+  - name: Built-in name type variable accepts explicit NULL
+    sql: DECLARE @name SYSNAME=N'row'; SET @name=NULL; SELECT @name AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Built-in name type variable capacity is fixed independently of CAST defaults
+    sql: DECLARE @name SYSNAME=N'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx';
+      SELECT @name AS value
+    expect:
+      rows: 1
+      data:
+      - value: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  - name: Built-in name type qualified variable uses the same immutable declaration
+    sql: DECLARE @name [sys].[sysname]=N'box'; SELECT @name AS value
+    expect:
+      rows: 1
+      data:
+      - value: box
+  - name: Built-in name type dynamic output uses the declared target
+    sql: DECLARE @value SYSNAME=N'left'; EXEC sp_executesql N'SET @name=@name+N''right''',N'@name SYSNAME OUTPUT',@name=@value
+      OUTPUT; SELECT @value AS value
+    expect:
+      rows: 1
+      data:
+      - value: leftright
+  - name: Built-in name type procedure default uses its original alias contract
+    setup:
+    - sql: DROP PROCEDURE IF EXISTS dbo.tsql_builtin_name_proc
+    - sql: CREATE PROCEDURE dbo.tsql_builtin_name_proc @name SYSNAME=N'default' AS SELECT @name AS value
+    sql: EXEC dbo.tsql_builtin_name_proc
+    expect:
+      rows: 1
+      data:
+      - value: default
+    cleanup:
+    - sql: DROP PROCEDURE IF EXISTS dbo.tsql_builtin_name_proc
+  - name: Built-in name type procedure input remains nullable
+    setup:
+    - sql: DROP PROCEDURE IF EXISTS dbo.tsql_builtin_name_proc
+    - sql: CREATE PROCEDURE dbo.tsql_builtin_name_proc @name SYSNAME=N'default' AS SELECT @name AS value
+    sql: EXEC dbo.tsql_builtin_name_proc @name=NULL
+    expect:
+      rows: 1
+      data:
+      - value: null
+    cleanup:
+    - sql: DROP PROCEDURE IF EXISTS dbo.tsql_builtin_name_proc
+  - name: Built-in name type procedure definition preserves the parameter alias
+    setup:
+    - sql: DROP PROCEDURE IF EXISTS dbo.tsql_builtin_name_proc
+    - sql: CREATE PROCEDURE dbo.tsql_builtin_name_proc @name SYSNAME=N'default' AS SELECT @name AS value
+    scm: |-
+      (begin
+        (define p (car (showprocedures "memcp-tests" "tsql_builtin_name_proc")))
+        (equal? (cadr (car (p "parameters"))) '("SYSNAME")))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP PROCEDURE IF EXISTS dbo.tsql_builtin_name_proc
+  - name: Built-in name type procedure output uses the invocation scope
+    setup:
+    - sql: DROP PROCEDURE IF EXISTS dbo.tsql_builtin_name_proc
+    - sql: CREATE PROCEDURE dbo.tsql_builtin_name_proc @name SYSNAME OUTPUT AS SET @name=N'output'
+    sql: DECLARE @value SYSNAME=NULL; EXEC dbo.tsql_builtin_name_proc @value OUTPUT; SELECT @value AS value
+    expect:
+      rows: 1
+      data:
+      - value: output
+    cleanup:
+    - sql: DROP PROCEDURE IF EXISTS dbo.tsql_builtin_name_proc
+  - name: Built-in name type empty direct result retains national wire metadata
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME)
+    scm: |-
+      (begin
+        (define field (car (tds_describe "memcp-tests" "SELECT name FROM tsql_builtin_names WHERE 1=0" "" (newsession))))
+        (and (equal? (field "sql_type") "NVARCHAR") (equal? (field "kind") 231) (equal? (field "size") 256)
+          (equal? (mod (field "flags") 2) 0)))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type NULL parameter retains its declared wire capacity
+    scm: |-
+      (begin
+        (define field (car (tds_describe "memcp-tests" "SELECT @name AS value" "@name SYSNAME" (newsession))))
+        (and (equal? (field "sql_type") "NVARCHAR") (equal? (field "kind") 231) (equal? (field "size") 256)))
+    expect:
+      result: true
+  - name: Built-in name type request binding retains the original alias metadata
+    scm: |-
+      (begin
+        (define s (newsession))
+        (define declarations (tds_bind_declarations "memcp-tests" "@name SYSNAME"))
+        (tds_bind_parameters s declarations (list (list "name" "name" "flags" 0 "type" (list "kind" 231 "size" 8) "value" "box")))
+        (and (equal? (s "__tsql_parameter:name") "box")
+          (equal? (s "__tsql_parameter_declarations") (list (list "name" (list "SYSNAME"))))))
+    expect:
+      result: true
+  - name: Built-in name type column metadata preserves name capacity and nullable override
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME NULL)
+    scm: |-
+      (begin
+        (define result (tsql_metadata_result "memcp-tests" "sp_columns" (list (list "table_name" "tsql_builtin_names") (list "column_name" "name") (list "odbcver" 3)) nil))
+        (define row (car (result "rows")))
+        (and (equal? (row "TYPE_NAME") "sysname") (equal? (row "DATA_TYPE") -9)
+          (equal? (row "PRECISION") 128) (equal? (row "CHAR_OCTET_LENGTH") 256) (equal? (row "NULLABLE") 1)))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type column length comes from the existing declaration
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME)
+    sql: SELECT COL_LENGTH(N'tsql_builtin_names',N'name') AS value
+    expect:
+      rows: 1
+      data:
+      - value: 256
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type view retains its declared national source contract
+    setup:
+    - sql: DROP VIEW IF EXISTS tsql_builtin_name_view
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME)
+    - sql: CREATE VIEW tsql_builtin_name_view AS SELECT name FROM tsql_builtin_names
+    scm: |-
+      (begin
+        (define field (car (tds_describe "memcp-tests" "SELECT name FROM tsql_builtin_name_view WHERE 1=0" "" (newsession))))
+        (and (equal? (field "sql_type") "NVARCHAR") (equal? (field "size") 256)))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP VIEW IF EXISTS tsql_builtin_name_view
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type derived source retains national capacity
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME)
+    scm: |-
+      (begin
+        (define field (car (tds_describe "memcp-tests" "SELECT d.name FROM (SELECT name FROM tsql_builtin_names) d WHERE 1=0" "" (newsession))))
+        (and (equal? (field "sql_type") "NVARCHAR") (equal? (field "size") 256)))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type does not silently choose a colliding user alias
+    sql: CREATE TYPE dbo.sysname FROM INT
+    expect:
+      error: true
+  - name: Built-in name type system alias cannot be dropped
+    sql: DROP TYPE [sys].[sysname]
+    expect:
+      error: true
+  - name: Built-in name type dbo qualification does not select the system alias
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    sql: CREATE TABLE tsql_builtin_names(name dbo.sysname)
+    expect:
+      error: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type does not enable an explicit CAST alias target
+    sql: SELECT CAST(N'box' AS SYSNAME) AS value
+    expect:
+      error: true
+  - name: Built-in name type does not enable an explicit CONVERT alias target
+    sql: SELECT CONVERT(SYSNAME,N'box') AS value
+    expect:
+      error: true
+  - name: Built-in name type does not create an alias catalog row
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME)
+    scm: (nil? (tsql_find_type_alias "memcp-tests" "sysname" nil))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type ordinary aliases retain their independent dimensions
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: DROP TYPE IF EXISTS dbo.builtin_control
+    - sql: CREATE TYPE dbo.builtin_control FROM NVARCHAR(7) NOT NULL
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name dbo.builtin_control)
+    scm: |-
+      (begin
+        (define field (car (tds_describe "memcp-tests" "SELECT name FROM tsql_builtin_names WHERE 1=0" "" (newsession))))
+        (and (equal? (field "sql_type") "NVARCHAR") (equal? (field "size") 14)))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: DROP TYPE IF EXISTS dbo.builtin_control
+  - name: Built-in name type rejects a NULL CAST alias target
+    sql: SELECT CAST(NULL AS SYSNAME) AS value
+    expect:
+      error: true
+  - name: Built-in name type rejects a NULL styled CONVERT alias target
+    sql: SELECT CONVERT(SYSNAME,NULL,NULL) AS value
+    expect:
+      error: true
+  - name: Built-in name type ALTER retains its fixed declaration while relaxing NULL
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name SYSNAME)
+    - sql: ALTER TABLE tsql_builtin_names ALTER COLUMN name SYSNAME NULL
+    - sql: INSERT tsql_builtin_names(id,name) VALUES(1,NULL)
+    sql: SELECT name FROM tsql_builtin_names
+    expect:
+      rows: 1
+      data:
+      - name: null
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type qualified RPC declaration retains its namespace
+    scm: |-
+      (begin
+        (define declarations (tds_bind_declarations "memcp-tests" "@name [sys].[SySnAmE]"))
+        (define s (newsession))
+        (tds_bind_parameters s declarations (list (list "name" "name" "flags" 0 "type" (list "kind" 231 "size" 8) "value" "box")))
+        (and (equal? declarations (list (list "name" (list "[sys].[SYSNAME]"))))
+          (equal? (s "__tsql_parameter_declarations") declarations) (equal? (s "__tsql_parameter:name") "box")))
+    expect:
+      result: true
+  - name: Built-in name type qualified procedure parameter retains its namespace
+    setup:
+    - sql: DROP PROCEDURE IF EXISTS dbo.tsql_builtin_name_proc
+    - sql: CREATE PROCEDURE dbo.tsql_builtin_name_proc @name [sys].[sysname]=N'default' AS SELECT @name AS value
+    scm: |-
+      (begin
+        (define p (car (showprocedures "memcp-tests" "tsql_builtin_name_proc")))
+        (equal? (cadr (car (p "parameters"))) '("[sys].[SYSNAME]")))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP PROCEDURE IF EXISTS dbo.tsql_builtin_name_proc
+  - name: Built-in name type qualified column inherits nonnullable policy
+    setup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+    - sql: CREATE TABLE tsql_builtin_names(id INT PRIMARY KEY,name [sys].[sysname])
+    sql: INSERT tsql_builtin_names(id,name) VALUES(1,NULL)
+    expect:
+      error: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS tsql_builtin_names
+  - name: Built-in name type qualified NULL CAST target remains forbidden
+    sql: SELECT CAST(NULL AS [sys].[sysname]) AS value
+    expect:
+      error: true
 
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_decl_rebound

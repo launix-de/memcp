@@ -43,12 +43,12 @@ test_cases:
       - sql: CREATE TABLE gs_count_orders (id INT, customer_id INT) ENGINE=memory
       - scm: |
           (begin
-            (insert (table "memcp-tests" "gs_count_customers") '("id")
+            (insert (table "memcp-tests" false "gs_count_customers" false) '("id")
               (map (produceN 15000) (lambda (i) (list (+ 1 i)))))
-            (insert (table "memcp-tests" "gs_count_orders") '("id" "customer_id")
+            (insert (table "memcp-tests" false "gs_count_orders" false) '("id" "customer_id")
               (map (produceN 150000) (lambda (i) (list (+ 1 i) (+ 1 (mod i 10000))))))
-            (insert (table "memcp-tests" "gs_count_customers") '("id") (list (list -1) (list -1) (list nil)))
-            (insert (table "memcp-tests" "gs_count_orders") '("id" "customer_id")
+            (insert (table "memcp-tests" false "gs_count_customers" false) '("id") (list (list -1) (list -1) (list nil)))
+            (insert (table "memcp-tests" false "gs_count_orders" false) '("id" "customer_id")
               (list (list nil 1) (list 150001 nil) (list 150002 -1)))
             (rebuild true false) true)
     sql: |
@@ -407,18 +407,18 @@ test_cases:
       - scm: |
           (begin
             (define rows (produceN 127 (lambda (i) (list (+ i 1000002) "active"))))
-            (insert (table "memcp-tests" "gs_distinct_entities") '("id" "state") rows '() (lambda () true) false))
+            (insert (table "memcp-tests" false "gs_distinct_entities" false) '("id" "state") rows '() (lambda () true) false))
       - scm: |
           (begin
             (define rows (produceN 254 (lambda (i)
               (list (+ i 3)
                     (+ (floor (/ i 2)) 1000002)
                     (if (equal? (mod i 2) 0) "alpha" "beta")))))
-            (insert (table "memcp-tests" "gs_distinct_attributes") '("attribute_id" "entity_id" "attribute_key") rows '() (lambda () true) false))
+            (insert (table "memcp-tests" false "gs_distinct_attributes" false) '("attribute_id" "entity_id" "attribute_key") rows '() (lambda () true) false))
       - sql: "SELECT COUNT(*) AS n FROM gs_distinct_entities WHERE id > 0"
       - sql: "SELECT COUNT(*) AS n FROM gs_distinct_attributes WHERE entity_id > 0"
-      - scm: '(rebuild (table "memcp-tests" "gs_distinct_entities") true true)'
-      - scm: '(rebuild (table "memcp-tests" "gs_distinct_attributes") true true)'
+      - scm: '(rebuild (table "memcp-tests" false "gs_distinct_entities" false) true true)'
+      - scm: '(rebuild (table "memcp-tests" false "gs_distinct_attributes" false) true true)'
       - scm: '(settings "ShardSize" 60000)'
     sql: |
       SELECT a.attribute_key,
@@ -665,16 +665,16 @@ test_cases:
       - sql: "CREATE TABLE gs_star_facts (id INT, driver_id INT, d1_id INT, d2_id INT, d3_id INT, d4_id INT, amount INT) ENGINE=memory"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "gs_star_driver") '("id" "name")
+            (insert (table "memcp-tests" false "gs_star_driver" false) '("id" "name")
               (map (produceN 8) (lambda (i)
                 (list (+ i 1) (if (equal? i 0) "selected" (concat "other-" i))))))
             (define dimension_rows (map (produceN 100) (lambda (i)
               (list (+ i 1) (concat "dimension-" i)))))
-            (insert (table "memcp-tests" "gs_star_d1") '("id" "label") dimension_rows)
-            (insert (table "memcp-tests" "gs_star_d2") '("id" "label") dimension_rows)
-            (insert (table "memcp-tests" "gs_star_d3") '("id" "label") dimension_rows)
-            (insert (table "memcp-tests" "gs_star_d4") '("id" "label") dimension_rows)
-            (insert (table "memcp-tests" "gs_star_facts")
+            (insert (table "memcp-tests" false "gs_star_d1" false) '("id" "label") dimension_rows)
+            (insert (table "memcp-tests" false "gs_star_d2" false) '("id" "label") dimension_rows)
+            (insert (table "memcp-tests" false "gs_star_d3" false) '("id" "label") dimension_rows)
+            (insert (table "memcp-tests" false "gs_star_d4" false) '("id" "label") dimension_rows)
+            (insert (table "memcp-tests" false "gs_star_facts" false)
               '("id" "driver_id" "d1_id" "d2_id" "d3_id" "d4_id" "amount")
               (map (produceN 100000) (lambda (i)
                 (list (+ i 1) (+ 1 (mod i 8))

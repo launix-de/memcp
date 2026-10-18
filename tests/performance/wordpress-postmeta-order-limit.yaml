@@ -18,7 +18,7 @@ setup:
   - sql: "CREATE TABLE wordpress_perf_posts (ID BIGINT PRIMARY KEY, post_title VARCHAR(64), post_status VARCHAR(20), post_type VARCHAR(20)) ENGINE=sloppy"
   - sql: "CREATE TABLE wordpress_perf_postmeta (meta_id BIGINT PRIMARY KEY, post_id BIGINT, meta_key VARCHAR(255), meta_value VARCHAR(64)) ENGINE=sloppy"
   - scm: |
-      (insert (table "memcp-tests" "wordpress_perf_posts")
+      (insert (table "memcp-tests" false "wordpress_perf_posts" false)
         '("ID" "post_title" "post_status" "post_type")
         (map (produceN 8214) (lambda (i)
           (begin
@@ -26,7 +26,7 @@ setup:
             (list id (concat "Benchmark Post " (string id))
               (if (equal? (mod id 20) 0) "draft" "publish") "post")))))
   - scm: |
-      (insert (table "memcp-tests" "wordpress_perf_postmeta")
+      (insert (table "memcp-tests" false "wordpress_perf_postmeta" false)
         '("meta_id" "post_id" "meta_key" "meta_value")
         (map (produceN 75000) (lambda (i)
           (begin
@@ -225,8 +225,8 @@ test_cases:
     revision_specific_scm: true
     scm: |
       (begin
-        (define posts (table "memcp-tests" "wordpress_perf_posts"))
-        (define postmeta (table "memcp-tests" "wordpress_perf_postmeta"))
+        (define posts (table "memcp-tests" false "wordpress_perf_posts" false))
+        (define postmeta (table "memcp-tests" false "wordpress_perf_postmeta" false))
         (define found
           (scan_join_order (session "__memcp_tx")
             (list postmeta posts)

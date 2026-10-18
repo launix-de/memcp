@@ -14,14 +14,14 @@ setup:
 - sql: CREATE TABLE qa_orders(o_orderkey INT, o_custkey INT, o_comment VARCHAR(64)) ENGINE=memory
 - scm: |-
     (begin
-     (insert (table "memcp-tests" "qa_customer") '("c_custkey") (map (produceN 512) (lambda (i) (list (+ i 1)))))
-     (insert (table "memcp-tests" "qa_orders") '("o_orderkey" "o_custkey" "o_comment")
+     (insert (table "memcp-tests" false "qa_customer" false) '("c_custkey") (map (produceN 512) (lambda (i) (list (+ i 1)))))
+     (insert (table "memcp-tests" false "qa_orders" false) '("o_orderkey" "o_custkey" "o_comment")
       (map (produceN 8192) (lambda (i) (list (if (equal? (mod i 17) 0) nil (+ i 1))
        (if (equal? (mod i 19) 0) nil (+ 1 (mod i 600)))
        (if (equal? (mod i 23) 0) nil (if (equal? (mod i 7) 0) "special pending requests" "ordinary"))))))
-     (insert (table "memcp-tests" "qa_customer") '("c_custkey") (list (list 1) (list nil) (list nil) (list 999)))
-     (rebuild (table "memcp-tests" "qa_customer") true false)
-     (rebuild (table "memcp-tests" "qa_orders") true false) true)
+     (insert (table "memcp-tests" false "qa_customer" false) '("c_custkey") (list (list 1) (list nil) (list nil) (list 999)))
+     (rebuild (table "memcp-tests" false "qa_customer" false) true false)
+     (rebuild (table "memcp-tests" false "qa_orders" false) true false) true)
 test_cases:
 - name: Outer count grouping
   sql: |

@@ -29,7 +29,7 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
-            (insert (table "{database}" "perf_source") '("id" "val" "name") rows)
+            (insert (table "{database}" false "perf_source" false) '("id" "val" "name") rows)
             (rebuild))
     sql: "INSERT IGNORE INTO perf_unique (id, val, name) SELECT id, val, name FROM perf_source"
     warmup: false
@@ -47,10 +47,10 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
-            (insert (table "{database}" "perf_unique") '("id" "val" "name") rows)
+            (insert (table "{database}" false "perf_unique" false) '("id" "val" "name") rows)
             (rebuild)
             (set rows2 (map (produceN {rows}) (lambda (i) (list (+ i {rows}) (+ i {rows}) (concat "new_" i)))))
-            (insert (table "{database}" "perf_source") '("id" "val" "name") rows2)
+            (insert (table "{database}" false "perf_source" false) '("id" "val" "name") rows2)
             (rebuild))
     sql: "INSERT IGNORE INTO perf_unique (id, val, name) SELECT id, val, name FROM perf_source"
     warmup: false
@@ -66,7 +66,7 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
-            (insert (table "{database}" "perf_unique") '("id" "val" "name") rows)
+            (insert (table "{database}" false "perf_unique" false) '("id" "val" "name") rows)
             (rebuild))
     sql: "INSERT IGNORE INTO perf_unique (id, val, name) SELECT id + {rows}, val, CONCAT('dup_', name) FROM perf_unique"
     threshold_ms: 30000
@@ -88,7 +88,7 @@ test_cases:
           (begin
             (set rows (map (produceN {rows})
               (lambda (i) (list i (concat "group-" i)))))
-            (insert (table "{database}" "perf_source_text") '("id" "code") rows)
+            (insert (table "{database}" false "perf_source_text" false) '("id" "code") rows)
             (rebuild))
     sql: "INSERT INTO perf_unique_text (id, code) SELECT id, code FROM perf_source_text"
     warmup: false
@@ -103,7 +103,7 @@ test_cases:
       - sql: "CREATE TABLE perf_concurrent_insert (id INT PRIMARY KEY, val INT) ENGINE=safe"
     scm: |
       (begin
-        (set target (table "{database}" "perf_concurrent_insert"))
+        (set target (table "{database}" false "perf_concurrent_insert" false))
         (parallelN 4 (lambda (worker)
           (reduce (produceN {rows}) (lambda (count i)
             (+ count (insert target '("id" "val")

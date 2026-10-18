@@ -487,8 +487,7 @@ test_cases:
     error: true
     contains: integer conversion overflow
 - name: Native distinct NULL key retains its generic declaration
-  scm: (createkey (table "memcp-tests" "write_null_distinct") "nullable_key" true
-    '("code") nil '("nulls_not_distinct" false))
+  scm: (createkey (table "memcp-tests" false "write_null_distinct" false) "nullable_key" true '("code") nil '("nulls_not_distinct" false))
   expect:
     result: true
 - name: Null safe lookup honors distinct native NULL keys
@@ -745,8 +744,7 @@ test_cases:
   expect:
     affected_rows: 0
 - name: Replace source uniqueness with distinct NULL semantics
-  scm: (createkey (table "memcp-tests" "write_guard_null_source") "unique_write_null"
-    true '("code") nil '("nulls_not_distinct" false))
+  scm: (createkey (table "memcp-tests" false "write_guard_null_source" false) "unique_write_null" true '("code") nil '("nulls_not_distinct" false))
   expect:
     result: true
 - name: A distinct NULL source can publish another NULL key
@@ -877,9 +875,9 @@ test_cases:
   expect:
     affected_rows: 1
 - name: Refresh source statistics without changing the declaration contract
-  scm: (rebuild (table "memcp-tests" "write_guard_trigger_source") true false)
+  scm: (rebuild (table "memcp-tests" false "write_guard_trigger_source" false) true false)
 - name: Refresh target statistics without invalidating inline mutation contracts
-  scm: (rebuild (table "memcp-tests" "write_guard_trigger_target") true false)
+  scm: (rebuild (table "memcp-tests" false "write_guard_trigger_target" false) true false)
 - name: Initial trigger invocation has one declared source match
   sql: INSERT INTO write_guard_trigger_event VALUES(1)
   expect:

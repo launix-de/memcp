@@ -11,8 +11,7 @@ setup:
 - sql: CREATE TABLE sj_guard_parents (id INT PRIMARY KEY, flag TEXT)
 - sql: CREATE TABLE sj_guard_children (id INT PRIMARY KEY, pid INT)
 - sql: INSERT INTO sj_guard_parents VALUES (1,NULL),(2,'ok')
-- scm: (insert (table "memcp-tests" "sj_guard_parents") '("id" "flag") (map (produceN 40) (lambda (i) (list (+ i
-    3) "bad"))))
+- scm: (insert (table "memcp-tests" false "sj_guard_parents" false) '("id" "flag") (map (produceN 40) (lambda (i) (list (+ i 3) "bad"))))
 - sql: INSERT INTO sj_guard_children VALUES (1,1),(2,2),(3,999),(4,NULL),(5,2)
 test_cases:
 - name: DROP TABLE IF EXISTS wp_comments

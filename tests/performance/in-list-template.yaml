@@ -180,7 +180,6 @@ test_cases:
 setup:
 - sql: DROP TABLE IF EXISTS ilt_perf_rows
 - sql: CREATE TABLE ilt_perf_rows (id INT PRIMARY KEY, label TEXT) ENGINE=sloppy
-- scm: (begin (insert (table "memcp-tests" "ilt_perf_rows") '("id" "label") (map (produceN 128) (lambda (i) (list
-    i "item")))) (rebuild (table "memcp-tests" "ilt_perf_rows") true false))
+- scm: (begin (insert (table "memcp-tests" false "ilt_perf_rows" false) '("id" "label") (map (produceN 128) (lambda (i) (list i "item")))) (rebuild (table "memcp-tests" false "ilt_perf_rows" false) true false))
 cleanup:
 - sql: DROP TABLE IF EXISTS ilt_perf_rows

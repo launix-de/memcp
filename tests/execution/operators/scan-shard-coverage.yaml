@@ -745,15 +745,15 @@ test_cases:
       - scm: |
           (begin
             (define rows (produceN 256 (lambda (i) (list (+ i 1) (+ i 1) (mod i 32)))))
-            (insert (table "memcp-tests" "cov_fanout_outer") '("id" "lookup_id" "bucket") rows '() (lambda () true) false))
+            (insert (table "memcp-tests" false "cov_fanout_outer" false) '("id" "lookup_id" "bucket") rows '() (lambda () true) false))
       - scm: |
           (begin
             (define rows (produceN 256 (lambda (i) (list (+ i 1) (* (+ i 1) 3) (mod i 32)))))
-            (insert (table "memcp-tests" "cov_fanout_lookup") '("id" "value" "bucket") rows '() (lambda () true) false))
+            (insert (table "memcp-tests" false "cov_fanout_lookup" false) '("id" "value" "bucket") rows '() (lambda () true) false))
       - sql: "SELECT COUNT(*) AS n FROM cov_fanout_outer WHERE bucket >= 0"
       - sql: "SELECT COUNT(*) AS n FROM cov_fanout_lookup WHERE bucket >= 0"
-      - scm: '(rebuild (table "memcp-tests" "cov_fanout_outer") true true)'
-      - scm: '(rebuild (table "memcp-tests" "cov_fanout_lookup") true true)'
+      - scm: '(rebuild (table "memcp-tests" false "cov_fanout_outer" false) true true)'
+      - scm: '(rebuild (table "memcp-tests" false "cov_fanout_lookup" false) true true)'
     sql: |
       SELECT SUM((
         SELECT l.value

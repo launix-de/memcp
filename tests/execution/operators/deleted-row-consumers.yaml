@@ -21,16 +21,16 @@ setup:
   - sql: "CREATE TABLE dcm_rows (id INT PRIMARY KEY, bucket INT, sort_key INT)"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "dcm_rows") '("id" "bucket" "sort_key")
+        (insert (table "memcp-tests" false "dcm_rows" false) '("id" "bucket" "sort_key")
           (map (produceN 16) (lambda (i) (list (+ i 1) 7 (+ i 1)))))
-        (rebuild (table "memcp-tests" "dcm_rows") true false)
-        (insert (table "memcp-tests" "dcm_rows") '("id" "bucket" "sort_key")
+        (rebuild (table "memcp-tests" false "dcm_rows" false) true false)
+        (insert (table "memcp-tests" false "dcm_rows" false) '("id" "bucket" "sort_key")
           (list (list 17 7 17) (list 18 7 18))))
 test_cases:
   - name: "Delete masks hide main and delta rows from every consumer"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "dcm_rows"))
+        (define tbl (table "memcp-tests" false "dcm_rows" false))
         (define before_delete (scan_recset nil tbl (car (eval (compile_scan_access '("bucket") (scheme "(lambda (bucket) (equal? bucket 7))")))) (cadr (eval (compile_scan_access '("bucket") (scheme "(lambda (bucket) (equal? bucket 7))")))) '("bucket") (lambda (bucket) (equal? bucket 7))))
         (define deleted (scan nil tbl (car (eval (compile_scan_access '("id") (scheme "(lambda (id) (or (equal? id 2) (equal? id 18)))")))) (cadr (eval (compile_scan_access '("id") (scheme "(lambda (id) (or (equal? id 2) (equal? id 18)))")))) '("id")
           (lambda (id) (or (equal? id 2) (equal? id 18)))

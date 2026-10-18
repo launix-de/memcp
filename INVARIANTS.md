@@ -1208,6 +1208,17 @@ stable phase ranges in a dedicated refactoring PR so review can distinguish
 behavior changes from relocation and A/B compile-time measurements remain
 meaningful.
 
+### Native table identifier binding
+
+All frontends and generated Scheme use the single native form
+`(table database database_ignorecase name name_ignorecase)`. The frontend
+supplies comparison policies; native lookup uses the existing exact catalog
+and its published folded-name index. Ambiguous folded bindings fail even when
+an exact spelling exists. Canonical spellings are available through
+`(show handle "name")`; no separate name resolver or catalog traversal is needed.
+The optimizer must not fold a table lookup into a retained handle: DROP/CREATE
+and RENAME can change the namespace binding of a cached expression.
+
 ### SQL compile-time type and collation ownership
 
 - SQL datatypes must NEVER be inherited from the SCM runtime type. The SQL
@@ -1218,6 +1229,17 @@ meaningful.
   `collation` are used for SQL compile-time decisions such as selecting
   collations for storage operators, compiling casts, or reporting type errors;
   they must not survive as runtime type wrappers or checks in storage operators.
+- A frontend may attach a `sql_compile_column` declaration compiler to a column
+  reference. The shared name binder supplies its immutable native point
+  description and expression triple. The callback must preserve the column
+  expression; only its declared type and collation may change. The binder
+  consumes this annotation before logical rewrites and physical lowering,
+  including references produced by wildcard expansion. Alias definitions are
+  frontend-owned data in ordinary system tables, not runtime storage types.
+- Alias-definition memoization belongs to one planner compilation session.
+  Its cache and factory must not enter executable plans, persisted definitions,
+  connection sessions, or later compiler sessions. A new compilation reads the
+  authoritative system table again, including after a prior negative lookup.
 
 ### Native generated-ID blocks
 

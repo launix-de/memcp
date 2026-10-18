@@ -33,10 +33,12 @@ type config struct {
 }
 
 type statement struct {
-	SQL        string      `json:"sql"`
-	Parameters []parameter `json:"parameters"`
-	Prepare    bool        `json:"prepare"`
-	Expect     expectation `json:"expect"`
+	SQL          string      `json:"sql"`
+	Parameters   []parameter `json:"parameters"`
+	Prepare      bool        `json:"prepare"`
+	PrepareOnly  bool        `json:"prepare_only"`
+	Declarations string      `json:"declarations"`
+	Expect       expectation `json:"expect"`
 }
 
 type parameter struct {
@@ -45,11 +47,21 @@ type parameter struct {
 }
 
 type expectation struct {
-	Error    bool             `json:"error"`
-	Contains []string         `json:"contains"`
-	Rows     *int             `json:"rows"`
-	Data     []map[string]any `json:"data"`
-	Columns  []string         `json:"columns"`
+	Error       bool                    `json:"error"`
+	Contains    []string                `json:"contains"`
+	Rows        *int                    `json:"rows"`
+	Data        []map[string]any        `json:"data"`
+	Columns     []string                `json:"columns"`
+	ColumnTypes []columnTypeExpectation `json:"column_types"`
+}
+
+type columnTypeExpectation struct {
+	Name      string `json:"name"`
+	Type      string `json:"type"`
+	Length    *int64 `json:"length"`
+	Nullable  *bool  `json:"nullable"`
+	Precision *int64 `json:"precision"`
+	Scale     *int64 `json:"scale"`
 }
 
 func main() {
@@ -111,6 +123,40 @@ func run() error {
 }
 
 func execute(ctx context.Context, conn *sql.Conn, stmt statement) error {
+	if stmt.PrepareOnly {
+		// Exercise the server's pure Describe boundary, not just the client's
+		// local PrepareContext wrapper. Release the returned handle unexecuted.
+		var handle int64
+		rows, err := conn.QueryContext(ctx, "sp_prepare", sql.Named("handle", sql.Out{Dest: &handle}),
+			sql.Named("params", stmt.Declarations), sql.Named("stmt", stmt.SQL))
+		if err != nil {
+			return checkError(stmt.Expect, err)
+		}
+		for {
+			for rows.Next() {
+				rows.Close()
+				return fmt.Errorf("pure prepare produced a result row")
+			}
+			if err = rows.Err(); err != nil {
+				rows.Close()
+				return checkError(stmt.Expect, err)
+			}
+			if !rows.NextResultSet() {
+				break
+			}
+		}
+		if err = rows.Close(); err != nil {
+			return checkError(stmt.Expect, err)
+		}
+		if stmt.Expect.Error {
+			return fmt.Errorf("pure prepare unexpectedly succeeded")
+		}
+		if handle <= 0 {
+			return fmt.Errorf("pure prepare did not return a handle")
+		}
+		_, err = conn.ExecContext(ctx, "sp_unprepare", sql.Named("handle", handle))
+		return err
+	}
 	args := make([]any, len(stmt.Parameters))
 	for i, p := range stmt.Parameters {
 		v := p.Value
@@ -166,6 +212,40 @@ func execute(ctx context.Context, conn *sql.Conn, stmt statement) error {
 		}
 		if stmt.Expect.Columns != nil && !reflect.DeepEqual(columns, stmt.Expect.Columns) {
 			return fmt.Errorf("expected columns %v, got %v", stmt.Expect.Columns, columns)
+		}
+		if stmt.Expect.ColumnTypes != nil {
+			types, err := rows.ColumnTypes()
+			if err != nil {
+				return err
+			}
+			if len(types) != len(stmt.Expect.ColumnTypes) {
+				return fmt.Errorf("expected %d column contracts, got %d", len(stmt.Expect.ColumnTypes), len(types))
+			}
+			for i, expected := range stmt.Expect.ColumnTypes {
+				actual := types[i]
+				if expected.Name != actual.Name() || expected.Type != actual.DatabaseTypeName() {
+					return fmt.Errorf("column %d expected %s %s, got %s %s", i, expected.Name, expected.Type, actual.Name(), actual.DatabaseTypeName())
+				}
+				if expected.Length != nil {
+					length, ok := actual.Length()
+					if !ok || length != *expected.Length {
+						return fmt.Errorf("column %s length: expected %d, got %d (known=%t)", actual.Name(), *expected.Length, length, ok)
+					}
+				}
+				if expected.Nullable != nil {
+					nullable, ok := actual.Nullable()
+					if !ok || nullable != *expected.Nullable {
+						return fmt.Errorf("column %s nullable: expected %t, got %t (known=%t)", actual.Name(), *expected.Nullable, nullable, ok)
+					}
+				}
+				precision, scale, known := actual.DecimalSize()
+				if expected.Precision != nil && (!known || precision != *expected.Precision) {
+					return fmt.Errorf("column %s precision: expected %d, got %d (known=%t)", actual.Name(), *expected.Precision, precision, known)
+				}
+				if expected.Scale != nil && (!known || scale != *expected.Scale) {
+					return fmt.Errorf("column %s scale: expected %d, got %d (known=%t)", actual.Name(), *expected.Scale, scale, known)
+				}
+			}
 		}
 		for rows.Next() {
 			values := make([]any, len(columns))

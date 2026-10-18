@@ -40,14 +40,14 @@ fixture_setup: &like_acl_fixture
   - scm: |
       (begin
         (define file_count (max 100 (floor (/ {rows} 2))))
-        (insert (table "memcp-tests" "pla_site") '("id" "direct_flag")
+        (insert (table "memcp-tests" false "pla_site" false) '("id" "direct_flag")
           (map (produceN 64) (lambda (i)
             (list i (if (equal? (mod i 16) 0) 1 0)))))
-        (insert (table "memcp-tests" "pla_assignment") '("site_id" "actor_id" "allowed")
+        (insert (table "memcp-tests" false "pla_assignment" false) '("site_id" "actor_id" "allowed")
           (map (produceN 32) (lambda (i) (list (* i 2) 7 1))))
-        (insert (table "memcp-tests" "pla_override") '("site_id" "actor_id" "allowed")
+        (insert (table "memcp-tests" false "pla_override" false) '("site_id" "actor_id" "allowed")
           (map (produceN 22) (lambda (i) (list (* i 3) 7 1))))
-        (insert (table "memcp-tests" "pla_file") '("id" "filename" "search_text")
+        (insert (table "memcp-tests" false "pla_file" false) '("id" "filename" "search_text")
           (map (produceN file_count) (lambda (i)
             (list i
               (if (equal? (mod i 100) 0)
@@ -62,7 +62,7 @@ fixture_setup: &like_acl_fixture
                     (if (equal? (mod i 7) 0) "common-document-text-" "ordinary-text-"))
                   8)
                 (string i))))))
-        (insert (table "memcp-tests" "pla_document")
+        (insert (table "memcp-tests" false "pla_document" false)
           '("id" "site_id" "tenant_id" "file_id" "inventory_no" "sort_key")
           (map (produceN {rows}) (lambda (i)
             (list i (mod i 64) (mod i 32) (mod i file_count)

@@ -42,18 +42,18 @@ setup:
 - sql: INSERT INTO nav_access (ID,user,nav_tenant,nav_site) VALUES (1,7,NULL,NULL),(2,8,1,NULL)
 - scm: |-
     (begin
-     (insert (table "memcp-tests" "nav_file") '("ID" "filename" "search")
+     (insert (table "memcp-tests" false "nav_file" false) '("ID" "filename" "search")
       (map (produceN 40000) (lambda (i)
        (list (+ i 1) (if (equal? (mod i 1000) 0) "1234.pdf" "ordinary.pdf")
         (concat (reduce (produceN 64) (lambda (s unused) (concat s "ordinary document text ")) "")
          (if (equal? (mod i 1000) 0) "1234" "other"))))))
-     (insert (table "memcp-tests" "nav_document")
+     (insert (table "memcp-tests" false "nav_document" false)
       '("ID" "nav_tenant" "nav_site" "nav_department" "nav_year" "nav_check" "file" "inventory")
       (map (produceN 80000) (lambda (i)
        (list (+ i 1) 1 10 100 1000 10000 (+ (mod i 40000) 1)
         (if (equal? (mod i 1000) 0) "1234" "ordinary")))))
      (map '("nav_file" "nav_document" "nav_tenant" "nav_site" "nav_department" "nav_year" "nav_check" "nav_access")
-      (lambda (t) (rebuild (table "memcp-tests" t) true false)))
+      (lambda (t) (rebuild (table "memcp-tests" false t false) true false)))
      true)
 test_cases:
 - name: search_page_limit_1

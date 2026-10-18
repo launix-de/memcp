@@ -26,8 +26,8 @@ setup:
               (+ inserted (insert target cols
                 (map (produceN amount) (lambda (local)
                   (rowfn (+ first local)))))))) 0)))
-        (define products (table "memcp-tests" "so_730_large_products"))
-        (define images (table "memcp-tests" "so_730_large_images"))
+        (define products (table "memcp-tests" false "so_730_large_products" false))
+        (define images (table "memcp-tests" false "so_730_large_images" false))
         (insert_batches products '("id" "unique_id" "project_1" "project_late")
           6276445 10000 (lambda (i)
             (list (+ i 1)
@@ -45,15 +45,15 @@ setup:
     timeout: 1800
   - scm: |
       (scan_order nil
-        (table "memcp-tests" "so_730_large_images")
+        (table "memcp-tests" false "so_730_large_images" false)
         (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5)))) '() (lambda () true) '("id") '(<) 0 0 1
         '() (lambda () true) (lambda (acc _row) acc) true false)
   - sql: "ALTER TABLE so_730_large_products ENGINE=sloppy"
   - sql: "ALTER TABLE so_730_large_images ENGINE=sloppy"
   - scm: |
       (begin
-        (rebuild (table "memcp-tests" "so_730_large_products") true true)
-        (rebuild (table "memcp-tests" "so_730_large_images") true true)
+        (rebuild (table "memcp-tests" false "so_730_large_products" false) true true)
+        (rebuild (table "memcp-tests" false "so_730_large_images" false) true true)
         true)
 
 test_cases:
@@ -84,8 +84,8 @@ test_cases:
     scm: |
       (begin
         (define tx (session "__memcp_tx"))
-        (define products (table "memcp-tests" "so_730_large_products"))
-        (define images (table "memcp-tests" "so_730_large_images"))
+        (define products (table "memcp-tests" false "so_730_large_products" false))
+        (define images (table "memcp-tests" false "so_730_large_images" false))
         (define selected (scan_recset tx products (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))") '()) 3 5)))) '("project_1")
           (lambda (project_1) (equal? project_1 1))))
         (define lookup (recset_key_index tx selected '("unique_id")))
@@ -99,8 +99,8 @@ test_cases:
     scm: |
       (begin
         (define tx (session "__memcp_tx"))
-        (define products (table "memcp-tests" "so_730_large_products"))
-        (define images (table "memcp-tests" "so_730_large_images"))
+        (define products (table "memcp-tests" false "so_730_large_products" false))
+        (define images (table "memcp-tests" false "so_730_large_images" false))
         (define selected (scan_recset tx products (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("project_late") (scheme "(lambda (project_late) (equal? project_late 1))") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("project_late") (scheme "(lambda (project_late) (equal? project_late 1))") '()) 3 5)))) '("project_late")
           (lambda (project_late) (equal? project_late 1))))
         (define projected (recset_project_join tx selected '("unique_id")

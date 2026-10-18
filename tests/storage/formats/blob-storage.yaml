@@ -515,9 +515,9 @@ test_cases:
     scm: |
       (begin
         (set text (reduce (produceN 1024) (lambda (acc i) (concat acc "payload-")) ""))
-        (insert (table "memcp-tests" "blob_ram_scan") '("id" "payload")
+        (insert (table "memcp-tests" false "blob_ram_scan" false) '("id" "payload")
           (map (produceN 256) (lambda (i) (list i (concat i ":" text)))))
-        (rebuild (table "memcp-tests" "blob_ram_scan") true false))
+        (rebuild (table "memcp-tests" false "blob_ram_scan" false) true false))
     expect: {}
   # Per-row projections require reading payloads on every execution. Aggregates
   # would reuse a group keytable and stop exercising blob decoding after warmup.

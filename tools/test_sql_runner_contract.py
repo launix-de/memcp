@@ -82,6 +82,7 @@ from run_sql_tests import (  # noqa: E402
     publish_performance_scale,
     request_shared_supervisor_restart,
     revision_specific_scm,
+    table_abi_fixture_sources,
     resolve_timing_samples,
     resolve_warmup_runs,
     run_test_specs,
@@ -395,33 +396,37 @@ class UpgradeWorkflowContractTest(unittest.TestCase):
         import subprocess
         step = next(step for step in self.jobs["versions"]["steps"]
                     if step.get("id") == "refs")
+        # A commit hook exports its own repository/index paths and Git -c
+        # settings. The disposable fixture must own all of its Git operations.
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith("GIT_")}
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             subprocess.run(["git", "init", "-b", "master"], cwd=repo,
-                           check=True, capture_output=True)
+                           env=environment, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "upgrade@example.invalid"],
-                           cwd=repo, check=True)
+                           cwd=repo, env=environment, check=True)
             subprocess.run(["git", "config", "user.name", "Upgrade Test"], cwd=repo,
-                           check=True)
+                           env=environment, check=True)
             commits = []
             for number in range(3):
                 (repo / "revision").write_text(str(number))
-                subprocess.run(["git", "add", "revision"], cwd=repo, check=True)
+                subprocess.run(["git", "add", "revision"], cwd=repo, env=environment, check=True)
                 subprocess.run(["git", "commit", "-m", "revision " + str(number)],
-                               cwd=repo, check=True, capture_output=True)
+                               cwd=repo, env=environment, check=True, capture_output=True)
                 commits.append(subprocess.run(
                     ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
-                    capture_output=True, text=True).stdout.strip())
+                    env=environment, capture_output=True, text=True).stdout.strip())
             subprocess.run(["git", "tag", "upgrade-release-0.1", commits[0]],
-                           cwd=repo, check=True)
+                           cwd=repo, env=environment, check=True)
             subprocess.run(["git", "tag", "upgrade-release-0.2", commits[1]],
-                           cwd=repo, check=True)
+                           cwd=repo, env=environment, check=True)
             subprocess.run(["git", "tag", "unrelated-release", commits[0]],
-                           cwd=repo, check=True)
+                           cwd=repo, env=environment, check=True)
             subprocess.run(["git", "update-ref", "refs/remotes/origin/master", commits[2]],
-                           cwd=repo, check=True)
+                           cwd=repo, env=environment, check=True)
             output = Path(tmp) / "output"
-            env = dict(os.environ, REQUESTED_REFS=requested, PR_BASE_REF=base,
+            env = dict(environment, REQUESTED_REFS=requested, PR_BASE_REF=base,
                        GITHUB_OUTPUT=str(output))
             result = subprocess.run(["bash", "-c", step["run"]], cwd=repo,
                                     env=env, capture_output=True)
@@ -429,6 +434,38 @@ class UpgradeWorkflowContractTest(unittest.TestCase):
             if output.exists():
                 refs = json.loads(output.read_text().removeprefix("predecessors="))
             return result.returncode, refs, commits
+
+    def test_fixture_git_does_not_inherit_hook_repository(self):
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith("GIT_")}
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory)
+
+            def git(*arguments):
+                return subprocess.check_output(["git", "-C", str(caller), *arguments],
+                                               env=environment, text=True).strip()
+
+            git("init", "-b", "master")
+            git("config", "core.hooksPath", "/dev/null")
+            git("config", "user.name", "Caller")
+            git("config", "user.email", "caller@example.invalid")
+            (caller / "sentinel").write_text("caller-owned contents")
+            git("add", "sentinel")
+            git("commit", "-m", "caller-owned commit")
+            before = (git("rev-parse", "HEAD"), git("tag"),
+                      (caller / ".git/config").read_bytes(), (caller / ".git/index").read_bytes())
+            with mock.patch.dict(os.environ, {
+                    "GIT_DIR": str(caller / ".git"), "GIT_COMMON_DIR": str(caller / ".git"),
+                    "GIT_WORK_TREE": str(caller), "GIT_INDEX_FILE": str(caller / ".git/index"),
+                    "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name",
+                    "GIT_CONFIG_VALUE_0": "Inherited hook identity"}):
+                status, refs, _commits = self.select_refs("[]")
+            self.assertEqual(status, 0)
+            self.assertEqual(len(refs), 3)
+            after = (git("rev-parse", "HEAD"), git("tag"),
+                     (caller / ".git/config").read_bytes(), (caller / ".git/index").read_bytes())
+            self.assertEqual(after, before, "fixture Git commands changed their caller's repository")
+            self.assertEqual((caller / "sentinel").read_text(), "caller-owned contents")
 
     def test_previous_master_and_every_release_pin_are_selected(self):
         status, refs, commits = self.select_refs("[]")
@@ -1634,6 +1671,49 @@ class FailFastParallelContractTest(unittest.TestCase):
                     revision_specific_scm(case, "tests/performance/physical.yaml"),
                     "(old_scan_interface)",
                 )
+
+    def test_baseline_table_abi_uses_only_equivalent_original_source(self) -> None:
+        old = '(insert (table "{database}" "fixture") \'("id") (list (list {rows})))'
+        new = old.replace('"{database}" "fixture"', '"{database}" false "fixture" false')
+        old_plan = "(compile_scan_plan 'scan nil (list 'table (schema db) (concat name suffix)) nil)"
+        new_plan = old_plan.replace("(schema db) (concat name suffix)",
+                                    "(schema db) false (concat name suffix) false")
+        spec = {"setup": [{"scm": new}], "cleanup": [{"scm": new}], "test_cases": [
+            {"name": "probe", "scm": new_plan, "threshold_ms": 1,
+             "setup": [{"scm": new}], "expect": {"rows": 1}}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tests/performance/abi.yaml"
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({"setup": [{"scm": old}],
+                                        "test_cases": [{"scm": old_plan}]}))
+            original = json.dumps(spec, sort_keys=True)
+            fingerprint = performance_case_fingerprint(spec["test_cases"][0], spec["setup"])
+            with mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                    mock.patch.dict(os.environ, {"MEMCP_TEST_WORKTREE": tmp, "PERF_FIXTURE_ROLE": "A"}):
+                mapping = table_abi_fixture_sources(str(path), spec)
+                self.assertEqual(mapping, {new: old, new_plan: old_plan})
+                runner = SQLTestRunner("http://localhost:1")
+                runner._table_abi_sources = mapping
+                response = SimpleNamespace(status_code=200, text="1")
+                with mock.patch("run_sql_tests.requests.post", return_value=response) as post:
+                    self.assertTrue(runner.run_setup(spec["setup"], "memcp-tests"))
+                self.assertEqual(post.call_args.kwargs["data"], old.encode())
+                # Folded lookup, data changes, string contents and unmatched
+                # fixture source cannot borrow an older workload.
+                for changed in (new.replace('false', 'true', 1), new.replace('{rows}', '1'),
+                                json.dumps(new), '(unrelated_call)'):
+                    self.assertEqual(table_abi_fixture_sources(str(path), {"scm": changed}), {})
+            self.assertEqual(json.dumps(spec, sort_keys=True), original)
+            self.assertEqual(performance_case_fingerprint(spec["test_cases"][0], spec["setup"]), fingerprint)
+
+    def test_table_abi_never_adapts_candidate_or_normal_execution(self) -> None:
+        for mode, role in (("record", "B"), ("", "A"), ("", "B")):
+            with self.subTest(mode=mode, role=role), \
+                    mock.patch("run_sql_tests.PERF_AB_MODE", mode), \
+                    mock.patch.dict(os.environ, {"PERF_FIXTURE_ROLE": role}), \
+                    mock.patch("run_sql_tests.yaml.safe_load") as load:
+                self.assertEqual(table_abi_fixture_sources("missing.yaml", {}), {})
+                load.assert_not_called()
 
     def test_normal_run_keeps_current_revision_physical_scm(self) -> None:
         case = {

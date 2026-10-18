@@ -8,25 +8,25 @@ setup:
   - sql: "DROP TABLE IF EXISTS qfi_access"
   - sql: "CREATE TABLE qfi_access (viewer INT, domain_id INT) ENGINE=sloppy"
   - sql: "INSERT INTO qfi_access VALUES (999,NULL),(998,998),(997,999)"
-  - scm: '(rebuild (table "memcp-tests" "qfi_access") true false)'
+  - scm: '(rebuild (table "memcp-tests" false "qfi_access" false) true false)'
   - sql: "DROP TABLE IF EXISTS qfi_single"
   - sql: "CREATE TABLE qfi_single (id INT PRIMARY KEY) ENGINE=sloppy"
   - sql: "INSERT INTO qfi_single VALUES (999)"
-  - scm: '(rebuild (table "memcp-tests" "qfi_single") true false)'
+  - scm: '(rebuild (table "memcp-tests" false "qfi_single" false) true false)'
   - sql: "DROP TABLE IF EXISTS qfi_document"
   - sql: "CREATE TABLE qfi_document (id INT PRIMARY KEY, label TEXT) ENGINE=sloppy"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "qfi_document") '("id" "label")
+        (insert (table "memcp-tests" false "qfi_document" false) '("id" "label")
           (map (produceN 1000) (lambda (i) (list i (if (< i 10) "needle" "ordinary")))))
-        (rebuild (table "memcp-tests" "qfi_document") true false))
+        (rebuild (table "memcp-tests" false "qfi_document" false) true false))
   - sql: "DROP TABLE IF EXISTS qfi_frequency"
   - sql: "CREATE TABLE qfi_frequency (owner_id INT) ENGINE=sloppy"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "qfi_frequency") '("owner_id")
+        (insert (table "memcp-tests" false "qfi_frequency" false) '("owner_id")
           (map (produceN 6000) (lambda (i) (list (if (< i 4500) 1 2)))))
-        (rebuild (table "memcp-tests" "qfi_frequency") true false))
+        (rebuild (table "memcp-tests" false "qfi_frequency" false) true false))
 test_cases:
   - name: "Rejected parameter-domain specialization leaves the ordinary plan reusable"
     scm: |
@@ -334,7 +334,7 @@ test_cases:
         (define variants (count (entry "variants")))
         (define pred (list 'lambda (list 'x) (list 'strlike 'x "%needle%" "utf8mb4_general_ci")))
         (define access (eval (compile_scan_access '("label") pred)))
-        (scan_recset nil (table "memcp-tests" "qfi_document") (car access)
+        (scan_recset nil (table "memcp-tests" false "qfi_document" false) (car access)
           (map (cadr access) (lambda (v) (eval v))) '("label") (eval pred))
         (sql_execute_formula sess nil
           (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
@@ -365,7 +365,7 @@ test_cases:
            literal representation. Feedback identifies the bound predicate. */
         (define pred (list 'lambda (list 'x) (list '< 'x (sess "v1"))))
         (define access (eval (compile_scan_access '("id") pred)))
-        (scan_recset nil (table "memcp-tests" "qfi_document") (car access)
+        (scan_recset nil (table "memcp-tests" false "qfi_document" false) (car access)
           (map (cadr access) (lambda (v) (eval v))) '("id") (eval pred))
         (sql_execute_formula sess nil
           (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
@@ -423,9 +423,9 @@ test_cases:
         (define first (run))
         (define entry (car (cache (car (cache)))))
         (define before (count (entry "variants")))
-        (insert (table "memcp-tests" "qfi_single") '("id")
+        (insert (table "memcp-tests" false "qfi_single" false) '("id")
           (map (produceN 256) (lambda (i) (list i))))
-        (rebuild (table "memcp-tests" "qfi_single") true false)
+        (rebuild (table "memcp-tests" false "qfi_single" false) true false)
         (define second (run))
         (if (and (equal? first 1) (equal? second 2)
           (> (count (entry "variants")) before)) true
@@ -447,9 +447,9 @@ test_cases:
         (define other (guard sess nil nil nil))
         (sess "owner" 1)
         (define restored (guard sess nil nil nil))
-        (insert (table "memcp-tests" "qfi_frequency") '("owner_id")
+        (insert (table "memcp-tests" false "qfi_frequency" false) '("owner_id")
           (map (produceN 6000) (lambda (i) (list 3))))
-        (rebuild (table "memcp-tests" "qfi_frequency") true false)
+        (rebuild (table "memcp-tests" false "qfi_frequency" false) true false)
         (define changed (guard sess nil nil nil))
         (if (and original (not other) restored (not changed)) true
           (error (concat "frequency guard ignored binding or rebuild: "
@@ -470,10 +470,10 @@ test_cases:
         (define guard (sql_queryplan_compile_formula nil
           (sql_queryplan_guard_from_session planning)))
         (define original (guard sess nil nil nil))
-        (createcolumn (table "memcp-tests" "qfi_cardinality")
+        (createcolumn (table "memcp-tests" false "qfi_cardinality" false)
           "extra_aggregate" "INT" '() '("temp" true) '("id") (lambda (id) (+ id 1)))
         (define published (guard sess nil nil nil))
-        (insert (table "memcp-tests" "qfi_cardinality") '("id") (list (list 4)))
+        (insert (table "memcp-tests" false "qfi_cardinality" false) '("id") (list (list 4)))
         (define changed (guard sess nil nil nil))
         (if (and original published (not changed)) true
           (error (concat "cardinality guard followed unrelated schema or missed rows: "

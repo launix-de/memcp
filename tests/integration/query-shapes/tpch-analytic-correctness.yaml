@@ -86,7 +86,7 @@ setup:
         (7,4,3,1,2,100,0.03,0.02,'N','O','1995-12-10','1995-12-05','1995-12-15','DELIVER IN PERSON','AIR',''),
         (7,4,3,2,3,100,0.03,0.02,'N','O','1995-12-11','1995-12-05','1995-12-15','DELIVER IN PERSON','AIR',''),
         (7,3,1,3,1,50,0.05,0.02,'N','O','1995-12-10','1995-12-15','1995-12-15','DELIVER IN PERSON','AIR','')
-  - scm: (partitiontable (table "memcp-tests" "tc_lineitem") (list (list "l_returnflag" (list "N" "R"))))
+  - scm: (partitiontable (table "memcp-tests" false "tc_lineitem" false) (list (list "l_returnflag" (list "N" "R"))))
 test_cases:
   - name: 'TPC-H Q01: Partitioned string groups with sums, averages and ordering'
     sql: |-

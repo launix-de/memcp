@@ -23,7 +23,7 @@ test_cases:
       - sql: "CREATE TABLE eager_idx (id INT, val INT, name VARCHAR(50))"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "eager_idx") '("id" "val" "name")
+            (insert (table "memcp-tests" false "eager_idx" false) '("id" "val" "name")
               (map (produceN 100) (lambda (i)
                 (list i (* i 3) (concat "row" i)))))
             (rebuild))
@@ -135,9 +135,9 @@ test_cases:
       - sql: "CREATE TABLE repartition_favorites (id INT, bucket INT) ENGINE=sloppy"
       - scm: |
           (begin
-            (insert (table "memcp-tests" "repartition_favorites") '("id" "bucket")
+            (insert (table "memcp-tests" false "repartition_favorites" false) '("id" "bucket")
               (map (produceN 50000) (lambda (i) (list i (mod i 2)))))
-            (rebuild (table "memcp-tests" "repartition_favorites") true false))
+            (rebuild (table "memcp-tests" false "repartition_favorites" false) true false))
       - sql: "SELECT id FROM repartition_favorites WHERE id = 49999"
       - sql: "SELECT id FROM repartition_favorites WHERE id = 49999"
     sql: "SELECT id FROM repartition_favorites WHERE id = 49999"
@@ -151,7 +151,7 @@ test_cases:
     expect: {rows: 1, data: [{id: 49999}]}
 
   - name: "Repartition with a warmed favorite index"
-    scm: '(partitiontable (table "memcp-tests" "repartition_favorites") (list (list "bucket" (list 0))))'
+    scm: '(partitiontable (table "memcp-tests" false "repartition_favorites" false) (list (list "bucket" (list 0))))'
 
   - name: "First point probe retains favorite after repartition"
     warmup: 0

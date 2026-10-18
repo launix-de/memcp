@@ -10,7 +10,7 @@ setup:
   - sql: "CREATE TABLE afs_check (id INT PRIMARY KEY, label VARCHAR(64)) ENGINE=sloppy"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "afs_check") '("id" "label")
+        (insert (table "memcp-tests" false "afs_check" false) '("id" "label")
           (map (produceN 1000) (lambda (i)
             (list i (if (< i 900) "common" nil)))))
         (rebuild))
@@ -21,7 +21,7 @@ test_cases:
   - name: "Unified estimator reads measured feedback without evaluating the predicate again"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "afs_check"))
+        (define tbl (table "memcp-tests" false "afs_check" false))
         (define callback (list 'lambda (list 'x) (list '>= 'x 200)))
         (define access (eval (compile_scan_access '("id") callback)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
@@ -41,7 +41,7 @@ test_cases:
   - name: "Unified estimator preserves unknown bindings and permits bounded fallback explicitly"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "afs_check"))
+        (define tbl (table "memcp-tests" false "afs_check" false))
         (define callback (list 'lambda (list 'x) (list '>= 'x 201)))
         (define access (eval (compile_scan_access '("id") callback)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
@@ -75,7 +75,7 @@ test_cases:
   - name: "Bound scalar literals share feedback with their unquoted scan predicate"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "afs_check"))
+        (define tbl (table "memcp-tests" false "afs_check" false))
         (define callback (list 'lambda (list 'x) (list '>= 'x (list 'quote 200))))
         (define access (eval (compile_scan_access '("id") callback)))
         (define estimate (scan_selectivity_estimate nil tbl (car access)
@@ -102,7 +102,7 @@ test_cases:
   - name: "A different-word length prior must not suppress permitted sampling"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "afs_check"))
+        (define tbl (table "memcp-tests" false "afs_check" false))
         (define rare (list 'lambda (list 'x) (list 'strlike 'x "%rarexx%" "utf8mb4_general_ci")))
         (define rare_access (eval (compile_scan_access '("label") rare)))
         (scan_recset nil tbl (nth rare_access 0)
@@ -123,7 +123,7 @@ test_cases:
   - name: "Complete filter feedback replaces a range constant and participates in plan guards"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "afs_check"))
+        (define tbl (table "memcp-tests" false "afs_check" false))
         (define src (list "a" "memcp-tests" "afs_check" false nil))
         (define expr (list '< (list 'get_column "a" false "id" false) 100))
         (define callback (list 'lambda (list 'x) (list '< 'x 100)))
@@ -145,7 +145,7 @@ test_cases:
   - name: "LIKE length buckets interpolate unknown patterns without crossing wildcard topology"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "afs_check"))
+        (define tbl (table "memcp-tests" false "afs_check" false))
         (define access_for (lambda (pattern)
           (eval (compile_scan_access '("label") (list 'lambda (list 'x)
             (list 'strlike 'x pattern "utf8mb4_general_ci"))))))
@@ -170,7 +170,7 @@ test_cases:
   - name: "Observed zero LIKE matches override the nonzero text prior"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "afs_check"))
+        (define tbl (table "memcp-tests" false "afs_check" false))
         (define callback (list 'lambda (list 'x) (list 'strlike 'x "%absent%" "utf8mb4_general_ci")))
         (define access (eval (compile_scan_access '("label") callback)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
@@ -195,7 +195,7 @@ test_cases:
   - name: "Complete indexed RecSet learns a table rate and refreshes plan guards"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" "afs_check"))
+        (define tbl (table "memcp-tests" false "afs_check" false))
         (define callback (list 'lambda (list 'x) (list 'strlike 'x "%common%" "utf8mb4_general_ci")))
         (define access (eval (compile_scan_access '("label") callback)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
@@ -305,7 +305,7 @@ test_cases:
         (define before (eval guard))
         (define access (eval (compile_scan_access '("id") callback)))
         (define values (map (nth access 1) (lambda (value) (eval value))))
-        (define matches (scan nil (table "memcp-tests" "afs_check")
+        (define matches (scan nil (table "memcp-tests" false "afs_check" false)
           (nth access 0) values '("id") (eval callback) '() scan_count 0 + false))
         (if (and before (equal? matches 321) (not (eval guard)) (empty_list? (nth variant 2)))
           true (error (concat "diagnostic feedback guard failed: " (serialize (list before matches (eval guard) (nth variant 2) guard))))))

@@ -18,10 +18,10 @@ setup:
   - sql: CREATE TABLE partition_hint_oversized (k0 INT, k1 INT, k2 INT) ENGINE=memory
   - scm: |
       (begin
-        (insert (table "memcp-tests" "partition_hint_source") '("id" "event_time" "a" "b" "c")
+        (insert (table "memcp-tests" false "partition_hint_source" false) '("id" "event_time" "a" "b" "c")
           (map (produceN 60000) (lambda (i)
             (list i (+ 1700000000 i) (mod i 40) (mod (floor (/ i 40)) 40) (floor (/ i 1600))))))
-        (rebuild (table "memcp-tests" "partition_hint_source")) true)
+        (rebuild (table "memcp-tests" false "partition_hint_source" false)) true)
 
 test_cases:
   - name: Correlated ID and time group initialization

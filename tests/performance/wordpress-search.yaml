@@ -20,7 +20,7 @@ setup:
     post_excerpt TEXT, post_content TEXT, post_status VARCHAR(20), post_type VARCHAR(20),
     post_password VARCHAR(20), post_date BIGINT) ENGINE=sloppy
 - scm: |-
-    (insert (table "memcp-tests" "wordpress_search_posts")
+    (insert (table "memcp-tests" false "wordpress_search_posts" false)
       '("ID" "post_title" "post_excerpt" "post_content" "post_status" "post_type" "post_password" "post_date")
       (map (produceN 22000) (lambda (i)
         (begin
