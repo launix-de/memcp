@@ -1025,6 +1025,198 @@ test_cases:
     )\n      (equal? ((nth fields 1) \"sql_type\") \"NVARCHAR\")\n      (equal? ((nth fields 2) \"sql_type\") \"\
     NVARCHAR\")\n      (equal? ((nth fields 3) \"sql_type\") \"INT\")\n      (nil? ((nth fields 0) \"source\")))\
     \ true (error \"concatenation lost character metadata\")))\n"
+- name: CTE binds a literal source
+  sql: WITH local_rows(n) AS (SELECT 7) SELECT n FROM local_rows
+  expect:
+    rows: 1
+    data:
+    - n: 7
+- name: CTE accepts a preceding statement terminator
+  sql: ;WITH local_rows AS (SELECT 7 AS n) SELECT n FROM local_rows
+  expect:
+    rows: 1
+    data:
+    - n: 7
+- name: CTE reads a native source
+  sql: WITH local_rows AS (SELECT id,val FROM dbo.tsql_data WHERE id<3) SELECT id,val FROM local_rows ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      val: 10
+    - id: 2
+      val: 30
+- name: CTE applies an explicit output column list
+  sql: WITH local_rows(code,amount) AS (SELECT id,val FROM dbo.tsql_data WHERE id=2) SELECT code,amount FROM local_rows
+  expect:
+    rows: 1
+    data:
+    - code: 2
+      amount: 30
+- name: CTE resolves preceding definitions
+  sql: WITH first_rows(n) AS (SELECT 3), second_rows AS (SELECT n+4 AS result FROM first_rows) SELECT result FROM
+    second_rows
+  expect:
+    rows: 1
+    data:
+    - result: 7
+- name: CTE supports independent definitions and joins
+  sql: WITH left_rows(n) AS (SELECT 2), right_rows(m) AS (SELECT 3) SELECT l.n+r.m AS result FROM left_rows AS l
+    CROSS JOIN right_rows AS r
+  expect:
+    rows: 1
+    data:
+    - result: 5
+- name: CTE supports two aliases of the same source
+  sql: WITH local_rows AS (SELECT id,val FROM dbo.tsql_data WHERE id<3) SELECT a.id,b.val FROM local_rows a INNER
+    JOIN local_rows b ON a.id=b.id ORDER BY a.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      val: 10
+    - id: 2
+      val: 30
+- name: CTE preserves a grouped producer
+  sql: WITH totals AS (SELECT name,SUM(val) AS amount FROM dbo.tsql_data GROUP BY name) SELECT name,amount FROM
+    totals WHERE amount=30 ORDER BY name
+  expect:
+    rows: 2
+    data:
+    - name: Alice
+      amount: 30
+    - name: Bob
+      amount: 30
+- name: CTE preserves an inner ordered TOP boundary
+  sql: WITH local_rows AS (SELECT TOP(2) id,val FROM dbo.tsql_data ORDER BY id DESC) SELECT id FROM local_rows ORDER
+    BY id
+  expect:
+    rows: 2
+    data:
+    - id: 3
+    - id: 4
+- name: CTE preserves a window output filter
+  sql: WITH local_rows AS (SELECT id,ROW_NUMBER() OVER(ORDER BY id) AS rn FROM dbo.tsql_data) SELECT id FROM local_rows
+    WHERE rn=2
+  expect:
+    rows: 1
+    data:
+    - id: 2
+- name: CTE preserves UNION ALL multiplicity
+  sql: WITH local_rows(n) AS (SELECT 2 UNION ALL SELECT 2) SELECT n FROM local_rows
+  expect:
+    rows: 2
+    data:
+    - n: 2
+    - n: 2
+- name: CTE preserves UNION DISTINCT
+  sql: WITH local_rows(n) AS (SELECT 2 UNION SELECT 2) SELECT n FROM local_rows
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: CTE binds names inside an EXISTS subquery
+  sql: WITH local_rows(n) AS (SELECT 1) SELECT id FROM dbo.tsql_data AS d WHERE EXISTS(SELECT 1 FROM local_rows
+    AS r WHERE r.n=d.id)
+  expect:
+    rows: 1
+    data:
+    - id: 1
+- name: CTE binds names inside an ordinary derived query
+  sql: WITH local_rows(n) AS (SELECT 8) SELECT q.n FROM (SELECT n FROM local_rows) AS q
+  expect:
+    rows: 1
+    data:
+    - n: 8
+- name: CTE shadows an unqualified native relation
+  sql: WITH tsql_data(id) AS (SELECT 99) SELECT id FROM tsql_data
+  expect:
+    rows: 1
+    data:
+    - id: 99
+- name: CTE leaves qualified native names outside the local namespace
+  sql: WITH tsql_data(id) AS (SELECT 99) SELECT id FROM dbo.tsql_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+- name: CTE matches names case insensitively
+  sql: WITH [Local Rows]([Value]) AS (SELECT 9) SELECT [value] FROM [local rows]
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: CTE does not alter string literal data
+  sql: WITH local_rows(n) AS (SELECT 1) SELECT N'local_rows WITH AS' AS text,n FROM local_rows
+  expect:
+    rows: 1
+    data:
+    - text: local_rows WITH AS
+      n: 1
+- name: CTE does not survive its statement
+  sql: SELECT * FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects duplicate declaration names
+  sql: WITH local_rows(n) AS (SELECT 1), LOCAL_ROWS(m) AS (SELECT 2) SELECT n FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects too few output aliases
+  sql: WITH local_rows(n) AS (SELECT 1 AS a,2 AS b) SELECT * FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects too many output aliases
+  sql: WITH local_rows(n,m) AS (SELECT 1 AS a) SELECT * FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects duplicate output aliases
+  sql: WITH local_rows(n,N) AS (SELECT 1 AS a,2 AS b) SELECT * FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects duplicate inferred names
+  sql: WITH local_rows AS (SELECT id,id FROM dbo.tsql_data) SELECT * FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects a forward reference
+  sql: WITH first_rows AS (SELECT n FROM second_rows),second_rows(n) AS (SELECT 1) SELECT n FROM first_rows
+  expect:
+    error: true
+- name: CTE rejects recursion explicitly until supported
+  sql: WITH local_rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM local_rows WHERE n<3) SELECT n FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects a self reference even when a native relation exists
+  sql: WITH tsql_data AS (SELECT id FROM tsql_data) SELECT id FROM tsql_data
+  expect:
+    error: true
+- name: CTE rejects an unbounded producer ORDER BY
+  sql: WITH local_rows AS (SELECT id FROM dbo.tsql_data ORDER BY id) SELECT id FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects OPTION in a producer
+  sql: WITH local_rows AS (SELECT id FROM dbo.tsql_data OPTION(RECOMPILE)) SELECT id FROM local_rows
+  expect:
+    error: true
+- name: CTE accepts a consumer query hint
+  sql: WITH local_rows AS (SELECT id FROM dbo.tsql_data WHERE id=2) SELECT id FROM local_rows OPTION(RECOMPILE)
+  expect:
+    rows: 1
+    data:
+    - id: 2
+- name: CTE declares a view through the existing view owner
+  sql: CREATE VIEW dbo.tsql_cte_view AS WITH local_rows AS (SELECT id,val FROM dbo.tsql_data WHERE id<3) SELECT
+    id,val FROM local_rows
+- name: CTE reads the ordinary persisted view definition
+  sql: SELECT id,val FROM dbo.tsql_cte_view ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      val: 10
+    - id: 2
+      val: 30
+- name: CTE drops its ordinary view fixture
+  sql: DROP VIEW dbo.tsql_cte_view
 - sql: DROP VIEW IF EXISTS dbo.tsql_view
   name: 'Fixture cleanup 001: DROP VIEW IF EXISTS dbo.tsql_view'
 - sql: DROP TABLE IF EXISTS dbo.tsql_copy
