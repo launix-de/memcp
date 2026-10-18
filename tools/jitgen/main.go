@@ -734,6 +734,9 @@ func nativeCallBoundaryReason(fn *ssa.Function) string {
 				case *ssa.MakeClosure:
 					return "escaping or recursive Go closure"
 				case *ssa.Call:
+					if callee := value.Call.StaticCallee(); callee != nil && goCallSignatureNeedsArrayBoundary(callee.Signature) {
+						return "stack-assigned array in Go call"
+					}
 					for _, arg := range value.Call.Args {
 						if _, ok := arg.(*ssa.Function); ok {
 							return "static Go callback value"
@@ -1790,6 +1793,50 @@ func goCallWordCount(t types.Type) int {
 	}
 }
 
+// goCallHasStackArray checks the Go ABIInternal register-assignment boundary,
+// independently of the packed memory widths used by goCallWordCount. Arrays
+// with more than one element (including fields of structs) are stack-assigned;
+// the current generic call emitter only maps register results and flat words.
+func goCallHasStackArray(t types.Type) bool {
+	if targetSizes.Sizeof(t) == 0 {
+		return false
+	}
+	switch value := t.Underlying().(type) {
+	case *types.Array:
+		return value.Len() > 1 || (value.Len() == 1 && goCallHasStackArray(value.Elem()))
+	case *types.Struct:
+		for i := 0; i < value.NumFields(); i++ {
+			if goCallHasStackArray(value.Field(i).Type()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func goCallSignatureNeedsArrayBoundary(signature *types.Signature) bool {
+	if receiver := signature.Recv(); receiver != nil && goCallHasStackArray(receiver.Type()) {
+		return true
+	}
+	for i := 0; i < signature.Params().Len(); i++ {
+		if goCallHasStackArray(signature.Params().At(i).Type()) {
+			return true
+		}
+	}
+	for i := 0; i < signature.Results().Len(); i++ {
+		resultType := signature.Results().At(i).Type()
+		// A single large aggregate already uses the existing heap-pointer
+		// wrapper; only direct register-shaped results need rejection here.
+		if signature.Results().Len() == 1 && goCallWordCount(resultType) == 0 {
+			continue
+		}
+		if goCallHasStackArray(resultType) {
+			return true
+		}
+	}
+	return false
+}
+
 func goCallPointerMask(t types.Type) uint8 {
 	switch u := t.Underlying().(type) {
 	case *types.Basic:
@@ -1964,6 +2011,9 @@ func isForwardingMergeClosure(fn *ssa.Function) bool {
 func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args []ssa.Value) bool {
 	funcExpr, ok := g.staticFuncExpr(callee)
 	if !ok {
+		return false
+	}
+	if goCallSignatureNeedsArrayBoundary(callee.Signature) {
 		return false
 	}
 	sig := callee.Signature
@@ -3149,7 +3199,11 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 
 	condVar := g.allocDesc()
 	g.emit("%s := %s", condVar, cond.goVar)
-	g.emit("ctx.EnsureDesc(&%s)", condVar)
+	if cond.marker == "_flags" {
+		g.emit("ctx.SyncDesc(&%s)", condVar)
+	} else {
+		g.emit("ctx.EnsureDesc(&%s)", condVar)
+	}
 	if cond.marker == "_flags" {
 		g.emit("if %s.Loc != LocImm && %s.Loc != LocFlags {", condVar, condVar)
 		g.emit("\tpanic(\"jit: fused If condition is neither LocImm nor LocFlags\")")
@@ -4129,7 +4183,13 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 			if ret, ok := instr.(*ssa.Return); ok && !isMultiBlock {
 				// Single-block: capture return value directly, no code emitted
 				if len(ret.Results) == 1 {
-					singleBlockResult = g.resolveValue(ret.Results[0])
+					if value, ok := g.vals[ret.Results[0].Name()]; ok && value.marker == "_flags" {
+						// A returned comparison remains owned by its descriptor. The
+						// caller's branch can consume it without boxing/materializing.
+						singleBlockResult = value
+					} else {
+						singleBlockResult = g.resolveValue(ret.Results[0])
+					}
 				} else if len(ret.Results) > 1 {
 					values := make([]genVal, len(ret.Results))
 					for i, returned := range ret.Results {
@@ -8789,6 +8849,32 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\t%s.Loc = LocNone", xVal.goVar)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		} else if v.Op == token.XOR {
+			// Copy the left operand so aliased and multiply-used inputs retain
+			// their ownership. All backends already implement register XOR.
+			yVal := g.resolveValue(v.Y)
+			g.emit("ctx.EnsureDescsTogether(&%s, &%s)", xVal.goVar, yVal.goVar)
+			dv := g.allocDesc()
+			g.emit("var %s JITValueDesc", dv)
+			g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
+			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() ^ %s.Imm.Int())}", dv, xVal.goVar, yVal.goVar)
+			g.emit("} else {")
+			g.emit("\txorResult := ctx.AllocRegExcept(%s.Reg, %s.Reg)", xVal.goVar, yVal.goVar)
+			g.emit("\tctx.EmitMovToReg(xorResult, %s)", xVal.goVar)
+			g.emit("\tif %s.Loc == LocReg {", yVal.goVar)
+			g.emit("\t\tctx.EmitXorInt64(xorResult, %s.Reg)", yVal.goVar)
+			g.emit("\t} else {")
+			g.emit("\t\txorOther := ctx.AllocRegExcept(xorResult)")
+			g.emit("\t\tctx.EmitMovToReg(xorOther, %s)", yVal.goVar)
+			g.emit("\t\tctx.EmitXorInt64(xorResult, xorOther)")
+			g.emit("\t\tctx.FreeReg(xorOther)")
+			g.emit("\t}")
+			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: xorResult}", dv)
+			g.emit("}")
+			if narrowUnsigned {
+				g.emitNormalizeUnsignedNarrow(dv, resBits)
+			}
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		} else if v.Op == token.OR {
 			// Bitwise OR
 			dv := g.allocDesc()
@@ -8989,7 +9075,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		// Phi-backed conditions may be LocStack at BB entry.
 		condVar := g.allocDesc()
 		g.emit("%s := %s", condVar, cond.goVar)
-		g.emit("ctx.EnsureDesc(&%s)", condVar)
+		if cond.marker == "_flags" {
+			g.emit("ctx.SyncDesc(&%s)", condVar)
+		} else {
+			g.emit("ctx.EnsureDesc(&%s)", condVar)
+		}
 		if cond.marker == "_flags" {
 			g.emit("if %s.Loc != LocImm && %s.Loc != LocFlags {", condVar, condVar)
 			g.emit("\tpanic(\"jit: fused If condition is neither LocImm nor LocFlags\")")

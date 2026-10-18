@@ -26,6 +26,7 @@ import (
 	"math/bits"
 	"regexp"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -1086,5 +1087,177 @@ func TestJITShortCircuitReleasesOperandRoots(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A match result may cross a later allocating call even if its final arm is
+// guaranteed to match. Its returned Rooted proof must survive branch allocator
+// restoration and reach the actual safepoint bitmap, not only FrameRoots.
+func TestJITMatchStackResultRemainsRootedAtFollowingSafepoint(t *testing.T) {
+	for _, fixture := range []struct {
+		name              string
+		arms              []Scmer
+		preRootedTarget   bool
+		spillTarget       bool
+		staleScalarTarget bool
+		dynamicSP         int32
+		dynamicSelector   bool
+	}{
+		{name: "binding-final-arm", arms: []Scmer{NewSymbol("_"), NewNthLocalVar(0)}},
+		{name: "known-literal-final-arm", arms: []Scmer{NewInt(1), NewNthLocalVar(0)}},
+		{name: "fallback-control", arms: []Scmer{NewInt(0), NewNil(), NewNthLocalVar(0)}},
+		{name: "existing-root-control", arms: []Scmer{NewSymbol("_"), NewNthLocalVar(0)}, preRootedTarget: true},
+		{name: "spill-final-arm", arms: []Scmer{NewSymbol("_"), NewNthLocalVar(0)}, spillTarget: true},
+		{name: "old-scalar-target", arms: []Scmer{NewSymbol("_"), NewNthLocalVar(0)}, staleScalarTarget: true},
+		{name: "dynamic-sp-target", arms: []Scmer{NewSymbol("_"), NewNthLocalVar(0)}, dynamicSP: 32},
+		{name: "dynamic-sp-spill", arms: []Scmer{NewSymbol("_"), NewNthLocalVar(0)}, dynamicSP: 32, spillTarget: true},
+		{name: "pointer-arm-before-scalar-arm", arms: []Scmer{NewInt(0), NewNthLocalVar(0), NewSymbol("_"), NewInt(2)}, dynamicSelector: true},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			ctx := newJITStackMapTestContext(make([]byte, 4096))
+			ctx.StackPhiTargets = true
+			ctx.SliceBase = RegR12
+			if fixture.dynamicSP != 0 {
+				ctx.AllocStack(64)
+				ctx.DynamicSP = fixture.dynamicSP
+			}
+			ctx.Env = &JITEnv{Numbered: []JITValueDesc{{Loc: LocInputPair, Type: JITTypeUnknown, StackOff: 0}}}
+			selector := NewInt(1)
+			if fixture.dynamicSelector {
+				ctx.AllRegs, ctx.FreeRegs = jitDefaultFreeGPRegs(), jitDefaultFreeGPRegs()
+				ctx.Env.Numbered = append(ctx.Env.Numbered, JITValueDesc{Loc: LocInputPair, Type: JITTypeUnknown, StackOff: 1})
+				selector = NewNthLocalVar(1)
+			}
+			target := JITValueDesc{Loc: LocAny}
+			if fixture.spillTarget {
+				target = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: ctx.AllocSpill(16), Rooted: true}
+			}
+			if fixture.preRootedTarget {
+				target = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: ctx.AllocStack(16), Rooted: true}
+				ctx.setStackPointer(jitStackRootFrameSP, target.StackOff, true)
+			}
+			if fixture.staleScalarTarget {
+				target = JITValueDesc{Loc: LocStackPair, Type: tagInt, StackOff: ctx.AllocStack(16), NoHeapPointer: true, Rooted: true, SliceSizeKnown: true, KnownSliceLen: 7, KnownSliceCap: 7}
+			}
+			expression := append([]Scmer{NewSymbol("match"), selector}, fixture.arms...)
+			out := jitCompileMatch(ctx, expression, ctx.SliceBase, target)
+			if out.Loc != LocStackPair || !out.Rooted || out.NoHeapPointer {
+				t.Fatalf("fixture requires an unknown pointer-bearing rooted stack result: %#v", out)
+			}
+			if out.SliceSizeKnown {
+				t.Error("match output inherits the old target's slice shape")
+			}
+			if out.Type != JITTypeUnknown {
+				t.Errorf("match output inherits old target type %d instead of its unknown arm type", out.Type)
+			}
+			root := jitStackRoot{base: jitStackRootFrameSP, offset: out.StackOff - ctx.DynamicSP}
+			if out.StackOff < 0 {
+				root.base, root.offset = jitStackRootFrameBP, out.StackOff
+			}
+			if _, live := ctx.StackRoots[root]; !live {
+				t.Errorf("match returns Rooted=true but its live output slot %v is absent from StackRoots", root)
+			}
+			ctx.recordSafepoint(nil, 0)
+			found := false
+			for _, actual := range jitDecodeSafepointRoots(ctx.Safepoints[len(ctx.Safepoints)-1]) {
+				found = found || actual == root
+			}
+			if !found {
+				t.Errorf("following allocating-call safepoint omits the live match output slot %v", root)
+			}
+		})
+	}
+}
+
+func TestJITMatchFreshStackResultSurvivesRuntimeGC(t *testing.T) {
+	const name = "jit_test_match_stack_result_gc"
+	declaration := &Declaration{
+		Name: name,
+		Fn:   func(args ...Scmer) Scmer { return NewSlice([]Scmer{args[0], NewString("tail")}) },
+		Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "list"},
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				previousEnv, previousStackPhi := ctx.Env, ctx.StackPhiTargets
+				ctx.Env = &JITEnv{Numbered: args, Outer: previousEnv}
+				ctx.StackPhiTargets = true
+				expression := []Scmer{NewSymbol("match"), NewInt(1), NewSymbol("_"),
+					NewSlice([]Scmer{NewSymbol("list"), NewNthLocalVar(0), NewString("tail")})}
+				value := jitCompileMatch(ctx, expression, ctx.SliceBase, JITValueDesc{Loc: LocAny})
+				ctx.Env, ctx.StackPhiTargets = previousEnv, previousStackPhi
+				// Collection happens during invocation, after the fresh branch result
+				// is stored. There is no collection during JIT compilation.
+				ctx.EmitGoCallToFrame(GoFuncAddr(runtime.GC), nil, nil)
+				return jitPlaceScmerIntoTarget(ctx, value, result)
+			}},
+	}
+	Declare(&Globalenv, declaration)
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda (value) (jit_test_match_stack_result_gc value))`)
+	value := NewString(strings.Repeat("kept-", 20))
+	got := Apply(compiled, value)
+	want := NewSlice([]Scmer{value, NewString("tail")})
+	if !Equal(got, want) {
+		t.Fatalf("match result after runtime collection = %s, want %s", SerializeToString(got, &Globalenv), SerializeToString(want, &Globalenv))
+	}
+}
+
+// A restored generator allocator can reuse a result whose previous pointer
+// was already dropped. The binding getter must not revive that old root while
+// executing the Go call that will replace it.
+func TestJITParserBindingDoesNotRootReusedResultBeforeReturn(t *testing.T) {
+	ctx := newJITStackMapTestContext(make([]byte, 16384))
+	ctx.AllRegs, ctx.FreeRegs = jitDefaultFreeGPRegs(), jitDefaultFreeGPRegs()
+	ctx.SliceBase = RegR12
+	ctx.StackPhiTargets = true
+	ctx.RuntimeEnv = NewAny(&Globalenv)
+	ctx.Env = &JITEnv{}
+	stateOff := ctx.AllocStack(16)
+	ctx.setStackPointer(jitStackRootFrameSP, stateOff, true)
+	emitter := jitParserEmitter{
+		ctx: ctx,
+		program: &jitParserProgram{rules: []jitParserRule{{
+			generator: NewSlice([]Scmer{NewSymbol("concat"), NewNthLocalVar(0), NewString("suffix")}),
+			bindings:  []Symbol{Symbol("value")}, lexicalParent: -1,
+		}}},
+		state:       JITValueDesc{Loc: LocStackPair, Type: tagAny, StackOff: stateOff, Rooted: true},
+		positionOff: ctx.AllocStack(8), continuationOff: ctx.AllocStack(8),
+		generatorValueOff: ctx.AllocSpill(16), inlineActions: true,
+		dispatchLabel: ctx.ReserveLabel(), ruleLabels: []JITLabel{ctx.ReserveLabel()},
+	}
+	ctx.setStackPointer(jitStackRootFrameBP, emitter.generatorValueOff, true)
+	beforeDiscarded := ctx.SnapshotAllocState()
+	discarded := JITEmitGoCallResults(ctx, GoFuncAddr(jitTestDiscardedStringResult), nil, []uint8{2}, []uint8{1})[0]
+	ctx.RestoreAllocState(beforeDiscarded)
+	// An intervening collection call no longer roots the discarded value.
+	ctx.EmitGoCallToFrame(GoFuncAddr(runtime.GC), nil, nil)
+	root := jitStackRoot{base: jitStackRootFrameBP, offset: discarded.StackOff}
+	for _, actual := range jitDecodeSafepointRoots(ctx.Safepoints[len(ctx.Safepoints)-1]) {
+		if actual == root {
+			t.Fatal("fixture still roots its discarded result before parser binding emission")
+		}
+	}
+	bindingSafepoint := len(ctx.Safepoints)
+	emitter.emitRuleReturn(0, true)
+	if len(ctx.Safepoints) <= bindingSafepoint {
+		t.Fatal("parser binding emitted no Go-call safepoint")
+	}
+	for _, actual := range jitDecodeSafepointRoots(ctx.Safepoints[bindingSafepoint]) {
+		if actual == root {
+			t.Errorf("binding getter safepoint roots discarded result slot %v before the getter returns its replacement", root)
+		}
+	}
+	rootedConsumer := false
+	// The final rule-return call follows allocator restoration. Calls inside
+	// the generator must retain the new binding while consuming it.
+	for _, safepoint := range ctx.Safepoints[bindingSafepoint+1 : len(ctx.Safepoints)-1] {
+		for _, actual := range jitDecodeSafepointRoots(safepoint) {
+			rootedConsumer = rootedConsumer || actual == root
+		}
+	}
+	if !rootedConsumer {
+		t.Error("generator consumer never roots the binding after the getter has returned")
 	}
 }

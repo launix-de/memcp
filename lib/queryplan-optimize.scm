@@ -7853,7 +7853,7 @@ Only remove these exact identities from the cut proof, never from the IR. */
 				(define identities (filter (mapIndex (gs_keys stage) (lambda (index key)
 					(if (and (ordered_binding_key_copy? axis stage index)
 						(< index (count lookup)) (ordered_binding_same? axis (nth lookup index)))
-						(make_exists_stage_join_condition (source_alias source) (list (nth names index)) (list axis))
+						(make_exists_stage_join_condition (source_alias source) (list (nth names index)) (list axis) false)
 						nil))) (lambda (identity) (not (nil? identity)))))
 				(combine_where_terms (filter (split_and_terms (source_join_expr source)) (lambda (term)
 					(not (reduce identities (lambda (same identity)

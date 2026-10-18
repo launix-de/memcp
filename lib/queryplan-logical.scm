@@ -412,7 +412,7 @@ query generation is the scope that releases them after execution. */
 (define make_stage_output_relation (lambda (stage_id)
 	(list (quote stage-output) stage_id)))
 
-(define logical_op (lambda (node) (if (and (list? node) (not (nil? node))) (car node) nil)))
+(define logical_op (lambda (node) (if (and (list? node) (not (empty_list? node))) (car node) nil)))
 (define query_block? (lambda (node) (equal? (logical_op node) (quote query-block))))
 (define group_stage? (lambda (node) (equal? (logical_op node) (quote group-stage))))
 (define union_block? (lambda (node) (equal? (logical_op node) (quote union-block))))
@@ -2153,16 +2153,13 @@ drifting on source-join pairs or residual outer references. */
 (define stage_source_outer? (lambda (outer_sources)
 	(not (empty_list? outer_sources))))
 
-/* A session-variable domain component is not a per-row correlation: the
-decorrelated stage was built for exactly this session value (not a value that
-varies per outer row), so this equality is a tautology by construction and
-must hold even when the session value is nil. Every other domain component is
-a genuine per-row correlation, where SQL NULL semantics correctly reject a
-nil-to-nil match. equal?? already follows those SQL semantics ((equal? nil
-nil) is nil, not true), which is exactly why the tautological case needs its
-own null-safe check instead of silently failing whenever the session variable
-is unset. */
-(define make_exists_stage_join_condition (lambda (stage_alias key_names outer_domain)
+/* A session-variable domain is the stage's own binding, so its rejoin is a
+NULL-safe identity even when unset. Genuine row correlations keep SQL equality:
+NULL = NULL is UNKNOWN. Window partitions instead request nulls_not_distinct
+because their keys identify GROUP BY partitions, including NULL components.
+The canonical OR form retains the keyed-lookup proof without changing ordinary
+correlation, IN or EXISTS semantics. */
+(define make_exists_stage_join_condition (lambda (stage_alias key_names outer_domain nulls_not_distinct)
 	(if (empty_list? outer_domain)
 		true
 		(combine_where_terms
@@ -2170,7 +2167,7 @@ is unset. */
 				(begin
 					(define domain_value (nth outer_domain i))
 					(define key_expr (list (quote get_column) stage_alias false (nth key_names i) false))
-					(if (query_session_read? domain_value)
+					(if (or nulls_not_distinct (query_session_read? domain_value))
 						(list (quote or)
 							(list (quote equal??) key_expr domain_value)
 							(list (quote and) (list (quote nil?) key_expr) (list (quote nil?) domain_value)))
@@ -2180,7 +2177,7 @@ is unset. */
 (define make_positive_in_join_condition (lambda (input stage_alias key_names lookup_keys probe match_ag)
 	(combine_where_terms
 		(list
-			(make_exists_stage_join_condition stage_alias key_names lookup_keys)
+			(make_exists_stage_join_condition stage_alias key_names lookup_keys false)
 			(list (quote not) (list (quote nil?) probe))
 			(list (quote >) (membership_count_expr input stage_alias match_ag) 0))
 		true)))
@@ -2265,7 +2262,7 @@ physical membership probe. */
 
 (define make_stage_lookup_condition (lambda (stage_alias key_names outer_domain post_condition)
 	(combine_where
-		(make_exists_stage_join_condition stage_alias key_names outer_domain)
+		(make_exists_stage_join_condition stage_alias key_names outer_domain false)
 		post_condition)))
 
 (define source_is_stage_output? (lambda (src)
@@ -3035,7 +3032,7 @@ general recursive boolean proof above. */
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
+			(make_exists_stage_join_condition stage_alias key_names lookup_keys false)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
 		(list
 			(list (quote >)
@@ -3262,7 +3259,7 @@ general recursive boolean proof above. */
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias (group_key_cols keys) lookup_keys)))
+			(make_exists_stage_join_condition stage_alias (group_key_cols keys) lookup_keys false)))
 		(list
 			(list (quote >)
 				(list (quote coalesceNil)
@@ -3456,7 +3453,7 @@ without separately proving two-valued semantics. */
 			(or truth_membership (not semijoin_where))
 			(if semijoin_where
 				(make_positive_in_join_condition (gs_input stage) stage_alias key_names (list probe) probe aggregate_count_descriptor)
-				(make_exists_stage_join_condition stage_alias key_names (list probe)))))
+				(make_exists_stage_join_condition stage_alias key_names (list probe) false))))
 		(define null_source (list
 			null_stage_alias
 			(group_stage_schema null_stage)
@@ -3584,13 +3581,13 @@ without separately proving two-valued semantics. */
 			(or truth_membership (not semijoin_where))
 			(if semijoin_where
 				(make_positive_in_join_condition (gs_input stage) stage_alias key_names lookup_keys probe aggregate_count_descriptor)
-				(make_exists_stage_join_condition stage_alias key_names lookup_keys))))
+				(make_exists_stage_join_condition stage_alias key_names lookup_keys false))))
 		(define null_source (list
 			null_stage_alias
 			(group_stage_schema null_stage)
 			(make_stage_output_relation null_stage_id)
 			true
-			(make_exists_stage_join_condition null_stage_alias null_key_names domain_lookup_keys)))
+			(make_exists_stage_join_condition null_stage_alias null_key_names domain_lookup_keys false)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
 		(if semijoin_where
 			(list true (list stage) (list source))
@@ -3640,7 +3637,7 @@ without separately proving two-valued semantics. */
 			(gs_input stage) input_alias stage_alias keys key_names ags (coalesceNil (gs_having stage) true)))
 		(define join_condition (combine_where_terms
 			(list
-				(make_exists_stage_join_condition stage_alias (list (nth key_names key_idx)) (list probe))
+				(make_exists_stage_join_condition stage_alias (list (nth key_names key_idx)) (list probe) false)
 				(list (quote not) (list (quote nil?) probe))
 				having_expr)
 			true))
@@ -3914,7 +3911,7 @@ without separately proving two-valued semantics. */
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
+			(make_exists_stage_join_condition stage_alias key_names lookup_keys false)))
 		(define output_exprs (map values_for_inner (lambda (value_for_inner)
 			(scalar_once_value_expr stage_input stage_alias
 				(scalar_once_descriptor value_for_inner order_for_inner (qb_offset inner))))))
@@ -4337,7 +4334,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
+			(make_exists_stage_join_condition stage_alias key_names lookup_keys false)))
 		(define output_exprs (map (produceN (count value_ags)) (lambda (i)
 			(begin
 				(define output_ag (nth value_ags i))
@@ -4799,6 +4796,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(list
 				(list (quote condition) true)
 				(list (quote purpose) (quote window_partition_aggregate))
+				(list (quote nulls_not_distinct) true)
 				(list (quote merge-aggregate-extensions) true)
 				(list (quote domain) outer_domain)
 				(list (quote lookup-keys) outer_domain)
@@ -4813,7 +4811,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(source_schema src)
 			(make_stage_output_relation stage_id)
 			true
-			(make_exists_stage_join_condition stage_alias key_names outer_domain)))
+			(make_exists_stage_join_condition stage_alias key_names outer_domain true)))
 		(list
 			(window_aggregate_value_expr stage_input fn canonical_args ags stage_alias)
 			(list stage)
@@ -5672,14 +5670,56 @@ outputs: this normalization covers joined and derived projection values. */
 			(field_expr_by_title rest title ignorecase))
 		_ nil)))
 
+/* Star qualifiers carry the same exact/folded identifier contract as ordinary
+column references. Resolve that contract before a derived export catalog loses
+its original source scope; never infer it from the alias spelling. */
+(define star_expr_matches_source? (lambda (expr src)
+	(match expr
+		((symbol sql_compile_column) _compiler column) (star_expr_matches_source? column src)
+		((symbol get_column) alias ignorecase "*" _)
+		(or (nil? alias) (if ignorecase (equal?? alias (source_alias src)) (equal? alias (source_alias src))))
+		((quote get_column) alias ignorecase "*" _)
+		(or (nil? alias) (if ignorecase (equal?? alias (source_alias src)) (equal? alias (source_alias src))))
+		_ false)))
+
+(define star_expr? (lambda (expr)
+	(match expr
+		((symbol sql_compile_column) _compiler column) (star_expr? column)
+		((symbol get_column) _ _ "*" _) true
+		((quote get_column) _ _ "*" _) true
+		_ false)))
+
+/* Star expansion must use each source's SQL-visible exported columns. A source
+may be a base table, table function, query block, or union; consulting only the
+base-table schema silently produces empty result metadata for derived.*. */
+(define expand_star_for_sources (lambda (sources expr)
+	(match expr
+		((symbol sql_compile_column) compiler column)
+		(map_assoc (expand_star_for_sources sources column) (lambda (_title reference)
+			(list (quote sql_compile_column) compiler reference)))
+		_ (merge (map (coalesceNil sources '()) (lambda (src)
+			(if (star_expr_matches_source? expr src)
+				(merge (map (binding_source_columns src) (lambda (col)
+					(list col (list (quote get_column) (source_alias src) false col false)))))
+				'())))))))
+
+(define expand_query_block_fields (lambda (sources fields)
+	(match (coalesceNil fields '())
+		(cons title (cons expr rest)) (begin
+			(if (star_expr? expr)
+				(merge (list (expand_star_for_sources sources expr) (expand_query_block_fields sources rest)))
+				(cons title (cons expr (expand_query_block_fields sources rest)))))
+		_ '())))
+
 /* Derived relations expose their projection, not every column of the base
-sources that replace them during logical flattening. Keep that SQL scope
-available while nested queries are decorrelated. */
+sources that replace them during logical flattening. Expand stars before the
+parent builds its binding catalog: the star marker is not an exported column.
+Keep that SQL scope available while nested queries are decorrelated. */
 (define logical_relation_fields (lambda (relation)
 	(begin
 		(define normalized (normalize_query_ast relation))
 		(if (query_block? normalized)
-			(qb_fields normalized)
+			(expand_query_block_fields (qb_sources normalized) (qb_fields normalized))
 			(if (union_block? normalized)
 				(match (union_branches normalized)
 					(cons branch _rest) (logical_relation_fields branch)
@@ -5864,7 +5904,7 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 			Only compile-time annotations remain; executable lowering consumes them. */
 			(define bound (bind_query_expr_tail scopes arguments path all_strings 0))
 			(define sources (map (merge scopes) binding_entry_source))
-			(define info (compiler (map bound (lambda (argument) (sql_expr_info sources argument)))))
+			(define info ((sql_expression_compiler compiler) (map bound (lambda (argument) (sql_expr_info sources argument)))))
 			(define formula (sql_info_formula info))
 			/* A fixed frontend BOOLEAN operator already carries this contract.
 			Keep its predicate AST visible to the shared logical extractors. */
@@ -6245,6 +6285,14 @@ Only flattenable FROM relations share the latter two with their parent. */
 			_ acc))
 		expr)))
 
+/* Flattening visits the right suffix first, but consumers apply its rewrites
+left to right. Close every later projection over an eliminated alias now:
+otherwise a later substitution can reintroduce a reference whose rule has
+already been consumed. Bound alias identities keep nested scopes separate. */
+(define prepend_derived_rewrite (lambda (alias projection rewrites)
+	(cons (list alias projection)
+		(map rewrites (lambda (rewrite) (rewrite_derived_ref alias projection rewrite))))))
+
 /* Aggregate arguments below a window node can retain an unqualified output
 alias after name binding. Resolve that alias against a flattened derived
 projection before the physical base-source alias is applied. Only a projection
@@ -6423,8 +6471,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 		projection))
 	(list
 		(rewrite_sources_join_for_derived alias effective_projection (nth tail 0))
-		(cons (list alias effective_projection)
-			(map (nth tail 1) (lambda (rewrite) (rewrite_derived_ref alias effective_projection rewrite))))
+		(prepend_derived_rewrite alias effective_projection (nth tail 1))
 		(if (source_outer? src) (nth tail 2) (cons matched (nth tail 2)))
 		(nth tail 3)))))
 
@@ -6478,7 +6525,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 										(merge (list
 											(nth staged 0)
 											(rewrite_sources_join_for_derived alias (nth staged 1) tail_sources)))
-										(cons (list alias (nth staged 1)) tail_rewrites)
+										(prepend_derived_rewrite alias (nth staged 1) tail_rewrites)
 										tail_wheres
 										(cons (nth staged 2) (merge (list (qb_stages inner) tail_stages)))))
 								(if (ordered_limited_derived_supported? inner src)
@@ -6487,7 +6534,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 										(define requalified_inner_stages (requalify_stages_for_derived (source_alias (car (qb_sources inner))) alias (qb_stages inner)))
 										(list
 											(merge (list (nth staged 0) tail_sources))
-											(cons (list alias (nth staged 1)) tail_rewrites)
+											(prepend_derived_rewrite alias (nth staged 1) tail_rewrites)
 											(cons (nth staged 2) tail_wheres)
 											(cons (nth staged 3) (merge (list requalified_inner_stages tail_stages)))))
 									(if (or (source_outer? src) (not (nil? (source_join_expr src))))
@@ -6496,7 +6543,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 											(define staged (make_limited_derived_stage_source alias inner relation))
 											(list
 												(cons (nth staged 0) tail_sources)
-												(cons (list alias (nth staged 1)) tail_rewrites)
+												(prepend_derived_rewrite alias (nth staged 1) tail_rewrites)
 												tail_wheres
 												(cons (nth staged 2) (merge (list (qb_stages inner) tail_stages))))))))
 							(begin
@@ -6506,7 +6553,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 										(flatten_constant_derived_join src inner tail)
 										(list
 											(rewrite_sources_join_for_derived alias (qb_fields inner) tail_sources)
-											(cons (list alias (qb_fields inner)) tail_rewrites)
+											(prepend_derived_rewrite alias (qb_fields inner) tail_rewrites)
 											(cons (qb_where inner) tail_wheres)
 											(merge (list (qb_stages inner) tail_stages))))
 									(if (equal? (count inner_sources) 1)
@@ -6541,7 +6588,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 														(source_outer? src)
 														joined_condition)
 													(rewrite_sources_join_for_derived alias effective_projection tail_sources))
-												(cons (list alias effective_projection) tail_rewrites)
+												(prepend_derived_rewrite alias effective_projection tail_rewrites)
 												(if (nil? parent_condition) tail_wheres (cons parent_condition tail_wheres))
 												(merge (list (nth stage_rebinding 0) tail_stages))))
 										(if (or (source_outer? src) (not (nil? (source_join_expr src))))
@@ -6575,13 +6622,13 @@ bindings are stable here, unlike mutable SQL session variables. */
 															(list derived_base_source)
 															derived_stage_sources
 															(rewrite_sources_join_for_derived alias effective_projection tail_sources)))
-														(cons (list alias effective_projection) tail_rewrites)
+														(prepend_derived_rewrite alias effective_projection tail_rewrites)
 														tail_wheres
 														(merge (list (nth stage_rebinding 0) tail_stages))))
 												(neumann_fail "untangle_query" "multi-source derived JOIN needs relation-unit lowering"))
 											(list
 												(merge (list inner_sources (rewrite_sources_join_for_derived alias (qb_fields inner) tail_sources)))
-												(cons (list alias (qb_fields inner)) tail_rewrites)
+												(prepend_derived_rewrite alias (qb_fields inner) tail_rewrites)
 												(cons (qb_where inner) tail_wheres)
 												(merge (list (qb_stages inner) tail_stages)))))))))
 ))))))
@@ -6862,7 +6909,7 @@ names in projections, predicates, and correlated subqueries. */
 		(make_query_block
 			(qb_schema inner)
 			(qb_sources inner)
-			(logical_union_projection_with_titles canonical_fields (qb_fields inner))
+			(logical_union_projection_with_titles canonical_fields (logical_relation_fields inner))
 			(qb_where inner)
 			(qb_group inner)
 			(qb_having inner)
@@ -6878,7 +6925,7 @@ names in projections, predicates, and correlated subqueries. */
 		(cons first_branch _rest) (begin
 			(define normalized (normalize_query_ast first_branch))
 			(if (query_block? normalized)
-				(qb_fields normalized)
+				(logical_relation_fields normalized)
 				(neumann_fail "untangle_query" "FROM UNION wrapper expects query-block branches")))
 		_ '())))
 

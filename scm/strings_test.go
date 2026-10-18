@@ -17,6 +17,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package scm
 
 import (
+	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"strings"
@@ -317,5 +319,158 @@ func TestComputeSizeBorrowedStrings(t *testing.T) {
 	}
 	if len(output) != 0 {
 		t.Fatalf("valid string tags produced diagnostics: %s", output)
+	}
+}
+
+func TestUTF16LengthAndPrefixContracts(t *testing.T) {
+	for _, test := range []struct {
+		text   string
+		units  int64
+		prefix []string
+	}{
+		{"", 0, []string{"", "", "", "", ""}},
+		{"abcd", 4, []string{"", "a", "ab", "abc", "abcd"}},
+		{"雪€", 2, []string{"", "雪", "雪€", "雪€", "雪€"}},
+		{"a😀z", 4, []string{"", "a", "a", "a😀", "a😀z"}},
+		{"😀x", 3, []string{"", "", "😀", "😀x", "😀x"}},
+		{"e\u0301", 2, []string{"", "e", "e\u0301", "e\u0301", "e\u0301"}},
+	} {
+		buffer, offsets := BuildCompressedStringBuffer([]string{test.text})
+		for _, value := range []Scmer{NewString(test.text), NewBufferString(buffer, offsets[0], len(test.text))} {
+			if got := declarations["utf16_length"].Fn(value); !got.IsInt() || got.Int() != test.units {
+				t.Fatalf("UTF16 length of %q = %v, want %d", test.text, got, test.units)
+			}
+			for limit, want := range test.prefix {
+				if got := declarations["utf16_prefix"].Fn(value, NewInt(int64(limit))); got.String() != want {
+					t.Fatalf("UTF16 prefix of %q at %d = %q, want %q", test.text, limit, got.String(), want)
+				}
+			}
+			if got := declarations["utf16_prefix"].Fn(value, NewInt(9223372036854775807)); got.String() != test.text {
+				t.Fatalf("unbounded prefix changed %q", test.text)
+			}
+		}
+	}
+	for _, name := range []string{"utf16_length", "utf16_prefix"} {
+		if got := declarations[name].Fn(NewNil(), NewInt(2)); !got.IsNil() {
+			t.Fatalf("%s lost nil", name)
+		}
+	}
+	if got := declarations["utf16_prefix"].Fn(NewString("x"), NewNil()); !got.IsNil() {
+		t.Fatal("nil prefix limit did not propagate")
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("negative prefix limit was accepted")
+		}
+	}()
+	declarations["utf16_prefix"].Fn(NewString("x"), NewInt(-1))
+}
+
+func TestUTF16CompiledStringContracts(t *testing.T) {
+	length := CompileJIT(NewProcStruct(*calibrationProcedure("(lambda (text) (utf16_length text))")), true)
+	prefix := CompileJIT(NewProcStruct(*calibrationProcedure("(lambda (text limit) (utf16_prefix text limit))")), true)
+	text := strings.Repeat("雪😀a", 9000)
+	buffer, offsets := BuildCompressedStringBuffer([]string{text})
+	for _, value := range []Scmer{NewString(text), NewBufferString(buffer, offsets[0], len(text))} {
+		if got := Apply(length, value); !got.IsInt() || got.Int() != 36000 {
+			t.Fatalf("compiled Unicode unit count = %v", got)
+		}
+		if got := Apply(prefix, value, NewInt(2)); got.String() != "雪" {
+			t.Fatalf("compiled prefix split supplementary scalar: %q", got.String())
+		}
+		if got := Apply(prefix, value, NewInt(4)); got.String() != "雪😀a" {
+			t.Fatalf("compiled prefix lost complete scalars: %q", got.String())
+		}
+	}
+	if !Apply(length, NewNil()).IsNil() || !Apply(prefix, NewString("x"), NewNil()).IsNil() {
+		t.Fatal("compiled Unicode helpers lost nil")
+	}
+}
+
+// Keep the generated hash loop equivalent to the standard FNV-1a contract,
+// including the two compressed-text branches around the 128-byte boundary.
+func fnvHashContractInputs() []Scmer {
+	texts := []string{"", "a", "hello", "\x00\xff\x80", "äΣK", strings.Repeat("x", 127), strings.Repeat("x", 128), strings.Repeat("äΣ", 1024)}
+	buffer, offsets := BuildCompressedStringBuffer(texts)
+	values := []Scmer{NewNil(), NewBool(true), NewInt(-9223372036854775808), NewFloat(1.25)}
+	for i, text := range texts {
+		values = append(values, NewString(text), NewBufferString(buffer, offsets[i], len(text)))
+	}
+	return values
+}
+
+func fnvHashContractWant(value Scmer) Scmer {
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(String(value)))
+	return NewString(fmt.Sprintf("%016x", hash.Sum64()))
+}
+
+func TestFNVHashContract(t *testing.T) {
+	for i, value := range fnvHashContractInputs() {
+		if got, want := declarations["fnv_hash"].Fn(value), fnvHashContractWant(value); !Equal(got, want) {
+			t.Fatalf("value %d (%v): got %s, want %s", i, value.GetTag(), String(got), String(want))
+		}
+	}
+}
+
+// Tests compile serially. Restore admission before executing the compiled code,
+// including every panic/Goexit path; production costs and admission stay intact.
+func compileFNVHashContract(t *testing.T, source string, forceBody bool) Scmer {
+	t.Helper()
+	if !jitEnabled {
+		t.Skip("requires native JIT execution")
+	}
+	declaration := declarations["fnv_hash"]
+	previous := declaration.RetainsCallArgs
+	defer func() { declaration.RetainsCallArgs = previous }()
+	if forceBody {
+		declaration.RetainsCallArgs = true
+	}
+	compiled := compileJITExpressionTestProc(t, source)
+	requireNoDynamicJITCalls(t, compiled)
+	if forceBody && compiled.Proc().Compiled.Coverage.InlinedCalls == 0 {
+		t.Fatal("hash contract did not exercise the generated inline body")
+	}
+	return compiled
+}
+
+func TestJITGeneratedFNVHashContract(t *testing.T) {
+	for _, mode := range []struct {
+		name      string
+		forceBody bool
+	}{{"boundary", false}, {"body", true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			compiled := compileFNVHashContract(t, `(lambda (value) (fnv_hash value))`, mode.forceBody)
+			for i, value := range fnvHashContractInputs() {
+				if got, want := Apply(compiled, value), fnvHashContractWant(value); !Equal(got, want) {
+					t.Fatalf("value %d: got %s, want %s", i, String(got), String(want))
+				}
+			}
+		})
+	}
+}
+
+func TestJITGeneratedFNVHashPreservesLiveValues(t *testing.T) {
+	for _, mode := range []struct {
+		name      string
+		forceBody bool
+	}{{"boundary", false}, {"body", true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			compiled := compileFNVHashContract(t, `(lambda (value a b c d e f g h)
+				(list a b c d (fnv_hash value) e f g h (fnv_hash value) a b c d e f g h))`, mode.forceBody)
+			live := []Scmer{NewInt(-7), NewString("retained"), NewFloat(3.5), NewBool(true), NewNil(), NewInt(9223372036854775807), NewString("last"), NewBool(false)}
+			for i, value := range fnvHashContractInputs() {
+				hash := fnvHashContractWant(value)
+				want := append([]Scmer{}, live[:4]...)
+				want = append(want, hash)
+				want = append(want, live[4:]...)
+				want = append(want, hash)
+				want = append(want, live...)
+				args := append([]Scmer{value}, live...)
+				if got := Apply(compiled, args...); !Equal(got, NewSlice(want)) {
+					t.Fatalf("value %d: hash call changed live values: got %s, want %s", i, String(got), String(NewSlice(want)))
+				}
+			}
+		})
 	}
 }

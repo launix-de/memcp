@@ -317,7 +317,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 			ctx.BindReg(r4, &d6)
 		}
 		d7 = d6
-		ctx.EnsureDesc(&d7)
+		ctx.SyncDesc(&d7)
 		if d7.Loc != scm.LocImm && d7.Loc != scm.LocFlags {
 			panic("jit: fused If condition is neither scm.LocImm nor scm.LocFlags")
 		}
@@ -940,7 +940,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 			ctx.BindReg(r36, &d43)
 		}
 		d44 = d43
-		ctx.EnsureDesc(&d44)
+		ctx.SyncDesc(&d44)
 		if d44.Loc != scm.LocImm && d44.Loc != scm.LocFlags {
 			panic("jit: fused If condition is neither scm.LocImm nor scm.LocFlags")
 		}
@@ -1148,7 +1148,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		}
 		ctx.FreeDesc(&idxInt)
 		d88 = d87
-		ctx.EnsureDesc(&d88)
+		ctx.SyncDesc(&d88)
 		if d88.Loc != scm.LocImm && d88.Loc != scm.LocFlags {
 			panic("jit: fused If condition is neither scm.LocImm nor scm.LocFlags")
 		}

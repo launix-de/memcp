@@ -22,28 +22,29 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package main
 
-import "archive/tar"
-import "archive/zip"
-import "bytes"
-import "compress/gzip"
-import "os"
-import "os/exec"
 import "io"
+import "os"
 import "fmt"
 import "flag"
+import "path"
+import "sync"
 import "time"
 import "bufio"
-import "sync"
-import "syscall"
+import "bytes"
+import "os/exec"
 import "runtime"
-import "io/ioutil"
 import "strings"
+import "syscall"
 import "os/signal"
+import "archive/tar"
+import "archive/zip"
 import "crypto/rand"
-import "path"
+import "compress/gzip"
 import "path/filepath"
-import "runtime/pprof"
 import "runtime/debug"
+import "runtime/pprof"
+import "unicode/utf16"
+import "encoding/binary"
 import "github.com/google/uuid"
 import "github.com/fsnotify/fsnotify"
 import "github.com/launix-de/memcp/scm"
@@ -615,44 +616,120 @@ func getStream(path string) func(a ...scm.Scmer) scm.Scmer {
 	}
 }
 
+// decodeLoadText is an opt-in file/stream transport conversion, not SQL type
+// handling. It preserves UTF-8 (including its BOM) for the existing text consumer.
+// UTF-16 is strict: malformed units must not silently become replacement text.
+func decodeLoadText(data []byte, encoding string) (string, error) {
+	encoding = strings.ToLower(encoding)
+	if encoding == "" {
+		return string(data), nil
+	}
+	if encoding != "bom" && encoding != "utf-16le" && encoding != "utf-16be" {
+		return "", fmt.Errorf("unsupported load text encoding %q", encoding)
+	}
+	if encoding == "bom" && (bytes.HasPrefix(data, []byte{0xff, 0xfe, 0, 0}) || bytes.HasPrefix(data, []byte{0, 0, 0xfe, 0xff})) {
+		return "", fmt.Errorf("UTF-32 load text is unsupported")
+	}
+	little := bytes.HasPrefix(data, []byte{0xff, 0xfe})
+	big := bytes.HasPrefix(data, []byte{0xfe, 0xff})
+	if encoding == "bom" && !little && !big {
+		return string(data), nil
+	}
+	if (encoding == "utf-16le" && big) || (encoding == "utf-16be" && little) {
+		return "", fmt.Errorf("load text byte order mark conflicts with %s", encoding)
+	}
+	if little || big {
+		data = data[2:]
+	}
+	if len(data)%2 != 0 {
+		return "", fmt.Errorf("odd UTF-16 byte length in load text")
+	}
+	var order binary.ByteOrder = binary.BigEndian
+	if little || encoding == "utf-16le" {
+		order = binary.LittleEndian
+	}
+	var text strings.Builder
+	text.Grow(len(data))
+	for i := 0; i < len(data); i += 2 {
+		unit := order.Uint16(data[i:])
+		switch {
+		case unit >= 0xd800 && unit <= 0xdbff:
+			if i+3 >= len(data) {
+				return "", fmt.Errorf("unpaired UTF-16 surrogate at byte %d", i)
+			}
+			next := order.Uint16(data[i+2:])
+			if next < 0xdc00 || next > 0xdfff {
+				return "", fmt.Errorf("unpaired UTF-16 surrogate at byte %d", i)
+			}
+			text.WriteRune(utf16.DecodeRune(rune(unit), rune(next)))
+			i += 2
+		case unit >= 0xdc00 && unit <= 0xdfff:
+			return "", fmt.Errorf("unpaired UTF-16 surrogate at byte %d", i)
+		default:
+			text.WriteRune(rune(unit))
+		}
+	}
+	return text.String(), nil
+}
+
 func getLoad(path string) func(a ...scm.Scmer) scm.Scmer {
 	return func(a ...scm.Scmer) scm.Scmer {
+		handler := len(a) > 1 && !a[1].IsNil()
+		delimited := len(a) > 2 && !a[2].IsNil()
+		if delimited && !handler {
+			panic("load delimiter requires a handler")
+		}
 		stream, ok := a[0].Any().(io.Reader)
 		if !ok {
-			// not a stream? call getStream
-			stream = getStream(path)(a[0]).Any().(io.Reader)
-		}
-		if len(a) > 2 {
-			splitter := bufio.NewReader(stream)
-			delimiter := scm.String(a[2])
-			if len(delimiter) != 1 {
-				panic("load delimiter must be 1 byte long")
-			}
-			for {
-				str, err := splitter.ReadString(delimiter[0])
-				if err == io.EOF {
-					if len(str) > 0 {
-						scm.Apply(a[1], scm.NewString(str))
-					}
-					break // file is finished
-				}
-				if err != nil {
-					panic(err)
-				}
-				// go??
-				scm.Apply(a[1], scm.NewString(str))
-			}
-		} else {
-			// read in whole
-			bytes, err := ioutil.ReadAll(stream)
+			// This call owns only files it opens. Supplied readers remain borrowed.
+			owned, err := openStream(resolveIOPath(path, scm.String(a[0])))
 			if err != nil {
 				panic(err)
 			}
-			if len(a) > 1 {
-				scm.Apply(a[1], scm.NewString(string(bytes)))
-			} else {
-				return scm.NewString(string(bytes))
+			defer owned.Close()
+			stream = owned
+		}
+		encoding := ""
+		if len(a) > 3 && !a[3].IsNil() {
+			encoding = scm.String(a[3])
+		}
+		// Text mode validates the entire input before invoking any handler. Raw
+		// delimiter mode retains its existing incremental read behavior.
+		if encoding != "" || !delimited {
+			data, err := io.ReadAll(stream)
+			if err != nil {
+				panic(err)
 			}
+			text, err := decodeLoadText(data, encoding)
+			if err != nil {
+				panic(err)
+			}
+			if !delimited {
+				if handler {
+					scm.Apply(a[1], scm.NewString(text))
+					return scm.NewBool(true)
+				}
+				return scm.NewString(text)
+			}
+			stream = strings.NewReader(text)
+		}
+		splitter := bufio.NewReader(stream)
+		delimiter := scm.String(a[2])
+		if len(delimiter) != 1 {
+			panic("load delimiter must be 1 byte long")
+		}
+		for {
+			str, err := splitter.ReadString(delimiter[0])
+			if err == io.EOF {
+				if len(str) > 0 {
+					scm.Apply(a[1], scm.NewString(str))
+				}
+				break
+			}
+			if err != nil {
+				panic(err)
+			}
+			scm.Apply(a[1], scm.NewString(str))
 		}
 		return scm.NewBool(true)
 	}
@@ -871,8 +948,9 @@ func setupIO(wd string) {
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Loads a file or stream and returns the string or iterates line-wise", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string|stream", Label: "filenameOrStream", Description: "filename relative to folder of source file, absolute path, or stream to read from"},
-				{Kind: "func", Label: "linehandler", Description: "handler that reads each line; each line may end with delimiter", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "string", Label: "line"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "string", Label: "delimiter", Description: "delimiter to extract; if no delimiter is given, the file is read as whole and returned or passed to linehandler", Optional: true},
+				{Kind: "func|nil", Label: "linehandler", Description: "handler that reads each line; each line may end with delimiter; nil omits the handler", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "string", Label: "line"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "string|nil", Label: "delimiter", Description: "one-byte delimiter, or nil for the whole input; requires linehandler when present", Optional: true},
+				{Kind: "string|nil", Label: "text_encoding", Description: "optional bom, utf-16le or utf-16be decoding; nil/empty preserves raw bytes. Text mode buffers and validates the whole input before any handler; UTF-8 and its BOM remain unchanged", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "string|bool"},
 		},
@@ -1030,9 +1108,7 @@ func setupIO(wd string) {
 		Name: "shutdown",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			if scm.ReplInstance != nil {
-				scm.ReplInstance.Close()
-			} else {
+			if !scm.CloseRepl() {
 				// no-repl mode: send SIGTERM to self to unblock signal wait
 				syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 			}
@@ -1531,10 +1607,7 @@ func exitroutine() {
 		exitsignal <- true
 		exitable.Wait()
 		fmt.Println("Exit procedure...")
-		if scm.ReplInstance != nil {
-			// in case it dosen't exit properly
-			scm.ReplInstance.Close()
-		}
+		scm.CloseRepl()
 		fmt.Println("finalizing storage...")
 		func() {
 			defer func() {

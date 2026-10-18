@@ -362,7 +362,7 @@ func init_scheduler() {
 					}
 					ctx.FreeDesc(&d0)
 					d2 = d1
-					ctx.EnsureDesc(&d2)
+					ctx.SyncDesc(&d2)
 					if d2.Loc != LocImm && d2.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}

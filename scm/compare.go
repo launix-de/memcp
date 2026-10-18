@@ -950,7 +950,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(r0, &d4)
 		}
 		d5 = d4
-		ctx.EnsureDesc(&d5)
+		ctx.SyncDesc(&d5)
 		if d5.Loc != LocImm && d5.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
@@ -1031,7 +1031,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(r1, &d14)
 		}
 		d15 = d14
-		ctx.EnsureDesc(&d15)
+		ctx.SyncDesc(&d15)
 		if d15.Loc != LocImm && d15.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
@@ -1097,7 +1097,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(r2, &d26)
 		}
 		d27 = d26
-		ctx.EnsureDesc(&d27)
+		ctx.SyncDesc(&d27)
 		if d27.Loc != LocImm && d27.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
@@ -1188,7 +1188,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(r3, &d41)
 		}
 		d42 = d41
-		ctx.EnsureDesc(&d42)
+		ctx.SyncDesc(&d42)
 		if d42.Loc != LocImm && d42.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
@@ -1285,7 +1285,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(r4, &d59)
 		}
 		d60 = d59
-		ctx.EnsureDesc(&d60)
+		ctx.SyncDesc(&d60)
 		if d60.Loc != LocImm && d60.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
@@ -1367,7 +1367,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(r5, &d79)
 		}
 		d80 = d79
-		ctx.EnsureDesc(&d80)
+		ctx.SyncDesc(&d80)
 		if d80.Loc != LocImm && d80.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
@@ -1453,7 +1453,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(r6, &d101)
 		}
 		d102 = d101
-		ctx.EnsureDesc(&d102)
+		ctx.SyncDesc(&d102)
 		if d102.Loc != LocImm && d102.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
@@ -1543,7 +1543,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(r7, &d125)
 		}
 		d126 = d125
-		ctx.EnsureDesc(&d126)
+		ctx.SyncDesc(&d126)
 		if d126.Loc != LocImm && d126.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
@@ -1878,7 +1878,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(r12, &d191)
 		}
 		d192 = d191
-		ctx.EnsureDesc(&d192)
+		ctx.SyncDesc(&d192)
 		if d192.Loc != LocImm && d192.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
@@ -2129,7 +2129,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(r19, &d235)
 		}
 		d236 = d235
-		ctx.EnsureDesc(&d236)
+		ctx.SyncDesc(&d236)
 		if d236.Loc != LocImm && d236.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
@@ -2515,7 +2515,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(r30, &d292)
 		}
 		d293 = d292
-		ctx.EnsureDesc(&d293)
+		ctx.SyncDesc(&d293)
 		if d293.Loc != LocImm && d293.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}

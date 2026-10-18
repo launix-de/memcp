@@ -301,7 +301,7 @@ func init_timezone() {
 					}
 					ctx.FreeDesc(&d0)
 					d2 = d1
-					ctx.EnsureDesc(&d2)
+					ctx.SyncDesc(&d2)
 					if d2.Loc != LocImm && d2.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -1650,7 +1650,7 @@ func init_timezone() {
 					}
 					ctx.FreeDesc(&d125)
 					d127 = d126
-					ctx.EnsureDesc(&d127)
+					ctx.SyncDesc(&d127)
 					if d127.Loc != LocImm && d127.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -2787,7 +2787,7 @@ func init_timezone() {
 					}
 					ctx.FreeDesc(&d17)
 					d19 = d18
-					ctx.EnsureDesc(&d19)
+					ctx.SyncDesc(&d19)
 					if d19.Loc != LocImm && d19.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -3212,7 +3212,7 @@ func init_timezone() {
 					}
 					ctx.FreeDesc(&d104)
 					d106 = d105
-					ctx.EnsureDesc(&d106)
+					ctx.SyncDesc(&d106)
 					if d106.Loc != LocImm && d106.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -4843,7 +4843,7 @@ func init_timezone() {
 					}
 					ctx.FreeDesc(&d64)
 					d66 = d65
-					ctx.EnsureDesc(&d66)
+					ctx.SyncDesc(&d66)
 					if d66.Loc != LocImm && d66.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -5212,7 +5212,7 @@ func init_timezone() {
 					}
 					ctx.FreeDesc(&d2)
 					d112 = d111
-					ctx.EnsureDesc(&d112)
+					ctx.SyncDesc(&d112)
 					if d112.Loc != LocImm && d112.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
