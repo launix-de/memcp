@@ -4025,6 +4025,388 @@ test_cases:
     - sql: DROP TABLE IF EXISTS tsql_condition_input
 
 
+  - name: UPPER retains declared NVARCHAR(5) NULL
+    sql: SELECT UPPER(CAST(NULL AS NVARCHAR(5))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: UPPER retains declared VARCHAR(5) NULL
+    sql: SELECT UPPER(CAST(NULL AS VARCHAR(5))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: UPPER retains a literal NULL
+    sql: SELECT UPPER(NULL) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: UPPER applies its string transformation
+    sql: SELECT UPPER(N' aBc ') AS value
+    expect:
+      rows: 1
+      data:
+      - value: ' ABC '
+  - name: UPPER rejects missing operands
+    sql: SELECT UPPER() AS value
+    expect:
+      error: true
+  - name: UPPER rejects excess operands
+    sql: SELECT UPPER(N'a',N'b') AS value
+    expect:
+      error: true
+  - name: UPPER describes an empty national result from its declaration
+    scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) UPPER(CAST(NULL AS NVARCHAR(3))) AS value" "" (newsession))
+      (lambda (field) (list (field "sql_type") (field "size"))))
+    expect:
+      result:
+      - - NVARCHAR
+        - 6
+  - name: UPPER describes a national column without reading rows
+    scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) UPPER(note) AS value FROM tsql_setup_memo" "" (newsession))
+      (lambda (field) (list (field "sql_type") (field "size"))))
+    expect:
+      result:
+      - - NVARCHAR
+        - 400
+  - name: UPPER compiles to an ordinary unwrapped string expression
+    scm: "(begin\n      (define info (sql_expr_info '() (tsql_builtin_expr \"UPPER\"\n        (list (tsql_cast_expr\
+      \ \" aBc \" \"NVARCHAR\" '(5))))))\n      (define formula (sql_info_formula info))\n      (list (sql_info_type\
+      \ info) (eval formula)\n        (not (strlike (string formula) \"%sql_compile_expr%\"))\n        (not (strlike\
+      \ (string formula) \"%sql_type_expr%\"))))"
+    expect:
+      result:
+      - NVARCHAR
+      - ' ABC '
+      - true
+      - true
+  - name: LOWER retains declared NVARCHAR(5) NULL
+    sql: SELECT LOWER(CAST(NULL AS NVARCHAR(5))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: LOWER retains declared VARCHAR(5) NULL
+    sql: SELECT LOWER(CAST(NULL AS VARCHAR(5))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: LOWER retains a literal NULL
+    sql: SELECT LOWER(NULL) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: LOWER applies its string transformation
+    sql: SELECT LOWER(N' aBc ') AS value
+    expect:
+      rows: 1
+      data:
+      - value: ' abc '
+  - name: LOWER rejects missing operands
+    sql: SELECT LOWER() AS value
+    expect:
+      error: true
+  - name: LOWER rejects excess operands
+    sql: SELECT LOWER(N'a',N'b') AS value
+    expect:
+      error: true
+  - name: LOWER describes an empty national result from its declaration
+    scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) LOWER(CAST(NULL AS NVARCHAR(3))) AS value" "" (newsession))
+      (lambda (field) (list (field "sql_type") (field "size"))))
+    expect:
+      result:
+      - - NVARCHAR
+        - 6
+  - name: LOWER describes a national column without reading rows
+    scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) LOWER(note) AS value FROM tsql_setup_memo" "" (newsession))
+      (lambda (field) (list (field "sql_type") (field "size"))))
+    expect:
+      result:
+      - - NVARCHAR
+        - 400
+  - name: LOWER compiles to an ordinary unwrapped string expression
+    scm: "(begin\n      (define info (sql_expr_info '() (tsql_builtin_expr \"LOWER\"\n        (list (tsql_cast_expr\
+      \ \" aBc \" \"NVARCHAR\" '(5))))))\n      (define formula (sql_info_formula info))\n      (list (sql_info_type\
+      \ info) (eval formula)\n        (not (strlike (string formula) \"%sql_compile_expr%\"))\n        (not (strlike\
+      \ (string formula) \"%sql_type_expr%\"))))"
+    expect:
+      result:
+      - NVARCHAR
+      - ' abc '
+      - true
+      - true
+  - name: LTRIM retains declared NVARCHAR(5) NULL
+    sql: SELECT LTRIM(CAST(NULL AS NVARCHAR(5))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: LTRIM retains declared VARCHAR(5) NULL
+    sql: SELECT LTRIM(CAST(NULL AS VARCHAR(5))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: LTRIM retains a literal NULL
+    sql: SELECT LTRIM(NULL) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: LTRIM applies its string transformation
+    sql: SELECT LTRIM(N' aBc ') AS value
+    expect:
+      rows: 1
+      data:
+      - value: 'aBc '
+  - name: LTRIM rejects missing operands
+    sql: SELECT LTRIM() AS value
+    expect:
+      error: true
+  - name: LTRIM rejects excess operands
+    sql: SELECT LTRIM(N'a',N'b') AS value
+    expect:
+      error: true
+  - name: LTRIM describes an empty national result from its declaration
+    scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) LTRIM(CAST(NULL AS NVARCHAR(3))) AS value" "" (newsession))
+      (lambda (field) (list (field "sql_type") (field "size"))))
+    expect:
+      result:
+      - - NVARCHAR
+        - 6
+  - name: LTRIM describes a national column without reading rows
+    scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) LTRIM(note) AS value FROM tsql_setup_memo" "" (newsession))
+      (lambda (field) (list (field "sql_type") (field "size"))))
+    expect:
+      result:
+      - - NVARCHAR
+        - 400
+  - name: LTRIM compiles to an ordinary unwrapped string expression
+    scm: "(begin\n      (define info (sql_expr_info '() (tsql_builtin_expr \"LTRIM\"\n        (list (tsql_cast_expr\
+      \ \" aBc \" \"NVARCHAR\" '(5))))))\n      (define formula (sql_info_formula info))\n      (list (sql_info_type\
+      \ info) (eval formula)\n        (not (strlike (string formula) \"%sql_compile_expr%\"))\n        (not (strlike\
+      \ (string formula) \"%sql_type_expr%\"))))"
+    expect:
+      result:
+      - NVARCHAR
+      - 'aBc '
+      - true
+      - true
+  - name: RTRIM retains declared NVARCHAR(5) NULL
+    sql: SELECT RTRIM(CAST(NULL AS NVARCHAR(5))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: RTRIM retains declared VARCHAR(5) NULL
+    sql: SELECT RTRIM(CAST(NULL AS VARCHAR(5))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: RTRIM retains a literal NULL
+    sql: SELECT RTRIM(NULL) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: RTRIM applies its string transformation
+    sql: SELECT RTRIM(N' aBc ') AS value
+    expect:
+      rows: 1
+      data:
+      - value: ' aBc'
+  - name: RTRIM rejects missing operands
+    sql: SELECT RTRIM() AS value
+    expect:
+      error: true
+  - name: RTRIM rejects excess operands
+    sql: SELECT RTRIM(N'a',N'b') AS value
+    expect:
+      error: true
+  - name: RTRIM describes an empty national result from its declaration
+    scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) RTRIM(CAST(NULL AS NVARCHAR(3))) AS value" "" (newsession))
+      (lambda (field) (list (field "sql_type") (field "size"))))
+    expect:
+      result:
+      - - NVARCHAR
+        - 6
+  - name: RTRIM describes a national column without reading rows
+    scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) RTRIM(note) AS value FROM tsql_setup_memo" "" (newsession))
+      (lambda (field) (list (field "sql_type") (field "size"))))
+    expect:
+      result:
+      - - NVARCHAR
+        - 400
+  - name: RTRIM compiles to an ordinary unwrapped string expression
+    scm: "(begin\n      (define info (sql_expr_info '() (tsql_builtin_expr \"RTRIM\"\n        (list (tsql_cast_expr\
+      \ \" aBc \" \"NVARCHAR\" '(5))))))\n      (define formula (sql_info_formula info))\n      (list (sql_info_type\
+      \ info) (eval formula)\n        (not (strlike (string formula) \"%sql_compile_expr%\"))\n        (not (strlike\
+      \ (string formula) \"%sql_type_expr%\"))))"
+    expect:
+      result:
+      - NVARCHAR
+      - ' aBc'
+      - true
+      - true
+  - name: TRIM retains declared NVARCHAR(5) NULL
+    sql: SELECT TRIM(CAST(NULL AS NVARCHAR(5))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: TRIM retains declared VARCHAR(5) NULL
+    sql: SELECT TRIM(CAST(NULL AS VARCHAR(5))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: TRIM retains a literal NULL
+    sql: SELECT TRIM(NULL) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: TRIM applies its string transformation
+    sql: SELECT TRIM(N' aBc ') AS value
+    expect:
+      rows: 1
+      data:
+      - value: aBc
+  - name: TRIM rejects missing operands
+    sql: SELECT TRIM() AS value
+    expect:
+      error: true
+  - name: TRIM rejects excess operands
+    sql: SELECT TRIM(N'a',N'b') AS value
+    expect:
+      error: true
+  - name: TRIM describes an empty national result from its declaration
+    scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) TRIM(CAST(NULL AS NVARCHAR(3))) AS value" "" (newsession))
+      (lambda (field) (list (field "sql_type") (field "size"))))
+    expect:
+      result:
+      - - NVARCHAR
+        - 6
+  - name: TRIM describes a national column without reading rows
+    scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) TRIM(note) AS value FROM tsql_setup_memo" "" (newsession))
+      (lambda (field) (list (field "sql_type") (field "size"))))
+    expect:
+      result:
+      - - NVARCHAR
+        - 400
+  - name: TRIM compiles to an ordinary unwrapped string expression
+    scm: "(begin\n      (define info (sql_expr_info '() (tsql_builtin_expr \"TRIM\"\n        (list (tsql_cast_expr\
+      \ \" aBc \" \"NVARCHAR\" '(5))))))\n      (define formula (sql_info_formula info))\n      (list (sql_info_type\
+      \ info) (eval formula)\n        (not (strlike (string formula) \"%sql_compile_expr%\"))\n        (not (strlike\
+      \ (string formula) \"%sql_type_expr%\"))))"
+    expect:
+      result:
+      - NVARCHAR
+      - aBc
+      - true
+      - true
+  - name: UPPER converts a declared integer through its text contract
+    sql: SELECT UPPER(CAST(12 AS INT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '12'
+  - name: LOWER converts a declared integer through its text contract
+    sql: SELECT LOWER(CAST(12 AS INT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '12'
+  - name: LTRIM removes spaces while preserving a leading tab
+    sql: SELECT LTRIM(N'  '+NCHAR(9)+N'mixed  ') AS value
+    expect:
+      rows: 1
+      data:
+      - value: "\tmixed  "
+  - name: RTRIM removes spaces while preserving a trailing carriage return
+    sql: SELECT RTRIM(N'  mixed'+NCHAR(13)+N'  ') AS value
+    expect:
+      rows: 1
+      data:
+      - value: "  mixed\r"
+  - name: TRIM removes spaces while preserving tabs and line feeds
+    sql: SELECT TRIM(N' '+NCHAR(9)+N'mixed'+NCHAR(10)+N' ') AS value
+    expect:
+      rows: 1
+      data:
+      - value: "\tmixed\n"
+  - name: LTRIM preserves a nonbreaking space
+    sql: SELECT LTRIM(NCHAR(160)+N'x'+NCHAR(160)) AS value
+    expect:
+      rows: 1
+      data:
+      - value:  x 
+  - name: RTRIM preserves a nonbreaking space
+    sql: SELECT RTRIM(NCHAR(160)+N'x'+NCHAR(160)) AS value
+    expect:
+      rows: 1
+      data:
+      - value:  x 
+  - name: TRIM preserves a nonbreaking space
+    sql: SELECT TRIM(NCHAR(160)+N'x'+NCHAR(160)) AS value
+    expect:
+      rows: 1
+      data:
+      - value:  x 
+  - name: National case mapping uses existing Unicode string operators
+    sql: SELECT UPPER(NCHAR(228)) AS upper_value,LOWER(NCHAR(196)) AS lower_value
+    expect:
+      rows: 1
+      data:
+      - upper_value: Ä
+        lower_value: ä
+  - name: String normalization consumes native nullable column values
+    sql: SELECT id,UPPER(note) AS u,LOWER(note) AS l,LTRIM(note) AS a,RTRIM(note) AS b,TRIM(note) AS c FROM tsql_setup_memo
+      ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        u: PENDING
+        l: pending
+        a: pending
+        b: pending
+        c: pending
+      - id: 2
+        u: null
+        l: null
+        a: null
+        b: null
+        c: null
+      - id: 3
+        u: PENDING
+        l: pending
+        a: pending
+        b: pending
+        c: pending
+  - name: String normalization views retain portable declaration compilers
+    setup:
+    - sql: DROP VIEW IF EXISTS string_normalization_view
+    sql: CREATE VIEW string_normalization_view AS SELECT UPPER(CAST(N'aBc' AS NVARCHAR(3))) AS u,LOWER(CAST(N'aBc'
+      AS NVARCHAR(3))) AS l,TRIM(CAST(N' abc ' AS NVARCHAR(5))) AS t
+  - name: String normalization view definitions survive a catalog restart
+    action: restart
+  - name: Restored string normalization view retains values and national metadata
+    sql: SELECT u,l,t FROM string_normalization_view
+    expect:
+      rows: 1
+      data:
+      - u: ABC
+        l: abc
+        t: abc
+    cleanup:
+    - sql: DROP VIEW IF EXISTS string_normalization_view
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_null_money
   - sql: DROP TABLE IF EXISTS tsql_null_contract_input
