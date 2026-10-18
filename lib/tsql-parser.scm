@@ -1428,6 +1428,7 @@ The shared expression compiler still owns the SQL type; these additional wire
 dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
+	((symbol sql_compile_expr) ((symbol tsql_text_compiler) length _national _fixed) _value) (list length)
 	((symbol sql_compile_expr) ((symbol tsql_builtin_compiler) name) value)
 	(if (has? '("UPPER" "LOWER" "LTRIM" "RTRIM" "TRIM") name)
 		(tsql_result_dimensions sources value parameters) nil)
