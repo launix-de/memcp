@@ -1429,9 +1429,12 @@ dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
 	((symbol sql_compile_expr) ((symbol tsql_text_compiler) length _national _fixed) _value) (list length)
-	((symbol sql_compile_expr) ((symbol tsql_builtin_compiler) name) value)
-	(if (has? '("UPPER" "LOWER" "LTRIM" "RTRIM" "TRIM") name)
+	(cons (symbol sql_compile_expr) (cons ((symbol tsql_builtin_compiler) name) (cons value _arguments)))
+	(if (has? '("UPPER" "LOWER" "LTRIM" "RTRIM" "TRIM" "LEFT" "RIGHT" "SUBSTRING") name)
 		(tsql_result_dimensions sources value parameters) nil)
+	((symbol tsql_left) value _amount) (tsql_result_dimensions sources value parameters)
+	((symbol tsql_right) value _amount) (tsql_result_dimensions sources value parameters)
+	((symbol tsql_substring) value _start _amount _binary) (tsql_result_dimensions sources value parameters)
 	((symbol tsql_upper) value) (tsql_result_dimensions sources value parameters)
 	((symbol tsql_lower) value) (tsql_result_dimensions sources value parameters)
 	((symbol tsql_ltrim) value) (tsql_result_dimensions sources value parameters)
@@ -1683,6 +1686,65 @@ Default trimming removes only ASCII space, preserving other whitespace. */
 (define tsql_ltrim (lambda (value) (if (nil? value) nil (regexp_replace value "^ +" ""))))
 (define tsql_rtrim (lambda (value) (if (nil? value) nil (regexp_replace value " +$" ""))))
 (define tsql_trim (lambda (value) (tsql_rtrim (tsql_ltrim value))))
+/* SQL positions and conversions are frontend contracts. Native prefix operators
+supply complete UTF16 boundaries; byte offsets are used only after validation.
+A boundary inside a surrogate pair is explicitly unsupported by this carrier.
+No character list, decoder, relation or runtime SQL type is constructed here. */
+(define tsql_slice_prefix (lambda (text units binary)
+	(if binary (substr text 0 (min units (strlen text)))
+		(begin
+			(define prefix (utf16_prefix text units))
+			(if (and (< (strlen prefix) (strlen text)) (< (utf16_length prefix) units))
+				(error "string slice boundary inside a surrogate pair is unsupported") prefix)))))
+(define tsql_left (lambda (value amount)
+	(if (or (nil? value) (nil? amount)) nil
+		(< amount 0) (error "LEFT length must be nonnegative")
+		(tsql_slice_prefix (string value) amount false))))
+(define tsql_right (lambda (value amount)
+	(if (or (nil? value) (nil? amount)) nil
+		(< amount 0) (error "RIGHT length must be nonnegative")
+		(equal? amount 0) ""
+		(begin
+			(define text (string value))
+			(define size (utf16_length text))
+			(if (>= amount size) text
+				(substr text (strlen (tsql_slice_prefix text (- size amount) false))))))))
+(define tsql_substring (lambda (value start amount binary)
+	(if (or (nil? value) (nil? start) (nil? amount)) nil
+		(< amount 0) (error "SUBSTRING length must be nonnegative")
+		(equal? amount 0) ""
+		(begin
+			/* Negative plus nonnegative cannot overflow the signed carrier.
+			Do not subtract a possibly minimal start or add two large endpoints. */
+			(define extent (if (< start 1) (max 0 (+ start (- amount 1))) amount))
+			(if (equal? extent 0) ""
+				(begin
+					(define text (string value))
+					(define prefix (tsql_slice_prefix text (if (> start 1) (- start 1) 0) binary))
+					(tsql_slice_prefix (substr text (strlen prefix)) extent binary)))))))
+(define tsql_compile_slicing (lambda (name infos) (begin
+	(if (equal? (count infos) (if (equal? name "SUBSTRING") 3 2)) true
+		(error name " has an invalid argument count"))
+	(define input (car infos))
+	(define type (sql_info_type input))
+	(define binary (and (equal? name "SUBSTRING") (has? '("BINARY" "VARBINARY" "IMAGE") type)))
+	(if (and (equal? name "SUBSTRING")
+		(not (has? '("NULL" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT" "SYSNAME" "BINARY" "VARBINARY" "IMAGE") type)))
+		(error "SUBSTRING requires declared character or binary data") true)
+	(if (and (not (equal? name "SUBSTRING")) (has? '("TEXT" "NTEXT" "IMAGE") type))
+		(error name " requires a convertible character declaration") true)
+	(define output (if binary "VARBINARY"
+		(has? '("NCHAR" "NVARCHAR" "NTEXT" "SYSNAME") type) "NVARCHAR" "VARCHAR"))
+	(define converted (if (or binary (has? '("NULL" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT" "SYSNAME") type))
+		input ((tsql_text_compiler -1 false false) (list input))))
+	(define positions (map (cdr infos) (lambda (info)
+		(sql_info_formula (tsql_convert_value_info info "BIGINT" nil)))))
+	(define arguments (cons (sql_info_formula converted) positions))
+	(sql_info (if (equal? name "SUBSTRING")
+		(cons (quote tsql_substring) (append arguments binary))
+		(cons (if (equal? name "LEFT") (quote tsql_left) (quote tsql_right)) arguments))
+		output (if binary nil (sql_info_collation converted))))))
+
 (define tsql_compile_string_normalization (lambda (name infos) (begin
 	(if (equal? (count infos) 1) true (error name " requires one argument"))
 	(define input (car infos))
@@ -1702,6 +1764,7 @@ Default trimming removes only ASCII space, preserving other whitespace. */
 	(if (equal? name "ROUND") (tsql_compile_round infos)
 		(has? '("ABS" "FLOOR" "CEILING") name) (tsql_compile_numeric_scalar name infos)
 		(has? '("SQUARE" "SQRT") name) (tsql_compile_floating_scalar name infos)
+		(has? '("LEFT" "RIGHT" "SUBSTRING") name) (tsql_compile_slicing name infos)
 		(has? '("UPPER" "LOWER" "LTRIM" "RTRIM" "TRIM") name) (tsql_compile_string_normalization name infos)
 		(sql_call_info (coalesce (tsql_builtins name) (error "unknown function " name)) infos)))))
 
@@ -1713,13 +1776,16 @@ Default trimming removes only ASCII space, preserving other whitespace. */
 	/* First-class callers retain lazy fallback; SQL calls use the declared
 	ISNULL compiler contract rather than this scalar operator alias. */
 	"ISNULL" coalesceNil
+	"LEFT" tsql_left
+	"RIGHT" tsql_right
+	"SUBSTRING" (lambda (value start amount) (tsql_substring value start amount false))
 	"LEN" (lambda (value) (if (nil? value) nil (strlen (sql_rtrim value))))
 	"SQUARE" tsql_square
 	"SQRT" tsql_square_root
 	"LTRIM" tsql_ltrim
 	"RTRIM" tsql_rtrim
 	"TRIM" tsql_trim
-	_ (if (has? '("ABS" "CEILING" "FLOOR" "ROUND" "UPPER" "LOWER" "REPLACE" "SUBSTRING" "CONCAT" "YEAR" "MONTH" "DAY") name)
+	_ (if (has? '("ABS" "CEILING" "FLOOR" "ROUND" "UPPER" "LOWER" "REPLACE" "CONCAT" "YEAR" "MONTH" "DAY") name)
 		(sql_builtins name) nil))))
 
 /* GO belongs to the script envelope, never the SQL statement grammar. Quoted
@@ -1986,7 +2052,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '((define fn tsql_identifier_unquoted) "(" (define arg tsql_expression) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")")
 			(tsql_window_expr (toUpper fn) (list arg) _over))
 
-		(parser '((atom "SUBSTRING" true) "(" (define s tsql_expression) "," (define start tsql_expression) "," (define len tsql_expression) ")") '((quote sql_substr) s start len))
+		(parser '((define name (or (atom "LEFT" true true "LEFT")
+			(atom "RIGHT" true true "RIGHT") (atom "SUBSTRING" true true "SUBSTRING")))
+			"(" (define args (* tsql_expression ",")) ")") (tsql_builtin_expr name args))
 
 		(parser '((atom "CONCAT" true) "(" (define p (+ tsql_expression ",")) ")")
 			(cons (quote concat) (map p (lambda (value) (list (quote coalesceNil) value "")))))
@@ -2018,10 +2086,6 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '((atom "@@IDENTITY" true)) (tsql_identity_expr false))
 
 		(parser (define var tsql_variable_name) (parameter_expression var))
-
-		(parser '((atom "LEFT" true) "(" (define s tsql_expression) "," (define n tsql_expression) ")") '((quote sql_substr) s 1 n))
-
-		(parser '((atom "RIGHT" true) "(" (define s tsql_expression) "," (define n tsql_expression) ")") '((quote if) '((quote nil?) s) nil '((quote sql_substr) s '((quote +) 1 '((quote -) '((quote strlen) s) n)) n)))
 
 		(parser '((define fn tsql_identifier_unquoted) "(" (define args (* tsql_expression ",")) ")" (atom "OVER" true) "(" (define _over tsql_window_spec) ")") (tsql_window_expr (toUpper fn) args _over))
 
