@@ -1332,6 +1332,65 @@ test_cases:
     data:
     - n: 9
     - n: 8
+- name: CTE rejects a synthesized literal output name
+  sql: WITH local_rows AS (SELECT 1) SELECT [1] FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects a synthesized computed output name
+  sql: WITH local_rows AS (SELECT id+1 FROM dbo.tsql_data) SELECT * FROM local_rows
+  expect:
+    error: true
+- name: CTE does not borrow output names from a later UNION arm
+  sql: WITH local_rows AS (SELECT 1 UNION ALL SELECT 2 AS n) SELECT * FROM local_rows
+  expect:
+    error: true
+- name: CTE accepts an explicitly quoted numeric output name
+  sql: WITH local_rows AS (SELECT 1 AS [1]) SELECT [1] FROM local_rows
+  expect:
+    rows: 1
+    data:
+    - '1': 1
+- name: CTE uses the named first UNION arm for output names
+  sql: WITH local_rows AS (SELECT 1 AS n UNION ALL SELECT 2) SELECT n FROM local_rows ORDER BY n
+  expect:
+    rows: 2
+    data:
+    - n: 1
+    - n: 2
+- name: CTE rejects OPTION nested in a derived producer
+  sql: WITH local_rows AS (SELECT d.id FROM (SELECT id FROM dbo.tsql_data OPTION(RECOMPILE)) AS d) SELECT id FROM
+    local_rows
+  expect:
+    error: true
+- name: CTE rejects OPTION nested in a predicate producer
+  sql: WITH local_rows AS (SELECT id FROM dbo.tsql_data WHERE EXISTS(SELECT 1 OPTION(RECOMPILE))) SELECT id FROM
+    local_rows
+  expect:
+    error: true
+- name: CTE allows a qualified native UPDATE despite shadowing
+  sql: WITH tsql_data(id) AS (SELECT 99) UPDATE dbo.tsql_data SET val=val+1 WHERE id=1
+- name: CTE observes the qualified native UPDATE
+  sql: SELECT id,val FROM dbo.tsql_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      val: 11
+- name: CTE restores its qualified native UPDATE fixture
+  sql: UPDATE dbo.tsql_data SET val=10 WHERE id=1
+- name: CTE allows a qualified native DELETE despite shadowing
+  sql: WITH tsql_data(id) AS (SELECT 99) DELETE FROM dbo.tsql_data WHERE id=-1
+- name: CTE allows a qualified native INSERT despite shadowing
+  sql: WITH tsql_data(id) AS (SELECT 99) INSERT INTO dbo.tsql_data VALUES(5,N'extra',60)
+- name: CTE observes the qualified native INSERT
+  sql: SELECT id,val FROM dbo.tsql_data WHERE id=5
+  expect:
+    rows: 1
+    data:
+    - id: 5
+      val: 60
+- name: CTE removes its qualified native INSERT fixture
+  sql: DELETE FROM dbo.tsql_data WHERE id=5
 - sql: DROP VIEW IF EXISTS dbo.tsql_view
   name: 'Fixture cleanup 001: DROP VIEW IF EXISTS dbo.tsql_view'
 - sql: DROP TABLE IF EXISTS dbo.tsql_copy
