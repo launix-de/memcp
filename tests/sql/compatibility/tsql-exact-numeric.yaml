@@ -2535,4 +2535,319 @@ test_cases:
     - true
     - true
 
+- name: SQUARE converts declared INT through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts declared SMALLINT through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS SMALLINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts declared BIGINT through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS BIGINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts declared FLOAT through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts declared REAL through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS REAL)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts declared DECIMAL(9,2) through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS DECIMAL(9,2))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts declared MONEY through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS MONEY)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts declared SMALLMONEY through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS SMALLMONEY)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts a complete national numeric text
+  sql: SELECT SQUARE(N'2.25') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 5.0625
+- name: SQUARE retains a typed NULL
+  sql: SELECT SQUARE(CAST(NULL AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: SQUARE retains a literal NULL
+  sql: SELECT SQUARE(NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: SQUARE converts its declared BIT operand
+  sql: SELECT SQUARE(CAST(1 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: SQUARE rejects a numeric prefix followed by text
+  sql: SELECT SQUARE(N'9junk') AS value
+  expect:
+    error: true
+- name: SQUARE requires an operand
+  sql: SELECT SQUARE() AS value
+  expect:
+    error: true
+- name: SQUARE rejects a second operand
+  sql: SELECT SQUARE(9,4) AS value
+  expect:
+    error: true
+- name: SQUARE compiles a plain formula with a declared FLOAT result
+  scm: (begin (define info (sql_expr_info (list) (tsql_builtin_expr "SQUARE" (list (tsql_cast_expr "2.25" "NVARCHAR"
+    (list 8)))))) (define syntax (json_encode (expression_syntax (sql_info_formula info)))) (list (sql_info_type
+    info) (eval (sql_info_formula info)) (not (strlike syntax "%sql_type_expr%")) (not (strlike syntax "%sql_compile_expr%"))))
+  expect:
+    result:
+    - FLOAT
+    - 5.0625
+    - true
+    - true
+- name: SQRT converts declared INT through its floating contract
+  sql: SELECT SQRT(CAST(81 AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts declared SMALLINT through its floating contract
+  sql: SELECT SQRT(CAST(81 AS SMALLINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts declared BIGINT through its floating contract
+  sql: SELECT SQRT(CAST(81 AS BIGINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts declared FLOAT through its floating contract
+  sql: SELECT SQRT(CAST(81 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts declared REAL through its floating contract
+  sql: SELECT SQRT(CAST(81 AS REAL)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts declared DECIMAL(9,2) through its floating contract
+  sql: SELECT SQRT(CAST(81 AS DECIMAL(9,2))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts declared MONEY through its floating contract
+  sql: SELECT SQRT(CAST(81 AS MONEY)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts declared SMALLMONEY through its floating contract
+  sql: SELECT SQRT(CAST(81 AS SMALLMONEY)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts a complete national numeric text
+  sql: SELECT SQRT(N'2.25') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1.5
+- name: SQRT retains a typed NULL
+  sql: SELECT SQRT(CAST(NULL AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: SQRT retains a literal NULL
+  sql: SELECT SQRT(NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: SQRT converts its declared BIT operand
+  sql: SELECT SQRT(CAST(1 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: SQRT rejects a numeric prefix followed by text
+  sql: SELECT SQRT(N'9junk') AS value
+  expect:
+    error: true
+- name: SQRT requires an operand
+  sql: SELECT SQRT() AS value
+  expect:
+    error: true
+- name: SQRT rejects a second operand
+  sql: SELECT SQRT(9,4) AS value
+  expect:
+    error: true
+- name: SQRT compiles a plain formula with a declared FLOAT result
+  scm: (begin (define info (sql_expr_info (list) (tsql_builtin_expr "SQRT" (list (tsql_cast_expr "2.25" "NVARCHAR"
+    (list 8)))))) (define syntax (json_encode (expression_syntax (sql_info_formula info)))) (list (sql_info_type
+    info) (eval (sql_info_formula info)) (not (strlike syntax "%sql_type_expr%")) (not (strlike syntax "%sql_compile_expr%"))))
+  expect:
+    result:
+    - FLOAT
+    - 1.5
+    - true
+    - true
+- name: SQUARE converts before a large integer product can wrap
+  sql: SELECT SQUARE(CAST('4000000000' AS BIGINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1.6e+19
+- name: SQUARE retains a negative floating magnitude
+  sql: SELECT SQUARE(CAST(-2.5 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 6.25
+- name: SQRT accepts zero
+  sql: SELECT SQRT(0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: SQUARE rejects a nonfinite product
+  sql: SELECT SQUARE(CAST(1e200 AS FLOAT)) AS value
+  expect:
+    error: true
+- name: SQRT rejects a negative real domain
+  sql: SELECT SQRT(CAST(-1 AS FLOAT)) AS value
+  expect:
+    error: true
+- name: Floating math uses native nullable column values
+  setup:
+  - sql: DROP TABLE IF EXISTS floating_math_values
+  - sql: CREATE TABLE floating_math_values(id INT PRIMARY KEY,n BIGINT,label NVARCHAR(16),x FLOAT)
+  - sql: INSERT floating_math_values VALUES(1,4000000000,N'2.25',-2.5),(2,9,N'9',0),(3,NULL,NULL,NULL)
+  sql: SELECT id,SQUARE(n) AS squared,SQRT(label) AS root,SQUARE(x) AS fractional FROM floating_math_values ORDER
+    BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      squared: 1.6e+19
+      root: 1.5
+      fractional: 6.25
+    - id: 2
+      squared: 81
+      root: 3
+      fractional: 0
+    - id: 3
+      squared: null
+      root: null
+      fractional: null
+  cleanup:
+  - sql: DROP TABLE floating_math_values
+- name: Floating math descriptions keep FLOAT for empty typed results
+  scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) SQUARE(CAST(NULL AS INT)) AS squared,SQRT(CAST(NULL AS NVARCHAR(8)))
+    AS root" "" (newsession)) (lambda (field) (list (field "name") (field "sql_type") (field "kind") (field "size"))))
+  expect:
+    result:
+    - - squared
+      - FLOAT
+      - 109
+      - 8
+    - - root
+      - FLOAT
+      - 109
+      - 8
+- name: Prepared floating math uses declared transport values including NULL
+  tds:
+    statements:
+    - sql: SELECT SQUARE(@value) AS squared,SQRT(@value) AS root
+      prepare: true
+      parameters:
+      - name: value
+        value: 4.0
+      expect:
+        rows: 1
+        data:
+        - squared: 16
+          root: 2
+        column_types:
+        - name: squared
+          type: FLOAT
+        - name: root
+          type: FLOAT
+    - sql: SELECT SQUARE(@value) AS squared,SQRT(@value) AS root
+      prepare: true
+      parameters:
+      - name: value
+        value: null
+      expect:
+        rows: 1
+        data:
+        - squared: null
+          root: null
+        column_types:
+        - name: squared
+          type: FLOAT
+        - name: root
+          type: FLOAT
+    - sql: SELECT SQUARE(@value) AS squared,SQRT(@value) AS root
+      prepare: true
+      parameters:
+      - name: value
+        value: 9.0
+      expect:
+        rows: 1
+        data:
+        - squared: 81
+          root: 3
+        column_types:
+        - name: squared
+          type: FLOAT
+        - name: root
+          type: FLOAT
+- name: Floating math view stores portable declaration compilers
+  sql: CREATE VIEW floating_math_view AS SELECT SQUARE(CAST(12 AS INT)) AS squared,SQRT(CAST(81 AS INT)) AS root
+  setup:
+  - sql: DROP VIEW IF EXISTS floating_math_view
+- name: Floating math view definitions survive a catalog restart
+  action: restart
+- name: Restored floating math view keeps both result contracts
+  sql: SELECT squared,root FROM floating_math_view
+  expect:
+    rows: 1
+    data:
+    - squared: 144
+      root: 9
+  cleanup:
+  - sql: DROP VIEW IF EXISTS floating_math_view
+
 cleanup: []

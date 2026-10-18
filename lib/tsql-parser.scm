@@ -1649,9 +1649,27 @@ Other scalar return families are selected by the frontend compiler below. */
 			(sql_info (if money (list (quote tsql_cast_money) formula false) formula)
 				(if integer (if (equal? type "BIGINT") "BIGINT" "INT") money "MONEY" "FLOAT") nil))))))
 
+/* These functions consume FLOAT contracts. Convert once before arithmetic:
+an integer carrier must not overflow before the declared floating operation. */
+(define tsql_square (lambda (value) (match value
+	nil nil
+	operand (begin
+		(define number (float operand))
+		(float (tsql_numeric_input (* number number)))))))
+(define tsql_square_root (lambda (value)
+	(if (nil? value) nil
+		(< value 0) (error "SQRT requires a nonnegative floating operand")
+		(sqrt (float value)))))
+(define tsql_compile_floating_scalar (lambda (name infos) (begin
+	(if (equal? (count infos) 1) true (error name " requires one argument"))
+	(define input (tsql_convert_value_info (car infos) "FLOAT" nil))
+	(sql_info (list (if (equal? name "SQUARE") (quote tsql_square) (quote tsql_square_root))
+		(sql_info_formula input)) "FLOAT" nil))))
+
 (define tsql_builtin_compiler (lambda (name) (lambda (infos)
 	(if (equal? name "ROUND") (tsql_compile_round infos)
 		(has? '("ABS" "FLOOR" "CEILING") name) (tsql_compile_numeric_scalar name infos)
+		(has? '("SQUARE" "SQRT") name) (tsql_compile_floating_scalar name infos)
 		(sql_call_info (coalesce (tsql_builtins name) (error "unknown function " name)) infos)))))
 
 (define tsql_builtin_expr (lambda (name arguments) (begin
@@ -1663,7 +1681,9 @@ Other scalar return families are selected by the frontend compiler below. */
 	ISNULL compiler contract rather than this scalar operator alias. */
 	"ISNULL" coalesceNil
 	"LEN" (lambda (value) (if (nil? value) nil (strlen (sql_rtrim value))))
-	_ (if (has? '("ABS" "CEILING" "FLOOR" "ROUND" "SQRT" "UPPER" "LOWER" "REPLACE" "SUBSTRING" "CONCAT" "YEAR" "MONTH" "DAY") name)
+	"SQUARE" tsql_square
+	"SQRT" tsql_square_root
+	_ (if (has? '("ABS" "CEILING" "FLOOR" "ROUND" "UPPER" "LOWER" "REPLACE" "SUBSTRING" "CONCAT" "YEAR" "MONTH" "DAY") name)
 		(sql_builtins name) nil))))
 
 /* GO belongs to the script envelope, never the SQL statement grammar. Quoted
