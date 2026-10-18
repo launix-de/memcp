@@ -1707,7 +1707,12 @@ class SQLTestRunner:
             return self.execute_sql(
                 database, query, auth_header, active_syntax,
                 session_id=session_id, timeout=sql_timeout, params=sql_params,
-                retry_on_connection_failure=not fixture_trial and not self._expect_interrupted_ok(test_case.get("expect")),
+                # Preserve execute_sql's request-safety decision. A case is
+                # not permission to replay a possibly committed mutation.
+                retry_on_connection_failure=(
+                    False if fixture_trial or self._expect_interrupted_ok(test_case.get("expect"))
+                    else None
+                ),
             )
 
         def record_baseline_query_failure(response, phase):
@@ -2156,10 +2161,10 @@ class SQLTestRunner:
                         return False
 
         if "affected_rows" in expect:
-            expected = expect["affected_rows"]
-            if results and results and "affected_rows" in results[0]:
-                return results[0]["affected_rows"] == expected
-            return True
+            if (not results or not isinstance(results[0], dict)
+                    or "affected_rows" not in results[0]
+                    or results[0]["affected_rows"] != expect["affected_rows"]):
+                return False
 
         if results is None:
             return False
@@ -2187,6 +2192,8 @@ class SQLTestRunner:
                 if not isinstance(results[i], dict):
                     return False
                 for k, v in row.items():
+                    if k not in results[i]:
+                        return False
                     if isinstance(v, float) and isinstance(results[i].get(k), (int, float)):
                         if abs(results[i][k] - v) > 0.01:
                             return False

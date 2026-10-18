@@ -1132,6 +1132,37 @@ class FailureAttributionContractTest(unittest.TestCase):
         self.assertEqual(runner.failed_critical, 1)
 
 
+class SQLResultPresenceContractTest(unittest.TestCase):
+    def test_affected_rows_requires_an_explicit_matching_result(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        response = SimpleNamespace(status_code=200, text="response", headers={})
+        for results, wanted in (
+            (None, False), ([], False), ([{}], False),
+            ([{"other": 0}], False), ([None], False), (["row"], False),
+            ([{"affected_rows": 1}], False), ([{"affected_rows": 0}], True),
+        ):
+            with self.subTest(results=results):
+                self.assertEqual(runner.validate_expectation(
+                    {"expect": {"affected_rows": 0}}, response, results), wanted)
+
+    def test_affected_rows_does_not_skip_other_result_assertions(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        response = SimpleNamespace(status_code=200, text="response", headers={})
+        case = {"expect": {"affected_rows": 1, "data": [{"proof": "yes"}]}}
+        self.assertFalse(runner.validate_expectation(case, response, [{"affected_rows": 1}]))
+        self.assertTrue(runner.validate_expectation(
+            case, response, [{"affected_rows": 1, "proof": "yes"}]))
+
+    def test_sql_null_requires_the_requested_column(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        response = SimpleNamespace(status_code=200, text="response", headers={})
+        case = {"expect": {"rows": 1, "data": [{"value": None}]}}
+        for result, wanted in (({}, False), ({"other": None}, False),
+                               ({"value": None}, True), ({"value": 0}, False)):
+            with self.subTest(result=result):
+                self.assertEqual(runner.validate_expectation(case, response, [result]), wanted)
+
+
 class ErrorResponseContractTest(unittest.TestCase):
     def test_missing_response_is_not_a_sql_error(self) -> None:
         self.assertFalse(is_error_response(None))
@@ -1192,6 +1223,51 @@ class InterruptedRequestContractTest(unittest.TestCase):
         self.assertIs(response, recovered)
         self.assertEqual(post.call_count, 2)
         wait_for_memcp.assert_called_once()
+
+    def test_case_dispatch_does_not_replay_mutations_after_unknown_outcomes(self) -> None:
+        # The server may have committed before the response was lost. Exercise
+        # the case dispatcher too: testing execute_sql alone misses overrides.
+        for query in (
+            "INSERT INTO items VALUES (1)",
+            "UPDATE items SET value = value + 1",
+            "DELETE FROM items",
+            "WITH source AS (SELECT 1) INSERT INTO items SELECT * FROM source",
+            "EXEC advance_counter",
+        ):
+            for failure in (requests.ConnectionError, requests.Timeout):
+                with self.subTest(query=query, failure=failure.__name__):
+                    runner = SQLTestRunner("http://localhost:1")
+                    runner.ensure_database = lambda _database: None
+                    recovered = SimpleNamespace(status_code=200, text='{"affected_rows": 1}')
+                    with mock.patch(
+                        "run_sql_tests.requests.post", side_effect=[failure("response lost"), recovered]
+                    ) as post, mock.patch("run_sql_tests.wait_for_memcp") as ready:
+                        passed = runner.run_test_case({
+                            "name": "mutation outcome is unknown",
+                            "sql": query,
+                            "max_plan_size": 0,
+                            "expect": {"affected_rows": 1},
+                        }, "memcp-tests")
+                    self.assertFalse(passed)
+                    post.assert_called_once()
+                    ready.assert_not_called()
+
+    def test_case_dispatch_keeps_read_only_recovery(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        runner.ensure_database = lambda _database: None
+        recovered = SimpleNamespace(status_code=200, text='{"value": 1}')
+        with mock.patch(
+            "run_sql_tests.requests.post", side_effect=[requests.ConnectionError("response lost"), recovered]
+        ) as post, mock.patch("run_sql_tests.wait_for_memcp") as ready:
+            passed = runner.run_test_case({
+                "name": "read-only recovery",
+                "sql": "SELECT 1 AS value",
+                "max_plan_size": 0,
+                "expect": {"rows": 1, "data": [{"value": 1}]},
+            }, "memcp-tests")
+        self.assertTrue(passed)
+        self.assertEqual(post.call_count, 2)
+        ready.assert_called_once()
 
     def test_interrupted_mutation_is_not_retried_after_connection_loss(self) -> None:
         runner = SQLTestRunner("http://localhost:1")
