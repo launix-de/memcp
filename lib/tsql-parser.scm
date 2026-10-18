@@ -183,7 +183,8 @@ no SQL type wrapper survives into execution or storage. */
 /* The same type grammar is used for RPC declarations and expression casts. */
 (define tsql_declared_type (parser '(
 	(? (define namespace tsql_identifier) ".") (define type tsql_column_type)
-) (if (or (nil? namespace) (equal?? namespace "sys")) type
+) (if (nil? namespace) type
+		(equal?? namespace "sys") (if (equal? type "SYSNAME") "[sys].[SYSNAME]" type)
 		(error "unsupported type namespace: " namespace))))
 /* Column declarations additionally admit persisted alias names. Cast/RPC
 contracts keep their existing native-type grammar until alias contracts there
@@ -247,8 +248,8 @@ numeric precision widening, and relaxed NULL policy. No frontend row scans. */
 			(define name tsql_variable_name)
 			(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
 			(define output (? (or (atom "OUTPUT" true) (atom "OUT" true))))
-		) (if output (list (toLower name) (cons type (tsql_decl_dimensions type dimensions)) true)
-				(list (toLower name) (cons type (tsql_decl_dimensions type dimensions))))) ","))
+		) (if output (list (toLower name) (tsql_parameter_declaration _schema type dimensions) true)
+				(list (toLower name) (tsql_parameter_declaration _schema type dimensions)))) ","))
 			(tsql_unique_parameters declarations) "^(?:/\\*.*?\\*/|--[^\r\n]*(?:[\r\n]|$)|[\r\n\t ]+)+") text))))
 /* Identity eligibility is a declaration-time dialect rule. Allocate values
 with the existing native auto_increment option, without another allocator or
@@ -263,9 +264,24 @@ runtime SQL type checks. Numeric declarations may only have zero scale. */
 			(lambda (key) (has? '("default" "default_expression") key)))
 			(error "IDENTITY cannot have a DEFAULT declaration") true)
 		(append attributes "null" false)) attributes)))
+/* This built-in alias has one immutable frontend declaration, not a catalog
+row or another storage type. Source declarations keep their original name;
+consumers resolve the existing parameter/column contract before compilation. */
+(define tsql_builtin_type_declaration (lambda (type)
+	(if (has? '("SYSNAME" "[SYS].[SYSNAME]") (toUpper type))
+		(list "name" "sysname" "base_type" "NVARCHAR" "dimensions" '(128) "nullable" false) nil)))
+(define tsql_parameter_declaration (lambda (database type dimensions) (begin
+	(define dimensions (tsql_decl_dimensions type dimensions))
+	(if (tsql_builtin_type_declaration type) (tsql_resolve_schema_type database type dimensions nil) true)
+	(cons type dimensions))))
+(define tsql_effective_parameter_contract (lambda (contract) (begin
+	(define builtin (tsql_builtin_type_declaration (car contract)))
+	(if builtin (cons (builtin "base_type") (builtin "dimensions")) contract))))
 (define tsql_decl_dimensions (lambda (type dimensions) (begin
 	(define count_dimensions (count dimensions))
-	(if (has? '("VARCHAR" "CHAR" "NVARCHAR" "NCHAR" "BINARY" "VARBINARY") type)
+	(if (tsql_builtin_type_declaration type)
+		(if (empty_list? dimensions) dimensions (error "built-in alias dimensions cannot be overridden"))
+		(has? '("VARCHAR" "CHAR" "NVARCHAR" "NCHAR" "BINARY" "VARBINARY") type)
 		(begin
 			(define length (if (empty_list? dimensions) 1 (car dimensions)))
 			(if (and (<= count_dimensions 1)
@@ -355,6 +371,7 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 
 (define tsql_cast_expr (lambda (value type dimensions) (begin
 	(define name (toUpper type))
+	(if (tsql_builtin_type_declaration name) (error "alias types cannot be explicit conversion targets") true)
 	(tsql_decl_dimensions name dimensions)
 	(define formula (match name
 		"INT" (list tsql_cast_integer value -2147483648 2147483647)
@@ -518,6 +535,7 @@ configurable cutoff remain separate compatibility work. */
 	(define parsed (str_to_date (concat date " " clock) "%Y-%m-%d %H:%i:%s"))
 	(if (nil? parsed) (error "invalid datetime value") (unix_timestamp parsed))))))
 (define tsql_convert_expr (lambda (value type dimensions style) (begin
+	(if (tsql_builtin_type_declaration type) (error "alias types cannot be explicit conversion targets") true)
 	(tsql_decl_dimensions type dimensions)
 	(match style
 		(symbol sql_null_style) (list (quote sql_type_expr) nil type nil)
@@ -1199,7 +1217,7 @@ dimensions are metadata only and are absent from the executable plan. */
 	((symbol hex2bin) hex) (if (string? hex) (list (intdiv (strlen hex) 2)) nil)
 	((symbol session) key) (begin
 		(define declaration (find parameters (lambda (item) (equal? key (concat "__tsql_parameter:" (car item)))) nil))
-		(if declaration (cdr (cadr declaration))
+		(if declaration (cdr (tsql_effective_parameter_contract (cadr declaration)))
 			(equal? key "schema") '(128)
 			(has? '("__tsql_scope_identity" "__tsql_identity") key) '(38 0) nil))
 	((symbol get_column) alias alias_ic column column_ic) (begin
@@ -1336,7 +1354,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(if script_syntax (list (quote tsql_batch_variable) name)
 			(empty_list? declaration) (error "undeclared T-SQL parameter: @" name)
 			(list (quote sql_type_expr) (list (quote session) (concat "__tsql_parameter:" name))
-				(car (cadr (car declaration))) nil)))))
+				(car (tsql_effective_parameter_contract (cadr (car declaration)))) nil)))))
 
 	(define placeholder_counter (newsession))
 	(placeholder_counter "n" 0)
@@ -2290,6 +2308,8 @@ a separator is recognized only on a physical line containing no SQL text. */
 					(define previous (if (nil? handle) nil (show handle "column" column true)))
 					(if (nil? previous) (error "ALTER column does not exist: " column) true)
 					(define dimensions (tsql_decl_dimensions type dimensions))
+					(define builtin (tsql_builtin_type_declaration type))
+					(define dimensions (if builtin (builtin "dimensions") dimensions))
 					(define type (tsql_storage_type type))
 					(define collation (coalesceNil collation (coalesceNil (previous "Collation") "")))
 					(if (tsql_compatible_column_declaration? previous type dimensions nullable collation) true
@@ -2459,7 +2479,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(define name tsql_script_variable) (? (atom "AS" true))
 				(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
 				(? "=" (define initializer (capture tsql_expression)))
-			) (list name (cons type (tsql_decl_dimensions type dimensions))
+			) (list name (tsql_parameter_declaration schema type dimensions)
 					(if initializer (car initializer) nil))))
 			(define tsql_script_exec_value (parser (or
 				(parser '((define variable tsql_script_variable) (or (atom "OUTPUT" true) (atom "OUT" true)))
@@ -2523,7 +2543,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 				initializers; they cannot capture an invocation's caller locals. */
 				(? "=" (define initializer (capture (or tsql_literal (parser '("+" (define value tsql_number)) value)))))
 				(define output (? (or (atom "OUTPUT" true) (atom "OUT" true))))
-			) (list name (cons type (tsql_decl_dimensions type dimensions))
+			) (list name (tsql_parameter_declaration schema type dimensions)
 					(if initializer (car initializer) nil) (if output true false))))
 			(define tsql_script_procedure (parser '(
 				(atom "CREATE" true) (define replace (? (atom "OR" true) (atom "ALTER" true)))
