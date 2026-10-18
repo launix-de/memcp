@@ -2617,11 +2617,23 @@ func Init(en scm.Env) {
 			validateUniqueConstraintNames(newTable.Unique)
 			newTable.publishShowColumnsSnapshot(true)
 
-			db.schemalock.Lock()
-			existing := db.tables.Get(tblName)
-			if nameIgnoreCase {
-				existing = db.GetTable(tblName, true)
-			}
+			existing := func() *table {
+				db.schemalock.Lock()
+				resolved := false
+				defer func() {
+					// Folded lookup can reject an ambiguous namespace. Only a
+					// successful lookup hands schema ownership to publication below.
+					if !resolved {
+						db.schemalock.Unlock()
+					}
+				}()
+				existing := db.tables.Get(tblName)
+				if nameIgnoreCase {
+					existing = db.GetTable(tblName, true)
+				}
+				resolved = true
+				return existing
+			}()
 			if existing != nil {
 				// Keep the hot ifnotexists path free of schema saves. Planner-created
 				// helper tables deliberately re-issue createtable on every query; if

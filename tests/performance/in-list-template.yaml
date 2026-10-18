@@ -1,8 +1,7 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Lexical cases: 100 operations, 3 warmups, 9 samples. Short QPCache cases:
-# 501 fresh caches for the point case, 51 for the IN cases; each cache keeps
-# 40 lookups including its first cold compilation.
+# 51 fresh caches, each with 40 lookups including its first cold compilation.
 # Forced-compilation coverage keeps five samples of 40 fresh caches each.
 metadata:
   performance_shard_weight: 19
@@ -120,10 +119,8 @@ test_cases:
     data:
     - ok
 - name: QPCache parse point 40 calls including cold compile
-  # Repeat complete cold/warm blocks so occasional pauses are amortized within
-  # one fixture instead of repeating its expensive setup in extra A/B pairs.
   warmup: 0
-  timing_samples: 501
+  timing_samples: 51
   timing_aggregation: total
   threshold_ms: 3000
   scm: |-

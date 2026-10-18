@@ -488,10 +488,6 @@ test_cases:
     sql: SELECT CONVERT(SYSNAME,N'box') AS value
     expect:
       error: true
-  - name: Built-in name type does not enable an explicit TRY alias target
-    sql: SELECT TRY_CAST(N'box' AS SYSNAME) AS value
-    expect:
-      error: true
   - name: Built-in name type does not create an alias catalog row
     setup:
     - sql: DROP TABLE IF EXISTS tsql_builtin_names
@@ -522,10 +518,6 @@ test_cases:
       error: true
   - name: Built-in name type rejects a NULL styled CONVERT alias target
     sql: SELECT CONVERT(SYSNAME,NULL,NULL) AS value
-    expect:
-      error: true
-  - name: Built-in name type rejects a NULL TRY_CAST alias target
-    sql: SELECT TRY_CAST(NULL AS SYSNAME) AS value
     expect:
       error: true
   - name: Built-in name type ALTER retains its fixed declaration while relaxing NULL

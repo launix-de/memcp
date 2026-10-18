@@ -396,33 +396,37 @@ class UpgradeWorkflowContractTest(unittest.TestCase):
         import subprocess
         step = next(step for step in self.jobs["versions"]["steps"]
                     if step.get("id") == "refs")
+        # A commit hook exports its own repository/index paths and Git -c
+        # settings. The disposable fixture must own all of its Git operations.
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith("GIT_")}
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             subprocess.run(["git", "init", "-b", "master"], cwd=repo,
-                           check=True, capture_output=True)
+                           env=environment, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "upgrade@example.invalid"],
-                           cwd=repo, check=True)
+                           cwd=repo, env=environment, check=True)
             subprocess.run(["git", "config", "user.name", "Upgrade Test"], cwd=repo,
-                           check=True)
+                           env=environment, check=True)
             commits = []
             for number in range(3):
                 (repo / "revision").write_text(str(number))
-                subprocess.run(["git", "add", "revision"], cwd=repo, check=True)
+                subprocess.run(["git", "add", "revision"], cwd=repo, env=environment, check=True)
                 subprocess.run(["git", "commit", "-m", "revision " + str(number)],
-                               cwd=repo, check=True, capture_output=True)
+                               cwd=repo, env=environment, check=True, capture_output=True)
                 commits.append(subprocess.run(
                     ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
-                    capture_output=True, text=True).stdout.strip())
+                    env=environment, capture_output=True, text=True).stdout.strip())
             subprocess.run(["git", "tag", "upgrade-release-0.1", commits[0]],
-                           cwd=repo, check=True)
+                           cwd=repo, env=environment, check=True)
             subprocess.run(["git", "tag", "upgrade-release-0.2", commits[1]],
-                           cwd=repo, check=True)
+                           cwd=repo, env=environment, check=True)
             subprocess.run(["git", "tag", "unrelated-release", commits[0]],
-                           cwd=repo, check=True)
+                           cwd=repo, env=environment, check=True)
             subprocess.run(["git", "update-ref", "refs/remotes/origin/master", commits[2]],
-                           cwd=repo, check=True)
+                           cwd=repo, env=environment, check=True)
             output = Path(tmp) / "output"
-            env = dict(os.environ, REQUESTED_REFS=requested, PR_BASE_REF=base,
+            env = dict(environment, REQUESTED_REFS=requested, PR_BASE_REF=base,
                        GITHUB_OUTPUT=str(output))
             result = subprocess.run(["bash", "-c", step["run"]], cwd=repo,
                                     env=env, capture_output=True)
@@ -430,6 +434,38 @@ class UpgradeWorkflowContractTest(unittest.TestCase):
             if output.exists():
                 refs = json.loads(output.read_text().removeprefix("predecessors="))
             return result.returncode, refs, commits
+
+    def test_fixture_git_does_not_inherit_hook_repository(self):
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith("GIT_")}
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory)
+
+            def git(*arguments):
+                return subprocess.check_output(["git", "-C", str(caller), *arguments],
+                                               env=environment, text=True).strip()
+
+            git("init", "-b", "master")
+            git("config", "core.hooksPath", "/dev/null")
+            git("config", "user.name", "Caller")
+            git("config", "user.email", "caller@example.invalid")
+            (caller / "sentinel").write_text("caller-owned contents")
+            git("add", "sentinel")
+            git("commit", "-m", "caller-owned commit")
+            before = (git("rev-parse", "HEAD"), git("tag"),
+                      (caller / ".git/config").read_bytes(), (caller / ".git/index").read_bytes())
+            with mock.patch.dict(os.environ, {
+                    "GIT_DIR": str(caller / ".git"), "GIT_COMMON_DIR": str(caller / ".git"),
+                    "GIT_WORK_TREE": str(caller), "GIT_INDEX_FILE": str(caller / ".git/index"),
+                    "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name",
+                    "GIT_CONFIG_VALUE_0": "Inherited hook identity"}):
+                status, refs, _commits = self.select_refs("[]")
+            self.assertEqual(status, 0)
+            self.assertEqual(len(refs), 3)
+            after = (git("rev-parse", "HEAD"), git("tag"),
+                     (caller / ".git/config").read_bytes(), (caller / ".git/index").read_bytes())
+            self.assertEqual(after, before, "fixture Git commands changed their caller's repository")
+            self.assertEqual((caller / "sentinel").read_text(), "caller-owned contents")
 
     def test_previous_master_and_every_release_pin_are_selected(self):
         status, refs, commits = self.select_refs("[]")
