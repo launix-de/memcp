@@ -1,0 +1,223 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Pure preparation and declaration-based client result metadata
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup:
+  - sql: DROP TABLE IF EXISTS prepare_describe_rows
+  - sql: DROP TABLE IF EXISTS prepare_describe_source
+  - sql: CREATE TABLE prepare_describe_rows(id INT IDENTITY PRIMARY KEY,label NVARCHAR(12) NOT NULL DEFAULT N'initial',amount DECIMAL(9,2),rv ROWVERSION)
+  - sql: CREATE TABLE prepare_describe_source(id INT PRIMARY KEY,value NVARCHAR(12))
+test_cases:
+  - name: INSERT VALUES preparation returns no fields and reserves no identity
+    scm: |
+      (empty_list? (tds_describe "memcp-tests"
+        "INSERT prepare_describe_rows(label) VALUES(@label)" "@label NVARCHAR(12)" (newsession)))
+    expect: {result: true}
+  - name: INSERT DEFAULT VALUES preparation uses the same declaration path
+    scm: |
+      (empty_list? (tds_describe "memcp-tests"
+        "INSERT prepare_describe_rows DEFAULT VALUES" "" (newsession)))
+    expect: {result: true}
+  - name: Default-only preparation rejects a missing native target
+    scm: (tds_describe "memcp-tests" "INSERT absent_prepare_target DEFAULT VALUES" "" (newsession))
+    expect: {error: true}
+  - name: Empty VALUES preparation rejects a missing native target
+    scm: (tds_describe "memcp-tests" "INSERT absent_prepare_target VALUES()" "" (newsession))
+    expect: {error: true}
+  - name: INSERT SELECT preparation validates its source without invoking its sink
+    scm: |
+      (empty_list? (tds_describe "memcp-tests"
+        "INSERT prepare_describe_rows(label) SELECT value FROM prepare_describe_source WHERE id=@id"
+        "@id INT" (newsession)))
+    expect: {result: true}
+  - name: UPDATE preparation validates bound assignment and filter contracts
+    scm: |
+      (empty_list? (tds_describe "memcp-tests"
+        "UPDATE prepare_describe_rows SET label=@label WHERE id=@id"
+        "@id INT,@label NVARCHAR(12)" (newsession)))
+    expect: {result: true}
+  - name: DELETE preparation validates its ordinary shared query context
+    scm: |
+      (empty_list? (tds_describe "memcp-tests"
+        "DELETE FROM prepare_describe_rows WHERE id=@id" "@id INT" (newsession)))
+    expect: {result: true}
+  - name: Prepared statements left both native tables empty
+    sql: SELECT COUNT(*) AS count FROM prepare_describe_rows
+    expect: {rows: 1, data: [{count: 0}]}
+  - name: Native prepare RPC validates DML and frees handles without execution
+    tds:
+      statements:
+        - sql: INSERT prepare_describe_rows(label) VALUES(@label)
+          declarations: '@label NVARCHAR(12)'
+          prepare_only: true
+        - sql: UPDATE prepare_describe_rows SET label=@label WHERE id=@id
+          declarations: '@id INT,@label NVARCHAR(12)'
+          prepare_only: true
+        - sql: DELETE FROM prepare_describe_rows WHERE id=@id
+          declarations: '@id INT'
+          prepare_only: true
+        - sql: UPDATE prepare_describe_rows SET absent=@id
+          declarations: '@id INT'
+          prepare_only: true
+          expect: {error: true}
+        - sql: INSERT absent_prepare_target DEFAULT VALUES
+          prepare_only: true
+          expect: {error: true,contains: ['INSERT target table does not exist']}
+        - sql: INSERT absent_prepare_target VALUES()
+          prepare_only: true
+          expect: {error: true,contains: ['INSERT target table does not exist']}
+        - sql: SELECT COUNT(*) AS count FROM prepare_describe_rows
+          expect: {rows: 1, data: [{count: 0}]}
+  - name: First real insert still receives the first generated identity
+    sql: INSERT prepare_describe_rows(label) VALUES(N'real')
+    expect: {affected_rows: 1}
+  - name: Preparation did not consume the native ID allocator
+    sql: SELECT id,label FROM prepare_describe_rows
+    expect: {rows: 1, data: [{id: 1,label: real}]}
+  - name: Description validates missing input columns even without parameters
+    scm: (tds_describe "memcp-tests" "SELECT absent FROM prepare_describe_rows" "" (newsession))
+    expect: {error: true}
+  - name: Description validates missing input relations even for constant projections
+    scm: (tds_describe "memcp-tests" "SELECT 1 AS value FROM absent_prepare_relation" "" (newsession))
+    expect: {error: true}
+  - name: Prepared INSERT SELECT rejects a missing projected column
+    scm: (tds_describe "memcp-tests" "INSERT prepare_describe_rows(label) SELECT absent FROM prepare_describe_source" "" (newsession))
+    expect: {error: true}
+  - name: Prepared DML rejects a missing target column
+    scm: (tds_describe "memcp-tests" "UPDATE prepare_describe_rows SET absent=@value" "@value INT" (newsession))
+    expect: {error: true}
+  - name: Preparation rejects DDL without evaluating its body
+    scm: (tds_describe "memcp-tests" "DROP TABLE prepare_describe_rows" "" (newsession))
+    expect: {error: true}
+  - name: Preparation rejects a second statement without executing the first
+    scm: (tds_describe "memcp-tests" "INSERT prepare_describe_rows(label) VALUES(N'not run'); SELECT id FROM prepare_describe_rows" "" (newsession))
+    expect: {error: true}
+  - name: Base column descriptors carry actual native provenance and flags
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests"
+          "SELECT TOP(0) id AS renamed,label,amount,rv,id+1 AS computed FROM prepare_describe_rows" "" (newsession)))
+        (define id (car fields))
+        (define label (nth fields 1))
+        (define amount (nth fields 2))
+        (define version (nth fields 3))
+        (define computed (nth fields 4))
+        (and (equal? (id "flags") 16) (equal? (label "flags") 4)
+          (equal? (amount "flags") 5) (equal? (version "user_type") 80)
+          (equal? (version "flags") 1) (equal? (computed "flags") 1)
+          (nil? (computed "source"))
+          (equal? (id "source") '("memcp-tests" "dbo" "prepare_describe_rows" "id"))))
+    expect: {result: true}
+  - name: Outer joins extend nonnull input declarations to nullable outputs
+    scm: |
+      (begin
+        (define field (car (tds_describe "memcp-tests"
+          "SELECT TOP(0) r.id FROM prepare_describe_source s LEFT JOIN prepare_describe_rows r ON r.id=s.id" "" (newsession))))
+        (and (equal? (mod (field "flags") 2) 1) (equal? (mod (intdiv (field "flags") 4) 4) 0))))
+    expect: {result: true}
+  - name: Union results do not inherit one input identity or update contract
+    scm: |
+      (begin
+        (define field (car (tds_describe "memcp-tests"
+          "SELECT id FROM prepare_describe_rows UNION ALL SELECT id FROM prepare_describe_source" "" (newsession))))
+        (and (equal? (field "flags") 1) (nil? (field "source"))
+          (equal? (field "user_type") 0))))
+    expect: {result: true}
+  - name: Actual client reads contracts for an empty result without sampling values
+    tds:
+      statements:
+        - sql: SELECT TOP(0) id,label,amount FROM prepare_describe_rows
+          expect:
+            rows: 0
+            columns: [id,label,amount]
+            column_types:
+              - {name: id,type: INT,nullable: false}
+              - {name: label,type: NVARCHAR,length: 12,nullable: false}
+              - {name: amount,type: DECIMAL,precision: 9,scale: 2,nullable: true}
+  - name: Parameter description uses explicit cast declarations without values
+    sql: EXEC sp_describe_undeclared_parameters N'SELECT CAST(@PRM0001 AS BIGINT) AS value'
+    expect:
+      rows: 1
+      data: [{name: '@PRM0001',parameter_ordinal: 1,suggested_system_type_id: 127,suggested_system_type_name: bigint,suggested_max_length: 8,suggested_precision: 19,suggested_tds_type_id: 38,suggested_tds_length: 8}]
+  - name: Parameter description retains Unicode MAX declarations
+    sql: EXEC sp_describe_undeclared_parameters N'SELECT CAST(@wide AS NVARCHAR(MAX)) AS value'
+    expect:
+      rows: 1
+      data: [{name: '@wide',suggested_system_type_name: 'nvarchar(max)',suggested_max_length: -1,suggested_precision: 0,suggested_tds_length: 65535}]
+  - name: Parameter transport preserves character and binary declarations
+    sql: >-
+      EXEC sp_describe_undeclared_parameters
+      N'SELECT CAST(@v AS VARCHAR(12)),CAST(@c AS CHAR(12)),CAST(@n AS NVARCHAR(12)),CAST(@nc AS NCHAR(12)),CAST(@b AS BINARY(12)),CAST(@vb AS VARBINARY(12)),CAST(@vm AS VARCHAR(MAX)),CAST(@bm AS VARBINARY(MAX))'
+    expect:
+      rows: 8
+      data:
+        - {name: '@v',suggested_system_type_name: 'varchar(12)',suggested_max_length: 12,suggested_tds_type_id: 167,suggested_tds_length: 12}
+        - {name: '@c',suggested_system_type_name: 'char(12)',suggested_max_length: 12,suggested_tds_type_id: 175,suggested_tds_length: 12}
+        - {name: '@n',suggested_system_type_name: 'nvarchar(12)',suggested_max_length: 24,suggested_tds_type_id: 231,suggested_tds_length: 24}
+        - {name: '@nc',suggested_system_type_name: 'nchar(12)',suggested_max_length: 24,suggested_tds_type_id: 239,suggested_tds_length: 24}
+        - {name: '@b',suggested_system_type_name: 'binary(12)',suggested_max_length: 12,suggested_tds_type_id: 173,suggested_tds_length: 12}
+        - {name: '@vb',suggested_system_type_name: 'varbinary(12)',suggested_max_length: 12,suggested_tds_type_id: 165,suggested_tds_length: 12}
+        - {name: '@vm',suggested_system_type_name: 'varchar(max)',suggested_max_length: -1,suggested_tds_type_id: 167,suggested_tds_length: 65535}
+        - {name: '@bm',suggested_system_type_name: 'varbinary(max)',suggested_max_length: -1,suggested_tds_type_id: 165,suggested_tds_length: 65535}
+  - name: Numeric parameter transport follows its input declaration
+    sql: >-
+      EXEC sp_describe_undeclared_parameters
+      N'SELECT CAST(@r AS REAL),CAST(@d AS DECIMAL(9,2)),CAST(@n AS NUMERIC(12,4))'
+    expect:
+      rows: 3
+      data:
+        - {name: '@r',suggested_system_type_id: 59,suggested_max_length: 4,suggested_precision: 24,suggested_tds_type_id: 109,suggested_tds_length: 4}
+        - {name: '@d',suggested_system_type_id: 106,suggested_system_type_name: 'decimal(9,2)',suggested_max_length: 5,suggested_precision: 9,suggested_scale: 2,suggested_tds_type_id: 106,suggested_tds_length: 5}
+        - {name: '@n',suggested_system_type_id: 108,suggested_system_type_name: 'numeric(12,4)',suggested_max_length: 9,suggested_precision: 12,suggested_scale: 4,suggested_tds_type_id: 108,suggested_tds_length: 9}
+  - name: Unsupported floating parameter transport fails explicitly
+    sql: EXEC sp_describe_undeclared_parameters N'SELECT CAST(@p AS FLOAT(24))'
+    expect: {error: true,contains: ['unsupported parameter transport contract: FLOAT']}
+  - name: Equality parameter inference uses its actual declared column contract
+    sql: EXEC sp_describe_undeclared_parameters N'SELECT label FROM prepare_describe_rows WHERE id=@Lookup'
+    expect:
+      rows: 1
+      data: [{name: '@Lookup',suggested_system_type_name: int,suggested_max_length: 4}]
+  - name: Repeated names use one consistent declared contract
+    sql: EXEC sp_describe_undeclared_parameters N'SELECT CAST(@Repeated AS INT) AS first,CAST(@repeated AS INT) AS second'
+    expect: {rows: 1,data: [{name: '@Repeated',parameter_ordinal: 1,suggested_system_type_name: int}]}
+  - name: Conflicting parameter contracts reject inference
+    sql: EXEC sp_describe_undeclared_parameters N'SELECT CAST(@p AS INT),CAST(@p AS NVARCHAR(10))'
+    expect: {error: true,contains: ['conflicting parameter declarations: @p']}
+  - name: Unconstrained parameter descriptions fail explicitly
+    sql: EXEC sp_describe_undeclared_parameters N'SELECT @unknown AS value'
+    expect: {error: true,contains: ['cannot infer parameter: @unknown']}
+  - name: Range inference without a supported declaration fails explicitly
+    sql: EXEC sp_describe_undeclared_parameters N'SELECT label FROM prepare_describe_rows WHERE id>@range'
+    expect: {error: true,contains: ['cannot infer parameter: @range']}
+  - name: Undeclared parameter analysis cannot execute DML
+    sql: EXEC sp_describe_undeclared_parameters N'DELETE FROM prepare_describe_rows WHERE id=@id'
+    expect: {error: true}
+  - name: Failed parameter descriptions leave existing rows unchanged
+    sql: SELECT id,label FROM prepare_describe_rows
+    expect: {rows: 1,data: [{id: 1,label: real}]}
+  - name: Real metadata RPC excludes declared references and literal variable text
+    tds:
+      statements:
+        - sql: sp_describe_undeclared_parameters
+          parameters:
+            - {name: tsql,value: 'SELECT CAST(@known AS INT) AS known,CAST(@Other AS SMALLINT) AS other'}
+            - {name: params,value: '@known INT'}
+          expect: {rows: 1,data: [{name: '@Other',parameter_ordinal: 1,suggested_system_type_name: smallint}]}
+        - sql: sp_describe_undeclared_parameters
+          parameters:
+            - {name: tsql,value: "SELECT N'@not_a_parameter' AS value /* @also_not */"}
+          expect: {rows: 0}
+        - sql: sp_describe_undeclared_parameters
+          parameters:
+            - {name: tsql,value: 'SELECT @known AS value'}
+            - {name: params,value: '@known INT'}
+          expect: {rows: 0}
+  - name: Analysis does not authorize undeclared references in later execution
+    sql: SELECT @PRM0001 AS value
+    expect: {error: true,contains: ['undeclared T-SQL parameter: @prm0001']}
+cleanup:
+  - sql: DROP TABLE prepare_describe_rows
+  - sql: DROP TABLE prepare_describe_source

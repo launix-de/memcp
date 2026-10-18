@@ -6,6 +6,7 @@ metadata:
   description: Bound t-sql metadata procedures used by ODBC clients
   syntax: tsql
   isolated: true
+  requires_tds: true
 setup: []
 test_cases:
 - sql: DROP VIEW IF EXISTS dbo.odbc_fixture_view
@@ -97,7 +98,6 @@ test_cases:
       TABLE_TYPE: TABLE
     - TABLE_NAME: odbc_fixture_view
       TABLE_TYPE: VIEW
-  noncritical: true
 - name: Exact metadata matching does not interpret wildcards
   sql: sp_tables @table_name=N'odbc%', @fUsePattern=0
   expect:
@@ -885,4 +885,236 @@ test_cases:
   sql: DROP TABLE driver_keys_parent
 - name: Remove driver constraint fixture driver_keys_unique
   sql: DROP TABLE driver_keys_unique
+
+# View discovery shares pure declaration binding with prepared statements.
+- name: View metadata fixture keeps native declaration contracts
+  sql: CREATE TABLE view_catalog_base(id INT IDENTITY NOT NULL PRIMARY KEY, label NVARCHAR(17), amount DECIMAL(9,3), enabled
+    BIT NOT NULL DEFAULT 1, d DATE)
+- name: View metadata fixture preserves explicit alias order
+  sql: CREATE VIEW [ViewCatalog]([Display Label],[Display Id],[Amount],[Enabled],[Day]) AS SELECT label,id,amount,enabled,d
+    FROM view_catalog_base
+- name: View metadata fixture includes nested direct projections
+  sql: CREATE VIEW view_catalog_nested AS SELECT [Display Id] AS id,[Display Label] AS label FROM [ViewCatalog]
+- name: View metadata fixture includes computed declarations without evaluation
+  sql: CREATE VIEW view_catalog_computed AS SELECT id+1 AS next_id,CAST(label AS NVARCHAR(11)) AS short_label,1/0
+    AS never_evaluate FROM view_catalog_base
+- name: View metadata fixture includes nullable outer provenance
+  sql: CREATE VIEW view_catalog_outer AS SELECT b.id AS optional_id FROM view_catalog_base a LEFT JOIN view_catalog_base
+    b ON a.id=b.id
+- name: View metadata fixture includes numeric union contracts
+  sql: CREATE VIEW view_catalog_union AS SELECT id FROM view_catalog_base UNION ALL SELECT id FROM view_catalog_base
+- name: View-only enumeration uses declared object kind
+  sql: EXEC sp_tables @table_name=N'ViewCatalog', @table_type=N'''VIEW'''
+  expect:
+    rows: 1
+    data:
+    - TABLE_NAME: ViewCatalog
+      TABLE_TYPE: VIEW
+- name: Table-only enumeration excludes a matching view
+  scm: (empty_list? ((tsql_metadata_result "memcp-tests" "sp_tables" (list (list "table_name" "ViewCatalog") (list "table_type" "'TABLE'")) nil) "rows"))
+  expect:
+    result: true
+- name: View metadata exact matching keeps canonical casing
+  sql: EXEC sp_tables @table_name=N'viewcatalog', @fUsePattern=0
+  expect:
+    rows: 1
+    data:
+    - TABLE_NAME: ViewCatalog
+      TABLE_TYPE: VIEW
+- name: View metadata pattern filter accepts literal underscores
+  sql: EXEC sp_tables @table_name=N'view[_]catalog[_]nested', @table_type=N'''VIEW'''
+  expect:
+    rows: 1
+    data:
+    - TABLE_NAME: view_catalog_nested
+- name: Empty view columns keep alias order and native SQL declarations
+  sql: EXEC sp_columns @table_name=N'viewcatalog', @ODBCVer=3
+  expect:
+    rows: 5
+    data:
+    - COLUMN_NAME: Display Label
+      DATA_TYPE: -9
+      PRECISION: 17
+      LENGTH: 34
+      NULLABLE: 1
+      ORDINAL_POSITION: 1
+      COLUMN_DEF: null
+    - COLUMN_NAME: Display Id
+      DATA_TYPE: 4
+      PRECISION: 10
+      NULLABLE: 0
+      ORDINAL_POSITION: 2
+    - COLUMN_NAME: Amount
+      DATA_TYPE: 3
+      PRECISION: 9
+      SCALE: 3
+      ORDINAL_POSITION: 3
+    - COLUMN_NAME: Enabled
+      DATA_TYPE: -7
+      NULLABLE: 0
+      ORDINAL_POSITION: 4
+      COLUMN_DEF: null
+    - COLUMN_NAME: Day
+      DATA_TYPE: 91
+      ORDINAL_POSITION: 5
+- name: View column filtering preserves original ordinal
+  sql: EXEC sp_columns @table_name=N'ViewCatalog', @column_name=N'Display I%'
+  expect:
+    rows: 1
+    data:
+    - COLUMN_NAME: Display Id
+      ORDINAL_POSITION: 2
+- name: Nested view columns inherit declarations without execution
+  sql: EXEC sp_columns @table_name=N'view_catalog_nested'
+  expect:
+    rows: 2
+    data:
+    - COLUMN_NAME: id
+      TYPE_NAME: int
+      NULLABLE: 0
+    - COLUMN_NAME: label
+      TYPE_NAME: nvarchar
+      PRECISION: 17
+# Persisted view IR still loses lexical bindings of frontend compiler callbacks.
+- name: Computed view metadata does not evaluate failing expressions
+  noncritical: true
+  sql: EXEC sp_columns @table_name=N'view_catalog_computed'
+  expect:
+    rows: 3
+    data:
+    - COLUMN_NAME: next_id
+      TYPE_NAME: int
+      NULLABLE: 1
+    - COLUMN_NAME: short_label
+      TYPE_NAME: nvarchar
+      PRECISION: 11
+      LENGTH: 22
+    - COLUMN_NAME: never_evaluate
+# Persisted view IR still loses lexical bindings of frontend compiler callbacks.
+- name: Outer view projections conservatively retain nullable provenance
+  noncritical: true
+  sql: EXEC sp_columns @table_name=N'view_catalog_outer'
+  expect:
+    rows: 1
+    data:
+    - COLUMN_NAME: optional_id
+      TYPE_NAME: int
+      NULLABLE: 1
+- name: Union view projections expose contracts without native keys
+  sql: EXEC sp_columns @table_name=N'view_catalog_union'
+  expect:
+    rows: 1
+    data:
+    - COLUMN_NAME: id
+      TYPE_NAME: int
+      NULLABLE: 1
+- name: View metadata enforces policy on referenced native tables
+  scm: "(try (lambda () (begin\n(tsql_metadata_result \"memcp-tests\" \"sp_columns\" (list (list \"table_name\"\
+    \ \"ViewCatalog\"))\n (lambda (database name write) (if (equal? name \"view_catalog_base\") (error \"base access\
+    \ denied\") true)))\n false)) (lambda (err) (equal? err \"base access denied\")))"
+  expect:
+    result: true
+- name: Pure view Describe enforces the same referenced table policy
+  scm: "(try (lambda () (begin\n(begin (define planning (newsession)) (planning \"__tsql_describe\" true)\n (parse_tsql\
+    \ \"memcp-tests\" \"SELECT * FROM [ViewCatalog]\"\n  (lambda (database name write) (if (equal? name \"view_catalog_base\"\
+    ) (error \"base access denied\") true)) planning nil))\n false)) (lambda (err) (equal? err \"base access denied\"\
+    )))"
+  expect:
+    result: true
+- name: View results never inherit native editability or keys
+  scm: "(begin (define fields (tds_describe \"memcp-tests\" \"SELECT * FROM [ViewCatalog]\" \"\" (newsession)))\n\
+    \ (reduce fields (lambda (valid field) (and valid (nil? (field \"source\")) (equal? (field \"flags\") 1))) true))"
+  expect:
+    result: true
+- name: View key discovery invents no native constraints
+  scm: (empty_list? ((tsql_metadata_result "memcp-tests" "sp_pkeys" (list (list "table_name" "ViewCatalog")) nil)
+    "rows"))
+  expect:
+    result: true
+- name: Real metadata RPC discovers view kind and column declarations
+  tds:
+    statements:
+    - sql: sp_tables
+      parameters:
+      - name: table_name
+        value: ViewCatalog
+      - name: table_type
+        value: '''VIEW'''
+      expect:
+        rows: 1
+        data:
+        - TABLE_NAME: ViewCatalog
+          TABLE_TYPE: VIEW
+    - sql: sp_columns
+      parameters:
+      - name: table_name
+        value: ViewCatalog
+      - name: column_name
+        value: Display Label
+      expect:
+        rows: 1
+        data:
+        - COLUMN_NAME: Display Label
+          TYPE_NAME: nvarchar
+          PRECISION: 17
+          LENGTH: 34
+    - sql: SELECT TOP 0 * FROM [ViewCatalog]
+      expect:
+        rows: 0
+        columns:
+        - Display Label
+        - Display Id
+        - Amount
+        - Enabled
+        - Day
+- name: Escaped view and column names remain AST data
+  sql: CREATE VIEW [view]]catalog]([label]]value]) AS SELECT label FROM view_catalog_base
+- name: Metadata returns escaped view declarations without text interpolation
+  sql: EXEC sp_columns @table_name=N'view]catalog'
+  expect:
+    rows: 1
+    data:
+    - TABLE_NAME: view]catalog
+      COLUMN_NAME: label]value
+      TYPE_NAME: nvarchar
+      PRECISION: 17
+- name: Remove escaped view metadata fixture
+  sql: DROP VIEW [view]]catalog]
+- name: View metadata left native rows untouched
+  sql: SELECT COUNT(*) AS count FROM view_catalog_base
+  expect:
+    rows: 1
+    data:
+    - count: 0
+- name: View metadata observes replacement through existing catalog
+  sql: CREATE OR ALTER VIEW view_catalog_nested AS SELECT id AS replaced FROM view_catalog_base
+- name: Replaced view metadata contains only its current projection
+  sql: EXEC sp_columns @table_name=N'view_catalog_nested'
+  expect:
+    rows: 1
+    data:
+    - COLUMN_NAME: replaced
+      ORDINAL_POSITION: 1
+- name: Remove view metadata fixture view_catalog_union
+  sql: DROP VIEW [view_catalog_union]
+- name: Remove view metadata fixture view_catalog_outer
+  sql: DROP VIEW [view_catalog_outer]
+- name: Remove view metadata fixture view_catalog_computed
+  sql: DROP VIEW [view_catalog_computed]
+- name: Remove view metadata fixture view_catalog_nested
+  sql: DROP VIEW [view_catalog_nested]
+- name: Remove view metadata fixture ViewCatalog
+  sql: DROP VIEW [ViewCatalog]
+- name: Removed views disappear from metadata
+  scm: (empty_list? ((tsql_metadata_result "memcp-tests" "sp_tables" (list (list "table_name" "ViewCatalog")) nil) "rows"))
+  expect:
+    result: true
+- name: Metadata discovery consumes no generated identity values
+  sql: INSERT view_catalog_base DEFAULT VALUES
+  expect: {affected_rows: 1}
+- name: First real view source row retains its native generated identity
+  sql: SELECT id,enabled FROM view_catalog_base
+  expect: {rows: 1, data: [{id: 1, enabled: 1}]}
+- name: Remove native view metadata fixture
+  sql: DROP TABLE view_catalog_base
 cleanup: []

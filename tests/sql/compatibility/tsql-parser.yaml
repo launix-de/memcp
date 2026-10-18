@@ -375,7 +375,6 @@ test_cases:
     - integer_result: 2
       decimal_result: 2.5
       text_result: ab
-  noncritical: true
 - name: ISNULL uses replacement semantics
   sql: SELECT ISNULL(NULL,7) AS a, ISNULL(0,7) AS b
   expect:
@@ -504,7 +503,6 @@ test_cases:
   sql: SELECT 1/0 AS value
   expect:
     error: true
-  noncritical: true
 # The formerly unsupported constant APPLY shape now checks the actual result.
 - name: Unsupported APPLY
   sql: SELECT a.id FROM tsql_data a CROSS APPLY (SELECT 1 AS value) b ORDER BY a.id
@@ -563,7 +561,6 @@ test_cases:
     rows: 1
     data:
     - days: 1
-  noncritical: true
 - name: IDENTITY zero seed is rejected
   sql: CREATE TABLE tsql_bad_identity (id INT IDENTITY(0,1))
   expect:
@@ -586,7 +583,6 @@ test_cases:
     rows: 1
     data:
     - quotient: 3
-  noncritical: true
 - name: BIGINT literal remains exact
   sql: SELECT 9007199254740993 AS value
   expect:
@@ -659,11 +655,12 @@ test_cases:
     \ declared type\")))\n"
 
 - name: Describe never executes INSERT
-  scm: '(tds_describe "memcp-tests" "INSERT INTO dbo.tsql_data VALUES (999,N''unexecuted'',1)" "" (newsession))
+  scm: |
+    (empty_list? (tds_describe "memcp-tests"
+      "INSERT INTO dbo.tsql_data VALUES (999,N'unexecuted',1)" "" (newsession)))
 
-    '
   expect:
-    error: true
+    {rows: 1, data: [true]}
 - name: Failed describe leaves rows unchanged
   sql: SELECT COUNT(*) AS n FROM dbo.tsql_data WHERE id=999
   expect:
@@ -675,12 +672,10 @@ test_cases:
     \ AS d\" \"\" (newsession)))\n  (if (and (equal? (count fields) 2) (equal? ((car fields) \"sql_type\") \"INT\"\
     )\n      (equal? ((cadr fields) \"name\") \"name\")) true (error \"derived star lost its exported metadata\"\
     )))\n"
-  noncritical: true
 - name: Numeric zero and one retain numeric result metadata
   scm: "(begin\n  (define s (newsession))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT 0 AS zero,1 AS\
     \ one,2 AS two\" \"\" s))\n  (if (equal? (map fields (lambda (field) (field \"sql_type\"))) '(\"INT\" \"INT\"\
     \ \"INT\")) true\n    (error \"numeric literal became a boolean\")))\n"
-  noncritical: true
 - name: Describe empty virtual catalog retains declared field types
   scm: "(begin\n  (define s (newsession))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT TOP (0) object_id,name\
     \ FROM sys.tables\" \"\" s))\n  (if (equal? (map fields (lambda (field) (field \"sql_type\"))) '(\"INT\" \"\
@@ -764,7 +759,6 @@ test_cases:
     \ y,MONTH(CAST('12:13:14' AS TIME)) AS m,DAY(CAST('12:13:14' AS TIME)) AS d\" \"\" (newsession)))\n  (if (equal?\
     \ (map fields (lambda (field) (field \"sql_type\"))) '(\"INT\" \"INT\" \"INT\")) true\n    (error \"calendar\
     \ aliases lost their integer result declarations\")))\n"
-  noncritical: true
 - name: Identity functions begin with typed NULL
   sql: SELECT @@IDENTITY AS session_id,SCOPE_IDENTITY() AS scoped_id
   expect:
@@ -779,7 +773,6 @@ test_cases:
     \ \"identity metadata lost exact numeric type\")))"
   expect:
     result: true
-  noncritical: true
 - name: Multirow identity returns last allocated ID and survives rollback
   scm: "(begin\n  (define s (newsession))\n  (s \"schema\" \"memcp-tests\")\n  (define execute (lambda (sql) (begin\n\
     \    (define output (newsession))\n    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula\
@@ -829,12 +822,12 @@ test_cases:
 - sql: DROP TABLE IF EXISTS dbo.tsql_identity_probe
   name: Fixture cleanup for Identity metadata marks only direct auto columns (1)
 - name: Prepare metadata for one INSERT has no fields and no side effects
-  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_prepare_describe\" true)\n  (define fields (tds_describe\
-    \ \"memcp-tests\" \"INSERT INTO dbo.tsql_data VALUES (999,N'unexecuted',1)\" \"\" s))\n  (if (empty_list? fields)\
-    \ true (error \"single INSERT acquired result fields\")))\n"
+  scm: |
+    (empty_list? (tds_describe "memcp-tests"
+      "INSERT INTO dbo.tsql_data VALUES (999,N'unexecuted',1)" "" (newsession)))
+
   expect:
     result: true
-  noncritical: true
 - name: Pure INSERT prepare did not execute its body
   sql: SELECT COUNT(*) AS n FROM dbo.tsql_data WHERE id=999
   expect:
@@ -842,13 +835,13 @@ test_cases:
     data:
     - n: 0
 - name: INSERT followed by SELECT cannot receive empty prepare metadata
-  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_prepare_describe\" true)\n  (tds_describe \"memcp-tests\"\
-    \ \"INSERT INTO dbo.tsql_data VALUES (999,N'unexecuted',1); SELECT id FROM dbo.tsql_data\" \"\" s))\n"
+  scm: |
+    (tds_describe "memcp-tests" "INSERT INTO dbo.tsql_data VALUES (999,N'unexecuted',1); SELECT id FROM dbo.tsql_data" "" (newsession))
   expect:
     error: true
 - name: DDL cannot pass the single INSERT prepare shape gate
-  scm: "(begin\n  (define s (newsession))\n  (s \"tsql_prepare_describe\" true)\n  (tds_describe \"memcp-tests\"\
-    \ \"DROP TABLE dbo.tsql_data\" \"\" s))\n"
+  scm: |
+    (tds_describe "memcp-tests" "DROP TABLE dbo.tsql_data" "" (newsession))
   expect:
     error: true
 - name: Identity rejects approximate type declarations
@@ -1032,7 +1025,6 @@ test_cases:
     )\n      (equal? ((nth fields 1) \"sql_type\") \"NVARCHAR\")\n      (equal? ((nth fields 2) \"sql_type\") \"\
     NVARCHAR\")\n      (equal? ((nth fields 3) \"sql_type\") \"INT\")\n      (nil? ((nth fields 0) \"source\")))\
     \ true (error \"concatenation lost character metadata\")))\n"
-  noncritical: true
 - sql: DROP VIEW IF EXISTS dbo.tsql_view
   name: 'Fixture cleanup 001: DROP VIEW IF EXISTS dbo.tsql_view'
 - sql: DROP TABLE IF EXISTS dbo.tsql_copy
