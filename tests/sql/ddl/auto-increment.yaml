@@ -12,7 +12,11 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS ai_blocks"
+  - sql: "DROP TABLE IF EXISTS ai_signed_replay"
+  - sql: "DROP TABLE IF EXISTS ai_signed_highwater"
   - sql: "CREATE TABLE ai_blocks (id BIGINT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE ai_signed_replay (id BIGINT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE ai_signed_highwater (id BIGINT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
   - sql: "DROP TABLE IF EXISTS ai_basic"
   - sql: "DROP TABLE IF EXISTS ai_explicit"
   - sql: "DROP TABLE IF EXISTS ai_mixed"
@@ -33,6 +37,8 @@ setup:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ai_blocks"
+  - sql: "DROP TABLE IF EXISTS ai_signed_replay"
+  - sql: "DROP TABLE IF EXISTS ai_signed_highwater"
   - sql: "DROP TABLE IF EXISTS ai_basic"
   - sql: "DROP TABLE IF EXISTS ai_explicit"
   - sql: "DROP TABLE IF EXISTS ai_restart"
@@ -414,8 +420,43 @@ test_cases:
     expect:
       affected_rows: 1
 
+  - name: "Restart: persist explicit negative IDs without consuming generated values"
+    sql: "INSERT INTO ai_signed_replay (id, name) VALUES (-1, 'negative'), (-9223372036854775808, 'minimum')"
+    expect: {affected_rows: 2}
+
+  - name: "Restart: mix positive high-water and negative explicit IDs"
+    sql: "INSERT INTO ai_signed_highwater (id, name) VALUES (-1, 'negative'), (41, 'positive'), (-9223372036854775808, 'minimum')"
+    expect: {affected_rows: 3}
+
   - name: "Restart: trigger server restart"
     sql: "SHUTDOWN"
+
+  - name: "Restart: negative explicit IDs leave the first generated ID available"
+    sql: "INSERT INTO ai_signed_replay (name) VALUES ('generated')"
+    expect: {affected_rows: 1}
+
+  - name: "Restart: retain signed rows and generate the first positive ID"
+    sql: "SELECT id,name FROM ai_signed_replay ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - {id: -9223372036854775808, name: minimum}
+        - {id: -1, name: negative}
+        - {id: 1, name: generated}
+
+  - name: "Restart: positive explicit IDs still advance the recovered allocator"
+    sql: "INSERT INTO ai_signed_highwater (name) VALUES ('generated')"
+    expect: {affected_rows: 1}
+
+  - name: "Restart: recovered high-water ignores negative explicit IDs"
+    sql: "SELECT id,name FROM ai_signed_highwater ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - {id: -9223372036854775808, name: minimum}
+        - {id: -1, name: negative}
+        - {id: 41, name: positive}
+        - {id: 42, name: generated}
 
   - name: "Restart: insert second row after restart — must not collide"
     sql: "INSERT INTO ai_restart (name) VALUES ('after')"
