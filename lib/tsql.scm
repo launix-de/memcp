@@ -48,11 +48,13 @@ relation as the case-insensitive declaration lookup. */
 (define tsql_find_type_alias (lambda (database name planning_session)
 	(if (nil? planning_session) (tsql_read_type_alias database name)
 		((tsql_type_alias_cache planning_session) (json_encode (list database name))))))
-(define tsql_alias_declaration (lambda (type planning_session)
-	(if (equal? (substr type 0 1) "[") (begin
-		(define parts (tsql_alias_name_parts type))
-		(coalesceNil (tsql_find_type_alias (car parts) (cadr parts) planning_session)
-			(error "alias type no longer exists: " type))) nil)))
+(define tsql_alias_declaration (lambda (type planning_session) (begin
+	(define builtin (tsql_builtin_type_declaration type))
+	(if builtin builtin
+		(equal? (substr type 0 1) "[") (begin
+			(define parts (tsql_alias_name_parts type))
+			(coalesceNil (tsql_find_type_alias (car parts) (cadr parts) planning_session)
+				(error "alias type no longer exists: " type))) nil))))
 (define tsql_effective_column (lambda (column planning_session)
 	(if (nil? column) nil (begin
 		(define alias (tsql_alias_declaration (column "RawType") planning_session))
@@ -72,7 +74,7 @@ the common binder consumes the temporary callback before planning. */
 	(if (nil? declaration) info (begin
 		(define alias (tsql_alias_declaration (declaration "RawType") planning_session))
 		(if (nil? alias) info (begin
-			(tsql_guard_type_alias (declaration "RawType") (alias "id") planning_session)
+			(if (alias "id") (tsql_guard_type_alias (declaration "RawType") (alias "id") planning_session) true)
 			(sql_info (sql_info_formula info) (alias "base_type")
 				(if (sql_text_type? (alias "base_type"))
 					(list (coalesce (declaration "Collation") "utf8mb4_general_ci") 2) nil)))))))))
@@ -91,7 +93,11 @@ the common binder consumes the temporary callback before planning. */
 		(tsql_bind_column_compilers order compiler) limit offset planning_session tx))))
 (define create_sql_type_alias (lambda (database name base dimensions nullable tx)
 	(tsql_type_ddl database tx (lambda () (begin
+		/* Until colliding user aliases have a bound precedence contract, reject
+		the ambiguity explicitly instead of shadowing the built-in declaration. */
+		(if (equal?? name "sysname") (error "user alias colliding with built-in type is not supported") true)
 		(define native_type (toUpper base))
+		(if (tsql_builtin_type_declaration native_type) (error "alias base must be a native type") true)
 		(define native_dimensions (tsql_decl_dimensions native_type dimensions))
 		(if (has? '("TIMESTAMP" "ROWVERSION") native_type) (error "generated versions cannot be alias base types") true)
 		(if (tsql_find_type_alias database name nil) (error "alias type already exists: " name) true)
@@ -121,11 +127,20 @@ the common binder consumes the temporary callback before planning. */
 (define tsql_schema_type_parts (parser (define parts (+ tsql_identifier ".")) parts))
 (define tsql_resolve_schema_type (lambda (database type dimensions planning_session) (begin
 	(define parts (tsql_schema_type_parts type))
+	(define builtin (match parts
+		'(name) (tsql_builtin_type_declaration name)
+		'(owner name) (if (equal?? owner "sys") (tsql_builtin_type_declaration name) nil)
+		_ nil))
 	(define native (match parts
 		'(name) (if (has? tsql_native_types (toUpper name)) (toUpper name) nil)
 		'(owner name) (if (equal?? owner "sys") (toUpper name) nil)
 		_ nil))
-	(if native (list "type" native "dimensions" (tsql_decl_dimensions native dimensions) "nullable" true)
+	(if builtin (begin
+		(tsql_decl_dimensions "SYSNAME" dimensions)
+		(if (and (equal? (count parts) 1) (tsql_find_type_alias database (car parts) planning_session))
+			(error "user alias colliding with built-in type is not supported") true)
+		(merge (list "type" (if (equal? (count parts) 1) "SYSNAME" "[sys].[SYSNAME]")) builtin))
+		native (list "type" native "dimensions" (tsql_decl_dimensions native dimensions) "nullable" true)
 		(begin
 			(define name (match parts
 				'(name) name
@@ -143,7 +158,7 @@ the common binder consumes the temporary callback before planning. */
 		(define base (coalesceNil (contract "base_type") (contract "type")))
 		(define native_dimensions (contract "dimensions"))
 		(define options (cdr attributes))
-		(define null_options (if (or (nil? (contract "id")) (has_assoc? options "null")) options
+		(define null_options (if (or (nil? (contract "base_type")) (has_assoc? options "null")) options
 			(append options "null" (contract "nullable"))))
 		(if (and (contract "id") (null_options "auto_increment"))
 			(error "IDENTITY alias declarations are not yet supported") true)
@@ -232,7 +247,7 @@ value; the wire descriptor and SQL declaration own the type independently. */
 		(error "duplicate T-SQL parameter value") true)
 	(define values (map declarations (lambda (declaration) (begin
 		(define name (car declaration))
-		(define contract (cadr declaration))
+		(define contract (tsql_effective_parameter_contract (cadr declaration)))
 		(define parameter (named name))
 		(define wire (parameter "type"))
 		(if (not (has? '(31 38 104 106 108 109 165 167 173 175 231 239) (wire "kind")))
@@ -355,9 +370,10 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 		(if (and (equal? mode "message-integer")
 			(not (has? '("TINYINT" "SMALLINT" "INT" "INTEGER" "BIGINT" "NULL") (toUpper (sql_info_type info)))))
 			(error "message substitution requires a declared integer argument") true)
+		(define conversion_target (if (nil? target) nil (tsql_effective_parameter_contract target)))
 		(define expr (if (has? '("assignment" "message-text" "message-integer") mode)
 			(sql_type_formula '() (tsql_cast_expr (list (quote sql_type_expr) expr (sql_info_type info) (sql_info_collation info))
-				(car target) (cdr target))) expr))
+				(car conversion_target) (cdr conversion_target))) expr))
 		(sql_queryplan_compile_formula tx (sql_queryplan_bind_tx_calls
 			(sql_queryplan_bind_execution_session (sql_type_lower_annotations expr))))))))))
 (define tsql_scalar_value (lambda (schema text session tx mode target) (begin
@@ -523,7 +539,7 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 			(define declaration (find (session "__tsql_parameter_declarations") (lambda (item) (equal? (car item) target)) nil))
 			(if declaration true (error "undeclared return status variable: @" target))
 			(define status (tsql_invoke_procedure owner name arguments statement session resultrow resultfields))
-			(define contract (cadr declaration))
+			(define contract (tsql_effective_parameter_contract (cadr declaration)))
 			/* The procedure frontend declares its return status INT. Conversion
 			uses that contract, never the dynamic carrier of the returned value. */
 			(define value (eval (sql_type_lower_annotations (tsql_cast_expr
@@ -819,7 +835,7 @@ as expressions; public type names retain the original alias spelling. */
 			(error "unsupported metadata declaration type: " type))))
 	(define declared (column "DeclaredType"))
 	(if (nil? declared) contract
-		(cons (cadr (tsql_alias_name_parts declared)) (cdr contract))))))
+		(cons (if (tsql_builtin_type_declaration declared) "sysname" (cadr (tsql_alias_name_parts declared))) (cdr contract))))))
 (define tsql_metadata_column_row (lambda (schema name column ordinal version) (begin
 	(define contract (tsql_metadata_type column version))
 	(define subtype (nth contract 6))
