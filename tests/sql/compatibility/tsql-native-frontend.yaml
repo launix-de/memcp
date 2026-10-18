@@ -4168,7 +4168,7 @@ test_cases:
     expect:
       error: true
   - name: LTRIM rejects excess operands
-    sql: SELECT LTRIM(N'a',N'b') AS value
+    sql: SELECT LTRIM(N'a',N'b',N'c') AS value
     expect:
       error: true
   - name: LTRIM describes an empty national result from its declaration
@@ -4225,7 +4225,7 @@ test_cases:
     expect:
       error: true
   - name: RTRIM rejects excess operands
-    sql: SELECT RTRIM(N'a',N'b') AS value
+    sql: SELECT RTRIM(N'a',N'b',N'c') AS value
     expect:
       error: true
   - name: RTRIM describes an empty national result from its declaration
