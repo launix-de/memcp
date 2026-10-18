@@ -1135,7 +1135,7 @@ test_cases:
     data:
     - id: 99
 - name: CTE leaves qualified native names outside the local namespace
-  sql: WITH tsql_data(id) AS (SELECT 99) SELECT id FROM dbo.tsql_data WHERE id=1
+  sql: WITH tsql_data(id) AS (SELECT 99) SELECT native_rows.id FROM dbo.tsql_data AS native_rows CROSS JOIN tsql_data AS local_rows WHERE native_rows.id=1
   expect:
     rows: 1
     data:
@@ -1368,7 +1368,7 @@ test_cases:
   expect:
     error: true
 - name: CTE allows a qualified native UPDATE despite shadowing
-  sql: WITH tsql_data(id) AS (SELECT 99) UPDATE dbo.tsql_data SET val=val+1 WHERE id=1
+  sql: WITH tsql_data(id) AS (SELECT 99) UPDATE dbo.tsql_data SET val=val+1 WHERE id=1 AND EXISTS(SELECT 1 FROM tsql_data)
 - name: CTE observes the qualified native UPDATE
   sql: SELECT id,val FROM dbo.tsql_data WHERE id=1
   expect:
@@ -1379,9 +1379,9 @@ test_cases:
 - name: CTE restores its qualified native UPDATE fixture
   sql: UPDATE dbo.tsql_data SET val=10 WHERE id=1
 - name: CTE allows a qualified native DELETE despite shadowing
-  sql: WITH tsql_data(id) AS (SELECT 99) DELETE FROM dbo.tsql_data WHERE id=-1
+  sql: WITH tsql_data(id) AS (SELECT 99) DELETE FROM dbo.tsql_data WHERE id=-1 AND EXISTS(SELECT 1 FROM tsql_data)
 - name: CTE allows a qualified native INSERT despite shadowing
-  sql: WITH tsql_data(id) AS (SELECT 99) INSERT INTO dbo.tsql_data VALUES(5,N'extra',60)
+  sql: WITH tsql_data(id) AS (SELECT 99) INSERT INTO dbo.tsql_data SELECT 5,N'extra',60 FROM tsql_data
 - name: CTE observes the qualified native INSERT
   sql: SELECT id,val FROM dbo.tsql_data WHERE id=5
   expect:
