@@ -4605,6 +4605,545 @@ test_cases:
           - name: c4
             type: NVARCHAR
 
+  - name: Declared string slices LEFT ASCII extent
+    sql: SELECT LEFT(N'abcdef',2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ab
+  - name: Declared string slices LEFT national BMP extent
+    sql: SELECT LEFT(N'a£中',2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: a£
+  - name: Declared string slices LEFT national single BMP unit
+    sql: SELECT LEFT(N'a£中',1) AS value
+    expect:
+      rows: 1
+      data:
+      - value: a
+  - name: Declared string slices LEFT ordinary UTF8 BMP extent
+    sql: SELECT LEFT('a£中',2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: a£
+  - name: Declared string slices LEFT combining units
+    sql: SELECT LEFT(N'éx',2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: é
+  - name: Declared string slices LEFT zero extent
+    sql: SELECT LEFT(N'a£中',0) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Declared string slices LEFT empty source
+    sql: SELECT LEFT(N'',2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Declared string slices LEFT past-end extent
+    sql: SELECT LEFT(N'a£中',99) AS value
+    expect:
+      rows: 1
+      data:
+      - value: a£中
+  - name: Declared string slices LEFT maximum native extent
+    sql: SELECT LEFT(CAST(N'a£中' AS NVARCHAR(MAX)),CAST(9223372036854775807 AS BIGINT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: a£中
+  - name: Declared string slices LEFT null source
+    sql: SELECT LEFT(CAST(NULL AS NVARCHAR(8)),2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Declared string slices LEFT null extent
+    sql: SELECT LEFT(N'a£中',CAST(NULL AS INT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Declared string slices LEFT numeric source
+    sql: SELECT LEFT(12345,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '12'
+  - name: Declared string slices LEFT text extent
+    sql: SELECT LEFT(N'abcdef',N'2') AS value
+    expect:
+      rows: 1
+      data:
+      - value: ab
+  - name: Declared string slices LEFT fractional extent
+    sql: SELECT LEFT(N'abcdef',CAST(2.9 AS DECIMAL(3,1))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ab
+  - name: Declared string slices LEFT padding is data
+    sql: SELECT LEFT(N' a  ',2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ' a'
+  - name: Declared string slices LEFT negative extent
+    sql: SELECT LEFT(N'abc',-1) AS value
+    expect:
+      error: true
+  - name: Declared string slices LEFT invalid text extent
+    sql: SELECT LEFT(N'abc',N'bad') AS value
+    expect:
+      error: true
+  - name: Declared string slices LEFT zero arity
+    sql: SELECT LEFT() AS value
+    expect:
+      error: true
+  - name: Declared string slices LEFT one arity
+    sql: SELECT LEFT(N'abc') AS value
+    expect:
+      error: true
+  - name: Declared string slices LEFT excess arity
+    sql: SELECT LEFT(N'abc',1,1,1) AS value
+    expect:
+      error: true
+  - name: Declared string slices RIGHT ASCII extent
+    sql: SELECT RIGHT(N'abcdef',2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ef
+  - name: Declared string slices RIGHT national BMP extent
+    sql: SELECT RIGHT(N'a£中',2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: £中
+  - name: Declared string slices RIGHT national single BMP unit
+    sql: SELECT RIGHT(N'a£中',1) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 中
+  - name: Declared string slices RIGHT ordinary UTF8 BMP extent
+    sql: SELECT RIGHT('a£中',2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: £中
+  - name: Declared string slices RIGHT combining units
+    sql: SELECT RIGHT(N'éx',2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ́x
+  - name: Declared string slices RIGHT zero extent
+    sql: SELECT RIGHT(N'a£中',0) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Declared string slices RIGHT empty source
+    sql: SELECT RIGHT(N'',2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Declared string slices RIGHT past-end extent
+    sql: SELECT RIGHT(N'a£中',99) AS value
+    expect:
+      rows: 1
+      data:
+      - value: a£中
+  - name: Declared string slices RIGHT maximum native extent
+    sql: SELECT RIGHT(CAST(N'a£中' AS NVARCHAR(MAX)),CAST(9223372036854775807 AS BIGINT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: a£中
+  - name: Declared string slices RIGHT null source
+    sql: SELECT RIGHT(CAST(NULL AS NVARCHAR(8)),2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Declared string slices RIGHT null extent
+    sql: SELECT RIGHT(N'a£中',CAST(NULL AS INT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Declared string slices RIGHT numeric source
+    sql: SELECT RIGHT(12345,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '45'
+  - name: Declared string slices RIGHT text extent
+    sql: SELECT RIGHT(N'abcdef',N'2') AS value
+    expect:
+      rows: 1
+      data:
+      - value: ef
+  - name: Declared string slices RIGHT fractional extent
+    sql: SELECT RIGHT(N'abcdef',CAST(2.9 AS DECIMAL(3,1))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ef
+  - name: Declared string slices RIGHT padding is data
+    sql: SELECT RIGHT(N' a  ',2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '  '
+  - name: Declared string slices RIGHT negative extent
+    sql: SELECT RIGHT(N'abc',-1) AS value
+    expect:
+      error: true
+  - name: Declared string slices RIGHT invalid text extent
+    sql: SELECT RIGHT(N'abc',N'bad') AS value
+    expect:
+      error: true
+  - name: Declared string slices RIGHT zero arity
+    sql: SELECT RIGHT() AS value
+    expect:
+      error: true
+  - name: Declared string slices RIGHT one arity
+    sql: SELECT RIGHT(N'abc') AS value
+    expect:
+      error: true
+  - name: Declared string slices RIGHT excess arity
+    sql: SELECT RIGHT(N'abc',1,1,1) AS value
+    expect:
+      error: true
+  - name: Declared string slices SUBSTRING ASCII extent
+    sql: SELECT SUBSTRING(N'abcdef',2,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: bc
+  - name: Declared string slices SUBSTRING national BMP extent
+    sql: SELECT SUBSTRING(N'a£中',2,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: £中
+  - name: Declared string slices SUBSTRING national single BMP unit
+    sql: SELECT SUBSTRING(N'a£中',2,1) AS value
+    expect:
+      rows: 1
+      data:
+      - value: £
+  - name: Declared string slices SUBSTRING ordinary UTF8 BMP extent
+    sql: SELECT SUBSTRING('a£中',2,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: £中
+  - name: Declared string slices SUBSTRING combining units
+    sql: SELECT SUBSTRING(N'éx',2,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ́x
+  - name: Declared string slices SUBSTRING zero extent
+    sql: SELECT SUBSTRING(N'a£中',2,0) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Declared string slices SUBSTRING empty source
+    sql: SELECT SUBSTRING(N'',2,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Declared string slices SUBSTRING past-end extent
+    sql: SELECT SUBSTRING(N'a£中',2,99) AS value
+    expect:
+      rows: 1
+      data:
+      - value: £中
+  - name: Declared string slices SUBSTRING maximum native extent
+    sql: SELECT SUBSTRING(CAST(N'a£中' AS NVARCHAR(MAX)),2,CAST(9223372036854775807 AS BIGINT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: £中
+  - name: Declared string slices SUBSTRING null source
+    sql: SELECT SUBSTRING(CAST(NULL AS NVARCHAR(8)),2,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Declared string slices SUBSTRING null extent
+    sql: SELECT SUBSTRING(N'a£中',2,CAST(NULL AS INT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Declared string slices SUBSTRING rejects a numeric source declaration
+    sql: SELECT SUBSTRING(12345,2,2) AS value
+    expect:
+      error: true
+  - name: Declared string slices SUBSTRING accepts explicitly converted numeric text
+    sql: SELECT SUBSTRING(CAST(12345 AS VARCHAR(8)),2,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: '23'
+  - name: Declared string slices SUBSTRING text extent
+    sql: SELECT SUBSTRING(N'abcdef',2,N'2') AS value
+    expect:
+      rows: 1
+      data:
+      - value: bc
+  - name: Declared string slices SUBSTRING fractional extent
+    sql: SELECT SUBSTRING(N'abcdef',2,CAST(2.9 AS DECIMAL(3,1))) AS value
+    expect:
+      rows: 1
+      data:
+      - value: bc
+  - name: Declared string slices SUBSTRING padding is data
+    sql: SELECT SUBSTRING(N' a  ',2,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 'a '
+  - name: Declared string slices SUBSTRING negative extent
+    sql: SELECT SUBSTRING(N'abc',2,-1) AS value
+    expect:
+      error: true
+  - name: Declared string slices SUBSTRING invalid text extent
+    sql: SELECT SUBSTRING(N'abc',2,N'bad') AS value
+    expect:
+      error: true
+  - name: Declared string slices SUBSTRING zero arity
+    sql: SELECT SUBSTRING() AS value
+    expect:
+      error: true
+  - name: Declared string slices SUBSTRING one arity
+    sql: SELECT SUBSTRING(N'abc') AS value
+    expect:
+      error: true
+  - name: Declared string slices SUBSTRING excess arity
+    sql: SELECT SUBSTRING(N'abc',1,1,1) AS value
+    expect:
+      error: true
+  - name: Declared string slices SUBSTRING zero start
+    sql: SELECT SUBSTRING(N'abcdef',0,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: a
+  - name: Declared string slices SUBSTRING negative start
+    sql: SELECT SUBSTRING(N'abcdef',-1,3) AS value
+    expect:
+      rows: 1
+      data:
+      - value: a
+  - name: Declared string slices SUBSTRING entirely before source
+    sql: SELECT SUBSTRING(N'abcdef',-99,3) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Declared string slices SUBSTRING null start
+    sql: SELECT SUBSTRING(N'abcdef',CAST(NULL AS INT),2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Declared string slices SUBSTRING start beyond source
+    sql: SELECT SUBSTRING(N'abcdef',99,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Declared string slices SUBSTRING maximum start
+    sql: SELECT SUBSTRING(CAST(N'abcdef' AS NVARCHAR(MAX)),CAST(9223372036854775807 AS BIGINT),CAST(9223372036854775807
+      AS BIGINT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Declared string slices SUBSTRING minimum start
+    sql: SELECT SUBSTRING(CAST(N'abcdef' AS NVARCHAR(MAX)),CAST(-9223372036854775808 AS BIGINT),CAST(9223372036854775807
+      AS BIGINT)) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Declared string slices native columns and nulls
+    sql: SELECT id,LEFT(note,2) AS a,RIGHT(note,2) AS b,SUBSTRING(note,2,1) AS c FROM string_slice_rows ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        a: a£
+        b: £中
+        c: £
+      - id: 2
+        a: null
+        b: null
+        c: null
+      - id: 3
+        a: z
+        b: z
+        c: ''
+    setup:
+    - sql: DROP TABLE IF EXISTS string_slice_rows
+    - sql: CREATE TABLE string_slice_rows(id INT PRIMARY KEY,note NVARCHAR(8))
+    - sql: INSERT string_slice_rows VALUES(1,N'a£中'),(2,NULL),(3,N'z')
+    cleanup:
+    - sql: DROP TABLE string_slice_rows
+  - name: Declared string slices LEFT empty result keeps national type
+    scm: (map (tds_describe "memcp-tests" "SELECT LEFT(CAST(NULL AS NVARCHAR(8)),2) AS value WHERE 1=0" "" (newsession))
+      (lambda (field) (field "sql_type")))
+    expect:
+      result:
+      - NVARCHAR
+  - name: Declared string slices LEFT consumes each operand once
+    scm: "(begin\n (define observed (newsession))\n (define tick (lambda (key value) (begin (observed key (+ 1 (coalesceNil\
+      \ (observed key) 0))) value)))\n (define input (list (quote sql_type_expr) (list tick \"input\" \"a£中\") \"\
+      NVARCHAR\" nil))\n (define count (list (quote sql_type_expr) (list tick \"count\" 2) \"INT\" nil))\n (define\
+      \ start (list (quote sql_type_expr) (list tick \"start\" 2) \"INT\" nil))\n (define info (sql_expr_info (list)\
+      \ (tsql_builtin_expr \"LEFT\" (list input count))))\n (and (equal? (eval (sql_info_formula info)) \"a£\")\n\
+      \  (equal? (observed \"input\") 1) (equal? (observed \"count\") 1)\n  (nil? (observed \"start\"))\n  (equal?\
+      \ (sql_info_type info) \"NVARCHAR\")\n  (not (regexp_test (string (sql_info_formula info)) \"sql_compile_expr|sql_type_expr\"\
+      ))))"
+    expect:
+      result: true
+  - name: Declared string slices RIGHT empty result keeps national type
+    scm: (map (tds_describe "memcp-tests" "SELECT RIGHT(CAST(NULL AS NVARCHAR(8)),2) AS value WHERE 1=0" "" (newsession))
+      (lambda (field) (field "sql_type")))
+    expect:
+      result:
+      - NVARCHAR
+  - name: Declared string slices RIGHT consumes each operand once
+    scm: "(begin\n (define observed (newsession))\n (define tick (lambda (key value) (begin (observed key (+ 1 (coalesceNil\
+      \ (observed key) 0))) value)))\n (define input (list (quote sql_type_expr) (list tick \"input\" \"a£中\") \"\
+      NVARCHAR\" nil))\n (define count (list (quote sql_type_expr) (list tick \"count\" 2) \"INT\" nil))\n (define\
+      \ start (list (quote sql_type_expr) (list tick \"start\" 2) \"INT\" nil))\n (define info (sql_expr_info (list)\
+      \ (tsql_builtin_expr \"RIGHT\" (list input count))))\n (and (equal? (eval (sql_info_formula info)) \"£中\")\n\
+      \  (equal? (observed \"input\") 1) (equal? (observed \"count\") 1)\n  (nil? (observed \"start\"))\n  (equal?\
+      \ (sql_info_type info) \"NVARCHAR\")\n  (not (regexp_test (string (sql_info_formula info)) \"sql_compile_expr|sql_type_expr\"\
+      ))))"
+    expect:
+      result: true
+  - name: Declared string slices SUBSTRING empty result keeps national type
+    scm: (map (tds_describe "memcp-tests" "SELECT SUBSTRING(CAST(NULL AS NVARCHAR(8)),2,1) AS value WHERE 1=0" ""
+      (newsession)) (lambda (field) (field "sql_type")))
+    expect:
+      result:
+      - NVARCHAR
+  - name: Declared string slices SUBSTRING consumes each operand once
+    scm: "(begin\n (define observed (newsession))\n (define tick (lambda (key value) (begin (observed key (+ 1 (coalesceNil\
+      \ (observed key) 0))) value)))\n (define input (list (quote sql_type_expr) (list tick \"input\" \"a£中\") \"\
+      NVARCHAR\" nil))\n (define count (list (quote sql_type_expr) (list tick \"count\" 2) \"INT\" nil))\n (define\
+      \ start (list (quote sql_type_expr) (list tick \"start\" 2) \"INT\" nil))\n (define info (sql_expr_info (list)\
+      \ (tsql_builtin_expr \"SUBSTRING\" (list input start count))))\n (and (equal? (eval (sql_info_formula info))\
+      \ \"£中\")\n  (equal? (observed \"input\") 1) (equal? (observed \"count\") 1)\n  (equal? (observed \"start\"\
+      ) 1)\n  (equal? (sql_info_type info) \"NVARCHAR\")\n  (not (regexp_test (string (sql_info_formula info)) \"\
+      sql_compile_expr|sql_type_expr\"))))"
+    expect:
+      result: true
+  - name: Declared string slices SUBSTRING binary data keeps byte extents
+    sql: SELECT SUBSTRING(0x00FF41,2,2)=0xFF41 AS value
+    expect:
+      rows: 1
+      data:
+      - value: true
+  - name: Declared string slices binary descriptor is selected from its declaration
+    scm: (map (tds_describe "memcp-tests" "SELECT SUBSTRING(CAST(NULL AS VARBINARY(8)),2,2) AS value WHERE 1=0" ""
+      (newsession)) (lambda (field) (field "sql_type")))
+    expect:
+      result:
+      - VARBINARY
+  - name: Declared string slices portable view definition
+    sql: CREATE VIEW string_slice_view AS SELECT LEFT(N'a£中',2) AS a,RIGHT(N'a£中',2) AS b,SUBSTRING(N'a£中',2,1) AS
+      c
+    setup:
+    - sql: DROP VIEW IF EXISTS string_slice_view
+  - name: Declared string slices portable view restart
+    action: restart
+  - name: Declared string slices portable view restored
+    sql: SELECT a,b,c FROM string_slice_view
+    expect:
+      rows: 1
+      data:
+      - a: a£
+        b: £中
+        c: £
+    cleanup:
+    - sql: DROP VIEW string_slice_view
+  - name: Declared string slices LEFT keeps a complete supplementary scalar
+    sql: SELECT LEFT(N'😀x',2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 😀
+  - name: Declared string slices RIGHT keeps a complete supplementary scalar
+    sql: SELECT RIGHT(N'x😀',2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 😀
+  - name: Declared string slices SUBSTRING keeps a complete supplementary scalar
+    sql: SELECT SUBSTRING(N'a😀z',2,2) AS value
+    expect:
+      rows: 1
+      data:
+      - value: 😀
+  - name: Declared string slices SUBSTRING empty extent emits no partial scalar
+    sql: SELECT SUBSTRING(N'a😀z',3,0) AS value
+    expect:
+      rows: 1
+      data:
+      - value: ''
+  - name: Declared string slices LEFT refuses an unrepresentable scalar boundary
+    sql: SELECT LEFT(N'😀x',1) AS value
+    expect:
+      error: true
+      contains: surrogate pair
+  - name: Declared string slices RIGHT refuses an unrepresentable scalar boundary
+    sql: SELECT RIGHT(N'x😀',1) AS value
+    expect:
+      error: true
+      contains: surrogate pair
+  - name: Declared string slices SUBSTRING refuses an unrepresentable start boundary
+    sql: SELECT SUBSTRING(N'a😀z',3,1) AS value
+    expect:
+      error: true
+      contains: surrogate pair
+  - name: Declared string slices SUBSTRING refuses an unrepresentable end boundary
+    sql: SELECT SUBSTRING(N'a😀z',2,1) AS value
+    expect:
+      error: true
+      contains: surrogate pair
+  - name: Declared string slices national output follows the declared contract
+    scm: "(begin\n (define value (list (quote sql_type_expr) \"a£中\" \"NVARCHAR\" '(\"bin\" 0)))\n (define info (sql_expr_info\
+      \ (list) (tsql_builtin_expr \"LEFT\" (list value (list (quote sql_type_expr) 2 \"INT\" nil)))))\n (and (equal?\
+      \ (sql_info_type info) \"NVARCHAR\")\n  (expression_equal? (sql_info_collation info) '(\"bin\" 0))\n  (equal?\
+      \ (eval (sql_info_formula info)) \"a£\")))"
+    expect:
+      result: true
+  - name: Declared string slices identical payload cannot override the SQL source contract
+    scm: "(begin\n (define arguments (list (list (quote sql_type_expr) \"12345\" \"INT\" nil)\n  (list (quote sql_type_expr)\
+      \ 2 \"INT\" nil) (list (quote sql_type_expr) 2 \"INT\" nil)))\n (try (lambda () (begin (sql_expr_info (list)\
+      \ (tsql_builtin_expr \"SUBSTRING\" arguments)) false))\n  (lambda (_cause) true)))"
+    expect:
+      result: true
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_null_money
   - sql: DROP TABLE IF EXISTS tsql_null_contract_input
