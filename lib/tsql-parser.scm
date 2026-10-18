@@ -1428,6 +1428,14 @@ The shared expression compiler still owns the SQL type; these additional wire
 dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
+	((symbol sql_compile_expr) ((symbol tsql_builtin_compiler) name) value)
+	(if (has? '("UPPER" "LOWER" "LTRIM" "RTRIM" "TRIM") name)
+		(tsql_result_dimensions sources value parameters) nil)
+	((symbol tsql_upper) value) (tsql_result_dimensions sources value parameters)
+	((symbol tsql_lower) value) (tsql_result_dimensions sources value parameters)
+	((symbol tsql_ltrim) value) (tsql_result_dimensions sources value parameters)
+	((symbol tsql_rtrim) value) (tsql_result_dimensions sources value parameters)
+	((symbol tsql_trim) value) (tsql_result_dimensions sources value parameters)
 	((symbol tsql_cast_decimal) _value precision scale) (list precision scale)
 	((symbol tsql_read_identity) _state) '(38 0)
 	((symbol tsql_cast_binary) _value length _fixed) (list length)
@@ -1666,10 +1674,34 @@ an integer carrier must not overflow before the declared floating operation. */
 	(sql_info (list (if (equal? name "SQUARE") (quote tsql_square) (quote tsql_square_root))
 		(sql_info_formula input)) "FLOAT" nil))))
 
+/* Character normalization keeps declaration metadata at compilation. Each
+ordinary scalar helper consumes its operand once; SQL NULL is not text.
+Default trimming removes only ASCII space, preserving other whitespace. */
+(define tsql_upper (lambda (value) (if (nil? value) nil (toUpper value))))
+(define tsql_lower (lambda (value) (if (nil? value) nil (toLower value))))
+(define tsql_ltrim (lambda (value) (if (nil? value) nil (regexp_replace value "^ +" ""))))
+(define tsql_rtrim (lambda (value) (if (nil? value) nil (regexp_replace value " +$" ""))))
+(define tsql_trim (lambda (value) (tsql_rtrim (tsql_ltrim value))))
+(define tsql_compile_string_normalization (lambda (name infos) (begin
+	(if (equal? (count infos) 1) true (error name " requires one argument"))
+	(define input (car infos))
+	(define type (sql_info_type input))
+	(define output (if (has? '("NVARCHAR" "NCHAR" "NTEXT" "SYSNAME") type) "NVARCHAR" "VARCHAR"))
+	/* Already-character formulas retain their original declaration nodes for
+	result dimensions. Do not insert an unbounded cast around a known width. */
+	(define converted (if (or (has? tsql_addition_text_types type)
+		(has? '("NULL" "TEXT" "NTEXT" "SYSNAME" "BINARY" "VARBINARY") type)) input
+		(tsql_convert_value_info input output (sql_info_collation input))))
+	(define helper (match name
+		"UPPER" (quote tsql_upper) "LOWER" (quote tsql_lower)
+		"LTRIM" (quote tsql_ltrim) "RTRIM" (quote tsql_rtrim) "TRIM" (quote tsql_trim)))
+	(sql_info (list helper (sql_info_formula converted)) output (sql_info_collation input)))))
+
 (define tsql_builtin_compiler (lambda (name) (lambda (infos)
 	(if (equal? name "ROUND") (tsql_compile_round infos)
 		(has? '("ABS" "FLOOR" "CEILING") name) (tsql_compile_numeric_scalar name infos)
 		(has? '("SQUARE" "SQRT") name) (tsql_compile_floating_scalar name infos)
+		(has? '("UPPER" "LOWER" "LTRIM" "RTRIM" "TRIM") name) (tsql_compile_string_normalization name infos)
 		(sql_call_info (coalesce (tsql_builtins name) (error "unknown function " name)) infos)))))
 
 (define tsql_builtin_expr (lambda (name arguments) (begin
@@ -1683,6 +1715,9 @@ an integer carrier must not overflow before the declared floating operation. */
 	"LEN" (lambda (value) (if (nil? value) nil (strlen (sql_rtrim value))))
 	"SQUARE" tsql_square
 	"SQRT" tsql_square_root
+	"LTRIM" tsql_ltrim
+	"RTRIM" tsql_rtrim
+	"TRIM" tsql_trim
 	_ (if (has? '("ABS" "CEILING" "FLOOR" "ROUND" "UPPER" "LOWER" "REPLACE" "SUBSTRING" "CONCAT" "YEAR" "MONTH" "DAY") name)
 		(sql_builtins name) nil))))
 
@@ -1954,10 +1989,6 @@ that context explicitly; stored views refuse this scalar before publication. */
 
 		(parser '((atom "CONCAT" true) "(" (define p (+ tsql_expression ",")) ")")
 			(cons (quote concat) (map p (lambda (value) (list (quote coalesceNil) value "")))))
-
-		(parser '((atom "TRIM" true) "(" (define e tsql_expression) ")") '((quote sql_trim) e))
-		(parser '((atom "LTRIM" true) "(" (define e tsql_expression) ")") '((quote sql_ltrim) e))
-		(parser '((atom "RTRIM" true) "(" (define e tsql_expression) ")") '((quote sql_rtrim) e))
 
 		(parser '((atom "COALESCE" true) "(" (define args (* tsql_expression ",")) ")") (tsql_coalesce_expr args))
 
