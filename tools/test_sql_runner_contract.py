@@ -24,10 +24,12 @@ import os
 import json
 import io
 from contextlib import redirect_stdout
+import concurrent.futures
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import itertools
 import requests
 import signal
+import subprocess
 import socket
 import sys
 import tempfile
@@ -1132,6 +1134,283 @@ class FailureAttributionContractTest(unittest.TestCase):
         self.assertEqual(runner.failed_critical, 1)
 
 
+class TransportFailureDiagnosticsContractTest(unittest.TestCase):
+    def runner(self, url="http://localhost:23456"):
+        runner = SQLTestRunner(url, password="private-password")
+        runner.ensure_database = mock.Mock()
+        return runner
+
+    def child(self, returncode=None, port=23456):
+        return SimpleNamespace(pid=24680, args=["./memcp", f"--api-port={port}"],
+                               poll=mock.Mock(return_value=returncode))
+
+    def sql_failure(self, runner, exception, child):
+        output = io.StringIO()
+        with mock.patch("run_sql_tests._owned_memcp_process", child), \
+                mock.patch("run_sql_tests.requests.post", side_effect=exception) as post, \
+                mock.patch("run_sql_tests.wait_for_memcp") as wait, redirect_stdout(output):
+            response = runner.execute_sql("memcp-tests", "SELECT 1", retry_on_connection_failure=False)
+        self.assertIsNone(response)
+        post.assert_called_once()
+        wait.assert_not_called()
+        return output.getvalue()
+
+    def fixture(self, operation, response, child, role="B"):
+        runner = self.runner()
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {"PERF_FIXTURE_TRIAL": "1", "PERF_FIXTURE_ROLE": role}), \
+                mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                mock.patch("run_sql_tests._owned_memcp_process", child), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.requests.post", side_effect=[response]) as post, \
+                redirect_stdout(output):
+            result = runner.run_test_case(dict(
+                {"name": "transport diagnostic", "threshold_ms": 1000,
+                 "timing_samples": 1, "warmup": 0, "expect": {"rows": 1}}, **operation), "memcp-tests")
+        post.assert_called_once()
+        return result, output.getvalue(), runner
+
+    def test_sql_transport_loss_reports_exception_and_owned_signal_exit(self):
+        child = self.child(-9)
+        output = self.sql_failure(self.runner(), requests.ConnectionError("connection reset"), child)
+        self.assertIn("SQL transport failure: ConnectionError", output)
+        self.assertIn("connection reset", output)
+        self.assertIn("response=absent timeout=false", output)
+        self.assertIn("pid=24680 state=exited returncode=-9", output)
+        self.assertNotIn("OOM", output)
+        child.poll.assert_called_once()
+
+    def test_transport_loss_reports_a_clean_owned_child_exit(self):
+        child = self.child(0)
+        output = self.sql_failure(self.runner(), requests.ConnectionError("peer closed"), child)
+        self.assertIn("state=exited returncode=0", output)
+        child.poll.assert_called_once()
+
+    def test_connect_only_timeout_does_not_search_for_a_server_process(self):
+        with mock.patch("run_sql_tests.find_memcp_pid") as find:
+            output = self.sql_failure(self.runner(), requests.ReadTimeout("read stalled"), None)
+        self.assertIn("response=absent timeout=true", output)
+        self.assertIn("server_child=not-owned", output)
+        find.assert_not_called()
+
+    def test_direct_successful_sql_request_has_no_diagnostic_output(self):
+        runner = self.runner()
+        child = self.child()
+        response = SimpleNamespace(status_code=200, text='[{"value":1}]', headers={})
+        output = io.StringIO()
+        with mock.patch("run_sql_tests._owned_memcp_process", child), \
+                mock.patch("run_sql_tests.requests.post", return_value=response) as post, \
+                redirect_stdout(output):
+            self.assertIs(runner.execute_sql("memcp-tests", "SELECT 1"), response)
+        post.assert_called_once()
+        child.poll.assert_not_called()
+        self.assertEqual(output.getvalue(), "")
+
+    def test_actual_owned_child_exit_code_is_observed_without_another_process(self):
+        with subprocess.Popen([sys.executable, "-c", "raise SystemExit(7)", "--api-port=23456"]) as child:
+            self.assertEqual(child.wait(timeout=3), 7)
+            output = self.sql_failure(self.runner(), requests.ConnectionError("peer closed"), child)
+            self.assertIn(f"pid={child.pid} state=exited returncode=7", output)
+
+    def test_sparql_request_uses_the_same_failure_only_diagnostics(self):
+        child = self.child()
+        runner = self.runner()
+        output = io.StringIO()
+        with mock.patch("run_sql_tests._owned_memcp_process", child), \
+                mock.patch("run_sql_tests.requests.post", side_effect=requests.ConnectionError("peer closed")) as post, \
+                redirect_stdout(output):
+            self.assertIsNone(runner.execute_sparql("memcp-tests", "SELECT ?s WHERE {?s ?p ?o}"))
+        post.assert_called_once()
+        child.poll.assert_called_once()
+        self.assertIn("SPARQL transport failure: ConnectionError", output.getvalue())
+
+    def test_scm_fixture_transport_failure_stays_critical_without_recovery(self):
+        child = self.child(7)
+        result, output, runner = self.fixture({"scm": "true"}, requests.ConnectionError("peer closed"), child, "A")
+        self.assertFalse(result)
+        self.assertEqual(runner.failed_critical, 1)
+        self.assertEqual(runner.perf_results, {})
+        self.assertIn("SCM transport failure: ConnectionError", output)
+        self.assertIn("peer closed", output)
+        self.assertIn("state=exited returncode=7", output)
+        self.assertIn("Invalid measured sample: 1", output)
+        self.assertNotIn("PERF_BASELINE_UNAVAILABLE", output)
+        child.poll.assert_called_once()
+
+    def test_baseline_timeout_retains_existing_recovery_classification(self):
+        child = self.child()
+        result, output, runner = self.fixture({"scm": "true"}, requests.ReadTimeout("read stalled"), child, "A")
+        self.assertTrue(result)
+        failure = next(iter(runner.perf_results.values()))["baseline_failure"]
+        self.assertEqual(failure["kind"], "timeout")
+        self.assertIn("SCM transport failure: ReadTimeout", output)
+        self.assertIn("response=absent timeout=true", output)
+        self.assertIn("pid=24680 state=running returncode=None", output)
+        child.poll.assert_called_once()
+
+    def test_actual_sql_error_keeps_http_evidence_without_transport_polling(self):
+        child = self.child()
+        response = SimpleNamespace(status_code=500, text="Error: invalid expression", headers={})
+        result, output, runner = self.fixture({"sql": "SELECT invalid"}, response, child)
+        self.assertFalse(result)
+        self.assertIn("HTTP 500: Error: invalid expression", output)
+        self.assertNotIn("transport failure", output)
+        self.assertEqual(runner.failed_critical, 1)
+        child.poll.assert_not_called()
+
+    def test_successful_requests_do_not_poll_or_print_transport_diagnostics(self):
+        for operation in ({"sql": "SELECT 1"}, {"scm": "true"}):
+            with self.subTest(operation=operation):
+                child = self.child()
+                response = SimpleNamespace(status_code=200, text="true", headers={})
+                result, output, _ = self.fixture(operation, response, child)
+                self.assertTrue(result)
+                self.assertNotIn("transport failure", output)
+                child.poll.assert_not_called()
+
+    def test_missing_or_unrelated_owner_never_supplies_a_child_status(self):
+        for url, child in (("http://localhost:23456", None),
+                           ("http://localhost:23456", self.child(-9, 23457)),
+                           ("http://remote.invalid:23456", self.child(-9))):
+            with self.subTest(url=url, child=child):
+                output = self.sql_failure(self.runner(url), requests.ConnectionError("lost"), child)
+                self.assertIn("server_child=not-owned", output)
+                self.assertNotIn("pid=24680", output)
+                if child:
+                    child.poll.assert_not_called()
+
+    def test_child_status_failure_cannot_replace_original_transport_failure(self):
+        child = self.child()
+        child.poll.side_effect = ChildProcessError("status unavailable")
+        output = self.sql_failure(self.runner(), requests.ConnectionError("original loss"), child)
+        self.assertIn("original loss", output)
+        self.assertIn("child_status=unavailable (ChildProcessError)", output)
+
+    def test_error_detail_redacts_credentials_and_query_values(self):
+        runner = self.runner()
+        request = requests.Request("POST", "http://user:private-password@localhost:23456/sql/memcp-tests?v1=query-secret",
+                                   headers={"Authorization": "Bearer token-secret", "Cookie": "cookie-secret"}).prepare()
+        request.headers["Authorization"] = "Bearer token-secret"
+        detail = ("connection reset at http://user:private-password@localhost:23456/sql/memcp-tests?v1=query-secret "
+                  "with url: /sql/memcp-tests?v1=relative-secret; "
+                  "Bearer token-secret cookie-secret")
+        output = self.sql_failure(runner, requests.ConnectionError(detail, request=request), None)
+        self.assertIn("connection reset", output)
+        for secret in ("private-password", "query-secret", "relative-secret", "token-secret", "cookie-secret"):
+            self.assertNotIn(secret, output)
+
+    def test_request_construction_failure_also_redacts_known_headers(self):
+        runner = self.runner()
+        runner.auth_header = {"Authorization": "Bearer token-secret", "Cookie": "cookie-secret"}
+        output = self.sql_failure(runner, requests.exceptions.InvalidHeader("invalid Bearer token-secret cookie-secret"), None)
+        self.assertIn("InvalidHeader", output)
+        self.assertNotIn("token-secret", output)
+        self.assertNotIn("cookie-secret", output)
+
+    def test_invalid_header_name_cannot_mask_the_request_exception(self):
+        runner = self.runner()
+        runner.auth_header = {7: "invalid header"}
+        output = self.sql_failure(runner, requests.exceptions.InvalidHeader("Header name must be a string"), None)
+        self.assertIn("InvalidHeader", output)
+        self.assertIn("Header name must be a string", output)
+
+    def test_diagnostic_detail_is_bounded_and_cannot_insert_log_lines(self):
+        output = self.sql_failure(self.runner(), requests.ConnectionError("first\nforged line\x1b[31m" + "x" * 10000), None)
+        self.assertIn("first\\nforged line", output)
+        self.assertNotIn("\x1b", output)
+        self.assertLess(len(output), 3000)
+
+    def test_concurrent_failures_keep_thread_local_timeout_classification(self):
+        runner = self.runner()
+        barrier = threading.Barrier(2)
+        output = []
+
+        def fail(_url, **kwargs):
+            barrier.wait(timeout=3)
+            if kwargs["data"] == b"SELECT 1":
+                raise requests.ReadTimeout("first request")
+            raise requests.ConnectionError("second request")
+
+        def execute(query):
+            response = runner.execute_sql("memcp-tests", query, retry_on_connection_failure=False)
+            return response, runner._test_context.request_timed_out
+
+        with mock.patch("run_sql_tests._owned_memcp_process", None), \
+                mock.patch("run_sql_tests.requests.post", side_effect=fail), \
+                mock.patch("builtins.print", side_effect=lambda *args, **kwargs: output.append(" ".join(map(str, args)))), \
+                concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(execute, "SELECT 1")
+            second = executor.submit(execute, "SELECT 2")
+            self.assertEqual(first.result(timeout=3), (None, True))
+            self.assertEqual(second.result(timeout=3), (None, False))
+        self.assertTrue(any("ReadTimeout" in line and "timeout=true" in line for line in output))
+        self.assertTrue(any("ConnectionError" in line and "timeout=false" in line for line in output))
+
+
+class SQLResultPresenceContractTest(unittest.TestCase):
+    def test_affected_rows_requires_an_explicit_matching_result(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        response = SimpleNamespace(status_code=200, text="response", headers={})
+        for results, wanted in (
+            (None, False), ([], False), ([{}], False),
+            ([{"other": 0}], False), ([None], False), (["row"], False),
+            ([{"affected_rows": 1}], False), ([{"affected_rows": 0}], True),
+        ):
+            with self.subTest(results=results):
+                self.assertEqual(runner.validate_expectation(
+                    {"expect": {"affected_rows": 0}}, response, results), wanted)
+
+    def test_affected_rows_does_not_skip_other_result_assertions(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        response = SimpleNamespace(status_code=200, text="response", headers={})
+        case = {"expect": {"affected_rows": 1, "data": [{"proof": "yes"}]}}
+        self.assertFalse(runner.validate_expectation(case, response, [{"affected_rows": 1}]))
+        self.assertTrue(runner.validate_expectation(
+            case, response, [{"affected_rows": 1, "proof": "yes"}]))
+
+    def test_sql_null_requires_the_requested_column(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        response = SimpleNamespace(status_code=200, text="response", headers={})
+        case = {"expect": {"rows": 1, "data": [{"value": None}]}}
+        for result, wanted in (({}, False), ({"other": None}, False),
+                               ({"value": None}, True), ({"value": 0}, False)):
+            with self.subTest(result=result):
+                self.assertEqual(runner.validate_expectation(case, response, [result]), wanted)
+
+
+class ResponseExpectationContractTest(unittest.TestCase):
+    def matches(self, expect, results) -> bool:
+        response = SimpleNamespace(status_code=200, text=json.dumps(results), headers={})
+        return SQLTestRunner("http://unused").validate_expectation(
+            {"expect": expect}, response, results)
+
+    def test_affected_rows_requires_a_completion_record(self) -> None:
+        for results in (None, [], [{}], [{"value": 0}], [0], ["affected_rows"]):
+            with self.subTest(results=results):
+                self.assertFalse(self.matches({"affected_rows": 0}, results))
+
+    def test_affected_rows_compares_the_declared_count(self) -> None:
+        for count in (0, 1, 7):
+            with self.subTest(count=count):
+                self.assertTrue(self.matches({"affected_rows": count}, [{"affected_rows": count}]))
+                self.assertFalse(self.matches({"affected_rows": count + 1}, [{"affected_rows": count}]))
+
+    def test_affected_rows_does_not_skip_row_count_assertions(self) -> None:
+        self.assertTrue(self.matches({"affected_rows": 0, "rows": 1}, [{"affected_rows": 0}]))
+        self.assertFalse(self.matches({"affected_rows": 0, "rows": 0}, [{"affected_rows": 0}]))
+
+    def test_affected_rows_does_not_skip_data_assertions(self) -> None:
+        result = [{"affected_rows": 2, "status": "done"}]
+        self.assertTrue(self.matches({"affected_rows": 2, "data": [{"status": "done"}]}, result))
+        self.assertFalse(self.matches({"affected_rows": 2, "data": [{"status": "missing"}]}, result))
+
+    def test_expected_null_requires_the_named_field(self) -> None:
+        self.assertTrue(self.matches({"data": [{"nullable": None}]}, [{"nullable": None}]))
+        self.assertFalse(self.matches({"data": [{"nullable": None}]}, [{}]))
+        self.assertFalse(self.matches({"data": [{"nullable": None}]}, [{"nullable": 0}]))
+
+
 class ErrorResponseContractTest(unittest.TestCase):
     def test_missing_response_is_not_a_sql_error(self) -> None:
         self.assertFalse(is_error_response(None))
@@ -1192,6 +1471,51 @@ class InterruptedRequestContractTest(unittest.TestCase):
         self.assertIs(response, recovered)
         self.assertEqual(post.call_count, 2)
         wait_for_memcp.assert_called_once()
+
+    def test_case_dispatch_does_not_replay_mutations_after_unknown_outcomes(self) -> None:
+        # The server may have committed before the response was lost. Exercise
+        # the case dispatcher too: testing execute_sql alone misses overrides.
+        for query in (
+            "INSERT INTO items VALUES (1)",
+            "UPDATE items SET value = value + 1",
+            "DELETE FROM items",
+            "WITH source AS (SELECT 1) INSERT INTO items SELECT * FROM source",
+            "EXEC advance_counter",
+        ):
+            for failure in (requests.ConnectionError, requests.Timeout):
+                with self.subTest(query=query, failure=failure.__name__):
+                    runner = SQLTestRunner("http://localhost:1")
+                    runner.ensure_database = lambda _database: None
+                    recovered = SimpleNamespace(status_code=200, text='{"affected_rows": 1}')
+                    with mock.patch(
+                        "run_sql_tests.requests.post", side_effect=[failure("response lost"), recovered]
+                    ) as post, mock.patch("run_sql_tests.wait_for_memcp") as ready:
+                        passed = runner.run_test_case({
+                            "name": "mutation outcome is unknown",
+                            "sql": query,
+                            "max_plan_size": 0,
+                            "expect": {"affected_rows": 1},
+                        }, "memcp-tests")
+                    self.assertFalse(passed)
+                    post.assert_called_once()
+                    ready.assert_not_called()
+
+    def test_case_dispatch_keeps_read_only_recovery(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        runner.ensure_database = lambda _database: None
+        recovered = SimpleNamespace(status_code=200, text='{"value": 1}')
+        with mock.patch(
+            "run_sql_tests.requests.post", side_effect=[requests.ConnectionError("response lost"), recovered]
+        ) as post, mock.patch("run_sql_tests.wait_for_memcp") as ready:
+            passed = runner.run_test_case({
+                "name": "read-only recovery",
+                "sql": "SELECT 1 AS value",
+                "max_plan_size": 0,
+                "expect": {"rows": 1, "data": [{"value": 1}]},
+            }, "memcp-tests")
+        self.assertTrue(passed)
+        self.assertEqual(post.call_count, 2)
+        ready.assert_called_once()
 
     def test_interrupted_mutation_is_not_retried_after_connection_loss(self) -> None:
         runner = SQLTestRunner("http://localhost:1")
@@ -2047,7 +2371,7 @@ class PerformanceFixtureContractTests(unittest.TestCase):
         with mock.patch("run_sql_tests.PERF_BASELINE_FILE", str(self.output)), \
                 mock.patch("run_sql_tests.PERF_BASELINE_SEED", str(self.seed)), \
                 mock.patch("run_sql_tests.PERF_AB_JITTER_MS", 50), \
-                mock.patch("run_sql_tests.subprocess.run", side_effect=self.subprocess), \
+                mock.patch("run_sql_tests.run_performance_process", side_effect=self.subprocess), \
                 redirect_stdout(io.StringIO()):
             return run_performance_ab(self.base, self.candidate, self.suites)
 
@@ -2125,7 +2449,7 @@ class PerformanceFixtureContractTests(unittest.TestCase):
 
     def test_shards_cover_each_suite_once_and_reject_invalid_indices(self):
         paths = [Path(f"suite-{index}") for index in range(13)]
-        for count in (4, 6):
+        for count in (4, 6, 7):
             with self.subTest(count=count):
                 assigned = []
                 for index in range(count):
@@ -2150,7 +2474,7 @@ class PerformanceFixtureContractTests(unittest.TestCase):
             path = self.root / f"weighted-{index:02d}.yaml"
             path.write_text(json.dumps({"metadata": {"performance_shard_weight": 64 if index < 2 else 1}}))
             paths.append(path)
-        for count in (4, 6):
+        for count, expected_sizes in ((4, [6, 6]), (6, [3, 3, 3, 3]), (7, [3, 3, 2, 2, 2])):
             with self.subTest(count=count):
                 shards = []
                 for index in range(count):
@@ -2158,7 +2482,7 @@ class PerformanceFixtureContractTests(unittest.TestCase):
                         shards.append(performance_shard_paths(paths))
                 self.assertCountEqual([path for shard in shards for path in shard], paths)
                 self.assertEqual(shards[:2], [[paths[0]], [paths[1]]])
-                self.assertEqual([len(shard) for shard in shards[2:]], [6, 6] if count == 4 else [3, 3, 3, 3])
+                self.assertEqual([len(shard) for shard in shards[2:]], expected_sizes)
         for bad in (0, -1, True, 1.5, "64"):
             paths[0].write_text(json.dumps({"metadata": {"performance_shard_weight": bad}}))
             with self.subTest(bad=bad), self.assertRaises(ValueError):
@@ -2472,6 +2796,20 @@ class PerformanceFixtureContractTests(unittest.TestCase):
 
 
 
+    def test_completion_is_published_for_a_complete_regression(self):
+        self.durations = lambda suite, role, index: 100 if role == "A" else 200
+        self.assertFalse(self.run_experiment())
+        manifest = json.loads(self.output.with_suffix(".trials").joinpath("manifest.json").read_text())
+        self.assertIs(manifest["completed"], True)
+
+    def test_fixture_error_cannot_publish_completion(self):
+        self.exit_code = 1
+        with self.assertRaises(RuntimeError):
+            self.run_experiment()
+        manifest = json.loads(self.output.with_suffix(".trials").joinpath("manifest.json").read_text())
+        self.assertIs(manifest["completed"], False)
+
+
 class ColdWarmTotalContractTests(unittest.TestCase):
     def test_total_keeps_the_cold_request(self):
         self.assertEqual(performance_measurement_ns([100] + [2] * 10, "total"), 120)
@@ -2606,6 +2944,282 @@ class RAMAbortOwnershipContractTest(unittest.TestCase):
             runner.trip_ram_abort("repeated")
             proc.kill.assert_called_once_with()
             discover.assert_not_called()
+
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "POSIX process-group ownership")
+class PerformanceProcessOwnershipContractTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.repository = Path(__file__).resolve().parents[1]
+
+    def wait_ready(self, owner, path):
+        deadline = time.monotonic() + 5
+        while not path.exists():
+            if owner.poll() is not None:
+                self.fail("fixture owner exited before ready: " + str(owner.returncode))
+            if time.monotonic() >= deadline:
+                self.fail("fixture did not become ready")
+            time.sleep(0.01)
+
+    def alive(self, pid):
+        try:
+            # A killed orphan can await PID1 reaping, but cannot run or write.
+            return Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1].split()[0] != "Z"
+        except FileNotFoundError:
+            return False
+
+    def owned_tree(self, signum=None, during_spawn=False, success=False):
+        grandchild = ("import os,signal,sys,time; from pathlib import Path; "
+                      "signal.signal(signal.SIGINT,signal.SIG_IGN); "
+                      "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+                      "Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)")
+        fixture = """
+import os,signal,subprocess,sys,time
+from pathlib import Path
+root=Path(sys.argv[1])
+signal.signal(signal.SIGINT,signal.SIG_IGN)
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+(root/'group').write_text(str(os.getpgrp()))
+(root/'parent').write_text(str(os.getpid()))
+subprocess.Popen([sys.executable,'-c',sys.argv[2],str(root/'descendant')])
+while not (root/'descendant').exists(): time.sleep(.01)
+if sys.argv[3]=='success': sys.exit(0)
+time.sleep(60)
+"""
+        owner_code = """
+import os,signal,subprocess,sys,time
+from pathlib import Path
+import run_sql_tests as runner
+root=Path(sys.argv[1])
+if sys.argv[2]=='spawn':
+    original=runner.subprocess.Popen
+    def spawning(*args,**kwargs):
+        process=original(*args,**kwargs)
+        while not (root/'descendant').exists(): time.sleep(.01)
+        os.kill(os.getpid(),signal.SIGTERM)
+        return process
+    runner.subprocess.Popen=spawning
+with (root/'output').open('w') as log:
+    result=runner.run_performance_process(
+        [sys.executable,'-c',sys.argv[3],str(root),sys.argv[4],sys.argv[5]],
+        cwd=sys.argv[6],env=os.environ.copy(),stdout=log,stderr=subprocess.STDOUT)
+sys.exit(result.returncode)
+"""
+        owner = subprocess.Popen(
+            [sys.executable, "-c", owner_code, str(self.directory),
+             "spawn" if during_spawn else "normal", fixture, grandchild,
+             "success" if success else "wait", str(self.repository)],
+            cwd=self.repository, start_new_session=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.wait_ready(owner, self.directory / "descendant")
+            if signum is not None:
+                owner.send_signal(signum)
+            self.assertEqual(owner.wait(timeout=5), 0 if success else 128 + (signum or signal.SIGTERM))
+            for name in ("parent", "descendant"):
+                pid = int((self.directory / name).read_text())
+                deadline = time.monotonic() + 2
+                while self.alive(pid) and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertFalse(self.alive(pid), f"owned {name} still running after owner returned")
+        finally:
+            groups = [owner.pid]
+            if (self.directory / "group").exists():
+                groups.append(int((self.directory / "group").read_text()))
+            for group in groups:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            owner.wait(timeout=5)
+
+    def test_term_cleans_running_fixture_and_descendant(self):
+        self.owned_tree(signal.SIGTERM)
+
+    def test_interrupt_cleans_running_fixture_and_descendant(self):
+        self.owned_tree(signal.SIGINT)
+
+    def test_signal_during_spawn_does_not_lose_child_ownership(self):
+        self.owned_tree(during_spawn=True)
+
+    def test_successful_fixture_cannot_leave_background_descendant(self):
+        self.owned_tree(success=True)
+
+    def test_normal_nonzero_exit_is_preserved(self):
+        import run_sql_tests as runner
+        result = runner.run_performance_process(
+            [sys.executable, "-c", "raise SystemExit(7)"], stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.assertEqual(result.returncode, 7)
+
+    def test_group_leader_remains_waitable_until_group_is_retired(self):
+        import run_sql_tests as runner
+        original_killpg = os.killpg
+        leader = []
+
+        def retire(pid, signum):
+            leader.append(pid)
+            status = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+            self.assertIsNotNone(status, "leader must exit before group retirement")
+            self.assertEqual(status.si_pid, pid)
+            self.assertEqual(status.si_status, 7)
+            self.assertEqual(Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1].split()[0], "Z")
+            original_killpg(pid, signum)
+
+        with mock.patch.object(runner.os, "killpg", side_effect=retire):
+            result = runner.run_performance_process(
+                [sys.executable, "-c", "raise SystemExit(7)"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(len(leader), 1)
+        with self.assertRaises(ChildProcessError):
+            os.waitid(os.P_PID, leader[0], os.WEXITED | os.WNOWAIT | os.WNOHANG)
+
+    def test_group_retirement_precedes_the_only_reaping_wait(self):
+        import run_sql_tests as runner
+        events = []
+        process = mock.Mock(pid=12345)
+
+        def reap(**kwargs):
+            events.append("reap")
+            process.returncode = 7
+            return 7
+
+        process.wait.side_effect = reap
+        with mock.patch.object(runner.subprocess, "Popen", return_value=process), \
+                mock.patch.object(runner.os, "waitid", side_effect=lambda *_: events.append("observe")) as observe, \
+                mock.patch.object(runner.os, "killpg", side_effect=lambda *_: events.append("retire")):
+            result = runner.run_performance_process(["fixture"])
+        self.assertEqual(events, ["observe", "retire", "reap"])
+        observe.assert_called_once_with(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+        process.wait.assert_called_once_with(timeout=5)
+        process.poll.assert_not_called()
+        self.assertEqual(result.returncode, 7)
+
+    def test_first_cancellation_during_successful_cleanup_is_preserved(self):
+        import run_sql_tests as runner
+        process = mock.Mock(pid=12345)
+        process.wait.return_value = 0
+        previous = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
+        with mock.patch.object(runner.subprocess, "Popen", return_value=process), \
+                mock.patch.object(runner.os, "waitid"), \
+                mock.patch.object(runner.os, "killpg", side_effect=lambda *_: signal.raise_signal(signal.SIGTERM)):
+            with self.assertRaises(SystemExit) as caught:
+                runner.run_performance_process(["fixture"])
+        self.assertEqual(caught.exception.code, 143)
+        process.wait.assert_called_once_with(timeout=5)
+        for signum, handler in previous.items():
+            self.assertIs(signal.getsignal(signum), handler)
+
+    def test_failed_wait_keeps_original_error_and_cleans_group(self):
+        import run_sql_tests as runner
+        process = mock.Mock(pid=12345)
+        process.wait.return_value = 0
+        previous = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
+        with mock.patch.object(runner.subprocess, "Popen", return_value=process), \
+                mock.patch.object(runner.os, "waitid", side_effect=RuntimeError("fixture wait failed")), \
+                mock.patch.object(runner.os, "killpg", side_effect=lambda *_: signal.raise_signal(signal.SIGTERM)) as kill:
+            with self.assertRaisesRegex(RuntimeError, "fixture wait failed"):
+                runner.run_performance_process(["fixture"])
+        kill.assert_called_once_with(process.pid, signal.SIGKILL)
+        process.wait.assert_called_once_with(timeout=5)
+        for signum, handler in previous.items():
+            self.assertIs(signal.getsignal(signum), handler)
+
+    def test_workflow_entry_delivers_signals_directly_to_runner(self):
+        import yaml
+        for filename in ("performance.yml", "jit-performance.yml"):
+            workflow = yaml.safe_load((self.repository / ".github/workflows" / filename).read_text())
+            steps = [step for job in workflow["jobs"].values() for step in job.get("steps", [])
+                     if step.get("name", "").startswith(("Measure ", "Profile failing "))
+                     and "--perf-ab" in step.get("run", "")]
+            self.assertEqual(len(steps), 2)
+            for index, step in enumerate(steps):
+                with self.subTest(workflow=filename, step=step["name"]):
+                    workspace = self.directory / filename / str(index)
+                    (workspace / "candidate").mkdir(parents=True)
+                    (workspace / "base/tests/performance").mkdir(parents=True)
+                    (workspace / "base/tests/performance/ci-workloads.json").write_text("{}")
+                    baseline = "jit-perf-baseline" if filename.startswith("jit-") else "perf-baseline"
+                    (workspace / (baseline + ".json")).write_text(json.dumps({
+                        "tests/performance/case.yaml::sample": {
+                            "passed": False, "verification_pending": False}}))
+                    trials = workspace / (baseline + ".trials")
+                    trials.mkdir()
+                    (trials / "manifest.json").write_text('{"completed": true}')
+                    (workspace / "bin").mkdir()
+                    marker = workspace / "runner-pid"
+                    stub = workspace / "bin/python3"
+                    stub.write_text(f"#!{sys.executable}\nimport os,sys,time\nfrom pathlib import Path\n"
+                                    f"if sys.argv[1]=='-': os.execv({sys.executable!r},[{sys.executable!r}]+sys.argv[1:])\n"
+                                    f"Path({str(marker)!r}).write_text(str(os.getpid()))\ntime.sleep(60)\n")
+                    stub.chmod(0o700)
+                    owner = subprocess.Popen(["bash", "-e", "-c", step["run"]], cwd=workspace,
+                        env=dict(os.environ, GITHUB_WORKSPACE=str(workspace), PATH=str(workspace / "bin") + ":" + os.environ["PATH"]),
+                        start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    try:
+                        self.wait_ready(owner, marker)
+                        self.assertEqual(int(marker.read_text()), owner.pid,
+                                         "entry shell must hand signal ownership to the runner")
+                        owner.terminate()
+                        self.assertEqual(owner.wait(timeout=3), -signal.SIGTERM)
+                    finally:
+                        try:
+                            os.killpg(owner.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        owner.wait(timeout=5)
+
+
+class PerformanceDiagnosticEligibilityContractTest(unittest.TestCase):
+    def test_normal_profile_requires_complete_nonpending_regression(self):
+        self.assert_profile_eligibility("performance.yml", "perf-baseline")
+
+    def test_native_profile_requires_complete_nonpending_regression(self):
+        self.assert_profile_eligibility("jit-performance.yml", "jit-perf-baseline")
+
+    def assert_profile_eligibility(self, filename, baseline):
+        import yaml
+        repository = Path(__file__).resolve().parents[1]
+        workflow = yaml.safe_load((repository / ".github/workflows" / filename).read_text())
+        measurement = next(step for job in workflow["jobs"].values() for step in job.get("steps", [])
+                           if step.get("name", "").startswith("Measure ")
+                           and "--perf-ab" in step.get("run", ""))
+        self.assertEqual(measurement.get("id"), "measure")
+        step = next(step for job in workflow["jobs"].values() for step in job.get("steps", [])
+                    if step.get("name", "").startswith("Profile failing "))
+        self.assertEqual(step.get("if"), "${{ failure() && steps.measure.outcome == 'failure' }}")
+        for completed, pending, passed, expected in (
+                (False, False, False, False), (True, True, False, False),
+                (True, False, False, True), (True, False, True, False)):
+            with self.subTest(completed=completed, pending=pending, passed=passed):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    (root / "candidate").mkdir()
+                    (root / "bin").mkdir()
+                    trials = root / (baseline + ".trials")
+                    trials.mkdir()
+                    (trials / "manifest.json").write_text(json.dumps({"completed": completed}))
+                    (root / (baseline + ".json")).write_text(json.dumps({
+                        "tests/performance/case.yaml::sample": {
+                            "passed": passed, "verification_pending": pending}}))
+                    marker = root / "profile-started"
+                    stub = root / "bin/python3"
+                    stub.write_text(f"#!{sys.executable}\nimport os,sys\nfrom pathlib import Path\n"
+                                    f"if sys.argv[1]=='-': os.execv({sys.executable!r},[{sys.executable!r}]+sys.argv[1:])\n"
+                                    f"Path({str(marker)!r}).write_text('started')\n")
+                    stub.chmod(0o700)
+                    result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root,
+                        env=dict(os.environ, GITHUB_WORKSPACE=str(root), PATH=str(root / "bin")+":"+os.environ["PATH"]),
+                        capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(marker.exists(), expected)
 
 
 if __name__ == "__main__":

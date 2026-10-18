@@ -6,7 +6,7 @@
 metadata:
   # Budget for seven independent fixture pairs, including process startup.
   # Extra cached requests reuse each fixture instead of repeating its setup.
-  performance_shard_weight: 18
+  performance_shard_weight: 95
   version: "1.0"
   description: "Range-first scalar values inside a period aggregate"
   isolated: true

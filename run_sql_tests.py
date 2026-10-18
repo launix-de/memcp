@@ -70,7 +70,7 @@ import struct
 from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 # CPU measurement helpers
 NUM_CPUS = multiprocessing.cpu_count()
@@ -1071,6 +1071,38 @@ class SQLTestRunner:
         except Exception:
             pass
 
+    def _report_request_exception(self, operation: str, exc: Exception, headers: Optional[Dict[str, str]]) -> None:
+        # Failure-only diagnostics: never poll processes or format exception
+        # details on the successful measured path. Do not log request bodies.
+        detail = str(exc)
+        request_headers = getattr(getattr(exc, "request", None), "headers", {}) or {}
+        secrets = [self.password] + [value for source in (headers or {}, request_headers)
+                                    for key, value in source.items()
+                                    if str(key).lower() in ("authorization", "proxy-authorization", "cookie")]
+        for secret in secrets:
+            if secret:
+                detail = detail.replace(str(secret), "[redacted]")
+        detail = re.sub(r"(https?://)[^/\s]*@", r"\1[redacted]@", detail)
+        detail = re.sub(r"\?[^\s'\"<>)]*", "?[redacted]", detail)
+        child_status = "server_child=not-owned"
+        child = _owned_memcp_process
+        try:
+            target = urlsplit(self.base_url)
+            owned = (child is not None and target.hostname in ("localhost", "127.0.0.1", "::1")
+                     and target.port == get_memcp_api_port(child))
+        except ValueError:
+            owned = False
+        if owned:
+            try:
+                returncode = child.poll()
+                state = "running" if returncode is None else "exited"
+                child_status = f"pid={child.pid} state={state} returncode={returncode}"
+            except Exception as status_error:
+                child_status = f"pid={child.pid} child_status=unavailable ({type(status_error).__name__})"
+        print(f"    {operation} transport failure: {type(exc).__name__} "
+              f"response=absent timeout={str(isinstance(exc, requests.Timeout)).lower()} "
+              f"{child_status} detail={json.dumps(detail[:2000])}", flush=True)
+
     def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None, session_id: Optional[str] = None, timeout: int = 10, params: Optional[list] = None, retry_on_connection_failure: Optional[bool] = None) -> Optional[requests.Response]:
         self._test_context.request_timed_out = False
         # proactively ensure database exists (works for connect-only too)
@@ -1099,6 +1131,7 @@ class SQLTestRunner:
                 return requests.post(url, data=body, headers=headers, timeout=timeout)
             except Exception as exc:
                 self._test_context.request_timed_out = isinstance(exc, requests.Timeout)
+                self._report_request_exception("SQL", exc, headers)
                 if not retry_on_connection_failure:
                     return None
                 # parse port from base_url
@@ -1132,7 +1165,7 @@ class SQLTestRunner:
             return requests.post(url, data=body, headers=headers, timeout=timeout)
         except Exception as e:
             self._test_context.request_timed_out = isinstance(e, requests.Timeout)
-            print(f"Error executing SPARQL: {e}")
+            self._report_request_exception("SPARQL", e, auth_header or self.auth_header)
             return None
 
     def load_ttl(self, database: str, ttl_data: str) -> bool:
@@ -1701,13 +1734,19 @@ class SQLTestRunner:
                                          headers=auth_header, timeout=sql_timeout)
                 except requests.RequestException as exc:
                     self._test_context.request_timed_out = isinstance(exc, requests.Timeout)
+                    self._report_request_exception("SCM", exc, auth_header)
                     return None
             if is_sparql:
                 return self.execute_sparql(database, query, auth_header, timeout=sql_timeout)
             return self.execute_sql(
                 database, query, auth_header, active_syntax,
                 session_id=session_id, timeout=sql_timeout, params=sql_params,
-                retry_on_connection_failure=not fixture_trial and not self._expect_interrupted_ok(test_case.get("expect")),
+                # Preserve execute_sql's request-safety decision. A case is
+                # not permission to replay a possibly committed mutation.
+                retry_on_connection_failure=(
+                    False if fixture_trial or self._expect_interrupted_ok(test_case.get("expect"))
+                    else None
+                ),
             )
 
         def record_baseline_query_failure(response, phase):
@@ -2156,10 +2195,10 @@ class SQLTestRunner:
                         return False
 
         if "affected_rows" in expect:
-            expected = expect["affected_rows"]
-            if results and results and "affected_rows" in results[0]:
-                return results[0]["affected_rows"] == expected
-            return True
+            if (not results or not isinstance(results[0], dict)
+                    or "affected_rows" not in results[0]
+                    or results[0]["affected_rows"] != expect["affected_rows"]):
+                return False
 
         if results is None:
             return False
@@ -2187,6 +2226,8 @@ class SQLTestRunner:
                 if not isinstance(results[i], dict):
                     return False
                 for k, v in row.items():
+                    if k not in results[i]:
+                        return False
                     if isinstance(v, float) and isinstance(results[i].get(k), (int, float)):
                         if abs(results[i][k] - v) > 0.01:
                             return False
@@ -3379,6 +3420,55 @@ def performance_shard_paths(paths: List[Path]) -> List[Path]:
     return sorted(shards[index])
 
 
+def run_performance_process(command, **kwargs):
+    """Own one disposable fixture's whole process group until it has stopped.
+
+    Workflow cancellation must reach this owner directly. Signals during Popen
+    are deferred until its process has been assigned, so even that spawn window
+    cannot leak a child. Normal completion also retires stray descendants before
+    another fixture or diagnostic may start. This owns no caller's server.
+    """
+    process = None
+    pending_signal = None
+    cleaning_up = False
+
+    def interrupted(signum, _frame):
+        nonlocal pending_signal
+        pending_signal = signum
+        if process is not None and not cleaning_up:
+            raise SystemExit(128 + signum)
+
+    signals = (signal.SIGINT, signal.SIGTERM)
+    previous = {signum: signal.getsignal(signum) for signum in signals}
+    try:
+        for signum in signals:
+            signal.signal(signum, interrupted)
+        process = subprocess.Popen(command, start_new_session=True, **kwargs)
+        if pending_signal is not None:
+            raise SystemExit(128 + pending_signal)
+        # Observe exit without reaping: the leader must retain its PID/group
+        # identity until killpg retires the whole private group, even if this
+        # owner is paused for an arbitrary time between observation and cleanup.
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+    finally:
+        # Cleanup itself must finish even if cancellation escalates. These are
+        # private temporary A/B stores, so abort never needs to publish a store.
+        cleaning_up = True
+        try:
+            if process is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=5)
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+    if pending_signal is not None:
+        raise SystemExit(128 + pending_signal)
+    return subprocess.CompletedProcess(command, process.returncode)
+
+
 def validate_reusable_fixture(spec: Dict[str, Any]) -> None:
     metadata = spec.get("metadata", {})
     if metadata.get("reuse_fixture") is not True or metadata.get("restart_after_setup") is not True:
@@ -3436,7 +3526,7 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
         raise ValueError("trusted performance seed cases are missing from both roles")
     all_suite_paths = suite_paths
     suite_paths = performance_shard_paths(suite_paths)
-    manifest = {"schema_version": 1, "runner_sha256": hashlib.sha256(runner.read_bytes()).hexdigest(),
+    manifest = {"schema_version": 1, "completed": False, "runner_sha256": hashlib.sha256(runner.read_bytes()).hexdigest(),
                 "seed_sha256": hashlib.sha256(seed.read_bytes()).hexdigest(),
                 "binaries": {role: {"path": str(tree / "memcp"),
                     "sha256": hashlib.sha256((tree / "memcp").read_bytes()).hexdigest(),
@@ -3486,7 +3576,7 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
         started = time.monotonic()
         log_path = artifacts / (name + ".log")
         with log_path.open("w") as log:
-            result = subprocess.run([sys.executable, "-u", str(runner), str(suite),
+            result = run_performance_process([sys.executable, "-u", str(runner), str(suite),
                                      "--log-times", "--fail-fast"],
                                     cwd=candidate, env=env, stdout=log, stderr=subprocess.STDOUT)
         print(log_path.read_text(), end="", flush=True)
@@ -3536,7 +3626,7 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
             print(f"PERF_FIXTURE {name}: {tree}", flush=True)
             measured_started = time.monotonic()
             with log_path.open("w") as log:
-                result = subprocess.run(command, cwd=candidate, env=env, stdout=log, stderr=subprocess.STDOUT)
+                result = run_performance_process(command, cwd=candidate, env=env, stdout=log, stderr=subprocess.STDOUT)
             save_event({"stage": "process", "suite": str(suite), "role": role,
                         "elapsed_ms": (time.monotonic() - measured_started) * 1000})
             print(log_path.read_text(), end="", flush=True)
@@ -3643,6 +3733,9 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
             enforce_recovered_query_budgets(suite, trials, summary)
             classify_identical_execution(summary)
             report(summary)
+        # Publish completion only after every owned fixture has stopped.
+        manifest["completed"] = True
+        (artifacts / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         return all(value["passed"] for key, value in complete.items() if key != "schema_version")
 
 
