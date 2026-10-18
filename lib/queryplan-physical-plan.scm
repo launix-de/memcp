@@ -11758,11 +11758,11 @@ physical decision and preserve its runtime recompile gate. */
 
 /* A source-free SELECT evaluates its projection once. Serialization omits
 closure captures, so it cannot establish expression identity. Collect exact
-AST entries (count, first field ordinal, representative) in the existing
-compile-local catalog, then freeze its lookup before constructing code.
+AST entries (count, first field ordinal, representative, volatility) in the
+existing compile-local catalog, then freeze its lookup before constructing code.
 The ordinal names are lexical temporaries, never semantic cache identities.
-Known volatile calls retain one evaluation per occurrence, using the same
-compile-time guard as scalar-probe hoisting. */
+Classify volatility once per representative: repeated stage expressions can
+contain large subtrees. Volatile calls still execute once per occurrence. */
 (define lower_zero_source_result_expr (lambda (fields)
 	(begin
 		(define expressions (extract_assoc fields (lambda (_title expr) expr)))
@@ -11770,30 +11770,28 @@ compile-time guard as scalar-probe hoisting. */
 		(define representatives (reverse (reduce (produceN (count expressions))
 			(lambda (result ordinal) (begin
 				(define expr (nth expressions ordinal))
-				(if (scalar_access_probe_expr_volatile? expr) result
+				(define previous (catalog expr))
+				(if previous
+					(match previous '(count first representative volatile)
+						(begin
+							(catalog expr (list (+ count 1) first representative volatile))
+							result))
 					(begin
-						(define previous (catalog expr))
-						(if previous
-							(begin
-								(catalog expr (list (+ (car previous) 1) (cadr previous) (nth previous 2)))
-								result)
-							(begin
-								(catalog expr (list 1 ordinal expr))
-								(cons expr result))))))) (list))))
+						(define volatile (scalar_access_probe_expr_volatile? expr))
+						(catalog expr (list 1 ordinal expr volatile))
+						(if volatile result (cons expr result)))))) (list))))
 		(define lookup (catalog))
 		(define repeated (filter representatives (lambda (expr) (> (car (lookup expr)) 1))))
 		(define definitions (map repeated (lambda (expr)
-			(match (lookup expr) '(_count ordinal representative)
+			(match (lookup expr) '(_count ordinal representative _volatile)
 				(list (quote define) (zero_source_shared_field_symbol ordinal)
 					(lower_scalar_marker_expr representative))))))
 		(define row (list (quote resultrow) (cons (quote list)
 			(map_assoc fields (lambda (_title expr)
-				(if (scalar_access_probe_expr_volatile? expr)
-					(lower_scalar_marker_expr expr)
-					(match (lookup expr) '(count ordinal _representative)
-						(if (> count 1)
-							(zero_source_shared_field_symbol ordinal)
-							(lower_scalar_marker_expr expr)))))))))
+				(match (lookup expr) '(count ordinal _representative volatile)
+					(if (and (not volatile) (> count 1))
+						(zero_source_shared_field_symbol ordinal)
+						(lower_scalar_marker_expr expr))))))))
 		(if (empty_list? definitions) row
 			(cons (quote !begin) (append definitions row))))))
 

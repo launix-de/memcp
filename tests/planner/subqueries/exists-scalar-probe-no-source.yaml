@@ -329,6 +329,26 @@ test_cases:
       result: true
 
 
+
+  - name: Wide source-free projection shares stable expressions and preserves all volatile calls
+    scm: |
+      (begin
+        (define stable (list (quote +) 10 20))
+        (define volatile (list (quote uuid)))
+        (define fields (merge (map (produceN 64) (lambda (ordinal)
+          (list (concat "value_" ordinal) stable (concat "token_" ordinal) volatile)))))
+        (define plan (lower_zero_source_result_expr fields))
+        (match plan
+          ((symbol !begin) ((symbol define) shared lowered) ((symbol resultrow) values))
+          (and (expression_equal? lowered stable)
+            (equal? (count values) 257)
+            (reduce (produceN 64) (lambda (valid ordinal)
+              (and valid
+                (equal? (nth values (+ (* ordinal 4) 2)) shared)
+                (expression_equal? (nth values (+ (* ordinal 4) 4)) volatile))) true))
+          _ false))
+    expect: {result: true}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS espn_share"
   - sql: "DROP TABLE IF EXISTS espn_parent"
