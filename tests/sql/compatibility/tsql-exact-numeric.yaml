@@ -10,6 +10,7 @@ metadata:
   description: Exact numeric values, casts and arithmetic in t-sql mode
   syntax: tsql
   isolated: true
+  requires_tds: true
 setup: []
 test_cases:
 - sql: DROP TABLE IF EXISTS money_bad_dimensions
