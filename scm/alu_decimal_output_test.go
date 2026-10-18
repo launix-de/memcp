@@ -86,3 +86,26 @@ func TestMultiplyMixedFloatPreservesExactWideIntegers(t *testing.T) {
 		t.Fatalf("late zero lost integral result: %v", got)
 	}
 }
+
+func TestFloatRepresentationConversion(t *testing.T) {
+	convert := declarations["float"].Fn
+	for _, value := range []Scmer{NewInt(0), NewInt(-7), NewInt(math.MinInt64), NewInt(math.MaxInt64), NewFloat(1.5)} {
+		got := convert(value)
+		if !got.IsFloat() || got.Float() != value.Float() {
+			t.Fatalf("float(%v) did not produce the expected floating representation: %v", value, got)
+		}
+	}
+	if got := convert(NewNil()); !got.IsNil() {
+		t.Fatalf("float(nil) did not preserve nil: %v", got)
+	}
+	for _, value := range []Scmer{NewString("1"), NewBool(true), NewSlice(nil)} {
+		t.Run(value.String(), func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("float accepted a nonnumeric operand")
+				}
+			}()
+			convert(value)
+		})
+	}
+}
