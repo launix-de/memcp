@@ -4407,6 +4407,198 @@ test_cases:
     cleanup:
     - sql: DROP VIEW IF EXISTS string_normalization_view
 
+  - name: UPPER retains capacity after expression annotations are consumed
+    scm: "(begin\n      (define ast (tsql_builtin_expr \"UPPER\" (list (tsql_cast_expr \" a \" \"NVARCHAR\" '(5)))))\n\
+      \      (define compiled (sql_info_formula (sql_expr_info '() ast)))\n      (list (tsql_result_dimensions '()\
+      \ ast '()) (tsql_result_dimensions '() compiled '())))"
+    expect:
+      result:
+      - - 5
+      - - 5
+  - name: UPPER retains the declared input collation at compilation
+    scm: "(sql_info_collation (sql_expr_info '() (tsql_builtin_expr \"UPPER\"\n      (list (list (quote sql_type_expr)\
+      \ \" a \" \"NVARCHAR\" '(\"bin\" 0))))))"
+    expect:
+      result:
+      - bin
+      - 0
+  - name: LOWER retains capacity after expression annotations are consumed
+    scm: "(begin\n      (define ast (tsql_builtin_expr \"LOWER\" (list (tsql_cast_expr \" a \" \"NVARCHAR\" '(5)))))\n\
+      \      (define compiled (sql_info_formula (sql_expr_info '() ast)))\n      (list (tsql_result_dimensions '()\
+      \ ast '()) (tsql_result_dimensions '() compiled '())))"
+    expect:
+      result:
+      - - 5
+      - - 5
+  - name: LOWER retains the declared input collation at compilation
+    scm: "(sql_info_collation (sql_expr_info '() (tsql_builtin_expr \"LOWER\"\n      (list (list (quote sql_type_expr)\
+      \ \" a \" \"NVARCHAR\" '(\"bin\" 0))))))"
+    expect:
+      result:
+      - bin
+      - 0
+  - name: LTRIM retains capacity after expression annotations are consumed
+    scm: "(begin\n      (define ast (tsql_builtin_expr \"LTRIM\" (list (tsql_cast_expr \" a \" \"NVARCHAR\" '(5)))))\n\
+      \      (define compiled (sql_info_formula (sql_expr_info '() ast)))\n      (list (tsql_result_dimensions '()\
+      \ ast '()) (tsql_result_dimensions '() compiled '())))"
+    expect:
+      result:
+      - - 5
+      - - 5
+  - name: LTRIM retains the declared input collation at compilation
+    scm: "(sql_info_collation (sql_expr_info '() (tsql_builtin_expr \"LTRIM\"\n      (list (list (quote sql_type_expr)\
+      \ \" a \" \"NVARCHAR\" '(\"bin\" 0))))))"
+    expect:
+      result:
+      - bin
+      - 0
+  - name: RTRIM retains capacity after expression annotations are consumed
+    scm: "(begin\n      (define ast (tsql_builtin_expr \"RTRIM\" (list (tsql_cast_expr \" a \" \"NVARCHAR\" '(5)))))\n\
+      \      (define compiled (sql_info_formula (sql_expr_info '() ast)))\n      (list (tsql_result_dimensions '()\
+      \ ast '()) (tsql_result_dimensions '() compiled '())))"
+    expect:
+      result:
+      - - 5
+      - - 5
+  - name: RTRIM retains the declared input collation at compilation
+    scm: "(sql_info_collation (sql_expr_info '() (tsql_builtin_expr \"RTRIM\"\n      (list (list (quote sql_type_expr)\
+      \ \" a \" \"NVARCHAR\" '(\"bin\" 0))))))"
+    expect:
+      result:
+      - bin
+      - 0
+  - name: TRIM retains capacity after expression annotations are consumed
+    scm: "(begin\n      (define ast (tsql_builtin_expr \"TRIM\" (list (tsql_cast_expr \" a \" \"NVARCHAR\" '(5)))))\n\
+      \      (define compiled (sql_info_formula (sql_expr_info '() ast)))\n      (list (tsql_result_dimensions '()\
+      \ ast '()) (tsql_result_dimensions '() compiled '())))"
+    expect:
+      result:
+      - - 5
+      - - 5
+  - name: TRIM retains the declared input collation at compilation
+    scm: "(sql_info_collation (sql_expr_info '() (tsql_builtin_expr \"TRIM\"\n      (list (list (quote sql_type_expr)\
+      \ \" a \" \"NVARCHAR\" '(\"bin\" 0))))))"
+    expect:
+      result:
+      - bin
+      - 0
+  - name: String normalization preserves unbounded national result declarations
+    scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) UPPER(CAST(NULL AS NVARCHAR(MAX))) AS c0,LOWER(CAST(NULL
+      AS NVARCHAR(MAX))) AS c1,LTRIM(CAST(NULL AS NVARCHAR(MAX))) AS c2,RTRIM(CAST(NULL AS NVARCHAR(MAX))) AS c3,TRIM(CAST(NULL
+      AS NVARCHAR(MAX))) AS c4" "" (newsession)) (lambda (field) (list (field "sql_type") (field "size"))))
+    expect:
+      result:
+      - - NVARCHAR
+        - 65535
+      - - NVARCHAR
+        - 65535
+      - - NVARCHAR
+        - 65535
+      - - NVARCHAR
+        - 65535
+      - - NVARCHAR
+        - 65535
+  - name: String normalization retains derived national declaration capacity
+    scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) UPPER(d.note) AS value FROM (SELECT CAST(NULL AS NVARCHAR(5))
+      AS note) AS d" "" (newsession)) (lambda (field) (list (field "sql_type") (field "size"))))
+    expect:
+      result:
+      - - NVARCHAR
+        - 10
+  - name: Portable normalization view metadata uses original declaration capacities
+    setup:
+    - sql: DROP VIEW IF EXISTS string_normalization_metadata
+    - sql: CREATE VIEW string_normalization_metadata AS SELECT UPPER(CAST(N'a' AS NVARCHAR(3))) AS u,TRIM(CAST(N'
+        a ' AS NVARCHAR(5))) AS t
+    scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) u,t FROM string_normalization_metadata" "" (newsession))
+      (lambda (field) (list (field "sql_type") (field "size"))))
+    expect:
+      result:
+      - - NVARCHAR
+        - 6
+      - - NVARCHAR
+        - 10
+    cleanup:
+    - sql: DROP VIEW IF EXISTS string_normalization_metadata
+  - name: Prepared string normalization retains declared national and NULL results
+    tds:
+      statements:
+      - sql: SELECT UPPER(CAST(@value AS NVARCHAR(7))) AS c0,LOWER(CAST(@value AS NVARCHAR(7))) AS c1,LTRIM(CAST(@value
+          AS NVARCHAR(7))) AS c2,RTRIM(CAST(@value AS NVARCHAR(7))) AS c3,TRIM(CAST(@value AS NVARCHAR(7))) AS c4
+        prepare: true
+        parameters:
+        - name: value
+          value: ' aBc '
+        expect:
+          rows: 1
+          data:
+          - c0: ' ABC '
+            c1: ' abc '
+            c2: 'aBc '
+            c3: ' aBc'
+            c4: aBc
+          column_types:
+          - name: c0
+            type: NVARCHAR
+          - name: c1
+            type: NVARCHAR
+          - name: c2
+            type: NVARCHAR
+          - name: c3
+            type: NVARCHAR
+          - name: c4
+            type: NVARCHAR
+      - sql: SELECT UPPER(CAST(@value AS NVARCHAR(7))) AS c0,LOWER(CAST(@value AS NVARCHAR(7))) AS c1,LTRIM(CAST(@value
+          AS NVARCHAR(7))) AS c2,RTRIM(CAST(@value AS NVARCHAR(7))) AS c3,TRIM(CAST(@value AS NVARCHAR(7))) AS c4
+        prepare: true
+        parameters:
+        - name: value
+          value: null
+        expect:
+          rows: 1
+          data:
+          - c0: null
+            c1: null
+            c2: null
+            c3: null
+            c4: null
+          column_types:
+          - name: c0
+            type: NVARCHAR
+          - name: c1
+            type: NVARCHAR
+          - name: c2
+            type: NVARCHAR
+          - name: c3
+            type: NVARCHAR
+          - name: c4
+            type: NVARCHAR
+      - sql: SELECT UPPER(CAST(@value AS NVARCHAR(7))) AS c0,LOWER(CAST(@value AS NVARCHAR(7))) AS c1,LTRIM(CAST(@value
+          AS NVARCHAR(7))) AS c2,RTRIM(CAST(@value AS NVARCHAR(7))) AS c3,TRIM(CAST(@value AS NVARCHAR(7))) AS c4
+        prepare: true
+        parameters:
+        - name: value
+          value: xy
+        expect:
+          rows: 1
+          data:
+          - c0: XY
+            c1: xy
+            c2: xy
+            c3: xy
+            c4: xy
+          column_types:
+          - name: c0
+            type: NVARCHAR
+          - name: c1
+            type: NVARCHAR
+          - name: c2
+            type: NVARCHAR
+          - name: c3
+            type: NVARCHAR
+          - name: c4
+            type: NVARCHAR
+
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_null_money
   - sql: DROP TABLE IF EXISTS tsql_null_contract_input
