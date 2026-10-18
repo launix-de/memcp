@@ -40,9 +40,10 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
-    # Cold toolchain builds have their own allowance. Measurement is capped
-    # separately at 15 minutes; a timed-out shard cannot pass the aggregate.
-    timeout-minutes: 30
+    # Complete seven-pair verification repeats fixture setup and startup. The
+    # job also owns the build prelude and up to ten minutes of diagnosis;
+    # neither allowance changes a query limit or a performance verdict.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -152,7 +153,8 @@ jobs:
 
       - name: Measure JIT base and candidate with the SQL test runner
         id: measure
-        timeout-minutes: 15
+        # Two complete predefined seven-pair checks need their full fixture work.
+        timeout-minutes: 30
         shell: bash
         run: |
           runner="$GITHUB_WORKSPACE/candidate/run_sql_tests.py"
