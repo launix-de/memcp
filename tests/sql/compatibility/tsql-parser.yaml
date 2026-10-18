@@ -1217,6 +1217,85 @@ test_cases:
       val: 30
 - name: CTE drops its ordinary view fixture
   sql: DROP VIEW dbo.tsql_cte_view
+- name: CTE creates a native mutation fixture
+  sql: CREATE TABLE dbo.tsql_cte_copy(id INT PRIMARY KEY,val INT)
+- name: CTE feeds the existing INSERT SELECT sink
+  sql: WITH selected AS (SELECT id,val FROM dbo.tsql_data WHERE id<3) INSERT INTO dbo.tsql_cte_copy(id,val) SELECT
+    id,val FROM selected
+- name: CTE checks rows written through the existing sink
+  sql: SELECT id,val FROM dbo.tsql_cte_copy ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      val: 10
+    - id: 2
+      val: 30
+- name: CTE feeds the existing UPDATE FROM source
+  sql: WITH changes AS (SELECT id,val+1 AS val FROM dbo.tsql_data WHERE id=1) UPDATE target SET val=changes.val
+    FROM dbo.tsql_cte_copy AS target INNER JOIN changes ON target.id=changes.id
+- name: CTE checks the native UPDATE result
+  sql: SELECT id,val FROM dbo.tsql_cte_copy ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      val: 11
+    - id: 2
+      val: 30
+- name: CTE feeds the existing DELETE FROM source
+  sql: WITH changes AS (SELECT id FROM dbo.tsql_data WHERE id=2) DELETE target FROM dbo.tsql_cte_copy AS target
+    INNER JOIN changes ON target.id=changes.id
+- name: CTE checks the native DELETE result
+  sql: SELECT id,val FROM dbo.tsql_cte_copy ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      val: 11
+- name: CTE drops its native mutation fixture
+  sql: DROP TABLE dbo.tsql_cte_copy
+- name: CTE describes declared parameters and empty national text
+  scm: "(begin\n  (define s (newsession))\n  (s \"username\" \"root\")\n  (define fields (tds_describe \"memcp-tests\"\
+    \n    \"WITH selected AS (SELECT id,name FROM dbo.tsql_data WHERE id=@wanted) SELECT id,name FROM selected WHERE\
+    \ 1=0\"\n    \"@wanted INT\" s))\n  (and (equal? (count fields) 2)\n    (equal? ((nth fields 0) \"name\") \"\
+    id\")\n    (equal? ((nth fields 0) \"sql_type\") \"INT\")\n    (equal? ((nth fields 1) \"name\") \"name\")\n\
+    \    (equal? ((nth fields 1) \"sql_type\") \"NVARCHAR\")\n    (equal? ((nth fields 1) \"size\") 100)))"
+  expect:
+    result: true
+- name: CTE authorizes native sources instead of local names
+  scm: "(begin\n  (define planning (newsession))\n  (planning \"__tsql_describe\" true)\n  (define checks (newsession))\n\
+    \  (define policy (lambda (database name write) (begin\n    (if (and (equal? database \"memcp-tests\") (equal?\
+    \ name \"tsql_data\") (not write))\n      (checks \"native\" true) (error \"non-native name reached authorization\"\
+    )))))\n  (parse_tsql \"memcp-tests\"\n    \"WITH selected AS (SELECT id FROM dbo.tsql_data) SELECT id FROM selected\"\
+    \n    policy planning nil)\n  (equal? (checks \"native\") true))"
+  expect:
+    result: true
+- name: CTE does not bypass native authorization
+  scm: "(begin\n  (define planning (newsession))\n  (planning \"__tsql_describe\" true)\n  (parse_tsql \"memcp-tests\"\
+    \n    \"WITH selected AS (SELECT id FROM dbo.tsql_data) SELECT id FROM selected\"\n    (lambda (_database _name\
+    \ _write) (error \"native access denied\")) planning nil))"
+  expect:
+    error: true
+- name: CTE compiles inside a stored procedure
+  sql: CREATE PROCEDURE dbo.tsql_cte_proc @wanted INT AS WITH selected AS (SELECT id,val FROM dbo.tsql_data WHERE
+    id=@wanted) SELECT id,val FROM selected
+- name: CTE binds the first procedure invocation
+  sql: EXEC dbo.tsql_cte_proc @wanted=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      val: 10
+- name: CTE rebinds the second procedure invocation
+  sql: EXEC dbo.tsql_cte_proc @wanted=2
+  expect:
+    rows: 1
+    data:
+    - id: 2
+      val: 30
+- name: CTE drops its stored procedure fixture
+  sql: DROP PROCEDURE dbo.tsql_cte_proc
 - sql: DROP VIEW IF EXISTS dbo.tsql_view
   name: 'Fixture cleanup 001: DROP VIEW IF EXISTS dbo.tsql_view'
 - sql: DROP TABLE IF EXISTS dbo.tsql_copy
