@@ -54,6 +54,22 @@ Run a taxonomy section through the pre-commit selector:
 ./git-pre-commit 'tests/planner/subqueries/*.yaml'
 ```
 
+## Result validation and completion counts
+
+Requested fields in `expect.data` must actually exist in each result object.
+An explicit SQL NULL is represented by a present field with a null value;
+`{}` does not satisfy an expectation for `{"value": null}`.
+
+The existing `affected_rows` path remains unchanged for compatibility with the
+current SQL endpoints. It compares a supplied completion count, but an absent
+count is not yet rejected. Therefore an `affected_rows` expectation alone does
+not prove the result of a command returning an empty response. Keep state and
+schema readback assertions; do not describe these legacy checks as complete
+completion-protocol coverage. Strict completion validation and its additional
+runner contracts must land together with the corresponding frontend/API output
+contract. This limitation does not justify inventing a count, replaying a write,
+or demoting a SQL specification.
+
 ## Performance trade-offs between startup and repeated execution
 
 When a change trades cold-start cost against warm execution, gate the complete

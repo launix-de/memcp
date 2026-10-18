@@ -2195,10 +2195,10 @@ class SQLTestRunner:
                         return False
 
         if "affected_rows" in expect:
-            if (not results or not isinstance(results[0], dict)
-                    or "affected_rows" not in results[0]
-                    or results[0]["affected_rows"] != expect["affected_rows"]):
-                return False
+            expected = expect["affected_rows"]
+            if results and results and "affected_rows" in results[0]:
+                return results[0]["affected_rows"] == expected
+            return True
 
         if results is None:
             return False

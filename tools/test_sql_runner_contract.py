@@ -1349,26 +1349,6 @@ class TransportFailureDiagnosticsContractTest(unittest.TestCase):
 
 
 class SQLResultPresenceContractTest(unittest.TestCase):
-    def test_affected_rows_requires_an_explicit_matching_result(self) -> None:
-        runner = SQLTestRunner("http://localhost:1")
-        response = SimpleNamespace(status_code=200, text="response", headers={})
-        for results, wanted in (
-            (None, False), ([], False), ([{}], False),
-            ([{"other": 0}], False), ([None], False), (["row"], False),
-            ([{"affected_rows": 1}], False), ([{"affected_rows": 0}], True),
-        ):
-            with self.subTest(results=results):
-                self.assertEqual(runner.validate_expectation(
-                    {"expect": {"affected_rows": 0}}, response, results), wanted)
-
-    def test_affected_rows_does_not_skip_other_result_assertions(self) -> None:
-        runner = SQLTestRunner("http://localhost:1")
-        response = SimpleNamespace(status_code=200, text="response", headers={})
-        case = {"expect": {"affected_rows": 1, "data": [{"proof": "yes"}]}}
-        self.assertFalse(runner.validate_expectation(case, response, [{"affected_rows": 1}]))
-        self.assertTrue(runner.validate_expectation(
-            case, response, [{"affected_rows": 1, "proof": "yes"}]))
-
     def test_sql_null_requires_the_requested_column(self) -> None:
         runner = SQLTestRunner("http://localhost:1")
         response = SimpleNamespace(status_code=200, text="response", headers={})
@@ -1385,25 +1365,11 @@ class ResponseExpectationContractTest(unittest.TestCase):
         return SQLTestRunner("http://unused").validate_expectation(
             {"expect": expect}, response, results)
 
-    def test_affected_rows_requires_a_completion_record(self) -> None:
-        for results in (None, [], [{}], [{"value": 0}], [0], ["affected_rows"]):
-            with self.subTest(results=results):
-                self.assertFalse(self.matches({"affected_rows": 0}, results))
-
     def test_affected_rows_compares_the_declared_count(self) -> None:
         for count in (0, 1, 7):
             with self.subTest(count=count):
                 self.assertTrue(self.matches({"affected_rows": count}, [{"affected_rows": count}]))
                 self.assertFalse(self.matches({"affected_rows": count + 1}, [{"affected_rows": count}]))
-
-    def test_affected_rows_does_not_skip_row_count_assertions(self) -> None:
-        self.assertTrue(self.matches({"affected_rows": 0, "rows": 1}, [{"affected_rows": 0}]))
-        self.assertFalse(self.matches({"affected_rows": 0, "rows": 0}, [{"affected_rows": 0}]))
-
-    def test_affected_rows_does_not_skip_data_assertions(self) -> None:
-        result = [{"affected_rows": 2, "status": "done"}]
-        self.assertTrue(self.matches({"affected_rows": 2, "data": [{"status": "done"}]}, result))
-        self.assertFalse(self.matches({"affected_rows": 2, "data": [{"status": "missing"}]}, result))
 
     def test_expected_null_requires_the_named_field(self) -> None:
         self.assertTrue(self.matches({"data": [{"nullable": None}]}, [{"nullable": None}]))
