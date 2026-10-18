@@ -4366,16 +4366,20 @@ test_cases:
       - upper_value: Ä
         lower_value: ä
   - name: String normalization consumes native nullable column values
-    sql: SELECT id,UPPER(note) AS u,LOWER(note) AS l,LTRIM(note) AS a,RTRIM(note) AS b,TRIM(note) AS c FROM tsql_setup_memo
+    setup:
+    - sql: DROP TABLE IF EXISTS string_normalization_rows
+    - sql: CREATE TABLE string_normalization_rows(id INT PRIMARY KEY,note NVARCHAR(32))
+    - sql: INSERT INTO string_normalization_rows VALUES(1,N' pending '),(2,NULL),(3,NCHAR(228))
+    sql: SELECT id,UPPER(note) AS u,LOWER(note) AS l,LTRIM(note) AS a,RTRIM(note) AS b,TRIM(note) AS c FROM string_normalization_rows
       ORDER BY id
     expect:
       rows: 3
       data:
       - id: 1
-        u: PENDING
-        l: pending
-        a: pending
-        b: pending
+        u: ' PENDING '
+        l: ' pending '
+        a: 'pending '
+        b: ' pending'
         c: pending
       - id: 2
         u: null
@@ -4384,11 +4388,13 @@ test_cases:
         b: null
         c: null
       - id: 3
-        u: PENDING
-        l: pending
-        a: pending
-        b: pending
-        c: pending
+        u: Ä
+        l: ä
+        a: ä
+        b: ä
+        c: ä
+    cleanup:
+    - sql: DROP TABLE IF EXISTS string_normalization_rows
   - name: String normalization views retain portable declaration compilers
     setup:
     - sql: DROP VIEW IF EXISTS string_normalization_view
