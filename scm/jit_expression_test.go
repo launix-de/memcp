@@ -2034,3 +2034,68 @@ func TestJITReadOnlyParametersKeepBorrowedFrame(t *testing.T) {
 		}
 	}
 }
+
+func TestJITFloatRepresentationConversion(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (value) (float value))`)
+	requireNoDynamicJITCalls(t, compiled)
+	for _, value := range []Scmer{NewInt(0), NewInt(-7), NewInt(9007199254740993), NewFloat(1.5), NewNil()} {
+		got := Apply(compiled, value)
+		if value.IsNil() {
+			if !got.IsNil() {
+				t.Fatalf("native float(nil) did not preserve nil: %v", got)
+			}
+		} else if !got.IsFloat() || got.Float() != value.Float() {
+			t.Fatalf("native float(%v) did not return the expected floating representation: %v", value, got)
+		}
+	}
+	// The shared size policy retains a native call for an unknown input tag.
+	// Exercise the generated emitter with the same correct native tag facts
+	// supplied by typed operators, without changing that production policy.
+	for _, test := range []struct {
+		name   string
+		tag    uint8
+		values []Scmer
+	}{
+		{"integer", tagInt, []Scmer{NewInt(0), NewInt(-7), NewInt(9007199254740993)}},
+		{"fraction", tagFloat, []Scmer{NewFloat(1.5), NewFloat(-2.5)}},
+		{"empty", tagNil, []Scmer{NewNil()}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			name := "jit_test_float_representation_" + test.name
+			declaration := &Declaration{
+				Name: name,
+				Fn:   func(args ...Scmer) Scmer { return declarations["float"].Fn(args...) },
+				Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "number"}}, Return: &TypeDescriptor{Kind: "number"},
+					JITEmit: func(ctx *JITContext, source []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+						args[0].Type = test.tag
+						args[0].NoHeapPointer = true
+						before := ctx.Coverage.InlinedCalls
+						out := declarations["float"].Type.JITEmit(ctx, source, args, result)
+						if ctx.Coverage.InlinedCalls == before {
+							panic("float fixture did not inline the generated conversion")
+						}
+						return out
+					}},
+			}
+			titles := declaration_titles
+			Declare(&Globalenv, declaration)
+			defer func() {
+				delete(Globalenv.Vars, Symbol(name))
+				delete(declarations, name)
+				delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
+				declaration_titles = titles
+			}()
+			converted := compileJITExpressionTestProc(t, "(lambda (value) ("+name+" value))")
+			for _, value := range test.values {
+				got := Apply(converted, value)
+				if value.IsNil() {
+					if !got.IsNil() {
+						t.Fatalf("generated float(nil) = %v", got)
+					}
+				} else if !got.IsFloat() || got.Float() != value.Float() {
+					t.Fatalf("generated float(%v) returned the wrong representation: %v", value, got)
+				}
+			}
+		})
+	}
+}
