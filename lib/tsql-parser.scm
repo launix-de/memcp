@@ -1793,7 +1793,9 @@ a separator is recognized only on a physical line containing no SQL text. */
 	(define tsql_select_clear_stage (lambda (query) (match query
 		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts)
 		(list (quote query-block) schema tables fields condition group having nil nil nil '() '()
-			(filter facts (lambda (fact) (equal? (car fact) (quote tsql_parser_query_hint)))))
+			(filter facts (lambda (fact) (or
+				(equal? (car fact) (quote tsql_parser_query_hint))
+				(equal? (car fact) (quote tsql_parser_unnamed_output))))))
 		_ query
 	)))
 
@@ -1903,80 +1905,98 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(match branches (cons only '()) only
 			_ (list (quote union-block) (quote all) branches nil nil nil '())))))
 
+	/* Export names belong to SELECT syntax, not the rendered expression title.
+	UNION uses its first branch's names; an explicit CTE column list supplies
+	the contract for otherwise unnamed expressions. */
+	(define tsql_cte_unnamed_output? (lambda (query) (match query
+		((symbol query-block) _db _sources _fields _where _group _having _order _limit _offset _hidden _stages facts)
+		(qassoc_get facts (quote tsql_parser_unnamed_output) false)
+		((symbol union-block) _mode branches _order _limit _offset _facts)
+		(tsql_cte_unnamed_output? (car branches))
+		_ false)))
+
 	/* Parser-only source recipes are bound once at the statement's compile
 	boundary. Local definitions become ordinary derived logical queries; native
 	names retain the existing catalog, policy and schema-guard path. Nothing here
 	is retained by a row callback or published as a separate relation catalog. */
-	(define tsql_finalize_sources (lambda (node kind bindings blocked) (match kind
-		"definitions" (begin
-			(define names (map node car))
-			(if (equal? (count names) (count (merge_unique (list (map names toLower))))) true
-				(error "duplicate CTE declaration name"))
-			(reduce node (lambda (available definition) (match definition
-				'(name aliases body) (begin
-					(define bound (tsql_finalize_sources body "definition" available names))
-					(define exported (tsql_finalize_sources bound "exports" available names))
-					(define titles (queryplan_result_titles exported))
-					(define output_names (coalesceNil aliases titles))
-					(if (equal? (count output_names) (count titles)) true
-						(error "CTE output alias count does not match query column count"))
-					(if (equal? (count output_names) (count (merge_unique (list (map output_names toLower))))) true
-						(error "duplicate CTE output column name"))
-					(cons (list name (if (nil? aliases) exported
-						(tsql_apply_derived_column_aliases exported aliases))) available)))) bindings))
-		"source" (match node '(id database relation outer join) (begin
-			(define resolved (match relation
-				((symbol tsql_source_name) name) (begin
-					(define local (find bindings (lambda (entry) (equal?? (car entry) name)) nil))
-					(if local (list id database (cadr local) outer nil)
-						(find blocked (lambda (entry) (equal?? entry name)) nil)
-						(error "recursive or forward CTE reference is unsupported: " name)
-						(begin
-							(define native (tsql_read_source id database name))
-							(list id database (source_relation native) outer nil))))
-				((symbol tsql_pending_apply) inner)
-				(tsql_apply_source (tsql_finalize_sources (list id database inner outer nil)
-					"source" bindings blocked) outer)
-				_ (list id database (tsql_finalize_sources relation "query" bindings blocked) outer nil)))
-			(list (source_alias resolved) (source_schema resolved) (source_relation resolved)
-				(source_outer? resolved) (tsql_finalize_sources join "query" bindings blocked))))
-		_ (match node
-			((symbol quote) _literal) node
-			((symbol tsql_pending_with) definitions body) (begin
-				(define available (tsql_finalize_sources definitions "definitions" bindings blocked))
-				(tsql_finalize_sources body "query" available '()))
-			((symbol tsql_pending_aliases) body aliases)
-			(tsql_apply_derived_column_aliases
-				(tsql_finalize_sources (tsql_finalize_sources body "query" bindings blocked)
-					"exports" bindings blocked) aliases)
-			((symbol tsql_pending_values) aliases rows)
-			(tsql_inline_values_query aliases (tsql_finalize_sources rows "query" bindings blocked))
-			((symbol query-block) db sources fields condition group having order limit offset hidden stages facts)
-			(begin
-				(if (equal? kind "definition") (begin
-					(if (and (not (empty_list? (coalesceNil order '()))) (nil? limit) (nil? offset))
-						(error "CTE ORDER BY requires TOP or OFFSET") true)
-					(if (qassoc_get facts (quote tsql_parser_query_hint) false)
-						(error "OPTION is not allowed in a CTE definition") true)) true)
-				(define bound_sources (if (equal? kind "exports") sources
-					(map sources (lambda (source) (tsql_finalize_sources source "source" bindings blocked)))))
-				(make_query_block db bound_sources
-					(if (equal? kind "exports") (expand_query_block_fields bound_sources fields)
-						(tsql_finalize_sources fields "query" bindings blocked))
-					(tsql_finalize_sources condition "query" bindings blocked)
-					(tsql_finalize_sources group "query" bindings blocked)
-					(tsql_finalize_sources having "query" bindings blocked)
-					(tsql_finalize_sources order "query" bindings blocked)
-					limit offset hidden stages
-					(filter facts (lambda (fact) (not (equal? (car fact) (quote tsql_parser_query_hint)))))))
-			((symbol union-block) mode branches order limit offset facts) (begin
-				(if (and (equal? kind "definition") (not (empty_list? (coalesceNil order '())))
-					(nil? limit) (nil? offset)) (error "CTE ORDER BY requires TOP or OFFSET") true)
-				(list (quote union-block) mode
-					(map branches (lambda (branch) (tsql_finalize_sources branch kind bindings blocked)))
-					(tsql_finalize_sources order "query" bindings blocked) limit offset facts))
-			(cons _head _tail) (map node (lambda (item) (tsql_finalize_sources item "query" bindings blocked)))
-			_ node))))
+	(define tsql_finalize_sources (lambda (node kind bindings blocked) (begin
+		(define definition_scope (or (equal? kind "definition") (equal? kind "definition_source")))
+		(define child_kind (if definition_scope "definition" "query"))
+		(define source_kind (if definition_scope "definition_source" "source"))
+		(match (if (equal? kind "definition_source") "source" kind)
+			"definitions" (begin
+				(define names (map node car))
+				(if (equal? (count names) (count (merge_unique (list (map names toLower))))) true
+					(error "duplicate CTE declaration name"))
+				(reduce node (lambda (available definition) (match definition
+					'(name aliases body) (begin
+						(if (and (nil? aliases) (tsql_cte_unnamed_output? body))
+							(error "CTE output expressions require column names") true)
+						(define bound (tsql_finalize_sources body "definition" available names))
+						(define exported (tsql_finalize_sources bound "exports" available names))
+						(define titles (queryplan_result_titles exported))
+						(define output_names (coalesceNil aliases titles))
+						(if (equal? (count output_names) (count titles)) true
+							(error "CTE output alias count does not match query column count"))
+						(if (equal? (count output_names) (count (merge_unique (list (map output_names toLower))))) true
+							(error "duplicate CTE output column name"))
+						(cons (list name (if (nil? aliases) exported
+							(tsql_apply_derived_column_aliases exported aliases))) available)))) bindings))
+			"source" (match node '(id database relation outer join) (begin
+				(define resolved (match relation
+					((symbol tsql_source_name) name) (begin
+						(define local (find bindings (lambda (entry) (equal?? (car entry) name)) nil))
+						(if local (list id database (cadr local) outer nil)
+							(find blocked (lambda (entry) (equal?? entry name)) nil)
+							(error "recursive or forward CTE reference is unsupported: " name)
+							(begin
+								(define native (tsql_read_source id database name))
+								(list id database (source_relation native) outer nil))))
+					((symbol tsql_pending_apply) inner)
+					(tsql_apply_source (tsql_finalize_sources (list id database inner outer nil)
+						source_kind bindings blocked) outer)
+					_ (list id database (tsql_finalize_sources relation child_kind bindings blocked) outer nil)))
+				(list (source_alias resolved) (source_schema resolved) (source_relation resolved)
+					(source_outer? resolved) (tsql_finalize_sources join child_kind bindings blocked))))
+			_ (match node
+				((symbol quote) _literal) node
+				((symbol tsql_pending_with) definitions body) (begin
+					(define available (tsql_finalize_sources definitions "definitions" bindings blocked))
+					(tsql_finalize_sources body "query" available '()))
+				((symbol tsql_pending_aliases) body aliases)
+				(tsql_apply_derived_column_aliases
+					(tsql_finalize_sources (tsql_finalize_sources body child_kind bindings blocked)
+						"exports" bindings blocked) aliases)
+				((symbol tsql_pending_values) aliases rows)
+				(tsql_inline_values_query aliases (tsql_finalize_sources rows child_kind bindings blocked))
+				((symbol query-block) db sources fields condition group having order limit offset hidden stages facts)
+				(begin
+					(if definition_scope (begin
+						(if (and (not (empty_list? (coalesceNil order '()))) (nil? limit) (nil? offset))
+							(error "CTE ORDER BY requires TOP or OFFSET") true)
+						(if (qassoc_get facts (quote tsql_parser_query_hint) false)
+							(error "OPTION is not allowed in a CTE definition") true)) true)
+					(define bound_sources (if (equal? kind "exports") sources
+						(map sources (lambda (source) (tsql_finalize_sources source source_kind bindings blocked)))))
+					(make_query_block db bound_sources
+						(if (equal? kind "exports") (expand_query_block_fields bound_sources fields)
+							(tsql_finalize_sources fields child_kind bindings blocked))
+						(tsql_finalize_sources condition child_kind bindings blocked)
+						(tsql_finalize_sources group child_kind bindings blocked)
+						(tsql_finalize_sources having child_kind bindings blocked)
+						(tsql_finalize_sources order child_kind bindings blocked)
+						limit offset hidden stages
+						(filter facts (lambda (fact) (and
+							(not (equal? (car fact) (quote tsql_parser_query_hint)))
+							(not (equal? (car fact) (quote tsql_parser_unnamed_output))))))))
+				((symbol union-block) mode branches order limit offset facts) (begin
+					(if (and definition_scope (not (empty_list? (coalesceNil order '())))
+						(nil? limit) (nil? offset)) (error "CTE ORDER BY requires TOP or OFFSET") true)
+					(list (quote union-block) mode
+						(map branches (lambda (branch) (tsql_finalize_sources branch kind bindings blocked)))
+						(tsql_finalize_sources order child_kind bindings blocked) limit offset facts))
+				(cons _head _tail) (map node (lambda (item) (tsql_finalize_sources item child_kind bindings blocked)))
+				_ node)))))
 
 	(define tsql_select_core (parser '(
 		(atom "SELECT" true)
@@ -1998,7 +2018,15 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(parser '((define e tsql_expression) (define title tsql_identifier)) '(title e))
 			(parser '((define e tsql_expression) (define title tsql_string)) '(title e))
 
-			(parser (define captured (capture tsql_expression)) '((extract_title_or_sql captured) (car (cdr captured))))
+			(parser (define captured (capture tsql_expression)) (begin
+				(define expr (nth captured 1))
+				(define named (match expr
+					((symbol sql_compile_column) _compiler ((symbol get_column) _alias _alias_ic _column _column_ic)) true
+					((symbol get_column) _alias _alias_ic _column _column_ic) true
+					_ false))
+				/* Only this syntax branch needs an unnamed-output marker. */
+				(if named (list (extract_title_or_sql captured) expr)
+					(list (extract_title_or_sql captured) expr false))))
 		) ","))
 		(?
 			(atom "FROM" true)
@@ -2046,7 +2074,9 @@ a separator is recognized only on a physical line containing no SQL text. */
 	) (begin
 			(if (and suffix_stage (nil? order)) (error "OFFSET requires ORDER BY") true)
 			(if (and suffix_stage (not (nil? prefix_limit))) (error "TOP cannot be combined with OFFSET") true)
-			(define projected_exprs (extract_assoc (merge cols) (lambda (_title expr) expr)))
+			(define fields (merge (map cols (lambda (column) (slice column 0 2)))))
+			(define unnamed_output (not (nil? (find cols (lambda (column) (equal? (count column) 3)) nil))))
+			(define projected_exprs (extract_assoc fields (lambda (_title expr) expr)))
 			(define sources (if (nil? from) '() (merge from)))
 
 			(define distinct_preserved_by_group (and distinct
@@ -2054,7 +2084,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 					(and (not (empty_list? group))
 						(reduce group (lambda (preserved expr)
 							(and preserved (contains? projected_exprs expr))) true)))))
-			(list (quote query-block) schema sources (merge cols) condition
+			(list (quote query-block) schema sources fields condition
 				(if (and distinct (not distinct_preserved_by_group)) projected_exprs group)
 				having
 				order (if (nil? prefix_limit) (if suffix_stage (car suffix_stage) limit) prefix_limit)
@@ -2064,7 +2094,8 @@ a separator is recognized only on a physical line containing no SQL text. */
 					HAVING names belong to the input scope in this frontend. */
 					(list (list (quote having_input_scope) true))
 					(if distinct (list (list (quote select_distinct) true)) '())
-					(if query_hint (list (list (quote tsql_parser_query_hint) true)) '())))))))
+					(if query_hint (list (list (quote tsql_parser_query_hint) true)) '())
+					(if unnamed_output (list (list (quote tsql_parser_unnamed_output) true)) '())))))))
 
 	(define tsql_select (parser (or
 		(parser '(
