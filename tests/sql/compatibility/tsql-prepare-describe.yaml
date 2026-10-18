@@ -218,6 +218,45 @@ test_cases:
   - name: Analysis does not authorize undeclared references in later execution
     sql: SELECT @PRM0001 AS value
     expect: {error: true,contains: ['undeclared T-SQL parameter: @prm0001']}
+  - name: CTE real prepare RPC preserves declared empty and populated results
+    tds:
+      statements:
+      - sql: WITH selected(code,label) AS (SELECT id,label FROM prepare_describe_rows WHERE id=@wanted) SELECT code,label
+          FROM selected
+        declarations: '@wanted INT'
+        prepare_only: true
+      - sql: WITH selected(code,label) AS (SELECT id,label FROM prepare_describe_rows WHERE id=@wanted) SELECT code,label
+          FROM selected
+        prepare: true
+        parameters:
+        - name: wanted
+          value: 1
+        expect:
+          rows: 1
+          data:
+          - code: 1
+            label: real
+          columns:
+          - code
+          - label
+          column_types: &id001
+          - name: code
+            type: INT
+          - name: label
+            type: NVARCHAR
+            length: 12
+      - sql: WITH selected(code,label) AS (SELECT id,label FROM prepare_describe_rows WHERE id=@wanted) SELECT code,label
+          FROM selected
+        prepare: true
+        parameters:
+        - name: wanted
+          value: 999
+        expect:
+          rows: 0
+          columns:
+          - code
+          - label
+          column_types: *id001
 cleanup:
   - sql: DROP TABLE prepare_describe_rows
   - sql: DROP TABLE prepare_describe_source
