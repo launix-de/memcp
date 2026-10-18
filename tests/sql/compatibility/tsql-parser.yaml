@@ -1296,6 +1296,42 @@ test_cases:
       val: 30
 - name: CTE drops its stored procedure fixture
   sql: DROP PROCEDURE dbo.tsql_cte_proc
+- name: CTE never falls back to a shadowed native UPDATE target
+  sql: WITH tsql_data AS (SELECT id,val FROM dbo.tsql_data WHERE id=1) UPDATE tsql_data SET val=999
+  expect:
+    error: true
+- name: CTE never falls back to a shadowed native DELETE target
+  sql: WITH tsql_data AS (SELECT id FROM dbo.tsql_data WHERE id=1) DELETE FROM tsql_data
+  expect:
+    error: true
+- name: CTE never falls back to a shadowed native INSERT target
+  sql: WITH tsql_data AS (SELECT id FROM dbo.tsql_data WHERE id=1) INSERT INTO tsql_data VALUES(5,N'wrong',999)
+  expect:
+    error: true
+- name: CTE unsupported write targets retain native rows
+  sql: SELECT id,val FROM dbo.tsql_data ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      val: 10
+    - id: 2
+      val: 30
+    - id: 3
+      val: 50
+    - id: 4
+      val: 20
+- name: CTE rejects a nested definition
+  sql: WITH outer_rows AS (WITH inner_rows(n) AS (SELECT 1) SELECT n FROM inner_rows) SELECT n FROM outer_rows
+  expect:
+    error: true
+- name: CTE binds a new statement after a terminated predecessor
+  sql: SELECT 9 AS n; WITH local_rows(n) AS (SELECT 8) SELECT n FROM local_rows
+  expect:
+    rows: 2
+    data:
+    - n: 9
+    - n: 8
 - sql: DROP VIEW IF EXISTS dbo.tsql_view
   name: 'Fixture cleanup 001: DROP VIEW IF EXISTS dbo.tsql_view'
 - sql: DROP TABLE IF EXISTS dbo.tsql_copy
