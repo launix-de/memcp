@@ -1990,6 +1990,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '((atom "CONCAT" true) "(" (define p (+ tsql_expression ",")) ")")
 			(cons (quote concat) (map p (lambda (value) (list (quote coalesceNil) value "")))))
 
+		(parser '((define name (or (atom "TRIM" true true "TRIM")
+			(atom "LTRIM" true true "LTRIM") (atom "RTRIM" true true "RTRIM")))
+			"(" (define args (* tsql_expression ",")) ")") (tsql_builtin_expr name args))
+
 		(parser '((atom "COALESCE" true) "(" (define args (* tsql_expression ",")) ")") (tsql_coalesce_expr args))
 
 		(parser '((atom "ISNULL" true) "(" (define args (* tsql_expression ",")) ")") (tsql_isnull_expr args))
