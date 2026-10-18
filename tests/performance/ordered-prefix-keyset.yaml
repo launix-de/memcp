@@ -6,7 +6,7 @@ metadata:
   reuse_fixture: true
   restart_after_setup: true
   # Keep the full seven-pair verification separate from other large fixture checks.
-  performance_shard_weight: 100
+  performance_shard_weight: 23
   ci: false
   perf_ci: true
   performance_rows: 800000

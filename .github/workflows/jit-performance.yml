@@ -36,7 +36,7 @@ jobs:
         run: test "$SHARD_RESULT" = success
 
   jit-performance-ab-shard:
-    name: jit-performance-ab (${{ matrix.shard }}/6)
+    name: jit-performance-ab (${{ matrix.shard }}/7)
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
@@ -46,10 +46,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6]
     env:
       PERF_SHARD_INDEX: ${{ matrix.shard }}
-      PERF_SHARD_COUNT: 6
+      PERF_SHARD_COUNT: 7
 
     steps:
       - name: Check out JIT merge candidate
@@ -165,7 +165,8 @@ jobs:
           # The reviewed runner measures old then new on independent
           # fixtures. Only suspect timings get fixed old/new verification pairs,
           # after the complete initial pass; original samples stay included.
-          (cd candidate && env \
+          cd candidate
+          exec env \
             PERF_BASELINE_FILE="$baseline" \
             PERF_BASELINE_SEED="$seed" \
             PERF_REPEAT=1000 \
@@ -173,7 +174,7 @@ jobs:
             PERF_AB_JITTER_MS=50 \
             PERF_SETUP_MAX_TIME_SEC=120 \
             PERF_REGRESSION_WAIVERS_FILE="$GITHUB_WORKSPACE/jit-perf-regression-waivers.txt" \
-            python3 -u "$runner" --perf-ab "$GITHUB_WORKSPACE/base" "$GITHUB_WORKSPACE/candidate")
+            python3 -u "$runner" --perf-ab "$GITHUB_WORKSPACE/base" "$GITHUB_WORKSPACE/candidate"
 
       - name: Profile failing JIT performance suites
         if: ${{ failure() && steps.measure.outcome == 'failure' }}
@@ -184,15 +185,22 @@ jobs:
           test -f "$baseline" || exit 0
           mapfile -t suites < <(python3 - "$baseline" <<'PY'
           import json, sys
+          from pathlib import Path
+          # A timeout or interrupted cohort is not a completed regression.
+          manifest = Path(sys.argv[1]).with_suffix('.trials') / 'manifest.json'
+          if not manifest.is_file() or json.load(manifest.open()).get('completed') is not True:
+            sys.exit(0)
           data = json.load(open(sys.argv[1]))
           print('\n'.join(sorted({key.split('::', 1)[0] for key, value in data.items()
-            if isinstance(value, dict) and value.get('passed') is False})))
+            if isinstance(value, dict) and value.get('passed') is False
+            and value.get('verification_pending') is False})))
           PY
           )
           test -n "${suites[0]:-}" || exit 0
           # The original unprofiled verdict remains failed. Profiles diagnose
           # the same queries and fixtures in independent old/new processes.
-          (cd candidate && env \
+          cd candidate
+          exec env \
             PERF_SHARD_INDEX=0 PERF_SHARD_COUNT=1 \
             MEMCP_CPU_PROFILE=1 \
             PERF_BASELINE_FILE="$GITHUB_WORKSPACE/jit-perf-diagnostic.json" \
@@ -200,7 +208,7 @@ jobs:
             PERF_REPEAT=1000 PERF_MIN_MEASURE_MS=1000 PERF_AB_JITTER_MS=50 \
             PERF_SETUP_MAX_TIME_SEC=120 \
             python3 -u run_sql_tests.py --perf-ab \
-              "$GITHUB_WORKSPACE/base" "$GITHUB_WORKSPACE/candidate" "${suites[@]}")
+              "$GITHUB_WORKSPACE/base" "$GITHUB_WORKSPACE/candidate" "${suites[@]}"
 
       - name: Upload measured JIT base
         if: always()

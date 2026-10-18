@@ -31,7 +31,7 @@ jobs:
         run: test "$SHARD_RESULT" = success
 
   performance-ab-shard:
-    name: performance-ab (${{ matrix.shard }}/6)
+    name: performance-ab (${{ matrix.shard }}/7)
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
@@ -41,10 +41,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6]
     env:
       PERF_SHARD_INDEX: ${{ matrix.shard }}
-      PERF_SHARD_COUNT: 6
+      PERF_SHARD_COUNT: 7
 
     steps:
       - name: Check out merge candidate
@@ -85,6 +85,7 @@ jobs:
           (cd candidate && go build -trimpath -buildvcs=false -o memcp)
 
       - name: Measure base and candidate with the SQL test runner
+        id: measure
         timeout-minutes: 15
         shell: bash
         run: |
@@ -101,7 +102,8 @@ jobs:
           # The reviewed runner measures old then new on independent
           # fixtures. Only suspect timings get fixed old/new verification pairs,
           # after the complete initial pass; original samples stay included.
-          (cd candidate && env \
+          cd candidate
+          exec env \
             PERF_BASELINE_FILE="$baseline" \
             PERF_BASELINE_SEED="$seed" \
             PERF_REPEAT=1000 \
@@ -109,7 +111,46 @@ jobs:
             PERF_AB_JITTER_MS=50 \
             PERF_SETUP_MAX_TIME_SEC=120 \
             PERF_REGRESSION_WAIVERS_FILE="$GITHUB_WORKSPACE/perf-regression-waivers.txt" \
-            python3 -u "$runner" --perf-ab "$GITHUB_WORKSPACE/base" "$GITHUB_WORKSPACE/candidate")
+            python3 -u "$runner" --perf-ab "$GITHUB_WORKSPACE/base" "$GITHUB_WORKSPACE/candidate"
+
+      - name: Profile failing performance suites
+        if: ${{ failure() && steps.measure.outcome == 'failure' }}
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          baseline="$GITHUB_WORKSPACE/perf-baseline.json"
+          # A timeout may leave no completed verdict to select. Skipping this
+          # diagnostic never changes the original measurement failure.
+          test -f "$baseline" || exit 0
+          mapfile -t suites < <(python3 - "$baseline" <<'PY'
+          import json, sys
+          from pathlib import Path
+          manifest = Path(sys.argv[1]).with_suffix('.trials') / 'manifest.json'
+          if not manifest.is_file() or json.load(manifest.open()).get('completed') is not True:
+            sys.exit(0)
+          data = json.load(open(sys.argv[1]))
+          print('\n'.join(sorted({key.split('::', 1)[0] for key, value in data.items()
+            if isinstance(value, dict) and value.get('passed') is False
+            and value.get('verification_pending') is False})))
+          PY
+          )
+          test -n "${suites[0]:-}" || exit 0
+          seed="$GITHUB_WORKSPACE/base/tests/performance/ci-workloads.json"
+          if [ ! -f "$seed" ]; then
+            seed="$GITHUB_WORKSPACE/candidate/tests/performance/ci-workloads.json"
+          fi
+          # The original unprofiled verdict remains failed. Profiles diagnose
+          # the same queries and fixtures in independent old/new processes.
+          cd candidate
+          exec env \
+            PERF_SHARD_INDEX=0 PERF_SHARD_COUNT=1 \
+            MEMCP_CPU_PROFILE=1 \
+            PERF_BASELINE_FILE="$GITHUB_WORKSPACE/perf-diagnostic.json" \
+            PERF_BASELINE_SEED="$seed" \
+            PERF_REPEAT=1000 PERF_MIN_MEASURE_MS=1000 PERF_AB_JITTER_MS=50 \
+            PERF_SETUP_MAX_TIME_SEC=120 \
+            python3 -u run_sql_tests.py --perf-ab \
+              "$GITHUB_WORKSPACE/base" "$GITHUB_WORKSPACE/candidate" "${suites[@]}"
 
       - name: Upload measured base
         if: always()
@@ -119,4 +160,6 @@ jobs:
           path: |
             perf-baseline.json
             perf-baseline.trials/
+            perf-diagnostic.json
+            perf-diagnostic.trials/
           if-no-files-found: warn
