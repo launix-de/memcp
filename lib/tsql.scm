@@ -918,10 +918,8 @@ no supplied value, physical plan, cache binding or marker is executed. */
 	((symbol tsql_unbound_parameter) name spelling) (list name spelling)
 	_ nil)))
 (define tsql_parameter_cast_head? (lambda (head)
-	(or (has? (list (quote tsql_cast_text) (quote tsql_cast_fixed_text) (quote tsql_cast_binary)
-		(quote tsql_cast_decimal)) head)
-		(expression_equal? head tsql_cast_integer) (expression_equal? head tsql_cast_float)
-		(expression_equal? head tsql_cast_bit))))
+	(has? '(tsql_cast_text tsql_cast_fixed_text tsql_cast_binary tsql_cast_decimal
+		tsql_cast_integer tsql_cast_float tsql_cast_bit) head)))
 (define tsql_parameter_analysis_join (lambda (left right)
 	(list (merge (list (car left) (car right))) (merge (list (cadr left) (cadr right))))))
 (define tsql_parameter_candidates (lambda (node sources declarations) (match node
