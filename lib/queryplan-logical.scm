@@ -5864,7 +5864,7 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 			Only compile-time annotations remain; executable lowering consumes them. */
 			(define bound (bind_query_expr_tail scopes arguments path all_strings 0))
 			(define sources (map (merge scopes) binding_entry_source))
-			(define info (compiler (map bound (lambda (argument) (sql_expr_info sources argument)))))
+			(define info ((sql_expression_compiler compiler) (map bound (lambda (argument) (sql_expr_info sources argument)))))
 			(define formula (sql_info_formula info))
 			/* A fixed frontend BOOLEAN operator already carries this contract.
 			Keep its predicate AST visible to the shared logical extractors. */

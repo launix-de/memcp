@@ -97,7 +97,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 			coverage = JITCoverage{}
 		}
 	}()
-	numVars = jitRequiredLocalSlots(body, numVars)
+	numVars, firstAssignment := jitRequiredLocalSlots(body, numVars)
 
 	freeRegs := jitDefaultFreeGPRegs()
 	freeFPRegs := uint64(0)
@@ -216,7 +216,8 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 			ctx.emitBytes(0xF3, 0x48, 0xAB) // rep stosq
 		}
 	}
-	useInputFrame := proc != nil && proc.NumberedOnly && numVars == inputArgCount && !ctx.HasSelfLoop
+	// setN writes require the existing private frame; LocInputPair is borrowed.
+	useInputFrame := proc != nil && proc.NumberedOnly && numVars == inputArgCount && firstAssignment < 0 && !ctx.HasSelfLoop
 	// Allocate local vars via AllocStack.
 	if numVars > 0 && !useInputFrame {
 		ctx.AllocStack(int32(numVars * 16))
