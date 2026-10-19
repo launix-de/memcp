@@ -41,13 +41,9 @@ test_cases:
     result: true
   noncritical: true
 - name: Prepared declarations share qualified CAST precision and scale
-  scm: |
-    (begin
-      (define fields (tds_describe "memcp-tests" "SELECT @amount AS amount"
-        "@amount [sys].[DECIMAL](20,2)" (newsession)))
-      (define field (car fields))
-      (and (equal? (field "sql_type") "DECIMAL")
-        (equal? (field "precision") 20) (equal? (field "scale") 2)))
+  scm: "(begin\n  (define fields (tds_describe \"memcp-tests\" \"SELECT @amount AS amount\"\n    \"@amount [sys].[DECIMAL](20,2)\"\
+    \ (newsession)))\n  (define field (car fields))\n  (and (equal? (field \"sql_type\") \"DECIMAL\")\n    (equal?\
+    \ (field \"precision\") 20) (equal? (field \"scale\") 2)))\n"
   expect:
     result: true
 - name: Metadata declarations share qualified type and MAX grammar
@@ -149,14 +145,11 @@ test_cases:
 - name: Conditional describe cannot run DDL
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_if_describe
-  scm: |
-    (begin
-      (define session (newsession))
-      (define failed (try (lambda () (begin
-        (tds_describe "memcp-tests" "IF 1=1 CREATE TABLE dbo.tsql_if_describe(id INT)" "" session)
-        false)) (lambda (_err) true)))
-      (and failed (nil? (table "memcp-tests" false "tsql_if_describe" false))))
-  expect: {result: true}
+  scm: "(begin\n  (define session (newsession))\n  (define failed (try (lambda () (begin\n    (tds_describe \"memcp-tests\"\
+    \ \"IF 1=1 CREATE TABLE dbo.tsql_if_describe(id INT)\" \"\" session)\n    false)) (lambda (_err) true)))\n \
+    \ (and failed (nil? (table \"memcp-tests\" false \"tsql_if_describe\" false))))\n"
+  expect:
+    result: true
 - sql: DROP TABLE IF EXISTS dbo.tsql_if_describe
   name: Fixture cleanup for Conditional describe cannot run DDL (1)
 - name: Selected IF table error remains visible
@@ -192,27 +185,27 @@ test_cases:
   expect:
     error: true
 - name: IF rejects BEGIN END blocks
-  # Retain the existing regression identity; blocks are now supported.
   sql: IF 1=1 BEGIN SELECT 5 AS n END
   expect:
     rows: 1
-    data: [{n: 5}]
+    data:
+    - n: 5
 - name: IF rejects nested control statements
-  # Retain the existing regression identity; blocks are now supported.
   sql: IF 1=1 IF 1=1 SELECT 5 AS n
   expect:
     rows: 1
-    data: [{n: 5}]
+    data:
+    - n: 5
 - name: IF rejects an internal semicolon before ELSE
   sql: IF 1=1 SELECT 5 AS n; ELSE SELECT 6 AS n
   expect:
     error: true
 - name: IF does not dispatch arbitrary procedure text
-  # Unselected EXEC must not look up or invoke a procedure.
   sql: IF 1=0 EXEC unknown_installation_procedure ELSE SELECT 5 AS n
   expect:
     rows: 1
-    data: [{n: 5}]
+    data:
+    - n: 5
 - name: Cached IF catalog conditions observe create and drop
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_if_catalog
@@ -231,61 +224,39 @@ test_cases:
 - sql: DROP TABLE IF EXISTS dbo.tsql_if_catalog
   name: Fixture cleanup for Cached IF catalog conditions observe create and drop (1)
 - name: Cached IF uses the current invocation session and result sink
-  scm: |
-    (begin
-      (define a (newsession))
-      (define b (newsession))
-      (map (list a b) (lambda (session) (begin
-        (session "username" "root")
-        (session "__tsql_parameter_declarations" (list (list "gate" (list "INT")) (list "payload" (list "INT")))))))
-      (a "__tsql_parameter:gate" 1) (a "__tsql_parameter:payload" 17)
-      (b "__tsql_parameter:gate" 0) (b "__tsql_parameter:payload" 99)
-      (define sql "IF @gate=1 SELECT @payload AS n ELSE SELECT -1 AS n")
-      (define execute (lambda (session) (begin
-        (define output (newsession))
-        (tsql_execute_request "memcp-tests" sql session nil 0
-          (lambda (row) (output "row" row)) (lambda args true))
-        ((output "row") "n"))))
-      (define first (execute a))
-      (define second (execute b))
-      (a "__tsql_parameter:payload" 23)
-      (define third (execute a))
-      (and (equal? first 17) (equal? second -1) (equal? third 23)))
-  expect: {result: true}
+  scm: "(begin\n  (define a (newsession))\n  (define b (newsession))\n  (map (list a b) (lambda (session) (begin\n\
+    \    (session \"username\" \"root\")\n    (session \"__tsql_parameter_declarations\" (list (list \"gate\" (list\
+    \ \"INT\")) (list \"payload\" (list \"INT\")))))))\n  (a \"__tsql_parameter:gate\" 1) (a \"__tsql_parameter:payload\"\
+    \ 17)\n  (b \"__tsql_parameter:gate\" 0) (b \"__tsql_parameter:payload\" 99)\n  (define sql \"IF @gate=1 SELECT\
+    \ @payload AS n ELSE SELECT -1 AS n\")\n  (define execute (lambda (session) (begin\n    (define output (newsession))\n\
+    \    (tsql_execute_request \"memcp-tests\" sql session nil 0\n      (lambda (row) (output \"row\" row)) (lambda\
+    \ args true))\n    ((output \"row\") \"n\"))))\n  (define first (execute a))\n  (define second (execute b))\n\
+    \  (a \"__tsql_parameter:payload\" 23)\n  (define third (execute a))\n  (and (equal? first 17) (equal? second\
+    \ -1) (equal? third 23)))\n"
+  expect:
+    result: true
 - name: IF DML retains its existing explicit transaction and skipped writes
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_if_transaction
   - sql: CREATE TABLE dbo.tsql_if_transaction(id INT PRIMARY KEY)
-  scm: |
-    (begin
-      (define session (newsession))
-      (session "username" "root")
-      (define execute (lambda (sql) (begin
-        (define output (newsession))
-        (tsql_execute_request "memcp-tests" sql session nil 0
-          (lambda (row) (output "row" row)) (lambda args true))
-        (output "row"))))
-      (execute "BEGIN TRANSACTION")
-      (execute "IF 1=0 INSERT INTO dbo.tsql_if_transaction VALUES(10)")
-      (execute "IF 1=1 INSERT INTO dbo.tsql_if_transaction VALUES(20)")
-      (define inside (execute "SELECT COUNT(*) AS n FROM dbo.tsql_if_transaction"))
-      (execute "ROLLBACK")
-      (define outside (execute "SELECT COUNT(*) AS n FROM dbo.tsql_if_transaction"))
-      (and (equal? (inside "n") 1) (equal? (outside "n") 0) (nil? (session "transaction"))))
-  expect: {result: true}
+  scm: "(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (define execute (lambda (sql)\
+    \ (begin\n    (define output (newsession))\n    (tsql_execute_request \"memcp-tests\" sql session nil 0\n  \
+    \    (lambda (row) (output \"row\" row)) (lambda args true))\n    (output \"row\"))))\n  (execute \"BEGIN TRANSACTION\"\
+    )\n  (execute \"IF 1=0 INSERT INTO dbo.tsql_if_transaction VALUES(10)\")\n  (execute \"IF 1=1 INSERT INTO dbo.tsql_if_transaction\
+    \ VALUES(20)\")\n  (define inside (execute \"SELECT COUNT(*) AS n FROM dbo.tsql_if_transaction\"))\n  (execute\
+    \ \"ROLLBACK\")\n  (define outside (execute \"SELECT COUNT(*) AS n FROM dbo.tsql_if_transaction\"))\n  (and\
+    \ (equal? (inside \"n\") 1) (equal? (outside \"n\") 0) (nil? (session \"transaction\"))))\n"
+  expect:
+    result: true
 - sql: DROP TABLE IF EXISTS dbo.tsql_if_transaction
   name: Fixture cleanup for IF DML retains its existing explicit transaction and skipped writes (1)
 - name: IF selected permission errors are not masked
-  scm: |
-    (begin
-      (define session (newsession))
-      (session "username" "script_unprivileged")
-      (define failure (try (lambda () (begin
-        (tsql_execute_request "memcp-tests" "IF 1=1 UPDATE dbo.tsql_data SET val=1"
-          session nil 0 (lambda (_row) true) (lambda args true))
-        "unexpected success")) (lambda (message) (concat message))))
-      (strlike failure "%access denied%"))
-  expect: {result: true}
+  scm: "(begin\n  (define session (newsession))\n  (session \"username\" \"script_unprivileged\")\n  (define failure\
+    \ (try (lambda () (begin\n    (tsql_execute_request \"memcp-tests\" \"IF 1=1 UPDATE dbo.tsql_data SET val=1\"\
+    \n      session nil 0 (lambda (_row) true) (lambda args true))\n    \"unexpected success\")) (lambda (message)\
+    \ (concat message))))\n  (strlike failure \"%access denied%\"))\n"
+  expect:
+    result: true
 - name: Mixed integer and string addition converts numeric input
   sql: SELECT 2 + '3' AS n
   expect:
@@ -498,12 +469,15 @@ test_cases:
   sql: SELECT 1/0 AS value
   expect:
     error: true
-# The formerly unsupported constant APPLY shape now checks the actual result.
 - name: Unsupported APPLY
   sql: SELECT a.id FROM tsql_data a CROSS APPLY (SELECT 1 AS value) b ORDER BY a.id
   expect:
     rows: 4
-    data: [{id: 1}, {id: 2}, {id: 3}, {id: 4}]
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
 - name: TSQL CREATE TABLE with IDENTITY
   sql: CREATE TABLE dbo.tsql_copy (id INT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(MAX))
   expect:
@@ -653,12 +627,12 @@ test_cases:
     \ \"name\") \"id\")\n      (equal? ((car fields) \"sql_type\") \"INT\")) true (error \"empty SELECT lost its\
     \ declared type\")))\n"
 - name: Describe never executes INSERT
-  scm: |
-    (empty_list? (tds_describe "memcp-tests"
-      "INSERT INTO dbo.tsql_data VALUES (999,N'unexecuted',1)" "" (newsession)))
-
+  scm: "(empty_list? (tds_describe \"memcp-tests\"\n  \"INSERT INTO dbo.tsql_data VALUES (999,N'unexecuted',1)\"\
+    \ \"\" (newsession)))\n"
   expect:
-    {rows: 1, data: [true]}
+    rows: 1
+    data:
+    - true
 - name: Failed describe leaves rows unchanged
   sql: SELECT COUNT(*) AS n FROM dbo.tsql_data WHERE id=999
   expect:
@@ -819,10 +793,8 @@ test_cases:
 - sql: DROP TABLE IF EXISTS dbo.tsql_identity_probe
   name: Fixture cleanup for Identity metadata marks only direct auto columns (1)
 - name: Prepare metadata for one INSERT has no fields and no side effects
-  scm: |
-    (empty_list? (tds_describe "memcp-tests"
-      "INSERT INTO dbo.tsql_data VALUES (999,N'unexecuted',1)" "" (newsession)))
-
+  scm: "(empty_list? (tds_describe \"memcp-tests\"\n  \"INSERT INTO dbo.tsql_data VALUES (999,N'unexecuted',1)\"\
+    \ \"\" (newsession)))\n"
   expect:
     result: true
 - name: Pure INSERT prepare did not execute its body
@@ -832,13 +804,16 @@ test_cases:
     data:
     - n: 0
 - name: INSERT followed by SELECT cannot receive empty prepare metadata
-  scm: |
-    (tds_describe "memcp-tests" "INSERT INTO dbo.tsql_data VALUES (999,N'unexecuted',1); SELECT id FROM dbo.tsql_data" "" (newsession))
+  scm: '(tds_describe "memcp-tests" "INSERT INTO dbo.tsql_data VALUES (999,N''unexecuted'',1); SELECT id FROM dbo.tsql_data"
+    "" (newsession))
+
+    '
   expect:
     error: true
 - name: DDL cannot pass the single INSERT prepare shape gate
-  scm: |
-    (tds_describe "memcp-tests" "DROP TABLE dbo.tsql_data" "" (newsession))
+  scm: '(tds_describe "memcp-tests" "DROP TABLE dbo.tsql_data" "" (newsession))
+
+    '
   expect:
     error: true
 - name: Identity rejects approximate type declarations
@@ -861,46 +836,46 @@ test_cases:
   sql: CREATE TABLE dbo.tsql_bad_identity (id BIT IDENTITY(1,1))
   expect:
     error: true
-# Preserve this existing regression identity; consumed reservations may leave
-# gaps and must not rewind the shared native allocator.
 - name: Declared identity boundaries reject before rows and retain last allocated value
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_identity_limit
-  scm: |
-    (begin
-      (define s (newsession))
-      (define execute (lambda (sql) (begin
-        (define out (newsession))
-        (with_autocommit s nil nil sql (lambda (tx)
-          (sql_execute_formula s tx (sql_queryplan_compile_formula
-            tx (parse_tsql "memcp-tests" sql nil s tx))
-            (lambda (row) (out "row" row)) (lambda fields true))))
-        (out "row"))))
-      (execute "CREATE TABLE dbo.tsql_identity_limit (id TINYINT IDENTITY(1,1),value INT)")
-      (define metadata (car (get_schema "memcp-tests" "tsql_identity_limit")))
-      (if (metadata "Null") (error "identity remained nullable") true)
-      (altertable (table "memcp-tests" false "tsql_identity_limit" false) "auto_increment" 255)
-      (define failed (try (lambda () (begin
-        (execute "INSERT INTO dbo.tsql_identity_limit(value) VALUES (1),(2)") false)) (lambda (_) true)))
-      (if failed true (error "tiny identity overflow was accepted"))
-      (define empty (execute "SELECT COUNT(*) AS n FROM dbo.tsql_identity_limit"))
-      (if (equal? (empty "n") 0) true (error "failed identity batch partially inserted"))
-      /* Failed reservations can leave gaps. Rewinding would race other writers. */
-      (if (equal? (reserve_ids (table "memcp-tests" false "tsql_identity_limit" false) 1) '(257 257))
-        true (error "failed identity batch rewound its consumed reservation"))
-      (execute "SET IDENTITY_INSERT dbo.tsql_identity_limit ON")
-          (execute "INSERT INTO dbo.tsql_identity_limit(id,value) VALUES (255,3)")
-      (define updated (try (lambda () (begin
-        (execute "UPDATE dbo.tsql_identity_limit SET id=1") false)) (lambda (_) true)))
-      (if updated true (error "identity was writable through UPDATE"))
-      (define unchanged (execute "SELECT id FROM dbo.tsql_identity_limit"))
-      (if (equal? (unchanged "id") 255) true (error "identity changed after rejected UPDATE"))
-      (execute "DROP TABLE dbo.tsql_identity_limit")
-      true)
+  scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define out (newsession))\n\
+    \    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula\n\
+    \        tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda (row) (out \"row\" row)) (lambda fields\
+    \ true))))\n    (out \"row\"))))\n  (execute \"CREATE TABLE dbo.tsql_identity_limit (id TINYINT IDENTITY(1,1),value\
+    \ INT)\")\n  (define metadata (car (get_schema \"memcp-tests\" \"tsql_identity_limit\")))\n  (if (metadata \"\
+    Null\") (error \"identity remained nullable\") true)\n  (altertable (table \"memcp-tests\" false \"tsql_identity_limit\"\
+    \ false) \"auto_increment\" 255)\n  (define failed (try (lambda () (begin\n    (execute \"INSERT INTO dbo.tsql_identity_limit(value)\
+    \ VALUES (1),(2)\") false)) (lambda (_) true)))\n  (if failed true (error \"tiny identity overflow was accepted\"\
+    ))\n  (define empty (execute \"SELECT COUNT(*) AS n FROM dbo.tsql_identity_limit\"))\n  (if (equal? (empty \"\
+    n\") 0) true (error \"failed identity batch partially inserted\"))\n  /* Failed reservations can leave gaps.\
+    \ Rewinding would race other writers. */\n  (if (equal? (reserve_ids (table \"memcp-tests\" false \"tsql_identity_limit\"\
+    \ false) 1) '(257 257))\n    true (error \"failed identity batch rewound its consumed reservation\"))\n  (execute\
+    \ \"SET IDENTITY_INSERT dbo.tsql_identity_limit ON\")\n      (execute \"INSERT INTO dbo.tsql_identity_limit(id,value)\
+    \ VALUES (255,3)\")\n  (define updated (try (lambda () (begin\n    (execute \"UPDATE dbo.tsql_identity_limit\
+    \ SET id=1\") false)) (lambda (_) true)))\n  (if updated true (error \"identity was writable through UPDATE\"\
+    ))\n  (define unchanged (execute \"SELECT id FROM dbo.tsql_identity_limit\"))\n  (if (equal? (unchanged \"id\"\
+    ) 255) true (error \"identity changed after rejected UPDATE\"))\n  (execute \"DROP TABLE dbo.tsql_identity_limit\"\
+    )\n  true)\n"
   expect:
     result: true
 - sql: DROP TABLE IF EXISTS dbo.tsql_identity_limit
-  scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define out (newsession))\n    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda (row) (out \"row\" row)) (lambda fields true))))\n    (out \"row\"))))\n  (execute \"CREATE TABLE dbo.tsql_identity_limit (id TINYINT IDENTITY(1,1),value INT)\")\n  (define metadata (car (get_schema \"memcp-tests\" \"tsql_identity_limit\")))\n  (if (metadata \"Null\") (error \"identity remained nullable\") true)\n  (altertable (table \"memcp-tests\" false \"tsql_identity_limit\" false) \"auto_increment\" 255)\n  (define failed (try (lambda () (begin (execute \"INSERT INTO dbo.tsql_identity_limit(value) VALUES (1),(2)\") false)) (lambda (_) true)))\n  (if failed true (error \"tiny identity overflow was accepted\"))\n  (define empty (execute \"SELECT COUNT(*) AS n FROM dbo.tsql_identity_limit\"))\n  (if (equal? (empty \"n\") 0) true (error \"failed identity batch partially inserted\"))\n  (execute \"INSERT INTO dbo.tsql_identity_limit(value) VALUES (3)\")\n  (define allocated (execute \"SELECT id FROM dbo.tsql_identity_limit\"))\n  (if (equal? (allocated \"id\") 255) true (error \"failed identity batch advanced the counter\"))\n  (define updated (try (lambda () (begin (execute \"UPDATE dbo.tsql_identity_limit SET id=1\") false)) (lambda (_) true)))\n  (if updated true (error \"identity was writable through UPDATE\"))\n  (define unchanged (execute \"SELECT id FROM dbo.tsql_identity_limit\"))\n  (if (equal? (unchanged \"id\") 255) true (error \"identity changed after rejected UPDATE\"))\n  (execute \"DROP TABLE dbo.tsql_identity_limit\")\n  true)\n"
+  scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define out (newsession))\n\
+    \    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula\
+    \ tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda (row) (out \"row\" row)) (lambda fields true))))\n\
+    \    (out \"row\"))))\n  (execute \"CREATE TABLE dbo.tsql_identity_limit (id TINYINT IDENTITY(1,1),value INT)\"\
+    )\n  (define metadata (car (get_schema \"memcp-tests\" \"tsql_identity_limit\")))\n  (if (metadata \"Null\"\
+    ) (error \"identity remained nullable\") true)\n  (altertable (table \"memcp-tests\" false \"tsql_identity_limit\"\
+    \ false) \"auto_increment\" 255)\n  (define failed (try (lambda () (begin (execute \"INSERT INTO dbo.tsql_identity_limit(value)\
+    \ VALUES (1),(2)\") false)) (lambda (_) true)))\n  (if failed true (error \"tiny identity overflow was accepted\"\
+    ))\n  (define empty (execute \"SELECT COUNT(*) AS n FROM dbo.tsql_identity_limit\"))\n  (if (equal? (empty \"\
+    n\") 0) true (error \"failed identity batch partially inserted\"))\n  (execute \"INSERT INTO dbo.tsql_identity_limit(value)\
+    \ VALUES (3)\")\n  (define allocated (execute \"SELECT id FROM dbo.tsql_identity_limit\"))\n  (if (equal? (allocated\
+    \ \"id\") 255) true (error \"failed identity batch advanced the counter\"))\n  (define updated (try (lambda\
+    \ () (begin (execute \"UPDATE dbo.tsql_identity_limit SET id=1\") false)) (lambda (_) true)))\n  (if updated\
+    \ true (error \"identity was writable through UPDATE\"))\n  (define unchanged (execute \"SELECT id FROM dbo.tsql_identity_limit\"\
+    ))\n  (if (equal? (unchanged \"id\") 255) true (error \"identity changed after rejected UPDATE\"))\n  (execute\
+    \ \"DROP TABLE dbo.tsql_identity_limit\")\n  true)\n"
   expect:
     result: true
   noncritical: true
@@ -909,27 +884,19 @@ test_cases:
 - name: Zero-scale decimal identity stores exact generated values
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_identity_decimal
-  scm: |
-    (begin
-      (define s (newsession))
-      (define execute (lambda (sql) (begin
-        (define out (newsession))
-        (with_autocommit s nil nil sql (lambda (tx)
-          (sql_execute_formula s tx (sql_queryplan_compile_formula tx (parse_tsql "memcp-tests" sql nil s tx))
-            (lambda (row) (out "row" row)) (lambda fields true))))
-        (out "row"))))
-      (execute "CREATE TABLE dbo.tsql_identity_decimal (id NUMERIC(9,0) IDENTITY(1,1),value INT)")
-      (execute "INSERT INTO dbo.tsql_identity_decimal(value) VALUES (10),(20)")
-      (define generated (execute "SELECT id FROM dbo.tsql_identity_decimal WHERE value=20"))
-      (if (and (string? (generated "id")) (equal? (coefficient_decode (generated "id")) "2")) true (error "generated decimal identity lacked exact representation"))
-      (execute "SET IDENTITY_INSERT dbo.tsql_identity_decimal ON")
-      (execute "INSERT INTO dbo.tsql_identity_decimal(id,value) VALUES (99,30)")
-      (execute "SET IDENTITY_INSERT dbo.tsql_identity_decimal OFF")
-      (execute "INSERT INTO dbo.tsql_identity_decimal(value) VALUES (40)")
-      (define next (execute "SELECT id FROM dbo.tsql_identity_decimal WHERE value=40"))
-      (if (equal? (coefficient_decode (next "id")) "100") true (error "exact imported identity failed to advance allocator"))
-      (execute "DROP TABLE dbo.tsql_identity_decimal")
-      true)
+  scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define out (newsession))\n\
+    \    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula\
+    \ tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda (row) (out \"row\" row)) (lambda fields true))))\n\
+    \    (out \"row\"))))\n  (execute \"CREATE TABLE dbo.tsql_identity_decimal (id NUMERIC(9,0) IDENTITY(1,1),value\
+    \ INT)\")\n  (execute \"INSERT INTO dbo.tsql_identity_decimal(value) VALUES (10),(20)\")\n  (define generated\
+    \ (execute \"SELECT id FROM dbo.tsql_identity_decimal WHERE value=20\"))\n  (if (and (string? (generated \"\
+    id\")) (equal? (coefficient_decode (generated \"id\")) \"2\")) true (error \"generated decimal identity lacked\
+    \ exact representation\"))\n  (execute \"SET IDENTITY_INSERT dbo.tsql_identity_decimal ON\")\n  (execute \"\
+    INSERT INTO dbo.tsql_identity_decimal(id,value) VALUES (99,30)\")\n  (execute \"SET IDENTITY_INSERT dbo.tsql_identity_decimal\
+    \ OFF\")\n  (execute \"INSERT INTO dbo.tsql_identity_decimal(value) VALUES (40)\")\n  (define next (execute\
+    \ \"SELECT id FROM dbo.tsql_identity_decimal WHERE value=40\"))\n  (if (equal? (coefficient_decode (next \"\
+    id\")) \"100\") true (error \"exact imported identity failed to advance allocator\"))\n  (execute \"DROP TABLE\
+    \ dbo.tsql_identity_decimal\")\n  true)\n"
   expect:
     result: true
   noncritical: true
@@ -1112,4 +1079,541 @@ test_cases:
     - column count
   cleanup:
   - sql: DROP TABLE tsql_implicit_version
+- name: CTE binds a literal source
+  sql: WITH local_rows(n) AS (SELECT 7) SELECT n FROM local_rows
+  expect:
+    rows: 1
+    data:
+    - n: 7
+- name: CTE accepts a preceding statement terminator
+  sql: ;WITH local_rows AS (SELECT 7 AS n) SELECT n FROM local_rows
+  expect:
+    rows: 1
+    data:
+    - n: 7
+- name: CTE reads a native source
+  sql: WITH local_rows AS (SELECT id,val FROM dbo.tsql_data WHERE id<3) SELECT id,val FROM local_rows ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      val: 10
+    - id: 2
+      val: 30
+- name: CTE applies an explicit output column list
+  sql: WITH local_rows(code,amount) AS (SELECT id,val FROM dbo.tsql_data WHERE id=2) SELECT code,amount FROM local_rows
+  expect:
+    rows: 1
+    data:
+    - code: 2
+      amount: 30
+- name: CTE resolves preceding definitions
+  sql: WITH first_rows(n) AS (SELECT 3), second_rows AS (SELECT n+4 AS result FROM first_rows) SELECT result FROM
+    second_rows
+  expect:
+    rows: 1
+    data:
+    - result: 7
+- name: CTE supports independent definitions and joins
+  sql: WITH left_rows(n) AS (SELECT 2), right_rows(m) AS (SELECT 3) SELECT l.n+r.m AS result FROM left_rows AS l
+    CROSS JOIN right_rows AS r
+  expect:
+    rows: 1
+    data:
+    - result: 5
+- name: CTE supports two aliases of the same source
+  sql: WITH local_rows AS (SELECT id,val FROM dbo.tsql_data WHERE id<3) SELECT a.id,b.val FROM local_rows a INNER
+    JOIN local_rows b ON a.id=b.id ORDER BY a.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      val: 10
+    - id: 2
+      val: 30
+- name: CTE preserves a grouped producer
+  sql: WITH totals AS (SELECT name,SUM(val) AS amount FROM dbo.tsql_data GROUP BY name) SELECT name,amount FROM
+    totals WHERE amount=30 ORDER BY name
+  expect:
+    rows: 2
+    data:
+    - name: Alice
+      amount: 30
+    - name: Bob
+      amount: 30
+- name: CTE preserves an inner ordered TOP boundary
+  sql: WITH local_rows AS (SELECT TOP(2) id,val FROM dbo.tsql_data ORDER BY id DESC) SELECT id FROM local_rows ORDER
+    BY id
+  expect:
+    rows: 2
+    data:
+    - id: 3
+    - id: 4
+- name: CTE preserves a window output filter
+  sql: WITH local_rows AS (SELECT id,ROW_NUMBER() OVER(ORDER BY id) AS rn FROM dbo.tsql_data) SELECT id FROM local_rows
+    WHERE rn=2
+  expect:
+    rows: 1
+    data:
+    - id: 2
+- name: CTE preserves UNION ALL multiplicity
+  sql: WITH local_rows(n) AS (SELECT 2 UNION ALL SELECT 2) SELECT n FROM local_rows
+  expect:
+    rows: 2
+    data:
+    - n: 2
+    - n: 2
+- name: CTE preserves UNION DISTINCT
+  sql: WITH local_rows(n) AS (SELECT 2 UNION SELECT 2) SELECT n FROM local_rows
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: CTE binds names inside an EXISTS subquery
+  sql: WITH local_rows(n) AS (SELECT 1) SELECT id FROM dbo.tsql_data AS d WHERE EXISTS(SELECT 1 FROM local_rows
+    AS r WHERE r.n=d.id)
+  expect:
+    rows: 1
+    data:
+    - id: 1
+- name: CTE binds names inside an ordinary derived query
+  sql: WITH local_rows(n) AS (SELECT 8) SELECT q.n FROM (SELECT n FROM local_rows) AS q
+  expect:
+    rows: 1
+    data:
+    - n: 8
+- name: CTE shadows an unqualified native relation
+  sql: WITH tsql_data(id) AS (SELECT 99) SELECT id FROM tsql_data
+  expect:
+    rows: 1
+    data:
+    - id: 99
+- name: CTE leaves qualified native names outside the local namespace
+  sql: WITH tsql_data(id) AS (SELECT 99) SELECT native_rows.id FROM dbo.tsql_data AS native_rows CROSS JOIN tsql_data
+    AS local_rows WHERE native_rows.id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+- name: CTE matches names case insensitively
+  sql: WITH [Local Rows]([Value]) AS (SELECT 9) SELECT [value] FROM [local rows]
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: CTE does not alter string literal data
+  sql: WITH local_rows(n) AS (SELECT 1) SELECT N'local_rows WITH AS' AS text,n FROM local_rows
+  expect:
+    rows: 1
+    data:
+    - text: local_rows WITH AS
+      n: 1
+- name: CTE does not survive its statement
+  sql: SELECT * FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects duplicate declaration names
+  sql: WITH local_rows(n) AS (SELECT 1), LOCAL_ROWS(m) AS (SELECT 2) SELECT n FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects too few output aliases
+  sql: WITH local_rows(n) AS (SELECT 1 AS a,2 AS b) SELECT * FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects too many output aliases
+  sql: WITH local_rows(n,m) AS (SELECT 1 AS a) SELECT * FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects duplicate output aliases
+  sql: WITH local_rows(n,N) AS (SELECT 1 AS a,2 AS b) SELECT * FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects duplicate inferred names
+  sql: WITH local_rows AS (SELECT id,id FROM dbo.tsql_data) SELECT * FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects a forward reference
+  sql: WITH first_rows AS (SELECT n FROM second_rows),second_rows(n) AS (SELECT 1) SELECT n FROM first_rows
+  expect:
+    error: true
+- name: CTE rejects recursion explicitly until supported
+  sql: WITH local_rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM local_rows WHERE n<3) SELECT n FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects a self reference even when a native relation exists
+  sql: WITH tsql_data AS (SELECT id FROM tsql_data) SELECT id FROM tsql_data
+  expect:
+    error: true
+- name: CTE rejects an unbounded producer ORDER BY
+  sql: WITH local_rows AS (SELECT id FROM dbo.tsql_data ORDER BY id) SELECT id FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects OPTION in a producer
+  sql: WITH local_rows AS (SELECT id FROM dbo.tsql_data OPTION(RECOMPILE)) SELECT id FROM local_rows
+  expect:
+    error: true
+- name: CTE accepts a consumer query hint
+  sql: WITH local_rows AS (SELECT id FROM dbo.tsql_data WHERE id=2) SELECT id FROM local_rows OPTION(RECOMPILE)
+  expect:
+    rows: 1
+    data:
+    - id: 2
+- name: CTE declares a view through the existing view owner
+  sql: CREATE VIEW dbo.tsql_cte_view AS WITH local_rows AS (SELECT id,val FROM dbo.tsql_data WHERE id<3) SELECT
+    id,val FROM local_rows
+- name: CTE reads the ordinary persisted view definition
+  sql: SELECT id,val FROM dbo.tsql_cte_view ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      val: 10
+    - id: 2
+      val: 30
+- name: CTE drops its ordinary view fixture
+  sql: DROP VIEW dbo.tsql_cte_view
+- name: CTE creates a native mutation fixture
+  sql: CREATE TABLE dbo.tsql_cte_copy(id INT PRIMARY KEY,val INT)
+- name: CTE feeds the existing INSERT SELECT sink
+  sql: WITH selected AS (SELECT id,val FROM dbo.tsql_data WHERE id<3) INSERT INTO dbo.tsql_cte_copy(id,val) SELECT
+    id,val FROM selected
+- name: CTE checks rows written through the existing sink
+  sql: SELECT id,val FROM dbo.tsql_cte_copy ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      val: 10
+    - id: 2
+      val: 30
+- name: CTE feeds the existing UPDATE FROM source
+  sql: WITH changes AS (SELECT id,val+1 AS val FROM dbo.tsql_data WHERE id=1) UPDATE target SET val=changes.val
+    FROM dbo.tsql_cte_copy AS target INNER JOIN changes ON target.id=changes.id
+- name: CTE checks the native UPDATE result
+  sql: SELECT id,val FROM dbo.tsql_cte_copy ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      val: 11
+    - id: 2
+      val: 30
+- name: CTE feeds the existing DELETE FROM source
+  sql: WITH changes AS (SELECT id FROM dbo.tsql_data WHERE id=2) DELETE target FROM dbo.tsql_cte_copy AS target
+    INNER JOIN changes ON target.id=changes.id
+- name: CTE checks the native DELETE result
+  sql: SELECT id,val FROM dbo.tsql_cte_copy ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      val: 11
+- name: CTE drops its native mutation fixture
+  sql: DROP TABLE dbo.tsql_cte_copy
+- name: CTE describes declared parameters and empty national text
+  scm: "(begin\n  (define s (newsession))\n  (s \"username\" \"root\")\n  (define fields (tds_describe \"memcp-tests\"\
+    \n    \"WITH selected AS (SELECT id,name FROM dbo.tsql_data WHERE id=@wanted) SELECT id,name FROM selected WHERE\
+    \ 1=0\"\n    \"@wanted INT\" s))\n  (and (equal? (count fields) 2)\n    (equal? ((nth fields 0) \"name\") \"\
+    id\")\n    (equal? ((nth fields 0) \"sql_type\") \"INT\")\n    (equal? ((nth fields 1) \"name\") \"name\")\n\
+    \    (equal? ((nth fields 1) \"sql_type\") \"NVARCHAR\")\n    (equal? ((nth fields 1) \"size\") 100)))"
+  expect:
+    result: true
+- name: CTE authorizes native sources instead of local names
+  scm: "(begin\n  (define planning (newsession))\n  (planning \"__tsql_describe\" true)\n  (define checks (newsession))\n\
+    \  (define policy (lambda (database name write) (begin\n    (if (and (equal? database \"memcp-tests\") (equal?\
+    \ name \"tsql_data\") (not write))\n      (checks \"native\" true) (error \"non-native name reached authorization\"\
+    )))))\n  (parse_tsql \"memcp-tests\"\n    \"WITH selected AS (SELECT id FROM dbo.tsql_data) SELECT id FROM selected\"\
+    \n    policy planning nil)\n  (equal? (checks \"native\") true))"
+  expect:
+    result: true
+- name: CTE does not bypass native authorization
+  scm: "(begin\n  (define planning (newsession))\n  (planning \"__tsql_describe\" true)\n  (parse_tsql \"memcp-tests\"\
+    \n    \"WITH selected AS (SELECT id FROM dbo.tsql_data) SELECT id FROM selected\"\n    (lambda (_database _name\
+    \ _write) (error \"native access denied\")) planning nil))"
+  expect:
+    error: true
+- name: CTE compiles inside a stored procedure
+  sql: CREATE PROCEDURE dbo.tsql_cte_proc @wanted INT AS WITH selected AS (SELECT id,val FROM dbo.tsql_data WHERE
+    id=@wanted) SELECT id,val FROM selected
+- name: CTE binds the first procedure invocation
+  sql: EXEC dbo.tsql_cte_proc @wanted=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      val: 10
+- name: CTE rebinds the second procedure invocation
+  sql: EXEC dbo.tsql_cte_proc @wanted=2
+  expect:
+    rows: 1
+    data:
+    - id: 2
+      val: 30
+- name: CTE drops its stored procedure fixture
+  sql: DROP PROCEDURE dbo.tsql_cte_proc
+- name: CTE never falls back to a shadowed native UPDATE target
+  sql: WITH tsql_data AS (SELECT id,val FROM dbo.tsql_data WHERE id=1) UPDATE tsql_data SET val=999
+  expect:
+    error: true
+- name: CTE never falls back to a shadowed native DELETE target
+  sql: WITH tsql_data AS (SELECT id FROM dbo.tsql_data WHERE id=1) DELETE FROM tsql_data
+  expect:
+    error: true
+- name: CTE never falls back to a shadowed native INSERT target
+  sql: WITH tsql_data AS (SELECT id FROM dbo.tsql_data WHERE id=1) INSERT INTO tsql_data VALUES(5,N'wrong',999)
+  expect:
+    error: true
+- name: CTE unsupported write targets retain native rows
+  sql: SELECT id,val FROM dbo.tsql_data ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      val: 10
+    - id: 2
+      val: 30
+    - id: 3
+      val: 50
+    - id: 4
+      val: 20
+- name: CTE rejects a nested definition
+  sql: WITH outer_rows AS (WITH inner_rows(n) AS (SELECT 1) SELECT n FROM inner_rows) SELECT n FROM outer_rows
+  expect:
+    error: true
+- name: CTE binds a new statement after a terminated predecessor
+  sql: SELECT 9 AS n; WITH local_rows(n) AS (SELECT 8) SELECT n FROM local_rows
+  expect:
+    rows: 2
+    data:
+    - n: 9
+    - n: 8
+- name: CTE rejects a synthesized literal output name
+  sql: WITH local_rows AS (SELECT 1) SELECT [1] FROM local_rows
+  expect:
+    error: true
+- name: CTE rejects a synthesized computed output name
+  sql: WITH local_rows AS (SELECT id+1 FROM dbo.tsql_data) SELECT * FROM local_rows
+  expect:
+    error: true
+- name: CTE does not borrow output names from a later UNION arm
+  sql: WITH local_rows AS (SELECT 1 UNION ALL SELECT 2 AS n) SELECT * FROM local_rows
+  expect:
+    error: true
+- name: CTE accepts an explicitly quoted numeric output name
+  sql: WITH local_rows AS (SELECT 1 AS [1]) SELECT [1] FROM local_rows
+  expect:
+    rows: 1
+    data:
+    - '1': 1
+- name: CTE uses the named first UNION arm for output names
+  sql: WITH local_rows AS (SELECT 1 AS n UNION ALL SELECT 2) SELECT n FROM local_rows ORDER BY n
+  expect:
+    rows: 2
+    data:
+    - n: 1
+    - n: 2
+- name: CTE rejects OPTION nested in a derived producer
+  sql: WITH local_rows AS (SELECT d.id FROM (SELECT id FROM dbo.tsql_data OPTION(RECOMPILE)) AS d) SELECT id FROM
+    local_rows
+  expect:
+    error: true
+- name: CTE rejects OPTION nested in a predicate producer
+  sql: WITH local_rows AS (SELECT id FROM dbo.tsql_data WHERE EXISTS(SELECT 1 OPTION(RECOMPILE))) SELECT id FROM
+    local_rows
+  expect:
+    error: true
+- name: CTE allows a qualified native UPDATE despite shadowing
+  sql: WITH tsql_data(id) AS (SELECT 99) UPDATE dbo.tsql_data SET val=val+1 WHERE id=1 AND EXISTS(SELECT 1 FROM
+    tsql_data)
+- name: CTE observes the qualified native UPDATE
+  sql: SELECT id,val FROM dbo.tsql_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      val: 11
+- name: CTE restores its qualified native UPDATE fixture
+  sql: UPDATE dbo.tsql_data SET val=10 WHERE id=1
+- name: CTE allows a qualified native DELETE despite shadowing
+  sql: WITH tsql_data(id) AS (SELECT 99) DELETE FROM dbo.tsql_data WHERE id=-1 AND EXISTS(SELECT 1 FROM tsql_data)
+- name: CTE allows a qualified native INSERT despite shadowing
+  sql: WITH tsql_data(id) AS (SELECT 99) INSERT INTO dbo.tsql_data SELECT 5,N'extra',60 FROM tsql_data
+- name: CTE observes the qualified native INSERT
+  sql: SELECT id,val FROM dbo.tsql_data WHERE id=5
+  expect:
+    rows: 1
+    data:
+    - id: 5
+      val: 60
+- name: CTE removes its qualified native INSERT fixture
+  sql: DELETE FROM dbo.tsql_data WHERE id=5
+- name: Set query preserves each branch TOP independently
+  sql: SELECT TOP(1) id AS value FROM tsql_data WHERE id=1 UNION ALL SELECT TOP(1) id AS value FROM tsql_data WHERE
+    id=3 ORDER BY value
+  expect:
+    rows: 2
+    data:
+    - value: 1
+    - value: 3
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_data
+  - sql: CREATE TABLE tsql_data(id INT PRIMARY KEY,name NVARCHAR(50),val INT)
+  - sql: INSERT tsql_data VALUES(1,N'Alice',10),(2,N'Bob',30),(3,N'Charlie',50),(4,N'Alice',20)
+- name: Set query right TOP zero leaves the left branch
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT TOP(0) 9 AS value FROM tsql_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: Set query left TOP zero leaves the right branch
+  sql: SELECT TOP(0) 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT 9 AS value FROM tsql_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: Set query does not apply the right TOP to all branches
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT TOP(2) id AS value FROM tsql_data WHERE id>=3
+    ORDER BY value
+  expect:
+    rows: 3
+    data:
+    - value: 3
+    - value: 4
+    - value: 7
+- name: Set query mixed distinct then all retains the final duplicate
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT
+    7 AS value FROM tsql_data WHERE id=1
+  expect:
+    rows: 2
+    data:
+    - value: 7
+    - value: 7
+- name: Set query mixed all then distinct removes prior duplicates
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT 7 AS value FROM tsql_data WHERE id=1 UNION SELECT
+    7 AS value FROM tsql_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: Set query homogeneous all keeps every branch
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL
+    SELECT 7 AS value FROM tsql_data WHERE id=1
+  expect:
+    rows: 3
+    data:
+    - value: 7
+    - value: 7
+    - value: 7
+- name: Set query homogeneous distinct removes every duplicate
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION SELECT 7 AS value FROM tsql_data WHERE id=1 UNION SELECT
+    7 AS value FROM tsql_data WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: Set query final order belongs to the whole union
+  sql: SELECT TOP(1) id AS value FROM tsql_data WHERE id=3 UNION ALL SELECT TOP(1) id AS value FROM tsql_data WHERE
+    id=1 ORDER BY value DESC
+  expect:
+    rows: 2
+    data:
+    - value: 3
+    - value: 1
+- name: Set query final offset does not conflict with branch TOP
+  sql: SELECT TOP(1) id AS value FROM tsql_data WHERE id=1 UNION ALL SELECT TOP(1) id AS value FROM tsql_data WHERE
+    id=3 ORDER BY value OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
+  expect:
+    rows: 1
+    data:
+    - value: 3
+- name: Set query offset applies after the complete union
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT 3 AS value FROM tsql_data WHERE id=1 UNION ALL
+    SELECT 9 AS value FROM tsql_data WHERE id=1 ORDER BY value OFFSET 1 ROWS
+  expect:
+    rows: 2
+    data:
+    - value: 7
+    - value: 9
+- name: Set query parenthesized all branch remains below outer distinct
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION (SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL
+    SELECT 7 AS value FROM tsql_data WHERE id=1)
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: Set query parenthesized distinct branch remains below outer all
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL (SELECT 7 AS value FROM tsql_data WHERE id=1 UNION
+    SELECT 7 AS value FROM tsql_data WHERE id=1)
+  expect:
+    rows: 2
+    data:
+    - value: 7
+    - value: 7
+- name: Set query parenthesized ordered TOP keeps its local boundary
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL (SELECT TOP(1) id AS value FROM tsql_data ORDER BY
+    id DESC) ORDER BY value
+  expect:
+    rows: 2
+    data:
+    - value: 4
+    - value: 7
+- name: Set query rejects order before an unparenthesized union
+  sql: SELECT id AS value FROM tsql_data ORDER BY value UNION ALL SELECT 7 AS value FROM tsql_data WHERE id=1
+  expect:
+    error: true
+- name: Set query rejects offset without a final order
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL SELECT 9 AS value FROM tsql_data WHERE id=1 OFFSET
+    1 ROWS
+  expect:
+    error: true
+- name: Set query retains the single select TOP OFFSET exclusion
+  sql: SELECT TOP(1) id FROM tsql_data ORDER BY id OFFSET 1 ROWS
+  expect:
+    error: true
+- name: Set query retains a single select ordered TOP
+  sql: SELECT TOP(2) id AS value FROM tsql_data ORDER BY id DESC
+  expect:
+    rows: 2
+    data:
+    - value: 4
+    - value: 3
+- name: Set query final alias comes from its first branch
+  sql: SELECT 7 AS first_value FROM tsql_data WHERE id=1 UNION ALL SELECT 3 AS other_value FROM tsql_data WHERE
+    id=1 ORDER BY first_value
+  expect:
+    rows: 2
+    data:
+    - first_value: 3
+    - first_value: 7
+- name: Set query final hints leave the same logical operator structure
+  scm: "(expression_equal?\n  (parse_tsql \"memcp-tests\" \"EXPLAIN IR SELECT TOP(1) id FROM tsql_data UNION ALL\
+    \ SELECT TOP(1) id FROM tsql_data ORDER BY id\" nil nil nil)\n  (parse_tsql \"memcp-tests\" \"EXPLAIN IR SELECT\
+    \ TOP(1) id FROM tsql_data UNION ALL SELECT TOP(1) id FROM tsql_data ORDER BY id OPTION(MAXDOP 1,RECOMPILE)\"\
+    \ nil nil nil))\n"
+  expect:
+    result: true
+- name: Set query outer order retains an inner ordered TOP boundary
+  sql: (SELECT TOP(2) id AS value FROM tsql_data ORDER BY id DESC) ORDER BY value
+  expect:
+    rows: 2
+    data:
+    - value: 3
+    - value: 4
+- name: Set query outer offset retains an inner ordered TOP boundary
+  sql: (SELECT TOP(2) id AS value FROM tsql_data ORDER BY id DESC) ORDER BY value OFFSET 1 ROWS FETCH NEXT 1 ROWS
+    ONLY
+  expect:
+    rows: 1
+    data:
+    - value: 4
+- name: Set query parenthesized star keeps its declared native columns
+  sql: (SELECT * FROM tsql_data WHERE id=3) ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 3
+      name: Charlie
+      val: 50
+- name: Set query fixture cleanup
+  sql: DROP TABLE IF EXISTS tsql_data
 cleanup: []

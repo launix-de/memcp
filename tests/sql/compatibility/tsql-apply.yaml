@@ -227,6 +227,94 @@ test_cases:
       OUTER APPLY (SELECT TOP(1) c.id AS child_id FROM tsql_apply_inner c
                    WHERE c.lookup_key=p.lookup_key ORDER BY c.id) q
     expect: {error: true}
+  - name: Chained scalar APPLY text casts retain eliminated left projections
+    sql: >-
+      SELECT p.id,r.label FROM tsql_apply_outer p
+      CROSS APPLY (SELECT p.id+1 AS next_id) q
+      CROSS APPLY (SELECT CAST(p.id+q.next_id AS NVARCHAR(4)) AS label) r
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{id: 1, label: '3'}, {id: 2, label: '5'}, {id: 3, label: '7'}, {id: 4, label: '9'}, {id: 5, label: '11'}]
+  - name: Three scalar APPLY projections close every earlier dependency
+    sql: >-
+      SELECT p.id,s.value FROM tsql_apply_outer p
+      CROSS APPLY (SELECT p.id+1 AS value) q
+      CROSS APPLY (SELECT p.id+q.value AS value) r
+      CROSS APPLY (SELECT q.value+r.value AS value) s ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{id: 1, value: 5}, {id: 2, value: 8}, {id: 3, value: 11}, {id: 4, value: 14}, {id: 5, value: 17}]
+  - name: Chained APPLY filters and ordering consume the closed projection
+    sql: >-
+      SELECT p.id,r.value FROM tsql_apply_outer p
+      CROSS APPLY (SELECT p.id+1 AS value) q
+      CROSS APPLY (SELECT p.id+q.value AS value) r
+      WHERE r.value>5 ORDER BY r.value DESC
+    expect:
+      rows: 3
+      data: [{id: 5, value: 11}, {id: 4, value: 9}, {id: 3, value: 7}]
+  - name: Chained APPLY retains computed single-source projections and NULL
+    sql: >-
+      SELECT p.id,r.value FROM tsql_apply_outer p
+      CROSS APPLY (SELECT c.amount+1 AS value FROM tsql_apply_inner c WHERE c.id=p.id+9) q
+      CROSS APPLY (SELECT q.value+1 AS value) r ORDER BY p.id
+    expect:
+      rows: 4
+      data: [{id: 1, value: 6}, {id: 2, value: null}, {id: 3, value: 8}, {id: 4, value: 10}]
+  - name: Chained APPLY retains computed multisource projections
+    sql: >-
+      SELECT p.id,r.value FROM tsql_apply_outer p
+      CROSS APPLY (SELECT c.amount+d.amount AS value FROM tsql_apply_inner c
+                   JOIN tsql_apply_inner d ON d.id=c.id WHERE c.id=p.id+9) q
+      CROSS APPLY (SELECT q.value+1 AS value) r ORDER BY p.id
+    expect:
+      rows: 4
+      data: [{id: 1, value: 9}, {id: 2, value: null}, {id: 3, value: 13}, {id: 4, value: 17}]
+  - name: Chained APPLY consumes the preceding aggregate stage projection
+    sql: >-
+      SELECT p.id,r.value FROM tsql_apply_outer p
+      CROSS APPLY (SELECT COUNT(*) AS n FROM tsql_apply_inner c WHERE c.lookup_key=p.lookup_key) q
+      CROSS APPLY (SELECT q.n+1 AS value) r ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{id: 1, value: 3}, {id: 2, value: 3}, {id: 3, value: 1}, {id: 4, value: 2}, {id: 5, value: 1}]
+  - name: Chained OUTER APPLY preserves presence independently of constant payload
+    sql: >-
+      SELECT p.id,r.value FROM tsql_apply_outer p
+      OUTER APPLY (SELECT c.id AS child_id,1 AS marker FROM tsql_apply_inner c WHERE c.id=p.id+9) q
+      CROSS APPLY (SELECT q.marker+p.id AS value) r ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{id: 1, value: 2}, {id: 2, value: 3}, {id: 3, value: 4}, {id: 4, value: 5}, {id: 5, value: null}]
+  - name: Chained OUTER APPLY preserves matched NULL and unmatched NULL payload
+    sql: >-
+      SELECT p.id,r.value FROM tsql_apply_outer p
+      OUTER APPLY (SELECT c.amount+1 AS value FROM tsql_apply_inner c WHERE c.id=p.id+9) q
+      CROSS APPLY (SELECT q.value+1 AS value) r ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{id: 1, value: 6}, {id: 2, value: null}, {id: 3, value: 8}, {id: 4, value: 10}, {id: 5, value: null}]
+  - name: Nested APPLY alias shadowing cannot capture an eliminated outer alias
+    sql: >-
+      SELECT p.id,r.value FROM tsql_apply_outer p
+      CROSS APPLY (SELECT p.id+1 AS value) q
+      CROSS APPLY (SELECT q.value+1 AS value FROM (SELECT 7 AS value) q) r ORDER BY p.id
+    expect:
+      rows: 5
+      data: [{id: 1, value: 8}, {id: 2, value: 8}, {id: 3, value: 8}, {id: 4, value: 8}, {id: 5, value: 8}]
+  - name: Chained APPLY cannot capture a later exported projection
+    sql: >-
+      SELECT r.value FROM tsql_apply_outer p
+      CROSS APPLY (SELECT r.value+1 AS value) q
+      CROSS APPLY (SELECT p.id+1 AS value) r
+    expect: {error: true}
+  - name: Chained APPLY does not make an ordinary nested relation lateral
+    sql: >-
+      SELECT r.value FROM tsql_apply_outer p
+      CROSS APPLY (SELECT p.id+1 AS value) q
+      CROSS APPLY (SELECT x.value FROM (SELECT q.value AS value) x) r
+    expect: {error: true}
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_apply_keywords
   - sql: DROP TABLE IF EXISTS tsql_apply_inner

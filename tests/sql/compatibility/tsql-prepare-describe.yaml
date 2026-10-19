@@ -218,6 +218,116 @@ test_cases:
   - name: Analysis does not authorize undeclared references in later execution
     sql: SELECT @PRM0001 AS value
     expect: {error: true,contains: ['undeclared T-SQL parameter: @prm0001']}
+  - name: CTE real prepare RPC preserves declared empty and populated results
+    tds:
+      statements:
+      - sql: WITH selected(code,label) AS (SELECT id,label FROM prepare_describe_rows WHERE id=@wanted) SELECT code,label
+          FROM selected
+        declarations: '@wanted INT'
+        prepare_only: true
+      - sql: WITH selected(code,label) AS (SELECT id,label FROM prepare_describe_rows WHERE id=@wanted) SELECT code,label
+          FROM selected
+        prepare: true
+        parameters:
+        - name: wanted
+          value: 1
+        expect:
+          rows: 1
+          data:
+          - code: 1
+            label: real
+          columns:
+          - code
+          - label
+          column_types: &id001
+          - name: code
+            type: INT
+          - name: label
+            type: NVARCHAR
+            length: 12
+      - sql: WITH selected(code,label) AS (SELECT id,label FROM prepare_describe_rows WHERE id=@wanted) SELECT code,label
+          FROM selected
+        prepare: true
+        parameters:
+        - name: wanted
+          value: 999
+        expect:
+          rows: 0
+          columns:
+          - code
+          - label
+          column_types: *id001
+  - name: Parameter inference retains all integer cast declarations
+    sql: EXEC sp_describe_undeclared_parameters N'SELECT CAST(@tiny AS TINYINT),CAST(@small
+      AS SMALLINT),CAST(@whole AS INT),CAST(@large AS BIGINT)'
+    expect:
+      rows: 4
+      data:
+      - name: '@tiny'
+        suggested_system_type_name: tinyint
+        suggested_system_type_id: 48
+        suggested_max_length: 1
+      - name: '@small'
+        suggested_system_type_name: smallint
+        suggested_system_type_id: 52
+        suggested_max_length: 2
+      - name: '@whole'
+        suggested_system_type_name: int
+        suggested_system_type_id: 56
+        suggested_max_length: 4
+      - name: '@large'
+        suggested_system_type_name: bigint
+        suggested_system_type_id: 127
+        suggested_max_length: 8
+  - name: Parameter inference retains decimal contracts independently of real casts
+    sql: EXEC sp_describe_undeclared_parameters N'SELECT CAST(@d AS DECIMAL(9,2)),CAST(@n
+      AS NUMERIC(12,4))'
+    expect:
+      rows: 2
+      data:
+      - name: '@d'
+        suggested_system_type_name: decimal(9,2)
+        suggested_precision: 9
+        suggested_scale: 2
+        suggested_max_length: 5
+      - name: '@n'
+        suggested_system_type_name: numeric(12,4)
+        suggested_precision: 12
+        suggested_scale: 4
+        suggested_max_length: 9
+  - name: CONVERT parameter inference uses the same declared scalar contracts
+    sql: EXEC sp_describe_undeclared_parameters N'SELECT CONVERT(SMALLINT,@small),CONVERT(REAL,@fraction),CONVERT(BIT,@flag)'
+    expect:
+      rows: 3
+      data:
+      - name: '@small'
+        suggested_system_type_name: smallint
+        suggested_max_length: 2
+      - name: '@fraction'
+        suggested_system_type_name: real
+        suggested_system_type_id: 59
+        suggested_max_length: 4
+      - name: '@flag'
+        suggested_system_type_name: bit
+        suggested_system_type_id: 104
+        suggested_max_length: 1
+        suggested_tds_type_id: 104
+  - name: Metadata RPC retains the inferred BIT input contract
+    tds:
+      statements:
+      - sql: sp_describe_undeclared_parameters
+        parameters:
+        - name: tsql
+          value: SELECT CAST(@BoolValue AS BIT) AS value
+        expect:
+          rows: 1
+          data:
+          - name: '@BoolValue'
+            suggested_system_type_name: bit
+            suggested_system_type_id: 104
+            suggested_max_length: 1
+            suggested_tds_type_id: 104
+            suggested_tds_length: 1
 cleanup:
   - sql: DROP TABLE prepare_describe_rows
   - sql: DROP TABLE prepare_describe_source
