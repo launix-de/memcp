@@ -53,7 +53,6 @@ test_cases:
     data:
     - NULLABLE: 0
       IS_NULLABLE: 'NO'
-  noncritical: true
 - name: Inline key rejects NULL insert
   sql: INSERT INTO dbo.inline_key_semantics (Id) VALUES (NULL)
   expect:
