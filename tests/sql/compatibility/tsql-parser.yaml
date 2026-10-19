@@ -928,7 +928,6 @@ test_cases:
   sql: INSERT INTO dbo.tsql_count_sink(v) SELECT 10 UNION ALL SELECT 20
   expect:
     affected_rows: 2
-  noncritical: true
 - sql: DROP TABLE IF EXISTS dbo.tsql_count_sink
   name: Fixture cleanup for Union insert select reports completed row count (1)
 - name: Table insert select reports completed row count

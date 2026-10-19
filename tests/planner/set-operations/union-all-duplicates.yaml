@@ -56,3 +56,40 @@ test_cases:
 
   - name: "Cleanup"
     sql: "DROP TABLE union_dup_test"
+
+  - name: Native UNION insertion completion includes all branches
+    setup:
+    - sql: DROP TABLE IF EXISTS union_completion_counts
+    - sql: CREATE TABLE union_completion_counts(v INT)
+    sql: INSERT INTO union_completion_counts(v) SELECT 1 AS v UNION ALL SELECT 2 AS v
+    expect:
+      affected_rows: 2
+    cleanup:
+    - sql: DROP TABLE IF EXISTS union_completion_counts
+  - name: Native UNION insertion completion includes empty first branch
+    setup:
+    - sql: DROP TABLE IF EXISTS union_completion_counts
+    - sql: CREATE TABLE union_completion_counts(v INT)
+    sql: INSERT INTO union_completion_counts(v) SELECT 1 AS v WHERE 1=0 UNION ALL SELECT 2 AS v
+    expect:
+      affected_rows: 1
+    cleanup:
+    - sql: DROP TABLE IF EXISTS union_completion_counts
+  - name: Native UNION insertion completion includes empty final branch
+    setup:
+    - sql: DROP TABLE IF EXISTS union_completion_counts
+    - sql: CREATE TABLE union_completion_counts(v INT)
+    sql: INSERT INTO union_completion_counts(v) SELECT 1 AS v UNION ALL SELECT 2 AS v WHERE 1=0
+    expect:
+      affected_rows: 1
+    cleanup:
+    - sql: DROP TABLE IF EXISTS union_completion_counts
+  - name: Native UNION insertion rejects unequal branch widths
+    setup:
+    - sql: DROP TABLE IF EXISTS union_completion_counts
+    - sql: CREATE TABLE union_completion_counts(v INT)
+    sql: INSERT INTO union_completion_counts(v) SELECT 1 AS v UNION ALL SELECT 2 AS v,3 AS extra
+    expect:
+      error: true
+    cleanup:
+    - sql: DROP TABLE IF EXISTS union_completion_counts

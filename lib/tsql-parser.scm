@@ -164,25 +164,26 @@ compile boundary. Byte equality reuses the native collation-aware operator;
 no SQL type wrapper survives into execution or storage. */
 (define tsql_binary_type? (lambda (type)
 	(has? '("BINARY" "VARBINARY" "IMAGE" "ROWVERSION") type)))
+(define tsql_comparison_compiler (lambda (op) (lambda (infos) (begin
+	(define left_info (car infos))
+	(define right_info (cadr infos))
+	(define left_type (sql_info_type left_info))
+	(define right_type (sql_info_type right_info))
+	(define head (match op "eq" (quote equal??) "ne" (quote equal??)
+		"lt" (quote <) "gt" (quote >) "le" (quote <=) "ge" (quote >=)))
+	(define comparison (if (and
+		(or (tsql_binary_type? left_type) (equal? left_type "NULL"))
+		(or (tsql_binary_type? right_type) (equal? right_type "NULL"))
+		(or (tsql_binary_type? left_type) (tsql_binary_type? right_type)))
+		(sql_info (if (has? '("eq" "ne") op)
+			(list (quote equal_collate) (sql_info_formula left_info) (sql_info_formula right_info) "bin")
+			(list (quote sql_compare) (sql_info_formula left_info) (sql_info_formula right_info)
+				(collate "bin" false) (string head))) "BOOLEAN" nil)
+		(sql_comparison_info head left_info right_info)))
+	(sql_info (if (equal? op "ne") (list (quote sql_not) (sql_info_formula comparison))
+		(sql_info_formula comparison)) "BOOLEAN" (sql_info_collation comparison))))))
 (define tsql_comparison_expr (lambda (op left right)
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define left_info (car infos))
-		(define right_info (cadr infos))
-		(define left_type (sql_info_type left_info))
-		(define right_type (sql_info_type right_info))
-		(define head (match op "eq" (quote equal??) "ne" (quote equal??)
-			"lt" (quote <) "gt" (quote >) "le" (quote <=) "ge" (quote >=)))
-		(define comparison (if (and
-			(or (tsql_binary_type? left_type) (equal? left_type "NULL"))
-			(or (tsql_binary_type? right_type) (equal? right_type "NULL"))
-			(or (tsql_binary_type? left_type) (tsql_binary_type? right_type)))
-			(sql_info (if (has? '("eq" "ne") op)
-				(list (quote equal_collate) (sql_info_formula left_info) (sql_info_formula right_info) "bin")
-				(list (quote sql_compare) (sql_info_formula left_info) (sql_info_formula right_info)
-					(collate "bin" false) (string head))) "BOOLEAN" nil)
-			(sql_comparison_info head left_info right_info)))
-		(sql_info (if (equal? op "ne") (list (quote sql_not) (sql_info_formula comparison))
-			(sql_info_formula comparison)) "BOOLEAN" (sql_info_collation comparison)))) left right)))
+	(list (quote sql_compile_expr) (list (quote tsql_comparison_compiler) op) left right)))
 (define tsql_column_type (parser (define name tsql_identifier) (toUpper name)))
 (define tsql_storage_type (lambda (name)
 	/* Text declarations remain native metadata. Storage chooses its value
@@ -511,24 +512,23 @@ allocation stay unchanged. Other dialects keep their own implicit-list rules. */
 	(map columns (lambda (name) (begin
 		(define declaration (tsql_target_column_declaration database table_name name planning_session))
 		(if (nil? declaration) (error "unknown INSERT column: " name) declaration)))))))
+(define tsql_text_compiler (lambda (length national fixed) (lambda (infos) (begin
+	(define info (car infos))
+	(define source (sql_info_type info))
+	(define formula (if (tsql_temporal_type? source)
+		(list format_date (tsql_calendar_difference_formula info)
+			(match source "DATE" "%Y-%m-%d" "TIME" "%H:%i:%s"
+				"DATETIME2" "%Y-%m-%d %H:%i:%s.000" _ "%Y-%m-%d %H:%i:%s"))
+		(sql_info_formula info)))
+	(if (and (plain_literal_expr? formula) (sql_numeric_type? (sql_info_type info))
+		(not (equal? length -1)) (> (strlen (string formula)) length))
+		(error "numeric character conversion overflow") true)
+	(sql_info (list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national)
+		(if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR")
+		(sql_info_collation info))))))
 (define tsql_cast_text_expr (lambda (value dimensions national fixed) (begin
-	/* Resolve the operand at the shared compile boundary, where its sources
-	and SQL contract are known. A parser-local walk would lose column types. */
 	(define length (if (empty_list? dimensions) 30 (car dimensions)))
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define info (car infos))
-		(define source (sql_info_type info))
-		(define formula (if (tsql_temporal_type? source)
-			(list format_date (tsql_calendar_difference_formula info)
-				(match source "DATE" "%Y-%m-%d" "TIME" "%H:%i:%s"
-					"DATETIME2" "%Y-%m-%d %H:%i:%s.000" _ "%Y-%m-%d %H:%i:%s"))
-			(sql_info_formula info)))
-		(if (and (plain_literal_expr? formula) (sql_numeric_type? (sql_info_type info))
-			(not (equal? length -1)) (> (strlen (string formula)) length))
-			(error "numeric character conversion overflow") true)
-		(sql_info (list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national)
-			(if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR")
-			(sql_info_collation info)))) value))))
+	(list (quote sql_compile_expr) (list (quote tsql_text_compiler) length national fixed) value))))
 /* The default character contract is NCHAR(1), without a supplementary-character
 collation. SQL conversion and range decisions stay here; the runtime operator
 only encodes Unicode scalars. Isolated surrogate code units are unsupported. */
@@ -1221,7 +1221,7 @@ Only the selected native operation survives the shared compile boundary. */
 		(if numeric nil (reduce infos (lambda (collation info)
 			(sql_merge_collation collation (sql_info_collation info))) nil))))))
 (define tsql_add_expr (lambda (left right)
-	(list (quote sql_compile_expr) tsql_compile_addition left right)))
+	(list (quote sql_compile_expr) (quote tsql_compile_addition) left right)))
 (define tsql_raise_error (lambda (number message state)
 	(error (list "tsql-error" number message state))))
 (define tsql_integer_divide (lambda (left right)
@@ -1318,6 +1318,7 @@ The shared expression compiler still owns the SQL type; these additional wire
 dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
 	((symbol sql_compile_column) _compiler column) (tsql_result_dimensions sources column parameters)
+	((symbol sql_compile_expr) ((symbol tsql_text_compiler) length _national _fixed) _value) (list length)
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
 	((symbol sql_compile_expr) ((symbol tsql_temporal_compiler) _target _style ((symbol quote) dimensions)) _value) dimensions
 	((symbol sql_compile_expr) ((symbol tsql_dateadd_compiler) _unit _months _seconds) _amount value)
@@ -1525,6 +1526,23 @@ a separator is recognized only on a physical line containing no SQL text. */
 (define tsql_connection_session (lambda (session)
 	(coalesceNil (session "__tsql_connection_session") session)))
 
+(define tsql_column_length (lambda (database policy relation column)
+	(if (or (nil? relation) (nil? column)) nil (begin
+		(define object ((parser '( (? (define owner tsql_identifier) ".")
+			(define name tsql_identifier)) (list (if (or (nil? owner) (equal?? owner "dbo")) database owner) name)) relation))
+		(define object_schema (car object))
+		(define name (coalesceNil (show (table object_schema false (cadr object) true) "name") (cadr object)))
+		(if policy (policy object_schema name false) true)
+		(define handle (table object_schema false name false))
+		(define declaration (if (nil? handle) nil (tsql_effective_column (show handle "column" column true) nil)))
+		(if (nil? declaration) nil (tsql_declared_byte_length declaration))))))
+
+(define tsql_view_has_metadata_scalar? (lambda (node) (match node
+	((symbol quote) _datum) false
+	(cons (symbol tsql_column_length) _arguments) true
+	(cons _head _tail) (not (nil? (find node tsql_view_has_metadata_scalar? nil)))
+	_ false)))
+
 (define parse_tsql (lambda (database s policy planning_session tx) (begin
 	(define schema database)
 	(define parse_started_ns (nanotime))
@@ -1653,17 +1671,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 	) (list (coalesce partition_by '()) (coalesce order_by '()))))
 
 	(define column_length_expr (lambda (relation column)
-		(list (quote sql_type_expr)
-			(list (lambda (relation column) (if (or (nil? relation) (nil? column)) nil (begin
-				(define object ((parser '( (? (define owner tsql_identifier) ".")
-					(define name tsql_identifier)) (list (if (or (nil? owner) (equal?? owner "dbo")) database owner) name)) relation))
-				(define object_schema (car object))
-				(define name (coalesceNil (show (table object_schema false (cadr object) true) "name") (cadr object)))
-				(if policy (policy object_schema name false) true)
-				(define handle (table object_schema false name false))
-				(define declaration (if (nil? handle) nil (tsql_effective_column (show handle "column" column true) nil)))
-				(if (nil? declaration) nil (tsql_declared_byte_length declaration))))) relation column)
-			"INT" nil)))
+		(list (quote sql_type_expr) (list (quote tsql_column_length) database policy relation column) "INT" nil)))
 
 	(define tsql_expression6 (parser (or
 
@@ -1836,7 +1844,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(make_query_block db sources
 					(map_assoc (expand_query_block_fields sources fields) (lambda (_title expr)
 						(if (star_expr? expr) expr
-							(list (quote sql_compile_expr) (lambda (infos) (car infos)) expr))))
+							(list (quote sql_compile_expr) (quote car) expr))))
 					condition group having order limit offset hidden stages
 					(qassoc_set facts (quote lateral) true))
 				_ (error "APPLY currently requires a SELECT query"))
@@ -2382,6 +2390,10 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(if policy (policy view_schema id true) true)
 			(define query (sql_apply_view_column_aliases
 				(tsql_finalize_sources (nth captured 1) "query" '() '()) aliases))
+			(if (tsql_view_has_metadata_scalar? query)
+				(error "COL_LENGTH in stored views requires a consuming compile policy") true)
+			(bind_query_names (tsql_bind_column_compilers (sql_expand_views query policy)
+				(tsql_column_compiler planning_session)) '())
 			(list (quote tsql_create_view_definition)
 				(list (quote session) "__memcp_tx")
 				view_schema id "tsql" (nth captured 0) (list (quote quote) query)
