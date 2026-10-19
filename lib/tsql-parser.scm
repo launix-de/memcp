@@ -789,26 +789,7 @@ is available; accepting them here would silently lose the user's value. */
 	(if (equal? unit "iso_week") (error "DATEADD does not support ISO week") true)
 	(define months (match unit "year" 12 "quarter" 3 "month" 1 _ nil))
 	(define seconds (match unit "second" 1 "minute" 60 "hour" 3600 "week" 604800 _ 86400))
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define input (cadr infos))
-		(define input_type (sql_info_type input))
-		(define amount_info (car infos))
-		(if (or (equal? (sql_info_type amount_info) "NULL") (sql_numeric_type? (sql_info_type amount_info))) true
-			(error "DATEADD requires a declared numeric interval"))
-		(if (and (equal? input_type "DATE") (has? '("hour" "minute" "second") unit))
-			(error "clock interval is not supported for DATE") true)
-		(if (and (equal? input_type "TIME") (not (has? '("hour" "minute" "second") unit)))
-			(error "calendar interval is not supported for TIME") true)
-		(define type (if (tsql_temporal_type? input_type) input_type "DATETIME"))
-		(define minimum (if (equal? type "DATETIME") -6847804800 -62135596800))
-		(define integer (list tsql_cast_integer (sql_info_formula amount_info) -2147483648 2147483647))
-		(define formula (list (if months tsql_calendar_shift_months tsql_calendar_shift_seconds)
-			(tsql_calendar_difference_formula input)
-			(list (quote *) integer (coalesceNil months seconds))))
-		(sql_info (match type
-			"TIME" (list tsql_calendar_time_only formula)
-			"SMALLDATETIME" (list tsql_calendar_small_datetime formula)
-			_ (list tsql_calendar_range formula minimum)) type nil))) amount value))))
+	(list (quote sql_compile_expr) (list (quote tsql_dateadd_compiler) unit months seconds) amount value))))
 (define tsql_calendar_difference_formula (lambda (info)
 	(if (equal? (sql_info_type info) "TIME") (list tsql_calendar_text (sql_info_formula info))
 		(tsql_calendar_formula info))))
@@ -2242,10 +2223,14 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(define fields (tsql_result_columns bound parameters))
 		(if (list? fields) (list (quote quote) '()) (error "invalid prepared mutation contract")))))
 	(define tsql_build_select_plan (lambda (query) (begin
-		(define expanded (if describe (tsql_describe_query query policy planning_session)
-			(tsql_bind_column_compilers (sql_expand_views query policy) (tsql_column_compiler planning_session))))
+		(define expanded (tsql_bind_column_compilers (sql_expand_views query policy) (tsql_column_compiler planning_session)))
+		/* Binding validates names and contracts but lowers conversion callbacks.
+		Describe the original declared expressions so NULL folding cannot erase
+		their explicit widths or temporal precision. Analysis still consumes the
+		bound tree; neither path constructs or executes a physical plan. */
+		(define checked (if describe (tsql_describe_query expanded policy planning_session) expanded))
 		(define descriptors (tsql_result_columns expanded parameters))
-		(if analyze_parameters (list (quote quote) expanded)
+		(if analyze_parameters (list (quote quote) checked)
 			describe (list (quote quote) descriptors) (list (quote !begin)
 				(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded))
 					(list (quote quote) descriptors))
