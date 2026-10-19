@@ -624,13 +624,16 @@ test_cases:
     data:
     - n: 2
 - name: TSQL INSERT VALUES resolves omitted target columns
-  sql: INSERT dbo.tsql_copy VALUES (10,N'implicit values')
+  sql: INSERT dbo.tsql_implicit_copy VALUES (10,N'implicit values')
   expect:
     affected_rows: 1
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_implicit_copy
+  - sql: CREATE TABLE dbo.tsql_implicit_copy(id INT PRIMARY KEY,name NVARCHAR(50))
 - name: TSQL INSERT SELECT resolves omitted target columns
-  sql: INSERT dbo.tsql_copy SELECT id+10,name FROM dbo.tsql_data WHERE id=1
+  sql: INSERT dbo.tsql_implicit_copy SELECT id+10,name FROM dbo.tsql_data WHERE id=1
 - name: Implicit target columns preserve names and values
-  sql: SELECT id,name FROM dbo.tsql_copy WHERE id>=10 ORDER BY id
+  sql: SELECT id,name FROM dbo.tsql_implicit_copy WHERE id>=10 ORDER BY id
   expect:
     rows: 2
     data:
@@ -639,9 +642,11 @@ test_cases:
     - id: 11
       name: Alice
 - name: Implicit target columns still enforce value arity
-  sql: INSERT dbo.tsql_copy VALUES (12)
+  sql: INSERT dbo.tsql_implicit_copy VALUES (12)
   expect:
     error: true
+  cleanup:
+  - sql: DROP TABLE dbo.tsql_implicit_copy
 - name: Describe empty SELECT preserves declared integer metadata
   scm: "(begin\n  (define s (newsession))\n  (s \"username\" \"root\")\n  (define fields (tds_describe \"memcp-tests\"\
     \ \"SELECT TOP (0) id FROM dbo.tsql_data\" \"\" s))\n  (if (and (equal? (count fields) 1) (equal? ((car fields)\
@@ -883,7 +888,8 @@ test_cases:
       /* Failed reservations can leave gaps. Rewinding would race other writers. */
       (if (equal? (reserve_ids (table "memcp-tests" false "tsql_identity_limit" false) 1) '(257 257))
         true (error "failed identity batch rewound its consumed reservation"))
-      (execute "INSERT INTO dbo.tsql_identity_limit(id,value) VALUES (255,3)")
+      (execute "SET IDENTITY_INSERT dbo.tsql_identity_limit ON")
+          (execute "INSERT INTO dbo.tsql_identity_limit(id,value) VALUES (255,3)")
       (define updated (try (lambda () (begin
         (execute "UPDATE dbo.tsql_identity_limit SET id=1") false)) (lambda (_) true)))
       (if updated true (error "identity was writable through UPDATE"))
@@ -903,18 +909,27 @@ test_cases:
 - name: Zero-scale decimal identity stores exact generated values
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_identity_decimal
-  scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define out (newsession))\n\
-    \    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula\
-    \ tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda (row) (out \"row\" row)) (lambda fields true))))\n\
-    \    (out \"row\"))))\n  (execute \"CREATE TABLE dbo.tsql_identity_decimal (id NUMERIC(9,0) IDENTITY(1,1),value\
-    \ INT)\")\n  (execute \"INSERT INTO dbo.tsql_identity_decimal(value) VALUES (10),(20)\")\n  (define generated\
-    \ (execute \"SELECT id FROM dbo.tsql_identity_decimal WHERE value=20\"))\n  (if (and (string? (generated \"\
-    id\")) (equal? (coefficient_decode (generated \"id\")) \"2\")) true (error \"generated decimal identity lacked\
-    \ exact representation\"))\n  (execute \"INSERT INTO dbo.tsql_identity_decimal(id,value) VALUES (99,30)\")\n\
-    \  (execute \"INSERT INTO dbo.tsql_identity_decimal(value) VALUES (40)\")\n  (define next (execute \"SELECT\
-    \ id FROM dbo.tsql_identity_decimal WHERE value=40\"))\n  (if (equal? (coefficient_decode (next \"id\")) \"\
-    100\") true (error \"exact imported identity failed to advance allocator\"))\n  (execute \"DROP TABLE dbo.tsql_identity_decimal\"\
-    )\n  true)\n"
+  scm: |
+    (begin
+      (define s (newsession))
+      (define execute (lambda (sql) (begin
+        (define out (newsession))
+        (with_autocommit s nil nil sql (lambda (tx)
+          (sql_execute_formula s tx (sql_queryplan_compile_formula tx (parse_tsql "memcp-tests" sql nil s tx))
+            (lambda (row) (out "row" row)) (lambda fields true))))
+        (out "row"))))
+      (execute "CREATE TABLE dbo.tsql_identity_decimal (id NUMERIC(9,0) IDENTITY(1,1),value INT)")
+      (execute "INSERT INTO dbo.tsql_identity_decimal(value) VALUES (10),(20)")
+      (define generated (execute "SELECT id FROM dbo.tsql_identity_decimal WHERE value=20"))
+      (if (and (string? (generated "id")) (equal? (coefficient_decode (generated "id")) "2")) true (error "generated decimal identity lacked exact representation"))
+      (execute "SET IDENTITY_INSERT dbo.tsql_identity_decimal ON")
+      (execute "INSERT INTO dbo.tsql_identity_decimal(id,value) VALUES (99,30)")
+      (execute "SET IDENTITY_INSERT dbo.tsql_identity_decimal OFF")
+      (execute "INSERT INTO dbo.tsql_identity_decimal(value) VALUES (40)")
+      (define next (execute "SELECT id FROM dbo.tsql_identity_decimal WHERE value=40"))
+      (if (equal? (coefficient_decode (next "id")) "100") true (error "exact imported identity failed to advance allocator"))
+      (execute "DROP TABLE dbo.tsql_identity_decimal")
+      true)
   expect:
     result: true
   noncritical: true
@@ -1023,4 +1038,78 @@ test_cases:
   name: 'Fixture cleanup 002: DROP TABLE IF EXISTS dbo.tsql_copy'
 - sql: DROP TABLE IF EXISTS dbo.tsql_data
   name: 'Fixture cleanup 003: DROP TABLE IF EXISTS dbo.tsql_data'
+- name: Omitted identity target columns leave allocation to the native sink
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_implicit_identity
+  - sql: CREATE TABLE tsql_implicit_identity(id INT IDENTITY(30,1) PRIMARY KEY,value INT,label NVARCHAR(20))
+  sql: INSERT tsql_implicit_identity VALUES(7,N'first')
+  expect:
+    affected_rows: 1
+- name: Omitted identity target columns also bind SELECT outputs
+  sql: INSERT tsql_implicit_identity SELECT 8,N'second'
+  expect:
+    affected_rows: 1
+- name: Omitted identity VALUES and SELECT preserve native consecutive IDs
+  sql: SELECT id,value,label FROM tsql_implicit_identity ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 30
+      value: 7
+      label: first
+    - id: 31
+      value: 8
+      label: second
+- name: Omitted target columns cannot supply an explicit identity value
+  sql: INSERT tsql_implicit_identity VALUES(100,9,N'not written')
+  expect:
+    error: true
+    contains:
+    - column count
+- name: Omitted SELECT columns cannot supply an explicit identity value
+  sql: INSERT tsql_implicit_identity SELECT 100,9,N'not written'
+  expect:
+    error: true
+- name: Nullable ordinary columns still participate in the implicit arity contract
+  sql: INSERT tsql_implicit_identity VALUES(9)
+  expect:
+    error: true
+    contains:
+    - column count
+- name: Rejected implicit identity input reserves no native ID block
+  sql: INSERT tsql_implicit_identity VALUES(9,N'third')
+  expect:
+    affected_rows: 1
+- name: Rejected implicit rows leave stored values and allocator unchanged
+  sql: SELECT id,value,label FROM tsql_implicit_identity WHERE id>=32 ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 32
+      value: 9
+      label: third
+  cleanup:
+  - sql: DROP TABLE tsql_implicit_identity
+- name: Implicit target binding skips a version declaration
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_implicit_version
+  - sql: CREATE TABLE tsql_implicit_version(id INT IDENTITY PRIMARY KEY,value INT,version TIMESTAMP)
+  sql: INSERT tsql_implicit_version VALUES(7)
+  expect:
+    affected_rows: 1
+- name: Version declarations do not shift ordinary positional inputs
+  sql: SELECT id,value FROM tsql_implicit_version
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Implicit inputs cannot supply an identity and version payload positionally
+  sql: INSERT tsql_implicit_version VALUES(99,7,0x0102030405060708)
+  expect:
+    error: true
+    contains:
+    - column count
+  cleanup:
+  - sql: DROP TABLE tsql_implicit_version
 cleanup: []
