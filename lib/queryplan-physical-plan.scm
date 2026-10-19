@@ -12225,26 +12225,28 @@ stars through the same catalog-aware path used by physical lowering. */
 			(neumann_fail "build_queryplan" "UNION branch column count mismatch")))))
 
 (define union_align_branch_fields (lambda (branch titles width)
-	(begin
-		(if (not (query_block? branch))
-			(neumann_fail "build_queryplan" "UNION branch lowering expects query-block branches")
-			true)
-		(if (not (equal? (count (qb_fields branch)) width))
-			(neumann_fail "build_queryplan" "UNION branch column count mismatch")
-			true)
-		(make_query_block
-			(qb_schema branch)
-			(qb_sources branch)
-			(projection_with_titles titles (projection_exprs (qb_fields branch)))
-			(qb_where branch)
-			(qb_group branch)
-			(qb_having branch)
-			(qb_order branch)
-			(qb_limit branch)
-			(qb_offset branch)
-			(qb_hidden branch)
-			(qb_stages branch)
-			(qb_facts branch)))))
+	(match branch
+		((symbol union-block) mode branches order limit offset facts)
+		(make_union_block mode (map branches (lambda (child)
+			(union_align_branch_fields child titles width))) order limit offset facts)
+		(cons (symbol query-block) _tail) (begin
+			(if (not (equal? (count (qb_fields branch)) width))
+				(neumann_fail "build_queryplan" "UNION branch column count mismatch")
+				true)
+			(make_query_block
+				(qb_schema branch)
+				(qb_sources branch)
+				(projection_with_titles titles (projection_exprs (qb_fields branch)))
+				(qb_where branch)
+				(qb_group branch)
+				(qb_having branch)
+				(qb_order branch)
+				(qb_limit branch)
+				(qb_offset branch)
+				(qb_hidden branch)
+				(qb_stages branch)
+				(qb_facts branch)))
+		_ (neumann_fail "build_queryplan" "UNION branch lowering expects query-block or union-block branches"))))
 
 (define projection_index_by_title (lambda (titles title)
 	(reduce (produceN (count titles)) (lambda (found i)
@@ -12707,46 +12709,44 @@ lowering and any genuinely necessary branch-local order barrier. */
 											true)))))
 							true))))))))
 
-(define lower_union_all_successive (lambda (block)
-	(begin
-		(define branches (union_branches block))
-		(if (empty_list? branches)
-			nil
-			(begin
-				(define first_branch (car branches))
-				(if (not (query_block? first_branch))
-					(neumann_fail "build_queryplan" "UNION branch lowering expects query-block branches")
-					true)
-				(define titles (projection_titles (qb_fields first_branch)))
-				(define width (count (qb_fields first_branch)))
-				(if (not (empty_list? (union_order block)))
-					(lower_union_all_ordered block titles width)
-					(if (or (not (nil? (union_limit block))) (not (nil? (union_offset block))))
-						(lower_union_all_ordered block titles width)
-						(cons (quote begin)
-							(map branches (lambda (branch)
-								(lower_query_block_with_stages (union_align_branch_fields branch titles width))))))))))))
+/* Each branch retains its own duplicate/window scope. Consume its completed
+native reduction once, then sum at branch boundaries; no shared row counter or
+second producer pass is needed. Empty scalar branches return an empty list,
+while result-only callbacks may return nil instead of an affected-row count. */
+(define lower_union_all_successive (lambda (block) (begin
+	(define branches (union_branches block))
+	(if (empty_list? branches) nil (begin
+		(define titles (queryplan_result_titles block))
+		(define width (* 2 (count titles)))
+		(if (or (not (empty_list? (union_order block)))
+			(not (nil? (union_limit block))) (not (nil? (union_offset block))))
+			(lower_union_all_ordered block titles width)
+			(reduce (map branches (lambda (branch) (begin
+				(define aligned (union_align_branch_fields branch titles width))
+				(define plan (if (query_block? aligned)
+					(lower_query_block_with_stages aligned) (lower_union_block aligned)))
+				(list (quote match) plan (quote __union_branch_result)
+					(list (quote if) (list (quote number?) (quote __union_branch_result))
+						(quote __union_branch_result) nil)))))
+				(lambda (total branch) (list (quote sql_sum_reduce) total branch)) nil)))))))
 
-(define wrap_plan_with_distinct_resultrow (lambda (plan)
-	(begin
-		(define seen (symbol "__union_distinct_seen"))
-		(define emit (symbol "__union_distinct_resultrow"))
-		(define row (symbol "__union_distinct_row"))
-		(define key (symbol "__union_distinct_key"))
-		(list (quote begin)
-			(list (quote define) seen (list (quote newsession)))
-			(list (quote define) emit (quote resultrow))
-			(list (quote define) (quote resultrow)
-				(list (quote lambda) (list row)
-					(list (quote begin)
-						(list (quote define) key (list (quote serialize) row))
-						(list (quote if)
-							(list seen key)
-							nil
-							(list (quote begin)
-								(list seen key true)
-								(list emit row))))))
-			plan))))
+(define wrap_plan_with_distinct_resultrow (lambda (plan) (begin
+	(define seen (symbol "__union_distinct_seen"))
+	(define emit (symbol "__union_distinct_resultrow"))
+	(define row (symbol "__union_distinct_row"))
+	(define key (symbol "__union_distinct_key"))
+	(list (quote begin)
+		(list (quote define) seen (list (quote newsession)))
+		(list (quote define) emit (quote resultrow))
+		/* Bind the branch sink as a lambda parameter. Defining resultrow in a
+		begin lets a nested DISTINCT shadow a sibling's emitted-row callback
+		when the enclosing plan is optimized as one expression. */
+		(list (list (quote lambda) (list (quote resultrow)) plan)
+			(list (quote lambda) (list row)
+				(list (quote begin)
+					(list (quote define) key (list (quote serialize) row))
+					(list (quote if) (list seen key) nil
+						(list (quote begin) (list seen key true) (list emit row))))))))))
 
 (define lower_union_block (lambda (block)
 	(if (equal? (union_mode block) (quote all))
