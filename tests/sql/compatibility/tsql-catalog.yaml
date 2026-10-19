@@ -205,6 +205,37 @@ test_cases:
       fixed: 8
       amount: 9
       unlimited: -1
+- name: Alias length metadata preserves native declarations
+  scm: "(begin\n  (define handle (table \"memcp-tests\" false \"catalog_items\" false))\n  (define before (show\
+    \ handle \"column\" \"title\" false))\n  (define length (tsql_column_length \"memcp-tests\" (sql_policy\
+    \ \"root\") \"dbo.catalog_items\" \"title\"))\n  (define after (show handle \"column\" \"title\" false))\n\
+    \  (list length (before \"Dimensions\")\n    (equal? (before \"RawType\") \"[memcp-tests].[dbo].[catalog_text]\"\
+    )\n    (expression_equal? before after)))"
+  expect:
+    result:
+    - 48
+    - - 24
+    - true
+    - true
+- name: Alias metadata length resolves its declared integer base
+  sql: SELECT COL_LENGTH(N'dbo.catalog_items',N'flag') AS size
+  expect:
+    data:
+    - size: 2
+- name: Alias metadata length honors the consuming relation policy
+  scm: (tsql_column_length "memcp-tests" (lambda (_database _relation _write) (error "length access denied"))
+    "dbo.catalog_items" "title")
+  expect:
+    error: true
+    contains: length access denied
+- name: Alias metadata length preserves missing and NULL arguments
+  sql: SELECT COL_LENGTH(N'dbo.catalog_items',N'absent') AS missing,COL_LENGTH(NULL,N'title') AS no_table,COL_LENGTH(N'dbo.catalog_items',NULL)
+    AS no_column
+  expect:
+    data:
+    - missing: null
+      no_table: null
+      no_column: null
 - name: Cross database metadata does not bypass the active database
   sql: SELECT TYPE_ID(N'otherdb.dbo.catalog_flag') AS type_id, COL_LENGTH(N'otherdb.dbo.catalog_items',N'id') AS
     size
@@ -899,4 +930,5 @@ test_cases:
       (drop_sql_type_alias "memcp-tests" "ddl_lifecycle_alias" true nil)
       (if (equal? outcome true) true (error (car outcome))))
   expect: {result: true}
+
 cleanup: []

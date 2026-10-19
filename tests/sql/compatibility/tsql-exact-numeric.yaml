@@ -10,6 +10,7 @@ metadata:
   description: Exact numeric values, casts and arithmetic in t-sql mode
   syntax: tsql
   isolated: true
+  requires_tds: true
 setup: []
 test_cases:
 - sql: DROP TABLE IF EXISTS money_bad_dimensions
@@ -585,28 +586,24 @@ test_cases:
     rows: 1
     data:
     - value: -13
-  noncritical: true
 - name: Money default character style
   sql: SELECT CAST(CAST(12.3456 AS MONEY) AS VARCHAR(40)) AS value
   expect:
     rows: 1
     data:
     - value: '12.35'
-  noncritical: true
 - name: Money comma character style
   sql: SELECT CONVERT(VARCHAR(40),CAST(-1234567.1234 AS MONEY),1) AS value
   expect:
     rows: 1
     data:
     - value: -1,234,567.12
-  noncritical: true
 - name: Small money ROUND promotes
   sql: SELECT CONVERT(VARCHAR(40),ROUND(CAST(12.3456 AS SMALLMONEY),2),2) AS value
   expect:
     rows: 1
     data:
     - value: '12.3500'
-  noncritical: true
 - name: Float arithmetic precedence
   sql: SELECT CAST(0.1+CAST(0.2 AS FLOAT) AS DECIMAL(5,2)) AS value
   expect:
@@ -746,4 +743,2409 @@ test_cases:
   name: 'Fixture cleanup 005: DROP TABLE IF EXISTS dbo.exact_default_probe'
 - sql: DROP TABLE tsql_exact_data
   name: 'Fixture cleanup 006: DROP TABLE tsql_exact_data'
+- name: ROUND integer positive tie rounds away from zero
+  sql: SELECT ROUND(15,-1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 20
+- name: ROUND integer negative tie rounds away from zero
+  sql: SELECT ROUND(-15,-1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -20
+- name: ROUND integer positive truncation differs from rounding
+  sql: SELECT ROUND(15,-1,1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 10
+- name: ROUND integer negative truncation moves toward zero
+  sql: SELECT ROUND(-15,-1,1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -10
+- name: ROUND any nonzero function selects truncation
+  sql: SELECT ROUND(15,-1,-7) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 10
+- name: ROUND positive integer length retains its input
+  sql: SELECT ROUND(CAST('-2147483648' AS INT),8) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -2147483648
+- name: ROUND integer zero handles the widest negative length
+  sql: SELECT ROUND(0,-2147483648) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: ROUND integer extreme negative length returns zero
+  sql: SELECT ROUND(123,-2147483648) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: ROUND integer extreme positive length retains its input
+  sql: SELECT ROUND(123,2147483647) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 123
+- name: ROUND integer rounding retains the upper valid hundred
+  sql: SELECT ROUND(2147483647,-2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2147483600
+- name: ROUND integer rounding retains the lower valid hundred
+  sql: SELECT ROUND(CAST('-2147483648' AS INT),-2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -2147483600
+- name: ROUND tiny integer result can grow within the promoted contract
+  sql: SELECT ROUND(CAST(255 AS TINYINT),-1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 260
+- name: ROUND small integer result can grow within the promoted contract
+  sql: SELECT ROUND(CAST(32767 AS SMALLINT),-1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 32770
+- name: ROUND big integer upper endpoint retains every digit
+  sql: SELECT ROUND(CAST(9223372036854775807 AS BIGINT),0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9223372036854775807
+- name: ROUND big integer lower endpoint retains every digit
+  sql: SELECT ROUND(CAST('-9223372036854775808' AS BIGINT),0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -9223372036854775808
+- name: ROUND big integer upper valid hundred remains exact
+  sql: SELECT ROUND(CAST(9223372036854775807 AS BIGINT),-2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9223372036854775800
+- name: ROUND big integer lower valid hundred remains exact
+  sql: SELECT ROUND(CAST('-9223372036854775808' AS BIGINT),-2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -9223372036854775800
+- name: ROUND big integer long truncation returns zero
+  sql: SELECT ROUND(CAST(9223372036854775807 AS BIGINT),-19,1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: ROUND big integer length beyond its digits returns zero
+  sql: SELECT ROUND(CAST('-9223372036854775808' AS BIGINT),-20) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: ROUND big integer long result below the half boundary is zero
+  sql: SELECT ROUND(CAST(4999999999999999999 AS BIGINT),-19) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: ROUND untyped NULL keeps the ordinary integer contract
+  sql: SELECT ROUND(NULL,1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ROUND typed integer NULL propagates
+  sql: SELECT ROUND(CAST(NULL AS BIGINT),-1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ROUND NULL length propagates
+  sql: SELECT ROUND(15,CAST(NULL AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ROUND NULL function propagates
+  sql: SELECT ROUND(15,0,CAST(NULL AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ROUND text length is converted using the declared integer contract
+  sql: SELECT ROUND(15,CAST('-1' AS VARCHAR(3))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 20
+- name: ROUND floating positive half rounds away from zero
+  sql: SELECT ROUND(CAST(1.25 AS FLOAT),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1.3
+- name: ROUND floating negative half rounds away from zero
+  sql: SELECT ROUND(CAST(-1.25 AS FLOAT),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -1.3
+- name: ROUND floating truncation keeps its sign
+  sql: SELECT ROUND(CAST(-1.25 AS FLOAT),1,1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -1.2
+- name: ROUND floating negative length rounds the integral part
+  sql: SELECT ROUND(CAST(1250 AS FLOAT),-2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1300
+- name: ROUND floating extreme positive length retains its input
+  sql: SELECT ROUND(CAST(1.25 AS FLOAT),2147483647) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1.25
+- name: ROUND floating extreme negative length returns zero
+  sql: SELECT ROUND(CAST(-1.25 AS FLOAT),-2147483648) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: ROUND floating large integral values do not overflow an integer carrier
+  sql: SELECT ROUND(CAST(1e100 AS FLOAT),0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1.0e+100
+- name: ROUND floating typed NULL propagates
+  sql: SELECT ROUND(CAST(NULL AS FLOAT),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ROUND real values use the floating return family
+  sql: SELECT ROUND(CAST(12.75 AS REAL),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.8
+- name: ROUND money rounds at two places
+  sql: SELECT ROUND(CAST(12.3456 AS MONEY),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.35
+- name: ROUND money negative truncation keeps two places
+  sql: SELECT ROUND(CAST(-12.3456 AS MONEY),2,1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12.34
+- name: ROUND money length finer than its fixed scale retains the value
+  sql: SELECT ROUND(CAST(12.3456 AS MONEY),2147483647) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.3456
+- name: ROUND small money rounding promotes beyond the input range
+  sql: SELECT ROUND(CAST(214748.3647 AS SMALLMONEY),-5) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 200000
+- name: ROUND money typed NULL propagates
+  sql: SELECT ROUND(CAST(NULL AS SMALLMONEY),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ROUND rejects positive integer rounding overflow
+  sql: SELECT ROUND(2147483647,-1) AS value
+  expect:
+    error: true
+- name: ROUND rejects negative integer rounding overflow
+  sql: SELECT ROUND(CAST('-2147483648' AS INT),-1) AS value
+  expect:
+    error: true
+- name: ROUND rejects positive big integer rounding overflow
+  sql: SELECT ROUND(CAST(9223372036854775807 AS BIGINT),-1) AS value
+  expect:
+    error: true
+- name: ROUND rejects negative big integer rounding overflow
+  sql: SELECT ROUND(CAST('-9223372036854775808' AS BIGINT),-1) AS value
+  expect:
+    error: true
+- name: ROUND rejects an unrepresentable nineteen digit positive result
+  sql: SELECT ROUND(CAST(5000000000000000000 AS BIGINT),-19) AS value
+  expect:
+    error: true
+- name: ROUND rejects an unrepresentable nineteen digit negative result
+  sql: SELECT ROUND(CAST('-5000000000000000000' AS BIGINT),-19) AS value
+  expect:
+    error: true
+- name: ROUND rejects a length outside the declared integer range
+  sql: SELECT ROUND(15,CAST(2147483648 AS BIGINT)) AS value
+  expect:
+    error: true
+- name: ROUND rejects a function outside the declared integer range
+  sql: SELECT ROUND(15,0,CAST(2147483648 AS BIGINT)) AS value
+  expect:
+    error: true
+- name: ROUND rejects a calendar source before runtime arithmetic
+  sql: SELECT ROUND(CAST(N'2026-03-15' AS DATE),0) AS value
+  expect:
+    error: true
+- name: ROUND rejects missing length
+  sql: SELECT ROUND(15) AS value
+  expect:
+    error: true
+- name: ROUND rejects extra arguments
+  sql: SELECT ROUND(15,0,0,0) AS value
+  expect:
+    error: true
+- name: ROUND columns bind dynamic lengths and truncation once per input
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_round_inputs
+  - sql: CREATE TABLE tsql_round_inputs (id INT PRIMARY KEY,v BIGINT,places INT,mode INT)
+  - sql: INSERT tsql_round_inputs VALUES (1,125,-1,0),(2,-125,-1,1),(3,NULL,0,0),(4,99,NULL,0)
+  sql: SELECT id,ROUND(v,places,mode) AS value FROM tsql_round_inputs ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      value: 130
+    - id: 2
+      value: -120
+    - id: 3
+      value: null
+    - id: 4
+      value: null
+  cleanup:
+  - sql: DROP TABLE tsql_round_inputs
+- name: ROUND empty descriptions preserve each declared return family
+  scm: |-
+    (begin
+      (define fields (tds_describe "memcp-tests"
+        "SELECT TOP(0) ROUND(CAST(NULL AS TINYINT),0) AS t,ROUND(CAST(NULL AS SMALLINT),0) AS s,ROUND(CAST(NULL AS INT),0) AS i,ROUND(CAST(NULL AS BIGINT),0) AS b,ROUND(CAST(NULL AS REAL),0) AS r,ROUND(CAST(NULL AS FLOAT),0) AS f,ROUND(CAST(NULL AS SMALLMONEY),0) AS sm,ROUND(CAST(NULL AS MONEY),0) AS m" "" (newsession)))
+      (if (and
+        (equal? (map fields (lambda (field) (field "sql_type"))) '("INT" "INT" "INT" "BIGINT" "FLOAT" "FLOAT" "MONEY" "MONEY"))
+        (equal? (map fields (lambda (field) (field "kind"))) '(38 38 38 38 109 109 110 110))
+        (equal? (map fields (lambda (field) (field "size"))) '(4 4 4 8 8 8 8 8))) true
+        (error "ROUND result family or width was not compiled from its declaration")))
+  expect:
+    result: true
+- name: ROUND executable formulas contain no compiletime type wrappers
+  scm: |
+    (begin
+      (define formula (sql_type_formula '() (tsql_builtin_expr "ROUND"
+        (list (tsql_cast_expr 125 "BIGINT" '()) -1))))
+      (if (and (not (regexp_test (string formula) "sql_type_expr|sql_compile_expr"))
+        (expression_equal? (cadr (car formula))
+          (list (quote round_value) (quote round_length) (quote round_function)))
+        (equal? (eval formula) 130)) true
+        (error "ROUND lost its parameters or leaked annotations into executable arithmetic")))
+  expect:
+    result: true
+- name: ROUND portable view binds ordinary projected integer declarations
+  setup:
+  - sql: DROP VIEW IF EXISTS tsql_round_view
+  - sql: DROP TABLE IF EXISTS tsql_round_inputs
+  - sql: CREATE TABLE tsql_round_inputs (id INT PRIMARY KEY,v BIGINT,places INT,mode INT)
+  - sql: INSERT tsql_round_inputs VALUES (1,125,-1,0),(2,-125,-1,1),(3,NULL,0,0),(4,99,NULL,0)
+  - sql: CREATE VIEW tsql_round_view AS SELECT id,ROUND(v,places,mode) AS value FROM tsql_round_inputs
+  sql: SELECT id,value FROM tsql_round_view ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      value: 130
+    - id: 2
+      value: -120
+    - id: 3
+      value: null
+    - id: 4
+      value: null
+  cleanup:
+  - sql: DROP VIEW tsql_round_view
+  - sql: DROP TABLE tsql_round_inputs
+- name: ROUND floating columns use bounded dynamic decimal units
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_round_real_inputs
+  - sql: CREATE TABLE tsql_round_real_inputs (id INT PRIMARY KEY,v FLOAT,places INT,mode INT)
+  - sql: INSERT tsql_round_real_inputs VALUES (1,1.25,1,0),(2,-1.25,1,1),(3,1250,-2,0),(4,1.25,2147483647,0),(5,1.25,-2147483648,0),(6,1.25,NULL,0)
+  sql: SELECT id,ROUND(v,places,mode) AS value FROM tsql_round_real_inputs ORDER BY id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+      value: 1.3
+    - id: 2
+      value: -1.2
+    - id: 3
+      value: 1300
+    - id: 4
+      value: 1.25
+    - id: 5
+      value: 0
+    - id: 6
+      value: null
+  cleanup:
+  - sql: DROP TABLE tsql_round_real_inputs
+- name: MONEY conversion preserves positive half
+  sql: SELECT CAST(12.34565 AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.3457
+- name: MONEY conversion preserves negative half
+  sql: SELECT CAST(-12.34565 AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12.3457
+- name: MONEY conversion preserves zero
+  sql: SELECT CAST(0 AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: MONEY conversion preserves NULL
+  sql: SELECT CAST(NULL AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: MONEY conversion preserves numeric text
+  sql: SELECT CAST(N'1234.5678' AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1234.5678
+- name: MONEY conversion preserves currency text
+  sql: SELECT CAST(N'$1,234.5678' AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1234.5678
+- name: MONEY conversion preserves bit one
+  sql: SELECT CAST(CAST(1 AS BIT) AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: MONEY conversion preserves bit zero
+  sql: SELECT CAST(CAST(0 AS BIT) AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: SMALLMONEY conversion preserves positive half
+  sql: SELECT CAST(12.34565 AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.3457
+- name: SMALLMONEY conversion preserves negative half
+  sql: SELECT CAST(-12.34565 AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12.3457
+- name: SMALLMONEY conversion preserves zero
+  sql: SELECT CAST(0 AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: SMALLMONEY conversion preserves NULL
+  sql: SELECT CAST(NULL AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: SMALLMONEY conversion preserves numeric text
+  sql: SELECT CAST(N'1234.5678' AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1234.5678
+- name: SMALLMONEY conversion preserves currency text
+  sql: SELECT CAST(N'$1,234.5678' AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1234.5678
+- name: SMALLMONEY conversion preserves bit one
+  sql: SELECT CAST(CAST(1 AS BIT) AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: SMALLMONEY conversion preserves bit zero
+  sql: SELECT CAST(CAST(0 AS BIT) AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: Small currency upper bound
+  sql: SELECT CAST(N'214748.3647' AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 214748.3647
+- name: Small currency lower bound
+  sql: SELECT CAST(N'-214748.3648' AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -214748.3648
+- name: Small currency rounding below upper bound
+  sql: SELECT CAST(N'214748.36474' AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 214748.3647
+- name: Small currency rejects rounding overflow
+  sql: SELECT CAST(214748.36475 AS SMALLMONEY) AS value
+  expect:
+    error: true
+- name: Small currency rejects negative rounding overflow
+  sql: SELECT CAST(-214748.36485 AS SMALLMONEY) AS value
+  expect:
+    error: true
+- name: Small currency rejects upper overflow
+  sql: SELECT CAST(214749 AS SMALLMONEY) AS value
+  expect:
+    error: true
+- name: Small currency rejects invalid text
+  sql: SELECT CAST(N'not money' AS SMALLMONEY) AS value
+  expect:
+    error: true
+- name: MONEY to integer rounds 12.75
+  sql: SELECT CAST(CAST(12.75 AS MONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 13
+- name: MONEY to integer rounds -12.75
+  sql: SELECT CAST(CAST(-12.75 AS MONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -13
+- name: MONEY to integer rounds 2.5
+  sql: SELECT CAST(CAST(2.5 AS MONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 3
+- name: MONEY to integer rounds -2.5
+  sql: SELECT CAST(CAST(-2.5 AS MONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -3
+- name: MONEY character style 0
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS MONEY),0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.57'
+- name: MONEY character style 1
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS MONEY),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -1,234.57
+- name: MONEY character style 2
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS MONEY),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.5678'
+- name: MONEY character style 126
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS MONEY),126) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.5678'
+- name: MONEY character style 999
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS MONEY),999) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.57'
+- name: MONEY default character cast uses two places
+  sql: SELECT CAST(CAST(12.3456 AS MONEY) AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.35'
+- name: SMALLMONEY to integer rounds 12.75
+  sql: SELECT CAST(CAST(12.75 AS SMALLMONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 13
+- name: SMALLMONEY to integer rounds -12.75
+  sql: SELECT CAST(CAST(-12.75 AS SMALLMONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -13
+- name: SMALLMONEY to integer rounds 2.5
+  sql: SELECT CAST(CAST(2.5 AS SMALLMONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 3
+- name: SMALLMONEY to integer rounds -2.5
+  sql: SELECT CAST(CAST(-2.5 AS SMALLMONEY) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -3
+- name: SMALLMONEY character style 0
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS SMALLMONEY),0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.57'
+- name: SMALLMONEY character style 1
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS SMALLMONEY),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -1,234.57
+- name: SMALLMONEY character style 2
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS SMALLMONEY),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.5678'
+- name: SMALLMONEY character style 126
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS SMALLMONEY),126) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.5678'
+- name: SMALLMONEY character style 999
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-1234.5678 AS SMALLMONEY),999) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-1234.57'
+- name: SMALLMONEY default character cast uses two places
+  sql: SELECT CAST(CAST(12.3456 AS SMALLMONEY) AS VARCHAR(40)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.35'
+- name: Currency text zero padding
+  sql: SELECT CONVERT(VARCHAR(40),CAST(0 AS MONEY),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '0.00'
+- name: Currency text rounded negative zero
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-0.0049 AS MONEY),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '0.00'
+- name: Currency text grouping carry
+  sql: SELECT CONVERT(VARCHAR(40),CAST(999.9950 AS MONEY),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1,000.00
+- name: Currency text negative grouping carry
+  sql: SELECT CONVERT(VARCHAR(40),CAST(-999.9950 AS MONEY),1) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -1,000.00
+- name: Currency fixed national text pads after formatting
+  sql: SELECT CAST(CAST(12.3 AS MONEY) AS NCHAR(8)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.30   '
+- name: Currency VARCHAR width failure is explicit
+  sql: SELECT CAST(CAST(12.34 AS MONEY) AS VARCHAR(3)) AS value
+  expect:
+    error: true
+- name: Currency NVARCHAR width failure is explicit
+  sql: SELECT CAST(CAST(12.34 AS MONEY) AS NVARCHAR(3)) AS value
+  expect:
+    error: true
+- name: Currency CHAR width failure is explicit
+  sql: SELECT CAST(CAST(12.34 AS MONEY) AS CHAR(3)) AS value
+  expect:
+    error: true
+- name: Currency NCHAR width failure is explicit
+  sql: SELECT CAST(CAST(12.34 AS MONEY) AS NCHAR(3)) AS value
+  expect:
+    error: true
+- name: Currency NULL style remains NULL
+  sql: SELECT CONVERT(VARCHAR(40),CAST(12.3 AS MONEY),NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Float conversion still truncates toward zero
+  sql: SELECT CAST(CAST(-12.75 AS FLOAT) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12
+- name: Currency conversion rejects undeclared BINARY semantics
+  sql: SELECT CAST(CAST(0x3132 AS BINARY(2)) AS MONEY) AS value
+  expect:
+    error: true
+- name: Currency conversion rejects undeclared VARBINARY semantics
+  sql: SELECT CAST(CAST(0x3132 AS VARBINARY(2)) AS MONEY) AS value
+  expect:
+    error: true
+- name: Stored calendar factory keeps its pattern argument contract
+  scm: (begin (define info ((tsql_styled_text_compiler "%Y-%m-%d %H:%i:%s" "VARCHAR" (list 19)) (list (sql_info 1704164645
+    "DATETIME" nil)))) (list (sql_info_type info) (eval (sql_info_formula info))))
+  expect:
+    result:
+    - VARCHAR
+    - '2024-01-02 03:04:05'
+- name: Remove previous currency declaration fixture
+  sql: DROP TABLE IF EXISTS money_contract_values
+- name: Prepare native currency columns
+  sql: CREATE TABLE money_contract_values (id INT PRIMARY KEY, amount MONEY, small_amount SMALLMONEY, omitted MONEY DEFAULT
+    1.23456)
+- name: Insert ordinary currency values through the shared sink
+  sql: INSERT INTO money_contract_values(id,amount,small_amount) VALUES (1,12.34565,-12.34565)
+- name: Declared currency assignments round before native insertion
+  sql: SELECT amount,small_amount,omitted FROM money_contract_values WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - amount: 12.3457
+      small_amount: -12.3457
+      omitted: 1.2346
+- name: Update ordinary currency values through the shared sink
+  sql: UPDATE money_contract_values SET amount=-2.55555,small_amount=2.55555 WHERE id=1
+- name: Declared currency update uses the same conversion
+  sql: SELECT amount,small_amount FROM money_contract_values WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - amount: -2.5556
+      small_amount: 2.5556
+- name: Currency column text uses its declared source contract
+  sql: SELECT CONVERT(VARCHAR(40),amount,2) AS value FROM money_contract_values WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: '-2.5556'
+- name: Empty currency result declares nullable wire types
+  scm: (map (tds_describe "memcp-tests" "SELECT TOP 0 amount,small_amount FROM money_contract_values" "" (newsession))
+    (lambda (c) (list (c "kind") (c "size") (c "precision") (c "scale") (c "sql_type"))))
+  expect:
+    result:
+    - - 110
+      - 8
+      - 19
+      - 4
+      - MONEY
+    - - 110
+      - 4
+      - 10
+      - 4
+      - SMALLMONEY
+- name: MONEY wire input keeps implicit scale for positive
+  scm: (begin (define s (newsession)) (tds_bind_parameters s (list (list "p" (list "MONEY"))) (list (list "name" "p"
+    "flags" 0 "type" (list "kind" 110 "size" 8 "scale" 0) "value" 123456))) (s "__tsql_parameter:p"))
+  expect:
+    result: 12.3456
+- name: MONEY wire input keeps implicit scale for negative
+  scm: (begin (define s (newsession)) (tds_bind_parameters s (list (list "p" (list "MONEY"))) (list (list "name" "p"
+    "flags" 0 "type" (list "kind" 110 "size" 8 "scale" 0) "value" -123456))) (s "__tsql_parameter:p"))
+  expect:
+    result: -12.3456
+- name: MONEY wire input keeps implicit scale for NULL
+  scm: (begin (define s (newsession)) (tds_bind_parameters s (list (list "p" (list "MONEY"))) (list (list "name" "p"
+    "flags" 0 "type" (list "kind" 110 "size" 8 "scale" 0) "value" nil))) (s "__tsql_parameter:p"))
+  expect:
+    result: null
+- name: SMALLMONEY wire input keeps implicit scale for positive
+  scm: (begin (define s (newsession)) (tds_bind_parameters s (list (list "p" (list "SMALLMONEY"))) (list (list "name"
+    "p" "flags" 0 "type" (list "kind" 110 "size" 4 "scale" 0) "value" 123456))) (s "__tsql_parameter:p"))
+  expect:
+    result: 12.3456
+- name: SMALLMONEY wire input keeps implicit scale for negative
+  scm: (begin (define s (newsession)) (tds_bind_parameters s (list (list "p" (list "SMALLMONEY"))) (list (list "name"
+    "p" "flags" 0 "type" (list "kind" 110 "size" 4 "scale" 0) "value" -123456))) (s "__tsql_parameter:p"))
+  expect:
+    result: -12.3456
+- name: SMALLMONEY wire input keeps implicit scale for NULL
+  scm: (begin (define s (newsession)) (tds_bind_parameters s (list (list "p" (list "SMALLMONEY"))) (list (list "name"
+    "p" "flags" 0 "type" (list "kind" 110 "size" 4 "scale" 0) "value" nil))) (s "__tsql_parameter:p"))
+  expect:
+    result: null
+- name: Currency wire input rejects invalid byte width
+  scm: (tds_bind_parameters (newsession) (list (list "p" (list "MONEY"))) (list (list "name" "p" "flags" 0 "type" (list
+    "kind" 110 "size" 5) "value" nil)))
+  expect:
+    error: true
+- name: Currency output emits an integer coefficient
+  scm: (list (tds_result_value (list "kind" 110 "size" 8) 12.3456) (tds_result_value (list "kind" 110 "size" 4) -12.3456)
+    (tds_result_value (list "kind" 110 "size" 8) nil))
+  expect:
+    result:
+    - 123456
+    - -123456
+    - null
+- name: Prepare styled currency view
+  sql: CREATE VIEW money_styled_contract AS SELECT CONVERT(NVARCHAR(40),amount,2) AS value FROM money_contract_values
+    WHERE id=1
+- name: Stored currency conversion retains declared style
+  sql: SELECT value FROM money_styled_contract
+  expect:
+    rows: 1
+    data:
+    - value: '-2.5556'
+- name: Styled currency view preserves its declared text width
+  scm: (map (tds_describe "memcp-tests" "SELECT TOP 0 value FROM money_styled_contract" "" (newsession)) (lambda (c)
+    (list (c "size") (c "sql_type"))))
+  expect:
+    result:
+    - - 80
+      - NVARCHAR
+- name: Remove styled currency view
+  sql: DROP VIEW money_styled_contract
+- name: Prepare native national and currency defaults
+  sql: CREATE TABLE money_native_defaults (id INT PRIMARY KEY, label NVARCHAR(8) DEFAULT N'Grüße', amount MONEY DEFAULT
+    N'$12.34565')
+- name: Omit columns through the ordinary native default path
+  sql: INSERT INTO money_native_defaults (id) VALUES (1)
+- name: National text and typed currency defaults share native insertion
+  sql: SELECT label,amount FROM money_native_defaults
+  expect:
+    rows: 1
+    data:
+    - label: Grüße
+      amount: 12.3457
+- name: Remove native default fixture
+  sql: DROP TABLE money_native_defaults
+- name: Remove native currency columns
+  sql: DROP TABLE money_contract_values
+- name: MONEY unary negation preserves positive contract
+  sql: SELECT -CAST(12.3456 AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12.3456
+- name: MONEY unary negation preserves negative contract
+  sql: SELECT -CAST(-12.3456 AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.3456
+- name: MONEY unary negation preserves NULL contract
+  sql: SELECT -CAST(NULL AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: SMALLMONEY unary negation preserves positive contract
+  sql: SELECT -CAST(12.3456 AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12.3456
+- name: SMALLMONEY unary negation preserves negative contract
+  sql: SELECT -CAST(-12.3456 AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.3456
+- name: SMALLMONEY unary negation preserves NULL contract
+  sql: SELECT -CAST(NULL AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Streaming currency assignment retains numeric syntax contract
+  setup:
+  - &id001
+    sql: DROP TABLE IF EXISTS tsql_numeric_sink_source
+  - &id002
+    sql: DROP TABLE IF EXISTS tsql_numeric_sink_target
+  - &id003
+    sql: CREATE TABLE tsql_numeric_sink_source (id INT PRIMARY KEY,m MONEY,sm SMALLMONEY,txt NVARCHAR(32),n INT,b VARBINARY(2),d
+      DATE)
+  - &id004
+    sql: INSERT tsql_numeric_sink_source VALUES (1,12.34565,-12.34565,N'$23.45675',42,0x3132,NULL),(2,NULL,NULL,NULL,NULL,NULL,NULL)
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT 1,1.23456
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 1.2346
+  cleanup: &id005
+  - &id006
+    sql: DROP TABLE tsql_numeric_sink_target
+  - &id007
+    sql: DROP TABLE tsql_numeric_sink_source
+- name: Streaming currency assignment retains national text syntax contract
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT 1,N'$12.34565'
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 12.3457
+  cleanup: *id005
+- name: Streaming currency assignment retains explicit money source
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT 1,CAST(12.34565 AS MONEY)
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 12.3457
+  cleanup: *id005
+- name: Streaming currency assignment retains explicit small money source
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT 1,CAST(-12.34565 AS SMALLMONEY)
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: -12.3457
+  cleanup: *id005
+- name: Streaming currency assignment retains native integer column
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT id,n FROM tsql_numeric_sink_source WHERE id=1
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 42
+  cleanup: *id005
+- name: Streaming currency assignment retains native text column
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount SMALLMONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT id,txt FROM tsql_numeric_sink_source WHERE id=1
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 23.4568
+  cleanup: *id005
+- name: Streaming currency assignment retains native money column
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT id,m FROM tsql_numeric_sink_source WHERE id=1
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 12.3457
+  cleanup: *id005
+- name: Streaming currency assignment retains native small money column
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT id,sm FROM tsql_numeric_sink_source WHERE id=1
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: -12.3457
+  cleanup: *id005
+- name: Streaming currency assignment retains untyped null syntax contract
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT 1,NULL
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: null
+  cleanup: *id005
+- name: Streaming currency assignment retains typed null money source
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT 1,CAST(NULL AS MONEY)
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: null
+  cleanup: *id005
+- name: Streaming currency assignment retains null native money column
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT 1,m FROM tsql_numeric_sink_source WHERE id=2
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: null
+  cleanup: *id005
+- name: Streaming currency assignment retains logical view source declarations
+  setup:
+  - sql: DROP VIEW IF EXISTS tsql_numeric_sink_view
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: CREATE VIEW tsql_numeric_sink_view AS SELECT id,m AS value FROM tsql_numeric_sink_source WHERE id=1
+  - sql: INSERT tsql_numeric_sink_target (id,amount) SELECT id,value FROM tsql_numeric_sink_view
+  sql: SELECT id,amount FROM tsql_numeric_sink_target
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 12.3457
+  cleanup:
+  - sql: DROP VIEW tsql_numeric_sink_view
+  - *id006
+  - *id007
+- name: Streaming currency assignment rejects binary source declaration without mutation
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target VALUES (99,88.5)
+  scm: |-
+    (begin
+      (define session (newsession))
+      (session "schema" "memcp-tests")
+      (session "username" "root")
+      (define failed (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "INSERT tsql_numeric_sink_target (id,amount) SELECT id,CAST(b AS BINARY(2)) FROM tsql_numeric_sink_source WHERE id=1" session nil 0
+          (lambda (_row) true) (lambda args true))
+        false)) (lambda (cause) (regexp_test (string cause) "currency conversion from BINARY is not implemented"))))
+      (define observed (newsession))
+      (tsql_execute_request "memcp-tests"
+        "SELECT COUNT(*) AS n,MIN(id) AS low,MAX(id) AS high,SUM(amount) AS total FROM tsql_numeric_sink_target"
+        session nil 0 (lambda (row) (observed "summary" row)) (lambda args true))
+      (define row (observed "summary"))
+      (if (and failed (not (nil? row)) (equal? (row "n") 1)
+        (equal? (row "low") 99) (equal? (row "high") 99) (equal? (row "total") 88.5)) true
+        (error "streaming assignment did not preserve the source contract or existing native rows")))
+  expect:
+    result: true
+  cleanup: *id005
+- name: Streaming currency assignment rejects variable binary source declaration without mutation
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target VALUES (99,88.5)
+  scm: |-
+    (begin
+      (define session (newsession))
+      (session "schema" "memcp-tests")
+      (session "username" "root")
+      (define failed (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "INSERT tsql_numeric_sink_target (id,amount) SELECT id,b FROM tsql_numeric_sink_source WHERE id=1" session nil 0
+          (lambda (_row) true) (lambda args true))
+        false)) (lambda (cause) (regexp_test (string cause) "currency conversion from VARBINARY is not implemented"))))
+      (define observed (newsession))
+      (tsql_execute_request "memcp-tests"
+        "SELECT COUNT(*) AS n,MIN(id) AS low,MAX(id) AS high,SUM(amount) AS total FROM tsql_numeric_sink_target"
+        session nil 0 (lambda (row) (observed "summary" row)) (lambda args true))
+      (define row (observed "summary"))
+      (if (and failed (not (nil? row)) (equal? (row "n") 1)
+        (equal? (row "low") 99) (equal? (row "high") 99) (equal? (row "total") 88.5)) true
+        (error "streaming assignment did not preserve the source contract or existing native rows")))
+  expect:
+    result: true
+  cleanup: *id005
+- name: Streaming currency assignment rejects calendar source declaration without mutation
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target VALUES (99,88.5)
+  scm: |-
+    (begin
+      (define session (newsession))
+      (session "schema" "memcp-tests")
+      (session "username" "root")
+      (define failed (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "INSERT tsql_numeric_sink_target (id,amount) SELECT id,d FROM tsql_numeric_sink_source WHERE id=1" session nil 0
+          (lambda (_row) true) (lambda args true))
+        false)) (lambda (cause) (regexp_test (string cause) "currency conversion from DATE is not implemented"))))
+      (define observed (newsession))
+      (tsql_execute_request "memcp-tests"
+        "SELECT COUNT(*) AS n,MIN(id) AS low,MAX(id) AS high,SUM(amount) AS total FROM tsql_numeric_sink_target"
+        session nil 0 (lambda (row) (observed "summary" row)) (lambda args true))
+      (define row (observed "summary"))
+      (if (and failed (not (nil? row)) (equal? (row "n") 1)
+        (equal? (row "low") 99) (equal? (row "high") 99) (equal? (row "total") 88.5)) true
+        (error "streaming assignment did not preserve the source contract or existing native rows")))
+  expect:
+    result: true
+  cleanup: *id005
+- name: Streaming currency assignment rejects invalid character payload without mutation
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount MONEY)
+  - sql: INSERT tsql_numeric_sink_target VALUES (99,88.5)
+  scm: |-
+    (begin
+      (define session (newsession))
+      (session "schema" "memcp-tests")
+      (session "username" "root")
+      (define failed (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "INSERT tsql_numeric_sink_target (id,amount) SELECT 2,N'bad money'" session nil 0
+          (lambda (_row) true) (lambda args true))
+        false)) (lambda (cause) (regexp_test (string cause) "invalid currency text"))))
+      (define observed (newsession))
+      (tsql_execute_request "memcp-tests"
+        "SELECT COUNT(*) AS n,MIN(id) AS low,MAX(id) AS high,SUM(amount) AS total FROM tsql_numeric_sink_target"
+        session nil 0 (lambda (row) (observed "summary" row)) (lambda args true))
+      (define row (observed "summary"))
+      (if (and failed (not (nil? row)) (equal? (row "n") 1)
+        (equal? (row "low") 99) (equal? (row "high") 99) (equal? (row "total") 88.5)) true
+        (error "streaming assignment did not preserve the source contract or existing native rows")))
+  expect:
+    result: true
+  cleanup: *id005
+- name: Streaming currency assignment rejects small currency range overflow without mutation
+  setup:
+  - *id001
+  - *id002
+  - *id003
+  - *id004
+  - sql: CREATE TABLE tsql_numeric_sink_target (id INT PRIMARY KEY,amount SMALLMONEY)
+  - sql: INSERT tsql_numeric_sink_target VALUES (99,88.5)
+  scm: |-
+    (begin
+      (define session (newsession))
+      (session "schema" "memcp-tests")
+      (session "username" "root")
+      (define failed (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "INSERT tsql_numeric_sink_target (id,amount) SELECT 2,300000" session nil 0
+          (lambda (_row) true) (lambda args true))
+        false)) (lambda (cause) (regexp_test (string cause) "small currency conversion overflow"))))
+      (define observed (newsession))
+      (tsql_execute_request "memcp-tests"
+        "SELECT COUNT(*) AS n,MIN(id) AS low,MAX(id) AS high,SUM(amount) AS total FROM tsql_numeric_sink_target"
+        session nil 0 (lambda (row) (observed "summary" row)) (lambda args true))
+      (define row (observed "summary"))
+      (if (and failed (not (nil? row)) (equal? (row "n") 1)
+        (equal? (row "low") 99) (equal? (row "high") 99) (equal? (row "total") 88.5)) true
+        (error "streaming assignment did not preserve the source contract or existing native rows")))
+  expect:
+    result: true
+  cleanup: *id005
+- name: ABS preserves byte input
+  sql: SELECT ABS(CAST(255 AS TINYINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 255
+- name: ABS preserves small signed input
+  sql: SELECT ABS(CAST(-32768 AS SMALLINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 32768
+- name: ABS preserves integer input
+  sql: SELECT ABS(CAST(-12 AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12
+- name: ABS preserves untyped NULL
+  sql: SELECT ABS(NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ABS preserves floating NULL
+  sql: SELECT ABS(CAST(NULL AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ABS preserves currency NULL
+  sql: SELECT ABS(CAST(NULL AS MONEY)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ABS preserves bit NULL
+  sql: SELECT ABS(CAST(NULL AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: ABS retains every digit of positive wide integer
+  sql: SELECT CAST(ABS(CAST(9007199254740993 AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9007199254740993'
+- name: ABS retains every digit of negative wide integer
+  sql: SELECT CAST(ABS(CAST(CAST('-9007199254740993' AS BIGINT) AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9007199254740993'
+- name: ABS retains every digit of maximum wide integer
+  sql: SELECT CAST(ABS(CAST(9223372036854775807 AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9223372036854775807'
+- name: ABS computes positive float
+  sql: SELECT ABS(CAST(12.75 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.75
+- name: ABS computes negative float
+  sql: SELECT ABS(CAST(-12.75 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.75
+- name: ABS computes real input
+  sql: SELECT ABS(CAST(12.75 AS REAL)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.75
+- name: ABS computes numeric character input
+  sql: SELECT ABS(CAST(N'-12.75' AS VARCHAR(20))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12.75
+- name: ABS accepts declared bit 0
+  sql: SELECT ABS(CAST(0 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: ABS accepts declared bit 1
+  sql: SELECT ABS(CAST(1 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: ABS retains currency type for MONEY 12.3456
+  sql: SELECT CONVERT(VARCHAR(40),ABS(CAST(12.3456 AS MONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.3456'
+- name: ABS retains currency type for MONEY -12.3456
+  sql: SELECT CONVERT(VARCHAR(40),ABS(CAST(-12.3456 AS MONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.3456'
+- name: ABS retains currency type for SMALLMONEY 12.3456
+  sql: SELECT CONVERT(VARCHAR(40),ABS(CAST(12.3456 AS SMALLMONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.3456'
+- name: ABS retains currency type for SMALLMONEY -12.3456
+  sql: SELECT CONVERT(VARCHAR(40),ABS(CAST(-12.3456 AS SMALLMONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.3456'
+- name: ABS rejects missing argument
+  sql: SELECT ABS() AS value
+  expect:
+    error: true
+- name: ABS rejects extra argument
+  sql: SELECT ABS(1,2) AS value
+  expect:
+    error: true
+- name: ABS rejects calendar input
+  sql: SELECT ABS(CAST('2024-01-02' AS DATE)) AS value
+  expect:
+    error: true
+- name: ABS empty output follows declared return families
+  scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) ABS(CAST(NULL AS TINYINT)) AS c0,ABS(CAST(NULL AS SMALLINT)) AS
+    c1,ABS(CAST(NULL AS INT)) AS c2,ABS(CAST(NULL AS BIGINT)) AS c3,ABS(CAST(NULL AS REAL)) AS c4,ABS(CAST(NULL AS FLOAT))
+    AS c5,ABS(CAST(NULL AS MONEY)) AS c6,ABS(CAST(NULL AS SMALLMONEY)) AS c7,ABS(CAST(NULL AS BIT)) AS c8" "" (newsession))
+    (lambda (c) (list (c "sql_type") (c "kind") (c "size"))))
+  expect:
+    result:
+    - - INT
+      - 38
+      - 4
+    - - INT
+      - 38
+      - 4
+    - - INT
+      - 38
+      - 4
+    - - BIGINT
+      - 38
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+    - - MONEY
+      - 110
+      - 8
+    - - MONEY
+      - 110
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+- name: ABS native columns preserve values NULL and declared promotion
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_scalar_values
+  - sql: CREATE TABLE tsql_scalar_values (id INT PRIMARY KEY,n BIGINT,x FLOAT,m SMALLMONEY)
+  - sql: INSERT tsql_scalar_values VALUES(1,-9007199254740993,-12.75,-12.3456),(2,NULL,NULL,NULL)
+  sql: SELECT id,CAST(ABS(n) AS VARCHAR(32)) AS n,ABS(x) AS x,CONVERT(VARCHAR(40),ABS(m),2) AS m FROM tsql_scalar_values
+    ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      n: '9007199254740993'
+      x: 12.75
+      m: '12.3456'
+    - id: 2
+      n: null
+      x: null
+      m: null
+  cleanup:
+  - sql: DROP TABLE tsql_scalar_values
+- name: ABS stored view retains ordinary declared source
+  sql: SELECT value FROM tsql_scalar_view
+  expect:
+    rows: 1
+    data:
+    - value: '12.3456'
+  setup:
+  - sql: DROP VIEW IF EXISTS tsql_scalar_view
+  - sql: CREATE VIEW tsql_scalar_view AS SELECT CONVERT(VARCHAR(40),ABS(CAST(-12.3456 AS SMALLMONEY)),2) AS value
+  cleanup:
+  - sql: DROP VIEW IF EXISTS tsql_scalar_view
+- name: FLOOR preserves byte input
+  sql: SELECT FLOOR(CAST(255 AS TINYINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 255
+- name: FLOOR preserves small signed input
+  sql: SELECT FLOOR(CAST(-32768 AS SMALLINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -32768
+- name: FLOOR preserves integer input
+  sql: SELECT FLOOR(CAST(-12 AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12
+- name: FLOOR preserves untyped NULL
+  sql: SELECT FLOOR(NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: FLOOR preserves floating NULL
+  sql: SELECT FLOOR(CAST(NULL AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: FLOOR preserves currency NULL
+  sql: SELECT FLOOR(CAST(NULL AS MONEY)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: FLOOR preserves bit NULL
+  sql: SELECT FLOOR(CAST(NULL AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: FLOOR retains every digit of positive wide integer
+  sql: SELECT CAST(FLOOR(CAST(9007199254740993 AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9007199254740993'
+- name: FLOOR retains every digit of negative wide integer
+  sql: SELECT CAST(FLOOR(CAST(CAST('-9007199254740993' AS BIGINT) AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-9007199254740993'
+- name: FLOOR retains every digit of maximum wide integer
+  sql: SELECT CAST(FLOOR(CAST(9223372036854775807 AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9223372036854775807'
+- name: FLOOR retains minimum wide integer
+  sql: SELECT CAST(FLOOR(CAST('-9223372036854775808' AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-9223372036854775808'
+- name: FLOOR computes positive float
+  sql: SELECT FLOOR(CAST(12.75 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12
+- name: FLOOR computes negative float
+  sql: SELECT FLOOR(CAST(-12.75 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -13
+- name: FLOOR computes real input
+  sql: SELECT FLOOR(CAST(12.75 AS REAL)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12
+- name: FLOOR computes numeric character input
+  sql: SELECT FLOOR(CAST(N'-12.75' AS VARCHAR(20))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -13
+- name: FLOOR accepts declared bit 0
+  sql: SELECT FLOOR(CAST(0 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: FLOOR accepts declared bit 1
+  sql: SELECT FLOOR(CAST(1 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: FLOOR retains currency type for MONEY 12.3456
+  sql: SELECT CONVERT(VARCHAR(40),FLOOR(CAST(12.3456 AS MONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.0000'
+- name: FLOOR retains currency type for MONEY -12.3456
+  sql: SELECT CONVERT(VARCHAR(40),FLOOR(CAST(-12.3456 AS MONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-13.0000'
+- name: FLOOR retains currency type for SMALLMONEY 12.3456
+  sql: SELECT CONVERT(VARCHAR(40),FLOOR(CAST(12.3456 AS SMALLMONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12.0000'
+- name: FLOOR retains currency type for SMALLMONEY -12.3456
+  sql: SELECT CONVERT(VARCHAR(40),FLOOR(CAST(-12.3456 AS SMALLMONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-13.0000'
+- name: FLOOR rejects missing argument
+  sql: SELECT FLOOR() AS value
+  expect:
+    error: true
+- name: FLOOR rejects extra argument
+  sql: SELECT FLOOR(1,2) AS value
+  expect:
+    error: true
+- name: FLOOR rejects calendar input
+  sql: SELECT FLOOR(CAST('2024-01-02' AS DATE)) AS value
+  expect:
+    error: true
+- name: FLOOR empty output follows declared return families
+  scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) FLOOR(CAST(NULL AS TINYINT)) AS c0,FLOOR(CAST(NULL AS SMALLINT))
+    AS c1,FLOOR(CAST(NULL AS INT)) AS c2,FLOOR(CAST(NULL AS BIGINT)) AS c3,FLOOR(CAST(NULL AS REAL)) AS c4,FLOOR(CAST(NULL
+    AS FLOAT)) AS c5,FLOOR(CAST(NULL AS MONEY)) AS c6,FLOOR(CAST(NULL AS SMALLMONEY)) AS c7,FLOOR(CAST(NULL AS BIT))
+    AS c8" "" (newsession)) (lambda (c) (list (c "sql_type") (c "kind") (c "size"))))
+  expect:
+    result:
+    - - INT
+      - 38
+      - 4
+    - - INT
+      - 38
+      - 4
+    - - INT
+      - 38
+      - 4
+    - - BIGINT
+      - 38
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+    - - MONEY
+      - 110
+      - 8
+    - - MONEY
+      - 110
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+- name: FLOOR native columns preserve values NULL and declared promotion
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_scalar_values
+  - sql: CREATE TABLE tsql_scalar_values (id INT PRIMARY KEY,n BIGINT,x FLOAT,m SMALLMONEY)
+  - sql: INSERT tsql_scalar_values VALUES(1,-9007199254740993,-12.75,-12.3456),(2,NULL,NULL,NULL)
+  sql: SELECT id,CAST(FLOOR(n) AS VARCHAR(32)) AS n,FLOOR(x) AS x,CONVERT(VARCHAR(40),FLOOR(m),2) AS m FROM tsql_scalar_values
+    ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      n: '-9007199254740993'
+      x: -13
+      m: '-13.0000'
+    - id: 2
+      n: null
+      x: null
+      m: null
+  cleanup:
+  - sql: DROP TABLE tsql_scalar_values
+- name: FLOOR stored view retains ordinary declared source
+  sql: SELECT value FROM tsql_scalar_view
+  expect:
+    rows: 1
+    data:
+    - value: '-13.0000'
+  setup:
+  - sql: DROP VIEW IF EXISTS tsql_scalar_view
+  - sql: CREATE VIEW tsql_scalar_view AS SELECT CONVERT(VARCHAR(40),FLOOR(CAST(-12.3456 AS SMALLMONEY)),2) AS value
+  cleanup:
+  - sql: DROP VIEW IF EXISTS tsql_scalar_view
+- name: CEILING preserves byte input
+  sql: SELECT CEILING(CAST(255 AS TINYINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 255
+- name: CEILING preserves small signed input
+  sql: SELECT CEILING(CAST(-32768 AS SMALLINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -32768
+- name: CEILING preserves integer input
+  sql: SELECT CEILING(CAST(-12 AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12
+- name: CEILING preserves untyped NULL
+  sql: SELECT CEILING(NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: CEILING preserves floating NULL
+  sql: SELECT CEILING(CAST(NULL AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: CEILING preserves currency NULL
+  sql: SELECT CEILING(CAST(NULL AS MONEY)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: CEILING preserves bit NULL
+  sql: SELECT CEILING(CAST(NULL AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: CEILING retains every digit of positive wide integer
+  sql: SELECT CAST(CEILING(CAST(9007199254740993 AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9007199254740993'
+- name: CEILING retains every digit of negative wide integer
+  sql: SELECT CAST(CEILING(CAST(CAST('-9007199254740993' AS BIGINT) AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-9007199254740993'
+- name: CEILING retains every digit of maximum wide integer
+  sql: SELECT CAST(CEILING(CAST(9223372036854775807 AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '9223372036854775807'
+- name: CEILING retains minimum wide integer
+  sql: SELECT CAST(CEILING(CAST('-9223372036854775808' AS BIGINT)) AS VARCHAR(32)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-9223372036854775808'
+- name: CEILING computes positive float
+  sql: SELECT CEILING(CAST(12.75 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 13
+- name: CEILING computes negative float
+  sql: SELECT CEILING(CAST(-12.75 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12
+- name: CEILING computes real input
+  sql: SELECT CEILING(CAST(12.75 AS REAL)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 13
+- name: CEILING computes numeric character input
+  sql: SELECT CEILING(CAST(N'-12.75' AS VARCHAR(20))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -12
+- name: CEILING accepts declared bit 0
+  sql: SELECT CEILING(CAST(0 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: CEILING accepts declared bit 1
+  sql: SELECT CEILING(CAST(1 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: CEILING retains currency type for MONEY 12.3456
+  sql: SELECT CONVERT(VARCHAR(40),CEILING(CAST(12.3456 AS MONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '13.0000'
+- name: CEILING retains currency type for MONEY -12.3456
+  sql: SELECT CONVERT(VARCHAR(40),CEILING(CAST(-12.3456 AS MONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-12.0000'
+- name: CEILING retains currency type for SMALLMONEY 12.3456
+  sql: SELECT CONVERT(VARCHAR(40),CEILING(CAST(12.3456 AS SMALLMONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '13.0000'
+- name: CEILING retains currency type for SMALLMONEY -12.3456
+  sql: SELECT CONVERT(VARCHAR(40),CEILING(CAST(-12.3456 AS SMALLMONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '-12.0000'
+- name: CEILING rejects missing argument
+  sql: SELECT CEILING() AS value
+  expect:
+    error: true
+- name: CEILING rejects extra argument
+  sql: SELECT CEILING(1,2) AS value
+  expect:
+    error: true
+- name: CEILING rejects calendar input
+  sql: SELECT CEILING(CAST('2024-01-02' AS DATE)) AS value
+  expect:
+    error: true
+- name: CEILING empty output follows declared return families
+  scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) CEILING(CAST(NULL AS TINYINT)) AS c0,CEILING(CAST(NULL AS SMALLINT))
+    AS c1,CEILING(CAST(NULL AS INT)) AS c2,CEILING(CAST(NULL AS BIGINT)) AS c3,CEILING(CAST(NULL AS REAL)) AS c4,CEILING(CAST(NULL
+    AS FLOAT)) AS c5,CEILING(CAST(NULL AS MONEY)) AS c6,CEILING(CAST(NULL AS SMALLMONEY)) AS c7,CEILING(CAST(NULL AS
+    BIT)) AS c8" "" (newsession)) (lambda (c) (list (c "sql_type") (c "kind") (c "size"))))
+  expect:
+    result:
+    - - INT
+      - 38
+      - 4
+    - - INT
+      - 38
+      - 4
+    - - INT
+      - 38
+      - 4
+    - - BIGINT
+      - 38
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+    - - MONEY
+      - 110
+      - 8
+    - - MONEY
+      - 110
+      - 8
+    - - FLOAT
+      - 109
+      - 8
+- name: CEILING native columns preserve values NULL and declared promotion
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_scalar_values
+  - sql: CREATE TABLE tsql_scalar_values (id INT PRIMARY KEY,n BIGINT,x FLOAT,m SMALLMONEY)
+  - sql: INSERT tsql_scalar_values VALUES(1,-9007199254740993,-12.75,-12.3456),(2,NULL,NULL,NULL)
+  sql: SELECT id,CAST(CEILING(n) AS VARCHAR(32)) AS n,CEILING(x) AS x,CONVERT(VARCHAR(40),CEILING(m),2) AS m FROM tsql_scalar_values
+    ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      n: '-9007199254740993'
+      x: -12
+      m: '-12.0000'
+    - id: 2
+      n: null
+      x: null
+      m: null
+  cleanup:
+  - sql: DROP TABLE tsql_scalar_values
+- name: CEILING stored view retains ordinary declared source
+  sql: SELECT value FROM tsql_scalar_view
+  expect:
+    rows: 1
+    data:
+    - value: '-12.0000'
+  setup:
+  - sql: DROP VIEW IF EXISTS tsql_scalar_view
+  - sql: CREATE VIEW tsql_scalar_view AS SELECT CONVERT(VARCHAR(40),CEILING(CAST(-12.3456 AS SMALLMONEY)),2) AS value
+  cleanup:
+  - sql: DROP VIEW IF EXISTS tsql_scalar_view
+- name: ABS rejects INT minimum overflow
+  sql: SELECT ABS(CAST('-2147483648' AS INT)) AS value
+  expect:
+    error: true
+- name: ABS rejects BIGINT minimum overflow
+  sql: SELECT ABS(CAST('-9223372036854775808' AS BIGINT)) AS value
+  expect:
+    error: true
+- name: ABS small currency minimum promotes safely
+  sql: SELECT CONVERT(VARCHAR(40),ABS(CAST(-214748.3648 AS SMALLMONEY)),2) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '214748.3648'
+- name: ABS floating magnitude remains outside integer range 1e100
+  sql: SELECT ABS(CAST(1e100 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1.0e+100
+- name: ABS floating magnitude remains outside integer range -1e100
+  sql: SELECT ABS(CAST(-1e100 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1.0e+100
+- name: ABS compiles a plain exact integer formula
+  scm: (begin (define info (sql_expr_info (list) (tsql_builtin_expr "ABS" (list (tsql_cast_expr (tsql_parse_integer "9007199254740993")
+    "BIGINT" (list)))))) (define syntax (json_encode (expression_syntax (sql_info_formula info)))) (list (sql_info_type
+    info) (string (eval (sql_info_formula info))) (not (strlike syntax "%sql_type_expr%")) (not (strlike syntax "%sql_compile_expr%"))))
+  expect:
+    result:
+    - BIGINT
+    - '9007199254740993'
+    - true
+    - true
+- name: FLOOR compiles a plain exact integer formula
+  scm: (begin (define info (sql_expr_info (list) (tsql_builtin_expr "FLOOR" (list (tsql_cast_expr (tsql_parse_integer
+    "9007199254740993") "BIGINT" (list)))))) (define syntax (json_encode (expression_syntax (sql_info_formula info))))
+    (list (sql_info_type info) (string (eval (sql_info_formula info))) (not (strlike syntax "%sql_type_expr%")) (not
+    (strlike syntax "%sql_compile_expr%"))))
+  expect:
+    result:
+    - BIGINT
+    - '9007199254740993'
+    - true
+    - true
+- name: CEILING compiles a plain exact integer formula
+  scm: (begin (define info (sql_expr_info (list) (tsql_builtin_expr "CEILING" (list (tsql_cast_expr (tsql_parse_integer
+    "9007199254740993") "BIGINT" (list)))))) (define syntax (json_encode (expression_syntax (sql_info_formula info))))
+    (list (sql_info_type info) (string (eval (sql_info_formula info))) (not (strlike syntax "%sql_type_expr%")) (not
+    (strlike syntax "%sql_compile_expr%"))))
+  expect:
+    result:
+    - BIGINT
+    - '9007199254740993'
+    - true
+    - true
+- name: SQUARE converts declared INT through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts declared SMALLINT through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS SMALLINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts declared BIGINT through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS BIGINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts declared FLOAT through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts declared REAL through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS REAL)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts declared DECIMAL(9,2) through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS DECIMAL(9,2))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts declared MONEY through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS MONEY)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts declared SMALLMONEY through its floating contract
+  sql: SELECT SQUARE(CAST(12 AS SMALLMONEY)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 144
+- name: SQUARE converts a complete national numeric text
+  sql: SELECT SQUARE(N'2.25') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 5.0625
+- name: SQUARE retains a typed NULL
+  sql: SELECT SQUARE(CAST(NULL AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: SQUARE retains a literal NULL
+  sql: SELECT SQUARE(NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: SQUARE converts its declared BIT operand
+  sql: SELECT SQUARE(CAST(1 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: SQUARE rejects a numeric prefix followed by text
+  sql: SELECT SQUARE(N'9junk') AS value
+  expect:
+    error: true
+- name: SQUARE requires an operand
+  sql: SELECT SQUARE() AS value
+  expect:
+    error: true
+- name: SQUARE rejects a second operand
+  sql: SELECT SQUARE(9,4) AS value
+  expect:
+    error: true
+- name: SQUARE compiles a plain formula with a declared FLOAT result
+  scm: (begin (define info (sql_expr_info (list) (tsql_builtin_expr "SQUARE" (list (tsql_cast_expr "2.25" "NVARCHAR"
+    (list 8)))))) (define syntax (json_encode (expression_syntax (sql_info_formula info)))) (list (sql_info_type info)
+    (eval (sql_info_formula info)) (not (strlike syntax "%sql_type_expr%")) (not (strlike syntax "%sql_compile_expr%"))))
+  expect:
+    result:
+    - FLOAT
+    - 5.0625
+    - true
+    - true
+- name: SQRT converts declared INT through its floating contract
+  sql: SELECT SQRT(CAST(81 AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts declared SMALLINT through its floating contract
+  sql: SELECT SQRT(CAST(81 AS SMALLINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts declared BIGINT through its floating contract
+  sql: SELECT SQRT(CAST(81 AS BIGINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts declared FLOAT through its floating contract
+  sql: SELECT SQRT(CAST(81 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts declared REAL through its floating contract
+  sql: SELECT SQRT(CAST(81 AS REAL)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts declared DECIMAL(9,2) through its floating contract
+  sql: SELECT SQRT(CAST(81 AS DECIMAL(9,2))) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts declared MONEY through its floating contract
+  sql: SELECT SQRT(CAST(81 AS MONEY)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts declared SMALLMONEY through its floating contract
+  sql: SELECT SQRT(CAST(81 AS SMALLMONEY)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SQRT converts a complete national numeric text
+  sql: SELECT SQRT(N'2.25') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1.5
+- name: SQRT retains a typed NULL
+  sql: SELECT SQRT(CAST(NULL AS INT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: SQRT retains a literal NULL
+  sql: SELECT SQRT(NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: SQRT converts its declared BIT operand
+  sql: SELECT SQRT(CAST(1 AS BIT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: SQRT rejects a numeric prefix followed by text
+  sql: SELECT SQRT(N'9junk') AS value
+  expect:
+    error: true
+- name: SQRT requires an operand
+  sql: SELECT SQRT() AS value
+  expect:
+    error: true
+- name: SQRT rejects a second operand
+  sql: SELECT SQRT(9,4) AS value
+  expect:
+    error: true
+- name: SQRT compiles a plain formula with a declared FLOAT result
+  scm: (begin (define info (sql_expr_info (list) (tsql_builtin_expr "SQRT" (list (tsql_cast_expr "2.25" "NVARCHAR" (list
+    8)))))) (define syntax (json_encode (expression_syntax (sql_info_formula info)))) (list (sql_info_type info) (eval
+    (sql_info_formula info)) (not (strlike syntax "%sql_type_expr%")) (not (strlike syntax "%sql_compile_expr%"))))
+  expect:
+    result:
+    - FLOAT
+    - 1.5
+    - true
+    - true
+- name: SQUARE converts before a large integer product can wrap
+  sql: SELECT SQUARE(CAST('4000000000' AS BIGINT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1.6e+19
+- name: SQUARE retains a negative floating magnitude
+  sql: SELECT SQUARE(CAST(-2.5 AS FLOAT)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 6.25
+- name: SQRT accepts zero
+  sql: SELECT SQRT(0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: SQUARE rejects a nonfinite product
+  sql: SELECT SQUARE(CAST(1e200 AS FLOAT)) AS value
+  expect:
+    error: true
+- name: SQRT rejects a negative real domain
+  sql: SELECT SQRT(CAST(-1 AS FLOAT)) AS value
+  expect:
+    error: true
+- name: Floating math uses native nullable column values
+  setup:
+  - sql: DROP TABLE IF EXISTS floating_math_values
+  - sql: CREATE TABLE floating_math_values(id INT PRIMARY KEY,n BIGINT,label NVARCHAR(16),x FLOAT)
+  - sql: INSERT floating_math_values VALUES(1,4000000000,N'2.25',-2.5),(2,9,N'9',0),(3,NULL,NULL,NULL)
+  sql: SELECT id,SQUARE(n) AS squared,SQRT(label) AS root,SQUARE(x) AS fractional FROM floating_math_values ORDER BY
+    id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      squared: 1.6e+19
+      root: 1.5
+      fractional: 6.25
+    - id: 2
+      squared: 81
+      root: 3
+      fractional: 0
+    - id: 3
+      squared: null
+      root: null
+      fractional: null
+  cleanup:
+  - sql: DROP TABLE floating_math_values
+- name: Floating math descriptions keep FLOAT for empty typed results
+  scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) SQUARE(CAST(NULL AS INT)) AS squared,SQRT(CAST(NULL AS NVARCHAR(8)))
+    AS root" "" (newsession)) (lambda (field) (list (field "name") (field "sql_type") (field "kind") (field "size"))))
+  expect:
+    result:
+    - - squared
+      - FLOAT
+      - 109
+      - 8
+    - - root
+      - FLOAT
+      - 109
+      - 8
+- name: Prepared floating math uses declared transport values including NULL
+  tds:
+    statements:
+    - sql: SELECT SQUARE(@value) AS squared,SQRT(@value) AS root
+      prepare: true
+      parameters:
+      - name: value
+        value: 4.0
+      expect:
+        rows: 1
+        data:
+        - squared: 16
+          root: 2
+        column_types:
+        - name: squared
+          type: FLOAT
+        - name: root
+          type: FLOAT
+    - sql: SELECT SQUARE(@value) AS squared,SQRT(@value) AS root
+      prepare: true
+      parameters:
+      - name: value
+        value: null
+      expect:
+        rows: 1
+        data:
+        - squared: null
+          root: null
+        column_types:
+        - name: squared
+          type: FLOAT
+        - name: root
+          type: FLOAT
+    - sql: SELECT SQUARE(@value) AS squared,SQRT(@value) AS root
+      prepare: true
+      parameters:
+      - name: value
+        value: 9.0
+      expect:
+        rows: 1
+        data:
+        - squared: 81
+          root: 3
+        column_types:
+        - name: squared
+          type: FLOAT
+        - name: root
+          type: FLOAT
+- name: Floating math view stores portable declaration compilers
+  sql: CREATE VIEW floating_math_view AS SELECT SQUARE(CAST(12 AS INT)) AS squared,SQRT(CAST(81 AS INT)) AS root
+  setup:
+  - sql: DROP VIEW IF EXISTS floating_math_view
+- name: Floating math view definitions survive a catalog restart
+  action: restart
+- name: Restored floating math view keeps both result contracts
+  sql: SELECT squared,root FROM floating_math_view
+  expect:
+    rows: 1
+    data:
+    - squared: 144
+      root: 9
+  cleanup:
+  - sql: DROP VIEW IF EXISTS floating_math_view
+- name: TRY_CAST converts bounded declared integer targets
+  sql: SELECT TRY_CAST(N'255' AS TINYINT) AS tiny_value,TRY_CAST(N'-32768' AS SMALLINT) AS small_value,TRY_CAST(N'2147483647'
+    AS INT) AS int_value,TRY_CAST(N'9223372036854775807' AS BIGINT) AS big_value
+  expect:
+    rows: 1
+    data:
+    - tiny_value: 255
+      small_value: -32768
+      int_value: 2147483647
+      big_value: 9223372036854775807
+- name: TRY_CONVERT converts integer boundaries
+  sql: SELECT TRY_CONVERT(BIGINT,N'-9223372036854775808') AS minimum,TRY_CONVERT(SMALLINT,N'32767') AS maximum
+  expect:
+    rows: 1
+    data:
+    - minimum: -9223372036854775808
+      maximum: 32767
+- name: TRY conversions return NULL for malformed integer text
+  sql: SELECT TRY_CAST(N'12x' AS INT) AS first_value,TRY_CONVERT(BIGINT,N'1.5') AS second_value
+  expect:
+    rows: 1
+    data:
+    - first_value: null
+      second_value: null
+- name: TRY conversions return NULL at integer overflow boundaries
+  sql: SELECT TRY_CAST(N'256' AS TINYINT) AS tiny_value,TRY_CAST(N'-32769' AS SMALLINT) AS small_value,TRY_CONVERT(INT,N'2147483648')
+    AS int_value,TRY_CONVERT(BIGINT,N'9223372036854775808') AS big_value
+  expect:
+    rows: 1
+    data:
+    - tiny_value: null
+      small_value: null
+      int_value: null
+      big_value: null
+- name: TRY conversions preserve typed NULL inputs
+  sql: SELECT TRY_CAST(NULL AS INT) AS integer_value,TRY_CONVERT(DECIMAL(8,2),NULL) AS decimal_value,TRY_CAST(NULL AS
+    NVARCHAR(8)) AS text_value
+  expect:
+    rows: 1
+    data:
+    - integer_value: null
+      decimal_value: null
+      text_value: null
+- name: TRY conversions reuse existing floating decimal and Boolean casts
+  sql: SELECT TRY_CAST(N'1.25' AS FLOAT) AS approximate,TRY_CONVERT(DECIMAL(8,2),N'12.345') AS scaled,TRY_CAST(N'false'
+    AS BIT) AS flag
+  expect:
+    rows: 1
+    data:
+    - approximate: 1.25
+      scaled: 12.35
+      flag: false
+- name: TRY conversions reject malformed numbers without hiding declarations
+  sql: SELECT TRY_CAST(N'bad' AS FLOAT) AS approximate,TRY_CONVERT(DECIMAL(8,2),N'bad') AS scaled,TRY_CAST(N'not-a-flag'
+    AS BIT) AS flag
+  expect:
+    rows: 1
+    data:
+    - approximate: null
+      scaled: null
+      flag: null
+- name: TRY decimal conversion returns NULL for declared precision overflow
+  sql: SELECT TRY_CAST(N'1000' AS DECIMAL(5,2)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY conversions keep numeric input truncation semantics
+  sql: SELECT TRY_CAST(CAST(-1.9 AS FLOAT) AS INT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: -1
+- name: TRY character conversions reuse fixed width and Unicode rules
+  sql: SELECT TRY_CAST(N'box' AS NCHAR(5)) AS fixed_value,TRY_CONVERT(NVARCHAR(2),N'😀x') AS national_value,TRY_CAST(N'abcdef'
+    AS VARCHAR(3)) AS shortened
+  expect:
+    rows: 1
+    data:
+    - fixed_value: 'box  '
+      national_value: 😀
+      shortened: abc
+- name: TRY numeric text overflow returns NULL instead of truncating digits
+  sql: SELECT TRY_CAST(1234 AS NVARCHAR(2)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY binary conversions preserve byte contracts
+  sql: SELECT CASE WHEN TRY_CAST(0x010203 AS BINARY(5))=0x0102030000 THEN 1 ELSE 0 END AS fixed_value,CASE WHEN TRY_CONVERT(VARBINARY(2),0x010203)=0x0102
+    THEN 1 ELSE 0 END AS shortened
+  expect:
+    rows: 1
+    data:
+    - fixed_value: 1
+      shortened: 1
+- name: TRY conversions reject unsupported text to binary declarations
+  sql: SELECT TRY_CAST(N'12' AS VARBINARY(2)) AS value
+  expect:
+    error: true
+    contains: conversion
+- name: TRY conversions reject unsupported binary to numeric declarations
+  sql: SELECT TRY_CONVERT(INT,0x0102) AS value
+  expect:
+    error: true
+    contains: conversion
+- name: TRY conversions validate target dimensions before recovery
+  sql: SELECT TRY_CAST(N'1' AS DECIMAL(2,3)) AS value
+  expect:
+    error: true
+- name: TRY conversions keep unsupported decimal precision carriers explicit
+  sql: SELECT TRY_CAST(N'1' AS DECIMAL(38,38)) AS value
+  expect:
+    error: true
+    contains: precision
+- name: TRY conversions reject an unsupported target contract
+  sql: SELECT TRY_CAST(1 AS XML) AS value
+  expect:
+    error: true
+- name: TRY_CAST does not swallow errors in its input expression
+  sql: SELECT TRY_CAST(1/0 AS INT) AS value
+  expect:
+    error: true
+    contains: division by zero
+- name: TRY_CONVERT does not swallow nested input conversion errors
+  sql: SELECT TRY_CONVERT(INT,CAST(N'bad' AS INT)) AS value
+  expect:
+    error: true
+    contains: invalid integer text
+- name: TRY_CONVERT NULL style returns a typed NULL
+  sql: SELECT TRY_CONVERT(INT,N'12',NULL) AS numeric_value,TRY_CONVERT(NVARCHAR(8),N'box',NULL) AS text_value
+  expect:
+    rows: 1
+    data:
+    - numeric_value: null
+      text_value: null
+- name: TRY_CONVERT preserves operand errors even for NULL style
+  sql: SELECT TRY_CONVERT(INT,1/0,NULL) AS value
+  expect:
+    error: true
+    contains: division by zero
+- name: TRY_CONVERT does not hide unsupported styles
+  sql: SELECT TRY_CONVERT(DATE,N'2026-03-15',999) AS value
+  expect:
+    error: true
+    contains: style
+- name: TRY_CONVERT keeps existing literal style syntax explicit
+  sql: DECLARE @style INT=112; SELECT TRY_CONVERT(DATE,N'20260315',@style) AS value
+  expect:
+    error: true
+- name: TRY conversions participate in searched CASE and predicates
+  sql: SELECT CASE WHEN TRY_CAST(N'bad' AS INT) IS NULL THEN TRY_CONVERT(INT,N'7') ELSE 9 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: TRY conversions bind declared batch parameters
+  sql: DECLARE @raw NVARCHAR(12)=N'15'; SELECT TRY_CAST(@raw AS SMALLINT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 15
+- name: TRY_CAST enforces its bounded varying input limit
+  scm: (eval (sql_type_formula (list) (tsql_try_convert_expr (list (quote sql_type_expr) (string_repeat "1" 4001) "NVARCHAR"
+    nil) "INT" (list) nil true)))
+  expect:
+    error: true
+    contains: length
+- name: TRY_CAST counts supplementary characters in its input limit
+  scm: (eval (sql_type_formula (list) (tsql_try_convert_expr (list (quote sql_type_expr) (string_repeat "😀" 2001) "NVARCHAR"
+    nil) "NVARCHAR" (list -1) nil true)))
+  expect:
+    error: true
+    contains: length
+- name: TRY_CAST permits supplementary text exactly at its input limit
+  scm: (begin (define value (string_repeat "😀" 2000)) (equal? (eval (sql_type_formula (list) (tsql_try_convert_expr (list
+    (quote sql_type_expr) value "NVARCHAR" nil) "NVARCHAR" (list -1) nil true))) value))
+  expect:
+    result: true
+- name: TRY decimal conversions allow ordinary values in wide declarations
+  sql: SELECT TRY_CAST(N'12' AS DECIMAL(19,0)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12
+- name: Ordinary numeric text casts keep their existing overflow failure
+  sql: SELECT CAST(1234 AS NVARCHAR(2)) AS value
+  expect:
+    error: true
+    contains: overflow
+- name: Small integer ASCII width uses a single marker and fixed padding
+  sql: SELECT CAST(1234 AS VARCHAR(2)) AS a,CONVERT(CHAR(3),-1234) AS b,TRY_CAST(CAST(1234 AS SMALLINT) AS VARCHAR(2))
+    AS c,TRY_CONVERT(VARCHAR(1),CAST(255 AS TINYINT)) AS d
+  expect:
+    rows: 1
+    data:
+    - a: '*'
+      b: '*  '
+      c: '*'
+      d: '*'
+- name: BIGINT ASCII overflow remains a conversion failure
+  sql: SELECT TRY_CAST(CAST(1234 AS BIGINT) AS VARCHAR(2)) AS a,TRY_CONVERT(CHAR(2),CAST(-1234 AS BIGINT)) AS b
+  expect:
+    rows: 1
+    data:
+    - a: null
+      b: null
+- name: Ordinary BIGINT ASCII overflow remains an error
+  sql: SELECT CAST(CAST(1234 AS BIGINT) AS VARCHAR(2)) AS value
+  expect:
+    error: true
+    contains: overflow
+- name: Numeric text conversion NULL and declared Boolean spelling
+  sql: SELECT CAST(CAST(1 AS BIT) AS VARCHAR(4)) AS a,TRY_CAST(CAST(0 AS BIT) AS NVARCHAR(4)) AS b,CONVERT(CHAR(3),CAST(1
+    AS BIT)) AS c,TRY_CONVERT(VARCHAR(2),CAST(NULL AS INT)) AS d
+  expect:
+    rows: 1
+    data:
+    - a: '1'
+      b: '0'
+      c: '1  '
+      d: null
+- name: National numeric text widths reject rather than use ASCII marker
+  sql: SELECT TRY_CAST(-1234 AS NVARCHAR(2)) AS a,TRY_CONVERT(NCHAR(2),1234) AS b,TRY_CAST(CAST(12.34 AS DECIMAL(6,2))
+    AS VARCHAR(2)) AS c
+  expect:
+    rows: 1
+    data:
+    - a: null
+      b: null
+      c: null
+- name: TRY decimal text rejects empty and whitespace input
+  sql: SELECT TRY_CAST(N'' AS DECIMAL(8,2)) AS a,TRY_CONVERT(NUMERIC(8,2),N'   ') AS b,TRY_CAST(N'' AS INT) AS c
+  expect:
+    rows: 1
+    data:
+    - a: null
+      b: null
+      c: 0
+- name: Ordinary decimal casts reject empty numeric text
+  sql: SELECT CAST(N'' AS DECIMAL(8,2)) AS value
+  expect:
+    error: true
+    contains: invalid numeric text
+- name: Ordinary numeric casts reject whitespace numeric text
+  sql: SELECT CONVERT(NUMERIC(8,2),N'   ') AS value
+  expect:
+    error: true
+    contains: invalid numeric text
 cleanup: []

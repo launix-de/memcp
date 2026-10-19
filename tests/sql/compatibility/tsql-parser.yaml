@@ -493,7 +493,6 @@ test_cases:
   sql: SELECT ISNULL(NULL)
   expect:
     error: true
-  noncritical: true
 - name: Division by zero
   sql: SELECT 1/0 AS value
   expect:

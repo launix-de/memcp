@@ -165,10 +165,9 @@ the common binder consumes the temporary callback before planning. */
 		(define identity_options (tsql_identity_attributes base native_dimensions null_options))
 		/* Frozen defaults use the same frontend conversion as explicit writes.
 		The existing native default field remains their only persisted value. */
-		(define default_options (if (and (has_assoc? identity_options "default")
-			(or (contract "id") (has? '("NVARCHAR" "NCHAR") base)))
+		(define default_options (if (has_assoc? identity_options "default")
 			(set_assoc identity_options "default" (eval (sql_type_formula '()
-				(tsql_cast_expr (list (quote quote) (identity_options "default")) base native_dimensions)))) identity_options))
+				(tsql_cast_expr (identity_options "default") base native_dimensions)))) identity_options))
 		(define published_options (if (contract "id") (append default_options "__tsql_alias_id" (contract "id")) default_options))
 		(list (quote list) "column" name (tsql_storage_type (contract "type"))
 			(cons (quote list) native_dimensions) (cons (quote list) published_options)))
@@ -236,10 +235,21 @@ until those contracts can be represented by the existing date primitives. */
 	/* TIME uses the frontend's existing clock-text carrier at the boundary;
 	other temporal contracts retain the normal native Unix calendar value. */
 	(if (equal? kind 41) (format_date date "%H:%i:%s") date))))
+(define tds_money_small? (lambda (wire) (match (wire "size")
+	4 true 8 false _ (error "invalid currency parameter byte width"))))
 (define tds_parameter_value (lambda (parameter) (begin
 	(define value (parameter "value"))
 	(define wire (parameter "type"))
 	(if (nil? value) nil
+		(equal? (wire "kind") 110) (begin
+			(define small (tds_money_small? wire))
+			/* This checks the codec's integer payload contract. The descriptor,
+			not the carrier, selected the fixed-scale SQL declaration above. */
+			(if (and (int? value) (or (not small) (and (>= value -2147483648) (<= value 2147483647)))) true
+				(error "invalid currency parameter coefficient"))
+			(define number (/ value 10000))
+			(if (equal? (tsql_money_coefficient number small) value) number
+				(error "currency parameter exceeds native numeric precision")))
 		(has? '(106 108) (wire "kind")) (begin
 			(define coefficient (value "coefficient"))
 			(define scale (wire "scale"))
@@ -290,6 +300,7 @@ its date and clock. SQL declarations select the descriptor before any rows. */
 		42 (tds_temporal_result_value descriptor value)
 		111 (tds_temporal_result_value descriptor value)
 		165 (list "bytes" value)
+		110 (tsql_money_coefficient value (equal? (descriptor "size") 4))
 		108 (begin
 			(define scale (descriptor "scale"))
 			/* A zero-scale SQL contract keeps native integer IDs exact. Scaled
@@ -326,7 +337,7 @@ value; the wire descriptor and SQL declaration own the type independently. */
 		(define contract (tsql_effective_parameter_contract (cadr declaration)))
 		(define parameter (named name))
 		(define wire (parameter "type"))
-		(if (not (has? '(31 38 40 41 42 43 104 106 108 109 111 165 167 173 175 231 239) (wire "kind")))
+		(if (not (has? '(31 38 40 41 42 43 104 106 108 109 110 111 165 167 173 175 231 239) (wire "kind")))
 			(error "unsupported T-SQL parameter wire type: " (wire "kind")) true)
 		/* A supplied NULL needs no numeric representation or conversion. Its SQL
 		contract still comes exclusively from the declaration. */
@@ -334,6 +345,7 @@ value; the wire descriptor and SQL declaration own the type independently. */
 			38 "BIGINT" 104 "BIT" 106 "DECIMAL" 108 "NUMERIC" 109 "FLOAT"
 			40 "DATE" 41 "TIME" 42 "DATETIME2" 43 "DATETIMEOFFSET"
 			111 (if (equal? (wire "size") 4) "SMALLDATETIME" "DATETIME")
+			110 (if (tds_money_small? wire) "SMALLMONEY" "MONEY")
 			165 "VARBINARY" 173 "BINARY" 167 "VARCHAR" 175 "CHAR" 231 "NVARCHAR" 239 "NCHAR" _ "NULL"))
 		(if (and (not (nil? (parameter "value"))) (tsql_binary_type? source_type)
 			(not (tsql_binary_type? (car contract))))
@@ -537,9 +549,57 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 	(parser (define text (regex "[^%]+" false false)) (list "text" text))
 	/* Format markers are case-sensitive prefixes. SQL word terminals would
 	incorrectly reject alphabetic text immediately following a conversion. */
-	(parser (define marker (regex "%%|%I64d|%[di]|%s" false false))
-		(match marker "%%" '("text" "%") "%I64d" '("BIGINT")
-			"%s" '("NVARCHAR" -1) _ '("INT")))) empty)) parts ""))
+	(parser "%%" '("text" "%"))
+	(parser '("%" (define flags (regex "[-+0# ]*" false false))
+		(? (define width (regex "(?:\\*|[1-9][0-9]*)" false false)))
+		(? "." (define precision (regex "(?:\\*|[0-9]*)" false false)))
+		(define marker (regex "(?:I64d|[dis])" false false)))
+		(list "format" (match marker "I64d" '("BIGINT") "s" '("NVARCHAR" -1) _ '("INT"))
+			flags width precision))) empty)) parts ""))
+(define tsql_message_argument (lambda (arguments index schema session tx contract) (begin
+	(if (< index (count arguments)) true (error "missing RAISERROR substitution"))
+	(tsql_scalar_value schema (nth arguments index) session tx
+		(if (equal? (car contract) "NVARCHAR") "message-text" "message-integer") contract))))
+(define tsql_message_bound (lambda (token arguments index schema session tx) (begin
+	(define value (if (nil? token) nil (equal? token "*")
+		(tsql_message_argument arguments index schema session tx '("INT"))
+		(equal? token "") 0 (tsql_parse_integer token)))
+	(if (and (not (nil? token)) (nil? value)) (error "invalid RAISERROR format bound") true)
+	(list value (+ index (if (equal? token "*") 1 0))))))
+(define tsql_message_field (lambda (value contract flags raw_width raw_precision) (begin
+	(define requested_width (coalesceNil raw_width 0))
+	/* Exact truncation also charges hidden substitution storage. Until that
+	contract is modeled, refuse oversized fields before allocating their padding. */
+	(if (or (> requested_width 2047) (< requested_width -2047))
+		(error "RAISERROR field width above 2047 is not implemented") true)
+	(define left (or (< requested_width 0) (regexp_test flags "-")))
+	(define width (if (< requested_width 0) (- 0 requested_width) requested_width))
+	(define precision (if (and (not (nil? raw_precision)) (< raw_precision 0)) nil raw_precision))
+	(define text (coalesceNil value "(null)"))
+	(define field (if (or (nil? value) (equal? (car contract) "NVARCHAR")) (begin
+		(define prefix (if (nil? precision) text (utf16_prefix text precision)))
+		(if (and (not (nil? precision)) (< (utf16_length prefix) (min (utf16_length text) precision)))
+			(error "RAISERROR precision splitting a supplementary pair is not implemented") true)
+		(list "" prefix))
+		(begin
+			(if (and (not (nil? precision)) (> precision 2047))
+				(error "RAISERROR integer precision above 2047 is not implemented") true)
+			(define negative (< value 0))
+			/* Remove the printed sign instead of negating the signed minimum. */
+			(define raw_digits (if negative (substr (string value) 1) (string value)))
+			(define digits (if (and (equal? precision 0) (equal? value 0)) "" raw_digits))
+			(define sign (if negative "-" (regexp_test flags "\\+") "+" (regexp_test flags " ") " " ""))
+			(list sign (concat (string_repeat "0" (max 0 (- (coalesceNil precision 1) (strlen digits)))) digits)))))
+	(define sign (car field))
+	(define body (cadr field))
+	(define units (+ (strlen sign) (utf16_length body)))
+	(if (> units 2047) (error "RAISERROR formatted field above 2047 is not implemented") true)
+	(define padding (max 0 (- width units)))
+	(define zero (and (not left) (nil? precision) (not (nil? value))
+		(not (equal? (car contract) "NVARCHAR")) (regexp_test flags "0")))
+	(if left (concat sign body (string_repeat " " padding))
+		zero (concat sign (string_repeat "0" padding) body)
+		(concat (string_repeat " " padding) sign body)))))
 (define tsql_run_raiserror (lambda (arguments statement session) (begin
 	(if (and (>= (count arguments) 3) (<= (count arguments) 23)) true
 		(error "RAISERROR requires message, severity, state and at most twenty substitutions"))
@@ -557,12 +617,15 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 		(define formatted (reduce (tsql_message_parts text) (lambda (result part)
 			(match part
 				'("text" text) (list (concat (car result) text) (cadr result))
-				_ (begin
-					(define index (cadr result))
-					(if (< index (count arguments)) true (error "missing RAISERROR substitution"))
-					(define value (tsql_scalar_value schema (nth arguments index) session tx
-						(if (equal? (car part) "NVARCHAR") "message-text" "message-integer") part))
-					(list (concat (car result) (coalesceNil value "(null)")) (+ index 1))))) (list "" 3)))
+				'("format" contract flags width precision) (begin
+					(define width_value (tsql_message_bound width arguments (cadr result) schema session tx))
+					(define precision_value (tsql_message_bound precision arguments (cadr width_value) schema session tx))
+					(define index (cadr precision_value))
+					(define value (tsql_message_argument arguments index schema session tx contract))
+					(list (concat (car result) (tsql_message_field value contract flags
+						(car width_value) (car precision_value))) (+ index 1))))) (list "" 3)))
+		(if (> (utf16_length (car formatted)) 2047)
+			(error "RAISERROR message truncation above 2047 is not implemented") true)
 		(list "tsql-error" 50000 (car formatted) (if (< state 0) 1 state) severity)))))
 	/* Raising after scalar binding keeps a frontend message from marking a
 	successful native transaction statement as failed. RAISERROR is not DML. */
@@ -611,9 +674,13 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 						(tsql_scalar_value schema (nth declaration 2) session tx "assignment" (cadr declaration)))) nil))
 				(session (concat "__tsql_parameter:" name) value))) nil)
 			0)
-		'("assign" name text) (begin
+		'("assign" name operation text) (begin
 			(define declaration (find (session "__tsql_parameter_declarations") (lambda (item) (equal? (car item) name)) nil))
 			(if declaration true (error "undeclared variable: @" name))
+			(if operation (tsql_bit_assignment_type (car (cadr declaration))) true)
+			/* Compound syntax uses the existing scalar compiler and assignment cast.
+			The parsed variable identifier is syntax, never caller-provided SQL text. */
+			(define text (if operation (concat "@" name " " operation " (" text ")") text))
 			(define value (statement text false (lambda (tx)
 				(tsql_scalar_value schema text session tx "assignment" (cadr declaration)))))
 			(session (concat "__tsql_parameter:" name) value)

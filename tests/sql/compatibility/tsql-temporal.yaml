@@ -32,19 +32,27 @@ test_cases:
 - name: Fixture rows for declared temporal result output
   sql: INSERT INTO tsql_temporal_output VALUES(1,N'12:13:14',N'2026-03-15',N'2026-03-15 12:13:14'),(2,NULL,NULL,NULL),(3,N'00:00:00',N'2026-03-16',N'2026-03-16 00:00:00')
 - name: Clock defaults are evaluated by a later insert rather than create
-  scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define output (newsession))\n\
-    \    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx\n        (sql_queryplan_compile_formula\
-    \ tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda (row) (output \"row\" row)) (lambda fields\
-    \ true))))\n    (output \"row\"))))\n  (execute \"CREATE TABLE tsql_clock_defaults (id INT PRIMARY KEY, created\
-    \ DATETIME DEFAULT ((GETDATE())), precise DATETIME2(7) DEFAULT SYSDATETIME(), standard DATETIME DEFAULT CURRENT_TIMESTAMP)\"\
-    )\n  (sleep 1.05)\n  (define cutoff (execute \"SELECT CONVERT(VARCHAR(30),GETDATE(),121) AS created,CONVERT(VARCHAR(30),SYSDATETIME(),121)\
-    \ AS precise\"))\n  (execute \"INSERT tsql_clock_defaults (id) VALUES (1)\")\n  (define row (execute \"SELECT\
-    \ CONVERT(VARCHAR(30),created,121) AS created,CONVERT(VARCHAR(30),precise,121) AS precise,CONVERT(VARCHAR(30),standard,121)\
-    \ AS standard FROM tsql_clock_defaults WHERE id=1\"))\n  (if (and (>= (tsql_datediff \"second\" (cutoff \"created\"\
-    ) (row \"created\")) 0)\n      (>= (tsql_datediff \"second\" (cutoff \"precise\") (row \"precise\")) 0)\n  \
-    \    (>= (tsql_datediff \"second\" (cutoff \"created\") (row \"standard\")) 0)) true\n    (error \"clock default\
-    \ was frozen while creating the table\")))\n"
-  noncritical: true
+  scm: |
+    (begin
+      (define s (newsession))
+      (define execute (lambda (sql) (begin
+        (define output (newsession))
+        (with_autocommit s nil nil sql (lambda (tx)
+          (sql_execute_formula s tx
+            (sql_queryplan_compile_formula tx (parse_tsql "memcp-tests" sql nil s tx))
+            (lambda (row) (output "row" row)) (lambda fields true))))
+        (output "row"))))
+      (execute "CREATE TABLE tsql_clock_defaults (id INT PRIMARY KEY, created DATETIME DEFAULT ((GETDATE())), precise DATETIME2(7) DEFAULT SYSDATETIME(), standard DATETIME DEFAULT CURRENT_TIMESTAMP)")
+      (sleep 1.05)
+      (define cutoff (execute "SELECT CONVERT(VARCHAR(30),GETDATE(),121) AS created,CONVERT(VARCHAR(30),SYSDATETIME(),121) AS precise"))
+      (execute "INSERT tsql_clock_defaults (id) VALUES (1)")
+      (define row (execute "SELECT CONVERT(VARCHAR(30),created,121) AS created,CONVERT(VARCHAR(30),precise,121) AS precise,CONVERT(VARCHAR(30),standard,121) AS standard FROM tsql_clock_defaults WHERE id=1"))
+      (if (and (>= (- (unix_timestamp (row "created")) (unix_timestamp (cutoff "created"))) 0)
+          (>= (- (unix_timestamp (row "precise")) (unix_timestamp (cutoff "precise"))) 0)
+          (>= (- (unix_timestamp (row "standard")) (unix_timestamp (cutoff "created"))) 0)) true
+        (error "clock default was frozen while creating the table")))
+  expect:
+    result: true
 - name: Raw current clocks preserve native temporal output
   sql: SELECT GETDATE() AS legacy,SYSDATETIME() AS precise,CURRENT_TIMESTAMP AS standard
   expect:
@@ -53,17 +61,23 @@ test_cases:
   sql: SELECT created,precise,standard FROM tsql_clock_defaults WHERE id=1
   expect:
     rows: 1
-  noncritical: true
 - name: Clock default expressions remain schema expressions
-  scm: "(begin\n  (define cols (tsql_get_schema \"memcp-tests\" \"tsql_clock_defaults\"))\n  (define find_column\
-    \ (lambda (name) (find cols (lambda (col) (equal? (col \"Field\") name)) nil)))\n  (if (and (equal? ((find_column\
-    \ \"created\") \"DefaultExpression\") \"GETDATE()\")\n      (equal? ((find_column \"precise\") \"DefaultExpression\"\
-    ) \"SYSDATETIME()\")\n      (equal? ((find_column \"standard\") \"DefaultExpression\") \"GETDATE()\")) true\n\
-    \    (error \"clock default was serialized as a creation-time literal\")))\n"
-  noncritical: true
+  scm: |
+    (begin
+      (define relation (table "memcp-tests" false "tsql_clock_defaults" false))
+      (define created (show relation "column" "created" false))
+      (define precise (show relation "column" "precise" false))
+      (define standard (show relation "column" "standard" false))
+      (if (and (equal? (created "DefaultExpression") "CURRENT_TIMESTAMP")
+          (equal? (precise "DefaultExpression") "CURRENT_TIMESTAMP")
+          (equal? (standard "DefaultExpression") "CURRENT_TIMESTAMP")
+          (equal? (precise "RawType") "DATETIME2")
+          (equal? (precise "Dimensions") '(7))) true
+        (error "clock default lost its native expression or declared type")))
+  expect:
+    result: true
 - name: An omitted clock default accepts explicit NULL unchanged
   sql: INSERT tsql_clock_defaults (id,created,precise,standard) VALUES (2,NULL,NULL,NULL)
-  noncritical: true
 - name: Explicit null clocks are not replaced by defaults
   sql: SELECT created,precise,standard FROM tsql_clock_defaults WHERE id=2
   expect:
@@ -72,7 +86,6 @@ test_cases:
     - created: null
       precise: null
       standard: null
-  noncritical: true
 - name: A retained compiled scalar clock is sampled on each execution
   scm: "(begin\n  (define s (newsession))\n  (define formula (sql_queryplan_compile_formula nil\n    (parse_tsql\
     \ \"memcp-tests\" \"SELECT GETDATE() AS legacy,SYSDATETIME() AS precise\" nil s nil)))\n  (define execute (lambda\
@@ -124,12 +137,10 @@ test_cases:
   syntax: mysql
 - name: Restarted clock defaults still evaluate during insert
   sql: INSERT tsql_clock_defaults (id) VALUES (3)
-  noncritical: true
 - name: Restarted stored clock values have native temporal output
   sql: SELECT created,precise,standard FROM tsql_clock_defaults WHERE id=3
   expect:
     rows: 1
-  noncritical: true
 - name: Legacy export style
   sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'15-03-18 00:00:00 AM',4),120) AS value
   expect:
@@ -166,7 +177,6 @@ test_cases:
     rows: 1
     data:
     - value: '2018-03-15 00:00:00'
-  noncritical: true
 - name: Default string temporal conversion
   sql: SELECT CAST(N'2026-03-15 12:13:14' AS DATE) AS value
   expect:
@@ -449,7 +459,6 @@ test_cases:
     rows: 1
     data:
     - value: Mar 15 2026 12:13PM
-  noncritical: true
 - name: Format declared date value
   sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATE),104) AS value
   expect:
@@ -886,7 +895,6 @@ test_cases:
     data:
     - clock: '2018-03-15 13:02:03'
       missing: null
-
 - name: Calendar numeric constants retain their syntax type
   sql: SELECT DATEPART(year,0) AS origin,DATEPART(day,1) AS next_day,DATEPART(hour,0.5) AS hour
   expect: {rows: 1, data: [{origin: 1900, next_day: 2, hour: 12}]}
@@ -961,22 +969,28 @@ test_cases:
   scm: |
     (sql_expr_info (list) (tsql_datepart_expr "year" (list (quote session) "date")))
   expect: {error: true}
-
-
 - name: Calendar unary expression resolves the source declaration
   sql: SELECT -DATEPART(year,dt) AS value FROM tsql_temporal_data WHERE id=1
   expect: {rows: 1, data: [{value: -2026}]}
 - name: Calendar nested text cast resolves the source declaration
   sql: SELECT CAST(CAST(DATEADD(day,1,dt) AS VARCHAR(19)) AS NVARCHAR(19)) AS value FROM tsql_temporal_data WHERE id=1
-  expect: {rows: 1, data: [{value: '2026-03-16 12:13:14'}]}
-
+  expect:
+    rows: 1
+    data:
+    - value: Mar 16 2026 12:13PM
+- name: Calendar explicit ISO style preserves seconds through a nested text cast
+  sql: SELECT CAST(CONVERT(VARCHAR(19),DATEADD(day,1,dt),120) AS NVARCHAR(19)) AS value FROM tsql_temporal_data WHERE
+    id=1
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-16 12:13:14'
 - name: Calendar large minutes interval cannot wrap a native duration
   sql: SELECT CONVERT(VARCHAR(19),DATEADD(minute,2147483647,N'1900-01-01'),120) AS value
   expect: {rows: 1, data: [{value: '5983-01-24 02:07:00'}]}
 - name: Calendar large hours interval rejects an out of range result
   sql: SELECT DATEADD(hour,2147483647,N'1900-01-01')
   expect: {error: true}
-
 - name: Calendar week numbering starts at January first
   sql: SELECT DATEPART(week,N'2026-01-01') AS first,DATEPART(wk,N'2026-01-04') AS following,DATEPART(isowk,N'2021-01-01') AS iso
   expect: {rows: 1, data: [{first: 1, following: 2, iso: 53}]}
@@ -1024,7 +1038,6 @@ test_cases:
 - name: Calendar null values propagate for all week forms
   sql: SELECT DATEPART(week,NULL) AS week,DATEPART(dw,NULL) AS day,DATEPART(isoww,NULL) AS iso
   expect: {rows: 1, data: [{week: null, day: null, iso: null}]}
-
 - name: Time declarations expose only clock date parts
   sql: SELECT DATEPART(hh,CAST(N'12:13:14' AS TIME)) AS hour,DATEPART(mi,CAST(N'12:13:14' AS TIME)) AS minute,DATEPART(ss,CAST(N'12:13:14' AS TIME)) AS second
   expect: {rows: 1, data: [{hour: 12, minute: 13, second: 14}]}
@@ -1100,7 +1113,6 @@ test_cases:
 - name: Precise clock function rejects unexpected arguments
   sql: SELECT SYSDATETIME(1)
   expect: {error: true}
-
 - name: Calendar date constructor preserves leap day and SQL DATE output
   sql: SELECT DATEFROMPARTS(2024,2,29) AS leap,DATEFROMPARTS(1,1,1) AS minimum,DATEFROMPARTS(9999,12,31) AS maximum
   expect: {rows: 1, data: [{leap: '2024-02-29', minimum: '0001-01-01', maximum: '9999-12-31'}]}
@@ -1143,7 +1155,6 @@ test_cases:
 - name: Calendar month end rejects declared clock input
   sql: SELECT EOMONTH(CAST(N'12:13:14' AS TIME))
   expect: {error: true}
-
 - name: First weekday is evaluated from the declared batch parameter
   sql: DECLARE @first INT=1; SET DATEFIRST @first; SELECT @@DATEFIRST AS first,DATEPART(weekday,N'2026-03-15') AS day
   expect: {rows: 1, data: [{first: 1, day: 7}]}
@@ -1188,7 +1199,6 @@ test_cases:
   expect: {result: true}
   cleanup:
   - sql: DROP TABLE tsql_week_domain
-
 - name: Stored TIME text retains its declared result value
   sql: SELECT tm FROM tsql_temporal_output WHERE id=1
   expect: {rows: 1, data: [{tm: '12:13:14'}]}
@@ -1217,12 +1227,722 @@ test_cases:
   expect: {result: true}
 - name: Fixture cleanup for declared temporal result output
   sql: DROP TABLE tsql_temporal_output
-
 - sql: DROP TABLE IF EXISTS tsql_clock_defaults
   name: 'Fixture cleanup 001: DROP TABLE IF EXISTS tsql_clock_defaults'
 - sql: DROP TABLE IF EXISTS tsql_temporal_data
   name: 'Fixture cleanup 002: DROP TABLE IF EXISTS tsql_temporal_data'
 - sql: DROP TABLE tsql_fractional_data
   name: 'Fixture cleanup 003: DROP TABLE tsql_fractional_data'
-
+- name: Calendar factories retain normalized aliases in compiler markers
+  scm: |
+    (map '("dd" "wk" "ww" "hh" "mi") (lambda (unit)
+      (list
+        (nth (cadr (tsql_dateadd_expr unit 1 "2026-03-15")) 1)
+        (nth (cadr (tsql_datediff_expr unit "2026-03-15" "2026-03-16" "INT")) 1)
+        (nth (cadr (tsql_datepart_expr unit "2026-03-15")) 1))))
+  expect:
+    data:
+    - - - day
+        - day
+        - day
+      - - week
+        - week
+        - week
+      - - week
+        - week
+        - week
+      - - hour
+        - hour
+        - hour
+      - - minute
+        - minute
+        - minute
+- name: Date difference aliases retain independent boundary constants
+  sql: SELECT DATEDIFF(dd,N'2026-03-15',N'2026-03-16') AS days,DATEDIFF(wk,N'2026-03-15',N'2026-03-16') AS weeks,DATEDIFF(hh,N'2026-03-15',N'2026-03-16')
+    AS hours,DATEDIFF_BIG(mi,N'2026-03-15',N'2026-03-16') AS minutes
+  expect:
+    rows: 1
+    data:
+    - days: 1
+      weeks: 0
+      hours: 24
+      minutes: 1440
+- name: Date part aliases retain their normalized compile contracts
+  sql: SELECT DATEPART(hh,N'2026-03-15 12:13:14') AS hours,DATEPART(mi,N'2026-03-15 12:13:14') AS minutes,DATEPART(ss,N'2026-03-15
+    12:13:14') AS seconds
+  expect:
+    rows: 1
+    data:
+    - hours: 12
+      minutes: 13
+      seconds: 14
+- name: Date addition accepts normalized clock aliases for declared time
+  sql: SELECT CONVERT(VARCHAR(8),DATEADD(hh,1,CAST(N'12:13:14' AS TIME)),108) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '13:13:14'
+- name: Union branches keep separate repeated calendar closures
+  sql: SELECT DATEDIFF(dd,N'2026-03-15',N'2026-03-16') AS amount,DATEDIFF(dd,N'2026-03-15',N'2026-03-16') AS duplicate
+    UNION ALL SELECT DATEDIFF(hh,N'2026-03-15',N'2026-03-16'),DATEDIFF(hh,N'2026-03-15',N'2026-03-16') ORDER BY amount
+  expect:
+    rows: 2
+    data:
+    - amount: 1
+      duplicate: 1
+    - amount: 24
+      duplicate: 24
+- name: Nested union branch consumers retain branch-local calendar values
+  sql: SELECT derived.amount+derived.duplicate AS total FROM (SELECT DATEDIFF(dd,N'2026-03-15',N'2026-03-16') AS amount,DATEDIFF(dd,N'2026-03-15',N'2026-03-16')
+    AS duplicate) derived UNION ALL SELECT derived.amount+derived.duplicate FROM (SELECT DATEDIFF(hh,N'2026-03-15',N'2026-03-16')
+    AS amount,DATEDIFF(hh,N'2026-03-15',N'2026-03-16') AS duplicate) derived ORDER BY total
+  expect:
+    rows: 2
+    data:
+    - total: 2
+    - total: 48
+- name: Calendar style 102 formats declared DATE
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATE),102) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2026.03.15
+- name: Calendar style 102 formats declared DATETIME
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15 23:13:00' AS DATETIME),102) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2026.03.15
+- name: Calendar style 102 formats declared SMALLDATETIME
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15 23:13:00' AS SMALLDATETIME),102) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2026.03.15
+- name: Calendar style 102 parses declared DATE
+  sql: SELECT CONVERT(VARCHAR(10),CONVERT(DATE,N'2026.03.15',102),23) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15'
+- name: Calendar style 102 parses declared DATETIME
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'2026.03.15',102),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 00:00:00'
+- name: Calendar style 102 retains typed NULL
+  sql: SELECT CONVERT(NVARCHAR(10),CAST(NULL AS DATETIME),102) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Calendar style 102 rejects an impossible day
+  sql: SELECT CONVERT(DATETIME,N'2026.03.32',102) AS value
+  expect:
+    error: true
+- name: Calendar style 103 formats declared DATE
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATE),103) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 15/03/2026
+- name: Calendar style 103 formats declared DATETIME
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15 23:13:00' AS DATETIME),103) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 15/03/2026
+- name: Calendar style 103 formats declared SMALLDATETIME
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15 23:13:00' AS SMALLDATETIME),103) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 15/03/2026
+- name: Calendar style 103 parses declared DATE
+  sql: SELECT CONVERT(VARCHAR(10),CONVERT(DATE,N'15/03/2026',103),23) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15'
+- name: Calendar style 103 parses declared DATETIME
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'15/03/2026',103),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 00:00:00'
+- name: Calendar style 103 retains typed NULL
+  sql: SELECT CONVERT(NVARCHAR(10),CAST(NULL AS DATETIME),103) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Calendar style 103 rejects an impossible day
+  sql: SELECT CONVERT(DATETIME,N'32/03/2026',103) AS value
+  expect:
+    error: true
+- name: Calendar style 105 formats declared DATE
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATE),105) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 15-03-2026
+- name: Calendar style 105 formats declared DATETIME
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15 23:13:00' AS DATETIME),105) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 15-03-2026
+- name: Calendar style 105 formats declared SMALLDATETIME
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15 23:13:00' AS SMALLDATETIME),105) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 15-03-2026
+- name: Calendar style 105 parses declared DATE
+  sql: SELECT CONVERT(VARCHAR(10),CONVERT(DATE,N'15-03-2026',105),23) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15'
+- name: Calendar style 105 parses declared DATETIME
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'15-03-2026',105),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 00:00:00'
+- name: Calendar style 105 retains typed NULL
+  sql: SELECT CONVERT(NVARCHAR(10),CAST(NULL AS DATETIME),105) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Calendar style 105 rejects an impossible day
+  sql: SELECT CONVERT(DATETIME,N'32-03-2026',105) AS value
+  expect:
+    error: true
+- name: Calendar style 110 formats declared DATE
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATE),110) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 03-15-2026
+- name: Calendar style 110 formats declared DATETIME
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15 23:13:00' AS DATETIME),110) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 03-15-2026
+- name: Calendar style 110 formats declared SMALLDATETIME
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15 23:13:00' AS SMALLDATETIME),110) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 03-15-2026
+- name: Calendar style 110 parses declared DATE
+  sql: SELECT CONVERT(VARCHAR(10),CONVERT(DATE,N'03-15-2026',110),23) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15'
+- name: Calendar style 110 parses declared DATETIME
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'03-15-2026',110),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 00:00:00'
+- name: Calendar style 110 retains typed NULL
+  sql: SELECT CONVERT(NVARCHAR(10),CAST(NULL AS DATETIME),110) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Calendar style 110 rejects an impossible day
+  sql: SELECT CONVERT(DATETIME,N'03-32-2026',110) AS value
+  expect:
+    error: true
+- name: Calendar style 111 formats declared DATE
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATE),111) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2026/03/15
+- name: Calendar style 111 formats declared DATETIME
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15 23:13:00' AS DATETIME),111) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2026/03/15
+- name: Calendar style 111 formats declared SMALLDATETIME
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15 23:13:00' AS SMALLDATETIME),111) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2026/03/15
+- name: Calendar style 111 parses declared DATE
+  sql: SELECT CONVERT(VARCHAR(10),CONVERT(DATE,N'2026/03/15',111),23) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15'
+- name: Calendar style 111 parses declared DATETIME
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'2026/03/15',111),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 00:00:00'
+- name: Calendar style 111 retains typed NULL
+  sql: SELECT CONVERT(NVARCHAR(10),CAST(NULL AS DATETIME),111) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Calendar style 111 rejects an impossible day
+  sql: SELECT CONVERT(DATETIME,N'2026/03/32',111) AS value
+  expect:
+    error: true
+- name: Legacy calendar style 100 formats DATETIME hour 00
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 00:13:00' AS DATETIME),100) AS value
+  expect:
+    rows: 1
+    data:
+    - value: Mar 15 2026 12:13AM
+- name: Legacy calendar style 100 formats DATETIME hour 12
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 12:13:00' AS DATETIME),100) AS value
+  expect:
+    rows: 1
+    data:
+    - value: Mar 15 2026 12:13PM
+- name: Legacy calendar style 100 formats DATETIME hour 23
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 23:13:00' AS DATETIME),100) AS value
+  expect:
+    rows: 1
+    data:
+    - value: Mar 15 2026 11:13PM
+- name: Legacy calendar default formats DATETIME with explicit zero
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 23:13:00' AS DATETIME),0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: Mar 15 2026 11:13PM
+- name: Legacy calendar default formats DATETIME with omitted
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 23:13:00' AS DATETIME)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: Mar 15 2026 11:13PM
+- name: Legacy calendar CAST formats declared DATETIME
+  sql: SELECT CAST(CAST(N'2026-03-15 12:13:00' AS DATETIME) AS NVARCHAR(30)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: Mar 15 2026 12:13PM
+- name: Legacy calendar style 100 formats SMALLDATETIME hour 00
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 00:13:00' AS SMALLDATETIME),100) AS value
+  expect:
+    rows: 1
+    data:
+    - value: Mar 15 2026 12:13AM
+- name: Legacy calendar style 100 formats SMALLDATETIME hour 12
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 12:13:00' AS SMALLDATETIME),100) AS value
+  expect:
+    rows: 1
+    data:
+    - value: Mar 15 2026 12:13PM
+- name: Legacy calendar style 100 formats SMALLDATETIME hour 23
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 23:13:00' AS SMALLDATETIME),100) AS value
+  expect:
+    rows: 1
+    data:
+    - value: Mar 15 2026 11:13PM
+- name: Legacy calendar default formats SMALLDATETIME with explicit zero
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 23:13:00' AS SMALLDATETIME),0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: Mar 15 2026 11:13PM
+- name: Legacy calendar default formats SMALLDATETIME with omitted
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 23:13:00' AS SMALLDATETIME)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: Mar 15 2026 11:13PM
+- name: Legacy calendar CAST formats declared SMALLDATETIME
+  sql: SELECT CAST(CAST(N'2026-03-15 12:13:00' AS SMALLDATETIME) AS NVARCHAR(30)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: Mar 15 2026 12:13PM
+- name: Legacy month input resolves 00:13:00
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'Mar 15 2026 12:13AM',100),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 00:13:00'
+- name: Legacy month input resolves 12:13:00
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'Mar 15 2026 12:13PM',100),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:00'
+- name: Legacy month input resolves 23:13:00
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'Mar 15 2026 11:13PM',100),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 23:13:00'
+- name: Legacy month formatter handles a timestamp below the Unix epoch
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'1969-12-31 23:59:59' AS DATETIME),100) AS value
+  expect:
+    rows: 1
+    data:
+    - value: Dec 31 1969 11:59PM
+- name: Legacy month formatting retains NULL
+  sql: SELECT CONVERT(VARCHAR(30),CAST(NULL AS SMALLDATETIME),100) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Legacy month input retains NULL
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,NULL,100),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: New calendar style retains NULL style
+  sql: SELECT CONVERT(NVARCHAR(10),CAST(N'2026-03-15' AS DATE),NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Calendar style 102 covers the first declared date
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'0001-01-01' AS DATE),102) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0001.01.01
+- name: Calendar style 103 covers the last declared date
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'9999-12-31' AS DATE),103) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 31/12/9999
+- name: Calendar style 105 covers the first legacy timestamp
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'1753-01-01' AS DATETIME),105) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 01-01-1753
+- name: Calendar style 110 covers the last whole-second legacy timestamp
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'9999-12-31 23:59:59' AS DATETIME),110) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 12-31-9999
+- name: Calendar style 111 covers the last small timestamp minute
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2079-06-06 23:59:00' AS SMALLDATETIME),111) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2079/06/06
+- name: Calendar DATE zero is not a numeric day offset
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'1970-01-01' AS DATE),103) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 01/01/1970
+- name: Calendar numeric day zero is converted only by explicit timestamp cast
+  sql: SELECT CONVERT(VARCHAR(10),CAST(0 AS DATETIME),102) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1900.01.01
+- name: Calendar style does not reinterpret an integer as a timestamp
+  sql: SELECT CONVERT(VARCHAR(30),0,120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '0'
+- name: New calendar style does not reinterpret an integer as a timestamp
+  sql: SELECT CONVERT(VARCHAR(30),0,103) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '0'
+- name: Calendar text truncation uses VARCHAR target width
+  sql: SELECT CONVERT(VARCHAR(7),CAST(N'2026-03-15' AS DATE),102) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026.03'
+- name: Calendar text truncation uses NVARCHAR target width
+  sql: SELECT CONVERT(NVARCHAR(7),CAST(N'2026-03-15' AS DATE),103) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 15/03/2
+- name: Calendar text fixed width pads after formatting
+  sql: SELECT CONVERT(NCHAR(12),CAST(N'2026-03-15' AS DATE),105) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '15-03-2026  '
+- name: Calendar national text retains full style
+  sql: SELECT CONVERT(NVARCHAR(10),CAST(N'2026-03-15' AS DATE),111) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2026/03/15
+- name: Calendar style uses native declared columns and typed NULL
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_style_values
+  - sql: CREATE TABLE tsql_style_values(id INT PRIMARY KEY,d DATE,dt DATETIME,sm SMALLDATETIME)
+  - sql: INSERT tsql_style_values VALUES(1,CAST(N'2026-03-15' AS DATE),CAST(N'2026-03-15 23:13:00' AS DATETIME),CAST(N'2026-03-15
+      23:13:00' AS SMALLDATETIME)),(2,NULL,NULL,NULL)
+  sql: SELECT id,CONVERT(VARCHAR(10),d,103) AS d,CONVERT(NVARCHAR(30),dt,100) AS dt,CONVERT(VARCHAR(30),sm) AS sm FROM
+    tsql_style_values ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      d: 15/03/2026
+      dt: Mar 15 2026 11:13PM
+      sm: Mar 15 2026 11:13PM
+    - id: 2
+      d: null
+      dt: null
+      sm: null
+  cleanup:
+  - sql: DROP TABLE tsql_style_values
+- name: Calendar national text describes width before reading rows
+  scm: (map (tds_describe "memcp-tests" "SELECT TOP(0) CONVERT(NVARCHAR(10),CAST(NULL AS DATETIME),103) AS value" ""
+    (newsession)) (lambda (c) (list (c "sql_type") (c "kind") (c "size"))))
+  expect:
+    result:
+    - - NVARCHAR
+      - 231
+      - 20
+- name: Existing calendar factory retains its pattern argument contract
+  scm: (begin (define info ((tsql_styled_text_compiler "%Y-%m-%d" "NVARCHAR" (list 10)) (list (sql_info (parse_date "2026-03-15
+    23:13:00") "DATETIME" nil)))) (list (sql_info_type info) (eval (sql_info_formula info))))
+  expect:
+    result:
+    - NVARCHAR
+    - '2026-03-15'
+- name: Calendar style view uses the portable existing conversion factory
+  setup:
+  - sql: DROP VIEW IF EXISTS tsql_style_view
+  - sql: CREATE VIEW tsql_style_view AS SELECT CONVERT(NVARCHAR(10),CAST(N'2026-03-15' AS DATE),103) AS value
+  sql: SELECT value FROM tsql_style_view
+  expect:
+    rows: 1
+    data:
+    - value: 15/03/2026
+- name: Calendar style view survives ordinary restart
+  sql: SHUTDOWN
+  syntax: mysql
+- name: Restored calendar style view retains its declaration and factory
+  sql: SELECT value FROM tsql_style_view
+  expect:
+    rows: 1
+    data:
+    - value: 15/03/2026
+  cleanup:
+  - sql: DROP VIEW IF EXISTS tsql_style_view
+- name: Calendar style 100 never reinterprets binary payload as a calendar
+  sql: SELECT CONVERT(VARCHAR(30),0x3132,100) AS value
+  expect:
+    error: true
+- name: Calendar style 103 never reinterprets binary payload as a calendar
+  sql: SELECT CONVERT(VARCHAR(30),0x3132,103) AS value
+  expect:
+    error: true
+- name: Calendar style 120 never reinterprets binary payload as a calendar
+  sql: SELECT CONVERT(VARCHAR(30),0x3132,120) AS value
+  expect:
+    error: true
+- name: Existing binary text style zero retains its ASCII byte contract
+  sql: SELECT CONVERT(VARCHAR(30),0x3132,0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '12'
+- name: Legacy style roundtrip retains single digit day and hour
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,CONVERT(VARCHAR(30),CAST(N'2026-03-05 13:02:00' AS DATETIME),100),100),120)
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-05 13:02:00'
+- name: Legacy default input shares canonical month parser
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'Mar 5 2026 1:02PM',0),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-05 13:02:00'
+- name: Legacy month parser rejects nonexistent leap day
+  sql: SELECT CONVERT(DATETIME,N'Feb 29 2026 12:00AM',100) AS value
+  expect:
+    error: true
+- name: Legacy month parser rejects nonexistent thirty first day
+  sql: SELECT CONVERT(DATETIME,N'Apr 31 2026 12:00AM',100) AS value
+  expect:
+    error: true
+- name: Legacy month parser retains a real leap day
+  sql: SELECT CONVERT(VARCHAR(19),CONVERT(DATETIME,N'Feb 29 2024 12:00AM',100),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2024-02-29 00:00:00'
+- name: Whole second precise clock default uses the native declaration
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_clock_declaration
+  - sql: CREATE TABLE tsql_clock_declaration(id INT,value DATETIME2(7) DEFAULT ((SYSDATETIME())))
+  scm: |
+    (begin
+      (define declaration (show (table "memcp-tests" false "tsql_clock_declaration" false) "column" "value" false))
+      (if (and (equal? (declaration "DefaultExpression") "CURRENT_TIMESTAMP")
+          (equal? (declaration "RawType") "DATETIME2")
+          (equal? (declaration "Dimensions") '(7))) true
+        (error "precise clock default did not retain its native declaration")))
+  expect:
+    result: true
+  cleanup:
+  - sql: DROP TABLE IF EXISTS tsql_clock_declaration
+- name: Precise clock default rejects arguments
+  sql: CREATE TABLE tsql_invalid_clock_default(value DATETIME2 DEFAULT SYSDATETIME(1))
+  expect:
+    error: true
+- name: Retained compiled clocks remain fresh across whole second executions
+  scm: |
+    (begin
+      (define s (newsession))
+      (define formula (sql_queryplan_compile_formula nil
+        (parse_tsql "memcp-tests" "SELECT GETDATE() AS legacy,SYSDATETIME() AS precise" nil s nil)))
+      (define execute (lambda () (begin
+        (define output (newsession))
+        (with_autocommit s nil nil "SELECT clocks" (lambda (tx)
+          (sql_execute_formula s tx formula (lambda (row) (output "row" row)) (lambda fields true))))
+        (output "row"))))
+      (define before (execute))
+      (sleep 1.05)
+      (define after (execute))
+      (if (and (> (- (unix_timestamp (after "legacy")) (unix_timestamp (before "legacy"))) 0)
+          (> (- (unix_timestamp (after "precise")) (unix_timestamp (before "precise"))) 0)) true
+        (error "compiled clock was folded into a cached literal")))
+  expect:
+    result: true
+- name: TRY_CAST keeps whole-second declared datetime output
+  sql: SELECT CONVERT(VARCHAR(19),TRY_CAST(N'2026-03-15 12:13:14' AS DATETIME2(0)),120) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14'
+- name: TRY_CONVERT parses existing compact calendar styles
+  sql: SELECT CONVERT(VARCHAR(10),TRY_CONVERT(DATE,N'20260315',112),23) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15'
+- name: TRY_CONVERT reuses existing day month year styles
+  sql: SELECT CONVERT(VARCHAR(10),TRY_CONVERT(DATE,N'15.03.2026',104),23) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15'
+- name: TRY temporal conversions return NULL for malformed calendars
+  sql: SELECT TRY_CAST(N'not-a-date' AS DATE) AS first_value,TRY_CONVERT(DATETIME,N'not-a-date',120) AS second_value
+  expect:
+    rows: 1
+    data:
+    - first_value: null
+      second_value: null
+- name: TRY temporal conversions return NULL for invalid calendar days
+  sql: SELECT TRY_CONVERT(DATE,N'2026-02-30',23) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY temporal conversions return NULL for legacy date range overflow
+  sql: SELECT TRY_CAST(3000000 AS DATETIME) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY_CONVERT retains typed NULL calendars
+  sql: SELECT TRY_CONVERT(DATE,NULL,112) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY_CONVERT NULL style yields a typed temporal NULL
+  sql: SELECT TRY_CONVERT(DATE,N'not-a-date',NULL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY_CONVERT formats declared calendar sources with existing styles
+  sql: SELECT TRY_CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATE),112) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '20260315'
+- name: TRY_CAST refuses unsupported fractional temporal carriers
+  sql: SELECT TRY_CAST(N'2026-03-15 12:13:14.123' AS DATETIME2(3)) AS value
+  expect:
+    error: true
+    contains: fractional
+- name: TRY_CONVERT refuses unsupported fractional temporal carriers
+  sql: SELECT TRY_CONVERT(DATETIME2(3),N'2026-03-15 12:13:14.123',121) AS value
+  expect:
+    error: true
+    contains: fractional
+- name: TRY_CAST rejects forbidden numeric to DATE contracts
+  sql: SELECT TRY_CAST(1 AS DATE) AS value
+  expect:
+    error: true
+    contains: convertible
+- name: TRY_CONVERT rejects unsupported date to integer contracts
+  sql: SELECT TRY_CONVERT(INT,CAST(N'2026-03-15' AS DATE)) AS value
+  expect:
+    error: true
+    contains: conversion
+- name: TRY rejects malformed fractional calendars as invalid input
+  sql: SELECT TRY_CAST(N'not-a-date 12:13:14.1' AS DATETIME2(0)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: TRY short year styles reject incomplete input without helper panics
+  sql: SELECT TRY_CONVERT(DATE,N'x',1) AS a,TRY_CONVERT(DATE,N'x',12) AS b,TRY_CONVERT(DATE,N'',1) AS c,TRY_CONVERT(DATE,N'',12)
+    AS d
+  expect:
+    rows: 1
+    data:
+    - a: null
+      b: null
+      c: null
+      d: null
+- name: TRY clock-only TIME refuses unsupported fractional carriers
+  sql: SELECT TRY_CAST(N'12:13:14.123' AS TIME(3)) AS value
+  expect:
+    error: true
+    contains: fractional
+- name: TRY clock-only datetime refuses unsupported fractional carriers
+  sql: SELECT TRY_CAST(N'12:13:14.123' AS DATETIME2(3)) AS value
+  expect:
+    error: true
+    contains: fractional
+- name: CONVERT keeps temporal style 101 beside binary hex styles
+  sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATETIME),101) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 03/15/2026
+- name: CONVERT keeps temporal style 121 beside binary hex styles
+  sql: SELECT CONVERT(VARCHAR(23),CAST(N'2026-03-15 12:13:14' AS DATETIME2(0)),121) AS value
+  expect:
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.000'
 cleanup: []
