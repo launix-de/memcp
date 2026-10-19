@@ -137,6 +137,32 @@ func TestStorageStringJITEmitUniqueStrings(t *testing.T) {
 	}
 }
 
+// Force stack scanning while a value returned by the storage emitter is live.
+// This requires the same registered frames and pointer maps as production;
+// executing an anonymous mmap function cannot safely cross this Go call.
+type collectingStringEmitter struct{ *StorageString }
+
+func (s collectingStringEmitter) JITEmit(ctx *scm.JITContext, idx, result scm.JITValueDesc) scm.JITValueDesc {
+	out := s.StorageString.JITEmit(ctx, idx, result)
+	ctx.StabilizeDescAcrossNestedCall(&out)
+	ctx.EmitGoCallVoid(scm.GoFuncAddr(runtime.GC), nil)
+	return out
+}
+
+func TestStorageStringJITReaderSurvivesGC(t *testing.T) {
+	values := []scm.Scmer{scm.NewString("reader first value"), scm.NewString("reader second value")}
+	s := buildStorageString(values)
+	reader, cleanup := jitBuildGetValueFunc(t, collectingStringEmitter{s}, true)
+	defer cleanup()
+	for range 3 {
+		for i, want := range values {
+			if got := reader(int64(i)); !scmerEqual(got, want) {
+				t.Fatalf("reader[%d] after GC = %v, want %v", i, got, want)
+			}
+		}
+	}
+}
+
 const benchStringN = 60000
 
 func BenchmarkStorageStringGetValue(b *testing.B) {
