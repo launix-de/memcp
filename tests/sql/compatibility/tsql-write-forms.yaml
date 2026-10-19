@@ -952,6 +952,123 @@ test_cases:
         (empty_list? (sql_mutation_key_contract (describe "secondary" '("id") false) true))))
   expect:
     result: true
+- name: Bitmask native UPDATE &= writes the existing target
+  setup:
+  - sql: DROP TABLE IF EXISTS bitmask_assignment
+  - sql: CREATE TABLE bitmask_assignment(id INT PRIMARY KEY,flags INT)
+  - sql: INSERT bitmask_assignment VALUES(1,219)
+  sql: UPDATE bitmask_assignment SET flags&=46 WHERE id=1
+  expect:
+    affected_rows: 1
+  cleanup:
+  - sql: DROP TABLE bitmask_assignment
+- name: Bitmask native UPDATE &= has an exact stored result
+  setup:
+  - sql: DROP TABLE IF EXISTS bitmask_assignment
+  - sql: CREATE TABLE bitmask_assignment(id INT PRIMARY KEY,flags INT)
+  - sql: INSERT bitmask_assignment VALUES(1,219)
+  - sql: UPDATE bitmask_assignment SET flags&=46 WHERE id=1
+  sql: SELECT flags AS value FROM bitmask_assignment WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 10
+  cleanup:
+  - sql: DROP TABLE bitmask_assignment
+- name: Bitmask native UPDATE |= writes the existing target
+  setup:
+  - sql: DROP TABLE IF EXISTS bitmask_assignment
+  - sql: CREATE TABLE bitmask_assignment(id INT PRIMARY KEY,flags INT)
+  - sql: INSERT bitmask_assignment VALUES(1,219)
+  sql: UPDATE bitmask_assignment SET flags|=46 WHERE id=1
+  expect:
+    affected_rows: 1
+  cleanup:
+  - sql: DROP TABLE bitmask_assignment
+- name: Bitmask native UPDATE |= has an exact stored result
+  setup:
+  - sql: DROP TABLE IF EXISTS bitmask_assignment
+  - sql: CREATE TABLE bitmask_assignment(id INT PRIMARY KEY,flags INT)
+  - sql: INSERT bitmask_assignment VALUES(1,219)
+  - sql: UPDATE bitmask_assignment SET flags|=46 WHERE id=1
+  sql: SELECT flags AS value FROM bitmask_assignment WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 255
+  cleanup:
+  - sql: DROP TABLE bitmask_assignment
+- name: Bitmask native UPDATE ^= writes the existing target
+  setup:
+  - sql: DROP TABLE IF EXISTS bitmask_assignment
+  - sql: CREATE TABLE bitmask_assignment(id INT PRIMARY KEY,flags INT)
+  - sql: INSERT bitmask_assignment VALUES(1,219)
+  sql: UPDATE bitmask_assignment SET flags^=46 WHERE id=1
+  expect:
+    affected_rows: 1
+  cleanup:
+  - sql: DROP TABLE bitmask_assignment
+- name: Bitmask native UPDATE ^= has an exact stored result
+  setup:
+  - sql: DROP TABLE IF EXISTS bitmask_assignment
+  - sql: CREATE TABLE bitmask_assignment(id INT PRIMARY KEY,flags INT)
+  - sql: INSERT bitmask_assignment VALUES(1,219)
+  - sql: UPDATE bitmask_assignment SET flags^=46 WHERE id=1
+  sql: SELECT flags AS value FROM bitmask_assignment WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 245
+  cleanup:
+  - sql: DROP TABLE bitmask_assignment
+- name: Bitmask UPDATE narrowing errors before changing stored values
+  setup:
+  - sql: DROP TABLE IF EXISTS bitmask_narrow
+  - sql: CREATE TABLE bitmask_narrow(id INT PRIMARY KEY,flags TINYINT DEFAULT 3)
+  - sql: INSERT bitmask_narrow VALUES(1,255)
+  sql: UPDATE bitmask_narrow SET flags ^= 256 WHERE id=1
+  expect:
+    error: true
+    contains: integer conversion overflow
+- name: Bitmask failed native assignment preserves the target
+  sql: SELECT flags AS value FROM bitmask_narrow
+  expect:
+    rows: 1
+    data:
+    - value: 255
+- name: Bitmask compound DEFAULT uses the existing assignment guard
+  sql: UPDATE bitmask_narrow SET flags &= DEFAULT
+  expect:
+    error: true
+    contains: DEFAULT requires simple assignment
+- name: Bitmask native NULL assignment remains a NULL value
+  setup:
+  - sql: UPDATE bitmask_narrow SET flags &= CAST(NULL AS INT)
+  sql: SELECT flags AS value FROM bitmask_narrow
+  expect:
+    rows: 1
+    data:
+    - value: null
+  cleanup:
+  - sql: DROP TABLE bitmask_narrow
+- name: Bitmask BIT column compound assignment rejects its declared target
+  setup:
+  - sql: DROP TABLE IF EXISTS bitmask_boolean
+  - sql: CREATE TABLE bitmask_boolean(id INT PRIMARY KEY,flags BIT)
+  - sql: INSERT bitmask_boolean VALUES(1,1)
+  sql: UPDATE bitmask_boolean SET flags &= 0
+  expect:
+    error: true
+    contains: bit compound assignment requires an integer target
+- name: Bitmask rejected BIT column compound assignment leaves its value intact
+  sql: SELECT flags AS value,flags & CAST(1 AS BIT) AS masked FROM bitmask_boolean
+  expect:
+    rows: 1
+    data:
+    - value: true
+      masked: 1
+  cleanup:
+  - sql: DROP TABLE bitmask_boolean
 cleanup:
 - sql: DROP TABLE IF EXISTS write_guard_trigger_event
 - sql: DROP TABLE IF EXISTS write_guard_trigger_audit

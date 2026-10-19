@@ -315,6 +315,50 @@ test_cases:
       CROSS APPLY (SELECT p.id+1 AS value) q
       CROSS APPLY (SELECT x.value FROM (SELECT q.value AS value) x) r
     expect: {error: true}
+  - name: CROSS APPLY dimensions retain the left integer through a text cast
+    scm: |-
+      (begin
+          (define fields (tds_describe "memcp-tests" "SELECT q.label FROM tsql_apply_outer p CROSS APPLY (SELECT CAST(p.id+1 AS NVARCHAR(6)) AS label) q" "" (newsession)))
+          (and (equal? (map fields (lambda (field) (field "sql_type"))) (list "NVARCHAR"))
+              (equal? (map fields (lambda (field) (field "size"))) (list 12))))
+    expect:
+      result: true
+  - name: Chained APPLY text dimensions include every preceding source
+    scm: |-
+      (begin
+          (define fields (tds_describe "memcp-tests" "SELECT r.label FROM tsql_apply_outer p CROSS APPLY (SELECT p.id+1 AS next_id) q CROSS APPLY (SELECT CAST(p.id+q.next_id AS NVARCHAR(4)) AS label) r" "" (newsession)))
+          (and (equal? (map fields (lambda (field) (field "sql_type"))) (list "NVARCHAR"))
+              (equal? (map fields (lambda (field) (field "size"))) (list 8))))
+    expect:
+      result: true
+  - name: OUTER APPLY typed text metadata preserves NULL aggregate results
+    sql: SELECT p.id,q.label FROM tsql_apply_outer p OUTER APPLY (SELECT CAST(SUM(c.amount*p.id)
+      AS NVARCHAR(6)) AS label FROM tsql_apply_inner c WHERE c.lookup_key=p.lookup_key)
+      q ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        label: '4'
+      - id: 2
+        label: '8'
+      - id: 3
+        label: null
+      - id: 4
+        label: '24'
+      - id: 5
+        label: null
+  - name: APPLY metadata cannot resolve a computed source to its right
+    scm: (tds_describe "memcp-tests" "SELECT q.label FROM tsql_apply_outer p CROSS APPLY
+      (SELECT CAST(r.id+1 AS NVARCHAR(4)) AS label) q CROSS JOIN tsql_apply_inner r"
+      "" (newsession))
+    expect:
+      error: true
+  - name: Ordinary derived metadata cannot acquire a lateral computed binding
+    scm: (tds_describe "memcp-tests" "SELECT q.label FROM tsql_apply_outer p CROSS JOIN
+      (SELECT CAST(p.id+1 AS NVARCHAR(4)) AS label) q" "" (newsession))
+    expect:
+      error: true
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_apply_keywords
   - sql: DROP TABLE IF EXISTS tsql_apply_inner

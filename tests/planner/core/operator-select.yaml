@@ -24,14 +24,12 @@ test_cases:
       data:
         - id: 1
         - id: 2
-
   - name: "Projected SELECT with WHERE"
     sql: "SELECT id FROM operator_select_00 WHERE id = 2"
     expect:
       rows: 1
       data:
         - id: 2
-
   - name: "Projected SELECT with ORDER BY"
     sql: "SELECT id FROM operator_select_00 ORDER BY id DESC"
     expect:
@@ -39,7 +37,6 @@ test_cases:
       data:
         - id: 2
         - id: 1
-
   - name: "Projected SELECT with WHERE and ORDER BY"
     sql: "SELECT name FROM operator_select_00 WHERE id > 0 ORDER BY id DESC"
     expect:
@@ -47,3 +44,13 @@ test_cases:
       data:
         - name: "two"
         - name: "one"
+  - name: "Logical operator inspection accepts empty and atomic operands"
+    scm: |
+      (and
+        (equal? (map (list nil (list) 42 "atom" (quote atom)) logical_op) (list nil nil nil nil nil))
+        (equal? (map (list '(query-block) '(group-stage) '(union-block) '(window-stage)) logical_op)
+          '(query-block group-stage union-block window-stage))
+        (not (group_stage? (list)))
+        (expression_equal? (canonical_aggregate_recipe '(lambda () 7)) '(lambda () 7)))
+    expect:
+      result: true
