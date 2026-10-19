@@ -1,0 +1,416 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Grouping complete UNION ALL bags through the shared logical group stage
+  requires_tds: true
+setup:
+- sql: DROP TABLE IF EXISTS ug_rows
+- sql: CREATE TABLE ug_rows(g INT,v INT)
+- sql: INSERT INTO ug_rows VALUES(1,2),(1,3),(2,NULL),(NULL,4),(3,-2),(3,2)
+test_cases:
+- name: UNION ALL grouping merges duplicate branch rows in sql
+  sql: SELECT g,SUM(v) AS total,COUNT(*) AS n FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v AS other_v
+    FROM ug_rows) u GROUP BY g HAVING SUM(v)>0 ORDER BY g
+  expect:
+    rows: 2
+    data:
+    - g: null
+      total: 8
+      n: 2
+    - g: 1
+      total: 10
+      n: 4
+  syntax: sql
+- name: UNION ALL outer filters precede grouping in sql
+  sql: SELECT g,SUM(v) AS total FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v AS other_v FROM ug_rows)
+    u WHERE v>2 GROUP BY g ORDER BY g
+  expect:
+    rows: 2
+    data:
+    - g: null
+      total: 8
+    - g: 1
+      total: 6
+  syntax: sql
+- name: UNION ALL grouping merges duplicate branch rows in psql
+  sql: SELECT g,SUM(v) AS total,COUNT(*) AS n FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v AS other_v
+    FROM ug_rows) u GROUP BY g HAVING SUM(v)>0 ORDER BY g
+  expect:
+    rows: 2
+    data:
+    - g: null
+      total: 8
+      n: 2
+    - g: 1
+      total: 10
+      n: 4
+  syntax: psql
+- name: UNION ALL outer filters precede grouping in psql
+  sql: SELECT g,SUM(v) AS total FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v AS other_v FROM ug_rows)
+    u WHERE v>2 GROUP BY g ORDER BY g
+  expect:
+    rows: 2
+    data:
+    - g: null
+      total: 8
+    - g: 1
+      total: 6
+  syntax: psql
+- name: UNION ALL grouping merges duplicate branch rows in tsql
+  sql: SELECT g,SUM(v) AS total,COUNT(*) AS n FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v AS other_v
+    FROM ug_rows) u GROUP BY g HAVING SUM(v)>0 ORDER BY g
+  expect:
+    rows: 2
+    data:
+    - g: null
+      total: 8
+      n: 2
+    - g: 1
+      total: 10
+      n: 4
+  syntax: tsql
+- name: UNION ALL outer filters precede grouping in tsql
+  sql: SELECT g,SUM(v) AS total FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v AS other_v FROM ug_rows)
+    u WHERE v>2 GROUP BY g ORDER BY g
+  expect:
+    rows: 2
+    data:
+    - g: null
+      total: 8
+    - g: 1
+      total: 6
+  syntax: tsql
+- name: Global aggregates preserve NULL and bag multiplicity
+  sql: SELECT SUM(v) AS total,COUNT(v) AS present,COUNT(*) AS n FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g
+    AS other_g,v AS other_v FROM ug_rows) u
+  expect:
+    rows: 1
+    data:
+    - total: 18
+      present: 10
+      n: 12
+- name: An empty UNION input produces one global aggregate row
+  sql: SELECT SUM(v) AS total,COUNT(*) AS n FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v AS other_v
+    FROM ug_rows) u WHERE 1=0
+  expect:
+    rows: 1
+    data:
+    - total: null
+      n: 0
+- name: An empty UNION input produces no grouped row
+  sql: SELECT g,SUM(v) AS total FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v AS other_v FROM ug_rows)
+    u WHERE 1=0 GROUP BY g
+  expect:
+    rows: 0
+    data: []
+- name: NULL-only and zero groups remain distinguishable
+  sql: SELECT g,SUM(v) AS total,COUNT(v) AS present FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v
+    AS other_v FROM ug_rows) u WHERE g=2 OR g=3 GROUP BY g ORDER BY g
+  expect:
+    rows: 2
+    data:
+    - g: 2
+      total: null
+      present: 0
+    - g: 3
+      total: 0
+      present: 4
+- name: Average merges unequal branch lengths without averaging branch averages
+  sql: SELECT AVG(v) AS mean,MIN(v) AS lo,MAX(v) AS hi FROM (SELECT g,v FROM ug_rows WHERE g=1 UNION ALL SELECT
+    g,v FROM ug_rows WHERE g=3 AND v<0) u
+  expect:
+    rows: 1
+    data:
+    - mean: 1
+      lo: -2
+      hi: 3
+- name: HAVING observes the final sum across branches
+  sql: SELECT g,SUM(v) AS total FROM (SELECT g,v FROM ug_rows WHERE g=3 AND v<0 UNION ALL SELECT g,v FROM ug_rows
+    WHERE g=3 AND v>0) u GROUP BY g HAVING SUM(v)>0
+  expect:
+    rows: 0
+    data: []
+- name: Grouped UNION output survives another derived alias
+  sql: SELECT x.g,x.total FROM (SELECT g,SUM(v) AS total FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v
+    AS other_v FROM ug_rows) u GROUP BY g HAVING SUM(v)>0) x WHERE x.g=1
+  expect:
+    rows: 1
+    data:
+    - g: 1
+      total: 10
+- name: Grouped UNION output retains computed aggregate projections
+  sql: SELECT g,SUM(v)*2+COUNT(*) AS score FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v AS other_v
+    FROM ug_rows) u WHERE g=1 GROUP BY g
+  expect:
+    rows: 1
+    data:
+    - g: 1
+      score: 24
+- name: GROUP BY expressions remain input expressions
+  sql: SELECT g+1 AS bucket,SUM(v) AS total FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v AS other_v
+    FROM ug_rows) u WHERE g=1 GROUP BY g+1
+  expect:
+    rows: 1
+    data:
+    - bucket: 2
+      total: 10
+- name: The same grouped UNION CTE can be bound twice independently
+  sql: WITH grouped AS (SELECT g,SUM(v) AS total FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v AS
+    other_v FROM ug_rows) u GROUP BY g) SELECT a.total+b.total AS total FROM grouped a JOIN grouped b ON a.g=b.g
+    WHERE a.g=1
+  expect:
+    rows: 1
+    data:
+    - total: 20
+  syntax: tsql
+- name: UNION DISTINCT input is rejected rather than summed as a bag
+  sql: SELECT SUM(v) AS total FROM (SELECT v FROM ug_rows UNION SELECT v FROM ug_rows) u
+  expect:
+    error: true
+- name: Grouped UNION IR retains a logical union input
+  sql: EXPLAIN IR SELECT g,SUM(v) AS total FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v AS other_v
+    FROM ug_rows) u GROUP BY g
+  expect:
+    result_contains:
+    - group-stage
+    - union-block
+    - stage-output
+    result_not_contains:
+    - '.grp:'
+    - '(scan '
+    - recset_
+- name: T-SQL TOP applies after final grouping and aggregate ordering
+  sql: SELECT TOP(1) g,SUM(v) AS total FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g,v FROM ug_rows) u WHERE
+    g IS NOT NULL GROUP BY g ORDER BY SUM(v) DESC
+  expect:
+    rows: 1
+    data:
+    - g: 1
+      total: 10
+  syntax: tsql
+- name: The global COUNT-only reduction keeps its existing union count path
+  sql: SELECT COUNT(*) AS n FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g,v FROM ug_rows) u
+  expect:
+    rows: 1
+    data:
+    - n: 12
+- name: COUNT-only IR keeps the existing global union count expression
+  sql: EXPLAIN IR SELECT COUNT(*) AS n FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g,v FROM ug_rows) u
+  expect:
+    result_contains:
+    - union_count
+    result_not_contains:
+    - group-stage
+- name: A final grouped ORDER window does not limit either input branch
+  sql: SELECT g,SUM(v) AS total FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g,v FROM ug_rows) u WHERE g IS NOT
+    NULL GROUP BY g ORDER BY g LIMIT 1 OFFSET 1
+  expect:
+    rows: 1
+    data:
+    - g: 2
+      total: null
+- name: Aggregates used only by HAVING remain available to the final filter
+  sql: SELECT g FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g,v FROM ug_rows) u GROUP BY g HAVING SUM(v)>8
+  expect:
+    rows: 1
+    data:
+    - g: 1
+- name: Aggregates used only by ORDER BY remain available to the final sorter
+  sql: SELECT g FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g,v FROM ug_rows) u WHERE g IS NOT NULL GROUP BY
+    g ORDER BY SUM(v) DESC LIMIT 1
+  expect:
+    rows: 1
+    data:
+    - g: 1
+- name: Unknown aggregate input columns remain binding errors
+  sql: SELECT SUM(missing) AS total FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g,v FROM ug_rows) u
+  expect:
+    error: true
+- name: Prepared grouped UNION calls do not retain earlier parameter bindings
+  tds:
+    statements:
+    - sql: SELECT SUM(v) AS total,COUNT(*) AS n FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g,v FROM ug_rows)
+        u WHERE g=@group_id
+      prepare: true
+      parameters:
+      - name: group_id
+        value: 1
+      expect:
+        rows: 1
+        data:
+        - total: 10
+          n: 4
+    - sql: SELECT SUM(v) AS total,COUNT(*) AS n FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g,v FROM ug_rows)
+        u WHERE g=@group_id
+      prepare: true
+      parameters:
+      - name: group_id
+        value: 3
+      expect:
+        rows: 1
+        data:
+        - total: 0
+          n: 4
+    - sql: SELECT SUM(v) AS total,COUNT(*) AS n FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g,v FROM ug_rows)
+        u WHERE g=@group_id
+      prepare: true
+      parameters:
+      - name: group_id
+        value: 9
+      expect:
+        rows: 1
+        data:
+        - total: null
+          n: 0
+    - sql: SELECT SUM(v) AS total,COUNT(*) AS n FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g,v FROM ug_rows)
+        u WHERE g=@group_id
+      prepare: true
+      parameters:
+      - name: group_id
+        value: 1
+      expect:
+        rows: 1
+        data:
+        - total: 10
+          n: 4
+- name: COUNT DISTINCT combines values rather than branch counts
+  syntax: tsql
+  sql: SELECT COUNT(DISTINCT v) AS n FROM (SELECT v FROM ug_rows UNION ALL SELECT v FROM ug_rows) u
+  expect:
+    rows: 1
+    data:
+    - n: 4
+- name: Grouping without aggregate output still merges branch keys
+  syntax: tsql
+  sql: SELECT g FROM (SELECT g FROM ug_rows UNION ALL SELECT g FROM ug_rows) u GROUP BY g ORDER BY g
+  expect:
+    rows: 4
+    data:
+    - g: null
+    - g: 1
+    - g: 2
+    - g: 3
+- name: Declared decimal branch arithmetic survives union grouping
+  syntax: tsql
+  sql: SELECT SUM(v) AS total FROM (SELECT v FROM ug_rows WHERE g=1 UNION ALL SELECT CAST(v AS DECIMAL(18,2))/2
+    AS v FROM ug_rows WHERE g=1) u
+  expect:
+    rows: 1
+    data:
+    - total: 7.5
+- name: Outer filters stay above a grouped input branch
+  syntax: tsql
+  sql: SELECT SUM(v) AS total FROM (SELECT g,SUM(v) AS v FROM ug_rows GROUP BY g UNION ALL SELECT g,v FROM ug_rows
+    WHERE g=3) u WHERE v>2
+  expect:
+    rows: 1
+    data:
+    - total: 9
+- name: Outer filters stay above a TOP branch boundary
+  syntax: tsql
+  sql: SELECT SUM(v) AS total,COUNT(*) AS n FROM (SELECT v FROM (SELECT TOP(1) v FROM ug_rows WHERE g=1 ORDER BY
+    v DESC) first_row UNION ALL SELECT v FROM ug_rows WHERE g=3) u WHERE v<3
+  expect:
+    rows: 1
+    data:
+    - total: 0
+      n: 2
+- name: Empty integer branches still participate in declared decimal precedence
+  syntax: tsql
+  sql: SELECT SUM(v) AS total FROM (SELECT v FROM ug_rows WHERE 1=0 UNION ALL SELECT CAST(v AS DECIMAL(18,2))/2
+    AS v FROM ug_rows WHERE g=1) u
+  expect:
+    rows: 1
+    data:
+    - total: 2.5
+- name: Declared text branches are converted by numeric UNION precedence
+  syntax: tsql
+  sql: SELECT SUM(v) AS total FROM (SELECT 1 AS v UNION ALL SELECT '2' AS v) u
+  expect:
+    rows: 1
+    data:
+    - total: 3
+- name: A BIT branch converts through its declared Boolean contract
+  syntax: tsql
+  sql: SELECT SUM(v) AS total FROM (SELECT CAST(1 AS BIT) AS v UNION ALL SELECT 2 AS v) u
+  expect:
+    rows: 1
+    data:
+    - total: 3
+- name: All NULL branches retain a nullable column contract
+  syntax: tsql
+  sql: SELECT SUM(v) AS total,COUNT(v) AS present FROM (SELECT NULL AS v UNION ALL SELECT NULL AS v) u
+  expect:
+    rows: 1
+    data:
+    - total: null
+      present: 0
+- name: Unicode precedence preserves national text across set branches
+  syntax: tsql
+  sql: SELECT value FROM (SELECT 'plain' AS value UNION ALL SELECT N'ä' AS value) u
+  expect:
+    rows: 2
+    data:
+    - value: plain
+    - value: ä
+- name: Invalid numeric UNION coercion remains an error
+  syntax: tsql
+  sql: SELECT SUM(v) AS total FROM (SELECT 1 AS v UNION ALL SELECT 'bad' AS v) u
+  expect:
+    error: true
+- name: UNION metadata follows declared common type before execution
+  scm: "(equal? ((car (tds_describe \"memcp-tests\"\n  \"SELECT v FROM (SELECT CAST(1 AS INT) AS v UNION ALL SELECT\
+    \ CAST(2 AS DECIMAL(18,2)) AS v) u\"\n  \"\" (newsession))) \"sql_type\") \"DECIMAL\")"
+  expect:
+    result: true
+- name: Fractional UNION aggregate roundtrips through the native protocol
+  tds:
+    statements:
+    - sql: SELECT SUM(v) AS total FROM (SELECT v FROM ug_rows WHERE g=1 UNION ALL SELECT CAST(v AS DECIMAL(18,2))/2
+        AS v FROM ug_rows WHERE g=1) u
+      expect:
+        rows: 1
+        data:
+        - total: 7.5
+- name: A nested ordered limit keeps its filter in sql
+  syntax: sql
+  sql: SELECT SUM(v) AS total,COUNT(*) AS n FROM (SELECT v FROM (SELECT v FROM ug_rows WHERE g=1 ORDER BY v DESC
+    LIMIT 1) first_row UNION ALL SELECT v FROM ug_rows WHERE g=3) u WHERE v<3
+  expect:
+    rows: 1
+    data:
+    - total: 0
+      n: 2
+- name: A nested ordered limit keeps its filter in psql
+  syntax: psql
+  sql: SELECT SUM(v) AS total,COUNT(*) AS n FROM (SELECT v FROM (SELECT v FROM ug_rows WHERE g=1 ORDER BY v DESC
+    LIMIT 1) first_row UNION ALL SELECT v FROM ug_rows WHERE g=3) u WHERE v<3
+  expect:
+    rows: 1
+    data:
+    - total: 0
+      n: 2
+- name: Derived NULL projections remain expressions in sql
+  syntax: sql
+  sql: SELECT x.v AS value FROM (SELECT NULL AS v) x
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Derived NULL projections remain expressions in psql
+  syntax: psql
+  sql: SELECT x.v AS value FROM (SELECT NULL AS v) x
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Derived NULL projections remain expressions in tsql
+  syntax: tsql
+  sql: SELECT x.v AS value FROM (SELECT NULL AS v) x
+  expect:
+    rows: 1
+    data:
+    - value: null
+cleanup:
+- sql: DROP TABLE IF EXISTS ug_rows

@@ -5666,7 +5666,8 @@ outputs: this normalization covers joined and derived projection values. */
 (define field_expr_by_title (lambda (fields title ignorecase)
 	(match (coalesceNil fields '())
 		(cons current_title (cons expr rest)) (if (if ignorecase (equal?? current_title title) (equal? current_title title))
-			expr
+			/* A present NULL is an expression, not the missing-field sentinel. */
+			(if (nil? expr) (sql_null_literal) expr)
 			(field_expr_by_title rest title ignorecase))
 		_ nil)))
 
@@ -6494,7 +6495,8 @@ bindings are stable here, unlike mutable SQL session variables. */
 			(define tail_rewrites (nth tail 1))
 			(define tail_wheres (nth tail 2))
 			(define tail_stages (nth tail 3))
-			(if (or (string? relation) (or (table_function_relation? relation) (row_domain_relation? relation)))
+			(if (or (stage_output_relation? relation)
+				(or (string? relation) (or (table_function_relation? relation) (row_domain_relation? relation))))
 				(begin
 					(list
 						(cons (list (source_alias src) (source_schema src) relation (source_outer? src) (source_join_expr src))
@@ -6568,7 +6570,8 @@ bindings are stable here, unlike mutable SQL session variables. */
 												(null_extend_projection_fields projection
 													(derived_projection_presence only_inner alias projection lateral))
 												projection))
-											(define inner_where (requalify_single_source_expr inner_alias alias (qb_where inner)))
+											(define inner_where (requalify_single_source_expr inner_alias alias
+												(combine_where (qb_where inner) (source_join_expr only_inner))))
 											/* The ON predicate tests real rows from the right relation, before
 											NULL extension. Rewriting it through effective_projection would wrap
 											even a key column in IF(IS NULL, NULL, key), hiding equality bounds
@@ -6584,7 +6587,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 													(list
 														alias
 														(source_schema only_inner)
-														(source_relation only_inner)
+														(rebind_derived_stage_expr stage_rebinding (source_relation only_inner))
 														(source_outer? src)
 														joined_condition)
 													(rewrite_sources_join_for_derived alias effective_projection tail_sources))
@@ -6604,7 +6607,8 @@ bindings are stable here, unlike mutable SQL session variables. */
 														(null_extend_projection_fields projection
 															(derived_projection_presence only_inner alias projection lateral))
 														projection))
-													(define inner_where (requalify_single_source_expr inner_alias alias (qb_where inner)))
+													(define inner_where (requalify_single_source_expr inner_alias alias
+														(combine_where (qb_where inner) (source_join_expr only_inner))))
 													/* ON sees candidate rows; only consumers above the LEFT JOIN
 													boundary see the NULL-extended projection. */
 													(define outer_join (rewrite_derived_ref alias projection (source_join_expr src)))
@@ -6612,7 +6616,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 													(define derived_base_source (list
 														alias
 														(source_schema only_inner)
-														(source_relation only_inner)
+														(rebind_derived_stage_expr stage_rebinding (source_relation only_inner))
 														(source_outer? src)
 														joined_condition))
 													(define derived_stage_sources (rebind_derived_stage_sources stage_rebinding
@@ -6867,6 +6871,50 @@ branch against its concrete value-relation row. */
 			_ nil)
 		_ nil)))
 
+/* Group the complete UNION ALL bag, rather than independently grouping its
+branches. The existing union-input group-stage reducer merges branch-local
+states; no rows are materialized by the frontend. DISTINCT and bounded UNION
+inputs retain their explicit unsupported-shape error until their input boundary
+can be represented by the same reducer. */
+(define rewrite_query_block_union_group (lambda (block src ctx)
+	(begin
+		(define relation (normalize_query_ast (source_relation src)))
+		(if (and (grouped_derived_relation? block)
+			(and (equal? (union_mode relation) (quote all))
+				(and (empty_list? (union_order relation))
+					(and (nil? (union_limit relation)) (nil? (union_offset relation))))))
+			(begin
+				(define alias (source_alias src))
+				(define canonical_fields (union_canonical_fields relation))
+				(define input_fields (map_assoc canonical_fields (lambda (title _expr)
+					(list (quote get_column) alias false title false))))
+				(define input_wrapper (make_query_block (qb_schema block) (list src)
+					input_fields (qb_where block) '() nil '() nil nil '() '() '()))
+				(define input (untangle_union_block (make_union_block (quote all)
+					(map (union_branches relation) (lambda (branch)
+						(wrap_embedded_union_branch_query input_wrapper src branch canonical_fields)))
+					'() nil nil (qassoc_set (union_facts relation) (quote alias) alias)) ctx))
+				(define template (make_group_stage_for_query_block block))
+				(define stage (make_group_stage (gs_id template) input
+					(gs_domain template) (gs_keys template) (gs_aggregates template)
+					(gs_having template) (gs_output template) (gs_order template)
+					(gs_limit template) (gs_offset template) (gs_facts template)))
+				(define output_alias (concat "__union_group:" (gs_id stage)))
+				(define replace_expr (lambda (expr)
+					(replace_group_expr input alias output_alias
+						(gs_keys stage) (group_key_cols (gs_keys stage)) (gs_aggregates stage) expr)))
+				(make_query_block (qb_schema block)
+					(list (list output_alias (qb_schema block) (make_stage_output_relation (gs_id stage)) false nil))
+					(map_assoc (qb_fields block) (lambda (_title expr) (replace_expr expr)))
+					(replace_expr (coalesceNil (qb_having block) true))
+					'() nil
+					(map (coalesceNil (qb_order block) '()) (lambda (item)
+						(match item '(expr direction) (list (replace_expr expr) direction) _ item)))
+					(qb_limit block) (qb_offset block)
+					(map_assoc (qb_hidden block) (lambda (_name expr) (replace_expr expr)))
+					(cons stage (qb_stages block)) (qb_facts block)))
+			nil))))
+
 (define rewrite_query_block_union_count (lambda (block src ctx)
 	(begin
 		(define title (union_count_projection_title (qb_fields block)))
@@ -7026,10 +7074,14 @@ output slots; the UNION order belongs to that projection, not the old source. */
 				(list (quote defer-subquery-rewrites) true))))
 		(define union_src (single_union_source block))
 		(define union_rewrite (if (nil? union_src) nil (rewrite_query_block_over_union_source block union_src)))
-		(if (not (nil? union_rewrite))
+		(define union_count_rewrite (if (nil? union_src) nil (rewrite_query_block_union_count block union_src child_ctx)))
+		(define union_group (if (or (nil? union_src) (not (nil? union_count_rewrite))) nil
+			(rewrite_query_block_union_group block union_src child_ctx)))
+		(if (not (nil? union_group))
+			(untangle_query_block union_group child_ctx)
+			(not (nil? union_rewrite))
 			(untangle_union_block union_rewrite child_ctx)
 			(begin
-				(define union_count_rewrite (if (nil? union_src) nil (rewrite_query_block_union_count block union_src child_ctx)))
 				(if (not (nil? union_count_rewrite))
 					union_count_rewrite
 					(begin

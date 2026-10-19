@@ -138,7 +138,6 @@ test_cases:
       stock: 5
     - location: 20
       stock: 3
-  noncritical: true
 - name: A transfer preserves the tenant total while internal and future movements stay excluded
   sql: |-
     WITH movements AS (
@@ -157,7 +156,6 @@ test_cases:
       stock: 8
     - tenant: 2
       stock: 7
-  noncritical: true
 - name: Pre-transfer cutoff retains the earlier location and unit cost
   sql: |-
     WITH movements AS (
@@ -528,7 +526,6 @@ test_cases:
   expect:
     rows: 0
     data: []
-  noncritical: true
 - name: Missing item masters are retained by balance computation and rejected only by final inner joins
   sql: |-
     WITH movements AS (
@@ -557,7 +554,6 @@ test_cases:
     data:
     - article: G
       stock: 1
-  noncritical: true
 - name: The final inner joins do not synthesize an item master
   sql: |-
     WITH movements AS (
