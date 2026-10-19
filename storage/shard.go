@@ -1649,10 +1649,10 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				if alreadyLocked {
 					triggerDeletedRow = make(dataset, len(declarations))
 					for i, col := range declarations {
-						// Internal query caches are not stored OLD payload. Reading a
-						// dirty ORC here would recompute while this shard is locked.
-						// Keep ordinals intact; invalidation uses original input values.
-						if col.IsTemp && isRuntimeComputedColumn(col) {
+						// An internal ordered cache may need a full dependency scan,
+						// which cannot run while this shard is locked. Ordinary computed
+						// values remain OLD inputs for dependent cache maintenance.
+						if col.IsTemp && len(col.OrcSortCols) > 0 {
 							triggerDeletedRow[i] = scm.NewNil()
 							continue
 						}
@@ -1667,10 +1667,9 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					t.mu.RLock()
 					triggerDeletedRow = make(dataset, len(declarations))
 					for i, col := range declarations {
-						// Internal query caches are not stored OLD payload. Reading a
-						// dirty ORC here would recompute while this shard is locked.
-						// Keep ordinals intact; invalidation uses original input values.
-						if col.IsTemp && isRuntimeComputedColumn(col) {
+						// Preserve ordinary computed OLD inputs; ordered cache repair
+						// needs preparation outside this shard's locked section.
+						if col.IsTemp && len(col.OrcSortCols) > 0 {
 							triggerDeletedRow[i] = scm.NewNil()
 							continue
 						}
