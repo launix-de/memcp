@@ -117,8 +117,12 @@ Only consumed name bindings enter the shared plan guards, never catalog epochs. 
 			(list "column" column_name type dimensions (tsql_publish_alias_attributes type attributes))
 			_ column))))
 		(sql_create_table database name published_columns (merge options '("name_ignorecase" true)) ifnotexists tx))))
-	(if (find columns (lambda (column) (match column
-		'("column" _name _type _dimensions attributes) (has_assoc? attributes "__tsql_alias_id") _ false)))
+	(if (> (count (filter columns (lambda (column) (match column
+		'("column" _name type _dimensions _attributes)
+		(has? '("ROWVERSION" "TIMESTAMP") (toUpper type))
+		_ false)))) 1) (error "only one generated version column is allowed")
+		(find columns (lambda (column) (match column
+			'("column" _name _type _dimensions attributes) (has_assoc? attributes "__tsql_alias_id") _ false)))
 		(tsql_type_ddl database tx publish) (publish)))))
 (define tsql_create_view_definition (lambda (tx database name dialect text query mode) (begin
 	(if (show (table database false name true) "name") (error "a table already owns this relation name: " name) true)

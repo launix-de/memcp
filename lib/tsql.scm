@@ -158,6 +158,9 @@ the common binder consumes the temporary callback before planning. */
 		(define base (coalesceNil (contract "base_type") (contract "type")))
 		(define native_dimensions (contract "dimensions"))
 		(define options (cdr attributes))
+		(if (and (has? '("ROWVERSION" "TIMESTAMP") base)
+			(or (has_assoc? options "default") (has_assoc? options "default_expression")))
+			(error "generated version column cannot have a DEFAULT declaration") true)
 		(define null_options (if (or (nil? (contract "base_type")) (has_assoc? options "null")) options
 			(append options "null" (contract "nullable"))))
 		(if (and (contract "id") (null_options "auto_increment"))
