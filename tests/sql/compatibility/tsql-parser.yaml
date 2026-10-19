@@ -157,7 +157,6 @@ test_cases:
         false)) (lambda (_err) true)))
       (and failed (nil? (table "memcp-tests" false "tsql_if_describe" false))))
   expect: {result: true}
-
 - sql: DROP TABLE IF EXISTS dbo.tsql_if_describe
   name: Fixture cleanup for Conditional describe cannot run DDL (1)
 - name: Selected IF table error remains visible
@@ -253,7 +252,6 @@ test_cases:
       (define third (execute a))
       (and (equal? first 17) (equal? second -1) (equal? third 23)))
   expect: {result: true}
-
 - name: IF DML retains its existing explicit transaction and skipped writes
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_if_transaction
@@ -275,7 +273,6 @@ test_cases:
       (define outside (execute "SELECT COUNT(*) AS n FROM dbo.tsql_if_transaction"))
       (and (equal? (inside "n") 1) (equal? (outside "n") 0) (nil? (session "transaction"))))
   expect: {result: true}
-
 - sql: DROP TABLE IF EXISTS dbo.tsql_if_transaction
   name: Fixture cleanup for IF DML retains its existing explicit transaction and skipped writes (1)
 - name: IF selected permission errors are not masked
@@ -289,7 +286,6 @@ test_cases:
         "unexpected success")) (lambda (message) (concat message))))
       (strlike failure "%access denied%"))
   expect: {result: true}
-
 - name: Mixed integer and string addition converts numeric input
   sql: SELECT 2 + '3' AS n
   expect:
@@ -339,7 +335,6 @@ test_cases:
     rows: 1
     data:
     - id: 1
-  noncritical: true
 - name: TSQL DISTINCT
   sql: SELECT DISTINCT name FROM tsql_data ORDER BY name
   expect:
@@ -554,7 +549,6 @@ test_cases:
   sql: SELECT @missing AS v
   expect:
     error: true
-
 - name: TSQL date boundary function
   sql: SELECT DATEDIFF(day,N'2026-01-01',N'2026-01-02') AS days
   expect:
@@ -653,7 +647,6 @@ test_cases:
     \ \"SELECT TOP (0) id FROM dbo.tsql_data\" \"\" s))\n  (if (and (equal? (count fields) 1) (equal? ((car fields)\
     \ \"name\") \"id\")\n      (equal? ((car fields) \"sql_type\") \"INT\")) true (error \"empty SELECT lost its\
     \ declared type\")))\n"
-
 - name: Describe never executes INSERT
   scm: |
     (empty_list? (tds_describe "memcp-tests"
@@ -690,7 +683,6 @@ test_cases:
     \ '(\"BIGINT\"))\n  (define fields (tds_describe \"memcp-tests\" \"SELECT @v AS value\" \"@v BIGINT\" s))\n\
     \  (if (equal? ((car fields) \"sql_type\") \"BIGINT\") true\n    (error \"guarded parameter lost its declared\
     \ type\")))\n"
-
 - name: Binary literals retain bytes and empty binary values
   scm: "(begin\n  (define s (newsession))\n  (define expression (parse_tsql \"memcp-tests\" \"SELECT 0x00FF0102\
     \ AS bytes,0x AS empty\" nil s nil))\n  (define output (newsession))\n  (sql_execute_formula s nil (sql_queryplan_compile_formula\

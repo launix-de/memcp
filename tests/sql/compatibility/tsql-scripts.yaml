@@ -716,7 +716,6 @@ test_cases:
   expect: {error: true}
   cleanup:
   - sql: DROP PROCEDURE IF EXISTS dbo.script_status_proc
-
 - name: System namespace column metadata uses the current database
   setup:
   - sql: DROP TABLE IF EXISTS dbo.script_sys_catalog
@@ -733,7 +732,6 @@ test_cases:
   expect: {rows: 1, data: [{TABLE_QUALIFIER: memcp-tests, TABLE_NAME: script_sys_catalog, COLUMN_NAME: id}]}
   cleanup:
   - sql: DROP TABLE dbo.script_sys_catalog
-
 - name: Dynamic procedure status is independent of native insert completion
   setup:
   - sql: DROP TABLE IF EXISTS dbo.script_dynamic_status
@@ -753,7 +751,6 @@ test_cases:
 - name: A dynamic RETURN supplies its explicit integer procedure status
   sql: DECLARE @status INT=0; EXEC @status=sys.sp_executesql N'RETURN 4; SELECT 99 AS unexpected'; SELECT @status AS status
   expect: {rows: 1, data: [{status: 4}]}
-
 - name: OUTPUT copies an input and output parameter back to its caller
   setup:
   - sql: DROP PROCEDURE IF EXISTS dbo.script_output_proc
@@ -1103,7 +1100,6 @@ test_cases:
   sql: RAISERROR(N'fixture error',16,256)
   expect:
     error: true
-
 - name: RAISERROR accepts signed integer and exact large integer substitutions
   sql: DECLARE @large BIGINT=9007199254740993; BEGIN TRY RAISERROR(N'%i:%I64d',16,1,-3,@large); END TRY BEGIN CATCH SELECT ERROR_MESSAGE()
     AS message; END CATCH
@@ -1171,7 +1167,6 @@ test_cases:
     data:
     - message: '00003'
   noncritical: true
-
 - name: Dynamic parameter declarations reject duplicate formal names
   sql: EXEC sp_executesql N'SELECT @n AS value',N'@n INT,@n INT',@n=1
   expect:
@@ -1195,7 +1190,6 @@ test_cases:
       text: abc
   cleanup:
   - sql: DROP PROCEDURE dbo.script_multiple_output
-
 - name: Procedure parameter defaults cannot read caller locals
   sql: CREATE PROCEDURE dbo.script_default_scope @value INT=@caller AS SELECT @value AS value
   expect:
@@ -1253,7 +1247,6 @@ test_cases:
   cleanup:
   - sql: DROP PROCEDURE IF EXISTS dbo.script_output_transaction_proc
   - sql: DROP TABLE dbo.script_output_transaction
-
 - name: Unary plus keeps a negative declared operand and integer division
   sql: DECLARE @n INT=-5; SELECT +@n AS value,(+@n)/2 AS divided,+NULL AS empty
   expect:
@@ -1266,7 +1259,6 @@ test_cases:
   sql: SELECT +CAST(N'3' AS NVARCHAR(4)) AS value
   expect:
     error: true
-
 - name: A called error helper sees the enclosing CATCH context
   setup:
   - sql: CREATE PROCEDURE dbo.script_error_helper AS SELECT ERROR_NUMBER() AS number,ERROR_SEVERITY() AS severity,ERROR_STATE() AS state
@@ -1305,5 +1297,89 @@ test_cases:
     - severity: null
   cleanup:
   - sql: DROP PROCEDURE dbo.script_error_helper
-
+- name: First batch statement may invoke a procedure without EXEC
+  setup:
+  - sql: CREATE PROCEDURE dbo.script_implicit_call @value INT AS SELECT @value AS value
+  sql: dbo.script_implicit_call @value=7; SELECT 8 AS value
+  expect:
+    rows: 2
+    data: [{value: 7}, {value: 8}]
+  cleanup:
+  - sql: DROP PROCEDURE dbo.script_implicit_call
+- name: GO restores the optional EXEC position
+  setup:
+  - sql: CREATE PROCEDURE dbo.script_implicit_call @value INT AS SELECT @value AS value
+  sql: |
+    dbo.script_implicit_call 3
+    GO
+    dbo.script_implicit_call 4
+  expect:
+    rows: 2
+    data: [{value: 3}, {value: 4}]
+  cleanup:
+  - sql: DROP PROCEDURE dbo.script_implicit_call
+- name: A later statement requires EXEC for a procedure call
+  scm: (parse_tsql_batch "memcp-tests" "SELECT 1; dbo.script_implicit_call 2")
+  expect: {error: true}
+- name: A conditional procedure call requires EXEC
+  scm: (parse_tsql_batch "memcp-tests" "IF 1=1 dbo.script_implicit_call 2")
+  expect: {error: true}
+- name: A nested block procedure call requires EXEC
+  scm: (parse_tsql_batch "memcp-tests" "BEGIN dbo.script_implicit_call 2 END")
+  expect: {error: true}
+- name: Explicit calls after ordinary statements retain the same invocation node
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests" "SELECT 1; EXEC dbo.inspect @value=2")
+      (list "batch" (list (list "statement" "SELECT 1")
+        (list "execute" "memcp-tests" "inspect" (list (list "value" "2"))))))
+  expect: {result: true}
+- name: Submitted UTF8 scripts accept a leading byte order mark
+  sql: "\uFEFFSELECT 9 AS value"
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: Native batches preserve consecutive command completions and later result metadata
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.script_native_done
+  - sql: CREATE TABLE dbo.script_native_done(id INT PRIMARY KEY,value INT)
+  tds:
+    statements:
+    - sql: INSERT dbo.script_native_done VALUES(1,2),(2,4); UPDATE dbo.script_native_done SET value=value+1; DELETE FROM
+        dbo.script_native_done WHERE id=2;
+      expect:
+        rows: 0
+    - sql: SELECT id,value FROM dbo.script_native_done
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 3
+    - sql: SET NOCOUNT ON; INSERT dbo.script_native_done VALUES(3,9); UPDATE dbo.script_native_done SET value=value+1
+        WHERE id=3; SET NOCOUNT OFF;
+      expect:
+        rows: 0
+    - sql: SELECT id,value FROM dbo.script_native_done ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 3
+        - id: 3
+          value: 10
+    - sql: BEGIN TRANSACTION; INSERT dbo.script_native_done VALUES(4,11); COMMIT;
+      expect:
+        rows: 0
+    - sql: SELECT TOP(0) value FROM dbo.script_native_done
+      expect:
+        rows: 0
+        columns:
+        - value
+    - sql: SELECT value FROM dbo.script_native_done WHERE id=4
+      expect:
+        rows: 1
+        data:
+        - value: 11
+  cleanup:
+  - sql: DROP TABLE dbo.script_native_done
 cleanup: []

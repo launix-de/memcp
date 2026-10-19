@@ -924,7 +924,6 @@ test_cases:
       data:
       - id: 1
         label: pending
-
   - name: Insert without into accepts the dialect statement spelling
     sql: INSERT tsql_native_copy (id,name) VALUES (99,N'optional keyword')
     expect: {rows: 1}
@@ -1072,7 +1071,6 @@ test_cases:
   - name: Dropped unique key permits the previously conflicting tuple
     sql: INSERT INTO tsql_setup_columns (tenant,label,revision) VALUES (1,N'after key drop',1)
     expect: {rows: 1}
-
   - name: Application catalog uses an ordinary native table
     sql: CREATE TABLE tsql_setup_catalog ([Table] NVARCHAR(80) PRIMARY KEY, Revision INT NOT NULL DEFAULT ((1)))
     expect: {rows: 0}
@@ -1092,7 +1090,6 @@ test_cases:
   - name: Registry keys are enforced by the ordinary native primary key
     sql: INSERT INTO tsql_setup_catalog VALUES (N'tsql_setup_columns',99)
     expect: {error: true}
-
   - name: Text cast fixture uses native column collation options
     scm: >-
       (createtable "memcp-tests" "tsql_cast_collation"
@@ -1116,7 +1113,6 @@ test_cases:
             (equal? (car (sql_info_formula info)) (quote tsql_cast_text)))
           true (error "text conversion lost its compiler contract")))
     expect: {result: true}
-
   - name: Having aggregate operand binds to the second joined source before its output alias
     sql: SELECT SUM(amount) AS amount FROM tsql_having_input AS p JOIN tsql_native AS n ON p.id=n.id HAVING SUM(amount)>6
     expect: {rows: 1, data: [{amount: 7}]}
@@ -1126,7 +1122,6 @@ test_cases:
   - name: Having aggregate binds unqualified input columns from a derived relation
     sql: SELECT SUM(amount) AS amount FROM (SELECT amount FROM tsql_native) AS d HAVING SUM(amount)>10
     expect: {rows: 1, data: [{amount: 14}]}
-
   - name: cast result types come from declarations including null operands
     scm: |
       (begin
@@ -1283,7 +1278,6 @@ test_cases:
           "SELECT id,SUM(CAST(amount AS INT)) OVER () AS total FROM tsql_native ORDER BY id"
           nil nil nil)) "sql_type_expr"))
     expect: {result: true}
-
   - name: RPC declaration grammar uses qualified builtin types and native dimensions
     scm: |
       (expression_equal? (tds_bind_declarations "memcp-tests"
@@ -1365,8 +1359,18 @@ test_cases:
   - name: RPC temporal wire inputs remain explicit unsupported types
     scm: |
       (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v DATETIME2(7)")
-        (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "scale" 7) "value" nil)))
-    expect: {error: true}
+        (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "scale" 7)
+          "value" (list "days" 719162 "ticks" 1 "offset" 0))))
+    expect: {error: true, contains: fractional temporal parameter}
+  - name: RPC temporal NULL retains its declared contract
+    scm: |
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME2(7)")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "scale" 7) "value" nil)))
+        (and (nil? (s "__tsql_parameter:v"))
+          (expression_equal? (s "__tsql_parameter_declarations") (list (list "v" (list "DATETIME2" 7))))))
+    expect: {result: true}
   - name: Pure prepare description retains types without parameter values
     scm: |
       (begin
@@ -1385,7 +1389,6 @@ test_cases:
   - name: Qualified expression cast reuses the declaration grammar
     sql: SELECT CAST('7' AS [sys].[INT]) AS value
     expect: {rows: 1, data: [{value: 7}]}
-
   - name: NOCOUNT controls completion while native writes and rows remain visible
     scm: |
       (begin
@@ -1433,7 +1436,6 @@ test_cases:
   - name: Unsupported session semantics are rejected explicitly
     sql: SET ANSI_NULLS OFF
     expect: {error: true}
-
   - name: ANSI NULL startup setting accepts the existing three-valued semantics
     sql: SET ANSI_NULLS ON
     expect: {rows: 0}
@@ -1545,7 +1547,6 @@ test_cases:
   - name: Zero scale generated values follow the declared columns
     sql: SELECT id,value FROM tsql_identity_zero_scale ORDER BY id
     expect: {rows: 2, data: [{id: 1, value: 7}, {id: 2, value: 8}]}
-
   - name: Positive identity seed uses the native table allocator
     sql: CREATE TABLE tsql_seeded_identity (id INT IDENTITY(50,1) PRIMARY KEY,value INT)
   - name: Native seeded identity assigns consecutive values
@@ -1600,7 +1601,6 @@ test_cases:
   - name: Seeded ALTER ADD does not bypass historical row initialization
     sql: ALTER TABLE tsql_seeded_identity ADD other INT IDENTITY(50,1)
     expect: {error: true}
-
   - name: Generated integer boundary uses the declared maximum
     setup:
       - sql: DROP TABLE IF EXISTS tsql_identity_int_limit
@@ -1700,7 +1700,6 @@ test_cases:
   - name: Rejected identity UPDATE preserves the original row
     sql: SELECT id,value FROM tsql_seeded_identity WHERE value=7
     expect: {rows: 1, data: [{id: 50, value: 7}]}
-
   - name: Parallel sessions receive disjoint own identity blocks
     setup:
       - sql: DROP TABLE IF EXISTS tsql_identity_parallel
@@ -1745,7 +1744,6 @@ test_cases:
         (execute "INSERT INTO tsql_identity_tx(value) VALUES (9)")
         (equal? ((execute "SELECT id FROM tsql_identity_tx") "id") 3))
     expect: {result: true}
-
   - name: Small integer identity preserves its last declared value
     setup:
       - sql: DROP TABLE IF EXISTS tsql_identity_small_limit
@@ -1769,7 +1767,6 @@ test_cases:
   - name: Carrier exhaustion preserves the exact committed identity
     sql: SELECT id,value FROM tsql_identity_big_limit
     expect: {rows: 1, data: [{id: 9223372036854775807, value: 7}]}
-
   - name: Duplicate identity targets cannot overwrite a validated explicit value
     setup:
       - sql: DROP TABLE IF EXISTS tsql_identity_duplicate
@@ -1788,7 +1785,6 @@ test_cases:
   - name: Duplicate target rejections publish no native rows
     sql: SELECT COUNT(*) AS n FROM tsql_identity_duplicate
     expect: {rows: 1, data: [{n: 0}]}
-
   - name: Rejected unique identity insert preserves the previous completion ID
     setup:
       - sql: DROP TABLE IF EXISTS tsql_identity_completion_unique
@@ -1831,7 +1827,6 @@ test_cases:
   - name: Aborted before insert publishes no identity row
     sql: SELECT COUNT(*) AS n FROM tsql_identity_completion_trigger
     expect: {rows: 1, data: [{n: 0}]}
-
   - name: Streaming identity insertion retains bounded native sink performance
     setup:
       - sql: DROP TABLE IF EXISTS tsql_identity_perf_target
@@ -1867,7 +1862,6 @@ test_cases:
       - sql: INSERT INTO tsql_identity_perf_target(value) SELECT value FROM tsql_identity_perf_source ORDER BY id
     sql: SELECT COUNT(*) AS n,MIN(id) AS first,MAX(id) AS last FROM tsql_identity_perf_target
     expect: {rows: 1, data: [{n: 5120, first: 1, last: 5120}]}
-
   - name: Native identity functions use the last owned block and preserve the first completion
     scm: |-
       (begin
