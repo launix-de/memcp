@@ -1016,7 +1016,8 @@ would retain fractional clocks fail until a generic higher-precision carrier
 is available; accepting them here would silently lose the user's value. */
 (define tsql_calendar_cast_text (lambda (value) (if (nil? value) nil (begin
 	(if (regexp_test value "[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]*[1-9]")
-		(error "fractional temporal conversion is not implemented") value)))))
+		(if (nil? (tsql_calendar_text value)) value
+			(error "fractional temporal conversion is not implemented")) value)))))
 (define tsql_temporal_compiler (lambda (target style dimensions) (lambda (infos) (begin
 	(tsql_decl_dimensions target dimensions)
 	(define input (car infos))
