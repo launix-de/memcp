@@ -772,7 +772,10 @@ test_cases:
        ORDER BY (SELECT f.uploaded_at FROM usol_notice_asset f WHERE f.ID=r.asset_id LIMIT 1) DESC,
        r.year_id DESC,r.site_id,r.department_id,r.category_id,r.ID DESC LIMIT 1) LIMIT 10000
     warmup: 0
-    timing_samples: 4
+    # Keep cold compilation/cache preparation in the measurement, then run
+    # 50 steady queries so isolated pauses do not dominate the measurement.
+    # Both revisions validate every result and retain all timing samples.
+    timing_samples: 51
     timing_aggregation: total
     performance_rows: 100000
     threshold_ms: 15000
