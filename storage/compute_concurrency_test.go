@@ -19,6 +19,7 @@ package storage
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -519,5 +520,77 @@ func TestOrderedComputeInvalidationReadsDeltaUnderShardLock(t *testing.T) {
 	want := int64(10 + rounds)
 	if got := proxy.GetValue(lastIdx).Int(); got != want {
 		t.Fatalf("running[%d] after %d concurrent inserts = %d, want %d", lastIdx, rounds, got, want)
+	}
+}
+
+// Compute-cache publication is not a stored-row mutation. Each mapper variant
+// must retain the selected physical identity and fill its cache without trying
+// to upgrade a caller's shard read lock, even with a writer already queued.
+func TestComputeSetDoesNotUpgradeShardReadOwnership(t *testing.T) {
+	for _, main := range []bool{true, false} {
+		for _, batch := range []bool{false, true} {
+			t.Run(fmt.Sprintf("main=%t/batch=%t", main, batch), func(t *testing.T) {
+				shard := &storageShard{t: &table{PersistencyMode: Memory}, main_count: 1,
+					columns: make(map[string]ColumnStorage), inserts: [][]scm.Scmer{{}}}
+				shard.setState(WRITE)
+				proxy := &StorageComputeProxy{shard: shard, colName: "cached", isOrdered: true,
+					count: 1, delta: make(map[uint32]scm.Scmer)}
+				shard.columns["cached"] = proxy
+				callback := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+					scm.Apply(args[1], scm.NewInt(42))
+					return args[0]
+				})
+				mapper := shard.OpenMapReducer([]string{"$set:cached"}, callback, false, 0, nil, nil)
+				defer mapper.Close()
+				id := uint32(0)
+				if !main {
+					id = 1
+				}
+				// A cached value belongs to its captured generation, including an
+				// identity hidden by a later DELETE. Filling it must not revive or
+				// forward that stored row. Scans own visibility filtering.
+				shard.deletions.Set(uint(id), true)
+				shard.mu.RLock()
+				writerDone := make(chan struct{})
+				go func() {
+					shard.mu.Lock()
+					shard.mu.Unlock()
+					close(writerDone)
+				}()
+				deadline := time.Now().Add(time.Second)
+				for shard.mu.TryRLock() {
+					shard.mu.RUnlock()
+					if time.Now().After(deadline) {
+						shard.mu.RUnlock()
+						<-writerDone
+						t.Fatal("writer did not queue")
+					}
+					runtime.Gosched()
+				}
+				done := make(chan struct{})
+				go func() {
+					if batch {
+						mapper.Stream(scm.NewNil(), []uint32{id}, []uint32{0})
+					} else {
+						mapper.Stream(scm.NewNil(), []uint32{id}, nil)
+					}
+					close(done)
+				}()
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Error("compute-cache fill waited for the shard lock")
+				}
+				shard.mu.RUnlock()
+				<-writerDone
+				<-done
+				if got := proxy.storedORCValue(id); !got.IsInt() || got.Int() != 42 {
+					t.Fatalf("cache slot %d = %v, want 42", id, got)
+				}
+				if !shard.deletions.Get(uint(id)) {
+					t.Fatal("cache fill changed stored-row visibility")
+				}
+			})
+		}
 	}
 }

@@ -164,25 +164,26 @@ compile boundary. Byte equality reuses the native collation-aware operator;
 no SQL type wrapper survives into execution or storage. */
 (define tsql_binary_type? (lambda (type)
 	(has? '("BINARY" "VARBINARY" "IMAGE" "ROWVERSION") type)))
+(define tsql_comparison_compiler (lambda (op) (lambda (infos) (begin
+	(define left_info (car infos))
+	(define right_info (cadr infos))
+	(define left_type (sql_info_type left_info))
+	(define right_type (sql_info_type right_info))
+	(define head (match op "eq" (quote equal??) "ne" (quote equal??)
+		"lt" (quote <) "gt" (quote >) "le" (quote <=) "ge" (quote >=)))
+	(define comparison (if (and
+		(or (tsql_binary_type? left_type) (equal? left_type "NULL"))
+		(or (tsql_binary_type? right_type) (equal? right_type "NULL"))
+		(or (tsql_binary_type? left_type) (tsql_binary_type? right_type)))
+		(sql_info (if (has? '("eq" "ne") op)
+			(list (quote equal_collate) (sql_info_formula left_info) (sql_info_formula right_info) "bin")
+			(list (quote sql_compare) (sql_info_formula left_info) (sql_info_formula right_info)
+				(collate "bin" false) (string head))) "BOOLEAN" nil)
+		(sql_comparison_info head left_info right_info)))
+	(sql_info (if (equal? op "ne") (list (quote sql_not) (sql_info_formula comparison))
+		(sql_info_formula comparison)) "BOOLEAN" (sql_info_collation comparison))))))
 (define tsql_comparison_expr (lambda (op left right)
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define left_info (car infos))
-		(define right_info (cadr infos))
-		(define left_type (sql_info_type left_info))
-		(define right_type (sql_info_type right_info))
-		(define head (match op "eq" (quote equal??) "ne" (quote equal??)
-			"lt" (quote <) "gt" (quote >) "le" (quote <=) "ge" (quote >=)))
-		(define comparison (if (and
-			(or (tsql_binary_type? left_type) (equal? left_type "NULL"))
-			(or (tsql_binary_type? right_type) (equal? right_type "NULL"))
-			(or (tsql_binary_type? left_type) (tsql_binary_type? right_type)))
-			(sql_info (if (has? '("eq" "ne") op)
-				(list (quote equal_collate) (sql_info_formula left_info) (sql_info_formula right_info) "bin")
-				(list (quote sql_compare) (sql_info_formula left_info) (sql_info_formula right_info)
-					(collate "bin" false) (string head))) "BOOLEAN" nil)
-			(sql_comparison_info head left_info right_info)))
-		(sql_info (if (equal? op "ne") (list (quote sql_not) (sql_info_formula comparison))
-			(sql_info_formula comparison)) "BOOLEAN" (sql_info_collation comparison)))) left right)))
+	(list (quote sql_compile_expr) (list (quote tsql_comparison_compiler) op) left right)))
 (define tsql_column_type (parser (define name tsql_identifier) (toUpper name)))
 (define tsql_storage_type (lambda (name)
 	/* Text declarations remain native metadata. Storage chooses its value
@@ -511,24 +512,23 @@ allocation stay unchanged. Other dialects keep their own implicit-list rules. */
 	(map columns (lambda (name) (begin
 		(define declaration (tsql_target_column_declaration database table_name name planning_session))
 		(if (nil? declaration) (error "unknown INSERT column: " name) declaration)))))))
+(define tsql_text_compiler (lambda (length national fixed) (lambda (infos) (begin
+	(define info (car infos))
+	(define source (sql_info_type info))
+	(define formula (if (tsql_temporal_type? source)
+		(list format_date (tsql_calendar_difference_formula info)
+			(match source "DATE" "%Y-%m-%d" "TIME" "%H:%i:%s"
+				"DATETIME2" "%Y-%m-%d %H:%i:%s.000" _ "%Y-%m-%d %H:%i:%s"))
+		(sql_info_formula info)))
+	(if (and (plain_literal_expr? formula) (sql_numeric_type? (sql_info_type info))
+		(not (equal? length -1)) (> (strlen (string formula)) length))
+		(error "numeric character conversion overflow") true)
+	(sql_info (list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national)
+		(if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR")
+		(sql_info_collation info))))))
 (define tsql_cast_text_expr (lambda (value dimensions national fixed) (begin
-	/* Resolve the operand at the shared compile boundary, where its sources
-	and SQL contract are known. A parser-local walk would lose column types. */
 	(define length (if (empty_list? dimensions) 30 (car dimensions)))
-	(list (quote sql_compile_expr) (lambda (infos) (begin
-		(define info (car infos))
-		(define source (sql_info_type info))
-		(define formula (if (tsql_temporal_type? source)
-			(list format_date (tsql_calendar_difference_formula info)
-				(match source "DATE" "%Y-%m-%d" "TIME" "%H:%i:%s"
-					"DATETIME2" "%Y-%m-%d %H:%i:%s.000" _ "%Y-%m-%d %H:%i:%s"))
-			(sql_info_formula info)))
-		(if (and (plain_literal_expr? formula) (sql_numeric_type? (sql_info_type info))
-			(not (equal? length -1)) (> (strlen (string formula)) length))
-			(error "numeric character conversion overflow") true)
-		(sql_info (list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national)
-			(if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR")
-			(sql_info_collation info)))) value))))
+	(list (quote sql_compile_expr) (list (quote tsql_text_compiler) length national fixed) value))))
 /* The default character contract is NCHAR(1), without a supplementary-character
 collation. SQL conversion and range decisions stay here; the runtime operator
 only encodes Unicode scalars. Isolated surrogate code units are unsupported. */
@@ -1221,7 +1221,7 @@ Only the selected native operation survives the shared compile boundary. */
 		(if numeric nil (reduce infos (lambda (collation info)
 			(sql_merge_collation collation (sql_info_collation info))) nil))))))
 (define tsql_add_expr (lambda (left right)
-	(list (quote sql_compile_expr) tsql_compile_addition left right)))
+	(list (quote sql_compile_expr) (quote tsql_compile_addition) left right)))
 (define tsql_raise_error (lambda (number message state)
 	(error (list "tsql-error" number message state))))
 (define tsql_integer_divide (lambda (left right)
@@ -1318,6 +1318,7 @@ The shared expression compiler still owns the SQL type; these additional wire
 dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
 	((symbol sql_compile_column) _compiler column) (tsql_result_dimensions sources column parameters)
+	((symbol sql_compile_expr) ((symbol tsql_text_compiler) length _national _fixed) _value) (list length)
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
 	((symbol sql_compile_expr) ((symbol tsql_temporal_compiler) _target _style ((symbol quote) dimensions)) _value) dimensions
 	((symbol sql_compile_expr) ((symbol tsql_dateadd_compiler) _unit _months _seconds) _amount value)
@@ -1525,6 +1526,23 @@ a separator is recognized only on a physical line containing no SQL text. */
 (define tsql_connection_session (lambda (session)
 	(coalesceNil (session "__tsql_connection_session") session)))
 
+(define tsql_column_length (lambda (database policy relation column)
+	(if (or (nil? relation) (nil? column)) nil (begin
+		(define object ((parser '( (? (define owner tsql_identifier) ".")
+			(define name tsql_identifier)) (list (if (or (nil? owner) (equal?? owner "dbo")) database owner) name)) relation))
+		(define object_schema (car object))
+		(define name (coalesceNil (show (table object_schema false (cadr object) true) "name") (cadr object)))
+		(if policy (policy object_schema name false) true)
+		(define handle (table object_schema false name false))
+		(define declaration (if (nil? handle) nil (tsql_effective_column (show handle "column" column true) nil)))
+		(if (nil? declaration) nil (tsql_declared_byte_length declaration))))))
+
+(define tsql_view_has_metadata_scalar? (lambda (node) (match node
+	((symbol quote) _datum) false
+	(cons (symbol tsql_column_length) _arguments) true
+	(cons _head _tail) (not (nil? (find node tsql_view_has_metadata_scalar? nil)))
+	_ false)))
+
 (define parse_tsql (lambda (database s policy planning_session tx) (begin
 	(define schema database)
 	(define parse_started_ns (nanotime))
@@ -1653,17 +1671,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 	) (list (coalesce partition_by '()) (coalesce order_by '()))))
 
 	(define column_length_expr (lambda (relation column)
-		(list (quote sql_type_expr)
-			(list (lambda (relation column) (if (or (nil? relation) (nil? column)) nil (begin
-				(define object ((parser '( (? (define owner tsql_identifier) ".")
-					(define name tsql_identifier)) (list (if (or (nil? owner) (equal?? owner "dbo")) database owner) name)) relation))
-				(define object_schema (car object))
-				(define name (coalesceNil (show (table object_schema false (cadr object) true) "name") (cadr object)))
-				(if policy (policy object_schema name false) true)
-				(define handle (table object_schema false name false))
-				(define declaration (if (nil? handle) nil (tsql_effective_column (show handle "column" column true) nil)))
-				(if (nil? declaration) nil (tsql_declared_byte_length declaration))))) relation column)
-			"INT" nil)))
+		(list (quote sql_type_expr) (list (quote tsql_column_length) database policy relation column) "INT" nil)))
 
 	(define tsql_expression6 (parser (or
 
@@ -1810,8 +1818,10 @@ a separator is recognized only on a physical line containing no SQL text. */
 	(define tabledefs (parser (or
 
 		(parser '((define l tabledefs) (define x (or
-			(parser '((atom "CROSS" true) (atom "APPLY" true) (define r tabledef)) (list (tsql_apply_source r false)))
-			(parser '((atom "OUTER" true) (atom "APPLY" true) (define r tabledef)) (list (tsql_apply_source r true)))
+			(parser '((atom "CROSS" true) (atom "APPLY" true) (define r tabledef)) (list (list (source_alias r) (source_schema r)
+				(list (quote tsql_pending_apply) (source_relation r)) false nil)))
+			(parser '((atom "OUTER" true) (atom "APPLY" true) (define r tabledef)) (list (list (source_alias r) (source_schema r)
+				(list (quote tsql_pending_apply) (source_relation r)) true nil)))
 			(parser '((atom "LEFT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e tsql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl true e))))
 			(parser '((? (atom "INNER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e tsql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl false e))))
 			(parser '((? (atom "CROSS" true)) (atom "JOIN" true) (define r tabledefs)) r)
@@ -1834,7 +1844,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(make_query_block db sources
 					(map_assoc (expand_query_block_fields sources fields) (lambda (_title expr)
 						(if (star_expr? expr) expr
-							(list (quote sql_compile_expr) (lambda (infos) (car infos)) expr))))
+							(list (quote sql_compile_expr) (quote car) expr))))
 					condition group having order limit offset hidden stages
 					(qassoc_set facts (quote lateral) true))
 				_ (error "APPLY currently requires a SELECT query"))
@@ -1856,21 +1866,21 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define rows (+ (parser '("(" (define row (+ tsql_expression ",")) ")") row) ","))
 			")" (? (atom "AS" true)) (define id tsql_identifier)
 			"(" (define aliases (+ tsql_identifier ",")) ")")
-			(list id schema (tsql_inline_values_query aliases rows) false nil))
+			(list id schema (list (quote tsql_pending_values) aliases rows) false nil))
 
 		(parser '((atom "(" true) (define query tsql_select) (atom ")" true) (atom "AS" true) (define id tsql_identifier) "(" (define aliases (+ tsql_identifier ",")) ")")
-			(list id schema (tsql_apply_derived_column_aliases query aliases) false nil))
+			(list id schema (list (quote tsql_pending_aliases) query aliases) false nil))
 		(parser '((atom "(" true) (define query tsql_select) (atom ")" true) (define id tsql_identifier) "(" (define aliases (+ tsql_identifier ",")) ")")
-			(list id schema (tsql_apply_derived_column_aliases query aliases) false nil))
+			(list id schema (list (quote tsql_pending_aliases) query aliases) false nil))
 		(parser '((atom "(" true) (define query tsql_select) (atom ")" true) (atom "AS" true) (define id tsql_identifier)) '(id schema query false nil))
 		(parser '((atom "(" true) (define query tsql_select) (atom ")" true) (define id tsql_identifier)) '(id schema query false nil))
 
 		(parser '((define owner tsql_schema_identifier) (define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (tsql_read_source id (tsql_qualifier_database owner database frontend_options) tbl))
 		(parser '((define owner tsql_schema_identifier) (define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (tsql_read_source id (tsql_qualifier_database owner database frontend_options) tbl))
 		(parser '((define owner tsql_schema_identifier) (define tbl tsql_identifier) (? tsql_table_hints)) (tsql_read_source tbl (tsql_qualifier_database owner database frontend_options) tbl))
-		(parser '((define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (tsql_read_source id schema tbl))
-		(parser '((define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (tsql_read_source id schema tbl))
-		(parser '((define tbl tsql_identifier) (? tsql_table_hints)) (tsql_read_source tbl schema tbl))
+		(parser '((define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (list id schema (list (quote tsql_source_name) tbl) false nil))
+		(parser '((define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (list id schema (list (quote tsql_source_name) tbl) false nil))
+		(parser '((define tbl tsql_identifier) (? tsql_table_hints)) (list tbl schema (list (quote tsql_source_name) tbl) false nil))
 	)))
 
 	(define from nil)
@@ -1887,64 +1897,24 @@ a separator is recognized only on a physical line containing no SQL text. */
 
 	(define offset nil)
 
-	(define tsql_select_order (lambda (query) (match query
-		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) order
-		_ nil
-	)))
+	/* A nested set expression is a normal derived relation. This preserves its
+	duplicate/window boundary using the shared binder and planner. */
+	(define tsql_query_from_source (lambda (query) (make_query_block schema
+		(list (list "__tsql_query_source" schema query false nil))
+		(list "*" (list (quote sql_compile_column) (quote tsql_compile_column)
+			(list (quote get_column) "__tsql_query_source" false "*" false)))
+		true nil nil nil nil nil '() '() '())))
 
-	(define tsql_select_limit (lambda (query) (match query
-		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) limit
-		_ nil
-	)))
-
-	(define tsql_select_offset (lambda (query) (match query
-		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) offset
-		_ nil
-	)))
-
-	(define tsql_select_clear_stage (lambda (query) (match query
-		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts)
-		(list (quote query-block) schema tables fields condition group having nil nil nil '() '() '())
-		_ query
-	)))
-
-	(define tsql_union_all_parts (lambda (query)
-		(match query
-			((symbol union-block) (symbol all) branches order limit offset facts) (list branches order limit offset)
-			_ nil)))
-
-	(define tsql_union_distinct_parts (lambda (query)
-		(match query
-			((symbol union-block) (symbol distinct) branches order limit offset facts) (list branches order limit offset)
-			_ nil)))
-
-	(define tsql_union_all_query (lambda (left right) (begin
-		(define right_parts (tsql_union_all_parts right))
-		(if (nil? right_parts)
-			(list (quote union-block)
-				(quote all)
-				(list left (tsql_select_clear_stage right))
-				(tsql_select_order right)
-				(tsql_select_limit right)
-				(tsql_select_offset right)
-				'())
-			(match right_parts '(branches order limit offset)
-				(list (quote union-block) (quote all) (cons left branches) order limit offset '())))
-	)))
-
-	(define tsql_union_distinct_query (lambda (left right) (begin
-		(define right_parts (tsql_union_distinct_parts right))
-		(if (nil? right_parts)
-			(list (quote union-block)
-				(quote distinct)
-				(list left (tsql_select_clear_stage right))
-				(tsql_select_order right)
-				(tsql_select_limit right)
-				(tsql_select_offset right)
-				'())
-			(match right_parts '(branches order limit offset)
-				(list (quote union-block) (quote distinct) (cons left branches) order limit offset '())))
-	)))
+	/* UNION is left associative. Flatten only an adjacent union with the same
+	mode and no intervening result window; every branch keeps its own TOP. */
+	(define tsql_union_query (lambda (mode left right) (begin
+		(define branches (match left
+			((symbol union-block) previous branches order limit offset facts)
+			(if (and (equal? previous mode) (nil? order) (nil? limit) (nil? offset)
+				(empty_list? facts)) (append branches right)
+				(list left right))
+			_ (list left right)))
+		(list (quote union-block) mode branches nil nil nil '()))))
 
 	(define tsql_inner_select_kind (lambda (sym) (begin
 		(if (equal?? sym "inner_select")
@@ -1989,7 +1959,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(match datasets
 			(cons only '()) (tsql_values_row_query schema2 coldesc only)
 			(cons first rest) (reduce rest (lambda (acc row)
-				(tsql_union_all_query acc (tsql_values_row_query schema2 coldesc row)))
+				(tsql_union_query (quote all) acc (tsql_values_row_query schema2 coldesc row)))
 				(tsql_values_row_query schema2 coldesc first))
 			_ (error "INSERT VALUES requires at least one row")
 		)
@@ -2014,6 +1984,102 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(match branches (cons only '()) only
 			_ (list (quote union-block) (quote all) branches nil nil nil '())))))
 
+	/* Export names belong to SELECT syntax, not the rendered expression title.
+	UNION uses its first branch's names; an explicit CTE column list supplies
+	the contract for otherwise unnamed expressions. */
+	(define tsql_cte_unnamed_output? (lambda (query) (match query
+		((symbol query-block) _db _sources _fields _where _group _having _order _limit _offset _hidden _stages facts)
+		(qassoc_get facts (quote tsql_parser_unnamed_output) false)
+		((symbol union-block) _mode branches _order _limit _offset _facts)
+		(tsql_cte_unnamed_output? (car branches))
+		_ false)))
+
+	/* Parser-only source recipes are bound once at the statement's compile
+	boundary. Local definitions become ordinary derived logical queries; native
+	names retain the existing catalog, policy and schema-guard path. Nothing here
+	is retained by a row callback or published as a separate relation catalog. */
+	(define tsql_finalize_sources (lambda (node kind bindings blocked) (begin
+		(define definition_scope (or (equal? kind "definition") (equal? kind "definition_source")))
+		(define child_kind (if definition_scope "definition" "query"))
+		(define source_kind (if definition_scope "definition_source" "source"))
+		(match (if (equal? kind "definition_source") "source" kind)
+			"definitions" (begin
+				(define names (map node car))
+				(if (equal? (count names) (count (merge_unique (list (map names toLower))))) true
+					(error "duplicate CTE declaration name"))
+				(reduce node (lambda (available definition) (match definition
+					'(name aliases body) (begin
+						(if (and (nil? aliases) (tsql_cte_unnamed_output? body))
+							(error "CTE output expressions require column names") true)
+						(define bound (tsql_finalize_sources body "definition" available names))
+						(define exported (tsql_finalize_sources bound "exports" available names))
+						(define titles (queryplan_result_titles exported))
+						(define output_names (coalesceNil aliases titles))
+						(if (equal? (count output_names) (count titles)) true
+							(error "CTE output alias count does not match query column count"))
+						(if (equal? (count output_names) (count (merge_unique (list (map output_names toLower))))) true
+							(error "duplicate CTE output column name"))
+						(cons (list name (if (nil? aliases) exported
+							(tsql_apply_derived_column_aliases exported aliases))) available)))) bindings))
+			"source" (match node '(id database relation outer join) (begin
+				(define resolved (match relation
+					((symbol tsql_source_name) name) (begin
+						(define local (find bindings (lambda (entry) (equal?? (car entry) name)) nil))
+						(if local (list id database (cadr local) outer nil)
+							(find blocked (lambda (entry) (equal?? entry name)) nil)
+							(error "recursive or forward CTE reference is unsupported: " name)
+							(begin
+								(define native (tsql_read_source id database name))
+								(list id database (source_relation native) outer nil))))
+					((symbol tsql_pending_apply) inner)
+					(tsql_apply_source (tsql_finalize_sources (list id database inner outer nil)
+						source_kind bindings blocked) outer)
+					_ (list id database (tsql_finalize_sources relation child_kind bindings blocked) outer nil)))
+				(list (source_alias resolved) (source_schema resolved) (source_relation resolved)
+					(source_outer? resolved) (tsql_finalize_sources join child_kind bindings blocked))))
+			_ (match node
+				((symbol quote) _literal) node
+				((symbol tsql_pending_with) definitions body) (begin
+					(define available (tsql_finalize_sources definitions "definitions" bindings blocked))
+					(tsql_finalize_sources body "query" available '()))
+				((symbol tsql_pending_aliases) body aliases)
+				(tsql_apply_derived_column_aliases
+					(tsql_finalize_sources (tsql_finalize_sources body child_kind bindings blocked)
+						"exports" bindings blocked) aliases)
+				((symbol tsql_pending_values) aliases rows)
+				(tsql_inline_values_query aliases (tsql_finalize_sources rows child_kind bindings blocked))
+				((symbol query-block) db sources fields condition group having order limit offset hidden stages facts)
+				(begin
+					(if definition_scope (begin
+						(if (and (not (empty_list? (coalesceNil order '()))) (nil? limit) (nil? offset))
+							(error "CTE ORDER BY requires TOP or OFFSET") true)
+						(if (qassoc_get facts (quote tsql_parser_query_hint) false)
+							(error "OPTION is not allowed in a CTE definition") true)) true)
+					(define bound_sources (if (equal? kind "exports") sources
+						(map sources (lambda (source) (tsql_finalize_sources source source_kind bindings blocked)))))
+					(make_query_block db bound_sources
+						(if (equal? kind "exports") (expand_query_block_fields bound_sources fields)
+							(tsql_finalize_sources fields child_kind bindings blocked))
+						(tsql_finalize_sources condition child_kind bindings blocked)
+						(tsql_finalize_sources group child_kind bindings blocked)
+						(tsql_finalize_sources having child_kind bindings blocked)
+						(tsql_finalize_sources order child_kind bindings blocked)
+						limit offset hidden stages
+						(filter facts (lambda (fact) (and
+							(not (equal? (car fact) (quote tsql_parser_query_hint)))
+							(not (equal? (car fact) (quote tsql_parser_unnamed_output))))))))
+				((symbol union-block) mode branches order limit offset facts) (begin
+					(if (and definition_scope (not (empty_list? (coalesceNil order '())))
+						(nil? limit) (nil? offset)) (error "CTE ORDER BY requires TOP or OFFSET") true)
+					(list (quote union-block) mode
+						(map branches (lambda (branch) (tsql_finalize_sources branch kind bindings blocked)))
+						(tsql_finalize_sources order child_kind bindings blocked) limit offset
+						(filter facts (lambda (fact) (and
+							(not (equal? (car fact) (quote tsql_parser_query_hint)))
+							(not (equal? (car fact) (quote tsql_parser_unnamed_output))))))))
+				(cons _head _tail) (map node (lambda (item) (tsql_finalize_sources item child_kind bindings blocked)))
+				_ node)))))
+
 	(define tsql_select_core (parser '(
 		(atom "SELECT" true)
 
@@ -2034,7 +2100,15 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(parser '((define e tsql_expression) (define title tsql_identifier)) '(title e))
 			(parser '((define e tsql_expression) (define title tsql_string)) '(title e))
 
-			(parser (define captured (capture tsql_expression)) '((extract_title_or_sql captured) (car (cdr captured))))
+			(parser (define captured (capture tsql_expression)) (begin
+				(define expr (nth captured 1))
+				(define named (match expr
+					((symbol sql_compile_column) _compiler ((symbol get_column) _alias _alias_ic _column _column_ic)) true
+					((symbol get_column) _alias _alias_ic _column _column_ic) true
+					_ false))
+				/* Only this syntax branch needs an unnamed-output marker. */
+				(if named (list (extract_title_or_sql captured) expr)
+					(list (extract_title_or_sql captured) expr false))))
 		) ","))
 		(?
 			(atom "FROM" true)
@@ -2058,6 +2132,58 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(define having tsql_expression)
 		)
 
+	) (begin
+			(define fields (merge (map cols (lambda (column) (slice column 0 2)))))
+			(define unnamed_output (not (nil? (find cols (lambda (column) (equal? (count column) 3)) nil))))
+			(define projected_exprs (extract_assoc fields (lambda (_title expr) expr)))
+			(define sources (if (nil? from) '() (merge from)))
+
+			(define distinct_preserved_by_group (and distinct
+				(and (not (nil? group))
+					(and (not (empty_list? group))
+						(reduce group (lambda (preserved expr)
+							(and preserved (contains? projected_exprs expr))) true)))))
+			(list (quote query-block) schema sources fields condition
+				(if (and distinct (not distinct_preserved_by_group)) projected_exprs group)
+				having
+				nil prefix_limit nil '() '()
+				(merge (list
+					/* The common name binder resolves all joined/derived sources.
+					HAVING names belong to the input scope in this frontend. */
+					(list (list (quote having_input_scope) true))
+					(if distinct (list (list (quote select_distinct) true)) '())
+					(if unnamed_output (list (list (quote tsql_parser_unnamed_output) true)) '())))))))
+
+	/* Parentheses delimit query expressions. Keep this parser-only bit until
+	the trailing window has been attached; it never enters logical planning. */
+	(define tsql_select_branch (parser (or
+		(parser (define query tsql_select_core) (list query false))
+		(parser '("(" (define query tsql_select) ")") (list query true)))))
+	(define tsql_select_window (lambda (query order suffix_stage parenthesized) (begin
+		(if (and suffix_stage (nil? order)) (error "OFFSET requires ORDER BY") true)
+		(if (and (nil? order) (nil? suffix_stage)) query (begin
+			/* An outer window over a bracketed query is an ordinary derived source.
+			Its inner TOP/order remains a semantic boundary for the shared planner. */
+			(define query (if parenthesized (tsql_query_from_source query) query))
+			(match query
+				((symbol query-block) database sources fields condition group having previous_order limit offset hidden stages facts)
+				(begin
+					(if (and suffix_stage (not (nil? limit))) (error "TOP cannot be combined with OFFSET") true)
+					(make_query_block database sources fields condition group having order
+						(if suffix_stage (car suffix_stage) limit)
+						(if suffix_stage (cadr suffix_stage) offset) hidden stages facts))
+				((symbol union-block) mode branches previous_order limit offset facts)
+				(list (quote union-block) mode branches order
+					(if suffix_stage (car suffix_stage) limit)
+					(if suffix_stage (cadr suffix_stage) offset) facts)))))))
+	(define tsql_select (parser '(
+		(define left tsql_select_branch)
+		(define terms (* (parser '(
+			(atom "UNION" true)
+			(define mode (or (parser (atom "ALL" true) (quote all)) (parser empty (quote distinct))))
+			(define right tsql_select_branch)
+		) (list mode (car right))) empty true))
+
 		(?
 			(atom "ORDER" true)
 			(atom "BY" true)
@@ -2077,44 +2203,32 @@ a separator is recognized only on a physical line containing no SQL text. */
 		)
 
 		(define suffix_stage tsql_select_suffix)
-		(? tsql_query_hints)
+		(? (define query_hint tsql_query_hints))
 
 	) (begin
-			(if (and suffix_stage (nil? order)) (error "OFFSET requires ORDER BY") true)
-			(if (and suffix_stage (not (nil? prefix_limit))) (error "TOP cannot be combined with OFFSET") true)
-			(define projected_exprs (extract_assoc (merge cols) (lambda (_title expr) expr)))
-			(define sources (if (nil? from) '() (merge from)))
+			(define query (tsql_select_window
+				(reduce terms (lambda (query term) (tsql_union_query (car term) query (cadr term))) (car left))
+				order suffix_stage (and (empty_list? terms) (cadr left))))
+			(if query_hint (match query
+				((symbol query-block) db sources fields condition group having order limit offset hidden stages facts)
+				(make_query_block db sources fields condition group having order limit offset hidden stages
+					(cons (list (quote tsql_parser_query_hint) true) facts))
+				((symbol union-block) mode branches order limit offset facts)
+				(make_union_block mode branches order limit offset
+					(cons (list (quote tsql_parser_query_hint) true) facts))) query))))
 
-			(define distinct_preserved_by_group (and distinct
-				(and (not (nil? group))
-					(and (not (empty_list? group))
-						(reduce group (lambda (preserved expr)
-							(and preserved (contains? projected_exprs expr))) true)))))
-			(list (quote query-block) schema sources (merge cols) condition
-				(if (and distinct (not distinct_preserved_by_group)) projected_exprs group)
-				having
-				order (if (nil? prefix_limit) (if suffix_stage (car suffix_stage) limit) prefix_limit)
-				(if suffix_stage (cadr suffix_stage) offset) '() '()
-				(merge (list
-					/* The common name binder resolves all joined/derived sources.
-					HAVING names belong to the input scope in this frontend. */
-					(list (list (quote having_input_scope) true))
-					(if distinct (list (list (quote select_distinct) true)) '())))))))
-
-	(define tsql_select (parser (or
-		(parser '(
-			(define left tsql_select_core)
-			(atom "UNION" true)
-			(atom "ALL" true)
-			(define right tsql_select)
-		) (tsql_union_all_query left right))
-		(parser '(
-			(define left tsql_select_core)
-			(atom "UNION" true)
-			(define right tsql_select)
-		) (tsql_union_distinct_query left right))
-		tsql_select_core
-	)))
+	(define tsql_cte_definitions (parser '(
+		(atom "WITH" true)
+		(define definitions (+ (parser '(
+			(define name tsql_identifier)
+			(define aliases (? (parser '("(" (define names (+ tsql_identifier ",")) ")") names)))
+			(atom "AS" true) "(" (define body tsql_select) ")"
+		) (list name aliases body)) ","))
+	) definitions))
+	(define tsql_root_select (parser (or
+		(parser '((define definitions tsql_cte_definitions) (define body tsql_select))
+			(list (quote tsql_pending_with) definitions body))
+		tsql_select)))
 
 	/* A mutation target may name a FROM alias. Resolve that alias before checking
 	write permission; the grammar never creates a fictitious table for it. */
@@ -2186,16 +2300,24 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(? (atom "FROM" true) (define from (+ tabledefs ",")))
 		(? (atom "WHERE" true) (define condition tsql_expression))
 		(? tsql_query_hints)
-	) (lambda () (begin
-			(define sources (merge (coalesceNil from '())))
+	) (lambda cte_arguments (begin
+			(define cte_bindings (if (empty_list? cte_arguments) '() (car cte_arguments)))
+			(define sources (map (merge (coalesceNil from '())) (lambda (source)
+				(tsql_finalize_sources source "source" cte_bindings '()))))
+			(if (and (nil? (car target))
+				(find cte_bindings (lambda (entry) (equal?? (car entry) (cadr target))) nil)
+				(not (find sources (lambda (source) (and (source_is_base_table? source)
+					(equal?? (source_alias source) (cadr target)))) nil)))
+				(error "write target must be a base table, not a CTE") true)
+			(define bound_condition (tsql_finalize_sources (coalesceNil condition true) "query" cte_bindings '()))
 			(define target (tsql_write_source target sources))
 			(if policy (policy (source_schema target) (source_relation target) true) true)
-			(define values (tsql_update_values target cols))
+			(define values (tsql_update_values target (tsql_finalize_sources cols "query" cte_bindings '())))
 			(if describe (tsql_describe_dml (source_schema target) (tsql_write_sources target sources)
-				values (coalesceNil condition true))
+				values bound_condition)
 				(tsql_build_dml_plan (source_schema target) (source_relation target) (source_alias target)
 					(tsql_write_sources target sources) values
-					(coalesceNil condition true) nil limit nil planning_session tx))))))
+					bound_condition nil limit nil planning_session tx))))))
 	(define tsql_delete (parser '(
 		(atom "DELETE" true)
 		(define limit tsql_write_limit)
@@ -2204,14 +2326,22 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(? (atom "FROM" true) (define from (+ tabledefs ",")))
 		(? (atom "WHERE" true) (define condition tsql_expression))
 		(? tsql_query_hints)
-	) (lambda () (begin
-			(define sources (merge (coalesceNil from '())))
+	) (lambda cte_arguments (begin
+			(define cte_bindings (if (empty_list? cte_arguments) '() (car cte_arguments)))
+			(define sources (map (merge (coalesceNil from '())) (lambda (source)
+				(tsql_finalize_sources source "source" cte_bindings '()))))
+			(if (and (nil? (car target))
+				(find cte_bindings (lambda (entry) (equal?? (car entry) (cadr target))) nil)
+				(not (find sources (lambda (source) (and (source_is_base_table? source)
+					(equal?? (source_alias source) (cadr target)))) nil)))
+				(error "write target must be a base table, not a CTE") true)
+			(define bound_condition (tsql_finalize_sources (coalesceNil condition true) "query" cte_bindings '()))
 			(define target (tsql_write_source target sources))
 			(if policy (policy (source_schema target) (source_relation target) true) true)
 			(if describe (tsql_describe_dml (source_schema target) (tsql_write_sources target sources)
-				(list "__prepare" (list (quote sql_type_expr) 1 "INT" nil)) (coalesceNil condition true))
+				(list "__prepare" (list (quote sql_type_expr) 1 "INT" nil)) bound_condition)
 				(tsql_build_dml_plan (source_schema target) (source_relation target) (source_alias target)
-					(tsql_write_sources target sources) nil (coalesceNil condition true)
+					(tsql_write_sources target sources) nil bound_condition
 					nil limit nil planning_session tx))))))
 
 	(define tsql_truncate (parser '(
@@ -2254,11 +2384,16 @@ a separator is recognized only on a physical line containing no SQL text. */
 			(parser (define id tsql_identifier) '(nil id))))
 		(define aliases (? (parser '("(" (define columns (+ tsql_identifier ",")) ")") columns)))
 		(atom "AS" true)
-		(define captured (capture tsql_select))
+		(define captured (capture tsql_root_select))
 	) (lambda () (match target '(schema2 id) (begin
 			(define view_schema (tsql_qualifier_database schema2 schema frontend_options))
 			(if policy (policy view_schema id true) true)
-			(define query (sql_apply_view_column_aliases (nth captured 1) aliases))
+			(define query (sql_apply_view_column_aliases
+				(tsql_finalize_sources (nth captured 1) "query" '() '()) aliases))
+			(if (tsql_view_has_metadata_scalar? query)
+				(error "COL_LENGTH in stored views requires a consuming compile policy") true)
+			(bind_query_names (tsql_bind_column_compilers (sql_expand_views query policy)
+				(tsql_column_compiler planning_session)) '())
 			(list (quote tsql_create_view_definition)
 				(list (quote session) "__memcp_tx")
 				view_schema id "tsql" (nth captured 0) (list (quote quote) query)
@@ -2288,7 +2423,8 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(define fields (tsql_result_columns bound parameters))
 		(if (list? fields) (list (quote quote) '()) (error "invalid prepared mutation contract")))))
 	(define tsql_build_select_plan (lambda (query) (begin
-		(define expanded (tsql_bind_column_compilers (sql_expand_views query policy) (tsql_column_compiler planning_session)))
+		(define bound_query (tsql_finalize_sources query "query" '() '()))
+		(define expanded (tsql_bind_column_compilers (sql_expand_views bound_query policy) (tsql_column_compiler planning_session)))
 		/* Binding validates names and contracts but lowers conversion callbacks.
 		Describe the original declared expressions so NULL folding cannot erase
 		their explicit widths or temporal precision. Analysis still consumes the
@@ -2367,7 +2503,10 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(? (define schema2 tsql_schema_identifier)) (define tbl tsql_identifier)
 		(? "(" (define columns (+ tsql_identifier ",")) ")")
 		(atom "VALUES" true) (define rows (+ tsql_insert_values_row ","))
-	) (lambda () (begin
+	) (lambda cte_arguments (begin
+			(define cte_bindings (if (empty_list? cte_arguments) '() (car cte_arguments)))
+			(if (and (nil? schema2) (find cte_bindings (lambda (entry) (equal?? (car entry) tbl)) nil))
+				(error "INSERT target must be a base table, not a CTE") true)
 			(define database (tsql_qualifier_database schema2 schema frontend_options))
 			(define tbl (tsql_table_name database tbl planning_session))
 			(if policy (policy database tbl true) true)
@@ -2382,7 +2521,8 @@ a separator is recognized only on a physical line containing no SQL text. */
 			reservation; SELECT limits stay in the shared logical query block. */
 			(define rows (map (if (nil? limit) rows (slice rows 0 limit)) (lambda (row)
 				(map (produceN (count columns)) (lambda (i)
-					(tsql_assignment_value (nth row i) (nth declarations i)))))))
+					(tsql_assignment_value
+						(tsql_finalize_sources (nth row i) "query" cte_bindings '()) (nth declarations i)))))))
 			(if (reduce rows (lambda (found row) (or found (tsql_dataset_contains_inner_select row))) false)
 				(tsql_insert_select_plan database tbl columns explicit_columns (tsql_values_to_select_query database columns rows))
 				(begin
@@ -2402,7 +2542,10 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(atom "INSERT" true) (define limit tsql_write_limit) (? (atom "INTO" true))
 		(? (define schema2 tsql_schema_identifier)) (define tbl tsql_identifier)
 		(atom "DEFAULT" true) (atom "VALUES" true)
-	) (lambda () (begin
+	) (lambda cte_arguments (begin
+			(define cte_bindings (if (empty_list? cte_arguments) '() (car cte_arguments)))
+			(if (and (nil? schema2) (find cte_bindings (lambda (entry) (equal?? (car entry) tbl)) nil))
+				(error "INSERT target must be a base table, not a CTE") true)
 			(define database (tsql_qualifier_database schema2 schema frontend_options))
 			(define tbl (tsql_table_name database tbl planning_session))
 			(if policy (policy database tbl true) true)
@@ -2419,15 +2562,24 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(? (define schema2 tsql_schema_identifier)) (define tbl tsql_identifier)
 		(? "(" (define columns (+ tsql_identifier ",")) ")")
 		(define query tsql_select)
-	) (lambda () (begin
+	) (lambda cte_arguments (begin
+			(define cte_bindings (if (empty_list? cte_arguments) '() (car cte_arguments)))
+			(if (and (nil? schema2) (find cte_bindings (lambda (entry) (equal?? (car entry) tbl)) nil))
+				(error "INSERT target must be a base table, not a CTE") true)
 			(define database (tsql_qualifier_database schema2 schema frontend_options))
 			(define tbl (tsql_table_name database tbl planning_session))
 			(if policy (policy database tbl true) true)
 			(define identity (tsql_insert_identity database tbl planning_session))
 			(tsql_insert_select_plan database tbl (coalesce columns
 				(tsql_insert_target_columns database tbl)) (not (nil? columns))
-				(tsql_insert_limit_query query limit))
+				(tsql_insert_limit_query (tsql_finalize_sources query "query" cte_bindings '()) limit))
 	))))
+	/* A WITH prefix supplies lexical source definitions to the existing
+	mutation action. It does not create an execution scope or another DML path. */
+	(define tsql_cte_mutation (parser '(
+		(define definitions tsql_cte_definitions)
+		(define statement (or tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete))
+	) (lambda () (statement (tsql_finalize_sources definitions "definitions" '() '())))))
 	/* Only UNIQUE declarations publish native keys. Ordinary acceleration
 	declarations carry no catalog state: the common planner owns autoindexes. */
 	(define tsql_create_index (parser '(
@@ -2645,13 +2797,14 @@ a separator is recognized only on a physical line containing no SQL text. */
 		(? (or (atom "TRAN" true) (atom "TRANSACTION" true))))
 		(lambda () (list (quote tx_rollback) (list (quote tsql_connection_session) (quote session))))))
 	(define p (parser (or
-		(parser (define query tsql_select) (lambda () (tsql_build_select_plan query)))
-		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query tsql_select)) (lambda () (explain_queryplan_ir (sql_expand_views query policy))))
-		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query tsql_select)) (lambda () (explain_queryplan_reorder (sql_expand_views query policy) planning_session)))
-		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query tsql_select)) (lambda () (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s) planning_session)))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query tsql_select)) (lambda () (explain_queryplan_physical (sql_expand_views query policy) planning_session)))
-		(parser '((atom "EXPLAIN" true) (define query tsql_select))
-			'(lambda () ('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy) planning_session tx)) (settings "ExplainWidth"))))))
+		tsql_cte_mutation
+		(parser (define query tsql_root_select) (lambda () (tsql_build_select_plan query)))
+		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query tsql_root_select)) (lambda () (explain_queryplan_ir (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy))))
+		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query tsql_root_select)) (lambda () (explain_queryplan_reorder (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy) planning_session)))
+		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query tsql_root_select)) (lambda () (explain_queryplan_compile (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy) parse_started_ns (strlen s) planning_session)))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query tsql_root_select)) (lambda () (explain_queryplan_physical (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy) planning_session)))
+		(parser '((atom "EXPLAIN" true) (define query tsql_root_select))
+			'(lambda () ('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy) planning_session tx)) (settings "ExplainWidth"))))))
 		tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete tsql_truncate
 		tsql_create_view tsql_create_table tsql_alter_table tsql_create_index tsql_alter_index tsql_drop_index
 		(parser '((atom "CREATE" true) (atom "TYPE" true)
@@ -2728,12 +2881,12 @@ a separator is recognized only on a physical line containing no SQL text. */
 
 
 	(define command_parser (if analyze_parameters
-		(parser (define query tsql_select) (lambda () (tsql_build_select_plan query)))
-		describe (parser (or (parser (define query tsql_select) (lambda () (tsql_build_select_plan query)))
-			tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete))
+		(parser (define query tsql_root_select) (lambda () (tsql_build_select_plan query)))
+		describe (parser (or (parser (define query tsql_root_select) (lambda () (tsql_build_select_plan query)))
+			tsql_cte_mutation tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete))
 		(parser (or p (parser empty (lambda () ""))))))
 	(if expression_only
-		((parser (define expression tsql_expression) (sql_expr_info '() expression) "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
+		((parser (define expression tsql_expression) (sql_expr_info '() (tsql_finalize_sources expression "query" '() '())) "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 		script_syntax (begin
 			/* Control grammar captures the ordinary leaf grammar without compiling its
 			statement yet. Earlier DDL in a batch must publish before later DML binds.

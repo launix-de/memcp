@@ -182,6 +182,47 @@ test_cases:
     expect:
       data: [3]
 
+  - name: Derived window cache permits later native DELETE
+    setup:
+    - sql: DROP TABLE IF EXISTS orc_delete_window_base
+    - sql: DROP TABLE IF EXISTS orc_delete_window_audit
+    - sql: CREATE TABLE orc_delete_window_base(id INT PRIMARY KEY,value INT)
+    - sql: CREATE TABLE orc_delete_window_audit(id INT,value INT)
+    - sql: INSERT INTO orc_delete_window_base VALUES(1,10),(2,30),(3,50),(4,20)
+    - sql: CREATE TRIGGER orc_delete_window_log AFTER DELETE ON orc_delete_window_base FOR EACH ROW BEGIN INSERT
+        INTO orc_delete_window_audit(id,value) VALUES(OLD.id,OLD.value); END
+    sql: SELECT id FROM (SELECT id,value FROM orc_delete_window_base ORDER BY id DESC LIMIT 2) w ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 3
+      - id: 4
+  - name: Insert invalidates the existing derived window cache
+    sql: INSERT INTO orc_delete_window_base VALUES(5,60)
+    expect:
+      affected_rows: 1
+  - name: DELETE does not materialize a dirty internal OLD cache
+    sql: DELETE FROM orc_delete_window_base WHERE id=5
+    expect:
+      affected_rows: 1
+  - name: DELETE preserves original OLD input values for user triggers
+    sql: SELECT id,value FROM orc_delete_window_audit
+    expect:
+      rows: 1
+      data:
+      - id: 5
+        value: 60
+  - name: Derived window remains correct after invalidation and DELETE
+    sql: SELECT id FROM (SELECT id,value FROM orc_delete_window_base ORDER BY id DESC LIMIT 2) w ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 3
+      - id: 4
+    cleanup:
+    - sql: DROP TABLE IF EXISTS orc_delete_window_base
+    - sql: DROP TABLE IF EXISTS orc_delete_window_audit
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS orc_dep_base"
   - sql: "DROP TABLE IF EXISTS orc_dep_src"

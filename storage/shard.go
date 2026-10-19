@@ -1649,6 +1649,13 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				if alreadyLocked {
 					triggerDeletedRow = make(dataset, len(declarations))
 					for i, col := range declarations {
+						// An internal ordered cache may need a full dependency scan,
+						// which cannot run while this shard is locked. Ordinary computed
+						// values remain OLD inputs for dependent cache maintenance.
+						if col.IsTemp && len(col.OrcSortCols) > 0 {
+							triggerDeletedRow[i] = scm.NewNil()
+							continue
+						}
 						cs := t.getColumnStorageOrPanic(col.Name, true, nil)
 						if idx < t.main_count {
 							triggerDeletedRow[i] = cs.GetValue(idx)
@@ -1660,6 +1667,12 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					t.mu.RLock()
 					triggerDeletedRow = make(dataset, len(declarations))
 					for i, col := range declarations {
+						// Preserve ordinary computed OLD inputs; ordered cache repair
+						// needs preparation outside this shard's locked section.
+						if col.IsTemp && len(col.OrcSortCols) > 0 {
+							triggerDeletedRow[i] = scm.NewNil()
+							continue
+						}
 						cs := t.getColumnStorageOrPanic(col.Name, true, nil)
 						if idx < t.main_count {
 							triggerDeletedRow[i] = cs.GetValue(idx)
@@ -2733,10 +2746,13 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 	if m.directRead {
 		return m.processDirectReadBlock(acc, recids)
 	}
+	// $set changes a separately synchronized compute cache, not stored rows.
+	// It must not upgrade an enclosing scan/index read lock to a shard write
+	// lock or redirect the generation-owned cache slot to another row version.
 	// Per-row lock: acquire write lock only around each row's mutation,
 	// not for the whole batch. This allows nested read scans (e.g. EXISTS
 	// inside UPDATE on the same table) to acquire RLock between rows.
-	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
+	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol) && !m.shardWriteLocked
 	if !needsPerRowLock && !m.hasUpdateCol && !m.hasIncrementCol && !m.hasSetCol {
 		m.prefetchMainColumns(recids)
 		if reduced, ok := m.processJITBuffer(acc, recids); ok {
@@ -2759,7 +2775,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 					}
 				}()
 			}
-			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
+			if m.hasUpdateCol || m.hasIncrementCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
@@ -2793,7 +2809,7 @@ func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, 
 	if m.directRead {
 		return m.processDirectReadBlock(acc, recids)
 	}
-	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
+	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol) && !m.shardWriteLocked
 	if !needsPerRowLock && !m.hasUpdateCol && !m.hasIncrementCol && !m.hasSetCol {
 		m.prefetchMainColumns(recids)
 		if reduced, ok := m.processJITBuffer(acc, recids); ok {
@@ -2816,7 +2832,7 @@ func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, 
 					}
 				}()
 			}
-			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
+			if m.hasUpdateCol || m.hasIncrementCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
@@ -2850,7 +2866,7 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 		return m.processDirectReadBlock(acc, recids)
 	}
 	// Same hoisting as processMainBlock (see comment there).
-	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
+	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol) && !m.shardWriteLocked
 	for _, id := range recids {
 		func() {
 			effectiveID := id
@@ -2864,7 +2880,7 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 					}
 				}()
 			}
-			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
+			if m.hasUpdateCol || m.hasIncrementCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
@@ -2892,7 +2908,7 @@ func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32,
 	if m.directRead {
 		return m.processDirectReadBlock(acc, recids)
 	}
-	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
+	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol) && !m.shardWriteLocked
 	for rowidx, id := range recids {
 		func() {
 			effectiveID := id
@@ -2907,7 +2923,7 @@ func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32,
 					}
 				}()
 			}
-			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
+			if m.hasUpdateCol || m.hasIncrementCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)

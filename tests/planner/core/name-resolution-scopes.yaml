@@ -38,13 +38,11 @@ setup:
   - sql: "INSERT INTO nr_line VALUES (1, 1, 'A'), (2, 1, 'A'), (3, 1, 'B'), (4, 2, 'C')"
 
 cleanup:
-  - sql: "DROP TABLE IF EXISTS nr_line"
   - sql: "DROP TABLE IF EXISTS nr_alias_conflict"
   - sql: "DROP TABLE IF EXISTS nr_leaf"
   - sql: "DROP TABLE IF EXISTS nr_other"
   - sql: "DROP TABLE IF EXISTS nr_inner"
   - sql: "DROP TABLE IF EXISTS nr_outer"
-
 test_cases:
   - name: "Column identifiers remain case-insensitive when quoted"
     sql: "SELECT `id` FROM nr_outer ORDER BY `Id`"
@@ -53,7 +51,6 @@ test_cases:
       data:
         - {id: 1}
         - {id: 2}
-
   - name: "Derived output column identifiers are case-insensitive"
     sql: |
       SELECT d.foo
@@ -64,7 +61,6 @@ test_cases:
       data:
         - {foo: 1}
         - {foo: 2}
-
   - name: "An unquoted relation qualifier is case-insensitive"
     sql: "SELECT AliasName.ID FROM nr_outer aliasname ORDER BY AliasName.ID"
     expect:
@@ -72,12 +68,10 @@ test_cases:
       data:
         - {ID: 1}
         - {ID: 2}
-
   - name: "A quoted relation qualifier is case-sensitive"
     sql: "SELECT `aliasname`.ID FROM nr_outer `AliasName`"
     expect:
       error: true
-
   - name: "Quoted case-distinct relation aliases remain distinguishable"
     sql: |
       SELECT `a`.ID AS outer_id, `A`.ID AS inner_id
@@ -89,12 +83,10 @@ test_cases:
       data:
         - {outer_id: 1, inner_id: 10}
         - {outer_id: 2, inner_id: 20}
-
   - name: "An unquoted case-folded qualifier rejects case-distinct ambiguity"
     sql: "SELECT a.ID FROM nr_outer `a` JOIN nr_inner `A` ON `A`.ID = `a`.file_id"
     expect:
       error: true
-
   - name: "Derived column alias lists bind the exported names"
     sql: |
       SELECT d.renamed
@@ -105,7 +97,6 @@ test_cases:
       data:
         - {renamed: 1}
         - {renamed: 2}
-
   - name: "Unqualified subquery column prefers the local relation"
     sql: |
       SELECT o.ID
@@ -117,7 +108,6 @@ test_cases:
       data:
         - {ID: 1}
         - {ID: 2}
-
   - name: "Unqualified subquery column falls back to the outer relation"
     sql: |
       SELECT o.ID
@@ -128,7 +118,6 @@ test_cases:
       rows: 1
       data:
         - {ID: 1}
-
   - name: "A local alias shadows an equal outer alias"
     sql: |
       SELECT o.ID
@@ -140,7 +129,6 @@ test_cases:
       data:
         - {ID: 1}
         - {ID: 2}
-
   - name: "Distinct scalar aggregate retains correlation when inner column matches outer alias"
     sql: |
       SELECT o.ID AS ID,
@@ -156,7 +144,6 @@ test_cases:
       data:
         - {ID: 1, item_codes: "A, B"}
         - {ID: 2, item_codes: "C"}
-
   - name: "A user alias cannot collide with a generated lexical alias"
     sql: |
       SELECT o.ID
@@ -169,7 +156,6 @@ test_cases:
       data:
         - {ID: 1}
         - {ID: 2}
-
   - name: "A deeply nested unqualified name prefers the nearest outer scope"
     sql: |
       SELECT o.ID
@@ -186,7 +172,6 @@ test_cases:
       data:
         - {ID: 1}
         - {ID: 2}
-
   - name: "An unqualified local column is not ambiguous with an outer column"
     sql: |
       SELECT o.ID
@@ -202,7 +187,6 @@ test_cases:
       data:
         - {ID: 1}
         - {ID: 2}
-
   - name: "Derived flattening cannot capture an inner IN column"
     sql: |
       SELECT t.ID
@@ -215,7 +199,6 @@ test_cases:
       rows: 1
       data:
         - {ID: 1}
-
   - name: "Explicit correlation through a derived alias survives flattening"
     sql: |
       SELECT t.ID
@@ -229,7 +212,6 @@ test_cases:
       data:
         - {ID: 1}
         - {ID: 2}
-
   - name: "Every UNION branch binds its own unqualified membership column"
     sql: |
       SELECT t.ID
@@ -244,7 +226,6 @@ test_cases:
       rows: 1
       data:
         - {ID: 2}
-
   - name: "GROUP BY and ORDER BY can bind an output alias"
     sql: |
       SELECT ID + 10 AS computed, COUNT(*) AS matches
@@ -256,7 +237,6 @@ test_cases:
       data:
         - {computed: 11, matches: 1}
         - {computed: 12, matches: 1}
-
   - name: "HAVING can bind an output alias"
     sql: |
       SELECT ID + 10 AS computed
@@ -267,7 +247,6 @@ test_cases:
       rows: 1
       data:
         - {computed: 11}
-
   - name: "GROUP BY prefers an input column over a colliding output alias"
     sql: |
       SELECT COUNT(*) AS shared
@@ -279,7 +258,6 @@ test_cases:
       data:
         - {shared: 1}
         - {shared: 1}
-
   - name: "HAVING prefers a colliding output alias over the input column"
     sql: |
       SELECT shared - 1000 AS shared
@@ -291,7 +269,6 @@ test_cases:
       rows: 1
       data:
         - {shared: 1}
-
   - name: "ORDER BY prefers a colliding output alias over the input column"
     sql: |
       SELECT -shared AS shared
@@ -302,7 +279,6 @@ test_cases:
       data:
         - {shared: -1002}
         - {shared: -1001}
-
   - name: "ORDER BY resolves the review alias conflict to the output"
     sql: |
       SELECT ID AS computed
@@ -313,7 +289,6 @@ test_cases:
       data:
         - {computed: 1}
         - {computed: 2}
-
   - name: "UNION ORDER BY binds the union output alias"
     sql: |
       SELECT ID AS result_id FROM nr_outer
@@ -326,7 +301,6 @@ test_cases:
         - {result_id: 1}
         - {result_id: 2}
         - {result_id: 30}
-
   - name: "UNION ORDER BY accepts an output position"
     sql: |
       SELECT ID AS result_id FROM nr_outer
@@ -339,7 +313,6 @@ test_cases:
         - {result_id: 30}
         - {result_id: 2}
         - {result_id: 1}
-
   - name: "UNION ORDER BY rejects a branch relation qualifier"
     sql: |
       SELECT o.ID AS result_id FROM nr_outer o
@@ -348,7 +321,6 @@ test_cases:
       ORDER BY o.ID
     expect:
       error: true
-
   - name: "UNION ORDER BY rejects an unknown output name"
     sql: |
       SELECT ID AS result_id FROM nr_outer
@@ -357,27 +329,22 @@ test_cases:
       ORDER BY missing
     expect:
       error: true
-
   - name: "WHERE cannot bind an output alias"
     sql: "SELECT ID + 10 AS computed FROM nr_outer WHERE computed = 11"
     expect:
       error: true
-
   - name: "A derived relation hides non-projected base columns"
     sql: "SELECT d.outer_only FROM (SELECT ID FROM nr_outer) d"
     expect:
       error: true
-
   - name: "An ambiguous local column fails instead of selecting a driver"
     sql: "SELECT ID FROM nr_inner i JOIN nr_other x ON TRUE"
     expect:
       error: true
-
   - name: "Duplicate aliases in one query block are rejected"
     sql: "SELECT x.ID FROM nr_outer x JOIN nr_inner x ON TRUE"
     expect:
       error: true
-
   - name: "A derived FROM relation cannot capture its sibling"
     sql: |
       SELECT o.ID
@@ -385,7 +352,6 @@ test_cases:
       JOIN (SELECT outer_only) d ON TRUE
     expect:
       error: true
-
   - name: "Parallel sibling scalar scopes keep their repeated local alias"
     parallel: cold_scope_binding
     sql: |
@@ -412,7 +378,6 @@ test_cases:
       data:
         - {ID: 1, first_match: true, second_match: true}
         - {ID: 2, first_match: true, second_match: true}
-
   - name: "Correlated scalar values bind equality representatives locally"
     parallel: cold_scope_binding
     sql: |
@@ -434,7 +399,6 @@ test_cases:
       data:
         - {ID: 1, exact_match: true, matching_rows: 1}
         - {ID: 2, exact_match: true, matching_rows: 1}
-
   - name: "Parallel quoted numeric alias remains local in a lazy branch"
     parallel: cold_scope_binding
     sql: |
@@ -455,7 +419,6 @@ test_cases:
       data:
         - {ID: 1, allowed: true}
         - {ID: 2, allowed: true}
-
   - name: "Parallel unqualified ID remains a column beside nested probes"
     parallel: cold_scope_binding
     sql: |
@@ -472,7 +435,6 @@ test_cases:
       rows: 1
       data:
         - {description: "row-1", label: "ten"}
-
   - name: "Parallel nested EXISTS keeps table names separate from aliases"
     parallel: cold_scope_binding
     sql: |
@@ -498,7 +460,6 @@ test_cases:
       data:
         - {ID: 1, visible: true}
         - {ID: 2, visible: false}
-
   - name: "Deep scalar scopes bind aliases independently below a derived window"
     parallel: cold_scope_binding
     sql: |
@@ -545,7 +506,6 @@ test_cases:
       data:
         - {ID: 1, weighted_end: 206}
         - {ID: 2, weighted_end: 202}
-
   - name: "Shared SQL grammar keeps deep alias captures isolated"
     scm: |
       (begin
@@ -554,7 +514,6 @@ test_cases:
           (parse_sql "memcp-tests" query (lambda (_schema _table _write) true))))))
     expect:
       data: [32]
-
   - name: "JOIN ON cannot reference a later source"
     sql: |
       SELECT o.ID
@@ -563,93 +522,74 @@ test_cases:
       JOIN nr_other x ON TRUE
     expect:
       error: true
-
   - name: "SQL: Derived star exports its declared input columns"
     syntax: mysql
     sql: "SELECT d.ID FROM (SELECT * FROM nr_outer) d WHERE d.ID = 1"
     expect: {rows: 1, data: [{ID: 1}]}
-
   - name: "SQL: Qualified derived star exports its own source"
     syntax: mysql
     sql: "SELECT d.inner_only FROM (SELECT i.* FROM nr_inner i) d WHERE d.ID = 10"
     expect: {rows: 1, data: [{inner_only: 201}]}
-
   - name: "SQL: Nested derived stars retain projection scope"
     syntax: mysql
     sql: "SELECT d.file_id FROM (SELECT m.* FROM (SELECT * FROM nr_outer) m) d WHERE d.ID = 2"
     expect: {rows: 1, data: [{file_id: 20}]}
-
   - name: "SQL: Derived union star exports first branch columns"
     syntax: mysql
     sql: "SELECT d.ID FROM (SELECT * FROM nr_outer UNION ALL SELECT * FROM nr_outer) d WHERE d.ID = 1"
     expect: {rows: 2, data: [{ID: 1}, {ID: 1}]}
-
   - name: "SQL: Derived star does not expose unprojected base columns"
     syntax: mysql
     sql: "SELECT d.outer_only FROM (SELECT x.* FROM (SELECT ID FROM nr_outer) x) d"
     expect: {error: true}
-
   - name: "SQL: Derived star keeps ambiguous input columns invalid"
     syntax: mysql
     sql: "SELECT ID FROM (SELECT * FROM nr_inner) i JOIN (SELECT * FROM nr_other) o ON TRUE"
     expect: {error: true}
-
   - name: "SQL: Derived star rejects an unknown source alias"
     syntax: mysql
     sql: "SELECT d.ID FROM (SELECT missing.* FROM nr_outer o) d"
     expect: {error: true}
-
   - name: "PSQL: Derived star exports its declared input columns"
     syntax: postgresql
     sql: "SELECT d.ID FROM (SELECT * FROM nr_outer) d WHERE d.ID = 1"
     expect: {rows: 1, data: [{ID: 1}]}
-
   - name: "PSQL: Qualified derived star exports its own source"
     syntax: postgresql
     sql: "SELECT d.inner_only FROM (SELECT i.* FROM nr_inner i) d WHERE d.ID = 10"
     expect: {rows: 1, data: [{inner_only: 201}]}
-
   - name: "PSQL: Nested derived stars retain projection scope"
     syntax: postgresql
     sql: "SELECT d.file_id FROM (SELECT m.* FROM (SELECT * FROM nr_outer) m) d WHERE d.ID = 2"
     expect: {rows: 1, data: [{file_id: 20}]}
-
   - name: "PSQL: Derived union star exports first branch columns"
     syntax: postgresql
     sql: "SELECT d.ID FROM (SELECT * FROM nr_outer UNION ALL SELECT * FROM nr_outer) d WHERE d.ID = 1"
     expect: {rows: 2, data: [{ID: 1}, {ID: 1}]}
-
   - name: "PSQL: Derived star does not expose unprojected base columns"
     syntax: postgresql
     sql: "SELECT d.outer_only FROM (SELECT x.* FROM (SELECT ID FROM nr_outer) x) d"
     expect: {error: true}
-
   - name: "PSQL: Derived star keeps ambiguous input columns invalid"
     syntax: postgresql
     sql: "SELECT ID FROM (SELECT * FROM nr_inner) i JOIN (SELECT * FROM nr_other) o ON TRUE"
     expect: {error: true}
-
   - name: "PSQL: Derived star rejects an unknown source alias"
     syntax: postgresql
     sql: "SELECT d.ID FROM (SELECT missing.* FROM nr_outer o) d"
     expect: {error: true}
-
   - name: "PSQL: Quoted derived stars preserve exact alias case"
     syntax: postgresql
     sql: 'SELECT d.inner_only FROM (SELECT "I".* FROM nr_inner "I") d WHERE d.ID=10'
     expect: {rows: 1, data: [{inner_only: 201}]}
-
   - name: "PSQL: Quoted derived stars cannot fold a different alias"
     syntax: postgresql
     sql: 'SELECT d.inner_only FROM (SELECT "I".* FROM nr_inner "i") d'
     expect: {error: true}
-
   - name: "SQL: Quoted derived stars cannot fold a different alias"
     syntax: mysql
     sql: "SELECT d.inner_only FROM (SELECT `I`.* FROM nr_inner `i`) d"
     expect: {error: true}
-
-
   - name: Compiled derived wildcards preserve declaration callbacks and folded qualifiers
     scm: |
       (begin
@@ -666,7 +606,6 @@ test_cases:
           (error (concat "wildcard contract mismatch: " (serialize (list (star_expr? star) expanded types
             (star_expr_matches_source? star (car sources)) (binding_source_columns (car sources))))))))
     expect: {result: true}
-
   - name: Compiled derived wildcards retain exact qualifier contracts
     scm: |
       (begin
@@ -675,10 +614,116 @@ test_cases:
           (list (quote get_column) "O" false "*" false)))
         (empty_list? (expand_query_block_fields sources (list "" star))))
     expect: {result: true}
-
-cleanup:
-  - sql: "DROP TABLE IF EXISTS nr_alias_conflict"
-  - sql: "DROP TABLE IF EXISTS nr_leaf"
-  - sql: "DROP TABLE IF EXISTS nr_other"
-  - sql: "DROP TABLE IF EXISTS nr_inner"
-  - sql: "DROP TABLE IF EXISTS nr_outer"
+  - name: 'T-SQL: Derived star exports its declared input columns'
+    syntax: tsql
+    sql: SELECT d.ID FROM (SELECT * FROM nr_outer) d WHERE d.ID = 1
+    expect:
+      rows: 1
+      data:
+      - ID: 1
+  - name: 'T-SQL: Qualified derived star exports its own source'
+    syntax: tsql
+    sql: SELECT d.inner_only FROM (SELECT i.* FROM nr_inner i) d WHERE d.ID = 10
+    expect:
+      rows: 1
+      data:
+      - inner_only: 201
+  - name: 'T-SQL: Nested derived stars retain projection scope'
+    syntax: tsql
+    sql: SELECT d.file_id FROM (SELECT m.* FROM (SELECT * FROM nr_outer) m) d WHERE d.ID = 2
+    expect:
+      rows: 1
+      data:
+      - file_id: 20
+  - name: 'T-SQL: Derived union star exports first branch columns'
+    syntax: tsql
+    sql: SELECT d.ID FROM (SELECT * FROM nr_outer UNION ALL SELECT * FROM nr_outer) d WHERE d.ID = 1
+    expect:
+      rows: 2
+      data:
+      - ID: 1
+      - ID: 1
+  - name: 'T-SQL: Derived star does not expose unprojected base columns'
+    syntax: tsql
+    sql: SELECT d.outer_only FROM (SELECT x.* FROM (SELECT ID FROM nr_outer) x) d
+    expect:
+      error: true
+  - name: 'T-SQL: Derived star keeps ambiguous input columns invalid'
+    syntax: tsql
+    sql: SELECT ID FROM (SELECT * FROM nr_inner) i JOIN (SELECT * FROM nr_other) o ON TRUE
+    expect:
+      error: true
+  - name: 'T-SQL: Derived star rejects an unknown source alias'
+    syntax: tsql
+    sql: SELECT d.ID FROM (SELECT missing.* FROM nr_outer o) d
+    expect:
+      error: true
+  - name: 'T-SQL: Folded qualified star retains native output names'
+    syntax: tsql
+    sql: SELECT I.* FROM nr_inner i WHERE i.ID=10
+    expect:
+      rows: 1
+      data:
+      - ID: 10
+        inner_only: 201
+        shared: 2001
+        label: ten
+  - name: 'T-SQL: Bracketed qualified star uses the same identifier contract'
+    syntax: tsql
+    sql: SELECT [I].* FROM nr_inner [i] WHERE i.ID=10
+    expect:
+      rows: 1
+      data:
+      - ID: 10
+        inner_only: 201
+        shared: 2001
+        label: ten
+  - name: 'T-SQL: Quoted qualified star uses the same identifier contract'
+    syntax: tsql
+    sql: SELECT "I".* FROM nr_inner "i" WHERE i.ID=10
+    expect:
+      rows: 1
+      data:
+      - ID: 10
+        inner_only: 201
+        shared: 2001
+        label: ten
+  - name: 'T-SQL: Derived folded star exports its declared input columns'
+    syntax: tsql
+    sql: SELECT d.inner_only FROM (SELECT I.* FROM nr_inner i) d WHERE d.ID=10
+    expect:
+      rows: 1
+      data:
+      - inner_only: 201
+  - name: 'T-SQL: Derived bracketed star exports its declared input columns'
+    syntax: tsql
+    sql: SELECT d.inner_only FROM (SELECT [I].* FROM nr_inner [i]) d WHERE d.ID=20
+    expect:
+      rows: 1
+      data:
+      - inner_only: 202
+  - name: 'T-SQL: Nested folded stars preserve each projection scope'
+    syntax: tsql
+    sql: SELECT d.inner_only FROM (SELECT M.* FROM (SELECT I.* FROM nr_inner i) m) d WHERE d.ID=10
+    expect:
+      rows: 1
+      data:
+      - inner_only: 201
+  - name: 'T-SQL: Union folded stars export first branch column names'
+    syntax: tsql
+    sql: SELECT d.inner_only FROM (SELECT I.* FROM nr_inner i UNION ALL SELECT J.* FROM nr_inner j) d WHERE d.ID=10
+    expect:
+      rows: 2
+      data:
+      - inner_only: 201
+      - inner_only: 201
+  - name: 'T-SQL: Folded star cannot restore an unprojected source column'
+    syntax: tsql
+    sql: SELECT d.inner_only FROM (SELECT I.* FROM (SELECT ID FROM nr_inner) i) d
+    expect:
+      error: true
+  - name: 'T-SQL: Unknown folded star remains an invalid source reference'
+    syntax: tsql
+    sql: SELECT MISSING.* FROM nr_inner i
+    expect:
+      error: true

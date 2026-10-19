@@ -2117,6 +2117,77 @@ test_cases:
       - sql: SET IDENTITY_INSERT tsql_identity_explicit_completion OFF
     sql: SELECT @@IDENTITY AS id
     expect: {rows: 1, data: [{id: null}]}
+  - name: CTE view retains native alias and independent cast declarations
+    setup:
+    - sql: DROP VIEW IF EXISTS cte_portable_metadata
+    - sql: DROP VIEW IF EXISTS cte_portable_view
+    - sql: DROP TABLE IF EXISTS cte_portable_input
+    - sql: DROP TYPE IF EXISTS dbo.cte_portable_text
+    - sql: CREATE TYPE dbo.cte_portable_text FROM NVARCHAR(8) NULL
+    - sql: CREATE TABLE cte_portable_input(id INT PRIMARY KEY,label dbo.cte_portable_text)
+    - sql: INSERT INTO cte_portable_input VALUES(1,N'pending')
+    - sql: CREATE VIEW cte_portable_view AS WITH local_rows AS (SELECT id,label FROM cte_portable_input) SELECT label,CAST(label
+        AS NVARCHAR(3)) AS short_label,id+1 AS next_id FROM local_rows
+    sql: SELECT label,short_label,next_id FROM cte_portable_view
+    expect:
+      rows: 1
+      data:
+      - label: pending
+        short_label: pen
+        next_id: 2
+  - name: CTE view description preserves alias type and independent result widths
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests" "SELECT label,short_label,next_id FROM cte_portable_view WHERE 1=0" "" (newsession)))
+        (define original (show (table "memcp-tests" false "cte_portable_input" false) "column" "label" false))
+        (and (equal? (count fields) 3)
+          (equal? (original "RawType") "[memcp-tests].[dbo].[cte_portable_text]")
+          (equal? ((nth fields 0) "sql_type") "NVARCHAR") (equal? ((nth fields 0) "size") 16)
+          (equal? ((nth fields 1) "sql_type") "NVARCHAR") (equal? ((nth fields 1) "size") 6)
+          (equal? ((nth fields 2) "sql_type") "INT") (equal? ((nth fields 2) "size") 4)))
+    expect:
+      result: true
+  - name: Portable metadata helper resolves alias bytes with canonical table spelling
+    sql: SELECT COL_LENGTH(N'dbo.CTE_PORTABLE_INPUT',N'LABEL') AS bytes
+    expect:
+      rows: 1
+      data:
+      - bytes: 16
+  - name: CTE view alias compile recipes survive durable catalog restart
+    action: restart
+  - name: Restored CTE view evaluates portable alias column compilers
+    sql: SELECT label,short_label,next_id FROM cte_portable_view
+    expect:
+      rows: 1
+      data:
+      - label: pending
+        short_label: pen
+        next_id: 2
+  - name: Restored CTE view description preserves alias and cast capacities
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests" "SELECT label,short_label,next_id FROM cte_portable_view WHERE 1=0" "" (newsession)))
+        (and (equal? (count fields) 3)
+          (equal? ((nth fields 0) "sql_type") "NVARCHAR") (equal? ((nth fields 0) "size") 16)
+          (equal? ((nth fields 1) "sql_type") "NVARCHAR") (equal? ((nth fields 1) "size") 6)
+          (equal? ((nth fields 2) "sql_type") "INT") (equal? ((nth fields 2) "size") 4)))
+    expect:
+      result: true
+  - name: CTE view rejects persisted metadata policy before publication
+    sql: CREATE VIEW cte_portable_metadata AS WITH local_rows AS (SELECT id FROM cte_portable_input) SELECT COL_LENGTH(N'cte_portable_input',N'label')
+      AS width FROM local_rows
+    expect:
+      error: true
+      contains: COL_LENGTH in stored views requires a consuming compile policy
+  - name: Rejected CTE metadata view leaves no definition
+    scm: (nil? (sql_find_view "memcp-tests" "cte_portable_metadata"))
+    expect:
+      result: true
+    cleanup:
+    - sql: DROP VIEW IF EXISTS cte_portable_metadata
+    - sql: DROP VIEW cte_portable_view
+    - sql: DROP TABLE cte_portable_input
+    - sql: DROP TYPE dbo.cte_portable_text
   - name: Identity observation precedes completion for VALUES
     setup:
     - sql: DROP TABLE IF EXISTS tsql_identity_observe_source
