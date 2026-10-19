@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Empty years must not inherit document membership from another year.
-# Each performance case measures one cold query plus three warm queries.
+# Performance measurements retain the cold query and fixed repeats.
 # Normal correctness runs use one complete 5000-row sparse-key period. The
 # full-year table is unused there; performance mode retains both 800k fixtures.
 metadata:
@@ -1159,7 +1159,9 @@ test_cases:
       AND (SELECT flag FROM nav_lookup_broad WHERE ID = nav_department.nav_site) = 1
   expect: {rows: 1, data: [{n: 5000}]}
   warmup: 0
-  timing_samples: 4
+  # Retain the cold lookup, then amortize isolated GC/scheduler pauses across
+  # 50 repeats. Every result and sample counts; both A/B sides use this workload.
+  timing_samples: 51
   timing_aggregation: total
   threshold_ms: 5000
 - name: 'Broad lookup does not build a projected table carrier'

@@ -1,0 +1,935 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# New noncritical cases are executable success specifications for observed gaps.
+# Their result assertions must remain intact when the implementation is added.
+metadata:
+  version: '1.0'
+  syntax: tsql
+  description: Historical inventory and valuation through composed UNION CTE and nullable cost contracts
+  isolated: true
+  requires_tds: true
+setup:
+- sql: DROP TABLE IF EXISTS hist_movements
+- sql: DROP TABLE IF EXISTS hist_costs
+- sql: DROP TABLE IF EXISTS hist_variants
+- sql: DROP TABLE IF EXISTS hist_items
+- sql: DROP TABLE IF EXISTS hist_locations
+- sql: DROP TABLE IF EXISTS hist_weights
+- sql: CREATE TABLE hist_movements (tenant SMALLINT, article VARCHAR(20), source_location INT, target_location INT,
+    effect SMALLINT, quantity DECIMAL(18,4), booked DATETIME, internal SMALLINT)
+- sql: INSERT INTO hist_movements VALUES (1,'A',0,10,1,10,'2025-01-01',0),(1,'A',10,0,-1,2,'2025-01-03',0),(1,'A',10,20,0,3,'2025-01-05',0),(1,'A',20,0,-1,99,'2025-01-06',1),(1,'A',0,10,1,100,'2025-02-01',0),(1,'B',0,10,1,4,'2025-01-01',0),(1,'C',0,10,1,2,'2025-01-01',0),(1,'C',10,0,-1,2,'2025-01-02',0),(1,'D',10,0,-1,5,'2025-01-01',0),(2,'A',0,10,1,7,'2025-01-01',0),(1,'E',0,20,1,1,'2025-01-01',0),(1,'F',0,20,1,2,'2025-01-01',0),(1,'G',0,20,1,1,'2025-01-01',0)
+- sql: CREATE TABLE hist_costs (tenant SMALLINT, article VARCHAR(20), effective DATETIME, unit_cost DECIMAL(18,4))
+- sql: INSERT INTO hist_costs VALUES (1,'A','2025-01-01',4),(1,'A','2025-01-07',5),(1,'A','2025-02-01',9),(1,'B','2025-01-01',0),(1,'B','2025-02-01',12),(1,'F','2025-01-01',NULL),(2,'A','2025-01-01',20)
+- sql: CREATE TABLE hist_variants (tenant SMALLINT, article VARCHAR(20), variant INT, unit_cost DECIMAL(18,4), PRIMARY
+    KEY (tenant,article,variant))
+- sql: INSERT INTO hist_variants VALUES (1,'A',0,7),(1,'B',0,8),(1,'C',0,3),(1,'D',0,1),(1,'E',0,0),(1,'F',0,6),(2,'A',0,21)
+- sql: CREATE TABLE hist_items (tenant SMALLINT, article VARCHAR(20), label NVARCHAR(30), weight_id INT, PRIMARY
+    KEY (tenant,article))
+- sql: INSERT INTO hist_items VALUES (1,'A',N'Alpha',1),(1,'B',N'Beta',2),(1,'C',N'Closed',2),(1,'D',N'Negative',2),(1,'E',N'Zero',99),(1,'F',N'Fallback',1),(2,'A',N'Other
+    tenant',3)
+- sql: CREATE TABLE hist_locations (tenant SMALLINT, id INT, label NVARCHAR(20), PRIMARY KEY (tenant,id))
+- sql: INSERT INTO hist_locations VALUES (1,10,N'Main'),(1,20,N'Secondary'),(2,10,N'Other')
+- sql: CREATE TABLE hist_weights (tenant SMALLINT, id INT, percentage DECIMAL(18,4), PRIMARY KEY (tenant,id))
+- sql: INSERT INTO hist_weights VALUES (1,1,50),(1,2,100),(2,3,75)
+test_cases:
+- name: Historical valuation composes four UNION branches five CTEs and nullable master joins
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT b.tenant,b.article,b.location,b.stock,c.unit_cost,c.cost_source,
+     b.stock*c.unit_cost AS value,w.percentage,b.stock*c.unit_cost*(w.percentage/100) AS weighted_value
+     FROM balances b LEFT JOIN costs c ON c.tenant=b.tenant AND c.article=b.article
+     INNER JOIN hist_items i ON i.tenant=b.tenant AND i.article=b.article
+     INNER JOIN hist_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=0
+     INNER JOIN hist_locations l ON l.tenant=b.tenant AND l.id=b.location
+     LEFT JOIN hist_weights w ON i.tenant=w.tenant AND i.weight_id=w.id
+     ORDER BY b.tenant,b.article,b.location
+  expect:
+    rows: 6
+    data:
+    - tenant: 1
+      article: A
+      location: 10
+      stock: 5
+      unit_cost: 5
+      cost_source: history
+      value: 25
+      percentage: 50
+      weighted_value: 12.5
+    - tenant: 1
+      article: A
+      location: 20
+      stock: 3
+      unit_cost: 5
+      cost_source: history
+      value: 15
+      percentage: 50
+      weighted_value: 7.5
+    - tenant: 1
+      article: B
+      location: 10
+      stock: 4
+      unit_cost: 8
+      cost_source: current
+      value: 32
+      percentage: 100
+      weighted_value: 32
+    - tenant: 1
+      article: E
+      location: 20
+      stock: 1
+      unit_cost: 0
+      cost_source: current
+      value: 0
+      percentage: null
+      weighted_value: null
+    - tenant: 1
+      article: F
+      location: 20
+      stock: 2
+      unit_cost: 6
+      cost_source: current
+      value: 12
+      percentage: 50
+      weighted_value: 6
+    - tenant: 2
+      article: A
+      location: 10
+      stock: 7
+      unit_cost: 20
+      cost_source: history
+      value: 140
+      percentage: 75
+      weighted_value: 105
+  noncritical: true
+- name: Transfer UNION legs preserve both signs before location grouping
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ) SELECT location,SUM(quantity) AS stock FROM movements WHERE tenant=1 AND article='A' AND booked<='2025-01-10' GROUP BY location ORDER BY location
+  expect:
+    rows: 2
+    data:
+    - location: 10
+      stock: 5
+    - location: 20
+      stock: 3
+- name: A transfer preserves the tenant total while internal and future movements stay excluded
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ) SELECT tenant,SUM(quantity) AS stock FROM movements WHERE article='A' AND booked<='2025-01-10' GROUP BY tenant ORDER BY tenant
+  expect:
+    rows: 2
+    data:
+    - tenant: 1
+      stock: 8
+    - tenant: 2
+      stock: 7
+- name: Pre-transfer cutoff retains the earlier location and unit cost
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250103',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250103',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT b.tenant,b.article,b.location,b.stock,c.unit_cost,c.cost_source,
+     b.stock*c.unit_cost AS value,w.percentage,b.stock*c.unit_cost*(w.percentage/100) AS weighted_value
+     FROM balances b LEFT JOIN costs c ON c.tenant=b.tenant AND c.article=b.article
+     INNER JOIN hist_items i ON i.tenant=b.tenant AND i.article=b.article
+     INNER JOIN hist_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=0
+     INNER JOIN hist_locations l ON l.tenant=b.tenant AND l.id=b.location
+     LEFT JOIN hist_weights w ON i.tenant=w.tenant AND i.weight_id=w.id
+    WHERE b.tenant=1 AND b.article='A' ORDER BY b.tenant,b.article,b.location
+  expect:
+    rows: 1
+    data:
+    - tenant: 1
+      article: A
+      location: 10
+      stock: 8
+      unit_cost: 4
+      value: 32
+      weighted_value: 16
+  noncritical: true
+- name: The inclusive booking cutoff includes the first day receipt
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250101',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250101',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT b.tenant,b.article,b.location,b.stock,c.unit_cost,c.cost_source,
+     b.stock*c.unit_cost AS value,w.percentage,b.stock*c.unit_cost*(w.percentage/100) AS weighted_value
+     FROM balances b LEFT JOIN costs c ON c.tenant=b.tenant AND c.article=b.article
+     INNER JOIN hist_items i ON i.tenant=b.tenant AND i.article=b.article
+     INNER JOIN hist_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=0
+     INNER JOIN hist_locations l ON l.tenant=b.tenant AND l.id=b.location
+     LEFT JOIN hist_weights w ON i.tenant=w.tenant AND i.weight_id=w.id
+    WHERE b.tenant=1 AND b.article='A' ORDER BY b.tenant,b.article,b.location
+  expect:
+    rows: 1
+    data:
+    - stock: 10
+      unit_cost: 4
+      value: 40
+      weighted_value: 20
+  noncritical: true
+- name: The inclusive cost cutoff selects the same day historical declaration
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250107',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250107',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT b.tenant,b.article,b.location,b.stock,c.unit_cost,c.cost_source,
+     b.stock*c.unit_cost AS value,w.percentage,b.stock*c.unit_cost*(w.percentage/100) AS weighted_value
+     FROM balances b LEFT JOIN costs c ON c.tenant=b.tenant AND c.article=b.article
+     INNER JOIN hist_items i ON i.tenant=b.tenant AND i.article=b.article
+     INNER JOIN hist_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=0
+     INNER JOIN hist_locations l ON l.tenant=b.tenant AND l.id=b.location
+     LEFT JOIN hist_weights w ON i.tenant=w.tenant AND i.weight_id=w.id
+    WHERE b.tenant=1 AND b.article='A' ORDER BY b.tenant,b.article,b.location
+  expect:
+    rows: 2
+    data:
+    - location: 10
+      stock: 5
+      unit_cost: 5
+    - location: 20
+      stock: 3
+      unit_cost: 5
+  noncritical: true
+- name: A cutoff before every movement returns an empty report without fabricated rows
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20241231',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20241231',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT b.tenant,b.article,b.location,b.stock,c.unit_cost,c.cost_source,
+     b.stock*c.unit_cost AS value,w.percentage,b.stock*c.unit_cost*(w.percentage/100) AS weighted_value
+     FROM balances b LEFT JOIN costs c ON c.tenant=b.tenant AND c.article=b.article
+     INNER JOIN hist_items i ON i.tenant=b.tenant AND i.article=b.article
+     INNER JOIN hist_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=0
+     INNER JOIN hist_locations l ON l.tenant=b.tenant AND l.id=b.location
+     LEFT JOIN hist_weights w ON i.tenant=w.tenant AND i.weight_id=w.id
+     ORDER BY b.tenant,b.article,b.location
+  expect:
+    rows: 0
+    data: []
+  noncritical: true
+- name: Future receipt and latest historical cost become eligible at the same cutoff
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250201',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250201',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT b.tenant,b.article,b.location,b.stock,c.unit_cost,c.cost_source,
+     b.stock*c.unit_cost AS value,w.percentage,b.stock*c.unit_cost*(w.percentage/100) AS weighted_value
+     FROM balances b LEFT JOIN costs c ON c.tenant=b.tenant AND c.article=b.article
+     INNER JOIN hist_items i ON i.tenant=b.tenant AND i.article=b.article
+     INNER JOIN hist_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=0
+     INNER JOIN hist_locations l ON l.tenant=b.tenant AND l.id=b.location
+     LEFT JOIN hist_weights w ON i.tenant=w.tenant AND i.weight_id=w.id
+    WHERE b.tenant=1 AND b.article='A' ORDER BY b.tenant,b.article,b.location
+  expect:
+    rows: 2
+    data:
+    - location: 10
+      stock: 105
+      unit_cost: 9
+      value: 945
+      weighted_value: 472.5
+    - location: 20
+      stock: 3
+      unit_cost: 9
+      value: 27
+      weighted_value: 13.5
+  noncritical: true
+- name: Latest costs remain independent for the same article in two tenants
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT tenant,article,unit_cost FROM historical_cost WHERE article='A' ORDER BY tenant
+  expect:
+    rows: 2
+    data:
+    - tenant: 1
+      article: A
+      unit_cost: 5
+    - tenant: 2
+      article: A
+      unit_cost: 20
+- name: Zero historical cost selects the declared current cost
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT b.tenant,b.article,b.location,b.stock,c.unit_cost,c.cost_source,
+     b.stock*c.unit_cost AS value,w.percentage,b.stock*c.unit_cost*(w.percentage/100) AS weighted_value
+     FROM balances b LEFT JOIN costs c ON c.tenant=b.tenant AND c.article=b.article
+     INNER JOIN hist_items i ON i.tenant=b.tenant AND i.article=b.article
+     INNER JOIN hist_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=0
+     INNER JOIN hist_locations l ON l.tenant=b.tenant AND l.id=b.location
+     LEFT JOIN hist_weights w ON i.tenant=w.tenant AND i.weight_id=w.id
+    WHERE b.tenant=1 AND b.article='B' ORDER BY b.tenant,b.article,b.location
+  expect:
+    rows: 1
+    data:
+    - stock: 4
+      unit_cost: 8
+      cost_source: current
+      weighted_value: 32
+  noncritical: true
+- name: NULL historical cost selects the declared current cost
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT b.tenant,b.article,b.location,b.stock,c.unit_cost,c.cost_source,
+     b.stock*c.unit_cost AS value,w.percentage,b.stock*c.unit_cost*(w.percentage/100) AS weighted_value
+     FROM balances b LEFT JOIN costs c ON c.tenant=b.tenant AND c.article=b.article
+     INNER JOIN hist_items i ON i.tenant=b.tenant AND i.article=b.article
+     INNER JOIN hist_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=0
+     INNER JOIN hist_locations l ON l.tenant=b.tenant AND l.id=b.location
+     LEFT JOIN hist_weights w ON i.tenant=w.tenant AND i.weight_id=w.id
+    WHERE b.tenant=1 AND b.article='F' ORDER BY b.tenant,b.article,b.location
+  expect:
+    rows: 1
+    data:
+    - stock: 2
+      unit_cost: 6
+      cost_source: current
+      weighted_value: 6
+  noncritical: true
+- name: Missing historical cost retains a zero current cost and nullable valuation weight
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT b.tenant,b.article,b.location,b.stock,c.unit_cost,c.cost_source,
+     b.stock*c.unit_cost AS value,w.percentage,b.stock*c.unit_cost*(w.percentage/100) AS weighted_value
+     FROM balances b LEFT JOIN costs c ON c.tenant=b.tenant AND c.article=b.article
+     INNER JOIN hist_items i ON i.tenant=b.tenant AND i.article=b.article
+     INNER JOIN hist_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=0
+     INNER JOIN hist_locations l ON l.tenant=b.tenant AND l.id=b.location
+     LEFT JOIN hist_weights w ON i.tenant=w.tenant AND i.weight_id=w.id
+    WHERE b.tenant=1 AND b.article='E' ORDER BY b.tenant,b.article,b.location
+  expect:
+    rows: 1
+    data:
+    - stock: 1
+      unit_cost: 0
+      value: 0
+      percentage: null
+      weighted_value: null
+  noncritical: true
+- name: HAVING removes both exhausted and negative location balances
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT article FROM balances WHERE tenant=1 AND article IN ('C','D')
+  expect:
+    rows: 0
+    data: []
+- name: Missing item masters are retained by balance computation and rejected only by final inner joins
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT article,stock FROM balances WHERE tenant=1 AND article='G'
+  expect:
+    rows: 1
+    data:
+    - article: G
+      stock: 1
+- name: The final inner joins do not synthesize an item master
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT b.tenant,b.article,b.location,b.stock,c.unit_cost,c.cost_source,
+     b.stock*c.unit_cost AS value,w.percentage,b.stock*c.unit_cost*(w.percentage/100) AS weighted_value
+     FROM balances b LEFT JOIN costs c ON c.tenant=b.tenant AND c.article=b.article
+     INNER JOIN hist_items i ON i.tenant=b.tenant AND i.article=b.article
+     INNER JOIN hist_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=0
+     INNER JOIN hist_locations l ON l.tenant=b.tenant AND l.id=b.location
+     LEFT JOIN hist_weights w ON i.tenant=w.tenant AND i.weight_id=w.id
+    WHERE b.tenant=1 AND b.article='G' ORDER BY b.tenant,b.article,b.location
+  expect:
+    rows: 0
+    data: []
+  noncritical: true
+- name: Historical valuation preserves the same contract through a named TDS cutoff parameter
+  tds:
+    statements:
+    - sql: |-
+        WITH movements AS (
+         SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+         UNION ALL
+         SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+         UNION ALL
+         SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+         UNION ALL
+         SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+        ), last_cost AS (
+         SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,@cutoff,112) GROUP BY tenant,article
+        ), historical_cost AS (
+         SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+        ), balances AS (
+         SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,@cutoff,112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+        ), costs AS (
+         SELECT v.tenant,v.article,
+         CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+         CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+         FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+        )
+        SELECT b.tenant,b.article,b.location,b.stock,c.unit_cost,c.cost_source,
+         b.stock*c.unit_cost AS value,w.percentage,b.stock*c.unit_cost*(w.percentage/100) AS weighted_value
+         FROM balances b LEFT JOIN costs c ON c.tenant=b.tenant AND c.article=b.article
+         INNER JOIN hist_items i ON i.tenant=b.tenant AND i.article=b.article
+         INNER JOIN hist_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=0
+         INNER JOIN hist_locations l ON l.tenant=b.tenant AND l.id=b.location
+         LEFT JOIN hist_weights w ON i.tenant=w.tenant AND i.weight_id=w.id
+         ORDER BY b.tenant,b.article,b.location
+      parameters:
+      - name: cutoff
+        value: '20250110'
+      expect:
+        rows: 6
+        data:
+        - tenant: 1
+          article: A
+          location: 10
+          weighted_value: 12.5
+        - tenant: 1
+          article: A
+          location: 20
+          weighted_value: 7.5
+        - tenant: 1
+          article: B
+          location: 10
+          weighted_value: 32
+        - tenant: 1
+          article: E
+          location: 20
+          weighted_value: null
+        - tenant: 1
+          article: F
+          location: 20
+          weighted_value: 6
+        - tenant: 2
+          article: A
+          location: 10
+          weighted_value: 105
+  noncritical: true
+- name: Inline table function stores the historical report with a bound cutoff
+  sql: |-
+    CREATE FUNCTION dbo.hist_inventory(@cutoff VARCHAR(8)) RETURNS TABLE AS RETURN (WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,@cutoff,112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,@cutoff,112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT b.tenant,b.article,b.location,b.stock,c.unit_cost,c.cost_source,
+     b.stock*c.unit_cost AS value,w.percentage,b.stock*c.unit_cost*(w.percentage/100) AS weighted_value
+     FROM balances b LEFT JOIN costs c ON c.tenant=b.tenant AND c.article=b.article
+     INNER JOIN hist_items i ON i.tenant=b.tenant AND i.article=b.article
+     INNER JOIN hist_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=0
+     INNER JOIN hist_locations l ON l.tenant=b.tenant AND l.id=b.location
+     LEFT JOIN hist_weights w ON i.tenant=w.tenant AND i.weight_id=w.id
+     )
+  noncritical: true
+- name: Inline table function invocation retains the composed report values
+  sql: SELECT article,location,weighted_value FROM dbo.hist_inventory('20250110') WHERE tenant=1 AND article='A'
+    ORDER BY location
+  expect:
+    rows: 2
+    data:
+    - article: A
+      location: 10
+      weighted_value: 12.5
+    - article: A
+      location: 20
+      weighted_value: 7.5
+  noncritical: true
+- name: Receipt branch keeps the declared sign and tenant partition before the cutoff
+  sql: SELECT tenant,article,SUM(effect*quantity) AS quantity FROM hist_movements WHERE source_location=0 AND target_location<>0
+    AND internal=0 AND booked<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article ORDER BY tenant,article
+  expect:
+    rows: 7
+    data:
+    - tenant: 1
+      article: A
+      quantity: 10
+    - tenant: 1
+      article: B
+      quantity: 4
+    - tenant: 1
+      article: C
+      quantity: 2
+    - tenant: 1
+      article: E
+      quantity: 1
+    - tenant: 1
+      article: F
+      quantity: 2
+    - tenant: 1
+      article: G
+      quantity: 1
+    - tenant: 2
+      article: A
+      quantity: 7
+- name: Issue branch excludes internal movements and preserves negative quantities
+  sql: SELECT tenant,article,SUM(effect*quantity) AS quantity FROM hist_movements WHERE source_location<>0 AND target_location=0
+    AND internal=0 AND booked<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article ORDER BY tenant,article
+  expect:
+    rows: 3
+    data:
+    - tenant: 1
+      article: A
+      quantity: -2
+    - tenant: 1
+      article: C
+      quantity: -2
+    - tenant: 1
+      article: D
+      quantity: -5
+- name: A transfer exposes independent negative source and positive target legs
+  sql: SELECT article,source_location,target_location,-1*quantity AS issue,+1*quantity AS receipt FROM hist_movements
+    WHERE source_location<>0 AND target_location<>0 AND internal=0
+  expect:
+    rows: 1
+    data:
+    - article: A
+      source_location: 10
+      target_location: 20
+      issue: -3
+      receipt: 3
+- name: The latest historical payload is joined by tenant article and exact maximum date
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT tenant,article,unit_cost FROM historical_cost ORDER BY tenant,article
+  expect:
+    rows: 4
+    data:
+    - tenant: 1
+      article: A
+      unit_cost: 5
+    - tenant: 1
+      article: B
+      unit_cost: 0
+    - tenant: 1
+      article: F
+      unit_cost: null
+    - tenant: 2
+      article: A
+      unit_cost: 20
+- name: The cost stage distinguishes zero NULL absent and nonzero historical inputs
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT tenant,article,unit_cost,cost_source FROM costs ORDER BY tenant,article
+  expect:
+    rows: 7
+    data:
+    - tenant: 1
+      article: A
+      unit_cost: 5
+      cost_source: history
+    - tenant: 1
+      article: B
+      unit_cost: 8
+      cost_source: current
+    - tenant: 1
+      article: C
+      unit_cost: 3
+      cost_source: current
+    - tenant: 1
+      article: D
+      unit_cost: 1
+      cost_source: current
+    - tenant: 1
+      article: E
+      unit_cost: 0
+      cost_source: current
+    - tenant: 1
+      article: F
+      unit_cost: 6
+      cost_source: current
+    - tenant: 2
+      article: A
+      unit_cost: 20
+      cost_source: history
+  noncritical: true
+- name: A tied maximum date preserves both historical payloads rather than picking one arbitrarily
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20250110',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT tenant,article,unit_cost FROM historical_cost WHERE tenant=1 AND article='A' ORDER BY unit_cost
+  expect:
+    rows: 2
+    data:
+    - tenant: 1
+      article: A
+      unit_cost: 5
+    - tenant: 1
+      article: A
+      unit_cost: 6
+  setup:
+  - sql: INSERT hist_costs VALUES(1,'A','2025-01-07',6)
+  cleanup:
+  - sql: DELETE FROM hist_costs WHERE tenant=1 AND article='A' AND effective='2025-01-07' AND unit_cost=6
+- name: Declared fractional valuation weights do not use integer division
+  sql: SELECT tenant,id,percentage/100 AS factor FROM hist_weights ORDER BY tenant,id
+  expect:
+    rows: 3
+    data:
+    - tenant: 1
+      id: 1
+      factor: 0.5
+    - tenant: 1
+      id: 2
+      factor: 1
+    - tenant: 2
+      id: 3
+      factor: 0.75
+- name: A cost stage cutoff before any history retains current masters and source labels
+  sql: |-
+    WITH movements AS (
+     SELECT tenant,article,source_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,effect*quantity AS quantity,booked FROM hist_movements WHERE target_location<>0 AND source_location=0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,source_location AS location,-1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+     UNION ALL
+     SELECT tenant,article,target_location AS location,+1*quantity AS quantity,booked FROM hist_movements WHERE source_location<>0 AND target_location<>0 AND internal=0
+    ), last_cost AS (
+     SELECT tenant,article,MAX(effective) AS effective FROM hist_costs WHERE effective<=CONVERT(DATETIME,'20241231',112) GROUP BY tenant,article
+    ), historical_cost AS (
+     SELECT c.tenant,c.article,c.unit_cost FROM hist_costs c INNER JOIN last_cost h ON h.tenant=c.tenant AND h.article=c.article AND h.effective=c.effective
+    ), balances AS (
+     SELECT tenant,article,location,SUM(quantity) AS stock FROM movements WHERE booked<=CONVERT(DATETIME,'20241231',112) GROUP BY tenant,article,location HAVING SUM(quantity)>0
+    ), costs AS (
+     SELECT v.tenant,v.article,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN v.unit_cost ELSE h.unit_cost END AS unit_cost,
+     CASE WHEN ISNULL(h.unit_cost,0)=0 THEN 'current' ELSE 'history' END AS cost_source
+     FROM hist_variants v LEFT JOIN historical_cost h ON v.tenant=h.tenant AND v.article=h.article AND v.variant=0
+    )
+    SELECT tenant,article,unit_cost,cost_source FROM costs WHERE article='A' ORDER BY tenant
+  expect:
+    rows: 2
+    data:
+    - tenant: 1
+      article: A
+      unit_cost: 7
+      cost_source: current
+    - tenant: 2
+      article: A
+      unit_cost: 21
+      cost_source: current
+  noncritical: true
+cleanup:
+- sql: DROP TABLE IF EXISTS hist_movements
+- sql: DROP TABLE IF EXISTS hist_costs
+- sql: DROP TABLE IF EXISTS hist_variants
+- sql: DROP TABLE IF EXISTS hist_items
+- sql: DROP TABLE IF EXISTS hist_locations
+- sql: DROP TABLE IF EXISTS hist_weights

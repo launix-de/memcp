@@ -1,0 +1,441 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# New noncritical cases are executable success specifications for observed gaps.
+# Their result assertions must remain intact when the implementation is added.
+metadata:
+  version: '1.0'
+  syntax: tsql
+  description: Tenant-scoped period maintenance, document repair and composed daily reports
+  isolated: true
+  requires_tds: true
+setup:
+- sql: DROP TABLE IF EXISTS op_parcels
+- sql: DROP TABLE IF EXISTS op_shipments
+- sql: DROP TABLE IF EXISTS op_statistics
+- sql: DROP TABLE IF EXISTS op_lines
+- sql: DROP TABLE IF EXISTS op_documents
+- sql: DROP TABLE IF EXISTS op_kinds
+- sql: DROP TABLE IF EXISTS op_periods
+- sql: DROP TABLE IF EXISTS op_journal
+- sql: CREATE TABLE op_documents (tenant SMALLINT, id INT, number INT, year INT, account NVARCHAR(20), document_date
+    DATETIME, kind VARCHAR(3), net DECIMAL(18,4), gross DECIMAL(18,4), cost_center NVARCHAR(20), status SMALLINT,
+    print_process INT, customer_group VARCHAR(10), PRIMARY KEY (tenant,id))
+- sql: CREATE TABLE op_kinds (code VARCHAR(3) PRIMARY KEY, revenue_sign SMALLINT)
+- sql: INSERT INTO op_kinds VALUES ('INV',1),('CR',-1)
+- sql: |-
+    INSERT INTO op_documents VALUES
+    (1,10,110,2025,N'C1',DATEFROMPARTS(YEAR(GETDATE()),1,10),'INV',100,120,N'HEAD',0,0,'GT1'),
+    (1,11,111,2025,N'C1',DATEFROMPARTS(YEAR(GETDATE()),2,10),'CR',20,24,NULL,0,0,'GT1'),
+    (1,12,112,2025,N'C2',DATEFROMPARTS(YEAR(GETDATE()),3,5),'INV',40,48,NULL,0,0,'GT2'),
+    (2,10,999,2025,N'C1',DATEFROMPARTS(YEAR(GETDATE()),1,10),'INV',999,999,N'OTHER',0,0,'GT1'),
+    (1,20,120,2025,N'C3',DATEFROMPARTS(YEAR(GETDATE()),8,1),'INV',90,108,NULL,0,0,'GT1'),
+    (1,21,121,2025,N'C4',DATEFROMPARTS(YEAR(GETDATE()),8,2),'INV',10,12,NULL,0,0,'OTHER'),
+    (1,22,122,2025,N'C5',DATEFROMPARTS(YEAR(GETDATE()),8,3),'INV',15,18,NULL,0,0,'GT1')
+- sql: CREATE TABLE op_lines (tenant SMALLINT, id INT, document_id INT, previous_id INT, article NVARCHAR(20), cost_center
+    NVARCHAR(20), accessory SMALLINT, origin_id INT, accessory_id INT, PRIMARY KEY (tenant,id))
+- sql: |-
+    INSERT INTO op_lines VALUES
+    (1,100,10,7,N'A',N'LINE',16,100,100),
+    (1,101,10,7,N'A',NULL,1,100,100),
+    (1,102,11,8,N'B',NULL,1,999,999),
+    (1,103,11,8,N'B',NULL,0,0,0),
+    (1,104,12,0,N'C',NULL,1,777,777),
+    (2,100,10,7,N'A',NULL,1,999,999)
+- sql: CREATE TABLE op_statistics (tenant SMALLINT, line_id INT, revenue DECIMAL(18,4))
+- sql: INSERT INTO op_statistics VALUES (1,100,10),(1,101,15),(1,102,20),(1,103,5),(1,104,7),(2,100,999)
+- sql: CREATE TABLE op_periods (year INT, period INT, tenant SMALLINT, total_period INT, label NVARCHAR(40), year_label
+    NVARCHAR(10), short_label NVARCHAR(10), begin_date DATETIME, end_date DATETIME, locked SMALLINT, PRIMARY KEY
+    (tenant,year,period))
+- sql: INSERT INTO op_periods VALUES (2024,13,1,2024013,N'Closing',N'2024',N'13',NULL,NULL,-1),(2024,13,2,2024013,N'Other
+    tenant',N'2024',N'13',NULL,NULL,-1)
+- sql: CREATE TABLE op_journal (tenant SMALLINT, id INT, period INT, print_status SMALLINT, position INT, PRIMARY
+    KEY (tenant,id))
+- sql: INSERT INTO op_journal VALUES (1,1,2024000,2,9),(1,2,2024001,2,9),(1,3,2024999,3,7),(1,4,2025001,4,8),(2,2,2024001,5,6)
+- sql: CREATE TABLE op_shipments (id INT PRIMARY KEY, tenant SMALLINT, document_id INT, daily_closed SMALLINT)
+- sql: INSERT INTO op_shipments VALUES (1,1,10,-1),(2,1,11,-1),(3,1,12,-1),(4,1,20,0),(5,1,21,-1),(6,1,22,-1)
+- sql: CREATE TABLE op_parcels (id INT PRIMARY KEY, shipment_id INT, number INT, created DATETIME)
+- sql: |-
+    INSERT INTO op_parcels VALUES
+    (1,1,1,'2025-01-10'),(2,1,2,'2025-01-10'),
+    (3,2,1,'2025-01-11'),(4,3,1,'2024-12-31'),
+    (5,4,1,'2025-01-12'),(6,5,1,'2025-01-12'),
+    (7,6,1,'2024-12-15'),(8,6,2,'2024-12-15'),(9,6,3,'2024-12-15')
+test_cases:
+- name: Tenant-scoped duplicate position audit retains grouped hidden sort keys
+  sql: |-
+    SELECT COUNT(l.id) AS copies,d.number,d.year,l.previous_id,l.article
+    FROM op_lines l
+    INNER JOIN op_documents d ON l.document_id=d.id AND l.tenant=d.tenant
+    WHERE l.tenant=1 AND l.previous_id>0 AND d.year>2020
+    GROUP BY l.document_id,d.number,d.year,l.previous_id,l.article
+    ORDER BY l.document_id DESC
+  expect:
+    rows: 2
+    data:
+    - copies: 2
+      number: 111
+      year: 2025
+      previous_id: 8
+      article: B
+    - copies: 2
+      number: 110
+      year: 2025
+      previous_id: 7
+      article: A
+- name: Cost allocation groups the same nullable fallback expression it projects
+  sql: |-
+    SELECT d.tenant,d.id,COALESCE(l.cost_center,d.cost_center,N'UNASSIGNED') AS cost_center,SUM(s.revenue) AS revenue
+    FROM op_statistics s
+    INNER JOIN op_lines l ON s.tenant=l.tenant AND s.line_id=l.id
+    INNER JOIN op_documents d ON d.tenant=l.tenant AND d.id=l.document_id
+    GROUP BY d.tenant,d.id,COALESCE(l.cost_center,d.cost_center,N'UNASSIGNED')
+    ORDER BY d.tenant,d.id,cost_center
+  expect:
+    rows: 5
+    data:
+    - tenant: 1
+      id: 10
+      cost_center: HEAD
+      revenue: 15
+    - tenant: 1
+      id: 10
+      cost_center: LINE
+      revenue: 10
+    - tenant: 1
+      id: 11
+      cost_center: UNASSIGNED
+      revenue: 25
+    - tenant: 1
+      id: 12
+      cost_center: UNASSIGNED
+      revenue: 7
+    - tenant: 2
+      id: 10
+      cost_center: OTHER
+      revenue: 999
+- name: Date-bounded signed turnover uses declared date conversions and tenant parameters
+  tds:
+    statements:
+    - sql: |-
+        SELECT d.tenant,d.account,SUM(d.net*k.revenue_sign) AS net_revenue,SUM(d.gross*k.revenue_sign) AS gross_revenue
+        FROM op_documents d INNER JOIN op_kinds k ON k.code=d.kind
+        WHERE d.document_date BETWEEN DATEFROMPARTS(YEAR(GETDATE()),1,1) AND CONVERT(DATETIME,CONCAT(@cutoff,YEAR(GETDATE())),104)
+          AND d.tenant=@tenant
+        GROUP BY d.tenant,d.account ORDER BY d.account
+      parameters:
+      - name: tenant
+        value: 1
+      - name: cutoff
+        value: 30.06.
+      expect:
+        rows: 2
+        data:
+        - tenant: 1
+          account: C1
+          net_revenue: 80
+          gross_revenue: 96
+        - tenant: 1
+          account: C2
+          net_revenue: 40
+          gross_revenue: 48
+- name: Period extension retains declarations Unicode text optional INTO and NULL dates
+  tds:
+    statements:
+    - sql: |-
+        DECLARE @tenant AS smallint = 1
+        UPDATE dbo.op_periods SET label=N'Closing 1' WHERE year=2024 AND period=13 AND tenant=@tenant
+        INSERT dbo.op_periods (year,period,tenant,total_period,label,year_label,short_label,begin_date,end_date,locked)
+        VALUES (2024,14,@tenant,2024014,N'Closing 2',N'2024',N'14',NULL,NULL,0)
+    - sql: SELECT tenant,period,label,begin_date,end_date,locked FROM op_periods ORDER BY tenant,period
+      expect:
+        rows: 3
+        data:
+        - tenant: 1
+          period: 13
+          label: Closing 1
+          begin_date: null
+          end_date: null
+          locked: -1
+        - tenant: 1
+          period: 14
+          label: Closing 2
+          begin_date: null
+          end_date: null
+          locked: 0
+        - tenant: 2
+          period: 13
+          label: Other tenant
+          begin_date: null
+          end_date: null
+          locked: -1
+- name: Journal reset changes the complete inclusive period range of one tenant
+  sql: UPDATE op_journal SET print_status=0,position=0 WHERE tenant=1 AND (period BETWEEN 2024001 AND 2024999)
+- name: Journal reset preserves out of range rows and other tenants
+  sql: SELECT tenant,id,print_status,position FROM op_journal ORDER BY tenant,id
+  expect:
+    rows: 5
+    data:
+    - tenant: 1
+      id: 1
+      print_status: 2
+      position: 9
+    - tenant: 1
+      id: 2
+      print_status: 0
+      position: 0
+    - tenant: 1
+      id: 3
+      print_status: 0
+      position: 0
+    - tenant: 1
+      id: 4
+      print_status: 4
+      position: 8
+    - tenant: 2
+      id: 2
+      print_status: 5
+      position: 6
+- name: Period unlocking retains year and tenant boundaries
+  sql: UPDATE op_periods SET locked=0 WHERE tenant=1 AND year=2024 AND period>=12
+- name: Period unlocking leaves the other tenant locked
+  sql: SELECT tenant,period,locked FROM op_periods ORDER BY tenant,period
+  expect:
+    rows: 3
+    data:
+    - tenant: 1
+      period: 13
+      locked: 0
+    - tenant: 1
+      period: 14
+      locked: 0
+    - tenant: 2
+      period: 13
+      locked: -1
+- name: Print completion updates two fields by the composite document identity
+  sql: UPDATE op_documents SET [status]=1,print_process=16 WHERE id=10 AND tenant=1
+- name: Print completion leaves the same document ID of another tenant untouched
+  sql: SELECT tenant,id,status,print_process FROM op_documents WHERE id=10 ORDER BY tenant
+  expect:
+    rows: 2
+    data:
+    - tenant: 1
+      id: 10
+      status: 1
+      print_process: 16
+    - tenant: 2
+      id: 10
+      status: 0
+      print_process: 0
+- name: Orphan accessory repair uses a same-table anti-membership source
+  tds:
+    statements:
+    - sql: |-
+        UPDATE op_lines SET accessory=0,origin_id=0,accessory_id=0
+        WHERE (Accessory>0 AND Accessory<>16) AND tenant=1 AND origin_id>0
+          AND origin_id NOT IN (SELECT id FROM op_lines WHERE origin_id=id AND accessory=16 AND tenant=1)
+    - sql: SELECT tenant,id,accessory,origin_id,accessory_id FROM op_lines ORDER BY tenant,id
+      expect:
+        rows: 6
+        data:
+        - tenant: 1
+          id: 100
+          accessory: 16
+          origin_id: 100
+          accessory_id: 100
+        - tenant: 1
+          id: 101
+          accessory: 1
+          origin_id: 100
+          accessory_id: 100
+        - tenant: 1
+          id: 102
+          accessory: 0
+          origin_id: 0
+          accessory_id: 0
+        - tenant: 1
+          id: 103
+          accessory: 0
+          origin_id: 0
+          accessory_id: 0
+        - tenant: 1
+          id: 104
+          accessory: 0
+          origin_id: 0
+          accessory_id: 0
+        - tenant: 2
+          id: 100
+          accessory: 1
+          origin_id: 999
+          accessory_id: 999
+  noncritical: true
+- name: Shipment distribution retains post-aggregate date eligibility and its full denominator
+  tds:
+    statements:
+    - sql: |-
+        WITH package_counts AS (
+          SELECT d.id AS document_id,COUNT(p.number) AS packages,MAX(p.created) AS latest
+          FROM op_parcels p
+          LEFT JOIN op_shipments s ON s.id=p.shipment_id
+          LEFT JOIN op_documents d ON d.id=s.document_id AND d.tenant=s.tenant
+          WHERE d.customer_group LIKE 'GT%' AND s.daily_closed=-1
+          GROUP BY d.id
+        ), package_distribution AS (
+          SELECT packages,COUNT(*) AS documents,COUNT(*)*100.0/SUM(COUNT(*)) OVER () AS percentage
+          FROM package_counts GROUP BY packages
+        )
+        SELECT packages,documents,percentage FROM package_distribution dist
+        WHERE packages BETWEEN 1 AND 25 AND EXISTS (
+          SELECT 1 FROM package_counts c WHERE c.latest>=@start_date AND c.latest<@end_date AND c.packages=dist.packages
+        ) ORDER BY packages
+      parameters:
+      - name: start_date
+        value: '2025-01-01'
+      - name: end_date
+        value: '2025-02-01'
+      expect:
+        rows: 2
+        data:
+        - packages: 1
+          documents: 2
+          percentage: 50
+        - packages: 2
+          documents: 1
+          percentage: 25
+  noncritical: true
+- name: A duplicate period insert is rejected without replacing its existing declaration
+  sql: INSERT dbo.op_periods (year,period,tenant,total_period,label) VALUES (2024,14,1,2024014,N'Duplicate')
+  expect:
+    error: true
+- name: Rejected duplicate period insertion leaves both tenant rows unchanged
+  sql: SELECT tenant,period,label FROM op_periods WHERE period=14 ORDER BY tenant
+  expect:
+    rows: 1
+    data:
+    - tenant: 1
+      period: 14
+      label: Closing 2
+- name: An explicit maintenance transaction can roll back its UPDATE and INSERT together
+  tds:
+    statements:
+    - sql: BEGIN TRANSACTION; UPDATE op_periods SET label=N'Temporary' WHERE tenant=1 AND year=2024 AND period=13;
+        INSERT op_periods (year,period,tenant,total_period,label) VALUES(2024,15,1,2024015,N'Temporary'); ROLLBACK
+        TRANSACTION
+    - sql: SELECT period,label FROM op_periods WHERE tenant=1 ORDER BY period
+      expect:
+        rows: 2
+        data:
+        - period: 13
+          label: Closing 1
+        - period: 14
+          label: Closing 2
+- name: Parameterized dynamic maintenance uses the supplied tenant in the ordinary update path
+  tds:
+    statements:
+    - sql: EXEC sys.sp_executesql N'UPDATE op_periods SET label=@label WHERE tenant=@tenant AND year=2024 AND period=14',N'@tenant
+        smallint,@label nvarchar(40)',@tenant=1,@label=N'Adjusted'
+    - sql: SELECT tenant,period,label FROM op_periods WHERE period=14
+      expect:
+        rows: 1
+        data:
+        - tenant: 1
+          period: 14
+          label: Adjusted
+  cleanup:
+  - sql: UPDATE op_periods SET label=N'Closing 2' WHERE tenant=1 AND period=14
+- name: Invalid tenant initialization rejects a script before its first write
+  sql: DECLARE @tenant smallint=N'not-a-number'; UPDATE op_periods SET label=N'Unexpected' WHERE tenant=@tenant
+  expect:
+    error: true
+- name: A rejected variable initialization preserves prior period values
+  sql: SELECT period,label FROM op_periods WHERE tenant=1 ORDER BY period
+  expect:
+    rows: 2
+    data:
+    - period: 13
+      label: Closing 1
+    - period: 14
+      label: Closing 2
+- name: The daily turnover upper date boundary is inclusive at midnight
+  tds:
+    statements:
+    - sql: SELECT d.account,SUM(d.net*k.revenue_sign) AS revenue FROM op_documents d JOIN op_kinds k ON k.code=d.kind
+        WHERE d.tenant=@tenant AND d.document_date BETWEEN DATEFROMPARTS(YEAR(GETDATE()),1,1) AND CONVERT(DATETIME,CONCAT(@cutoff,YEAR(GETDATE())),104)
+        GROUP BY d.account ORDER BY d.account
+      parameters:
+      - name: tenant
+        value: 1
+      - name: cutoff
+        value: 10.01.
+      expect:
+        rows: 1
+        data:
+        - account: C1
+          revenue: 100
+- name: A date interval before the first sale does not invent an aggregate group
+  sql: SELECT d.account,SUM(d.net*k.revenue_sign) AS revenue FROM op_documents d JOIN op_kinds k ON k.code=d.kind
+    WHERE d.tenant=1 AND d.document_date BETWEEN DATEFROMPARTS(YEAR(GETDATE()),1,1) AND DATEFROMPARTS(YEAR(GETDATE()),1,9)
+    GROUP BY d.account
+  expect:
+    rows: 0
+    data: []
+- name: Invalid localized dates are rejected before a report can run
+  sql: SELECT CONVERT(DATETIME,'31.02.2025',104) AS cutoff
+  expect:
+    error: true
+- name: A blank line cost center is retained rather than replaced by the header fallback
+  sql: SELECT COALESCE(l.cost_center,d.cost_center,N'UNASSIGNED') AS cost_center,SUM(s.revenue) AS revenue FROM
+    op_statistics s JOIN op_lines l ON s.tenant=l.tenant AND s.line_id=l.id JOIN op_documents d ON d.tenant=l.tenant
+    AND d.id=l.document_id WHERE d.tenant=1 AND d.id=10 GROUP BY COALESCE(l.cost_center,d.cost_center,N'UNASSIGNED')
+    ORDER BY cost_center
+  setup:
+  - sql: UPDATE op_lines SET cost_center=N'' WHERE tenant=1 AND id=101
+  cleanup:
+  - sql: UPDATE op_lines SET cost_center=NULL WHERE tenant=1 AND id=101
+  expect:
+    rows: 2
+    data:
+    - cost_center: ''
+      revenue: 15
+    - cost_center: LINE
+      revenue: 10
+- name: An ordinary stored procedure can perform the same parameterized period update
+  tds:
+    statements:
+    - sql: CREATE OR ALTER PROCEDURE dbo.op_unlock_periods @tenant smallint,@year int,@period int AS BEGIN SET NOCOUNT
+        ON; UPDATE op_periods SET locked=0 WHERE tenant=@tenant AND year=@year AND period>=@period; END
+    - sql: EXEC dbo.op_unlock_periods @tenant=2,@year=2024,@period=13
+    - sql: SELECT tenant,period,locked FROM op_periods WHERE tenant=2
+      expect:
+        rows: 1
+        data:
+        - tenant: 2
+          period: 13
+          locked: 0
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.op_unlock_periods
+  - sql: UPDATE op_periods SET locked=-1 WHERE tenant=2
+- name: An invalid period script leaves the request usable for the next statement
+  tds:
+    statements:
+    - sql: INSERT op_periods (year,period,tenant,total_period,label) VALUES (2024,14,1,2024014,N'Duplicate')
+      expect:
+        error: true
+    - sql: SELECT 1 AS ready
+      expect:
+        rows: 1
+        data:
+        - ready: 1
+    - sql: SELECT label FROM op_periods WHERE tenant=1 AND period=14
+      expect:
+        rows: 1
+        data:
+        - label: Closing 2
+cleanup:
+- sql: DROP TABLE IF EXISTS op_parcels
+- sql: DROP TABLE IF EXISTS op_shipments
+- sql: DROP TABLE IF EXISTS op_statistics
+- sql: DROP TABLE IF EXISTS op_lines
+- sql: DROP TABLE IF EXISTS op_documents
+- sql: DROP TABLE IF EXISTS op_kinds
+- sql: DROP TABLE IF EXISTS op_periods
+- sql: DROP TABLE IF EXISTS op_journal
