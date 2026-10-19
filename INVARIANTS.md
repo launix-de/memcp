@@ -586,6 +586,16 @@ variants must preserve this definition/cache distinction. Eager preparation,
 selective prewarming, and lazy repair may change when work happens, never the
 query-visible result.
 
+`ShardMapReducer` distinguishes stored-row mutation from `$set:` compute-cache
+publication. A cache fill retains the selected physical generation and record
+ID, including a record hidden after selection; it must not forward the cache
+slot to another row version or change row visibility. Its source readers retain
+their ordinary lifetime/access ownership, and `StorageComputeProxy.SetValue`
+owns cache synchronization. A cache-only mapper must not acquire a shard write
+lock per row or upgrade an enclosing index/scan read lock. `$update` and
+`$increment:` retain their existing mutation protocol. This distinction does
+not remove the remaining legacy scan/read locks.
+
 ## LIMIT Belongs In Storage Operators
 
 SQL OFFSET/LIMIT must be implemented by storage operators, with or without an
