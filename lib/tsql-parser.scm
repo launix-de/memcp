@@ -2697,10 +2697,10 @@ a separator is recognized only on a physical line containing no SQL text. */
 				(list (quote drop_sql_view) (list (quote session) "__memcp_tx")
 					database name (if ifexists true false)))))
 		(parser '((atom "SET" true) (atom "IDENTITY_INSERT" true)
-			(? (define schema2 tsql_schema_identifier) ".") (define name tsql_identifier)
+			(? (define schema2 tsql_schema_identifier)) (define name tsql_identifier)
 			(define enabled (or (parser (atom "ON" true) true) (parser (atom "OFF" true) false))))
 			(lambda () (begin
-				(define database (coalesce schema2 schema))
+				(define database (tsql_qualifier_database schema2 schema frontend_options))
 				(if policy (policy database name true) true)
 				(list (quote tsql_set_identity_insert) (quote session) database name enabled))))
 		(parser '((atom "SET" true) (atom "NOCOUNT" true)
