@@ -412,5 +412,31 @@ test_cases:
     rows: 1
     data:
     - value: null
+- name: Nested scalar aggregates keep their query scope in sql
+  syntax: sql
+  sql: SELECT p.g,COALESCE((SELECT SUM((SELECT r.v FROM ug_rows r WHERE r.g=e.g ORDER BY r.v DESC LIMIT 1)) FROM
+    ug_rows e WHERE e.g=p.g),0) AS total FROM (SELECT 1 AS g UNION ALL SELECT 2 UNION ALL SELECT 9) p ORDER BY p.g
+  expect:
+    rows: 3
+    data:
+    - g: 1
+      total: 6
+    - g: 2
+      total: 0
+    - g: 9
+      total: 0
+- name: Nested scalar aggregates keep their query scope in psql
+  syntax: psql
+  sql: SELECT p.g,COALESCE((SELECT SUM((SELECT r.v FROM ug_rows r WHERE r.g=e.g ORDER BY r.v DESC LIMIT 1)) FROM
+    ug_rows e WHERE e.g=p.g),0) AS total FROM (SELECT 1 AS g UNION ALL SELECT 2 UNION ALL SELECT 9) p ORDER BY p.g
+  expect:
+    rows: 3
+    data:
+    - g: 1
+      total: 6
+    - g: 2
+      total: 0
+    - g: 9
+      total: 0
 cleanup:
 - sql: DROP TABLE IF EXISTS ug_rows

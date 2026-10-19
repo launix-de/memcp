@@ -6879,7 +6879,10 @@ can be represented by the same reducer. */
 (define rewrite_query_block_union_group (lambda (block src ctx)
 	(begin
 		(define relation (normalize_query_ast (source_relation src)))
-		(if (and (grouped_derived_relation? block)
+		/* Only this SELECT's aggregates own its group boundary. Nested scalar
+		queries keep their own groups and are decorrelated by the ordinary walk. */
+		(if (and (or (not (empty_list? (qb_group block)))
+			(or (not (nil? (qb_having block))) (query_block_has_local_aggregates? block)))
 			(and (equal? (union_mode relation) (quote all))
 				(and (empty_list? (union_order relation))
 					(and (nil? (union_limit relation)) (nil? (union_offset relation))))))
