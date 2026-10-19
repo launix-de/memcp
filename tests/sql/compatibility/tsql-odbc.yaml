@@ -36,8 +36,7 @@ test_cases:
     UNIQUE(id), C'
 - scm: (createforeignkey (table "memcp-tests" false "odbc_keys_child" false) "FK_parent" (list "p_second" "p_first")
     (table "memcp-tests" false "odbc_keys_parent" false) (list "second" "first") "cascade" "set null")
-  name: 'Fixture setup 011: (createforeignkey (table "memcp-tests" false "odbc_keys_child" false) "FK_parent" (list "p_second" "p_first")
-    (t'
+  name: "Fixture setup 011: (createforeignkey (table \"memcp-tests\" \"odbc_keys_child\") \"FK_parent\" (list \"p_second\" \"p_first\") (t"
 - name: Direct base columns retain precise provenance and nullability
   scm: |
     (begin
