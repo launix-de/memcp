@@ -25,6 +25,7 @@ import (
 	"go/token"
 	"go/types"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -1044,5 +1045,215 @@ func enabled(args ...Scmer) Scmer { return NewBool(JITEnabled()) }
 	}
 	if !strings.Contains(code, "GoFuncAddr(JITEnabled)") {
 		t.Fatalf("generator baked in its own build flag:\n%s", code)
+	}
+}
+
+func TestIntegerXorUsesExistingNativeEmitter(t *testing.T) {
+	for _, expression := range []string{"a[0].Int() ^ a[1].Int()", "a[0].Int() ^ -1", "a[0].Int() ^ a[0].Int()", "(a[0].Int() ^ a[1].Int()) + a[0].Int()"} {
+		fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func NewInt(int64) Scmer
+func (Scmer) Int() int64
+func xor(a ...Scmer) Scmer { return NewInt(`+expression+`) }
+`, "xor")
+		code, errMsg := generateClosure("xor", fn, nil)
+		if errMsg != "" {
+			t.Fatal(errMsg)
+		}
+		if !strings.Contains(code, "ctx.EmitXorInt64") {
+			t.Fatalf("missing native XOR: %s", code)
+		}
+		if !strings.Contains(code, "ctx.EnsureDescsTogether(") {
+			t.Fatalf("XOR operands can evict each other while reloading: %s", code)
+		}
+		if !strings.Contains(code, "xorResult := ctx.AllocRegExcept") {
+			t.Fatalf("XOR did not preserve source register ownership: %s", code)
+		}
+	}
+}
+
+func TestInlinedBooleanHelperKeepsBranchFlags(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+ type Scmer struct{}
+ func NewInt(int64) Scmer
+ func (Scmer) Int() int64
+ func positive(value Scmer) bool { return value.Int() > 0 }
+ func choose(a ...Scmer) Scmer {
+	if positive(a[0]) { return NewInt(1) }
+	return NewInt(0)
+ }
+ `, "choose")
+	code, errMsg := generateClosure("choose", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	match := regexp.MustCompile(`(\w+) = ctx.DeferBooleanFlags\(`).FindStringSubmatch(code)
+	if len(match) != 2 {
+		t.Fatalf("helper did not return lazy comparison flags:\n%s", code)
+	}
+	if strings.Contains(code, "ctx.EnsureDesc(&"+match[1]+")") {
+		t.Fatalf("inlined helper return materializes flags before its branch:\n%s", code)
+	}
+	condition := regexp.MustCompile(`(?m)^\s*(d[0-9]+) (?::=|=) ` + match[1] + `\n`).FindStringSubmatch(code)
+	if len(condition) != 2 {
+		t.Fatalf("helper result not directly consumed by branch:\n%s", code)
+	}
+	if !strings.Contains(code, "ctx.SyncDesc(&"+condition[1]+")") || strings.Contains(code, "ctx.EnsureDesc(&"+condition[1]+")") {
+		t.Fatalf("branch materializes its lazy comparison flags:\n%s", code)
+	}
+}
+
+func TestGoCallStackArrayAdmissionPreservesMemoryLayout(t *testing.T) {
+	array := types.NewArray(types.Typ[types.Byte], 16)
+	field := types.NewVar(token.NoPos, nil, "bytes", array)
+	for _, test := range []struct {
+		name      string
+		valueType types.Type
+		stack     bool
+	}{
+		{"byte array", array, true},
+		{"array field", types.NewStruct([]*types.Var{field}, nil), true},
+		{"nested array", types.NewArray(array, 1), true},
+		{"array pointer", types.NewPointer(array), false},
+		{"one element", types.NewArray(types.Typ[types.Byte], 1), false},
+		{"empty array", types.NewArray(types.Typ[types.Byte], 0), false},
+		{"zero-sized array", types.NewArray(types.NewStruct(nil, nil), 16), false},
+		{"text", types.Typ[types.String], false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := goCallHasStackArray(test.valueType); got != test.stack {
+				t.Fatalf("stack-array admission = %v, want %v", got, test.stack)
+			}
+		})
+	}
+	if got := goCallWordCount(array); got != 2 {
+		t.Fatalf("packed array width changed to %d, want 2", got)
+	}
+	if got := goCallPointerMask(array); got != 0 {
+		t.Fatalf("packed byte-array pointer mask changed to %d, want 0", got)
+	}
+}
+
+func TestGoCallStackArrayUsesExistingNativeBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		helper string
+		body   string
+	}{
+		{"array result", "func token() ([16]byte, error)", "_, _ = token()"},
+		{"array argument", "func accept([16]byte) int64", "var token [16]byte; _ = accept(token)"},
+		{"large array argument", "func accept([32]byte) int64", "var token [32]byte; _ = accept(token)"},
+		{"large struct argument", "type Token struct { Bytes [32]byte }; func accept(Token) int64", "var token Token; _ = accept(token)"},
+		{"struct result", "type Token struct { Bytes [16]byte }; func token() Token", "_ = token()"},
+		{"array receiver", "type Token [16]byte; func (Token) Text() string", "var token Token; _ = token.Text()"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fn := buildTestSSAFunction(t, "package sample\ntype Scmer struct{}\n"+test.helper+
+				"\nfunc sample(args ...Scmer) Scmer { "+test.body+"; return args[0] }", "sample")
+			if reason := nativeCallBoundaryReason(fn); reason != "stack-assigned array in Go call" {
+				t.Fatalf("native boundary reason = %q", reason)
+			}
+			var call *ssa.Call
+			for _, block := range fn.Blocks {
+				for _, instruction := range block.Instrs {
+					if candidate, ok := instruction.(*ssa.Call); ok {
+						call = candidate
+					}
+				}
+			}
+			if call == nil {
+				t.Fatal("missing static call fixture")
+			}
+			generator := newCodeGen(fn, nil)
+			if generator.emitGenericStaticCall(call.Name(), call.Call.StaticCallee(), call.Call.Args) {
+				t.Fatal("unsupported array call emitted as register words")
+			}
+			if generator.w.Len() != 0 {
+				t.Fatal("rejected call left partial emitter code")
+			}
+			code := generateNativeCallClosure("sample", nativeCallBoundaryReason(fn))
+			if !strings.Contains(code, "jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)") {
+				t.Fatal("native declaration boundary was lost")
+			}
+		})
+	}
+}
+
+func TestGoCallOrdinaryMultiResultRemainsAdmissible(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+ type Scmer struct{}
+ func text() (string, error)
+ func sample(args ...Scmer) Scmer { _, _ = text(); return args[0] }
+`, "sample")
+	if reason := nativeCallBoundaryReason(fn); reason != "" {
+		t.Fatalf("ordinary text/error call acquired boundary reason %q", reason)
+	}
+	var call *ssa.Call
+	for _, instruction := range fn.Blocks[0].Instrs {
+		if candidate, ok := instruction.(*ssa.Call); ok {
+			call = candidate
+		}
+	}
+	if call == nil {
+		t.Fatal("missing text/error call fixture")
+	}
+	generator := newCodeGen(fn, nil)
+	for _, invalid := range []*ssa.Function{nil, {}} {
+		if generator.emitGenericStaticCall("missing", invalid, nil) || generator.w.Len() != 0 {
+			t.Fatal("invalid callee must retain rejection before signature analysis")
+		}
+	}
+	if !generator.emitGenericStaticCall(call.Name(), call.Call.StaticCallee(), call.Call.Args) {
+		t.Fatal("ordinary text/error register results rejected")
+	}
+	if !strings.Contains(generator.w.String(), "[]uint8{2, 2}, []uint8{1, 3}") {
+		t.Fatal("ordinary text/error ABI width or pointer maps changed")
+	}
+}
+
+func TestGoCallLargeSingleAggregateKeepsPointerWrapper(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		definition string
+		typeName   string
+	}{
+		{"array", "", "[32]byte"},
+		{"struct", "type Token struct { Bytes [32]byte }", "Token"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fn := buildTestSSAFunction(t, "package sample\ntype Scmer struct{}\n"+test.definition+
+				"\nfunc token() "+test.typeName+
+				"\nfunc sample(args ...Scmer) Scmer { _ = token(); return args[0] }", "sample")
+			if reason := nativeCallBoundaryReason(fn); reason != "" {
+				t.Fatalf("safe aggregate wrapper acquired boundary reason %q", reason)
+			}
+			var call *ssa.Call
+			for _, instruction := range fn.Blocks[0].Instrs {
+				if candidate, ok := instruction.(*ssa.Call); ok {
+					call = candidate
+				}
+			}
+			if call == nil {
+				t.Fatal("missing aggregate call fixture")
+			}
+			resultType := call.Call.StaticCallee().Signature.Results().At(0).Type()
+			if !goCallHasStackArray(resultType) || goCallWordCount(resultType) != 0 {
+				t.Fatal("fixture must use an existing large aggregate wrapper")
+			}
+			generator := newCodeGen(fn, nil)
+			if !generator.emitGenericStaticCall(call.Name(), call.Call.StaticCallee(), call.Call.Args) {
+				t.Fatal("existing single aggregate pointer wrapper rejected")
+			}
+			code := generator.w.String()
+			for _, expected := range []string{"value := token(); return &value", ".NoHeapPointer = false"} {
+				if !strings.Contains(code, expected) {
+					t.Fatalf("wrapper lost %q:\n%s", expected, code)
+				}
+			}
+			value := generator.vals[call.Name()]
+			if !value.isDesc || value.marker != "_aggregate_ptr" || !value.pinAcrossBlock {
+				t.Fatalf("wrapper lost its retained aggregate pointer metadata: %+v", value)
+			}
+		})
 	}
 }

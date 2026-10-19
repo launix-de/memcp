@@ -50,11 +50,14 @@ consumer stage. */
 (define rdf_typed_literal (lambda (value datatype)
 	(if (regexp_test datatype "(?:#|:)integer$")
 		(json_decode_scmer value)
-		(if (regexp_test datatype "(?:#|:)(?:decimal|double|float)$")
-			(simplify value)
-			(if (regexp_test datatype "(?:#|:)boolean$")
-				(equal? (toLower value) "true")
-				value)))
+		(regexp_test datatype "(?:#|:)(?:decimal|double|float)$") (begin
+			/* The declared datatype selects the floating carrier, even when its
+			lexical form is an integer. Invalid text keeps the existing fallback. */
+			(define number (simplify value))
+			(if (number? number) (float number) number))
+		(regexp_test datatype "(?:#|:)boolean$")
+		(equal? (toLower value) "true")
+		value)
 ))
 (define rdf_unbound_expr (lambda () '("__rdf_unbound__")))
 (define rdf_unbound_expr? (lambda (expr) (equal? expr '("__rdf_unbound__"))))

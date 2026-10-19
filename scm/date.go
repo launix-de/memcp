@@ -543,7 +543,7 @@ func init_date() {
 					}
 					ctx.FreeDesc(&d3)
 					d5 = d4
-					ctx.EnsureDesc(&d5)
+					ctx.SyncDesc(&d5)
 					if d5.Loc != LocImm && d5.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -1339,7 +1339,7 @@ func init_date() {
 					}
 					ctx.FreeDesc(&d12)
 					d14 = d13
-					ctx.EnsureDesc(&d14)
+					ctx.SyncDesc(&d14)
 					if d14.Loc != LocImm && d14.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -2325,7 +2325,7 @@ func init_date() {
 					}
 					ctx.FreeDesc(&d33)
 					d35 = d34
-					ctx.EnsureDesc(&d35)
+					ctx.SyncDesc(&d35)
 					if d35.Loc != LocImm && d35.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -3531,7 +3531,7 @@ func init_date() {
 					}
 					ctx.FreeDesc(&d33)
 					d35 = d34
-					ctx.EnsureDesc(&d35)
+					ctx.SyncDesc(&d35)
 					if d35.Loc != LocImm && d35.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -15687,7 +15687,7 @@ func init_date() {
 					ctx.FreeDesc(&d570)
 					ctx.FreeDesc(&d571)
 					d573 = d572
-					ctx.EnsureDesc(&d573)
+					ctx.SyncDesc(&d573)
 					if d573.Loc != LocImm && d573.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -16820,7 +16820,7 @@ func init_date() {
 					ctx.FreeDesc(&d977)
 					ctx.FreeDesc(&d978)
 					d980 = d979
-					ctx.EnsureDesc(&d980)
+					ctx.SyncDesc(&d980)
 					if d980.Loc != LocImm && d980.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -18020,7 +18020,7 @@ func init_date() {
 					ctx.FreeDesc(&d1440)
 					ctx.FreeDesc(&d1441)
 					d1443 = d1442
-					ctx.EnsureDesc(&d1443)
+					ctx.SyncDesc(&d1443)
 					if d1443.Loc != LocImm && d1443.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -18984,7 +18984,7 @@ func init_date() {
 					ctx.FreeDesc(&d1782)
 					ctx.FreeDesc(&d1783)
 					d1785 = d1784
-					ctx.EnsureDesc(&d1785)
+					ctx.SyncDesc(&d1785)
 					if d1785.Loc != LocImm && d1785.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
@@ -19813,7 +19813,7 @@ func init_date() {
 					ctx.FreeDesc(&d2141)
 					ctx.FreeDesc(&d2142)
 					d2144 = d2143
-					ctx.EnsureDesc(&d2144)
+					ctx.SyncDesc(&d2144)
 					if d2144.Loc != LocImm && d2144.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}

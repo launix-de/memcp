@@ -260,11 +260,11 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 			(list (quote outer) 1 expr)
 			expr))))
 
-(define scalar_first_probe_key_terms (lambda (sources default_alias src keys lookup_keys)
+(define scalar_first_probe_key_terms (lambda (sources default_alias src keys lookup_keys nulls_not_distinct)
 	(begin
 		(define alias (source_alias src))
 		(map (produceN (count keys)) (lambda (i)
-			((if (query_session_read? (nth keys i))
+			((if (or nulls_not_distinct (query_session_read? (nth keys i)))
 				group_session_key_equal_expr
 				(lambda (key value) (list (quote equal??) key value)))
 				(lower_column_expr_for_alias src (nth keys i))
@@ -993,7 +993,9 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 				(define property_cover (if (invariant_property_cover_selected? all_stages stage property_cover) property_cover nil))
 				(define keyed_terms (map (produceN (count keys)) (lambda (i)
 					(list (query_key_term_alias (qb_sources input) (nth keys i))
-						(list (quote equal??) (nth keys i) (nth lookup_keys i))))))
+						(if (qassoc_get (gs_facts stage) (quote nulls_not_distinct) false)
+							(group_session_key_equal_expr (nth keys i) (nth lookup_keys i))
+							(list (quote equal??) (nth keys i) (nth lookup_keys i)))))))
 				(define where_key_terms (map
 					(filter keyed_terms (lambda (term) (not (nil? (nth term 0)))))
 					(lambda (term) (nth term 1))))
@@ -2385,7 +2387,7 @@ would still have to project that value over the segment. */
 				(cons (quote and)
 					(cons
 						(lower_column_expr_for_alias src condition)
-						(scalar_first_probe_key_terms sources default_alias src keys lookup_keys))))
+						(scalar_first_probe_key_terms sources default_alias src keys lookup_keys false))))
 			(cons (quote list) order_cols)
 			(cons (quote list) dirs)
 			0
@@ -3511,7 +3513,8 @@ preparation reuse, ensuring newly occupied cells are refined before reading. */
 			(neumann_fail "build_queryplan" "scalar aggregate probe references unknown aggregate column")
 			true)
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-		(define key_terms (scalar_first_probe_key_terms sources default_alias src keys lookup_keys))
+		(define key_terms (scalar_first_probe_key_terms sources default_alias src keys lookup_keys
+			(qassoc_get (gs_facts stage) (quote nulls_not_distinct) false)))
 		(define value_expr (nth ag 0))
 		(define reduce_expr (nth ag 1))
 		(define neutral_expr (nth ag 2))
@@ -3722,7 +3725,7 @@ probe. */
 						(cons (quote and)
 							(cons
 								(lower_column_expr_for_alias src condition)
-								(scalar_first_probe_key_terms sources default_alias src keys lookup_keys))))
+								(scalar_first_probe_key_terms sources default_alias src keys lookup_keys false))))
 					'(list)
 					'(list)
 					0

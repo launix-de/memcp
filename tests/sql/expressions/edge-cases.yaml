@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Edge Cases and Error Handling Test Suite
 # Tests that MUST fail: syntax errors, non-existent columns/tables, invalid operations
 
@@ -278,12 +280,27 @@ test_cases:
         - MixedCase: 456
 
   # === NUMERIC EDGE CASES ===
+  # Preserve the historical regression ID; the result must now retain every digit.
   - name: "Very large number (precision loss expected)"
     sql: "SELECT 999999999999999999 AS big_number"
     expect:
       rows: 1
       data:
-        - big_number: 1000000000000000000
+        - big_number: 999999999999999999
+
+  - name: "Large integer literal retains every digit as text"
+    sql: "SELECT CONCAT('',999999999999999999) AS big_number"
+    expect:
+      rows: 1
+      data:
+        - big_number: "999999999999999999"
+
+  - name: "Negative large integer literal retains every digit as text"
+    sql: "SELECT CONCAT('',-999999999999999999) AS big_number"
+    expect:
+      rows: 1
+      data:
+        - big_number: "-999999999999999999"
 
   - name: "Very small decimal"
     sql: "SELECT 0.000001 AS tiny_number"

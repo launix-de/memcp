@@ -509,6 +509,50 @@ test_cases:
         (list (quote sql_type_expr) 1 "INT" nil))
     expect: {result: true}
 
+
+  - name: Stored compiler names resolve declared contracts before execution
+    scm: |
+      (begin
+        (define expression (list (quote sql_compile_expr) (quote car)
+          (list (quote sql_type_expr) 1 "FLOAT" nil)))
+        (define restored (eval (scheme (serialize (list (quote quote) expression)))))
+        (define info (sql_expr_info (list) restored))
+        (and (equal? (sql_info_type info) "FLOAT")
+          (equal? (sql_info_formula info) 1)
+          (equal? (sql_type_lower_annotations restored) 1)))
+    expect: {result: true}
+
+  - name: Stored compiler factories receive the producing scope contracts
+    scm: |
+      (begin
+        (define factory (list
+          (list (quote lambda) (list (quote kind))
+            (list (quote lambda) (list (quote infos))
+              (list (quote sql_info)
+                (list (quote sql_info_formula) (list (quote car) (quote infos)))
+                (quote kind) nil))) "FLOAT"))
+        (define expression (list (quote sql_compile_expr) factory
+          (list (quote sql_type_expr) 1 "INT" nil)))
+        (define restored (eval (scheme (serialize (list (quote quote) expression)))))
+        (define bound (bind_query_expr '() restored "stored-compiler" '()))
+        (define info (sql_expr_info (list) bound))
+        (and (equal? (sql_info_type info) "FLOAT")
+          (equal? (sql_info_formula info) 1)
+          (equal? (sql_type_lower_annotations bound) 1)))
+    expect: {result: true}
+
+  - name: Persisted order symbols select the same explicit column collation
+    scm: |
+      (begin
+        (define source (list "c" "memcp-tests" "stf_ci" false nil))
+        (define column (list (quote sql_type_expr)
+          (list (quote get_column) "c" false "nm" false) "VARCHAR" (list "bin" 0)))
+        (define order (sql_type_order_item (list source) (list column (quote <))))
+        (and (expression_equal? (car order) (sql_info_formula (sql_expr_info (list source) column)))
+          ((cadr order) "A" "a")
+          (not ((cadr order) "a" "A"))))
+    expect: {result: true}
+
 cleanup:
   - sql: DROP TABLE IF EXISTS stf_bin_compare
   - sql: DROP TABLE IF EXISTS stf_doc

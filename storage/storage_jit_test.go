@@ -31,82 +31,20 @@ type jitEmitter interface {
 	JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc
 }
 
-// jitBuildGetValueFunc compiles a JIT function for any storage type.
-// Returns func(int64) scm.Scmer with Go ABI calling convention.
-// Returns nil fn if the emitter panics (e.g. register exhaustion).
+// jitBuildGetValueFunc uses the production storage ABI, including runtime
+// registration, stack growth and precise GC maps. An anonymous executable mmap
+// cannot safely call Go functions, even when the storage read itself allocates
+// nothing: a concurrent GC may walk its caller's stack at any point.
 func jitBuildGetValueFunc(tb testing.TB, s jitEmitter, _ bool) (fn func(int64) scm.Scmer, cleanup func()) {
 	tb.Helper()
-	if runtime.GOARCH != "amd64" {
-		tb.Skip("JIT tests only on amd64")
+	if !scm.JITEnabled() {
+		tb.Skip("requires the registered JIT runtime")
 	}
-
-	codeBuf := make([]byte, 65536)
-	// Free registers: exclude RAX (arg/return), RBX (return aux), RSP, RBP,
-	// R11 (scratch for emit helpers), R14 (Go "g" pointer)
-	freeRegs := uint64((1 << uint(scm.RegRAX)) | (1 << uint(scm.RegRBX)) |
-		(1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
-		(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
-		(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
-		(1 << uint(scm.RegR12)) | (1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)))
-	ctx := &scm.JITContext{
-		Ptr:      unsafe.Pointer(&codeBuf[0]),
-		Start:    unsafe.Pointer(&codeBuf[0]),
-		End:      unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
-		FreeRegs: freeRegs,
-		AllRegs:  freeRegs,
+	reader := scm.CompileJITStorageGetValue(s.JITEmit)
+	if reader == nil {
+		tb.Fatal("storage reader compilation failed")
 	}
-	// Keep R14 untouched because Go calls inside fallback emitters require
-	// it to hold the runtime g-pointer. No loop-reserved registers needed here.
-
-	// Entry: Go ABI — RAX = int64 index argument
-	idxReg := ctx.AllocReg()
-	ctx.EmitMovRegReg(idxReg, scm.RegRAX)
-	idx := scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idxReg}
-
-	// Use recover to handle register exhaustion gracefully
-	var emitErr interface{}
-	func() {
-		defer func() { emitErr = recover() }()
-		result := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: scm.RegRAX, Reg2: scm.RegRBX}
-		desc := s.JITEmit(ctx, idx, result)
-		ctx.EmitMovPairToResult(&desc, &result)
-		ctx.EmitByte(0xC3) // RET
-		ctx.ResolveFixupsFinal()
-	}()
-	if emitErr != nil {
-		tb.Skipf("JIT emit failed: %v", emitErr)
-		return nil, func() {}
-	}
-
-	codeLen := int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-	code := codeBuf[:codeLen]
-
-	pageSize := syscall.Getpagesize()
-	n := (len(code) + pageSize - 1) &^ (pageSize - 1)
-	b, err := syscall.Mmap(-1, 0, n, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANON)
-	if err != nil {
-		tb.Fatalf("mmap failed: %v", err)
-	}
-	copy(b, code)
-	if err := syscall.Mprotect(b, syscall.PROT_READ|syscall.PROT_EXEC); err != nil {
-		syscall.Munmap(b)
-		tb.Fatalf("mprotect failed: %v", err)
-	}
-
-	type funcHeader struct {
-		fnptr *byte
-	}
-	hdr := &funcHeader{fnptr: &b[0]}
-	hdrPtr := unsafe.Pointer(hdr)
-	jitFn := *(*func(int64) scm.Scmer)(unsafe.Pointer(&hdrPtr))
-
-	tb.Logf("JIT code size: %d bytes", codeLen)
-
-	return jitFn, func() {
-		runtime.KeepAlive(hdr)
-		runtime.KeepAlive(ctx) // keep compile-time roots alive through the native call
-		syscall.Munmap(b)
-	}
+	return func(idx int64) scm.Scmer { return reader(uint32(idx)) }, func() {}
 }
 
 func TestStorageDecimalFinishedJITReadersComposeInnerStorage(t *testing.T) {

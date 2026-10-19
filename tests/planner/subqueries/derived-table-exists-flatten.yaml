@@ -107,6 +107,28 @@ test_cases:
     expect:
       error: true
 
+  - name: "Logical lateral flattening closes a three-source projection chain"
+    scm: |-
+      (begin
+        (define q (make_query_block "memcp-tests" '() '("value" 1)
+          true nil nil nil nil nil '() '() (list (list (quote lateral) true))))
+        (define r (make_query_block "memcp-tests" '()
+          (list "value" (list (quote +) (list (quote get_column) "q" false "value" false) 1))
+          true nil nil nil nil nil '() '() (list (list (quote lateral) true))))
+        (define s (make_query_block "memcp-tests" '()
+          (list "value" (list (quote +) (list (quote get_column) "r" false "value" false) 1))
+          true nil nil nil nil nil '() '() (list (list (quote lateral) true))))
+        (define flattened (flatten_source_list
+          (list (list "q" "memcp-tests" q false nil)
+            (list "r" "memcp-tests" r false nil)
+            (list "s" "memcp-tests" s false nil)) nil '()))
+        (define formula (rewrite_derived_ref_chain (nth flattened 1)
+          (list (quote get_column) "s" false "value" false)))
+        (and (empty_list? (nth flattened 0))
+          (empty_list? (query_expr_alias_set nil formula '()))
+          (equal? (tryfold formula) 3)))
+    expect: {result: true}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS dtef_items"
   - sql: "DROP TABLE IF EXISTS dtef_team"

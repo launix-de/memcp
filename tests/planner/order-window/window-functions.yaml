@@ -608,6 +608,164 @@ test_cases:
         - {id: 2, time_val: 20, prev_time: 10}
         - {id: 3, time_val: 30, prev_time: 20}
 
+  - name: Create nullable partition membership fixture
+    sql: CREATE TABLE win_null_keys(id INT PRIMARY KEY,k1 INT,k2 INT,amount INT)
+  - name: Populate NULL and zero partition keys independently
+    sql: INSERT INTO win_null_keys VALUES (1,NULL,NULL,10),(2,NULL,NULL,20),(3,0,NULL,4),(4,NULL,0,8),(5,0,0,NULL),(6,1,0,12),(7,1,0,NULL)
+  - name: sql window membership retains the NULL partition separately from zero
+    syntax: sql
+    sql: SELECT id,COUNT(*) OVER (PARTITION BY k1) AS all_rows,COUNT(amount) OVER (PARTITION
+      BY k1) AS values_count,SUM(amount) OVER (PARTITION BY k1) AS total FROM win_null_keys
+      ORDER BY id
+    expect:
+      rows: 7
+      data: &id001
+      - id: 1
+        all_rows: 3
+        values_count: 3
+        total: 38
+      - id: 2
+        all_rows: 3
+        values_count: 3
+        total: 38
+      - id: 3
+        all_rows: 2
+        values_count: 1
+        total: 4
+      - id: 4
+        all_rows: 3
+        values_count: 3
+        total: 38
+      - id: 5
+        all_rows: 2
+        values_count: 1
+        total: 4
+      - id: 6
+        all_rows: 2
+        values_count: 1
+        total: 12
+      - id: 7
+        all_rows: 2
+        values_count: 1
+        total: 12
+  - name: psql window membership retains the NULL partition separately from zero
+    syntax: psql
+    sql: SELECT id,COUNT(*) OVER (PARTITION BY k1) AS all_rows,COUNT(amount) OVER (PARTITION
+      BY k1) AS values_count,SUM(amount) OVER (PARTITION BY k1) AS total FROM win_null_keys
+      ORDER BY id
+    expect:
+      rows: 7
+      data: *id001
+  - name: tsql window membership retains the NULL partition separately from zero
+    syntax: tsql
+    sql: SELECT id,COUNT(*) OVER (PARTITION BY k1) AS all_rows,COUNT(amount) OVER (PARTITION
+      BY k1) AS values_count,SUM(amount) OVER (PARTITION BY k1) AS total FROM win_null_keys
+      ORDER BY id
+    expect:
+      rows: 7
+      data: *id001
+  - name: Composite windows retain each NULL position and all-NULL aggregate input
+    sql: SELECT id,COUNT(*) OVER (PARTITION BY k1,k2) AS all_rows,COUNT(amount) OVER
+      (PARTITION BY k1,k2) AS values_count,SUM(amount) OVER (PARTITION BY k1,k2) AS
+      total FROM win_null_keys ORDER BY id
+    expect:
+      rows: 7
+      data:
+      - id: 1
+        all_rows: 2
+        values_count: 2
+        total: 30
+      - id: 2
+        all_rows: 2
+        values_count: 2
+        total: 30
+      - id: 3
+        all_rows: 1
+        values_count: 1
+        total: 4
+      - id: 4
+        all_rows: 1
+        values_count: 1
+        total: 8
+      - id: 5
+        all_rows: 1
+        values_count: 0
+        total: null
+      - id: 6
+        all_rows: 2
+        values_count: 1
+        total: 12
+      - id: 7
+        all_rows: 2
+        values_count: 1
+        total: 12
+  - name: WHERE filters nullable window input before aggregate lookup
+    sql: SELECT id,COUNT(*) OVER (PARTITION BY k1) AS all_rows,SUM(amount) OVER (PARTITION
+      BY k1) AS total FROM win_null_keys WHERE k1 IS NULL AND amount>=10 ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        all_rows: 2
+        total: 30
+      - id: 2
+        all_rows: 2
+        total: 30
+  - name: An empty nullable window domain creates no result rows
+    sql: SELECT id,COUNT(*) OVER (PARTITION BY k1) AS all_rows FROM win_null_keys WHERE
+      id<0
+    expect:
+      rows: 0
+  - name: Ordinary equality with NULL does not become partition identity
+    sql: SELECT id FROM win_null_keys WHERE k1=NULL
+    expect:
+      rows: 0
+  - name: Correlated SQL equality still excludes NULL-to-NULL membership
+    sql: SELECT a.id,(SELECT COUNT(*) FROM win_null_keys b WHERE b.k1=a.k1) AS matches
+      FROM win_null_keys a ORDER BY a.id
+    expect:
+      rows: 7
+      data:
+      - id: 1
+        matches: 0
+      - id: 2
+        matches: 0
+      - id: 3
+        matches: 2
+      - id: 4
+        matches: 0
+      - id: 5
+        matches: 2
+      - id: 6
+        matches: 2
+      - id: 7
+        matches: 2
+  - name: Move a row from zero into the NULL window partition
+    sql: UPDATE win_null_keys SET k1=NULL WHERE id=3
+    expect:
+      affected_rows: 1
+  - name: Native mutation invalidates both affected nullable window domains
+    sql: SELECT id,COUNT(*) OVER (PARTITION BY k1) AS all_rows FROM win_null_keys ORDER
+      BY id
+    expect:
+      rows: 7
+      data:
+      - id: 1
+        all_rows: 4
+      - id: 2
+        all_rows: 4
+      - id: 3
+        all_rows: 4
+      - id: 4
+        all_rows: 4
+      - id: 5
+        all_rows: 1
+      - id: 6
+        all_rows: 2
+      - id: 7
+        all_rows: 2
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS win_null_keys"
   - sql: "DROP TABLE IF EXISTS win_emp"
   - sql: "DROP TABLE IF EXISTS win_nullable"

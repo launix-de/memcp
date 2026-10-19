@@ -169,7 +169,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 			ctx.BindReg(r3, &d2)
 		}
 		d4 = d2
-		ctx.EnsureDesc(&d4)
+		ctx.SyncDesc(&d4)
 		if d4.Loc != scm.LocImm && d4.Loc != scm.LocFlags {
 			panic("jit: fused If condition is neither scm.LocImm nor scm.LocFlags")
 		}

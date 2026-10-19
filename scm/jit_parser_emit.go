@@ -1776,8 +1776,11 @@ func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {
 					var wordsBuf [16]goCallArgWord
 					words := emitter.ctx.flattenArgs(callArgs, &wordsBuf)
 					off := emitter.ctx.AllocSpill(16)
-					emitter.ctx.setStackPointer(jitStackRootFrameBP, off, true)
+					// Restored generator allocators reuse these slots. Discard any
+					// old root until the helper has stored its new binding value.
+					emitter.ctx.setStackPointer(jitStackRootFrameBP, off, false)
 					emitter.ctx.EmitGoCallToFrame(GoFuncAddr(jitParserBindingValueForRuleNative), words, []int32{off, off + 8})
+					emitter.ctx.setStackPointer(jitStackRootFrameBP, off, true)
 					emitter.ctx.FreeDesc(&sp)
 					args[index] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: off, Rooted: true}
 				}

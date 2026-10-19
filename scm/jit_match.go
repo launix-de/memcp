@@ -759,6 +759,22 @@ func jitCompileMatch(ctx *JITContext, list []Scmer, sliceBase Reg, result JITVal
 	if target.Loc == LocRegPair {
 		ctx.BindReg(target.Reg, &target)
 		ctx.BindReg(target.Reg2, &target)
+	} else if target.Loc == LocStackPair {
+		// Caller-supplied homes describe the old slot contents, not a proof
+		// shared by every new arm. Keep the merged output conservative.
+		target.Type = JITTypeUnknown
+		target.NoHeapPointer = false
+		target.ReturnTypeMerged = false
+		target.SliceSizeKnown = false
+		target.Rooted = true
+		// Sibling restoration discards each arm's temporary roots. The finished
+		// output is live at the join even when an always-matching arm skipped
+		// fallback, so publish its final home after all branch restores.
+		base, offset := jitStackRootFrameSP, target.StackOff-ctx.DynamicSP
+		if target.StackOff < 0 {
+			base, offset = jitStackRootFrameBP, target.StackOff
+		}
+		ctx.setStackPointer(base, offset, true)
 	}
 	return target
 }

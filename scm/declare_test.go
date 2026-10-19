@@ -25,6 +25,85 @@ import (
 	"testing"
 )
 
+// This is the previous membership implementation, retained only as a semantic
+// oracle and a paired microbenchmark baseline.
+func splitTypeKindMembership(kinds, wanted string) bool {
+	for _, kind := range strings.Split(kinds, "|") {
+		if kind == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func TestTypeKindMembershipExactTokens(t *testing.T) {
+	for _, tc := range []struct {
+		kinds, wanted string
+		want          bool
+	}{
+		{"func", "func", true}, {"func", "int", false},
+		{"func|nil", "func", true}, {"func|nil", "nil", true},
+		{"func|nil", "string", false}, {"func|nil", "func|nil", false},
+		{"functional|nullable", "func", false}, {"func", "fun", false},
+		{"", "", true}, {"", "func", false}, {"func", "", false},
+		{"|func", "", true}, {"func|", "", true}, {"func||nil", "", true},
+		{"||", "", true}, {"||", "func", false},
+		{" func|nil", "func", false}, {"func |nil", "func", false},
+		{"FUNC|nil", "func", false}, {"func\n|nil", "func", false},
+		{"text|🐘|nil", "🐘", true},
+	} {
+		t.Run(fmt.Sprintf("%q/%q", tc.kinds, tc.wanted), func(t *testing.T) {
+			if got := hasTypeKind(tc.kinds, tc.wanted); got != tc.want {
+				t.Fatalf("hasTypeKind(%q,%q)=%v, want %v", tc.kinds, tc.wanted, got, tc.want)
+			}
+		})
+	}
+	tokens := []string{"", "func", "nil", "functional", " func", "func ", "FUNC", "🐘"}
+	for _, a := range tokens {
+		for _, b := range tokens {
+			for _, c := range tokens {
+				kinds := a + "|" + b + "|" + c
+				for _, wanted := range tokens {
+					if hasTypeKind(kinds, wanted) != splitTypeKindMembership(kinds, wanted) {
+						t.Fatalf("membership changed for %q/%q", kinds, wanted)
+					}
+				}
+			}
+		}
+	}
+}
+
+var typeKindMembershipBenchmarkResult bool
+
+func BenchmarkTypeKindMembership(b *testing.B) {
+	for _, tc := range []struct{ name, kinds, wanted string }{
+		{"plain_match", "func", "func"},
+		{"plain_miss", "func", "int"},
+		{"union_head", "func|nil", "func"},
+		{"union_tail", "func|nil", "nil"},
+		{"union_miss", "func|nil", "string"},
+		{"many_tail", "string|number|int|bool|list|func|nil", "nil"},
+		{"empty_input", "", ""},
+		{"empty_token", "func||nil", ""},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			for _, implementation := range []struct {
+				name string
+				fn   func(string, string) bool
+			}{{"Split", splitTypeKindMembership}, {"Current", hasTypeKind}} {
+				b.Run(implementation.name, func(b *testing.B) {
+					b.ReportAllocs()
+					result := false
+					for i := 0; i < b.N; i++ {
+						result = implementation.fn(tc.kinds, tc.wanted)
+					}
+					typeKindMembershipBenchmarkResult = result
+				})
+			}
+		})
+	}
+}
+
 func nestedDocumentationType() *TypeDescriptor {
 	return &TypeDescriptor{
 		Kind:        "assoc",
@@ -366,5 +445,39 @@ func TestCallbackDescriptionsDoNotRepeatStructuredSignatures(t *testing.T) {
 
 	for name, declaration := range declarations {
 		inspect(name, declaration.Type)
+	}
+}
+
+// A nullable callback is still checked against its declared invocation contract.
+func TestNullableCallbackSignatureValidation(t *testing.T) {
+	const name = "test_nullable_callback"
+	declaration := &Declaration{Name: name, Fn: func(...Scmer) Scmer { return NewBool(true) },
+		Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{
+			{Kind: "func|nil", Params: []*TypeDescriptor{{Kind: "string"}}, Return: &TypeDescriptor{Kind: "string"}},
+		}, Return: &TypeDescriptor{Kind: "bool"}}}
+	Declare(&Globalenv, declaration)
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
+	}()
+	for _, test := range []struct {
+		argument string
+		invalid  bool
+	}{
+		{"nil", false},
+		{`(lambda (text) text)`, false},
+		{`(lambda () "ok")`, false},
+		{`(lambda (text other) text)`, true},
+		{`(lambda (text) 42)`, true},
+	} {
+		t.Run(test.argument, func(t *testing.T) {
+			defer func() {
+				if failed := recover() != nil; failed != test.invalid {
+					t.Errorf("callback validation failed=%v, want %v", failed, test.invalid)
+				}
+			}()
+			Validate(Read(t.Name(), "("+name+" "+test.argument+")"), "bool")
+		})
 	}
 }

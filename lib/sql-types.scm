@@ -326,8 +326,8 @@ keeps its existing (ignorecase-flagged) resolution for them. */
 			(if (nil? canonical)
 				(sql_info original "any" nil)
 				(begin
-					(define meta (find (get_schema (source_schema src) (source_relation src))
-						(lambda (c) (equal?? (c "Field") canonical)) nil))
+					(define handle (table (source_schema src) false (source_relation src) false))
+					(define meta (if (nil? handle) nil (show handle "column" canonical false)))
 					(define type (if (nil? meta) "any" (toUpper (coalesceNil (meta "RawType") "any"))))
 					(define collname (if (nil? meta) nil (meta "Collation")))
 					(sql_info
@@ -366,7 +366,7 @@ Derived columns already carry their producer's expression contract. */
 				(define handle (table (source_schema src) false (source_relation src) false))
 				(if (nil? handle) nil (show handle "column" column column_ic)))))
 		_ nil))
-	(define resolved (compiler info declaration))
+	(define resolved ((sql_expression_compiler compiler) info declaration))
 	(if (expression_equal? (sql_info_formula info) (sql_info_formula resolved)) resolved
 		(error "a column declaration compiler must preserve the column expression")))))
 
@@ -403,9 +403,13 @@ the conditions are booleans and would otherwise pollute the merge. */
 			(lambda (i) (or (equal? i (- n 1)) (equal? (- i (* 2 (intdiv i 2))) 1))))
 			(lambda (i) (nth infos i))))))
 
-(define sql_call_info (lambda (sources head args)
+/* Stored compiler slots are global names or factory-call syntax with explicit
+constants. Resolution stays at compilation; existing callable slots self-evaluate. */
+(define sql_expression_compiler (lambda (compiler) (eval compiler)))
+
+/* Call contracts consume resolved SQL triples from their producing scope. */
+(define sql_call_info (lambda (head infos)
 	(begin
-		(define infos (map args (lambda (a) (sql_expr_info sources a))))
 		(define forms (map infos sql_info_formula))
 		(if (sql_arith_head? head)
 			(sql_info (cons head forms)
@@ -456,13 +460,13 @@ the conditions are booleans and would otherwise pollute the merge. */
 		/* Dialects compile type-directed operations from resolved argument triples.
 		The callback is a compiler, never an executable SQL operator. */
 		(cons (symbol sql_compile_expr) (cons compiler arguments))
-		(compiler (map arguments (lambda (argument) (sql_expr_info sources argument))))
+		((sql_expression_compiler compiler) (map arguments (lambda (argument) (sql_expr_info sources argument))))
 		((symbol sql_compile_column) compiler expression)
 		(sql_compile_column_info sources compiler expression)
 		((symbol session) _key) (sql_info expr "any" nil)
 		((symbol session_globalvar) _key) (sql_info expr "any" nil)
 		((symbol lambda) _params _body) (sql_info expr "any" nil)
-		(cons head args) (sql_call_info sources head args)
+		(cons head args) (sql_call_info head (map args (lambda (argument) (sql_expr_info sources argument))))
 		_ (sql_info expr (sql_type_of_literal expr)
 			(if (string? expr) (list "utf8mb4_general_ci" 4) nil)))))
 
@@ -507,18 +511,18 @@ planner has its own star-expansion (and GROUP-BY-primary-key rules) downstream. 
 (define sql_type_field_formula (lambda (sources expr)
 	(if (star_expr? expr) expr (sql_type_formula sources expr))))
 
-/* Resolve the ORDER direction of a text-valued *expression* to its collation
-callback. Bare column keys keep their raw < / > so the existing native
-scan-order path (order_relations_for_source) is untouched; only computed keys
-(UPPER(x), CONCAT(a, b), x COLLATE y) — which the old physical_expr_collation
-always treated as "bin" — get the coercing relation. */
+/* Resolve canonical persisted direction names while compiling. Bare columns
+keep the native scan-order path; computed expressions and explicit COLLATE
+contracts select their comparator once, outside executable row loops. */
 (define sql_type_order_item (lambda (sources item)
 	(match item
 		'(order_expr order_dir) (begin
+			(define order_dir (eval order_dir))
 			(define info (sql_expr_info sources order_expr))
 			(define coll (sql_info_collation info))
 			(if (and (or (equal? order_dir <) (equal? order_dir >))
-				(not (sql_column_ref? (sql_info_formula info)))
+				(or (not (sql_column_ref? (sql_info_formula info)))
+					(and (not (nil? coll)) (equal? (cadr coll) 0)))
 				(sql_text_type? (sql_info_type info))
 				(not (nil? coll)))
 				(list (sql_info_formula info) (collate (car coll) (equal? order_dir >)))

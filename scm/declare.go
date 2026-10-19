@@ -657,7 +657,7 @@ func types_match(given string, required string) bool {
 // expected callback signature (parameter count). Returns "" on success
 // or an error description.
 func validateCallbackSignature(lambdaSlice []Scmer, expectedSig *TypeDescriptor, source_info SourceInfo) string {
-	if expectedSig == nil || expectedSig.Kind != "func" || len(expectedSig.Params) == 0 {
+	if expectedSig == nil || !hasTypeKind(expectedSig.Kind, "func") || len(expectedSig.Params) == 0 {
 		return ""
 	}
 	// lambdaSlice is (lambda (params...) body [numvars])
@@ -804,14 +804,14 @@ func Validate(val Scmer, require string) string {
 					}
 					// Deep callback signature validation: if param expects func with Params,
 					// and the argument is a lambda literal, validate arity and return type.
-					if subrequired == "func" && def != nil && def.Type != nil {
+					if hasTypeKind(subrequired, "func") && def != nil && def.Type != nil {
 						j := i - 1
 						if j >= len(def.Type.Params) {
 							j = len(def.Type.Params) - 1
 						}
 						if j >= 0 && j < len(def.Type.Params) && def.Type.Params[j] != nil {
 							paramTD := def.Type.Params[j]
-							if paramTD.Kind == "func" && len(paramTD.Params) > 0 {
+							if hasTypeKind(paramTD.Kind, "func") && len(paramTD.Params) > 0 {
 								argVal := slice[i]
 								if argVal.IsSourceInfo() {
 									argVal = argVal.SourceInfo().value
@@ -909,12 +909,16 @@ func FormatTypeSignature(td *TypeDescriptor) string {
 }
 
 func hasTypeKind(kinds, wanted string) bool {
-	for _, kind := range strings.Split(kinds, "|") {
+	for {
+		kind, rest, more := strings.Cut(kinds, "|")
 		if kind == wanted {
 			return true
 		}
+		if !more {
+			return false
+		}
+		kinds = rest
 	}
-	return false
 }
 
 func replaceTypeKind(kinds, wanted, replacement string) string {
