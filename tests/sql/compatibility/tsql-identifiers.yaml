@@ -53,7 +53,6 @@ test_cases:
     data:
     - NULLABLE: 0
       IS_NULLABLE: 'NO'
-  noncritical: true
 - name: Inline key rejects NULL insert
   sql: INSERT INTO dbo.inline_key_semantics (Id) VALUES (NULL)
   expect:
@@ -233,4 +232,286 @@ test_cases:
   name: 'Fixture cleanup 004: DROP TABLE IF EXISTS dbo.inline_key_semantics'
 - sql: DROP TABLE IF EXISTS dbo.key_semantics
   name: 'Fixture cleanup 005: DROP TABLE IF EXISTS dbo.key_semantics'
+- name: Quoted default owner qualifies a database table declaration
+  sql: CREATE TABLE [memcp-tests].[dbo].[tsql_qualified] ([id] INT PRIMARY KEY,[value] INT)
+  setup:
+  - sql: DROP VIEW IF EXISTS dbo.tsql_qualified_view
+  - sql: DROP PROCEDURE IF EXISTS dbo.tsql_qualified_proc
+  - sql: DROP TABLE IF EXISTS dbo.tsql_qualified_child
+  - sql: DROP TABLE IF EXISTS dbo.tsql_qualified
+  - sql: DROP TABLE IF EXISTS dbo.tsql_qualified_defaults
+- name: Quoted database default owner targets native INSERT
+  sql: INSERT INTO [memcp-tests].[dbo].[tsql_qualified](id,value) VALUES(1,10)
+  expect:
+    affected_rows: 1
+- name: Qualified SELECT aliases preserve their native source
+  sql: SELECT q.id,q.value FROM [memcp-tests].[dBo].[tsql_qualified] AS q
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 10
+- name: Empty default owner targets the same native table
+  sql: INSERT INTO [memcp-tests]..[tsql_qualified](id,value) VALUES(2,20)
+  expect:
+    affected_rows: 1
+- name: Default owner qualifiers can contain ordinary comments
+  sql: SELECT id FROM [memcp-tests] /* database */ . [dbo] /* owner */ . [tsql_qualified] WHERE id=2
+  expect:
+    rows: 1
+    data:
+    - id: 2
+- name: Qualified INSERT SELECT uses the existing native sink
+  sql: INSERT INTO [memcp-tests]..[tsql_qualified](id,value) SELECT id+2,value+20 FROM [memcp-tests].[dbo].[tsql_qualified]
+  expect:
+    affected_rows: 2
+- name: Qualified UPDATE resolves its ordinary source alias
+  sql: UPDATE q SET value=value+1 FROM [memcp-tests].[dbo].[tsql_qualified] AS q WHERE q.id=1
+  expect:
+    affected_rows: 1
+- name: Qualified UPDATE without FROM targets its native relation
+  sql: UPDATE [memcp-tests]..[tsql_qualified] SET value=22 WHERE id=2
+  expect:
+    affected_rows: 1
+- name: Qualified DELETE targets the native row stream
+  sql: DELETE FROM [memcp-tests].[dbo].[tsql_qualified] WHERE id=4
+  expect:
+    affected_rows: 1
+- name: Qualified DML changes are visible without another namespace
+  sql: SELECT id,value FROM [memcp-tests]..[tsql_qualified] ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 11
+    - id: 2
+      value: 22
+    - id: 3
+      value: 30
+- name: Qualified ALTER ADD uses the same native table
+  sql: ALTER TABLE [memcp-tests].[dbo].[tsql_qualified] ADD extra INT
+- name: Added columns are visible through the empty owner form
+  sql: SELECT extra FROM [memcp-tests]..[tsql_qualified] WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - extra: null
+- name: Empty owner ALTER DROP uses the same declaration
+  sql: ALTER TABLE [memcp-tests]..[tsql_qualified] DROP COLUMN extra
+- name: Qualified CREATE INDEX keeps acceleration choices with the native planner
+  sql: CREATE INDEX tsql_qualified_hint ON [memcp-tests].[dbo].[tsql_qualified](value)
+- name: Quoted owner view body reads a database qualified source
+  sql: CREATE VIEW [dbo].[tsql_qualified_view] AS SELECT id,value FROM [memcp-tests].[dbo].[tsql_qualified]
+- name: Qualified view references use the existing native view expansion
+  sql: SELECT id,value FROM [memcp-tests]..[tsql_qualified_view] WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 11
+- name: Quoted owner procedure body uses the same qualified relation
+  sql: CREATE PROCEDURE [dbo].[tsql_qualified_proc] @id INT AS SELECT value FROM [memcp-tests].[dbo].[tsql_qualified]
+    WHERE id=@id
+- name: EXEC resolves a quoted database and default owner
+  sql: EXEC [memcp-tests].[dBo].[tsql_qualified_proc] @id=1
+  expect:
+    rows: 1
+    data:
+    - value: 11
+- name: EXEC also accepts the empty default owner
+  sql: EXEC [memcp-tests]..[tsql_qualified_proc] 2
+  expect:
+    rows: 1
+    data:
+    - value: 22
+- name: Qualified references retain native foreign key endpoints
+  sql: CREATE TABLE [memcp-tests]..[tsql_qualified_child](id INT PRIMARY KEY,parent_id INT,CONSTRAINT tsql_qualified_fk
+    FOREIGN KEY(parent_id) REFERENCES [memcp-tests].[dbo].[tsql_qualified](id))
+- name: Qualified foreign key declaration enforces the existing constraint
+  sql: INSERT INTO [memcp-tests].[dbo].[tsql_qualified_child] VALUES(1,999)
+  expect:
+    error: true
+- name: Qualified foreign key declaration admits an existing parent
+  sql: INSERT INTO [memcp-tests]..[tsql_qualified_child] VALUES(1,1)
+  expect:
+    affected_rows: 1
+- name: Cross database foreign key qualification fails before publication
+  sql: CREATE TABLE dbo.tsql_qualified_bad_fk(id INT,parent_id INT,FOREIGN KEY(parent_id) REFERENCES [absent_catalog].[dbo].[tsql_qualified](id))
+  expect:
+    error: true
+    contains: cross-database
+- name: Rejected foreign key qualifiers leave no native table
+  scm: (nil? (table "memcp-tests" false "tsql_qualified_bad_fk" false))
+  expect:
+    result: true
+- name: Brackets escape closing delimiters without changing the object identity
+  sql: CREATE TABLE [memcp-tests].[dbo].[tsql_qual]]ified]([col]]umn] INT)
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.[tsql_qual]]ified]
+- name: Escaped bracket identifiers roundtrip through INSERT and SELECT
+  sql: INSERT INTO [memcp-tests]..[tsql_qual]]ified]([col]]umn]) VALUES(7)
+  expect:
+    affected_rows: 1
+- name: Escaped bracket columns remain ordinary native values
+  sql: SELECT [col]]umn] AS value FROM [memcp-tests].[dbo].[tsql_qual]]ified]
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: Double quoted delimiters preserve embedded quotes
+  sql: CREATE TABLE "memcp-tests"."dbo"."tsql_qual""ified"("col""umn" INT)
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo."tsql_qual""ified"
+- name: Double quoted names use the same writable relation
+  sql: INSERT INTO "memcp-tests".."tsql_qual""ified"("col""umn") VALUES(8)
+  expect:
+    affected_rows: 1
+- name: Double quoted source aliases preserve embedded quotes
+  sql: SELECT "a""b"."col""umn" AS value FROM "memcp-tests"."dbo"."tsql_qual""ified" AS "a""b"
+  expect:
+    rows: 1
+    data:
+    - value: 8
+- name: Quoted dots are data within a single identifier
+  sql: CREATE TABLE [memcp-tests].[dbo].[tsql.qualified]([id] INT)
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.[tsql.qualified]
+- name: Quoted dotted table names do not become another qualifier
+  sql: INSERT INTO [memcp-tests]..[tsql.qualified] VALUES(9)
+  expect:
+    affected_rows: 1
+- name: Quoted dotted identifiers retain their stored row
+  sql: SELECT id FROM [memcp-tests].[dbo].[tsql.qualified]
+  expect:
+    rows: 1
+    data:
+    - id: 9
+- name: Other three part owners do not become a database or table alias
+  sql: SELECT id FROM [memcp-tests].[other_owner].[tsql_qualified]
+  expect:
+    error: true
+- name: Catalog owners are not falsely treated as user default owners
+  sql: SELECT name FROM [memcp-tests].[sys].[tables]
+  expect:
+    error: true
+- name: Four part linked object names fail explicitly
+  sql: SELECT id FROM [unavailable].[memcp-tests].[dbo].[tsql_qualified]
+  expect:
+    error: true
+- name: An incomplete three part name cannot capture a source alias
+  sql: SELECT id FROM [memcp-tests].[dbo].
+  expect:
+    error: true
+- name: Three part column references fail instead of silently truncating the source
+  sql: SELECT [dbo].[tsql_qualified].[id] FROM dbo.tsql_qualified
+  expect:
+    error: true
+- name: Four part column references fail instead of selecting another table
+  sql: SELECT [memcp-tests].[dbo].[tsql_qualified].[id] FROM dbo.tsql_qualified
+  expect:
+    error: true
+- name: Multiple part assignment columns fail before writes
+  sql: UPDATE dbo.tsql_qualified SET dbo.tsql_qualified.value=99 WHERE id=1
+  expect:
+    error: true
+- name: Rejected qualified syntax preserves the actual table
+  sql: SELECT value FROM dbo.tsql_qualified WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - value: 11
+- name: Qualified TRUNCATE uses the existing DML planner
+  sql: TRUNCATE TABLE [memcp-tests]..[tsql_qualified_child]
+- name: Qualified truncation leaves the parent unchanged
+  sql: SELECT COUNT(*) AS n FROM [memcp-tests].[dbo].[tsql_qualified]
+  expect:
+    rows: 1
+    data:
+    - n: 3
+- name: Qualified default row INSERT reuses the original DEFAULT VALUES branch
+  sql: INSERT INTO [memcp-tests].[dbo].[tsql_qualified_defaults] DEFAULT VALUES
+  setup:
+  - sql: CREATE TABLE dbo.tsql_qualified_defaults(value INT DEFAULT 7)
+  expect:
+    affected_rows: 1
+- name: Qualified default row is visible through the empty owner spelling
+  sql: SELECT value FROM [memcp-tests]..[tsql_qualified_defaults]
+  expect:
+    rows: 1
+    data:
+    - value: 7
+  cleanup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_qualified_defaults
+- name: Qualified EXEC status parsing uses the same procedure owner grammar
+  scm: |
+    (equal? (parse_tsql_batch "memcp-tests" "EXEC @status=[memcp-tests]..[tsql_qualified_proc] @id=1")
+      (list "batch" (list (list "execute-status" "memcp-tests" "tsql_qualified_proc" (list (list "id" "1")) "status"))))
+  expect:
+    result: true
+- name: Qualified ALTER INDEX leaves physical choices with the shared planner
+  sql: ALTER INDEX tsql_qualified_hint ON [memcp-tests]..[tsql_qualified] REBUILD
+- name: Qualified DROP INDEX retains native constraint safety checks
+  sql: DROP INDEX tsql_qualified_hint ON [memcp-tests].[dbo].[tsql_qualified]
+  expect:
+    error: true
+    contains: native constraint-safe key removal
+- name: Relative default owner references resolve against the CREATE target context
+  scm: |
+    (begin
+      (define formula (parse_tsql "memcp-tests" "CREATE TABLE [other_catalog].[dbo].[child](id INT,parent_id INT,FOREIGN KEY(parent_id) REFERENCES [dbo].[parent](id))"
+        (lambda (database _name _write)
+          (if (equal? database "other_catalog") true (error "unresolved policy database"))) nil nil))
+      (and (equal? (cadr formula) "other_catalog")
+        (equal? (nth formula 2) "child")
+        (expression_equal? (nth (nth formula 3) 3)
+          (list (quote list) "foreign" nil (list (quote list) "parent_id") "parent"
+            (list (quote list) "id") nil nil))
+        (not (regexp_test (string formula) "tsql_default_owner|tsql_qualifier_database"))))
+  expect:
+    result: true
+- name: Unqualified references retain the CREATE target context
+  scm: |
+    (begin
+      (define formula (parse_tsql "memcp-tests" "CREATE TABLE [other_catalog].[dbo].[child](id INT,parent_id INT,FOREIGN KEY(parent_id) REFERENCES [parent](id))"
+        (lambda (database _name _write)
+          (if (equal? database "other_catalog") true (error "unresolved policy database"))) nil nil))
+      (and (equal? (cadr formula) "other_catalog")
+        (equal? (nth formula 2) "child")
+        (expression_equal? (nth (nth formula 3) 3)
+          (list (quote list) "foreign" nil (list (quote list) "parent_id") "parent"
+            (list (quote list) "id") nil nil))
+        (not (regexp_test (string formula) "tsql_default_owner|tsql_qualifier_database"))))
+  expect:
+    result: true
+- name: Explicit matching database references retain the existing native FK contract
+  scm: |
+    (begin
+      (define formula (parse_tsql "memcp-tests" "CREATE TABLE [other_catalog].[dbo].[child](id INT,parent_id INT,FOREIGN KEY(parent_id) REFERENCES [other_catalog].[dbo].[parent](id))"
+        (lambda (database _name _write)
+          (if (equal? database "other_catalog") true (error "unresolved policy database"))) nil nil))
+      (and (equal? (cadr formula) "other_catalog")
+        (equal? (nth formula 2) "child")
+        (expression_equal? (nth (nth formula 3) 3)
+          (list (quote list) "foreign" nil (list (quote list) "parent_id") "parent"
+            (list (quote list) "id") nil nil))
+        (not (regexp_test (string formula) "tsql_default_owner|tsql_qualifier_database"))))
+  expect:
+    result: true
+- name: Explicit request database references remain cross database errors in another CREATE context
+  scm: |
+    (try (lambda () (begin
+      (parse_tsql "memcp-tests" "CREATE TABLE [other_catalog].[dbo].[child](id INT,parent_id INT,FOREIGN KEY(parent_id) REFERENCES [memcp-tests].[dbo].[parent](id))" nil nil nil)
+      false))
+      (lambda (message) (equal? message "cross-database foreign keys are not supported")))
+  expect:
+    result: true
+- name: Qualified cleanup resolves each original native object
+  sql: DROP TABLE [memcp-tests].[dbo].[tsql_qualified_child]
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS [dbo].[tsql_qualified_proc]
+  - sql: DROP VIEW IF EXISTS [dbo].[tsql_qualified_view]
+  - sql: DROP TABLE IF EXISTS [memcp-tests]..[tsql_qualified]
+  - sql: DROP TABLE IF EXISTS dbo.[tsql_qual]]ified]
+  - sql: DROP TABLE IF EXISTS dbo."tsql_qual""ified"
+  - sql: DROP TABLE IF EXISTS dbo.[tsql.qualified]
 cleanup: []

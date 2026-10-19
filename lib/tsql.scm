@@ -194,6 +194,48 @@ the common binder consumes the temporary callback before planning. */
 
 /* Transport tuples describe bytes and unscaled coefficients only. Their SQL
 meaning is chosen here from the request's declaration, not in the Go bridge. */
+/* The transport exposes integer day/clock fields, never a SQL runtime type.
+Validate their declaration-specific units once per parameter. The current native
+calendar carrier keeps whole seconds; refuse fractional loss and offset loss
+until those contracts can be represented by the existing date primitives. */
+(define tds_temporal_parameter_value (lambda (wire value) (begin
+	(define kind (wire "kind"))
+	(define days (value "days"))
+	(define ticks (value "ticks"))
+	(define offset (value "offset"))
+	(if (and (int? days) (int? ticks) (int? offset)) true
+		(error "invalid temporal parameter fields"))
+	(define legacy (equal? kind 111))
+	(define short (and legacy (equal? (wire "size") 4)))
+	(if (and legacy (not (has? '(4 8) (wire "size"))))
+		(error "invalid legacy temporal parameter size") true)
+	(define factor (if (has? '(41 42 43) kind) (begin
+		(define scale (wire "scale"))
+		(if (and (int? scale) (>= scale 0) (<= scale 7)) true
+			(error "invalid temporal parameter scale"))
+		(tsql_parse_integer (concat "1" (string_repeat "0" scale))))
+		legacy (if short 1 300) 1))
+	(if (and (equal? kind 41) (not (equal? days 0)))
+		(error "invalid time parameter day") true)
+	(if (and (>= days (if legacy (if short 0 -53690) 0))
+		(<= days (if legacy (if short 65535 2958463) 3652058))) true
+		(error "temporal parameter calendar overflow"))
+	(if (and (>= ticks 0) (< ticks (if short 1440 (* 86400 factor)))
+		(or (not (equal? kind 40)) (equal? ticks 0))) true
+		(error "temporal parameter clock overflow"))
+	(if (and (equal? kind 43) (or (< offset -840) (> offset 840)))
+		(error "temporal parameter offset overflow") true)
+	(if (equal? kind 43)
+		(error "offset temporal parameter preservation is not implemented")
+		(not (equal? offset 0)) (error "unexpected temporal parameter offset") true)
+	(if (equal? (mod ticks factor) 0) true
+		(error "fractional temporal parameter precision is not implemented"))
+	(define seconds (if short (* ticks 60) (intdiv ticks factor)))
+	(define date (tsql_calendar_shift_seconds
+		(date_add (parse_date (if (or legacy (equal? kind 41)) "1900-01-01" "0001-01-01")) days "DAY") seconds))
+	/* TIME uses the frontend's existing clock-text carrier at the boundary;
+	other temporal contracts retain the normal native Unix calendar value. */
+	(if (equal? kind 41) (format_date date "%H:%i:%s") date))))
 (define tds_parameter_value (lambda (parameter) (begin
 	(define value (parameter "value"))
 	(define wire (parameter "type"))
@@ -210,9 +252,43 @@ meaning is chosen here from the request's declaration, not in the Go bridge. */
 				(define padded (concat (string_repeat "0" (max 0 (+ 1 (- scale (strlen digits))))) digits))
 				(define point (- (strlen padded) scale))
 				(tsql_numeric_input (concat (if negative "-" "") (substr padded 0 point) "." (substr padded point))))))
+		(has? '(40 41 42 43 111) (wire "kind")) (tds_temporal_parameter_value wire value)
 		value))))
+/* Convert only the external result edge to the existing neutral transport
+payload. The shared plan and stored columns retain their normal Unix values.
+Floor is required before 1970: truncating a negative partial day changes both
+its date and clock. SQL declarations select the descriptor before any rows. */
+(define tds_temporal_result_value (lambda (descriptor value) (begin
+	(define kind (descriptor "kind"))
+	/* A string is an existing text representation of this declared SQL type,
+	not a source for choosing its type. Check before the generic Unix adapter
+	can discard a fraction; native Unix/date values need no text round trip.
+	DATE intentionally discards its clock under the declared DATE contract. */
+	(define textual (string? value))
+	(define checked (if (and textual (not (equal? kind 40)))
+		(tsql_calendar_cast_text value) value))
+	(define seconds (unix_timestamp (if (and textual (equal? kind 41))
+		(tsql_calendar_text checked) checked)))
+	(define day (intdiv (floor (/ seconds 86400)) 1))
+	(define clock (- seconds (* day 86400)))
+	(define legacy (equal? kind 111))
+	(define short (and legacy (equal? (descriptor "size") 4)))
+	(if (equal? kind 41) true
+		(and (>= seconds (if legacy (if short -2208988800 -6847804800) -62135596800))
+			(<= seconds (if short 3453321540 253402300799))) true
+		(error "calendar wire result overflow"))
+	(if (and short (not (equal? (mod clock 60) 0)))
+		(error "small datetime wire result requires whole minutes") true)
+	(list "days" (if (equal? kind 41) 0 (+ day (if legacy 25567 719162)))
+		"ticks" (if (equal? kind 40) 0 short (intdiv clock 60)
+			(* clock (if legacy 300 (nth '(1 10 100 1000 10000 100000 1000000 10000000) (descriptor "scale")))))
+		"offset" 0))))
 (define tds_result_value (lambda (descriptor value) (if (nil? value) nil
 	(match (descriptor "kind")
+		40 (tds_temporal_result_value descriptor value)
+		41 (tds_temporal_result_value descriptor value)
+		42 (tds_temporal_result_value descriptor value)
+		111 (tds_temporal_result_value descriptor value)
 		165 (list "bytes" value)
 		108 (begin
 			(define scale (descriptor "scale"))
@@ -250,16 +326,21 @@ value; the wire descriptor and SQL declaration own the type independently. */
 		(define contract (tsql_effective_parameter_contract (cadr declaration)))
 		(define parameter (named name))
 		(define wire (parameter "type"))
-		(if (not (has? '(31 38 104 106 108 109 165 167 173 175 231 239) (wire "kind")))
+		(if (not (has? '(31 38 40 41 42 43 104 106 108 109 111 165 167 173 175 231 239) (wire "kind")))
 			(error "unsupported T-SQL parameter wire type: " (wire "kind")) true)
 		/* A supplied NULL needs no numeric representation or conversion. Its SQL
 		contract still comes exclusively from the declaration. */
 		(define source_type (match (wire "kind")
 			38 "BIGINT" 104 "BIT" 106 "DECIMAL" 108 "NUMERIC" 109 "FLOAT"
+			40 "DATE" 41 "TIME" 42 "DATETIME2" 43 "DATETIMEOFFSET"
+			111 (if (equal? (wire "size") 4) "SMALLDATETIME" "DATETIME")
 			165 "VARBINARY" 173 "BINARY" 167 "VARCHAR" 175 "CHAR" 231 "NVARCHAR" 239 "NCHAR" _ "NULL"))
 		(if (and (not (nil? (parameter "value"))) (tsql_binary_type? source_type)
 			(not (tsql_binary_type? (car contract))))
 			(error "binary parameter conversion is not implemented") true)
+		(if (and (not (nil? (parameter "value"))) (tsql_temporal_type? source_type)
+			(not (or (tsql_temporal_type? (car contract)) (sql_text_type? (car contract)))))
+			(error "temporal parameter conversion is not implemented") true)
 		(define converted (if (nil? (parameter "value")) nil
 			(eval (sql_type_lower_annotations
 				(tsql_cast_expr (list (quote sql_type_expr) (list (quote quote) (tds_parameter_value parameter)) source_type nil)
@@ -293,9 +374,13 @@ execution paths. The cache, transaction owner and compiled evaluator are shared.
 	(define declarations (coalesceNil (session "__tsql_parameter_declarations") (list)))
 	/* Cache identity includes the complete immutable declaration contract. Values
 	remain invocation inputs; differently typed calls cannot reuse wrong metadata. */
-	(define cache_scope (json_encode (list username declarations)))
+	(define import_target (session "tsql_import_target"))
+	(define import_source (session "tsql_import_source"))
+	(define cache_scope (json_encode (list username declarations import_target import_source)))
 	(define parser (lambda (database text policy planning tx) (begin
 		(planning "__tsql_parameter_declarations" declarations)
+		(planning "tsql_import_target" import_target)
+		(planning "tsql_import_source" import_source)
 		(parse_tsql database text policy planning tx))))
 	(define formula (cached_parse tsql_queryplan_cache (list parser (list "exact_guards" true)) schema input
 		(list (quote sql-policy-for) username) cache_scope session false tx))
@@ -524,12 +609,19 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 			(session (concat "__tsql_parameter:" name) value)
 			0)
 		'("create-procedure" owner name parameters source replace) (statement "procedure definition" false (lambda (tx) (begin
+			/* Stored procedure source is not yet normalized for import aliases or
+			checked dependencies. Reject before catalog publication; ordinary
+			procedure creation still uses its existing source compiler. */
+			(if (session "tsql_import_target")
+				(error "retargeted procedure definitions are not supported") true)
 			(if (session "transaction") (error "procedure DDL inside explicit transactions is not supported") true)
+			(define owner (tsql_qualifier_database owner schema session))
 			((sql_policy (session "username")) owner name true)
 			(createprocedure owner (toLower name) "tsql-procedure" source parameters replace)
 			0)))
 		'("drop-procedure" owner name ignore) (statement "procedure deletion" false (lambda (_tx) (begin
 			(if (session "transaction") (error "procedure DDL inside explicit transactions is not supported") true)
+			(define owner (tsql_qualifier_database owner schema session))
 			((sql_policy (session "username")) owner name true)
 			(define definition (find (showprocedures owner (toLower name)) (lambda (_definition) true) nil))
 			(dropprocedure owner (if definition (definition "name") name) ignore)
@@ -572,13 +664,48 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 		(define commands (cadr (batch "syntax")))
 		(tsql_execute_command_batch schema commands inherited supplied statement session resultrow resultfields
 			(lambda (result _status _scoped) result)))) 0)) 0))))
+/* Frontend scopes borrow names; the native request still owns the original
+connection session and its reusable transaction record. */
 (define tsql_execute_request (lambda (schema text session state sequence resultrow resultfields)
-	(with_query_request session state sequence text (lambda (statement)
+	(with_query_request (tsql_connection_session session) state sequence text (lambda (statement)
 		(tsql_execute_batches schema text session statement resultrow resultfields)))))
 /* Console imports accept the same textual script as REST and the connector.
 The caller supplies its ordinary authenticated session; file I/O stays in load. */
-(define load_tsql (lambda (schema stream session)
-	(tsql_execute_request schema (load stream) session nil 0 print (lambda args true))))
+/* The two import names belong to one invocation. Other state, notably the
+account and existing transaction, remains on the ordinary caller session. */
+(define tsql_import_scope (lambda (schema parent) (begin
+	(define names (newsession))
+	(names "tsql_import_target" schema)
+	(names "__tsql_connection_session" (tsql_connection_session parent))
+	(define own? (lambda (key) (has? '("tsql_import_target" "tsql_import_source" "__tsql_connection_session") key)))
+	(lambda args (match args
+		'() (merge_unique (list (names) (filter (parent) (lambda (key) (not (own? key))))))
+		'(key) (if (own? key) (names key) (parent key))
+		'(key value) (if (own? key) (names key value) (parent key value))
+		_ (apply parent args))))))
+/* USE declares one source alias during import; it never selects that database.
+Literal contents are untouched and all following statements keep the target. */
+(define tsql_import_database (lambda (session name) (begin
+	(define source (session "tsql_import_source"))
+	(if (equal? name (session "tsql_import_target")) 0
+		(nil? source) (begin (session "tsql_import_source" name) 0)
+		(equal? source name) 0
+		(error "import cannot select a second source database: " name)))))
+(define load_tsql (lambda (schema stream session) (begin
+	((sql_policy (session "username")) schema true false)
+	/* An import borrows an existing caller transaction. Otherwise it owns only
+	explicit transactions opened by this script, and must release them on failure
+	or unfinished input. Completed autocommit statements retain their commits. */
+	(define caller_transaction (session "transaction"))
+	(define outcome (try (lambda ()
+		(list true (tsql_execute_request schema (load stream nil nil "bom") (tsql_import_scope schema session) nil 0 print (lambda args true))))
+		(lambda (failure) (list false failure))))
+	(define unfinished (and (nil? caller_transaction) (session "transaction")))
+	/* Cleanup runs once, outside the request's catch: a persistence failure
+	during rollback must propagate rather than retry the same native cleanup. */
+	(if unfinished (tx_rollback session) true)
+	(if (not (car outcome)) (error (cadr outcome))
+		unfinished (error "unfinished import transaction") (cadr outcome)))))
 /* Source compilers capture definitions only. Execution receives the caller's
 statement owner, account, transaction session, arguments and output callbacks. */
 (define tsql_procedure_compile (lambda (source context) (begin
@@ -683,11 +810,17 @@ Only parameter-sized scalar tuples are collected; relational SQL stays native. *
 	(tsql_execute_dynamic schema (car binding) (map (cadr binding) (lambda (item) (list (car item) (cadr item))))
 		(car bound) statement caller resultrow resultfields
 		(lambda (_result status scoped) (begin (tsql_copy_outputs (cadr bound) scoped statement caller) status))))))
-(define tsql_invoke_procedure (lambda (schema name arguments statement caller resultrow resultfields)
+(define tsql_invoke_procedure (lambda (schema name arguments statement caller resultrow resultfields) (begin
+	(define metadata_call (has? '("sp_describe_undeclared_parameters" "sp_tables" "sp_columns" "sp_pkeys" "sp_statistics" "sp_fkeys" "sp_datatype_info" "sp_datatype_info_100" "sp_special_columns") (toLower name)))
+	/* sys is a virtual owner only for supported system calls. Other owners
+	use the same import binding as ordinary SQL, before any invocation runs. */
+	(define schema (if (and (equal?? schema "sys")
+		(or metadata_call (equal? (toLower name) "sp_executesql"))) (caller "schema")
+		(tsql_qualifier_database schema (caller "schema") caller)))
 	(if (equal? (toLower name) "sp_executesql")
 		(tsql_execute_parameterized (if (equal?? schema "sys") (caller "schema") schema)
 			arguments statement caller resultrow resultfields)
-		(has? '("sp_describe_undeclared_parameters" "sp_tables" "sp_columns" "sp_pkeys" "sp_statistics" "sp_fkeys" "sp_datatype_info" "sp_datatype_info_100" "sp_special_columns") (toLower name))
+		metadata_call
 		(statement "metadata procedure" false (lambda (tx) (begin
 			(define values (map arguments (lambda (argument) (begin
 				(match (cadr argument) (cons _head _tail) (error "metadata parameters are input-only") _ true)
@@ -704,7 +837,7 @@ Only parameter-sized scalar tuples are collected; relational SQL stays native. *
 				(error "procedure language cannot execute in this frontend"))
 			(define binding (tsql_bind_call arguments (definition "parameters") statement caller))
 			((snapshot "callable") statement caller (car binding) resultrow resultfields
-				(lambda (status scoped) (begin (tsql_copy_outputs (cadr binding) scoped statement caller) status)))))))
+				(lambda (status scoped) (begin (tsql_copy_outputs (cadr binding) scoped statement caller) status))))))))
 
 (define tsql_http_query (lambda (req res schema) (begin
 	(define stored (mysql_auth (req "username")))
@@ -719,13 +852,17 @@ Only parameter-sized scalar tuples are collected; relational SQL stays native. *
 				query options may supply values, never replace either authority. */
 				(session "username" (req "username"))
 				(session "schema" schema)
+				(session "tsql_import_target" nil)
+				(session "tsql_import_source" nil)
 				/* One scope owner per submitted batch, never per native insert row. */
 				(session "__tsql_scope" (newsession))
 				(define output (newsession))
 				(define result (tsql_execute_request schema text session (req "__session_state") (req "__query_seq")
 					(lambda (values) (begin (output "rows" true) ((res "jsonl") values)))
-					(lambda args true)))
-				(if (and (not (output "rows")) (number? result))
+					(lambda args (output "fields" true))))
+				/* An empty result set still has a declared field contract. Its
+				procedure return status must not become an affected-row record. */
+				(if (and (not (or (output "rows") (output "fields"))) (number? result))
 					((res "jsonl") (list "affected_rows" result)) true)
 			) text)) (lambda (err) (begin
 					(error_log (concat err) schema (req "username") text)
@@ -832,13 +969,14 @@ identity, key or comment. Unknown expression widths must not become width one. *
 	(map names (lambda (name)
 		(if (has? integers name) (list "name" name "kind" 38 "size" 4 "flags" 1)
 			(list "name" name "kind" 231 "size" 8000 "flags" 1))))))
-/* (type name, ODBC code, precision, byte length, scale, radix, datetime subtype).
-Only declarations decide these values: an empty or all-NULL table is identical.
-Metadata consumers resolve aliases through the same local declaration factory
-as expressions; public type names retain the original alias spelling. */
+/* (type name, ODBC code, precision, transfer length, scale, radix, datetime subtype).
+Transfer length describes the driver's default C representation, not compressed
+or physical column storage. Only declarations decide these values. */
 (define tsql_metadata_type (lambda (column version) (begin
 	(define dimensions (column "Dimensions"))
-	(define length (if (empty_list? dimensions) 1 (car dimensions)))
+	(define width (if (empty_list? dimensions) 1 (car dimensions)))
+	/* The declaration's MAX sentinel is not an ODBC length. */
+	(define length (if (equal? width -1) 0 width))
 	(define type (toLower (column "RawType")))
 	(define contract (match type
 		"bigint" '("bigint" -5 19 8 0 10 nil)
@@ -851,22 +989,31 @@ as expressions; public type names retain the original alias spelling. */
 		"real" '("real" 7 24 4 nil 2 nil)
 		"float" '("float" 6 53 8 nil 2 nil)
 		"double" '("float" 6 53 8 nil 2 nil)
-		"money" '("money" 3 19 8 4 10 nil)
-		"smallmoney" '("smallmoney" 3 10 4 4 10 nil)
+		"money" '("money" 3 19 21 4 10 nil)
+		"smallmoney" '("smallmoney" 3 10 12 4 10 nil)
 		"uniqueidentifier" '("uniqueidentifier" -11 36 16 nil nil nil)
-		"date" (list "date" (if (equal? version 2) 9 91) 10 6 nil nil 1)
+		"text" '("text" -1 2147483647 2147483647 nil nil nil)
+		"ntext" '("ntext" -10 1073741823 2147483646 nil nil nil)
+		"image" '("image" -4 2147483647 2147483647 nil nil nil)
+		"date" (list "date" (if (equal? version 2) 9 91) 10 6 0 nil 1)
 		"datetime" (list "datetime" (if (equal? version 2) 11 93) 23 16 3 nil 3)
 		"smalldatetime" (list "smalldatetime" (if (equal? version 2) 11 93) 16 16 0 nil 3)
 		"rowversion" '("rowversion" -2 8 8 nil nil nil)
 		"timestamp" (begin
 			(define scale (if (empty_list? dimensions) 6 (car dimensions)))
 			(list "datetime2" (if (equal? version 2) 11 93) (if (> scale 0) (+ 20 scale) 19) 16 scale nil 3))
-		_ (if (has? '("decimal" "numeric") type)
+		_ (if (has? '("time" "datetime2" "datetimeoffset") type)
+			(begin
+				(define scale (if (empty_list? dimensions) 7 (car dimensions)))
+				(define code (match type "time" -154 "datetimeoffset" -155 _ (if (equal? version 2) 11 93)))
+				(define precision (+ (match type "time" 8 "datetimeoffset" 26 _ 19) (if (> scale 0) (+ scale 1) 0)))
+				(list type code precision (match type "time" 10 "datetimeoffset" 20 _ 16) scale nil
+					(if (equal? type "datetime2") 3 nil)))
+			(has? '("decimal" "numeric") type)
 			(begin
 				(define precision (if (empty_list? dimensions) 18 (car dimensions)))
 				(define scale (if (< (count dimensions) 2) 0 (cadr dimensions)))
-				(list type (if (equal? type "decimal") 3 2) precision
-					(if (<= precision 9) 5 (<= precision 19) 9 (<= precision 28) 13 17) scale 10 nil))
+				(list type (if (equal? type "decimal") 3 2) precision (+ precision 2) scale 10 nil))
 			(has? '("varchar" "char" "nvarchar" "nchar" "binary" "varbinary") type)
 			(list type (match type "varchar" 12 "char" 1 "nvarchar" -9 "nchar" -8 "binary" -2 "varbinary" -3)
 				length (if (and (> length 0) (has? '("nvarchar" "nchar") type)) (* length 2) length) nil nil nil)
@@ -885,31 +1032,47 @@ as expressions; public type names retain the original alias spelling. */
 		"REMARKS" (if (equal? (column "Comment") "") nil (column "Comment"))
 		"COLUMN_DEF" (if (equal? (column "DefaultExpression") "") (column "Default") (column "DefaultExpression"))
 		"SQL_DATA_TYPE" (if subtype 9 (nth contract 1)) "SQL_DATETIME_SUB" subtype
-		"CHAR_OCTET_LENGTH" (if (has? '("varchar" "char" "nvarchar" "nchar" "binary" "varbinary") type) (nth contract 3) nil)
+		"CHAR_OCTET_LENGTH" (if (has? '("varchar" "char" "nvarchar" "nchar" "binary" "varbinary" "text" "ntext" "image") type) (nth contract 3) nil)
 		"ORDINAL_POSITION" ordinal "IS_NULLABLE" (if (column "Null") "YES" "NO")))))
 /* Type info is a frontend declaration catalog, not a registry of runtime tags. */
 (define tsql_metadata_type_info (lambda (options version) (begin
 	(define definitions (list (list "bigint" '()) (list "int" '()) (list "smallint" '()) (list "tinyint" '())
 		(list "bit" '()) (list "real" '()) (list "float" '()) (list "decimal" '(38 0)) (list "numeric" '(38 0))
-		(list "varchar" '(8000)) (list "char" '(8000)) (list "date" '())))
+		(list "money" '()) (list "smallmoney" '()) (list "uniqueidentifier" '())
+		(list "varchar" '(8000)) (list "char" '(8000)) (list "nvarchar" '(4000)) (list "nchar" '(4000))
+		(list "binary" '(8000)) (list "varbinary" '(8000))
+		(list "text" '()) (list "ntext" '()) (list "image" '())
+		(list "date" '()) (list "datetime" '()) (list "smalldatetime" '())
+		(list "datetime2" '(7)) (list "time" '(7)) (list "datetimeoffset" '(7))))
 	(define rows (map definitions (lambda (definition) (begin
 		(define contract (tsql_metadata_type (list "RawType" (car definition) "Dimensions" (cadr definition)) version))
 		(define type (car contract))
-		(define character (has? '("varchar" "char") type))
+		(define character (has? '("varchar" "char" "nvarchar" "nchar" "text" "ntext") type))
+		(define binary (has? '("binary" "varbinary" "image") type))
+		(define long_value (has? '("text" "ntext" "image") type))
+		(define calendar (has? '("date" "datetime" "smalldatetime" "datetime2" "time" "datetimeoffset") type))
+		(define scaled_calendar (has? '("datetime2" "time" "datetimeoffset") type))
 		(define decimal (has? '("decimal" "numeric") type))
+		(define money (has? '("money" "smallmoney") type))
+		(define numeric (or decimal money (has? '("bigint" "int" "smallint" "tinyint" "real" "float") type)))
+		(define quoted (or character calendar (equal? type "uniqueidentifier")))
 		(list "TYPE_NAME" type "DATA_TYPE" (nth contract 1) "PRECISION" (nth contract 2)
-			"LITERAL_PREFIX" (if (or character (equal? type "date")) "'" nil)
-			"LITERAL_SUFFIX" (if (or character (equal? type "date")) "'" nil)
-			"CREATE_PARAMS" (if character "length" decimal "precision,scale" nil)
-			"NULLABLE" 1 "CASE_SENSITIVE" (if character 1 0) "SEARCHABLE" 3
-			"UNSIGNED_ATTRIBUTE" (if (equal? type "tinyint") 1 (has? '("bigint" "int" "smallint" "decimal" "numeric" "real" "float") type) 0 nil)
-			"MONEY" 0 "AUTO_INCREMENT" (if (has? '("bigint" "int" "smallint" "tinyint") type) 1 0)
-			"LOCAL_TYPE_NAME" type "MINIMUM_SCALE" (nth contract 4) "MAXIMUM_SCALE" (if decimal 38 (nth contract 4))
+			"LITERAL_PREFIX" (if quoted "'" binary "0x" nil)
+			"LITERAL_SUFFIX" (if quoted "'" nil)
+			"CREATE_PARAMS" (if (and (or character binary) (not long_value)) "length" decimal "precision,scale" scaled_calendar "scale" nil)
+			"NULLABLE" 1 "CASE_SENSITIVE" (if character 1 0)
+			/* ODBC predicate capabilities: none=0, LIKE-only=1, full=3. */
+			"SEARCHABLE" (match type "image" 0 "text" 1 "ntext" 1 _ 3)
+			"UNSIGNED_ATTRIBUTE" (if (equal? type "tinyint") 1 numeric 0 nil)
+			"MONEY" (if money 1 0) "AUTO_INCREMENT" (if (has? '("bigint" "int" "smallint" "tinyint") type) 1 numeric 0 nil)
+			"LOCAL_TYPE_NAME" type "MINIMUM_SCALE" (if scaled_calendar 0 (nth contract 4))
+			"MAXIMUM_SCALE" (if decimal 38 scaled_calendar 7 (nth contract 4))
 			"SQL_DATA_TYPE" (if (nth contract 6) 9 (nth contract 1)) "SQL_DATETIME_SUB" (nth contract 6)
 			"NUM_PREC_RADIX" (nth contract 5) "INTERVAL_PRECISION" nil)))))
 	(list '("TYPE_NAME" "DATA_TYPE" "PRECISION" "LITERAL_PREFIX" "LITERAL_SUFFIX" "CREATE_PARAMS" "NULLABLE" "CASE_SENSITIVE" "SEARCHABLE" "UNSIGNED_ATTRIBUTE" "MONEY" "AUTO_INCREMENT" "LOCAL_TYPE_NAME" "MINIMUM_SCALE" "MAXIMUM_SCALE" "SQL_DATA_TYPE" "SQL_DATETIME_SUB" "NUM_PREC_RADIX" "INTERVAL_PRECISION")
 		'("DATA_TYPE" "PRECISION" "NULLABLE" "CASE_SENSITIVE" "SEARCHABLE" "UNSIGNED_ATTRIBUTE" "MONEY" "AUTO_INCREMENT" "MINIMUM_SCALE" "MAXIMUM_SCALE" "SQL_DATA_TYPE" "SQL_DATETIME_SUB" "NUM_PREC_RADIX" "INTERVAL_PRECISION")
-		(filter rows (lambda (row) (or (nil? (options "data_type")) (equal? (options "data_type") 0) (equal? (row "DATA_TYPE") (options "data_type")))))))))
+		(sort (filter rows (lambda (row) (or (nil? (options "data_type")) (equal? (options "data_type") 0) (equal? (row "DATA_TYPE") (options "data_type")))))
+			(lambda (left right) (< (left "DATA_TYPE") (right "DATA_TYPE"))))))))
 /* Undeclared parameters are parsed by the ordinary grammar, then inferred
 from its bound declaration contracts. Probe markers are analysis-only data:
 no supplied value, physical plan, cache binding or marker is executed. */

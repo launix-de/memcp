@@ -18,13 +18,14 @@ require (
 	github.com/dunglas/frankenphp v1.12.7
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-sql-driver/mysql v1.8.1
+	github.com/golang-sql/civil v0.0.0-20190719163853-cb61b32ac6fe
 	github.com/google/btree v1.1.3
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/launix-de/NonLockingReadMap v1.1.1
 	github.com/launix-de/go-mysqlstack v0.2.0
 	github.com/launix-de/go-packrat/v2 v2.1.25
-	github.com/launix-de/go-tdsstack v0.1.0
+	github.com/launix-de/go-tdsstack v0.1.1
 	github.com/leonelquinteros/gotext v1.7.2
 	github.com/lib/pq v1.11.2
 	github.com/pierrec/lz4/v4 v4.1.26
@@ -65,7 +66,6 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/gofrs/uuid/v5 v5.5.1 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
-	github.com/golang-sql/civil v0.0.0-20190719163853-cb61b32ac6fe // indirect
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
 	github.com/gorilla/handlers v1.5.2 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect

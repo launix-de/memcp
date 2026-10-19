@@ -6,6 +6,150 @@ metadata:
   isolated: true
 setup: []
 test_cases:
+- name: Create independent console transaction fixture
+  syntax: tsql
+  sql: CREATE TABLE dbo.tsdump_console_lifecycle (id INT PRIMARY KEY,label NVARCHAR(80))
+- name: Console import commits a completed explicit transaction
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (streamString "BEGIN TRANSACTION; INSERT dbo.tsdump_console_lifecycle VALUES(1,N'committed'); COMMIT;") session)
+      (nil? (session "transaction")))
+  expect:
+    result: true
+- name: Committed console data is visible to a new request
+  syntax: tsql
+  sql: SELECT label FROM dbo.tsdump_console_lifecycle WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - label: committed
+- name: Console import rejects and releases an unfinished transaction
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (try (lambda () (begin
+        (load_tsql "memcp-tests" (streamString "BEGIN TRANSACTION; INSERT dbo.tsdump_console_lifecycle VALUES(2,N'unfinished');") session)
+        false)) (lambda (failure)
+          (and (nil? (session "transaction")) (strlike (concat failure) "%unfinished import transaction%")))))
+  expect:
+    result: true
+- name: Unfinished console changes are rolled back
+  syntax: tsql
+  sql: SELECT COUNT(*) AS n FROM dbo.tsdump_console_lifecycle WHERE id=2
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: Runtime failure rolls back only the import transaction
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (try (lambda () (begin
+        (load_tsql "memcp-tests" (streamString "INSERT dbo.tsdump_console_lifecycle VALUES(3,N'autocommit'); BEGIN TRANSACTION; INSERT dbo.tsdump_console_lifecycle VALUES(4,N'rolled back'); THROW 51000,N'import failure marker',1;") session)
+        false)) (lambda (failure)
+          (and (nil? (session "transaction")) (strlike (concat failure) "%import failure marker%")))))
+  expect:
+    result: true
+- name: Import failure preserves completed autocommit statements
+  syntax: tsql
+  sql: SELECT id,label FROM dbo.tsdump_console_lifecycle WHERE id IN (3,4) ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 3
+      label: autocommit
+- name: Console import leaves a caller transaction under caller ownership
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (tx_begin session)
+      (load_tsql "memcp-tests" (streamString "INSERT dbo.tsdump_console_lifecycle VALUES(5,N'caller owned');") session)
+      (define owned (not (nil? (session "transaction"))))
+      (tx_rollback session)
+      owned)
+  expect:
+    result: true
+- name: Caller rollback removes imported changes
+  syntax: tsql
+  sql: SELECT COUNT(*) AS n FROM dbo.tsdump_console_lifecycle WHERE id=5
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: A failed import does not take over a caller transaction
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (tx_begin session)
+      (define retained (try (lambda () (begin
+        (load_tsql "memcp-tests" (streamString "THROW 51000,N'caller failure marker',1;") session)
+        false)) (lambda (failure)
+          (and (not (nil? (session "transaction"))) (strlike (concat failure) "%caller failure marker%")))))
+      (tx_rollback session)
+      retained)
+  expect:
+    result: true
+- name: Compressed UTF8 streams use the existing stream adapters
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (zcat (gzip (streamString "INSERT dbo.tsdump_console_lifecycle VALUES(6,N'Zürich 🐘');"))) session)
+      true)
+  expect:
+    result: true
+- name: Compressed UTF8 import preserves Unicode
+  syntax: tsql
+  sql: SELECT label FROM dbo.tsdump_console_lifecycle WHERE id=6
+  expect:
+    rows: 1
+    data:
+    - label: Zürich 🐘
+- name: Console import accepts a leading UTF8 byte order mark
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (streamString (concat (unicode_char 65279) "INSERT dbo.tsdump_console_lifecycle VALUES(7,N'BOM');")) session)
+      true)
+  expect:
+    result: true
+- name: A byte order mark within a value remains data
+  syntax: tsql
+  sql: "SELECT N'\uFEFF' AS value"
+  expect:
+    rows: 1
+    data:
+    - value: "\uFEFF"
+- name: Authenticated console import runs an ordinary UTF8 script
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-script-basic.sql") session)
+      true)
+  expect:
+    result: true
+- name: Console import preserves batch variables and quoted GO text
+  syntax: tsql
+  sql: SELECT id,label FROM dbo.script_import
+  expect:
+    rows: 1
+    data:
+    - id: 7
+      label: |-
+        line one
+        GO
+        line two
+- name: Remove the ordinary console import fixture
+  syntax: tsql
+  sql: DROP TABLE dbo.script_import
 - sql: DROP TABLE IF EXISTS tsdump_identity_observation
   name: 'Fixture setup 001: DROP TABLE IF EXISTS tsdump_identity_observation'
 - sql: DROP TABLE IF EXISTS tsdump_identity
@@ -17,7 +161,11 @@ test_cases:
 - sql: DROP TABLE IF EXISTS tsdump_conditional
   name: 'Fixture setup 005: DROP TABLE IF EXISTS tsdump_conditional'
 - name: Load GO-delimited export into selected target
-  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-export.sql") (sql_policy "root"))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-export.sql") session))
   noncritical: true
 - name: Multiline conditional declarations and ELSE data preserve target confinement
   sql: SELECT id,label FROM tsdump_conditional
@@ -78,8 +226,11 @@ test_cases:
   expect:
     error: true
 - name: Compressed UTF16 export is decoded without data loss
-  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-utf16.sql.gz") (sql_policy "root"))
-  noncritical: true
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-utf16.sql.gz") session))
 - name: UTF16 import preserves Unicode and nulls
   sql: SELECT id, label, note FROM tsdump_utf16
   expect:
@@ -88,33 +239,45 @@ test_cases:
     - id: 1
       label: Zürich 🐘
       note: null
-  noncritical: true
 - name: Import policy is honored before opening a file
-  scm: (load_tsql "memcp-tests" "/does/not/exist" (lambda (db table write) (error "denied")))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "import_denied")
+      (try (lambda () (begin
+        (load_tsql "memcp-tests" "/does/not/exist" session)
+        false)) (lambda (failure)
+          (if (strlike (concat failure) "%access denied%") (error (concat failure)) false))))
   expect:
     error: true
 - name: Unsupported import statement stops execution
-  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-unsupported.sql") (sql_policy "root"))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-unsupported.sql") session))
   expect:
     error: true
 - name: Statements after an unsupported statement are not executed
-  sql: SELECT COUNT(*) AS n FROM tsdump_items WHERE id = 998
+  sql: SELECT COUNT(*) AS n FROM tsdump_console_lifecycle WHERE id = 998
   expect:
     rows: 1
     data:
     - n: 0
-  noncritical: true
 - name: Uncommitted import transaction is rejected
-  scm: (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-uncommitted.sql") (sql_policy "root"))
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (concat __DIR__ "/../tests/fixtures/tsql-uncommitted.sql") session))
   expect:
     error: true
 - name: Uncommitted imported rows are rolled back
-  sql: SELECT COUNT(*) AS n FROM tsdump_items WHERE id = 999
+  sql: SELECT COUNT(*) AS n FROM tsdump_console_lifecycle WHERE id = 999
   expect:
     rows: 1
     data:
     - n: 0
-  noncritical: true
 - name: Import rejects references outside destination and source alias
   scm: "(begin\n  (define s (newsession))\n  (s \"tsql_import_target\" \"memcp-tests\")\n  (s \"tsql_import_source\"\
     \ \"export_source\")\n  (parse_tsql \"memcp-tests\" \"SELECT * FROM [other_db].[dbo].[tsdump_items]\" (sql_policy\
@@ -141,4 +304,219 @@ test_cases:
   name: 'Fixture cleanup 004: DROP TABLE IF EXISTS tsdump_utf16'
 - sql: DROP TABLE IF EXISTS tsdump_conditional
   name: 'Fixture cleanup 005: DROP TABLE IF EXISTS tsdump_conditional'
+- name: Import source names bind qualified DDL and leave string contents unchanged
+  scm: "(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (load_tsql \"memcp-tests\"\
+    \ (streamString \"USE [import_source]\\nGO\\nCREATE TABLE [import_source].[dbo].[tsdump_bound] (id INT PRIMARY\
+    \ KEY,label NVARCHAR(80))\\nGO\\nINSERT [import_source]..[tsdump_bound] VALUES(1,N'import_source.dbo.keep')\\\
+    nGO\\n\") session)\n  true)\n"
+  expect:
+    result: true
+- name: Imported qualified data belongs to the destination
+  syntax: tsql
+  sql: SELECT id,label FROM dbo.tsdump_bound
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      label: import_source.dbo.keep
+- name: Repeated source USE and destination USE retain one import target
+  scm: "(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (load_tsql \"memcp-tests\"\
+    \ (streamString \"USE [import_source]\\nGO\\nUSE [import_source]\\nGO\\nUSE [memcp-tests]\\nGO\\nINSERT dbo.tsdump_bound\
+    \ VALUES(2,N'target')\") session)\n  true)\n"
+  expect:
+    result: true
+- name: Source bindings never replace the callers import names
+  scm: "(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (session \"tsql_import_target\"\
+    \ \"caller target\")\n  (session \"tsql_import_source\" \"caller source\")\n  (load_tsql \"memcp-tests\" (streamString\
+    \ \"USE [import_source]\\nGO\\nSELECT 1 AS value\") session)\n  (and (equal? (session \"tsql_import_target\"\
+    ) \"caller target\")\n    (equal? (session \"tsql_import_source\") \"caller source\")))\n"
+  expect:
+    result: true
+- name: Imports reject selecting another source through the public script path
+  scm: "(try (lambda () (begin\n(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (load_tsql\
+    \ \"memcp-tests\" (streamString \"USE [import_source]\\nGO\\nUSE [another_source]\") session))\nfalse))\n  (lambda\
+    \ (failure) (strlike (concat failure) \"%second source database%\")))\n"
+  expect:
+    result: true
+- name: Imports reject qualified reads outside the target and source
+  scm: "(try (lambda () (begin\n(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (load_tsql\
+    \ \"memcp-tests\" (streamString \"USE [import_source]\\nGO\\nSELECT * FROM [another_source].[dbo].[tsdump_bound]\"\
+    ) session))\nfalse))\n  (lambda (failure) (strlike (concat failure) \"%outside destination%\")))\n"
+  expect:
+    result: true
+- name: Imports reject qualified writes outside the target and source
+  scm: "(try (lambda () (begin\n(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (load_tsql\
+    \ \"memcp-tests\" (streamString \"USE [import_source]\\nGO\\nDELETE FROM [another_source]..[tsdump_bound]\"\
+    ) session))\nfalse))\n  (lambda (failure) (strlike (concat failure) \"%outside destination%\")))\n"
+  expect:
+    result: true
+- name: Imports reject qualified declarations outside the target and source
+  scm: "(try (lambda () (begin\n(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (load_tsql\
+    \ \"memcp-tests\" (streamString \"USE [import_source]\\nGO\\nCREATE TABLE [another_source].[dbo].[tsdump_escape](id\
+    \ INT)\") session))\nfalse))\n  (lambda (failure) (strlike (concat failure) \"%outside destination%\")))\n"
+  expect:
+    result: true
+- name: Import source mappings cannot leak through the statement cache
+  scm: "(try (lambda () (begin\n(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (load_tsql\
+    \ \"memcp-tests\" (streamString \"USE [import_source]\\nGO\\nSELECT id FROM [import_source].[dbo].[tsdump_bound]\"\
+    ) session)\n  (load_tsql \"memcp-tests\" (streamString \"USE [another_source]\\nGO\\nSELECT id FROM [import_source].[dbo].[tsdump_bound]\"\
+    ) session))\nfalse))\n  (lambda (failure) (strlike (concat failure) \"%outside destination%\")))\n"
+  expect:
+    result: true
+- name: Imports cannot issue administrative database DDL
+  scm: "(try (lambda () (begin\n(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (load_tsql\
+    \ \"memcp-tests\" (streamString \"CREATE DATABASE tsdump_escape_database\") session))\nfalse))\n  (lambda (failure)\
+    \ (strlike (concat failure) \"%outside destination%\")))\n"
+  expect:
+    result: true
+- name: Retargeted views store the native destination query
+  scm: "(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (load_tsql \"memcp-tests\"\
+    \ (streamString \"USE [import_source]\\nGO\\nCREATE VIEW [import_source].[dbo].[tsdump_bound_view] AS SELECT\
+    \ id,label FROM [import_source]..[tsdump_bound]\") session)\n  true)\n"
+  expect:
+    result: true
+- name: Retargeted view can be read after the import context ends
+  syntax: tsql
+  sql: SELECT id,label FROM dbo.tsdump_bound_view ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      label: import_source.dbo.keep
+    - id: 2
+      label: target
+- name: Import source aliases do not leak into persisted procedure source
+  scm: "(try (lambda () (begin\n(begin\n  (define session (newsession))\n  (session \"username\" \"root\")\n  (load_tsql\
+    \ \"memcp-tests\" (streamString \"USE [import_source]\\nGO\\nCREATE PROCEDURE dbo.tsdump_unsafe_proc AS SELECT\
+    \ id FROM [import_source]..[tsdump_bound]\") session))\nfalse))\n  (lambda (failure) (strlike (concat failure)\
+    \ \"%retargeted procedure definitions%\")))\n"
+  expect:
+    result: true
+- name: Rejected import operations leave the actual destination intact
+  syntax: tsql
+  sql: SELECT COUNT(*) AS n FROM dbo.tsdump_bound
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: Remove the imported view through the normal frontend
+  syntax: tsql
+  sql: DROP VIEW dbo.tsdump_bound_view
+- name: Remove the imported target through the normal frontend
+  syntax: tsql
+  sql: DROP TABLE dbo.tsdump_bound
+- name: HTTP options cannot enable import namespace bindings
+  scm: |
+    (begin
+      (define session (newsession))
+      (define output (newsession))
+      (tsql_http_query
+        (list "username" "root" "password" "admin" "body" (lambda () "SELECT 1 AS value")
+          "__session" session "__session_state" nil "__query_seq" 0
+          "query" (list "tsql_import_target" "another_source" "tsql_import_source" "memcp-tests"))
+        (list "header" (lambda args true) "jsonl" (lambda (row) (output "row" row))
+          "status" (lambda (status) (output "status" status)) "print" (lambda args (output "error" args)))
+        "memcp-tests")
+      (and (nil? (session "tsql_import_target")) (nil? (session "tsql_import_source"))
+        (nil? (output "error")) (equal? ((output "row") "value") 1)))
+  expect: {result: true}
+- name: Import virtual system calls keep the native target context
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (streamString "USE [import_source]\nGO\nEXEC sys.sp_executesql N'SELECT 1 AS value'\nGO\nEXEC sys.sp_columns @table_name=N'tsdump_console_lifecycle'") session)
+      true)
+  expect: {result: true}
+- name: Dynamic import SQL retains the same target confinement
+  scm: |
+    (try (lambda () (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (streamString "USE [import_source]\nGO\nEXEC sys.sp_executesql N'SELECT * FROM [another_source]..[tsdump_escape]'") session)
+      false)) (lambda (failure) (strlike (concat failure) "%outside destination%")))
+  expect: {result: true}
+- name: Qualified system calls cannot select an unrelated import database
+  scm: |
+    (try (lambda () (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (streamString "USE [import_source]\nGO\nEXEC [another_source].dbo.sp_columns @table_name=N'tsdump_escape'") session)
+      false)) (lambda (failure) (strlike (concat failure) "%outside destination%")))
+  expect: {result: true}
+- name: Persisted procedure source is also rejected before any source USE
+  scm: |
+    (try (lambda () (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (streamString "CREATE PROCEDURE dbo.tsdump_unsafe_proc AS SELECT * FROM [another_source]..[tsdump_escape]") session)
+      false)) (lambda (failure) (strlike (concat failure) "%retargeted procedure definitions%")))
+  expect: {result: true}
+- name: System target imports cannot authorize database administration
+  scm: |
+    (begin
+      (define planning (newsession))
+      (planning "tsql_import_target" "system")
+      (try (lambda () (begin
+        (parse_tsql "system" "CREATE DATABASE tsdump_escape_database" (lambda args true) planning nil)
+        false)) (lambda (failure) (strlike (concat failure) "%outside destination%"))))
+  expect: {result: true}
+- name: Text input fixture starts empty
+  syntax: tsql
+  sql: DROP TABLE IF EXISTS dbo.tsdump_text_input
+- name: Text input uses ordinary native columns
+  syntax: tsql
+  sql: CREATE TABLE dbo.tsdump_text_input(id INT PRIMARY KEY,label NVARCHAR(80))
+- name: UTF16 big-endian stream uses the ordinary import path
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (streamString (base64_decode "/v8ASQBOAFMARQBSAFQAIABkAGIAbwAuAHQAcwBkAHUAbQBwAF8AdABlAHgAdABfAGkAbgBwAHUAdAAgAFYAQQBMAFUARQBTACgAMQAsAE4AJwBaAPwAcgBpAGMAaAAg2D3cGAAnACkAOw==")) session)
+      true)
+  expect:
+    result: true
+- name: Big-endian import preserves astral text
+  syntax: tsql
+  sql: SELECT id,label FROM dbo.tsdump_text_input
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      label: Zürich 🐘
+- name: Malformed UTF16 stops before any SQL executes
+  scm: |
+    (try (lambda () (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (streamString (base64_decode "//5JAE4AUwBFAFIAVAAgAGQAYgBvAC4AdABzAGQAdQBtAHAAXwB0AGUAeAB0AF8AaQBuAHAAdQB0ACAAVgBBAEwAVQBFAFMAKAAyACwATgAnAHAAYQByAHQAaQBhAGwAJwApADsAIQ==")) session)
+      false)) (lambda (failure) (strlike (concat failure) "%odd UTF-16%")))
+  expect:
+    result: true
+- name: Malformed input publishes no partial insert
+  syntax: tsql
+  sql: SELECT COUNT(*) AS n FROM dbo.tsdump_text_input
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: UTF32 is rejected as an unsupported input encoding
+  scm: |
+    (try (lambda () (begin
+      (define session (newsession))
+      (session "username" "root")
+      (load_tsql "memcp-tests" (streamString (base64_decode "//4AAEEAAAA=")) session)
+      false)) (lambda (failure) (strlike (concat failure) "%UTF-32%")))
+  expect:
+    result: true
+- name: Generic load accepts explicit encoding and omitted handlers
+  scm: (equal? (load (streamString (base64_decode "AEE=")) nil nil "utf-16be") "A")
+  expect:
+    result: true
+- name: Text input fixture cleanup
+  syntax: tsql
+  sql: DROP TABLE dbo.tsdump_text_input
+- name: Drop independent console transaction fixture
+  syntax: tsql
+  sql: DROP TABLE dbo.tsdump_console_lifecycle
 cleanup: []
