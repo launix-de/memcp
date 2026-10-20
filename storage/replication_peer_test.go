@@ -1,0 +1,152 @@
+/*
+Copyright (C) 2026 Carl-Philip Hänsch
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later version.
+This program is distributed WITHOUT ANY WARRANTY; without even the implied
+warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
+<https://www.gnu.org/licenses/> for a copy of the GNU General Public License.
+*/
+
+package storage
+
+import "fmt"
+import "sync"
+import "time"
+import "context"
+import "strings"
+import "testing"
+import "net/http"
+import "encoding/json"
+import "encoding/base64"
+import "net/http/httptest"
+import "github.com/gorilla/websocket"
+import "github.com/launix-de/memcp/scm"
+
+func TestReplicationBidirectionalRPCAndDisconnect(t *testing.T) {
+	accepted := make(chan *replicationPeer, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, req, nil)
+		if err != nil {
+			return
+		}
+		accepted <- newReplicationPeer(conn, func(ctx context.Context, method string, data json.RawMessage) (any, error) {
+			if method == "block" {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			return string(data), nil
+		})
+	}))
+	defer server.Close()
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := newReplicationPeer(conn, func(ctx context.Context, method string, data json.RawMessage) (any, error) { return string(data), nil })
+	master := <-accepted
+	defer client.close()
+	defer master.close()
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			p := client
+			if i%2 == 0 {
+				p = master
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			var output string
+			if err := p.call(ctx, "echo", i, &output); err != nil || output != fmt.Sprint(i) {
+				t.Errorf("RPC %d: %q %v", i, output, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	finished := make(chan error, 1)
+	go func() { finished <- client.call(context.Background(), "block", nil, nil) }()
+	client.close()
+	select {
+	case err := <-finished:
+		if err == nil {
+			t.Fatal("disconnected RPC succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("disconnect did not release pending RPC")
+	}
+}
+
+func TestReplicationPasswordProofs(t *testing.T) {
+	// Fixed mysql_native_password vector: SHA1(password), salt bytes 0..19.
+	raw, err := base64.StdEncoding.DecodeString("LTascojglBT9PkRYCeOarSGjZrM=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scramble, _ := base64.StdEncoding.DecodeString("OfHT2dhT7wGkMn9zhgTPsGY26qc=")
+	salt := make([]byte, 20)
+	for i := range salt {
+		salt[i] = byte(i)
+	}
+	if !replicationPasswordProof(raw, "", salt, scramble) {
+		t.Fatal("valid MySQL challenge rejected")
+	}
+	if !replicationPasswordProof(raw, "LTascojglBT9PkRYCeOarSGjZrM=", nil, nil) {
+		t.Fatal("valid HTTP hash rejected")
+	}
+	scramble[2] ^= 1
+	if replicationPasswordProof(raw, "", salt, scramble) {
+		t.Fatal("tampered challenge accepted")
+	}
+	if replicationPasswordProof(raw, "", salt, scramble[:2]) {
+		t.Fatal("short challenge accepted")
+	}
+	if replicationPasswordProof(raw, "wrong", nil, nil) {
+		t.Fatal("wrong password accepted")
+	}
+}
+
+func TestReplicationSnapshotWaitsForMaintenance(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "treplicationmaintenance", 3)
+	tbl.maintenanceMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			tbl.maintenanceMu.Unlock()
+		}
+	}()
+	type result struct {
+		data []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() { data, err := exportReplicaDatabase(tbl.schema.Name); done <- result{data, err} }()
+	select {
+	case outcome := <-done:
+		t.Fatalf("snapshot skipped a busy table: %v", outcome.err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	tbl.maintenanceMu.Unlock()
+	locked = false
+	var outcome result
+	select {
+	case outcome = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("snapshot did not resume after maintenance")
+	}
+	if outcome.err != nil {
+		t.Fatal(outcome.err)
+	}
+	if err := importReplicaDatabase(tbl.schema.Name, outcome.data); err != nil {
+		t.Fatal(err)
+	}
+	loaded := GetDatabase(tbl.schema.Name).GetTable("items")
+	add := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewInt(a[0].Int() + a[1].Int()) })
+	schema := scm.NewSlice([]scm.Scmer{newScanAccessHeader(0, scanAccessConsumerScan, 0, -1)})
+	sum := loaded.scan(nil, schema, nil, nil, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) }), []string{"id"}, add, scm.NewInt(0), add, false)
+	if sum.Int() != 6 {
+		t.Fatalf("snapshot lost rows from skipped maintenance: %v", sum)
+	}
+}

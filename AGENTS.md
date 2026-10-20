@@ -109,6 +109,22 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- `replicationManager` is published once after frontend initialization. Its
+  private fsynced journal owns peer identities, cached authentication, ownership
+  and administrative retirement tombstones; it is never inferred from liveness.
+  `replicaCell.directory` serializes grants, while its admission gate retains
+  local transaction lifetimes outside row loops. Incoming generations use the
+  existing persistence lifecycle lock and publish objects before schema JSON;
+  stale database descriptors may neither rebuild nor garbage-collect a successor.
+  The initial implementation groups a database schema and its shards, with
+  full compressed checkpoints. Independent shard MOSI and streaming transfers
+  remain required before enabling the planned multi-master cluster architecture.
+  `TxContext.replicationRelease` is session-executor-owned transaction admission;
+  `replicationDatabase` is its immutable database binding while held.
+  it spans explicit transactions and is released on completion/error. It is not
+  persisted. `Settings.ReplicationUUID` is generated once before replication
+  starts and persists as the installation's confidential identity/secret.
+
 - Complete ordinary-column declaration replacement is copy-on-write under the
   existing table DDL and database schema ownership. The expected old declaration
   is checked before publication. Existing batches retain immutable old

@@ -2368,9 +2368,18 @@ func RegisterSession(user, host, db string) *SessionState {
 	return s
 }
 
+// SessionCleanupHook lets the engine release transaction-scoped resources
+// when an HTTP session expires. It is installed before serving requests.
+var SessionCleanupHook func(session Scmer)
+
 // UnregisterSession removes a session from the process list.
 func UnregisterSession(id uint64) {
-	processList.Delete(id)
+	if value, ok := processList.LoadAndDelete(id); ok && SessionCleanupHook != nil {
+		ss := value.(*SessionState)
+		if !ss.scmSession.IsNil() {
+			SessionCleanupHook(ss.scmSession)
+		}
+	}
 }
 
 // Snapshot returns a point-in-time copy of all active sessions.

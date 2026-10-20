@@ -323,6 +323,37 @@ non-null default. ADD supports the frontend's literal defaults, constant
 arithmetic/casts where supported, and `CURRENT_TIMESTAMP`; other default
 expressions fail before the column is published.
 
+### Experimental local replication
+
+Run a master with `--replication=7331` and a slave with
+`--replication=master-host:7331`. Each instance needs its own `-data` directory
+and independent backend namespace, including separate buckets/prefixes for
+remote storage. The existing persistence backends are used without modification.
+`schema.json` remains the schema format. `SHUTDOWN` affects the addressed instance.
+
+HTTP and MySQL logins on the slave are verified by the master and cached for
+offline authentication. A slave claims the opened database, retains durable
+ownership through disconnects/restarts, and can use its local `SAFE` tables
+while the master is offline. An unavailable remote owner produces
+`Cluster network error`; disconnection never transfers ownership. Use `SAFE`
+for crash recovery: replication does not strengthen `memory` or `sloppy` durability.
+
+The dashboard Settings page lists slaves and offers an explicit **Retire slave**
+action. Retirement makes the last master backup authoritative and may lose
+untransferred offline changes. The persisted `ReplicationUUID` is also the
+slave's secret; do not share or clone its settings between installations.
+
+This initial implementation admits whole databases and exchanges complete
+compressed checkpoints; SQL admission conservatively obtains M ownership even
+for reads. It is not yet the planned independent-shard MOSI implementation.
+Multi-master cluster routing, distributed scans and bounded streaming transfers
+remain future work. Cross-database statements/transactions are rejected rather
+than operating without admission for their additional databases. The crash test covers alternating process failures with
+retained data directories, not destruction of an offline owner's disk.
+
+Run the crash test with `go test ./storage -run TestReplication -count=1`.
+It starts independent master/slave processes and uses both HTTP and MySQL.
+
 ### Storage failure notifications
 
 Administrators can register named Scheme callbacks for persistence failures.

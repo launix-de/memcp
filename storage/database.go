@@ -442,7 +442,13 @@ func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string 
 	dbs := databases.GetAll()
 	var errs []string
 	for _, db := range dbs {
-		errs = append(errs, rebuildDatabaseAndCompact(db, all, repartition, includeEphemeral)...)
+		if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
+			if state := r.cell(db.Name).state.Load(); state != nil && *state != "M" {
+				continue
+			}
+		}
+		failures, _ := rebuildDatabaseAndCompact(db, all, repartition, includeEphemeral)
+		errs = append(errs, failures...)
 	}
 	duration := fmt.Sprint(time.Since(start))
 	if len(errs) == 0 {
@@ -451,9 +457,14 @@ func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string 
 	return duration + " errors: " + strings.Join(errs, " | ")
 }
 
-func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, includeEphemeral bool) []string {
+// complete distinguishes a full checkpoint from successful best-effort
+// maintenance which skipped a busy or cold table. Replication needs the former.
+func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, includeEphemeral bool) ([]string, bool) {
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
+	if replication.Load() != nil && GetDatabase(db.Name) != db {
+		return []string{"database generation was replaced"}, false
+	}
 	var transactionCutoff uint64
 	var hasTransactions bool
 	if err := func() (err error) {
@@ -461,24 +472,24 @@ func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, include
 		transactionCutoff, hasTransactions = db.transactionCompactionSnapshot()
 		return nil
 	}(); err != nil {
-		return []string{err.Error()}
+		return []string{err.Error()}, false
 	}
 	result := db.rebuildWithLifecycle(all, repartition, includeEphemeral)
 	if len(result.errors) > 0 {
-		return result.errors
+		return result.errors, false
 	}
 	if err := func() (err error) {
 		defer func() { err = recoverAsError("save failed for database " + db.Name) }()
 		db.save()
 		return nil
 	}(); err != nil {
-		return []string{err.Error()}
+		return []string{err.Error()}, false
 	}
 	// db.save() committed all replacement UUIDs. A save failure returns above
 	// and deliberately retains every old generation.
 	errs := cleanupReplacedShardGenerations(result.replaced, "database "+db.Name)
 	if len(errs) != 0 || !result.complete || !hasTransactions {
-		return errs
+		return errs, result.complete && len(errs) == 0
 	}
 	if err := func() (err error) {
 		defer func() { err = recoverAsError("transaction log compaction failed for database " + db.Name) }()
@@ -487,7 +498,7 @@ func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, include
 	}(); err != nil {
 		errs = append(errs, err.Error())
 	}
-	return errs
+	return errs, result.complete && len(errs) == 0
 }
 
 func UnloadDatabases() {
@@ -1103,6 +1114,9 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 // public rebuild paths retain it through schema publication, so cleanup cannot
 // observe generation-private files in the build→publish interval.
 func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphemeral bool, only ...*table) rebuildDatabaseResult {
+	if replication.Load() != nil && GetDatabase(db.Name) != db {
+		return rebuildDatabaseResult{}
+	}
 	if db.srState == COLD {
 		// do nothing for cold databases; avoid loading during rebuild
 		return rebuildDatabaseResult{}

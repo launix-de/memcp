@@ -502,7 +502,7 @@ func TestForcedDatabaseRebuildCompactsTransactionLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if errs := rebuildDatabaseAndCompact(db, true, false, false); len(errs) != 0 {
+	if errs, _ := rebuildDatabaseAndCompact(db, true, false, false); len(errs) != 0 {
 		t.Fatalf("forced rebuild failed: %v", errs)
 	}
 	after, err := os.Stat(logPath)
@@ -522,7 +522,7 @@ func TestForcedDatabaseRebuildCompactsTransactionLog(t *testing.T) {
 func TestNonForcedDatabaseRebuildKeepsTransactionLogForColdShards(t *testing.T) {
 	tbl, engine := createDurabilityTestTable(t, "ttxlogcold", 4)
 	source := tbl.schema
-	if errs := rebuildDatabaseAndCompact(source, true, false, false); len(errs) != 0 {
+	if errs, _ := rebuildDatabaseAndCompact(source, true, false, false); len(errs) != 0 {
 		t.Fatalf("fixture rebuild failed: %v", errs)
 	}
 	source.commitTransaction("needed-by-cold-generation/1", true)
@@ -546,7 +546,7 @@ func TestNonForcedDatabaseRebuildKeepsTransactionLogForColdShards(t *testing.T) 
 		}
 	}
 
-	if errs := rebuildDatabaseAndCompact(db, false, false, false); len(errs) != 0 {
+	if errs, _ := rebuildDatabaseAndCompact(db, false, false, false); len(errs) != 0 {
 		t.Fatalf("non-forced rebuild failed: %v", errs)
 	}
 	if !db.transactionCommitted("needed-by-cold-generation/1") {

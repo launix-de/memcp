@@ -923,6 +923,7 @@ func (s *storageShard) retainCacheRead() {
 func (s *storageShard) releaseCacheRead() { s.cacheReaders.Add(-1) }
 
 func (s *storageShard) GetRead(currentTx *TxContext) ReadAccess {
+	replicationCheckTable(s.t, currentTx)
 	s.retainCacheRead()
 	ready := false
 	defer func() {

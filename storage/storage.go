@@ -770,6 +770,11 @@ func invalidateComputedRows(proxy *StorageComputeProxy, recids map[uint32]struct
 }
 
 func Init(en scm.Env) {
+	scm.HTTPAuthenticationHook = replicationHTTPAuthentication
+	scm.MySQLAuthenticationHook = replicationMySQLAuthentication
+	scm.MySQLDatabaseHook = replicationOpenDatabase
+	scm.SessionCleanupHook = replicationSessionClosed
+	initReplicationAdmin(&en)
 	const scanFilterColumnsDesc = "physical columns passed to filter before mapreduce; $recset_contains supplies a row-bound RecSet membership closure"
 	const scanMapColumnsDesc = "physical columns passed to map after filtering; pseudo columns are $update (update/delete current row), $record_ref (query-local physical row identity), $recset_contains (row-bound RecSet membership), $recmap_call (row-bound RecMap accessor), $set:<column>, $increment:<column>, and $invalidate:<column> (computed-column maintenance), plus NEW.<column> in trigger plans"
 	const scanOrderMapColumnsDesc = scanMapColumnsDesc + "; $break is reserved for internal ORC convergence and must not implement SQL OFFSET/LIMIT, which belong in the native offset and limit arguments"

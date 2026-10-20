@@ -69,6 +69,12 @@ jobs:
           MEMCP_TEST_LOGDIR: ${{ runner.temp }}/memcp-test-diagnostics
         run: bash git-pre-commit
 
+      - name: Test replication protocol and alternating process failures
+        timeout-minutes: 5
+        env:
+          MEMCP_REPLICATION_BINARY: ${{ github.workspace }}/memcp
+        run: go test ./storage -run '^TestReplication' -count=1 -v
+
       - name: Upload test diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
