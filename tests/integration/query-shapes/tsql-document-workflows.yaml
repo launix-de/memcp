@@ -1035,10 +1035,12 @@ test_cases:
   sql: DECLARE @cap INT=-1; SELECT TOP (@cap) id FROM day_docs
   expect:
     error: true
+    contains: TOP requires a nonnegative count
 - name: A NULL bound TOP cannot become an unlimited scan
   sql: DECLARE @cap INT=NULL; SELECT TOP (@cap) id FROM day_docs
   expect:
     error: true
+    contains: TOP requires a nonnegative count
 - name: TOP cannot bind a per row column as an invocation count
   sql: SELECT TOP (id) id FROM day_docs
   expect:
@@ -1069,6 +1071,7 @@ test_cases:
     ON d.tenant=l.tenant AND d.id=l.doc_id
   expect:
     error: true
+    contains: nested outer join units are not supported
 - name: A bound zero TOP suppresses a source free projection
   sql: DECLARE @cap INT=0; SELECT TOP (@cap) 42 AS value
   expect:
@@ -1099,7 +1102,7 @@ test_cases:
   sql: SELECT TOP (SUM(id)) id FROM day_docs
   expect:
     error: true
-- name: TOP does not accept a correlated count subquery
+- name: TOP rejects a count subquery until relational bound lowering exists
   sql: SELECT TOP ((SELECT MAX(id) FROM day_lines)) id FROM day_docs
   expect:
     error: true
