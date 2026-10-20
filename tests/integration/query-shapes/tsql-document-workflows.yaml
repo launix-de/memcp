@@ -445,7 +445,6 @@ test_cases:
           menu_enabled: 0
           tax_rate: null
           entry_kind: 4000
-  noncritical: true
 - name: The traced document projection accepts bound tenant and account with its literal TOP cap
   tds:
     statements:
@@ -567,7 +566,6 @@ test_cases:
       Delivered not invoiced: 3
       stock: 2
       Combined stock: 5
-  noncritical: true
 - name: An equivalent flat delivery join retains the same SQL bag multiplicities
   sql: |-
     SELECT i.article AS article,i.label AS label,i.unit AS unit,stock.location AS location,
@@ -984,6 +982,143 @@ test_cases:
       postal: '90000'
       last_sale: '2025-01-12 00:00:00'
       revenue: 60
+- name: A batch TOP expression retains its declared parameter arithmetic
+  sql: DECLARE @cap INT=2; SELECT TOP (@cap+1) id FROM day_docs WHERE tenant=1 ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 10
+    - id: 11
+    - id: 12
+- name: A prepared TOP count remains invocation bound across cache reuse
+  tds:
+    statements:
+    - sql: SELECT TOP (@cap) id FROM day_docs WHERE tenant=1 ORDER BY id
+      prepare: true
+      parameters:
+      - name: cap
+        value: 2
+      expect:
+        rows: 2
+        data:
+        - id: 10
+        - id: 11
+    - sql: SELECT TOP (@cap) id FROM day_docs WHERE tenant=1 ORDER BY id
+      prepare: true
+      parameters:
+      - name: cap
+        value: 0
+      expect:
+        rows: 0
+        data: []
+    - sql: SELECT TOP (@cap) id FROM day_docs WHERE tenant=1 ORDER BY id
+      prepare: true
+      parameters:
+      - name: cap
+        value: 1
+      expect:
+        rows: 1
+        data:
+        - id: 10
+    - sql: SELECT TOP (@cap) id FROM day_docs WHERE tenant=1 ORDER BY id
+      prepare: true
+      parameters:
+      - name: cap
+        value: 3
+      expect:
+        rows: 3
+        data:
+        - id: 10
+        - id: 11
+        - id: 12
+- name: A negative bound TOP cannot become an unlimited scan
+  sql: DECLARE @cap INT=-1; SELECT TOP (@cap) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires a nonnegative count
+- name: A NULL bound TOP cannot become an unlimited scan
+  sql: DECLARE @cap INT=NULL; SELECT TOP (@cap) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires a nonnegative count
+- name: TOP cannot bind a per row column as an invocation count
+  sql: SELECT TOP (id) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires an invocation scalar
+- name: Right nested inner joins retain both ON predicates and bag multiplicity
+  sql: SELECT d.id,l.id AS line,i.label FROM day_docs d JOIN day_lines l JOIN day_items i ON l.tenant=i.tenant AND
+    l.article=i.article ON d.tenant=l.tenant AND d.id=l.doc_id WHERE d.tenant=1 AND d.id=10 ORDER BY l.id
+  expect:
+    rows: 5
+    data:
+    - id: 10
+      line: 1000
+      label: Alpha
+    - id: 10
+      line: 1001
+      label: Beta
+    - id: 10
+      line: 1002
+      label: Alpha
+    - id: 10
+      line: 1003
+      label: Gamma
+    - id: 10
+      line: 1004
+      label: Beta
+- name: A right nested outer join boundary is rejected until represented logically
+  sql: SELECT d.id FROM day_docs d JOIN day_lines l LEFT JOIN day_items i ON l.tenant=i.tenant AND l.article=i.article
+    ON d.tenant=l.tenant AND d.id=l.doc_id
+  expect:
+    error: true
+    contains: nested outer join units are not supported
+- name: A bound zero TOP suppresses a source free projection
+  sql: DECLARE @cap INT=0; SELECT TOP (@cap) 42 AS value
+  expect:
+    rows: 0
+- name: A bound TOP uses the native unordered limit path
+  sql: DECLARE @cap INT=2; SELECT TOP (@cap) id FROM day_docs WHERE tenant=1
+  expect:
+    rows: 2
+- name: A decimal TOP expression converts to the declared integer count
+  sql: SELECT TOP (2.9) id FROM day_docs WHERE tenant=1 ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+    - id: 11
+- name: A bound TOP retains its count when filtering an ordered join
+  sql: DECLARE @cap INT=1; SELECT TOP (@cap) d.id FROM day_docs d JOIN day_lines l ON d.tenant=l.tenant AND d.id=l.doc_id
+    WHERE d.tenant=1 AND d.kind='SHIP' ORDER BY d.id,l.id
+  expect:
+    rows: 1
+    data:
+    - id: 11
+- name: A computed count cannot exceed the signed integer carrier
+  sql: SELECT TOP (9223372036854775808.0) id FROM day_docs
+  expect:
+    error: true
+- name: TOP does not accept an aggregate as a scalar count
+  sql: SELECT TOP (SUM(id)) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires an invocation scalar
+- name: TOP rejects a count subquery until relational bound lowering exists
+  sql: SELECT TOP ((SELECT MAX(id) FROM day_lines)) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires an invocation scalar
+- name: A typed column cast still cannot become a TOP invocation bound
+  sql: SELECT TOP (CAST(id AS INT)) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires an invocation scalar
+- name: A numeric aggregate result cannot become a TOP invocation bound
+  sql: SELECT TOP (COUNT(*)) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires an invocation scalar
 cleanup:
 - sql: DROP TABLE IF EXISTS day_barcodes
 - sql: DROP TABLE IF EXISTS day_addresses

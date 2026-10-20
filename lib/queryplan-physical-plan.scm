@@ -12023,14 +12023,18 @@ identity. Other self aliases still require a frozen source snapshot. */
 				0)
 			(begin
 
-				/* A later nested source probe must not see this statement move its own
-				join key into another source match (Halloween effect). Until the native
-				target domain is frozen, reject assignments which change that binding. */
+				/* The 0:1 source proof consumes equality bindings. Keep those target
+				columns stable so a later probe cannot move into another source match.
+				Residual inequalities do not establish that proof: changing a compared
+				payload still visits each target through the same unique source key.
+				Overlapping self-source reads are checked independently below. */
 				(define other_aliases (filter (source_aliases sources) (lambda (alias)
 					(not (equal?? alias target_alias)))))
 				(define target_join_terms (filter (split_and_terms
 					(combine_where_terms (source_join_exprs sources) cond)) (lambda (term)
-						(and (expr_refs_alias? first_alias target_alias term)
+						(and (or (not (nil? (equality_term_operands term)))
+							(not (nil? (null_safe_equality_operands term))))
+							(expr_refs_alias? first_alias target_alias term)
 							(expr_refs_any_alias? first_alias other_aliases term)))))
 				(define bound_target_columns (merge_unique (map target_join_terms (lambda (term)
 					(extract_columns_for_join_alias sources first_alias target_alias term)))))
