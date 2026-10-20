@@ -70,7 +70,6 @@ test_cases:
       article: A
       root: 8
       parent: 9
-  noncritical: true
 - name: Classification repair retains unmatched records in class_sales
   sql: SELECT tenant,id,group_id,root,parent FROM class_sales ORDER BY tenant,id
   expect:
@@ -240,7 +239,6 @@ test_cases:
     UPDATE class_items SET root=g.root,parent=g.parent
     FROM class_items INNER JOIN class_groups g ON class_items.tenant=g.tenant AND class_items.group_id=g.id
     WHERE class_items.parent<>g.parent
-  noncritical: true
 - name: An unscoped master refresh retains the composite group identity
   sql: SELECT tenant,article,root,parent FROM class_items WHERE article='A' ORDER BY tenant
   expect:
@@ -254,7 +252,6 @@ test_cases:
       article: A
       root: 900
       parent: 910
-  noncritical: true
 - name: Joined classification assignments without the changed column predicate use the ordinary update path
   setup:
   - sql: UPDATE class_items SET root=1,parent=2,route=9 WHERE tenant=1 AND article='A'

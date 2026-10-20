@@ -1069,6 +1069,51 @@ test_cases:
       masked: 1
   cleanup:
   - sql: DROP TABLE bitmask_boolean
+- name: A stable unique join allows changing a cross source residual predicate
+  setup:
+  - sql: DELETE FROM write_composite
+  - sql: INSERT INTO write_composite VALUES(1,1,10),(2,1,20)
+  sql: UPDATE t SET value=s.value FROM write_composite t JOIN write_source s ON t.id=s.id WHERE t.value<>s.value
+  expect:
+    affected_rows: 2
+- name: The residual predicate update changes each composite target exactly once
+  sql: SELECT tenant,id,value FROM write_composite ORDER BY tenant,id
+  expect:
+    rows: 2
+    data:
+    - tenant: 1
+      id: 1
+      value: 4
+    - tenant: 2
+      id: 1
+      value: 4
+- name: A stable unique join preserves UNKNOWN in a changed residual predicate
+  setup:
+  - sql: UPDATE write_composite SET value=NULL
+  sql: UPDATE t SET value=s.value FROM write_composite t JOIN write_source s ON t.id=s.id WHERE t.value<>s.value
+  expect:
+    affected_rows: 0
+- name: A NULL aware residual can initialize a value without changing key bindings
+  sql: UPDATE t SET value=s.value FROM write_composite t JOIN write_source s ON t.id=s.id WHERE t.value IS NULL
+    OR t.value<>s.value
+  expect:
+    affected_rows: 2
+- name: mysql joined UPDATE preserves stable bindings while replacing a compared value
+  syntax: mysql
+  setup:
+  - sql: UPDATE write_composite SET value=10
+  sql: UPDATE write_composite,write_source SET value=write_source.value WHERE write_composite.id=write_source.id
+    AND write_composite.value<>write_source.value
+  expect:
+    affected_rows: 2
+- name: psql joined UPDATE preserves stable bindings while replacing a compared value
+  syntax: psql
+  setup:
+  - sql: UPDATE write_composite SET value=10
+  sql: UPDATE write_composite,write_source SET value=write_source.value WHERE write_composite.id=write_source.id
+    AND write_composite.value<>write_source.value
+  expect:
+    affected_rows: 2
 cleanup:
 - sql: DROP TABLE IF EXISTS write_guard_trigger_event
 - sql: DROP TABLE IF EXISTS write_guard_trigger_audit
