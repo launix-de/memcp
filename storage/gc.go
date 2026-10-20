@@ -53,6 +53,9 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int, complete bool
 	if replication.Load() != nil && GetDatabase(db.Name) != db {
 		return 0, 0, false
 	}
+	if replicationRetainsCatalogs(db.Name) {
+		return 0, 0, false
+	}
 	blobsDeleted, complete = cleanBlobs(db)
 	shardsDeleted = cleanShards(db)
 	return

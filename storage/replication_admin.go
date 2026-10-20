@@ -151,6 +151,15 @@ func StopReplication() {
 }
 
 func initReplicationAdmin(en *scm.Env) {
+	scm.Declare(en, &scm.Declaration{Name: "replication_write", Fn: func(a ...scm.Scmer) scm.Scmer {
+		if !a[0].IsNil() {
+			if tx, ok := a[0].Any().(*TxContext); ok {
+				replicationWrite(tx)
+			}
+		}
+		return scm.NewBool(true)
+	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true,
+		Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
 	scm.Declare(en, &scm.Declaration{Name: "replication_slaves", Fn: func(a ...scm.Scmer) scm.Scmer {
 		r := replication.Load()
 		var statuses []replicaStatus = []replicaStatus{}

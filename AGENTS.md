@@ -112,17 +112,27 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - `replicationManager` is published once after frontend initialization. Its
   private fsynced journal owns peer identities, cached authentication, ownership
   and administrative retirement tombstones; it is never inferred from liveness.
-  `replicaCell.directory` serializes grants, while its admission gate retains
-  local transaction lifetimes outside row loops. Incoming generations use the
+  `replicaCell.directory` serializes grants. Only write transactions retain its
+  local gate, outside row loops. Reads accept M/O/S through atomic loads, use
+  existing shard/catalog snapshots and neither register readers nor update a
+  shared counter, lock, or admission word. Read completion never checkpoints.
+  The cell directory is an immutable atomic lookup snapshot; additions publish
+  under the manager mutex, while startup builds it once before publication.
+  Incoming generations use the
   existing persistence lifecycle lock and publish objects before schema JSON;
   stale database descriptors may neither rebuild nor garbage-collect a successor.
   The initial implementation groups a database schema and its shards, with
   full compressed checkpoints. Independent shard MOSI and streaming transfers
   remain required before enabling the planned multi-master cluster architecture.
-  `TxContext.replicationRelease` is session-executor-owned transaction admission;
-  `replicationDatabase` is its immutable database binding while held.
-  it spans explicit transactions and is released on completion/error. It is not
-  persisted. `Settings.ReplicationUUID` is generated once before replication
+  `TxContext.replicationActive`, `replicationDatabase`, `replicationCell` and
+  `replicationWriting` are session-executor-owned bindings. Only write bindings
+  retain the gate across explicit transactions, released on completion/error.
+  Parsed write policies and cached write plans establish M before execution;
+  native INSERT rejects missing ownership and retired catalog generations.
+  `replicaCell.retiredCatalogs` is a transition-published immutable weak directory.
+  Maintenance retains disk generations while any old catalog remains reachable;
+  readers never register or touch this directory. None of this state is persisted.
+  `Settings.ReplicationUUID` is generated once before replication
   starts and persists as the installation's confidential identity/secret.
 
 - Complete ordinary-column declaration replacement is copy-on-write under the

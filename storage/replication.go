@@ -16,6 +16,7 @@ import "os"
 import "fmt"
 import "net"
 import "sync"
+import "weak"
 import "time"
 import "bytes"
 import "context"
@@ -37,10 +38,14 @@ const replicationNetworkError = "Cluster network error"
 
 // Replication is published once at startup, after frontend registration. It is
 // nil for ordinary instances. Directory updates are serialized per database;
-// its journal is fsynced before a new owner may execute. Local admission holds
-// a read lease per transaction, never per row. The first implementation groups
+// its journal is fsynced before a new owner may execute. Only write transactions
+// retain a local gate; reads use ordinary snapshots. The first implementation groups
 // a schema and its shards into one ownership unit; storage backends are unchanged.
 var replication atomic.Pointer[replicationManager]
+
+// Session getters borrow immutable arguments; reusing the key avoids a
+// variadic argument allocation at every statement boundary.
+var replicationSchemaArgument = []scm.Scmer{scm.NewString("schema")}
 
 type replicaAuth struct {
 	Hash      string          `json:"hash"`
@@ -62,13 +67,14 @@ type replicaJournal struct {
 }
 
 type replicaCell struct {
-	// gate protects active local statements against an incoming ownership
-	// change. Normal statements share the lease, including local writes.
-	gate       sync.RWMutex
-	state      atomic.Pointer[string]
-	directory  sync.Mutex
-	checkpoint sync.Mutex
-	acquire    sync.Mutex
+	// gate protects uncommitted local writes against ownership transfer.
+	// Analytics never participate: their existing snapshots remain valid.
+	gate            sync.RWMutex // write transactions only; reads use existing snapshots
+	state           atomic.Pointer[string]
+	directory       sync.Mutex
+	checkpoint      sync.Mutex
+	acquire         sync.Mutex
+	retiredCatalogs atomic.Pointer[[]weak.Pointer[database]]
 }
 
 type replicationManager struct {
@@ -79,6 +85,8 @@ type replicationManager struct {
 	authMu        sync.Mutex
 	authInstalled map[string]string
 	cells         map[string]*replicaCell
+	cellSnapshot  atomic.Pointer[map[string]*replicaCell]
+	retired       atomic.Bool
 	journal       replicaJournal
 	peers         map[string]*replicationPeer
 	upstream      *replicationPeer
@@ -163,9 +171,19 @@ func StartReplication(address string, shutdown func()) error {
 	if r.journal.Records == nil || r.journal.Users == nil || r.journal.Retired == nil {
 		return fmt.Errorf("invalid replication journal directories")
 	}
+	r.retired.Store(r.journal.Retired[r.id])
 	for name, record := range r.journal.Records {
-		r.cell(name).state.Store(&record.State)
+		c := &replicaCell{}
+		c.state.Store(&record.State)
+		r.cells[name] = c
 	}
+	// Startup constructs the directory unpublished; avoid copying it once per
+	// tenant. Runtime additions publish one new immutable lookup snapshot.
+	snapshot := make(map[string]*replicaCell, len(r.cells))
+	for name, c := range r.cells {
+		snapshot[name] = c
+	}
+	r.cellSnapshot.Store(&snapshot)
 	if r.master {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/replication", r.accept)
@@ -231,12 +249,22 @@ func (r *replicationManager) saveLocked() error {
 }
 
 func (r *replicationManager) cell(name string) *replicaCell {
+	if snapshot := r.cellSnapshot.Load(); snapshot != nil {
+		if c := (*snapshot)[name]; c != nil {
+			return c
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	c := r.cells[name]
 	if c == nil {
 		c = &replicaCell{}
 		r.cells[name] = c
+		snapshot := make(map[string]*replicaCell, len(r.cells))
+		for name, cell := range r.cells {
+			snapshot[name] = cell
+		}
+		r.cellSnapshot.Store(&snapshot)
 	}
 	return c
 }
@@ -467,6 +495,7 @@ func (r *replicationManager) handleSlave(ctx context.Context, method string, dat
 		if err != nil {
 			return nil, err
 		}
+		r.retired.Store(true)
 		if r.shutdown != nil {
 			time.AfterFunc(50*time.Millisecond, r.shutdown)
 		}
@@ -638,7 +667,13 @@ func (r *replicationManager) claim(ctx context.Context, id string, req replicaRe
 		grant.Dump = dump
 	}
 	if req.Read {
-		record.Readers[id] = true
+		if record.Owner == id {
+			// Recovering an owner's read capability must not grant M while
+			// other S copies still exist. Ownership remains with this O copy.
+			grant.State = "O"
+		} else {
+			record.Readers[id] = true
+		}
 	} else {
 		for reader := range record.Readers {
 			if reader == id || reader == r.id {
@@ -653,6 +688,8 @@ func (r *replicationManager) claim(ctx context.Context, id string, req replicaRe
 		record.Epoch++
 		record.Owner = id
 	}
+	c.gate.Lock()
+	defer c.gate.Unlock()
 	r.mu.Lock()
 	if r.journal.Retired[id] {
 		r.mu.Unlock()
@@ -664,7 +701,7 @@ func (r *replicationManager) claim(ctx context.Context, id string, req replicaRe
 		if req.Read {
 			record.State = "O"
 		}
-	} else if req.Read && id == r.id {
+	} else if record.Readers[r.id] {
 		record.State = "S"
 	}
 	r.journal.Records[req.Database] = record
@@ -677,43 +714,66 @@ func (r *replicationManager) claim(ctx context.Context, id string, req replicaRe
 	return grant, err
 }
 
-// replicationEnter conservatively acquires write ownership for the schema and
-// its physical shards before planning. This prevents cached plans retaining a
-// replaced catalog. The lease spans an explicit transaction, including pauses
-// between statements; a remote handover must not serialize uncommitted rows.
+// Reads use the engine's ordinary immutable shard/catalog snapshots. They do
+// not register admission, increment a counter, hold a lock, or rebuild/checkpoint.
+// Only a write transaction retains the local write-side gate: handover must not
+// serialize uncommitted deltas. Shared ownership alone never blocks analytics.
 func replicationEnter(tx *TxContext, session scm.Scmer) {
+	replicationEnterMode(tx, session, false)
+}
+
+func replicationLeave(tx *TxContext) {
+	if tx.replicationWriting {
+		tx.replicationCell.gate.RUnlock()
+	}
+	tx.replicationWriting = false
+	tx.replicationActive = false
+	tx.replicationDatabase = ""
+}
+
+func replicaCanRead(state *string) bool {
+	return state != nil && (*state == "M" || *state == "O" || *state == "S")
+}
+
+func replicationEnterMode(tx *TxContext, session scm.Scmer, write bool) {
 	r := replication.Load()
 	if r == nil {
 		return
 	}
-	name := session.Func()(scm.NewString("schema")).String()
-	if tx.replicationRelease != nil {
+	name := session.Func()(replicationSchemaArgument...).String()
+	if r.retired.Load() {
+		panic("replica retired by administrator")
+	}
+	if tx.replicationActive {
 		if tx.replicationDatabase != name {
 			panic("cross-database transactions are not supported by replication")
 		}
-		return
-	}
-	r.mu.Lock()
-	retired := !r.master && r.journal.Retired[r.id]
-	r.mu.Unlock()
-	if retired {
-		panic("replica retired by administrator")
+		if tx.replicationWriting || (!write && replicaCanRead(tx.replicationCell.state.Load())) {
+			return
+		}
+		replicationLeave(tx)
 	}
 	if !validReplicaDatabase(name) {
 		return
 	}
 	c := r.cell(name)
 	for {
-		c.gate.RLock()
 		state := c.state.Load()
-		if state != nil && *state == "M" {
-			tx.replicationDatabase = name
-			tx.replicationRelease = func() { c.gate.RUnlock(); tx.replicationDatabase = "" }
+		if !write && replicaCanRead(state) {
+			tx.replicationCell, tx.replicationDatabase, tx.replicationActive = c, name, true
 			return
 		}
-		// A fresh master owns its existing databases until explicitly delegated.
-		if state == nil && r.master {
+		if write && state != nil && *state == "M" {
+			c.gate.RLock()
+			if state := c.state.Load(); state != nil && *state == "M" {
+				tx.replicationCell, tx.replicationDatabase, tx.replicationActive = c, name, true
+				tx.replicationWriting = true
+				return
+			}
 			c.gate.RUnlock()
+			continue
+		}
+		if state == nil && r.master {
 			c.gate.Lock()
 			if c.state.Load() == nil {
 				r.mu.Lock()
@@ -730,9 +790,9 @@ func replicationEnter(tx *TxContext, session scm.Scmer) {
 			c.gate.Unlock()
 			continue
 		}
-		c.gate.RUnlock()
 		c.acquire.Lock()
-		if state := c.state.Load(); state != nil && *state == "M" {
+		state = c.state.Load()
+		if (!write && replicaCanRead(state)) || (write && state != nil && *state == "M") {
 			c.acquire.Unlock()
 			continue
 		}
@@ -743,9 +803,12 @@ func replicationEnter(tx *TxContext, session scm.Scmer) {
 		r.mu.Lock()
 		epoch := r.journal.Records[name].Epoch
 		r.mu.Unlock()
+		// The first slave connection still claims the complete database as M.
+		// Every subsequent missing read capability requests S, never M.
+		read := !write && (r.master || state != nil)
 		if r.master {
 			var value any
-			value, err = r.claim(ctx, r.id, replicaRequest{Database: name, Epoch: epoch})
+			value, err = r.claim(ctx, r.id, replicaRequest{Database: name, Epoch: epoch, Read: read})
 			if err == nil {
 				grant = value.(replicaGrant)
 			}
@@ -764,7 +827,7 @@ func replicationEnter(tx *TxContext, session scm.Scmer) {
 				c.acquire.Unlock()
 				panic(replicationNetworkError)
 			}
-			err = peer.call(ctx, "claim", replicaRequest{Database: name, User: user, Hash: auth.Hash, Epoch: epoch}, &grant)
+			err = peer.call(ctx, "claim", replicaRequest{Database: name, User: user, Hash: auth.Hash, Epoch: epoch, Read: read}, &grant)
 		}
 		cancel()
 		if err != nil {
@@ -792,10 +855,46 @@ func replicationEnter(tx *TxContext, session scm.Scmer) {
 	}
 }
 
+// Called before a parsed write plan executes, including on plan-cache hits.
+func replicationWrite(tx *TxContext) {
+	if replication.Load() != nil && tx != nil {
+		replicationEnterMode(tx, tx.Session, true)
+	}
+}
+
 func replicationCheckTable(t *table, tx *TxContext) {
-	if replication.Load() != nil && tx != nil && tx.replicationRelease != nil && validReplicaDatabase(t.schema.Name) && tx.replicationDatabase != t.schema.Name {
+	if replication.Load() != nil && tx != nil && tx.replicationActive && validReplicaDatabase(t.schema.Name) && tx.replicationDatabase != t.schema.Name {
 		panic("cross-database statements are not supported by replication")
 	}
+}
+
+func replicationCheckWriteTable(t *table, tx *TxContext) {
+	replicationCheckTable(t, tx)
+	if replication.Load() == nil || tx == nil || !validReplicaDatabase(t.schema.Name) {
+		return
+	}
+	if !tx.replicationWriting {
+		panic("replication write requires M ownership")
+	}
+	if GetDatabase(t.schema.Name) != t.schema {
+		panic("replication schema changed; retry statement")
+	}
+}
+
+// Maintenance retains old disk objects while an existing query or cached
+// descriptor still owns its catalog. The weak directory is published only at
+// import; normal readers never register or update retention metadata.
+func replicationRetainsCatalogs(name string) bool {
+	if r := replication.Load(); r != nil {
+		if history := r.cell(name).retiredCatalogs.Load(); history != nil {
+			for _, previous := range *history {
+				if previous.Value() != nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func replicationOpenDatabase(user, database string) (err error) {
@@ -804,8 +903,8 @@ func replicationOpenDatabase(user, database string) (err error) {
 	}
 	tx := &TxContext{}
 	defer func() {
-		if tx.replicationRelease != nil {
-			tx.replicationRelease()
+		if tx.replicationActive {
+			replicationLeave(tx)
 		}
 		if value := recover(); value != nil {
 			err = fmt.Errorf("%v", value)
@@ -839,9 +938,9 @@ func replicationSessionClosed(session scm.Scmer) {
 	tx.queryMu.Lock()
 	defer tx.queryMu.Unlock()
 	defer func() {
-		if tx.replicationRelease != nil {
-			tx.replicationRelease()
-			tx.replicationRelease = nil
+		if tx.replicationActive {
+			replicationLeave(tx)
+			tx.replicationActive = false
 		}
 		if err := recover(); err != nil {
 			scm.PrintError(err)
@@ -964,6 +1063,23 @@ func importReplicaDatabase(name string, data []byte) (err error) {
 	replacement := newDatabase()
 	replacement.Name, replacement.persistence, replacement.srState = name, engine, COLD
 	replacement.ensureLoaded()
+	if r := replication.Load(); r != nil && db != nil {
+		// Existing queries may still own the prior immutable catalog/shards.
+		// Keep their disk generations until Go observes no remaining owners,
+		// without reader registration, counters or synchronization on reads.
+		c := r.cell(name)
+		previous := c.retiredCatalogs.Load()
+		retained := make([]weak.Pointer[database], 0, 1)
+		if previous != nil {
+			for _, old := range *previous {
+				if old.Value() != nil {
+					retained = append(retained, old)
+				}
+			}
+		}
+		retained = append(retained, weak.Make(db))
+		c.retiredCatalogs.Store(&retained)
+	}
 	databases.Set(name, replacement)
 	return nil
 }

@@ -3708,6 +3708,9 @@ func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
 }
 
 func (t *storageShard) RemoveFromDisk() {
+	if replication.Load() != nil && t.t.schema != nil && replicationRetainsCatalogs(t.t.schema.Name) {
+		return
+	}
 	t.cleanupOnce.Do(func() {
 		// Rebuild retirement may overlap a later ADD after releasing ddlMu.
 		// Borrow one published directory, never the mutable declaration slice.

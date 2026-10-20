@@ -3483,7 +3483,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	if len(currentTxArgs) > 0 {
 		currentTx = currentTxArgs[0]
 	}
-	replicationCheckTable(t, currentTx)
+	replicationCheckWriteTable(t, currentTx)
 	// A blocked request must not retain UNIQUE guards or routing reservations
 	// needed by the SQL LOCK TABLES owner. Shard mutation still rechecks races.
 	if t.hasTableLock() {

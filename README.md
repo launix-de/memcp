@@ -344,8 +344,12 @@ untransferred offline changes. The persisted `ReplicationUUID` is also the
 slave's secret; do not share or clone its settings between installations.
 
 This initial implementation admits whole databases and exchanges complete
-compressed checkpoints; SQL admission conservatively obtains M ownership even
-for reads. It is not yet the planned independent-shard MOSI implementation.
+compressed checkpoints. Missing read rights request S; existing M/O/S rights are
+checked with atomic loads. Local reads add no replication locks, reader counters,
+registration, rebuilds or checkpoint uploads. They retain the engine's ordinary
+snapshots across a handover. Parsed write plans acquire M before execution,
+including cache hits; only writes participate in the local handover gate.
+It is not yet the planned independent-shard MOSI implementation.
 Multi-master cluster routing, distributed scans and bounded streaming transfers
 remain future work. Cross-database statements/transactions are rejected rather
 than operating without admission for their additional databases. The crash test covers alternating process failures with

@@ -19,6 +19,7 @@ import "time"
 import "bytes"
 import "os/exec"
 import "strings"
+import "sync"
 import "testing"
 import "net/http"
 import "database/sql"
@@ -297,6 +298,96 @@ func TestReplicationAlternatingProcessFailures(t *testing.T) {
 		if settings.ReplicationUUID != identity {
 			t.Fatal("reconnect changed identity")
 		}
+	}
+	// A master read shares the slave's M generation: master S, slave O. Reads
+	// on either process must preserve those flags instead of acquiring M.
+	record := func(p *replicaProcess) replicaRecord {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(p.data, ".replication-state"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var journal replicaJournal
+		if err := json.Unmarshal(data, &journal); err != nil {
+			t.Fatal(err)
+		}
+		return journal.Records["replica_test"]
+	}
+	master.mustQuery("SELECT COUNT(*) AS n FROM items")
+	if record(master).State != "S" || record(slave).State != "O" {
+		t.Fatal("read failed to establish S/O")
+	}
+	sharedEpoch := record(master).Epoch
+	master.mustQuery("EXPLAIN SELECT COUNT(*) AS n FROM items")
+	if record(master).State != "S" || record(slave).State != "O" || record(master).Epoch != sharedEpoch {
+		t.Fatal("EXPLAIN changed shared read ownership")
+	}
+	master.kill()
+	if body := slave.mustQuery("SELECT COUNT(*) AS n FROM items"); replicaNumber(body, "n") != 16 {
+		t.Fatal(body)
+	}
+	if status, body := slave.query("replica_test", "INSERT INTO items VALUES(9000,9000)", "replication-test-password"); status != 500 || !strings.Contains(body, replicationNetworkError) {
+		t.Fatalf("O owner wrote without invalidating offline S reader: %d %s", status, body)
+	}
+	master.start()
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		var encoded string
+		if err := json.Unmarshal([]byte(master.admin("(replication_slaves)")), &encoded); err != nil {
+			t.Fatal(err)
+		}
+		var statuses []replicaStatus
+		_ = json.Unmarshal([]byte(encoded), &statuses)
+		if len(statuses) == 1 && statuses[0].Connected {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("shared owner did not reconnect")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	var readers sync.WaitGroup
+	errors := make(chan string, 32)
+	for i := 0; i < 32; i++ {
+		readers.Add(1)
+		go func(i int) {
+			defer readers.Done()
+			p := master
+			if i%2 == 0 {
+				p = slave
+			}
+			for j := 0; j < 5; j++ {
+				status, body := p.query("replica_test", "SELECT COUNT(*) AS n FROM items", "replication-test-password")
+				if status != 200 || replicaNumber(body, "n") != 16 {
+					errors <- fmt.Sprintf("parallel read: %d %s", status, body)
+					return
+				}
+			}
+		}(i)
+	}
+	readers.Wait()
+	close(errors)
+	for err := range errors {
+		t.Error(err)
+	}
+	if record(master).State != "S" || record(slave).State != "O" || record(master).Epoch != sharedEpoch {
+		t.Fatal("parallel analytics modified S/O rights or ownership epoch")
+	}
+	// Execute the identical cached write twice, with sharing in between.
+	// Both misses and hits must upgrade to M and invalidate other readers.
+	for i := 0; i < 2; i++ {
+		master.mustQuery("UPDATE items SET value=value+1 WHERE id=1")
+		if record(master).State != "M" || record(slave).State != "I" {
+			t.Fatal("write failed to invalidate S/O")
+		}
+		slave.mustQuery("SELECT COUNT(*) AS n FROM items")
+		if record(master).State != "O" || record(slave).State != "S" {
+			t.Fatal("slave read failed to share master generation")
+		}
+	}
+	slave.mustQuery("UPDATE items SET value=value-2 WHERE id=1")
+	if record(slave).State != "M" || record(master).State != "I" {
+		t.Fatal("slave did not reclaim M")
 	}
 	// An explicit transaction prevents transfer until it commits. The network
 	// request times out first; a late offer must never let the modifier's next

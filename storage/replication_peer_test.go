@@ -17,12 +17,133 @@ import "time"
 import "context"
 import "strings"
 import "testing"
+import "runtime"
 import "net/http"
 import "encoding/json"
 import "encoding/base64"
 import "net/http/httptest"
 import "github.com/gorilla/websocket"
 import "github.com/launix-de/memcp/scm"
+
+func replicaAdmissionFixture(name string) (*replicationManager, *replicaCell, scm.Scmer) {
+	r := &replicationManager{cells: make(map[string]*replicaCell)}
+	c := r.cell(name)
+	database := scm.NewString(name)
+	session := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		if a[0].String() == "schema" {
+			return database
+		}
+		return scm.NewNil()
+	})
+	return r, c, session
+}
+
+func TestReplicationParallelReadsIgnoreControlLocks(t *testing.T) {
+	old := replication.Load()
+	defer replication.Store(old)
+	for _, state := range []string{"M", "O", "S"} {
+		r, c, session := replicaAdmissionFixture("parallel_analytics")
+		c.state.Store(&state)
+		replication.Store(r)
+		// Hold every control-plane lock, including the write/handover gate.
+		// Already-authorized reads must still complete on their own snapshots.
+		r.mu.Lock()
+		c.gate.Lock()
+		c.acquire.Lock()
+		c.directory.Lock()
+		c.checkpoint.Lock()
+		done := make(chan struct{})
+		go func() {
+			var readers sync.WaitGroup
+			for i := 0; i < 32; i++ {
+				readers.Add(1)
+				go func() {
+					defer readers.Done()
+					tx := &TxContext{}
+					for j := 0; j < 1000; j++ {
+						replicationEnter(tx, session)
+						replicationLeave(tx)
+					}
+				}()
+			}
+			readers.Wait()
+			close(done)
+		}()
+		timedOut := false
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			timedOut = true
+		}
+		c.checkpoint.Unlock()
+		c.directory.Unlock()
+		c.acquire.Unlock()
+		c.gate.Unlock()
+		r.mu.Unlock()
+		<-done
+		if timedOut {
+			t.Fatalf("%s reads waited for shared control locks", state)
+		}
+		if c.state.Load() != &state {
+			t.Fatalf("%s read wrote the shared flags", state)
+		}
+	}
+}
+
+func BenchmarkReplicationReadAdmission(b *testing.B) {
+	old := replication.Load()
+	defer replication.Store(old)
+	r, c, session := replicaAdmissionFixture("parallel_analytics")
+	state := "S"
+	c.state.Store(&state)
+	replication.Store(r)
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		tx := &TxContext{}
+		for pb.Next() {
+			replicationEnter(tx, session)
+			replicationLeave(tx)
+		}
+	})
+	runtime.KeepAlive(r)
+}
+
+func TestReplicationOldSnapshotSurvivesImportAndRebuild(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "treplicationsnapshot", 3)
+	dump, err := exportReplicaDatabase(tbl.schema.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := importReplicaDatabase(tbl.schema.Name, dump); err != nil {
+		t.Fatal(err)
+	}
+	previous := GetDatabase(tbl.schema.Name).GetTable("items").ActiveShards()[0]
+	lease := previous.GetRead(nil)
+	defer lease.Release()
+	r, _, _ := replicaAdmissionFixture(tbl.schema.Name)
+	oldManager := replication.Load()
+	replication.Store(r)
+	defer replication.Store(oldManager)
+	// A running reader owns the old snapshot; importing and rebuilding the
+	// successor may proceed without draining that query or adding a read lock.
+	if err := importReplicaDatabase(tbl.schema.Name, dump); err != nil {
+		t.Fatal(err)
+	}
+	current := GetDatabase(tbl.schema.Name)
+	current.GetTable("items").Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(4), scm.NewString("new-row")}}, nil, scm.NewNil(), false, nil)
+	if errors, complete := rebuildDatabaseAndCompact(current, true, false, false); len(errors) != 0 || !complete {
+		t.Fatalf("rebuild: %v, complete=%v", errors, complete)
+	}
+	if _, _, complete := CleanDatabase(current); complete {
+		t.Fatal("cleanup ignored a reachable old catalog")
+	}
+	reader := previous.ColumnReaderTx(nil, "payload", false, ReadCompressed|readOperatorOwned)
+	defer ReleaseColumnReader(reader)
+	if got := reader.GetValue(0).String(); got != "row-00000001" {
+		t.Fatalf("old snapshot changed: %s", got)
+	}
+	runtime.KeepAlive(previous)
+}
 
 func TestReplicationBidirectionalRPCAndDisconnect(t *testing.T) {
 	accepted := make(chan *replicationPeer, 1)
