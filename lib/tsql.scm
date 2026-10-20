@@ -455,9 +455,16 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 		_ (apply parent args))))))
 (define tsql_scalar_expression_allowed? (lambda (expr) (match expr
 	((symbol quote) _value) true
-	(cons head tail) (and (not (and (symbol? head)
-		(has? '(inner_select inner_select_exists inner_select_in get_column aggregate window) head)))
-		(reduce tail (lambda (allowed child) (and allowed (tsql_scalar_expression_allowed? child))) true))
+	/* Parser source locations can wrap a symbol. Match the semantic head,
+	not its raw carrier tag, before admitting a standalone scalar formula. */
+	(cons (symbol inner_select) _arguments) false
+	(cons (symbol inner_select_exists) _arguments) false
+	(cons (symbol inner_select_in) _arguments) false
+	(cons (symbol get_column) _arguments) false
+	(cons (symbol aggregate) _arguments) false
+	(cons (symbol window) _arguments) false
+	(cons _head tail)
+	(reduce tail (lambda (allowed child) (and allowed (tsql_scalar_expression_allowed? child))) true)
 	_ true)))
 (define tsql_scalar_formula (lambda (schema text contracts mode target tx) (begin
 	(define key (json_encode (list schema text contracts mode target)))

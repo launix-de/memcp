@@ -1045,6 +1045,7 @@ test_cases:
   sql: SELECT TOP (id) id FROM day_docs
   expect:
     error: true
+    contains: TOP requires an invocation scalar
 - name: Right nested inner joins retain both ON predicates and bag multiplicity
   sql: SELECT d.id,l.id AS line,i.label FROM day_docs d JOIN day_lines l JOIN day_items i ON l.tenant=i.tenant AND
     l.article=i.article ON d.tenant=l.tenant AND d.id=l.doc_id WHERE d.tenant=1 AND d.id=10 ORDER BY l.id
@@ -1102,10 +1103,22 @@ test_cases:
   sql: SELECT TOP (SUM(id)) id FROM day_docs
   expect:
     error: true
+    contains: TOP requires an invocation scalar
 - name: TOP rejects a count subquery until relational bound lowering exists
   sql: SELECT TOP ((SELECT MAX(id) FROM day_lines)) id FROM day_docs
   expect:
     error: true
+    contains: TOP requires an invocation scalar
+- name: A typed column cast still cannot become a TOP invocation bound
+  sql: SELECT TOP (CAST(id AS INT)) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires an invocation scalar
+- name: A numeric aggregate result cannot become a TOP invocation bound
+  sql: SELECT TOP (COUNT(*)) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires an invocation scalar
 cleanup:
 - sql: DROP TABLE IF EXISTS day_barcodes
 - sql: DROP TABLE IF EXISTS day_addresses
