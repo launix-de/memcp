@@ -67,8 +67,9 @@ snapshot through the stable handle for the rest of this compile only. */
 				(begin
 					(if policy (policy schema tbl true) true)
 					(access "write" true)
-					/* Upgrade before lowering a target table. System commands have
-					no table target here; their execution guard handles the upgrade. */
+					(if (and (equal? schema "system") (equal? tbl true)) (access "admin" true) true)
+					/* Native schema/shard access acquires ownership. Keep write
+					intent on cached plans; admin commands route to the master. */
 					(if (or readonly (equal? schema "system")) true (replication_write tx)))
 				(begin
 					(define handle (table schema false tbl false))
@@ -327,10 +328,19 @@ the parameter list: this prevents a cached plan from retaining the compiling
 request and makes the complete dispatcher eligible for native compilation.
 The Proc retains its optimized Scheme body, so cachemap memory accounting and
 serialization still see the complete plan. */
-(define sql_queryplan_write_guard (lambda (formula access readonly)
+(define sql_queryplan_write_guard (lambda (formula access readonly schema parse_query parse_fn)
 	(if (and (not readonly) (access "write")
-		(not (match formula ((symbol shutdown)) true ((quote shutdown)) true _ false)))
-		(list (quote !begin) (list (quote replication_write) (quote tx)) formula)
+		(not (match formula
+			(cons head tail) (and (empty_list? tail)
+				(or (equal? head shutdown) (equal? head (quote shutdown))))
+			_ false)))
+		(if (access "admin")
+			(list (quote if) (list (quote replication_slave))
+				(list (quote replication_admin) (quote session) schema parse_query
+					(if (list? parse_fn) (equal? (car parse_fn) parse_psql) false)
+					(quote resultrow) (quote resultfields))
+				formula)
+			(list (quote !begin) (list (quote replication_write) (quote tx)) formula))
 		formula)))
 
 (define sql_queryplan_compile_formula (lambda (compile_tx formula)
@@ -359,7 +369,7 @@ serialization still see the complete plan. */
 		work or install a variant after its requesting context was cancelled. */
 		(tx_check tx)
 		(define plan (sql_queryplan_compile_formula tx
-			(sql_queryplan_write_guard (sql_queryplan_bind_execution_session raw_plan) access statistics_diagnostic)))
+			(sql_queryplan_write_guard (sql_queryplan_bind_execution_session raw_plan) access statistics_diagnostic schema parse_query parse_fn)))
 		(tx_check tx)
 		/* Diagnostics must refresh their captured estimates when table statistics
 		change, but checking their cache must never execute candidate preparations. */
@@ -608,7 +618,7 @@ user table merely to discard a newly constructed policy closure. */
 											(sql_queryplan_bind_execution_session
 												(with_session session (lambda ()
 													(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx))))))
-										(sql_queryplan_compile_formula compile_tx (sql_queryplan_write_guard raw_plan access compile_diagnostic)))))
+										(sql_queryplan_compile_formula compile_tx (sql_queryplan_write_guard raw_plan access compile_diagnostic schema parse_query parse_fn)))))
 								(if compile_diagnostic
 									(exact_compile tx)
 									(queryplan_cache cache_key tx exact_compile))))

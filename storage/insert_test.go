@@ -241,7 +241,7 @@ func TestInsertBalancedShardsSurviveWALReplay(t *testing.T) {
 		t.Fatal("writers share a shard")
 	}
 	for i, shard := range []*storageShard{first, second} {
-		release := shard.GetExclusive()
+		release := shard.GetWrite(nil).Release
 		shard.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(int64(i + 1)), scm.NewString("durable")}}, false, nil, nil, false, nil)
 		release()
 	}

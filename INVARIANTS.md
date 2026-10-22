@@ -34,6 +34,24 @@ violations; fixing a race by adding locks to an inner hot path is not sufficient
 Existing protection must not be removed before its replacement provides the
 same ownership, visibility, lifetime, and durability guarantees.
 
+### Replication authority and backend generations
+
+- Database schema.json and each logical data shard have independent MOSI slots.
+  IS identifies a current backend-only generation; IO requires acquisition from
+  its remote owner. A backend-only authoritative generation must never be stale.
+  A retained safety backup cannot establish IS or satisfy an IO access.
+- Restart reconstructs IS only from durable local M/O/S permission. Loading
+  restores that permission, never upgrades S/O to M. Invalidation durably removes
+  local authority before admitting a remote writer. Owner unavailability fails
+  immediately with `Cluster network error`; it never promotes a backup or
+  reclaims an offline slave's M on a timer.
+- MR/OR/SR grant no access and coalesce requests in the state machine. A read
+  request can upgrade to MR; an older read grant cannot release its write waiters.
+  Complete generation installation and durable permission precede waiter release.
+- Already authorized MOSI reads only load atomics. Existing shard leases and
+  snapshot lifetimes retain their own purpose; replication adds no read-side
+  locks, registration, counters or per-row synchronization writes.
+
 ### Immutable main storage and mutable deltas
 
 - A shard's main column storages contain fixed, read-only values for one

@@ -223,9 +223,11 @@ JIT_CROSS_EMULATOR ?= $(JIT_CROSS_EMULATOR_$(JIT_CROSS_ARCH))
 jit-cross-test: jit-toolchain
 	@test -n "$(JIT_CROSS_EMULATOR)" || { echo "Use arm64 or riscv64 for JIT_CROSS_ARCH" >&2; exit 1; }
 	@command -v "$(JIT_CROSS_EMULATOR)" >/dev/null
-	CGO_ENABLED=0 GOOS=linux GOARCH=$(JIT_CROSS_ARCH) \
+	MEMCP_REPLICATION_EXECUTOR="$(JIT_CROSS_EMULATOR)" \
+		MEMCP_REPLICATION_STARTUP_TIMEOUT=3m \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$(JIT_CROSS_ARCH) \
 		GOROOT="$(JIT_GOROOT)" GOEXPERIMENT=jit "$(JIT_GOROOT)/bin/go" \
-		test -tags=nophp -exec="$(JIT_CROSS_EMULATOR)" ./scm ./storage
+		test -timeout=30m -tags=nophp -exec="$(JIT_CROSS_EMULATOR)" ./scm ./storage
 
 jitgen:
 	@set -eu; \

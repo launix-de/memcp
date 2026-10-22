@@ -1665,13 +1665,21 @@ func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopolog
 		release := shard.acquireReadForScan(currentTx)
 		defer release.Release()
 		if scm.Trace == nil {
-			queue = shard.scan_order(bounds, spec.conditionCols, spec.condition, spec.acceptCols, spec.accept, spec.sortcols, sortdirs, limitPartitionCols, offset, shardLimit, spec.callbackCols, currentTx, ss)
+			scanShard := shard
+			if release.shard != nil {
+				scanShard = release.shard
+			}
+			queue = scanShard.scan_order(bounds, spec.conditionCols, spec.condition, spec.acceptCols, spec.accept, spec.sortcols, sortdirs, limitPartitionCols, offset, shardLimit, spec.callbackCols, currentTx, ss)
 		} else {
 			scm.Trace.Duration(fmt.Sprintf("%p", shard), "shard", func() {
-				queue = shard.scan_order(bounds, spec.conditionCols, spec.condition, spec.acceptCols, spec.accept, spec.sortcols, sortdirs, limitPartitionCols, offset, shardLimit, spec.callbackCols, currentTx, ss)
+				scanShard := shard
+				if release.shard != nil {
+					scanShard = release.shard
+				}
+				queue = scanShard.scan_order(bounds, spec.conditionCols, spec.condition, spec.acceptCols, spec.accept, spec.sortcols, sortdirs, limitPartitionCols, offset, shardLimit, spec.callbackCols, currentTx, ss)
 			})
 		}
-		inputCount = int64(shard.main_count) + int64(shard.plannerDeltaRows.Load())
+		inputCount = int64(queue.shard.main_count) + int64(queue.shard.plannerDeltaRows.Load())
 	}()
 	shard.activeScanners.Add(-1)
 	topology.releaseOperation()

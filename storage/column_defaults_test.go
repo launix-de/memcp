@@ -367,7 +367,7 @@ func TestAddedDefaultSchemaDropsRetiredRecoveryExtents(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "taddeddefaultmetadata", 2)
 	second := NewShard(tbl)
 	func() {
-		release := second.GetExclusive()
+		release := second.GetWrite(nil).Release
 		defer release()
 		second.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 			{scm.NewInt(3), scm.NewString("third")},

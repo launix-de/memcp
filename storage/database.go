@@ -103,12 +103,13 @@ func (db *database) blobRefState() *blobRefState {
 }
 
 func newDatabase() *database {
-	return &database{
+	db := &database{
 		tables:      NonLockingReadMap.NewReadMap[string, *table](),
 		procedures:  NonLockingReadMap.NewReadMap[string, *ProcedureDescription](),
 		blobRefs:    new(blobRefState),
 		committedTx: make(map[string]uint64),
 	}
+	return db
 }
 
 const transactionLogName = ".transactions"
@@ -414,6 +415,9 @@ func RebuildTable(tbl *table, all bool, repartition bool) string {
 	tbl.schema.persistenceLifecycle.RLock()
 	defer tbl.schema.persistenceLifecycle.RUnlock()
 	result := tbl.schema.rebuildWithLifecycle(all, repartition, true, tbl)
+	if r := replication.Load(); r != nil && !r.master && validReplicaDatabase(tbl.schema.Name) {
+		defer func() { go replicationCheckpoint(tbl.schema.Name, "") }()
+	}
 	errs := append([]string(nil), result.errors...)
 	if len(errs) == 0 {
 		if err := func() (err error) {
@@ -442,11 +446,6 @@ func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string 
 	dbs := databases.GetAll()
 	var errs []string
 	for _, db := range dbs {
-		if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
-			if state := r.cell(db.Name).state.Load(); state != nil && *state != "M" {
-				continue
-			}
-		}
 		failures, _ := rebuildDatabaseAndCompact(db, all, repartition, includeEphemeral)
 		errs = append(errs, failures...)
 	}
@@ -475,6 +474,9 @@ func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, include
 		return []string{err.Error()}, false
 	}
 	result := db.rebuildWithLifecycle(all, repartition, includeEphemeral)
+	if r := replication.Load(); r != nil && !r.master && validReplicaDatabase(db.Name) {
+		defer func() { go replicationCheckpoint(db.Name, "") }()
+	}
 	if len(result.errors) > 0 {
 		return result.errors, false
 	}
@@ -1047,9 +1049,22 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 }
 
 // SharedResource impl for database
-func (db *database) GetState() SharedState           { return db.srState }
-func (db *database) GetRead(_ *TxContext) ReadAccess { db.ensureLoaded(); return ReadAccess{} }
-func (db *database) GetExclusive() func()            { db.ensureLoaded(); db.srState = WRITE; return func() {} }
+func (db *database) GetState() SharedState { return db.srState }
+func (db *database) GetRead(tx *TxContext) ReadAccess {
+	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
+		r.obtain(replicaResource{Database: db.Name}, mosiS, replicationUser(tx))
+	}
+	db.ensureLoaded()
+	return ReadAccess{}
+}
+func (db *database) GetWrite(tx *TxContext) WriteAccess {
+	var release func()
+	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
+		_, release = r.writeResource(replicaResource{Database: db.Name}, tx)
+	}
+	db.ensureLoaded()
+	return WriteAccess{release: release}
+}
 
 // helper to fetch a table with lazy db load
 func (db *database) GetTable(name string, ignoreCase ...bool) *table {
@@ -1263,6 +1278,21 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 						sdone.Done()
 					}()
 					if s != nil {
+						if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) && !t.isEphemeralQueryTable() {
+							cell := r.shardCell(s)
+							if !cell.gate.TryLock() {
+								newShardList[i] = s
+								incomplete.Store(true)
+								return
+							}
+							defer cell.gate.Unlock()
+							phase := cell.rights.phase()
+							if phase != mosiM && phase != mosiO {
+								newShardList[i] = s
+								incomplete.Store(true)
+								return
+							}
+						}
 						newShardList[i] = s.rebuild(all)
 					}
 				}(i, s, shardLease)
@@ -1457,7 +1487,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 			// transition to maintenanceKind=2 for repartition (no re-lock needed).
 			var shardCandidates []shardDimension
 			doRepart := false
-			if repartition && !hasColdShard {
+			if repartition && !hasColdShard && replication.Load() == nil {
 				var shouldChange bool
 				shardCandidates, shouldChange = t.proposerepartition(maincount)
 				if shouldChange {
@@ -1980,6 +2010,7 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 	// update it, and no table may appear while the destination generation is
 	// being prepared.
 	db.ensureBlobTable()
+	defer db.GetWrite(nil).Release()
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
 	if GetDatabase(schema) != db {
@@ -2120,6 +2151,9 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 			return existing, false
 		}
 	}
+	if !(pm == Cache && strings.HasPrefix(name, ".")) {
+		defer db.GetWrite(nil).Release()
+	}
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	db.ensureLoaded()
@@ -2199,6 +2233,7 @@ func DropTable(schema, name string, ifexists bool) {
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
+	defer db.GetWrite(nil).Release()
 	db.persistenceLifecycle.RLock()
 	persistenceLifecycleLocked := true
 	defer func() {
@@ -2261,6 +2296,7 @@ func RenameTable(schema, oldname, newname string) {
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
+	defer db.GetWrite(nil).Release()
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	db.ensureLoaded()

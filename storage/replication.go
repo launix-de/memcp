@@ -11,21 +11,19 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 
 package storage
 
-import "io"
 import "os"
 import "fmt"
 import "net"
 import "sync"
 import "weak"
-import "time"
 import "bytes"
+import "time"
 import "context"
 import "strconv"
 import "strings"
 import "net/http"
 import "crypto/sha1"
 import "sync/atomic"
-import "compress/gzip"
 import "crypto/subtle"
 import "encoding/json"
 import "path/filepath"
@@ -37,15 +35,16 @@ import "github.com/launix-de/memcp/scm"
 const replicationNetworkError = "Cluster network error"
 
 // Replication is published once at startup, after frontend registration. It is
-// nil for ordinary instances. Directory updates are serialized per database;
+// nil for ordinary instances. Directory updates are serialized per resource;
 // its journal is fsynced before a new owner may execute. Only write transactions
-// retain a local gate; reads use ordinary snapshots. The first implementation groups
-// a schema and its shards into one ownership unit; storage backends are unchanged.
+// retain a local gate; reads use ordinary snapshots. Each database schema and
+// each data shard have independent MOSI slots; storage backends are unchanged.
 var replication atomic.Pointer[replicationManager]
 
 // Session getters borrow immutable arguments; reusing the key avoids a
 // variadic argument allocation at every statement boundary.
 var replicationSchemaArgument = []scm.Scmer{scm.NewString("schema")}
+var replicationUsernameArgument = []scm.Scmer{scm.NewString("username")}
 
 type replicaAuth struct {
 	Hash      string          `json:"hash"`
@@ -54,27 +53,44 @@ type replicaAuth struct {
 }
 
 type replicaRecord struct {
-	Epoch   uint64          `json:"epoch"`
-	State   string          `json:"state"`
-	Owner   string          `json:"owner,omitempty"`
-	Readers map[string]bool `json:"readers,omitempty"`
+	InitialClaimed bool                          `json:"initial_claimed,omitempty"`
+	Epoch          uint64                        `json:"epoch"`
+	State          string                        `json:"state"`
+	Owner          string                        `json:"owner,omitempty"`
+	Readers        map[string]bool               `json:"readers,omitempty"`
+	Resource       replicaResource               `json:"resource"`
+	Generation     string                        `json:"generation,omitempty"`
+	Requests       map[string]replicaRequestMark `json:"requests,omitempty"`
+}
+
+type replicaRequestMark struct {
+	Sequence uint64 `json:"sequence"`
+	Write    bool   `json:"write"`
 }
 
 type replicaJournal struct {
-	Records map[string]replicaRecord `json:"records"`
-	Users   map[string]replicaAuth   `json:"users"`
-	Retired map[string]bool          `json:"retired"`
+	Version     int                      `json:"version"`
+	Records     map[string]replicaRecord `json:"records"`
+	Users       map[string]replicaAuth   `json:"users"`
+	Retired     map[string]bool          `json:"retired"`
+	Initialized map[string]bool          `json:"initialized,omitempty"`
+	Sequence    uint64                   `json:"sequence,omitempty"`
 }
 
 type replicaCell struct {
 	// gate protects uncommitted local writes against ownership transfer.
 	// Analytics never participate: their existing snapshots remain valid.
-	gate            sync.RWMutex // write transactions only; reads use existing snapshots
-	state           atomic.Pointer[string]
-	directory       sync.Mutex
-	checkpoint      sync.Mutex
-	acquire         sync.Mutex
-	retiredCatalogs atomic.Pointer[[]weak.Pointer[database]]
+	gate             sync.RWMutex // write transactions only; reads use existing snapshots
+	rights           mosiState
+	resource         atomic.Pointer[replicaResource]
+	current          atomic.Pointer[storageShard]
+	bootstrap        sync.Mutex
+	initialized      atomic.Bool
+	bootstrapStarted bool
+	directory        sync.Mutex
+	checkpoint       sync.Mutex
+	acquire          sync.Mutex
+	retiredShards    atomic.Pointer[[]weak.Pointer[storageShard]]
 }
 
 type replicationManager struct {
@@ -97,30 +113,21 @@ type replicationManager struct {
 	shutdown      func()
 	stopping      bool
 	stopOnce      sync.Once
+	steps         sync.Map // transfer/invalidations; values are *replicaStep
+	imports       sync.Map // connection ID + transfer ID; reader-owned *replicaImport
 }
 
 type replicaRequest struct {
-	Epoch    uint64 `json:"epoch,omitempty"`
-	Database string `json:"database"`
-	User     string `json:"user,omitempty"`
-	Hash     string `json:"hash,omitempty"`
-	Read     bool   `json:"read,omitempty"`
-	State    string `json:"state,omitempty"`
-	Dump     []byte `json:"dump,omitempty"`
-	Salt     []byte `json:"salt,omitempty"`
-	Scramble []byte `json:"scramble,omitempty"`
-}
-
-type replicaDump struct {
-	Schema []byte            `json:"schema"`
-	Files  map[string][]byte `json:"files"`
-	Blobs  map[string][]byte `json:"blobs"`
-}
-
-type replicaGrant struct {
-	Epoch uint64 `json:"epoch"`
-	State string `json:"state"`
-	Dump  []byte `json:"dump,omitempty"`
+	SQL        string `json:"sql,omitempty"`
+	PostgreSQL bool   `json:"postgresql,omitempty"`
+	Epoch      uint64 `json:"epoch,omitempty"`
+	Database   string `json:"database"`
+	User       string `json:"user,omitempty"`
+	Hash       string `json:"hash,omitempty"`
+	Read       bool   `json:"read,omitempty"`
+	State      string `json:"state,omitempty"`
+	Salt       []byte `json:"salt,omitempty"`
+	Scramble   []byte `json:"scramble,omitempty"`
 }
 
 // StartReplication accepts a port (master) or host:port (slave). A slave uses
@@ -159,14 +166,18 @@ func StartReplication(address string, shutdown func()) error {
 	if _, err := uuid.Parse(r.id); err != nil {
 		return fmt.Errorf("invalid saved replication identity")
 	}
-	r.journal = replicaJournal{Records: make(map[string]replicaRecord), Users: make(map[string]replicaAuth), Retired: make(map[string]bool)}
+	r.journal = replicaJournal{Version: 2, Records: make(map[string]replicaRecord), Users: make(map[string]replicaAuth), Retired: make(map[string]bool)}
 	data, err := os.ReadFile(filepath.Join(Basepath, ".replication-state"))
 	if err == nil {
+		r.journal = replicaJournal{}
 		if err := json.Unmarshal(data, &r.journal); err != nil {
 			return fmt.Errorf("invalid replication journal: %w", err)
 		}
 	} else if !os.IsNotExist(err) {
 		return err
+	}
+	if r.journal.Version != 2 {
+		return fmt.Errorf("unsupported replication journal version: resynchronize the experimental database-granular installation explicitly")
 	}
 	if r.journal.Records == nil || r.journal.Users == nil || r.journal.Retired == nil {
 		return fmt.Errorf("invalid replication journal directories")
@@ -174,7 +185,13 @@ func StartReplication(address string, shutdown func()) error {
 	r.retired.Store(r.journal.Retired[r.id])
 	for name, record := range r.journal.Records {
 		c := &replicaCell{}
-		c.state.Store(&record.State)
+		resource := record.Resource
+		if !resource.valid() || resource.key() != name {
+			return fmt.Errorf("invalid replication journal resource")
+		}
+		c.resource.Store(&resource)
+		c.initialized.Store(r.journal.Initialized[resource.Database])
+		c.rights.restoreBackend(parseMosiPhase(record.State))
 		r.cells[name] = c
 	}
 	// Startup constructs the directory unpublished; avoid copying it once per
@@ -278,7 +295,7 @@ func (r *replicationManager) setLocal(name, state string) error {
 	if err := r.saveLocked(); err != nil {
 		return err
 	}
-	r.cells[name].state.Store(&state)
+	r.cells[name].rights.publish(parseMosiPhase(state))
 	return nil
 }
 
@@ -297,8 +314,12 @@ func (r *replicationManager) accept(w http.ResponseWriter, req *http.Request) {
 	stopping := r.stopping
 	old := r.peers[id]
 	r.mu.Unlock()
-	if retired || stopping {
-		http.Error(w, "replica retired by administrator", 403)
+	if retired {
+		http.Error(w, "replica retired by administrator", http.StatusForbidden)
+		return
+	}
+	if stopping {
+		http.Error(w, "replication master is stopping", http.StatusServiceUnavailable)
 		return
 	}
 	if old != nil {
@@ -317,11 +338,12 @@ func (r *replicationManager) accept(w http.ResponseWriter, req *http.Request) {
 	}
 	p := newReplicationPeer(conn, func(ctx context.Context, method string, data json.RawMessage) (any, error) {
 		return r.handleMaster(ctx, id, method, data)
-	})
+	}, func(packet *replicaPacket) error { return r.receivePacket(id, packet) })
 	r.peers[id] = p
 	r.mu.Unlock()
 	<-p.done
 	p.wait()
+	r.abortImports(id)
 	r.mu.Lock()
 	if r.peers[id] == p {
 		delete(r.peers, id)
@@ -337,7 +359,14 @@ func (r *replicationManager) connect() {
 		default:
 		}
 		header := http.Header{"X-Memcp-Replica": []string{r.id}}
-		conn, _, err := websocket.DefaultDialer.Dial("ws://"+r.address+"/replication", header)
+		conn, response, err := websocket.DefaultDialer.Dial("ws://"+r.address+"/replication", header)
+		if err != nil && response != nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusForbidden {
+				_, _ = r.handleSlave(context.Background(), "retire", nil)
+				return
+			}
+		}
 		if err == nil {
 			r.mu.Lock()
 			if r.stopping {
@@ -345,15 +374,15 @@ func (r *replicationManager) connect() {
 				conn.Close()
 				return
 			}
-			p := newReplicationPeer(conn, r.handleSlave)
+			p := newReplicationPeer(conn, r.handleSlave, func(packet *replicaPacket) error { return r.receivePacket("", packet) })
 			r.upstream = p
 			r.mu.Unlock()
 			go func() {
 				r.mu.Lock()
-				names := make([]string, 0, len(r.journal.Records))
-				for name, record := range r.journal.Records {
+				names := make(map[string]bool)
+				for _, record := range r.journal.Records {
 					if record.State == "M" {
-						names = append(names, name)
+						names[record.Resource.Database] = true
 					}
 				}
 				users := make(map[string]replicaAuth, len(r.journal.Users))
@@ -361,7 +390,7 @@ func (r *replicationManager) connect() {
 					users[user] = auth
 				}
 				r.mu.Unlock()
-				for _, name := range names {
+				for name := range names {
 					for user, auth := range users {
 						if auth.Admin || auth.Databases[name] {
 							replicationCheckpoint(name, user)
@@ -372,6 +401,7 @@ func (r *replicationManager) connect() {
 			}()
 			<-p.done
 			p.wait()
+			r.abortImports("")
 			r.mu.Lock()
 			if r.upstream == p {
 				r.upstream = nil
@@ -462,28 +492,16 @@ func (r *replicationManager) handleMaster(ctx context.Context, id, method string
 	if method == "login" {
 		return auth, nil
 	}
+	if method == "admin" {
+		if !auth.Admin {
+			return nil, fmt.Errorf("administrator access required")
+		}
+		return r.executeAdmin(req)
+	}
 	if !auth.Admin && !auth.Databases[req.Database] {
 		return nil, fmt.Errorf("access denied for database %s", req.Database)
 	}
-	switch method {
-	case "claim":
-		return r.claim(ctx, id, req)
-	case "backup":
-		c := r.cell(req.Database)
-		c.directory.Lock()
-		defer c.directory.Unlock()
-		r.mu.Lock()
-		record := r.journal.Records[req.Database]
-		r.mu.Unlock()
-		if record.Owner != id || record.Epoch != req.Epoch {
-			return nil, fmt.Errorf("replica is no longer the modifier")
-		}
-		c.gate.Lock()
-		defer c.gate.Unlock()
-		return nil, importReplicaDatabase(req.Database, req.Dump)
-	default:
-		return nil, fmt.Errorf("unknown replication method")
-	}
+	return nil, fmt.Errorf("unknown authentication method")
 }
 
 func (r *replicationManager) handleSlave(ctx context.Context, method string, data json.RawMessage) (any, error) {
@@ -501,42 +519,7 @@ func (r *replicationManager) handleSlave(ctx context.Context, method string, dat
 		}
 		return true, nil
 	}
-	var req replicaRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return nil, err
-	}
-	if !validReplicaDatabase(req.Database) {
-		return nil, fmt.Errorf("invalid replication database")
-	}
-	c := r.cell(req.Database)
-	if err := replicationLock(ctx, &c.gate); err != nil {
-		return nil, err
-	}
-	defer c.gate.Unlock()
-	switch method {
-	case "offer":
-		r.mu.Lock()
-		epoch := r.journal.Records[req.Database].Epoch
-		r.mu.Unlock()
-		if epoch != req.Epoch {
-			return nil, fmt.Errorf("stale ownership transfer")
-		}
-		dump, err := exportReplicaDatabase(req.Database)
-		if err != nil {
-			return nil, err
-		}
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf(replicationNetworkError)
-		}
-		if err := r.setLocal(req.Database, req.State); err != nil {
-			return nil, err
-		}
-		return replicaGrant{State: req.State, Dump: dump}, nil
-	case "invalidate":
-		return nil, r.setLocal(req.Database, "I")
-	default:
-		return nil, fmt.Errorf("unknown replication callback")
-	}
+	return nil, fmt.Errorf("unknown administrative callback")
 }
 
 func validReplicaDatabase(name string) bool {
@@ -558,162 +541,6 @@ func replicationLock(ctx context.Context, gate *sync.RWMutex) error {
 	return nil
 }
 
-func (r *replicationManager) claim(ctx context.Context, id string, req replicaRequest) (any, error) {
-	if !validReplicaDatabase(req.Database) {
-		return nil, fmt.Errorf("invalid replication database")
-	}
-	c := r.cell(req.Database)
-	c.directory.Lock()
-	defer c.directory.Unlock()
-	r.mu.Lock()
-	record, exists := r.journal.Records[req.Database]
-	readers := make(map[string]bool, len(record.Readers))
-	for reader, present := range record.Readers {
-		readers[reader] = present
-	}
-	record.Readers = readers
-	r.mu.Unlock()
-	if !exists {
-		record = replicaRecord{State: "M", Owner: r.id, Epoch: 1}
-		r.mu.Lock()
-		r.journal.Records[req.Database] = record
-		err := r.saveLocked()
-		r.mu.Unlock()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if record.Readers == nil {
-		record.Readers = make(map[string]bool)
-	}
-	var grant replicaGrant
-	grant.State = "M"
-	if req.Read {
-		grant.State = "S"
-	}
-	if record.Owner != id {
-		oldState := "I"
-		if req.Read {
-			oldState = "O"
-		}
-		if record.Owner == r.id {
-			if err := replicationLock(ctx, &c.gate); err != nil {
-				return nil, err
-			}
-			dump, err := exportReplicaDatabase(req.Database)
-			if err == nil {
-				err = r.setLocal(req.Database, oldState)
-			}
-			c.gate.Unlock()
-			if err != nil {
-				return nil, err
-			}
-			grant.Dump = dump
-		} else {
-			peer := r.peer(record.Owner)
-			if peer == nil {
-				return nil, fmt.Errorf(replicationNetworkError)
-			}
-			if err := peer.call(ctx, "offer", replicaRequest{Database: req.Database, State: oldState, Epoch: record.Epoch}, &grant); err != nil {
-				return nil, fmt.Errorf(replicationNetworkError)
-			}
-			grant.State = "M"
-			if req.Read {
-				grant.State = "S"
-			}
-			// The master keeps the complete transferred generation, regardless
-			// of whether it currently holds a read capability.
-			if err := replicationLock(ctx, &c.gate); err != nil {
-				return nil, err
-			}
-			err := importReplicaDatabase(req.Database, grant.Dump)
-			c.gate.Unlock()
-			if err != nil {
-				return nil, err
-			}
-		}
-	} else if id != r.id && req.Epoch == record.Epoch {
-		// A timed-out request may invalidate the modifier after the requester
-		// has abandoned its reply. The still-current epoch identifies the
-		// modifier's own disk as authoritative, even if its local flag is I.
-		// Never overwrite that disk from the master's older backup.
-		peer := r.peer(id)
-		if peer == nil {
-			return nil, fmt.Errorf(replicationNetworkError)
-		}
-		if err := peer.call(ctx, "offer", replicaRequest{Database: req.Database, State: "I", Epoch: record.Epoch}, &grant); err != nil {
-			return nil, err
-		}
-		if err := replicationLock(ctx, &c.gate); err != nil {
-			return nil, err
-		}
-		err := importReplicaDatabase(req.Database, grant.Dump)
-		c.gate.Unlock()
-		if err != nil {
-			return nil, err
-		}
-		grant.State = "M"
-	} else {
-		// An uninstalled grant has a newer epoch than the receiver's journal;
-		// its complete payload is recoverable from the master backup.
-		if err := replicationLock(ctx, &c.gate); err != nil {
-			return nil, err
-		}
-		dump, err := exportReplicaDatabase(req.Database)
-		c.gate.Unlock()
-		if err != nil {
-			return nil, err
-		}
-		grant.Dump = dump
-	}
-	if req.Read {
-		if record.Owner == id {
-			// Recovering an owner's read capability must not grant M while
-			// other S copies still exist. Ownership remains with this O copy.
-			grant.State = "O"
-		} else {
-			record.Readers[id] = true
-		}
-	} else {
-		for reader := range record.Readers {
-			if reader == id || reader == r.id {
-				continue
-			}
-			p := r.peer(reader)
-			if p == nil || p.call(ctx, "invalidate", replicaRequest{Database: req.Database}, nil) != nil {
-				return nil, fmt.Errorf(replicationNetworkError)
-			}
-		}
-		record.Readers = make(map[string]bool)
-		record.Epoch++
-		record.Owner = id
-	}
-	c.gate.Lock()
-	defer c.gate.Unlock()
-	r.mu.Lock()
-	if r.journal.Retired[id] {
-		r.mu.Unlock()
-		return nil, fmt.Errorf("replica retired by administrator")
-	}
-	record.State = "I"
-	if record.Owner == r.id {
-		record.State = "M"
-		if req.Read {
-			record.State = "O"
-		}
-	} else if record.Readers[r.id] {
-		record.State = "S"
-	}
-	r.journal.Records[req.Database] = record
-	grant.Epoch = record.Epoch
-	err := r.saveLocked()
-	if err == nil {
-		c.state.Store(&record.State)
-	}
-	r.mu.Unlock()
-	return grant, err
-}
-
 // Reads use the engine's ordinary immutable shard/catalog snapshots. They do
 // not register admission, increment a counter, hold a lock, or rebuild/checkpoint.
 // Only a write transaction retains the local write-side gate: handover must not
@@ -723,12 +550,14 @@ func replicationEnter(tx *TxContext, session scm.Scmer) {
 }
 
 func replicationLeave(tx *TxContext) {
-	if tx.replicationWriting {
-		tx.replicationCell.gate.RUnlock()
+	tx.mu.Lock()
+	cells := tx.replicationCells
+	tx.replicationCells = nil
+	tx.mu.Unlock()
+	for cell := range cells {
+		cell.gate.RUnlock()
 	}
-	tx.replicationWriting = false
-	tx.replicationActive = false
-	tx.replicationDatabase = ""
+	tx.replicationWriting, tx.replicationActive = false, false
 }
 
 func replicaCanRead(state *string) bool {
@@ -741,160 +570,74 @@ func replicationEnterMode(tx *TxContext, session scm.Scmer, write bool) {
 		return
 	}
 	name := session.Func()(replicationSchemaArgument...).String()
-	if r.retired.Load() {
-		panic("replica retired by administrator")
-	}
-	if tx.replicationActive {
-		if tx.replicationDatabase != name {
-			panic("cross-database transactions are not supported by replication")
-		}
-		if tx.replicationWriting || (!write && replicaCanRead(tx.replicationCell.state.Load())) {
-			return
-		}
-		replicationLeave(tx)
-	}
 	if !validReplicaDatabase(name) {
 		return
 	}
-	c := r.cell(name)
-	for {
-		state := c.state.Load()
-		if !write && replicaCanRead(state) {
-			tx.replicationCell, tx.replicationDatabase, tx.replicationActive = c, name, true
-			return
-		}
-		if write && state != nil && *state == "M" {
-			c.gate.RLock()
-			if state := c.state.Load(); state != nil && *state == "M" {
-				tx.replicationCell, tx.replicationDatabase, tx.replicationActive = c, name, true
-				tx.replicationWriting = true
-				return
-			}
-			c.gate.RUnlock()
-			continue
-		}
-		if state == nil && r.master {
-			c.gate.Lock()
-			if c.state.Load() == nil {
-				r.mu.Lock()
-				r.journal.Records[name] = replicaRecord{State: "M", Owner: r.id, Epoch: 1}
-				err := r.saveLocked()
-				r.mu.Unlock()
-				if err != nil {
-					c.gate.Unlock()
-					panic(err)
-				}
-				value := "M"
-				c.state.Store(&value)
-			}
-			c.gate.Unlock()
-			continue
-		}
-		c.acquire.Lock()
-		state = c.state.Load()
-		if (!write && replicaCanRead(state)) || (write && state != nil && *state == "M") {
-			c.acquire.Unlock()
-			continue
-		}
-		user := session.Func()(scm.NewString("username")).String()
-		var grant replicaGrant
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		var err error
-		r.mu.Lock()
-		epoch := r.journal.Records[name].Epoch
-		r.mu.Unlock()
-		// The first slave connection still claims the complete database as M.
-		// Every subsequent missing read capability requests S, never M.
-		read := !write && (r.master || state != nil)
-		if r.master {
-			var value any
-			value, err = r.claim(ctx, r.id, replicaRequest{Database: name, Epoch: epoch, Read: read})
-			if err == nil {
-				grant = value.(replicaGrant)
-			}
-		} else {
-			r.mu.Lock()
-			auth, ok := r.journal.Users[user]
-			r.mu.Unlock()
-			if !ok || (!auth.Admin && !auth.Databases[name]) {
-				cancel()
-				c.acquire.Unlock()
-				panic("replication database access denied")
-			}
-			peer := r.peer("")
-			if peer == nil {
-				cancel()
-				c.acquire.Unlock()
-				panic(replicationNetworkError)
-			}
-			err = peer.call(ctx, "claim", replicaRequest{Database: name, User: user, Hash: auth.Hash, Epoch: epoch, Read: read}, &grant)
-		}
-		cancel()
-		if err != nil {
-			c.acquire.Unlock()
-			panic(replicationNetworkError)
-		}
-		c.gate.Lock()
-		if err := importReplicaDatabase(name, grant.Dump); err != nil {
-			c.gate.Unlock()
-			c.acquire.Unlock()
-			panic(err)
-		}
-		r.mu.Lock()
-		localRecord := r.journal.Records[name]
-		localRecord.Epoch = grant.Epoch
-		r.journal.Records[name] = localRecord
-		r.mu.Unlock()
-		if err := r.setLocal(name, grant.State); err != nil {
-			c.gate.Unlock()
-			c.acquire.Unlock()
-			panic(err)
-		}
-		c.gate.Unlock()
-		c.acquire.Unlock()
+	r.firstDatabase(name, session)
+	tx.replicationActive = true
+	if write {
+		tx.replicationWriting = true
 	}
 }
 
 // Called before a parsed write plan executes, including on plan-cache hits.
 func replicationWrite(tx *TxContext) {
 	if replication.Load() != nil && tx != nil {
-		replicationEnterMode(tx, tx.Session, true)
-	}
-}
-
-func replicationCheckTable(t *table, tx *TxContext) {
-	if replication.Load() != nil && tx != nil && tx.replicationActive && validReplicaDatabase(t.schema.Name) && tx.replicationDatabase != t.schema.Name {
-		panic("cross-database statements are not supported by replication")
+		tx.replicationWriting = true
 	}
 }
 
 func replicationCheckWriteTable(t *table, tx *TxContext) {
-	replicationCheckTable(t, tx)
-	if replication.Load() == nil || tx == nil || !validReplicaDatabase(t.schema.Name) {
+	if replication.Load() == nil || !validReplicaDatabase(t.schema.Name) || t.isEphemeralQueryTable() {
 		return
 	}
-	if !tx.replicationWriting {
-		panic("replication write requires M ownership")
-	}
-	if GetDatabase(t.schema.Name) != t.schema {
+	if t.schema.tables.Get(t.Name) != t {
 		panic("replication schema changed; retry statement")
 	}
 }
 
-// Maintenance retains old disk objects while an existing query or cached
-// descriptor still owns its catalog. The weak directory is published only at
-// import; normal readers never register or update retention metadata.
+// Weak retirement metadata is updated only at generation publication. A query
+// retaining a historical shard keeps its files alive without registering reads.
 func replicationRetainsCatalogs(name string) bool {
 	if r := replication.Load(); r != nil {
-		if history := r.cell(name).retiredCatalogs.Load(); history != nil {
-			for _, previous := range *history {
-				if previous.Value() != nil {
-					return true
+		if cells := r.cellSnapshot.Load(); cells != nil {
+			for _, cell := range *cells {
+				resource := cell.resource.Load()
+				if resource == nil || resource.Database != name {
+					continue
+				}
+				if history := cell.retiredShards.Load(); history != nil {
+					for _, previous := range *history {
+						if previous.Value() != nil {
+							return true
+						}
+					}
 				}
 			}
 		}
 	}
 	return false
+}
+
+func (c *replicaCell) retainGeneration(shard *storageShard) {
+	if shard == nil {
+		return
+	}
+	for {
+		previous := c.retiredShards.Load()
+		next := make([]weak.Pointer[storageShard], 0)
+		if previous != nil {
+			for _, entry := range *previous {
+				if entry.Value() != nil {
+					next = append(next, entry)
+				}
+			}
+		}
+		next = append(next, weak.Make(shard))
+		if c.retiredShards.CompareAndSwap(previous, &next) {
+			return
+		}
+	}
 }
 
 func replicationOpenDatabase(user, database string) (err error) {
@@ -951,180 +694,13 @@ func replicationSessionClosed(session scm.Scmer) {
 	}
 }
 
-func exportReplicaDatabase(name string) (data []byte, err error) {
-	defer func() {
-		if p := recover(); p != nil {
-			err = fmt.Errorf("replication export: %v", p)
-		}
-	}()
-	db := GetDatabase(name)
-	if db == nil {
-		return nil, fmt.Errorf("database does not exist")
-	}
-	db.ensureLoaded()
-	for {
-		errors, complete := rebuildDatabaseAndCompact(db, true, false, false)
-		if len(errors) != 0 {
-			return nil, fmt.Errorf("replication rebuild: %s", strings.Join(errors, "; "))
-		}
-		if complete {
-			break
-		}
-		// A best-effort maintenance pass may skip a table already rebuilding.
-		// Wait without DDL ownership, then force a complete generation. Never
-		// drop its still-authoritative WAL from an incomplete transfer.
-		for _, t := range db.tables.GetAll() {
-			t.maintenanceMu.Lock()
-			t.maintenanceMu.Unlock()
-		}
-	}
-	db.persistenceLifecycle.Lock()
-	defer db.persistenceLifecycle.Unlock()
-	dump := replicaDump{Schema: db.persistence.ReadSchema(), Files: make(map[string][]byte), Blobs: make(map[string][]byte)}
-	read := func(reader io.ReadCloser) []byte {
-		defer reader.Close()
-		data, err := io.ReadAll(reader)
-		if err != nil {
-			panic(err)
-		}
-		return data
-	}
-	db.persistence.WalkShardFiles(func(name string) {
-		if !isPersistenceLogObject(name) {
-			dump.Files[name] = read(db.persistence.ReadShardFile(name))
-		}
-	})
-	db.persistence.WalkBlobs(func(hash string) { dump.Blobs[hash] = read(db.persistence.ReadBlob(hash)) })
-	var packed bytes.Buffer
-	writer := gzip.NewWriter(&packed)
-	if err := json.NewEncoder(writer).Encode(dump); err != nil {
-		return nil, err
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-	return packed.Bytes(), nil
-}
-
-func importReplicaDatabase(name string, data []byte) (err error) {
-	defer func() {
-		if p := recover(); p != nil {
-			err = fmt.Errorf("replication import: %v", p)
-		}
-	}()
-	reader, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
-	var dump replicaDump
-	if err := json.NewDecoder(reader).Decode(&dump); err != nil {
-		return err
-	}
-	var schema struct{ Name string }
-	if err := json.Unmarshal(dump.Schema, &schema); err != nil || schema.Name != name {
-		return fmt.Errorf("invalid replication schema")
-	}
-	db := GetDatabase(name)
-	var engine PersistenceEngine
-	if db != nil {
-		db.persistenceLifecycle.Lock()
-		defer db.persistenceLifecycle.Unlock()
-		db.save() // drain queued buffered schema publications before replacement
-		db.closeTransactionLog()
-		engine = db.persistence
-	} else {
-		// A preconfigured destination selects its own backend and credentials.
-		engine = createPersistenceFromConfig(name, databaseBackendConfig(name))
-	}
-	write := func(w io.WriteCloser, data []byte) {
-		if _, err := w.Write(data); err != nil {
-			abortPersistenceWrite(w)
-			panic(err)
-		}
-		finishColumnWrite(w, true)
-	}
-	for object, data := range dump.Files {
-		if strings.ContainsAny(object, "/\\\x00") || strings.HasPrefix(object, ".") {
-			return fmt.Errorf("invalid replication object")
-		}
-		write(engine.WriteShardFile(object), data)
-	}
-	for hash, data := range dump.Blobs {
-		if strings.ContainsAny(hash, "/\\\x00") || strings.HasPrefix(hash, ".") {
-			return fmt.Errorf("invalid replication blob")
-		}
-		write(engine.WriteBlob(hash), data)
-	}
-	// New shard UUIDs have no source WALs. Keep old coordinator records until
-	// ordinary compaction: deleting them before atomic schema publication could
-	// destroy recovery of the previous generation after a process crash.
-	engine.WriteSchema(dump.Schema)
-	replacement := newDatabase()
-	replacement.Name, replacement.persistence, replacement.srState = name, engine, COLD
-	replacement.ensureLoaded()
-	if r := replication.Load(); r != nil && db != nil {
-		// Existing queries may still own the prior immutable catalog/shards.
-		// Keep their disk generations until Go observes no remaining owners,
-		// without reader registration, counters or synchronization on reads.
-		c := r.cell(name)
-		previous := c.retiredCatalogs.Load()
-		retained := make([]weak.Pointer[database], 0, 1)
-		if previous != nil {
-			for _, old := range *previous {
-				if old.Value() != nil {
-					retained = append(retained, old)
-				}
-			}
-		}
-		retained = append(retained, weak.Make(db))
-		c.retiredCatalogs.Store(&retained)
-	}
-	databases.Set(name, replacement)
-	return nil
-}
-
 // replicationCheckpoint is best effort while the master is offline. Local
 // SAFE commit remains durable independently. Reconnection uploads the newest
 // complete rebuild again; an unavailable master never revokes local M.
 func replicationCheckpoint(name, user string) {
 	r := replication.Load()
-	if r == nil || r.master || !validReplicaDatabase(name) {
-		return
-	}
-	peer := r.peer("")
-	if peer == nil {
-		return
-	}
-	c := r.cell(name)
-	if !c.checkpoint.TryLock() {
-		return
-	}
-	defer c.checkpoint.Unlock()
-	if !c.gate.TryLock() {
-		return
-	}
-	state := c.state.Load()
-	if state == nil || *state != "M" {
-		c.gate.Unlock()
-		return
-	}
-	dump, err := exportReplicaDatabase(name)
-	r.mu.Lock()
-	epoch := r.journal.Records[name].Epoch
-	r.mu.Unlock()
-	c.gate.Unlock()
-	if err != nil {
-		scm.PrintError(err)
-		return
-	}
-	r.mu.Lock()
-	auth := r.journal.Users[user]
-	r.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := peer.call(ctx, "backup", replicaRequest{Database: name, User: user, Hash: auth.Hash, Dump: dump, Epoch: epoch}, nil); err != nil {
-		scm.PrintError(fmt.Errorf("replication checkpoint deferred: %w", err))
+	if r != nil && !r.master && validReplicaDatabase(name) {
+		r.backupDatabase(name, user)
 	}
 }
 

@@ -12,6 +12,9 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
+import "io"
+import "bytes"
+import "compress/gzip"
 import "sync"
 import "time"
 import "context"
@@ -22,6 +25,7 @@ import "net/http"
 import "encoding/json"
 import "encoding/base64"
 import "net/http/httptest"
+import "github.com/google/uuid"
 import "github.com/gorilla/websocket"
 import "github.com/launix-de/memcp/scm"
 
@@ -43,7 +47,8 @@ func TestReplicationParallelReadsIgnoreControlLocks(t *testing.T) {
 	defer replication.Store(old)
 	for _, state := range []string{"M", "O", "S"} {
 		r, c, session := replicaAdmissionFixture("parallel_analytics")
-		c.state.Store(&state)
+		c.rights.initialize(parseMosiPhase(state))
+		c.initialized.Store(true)
 		replication.Store(r)
 		// Hold every control-plane lock, including the write/handover gate.
 		// Already-authorized reads must still complete on their own snapshots.
@@ -84,7 +89,7 @@ func TestReplicationParallelReadsIgnoreControlLocks(t *testing.T) {
 		if timedOut {
 			t.Fatalf("%s reads waited for shared control locks", state)
 		}
-		if c.state.Load() != &state {
+		if c.rights.phase().String() != state {
 			t.Fatalf("%s read wrote the shared flags", state)
 		}
 	}
@@ -95,7 +100,8 @@ func BenchmarkReplicationReadAdmission(b *testing.B) {
 	defer replication.Store(old)
 	r, c, session := replicaAdmissionFixture("parallel_analytics")
 	state := "S"
-	c.state.Store(&state)
+	c.rights.initialize(parseMosiPhase(state))
+	c.initialized.Store(true)
 	replication.Store(r)
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
@@ -106,43 +112,6 @@ func BenchmarkReplicationReadAdmission(b *testing.B) {
 		}
 	})
 	runtime.KeepAlive(r)
-}
-
-func TestReplicationOldSnapshotSurvivesImportAndRebuild(t *testing.T) {
-	tbl, _ := createDurabilityTestTable(t, "treplicationsnapshot", 3)
-	dump, err := exportReplicaDatabase(tbl.schema.Name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := importReplicaDatabase(tbl.schema.Name, dump); err != nil {
-		t.Fatal(err)
-	}
-	previous := GetDatabase(tbl.schema.Name).GetTable("items").ActiveShards()[0]
-	lease := previous.GetRead(nil)
-	defer lease.Release()
-	r, _, _ := replicaAdmissionFixture(tbl.schema.Name)
-	oldManager := replication.Load()
-	replication.Store(r)
-	defer replication.Store(oldManager)
-	// A running reader owns the old snapshot; importing and rebuilding the
-	// successor may proceed without draining that query or adding a read lock.
-	if err := importReplicaDatabase(tbl.schema.Name, dump); err != nil {
-		t.Fatal(err)
-	}
-	current := GetDatabase(tbl.schema.Name)
-	current.GetTable("items").Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(4), scm.NewString("new-row")}}, nil, scm.NewNil(), false, nil)
-	if errors, complete := rebuildDatabaseAndCompact(current, true, false, false); len(errors) != 0 || !complete {
-		t.Fatalf("rebuild: %v, complete=%v", errors, complete)
-	}
-	if _, _, complete := CleanDatabase(current); complete {
-		t.Fatal("cleanup ignored a reachable old catalog")
-	}
-	reader := previous.ColumnReaderTx(nil, "payload", false, ReadCompressed|readOperatorOwned)
-	defer ReleaseColumnReader(reader)
-	if got := reader.GetValue(0).String(); got != "row-00000001" {
-		t.Fatalf("old snapshot changed: %s", got)
-	}
-	runtime.KeepAlive(previous)
 }
 
 func TestReplicationBidirectionalRPCAndDisconnect(t *testing.T) {
@@ -158,14 +127,14 @@ func TestReplicationBidirectionalRPCAndDisconnect(t *testing.T) {
 				return nil, ctx.Err()
 			}
 			return string(data), nil
-		})
+		}, nil)
 	}))
 	defer server.Close()
 	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := newReplicationPeer(conn, func(ctx context.Context, method string, data json.RawMessage) (any, error) { return string(data), nil })
+	client := newReplicationPeer(conn, func(ctx context.Context, method string, data json.RawMessage) (any, error) { return string(data), nil }, nil)
 	master := <-accepted
 	defer client.close()
 	defer master.close()
@@ -231,6 +200,8 @@ func TestReplicationPasswordProofs(t *testing.T) {
 
 func TestReplicationSnapshotWaitsForMaintenance(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "treplicationmaintenance", 3)
+	r := &replicationManager{cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	resource := replicaResource{Database: tbl.schema.Name, Table: tbl.Name, Shard: tbl.ActiveShards()[0].logicalID().String()}
 	tbl.maintenanceMu.Lock()
 	locked := true
 	defer func() {
@@ -238,36 +209,162 @@ func TestReplicationSnapshotWaitsForMaintenance(t *testing.T) {
 			tbl.maintenanceMu.Unlock()
 		}
 	}()
-	type result struct {
-		data []byte
-		err  error
-	}
-	done := make(chan result, 1)
-	go func() { data, err := exportReplicaDatabase(tbl.schema.Name); done <- result{data, err} }()
+	done := make(chan error, 1)
+	go func() { _, err := r.prepareResource(resource); done <- err }()
 	select {
-	case outcome := <-done:
-		t.Fatalf("snapshot skipped a busy table: %v", outcome.err)
+	case err := <-done:
+		t.Fatalf("snapshot skipped busy table: %v", err)
 	case <-time.After(30 * time.Millisecond):
 	}
 	tbl.maintenanceMu.Unlock()
 	locked = false
-	var outcome result
 	select {
-	case outcome = <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("snapshot did not resume after maintenance")
+		t.Fatal("snapshot did not resume")
 	}
-	if outcome.err != nil {
-		t.Fatal(outcome.err)
+}
+
+func TestReplicationBoundedChunkStream(t *testing.T) {
+	peer := &replicationPeer{done: make(chan struct{}), outgoing: make(chan replicationMessage, 8)}
+	finished := make(chan error, 1)
+	payload := bytes.Repeat([]byte("streamed shard generation\n"), 100000)
+	go func() {
+		finished <- peer.sendObject(replicaPacket{ID: "stream"}, "column", "payload", io.NopCloser(bytes.NewReader(payload)))
+	}()
+	total, packets := 0, 0
+	for {
+		message := <-peer.outgoing
+		packet := message.Packet
+		if packet.Kind == "object_end" {
+			break
+		}
+		if packet.Kind != "chunk" {
+			continue
+		}
+		decoded, err := decodeReplicaChunk(*packet)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(decoded, payload[total:total+len(decoded)]) {
+			t.Fatal("stream corrupted")
+		}
+		total += len(decoded)
+		packets++
 	}
-	if err := importReplicaDatabase(tbl.schema.Name, outcome.data); err != nil {
+	if err := <-finished; err != nil {
 		t.Fatal(err)
 	}
-	loaded := GetDatabase(tbl.schema.Name).GetTable("items")
-	add := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewInt(a[0].Int() + a[1].Int()) })
-	schema := scm.NewSlice([]scm.Scmer{newScanAccessHeader(0, scanAccessConsumerScan, 0, -1)})
-	sum := loaded.scan(nil, schema, nil, nil, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) }), []string{"id"}, add, scm.NewInt(0), add, false)
-	if sum.Int() != 6 {
-		t.Fatalf("snapshot lost rows from skipped maintenance: %v", sum)
+	if total != len(payload) || packets < 2 {
+		t.Fatalf("not an incremental shard stream: %d/%d in %d packets", total, len(payload), packets)
+	}
+	var expanded bytes.Buffer
+	writer := gzip.NewWriter(&expanded)
+	writer.Write(make([]byte, replicaPacketBytes+1))
+	writer.Close()
+	if _, err := decodeReplicaChunk(replicaPacket{Payload: expanded.Bytes()}); err == nil {
+		t.Fatal("unbounded expanded chunk accepted")
+	}
+}
+
+func TestReplicationSnapshotKeepsGenerationAndFiles(t *testing.T) {
+	table, engine := createDurabilityTestTable(t, "treplicasnapshot", 3)
+	r := &replicationManager{cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	resource := replicaResource{Database: table.schema.Name, Table: table.Name, Shard: table.ActiveShards()[0].logicalID().String()}
+	if _, err := r.prepareResource(resource); err != nil {
+		t.Fatal(err)
+	}
+	cell := r.resourceCell(resource)
+	original := cell.current.Load()
+	cell.rights.initialize(mosiS)
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	replacement := original.rebuild(true)
+	if replacement == original {
+		t.Fatal("forced rebuild did not produce a successor")
+	}
+	if err := r.replaceShard(resource, original, replacement); err != nil {
+		t.Fatal(err)
+	}
+	cell.current.Store(replacement)
+	access := original.GetRead(nil)
+	if access.shard != replacement {
+		access.Release()
+		t.Fatal("ordinary read did not resolve the current generation")
+	}
+	access.Release()
+	// These query-local IDs already own the historical generation. Losing
+	// permission to the current shard must not cause projection to fetch or
+	// reinterpret newer rows, even when that owner is now offline.
+	cell.rights.publish(mosiIO)
+	access = original.acquireSnapshotRead(nil)
+	if access.shard != original {
+		access.Release()
+		t.Fatal("physical snapshot IDs were rebound to another generation")
+	}
+	access.Release()
+	original.RemoveFromDisk()
+	reader := engine.ReadColumn(original.uuid.String(), "id")
+	defer reader.Close()
+	if missing, ok := reader.(interface{ Missing() bool }); ok && missing.Missing() {
+		t.Fatal("retirement deleted a reachable snapshot's column file")
+	}
+	if _, _, complete := CleanDatabase(table.schema); complete {
+		t.Fatal("cleanup ignored historical generation ownership")
+	}
+	runtime.KeepAlive(original)
+}
+
+func TestReplicationCleanupRetainsCompletedBackup(t *testing.T) {
+	table, engine := createDurabilityTestTable(t, "treplicabackupgc", 3)
+	r := &replicationManager{master: true, id: "master", cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	resource := replicaResource{Database: table.schema.Name, Table: table.Name, Shard: table.ActiveShards()[0].logicalID().String()}
+	if _, err := r.prepareResource(resource); err != nil {
+		t.Fatal(err)
+	}
+	backup := r.resourceCell(resource).current.Load()
+	// A newer remote schema can advertise a UUID before its data arrives. It
+	// cannot displace the last completed backup's backend ownership proof.
+	pending := new(storageShard)
+	data, _ := json.Marshal(map[string]string{"uuid": uuid.NewString(), "mosi": resource.Shard})
+	if err := json.Unmarshal(data, pending); err != nil {
+		t.Fatal(err)
+	}
+	pending.t = table
+	table.mu.Lock()
+	table.Shards = []*storageShard{pending}
+	table.publishTopologyLocked()
+	table.mu.Unlock()
+	cell := r.shardCell(pending)
+	cell.current.Store(pending)
+	cell.rights.initialize(mosiIO)
+	r.journal.Records[resource.key()] = replicaRecord{Resource: resource, Owner: "slave", State: "IO", Epoch: 1, Generation: backup.uuid.String()}
+	orphan := uuid.NewString()
+	writer := engine.WriteColumn(orphan, "unused")
+	writer.Write([]byte("orphan"))
+	finishColumnWrite(writer, true)
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	if removed := cleanShards(table.schema); removed == 0 {
+		t.Fatal("cleanup retained unrelated orphan files")
+	}
+	reader := engine.ReadColumn(backup.uuid.String(), "payload")
+	if missing, ok := reader.(interface{ Missing() bool }); ok && missing.Missing() {
+		reader.Close()
+		t.Fatal("cleanup deleted the last complete backup")
+	}
+	reader.Close()
+	if err := r.restoreBackup(r.journal.Records[resource.key()]); err != nil {
+		t.Fatal(err)
+	}
+	cell.rights.publish(mosiM)
+	access := cell.current.Load().GetRead(nil)
+	defer access.Release()
+	value := access.shard.getColumnStorageOrPanic("payload", false, nil).GetValue(0)
+	if value.String() != "row-00000001" {
+		t.Fatalf("completed backup was not restored: %v", value)
 	}
 }

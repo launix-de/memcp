@@ -54,6 +54,11 @@ func (p *replicaProcess) start() {
 		p.t.Fatal(err)
 	}
 	p.cmd = exec.Command(p.binary, "-data", p.data, "--api-port="+p.port, "--disable-mysql", "--mysql-socket=", "--no-repl", "--root-password="+p.password, "--replication="+p.replication, "lib/main.scm")
+	// go test -exec wraps only the test binary, not processes it launches.
+	// Cross tests must execute the target server explicitly through QEMU too.
+	if executor := os.Getenv("MEMCP_REPLICATION_EXECUTOR"); executor != "" {
+		p.cmd = exec.Command(executor, p.cmd.Args...)
+	}
 	if p.mysqlPort != "" {
 		args := make([]string, 0, len(p.cmd.Args))
 		for _, a := range p.cmd.Args {
@@ -67,7 +72,14 @@ func (p *replicaProcess) start() {
 	if err := p.cmd.Start(); err != nil {
 		p.t.Fatal(err)
 	}
-	deadline := time.Now().Add(45 * time.Second)
+	startupTimeout := 45 * time.Second
+	if configured := os.Getenv("MEMCP_REPLICATION_STARTUP_TIMEOUT"); configured != "" {
+		startupTimeout, err = time.ParseDuration(configured)
+		if err != nil || startupTimeout <= 0 {
+			p.t.Fatalf("invalid replication startup timeout %q", configured)
+		}
+	}
+	deadline := time.Now().Add(startupTimeout)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", "127.0.0.1:"+p.port, 100*time.Millisecond)
 		if err == nil {
@@ -250,6 +262,17 @@ func TestReplicationAlternatingProcessFailures(t *testing.T) {
 	if status, _ := slave.queryAs("replica_user", "private_test", "SELECT 1", "user-password"); status == 200 {
 		t.Fatal("slave read an unauthorized database")
 	}
+	for _, command := range []string{"CREATE DATABASE slave_admin_test", "CREATE USER slave_created_user IDENTIFIED BY 'slave-created-password'", "GRANT ALL ON replica_test.* TO slave_created_user"} {
+		if status, body := slave.query("system", command, "replication-test-password"); status != 200 {
+			t.Fatalf("forwarded administration: %d %s", status, body)
+		}
+	}
+	if status, body := master.query("system", "SELECT COUNT(*) AS n FROM user WHERE username='slave_created_user'", master.password); status != 200 || replicaNumber(body, "n") != 1 {
+		t.Fatalf("slave admin did not update master access: %d %s", status, body)
+	}
+	if _, err := os.Stat(filepath.Join(master.data, "slave_admin_test", "schema.json")); err != nil {
+		t.Fatalf("slave CREATE DATABASE did not reach master: %v", err)
+	}
 	for round := 0; round < 3; round++ {
 		master.kill()
 		if round == 0 {
@@ -273,7 +296,7 @@ func TestReplicationAlternatingProcessFailures(t *testing.T) {
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Fatal("master backup did not catch up")
+				t.Fatalf("master backup did not catch up\nMASTER: %s\nSLAVE: %s", masterSchema, slaveSchema)
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
@@ -299,6 +322,14 @@ func TestReplicationAlternatingProcessFailures(t *testing.T) {
 			t.Fatal("reconnect changed identity")
 		}
 	}
+	// DDL on the other node must first obtain current data generations, not
+	// replace a modifier's deltas with the master's older safety backup.
+	master.mustQuery("ALTER TABLE items ADD COLUMN extra INT DEFAULT 7")
+	if body := slave.mustQuery("SELECT COUNT(*) AS n FROM items WHERE extra=7"); replicaNumber(body, "n") != 16 {
+		t.Fatalf("remote DDL lost data or default values: %s", body)
+	}
+	slave.mustQuery("UPDATE items SET value=value WHERE id=1")
+	slave.mustQuery("ALTER TABLE items DROP COLUMN extra")
 	// A master read shares the slave's M generation: master S, slave O. Reads
 	// on either process must preserve those flags instead of acquiring M.
 	record := func(p *replicaProcess) replicaRecord {
@@ -311,7 +342,13 @@ func TestReplicationAlternatingProcessFailures(t *testing.T) {
 		if err := json.Unmarshal(data, &journal); err != nil {
 			t.Fatal(err)
 		}
-		return journal.Records["replica_test"]
+		for _, record := range journal.Records {
+			if record.Resource.Table == "items" {
+				return record
+			}
+		}
+		t.Fatal("items has no independent MOSI record")
+		return replicaRecord{}
 	}
 	master.mustQuery("SELECT COUNT(*) AS n FROM items")
 	if record(master).State != "S" || record(slave).State != "O" {
@@ -377,7 +414,7 @@ func TestReplicationAlternatingProcessFailures(t *testing.T) {
 	// Both misses and hits must upgrade to M and invalidate other readers.
 	for i := 0; i < 2; i++ {
 		master.mustQuery("UPDATE items SET value=value+1 WHERE id=1")
-		if record(master).State != "M" || record(slave).State != "I" {
+		if record(master).State != "M" || record(slave).State != "IO" {
 			t.Fatal("write failed to invalidate S/O")
 		}
 		slave.mustQuery("SELECT COUNT(*) AS n FROM items")
@@ -386,7 +423,7 @@ func TestReplicationAlternatingProcessFailures(t *testing.T) {
 		}
 	}
 	slave.mustQuery("UPDATE items SET value=value-2 WHERE id=1")
-	if record(slave).State != "M" || record(master).State != "I" {
+	if record(slave).State != "M" || record(master).State != "IO" {
 		t.Fatal("slave did not reclaim M")
 	}
 	// An explicit transaction prevents transfer until it commits. The network
@@ -404,12 +441,30 @@ func TestReplicationAlternatingProcessFailures(t *testing.T) {
 	if _, err := tx.Exec("INSERT INTO items VALUES(1000,999)"); err != nil {
 		t.Fatal(err)
 	}
-	status, body := master.query("replica_test", "SELECT COUNT(*) FROM items", "replication-test-password")
-	if status != 500 || !strings.Contains(body, replicationNetworkError) {
-		t.Fatalf("held transaction transfer: %d %s", status, body)
+	type readResult struct {
+		status int
+		body   string
+	}
+	waitingRead := make(chan readResult, 1)
+	go func() {
+		status, body := master.query("replica_test", "SELECT COUNT(*) AS n FROM items", "replication-test-password")
+		waitingRead <- readResult{status, body}
+	}()
+	select {
+	case result := <-waitingRead:
+		t.Fatalf("transfer crossed uncommitted transaction: %d %s", result.status, result.body)
+	case <-time.After(100 * time.Millisecond):
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case result := <-waitingRead:
+		if result.status != 200 || replicaNumber(result.body, "n") != 17 {
+			t.Fatalf("reader after commit: %d %s", result.status, result.body)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("reader was not released after committed transfer")
 	}
 	time.Sleep(100 * time.Millisecond)
 	if body := slave.mustQuery("SELECT value FROM items WHERE id=1000"); replicaNumber(body, "value") != 999 {
@@ -435,6 +490,28 @@ func TestReplicationAlternatingProcessFailures(t *testing.T) {
 	slave.kill()
 	slave.start()
 	slave.mustQuery("SELECT COUNT(*) AS n FROM items")
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		masterData, _ := os.ReadFile(filepath.Join(master.data, ".replication-state"))
+		slaveData, _ := os.ReadFile(filepath.Join(slave.data, ".replication-state"))
+		var masterJournal, slaveJournal replicaJournal
+		if json.Unmarshal(masterData, &masterJournal) != nil || json.Unmarshal(slaveData, &slaveJournal) != nil {
+			t.Fatal("invalid backup journal")
+		}
+		complete := true
+		for key, source := range slaveJournal.Records {
+			if source.Resource.Database == "replica_test" && source.Resource.Shard != "" && source.State == "M" && (masterJournal.Records[key].Generation == "" || masterJournal.Records[key].Generation != source.Generation) {
+				complete = false
+			}
+		}
+		if complete {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("reconnected slave did not publish every rebuild backup")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	master.admin(fmt.Sprintf("(replication_retire %q)", identity))
 	slave.waitOffline()
 	if body := master.mustQuery("SELECT COUNT(*) AS n FROM items"); replicaNumber(body, "n") != 16 {
@@ -452,5 +529,118 @@ func TestReplicationAlternatingProcessFailures(t *testing.T) {
 	slave.start()
 	if status, _ := slave.query("replica_test", "SELECT * FROM items", "replication-test-password"); status == 200 {
 		t.Fatal("retired slave reactivated stale ownership")
+	}
+}
+
+func TestReplicationIndependentPartitionOwnership(t *testing.T) {
+	if testing.Short() {
+		t.Skip("partition ownership process test")
+	}
+	root, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := os.Getenv("MEMCP_REPLICATION_BINARY")
+	if binary == "" {
+		binary = filepath.Join(t.TempDir(), "memcp")
+		command := exec.Command("go", "build", "-tags=nophp", "-o", binary, ".")
+		command.Dir = root
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("build: %v: %s", err, output)
+		}
+	}
+	port := replicaTestPort(t)
+	master := &replicaProcess{t: t, binary: binary, root: root, data: t.TempDir(), port: replicaTestPort(t), replication: port, password: "replication-test-password"}
+	slave := &replicaProcess{t: t, binary: binary, root: root, data: t.TempDir(), port: replicaTestPort(t), replication: "127.0.0.1:" + port, password: "different-local-password"}
+	t.Cleanup(func() {
+		slave.kill()
+		master.kill()
+		if t.Failed() {
+			t.Logf("MASTER\n%s\nSLAVE\n%s", master.logs(), slave.logs())
+		}
+	})
+	master.start()
+	if status, body := master.query("system", "CREATE DATABASE replica_test", master.password); status != 200 {
+		t.Fatalf("database: %d %s", status, body)
+	}
+	master.mustQuery("CREATE TABLE items(id INT PRIMARY KEY, value INT) ENGINE=SAFE")
+	master.mustQuery("INSERT INTO items VALUES(1,10),(9,90)")
+	if body := master.admin(`(partitiontable (table "replica_test" false "items" false) (list "id" (list 5)))`); strings.TrimSpace(body) != "true" {
+		t.Fatalf("partition: %s", body)
+	}
+	master.mustQuery("CREATE TABLE volatile_items(id INT, value TEXT) ENGINE=MEMORY")
+	master.mustQuery("INSERT INTO volatile_items VALUES(1,'streamed-memory-generation')")
+	slave.start()
+	readyDeadline := time.Now().Add(10 * time.Second)
+	for {
+		status, _ := slave.query("system", "SELECT 1", master.password)
+		if status == 200 {
+			break
+		}
+		if time.Now().After(readyDeadline) {
+			t.Fatal("initial upstream authentication did not become ready")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if body := slave.mustQuery("SELECT value FROM volatile_items WHERE id=1"); !strings.Contains(body, "streamed-memory-generation") {
+		t.Fatalf("volatile generation transfer: %s", body)
+	}
+	if body := slave.mustQuery("SELECT COUNT(*) AS n FROM items"); replicaNumber(body, "n") != 2 {
+		t.Fatal(body)
+	}
+	journal := func(process *replicaProcess) replicaJournal {
+		data, err := os.ReadFile(filepath.Join(process.data, ".replication-state"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var journal replicaJournal
+		if err := json.Unmarshal(data, &journal); err != nil {
+			t.Fatal(err)
+		}
+		return journal
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !journal(slave).Initialized["replica_test"] {
+		if time.Now().After(deadline) {
+			t.Fatal("initial shard M claims did not finish")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if body := master.mustQuery("SELECT value FROM items WHERE id=1"); replicaNumber(body, "value") != 10 {
+		t.Fatal(body)
+	}
+	counts := func(process *replicaProcess) map[string]int {
+		result := make(map[string]int)
+		for _, record := range journal(process).Records {
+			if record.Resource.Table == "items" {
+				result[record.State]++
+			}
+		}
+		return result
+	}
+	if flags := counts(master); flags["S"] != 1 || flags["IO"] != 1 {
+		t.Fatalf("master acquired unrelated partition: %v", flags)
+	}
+	if flags := counts(slave); flags["O"] != 1 || flags["M"] != 1 {
+		t.Fatalf("slave lost independent partition ownership: %v", flags)
+	}
+	master.kill()
+	slave.mustQuery("UPDATE items SET value=value+1 WHERE id=9")
+	if status, body := slave.query("replica_test", "UPDATE items SET value=value+1 WHERE id=1", master.password); status != 500 || !strings.Contains(body, replicationNetworkError) {
+		t.Fatalf("offline O write: %d %s", status, body)
+	}
+	master.start()
+	slave.kill()
+	// Restarted master may load its valid shared partition, but must not use
+	// its older backend backup for the independently modified IO partition.
+	if body := master.mustQuery("SELECT value FROM items WHERE id=1"); replicaNumber(body, "value") != 10 {
+		t.Fatal(body)
+	}
+	if status, body := master.query("replica_test", "SELECT value FROM items WHERE id=9", master.password); status != 500 || !strings.Contains(body, replicationNetworkError) {
+		t.Fatalf("IO fell back to stale backup: %d %s", status, body)
+	}
+	slave.start()
+	if body := slave.mustQuery("SELECT value FROM items WHERE id=9"); replicaNumber(body, "value") != 91 {
+		t.Fatalf("restart lost autonomous M write: %s", body)
 	}
 }

@@ -122,9 +122,8 @@ type TxContext struct {
 	// Replication bindings are session-executor-owned, never shared by readers.
 	// Only writes retain a gate across the transaction; reads use shard snapshots.
 	replicationActive   bool
-	replicationDatabase string
-	replicationCell     *replicaCell
 	replicationWriting  bool
+	replicationCells    map[*replicaCell]bool
 	ID                  uint64
 	Mode                TxMode
 	State               TxState
@@ -1081,11 +1080,7 @@ func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, fn 
 	}
 	defer func() {
 		if tx.replicationActive && (tx.State != TxActive || session.Func()(scm.NewString("transaction")).IsNil()) {
-			wrote := tx.replicationWriting
 			replicationLeave(tx)
-			if wrote && tx.State == TxCommitted {
-				replicationCheckpoint(session.Func()(scm.NewString("schema")).String(), session.Func()(scm.NewString("username")).String())
-			}
 		}
 	}()
 	sessionFn := session.Func()

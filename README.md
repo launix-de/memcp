@@ -343,17 +343,28 @@ action. Retirement makes the last master backup authoritative and may lose
 untransferred offline changes. The persisted `ReplicationUUID` is also the
 slave's secret; do not share or clone its settings between installations.
 
-This initial implementation admits whole databases and exchanges complete
-compressed checkpoints. Missing read rights request S; existing M/O/S rights are
-checked with atomic loads. Local reads add no replication locks, reader counters,
-registration, rebuilds or checkpoint uploads. They retain the engine's ordinary
-snapshots across a handover. Parsed write plans acquire M before execution,
-including cache hits; only writes participate in the local handover gate.
-It is not yet the planned independent-shard MOSI implementation.
-Multi-master cluster routing, distributed scans and bounded streaming transfers
-remain future work. Cross-database statements/transactions are rejected rather
-than operating without admission for their additional databases. The crash test covers alternating process failures with
-retained data directories, not destruction of an offline owner's disk.
+Each database schema and each logical data shard has an independent MOSI
+slot. The initial connection acquires schema M, discovers its shards, then
+requests shard M through the ordinary access protocol. Later reads request S;
+M becomes O at its previous owner. Writes acquire M and invalidate other copies.
+The MR/OR/SR states coalesce concurrent requests and allow read-to-write upgrades.
+
+IS denotes a current backend-only generation with durable local permission;
+IO must acquire from its remote owner even when an older backup exists locally.
+Loading IS restores its existing permission and cannot turn a shared copy into M.
+Already authorized reads check atomic state without additional replication locks,
+reader counters or registration. Existing snapshots retain historical generations.
+Only writes participate in the handover gate, including explicit transactions.
+
+Transfers stream independently compressed chunks through bounded queues into
+backend writers. Handover rebuilds exactly the requested shard; receivers install
+its generation and point topology update before acknowledging or releasing waits.
+Slave admin SQL runs against the master's own authentication and access catalog;
+SHUTDOWN remains local. Multi-master routing and distributed scans remain future
+work. Dedicated CI exercises alternating process crashes, parallel shared reads,
+independent partition ownership, offline writes and durable restart. These tests
+retain data directories; retiring a destroyed owner's disk can lose changes newer
+than its last transferred backup.
 
 Run the crash test with `go test ./storage -run TestReplication -count=1`.
 It starts independent master/slave processes and uses both HTTP and MySQL.

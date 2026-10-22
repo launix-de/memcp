@@ -23,18 +23,21 @@ import "github.com/gorilla/websocket"
 // outbound connection. Neither RPC handlers nor storage I/O run under its mutex.
 // A disconnected peer fails every outstanding call; no write is retried here.
 type replicationPeer struct {
-	conn     *websocket.Conn
-	writeMu  sync.Mutex
-	mu       sync.Mutex
-	pending  map[uint64]chan replicationMessage
-	next     atomic.Uint64
-	done     chan struct{}
-	once     sync.Once
-	handle   func(context.Context, string, json.RawMessage) (any, error)
-	ctx      context.Context
-	cancel   context.CancelFunc
-	readDone chan struct{}
-	workers  sync.WaitGroup
+	conn      *websocket.Conn
+	writeMu   sync.Mutex
+	outgoing  chan replicationMessage
+	writeDone chan struct{}
+	mu        sync.Mutex
+	pending   map[uint64]chan replicationMessage
+	next      atomic.Uint64
+	done      chan struct{}
+	once      sync.Once
+	handle    func(context.Context, string, json.RawMessage) (any, error)
+	packet    func(*replicaPacket) error
+	ctx       context.Context
+	cancel    context.CancelFunc
+	readDone  chan struct{}
+	workers   sync.WaitGroup
 }
 
 type replicationMessage struct {
@@ -42,20 +45,22 @@ type replicationMessage struct {
 	Method string          `json:"method,omitempty"`
 	Data   json.RawMessage `json:"data,omitempty"`
 	Error  string          `json:"error,omitempty"`
+	Packet *replicaPacket  `json:"packet,omitempty"`
 }
 
 type replicationRemoteError string
 
 func (e replicationRemoteError) Error() string { return string(e) }
 
-func newReplicationPeer(conn *websocket.Conn, handle func(context.Context, string, json.RawMessage) (any, error)) *replicationPeer {
-	p := &replicationPeer{conn: conn, pending: make(map[uint64]chan replicationMessage), done: make(chan struct{}), handle: handle}
+func newReplicationPeer(conn *websocket.Conn, handle func(context.Context, string, json.RawMessage) (any, error), packet func(*replicaPacket) error) *replicationPeer {
+	p := &replicationPeer{conn: conn, pending: make(map[uint64]chan replicationMessage), done: make(chan struct{}), handle: handle, packet: packet, outgoing: make(chan replicationMessage, 8), writeDone: make(chan struct{})}
 	p.readDone = make(chan struct{})
 	p.ctx, p.cancel = context.WithCancel(context.Background())
-	conn.SetReadLimit(1 << 30)
+	conn.SetReadLimit(256 * 1024)
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(15 * time.Second)) })
 	go p.read()
+	go p.write()
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -78,9 +83,35 @@ func (p *replicationPeer) close() {
 	p.once.Do(func() { close(p.done); p.cancel(); p.conn.Close() })
 }
 
-func (p *replicationPeer) wait() { <-p.readDone; p.workers.Wait() }
+func (p *replicationPeer) wait() { <-p.readDone; <-p.writeDone; p.workers.Wait() }
 
 func (p *replicationPeer) send(m replicationMessage) error {
+	select {
+	case <-p.done:
+		return fmt.Errorf(replicationNetworkError)
+	case p.outgoing <- m:
+		return nil
+	}
+}
+
+// The bounded queue owns each message after send returns. Producers never
+// wait for a protocol reply here; the connection reader completes acquisitions.
+func (p *replicationPeer) write() {
+	defer close(p.writeDone)
+	defer p.close()
+	for {
+		select {
+		case <-p.done:
+			return
+		case m := <-p.outgoing:
+			if err := p.writeMessage(m); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (p *replicationPeer) writeMessage(m replicationMessage) error {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 	select {
@@ -132,6 +163,16 @@ func (p *replicationPeer) read() {
 		var m replicationMessage
 		if err := p.conn.ReadJSON(&m); err != nil {
 			return
+		}
+		if m.Packet != nil {
+			if p.packet == nil {
+				return
+			}
+			if err := p.packet(m.Packet); err != nil {
+				fmt.Println("replication packet rejected:", err)
+				return
+			}
+			continue
 		}
 		if m.Method == "" {
 			p.mu.Lock()

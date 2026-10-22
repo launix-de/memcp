@@ -110,30 +110,53 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 ### Concurrency Rules (Storage Engine)
 
 - `replicationManager` is published once after frontend initialization. Its
-  private fsynced journal owns peer identities, cached authentication, ownership
-  and administrative retirement tombstones; it is never inferred from liveness.
-  `replicaCell.directory` serializes grants. Only write transactions retain its
-  local gate, outside row loops. Reads accept M/O/S through atomic loads, use
-  existing shard/catalog snapshots and neither register readers nor update a
-  shared counter, lock, or admission word. Read completion never checkpoints.
-  The cell directory is an immutable atomic lookup snapshot; additions publish
-  under the manager mutex, while startup builds it once before publication.
-  Incoming generations use the
-  existing persistence lifecycle lock and publish objects before schema JSON;
-  stale database descriptors may neither rebuild nor garbage-collect a successor.
-  The initial implementation groups a database schema and its shards, with
-  full compressed checkpoints. Independent shard MOSI and streaming transfers
-  remain required before enabling the planned multi-master cluster architecture.
-  `TxContext.replicationActive`, `replicationDatabase`, `replicationCell` and
-  `replicationWriting` are session-executor-owned bindings. Only write bindings
-  retain the gate across explicit transactions, released on completion/error.
-  Parsed write policies and cached write plans establish M before execution;
-  native INSERT rejects missing ownership and retired catalog generations.
-  `replicaCell.retiredCatalogs` is a transition-published immutable weak directory.
-  Maintenance retains disk generations while any old catalog remains reachable;
-  readers never register or touch this directory. None of this state is persisted.
-  `Settings.ReplicationUUID` is generated once before replication
-  starts and persists as the installation's confidential identity/secret.
+  private fsynced journal owns peer identities, cached authentication, resource
+  permissions and administrative retirement tombstones, never inferred from
+  liveness. Each database schema and logical data shard has its own `replicaCell`.
+  `directory` serializes ownership handovers; `gate` protects only write batches
+  and transactions. Already authorized reads use atomic state loads and existing
+  snapshot lifetimes, without additional reader registration or admission writes.
+  `mosiState` publishes immutable M/O/S/IS/IO/MR/OR/SR descriptors using CAS on
+  transitions only. Pending request descriptors own one flight and wake all
+  waiters after installation and durable permission publication. SR/OR upgrades
+  retain that flight; late read grants cannot satisfy MR.
+  IS represents a current backend-only generation, retaining its previously
+  durable M/O/S permission for local restoration. IO always acquires from the
+  remote owner, regardless of backup files. Backend-only authority is never
+  inferred from file existence; invalidation removes it before writer admission.
+  Query-local physical row IDs retain an already acquired historical generation;
+  their projection leases never reacquire current MOSI rights or rebind IDs.
+  Semantic column DDL owns schema M and obtains the table's current data
+  generations before publication; foreign statements reacquire lost schema
+  permission before obtaining a new data write right. Lifecycle callbacks run
+  after releasing schema handover ownership, so nested DDL cannot self-deadlock.
+  Runtime COLD remains a separate materialization state. Eviction publishes IS only after verifying a current persisted generation
+  with no deltas, and cannot promote IO or a pending request. Journal permissions
+  reconstruct IS only for already authorized local generations on restart.
+  `resource`, `current` and the immutable cell lookup directory are atomically
+  published; additions use the manager mutex. `storageShard.lineage` is immutable
+  and inherited by rebuild successors; physical UUIDs identify generations.
+  `storageShard.coherence` attaches its stable resource cell through atomic CAS.
+  `retiredShards` is an immutable weak directory updated at generation publication.
+  Maintenance preserves historical files while snapshots retain those shards;
+  readers neither register nor touch retirement metadata.
+  Incoming payloads use bounded independently compressed chunks and private
+  backend writers. Receiver-owned import objects are aborted after disconnect.
+  Schema import serializes against persistence lifecycle, DDL and queued saves.
+  Journal generation UUIDs name completed transfers; schema-only placeholders
+  never constitute completed backups. Startup GC waits for replication recovery,
+  and runtime GC retains completed backup files and blob manifests independently
+  of advertised remote topology. Explicit retirement restores only that completed
+  generation before publishing M; it never promotes an incomplete transfer.
+  `table.replicationCacheEpoch` advances only at remote invalidation publication;
+  each `StorageComputeProxy.replicationCacheEpoch` applies it under proxy ownership
+  during preparation, never in generated row loops.
+  `TxContext.replicationCells` is guarded by its mutex and owns deduplicated
+  write handover leases until commit/rollback. Session replication bindings are
+  executor-owned; neither flights nor transaction bindings are persisted.
+  `Settings.ReplicationUUID` is generated once and saved as the installation's
+  confidential identity/secret. Bootstrap progress and request ordering are
+  journaled; control mutexes and runtime snapshots are process-local.
 
 - Complete ordinary-column declaration replacement is copy-on-write under the
   existing table DDL and database schema ownership. The expected old declaration

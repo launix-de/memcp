@@ -1127,6 +1127,7 @@ func (index *StorageIndex) hasAvailableColumnsRLocked() bool {
 
 func rebuildRepartitionIndexes(candidates []*StorageIndex, shard *storageShard) {
 	release := shard.GetRead(nil)
+	shard = release.shard
 	defer release.Release()
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
@@ -1161,6 +1162,7 @@ func snapshotRepartitionIndexes(shards []*storageShard) []*StorageIndex {
 			}
 			func() {
 				release := shard.GetRead(nil)
+				shard = release.shard
 				defer release.Release()
 				shard.mu.RLock()
 				defer shard.mu.RUnlock()

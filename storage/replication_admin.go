@@ -13,6 +13,7 @@ package storage
 
 import "fmt"
 import "sort"
+import "sync"
 import "time"
 import "context"
 import "encoding/json"
@@ -53,10 +54,14 @@ func (r *replicationManager) statuses() []replicaStatus {
 				status.Connected = true
 			}
 		}
-		for name, record := range r.journal.Records {
+		databaseNames := make(map[string]bool)
+		for _, record := range r.journal.Records {
 			if record.Owner == id || record.Readers[id] {
-				status.Databases = append(status.Databases, name)
+				databaseNames[record.Resource.Database] = true
 			}
+		}
+		for name := range databaseNames {
+			status.Databases = append(status.Databases, name)
 		}
 		sort.Strings(status.Databases)
 		result = append(result, status)
@@ -99,6 +104,15 @@ func (r *replicationManager) retire(id string) error {
 		c.gate.Lock()
 		r.mu.Lock()
 		record := r.journal.Records[name]
+		r.mu.Unlock()
+		if record.Owner == id {
+			if err := r.restoreBackup(record); err != nil {
+				c.gate.Unlock()
+				c.directory.Unlock()
+				return err
+			}
+		}
+		r.mu.Lock()
 		delete(record.Readers, id)
 		if record.Owner == id {
 			record.Epoch++
@@ -107,7 +121,7 @@ func (r *replicationManager) retire(id string) error {
 		r.journal.Records[name] = record
 		err := r.saveLocked()
 		if err == nil {
-			c.state.Store(&record.State)
+			c.rights.publish(parseMosiPhase(record.State))
 		}
 		r.mu.Unlock()
 		c.gate.Unlock()
@@ -150,7 +164,84 @@ func StopReplication() {
 	})
 }
 
+type replicaAdminResult struct {
+	Value  scm.Scmer   `json:"value"`
+	Rows   []scm.Scmer `json:"rows"`
+	Fields []scm.Scmer `json:"fields"`
+}
+
+// Admin commands are classified by the existing parser policy boundary. The
+// master authenticates and checks its own administrator flag before evaluating
+// them. Sessions, transactions and compiled closures stay local to each node.
+func (r *replicationManager) executeAdmin(request replicaRequest) (result replicaAdminResult, err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			err = fmt.Errorf("admin command: %v", failure)
+		}
+	}()
+	session := scm.NewSession()
+	session.Func()(scm.NewString("username"), scm.NewString(request.User))
+	session.Func()(scm.NewString("schema"), scm.NewString(request.Database))
+	if request.PostgreSQL {
+		session.Func()(scm.NewString("syntax"), scm.NewString("postgresql"))
+	}
+	execute := scm.Globalenv.FindRead("mysql_run_sql_statement").Vars["mysql_run_sql_statement"]
+	var outputMu sync.Mutex
+	row := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		outputMu.Lock()
+		defer outputMu.Unlock()
+		result.Rows = append(result.Rows, values[0])
+		return scm.NewBool(true)
+	})
+	fields := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		outputMu.Lock()
+		defer outputMu.Unlock()
+		result.Fields = append(result.Fields, values[0])
+		return scm.NewBool(true)
+	})
+	result.Value = WithAutocommit(session, nil, 0, "replicated admin command", scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		return scm.Apply(execute, values[0], scm.NewString(request.Database), scm.NewString(request.SQL), session, row, fields)
+	}))
+	return result, nil
+}
+
+func replicationAdmin(arguments []scm.Scmer) scm.Scmer {
+	r := replication.Load()
+	if r == nil || r.master {
+		panic("admin forwarding requires a replication slave")
+	}
+	session := arguments[0]
+	user := session.Func()(scm.NewString("username")).String()
+	database := arguments[1].String()
+	user, auth, err := r.proof(user, database)
+	if err != nil || !auth.Admin {
+		panic("administrator access required")
+	}
+	peer := r.peer("")
+	if peer == nil {
+		panic(replicationNetworkError)
+	}
+	ctx, cancel := replicaPacketContext(peer)
+	defer cancel()
+	var result replicaAdminResult
+	request := replicaRequest{User: user, Hash: auth.Hash, Database: database, SQL: arguments[2].String(), PostgreSQL: arguments[3].Bool()}
+	if err := peer.call(ctx, "admin", request, &result); err != nil {
+		panic(err)
+	}
+	for _, fields := range result.Fields {
+		scm.Apply(arguments[5], fields)
+	}
+	for _, row := range result.Rows {
+		scm.Apply(arguments[4], row)
+	}
+	return result.Value
+}
+
 func initReplicationAdmin(en *scm.Env) {
+	scm.Declare(en, &scm.Declaration{Name: "replication_slave", Fn: func(...scm.Scmer) scm.Scmer { r := replication.Load(); return scm.NewBool(r != nil && !r.master) }, Type: &scm.TypeDescriptor{Kind: "func", Return: &scm.TypeDescriptor{Kind: "bool"}}})
+	scm.Declare(en, &scm.Declaration{Name: "replication_admin", Fn: func(a ...scm.Scmer) scm.Scmer { return replicationAdmin(a) },
+		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "func", Label: "session"}, {Kind: "string", Label: "database"}, {Kind: "string", Label: "sql"}, {Kind: "bool", Label: "postgresql"}, {Kind: "func", Label: "resultrow"}, {Kind: "func", Label: "resultfields"}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
 	scm.Declare(en, &scm.Declaration{Name: "replication_write", Fn: func(a ...scm.Scmer) scm.Scmer {
 		if !a[0].IsNil() {
 			if tx, ok := a[0].Any().(*TxContext); ok {

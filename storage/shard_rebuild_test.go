@@ -44,7 +44,7 @@ func TestColdShardLoadWaitObservesQueryCancellation(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
 			if multi {
 				extra := NewShard(tbl)
-				release := extra.GetExclusive()
+				release := extra.GetWrite(nil).Release
 				extra.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 					{scm.NewInt(3), scm.NewString("row-00000003")},
 					{scm.NewInt(4), scm.NewString("row-00000004")},
@@ -2738,7 +2738,7 @@ func TestIndexComputedReadersRespectHeldShardLock(t *testing.T) {
 					"raw": &StorageSCMER{values: []scm.Scmer{scm.NewInt(7)}},
 				}}
 			shard.setState(SHARED)
-			release := shard.GetExclusive()
+			release := shard.GetWrite(nil).Release
 			defer release()
 			shard.mu.Lock()
 			shard.columns["input"] = &StorageComputeProxy{
