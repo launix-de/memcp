@@ -330,6 +330,12 @@ func TestReplicationAlternatingProcessFailures(t *testing.T) {
 	}
 	slave.mustQuery("UPDATE items SET value=value WHERE id=1")
 	slave.mustQuery("ALTER TABLE items DROP COLUMN extra")
+	master.mustQuery("RENAME TABLE items TO renamed_items")
+	if body := slave.mustQuery("SELECT COUNT(*) AS n FROM renamed_items"); replicaNumber(body, "n") != 16 {
+		t.Fatalf("remote rename lost data: %s", body)
+	}
+	slave.mustQuery("RENAME TABLE renamed_items TO items")
+	slave.mustQuery("UPDATE items SET value=value WHERE id=1")
 	// A master read shares the slave's M generation: master S, slave O. Reads
 	// on either process must preserve those flags instead of acquiring M.
 	record := func(p *replicaProcess) replicaRecord {

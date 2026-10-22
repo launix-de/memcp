@@ -2300,6 +2300,15 @@ func RenameTable(schema, oldname, newname string) {
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	db.ensureLoaded()
+	if r := replication.Load(); r != nil && validReplicaDatabase(schema) {
+		if target := db.tables.Get(oldname); target != nil {
+			for _, shard := range target.ActiveShards() {
+				if shard != nil {
+					r.obtain(*r.shardCell(shard).resource.Load(), mosiM, "")
+				}
+			}
+		}
+	}
 	db.schemalock.Lock()
 	t := db.tables.Get(oldname)
 	if t == nil {

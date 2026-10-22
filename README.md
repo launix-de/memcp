@@ -349,6 +349,14 @@ requests shard M through the ordinary access protocol. Later reads request S;
 M becomes O at its previous owner. Writes acquire M and invalidate other copies.
 The MR/OR/SR states coalesce concurrent requests and allow read-to-write upgrades.
 
+Full offline operation, including DDL, requires M for the database schema and
+all its data shards. Shared copies still permit reads; writes require M for
+the affected resource.
+Master analytics can leave those resources shared; they do not automatically
+return to M when the query ends. A later write reclaims M through the ordinary
+protocol while the other holders are reachable. Automatic reclamation and an
+explicit database-wide offline-readiness command are not implemented yet.
+
 IS denotes a current backend-only generation with durable local permission;
 IO must acquire from its remote owner even when an older backup exists locally.
 Loading IS restores its existing permission and cannot turn a shared copy into M.

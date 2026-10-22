@@ -368,6 +368,7 @@ func (r *replicationManager) backupDatabase(name, user string) {
 	}
 	for _, resource := range resources {
 		cell := r.resourceCell(resource)
+		resource = *cell.resource.Load() // schema publication may have renamed its table
 		if !cell.gate.TryLock() {
 			continue
 		}

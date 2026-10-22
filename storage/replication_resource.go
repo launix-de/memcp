@@ -112,7 +112,17 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 	shard.coherence.CompareAndSwap(nil, c)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.journal.Records[resource.key()]; !exists {
+	if record, exists := r.journal.Records[resource.key()]; exists {
+		if record.Resource != resource {
+			record.Resource = resource
+			r.journal.Records[resource.key()] = record
+			publication := resource
+			c.resource.Store(&publication)
+			if err := r.saveLocked(); err != nil {
+				panic(err)
+			}
+		}
+	} else {
 		phase := mosiIO
 		if local {
 			phase = mosiM
