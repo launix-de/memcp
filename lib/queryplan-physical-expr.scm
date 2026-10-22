@@ -9141,10 +9141,24 @@ once and every base-only leaf remains a vectorized domain scan. */
 		(reduce branches (lambda (acc branch)
 			(list shard_reduce_expr
 				acc
-				(lower_query_block_as_dataset_reduce
-					branch
-					(union_branch_group_row_fields candidate_alias branch keys key_names ags value_cols)
-					row_mapper reduce_expr neutral_expr shard_reduce_expr)))
+				(begin
+					(define fields (union_branch_group_row_fields candidate_alias branch keys key_names ags value_cols))
+					/* A branch can own grouped/limited derived stages. Use the same
+					physical preparation as an ordinary SELECT before reducing its rows. */
+					(define prepared (if (empty_list? (qb_stages branch)) nil
+						(prepare_simple_query_block_physical_core (make_query_block
+							(qb_schema branch) (qb_sources branch) fields (qb_where branch)
+							(qb_group branch) (qb_having branch) (qb_order branch)
+							(qb_limit branch) (qb_offset branch) (qb_hidden branch)
+							(qb_stages branch) (qb_facts branch)))))
+					(define core (if (nil? prepared) branch (nth prepared 1)))
+					(define result (lower_query_block_as_dataset_reduce core
+						(if (nil? prepared) fields (qb_fields core))
+						row_mapper reduce_expr neutral_expr shard_reduce_expr))
+					(if (nil? prepared) result
+						(cons (quote !begin) (append (nth prepared 0)
+							(list (list (quote lambda) (list (quote __union_branch_result))
+								(cons (quote !begin) (append (nth prepared 2) (quote __union_branch_result)))) result)))))))
 			neutral_expr))))
 
 (define build_union_group_aggregates_insert_plan (lambda (input naming_input grouptbl keys key_names ags)

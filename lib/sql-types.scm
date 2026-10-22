@@ -642,7 +642,10 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 				(if (nil? (qb_having block)) nil (sql_type_formula all_sources (qb_having block)))
 				(map (coalesceNil (qb_order block) '())
 					(lambda (order_item) (sql_type_order_item all_sources order_item)))
-				(qb_limit block) (qb_offset block) (sql_type_lower_annotations (qb_hidden block)) (sql_type_lower_annotations (qb_stages block))
+				/* Bounds have no column scope. Compile frontend annotations only;
+				ordinary limits need no fresh SQL type/collation records. */
+				(sql_type_lower_annotations (qb_limit block)) (sql_type_lower_annotations (qb_offset block))
+				(sql_type_lower_annotations (qb_hidden block)) (sql_type_lower_annotations (qb_stages block))
 				(qassoc_set (qassoc_set (qassoc_set (qb_facts block) (quote comparison-declarations) declarations) (quote comparison-contracts) mutation_contracts) (quote result-types)
 					(map_assoc (expand_query_block_fields sources (qb_fields block))
 						(lambda (rt_title rt_expr) (sql_type_result_descriptor all_sources rt_expr)))))))))

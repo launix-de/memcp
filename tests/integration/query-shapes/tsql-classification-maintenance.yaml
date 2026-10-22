@@ -1,0 +1,535 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  description: Joined classification repair and ordered routing configuration batches
+  isolated: true
+  requires_tds: true
+setup:
+- sql: DROP TABLE IF EXISTS class_locations
+- sql: DROP TABLE IF EXISTS class_kits
+- sql: DROP TABLE IF EXISTS class_purchases
+- sql: DROP TABLE IF EXISTS class_sales
+- sql: DROP TABLE IF EXISTS class_items
+- sql: DROP TABLE IF EXISTS class_groups
+- sql: CREATE TABLE class_groups (tenant SMALLINT,id INT,root INT,parent INT,PRIMARY KEY(tenant,id))
+- sql: CREATE TABLE class_items (tenant SMALLINT,article VARCHAR(10),group_id INT,root INT,parent INT,route INT,PRIMARY
+    KEY(tenant,article))
+- sql: CREATE TABLE class_sales (tenant SMALLINT,id INT,article VARCHAR(10),group_id INT,root INT,parent INT,route
+    INT,route_status INT,PRIMARY KEY(tenant,id))
+- sql: CREATE TABLE class_purchases (tenant SMALLINT,id INT,article VARCHAR(10),group_id INT,root INT,parent INT,route
+    INT,route_status INT,PRIMARY KEY(tenant,id))
+- sql: CREATE TABLE class_kits (tenant SMALLINT,id INT,article VARCHAR(10),group_id INT,root INT,parent INT,route
+    INT,route_status INT,PRIMARY KEY(tenant,id))
+- sql: CREATE TABLE class_locations (tenant SMALLINT,code VARCHAR(10),route INT,PRIMARY KEY(tenant,code))
+- sql: INSERT INTO class_groups VALUES (1,10,100,110),(1,20,200,210),(2,10,900,910)
+- sql: INSERT INTO class_items VALUES (1,'A',10,1,2,9),(1,'B',20,200,210,9),(1,'C',99,3,4,9),(2,'A',10,8,9,7)
+- sql: INSERT INTO class_sales VALUES (1,1,'A',0,-10,-20,9,9),(1,2,'B',0,-10,-20,9,9),(1,3,'MISSING',0,-10,-20,9,9),(2,1,'A',0,-10,-20,7,7)
+- sql: INSERT INTO class_purchases VALUES (1,1,'A',0,-10,-20,9,9),(1,2,'B',0,-10,-20,9,9),(1,3,'MISSING',0,-10,-20,9,9),(2,1,'A',0,-10,-20,7,7)
+- sql: INSERT INTO class_kits VALUES (1,1,'A',0,-10,-20,9,9),(1,2,'B',0,-10,-20,9,9),(1,3,'MISSING',0,-10,-20,9,9),(2,1,'A',0,-10,-20,7,7)
+- sql: INSERT INTO class_locations VALUES (1,'MAIN',9),(1,'BACK',9),(1,'SIDE',9),(2,'MAIN',7)
+test_cases:
+- name: A scoped maintenance script refreshes masters before three historical line tables
+  setup:
+  - sql: UPDATE class_items SET root=1,parent=2,route=9 WHERE tenant=1 AND article='A'
+  - sql: UPDATE class_items SET root=8,parent=9,route=7 WHERE tenant=2 AND article='A'
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  sql: |-
+    DECLARE @tenant SMALLINT=1;
+    UPDATE class_items SET root=g.root,parent=g.parent
+    FROM class_items INNER JOIN class_groups g ON class_items.tenant=g.tenant AND class_items.group_id=g.id
+    WHERE class_items.parent<>g.parent AND class_items.tenant=@tenant;
+    UPDATE class_sales SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_sales INNER JOIN class_items i ON class_sales.tenant=i.tenant AND class_sales.article=i.article WHERE i.tenant=@tenant;
+    UPDATE class_purchases SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_purchases INNER JOIN class_items i ON class_purchases.tenant=i.tenant AND class_purchases.article=i.article WHERE i.tenant=@tenant;
+    UPDATE class_kits SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_kits INNER JOIN class_items i ON class_kits.tenant=i.tenant AND class_kits.article=i.article WHERE i.tenant=@tenant
+  noncritical: true
+- name: Classification repair preserves missing groups and the other tenant master
+  sql: SELECT tenant,article,root,parent FROM class_items ORDER BY tenant,article
+  expect:
+    rows: 4
+    data:
+    - tenant: 1
+      article: A
+      root: 100
+      parent: 110
+    - tenant: 1
+      article: B
+      root: 200
+      parent: 210
+    - tenant: 1
+      article: C
+      root: 3
+      parent: 4
+    - tenant: 2
+      article: A
+      root: 8
+      parent: 9
+- name: Classification repair retains unmatched records in class_sales
+  sql: SELECT tenant,id,group_id,root,parent FROM class_sales ORDER BY tenant,id
+  expect:
+    rows: 4
+    data: &id001
+    - tenant: 1
+      id: 1
+      group_id: 10
+      root: 100
+      parent: 110
+    - tenant: 1
+      id: 2
+      group_id: 20
+      root: 200
+      parent: 210
+    - tenant: 1
+      id: 3
+      group_id: 0
+      root: -10
+      parent: -20
+    - tenant: 2
+      id: 1
+      group_id: 0
+      root: -10
+      parent: -20
+  noncritical: true
+- name: Classification repair retains unmatched records in class_purchases
+  sql: SELECT tenant,id,group_id,root,parent FROM class_purchases ORDER BY tenant,id
+  expect:
+    rows: 4
+    data: *id001
+  noncritical: true
+- name: Classification repair retains unmatched records in class_kits
+  sql: SELECT tenant,id,group_id,root,parent FROM class_kits ORDER BY tenant,id
+  expect:
+    rows: 4
+    data: *id001
+  noncritical: true
+- name: Repeating the complete classification script leaves the same declaration values
+  sql: |-
+    DECLARE @tenant SMALLINT=1;
+    UPDATE class_items SET root=g.root,parent=g.parent
+    FROM class_items INNER JOIN class_groups g ON class_items.tenant=g.tenant AND class_items.group_id=g.id
+    WHERE class_items.parent<>g.parent AND class_items.tenant=@tenant;
+    UPDATE class_sales SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_sales INNER JOIN class_items i ON class_sales.tenant=i.tenant AND class_sales.article=i.article WHERE i.tenant=@tenant;
+    UPDATE class_purchases SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_purchases INNER JOIN class_items i ON class_purchases.tenant=i.tenant AND class_purchases.article=i.article WHERE i.tenant=@tenant;
+    UPDATE class_kits SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_kits INNER JOIN class_items i ON class_kits.tenant=i.tenant AND class_kits.article=i.article WHERE i.tenant=@tenant
+  noncritical: true
+- name: An idempotent repair still keeps historical lines aligned with their master
+  sql: SELECT tenant,id,group_id,root,parent FROM class_sales ORDER BY tenant,id
+  expect:
+    rows: 4
+    data: *id001
+  noncritical: true
+- name: An explicit transaction rolls back all classification writes across the four targets
+  setup:
+  - sql: UPDATE class_items SET root=1,parent=2,route=9 WHERE tenant=1 AND article='A'
+  - sql: UPDATE class_items SET root=8,parent=9,route=7 WHERE tenant=2 AND article='A'
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  tds:
+    statements:
+    - sql: |-
+        BEGIN TRANSACTION;
+        DECLARE @tenant SMALLINT=1;
+        UPDATE class_items SET root=g.root,parent=g.parent
+        FROM class_items INNER JOIN class_groups g ON class_items.tenant=g.tenant AND class_items.group_id=g.id
+        WHERE class_items.parent<>g.parent AND class_items.tenant=@tenant;
+        UPDATE class_sales SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_sales INNER JOIN class_items i ON class_sales.tenant=i.tenant AND class_sales.article=i.article WHERE i.tenant=@tenant;
+        UPDATE class_purchases SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_purchases INNER JOIN class_items i ON class_purchases.tenant=i.tenant AND class_purchases.article=i.article WHERE i.tenant=@tenant;
+        UPDATE class_kits SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_kits INNER JOIN class_items i ON class_kits.tenant=i.tenant AND class_kits.article=i.article WHERE i.tenant=@tenant;
+        ROLLBACK TRANSACTION
+    - sql: SELECT tenant,article,root,parent FROM class_items WHERE article='A' ORDER BY tenant
+      expect:
+        rows: 2
+        data:
+        - tenant: 1
+          article: A
+          root: 1
+          parent: 2
+        - tenant: 2
+          article: A
+          root: 8
+          parent: 9
+    - sql: SELECT tenant,id,group_id,root,parent FROM class_sales WHERE id=1 ORDER BY tenant
+      expect:
+        rows: 2
+        data:
+        - tenant: 1
+          id: 1
+          group_id: 0
+          root: -10
+          parent: -20
+        - tenant: 2
+          id: 1
+          group_id: 0
+          root: -10
+          parent: -20
+  noncritical: true
+- name: A native prepared maintenance batch binds the tenant for every target
+  setup:
+  - sql: UPDATE class_items SET root=1,parent=2,route=9 WHERE tenant=1 AND article='A'
+  - sql: UPDATE class_items SET root=8,parent=9,route=7 WHERE tenant=2 AND article='A'
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  tds:
+    statements:
+    - sql: |-
+        UPDATE class_items SET root=g.root,parent=g.parent
+        FROM class_items INNER JOIN class_groups g ON class_items.tenant=g.tenant AND class_items.group_id=g.id
+        WHERE class_items.parent<>g.parent AND class_items.tenant=@tenant;
+        UPDATE class_sales SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_sales INNER JOIN class_items i ON class_sales.tenant=i.tenant AND class_sales.article=i.article WHERE i.tenant=@tenant;
+        UPDATE class_purchases SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_purchases INNER JOIN class_items i ON class_purchases.tenant=i.tenant AND class_purchases.article=i.article WHERE i.tenant=@tenant;
+        UPDATE class_kits SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_kits INNER JOIN class_items i ON class_kits.tenant=i.tenant AND class_kits.article=i.article WHERE i.tenant=@tenant
+      parameters:
+      - name: tenant
+        value: 1
+      prepare: true
+    - sql: SELECT tenant,id,group_id,root,parent FROM class_purchases ORDER BY tenant,id
+      expect:
+        rows: 4
+        data: *id001
+  noncritical: true
+- name: A failed declaration rejects maintenance before any target is modified
+  setup:
+  - sql: UPDATE class_items SET root=1,parent=2,route=9 WHERE tenant=1 AND article='A'
+  - sql: UPDATE class_items SET root=8,parent=9,route=7 WHERE tenant=2 AND article='A'
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  sql: |-
+    DECLARE @tenant SMALLINT=N'invalid';
+    UPDATE class_items SET root=g.root,parent=g.parent
+    FROM class_items INNER JOIN class_groups g ON class_items.tenant=g.tenant AND class_items.group_id=g.id
+    WHERE class_items.parent<>g.parent AND class_items.tenant=@tenant;
+    UPDATE class_sales SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_sales INNER JOIN class_items i ON class_sales.tenant=i.tenant AND class_sales.article=i.article WHERE i.tenant=@tenant;
+    UPDATE class_purchases SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_purchases INNER JOIN class_items i ON class_purchases.tenant=i.tenant AND class_purchases.article=i.article WHERE i.tenant=@tenant;
+    UPDATE class_kits SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_kits INNER JOIN class_items i ON class_kits.tenant=i.tenant AND class_kits.article=i.article WHERE i.tenant=@tenant
+  expect:
+    error: true
+- name: Rejected initialization leaves the source master unchanged
+  sql: SELECT tenant,article,root,parent FROM class_items WHERE article='A' ORDER BY tenant
+  expect:
+    rows: 2
+    data:
+    - tenant: 1
+      article: A
+      root: 1
+      parent: 2
+    - tenant: 2
+      article: A
+      root: 8
+      parent: 9
+- name: The unscoped repair uses each tenant own group rather than a globally matching number
+  sql: |-
+    UPDATE class_items SET root=g.root,parent=g.parent
+    FROM class_items INNER JOIN class_groups g ON class_items.tenant=g.tenant AND class_items.group_id=g.id
+    WHERE class_items.parent<>g.parent
+- name: An unscoped master refresh retains the composite group identity
+  sql: SELECT tenant,article,root,parent FROM class_items WHERE article='A' ORDER BY tenant
+  expect:
+    rows: 2
+    data:
+    - tenant: 1
+      article: A
+      root: 100
+      parent: 110
+    - tenant: 2
+      article: A
+      root: 900
+      parent: 910
+- name: Joined classification assignments without the changed column predicate use the ordinary update path
+  setup:
+  - sql: UPDATE class_items SET root=1,parent=2,route=9 WHERE tenant=1 AND article='A'
+  - sql: UPDATE class_items SET root=8,parent=9,route=7 WHERE tenant=2 AND article='A'
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  sql: |-
+    DECLARE @tenant SMALLINT=1;
+    UPDATE class_items SET root=g.root,parent=g.parent
+    FROM class_items INNER JOIN class_groups g ON class_items.tenant=g.tenant AND class_items.group_id=g.id
+    WHERE class_items.tenant=@tenant;
+    UPDATE class_sales SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_sales INNER JOIN class_items i ON class_sales.tenant=i.tenant AND class_sales.article=i.article WHERE i.tenant=@tenant;
+    UPDATE class_purchases SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_purchases INNER JOIN class_items i ON class_purchases.tenant=i.tenant AND class_purchases.article=i.article WHERE i.tenant=@tenant;
+    UPDATE class_kits SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_kits INNER JOIN class_items i ON class_kits.tenant=i.tenant AND class_kits.article=i.article WHERE i.tenant=@tenant
+  noncritical: true
+- name: All three repaired history targets retain missing articles and foreign tenant values
+  sql: SELECT 'kits' AS source,tenant,id,group_id,root,parent FROM class_kits UNION ALL SELECT 'purchases' AS source,tenant,id,group_id,root,parent
+    FROM class_purchases UNION ALL SELECT 'sales' AS source,tenant,id,group_id,root,parent FROM class_sales ORDER
+    BY source,tenant,id
+  expect:
+    rows: 12
+    data:
+    - source: kits
+      tenant: 1
+      id: 1
+      group_id: 10
+      root: 100
+      parent: 110
+    - source: kits
+      tenant: 1
+      id: 2
+      group_id: 20
+      root: 200
+      parent: 210
+    - source: kits
+      tenant: 1
+      id: 3
+      group_id: 0
+      root: -10
+      parent: -20
+    - source: kits
+      tenant: 2
+      id: 1
+      group_id: 0
+      root: -10
+      parent: -20
+    - source: purchases
+      tenant: 1
+      id: 1
+      group_id: 10
+      root: 100
+      parent: 110
+    - source: purchases
+      tenant: 1
+      id: 2
+      group_id: 20
+      root: 200
+      parent: 210
+    - source: purchases
+      tenant: 1
+      id: 3
+      group_id: 0
+      root: -10
+      parent: -20
+    - source: purchases
+      tenant: 2
+      id: 1
+      group_id: 0
+      root: -10
+      parent: -20
+    - source: sales
+      tenant: 1
+      id: 1
+      group_id: 10
+      root: 100
+      parent: 110
+    - source: sales
+      tenant: 1
+      id: 2
+      group_id: 20
+      root: 200
+      parent: 210
+    - source: sales
+      tenant: 1
+      id: 3
+      group_id: 0
+      root: -10
+      parent: -20
+    - source: sales
+      tenant: 2
+      id: 1
+      group_id: 0
+      root: -10
+      parent: -20
+  noncritical: true
+- name: An unconditional classification batch rolls back all four native update targets
+  setup:
+  - sql: UPDATE class_items SET root=1,parent=2,route=9 WHERE tenant=1 AND article='A'
+  - sql: UPDATE class_items SET root=8,parent=9,route=7 WHERE tenant=2 AND article='A'
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  tds:
+    statements:
+    - sql: |-
+        BEGIN TRANSACTION;
+        DECLARE @tenant SMALLINT=1;
+        UPDATE class_items SET root=g.root,parent=g.parent
+        FROM class_items INNER JOIN class_groups g ON class_items.tenant=g.tenant AND class_items.group_id=g.id
+        WHERE class_items.tenant=@tenant;
+        UPDATE class_sales SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_sales INNER JOIN class_items i ON class_sales.tenant=i.tenant AND class_sales.article=i.article WHERE i.tenant=@tenant;
+        UPDATE class_purchases SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_purchases INNER JOIN class_items i ON class_purchases.tenant=i.tenant AND class_purchases.article=i.article WHERE i.tenant=@tenant;
+        UPDATE class_kits SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_kits INNER JOIN class_items i ON class_kits.tenant=i.tenant AND class_kits.article=i.article WHERE i.tenant=@tenant;
+        ROLLBACK TRANSACTION
+    - sql: SELECT tenant,article,root,parent FROM class_items WHERE article='A' ORDER BY tenant
+      expect:
+        rows: 2
+        data:
+        - tenant: 1
+          article: A
+          root: 1
+          parent: 2
+        - tenant: 2
+          article: A
+          root: 8
+          parent: 9
+    - sql: SELECT tenant,id,group_id,root,parent FROM class_sales WHERE id=1 ORDER BY tenant
+      expect:
+        rows: 2
+        data:
+        - tenant: 1
+          id: 1
+          group_id: 0
+          root: -10
+          parent: -20
+        - tenant: 2
+          id: 1
+          group_id: 0
+          root: -10
+          parent: -20
+  noncritical: true
+- name: A standalone integer keyed master refresh exposes its writes then rolls them back
+  setup:
+  - sql: UPDATE class_items SET root=1,parent=2,route=9 WHERE tenant=1 AND article='A'
+  - sql: UPDATE class_items SET root=8,parent=9,route=7 WHERE tenant=2 AND article='A'
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  tds:
+    statements:
+    - sql: |-
+        BEGIN TRANSACTION; DECLARE @tenant SMALLINT=1; UPDATE class_items SET root=g.root,parent=g.parent
+        FROM class_items INNER JOIN class_groups g ON class_items.tenant=g.tenant AND class_items.group_id=g.id
+        WHERE class_items.tenant=@tenant
+    - sql: SELECT tenant,article,root,parent FROM class_items WHERE article='A' ORDER BY tenant
+      expect:
+        rows: 2
+        data:
+        - tenant: 1
+          article: A
+          root: 100
+          parent: 110
+        - tenant: 2
+          article: A
+          root: 8
+          parent: 9
+    - sql: ROLLBACK TRANSACTION
+    - sql: SELECT tenant,article,root,parent FROM class_items WHERE article='A' ORDER BY tenant
+      expect:
+        rows: 2
+        data:
+        - tenant: 1
+          article: A
+          root: 1
+          parent: 2
+        - tenant: 2
+          article: A
+          root: 8
+          parent: 9
+- name: A standalone text keyed history refresh retains its composite source identity
+  setup:
+  - sql: UPDATE class_items SET root=1,parent=2,route=9 WHERE tenant=1 AND article='A'
+  - sql: UPDATE class_items SET root=8,parent=9,route=7 WHERE tenant=2 AND article='A'
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_sales SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_purchases SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=9,route_status=9 WHERE tenant=1
+  - sql: UPDATE class_kits SET group_id=0,root=-10,parent=-20,route=7,route_status=7 WHERE tenant=2
+  - sql: UPDATE class_items SET root=100,parent=110 WHERE tenant=1 AND article='A'
+  tds:
+    statements:
+    - sql: UPDATE class_sales SET root=i.root,parent=i.parent,group_id=i.group_id FROM class_sales INNER JOIN class_items
+        i ON class_sales.tenant=i.tenant AND class_sales.article=i.article WHERE i.tenant=1
+    - sql: SELECT tenant,id,group_id,root,parent FROM class_sales ORDER BY tenant,id
+      expect:
+        rows: 4
+        data: *id001
+  noncritical: true
+- name: A delimiter free configuration batch updates all routing defaults and overrides
+  sql: |-
+    UPDATE class_locations SET route=0 WHERE tenant=1
+    UPDATE class_locations SET route=-1 WHERE tenant=1 AND code='BACK'
+    UPDATE class_locations SET route=1 WHERE tenant=1 AND code='SIDE'
+    UPDATE class_items SET route=0 WHERE tenant=1
+    UPDATE class_items SET route=1 WHERE tenant=1 AND article='A'
+    UPDATE class_items SET route=2 WHERE tenant=1 AND article='B'
+    UPDATE class_sales SET route=0 WHERE tenant=1
+    UPDATE class_sales SET route_status=0 WHERE tenant=1
+- name: Configuration distinguishes negative default routing from zero and positive routes
+  sql: SELECT tenant,code,route FROM class_locations ORDER BY tenant,code
+  expect:
+    rows: 4
+    data:
+    - tenant: 1
+      code: BACK
+      route: -1
+    - tenant: 1
+      code: MAIN
+      route: 0
+    - tenant: 1
+      code: SIDE
+      route: 1
+    - tenant: 2
+      code: MAIN
+      route: 7
+- name: Configuration applies per item overrides without changing the other tenant
+  sql: SELECT tenant,article,route FROM class_items ORDER BY tenant,article
+  expect:
+    rows: 4
+    data:
+    - tenant: 1
+      article: A
+      route: 1
+    - tenant: 1
+      article: B
+      route: 2
+    - tenant: 1
+      article: C
+      route: 0
+    - tenant: 2
+      article: A
+      route: 7
+- name: Configuration clears both historical line routing fields together
+  sql: SELECT tenant,id,route,route_status FROM class_sales ORDER BY tenant,id
+  expect:
+    rows: 4
+    data:
+    - tenant: 1
+      id: 1
+      route: 0
+      route_status: 0
+    - tenant: 1
+      id: 2
+      route: 0
+      route_status: 0
+    - tenant: 1
+      id: 3
+      route: 0
+      route_status: 0
+    - tenant: 2
+      id: 1
+      route: 7
+      route_status: 7
+cleanup:
+- sql: DROP TABLE IF EXISTS class_locations
+- sql: DROP TABLE IF EXISTS class_kits
+- sql: DROP TABLE IF EXISTS class_purchases
+- sql: DROP TABLE IF EXISTS class_sales
+- sql: DROP TABLE IF EXISTS class_items
+- sql: DROP TABLE IF EXISTS class_groups

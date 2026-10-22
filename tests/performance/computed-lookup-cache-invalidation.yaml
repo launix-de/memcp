@@ -84,7 +84,10 @@ test_cases:
     threshold_ms: 5000
     timeout: 20
     warmup: 0
-    timing_samples: 4
+    # Amortize fixed GC/scheduling interruptions over one cold preparation
+    # and 50 repeats, without discarding any sample. Both A/B revisions execute
+    # every repeat and validate the same result; percentage and time gates stay.
+    timing_samples: 51
     timing_aggregation: total
     max_regression_pct: 20
     scm: |

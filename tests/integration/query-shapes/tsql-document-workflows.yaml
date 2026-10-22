@@ -1,0 +1,1137 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  description: Document inquiry, unbilled deliveries and tenant-scoped daily reporting
+  isolated: true
+  requires_tds: true
+setup:
+- sql: DROP TABLE IF EXISTS day_barcodes
+- sql: DROP TABLE IF EXISTS day_addresses
+- sql: DROP TABLE IF EXISTS day_accounts
+- sql: DROP TABLE IF EXISTS day_stocks
+- sql: DROP TABLE IF EXISTS day_variant_text
+- sql: DROP TABLE IF EXISTS day_variants
+- sql: DROP TABLE IF EXISTS day_items
+- sql: DROP TABLE IF EXISTS day_flow_lines
+- sql: DROP TABLE IF EXISTS day_lines
+- sql: DROP TABLE IF EXISTS day_taxes
+- sql: DROP TABLE IF EXISTS day_kinds
+- sql: DROP TABLE IF EXISTS day_periods
+- sql: DROP TABLE IF EXISTS day_groups
+- sql: DROP TABLE IF EXISTS day_flows
+- sql: DROP TABLE IF EXISTS day_docs
+- sql: CREATE TABLE day_docs (tenant SMALLINT,id INT,flow_id INT,year INT,number INT,account VARCHAR(10),kind VARCHAR(5),status
+    INT,journal INT,period INT,tax INT,save_status SMALLINT,net DECIMAL(18,4),doc_date DATETIME,PRIMARY KEY(tenant,id))
+- sql: INSERT INTO day_docs VALUES (1,10,1,2025,110,'C1','ORD',0,7,202501,1,0,100,'2025-01-10'),(1,11,1,2025,111,'C1','SHIP',0,7,202501,99,1,20,'2025-01-11'),(1,12,2,2025,112,'C2','SHIP',0,7,202501,1,0,60,'2025-01-12'),(1,13,NULL,2025,113,'C1','ORD',0,7,202502,1,0,25,'2025-02-01'),(1,14,3,2025,114,'C1','SHIP',1,7,202501,NULL,NULL,30,'2025-01-13'),(1,15,1,2025,115,'C1','INV',0,7,202501,1,0,80,'2025-01-15'),(1,16,1,2025,116,'C1','SHIP',0,7,202501,1,0,10,'2025-01-31
+    12:00:00'),(1,17,1,2025,117,'C1','UNK',0,7,202501,1,0,1000,'2025-01-20'),(1,18,1,2025,118,NULL,'ORD',0,7,202501,1,0,0,'2025-01-20'),(2,10,1,2025,910,'C1','ORD',0,7,202501,1,0,999,'2025-01-10')
+- sql: CREATE TABLE day_flows (tenant SMALLINT,id INT,fulfilled SMALLINT,account VARCHAR(10),PRIMARY KEY(tenant,id))
+- sql: INSERT INTO day_flows VALUES (1,1,0,'C1'),(1,2,-1,'C2'),(1,3,NULL,'C1'),(2,1,-1,'C1')
+- sql: CREATE TABLE day_groups (tenant SMALLINT,category INT,code VARCHAR(10),number INT,label NVARCHAR(30))
+- sql: INSERT INTO day_groups VALUES (0,10,'open',0,'Open'),(0,10,'hold',1,'Hold'),(0,20,'7',7,'Sales'),(2,20,'7',7,'Foreign')
+- sql: CREATE TABLE day_periods (tenant SMALLINT,id INT,PRIMARY KEY(tenant,id))
+- sql: INSERT INTO day_periods VALUES (1,202501),(1,202502),(2,202501)
+- sql: CREATE TABLE day_kinds (code VARCHAR(5) PRIMARY KEY,delivered SMALLINT,effect SMALLINT,returned SMALLINT,invoiced
+    SMALLINT,ordered SMALLINT)
+- sql: INSERT INTO day_kinds VALUES ('ORD',0,0,0,0,1),('SHIP',-1,1,0,0,0),('INV',0,0,0,-1,0),('CR',0,-1,0,-1,0)
+- sql: CREATE TABLE day_taxes (id INT PRIMARY KEY,rate DECIMAL(18,4))
+- sql: INSERT INTO day_taxes VALUES (1,20)
+- sql: CREATE TABLE day_lines (tenant SMALLINT,id INT,doc_id INT,flow_line INT,article VARCHAR(10),variant INT,quantity
+    DECIMAL(18,4),PRIMARY KEY(tenant,id))
+- sql: INSERT INTO day_lines VALUES (1,1000,10,100,'A',0,10),(1,1001,10,101,'B',0,4),(1,1002,10,102,'A',0,2),(1,1003,10,104,'C',1,5),(1,1004,10,105,'B',0,1),(1,1100,11,100,'A',0,4),(1,1101,11,102,'A',0,2),(1,1600,16,100,'A',0,2),(1,1200,12,103,'A',0,1),(1,1400,14,106,'C',1,3),(1,1500,15,100,'A',0,2),(2,1000,10,100,'A',0,100)
+- sql: CREATE TABLE day_flow_lines (tenant SMALLINT,id INT,flow_id INT,article VARCHAR(10),variant INT,ordered DECIMAL(18,4),delivered
+    DECIMAL(18,4),returned DECIMAL(18,4),invoiced DECIMAL(18,4),PRIMARY KEY(tenant,id))
+- sql: INSERT INTO day_flow_lines VALUES (1,100,1,'A',0,10,6,1,2),(1,101,1,'B',0,4,4,0,4),(1,102,1,'A',0,2,2,NULL,NULL),(1,103,2,'A',0,10,1,0,0),(1,104,1,'C',1,5,NULL,NULL,0),(1,105,1,'B',0,1,1,1,0),(1,106,3,'C',1,5,3,NULL,0),(2,100,1,'A',0,100,99,0,0)
+- sql: CREATE TABLE day_items (tenant SMALLINT,article VARCHAR(10),label NVARCHAR(30),unit VARCHAR(5),PRIMARY KEY(tenant,article))
+- sql: INSERT INTO day_items VALUES (1,'A','Alpha','ea'),(1,'B','Beta','ea'),(1,'C','Gamma','kg'),(2,'A','Foreign','ea')
+- sql: CREATE TABLE day_variants (tenant SMALLINT,article VARCHAR(10),variant INT,PRIMARY KEY(tenant,article,variant))
+- sql: INSERT INTO day_variants VALUES (1,'A',0),(1,'B',0),(1,'C',1),(2,'A',0)
+- sql: CREATE TABLE day_variant_text (tenant SMALLINT,variant INT,label NVARCHAR(30))
+- sql: INSERT INTO day_variant_text VALUES (1,0,'Standard'),(1,1,'Red'),(2,0,'Foreign')
+- sql: CREATE TABLE day_stocks (tenant SMALLINT,article VARCHAR(10),variant INT,location INT,quantity DECIMAL(18,4))
+- sql: INSERT INTO day_stocks VALUES (1,'A',0,10,100),(1,'A',0,20,50),(1,'B',0,10,8),(1,'C',1,20,2),(2,'A',0,10,999)
+- sql: CREATE TABLE day_accounts (tenant SMALLINT,code VARCHAR(10),address_id INT,last_sale DATETIME,PRIMARY KEY(tenant,code))
+- sql: INSERT INTO day_accounts VALUES (1,'C1',1,'2025-01-31 00:00:00'),(1,'C2',2,'2025-01-12 00:00:00'),(2,'C1',1,'2025-01-10
+    00:00:00')
+- sql: CREATE TABLE day_addresses (tenant SMALLINT,id INT,label NVARCHAR(30),postal VARCHAR(10),PRIMARY KEY(tenant,id))
+- sql: INSERT INTO day_addresses VALUES (1,1,'North','01234'),(1,2,'South','90000'),(2,1,'Foreign','99999')
+- sql: CREATE TABLE day_barcodes (tenant SMALLINT,article VARCHAR(10),variant INT,barcode VARCHAR(20))
+- sql: INSERT INTO day_barcodes VALUES (1,'B',0,'B-0'),(1,'C',1,'C-1'),(2,'A',0,'X-0')
+test_cases:
+- name: Document list retains the traced TOP projection joins and defaulted state filter
+  sql: |-
+    SELECT TOP 301 d.id,d.year,d.number,
+     CASE WHEN ISNULL(2002,0)>0 THEN 'EUR' ELSE 'DEM' END AS currency,
+     ISNULL(f.fulfilled,-2) AS fulfilled,d.net,
+     CONVERT(VARCHAR,d.year) + '-' + CONVERT(VARCHAR,d.number) AS separator,
+     d.flow_id AS flow,d.flow_id AS flow_id,
+     CASE WHEN ISNULL(d.save_status,0)=1 THEN 0 ELSE -1 END AS menu_enabled,
+     tax.rate AS tax_rate,4000 AS entry_kind
+    FROM day_docs d
+    LEFT JOIN day_flows f ON d.tenant=f.tenant AND d.flow_id=f.id
+    INNER JOIN day_groups status_group ON status_group.number=d.status AND status_group.tenant=0 AND status_group.category=10
+    INNER JOIN day_kinds kind ON kind.code=d.kind
+    INNER JOIN day_groups journal_group ON journal_group.code=CONVERT(VARCHAR,d.journal) AND journal_group.tenant=0 AND journal_group.category=20
+    LEFT JOIN day_taxes tax ON tax.id=d.tax
+    INNER JOIN day_periods period ON period.tenant=d.tenant AND period.id=d.period
+    WHERE d.tenant=1 AND ISNULL(d.account,'')='C1' AND ISNULL(ISNULL(f.fulfilled,-2),0) IN (0) ORDER BY d.year,d.number,d.id
+  expect:
+    rows: 4
+    data:
+    - id: 10
+      year: 2025
+      number: 110
+      currency: EUR
+      fulfilled: 0
+      net: 100
+      separator: 2025-110
+      flow: 1
+      flow_id: 1
+      menu_enabled: -1
+      tax_rate: 20
+      entry_kind: 4000
+    - id: 11
+      year: 2025
+      number: 111
+      currency: EUR
+      fulfilled: 0
+      net: 20
+      separator: 2025-111
+      flow: 1
+      flow_id: 1
+      menu_enabled: 0
+      tax_rate: null
+      entry_kind: 4000
+    - id: 15
+      year: 2025
+      number: 115
+      currency: EUR
+      fulfilled: 0
+      net: 80
+      separator: 2025-115
+      flow: 1
+      flow_id: 1
+      menu_enabled: -1
+      tax_rate: 20
+      entry_kind: 4000
+    - id: 16
+      year: 2025
+      number: 116
+      currency: EUR
+      fulfilled: 0
+      net: 10
+      separator: 2025-116
+      flow: 1
+      flow_id: 1
+      menu_enabled: -1
+      tax_rate: 20
+      entry_kind: 4000
+- name: Removing only the fulfillment prefilter retains absent and NULL flow states
+  sql: |-
+    SELECT TOP 301 d.id,d.year,d.number,
+     CASE WHEN ISNULL(2002,0)>0 THEN 'EUR' ELSE 'DEM' END AS currency,
+     ISNULL(f.fulfilled,-2) AS fulfilled,d.net,
+     CONVERT(VARCHAR,d.year) + '-' + CONVERT(VARCHAR,d.number) AS separator,
+     d.flow_id AS flow,d.flow_id AS flow_id,
+     CASE WHEN ISNULL(d.save_status,0)=1 THEN 0 ELSE -1 END AS menu_enabled,
+     tax.rate AS tax_rate,4000 AS entry_kind
+    FROM day_docs d
+    LEFT JOIN day_flows f ON d.tenant=f.tenant AND d.flow_id=f.id
+    INNER JOIN day_groups status_group ON status_group.number=d.status AND status_group.tenant=0 AND status_group.category=10
+    INNER JOIN day_kinds kind ON kind.code=d.kind
+    INNER JOIN day_groups journal_group ON journal_group.code=CONVERT(VARCHAR,d.journal) AND journal_group.tenant=0 AND journal_group.category=20
+    LEFT JOIN day_taxes tax ON tax.id=d.tax
+    INNER JOIN day_periods period ON period.tenant=d.tenant AND period.id=d.period
+    WHERE d.tenant=1 AND ISNULL(d.account,'')='C1' ORDER BY d.year,d.number,d.id
+  expect:
+    rows: 6
+    data:
+    - id: 10
+      year: 2025
+      number: 110
+      currency: EUR
+      fulfilled: 0
+      net: 100
+      separator: 2025-110
+      flow: 1
+      flow_id: 1
+      menu_enabled: -1
+      tax_rate: 20
+      entry_kind: 4000
+    - id: 11
+      year: 2025
+      number: 111
+      currency: EUR
+      fulfilled: 0
+      net: 20
+      separator: 2025-111
+      flow: 1
+      flow_id: 1
+      menu_enabled: 0
+      tax_rate: null
+      entry_kind: 4000
+    - id: 13
+      year: 2025
+      number: 113
+      currency: EUR
+      fulfilled: -2
+      net: 25
+      separator: 2025-113
+      flow: null
+      flow_id: null
+      menu_enabled: -1
+      tax_rate: 20
+      entry_kind: 4000
+    - id: 14
+      year: 2025
+      number: 114
+      currency: EUR
+      fulfilled: -2
+      net: 30
+      separator: 2025-114
+      flow: 3
+      flow_id: 3
+      menu_enabled: -1
+      tax_rate: null
+      entry_kind: 4000
+    - id: 15
+      year: 2025
+      number: 115
+      currency: EUR
+      fulfilled: 0
+      net: 80
+      separator: 2025-115
+      flow: 1
+      flow_id: 1
+      menu_enabled: -1
+      tax_rate: 20
+      entry_kind: 4000
+    - id: 16
+      year: 2025
+      number: 116
+      currency: EUR
+      fulfilled: 0
+      net: 10
+      separator: 2025-116
+      flow: 1
+      flow_id: 1
+      menu_enabled: -1
+      tax_rate: 20
+      entry_kind: 4000
+- name: The document list applies TOP after all joined eligibility predicates
+  sql: |-
+    SELECT TOP 2 d.id,d.year,d.number,
+     CASE WHEN ISNULL(2002,0)>0 THEN 'EUR' ELSE 'DEM' END AS currency,
+     ISNULL(f.fulfilled,-2) AS fulfilled,d.net,
+     CONVERT(VARCHAR,d.year) + '-' + CONVERT(VARCHAR,d.number) AS separator,
+     d.flow_id AS flow,d.flow_id AS flow_id,
+     CASE WHEN ISNULL(d.save_status,0)=1 THEN 0 ELSE -1 END AS menu_enabled,
+     tax.rate AS tax_rate,4000 AS entry_kind
+    FROM day_docs d
+    LEFT JOIN day_flows f ON d.tenant=f.tenant AND d.flow_id=f.id
+    INNER JOIN day_groups status_group ON status_group.number=d.status AND status_group.tenant=0 AND status_group.category=10
+    INNER JOIN day_kinds kind ON kind.code=d.kind
+    INNER JOIN day_groups journal_group ON journal_group.code=CONVERT(VARCHAR,d.journal) AND journal_group.tenant=0 AND journal_group.category=20
+    LEFT JOIN day_taxes tax ON tax.id=d.tax
+    INNER JOIN day_periods period ON period.tenant=d.tenant AND period.id=d.period
+    WHERE d.tenant=1 AND ISNULL(d.account,'')='C1' AND ISNULL(ISNULL(f.fulfilled,-2),0) IN (0) ORDER BY d.year,d.number,d.id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+      year: 2025
+      number: 110
+      currency: EUR
+      fulfilled: 0
+      net: 100
+      separator: 2025-110
+      flow: 1
+      flow_id: 1
+      menu_enabled: -1
+      tax_rate: 20
+      entry_kind: 4000
+    - id: 11
+      year: 2025
+      number: 111
+      currency: EUR
+      fulfilled: 0
+      net: 20
+      separator: 2025-111
+      flow: 1
+      flow_id: 1
+      menu_enabled: 0
+      tax_rate: null
+      entry_kind: 4000
+- name: A pending document keeps its disabled menu and absent tax payload
+  sql: |-
+    SELECT TOP 301 d.id,d.year,d.number,
+     CASE WHEN ISNULL(2002,0)>0 THEN 'EUR' ELSE 'DEM' END AS currency,
+     ISNULL(f.fulfilled,-2) AS fulfilled,d.net,
+     CONVERT(VARCHAR,d.year) + '-' + CONVERT(VARCHAR,d.number) AS separator,
+     d.flow_id AS flow,d.flow_id AS flow_id,
+     CASE WHEN ISNULL(d.save_status,0)=1 THEN 0 ELSE -1 END AS menu_enabled,
+     tax.rate AS tax_rate,4000 AS entry_kind
+    FROM day_docs d
+    LEFT JOIN day_flows f ON d.tenant=f.tenant AND d.flow_id=f.id
+    INNER JOIN day_groups status_group ON status_group.number=d.status AND status_group.tenant=0 AND status_group.category=10
+    INNER JOIN day_kinds kind ON kind.code=d.kind
+    INNER JOIN day_groups journal_group ON journal_group.code=CONVERT(VARCHAR,d.journal) AND journal_group.tenant=0 AND journal_group.category=20
+    LEFT JOIN day_taxes tax ON tax.id=d.tax
+    INNER JOIN day_periods period ON period.tenant=d.tenant AND period.id=d.period
+    WHERE d.tenant=1 AND ISNULL(d.account,'')='C1' AND d.id=11 ORDER BY d.id
+  expect:
+    rows: 1
+    data:
+    - id: 11
+      year: 2025
+      number: 111
+      currency: EUR
+      fulfilled: 0
+      net: 20
+      separator: 2025-111
+      flow: 1
+      flow_id: 1
+      menu_enabled: 0
+      tax_rate: null
+      entry_kind: 4000
+- name: A missing flow remains NULL until the projection supplies its negative sentinel
+  sql: |-
+    SELECT TOP 301 d.id,d.year,d.number,
+     CASE WHEN ISNULL(2002,0)>0 THEN 'EUR' ELSE 'DEM' END AS currency,
+     ISNULL(f.fulfilled,-2) AS fulfilled,d.net,
+     CONVERT(VARCHAR,d.year) + '-' + CONVERT(VARCHAR,d.number) AS separator,
+     d.flow_id AS flow,d.flow_id AS flow_id,
+     CASE WHEN ISNULL(d.save_status,0)=1 THEN 0 ELSE -1 END AS menu_enabled,
+     tax.rate AS tax_rate,4000 AS entry_kind
+    FROM day_docs d
+    LEFT JOIN day_flows f ON d.tenant=f.tenant AND d.flow_id=f.id
+    INNER JOIN day_groups status_group ON status_group.number=d.status AND status_group.tenant=0 AND status_group.category=10
+    INNER JOIN day_kinds kind ON kind.code=d.kind
+    INNER JOIN day_groups journal_group ON journal_group.code=CONVERT(VARCHAR,d.journal) AND journal_group.tenant=0 AND journal_group.category=20
+    LEFT JOIN day_taxes tax ON tax.id=d.tax
+    INNER JOIN day_periods period ON period.tenant=d.tenant AND period.id=d.period
+    WHERE d.tenant=1 AND ISNULL(d.account,'')='C1' AND d.id=13 ORDER BY d.id
+  expect:
+    rows: 1
+    data:
+    - id: 13
+      year: 2025
+      number: 113
+      currency: EUR
+      fulfilled: -2
+      net: 25
+      separator: 2025-113
+      flow: null
+      flow_id: null
+      menu_enabled: -1
+      tax_rate: 20
+      entry_kind: 4000
+- name: Explicit NULL and absent flows share the projected sentinel without satisfying zero
+  sql: |-
+    SELECT TOP 301 d.id,d.year,d.number,
+     CASE WHEN ISNULL(2002,0)>0 THEN 'EUR' ELSE 'DEM' END AS currency,
+     ISNULL(f.fulfilled,-2) AS fulfilled,d.net,
+     CONVERT(VARCHAR,d.year) + '-' + CONVERT(VARCHAR,d.number) AS separator,
+     d.flow_id AS flow,d.flow_id AS flow_id,
+     CASE WHEN ISNULL(d.save_status,0)=1 THEN 0 ELSE -1 END AS menu_enabled,
+     tax.rate AS tax_rate,4000 AS entry_kind
+    FROM day_docs d
+    LEFT JOIN day_flows f ON d.tenant=f.tenant AND d.flow_id=f.id
+    INNER JOIN day_groups status_group ON status_group.number=d.status AND status_group.tenant=0 AND status_group.category=10
+    INNER JOIN day_kinds kind ON kind.code=d.kind
+    INNER JOIN day_groups journal_group ON journal_group.code=CONVERT(VARCHAR,d.journal) AND journal_group.tenant=0 AND journal_group.category=20
+    LEFT JOIN day_taxes tax ON tax.id=d.tax
+    INNER JOIN day_periods period ON period.tenant=d.tenant AND period.id=d.period
+    WHERE d.tenant=1 AND ISNULL(d.account,'')='C1' AND d.id IN (13,14) ORDER BY d.id
+  expect:
+    rows: 2
+    data:
+    - id: 13
+      year: 2025
+      number: 113
+      currency: EUR
+      fulfilled: -2
+      net: 25
+      separator: 2025-113
+      flow: null
+      flow_id: null
+      menu_enabled: -1
+      tax_rate: 20
+      entry_kind: 4000
+    - id: 14
+      year: 2025
+      number: 114
+      currency: EUR
+      fulfilled: -2
+      net: 30
+      separator: 2025-114
+      flow: 3
+      flow_id: 3
+      menu_enabled: -1
+      tax_rate: null
+      entry_kind: 4000
+- name: A second tenant with the same flow identity cannot satisfy the first tenant list
+  sql: |-
+    SELECT TOP 301 d.id,d.year,d.number,
+     CASE WHEN ISNULL(2002,0)>0 THEN 'EUR' ELSE 'DEM' END AS currency,
+     ISNULL(f.fulfilled,-2) AS fulfilled,d.net,
+     CONVERT(VARCHAR,d.year) + '-' + CONVERT(VARCHAR,d.number) AS separator,
+     d.flow_id AS flow,d.flow_id AS flow_id,
+     CASE WHEN ISNULL(d.save_status,0)=1 THEN 0 ELSE -1 END AS menu_enabled,
+     tax.rate AS tax_rate,4000 AS entry_kind
+    FROM day_docs d
+    LEFT JOIN day_flows f ON d.tenant=f.tenant AND d.flow_id=f.id
+    INNER JOIN day_groups status_group ON status_group.number=d.status AND status_group.tenant=0 AND status_group.category=10
+    INNER JOIN day_kinds kind ON kind.code=d.kind
+    INNER JOIN day_groups journal_group ON journal_group.code=CONVERT(VARCHAR,d.journal) AND journal_group.tenant=0 AND journal_group.category=20
+    LEFT JOIN day_taxes tax ON tax.id=d.tax
+    INNER JOIN day_periods period ON period.tenant=d.tenant AND period.id=d.period
+    WHERE d.tenant=2 AND ISNULL(d.account,'')='C1' AND ISNULL(ISNULL(f.fulfilled,-2),0) IN (0) ORDER BY d.year,d.number,d.id
+  expect:
+    rows: 0
+    data: []
+- name: The document list binds tenant account and row cap through the native protocol
+  tds:
+    statements:
+    - sql: |-
+        SELECT TOP (@cap) d.id,d.year,d.number,
+         CASE WHEN ISNULL(2002,0)>0 THEN 'EUR' ELSE 'DEM' END AS currency,
+         ISNULL(f.fulfilled,-2) AS fulfilled,d.net,
+         CONVERT(VARCHAR,d.year) + '-' + CONVERT(VARCHAR,d.number) AS separator,
+         d.flow_id AS flow,d.flow_id AS flow_id,
+         CASE WHEN ISNULL(d.save_status,0)=1 THEN 0 ELSE -1 END AS menu_enabled,
+         tax.rate AS tax_rate,4000 AS entry_kind
+        FROM day_docs d
+        LEFT JOIN day_flows f ON d.tenant=f.tenant AND d.flow_id=f.id
+        INNER JOIN day_groups status_group ON status_group.number=d.status AND status_group.tenant=0 AND status_group.category=10
+        INNER JOIN day_kinds kind ON kind.code=d.kind
+        INNER JOIN day_groups journal_group ON journal_group.code=CONVERT(VARCHAR,d.journal) AND journal_group.tenant=0 AND journal_group.category=20
+        LEFT JOIN day_taxes tax ON tax.id=d.tax
+        INNER JOIN day_periods period ON period.tenant=d.tenant AND period.id=d.period
+        WHERE d.tenant=@tenant AND ISNULL(d.account,'')=@account AND ISNULL(ISNULL(f.fulfilled,-2),0) IN (0) ORDER BY d.year,d.number,d.id
+      parameters:
+      - name: cap
+        value: 2
+      - name: tenant
+        value: 1
+      - name: account
+        value: C1
+      prepare: true
+      expect:
+        rows: 2
+        data:
+        - id: 10
+          year: 2025
+          number: 110
+          currency: EUR
+          fulfilled: 0
+          net: '100.0000'
+          separator: 2025-110
+          flow: 1
+          flow_id: 1
+          menu_enabled: -1
+          tax_rate: '20.0000'
+          entry_kind: 4000
+        - id: 11
+          year: 2025
+          number: 111
+          currency: EUR
+          fulfilled: 0
+          net: '20.0000'
+          separator: 2025-111
+          flow: 1
+          flow_id: 1
+          menu_enabled: 0
+          tax_rate: null
+          entry_kind: 4000
+- name: The traced document projection accepts bound tenant and account with its literal TOP cap
+  tds:
+    statements:
+    - sql: |-
+        SELECT TOP 301 d.id,d.year,d.number,
+         CASE WHEN ISNULL(2002,0)>0 THEN 'EUR' ELSE 'DEM' END AS currency,
+         ISNULL(f.fulfilled,-2) AS fulfilled,d.net,
+         CONVERT(VARCHAR,d.year) + '-' + CONVERT(VARCHAR,d.number) AS separator,
+         d.flow_id AS flow,d.flow_id AS flow_id,
+         CASE WHEN ISNULL(d.save_status,0)=1 THEN 0 ELSE -1 END AS menu_enabled,
+         tax.rate AS tax_rate,4000 AS entry_kind
+        FROM day_docs d
+        LEFT JOIN day_flows f ON d.tenant=f.tenant AND d.flow_id=f.id
+        INNER JOIN day_groups status_group ON status_group.number=d.status AND status_group.tenant=0 AND status_group.category=10
+        INNER JOIN day_kinds kind ON kind.code=d.kind
+        INNER JOIN day_groups journal_group ON journal_group.code=CONVERT(VARCHAR,d.journal) AND journal_group.tenant=0 AND journal_group.category=20
+        LEFT JOIN day_taxes tax ON tax.id=d.tax
+        INNER JOIN day_periods period ON period.tenant=d.tenant AND period.id=d.period
+        WHERE d.tenant=@tenant AND ISNULL(d.account,'')=@account AND ISNULL(ISNULL(f.fulfilled,-2),0) IN (0) ORDER BY d.year,d.number,d.id
+      parameters:
+      - name: tenant
+        value: 1
+      - name: account
+        value: C1
+      prepare: true
+      expect:
+        rows: 4
+        data:
+        - id: 10
+          year: 2025
+          number: 110
+          currency: EUR
+          fulfilled: 0
+          net: '100.0000'
+          separator: 2025-110
+          flow: 1
+          flow_id: 1
+          menu_enabled: -1
+          tax_rate: '20.0000'
+          entry_kind: 4000
+        - id: 11
+          year: 2025
+          number: 111
+          currency: EUR
+          fulfilled: 0
+          net: '20.0000'
+          separator: 2025-111
+          flow: 1
+          flow_id: 1
+          menu_enabled: 0
+          tax_rate: null
+          entry_kind: 4000
+        - id: 15
+          year: 2025
+          number: 115
+          currency: EUR
+          fulfilled: 0
+          net: '80.0000'
+          separator: 2025-115
+          flow: 1
+          flow_id: 1
+          menu_enabled: -1
+          tax_rate: '20.0000'
+          entry_kind: 4000
+        - id: 16
+          year: 2025
+          number: 116
+          currency: EUR
+          fulfilled: 0
+          net: '10.0000'
+          separator: 2025-116
+          flow: 1
+          flow_id: 1
+          menu_enabled: -1
+          tax_rate: '20.0000'
+          entry_kind: 4000
+- name: Unbilled delivery reporting preserves nested JOIN binding and single quoted aliases
+  sql: |-
+    SELECT i.article AS article,i.label AS label,i.unit AS unit,stock.location AS location,
+     SUM(fl.delivered) AS 'Delivered not invoiced',SUM(stock.quantity) AS stock,
+     SUM(fl.delivered)+SUM(stock.quantity) AS 'Combined stock'
+    FROM day_addresses address_row
+    INNER JOIN day_accounts account_row ON address_row.tenant=account_row.tenant AND address_row.id=account_row.address_id
+    INNER JOIN day_flows f
+     INNER JOIN day_flow_lines fl ON fl.tenant=f.tenant AND fl.flow_id=f.id
+     INNER JOIN day_lines l ON l.tenant=fl.tenant AND l.flow_line=fl.id
+     INNER JOIN day_docs d ON d.tenant=l.tenant AND d.id=l.doc_id
+     INNER JOIN day_items i ON i.tenant=l.tenant AND i.article=l.article
+     INNER JOIN day_variant_text text_row
+      INNER JOIN day_variants v ON text_row.tenant=v.tenant AND text_row.variant=v.variant
+     ON v.tenant=l.tenant AND v.article=l.article AND v.variant=l.variant
+     ON account_row.tenant=d.tenant AND account_row.code=d.account
+    INNER JOIN day_stocks stock ON stock.tenant=i.tenant AND stock.article=i.article AND stock.variant=v.variant
+     WHERE fl.tenant=1 AND ISNULL(fl.delivered,0)>0
+    AND ISNULL(fl.delivered,0)-ISNULL(fl.returned,0)>ISNULL(fl.invoiced,0)
+    AND ISNULL(f.fulfilled,0) IN (0)
+    AND d.kind IN (SELECT code FROM day_kinds WHERE delivered=-1 AND effect=1 AND returned=0 AND invoiced=0) GROUP BY i.article,i.label,i.unit,stock.location ORDER BY i.article,stock.location
+  expect:
+    rows: 3
+    data:
+    - article: A
+      label: Alpha
+      unit: ea
+      location: 10
+      Delivered not invoiced: 14
+      stock: 300
+      Combined stock: 314
+    - article: A
+      label: Alpha
+      unit: ea
+      location: 20
+      Delivered not invoiced: 14
+      stock: 150
+      Combined stock: 164
+    - article: C
+      label: Gamma
+      unit: kg
+      location: 20
+      Delivered not invoiced: 3
+      stock: 2
+      Combined stock: 5
+- name: An equivalent flat delivery join retains the same SQL bag multiplicities
+  sql: |-
+    SELECT i.article AS article,i.label AS label,i.unit AS unit,stock.location AS location,
+     SUM(fl.delivered) AS 'Delivered not invoiced',SUM(stock.quantity) AS stock,
+     SUM(fl.delivered)+SUM(stock.quantity) AS 'Combined stock'
+    FROM day_flow_lines fl
+    INNER JOIN day_flows f ON fl.tenant=f.tenant AND fl.flow_id=f.id
+    INNER JOIN day_lines l ON l.tenant=fl.tenant AND l.flow_line=fl.id
+    INNER JOIN day_docs d ON d.tenant=l.tenant AND d.id=l.doc_id
+    INNER JOIN day_items i ON i.tenant=l.tenant AND i.article=l.article
+    INNER JOIN day_variants v ON v.tenant=l.tenant AND v.article=l.article AND v.variant=l.variant
+    INNER JOIN day_variant_text text_row ON text_row.tenant=v.tenant AND text_row.variant=v.variant
+    INNER JOIN day_stocks stock ON stock.tenant=i.tenant AND stock.article=i.article AND stock.variant=v.variant
+    INNER JOIN day_accounts account_row ON account_row.tenant=d.tenant AND account_row.code=d.account
+    INNER JOIN day_addresses address_row ON address_row.tenant=account_row.tenant AND address_row.id=account_row.address_id
+     WHERE fl.tenant=1 AND ISNULL(fl.delivered,0)>0
+    AND ISNULL(fl.delivered,0)-ISNULL(fl.returned,0)>ISNULL(fl.invoiced,0)
+    AND ISNULL(f.fulfilled,0) IN (0)
+    AND d.kind IN (SELECT code FROM day_kinds WHERE delivered=-1 AND effect=1 AND returned=0 AND invoiced=0) GROUP BY i.article,i.label,i.unit,stock.location ORDER BY i.article,stock.location
+  expect:
+    rows: 3
+    data:
+    - article: A
+      label: Alpha
+      unit: ea
+      location: 10
+      Delivered not invoiced: 14
+      stock: 300
+      Combined stock: 314
+    - article: A
+      label: Alpha
+      unit: ea
+      location: 20
+      Delivered not invoiced: 14
+      stock: 150
+      Combined stock: 164
+    - article: C
+      label: Gamma
+      unit: kg
+      location: 20
+      Delivered not invoiced: 3
+      stock: 2
+      Combined stock: 5
+- name: A delivery with a NULL fulfillment marker follows the report zero fallback
+  sql: |-
+    SELECT i.article AS article,i.label AS label,i.unit AS unit,stock.location AS location,
+     SUM(fl.delivered) AS 'Delivered not invoiced',SUM(stock.quantity) AS stock,
+     SUM(fl.delivered)+SUM(stock.quantity) AS 'Combined stock'
+    FROM day_flow_lines fl
+    INNER JOIN day_flows f ON fl.tenant=f.tenant AND fl.flow_id=f.id
+    INNER JOIN day_lines l ON l.tenant=fl.tenant AND l.flow_line=fl.id
+    INNER JOIN day_docs d ON d.tenant=l.tenant AND d.id=l.doc_id
+    INNER JOIN day_items i ON i.tenant=l.tenant AND i.article=l.article
+    INNER JOIN day_variants v ON v.tenant=l.tenant AND v.article=l.article AND v.variant=l.variant
+    INNER JOIN day_variant_text text_row ON text_row.tenant=v.tenant AND text_row.variant=v.variant
+    INNER JOIN day_stocks stock ON stock.tenant=i.tenant AND stock.article=i.article AND stock.variant=v.variant
+    INNER JOIN day_accounts account_row ON account_row.tenant=d.tenant AND account_row.code=d.account
+    INNER JOIN day_addresses address_row ON address_row.tenant=account_row.tenant AND address_row.id=account_row.address_id
+     WHERE fl.tenant=1 AND fl.id=106 AND ISNULL(fl.delivered,0)>0
+    AND ISNULL(fl.delivered,0)-ISNULL(fl.returned,0)>ISNULL(fl.invoiced,0)
+    AND ISNULL(f.fulfilled,0) IN (0)
+    AND d.kind IN (SELECT code FROM day_kinds WHERE delivered=-1 AND effect=1 AND returned=0 AND invoiced=0) GROUP BY i.article,i.label,i.unit,stock.location ORDER BY i.article,stock.location
+  expect:
+    rows: 1
+    data:
+    - article: C
+      label: Gamma
+      unit: kg
+      location: 20
+      Delivered not invoiced: 3
+      stock: 2
+      Combined stock: 5
+- name: NULL return and invoice quantities remain eligible in the composite delivery report
+  sql: |-
+    SELECT i.article AS article,i.label AS label,i.unit AS unit,stock.location AS location,
+     SUM(fl.delivered) AS 'Delivered not invoiced',SUM(stock.quantity) AS stock,
+     SUM(fl.delivered)+SUM(stock.quantity) AS 'Combined stock'
+    FROM day_flow_lines fl
+    INNER JOIN day_flows f ON fl.tenant=f.tenant AND fl.flow_id=f.id
+    INNER JOIN day_lines l ON l.tenant=fl.tenant AND l.flow_line=fl.id
+    INNER JOIN day_docs d ON d.tenant=l.tenant AND d.id=l.doc_id
+    INNER JOIN day_items i ON i.tenant=l.tenant AND i.article=l.article
+    INNER JOIN day_variants v ON v.tenant=l.tenant AND v.article=l.article AND v.variant=l.variant
+    INNER JOIN day_variant_text text_row ON text_row.tenant=v.tenant AND text_row.variant=v.variant
+    INNER JOIN day_stocks stock ON stock.tenant=i.tenant AND stock.article=i.article AND stock.variant=v.variant
+    INNER JOIN day_accounts account_row ON account_row.tenant=d.tenant AND account_row.code=d.account
+    INNER JOIN day_addresses address_row ON address_row.tenant=account_row.tenant AND address_row.id=account_row.address_id
+     WHERE fl.tenant=1 AND fl.id=102 AND ISNULL(fl.delivered,0)>0
+    AND ISNULL(fl.delivered,0)-ISNULL(fl.returned,0)>ISNULL(fl.invoiced,0)
+    AND ISNULL(f.fulfilled,0) IN (0)
+    AND d.kind IN (SELECT code FROM day_kinds WHERE delivered=-1 AND effect=1 AND returned=0 AND invoiced=0) GROUP BY i.article,i.label,i.unit,stock.location ORDER BY i.article,stock.location
+  expect:
+    rows: 2
+    data:
+    - article: A
+      label: Alpha
+      unit: ea
+      location: 10
+      Delivered not invoiced: 2
+      stock: 100
+      Combined stock: 102
+    - article: A
+      label: Alpha
+      unit: ea
+      location: 20
+      Delivered not invoiced: 2
+      stock: 50
+      Combined stock: 52
+- name: Fully invoiced returned and undelivered lines contribute no stock copies
+  sql: |-
+    SELECT i.article AS article,i.label AS label,i.unit AS unit,stock.location AS location,
+     SUM(fl.delivered) AS 'Delivered not invoiced',SUM(stock.quantity) AS stock,
+     SUM(fl.delivered)+SUM(stock.quantity) AS 'Combined stock'
+    FROM day_flow_lines fl
+    INNER JOIN day_flows f ON fl.tenant=f.tenant AND fl.flow_id=f.id
+    INNER JOIN day_lines l ON l.tenant=fl.tenant AND l.flow_line=fl.id
+    INNER JOIN day_docs d ON d.tenant=l.tenant AND d.id=l.doc_id
+    INNER JOIN day_items i ON i.tenant=l.tenant AND i.article=l.article
+    INNER JOIN day_variants v ON v.tenant=l.tenant AND v.article=l.article AND v.variant=l.variant
+    INNER JOIN day_variant_text text_row ON text_row.tenant=v.tenant AND text_row.variant=v.variant
+    INNER JOIN day_stocks stock ON stock.tenant=i.tenant AND stock.article=i.article AND stock.variant=v.variant
+    INNER JOIN day_accounts account_row ON account_row.tenant=d.tenant AND account_row.code=d.account
+    INNER JOIN day_addresses address_row ON address_row.tenant=account_row.tenant AND address_row.id=account_row.address_id
+     WHERE fl.tenant=1 AND fl.id IN (101,104,105) AND ISNULL(fl.delivered,0)>0
+    AND ISNULL(fl.delivered,0)-ISNULL(fl.returned,0)>ISNULL(fl.invoiced,0)
+    AND ISNULL(f.fulfilled,0) IN (0)
+    AND d.kind IN (SELECT code FROM day_kinds WHERE delivered=-1 AND effect=1 AND returned=0 AND invoiced=0) GROUP BY i.article,i.label,i.unit,stock.location ORDER BY i.article,stock.location
+  expect:
+    rows: 0
+    data: []
+- name: A fulfilled flow is excluded before grouped stock is calculated
+  sql: |-
+    SELECT i.article AS article,i.label AS label,i.unit AS unit,stock.location AS location,
+     SUM(fl.delivered) AS 'Delivered not invoiced',SUM(stock.quantity) AS stock,
+     SUM(fl.delivered)+SUM(stock.quantity) AS 'Combined stock'
+    FROM day_flow_lines fl
+    INNER JOIN day_flows f ON fl.tenant=f.tenant AND fl.flow_id=f.id
+    INNER JOIN day_lines l ON l.tenant=fl.tenant AND l.flow_line=fl.id
+    INNER JOIN day_docs d ON d.tenant=l.tenant AND d.id=l.doc_id
+    INNER JOIN day_items i ON i.tenant=l.tenant AND i.article=l.article
+    INNER JOIN day_variants v ON v.tenant=l.tenant AND v.article=l.article AND v.variant=l.variant
+    INNER JOIN day_variant_text text_row ON text_row.tenant=v.tenant AND text_row.variant=v.variant
+    INNER JOIN day_stocks stock ON stock.tenant=i.tenant AND stock.article=i.article AND stock.variant=v.variant
+    INNER JOIN day_accounts account_row ON account_row.tenant=d.tenant AND account_row.code=d.account
+    INNER JOIN day_addresses address_row ON address_row.tenant=account_row.tenant AND address_row.id=account_row.address_id
+     WHERE fl.tenant=1 AND fl.id=103 AND ISNULL(fl.delivered,0)>0
+    AND ISNULL(fl.delivered,0)-ISNULL(fl.returned,0)>ISNULL(fl.invoiced,0)
+    AND ISNULL(f.fulfilled,0) IN (0)
+    AND d.kind IN (SELECT code FROM day_kinds WHERE delivered=-1 AND effect=1 AND returned=0 AND invoiced=0) GROUP BY i.article,i.label,i.unit,stock.location ORDER BY i.article,stock.location
+  expect:
+    rows: 0
+    data: []
+- name: Grouped delivery output can filter its retained bag aggregate with HAVING
+  sql: |-
+    SELECT i.article AS article,i.label AS label,i.unit AS unit,stock.location AS location,
+     SUM(fl.delivered) AS 'Delivered not invoiced',SUM(stock.quantity) AS stock,
+     SUM(fl.delivered)+SUM(stock.quantity) AS 'Combined stock'
+    FROM day_flow_lines fl
+    INNER JOIN day_flows f ON fl.tenant=f.tenant AND fl.flow_id=f.id
+    INNER JOIN day_lines l ON l.tenant=fl.tenant AND l.flow_line=fl.id
+    INNER JOIN day_docs d ON d.tenant=l.tenant AND d.id=l.doc_id
+    INNER JOIN day_items i ON i.tenant=l.tenant AND i.article=l.article
+    INNER JOIN day_variants v ON v.tenant=l.tenant AND v.article=l.article AND v.variant=l.variant
+    INNER JOIN day_variant_text text_row ON text_row.tenant=v.tenant AND text_row.variant=v.variant
+    INNER JOIN day_stocks stock ON stock.tenant=i.tenant AND stock.article=i.article AND stock.variant=v.variant
+    INNER JOIN day_accounts account_row ON account_row.tenant=d.tenant AND account_row.code=d.account
+    INNER JOIN day_addresses address_row ON address_row.tenant=account_row.tenant AND address_row.id=account_row.address_id
+     WHERE fl.tenant=1 AND ISNULL(fl.delivered,0)>0
+    AND ISNULL(fl.delivered,0)-ISNULL(fl.returned,0)>ISNULL(fl.invoiced,0)
+    AND ISNULL(f.fulfilled,0) IN (0)
+    AND d.kind IN (SELECT code FROM day_kinds WHERE delivered=-1 AND effect=1 AND returned=0 AND invoiced=0) GROUP BY i.article,i.label,i.unit,stock.location HAVING SUM(fl.delivered)>3 ORDER BY i.article,stock.location
+  expect:
+    rows: 2
+    data:
+    - article: A
+      label: Alpha
+      unit: ea
+      location: 10
+      Delivered not invoiced: 14
+      stock: 300
+      Combined stock: 314
+    - article: A
+      label: Alpha
+      unit: ea
+      location: 20
+      Delivered not invoiced: 14
+      stock: 150
+      Combined stock: 164
+- name: The composed delivery report binds its tenant through a prepared native call
+  tds:
+    statements:
+    - sql: |-
+        SELECT i.article AS article,i.label AS label,i.unit AS unit,stock.location AS location,
+         SUM(fl.delivered) AS 'Delivered not invoiced',SUM(stock.quantity) AS stock,
+         SUM(fl.delivered)+SUM(stock.quantity) AS 'Combined stock'
+        FROM day_flow_lines fl
+        INNER JOIN day_flows f ON fl.tenant=f.tenant AND fl.flow_id=f.id
+        INNER JOIN day_lines l ON l.tenant=fl.tenant AND l.flow_line=fl.id
+        INNER JOIN day_docs d ON d.tenant=l.tenant AND d.id=l.doc_id
+        INNER JOIN day_items i ON i.tenant=l.tenant AND i.article=l.article
+        INNER JOIN day_variants v ON v.tenant=l.tenant AND v.article=l.article AND v.variant=l.variant
+        INNER JOIN day_variant_text text_row ON text_row.tenant=v.tenant AND text_row.variant=v.variant
+        INNER JOIN day_stocks stock ON stock.tenant=i.tenant AND stock.article=i.article AND stock.variant=v.variant
+        INNER JOIN day_accounts account_row ON account_row.tenant=d.tenant AND account_row.code=d.account
+        INNER JOIN day_addresses address_row ON address_row.tenant=account_row.tenant AND address_row.id=account_row.address_id
+         WHERE fl.tenant=@tenant AND ISNULL(fl.delivered,0)>0
+        AND ISNULL(fl.delivered,0)-ISNULL(fl.returned,0)>ISNULL(fl.invoiced,0)
+        AND ISNULL(f.fulfilled,0) IN (0)
+        AND d.kind IN (SELECT code FROM day_kinds WHERE delivered=-1 AND effect=1 AND returned=0 AND invoiced=0) GROUP BY i.article,i.label,i.unit,stock.location ORDER BY i.article,stock.location
+      parameters:
+      - name: tenant
+        value: 1
+      prepare: true
+      expect:
+        rows: 3
+        data:
+        - article: A
+          label: Alpha
+          unit: ea
+          location: 10
+          Delivered not invoiced: 14
+          stock: 300
+          Combined stock: 314
+        - article: A
+          label: Alpha
+          unit: ea
+          location: 20
+          Delivered not invoiced: 14
+          stock: 150
+          Combined stock: 164
+        - article: C
+          label: Gamma
+          unit: kg
+          location: 20
+          Delivered not invoiced: 3
+          stock: 2
+          Combined stock: 5
+- name: Delivery frequency composes an aggregate derived join and aggregate sort expression
+  sql: |-
+    SELECT d.tenant,l.article,COUNT(d.id) AS order_lines,
+     SUM(ISNULL(deliveries.delivery_count,0)) AS deliveries
+    FROM day_docs d INNER JOIN day_lines l ON d.tenant=l.tenant AND d.id=l.doc_id
+    INNER JOIN day_kinds kind ON kind.code=d.kind
+    INNER JOIN (
+     SELECT dl.flow_line,dl.tenant,SUM(dl.quantity*dk.effect) AS delivered,COUNT(dd.number) AS delivery_count
+     FROM day_docs dd INNER JOIN day_lines dl ON dd.tenant=dl.tenant AND dd.id=dl.doc_id
+     INNER JOIN day_kinds dk ON dk.code=dd.kind WHERE dk.effect=1
+     GROUP BY dl.flow_line,dl.tenant
+    ) deliveries ON deliveries.tenant=l.tenant AND deliveries.flow_line=l.flow_line
+    WHERE l.article IS NOT NULL AND kind.ordered=1
+    GROUP BY d.tenant,l.article
+    ORDER BY COUNT(d.id)-SUM(ISNULL(deliveries.delivery_count,0)),d.tenant,l.article
+  expect:
+    rows: 1
+    data:
+    - tenant: 1
+      article: A
+      order_lines: 2
+      deliveries: 3
+- name: A left frequency join retains order lines with no shipment history
+  sql: |-
+    SELECT d.tenant,l.article,COUNT(d.id) AS order_lines,
+     SUM(ISNULL(deliveries.delivery_count,0)) AS deliveries
+    FROM day_docs d INNER JOIN day_lines l ON d.tenant=l.tenant AND d.id=l.doc_id
+    INNER JOIN day_kinds kind ON kind.code=d.kind
+    LEFT JOIN (
+     SELECT dl.flow_line,dl.tenant,SUM(dl.quantity*dk.effect) AS delivered,COUNT(dd.number) AS delivery_count
+     FROM day_docs dd INNER JOIN day_lines dl ON dd.tenant=dl.tenant AND dd.id=dl.doc_id
+     INNER JOIN day_kinds dk ON dk.code=dd.kind WHERE dk.effect=1
+     GROUP BY dl.flow_line,dl.tenant
+    ) deliveries ON deliveries.tenant=l.tenant AND deliveries.flow_line=l.flow_line
+    WHERE l.article IS NOT NULL AND kind.ordered=1
+    GROUP BY d.tenant,l.article
+    ORDER BY COUNT(d.id)-SUM(ISNULL(deliveries.delivery_count,0)),d.tenant,l.article
+  expect:
+    rows: 4
+    data:
+    - tenant: 1
+      article: A
+      order_lines: 2
+      deliveries: 3
+    - tenant: 1
+      article: C
+      order_lines: 1
+      deliveries: 0
+    - tenant: 2
+      article: A
+      order_lines: 1
+      deliveries: 0
+    - tenant: 1
+      article: B
+      order_lines: 2
+      deliveries: 0
+- name: Quantity discrepancies group by tenant and article while NULL comparisons stay unknown
+  sql: |-
+    SELECT tenant,article,COUNT(id) AS discrepancies FROM day_flow_lines
+     WHERE ordered<>delivered GROUP BY tenant,article ORDER BY discrepancies DESC,tenant,article
+  expect:
+    rows: 3
+    data:
+    - tenant: 1
+      article: A
+      discrepancies: 2
+    - tenant: 1
+      article: C
+      discrepancies: 1
+    - tenant: 2
+      article: A
+      discrepancies: 1
+- name: An optional barcode chain preserves items even when their variant master exists
+  sql: |-
+    SELECT i.tenant,i.article,barcode.barcode,v.variant,text_row.label
+    FROM day_items i LEFT JOIN day_barcodes barcode ON barcode.tenant=i.tenant AND barcode.article=i.article
+    LEFT JOIN day_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=barcode.variant
+    LEFT JOIN day_variant_text text_row ON text_row.tenant=v.tenant AND text_row.variant=v.variant
+    WHERE i.tenant=1 ORDER BY i.article
+  expect:
+    rows: 3
+    data:
+    - tenant: 1
+      article: A
+      barcode: null
+      variant: null
+      label: null
+    - tenant: 1
+      article: B
+      barcode: B-0
+      variant: 0
+      label: Standard
+    - tenant: 1
+      article: C
+      barcode: C-1
+      variant: 1
+      label: Red
+- name: A right relation predicate in WHERE deliberately removes missing barcode chains
+  sql: |-
+    SELECT i.tenant,i.article,barcode.barcode,v.variant,text_row.label
+    FROM day_items i LEFT JOIN day_barcodes barcode ON barcode.tenant=i.tenant AND barcode.article=i.article
+    LEFT JOIN day_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=barcode.variant
+    LEFT JOIN day_variant_text text_row ON text_row.tenant=v.tenant AND text_row.variant=v.variant
+    WHERE i.tenant=1 AND v.variant=0 ORDER BY i.article
+  expect:
+    rows: 1
+    data:
+    - tenant: 1
+      article: B
+      barcode: B-0
+      variant: 0
+      label: Standard
+- name: The same optional variant restriction in ON keeps the preserved item domain
+  sql: |-
+    SELECT i.tenant,i.article,barcode.barcode,v.variant,text_row.label
+    FROM day_items i LEFT JOIN day_barcodes barcode ON barcode.tenant=i.tenant AND barcode.article=i.article
+    LEFT JOIN day_variants v ON v.tenant=i.tenant AND v.article=i.article AND v.variant=barcode.variant AND v.variant=0
+    LEFT JOIN day_variant_text text_row ON text_row.tenant=v.tenant AND text_row.variant=v.variant
+    WHERE i.tenant=1 ORDER BY i.article
+  expect:
+    rows: 3
+    data:
+    - tenant: 1
+      article: A
+      barcode: null
+      variant: null
+      label: null
+    - tenant: 1
+      article: B
+      barcode: B-0
+      variant: 0
+      label: Standard
+    - tenant: 1
+      article: C
+      barcode: C-1
+      variant: null
+      label: null
+- name: Customer geography keeps leading zero postal codes hidden group keys and revenue order
+  sql: |-
+    SELECT a.code,address_row.label,address_row.postal,a.last_sale,SUM(d.net) AS revenue
+    FROM day_docs d INNER JOIN day_accounts a ON d.tenant=a.tenant AND d.account=a.code
+    INNER JOIN day_addresses address_row ON address_row.tenant=a.tenant AND address_row.id=a.address_id
+    WHERE d.tenant=1 AND d.kind IN ('SHIP','INV') AND d.doc_date BETWEEN '2025-01-01' AND '2025-01-31'
+    GROUP BY a.code,a.last_sale,d.account,address_row.label,address_row.postal
+    ORDER BY revenue DESC,a.code
+  expect:
+    rows: 2
+    data:
+    - code: C1
+      label: North
+      postal: '01234'
+      last_sale: '2025-01-31 00:00:00'
+      revenue: 130
+    - code: C2
+      label: South
+      postal: '90000'
+      last_sale: '2025-01-12 00:00:00'
+      revenue: 60
+- name: A midnight upper report boundary excludes a document later on the same day
+  sql: |-
+    SELECT a.code,address_row.label,address_row.postal,a.last_sale,SUM(d.net) AS revenue
+    FROM day_docs d INNER JOIN day_accounts a ON d.tenant=a.tenant AND d.account=a.code
+    INNER JOIN day_addresses address_row ON address_row.tenant=a.tenant AND address_row.id=a.address_id
+    WHERE d.tenant=1 AND d.kind IN ('SHIP','INV') AND d.doc_date >='2025-01-01' AND d.doc_date<'2025-02-01'
+    GROUP BY a.code,a.last_sale,d.account,address_row.label,address_row.postal
+    ORDER BY revenue DESC,a.code
+  expect:
+    rows: 2
+    data:
+    - code: C1
+      label: North
+      postal: '01234'
+      last_sale: '2025-01-31 00:00:00'
+      revenue: 140
+    - code: C2
+      label: South
+      postal: '90000'
+      last_sale: '2025-01-12 00:00:00'
+      revenue: 60
+- name: A batch TOP expression retains its declared parameter arithmetic
+  sql: DECLARE @cap INT=2; SELECT TOP (@cap+1) id FROM day_docs WHERE tenant=1 ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 10
+    - id: 11
+    - id: 12
+- name: A prepared TOP count remains invocation bound across cache reuse
+  tds:
+    statements:
+    - sql: SELECT TOP (@cap) id FROM day_docs WHERE tenant=1 ORDER BY id
+      prepare: true
+      parameters:
+      - name: cap
+        value: 2
+      expect:
+        rows: 2
+        data:
+        - id: 10
+        - id: 11
+    - sql: SELECT TOP (@cap) id FROM day_docs WHERE tenant=1 ORDER BY id
+      prepare: true
+      parameters:
+      - name: cap
+        value: 0
+      expect:
+        rows: 0
+        data: []
+    - sql: SELECT TOP (@cap) id FROM day_docs WHERE tenant=1 ORDER BY id
+      prepare: true
+      parameters:
+      - name: cap
+        value: 1
+      expect:
+        rows: 1
+        data:
+        - id: 10
+    - sql: SELECT TOP (@cap) id FROM day_docs WHERE tenant=1 ORDER BY id
+      prepare: true
+      parameters:
+      - name: cap
+        value: 3
+      expect:
+        rows: 3
+        data:
+        - id: 10
+        - id: 11
+        - id: 12
+- name: A negative bound TOP cannot become an unlimited scan
+  sql: DECLARE @cap INT=-1; SELECT TOP (@cap) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires a nonnegative count
+- name: A NULL bound TOP cannot become an unlimited scan
+  sql: DECLARE @cap INT=NULL; SELECT TOP (@cap) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires a nonnegative count
+- name: TOP cannot bind a per row column as an invocation count
+  sql: SELECT TOP (id) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires an invocation scalar
+- name: Right nested inner joins retain both ON predicates and bag multiplicity
+  sql: SELECT d.id,l.id AS line,i.label FROM day_docs d JOIN day_lines l JOIN day_items i ON l.tenant=i.tenant AND
+    l.article=i.article ON d.tenant=l.tenant AND d.id=l.doc_id WHERE d.tenant=1 AND d.id=10 ORDER BY l.id
+  expect:
+    rows: 5
+    data:
+    - id: 10
+      line: 1000
+      label: Alpha
+    - id: 10
+      line: 1001
+      label: Beta
+    - id: 10
+      line: 1002
+      label: Alpha
+    - id: 10
+      line: 1003
+      label: Gamma
+    - id: 10
+      line: 1004
+      label: Beta
+- name: A right nested outer join boundary is rejected until represented logically
+  sql: SELECT d.id FROM day_docs d JOIN day_lines l LEFT JOIN day_items i ON l.tenant=i.tenant AND l.article=i.article
+    ON d.tenant=l.tenant AND d.id=l.doc_id
+  expect:
+    error: true
+    contains: nested outer join units are not supported
+- name: A bound zero TOP suppresses a source free projection
+  sql: DECLARE @cap INT=0; SELECT TOP (@cap) 42 AS value
+  expect:
+    rows: 0
+- name: A bound TOP uses the native unordered limit path
+  sql: DECLARE @cap INT=2; SELECT TOP (@cap) id FROM day_docs WHERE tenant=1
+  expect:
+    rows: 2
+- name: A decimal TOP expression converts to the declared integer count
+  sql: SELECT TOP (2.9) id FROM day_docs WHERE tenant=1 ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+    - id: 11
+- name: A bound TOP retains its count when filtering an ordered join
+  sql: DECLARE @cap INT=1; SELECT TOP (@cap) d.id FROM day_docs d JOIN day_lines l ON d.tenant=l.tenant AND d.id=l.doc_id
+    WHERE d.tenant=1 AND d.kind='SHIP' ORDER BY d.id,l.id
+  expect:
+    rows: 1
+    data:
+    - id: 11
+- name: A computed count cannot exceed the signed integer carrier
+  sql: SELECT TOP (9223372036854775808.0) id FROM day_docs
+  expect:
+    error: true
+- name: TOP does not accept an aggregate as a scalar count
+  sql: SELECT TOP (SUM(id)) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires an invocation scalar
+- name: TOP rejects a count subquery until relational bound lowering exists
+  sql: SELECT TOP ((SELECT MAX(id) FROM day_lines)) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires an invocation scalar
+- name: A typed column cast still cannot become a TOP invocation bound
+  sql: SELECT TOP (CAST(id AS INT)) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires an invocation scalar
+- name: A numeric aggregate result cannot become a TOP invocation bound
+  sql: SELECT TOP (COUNT(*)) id FROM day_docs
+  expect:
+    error: true
+    contains: TOP requires an invocation scalar
+cleanup:
+- sql: DROP TABLE IF EXISTS day_barcodes
+- sql: DROP TABLE IF EXISTS day_addresses
+- sql: DROP TABLE IF EXISTS day_accounts
+- sql: DROP TABLE IF EXISTS day_stocks
+- sql: DROP TABLE IF EXISTS day_variant_text
+- sql: DROP TABLE IF EXISTS day_variants
+- sql: DROP TABLE IF EXISTS day_items
+- sql: DROP TABLE IF EXISTS day_flow_lines
+- sql: DROP TABLE IF EXISTS day_lines
+- sql: DROP TABLE IF EXISTS day_taxes
+- sql: DROP TABLE IF EXISTS day_kinds
+- sql: DROP TABLE IF EXISTS day_periods
+- sql: DROP TABLE IF EXISTS day_groups
+- sql: DROP TABLE IF EXISTS day_flows
+- sql: DROP TABLE IF EXISTS day_docs

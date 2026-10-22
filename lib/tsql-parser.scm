@@ -1586,9 +1586,13 @@ an unchecked replacement. Completion uses only this invocation's reserved range.
 							'('session "last_insert_id" '('car '__tsql_ids))
 							(if capture_identity '('tsql_complete_identity 'session '('cadr '__tsql_ids)) true)) true)
 						'__tsql_inserted))))))))
-(define tsql_select_prefix (parser (? (atom "TOP" true)
-	(define top_count (or (parser '("(" (define n tsql_int) ")") n) sql_int)))
-	(if (and top_count (< top_count 0)) (error "TOP requires a nonnegative count") top_count)))
+/* Bounds are invocation scalars, never per-row expressions. SQL conversion is
+chosen from the frontend contract; only the count expression reaches the scan. */
+(define tsql_row_count (lambda (value)
+	(if (or (nil? value) (< value 0)) (error "TOP requires a nonnegative count") value)))
+(define tsql_compile_row_count (lambda (infos) (begin
+	(define info (tsql_convert_value_info (car infos) "BIGINT" nil))
+	(sql_info (list (quote tsql_row_count) (sql_info_formula info)) "BIGINT" nil))))
 (define tsql_select_suffix (parser (? (atom "OFFSET" true) (define offset tsql_int)
 	(or (atom "ROW" true) (atom "ROWS" true))
 	(? (atom "FETCH" true) (or (atom "FIRST" true) (atom "NEXT" true))
@@ -1711,6 +1715,35 @@ runtime values nor stores a second relational representation. */
 		(reduce infos (lambda (collation info)
 			(sql_merge_collation collation (sql_info_collation info))) nil) nil))
 	(map infos (lambda (info) (tsql_convert_value_info info target collation))))))
+/* UNION chooses column contracts from declarations, just like CASE and
+inline values. Coercions become ordinary expressions before the shared planner;
+no runtime value tag determines a SQL type. A nested set keeps its boundary. */
+(define tsql_union_contracts (lambda (database branches) (begin
+	(define recipes (map branches (lambda (branch)
+		(if (query_block? branch) branch
+			(make_query_block database
+				(list (list "__tsql_set_input" database branch false nil))
+				(merge (map (queryplan_result_titles branch) (lambda (title)
+					(list title (list (quote get_column) "__tsql_set_input" false title false)))))
+				true '() nil '() nil nil '() '() '())))))
+	(define fields (map recipes (lambda (branch)
+		(expand_query_block_fields (qb_sources branch) (qb_fields branch)))))
+	(define width (intdiv (count (car fields)) 2))
+	(if (reduce fields (lambda (valid field) (and valid (equal? (count field) (* width 2)))) true)
+		true (error "UNION branch column count mismatch"))
+	(define infos (map (produceN width) (lambda (column)
+		(tsql_common_value_infos (mapIndex recipes (lambda (index branch)
+			(sql_expr_info (qb_sources branch) (nth (nth fields index) (+ (* column 2) 1))))) "INT"))))
+	(mapIndex recipes (lambda (index branch)
+		(make_query_block (qb_schema branch) (qb_sources branch)
+			(merge (map (produceN width) (lambda (column) (begin
+				(define info (nth (nth infos column) index))
+				(list (nth (nth fields index) (* column 2))
+					(list (quote sql_type_expr) (sql_info_formula info)
+						(sql_info_type info) (sql_info_collation info)))))))
+			(qb_where branch) (qb_group branch) (qb_having branch) (qb_order branch)
+			(qb_limit branch) (qb_offset branch) (qb_hidden branch) (qb_stages branch) (qb_facts branch)))))))
+
 /* NULL fallback has the same declared precedence as other T-SQL expressions.
 The shared lazy coalesce operator remains responsible for evaluation; this
 callback consumes SQL triples and leaves only converted formulas in the plan.
@@ -2657,7 +2690,18 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(parser '((atom "OUTER" true) (atom "APPLY" true) (define r tabledef)) (list (list (source_alias r) (source_schema r)
 				(list (quote tsql_pending_apply) (source_relation r)) true nil)))
 			(parser '((atom "LEFT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e tsql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl true e))))
-			(parser '((? (atom "INNER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e tsql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl false e))))
+			(parser '((? (atom "INNER" true)) (atom "JOIN" true) (define r tabledefs) (atom "ON" true) (define e tsql_expression))
+				(begin
+					/* Associative inner joins share one logical predicate cloud.
+					A nested nullable unit needs an explicit join boundary instead. */
+					(if (reduce r (lambda (inner src) (and inner (not (source_outer? src)))) true) true
+						(error "nested outer join units are not supported yet"))
+					/* The enclosing ON sees the complete right input. Attach it after
+					that input so the common binder sees every referenced alias. */
+					(mapIndex r (lambda (index src)
+						(if (equal? index (- (count r) 1))
+							(match src '(id database relation _ join)
+								(list id database relation false (combine_where join e))) src)))))
 			(parser '((? (atom "CROSS" true)) (atom "JOIN" true) (define r tabledefs)) r)
 		))) (merge l x))
 
@@ -2906,13 +2950,23 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(if (and definition_scope (not (empty_list? (coalesceNil order '())))
 						(nil? limit) (nil? offset)) (error "CTE ORDER BY requires TOP or OFFSET") true)
 					(list (quote union-block) mode
-						(map branches (lambda (branch) (tsql_finalize_sources branch kind bindings blocked)))
+						(tsql_union_contracts schema (map branches (lambda (branch) (tsql_finalize_sources branch kind bindings blocked))))
 						(tsql_finalize_sources order child_kind bindings blocked) limit offset
 						(filter facts (lambda (fact) (and
 							(not (equal? (car fact) (quote tsql_parser_query_hint)))
 							(not (equal? (car fact) (quote tsql_parser_unnamed_output))))))))
 				(cons _head _tail) (map node (lambda (item) (tsql_finalize_sources item child_kind bindings blocked)))
 				_ node)))))
+
+	(define tsql_select_prefix (parser (? (atom "TOP" true)
+		(define top_count (or
+			(parser '("(" (define count tsql_int) ")") count)
+			(parser '("(" (define expression tsql_expression) ")") (begin
+				(if (tsql_scalar_expression_allowed? expression) true
+					(error "TOP requires an invocation scalar"))
+				(list (quote sql_compile_expr) (quote tsql_compile_row_count) expression)))
+			tsql_int)))
+		(if (and (number? top_count) (< top_count 0)) (error "TOP requires a nonnegative count") top_count)))
 
 	(define tsql_select_core (parser '(
 		(atom "SELECT" true)
