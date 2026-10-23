@@ -5749,6 +5749,35 @@ source alias is the stable identity consumed by all later planner phases. */
 					(row_domain_columns relation)
 					(binding_field_titles (logical_relation_fields relation))))))))
 
+/* A wildcard consumes the ordered public column directory, including columns
+which do not exist yet. Guard that declaration through the ordinary compile
+accumulator: point-column guards cannot detect a later ADD. Neither shard
+topology nor statistics participate in this contract. */
+(define planner_star_column_names (lambda (schema tbl)
+	(map (get_schema schema tbl) (lambda (column) (column "Field")))))
+
+(define planner_guard_star_columns (lambda (query planning_session)
+	(begin
+		(define node (normalize_query_ast query))
+		(if (query_block? node)
+			(begin
+				(reduce (qb_sources node) (lambda (_ src)
+					(begin
+						(if (and (string? (source_relation src))
+							(reduce (extract_assoc (qb_fields node) (lambda (_title expr) expr))
+								(lambda (found expr) (or found (star_expr_matches_source? expr src))) false))
+							(planner_record_guard_condition
+								(list (quote expression_equal?)
+									(list (quote planner_star_column_names) (source_schema src) (source_relation src))
+									(list (quote quote) (binding_source_columns src))) planning_session)
+							nil)
+						(if (string? (source_relation src)) nil
+							(planner_guard_star_columns (source_relation src) planning_session)))) nil))
+			(if (union_block? node)
+				(reduce (union_branches node) (lambda (_ branch)
+					(planner_guard_star_columns branch planning_session)) nil)
+				nil)))))
+
 (define binding_column_name (lambda (columns col col_ignorecase)
 	(reduce (coalesceNil columns '()) (lambda (found candidate)
 		(if (not (nil? found))

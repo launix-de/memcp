@@ -29,6 +29,31 @@ import "github.com/google/uuid"
 import "github.com/gorilla/websocket"
 import "github.com/launix-de/memcp/scm"
 
+func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "treplicareclaim", 3)
+	empty, _ := CreateTable(table.schema.Name, "empty", Safe, false)
+	empty.CreateColumn("id", "INT", nil, nil)
+	r := &replicationManager{id: "slave", cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	schema := replicaResource{Database: table.schema.Name}
+	r.resourceCell(schema).rights.initialize(mosiM)
+	r.schemaShards(table.schema, r.id, true)
+	for _, item := range table.schema.tables.GetAll() {
+		for _, shard := range item.ActiveShards() {
+			r.shardCell(shard).rights.restoreBackend(mosiM)
+		}
+	}
+	if !r.reclaimDatabase(table.schema.Name) {
+		t.Fatal("current backend-only exclusive generations were not reclaimed")
+	}
+	for _, item := range table.schema.tables.GetAll() {
+		for _, shard := range item.ActiveShards() {
+			if r.shardCell(shard).rights.phase() != mosiM {
+				t.Fatalf("%s: active shard was not acquired", item.Name)
+			}
+		}
+	}
+}
+
 func replicaAdmissionFixture(name string) (*replicationManager, *replicaCell, scm.Scmer) {
 	r := &replicationManager{cells: make(map[string]*replicaCell)}
 	c := r.cell(name)

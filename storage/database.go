@@ -1024,9 +1024,9 @@ func upgradePersistedTableCalls(value scm.Scmer) scm.Scmer {
 }
 
 func invalidatePersistedPlannerCodeAfterLoad(t *table) {
-	if t.OnInit != nil {
-		restored := upgradePersistedTableCalls(*t.OnInit)
-		t.OnInit = &restored
+	if initializer := t.OnInit.Load(); initializer != nil {
+		restored := upgradePersistedTableCalls(*initializer)
+		t.OnInit.Store(&restored)
 	}
 	for _, col := range t.Columns {
 		col.OnUpdate = upgradePersistedTableCalls(col.OnUpdate)
@@ -1044,7 +1044,7 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 		}
 	}
 	if t.isEphemeralQueryTable() {
-		t.OnInit = nil
+		t.OnInit.Store(nil)
 	}
 }
 

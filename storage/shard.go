@@ -561,8 +561,10 @@ func (u *storageShard) logicalID() uuid.UUID {
 	}
 	return u.uuid
 }
-func (u *storageShard) load(t *table) {
-	u.t = t
+func (u *storageShard) load() {
+	// The table identity is initialized before publication. Cold loading must
+	// not rewrite it while schema checkpoints serialize this generation.
+	t := u.t
 	// mark columns for lazy loading (caller must hold u.mu.Lock)
 	for _, col := range u.t.Columns {
 		u.columns[col.Name] = nil
@@ -1021,7 +1023,7 @@ func (s *storageShard) ensureLoaded() {
 		return
 	}
 	// materialize shard from disk (load expects caller to hold mu.Lock)
-	s.load(s.t)
+	s.load()
 	// memory engine shards stay WRITE to bypass LRU later
 	if s.t.PersistencyMode == Memory {
 		s.setState(WRITE)

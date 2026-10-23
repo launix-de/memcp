@@ -412,11 +412,6 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			}
 		}
 	}
-	readers := make(map[string]bool, len(record.Readers))
-	for id, present := range record.Readers {
-		readers[id] = present
-	}
-	record.Readers = readers
 	marks := make(map[string]replicaRequestMark, len(record.Requests))
 	for id, mark := range record.Requests {
 		marks[id] = mark
@@ -435,6 +430,14 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		r.mu.Unlock()
 		return err
 	}
+	// The durable request mark now shares the journal's reader directory.
+	// Handovers keep a private successor until their final publication: another
+	// resource's checkpoint may serialize the journal while network steps run.
+	readers := make(map[string]bool, len(record.Readers))
+	for id, present := range record.Readers {
+		readers[id] = present
+	}
+	record.Readers = readers
 	r.mu.Unlock()
 	if record.Owner != requester {
 		oldState := "IO"

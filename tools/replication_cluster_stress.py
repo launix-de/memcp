@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import base64
 import concurrent.futures
+import contextlib
 import http.client
 import json
 import os
@@ -29,6 +30,7 @@ import threading
 import time
 import traceback
 import uuid
+from types import SimpleNamespace
 
 from reliability_drill import (
     ROOT, DrillFailure, HttpClient, OwnedServer, expect, free_port,
@@ -53,21 +55,23 @@ def eventually(check, context: str, timeout: float = 15):
 
 
 class Client(HttpClient):
-    def __init__(self, port: int, timeout: float, user="root", password=PASSWORD):
+    def __init__(self, port: int, timeout: float, user="root", password=PASSWORD, database=DATABASE):
         super().__init__(port, timeout)
+        self.database = database
         token = base64.b64encode(f"{user}:{password}".encode()).decode()
         self.headers["Authorization"] = "Basic " + token
 
-    def sql(self, statement, database=DATABASE, session=None, timeout=None):
-        return super().sql(statement, database, session, timeout)
+    def sql(self, statement, database=None, session=None, timeout=None):
+        return super().sql(statement, self.database if database is None else database, session, timeout)
 
-    def number(self, statement, column="n", database=DATABASE):
+    def number(self, statement, column="n", database=None):
         rows = self.sql(statement, database)
         if len(rows) != 1 or column not in rows[0]:
             raise DrillFailure(f"missing scalar {column}: {statement}: {rows}")
         return int(rows[0][column])
 
-    def reject(self, statement, *, contains=None, status=None, database=DATABASE):
+    def reject(self, statement, *, contains=None, status=None, database=None):
+        started = time.monotonic()
         try:
             self.sql(statement, database)
         except DrillFailure as error:
@@ -75,24 +79,27 @@ class Client(HttpClient):
                 raise
             if status and f"({status})" not in str(error):
                 raise
+            if contains == NETWORK_ERROR and time.monotonic() - started > 5:
+                raise DrillFailure(f"unavailable owner did not fail promptly: {statement}") from error
             return
         raise DrillFailure(f"unexpectedly accepted: {statement}")
 
 
 class Node(OwnedServer):
-    def __init__(self, args, artifacts, name, replication, local_password=PASSWORD):
+    def __init__(self, args, artifacts, name, replication, local_password=PASSWORD, database=DATABASE):
         directory = artifacts / name
         directory.mkdir()
         data = directory / "data"
         data.mkdir()
         super().__init__(args.binary, ROOT / "lib/main.scm", data, directory, args.timeout)
         self.name = name
+        self.database = database
         self.port, self.mysql_port = free_port(), free_port()
         self.replication = replication
         self.password = local_password
         self.executor = shlex.split(args.executor)
         self.startup_timeout = args.startup_timeout
-        self.client = Client(self.port, self.timeout)
+        self.client = Client(self.port, self.timeout, database=self.database)
 
     def start(self, *, retired=False, probe_sql=True):
         if self.process is not None:
@@ -111,7 +118,7 @@ class Node(OwnedServer):
             stderr=subprocess.STDOUT, start_new_session=True,
         )
         print(f"  {self.name}: start pid={self.process.pid}, generation={self.generation}", flush=True)
-        self.client = Client(self.port, self.timeout)
+        self.client = Client(self.port, self.timeout, database=self.database)
 
         def ready():
             if self.process.poll() is not None:
@@ -149,7 +156,7 @@ class Node(OwnedServer):
         return json.loads((self.data_dir / ".replication-state").read_text())
 
     def records(self, table):
-        schema = json.loads((self.data_dir / DATABASE / "schema.json").read_text())["tables"][table]
+        schema = json.loads((self.data_dir / self.database / "schema.json").read_text())["tables"][table]
         shards = schema.get("PShards" if schema["ShardMode"] == "partition" else "Shards") or []
         active = {shard.get("mosi", shard["uuid"]) if isinstance(shard, dict) else shard
                   for shard in shards if shard is not None}
@@ -162,6 +169,24 @@ class Node(OwnedServer):
         records = self.records(table)
         expect(len(records), 1, f"{self.name}: one shard for {table}")
         return records[0]
+
+    def database_records(self, database=None):
+        name = self.database if database is None else database
+        schema = json.loads((self.data_dir / name / "schema.json").read_text())
+        return database_records(name, schema, self.journal())
+
+    def assert_exclusive(self, database=None, owner=None, state="M"):
+        identity = json.loads((self.data_dir / "settings.json").read_text())["ReplicationUUID"]
+        records = self.database_records(database)
+        for key, record in records.items():
+            expect((record["state"], record.get("owner")), (state, identity if owner is None else owner),
+                   f"{self.name}: exclusive database resource {key}")
+        return set(records)
+
+    def reclaim(self):
+        expect(self.client.scm(f"(replication_reclaim {json.dumps(self.database)})").strip(),
+               "true", f"{self.name}: full database M reclaim")
+        return self.assert_exclusive()
 
     def statuses(self):
         return json.loads(json.loads(self.client.scm("(replication_slaves)")))
@@ -182,12 +207,34 @@ class Node(OwnedServer):
     def mysql(self, statement):
         command = ["mysql", "--no-defaults", "--batch", "--skip-column-names",
                    "--protocol=TCP", "--host=127.0.0.1", f"--port={self.mysql_port}",
-                   "--user=root", DATABASE, "--execute=" + statement]
+                   "--user=root", self.database, "--execute=" + statement]
         result = subprocess.run(command, env={**os.environ, "MYSQL_PWD": PASSWORD},
                                 capture_output=True, text=True, timeout=self.timeout)
         if result.returncode:
             raise DrillFailure(f"MySQL login/query failed: {result.stderr}")
         return result.stdout.strip()
+
+
+def database_records(name, schema, journal):
+    """Use the current catalog, including empty/internal durable shards."""
+    expected = {name: {"database": name}}
+    for table_name, table in schema["tables"].items():
+        if table_name.startswith(".") and table["PersistencyMode"] == "cache":
+            continue
+        shards = table.get("PShards" if table["ShardMode"] == "partition" else "Shards") or []
+        for shard in shards:
+            if shard is None:
+                continue
+            identity = shard.get("mosi", shard["uuid"]) if isinstance(shard, dict) else shard
+            expected[f"{name}/{identity}"] = {"database": name, "table": table_name, "shard": identity}
+    result = {}
+    for key, resource in expected.items():
+        if key not in journal["records"]:
+            raise DrillFailure(f"missing MOSI resource: {key}")
+        record = journal["records"][key]
+        expect(record["resource"], resource, f"catalog/MOSI identity {key}")
+        result[key] = record
+    return result
 
 
 class Cluster:
@@ -421,6 +468,57 @@ class Oracle:
             for row_id in actual.keys() | self.rows.keys():
                 if actual.get(row_id) not in self.rows.get(row_id, set()):
                     raise DrillFailure(f"lost/corrupted write: id={row_id}, actual={actual.get(row_id)}, allowed={self.rows.get(row_id)}")
+        return actual
+
+    def verify_pair(self, master, slave):
+        """Call only at a mutation barrier; both nodes must agree exactly."""
+        left, right = self.verify(master), self.verify(slave)
+        expect(left, right, f"master/slave freshness for {master.database}")
+        with self.lock:
+            for row_id, allowed in self.rows.items():
+                if len(allowed) > 1:
+                    value = left.get(row_id)
+                    self.rows[row_id] = {value}
+                    self.log("resolved", row_id, value)
+
+
+class WorkloadGate:
+    """Pause new mutations for exact readback, without serializing writers."""
+    def __init__(self, timeout):
+        self.condition = threading.Condition()
+        self.active = 0
+        self.checking = False
+        self.timeout = timeout
+
+    @contextlib.contextmanager
+    def mutation(self):
+        with self.condition:
+            if not self.condition.wait_for(lambda: not self.checking, self.timeout):
+                raise DrillFailure("writer blocked at freshness checkpoint")
+            self.active += 1
+        try:
+            yield
+        finally:
+            with self.condition:
+                self.active -= 1
+                self.condition.notify_all()
+
+    @contextlib.contextmanager
+    def checkpoint(self):
+        with self.condition:
+            if not self.condition.wait_for(lambda: not self.checking, self.timeout):
+                raise DrillFailure("overlapping freshness checkpoints")
+            self.checking = True
+            if not self.condition.wait_for(lambda: self.active == 0, self.timeout):
+                self.checking = False
+                self.condition.notify_all()
+                raise DrillFailure("in-flight writers did not reach freshness checkpoint")
+        try:
+            yield
+        finally:
+            with self.condition:
+                self.checking = False
+                self.condition.notify_all()
 
 
 def workload(args, cluster, oracle, phase, *, analytics=False, crash_slave=False):
@@ -430,6 +528,12 @@ def workload(args, cluster, oracle, phase, *, analytics=False, crash_slave=False
     errors = queue.Queue()
     barrier = threading.Barrier(args.workers + (3 if analytics else 1))
     slave_client = cluster.slave.client
+    master_client = Client(cluster.master.port, args.timeout, database=slave_client.database)
+    gate = WorkloadGate(args.timeout)
+    marker = 1000000000 + phase
+    oracle.attempt(0, marker)
+    slave_client.sql(f"UPDATE stress_items SET value={marker} WHERE id=0")
+    oracle.acknowledge(0, marker)
 
     def writer(worker):
         rng = random.Random(args.seed + phase * 1000 + worker)
@@ -443,17 +547,18 @@ def workload(args, cluster, oracle, phase, *, analytics=False, crash_slave=False
                               (f"UPDATE stress_items SET value=value+1 WHERE id={row_id}", row_id * 10 + 1)]
                 if rng.random() < 0.25:
                     statements.append((f"DELETE FROM stress_items WHERE id={row_id}", None))
-                for statement, value in statements:
-                    oracle.attempt(row_id, value)
-                    try:
-                        slave_client.sql(statement)
-                    except (OSError, http.client.HTTPException, json.JSONDecodeError):
-                        if not crashing.is_set():
-                            raise
-                        oracle.uncertain(row_id, value)
-                        return
-                    oracle.acknowledge(row_id, value)
-                    progressed.set()
+                with gate.mutation():
+                    for statement, value in statements:
+                        oracle.attempt(row_id, value)
+                        try:
+                            slave_client.sql(statement)
+                        except (OSError, http.client.HTTPException, json.JSONDecodeError):
+                            if not crashing.is_set():
+                                raise
+                            oracle.uncertain(row_id, value)
+                            return
+                        oracle.acknowledge(row_id, value)
+                        progressed.set()
                 time.sleep(rng.uniform(0.001, 0.01))
         except Exception as error:
             errors.put(error)
@@ -463,11 +568,17 @@ def workload(args, cluster, oracle, phase, *, analytics=False, crash_slave=False
         try:
             barrier.wait(timeout=args.timeout)
             while not stop.is_set():
-                rows = cluster.master.client.sql("SELECT id,value FROM stress_items")
+                rows = master_client.sql("SELECT id,value FROM stress_items")
+                sentinels = []
                 for row in rows:
                     row_id, value = int(row["id"]), int(row["value"])
-                    if value not in (row_id * 10, row_id * 10 + 1):
+                    if row_id == 0:
+                        sentinels.append(value)
+                    elif value not in (row_id * 10, row_id * 10 + 1):
                         raise DrillFailure(f"analytic reader observed incomplete/corrupt row: {row}")
+                expect(sentinels, [marker], "master must see acknowledged phase marker during concurrent writes")
+                with gate.checkpoint():
+                    oracle.verify_pair(master_client, slave_client)
                 time.sleep(0.005)
         except Exception as error:
             errors.put(error)
@@ -477,8 +588,8 @@ def workload(args, cluster, oracle, phase, *, analytics=False, crash_slave=False
         try:
             barrier.wait(timeout=args.timeout)
             while not stop.is_set():
-                cluster.master.client.scm(f'(blob_cleanup "{DATABASE}")')
-                cluster.slave.client.scm(f'(blob_cleanup "{DATABASE}")')
+                cluster.master.client.scm(f'(blob_cleanup "{slave_client.database}")')
+                cluster.slave.client.scm(f'(blob_cleanup "{slave_client.database}")')
                 time.sleep(0.01)
         except Exception as error:
             errors.put(error)
@@ -517,41 +628,293 @@ def workload(args, cluster, oracle, phase, *, analytics=False, crash_slave=False
         raise errors.get()
 
 
+def setup_stress_database(master, name):
+    master.sql(f"CREATE DATABASE {name}", "system")
+    for statement in ("CREATE TABLE stress_items(id INT PRIMARY KEY, value INT) ENGINE=SAFE",
+                      "INSERT INTO stress_items VALUES(0,0)",
+                      "CREATE TABLE stress_aux(id INT PRIMARY KEY, value INT) ENGINE=SAFE",
+                      "INSERT INTO stress_aux VALUES(1,100),(9,900)",
+                      "CREATE TABLE stress_empty(id INT PRIMARY KEY, value INT) ENGINE=SAFE"):
+        master.sql(statement, name)
+    expect(master.scm(f'(partitiontable (table "{name}" false "stress_aux" false) (list "id" (list 5)))').strip(),
+           "true", "partitioned auxiliary table")
+
+
+def table_values(client, table):
+    rows = client.sql(f"SELECT id,value FROM `{table}`")
+    result = {int(row["id"]): int(row["value"]) for row in rows}
+    expect(len(rows), len(result), f"unique row IDs in {table}")
+    return result
+
+
+def verify_database_pair(master, slave, oracle, aux, extra=None):
+    oracle.verify_pair(master, slave)
+    for client in (master, slave):
+        expect(table_values(client, "stress_aux"), aux, f"{client.database}: fresh partitioned data")
+        expect(client.sql("SELECT * FROM stress_empty"), [], f"{client.database}: empty table")
+        for table, expected in (extra or {}).items():
+            expect(table_values(client, table), expected, f"{client.database}: offline schema/data {table}")
+
+
+def assert_reclaimed(master, slave):
+    keys = slave.reclaim()
+    identity = json.loads((slave.data_dir / "settings.json").read_text())["ReplicationUUID"]
+    expect(master.assert_exclusive(slave.database, owner=identity, state="IO"), keys,
+           "same complete resource set, slave M/master IO")
+    return len(keys)
+
+
+def alternate_writers(master, slave, aux):
+    # Equal row counts and plausible old values cannot satisfy these checks.
+    for writer, reader in ((master, slave), (slave, master)):
+        writer.sql("UPDATE stress_aux SET value=value+1")
+        for row_id in aux:
+            aux[row_id] += 1
+        expect(table_values(reader, "stress_aux"), aux, "fresh values after remote write")
+        expect(table_values(writer, "stress_aux"), aux, "fresh values at writer")
+
+
 def run_stress(args, artifacts, journal):
     print(f"SCENARIO: threaded stress ({args.rounds} rounds, {args.workers} writers, seed {args.seed})", flush=True)
     oracle = Oracle(artifacts / "writes.jsonl")
     try:
         with Cluster(args, artifacts, "stress") as cluster:
-            cluster.initialize(["CREATE TABLE stress_items(id INT PRIMARY KEY, value INT) ENGINE=SAFE",
-                                "INSERT INTO stress_items VALUES(0,0)"])
+            cluster.master.start()
+            setup_stress_database(cluster.master.client, DATABASE)
+            cluster.slave.start()
             cluster.slave.client.sql("SELECT * FROM stress_items")
             eventually(lambda: cluster.slave.journal().get("initialized", {}).get(DATABASE), "initial stress M claims")
+            aux, extra = {1: 100, 9: 900}, {}
+            master = cluster.master.client
+            verify_database_pair(master, cluster.slave.client, oracle, aux)
+            # A shared schema is sufficient to make offline reclaim impossible;
+            # neither a timeout nor local backup files may manufacture M.
+            cluster.master.kill()
+            try:
+                cluster.slave.client.scm(f'(replication_reclaim "{DATABASE}")')
+            except DrillFailure as error:
+                if NETWORK_ERROR not in str(error):
+                    raise
+            else:
+                raise DrillFailure("reclaim succeeded with an unreachable S holder")
+            expect(cluster.slave.journal()["records"][DATABASE]["state"], "O", "failed reclaim preserves durable shared authority")
+            cluster.master.start()
+            eventually(cluster.master.connected, "negative reclaim reconnect")
             for round_index in range(args.rounds):
                 print(f"  round {round_index + 1}: online analytics/GC, master crash, slave crash", flush=True)
                 phase = round_index * 3
                 workload(args, cluster, oracle, phase, analytics=True)
-                oracle.verify(cluster.slave.client)
-                # Public DDL obtains schema M and all table shard M, including
-                # empty shards. Offline writes are tested only after full M;
-                # this does not assume an unimplemented automatic reclamation.
-                cluster.slave.client.sql("ALTER TABLE stress_items ADD COLUMN ownership_probe INT DEFAULT 0")
-                cluster.slave.client.sql("ALTER TABLE stress_items DROP COLUMN ownership_probe")
-                expect(set(record["state"] for record in cluster.slave.records("stress_items")), {"M"}, "pre-crash M rights")
+                alternate_writers(master, cluster.slave.client, aux)
+                verify_database_pair(master, cluster.slave.client, oracle, aux, extra)
+                resource_count = assert_reclaimed(cluster.master, cluster.slave)
                 cluster.master.kill()
                 workload(args, cluster, oracle, phase + 1)
+                table = f"offline_round_{round_index}"
+                cluster.slave.client.sql(f"CREATE TABLE {table}(id INT PRIMARY KEY, value INT) ENGINE=SAFE")
+                cluster.slave.client.sql(f"INSERT INTO {table} VALUES(1,{round_index})")
+                extra[table] = {1: round_index}
                 oracle.verify(cluster.slave.client)
+                cluster.slave.assert_exclusive()
                 cluster.master.start()
                 eventually(cluster.master.connected, "stress slave did not reconnect")
+                verify_database_pair(master, cluster.slave.client, oracle, aux, extra)
+                assert_reclaimed(cluster.master, cluster.slave)
                 workload(args, cluster, oracle, phase + 2, crash_slave=True)
                 cluster.master.client.reject("SELECT * FROM stress_items", status=500, contains=NETWORK_ERROR)
                 cluster.slave.start()
-                oracle.verify(cluster.slave.client)
+                verify_database_pair(master, cluster.slave.client, oracle, aux, extra)
+                assert_reclaimed(cluster.master, cluster.slave)
                 journal.append({"scenario": "threaded-stress", "round": round_index + 1,
+                                "exclusive_resources": resource_count, "freshness": "both-nodes",
                                 "acknowledged": oracle.acknowledged, "ambiguous": oracle.ambiguous})
             if oracle.acknowledged == 0:
                 raise DrillFailure("stress completed without acknowledged writes")
     finally:
         oracle.events.close()
+
+
+class MasterOnlyWorkload:
+    """One persistent master SQL session; no slave may acquire this catalog."""
+    def __init__(self, args, node, name):
+        self.node, self.name, self.timeout = node, name, args.timeout
+        self.client = Client(node.port, args.timeout, database=name)
+        self.stop = threading.Event()
+        self.condition = threading.Condition()
+        self.cycles = 0
+        self.error = None
+        self.expected = {0: 0}
+        self.finished = False
+        self.thread = threading.Thread(target=self.run, name="master-only-ddl-and-data", daemon=True)
+
+    def run(self):
+        session = uuid.uuid4().hex
+        query = lambda statement: self.client.sql(statement, session=session)
+        try:
+            sequence = 0
+            while not self.stop.is_set():
+                sequence += 1
+                query(f"INSERT INTO master_items VALUES({sequence},{sequence * 10})")
+                query(f"UPDATE master_items SET value=value+1 WHERE id={sequence}")
+                self.expected[sequence] = sequence * 10 + 1
+                if sequence % 3 == 0:
+                    query(f"DELETE FROM master_items WHERE id={sequence - 1}")
+                    del self.expected[sequence - 1]
+                query(f"ALTER TABLE master_items ADD COLUMN cycle_marker INT DEFAULT {sequence}")
+                rows = query("SELECT * FROM master_items")
+                expect(len(rows), len(self.expected), "master-only row count during DDL")
+                expect({int(row["id"]): row for row in rows},
+                       {key: {"id": key, "value": value, "cycle_marker": sequence}
+                        for key, value in self.expected.items()}, "master-only DDL/default/data freshness")
+                query("ALTER TABLE master_items DROP COLUMN cycle_marker")
+                rows = query("SELECT * FROM master_items")
+                expect(len(rows), len(self.expected), "master-only row count after DROP")
+                expect({int(row["id"]): row for row in rows},
+                       {key: {"id": key, "value": value} for key, value in self.expected.items()},
+                       "master-only schema after DROP and cached SELECT")
+                self.node.assert_exclusive(self.name)
+                with self.condition:
+                    self.cycles += 1
+                    self.condition.notify_all()
+                self.stop.wait(0.01)
+        except Exception as error:
+            with self.condition:
+                self.error = error
+                self.condition.notify_all()
+
+    def progress(self, previous):
+        with self.condition:
+            if not self.condition.wait_for(lambda: self.cycles > previous or self.error is not None, self.timeout):
+                raise DrillFailure("master-only schema/data queries stalled while a slave was unavailable")
+            if self.error is not None:
+                raise self.error
+            return self.cycles
+
+    def finish(self):
+        if self.finished:
+            return
+        self.finished = True
+        self.stop.set()
+        self.thread.join(self.timeout * 3)
+        if self.thread.is_alive():
+            raise DrillFailure("master-only thread did not stop")
+        if self.error is not None:
+            raise self.error
+        expect(table_values(self.client, "master_items"), self.expected, "master-only final exact data")
+        self.node.assert_exclusive(self.name)
+
+
+def assert_separate_claims(master, slaves, master_only):
+    for slave in slaves:
+        forbidden = {master_only} | {other.database for other in slaves if other is not slave}
+        for name in forbidden:
+            if (slave.data_dir / name / "schema.json").exists():
+                raise DrillFailure(f"{slave.name} unexpectedly replicated {name}")
+        for record in slave.journal()["records"].values():
+            if record["resource"]["database"] in forbidden:
+                raise DrillFailure(f"{slave.name} has a cross-database MOSI claim: {record}")
+    master.assert_exclusive(master_only)
+
+
+def run_multiple_slaves(args, artifacts, journal):
+    print("SCENARIO: two independent replication slaves plus concurrent master-only schema/data", flush=True)
+    directory = artifacts / "multiple-slaves"
+    directory.mkdir()
+    port = free_port()
+    master = Node(args, directory, "master", str(port))
+    slaves = [Node(args, directory, "slave-a", f"127.0.0.1:{port}", "local-a", "replica_a"),
+              Node(args, directory, "slave-b", f"127.0.0.1:{port}", "local-b", "replica_b")]
+    master_only = "master_only"
+    with contextlib.ExitStack() as owned:
+        owned.callback(master.cleanup)
+        for slave in slaves:
+            owned.callback(slave.cleanup)
+        master.start()
+        for slave in slaves:
+            setup_stress_database(master.client, slave.database)
+            slave.start()
+            slave.client.sql("SELECT * FROM stress_items")
+            eventually(lambda s=slave: s.journal().get("initialized", {}).get(s.database), "per-slave initial M claims")
+        master.client.sql(f"CREATE DATABASE {master_only}", "system")
+        direct = Client(master.port, args.timeout, database=master_only)
+        direct.sql("CREATE TABLE master_items(id INT PRIMARY KEY, value INT) ENGINE=SAFE")
+        direct.sql("INSERT INTO master_items VALUES(0,0)")
+        monitor = MasterOnlyWorkload(args, master, master_only)
+        monitor.thread.start()
+        owned.callback(monitor.finish)
+        monitor.progress(0)
+        oracles = [Oracle(directory / f"writes-{index}.jsonl") for index in range(2)]
+        for oracle in oracles:
+            owned.callback(oracle.events.close)
+        pairs = [SimpleNamespace(master=master, slave=slave) for slave in slaves]
+        for round_index in range(args.rounds):
+            print(f"  multi-slave round {round_index + 1}: simultaneous independent databases", flush=True)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as threads:
+                futures = [threads.submit(workload, args, pair, oracle, round_index * 3, analytics=True)
+                           for pair, oracle in zip(pairs, oracles)]
+                for future in futures:
+                    future.result()
+            for slave, oracle in zip(slaves, oracles):
+                reader = Client(master.port, args.timeout, database=slave.database)
+                verify_database_pair(reader, slave.client, oracle, {1: 100, 9: 900})
+                assert_reclaimed(master, slave)
+            assert_separate_claims(master, slaves, master_only)
+            for offline_index in range(2):
+                offline = slaves[offline_index]
+                live_index = 1 - offline_index
+                live = slaves[live_index]
+                offline.kill()
+                Client(master.port, args.timeout, database=offline.database).reject(
+                    "SELECT * FROM stress_items", status=500, contains=NETWORK_ERROR)
+                before = monitor.cycles
+                workload(args, pairs[live_index], oracles[live_index], round_index * 3 + offline_index + 1,
+                         analytics=True)
+                # Two completions ensure a full DDL/data cycle started after
+                # the peer was already unavailable, even if one was in flight.
+                monitor.progress(before + 1)
+                verify_database_pair(Client(master.port, args.timeout, database=live.database), live.client,
+                                     oracles[live_index], {1: 100, 9: 900})
+                assert_reclaimed(master, live)
+                offline.start()
+                eventually(lambda: len([s for s in master.statuses() if s["connected"]]) == 2,
+                           "both slaves did not reconnect")
+                verify_database_pair(Client(master.port, args.timeout, database=offline.database), offline.client,
+                                     oracles[offline_index], {1: 100, 9: 900})
+                assert_reclaimed(master, offline)
+                assert_separate_claims(master, slaves, master_only)
+            journal.append({"scenario": "multiple-slaves", "round": round_index + 1,
+                            "databases": [slave.database for slave in slaves],
+                            "master_only_ddl_data_cycles": monitor.cycles})
+        monitor.finish()
+        for slave, oracle in zip(slaves, oracles):
+            assert_reclaimed(master, slave)
+        master.kill()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as threads:
+            futures = [threads.submit(workload, args, pair, oracle, args.rounds * 3 + index)
+                       for index, (pair, oracle) in enumerate(zip(pairs, oracles))]
+            for future in futures:
+                future.result()
+        for slave, oracle in zip(slaves, oracles):
+            oracle.verify(slave.client)
+            slave.assert_exclusive()
+        master.start()
+        eventually(lambda: len([s for s in master.statuses() if s["connected"]]) == 2,
+                   "both slaves did not reconnect after master restart")
+        expect(table_values(direct, "master_items"), monitor.expected, "master-only schema/data survived master crash")
+        rows = direct.sql("SELECT * FROM master_items")
+        expect(len(rows), len(monitor.expected), "master-only row count after master restart")
+        expect({int(row["id"]): row for row in rows},
+               {key: {"id": key, "value": value} for key, value in monitor.expected.items()},
+               "master-only ADD/DROP schema survived master crash without resurrected columns")
+        for index, (slave, oracle) in enumerate(zip(slaves, oracles)):
+            reader = Client(master.port, args.timeout, database=slave.database)
+            verify_database_pair(reader, slave.client, oracle, {1: 100, 9: 900})
+            slave.kill()
+            oracle.verify(reader)  # Its current S copy remains valid offline.
+            slave.start()
+            verify_database_pair(reader, slave.client, oracle, {1: 100, 9: 900})
+            assert_reclaimed(master, slave)
+        assert_separate_claims(master, slaves, master_only)
+        journal.append({"scenario": "multiple-slave-master-restart", "freshness": "all-three-databases"})
 
 
 def main():
@@ -582,6 +945,14 @@ def main():
         run_regressions(args, artifacts, journal)
         run_partitions(args, artifacts, journal)
         run_stress(args, artifacts, journal)
+        run_multiple_slaves(args, artifacts, journal)
+        # Also catch a race which terminates a process after its last response
+        # or during an expected shutdown; those exits cannot be inferred solely
+        # from SQL response validation.
+        for log in artifacts.rglob("memcp-generation-*.log"):
+            with log.open("rb") as lines:
+                if any(b"WARNING: DATA RACE" in line for line in lines):
+                    raise DrillFailure(f"server race report: {log}")
         write_manifest(artifacts / "manifest.json", args.seed, "passed", journal)
         print("PASS: replication cluster stress", flush=True)
         return 0

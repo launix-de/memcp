@@ -354,8 +354,12 @@ all its data shards. Shared copies still permit reads; writes require M for
 the affected resource.
 Master analytics can leave those resources shared; they do not automatically
 return to M when the query ends. A later write reclaims M through the ordinary
-protocol while the other holders are reachable. Automatic reclamation and an
-explicit database-wide offline-readiness command are not implemented yet.
+protocol while the other holders are reachable. On the slave, an administrator
+can run `(replication_reclaim "database")` through `/scm` to acquire M for its
+schema and every active durable shard, including empty and internal shards.
+It returns true only if all those permissions are still exclusive at the final
+check. Subsequent remote queries can share them again. An unreachable holder
+causes `Cluster network error`; reclamation never overrides its ownership.
 
 IS denotes a current backend-only generation with durable local permission;
 IO must acquire from its remote owner even when an older backup exists locally.
@@ -371,7 +375,10 @@ Slave admin SQL runs against the master's own authentication and access catalog;
 SHUTDOWN remains local. Multi-master routing and distributed scans remain future
 work. The separate **Replication Cluster Stress test** workflow runs a Python
 process/thread runner with alternating process crashes, parallel shared reads,
-independent partition ownership, offline writes and durable restart. These tests
+independent partition ownership, complete database reclamation, offline writes
+and durable restart. Two simultaneous slaves claim different databases while a
+third, master-only database runs schema changes and verified data queries.
+Quiescent checkpoints compare complete current values on both nodes. These tests
 retain data directories; retiring a destroyed owner's disk can lose changes newer
 than its last transferred backup.
 

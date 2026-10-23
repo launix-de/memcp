@@ -59,8 +59,20 @@ same ownership, visibility, lifetime, and durability guarantees.
 - Already authorized MOSI reads only load atomics. Existing shard leases and
   snapshot lifetimes retain their own purpose; replication adds no read-side
   locks, registration, counters or per-row synchronization writes.
+- Appending an INSERT writer lane changes the database shard directory and
+  requires schema M before native maintenance locks. Its private generation is
+  protected by the existing import-publication mutex until durable topology
+  publication; ordinary inserts into existing lanes retain shard-only ownership.
+  Database reclamation uses normal MOSI acquisitions for schema and every active
+  non-ephemeral shard. Its final permission check is a point-in-time observation,
+  never an exemption from later remote requests or owner-unavailability errors.
 
 ### Immutable main storage and mutable deltas
+
+Planner-cache initializer definitions are immutable atomic publications, including
+nil repair after schema reload. Completion is published once under the existing
+table creation barrier; warm probes read atomics. The persisted `oninit` field
+retains its existing representation and contains no synchronization state.
 
 - A shard's main column storages contain fixed, read-only values for one
   generation. Updates must not overwrite these values. Delta storage contains
@@ -488,6 +500,11 @@ snapshot identity, unrelated constraint labels or foreign-key metadata.
 Column-declaration guards compare only
 consumed type, dimensions, nullability and collation through published point
 metadata. Statistics publication must not invalidate a declaration contract.
+Wildcard expansion additionally consumes the ordered public column-name
+directory of each matching base source, including through derived relations and
+UNION branches. Exact SELECT entries use the same declaration-guard dispatcher;
+guard-free entries retain their direct callable. Wildcard guards compare that
+directory, never a catalog revision, shard topology or unrelated database DDL.
 Direct DML recipes use the same compile-local guard protocol for mutation
 semantics only; a cost/statistics change must not become a schema-contract error.
 Comparison proofs retain frontend operand triples before binding removes

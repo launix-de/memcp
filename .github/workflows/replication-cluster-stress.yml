@@ -47,16 +47,36 @@ jobs:
       - name: Check process runner and write oracle
         run: python3 tools/test_reliability_drill.py
 
-      - name: Run Python process and thread runner
+      - name: Run crash, reclaim and three-database isolation scenarios
         run: >-
           python3 -u tools/replication_cluster_stress.py
           --binary "$RUNNER_TEMP/memcp-replication"
           --artifacts "$RUNNER_TEMP/replication-stress"
           --seed 20261023 --rounds 5 --workers 4 --operations 25
 
+      - name: Build race-instrumented servers
+        run: go build -race -tags=nophp -o "$RUNNER_TEMP/memcp-replication-race" .
+
+      - name: Check MOSI state-machine and publication units for races
+        run: >-
+          go test -race -tags=nophp ./storage
+          -run 'TestReplication|TestMosi|TestCreateTableRefreshesInvalidatedPlannerCacheOnInit'
+          -count=1
+
+      - name: Check the same process scenarios with the Go race detector
+        env:
+          GORACE: halt_on_error=1 exitcode=66
+        run: >-
+          python3 -u tools/replication_cluster_stress.py
+          --binary "$RUNNER_TEMP/memcp-replication-race"
+          --artifacts "$RUNNER_TEMP/replication-stress-race"
+          --seed 20261025 --rounds 1 --workers 3 --operations 12
+
       - name: Upload node logs and write oracle
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: replication-cluster-stress
-          path: ${{ runner.temp }}/replication-stress
+          path: |
+            ${{ runner.temp }}/replication-stress
+            ${{ runner.temp }}/replication-stress-race

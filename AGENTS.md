@@ -109,10 +109,22 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- `table.OnInit` atomically publishes an immutable closed callback. JSON loading
+  and ABI migration initialize it before publication; schema-owned repair of a
+  restored planner cache may replace nil. `onInitComplete` publishes completion
+  atomically under the existing `creationMu`; callback execution and failures
+  retain that table-local barrier. Serialization reads the published callback
+  and preserves the existing `oninit` JSON field. Warm catalog probes only load
+  these atomics and never write completion again.
+
 - `replicationManager` is published once after frontend initialization. Its
   private fsynced journal owns peer identities, cached authentication, resource
   permissions and administrative retirement tombstones, never inferred from
   liveness. Each database schema and logical data shard has its own `replicaCell`.
+  A coordinator's pending reader directory is private after request-mark
+  persistence, until final publication under the manager mutex. Network waits
+  must never mutate maps concurrently serialized by another resource's journal
+  checkpoint.
   `directory` serializes ownership handovers; `gate` protects only write batches
   and transactions. Already authorized reads use atomic state loads and existing
   snapshot lifetimes, without additional reader registration or admission writes.
@@ -157,6 +169,9 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   The schema cell's `importPublication` mutex protects import registration and
   data-generation publication against GC. GC takes the existing persistence
   lifecycle exclusively, then this mutex, and defers while any import remains.
+  Appended INSERT writer lanes own schema M before native maintenance locks
+  and retain this publication mutex through their private generation's durable
+  topology publication. Inserts using existing lanes add no schema write lease.
   Readers never take a persistence lease across network packet boundaries;
   schema imports retain their existing exclusive lifecycle publication instead.
   Source preparation owns a persistence read capability before its handover
@@ -376,6 +391,8 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - `storageShard.srState` is an atomic lifecycle publication. Read it through
   `state()` and publish transitions through `setState()`; shard read hot paths
   must not acquire a shard lock merely to inspect the lifecycle state.
+  Its `t` identity is initialized before publication and remains immutable;
+  cold loading must not rewrite it while schema serialization reads it.
 
 - `storageShard.cacheReaders` is an atomic, process-local count of `GetRead`
   leases. The first lease synchronizes with cleanup under `shard.mu`; nested

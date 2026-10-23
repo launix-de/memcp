@@ -550,6 +550,26 @@ foreign keys:
 	update: I am tbl2 -> check all cols2 (old values): do the values exist in tbl1.cols1? if so -> CASCADE an update in tbl1, SET NULL in tbl1 or RESTRICT
 	delete: I am tbl2 -> check all cols2 (old values): do the values exist in tbl1.cols1? if so -> CASCADE a delete in tbl1, SET NULL in tbl1 or RESTRICT
 */
+// atomicTableInitializer publishes one immutable closed callback. JSON loading
+// initializes it before table publication; schema-owned legacy-cache repair may
+// replace a nil definition while ordinary createtable guards read it.
+type atomicTableInitializer struct {
+	atomic.Pointer[scm.Scmer]
+}
+
+func (initializer *atomicTableInitializer) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		initializer.Store(nil)
+		return nil
+	}
+	var value scm.Scmer
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	initializer.Store(&value)
+	return nil
+}
+
 type table struct {
 	// Query-local contribution reuse checks these atomics outside row loops.
 	// Writers bracket complete DML/visibility/topology batches. Identity is
@@ -564,12 +584,12 @@ type table struct {
 	schema          *database
 	Name            string
 	Columns         []*column
-	Unique          []uniqueKey          // unique keys
-	Foreign         []foreignKey         // foreign keys
-	Triggers        []TriggerDescription // triggers on this table
-	PersistencyMode PersistencyMode      /* 0 = safe (default), 1 = sloppy, 2 = memory */
-	OnInit          *scm.Scmer           `json:"oninit,omitempty"` // closed callback that repopulates data-empty engines after restart
-	cacheUsers      int64                // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
+	Unique          []uniqueKey            // unique keys
+	Foreign         []foreignKey           // foreign keys
+	Triggers        []TriggerDescription   // triggers on this table
+	PersistencyMode PersistencyMode        /* 0 = safe (default), 1 = sloppy, 2 = memory */
+	OnInit          atomicTableInitializer `json:"oninit,omitempty"` // immutable closed callback, atomically published
+	cacheUsers      int64                  // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
 	// Immutable reverse dependency list, published by registration with CAS.
 	// Eviction visits only these sources; it never scans the whole catalog.
 	cacheTriggerSources atomic.Pointer[cacheTriggerSource]
@@ -642,7 +662,7 @@ type table struct {
 	// oninit hook. Concurrent if-not-exists calls wait on the same barrier.
 	creationMu     sync.Mutex
 	creationPanic  any
-	onInitComplete bool // guarded by creationMu; deliberately resets after restart
+	onInitComplete atomic.Bool // completion published under creationMu; deliberately resets after restart
 
 	// cacheInitMu guards the one-time initializer for canonical planner caches.
 	// The table object is removed on cache eviction, so initialization state has
@@ -802,15 +822,16 @@ func (t *table) awaitCreationInitialization(tx scm.Scmer) {
 	if t.creationPanic != nil {
 		panic(t.creationPanic)
 	}
+	if t.onInitComplete.Load() {
+		return
+	}
 	if t.PersistencyMode != Memory && t.PersistencyMode != Cache {
-		t.onInitComplete = true
+		t.onInitComplete.Store(true)
 		return
 	}
-	if t.onInitComplete {
-		return
-	}
-	if t.OnInit == nil {
-		t.onInitComplete = true
+	initializer := t.OnInit.Load()
+	if initializer == nil {
+		t.onInitComplete.Store(true)
 		return
 	}
 	var thisCallPanic any
@@ -827,8 +848,8 @@ func (t *table) awaitCreationInitialization(tx scm.Scmer) {
 				t.creationPanic = thisCallPanic
 			}
 		}()
-		scm.Apply(*t.OnInit, tx)
-		t.onInitComplete = true
+		scm.Apply(*initializer, tx)
+		t.onInitComplete.Store(true)
 	}()
 	if thisCallPanic != nil {
 		panic(thisCallPanic)
@@ -991,7 +1012,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		Foreign:            t.Foreign,
 		Triggers:           t.Triggers,
 		PersistencyMode:    t.PersistencyMode,
-		OnInit:             t.OnInit,
+		OnInit:             t.OnInit.Load(),
 		AutoIncrement:      autoIncrement,
 		Collation:          t.Collation,
 		Charset:            t.Charset,
@@ -3371,6 +3392,19 @@ func (t *table) DropColumnIfExists(name string) bool {
 }
 
 func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *storageShard, incoming uint, balance bool) (*tableShardTopology, *storageShard) {
+	if r := replication.Load(); r != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable() {
+		// Adding a lane changes the database's shard directory. Invalidate
+		// shared schema copies before publication, without affecting ordinary
+		// INSERTs which can use an existing lane.
+		access := t.schema.GetWrite(nil)
+		defer access.Release()
+		if t.schema.tables.Get(t.Name) != t {
+			panic("replication schema changed; retry statement")
+		}
+		publication := r.resourceCell(replicaResource{Database: t.schema.Name})
+		publication.importPublication.Lock()
+		defer publication.importPublication.Unlock()
+	}
 	if !t.maintenanceMu.TryLock() {
 		return t.topology.Load(), nil
 	}

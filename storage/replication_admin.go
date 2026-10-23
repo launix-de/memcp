@@ -26,6 +26,47 @@ type replicaStatus struct {
 	Databases []string `json:"databases"`
 }
 
+// Reclaim uses ordinary MOSI requests, including empty and internal durable
+// shards. It never promotes an unavailable owner's backup. This is a point-in-
+// time check, not a reservation against subsequent remote queries.
+func (r *replicationManager) reclaimDatabase(name string) bool {
+	if r.master || !validReplicaDatabase(name) {
+		panic("database reclaim requires a replication slave and a user database")
+	}
+	schema := r.obtain(replicaResource{Database: name}, mosiM, "")
+	db := databases.Get(name)
+	if db == nil {
+		panic("missing reclaimed database")
+	}
+	db.ensureLoaded()
+	r.schemaShards(db, r.id, true)
+	for _, table := range db.tables.GetAll() {
+		if table.isEphemeralQueryTable() {
+			continue
+		}
+		for _, shard := range table.ActiveShards() {
+			if shard != nil {
+				r.obtain(*r.shardCell(shard).resource.Load(), mosiM, "")
+			}
+		}
+	}
+	ownsM := func(cell *replicaCell) bool {
+		state := cell.rights.snapshot()
+		return state.phase == mosiM || state.phase == mosiIS && state.backend == mosiM
+	}
+	for _, table := range db.tables.GetAll() {
+		if table.isEphemeralQueryTable() {
+			continue
+		}
+		for _, shard := range table.ActiveShards() {
+			if shard != nil && !ownsM(r.shardCell(shard)) {
+				return false
+			}
+		}
+	}
+	return ownsM(schema)
+}
+
 func (r *replicationManager) statuses() []replicaStatus {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -242,6 +283,13 @@ func replicationAdmin(arguments []scm.Scmer) scm.Scmer {
 }
 
 func initReplicationAdmin(en *scm.Env) {
+	scm.Declare(en, &scm.Declaration{Name: "replication_reclaim", Fn: func(a ...scm.Scmer) scm.Scmer {
+		r := replication.Load()
+		if r == nil {
+			panic("replication is not enabled")
+		}
+		return scm.NewBool(r.reclaimDatabase(a[0].String()))
+	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "admin-only: request schema and every data shard as M through normal MOSI; false if concurrently shared again", HasSideEffects: true, Params: []*scm.TypeDescriptor{{Kind: "string", Label: "database"}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
 	scm.Declare(en, &scm.Declaration{Name: "replication_slave", Fn: func(...scm.Scmer) scm.Scmer { r := replication.Load(); return scm.NewBool(r != nil && !r.master) }, Type: &scm.TypeDescriptor{Kind: "func", Return: &scm.TypeDescriptor{Kind: "bool"}}})
 	scm.Declare(en, &scm.Declaration{Name: "replication_admin", Fn: func(a ...scm.Scmer) scm.Scmer { return replicationAdmin(a) },
 		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true,

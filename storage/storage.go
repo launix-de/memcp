@@ -2497,7 +2497,7 @@ func Init(en scm.Env) {
 			// result stays race-free under concurrent creators.
 			if ifnotexists {
 				if existing := db.tables.Get(tblName); existing != nil {
-					if existing.OnInit != nil || existing.onInitComplete {
+					if existing.OnInit.Load() != nil || existing.onInitComplete.Load() {
 						// This also reruns persisted oninit for data-empty MEMORY/CACHE
 						// tables after restart. The local barrier affects no other table.
 						existing.awaitCreationInitialization(currentTx)
@@ -2568,7 +2568,7 @@ func Init(en scm.Env) {
 			newTable.Auto_increment = autoIncrement
 			if !oninit.IsNil() {
 				closedOnInit := scm.CloseProcedure(oninit)
-				newTable.OnInit = &closedOnInit
+				newTable.OnInit.Store(&closedOnInit)
 			}
 
 			for _, coldef := range mustScmerSlice(a[2], "columns") {
@@ -2652,9 +2652,9 @@ func Init(en scm.Env) {
 				// the table already exists, "created=false" is the only signal the
 				// caller needs to skip collect/materialization work.
 				atomic.StoreUint64(&existing.lastAccessed, uint64(time.Now().UnixNano()))
-				if existing.OnInit == nil && !oninit.IsNil() {
+				if existing.OnInit.Load() == nil && !oninit.IsNil() {
 					closedOnInit := scm.CloseProcedure(oninit)
-					existing.OnInit = &closedOnInit
+					existing.OnInit.Store(&closedOnInit)
 					db.saveLockedAndUnlock(schemaSaveBuffered)
 				} else {
 					db.schemalock.Unlock()
@@ -2741,7 +2741,7 @@ func Init(en scm.Env) {
 				if !oninit.IsNil() {
 					scm.Apply(oninit, currentTx)
 				}
-				newTable.onInitComplete = true
+				newTable.onInitComplete.Store(true)
 				executeRegisteredCreateTableTriggers(newTable, nil)
 			}()
 			if thisCallPanic != nil {

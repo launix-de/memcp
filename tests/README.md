@@ -56,11 +56,24 @@ python3 tools/replication_cluster_stress.py --seed 20261023 --rounds 5 --workers
 ```
 
 The **Replication Cluster Stress test** workflow executes this runner directly.
-It owns both server processes, alternates SIGKILL/restart without taking both
-offline, and runs concurrent slave writers, master analytics and garbage collection. Its per-row
-oracle checks every acknowledged write after recovery; a write interrupted
-before its response may have either its previous or new value and is never
-blindly retried. Logs, write events, seed and a result manifest remain in the
+It repeats the process scenarios with race-instrumented servers and a second
+seed, failing on a Go race report and retaining both runs' artifacts.
+It owns the server processes, alternates SIGKILL/restart without taking an owner
+and its backup offline together, and runs concurrent slave writers, master
+analytics and garbage collection. A separate scenario uses two simultaneous
+slaves with different databases and a third master-only database. The latter
+executes ADD/DROP COLUMN and exact data queries on its own master session,
+including complete cycles while either slave is unavailable; neither slave may
+acquire its catalog or ownership records.
+
+The per-row oracle compares complete current values on both nodes at mutation
+barriers and after recovery. A write interrupted before its response may have
+either its previous or new value and is never blindly retried. Both nodes must
+agree on that outcome; recovery fixes it permanently. Reclaim checks the schema
+and every current shard, including empty, partitioned and internal durable
+shards, before cutting the master connection and performing offline DDL/DML.
+An unreachable holder must fail without ownership promotion. Logs, write events,
+seed and a result manifest remain in the
 printed artifact directory. `--executor` and `--startup-timeout` also support
 running a prebuilt target binary through QEMU. Go tests retain only in-process
 MOSI/state-machine and transport checks.

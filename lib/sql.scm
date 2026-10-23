@@ -580,9 +580,14 @@ user table merely to discard a newly constructed policy closure. */
 				compiled procedures. Their dispatchers still evaluate every guard. */
 				(if (list? cached_entry) (cadr cached_entry) cached_entry)
 				(begin
-					(define select_query (match (toUpper parse_query)
-						(regex "^\\s*SELECT\\b" _) true
-						_ false))
+					/* Only SELECT owns read-plan declaration guards. In particular,
+					CREATE TRIGGER must leave inline DML guards inside its callback.
+					Reuse the lexical token pass on this cold miss so leading comments
+					cannot bypass wildcard declaration validation. */
+					(define tokens (sql_parameter_tokens parse_query))
+					(define first_token (sql_parameter_next_significant_index tokens 0))
+					(define select_query (if (< first_token (count tokens))
+						(equal?? (nth tokens first_token) "SELECT") false))
 					/* EXPLAIN captures planning statistics and needs their invalidation too.
 					Ordinary point and ordered scans retain the smaller exact cache path. */
 					(define guarded_query (or explain_query (and select_query
@@ -594,6 +599,7 @@ user table merely to discard a newly constructed policy closure. */
 						exact producer remains identical to its guard-free implementation;
 						its cold optimizer must not compile an unused variant producer. */
 						(if (or (and (list? parse_fn) (> (count parse_fn) 1) ((cadr parse_fn) "exact_guards"))
+							select_query
 							(match (toUpper parse_query)
 								(regex "^\\s*(?:UPDATE|DELETE)\\b" _) true _ false))
 							(begin
