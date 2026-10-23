@@ -23,6 +23,18 @@ current MemCP can open data written by that revision. `workflow_dispatch`'s
 `base_refs` input accepts a JSON list such as `["topic/old-format"]` for
 additional one-off checks.
 
+The `upgrade-release-before-lz4-dictionaries-2026-10-14` pin identifies
+`44d6af4d331fda2a9901375c0895a54f1a41260e`, immediately before the LZ4 dictionary
+persistence change (#1107) and the subsequent APPLY planner change (#1110).
+It preserves a predecessor from before both changes in the mandatory matrix.
+
+The `upgrade-release-before-group-source-recipes-2026-09-29` pin identifies
+`a9cc5da0f69b566d59db757461f90ff8ee6ee467`, before the point/range group-cache
+carrier identity changes (#1010). Its binary warms and persists the older
+helper structures before the candidate opens the same data directory. The test
+harness must not remove or rewrite those structures to prepare the upgrade;
+the engine owns compatibility with historical optimization state.
+
 ## What each matrix job proves
 
 The predecessor binary creates the complete fixture and supplies two oracles:
@@ -47,6 +59,14 @@ inspect hidden schemas, column names, cache families or `EXPLAIN` operator
 names. Coverage comes from realistic query breadth and lifecycle depth; an
 implementation remains free to migrate, discard, rename or stop producing a
 cache as long as public results remain correct.
+
+The candidate additionally executes equivalent derived-table alias variants
+against those same query results, including repeated aliases across grouping
+barriers and grouped window totals. These extra checks run before candidate
+DML, after cold/warm mutations, and after restart. A predecessor may itself
+contain the alias-shadowing regression; its unchanged, distinctly aliased SQL
+still supplies the oracle. The original old/new query comparisons remain
+mandatory alongside the candidate's equivalent variants.
 
 Engine format versions, cache names and cache layouts are a black box to this
 test. It never edits the implementation to synthesize a layout change or checks
