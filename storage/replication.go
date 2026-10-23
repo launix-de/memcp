@@ -80,17 +80,18 @@ type replicaJournal struct {
 type replicaCell struct {
 	// gate protects uncommitted local writes against ownership transfer.
 	// Analytics never participate: their existing snapshots remain valid.
-	gate             sync.RWMutex // write transactions only; reads use existing snapshots
-	rights           mosiState
-	resource         atomic.Pointer[replicaResource]
-	current          atomic.Pointer[storageShard]
-	bootstrap        sync.Mutex
-	initialized      atomic.Bool
-	bootstrapStarted bool
-	directory        sync.Mutex
-	checkpoint       sync.Mutex
-	acquire          sync.Mutex
-	retiredShards    atomic.Pointer[[]weak.Pointer[storageShard]]
+	gate              sync.RWMutex // write transactions only; reads use existing snapshots
+	rights            mosiState
+	resource          atomic.Pointer[replicaResource]
+	current           atomic.Pointer[storageShard]
+	bootstrap         sync.Mutex
+	initialized       atomic.Bool
+	bootstrapStarted  bool
+	directory         sync.Mutex
+	checkpoint        sync.Mutex
+	importPublication sync.Mutex // schema cell: import registration/publication versus GC
+	acquire           sync.Mutex
+	retiredShards     atomic.Pointer[[]weak.Pointer[storageShard]]
 }
 
 type replicationManager struct {

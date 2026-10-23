@@ -60,6 +60,19 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int, complete bool
 	db.ensureLoaded()
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
+	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
+		publication := r.resourceCell(replicaResource{Database: db.Name})
+		publication.importPublication.Lock()
+		defer publication.importPublication.Unlock()
+		pending := false
+		r.imports.Range(func(_, value any) bool {
+			pending = value.(*replicaImport).header.Resource.Database == db.Name
+			return !pending
+		})
+		if pending {
+			return 0, 0, false
+		}
+	}
 	if replication.Load() != nil && GetDatabase(db.Name) != db {
 		return 0, 0, false
 	}

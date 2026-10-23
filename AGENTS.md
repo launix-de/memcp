@@ -148,6 +148,21 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   and runtime GC retains completed backup files and blob manifests independently
   of advertised remote topology. Explicit retirement restores only that completed
   generation before publishing M; it never promotes an incomplete transfer.
+  `replicaImport.knownGeneration` is immutable receiver-owned import metadata,
+  initialized from the completed-generation journal before publication. A resend
+  consumes existing immutable columns without opening another backend writer;
+  interrupted resends must never truncate a completed backup. Retirement joins
+  the peer reader before promoting a backup, so an earlier import cannot publish
+  over the promoted owner. RPC workers retain their existing lifecycle ownership.
+  The schema cell's `importPublication` mutex protects import registration and
+  data-generation publication against GC. GC takes the existing persistence
+  lifecycle exclusively, then this mutex, and defers while any import remains.
+  Readers never take a persistence lease across network packet boundaries;
+  schema imports retain their existing exclusive lifecycle publication instead.
+  Source preparation owns a persistence read capability before its handover
+  gate, through private generation creation and publication, and releases it
+  before sending packets. None of these
+  maintenance capabilities participates in already authorized reads.
   `table.replicationCacheEpoch` advances only at remote invalidation publication;
   each `StorageComputeProxy.replicationCacheEpoch` applies it under proxy ownership
   during preparation, never in generated row loops.

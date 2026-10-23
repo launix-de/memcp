@@ -369,10 +369,16 @@ func (r *replicationManager) backupDatabase(name, user string) {
 	for _, resource := range resources {
 		cell := r.resourceCell(resource)
 		resource = *cell.resource.Load() // schema publication may have renamed its table
-		if !cell.gate.TryLock() {
-			continue
-		}
 		func() {
+			releasePersistence, err := replicaPersistenceRead(resource)
+			if err != nil {
+				scm.PrintError(err)
+				return
+			}
+			defer releasePersistence()
+			if !cell.gate.TryLock() {
+				return
+			}
 			defer cell.gate.Unlock()
 			if cell.rights.phase() == mosiIS {
 				r.obtain(resource, mosiM, user)
@@ -392,6 +398,7 @@ func (r *replicationManager) backupDatabase(name, user string) {
 			r.mu.Lock()
 			epoch := r.journal.Records[resource.key()].Epoch
 			r.mu.Unlock()
+			releasePersistence()
 			if err := r.sendResource(peer, replicaPacket{ID: uuid.NewString(), Resource: resource, Epoch: epoch, Generation: generation, User: user, Hash: auth.Hash}); err != nil {
 				scm.PrintError(err)
 			}

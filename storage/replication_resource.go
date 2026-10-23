@@ -26,12 +26,15 @@ import "github.com/google/uuid"
 // memory is bounded by the connection queue; schema JSON uses the existing
 // byte-slice persistence API, while column/blob bytes go directly to writers.
 type replicaImport struct {
-	header     replicaPacket
-	engine     PersistenceEngine
-	writer     io.WriteCloser
-	schema     bytes.Buffer
-	objectKind string
-	objectName string
+	header replicaPacket
+	engine PersistenceEngine
+	// Set at unpublished construction from the completed-generation journal.
+	// Duplicate immutable columns are consumed without reopening their files.
+	knownGeneration bool
+	writer          io.WriteCloser
+	schema          bytes.Buffer
+	objectKind      string
+	objectName      string
 }
 
 type replicaStep struct {
@@ -40,6 +43,27 @@ type replicaStep struct {
 	done     chan struct{}
 	once     sync.Once
 	err      error
+}
+
+// Source preparation follows the native lifecycle -> handover gate order.
+// The caller releases this capability before sending packets; the idempotent
+// local release also supports deferred cleanup of preparation failures.
+func replicaPersistenceRead(resource replicaResource) (func(), error) {
+	if resource.Shard == "" {
+		return func() {}, nil
+	}
+	db := databases.Get(resource.Database)
+	if db == nil {
+		return nil, fmt.Errorf("missing shard database")
+	}
+	db.persistenceLifecycle.RLock()
+	released := false
+	return func() {
+		if !released {
+			released = true
+			db.persistenceLifecycle.RUnlock()
+		}
+	}, nil
 }
 
 func (step *replicaStep) finish(err error) { step.once.Do(func() { step.err = err; close(step.done) }) }
@@ -374,7 +398,10 @@ func (r *replicationManager) startImport(packet replicaPacket) (*replicaImport, 
 	if engine == nil {
 		return nil, fmt.Errorf("invalid local backend")
 	}
-	return &replicaImport{header: packet, engine: engine}, nil
+	r.mu.Lock()
+	known := packet.Resource.Shard != "" && packet.Generation != "" && r.journal.Records[packet.Resource.key()].Generation == packet.Generation
+	r.mu.Unlock()
+	return &replicaImport{header: packet, engine: engine, knownGeneration: known}, nil
 }
 
 func (transfer *replicaImport) abort() {
@@ -426,6 +453,32 @@ func (transfer *replicaImport) packet(packet replicaPacket) error {
 			if _, err := uuid.Parse(packet.Generation); err != nil {
 				return err
 			}
+			if transfer.knownGeneration {
+				// WriteColumn may truncate immediately: backends expect a private
+				// new generation. Reconnect backups can resend an already completed
+				// UUID, whose immutable payload must survive even an aborted resend.
+				// A volatile generation may have no local column files yet; those
+				// still need their first installation through the normal writer.
+				exists, err := func() (bool, error) {
+					existing := transfer.engine.ReadColumn(packet.Generation, packet.Object)
+					defer existing.Close()
+					if missing, ok := existing.(interface{ Missing() bool }); ok && missing.Missing() {
+						return false, nil
+					}
+					var marker [1]byte
+					n, err := existing.Read(marker[:])
+					if err != nil && err != io.EOF {
+						return false, err
+					}
+					return n != 0, nil
+				}()
+				if err != nil {
+					return err
+				}
+				if exists {
+					return nil
+				}
+			}
 			transfer.writer = transfer.engine.WriteColumn(packet.Generation, packet.Object)
 		case "blob":
 			if !validBlobHash(packet.Object) {
@@ -447,7 +500,7 @@ func (transfer *replicaImport) packet(packet replicaPacket) error {
 			_, err = transfer.schema.Write(data)
 		} else if transfer.writer != nil {
 			_, err = transfer.writer.Write(data)
-		} else {
+		} else if !transfer.knownGeneration || transfer.objectKind != "column" {
 			return fmt.Errorf("chunk outside object")
 		}
 		return err

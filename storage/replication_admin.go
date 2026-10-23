@@ -97,6 +97,10 @@ func (r *replicationManager) retire(id string) error {
 		_ = p.call(ctx, "retire", struct{}{}, nil)
 		cancel()
 		p.close()
+		// An inline import which passed its retirement check must finish before
+		// backup promotion. RPC workers are not joined here: retirement itself
+		// can run inside one of them. The connection owner cleans up imports.
+		<-p.readDone
 	}
 	for _, name := range names {
 		c := r.cell(name)

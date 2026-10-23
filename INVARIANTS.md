@@ -40,6 +40,14 @@ same ownership, visibility, lifetime, and durability guarantees.
   IS identifies a current backend-only generation; IO requires acquisition from
   its remote owner. A backend-only authoritative generation must never be stale.
   A retained safety backup cannot establish IS or satisfy an IO access.
+  Repeated transfers of a completed immutable generation never reopen its
+  existing column objects for writing. An aborted resend must preserve the last
+  complete backup. Retirement waits for inline import publication to stop before
+  restoring that backup as authoritative.
+  Pending imports remain registered through publication. GC synchronizes with
+  their registration and defers deletion while an import can own private files.
+  Source rebuilds retain the existing persistence lifecycle capability, acquired
+  before write handover gates. No lifecycle lease spans incoming packet waits.
 - Restart reconstructs IS only from durable local M/O/S permission. Loading
   restores that permission, never upgrades S/O to M. Invalidation durably removes
   local authority before admitting a remote writer. Owner unavailability fails

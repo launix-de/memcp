@@ -57,6 +57,7 @@ func TestReplicationParallelReadsIgnoreControlLocks(t *testing.T) {
 		c.acquire.Lock()
 		c.directory.Lock()
 		c.checkpoint.Lock()
+		c.importPublication.Lock()
 		done := make(chan struct{})
 		go func() {
 			var readers sync.WaitGroup
@@ -80,6 +81,7 @@ func TestReplicationParallelReadsIgnoreControlLocks(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			timedOut = true
 		}
+		c.importPublication.Unlock()
 		c.checkpoint.Unlock()
 		c.directory.Unlock()
 		c.acquire.Unlock()
@@ -366,5 +368,106 @@ func TestReplicationCleanupRetainsCompletedBackup(t *testing.T) {
 	value := access.shard.getColumnStorageOrPanic("payload", false, nil).GetValue(0)
 	if value.String() != "row-00000001" {
 		t.Fatalf("completed backup was not restored: %v", value)
+	}
+}
+
+func TestReplicationRepeatedTransferKeepsCompletedColumns(t *testing.T) {
+	table, engine := createDurabilityTestTable(t, "treplicaresend", 3)
+	r := &replicationManager{master: true, id: "master", cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	resource := replicaResource{Database: table.schema.Name, Table: table.Name, Shard: table.ActiveShards()[0].logicalID().String()}
+	generation, err := r.prepareResource(resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.journal.Records[resource.key()] = replicaRecord{Resource: resource, Owner: "slave", State: "IO", Generation: generation}
+	read := func() []byte {
+		t.Helper()
+		reader := engine.ReadColumn(generation, "payload")
+		defer reader.Close()
+		data, err := io.ReadAll(reader)
+		if err != nil || len(data) == 0 {
+			t.Fatalf("completed column is missing: %v", err)
+		}
+		return data
+	}
+	before := read()
+	for _, complete := range []bool{false, true} {
+		packet := replicaPacket{ID: uuid.NewString(), Resource: resource, Generation: generation, Kind: "object", ObjectKind: "column", Object: "payload"}
+		transfer, err := r.startImport(packet)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(transfer.abort)
+		if err := transfer.packet(packet); err != nil {
+			t.Fatal(err)
+		}
+		// Even before any chunk arrives, opening a duplicate transfer must
+		// leave the completed file readable by snapshots and retirement.
+		if !bytes.Equal(read(), before) {
+			t.Fatal("resend truncated a completed generation on object open")
+		}
+		if complete {
+			var packed bytes.Buffer
+			writer := gzip.NewWriter(&packed)
+			writer.Write(before)
+			writer.Close()
+			packet.Kind, packet.Payload = "chunk", packed.Bytes()
+			if err := transfer.packet(packet); err != nil {
+				t.Fatal(err)
+			}
+			packet.Kind, packet.Payload = "object_end", nil
+			if err := transfer.packet(packet); err != nil {
+				t.Fatal(err)
+			}
+		}
+		transfer.abort()
+		if !bytes.Equal(read(), before) {
+			t.Fatal("completed or interrupted resend replaced immutable bytes")
+		}
+	}
+}
+
+func TestReplicationImportDefersCleanup(t *testing.T) {
+	table, engine := createDurabilityTestTable(t, "treplicainflight", 3)
+	r := &replicationManager{master: true, id: "master", cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	resource := replicaResource{Database: table.schema.Name, Table: table.Name, Shard: table.ActiveShards()[0].logicalID().String()}
+	if _, err := r.prepareResource(resource); err != nil {
+		t.Fatal(err)
+	}
+	// This unpublished fixture has no historical query owners.
+	r.resourceCell(resource).retiredShards.Store(nil)
+	packet := replicaPacket{ID: "pending", Resource: resource, Generation: uuid.NewString(), Kind: "object", ObjectKind: "column", Object: "payload"}
+	transfer, err := r.startImport(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.imports.Store("slave/pending", transfer)
+	previous := replication.Swap(r)
+	defer func() {
+		transfer.abort()
+		r.imports.Delete("slave/pending")
+		replication.Store(previous)
+	}()
+	if err := transfer.packet(packet); err != nil {
+		t.Fatal(err)
+	}
+	if blobs, shards, complete := CleanDatabase(table.schema); blobs != 0 || shards != 0 || complete {
+		t.Fatalf("cleanup ran through a private transfer: %d blobs, %d shards, complete=%v", blobs, shards, complete)
+	}
+	reader := engine.ReadColumn(packet.Generation, "payload")
+	if missing, ok := reader.(interface{ Missing() bool }); ok && missing.Missing() {
+		reader.Close()
+		t.Fatal("cleanup deleted the incoming generation")
+	}
+	reader.Close()
+	transfer.abort()
+	r.imports.Delete("slave/pending")
+	table.schema.persistenceLifecycle.Lock()
+	cleanShards(table.schema)
+	table.schema.persistenceLifecycle.Unlock()
+	reader = engine.ReadColumn(packet.Generation, "payload")
+	defer reader.Close()
+	if missing, ok := reader.(interface{ Missing() bool }); !ok || !missing.Missing() {
+		t.Fatal("aborted private generation was retained after import cleanup")
 	}
 }

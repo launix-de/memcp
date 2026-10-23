@@ -230,7 +230,10 @@ func (r *replicationManager) receivePacket(source string, packet *replicaPacket)
 		if err != nil {
 			return err
 		}
+		publication := r.resourceCell(replicaResource{Database: packet.Resource.Database})
+		publication.importPublication.Lock()
 		r.imports.Store(key, transfer)
+		publication.importPublication.Unlock()
 		return nil
 	case "object", "chunk", "object_end", "end":
 		key := source + "/" + packet.ID
@@ -245,7 +248,12 @@ func (r *replicationManager) receivePacket(source string, packet *replicaPacket)
 		if packet.Kind != "end" {
 			return transfer.packet(*packet)
 		}
-		r.imports.Delete(key)
+		if packet.Resource.Shard != "" {
+			publication := r.resourceCell(replicaResource{Database: packet.Resource.Database})
+			publication.importPublication.Lock()
+			defer publication.importPublication.Unlock()
+		}
+		defer r.imports.Delete(key)
 		defer transfer.abort()
 		if r.master {
 			r.mu.Lock()
@@ -340,6 +348,11 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 	if r.master || source != "" {
 		return fmt.Errorf("recall from non-master")
 	}
+	releasePersistence, err := replicaPersistenceRead(packet.Resource)
+	if err != nil {
+		return err
+	}
+	defer releasePersistence()
 	c := r.resourceCell(packet.Resource)
 	if err := replicationLock(ctx, &c.gate); err != nil {
 		return err
@@ -364,6 +377,7 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 	}
 	r.publishLocal(packet.Resource, phase)
 	packet.Generation = generation
+	releasePersistence()
 	return r.sendResource(r.peer(source), packet)
 }
 
@@ -428,6 +442,11 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			oldState = "O"
 		}
 		if record.Owner == r.id {
+			releasePersistence, err := replicaPersistenceRead(packet.Resource)
+			if err != nil {
+				return err
+			}
+			defer releasePersistence()
 			if err := replicationLock(ctx, &c.gate); err != nil {
 				return err
 			}
@@ -440,6 +459,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				record.Generation = generation
 			}
 			c.gate.Unlock()
+			releasePersistence()
 			if err != nil {
 				return err
 			}
