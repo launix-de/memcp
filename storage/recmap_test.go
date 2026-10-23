@@ -126,7 +126,7 @@ func TestRecMapCallPreservesMatchesAcrossSourceRebuild(t *testing.T) {
 	// even when its target key matches an existing row.
 	source.Insert([]string{"id", "target_id"}, [][]scm.Scmer{{scm.NewInt(5), scm.NewInt(10)}}, nil, scm.NewNil(), false, nil)
 	// Compact the first row to verify recid translation, not just a shard alias.
-	release := currentSource.GetExclusive()
+	release := currentSource.GetWrite(nil).Release
 	currentSource.mu.Lock()
 	currentSource.deletions.Set(0, true)
 	currentSource.mu.Unlock()

@@ -244,6 +244,9 @@ func runAcquiredShardScan(currentTx *TxContext, shard *storageShard, solo bool, 
 	func() {
 		defer func() { acquisitionFailure = recover() }()
 		release = shard.acquireReadForScan(currentTx)
+		if release.shard != nil {
+			shard = release.shard
+		}
 	}()
 	defer release.Release()
 	if scm.Trace == nil {
@@ -443,6 +446,13 @@ func (s *storageShard) acquireReadForScan(currentTx *TxContext) ReadAccess {
 		return ReadAccess{}
 	}
 	return s.GetRead(currentTx)
+}
+
+func (s *storageShard) acquireSnapshotRead(currentTx *TxContext) ReadAccess {
+	if s.hasWriteOwnerForTx(currentTx) {
+		return ReadAccess{}
+	}
+	return s.getRead(currentTx, true)
 }
 
 func collectRelevantShards(schema []shardDimension, access scanAccess, shards []*storageShard) []*storageShard {
@@ -1362,6 +1372,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 	for _, shard := range newshards {
 		indexes := func() []*StorageIndex {
 			release := shard.GetRead(nil)
+			shard = release.shard
 			defer release.Release()
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()

@@ -34,7 +34,45 @@ violations; fixing a race by adding locks to an inner hot path is not sufficient
 Existing protection must not be removed before its replacement provides the
 same ownership, visibility, lifetime, and durability guarantees.
 
+### Replication authority and backend generations
+
+- Database schema.json and each logical data shard have independent MOSI slots.
+  IS identifies a current backend-only generation; IO requires acquisition from
+  its remote owner. A backend-only authoritative generation must never be stale.
+  A retained safety backup cannot establish IS or satisfy an IO access.
+  Repeated transfers of a completed immutable generation never reopen its
+  existing column objects for writing. An aborted resend must preserve the last
+  complete backup. Retirement waits for inline import publication to stop before
+  restoring that backup as authoritative.
+  Pending imports remain registered through publication. GC synchronizes with
+  their registration and defers deletion while an import can own private files.
+  Source rebuilds retain the existing persistence lifecycle capability, acquired
+  before write handover gates. No lifecycle lease spans incoming packet waits.
+- Restart reconstructs IS only from durable local M/O/S permission. Loading
+  restores that permission, never upgrades S/O to M. Invalidation durably removes
+  local authority before admitting a remote writer. Owner unavailability fails
+  immediately with `Cluster network error`; it never promotes a backup or
+  reclaims an offline slave's M on a timer.
+- MR/OR/SR grant no access and coalesce requests in the state machine. A read
+  request can upgrade to MR; an older read grant cannot release its write waiters.
+  Complete generation installation and durable permission precede waiter release.
+- Already authorized MOSI reads only load atomics. Existing shard leases and
+  snapshot lifetimes retain their own purpose; replication adds no read-side
+  locks, registration, counters or per-row synchronization writes.
+- Appending an INSERT writer lane changes the database shard directory and
+  requires schema M before native maintenance locks. Its private generation is
+  protected by the existing import-publication mutex until durable topology
+  publication; ordinary inserts into existing lanes retain shard-only ownership.
+  Database reclamation uses normal MOSI acquisitions for schema and every active
+  non-ephemeral shard. Its final permission check is a point-in-time observation,
+  never an exemption from later remote requests or owner-unavailability errors.
+
 ### Immutable main storage and mutable deltas
+
+Planner-cache initializer definitions are immutable atomic publications, including
+nil repair after schema reload. Completion is published once under the existing
+table creation barrier; warm probes read atomics. The persisted `oninit` field
+retains its existing representation and contains no synchronization state.
 
 - A shard's main column storages contain fixed, read-only values for one
   generation. Updates must not overwrite these values. Delta storage contains
@@ -462,6 +500,11 @@ snapshot identity, unrelated constraint labels or foreign-key metadata.
 Column-declaration guards compare only
 consumed type, dimensions, nullability and collation through published point
 metadata. Statistics publication must not invalidate a declaration contract.
+Wildcard expansion additionally consumes the ordered public column-name
+directory of each matching base source, including through derived relations and
+UNION branches. Exact SELECT entries use the same declaration-guard dispatcher;
+guard-free entries retain their direct callable. Wildcard guards compare that
+directory, never a catalog revision, shard topology or unrelated database DDL.
 Direct DML recipes use the same compile-local guard protocol for mutation
 semantics only; a cost/statistics change must not become a schema-contract error.
 Comparison proofs retain frontend operand triples before binding removes

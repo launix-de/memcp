@@ -276,10 +276,11 @@ func TestPersistedTableCallABIUpgradePreservesData(t *testing.T) {
 		t.Fatal("ABI upgrade rewrote an invocation of a lexical parameter")
 	}
 
-	definition := &table{Name: "items", OnInit: &original,
+	definition := &table{Name: "items",
 		Triggers: []TriggerDescription{{Language: "scheme", Source: "(lambda () (table \"memcp-tests\" \"items\"))"}}}
+	definition.OnInit.Store(&original)
 	invalidatePersistedPlannerCodeAfterLoad(definition)
-	if len(definition.OnInit.Proc().Body.Slice()) != 5 {
+	if len(definition.OnInit.Load().Proc().Body.Slice()) != 5 {
 		t.Fatal("load did not upgrade the existing initialization callback")
 	}
 	source := scm.Read("upgraded trigger", definition.Triggers[0].Source).WithoutSourceInfo().Slice()

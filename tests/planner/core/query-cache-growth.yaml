@@ -752,7 +752,43 @@ test_cases:
         (equal? value "longer"))
     expect: {result: true}
 
+  - name: Cached wildcard tracks ADD and DROP without changing the query text
+    sql: "CREATE TABLE cg_star (id INT PRIMARY KEY, value INT)"
+  - name: Seed wildcard fixture
+    sql: "INSERT INTO cg_star VALUES(1,10)"
+  - name: Compile exact wildcard
+    sql: "SELECT * FROM cg_star"
+    expect: {rows: 1, data: [{id: 1, value: 10}]}
+  - name: Compile wildcard with a leading SQL comment
+    sql: "/* cached wildcard */ SELECT * FROM cg_star"
+    expect: {rows: 1, data: [{id: 1, value: 10}]}
+  - name: Extend wildcard directory
+    sql: "ALTER TABLE cg_star ADD COLUMN extra INT DEFAULT 7"
+  - name: Same cached wildcard sees added column
+    sql: "SELECT * FROM cg_star"
+    expect: {rows: 1, data: [{id: 1, value: 10, extra: 7}]}
+  - name: Commented exact wildcard uses declaration guards too
+    sql: "/* cached wildcard */ SELECT * FROM cg_star"
+    expect: {rows: 1, data: [{id: 1, value: 10, extra: 7}]}
+  - name: Compile qualified wildcard
+    sql: "SELECT c.* FROM cg_star c"
+    expect: {rows: 1, data: [{id: 1, value: 10, extra: 7}]}
+  - name: Retire wildcard column
+    sql: "ALTER TABLE cg_star DROP COLUMN extra"
+  - name: Exact wildcard drops stale projection
+    sql: "SELECT * FROM cg_star"
+    expect: {rows: 1, data: [{id: 1, value: 10}]}
+  - name: Qualified wildcard drops stale projection
+    sql: "SELECT c.* FROM cg_star c"
+    expect: {rows: 1, data: [{id: 1, value: 10}]}
+  - name: Recreate wildcard column with a different default
+    sql: "ALTER TABLE cg_star ADD COLUMN extra INT DEFAULT 9"
+  - name: Reused column inventory reads the current declaration
+    sql: "SELECT * FROM cg_star"
+    expect: {rows: 1, data: [{id: 1, value: 10, extra: 9}]}
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS cg_star"
   - sql: "DROP TABLE IF EXISTS cg_decl_contract"
   - sql: "DROP TABLE IF EXISTS cg_rows"
   - sql: "DROP TABLE IF EXISTS cg_dml_rows"

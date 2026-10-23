@@ -323,6 +323,72 @@ non-null default. ADD supports the frontend's literal defaults, constant
 arithmetic/casts where supported, and `CURRENT_TIMESTAMP`; other default
 expressions fail before the column is published.
 
+### Experimental local replication
+
+Run a master with `--replication=7331` and a slave with
+`--replication=master-host:7331`. Each instance needs its own `-data` directory
+and independent backend namespace, including separate buckets/prefixes for
+remote storage. The existing persistence backends are used without modification.
+`schema.json` remains the schema format. `SHUTDOWN` affects the addressed instance.
+
+HTTP and MySQL logins on the slave are verified by the master and cached for
+offline authentication. A slave claims the opened database, retains durable
+ownership through disconnects/restarts, and can use its local `SAFE` tables
+while the master is offline. An unavailable remote owner produces
+`Cluster network error`; disconnection never transfers ownership. Use `SAFE`
+for crash recovery: replication does not strengthen `memory` or `sloppy` durability.
+
+The dashboard Settings page lists slaves and offers an explicit **Retire slave**
+action. Retirement makes the last master backup authoritative and may lose
+untransferred offline changes. The persisted `ReplicationUUID` is also the
+slave's secret; do not share or clone its settings between installations.
+
+Each database schema and each logical data shard has an independent MOSI
+slot. The initial connection acquires schema M, discovers its shards, then
+requests shard M through the ordinary access protocol. Later reads request S;
+M becomes O at its previous owner. Writes acquire M and invalidate other copies.
+The MR/OR/SR states coalesce concurrent requests and allow read-to-write upgrades.
+
+Full offline operation, including DDL, requires M for the database schema and
+all its data shards. Shared copies still permit reads; writes require M for
+the affected resource.
+Master analytics can leave those resources shared; they do not automatically
+return to M when the query ends. A later write reclaims M through the ordinary
+protocol while the other holders are reachable. On the slave, an administrator
+can run `(replication_reclaim "database")` through `/scm` to acquire M for its
+schema and every active durable shard, including empty and internal shards.
+It returns true only if all those permissions are still exclusive at the final
+check. Subsequent remote queries can share them again. An unreachable holder
+causes `Cluster network error`; reclamation never overrides its ownership.
+
+IS denotes a current backend-only generation with durable local permission;
+IO must acquire from its remote owner even when an older backup exists locally.
+Loading IS restores its existing permission and cannot turn a shared copy into M.
+Already authorized reads check atomic state without additional replication locks,
+reader counters or registration. Existing snapshots retain historical generations.
+Only writes participate in the handover gate, including explicit transactions.
+
+Transfers stream independently compressed chunks through bounded queues into
+backend writers. Handover rebuilds exactly the requested shard; receivers install
+its generation and point topology update before acknowledging or releasing waits.
+Slave admin SQL runs against the master's own authentication and access catalog;
+SHUTDOWN remains local. Multi-master routing and distributed scans remain future
+work. The separate **Replication Cluster Stress test** workflow runs a Python
+process/thread runner with alternating process crashes, parallel shared reads,
+independent partition ownership, complete database reclamation, offline writes
+and durable restart. Two simultaneous slaves claim different databases while a
+third, master-only database runs schema changes and verified data queries.
+Quiescent checkpoints compare complete current values on both nodes. These tests
+retain data directories; retiring a destroyed owner's disk can lose changes newer
+than its last transferred backup.
+
+Run it after building MemCP with
+`python3 tools/replication_cluster_stress.py --seed 20261023`.
+It owns independent master/slave processes, uses HTTP and the `mysql` client,
+and retains node logs, a write oracle and the seed in its printed artifact path.
+`--rounds`, `--workers` and `--operations` control the threaded workload.
+Go tests cover the in-process MOSI and transport units separately.
+
 ### Storage failure notifications
 
 Administrators can register named Scheme callbacks for persistence failures.

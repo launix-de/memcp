@@ -36,6 +36,11 @@ import "github.com/gorilla/websocket"
 var httpServersMu sync.Mutex
 var httpServers []*http.Server
 
+// HTTPAuthenticationHook is installed during startup by an engine which needs
+// to validate/cache credentials before the normal frontend authentication.
+// A nil hook preserves ordinary standalone authentication.
+var HTTPAuthenticationHook func(username, password string) bool
+
 // HTTPRequest performs an outbound request assembled by trusted Scheme code.
 // Browser-controlled requests are deliberately not forwarded implicitly.
 func HTTPRequest(a ...Scmer) Scmer {
@@ -205,6 +210,11 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		// if no basicauth is provided, read from URL
 		user = req.URL.User.Username()
 		pass, upok = req.URL.User.Password()
+	}
+	if HTTPAuthenticationHook != nil && !HTTPAuthenticationHook(user, pass) {
+		res.Header().Set("WWW-Authenticate", "Basic realm=\"authorization required\"")
+		http.Error(res, "Unauthorized", http.StatusUnauthorized)
+		return
 	}
 	req_scm := []Scmer{
 		NewString("req"), NewAny(req),

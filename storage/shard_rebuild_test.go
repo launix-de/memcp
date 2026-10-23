@@ -44,7 +44,7 @@ func TestColdShardLoadWaitObservesQueryCancellation(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
 			if multi {
 				extra := NewShard(tbl)
-				release := extra.GetExclusive()
+				release := extra.GetWrite(nil).Release
 				extra.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 					{scm.NewInt(3), scm.NewString("row-00000003")},
 					{scm.NewInt(4), scm.NewString("row-00000004")},
@@ -502,7 +502,7 @@ func TestForcedDatabaseRebuildCompactsTransactionLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if errs := rebuildDatabaseAndCompact(db, true, false, false); len(errs) != 0 {
+	if errs, _ := rebuildDatabaseAndCompact(db, true, false, false); len(errs) != 0 {
 		t.Fatalf("forced rebuild failed: %v", errs)
 	}
 	after, err := os.Stat(logPath)
@@ -522,7 +522,7 @@ func TestForcedDatabaseRebuildCompactsTransactionLog(t *testing.T) {
 func TestNonForcedDatabaseRebuildKeepsTransactionLogForColdShards(t *testing.T) {
 	tbl, engine := createDurabilityTestTable(t, "ttxlogcold", 4)
 	source := tbl.schema
-	if errs := rebuildDatabaseAndCompact(source, true, false, false); len(errs) != 0 {
+	if errs, _ := rebuildDatabaseAndCompact(source, true, false, false); len(errs) != 0 {
 		t.Fatalf("fixture rebuild failed: %v", errs)
 	}
 	source.commitTransaction("needed-by-cold-generation/1", true)
@@ -546,7 +546,7 @@ func TestNonForcedDatabaseRebuildKeepsTransactionLogForColdShards(t *testing.T) 
 		}
 	}
 
-	if errs := rebuildDatabaseAndCompact(db, false, false, false); len(errs) != 0 {
+	if errs, _ := rebuildDatabaseAndCompact(db, false, false, false); len(errs) != 0 {
 		t.Fatalf("non-forced rebuild failed: %v", errs)
 	}
 	if !db.transactionCommitted("needed-by-cold-generation/1") {
@@ -647,19 +647,21 @@ func TestSchemaReloadInvalidatesPlannerCacheOnInit(t *testing.T) {
 	stale := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
 		panic("stale planner callback must not run")
 	})
-	plannerCache := &table{Name: ".grp:items:old", PersistencyMode: Cache, OnInit: &stale}
+	plannerCache := &table{Name: ".grp:items:old", PersistencyMode: Cache}
+	plannerCache.OnInit.Store(&stale)
 	invalidatePersistedPlannerCodeAfterLoad(plannerCache)
-	if plannerCache.OnInit != nil {
+	if plannerCache.OnInit.Load() != nil {
 		t.Fatal("schema reload retained planner-generated cache oninit")
 	}
 
 	for _, durable := range []*table{
-		{Name: "application_cache", PersistencyMode: Cache, OnInit: &stale},
-		{Name: ".internal", PersistencyMode: Safe, OnInit: &stale},
-		{Name: ".memory_helper", PersistencyMode: Memory, OnInit: &stale},
+		{Name: "application_cache", PersistencyMode: Cache},
+		{Name: ".internal", PersistencyMode: Safe},
+		{Name: ".memory_helper", PersistencyMode: Memory},
 	} {
+		durable.OnInit.Store(&stale)
 		invalidatePersistedPlannerCodeAfterLoad(durable)
-		if durable.OnInit == nil {
+		if durable.OnInit.Load() == nil {
 			t.Fatalf("schema reload invalidated non-planner table %s", durable.Name)
 		}
 	}
@@ -703,7 +705,7 @@ func TestCreateTableRefreshesInvalidatedPlannerCacheOnInit(t *testing.T) {
 	}
 
 	plannerCache := GetDatabase("tplanneroninitrefresh").GetTable(".grp:items:old")
-	plannerCache.onInitComplete = false // restart-only state is deliberately not persisted
+	plannerCache.onInitComplete.Store(false) // restart-only state is deliberately not persisted
 	invalidatePersistedPlannerCodeAfterLoad(plannerCache)
 	var currentCalls atomic.Int64
 	current := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
@@ -714,12 +716,25 @@ func TestCreateTableRefreshesInvalidatedPlannerCacheOnInit(t *testing.T) {
 		scm.NewString("engine"), scm.NewString("cache"),
 		scm.NewString("oninit"), current,
 	})
-	created := callBuiltin(t, "createtable",
-		scm.NewString("tplanneroninitrefresh"), scm.NewString(".grp:items:old"),
-		cols, options, scm.NewBool(true), scm.NewNil())
-	if scm.ToBool(created) {
-		t.Fatal("refreshing the planner callback recreated the cache table")
+	var creators sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 32; i++ {
+		creators.Add(1)
+		go func() {
+			defer creators.Done()
+			<-start
+			for j := 0; j < 10; j++ {
+				created := callBuiltin(t, "createtable",
+					scm.NewString("tplanneroninitrefresh"), scm.NewString(".grp:items:old"),
+					cols, options, scm.NewBool(true), scm.NewNil())
+				if scm.ToBool(created) {
+					t.Error("refreshing the planner callback recreated the cache table")
+				}
+			}
+		}()
 	}
+	close(start)
+	creators.Wait()
 	if staleCalls.Load() != 1 || currentCalls.Load() != 1 {
 		t.Fatalf("refresh ran stale=%d current=%d callbacks, want 1 and 1", staleCalls.Load(), currentCalls.Load())
 	}
@@ -1630,11 +1645,12 @@ func TestEphemeralQueryShardLoadIgnoresPersistedHelperContents(t *testing.T) {
 	f.Close()
 
 	reloaded := &storageShard{
+		t:            tbl,
 		uuid:         orig.uuid,
 		columns:      make(map[string]ColumnStorage),
 		deltaColumns: make(map[string]int),
 	}
-	reloaded.load(tbl)
+	reloaded.load()
 
 	if reloaded.main_count != 0 {
 		t.Fatalf("ephemeral helper load restored main_count=%d, want 0", reloaded.main_count)
@@ -1684,11 +1700,12 @@ func TestEmptyWALReplayKeepsPersistedColumnsLazy(t *testing.T) {
 	}
 
 	reloaded := &storageShard{
+		t:            tbl,
 		uuid:         orig.uuid,
 		columns:      make(map[string]ColumnStorage),
 		deltaColumns: make(map[string]int),
 	}
-	reloaded.load(tbl)
+	reloaded.load()
 	defer reloaded.logfile.Close()
 
 	if reloaded.main_count != 0 {
@@ -2738,7 +2755,7 @@ func TestIndexComputedReadersRespectHeldShardLock(t *testing.T) {
 					"raw": &StorageSCMER{values: []scm.Scmer{scm.NewInt(7)}},
 				}}
 			shard.setState(SHARED)
-			release := shard.GetExclusive()
+			release := shard.GetWrite(nil).Release
 			defer release()
 			shard.mu.Lock()
 			shard.columns["input"] = &StorageComputeProxy{

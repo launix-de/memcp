@@ -611,6 +611,12 @@ body{display:flex;flex-direction:column}
 </section>
 <div class="settings-grid" id="settings-grid"></div>
 <div class="detail-section" style="margin-top:28px">
+<h3>Replication Slaves</h3>
+<button id="btn-refresh-replicas">Refresh</button>
+<p id="replicas-status" role="status"></p>
+<table class="browse-table"><thead><tr><th>Slave</th><th>Connection</th><th>Databases</th><th>Action</th></tr></thead><tbody id="replicas-list"></tbody></table>
+</div>
+<div class="detail-section" style="margin-top:28px">
 <h3>Storage Failure Hooks</h3>
 <p style="color:#888;font-size:.78rem;margin-bottom:12px">Enabled hooks execute trusted Scheme code with server permissions. Classes are <code>io</code>, <code>cleanup</code>, <code>ambiguous_commit</code>, or <code>*</code>. Changes are persisted in <code>system.storage_failure_hooks</code>.</p>
 <button class="btn-warn" id="btn-add-storage-hook" style="margin-bottom:12px">Add Hook</button>
@@ -1400,6 +1406,22 @@ fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:"(json_encode_as
 .then(function(t){var v=JSON.parse(t);if(typeof v==="string")v=JSON.parse(v);cb(v);})
 .catch(function(e){console.error("Settings error:",e);});
 }
+function loadReplicationSlaves(){
+fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:"(replication_slaves)"})
+.then(function(r){if(!r.ok)throw new Error(r.status);return r.json();})
+.then(function(data){if(typeof data==="string")data=JSON.parse(data);
+var rows=document.getElementById("replicas-list");rows.textContent="";
+document.getElementById("replicas-status").textContent=data.length?"":"No replication slaves.";
+data.forEach(function(slave){var tr=document.createElement("tr");
+[slave.id.slice(0,8),slave.retired?"Retired":slave.connected?"Connected":"Offline",slave.databases.join(", ")].forEach(function(value){var td=document.createElement("td");td.textContent=value;tr.appendChild(td);});
+var td=document.createElement("td");if(!slave.retired){var button=document.createElement("button");button.textContent="Retire slave";button.className="btn-warn";
+button.onclick=function(){if(!window.confirm("Retire this slave and release its ownership? Changes absent from the master backup may be lost."))return;
+fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:"(replication_retire "+scmLiteral(slave.id)+")"})
+.then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error(t)});loadReplicationSlaves();})
+.catch(function(e){document.getElementById("replicas-status").textContent=e.message;});};td.appendChild(button);}tr.appendChild(td);rows.appendChild(tr);});})
+.catch(function(e){document.getElementById("replicas-status").textContent=e.message;});
+}
+document.getElementById("btn-refresh-replicas").onclick=loadReplicationSlaves;
 function saveSetting(key,value,cb){
 fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:"(settings "+JSON.stringify(key)+" "+scmLiteral(value)+")"})
 .then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error(t)});return r.text();})
@@ -1623,6 +1645,7 @@ if(!isAdmin){location.hash="databases";return}
 showView("view-settings");
 document.getElementById("root-pw-warning").style.display=defaultPassword?"":"none";
 fetchSettings(renderSettings);
+loadReplicationSlaves();
 loadStorageFailureHooks();
 scmFetch(SCM_SERVICES,renderServices);
 return;

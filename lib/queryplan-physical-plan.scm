@@ -13484,7 +13484,9 @@ compile repeats Scheme closure optimization even when no domain was changed. */
 /* Parser-facing adapters                                                     */
 
 (define build_queryplan_term (lambda (query planning_session tx)
-	(neumann_compile_pipeline query planning_session tx)))
+	(begin
+		(planner_guard_star_columns query planning_session)
+		(neumann_compile_pipeline query planning_session tx))))
 
 (define build_dml_plan (lambda (schema tbl tblalias all_defs cols condition order limit offset planning_session tx)
 	(begin

@@ -24,6 +24,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -47,9 +49,36 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int, complete bool
 	// Startup cleanup runs immediately after the lazy database catalog is
 	// discovered. An unloaded schema is not an empty schema: load its committed
 	// topology before proving that any disk object is unowned.
+	// Replication starts after the frontend discovers schemas. Until its
+	// durable ownership/backup directory is loaded, startup cannot prove that
+	// an apparently old UUID is unowned.
+	if replication.Load() == nil {
+		if _, err := os.Stat(filepath.Join(Basepath, ".replication-state")); err == nil {
+			return 0, 0, false
+		}
+	}
 	db.ensureLoaded()
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
+	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
+		publication := r.resourceCell(replicaResource{Database: db.Name})
+		publication.importPublication.Lock()
+		defer publication.importPublication.Unlock()
+		pending := false
+		r.imports.Range(func(_, value any) bool {
+			pending = value.(*replicaImport).header.Resource.Database == db.Name
+			return !pending
+		})
+		if pending {
+			return 0, 0, false
+		}
+	}
+	if replication.Load() != nil && GetDatabase(db.Name) != db {
+		return 0, 0, false
+	}
+	if replicationRetainsCatalogs(db.Name) {
+		return 0, 0, false
+	}
 	blobsDeleted, complete = cleanBlobs(db)
 	shardsDeleted = cleanShards(db)
 	return
@@ -157,6 +186,18 @@ func activeBlobReferences(db *database, persistManifests bool) (map[string]struc
 			for hash := range manifestReferences {
 				references[hash] = struct{}{}
 			}
+		}
+	}
+	for _, record := range replicationBackupRecords(db) {
+		if record.Resource.Table == ".blobs" {
+			continue
+		}
+		manifest, valid := readBlobManifest(db.persistence.ReadColumn(record.Generation, blobManifestColumn))
+		if !valid {
+			return nil, false
+		}
+		for hash := range manifest {
+			references[hash] = struct{}{}
 		}
 	}
 	return references, true
@@ -326,6 +367,9 @@ func cleanShards(db *database) int {
 				activeUUIDs[s.uuid.String()] = true
 			}
 		}
+	}
+	for _, record := range replicationBackupRecords(db) {
+		activeUUIDs[record.Generation] = true
 	}
 	db.schemalock.RUnlock()
 

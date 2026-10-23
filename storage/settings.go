@@ -29,6 +29,9 @@ import "github.com/dc0d/onexit"
 import "github.com/launix-de/memcp/scm"
 
 type SettingsT struct {
+	// ReplicationUUID is initialized once before replication starts and remains
+	// immutable for this installation. It is also the reconnect secret.
+	ReplicationUUID        string `json:",omitempty"`
 	PHPIMAPBinary          string // NTS PHP CLI with native IMAP; empty disables the isolated adapter.
 	PHPThreads             int64  // Global PHP startup setting; changes require a restart.
 	PHPMemoryLimit         int64  // Global PHP startup setting; changes require a restart.

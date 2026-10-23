@@ -1513,6 +1513,9 @@ func runDirectSingleShardExists(currentTx *TxContext, topology *tableShardTopolo
 	}()
 	release := shard.acquireReadForScan(currentTx)
 	defer release.Release()
+	if release.shard != nil {
+		shard = release.shard
+	}
 	if ss != nil && ss.IsKilledSeq(querySeq) {
 		panic("query killed")
 	}
@@ -1544,6 +1547,9 @@ func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology
 	}()
 	release := shard.acquireReadForScan(currentTx)
 	defer release.Release()
+	if release.shard != nil {
+		shard = release.shard
+	}
 	if ss != nil && ss.IsKilledSeq(querySeq) {
 		panic("query killed")
 	}
@@ -2166,6 +2172,15 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 }
 
 func (t *storageShard) scan(access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
+	for _, name := range callbackCols {
+		if name == "$update" || strings.HasPrefix(name, "$increment:") {
+			writeAccess := t.GetWrite(currentTx)
+			defer writeAccess.Release()
+			t = writeAccess.shard
+			break
+		}
+	}
+
 	if stride > 0 {
 		return t.scanBatch(access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
 	}

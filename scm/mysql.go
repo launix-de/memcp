@@ -36,6 +36,14 @@ type mysqlCloser interface {
 
 var mysqlListenersMu sync.Mutex
 var mysqlListeners []mysqlCloser
+
+// MySQLAuthenticationHook lets the engine forward the existing native-password
+// challenge before the ordinary local user lookup. Installed during startup.
+var MySQLAuthenticationHook func(username string, salt, scramble []byte) bool
+
+// MySQLDatabaseHook prepares a remotely backed database before the ordinary
+// schema callback. A nil hook keeps standalone database selection unchanged.
+var MySQLDatabaseHook func(username, database string) error
 var mysqlInitializationMu sync.Mutex
 var mysqlInitializationDone = func() chan struct{} {
 	done := make(chan struct{})
@@ -197,6 +205,9 @@ func (m *MySQLWrapper) SessionDec(session *driver.Session) {
 }
 func (m *MySQLWrapper) SessionClosed(session *driver.Session) {
 	m.log.Info("%s", "Closed Session "+session.User()+" from "+session.Addr())
+	if SessionCleanupHook != nil {
+		SessionCleanupHook(mysqlScmSession(session))
+	}
 	mysqlsessions.Delete(session)
 	if v, ok := mysqlStates.LoadAndDelete(session); ok {
 		st := v.(*SessionState)
@@ -211,6 +222,9 @@ func (m *MySQLWrapper) SessionCheck(session *driver.Session) error {
 
 func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 	m.log.Info("%s", "Auth Check with "+session.User())
+	if MySQLAuthenticationHook != nil && !MySQLAuthenticationHook(session.User(), session.Salt(), session.Scramble()) {
+		return sqldb.NewSQLError(sqldb.ER_ACCESS_DENIED_ERROR, session.User(), session.Addr(), "YES")
+	}
 	// callback should load password from database
 	var password Scmer
 	withMySQLScmSession(session, func() {
@@ -228,6 +242,11 @@ func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 }
 func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error {
 	m.log.Info("%s", "db "+database)
+	if MySQLDatabaseHook != nil {
+		if err := MySQLDatabaseHook(session.User(), database); err != nil {
+			return err
+		}
+	}
 	var allowed Scmer
 	withMySQLScmSession(session, func() {
 		allowed = Apply(m.schemacallback, NewString(session.User()), NewString(database))

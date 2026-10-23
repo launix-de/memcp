@@ -880,7 +880,7 @@ func TestBlobRefcountPanicReleasesRowsLock(t *testing.T) {
 	db.IncrBlobRefcount(hash)
 	shard := db.ensureBlobTable().ActiveShards()[0]
 	func() {
-		defer shard.GetExclusive()()
+		defer shard.GetWrite(nil).Release()
 		shard.mu.Lock()
 		defer shard.mu.Unlock()
 		shard.logfile = &faultLogfile{PersistenceLogfile: shard.logfile,

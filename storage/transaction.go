@@ -119,6 +119,11 @@ var GlobalCommitEpoch uint64
 // (the common case with with_autocommit) allocate nothing beyond the
 // TxContext struct itself.
 type TxContext struct {
+	// Replication bindings are session-executor-owned, never shared by readers.
+	// Only writes retain a gate across the transaction; reads use shard snapshots.
+	replicationActive   bool
+	replicationWriting  bool
+	replicationCells    map[*replicaCell]bool
 	ID                  uint64
 	Mode                TxMode
 	State               TxState
@@ -1070,6 +1075,14 @@ func WithAutocommit(session scm.Scmer, ss *scm.SessionState, querySeq uint64, qu
 	return runAutocommitStatement(tx, session, strings.EqualFold(strings.TrimSpace(query), "ROLLBACK"), fn)
 }
 func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, fn scm.Scmer) scm.Scmer {
+	if !recovery || !tx.replicationActive {
+		replicationEnter(tx, session)
+	}
+	defer func() {
+		if tx.replicationActive && (tx.State != TxActive || session.Func()(scm.NewString("transaction")).IsNil()) {
+			replicationLeave(tx)
+		}
+	}()
 	sessionFn := session.Func()
 	txValue := scm.NewAny(tx)
 	explicit := !sessionFn(scm.NewString("transaction")).IsNil()

@@ -1,0 +1,82 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Replication Cluster Stress test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: replication-cluster-stress-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
+  replication-cluster-stress:
+    name: Replication Cluster Stress test
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out MemCP
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install SQL client
+        uses: ./.github/actions/setup-apt
+        with:
+          packages: mariadb-client
+
+      - name: Build MemCP
+        run: go build -tags=nophp -o "$RUNNER_TEMP/memcp-replication" .
+
+      - name: Check process runner and write oracle
+        run: python3 tools/test_reliability_drill.py
+
+      - name: Run crash, reclaim and three-database isolation scenarios
+        run: >-
+          python3 -u tools/replication_cluster_stress.py
+          --binary "$RUNNER_TEMP/memcp-replication"
+          --artifacts "$RUNNER_TEMP/replication-stress"
+          --seed 20261023 --rounds 5 --workers 4 --operations 25
+
+      - name: Build race-instrumented servers
+        run: go build -race -tags=nophp -o "$RUNNER_TEMP/memcp-replication-race" .
+
+      - name: Check MOSI state-machine and publication units for races
+        run: >-
+          go test -race -tags=nophp ./storage
+          -run 'TestReplication|TestMosi|TestCreateTableRefreshesInvalidatedPlannerCacheOnInit'
+          -count=1
+
+      - name: Check the same process scenarios with the Go race detector
+        env:
+          GORACE: halt_on_error=1 exitcode=66
+        run: >-
+          python3 -u tools/replication_cluster_stress.py
+          --binary "$RUNNER_TEMP/memcp-replication-race"
+          --artifacts "$RUNNER_TEMP/replication-stress-race"
+          --seed 20261025 --rounds 1 --workers 3 --operations 12
+
+      - name: Upload node logs and write oracle
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: replication-cluster-stress
+          path: |
+            ${{ runner.temp }}/replication-stress
+            ${{ runner.temp }}/replication-stress-race

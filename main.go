@@ -1340,6 +1340,8 @@ func main() {
 
 	basepath := "data"
 	flag.StringVar(&basepath, "data", "data", "Data folder for persistence")
+	replicationAddress := ""
+	flag.StringVar(&replicationAddress, "replication", "", "Replication master PORT or slave HOST:PORT")
 
 	profile := ""
 	flag.StringVar(&profile, "profile", "", "Data folder for persistence")
@@ -1385,7 +1387,15 @@ func main() {
 			continue
 		}
 
-		if arg == "-c" || arg == "-data" || arg == "-profile" || arg == "-wd" || arg == "-write-docu" {
+		if strings.HasPrefix(arg, "--replication=") || strings.HasPrefix(arg, "-replication=") {
+			knownArgs = append(knownArgs, arg)
+		} else if arg == "--replication" || arg == "-replication" {
+			knownArgs = append(knownArgs, "-replication")
+			if i+2 < len(os.Args) {
+				knownArgs = append(knownArgs, os.Args[i+2])
+				skipNext = true
+			}
+		} else if arg == "-c" || arg == "-data" || arg == "-profile" || arg == "-wd" || arg == "-write-docu" {
 			knownArgs = append(knownArgs, arg)
 			if i+1 < len(os.Args[1:]) {
 				knownArgs = append(knownArgs, os.Args[i+2])
@@ -1496,6 +1506,10 @@ func main() {
 		}
 	}()
 	<-initDone
+	if err := storage.StartReplication(replicationAddress, func() { scm.Apply(IOEnv.Vars["shutdown"]) }); err != nil {
+		fmt.Fprintln(os.Stderr, "replication:", err)
+		os.Exit(1)
+	}
 	scm.CompleteMySQLInitialization()
 	if !initialize {
 		if err := startPHP(os.Args[1:]); err != nil {
@@ -1616,6 +1630,7 @@ func exitroutine() {
 					fmt.Println("error: UnloadDatabases failed:", r)
 				}
 			}()
+			storage.StopReplication()
 			storage.UnloadDatabases()
 		}()
 		fmt.Println("finalizing memory...")
