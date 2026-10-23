@@ -6263,17 +6263,31 @@ Only flattenable FROM relations share the latter two with their parent. */
 		_ false)))
 
 (define rewrite_derived_ref (lambda (alias projection expr)
-	(match expr
-		((symbol get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (equal? tblvar alias)
-			(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
-			expr)
-		((quote get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (equal? tblvar alias)
-			(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
-			expr)
-		(cons head tail) (cons
-			(rewrite_derived_ref alias projection head)
-			(map tail (lambda (item) (rewrite_derived_ref alias projection item))))
-		_ expr)))
+	/* Operator barriers keep their own binding namespace. A derived alias in
+	the enclosing block may have the same spelling as a stage's local input;
+	substituting there would turn base columns into that stage's own outputs. */
+	(if (match expr
+		(cons (symbol query-block) _parts)
+		(contains? (source_aliases (qb_sources expr)) alias)
+		(cons (symbol group-stage) _parts)
+		(contains? (source_aliases
+			(if (query_block? (gs_input expr)) (qb_sources (gs_input expr))
+				(match (gs_input expr)
+					'(_alias _schema _relation _outer _join) (list (gs_input expr))
+					_ '()))) alias)
+		_ false)
+		expr
+		(match expr
+			((symbol get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (equal? tblvar alias)
+				(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
+				expr)
+			((quote get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (equal? tblvar alias)
+				(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
+				expr)
+			(cons head tail) (cons
+				(rewrite_derived_ref alias projection head)
+				(map tail (lambda (item) (rewrite_derived_ref alias projection item))))
+			_ expr))))
 
 (define rewrite_derived_fields (lambda (alias projection fields)
 	(match (coalesceNil fields '())

@@ -13,6 +13,8 @@ import subprocess
 import sys
 
 mode, port, *args = sys.argv[1:]
+check_alias_variants = '--alias-variants' in args
+args = [arg for arg in args if arg != '--alias-variants']
 client = ['mysql', '-h', '127.0.0.1', '-P', port, '-u', 'root', '-padmin',
           '-N', '-B', '--raw', 'memcp-tests']
 
@@ -35,6 +37,14 @@ def cases(changed=False):
          'SELECT tenant_id, COUNT(*), SUM(amount) FROM up_group_events GROUP BY tenant_id ORDER BY tenant_id',
          '1\t3000\t26992\n2\t3000\t27000' if unchanged else
          '1\t3000\t27092\n2\t3000\t27000'),
+        ('grouped window totals', 12,
+         'SELECT grouped.* FROM (SELECT tenant_id, COUNT(*) AS n, '
+         'SUM(COUNT(*)) OVER () AS total_n, SUM(amount) AS amount, '
+         'SUM(SUM(amount)) OVER () AS total '
+         'FROM (SELECT tenant_id, amount FROM up_group_events) rows_in GROUP BY tenant_id) grouped '
+         'WHERE TRUE ORDER BY grouped.tenant_id LIMIT 72 OFFSET 0',
+         '1\t3000\t6000\t26992\t53992\n2\t3000\t6000\t27000\t53992' if unchanged else
+         '1\t3000\t6000\t27092\t54092\n2\t3000\t6000\t27000\t54092'),
         ('computed group order', 12,
          'SELECT bucket, SUM(value) FROM up_helper GROUP BY bucket ORDER BY SUM(value) + 1 DESC',
          '2\t70\n1\t30' if unchanged else '2\t70\n1\t35'),
@@ -81,6 +91,22 @@ def cases(changed=False):
     ]
 
 
+# These alpha-renamings must return exactly the predecessor's public oracle.
+# The predecessor can itself contain the alias-shadowing bug, so run the extra
+# variants on the candidate, in addition to the unchanged old/new SQL workload.
+ALIAS_VARIANTS = {
+    'group aggregate':
+        'SELECT t.* FROM (SELECT bucket, COUNT(*), SUM(value) '
+        'FROM (SELECT bucket, value FROM up_helper) t GROUP BY bucket) t ORDER BY t.bucket',
+    'grouped window totals':
+        'SELECT t.* FROM (SELECT tenant_id, COUNT(*) AS n, '
+        'SUM(COUNT(*)) OVER () AS total_n, SUM(amount) AS amount, '
+        'SUM(SUM(amount)) OVER () AS total '
+        'FROM (SELECT tenant_id, amount FROM up_group_events) t GROUP BY tenant_id) t '
+        'WHERE TRUE ORDER BY t.tenant_id LIMIT 72 OFFSET 0',
+}
+
+
 def run_cases(changed=False, oracle=None):
     results = {}
     for name, repetitions, sql, expected in cases(changed):
@@ -92,6 +118,14 @@ def run_cases(changed=False, oracle=None):
                 raise AssertionError(
                     f'{name} execution {execution}: expected {expected!r}, got {actual!r}')
             outputs.append(actual)
+        if check_alias_variants and name in ALIAS_VARIANTS:
+            print(f'checking alias variant: {name} ({repetitions} executions)', flush=True)
+            for execution, reference in enumerate(outputs, 1):
+                actual = query(ALIAS_VARIANTS[name])
+                if actual != reference:
+                    raise AssertionError(
+                        f'{name} alias variant execution {execution}: '
+                        f'expected {reference!r}, got {actual!r}')
         results[name] = outputs
     if oracle is not None and results != oracle:
         raise AssertionError('public SQL results differ from the old-writer oracle')

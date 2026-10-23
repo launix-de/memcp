@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Regression for grouped derived-table wrappers over a materialized inner SELECT.
 
 metadata:
@@ -246,3 +248,58 @@ test_cases:
         - category: 30
           subtotal: null
           total: 12
+
+  - name: "reused derived alias preserves grouped keys and aggregates"
+    sql: |
+      SELECT t.* FROM (
+        SELECT date, COUNT(*) AS n, SUM(val) AS subtotal
+        FROM (SELECT date, val FROM vac_reg_main) t
+        GROUP BY date
+      ) t ORDER BY t.date
+    expect:
+      rows: 3
+      data:
+        - {date: 1704067200, n: 1, subtotal: 10}
+        - {date: 1706745600, n: 1, subtotal: 20}
+        - {date: 1735689600, n: 1, subtotal: 30}
+
+  - name: "reused derived alias preserves grouped window percentages"
+    sql: |
+      SELECT t.* FROM (
+        SELECT year_date, COUNT(*) AS n,
+          COUNT(*)*100/GREATEST(SUM(COUNT(*)) OVER (), 1) AS count_percent,
+          SUM(val) AS val,
+          SUM(val)*100/GREATEST(SUM(SUM(val)) OVER (), 1) AS value_percent
+        FROM (
+          SELECT UNIX_TIMESTAMP(STR_TO_DATE(
+            DATE_FORMAT(FROM_UNIXTIME(date), '%Y-01-01'), '%Y-%m-%d')) AS year_date,
+            val AS val
+          FROM vac_reg_main c WHERE ID>0
+        ) t
+        GROUP BY year_date
+      ) t WHERE TRUE ORDER BY t.year_date LIMIT 72 OFFSET 0
+    expect:
+      rows: 2
+      data:
+        - {year_date: 1704067200, n: 2, count_percent: 66.66666666666667, val: 30, value_percent: 50}
+        - {year_date: 1735689600, n: 1, count_percent: 33.333333333333336, val: 30, value_percent: 50}
+
+  - name: "outer filter and offset retain the shadowed grouped window domain"
+    sql: |
+      SELECT t.* FROM (
+        SELECT date, SUM(val) AS subtotal, SUM(SUM(val)) OVER () AS total
+        FROM (SELECT date, val FROM vac_reg_main) t
+        GROUP BY date HAVING SUM(val)>=10
+      ) t WHERE t.subtotal>=20 ORDER BY t.date LIMIT 1 OFFSET 1
+    expect:
+      rows: 1
+      data: [{date: 1735689600, subtotal: 30, total: 60}]
+
+  - name: "empty grouped input remains empty with reused derived aliases"
+    sql: |
+      SELECT t.* FROM (
+        SELECT date, COUNT(*) AS n, SUM(SUM(val)) OVER () AS total
+        FROM (SELECT date, val FROM vac_reg_main WHERE val<0) t GROUP BY date
+      ) t
+    expect:
+      rows: 0
