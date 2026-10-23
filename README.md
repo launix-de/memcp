@@ -369,13 +369,18 @@ backend writers. Handover rebuilds exactly the requested shard; receivers instal
 its generation and point topology update before acknowledging or releasing waits.
 Slave admin SQL runs against the master's own authentication and access catalog;
 SHUTDOWN remains local. Multi-master routing and distributed scans remain future
-work. Dedicated CI exercises alternating process crashes, parallel shared reads,
+work. The separate **Replication Cluster Stress test** workflow runs a Python
+process/thread runner with alternating process crashes, parallel shared reads,
 independent partition ownership, offline writes and durable restart. These tests
 retain data directories; retiring a destroyed owner's disk can lose changes newer
 than its last transferred backup.
 
-Run the crash test with `go test ./storage -run TestReplication -count=1`.
-It starts independent master/slave processes and uses both HTTP and MySQL.
+Run it after building MemCP with
+`python3 tools/replication_cluster_stress.py --seed 20261023`.
+It owns independent master/slave processes, uses HTTP and the `mysql` client,
+and retains node logs, a write oracle and the seed in its printed artifact path.
+`--rounds`, `--workers` and `--operations` control the threaded workload.
+Go tests cover the in-process MOSI and transport units separately.
 
 ### Storage failure notifications
 

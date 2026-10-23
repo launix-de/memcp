@@ -48,6 +48,23 @@ Run one suite directly with, for example:
 python3 run_sql_tests.py tests/planner/subqueries/deep-correlation-membership.yaml
 ```
 
+Replication process/crash scenarios run outside the Go test harness. Build
+`memcp`, install the `mysql` client, then run:
+
+```sh
+python3 tools/replication_cluster_stress.py --seed 20261023 --rounds 5 --workers 4 --operations 25
+```
+
+The **Replication Cluster Stress test** workflow executes this runner directly.
+It owns both server processes, alternates SIGKILL/restart without taking both
+offline, and runs concurrent slave writers, master analytics and garbage collection. Its per-row
+oracle checks every acknowledged write after recovery; a write interrupted
+before its response may have either its previous or new value and is never
+blindly retried. Logs, write events, seed and a result manifest remain in the
+printed artifact directory. `--executor` and `--startup-timeout` also support
+running a prebuilt target binary through QEMU. Go tests retain only in-process
+MOSI/state-machine and transport checks.
+
 Run a taxonomy section through the pre-commit selector:
 
 ```sh

@@ -16,6 +16,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+import replication_cluster_stress as replication
+
 
 MODULE_PATH = Path(__file__).with_name("reliability_drill.py")
 SPEC = importlib.util.spec_from_file_location("reliability_drill", MODULE_PATH)
@@ -92,6 +94,62 @@ class ReliabilityDrillTests(unittest.TestCase):
 		self.assertEqual(args.mode, "schema-race")
 		self.assertGreater(args.schema_race_rows, 0)
 		self.assertGreater(args.schema_race_rounds, 0)
+
+
+class ReplicationOracleTests(unittest.TestCase):
+	def setUp(self) -> None:
+		directory = tempfile.TemporaryDirectory()
+		self.addCleanup(directory.cleanup)
+		self.oracle = replication.Oracle(Path(directory.name) / "writes.jsonl")
+		self.addCleanup(self.oracle.events.close)
+
+	def check_rows(self, rows) -> None:
+		client = mock.Mock()
+		client.sql.return_value = [{"id": 0, "value": 0}] + rows
+		self.oracle.verify(client)
+
+	def test_acknowledged_insert_cannot_disappear(self) -> None:
+		self.oracle.attempt(1, 10)
+		self.oracle.acknowledge(1, 10)
+		self.check_rows([{"id": 1, "value": 10}])
+		with self.assertRaises(replication.DrillFailure):
+			self.check_rows([])
+
+	def test_unanswered_insert_allows_only_absence_or_complete_row(self) -> None:
+		self.oracle.attempt(1, 10)
+		self.oracle.uncertain(1, 10)
+		self.check_rows([])
+		self.check_rows([{"id": 1, "value": 10}])
+		with self.assertRaises(replication.DrillFailure):
+			self.check_rows([{"id": 1, "value": 999}])
+
+	def test_unanswered_update_cannot_erase_acknowledged_insert(self) -> None:
+		self.oracle.attempt(1, 10)
+		self.oracle.acknowledge(1, 10)
+		self.oracle.attempt(1, 11)
+		self.oracle.uncertain(1, 11)
+		for value in (10, 11):
+			self.check_rows([{"id": 1, "value": value}])
+		with self.assertRaises(replication.DrillFailure):
+			self.check_rows([])
+		self.oracle.acknowledge(1, 11)
+		with self.assertRaises(replication.DrillFailure):
+			self.check_rows([{"id": 1, "value": 10}])
+
+	def test_acknowledged_delete_cannot_reappear(self) -> None:
+		self.oracle.attempt(1, 10)
+		self.oracle.acknowledge(1, 10)
+		self.oracle.attempt(1, None)
+		self.oracle.acknowledge(1, None)
+		self.check_rows([])
+		with self.assertRaises(replication.DrillFailure):
+			self.check_rows([{"id": 1, "value": 10}])
+
+	def test_extra_or_duplicate_rows_fail(self) -> None:
+		with self.assertRaises(replication.DrillFailure):
+			self.check_rows([{"id": 999, "value": 9990}])
+		with self.assertRaises(replication.DrillFailure):
+			self.check_rows([{"id": 0, "value": 0}])
 
 
 if __name__ == "__main__":
