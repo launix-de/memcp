@@ -599,7 +599,10 @@ user table merely to discard a newly constructed policy closure. */
 						exact producer remains identical to its guard-free implementation;
 						its cold optimizer must not compile an unused variant producer. */
 						(if (or (and (list? parse_fn) (> (count parse_fn) 1) ((cadr parse_fn) "exact_guards"))
-							select_query
+							/* A bare star conservatively selects declaration collection;
+							the logical AST decides whether any directory was consumed.
+							Point queries retain their original direct exact compiler. */
+							(and select_query (has? tokens "*"))
 							(match (toUpper parse_query)
 								(regex "^\\s*(?:UPDATE|DELETE)\\b" _) true _ false))
 							(begin
