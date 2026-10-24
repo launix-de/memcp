@@ -361,6 +361,13 @@ It returns true only if all those permissions are still exclusive at the final
 check. Subsequent remote queries can share them again. An unreachable holder
 causes `Cluster network error`; reclamation never overrides its ownership.
 
+Before each global rebuild, the existing 15-minute maintenance job also attempts
+this reclaim for every fully initialized database on a slave. Failures are logged
+per database; other databases and the rebuild still proceed. It does not subscribe
+new databases or reclaim on a master. The next run is scheduled 15 minutes after
+the previous job finishes, so long rebuilds extend the interval. Later remote reads
+can share permissions again; periodic reclamation is not an offline-write guarantee.
+
 IS denotes a current backend-only generation with durable local permission;
 IO must acquire from its remote owner even when an older backup exists locally.
 Loading IS restores its existing permission and cannot turn a shared copy into M.

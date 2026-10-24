@@ -54,6 +54,104 @@ func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {
 	}
 }
 
+func TestReplicationPeriodicReclaimContinuesAfterOfflineTenant(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "z_periodic_reclaim", 3)
+	r := &replicationManager{id: "slave", cells: make(map[string]*replicaCell), journal: replicaJournal{
+		Records:     make(map[string]replicaRecord),
+		Initialized: map[string]bool{"a_offline_tenant": true, table.schema.Name: true, "pending_tenant": false, "system": true},
+	}}
+	r.resourceCell(replicaResource{Database: "a_offline_tenant"}).rights.initialize(mosiS)
+	r.resourceCell(replicaResource{Database: table.schema.Name}).rights.initialize(mosiM)
+	r.schemaShards(table.schema, r.id, true)
+	for _, shard := range table.ActiveShards() {
+		r.shardCell(shard).rights.restoreBackend(mosiM)
+	}
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	failures := ReclaimReplicationDatabases()
+	if len(failures) != 1 || !strings.Contains(failures[0], "a_offline_tenant") || !strings.Contains(failures[0], replicationNetworkError) {
+		t.Fatalf("expected the offline tenant failure only, got %v", failures)
+	}
+	for _, shard := range table.ActiveShards() {
+		if r.shardCell(shard).rights.phase() != mosiM {
+			t.Fatal("later tenant was not reclaimed after the offline failure")
+		}
+	}
+	if r.resourceCell(replicaResource{Database: "a_offline_tenant"}).rights.phase() == mosiM {
+		t.Fatal("offline tenant was promoted without upstream permission")
+	}
+	for _, name := range []string{"system", "pending_tenant"} {
+		if r.cells[name] != nil {
+			t.Fatalf("periodic maintenance acquired excluded database %s", name)
+		}
+	}
+	for _, manager := range []*replicationManager{nil, {master: true}, {}} {
+		if manager != nil && !manager.master {
+			manager.retired.Store(true)
+		}
+		replication.Store(manager)
+		if failures := ReclaimReplicationDatabases(); len(failures) != 0 {
+			t.Fatalf("inactive periodic reclaim failed: %v", failures)
+		}
+	}
+}
+
+func TestReplicationPeriodicReclaimUsesOrdinaryMosiGrant(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "t_periodic_remote_reclaim", 3)
+	r := &replicationManager{id: "slave", cells: make(map[string]*replicaCell), journal: replicaJournal{
+		Records:     make(map[string]replicaRecord),
+		Users:       map[string]replicaAuth{"tenant": {Hash: "cached-proof", Databases: map[string]bool{table.schema.Name: true}}},
+		Initialized: map[string]bool{table.schema.Name: true},
+	}}
+	schema := replicaResource{Database: table.schema.Name}
+	r.resourceCell(schema).rights.initialize(mosiS)
+	r.schemaShards(table.schema, r.id, true)
+	peer := &replicationPeer{outgoing: make(chan replicationMessage, 8), done: make(chan struct{})}
+	r.upstream = peer
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	var failures []string
+	done := make(chan struct{})
+	go func() {
+		failures = ReclaimReplicationDatabases()
+		close(done)
+	}()
+	defer func() {
+		close(peer.done)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("periodic reclaim did not finish after disconnect")
+		}
+	}()
+	select {
+	case message := <-peer.outgoing:
+		packet := message.Packet
+		if packet == nil || packet.Kind != "write" || packet.Resource != schema || packet.User != "tenant" || packet.Hash != "cached-proof" || packet.Sequence == 0 {
+			t.Fatalf("unexpected periodic ownership request: %+v", packet)
+		}
+		if r.resourceCell(schema).rights.phase() != mosiMR {
+			t.Fatal("request granted rights before the upstream grant")
+		}
+		if err := r.acceptGrant(replicaPacket{ID: packet.ID, Resource: schema, State: "M", Epoch: 2, Owner: r.id}); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("periodic reclaim did not request schema M")
+	}
+	select {
+	case <-done:
+		if len(failures) != 0 {
+			t.Fatalf("periodic reclaim failed after grant: %v", failures)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("periodic reclaim did not finish after grant")
+	}
+	if r.resourceCell(schema).rights.phase() != mosiM || r.journal.Records[schema.key()].Epoch != 2 {
+		t.Fatal("periodic reclaim did not retain the durable upstream grant")
+	}
+}
+
 func replicaAdmissionFixture(name string) (*replicationManager, *replicaCell, scm.Scmer) {
 	r := &replicationManager{cells: make(map[string]*replicaCell)}
 	c := r.cell(name)
