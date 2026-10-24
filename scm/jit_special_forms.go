@@ -348,66 +348,86 @@ func jitEmitSpecialMatch(name string) func(*JITContext, []Scmer, []JITValueDesc,
 	}
 }
 
+// IF arms have independent temporary ownership. Spill outer values before
+// branching, retain only the common result, and restore the same allocator
+// state on every sibling edge and at the join.
 func jitEmitSpecialIf(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
 	if len(args) < 2 {
-		imm := NewNil()
-		ctx.TrackImm(imm)
-		return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
+		return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, result)
 	}
-	target := result
-	if target.Loc != LocStackPair {
-		target = jitEnsureResultPair(ctx, result)
-		ctx.ProtectReg(target.Reg)
-		ctx.ProtectReg(target.Reg2)
-		defer func() {
-			ctx.UnprotectReg(target.Reg2)
-			ctx.UnprotectReg(target.Reg)
-		}()
-	}
+	outerEnv := ctx.Env
+	stableEnv := ctx.StabilizeJITEnv(outerEnv, true)
+	// Reuse a caller-reserved pair before requesting more registers. Conditions
+	// read the preserved input homes; caller stack destinations are written last.
+	// Placement is reusable, while proofs about the previous value are not.
+	pair := jitEnsureResultPair(ctx, result)
+	saved := JITValueDesc{ID: pair.ID, Loc: LocRegPair, Type: JITTypeUnknown, Reg: pair.Reg, Reg2: pair.Reg2}
+	ctx.ProtectReg(saved.Reg)
+	ctx.ProtectReg(saved.Reg2)
+	boundary := ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true, ResultRegs: []Reg{saved.Reg, saved.Reg2}})
+	ctx.Env = stableEnv
+	branchState := ctx.SnapshotAllocState()
 	endLabel := ctx.ReserveLabel()
 	i := 0
 	for i+1 < len(args) {
-		thenLabel := ctx.ReserveLabel()
-		nextLabel := ctx.ReserveLabel()
+		thenLabel, nextLabel := ctx.ReserveLabel(), ctx.ReserveLabel()
 		jitEmitCondJump(ctx, args[i], ctx.SliceBase, thenLabel, nextLabel)
 		ctx.MarkLabel(thenLabel)
-		value := jitCompileExpr(ctx, args[i+1], ctx.SliceBase, target)
-		_ = jitPlaceScmerIntoTarget(ctx, value, target)
+		ctx.RestoreAllocState(branchState)
+		value := jitCompileExpr(ctx, args[i+1], ctx.SliceBase, saved)
+		_ = jitPlaceScmerIntoTarget(ctx, value, saved)
 		ctx.EmitJmp(endLabel)
 		ctx.MarkLabel(nextLabel)
+		ctx.RestoreAllocState(branchState)
 		i += 2
 	}
 	if i < len(args) {
-		value := jitCompileExpr(ctx, args[i], ctx.SliceBase, target)
-		_ = jitPlaceScmerIntoTarget(ctx, value, target)
+		value := jitCompileExpr(ctx, args[i], ctx.SliceBase, saved)
+		_ = jitPlaceScmerIntoTarget(ctx, value, saved)
 	} else {
-		nilValue := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-		_ = jitPlaceScmerIntoTarget(ctx, nilValue, target)
+		_ = jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, saved)
 	}
 	ctx.MarkLabel(endLabel)
-	if target.Loc == LocRegPair {
-		ctx.BindReg(target.Reg, &target)
-		ctx.BindReg(target.Reg2, &target)
-	}
-	return target
+	ctx.Env = outerEnv
+	boundary.Restore(ctx)
+	ctx.UnprotectReg(saved.Reg2)
+	ctx.UnprotectReg(saved.Reg)
+	saved.Type, saved.NoHeapPointer = JITTypeUnknown, false
+	ctx.BindReg(saved.Reg, &saved)
+	ctx.BindReg(saved.Reg2, &saved)
+	return jitPlaceScmerIntoTarget(ctx, saved, result)
 }
 
 func jitEmitSpecialIfCond(ctx *JITContext, args []Scmer, trueLabel, falseLabel JITLabel) {
+	outerEnv := ctx.Env
+	stableEnv := ctx.StabilizeJITEnv(outerEnv, true)
+	boundary := ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true})
+	ctx.Env = stableEnv
+	branchState := ctx.SnapshotAllocState()
+	yes, no := ctx.ReserveLabel(), ctx.ReserveLabel()
 	i := 0
 	for i+1 < len(args) {
-		thenLabel := ctx.ReserveLabel()
-		nextLabel := ctx.ReserveLabel()
+		thenLabel, nextLabel := ctx.ReserveLabel(), ctx.ReserveLabel()
 		jitEmitCondJump(ctx, args[i], ctx.SliceBase, thenLabel, nextLabel)
 		ctx.MarkLabel(thenLabel)
-		jitEmitCondJump(ctx, args[i+1], ctx.SliceBase, trueLabel, falseLabel)
+		ctx.RestoreAllocState(branchState)
+		jitEmitCondJump(ctx, args[i+1], ctx.SliceBase, yes, no)
 		ctx.MarkLabel(nextLabel)
+		ctx.RestoreAllocState(branchState)
 		i += 2
 	}
 	if i < len(args) {
-		jitEmitCondJump(ctx, args[i], ctx.SliceBase, trueLabel, falseLabel)
+		jitEmitCondJump(ctx, args[i], ctx.SliceBase, yes, no)
 	} else {
-		ctx.EmitJmp(falseLabel)
+		ctx.EmitJmp(no)
 	}
+	ctx.Env = outerEnv
+	ctx.MarkLabel(yes)
+	boundary.Restore(ctx)
+	ctx.EmitJmp(trueLabel)
+	ctx.MarkLabel(no)
+	boundary.Restore(ctx)
+	ctx.EmitJmp(falseLabel)
 }
 
 type jitConditionTargets struct{ yes, no JITLabel }

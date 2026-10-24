@@ -184,6 +184,22 @@ retains its existing representation and contains no synchronization state.
   semantic atomic-load emitter and rejects an unpublished code word. These reads
   introduce no locks, counters, CAS operations or other shared-memory writes.
 
+- Native IF branches preserve outer register ownership before branching and
+  restore an independent allocator/root snapshot on sibling edges. Only the
+  common result survives a value join; branch-only closure captures and spills
+  must never enter later stack maps on paths which skipped their producers.
+  Condition lowering restores the outer state on both outgoing edges. The
+  caller's reserved register pair remains usable under register pressure, with
+  value proofs cleared for the new result. Condition inputs use preserved homes;
+  an aliased caller stack destination is written only after those inputs have
+  been consumed.
+
+- Native regex scans reserve their returned Scmer slot in the caller's stack
+  region before reserving temporary walker state. Releasing walker state must
+  neither release nor unroot that result; a caller may allocate scratch before
+  consuming it. Scmer stack roots describe only the pointer word. The auxiliary
+  tag/length word and raw regex cursor/end positions are never Go pointer roots.
+
 - Parallelize sufficiently large batches or shards within the query/session
   budget. Use worker-local accumulators and merge at batch/task completion;
   avoid per-row goroutines and shared counters. Streaming producers must obey
