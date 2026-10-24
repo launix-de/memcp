@@ -1325,3 +1325,139 @@ func TestJITParserBindingDoesNotRootReusedResultBeforeReturn(t *testing.T) {
 		t.Error("generator consumer never roots the binding after the getter has returned")
 	}
 }
+
+// A branch-local capture home must not become a root on a sibling edge or
+// after the join. Its address may still hold scalar scratch from earlier code.
+func TestJITIfDiscardsBranchLocalRoots(t *testing.T) {
+	var local jitStackRoot
+	emitted := false
+	checks := 0
+	producer := &Declaration{Name: "jit_branch_private_root", Fn: func(...Scmer) Scmer { return NewString("branch") }, Type: &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "string"}, JITEmit: func(ctx *JITContext, _ []Scmer, _ []JITValueDesc, target JITValueDesc) JITValueDesc {
+		off := ctx.AllocStack(16)
+		ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("private capture")}, off)
+		local = jitStackRoot{jitStackRootFrameSP, off - ctx.DynamicSP}
+		emitted = true
+		return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("branch")}, target)
+	}}}
+	consumer := &Declaration{Name: "jit_branch_root_safepoint", Fn: func(...Scmer) Scmer { runtime.GC(); return NewBool(true) }, Type: &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "bool"}, JITEmit: func(ctx *JITContext, _ []Scmer, _ []JITValueDesc, target JITValueDesc) JITValueDesc {
+		if emitted {
+			if _, live := ctx.StackRoots[local]; live {
+				t.Error("branch-local capture remains a root on a sibling or joined path")
+			}
+			checks++
+		}
+		ctx.EmitGoCallVoid(GoFuncAddr(runtime.GC), nil)
+		return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}, target)
+	}}}
+	for _, declaration := range []*Declaration{producer, consumer} {
+		Declare(&Globalenv, declaration)
+	}
+	defer func() {
+		for _, declaration := range []*Declaration{producer, consumer} {
+			delete(Globalenv.Vars, Symbol(declaration.Name))
+			delete(declarations, declaration.Name)
+			delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
+		}
+	}()
+	for index, expression := range []string{
+		`(lambda (flag) (begin (if flag (jit_branch_private_root) nil) (jit_branch_root_safepoint)))`,
+		`(lambda (flag) (if flag (jit_branch_private_root) (jit_branch_root_safepoint)))`,
+		`(lambda (flag) (if (if flag (begin (jit_branch_private_root) true) false) (jit_branch_root_safepoint) (jit_branch_root_safepoint)))`,
+		`(lambda (flag) (begin (if flag (jit_branch_private_root)) (jit_branch_root_safepoint)))`,
+	} {
+		emitted = false
+		compiled := compileJITExpressionTestProc(t, expression)
+		for _, flag := range []bool{false, true} {
+			want := NewBool(true)
+			if index == 1 && flag {
+				want = NewString("branch")
+			}
+			if got := Apply(compiled, NewBool(flag)); !Equal(got, want) {
+				t.Fatalf("case %d flag %t: got %s, want %s", index, flag, String(got), String(want))
+			}
+		}
+	}
+	if checks < 3 {
+		t.Fatalf("branch root checks were not emitted: %d", checks)
+	}
+}
+
+// A caller may reuse an input home as the eventual result destination. IF
+// must consume that input before publishing a result into the shared home.
+func TestJITIfPreservesAliasedInput(t *testing.T) {
+	declaration := &Declaration{Name: "jit_if_alias_probe", Fn: func(args ...Scmer) Scmer {
+		if args[0].Bool() {
+			return NewString("yes")
+		}
+		return NewString("no")
+	}, Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "bool"}}, Return: &TypeDescriptor{Kind: "string"}, JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, target JITValueDesc) JITValueDesc {
+		off := ctx.AllocStack(16)
+		ctx.EmitStoreScmerToStack(args[0], off)
+		alias := JITValueDesc{Loc: LocStackPair, StackOff: off, Type: tagBool, Rooted: true}
+		outer := ctx.Env
+		ctx.Env = &JITEnv{Vars: map[Symbol]JITValueDesc{"jit_if_input": alias}, Outer: outer}
+		out := jitEmitSpecialIf(ctx, []Scmer{NewSymbol("jit_if_input"), NewString("yes"), NewString("no")}, nil, alias)
+		ctx.Env = outer
+		return jitPlaceScmerIntoTarget(ctx, out, target)
+	}}}
+	Declare(&Globalenv, declaration)
+	defer func() {
+		delete(Globalenv.Vars, Symbol(declaration.Name))
+		delete(declarations, declaration.Name)
+		delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda (flag) (jit_if_alias_probe flag))`)
+	for _, flag := range []bool{false, true} {
+		want := "no"
+		if flag {
+			want = "yes"
+		}
+		if got := String(Apply(compiled, NewBool(flag))); got != want {
+			t.Fatalf("flag %t: got %q, want %q", flag, got, want)
+		}
+	}
+}
+
+// Nested emitters can enter IF with the register bank already reserved. Its
+// caller-provided result pair must remain usable without another allocation.
+func TestJITIfUsesReservedResultRegisters(t *testing.T) {
+	declaration := &Declaration{Name: "jit_if_reserved_result_probe", Fn: func(args ...Scmer) Scmer {
+		if args[0].Bool() {
+			return NewInt(7)
+		}
+		return NewInt(9)
+	}, Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "bool"}}, Return: &TypeDescriptor{Kind: "int"}, JITVirtualArgs: true, JITEmit: func(ctx *JITContext, source []Scmer, _ []JITValueDesc, target JITValueDesc) JITValueDesc {
+		var held []JITValueDesc
+		for bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) >= 2 {
+			value := jitAllocTrackedPair(ctx, JITTypeUnknown)
+			ctx.ProtectReg(value.Reg)
+			ctx.ProtectReg(value.Reg2)
+			held = append(held, value)
+		}
+		if len(held) == 0 {
+			t.Fatal("probe did not reserve a result pair")
+		}
+		out := jitEmitSpecialIf(ctx, []Scmer{source[0], NewInt(7), NewInt(9)}, nil, held[0])
+		for _, value := range held {
+			ctx.UnprotectReg(value.Reg2)
+			ctx.UnprotectReg(value.Reg)
+		}
+		return jitPlaceScmerIntoTarget(ctx, out, target)
+	}}}
+	Declare(&Globalenv, declaration)
+	defer func() {
+		delete(Globalenv.Vars, Symbol(declaration.Name))
+		delete(declarations, declaration.Name)
+		delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda (flag) (jit_if_reserved_result_probe flag))`)
+	for _, flag := range []bool{false, true} {
+		want := int64(9)
+		if flag {
+			want = 7
+		}
+		if got := Apply(compiled, NewBool(flag)); !Equal(got, NewInt(want)) {
+			t.Fatalf("flag %t: got %s, want %d", flag, String(got), want)
+		}
+	}
+}

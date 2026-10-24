@@ -405,18 +405,18 @@ func (emitter *jitRegexEmitter) emitGoStringState(text JITValueDesc) {
 func jitEmitRegexScanReplace(ctx *JITContext, program *jitRegexProgram, input JITValueDesc,
 	onMatch func(startOff, endOff JITValueDesc), onEnd func(resultSlot JITValueDesc), nilPath func(resultSlot JITValueDesc)) JITValueDesc {
 
-	e := &jitRegexEmitter{ctx: ctx, program: program}
-	nilLabel := ctx.ReserveLabel()
-	invalid := ctx.ReserveLabel()
-	e.reserveMachineState(input, invalid, &nilLabel, true)
-
+	// The returned result belongs to the caller, outside the regex walker's
+	// temporary region. releaseMachineState must never free or unroot it.
 	resultOff := ctx.AllocStack(16)
 	ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
 	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, resultOff)
 	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, resultOff+8)
 	ctx.setStackPointer(jitStackRootFrameSP, resultOff-ctx.DynamicSP, true)
-	ctx.setStackPointer(jitStackRootFrameSP, resultOff+8-ctx.DynamicSP, true)
 	resultSlot := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
+	e := &jitRegexEmitter{ctx: ctx, program: program}
+	nilLabel := ctx.ReserveLabel()
+	invalid := ctx.ReserveLabel()
+	e.reserveMachineState(input, invalid, &nilLabel, true)
 
 	endOff := ctx.AllocStack(8)
 	ctx.EmitStoreRegMem(e.end, ctx.StackReg, endOff)
@@ -809,7 +809,6 @@ func (emitter *jitRegexEmitter) emitBacktrackingRepeat(node *syntax.Regexp, min 
 	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, stackOff)
 	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, stackOff+8)
 	ctx.setStackPointer(jitStackRootFrameSP, stackOff-ctx.DynamicSP, true)
-	ctx.setStackPointer(jitStackRootFrameSP, stackOff+8-ctx.DynamicSP, true)
 	stackSlot := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: stackOff, Rooted: true}
 	{
 		handle := ctx.EmitGoCallScalar(GoFuncAddr(jitRegexBacktrackNew), nil, 2)
@@ -1487,7 +1486,6 @@ func jitEmitConstantRegexpMatches(ctx *JITContext, pattern *regexp.Regexp, value
 	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, accOff+8)
 	ctx.setStackPointer(jitStackRootFrameSP, inputOff-ctx.DynamicSP, true)
 	ctx.setStackPointer(jitStackRootFrameSP, accOff-ctx.DynamicSP, true)
-	ctx.setStackPointer(jitStackRootFrameSP, accOff+8-ctx.DynamicSP, true)
 	accSlot := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: accOff, Rooted: true}
 	inputSlot := func() JITValueDesc {
 		return JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: inputOff}

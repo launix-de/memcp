@@ -91,3 +91,50 @@ func TestJITRegexpMatchesNoCopy(t *testing.T) {
 		}
 	}
 }
+
+// A caller may keep an unconstrained result while reserving its next scratch
+// region. The regex emitter must retain ownership of that result's stack slot.
+func TestJITRegexpMatchesResultSurvivesCallerScratch(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	const name = "jit_regex_result_scratch_probe"
+	pattern := regexp.MustCompile(`[a-z]+`)
+	declaration := &Declaration{
+		Name: name,
+		Fn: func(args ...Scmer) Scmer {
+			return jitConstantRegexpMatches(NewRegex(pattern), args[0])
+		},
+		Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "string"}}, Return: &TypeDescriptor{Kind: "list"},
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, target JITValueDesc) JITValueDesc {
+				value := jitEmitConstantRegexpMatches(ctx, pattern, args[0], JITValueDesc{Loc: LocAny})
+				scratch := ctx.AllocStack(16)
+				ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("caller scratch")}, scratch)
+				out := jitPlaceScmerIntoTarget(ctx, value, target)
+				ctx.FreeStack(16)
+				return out
+			},
+		},
+	}
+	Declare(&Globalenv, declaration)
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda (text) (jit_regex_result_scratch_probe text))`)
+	for _, test := range []struct {
+		input Scmer
+		want  Scmer
+	}{
+		{NewString("alpha beta"), NewSlice([]Scmer{NewString("alpha"), NewString("beta")})},
+		{NewString("123"), NewSlice(nil)},
+		{NewString(""), NewSlice(nil)},
+		{NewNil(), NewSlice(nil)},
+	} {
+		got := Apply(compiled, test.input)
+		if !got.IsSlice() || !Equal(got, test.want) {
+			t.Fatalf("regex result was overwritten by caller scratch: %s", String(got))
+		}
+	}
+}
