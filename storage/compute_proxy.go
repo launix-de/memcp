@@ -130,7 +130,8 @@ type StorageComputeProxy struct {
 	// this O(1) generation instead of walking every live delta row merely to
 	// prove that no repair work exists. A mutation which leaves a hole advances
 	// revision without advancing preparedRevision.
-	preparedRevision atomic.Uint64
+	preparedRevision      atomic.Uint64
+	replicationCacheEpoch atomic.Uint64 // last applied table coherence epoch; preparation only
 	// plannerDeltaRows is the monotonically growing number of appended delta
 	// records in this shard (deletions only change their visibility). Remembering
 	// the prepared length makes a later append invalidate the O(1) proof without
@@ -296,6 +297,7 @@ func (r *computeProxyReader) GetValueMulti(recids []uint32, target []scm.Scmer, 
 }
 
 func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext, alreadyLocked bool, hints ColumnReadHints) ColumnReader {
+	p.synchronizeReplicationCache()
 	if p.isOrdered {
 		return &orderedComputeProxyReader{proxy: p, tx: tx, alreadyLocked: alreadyLocked}
 	}
@@ -1008,6 +1010,27 @@ func (p *StorageComputeProxy) InvalidateAll() {
 	p.validMask.Reset()
 	p.delta = make(map[uint32]scm.Scmer)
 	p.deltaBytes = 0
+}
+
+func (p *StorageComputeProxy) synchronizeReplicationCache() {
+	if p.shard == nil || p.shard.t == nil {
+		return
+	}
+	epoch := p.shard.t.replicationCacheEpoch.Load()
+	if p.replicationCacheEpoch.Load() == epoch {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.replicationCacheEpoch.Load() == epoch {
+		return
+	}
+	p.revision.Add(1)
+	p.compressed = false
+	p.validMask.Reset()
+	p.delta = make(map[uint32]scm.Scmer)
+	p.deltaBytes = 0
+	p.replicationCacheEpoch.Store(epoch)
 }
 
 // ShouldSkipSelectiveInvalidation returns true when cumulative invalidation

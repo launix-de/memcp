@@ -59,12 +59,18 @@ the dispatch formula and retained ASTs without limit. */
 /* A parse can mention the same physical table through many aliases. Resolve
 and authorize each readable table once, then keep using show's immutable table
 snapshot through the stable handle for the rest of this compile only. */
-(define sql_compile_table_policy (lambda (policy)
+(define sql_compile_table_policy (lambda (policy tx access readonly)
 	(begin
 		(define catalog (newsession))
 		(lambda (schema tbl write)
 			(if write
-				(if policy (policy schema tbl true) true)
+				(begin
+					(if policy (policy schema tbl true) true)
+					(access "write" true)
+					(if (and (equal? schema "system") (equal? tbl true)) (access "admin" true) true)
+					/* Native schema/shard access acquires ownership. Keep write
+					intent on cached plans; admin commands route to the master. */
+					(if (or readonly (equal? schema "system")) true (replication_write tx)))
 				(begin
 					(define handle (table schema false tbl false))
 					(if (and handle (catalog handle))
@@ -322,6 +328,21 @@ the parameter list: this prevents a cached plan from retaining the compiling
 request and makes the complete dispatcher eligible for native compilation.
 The Proc retains its optimized Scheme body, so cachemap memory accounting and
 serialization still see the complete plan. */
+(define sql_queryplan_write_guard (lambda (formula access readonly schema parse_query parse_fn)
+	(if (and (not readonly) (access "write")
+		(not (match formula
+			(cons head tail) (and (empty_list? tail)
+				(or (equal? head shutdown) (equal? head (quote shutdown))))
+			_ false)))
+		(if (access "admin")
+			(list (quote if) (list (quote replication_slave))
+				(list (quote replication_admin) (quote session) schema parse_query
+					(if (list? parse_fn) (equal? (car parse_fn) parse_psql) false)
+					(quote resultrow) (quote resultfields))
+				formula)
+			(list (quote !begin) (list (quote replication_write) (quote tx)) formula))
+		formula)))
+
 (define sql_queryplan_compile_formula (lambda (compile_tx formula)
 	(jit (close_procedure (eval (optimize (list
 		(quote lambda)
@@ -340,14 +361,15 @@ serialization still see the complete plan. */
 		(planning_session "__memcp_queryplan_diagnostic_statistics" statistics_diagnostic)
 		(if statistics_diagnostic
 			(planning_session "__memcp_queryplan_diagnostic_guards" (newsession)) nil)
-		(define compile_policy (sql_compile_table_policy policy))
+		(define access (newsession))
+		(define compile_policy (sql_compile_table_policy policy tx access statistics_diagnostic))
 		(define raw_plan (with_session planning_session (lambda ()
 			(sql_invoke_parse_fn parse_fn schema parse_query compile_policy planning_session tx))))
 		/* Parsing includes logical and physical planning. Never spend optimizer
 		work or install a variant after its requesting context was cancelled. */
 		(tx_check tx)
 		(define plan (sql_queryplan_compile_formula tx
-			(sql_queryplan_bind_execution_session raw_plan)))
+			(sql_queryplan_write_guard (sql_queryplan_bind_execution_session raw_plan) access statistics_diagnostic schema parse_query parse_fn)))
 		(tx_check tx)
 		/* Diagnostics must refresh their captured estimates when table statistics
 		change, but checking their cache must never execute candidate preparations. */
@@ -558,9 +580,14 @@ user table merely to discard a newly constructed policy closure. */
 				compiled procedures. Their dispatchers still evaluate every guard. */
 				(if (list? cached_entry) (cadr cached_entry) cached_entry)
 				(begin
-					(define select_query (match (toUpper parse_query)
-						(regex "^\\s*SELECT\\b" _) true
-						_ false))
+					/* Only SELECT owns read-plan declaration guards. In particular,
+					CREATE TRIGGER must leave inline DML guards inside its callback.
+					Reuse the lexical token pass on this cold miss so leading comments
+					cannot bypass wildcard declaration validation. */
+					(define tokens (sql_parameter_tokens parse_query))
+					(define first_token (sql_parameter_next_significant_index tokens 0))
+					(define select_query (if (< first_token (count tokens))
+						(equal?? (nth tokens first_token) "SELECT") false))
 					/* EXPLAIN captures planning statistics and needs their invalidation too.
 					Ordinary point and ordered scans retain the smaller exact cache path. */
 					(define guarded_query (or explain_query (and select_query
@@ -572,6 +599,10 @@ user table merely to discard a newly constructed policy closure. */
 						exact producer remains identical to its guard-free implementation;
 						its cold optimizer must not compile an unused variant producer. */
 						(if (or (and (list? parse_fn) (> (count parse_fn) 1) ((cadr parse_fn) "exact_guards"))
+							/* A bare star conservatively selects declaration collection;
+							the logical AST decides whether any directory was consumed.
+							Point queries retain their original direct exact compiler. */
+							(and select_query (has? tokens "*"))
 							(match (toUpper parse_query)
 								(regex "^\\s*(?:UPDATE|DELETE)\\b" _) true _ false))
 							(begin
@@ -590,11 +621,13 @@ user table merely to discard a newly constructed policy closure. */
 								(define exact_compile (lambda (compile_tx)
 									(begin
 										(define resolved_policy (sql_policy_spec_resolve policy))
-										(define compile_policy (sql_compile_table_policy resolved_policy))
-										(sql_queryplan_compile_formula compile_tx (sql_queryplan_bind_tx_calls
+										(define access (newsession))
+										(define compile_policy (sql_compile_table_policy resolved_policy compile_tx access compile_diagnostic))
+										(define raw_plan (sql_queryplan_bind_tx_calls
 											(sql_queryplan_bind_execution_session
 												(with_session session (lambda ()
-													(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx)))))))))
+													(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx))))))
+										(sql_queryplan_compile_formula compile_tx (sql_queryplan_write_guard raw_plan access compile_diagnostic schema parse_query parse_fn)))))
 								(if compile_diagnostic
 									(exact_compile tx)
 									(queryplan_cache cache_key tx exact_compile))))

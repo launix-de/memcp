@@ -27,25 +27,27 @@ test_cases:
       (begin
         (define calls (newsession))
         (calls "count" 0)
+        (define access (newsession))
         (define compile_policy (jit sql_compile_table_policy))
         (define check (compile_policy (lambda (schema tbl write)
           (begin
             (calls "count" (+ (calls "count") 1))
             (if (and (equal? schema "memcp-tests") (equal? tbl "jit_register_pressure"))
-              true (error "policy arguments changed"))))))
+              true (error "policy arguments changed")))) nil access false))
         (check "memcp-tests" "jit_register_pressure" false)
         (check "memcp-tests" "jit_register_pressure" false)
         (check "memcp-tests" "jit_register_pressure" true)
-        (if (equal? (calls "count") 2) true (error "policy memoization changed")))
+        (if (and (equal? (calls "count") 2) (access "write"))
+          true (error "policy memoization or write intent changed")))
   - name: "Compiled read policy still rejects access"
     scm: |
-      (((jit sql_compile_table_policy) (lambda (schema tbl write) (error "denied")))
+      (((jit sql_compile_table_policy) (lambda (schema tbl write) (error "denied")) nil (newsession) false)
         "memcp-tests" "jit_register_pressure" false)
     expect:
       error: true
   - name: "Compiled write policy still rejects access"
     scm: |
-      (((jit sql_compile_table_policy) (lambda (schema tbl write) (error "denied")))
+      (((jit sql_compile_table_policy) (lambda (schema tbl write) (error "denied")) nil (newsession) false)
         "memcp-tests" "jit_register_pressure" true)
     expect:
       error: true

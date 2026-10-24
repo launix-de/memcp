@@ -40,7 +40,7 @@ func TestAwaitCreationInitializationRetriesAfterQueryKilled(t *testing.T) {
 		}
 		return scm.NewBool(true)
 	})
-	tbl.OnInit = &onInit
+	tbl.OnInit.Store(&onInit)
 
 	func() {
 		defer func() {
@@ -54,14 +54,14 @@ func TestAwaitCreationInitializationRetriesAfterQueryKilled(t *testing.T) {
 	if tbl.creationPanic != nil {
 		t.Fatalf("a transient query-killed panic must not be cached as creationPanic, got %v", tbl.creationPanic)
 	}
-	if tbl.onInitComplete {
+	if tbl.onInitComplete.Load() {
 		t.Fatal("onInitComplete must stay false after a killed OnInit attempt")
 	}
 
 	// A later, unrelated call must retry OnInit from scratch rather than
 	// replaying the stale panic against an unrelated query/session.
 	tbl.awaitCreationInitialization(scm.NewNil())
-	if !tbl.onInitComplete {
+	if !tbl.onInitComplete.Load() {
 		t.Fatal("retry after query-killed should have completed OnInit")
 	}
 	if calls != 2 {
@@ -96,7 +96,7 @@ func TestAwaitCreationInitializationCachesGenuineFailure(t *testing.T) {
 		calls++
 		panic("boom: genuinely broken onInit")
 	})
-	tbl.OnInit = &onInit
+	tbl.OnInit.Store(&onInit)
 
 	for i := 0; i < 2; i++ {
 		func() {

@@ -36,6 +36,17 @@ type ReadAccess struct {
 	shard *storageShard
 }
 
+type WriteAccess struct {
+	shard   *storageShard
+	release func()
+}
+
+func (access WriteAccess) Release() {
+	if access.release != nil {
+		access.release()
+	}
+}
+
 func (access ReadAccess) Release() {
 	if access.shard != nil {
 		access.shard.releaseCacheRead()
@@ -43,11 +54,11 @@ func (access ReadAccess) Release() {
 }
 
 // SharedResource is the access boundary for a lazily loaded local or clustered
-// resource. GetRead/GetExclusive must not be bypassed by callers that happen to
+// resource. GetRead/GetWrite must not be bypassed by callers that happen to
 // know today's in-process representation: a cluster implementation may satisfy a
 // read by loading a local SHARED copy or by routing work to a current shard owner.
 type SharedResource interface {
 	GetState() SharedState
 	GetRead(currentTx *TxContext) ReadAccess // cold-load waits observe this query
-	GetExclusive() func()                    // acquire exclusive access; returns release()
+	GetWrite(currentTx *TxContext) WriteAccess
 }

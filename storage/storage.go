@@ -770,6 +770,11 @@ func invalidateComputedRows(proxy *StorageComputeProxy, recids map[uint32]struct
 }
 
 func Init(en scm.Env) {
+	scm.HTTPAuthenticationHook = replicationHTTPAuthentication
+	scm.MySQLAuthenticationHook = replicationMySQLAuthentication
+	scm.MySQLDatabaseHook = replicationOpenDatabase
+	scm.SessionCleanupHook = replicationSessionClosed
+	initReplicationAdmin(&en)
 	const scanFilterColumnsDesc = "physical columns passed to filter before mapreduce; $recset_contains supplies a row-bound RecSet membership closure"
 	const scanMapColumnsDesc = "physical columns passed to map after filtering; pseudo columns are $update (update/delete current row), $record_ref (query-local physical row identity), $recset_contains (row-bound RecSet membership), $recmap_call (row-bound RecMap accessor), $set:<column>, $increment:<column>, and $invalidate:<column> (computed-column maintenance), plus NEW.<column> in trigger plans"
 	const scanOrderMapColumnsDesc = scanMapColumnsDesc + "; $break is reserved for internal ORC convergence and must not implement SQL OFFSET/LIMIT, which belong in the native offset and limit arguments"
@@ -959,6 +964,7 @@ func Init(en scm.Env) {
 			if db == nil {
 				return scm.NewNil()
 			}
+			db.GetRead(nil)
 			t := db.GetTable(scm.String(a[2]), a[3].Bool())
 			if t == nil {
 				return scm.NewNil()
@@ -1225,6 +1231,7 @@ func Init(en scm.Env) {
 				}
 				estimate := func() filteredRowEstimate {
 					release := shard.GetRead(currentTx)
+					shard = release.shard
 					defer release.Release()
 					return shard.EstimateFilteredRows(conditionCols, condition, limit, currentTx, accessSchema, accessValues)
 				}()
@@ -2490,7 +2497,7 @@ func Init(en scm.Env) {
 			// result stays race-free under concurrent creators.
 			if ifnotexists {
 				if existing := db.tables.Get(tblName); existing != nil {
-					if existing.OnInit != nil || existing.onInitComplete {
+					if existing.OnInit.Load() != nil || existing.onInitComplete.Load() {
 						// This also reruns persisted oninit for data-empty MEMORY/CACHE
 						// tables after restart. The local barrier affects no other table.
 						existing.awaitCreationInitialization(currentTx)
@@ -2561,7 +2568,7 @@ func Init(en scm.Env) {
 			newTable.Auto_increment = autoIncrement
 			if !oninit.IsNil() {
 				closedOnInit := scm.CloseProcedure(oninit)
-				newTable.OnInit = &closedOnInit
+				newTable.OnInit.Store(&closedOnInit)
 			}
 
 			for _, coldef := range mustScmerSlice(a[2], "columns") {
@@ -2617,6 +2624,11 @@ func Init(en scm.Env) {
 			validateUniqueConstraintNames(newTable.Unique)
 			newTable.publishShowColumnsSnapshot(true)
 
+			var schemaAccess WriteAccess
+			if !newTable.isEphemeralQueryTable() {
+				schemaAccess = db.GetWrite(nil)
+				defer func() { schemaAccess.Release() }()
+			}
 			existing := func() *table {
 				db.schemalock.Lock()
 				resolved := false
@@ -2640,9 +2652,9 @@ func Init(en scm.Env) {
 				// the table already exists, "created=false" is the only signal the
 				// caller needs to skip collect/materialization work.
 				atomic.StoreUint64(&existing.lastAccessed, uint64(time.Now().UnixNano()))
-				if existing.OnInit == nil && !oninit.IsNil() {
+				if existing.OnInit.Load() == nil && !oninit.IsNil() {
 					closedOnInit := scm.CloseProcedure(oninit)
-					existing.OnInit = &closedOnInit
+					existing.OnInit.Store(&closedOnInit)
 					db.saveLockedAndUnlock(schemaSaveBuffered)
 				} else {
 					db.schemalock.Unlock()
@@ -2704,6 +2716,10 @@ func Init(en scm.Env) {
 				mode = schemaSaveBuffered
 			}
 			db.saveLockedAndUnlock(mode)
+			// Dependency/oninit callbacks acquire their own schema rights.
+			// End publication ownership before invoking nested DDL.
+			schemaAccess.Release()
+			schemaAccess = WriteAccess{}
 			unlockPersistenceLifecycle()
 			registerCreatedTable(newTable)
 			var thisCallPanic any
@@ -2725,7 +2741,7 @@ func Init(en scm.Env) {
 				if !oninit.IsNil() {
 					scm.Apply(oninit, currentTx)
 				}
-				newTable.onInitComplete = true
+				newTable.onInitComplete.Store(true)
 				executeRegisteredCreateTableTriggers(newTable, nil)
 			}()
 			if thisCallPanic != nil {
@@ -2794,6 +2810,18 @@ func Init(en scm.Env) {
 					orcReduceInit = val
 				}
 			}
+			temporary := false
+			for i := 0; i+1 < len(typeparams); i += 2 {
+				if scm.String(typeparams[i]) == "temp" && scm.ToBool(typeparams[i+1]) {
+					temporary = true
+				}
+			}
+			var schemaAccess WriteAccess
+			if !temporary {
+				t, schemaAccess = t.schemaWrite()
+				defer schemaAccess.Release()
+			}
+
 			t.ddlMu.Lock()
 			defer t.ddlMu.Unlock()
 			var queryTx *TxContext
@@ -2935,6 +2963,8 @@ func Init(en scm.Env) {
 				unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, ss, querySeqFromTx(currentTx))
 			}
 			defer unlockTable()
+			t, schemaAccess := t.schemaWrite()
+			defer schemaAccess.Release()
 			t.schema.schemalock.Lock()
 			t.ddlMu.Lock()
 			defer t.ddlMu.Unlock()
@@ -2967,6 +2997,7 @@ func Init(en scm.Env) {
 			t.ddlMu.Lock()
 			defer t.ddlMu.Unlock()
 			db := t.schema
+			defer db.GetWrite(nil).Release()
 			db.schemalock.Lock()
 			for _, fk := range t.Foreign {
 				// Parent-side copies do not belong to this table's constraints.
@@ -3020,6 +3051,7 @@ func Init(en scm.Env) {
 			t1.ddlMu.Lock()
 			defer t1.ddlMu.Unlock()
 			db := t1.schema
+			defer db.GetWrite(nil).Release()
 			db.schemalock.Lock()
 			for _, u := range t1.Foreign {
 				if u.Id == id {
@@ -4078,12 +4110,14 @@ func Init(en scm.Env) {
 				if db == nil {
 					return scm.NewNil() // use this to check if a database exists
 				}
+				db.GetRead(nil)
 				return db.ShowTables()
 			} else if len(a) == 2 {
 				db := GetDatabase(scm.String(a[0]))
 				if db == nil {
 					panic("database " + scm.String(a[0]) + " does not exist")
 				}
+				db.GetRead(nil)
 				// (show schema true) → full table listing
 				if a[1].IsBool() && a[1].Bool() {
 					db.ensureLoaded()
@@ -4125,6 +4159,7 @@ func Init(en scm.Env) {
 				if db == nil {
 					panic("database " + scm.String(a[0]) + " does not exist")
 				}
+				db.GetRead(nil)
 				t := db.GetTable(scm.String(a[1]))
 				if t == nil {
 					panic("show3: table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
@@ -4185,6 +4220,7 @@ func Init(en scm.Env) {
 					if db == nil {
 						panic("database " + scm.String(a[0]) + " does not exist")
 					}
+					db.GetRead(nil)
 					t := db.GetTable(scm.String(a[1]))
 					if t == nil {
 						panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
@@ -4654,6 +4690,7 @@ func Init(en scm.Env) {
 			}
 			t.ddlMu.Lock()
 			defer t.ddlMu.Unlock()
+			defer db.GetWrite(nil).Release()
 			db.schemalock.Lock()
 			// Idempotent: replace any existing trigger with the same name
 			t.RemoveTrigger(name)
@@ -5645,6 +5682,9 @@ func uniqueKeyOptions(key uniqueKey, options scm.Scmer) uniqueKey {
 // createTableKey publishes validated uniqueness metadata. Callers enforce user
 // maintenance policy; the fixed bootstrap key list is initialized before serving.
 func createTableKey(t *table, key uniqueKey, currentTx *TxContext) bool {
+	t, schemaAccess := t.schemaWrite()
+	defer schemaAccess.Release()
+
 	// SQL DDL runs with a query session. Its exclusive table lock closes the
 	// race with writers which selected the no-UNIQUE insert path before the
 	// metadata was published. Boot-time catalog creation is single-threaded

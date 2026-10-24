@@ -107,24 +107,24 @@ stop_server
 # Read the predecessor's untouched persisted data before any candidate DML.
 # Compare only public results; cache names, versions and layouts are a black box.
 start_server candidate candidate-upgrade
-python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json"
+python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
 bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
 stop_server
 
 # Use a separate cold process to retain coverage of mutations before first read.
 start_server candidate candidate-cold-dml
-python3 "$HELPERS" cold-mutate "$MYSQL_PORT" "$ORACLES/queries.json"
+python3 "$HELPERS" cold-mutate "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
 bash "$VALIDATOR" "$MYSQL_PORT" zero-policy-checks
-python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json"
+python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
 bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
-python3 "$HELPERS" mutate "$MYSQL_PORT" "$ORACLES/queries.json"
+python3 "$HELPERS" mutate "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
 bash "$VALIDATOR" "$MYSQL_PORT" mutate "$ORACLES/before.json" "$ORACLES/after-dml.json"
 stop_server
 
 # The post-DML oracle is derived from the old reference plus specified
 # mutations. Reopening must preserve that entire expected state.
 start_server candidate candidate-restart
-python3 "$HELPERS" cold-mutate "$MYSQL_PORT" "$ORACLES/queries.json"
-python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json"
+python3 "$HELPERS" cold-mutate "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
+python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
 bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/after-dml.json"
 stop_server

@@ -157,7 +157,11 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 					defer shard.activeScanners.Add(-1)
 					release := shard.acquireReadForScan(currentTx)
 					defer release.Release()
-					return shard.scan_order(runtimeScanAccess(bounds), nil, condition,
+					scanShard := shard
+					if release.shard != nil {
+						scanShard = release.shard
+					}
+					return scanShard.scan_order(runtimeScanAccess(bounds), nil, condition,
 						nil, scm.NewNil(), sortcols, sortdirs, 0, remainingOffset,
 						limit-len(records), nil, currentTx, sessionState)
 				}()
@@ -171,11 +175,11 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 				if available := limit - len(records); len(items) > available {
 					items = items[:available]
 				}
-				part := &orderedBatchPart{shard: shard, universe: queue.universe,
+				part := &orderedBatchPart{shard: queue.shard, universe: queue.universe,
 					recids: append([]uint32(nil), items...)}
 				partOrder = append(partOrder, part)
 				for _, recid := range items {
-					records = append(records, orderedBatchRecord{shard: shard, recid: recid})
+					records = append(records, orderedBatchRecord{shard: queue.shard, recid: recid})
 				}
 			}
 			if descending {

@@ -103,12 +103,13 @@ func (db *database) blobRefState() *blobRefState {
 }
 
 func newDatabase() *database {
-	return &database{
+	db := &database{
 		tables:      NonLockingReadMap.NewReadMap[string, *table](),
 		procedures:  NonLockingReadMap.NewReadMap[string, *ProcedureDescription](),
 		blobRefs:    new(blobRefState),
 		committedTx: make(map[string]uint64),
 	}
+	return db
 }
 
 const transactionLogName = ".transactions"
@@ -414,6 +415,9 @@ func RebuildTable(tbl *table, all bool, repartition bool) string {
 	tbl.schema.persistenceLifecycle.RLock()
 	defer tbl.schema.persistenceLifecycle.RUnlock()
 	result := tbl.schema.rebuildWithLifecycle(all, repartition, true, tbl)
+	if r := replication.Load(); r != nil && !r.master && validReplicaDatabase(tbl.schema.Name) {
+		defer func() { go replicationCheckpoint(tbl.schema.Name, "") }()
+	}
 	errs := append([]string(nil), result.errors...)
 	if len(errs) == 0 {
 		if err := func() (err error) {
@@ -442,7 +446,8 @@ func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string 
 	dbs := databases.GetAll()
 	var errs []string
 	for _, db := range dbs {
-		errs = append(errs, rebuildDatabaseAndCompact(db, all, repartition, includeEphemeral)...)
+		failures, _ := rebuildDatabaseAndCompact(db, all, repartition, includeEphemeral)
+		errs = append(errs, failures...)
 	}
 	duration := fmt.Sprint(time.Since(start))
 	if len(errs) == 0 {
@@ -451,9 +456,14 @@ func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string 
 	return duration + " errors: " + strings.Join(errs, " | ")
 }
 
-func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, includeEphemeral bool) []string {
+// complete distinguishes a full checkpoint from successful best-effort
+// maintenance which skipped a busy or cold table. Replication needs the former.
+func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, includeEphemeral bool) ([]string, bool) {
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
+	if replication.Load() != nil && GetDatabase(db.Name) != db {
+		return []string{"database generation was replaced"}, false
+	}
 	var transactionCutoff uint64
 	var hasTransactions bool
 	if err := func() (err error) {
@@ -461,24 +471,27 @@ func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, include
 		transactionCutoff, hasTransactions = db.transactionCompactionSnapshot()
 		return nil
 	}(); err != nil {
-		return []string{err.Error()}
+		return []string{err.Error()}, false
 	}
 	result := db.rebuildWithLifecycle(all, repartition, includeEphemeral)
+	if r := replication.Load(); r != nil && !r.master && validReplicaDatabase(db.Name) {
+		defer func() { go replicationCheckpoint(db.Name, "") }()
+	}
 	if len(result.errors) > 0 {
-		return result.errors
+		return result.errors, false
 	}
 	if err := func() (err error) {
 		defer func() { err = recoverAsError("save failed for database " + db.Name) }()
 		db.save()
 		return nil
 	}(); err != nil {
-		return []string{err.Error()}
+		return []string{err.Error()}, false
 	}
 	// db.save() committed all replacement UUIDs. A save failure returns above
 	// and deliberately retains every old generation.
 	errs := cleanupReplacedShardGenerations(result.replaced, "database "+db.Name)
 	if len(errs) != 0 || !result.complete || !hasTransactions {
-		return errs
+		return errs, result.complete && len(errs) == 0
 	}
 	if err := func() (err error) {
 		defer func() { err = recoverAsError("transaction log compaction failed for database " + db.Name) }()
@@ -487,7 +500,7 @@ func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, include
 	}(); err != nil {
 		errs = append(errs, err.Error())
 	}
-	return errs
+	return errs, result.complete && len(errs) == 0
 }
 
 func UnloadDatabases() {
@@ -1011,9 +1024,9 @@ func upgradePersistedTableCalls(value scm.Scmer) scm.Scmer {
 }
 
 func invalidatePersistedPlannerCodeAfterLoad(t *table) {
-	if t.OnInit != nil {
-		restored := upgradePersistedTableCalls(*t.OnInit)
-		t.OnInit = &restored
+	if initializer := t.OnInit.Load(); initializer != nil {
+		restored := upgradePersistedTableCalls(*initializer)
+		t.OnInit.Store(&restored)
 	}
 	for _, col := range t.Columns {
 		col.OnUpdate = upgradePersistedTableCalls(col.OnUpdate)
@@ -1031,14 +1044,27 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 		}
 	}
 	if t.isEphemeralQueryTable() {
-		t.OnInit = nil
+		t.OnInit.Store(nil)
 	}
 }
 
 // SharedResource impl for database
-func (db *database) GetState() SharedState           { return db.srState }
-func (db *database) GetRead(_ *TxContext) ReadAccess { db.ensureLoaded(); return ReadAccess{} }
-func (db *database) GetExclusive() func()            { db.ensureLoaded(); db.srState = WRITE; return func() {} }
+func (db *database) GetState() SharedState { return db.srState }
+func (db *database) GetRead(tx *TxContext) ReadAccess {
+	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
+		r.obtain(replicaResource{Database: db.Name}, mosiS, replicationUser(tx))
+	}
+	db.ensureLoaded()
+	return ReadAccess{}
+}
+func (db *database) GetWrite(tx *TxContext) WriteAccess {
+	var release func()
+	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
+		_, release = r.writeResource(replicaResource{Database: db.Name}, tx)
+	}
+	db.ensureLoaded()
+	return WriteAccess{release: release}
+}
 
 // helper to fetch a table with lazy db load
 func (db *database) GetTable(name string, ignoreCase ...bool) *table {
@@ -1103,6 +1129,9 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 // public rebuild paths retain it through schema publication, so cleanup cannot
 // observe generation-private files in the build→publish interval.
 func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphemeral bool, only ...*table) rebuildDatabaseResult {
+	if replication.Load() != nil && GetDatabase(db.Name) != db {
+		return rebuildDatabaseResult{}
+	}
 	if db.srState == COLD {
 		// do nothing for cold databases; avoid loading during rebuild
 		return rebuildDatabaseResult{}
@@ -1249,6 +1278,21 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 						sdone.Done()
 					}()
 					if s != nil {
+						if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) && !t.isEphemeralQueryTable() {
+							cell := r.shardCell(s)
+							if !cell.gate.TryLock() {
+								newShardList[i] = s
+								incomplete.Store(true)
+								return
+							}
+							defer cell.gate.Unlock()
+							phase := cell.rights.phase()
+							if phase != mosiM && phase != mosiO {
+								newShardList[i] = s
+								incomplete.Store(true)
+								return
+							}
+						}
 						newShardList[i] = s.rebuild(all)
 					}
 				}(i, s, shardLease)
@@ -1443,7 +1487,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 			// transition to maintenanceKind=2 for repartition (no re-lock needed).
 			var shardCandidates []shardDimension
 			doRepart := false
-			if repartition && !hasColdShard {
+			if repartition && !hasColdShard && replication.Load() == nil {
 				var shouldChange bool
 				shardCandidates, shouldChange = t.proposerepartition(maincount)
 				if shouldChange {
@@ -1966,6 +2010,7 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 	// update it, and no table may appear while the destination generation is
 	// being prepared.
 	db.ensureBlobTable()
+	defer db.GetWrite(nil).Release()
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
 	if GetDatabase(schema) != db {
@@ -2106,6 +2151,9 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 			return existing, false
 		}
 	}
+	if !(pm == Cache && strings.HasPrefix(name, ".")) {
+		defer db.GetWrite(nil).Release()
+	}
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	db.ensureLoaded()
@@ -2185,6 +2233,7 @@ func DropTable(schema, name string, ifexists bool) {
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
+	defer db.GetWrite(nil).Release()
 	db.persistenceLifecycle.RLock()
 	persistenceLifecycleLocked := true
 	defer func() {
@@ -2247,9 +2296,19 @@ func RenameTable(schema, oldname, newname string) {
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
+	defer db.GetWrite(nil).Release()
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	db.ensureLoaded()
+	if r := replication.Load(); r != nil && validReplicaDatabase(schema) {
+		if target := db.tables.Get(oldname); target != nil {
+			for _, shard := range target.ActiveShards() {
+				if shard != nil {
+					r.obtain(*r.shardCell(shard).resource.Load(), mosiM, "")
+				}
+			}
+		}
+	}
 	db.schemalock.Lock()
 	t := db.tables.Get(oldname)
 	if t == nil {
