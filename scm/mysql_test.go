@@ -17,13 +17,14 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 package scm
 
-import (
-	"strings"
-	"testing"
-	"time"
-
-	querypb "github.com/launix-de/go-mysqlstack/sqlparser/depends/query"
-)
+import "net"
+import "time"
+import "runtime"
+import "strings"
+import "testing"
+import "github.com/launix-de/go-mysqlstack/xlog"
+import "github.com/launix-de/go-mysqlstack/driver"
+import querypb "github.com/launix-de/go-mysqlstack/sqlparser/depends/query"
 
 func TestMySQLInitializationGate(t *testing.T) {
 	BeginMySQLInitialization()
@@ -167,5 +168,131 @@ func TestPrepareMySQLResultFieldsPreservesCompilerOrderAndDuplicates(t *testing.
 	}
 	if colmap["id"] != 0 || colmap["value"] != 2 {
 		t.Fatalf("unexpected fallback column map: %+v", colmap)
+	}
+}
+
+// mysqlLifecycleProbe observes real driver events while keeping the production
+// wrapper responsible for Scheme sessions, locks and process-list ownership.
+type mysqlLifecycleProbe struct {
+	*MySQLWrapper
+	opened chan *driver.Session
+	closed chan *driver.Session
+}
+
+func (p *mysqlLifecycleProbe) NewSession(session *driver.Session) {
+	p.MySQLWrapper.NewSession(session)
+	p.opened <- session
+}
+
+func (p *mysqlLifecycleProbe) SessionClosed(session *driver.Session) {
+	p.MySQLWrapper.SessionClosed(session)
+	p.closed <- session
+}
+
+func TestMySQLConnectionCloseReleasesSession(t *testing.T) {
+	log := xlog.NewStdLog(xlog.Level(xlog.ERROR))
+	probe := &mysqlLifecycleProbe{
+		MySQLWrapper: &MySQLWrapper{
+			log: log,
+			authcallback: NewFunc(func(...Scmer) Scmer {
+				return NewString(string(driver.CreatePassword("admin")))
+			}),
+		},
+		opened: make(chan *driver.Session, 1),
+		closed: make(chan *driver.Session, 1),
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := driver.NewListenerFromNetListener(log, listener, probe)
+	// The driver's public accept loop sets GOMAXPROCS; restore the caller's
+	// setting once the listener and test connections have drained.
+	procs := runtime.GOMAXPROCS(0)
+	stopped := make(chan struct{})
+	go func() { defer close(stopped); server.Accept() }()
+	t.Cleanup(func() { server.Close(); <-stopped; runtime.GOMAXPROCS(procs) })
+
+	httpKey := t.Name()
+	httpSession := RegisterSession("root", "http", "")
+	httpStates.Store(httpKey, httpSession)
+	t.Cleanup(func() { EvictHTTPSession(httpKey) })
+
+	for _, mode := range []string{"quit", "disconnect", "auth failure"} {
+		t.Run(mode, func(t *testing.T) {
+			password := "admin"
+			if mode == "auth failure" {
+				password = "wrong"
+			}
+			client, err := driver.NewConn("root", password, listener.Addr().String(), "", "")
+			if client != nil {
+				t.Cleanup(client.Cleanup)
+			}
+			if mode == "auth failure" {
+				if err == nil {
+					client.Close()
+					t.Fatal("invalid password was accepted")
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			var session *driver.Session
+			select {
+			case session = <-probe.opened:
+				t.Cleanup(session.Close)
+			case <-time.After(3 * time.Second):
+				t.Fatal("MySQL session was not registered")
+			}
+			var state *SessionState
+			unlocked := make(chan struct{}, 1)
+			if mode != "auth failure" {
+				value, ok := mysqlStates.Load(session)
+				if !ok {
+					t.Fatal("live MySQL session is missing from the process list")
+				}
+				state = value.(*SessionState)
+				state.AddLock(func() { unlocked <- struct{}{} })
+				if mode == "disconnect" {
+					client.Cleanup()
+				} else {
+					client.Close()
+				}
+			}
+			select {
+			case closed := <-probe.closed:
+				if closed != session {
+					t.Fatal("another MySQL session was closed")
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("MySQL session was not unregistered")
+			}
+			select {
+			case <-session.Done():
+			default:
+				t.Fatal("application session was removed but driver session remained alive")
+			}
+			if _, ok := mysqlsessions.Load(session); ok {
+				t.Fatal("closed connection retained its Scheme session")
+			}
+			if _, ok := mysqlStates.Load(session); ok {
+				t.Fatal("closed connection retained its process-list mapping")
+			}
+			if state != nil {
+				if _, ok := processList.Load(state.ID); ok {
+					t.Fatal("closed connection remained in the process list")
+				}
+				select {
+				case <-unlocked:
+				default:
+					t.Fatal("closed connection retained its table locks")
+				}
+			}
+			if value, ok := httpStates.Load(httpKey); !ok || value != httpSession {
+				t.Fatal("MySQL connection close removed an independent persistent HTTP session")
+			}
+			if _, ok := processList.Load(httpSession.ID); !ok {
+				t.Fatal("persistent HTTP session was prematurely unregistered")
+			}
+		})
 	}
 }
