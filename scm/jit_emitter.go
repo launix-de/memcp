@@ -252,8 +252,8 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		ctx.SliceBaseTracksRSP = true
 	}
 	captureCount := 0
-	if proc != nil && proc.Compiled != nil {
-		captureCount = proc.Compiled.CaptureCount
+	if proc != nil && proc.compiled() != nil {
+		captureCount = proc.compiled().CaptureCount
 	}
 	if proc != nil && (captureCount != 0 || ctx.UsesRuntimeEnv) {
 		ctx.ClosureFuncOff = ctx.AllocStack(8)
@@ -288,9 +288,9 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 				}
 				numbered[index] = desc
 			}
-			if proc.Compiled != nil {
-				for index := 0; index < proc.Compiled.CaptureCount; index++ {
-					slot := proc.Compiled.CaptureBase + index
+			if proc.compiled() != nil {
+				for index := 0; index < proc.compiled().CaptureCount; index++ {
+					slot := proc.compiled().CaptureBase + index
 					if slot < 0 || slot >= len(numbered) {
 						panic("jit: closure capture slot outside local frame")
 					}

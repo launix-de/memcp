@@ -168,6 +168,16 @@ retains its existing representation and contains no synchronization state.
 
 ### Bounded parallelism and verifiable ownership
 
+- A shared Scheme `Proc` retains an immutable source declaration. Native entry
+  metadata is initialized once, including its funcval and arity, before atomic
+  publication. `JITCode` is the final execution publication, after stack maps and
+  transitive callees are ready; shared installs never mutate an existing entry.
+  Go readers use `nativeCode`/`compiled`; Proc snapshots read these fields
+  atomically and never copy the identity's compilation CAS. A winning compiler
+  rechecks publication before starting work. Dynamic native dispatch uses the
+  semantic atomic-load emitter and rejects an unpublished code word. These reads
+  introduce no locks, counters, CAS operations or other shared-memory writes.
+
 - Parallelize sufficiently large batches or shards within the query/session
   budget. Use worker-local accumulators and merge at batch/task completion;
   avoid per-row goroutines and shared counters. Streaming producers must obey

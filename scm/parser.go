@@ -121,7 +121,7 @@ func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scme
 		jitCompileEnvironmentParsers(en)
 		for sym := range deferredProcs {
 			value, exists := target.Vars[sym]
-			if !exists || value.GetTag() != tagProc || value.Proc() == nil || value.Proc().Compiled != nil {
+			if !exists || value.GetTag() != tagProc || value.Proc() == nil || value.Proc().compiled() != nil {
 				continue
 			}
 			compiled, _, selected := jitCompileImportProc(sym, value)
@@ -161,7 +161,7 @@ func jitCompileImportProc(sym Symbol, value Scmer) (Scmer, *JITEntryPoint, bool)
 	compiled := jitCompileProbe(value)
 	var entry *JITEntryPoint
 	if compiled.GetTag() == tagProc && compiled.Proc() != nil {
-		entry = compiled.Proc().Compiled
+		entry = compiled.Proc().compiled()
 	}
 	// Late-bound calls choose compiled Proc, native builtin, or interpreter
 	// dispatch independently. Keep every successfully emitted outer procedure;

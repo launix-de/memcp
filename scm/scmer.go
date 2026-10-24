@@ -378,7 +378,7 @@ func NewProc(p *Proc) Scmer {
 		return Scmer{nil, makeAux(tagProc, 0)}
 	}
 	ptr := new(Proc)
-	*ptr = *p
+	*ptr = p.snapshot()
 	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagProc, 0)}
 }
 

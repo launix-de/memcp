@@ -116,7 +116,7 @@ func String(v Scmer) string {
 		// Pretty-print procedures as (lambda ...) expressions without
 		// serializing the captured environment to avoid recursion.
 		var b bytes.Buffer
-		serializeProcShallow(bufferTextWriter(&b), *v.Proc(), &Globalenv)
+		serializeProcShallow(bufferTextWriter(&b), v.Proc().snapshot(), &Globalenv)
 		return b.String()
 	case tagJIT:
 		var b bytes.Buffer
@@ -208,7 +208,7 @@ func WriteStringValue(w *schemeTextWriter, v Scmer) {
 	case tagFunc:
 		w.WriteString("[native func]")
 	case tagProc:
-		serializeProcShallow(w, *v.Proc(), &Globalenv)
+		serializeProcShallow(w, v.Proc().snapshot(), &Globalenv)
 	case tagJIT:
 		serializeProcShallow(w, v.JIT().Proc, &Globalenv)
 	case tagFastDict:
@@ -391,7 +391,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 	case tagProc:
 		// Serialize compiled procedures as (lambda ...) expressions, but
 		// avoid walking the captured environment here to prevent cycles.
-		serializeProcShallow(b, *v.Proc(), glob)
+		serializeProcShallow(b, v.Proc().snapshot(), glob)
 	case tagFastDict:
 		fd := v.FastDict()
 		b.WriteByte('(')
