@@ -1600,6 +1600,9 @@ func cronroutine() {
 	scheduleRebuild = func(delay time.Duration) {
 		if _, ok := sched.ScheduleAfter(delay, func() {
 			fmt.Println("running 15min cron ...")
+			for _, failure := range storage.ReclaimReplicationDatabases() {
+				fmt.Println("periodic replication reclaim deferred:", failure)
+			}
 			fmt.Println("table compression done in ", storage.Rebuild(false, true))
 			scheduleRebuild(rebuildInterval)
 		}); !ok {
