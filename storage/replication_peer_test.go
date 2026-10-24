@@ -494,6 +494,95 @@ func TestReplicationCleanupRetainsCompletedBackup(t *testing.T) {
 	}
 }
 
+// Both transfer admission and column validation must wait for the complete
+// lazy catalog, including when startup cleanup already owns its initialization.
+func TestReplicationImportWaitsForSchemaLoad(t *testing.T) {
+	for _, entry := range []string{"begin", "column"} {
+		for _, loading := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/loading=%t", entry, loading), func(t *testing.T) {
+				table, engine := createDurabilityTestTable(t, "treplicaimportload", 1)
+				blocking := &blockingSchemaReadPersistence{
+					PersistenceEngine: engine,
+					entered:           make(chan struct{}, 2),
+					release:           make(chan struct{}),
+				}
+				db := newDatabase()
+				db.Name, db.persistence, db.srState = table.schema.Name, blocking, COLD
+				databases.Set(db.Name, db)
+				var release sync.Once
+				unblock := func() { release.Do(func() { close(blocking.release) }) }
+				var workers sync.WaitGroup
+				t.Cleanup(func() {
+					unblock()
+					workers.Wait()
+					db.closeTransactionLog()
+					databases.Set(db.Name, table.schema)
+				})
+				if loading {
+					workers.Add(1)
+					go func() {
+						defer workers.Done()
+						db.ensureLoaded()
+					}()
+					<-blocking.entered
+				}
+				packet := replicaPacket{
+					Resource:   replicaResource{Database: db.Name, Table: table.Name, Shard: uuid.NewString()},
+					Generation: uuid.NewString(), Kind: "object", ObjectKind: "column", Object: "payload",
+				}
+				r := &replicationManager{journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+				done := make(chan error, 1)
+				workers.Add(1)
+				go func() {
+					defer workers.Done()
+					if entry == "begin" {
+						transfer, err := r.startImport(packet)
+						if transfer != nil {
+							transfer.abort()
+						}
+						done <- err
+					} else {
+						transfer := &replicaImport{header: packet, engine: blocking}
+						defer transfer.abort()
+						done <- transfer.packet(packet)
+					}
+				}()
+				if !loading {
+					select {
+					case <-blocking.entered:
+					case err := <-done:
+						t.Fatalf("%s returned without loading its cold catalog: %v", entry, err)
+					case <-time.After(2 * time.Second):
+						t.Fatal("import did not start schema initialization")
+					}
+				}
+				select {
+				case err := <-done:
+					t.Fatalf("%s returned before schema publication: %v", entry, err)
+				case <-time.After(50 * time.Millisecond):
+				}
+				unblock()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatalf("import after schema publication: %v", err)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("import did not resume after schema publication")
+				}
+				workers.Wait()
+				if blocking.calls.Load() != 1 {
+					t.Fatal("import loaded the schema more than once")
+				}
+				loaded := db.tables.Get(table.Name)
+				if loaded == nil || loaded.schema != db {
+					t.Fatal("import did not observe the initialized table")
+				}
+			})
+		}
+	}
+}
+
 func TestReplicationRepeatedTransferKeepsCompletedColumns(t *testing.T) {
 	table, engine := createDurabilityTestTable(t, "treplicaresend", 3)
 	r := &replicationManager{master: true, id: "master", cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
