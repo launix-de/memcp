@@ -23,11 +23,12 @@ import "sync"
 import "time"
 import "runtime"
 import "strings"
-import "encoding/json"
 import "reflect"
 import "sync/atomic"
+import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
+import "github.com/launix-de/memcp/storage/mosi"
 
 type database struct {
 	Name        string                                     `json:"name"`
@@ -1052,7 +1053,7 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 func (db *database) GetState() SharedState { return db.srState }
 func (db *database) GetRead(tx *TxContext) ReadAccess {
 	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
-		r.obtain(replicaResource{Database: db.Name}, mosiS, replicationUser(tx))
+		r.obtain(mosiResource{Database: db.Name}, mosi.S, replicationUser(tx))
 	}
 	db.ensureLoaded()
 	return ReadAccess{}
@@ -1060,7 +1061,7 @@ func (db *database) GetRead(tx *TxContext) ReadAccess {
 func (db *database) GetWrite(tx *TxContext) WriteAccess {
 	var release func()
 	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
-		_, release = r.writeResource(replicaResource{Database: db.Name}, tx)
+		_, release = r.writeResource(mosiResource{Database: db.Name}, tx)
 	}
 	db.ensureLoaded()
 	return WriteAccess{release: release}
@@ -1286,8 +1287,8 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 								return
 							}
 							defer cell.gate.Unlock()
-							phase := cell.rights.phase()
-							if phase != mosiM && phase != mosiO {
+							phase := cell.rights.Phase()
+							if phase != mosi.M && phase != mosi.O {
 								newShardList[i] = s
 								incomplete.Store(true)
 								return
@@ -2304,7 +2305,7 @@ func RenameTable(schema, oldname, newname string) {
 		if target := db.tables.Get(oldname); target != nil {
 			for _, shard := range target.ActiveShards() {
 				if shard != nil {
-					r.obtain(*r.shardCell(shard).resource.Load(), mosiM, "")
+					r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "")
 				}
 			}
 		}

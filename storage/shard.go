@@ -19,19 +19,19 @@ package storage
 import "fmt"
 import "math"
 import "sync"
-import "sync/atomic"
 import "time"
+import "unsafe"
 import "strings"
 import "reflect"
-import "unsafe"
 import "runtime"
+import "sync/atomic"
 import "encoding/json"
 import "encoding/binary"
-import "github.com/carli2/hybridsort"
 import "github.com/google/uuid"
+import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
-import "github.com/launix-de/go-mysqlstack/sqldb"
 import "github.com/launix-de/NonLockingReadMap"
+import "github.com/launix-de/go-mysqlstack/sqldb"
 
 type storageShard struct {
 	// Immutable feedback cells; only whole-shard completions publish via CAS.
@@ -1076,7 +1076,7 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	}
 	s.setState(COLD)
 	if cell := s.coherence.Load(); cell != nil && s.t != nil && s.t.PersistencyMode != Cache && cell.current.Load() == s {
-		cell.rights.backendOnly()
+		cell.rights.BackendOnly()
 	}
 	s.mu.Unlock()
 	return true

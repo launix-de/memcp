@@ -396,6 +396,15 @@ and retains node logs, a write oracle and the seed in its printed artifact path.
 `--rounds`, `--workers` and `--operations` control the threaded workload.
 Go tests cover the in-process MOSI and transport units separately.
 
+The coherence state machine lives in `storage/mosi`, independently of storage,
+SQL, transport and backend policy. Its public API exposes immutable permission
+snapshots and request completion. Engine framing and connections are in
+`storage/mosi_wire.go` and `storage/mosi_transport.go`; replication directory
+coordination, generation transfer, authentication, journal, session integration
+and startup use the corresponding `storage/replication_*.go` files. This separates
+the shared coherence core from the current master/slave topology; multi-master
+membership and distributed execution remain future work.
+
 ### Storage failure notifications
 
 Administrators can register named Scheme callbacks for persistence failures.

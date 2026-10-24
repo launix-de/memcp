@@ -3401,7 +3401,7 @@ func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *sto
 		if t.schema.tables.Get(t.Name) != t {
 			panic("replication schema changed; retry statement")
 		}
-		publication := r.resourceCell(replicaResource{Database: t.schema.Name})
+		publication := r.resourceCell(mosiResource{Database: t.schema.Name})
 		publication.importPublication.Lock()
 		defer publication.importPublication.Unlock()
 	}
