@@ -64,10 +64,10 @@ type SerialProc struct {
 // owned lexical environments; non-capturing bodies reuse their call storage.
 func prepareSerialInterpreter(val Scmer) func([]Scmer) Scmer {
 	proc := val.Proc()
-	if proc.JITCode != 0 {
+	if proc.nativeCode() != 0 {
 		return func(args []Scmer) Scmer { return proc.callJIT(args) }
 	}
-	p := *proc
+	p := proc.snapshot()
 	if serialExprMayCaptureEnv(p.Body) {
 		// Optimized numbered bodies can reuse prepared expression structure,
 		// while every invocation still owns the scope retained by its lambdas.
@@ -339,7 +339,7 @@ func PrepareSerialProc(source Scmer) SerialProc {
 func ApplyOnce(source Scmer, args []Scmer) Scmer {
 	prepared := classifySerialProc(source)
 	if prepared.Kind == SerialProcGeneral {
-		if source.Proc().Compiled == nil {
+		if source.Proc().compiled() == nil {
 			return Apply(source, args...)
 		}
 		prepared.borrowed = prepareSerialInterpreter(source)
@@ -359,19 +359,19 @@ func classifySerialProc(source Scmer) SerialProc {
 	}
 	if source.GetTag() == tagFunc {
 		function := source.Func()
-		if proc := JITProcForFunction(function); proc != nil && proc.Compiled != nil {
+		if proc := JITProcForFunction(function); proc != nil && proc.compiled() != nil {
 			params, fixedArity := scmerSlice(proc.Params)
-			if jitEnabled && fixedArity && len(proc.Compiled.HiddenArgs) == 0 {
+			if jitEnabled && fixedArity && len(proc.compiled().HiddenArgs) == 0 {
 				prepared.Kind = SerialProcJIT
 				prepared.Function = function
-				prepared.jitEntry = proc.Compiled
+				prepared.jitEntry = proc.compiled()
 				prepared.jitArity = len(params)
 				return prepared
 			}
 			if jitEnabled {
 				prepared.Kind = SerialProcJITMetadata
 				prepared.Function = function
-				prepared.jitEntry = proc.Compiled
+				prepared.jitEntry = proc.compiled()
 				return prepared
 			}
 		}
@@ -401,15 +401,15 @@ func classifySerialProc(source Scmer) SerialProc {
 	// Compiled is the authoritative implementation of a Proc. Its retained
 	// source body is diagnostic input, not necessarily an executable equivalent;
 	// classifying that body could silently bypass code generation semantics.
-	if proc.Compiled != nil {
+	if proc.compiled() != nil {
 		params, fixedArity := scmerSlice(proc.Params)
-		if jitEnabled && fixedArity && len(proc.Compiled.HiddenArgs) == 0 {
+		if jitEnabled && fixedArity && len(proc.compiled().HiddenArgs) == 0 {
 			prepared.Kind = SerialProcJIT
 			prepared.Function = proc.jitFunction()
 			if prepared.Function == nil {
-				prepared.Function = proc.Compiled.Native
+				prepared.Function = proc.compiled().Native
 			}
-			prepared.jitEntry = proc.Compiled
+			prepared.jitEntry = proc.compiled()
 			prepared.jitArity = len(params)
 			return prepared
 		}
@@ -417,9 +417,9 @@ func classifySerialProc(source Scmer) SerialProc {
 			prepared.Kind = SerialProcJITMetadata
 			prepared.Function = proc.jitFunction()
 			if prepared.Function == nil {
-				prepared.Function = proc.Compiled.Native
+				prepared.Function = proc.compiled().Native
 			}
-			prepared.jitEntry = proc.Compiled
+			prepared.jitEntry = proc.compiled()
 			return prepared
 		}
 		prepared.Kind = SerialProcGeneral

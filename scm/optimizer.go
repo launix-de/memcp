@@ -1340,7 +1340,7 @@ func buildProcSpecialization(proc *Proc, key procSpecializationKey, paramTypes [
 	if !ok || len(parts) < 3 || !scmerIsSymbol(parts[0], "lambda") {
 		return NewNil(), nestedUsed, rootMutationUsed
 	}
-	specialized := *proc
+	specialized := proc.snapshot()
 	specialized.Params = parts[1]
 	specialized.Body = parts[2]
 	if len(parts) > 3 {
@@ -1363,8 +1363,8 @@ func buildProcSpecialization(proc *Proc, key procSpecializationKey, paramTypes [
 		Sequence:  proc.OptimizerMeta.Sequence,
 	}
 	variant := NewProcStruct(specialized)
-	if proc.Compiled != nil {
-		variant = jitCompileMode(proc.Compiled.RecursiveLambdas, variant)
+	if proc.compiled() != nil {
+		variant = jitCompileMode(proc.compiled().RecursiveLambdas, variant)
 	}
 	return variant, nestedUsed, rootMutationUsed
 }

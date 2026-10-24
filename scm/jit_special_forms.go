@@ -685,17 +685,17 @@ func jitCompileBoundLambdaTemplate(ctx *JITContext, template Scmer) Scmer {
 	if ctx.lambdaTemplates != nil && index < len(*ctx.lambdaTemplates) {
 		cached := (*ctx.lambdaTemplates)[index]
 		old := cached.Proc()
-		if old != nil && old.Compiled != nil && old.Compiled.CodePtr != nil &&
+		if old != nil && old.compiled() != nil && old.compiled().CodePtr != nil &&
 			old.NumVars == candidate.NumVars &&
 			astStructuralEqual(old.Params, candidate.Params) &&
 			astStructuralEqual(old.Body, candidate.Body) &&
-			old.Compiled.CaptureBase == candidate.Compiled.CaptureBase &&
-			old.Compiled.CaptureCount == candidate.Compiled.CaptureCount &&
-			astStructuralEqual(NewSlice(old.Compiled.CaptureKeys), NewSlice(candidate.Compiled.CaptureKeys)) {
-			sameSymbols := len(old.Compiled.CaptureSymbols) == len(candidate.Compiled.CaptureSymbols)
+			old.compiled().CaptureBase == candidate.compiled().CaptureBase &&
+			old.compiled().CaptureCount == candidate.compiled().CaptureCount &&
+			astStructuralEqual(NewSlice(old.compiled().CaptureKeys), NewSlice(candidate.compiled().CaptureKeys)) {
+			sameSymbols := len(old.compiled().CaptureSymbols) == len(candidate.compiled().CaptureSymbols)
 			if sameSymbols {
-				for i, symbol := range old.Compiled.CaptureSymbols {
-					if symbol != candidate.Compiled.CaptureSymbols[i] {
+				for i, symbol := range old.compiled().CaptureSymbols {
+					if symbol != candidate.compiled().CaptureSymbols[i] {
 						sameSymbols = false
 						break
 					}
@@ -922,10 +922,10 @@ func jitLambdaCaptureKeys(captureArgs []Scmer) []Scmer {
 // so pointer stores participate in concurrent GC marking.
 func jitEmitBoundLambdaProc(ctx *JITContext, template Scmer, captureArgs []Scmer, sliceBase Reg, result JITValueDesc, stack, bindSelf bool) JITValueDesc {
 	proc := template.Proc()
-	if proc == nil || proc.Compiled == nil || proc.JITCode == 0 {
+	if proc == nil || proc.compiled() == nil || proc.nativeCode() == 0 {
 		panic("jit: lambda template is not compiled")
 	}
-	if len(captureArgs)%2 != 0 || len(captureArgs)/2 != proc.Compiled.CaptureCount {
+	if len(captureArgs)%2 != 0 || len(captureArgs)/2 != proc.compiled().CaptureCount {
 		panic("jit: invalid lambda captures")
 	}
 	captureCount := len(captureArgs) / 2
