@@ -26,6 +26,43 @@ type replicaStatus struct {
 	Databases []string `json:"databases"`
 }
 
+// ReclaimReplicationDatabases is the slave's periodic maintenance entry point.
+// Call it before taking rebuild/persistence locks: ordinary MOSI handovers can
+// need those same locks while the upstream supplies the current generation.
+// The cron owns serialization; failures affect only the current database.
+func ReclaimReplicationDatabases() []string {
+	r := replication.Load()
+	if r == nil || r.master || r.retired.Load() {
+		return nil
+	}
+	r.mu.Lock()
+	names := make([]string, 0, len(r.journal.Initialized))
+	for name, initialized := range r.journal.Initialized {
+		if initialized && validReplicaDatabase(name) {
+			names = append(names, name)
+		}
+	}
+	r.mu.Unlock()
+	sort.Strings(names)
+	var failures []string
+	for _, name := range names {
+		if err := func() (err error) {
+			defer func() {
+				if failure := recover(); failure != nil {
+					err = fmt.Errorf("replication reclaim %s: %v", name, failure)
+				}
+			}()
+			if !r.reclaimDatabase(name) {
+				return fmt.Errorf("replication reclaim %s: permissions were shared again during reclaim", name)
+			}
+			return nil
+		}(); err != nil {
+			failures = append(failures, err.Error())
+		}
+	}
+	return failures
+}
+
 // Reclaim uses ordinary MOSI requests, including empty and internal durable
 // shards. It never promotes an unavailable owner's backup. This is a point-in-
 // time check, not a reservation against subsequent remote queries.
