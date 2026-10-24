@@ -95,13 +95,23 @@ jobs:
           make jitgen
           git diff --exit-code -- scm storage
 
-      - name: Race-check JIT publication and concurrent stack-map growth
+      - name: Race-check JIT publication, stack maps and branch roots
         timeout-minutes: 5
         env:
           GORACE: halt_on_error=1
         run: >-
           go test -race ./scm
-          -run '^TestJITConcurrent(SharedProcPublication|StackMapAppendAndGC)$'
+          -run '^TestJIT(Concurrent(SharedProcPublication|StackMapAppendAndGC)|RegexpMatchesResultSurvivesCallerScratch|If(DiscardsBranchLocalRoots|PreservesAliasedInput))$'
+          -count=5
+
+      - name: Check JIT roots under aggressive GC
+        timeout-minutes: 5
+        env:
+          GOGC: "1"
+          GODEBUG: clobberfree=1,gccheckmark=1
+        run: >-
+          go test ./scm
+          -run 'TestJIT(If|Regexp|Regex|Empty|SliceData|Reserved|GroupStage|Concurrent)'
           -count=5
 
       - name: Install test dependencies
