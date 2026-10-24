@@ -36,6 +36,12 @@ same ownership, visibility, lifetime, and durability guarantees.
 
 ### Replication authority and backend generations
 
+- `storage/mosi` owns the shared permission state machine independently of
+  routing, SQL, storage and backend policy. Its immutable publications are read
+  through accessors; request completion publishes errors before waking waiters.
+  Engine adapters supply durable installation and directory coordination.
+  Replication and future cluster domains must reuse this state machine, with
+  distinct resource instances rather than separate implementations.
 - Database schema.json and each logical data shard have independent MOSI slots.
   IS identifies a current backend-only generation; IO requires acquisition from
   its remote owner. A backend-only authoritative generation must never be stale.

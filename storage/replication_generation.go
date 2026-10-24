@@ -14,19 +14,20 @@ package storage
 import "io"
 import "fmt"
 import "sync"
+import "bytes"
 import "strings"
 import "reflect"
-import "encoding/binary"
-import "bytes"
 import "context"
 import "encoding/json"
+import "encoding/binary"
 import "github.com/google/uuid"
+import "github.com/launix-de/memcp/storage/mosi"
 
 // The receiver owns one private backend writer per active transfer. Packet
 // memory is bounded by the connection queue; schema JSON uses the existing
 // byte-slice persistence API, while column/blob bytes go directly to writers.
 type replicaImport struct {
-	header replicaPacket
+	header mosiPacket
 	engine PersistenceEngine
 	// Set at unpublished construction from the completed-generation journal.
 	// Duplicate immutable columns are consumed without reopening their files.
@@ -39,7 +40,7 @@ type replicaImport struct {
 
 type replicaStep struct {
 	peer     string
-	resource replicaResource
+	resource mosiResource
 	done     chan struct{}
 	once     sync.Once
 	err      error
@@ -48,7 +49,7 @@ type replicaStep struct {
 // Source preparation follows the native lifecycle -> handover gate order.
 // The caller releases this capability before sending packets; the idempotent
 // local release also supports deferred cleanup of preparation failures.
-func replicaPersistenceRead(resource replicaResource) (func(), error) {
+func replicaPersistenceRead(resource mosiResource) (func(), error) {
 	if resource.Shard == "" {
 		return func() {}, nil
 	}
@@ -68,7 +69,7 @@ func replicaPersistenceRead(resource replicaResource) (func(), error) {
 
 func (step *replicaStep) finish(err error) { step.once.Do(func() { step.err = err; close(step.done) }) }
 
-func (r *replicationManager) resourceCell(resource replicaResource) *replicaCell {
+func (r *replicationManager) resourceCell(resource mosiResource) *replicaCell {
 	c := r.cell(resource.key())
 	if c.resource.Load() == nil {
 		publication := resource
@@ -77,9 +78,9 @@ func (r *replicationManager) resourceCell(resource replicaResource) *replicaCell
 	return c
 }
 
-func (r *replicationManager) publishLocal(resource replicaResource, phase mosiPhase) {
+func (r *replicationManager) publishLocal(resource mosiResource, phase mosi.Phase) {
 	c := r.resourceCell(resource)
-	if phase == mosiIO && resource.Shard != "" {
+	if phase == mosi.IO && resource.Shard != "" {
 		// Cached analytic results must stop being reusable before a remote
 		// writer changes this source. This is publication work, not a scan/read
 		// counter, and causes ordinary cache initialization to acquire GetRead.
@@ -87,7 +88,7 @@ func (r *replicationManager) publishLocal(resource replicaResource, phase mosiPh
 			invalidateReplicaCaches(shard.t)
 		}
 	}
-	c.rights.publish(phase)
+	c.rights.Publish(phase)
 }
 
 // Mark runtime dependency targets without acquiring their shard/proxy locks or
@@ -117,7 +118,7 @@ func invalidateReplicaCaches(source *table) {
 	}
 }
 
-func (r *replicationManager) localRecord(resource replicaResource, phase mosiPhase, generation string) error {
+func (r *replicationManager) localRecord(resource mosiResource, phase mosi.Phase, generation string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	record := r.journal.Records[resource.key()]
@@ -130,7 +131,7 @@ func (r *replicationManager) localRecord(resource replicaResource, phase mosiPha
 }
 
 func (r *replicationManager) declareShard(shard *storageShard, owner string, local bool) *replicaCell {
-	resource := replicaResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.logicalID().String()}
+	resource := mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.logicalID().String()}
 	c := r.resourceCell(resource)
 	c.current.CompareAndSwap(nil, shard)
 	shard.coherence.CompareAndSwap(nil, c)
@@ -147,9 +148,9 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 			}
 		}
 	} else {
-		phase := mosiIO
+		phase := mosi.IO
 		if local {
-			phase = mosiM
+			phase = mosi.M
 		}
 		generation := ""
 		if local {
@@ -159,7 +160,7 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 		if err := r.saveLocked(); err != nil {
 			panic(err)
 		}
-		c.rights.initialize(phase)
+		c.rights.Initialize(phase)
 	}
 	return c
 }
@@ -177,7 +178,7 @@ func (r *replicationManager) schemaShards(db *database, owner string, local bool
 	}
 }
 
-func (r *replicationManager) findShard(resource replicaResource) *storageShard {
+func (r *replicationManager) findShard(resource mosiResource) *storageShard {
 	db := databases.Get(resource.Database)
 	if db == nil {
 		return nil
@@ -199,7 +200,7 @@ func (r *replicationManager) shardCell(shard *storageShard) *replicaCell {
 	if c := shard.coherence.Load(); c != nil {
 		return c
 	}
-	resource := replicaResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.logicalID().String()}
+	resource := mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.logicalID().String()}
 	c := r.resourceCell(resource)
 	c.current.CompareAndSwap(nil, shard)
 	shard.coherence.CompareAndSwap(nil, c)
@@ -209,7 +210,7 @@ func (r *replicationManager) shardCell(shard *storageShard) *replicaCell {
 // prepareResource rebuilds exactly one logical shard, never its siblings. Its
 // write handover gate is already owned and transactions have completed. The
 // existing rebuild forwards mutations and retains old reader generations.
-func (r *replicationManager) prepareResource(resource replicaResource) (generation string, err error) {
+func (r *replicationManager) prepareResource(resource mosiResource) (generation string, err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			err = fmt.Errorf("replication prepare: %v", failure)
@@ -270,7 +271,7 @@ func (r *replicationManager) prepareResource(resource replicaResource) (generati
 // replaceShard publishes a point update to one table's immutable topology.
 // Old pointers and files remain owned by their existing snapshots; replication
 // does not mutate payload or introduce a second lock for that old generation.
-func (r *replicationManager) replaceShard(resource replicaResource, previous, replacement *storageShard) error {
+func (r *replicationManager) replaceShard(resource mosiResource, previous, replacement *storageShard) error {
 	db := databases.Get(resource.Database)
 	if db == nil {
 		return fmt.Errorf("missing database for shard patch")
@@ -300,7 +301,7 @@ func (r *replicationManager) replaceShard(resource replicaResource, previous, re
 	return nil
 }
 
-func (r *replicationManager) sendResource(peer *replicationPeer, header replicaPacket) (err error) {
+func (r *replicationManager) sendResource(peer *mosiPeer, header mosiPacket) (err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			err = fmt.Errorf("replication transfer: %v", failure)
@@ -387,7 +388,7 @@ func replicaColumnStream(column ColumnStorage) io.ReadCloser {
 	return reader
 }
 
-func (r *replicationManager) startImport(packet replicaPacket) (*replicaImport, error) {
+func (r *replicationManager) startImport(packet mosiPacket) (*replicaImport, error) {
 	db := databases.Get(packet.Resource.Database)
 	var engine PersistenceEngine
 	if db != nil {
@@ -411,7 +412,7 @@ func (transfer *replicaImport) abort() {
 	}
 }
 
-func (transfer *replicaImport) packet(packet replicaPacket) error {
+func (transfer *replicaImport) packet(packet mosiPacket) error {
 	if packet.Resource != transfer.header.Resource || packet.Epoch != transfer.header.Epoch || packet.Generation != transfer.header.Generation {
 		return fmt.Errorf("transfer header changed")
 	}
@@ -492,7 +493,7 @@ func (transfer *replicaImport) packet(packet replicaPacket) error {
 		if packet.ObjectKind != transfer.objectKind || packet.Object != transfer.objectName {
 			return fmt.Errorf("object header changed")
 		}
-		data, err := decodeReplicaChunk(packet)
+		data, err := decodeMosiChunk(packet)
 		if err != nil {
 			return err
 		}
@@ -562,7 +563,7 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 	}
 	shard.t = table
 	c := r.resourceCell(resource)
-	if current := c.current.Load(); current != nil && current.uuid == shard.uuid && current.t == table && c.rights.phase().readable() {
+	if current := c.current.Load(); current != nil && current.uuid == shard.uuid && current.t == table && c.rights.Phase().Readable() {
 		return nil
 	}
 	if table.PersistencyMode == Memory || table.PersistencyMode == Cache {
@@ -729,10 +730,10 @@ func sameReplicaDeclaration(previous, incoming *table) bool {
 	return bytes.Equal(declaration(previous), declaration(incoming))
 }
 
-func (r *replicationManager) step(ctx context.Context, peerID string, packet replicaPacket) error {
+func (r *replicationManager) step(ctx context.Context, peerID string, packet mosiPacket) error {
 	peer := r.peer(peerID)
 	if peer == nil {
-		return fmt.Errorf(replicationNetworkError)
+		return fmt.Errorf(mosi.NetworkError)
 	}
 	step := &replicaStep{peer: peerID, resource: packet.Resource, done: make(chan struct{})}
 	r.steps.Store(packet.ID, step)
@@ -744,16 +745,16 @@ func (r *replicationManager) step(ctx context.Context, peerID string, packet rep
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-peer.done:
-		return fmt.Errorf(replicationNetworkError)
+		return fmt.Errorf(mosi.NetworkError)
 	case <-step.done:
 		return step.err
 	}
 }
 
-func (r *replicationManager) transmitResource(ctx context.Context, peerID string, header replicaPacket) error {
+func (r *replicationManager) transmitResource(ctx context.Context, peerID string, header mosiPacket) error {
 	peer := r.peer(peerID)
 	if peer == nil {
-		return fmt.Errorf(replicationNetworkError)
+		return fmt.Errorf(mosi.NetworkError)
 	}
 	step := &replicaStep{peer: peerID, resource: header.Resource, done: make(chan struct{})}
 	r.steps.Store(header.ID, step)
@@ -765,7 +766,7 @@ func (r *replicationManager) transmitResource(ctx context.Context, peerID string
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-peer.done:
-		return fmt.Errorf(replicationNetworkError)
+		return fmt.Errorf(mosi.NetworkError)
 	case <-step.done:
 		return step.err
 	}
@@ -774,7 +775,7 @@ func (r *replicationManager) transmitResource(ctx context.Context, peerID string
 // A completed backup can advance readers of the same immutable data. The
 // resource directory serializes this point publication with ownership changes;
 // receivers install the shard and topology before acknowledging it.
-func (r *replicationManager) distributeRebuild(resource replicaResource) {
+func (r *replicationManager) distributeRebuild(resource mosiResource) {
 	cell := r.resourceCell(resource)
 	cell.directory.Lock()
 	defer cell.directory.Unlock()
@@ -792,8 +793,8 @@ func (r *replicationManager) distributeRebuild(resource replicaResource) {
 		if peer == nil {
 			continue
 		}
-		ctx, cancel := replicaPacketContext(peer)
-		_ = r.transmitResource(ctx, id, replicaPacket{ID: uuid.NewString(), Resource: resource, Epoch: record.Epoch, Generation: record.Generation})
+		ctx, cancel := mosiPacketContext(peer)
+		_ = r.transmitResource(ctx, id, mosiPacket{ID: uuid.NewString(), Resource: resource, Epoch: record.Epoch, Generation: record.Generation})
 		cancel()
 	}
 }
@@ -844,6 +845,6 @@ func (r *replicationManager) restoreBackup(record replicaRecord) error {
 	if record.Generation == "" {
 		return fmt.Errorf("slave has no completed shard backup")
 	}
-	transfer := &replicaImport{header: replicaPacket{Resource: record.Resource, Generation: record.Generation}, engine: db.persistence}
+	transfer := &replicaImport{header: mosiPacket{Resource: record.Resource, Generation: record.Generation}, engine: db.persistence}
 	return r.finishImport(r.id, transfer)
 }
