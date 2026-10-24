@@ -63,7 +63,7 @@ func jitRegexpReplaceHelperFor(pattern *regexp.Regexp, replacement Scmer) *JITEn
 	}))
 	var entry *JITEntryPoint
 	if compiled.GetTag() == tagProc && compiled.Proc() != nil {
-		entry = compiled.Proc().Compiled
+		entry = compiled.Proc().compiled()
 		if entry != nil {
 			entry.DebugName = "regexp_replace scan " + pattern.String()
 		}

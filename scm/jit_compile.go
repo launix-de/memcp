@@ -563,7 +563,7 @@ func jitResolveGlobalSymbol(symbol Scmer) Scmer {
 
 func jitApplyCallable0(callable Scmer, env *Env) Scmer {
 	if callable.GetTag() == tagProc {
-		if proc := callable.Proc(); proc != nil && proc.JITCode != 0 {
+		if proc := callable.Proc(); proc != nil && proc.nativeCode() != 0 {
 			return proc.callJIT(nil)
 		}
 	}
@@ -572,7 +572,7 @@ func jitApplyCallable0(callable Scmer, env *Env) Scmer {
 
 func jitApplyCallable1(callable Scmer, env *Env, arg0 Scmer) Scmer {
 	if callable.GetTag() == tagProc {
-		if proc := callable.Proc(); proc != nil && proc.JITCode != 0 {
+		if proc := callable.Proc(); proc != nil && proc.nativeCode() != 0 {
 			return proc.callJIT([]Scmer{arg0})
 		}
 	}
@@ -581,7 +581,7 @@ func jitApplyCallable1(callable Scmer, env *Env, arg0 Scmer) Scmer {
 
 func jitApplyCallable2(callable Scmer, env *Env, arg0, arg1 Scmer) Scmer {
 	if callable.GetTag() == tagProc {
-		if proc := callable.Proc(); proc != nil && proc.JITCode != 0 {
+		if proc := callable.Proc(); proc != nil && proc.nativeCode() != 0 {
 			return proc.callJIT([]Scmer{arg0, arg1})
 		}
 	}
@@ -590,7 +590,7 @@ func jitApplyCallable2(callable Scmer, env *Env, arg0, arg1 Scmer) Scmer {
 
 func jitApplyCallableSlice(callable Scmer, env *Env, args []Scmer) Scmer {
 	if callable.GetTag() == tagProc {
-		if proc := callable.Proc(); proc != nil && proc.JITCode != 0 {
+		if proc := callable.Proc(); proc != nil && proc.nativeCode() != 0 {
 			return proc.callJIT(args)
 		}
 	}
@@ -2767,7 +2767,7 @@ func jitCompileSpecialThunk(ctx *JITContext, body Scmer, sliceBase Reg, result J
 		En:      outer,
 		NumVars: len(params),
 	}), ctx.CompileScope)
-	if callable.GetTag() != tagProc || callable.Proc() == nil || callable.Proc().Compiled == nil {
+	if callable.GetTag() != tagProc || callable.Proc() == nil || callable.Proc().compiled() == nil {
 		panic("jit: special-form child did not compile")
 	}
 	argExprs = append([]Scmer{callable}, argExprs...)
@@ -2780,11 +2780,11 @@ func jitStaticProcForExpr(ctx *JITContext, expr Scmer) (Scmer, *Proc, bool) {
 	}
 	if expr.GetTag() == tagProc {
 		proc := expr.Proc()
-		if proc != nil && proc.JITCode == 0 && atomic.LoadUint32(&proc.jitCompiling) == 0 {
+		if proc != nil && proc.nativeCode() == 0 && atomic.LoadUint32(&proc.jitCompiling) == 0 {
 			expr = jitCompileModeDeferred(true, expr, ctx.CompileScope)
 			proc = expr.Proc()
 		}
-		return expr, proc, proc != nil && proc.JITCode != 0 && proc.Compiled != nil && proc.Compiled.JITDirect != 0
+		return expr, proc, proc != nil && proc.nativeCode() != 0 && proc.compiled() != nil && proc.compiled().JITDirect != 0
 	}
 	if expr.GetTag() != tagSymbol {
 		return Scmer{}, nil, false
@@ -2794,11 +2794,11 @@ func jitStaticProcForExpr(ctx *JITContext, expr Scmer) (Scmer, *Proc, bool) {
 		if value, exists := ctx.Env.Lookup(symbol); exists {
 			if value.Loc == LocImm && value.Imm.GetTag() == tagProc {
 				proc := value.Imm.Proc()
-				if proc != nil && proc.JITCode == 0 && atomic.LoadUint32(&proc.jitCompiling) == 0 {
+				if proc != nil && proc.nativeCode() == 0 && atomic.LoadUint32(&proc.jitCompiling) == 0 {
 					value.Imm = jitCompileModeDeferred(true, value.Imm, ctx.CompileScope)
 					proc = value.Imm.Proc()
 				}
-				return value.Imm, proc, proc != nil && proc.JITCode != 0 && proc.Compiled != nil && proc.Compiled.JITDirect != 0
+				return value.Imm, proc, proc != nil && proc.nativeCode() != 0 && proc.compiled() != nil && proc.compiled().JITDirect != 0
 			}
 			return Scmer{}, nil, false
 		}
@@ -2813,11 +2813,11 @@ func jitStaticProcForExpr(ctx *JITContext, expr Scmer) (Scmer, *Proc, bool) {
 		return Scmer{}, nil, false
 	}
 	proc := value.Proc()
-	if proc != nil && proc.JITCode == 0 && atomic.LoadUint32(&proc.jitCompiling) == 0 {
+	if proc != nil && proc.nativeCode() == 0 && atomic.LoadUint32(&proc.jitCompiling) == 0 {
 		value = jitCompileModeDeferred(true, value, ctx.CompileScope)
 		proc = value.Proc()
 	}
-	return value, proc, proc != nil && proc.JITCode != 0 && proc.Compiled != nil && proc.Compiled.JITDirect != 0
+	return value, proc, proc != nil && proc.nativeCode() != 0 && proc.compiled() != nil && proc.compiled().JITDirect != 0
 }
 
 func jitCompileStaticProcCall(ctx *JITContext, callable Scmer, proc *Proc, operands []Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
@@ -2827,7 +2827,7 @@ func jitCompileStaticProcCall(ctx *JITContext, callable Scmer, proc *Proc, opera
 		jitCompileRootedCallValueAt(ctx, operand, sliceBase, operandOff+int32(index*16))
 	}
 	ctx.TrackImm(callable)
-	ctx.TrackEntry(proc.Compiled)
+	ctx.TrackEntry(proc.compiled())
 	// The result must remain reserved and rooted after the boundary restores
 	// its spill allocator and stack-root snapshot.
 	resultOff := ctx.AllocSpill(16)
@@ -2878,7 +2878,7 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 		input := jitCompileRootedCallValue(ctx, operands[0], sliceBase)
 		return jitEmitParserTemplate(ctx, parser, input, result)
 	}
-	if callable, proc, ok := jitStaticProcForExpr(ctx, callableExpr); ok && (proc.Compiled.JITArity < 0 || proc.Compiled.JITArity == len(operands)) {
+	if callable, proc, ok := jitStaticProcForExpr(ctx, callableExpr); ok && (proc.compiled().JITArity < 0 || proc.compiled().JITArity == len(operands)) {
 		return jitCompileStaticProcCall(ctx, callable, proc, operands, sliceBase, result)
 	}
 	ctx.Coverage.DynamicCalls++
@@ -2947,7 +2947,7 @@ func jitEmitDynamicCallableAt(ctx *JITContext, callable JITValueDesc, operandVal
 	// Scheme procedures need a direct, arity-compatible JIT entry. Their *Proc
 	// pointer is already the funcval context consumed by EmitProcCall.
 	metadata := ctx.AllocRegExcept(callableValue.Reg, callableValue.Reg2)
-	ctx.EmitMovRegMem(metadata, callableValue.Reg, int32(unsafe.Offsetof(Proc{}.Compiled)))
+	ctx.EmitAtomicLoad64(metadata, callableValue.Reg, int32(unsafe.Offsetof(Proc{}.Compiled)))
 	ctx.EmitCmpRegImm32(metadata, 0)
 	ctx.EmitJcc(CcE, fallbackLabel)
 	direct := ctx.AllocRegExcept(callableValue.Reg, callableValue.Reg2, metadata)
@@ -2966,7 +2966,7 @@ func jitEmitDynamicCallableAt(ctx *JITContext, callable JITValueDesc, operandVal
 	ctx.FreeReg(arity)
 	ctx.FreeReg(metadata)
 	codeReg := ctx.AllocRegExcept(callableValue.Reg, callableValue.Reg2)
-	ctx.EmitMovRegMem(codeReg, callableValue.Reg, int32(unsafe.Offsetof(Proc{}.JITCode)))
+	ctx.EmitAtomicLoad64(codeReg, callableValue.Reg, int32(unsafe.Offsetof(Proc{}.JITCode)))
 	ctx.EmitCmpRegImm32(codeReg, 0)
 	ctx.FreeReg(codeReg)
 	ctx.EmitJcc(CcE, fallbackLabel)
@@ -3380,9 +3380,9 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		ctx.TrackImm(expr)
 		return JITValueDesc{Loc: LocImm, Type: expr.GetTag(), Imm: expr}
 	case tagProc:
-		if ctx.RecursiveLambdas && expr.Proc() != nil && expr.Proc().Compiled == nil {
+		if ctx.RecursiveLambdas && expr.Proc() != nil && expr.Proc().compiled() == nil {
 			compiled := jitCompileModeDeferred(true, expr, ctx.CompileScope)
-			if compiled.GetTag() != tagProc || compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+			if compiled.GetTag() != tagProc || compiled.Proc() == nil || compiled.Proc().compiled() == nil {
 				panic("jit: embedded procedure could not be compiled")
 			}
 			expr = compiled

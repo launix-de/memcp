@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -328,6 +329,69 @@ func TestJITDeferredCompilationReturnsPrivateProc(t *testing.T) {
 	if compiled.Proc().JITCode == 0 || compiled.Proc().Compiled == nil {
 		t.Fatal("deferred compilation did not return its private compiled Proc")
 	}
+	if JITProcForFunction(compiled.Proc().Compiled.Native) != compiled.Proc() {
+		t.Fatal("shared installation rewrote the private entry's funcval")
+	}
+}
+
+func TestJITConcurrentSharedProcPublication(t *testing.T) {
+	dispatch := CompileJIT(Eval(Read(t.Name(), `(lambda (callback value) (callback value))`), &Globalenv), true)
+	for round := 0; round < 20; round++ {
+		template := Eval(Read(t.Name(), `(lambda (value) (list value value))`), &Globalenv)
+		start := make(chan struct{})
+		var workers sync.WaitGroup
+		for worker := 0; worker < 16; worker++ {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				<-start
+				for attempt := 0; attempt < 20; attempt++ {
+					compiled := CompileJIT(template, true)
+					got := Apply(compiled, NewString("shared publication"))
+					if attempt%2 != 0 {
+						got = Apply(dispatch, compiled, NewString("shared publication"))
+					}
+					if !got.IsSlice() || len(got.Slice()) != 2 || got.Slice()[0].String() != "shared publication" || got.Slice()[1].String() != "shared publication" {
+						t.Error("concurrent compilation returned corrupt values")
+						return
+					}
+				}
+			}()
+		}
+		close(start)
+		workers.Wait()
+	}
+}
+
+// Append metadata while other goroutines grow and scan stacks through older
+// native entries. Both the new reservation and the old map prefix must remain
+// usable when runtime/jit's backing table grows or allocation changes arenas.
+func TestJITConcurrentStackMapAppendAndGC(t *testing.T) {
+	var workers sync.WaitGroup
+	for worker := 0; worker < 4; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			var retained []Scmer
+			for round := 0; round < 32; round++ {
+				template := Eval(Read(t.Name(), `(lambda (value) value)`), &Globalenv)
+				template.Proc().Body = NewSlice([]Scmer{NewFunc(func(args ...Scmer) Scmer {
+					return jitPublicationTestGrowStack(32, args[0])
+				}), NewNthLocalVar(0)})
+				retained = append(retained, CompileJIT(template, true))
+				for _, compiled := range []Scmer{retained[0], retained[len(retained)-1]} {
+					want := strings.Repeat(fmt.Sprintf("map-%d/", round), 32)
+					got := Apply(compiled, NewString(want))
+					if !got.IsString() || got.String() != want {
+						t.Error("stack-map append or stack relocation lost a live value")
+						return
+					}
+				}
+			}
+			runtime.KeepAlive(retained)
+		}()
+	}
+	workers.Wait()
 }
 
 // Reusing a private, deferred Proc must still honor the public compilation
