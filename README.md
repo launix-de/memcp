@@ -919,19 +919,27 @@ measured performance work, documentation, storage formats, and new operators.
 Fork the repository, then build and test your clone as described under
 [Quick start](#quick-start) and [Testing](#testing). Develop on a branch, add
 regression coverage for every change, and open a pull request against `master`.
+Use a dedicated worktree under `.worktrees/` and fetch/rebase onto the current
+`origin/master` before every push. See [Repository Guidelines](AGENTS.md) for
+the complete workflow.
 
 ## Testing
 
-MemCP includes a comprehensive test framework:
+Run focused local tests for the feature or bug being changed. Intermediate
+commits may contain failing or incomplete work; document known failures and use
+a draft PR when appropriate. GitHub CI runs the full suite for code changes,
+and required checks must pass before merging into `master`. Documentation-only
+changes retain the existing CI skip policy.
+
+`git-pre-commit` remains the CI full-suite runner invoked by `make test`; do not
+install it as a local commit hook or run full tests during local patch development.
+If the legacy full-suite hook is already installed, locate it with
+`git rev-parse --git-path hooks/pre-commit`, inspect it, and move that legacy hook
+to a backup name. Preserve unrelated hooks. Ordinary commits do not need
+`--no-verify`.
 
 ```bash
-# Run all tests
-make test
-
-# Or if you want to contribute, deploy this as a Pre-commit hook:
-cp git-pre-commit .git/hooks/pre-commit
-
-# Run specific test suites (starts its own server automatically)
+# Run a focused test suite (starts its own server automatically)
 python3 run_sql_tests.py tests/sql/expressions/basic-sql.yaml   # Basic operations
 python3 run_sql_tests.py tests/sql/expressions/functions.yaml   # SQL functions
 python3 run_sql_tests.py tests/sql/expressions/error-cases.yaml # Error handling

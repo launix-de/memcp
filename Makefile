@@ -304,7 +304,7 @@ perf:
 	perf record --call-graph fp -- ./memcp
 
 test:
-	# run `cp git-pre-commit .git/hooks/pre-commit` to activate the trigger
+	# Full-suite CI entrypoint; use focused tests during local development.
 	MEMCP_FAIL_FAST=0 MEMCP_COVERAGE=1 MEMCP_COVERDIR=$${MEMCP_COVERDIR:-/tmp/memcp-coverage} ./git-pre-commit
 
 memcp.sif: all
