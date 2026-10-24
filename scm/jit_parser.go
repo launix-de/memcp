@@ -417,10 +417,10 @@ func jitCompileParserRoots(environment *Env, parsers []*ScmParser) {
 		Params: NewSlice([]Scmer{NewSymbol("input"), NewSymbol("state"), NewSymbol("entry")}),
 		Body:   body, En: environment, NumVars: 3, NumberedOnly: true,
 	}))
-	if !compiled.IsProc() || compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+	if !compiled.IsProc() || compiled.Proc() == nil || compiled.Proc().compiled() == nil {
 		panic("jit: parser grammar could not be compiled")
 	}
-	entry := compiled.Proc().Compiled
+	entry := compiled.Proc().compiled()
 	entry.DebugName = "parser grammar"
 	maybeLogJITCodeName(entry)
 	// Referenced rules inherit this caller's scanner; publishing this entry
@@ -520,9 +520,9 @@ func (builder *jitParserBuilder) finishRule(ruleID int) {
 	if jitEnabled {
 		requiredSlots, _ := jitRequiredLocalSlots(rule.generator, len(params))
 		if requiredSlots <= len(params) {
-			if compiled := jitCompileModeDeferred(true, action); compiled.IsProc() && compiled.Proc() != nil && compiled.Proc().Compiled != nil {
+			if compiled := jitCompileModeDeferred(true, action); compiled.IsProc() && compiled.Proc() != nil && compiled.Proc().compiled() != nil {
 				action = compiled
-				rule.compiledAction = compiled.Proc().Compiled
+				rule.compiledAction = compiled.Proc().compiled()
 				rule.compiledAction.DebugName = fmt.Sprintf("parser action %d", ruleID)
 			}
 		}

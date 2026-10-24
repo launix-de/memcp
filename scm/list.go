@@ -24695,7 +24695,7 @@ func init_list() {
 				// serial callback tree here cannot amortize its construction.
 				merge := a[3]
 				mergeFn = func(oldV, newV Scmer) Scmer {
-					if merge.GetTag() == tagFunc || (merge.IsProc() && merge.Proc().Compiled != nil) {
+					if merge.GetTag() == tagFunc || (merge.IsProc() && merge.Proc().compiled() != nil) {
 						// Keep native argument ownership and authoritative
 						// compiled entry dispatch unchanged.
 						prepared := PrepareSerialProc(merge)
@@ -59209,7 +59209,7 @@ func init_list() {
 				// serial callback tree here cannot amortize its construction.
 				merge := a[3]
 				mergeFn = func(oldV, newV Scmer) Scmer {
-					if merge.GetTag() == tagFunc || (merge.IsProc() && merge.Proc().Compiled != nil) {
+					if merge.GetTag() == tagFunc || (merge.IsProc() && merge.Proc().compiled() != nil) {
 						// Keep native argument ownership and authoritative
 						// compiled entry dispatch unchanged.
 						prepared := PrepareSerialProc(merge)

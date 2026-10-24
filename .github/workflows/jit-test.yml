@@ -95,6 +95,15 @@ jobs:
           make jitgen
           git diff --exit-code -- scm storage
 
+      - name: Race-check JIT publication and concurrent stack-map growth
+        timeout-minutes: 5
+        env:
+          GORACE: halt_on_error=1
+        run: >-
+          go test -race ./scm
+          -run '^TestJITConcurrent(SharedProcPublication|StackMapAppendAndGC)$'
+          -count=5
+
       - name: Install test dependencies
         timeout-minutes: 5
         run: |

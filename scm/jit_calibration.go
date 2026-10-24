@@ -211,7 +211,7 @@ func measureFilterBufferCalibration() (compileNS, currentNS, fusedNS float64, ex
 	template := calibrationProcedure(`(lambda (value) (> value 127))`)
 	compiled := CompileJIT(NewProcStruct(*cloneCalibrationProcedure(template)), true)
 	proc := compiled.Proc()
-	if proc == nil || proc.Compiled == nil {
+	if proc == nil || proc.compiled() == nil {
 		return 0, 0, 0, 0
 	}
 	expressionUnits = JITExpressionCost(proc.Body)
@@ -240,7 +240,7 @@ func measureFilterBufferCalibration() (compileNS, currentNS, fusedNS float64, ex
 		out := 0
 		for index, value := range values {
 			args[0] = value
-			if ToBool(proc.Compiled.Native(args...)) {
+			if ToBool(proc.compiled().Native(args...)) {
 				ids[out] = uint32(index)
 				out++
 			}
@@ -268,7 +268,7 @@ func measureFilterBufferCompileUnit(simpleNS float64, simpleUnits int) float64 {
 	template := calibrationProcedure("(lambda (a b c) (and (> (+ a (* b c)) 127) (< (- c a) 511)))")
 	compiled := CompileJIT(NewProcStruct(*cloneCalibrationProcedure(template)), true)
 	proc := compiled.Proc()
-	if proc == nil || proc.Compiled == nil {
+	if proc == nil || proc.compiled() == nil {
 		return -1
 	}
 	units := JITExpressionCost(proc.Body)
@@ -292,7 +292,7 @@ func measureMapReduceBufferCalibration(source string, width int) (compileNS, cur
 	template := calibrationProcedure(source)
 	compiled := CompileJIT(NewProcStruct(*cloneCalibrationProcedure(template)), true)
 	proc := compiled.Proc()
-	if proc == nil || proc.Compiled == nil {
+	if proc == nil || proc.compiled() == nil {
 		return 0, 0, 0, 0
 	}
 	expressionUnits = JITExpressionCost(proc.Body)
@@ -324,7 +324,7 @@ func measureMapReduceBufferCalibration(source string, width int) (compileNS, cur
 		for offset := 0; offset < len(values); offset += width {
 			args[0] = acc
 			copy(args[1:], values[offset:offset+width])
-			acc = proc.Compiled.Native(args...)
+			acc = proc.compiled().Native(args...)
 		}
 		currentSamples[sample] = float64(time.Since(started).Nanoseconds()) / rows
 		jitCalibrationSink = acc
@@ -379,10 +379,10 @@ func measureJITCalibrationShapes() []jitCalibrationObservation {
 		before := time.Now()
 		compiled := CompileJIT(NewProcStruct(*procedure), true)
 		publishedNS := float64(time.Since(before).Nanoseconds())
-		if compiled.Proc() == nil || compiled.Proc().Compiled == nil || compiled.Proc().Compiled.Native == nil {
+		if compiled.Proc() == nil || compiled.Proc().compiled() == nil || compiled.Proc().compiled().Native == nil {
 			panic("jit calibration: fixed predicate did not publish")
 		}
-		callNS := measureJITCalibrationCall(compiled.Proc().Compiled.Native, shape.argSets)
+		callNS := measureJITCalibrationCall(compiled.Proc().compiled().Native, shape.argSets)
 		observations = append(observations, jitCalibrationObservation{
 			workUnits: workUnits,
 			emitNS:    emitNS,
@@ -494,7 +494,7 @@ func calibrationProcedure(source string) *Proc {
 }
 
 func cloneCalibrationProcedure(template *Proc) *Proc {
-	copy := *template
+	copy := template.snapshot()
 	copy.JITCode = 0
 	copy.Compiled = nil
 	copy.jitCompiling = 0
