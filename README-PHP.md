@@ -14,7 +14,17 @@ outside the checkout. `phpbridge/` contains MemCP's own PDO, locale and isolated
 
 ## Build
 
-Use Go 1.26 or newer and a C toolchain. Install PHP 8.5 with ZTS and the embed
+PHP 8.5.12 is the minimum supported runtime because earlier releases are affected
+by [CVE-2026-109618](https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w)
+and [CVE-2026-109619](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp).
+The embedded FrankenPHP host shares PHP's request startup and shutdown paths;
+MemCP's request memory quota does not mitigate these vulnerabilities. Update the
+matching ZTS SDK, runtime and extensions, rebuild/reinstall MemCP, and restart
+the process. Packaged installations include a private runtime, so updating only
+the system PHP CLI does not update embedded PHP. Builds using `make nophp` do
+not contain the embedded runtime.
+
+Use Go 1.26 or newer and a C toolchain. Install PHP 8.5.12 or newer with ZTS and the embed
 SAPI, including PDO and OPcache. The PHP headers, `php-config`, `libphp`, and
 extensions must belong to the same build. A usual NTS PHP-FPM package is not
 sufficient. Follow the upstream [FrankenPHP build instructions](https://frankenphp.dev/docs/compile/).
@@ -171,7 +181,7 @@ Install the development headers for Oniguruma, libzip, ICU, GMP, libxml2,
 cURL, OpenSSL and ImageMagick. Build the released Imagick extension separately
 using the ZTS installation's `phpize` and `--with-php-config=...`, then enable
 `extension=imagick.so` in that installation's `php.ini`. The CI workflow pins
-PHP 8.5.10 and Imagick 3.8.1 downloads by checksum and keeps all external sources
+PHP 8.5.12 and Imagick 3.8.1 downloads by checksum and keeps all external sources
 outside this repository.
 
 ## PHP quotas, concurrency and tuning
