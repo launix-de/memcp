@@ -34,22 +34,63 @@ contents may enter a MemCP commit or build.
 
 Every change — bugfix, feature, refactor — must go through a **branch + PR** cycle. Direct commits to `master` are blocked by GitHub branch protection.
 
-1. **Create a worktree + branch** for your change:
+1. **Create a branch and worktree under `.worktrees/`** in the main checkout.
+   Develop every patch in its own worktree; keep the main checkout unchanged:
+   ```sh
+   git fetch origin master
+   git worktree add .worktrees/my-feature -b my-feature origin/master
+   cd .worktrees/my-feature
    ```
-   git worktree add ../memcp-my-feature -b my-feature
-   cd ../memcp-my-feature
+2. **Develop and run focused local checks** for the feature or bug being changed.
+   Run individual test cases or narrowly selected suites, plus relevant builds,
+   formatters and static checks. Do not run the full test suite locally.
+   For documentation-only changes, review the diff and check formatting/links;
+   executable tests are not required.
+3. **Commit freely on the feature branch**, including incomplete or failing
+   intermediate states. A local commit does not require a successful build or
+   passing tests. Record known failures and unfinished work in the commit or PR
+   description. Use ordinary `git commit`; do not install a full-suite commit
+   hook or require `--no-verify` for routine work.
+4. **Rebase onto the current `origin/master` before every push**, including PR
+   updates. Fetch immediately before rebasing; a merge from `master` does not
+   replace this step:
+   ```sh
+   git fetch origin master
+   git rebase origin/master
+   git merge-base --is-ancestor origin/master HEAD
+   git push -u origin my-feature
    ```
-2. **Develop and commit** on the branch. The pre-commit hook runs the full test suite before each commit.
-3. **Open a PR** targeting `master`:
+   Resolve conflicts and repeat the affected focused checks before pushing;
+   report any remaining failures instead of treating them as a commit gate.
+   If rebasing rewrites an already-pushed branch, use `git push --force-with-lease`
+   instead of an unconditional force push. Never overwrite another contributor's
+   work.
+5. **Open a PR** targeting `master` and describe focused checks and known
+   failures. Use a draft PR for incomplete work:
+   ```sh
+   gh pr create --base master --title "Short description" --body "What and why"
    ```
-   gh pr create --title "Short description" --body "What and why"
-   ```
-4. **CI must be green** (`test` GitHub Actions job) before the PR can be merged.
-5. **Merge the PR** on GitHub (or `gh pr merge`). Delete the branch and worktree afterwards.
+6. **Let GitHub CI run the full suite.** Watch the checks for the latest pushed
+   commit, including the code integrated with the current `master`. All required
+   checks must be green before merging; incomplete or failing intermediate
+   commits must never bypass this merge gate. Diagnose CI failures
+   with focused local reproductions; do not respond by starting a local full run
+   or weakening test assertions, timing budgets or CI gates.
+7. **Merge through GitHub** when requested and after required checks pass.
+   Delete the branch and worktree afterwards.
 
 Each CI workflow first runs a small `changes` gate (`.github/workflows/detect-changes.yml`). When a pull request touches **only** documentation (`*.md`, `wiki/`, `papers/`, `assets/`, …) the build/test jobs — `test`, `performance-ab`, `sql-time-limit-guard`, the JIT jobs, packaging — are skipped and report success, so a docs-only PR is mergeable without a full run. Touching anything under `tests/`, `scm/`, `storage/`, `lib/`, `tools/`, `apps/`, `corelib/`, `.github/`, or any `*.go` / build file runs the full CI as before. When in doubt the gate runs everything.
 
-`git commit --no-verify` is allowed for intermediate commits on non-`master` branches, after a successful `make test` run in the current worktree/session to save iteration time, or for documentation-only changes (e.g. `README*`, docs, manuals) that do not modify executable code or tests. Before pushing/opening a PR, run the full hook-equivalent test suite (e.g. `make test`) again for any change set that includes code/test changes.
+### Local commit hooks
+
+`git-pre-commit` is the existing CI full-suite runner despite its historical
+name. Keep it available to GitHub Actions and `make test`, but do not install
+it as a local Git hook. Remove the legacy full-suite hook from the active hook
+path when it is present so ordinary commits do not require `--no-verify`.
+Use `git rev-parse --git-path hooks/pre-commit` to locate it; inspect the file
+and move only the legacy MemCP full-suite hook to a backup outside the active
+hook name. Preserve unrelated hooks and hook configuration. Linked worktrees
+share the repository's hook directory, so this migration applies to them too.
 
 ## Build, Test, and Dev Commands
 - Build: `go build -o memcp` or `make` (default builds).
@@ -57,7 +98,7 @@ Each CI workflow first runs a small `changes` gate (`.github/workflows/detect-ch
 - Background run: always use `--no-repl` when running memcp in the background, otherwise closing stdin causes the REPL to exit: `./memcp --no-repl --api-port=4321 lib/main.scm &`
 - Quick test (single file): `python3 run_sql_tests.py tests/sql/expressions/basic-sql.yaml`.
 - Connect-only (reuse a running instance): `python3 run_sql_tests.py tests/sql/expressions/functions.yaml 4321 --connect-only`.
-- Pre-commit: `git commit` recursively runs every `tests/**/*.yaml` suite except files with `metadata.ci: false`, using a single MemCP instance. Bypassing with `--no-verify` is permitted for intermediate commits on non-`master` branches, after a successful `make test` run, or for documentation-only changes (README/docs/manuals) without code/test modifications; still run the full suite before pushing whenever code/test changes are part of the branch.
+- Full suite (CI): `make test` / `bash git-pre-commit`. GitHub CI owns full-suite execution; do not run these commands locally during patch development.
 
 ### Exact Server Invocation (used by test runner)
 The test runner (`run_sql_tests.py`) starts the server exactly like this:
@@ -528,7 +569,7 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 ### Coverage Measurement
 - Build with coverage: `go build -cover -o memcp -covermode=atomic`
 - Run with coverage: `GOCOVERDIR=/tmp/memcp-coverage ./memcp ...`
-- The `make test` / `git-pre-commit` script supports `MEMCP_COVERAGE=1 MEMCP_COVERDIR=/tmp/memcp-coverage` environment variables to automatically build with coverage, collect profiles, and report.
+- In CI, the `make test` / `git-pre-commit` full-suite runner supports `MEMCP_COVERAGE=1 MEMCP_COVERDIR=/tmp/memcp-coverage` environment variables to automatically build with coverage, collect profiles, and report.
 - Generate report: `go tool covdata textfmt -i=/tmp/memcp-coverage -o=/tmp/memcp-coverage/coverage.out && go tool cover -func=/tmp/memcp-coverage/coverage.out`
 - HTML report: `go tool cover -html=/tmp/memcp-coverage/coverage.out`
 - Current coverage: **69.7%** (594 Scheme unit tests in `lib/test.scm`, 72 storage type tests + ~4800 SQL cases in `tests/**/*.yaml`)
@@ -541,11 +582,11 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - run memcp with enabled mysql frontend on port 3307, make sure to capture its output and enable TracePrint in settings
 - run some unit tests or let the user click through the software
 - read through the captured output, identify the failing queries and inspect the caught panics
-- construct a test case in tests/ that will reproduce the failing bug, verify bug reproduction with make test
+- Add a focused regression case under `tests/` and reproduce the bug by running only that case or its narrow topic suite.
 - work on the bugfix
-- verify with make test, reiterate
-- if any regression appears in `make test`, stop immediately and fix the root cause before continuing any other work
-- do not commit until all tests including the new one pass
+- Verify the fix with the focused regression case and directly affected checks; iterate as needed.
+- Investigate regressions from focused local checks or GitHub CI and fix the root cause; use targeted local reproductions for CI failures.
+- Intermediate commits may contain failing tests or unfinished fixes; record known failures. GitHub CI runs the complete suite after pushing, and required checks must pass before merge.
 
 ## Execution Plan Building Hints (Pipelines & Braking)
 - Operator pipelines: fuse filter → project → aggregate in a single scan to reduce overhead
@@ -674,7 +715,7 @@ To optimize memcp for a query you must consider the following steps:
  - when a performance change trades cold-start time against warm execution, compare the total of one cold query plus a fixed `n` further executions. Configure `timing_aggregation: total`, `warmup: 0`, and `timing_samples: n + 1`; existing separate cold/warm cases can share a `timing_group`. Choose `n` before measuring and keep it identical for A and B. Gate the complete workload at at most 20% regression, retaining phase timings for diagnosis; do not independently reject a phase trade-off or discard startup through median sampling. See `tests/README.md`.
  - Short performance and compile-time probes must measure enough repetitions on the same fixture that an isolated GC or scheduling pause cannot dominate the result. Include the first execution; retain all samples and result checks. Freeze repetition counts before A/B measurement and use identical counts on both sides. Do not force GC or relax budgets to stabilize a measurement.
  - every performance optimization PR must include in its description the manual A/B measurements performed during development for the query being optimized. These measurements must exist before the PR is created and compare the development baseline with the proposed change using the same fixture/setup, warmup, and sample configuration. State both latencies and the absolute or relative change. CI results are not a substitute for these hand measurements.
- - do not run the fulltest alone - always commit no-verify after the needle testcases work and look sane, push PR and watch the CI's results
+ - Run only the focused query regression tests and manual A/B measurements locally. Follow the Development Workflow for committing, rebasing onto current `origin/master`, and pushing; GitHub CI runs the full suite and broader A/B benchmarks.
 
 ## RELEASE: Complete Release Process
 
