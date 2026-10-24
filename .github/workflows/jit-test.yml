@@ -101,18 +101,18 @@ jobs:
           GORACE: halt_on_error=1
         run: >-
           go test -race ./scm
-          -run '^TestJIT(Concurrent(SharedProcPublication|StackMapAppendAndGC)|RegexpMatchesResultSurvivesCallerScratch|If(DiscardsBranchLocalRoots|PreservesAliasedInput))$'
+          -run '^TestJIT(Concurrent(SharedProcPublication|StackMapAppendAndGC)|RegexpMatchesResultSurvivesCallerScratch|If(DiscardsBranchLocalRoots|PreservesAliasedInput|UsesReservedResultRegisters))$'
           -count=5
 
       - name: Check JIT roots under aggressive GC
         timeout-minutes: 5
-        env:
-          GOGC: "1"
-          GODEBUG: clobberfree=1,gccheckmark=1
-        run: >-
-          go test ./scm
-          -run 'TestJIT(If|Regexp|Regex|Empty|SliceData|Reserved|GroupStage|Concurrent)'
-          -count=5
+        run: |
+          go test -c -o "$RUNNER_TEMP/jit-root-tests" ./scm
+          cd scm
+          GOGC=1 GODEBUG=clobberfree=1,gccheckmark=1 \
+            "$RUNNER_TEMP/jit-root-tests" \
+            -test.run 'TestJIT(If|Regexp|Regex|Empty|SliceData|Reserved|GroupStage|Concurrent)' \
+            -test.count=5
 
       - name: Install test dependencies
         timeout-minutes: 5

@@ -357,9 +357,11 @@ func jitEmitSpecialIf(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JI
 	}
 	outerEnv := ctx.Env
 	stableEnv := ctx.StabilizeJITEnv(outerEnv, true)
-	// Keep the existing register-pair branch contract. A private result also
-	// leaves an aliased caller input intact until the condition consumes it.
-	saved := jitAllocTrackedPair(ctx, JITTypeUnknown)
+	// Reuse a caller-reserved pair before requesting more registers. Conditions
+	// read the preserved input homes; caller stack destinations are written last.
+	// Placement is reusable, while proofs about the previous value are not.
+	pair := jitEnsureResultPair(ctx, result)
+	saved := JITValueDesc{ID: pair.ID, Loc: LocRegPair, Type: JITTypeUnknown, Reg: pair.Reg, Reg2: pair.Reg2}
 	ctx.ProtectReg(saved.Reg)
 	ctx.ProtectReg(saved.Reg2)
 	boundary := ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true, ResultRegs: []Reg{saved.Reg, saved.Reg2}})

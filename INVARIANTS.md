@@ -183,8 +183,10 @@ retains its existing representation and contains no synchronization state.
   common result survives a value join; branch-only closure captures and spills
   must never enter later stack maps on paths which skipped their producers.
   Condition lowering restores the outer state on both outgoing edges. The
-  common value home is private until publication: a caller destination may alias
-  a condition input and must not be cleared before that input has been consumed.
+  caller's reserved register pair remains usable under register pressure, with
+  value proofs cleared for the new result. Condition inputs use preserved homes;
+  an aliased caller stack destination is written only after those inputs have
+  been consumed.
 
 - Native regex scans reserve their returned Scmer slot in the caller's stack
   region before reserving temporary walker state. Releasing walker state must

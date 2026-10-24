@@ -1417,3 +1417,47 @@ func TestJITIfPreservesAliasedInput(t *testing.T) {
 		}
 	}
 }
+
+// Nested emitters can enter IF with the register bank already reserved. Its
+// caller-provided result pair must remain usable without another allocation.
+func TestJITIfUsesReservedResultRegisters(t *testing.T) {
+	declaration := &Declaration{Name: "jit_if_reserved_result_probe", Fn: func(args ...Scmer) Scmer {
+		if args[0].Bool() {
+			return NewInt(7)
+		}
+		return NewInt(9)
+	}, Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "bool"}}, Return: &TypeDescriptor{Kind: "int"}, JITVirtualArgs: true, JITEmit: func(ctx *JITContext, source []Scmer, _ []JITValueDesc, target JITValueDesc) JITValueDesc {
+		var held []JITValueDesc
+		for bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) >= 2 {
+			value := jitAllocTrackedPair(ctx, JITTypeUnknown)
+			ctx.ProtectReg(value.Reg)
+			ctx.ProtectReg(value.Reg2)
+			held = append(held, value)
+		}
+		if len(held) == 0 {
+			t.Fatal("probe did not reserve a result pair")
+		}
+		out := jitEmitSpecialIf(ctx, []Scmer{source[0], NewInt(7), NewInt(9)}, nil, held[0])
+		for _, value := range held {
+			ctx.UnprotectReg(value.Reg2)
+			ctx.UnprotectReg(value.Reg)
+		}
+		return jitPlaceScmerIntoTarget(ctx, out, target)
+	}}}
+	Declare(&Globalenv, declaration)
+	defer func() {
+		delete(Globalenv.Vars, Symbol(declaration.Name))
+		delete(declarations, declaration.Name)
+		delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda (flag) (jit_if_reserved_result_probe flag))`)
+	for _, flag := range []bool{false, true} {
+		want := int64(9)
+		if flag {
+			want = 7
+		}
+		if got := Apply(compiled, NewBool(flag)); !Equal(got, NewInt(want)) {
+			t.Fatalf("flag %t: got %s, want %d", flag, String(got), want)
+		}
+	}
+}
