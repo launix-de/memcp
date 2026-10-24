@@ -391,6 +391,12 @@ func (r *replicationManager) startImport(packet replicaPacket) (*replicaImport, 
 	db := databases.Get(packet.Resource.Database)
 	var engine PersistenceEngine
 	if db != nil {
+		if packet.Resource.Shard != "" {
+			// Complete lazy catalog publication before registering the import or
+			// acquiring importPublication at completion. Startup GC may own the
+			// same loadOnce; a discovered database is not yet a loaded schema.
+			db.ensureLoaded()
+		}
 		engine = db.persistence
 	} else {
 		engine = createPersistenceFromConfig(packet.Resource.Database, databaseBackendConfig(packet.Resource.Database))
@@ -434,6 +440,7 @@ func (transfer *replicaImport) packet(packet replicaPacket) error {
 			if db == nil {
 				return fmt.Errorf("unknown column database")
 			}
+			db.ensureLoaded()
 			table := db.tables.Get(packet.Resource.Table)
 			if table == nil {
 				return fmt.Errorf("unknown column table")
@@ -548,6 +555,9 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 	if db == nil {
 		return fmt.Errorf("schema must arrive before shard")
 	}
+	// Network transfers initialized this catalog before import registration;
+	// local backup restoration also enters here without startImport.
+	db.ensureLoaded()
 	table := db.tables.Get(resource.Table)
 	if table == nil {
 		return fmt.Errorf("unknown shard table")
