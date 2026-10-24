@@ -3,8 +3,8 @@
 /* Copyright (C) 2026 Carl-Philip Hänsch
  * SPDX-License-Identifier: GPL-3.0-or-later */
 #include <php.h>
-#if PHP_VERSION_ID < 80500
-#error "MemCP PHP quotas require PHP 8.5 or newer (max_memory_limit)"
+#if PHP_VERSION_ID < 80512
+#error "MemCP requires PHP 8.5.12 or newer (CVE-2026-109618, CVE-2026-109619)"
 #endif
 #include <ext/pdo/php_pdo_driver.h>
 #include <ext/pdo/pdo_sql_parser.h>

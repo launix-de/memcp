@@ -17,46 +17,46 @@ LDFLAGS      ?=
 # sudo, or extension development libraries are needed. Keep version/checksum
 # pairs together. All downloaded files stay in the ignored .third_party cache.
 PHP_CACHE ?= $(CURDIR)/.third_party/php
-PHP_SDK_ROOT ?= $(PHP_CACHE)/8.5.11-$(GOARCH)
+PHP_SDK_ROOT ?= $(PHP_CACHE)/8.5.12-$(GOARCH)
 override PHP_CACHE := $(abspath $(PHP_CACHE))
 override PHP_SDK_ROOT := $(abspath $(PHP_SDK_ROOT))
 PHP_PACKAGE_URL := https://pkg.henderkes.com/api/packages/85/debian/pool/php-zts/main
 PHP_PACKAGES_amd64 := \
-	php-zts-devel_8.5.11-1_amd64.deb:0b0e6b6a77879c66460393a1acbc510a551cb9e0093937c4bf75a9b13f68f08d \
-	php-zts-cli_8.5.11-1_amd64.deb:71230fcc152097a64b46b7feefc086b5ed7d900521d095b6517391eba9193dfb \
-	php-zts-embed_8.5.11-1_amd64.deb:e354af7e2a1d13a0962c8c15aefb3fd67fc53b216264361029ab962888c82092 \
-	php-zts-pdo_8.5.11-1_amd64.deb:d2805258ed22cef34f5fd8db9897284f9fb1d169d849531ac211b2bca88a6380 \
-	php-zts-mysqlnd_8.5.11-1_amd64.deb:709cbdbb129a4a132f4e39748ef2e61e889b609541432bd0ed41a427004143f4 \
-	php-zts-pdo-mysql_8.5.11-1_amd64.deb:794d9db5079fe5e2613e09d97033dab6c269cde407302528484948678972f85d \
-	php-zts-pdo-sqlite_8.5.11-1_amd64.deb:482ae8503f9322b492da4ee076a4baffc7b83dee7b003c97d86674a1e019c79c \
-	php-zts-mysqli_8.5.11-1_amd64.deb:6ea3da2c6139b576229ec76b7edc3eb6a9965334979a6d1f987effa3bda6340b \
-	php-zts-gmp_8.5.11-1_amd64.deb:690792d179857390177eba5dd35b0536e27d4fa4f74f3b038925d9a8600dce58 \
-	php-zts-gettext_8.5.11-1_amd64.deb:7414f6152e6018bec2d39de0bc333d30523e60bd4924a639cb0dad33551fdb9d \
-	php-zts-intl_8.5.11-1_amd64.deb:b8e4c34dbfd516b731e22f431291c314bc6a03c94a2974b85ae9e0a2b2570bd7 \
-	php-zts-gd_8.5.11-1_amd64.deb:c409e0078bf3a398fecd2f62b7bbdd5492d39646001317d0906f58697bd4bfe7 \
-	php-zts-zip_1.22.8+php85-2_amd64.deb:65a3a344506d151a165203017d78fd8046371fb66da30955d4f925012ed4ac47 \
-	php-zts-imagick_3.8.1+php85-9_amd64.deb:03df6d1d94f4bc0743097afd8f11fc5051e717b0137deb5122e3d3f131ecc30b
+	php-zts-devel_8.5.12-4_amd64.deb:2c7629c4ae94fdb0f1301421ccb700f983e55ac911de2cc187a37fb3f2ea90b0 \
+	php-zts-cli_8.5.12-3_amd64.deb:e8bd629ea68a1b4c5d39b2bcf3d0c447bc31b4640e20c3b3923e70a275bfbd45 \
+	php-zts-embed_8.5.12-3_amd64.deb:88cb6501bbacc768e34c37ed1b8d0802c8278614d99bcdefac246b5cb73fb61b \
+	php-zts-pdo_8.5.12-1_amd64.deb:d8d387d0b1e3b4a7764a4d7e3d3722f8f113edf7fcd9778e863f9a317b85d8f7 \
+	php-zts-mysqlnd_8.5.12-1_amd64.deb:4dc0d71b51e57a9bae41bb77dd1c05aa9e86e542b3b9ffaff634dcb86f506da2 \
+	php-zts-pdo-mysql_8.5.12-1_amd64.deb:1eb1e948e69239b4f655beb603904de22d2201bf8f79365bfeb9b13c3009418c \
+	php-zts-pdo-sqlite_8.5.12-1_amd64.deb:68d126fe281c2655b3b79749c2c5036e39a18432e751a058666ee1a335517514 \
+	php-zts-mysqli_8.5.12-1_amd64.deb:e9ceba43e1a90a169d61c9cf35cfed92b71d50328a3e61790e7903062c8dc823 \
+	php-zts-gmp_8.5.12-1_amd64.deb:825474bed70abddd3149de3fde6dab58a3b22a85f04020781ef11c1b33273c89 \
+	php-zts-gettext_8.5.12-1_amd64.deb:14ec200c1349532add7a23ad9f9f961ed506d920efe0c2cdaf5c9557ca8df959 \
+	php-zts-intl_8.5.12-1_amd64.deb:696754d791d28a677b36fc306321e76618c35722786542c37a4d4345b8aee0ba \
+	php-zts-gd_8.5.12-1_amd64.deb:680e7427ef023ab333f49ea72b1b69fc4b23c33bf20e7aae62414a2d9b4b31f8 \
+	php-zts-zip_1.22.8+php85.12+ext-1_amd64.deb:5f6ee401644e0f5f51605b43a166de10028e740623e82581a509d926c4374e36 \
+	php-zts-imagick_3.8.1+php85.12+ext-1_amd64.deb:9daa031d2d9edaf756c84cc827487c93bfc2b9bc99fab237881260f0eaec640d
 PHP_PACKAGES_arm64 := \
-	php-zts-devel_8.5.11-1_arm64.deb:bb8a5d96beed29888064ca34428c98b89e9f4c11d606e3276f3d3c9f17d508d2 \
-	php-zts-cli_8.5.11-1_arm64.deb:cfda8a42c416319545689c643115e931801851b0212ae825aa826e5409c81ab9 \
-	php-zts-embed_8.5.11-1_arm64.deb:04f8616206cd7b44739c4430687f1a693cba8c6281530d43d6feef182eb3be14 \
-	php-zts-pdo_8.5.11-1_arm64.deb:927e08792b30d56a54cc7aa1495945420b69e45283d2a673b9dc5d5b40f4f07a \
-	php-zts-mysqlnd_8.5.11-1_arm64.deb:b5091ce23de84a1df91efaa3372654dcb71732529b4297d9ad38f8a04d5a5adf \
-	php-zts-pdo-mysql_8.5.11-1_arm64.deb:153768eeec6e3d89404eee23d5917589d981069267ce4ea94a483f369e2483aa \
-	php-zts-pdo-sqlite_8.5.11-1_arm64.deb:e93bcf64434df142560844d37e0220c474decd94494bbd0e33c09d39e41c62e9 \
-	php-zts-mysqli_8.5.11-1_arm64.deb:906bc005d666175e30b97024f39fc3ab06a4706dab5bea910b95fdc2d90c7aa7 \
-	php-zts-gmp_8.5.11-1_arm64.deb:07b311c780b25b0b9abd37d6b3f2a5e742301d66eb0511dc80af2dd7e14c14aa \
-	php-zts-gettext_8.5.11-1_arm64.deb:5229999d12a3f816353db2eb603a2e20181cac824653d48ca56483ff13b7a1f0 \
-	php-zts-intl_8.5.11-1_arm64.deb:cf8475896161a4219406e9105c2c803a57e233066e13456a52d5e1c972975a94 \
-	php-zts-gd_8.5.11-1_arm64.deb:5dae6e98ce25ff821cedf5937b8875c2b0b3f10a916df0fe50c58c1fbf63a203 \
-	php-zts-zip_1.22.8+php85-2_arm64.deb:d1b7b6964c00f27e16923fdd11609030879a0dee67639df76c26e7fb8ff2545f \
-	php-zts-imagick_3.8.1+php85-9_arm64.deb:1f577fa9cd6126381d992a95fe12197e52d611a258696d3f6e9ae936ff8b16f5
+	php-zts-devel_8.5.12-3_arm64.deb:90920b4555ad0a7f611bc7f7ef5241038b0d388a56bf38e55a4056725bb4843b \
+	php-zts-cli_8.5.12-3_arm64.deb:e4e2a74d86a33285504841c6e8b351502fe8b23b3f67e7dbbfaf4c9710a56a7d \
+	php-zts-embed_8.5.12-3_arm64.deb:091892ade4cba10b3078bbb812b924ccf40d57611b7e2657b6533b11eadb2f56 \
+	php-zts-pdo_8.5.12-1_arm64.deb:8f3d6d2d202cb20e404312c429b7de4c3490d30d128bac1c6f555394d9371fa2 \
+	php-zts-mysqlnd_8.5.12-1_arm64.deb:3bc7cf3a8e1c271c5ea293c816719b6e3f656607fd8b28552075e5298bdd65ea \
+	php-zts-pdo-mysql_8.5.12-1_arm64.deb:c939d611e95f5600588def06f38c0a64920d9d42569d991ab2da9c14f975103b \
+	php-zts-pdo-sqlite_8.5.12-1_arm64.deb:8766665836e2909484e846f9ae82befd3e7f9615395797973e72c3301e368440 \
+	php-zts-mysqli_8.5.12-1_arm64.deb:0a53201a01393fa1263f061eca3c84f967a8c700848134bbaa2131dd6254e91a \
+	php-zts-gmp_8.5.12-1_arm64.deb:8a1374ae738c74f47bb5a5e67de046cfa6e4d40b8e1841e7f1bc55759f2565c2 \
+	php-zts-gettext_8.5.12-1_arm64.deb:92b78532db2db745e6c1253247aadb818e92e673b42202c324825c46832de6d9 \
+	php-zts-intl_8.5.12-1_arm64.deb:80b4b461f7087afd13cb590a568e7f8b1ca2c50f7d5cff11a09aac2596d9a3a6 \
+	php-zts-gd_8.5.12-1_arm64.deb:decb8a7abc5954b29a88696d57ff10849150007399d8f94bc13dbb2085146c54 \
+	php-zts-zip_1.22.8+php85.12+ext-1_arm64.deb:ec2df81965ff180b0ecfd18cbb7269f2f607d57da5e15250a35e25a2f2782e0e \
+	php-zts-imagick_3.8.1+php85.12+ext-1_arm64.deb:0bb667e2eed0c15bd6f61e4a9b3c70f373ee2827c8c47ca7a9b66977cfad21ac
 # Explicit PHP_CONFIG wins. Reuse a complete installed ZTS SDK where present;
 # an ordinary NTS php-dev package cannot be used by the embedded host.
 ifeq ($(origin PHP_CONFIG), undefined)
 PHP_CONFIG := $(shell for pc in php-config "$(HOME)/.local/opt/memcp-php/bin/php-config"; do \
  command -v "$$pc" >/dev/null 2>&1 || continue; \
- test "$$($$pc --vernum 2>/dev/null)" -ge 80500 2>/dev/null || continue; \
+ test "$$($$pc --vernum 2>/dev/null)" -ge 80512 2>/dev/null || continue; \
  "$$pc" --configure-options | grep -q -- --enable-zts || continue; \
  test -f "$$($$pc --prefix)/lib/libphp.so" || continue; \
  "$$($$pc --php-binary)" -r 'exit(PHP_ZTS && extension_loaded("pdo") && extension_loaded("imagick") && extension_loaded("gd") && extension_loaded("zip") ? 0 : 1);' >/dev/null 2>&1 || continue; \
@@ -98,7 +98,7 @@ nophp:
 # Fail before compiling when php-config points at an NTS/FPM-only SDK.
 .PHONY: check-php
 check-php: $(PHP_PROVISION)
-	@test "$$($(PHP_CONFIG) --vernum)" -ge 80500 || { echo "PHP >= 8.5 ZTS SDK required" >&2; exit 1; }
+	@test "$$($(PHP_CONFIG) --vernum)" -ge 80512 || { echo "PHP >= 8.5.12 ZTS SDK required (CVE-2026-109618, CVE-2026-109619)" >&2; exit 1; }
 	@case "$$($(PHP_CONFIG) --configure-options)" in *--enable-zts*) ;; *) echo "PHP ZTS SDK required" >&2; exit 1 ;; esac
 	@test -f "$$($(PHP_CONFIG) --prefix)/lib/libphp.so" || { echo "PHP embed shared library required" >&2; exit 1; }
 
