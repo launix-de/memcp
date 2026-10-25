@@ -30,6 +30,223 @@ import "github.com/gorilla/websocket"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
+func TestReplicationOrderedScanRetainsColdPayloadThroughCallback(t *testing.T) {
+	for _, name := range []string{"direct", "first", "multi", "recset", "batch", "direct-panic", "first-panic", "multi-panic", "recset-panic", "batch-panic"} {
+		t.Run(name, func(t *testing.T) {
+			path := strings.TrimSuffix(name, "-panic")
+			failCallback := path != name
+			tbl, _ := createDurabilityTestTable(t, "torderedcold", 4)
+			RebuildTable(tbl, true, false)
+			shard := tbl.ActiveShards()[0]
+			part := newRecSetShardFromSortedIDs(shard, 4, []uint32{0, 1, 2, 3})
+			source := &recSet{table: tbl, shards: []recSetShard{part}, count: 4}
+			var freed [numEvictableTypes]int64
+			if !shardCleanup(shard, &freed) || shard.state() != COLD {
+				t.Fatal("fixture did not become cold")
+			}
+			_, order := integerOrder(false)
+			condition := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+			callback := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+				if shardCleanup(shard, &freed) {
+					t.Error("evicted the shard while an ordered callback still owns its rows")
+				}
+				if failCallback {
+					panic("ordered callback failed")
+				}
+				return scm.NewInt(args[0].Int() + args[1].Int())
+			})
+			schema := newScanAccessSchema(scanAccessConsumerScan, nil, -1)
+			spec := scanOrderTableSpec{table: tbl, accessSchema: schema, condition: condition,
+				sortcols: []scm.Scmer{scm.NewString("id")}, callbackCols: []string{"id"}, callback: callback,
+				perTableOffset: -1, perTableLimit: -1}
+			var got scm.Scmer
+			var failure any
+			func() {
+				defer func() { failure = recover() }()
+				switch path {
+				case "multi":
+					got = scanOrderMulti(nil, []scanOrderTableSpec{spec}, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 4, scm.NewInt(0), false, scm.NewNil())
+				case "recset":
+					got = source.scan_order(nil, schema, nil, nil, condition, spec.sortcols, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 4, spec.callbackCols, callback, scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil())
+				case "batch":
+					got = scanOrderBatchAccept(nil, spec, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[0] }), spec.sortcols, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 4, spec.callbackCols, callback, scm.NewInt(0), false, scm.NewNil())
+				default:
+					limit := 4
+					if path == "first" {
+						spec.sortcols = nil
+						limit = 1
+					}
+					var dirs []func(...scm.Scmer) scm.Scmer
+					if len(spec.sortcols) != 0 {
+						dirs = []func(...scm.Scmer) scm.Scmer{order}
+					}
+					got = tbl.scan_order(nil, schema, nil, nil, condition, spec.sortcols, dirs, 0, 0, limit, spec.callbackCols, callback, scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil())
+				}
+			}()
+			if failCallback {
+				if fmt.Sprint(failure) != "ordered callback failed" {
+					t.Fatalf("callback panic = %v", failure)
+				}
+			} else if failure != nil {
+				t.Fatalf("ordered scan failed: %v", failure)
+			}
+			want := int64(10)
+			if path == "first" {
+				want = 1
+			}
+			if !failCallback && got.Int() != want {
+				t.Fatalf("sum = %v, want %d", got, want)
+			}
+			if shard.cacheReaders.Load() != 0 {
+				t.Fatal("ordered scan leaked its payload lease")
+			}
+			if !shardCleanup(shard, &freed) {
+				t.Fatal("completed ordered scan still prevents eviction")
+			}
+		})
+	}
+}
+
+func TestReplicationOrderedMutationRequiresWritePermission(t *testing.T) {
+	for _, path := range []string{"first", "direct", "multi", "batch"} {
+		t.Run(path, func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "torderedrights", 3)
+			r := &replicationManager{cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+			r.resourceCell(mosiResource{Database: tbl.schema.Name}).rights.Initialize(mosi.M)
+			shard := tbl.ActiveShards()[0]
+			r.shardCell(shard).rights.Initialize(mosi.S)
+			previous := replication.Swap(r)
+			defer replication.Store(previous)
+			called := false
+			var failure any
+			func() {
+				defer func() { failure = recover() }()
+				var sorts []scm.Scmer
+				var dirs []func(...scm.Scmer) scm.Scmer
+				if path != "first" {
+					_, order := integerOrder(false)
+					sorts, dirs = []scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{order}
+				}
+				callback := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+					called = true
+					scm.Apply(args[1])
+					return args[0]
+				})
+				spec := scanOrderTableSpec{table: tbl, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1), condition: trueCondition(), sortcols: sorts, callbackCols: []string{"$update"}, callback: callback, perTableOffset: -1, perTableLimit: -1}
+				switch path {
+				case "multi":
+					scanOrderMulti(nil, []scanOrderTableSpec{spec}, dirs, 0, 0, 1, scm.NewInt(0), false, scm.NewNil())
+				case "batch":
+					scanOrderBatchAccept(nil, spec, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[0] }), sorts, dirs, 0, 0, 1, spec.callbackCols, callback, scm.NewInt(0), false, scm.NewNil())
+				default:
+					tbl.scan_order(nil, spec.accessSchema, nil, nil, spec.condition, sorts, dirs, 0, 0, 1, spec.callbackCols, callback, scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil())
+				}
+			}()
+			if failure == nil || !strings.Contains(fmt.Sprint(failure), mosi.NetworkError) {
+				t.Errorf("write without a reachable owner failed with %v, want %s", failure, mosi.NetworkError)
+			}
+			if called || shard.deletions.Count() != 0 {
+				t.Error("ordered mutation ran without exclusive MOSI permission")
+			}
+		})
+	}
+}
+
+func TestReplicationOrderedMutationRetainsTransactionWriteLease(t *testing.T) {
+	for _, mode := range []TxMode{TxCursorStability, TxACID} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "torderedtxrights", 3)
+			r := &replicationManager{cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+			r.resourceCell(mosiResource{Database: tbl.schema.Name}).rights.Initialize(mosi.M)
+			shard := tbl.ActiveShards()[0]
+			cell := r.shardCell(shard)
+			cell.rights.Initialize(mosi.M)
+			previous := replication.Swap(r)
+			defer replication.Store(previous)
+			tx := NewTxContext(mode)
+			defer replicationLeave(tx)
+			defer tx.Rollback()
+			_, order := integerOrder(false)
+			tbl.scan_order(tx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueCondition(),
+				[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 1,
+				[]string{"$update"}, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+					if cell.gate.TryLock() {
+						cell.gate.Unlock()
+						t.Error("ownership handover was admitted during the mutation callback")
+					}
+					scm.Apply(args[1])
+					return args[0]
+				}), scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil())
+			if tx.IsVisible(shard, 0) {
+				t.Fatal("transaction did not delete the first row")
+			}
+			if cell.gate.TryLock() {
+				cell.gate.Unlock()
+				t.Fatal("ordered scan released the write lease before transaction completion")
+			}
+			tx.Rollback()
+			replicationLeave(tx)
+			if shard.deletions.Count() != 0 {
+				t.Fatal("rollback did not restore the ordered deletion")
+			}
+			if !cell.gate.TryLock() {
+				t.Fatal("completed transaction retained its write lease")
+			}
+			cell.gate.Unlock()
+		})
+	}
+}
+
+func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "torderedhistory", 3)
+	RebuildTable(tbl, true, false)
+	original := tbl.ActiveShards()[0]
+	part := newRecSetShardFromSortedIDs(original, 3, []uint32{0, 1, 2})
+	source := &recSet{table: tbl, shards: []recSetShard{part}, count: 3}
+	r := &replicationManager{cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	cell := r.shardCell(original)
+	replacement := original.rebuild(true)
+	if replacement == original {
+		t.Fatal("fixture did not produce a successor")
+	}
+	cell.current.Store(replacement)
+	cell.rights.Initialize(mosi.IO)
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	_, order := integerOrder(false)
+	got := source.scan_order(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueCondition(),
+		[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 3,
+		[]string{"id"}, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return scm.NewInt(args[0].Int() + args[1].Int()) }),
+		scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil())
+	if got.Int() != 6 || cell.rights.Phase() != mosi.IO {
+		t.Fatalf("historical sum = %v, current rights = %v", got, cell.rights.Phase())
+	}
+	if original.cacheReaders.Load() != 0 {
+		t.Fatal("historical ordered scan leaked its read capability")
+	}
+	// Acquiring current M must never reinterpret these historical physical IDs.
+	cell.rights.Initialize(mosi.M)
+	called := false
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		source.scan_order(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueCondition(),
+			[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 1,
+			[]string{"$update"}, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+				called = true
+				return args[0]
+			}),
+			scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil())
+	}()
+	if called || !strings.Contains(fmt.Sprint(failure), "generation changed; retry statement") {
+		t.Fatalf("historical mutation called = %v, failure = %v", called, failure)
+	}
+	if !cell.gate.TryLock() {
+		t.Fatal("generation mismatch leaked its write capability")
+	}
+	cell.gate.Unlock()
+}
+
 func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "treplicareclaim", 3)
 	empty, _ := CreateTable(table.schema.Name, "empty", Safe, false)

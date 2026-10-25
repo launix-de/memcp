@@ -419,8 +419,10 @@ func skipPartition(q *globalqueue, qx *shardqueue, pk []scm.Scmer, n int) {
 
 type shardqueue struct {
 	shard           *storageShard
-	items           []uint32 // TODO: refactor to chan, so we can block generating too much entries
-	universe        uint32   // visible recid upper bound captured by the shard scan
+	readAccess      ReadAccess  // queue owns the selected generation through merge/projection
+	writeAccess     WriteAccess // mutation queues retain M through their callbacks
+	items           []uint32    // TODO: refactor to chan, so we can block generating too much entries
+	universe        uint32      // visible recid upper bound captured by the shard scan
 	candidateCount  int64
 	err             scanError
 	scols           []func(uint32) scm.Scmer // sort criteria column reader
@@ -441,6 +443,10 @@ func (s *shardqueue) closeReaders() {
 	readers := s.sortReaders
 	s.sortReaders = nil
 	releaseColumnReaders(readers)
+	s.readAccess.Release()
+	s.readAccess = ReadAccess{}
+	s.writeAccess.Release()
+	s.writeAccess = WriteAccess{}
 }
 
 const directScanOrderColumns = 8
@@ -1743,7 +1749,7 @@ func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessV
 	// The general path owns per-scan debugging and telemetry. Debugging is
 	// explicitly allowed to add overhead, so keep it visible instead of letting
 	// the LIMIT 1 fast path silently omit this scan from system statistics.
-	if !Settings.ScanDebugging && postOrderFilter.IsNil() && len(sortcols) == 0 && limitPartitionCols == 0 && offset == 0 && limit == 1 && !isOuter {
+	if !Settings.ScanDebugging && !contributionMutationColumns(callbackCols) && postOrderFilter.IsNil() && len(sortcols) == 0 && limitPartitionCols == 0 && offset == 0 && limit == 1 && !isOuter {
 		return t.scanOrderFirst(currentTx, accessSchema, accessValues, conditionCols, condition, callbackCols, mapReduce, neutral, notFoundValue)
 	}
 	spec := scanOrderTableSpec{
@@ -1788,6 +1794,8 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 
 	var mu sync.Mutex
 	var foundShard *storageShard
+	var foundAccess ReadAccess
+	defer func() { foundAccess.Release() }()
 	var foundID uint32
 	var firstErr scanError
 	done := t.iterateShardsParallel(currentTx, bounds, nil, func(shard *storageShard, _ bool, acquisitionFailure any) {
@@ -1816,12 +1824,18 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 		if !present {
 			return
 		}
+		// Keep this exact generation after the fanout worker releases its
+		// acquisition. Reacquiring current MOSI rights could rebind foundID.
+		candidateAccess := shard.acquireSnapshotRead(currentTx)
 		mu.Lock()
 		if foundShard == nil {
+			foundAccess = candidateAccess
+			candidateAccess = ReadAccess{}
 			foundShard = shard
 			foundID = recid
 		}
 		mu.Unlock()
+		candidateAccess.Release()
 	})
 	if done != nil {
 		<-done
@@ -1897,6 +1911,16 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 			result.closeReaders()
 		}
 	}()
+	if contributionMutationColumns(callbackCols) {
+		result.writeAccess = t.GetWrite(currentTx)
+		if result.writeAccess.shard != t {
+			panic("ordered mutation generation changed; retry statement")
+		}
+	}
+	// Table scans already acquired current read rights at orchestration; RecSet
+	// scans own historical physical IDs. Retain that generation without a second
+	// MOSI acquisition, including after this function returns its sorted queue.
+	result.readAccess = t.acquireSnapshotRead(currentTx)
 	result.shard = t
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
