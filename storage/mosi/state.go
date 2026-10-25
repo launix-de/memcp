@@ -14,6 +14,7 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package mosi
 
 import "fmt"
+import "context"
 import "sync/atomic"
 import "github.com/google/uuid"
 
@@ -89,6 +90,10 @@ type Publication struct {
 	backend    Phase // immutable RAM permission proving an IS generation is current
 	flight     *Flight
 	installing bool
+	writer     *Writer   // the single active local writer; independent of read permission
+	writeDepth uint32    // nested scopes belonging to that same writer/transaction
+	handover   *Handover // closes new writer admission; existing transactions may finish
+	sealed     bool      // the existing transaction/generation drain has completed
 }
 
 var stable = [...]Publication{{phase: IO}, {phase: M}, {phase: O}, {phase: S}, {phase: IS}}
@@ -148,10 +153,10 @@ func (state *State) RestoreBackend(phase Phase) {
 func (state *State) BackendOnly() {
 	for {
 		current := state.Snapshot()
-		if !current.phase.Readable() {
+		if !current.phase.Readable() || current.writer != nil || current.handover != nil && !current.sealed {
 			return
 		}
-		next := &Publication{phase: IS, backend: current.phase}
+		next := &Publication{phase: IS, backend: current.phase, handover: current.handover, sealed: current.sealed}
 		if state.value.CompareAndSwap(current, next) {
 			return
 		}
@@ -186,7 +191,7 @@ func (state *State) Request(wanted Phase) (*Publication, Action) {
 			}
 			// This only restores an already established permission. Actual payload
 			// loading uses the existing local COLD lifecycle after acquisition.
-			if !state.value.CompareAndSwap(old, &stable[current.backend]) {
+			if !state.value.CompareAndSwap(old, permissionPublication(current.backend, current)) {
 				continue
 			}
 			continue
@@ -196,7 +201,7 @@ func (state *State) Request(wanted Phase) (*Publication, Action) {
 		}
 		if current.phase.Requested() {
 			if wanted == M && current.phase != MR && !current.installing {
-				next := &Publication{phase: MR, flight: current.flight, prior: current.prior}
+				next := &Publication{phase: MR, flight: current.flight, prior: current.prior, handover: current.handover, sealed: current.sealed}
 				if !state.value.CompareAndSwap(old, next) {
 					continue
 				}
@@ -210,7 +215,7 @@ func (state *State) Request(wanted Phase) (*Publication, Action) {
 		} else if wanted == O {
 			phase = OR
 		}
-		next := &Publication{phase: phase, prior: current.phase, flight: &Flight{id: uuid.NewString(), done: make(chan struct{})}}
+		next := &Publication{phase: phase, prior: current.phase, handover: current.handover, sealed: current.sealed, flight: &Flight{id: uuid.NewString(), done: make(chan struct{})}}
 		if state.value.CompareAndSwap(old, next) {
 			return next, Send
 		}
@@ -233,7 +238,7 @@ func (state *State) Grant(id string, phase Phase, install func() error) (bool, e
 		if current.phase == MR && phase != M {
 			return false, nil
 		}
-		claimed := &Publication{phase: current.phase, flight: current.flight, installing: true}
+		claimed := &Publication{phase: current.phase, flight: current.flight, installing: true, handover: current.handover, sealed: current.sealed}
 		if !state.value.CompareAndSwap(current, claimed) {
 			continue
 		}
@@ -247,9 +252,9 @@ func (state *State) Grant(id string, phase Phase, install func() error) (bool, e
 		}()
 		if err != nil {
 			current.flight.err = err
-			state.value.Store(&stable[IO])
+			state.value.Store(permissionPublication(IO, claimed))
 		} else {
-			state.value.Store(&stable[phase])
+			state.value.Store(permissionPublication(phase, claimed))
 		}
 		close(current.flight.done)
 		return true, err
@@ -266,7 +271,7 @@ func (state *State) Fail(id string, err error) {
 		if current.prior.Readable() {
 			restore = current.prior
 		}
-		if state.value.CompareAndSwap(current, &stable[restore]) {
+		if state.value.CompareAndSwap(current, permissionPublication(restore, current)) {
 			current.flight.err = err
 			close(current.flight.done)
 			return
@@ -297,13 +302,16 @@ func (state *State) Publish(phase Phase) {
 			if prior == current.prior {
 				return
 			}
-			next := &Publication{phase: current.phase, flight: current.flight, prior: prior}
+			next := &Publication{phase: current.phase, flight: current.flight, prior: prior, handover: current.handover, sealed: current.sealed}
 			if !state.value.CompareAndSwap(current, next) {
 				continue
 			}
 			return
 		}
-		if !state.value.CompareAndSwap(current, &stable[phase]) {
+		if current != nil && current.writer != nil {
+			panic("MOSI publication while a local writer is active")
+		}
+		if !state.value.CompareAndSwap(current, permissionPublication(phase, current)) {
 			continue
 		}
 		if current != nil && current.flight != nil {
@@ -345,3 +353,179 @@ func (flight *Flight) Sequence() uint64 { return flight.serial.Load() }
 
 // SetSequence requires the caller's request-sequence ownership.
 func (flight *Flight) SetSequence(sequence uint64) { flight.serial.Store(sequence) }
+
+// permissionPublication retains local admission ownership across a wire-right
+// transition. Local active M is never serialized as another network permission.
+func permissionPublication(phase Phase, previous *Publication) *Publication {
+	if previous == nil || previous.handover == nil {
+		return &stable[phase]
+	}
+	return &Publication{phase: phase, handover: previous.handover, sealed: previous.sealed}
+}
+
+// Writer is the one local M writer. Nested scopes may borrow the same explicit
+// transaction owner; independent transactions never share active M. Readers do
+// not inspect, register with, or wait for Writer. Each acquired scope releases
+// exactly once. This is the sole MOSI write-admission mechanism, not an RWMutex
+// gate layered over it. Native container/visibility publication retains its
+// existing ownership, without another replication admission lock.
+type Writer struct {
+	state *State
+	owner any
+	done  chan struct{}
+}
+
+// TryWrite admits one local batch or returns its existing completion to await.
+// A nil completion means M must first be acquired through the ordinary protocol.
+// continuation is proof from the existing native transaction directory; only
+// that transaction may continue while an unsealed handover drains its writes.
+func (state *State) TryWrite(owner any, continuation bool) (*Writer, <-chan struct{}) {
+	for {
+		current := state.value.Load()
+		if current == nil || current.phase != M {
+			return nil, nil
+		}
+		if current.installing {
+			return nil, current.flight.done
+		}
+		if current.writer != nil {
+			if owner == nil || current.writer.owner != owner {
+				return nil, current.writer.done
+			}
+		} else if current.handover != nil && (current.sealed || !continuation) {
+			return nil, current.handover.done
+		}
+		next := *current
+		if next.writer == nil {
+			next.writer = &Writer{state: state, owner: owner, done: make(chan struct{})}
+		}
+		next.writeDepth++
+		if state.value.CompareAndSwap(current, &next) {
+			return next.writer, nil
+		}
+	}
+}
+
+func (writer *Writer) Release() {
+	for {
+		current := writer.state.value.Load()
+		if current == nil || current.writer != writer || current.writeDepth == 0 {
+			panic("MOSI write scope released without ownership")
+		}
+		next := *current
+		next.writeDepth--
+		if next.writeDepth == 0 {
+			next.writer = nil
+		}
+		if writer.state.value.CompareAndSwap(current, &next) {
+			if next.writer == nil {
+				close(writer.done)
+			}
+			return
+		}
+	}
+}
+
+// Handover owns admission closure only. It never excludes readers. A sealed
+// handover may prepare/install a generation; it must be released before network
+// streaming. Native transaction counters supply the drain, never new reader or
+// transaction registration in MOSI.
+type Handover struct {
+	state *State
+	done  chan struct{}
+}
+
+func (state *State) ClosingWrites() bool { return state.Snapshot().handover != nil }
+func (state *State) Writing() bool       { return state.Snapshot().writer != nil }
+
+func (state *State) TryHandover(drained func() bool) *Handover {
+	current := state.value.Load()
+	if current != nil && (current.writer != nil || current.handover != nil || current.installing) {
+		return nil
+	}
+	if !drained() {
+		return nil
+	}
+	next := *state.Snapshot()
+	next.handover = &Handover{state: state, done: make(chan struct{})}
+	next.sealed = true
+	if !state.value.CompareAndSwap(current, &next) {
+		return nil
+	}
+	return next.handover
+}
+
+func (state *State) BeginHandover(ctx context.Context, drain func(context.Context) error) (*Handover, error) {
+	var handover *Handover
+	for handover == nil {
+		current := state.value.Load()
+		next := *state.Snapshot()
+		var wait <-chan struct{}
+		if next.installing {
+			wait = next.flight.done
+		} else if next.handover != nil {
+			wait = next.handover.done
+		}
+		if wait != nil {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-wait:
+			}
+			continue
+		}
+		next.handover = &Handover{state: state, done: make(chan struct{})}
+		if state.value.CompareAndSwap(current, &next) {
+			handover = next.handover
+		}
+	}
+	complete := false
+	defer func() {
+		if !complete {
+			handover.Release()
+		}
+	}()
+	for {
+		current := state.value.Load()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if current.writer != nil {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-current.writer.done:
+			}
+			continue
+		}
+		if err := drain(ctx); err != nil {
+			return nil, err
+		}
+		next := *current
+		next.sealed = true
+		if state.value.CompareAndSwap(current, &next) {
+			complete = true
+			return handover, nil
+		}
+	}
+
+}
+
+func (handover *Handover) Release() {
+	for {
+		current := handover.state.value.Load()
+		if current == nil || current.handover != handover {
+			panic("MOSI handover released without ownership")
+		}
+		if current.installing {
+			<-current.flight.done
+			continue
+		}
+		next := *current
+		next.handover, next.sealed = nil, false
+		if handover.state.value.CompareAndSwap(current, &next) {
+			close(handover.done)
+			return
+		}
+	}
+}

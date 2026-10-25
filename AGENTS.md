@@ -185,9 +185,32 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   No private journal or persisted slave registration exists. `replicationStarting`
   is published before catalog discovery; startup GC cannot delete unexamined
   safety copies before the runtime directory and native configuration are ready.
-  `directory` serializes ownership handovers; `gate` protects only write batches
-  and transactions. Already authorized reads use atomic state loads and existing
-  snapshot lifetimes, without additional reader registration or admission writes.
+  `directory` serializes ownership handovers. `mosi.State` is the only local
+  write-admission authority: M held, M active with one explicit writer owner,
+  and M closing for handover. These are local substates, never new wire rights
+  or per-write epochs. Nested scopes may borrow the same explicit transaction
+  owner; independent writer owners serialize. Scope acquisition/release is once
+  per batch, never per row. No additional generic shard/schema writer gate or
+  RWMutex read lease may duplicate this authority. Payload eviction nonblockingly
+  closes this same admission state before detaching a current generation; IS
+  restoration retains that closure until eviction completes. Native mutable-container,
+  WAL and visibility ownership retains its distinct existing purpose.
+  Handover closes new write admission, lets already registered native transaction
+  owners continue, and seals only after active batches and native transaction
+  generations drain. Historical generations participate through existing weak
+  retirement metadata; no replication transaction map/counter is retained.
+  Readers do not wait for M active/closing and use atomic permission loads plus
+  existing snapshot lifetimes, without extra reader registration or admission writes.
+  `checkpoint` serializes source database backup batches; `sendMu` orders generation
+  streams per resource. Neither participates in local reader/writer admission.
+  `replicaTransfer` owns one captured physical generation, immutable declarations,
+  backend and optional schema bytes. `transfers` registers active outgoing snapshots
+  under the persistence lifecycle until send completion, so GC/drop cannot delete
+  their files. Backend cutover and database drop reject an active transfer before
+  retiring its namespace; volatile payloads use one existing eviction lease. No transfer is retained after
+  sending, and no reader/write-batch registers with this cold lifecycle directory. Send never
+  reloads the current shard or schema and holds no writer/DDL/lifecycle lock during
+  network backpressure. Transfer payload ownership ends exactly once after send.
   `storage/mosi.State` publishes immutable M/O/S/IS/IO/MR/OR/SR descriptors using CAS on
   transitions only. Pending request descriptors own one flight and wake all
   waiters after complete data installation and RAM permission publication. SR/OR upgrades

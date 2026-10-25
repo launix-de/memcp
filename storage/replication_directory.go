@@ -41,10 +41,11 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 		return fmt.Errorf("invalidation from non-master")
 	}
 	c := r.resourceCell(packet.Resource)
-	if err := replicationLock(ctx, &c.gate); err != nil {
+	handover, err := c.rights.BeginHandover(ctx, c.drainWrites)
+	if err != nil {
 		return err
 	}
-	defer c.gate.Unlock()
+	defer handover.Release()
 	r.localRecord(packet.Resource, mosi.IO, "")
 	r.publishLocal(packet.Resource, mosi.IO)
 	return r.peer(source).post(mosiPacket{Kind: "ack", Resource: packet.Resource, ID: packet.ID})
@@ -54,16 +55,26 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 	if r.master || source != "" {
 		return fmt.Errorf("recall from non-master")
 	}
+	c := r.resourceCell(packet.Resource)
+	// Older safety-copy packets must be enqueued before this ownership offer.
+	// Waiting for a sender never closes local write admission.
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
 	releasePersistence, err := replicaPersistenceRead(packet.Resource)
 	if err != nil {
 		return err
 	}
 	defer releasePersistence()
-	c := r.resourceCell(packet.Resource)
-	if err := replicationLock(ctx, &c.gate); err != nil {
+	handover, err := c.rights.BeginHandover(ctx, c.drainWrites)
+	if err != nil {
 		return err
 	}
-	defer c.gate.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			handover.Release()
+		}
+	}()
 	r.mu.Lock()
 	record := r.directory.Records[packet.Resource.key()]
 	r.mu.Unlock()
@@ -89,8 +100,14 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 	})
 	r.publishLocal(packet.Resource, phase)
 	packet.Generation = generation
+	transfer, err := r.captureResource(packet.Resource, generation)
+	if err != nil {
+		return err
+	}
+	handover.Release()
+	locked = false
 	releasePersistence()
-	return r.sendResource(r.peer(source), packet)
+	return r.sendResource(r.peer(source), packet, transfer)
 }
 
 func (r *replicationManager) coordinate(ctx context.Context, requester string, packet mosiPacket) error {
@@ -158,7 +175,8 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				return err
 			}
 			defer releasePersistence()
-			if err := replicationLock(ctx, &c.gate); err != nil {
+			handover, err := c.rights.BeginHandover(ctx, c.drainWrites)
+			if err != nil {
 				return err
 			}
 			generation, err := r.prepareResource(packet.Resource)
@@ -172,7 +190,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				r.publishLocal(packet.Resource, mosi.ParsePhase(oldState))
 				record.Generation = generation
 			}
-			c.gate.Unlock()
+			handover.Release()
 			releasePersistence()
 			if err != nil {
 				return err
@@ -199,11 +217,12 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				continue
 			}
 			if reader == r.id {
-				if err := replicationLock(ctx, &c.gate); err != nil {
+				handover, err := c.rights.BeginHandover(ctx, c.drainWrites)
+				if err != nil {
 					return err
 				}
 				r.publishLocal(packet.Resource, mosi.IO)
-				c.gate.Unlock()
+				handover.Release()
 			} else if err := r.step(ctx, reader, mosiPacket{Kind: "invalidate", ID: uuid.NewString(), Resource: packet.Resource, Epoch: record.Epoch}); err != nil {
 				return err
 			}

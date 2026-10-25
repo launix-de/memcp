@@ -30,7 +30,7 @@ import "github.com/launix-de/memcp/storage/mosi"
 // Replication is published once at startup, after frontend registration. It is
 // nil for ordinary instances. Directory updates are serialized per resource;
 // complete data installation precedes ownership publication. Only write transactions
-// retain a local gate; reads use ordinary snapshots. Each database schema and
+// use MOSI local writer admission; reads use ordinary snapshots. Each database schema and
 // each data shard have independent MOSI slots; storage backends are unchanged.
 var replication atomic.Pointer[replicationManager]
 var replicationStarting atomic.Bool
@@ -77,6 +77,7 @@ type replicationManager struct {
 	stopping        bool
 	stopOnce        sync.Once
 	steps           sync.Map // transfer/invalidations; values are *replicaStep
+	transfers       sync.Map // active outgoing *replicaTransfer -> database; cold GC lifetime only
 	imports         sync.Map // connection ID + transfer ID; reader-owned *replicaImport
 }
 
@@ -333,21 +334,6 @@ func activeReplication(db *database) *replicationManager {
 
 func validReplicaDatabase(name string) bool {
 	return name != "" && name != "system" && !strings.HasPrefix(name, "system_") && !strings.ContainsAny(name, "/\\\x00") && name != "." && name != ".."
-}
-
-func replicationLock(ctx context.Context, gate *sync.RWMutex) error {
-	for !gate.TryLock() {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf(mosi.NetworkError)
-		case <-time.After(time.Millisecond):
-		}
-	}
-	if ctx.Err() != nil {
-		gate.Unlock()
-		return fmt.Errorf(mosi.NetworkError)
-	}
-	return nil
 }
 
 // replicationCheckpoint is best effort while the master is offline. Local

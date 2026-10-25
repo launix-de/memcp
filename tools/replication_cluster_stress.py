@@ -393,10 +393,13 @@ def run_regressions(args, artifacts, journal):
                 pass
             else:
                 raise DrillFailure("transfer crossed an uncommitted transaction")
+            # A closing handover may stop new writers, but the native
+            # transaction already owning this shard must still finish.
+            s.sql("INSERT INTO items VALUES(1001,998)", session=session)
             s.sql("COMMIT", session=session)
-            expect(waiting.result(timeout=args.timeout), 17, "handover after transaction commit")
+            expect(waiting.result(timeout=args.timeout), 18, "handover after transaction commit")
         expect(s.number("SELECT value FROM items WHERE id=1000", "value"), 999, "late handover")
-        s.sql("DELETE FROM items WHERE id=1000")
+        s.sql("DELETE FROM items WHERE id IN (1000,1001)")
         Client(slave.port, args.timeout, password="wrong-password").reject("SELECT 1", status=401)
         expect(master.statuses()[0]["id"], identity, "dashboard identity")
         s.sql("SHUTDOWN")

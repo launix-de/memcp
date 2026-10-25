@@ -18,6 +18,7 @@ import "sync"
 import "bytes"
 import "strings"
 import "reflect"
+import "runtime"
 import "context"
 import "encoding/json"
 import "encoding/binary"
@@ -47,7 +48,7 @@ type replicaStep struct {
 	err      error
 }
 
-// Source preparation follows the native lifecycle -> handover gate order.
+// Source preparation follows native lifecycle -> MOSI handover ownership.
 // The caller releases this capability before sending packets; the idempotent
 // local release also supports deferred cleanup of preparation failures.
 func replicaPersistenceRead(resource mosiResource) (func(), error) {
@@ -218,7 +219,7 @@ func (r *replicationManager) shardCell(shard *storageShard) *replicaCell {
 }
 
 // prepareResource rebuilds exactly one logical shard, never its siblings. Its
-// write handover gate is already owned and transactions have completed. The
+// sealed MOSI handover is already owned and native transactions have drained. The
 // existing rebuild forwards mutations and retains old reader generations.
 func (r *replicationManager) prepareResource(resource mosiResource) (generation string, err error) {
 	defer func() {
@@ -311,45 +312,132 @@ func (r *replicationManager) replaceShard(resource mosiResource, previous, repla
 	return nil
 }
 
-func (r *replicationManager) sendResource(peer *mosiPeer, header mosiPacket) (err error) {
+// replicaTransfer binds one immutable generation before releasing source write
+// ownership. The active outgoing registry protects its backend objects from
+// reclamation; no writer lock is retained by the network.
+type replicaTransfer struct {
+	engine     PersistenceEngine
+	schema     []byte
+	shard      *storageShard
+	columns    []*column
+	generation string
+	volatile   bool
+	blobTable  bool
+	payload    ReadAccess // existing eviction lease, only for volatile streamed RAM
+	manager    *replicationManager
+	database   string
+	released   bool // exclusively owned by the sending caller
+}
+
+// Caller owns the database persistence lifecycle while binding the generation.
+func (r *replicationManager) captureResource(resource mosiResource, generation string) (*replicaTransfer, error) {
+	db := databases.Get(resource.Database)
+	if db == nil {
+		return nil, fmt.Errorf("missing database")
+	}
+	transfer := &replicaTransfer{engine: db.persistence, generation: generation}
+	complete := false
+	defer func() {
+		if !complete {
+			transfer.release()
+		}
+	}()
+	if resource.Shard == "" {
+		transfer.schema = append([]byte(nil), db.persistence.ReadSchema()...)
+		actual, err := replicaSchemaGeneration(transfer.schema)
+		if err != nil {
+			return nil, err
+		}
+		if generation != "" && actual != generation {
+			return nil, fmt.Errorf("schema generation changed before transfer")
+		}
+		transfer.generation = actual
+		complete = true
+		return transfer, nil
+	}
+	transfer.manager, transfer.database = r, resource.Database
+	r.transfers.Store(transfer, resource.Database)
+	cell := r.resourceCell(resource)
+	shard := cell.current.Load()
+	if shard != nil && generation != "" && shard.uuid.String() != generation {
+		shard = nil
+		if history := cell.retiredShards.Load(); history != nil {
+			for _, entry := range *history {
+				if previous := entry.Value(); previous != nil && previous.uuid.String() == generation {
+					shard = previous
+					break
+				}
+			}
+		}
+	}
+	if shard == nil {
+		return nil, fmt.Errorf("missing transfer generation")
+	}
+	transfer.shard, transfer.generation = shard, shard.uuid.String()
+	transfer.columns = shard.t.columnDeclarations()
+	transfer.volatile = shard.t.PersistencyMode == Memory || shard.t.PersistencyMode == Cache
+	transfer.blobTable = shard.t.Name == ".blobs"
+	if transfer.volatile {
+		transfer.payload = shard.getRead(nil, true)
+	}
+	complete = true
+	return transfer, nil
+}
+
+// The sender is the sole release owner. GC sees only the registry entry;
+// ordinary queries and local write admission never inspect or update it.
+func (transfer *replicaTransfer) release() {
+	if transfer.released {
+		return
+	}
+	transfer.released = true
+	transfer.payload.Release()
+	if transfer.manager != nil {
+		transfer.manager.transfers.Delete(transfer)
+	}
+}
+
+func (r *replicationManager) hasTransfers(database string) bool {
+	found := false
+	r.transfers.Range(func(_, value any) bool { found = value.(string) == database; return !found })
+	return found
+}
+
+func (r *replicationManager) sendResource(peer *mosiPeer, header mosiPacket, transfer *replicaTransfer) (err error) {
+	defer runtime.KeepAlive(transfer)
+	defer transfer.release()
+
 	defer func() {
 		if failure := recover(); failure != nil {
 			err = fmt.Errorf("replication transfer: %v", failure)
 		}
 	}()
-	db := databases.Get(header.Resource.Database)
-	if db == nil {
-		return fmt.Errorf("missing database")
-	}
+	header.Generation = transfer.generation
 	header.Kind = "begin"
 	if err := peer.post(header); err != nil {
 		return err
 	}
 	if header.Resource.Shard == "" {
-		if err := peer.sendObject(header, "schema", "", io.NopCloser(bytes.NewReader(db.persistence.ReadSchema()))); err != nil {
+		if err := peer.sendObject(header, "schema", "", io.NopCloser(bytes.NewReader(transfer.schema))); err != nil {
 			return err
 		}
 	} else {
-		shard := r.resourceCell(header.Resource).current.Load()
-		if shard == nil {
-			return fmt.Errorf("missing shard generation")
-		}
-		header.Generation = shard.uuid.String()
-		volatile := shard.t.PersistencyMode == Memory || shard.t.PersistencyMode == Cache
-		for _, column := range shard.t.columnDeclarations() {
+		shard := transfer.shard
+		volatile := transfer.volatile
+		for _, column := range transfer.columns {
 			if column.Computor.IsNil() {
 				var reader io.ReadCloser
 				if volatile {
 					reader = replicaColumnStream(shard.getColumnStorageOrPanic(column.Name, false, nil))
 				} else {
-					reader = db.persistence.ReadColumn(header.Generation, column.Name)
+					reader = transfer.engine.ReadColumn(header.Generation, column.Name)
 				}
 				if err := peer.sendObject(header, "column", column.Name, reader); err != nil {
 					return err
 				}
 			}
 		}
-		manifest := db.persistence.ReadColumn(header.Generation, blobManifestColumn)
+		manifest := transfer.engine.ReadColumn(header.Generation, blobManifestColumn)
 		if missing, ok := manifest.(interface{ Missing() bool }); !ok || !missing.Missing() {
 			if err := peer.sendObject(header, "column", blobManifestColumn, manifest); err != nil {
 				return err
@@ -359,20 +447,20 @@ func (r *replicationManager) sendResource(peer *mosiPeer, header mosiPacket) (er
 		}
 		references := make(map[string]struct{})
 		if volatile {
-			for _, column := range shard.t.columnDeclarations() {
+			for _, column := range transfer.columns {
 				if column.Computor.IsNil() {
 					appendColumnBlobReferences(shard.getColumnStorageOrPanic(column.Name, false, nil), references, shard.main_count)
 				}
 			}
-		} else if shard.t.Name != ".blobs" {
+		} else if !transfer.blobTable {
 			var valid bool
-			references, valid = readBlobManifest(db.persistence.ReadColumn(header.Generation, blobManifestColumn))
+			references, valid = readBlobManifest(transfer.engine.ReadColumn(header.Generation, blobManifestColumn))
 			if !valid {
 				return fmt.Errorf("invalid shard blob manifest")
 			}
 		}
 		for hash := range references {
-			if err := peer.sendObject(header, "blob", hash, db.persistence.ReadBlob(hash)); err != nil {
+			if err := peer.sendObject(header, "blob", hash, transfer.engine.ReadBlob(hash)); err != nil {
 				return err
 			}
 		}
@@ -786,7 +874,16 @@ func (r *replicationManager) transmitResource(ctx context.Context, peerID string
 	step := &replicaStep{peer: peerID, resource: header.Resource, done: make(chan struct{})}
 	r.steps.Store(header.ID, step)
 	defer r.steps.Delete(header.ID)
-	if err := r.sendResource(peer, header); err != nil {
+	release, err := replicaPersistenceRead(header.Resource)
+	if err != nil {
+		return err
+	}
+	transfer, err := r.captureResource(header.Resource, header.Generation)
+	release()
+	if err != nil {
+		return err
+	}
+	if err := r.sendResource(peer, header, transfer); err != nil {
 		return err
 	}
 	select {

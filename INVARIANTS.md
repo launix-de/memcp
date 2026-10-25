@@ -53,7 +53,7 @@ same ownership, visibility, lifetime, and durability guarantees.
   Pending imports remain registered through publication. GC synchronizes with
   their registration and defers deletion while an import can own private files.
   Source rebuilds retain the existing persistence lifecycle capability, acquired
-  before write handover gates. No lifecycle lease spans incoming packet waits.
+  before source handover preparation. No lifecycle lease spans network waits.
 - MOSI permissions, owners, reader sets, epochs, bootstrap progress and request
   ordering live only in RAM. A restart never restores them from a private file
   or native table. A slave authenticates through the master's user policy and
@@ -87,6 +87,30 @@ same ownership, visibility, lifetime, and durability guarantees.
   handovers retain their source/target hints in RAM
   so a master failure between revocation and grant can be reconstructed without
   trusting incomplete data or overlooking a possible foreign M owner.
+- Local write admission is part of `mosi.State`: M held has no active writer;
+  M active has one writer owner; M closing prevents new writers during handover.
+  Nested scopes belonging to the same explicit transaction may borrow its writer.
+  Independent writer owners serialize once per batch, never per row. These local
+  substates do not change network M/O/S or advance an epoch per local write.
+  Do not add a generic shard/schema writer lock, RWMutex gate or duplicate
+  transaction registry alongside this state machine. Native mutable containers,
+  WAL, UNIQUE checks and visibility forwarding retain their existing separate
+  synchronization responsibilities; they do not implement another MOSI admission.
+  Handover drains the engine's native modified-transaction generations, including
+  retained historical shards, and permits those transactions to finish their
+  already admitted work. Read-only and idle transactions retain no MOSI gate.
+  M active/closing remains readable under existing snapshots and TX visibility.
+  Payload eviction uses a nonblocking claim of this same admission state; it
+  cannot detach a generation between a writer's permission check and payload use.
+  IS restoration preserves a still-active eviction/handover closure.
+- A transfer captures its exact physical generation and immutable declarations
+  before releasing source write admission. Streaming never reloads current shard
+  topology or schema, and never holds a writer/DDL/lifecycle lock over network I/O.
+  Outgoing snapshots register with GC under the persistence lifecycle until send
+  completion. Destructive backend cutover/drop rejects an active transfer before
+  namespace retirement. Volatile payloads retain their existing eviction capability. No query reader or
+  local write batch participates in that cold registry. Source transfer ordering
+  is separate from writes.
 - Already authorized MOSI reads only load atomics. Existing shard leases and
   snapshot lifetimes retain their own purpose; replication adds no read-side
   locks, registration, counters or per-row synchronization writes.

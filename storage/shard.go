@@ -30,6 +30,7 @@ import "encoding/binary"
 import "github.com/google/uuid"
 import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage/mosi"
 import "github.com/launix-de/NonLockingReadMap"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
@@ -1007,6 +1008,12 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 }
 func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 	var release func()
+	ready := false
+	defer func() {
+		if !ready && release != nil {
+			release()
+		}
+	}()
 	if s.t != nil {
 		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
 			cell := r.shardCell(s)
@@ -1019,6 +1026,7 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 	s.ensureLoaded()
 	s.setState(WRITE)
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
+	ready = true
 	return WriteAccess{shard: s, release: release}
 }
 
@@ -1052,6 +1060,17 @@ func (s *storageShard) ensureLoaded() {
 	}
 }
 
+// Payload eviction uses the same local admission state as mutation. The
+// CacheManager never waits for a writer; it retries a busy generation later.
+// Queries acquire no additional reader registration for this coordination.
+func (s *storageShard) claimEviction() (*mosi.Handover, bool) {
+	if cell := s.coherence.Load(); cell != nil && cell.current.Load() == s {
+		handover := cell.rights.TryHandover(cell.writesDrained)
+		return handover, handover != nil
+	}
+	return nil, true
+}
+
 // shardCleanup is called by the CacheManager when evicting a shard.
 // Returns false if the shard lock cannot be acquired (non-blocking).
 func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
@@ -1059,6 +1078,13 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	// Safety: MEMORY-engine shards must NEVER be evicted (data would be lost permanently).
 	if s.t != nil && s.t.PersistencyMode == Memory {
 		return false
+	}
+	handover, available := s.claimEviction()
+	if !available {
+		return false
+	}
+	if handover != nil {
+		defer handover.Release()
 	}
 	if !s.mu.TryLock() {
 		return false // shard is in use, skip eviction
@@ -1205,6 +1231,13 @@ func shardLastUsed(ptr any) time.Time {
 // Unlike shardCleanup, it forcibly clears in-flight deltas since there is no disk backing.
 func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	s := ptr.(*storageShard)
+	handover, available := s.claimEviction()
+	if !available {
+		return false
+	}
+	if handover != nil {
+		defer handover.Release()
+	}
 	if !s.mu.TryLock() {
 		return false // shard is in use, retry later
 	}
