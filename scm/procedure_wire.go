@@ -19,7 +19,8 @@ const maxProcedureWireBytes = 256 * 1024
 
 // MarshalProcedure snapshots explicit captures before using the ordinary Scmer
 // AST codec. It does not serialize Env, native/JIT code, sessions or Go pointers.
-// Both nodes must provide the same global builtin contract. Unsupported values
+// Both nodes must provide the same declared global builtin contract; other
+// globals require explicit captures. Unsupported values
 // and unresolved lexical captures fail instead of silently becoming "?" or a
 // different receiver-side global. This is a conservative first transport subset.
 func MarshalProcedure(value Scmer) (data []byte, err error) {
@@ -73,6 +74,7 @@ func UnmarshalProcedure(data []byte) (Scmer, error) {
 }
 
 func procedureWireBindings(params, body Scmer, parent map[Symbol]struct{}) map[Symbol]struct{} {
+	params = params.WithoutSourceInfo()
 	bound := maps.Clone(parent)
 	if bound == nil {
 		bound = make(map[Symbol]struct{})
@@ -81,6 +83,7 @@ func procedureWireBindings(params, body Scmer, parent map[Symbol]struct{}) map[S
 		bound[params.Symbol()] = struct{}{}
 	} else if params.IsSlice() {
 		for _, param := range params.Slice() {
+			param = param.WithoutSourceInfo()
 			if param.IsSymbol() {
 				bound[param.Symbol()] = struct{}{}
 			}
@@ -100,11 +103,20 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 		return nil
 	case tagSymbol:
 		if !literal {
-			if _, local := bound[value.Symbol()]; !local && origin != nil {
-				binding := origin.FindRead(value.Symbol())
-				if binding != &Globalenv {
-					if _, present := binding.Vars[value.Symbol()]; present {
-						return fmt.Errorf("unclosed lexical capture %s", value.Symbol())
+			if _, local := bound[value.Symbol()]; !local {
+				if origin != nil {
+					binding := origin.FindRead(value.Symbol())
+					if binding != &Globalenv {
+						if _, present := binding.Vars[value.Symbol()]; present {
+							return fmt.Errorf("unclosed lexical capture %s", value.Symbol())
+						}
+					}
+				}
+				if DeclarationForValue(value) == nil {
+					switch value.String() {
+					case "outer", "var", "begin", "if", "match", "and", "or":
+					default:
+						return fmt.Errorf("procedure requires an explicit binding for %s", value.Symbol())
 					}
 				}
 			}
@@ -120,8 +132,9 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 		if !literal {
 			items = lambdaSyntaxOperands(items)
 		}
-		if !literal && len(items) > 0 && items[0].IsSymbol() {
-			switch items[0].String() {
+		if !literal && len(items) > 0 {
+			head, _ := symbolName(items[0])
+			switch head {
 			case "quote":
 				if len(items) != 2 {
 					return fmt.Errorf("invalid quoted procedure value")

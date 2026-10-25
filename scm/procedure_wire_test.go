@@ -107,3 +107,29 @@ func TestProcedureWireJITCaptures(t *testing.T) {
 		t.Fatal("wire retained process-local JIT metadata")
 	}
 }
+
+func TestProcedureWireCapturedData(t *testing.T) {
+	for _, captured := range []Scmer{
+		NewNil(), NewSymbol("literal_symbol"), NewString("a\x00b"),
+		NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(nil), NewInt(7)}),
+		NewSlice([]Scmer{NewString("key"), NewSlice([]Scmer{NewInt(17)})}),
+	} {
+		env := &Env{Vars: Vars{Symbol("captured"): captured}, Outer: &Globalenv}
+		data, err := MarshalProcedure(Eval(Read(t.Name(), `(lambda () captured)`), env))
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := UnmarshalProcedure(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := Apply(value); !Equal(got, captured) {
+			t.Fatalf("captured data changed: %v != %v", got, captured)
+		}
+	}
+	Globalenv.Vars[Symbol("wire_test_global")] = NewInt(7)
+	defer delete(Globalenv.Vars, Symbol("wire_test_global"))
+	if _, err := MarshalProcedure(Eval(Read(t.Name(), `(lambda () wire_test_global)`), &Globalenv)); err == nil {
+		t.Fatal("mutable global was implicitly rebound at the receiver")
+	}
+}

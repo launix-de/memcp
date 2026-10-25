@@ -72,7 +72,7 @@ func (invocation shardScanInvocation) delegate(shard *storageShard, failure shar
 		}
 	}()
 	target := failure.target
-	if target == nil || target.executor == nil || shard.t == nil ||
+	if target == nil || shard.scanTarget.Load() != target || target.executor == nil || shard.t == nil ||
 		target.resource.Database != shard.t.schema.Name || target.resource.Table != shard.t.Name ||
 		target.resource.Shard != shard.logicalID().String() || target.generation != shard.uuid || !target.resource.valid() {
 		panic("invalid remote shard scan target")

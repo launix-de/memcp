@@ -142,17 +142,34 @@ func TestScanDelegationRejectsUnsupportedAndStaleTasks(t *testing.T) {
 		calls++
 		return scanResult{}
 	})
-	for _, invocation := range []shardScanInvocation{
-		{source: &recSet{}}, {stride: 1}, {callbackCols: []string{"$update"}}, {callbackCols: []string{"$increment:id"}},
+	for _, test := range []struct {
+		stride  int
+		columns []string
+		want    string
+	}{
+		{stride: 1, want: "remote shard scan does not support physical source sets or batches"},
+		{columns: []string{"$update"}, want: "remote shard scan mutations require a transaction participant protocol"},
+		{columns: []string{"$increment:id"}, want: "remote shard scan mutations require a transaction participant protocol"},
 	} {
-		if result := invocation.delegate(shard, shardReadDelegation{shard.scanTarget.Load()}); result.err.r == nil {
-			t.Fatal("unsupported scan was delegated")
+		var failure any
+		func() {
+			defer func() { failure = recover() }()
+			tbl.scanWithBatch(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, scm.NewNil(), test.columns, scm.NewNil(), scm.NewInt(0), scm.NewNil(), false, test.stride, nil)
+		}()
+		if fmt.Sprint(failure) != test.want {
+			t.Fatalf("unsupported scan failure = %v, want %s", failure, test.want)
 		}
 	}
 	stale := *shard.scanTarget.Load()
 	stale.generation = uuid.New()
-	if result := (shardScanInvocation{}).delegate(shard, shardReadDelegation{&stale}); result.err.r == nil {
-		t.Fatal("stale generation was delegated")
+	shard.scanTarget.Store(&stale)
+	var staleFailure any
+	func() {
+		defer func() { staleFailure = recover() }()
+		delegationTestScan(tbl, nil, scm.NewNil())
+	}()
+	if fmt.Sprint(staleFailure) != "invalid remote shard scan target" {
+		t.Fatalf("stale target failure = %v", staleFailure)
 	}
 	if calls != 0 {
 		t.Fatal("rejected task reached the executor")
