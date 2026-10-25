@@ -1186,3 +1186,37 @@ func TestReplicationNativeWriterContinuesWhileForeignDDLHasSchema(t *testing.T) 
 		t.Fatal("DDL wait revoked the existing data transaction")
 	}
 }
+
+func TestReplicationActiveWriterPreventsPayloadEviction(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "tactivewritereviction", 3)
+	r := replicaRecoveryFixture()
+	r.schemaShards(table.schema, r.id, true)
+	resource := *r.shardCell(table.ActiveShards()[0]).resource.Load()
+	if _, err := r.prepareResource(resource); err != nil {
+		t.Fatal(err)
+	}
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	shard := table.ActiveShards()[0]
+	access := shard.GetWrite(nil)
+	released := false
+	defer func() {
+		if !released {
+			access.Release()
+		}
+	}()
+	var freed [numEvictableTypes]int64
+	if shardCleanup(shard, &freed) {
+		t.Fatal("eviction detached an admitted writer's payload")
+	}
+	read := shard.GetRead(nil)
+	if read.shard.Count() != 3 {
+		t.Fatal("active writer blocked its ordinary snapshot reader")
+	}
+	read.Release()
+	access.Release()
+	released = true
+	if !shardCleanup(shard, &freed) {
+		t.Fatal("completed writer retained payload admission")
+	}
+}

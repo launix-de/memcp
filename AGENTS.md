@@ -191,7 +191,9 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   or per-write epochs. Nested scopes may borrow the same explicit transaction
   owner; independent writer owners serialize. Scope acquisition/release is once
   per batch, never per row. No additional generic shard/schema writer gate or
-  RWMutex read lease may duplicate this authority. Native mutable-container,
+  RWMutex read lease may duplicate this authority. Payload eviction nonblockingly
+  closes this same admission state before detaching a current generation; IS
+  restoration retains that closure until eviction completes. Native mutable-container,
   WAL and visibility ownership retains its distinct existing purpose.
   Handover closes new write admission, lets already registered native transaction
   owners continue, and seals only after active batches and native transaction

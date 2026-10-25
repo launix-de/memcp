@@ -455,3 +455,26 @@ func TestMosiFailedNativeDrainReopensWriteAdmission(t *testing.T) {
 	}
 	writer.Release()
 }
+
+func TestMosiBackendRestorePreservesClosedWriteAdmission(t *testing.T) {
+	var state mosi.State
+	state.Initialize(mosi.M)
+	handover := state.TryHandover(func() bool { return true })
+	if handover == nil {
+		t.Fatal("eviction could not claim the idle generation")
+	}
+	state.BackendOnly()
+	publication, action := state.Request(mosi.S)
+	if action != mosi.Ready || publication.Phase() != mosi.M {
+		t.Fatal("eviction blocked the existing read permission")
+	}
+	if writer, wait := state.TryWrite(nil, false); writer != nil || wait == nil {
+		t.Fatal("backend restore bypassed eviction's closed write admission")
+	}
+	handover.Release()
+	writer, _ := state.TryWrite(nil, false)
+	if writer == nil {
+		t.Fatal("completed eviction retained write admission")
+	}
+	writer.Release()
+}

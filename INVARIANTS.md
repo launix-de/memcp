@@ -100,6 +100,9 @@ same ownership, visibility, lifetime, and durability guarantees.
   retained historical shards, and permits those transactions to finish their
   already admitted work. Read-only and idle transactions retain no MOSI gate.
   M active/closing remains readable under existing snapshots and TX visibility.
+  Payload eviction uses a nonblocking claim of this same admission state; it
+  cannot detach a generation between a writer's permission check and payload use.
+  IS restoration preserves a still-active eviction/handover closure.
 - A transfer captures its exact physical generation and immutable declarations
   before releasing source write admission. Streaming never reloads current shard
   topology or schema, and never holds a writer/DDL/lifecycle lock over network I/O.

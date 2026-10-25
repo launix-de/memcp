@@ -153,10 +153,10 @@ func (state *State) RestoreBackend(phase Phase) {
 func (state *State) BackendOnly() {
 	for {
 		current := state.Snapshot()
-		if !current.phase.Readable() || current.writer != nil || current.handover != nil {
+		if !current.phase.Readable() || current.writer != nil || current.handover != nil && !current.sealed {
 			return
 		}
-		next := &Publication{phase: IS, backend: current.phase}
+		next := &Publication{phase: IS, backend: current.phase, handover: current.handover, sealed: current.sealed}
 		if state.value.CompareAndSwap(current, next) {
 			return
 		}
@@ -191,7 +191,7 @@ func (state *State) Request(wanted Phase) (*Publication, Action) {
 			}
 			// This only restores an already established permission. Actual payload
 			// loading uses the existing local COLD lifecycle after acquisition.
-			if !state.value.CompareAndSwap(old, &stable[current.backend]) {
+			if !state.value.CompareAndSwap(old, permissionPublication(current.backend, current)) {
 				continue
 			}
 			continue
