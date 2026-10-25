@@ -111,7 +111,7 @@ func TestReplicationOrderedMutationRequiresWritePermission(t *testing.T) {
 	for _, path := range []string{"first", "direct", "multi", "batch"} {
 		t.Run(path, func(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "torderedrights", 3)
-			r := &replicationManager{cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+			r := &replicationManager{cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 			r.resourceCell(mosiResource{Database: tbl.schema.Name}).rights.Initialize(mosi.M)
 			shard := tbl.ActiveShards()[0]
 			r.shardCell(shard).rights.Initialize(mosi.S)
@@ -156,7 +156,7 @@ func TestReplicationOrderedMutationRetainsTransactionWriteLease(t *testing.T) {
 	for _, mode := range []TxMode{TxCursorStability, TxACID} {
 		t.Run(fmt.Sprint(mode), func(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "torderedtxrights", 3)
-			r := &replicationManager{cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+			r := &replicationManager{cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 			r.resourceCell(mosiResource{Database: tbl.schema.Name}).rights.Initialize(mosi.M)
 			shard := tbl.ActiveShards()[0]
 			cell := r.shardCell(shard)
@@ -203,7 +203,7 @@ func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 	original := tbl.ActiveShards()[0]
 	part := newRecSetShardFromSortedIDs(original, 3, []uint32{0, 1, 2})
 	source := &recSet{table: tbl, shards: []recSetShard{part}, count: 3}
-	r := &replicationManager{cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	r := &replicationManager{cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 	cell := r.shardCell(original)
 	replacement := original.rebuild(true)
 	if replacement == original {
