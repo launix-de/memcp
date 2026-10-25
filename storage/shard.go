@@ -43,6 +43,9 @@ type storageShard struct {
 	// Constructors/load own initialization; rebuild successors inherit it.
 	lineage   uuid.UUID
 	coherence atomic.Pointer[replicaCell]
+	// Immutable remote-stub routing, atomically published before topology admission.
+	// Runtime-only; never copied to rebuild successors or historical generations.
+	scanTarget atomic.Pointer[shardScanTarget]
 	// main storage
 	main_count uint32 // size of main storage
 	// plannerMainRows and plannerDeltaRows publish only row counts. They may be
@@ -984,6 +987,9 @@ func (s *storageShard) GetRead(currentTx *TxContext) ReadAccess {
 // Physical query-local IDs retain their original immutable generation. Rights
 // acquisition may install a successor, but must never reinterpret those IDs.
 func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
+	if target := s.scanTarget.Load(); target != nil {
+		panic(shardReadDelegation{target})
+	}
 	if !snapshot && s.t != nil {
 		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
 			s = r.readShard(s, currentTx)
@@ -1007,6 +1013,9 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 	return ReadAccess{shard: s}
 }
 func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
+	if s.scanTarget.Load() != nil {
+		panic("remote shard writes require a transaction participant protocol")
+	}
 	var release func()
 	ready := false
 	defer func() {

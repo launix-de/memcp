@@ -150,6 +150,16 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- `storageShard.scanTarget` atomically publishes immutable, process-local stub
+  routing before topology admission. It owns no MOSI rights, query or transaction.
+  It is neither persisted nor inherited by rebuild/historical generations.
+  `GetRead` signals delegation before payload access; `GetWrite` fails closed
+  until remote transaction participation exists. Only the acquisition boundary
+  of ordinary unbatched scans consumes that typed signal. Operator/callback
+  panics never trigger delegation or retries. Executor invocations borrow the
+  existing query bindings and are not wire objects; adapters must separately
+  encode code/data and preserve visibility, generation and transaction contracts.
+
 - `storageShard.Indexes` permits append-only lazy declarations under
   `indexMutex` with shared shard ownership. Accounting, diagnostics and
   registration borrow a directory snapshot under that mutex while retaining

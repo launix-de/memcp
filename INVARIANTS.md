@@ -137,6 +137,38 @@ same ownership, visibility, lifetime, and durability guarantees.
   non-ephemeral shard. Its final permission check is a point-in-time observation,
   never an exemption from later remote requests or owner-unavailability errors.
 
+### Remote scan preparation
+
+- A remote stub's immutable `scanTarget` is routing metadata, never evidence of
+  MOSI authority. Its schema name and logical shard UUID identify the resource;
+  the physical generation fences a concrete execution target. Publication owns
+  stub construction before topology admission. Local/historical generations do
+  not inherit this target. This preparatory interface is not enabled by any CLI
+  or network route yet.
+- `GetRead` may raise a typed delegation signal before local materialization or
+  payload leases. Only the ordinary scan's acquisition boundary consumes it,
+  including the direct single-shard path. A signal from a running callback,
+  ordinary network failure or arbitrary panic remains an error. Delegation does
+  not retry a failed or ambiguously completed execution. Existing topology and
+  scanner registrations remain held through executor completion and are released
+  on success and failure. GetWrite, ordered/point operators, batches and physical
+  source sets fail explicitly until their remote contracts are implemented.
+- `shardScanInvocation` borrows query-local callbacks, access and transaction
+  bindings. It is not a network DTO and must never be serialized directly.
+  A transport adapter must encode a versioned task with explicit visibility and
+  transaction participation; return scalar/group reductions through the ordinary
+  combine contract, never physical row identities. The worker must independently
+  acquire the appropriate MOSI permission and retain its generation.
+- `scm.MarshalProcedure` closes explicit captures before the existing JSON AST
+  encoding. It supports scalar/list captures, ordinary nested lambda scopes and
+  numbered/JIT source bodies, not arbitrary environments. Process-local values,
+  native closure captures and unresolved external bindings in nested lambdas fail
+  explicitly. The bounded versioned codec does not authorize or sandbox code;
+  both peers must provide the same global builtin contract. Decoding reconstructs
+  an uncompiled procedure without executing its body. General closure/handle RPC,
+  task deduplication and remote transaction/record-horizon transfer remain future
+  adapter work.
+
 ### Immutable main storage and mutable deltas
 
 Planner-cache initializer definitions are immutable atomic publications, including
