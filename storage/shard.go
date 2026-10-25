@@ -305,6 +305,16 @@ func (s *storageShard) recordNextInsertRange(oldStartRecid, newStartRecid uint32
 	s.nextTranslationMu.Unlock()
 }
 
+// indexDirectorySnapshot borrows the append-only directory under its publication
+// owner. Caller retains s.mu to exclude replacement/reordering; appended entries
+// do not mutate the borrowed prefix. No index lock spans child accounting.
+func (s *storageShard) indexDirectorySnapshot() []*StorageIndex {
+	s.indexMutex.Lock()
+	indexes := s.Indexes
+	s.indexMutex.Unlock()
+	return indexes
+}
+
 // exclusiveSizeLocked is EXCLUSIVE ownership for CacheManager registration, not
 // the shard's resident total or the bytes a cascading eviction can release.
 // Children have separate registrations and must not be charged twice globally.
@@ -312,7 +322,7 @@ func (s *storageShard) recordNextInsertRange(oldStartRecid, newStartRecid uint32
 func (s *storageShard) exclusiveSizeLocked() uint {
 	// Fixed layout is exact; Go map bucket overhead remains an estimate.
 	result := uint(unsafe.Sizeof(*s)) + 64*uint(len(s.columns)+len(s.deltaColumns)+len(s.tempColumnBytes))
-	result += uint(cap(s.Indexes)) * uint(unsafe.Sizeof((*StorageIndex)(nil)))
+	result += uint(cap(s.indexDirectorySnapshot())) * uint(unsafe.Sizeof((*StorageIndex)(nil)))
 	if s.state() != COLD {
 		for name, c := range s.columns {
 			if c != nil && s.ownsColumnMemory(name) {
@@ -359,7 +369,7 @@ func (s *storageShard) residentMemoryLocked() memoryOwnerSnapshot {
 			return true
 		})
 	}
-	for _, index := range s.Indexes {
+	for _, index := range s.indexDirectorySnapshot() {
 		if index != nil {
 			m.indexes += index.ComputeSize()
 		}
@@ -1097,8 +1107,13 @@ func (s *storageShard) evictionOffer(currentSize int64) evictionOffer {
 		(s.t.PersistencyMode != Cache && (len(s.inserts) > 0 || s.deletions.Count() > 0))) {
 		return evictionOffer{}
 	}
+	if !s.indexMutex.TryLock() {
+		return evictionOffer{}
+	}
+	indexes := s.Indexes
+	s.indexMutex.Unlock()
 	full := currentSize
-	for _, index := range s.Indexes {
+	for _, index := range indexes {
 		if item := GlobalCache.itemMap[index]; item != nil {
 			full += item.size
 		}
