@@ -29,6 +29,27 @@ import (
 	"time"
 )
 
+func TestHTTPRouteIsExplicitAndOwnsItsAuthentication(t *testing.T) {
+	oldAuth := HTTPAuthenticationHook
+	defer func() { HTTPAuthenticationHook = oldAuth }()
+	HTTPAuthenticationHook = func(string, string) bool { return false }
+	protocol := NewAny(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) }))
+	fallback := NewFunc(func(...Scmer) Scmer { return NewNil() })
+	router := httpHandler(HTTPRoute(NewString("/test-node"), protocol, fallback))
+	ordinaryServer := httpHandler(fallback)
+	request := func(handler http.Handler, path string) int {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest("GET", path, nil))
+		return response.Code
+	}
+	if request(router, "/test-node") != http.StatusAccepted || request(router, "/test-node/other") != http.StatusUnauthorized {
+		t.Fatal("explicit protocol route did not preserve its authentication boundary")
+	}
+	if request(ordinaryServer, "/test-node") != http.StatusUnauthorized {
+		t.Fatal("another HTTP server inherited the protocol route")
+	}
+}
+
 func TestHTTPServeReportsListenerFailureBeforePublication(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

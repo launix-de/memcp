@@ -17,6 +17,7 @@ import "sort"
 import "sync"
 import "time"
 import "context"
+import "net/http"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -246,11 +247,11 @@ func StopReplication() {
 			peers = append(peers, r.upstream)
 		}
 		r.mu.Unlock()
+		if r.releaseRole != nil {
+			r.releaseRole()
+		}
 		for _, p := range peers {
 			p.close()
-		}
-		if r.server != nil {
-			r.server.Shutdown(context.Background())
 		}
 		for _, p := range peers {
 			p.wait()
@@ -361,6 +362,17 @@ func initReplicationAdmin(en *scm.Env) {
 		}
 		return scm.NewString(string(data))
 	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "admin-only local RAM snapshot of replication resources; never persisted", Return: &scm.TypeDescriptor{Kind: "string"}}})
+	scm.Declare(en, &scm.Declaration{Name: "replication_start", Fn: func(a ...scm.Scmer) scm.Scmer {
+		shutdown := a[1]
+		if err := StartReplication(a[0].String(), func() { scm.Apply(shutdown) }); err != nil {
+			panic(err)
+		}
+		return scm.NewBool(true)
+	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "initializes replication from trusted Scheme startup; HTTP listeners and routes are constructed separately by Scheme", HasSideEffects: true,
+		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "address"}, {Kind: "func", Label: "shutdown", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
+	scm.Declare(en, &scm.Declaration{Name: "node_protocol", Fn: func(...scm.Scmer) scm.Scmer {
+		return scm.NewAny(http.HandlerFunc(serveMosiHTTP))
+	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the shared node HTTP handler for explicit http_route/serve composition; role selection grants no permissions", Return: &scm.TypeDescriptor{Kind: "any"}}})
 	scm.Declare(en, &scm.Declaration{Name: "replication_reclaim", Fn: func(a ...scm.Scmer) scm.Scmer {
 		r := replication.Load()
 		if r == nil {

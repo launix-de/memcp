@@ -325,11 +325,52 @@ expressions fail before the column is published.
 
 ### Experimental local replication
 
-Run a master with `--replication=7331` and a slave with
-`--replication=master-host:7331`. Each instance needs its own `-data` directory
+Run a replication master with `--replication=listen` and a slave with
+`--replication=ws://master-host:4321/cluster`. The master serves the `/cluster` WebSocket
+endpoint on its ordinary HTTP API listener; no separate port is needed.
+`--replication=listen` requires an enabled HTTP API listener. Explicit
+HTTP(S)/WS(S) URLs may include a proxy path; a URL without a path uses `/cluster`.
+Secure URLs use the normal TLS certificate validation. The built-in HTTP listener
+currently serves plain HTTP; HTTPS/WSS requires a TLS endpoint in front of it.
+The optional dedicated listener remains available with `--replication=7331`
+and `--replication=master-host:7331`; it uses exactly the same node protocol.
+
+`lib/main.scm` calls `replication_start` and constructs the listeners and routes.
+The handler returned by `node_protocol` is mounted explicitly, for example:
+
+```scheme
+(serve port
+	(http_route "/engine/node" (node_protocol)
+		(lambda (req res) (http_handler req res))))
+```
+
+The standard startup script fixes the route at `/cluster`, like `/dashboard`.
+The example above is for a custom Scheme server; its peers would use
+`--replication=ws://master-host:4321/engine/node`. Other HTTP servers do not
+inherit the route. The native protocol handler owns its own authentication;
+the Scheme fallback retains ordinary HTTP authentication.
+
+Each instance needs its own `-data` directory
 and independent backend namespace, including separate buckets/prefixes for
 remote storage. The existing persistence backends are used without modification.
 `schema.json` remains the schema format. `SHUTDOWN` affects the addressed instance.
+
+Both listeners negotiate `memcp.mosi.v1` and exchange bounded binary WebSocket
+messages. Each message contains a versioned envelope, JSON control metadata and
+raw compressed transfer bytes, without base64 expansion of shard chunks. Text
+messages, unsupported versions and oversized messages are rejected. Older JSON
+replication peers must be upgraded together. SQL requests on the same HTTP port
+continue to use their ordinary authentication; `/cluster` owns its existing
+replication authentication and per-message authorization.
+The shared route dispatches the explicit `X-MemCP-Role` to its enabled adapter;
+selecting a role grants no rights, and removing one adapter preserves others.
+
+This is the shared transport foundation for replication and future cluster
+peers. Cluster membership and cluster-secret authentication are not enabled by
+this endpoint. Future cluster peers are equal participants: the first node and
+the connect address confer no permanent coordinator role. A graceful cluster
+leave must hand over MOSI rights and directory duties before stopping, allowing
+clients to reconnect to a second node and the first node to be removed.
 
 HTTP and MySQL logins on the slave are verified by the master and cached for
 offline authentication. A slave claims the opened database, retains durable
@@ -394,6 +435,8 @@ Run it after building MemCP with
 It owns independent master/slave processes, uses HTTP and the `mysql` client,
 and retains node logs, a write oracle and the seed in its printed artifact path.
 `--rounds`, `--workers` and `--operations` control the threaded workload.
+The runner uses the normal HTTP `/cluster` route by default;
+`--dedicated-replication-port` tests the optional dedicated listener.
 Go tests cover the in-process MOSI and transport units separately.
 
 The coherence state machine lives in `storage/mosi`, independently of storage,

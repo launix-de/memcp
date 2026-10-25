@@ -247,9 +247,10 @@ class Cluster:
     def __init__(self, args, artifacts, name):
         directory = artifacts / name
         directory.mkdir()
-        port = free_port()
-        self.master = Node(args, directory, "master", str(port))
-        self.slave = Node(args, directory, "slave", f"127.0.0.1:{port}", "different-local-password")
+        port = free_port() if args.dedicated_replication_port else None
+        self.master = Node(args, directory, "master", str(port) if port else "listen")
+        upstream = f"127.0.0.1:{port}" if port else f"http://127.0.0.1:{self.master.port}"
+        self.slave = Node(args, directory, "slave", upstream, "different-local-password")
 
     def __enter__(self):
         return self
@@ -860,10 +861,11 @@ def run_multiple_slaves(args, artifacts, journal):
     print("SCENARIO: two independent replication slaves plus concurrent master-only schema/data", flush=True)
     directory = artifacts / "multiple-slaves"
     directory.mkdir()
-    port = free_port()
-    master = Node(args, directory, "master", str(port))
-    slaves = [Node(args, directory, "slave-a", f"127.0.0.1:{port}", "local-a", "replica_a"),
-              Node(args, directory, "slave-b", f"127.0.0.1:{port}", "local-b", "replica_b")]
+    port = free_port() if args.dedicated_replication_port else None
+    master = Node(args, directory, "master", str(port) if port else "listen")
+    upstream = f"127.0.0.1:{port}" if port else f"http://127.0.0.1:{master.port}"
+    slaves = [Node(args, directory, "slave-a", upstream, "local-a", "replica_a"),
+              Node(args, directory, "slave-b", upstream, "local-b", "replica_b")]
     master_only = "master_only"
     with contextlib.ExitStack() as owned:
         owned.callback(master.cleanup)
@@ -969,6 +971,8 @@ def main():
     parser.add_argument("--timeout", type=float, default=20)
     parser.add_argument("--startup-timeout", type=float, default=45)
     parser.add_argument("--executor", default="", help="optional server executor, e.g. qemu-aarch64-static")
+    parser.add_argument("--dedicated-replication-port", action="store_true",
+                        help="exercise the optional dedicated listener instead of the normal HTTP /cluster route")
     args = parser.parse_args()
     if min(args.rounds, args.workers, args.operations, args.timeout, args.startup_timeout) <= 0:
         parser.error("rounds, workers, operations and timeouts must be positive")
@@ -980,7 +984,8 @@ def main():
     artifacts = make_artifact_dir(args.artifacts)
     journal = [{"scenario": "configuration", "rounds": args.rounds, "workers": args.workers,
                 "operations": args.operations, "binary": str(args.binary), "executor": args.executor,
-                "timeout": args.timeout, "startup_timeout": args.startup_timeout}]
+                "timeout": args.timeout, "startup_timeout": args.startup_timeout,
+                "dedicated_replication_port": args.dedicated_replication_port}]
     print(f"Replication cluster stress artifacts: {artifacts}\nSeed: {args.seed}", flush=True)
     try:
         run_regressions(args, artifacts, journal)

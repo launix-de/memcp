@@ -201,6 +201,20 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   `Flight.Err()` is read only after `Done()` closes. Its sequence is assigned
   under the manager mutex within one process incarnation, before enqueueing.
   `mosi_transport.go` and `mosi_wire.go` contain shared engine transport/framing;
+  the normal HTTP `/cluster` route and optional dedicated replication listener use
+  the same `memcp.mosi.v1` binary WebSocket envelope. JSON control metadata and
+  raw compressed chunk bytes are bounded together before dispatch. Unsupported
+  protocols and text frames are rejected, never silently downgraded.
+  Scheme startup initializes replication and explicitly composes `http_route`
+  and `node_protocol` on the chosen `serve` listener. Routers are immutable,
+  listener-local values; no global route hook intercepts other HTTP servers.
+  Native handlers own protocol authentication; Scheme fallbacks retain the
+  ordinary SQL authentication/session boundary.
+  `replicationManager.releaseRole` is initialized at startup and removes its
+  role under `stopOnce`; removal does not dispose an already executing handler.
+  `mosiHTTP.roles` is an immutable role-handler publication. Its mutex owns
+  registration/removal; dispatch only loads the snapshot. Role selection never
+  authenticates a peer or grants resources.
   `replication_directory.go` coordinates the current star topology, while
   `replication_generation.go` owns storage installation. Authentication, RAM state, configuration, recovery,
   session integration and startup live in their matching `replication_*.go` files.

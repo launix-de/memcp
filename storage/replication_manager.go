@@ -18,6 +18,7 @@ import "time"
 import "context"
 import "strconv"
 import "strings"
+import "net/url"
 import "net/http"
 import "sync/atomic"
 import "encoding/json"
@@ -68,7 +69,7 @@ type replicationManager struct {
 	recoveryReports map[string]map[string]replicaRecord
 	peers           map[string]*mosiPeer
 	upstream        *mosiPeer
-	server          *http.Server
+	releaseRole     func() // startup-owned role; stopOnce removes it before peer shutdown
 	done            chan struct{}
 	password        scm.Scmer
 	policy          scm.Scmer
@@ -79,22 +80,30 @@ type replicationManager struct {
 	imports         sync.Map // connection ID + transfer ID; reader-owned *replicaImport
 }
 
-// StartReplication accepts a port (master) or host:port (slave). A slave uses
-// only outbound connections, so reverse transfers also work behind NAT.
+// StartReplication initializes engine adapters from trusted Scheme startup.
+// Scheme constructs listeners and mounts node_protocol explicitly. A slave
+// uses one outbound bidirectional connection, including behind NAT.
 func StartReplication(address string, shutdown func()) error {
 	if address == "" {
 		return nil
 	}
+	if replication.Load() != nil {
+		return fmt.Errorf("replication is already initialized")
+	}
 	r := &replicationManager{address: address, cells: make(map[string]*replicaCell), peers: make(map[string]*mosiPeer), done: make(chan struct{})}
 	r.shutdown = shutdown
-	r.master = !strings.Contains(address, ":")
-	if r.master {
+	r.master = address == "listen" || !strings.Contains(address, ":")
+	if r.master && address != "listen" {
 		port, err := strconv.Atoi(address)
 		if err != nil || port < 1 || port > 65535 {
 			return fmt.Errorf("invalid replication port")
 		}
-	} else if _, _, err := net.SplitHostPort(address); err != nil {
-		return fmt.Errorf("invalid replication address: %w", err)
+	} else if !r.master {
+		var err error
+		r.address, err = mosiEndpointURL(address)
+		if err != nil {
+			return err
+		}
 	}
 	r.password = scm.Globalenv.FindRead("mysql_auth").Vars["mysql_auth"]
 	r.policy = scm.Globalenv.FindRead("sql_policy").Vars["sql_policy"]
@@ -142,19 +151,12 @@ func StartReplication(address string, shutdown func()) error {
 	snapshot := make(map[string]*replicaCell)
 	r.cellSnapshot.Store(&snapshot)
 	if r.master {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/replication", r.accept)
-		listener, err := net.Listen("tcp", ":"+address)
+		release, err := registerMosiRole("replication", http.HandlerFunc(r.accept))
 		if err != nil {
 			return err
 		}
-		r.server = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		r.releaseRole = release
 		replication.Store(r)
-		go func() {
-			if err := r.server.Serve(listener); err != nil && err != http.ErrServerClosed {
-				scm.PrintError(err)
-			}
-		}()
 	} else {
 		replication.Store(r)
 		go r.connect()
@@ -162,7 +164,49 @@ func StartReplication(address string, shutdown func()) error {
 	return nil
 }
 
+func mosiEndpointURL(address string) (string, error) {
+	if !strings.Contains(address, "://") {
+		if _, _, err := net.SplitHostPort(address); err != nil {
+			return "", fmt.Errorf("invalid node address")
+		}
+		address = "ws://" + address
+	}
+	u, err := url.Parse(address)
+	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", fmt.Errorf("invalid node URL")
+	}
+	switch u.Scheme {
+	case "http":
+		u.Scheme = "ws"
+	case "https":
+		u.Scheme = "wss"
+	case "ws", "wss":
+	default:
+		return "", fmt.Errorf("node URL requires HTTP(S) or WS(S)")
+	}
+	if u.Path == "" || u.Path == "/" {
+		u.Path = mosiHTTPPath
+	}
+	return u.String(), nil
+}
+
 func (r *replicationManager) accept(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "node protocol requires GET", http.StatusMethodNotAllowed)
+		return
+	}
+	supported := false
+	for _, protocol := range websocket.Subprotocols(req) {
+		if protocol == mosiSubprotocol {
+			supported = true
+		}
+	}
+	if !supported {
+		w.Header().Set("Sec-WebSocket-Protocol", mosiSubprotocol)
+		http.Error(w, "unsupported node protocol", http.StatusUpgradeRequired)
+		return
+	}
 	id := req.Header.Get("X-MemCP-Replica")
 	if id == r.id {
 		http.Error(w, "master identity cannot be used by a slave", 400)
@@ -189,7 +233,7 @@ func (r *replicationManager) accept(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "replica already connected", 409)
 		return
 	}
-	conn, err := (&websocket.Upgrader{CheckOrigin: func(req *http.Request) bool { return req.Header.Get("Origin") == "" }}).Upgrade(w, req, nil)
+	conn, err := (&websocket.Upgrader{Subprotocols: []string{mosiSubprotocol}, CheckOrigin: func(req *http.Request) bool { return req.Header.Get("Origin") == "" }}).Upgrade(w, req, nil)
 	if err != nil {
 		return
 	}
@@ -216,20 +260,26 @@ func (r *replicationManager) accept(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *replicationManager) connect() {
+	dialer := *websocket.DefaultDialer
+	dialer.Subprotocols = []string{mosiSubprotocol}
 	for {
 		select {
 		case <-r.done:
 			return
 		default:
 		}
-		header := http.Header{"X-Memcp-Replica": []string{r.id}}
-		conn, response, err := websocket.DefaultDialer.Dial("ws://"+r.address+"/replication", header)
+		header := http.Header{"X-Memcp-Replica": []string{r.id}, "X-Memcp-Role": []string{"replication"}}
+		conn, response, err := dialer.Dial(r.address, header)
 		if err != nil && response != nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusForbidden {
 				_, _ = r.handleSlave(context.Background(), "retire", nil)
 				return
 			}
+		}
+		if err == nil && conn.Subprotocol() != mosiSubprotocol {
+			conn.Close()
+			err = fmt.Errorf("unsupported node protocol")
 		}
 		if err == nil {
 			r.mu.Lock()

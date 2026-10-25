@@ -81,6 +81,36 @@ func HTTPRequest(a ...Scmer) Scmer {
 	})
 }
 
+func httpHandler(value Scmer) http.Handler {
+	if value.GetTag() == tagAny {
+		if handler, ok := value.Any().(http.Handler); ok {
+			return handler
+		}
+	}
+	if !value.IsProc() && !value.IsNativeFunc() && !value.IsJIT() {
+		panic("HTTP handler must be a Scheme callable or native HTTP handler")
+	}
+	return &HttpServer{callback: value}
+}
+
+// HTTPRoute constructs one immutable exact-path router for an explicitly chosen
+// listener. Native protocol handlers own their authentication; Scheme fallback
+// handlers retain the ordinary HTTP authentication/session boundary.
+func HTTPRoute(a ...Scmer) Scmer {
+	path := a[0].String()
+	if path == "" || path[0] != '/' || strings.ContainsAny(path, "?#") {
+		panic("http_route requires an absolute path without query or fragment")
+	}
+	matched, fallback := httpHandler(a[1]), httpHandler(a[2])
+	return NewAny(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == path {
+			matched.ServeHTTP(w, req)
+		} else {
+			fallback.ServeHTTP(w, req)
+		}
+	}))
+}
+
 // build this function into your SCM environment to offer http server capabilities
 func HTTPServe(a ...Scmer) Scmer {
 	// HTTP endpoint; params: (port, handler, optional bind host)
@@ -89,7 +119,7 @@ func HTTPServe(a ...Scmer) Scmer {
 	if len(a) > 2 {
 		host = a[2].String()
 	}
-	handler := &HttpServer{a[1]}
+	handler := httpHandler(a[1])
 	server := &http.Server{
 		Addr:           net.JoinHostPort(host, port),
 		Handler:        handler,
