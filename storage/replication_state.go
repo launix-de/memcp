@@ -11,12 +11,11 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 
 package storage
 
-import "os"
-import "encoding/json"
-import "path/filepath"
-import "github.com/launix-de/memcp/storage/mosi"
+import "fmt"
+import "maps"
 
 type replicaRecord struct {
+	Handoff        string                        `json:"handoff,omitempty"`
 	InitialClaimed bool                          `json:"initial_claimed,omitempty"`
 	Epoch          uint64                        `json:"epoch"`
 	State          string                        `json:"state"`
@@ -32,8 +31,7 @@ type replicaRequestMark struct {
 	Write    bool   `json:"write"`
 }
 
-type replicaJournal struct {
-	Version     int                      `json:"version"`
+type replicaDirectory struct {
 	Records     map[string]replicaRecord `json:"records"`
 	Users       map[string]replicaAuth   `json:"users"`
 	Retired     map[string]bool          `json:"retired"`
@@ -41,47 +39,44 @@ type replicaJournal struct {
 	Sequence    uint64                   `json:"sequence,omitempty"`
 }
 
-func writeReplicationJournal(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
-		return err
+// updateRecord publishes one immutable runtime directory entry. MOSI rights,
+// ownership, epochs and request sequences are never written to a backend.
+func (r *replicationManager) updateRecord(resource mosiResource, update func(*replicaRecord) bool) replicaRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record := r.directory.Records[resource.key()]
+	if record.State == "" {
+		record.Resource, record.State = resource, "IO"
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".replication-tmp-")
-	if err != nil {
-		return err
+	record.Readers, record.Requests = maps.Clone(record.Readers), maps.Clone(record.Requests)
+	if update(&record) {
+		r.directory.Records[resource.key()] = record
 	}
-	defer os.Remove(f.Name())
-	if err := f.Chmod(0600); err != nil {
-		f.Close()
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(f.Name(), path); err != nil {
-		return err
-	}
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return record
 }
 
-func (r *replicationManager) saveLocked() error {
-	data, err := json.Marshal(r.journal)
-	if err != nil {
-		return err
+func (r *replicationManager) storeConfig(entry replicaConfigEntry) error {
+	if entry.Kind != "users" && entry.Kind != "retired" {
+		return fmt.Errorf("not persistent replication configuration: %s", entry.Kind)
 	}
-	return writeReplicationJournal(filepath.Join(Basepath, ".replication-state"), data)
+	if entry.Kind == "users" && entry.Auth == nil {
+		return fmt.Errorf("missing saved user proof")
+	}
+	if r.config != nil {
+		if err := r.writeConfig(entry); err != nil {
+			return err
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch entry.Kind {
+	case "users":
+		r.directory.Users[entry.Name] = *entry.Auth
+	case "retired":
+		r.directory.Retired[entry.Name] = entry.Value
+
+	}
+	return nil
 }
 
 func (r *replicationManager) cell(name string) *replicaCell {
@@ -103,17 +98,4 @@ func (r *replicationManager) cell(name string) *replicaCell {
 		r.cellSnapshot.Store(&snapshot)
 	}
 	return c
-}
-
-func (r *replicationManager) setLocal(name, state string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	record := r.journal.Records[name]
-	record.State = state
-	r.journal.Records[name] = record
-	if err := r.saveLocked(); err != nil {
-		return err
-	}
-	r.cells[name].rights.Publish(mosi.ParsePhase(state))
-	return nil
 }

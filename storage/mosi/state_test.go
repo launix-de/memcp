@@ -277,3 +277,45 @@ func TestMosiBackendEvictionDoesNotResurrectRevokedRights(t *testing.T) {
 		}
 	}
 }
+
+func TestMosiLateRecoveryCannotReplaceRequestOrPermission(t *testing.T) {
+	var state mosi.State
+	if !state.Establish(mosi.S) {
+		t.Fatal("fresh live-peer authority was not established")
+	}
+	pending, action := state.Request(mosi.M)
+	if action != mosi.Send {
+		t.Fatal("write request did not start")
+	}
+	if state.Establish(mosi.S) || state.Phase() != mosi.MR {
+		t.Fatal("late recovery replaced an active request")
+	}
+	if ok, err := state.Grant(pending.Flight().ID(), mosi.M, func() error { return nil }); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	if state.Establish(mosi.S) || state.Phase() != mosi.M {
+		t.Fatal("late recovery downgraded a granted modifier")
+	}
+}
+
+func TestMosiFailedUpgradeRetainsOnlyUnrevokedReadPermission(t *testing.T) {
+	for _, phase := range []mosi.Phase{mosi.O, mosi.S} {
+		for _, invalidated := range []bool{false, true} {
+			var state mosi.State
+			state.Initialize(phase)
+			request, _ := state.Request(mosi.M)
+			if invalidated {
+				state.Publish(mosi.IO)
+			}
+			state.Fail(request.Flight().ID(), fmt.Errorf(mosi.NetworkError))
+			<-request.Flight().Done()
+			want := phase
+			if invalidated {
+				want = mosi.IO
+			}
+			if state.Phase() != want {
+				t.Fatalf("phase=%s invalidated=%t: failed request restored %s, want %s", phase, invalidated, state.Phase(), want)
+			}
+		}
+	}
+}

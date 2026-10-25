@@ -111,7 +111,7 @@ func TestReplicationOrderedMutationRequiresWritePermission(t *testing.T) {
 	for _, path := range []string{"first", "direct", "multi", "batch"} {
 		t.Run(path, func(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "torderedrights", 3)
-			r := &replicationManager{cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+			r := &replicationManager{cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 			r.resourceCell(mosiResource{Database: tbl.schema.Name}).rights.Initialize(mosi.M)
 			shard := tbl.ActiveShards()[0]
 			r.shardCell(shard).rights.Initialize(mosi.S)
@@ -156,7 +156,7 @@ func TestReplicationOrderedMutationRetainsTransactionWriteLease(t *testing.T) {
 	for _, mode := range []TxMode{TxCursorStability, TxACID} {
 		t.Run(fmt.Sprint(mode), func(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "torderedtxrights", 3)
-			r := &replicationManager{cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+			r := &replicationManager{cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 			r.resourceCell(mosiResource{Database: tbl.schema.Name}).rights.Initialize(mosi.M)
 			shard := tbl.ActiveShards()[0]
 			cell := r.shardCell(shard)
@@ -203,7 +203,7 @@ func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 	original := tbl.ActiveShards()[0]
 	part := newRecSetShardFromSortedIDs(original, 3, []uint32{0, 1, 2})
 	source := &recSet{table: tbl, shards: []recSetShard{part}, count: 3}
-	r := &replicationManager{cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	r := &replicationManager{cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 	cell := r.shardCell(original)
 	replacement := original.rebuild(true)
 	if replacement == original {
@@ -251,7 +251,7 @@ func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "treplicareclaim", 3)
 	empty, _ := CreateTable(table.schema.Name, "empty", Safe, false)
 	empty.CreateColumn("id", "INT", nil, nil)
-	r := &replicationManager{id: "slave", cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	r := &replicationManager{id: "slave", cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 	schema := mosiResource{Database: table.schema.Name}
 	r.resourceCell(schema).rights.Initialize(mosi.M)
 	r.schemaShards(table.schema, r.id, true)
@@ -274,7 +274,7 @@ func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {
 
 func TestReplicationPeriodicReclaimContinuesAfterOfflineTenant(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "z_periodic_reclaim", 3)
-	r := &replicationManager{id: "slave", cells: make(map[string]*replicaCell), journal: replicaJournal{
+	r := &replicationManager{id: "slave", cells: make(map[string]*replicaCell), directory: replicaDirectory{
 		Records:     make(map[string]replicaRecord),
 		Initialized: map[string]bool{"a_offline_tenant": true, table.schema.Name: true, "pending_tenant": false, "system": true},
 	}}
@@ -316,7 +316,7 @@ func TestReplicationPeriodicReclaimContinuesAfterOfflineTenant(t *testing.T) {
 
 func TestReplicationPeriodicReclaimUsesOrdinaryMosiGrant(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "t_periodic_remote_reclaim", 3)
-	r := &replicationManager{id: "slave", cells: make(map[string]*replicaCell), journal: replicaJournal{
+	r := &replicationManager{id: "slave", cells: make(map[string]*replicaCell), directory: replicaDirectory{
 		Records:     make(map[string]replicaRecord),
 		Users:       map[string]replicaAuth{"tenant": {Hash: "cached-proof", Databases: map[string]bool{table.schema.Name: true}}},
 		Initialized: map[string]bool{table.schema.Name: true},
@@ -365,7 +365,7 @@ func TestReplicationPeriodicReclaimUsesOrdinaryMosiGrant(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("periodic reclaim did not finish after grant")
 	}
-	if r.resourceCell(schema).rights.Phase() != mosi.M || r.journal.Records[schema.key()].Epoch != 2 {
+	if r.resourceCell(schema).rights.Phase() != mosi.M || r.directory.Records[schema.key()].Epoch != 2 {
 		t.Fatal("periodic reclaim did not retain the durable upstream grant")
 	}
 }
@@ -543,7 +543,7 @@ func TestReplicationPasswordProofs(t *testing.T) {
 
 func TestReplicationSnapshotWaitsForMaintenance(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "treplicationmaintenance", 3)
-	r := &replicationManager{cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	r := &replicationManager{cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 	resource := mosiResource{Database: tbl.schema.Name, Table: tbl.Name, Shard: tbl.ActiveShards()[0].logicalID().String()}
 	tbl.maintenanceMu.Lock()
 	locked := true
@@ -615,7 +615,7 @@ func TestReplicationBoundedChunkStream(t *testing.T) {
 
 func TestReplicationSnapshotKeepsGenerationAndFiles(t *testing.T) {
 	table, engine := createDurabilityTestTable(t, "treplicasnapshot", 3)
-	r := &replicationManager{cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	r := &replicationManager{cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 	resource := mosiResource{Database: table.schema.Name, Table: table.Name, Shard: table.ActiveShards()[0].logicalID().String()}
 	if _, err := r.prepareResource(resource); err != nil {
 		t.Fatal(err)
@@ -663,7 +663,7 @@ func TestReplicationSnapshotKeepsGenerationAndFiles(t *testing.T) {
 
 func TestReplicationCleanupRetainsCompletedBackup(t *testing.T) {
 	table, engine := createDurabilityTestTable(t, "treplicabackupgc", 3)
-	r := &replicationManager{master: true, id: "master", cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	r := &replicationManager{master: true, id: "master", cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 	resource := mosiResource{Database: table.schema.Name, Table: table.Name, Shard: table.ActiveShards()[0].logicalID().String()}
 	if _, err := r.prepareResource(resource); err != nil {
 		t.Fatal(err)
@@ -684,7 +684,8 @@ func TestReplicationCleanupRetainsCompletedBackup(t *testing.T) {
 	cell := r.shardCell(pending)
 	cell.current.Store(pending)
 	cell.rights.Initialize(mosi.IO)
-	r.journal.Records[resource.key()] = replicaRecord{Resource: resource, Owner: "slave", State: "IO", Epoch: 1, Generation: backup.uuid.String()}
+	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, Owner: "slave", State: "IO", Epoch: 1, Generation: backup.uuid.String()}
+	r.backups = map[string]replicaBackup{resource.key(): {Resource: resource, Generation: backup.uuid.String()}}
 	orphan := uuid.NewString()
 	writer := engine.WriteColumn(orphan, "unused")
 	writer.Write([]byte("orphan"))
@@ -700,7 +701,7 @@ func TestReplicationCleanupRetainsCompletedBackup(t *testing.T) {
 		t.Fatal("cleanup deleted the last complete backup")
 	}
 	reader.Close()
-	if err := r.restoreBackup(r.journal.Records[resource.key()]); err != nil {
+	if err := r.restoreBackup(r.directory.Records[resource.key()]); err != nil {
 		t.Fatal(err)
 	}
 	cell.rights.Publish(mosi.M)
@@ -748,7 +749,7 @@ func TestReplicationImportWaitsForSchemaLoad(t *testing.T) {
 					Resource:   mosiResource{Database: db.Name, Table: table.Name, Shard: uuid.NewString()},
 					Generation: uuid.NewString(), Kind: "object", ObjectKind: "column", Object: "payload",
 				}
-				r := &replicationManager{journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+				r := &replicationManager{directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 				done := make(chan error, 1)
 				workers.Add(1)
 				go func() {
@@ -803,13 +804,13 @@ func TestReplicationImportWaitsForSchemaLoad(t *testing.T) {
 
 func TestReplicationRepeatedTransferKeepsCompletedColumns(t *testing.T) {
 	table, engine := createDurabilityTestTable(t, "treplicaresend", 3)
-	r := &replicationManager{master: true, id: "master", cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	r := &replicationManager{master: true, id: "master", cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 	resource := mosiResource{Database: table.schema.Name, Table: table.Name, Shard: table.ActiveShards()[0].logicalID().String()}
 	generation, err := r.prepareResource(resource)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.journal.Records[resource.key()] = replicaRecord{Resource: resource, Owner: "slave", State: "IO", Generation: generation}
+	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, Owner: "slave", State: "IO", Generation: generation}
 	read := func() []byte {
 		t.Helper()
 		reader := engine.ReadColumn(generation, "payload")
@@ -859,7 +860,7 @@ func TestReplicationRepeatedTransferKeepsCompletedColumns(t *testing.T) {
 
 func TestReplicationImportDefersCleanup(t *testing.T) {
 	table, engine := createDurabilityTestTable(t, "treplicainflight", 3)
-	r := &replicationManager{master: true, id: "master", cells: make(map[string]*replicaCell), journal: replicaJournal{Records: make(map[string]replicaRecord)}}
+	r := &replicationManager{master: true, id: "master", cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 	resource := mosiResource{Database: table.schema.Name, Table: table.Name, Shard: table.ActiveShards()[0].logicalID().String()}
 	if _, err := r.prepareResource(resource); err != nil {
 		t.Fatal(err)

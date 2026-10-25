@@ -23,16 +23,18 @@ import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
 type replicaRequest struct {
-	SQL        string `json:"sql,omitempty"`
-	PostgreSQL bool   `json:"postgresql,omitempty"`
-	Epoch      uint64 `json:"epoch,omitempty"`
-	Database   string `json:"database"`
-	User       string `json:"user,omitempty"`
-	Hash       string `json:"hash,omitempty"`
-	Read       bool   `json:"read,omitempty"`
-	State      string `json:"state,omitempty"`
-	Salt       []byte `json:"salt,omitempty"`
-	Scramble   []byte `json:"scramble,omitempty"`
+	Boot       string          `json:"boot,omitempty"`
+	Resources  []replicaRecord `json:"resources,omitempty"`
+	SQL        string          `json:"sql,omitempty"`
+	PostgreSQL bool            `json:"postgresql,omitempty"`
+	Epoch      uint64          `json:"epoch,omitempty"`
+	Database   string          `json:"database"`
+	User       string          `json:"user,omitempty"`
+	Hash       string          `json:"hash,omitempty"`
+	Read       bool            `json:"read,omitempty"`
+	State      string          `json:"state,omitempty"`
+	Salt       []byte          `json:"salt,omitempty"`
+	Scramble   []byte          `json:"scramble,omitempty"`
 }
 
 type replicaAuth struct {
@@ -96,7 +98,7 @@ func (r *replicationManager) handleMaster(ctx context.Context, id, method string
 		return nil, err
 	}
 	r.mu.Lock()
-	retired := r.journal.Retired[id]
+	retired := r.directory.Retired[id]
 	r.mu.Unlock()
 	if retired {
 		return nil, fmt.Errorf("replica retired by administrator")
@@ -104,6 +106,18 @@ func (r *replicationManager) handleMaster(ctx context.Context, id, method string
 	auth, err := r.authenticate(req.User, req.Hash, req.Salt, req.Scramble, req.Database)
 	if err != nil {
 		return nil, err
+	}
+	if method == "hello_done" {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.peersBoot[id] != req.Boot {
+			return nil, fmt.Errorf("stale slave incarnation")
+		}
+		r.peerReady[id] = true
+		return true, nil
+	}
+	if method == "hello" {
+		return r.recoverPeer(ctx, id, req, auth)
 	}
 	if method == "login" {
 		return auth, nil
@@ -122,10 +136,7 @@ func (r *replicationManager) handleMaster(ctx context.Context, id, method string
 
 func (r *replicationManager) handleSlave(ctx context.Context, method string, data json.RawMessage) (any, error) {
 	if method == "retire" {
-		r.mu.Lock()
-		r.journal.Retired[r.id] = true
-		err := r.saveLocked()
-		r.mu.Unlock()
+		err := r.storeConfig(replicaConfigEntry{Kind: "retired", Name: r.id, Value: true})
 		if err != nil {
 			return nil, err
 		}
@@ -142,7 +153,9 @@ func (r *replicationManager) handleSlave(ctx context.Context, method string, dat
 // the ordinary frontend sees it. Its cache is private to this installation;
 // the master never trusts locally edited access rows.
 func replicationHTTPAuthentication(user, password string) bool {
-	if r := replication.Load(); r == nil || r.master {
+	if r := replication.Load(); r == nil {
+		return !replicationStarting.Load()
+	} else if r.master {
 		return true
 	}
 	hash := base64.StdEncoding.EncodeToString([]byte(scm.MySQLPassword(scm.NewString(password)).String()))
@@ -173,7 +186,10 @@ func replicationPasswordProof(raw []byte, hash string, salt, scramble []byte) bo
 
 func replicationAuthentication(proof replicaRequest) bool {
 	r := replication.Load()
-	if r == nil || r.master {
+	if r == nil {
+		return !replicationStarting.Load()
+	}
+	if r.master {
 		return true
 	}
 	var auth replicaAuth
@@ -186,30 +202,34 @@ func replicationAuthentication(proof replicaRequest) bool {
 				return false
 			}
 			r.mu.Lock()
-			auth = r.journal.Users[proof.User]
+			auth = r.directory.Users[proof.User]
 			r.mu.Unlock()
 		} else {
 			r.mu.Lock()
-			previous, exists := r.journal.Users[proof.User]
-			r.journal.Users[proof.User] = auth
+			previous, exists := r.directory.Users[proof.User]
 			old, _ := json.Marshal(previous)
+			r.mu.Unlock()
 			current, _ := json.Marshal(auth)
 			if !exists || !bytes.Equal(old, current) {
-				err = r.saveLocked()
+				err = r.storeConfig(replicaConfigEntry{Kind: "users", Name: proof.User, Auth: &auth})
 			}
-			r.mu.Unlock()
 			if err != nil {
 				return false
 			}
 		}
 	} else {
 		r.mu.Lock()
-		auth = r.journal.Users[proof.User]
+		auth = r.directory.Users[proof.User]
 		r.mu.Unlock()
 	}
 	rawHash, err := base64.StdEncoding.DecodeString(auth.Hash)
 	if err != nil || !replicationPasswordProof(rawHash, proof.Hash, proof.Salt, proof.Scramble) {
 		return false
+	}
+	if peer := r.peer(""); peer != nil {
+		if err := r.recoverConnection(peer, proof.User, auth); err != nil {
+			scm.PrintError(err)
+		}
 	}
 	r.authMu.Lock()
 	defer r.authMu.Unlock()

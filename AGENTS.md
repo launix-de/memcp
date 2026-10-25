@@ -166,32 +166,48 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   these atomics and never write completion again.
 
 - `replicationManager` is published once after frontend initialization. Its
-  private fsynced journal owns peer identities, cached authentication, resource
-  permissions and administrative retirement tombstones, never inferred from
-  liveness. Each database schema and logical data shard has its own `replicaCell`.
-  A coordinator's pending reader directory is private after request-mark
-  persistence, until final publication under the manager mutex. Network waits
-  must never mutate maps concurrently serialized by another resource's journal
-  checkpoint.
+  resource directory, MOSI permissions, epochs, reader sets, bootstrap progress,
+  initial claims and request ordering are RAM-only and owned by `mu`. Published
+  record maps are immutable; mutations copy their reader/request directories.
+  A coordinator's pending reader directory remains private until final publication.
+  Each database schema and logical data shard has its own `replicaCell`.
+  Authenticated reconnect reports recover rights from live participants. `boot`
+  identifies a process incarnation; `peersBoot`, `peerReady`, `initialClaims`, `confirmed` and
+  `recoveryReports` are guarded by `mu`. `restoring` is initialized before
+  publication from data-placement metadata and then immutable. `recoveryMu` owns
+  a slave's connection recovery and its per-user `recoveredUsers` map. `ready`
+  is atomic. Recovery uses a bounded worker count and one resource per message.
+  None of this recovery/control ownership participates in authorized read loops.
+  `config` is a startup-initialized ordinary SAFE table; its native APIs persist
+  cached login proofs, explicit retirement and completed copy placement, keyed by
+  the local node UUID even when the backend is shared.
+  `backups` is a `mu`-guarded RAM cache of that placement, never permission.
+  No private journal or persisted slave registration exists. `replicationStarting`
+  is published before catalog discovery; startup GC cannot delete unexamined
+  safety copies before the runtime directory and native configuration are ready.
   `directory` serializes ownership handovers; `gate` protects only write batches
   and transactions. Already authorized reads use atomic state loads and existing
   snapshot lifetimes, without additional reader registration or admission writes.
   `storage/mosi.State` publishes immutable M/O/S/IS/IO/MR/OR/SR descriptors using CAS on
   transitions only. Pending request descriptors own one flight and wake all
-  waiters after installation and durable permission publication. SR/OR upgrades
-  retain that flight; late read grants cannot satisfy MR.
+  waiters after complete data installation and RAM permission publication. SR/OR upgrades
+  retain that flight; late read grants cannot satisfy MR. Requested publications
+  retain a prior O/S proof solely for failure/recovery. Invalidation clears it
+  atomically, so failed upgrades cannot resurrect a revoked generation.
+  Recovery establishes authority with CAS only on an unpublished state; late
+  reconnect responses cannot replace an active request or a newer permission.
   The `storage/mosi` package has no storage/frontend/backend dependencies;
   publication fields remain private and its callers use immutable accessors.
   `Flight.Err()` is read only after `Done()` closes. Its sequence is assigned
-  under the existing journal ownership after durable save, before enqueueing.
+  under the manager mutex within one process incarnation, before enqueueing.
   `mosi_transport.go` and `mosi_wire.go` contain shared engine transport/framing;
   `replication_directory.go` coordinates the current star topology, while
-  `replication_generation.go` owns storage installation. Authentication, journal,
+  `replication_generation.go` owns storage installation. Authentication, RAM state, configuration, recovery,
   session integration and startup live in their matching `replication_*.go` files.
   These adapters remain separate from the reusable state machine; adding a
   cluster domain must not fork its permission/publication protocol.
   IS represents a current backend-only generation, retaining its previously
-  durable M/O/S permission for local restoration. IO always acquires from the
+  RAM M/O/S permission for local restoration. IO always acquires from the
   remote owner, regardless of backup files. Backend-only authority is never
   inferred from file existence; invalidation removes it before writer admission.
   Query-local physical row IDs retain an already acquired historical generation;
@@ -201,8 +217,12 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   permission before obtaining a new data write right. Lifecycle callbacks run
   after releasing schema handover ownership, so nested DDL cannot self-deadlock.
   Runtime COLD remains a separate materialization state. Eviction publishes IS only after verifying a current persisted generation
-  with no deltas, and cannot promote IO or a pending request. Journal permissions
-  reconstruct IS only for already authorized local generations on restart.
+  with no deltas, and cannot promote IO or a pending request. Restart requires
+  live peer authority before any former delegated local generation is usable.
+  Interrupted handover recovery uses the surviving source's RAM report and the
+  master's complete native generation/WAL. Incoming schemas preserve local
+  physical UUIDs for existing logical shards; canonical schema digests exclude
+  physical placement and advisory statistics.
   `resource`, `current` and the immutable cell lookup directory are atomically
   published; additions use the manager mutex. `storageShard.lineage` is immutable
   and inherited by rebuild successors; physical UUIDs identify generations.
@@ -213,13 +233,13 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   Incoming payloads use bounded independently compressed chunks and private
   backend writers. Receiver-owned import objects are aborted after disconnect.
   Schema import serializes against persistence lifecycle, DDL and queued saves.
-  Journal generation UUIDs name completed transfers; schema-only placeholders
+  Native placement UUIDs/content digests name completed transfers; schema-only placeholders
   never constitute completed backups. Startup GC waits for replication recovery,
   and runtime GC retains completed backup files and blob manifests independently
   of advertised remote topology. Explicit retirement restores only that completed
   generation before publishing M; it never promotes an incomplete transfer.
   `replicaImport.knownGeneration` is immutable receiver-owned import metadata,
-  initialized from the completed-generation journal before publication. A resend
+  initialized from completed native data placement before publication. A resend
   consumes existing immutable columns without opening another backend writer;
   interrupted resends must never truncate a completed backup. Retirement joins
   the peer reader before promoting a backup, so an earlier import cannot publish
@@ -242,9 +262,10 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   `TxContext.replicationCells` is guarded by its mutex and owns deduplicated
   write handover leases until commit/rollback. Session replication bindings are
   executor-owned; neither flights nor transaction bindings are persisted.
-  `Settings.ReplicationUUID` is generated once and saved as the installation's
-  confidential identity/secret. Bootstrap progress and request ordering are
-  journaled; control mutexes and runtime snapshots are process-local.
+  The installation UUID/secret stays in local `Settings.ReplicationUUID`, through
+  the ordinary atomic settings checkpoint, never a shared database backend. Existing
+  private-journal installations require explicit resynchronization with live
+  owners; startup refuses to resurrect their saved rights.
 
 - Complete ordinary-column declaration replacement is copy-on-write under the
   existing table DDL and database schema ownership. The expected old declaration

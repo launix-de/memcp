@@ -11,7 +11,6 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 
 package storage
 
-import "os"
 import "fmt"
 import "net"
 import "sync"
@@ -22,7 +21,6 @@ import "strings"
 import "net/http"
 import "sync/atomic"
 import "encoding/json"
-import "path/filepath"
 import "github.com/google/uuid"
 import "github.com/gorilla/websocket"
 import "github.com/launix-de/memcp/scm"
@@ -30,10 +28,15 @@ import "github.com/launix-de/memcp/storage/mosi"
 
 // Replication is published once at startup, after frontend registration. It is
 // nil for ordinary instances. Directory updates are serialized per resource;
-// its journal is fsynced before a new owner may execute. Only write transactions
+// complete data installation precedes ownership publication. Only write transactions
 // retain a local gate; reads use ordinary snapshots. Each database schema and
 // each data shard have independent MOSI slots; storage backends are unchanged.
 var replication atomic.Pointer[replicationManager]
+var replicationStarting atomic.Bool
+
+// PrepareReplication prevents startup GC from deleting safety copies before
+// runtime ownership is reconstructed. Called before catalog discovery starts.
+func PrepareReplication() { replicationStarting.Store(true) }
 
 // Session getters borrow immutable arguments; reusing the key avoids a
 // variadic argument allocation at every statement boundary.
@@ -41,27 +44,39 @@ var replicationSchemaArgument = []scm.Scmer{scm.NewString("schema")}
 var replicationUsernameArgument = []scm.Scmer{scm.NewString("username")}
 
 type replicationManager struct {
-	master        bool
-	address       string
-	id            string
-	mu            sync.Mutex
-	authMu        sync.Mutex
-	authInstalled map[string]string
-	cells         map[string]*replicaCell
-	cellSnapshot  atomic.Pointer[map[string]*replicaCell]
-	retired       atomic.Bool
-	journal       replicaJournal
-	peers         map[string]*mosiPeer
-	upstream      *mosiPeer
-	server        *http.Server
-	done          chan struct{}
-	password      scm.Scmer
-	policy        scm.Scmer
-	shutdown      func()
-	stopping      bool
-	stopOnce      sync.Once
-	steps         sync.Map // transfer/invalidations; values are *replicaStep
-	imports       sync.Map // connection ID + transfer ID; reader-owned *replicaImport
+	master          bool
+	address         string
+	id              string
+	mu              sync.Mutex
+	authMu          sync.Mutex
+	authInstalled   map[string]string
+	cells           map[string]*replicaCell
+	cellSnapshot    atomic.Pointer[map[string]*replicaCell]
+	retired         atomic.Bool
+	directory       replicaDirectory
+	config          *table
+	backups         map[string]replicaBackup
+	boot            string
+	ready           atomic.Bool
+	peersBoot       map[string]string
+	peerReady       map[string]bool
+	recoveryMu      sync.Mutex
+	recoveredUsers  map[string]*mosiPeer
+	restoring       map[string]bool
+	confirmed       map[string]string
+	initialClaims   map[string]map[string]bool
+	recoveryReports map[string]map[string]replicaRecord
+	peers           map[string]*mosiPeer
+	upstream        *mosiPeer
+	server          *http.Server
+	done            chan struct{}
+	password        scm.Scmer
+	policy          scm.Scmer
+	shutdown        func()
+	stopping        bool
+	stopOnce        sync.Once
+	steps           sync.Map // transfer/invalidations; values are *replicaStep
+	imports         sync.Map // connection ID + transfer ID; reader-owned *replicaImport
 }
 
 // StartReplication accepts a port (master) or host:port (slave). A slave uses
@@ -86,54 +101,45 @@ func StartReplication(address string, shutdown func()) error {
 	if r.password.IsNil() || r.policy.IsNil() {
 		return fmt.Errorf("replication requires the SQL authentication frontend")
 	}
-	if Settings.ReplicationUUID == "" {
+	PrepareReplication()
+	settingsMu.Lock()
+	createdIdentity := Settings.ReplicationUUID == ""
+	if createdIdentity {
 		Settings.ReplicationUUID = uuid.NewString()
-		data, err := json.Marshal(Settings)
-		if err != nil {
-			return err
-		}
-		if err := writeReplicationJournal(filepath.Join(Basepath, "settings.json"), data); err != nil {
-			return err
-		}
 	}
 	r.id = Settings.ReplicationUUID
+	settingsMu.Unlock()
 	if _, err := uuid.Parse(r.id); err != nil {
 		return fmt.Errorf("invalid saved replication identity")
 	}
-	r.journal = replicaJournal{Version: 2, Records: make(map[string]replicaRecord), Users: make(map[string]replicaAuth), Retired: make(map[string]bool)}
-	data, err := os.ReadFile(filepath.Join(Basepath, ".replication-state"))
-	if err == nil {
-		r.journal = replicaJournal{}
-		if err := json.Unmarshal(data, &r.journal); err != nil {
-			return fmt.Errorf("invalid replication journal: %w", err)
+	if createdIdentity {
+		if err := saveSettings(); err != nil {
+			settingsMu.Lock()
+			Settings.ReplicationUUID = ""
+			settingsMu.Unlock()
+			return err
 		}
-	} else if !os.IsNotExist(err) {
+	}
+	r.boot = uuid.NewString()
+	r.backups = make(map[string]replicaBackup)
+	r.restoring = make(map[string]bool)
+	r.confirmed = make(map[string]string)
+	r.initialClaims = make(map[string]map[string]bool)
+	r.recoveryReports = make(map[string]map[string]replicaRecord)
+	r.peersBoot = make(map[string]string)
+	r.peerReady = make(map[string]bool)
+	r.directory = replicaDirectory{Records: make(map[string]replicaRecord), Users: make(map[string]replicaAuth), Retired: make(map[string]bool), Initialized: make(map[string]bool)}
+	if err := r.openConfig(); err != nil {
 		return err
 	}
-	if r.journal.Version != 2 {
-		return fmt.Errorf("unsupported replication journal version: resynchronize the experimental database-granular installation explicitly")
+	r.retired.Store(r.directory.Retired[r.id])
+	for _, backup := range r.backups {
+		r.restoring[backup.Resource.Database] = true
 	}
-	if r.journal.Records == nil || r.journal.Users == nil || r.journal.Retired == nil {
-		return fmt.Errorf("invalid replication journal directories")
+	if r.master {
+		r.ready.Store(true)
 	}
-	r.retired.Store(r.journal.Retired[r.id])
-	for name, record := range r.journal.Records {
-		c := &replicaCell{}
-		resource := record.Resource
-		if !resource.valid() || resource.key() != name {
-			return fmt.Errorf("invalid replication journal resource")
-		}
-		c.resource.Store(&resource)
-		c.initialized.Store(r.journal.Initialized[resource.Database])
-		c.rights.RestoreBackend(mosi.ParsePhase(record.State))
-		r.cells[name] = c
-	}
-	// Startup constructs the directory unpublished; avoid copying it once per
-	// tenant. Runtime additions publish one new immutable lookup snapshot.
-	snapshot := make(map[string]*replicaCell, len(r.cells))
-	for name, c := range r.cells {
-		snapshot[name] = c
-	}
+	snapshot := make(map[string]*replicaCell)
 	r.cellSnapshot.Store(&snapshot)
 	if r.master {
 		mux := http.NewServeMux()
@@ -167,7 +173,7 @@ func (r *replicationManager) accept(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	r.mu.Lock()
-	retired := r.journal.Retired[id]
+	retired := r.directory.Retired[id]
 	stopping := r.stopping
 	old := r.peers[id]
 	r.mu.Unlock()
@@ -197,6 +203,7 @@ func (r *replicationManager) accept(w http.ResponseWriter, req *http.Request) {
 		return r.handleMaster(ctx, id, method, data)
 	}, func(packet *mosiPacket) error { return r.receivePacket(id, packet) })
 	r.peers[id] = p
+	r.peerReady[id] = false
 	r.mu.Unlock()
 	<-p.done
 	p.wait()
@@ -234,28 +241,7 @@ func (r *replicationManager) connect() {
 			p := newMosiPeer(conn, r.handleSlave, func(packet *mosiPacket) error { return r.receivePacket("", packet) })
 			r.upstream = p
 			r.mu.Unlock()
-			go func() {
-				r.mu.Lock()
-				names := make(map[string]bool)
-				for _, record := range r.journal.Records {
-					if record.State == "M" {
-						names[record.Resource.Database] = true
-					}
-				}
-				users := make(map[string]replicaAuth, len(r.journal.Users))
-				for user, auth := range r.journal.Users {
-					users[user] = auth
-				}
-				r.mu.Unlock()
-				for name := range names {
-					for user, auth := range users {
-						if auth.Admin || auth.Databases[name] {
-							replicationCheckpoint(name, user)
-							break
-						}
-					}
-				}
-			}()
+			go r.recoverCached(p)
 			<-p.done
 			p.wait()
 			r.abortImports("")
@@ -280,6 +266,19 @@ func (r *replicationManager) peer(id string) *mosiPeer {
 		return r.upstream
 	}
 	return r.peers[id]
+}
+
+// Engine access fails closed while configured replication has not published
+// its manager. Frontend bootstrap may still use the excluded system catalog.
+func activeReplication(db *database) *replicationManager {
+	if db == nil {
+		return nil
+	}
+	r := replication.Load()
+	if r == nil && replicationStarting.Load() && validReplicaDatabase(db.Name) {
+		panic(mosi.NetworkError)
+	}
+	return r
 }
 
 func validReplicaDatabase(name string) bool {

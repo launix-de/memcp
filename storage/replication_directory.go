@@ -19,18 +19,19 @@ import "github.com/launix-de/memcp/storage/mosi"
 func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 	c := r.resourceCell(packet.Resource)
 	_, err := c.rights.Grant(packet.ID, mosi.ParsePhase(packet.State), func() error {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		record := r.journal.Records[packet.Resource.key()]
-		record.Resource, record.State, record.Epoch, record.Owner = packet.Resource, packet.State, packet.Epoch, packet.Owner
-		if packet.State == "M" {
-			record.InitialClaimed = true
-		}
-		if packet.Generation != "" {
-			record.Generation = packet.Generation
-		}
-		r.journal.Records[packet.Resource.key()] = record
-		return r.saveLocked()
+		r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
+			record.Resource, record.State, record.Epoch, record.Owner = packet.Resource, packet.State, packet.Epoch, packet.Owner
+			record.Readers = packet.Readers
+			record.Handoff = ""
+			if packet.State == "M" {
+				record.InitialClaimed = true
+			}
+			if packet.Generation != "" {
+				record.Generation = packet.Generation
+			}
+			return true
+		})
+		return nil
 	})
 	return err
 }
@@ -44,9 +45,7 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 		return err
 	}
 	defer c.gate.Unlock()
-	if err := r.localRecord(packet.Resource, mosi.IO, ""); err != nil {
-		return err
-	}
+	r.localRecord(packet.Resource, mosi.IO, "")
 	r.publishLocal(packet.Resource, mosi.IO)
 	return r.peer(source).post(mosiPacket{Kind: "ack", Resource: packet.Resource, ID: packet.ID})
 }
@@ -66,7 +65,7 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 	}
 	defer c.gate.Unlock()
 	r.mu.Lock()
-	record := r.journal.Records[packet.Resource.key()]
+	record := r.directory.Records[packet.Resource.key()]
 	r.mu.Unlock()
 	if record.Epoch != packet.Epoch {
 		return fmt.Errorf("stale recall")
@@ -79,9 +78,15 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 		return ctx.Err()
 	}
 	phase := mosi.ParsePhase(packet.State)
-	if err := r.localRecord(packet.Resource, phase, generation); err != nil {
-		return err
-	}
+	r.localRecord(packet.Resource, phase, generation)
+	r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
+		record.Readers = packet.Readers
+		record.Handoff = ""
+		if phase == mosi.IO {
+			record.Handoff = packet.Owner
+		}
+		return true
+	})
 	r.publishLocal(packet.Resource, phase)
 	packet.Generation = generation
 	releasePersistence()
@@ -97,6 +102,9 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			return err
 		}
 	}
+	if !r.resourceKnown(packet.Resource) {
+		return fmt.Errorf(mosi.NetworkError)
+	}
 	c := r.resourceCell(packet.Resource)
 	c.directory.Lock()
 	defer c.directory.Unlock()
@@ -108,44 +116,37 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 	if localShard == nil && packet.Resource.Shard != "" {
 		localShard = r.findShard(packet.Resource)
 	}
-	r.mu.Lock()
-	record, exists := r.journal.Records[packet.Resource.key()]
-	if !exists {
-		record = replicaRecord{Resource: packet.Resource, Owner: r.id, State: "M", Epoch: 1}
-		if packet.Resource.Shard != "" {
-			if shard := localShard; shard != nil {
-				record.Generation = shard.uuid.String()
-				c.current.Store(shard)
+	write := packet.Kind == "write" || packet.Kind == "begin"
+	stale := false
+	record := r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
+		if record.Owner == "" {
+			record.Resource, record.Owner, record.State, record.Epoch = packet.Resource, r.id, "M", 1
+			if localShard != nil && packet.Resource.Shard != "" {
+				record.Generation = localShard.uuid.String()
+				c.current.Store(localShard)
 			}
 		}
-	}
-	marks := make(map[string]replicaRequestMark, len(record.Requests))
-	for id, mark := range record.Requests {
-		marks[id] = mark
-	}
-	record.Requests = marks
-	mark := marks[requester]
-	write := packet.Kind == "write" || packet.Kind == "begin"
-	if packet.Sequence < mark.Sequence || (packet.Sequence == mark.Sequence && mark.Write && !write) {
-		r.mu.Unlock()
+		mark := record.Requests[requester]
+		if packet.Sequence < mark.Sequence || (packet.Sequence == mark.Sequence && mark.Write && !write) {
+			stale = true
+			return false
+		}
+		if record.Requests == nil {
+			record.Requests = make(map[string]replicaRequestMark)
+		}
+		record.Requests[requester] = replicaRequestMark{Sequence: packet.Sequence, Write: write}
+		return true
+	})
+	if stale {
 		return nil
 	}
-	marks[requester] = replicaRequestMark{Sequence: packet.Sequence, Write: write}
 	originalOwner := record.Owner
-	r.journal.Records[packet.Resource.key()] = record
-	if err := r.saveLocked(); err != nil {
-		r.mu.Unlock()
-		return err
-	}
-	// The durable request mark now shares the journal's reader directory.
-	// Handovers keep a private successor until their final publication: another
-	// resource's checkpoint may serialize the journal while network steps run.
+	// The successor remains private while network handover runs.
 	readers := make(map[string]bool, len(record.Readers))
 	for id, present := range record.Readers {
 		readers[id] = present
 	}
 	record.Readers = readers
-	r.mu.Unlock()
 	if record.Owner != requester {
 		oldState := "IO"
 		if !write {
@@ -161,8 +162,11 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				return err
 			}
 			generation, err := r.prepareResource(packet.Resource)
+			if err == nil && requester != r.id {
+				err = r.saveBackup(packet.Resource, generation)
+			}
 			if err == nil {
-				err = r.localRecord(packet.Resource, mosi.ParsePhase(oldState), generation)
+				r.localRecord(packet.Resource, mosi.ParsePhase(oldState), generation)
 			}
 			if err == nil {
 				r.publishLocal(packet.Resource, mosi.ParsePhase(oldState))
@@ -174,12 +178,19 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				return err
 			}
 		} else {
-			if err := r.step(ctx, record.Owner, mosiPacket{Kind: "recall", ID: uuid.NewString(), Resource: packet.Resource, Epoch: record.Epoch, State: oldState}); err != nil {
+			knownReaders := make(map[string]bool, len(record.Readers)+1)
+			for reader, present := range record.Readers {
+				knownReaders[reader] = present
+			}
+			if !write {
+				knownReaders[requester] = true
+			}
+			if err := r.step(ctx, record.Owner, mosiPacket{Kind: "recall", ID: uuid.NewString(), Resource: packet.Resource, Epoch: record.Epoch, State: oldState, Readers: knownReaders, Owner: requester}); err != nil {
 				return err
 			}
-			if shard := c.current.Load(); shard != nil {
-				record.Generation = shard.uuid.String()
-			}
+			r.mu.Lock()
+			record.Generation = r.directory.Records[packet.Resource.key()].Generation
+			r.mu.Unlock()
 		}
 	}
 	if write {
@@ -225,12 +236,29 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 	} else if record.Readers[r.id] {
 		record.State = "S"
 	}
-	r.mu.Lock()
-	r.journal.Records[packet.Resource.key()] = record
-	err := r.saveLocked()
-	r.mu.Unlock()
-	if err != nil {
-		return err
+	r.updateRecord(packet.Resource, func(current *replicaRecord) bool {
+		*current = record
+		if r.master {
+			if r.confirmed == nil {
+				r.confirmed = make(map[string]string)
+			}
+			r.confirmed[packet.Resource.key()] = record.Owner
+			if write && requester != r.id {
+				if r.initialClaims == nil {
+					r.initialClaims = make(map[string]map[string]bool)
+				}
+				if r.initialClaims[requester] == nil {
+					r.initialClaims[requester] = make(map[string]bool)
+				}
+				r.initialClaims[requester][packet.Resource.key()] = true
+			}
+		}
+		return true
+	})
+	if record.State == "M" {
+		if err := r.clearBackup(packet.Resource); err != nil {
+			return err
+		}
 	}
 	if requester == r.id {
 		_, err := c.rights.Grant(packet.ID, mosi.ParsePhase(grantState), func() error { return nil })
@@ -241,5 +269,5 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		return fmt.Errorf(mosi.NetworkError)
 	}
 	r.publishLocal(packet.Resource, mosi.ParsePhase(record.State))
-	return peer.post(mosiPacket{Kind: "grant", ID: packet.ID, Resource: packet.Resource, Epoch: record.Epoch, State: grantState, Generation: record.Generation, Owner: record.Owner})
+	return peer.post(mosiPacket{Kind: "grant", ID: packet.ID, Resource: packet.Resource, Epoch: record.Epoch, State: grantState, Generation: record.Generation, Owner: record.Owner, Readers: record.Readers})
 }

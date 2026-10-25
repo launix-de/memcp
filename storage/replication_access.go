@@ -69,21 +69,18 @@ func (table *table) schemaWrite() (*table, WriteAccess) {
 	return table, access
 }
 
-func (r *replicationManager) requestSequence(flight *mosi.Flight) (uint64, error) {
+func (r *replicationManager) requestSequence(flight *mosi.Flight) uint64 {
 	if serial := flight.Sequence(); serial != 0 {
-		return serial, nil
+		return serial
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if serial := flight.Sequence(); serial != 0 {
-		return serial, nil
+		return serial
 	}
-	r.journal.Sequence++
-	if err := r.saveLocked(); err != nil {
-		return 0, err
-	}
-	flight.SetSequence(r.journal.Sequence)
-	return r.journal.Sequence, nil
+	r.directory.Sequence++
+	flight.SetSequence(r.directory.Sequence)
+	return r.directory.Sequence
 }
 
 func replicationUser(tx *TxContext) string {
@@ -97,13 +94,13 @@ func (r *replicationManager) proof(user, database string) (string, replicaAuth, 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if user != "" {
-		auth, exists := r.journal.Users[user]
+		auth, exists := r.directory.Users[user]
 		if exists && (auth.Admin || auth.Databases[database]) {
 			return user, auth, nil
 		}
 		return "", replicaAuth{}, fmt.Errorf("database access denied")
 	}
-	for name, auth := range r.journal.Users {
+	for name, auth := range r.directory.Users {
 		if auth.Admin || auth.Databases[database] {
 			return name, auth, nil
 		}
@@ -116,23 +113,25 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 		panic("replica retired by administrator")
 	}
 	c := r.resourceCell(resource)
+	phase := c.rights.Phase()
+	if phase == mosi.M || wanted != mosi.M && phase.Readable() {
+		return c
+	}
+	if r.config != nil && ((!r.master && !r.ready.Load()) || !r.resourceKnown(resource)) {
+		panic(mosi.NetworkError)
+	}
 	// A master owns previously undelegated local resources. Declare that fact
-	// durably before publishing M; all further changes use normal messages.
+	// before publishing M; all further changes use normal messages.
 	if r.master && !c.rights.Initialized() {
 		c.acquire.Lock()
 		if !c.rights.Initialized() {
-			r.mu.Lock()
-			record, exists := r.journal.Records[resource.key()]
-			if !exists {
-				record = replicaRecord{Resource: resource, State: "M", Owner: r.id, Epoch: 1}
-				r.journal.Records[resource.key()] = record
-			}
-			err := r.saveLocked()
-			r.mu.Unlock()
-			if err != nil {
-				c.acquire.Unlock()
-				panic(err)
-			}
+			record := r.updateRecord(resource, func(record *replicaRecord) bool {
+				if record.Owner != "" {
+					return false
+				}
+				record.Resource, record.State, record.Owner, record.Epoch = resource, "M", r.id, 1
+				return true
+			})
 			c.rights.RestoreBackend(mosi.ParsePhase(record.State))
 		}
 		c.acquire.Unlock()
@@ -143,30 +142,30 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 			return c
 		}
 		if action == mosi.Send || action == mosi.Upgrade {
-			serial, err := r.requestSequence(publication.Flight())
+			serial := r.requestSequence(publication.Flight())
+			var err error
 			packet := mosiPacket{Kind: "read", ID: publication.Flight().ID(), Resource: resource, Sequence: serial}
 			if publication.Phase() == mosi.MR {
 				packet.Kind = "write"
 			}
-			if err == nil {
-				if r.master {
-					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-						defer cancel()
-						if err := r.coordinate(ctx, r.id, packet); err != nil {
-							c.rights.Fail(packet.ID, err)
-						}
-					}()
-				} else {
-					var auth replicaAuth
-					packet.User, auth, err = r.proof(user, resource.Database)
-					packet.Hash = auth.Hash
-					peer := r.peer("")
-					if peer == nil {
-						err = fmt.Errorf(mosi.NetworkError)
-					} else if err == nil {
-						err = peer.post(packet)
+			if r.master {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+					defer cancel()
+					if err := r.coordinate(ctx, r.id, packet); err != nil {
+						fmt.Println("replication acquisition failed:", packet.Kind, packet.Resource.key(), err)
+						c.rights.Fail(packet.ID, err)
 					}
+				}()
+			} else {
+				var auth replicaAuth
+				packet.User, auth, err = r.proof(user, resource.Database)
+				packet.Hash = auth.Hash
+				peer := r.peer("")
+				if peer == nil {
+					err = fmt.Errorf(mosi.NetworkError)
+				} else if err == nil {
+					err = peer.post(packet)
 				}
 			}
 			if err != nil {
@@ -220,7 +219,7 @@ func (r *replicationManager) firstDatabase(name string, session scm.Scmer) {
 		return
 	}
 	r.mu.Lock()
-	claimed := r.journal.Records[resource.key()].InitialClaimed
+	claimed := r.directory.Records[resource.key()].InitialClaimed
 	r.mu.Unlock()
 	wanted := mosi.M
 	if claimed {
@@ -242,7 +241,7 @@ func (r *replicationManager) firstDatabase(name string, session scm.Scmer) {
 			}
 			item := mosiResource{Database: name, Table: table.Name, Shard: shard.logicalID().String()}
 			r.mu.Lock()
-			claimed := r.journal.Records[item.key()].InitialClaimed
+			claimed := r.directory.Records[item.key()].InitialClaimed
 			r.mu.Unlock()
 			if !claimed {
 				resources = append(resources, item)
@@ -273,16 +272,11 @@ func (r *replicationManager) firstDatabase(name string, session scm.Scmer) {
 			return
 		}
 		r.mu.Lock()
-		if r.journal.Initialized == nil {
-			r.journal.Initialized = make(map[string]bool)
+		if r.directory.Initialized == nil {
+			r.directory.Initialized = make(map[string]bool)
 		}
-		r.journal.Initialized[name] = true
-		err := r.saveLocked()
+		r.directory.Initialized[name] = true
 		r.mu.Unlock()
-		if err != nil {
-			scm.PrintError(err)
-			return
-		}
 		c.initialized.Store(true)
 	}()
 }
@@ -294,7 +288,7 @@ func (r *replicationManager) readShard(shard *storageShard, tx *TxContext) *stor
 		wanted := mosi.S
 		if !r.master && !r.resourceCell(mosiResource{Database: resource.Database}).initialized.Load() {
 			r.mu.Lock()
-			claimed := r.journal.Records[resource.key()].InitialClaimed
+			claimed := r.directory.Records[resource.key()].InitialClaimed
 			r.mu.Unlock()
 			// A query may beat its bootstrap worker to this shard. Its first
 			// acquisition still belongs to initialization and must request M;
@@ -375,7 +369,7 @@ func (r *replicationManager) backupDatabase(name, user string) {
 	}
 	r.mu.Lock()
 	resources := make([]mosiResource, 0)
-	for _, record := range r.journal.Records {
+	for _, record := range r.directory.Records {
 		if record.Resource.Database == name && record.State == "M" {
 			resources = append(resources, record.Resource)
 		}
@@ -410,12 +404,9 @@ func (r *replicationManager) backupDatabase(name, user string) {
 				scm.PrintError(err)
 				return
 			}
-			if err := r.localRecord(resource, mosi.M, generation); err != nil {
-				scm.PrintError(err)
-				return
-			}
+			r.localRecord(resource, mosi.M, generation)
 			r.mu.Lock()
-			epoch := r.journal.Records[resource.key()].Epoch
+			epoch := r.directory.Records[resource.key()].Epoch
 			r.mu.Unlock()
 			releasePersistence()
 			if err := r.sendResource(peer, mosiPacket{ID: uuid.NewString(), Resource: resource, Epoch: epoch, Generation: generation, User: user, Hash: auth.Hash}); err != nil {
