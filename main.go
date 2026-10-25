@@ -985,11 +985,17 @@ func setupIO(wd string) {
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Opens a HTTP server at a given port", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "number", Label: "port", Description: "port number for HTTP server"},
-				{Kind: "func", Label: "handler", Description: "handler that processes each HTTP request", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "req", Description: "HTTP request object"}, {Kind: "any", Label: "res", Description: "HTTP response object"}}, Return: &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "handler result"}},
+				{Kind: "any", Label: "handler", Description: "Scheme (req res) callable or native handler composed by http_route"},
 				{Kind: "string", Label: "host", Description: "optional bind address; defaults to all interfaces", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		Name: "http_route",
+		Fn:   scm.HTTPRoute,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "constructs an exact-path HTTP router for an explicitly selected serve listener", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "string", Label: "path"}, {Kind: "any", Label: "handler"}, {Kind: "any", Label: "fallback"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "http_request",
@@ -1341,7 +1347,7 @@ func main() {
 	basepath := "data"
 	flag.StringVar(&basepath, "data", "data", "Data folder for persistence")
 	replicationAddress := ""
-	flag.StringVar(&replicationAddress, "replication", "", "Replication master PORT or slave HOST:PORT")
+	flag.StringVar(&replicationAddress, "replication", "", "Replication listen on HTTP API, dedicated PORT, or upstream HTTP(S)/WS(S) URL or HOST:PORT")
 
 	profile := ""
 	flag.StringVar(&profile, "profile", "", "Data folder for persistence")
@@ -1509,10 +1515,6 @@ func main() {
 		}
 	}()
 	<-initDone
-	if err := storage.StartReplication(replicationAddress, func() { scm.Apply(IOEnv.Vars["shutdown"]) }); err != nil {
-		fmt.Fprintln(os.Stderr, "replication:", err)
-		os.Exit(1)
-	}
 	scm.CompleteMySQLInitialization()
 	if !initialize {
 		if err := startPHP(os.Args[1:]); err != nil {

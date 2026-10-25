@@ -15,9 +15,69 @@ import "io"
 import "fmt"
 import "bytes"
 import "compress/gzip"
+import "encoding/json"
+import "encoding/binary"
 import "github.com/google/uuid"
 
 const mosiPacketBytes = 64 * 1024
+
+const mosiHTTPPath = "/cluster"
+const mosiSubprotocol = "memcp.mosi.v1"
+const mosiMaxMessageBytes = 256 * 1024
+
+// One binary WebSocket message contains MOSI + version 1 + a uint32 metadata
+// length, followed by JSON control metadata and raw compressed chunk bytes.
+// Packet payloads are never base64-expanded. This envelope is shared by both
+// dedicated replication listeners and the normal HTTP node-protocol route.
+func encodeMosiMessage(message mosiMessage) ([]byte, error) {
+	var payload []byte
+	if message.Packet != nil {
+		packet := *message.Packet
+		payload, packet.Payload = packet.Payload, nil
+		message.Packet = &packet
+		if len(payload) != 0 && (packet.Kind != "chunk" || len(payload) > mosiPacketBytes+1024) {
+			return nil, fmt.Errorf("invalid MOSI binary payload")
+		}
+	}
+	metadata, err := json.Marshal(message)
+	if err != nil {
+		return nil, err
+	}
+	if 9+len(metadata)+len(payload) > mosiMaxMessageBytes {
+		return nil, fmt.Errorf("oversized MOSI message")
+	}
+	frame := make([]byte, 9+len(metadata)+len(payload))
+	copy(frame, "MOSI\x01")
+	binary.BigEndian.PutUint32(frame[5:9], uint32(len(metadata)))
+	copy(frame[9:], metadata)
+	copy(frame[9+len(metadata):], payload)
+	return frame, nil
+}
+
+func decodeMosiMessage(frame []byte) (mosiMessage, error) {
+	var message mosiMessage
+	if len(frame) < 9 || len(frame) > mosiMaxMessageBytes || string(frame[:5]) != "MOSI\x01" {
+		return message, fmt.Errorf("invalid MOSI message version or size")
+	}
+	length := uint64(binary.BigEndian.Uint32(frame[5:9]))
+	if length > uint64(len(frame)-9) {
+		return message, fmt.Errorf("truncated MOSI metadata")
+	}
+	if err := json.Unmarshal(frame[9:9+int(length)], &message); err != nil {
+		return mosiMessage{}, fmt.Errorf("invalid MOSI metadata")
+	}
+	payload := frame[9+int(length):]
+	if message.Packet != nil && len(message.Packet.Payload) != 0 {
+		return mosiMessage{}, fmt.Errorf("inline MOSI payload is not allowed")
+	}
+	if len(payload) != 0 {
+		if message.Packet == nil || message.Packet.Kind != "chunk" || len(payload) > mosiPacketBytes+1024 {
+			return mosiMessage{}, fmt.Errorf("invalid MOSI binary payload")
+		}
+		message.Packet.Payload = payload
+	}
+	return message, nil
+}
 
 type mosiResource struct {
 	Database string `json:"database"`

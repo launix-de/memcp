@@ -62,10 +62,26 @@ own compiler under any language name. */
 (import "dashboard.scm")
 (import "rdf.scm")
 
+/* Scheme owns protocol initialization, listener selection and exact routing.
+Other (serve ...) calls do not inherit this endpoint. */
+(define node_replication_address (arg "replication" "replication" ""))
+(if (and (equal? node_replication_address "listen") (arg "disable-api" false))
+	(error "--replication=listen requires the HTTP API"))
+(if (not (equal? node_replication_address ""))
+	(replication_start node_replication_address (lambda () (shutdown))))
+(define node_handler (node_protocol))
+(if (number? (simplify node_replication_address))
+	(serve (simplify node_replication_address)
+		(http_route "/cluster" node_handler
+			(http_route "/replication" node_handler (lambda (req res)
+				((res "status") 404))))))
+
 /* read ports from command line arguments or environment */
 (if (not (arg "disable-api" false)) (begin
 	(set port (arg "api-port" (env "PORT" "4321")))
-	(serve port (lambda (req res) (http_handler req res)))
+	(serve port (if (equal? node_replication_address "")
+		(lambda (req res) (http_handler req res))
+		(http_route "/cluster" node_handler (lambda (req res) (http_handler req res)))))
 	(service_registry "HTTP Server" (list port "/" "HTTP"))
 	(print "listening on http://localhost:" port)
 ))

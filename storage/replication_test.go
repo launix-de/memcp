@@ -23,6 +23,7 @@ import "runtime"
 import "net/http"
 import "compress/gzip"
 import "encoding/json"
+import "encoding/binary"
 import "encoding/base64"
 import "net/http/httptest"
 import "github.com/google/uuid"
@@ -245,6 +246,164 @@ func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 		t.Fatal("generation mismatch leaked its write capability")
 	}
 	cell.gate.Unlock()
+}
+
+func TestMosiBinaryEnvelopeRoundTripAndLimits(t *testing.T) {
+	for _, message := range []mosiMessage{
+		{ID: 7, Method: "authenticate", Data: json.RawMessage(`{"user":"alice"}`)},
+		{ID: 7, Error: "denied"},
+		{Packet: &mosiPacket{Kind: "grant", ID: "request", Epoch: 42, State: "M", Generation: "generation"}},
+		{Packet: &mosiPacket{Kind: "chunk", ID: "request", Payload: bytes.Repeat([]byte{0xff, 0, 1}, 20000)}},
+	} {
+		frame, err := encodeMosiMessage(message)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := decodeMosiMessage(frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, _ := json.Marshal(message)
+		got, _ := json.Marshal(decoded)
+		if !bytes.Equal(got, want) {
+			t.Fatalf("binary round trip changed the message: %s", got)
+		}
+		if message.Packet != nil && message.Packet.Kind == "chunk" && len(frame) > len(message.Packet.Payload)+1024 {
+			t.Fatal("binary chunk was expanded rather than carried as raw bytes")
+		}
+	}
+	valid, _ := encodeMosiMessage(mosiMessage{ID: 1})
+	badVersion := bytes.Clone(valid)
+	badVersion[4] = 2
+	badLength := bytes.Clone(valid)
+	binary.BigEndian.PutUint32(badLength[5:9], ^uint32(0))
+	inlineMetadata := []byte(`{"packet":{"kind":"chunk","payload":"eA=="}}`)
+	inlinePayload := make([]byte, 9+len(inlineMetadata))
+	copy(inlinePayload, "MOSI\x01")
+	binary.BigEndian.PutUint32(inlinePayload[5:9], uint32(len(inlineMetadata)))
+	copy(inlinePayload[9:], inlineMetadata)
+	for _, frame := range [][]byte{nil, valid[:8], badVersion, badLength, append(bytes.Clone(valid), 1), inlinePayload, make([]byte, mosiMaxMessageBytes+1)} {
+		if _, err := decodeMosiMessage(frame); err == nil {
+			t.Fatal("malformed or oversized binary envelope was accepted")
+		}
+	}
+	for _, message := range []mosiMessage{
+		{Data: json.RawMessage(`"` + strings.Repeat("x", mosiMaxMessageBytes) + `"`)},
+		{Packet: &mosiPacket{Kind: "grant", Payload: []byte{1}}},
+		{Packet: &mosiPacket{Kind: "chunk", Payload: make([]byte, mosiPacketBytes+1025)}},
+	} {
+		if _, err := encodeMosiMessage(message); err == nil {
+			t.Fatal("invalid outgoing binary envelope was accepted")
+		}
+	}
+}
+
+func TestMosiEndpointURLs(t *testing.T) {
+	for input, want := range map[string]string{
+		"127.0.0.1:7331": "ws://127.0.0.1:7331/cluster", "[::1]:4321": "ws://[::1]:4321/cluster",
+		"http://node:4321": "ws://node:4321/cluster", "https://node/": "wss://node/cluster",
+		"wss://node/prefix/cluster": "wss://node/prefix/cluster",
+	} {
+		if got, err := mosiEndpointURL(input); err != nil || got != want {
+			t.Errorf("%q resolved to %q, %v; want %q", input, got, err, want)
+		}
+	}
+	for _, input := range []string{"node", "http://", "ftp://node", "http://user:secret@node", "http://node?secret=x", "https://node/#fragment"} {
+		if _, err := mosiEndpointURL(input); err == nil {
+			t.Errorf("invalid node URL accepted: %q", input)
+		}
+	}
+}
+
+func TestMosiHTTPRolesKeepIndependentAuthenticationBoundaries(t *testing.T) {
+	register := func(role string, status int) func() {
+		t.Helper()
+		release, err := registerMosiRole(role, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { w.WriteHeader(status) }))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(release)
+		return release
+	}
+	releaseReplication := register("replication", http.StatusUnauthorized)
+	register("test-peer", http.StatusAccepted)
+	request := func(role string) int {
+		req := httptest.NewRequest(http.MethodGet, mosiHTTPPath, nil)
+		req.Header.Set("X-MemCP-Role", role)
+		response := httptest.NewRecorder()
+		serveMosiHTTP(response, req)
+		return response.Code
+	}
+	if request("replication") != http.StatusUnauthorized || request("test-peer") != http.StatusAccepted || request("cluster") != http.StatusForbidden {
+		t.Fatal("a role was routed to another adapter's authentication boundary")
+	}
+	releaseReplication()
+	if request("replication") != http.StatusForbidden || request("test-peer") != http.StatusAccepted {
+		t.Fatal("removing one role disrupted the other role")
+	}
+	register("replication", http.StatusNoContent)
+	releaseReplication()
+	if request("replication") != http.StatusNoContent {
+		t.Fatal("old role cleanup removed its replacement")
+	}
+}
+
+func TestReplicationWebSocketUsesNormalHTTPRoute(t *testing.T) {
+	r := &replicationManager{id: uuid.NewString(), peers: make(map[string]*mosiPeer)}
+	finished := make(chan struct{})
+	unregister, err := registerMosiRole("replication", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		defer close(finished)
+		r.accept(w, req)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unregister()
+	fallback := scm.NewAny(http.NotFoundHandler())
+	router := scm.HTTPRoute(scm.NewString("/custom/node"), scm.NewAny(http.HandlerFunc(serveMosiHTTP)), fallback)
+	server := httptest.NewServer(router.Any().(http.Handler))
+	defer server.Close()
+	target, _ := mosiEndpointURL(server.URL + "/custom/node")
+	dialer := *websocket.DefaultDialer
+	dialer.Subprotocols = []string{mosiSubprotocol}
+	header := http.Header{"X-Memcp-Replica": []string{uuid.NewString()}, "X-Memcp-Role": []string{"replication"}}
+	conn, _, err := dialer.Dial(target, header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { conn.Close(); <-finished }()
+	if conn.Subprotocol() != mosiSubprotocol {
+		t.Fatal("normal HTTP endpoint did not negotiate the node protocol")
+	}
+	frame, _ := encodeMosiMessage(mosiMessage{ID: 9, Method: "unsupported"})
+	if err := conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
+		t.Fatal(err)
+	}
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	kind, reply, err := conn.ReadMessage()
+	if err != nil || kind != websocket.BinaryMessage {
+		t.Fatalf("node reply was not binary: kind=%d err=%v", kind, err)
+	}
+	message, err := decodeMosiMessage(reply)
+	if err != nil || message.ID != 9 || message.Error == "" {
+		t.Fatalf("unexpected node reply: %+v, %v", message, err)
+	}
+	// Old JSON/text frames are rejected rather than silently downgraded.
+	conn.WriteMessage(websocket.TextMessage, []byte(`{"id":10,"method":"unsupported"}`))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("text message was accepted by the binary node protocol")
+	}
+}
+
+func TestReplicationWebSocketRejectsUnsupportedProtocol(t *testing.T) {
+	r := &replicationManager{}
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		response := httptest.NewRecorder()
+		r.accept(response, httptest.NewRequest(method, mosiHTTPPath, nil))
+		if response.Code != http.StatusUpgradeRequired && response.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("invalid node handshake returned %d", response.Code)
+		}
+	}
 }
 
 func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {

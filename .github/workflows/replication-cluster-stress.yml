@@ -63,7 +63,7 @@ jobs:
           -run 'TestReplication|TestMosi|TestCreateTableRefreshesInvalidatedPlannerCacheOnInit'
           -count=1
 
-      - name: Check the same process scenarios with the Go race detector
+      - name: Check dedicated-listener scenarios with the Go race detector
         env:
           GORACE: halt_on_error=1 exitcode=66
         run: >-
@@ -71,6 +71,7 @@ jobs:
           --binary "$RUNNER_TEMP/memcp-replication-race"
           --artifacts "$RUNNER_TEMP/replication-stress-race"
           --seed 20261025 --rounds 1 --workers 3 --operations 12
+          --dedicated-replication-port
 
       - name: Upload node logs and write oracle
         if: always()

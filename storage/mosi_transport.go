@@ -15,10 +15,58 @@ import "fmt"
 import "sync"
 import "time"
 import "context"
+import "net/http"
 import "sync/atomic"
 import "encoding/json"
 import "github.com/gorilla/websocket"
 import "github.com/launix-de/memcp/storage/mosi"
+
+// Roles share one HTTP endpoint and codec, while each adapter owns its own
+// authentication and authorization. Choosing a role in a header grants no rights.
+var mosiHTTP struct {
+	mu    sync.Mutex
+	roles atomic.Pointer[map[string]http.Handler]
+}
+
+func serveMosiHTTP(w http.ResponseWriter, req *http.Request) {
+	if roles := mosiHTTP.roles.Load(); roles != nil {
+		if handler := (*roles)[req.Header.Get("X-MemCP-Role")]; handler != nil {
+			handler.ServeHTTP(w, req)
+			return
+		}
+	}
+	http.Error(w, "node role is not enabled", http.StatusForbidden)
+}
+
+func registerMosiRole(role string, handler http.Handler) (func(), error) {
+	mosiHTTP.mu.Lock()
+	defer mosiHTTP.mu.Unlock()
+	next := make(map[string]http.Handler)
+	if old := mosiHTTP.roles.Load(); old != nil {
+		for key, value := range *old {
+			next[key] = value
+		}
+	}
+	if role == "" || handler == nil || next[role] != nil {
+		return nil, fmt.Errorf("invalid or duplicate node role")
+	}
+	next[role] = handler
+	mosiHTTP.roles.Store(&next)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			mosiHTTP.mu.Lock()
+			defer mosiHTTP.mu.Unlock()
+			next := make(map[string]http.Handler)
+			for key, value := range *mosiHTTP.roles.Load() {
+				if key != role {
+					next[key] = value
+				}
+			}
+			mosiHTTP.roles.Store(&next)
+		})
+	}, nil
+}
 
 // mosiPeer multiplexes requests in both directions over one peer connection.
 // Neither RPC handlers nor storage I/O run under its mutex.
@@ -57,7 +105,7 @@ func newMosiPeer(conn *websocket.Conn, handle func(context.Context, string, json
 	p := &mosiPeer{conn: conn, pending: make(map[uint64]chan mosiMessage), done: make(chan struct{}), handle: handle, packet: packet, outgoing: make(chan mosiMessage, 8), writeDone: make(chan struct{})}
 	p.readDone = make(chan struct{})
 	p.ctx, p.cancel = context.WithCancel(context.Background())
-	conn.SetReadLimit(256 * 1024)
+	conn.SetReadLimit(mosiMaxMessageBytes)
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(15 * time.Second)) })
 	go p.read()
@@ -123,7 +171,11 @@ func (p *mosiPeer) writeMessage(m mosiMessage) error {
 	if err := p.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return err
 	}
-	return p.conn.WriteJSON(m)
+	frame, err := encodeMosiMessage(m)
+	if err != nil {
+		return err
+	}
+	return p.conn.WriteMessage(websocket.BinaryMessage, frame)
 }
 
 func (p *mosiPeer) call(ctx context.Context, method string, input, output any) error {
@@ -161,8 +213,12 @@ func (p *mosiPeer) read() {
 	defer close(p.readDone)
 	defer p.close()
 	for {
-		var m mosiMessage
-		if err := p.conn.ReadJSON(&m); err != nil {
+		kind, frame, err := p.conn.ReadMessage()
+		if err != nil || kind != websocket.BinaryMessage {
+			return
+		}
+		m, err := decodeMosiMessage(frame)
+		if err != nil {
 			return
 		}
 		if m.Packet != nil {

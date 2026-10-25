@@ -56,6 +56,9 @@ python3 tools/replication_cluster_stress.py --seed 20261023 --rounds 5 --workers
 ```
 
 The **Replication Cluster Stress test** workflow executes this runner directly.
+The default run connects through `/cluster` on the normal HTTP API listener; the
+race-instrumented process run uses `--dedicated-replication-port` to cover the
+optional dedicated listener with the same binary WebSocket protocol.
 It repeats the process scenarios with race-instrumented servers and a second
 seed, failing on a Go race report and retaining both runs' artifacts.
 It owns the server processes, alternates SIGKILL/restart without taking an owner
