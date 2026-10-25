@@ -102,6 +102,24 @@ func StartReplication(address string, shutdown func()) error {
 		return fmt.Errorf("replication requires the SQL authentication frontend")
 	}
 	PrepareReplication()
+	settingsMu.Lock()
+	createdIdentity := Settings.ReplicationUUID == ""
+	if createdIdentity {
+		Settings.ReplicationUUID = uuid.NewString()
+	}
+	r.id = Settings.ReplicationUUID
+	settingsMu.Unlock()
+	if _, err := uuid.Parse(r.id); err != nil {
+		return fmt.Errorf("invalid saved replication identity")
+	}
+	if createdIdentity {
+		if err := saveSettings(); err != nil {
+			settingsMu.Lock()
+			Settings.ReplicationUUID = ""
+			settingsMu.Unlock()
+			return err
+		}
+	}
 	r.boot = uuid.NewString()
 	r.backups = make(map[string]replicaBackup)
 	r.restoring = make(map[string]bool)

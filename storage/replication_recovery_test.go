@@ -169,15 +169,12 @@ func TestReplicationGrantedReadsIgnoreDirectoryLocks(t *testing.T) {
 func TestReplicationConfigUsesNativePersistenceWithoutRights(t *testing.T) {
 	source, engine := createDurabilityTestTable(t, "treplication_native_config", 0)
 	config, _ := CreateTable(source.schema.Name, "config", Safe, false)
+	config.CreateColumn("node", "text", nil, nil)
 	config.CreateColumn("key", "text", nil, nil)
 	config.CreateColumn("value", "text", nil, nil)
-	createTableKey(config, uniqueKey{Id: "PRIMARY", Cols: []string{"key"}}, nil)
+	createTableKey(config, uniqueKey{Id: "PRIMARY", Cols: []string{"node", "key"}}, nil)
 	r := replicaRecoveryFixture()
 	r.config = config
-	identity := uuid.NewString()
-	if err := r.writeConfig(replicaConfigEntry{Kind: "identity", Name: "node", Identity: identity}); err != nil {
-		t.Fatal(err)
-	}
 	auth := replicaAuth{Hash: "cached-proof", Databases: map[string]bool{"tenant": true}}
 	if err := r.storeConfig(replicaConfigEntry{Kind: "users", Name: "alice", Auth: &auth}); err != nil {
 		t.Fatal(err)
@@ -191,16 +188,28 @@ func TestReplicationConfigUsesNativePersistenceWithoutRights(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.localRecord(resource, mosi.M, generation)
+	// Another node may share system's backend, but must not share our cache or
+	// the last complete physical generation of its independent safety copy.
+	other := replicaRecoveryFixture()
+	other.config = config
+	otherAuth := replicaAuth{Hash: "other-node-proof", Admin: true}
+	if err := other.storeConfig(replicaConfigEntry{Kind: "users", Name: "alice", Auth: &otherAuth}); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.saveBackup(resource, uuid.NewString()); err != nil {
+		t.Fatal(err)
+	}
 	// Reopen through the ordinary schema/WAL loader, without a replication file.
 	db := newDatabase()
 	db.Name, db.persistence, db.srState = source.schema.Name, engine, COLD
 	db.ensureLoaded()
 	defer db.closeTransactionLog()
 	restarted := replicaRecoveryFixture()
+	restarted.id = r.id
 	if err := restarted.loadConfig(db.tables.Get("config")); err != nil {
 		t.Fatal(err)
 	}
-	if restarted.id != identity || restarted.directory.Users["alice"].Hash != "cached-proof" || !restarted.directory.Retired["retired-peer"] {
+	if restarted.directory.Users["alice"].Hash != "cached-proof" || !restarted.directory.Retired["retired-peer"] {
 		t.Fatal("native config did not survive restart")
 	}
 	if restarted.backups[resource.key()].Generation != generation {
@@ -326,5 +335,30 @@ func TestReplicationRecoveredSharedBindsCompletedGeneration(t *testing.T) {
 	defer access.Release()
 	if access.shard.main_count != 3 {
 		t.Fatalf("recovered backup lost rows: %d", access.shard.main_count)
+	}
+}
+
+func TestReplicationIdentityUsesLocalSettingsCheckpoint(t *testing.T) {
+	oldBase := Basepath
+	settingsMu.Lock()
+	oldID := Settings.ReplicationUUID
+	Settings.ReplicationUUID = uuid.NewString()
+	identity := Settings.ReplicationUUID
+	settingsMu.Unlock()
+	Basepath = t.TempDir()
+	defer func() { Basepath = oldBase; settingsMu.Lock(); Settings.ReplicationUUID = oldID; settingsMu.Unlock() }()
+	if err := saveSettings(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(Basepath, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored struct{ ReplicationUUID string }
+	if err := json.Unmarshal(data, &stored); err != nil || stored.ReplicationUUID != identity {
+		t.Fatal("node identity was not durably saved in local settings", err)
+	}
+	if files, err := filepath.Glob(filepath.Join(Basepath, ".settings-tmp-*")); err != nil || len(files) != 0 {
+		t.Fatal("settings checkpoint left a live temporary file", files, err)
 	}
 }

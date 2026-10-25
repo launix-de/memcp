@@ -65,11 +65,12 @@ same ownership, visibility, lifetime, and durability guarantees.
   handover establishes their data custodian. Offline owners are never reclaimed
   on a timer. Failed acquisition raises `Cluster network error`.
 - `system.replication_config` is an ordinary SAFE table. It stores only the
-  installation identity, offline authentication cache, explicit retirement
-  decisions and completed backup placement (resource plus physical generation
+  offline authentication cache, explicit retirement decisions and completed backup placement (resource plus physical generation
   or schema content digest). It stores no permissions or slave registration.
   Native persistence/WAL and backend semantics own these data and configuration
-  changes. No coherence transition serializes or fsyncs the resource directory.
+  changes. Entries are scoped by local installation UUID so shared database
+  backends cannot merge different nodes' caches. UUID/secret stays in ordinary
+  local settings. No coherence transition serializes or fsyncs the directory.
   A promoted safety copy becomes ordinary current data only after complete
   installation and foreign permission removal; placement metadata is then retired.
 - MR/OR/SR grant no access and coalesce requests in the state machine. A read

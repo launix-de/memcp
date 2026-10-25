@@ -509,10 +509,8 @@ func UnloadDatabases() {
 	for _, db := range databases.GetAll() {
 		db.closeTransactionLog()
 	}
-	data, _ := json.Marshal(Settings)
-	if settings, err := os.OpenFile(Basepath+"/settings.json", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0640); err == nil {
-		defer settings.Close()
-		settings.Write(data)
+	if err := saveSettings(); err != nil {
+		fmt.Println("saving local settings:", err)
 	}
 	GlobalCache.Stop()
 }

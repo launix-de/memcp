@@ -221,6 +221,49 @@ func getCreateTableTriggers(schema, table string) []CreateTableTriggerRegistrati
 }
 
 // call this after you filled Settings
+// saveSettings is the ordinary local installation-settings checkpoint. Database
+// backends may be shared, but node identity and local process settings are not.
+func saveSettings() error {
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
+	data, err := json.Marshal(Settings)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(Basepath, 0750); err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(Basepath, ".settings-tmp-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	if err := file.Chmod(0600); err != nil {
+		file.Close()
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(file.Name(), filepath.Join(Basepath, "settings.json")); err != nil {
+		return err
+	}
+	dir, err := os.Open(Basepath)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
 func InitSettings() {
 	scm.SettingsHaveGoodBacktraces = Settings.Backtrace
 	scm.SetTrace(Settings.Trace)

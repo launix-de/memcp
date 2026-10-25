@@ -172,7 +172,8 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   is atomic. Recovery uses a bounded worker count and one resource per message.
   None of this recovery/control ownership participates in authorized read loops.
   `config` is a startup-initialized ordinary SAFE table; its native APIs persist
-  UUID/secret, cached login proofs, explicit retirement and completed copy placement.
+  cached login proofs, explicit retirement and completed copy placement, keyed by
+  the local node UUID even when the backend is shared.
   `backups` is a `mu`-guarded RAM cache of that placement, never permission.
   No private journal or persisted slave registration exists. `replicationStarting`
   is published before catalog discovery; startup GC cannot delete unexamined
@@ -250,8 +251,8 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   `TxContext.replicationCells` is guarded by its mutex and owns deduplicated
   write handover leases until commit/rollback. Session replication bindings are
   executor-owned; neither flights nor transaction bindings are persisted.
-  The installation UUID/secret is native configuration. `Settings.ReplicationUUID`
-  is a one-time legacy identity source, never a source of permissions. Existing
+  The installation UUID/secret stays in local `Settings.ReplicationUUID`, through
+  the ordinary atomic settings checkpoint, never a shared database backend. Existing
   private-journal installations require explicit resynchronization with live
   owners; startup refuses to resurrect their saved rights.
 
