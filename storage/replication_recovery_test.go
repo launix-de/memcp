@@ -700,3 +700,126 @@ func TestReplicationInvalidationRacingNewGrant(t *testing.T) {
 		}
 	}
 }
+
+func TestReplicationReconnectPreservesCompletedRequestDomain(t *testing.T) {
+	r := replicaRecoveryFixture()
+	peer, boot := uuid.NewString(), uuid.NewString()
+	resource := mosiResource{Database: "tenant"}
+	mark := replicaRequestMark{Sequence: 900, Write: true, ID: "completed-flight", Completed: true}
+	r.peersBoot[peer] = boot
+	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, Owner: peer, Epoch: 7, State: "IO", Requests: map[string]replicaRequestMark{peer: mark}}
+	request := replicaRequest{Boot: boot, Resources: []replicaRecord{{Resource: resource, Generation: "current"}}}
+	reply, err := r.recoverPeer(context.Background(), peer, request, replicaAuth{Databases: map[string]bool{"tenant": true}})
+	if err != nil || len(reply.Resources) != 1 {
+		t.Fatal("same-incarnation recovery failed", err)
+	}
+	if r.directory.Records[resource.key()].Requests[peer] != mark {
+		t.Fatal("reconnect reset completed request suppression")
+	}
+	if len(reply.Resources[0].Requests) != 0 {
+		t.Fatal("recovery leaked another node's request marks")
+	}
+	request.Boot = uuid.NewString()
+	if _, err := r.recoverPeer(context.Background(), peer, request, replicaAuth{Databases: map[string]bool{"tenant": true}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := r.directory.Records[resource.key()].Requests[peer]; present {
+		t.Fatal("new process retained old flight identity")
+	}
+}
+
+func TestReplicationRequestCompletionKeepsPublishedMapImmutable(t *testing.T) {
+	r := replicaRecoveryFixture()
+	resource := mosiResource{Database: "tenant"}
+	peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	r.peers = map[string]*mosiPeer{"reader": peer}
+	c := r.resourceCell(resource)
+	c.rights.Initialize(mosi.O)
+	pending, _ := c.rights.Request(mosi.M)
+	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, Owner: r.id, Epoch: 5, State: "O", Readers: map[string]bool{"reader": true}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- r.coordinate(ctx, r.id, mosiPacket{Kind: "write", ID: pending.Flight().ID(), Resource: resource, Sequence: 1})
+	}()
+	var packet *mosiPacket
+	select {
+	case message := <-peer.outgoing:
+		packet = message.Packet
+	case <-ctx.Done():
+		t.Fatal("no invalidation sent")
+	}
+	r.mu.Lock()
+	snapshot := r.directory.Records[resource.key()]
+	before := snapshot.Requests[r.id]
+	r.mu.Unlock()
+	if before.Completed || before.ID != pending.Flight().ID() {
+		t.Fatal("missing pending request publication")
+	}
+	if err := r.receivePacket("reader", &mosiPacket{Kind: "ack", ID: packet.ID, Resource: resource, Epoch: packet.Epoch}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("handover did not complete")
+	}
+	if snapshot.Requests[r.id] != before {
+		t.Fatal("completion mutated an already published request map")
+	}
+	if !r.directory.Records[resource.key()].Requests[r.id].Completed {
+		t.Fatal("successor did not publish request completion")
+	}
+}
+
+func TestReplicationTransferAckBindsCapturedGeneration(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "t_replica_ack_generation", 3)
+	r := replicaRecoveryFixture()
+	resource := mosiResource{Database: table.schema.Name, Table: table.Name, Shard: table.ActiveShards()[0].logicalID().String()}
+	if _, err := r.prepareResource(resource); err != nil {
+		t.Fatal(err)
+	}
+	peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	r.peers = map[string]*mosiPeer{"slave": peer}
+	defer close(peer.done)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- r.transmitResource(ctx, "slave", mosiPacket{ID: "snapshot", Resource: resource, Epoch: 9})
+	}()
+	for {
+		select {
+		case message := <-peer.outgoing:
+			packet := message.Packet
+			if packet.Kind == "begin" {
+				value, exists := r.steps.Load(packet.ID)
+				if !exists || packet.Generation == "" || value.(*replicaStep).generation != packet.Generation {
+					t.Fatal("ACK identity did not bind captured generation")
+				}
+			}
+			if packet.Kind == "end" {
+				ack := *packet
+				ack.Kind = "ack"
+				if err := r.receivePacket("slave", &ack); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-ctx.Done():
+					t.Fatal("matching generation ACK did not complete transfer")
+				}
+				return
+			}
+		case <-ctx.Done():
+			t.Fatal("transfer did not finish")
+		}
+	}
+}

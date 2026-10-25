@@ -298,9 +298,13 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		record.State = "S"
 	}
 	r.updateRecord(packet.Resource, func(current *replicaRecord) bool {
-		mark := record.Requests[requester]
+		// updateRecord cloned the latest published request directory. Complete
+		// only that private successor; the earlier pending record may be retained
+		// by diagnostics or recovery while this handover was awaiting an ACK.
+		mark := current.Requests[requester]
 		mark.Completed = true
-		record.Requests[requester] = mark
+		current.Requests[requester] = mark
+		record.Requests = current.Requests
 		*current = record
 		if r.master {
 			if r.confirmed == nil {

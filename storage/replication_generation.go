@@ -879,9 +879,6 @@ func (r *replicationManager) transmitResource(ctx context.Context, peerID string
 	if peer == nil {
 		return fmt.Errorf(mosi.NetworkError)
 	}
-	step := &replicaStep{peer: peerID, resource: header.Resource, epoch: header.Epoch, generation: header.Generation, done: make(chan struct{})}
-	r.steps.Store(header.ID, step)
-	defer r.steps.Delete(header.ID)
 	release, err := replicaPersistenceRead(header.Resource)
 	if err != nil {
 		return err
@@ -891,6 +888,12 @@ func (r *replicationManager) transmitResource(ctx context.Context, peerID string
 	if err != nil {
 		return err
 	}
+	// Bind the ACK to the captured generation even when the caller asked for
+	// the current resource without already knowing its physical UUID/hash.
+	header.Generation = transfer.generation
+	step := &replicaStep{peer: peerID, resource: header.Resource, epoch: header.Epoch, generation: header.Generation, done: make(chan struct{})}
+	r.steps.Store(header.ID, step)
+	defer r.steps.Delete(header.ID)
 	if err := r.sendResource(peer, header, transfer); err != nil {
 		return err
 	}
