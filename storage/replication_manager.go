@@ -270,9 +270,12 @@ func (r *replicationManager) peer(id string) *mosiPeer {
 
 // Engine access fails closed while configured replication has not published
 // its manager. Frontend bootstrap may still use the excluded system catalog.
-func activeReplication(name string) *replicationManager {
+func activeReplication(db *database) *replicationManager {
+	if db == nil {
+		return nil
+	}
 	r := replication.Load()
-	if r == nil && replicationStarting.Load() && validReplicaDatabase(name) {
+	if r == nil && replicationStarting.Load() && validReplicaDatabase(db.Name) {
 		panic(mosi.NetworkError)
 	}
 	return r

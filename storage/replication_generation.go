@@ -139,6 +139,12 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 		if record.Owner != "" {
 			changed := record.Resource != resource
 			record.Resource = resource
+			if r.master && !r.restoring[resource.Database] {
+				if r.confirmed == nil {
+					r.confirmed = make(map[string]string)
+				}
+				r.confirmed[resource.key()] = record.Owner
+			}
 			return changed
 		}
 		record.Resource, record.Owner, record.Epoch = resource, owner, 1
@@ -146,11 +152,15 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 		if local {
 			record.State, record.Generation = "M", shard.uuid.String()
 		}
-		if r.master && r.restoring[resource.Database] {
+		if r.master {
 			schemaKey := mosiResource{Database: resource.Database}.key()
-			if r.confirmed[schemaKey] == "" {
+			known := !r.restoring[resource.Database] || r.confirmed[schemaKey] != "" && (owner == r.id || r.peerReady[owner]) && len(r.recoveryReports[resource.key()]) == 0
+			if !known {
 				record.Owner, record.State = "", "IO"
 			} else {
+				if r.confirmed == nil {
+					r.confirmed = make(map[string]string)
+				}
 				r.confirmed[resource.key()] = record.Owner
 			}
 		}
@@ -160,7 +170,7 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 	publication := resource
 	c.resource.Store(&publication)
 	if initialized {
-		c.rights.Initialize(mosi.ParsePhase(record.State))
+		c.rights.Establish(mosi.ParsePhase(record.State))
 	}
 	return c
 }
@@ -224,7 +234,7 @@ func (r *replicationManager) prepareResource(resource mosiResource) (generation 
 	if resource.Shard == "" {
 		r.schemaShards(db, r.id, true)
 		db.save()
-		return fmt.Sprintf("%x", sha256.Sum256(db.persistence.ReadSchema())), nil
+		return replicaSchemaGeneration(db.persistence.ReadSchema())
 	}
 	c := r.resourceCell(resource)
 	shard := c.current.Load()
@@ -645,6 +655,13 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 		}
 		db.saveMu.Unlock()
 	}
+	if db != nil {
+		var err error
+		data, err = replicaSchemaForLocalData(db, data)
+		if err != nil {
+			return err
+		}
+	}
 	engine.WriteSchema(data)
 	replacement = newDatabase()
 	replacement.Name, replacement.persistence, replacement.srState = name, engine, COLD
@@ -856,4 +873,184 @@ func (r *replicationManager) restoreBackup(record replicaRecord) error {
 	}
 	transfer := &replicaImport{header: mosiPacket{Resource: record.Resource, Generation: record.Generation}, engine: db.persistence}
 	return r.finishImport(r.id, transfer)
+}
+
+// A schema transfer publishes declarations and logical topology. Physical UUIDs
+// still name this backend's own data: a peer's schema must not redirect a local
+// modifier away from its current generation and WAL before data arrives.
+func replicaSchemaForLocalData(db *database, data []byte) ([]byte, error) {
+	local := make(map[string]string)
+	for _, table := range db.tables.GetAll() {
+		for _, shard := range table.ActiveShards() {
+			if shard != nil {
+				local[shard.logicalID().String()] = shard.uuid.String()
+			}
+		}
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return nil, err
+	}
+	var tables map[string]json.RawMessage
+	if err := json.Unmarshal(document["tables"], &tables); err != nil {
+		return nil, err
+	}
+	for name, encoded := range tables {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &fields); err != nil {
+			return nil, err
+		}
+		for _, key := range []string{"Shards", "PShards"} {
+			if len(fields[key]) == 0 {
+				continue
+			}
+			var shards []json.RawMessage
+			if err := json.Unmarshal(fields[key], &shards); err != nil {
+				return nil, err
+			}
+			for index, raw := range shards {
+				if bytes.Equal(raw, []byte("null")) {
+					continue
+				}
+				var identity storageShard
+				if err := json.Unmarshal(raw, &identity); err != nil {
+					return nil, err
+				}
+				if generation, exists := local[identity.logicalID().String()]; exists {
+					replacement, err := json.Marshal(struct {
+						UUID    string `json:"uuid"`
+						Lineage string `json:"mosi"`
+					}{generation, identity.logicalID().String()})
+					if err != nil {
+						return nil, err
+					}
+					shards[index] = replacement
+				}
+			}
+			fields[key], _ = json.Marshal(shards)
+		}
+		tables[name], _ = json.Marshal(fields)
+	}
+	document["tables"], _ = json.Marshal(tables)
+	return json.Marshal(document)
+}
+
+// Schema coherence covers declarations/logical topology, not node-local data
+// locations or advisory statistics. Equivalent local UUID mappings have the
+// same generation digest after an ordinary schema transfer.
+func replicaSchemaGeneration(data []byte) (string, error) {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return "", err
+	}
+	var tables map[string]json.RawMessage
+	if err := json.Unmarshal(document["tables"], &tables); err != nil {
+		return "", err
+	}
+	for name, encoded := range tables {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &fields); err != nil {
+			return "", err
+		}
+		for _, key := range []string{"Auto_increment", "planner_row_estimate", "key_frequencies", "filter_feedback"} {
+			delete(fields, key)
+		}
+		for _, key := range []string{"Shards", "PShards"} {
+			if len(fields[key]) == 0 {
+				continue
+			}
+			var shards []*storageShard
+			if err := json.Unmarshal(fields[key], &shards); err != nil {
+				return "", err
+			}
+			ids := make([]string, len(shards))
+			for i, shard := range shards {
+				if shard != nil {
+					ids[i] = shard.logicalID().String()
+				}
+			}
+			fields[key], _ = json.Marshal(ids)
+		}
+		var columns []map[string]json.RawMessage
+		if err := json.Unmarshal(fields["Columns"], &columns); err != nil {
+			return "", err
+		}
+		for _, column := range columns {
+			delete(column, "PartitioningScore")
+		}
+		fields["Columns"], _ = json.Marshal(columns)
+		tables[name], _ = json.Marshal(fields)
+	}
+	document["tables"], _ = json.Marshal(tables)
+	normalized, err := json.Marshal(document)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(normalized)), nil
+}
+
+// Complete local ordinary data can retain writes committed by the restarting
+// master after a modifier surrendered ownership. Never choose an old slave copy
+// over this generation/WAL merely because the master's RAM directory was lost.
+func (r *replicationManager) completeLocalGeneration(resource mosiResource) (string, error) {
+	db := databases.Get(resource.Database)
+	if db == nil {
+		return "", nil
+	}
+	db.ensureLoaded()
+	db.persistenceLifecycle.RLock()
+	defer db.persistenceLifecycle.RUnlock()
+	if resource.Shard == "" {
+		return replicaSchemaGeneration(db.persistence.ReadSchema())
+	}
+	table := db.tables.Get(resource.Table)
+	if table == nil || table.PersistencyMode == Memory || table.PersistencyMode == Cache {
+		return "", nil
+	}
+	var current *storageShard
+	for _, shard := range table.ActiveShards() {
+		if shard != nil && shard.logicalID().String() == resource.Shard {
+			current = shard
+			break
+		}
+	}
+	if current == nil {
+		return "", nil
+	}
+	generation := current.uuid.String()
+	for _, column := range table.columnDeclarations() {
+		if !column.Computor.IsNil() {
+			continue
+		}
+		reader := db.persistence.ReadColumn(generation, column.Name)
+		var marker [1]byte
+		n, err := reader.Read(marker[:])
+		reader.Close()
+		if err != nil && err != io.EOF {
+			return "", err
+		}
+		if n == 0 {
+			return "", nil
+		}
+	}
+	if resource.Table != ".blobs" {
+		references, valid := readBlobManifest(db.persistence.ReadColumn(generation, blobManifestColumn))
+		if !valid {
+			return "", nil
+		}
+		for hash := range references {
+			reader := db.persistence.ReadBlob(hash)
+			if missing, ok := reader.(interface{ Missing() bool }); ok && missing.Missing() {
+				reader.Close()
+				return "", nil
+			}
+			var marker [1]byte
+			_, err := reader.Read(marker[:])
+			reader.Close()
+			if err != nil && err != io.EOF {
+				return "", err
+			}
+		}
+	}
+	return generation, nil
 }

@@ -973,8 +973,8 @@ func (s *storageShard) GetRead(currentTx *TxContext) ReadAccess {
 // Physical query-local IDs retain their original immutable generation. Rights
 // acquisition may install a successor, but must never reinterpret those IDs.
 func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
-	if !snapshot {
-		if r := activeReplication(s.t.schema.Name); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
+	if !snapshot && s.t != nil {
+		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
 			s = r.readShard(s, currentTx)
 		}
 	}
@@ -997,11 +997,13 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 }
 func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 	var release func()
-	if r := activeReplication(s.t.schema.Name); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
-		cell := r.shardCell(s)
-		cell, release = r.writeResource(*cell.resource.Load(), currentTx)
-		if current := cell.current.Load(); current != nil {
-			s = current
+	if s.t != nil {
+		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
+			cell := r.shardCell(s)
+			cell, release = r.writeResource(*cell.resource.Load(), currentTx)
+			if current := cell.current.Load(); current != nil {
+				s = current
+			}
 		}
 	}
 	s.ensureLoaded()

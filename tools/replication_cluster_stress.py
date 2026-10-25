@@ -319,8 +319,11 @@ def run_regressions(args, artifacts, journal):
                    "offline MySQL authentication")
             master.start()
             eventually(master.connected, "slave did not reconnect to restarted master")
-            eventually(lambda: (master.data_dir / DATABASE / "schema.json").read_bytes() ==
-                       (slave.data_dir / DATABASE / "schema.json").read_bytes(), "backup schema did not catch up")
+            def schema_backed_up():
+                source = slave.snapshot()["records"].get(DATABASE, {}).get("generation")
+                target = master.snapshot()["records"].get(DATABASE, {}).get("generation")
+                return source and source == target
+            eventually(schema_backed_up, "backup schema generation did not catch up")
             slave.kill()
             m.reject("SELECT * FROM items", status=500, contains=NETWORK_ERROR)
             s = slave.start()
@@ -330,6 +333,22 @@ def run_regressions(args, artifacts, journal):
                    "survived-offline-ddl", "offline DDL recovery")
             expect(slave.snapshot()["id"], identity,
                    "persistent reconnect identity")
+        # A master may become the modifier too. Its committed native WAL must
+        # survive restart instead of recovering the slave's older surrendered
+        # copy. Exercise the next slave write as well as reads on both nodes.
+        m.sql("UPDATE items SET value=value+1000 WHERE id=1")
+        expect((master.record("items")["state"], slave.record("items")["state"]),
+               ("M", "IO"), "master owns committed write before crash")
+        master.kill()
+        m = master.start()
+        eventually(master.connected, "master write owner did not recover")
+        expect(m.number("SELECT value FROM items WHERE id=1", "value"), 1013,
+               "master WAL after master crash")
+        expect(s.number("SELECT value FROM items WHERE id=1", "value"), 1013,
+               "slave receives latest master WAL after master crash")
+        s.sql("UPDATE items SET value=value-1000 WHERE id=1")
+        expect(s.number("SELECT value FROM items WHERE id=1", "value"), 13,
+               "slave write preserves recovered master data")
         m.sql("ALTER TABLE items ADD COLUMN extra INT DEFAULT 7")
         expect(s.number("SELECT COUNT(*) AS n FROM items WHERE extra=7"), 16, "remote DDL/defaults")
         s.sql("UPDATE items SET value=value WHERE id=1")

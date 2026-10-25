@@ -12,11 +12,10 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
-import "crypto/sha256"
 import "maps"
 import "sync"
-import "sync/atomic"
 import "context"
+import "sync/atomic"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -34,10 +33,13 @@ func (r *replicationManager) resourceKnown(resource mosiResource) bool {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	record, exists := r.directory.Records[resource.key()]
+	if exists && record.Owner == "" {
+		return false
+	}
 	if _, backup := r.backups[resource.key()]; !backup {
 		return true
 	}
-	record := r.directory.Records[resource.key()]
 	return record.Owner != "" && r.confirmed[resource.key()] == record.Owner
 }
 
@@ -52,7 +54,11 @@ func (r *replicationManager) recoveryInventory(auth replicaAuth) []replicaRecord
 		}
 		db.ensureLoaded()
 		schema := mosiResource{Database: db.Name}
-		resources[schema.key()] = replicaRecord{Resource: schema, Generation: fmt.Sprintf("%x", sha256.Sum256(db.persistence.ReadSchema()))}
+		generation, err := replicaSchemaGeneration(db.persistence.ReadSchema())
+		if err != nil {
+			panic(err)
+		}
+		resources[schema.key()] = replicaRecord{Resource: schema, Generation: generation}
 		for _, table := range db.tables.GetAll() {
 			if table.isEphemeralQueryTable() {
 				continue
@@ -128,7 +134,12 @@ func (r *replicationManager) recoverCached(peer *mosiPeer) {
 	}
 }
 
-func (r *replicationManager) recoverConnection(peer *mosiPeer, user string, auth replicaAuth) error {
+func (r *replicationManager) recoverConnection(peer *mosiPeer, user string, auth replicaAuth) (err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			err = fmt.Errorf("replication recovery: %v", failure)
+		}
+	}()
 	r.recoveryMu.Lock()
 	defer r.recoveryMu.Unlock()
 	if r.recoveredUsers[user] == peer {
@@ -295,7 +306,20 @@ func (r *replicationManager) recoverResource(ctx context.Context, id string, rep
 	if ctx.Err() != nil {
 		return replicaRecord{}, false, ctx.Err()
 	}
-	record, exists, claimed, err := r.mergeRecoveryReport(id, reported)
+	localGeneration := ""
+	if reported.State == "IO" && reported.Handoff == r.id {
+		r.mu.Lock()
+		_, backup := r.backups[resource.key()]
+		r.mu.Unlock()
+		if !backup {
+			var err error
+			localGeneration, err = r.completeLocalGeneration(resource)
+			if err != nil {
+				return replicaRecord{}, false, err
+			}
+		}
+	}
+	record, exists, claimed, err := r.mergeRecoveryReport(id, reported, localGeneration)
 	if err != nil || !exists {
 		return replicaRecord{}, false, err
 	}
@@ -332,7 +356,7 @@ func (r *replicationManager) recoverResource(ctx context.Context, id string, rep
 
 // Only immutable runtime metadata is merged while holding the manager mutex.
 // Catalog loading, installation, backend writes and network waits happen outside.
-func (r *replicationManager) mergeRecoveryReport(id string, reported replicaRecord) (replicaRecord, bool, bool, error) {
+func (r *replicationManager) mergeRecoveryReport(id string, reported replicaRecord, localGeneration string) (replicaRecord, bool, bool, error) {
 	resource := reported.Resource
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -411,10 +435,13 @@ func (r *replicationManager) mergeRecoveryReport(id string, reported replicaReco
 				continue
 			}
 			owner := source
-			if proof.Handoff == r.id && r.backups[resource.key()].Generation == proof.Generation {
+			if proof.Handoff == r.id && (r.backups[resource.key()].Generation == proof.Generation || localGeneration != "") {
 				owner = r.id
 			}
 			record = replicaRecord{Resource: resource, Owner: owner, Epoch: proof.Epoch, State: "IO", Readers: maps.Clone(proof.Readers), Generation: r.backups[resource.key()].Generation, InitialClaimed: proof.InitialClaimed}
+			if owner == r.id && localGeneration != "" {
+				record.Generation = localGeneration
+			}
 			delete(record.Readers, owner)
 			delete(record.Readers, proof.Handoff)
 			if owner == r.id {

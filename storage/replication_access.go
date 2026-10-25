@@ -153,6 +153,7 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 					defer cancel()
 					if err := r.coordinate(ctx, r.id, packet); err != nil {
+						fmt.Println("replication acquisition failed:", packet.Kind, packet.Resource.key(), err)
 						c.rights.Fail(packet.ID, err)
 					}
 				}()

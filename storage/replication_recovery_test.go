@@ -19,6 +19,7 @@ import "context"
 import "encoding/json"
 import "path/filepath"
 import "github.com/google/uuid"
+import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
 func replicaRecoveryFixture() *replicationManager {
@@ -360,5 +361,79 @@ func TestReplicationIdentityUsesLocalSettingsCheckpoint(t *testing.T) {
 	}
 	if files, err := filepath.Glob(filepath.Join(Basepath, ".settings-tmp-*")); err != nil || len(files) != 0 {
 		t.Fatal("settings checkpoint left a live temporary file", files, err)
+	}
+}
+
+func TestReplicationRuntimeSchemaCreatorConfirmsNewShard(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "treplication_runtime_creator", 1)
+	r := replicaRecoveryFixture()
+	creator := uuid.NewString()
+	shard := table.ActiveShards()[0]
+	cell := r.declareShard(shard, creator, false)
+	resource := *cell.resource.Load()
+	if err := r.saveBackup(resource, shard.uuid.String()); err != nil {
+		t.Fatal(err)
+	}
+	if !r.resourceKnown(resource) || r.directory.Records[resource.key()].Owner != creator || cell.rights.Phase() != mosi.IO {
+		t.Fatal("a running master's authenticated schema creator was mistaken for unknown restart authority")
+	}
+}
+
+func TestReplicationRecoveryKeepsMasterWALAfterSurrender(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "treplication_master_wal", 3)
+	table.schema.rebuild(true, false, false, table)
+	original := table.ActiveShards()[0]
+	table.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("committed-by-master")}}, nil, scm.NewNil(), false, nil)
+	r := replicaRecoveryFixture()
+	source := uuid.NewString()
+	resource := mosiResource{Database: table.schema.Name, Table: table.Name, Shard: original.logicalID().String()}
+	r.restoring[resource.Database] = true
+	report := replicaRecord{Resource: resource, State: "IO", Owner: source, Handoff: r.id, Epoch: 7, Generation: original.uuid.String()}
+	if _, err := r.recoverPeer(context.Background(), source, replicaRequest{Boot: uuid.NewString(), Resources: []replicaRecord{report}}, replicaAuth{Admin: true}); err != nil {
+		t.Fatal(err)
+	}
+	if r.directory.Records[resource.key()].Owner != r.id {
+		t.Fatal("old slave I copy replaced the master's newer committed data")
+	}
+	old := replication.Swap(r)
+	defer replication.Store(old)
+	access := table.ActiveShards()[0].GetRead(nil)
+	defer access.Release()
+	if access.shard.Count() != 4 {
+		t.Fatalf("master WAL was lost during recovery: rows=%d", access.shard.Count())
+	}
+}
+
+func TestReplicationSchemaTransferPreservesLocalPhysicalGeneration(t *testing.T) {
+	table, engine := createDurabilityTestTable(t, "treplication_local_physical", 3)
+	r := replicaRecoveryFixture()
+	old := replication.Swap(r)
+	defer replication.Store(old)
+	r.resourceCell(mosiResource{Database: table.schema.Name}).rights.Initialize(mosi.M)
+	r.schemaShards(table.schema, r.id, true)
+	table.schema.rebuild(true, false, false, table)
+	table.schema.save()
+	remoteSchema := append([]byte(nil), engine.ReadSchema()...)
+	table.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("newer-master-main")}}, nil, scm.NewNil(), false, nil)
+	table.schema.rebuild(true, false, false, table)
+	local := table.ActiveShards()[0]
+	if err := r.installSchema(uuid.NewString(), table.schema.Name, engine, remoteSchema); err != nil {
+		t.Fatal(err)
+	}
+	loaded := newDatabase()
+	if err := json.Unmarshal(engine.ReadSchema(), loaded); err != nil {
+		t.Fatal(err)
+	}
+	saved := loaded.tables.Get(table.Name).ActiveShards()[0]
+	if saved.uuid != local.uuid {
+		t.Fatal("remote schema redirected storage away from the local current generation/WAL")
+	}
+	remoteGeneration, err := replicaSchemaGeneration(remoteSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localGeneration, err := replicaSchemaGeneration(engine.ReadSchema())
+	if err != nil || localGeneration != remoteGeneration {
+		t.Fatal("local physical UUID mapping changed semantic schema identity", err)
 	}
 }

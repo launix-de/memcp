@@ -73,6 +73,11 @@ same ownership, visibility, lifetime, and durability guarantees.
   local settings. No coherence transition serializes or fsyncs the directory.
   A promoted safety copy becomes ordinary current data only after complete
   installation and foreign permission removal; placement metadata is then retired.
+  An interrupted handover reported by its surviving source may recover the
+  master's complete ordinary generation and WAL. A peer schema transfer keeps
+  local physical UUID bindings for existing logical shards; schema generations
+  compare declarations/topology independently of those local bindings and
+  advisory statistics.
 - MR/OR/SR grant no access and coalesce requests in the state machine. A read
   request can upgrade to MR; an older read grant cannot release its write waiters.
   Complete data installation precedes publication of the RAM permission and

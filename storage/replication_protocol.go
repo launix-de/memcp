@@ -70,6 +70,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 				}
 			}()
 			if requestErr != nil {
+				fmt.Println("replication request failed:", copy.Kind, copy.Resource.key(), requestErr)
 				_ = peer.post(mosiPacket{Kind: "failure", ID: copy.ID, Resource: copy.Resource, Error: requestErr.Error()})
 			}
 		}()

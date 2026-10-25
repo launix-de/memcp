@@ -212,6 +212,10 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   Runtime COLD remains a separate materialization state. Eviction publishes IS only after verifying a current persisted generation
   with no deltas, and cannot promote IO or a pending request. Restart requires
   live peer authority before any former delegated local generation is usable.
+  Interrupted handover recovery uses the surviving source's RAM report and the
+  master's complete native generation/WAL. Incoming schemas preserve local
+  physical UUIDs for existing logical shards; canonical schema digests exclude
+  physical placement and advisory statistics.
   `resource`, `current` and the immutable cell lookup directory are atomically
   published; additions use the manager mutex. `storageShard.lineage` is immutable
   and inherited by rebuild successors; physical UUIDs identify generations.
