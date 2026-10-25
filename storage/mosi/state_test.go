@@ -42,7 +42,7 @@ func TestMosiIndependentResources(t *testing.T) {
 	if cluster.Phase() != mosi.M || replication.Phase() != mosi.MR || outer.Phase() != mosi.MR {
 		t.Fatal("one resource's publication changed another request or its immutable snapshot")
 	}
-	replication.Fail(inner.Flight().ID(), fmt.Errorf(mosi.NetworkError))
+	replication.Fail(inner.Flight().ID(), fmt.Errorf(mosi.NetworkError), mosi.IO)
 	<-inner.Flight().Done()
 	if cluster.Phase() != mosi.M || inner.Flight().Err() == nil {
 		t.Fatal("one resource's failure affected another resource")
@@ -177,7 +177,7 @@ func TestMosiAuthorizedReadsDoNotPublish(t *testing.T) {
 func TestMosiFailureAndRecovery(t *testing.T) {
 	var state mosi.State
 	first, _ := state.Request(mosi.S)
-	state.Fail(first.Flight().ID(), fmt.Errorf(mosi.NetworkError))
+	state.Fail(first.Flight().ID(), fmt.Errorf(mosi.NetworkError), mosi.IO)
 	<-first.Flight().Done()
 	if first.Flight().Err() == nil || state.Phase() != mosi.IO {
 		t.Fatal("network failure did not complete request")
@@ -254,7 +254,7 @@ func TestMosiInvalidationRemovesBackendAuthority(t *testing.T) {
 	if action != mosi.Send || publication.Phase() != mosi.SR {
 		t.Fatal("revoked backend generation remained locally readable")
 	}
-	state.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError))
+	state.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError), mosi.IO)
 	if state.Phase() != mosi.IO {
 		t.Fatal("unreachable owner fell back to a backup")
 	}
@@ -310,7 +310,7 @@ func TestMosiFailedUpgradeRetainsOnlyUnrevokedReadPermission(t *testing.T) {
 			if invalidated {
 				state.Publish(mosi.IO)
 			}
-			state.Fail(request.Flight().ID(), fmt.Errorf(mosi.NetworkError))
+			state.Fail(request.Flight().ID(), fmt.Errorf(mosi.NetworkError), mosi.IO)
 			<-request.Flight().Done()
 			want := phase
 			if invalidated {
@@ -477,4 +477,25 @@ func TestMosiBackendRestorePreservesClosedWriteAdmission(t *testing.T) {
 		t.Fatal("completed eviction retained write admission")
 	}
 	writer.Release()
+}
+
+func TestMosiReadFailureRacingUpgradePreservesWriteRequest(t *testing.T) {
+	for range 500 {
+		var state mosi.State
+		read, _ := state.Request(mosi.S)
+		var workers sync.WaitGroup
+		start := make(chan struct{})
+		workers.Add(2)
+		go func() { defer workers.Done(); <-start; state.Request(mosi.M) }()
+		go func() {
+			defer workers.Done()
+			<-start
+			state.Fail(read.Flight().ID(), fmt.Errorf("read failed"), mosi.S)
+		}()
+		close(start)
+		workers.Wait()
+		if state.Phase() != mosi.MR {
+			t.Fatal("read failure cancelled concurrent write upgrade")
+		}
+	}
 }

@@ -41,11 +41,13 @@ type replicaImport struct {
 }
 
 type replicaStep struct {
-	peer     string
-	resource mosiResource
-	done     chan struct{}
-	once     sync.Once
-	err      error
+	peer       string
+	resource   mosiResource
+	epoch      uint64
+	generation string
+	done       chan struct{}
+	once       sync.Once
+	err        error
 }
 
 // Source preparation follows native lifecycle -> MOSI handover ownership.
@@ -67,6 +69,12 @@ func replicaPersistenceRead(resource mosiResource) (func(), error) {
 			db.persistenceLifecycle.RUnlock()
 		}
 	}, nil
+}
+
+// A request ID names one operation, not just a peer/resource pair. An old
+// epoch or a different installed generation cannot complete its acknowledgement.
+func (step *replicaStep) matches(source string, packet mosiPacket) bool {
+	return step.peer == source && step.resource == packet.Resource && step.epoch == packet.Epoch && (step.generation == "" || step.generation == packet.Generation)
 }
 
 func (step *replicaStep) finish(err error) { step.once.Do(func() { step.err = err; close(step.done) }) }
@@ -850,7 +858,7 @@ func (r *replicationManager) step(ctx context.Context, peerID string, packet mos
 	if peer == nil {
 		return fmt.Errorf(mosi.NetworkError)
 	}
-	step := &replicaStep{peer: peerID, resource: packet.Resource, done: make(chan struct{})}
+	step := &replicaStep{peer: peerID, resource: packet.Resource, epoch: packet.Epoch, generation: packet.Generation, done: make(chan struct{})}
 	r.steps.Store(packet.ID, step)
 	defer r.steps.Delete(packet.ID)
 	if err := peer.post(packet); err != nil {
@@ -871,7 +879,7 @@ func (r *replicationManager) transmitResource(ctx context.Context, peerID string
 	if peer == nil {
 		return fmt.Errorf(mosi.NetworkError)
 	}
-	step := &replicaStep{peer: peerID, resource: header.Resource, done: make(chan struct{})}
+	step := &replicaStep{peer: peerID, resource: header.Resource, epoch: header.Epoch, generation: header.Generation, done: make(chan struct{})}
 	r.steps.Store(header.ID, step)
 	defer r.steps.Delete(header.ID)
 	release, err := replicaPersistenceRead(header.Resource)

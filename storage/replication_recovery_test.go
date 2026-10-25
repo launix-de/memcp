@@ -437,3 +437,266 @@ func TestReplicationSchemaTransferPreservesLocalPhysicalGeneration(t *testing.T)
 		t.Fatal("local physical UUID mapping changed semantic schema identity", err)
 	}
 }
+
+func TestReplicationDelayedInvalidationPreservesNewGrant(t *testing.T) {
+	r := replicaRecoveryFixture()
+	r.master = false
+	r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	resource := mosiResource{Database: "tenant"}
+	c := r.resourceCell(resource)
+	c.rights.Initialize(mosi.M)
+	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, State: "M", Owner: r.id, Epoch: 9}
+	if err := r.invalidateResource(context.Background(), "", mosiPacket{Kind: "invalidate", ID: "old-revocation", Resource: resource, Epoch: 8}); err != nil {
+		t.Fatal(err)
+	}
+	if c.rights.Phase() != mosi.M || r.directory.Records[resource.key()].State != "M" {
+		t.Fatal("old invalidation revoked newer M")
+	}
+}
+
+func TestReplicationDuplicateWriteDoesNotReacquireOwnership(t *testing.T) {
+	r := replicaRecoveryFixture()
+	resource := mosiResource{Database: "tenant"}
+	c := r.resourceCell(resource)
+	c.rights.Initialize(mosi.IO)
+	pending, _ := c.rights.Request(mosi.M)
+	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, State: "IO", Owner: r.id, Epoch: 5}
+	packet := mosiPacket{Kind: "write", ID: pending.Flight().ID(), Resource: resource, Sequence: 1}
+	if err := r.coordinate(context.Background(), r.id, packet); err != nil {
+		t.Fatal(err)
+	}
+	epoch := r.directory.Records[resource.key()].Epoch
+	if err := r.coordinate(context.Background(), r.id, packet); err != nil {
+		t.Fatal(err)
+	}
+	if r.directory.Records[resource.key()].Epoch != epoch {
+		t.Fatal("duplicate write executed a second ownership transition")
+	}
+	// Even after a later delegation, replaying the completed request must not
+	// recall that owner's data or regain rights on behalf of the old requester.
+	r.updateRecord(resource, func(record *replicaRecord) bool { record.Owner = "another-node"; record.Epoch++; return true })
+	if err := r.coordinate(context.Background(), r.id, packet); err != nil {
+		t.Fatal("completed replay attempted a new recall", err)
+	}
+}
+
+func TestReplicationAcknowledgementMatchesHandover(t *testing.T) {
+	resource := mosiResource{Database: "tenant"}
+	for _, kind := range []string{"ack", "failure", "begin"} {
+		for _, mismatch := range []string{"peer", "resource", "epoch", "generation"} {
+			t.Run(kind+"/"+mismatch, func(t *testing.T) {
+				r := replicaRecoveryFixture()
+				source := "slave"
+				peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+				r.peers = map[string]*mosiPeer{source: peer, "other": peer}
+				step := &replicaStep{peer: source, resource: resource, epoch: 9, generation: "current", done: make(chan struct{})}
+				r.steps.Store("handover", step)
+				packet := mosiPacket{Kind: kind, ID: "handover", Resource: resource, Epoch: 9, Generation: "current"}
+				switch mismatch {
+				case "peer":
+					source = "other"
+				case "resource":
+					packet.Resource.Database = "other"
+				case "epoch":
+					packet.Epoch--
+				case "generation":
+					packet.Generation = "old"
+				}
+				if err := r.receivePacket(source, &packet); err == nil {
+					t.Fatal("mismatched operation accepted")
+				}
+				select {
+				case <-step.done:
+					t.Fatal("mismatched packet completed handover")
+				default:
+				}
+				if kind != "begin" {
+					packet = mosiPacket{Kind: kind, ID: "handover", Resource: resource, Epoch: 9, Generation: "current"}
+					if err := r.receivePacket("slave", &packet); err != nil {
+						t.Fatal(err)
+					}
+					select {
+					case <-step.done:
+					default:
+						t.Fatal("matching reply did not finish handover")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestReplicationStaleGrantFailsPendingFlight(t *testing.T) {
+	r := replicaRecoveryFixture()
+	resource := mosiResource{Database: "tenant"}
+	c := r.resourceCell(resource)
+	c.rights.Initialize(mosi.IO)
+	pending, _ := c.rights.Request(mosi.M)
+	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, Owner: "other", Epoch: 9, State: "IO"}
+	err := r.acceptGrant(mosiPacket{ID: pending.Flight().ID(), Resource: resource, Epoch: 8, State: "M", Owner: r.id})
+	if err == nil || c.rights.Phase() != mosi.IO || r.directory.Records[resource.key()].Epoch != 9 {
+		t.Fatal("stale grant published authority", err)
+	}
+	select {
+	case <-pending.Flight().Done():
+		if pending.Flight().Err() == nil {
+			t.Fatal("stale grant succeeded")
+		}
+	default:
+		t.Fatal("stale grant stranded waiters")
+	}
+}
+
+func TestReplicationCompletedReadStillAllowsWriteUpgrade(t *testing.T) {
+	r := replicaRecoveryFixture()
+	resource := mosiResource{Database: "tenant"}
+	c := r.resourceCell(resource)
+	c.rights.Initialize(mosi.IO)
+	read, _ := c.rights.Request(mosi.S)
+	c.rights.Request(mosi.M) // upgrade wins before the read grant arrives
+	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, Owner: r.id, Epoch: 5, State: "IO"}
+	packet := mosiPacket{Kind: "read", ID: read.Flight().ID(), Resource: resource, Sequence: 1}
+	if err := r.coordinate(context.Background(), r.id, packet); err != nil {
+		t.Fatal(err)
+	}
+	if c.rights.Phase() != mosi.MR {
+		t.Fatal("read reply bypassed pending write upgrade")
+	}
+	packet.Kind = "write"
+	var workers sync.WaitGroup
+	for range 32 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			if err := r.coordinate(context.Background(), r.id, packet); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	workers.Wait()
+	if c.rights.Phase() != mosi.M || r.directory.Records[resource.key()].Epoch != 6 {
+		t.Fatal("write upgrade lost or executed repeatedly")
+	}
+}
+
+func TestReplicationStaleTransferDoesNotOpenBackend(t *testing.T) {
+	r := replicaRecoveryFixture()
+	r.master = false
+	r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	resource := mosiResource{Database: "tenant"}
+	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, Epoch: 9}
+	if err := r.receivePacket("", &mosiPacket{Kind: "begin", ID: "old", Resource: resource, Epoch: 8}); err == nil {
+		t.Fatal("stale transfer opened backend")
+	}
+	if _, exists := r.imports.Load("/old"); exists {
+		t.Fatal("stale transfer registered an import")
+	}
+	// A transfer which began before a newer grant must also be rejected at end,
+	// before even attempting to publish this deliberately invalid schema payload.
+	transfer := &replicaImport{header: mosiPacket{ID: "old", Resource: resource, Epoch: 8}}
+	r.imports.Store("/old", transfer)
+	err := r.receivePacket("", &mosiPacket{Kind: "end", ID: "old", Resource: resource, Epoch: 8})
+	if err == nil || err.Error() != "stale transfer epoch" {
+		t.Fatal("staged transfer published after newer epoch", err)
+	}
+	if _, exists := r.imports.Load("/old"); exists {
+		t.Fatal("rejected transfer retained GC registration")
+	}
+}
+
+func TestReplicationReadFailureDoesNotCancelWriteUpgrade(t *testing.T) {
+	r := replicaRecoveryFixture()
+	r.master = false
+	r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	resource := mosiResource{Database: "tenant"}
+	c := r.resourceCell(resource)
+	c.rights.Initialize(mosi.IO)
+	pending, _ := c.rights.Request(mosi.S)
+	c.rights.Request(mosi.M)
+	packet := mosiPacket{Kind: "failure", ID: pending.Flight().ID(), Resource: resource, State: "S", Error: "read failed"}
+	if err := r.receivePacket("", &packet); err != nil {
+		t.Fatal(err)
+	}
+	if c.rights.Phase() != mosi.MR {
+		t.Fatal("read failure cancelled stronger request")
+	}
+	select {
+	case <-pending.Flight().Done():
+		t.Fatal("read failure woke write waiters")
+	default:
+	}
+	packet.State = "M"
+	if err := r.receivePacket("", &packet); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-pending.Flight().Done():
+		if pending.Flight().Err() == nil {
+			t.Fatal("write failure succeeded")
+		}
+	default:
+		t.Fatal("write failure did not wake waiters")
+	}
+}
+
+func TestReplicationCurrentInvalidationAndFutureEpoch(t *testing.T) {
+	r := replicaRecoveryFixture()
+	r.master = false
+	r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	resource := mosiResource{Database: "tenant"}
+	c := r.resourceCell(resource)
+	c.rights.Initialize(mosi.S)
+	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, State: "S", Epoch: 9}
+	packet := mosiPacket{Kind: "invalidate", ID: "invalidate", Resource: resource, Epoch: 10}
+	if err := r.invalidateResource(context.Background(), "", packet); err == nil || c.rights.Phase() != mosi.S {
+		t.Fatal("future invalidation changed current authority")
+	}
+	packet.Epoch = 9
+	for range 2 {
+		if err := r.invalidateResource(context.Background(), "", packet); err != nil {
+			t.Fatal(err)
+		}
+		if c.rights.Phase() != mosi.IO {
+			t.Fatal("current invalidation retained read rights")
+		}
+		reply := <-r.upstream.outgoing
+		if reply.Packet.Kind != "ack" || reply.Packet.Epoch != 9 || reply.Packet.ID != packet.ID {
+			t.Fatal("invalidation lost operation identity")
+		}
+	}
+}
+
+func TestReplicationInvalidationRacingNewGrant(t *testing.T) {
+	for range 100 {
+		r := replicaRecoveryFixture()
+		r.master = false
+		r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+		resource := mosiResource{Database: "tenant"}
+		c := r.resourceCell(resource)
+		c.rights.Initialize(mosi.S)
+		pending, _ := c.rights.Request(mosi.M)
+		r.directory.Records[resource.key()] = replicaRecord{Resource: resource, State: "S", Epoch: 9}
+		start := make(chan struct{})
+		var workers sync.WaitGroup
+		workers.Add(2)
+		go func() {
+			defer workers.Done()
+			<-start
+			if err := r.invalidateResource(context.Background(), "", mosiPacket{Kind: "invalidate", ID: "old", Resource: resource, Epoch: 9}); err != nil {
+				t.Error(err)
+			}
+		}()
+		go func() {
+			defer workers.Done()
+			<-start
+			if err := r.acceptGrant(mosiPacket{ID: pending.Flight().ID(), Resource: resource, State: "M", Epoch: 10, Owner: r.id}); err != nil {
+				t.Error(err)
+			}
+		}()
+		close(start)
+		workers.Wait()
+		if c.rights.Phase() != mosi.M || r.directory.Records[resource.key()].Epoch != 10 {
+			t.Fatal("old invalidation raced newer grant publication")
+		}
+	}
+}

@@ -27,8 +27,10 @@ type replicaRecord struct {
 }
 
 type replicaRequestMark struct {
-	Sequence uint64 `json:"sequence"`
-	Write    bool   `json:"write"`
+	Sequence  uint64 `json:"sequence"`
+	Write     bool   `json:"write"`
+	ID        string `json:"id,omitempty"`
+	Completed bool   `json:"completed,omitempty"`
 }
 
 type replicaDirectory struct {

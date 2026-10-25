@@ -171,6 +171,14 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   record maps are immutable; mutations copy their reader/request directories.
   A coordinator's pending reader directory remains private until final publication.
   Each database schema and logical data shard has its own `replicaCell`.
+  Its existing `acquire` mutex serializes inbound grant, recall, invalidation
+  and final slave import publication against epoch changes; local granted
+  reads and write batches never acquire it. Release it before transport sends.
+  `replicaRequestMark.ID` and `Completed` belong to the immutable RAM directory
+  entry under existing resource-directory serialization. Completed requests
+  cannot execute twice; a same-flight read-to-write upgrade remains valid.
+  `replicaStep.epoch` and `generation` are immutable operation identity, set
+  before registration and checked before replies can finish that operation.
   Authenticated reconnect reports recover rights from live participants. `boot`
   identifies a process incarnation; `peersBoot`, `peerReady`, `initialClaims`, `confirmed` and
   `recoveryReports` are guarded by `mu`. `restoring` is initialized before

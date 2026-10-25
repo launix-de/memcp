@@ -18,7 +18,15 @@ import "github.com/launix-de/memcp/storage/mosi"
 
 func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 	c := r.resourceCell(packet.Resource)
+	c.acquire.Lock()
+	defer c.acquire.Unlock()
 	_, err := c.rights.Grant(packet.ID, mosi.ParsePhase(packet.State), func() error {
+		r.mu.Lock()
+		current := r.directory.Records[packet.Resource.key()]
+		r.mu.Unlock()
+		if packet.Epoch < current.Epoch {
+			return fmt.Errorf("stale grant epoch")
+		}
 		r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
 			record.Resource, record.State, record.Epoch, record.Owner = packet.Resource, packet.State, packet.Epoch, packet.Owner
 			record.Readers = packet.Readers
@@ -41,14 +49,36 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 		return fmt.Errorf("invalidation from non-master")
 	}
 	c := r.resourceCell(packet.Resource)
-	handover, err := c.rights.BeginHandover(ctx, c.drainWrites)
-	if err != nil {
+	// Serialize only inbound authority publication against a newer grant. Local
+	// read/write admission never takes acquire, and it is released before send.
+	if err := func() error {
+		c.acquire.Lock()
+		defer c.acquire.Unlock()
+		r.mu.Lock()
+		epoch := r.directory.Records[packet.Resource.key()].Epoch
+		r.mu.Unlock()
+		if packet.Epoch > epoch {
+			return fmt.Errorf("future invalidation epoch")
+		}
+		if packet.Epoch < epoch {
+			return nil
+		}
+		handover, err := c.rights.BeginHandover(ctx, c.drainWrites)
+		if err != nil {
+			return err
+		}
+		defer handover.Release()
+		r.localRecord(packet.Resource, mosi.IO, "")
+		r.publishLocal(packet.Resource, mosi.IO)
+		return nil
+	}(); err != nil {
 		return err
 	}
-	defer handover.Release()
-	r.localRecord(packet.Resource, mosi.IO, "")
-	r.publishLocal(packet.Resource, mosi.IO)
-	return r.peer(source).post(mosiPacket{Kind: "ack", Resource: packet.Resource, ID: packet.ID})
+	peer := r.peer(source)
+	if peer == nil {
+		return fmt.Errorf(mosi.NetworkError)
+	}
+	return peer.post(mosiPacket{Kind: "ack", Resource: packet.Resource, ID: packet.ID, Epoch: packet.Epoch})
 }
 
 func (r *replicationManager) offerResource(ctx context.Context, source string, packet mosiPacket) error {
@@ -65,6 +95,13 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 		return err
 	}
 	defer releasePersistence()
+	c.acquire.Lock()
+	authorityLocked := true
+	defer func() {
+		if authorityLocked {
+			c.acquire.Unlock()
+		}
+	}()
 	handover, err := c.rights.BeginHandover(ctx, c.drainWrites)
 	if err != nil {
 		return err
@@ -106,6 +143,8 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 	}
 	handover.Release()
 	locked = false
+	c.acquire.Unlock()
+	authorityLocked = false
 	releasePersistence()
 	return r.sendResource(r.peer(source), packet, transfer)
 }
@@ -144,14 +183,17 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			}
 		}
 		mark := record.Requests[requester]
-		if packet.Sequence < mark.Sequence || (packet.Sequence == mark.Sequence && mark.Write && !write) {
+		sameSequence := packet.Sequence == mark.Sequence
+		differentFlight := mark.ID != "" && mark.ID != packet.ID
+		completed := mark.Completed && mark.Write == write
+		if packet.Sequence < mark.Sequence || sameSequence && (differentFlight || mark.Write && !write || completed) {
 			stale = true
 			return false
 		}
 		if record.Requests == nil {
 			record.Requests = make(map[string]replicaRequestMark)
 		}
-		record.Requests[requester] = replicaRequestMark{Sequence: packet.Sequence, Write: write}
+		record.Requests[requester] = replicaRequestMark{Sequence: packet.Sequence, Write: write, ID: packet.ID}
 		return true
 	})
 	if stale {
@@ -256,6 +298,9 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		record.State = "S"
 	}
 	r.updateRecord(packet.Resource, func(current *replicaRecord) bool {
+		mark := record.Requests[requester]
+		mark.Completed = true
+		record.Requests[requester] = mark
 		*current = record
 		if r.master {
 			if r.confirmed == nil {
