@@ -59,7 +59,7 @@ jobs:
 
       - name: Check MOSI state-machine and publication units for races
         run: >-
-          go test -race -tags=nophp ./storage
+          go test -race -tags=nophp ./storage/mosi ./storage
           -run 'TestReplication|TestMosi|TestCreateTableRefreshesInvalidatedPlannerCacheOnInit'
           -count=1
 

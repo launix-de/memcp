@@ -61,7 +61,7 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int, complete bool
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
 	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
-		publication := r.resourceCell(replicaResource{Database: db.Name})
+		publication := r.resourceCell(mosiResource{Database: db.Name})
 		publication.importPublication.Lock()
 		defer publication.importPublication.Unlock()
 		pending := false

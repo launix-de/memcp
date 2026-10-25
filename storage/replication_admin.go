@@ -18,6 +18,7 @@ import "time"
 import "context"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage/mosi"
 
 type replicaStatus struct {
 	ID        string   `json:"id"`
@@ -70,7 +71,7 @@ func (r *replicationManager) reclaimDatabase(name string) bool {
 	if r.master || !validReplicaDatabase(name) {
 		panic("database reclaim requires a replication slave and a user database")
 	}
-	schema := r.obtain(replicaResource{Database: name}, mosiM, "")
+	schema := r.obtain(mosiResource{Database: name}, mosi.M, "")
 	db := databases.Get(name)
 	if db == nil {
 		panic("missing reclaimed database")
@@ -83,13 +84,13 @@ func (r *replicationManager) reclaimDatabase(name string) bool {
 		}
 		for _, shard := range table.ActiveShards() {
 			if shard != nil {
-				r.obtain(*r.shardCell(shard).resource.Load(), mosiM, "")
+				r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "")
 			}
 		}
 	}
 	ownsM := func(cell *replicaCell) bool {
-		state := cell.rights.snapshot()
-		return state.phase == mosiM || state.phase == mosiIS && state.backend == mosiM
+		state := cell.rights.Snapshot()
+		return state.Phase() == mosi.M || state.Phase() == mosi.IS && state.Backend() == mosi.M
 	}
 	for _, table := range db.tables.GetAll() {
 		if table.isEphemeralQueryTable() {
@@ -203,7 +204,7 @@ func (r *replicationManager) retire(id string) error {
 		r.journal.Records[name] = record
 		err := r.saveLocked()
 		if err == nil {
-			c.rights.publish(parseMosiPhase(record.State))
+			c.rights.Publish(mosi.ParsePhase(record.State))
 		}
 		r.mu.Unlock()
 		c.gate.Unlock()
@@ -226,7 +227,7 @@ func StopReplication() {
 		r.mu.Lock()
 		r.stopping = true
 		close(r.done)
-		peers := make([]*replicationPeer, 0, len(r.peers)+1)
+		peers := make([]*mosiPeer, 0, len(r.peers)+1)
 		for _, p := range r.peers {
 			peers = append(peers, p)
 		}
@@ -301,9 +302,9 @@ func replicationAdmin(arguments []scm.Scmer) scm.Scmer {
 	}
 	peer := r.peer("")
 	if peer == nil {
-		panic(replicationNetworkError)
+		panic(mosi.NetworkError)
 	}
-	ctx, cancel := replicaPacketContext(peer)
+	ctx, cancel := mosiPacketContext(peer)
 	defer cancel()
 	var result replicaAdminResult
 	request := replicaRequest{User: user, Hash: auth.Hash, Database: database, SQL: arguments[2].String(), PostgreSQL: arguments[3].Bool()}

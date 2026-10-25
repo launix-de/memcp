@@ -169,10 +169,20 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   `directory` serializes ownership handovers; `gate` protects only write batches
   and transactions. Already authorized reads use atomic state loads and existing
   snapshot lifetimes, without additional reader registration or admission writes.
-  `mosiState` publishes immutable M/O/S/IS/IO/MR/OR/SR descriptors using CAS on
+  `storage/mosi.State` publishes immutable M/O/S/IS/IO/MR/OR/SR descriptors using CAS on
   transitions only. Pending request descriptors own one flight and wake all
   waiters after installation and durable permission publication. SR/OR upgrades
   retain that flight; late read grants cannot satisfy MR.
+  The `storage/mosi` package has no storage/frontend/backend dependencies;
+  publication fields remain private and its callers use immutable accessors.
+  `Flight.Err()` is read only after `Done()` closes. Its sequence is assigned
+  under the existing journal ownership after durable save, before enqueueing.
+  `mosi_transport.go` and `mosi_wire.go` contain shared engine transport/framing;
+  `replication_directory.go` coordinates the current star topology, while
+  `replication_generation.go` owns storage installation. Authentication, journal,
+  session integration and startup live in their matching `replication_*.go` files.
+  These adapters remain separate from the reusable state machine; adding a
+  cluster domain must not fork its permission/publication protocol.
   IS represents a current backend-only generation, retaining its previously
   durable M/O/S permission for local restoration. IO always acquires from the
   remote owner, regardless of backup files. Backend-only authority is never

@@ -18,42 +18,43 @@ import "context"
 import "sync/atomic"
 import "encoding/json"
 import "github.com/gorilla/websocket"
+import "github.com/launix-de/memcp/storage/mosi"
 
-// replicationPeer multiplexes requests in both directions over the slave's
-// outbound connection. Neither RPC handlers nor storage I/O run under its mutex.
+// mosiPeer multiplexes requests in both directions over one peer connection.
+// Neither RPC handlers nor storage I/O run under its mutex.
 // A disconnected peer fails every outstanding call; no write is retried here.
-type replicationPeer struct {
+type mosiPeer struct {
 	conn      *websocket.Conn
 	writeMu   sync.Mutex
-	outgoing  chan replicationMessage
+	outgoing  chan mosiMessage
 	writeDone chan struct{}
 	mu        sync.Mutex
-	pending   map[uint64]chan replicationMessage
+	pending   map[uint64]chan mosiMessage
 	next      atomic.Uint64
 	done      chan struct{}
 	once      sync.Once
 	handle    func(context.Context, string, json.RawMessage) (any, error)
-	packet    func(*replicaPacket) error
+	packet    func(*mosiPacket) error
 	ctx       context.Context
 	cancel    context.CancelFunc
 	readDone  chan struct{}
 	workers   sync.WaitGroup
 }
 
-type replicationMessage struct {
+type mosiMessage struct {
 	ID     uint64          `json:"id"`
 	Method string          `json:"method,omitempty"`
 	Data   json.RawMessage `json:"data,omitempty"`
 	Error  string          `json:"error,omitempty"`
-	Packet *replicaPacket  `json:"packet,omitempty"`
+	Packet *mosiPacket     `json:"packet,omitempty"`
 }
 
-type replicationRemoteError string
+type mosiRemoteError string
 
-func (e replicationRemoteError) Error() string { return string(e) }
+func (e mosiRemoteError) Error() string { return string(e) }
 
-func newReplicationPeer(conn *websocket.Conn, handle func(context.Context, string, json.RawMessage) (any, error), packet func(*replicaPacket) error) *replicationPeer {
-	p := &replicationPeer{conn: conn, pending: make(map[uint64]chan replicationMessage), done: make(chan struct{}), handle: handle, packet: packet, outgoing: make(chan replicationMessage, 8), writeDone: make(chan struct{})}
+func newMosiPeer(conn *websocket.Conn, handle func(context.Context, string, json.RawMessage) (any, error), packet func(*mosiPacket) error) *mosiPeer {
+	p := &mosiPeer{conn: conn, pending: make(map[uint64]chan mosiMessage), done: make(chan struct{}), handle: handle, packet: packet, outgoing: make(chan mosiMessage, 8), writeDone: make(chan struct{})}
 	p.readDone = make(chan struct{})
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	conn.SetReadLimit(256 * 1024)
@@ -79,16 +80,16 @@ func newReplicationPeer(conn *websocket.Conn, handle func(context.Context, strin
 	return p
 }
 
-func (p *replicationPeer) close() {
+func (p *mosiPeer) close() {
 	p.once.Do(func() { close(p.done); p.cancel(); p.conn.Close() })
 }
 
-func (p *replicationPeer) wait() { <-p.readDone; <-p.writeDone; p.workers.Wait() }
+func (p *mosiPeer) wait() { <-p.readDone; <-p.writeDone; p.workers.Wait() }
 
-func (p *replicationPeer) send(m replicationMessage) error {
+func (p *mosiPeer) send(m mosiMessage) error {
 	select {
 	case <-p.done:
-		return fmt.Errorf(replicationNetworkError)
+		return fmt.Errorf(mosi.NetworkError)
 	case p.outgoing <- m:
 		return nil
 	}
@@ -96,7 +97,7 @@ func (p *replicationPeer) send(m replicationMessage) error {
 
 // The bounded queue owns each message after send returns. Producers never
 // wait for a protocol reply here; the connection reader completes acquisitions.
-func (p *replicationPeer) write() {
+func (p *mosiPeer) write() {
 	defer close(p.writeDone)
 	defer p.close()
 	for {
@@ -111,12 +112,12 @@ func (p *replicationPeer) write() {
 	}
 }
 
-func (p *replicationPeer) writeMessage(m replicationMessage) error {
+func (p *mosiPeer) writeMessage(m mosiMessage) error {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 	select {
 	case <-p.done:
-		return fmt.Errorf(replicationNetworkError)
+		return fmt.Errorf(mosi.NetworkError)
 	default:
 	}
 	if err := p.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -125,18 +126,18 @@ func (p *replicationPeer) writeMessage(m replicationMessage) error {
 	return p.conn.WriteJSON(m)
 }
 
-func (p *replicationPeer) call(ctx context.Context, method string, input, output any) error {
+func (p *mosiPeer) call(ctx context.Context, method string, input, output any) error {
 	data, err := json.Marshal(input)
 	if err != nil {
 		return err
 	}
 	id := p.next.Add(1)
-	ch := make(chan replicationMessage, 1)
+	ch := make(chan mosiMessage, 1)
 	p.mu.Lock()
 	p.pending[id] = ch
 	p.mu.Unlock()
 	defer func() { p.mu.Lock(); delete(p.pending, id); p.mu.Unlock() }()
-	if err := p.send(replicationMessage{ID: id, Method: method, Data: data}); err != nil {
+	if err := p.send(mosiMessage{ID: id, Method: method, Data: data}); err != nil {
 		p.close()
 		return err
 	}
@@ -147,7 +148,7 @@ func (p *replicationPeer) call(ctx context.Context, method string, input, output
 		return ctx.Err()
 	case reply := <-ch:
 		if reply.Error != "" {
-			return replicationRemoteError(reply.Error)
+			return mosiRemoteError(reply.Error)
 		}
 		if output == nil {
 			return nil
@@ -156,11 +157,11 @@ func (p *replicationPeer) call(ctx context.Context, method string, input, output
 	}
 }
 
-func (p *replicationPeer) read() {
+func (p *mosiPeer) read() {
 	defer close(p.readDone)
 	defer p.close()
 	for {
-		var m replicationMessage
+		var m mosiMessage
 		if err := p.conn.ReadJSON(&m); err != nil {
 			return
 		}
@@ -187,9 +188,9 @@ func (p *replicationPeer) read() {
 			continue
 		}
 		p.workers.Add(1)
-		go func(m replicationMessage) {
+		go func(m mosiMessage) {
 			defer p.workers.Done()
-			reply := replicationMessage{ID: m.ID}
+			reply := mosiMessage{ID: m.ID}
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
