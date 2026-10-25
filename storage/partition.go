@@ -1376,7 +1376,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 			defer release.Release()
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
-			return append([]*StorageIndex(nil), shard.Indexes...)
+			return append([]*StorageIndex(nil), shard.indexDirectorySnapshot()...)
 		}()
 		for _, index := range indexes {
 			GlobalCache.AddItem(index, int64(index.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)

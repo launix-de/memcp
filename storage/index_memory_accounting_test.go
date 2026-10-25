@@ -110,3 +110,40 @@ func TestStorageIndexComputeSizeCountsDeltaBtreeAndHooks(t *testing.T) {
 		t.Fatalf("ComputeSize() = %d, want larger than base plus hooks %d", got, baseOnly+4096)
 	}
 }
+
+// Lazy index declarations are appended by concurrent scans under indexMutex
+// while they hold only shared shard ownership. Both cache registration and
+// diagnostics must snapshot that directory with its actual publication owner.
+func TestShardAccountingConcurrentIndexPublication(t *testing.T) {
+	shard := &storageShard{}
+	shard.setState(SHARED)
+	const count = 512
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		<-start
+		for range count {
+			index := &StorageIndex{}
+			shard.mu.RLock()
+			shard.indexMutex.Lock()
+			shard.Indexes = append(shard.Indexes, index)
+			shard.indexMutex.Unlock()
+			shard.mu.RUnlock()
+		}
+	}()
+	close(start)
+	for range count {
+		shard.exclusiveSize()
+		shard.ComputeSize()
+	}
+	workers.Wait()
+	var children uint
+	for _, index := range shard.Indexes {
+		children += index.ComputeSize()
+	}
+	if got, want := shard.ComputeSize(), shard.exclusiveSize()+children; got != want {
+		t.Fatalf("inclusive shard bytes = %d, want parent plus all published indices %d", got, want)
+	}
+}

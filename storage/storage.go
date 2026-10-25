@@ -4271,8 +4271,9 @@ func Init(en scm.Env) {
 							}))
 						}
 						colRows = scm.NewSlice(colSlice)
-						idxSlice := make([]scm.Scmer, 0, len(s.Indexes))
-						for _, ix := range s.Indexes {
+						indexes := s.indexDirectorySnapshot()
+						idxSlice := make([]scm.Scmer, 0, len(indexes))
+						for _, ix := range indexes {
 							ix.mu.Lock()
 							orders := make([]scm.Scmer, len(ix.ColOrderMeta))
 							for i, order := range ix.ColOrderMeta {

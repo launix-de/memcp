@@ -150,6 +150,13 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- `storageShard.Indexes` permits append-only lazy declarations under
+  `indexMutex` with shared shard ownership. Accounting, diagnostics and
+  registration borrow a directory snapshot under that mutex while retaining
+  `shard.mu` against replacement/reordering; no publication lock spans child
+  accounting. Eviction offers use TryLock and defer a busy directory. Warm
+  query/row execution receives no additional synchronization.
+
 - `table.OnInit` atomically publishes an immutable closed callback. JSON loading
   and ABI migration initialize it before publication; schema-owned repair of a
   restored planner cache may replace nil. `onInitComplete` publishes completion
