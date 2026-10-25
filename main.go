@@ -1453,6 +1453,9 @@ func main() {
 	scm.BeginMySQLInitialization()
 	go func() {
 		defer close(initDone)
+		if replicationAddress != "" {
+			storage.PrepareReplication()
+		}
 		storage.LoadDatabases()
 		// scripts initialization
 		if len(imports) == 0 {

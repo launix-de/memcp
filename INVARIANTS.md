@@ -54,14 +54,33 @@ same ownership, visibility, lifetime, and durability guarantees.
   their registration and defers deletion while an import can own private files.
   Source rebuilds retain the existing persistence lifecycle capability, acquired
   before write handover gates. No lifecycle lease spans incoming packet waits.
-- Restart reconstructs IS only from durable local M/O/S permission. Loading
-  restores that permission, never upgrades S/O to M. Invalidation durably removes
-  local authority before admitting a remote writer. Owner unavailability fails
-  immediately with `Cluster network error`; it never promotes a backup or
-  reclaims an offline slave's M on a timer.
+- MOSI permissions, owners, reader sets, epochs, bootstrap progress and request
+  ordering live only in RAM. A restart never restores them from a private file
+  or native table. A slave authenticates through the master's user policy and
+  reconstructs permissions from the running master's directory. A restarted
+  master reconstructs delegated resources from authenticated live reports.
+  A new process incarnation resets its request-number domain; reconnecting the
+  same incarnation does not discard suppression/upgrade marks.
+  Unknown safety copies remain IO until live authority or a validated interrupted
+  handover establishes their data custodian. Offline owners are never reclaimed
+  on a timer. Failed acquisition raises `Cluster network error`.
+- `system.replication_config` is an ordinary SAFE table. It stores only the
+  installation identity, offline authentication cache, explicit retirement
+  decisions and completed backup placement (resource plus physical generation
+  or schema content digest). It stores no permissions or slave registration.
+  Native persistence/WAL and backend semantics own these data and configuration
+  changes. No coherence transition serializes or fsyncs the resource directory.
+  A promoted safety copy becomes ordinary current data only after complete
+  installation and foreign permission removal; placement metadata is then retired.
 - MR/OR/SR grant no access and coalesce requests in the state machine. A read
   request can upgrade to MR; an older read grant cannot release its write waiters.
-  Complete generation installation and durable permission precede waiter release.
+  Complete data installation precedes publication of the RAM permission and
+  waking waiters. A failed upgrade retains its previous read permission only
+  if no invalidation removed it. Pending descriptors still grant no query access;
+  reconnect reports may carry that unrevoked prior permission as proof. Incoming
+  handovers retain their source/target hints in RAM
+  so a master failure between revocation and grant can be reconstructed without
+  trusting incomplete data or overlooking a possible foreign M owner.
 - Already authorized MOSI reads only load atomics. Existing shard leases and
   snapshot lifetimes retain their own purpose; replication adds no read-side
   locks, registration, counters or per-row synchronization writes.

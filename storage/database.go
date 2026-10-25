@@ -1052,7 +1052,7 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 // SharedResource impl for database
 func (db *database) GetState() SharedState { return db.srState }
 func (db *database) GetRead(tx *TxContext) ReadAccess {
-	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
+	if r := activeReplication(db.Name); r != nil && validReplicaDatabase(db.Name) {
 		r.obtain(mosiResource{Database: db.Name}, mosi.S, replicationUser(tx))
 	}
 	db.ensureLoaded()
@@ -1060,7 +1060,7 @@ func (db *database) GetRead(tx *TxContext) ReadAccess {
 }
 func (db *database) GetWrite(tx *TxContext) WriteAccess {
 	var release func()
-	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
+	if r := activeReplication(db.Name); r != nil && validReplicaDatabase(db.Name) {
 		_, release = r.writeResource(mosiResource{Database: db.Name}, tx)
 	}
 	db.ensureLoaded()

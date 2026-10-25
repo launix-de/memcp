@@ -138,6 +138,8 @@ class Node(OwnedServer):
                 return False
 
         eventually(ready, f"{self.name} did not start; inspect {log}", self.startup_timeout)
+        if list(self.data_dir.glob(".replication-state*")):
+            raise DrillFailure(f"{self.name} wrote a private replication journal")
         return self.client
 
     def kill(self):
@@ -152,15 +154,19 @@ class Node(OwnedServer):
         finally:
             self.client = client
 
-    def journal(self):
-        return json.loads((self.data_dir / ".replication-state").read_text())
+    def snapshot(self):
+        # Inspect live RAM state; disk contents cannot grant MOSI rights.
+        result = self.client.scm("(replication_status)").strip()
+        if result.startswith('"'):
+            result = json.loads(result)
+        return json.loads(result)
 
     def records(self, table):
         schema = json.loads((self.data_dir / self.database / "schema.json").read_text())["tables"][table]
         shards = schema.get("PShards" if schema["ShardMode"] == "partition" else "Shards") or []
         active = {shard.get("mosi", shard["uuid"]) if isinstance(shard, dict) else shard
                   for shard in shards if shard is not None}
-        records = [record for record in self.journal()["records"].values()
+        records = [record for record in self.snapshot()["records"].values()
                    if record["resource"].get("shard") in active]
         expect(len(records), len(active), f"{self.name}: MOSI records for every active {table} shard")
         return records
@@ -173,10 +179,10 @@ class Node(OwnedServer):
     def database_records(self, database=None):
         name = self.database if database is None else database
         schema = json.loads((self.data_dir / name / "schema.json").read_text())
-        return database_records(name, schema, self.journal())
+        return database_records(name, schema, self.snapshot())
 
     def assert_exclusive(self, database=None, owner=None, state="M"):
-        identity = json.loads((self.data_dir / "settings.json").read_text())["ReplicationUUID"]
+        identity = self.snapshot()["id"]
         records = self.database_records(database)
         for key, record in records.items():
             expect((record["state"], record.get("owner")), (state, identity if owner is None else owner),
@@ -193,7 +199,7 @@ class Node(OwnedServer):
 
     def connected(self):
         statuses = self.statuses()
-        return len(statuses) == 1 and statuses[0]["connected"]
+        return len(statuses) == 1 and statuses[0]["connected"] and statuses[0]["ready"]
 
     def wait_offline(self):
         def offline():
@@ -281,7 +287,7 @@ def run_regressions(args, artifacts, journal):
         expect(eventually(first_mysql_login, "first MySQL login/transfer did not become ready"),
                "1", "first MySQL login/transfer")
         expect(s.number("SELECT COUNT(*) AS n FROM items"), 1, "initial HTTP transfer")
-        identity = json.loads((slave.data_dir / "settings.json").read_text())["ReplicationUUID"]
+        identity = slave.snapshot()["id"]
         if not identity:
             raise DrillFailure("slave identity was not persisted")
         user = Client(slave.port, args.timeout, "replica_user", "user-password")
@@ -300,6 +306,11 @@ def run_regressions(args, artifacts, journal):
             if round_index == 0:
                 s.sql("CREATE TABLE offline_created(id INT PRIMARY KEY, payload TEXT) ENGINE=SAFE")
                 s.sql("INSERT INTO offline_created VALUES(1,'survived-offline-ddl')")
+            if round_index == 1:
+                # After the slave itself restarted, recovered schema M must
+                # still permit offline creation of brand-new data shards.
+                s.sql("CREATE TABLE offline_restart_created(id INT PRIMARY KEY, payload TEXT) ENGINE=SAFE")
+                s.sql("INSERT INTO offline_restart_created VALUES(1,'after-slave-restart')")
             for offset in range(5):
                 row_id = round_index * 5 + offset + 2
                 s.sql(f"INSERT INTO items VALUES({row_id},{row_id * 10})")
@@ -317,7 +328,7 @@ def run_regressions(args, artifacts, journal):
             expect(s.number("SELECT value FROM items WHERE id=1", "value"), 11 + round_index, "durable update")
             expect(s.sql("SELECT payload FROM offline_created WHERE id=1")[0]["payload"],
                    "survived-offline-ddl", "offline DDL recovery")
-            expect(json.loads((slave.data_dir / "settings.json").read_text())["ReplicationUUID"], identity,
+            expect(slave.snapshot()["id"], identity,
                    "persistent reconnect identity")
         m.sql("ALTER TABLE items ADD COLUMN extra INT DEFAULT 7")
         expect(s.number("SELECT COUNT(*) AS n FROM items WHERE extra=7"), 16, "remote DDL/defaults")
@@ -334,6 +345,7 @@ def run_regressions(args, artifacts, journal):
         master.kill()
         expect(s.number("SELECT COUNT(*) AS n FROM items"), 16, "offline O read")
         s.reject("INSERT INTO items VALUES(9000,9000)", status=500, contains=NETWORK_ERROR)
+        expect(s.number("SELECT COUNT(*) AS n FROM items"), 16, "failed write upgrade retains offline O read")
         master.start()
         eventually(master.connected, "shared owner did not reconnect")
         def reader(index):
@@ -374,8 +386,8 @@ def run_regressions(args, artifacts, journal):
         s = slave.start()
         s.sql("SELECT COUNT(*) AS n FROM items")
         def backed_up():
-            destination = master.journal()["records"]
-            for key, source in slave.journal()["records"].items():
+            destination = master.snapshot()["records"]
+            for key, source in slave.snapshot()["records"].items():
                 if (source["resource"]["database"] == DATABASE and source["resource"].get("shard")
                         and source["state"] == "M"):
                     if not destination.get(key, {}).get("generation") or destination[key]["generation"] != source.get("generation"):
@@ -387,6 +399,8 @@ def run_regressions(args, artifacts, journal):
         expect(m.number("SELECT COUNT(*) AS n FROM items"), 16, "retirement backup")
         expect(m.sql("SELECT payload FROM offline_created WHERE id=1")[0]["payload"],
                "survived-offline-ddl", "offline backup schema/data")
+        expect(m.sql("SELECT payload FROM offline_restart_created WHERE id=1")[0]["payload"],
+               "after-slave-restart", "offline DDL after recovered slave restart")
         master.kill()
         m = master.start()
         expect(m.number("SELECT COUNT(*) AS n FROM items"), 16, "backup restart")
@@ -415,16 +429,24 @@ def run_partitions(args, artifacts, journal):
         expect(s.sql("SELECT value FROM volatile_items WHERE id=1")[0]["value"],
                "streamed-memory-generation", "volatile generation transfer")
         expect(s.number("SELECT COUNT(*) AS n FROM items"), 2, "partition initial transfer")
-        eventually(lambda: slave.journal().get("initialized", {}).get(DATABASE), "initial shard M claims")
+        eventually(lambda: slave.snapshot().get("initialized", {}).get(DATABASE), "initial shard M claims")
         expect(m.number("SELECT value FROM items WHERE id=1", "value"), 10, "one-partition read")
         expect(sorted(record["state"] for record in master.records("items")), ["IO", "S"], "master partition rights")
         expect(sorted(record["state"] for record in slave.records("items")), ["M", "O"], "slave partition rights")
+        shared_keys = {key for key, record in master.snapshot()["records"].items()
+                       if record["state"] == "S"}
         master.kill()
         s.sql("UPDATE items SET value=value+1 WHERE id=9")
         s.reject("UPDATE items SET value=value+1 WHERE id=1", status=500, contains=NETWORK_ERROR)
         master.start()
+        # A listening master has no recovered permissions yet. The surviving
+        # slave must report S/O before we take that survivor down in turn.
+        def shared_recovered():
+            records = master.snapshot()["records"]
+            return all(records.get(key, {}).get("state") == "S" for key in shared_keys)
+        eventually(shared_recovered, "master did not reconstruct shared permissions from the live slave")
         slave.kill()
-        expect(m.number("SELECT value FROM items WHERE id=1", "value"), 10, "restart current backend S")
+        expect(m.number("SELECT value FROM items WHERE id=1", "value"), 10, "live-recovered backend S")
         m.reject("SELECT value FROM items WHERE id=9", status=500, contains=NETWORK_ERROR)
         s = slave.start()
         expect(s.number("SELECT value FROM items WHERE id=9", "value"), 91, "restart autonomous M write")
@@ -658,7 +680,7 @@ def verify_database_pair(master, slave, oracle, aux, extra=None):
 
 def assert_reclaimed(master, slave):
     keys = slave.reclaim()
-    identity = json.loads((slave.data_dir / "settings.json").read_text())["ReplicationUUID"]
+    identity = slave.snapshot()["id"]
     expect(master.assert_exclusive(slave.database, owner=identity, state="IO"), keys,
            "same complete resource set, slave M/master IO")
     return len(keys)
@@ -683,7 +705,7 @@ def run_stress(args, artifacts, journal):
             setup_stress_database(cluster.master.client, DATABASE)
             cluster.slave.start()
             cluster.slave.client.sql("SELECT * FROM stress_items")
-            eventually(lambda: cluster.slave.journal().get("initialized", {}).get(DATABASE), "initial stress M claims")
+            eventually(lambda: cluster.slave.snapshot().get("initialized", {}).get(DATABASE), "initial stress M claims")
             aux, extra = {1: 100, 9: 900}, {}
             master = cluster.master.client
             verify_database_pair(master, cluster.slave.client, oracle, aux)
@@ -697,7 +719,7 @@ def run_stress(args, artifacts, journal):
                     raise
             else:
                 raise DrillFailure("reclaim succeeded with an unreachable S holder")
-            expect(cluster.slave.journal()["records"][DATABASE]["state"], "O", "failed reclaim preserves durable shared authority")
+            expect(cluster.slave.snapshot()["records"][DATABASE]["state"], "O", "failed reclaim preserves durable shared authority")
             cluster.master.start()
             eventually(cluster.master.connected, "negative reclaim reconnect")
             for round_index in range(args.rounds):
@@ -809,7 +831,7 @@ def assert_separate_claims(master, slaves, master_only):
         for name in forbidden:
             if (slave.data_dir / name / "schema.json").exists():
                 raise DrillFailure(f"{slave.name} unexpectedly replicated {name}")
-        for record in slave.journal()["records"].values():
+        for record in slave.snapshot()["records"].values():
             if record["resource"]["database"] in forbidden:
                 raise DrillFailure(f"{slave.name} has a cross-database MOSI claim: {record}")
     master.assert_exclusive(master_only)
@@ -833,7 +855,7 @@ def run_multiple_slaves(args, artifacts, journal):
             setup_stress_database(master.client, slave.database)
             slave.start()
             slave.client.sql("SELECT * FROM stress_items")
-            eventually(lambda s=slave: s.journal().get("initialized", {}).get(s.database), "per-slave initial M claims")
+            eventually(lambda s=slave: s.snapshot().get("initialized", {}).get(s.database), "per-slave initial M claims")
         master.client.sql(f"CREATE DATABASE {master_only}", "system")
         direct = Client(master.port, args.timeout, database=master_only)
         direct.sql("CREATE TABLE master_items(id INT PRIMARY KEY, value INT) ENGINE=SAFE")

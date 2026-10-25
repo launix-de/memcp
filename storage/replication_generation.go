@@ -13,6 +13,7 @@ package storage
 
 import "io"
 import "fmt"
+import "crypto/sha256"
 import "sync"
 import "bytes"
 import "strings"
@@ -29,7 +30,7 @@ import "github.com/launix-de/memcp/storage/mosi"
 type replicaImport struct {
 	header mosiPacket
 	engine PersistenceEngine
-	// Set at unpublished construction from the completed-generation journal.
+	// Set at unpublished construction from completed local data placement.
 	// Duplicate immutable columns are consumed without reopening their files.
 	knownGeneration bool
 	writer          io.WriteCloser
@@ -118,16 +119,14 @@ func invalidateReplicaCaches(source *table) {
 	}
 }
 
-func (r *replicationManager) localRecord(resource mosiResource, phase mosi.Phase, generation string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	record := r.journal.Records[resource.key()]
-	record.Resource, record.State = resource, phase.String()
-	if generation != "" {
-		record.Generation = generation
-	}
-	r.journal.Records[resource.key()] = record
-	return r.saveLocked()
+func (r *replicationManager) localRecord(resource mosiResource, phase mosi.Phase, generation string) {
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Resource, record.State = resource, phase.String()
+		if generation != "" {
+			record.Generation = generation
+		}
+		return true
+	})
 }
 
 func (r *replicationManager) declareShard(shard *storageShard, owner string, local bool) *replicaCell {
@@ -135,32 +134,33 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 	c := r.resourceCell(resource)
 	c.current.CompareAndSwap(nil, shard)
 	shard.coherence.CompareAndSwap(nil, c)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if record, exists := r.journal.Records[resource.key()]; exists {
-		if record.Resource != resource {
+	initialized := false
+	record := r.updateRecord(resource, func(record *replicaRecord) bool {
+		if record.Owner != "" {
+			changed := record.Resource != resource
 			record.Resource = resource
-			r.journal.Records[resource.key()] = record
-			publication := resource
-			c.resource.Store(&publication)
-			if err := r.saveLocked(); err != nil {
-				panic(err)
+			return changed
+		}
+		record.Resource, record.Owner, record.Epoch = resource, owner, 1
+		record.State = "IO"
+		if local {
+			record.State, record.Generation = "M", shard.uuid.String()
+		}
+		if r.master && r.restoring[resource.Database] {
+			schemaKey := mosiResource{Database: resource.Database}.key()
+			if r.confirmed[schemaKey] == "" {
+				record.Owner, record.State = "", "IO"
+			} else {
+				r.confirmed[resource.key()] = record.Owner
 			}
 		}
-	} else {
-		phase := mosi.IO
-		if local {
-			phase = mosi.M
-		}
-		generation := ""
-		if local {
-			generation = shard.uuid.String()
-		}
-		r.journal.Records[resource.key()] = replicaRecord{Resource: resource, State: phase.String(), Owner: owner, Epoch: 1, Generation: generation}
-		if err := r.saveLocked(); err != nil {
-			panic(err)
-		}
-		c.rights.Initialize(phase)
+		initialized = true
+		return true
+	})
+	publication := resource
+	c.resource.Store(&publication)
+	if initialized {
+		c.rights.Initialize(mosi.ParsePhase(record.State))
 	}
 	return c
 }
@@ -224,7 +224,7 @@ func (r *replicationManager) prepareResource(resource mosiResource) (generation 
 	if resource.Shard == "" {
 		r.schemaShards(db, r.id, true)
 		db.save()
-		return "", nil
+		return fmt.Sprintf("%x", sha256.Sum256(db.persistence.ReadSchema())), nil
 	}
 	c := r.resourceCell(resource)
 	shard := c.current.Load()
@@ -406,7 +406,7 @@ func (r *replicationManager) startImport(packet mosiPacket) (*replicaImport, err
 		return nil, fmt.Errorf("invalid local backend")
 	}
 	r.mu.Lock()
-	known := packet.Resource.Shard != "" && packet.Generation != "" && r.journal.Records[packet.Resource.key()].Generation == packet.Generation
+	known := packet.Resource.Shard != "" && packet.Generation != "" && (r.directory.Records[packet.Resource.key()].Generation == packet.Generation || r.backups[packet.Resource.key()].Generation == packet.Generation)
 	r.mu.Unlock()
 	return &replicaImport{header: packet, engine: engine, knownGeneration: known}, nil
 }
@@ -790,7 +790,7 @@ func (r *replicationManager) distributeRebuild(resource mosiResource) {
 	cell.directory.Lock()
 	defer cell.directory.Unlock()
 	r.mu.Lock()
-	record := r.journal.Records[resource.key()]
+	record := r.directory.Records[resource.key()]
 	readers := make([]string, 0, len(record.Readers))
 	for id := range record.Readers {
 		if id != r.id && id != record.Owner {
@@ -820,8 +820,7 @@ func (r *replicationManager) abortImports(source string) {
 	})
 }
 
-// The journal's generation names a completed backup, not a UUID merely seen in
-// a remote schema. Maintenance retains it until another complete transfer wins.
+// Completed data placement names safety copies independently of RAM ownership.
 func replicationBackupRecords(db *database) []replicaRecord {
 	r := replication.Load()
 	if r == nil || !r.master {
@@ -830,10 +829,10 @@ func replicationBackupRecords(db *database) []replicaRecord {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var records []replicaRecord
-	for _, record := range r.journal.Records {
-		if record.Resource.Database == db.Name && record.Resource.Shard != "" && record.Owner != r.id && record.Generation != "" {
-			if table := db.tables.Get(record.Resource.Table); table != nil && table.PersistencyMode != Memory && table.PersistencyMode != Cache {
-				records = append(records, record)
+	for _, backup := range r.backups {
+		if backup.Resource.Database == db.Name {
+			if table := db.tables.Get(backup.Resource.Table); table != nil && table.PersistencyMode != Memory && table.PersistencyMode != Cache {
+				records = append(records, replicaRecord{Resource: backup.Resource, Generation: backup.Generation})
 			}
 		}
 	}

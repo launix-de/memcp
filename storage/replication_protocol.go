@@ -35,7 +35,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 	}
 	if r.master {
 		r.mu.Lock()
-		retired := r.journal.Retired[source]
+		retired := r.directory.Retired[source]
 		r.mu.Unlock()
 		if retired {
 			return fmt.Errorf("replica retired by administrator")
@@ -103,7 +103,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 				}
 			} else {
 				r.mu.Lock()
-				record := r.journal.Records[packet.Resource.key()]
+				record := r.directory.Records[packet.Resource.key()]
 				r.mu.Unlock()
 				if record.Owner != source || record.Epoch != packet.Epoch {
 					return fmt.Errorf("backup from non-owner")
@@ -150,7 +150,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 		defer transfer.abort()
 		if r.master {
 			r.mu.Lock()
-			record := r.journal.Records[packet.Resource.key()]
+			record := r.directory.Records[packet.Resource.key()]
 			r.mu.Unlock()
 			if record.Owner != source || record.Epoch != packet.Epoch {
 				return fmt.Errorf("stale transfer epoch")
@@ -159,16 +159,14 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 		if err := r.finishImport(source, transfer); err != nil {
 			return err
 		}
-		if r.master && packet.Resource.Shard != "" {
-			r.mu.Lock()
-			record := r.journal.Records[packet.Resource.key()]
-			record.Generation = packet.Generation
-			r.journal.Records[packet.Resource.key()] = record
-			err := r.saveLocked()
-			r.mu.Unlock()
-			if err != nil {
-				return err
-			}
+		if err := r.saveBackup(packet.Resource, packet.Generation); err != nil {
+			return err
+		}
+		if r.master {
+			r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
+				record.Generation = packet.Generation
+				return true
+			})
 		}
 		if !r.master {
 			return peer.post(mosiPacket{Kind: "ack", ID: packet.ID, Resource: packet.Resource})

@@ -24,8 +24,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -52,10 +50,8 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int, complete bool
 	// Replication starts after the frontend discovers schemas. Until its
 	// durable ownership/backup directory is loaded, startup cannot prove that
 	// an apparently old UUID is unowned.
-	if replication.Load() == nil {
-		if _, err := os.Stat(filepath.Join(Basepath, ".replication-state")); err == nil {
-			return 0, 0, false
-		}
+	if replicationStarting.Load() && replication.Load() == nil && validReplicaDatabase(db.Name) {
+		return 0, 0, false
 	}
 	db.ensureLoaded()
 	db.persistenceLifecycle.Lock()

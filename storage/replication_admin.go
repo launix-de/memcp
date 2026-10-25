@@ -12,6 +12,7 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
+import "maps"
 import "sort"
 import "sync"
 import "time"
@@ -23,6 +24,7 @@ import "github.com/launix-de/memcp/storage/mosi"
 type replicaStatus struct {
 	ID        string   `json:"id"`
 	Connected bool     `json:"connected"`
+	Ready     bool     `json:"ready"`
 	Retired   bool     `json:"retired"`
 	Databases []string `json:"databases"`
 }
@@ -37,8 +39,8 @@ func ReclaimReplicationDatabases() []string {
 		return nil
 	}
 	r.mu.Lock()
-	names := make([]string, 0, len(r.journal.Initialized))
-	for name, initialized := range r.journal.Initialized {
+	names := make([]string, 0, len(r.directory.Initialized))
+	for name, initialized := range r.directory.Initialized {
 		if initialized && validReplicaDatabase(name) {
 			names = append(names, name)
 		}
@@ -112,10 +114,10 @@ func (r *replicationManager) statuses() []replicaStatus {
 	for id := range r.peers {
 		known[id] = true
 	}
-	for id := range r.journal.Retired {
+	for id := range r.directory.Retired {
 		known[id] = true
 	}
-	for _, record := range r.journal.Records {
+	for _, record := range r.directory.Records {
 		known[record.Owner] = true
 		for id := range record.Readers {
 			known[id] = true
@@ -125,7 +127,7 @@ func (r *replicationManager) statuses() []replicaStatus {
 	delete(known, "")
 	result := make([]replicaStatus, 0, len(known))
 	for id := range known {
-		status := replicaStatus{ID: id, Retired: r.journal.Retired[id], Databases: []string{}}
+		status := replicaStatus{ID: id, Ready: r.peerReady[id], Retired: r.directory.Retired[id], Databases: []string{}}
 		if p := r.peers[id]; p != nil {
 			select {
 			case <-p.done:
@@ -134,7 +136,7 @@ func (r *replicationManager) statuses() []replicaStatus {
 			}
 		}
 		databaseNames := make(map[string]bool)
-		for _, record := range r.journal.Records {
+		for _, record := range r.directory.Records {
 			if record.Owner == id || record.Readers[id] {
 				databaseNames[record.Resource.Database] = true
 			}
@@ -153,24 +155,21 @@ func (r *replicationManager) statuses() []replicaStatus {
 // timeout. Its tombstone is durable before any ownership is reassigned. The
 // best available master backup becomes authoritative; offline changes may be lost.
 func (r *replicationManager) retire(id string) error {
-	r.mu.Lock()
 	if id == "" || id == r.id {
-		r.mu.Unlock()
 		return fmt.Errorf("invalid slave")
 	}
-	r.journal.Retired[id] = true
-	err := r.saveLocked()
+	if err := r.storeConfig(replicaConfigEntry{Kind: "retired", Name: id, Value: true}); err != nil {
+		return err
+	}
+	r.mu.Lock()
 	p := r.peers[id]
 	names := make([]string, 0)
-	for name, record := range r.journal.Records {
+	for name, record := range r.directory.Records {
 		if record.Owner == id || record.Readers[id] {
 			names = append(names, name)
 		}
 	}
 	r.mu.Unlock()
-	if err != nil {
-		return err
-	}
 	if p != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		_ = p.call(ctx, "retire", struct{}{}, nil)
@@ -186,7 +185,7 @@ func (r *replicationManager) retire(id string) error {
 		c.directory.Lock()
 		c.gate.Lock()
 		r.mu.Lock()
-		record := r.journal.Records[name]
+		record := r.directory.Records[name]
 		r.mu.Unlock()
 		if record.Owner == id {
 			if err := r.restoreBackup(record); err != nil {
@@ -195,18 +194,30 @@ func (r *replicationManager) retire(id string) error {
 				return err
 			}
 		}
-		r.mu.Lock()
-		delete(record.Readers, id)
-		if record.Owner == id {
-			record.Epoch++
-			record.Owner, record.State = r.id, "M"
+		record = r.updateRecord(record.Resource, func(record *replicaRecord) bool {
+			delete(record.Readers, id)
+			if record.Owner == id {
+				record.Epoch++
+				record.Owner, record.State = r.id, "M"
+			}
+			r.confirmed[record.Resource.key()] = record.Owner
+			return true
+		})
+		var err error
+		if record.Owner == r.id {
+			foreign := false
+			for reader := range record.Readers {
+				if reader != r.id {
+					foreign = true
+				}
+			}
+			if !foreign {
+				err = r.clearBackup(record.Resource)
+			}
 		}
-		r.journal.Records[name] = record
-		err := r.saveLocked()
 		if err == nil {
 			c.rights.Publish(mosi.ParsePhase(record.State))
 		}
-		r.mu.Unlock()
 		c.gate.Unlock()
 		c.directory.Unlock()
 		if err != nil {
@@ -320,7 +331,36 @@ func replicationAdmin(arguments []scm.Scmer) scm.Scmer {
 	return result.Value
 }
 
+// Runtime diagnostics are sampled on demand; they are never checkpoints or
+// restart authority. Copy outer maps under mu, then encode immutable entries.
+func (r *replicationManager) statusSnapshot() ([]byte, error) {
+	r.mu.Lock()
+	directory := r.directory
+	directory.Records = maps.Clone(directory.Records)
+	directory.Users = nil // diagnostics must not disclose cached credential proofs
+	directory.Retired = maps.Clone(directory.Retired)
+	directory.Initialized = maps.Clone(directory.Initialized)
+	r.mu.Unlock()
+	return json.Marshal(struct {
+		ID    string `json:"id"`
+		Boot  string `json:"boot"`
+		Ready bool   `json:"ready"`
+		replicaDirectory
+	}{r.id, r.boot, r.ready.Load(), directory})
+}
+
 func initReplicationAdmin(en *scm.Env) {
+	scm.Declare(en, &scm.Declaration{Name: "replication_status", Fn: func(...scm.Scmer) scm.Scmer {
+		r := replication.Load()
+		if r == nil {
+			panic("replication is not enabled")
+		}
+		data, err := r.statusSnapshot()
+		if err != nil {
+			panic(err)
+		}
+		return scm.NewString(string(data))
+	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "admin-only local RAM snapshot of replication resources; never persisted", Return: &scm.TypeDescriptor{Kind: "string"}}})
 	scm.Declare(en, &scm.Declaration{Name: "replication_reclaim", Fn: func(a ...scm.Scmer) scm.Scmer {
 		r := replication.Load()
 		if r == nil {
