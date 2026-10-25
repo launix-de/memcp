@@ -1256,6 +1256,7 @@ func collectScanJoinOrderShardStreams(currentTx *TxContext, input *scanJoinOrder
 		queue := shard.scan_order(bounds, input.filterCols, input.filter,
 			nil, scm.NewNil(),
 			sortcols, sortdirs, 0, 0, -1, input.readCols, currentTx, ss)
+		defer queue.closeReaders()
 		refs := make([]orderedBatchRecord, len(queue.items))
 		for i, recid := range queue.items {
 			refs[i] = orderedBatchRecord{shard: shard, recid: recid}

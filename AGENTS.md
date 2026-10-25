@@ -462,6 +462,11 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   projection-only payloads must not be prepared ahead of filtering or LIMIT.
   The counter is not persisted. Idle/LRU time hints cannot authorize eviction
   of an active, arbitrarily paused preparation.
+  Ordered scan queues retain their generation's read capability through sorting,
+  global merge and final projection, including early LIMIT and panic unwinding.
+  Their write capability covers mutation selection and callbacks. Query-local
+  RecSet IDs retain historical generations without reacquiring current MOSI rights;
+  a mutation acquisition which replaces that generation requires a statement retry.
 
 - `inIndexHook.positions` is an immutable compressed main-generation row-ID
   permutation owned by its parent index hook. It retains no shard/catalog,

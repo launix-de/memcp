@@ -326,10 +326,12 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 		func([]uint32) bool { return false })
 	shard.mu.RUnlock()
 	run := func(acceptCols []string, accept scm.Scmer) *shardqueue {
-		return shard.scan_order(coveredRuntimeScanAccess(bounds),
+		queue := shard.scan_order(coveredRuntimeScanAccess(bounds),
 			[]string{"bucket"}, condition, acceptCols, accept,
 			[]scm.Scmer{scm.NewString("rank")}, []func(...scm.Scmer) scm.Scmer{order},
 			0, 0, limit, nil, nil, nil)
+		t.Cleanup(queue.closeReaders)
+		return queue
 	}
 	queue := run(nil, scm.NewNil())
 	if queue.candidateCount != limit {

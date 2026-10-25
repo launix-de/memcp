@@ -65,6 +65,12 @@ same ownership, visibility, lifetime, and durability guarantees.
 - Already authorized MOSI reads only load atomics. Existing shard leases and
   snapshot lifetimes retain their own purpose; replication adds no read-side
   locks, registration, counters or per-row synchronization writes.
+- Ordered scan results retain their existing payload capability through merge
+  and projection, not merely through candidate selection. Historical physical
+  IDs acquire a snapshot capability without rebinding to a current generation.
+  Ordered mutations acquire M before selecting rows and retain the write lease
+  through callback completion. If acquiring M replaces a generation whose IDs
+  were already selected, abort for statement retry rather than reinterpret IDs.
 - Appending an INSERT writer lane changes the database shard directory and
   requires schema M before native maintenance locks. Its private generation is
   protected by the existing import-publication mutex until durable topology

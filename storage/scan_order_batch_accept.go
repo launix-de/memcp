@@ -309,7 +309,17 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 	filterProgram := scm.PrepareSerialProc(batchFilter)
 	var filterArgs [1]scm.Scmer
 	mappers := make(map[*storageShard]*ShardMapReducer)
+	reads := make(map[*storageShard]ReadAccess)
+	writes := make(map[*storageShard]WriteAccess)
 	defer func() {
+		defer func() {
+			for _, access := range reads {
+				access.Release()
+			}
+			for _, access := range writes {
+				access.Release()
+			}
+		}()
 		for _, mapper := range mappers {
 			mapper.Close()
 			mapper.FlushSideEffects()
@@ -318,6 +328,14 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 	mapperFor := func(shard *storageShard) *ShardMapReducer {
 		mapper := mappers[shard]
 		if mapper == nil {
+			if contributionMutationColumns(callbackCols) {
+				access := shard.GetWrite(currentTx)
+				writes[shard] = access
+				if access.shard != shard {
+					panic("ordered mutation generation changed; retry statement")
+				}
+			}
+			reads[shard] = shard.acquireSnapshotRead(currentTx)
 			mapper = shard.OpenMapReducer(callbackCols, mapReduce, false, 0, nil, currentTx)
 			mappers[shard] = mapper
 		}
