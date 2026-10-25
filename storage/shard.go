@@ -1007,6 +1007,12 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 }
 func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 	var release func()
+	ready := false
+	defer func() {
+		if !ready && release != nil {
+			release()
+		}
+	}()
 	if s.t != nil {
 		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
 			cell := r.shardCell(s)
@@ -1019,6 +1025,7 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 	s.ensureLoaded()
 	s.setState(WRITE)
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
+	ready = true
 	return WriteAccess{shard: s, release: release}
 }
 

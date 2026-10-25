@@ -12,6 +12,9 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package mosi_test
 
 import "fmt"
+import "time"
+import "context"
+import "runtime"
 import "sync"
 import "testing"
 import "sync/atomic"
@@ -318,4 +321,137 @@ func TestMosiFailedUpgradeRetainsOnlyUnrevokedReadPermission(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestMosiSingleWriterLeavesReadsUnregistered(t *testing.T) {
+	var state mosi.State
+	state.Initialize(mosi.M)
+	owner := new(int)
+	writer, wait := state.TryWrite(owner, false)
+	if writer == nil || wait != nil {
+		t.Fatal("first writer was not admitted")
+	}
+	before := state.Snapshot()
+	for range 1000 {
+		publication, action := state.Request(mosi.S)
+		if action != mosi.Ready || publication != before || !publication.Phase().Readable() {
+			t.Fatal("read registered or waited for an active writer")
+		}
+	}
+	other, wait := state.TryWrite(new(int), false)
+	if other != nil || wait == nil {
+		t.Fatal("independent writer entered active mosi.M")
+	}
+	nested, _ := state.TryWrite(owner, false)
+	if nested != writer {
+		t.Fatal("nested transaction lost its active writer")
+	}
+	writer.Release()
+	select {
+	case <-wait:
+		t.Fatal("nested write scope was forgotten")
+	default:
+	}
+	nested.Release()
+	<-wait
+	next, _ := state.TryWrite(new(int), false)
+	if next == nil {
+		t.Fatal("completed batch retained active mosi.M")
+	}
+	next.Release()
+}
+
+func TestMosiHandoverDrainsExistingWritesWithoutBlockingReads(t *testing.T) {
+	var state mosi.State
+	state.Initialize(mosi.M)
+	nativeDone := make(chan struct{})
+	drain := func(ctx context.Context) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-nativeDone:
+			return nil
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ready := make(chan *mosi.Handover, 1)
+	go func() {
+		handover, err := state.BeginHandover(ctx, drain)
+		if err == nil {
+			ready <- handover
+		}
+	}()
+	for !state.ClosingWrites() {
+		select {
+		case <-ctx.Done():
+			t.Fatal("handover did not close admission")
+		default:
+			runtime.Gosched()
+		}
+	}
+	if !state.Phase().Readable() {
+		t.Fatal("closing writer admission revoked readers")
+	}
+	if writer, wait := state.TryWrite(new(int), false); writer != nil || wait == nil {
+		t.Fatal("new writer bypassed the native transaction drain")
+	}
+	continuation, _ := state.TryWrite(new(int), true)
+	if continuation == nil {
+		t.Fatal("existing transaction could not finish its writes")
+	}
+	close(nativeDone)
+	select {
+	case <-ready:
+		t.Fatal("handover passed an active batch")
+	default:
+	}
+	continuation.Release()
+	var handover *mosi.Handover
+	select {
+	case handover = <-ready:
+	case <-ctx.Done():
+		t.Fatal("handover did not finish draining")
+	}
+	if writer, _ := state.TryWrite(new(int), true); writer != nil {
+		t.Fatal("sealed handover admitted another writer")
+	}
+	state.Publish(mosi.O)
+	handover.Release()
+	if state.Phase() != mosi.O {
+		t.Fatal("handover changed the published permission")
+	}
+}
+
+func TestMosiCancelledHandoverRestoresWriterAdmission(t *testing.T) {
+	var state mosi.State
+	state.Initialize(mosi.M)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := state.BeginHandover(ctx, func(ctx context.Context) error { return ctx.Err() }); err == nil {
+		t.Fatal("cancelled handover succeeded")
+	}
+	writer, _ := state.TryWrite(new(int), false)
+	if writer == nil {
+		t.Fatal("cancelled handover left write admission closed")
+	}
+	writer.Release()
+}
+
+func TestMosiFailedNativeDrainReopensWriteAdmission(t *testing.T) {
+	var state mosi.State
+	state.Initialize(mosi.M)
+	failure := func() (failure any) {
+		defer func() { failure = recover() }()
+		state.BeginHandover(context.Background(), func(context.Context) error { panic("native drain failure") })
+		return nil
+	}()
+	if failure == nil {
+		t.Fatal("fixture did not fail")
+	}
+	writer, _ := state.TryWrite(new(int), false)
+	if writer == nil {
+		t.Fatal("failed native drain retained write admission")
+	}
+	writer.Release()
 }

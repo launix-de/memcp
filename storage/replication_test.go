@@ -153,7 +153,7 @@ func TestReplicationOrderedMutationRequiresWritePermission(t *testing.T) {
 	}
 }
 
-func TestReplicationOrderedMutationRetainsTransactionWriteLease(t *testing.T) {
+func TestReplicationOrderedMutationDrainsNativeTransactionBeforeHandover(t *testing.T) {
 	for _, mode := range []TxMode{TxCursorStability, TxACID} {
 		t.Run(fmt.Sprint(mode), func(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "torderedtxrights", 3)
@@ -171,8 +171,8 @@ func TestReplicationOrderedMutationRetainsTransactionWriteLease(t *testing.T) {
 			tbl.scan_order(tx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueCondition(),
 				[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 1,
 				[]string{"$update"}, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-					if cell.gate.TryLock() {
-						cell.gate.Unlock()
+					if handover := cell.rights.TryHandover(cell.writesDrained); handover != nil {
+						handover.Release()
 						t.Error("ownership handover was admitted during the mutation callback")
 					}
 					scm.Apply(args[1])
@@ -181,19 +181,20 @@ func TestReplicationOrderedMutationRetainsTransactionWriteLease(t *testing.T) {
 			if tx.IsVisible(shard, 0) {
 				t.Fatal("transaction did not delete the first row")
 			}
-			if cell.gate.TryLock() {
-				cell.gate.Unlock()
-				t.Fatal("ordered scan released the write lease before transaction completion")
+			if handover := cell.rights.TryHandover(cell.writesDrained); handover != nil {
+				handover.Release()
+				t.Fatal("native transaction did not defer ownership handover")
 			}
 			tx.Rollback()
 			replicationLeave(tx)
 			if shard.deletions.Count() != 0 {
 				t.Fatal("rollback did not restore the ordered deletion")
 			}
-			if !cell.gate.TryLock() {
-				t.Fatal("completed transaction retained its write lease")
+			handover := cell.rights.TryHandover(cell.writesDrained)
+			if handover == nil {
+				t.Fatal("completed transaction retained write admission")
 			}
-			cell.gate.Unlock()
+			handover.Release()
 		})
 	}
 }
@@ -242,10 +243,11 @@ func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 	if called || !strings.Contains(fmt.Sprint(failure), "generation changed; retry statement") {
 		t.Fatalf("historical mutation called = %v, failure = %v", called, failure)
 	}
-	if !cell.gate.TryLock() {
+	handover := cell.rights.TryHandover(cell.writesDrained)
+	if handover == nil {
 		t.Fatal("generation mismatch leaked its write capability")
 	}
-	cell.gate.Unlock()
+	handover.Release()
 }
 
 func TestMosiBinaryEnvelopeRoundTripAndLimits(t *testing.T) {
@@ -550,13 +552,17 @@ func TestReplicationParallelReadsIgnoreControlLocks(t *testing.T) {
 		c.rights.Initialize(mosi.ParsePhase(state))
 		c.initialized.Store(true)
 		replication.Store(r)
-		// Hold every control-plane lock, including the write/handover gate.
+		// Hold every control-plane lock, including closed writer admission.
 		// Already-authorized reads must still complete on their own snapshots.
 		r.mu.Lock()
-		c.gate.Lock()
+		handover := c.rights.TryHandover(c.writesDrained)
+		if handover == nil {
+			t.Fatal("unexpected active write")
+		}
 		c.acquire.Lock()
 		c.directory.Lock()
 		c.checkpoint.Lock()
+		c.sendMu.Lock()
 		c.importPublication.Lock()
 		done := make(chan struct{})
 		go func() {
@@ -582,10 +588,11 @@ func TestReplicationParallelReadsIgnoreControlLocks(t *testing.T) {
 			timedOut = true
 		}
 		c.importPublication.Unlock()
+		c.sendMu.Unlock()
 		c.checkpoint.Unlock()
 		c.directory.Unlock()
 		c.acquire.Unlock()
-		c.gate.Unlock()
+		handover.Release()
 		r.mu.Unlock()
 		<-done
 		if timedOut {
@@ -1059,5 +1066,123 @@ func TestReplicationImportDefersCleanup(t *testing.T) {
 	defer reader.Close()
 	if missing, ok := reader.(interface{ Missing() bool }); !ok || !missing.Missing() {
 		t.Fatal("aborted private generation was retained after import cleanup")
+	}
+}
+
+func TestReplicationBackupBackpressureDoesNotHoldActiveWriter(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "tbackupwriteradmission", 3)
+	r := replicaRecoveryFixture()
+	r.master = false
+	r.directory.Users["root"] = replicaAuth{Admin: true}
+	cell := r.declareShard(table.ActiveShards()[0], r.id, true)
+	resource := *cell.resource.Load()
+	// The queue is deliberately unbuffered: receiving begin proves preparation
+	// finished; stopping consumption then holds the transport at its next packet.
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage)}
+	r.upstream = peer
+	done := make(chan struct{})
+	go func() { defer close(done); r.backupDatabase(resource.Database, "root") }()
+	defer func() { close(peer.done); <-done }()
+	select {
+	case message := <-peer.outgoing:
+		if message.Packet == nil || message.Packet.Kind != "begin" {
+			t.Fatal("backup did not begin")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("backup did not reach the transport")
+	}
+	writer, wait := cell.rights.TryWrite(nil, false)
+	if writer == nil || wait != nil {
+		t.Fatal("network backpressure retained local writer admission")
+	}
+	if !cell.rights.Phase().Readable() {
+		t.Fatal("active backup writer excluded readers")
+	}
+	writer.Release()
+}
+
+func TestReplicationTransferRemainsBoundToPreparedGeneration(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "tboundtransfergeneration", 3)
+	r := replicaRecoveryFixture()
+	r.schemaShards(table.schema, r.id, true)
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	resource := *r.shardCell(table.ActiveShards()[0]).resource.Load()
+	generation, err := r.prepareResource(resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfer, err := r.captureResource(resource, generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transfer.release()
+	if !r.hasTransfers(resource.Database) {
+		t.Fatal("snapshot has no GC lifetime")
+	}
+	if _, _, complete := CleanDatabase(table.schema); complete {
+		t.Fatal("GC ignored an outgoing snapshot")
+	}
+	failure := func() (failure any) {
+		defer func() { failure = recover() }()
+		DropDatabase(resource.Database, false)
+		return nil
+	}()
+	if failure == nil || databases.Get(resource.Database) != table.schema {
+		t.Fatal("DROP DATABASE retired an active transfer namespace")
+	}
+	// Publish another physical generation before the transfer starts. Every
+	// packet, including begin, must still refer to the captured original UUID.
+	table.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("later-write")}}, nil, scm.NewNil(), false, nil)
+	next, err := r.prepareResource(resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next == generation {
+		t.Fatal("fixture did not replace its generation")
+	}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 64)}
+	if err := r.sendResource(peer, mosiPacket{ID: uuid.NewString(), Resource: resource, Generation: generation}, transfer); err != nil {
+		t.Fatal(err)
+	}
+	if r.hasTransfers(resource.Database) {
+		t.Fatal("completed transfer retained its GC lifetime")
+	}
+	if _, err := r.captureResource(resource, uuid.NewString()); err == nil || r.hasTransfers(resource.Database) {
+		t.Fatal("failed capture leaked a GC lifetime")
+	}
+	close(peer.outgoing)
+	packets := 0
+	for message := range peer.outgoing {
+		if message.Packet.Generation != generation {
+			t.Fatalf("transfer changed UUID %s -> %s", generation, message.Packet.Generation)
+		}
+		packets++
+	}
+	if packets < 3 {
+		t.Fatal("transfer omitted its immutable data")
+	}
+}
+
+func TestReplicationNativeWriterContinuesWhileForeignDDLHasSchema(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "tnativetxschemacontinue", 3)
+	r := replicaRecoveryFixture()
+	r.master = false
+	r.schemaShards(table.schema, r.id, true)
+	r.resourceCell(mosiResource{Database: table.schema.Name}).rights.Initialize(mosi.M)
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	tx := NewTxContext(TxACID)
+	defer tx.Rollback()
+	table.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("pending-native-write")}}, nil, scm.NewNil(), false, nil, tx)
+	cell := r.shardCell(table.ActiveShards()[0])
+	if cell.writesDrained() {
+		t.Fatal("native transaction was not registered")
+	}
+	r.resourceCell(mosiResource{Database: table.schema.Name}).rights.Publish(mosi.IO)
+	_, release := r.writeResource(*cell.resource.Load(), tx)
+	release()
+	if !cell.rights.Phase().Readable() {
+		t.Fatal("DDL wait revoked the existing data transaction")
 	}
 }

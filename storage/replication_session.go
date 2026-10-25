@@ -17,20 +17,13 @@ import "github.com/launix-de/memcp/scm"
 
 // Reads use the engine's ordinary immutable shard/catalog snapshots. They do
 // not register admission, increment a counter, hold a lock, or rebuild/checkpoint.
-// Only a write transaction retains the local write-side gate: handover must not
-// serialize uncommitted deltas. Shared ownership alone never blocks analytics.
+// Native transaction generations retain uncommitted writes. The MOSI local
+// writer is batch-scoped; neither read-only nor idle transactions hold a gate.
 func replicationEnter(tx *TxContext, session scm.Scmer) {
 	replicationEnterMode(tx, session, false)
 }
 
 func replicationLeave(tx *TxContext) {
-	tx.mu.Lock()
-	cells := tx.replicationCells
-	tx.replicationCells = nil
-	tx.mu.Unlock()
-	for cell := range cells {
-		cell.gate.RUnlock()
-	}
 	tx.replicationWriting, tx.replicationActive = false, false
 }
 
@@ -74,6 +67,9 @@ func replicationCheckWriteTable(t *table, tx *TxContext) {
 // retaining a historical shard keeps its files alive without registering reads.
 func replicationRetainsCatalogs(name string) bool {
 	if r := replication.Load(); r != nil {
+		if r.hasTransfers(name) {
+			return true
+		}
 		if cells := r.cellSnapshot.Load(); cells != nil {
 			for _, cell := range *cells {
 				resource := cell.resource.Load()
@@ -102,6 +98,9 @@ func (c *replicaCell) retainGeneration(shard *storageShard) {
 		next := make([]weak.Pointer[storageShard], 0)
 		if previous != nil {
 			for _, entry := range *previous {
+				if entry.Value() == shard {
+					return
+				}
 				if entry.Value() != nil {
 					next = append(next, entry)
 				}

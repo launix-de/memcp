@@ -1058,10 +1058,17 @@ func (db *database) GetRead(tx *TxContext) ReadAccess {
 }
 func (db *database) GetWrite(tx *TxContext) WriteAccess {
 	var release func()
+	ready := false
+	defer func() {
+		if !ready && release != nil {
+			release()
+		}
+	}()
 	if r := activeReplication(db); r != nil && validReplicaDatabase(db.Name) {
 		_, release = r.writeResource(mosiResource{Database: db.Name}, tx)
 	}
 	db.ensureLoaded()
+	ready = true
 	return WriteAccess{release: release}
 }
 
@@ -1279,12 +1286,13 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 					if s != nil {
 						if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) && !t.isEphemeralQueryTable() {
 							cell := r.shardCell(s)
-							if !cell.gate.TryLock() {
+							handover := cell.rights.TryHandover(cell.writesDrained)
+							if handover == nil {
 								newShardList[i] = s
 								incomplete.Store(true)
 								return
 							}
-							defer cell.gate.Unlock()
+							defer handover.Release()
 							phase := cell.rights.Phase()
 							if phase != mosi.M && phase != mosi.O {
 								newShardList[i] = s
@@ -2012,6 +2020,9 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 	defer db.GetWrite(nil).Release()
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
+	if r := replication.Load(); r != nil && r.hasTransfers(schema) {
+		panic("database has active replication transfers; retry ALTER DATABASE storage")
+	}
 	if GetDatabase(schema) != db {
 		panic("Database " + schema + " was dropped while waiting for storage migration")
 	}
@@ -2103,6 +2114,9 @@ func DropDatabase(schema string, ifexists bool) bool {
 	}
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
+	if r := replication.Load(); r != nil && r.hasTransfers(schema) {
+		panic("database has active replication transfers; retry DROP DATABASE")
+	}
 	requireDatabaseMaintenance(schema, maintenanceDrop)
 	db = databases.Remove(schema)
 	if db == nil {
@@ -2232,7 +2246,8 @@ func DropTable(schema, name string, ifexists bool) {
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
-	defer db.GetWrite(nil).Release()
+	schemaAccess := db.GetWrite(nil)
+	defer func() { schemaAccess.Release() }()
 	db.persistenceLifecycle.RLock()
 	persistenceLifecycleLocked := true
 	defer func() {
@@ -2287,6 +2302,8 @@ func DropTable(schema, name string, ifexists bool) {
 	persistenceLifecycleLocked = false
 	// Fire AfterDropTable triggers after releasing catalog and persistence
 	// lifecycle locks. Cascading drops may perform DDL in this database again.
+	schemaAccess.Release()
+	schemaAccess = WriteAccess{}
 	t.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 }
 

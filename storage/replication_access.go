@@ -23,9 +23,8 @@ import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
 type replicaCell struct {
-	// gate protects uncommitted local writes against ownership transfer.
-	// Analytics never participate: their existing snapshots remain valid.
-	gate              sync.RWMutex // write transactions only; reads use existing snapshots
+	// rights owns both MOSI permissions and the one active local writer.
+	// Readers never participate in writer admission or transaction draining.
 	rights            mosi.State
 	resource          atomic.Pointer[mosiResource]
 	current           atomic.Pointer[storageShard]
@@ -33,7 +32,8 @@ type replicaCell struct {
 	initialized       atomic.Bool
 	bootstrapStarted  bool
 	directory         sync.Mutex
-	checkpoint        sync.Mutex
+	checkpoint        sync.Mutex // database backup order; never acquired by local readers/writers
+	sendMu            sync.Mutex // source generation streams for this resource only
 	importPublication sync.Mutex // schema cell: import registration/publication versus GC
 	acquire           sync.Mutex
 	retiredShards     atomic.Pointer[[]weak.Pointer[storageShard]]
@@ -305,47 +305,95 @@ func (r *replicationManager) readShard(shard *storageShard, tx *TxContext) *stor
 	return shard
 }
 
-// Write leases are transaction-owned and charged once per resource. They are
-// absent from readers and row loops; the transfer waits for commit/rollback.
-func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext) (*replicaCell, func()) {
-	c := r.resourceCell(resource)
-	if tx != nil {
-		tx.mu.Lock()
-		owned := tx.replicationCells[c]
-		tx.mu.Unlock()
-		if owned {
-			return c, func() {}
+// Native transaction ownership already tracks every modified generation.
+// Reuse that proof for handover; no transaction-wide replication lock, counter
+// or duplicate per-transaction resource directory is maintained.
+func (c *replicaCell) writesDrained() bool {
+	if shard := c.current.Load(); shard != nil && shard.activeTransactions.Load() != 0 {
+		return false
+	}
+	if previous := c.retiredShards.Load(); previous != nil {
+		for _, entry := range *previous {
+			if shard := entry.Value(); shard != nil && shard.activeTransactions.Load() != 0 {
+				return false
+			}
 		}
 	}
-	// A statement which lost schema permission during DDL must reacquire it
-	// before obtaining a new data write right. Existing write owners retain
-	// their transaction lease; DDL waits for their committed shard handover.
+	return true
+}
+
+// Handover reuses the native transaction completion notification. Historical
+// generations stay reachable while waiting; continuation batches can finish
+// normally without registering another MOSI transaction lifetime.
+func (c *replicaCell) drainWrites(ctx context.Context) error {
+	groups := make(map[*table][]*storageShard)
+	add := func(shard *storageShard) {
+		if shard != nil {
+			groups[shard.t] = append(groups[shard.t], shard)
+		}
+	}
+	add(c.current.Load())
+	if history := c.retiredShards.Load(); history != nil {
+		for _, entry := range *history {
+			add(entry.Value())
+		}
+	}
+	for table, shards := range groups {
+		if err := table.waitForTransactions(ctx, shards); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *replicaCell) transactionContinues(tx *TxContext) bool {
+	if tx == nil {
+		return false
+	}
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	for shard := range tx.shards {
+		if shard.coherence.Load() == c {
+			return true
+		}
+	}
+	return false
+}
+
+// Write admission is a local substate of M, once per batch. Independent writer
+// transactions serialize; nested work may borrow its explicit transaction owner.
+// Only handover consults the existing native transaction lifetime. Reads do not
+// acquire a lease and network streaming never retains an active writer.
+func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext) (*replicaCell, func()) {
+	c := r.resourceCell(resource)
 	if resource.Shard != "" && tx != nil {
-		r.obtain(mosiResource{Database: resource.Database}, mosi.S, replicationUser(tx))
+		schema := mosiResource{Database: resource.Database}
+		// A foreign DDL owner may already hold schema M while waiting for our
+		// native data transaction. Its continuation retains its old declarations
+		// and must finish before that DDL, rather than deadlock reacquiring S.
+		if !r.resourceCell(schema).rights.Phase().Readable() && !c.transactionContinues(tx) {
+			r.obtain(schema, mosi.S, replicationUser(tx))
+		}
+	}
+	var owner any
+	if tx != nil {
+		owner = tx
 	}
 	for {
 		r.obtain(resource, mosi.M, replicationUser(tx))
-		c.gate.RLock()
-		if c.rights.Phase() == mosi.M {
-			break
+		continuation := c.rights.ClosingWrites() && c.transactionContinues(tx)
+		writer, wait := c.rights.TryWrite(owner, continuation)
+		if writer != nil {
+			return c, writer.Release
 		}
-		c.gate.RUnlock()
+		if wait != nil {
+			select {
+			case <-wait:
+			case <-r.done:
+				panic(mosi.NetworkError)
+			}
+		}
 	}
-	if tx == nil {
-		return c, c.gate.RUnlock
-	}
-	tx.mu.Lock()
-	if tx.replicationCells == nil {
-		tx.replicationCells = make(map[*replicaCell]bool)
-	}
-	if tx.replicationCells[c] {
-		c.gate.RUnlock()
-	} else {
-		tx.replicationCells[c] = true
-	}
-	tx.replicationWriting = true
-	tx.mu.Unlock()
-	return c, func() {}
 }
 
 func (r *replicationManager) backupDatabase(name, user string) {
@@ -370,48 +418,75 @@ func (r *replicationManager) backupDatabase(name, user string) {
 	r.mu.Lock()
 	resources := make([]mosiResource, 0)
 	for _, record := range r.directory.Records {
-		if record.Resource.Database == name && record.State == "M" {
+		if record.Resource.Database == name && record.Resource.Shard != "" && record.State == "M" {
 			resources = append(resources, record.Resource)
 		}
 	}
 	r.mu.Unlock()
 	sort.Slice(resources, func(i, j int) bool { return resources[i].key() < resources[j].key() })
 	if guard.rights.Phase() == mosi.M {
-		resources = append(resources, mosiResource{Database: name})
+		// Recovery may restore live schema rights before its RAM directory
+		// record. Always introduce new tables before sending their data.
+		schema := mosiResource{Database: name}
+		resources = append([]mosiResource{schema}, resources...)
+		resources = append(resources, schema)
 	}
-	for _, resource := range resources {
+	for index, resource := range resources {
 		cell := r.resourceCell(resource)
 		resource = *cell.resource.Load() // schema publication may have renamed its table
-		func() {
+		sent := func() bool {
+			// Serialize generations sent for this resource, never local writes.
+			if !cell.sendMu.TryLock() {
+				return false
+			}
+			defer cell.sendMu.Unlock()
 			releasePersistence, err := replicaPersistenceRead(resource)
 			if err != nil {
 				scm.PrintError(err)
-				return
+				return false
 			}
 			defer releasePersistence()
-			if !cell.gate.TryLock() {
-				return
+			handover := cell.rights.TryHandover(cell.writesDrained)
+			if handover == nil {
+				return false
 			}
-			defer cell.gate.Unlock()
+			locked := true
+			defer func() {
+				if locked {
+					handover.Release()
+				}
+			}()
 			if cell.rights.Phase() == mosi.IS {
 				r.obtain(resource, mosi.M, user)
 			}
 			if cell.rights.Phase() != mosi.M {
-				return
+				return false
 			}
 			generation, err := r.prepareResource(resource)
 			if err != nil {
 				scm.PrintError(err)
-				return
+				return false
 			}
 			r.localRecord(resource, mosi.M, generation)
 			r.mu.Lock()
 			epoch := r.directory.Records[resource.key()].Epoch
 			r.mu.Unlock()
-			releasePersistence()
-			if err := r.sendResource(peer, mosiPacket{ID: uuid.NewString(), Resource: resource, Epoch: epoch, Generation: generation, User: user, Hash: auth.Hash}); err != nil {
+			transfer, err := r.captureResource(resource, generation)
+			if err != nil {
 				scm.PrintError(err)
+				return false
 			}
+			handover.Release()
+			locked = false
+			releasePersistence()
+			if err := r.sendResource(peer, mosiPacket{ID: uuid.NewString(), Resource: resource, Epoch: epoch, Generation: generation, User: user, Hash: auth.Hash}, transfer); err != nil {
+				scm.PrintError(err)
+				return false
+			}
+			return true
 		}()
+		if index == 0 && resource.Shard == "" && !sent {
+			return
+		}
 	}
 }

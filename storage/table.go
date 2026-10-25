@@ -784,7 +784,7 @@ func (t *table) signalTransactionDrain() {
 	t.transactionDrainMu.Unlock()
 }
 
-func (t *table) waitForTransactions(shards []*storageShard) {
+func (t *table) waitForTransactions(ctx context.Context, shards []*storageShard) error {
 	hasActive := func() bool {
 		for _, shard := range shards {
 			if shard != nil && shard.activeTransactions.Load() != 0 {
@@ -794,7 +794,7 @@ func (t *table) waitForTransactions(shards []*storageShard) {
 		return false
 	}
 	if !hasActive() {
-		return
+		return ctx.Err()
 	}
 	t.transactionDrainOnce.Do(func() {
 		t.transactionDrainMu.Lock()
@@ -802,12 +802,19 @@ func (t *table) waitForTransactions(shards []*storageShard) {
 		t.transactionDrainMu.Unlock()
 	})
 	t.transactionDrainMu.Lock()
+	stop := context.AfterFunc(ctx, func() {
+		t.transactionDrainMu.Lock()
+		t.transactionDrain.Broadcast()
+		t.transactionDrainMu.Unlock()
+	})
+	defer stop()
 	t.transactionDrainWaiters.Add(1)
-	for hasActive() {
+	for hasActive() && ctx.Err() == nil {
 		t.transactionDrain.Wait()
 	}
 	t.transactionDrainWaiters.Add(-1)
 	t.transactionDrainMu.Unlock()
+	return ctx.Err()
 }
 
 // awaitCreationInitialization is the idempotent createtable barrier for an

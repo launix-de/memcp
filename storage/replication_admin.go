@@ -184,13 +184,17 @@ func (r *replicationManager) retire(id string) error {
 	for _, name := range names {
 		c := r.cell(name)
 		c.directory.Lock()
-		c.gate.Lock()
+		handover, err := c.rights.BeginHandover(context.Background(), c.drainWrites)
+		if err != nil {
+			c.directory.Unlock()
+			return err
+		}
 		r.mu.Lock()
 		record := r.directory.Records[name]
 		r.mu.Unlock()
 		if record.Owner == id {
 			if err := r.restoreBackup(record); err != nil {
-				c.gate.Unlock()
+				handover.Release()
 				c.directory.Unlock()
 				return err
 			}
@@ -204,7 +208,7 @@ func (r *replicationManager) retire(id string) error {
 			r.confirmed[record.Resource.key()] = record.Owner
 			return true
 		})
-		var err error
+		err = nil
 		if record.Owner == r.id {
 			foreign := false
 			for reader := range record.Readers {
@@ -219,7 +223,7 @@ func (r *replicationManager) retire(id string) error {
 		if err == nil {
 			c.rights.Publish(mosi.ParsePhase(record.State))
 		}
-		c.gate.Unlock()
+		handover.Release()
 		c.directory.Unlock()
 		if err != nil {
 			return err

@@ -120,10 +120,9 @@ var GlobalCommitEpoch uint64
 // TxContext struct itself.
 type TxContext struct {
 	// Replication bindings are session-executor-owned, never shared by readers.
-	// Only writes retain a gate across the transaction; reads use shard snapshots.
+	// Native shard transaction generations supply the ownership-transfer drain.
 	replicationActive   bool
 	replicationWriting  bool
-	replicationCells    map[*replicaCell]bool
 	ID                  uint64
 	Mode                TxMode
 	State               TxState
