@@ -11,14 +11,15 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package scm
 
 import "fmt"
+import "bytes"
 import "maps"
 import "encoding/json"
 
-const procedureWireVersion = 1
+const procedureWireVersion = 2
 const maxProcedureWireBytes = 256 * 1024
 
-// MarshalProcedure snapshots explicit captures before using the ordinary Scmer
-// AST codec. It does not serialize Env, native/JIT code, sessions or Go pointers.
+// MarshalProcedure snapshots explicit captures before using the existing Scheme
+// Serialize function. It does not serialize Env, native/JIT code, sessions or Go pointers.
 // Both nodes must provide the same declared global builtin contract; other
 // globals require explicit captures. Unsupported values
 // and unresolved lexical captures fail instead of silently becoming "?" or a
@@ -39,10 +40,12 @@ func MarshalProcedure(value Scmer) (data []byte, err error) {
 	if err := validateProcedureWire(proc.Body, bound, value.Proc().En, false, 0); err != nil {
 		return nil, err
 	}
+	var source bytes.Buffer
+	Serialize(&source, closed, &Globalenv)
 	data, err = json.Marshal(struct {
-		Version int   `json:"version"`
-		Code    Scmer `json:"code"`
-	}{procedureWireVersion, closed})
+		Version int    `json:"version"`
+		Source  string `json:"source"`
+	}{procedureWireVersion, source.String()})
 	if len(data) > maxProcedureWireBytes {
 		return nil, fmt.Errorf("procedure exceeds wire size limit")
 	}
@@ -52,25 +55,55 @@ func MarshalProcedure(value Scmer) (data []byte, err error) {
 // UnmarshalProcedure reconstructs an uncompiled procedure without evaluating
 // its body. Only an authenticated task handler may later execute it. The codec
 // is not a sandbox or an authorization boundary.
-func UnmarshalProcedure(data []byte) (Scmer, error) {
+func UnmarshalProcedure(data []byte) (value Scmer, err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			value = NewNil()
+			err = fmt.Errorf("procedure decoding: %v", failure)
+		}
+	}()
 	if len(data) > maxProcedureWireBytes {
 		return NewNil(), fmt.Errorf("procedure exceeds wire size limit")
 	}
 	var envelope struct {
-		Version int   `json:"version"`
-		Code    Scmer `json:"code"`
+		Version int    `json:"version"`
+		Source  string `json:"source"`
 	}
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return NewNil(), err
 	}
-	if envelope.Version != procedureWireVersion || !envelope.Code.IsProc() {
+	if envelope.Version != procedureWireVersion {
 		return NewNil(), fmt.Errorf("unsupported procedure envelope")
 	}
-	proc := envelope.Code.Proc()
-	if err := validateProcedureWire(proc.Body, procedureWireBindings(proc.Params, proc.Body, nil), &Globalenv, false, 0); err != nil {
+	tokens := tokenize("remote procedure", envelope.Source)
+	expression := readFrom(&tokens)
+	items, ok := scmerAsSlice(expression)
+	if !ok || (len(items) != 3 && len(items) != 4) || !scmerIsSymbol(items[0], "lambda") || len(tokens) != 0 {
+		return NewNil(), fmt.Errorf("procedure envelope must contain exactly one lambda")
+	}
+	params := items[1].WithoutSourceInfo()
+	if !params.IsSymbol() {
+		if !params.IsSlice() {
+			return NewNil(), fmt.Errorf("invalid procedure parameters")
+		}
+		for _, param := range params.Slice() {
+			if !param.WithoutSourceInfo().IsSymbol() {
+				return NewNil(), fmt.Errorf("invalid procedure parameter")
+			}
+		}
+	}
+	if len(items) == 4 {
+		count := items[3].WithoutSourceInfo()
+		if !count.IsInt() || count.Int() < 0 || count.Int() > 65536 {
+			return NewNil(), fmt.Errorf("invalid procedure frame size")
+		}
+	}
+	if err := validateProcedureWire(items[2], procedureWireBindings(params, items[2], nil), &Globalenv, false, 0); err != nil {
 		return NewNil(), err
 	}
-	return envelope.Code, nil
+	// Only the validated lambda form is evaluated. Its body stays inert until
+	// the authorized worker calls the reconstructed procedure.
+	return Eval(Optimize(expression, &Globalenv, nil), &Globalenv), nil
 }
 
 func procedureWireBindings(params, body Scmer, parent map[Symbol]struct{}) map[Symbol]struct{} {
@@ -114,7 +147,7 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 				}
 				if DeclarationForValue(value) == nil {
 					switch value.String() {
-					case "outer", "var", "begin", "if", "match", "and", "or":
+					case "outer", "var", "begin", "if", "match", "and", "or", "nil", "true", "false":
 					default:
 						return fmt.Errorf("procedure requires an explicit binding for %s", value.Symbol())
 					}

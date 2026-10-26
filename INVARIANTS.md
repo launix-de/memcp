@@ -159,8 +159,8 @@ same ownership, visibility, lifetime, and durability guarantees.
   transaction participation; return scalar/group reductions through the ordinary
   combine contract, never physical row identities. The worker must independently
   acquire the appropriate MOSI permission and retain its generation.
-- `scm.MarshalProcedure` closes explicit captures before the existing JSON AST
-  encoding. It supports scalar/list captures, ordinary nested lambda scopes and
+- `scm.MarshalProcedure` closes explicit captures before the existing Scheme Serialize
+  encoding. The versioned envelope carries Scheme source, not a JSON AST. It supports scalar/list captures, ordinary nested lambda scopes and
   numbered/JIT source bodies, not arbitrary environments. Process-local values,
   native closure captures and unresolved external bindings in nested lambdas fail
   explicitly. The bounded versioned codec does not authorize or sandbox code;

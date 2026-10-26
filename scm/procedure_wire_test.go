@@ -11,6 +11,7 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package scm
 
 import "bytes"
+import "fmt"
 import "strings"
 import "testing"
 
@@ -45,7 +46,7 @@ func TestProcedureWireSnapshotsCapturesAndRunsWithoutSourceEnvironment(t *testin
 				got = Apply(got, NewInt(7))
 			}
 			if got.Int() != 10 {
-				t.Fatalf("optimize=%v source=%s: got %v", optimize, source, got)
+				t.Fatalf("optimize=%v source=%s: got %v, wire=%s", optimize, source, got, data)
 			}
 		}
 	}
@@ -131,5 +132,29 @@ func TestProcedureWireCapturedData(t *testing.T) {
 	defer delete(Globalenv.Vars, Symbol("wire_test_global"))
 	if _, err := MarshalProcedure(Eval(Read(t.Name(), `(lambda () wire_test_global)`), &Globalenv)); err == nil {
 		t.Fatal("mutable global was implicitly rebound at the receiver")
+	}
+}
+
+func TestProcedureWireUsesSchemeSerializeAndDoesNotEvaluateBody(t *testing.T) {
+	original := Eval(Read(t.Name(), `(lambda (row) (+ row 7))`), &Globalenv)
+	data, err := MarshalProcedure(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"source":"(lambda `)) || bytes.Contains(data, []byte(`"code"`)) {
+		t.Fatalf("wire is not Scheme Serialize source: %s", data)
+	}
+	if _, err := UnmarshalProcedure([]byte(`{"version":2,"source":"(lambda () (error \"not during decoding\"))"}`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []string{
+		`(begin (error "not a lambda") (lambda () 1))`,
+		`(lambda () 1) (error "trailing program")`,
+		`(lambda () 1 (error "frame is code"))`,
+	} {
+		data := []byte(fmt.Sprintf(`{"version":2,"source":%q}`, source))
+		if _, err := UnmarshalProcedure(data); err == nil {
+			t.Fatalf("accepted executable envelope: %s", source)
+		}
 	}
 }

@@ -348,6 +348,16 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 	case tagSlice:
 		slice := lambdaSyntaxOperands(v.Slice())
+		if (len(slice) == 3 || len(slice) == 4) && scmerIsSymbol(slice[0], "lambda") {
+			// Numbered locals in a nested lambda belong to its own parameter
+			// frame. Using the enclosing Proc renames slot 0 to the wrong name.
+			child := Proc{Params: slice[1].WithoutSourceInfo(), Body: slice[2], En: glob}
+			if len(slice) == 4 {
+				child.NumVars = int(slice[3].Int())
+			}
+			serializeProcShallow(b, child, glob)
+			return
+		}
 		if len(slice) == 3 && scmerIsSymbol(slice[0], "outer") {
 			b.WriteString("(outer ")
 			serializeEx(b, slice[1], en, glob, nil)
