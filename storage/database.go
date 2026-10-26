@@ -1112,7 +1112,13 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 func (db *database) GetState() SharedState { return db.srState }
 func (db *database) GetRead(tx *TxContext) ReadAccess {
 	if r := activeReplication(db); r != nil && validReplicaDatabase(db.Name) {
-		r.obtain(mosiResource{Database: db.Name}, mosi.S, replicationUser(tx), tx)
+		resource := mosiResource{Database: db.Name}
+		// An authorized schema read only samples its local permission. User
+		// proofs and SessionState context lookups belong to cold acquisition;
+		// evaluating them here would synchronize even the granted read path.
+		if !r.resourceCell(resource).ownstate.Phase().Readable() {
+			r.obtain(resource, mosi.S, replicationUser(tx), tx)
+		}
 	}
 	db.ensureLoaded()
 	return ReadAccess{}

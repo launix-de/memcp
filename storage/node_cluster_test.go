@@ -275,3 +275,18 @@ func TestClusterColdHandoverRetainsEarlierOwnersCommitAuthority(t *testing.T) {
 		t.Fatal("cold forwarding lost the original modifier's durable commit proof")
 	}
 }
+
+func TestClusterGrantedSchemaReadDoesNotConsultSession(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_cluster_granted_schema", 1)
+	cluster := &nodeCluster{databases: map[string]bool{tbl.schema.Name: true}}
+	cluster.initializeManager()
+	cell := cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name})
+	cell.ownstate.Establish(mosi.S)
+	mounts := map[string]bool{tbl.schema.Name: true}
+	oldMounts := sharedClusterMounts.Swap(&mounts)
+	defer sharedClusterMounts.Store(oldMounts)
+	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(oldService)
+	tx := &TxContext{Session: scm.NewFunc(func(...scm.Scmer) scm.Scmer { panic("granted schema read consulted user session") })}
+	tbl.schema.GetRead(tx).Release()
+}
