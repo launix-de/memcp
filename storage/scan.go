@@ -2395,6 +2395,13 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		}
 	}()
 	maxInsertIndex := len(t.inserts)
+	if access.runtime != nil && access.runtime.horizon != nil {
+		horizon := access.runtime.horizon
+		if t.main_count != horizon.Main || uint64(maxInsertIndex) < uint64(horizon.Delta) {
+			panic("remote scan horizon changed")
+		}
+		maxInsertIndex = int(horizon.Delta)
+	}
 	feedbackPopulation := int64(t.main_count) + int64(maxInsertIndex) - int64(t.deletions.Count())
 	var feedbackCandidates int64
 	visibleUpper := t.main_count + uint32(maxInsertIndex)

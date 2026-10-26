@@ -97,6 +97,7 @@ class Node(OwnedServer):
         self.port, self.mysql_port = free_port(), free_port()
         self.replication = replication
         self.password = local_password
+        self.cluster_secret = "replication-runner-shared-scan-secret"
         self.executor = shlex.split(args.executor)
         self.startup_timeout = args.startup_timeout
         self.client = Client(self.port, self.timeout, database=self.database)
@@ -111,7 +112,7 @@ class Node(OwnedServer):
             str(self.binary), "-data", str(self.data_dir),
             f"--api-port={self.port}", f"--mysql-port={self.mysql_port}",
             "--mysql-socket=", "--no-repl", f"--root-password={self.password}",
-            f"--replication={self.replication}", str(self.app),
+            f"--replication={self.replication}", f"--cluster-secret={self.cluster_secret}", str(self.app),
         ]
         self.process = subprocess.Popen(
             command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=self.log_handle,
@@ -1000,6 +1001,43 @@ def run_multiple_slaves(args, artifacts, journal):
         journal.append({"scenario": "multiple-slave-master-restart", "freshness": "all-three-databases"})
 
 
+def run_remote_scans(args, artifacts, journal):
+    print("SCENARIO: Scheme filter/mapreduce run on another process and return only reductions", flush=True)
+    with Cluster(args, artifacts, "remote-scans") as cluster:
+        master, worker = cluster.master, cluster.slave
+        m = master.start()
+        m.sql(f"CREATE DATABASE {DATABASE}", "system")
+        m.sql("CREATE TABLE remote_items(id INT PRIMARY KEY, bucket TEXT, value INT) ENGINE=SAFE")
+        m.sql("INSERT INTO remote_items VALUES(1,'a',10),(2,'a',20),(3,'b',30),(4,'b',40)")
+        m.scm(f'(partitiontable (table "{DATABASE}" false "remote_items" false) (list (list "id" (list 3))))')
+        w = worker.start()
+        expect(w.number("SELECT COUNT(*) AS n FROM remote_items"), 4, "remote source bootstrap")
+        eventually(lambda: worker.snapshot().get("initialized", {}).get(DATABASE), "worker initial claims")
+        worker_id = w.scm("(node_id)").strip().strip('"')
+        coordinator_id = m.scm("(node_id)").strip().strip('"')
+        if worker_id == coordinator_id:
+            raise DrillFailure("remote scan fixture reused one node identity")
+        endpoint = json.dumps(f"http://127.0.0.1:{worker.port}/cluster")
+        bindings = f'(define cutoff 1) (define factor 2) (define expected_node {json.dumps(worker_id)})'
+        condition = '(lambda (id) (and (> id cutoff) (equal? (node_id) expected_node)))'
+        reducer = '(lambda (acc value) (if (equal? (node_id) expected_node) (+ acc (* factor value)) (error "mapreducer ran on coordinator")))'
+        scalar = f"""(scan_remote nil {endpoint} "{DATABASE}" "remote_items" '("id") {condition} '("value") {reducer} 0 +)"""
+        expression = f'(begin {bindings} {scalar})'
+        for expected in (180, 190, 200):
+            expect(m.scm(expression).strip(), str(expected), "filter/mapreduce placement and fresh remote sum")
+            if expected != 200:
+                w.sql("UPDATE remote_items SET value=value+5 WHERE id=2")
+        grouped = f"""(scan_remote nil {endpoint} "{DATABASE}" "remote_items" '("id") {condition} '("bucket" "value") (lambda (acc bucket value) (set_assoc acc bucket (* factor value) +)) '() (lambda (left right) (merge_assoc left right +)) "group_sums")"""
+        result = m.scm(f'(begin {bindings} (define result {grouped}) (list (result "a") (result "b")))').strip()
+        expect(json.loads(result), [60, 140], "grouped partial reductions and coordinator combine")
+        # The same transport works in the reverse direction; the contact node
+        # has no permanent execution/master role in the scan protocol.
+        reverse = f"""(scan_remote nil "http://127.0.0.1:{master.port}/cluster" "{DATABASE}" "remote_items" '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +)"""
+        expect(w.scm(reverse).strip(), "110", "reverse remote execution")
+        journal.append({"scenario": "remote-scans", "worker": worker_id, "coordinator": coordinator_id,
+                        "shards": 2, "fresh_sums": [180, 190, 200], "group_sums": [60, 140]})
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=ROOT / "memcp")
@@ -1013,6 +1051,7 @@ def main():
     parser.add_argument("--executor", default="", help="optional server executor, e.g. qemu-aarch64-static")
     parser.add_argument("--dedicated-replication-port", action="store_true",
                         help="exercise the optional dedicated listener instead of the normal HTTP /cluster route")
+    parser.add_argument("--remote-scans-only", action="store_true", help="run only the focused two-process remote scan scenario")
     args = parser.parse_args()
     if min(args.rounds, args.workers, args.operations, args.timeout, args.startup_timeout) <= 0:
         parser.error("rounds, workers, operations and timeouts must be positive")
@@ -1028,10 +1067,12 @@ def main():
                 "dedicated_replication_port": args.dedicated_replication_port}]
     print(f"Replication cluster stress artifacts: {artifacts}\nSeed: {args.seed}", flush=True)
     try:
-        run_regressions(args, artifacts, journal)
-        run_partitions(args, artifacts, journal)
-        run_stress(args, artifacts, journal)
-        run_multiple_slaves(args, artifacts, journal)
+        run_remote_scans(args, artifacts, journal)
+        if not args.remote_scans_only:
+            run_regressions(args, artifacts, journal)
+            run_partitions(args, artifacts, journal)
+            run_stress(args, artifacts, journal)
+            run_multiple_slaves(args, artifacts, journal)
         # Also catch a race which terminates a process after its last response
         # or during an expected shutdown; those exits cannot be inferred solely
         # from SQL response validation.
@@ -1049,6 +1090,10 @@ def main():
                   "--seed", str(args.seed), "--rounds", str(args.rounds), "--workers", str(args.workers),
                   "--operations", str(args.operations), "--timeout", str(args.timeout),
                   "--startup-timeout", str(args.startup_timeout), "--executor", args.executor]
+        if args.remote_scans_only:
+            replay.append("--remote-scans-only")
+        if args.dedicated_replication_port:
+            replay.append("--dedicated-replication-port")
         print(f"FAIL: {error}\nReproduce: {shlex.join(replay)}\nArtifacts: {artifacts}", file=sys.stderr, flush=True)
         return 1
 

@@ -1638,6 +1638,7 @@ func exitroutine() {
 					fmt.Println("error: UnloadDatabases failed:", r)
 				}
 			}()
+			storage.StopNodeScans()
 			storage.StopReplication()
 			storage.UnloadDatabases()
 		}()

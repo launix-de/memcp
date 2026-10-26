@@ -1,0 +1,142 @@
+/*
+Copyright (C) 2026 Carl-Philip Hänsch
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later version.
+This program is distributed WITHOUT ANY WARRANTY; without even the implied
+warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
+<https://www.gnu.org/licenses/> for a copy of the GNU General Public License.
+*/
+package storage
+
+import "strings"
+import "testing"
+import "context"
+import "net/http"
+import "net/http/httptest"
+import "encoding/json"
+import "github.com/google/uuid"
+import "github.com/gorilla/websocket"
+import "github.com/launix-de/memcp/scm"
+
+const testScanSecret = "scan-test-secret-32-bytes-constant"
+
+func setupRemoteScanConnection(t *testing.T) (*mosiPeer, *nodeScanService, string) {
+	t.Helper()
+	old := nodeScans.Swap(nil)
+	if err := startNodeScans(testScanSecret); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/cluster", serveMosiHTTP)
+	server := httptest.NewServer(mux)
+	client := &nodeScanService{id: uuid.NewString(), secret: []byte(testScanSecret), peers: make(map[*mosiPeer]bool)}
+	peer, err := client.connect(context.Background(), server.URL+"/cluster")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { client.forget(peer); StopNodeScans(); nodeScans.Store(old); server.Close() })
+	return peer, client, server.URL + "/cluster"
+}
+func makeRemoteScanTask(t *testing.T, shard remoteScanShard) remoteScanTask {
+	t.Helper()
+	encode := func(source string) json.RawMessage {
+		data, err := scm.MarshalProcedure(scm.Eval(scm.Read(t.Name(), source), &scm.Globalenv))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	return remoteScanTask{Version: scanWireVersion, Task: 1, Attempt: uuid.NewString(), Visibility: "cursor-stability/captured-horizon", Shard: shard, FilterColumns: []string{"id"}, Filter: encode(`(lambda (id) (> id 1))`), MapColumns: []string{"id"}, MapReducer: encode(`(lambda (acc id) (+ acc id))`), Neutral: json.RawMessage(`0`), ResultKind: "scalar"}
+}
+func TestRemoteScanRPCExecutesReductionWithCapturedHorizon(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tremotescanrpc", 4)
+	RebuildTable(tbl, true, false)
+	peer, _, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := peer.call(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts); err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 1 {
+		t.Fatal("expected one shard")
+	}
+	// A future insert after the described scan extent must not enter this task.
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1000), scm.NewString("future")}}, nil, scm.NewNil(), false, nil)
+	task := makeRemoteScanTask(t, parts[0])
+	var response remoteScanResult
+	if err := peer.call(context.Background(), "scan.execute", task, &response); err != nil {
+		t.Fatal(err)
+	}
+	value, err := decodeScanData(response.Value, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Int() != 9 || response.OutCount != 3 || response.Shard != parts[0] || response.Attempt != task.Attempt {
+		t.Fatalf("wrong reduction or task identity: %+v", response)
+	}
+	if err := peer.call(context.Background(), "scan.execute", task, &response); err == nil || !strings.Contains(err.Error(), "replayed") {
+		t.Fatalf("duplicate task: %v", err)
+	}
+	task.Task++
+	task.Attempt = uuid.NewString()
+	task.Shard.Generation = uuid.New()
+	if err := peer.call(context.Background(), "scan.execute", task, &response); err == nil || !strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("stale generation: %v", err)
+	}
+	for _, shard := range tbl.ActiveShards() {
+		if shard.activeScanners.Load() != 0 || shard.cacheReaders.Load() != 0 {
+			t.Fatal("RPC leaked a scan or payload lease")
+		}
+	}
+	if tbl.activeTopology().operations.Load() != 0 {
+		t.Fatal("RPC leaked topology registration")
+	}
+}
+func TestRemoteScanRejectsRawRowsAndWrongSecret(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tremotescanreject", 2)
+	peer, _, endpoint := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := peer.call(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts); err != nil {
+		t.Fatal(err)
+	}
+	task := makeRemoteScanTask(t, parts[0])
+	task.Neutral = json.RawMessage(`[]`)
+	data, err := scm.MarshalProcedure(scm.Eval(scm.Read(t.Name(), `(lambda (acc id) (append acc (list id)))`), &scm.Globalenv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.MapReducer = data
+	var response remoteScanResult
+	if err := peer.call(context.Background(), "scan.execute", task, &response); err == nil || !strings.Contains(err.Error(), "cannot return rows") {
+		t.Fatalf("raw rows accepted: %v", err)
+	}
+	wrong := &nodeScanService{id: uuid.NewString(), secret: []byte("different-node-secret"), peers: make(map[*mosiPeer]bool)}
+	if rejected, err := wrong.connect(context.Background(), endpoint); err == nil {
+		wrong.forget(rejected)
+		t.Fatal("wrong node secret accepted")
+	}
+	// An unauthenticated node may receive a public challenge, never the secret
+	// or a scan result. Sending a task instead of proof closes that connection.
+	dialer := *websocket.DefaultDialer
+	dialer.Subprotocols = []string{mosiSubprotocol}
+	address, _ := mosiEndpointURL(endpoint)
+	conn, _, err := dialer.Dial(address, http.Header{"X-Memcp-Role": []string{"scan"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, challenge, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(challenge), testScanSecret) {
+		t.Fatal("challenge leaked the node secret")
+	}
+	if err := scanAuthMessage(conn, "scan.execute", task); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("unauthenticated scan received a response")
+	}
+}

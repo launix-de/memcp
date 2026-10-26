@@ -43,7 +43,7 @@ type storageShard struct {
 	// Constructors/load own initialization; rebuild successors inherit it.
 	lineage   uuid.UUID
 	coherence atomic.Pointer[replicaCell]
-	// Immutable remote-stub routing, atomically published before topology admission.
+	// Immutable query-local remote-stub routing, initialized before use.
 	// Runtime-only; never copied to rebuild successors or historical generations.
 	scanTarget atomic.Pointer[shardScanTarget]
 	// main storage

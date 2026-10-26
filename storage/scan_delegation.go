@@ -18,9 +18,9 @@ import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
 // shardScanTarget is immutable routing metadata for a remote-only stub. The
-// adapter publishes it before publishing the stub's topology. It grants no
-// MOSI permission and must never be attached to a retained historical generation.
-// The executor belongs to the adapter, not to a query or transaction.
+// query initializes it before using the stub. It grants no MOSI permission
+// and must never be attached to a retained historical generation. The executor
+// borrows that query and must not enter the persistent catalog.
 type shardScanTarget struct {
 	resource   mosiResource
 	generation uuid.UUID
