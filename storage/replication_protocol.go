@@ -93,7 +93,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 			}
 			step.finish(failure)
 		} else if packet.Kind == "failure" {
-			rights := &r.resourceCell(packet.Resource).rights
+			rights := &r.resourceCell(packet.Resource).ownstate
 			// Read and write-upgrade workers share a flight. A late read failure
 			// cannot cancel the stronger request already sent for that flight.
 			requested := mosi.IO

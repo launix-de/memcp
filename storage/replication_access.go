@@ -23,9 +23,26 @@ import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
 type replicaCell struct {
-	// rights owns both MOSI permissions and the one active local writer.
-	// Readers never participate in writer admission or transaction draining.
-	rights            mosi.State
+	// Each schema/logical shard has two independent authority slots. Both use
+	// the same MOSI implementation; neither state is a persisted directory.
+	//
+	// clusterstate is this node's OUTWARD permission, including authority
+	// delegated to its descendants. ownstate alone admits LOCAL engine access
+	// and owns the existing active/closing M writer substate. For example, a
+	// master can have clusterstate=M and ownstate=IO while its slave holds M.
+	// Reading clusterstate must never authorize a local query or backend load.
+	//
+	// Today a replication master is the root of its domain (no cluster peers),
+	// and a slave is a leaf whose two stable permissions agree. A future cluster
+	// adapter must acquire the outward slot before delegating inward, and drain
+	// all inward holders before acknowledging an outward recall. A child group
+	// repeats this boundary; these are not two global flags for an entire tree.
+	//
+	// Publication raises clusterstate BEFORE raising ownstate, and lowers
+	// ownstate BEFORE lowering clusterstate. Thus queries need only the existing
+	// ownstate atomic read, with no second lock, CAS or reader registration.
+	clusterstate      mosi.State
+	ownstate          mosi.State
 	resource          atomic.Pointer[mosiResource]
 	current           atomic.Pointer[storageShard]
 	bootstrap         sync.Mutex
@@ -113,7 +130,7 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 		panic("replica retired by administrator")
 	}
 	c := r.resourceCell(resource)
-	phase := c.rights.Phase()
+	phase := c.ownstate.Phase()
 	if phase == mosi.M || wanted != mosi.M && phase.Readable() {
 		return c
 	}
@@ -122,9 +139,9 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 	}
 	// A master owns previously undelegated local resources. Declare that fact
 	// before publishing M; all further changes use normal messages.
-	if r.master && !c.rights.Initialized() {
+	if r.master && !c.ownstate.Initialized() {
 		c.acquire.Lock()
-		if !c.rights.Initialized() {
+		if !c.ownstate.Initialized() {
 			record := r.updateRecord(resource, func(record *replicaRecord) bool {
 				if record.Owner != "" {
 					return false
@@ -132,12 +149,15 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 				record.Resource, record.State, record.Owner, record.Epoch = resource, "M", r.id, 1
 				return true
 			})
-			c.rights.RestoreBackend(mosi.ParsePhase(record.State))
+			// This is root-domain bootstrap, not permission inferred from storage.
+			// resourceKnown above prevents a retained backup from authorizing recovery.
+			c.clusterstate.Establish(mosi.M)
+			c.ownstate.RestoreBackend(mosi.ParsePhase(record.State))
 		}
 		c.acquire.Unlock()
 	}
 	for {
-		publication, action := c.rights.Request(wanted)
+		publication, action := c.ownstate.Request(wanted)
 		if action == mosi.Ready {
 			return c
 		}
@@ -158,7 +178,7 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 						if packet.Kind == "write" {
 							requested = mosi.M
 						}
-						c.rights.Fail(packet.ID, err, requested)
+						c.ownstate.Fail(packet.ID, err, requested)
 					}
 				}()
 			} else {
@@ -173,7 +193,7 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 				}
 			}
 			if err != nil {
-				c.rights.Fail(publication.Flight().ID(), err, mosi.IO)
+				c.ownstate.Fail(publication.Flight().ID(), err, mosi.IO)
 			}
 		}
 		var disconnected <-chan struct{}
@@ -181,7 +201,7 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 			if peer := r.peer(""); peer != nil {
 				disconnected = peer.done
 			} else {
-				c.rights.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError), mosi.IO)
+				c.ownstate.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError), mosi.IO)
 			}
 		}
 		select {
@@ -190,10 +210,10 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 				panic(mosi.NetworkError)
 			}
 		case <-disconnected:
-			c.rights.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError), mosi.IO)
+			c.ownstate.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError), mosi.IO)
 			panic(mosi.NetworkError)
 		case <-r.done:
-			c.rights.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError), mosi.IO)
+			c.ownstate.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError), mosi.IO)
 			panic(mosi.NetworkError)
 		}
 	}
@@ -210,7 +230,7 @@ func (r *replicationManager) firstDatabase(name string, session scm.Scmer) {
 	resource := mosiResource{Database: name}
 	c := r.resourceCell(resource)
 	if r.master || c.initialized.Load() {
-		if !c.rights.Phase().Readable() {
+		if !c.ownstate.Phase().Readable() {
 			r.obtain(resource, mosi.S, session.Func()(replicationUsernameArgument...).String())
 		}
 		return
@@ -287,7 +307,7 @@ func (r *replicationManager) firstDatabase(name string, session scm.Scmer) {
 
 func (r *replicationManager) readShard(shard *storageShard, tx *TxContext) *storageShard {
 	c := r.shardCell(shard)
-	if !c.rights.Phase().Readable() {
+	if !c.ownstate.Phase().Readable() {
 		resource := *c.resource.Load()
 		wanted := mosi.S
 		if !r.master && !r.resourceCell(mosiResource{Database: resource.Database}).initialized.Load() {
@@ -375,7 +395,7 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext)
 		// A foreign DDL owner may already hold schema M while waiting for our
 		// native data transaction. Its continuation retains its old declarations
 		// and must finish before that DDL, rather than deadlock reacquiring S.
-		if !r.resourceCell(schema).rights.Phase().Readable() && !c.transactionContinues(tx) {
+		if !r.resourceCell(schema).ownstate.Phase().Readable() && !c.transactionContinues(tx) {
 			r.obtain(schema, mosi.S, replicationUser(tx))
 		}
 	}
@@ -385,8 +405,8 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext)
 	}
 	for {
 		r.obtain(resource, mosi.M, replicationUser(tx))
-		continuation := c.rights.ClosingWrites() && c.transactionContinues(tx)
-		writer, wait := c.rights.TryWrite(owner, continuation)
+		continuation := c.ownstate.ClosingWrites() && c.transactionContinues(tx)
+		writer, wait := c.ownstate.TryWrite(owner, continuation)
 		if writer != nil {
 			return c, writer.Release
 		}
@@ -428,7 +448,7 @@ func (r *replicationManager) backupDatabase(name, user string) {
 	}
 	r.mu.Unlock()
 	sort.Slice(resources, func(i, j int) bool { return resources[i].key() < resources[j].key() })
-	if guard.rights.Phase() == mosi.M {
+	if guard.ownstate.Phase() == mosi.M {
 		// Recovery may restore live schema rights before its RAM directory
 		// record. Always introduce new tables before sending their data.
 		schema := mosiResource{Database: name}
@@ -450,7 +470,7 @@ func (r *replicationManager) backupDatabase(name, user string) {
 				return false
 			}
 			defer releasePersistence()
-			handover := cell.rights.TryHandover(cell.writesDrained)
+			handover := cell.ownstate.TryHandover(cell.writesDrained)
 			if handover == nil {
 				return false
 			}
@@ -460,10 +480,10 @@ func (r *replicationManager) backupDatabase(name, user string) {
 					handover.Release()
 				}
 			}()
-			if cell.rights.Phase() == mosi.IS {
+			if cell.ownstate.Phase() == mosi.IS {
 				r.obtain(resource, mosi.M, user)
 			}
-			if cell.rights.Phase() != mosi.M {
+			if cell.ownstate.Phase() != mosi.M {
 				return false
 			}
 			generation, err := r.prepareResource(resource)

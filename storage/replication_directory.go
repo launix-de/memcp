@@ -20,7 +20,7 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 	c := r.resourceCell(packet.Resource)
 	c.acquire.Lock()
 	defer c.acquire.Unlock()
-	_, err := c.rights.Grant(packet.ID, mosi.ParsePhase(packet.State), func() error {
+	_, err := c.ownstate.Grant(packet.ID, mosi.ParsePhase(packet.State), func() error {
 		r.mu.Lock()
 		current := r.directory.Records[packet.Resource.key()]
 		r.mu.Unlock()
@@ -39,6 +39,11 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 			}
 			return true
 		})
+		// The generation is installed and the directory accepted this grant.
+		// Publish outward permission before Grant wakes local query/write waiters.
+		// A future delegating slave must grant its own descendants through their
+		// directory; it must never treat this outer M as unconditional local M.
+		c.clusterstate.Publish(mosi.ParsePhase(packet.State))
 		return nil
 	})
 	return err
@@ -63,13 +68,16 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 		if packet.Epoch < epoch {
 			return nil
 		}
-		handover, err := c.rights.BeginHandover(ctx, c.drainWrites)
+		handover, err := c.ownstate.BeginHandover(ctx, c.drainWrites)
 		if err != nil {
 			return err
 		}
 		defer handover.Release()
 		r.localRecord(packet.Resource, mosi.IO, "")
 		r.publishLocal(packet.Resource, mosi.IO)
+		// No inward holder may retain stronger rights after an outward ACK.
+		// Current slaves are leaves; a grouped slave must first recall its children.
+		c.clusterstate.Publish(mosi.IO)
 		return nil
 	}(); err != nil {
 		return err
@@ -102,7 +110,7 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 			c.acquire.Unlock()
 		}
 	}()
-	handover, err := c.rights.BeginHandover(ctx, c.drainWrites)
+	handover, err := c.ownstate.BeginHandover(ctx, c.drainWrites)
 	if err != nil {
 		return err
 	}
@@ -136,6 +144,9 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 		return true
 	})
 	r.publishLocal(packet.Resource, phase)
+	// Local writes have drained before the enclosing permission is reduced.
+	// The root master does not take this path when delegating to its slave.
+	c.clusterstate.Publish(phase)
 	packet.Generation = generation
 	transfer, err := r.captureResource(packet.Resource, generation)
 	if err != nil {
@@ -167,6 +178,11 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	// There are no outer cluster peers in this adapter yet. A known resource
+	// belongs to this root domain even when its local executor has IO. Keep the
+	// root claim separate from the ownstate grant below. Cluster routing will
+	// replace this bootstrap with acquisition from the enclosing directory.
+	c.clusterstate.Establish(mosi.M)
 	// Catalog loading may itself declare shards and acquire r.mu.
 	localShard := c.current.Load()
 	if localShard == nil && packet.Resource.Shard != "" {
@@ -217,7 +233,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				return err
 			}
 			defer releasePersistence()
-			handover, err := c.rights.BeginHandover(ctx, c.drainWrites)
+			handover, err := c.ownstate.BeginHandover(ctx, c.drainWrites)
 			if err != nil {
 				return err
 			}
@@ -259,7 +275,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				continue
 			}
 			if reader == r.id {
-				handover, err := c.rights.BeginHandover(ctx, c.drainWrites)
+				handover, err := c.ownstate.BeginHandover(ctx, c.drainWrites)
 				if err != nil {
 					return err
 				}
@@ -329,7 +345,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		}
 	}
 	if requester == r.id {
-		_, err := c.rights.Grant(packet.ID, mosi.ParsePhase(grantState), func() error { return nil })
+		_, err := c.ownstate.Grant(packet.ID, mosi.ParsePhase(grantState), func() error { return nil })
 		return err
 	}
 	peer := r.peer(requester)

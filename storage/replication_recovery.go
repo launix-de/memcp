@@ -93,7 +93,12 @@ func (r *replicationManager) recoveryInventory(auth replicaAuth) []replicaRecord
 		if cell == nil {
 			continue
 		}
-		publication := cell.rights.Snapshot()
+		// This inventory is sent OUTWARD, so delegated authority must not disappear
+		// just because the local executor is IO. Today only leaf slaves call this
+		// adapter: their record owner/readers/epoch already belong to the upstream
+		// domain. A grouped slave must supply that domain's directory record here,
+		// never expose its private child-owner directory to the enclosing master.
+		publication := cell.clusterstate.Snapshot()
 		phase := publication.Phase()
 		if phase == mosi.IS {
 			phase = publication.Backend()
@@ -199,13 +204,14 @@ func (r *replicationManager) recoverConnection(peer *mosiPeer, user string, auth
 			return fmt.Errorf("invalid recovery resource")
 		}
 		cell := r.resourceCell(record.Resource)
-		phase := mosi.ParsePhase(record.State)
 		r.mu.Lock()
 		if _, exists := r.directory.Records[record.Resource.key()]; !exists {
 			r.directory.Records[record.Resource.key()] = record
 		}
 		r.mu.Unlock()
-		cell.rights.Establish(phase)
+		// Recover outer permission before local admission. Establish is one-shot:
+		// a late hello cannot undo a newer wire grant, recall or pending request.
+		r.establishAuthority(cell, record)
 
 	}
 	complete := make(map[string]bool)
@@ -324,7 +330,19 @@ func (r *replicationManager) recoverResource(ctx context.Context, id string, rep
 		return replicaRecord{}, false, err
 	}
 	local := mosi.ParsePhase(record.State)
-	if !cell.rights.Initialized() {
+	// A live, authenticated report identifies the root domain's custodian.
+	// Previously unknown safety copies stay IO until this proof exists; recovery
+	// never infers aggregate M merely from a file or a liveness timeout.
+	if record.Owner != "" && r.resourceKnown(resource) {
+		cell.clusterstate.Publish(mosi.M)
+	} else {
+		// A reader's report may name a modifier that has not confirmed recovery.
+		// Preserve that routing evidence in the directory, but neither publish a
+		// local S from its retained backup nor outrun the still-unknown outer slot.
+		// A later confirmed owner is acquired through the ordinary GetRead path.
+		local = mosi.IO
+	}
+	if !cell.ownstate.Initialized() {
 		// A remote schema can advertise a UUID whose data never finished arriving.
 		// Bind a readable recovered slot to its completed local copy before publishing
 		// authority; ordinary COLD loading then uses the correct native generation.
@@ -336,7 +354,7 @@ func (r *replicationManager) recoverResource(ctx context.Context, id string, rep
 				return replicaRecord{}, false, err
 			}
 		}
-		cell.rights.Establish(local)
+		cell.ownstate.Establish(local)
 	}
 	state := "IO"
 	if record.Owner == id {
