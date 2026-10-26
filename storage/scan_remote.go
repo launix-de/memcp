@@ -65,10 +65,12 @@ type remoteScanResult struct {
 // A connection owns a bounded replay window. Old task numbers are rejected,
 // never forgotten into an executable state. No rights or task state is persisted.
 type scanRPCSession struct {
-	mu      sync.Mutex
-	high    uint64
-	seen    [1024]uint64
-	workers chan struct{}
+	service  *nodeScanService // immutable connection-owned role adapter
+	remoteID string           // authenticated identity, never taken from an RPC assertion
+	mu       sync.Mutex
+	high     uint64
+	seen     [1024]uint64
+	workers  chan struct{}
 }
 
 func newScanRPCSession() *scanRPCSession { return &scanRPCSession{workers: make(chan struct{}, 8)} }
@@ -85,15 +87,34 @@ func (s *scanRPCSession) claim(task uint64) error {
 	return nil
 }
 func (s *scanRPCSession) handle(ctx context.Context, method string, data json.RawMessage) (any, error) {
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	// Membership control must not be rejected just because all compute slots
+	// are busy; overload is not evidence that an authenticated node disappeared.
+	if method == "cluster.hello" || method == "cluster.wait_capacity" {
+		if s.service == nil || s.service.cluster == nil {
+			return nil, fmt.Errorf("cluster membership is not enabled")
+		}
+		return s.service.cluster.handle(s, ctx, s.remoteID, method, data)
 	}
 	select {
 	case s.workers <- struct{}{}:
 		defer func() { <-s.workers }()
 	default:
+		if method == "cluster.reduce" {
+			return clusterReduceReply{Rejected: true}, nil
+		}
 		return nil, fmt.Errorf("remote scan worker limit")
 	}
+	if strings.HasPrefix(method, "cluster.") {
+		if s.service == nil || s.service.cluster == nil {
+			return nil, fmt.Errorf("cluster membership is not enabled")
+		}
+		return s.service.cluster.handle(s, ctx, s.remoteID, method, data)
+	}
+
 	switch method {
 	case "scan.describe":
 		var request remoteScanDescribe
@@ -102,6 +123,9 @@ func (s *scanRPCSession) handle(ctx context.Context, method string, data json.Ra
 		}
 		if request.Version != scanWireVersion || !validReplicaDatabase(request.Database) || request.Table == "" {
 			return nil, fmt.Errorf("invalid remote scan source")
+		}
+		if sharedClusterDatabase(request.Database) {
+			return nil, fmt.Errorf("shared cluster sources require automatic bounded placement")
 		}
 		db := GetDatabase(request.Database)
 		if db == nil {
@@ -142,64 +166,74 @@ func (s *scanRPCSession) handle(ctx context.Context, method string, data json.Ra
 		if err := json.Unmarshal(data, &request); err != nil {
 			return nil, err
 		}
-		if request.Version != scanWireVersion || request.Visibility != "cursor-stability/captured-horizon" || !request.Shard.Resource.valid() || request.Shard.Resource.Shard == "" || request.Shard.Generation == uuid.Nil {
-			return nil, fmt.Errorf("invalid remote scan contract")
+		if sharedClusterDatabase(request.Shard.Resource.Database) {
+			return nil, fmt.Errorf("shared cluster tasks require RAM admission through cluster.reduce")
 		}
-		if _, err := uuid.Parse(request.Attempt); err != nil {
-			return nil, fmt.Errorf("invalid scan attempt")
-		}
-		if request.ResultKind != "scalar" && request.ResultKind != "group_sums" {
-			return nil, fmt.Errorf("unsupported remote result kind")
-		}
-		if err := s.claim(request.Task); err != nil {
-			return nil, err
-		}
-		for _, cols := range [][]string{request.FilterColumns, request.MapColumns} {
-			for _, col := range cols {
-				if strings.HasPrefix(col, "$") {
-					return nil, fmt.Errorf("remote scan rejects query-local or mutation columns")
-				}
-			}
-		}
-		filter, err := scm.UnmarshalProcedure(request.Filter)
-		if err != nil {
-			return nil, err
-		}
-		reducer, err := scm.UnmarshalProcedure(request.MapReducer)
-		if err != nil {
-			return nil, err
-		}
-		if err := validateRemoteScanReadOnly(filter); err != nil {
-			return nil, err
-		}
-		if err := validateRemoteScanReadOnly(reducer); err != nil {
-			return nil, err
-		}
-		neutral, err := decodeScanData(request.Neutral, false)
-		if err != nil {
-			return nil, err
-		}
-		var output remoteScanResult
-		err = withRemoteScanShard(request.Shard, func(shard *storageShard) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			access := runtimeScanAccess(nil)
-			access.ensureRuntime().horizon = &request.Shard.Horizon
-			value, count, candidates := shard.scan(access, request.FilterColumns, filter, request.MapColumns, reducer, neutral, 0, nil, nil, nil)
-			encoded, err := encodeScanResult(value, request.ResultKind)
-			if err != nil {
-				return err
-			}
-			output = remoteScanResult{Version: scanWireVersion, Task: request.Task, Attempt: request.Attempt, Shard: request.Shard, Kind: request.ResultKind, Value: encoded, OutCount: count, InputCount: int64(request.Shard.Horizon.Main) + int64(request.Shard.Horizon.Delta), CandidateCount: candidates}
-			return nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		return boundedScanReply(output)
+		return s.executeScanTask(ctx, request)
 	}
 	return nil, fmt.Errorf("unknown remote scan method")
+}
+
+// Both explicitly addressed and automatically placed reductions enter this
+// same checked executor. Admission is owned by the caller; replay, procedure,
+// generation, visibility and result validation are not duplicated by adapters.
+func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScanTask) (any, error) {
+	if request.Version != scanWireVersion || request.Visibility != "cursor-stability/captured-horizon" || !request.Shard.Resource.valid() || request.Shard.Resource.Shard == "" || request.Shard.Generation == uuid.Nil {
+		return nil, fmt.Errorf("invalid remote scan contract")
+	}
+	if _, err := uuid.Parse(request.Attempt); err != nil {
+		return nil, fmt.Errorf("invalid scan attempt")
+	}
+	if request.ResultKind != "scalar" && request.ResultKind != "group_sums" {
+		return nil, fmt.Errorf("unsupported remote result kind")
+	}
+	if err := s.claim(request.Task); err != nil {
+		return nil, err
+	}
+	for _, cols := range [][]string{request.FilterColumns, request.MapColumns} {
+		for _, col := range cols {
+			if strings.HasPrefix(col, "$") {
+				return nil, fmt.Errorf("remote scan rejects query-local or mutation columns")
+			}
+		}
+	}
+	filter, err := scm.UnmarshalProcedure(request.Filter)
+	if err != nil {
+		return nil, err
+	}
+	reducer, err := scm.UnmarshalProcedure(request.MapReducer)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateRemoteScanReadOnly(filter); err != nil {
+		return nil, err
+	}
+	if err := validateRemoteScanReadOnly(reducer); err != nil {
+		return nil, err
+	}
+	neutral, err := decodeScanData(request.Neutral, false)
+	if err != nil {
+		return nil, err
+	}
+	var output remoteScanResult
+	err = withRemoteScanShard(request.Shard, func(shard *storageShard) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		access := runtimeScanAccess(nil)
+		access.ensureRuntime().horizon = &request.Shard.Horizon
+		value, count, candidates := shard.scan(access, request.FilterColumns, filter, request.MapColumns, reducer, neutral, 0, nil, nil, nil)
+		encoded, err := encodeScanResult(value, request.ResultKind)
+		if err != nil {
+			return err
+		}
+		output = remoteScanResult{Version: scanWireVersion, Task: request.Task, Attempt: request.Attempt, Shard: request.Shard, Kind: request.ResultKind, Value: encoded, OutCount: count, InputCount: int64(request.Shard.Horizon.Main) + int64(request.Shard.Horizon.Delta), CandidateCount: candidates}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return boundedScanReply(output)
 }
 
 // Mutating storage/native callbacks need a remote transaction participant and
@@ -369,6 +403,7 @@ func encodeScanResult(value scm.Scmer, kind string) (json.RawMessage, error) {
 }
 
 type peerScanExecutor struct {
+	cluster  bool // immutable shared-generation placement captures extent at executor
 	peer     *mosiPeer
 	ctx      context.Context
 	prepared remoteScanShard
@@ -400,7 +435,22 @@ func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, _ uuid
 		panic("remote scan resource mismatch")
 	}
 	var response remoteScanResult
-	if err := executor.peer.call(executor.ctx, "scan.execute", task, &response); err != nil {
+	if executor.cluster {
+		var reply clusterReduceReply
+		if err := executor.peer.call(executor.ctx, "cluster.reduce", task, &reply); err != nil {
+			panic(err)
+		}
+		if reply.Rejected {
+			panic(clusterCapacityRejection{Version: reply.Version, Permanent: reply.Permanent})
+		}
+		if reply.Result == nil {
+			panic("missing cluster reduction")
+		}
+		response = *reply.Result
+		// This mode accepts only immutable, delta-free mounted generations. The
+		// worker captures their extent after admission; identity/schema remain exact.
+		task.Shard.Horizon = response.Shard.Horizon
+	} else if err := executor.peer.call(executor.ctx, "scan.execute", task, &response); err != nil {
 		panic(err)
 	}
 	if response.Version != scanWireVersion || response.Task != task.Task || response.Attempt != task.Attempt || response.Shard != task.Shard || response.Kind != task.ResultKind {
@@ -435,7 +485,7 @@ func remoteScan(a ...scm.Scmer) scm.Scmer {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	peer, err := service.connect(ctx, a[1].String())
+	peer, _, err := service.connect(ctx, a[1].String())
 	if err != nil {
 		panic(err)
 	}
@@ -468,7 +518,7 @@ func remoteScan(a ...scm.Scmer) scm.Scmer {
 			panic(err)
 		}
 		stub := &storageShard{t: stubTable, uuid: part.Generation, lineage: identity}
-		target := &shardScanTarget{resource: part.Resource, generation: part.Generation, executor: &peerScanExecutor{peer, ctx, part, kind, &sequence}}
+		target := &shardScanTarget{resource: part.Resource, generation: part.Generation, executor: &peerScanExecutor{peer: peer, ctx: ctx, prepared: part, kind: kind, next: &sequence}}
 		stub.scanTarget.Store(target)
 		var result scanResult
 		runAcquiredShardScan(tx, stub, true, func(shard *storageShard, _ bool, failure any) {

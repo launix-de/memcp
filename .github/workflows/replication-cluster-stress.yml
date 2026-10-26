@@ -81,3 +81,50 @@ jobs:
           path: |
             ${{ runner.temp }}/replication-stress
             ${{ runner.temp }}/replication-stress-race
+
+  cluster-stress:
+    name: Cluster Stress test
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out MemCP
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Install SQL client
+        uses: ./.github/actions/setup-apt
+        with:
+          packages: mariadb-client
+      - name: Build servers
+        run: go build -tags=nophp -o "$RUNNER_TEMP/memcp-cluster" .
+      - name: Check authenticated placement and shared-budget units
+        run: >-
+          go test -race -tags=nophp ./storage ./scm
+          -run '^Test(Cluster|RemoteScan|ScanDelegation|ProcedureWire)' -count=1
+      - name: Run three-node SQL sum above one node RAM budget
+        run: >-
+          python3 -u tools/replication_cluster_stress.py
+          --binary "$RUNNER_TEMP/memcp-cluster"
+          --artifacts "$RUNNER_TEMP/cluster-placement" --cluster-only --seed 20261026
+      - name: Build race-instrumented servers
+        run: go build -race -tags=nophp -o "$RUNNER_TEMP/memcp-cluster-race" .
+      - name: Check cluster processes with race detector
+        env:
+          GORACE: halt_on_error=1 exitcode=66
+        run: >-
+          python3 -u tools/replication_cluster_stress.py
+          --binary "$RUNNER_TEMP/memcp-cluster-race"
+          --artifacts "$RUNNER_TEMP/cluster-placement-race" --cluster-only --seed 20261026
+          --fixture-binary "$RUNNER_TEMP/memcp-cluster"
+      - name: Upload cluster logs, budgets and result oracle
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cluster-placement
+          path: |
+            ${{ runner.temp }}/cluster-placement
+            ${{ runner.temp }}/cluster-placement-race

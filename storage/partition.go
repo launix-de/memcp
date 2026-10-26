@@ -445,6 +445,30 @@ func (s *storageShard) acquireReadForScan(currentTx *TxContext) ReadAccess {
 	if s.hasWriteOwnerForTx(currentTx) {
 		return ReadAccess{}
 	}
+	if sharedClusterSource(s.t) && s.scanTarget.Load() == nil {
+		cluster := activeNodeCluster()
+		if cluster == nil {
+			panic("cluster is not initialized")
+		}
+		lease := cluster.prepareLocalScan(s, currentTx)
+		ready := false
+		defer func() {
+			if !ready {
+				lease.Release()
+			}
+		}()
+		access := s.GetRead(currentTx)
+		// This mount admits S only and the native lease prevents eviction. Do
+		// not add a read lock just to inspect the immutable generation's extent.
+		clean := len(access.shard.inserts) == 0 && access.shard.deletions.Count() == 0
+		if !clean {
+			access.Release()
+			panic("shared cluster generations must be rebuilt before mounting")
+		}
+		access.scanRAM = lease
+		ready = true
+		return access
+	}
 	return s.GetRead(currentTx)
 }
 

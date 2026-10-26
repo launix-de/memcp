@@ -232,6 +232,10 @@ func systemMemInfo() (free, total int64) {
 // CacheManager manages memory-limited soft references with two-phase eviction.
 // Two budgets: persistedBudget (shards+indexes) and memoryBudget (total).
 type CacheManager struct {
+	queryVersion     uint64 // run-owned admission release notification
+	queryChanged     chan struct{}
+	queryGenerations map[*storageShard]queryGenerationBudget // run-owned operator reservations
+	queryPeak        int64                                   // run-owned peak at admission
 	// All metadata below is owned by run(). Query workers only publish lifecycle
 	// messages; cache-object children never become global registrations.
 	minimumMemory   int64 // eviction floor; owned by run(), like the budgets
@@ -254,6 +258,11 @@ type CacheManager struct {
 }
 
 type cacheOp struct {
+	queryCovered       *storageShard
+	queryCoveredReply  chan bool
+	queryWatch         chan (<-chan struct{})
+	queryVersion       uint64
+	query              *queryBudgetOp
 	ready              <-chan struct{} // optional: owner released its lock after enqueueing
 	add                *softItem
 	del                any
@@ -271,6 +280,8 @@ type cacheOp struct {
 
 // CacheStat holds stat results returned via channel.
 type CacheStat struct {
+	QueryReserved   int64
+	QueryPeak       int64
 	SizeByType      [numEvictableTypes]int64
 	CountByType     [numEvictableTypes]int64
 	CurrentMemory   int64
@@ -483,7 +494,7 @@ func (cm *CacheManager) runEvictionChecks(additionalSize int64) {
 	// Use -1 as sentinel for "no constraint"; >=0 means evict to that byte limit.
 	effectiveBudget := int64(-1)
 	if cm.memoryBudget > 0 {
-		effectiveBudget = cm.memoryBudget
+		effectiveBudget = max(0, cm.memoryBudget-cm.queryReservedBytes())
 	}
 
 	// Check system-wide free RAM (throttled to once per second).
@@ -524,7 +535,21 @@ func (cm *CacheManager) run() {
 			if op.ready != nil {
 				<-op.ready
 			}
-			if op.add != nil {
+			if op.queryCoveredReply != nil {
+				op.queryCoveredReply <- cm.queryGenerations[op.queryCovered].users > 0
+			} else if op.queryWatch != nil {
+				if cm.queryChanged == nil {
+					cm.queryChanged = make(chan struct{})
+				}
+				changed := cm.queryChanged
+				if op.queryVersion != cm.queryVersion {
+					changed = make(chan struct{})
+					close(changed)
+				}
+				op.queryWatch <- changed
+			} else if op.query != nil {
+				cm.queryBudgetOperation(op.query)
+			} else if op.add != nil {
 				cm.addInternal(op.add)
 			} else if op.del != nil {
 				cm.removeByPointer(op.del)
@@ -541,7 +566,7 @@ func (cm *CacheManager) run() {
 			} else if op.pressureSize > 0 {
 				cm.runEvictionChecks(op.pressureSize)
 			} else if op.statResult != nil {
-				op.statResult <- CacheStat{
+				op.statResult <- CacheStat{QueryReserved: cm.queryReservedBytes(), QueryPeak: cm.queryPeak,
 					SizeByType:      cm.sizeByType,
 					CountByType:     cm.countByType,
 					CurrentMemory:   cm.currentMemory,

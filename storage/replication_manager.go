@@ -115,23 +115,10 @@ func StartReplication(address string, shutdown func()) error {
 		return fmt.Errorf("replication requires the SQL authentication frontend")
 	}
 	PrepareReplication()
-	settingsMu.Lock()
-	createdIdentity := Settings.ReplicationUUID == ""
-	if createdIdentity {
-		Settings.ReplicationUUID = uuid.NewString()
-	}
-	r.id = Settings.ReplicationUUID
-	settingsMu.Unlock()
-	if _, err := uuid.Parse(r.id); err != nil {
-		return fmt.Errorf("invalid saved replication identity")
-	}
-	if createdIdentity {
-		if err := saveSettings(); err != nil {
-			settingsMu.Lock()
-			Settings.ReplicationUUID = ""
-			settingsMu.Unlock()
-			return err
-		}
+	var identityErr error
+	r.id, identityErr = localNodeIdentity()
+	if identityErr != nil {
+		return identityErr
 	}
 	r.boot = uuid.NewString()
 	r.backups = make(map[string]replicaBackup)
@@ -325,7 +312,7 @@ func (r *replicationManager) peer(id string) *mosiPeer {
 // Engine access fails closed while configured replication has not published
 // its manager. Frontend bootstrap may still use the excluded system catalog.
 func activeReplication(db *database) *replicationManager {
-	if db == nil {
+	if db == nil || sharedClusterDatabase(db.Name) {
 		return nil
 	}
 	r := replication.Load()
@@ -344,7 +331,31 @@ func validReplicaDatabase(name string) bool {
 // complete rebuild again; an unavailable master never revokes local M.
 func replicationCheckpoint(name, user string) {
 	r := replication.Load()
-	if r != nil && !r.master && validReplicaDatabase(name) {
+	if r != nil && !r.master && validReplicaDatabase(name) && !sharedClusterDatabase(name) {
 		r.backupDatabase(name, user)
 	}
+}
+
+// The installation UUID identifies a node across reconnects. Cluster membership
+// requires the independent shared-secret proof; knowing this ID grants no role.
+func localNodeIdentity() (string, error) {
+	settingsMu.Lock()
+	createdIdentity := Settings.ReplicationUUID == ""
+	if createdIdentity {
+		Settings.ReplicationUUID = uuid.NewString()
+	}
+	id := Settings.ReplicationUUID
+	settingsMu.Unlock()
+	if _, err := uuid.Parse(id); err != nil {
+		return "", fmt.Errorf("invalid saved replication identity")
+	}
+	if createdIdentity {
+		if err := saveSettings(); err != nil {
+			settingsMu.Lock()
+			Settings.ReplicationUUID = ""
+			settingsMu.Unlock()
+			return "", err
+		}
+	}
+	return id, nil
 }

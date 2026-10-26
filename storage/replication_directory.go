@@ -161,6 +161,9 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 }
 
 func (r *replicationManager) coordinate(ctx context.Context, requester string, packet mosiPacket) error {
+	if sharedClusterDatabase(packet.Resource.Database) {
+		return fmt.Errorf("shared cluster snapshots do not yet delegate replication rights")
+	}
 	if !r.master {
 		return fmt.Errorf("resource request to non-master")
 	}

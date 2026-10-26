@@ -1452,6 +1452,10 @@ func main() {
 	}
 	scm.CalibrateJITCosts()
 
+	if err := storage.PrepareNodeCluster(fullArgs); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	storage.Basepath = basepath
 	// Run initialization in one goroutine so startup keeps its existing
 	// sequencing while request state remains explicit.

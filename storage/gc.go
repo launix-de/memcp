@@ -44,6 +44,10 @@ const blobManifestHeader = "memcp-blob-references-v2\n"
 // could prove every active generation's references (false means this pass
 // deleted nothing and should simply be retried later).
 func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int, complete bool) {
+	if sharedClusterDatabase(db.Name) {
+		return 0, 0, false
+	} // no cluster-wide delete proof in S
+
 	// Startup cleanup runs immediately after the lazy database catalog is
 	// discovered. An unloaded schema is not an empty schema: load its committed
 	// topology before proving that any disk object is unowned.

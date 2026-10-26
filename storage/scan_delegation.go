@@ -22,6 +22,7 @@ import "github.com/launix-de/memcp/scm"
 // and must never be attached to a retained historical generation. The executor
 // borrows that query and must not enter the persistent catalog.
 type shardScanTarget struct {
+	origin     *storageShard // optional query-local route for a real shared generation; never published on it
 	resource   mosiResource
 	generation uuid.UUID
 	executor   shardScanExecutor
@@ -72,7 +73,7 @@ func (invocation shardScanInvocation) delegate(shard *storageShard, failure shar
 		}
 	}()
 	target := failure.target
-	if target == nil || shard.scanTarget.Load() != target || target.executor == nil || shard.t == nil ||
+	if target == nil || (shard.scanTarget.Load() != target && target.origin != shard) || target.executor == nil || shard.t == nil ||
 		target.resource.Database != shard.t.schema.Name || target.resource.Table != shard.t.Name ||
 		target.resource.Shard != shard.logicalID().String() || target.generation != shard.uuid || !target.resource.valid() {
 		panic("invalid remote shard scan target")

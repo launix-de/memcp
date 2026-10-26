@@ -10,12 +10,12 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 */
 package storage
 
+import "context"
 import "strings"
 import "testing"
-import "context"
 import "net/http"
-import "net/http/httptest"
 import "encoding/json"
+import "net/http/httptest"
 import "github.com/google/uuid"
 import "github.com/gorilla/websocket"
 import "github.com/launix-de/memcp/scm"
@@ -32,7 +32,7 @@ func setupRemoteScanConnection(t *testing.T) (*mosiPeer, *nodeScanService, strin
 	mux.HandleFunc("/cluster", serveMosiHTTP)
 	server := httptest.NewServer(mux)
 	client := &nodeScanService{id: uuid.NewString(), secret: []byte(testScanSecret), peers: make(map[*mosiPeer]bool)}
-	peer, err := client.connect(context.Background(), server.URL+"/cluster")
+	peer, _, err := client.connect(context.Background(), server.URL+"/cluster")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestRemoteScanRejectsRawRowsAndWrongSecret(t *testing.T) {
 		t.Fatalf("raw rows accepted: %v", err)
 	}
 	wrong := &nodeScanService{id: uuid.NewString(), secret: []byte("different-node-secret"), peers: make(map[*mosiPeer]bool)}
-	if rejected, err := wrong.connect(context.Background(), endpoint); err == nil {
+	if rejected, _, err := wrong.connect(context.Background(), endpoint); err == nil {
 		wrong.forget(rejected)
 		t.Fatal("wrong node secret accepted")
 	}
@@ -138,5 +138,42 @@ func TestRemoteScanRejectsRawRowsAndWrongSecret(t *testing.T) {
 	}
 	if _, _, err := conn.ReadMessage(); err == nil {
 		t.Fatal("unauthenticated scan received a response")
+	}
+}
+
+func TestClusterAuthenticationRejectsReplayedProof(t *testing.T) {
+	_, _, endpoint := setupRemoteScanConnection(t)
+	address, _ := mosiEndpointURL(endpoint)
+	dialer := *websocket.DefaultDialer
+	dialer.Subprotocols = []string{mosiSubprotocol}
+	dial := func() *websocket.Conn {
+		conn, _, err := dialer.Dial(address, http.Header{"X-Memcp-Role": []string{"scan"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		return conn
+	}
+	first := dial()
+	var original scanChallenge
+	if err := readScanAuth(first, "scan.challenge", &original); err != nil {
+		t.Fatal(err)
+	}
+	client := scanChallenge{Node: uuid.NewString(), Nonce: uuid.NewString()}
+	client.Proof = scanAuthProof([]byte(testScanSecret), "client", original, client)
+	first.Close()
+	second := dial()
+	var fresh scanChallenge
+	if err := readScanAuth(second, "scan.challenge", &fresh); err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Nonce == original.Nonce {
+		t.Fatal("authentication reused its server nonce")
+	}
+	if err := scanAuthMessage(second, "scan.proof", client); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := second.ReadMessage(); err == nil {
+		t.Fatal("a proof for an older challenge authenticated a fresh connection")
 	}
 }
