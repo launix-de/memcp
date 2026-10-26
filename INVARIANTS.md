@@ -40,8 +40,6 @@ same ownership, visibility, lifetime, and durability guarantees.
   routing, SQL, storage and backend policy. Its immutable publications are read
   through accessors; request completion publishes errors before waking waiters.
   Engine adapters supply durable installation and directory coordination.
-  Replication and future cluster domains must reuse this state machine, with
-  distinct resource instances rather than separate implementations.
 - Database schema.json and each logical data shard have independent MOSI pairs.
   `clusterstate` represents the node/domain's outward authority, including
   delegated descendants; `ownstate` alone authorizes local queries, loading,
@@ -51,9 +49,7 @@ same ownership, visibility, lifetime, and durability guarantees.
   outward rights. Current root masters retain outward M for known resources;
   leaf slaves have matching stable rights, with ownstate carrying request and
   local active/closing writer substates. No second slot check, lock, CAS, or
-  reader registration is added to granted local reads. Each future nested
-  domain repeats this boundary and has separate routing/directory ownership;
-  root bootstrap is not a cluster acquisition or automatic failover policy.
+  reader registration is added to granted local reads.
   IS identifies a current backend-only generation; IO requires acquisition from
   its remote owner. A backend-only authoritative generation must never be stale.
   A retained safety backup cannot establish IS or satisfy an IO access.
@@ -147,76 +143,6 @@ same ownership, visibility, lifetime, and durability guarantees.
   Database reclamation uses normal MOSI acquisitions for schema and every active
   non-ephemeral shard. Its final permission check is a point-in-time observation,
   never an exemption from later remote requests or owner-unavailability errors.
-
-### Initial shared snapshot cluster
-
-- Cluster membership reuses the authenticated node scan service, full peer
-  rosters and the shared binary WebSocket route. Joining through one contact
-  does not give it a leader/monitor role; discovered peers authenticate directly.
-  UUID, process incarnation and the independent shared secret have distinct
-  meanings. Reconnect/liveness changes placement hints, never MOSI permissions.
-- Explicit shared database mounts currently admit S only for immutable rebuilt
-  schema/shard generations. An authenticated peer cannot obtain M through this
-  adapter. Persistent writes and destructive maintenance remain disabled until
-  the existing MOSI handover machinery is connected between cluster masters.
-  Do not bypass this boundary through replication or old unbudgeted scan RPCs.
-- Numeric header estimates, RAM admission and placement happen before payload
-  acquisition, under the resource's S permission and outside generated loops.
-  Already warm payload is credited once; private operator scratch is charged
-  per concurrent invocation against the same CacheManager total budget.
-  Missing formats fail explicitly, not by guessing from compressed object size.
-- A typed delegation target for a real source generation remains query-local.
-  Residency can prefer a peer; capacity can reject before computation. Only
-  these explicit pre-execution rejections may reroute/wait. Worker execution,
-  transport ambiguity and callback failures are propagated without task retry.
-  The existing executor checks schema/generation, captures a delta-free horizon
-  and returns exactly one scalar; it never sends source rows or physical IDs.
-- Versioned budget notifications prevent lost wakeups between admission failure
-  and waiting. Waiting does not hold source payload, writer admission or a
-  compute slot required by another task to finish. Unknown/permanent capacity
-  failures return controlled errors. This initial numeric scalar contract is
-  not admission for arbitrary closures, grouped cardinality or live mutations.
-
-### Remote shard scans
-
-- `scan_remote` constructs query-local remote-only stubs. Their atomic immutable
-  `scanTarget` is routing metadata, never MOSI authority. Schema name/logical
-  shard UUID identify the resource; the physical generation fences execution.
-  Targets and executors belong to that query and never survive it, enter the
-  persistent catalog, or propagate to rebuild/historical generations.
-- `GetRead` signals delegation before payload acquisition. Only an acquisition
-  boundary consumes that typed signal. Callback panics, ordinary network errors
-  and ambiguous completion never trigger a retry. Invocations borrow query-local
-  callbacks/access/transaction bindings and are not wire DTOs.
-- `nodeScanService` publishes its immutable secret/incarnation once from Scheme
-  startup. The `/cluster` scan role mutually authenticates fresh nonces through
-  direction/protocol-bound HMAC proofs. Secrets never enter replication policy
-  or wire messages. Mutexes own the peer directory; connection lifetime joins
-  include handshakes, RPC workers and outbound calls before storage finalization.
-- `scanRPCSession` owns a bounded monotonic task replay window and worker slots
-  per authenticated connection. Old/duplicate numbers fail, never become newly
-  executable after pruning. Request/reply task, attempt, generation, horizon and
-  result-kind identities must agree. No task state is persisted.
-- A targeted source description acquires native schema/shard reads and captures
-  the column-semantics fingerprint, physical generation and main/delta horizon.
-  No payload or rights lease spans description/execute packets. Execution
-  reacquires MOSI access and existing topology/scanner/cache lifetimes, rejects
-  changed identities, runs the native filter/mapreducer, and checks schema
-  publication again before returning. It never establishes authority from files.
-- `scanAccessRuntime.horizon` is immutable invocation-owned input set before
-  preparation. The ordinary visible-upper and delta-bound paths exclude future
-  inserts. No reader registration or synchronization is added in row loops.
-  Cursor-stability standalone/autocommit reads are supported; ACID and explicit
-  transactions fail rather than acquiring an independent remote snapshot.
-- Both callbacks use `scm.MarshalProcedure`: CloseProcedure then the existing
-  Scheme Serialize implementation. The bounded versioned envelope contains
-  Scheme source. Decoding validates a single lambda, restores numbered syntax
-  through ordinary optimization, and creates the procedure without invoking it.
-  Unresolved captures, process-local handles, raw-row replies and known mutating
-  callbacks fail explicitly. Code is authenticated cluster code, not sandboxed.
-- Only scalar reductions or grouped FastDict states return to the coordinator.
-  It combines partial results; no row stream, physical IDs or per-row callback
-  RPC crosses the transport. Replies obey the existing bounded frame contract.
 
 ### Immutable main storage and mutable deltas
 

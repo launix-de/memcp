@@ -127,35 +127,6 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - Database is auto-created on first use.
 - Tests use database name `memcp-tests` on port 4321 (or custom port).
 
-## Shared snapshot cluster execution
-
-- `nodeCluster` is startup-owned by `nodeScanService`. Its secret is read from
-  a local file and never enters RPC metadata, replication login policy or CLI
-  values. The existing mutual nonce/HMAC proof authenticates the connection's
-  installation ID; `Boot` identifies its current process. Membership is a full
-  immutable roster published under the cold cluster mutex, read through `view`.
-  Discovery/liveness cannot grant M or promote an offline owner. Connections
-  carry their own monotonic task sequence and are joined before storage stops.
-- Explicit `--cluster-databases` mounts are currently immutable, rebuilt shared
-  generations with S-only schema/shard slots. They do not overlap a replication
-  namespace. Durable DML/DDL, rebuild and GC are blocked/deferred for these
-  mounts until distributed write handover is connected. Private system and
-  planner Cache tables retain their native lifecycle. Backend implementations
-  are unchanged; bounded numeric headers are read only after S admission.
-- Automatic placement raises the existing typed acquisition panic for a cold
-  shard with a warm peer or rejected local RAM admission. Its `origin` target
-  is invocation-owned; it is never installed on a live/historical shard. Only
-  unbatched scalar reductions over supported numeric formats and CS autocommit
-  are currently admitted. Workers use the same checked scan executor as
-  `scan_remote`, capture an immutable delta-free horizon and return one scalar.
-- `CacheManager.queryGenerations`, `queryPeak`, `queryVersion` and `queryChanged`
-  are owned by its existing actor. Operator reservations share the node cache
-  budget, credit a resident generation once and count private scratch per task.
-  Loading converts expected payload into cache bytes; reservations release once
-  on success/panic/error. Capacity rejection precedes task claim/execution and
-  may wait on versioned actor notifications. Ambiguous/started tasks are never
-  retried. No admission, roster update or synchronization occurs in row loops.
-
 ## Coding Style & Naming
 - in every source file: include license header
 - Go: format with `go fmt ./...` after each patch; keep idiomatic Go (short, cohesive funcs). Tabs and gofmt defaults are expected.
@@ -178,18 +149,6 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - When changing function signatures, update all call sites in the repository in one pass; do not leave temporary wrappers.
 
 ### Concurrency Rules (Storage Engine)
-
-- `storageShard.scanTarget` is immutable atomic query-local stub routing.
-  It grants no MOSI rights and is neither persisted nor inherited by generations.
-  GetRead signals delegation before payload acquisition. Only scan acquisition
-  boundaries consume it; callback panics and ambiguous replies never cause retries.
-  `nodeScanService` publishes immutable secret/incarnation at Scheme startup;
-  its mutex owns connection membership and its wait group joins handshakes and
-  peers before shutdown. `scanRPCSession` owns connection-local replay/worker
-  bounds. `scanAccessRuntime.horizon` is immutable operator input, checked against
-  the acquired generation/schema before local worker execution. Query bindings,
-  stubs and executors never survive their query. Worker row loops use existing
-  visibility and introduce no shared synchronization writes.
 
 - `storageShard.Indexes` permits append-only lazy declarations under
   `indexMutex` with shared shard ownership. Accounting, diagnostics and
@@ -302,8 +261,7 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   `replication_directory.go` coordinates the current star topology, while
   `replication_generation.go` owns storage installation. Authentication, RAM state, configuration, recovery,
   session integration and startup live in their matching `replication_*.go` files.
-  These adapters remain separate from the reusable state machine; adding a
-  cluster domain must not fork its permission/publication protocol.
+  These adapters remain separate from the reusable state machine.
   IS represents a current backend-only generation, retaining its previously
   RAM M/O/S permission for local restoration. IO always acquires from the
   remote owner, regardless of backup files. Backend-only authority is never
