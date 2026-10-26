@@ -40,17 +40,17 @@ func TestReplicationRightsNeverWritePersistence(t *testing.T) {
 	r := replicaRecoveryFixture()
 	resource := mosiResource{Database: "tenant"}
 	cell := r.obtain(resource, mosi.M, "")
-	if cell.rights.Phase() != mosi.M {
+	if cell.ownstate.Phase() != mosi.M {
 		t.Fatal("local permission was not published")
 	}
 	r.localRecord(resource, mosi.IO, "")
-	cell.rights.Initialize(mosi.IO)
-	pending, _ := cell.rights.Request(mosi.M)
+	cell.ownstate.Initialize(mosi.IO)
+	pending, _ := cell.ownstate.Request(mosi.M)
 	if err := r.acceptGrant(mosiPacket{ID: pending.Flight().ID(), Resource: resource, State: "M", Owner: r.id, Epoch: 2}); err != nil {
 		t.Fatal(err)
 	}
 	<-pending.Flight().Done()
-	if cell.rights.Phase() != mosi.M {
+	if cell.ownstate.Phase() != mosi.M {
 		t.Fatal("RAM grant did not complete")
 	}
 	data, err := os.ReadFile(Basepath)
@@ -80,7 +80,10 @@ func TestReplicationRecoveryNeedsLiveAuthority(t *testing.T) {
 		t.Fatal("live authority did not reconstruct directory", err)
 	}
 	record := r.directory.Records[resource.key()]
-	if record.Owner != peer || record.State != "IO" || r.resourceCell(resource).rights.Phase() != mosi.IO {
+	if r.resourceCell(resource).clusterstate.Phase() != mosi.M {
+		t.Fatal("live delegated owner did not establish outward domain M")
+	}
+	if record.Owner != peer || record.State != "IO" || r.resourceCell(resource).ownstate.Phase() != mosi.IO {
 		t.Fatal("master used a remote owner's backup")
 	}
 	if !r.resourceKnown(resource) {
@@ -95,7 +98,7 @@ func TestReplicationRecoveryNeedsLiveAuthority(t *testing.T) {
 	if failure != mosi.NetworkError {
 		t.Fatalf("unreachable modifier did not fail: %v", failure)
 	}
-	if r.directory.Records[resource.key()].Owner != peer || r.resourceCell(resource).rights.Phase() != mosi.IO {
+	if r.directory.Records[resource.key()].Owner != peer || r.resourceCell(resource).ownstate.Phase() != mosi.IO {
 		t.Fatal("offline modifier was reclaimed")
 	}
 }
@@ -142,7 +145,7 @@ func TestReplicationGrantedReadsIgnoreDirectoryLocks(t *testing.T) {
 	r := replicaRecoveryFixture()
 	resource := mosiResource{Database: "tenant"}
 	cell := r.resourceCell(resource)
-	cell.rights.Initialize(mosi.S)
+	cell.ownstate.Initialize(mosi.S)
 	// The complete manager/control plane can be busy without a RAM write or lock
 	// in the already authorized schema path.
 	r.mu.Lock()
@@ -250,7 +253,7 @@ func TestReplicationRecoveryInterruptedHandover(t *testing.T) {
 			if record.Owner != wantOwner || !r.resourceKnown(resource) {
 				t.Fatal("interrupted handover has no safe data custodian", record)
 			}
-			if !complete && r.resourceCell(resource).rights.Phase() != mosi.IO {
+			if !complete && r.resourceCell(resource).ownstate.Phase() != mosi.IO {
 				t.Fatal("partial master data gained authority")
 			}
 		})
@@ -270,6 +273,10 @@ func TestReplicationRecoveryWaitsForHandoverRecipient(t *testing.T) {
 	if r.resourceKnown(resource) {
 		t.Fatal("unreported recipient's possible M was reclaimed")
 	}
+	if r.resourceCell(resource).clusterstate.Phase() != mosi.IO {
+		t.Fatal("unconfirmed handover established outward authority")
+	}
+
 	// The still-running recipient confirms that no M grant was installed.
 	recipient := replicaRecord{Resource: resource, Owner: source, State: "IO", Epoch: 7}
 	if _, err := r.recoverPeer(context.Background(), target, replicaRequest{Boot: uuid.NewString(), Resources: []replicaRecord{recipient}}, replicaAuth{Admin: true}); err != nil {
@@ -327,7 +334,7 @@ func TestReplicationRecoveredSharedBindsCompletedGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	cell := r.resourceCell(resource)
-	if cell.rights.Phase() != mosi.S || cell.current.Load() == nil || cell.current.Load().uuid != completed.uuid {
+	if cell.ownstate.Phase() != mosi.S || cell.current.Load() == nil || cell.current.Load().uuid != completed.uuid {
 		t.Fatal("recovery published S for an incomplete advertised generation")
 	}
 	old := replication.Swap(r)
@@ -374,7 +381,7 @@ func TestReplicationRuntimeSchemaCreatorConfirmsNewShard(t *testing.T) {
 	if err := r.saveBackup(resource, shard.uuid.String()); err != nil {
 		t.Fatal(err)
 	}
-	if !r.resourceKnown(resource) || r.directory.Records[resource.key()].Owner != creator || cell.rights.Phase() != mosi.IO {
+	if !r.resourceKnown(resource) || r.directory.Records[resource.key()].Owner != creator || cell.ownstate.Phase() != mosi.IO {
 		t.Fatal("a running master's authenticated schema creator was mistaken for unknown restart authority")
 	}
 }
@@ -409,7 +416,7 @@ func TestReplicationSchemaTransferPreservesLocalPhysicalGeneration(t *testing.T)
 	r := replicaRecoveryFixture()
 	old := replication.Swap(r)
 	defer replication.Store(old)
-	r.resourceCell(mosiResource{Database: table.schema.Name}).rights.Initialize(mosi.M)
+	r.resourceCell(mosiResource{Database: table.schema.Name}).ownstate.Initialize(mosi.M)
 	r.schemaShards(table.schema, r.id, true)
 	table.schema.rebuild(true, false, false, table)
 	table.schema.save()
@@ -444,12 +451,12 @@ func TestReplicationDelayedInvalidationPreservesNewGrant(t *testing.T) {
 	r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
 	resource := mosiResource{Database: "tenant"}
 	c := r.resourceCell(resource)
-	c.rights.Initialize(mosi.M)
+	c.ownstate.Initialize(mosi.M)
 	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, State: "M", Owner: r.id, Epoch: 9}
 	if err := r.invalidateResource(context.Background(), "", mosiPacket{Kind: "invalidate", ID: "old-revocation", Resource: resource, Epoch: 8}); err != nil {
 		t.Fatal(err)
 	}
-	if c.rights.Phase() != mosi.M || r.directory.Records[resource.key()].State != "M" {
+	if c.ownstate.Phase() != mosi.M || r.directory.Records[resource.key()].State != "M" {
 		t.Fatal("old invalidation revoked newer M")
 	}
 }
@@ -458,8 +465,8 @@ func TestReplicationDuplicateWriteDoesNotReacquireOwnership(t *testing.T) {
 	r := replicaRecoveryFixture()
 	resource := mosiResource{Database: "tenant"}
 	c := r.resourceCell(resource)
-	c.rights.Initialize(mosi.IO)
-	pending, _ := c.rights.Request(mosi.M)
+	c.ownstate.Initialize(mosi.IO)
+	pending, _ := c.ownstate.Request(mosi.M)
 	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, State: "IO", Owner: r.id, Epoch: 5}
 	packet := mosiPacket{Kind: "write", ID: pending.Flight().ID(), Resource: resource, Sequence: 1}
 	if err := r.coordinate(context.Background(), r.id, packet); err != nil {
@@ -530,11 +537,11 @@ func TestReplicationStaleGrantFailsPendingFlight(t *testing.T) {
 	r := replicaRecoveryFixture()
 	resource := mosiResource{Database: "tenant"}
 	c := r.resourceCell(resource)
-	c.rights.Initialize(mosi.IO)
-	pending, _ := c.rights.Request(mosi.M)
+	c.ownstate.Initialize(mosi.IO)
+	pending, _ := c.ownstate.Request(mosi.M)
 	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, Owner: "other", Epoch: 9, State: "IO"}
 	err := r.acceptGrant(mosiPacket{ID: pending.Flight().ID(), Resource: resource, Epoch: 8, State: "M", Owner: r.id})
-	if err == nil || c.rights.Phase() != mosi.IO || r.directory.Records[resource.key()].Epoch != 9 {
+	if err == nil || c.ownstate.Phase() != mosi.IO || r.directory.Records[resource.key()].Epoch != 9 {
 		t.Fatal("stale grant published authority", err)
 	}
 	select {
@@ -551,15 +558,15 @@ func TestReplicationCompletedReadStillAllowsWriteUpgrade(t *testing.T) {
 	r := replicaRecoveryFixture()
 	resource := mosiResource{Database: "tenant"}
 	c := r.resourceCell(resource)
-	c.rights.Initialize(mosi.IO)
-	read, _ := c.rights.Request(mosi.S)
-	c.rights.Request(mosi.M) // upgrade wins before the read grant arrives
+	c.ownstate.Initialize(mosi.IO)
+	read, _ := c.ownstate.Request(mosi.S)
+	c.ownstate.Request(mosi.M) // upgrade wins before the read grant arrives
 	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, Owner: r.id, Epoch: 5, State: "IO"}
 	packet := mosiPacket{Kind: "read", ID: read.Flight().ID(), Resource: resource, Sequence: 1}
 	if err := r.coordinate(context.Background(), r.id, packet); err != nil {
 		t.Fatal(err)
 	}
-	if c.rights.Phase() != mosi.MR {
+	if c.ownstate.Phase() != mosi.MR {
 		t.Fatal("read reply bypassed pending write upgrade")
 	}
 	packet.Kind = "write"
@@ -574,7 +581,7 @@ func TestReplicationCompletedReadStillAllowsWriteUpgrade(t *testing.T) {
 		}()
 	}
 	workers.Wait()
-	if c.rights.Phase() != mosi.M || r.directory.Records[resource.key()].Epoch != 6 {
+	if c.ownstate.Phase() != mosi.M || r.directory.Records[resource.key()].Epoch != 6 {
 		t.Fatal("write upgrade lost or executed repeatedly")
 	}
 }
@@ -610,14 +617,14 @@ func TestReplicationReadFailureDoesNotCancelWriteUpgrade(t *testing.T) {
 	r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
 	resource := mosiResource{Database: "tenant"}
 	c := r.resourceCell(resource)
-	c.rights.Initialize(mosi.IO)
-	pending, _ := c.rights.Request(mosi.S)
-	c.rights.Request(mosi.M)
+	c.ownstate.Initialize(mosi.IO)
+	pending, _ := c.ownstate.Request(mosi.S)
+	c.ownstate.Request(mosi.M)
 	packet := mosiPacket{Kind: "failure", ID: pending.Flight().ID(), Resource: resource, State: "S", Error: "read failed"}
 	if err := r.receivePacket("", &packet); err != nil {
 		t.Fatal(err)
 	}
-	if c.rights.Phase() != mosi.MR {
+	if c.ownstate.Phase() != mosi.MR {
 		t.Fatal("read failure cancelled stronger request")
 	}
 	select {
@@ -645,10 +652,10 @@ func TestReplicationCurrentInvalidationAndFutureEpoch(t *testing.T) {
 	r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
 	resource := mosiResource{Database: "tenant"}
 	c := r.resourceCell(resource)
-	c.rights.Initialize(mosi.S)
+	c.ownstate.Initialize(mosi.S)
 	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, State: "S", Epoch: 9}
 	packet := mosiPacket{Kind: "invalidate", ID: "invalidate", Resource: resource, Epoch: 10}
-	if err := r.invalidateResource(context.Background(), "", packet); err == nil || c.rights.Phase() != mosi.S {
+	if err := r.invalidateResource(context.Background(), "", packet); err == nil || c.ownstate.Phase() != mosi.S {
 		t.Fatal("future invalidation changed current authority")
 	}
 	packet.Epoch = 9
@@ -656,7 +663,7 @@ func TestReplicationCurrentInvalidationAndFutureEpoch(t *testing.T) {
 		if err := r.invalidateResource(context.Background(), "", packet); err != nil {
 			t.Fatal(err)
 		}
-		if c.rights.Phase() != mosi.IO {
+		if c.ownstate.Phase() != mosi.IO {
 			t.Fatal("current invalidation retained read rights")
 		}
 		reply := <-r.upstream.outgoing
@@ -673,8 +680,8 @@ func TestReplicationInvalidationRacingNewGrant(t *testing.T) {
 		r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
 		resource := mosiResource{Database: "tenant"}
 		c := r.resourceCell(resource)
-		c.rights.Initialize(mosi.S)
-		pending, _ := c.rights.Request(mosi.M)
+		c.ownstate.Initialize(mosi.S)
+		pending, _ := c.ownstate.Request(mosi.M)
 		r.directory.Records[resource.key()] = replicaRecord{Resource: resource, State: "S", Epoch: 9}
 		start := make(chan struct{})
 		var workers sync.WaitGroup
@@ -695,7 +702,7 @@ func TestReplicationInvalidationRacingNewGrant(t *testing.T) {
 		}()
 		close(start)
 		workers.Wait()
-		if c.rights.Phase() != mosi.M || r.directory.Records[resource.key()].Epoch != 10 {
+		if c.ownstate.Phase() != mosi.M || r.directory.Records[resource.key()].Epoch != 10 {
 			t.Fatal("old invalidation raced newer grant publication")
 		}
 	}
@@ -734,8 +741,8 @@ func TestReplicationRequestCompletionKeepsPublishedMapImmutable(t *testing.T) {
 	peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
 	r.peers = map[string]*mosiPeer{"reader": peer}
 	c := r.resourceCell(resource)
-	c.rights.Initialize(mosi.O)
-	pending, _ := c.rights.Request(mosi.M)
+	c.ownstate.Initialize(mosi.O)
+	pending, _ := c.ownstate.Request(mosi.M)
 	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, Owner: r.id, Epoch: 5, State: "O", Readers: map[string]bool{"reader": true}}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -821,5 +828,141 @@ func TestReplicationTransferAckBindsCapturedGeneration(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatal("transfer did not finish")
 		}
+	}
+}
+
+func TestReplicationOuterAuthorityCannotAdmitDelegatedQueries(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "t_two_authority_delegation", 3)
+	r := replicaRecoveryFixture()
+	peer := uuid.NewString()
+	shard := table.ActiveShards()[0]
+	cell := r.declareShard(shard, peer, false)
+	resource := *cell.resource.Load()
+	schema := mosiResource{Database: table.schema.Name}
+	r.directory.Records[schema.key()] = replicaRecord{Resource: schema, Owner: peer, State: "IO", Epoch: 1}
+	schemaCell := r.resourceCell(schema)
+	r.establishAuthority(schemaCell, r.directory.Records[schema.key()])
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	for _, access := range []func(){
+		func() { shard.GetRead(nil).Release() }, func() { shard.GetWrite(nil).Release() },
+		func() { table.schema.GetRead(nil).Release() }, func() { table.schema.GetWrite(nil).Release() },
+	} {
+		failure := func() (failure any) { defer func() { failure = recover() }(); access(); return nil }()
+		if failure != mosi.NetworkError {
+			t.Fatal("outer M authorized a delegated local access", failure)
+		}
+	}
+	for _, c := range []*replicaCell{cell, schemaCell} {
+		if c.clusterstate.Phase() != mosi.M || c.ownstate.Phase() != mosi.IO {
+			t.Fatal("failed access changed domain ownership")
+		}
+	}
+	if r.directory.Records[resource.key()].Owner != peer {
+		t.Fatal("unreachable slave was silently promoted")
+	}
+}
+
+func TestReplicationOwnReadsIgnoreOutwardHandover(t *testing.T) {
+	r := replicaRecoveryFixture()
+	resource := mosiResource{Database: "tenant"}
+	c := r.resourceCell(resource)
+	c.clusterstate.Initialize(mosi.M)
+	c.ownstate.Initialize(mosi.S)
+	handover := c.clusterstate.TryHandover(func() bool { return true })
+	if handover == nil {
+		t.Fatal("missing outward handover")
+	}
+	defer handover.Release()
+	outer, own := c.clusterstate.Snapshot(), c.ownstate.Snapshot()
+	// Busy control-plane locks and a closing outer slot add no synchronization
+	// to an already authorized local reader. Test immutable publication identity
+	// as well as completion, rather than merely checking the resulting phase.
+	r.mu.Lock()
+	c.acquire.Lock()
+	c.directory.Lock()
+	done := make(chan struct{})
+	go func() {
+		for range 10000 {
+			r.obtain(resource, mosi.S, "")
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Error("local readers waited for outward/control ownership")
+	}
+	c.directory.Unlock()
+	c.acquire.Unlock()
+	r.mu.Unlock()
+	<-done
+	if c.clusterstate.Snapshot() != outer || c.ownstate.Snapshot() != own {
+		t.Fatal("granted reads wrote an authority slot")
+	}
+}
+
+func TestReplicationLeafGrantAndRevocationUpdateBothStates(t *testing.T) {
+	r := replicaRecoveryFixture()
+	r.master = false
+	r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	resource := mosiResource{Database: "tenant"}
+	c := r.resourceCell(resource)
+	pending, _ := c.ownstate.Request(mosi.M)
+	if err := r.acceptGrant(mosiPacket{ID: pending.Flight().ID(), Resource: resource, Epoch: 9, Owner: r.id, State: "M"}); err != nil {
+		t.Fatal(err)
+	}
+	if c.clusterstate.Phase() != mosi.M || c.ownstate.Phase() != mosi.M {
+		t.Fatal("leaf grant missed an authority slot")
+	}
+	c.ownstate.BackendOnly()
+	if c.ownstate.Phase() != mosi.IS || c.clusterstate.Phase() != mosi.M {
+		t.Fatal("RAM eviction changed outward authority")
+	}
+	if err := r.invalidateResource(context.Background(), "", mosiPacket{ID: "revoke", Resource: resource, Epoch: 9}); err != nil {
+		t.Fatal(err)
+	}
+	if c.ownstate.Phase() != mosi.IO || c.clusterstate.Phase() != mosi.IO {
+		t.Fatal("outward revocation retained local permission")
+	}
+}
+
+func TestReplicationRecoveryInventoryReportsOutwardAuthority(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "t_two_authority_inventory", 3)
+	r := replicaRecoveryFixture()
+	r.master = false
+	r.schemaShards(table.schema, r.id, true)
+	c := r.shardCell(table.ActiveShards()[0])
+	// Simulate the boundary of a future child group. The existing leaf adapter's
+	// upstream-domain record remains ours; child-owner metadata belongs elsewhere.
+	c.ownstate.Publish(mosi.IO)
+	records := r.recoveryInventory(replicaAuth{Databases: map[string]bool{table.schema.Name: true}})
+	found := false
+	for _, record := range records {
+		if record.Resource == *c.resource.Load() {
+			found = true
+			if record.State != "M" || record.Owner != r.id {
+				t.Fatal("local IO hid delegated outward authority")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing inventory resource")
+	}
+}
+
+func TestReplicationUnconfirmedReaderCannotRaiseOwnAuthority(t *testing.T) {
+	r := replicaRecoveryFixture()
+	resource := mosiResource{Database: "tenant"}
+	r.restoring[resource.Database] = true
+	r.backups[resource.key()] = replicaBackup{Resource: resource}
+	reader, owner := uuid.NewString(), uuid.NewString()
+	report := replicaRecord{Resource: resource, Owner: owner, State: "S", Epoch: 9, Readers: map[string]bool{r.id: true}}
+	if _, err := r.recoverPeer(context.Background(), reader, replicaRequest{Boot: uuid.NewString(), Resources: []replicaRecord{report}}, replicaAuth{Admin: true}); err != nil {
+		t.Fatal(err)
+	}
+	c := r.resourceCell(resource)
+	if c.clusterstate.Phase() != mosi.IO || c.ownstate.Phase() != mosi.IO {
+		t.Fatal("unconfirmed owner proof established stronger local than outward rights")
 	}
 }

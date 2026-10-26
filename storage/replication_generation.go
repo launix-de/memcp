@@ -88,6 +88,9 @@ func (r *replicationManager) resourceCell(resource mosiResource) *replicaCell {
 	return c
 }
 
+// publishLocal changes only execution permission. In particular, handing M to
+// an attached slave leaves the master's outward clusterstate unchanged. The
+// wire adapter must explicitly publish an outer revocation AFTER this call.
 func (r *replicationManager) publishLocal(resource mosiResource, phase mosi.Phase) {
 	c := r.resourceCell(resource)
 	if phase == mosi.IO && resource.Shard != "" {
@@ -98,7 +101,7 @@ func (r *replicationManager) publishLocal(resource mosiResource, phase mosi.Phas
 			invalidateReplicaCaches(shard.t)
 		}
 	}
-	c.rights.Publish(phase)
+	c.ownstate.Publish(phase)
 }
 
 // Mark runtime dependency targets without acquiring their shard/proxy locks or
@@ -136,6 +139,28 @@ func (r *replicationManager) localRecord(resource mosiResource, phase mosi.Phase
 		}
 		return true
 	})
+}
+
+// establishAuthority publishes an unpublished resource from the existing
+// declaration/recovery proof. record.State is the LOCAL permission, not the
+// aggregate rights of the master's domain. A known remote owner still belongs
+// to that root domain; an unknown backup owner establishes no outward rights.
+//
+// This root/leaf mapping is the current replication adapter only. Cluster join
+// must supply real outward grants instead of deriving M from the master role.
+// Recursive groups apply this same pair at each boundary; peer routing and
+// directory ownership belong to their adapters, never to query admission.
+func (r *replicationManager) establishAuthority(c *replicaCell, record replicaRecord) {
+	own := mosi.ParsePhase(record.State)
+	outer := own
+	if r.master {
+		outer = mosi.IO
+		if record.Owner != "" {
+			outer = mosi.M
+		}
+	}
+	c.clusterstate.Establish(outer)
+	c.ownstate.Establish(own)
 }
 
 func (r *replicationManager) declareShard(shard *storageShard, owner string, local bool) *replicaCell {
@@ -179,7 +204,7 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 	publication := resource
 	c.resource.Store(&publication)
 	if initialized {
-		c.rights.Establish(mosi.ParsePhase(record.State))
+		r.establishAuthority(c, record)
 	}
 	return c
 }
@@ -679,7 +704,7 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 	}
 	shard.t = table
 	c := r.resourceCell(resource)
-	if current := c.current.Load(); current != nil && current.uuid == shard.uuid && current.t == table && c.rights.Phase().Readable() {
+	if current := c.current.Load(); current != nil && current.uuid == shard.uuid && current.t == table && c.ownstate.Phase().Readable() {
 		return nil
 	}
 	if table.PersistencyMode == Memory || table.PersistencyMode == Cache {

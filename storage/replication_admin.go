@@ -92,7 +92,7 @@ func (r *replicationManager) reclaimDatabase(name string) bool {
 		}
 	}
 	ownsM := func(cell *replicaCell) bool {
-		state := cell.rights.Snapshot()
+		state := cell.ownstate.Snapshot()
 		return state.Phase() == mosi.M || state.Phase() == mosi.IS && state.Backend() == mosi.M
 	}
 	for _, table := range db.tables.GetAll() {
@@ -184,7 +184,7 @@ func (r *replicationManager) retire(id string) error {
 	for _, name := range names {
 		c := r.cell(name)
 		c.directory.Lock()
-		handover, err := c.rights.BeginHandover(context.Background(), c.drainWrites)
+		handover, err := c.ownstate.BeginHandover(context.Background(), c.drainWrites)
 		if err != nil {
 			c.directory.Unlock()
 			return err
@@ -221,7 +221,10 @@ func (r *replicationManager) retire(id string) error {
 			}
 		}
 		if err == nil {
-			c.rights.Publish(mosi.ParsePhase(record.State))
+			// Explicit, fenced promotion can establish root-domain authority that was
+			// unknown during recovery. It is not a timeout or a backend-existence proof.
+			c.clusterstate.Publish(mosi.M)
+			c.ownstate.Publish(mosi.ParsePhase(record.State))
 		}
 		handover.Release()
 		c.directory.Unlock()
@@ -345,13 +348,25 @@ func (r *replicationManager) statusSnapshot() ([]byte, error) {
 	directory.Users = nil // diagnostics must not disclose cached credential proofs
 	directory.Retired = maps.Clone(directory.Retired)
 	directory.Initialized = maps.Clone(directory.Initialized)
+	// These are on-demand diagnostic samples, not an atomic combined grant and
+	// never a query-admission cache. Keep the legacy directory state for clients
+	// while exposing the outward/local distinction to tests and reviewers.
+	type authorityView struct {
+		Clusterstate string `json:"clusterstate"`
+		Ownstate     string `json:"ownstate"`
+	}
+	authority := make(map[string]authorityView, len(r.cells))
+	for key, cell := range r.cells {
+		authority[key] = authorityView{cell.clusterstate.Phase().String(), cell.ownstate.Phase().String()}
+	}
 	r.mu.Unlock()
 	return json.Marshal(struct {
-		ID    string `json:"id"`
-		Boot  string `json:"boot"`
-		Ready bool   `json:"ready"`
+		ID        string                   `json:"id"`
+		Boot      string                   `json:"boot"`
+		Ready     bool                     `json:"ready"`
+		Authority map[string]authorityView `json:"authority"`
 		replicaDirectory
-	}{r.id, r.boot, r.ready.Load(), directory})
+	}{ID: r.id, Boot: r.boot, Ready: r.ready.Load(), Authority: authority, replicaDirectory: directory})
 }
 
 func initReplicationAdmin(en *scm.Env) {

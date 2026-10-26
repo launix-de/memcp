@@ -171,6 +171,18 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   record maps are immutable; mutations copy their reader/request directories.
   A coordinator's pending reader directory remains private until final publication.
   Each database schema and logical data shard has its own `replicaCell`.
+  `replicaCell.clusterstate` is RAM-only outward domain authority, including
+  delegated descendants; `ownstate` alone admits local schema/shard execution
+  and owns the existing active/closing writer. Publish outward permission before
+  raising local permission, and revoke/drain local holders before reducing the
+  outward permission. Root replication masters retain outer M while delegating
+  local M to a slave; leaf slaves currently mirror stable outward/local rights.
+  Unknown recovery copies establish neither permission from backend contents.
+  Recovery inventory reports outward authority; child-directory identities must
+  remain private when a future grouped slave reports to its enclosing domain.
+  Reuse this pair per hierarchy boundary; it is not a global two-flag topology.
+  Local reads never inspect the outer slot, register or synchronize with it.
+  Diagnostics sample both slots on demand and are never an admission snapshot.
   Its existing `acquire` mutex serializes inbound grant, recall, invalidation
   and final slave import publication against epoch changes; local granted
   reads and write batches never acquire it. Release it before transport sends.
@@ -193,7 +205,7 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   No private journal or persisted slave registration exists. `replicationStarting`
   is published before catalog discovery; startup GC cannot delete unexamined
   safety copies before the runtime directory and native configuration are ready.
-  `directory` serializes ownership handovers. `mosi.State` is the only local
+  `directory` serializes ownership handovers. `ownstate` uses `mosi.State` as the only local
   write-admission authority: M held, M active with one explicit writer owner,
   and M closing for handover. These are local substates, never new wire rights
   or per-write epochs. Nested scopes may borrow the same explicit transaction
