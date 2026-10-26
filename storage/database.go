@@ -26,7 +26,6 @@ import "strings"
 import "reflect"
 import "sync/atomic"
 import "encoding/json"
-import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -117,9 +116,10 @@ func newDatabase() *database {
 const transactionLogName = ".transactions"
 
 // Cluster nodes own independent native commit streams in the shared backend.
-// A shard handover drains transactions and publishes a rebuilt generation, so
-// another node never needs the source's private commit map to read that main.
-// Reboot keeps the installation UUID and replays its own ordinary WAL stream.
+// Warm handover rebuilds drain native transactions. Cold references can still
+// replay a durable WAL written by an earlier owner, so acquisition merges the
+// known installations' native commit authority before loading that generation.
+// Reboot retains the installation UUID and its ordinary commit stream.
 // This is native engine persistence, never a MOSI journal or backend override.
 func (db *database) transactionLogKey() string {
 	if !sharedClusterDatabase(db.Name) {
@@ -2558,24 +2558,38 @@ func (t *table) evictShardChildren(freedByType *[numEvictableTypes]int64) bool {
 }
 
 func (db *database) importClusterCommits(owner string) error {
-	if !strings.HasPrefix(owner, "memcp://") {
-		return fmt.Errorf("invalid commit owner URI")
-	}
-	id := strings.TrimPrefix(owner, "memcp://")
-	if _, err := uuid.Parse(id); err != nil {
+	if err := validateClusterURI(owner); err != nil {
 		return err
 	}
-	_, entries, handle := db.persistence.ReplayLog(transactionLogName + "." + id)
-	commits := make([]string, 0)
-	for entry := range entries {
-		commit, ok := entry.(LogEntryCommit)
-		if !ok || commit.txID == "" {
-			handle.Close()
-			return fmt.Errorf("invalid native commit log")
+	// A cold generation can pass through several owners without loading or
+	// rebuilding its WAL. The immediate sender's own commit stream alone is
+	// therefore insufficient. Membership retains unreachable installations;
+	// these ordinary backend logs remain readable without contacting the node.
+	owners := map[string]bool{owner: true}
+	if cluster := activeNodeCluster(); cluster != nil {
+		if view := cluster.view.Load(); view != nil {
+			for _, member := range view.members {
+				owners[member.ID] = true
+			}
 		}
-		commits = append(commits, commit.txID)
 	}
-	handle.Close()
+	commits := make([]string, 0)
+	for owner := range owners {
+		if err := validateClusterURI(owner); err != nil {
+			return err
+		}
+		id := strings.TrimPrefix(owner, "memcp://")
+		_, entries, handle := db.persistence.ReplayLog(transactionLogName + "." + id)
+		for entry := range entries {
+			commit, ok := entry.(LogEntryCommit)
+			if !ok || commit.txID == "" {
+				handle.Close()
+				return fmt.Errorf("invalid native commit log")
+			}
+			commits = append(commits, commit.txID)
+		}
+		handle.Close()
+	}
 	db.initializeTransactionLog()
 	db.transactionMu.Lock()
 	for _, txID := range commits {

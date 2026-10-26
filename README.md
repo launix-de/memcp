@@ -480,7 +480,9 @@ receive new UUIDs while existing native snapshots keep their forwarding semantic
 Shared-backend handovers exchange references through the same resource protocol
 used for replication. Local writes and DDL acquire M; subsequent reads invalidate
 and rebuild ordinary query caches as ownership changes. Shared historical-file GC
-is deferred until cluster-wide reference retirement is implemented.
+and old UUID alias retirement are deferred until cluster-wide reference retirement
+is implemented. Native commit streams also remain available for cold WAL replay
+through earlier owners.
 
 Ordinary unordered SQL scalar reductions use the existing shard scan pipeline.
 Warm shards compute locally. Cold acquisitions either load locally or raise the

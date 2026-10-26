@@ -13,6 +13,7 @@ package storage
 import "time"
 import "context"
 import "testing"
+import "strings"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -225,5 +226,52 @@ func TestClusterCancelledReaderRetainsSharedRequestFlight(t *testing.T) {
 	}
 	if cluster.obtain(context.Background(), resource, mosi.S) != cell {
 		t.Fatal("remaining readers could not use the received grant")
+	}
+}
+
+func TestClusterLiveRevocationCannotRecoverOldOwnerRights(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}}
+	cluster.initializeManager()
+	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self}})
+	resource := mosiResource{Database: "live_revocation_db"}
+	cell := cluster.manager.resourceCell(resource)
+	cell.ownstate.Establish(mosi.IO)
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch, record.State = cluster.self.ID, 9, "IO"
+		return true
+	})
+	if _, err := cluster.locate(context.Background(), resource); err == nil || cell.ownstate.Phase() != mosi.IO {
+		t.Fatal("live handover was mistaken for restart recovery and promoted")
+	}
+	successor := "memcp://" + uuid.NewString()
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool { record.Handoff = successor; return true })
+	owner, err := cluster.locate(context.Background(), resource)
+	if err != nil || owner != successor || cell.ownstate.Phase() != mosi.IO {
+		t.Fatal("pending handover did not route to its successor without acquiring permission")
+	}
+}
+
+func TestClusterColdHandoverRetainsEarlierOwnersCommitAuthority(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_cluster_commit_lineage", 1)
+	db := tbl.schema
+	first := "memcp://" + uuid.NewString()
+	sender := "memcp://" + uuid.NewString()
+	cluster := &nodeCluster{}
+	cluster.view.Store(&clusterView{members: []clusterMember{{ID: first}, {ID: sender}}})
+	old := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(old)
+	for _, owner := range []string{first, sender} {
+		_, entries, log := db.persistence.ReplayLog(transactionLogName + "." + strings.TrimPrefix(owner, "memcp://"))
+		for range entries {
+		}
+		log.Write(LogEntryCommit{txID: owner})
+		log.Flush(true)
+		log.Close()
+	}
+	if err := db.importClusterCommits(sender); err != nil {
+		t.Fatal(err)
+	}
+	if !db.transactionCommitted(first) || !db.transactionCommitted(sender) {
+		t.Fatal("cold forwarding lost the original modifier's durable commit proof")
 	}
 }

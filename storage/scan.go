@@ -18,11 +18,11 @@ package storage
 
 import "fmt"
 import "time"
-import "runtime/debug"
 import "sort"
-import "strings"
 import "sync"
+import "strings"
 import "sync/atomic"
+import "runtime/debug"
 import "github.com/launix-de/memcp/scm"
 
 type scanError struct {

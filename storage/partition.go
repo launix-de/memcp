@@ -17,15 +17,15 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
-import "github.com/carli2/hybridsort"
 import "sort"
 import "sync"
-import "sync/atomic"
 import "time"
 import "runtime"
 import "strings"
-import "github.com/launix-de/NonLockingReadMap"
+import "sync/atomic"
+import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/NonLockingReadMap"
 
 const repartitionDrainTimeout = 30 * time.Second
 

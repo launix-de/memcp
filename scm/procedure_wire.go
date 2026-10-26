@@ -11,8 +11,8 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package scm
 
 import "fmt"
-import "bytes"
 import "maps"
+import "bytes"
 import "encoding/json"
 
 const procedureWireVersion = 2

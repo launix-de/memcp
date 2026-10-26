@@ -15,9 +15,9 @@ import "sync"
 import "context"
 import "encoding/json"
 import "runtime/debug"
-import "github.com/launix-de/go-mysqlstack/sqldb"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/go-mysqlstack/sqldb"
 
 // These messages have no RPC response handle. The reducer registers a return
 // channel before enqueueing a task; the node reader delivers a completion (or

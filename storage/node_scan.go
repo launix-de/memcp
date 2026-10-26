@@ -12,8 +12,8 @@ package storage
 
 import "fmt"
 import "sync"
-import "strings"
 import "time"
+import "strings"
 import "context"
 import "net/http"
 import "crypto/hmac"

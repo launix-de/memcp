@@ -16,19 +16,19 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
-import "context"
 import "fmt"
 import "math"
 import "sort"
-import "math/bits"
 import "sync"
 import "time"
 import "errors"
 import "slices"
 import "unsafe"
+import "context"
 import "strconv"
 import "strings"
 import "unicode"
+import "math/bits"
 import "sync/atomic"
 import "unicode/utf8"
 import "encoding/json"

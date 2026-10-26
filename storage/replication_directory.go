@@ -288,6 +288,15 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				r.localRecord(packet.Resource, mosi.ParsePhase(oldState), generation)
 			}
 			if err == nil {
+				if r.cluster != nil && write {
+					// Route concurrent lookups toward the successor while its
+					// installation ACK is pending. This is not a grant; local IO
+					// remains revoked and the successor still waits for its M grant.
+					r.updateRecord(packet.Resource, func(current *replicaRecord) bool {
+						current.Handoff = requester
+						return true
+					})
+				}
 				r.publishLocal(packet.Resource, mosi.ParsePhase(oldState))
 				record.Generation = generation
 			}

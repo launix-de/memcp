@@ -10,8 +10,8 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 */
 package scm
 
-import "bytes"
 import "fmt"
+import "bytes"
 import "strings"
 import "testing"
 

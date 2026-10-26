@@ -30,8 +30,8 @@ import "encoding/binary"
 import "github.com/google/uuid"
 import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
-import "github.com/launix-de/memcp/storage/mosi"
 import "github.com/launix-de/NonLockingReadMap"
+import "github.com/launix-de/memcp/storage/mosi"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
 type storageShard struct {

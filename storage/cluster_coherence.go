@@ -58,6 +58,9 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 	if phase == mosi.M || phase == mosi.O {
 		return r.id, nil
 	}
+	if own.Handoff != "" {
+		return own.Handoff, nil
+	}
 	if own.Owner != "" && own.Owner != r.id {
 		return own.Owner, nil
 	}
@@ -89,6 +92,12 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 		return "", fmt.Errorf(mosi.NetworkError)
 	}
 	if owner == r.id && !authoritative {
+		// A live IO publication is a revocation, not a restarted owner. The
+		// directory may still name us while a handover awaits installation ACK;
+		// reconstructing M here would resurrect revoked rights and stale schema.
+		if r.resourceCell(resource).ownstate.Initialized() {
+			return "", fmt.Errorf("cluster ownership handover is incomplete")
+		}
 		// Recover a restarted owner only from a complete live roster. An unreachable
 		// permission holder never disappears because of a timeout or membership hint.
 		if len(view.links) != len(view.members)-1 {
@@ -133,6 +142,7 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 	if phase := c.ownstate.Phase(); phase == mosi.M || wanted != mosi.M && phase.Readable() {
 		return c
 	}
+	restoreCommits := !c.ownstate.Initialized()
 	ctx, cancel := context.WithTimeout(parent, 30*time.Minute)
 	defer cancel()
 	owner, err := cluster.locate(ctx, resource)
@@ -143,6 +153,15 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 	for {
 		publication, action := c.ownstate.Request(wanted)
 		if action == mosi.Ready {
+			if restoreCommits && resource.Shard != "" {
+				// Restart recovery may establish local authority without a new
+				// reference packet. Restore native WAL commit proofs here too,
+				// before any backend generation can be materialized.
+				db := GetDatabase(resource.Database)
+				if db == nil || db.importClusterCommits(owner) != nil {
+					panic(mosi.NetworkError)
+				}
+			}
 			return c
 		}
 		if action == mosi.Send || action == mosi.Upgrade {
@@ -417,6 +436,8 @@ func (cluster *nodeCluster) initializeManager() {
 // A rebuild publishes a new shard UUID. Both native shard objects retain the
 // same local permission cell while mutation forwarding is live; old UUIDs are
 // routing aliases for in-flight operations, never independent writer grants.
+// Retirement needs a distributed proof that no old UUID request is in flight;
+// aliases are deliberately retained with deferred historical-generation GC.
 func (cluster *nodeCluster) aliasShard(resource mosiResource, shard *storageShard) {
 	r := cluster.manager
 	c := r.resourceCell(resource)
