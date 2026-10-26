@@ -48,6 +48,7 @@ var replicationSchemaArgument = []scm.Scmer{scm.NewString("schema")}
 var replicationUsernameArgument = []scm.Scmer{scm.NewString("username")}
 
 type replicationManager struct {
+	cluster         *nodeCluster // optional URI directory/shared-generation strategy; same MOSI core
 	master          bool
 	address         string
 	id              string
@@ -301,6 +302,9 @@ func (r *replicationManager) connect() {
 }
 
 func (r *replicationManager) peer(id string) *mosiPeer {
+	if r.cluster != nil {
+		return r.cluster.peer(id)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if id == "" {
@@ -312,7 +316,13 @@ func (r *replicationManager) peer(id string) *mosiPeer {
 // Engine access fails closed while configured replication has not published
 // its manager. Frontend bootstrap may still use the excluded system catalog.
 func activeReplication(db *database) *replicationManager {
-	if db == nil || sharedClusterDatabase(db.Name) {
+	if db != nil && sharedClusterDatabase(db.Name) {
+		if cluster := activeNodeCluster(); cluster != nil {
+			return cluster.manager
+		}
+		panic(mosi.NetworkError)
+	}
+	if db == nil {
 		return nil
 	}
 	r := replication.Load()

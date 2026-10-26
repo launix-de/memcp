@@ -82,6 +82,13 @@ func (r *replicationManager) storeConfig(entry replicaConfigEntry) error {
 }
 
 func (r *replicationManager) cell(name string) *replicaCell {
+	if r.cluster != nil {
+		if value, ok := r.cluster.states.Load(name); ok {
+			return value.(*replicaCell)
+		}
+		value, _ := r.cluster.states.LoadOrStore(name, &replicaCell{})
+		return value.(*replicaCell)
+	}
 	if snapshot := r.cellSnapshot.Load(); snapshot != nil {
 		if c := (*snapshot)[name]; c != nil {
 			return c

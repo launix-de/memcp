@@ -179,6 +179,7 @@ type scanAccessSegment struct {
 }
 
 type scanAccessRuntime struct {
+	mutation bool // invocation-owned: acquire M before selecting cluster mutation rows
 	// Immutable remote invocation extent; supplied before operator preparation.
 	horizon *shardScanHorizon
 	// prefixMerge is immutable invocation-owned state, borrowed under the scan

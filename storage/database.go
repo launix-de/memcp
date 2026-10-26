@@ -115,10 +115,26 @@ func newDatabase() *database {
 
 const transactionLogName = ".transactions"
 
+// Cluster nodes own independent native commit streams in the shared backend.
+// A shard handover drains transactions and publishes a rebuilt generation, so
+// another node never needs the source's private commit map to read that main.
+// Reboot keeps the installation UUID and replays its own ordinary WAL stream.
+// This is native engine persistence, never a MOSI journal or backend override.
+func (db *database) transactionLogKey() string {
+	if !sharedClusterDatabase(db.Name) {
+		return transactionLogName
+	}
+	id, err := localNodeIdentity()
+	if err != nil {
+		panic(err)
+	}
+	return transactionLogName + "." + id
+}
+
 func (db *database) initializeTransactionLog() {
 	db.transactionOnce.Do(func() {
 		committed := make(map[string]uint64)
-		_, entries, logfile := db.persistence.ReplayLog(transactionLogName)
+		_, entries, logfile := db.persistence.ReplayLog(db.transactionLogKey())
 		for entry := range entries {
 			commit, ok := entry.(LogEntryCommit)
 			if !ok || commit.txID == "" {
@@ -202,7 +218,7 @@ func (db *database) compactTransactionLog(cutoff uint64) {
 	// Committers share transactionMu, so nobody can append between this
 	// barrier and publishing the replacement log.
 	db.transactionLog.Flush(true)
-	replacement := db.persistence.SwapLog(transactionLogName, entries, true)
+	replacement := db.persistence.SwapLog(db.transactionLogKey(), entries, true)
 	old := db.transactionLog
 	db.transactionLog = replacement
 	db.committedTx = retained
@@ -311,7 +327,16 @@ func (d *database) MarshalJSON() ([]byte, error) {
 		}
 	}
 	sort.Slice(definitions, func(i, j int) bool { return definitions[i].Name < definitions[j].Name })
-	return json.Marshal(persist{Name: d.Name, Tables: d.tables, Procedures: definitions})
+	tables := d.tables
+	if sharedClusterDatabase(d.Name) {
+		tables = NonLockingReadMap.NewReadMap[string, *table]()
+		for _, table := range d.tables.GetAll() {
+			if !table.isEphemeralQueryTable() {
+				tables.Set(table.Name, table)
+			}
+		}
+	}
+	return json.Marshal(persist{Name: d.Name, Tables: tables, Procedures: definitions})
 }
 
 func (d *database) UnmarshalJSON(data []byte) error {
@@ -670,8 +695,11 @@ func (db *database) commitSchemaSnapshot(jsonbytes []byte, durable bool, release
 
 func (db *database) save() {
 	if sharedClusterDatabase(db.Name) {
-		return
-	} // advisory runtime metadata is private to this reader
+		cluster := activeNodeCluster()
+		if cluster == nil || cluster.manager.resourceCell(mosiResource{Database: db.Name}).ownstate.Phase() != mosi.M {
+			return
+		}
+	}
 	if db.srState == COLD {
 		// Do not serialize a cold database; keep existing schema.json intact
 		return
@@ -698,8 +726,11 @@ func (db *database) save() {
 // synchronous schema save or rebuild includes it in its complete snapshot.
 func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
 	if sharedClusterDatabase(db.Name) {
-		db.schemalock.Unlock()
-		return
+		cluster := activeNodeCluster()
+		if cluster == nil || cluster.manager.resourceCell(mosiResource{Database: db.Name}).ownstate.Phase() != mosi.M {
+			db.schemalock.Unlock()
+			return
+		}
 	}
 	if db.srState == COLD {
 		db.schemalock.Unlock()
@@ -1061,11 +1092,6 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 // SharedResource impl for database
 func (db *database) GetState() SharedState { return db.srState }
 func (db *database) GetRead(tx *TxContext) ReadAccess {
-	if sharedClusterDatabase(db.Name) {
-		acquireClusterSnapshot(mosiResource{Database: db.Name})
-		db.ensureLoaded()
-		return ReadAccess{}
-	}
 	if r := activeReplication(db); r != nil && validReplicaDatabase(db.Name) {
 		r.obtain(mosiResource{Database: db.Name}, mosi.S, replicationUser(tx))
 	}
@@ -1073,7 +1099,6 @@ func (db *database) GetRead(tx *TxContext) ReadAccess {
 	return ReadAccess{}
 }
 func (db *database) GetWrite(tx *TxContext) WriteAccess {
-	rejectClusterSnapshotWrite(db.Name)
 	var release func()
 	ready := false
 	defer func() {
@@ -1153,7 +1178,10 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 // observe generation-private files in the build→publish interval.
 func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphemeral bool, only ...*table) rebuildDatabaseResult {
 	if sharedClusterDatabase(db.Name) {
-		return rebuildDatabaseResult{}
+		r := activeReplication(db)
+		if r.resourceCell(mosiResource{Database: db.Name}).ownstate.Phase() != mosi.M {
+			return rebuildDatabaseResult{}
+		}
 	}
 
 	if replication.Load() != nil && GetDatabase(db.Name) != db {
@@ -1305,7 +1333,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 						sdone.Done()
 					}()
 					if s != nil {
-						if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) && !t.isEphemeralQueryTable() {
+						if r := activeReplication(db); r != nil && validReplicaDatabase(db.Name) && !t.isEphemeralQueryTable() {
 							cell := r.shardCell(s)
 							handover := cell.ownstate.TryHandover(cell.writesDrained)
 							if handover == nil {
@@ -1920,7 +1948,7 @@ func moveTransactionLog(db *database, dst PersistenceEngine) PersistenceLogfile 
 	for index, id := range ids {
 		entries[index] = LogEntryCommit{txID: id}
 	}
-	replacement := dst.SwapLog(transactionLogName, entries, true)
+	replacement := dst.SwapLog(db.transactionLogKey(), entries, true)
 	old := db.transactionLog
 	db.transactionLog = replacement
 	return old
@@ -2126,7 +2154,6 @@ func DatabaseBackendName(schema string) string {
 }
 
 func DropDatabase(schema string, ifexists bool) bool {
-	rejectClusterSnapshotWrite(schema)
 	db := databases.Get(schema)
 	if db == nil {
 		if ifexists {

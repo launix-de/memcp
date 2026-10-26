@@ -104,7 +104,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 		}
 		return nil
 	case "grant":
-		if r.master || source != "" {
+		if r.cluster == nil && (r.master || source != "") {
 			return fmt.Errorf("grant from non-master")
 		}
 		return r.acceptGrant(*packet)

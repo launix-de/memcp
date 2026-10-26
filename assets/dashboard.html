@@ -1505,6 +1505,7 @@ var settingsGroups=[
 {key:"PHPOutputBuffer",label:"Output buffer per request",desc:"0 disables buffering.",type:"bytes",min:0}
 ]},
 {group:"Memory",items:[
+{key:"ShardRamPercent",label:"Cluster shard RAM (% of node budget)",desc:"Reject cold shard loads at this share of the node memory budget. Leaves room for computation and query caches; warm shards run locally. Default 50%.",type:"number",min:1,max:100},
 {key:"MaxRamPercent",label:"Automatic cache budget (% of RAM)",desc:"Percentage of the available RAM limit, used unless a custom maximum is applied above. 0 uses 50%.",type:"number"},
 {key:"MinRamBytes",label:"Minimum retained memory",desc:"Eviction floor for tracked cache memory, including system RAM pressure and idle expiry (0 disables)",type:"bytes",min:0},
 {key:"MaxRamBytes",label:"Total memory limit",desc:"Override total budget (0 uses the percentage)",type:"bytes",min:0},

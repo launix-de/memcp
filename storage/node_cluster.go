@@ -23,6 +23,11 @@ import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
+// The initial implementation keeps a full mesh for small clusters (<=10).
+// For larger deployments retain only ten random neighbours and route messages
+// over hops to their stable memcp:// peer URI. Address/connection/incarnation
+// are separate from that URI; a reconnect must not change the logical target.
+// Sparse multi-hop routing is deliberately not approximated by a larger mesh.
 const clusterRosterLimit = 512
 
 type clusterMember struct {
@@ -53,9 +58,11 @@ type clusterView struct {
 // contact has no special role: every node retains the complete authenticated
 // roster and independently connects to discovered peers.
 type nodeCluster struct {
-	waiters   chan struct{}   // bounds blocked admission RPCs independently of compute slots
-	states    sync.Map        // resource -> shared-S replicaCell, immutable generation mounts only
-	databases map[string]bool // immutable mounted shared snapshots, separate from replica namespaces
+	manager   *replicationManager // shared MOSI engine adapter; no second state machine
+	homes     sync.Map            // database -> immutable directory URI; RAM-only
+	waiters   chan struct{}       // bounds blocked admission RPCs independently of compute slots
+	states    sync.Map            // resource -> shared-S replicaCell, immutable generation mounts only
+	databases map[string]bool     // immutable mounted shared snapshots, separate from replica namespaces
 	service   *nodeScanService
 	self      clusterMember
 	seed      string
@@ -91,7 +98,7 @@ func (cluster *nodeCluster) publishLocked() {
 	cluster.view.Store(view)
 }
 func validClusterMember(member clusterMember) bool {
-	_, idErr := uuid.Parse(member.ID)
+	idErr := validateClusterURI(member.ID)
 	_, bootErr := uuid.Parse(member.Boot)
 	address, err := mosiEndpointURL(member.Address)
 	return idErr == nil && bootErr == nil && err == nil && address == member.Address && len(address) <= 2048
@@ -142,18 +149,21 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 		return nil, err
 	}
 	switch method {
-	case "cluster.wait_capacity":
-		select {
-		case cluster.waiters <- struct{}{}:
-			defer func() { <-cluster.waiters }()
-		default:
-			return nil, fmt.Errorf("cluster capacity queue full")
-		}
-		var version uint64
-		if err := json.Unmarshal(data, &version); err != nil {
+	case "cluster.home":
+		request, err := decodeClusterHome(data)
+		if err != nil {
 			return nil, err
 		}
-		return nil, GlobalCache.waitQueryCapacity(ctx, version)
+		return cluster.homeMessage(request)
+	case "cluster.report":
+		var resource mosiResource
+		if err := json.Unmarshal(data, &resource); err != nil {
+			return nil, err
+		}
+		if !resource.valid() || !cluster.databases[resource.Database] {
+			return nil, fmt.Errorf("invalid cluster report")
+		}
+		return cluster.report(resource), nil
 	case "cluster.hint", "cluster.reduce":
 		known := false
 		if view := cluster.view.Load(); view != nil {
@@ -299,7 +309,7 @@ func startNodeCluster(secretFile, address, seed, databases string) error {
 		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cluster := &nodeCluster{service: service, self: clusterMember{id, service.id, endpoint}, seed: seed, ctx: ctx, cancel: cancel, members: make(map[string]clusterMember), links: make(map[string]*clusterLink)}
+	cluster := &nodeCluster{service: service, self: clusterMember{"memcp://" + id, service.id, endpoint}, seed: seed, ctx: ctx, cancel: cancel, members: make(map[string]clusterMember), links: make(map[string]*clusterLink)}
 	cluster.databases = make(map[string]bool)
 	for _, name := range strings.Split(databases, ",") {
 		if !validReplicaDatabase(name) {
@@ -308,7 +318,8 @@ func startNodeCluster(secretFile, address, seed, databases string) error {
 		}
 		cluster.databases[name] = true
 	}
-	cluster.members[id] = cluster.self
+	cluster.initializeManager()
+	cluster.members[cluster.self.ID] = cluster.self
 	cluster.publishLocked()
 	cluster.waiters = make(chan struct{}, 256)
 	service.cluster = cluster // immutable before the HTTP role becomes reachable
@@ -352,4 +363,12 @@ func initNodeCluster(en *scm.Env) {
 		}
 		return scm.NewString(string(data))
 	}, Type: &scm.TypeDescriptor{Kind: "func", Return: &scm.TypeDescriptor{Kind: "string"}}})
+}
+
+func validateClusterURI(id string) error {
+	if !strings.HasPrefix(id, "memcp://") {
+		return fmt.Errorf("expected memcp:// peer URI")
+	}
+	_, err := uuid.Parse(strings.TrimPrefix(id, "memcp://"))
+	return err
 }

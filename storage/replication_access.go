@@ -67,7 +67,7 @@ func (table *table) schemaWrite() (*table, WriteAccess) {
 			access.Release()
 		}
 	}()
-	if r := replication.Load(); r != nil && validReplicaDatabase(table.schema.Name) {
+	if r := activeReplication(table.schema); r != nil && validReplicaDatabase(table.schema.Name) {
 		current := table.schema.tables.Get(table.Name)
 		if current == nil {
 			panic("replication schema changed; retry statement")
@@ -126,6 +126,9 @@ func (r *replicationManager) proof(user, database string) (string, replicaAuth, 
 }
 
 func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, user string) *replicaCell {
+	if r.cluster != nil {
+		return r.cluster.obtain(resource, wanted)
+	}
 	if r.retired.Load() {
 		panic("replica retired by administrator")
 	}

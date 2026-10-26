@@ -57,7 +57,7 @@ func replicationWrite(tx *TxContext) {
 }
 
 func replicationCheckWriteTable(t *table, tx *TxContext) {
-	if replication.Load() == nil || !validReplicaDatabase(t.schema.Name) || t.isEphemeralQueryTable() {
+	if !validReplicaDatabase(t.schema.Name) || t.isEphemeralQueryTable() || activeReplication(t.schema) == nil {
 		return
 	}
 	if t.schema.tables.Get(t.Name) != t {
@@ -68,6 +68,9 @@ func replicationCheckWriteTable(t *table, tx *TxContext) {
 // Weak retirement metadata is updated only at generation publication. A query
 // retaining a historical shard keeps its files alive without registering reads.
 func replicationRetainsCatalogs(name string) bool {
+	if sharedClusterDatabase(name) {
+		return true
+	} // cluster-wide historical-generation GC is not a local pointer test
 	if r := replication.Load(); r != nil {
 		if r.hasTransfers(name) {
 			return true

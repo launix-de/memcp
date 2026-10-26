@@ -49,6 +49,7 @@ type SettingsT struct {
 	ShardSize              uint
 	AnalyzeMinItems        int
 	IndexThreshold         int   // min shard rows before creating a new adaptive index (0 = default 5)
+	ShardRamPercent        int   // cold cluster shard admission fraction of node budget; default 50
 	MaxRamPercent          int   // 0 = default (50%), otherwise 1-100; total memory budget
 	MinRamBytes            int64 // 0 = disabled; eviction floor for tracked cache memory, even under system pressure
 	MaxRamBytes            int64 // 0 = use MaxRamPercent; >0 = override total budget in bytes
@@ -150,6 +151,7 @@ var Settings = SettingsT{
 	PartitionMaxDimensions: 10,
 	DefaultEngine:          "safe",
 	ShardSize:              60000,
+	ShardRamPercent:        50,
 	AnalyzeMinItems:        50,
 	IndexThreshold:         5,
 	ExplainWidth:           20,
@@ -297,6 +299,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("ShardSize"), scm.NewInt(int64(Settings.ShardSize)),
 			scm.NewString("AnalyzeMinItems"), scm.NewInt(int64(Settings.AnalyzeMinItems)),
 			scm.NewString("IndexThreshold"), scm.NewInt(int64(Settings.IndexThreshold)),
+			scm.NewString("ShardRamPercent"), scm.NewInt(int64(Settings.ShardRamPercent)),
 			scm.NewString("MaxRamPercent"), scm.NewInt(int64(Settings.MaxRamPercent)),
 			scm.NewString("MaxRamBytes"), scm.NewInt(Settings.MaxRamBytes),
 			scm.NewString("MinRamBytes"), scm.NewInt(Settings.MinRamBytes),
@@ -350,6 +353,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(int64(Settings.AnalyzeMinItems))
 		case "IndexThreshold":
 			return scm.NewInt(int64(Settings.IndexThreshold))
+		case "ShardRamPercent":
+			return scm.NewInt(int64(Settings.ShardRamPercent))
 		case "MaxRamPercent":
 			return scm.NewInt(int64(Settings.MaxRamPercent))
 		case "MinRamBytes":
@@ -441,6 +446,13 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.MinRamBytes = value
 			total, persisted := computeMemoryBudgets()
 			GlobalCache.UpdateBudget(total, persisted, value)
+		case "ShardRamPercent":
+			percent := scm.ToInt(a[1])
+			if percent < 1 || percent > 100 {
+				panic("ShardRamPercent must be between 1 and 100")
+			}
+			Settings.ShardRamPercent = percent
+			GlobalCache.SetShardRAMPercent(percent)
 		case "MaxRamPercent":
 			Settings.MaxRamPercent = scm.ToInt(a[1])
 			total, persisted := computeMemoryBudgets()
@@ -656,6 +668,7 @@ func InitCacheManager() {
 	GlobalMaintenanceRAMBudget.SetCapacity(computeMaintenanceMemoryBudget(total))
 	if total > 0 || persisted > 0 {
 		GlobalCache.Init(total, persisted, Settings.MinRamBytes)
+		GlobalCache.SetShardRAMPercent(Settings.ShardRamPercent)
 	}
 	// Register persistent HTTP sessions in the cache so they are evicted after 30 min idle.
 	scm.SetHTTPSessionAddHook(func(key string, ss *scm.SessionState) {

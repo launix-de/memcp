@@ -16,53 +16,38 @@ import "testing"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
-func TestClusterQueryBudgetCreditsResidentGenerationOnce(t *testing.T) {
-	const mib = int64(1 << 20)
+func TestClusterShardRAMUsesMeasuredLedgerAndFraction(t *testing.T) {
 	var cache CacheManager
-	cache.Init(10*mib, 10*mib, 0)
+	cache.Init(10<<20, 10<<20, 0)
 	defer cache.Stop()
+	cache.SetShardRAMPercent(50)
+	if !cache.canLoadClusterShard() {
+		t.Fatal("empty ledger rejected")
+	}
+	// A pinned native object cannot be evicted to manufacture admission.
+	cache.AddItem(new(int), 5<<20, TypeShard, func(any, *[numEvictableTypes]int64) bool { return false }, func(any) time.Time { return time.Now() }, nil)
+	if cache.canLoadClusterShard() {
+		t.Fatal("admitted a cold shard at the 50% boundary")
+	}
+	cache.SetShardRAMPercent(60)
+	if !cache.canLoadClusterShard() {
+		t.Fatal("runtime fraction change was ignored")
+	}
+	stat := cache.Stat()
+	if stat.ShardMemory != 5<<20 || stat.ShardBudget != 6<<20 {
+		t.Fatal("ledger mismatch")
+	}
+}
+func TestClusterWarmScanDoesNotReadBackendOrReserveRAM(t *testing.T) {
 	shard := &storageShard{}
-	shard.cacheReaders.Store(1)
-	cache.AddItem(shard, 2*mib, TypeShard, func(any, *[numEvictableTypes]int64) bool { return false }, func(any) time.Time { return time.Now() }, nil)
-	first, _ := cache.tryQueryRAM(shard, 4*mib, mib)
-	if first == nil {
-		t.Fatal("first operator rejected")
-	}
-	second, _ := cache.tryQueryRAM(shard, 4*mib, mib)
-	if second == nil {
-		first.Release()
-		t.Fatal("shared resident bytes counted twice")
-	}
-	if cache.Stat().QueryReserved != 4*mib {
-		t.Fatal("missing-payload/scratch reservation mismatch")
-	}
-	cache.SetSize(shard, 4*mib)
-	if cache.Stat().QueryReserved != 2*mib {
-		t.Fatal("loading did not convert reservation into resident credit")
-	}
-	other := &storageShard{}
-	if unexpected, _ := cache.tryQueryRAM(other, 4*mib, mib); unexpected != nil {
-		unexpected.Release()
-		t.Fatal("over-budget work admitted")
-	}
-	first.Release()
-	second.Release()
-	if cache.Stat().QueryReserved != 0 {
-		t.Fatal("operator reservation leaked")
-	}
-	final, _ := cache.tryQueryRAM(other, 4*mib, mib)
-	if final == nil {
-		t.Fatal("released capacity was not reusable")
-	}
-	final.Release()
-	if stat := cache.Stat(); stat.QueryPeak > stat.MemoryBudget {
-		t.Fatal("admission peak exceeded node budget")
-	}
+	shard.setState(SHARED)
+	// No table/backend, peers or budget actor exist. A warm decision needs none.
+	(&nodeCluster{}).prepareLocalScan(shard, nil)
 }
 
 func TestClusterRosterRequiresBoundIdentityAndRetainsSnapshot(t *testing.T) {
-	self := clusterMember{uuid.NewString(), uuid.NewString(), "ws://127.0.0.1:4001/cluster"}
-	remote := clusterMember{uuid.NewString(), uuid.NewString(), "ws://127.0.0.1:4002/cluster"}
+	self := clusterMember{"memcp://" + uuid.NewString(), uuid.NewString(), "ws://127.0.0.1:4001/cluster"}
+	remote := clusterMember{"memcp://" + uuid.NewString(), uuid.NewString(), "ws://127.0.0.1:4002/cluster"}
 	cluster := &nodeCluster{self: self, members: map[string]clusterMember{self.ID: self}, links: make(map[string]*clusterLink)}
 	cluster.publishLocked()
 	before := cluster.view.Load()
@@ -86,35 +71,6 @@ func TestClusterHintCannotAccessUnMountedDatabase(t *testing.T) {
 	cluster := &nodeCluster{}
 	if _, err := cluster.handle(newScanRPCSession(), context.Background(), "peer", "cluster.hint", []byte(`{"resource":{"database":"system","table":"user"}}`)); err == nil {
 		t.Fatal("cluster hint bypassed mount boundary")
-	}
-}
-
-func TestClusterAdmissionRejectsUnknownColumnBeforeLoading(t *testing.T) {
-	table, _ := createDurabilityTestTable(t, "t_cluster_header_fence", 2)
-	shard := table.ActiveShards()[0]
-	// Fresh delta-only generations have no immutable column header. Placement
-	// must refuse them before a native loader can use an unbounded row estimate.
-	if _, _, err := estimateClusterShard(shard); err == nil {
-		t.Fatal("delta-only generation admitted as immutable numeric shard")
-	}
-}
-
-func TestClusterCapacityReleaseBeforeWatchCannotLoseWakeup(t *testing.T) {
-	var cache CacheManager
-	cache.Init(4<<20, 4<<20, 0)
-	defer cache.Stop()
-	lease, decision := cache.tryQueryRAM(&storageShard{}, 1<<20, 1<<20)
-	if lease == nil {
-		t.Fatal("missing test admission")
-	}
-	lease.Release()
-	reply := make(chan (<-chan struct{}), 1)
-	cache.opChan <- cacheOp{queryWatch: reply, queryVersion: decision.Version}
-	signal := <-reply
-	select {
-	case <-signal:
-	default:
-		t.Fatal("release before watcher registration lost the capacity wakeup")
 	}
 }
 
@@ -147,9 +103,14 @@ func TestClusterMountDoesNotSubscribeThroughReplication(t *testing.T) {
 	manager := replicaRecoveryFixture()
 	oldManager := replication.Swap(manager)
 	defer replication.Store(oldManager)
-	if activeReplication(table.schema) != nil {
-		t.Fatal("shared snapshot entered the replication adapter")
+	oldService := nodeScans.Load()
+	outer := &replicationManager{}
+	nodeScans.Store(&nodeScanService{cluster: &nodeCluster{manager: outer}})
+	defer nodeScans.Store(oldService)
+	if activeReplication(table.schema) != outer {
+		t.Fatal("cluster source did not select its own domain")
 	}
+
 	if activeReplication(&database{Name: "separate_replica_tenant"}) != manager {
 		t.Fatal("unrelated replication namespace was disabled")
 	}

@@ -33,8 +33,9 @@ const (
 // generation/visibility rules. Release must be called exactly once, including
 // panic/cancellation unwinding; a zero access requires no cleanup.
 type ReadAccess struct {
-	scanRAM *queryRAMLease // optional cluster operator budget; not a reader/MOSI lock
-	shard   *storageShard
+	releaseWrite func() // existing MOSI writer admission for a mutating cluster scan
+	writer       bool
+	shard        *storageShard
 }
 
 type WriteAccess struct {
@@ -49,8 +50,11 @@ func (access WriteAccess) Release() {
 }
 
 func (access ReadAccess) Release() {
-	if access.scanRAM != nil {
-		defer access.scanRAM.Release()
+	if access.writer {
+		if access.releaseWrite != nil {
+			access.releaseWrite()
+		}
+		return
 	}
 	if access.shard != nil {
 		access.shard.releaseCacheRead()

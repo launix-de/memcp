@@ -66,35 +66,12 @@ func sharedClusterSource(table *table) bool {
 	return table != nil && table.schema != nil && !table.isEphemeralQueryTable() && sharedClusterDatabase(table.schema.Name)
 }
 
-func (cluster *nodeCluster) sharedRead(resource mosiResource) *replicaCell {
-	if value, exists := cluster.states.Load(resource.key()); exists {
-		return value.(*replicaCell)
-	}
-	cluster.mu.Lock()
-	defer cluster.mu.Unlock()
-	if value, exists := cluster.states.Load(resource.key()); exists {
-		return value.(*replicaCell)
-	}
-	cell := &replicaCell{}
-	cell.resource.Store(&resource)
-	cell.clusterstate.Establish(mosi.S)
-	cell.ownstate.Establish(mosi.S)
-	cluster.states.Store(resource.key(), cell)
-	return cell
-}
+// Every schema/shard now acquires actual network MOSI permission. The
+// immutable mount adapter has no authority to fabricate S from a backend file.
 func acquireClusterSnapshot(resource mosiResource) *replicaCell {
 	cluster := activeNodeCluster()
 	if cluster == nil || !cluster.databases[resource.Database] {
 		panic(mosi.NetworkError)
 	}
-	cell := cluster.sharedRead(resource)
-	if _, action := cell.ownstate.Request(mosi.S); action != mosi.Ready {
-		panic(mosi.NetworkError)
-	}
-	return cell
-}
-func rejectClusterSnapshotWrite(name string) {
-	if sharedClusterDatabase(name) {
-		panic("cluster shared snapshots are read-only until distributed MOSI write handover is connected")
-	}
+	return cluster.manager.obtain(resource, mosi.S, "")
 }

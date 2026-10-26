@@ -2509,15 +2509,6 @@ func Init(en scm.Env) {
 					// invocation so its current closed callback can repair the table.
 				}
 			}
-			db.persistenceLifecycle.RLock()
-			persistenceLifecycleLocked := true
-			unlockPersistenceLifecycle := func() {
-				if persistenceLifecycleLocked {
-					persistenceLifecycleLocked = false
-					db.persistenceLifecycle.RUnlock()
-				}
-			}
-			defer unlockPersistenceLifecycle()
 			// parse options only after the fast existing-table probe
 			options := mustScmerSlice(a[3], "options")
 			var autoIncrement uint64
@@ -2553,6 +2544,23 @@ func Init(en scm.Env) {
 				}
 			}
 			pm := parsePersistencyMode(engine)
+			// Acquire schema ownership before native lifecycle locks or opening
+			// unpublished shard logs. A remote schema grant may need to install
+			// metadata through that same lifecycle boundary.
+			var schemaAccess WriteAccess
+			if !(pm == Cache && strings.HasPrefix(tblName, ".")) {
+				schemaAccess = db.GetWrite(nil)
+				defer func() { schemaAccess.Release() }()
+			}
+			db.persistenceLifecycle.RLock()
+			persistenceLifecycleLocked := true
+			unlockPersistenceLifecycle := func() {
+				if persistenceLifecycleLocked {
+					persistenceLifecycleLocked = false
+					db.persistenceLifecycle.RUnlock()
+				}
+			}
+			defer unlockPersistenceLifecycle()
 
 			newTable := new(table)
 			newTable.schema = db
@@ -2625,11 +2633,6 @@ func Init(en scm.Env) {
 			validateUniqueConstraintNames(newTable.Unique)
 			newTable.publishShowColumnsSnapshot(true)
 
-			var schemaAccess WriteAccess
-			if !newTable.isEphemeralQueryTable() {
-				schemaAccess = db.GetWrite(nil)
-				defer func() { schemaAccess.Release() }()
-			}
 			existing := func() *table {
 				db.schemalock.Lock()
 				resolved := false

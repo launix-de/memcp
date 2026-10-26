@@ -164,6 +164,9 @@ func (r *replicationManager) establishAuthority(c *replicaCell, record replicaRe
 }
 
 func (r *replicationManager) declareShard(shard *storageShard, owner string, local bool) *replicaCell {
+	if r.cluster != nil {
+		return r.cluster.declareShard(shard, local)
+	}
 	resource := mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.logicalID().String()}
 	c := r.resourceCell(resource)
 	c.current.CompareAndSwap(nil, shard)
@@ -266,7 +269,9 @@ func (r *replicationManager) prepareResource(resource mosiResource) (generation 
 	}
 	db.ensureLoaded()
 	if resource.Shard == "" {
-		r.schemaShards(db, r.id, true)
+		if r.cluster == nil {
+			r.schemaShards(db, r.id, true)
+		}
 		db.save()
 		return replicaSchemaGeneration(db.persistence.ReadSchema())
 	}
@@ -776,23 +781,32 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 		}
 		db.saveMu.Unlock()
 	}
-	if db != nil {
+	if db != nil && r.cluster == nil {
 		var err error
 		data, err = replicaSchemaForLocalData(db, data)
 		if err != nil {
 			return err
 		}
 	}
-	engine.WriteSchema(data)
+	if r.cluster == nil {
+		engine.WriteSchema(data)
+	}
 	replacement = newDatabase()
 	replacement.Name, replacement.persistence, replacement.srState = name, engine, COLD
+	if r.cluster != nil {
+		replacement.persistence = clusterSchemaView{engine, data}
+	}
 	replacement.ensureLoaded()
+	replacement.persistence = engine
 	if db == nil {
 		databases.Set(name, replacement)
 		db = replacement
 	} else {
 		defer replacement.closeTransactionLog()
 		for _, table := range db.tables.GetAll() {
+			if r.cluster != nil && table.isEphemeralQueryTable() {
+				continue
+			}
 			if replacement.tables.Get(table.Name) == nil {
 				for _, shard := range table.ActiveShards() {
 					if shard == nil {
@@ -806,8 +820,35 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 			}
 		}
 		for _, table := range replacement.tables.GetAll() {
+			if r.cluster != nil && table.isEphemeralQueryTable() {
+				continue
+			}
 			previous := db.tables.Get(table.Name)
 			if previous != nil && sameReplicaDeclaration(previous, table) {
+				if r.cluster != nil {
+					for _, incoming := range table.ActiveShards() {
+						if incoming == nil {
+							continue
+						}
+						resource := mosiResource{Database: name, Table: previous.Name, Shard: incoming.logicalID().String()}
+						cell := r.resourceCell(resource)
+						old := cell.current.Load()
+						if old == nil {
+							old = r.findShard(resource)
+						}
+						if old != nil && old.uuid != incoming.uuid {
+							if cell.ownstate.Phase() == mosi.M {
+								return fmt.Errorf("shared schema conflicts with a local modifier")
+							}
+							incoming.t = previous
+							incoming.coherence.Store(cell)
+							if err := r.replaceShard(resource, old, incoming); err != nil {
+								return err
+							}
+							cell.current.Store(incoming)
+						}
+					}
+				}
 				continue
 			}
 			table.schema = db
@@ -900,6 +941,10 @@ func (r *replicationManager) step(ctx context.Context, peerID string, packet mos
 }
 
 func (r *replicationManager) transmitResource(ctx context.Context, peerID string, header mosiPacket) error {
+	if r.cluster != nil {
+		header.Kind = "reference"
+		return r.step(ctx, peerID, header)
+	}
 	peer := r.peer(peerID)
 	if peer == nil {
 		return fmt.Errorf(mosi.NetworkError)

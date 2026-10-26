@@ -50,7 +50,7 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 }
 
 func (r *replicationManager) invalidateResource(ctx context.Context, source string, packet mosiPacket) error {
-	if r.master || source != "" {
+	if r.cluster == nil && (r.master || source != "") {
 		return fmt.Errorf("invalidation from non-master")
 	}
 	c := r.resourceCell(packet.Resource)
@@ -90,12 +90,15 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 }
 
 func (r *replicationManager) offerResource(ctx context.Context, source string, packet mosiPacket) error {
-	if r.master || source != "" {
+	if r.cluster == nil && (r.master || source != "") {
 		return fmt.Errorf("recall from non-master")
 	}
 	c := r.resourceCell(packet.Resource)
 	// Older safety-copy packets must be enqueued before this ownership offer.
 	// Waiting for a sender never closes local write admission.
+	if r.cluster != nil && packet.Resource.Shard != "" {
+		r.obtain(mosiResource{Database: packet.Resource.Database}, mosi.M, "")
+	}
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	releasePersistence, err := replicaPersistenceRead(packet.Resource)
@@ -148,6 +151,19 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 	// The root master does not take this path when delegating to its slave.
 	c.clusterstate.Publish(phase)
 	packet.Generation = generation
+	if r.cluster != nil {
+		handover.Release()
+		locked = false
+		c.acquire.Unlock()
+		authorityLocked = false
+		releasePersistence()
+		packet.Kind = "reference"
+		peer := r.peer(source)
+		if peer == nil {
+			return fmt.Errorf(mosi.NetworkError)
+		}
+		return peer.post(packet)
+	}
 	transfer, err := r.captureResource(packet.Resource, generation)
 	if err != nil {
 		return err
@@ -161,13 +177,10 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 }
 
 func (r *replicationManager) coordinate(ctx context.Context, requester string, packet mosiPacket) error {
-	if sharedClusterDatabase(packet.Resource.Database) {
-		return fmt.Errorf("shared cluster snapshots do not yet delegate replication rights")
-	}
 	if !r.master {
 		return fmt.Errorf("resource request to non-master")
 	}
-	if requester != r.id {
+	if r.cluster == nil && requester != r.id {
 		if err := r.authorizePacket(packet); err != nil {
 			return err
 		}
@@ -192,6 +205,11 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		localShard = r.findShard(packet.Resource)
 	}
 	write := packet.Kind == "write" || packet.Kind == "begin"
+	if r.cluster != nil {
+		if err := r.cluster.recoverDirectory(ctx, packet.Resource); err != nil {
+			return err
+		}
+	}
 	stale := false
 	record := r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
 		if record.Owner == "" {
@@ -231,6 +249,9 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			oldState = "O"
 		}
 		if record.Owner == r.id {
+			if r.cluster != nil && packet.Resource.Shard != "" {
+				r.obtain(mosiResource{Database: packet.Resource.Database}, mosi.M, "")
+			}
 			releasePersistence, err := replicaPersistenceRead(packet.Resource)
 			if err != nil {
 				return err
@@ -241,7 +262,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				return err
 			}
 			generation, err := r.prepareResource(packet.Resource)
-			if err == nil && requester != r.id {
+			if err == nil && requester != r.id && r.cluster == nil {
 				err = r.saveBackup(packet.Resource, generation)
 			}
 			if err == nil {

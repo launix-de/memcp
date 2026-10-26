@@ -12,6 +12,7 @@ package storage
 
 import "fmt"
 import "sync"
+import "strings"
 import "time"
 import "context"
 import "net/http"
@@ -29,6 +30,8 @@ import "github.com/launix-de/memcp/scm"
 var nodeScans atomic.Pointer[nodeScanService]
 
 type nodeScanService struct {
+	executions  sync.Map // invocation UUID -> worker TxContext, never persisted or serialized
+	returns     sync.Map // reducer-owned UUID -> *scanReturnChannel, removed on completion/error
 	id          string
 	cluster     *nodeCluster // immutable startup-owned adapter; nil for explicit scan_remote
 	secret      []byte
@@ -84,6 +87,9 @@ func readScanAuth(conn *websocket.Conn, method string, output any) error {
 
 func validScanChallenge(c scanChallenge) bool {
 	_, nodeErr := uuid.Parse(c.Node)
+	if strings.HasPrefix(c.Node, "memcp://") {
+		nodeErr = validateClusterURI(c.Node)
+	}
 	_, nonceErr := uuid.Parse(c.Nonce)
 	return nodeErr == nil && nonceErr == nil
 }
@@ -199,7 +205,13 @@ func (service *nodeScanService) accept(w http.ResponseWriter, req *http.Request)
 	}
 	session := newScanRPCSession()
 	session.service, session.remoteID = service, remoteID
-	peer := newMosiPeer(conn, session.handle, nil)
+	var packets func(*mosiPacket) error
+	if service.cluster != nil {
+		packets = func(packet *mosiPacket) error { return service.cluster.receive(remoteID, packet) }
+	}
+	peer := newMosiPeer(conn, session.handle, packets)
+	peer.scanService = service
+	session.bindPeer(peer)
 	if !service.track(peer) {
 		peer.close()
 	}
@@ -241,7 +253,13 @@ func (service *nodeScanService) connect(ctx context.Context, address string) (*m
 	}
 	session := newScanRPCSession()
 	session.service, session.remoteID = service, remoteID
-	peer := newMosiPeer(conn, session.handle, nil)
+	var packets func(*mosiPacket) error
+	if service.cluster != nil {
+		packets = func(packet *mosiPacket) error { return service.cluster.receive(remoteID, packet) }
+	}
+	peer := newMosiPeer(conn, session.handle, packets)
+	peer.scanService = service
+	session.bindPeer(peer)
 	if !service.track(peer) {
 		peer.close()
 		peer.wait()
@@ -315,6 +333,14 @@ func StopNodeScans() {
 }
 func initNodeScans(en *scm.Env) {
 	initNodeCluster(en)
+	scm.Declare(en, &scm.Declaration{Name: "node_query_context", Fn: func(a ...scm.Scmer) scm.Scmer {
+		if service := nodeScans.Load(); service != nil {
+			if value, ok := service.executions.Load(a[0].String()); ok {
+				return scm.NewAny(value.(*TxContext))
+			}
+		}
+		panic("expired remote query context")
+	}, Type: &scm.TypeDescriptor{Kind: "func", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "channel"}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
 	scm.Declare(en, &scm.Declaration{Name: "node_scan_start", Fn: func(a ...scm.Scmer) scm.Scmer {
 		if err := startNodeScans(a[0].String()); err != nil {
 			panic(err)

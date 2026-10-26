@@ -3399,7 +3399,7 @@ func (t *table) DropColumnIfExists(name string) bool {
 }
 
 func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *storageShard, incoming uint, balance bool) (*tableShardTopology, *storageShard) {
-	if r := replication.Load(); r != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable() {
+	if r := activeReplication(t.schema); r != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable() {
 		// Adding a lane changes the database's shard directory. Invalidate
 		// shared schema copies before publication, without affecting ordinary
 		// INSERTs which can use an existing lane.

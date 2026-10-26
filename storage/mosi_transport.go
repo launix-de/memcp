@@ -72,21 +72,22 @@ func registerMosiRole(role string, handler http.Handler) (func(), error) {
 // Neither RPC handlers nor storage I/O run under its mutex.
 // A disconnected peer fails every outstanding call; no write is retried here.
 type mosiPeer struct {
-	conn      *websocket.Conn
-	writeMu   sync.Mutex
-	outgoing  chan mosiMessage
-	writeDone chan struct{}
-	mu        sync.Mutex
-	pending   map[uint64]chan mosiMessage
-	next      atomic.Uint64
-	done      chan struct{}
-	once      sync.Once
-	handle    func(context.Context, string, json.RawMessage) (any, error)
-	packet    func(*mosiPacket) error
-	ctx       context.Context
-	cancel    context.CancelFunc
-	readDone  chan struct{}
-	workers   sync.WaitGroup
+	scanService *nodeScanService // immutable before an outbound scan is dispatched
+	conn        *websocket.Conn
+	writeMu     sync.Mutex
+	outgoing    chan mosiMessage
+	writeDone   chan struct{}
+	mu          sync.Mutex
+	pending     map[uint64]chan mosiMessage
+	next        atomic.Uint64
+	done        chan struct{}
+	once        sync.Once
+	handle      func(context.Context, string, json.RawMessage) (any, error)
+	packet      func(*mosiPacket) error
+	ctx         context.Context
+	cancel      context.CancelFunc
+	readDone    chan struct{}
+	workers     sync.WaitGroup
 }
 
 type mosiMessage struct {
@@ -263,6 +264,9 @@ func (p *mosiPeer) read() {
 					reply.Error = err.Error()
 				}
 			}()
+			if m.ID == 0 {
+				return
+			} // fire-and-forget messages complete via their registered channel
 			if err := p.send(reply); err != nil {
 				p.close()
 			}
