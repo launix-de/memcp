@@ -97,7 +97,7 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 	// Older safety-copy packets must be enqueued before this ownership offer.
 	// Waiting for a sender never closes local write admission.
 	if r.cluster != nil && packet.Resource.Shard != "" {
-		r.obtain(mosiResource{Database: packet.Resource.Database}, mosi.M, "")
+		r.obtain(mosiResource{Database: packet.Resource.Database}, mosi.M, "", nil)
 	}
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
@@ -157,7 +157,10 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 		c.acquire.Unlock()
 		authorityLocked = false
 		releasePersistence()
-		packet.Kind = "reference"
+		packet.Kind, packet.From, packet.To = "reference", r.id, source
+		if current := c.current.Load(); current != nil && packet.Resource.Shard != "" {
+			packet.Lineage = current.logicalID().String()
+		}
 		peer := r.peer(source)
 		if peer == nil {
 			return fmt.Errorf(mosi.NetworkError)
@@ -198,11 +201,28 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	// There are no outer cluster peers in this adapter yet. A known resource
-	// belongs to this root domain even when its local executor has IO. Keep the
-	// root claim separate from the ownstate grant below. Cluster routing will
-	// replace this bootstrap with acquisition from the enclosing directory.
-	c.clusterstate.Establish(mosi.M)
+	if r.cluster != nil {
+		// Discovery may race an earlier handover while this request waits for
+		// directory ownership. The old owner forwards to the successor; it must
+		// never become a permanent coordinator recalling the actual owner.
+		r.mu.Lock()
+		owner := r.directory.Records[r.recordKey(packet.Resource)].Owner
+		r.mu.Unlock()
+		if owner != "" && owner != r.id {
+			peer := r.peer(owner)
+			if peer == nil {
+				return fmt.Errorf(mosi.NetworkError)
+			}
+			packet.From, packet.To = requester, owner
+			return peer.post(packet)
+		}
+	}
+	if r.cluster == nil {
+		// A star master retains its outward root claim while delegating inward
+		// to a slave. Cluster peers instead receive authority through owner
+		// discovery and grants; merely coordinating cannot establish outer M.
+		c.clusterstate.Establish(mosi.M)
+	}
 	// Catalog loading may itself declare shards and acquire r.mu.
 	localShard := c.current.Load()
 	if localShard == nil && packet.Resource.Shard != "" {
@@ -249,7 +269,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		}
 		if record.Owner == r.id {
 			if r.cluster != nil && packet.Resource.Shard != "" {
-				r.obtain(mosiResource{Database: packet.Resource.Database}, mosi.M, "")
+				r.obtain(mosiResource{Database: packet.Resource.Database}, mosi.M, "", nil)
 			}
 			releasePersistence, err := replicaPersistenceRead(packet.Resource)
 			if err != nil {

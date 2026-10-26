@@ -1201,7 +1201,18 @@ def run_cluster_placement(args, artifacts, journal):
             expect(int(nodes[cold_worker].client.scm(expression).strip()), expected,
                    f"uncached result after write {revision}")
         nodes[1].client.sql("CREATE TABLE cluster_ddl(id INT PRIMARY KEY,n INT) ENGINE=SAFE")
-        nodes[2].client.sql("INSERT INTO cluster_ddl VALUES(1,7),(2,11)")
+        try:
+            nodes[2].client.sql("INSERT INTO cluster_ddl VALUES(1,7),(2,11)")
+        except Exception:
+            # Preserve the original failure while recording live catalog data;
+            # parser-level metadata fallback can otherwise mask its root cause.
+            for node in nodes:
+                try:
+                    print(node.name, "DDL diagnostic", node.client.scm(
+                        f'(list (show "{DATABASE}" "cluster_ddl") (get_schema "{DATABASE}" "cluster_ddl"))'), flush=True)
+                except Exception as diagnostic:
+                    print(node.name, "DDL diagnostic failed", diagnostic, flush=True)
+            raise
         for node in nodes:
             expect(node.client.number("SELECT SUM(n) AS total FROM cluster_ddl", "total"), 18,
                    "DDL and inserted data visible across nodes")
@@ -1221,20 +1232,40 @@ def run_cluster_placement(args, artifacts, journal):
             edge = Node(args, directory, f"edge-{index}", f"http://127.0.0.1:{upstream.port}/cluster", database=database)
             cleanup.callback(lambda edge=edge: edge.kill() if edge.process is not None else None)
             edge.start()
+            edge_nodes.append(edge)
+
+        def edge_work(index):
+            edge = edge_nodes[index]
             for row_id in range(6):
                 edge.client.sql(f"INSERT INTO edge_items VALUES({row_id},{row_id + 1})")
             expect(edge.client.number("SELECT SUM(n) AS total FROM edge_items", "total"), 21,
                    "edge workload during cluster operation")
-            expect(upstream.client.number("SELECT SUM(n) AS total FROM edge_items", "total", database=database), 21,
+            expect(nodes[index + 1].client.number("SELECT SUM(n) AS total FROM edge_items", "total",
+                                                 database=edge.database), 21,
                    "replication master reads tenant updates")
-            edge_nodes.append(edge)
-        nodes[0].client.sql("CREATE DATABASE cluster_private", "system")
-        nodes[0].client.sql("CREATE TABLE private_items(id INT)", "cluster_private")
-        nodes[0].client.sql("INSERT INTO private_items VALUES(13)", "cluster_private")
-        expect(nodes[0].client.number("SELECT SUM(id) AS total FROM private_items", "total", database="cluster_private"), 13,
-               "master-only namespace remains writable")
-        for node in nodes:
-            expect(node.client.number(query, "total"), expected, "cluster sum after independent edge workloads")
+
+        def private_work():
+            master = nodes[0].client
+            master.sql("CREATE DATABASE cluster_private", "system")
+            master.sql("CREATE TABLE private_items(id INT)", "cluster_private")
+            master.sql("INSERT INTO private_items VALUES(13)", "cluster_private")
+            master.sql("ALTER TABLE private_items ADD COLUMN extra INT DEFAULT 7", "cluster_private")
+            expect(master.number("SELECT SUM(id) AS total FROM private_items", "total", database="cluster_private"), 13,
+                   "master-only namespace remains writable")
+            expect(master.number("SELECT SUM(extra) AS total FROM private_items", "total", database="cluster_private"), 7,
+                   "master-only ALTER remains independent of replica ownership")
+
+        def cluster_reads():
+            for node in nodes:
+                expect(node.client.number(query, "total"), expected, "cluster sum during independent edge workloads")
+
+        # Separate tenant replicas, private DDL and shared analytic reads must
+        # progress concurrently. Each future propagates its assertions/errors.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as threads:
+            futures = [threads.submit(edge_work, index) for index in range(2)]
+            futures.extend([threads.submit(private_work), threads.submit(cluster_reads)])
+            for future in futures:
+                future.result()
         # Move schema ownership away from the contact before it is killed. The
         # contact's already-granted S rights remain usable by the survivors.
         nodes[1].client.sql("CREATE TABLE after_contact(id INT)")

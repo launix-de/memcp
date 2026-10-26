@@ -127,13 +127,13 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 	}
 	return owner, nil
 }
-func (cluster *nodeCluster) obtain(resource mosiResource, wanted mosi.Phase) *replicaCell {
+func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource, wanted mosi.Phase) *replicaCell {
 	r := cluster.manager
 	c := r.resourceCell(resource)
 	if phase := c.ownstate.Phase(); phase == mosi.M || wanted != mosi.M && phase.Readable() {
 		return c
 	}
-	ctx, cancel := context.WithTimeout(cluster.ctx, 30*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 30*time.Minute)
 	defer cancel()
 	owner, err := cluster.locate(ctx, resource)
 	if err != nil {
@@ -152,7 +152,11 @@ func (cluster *nodeCluster) obtain(resource mosiResource, wanted mosi.Phase) *re
 			}
 			if owner == r.id {
 				go func() {
-					if failure := r.coordinate(ctx, r.id, packet); failure != nil {
+					// The shared MR/SR flight belongs to the protocol. One waiter
+					// cancelling cannot revoke every other reader's acquisition.
+					operation, finish := context.WithTimeout(cluster.ctx, 30*time.Minute)
+					defer finish()
+					if failure := r.coordinate(operation, r.id, packet); failure != nil {
 						c.ownstate.Fail(packet.ID, failure, wanted)
 					}
 				}()
@@ -183,8 +187,9 @@ func (cluster *nodeCluster) obtain(resource mosiResource, wanted mosi.Phase) *re
 				panic(mosi.NetworkError)
 			}
 		case <-ctx.Done():
-			c.ownstate.Fail(publication.Flight().ID(), ctx.Err(), wanted)
-			panic(mosi.NetworkError)
+			// Leave the shared flight alive for other waiters and the node
+			// reader to complete. Cancellation is local to this invocation.
+			panic(ctx.Err())
 		case <-disconnected:
 			c.ownstate.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError), wanted)
 			panic(mosi.NetworkError)
@@ -305,7 +310,14 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 	if packet.Epoch < cluster.report(packet.Resource).Epoch {
 		return fmt.Errorf("stale shared reference")
 	}
-	if !c.ownstate.Phase().Requested() {
+	var expected *replicaStep
+	if value, exists := r.steps.Load(packet.ID); exists {
+		expected = value.(*replicaStep)
+		if !expected.matches(source, packet) {
+			return fmt.Errorf("unexpected shared reference source")
+		}
+	}
+	if expected == nil && !c.ownstate.Phase().Requested() {
 		// An O holder may publish a rebuilt generation to its known S readers
 		// without a new read request. Keep their existing permission and install
 		// only an update from the recorded owner at this exact authority epoch.
@@ -338,6 +350,10 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 		}
 	}
 	r.updateRecord(packet.Resource, func(record *replicaRecord) bool { record.Generation = packet.Generation; return true })
+	if expected != nil {
+		expected.finish(nil)
+		return nil
+	}
 	peer := r.peer(source)
 	if peer == nil {
 		return fmt.Errorf(mosi.NetworkError)

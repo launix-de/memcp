@@ -11,6 +11,7 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
+import "context"
 import "strings"
 import "sync/atomic"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -66,10 +67,10 @@ func sharedClusterSource(table *table) bool {
 
 // Every schema/shard now acquires actual network MOSI permission. The
 // immutable mount adapter has no authority to fabricate S from a backend file.
-func acquireClusterRead(resource mosiResource) *replicaCell {
+func acquireClusterRead(ctx context.Context, resource mosiResource) *replicaCell {
 	cluster := activeNodeCluster()
 	if cluster == nil || !cluster.databases[resource.Database] {
 		panic(mosi.NetworkError)
 	}
-	return cluster.manager.obtain(resource, mosi.S, "")
+	return cluster.obtain(ctx, resource, mosi.S)
 }

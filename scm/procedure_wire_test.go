@@ -158,3 +158,12 @@ func TestProcedureWireUsesSchemeSerializeAndDoesNotEvaluateBody(t *testing.T) {
 		}
 	}
 }
+
+func TestProcedureWireNestedScanContextRebindSkipsQuotedData(t *testing.T) {
+	input := Read(t.Name(), `(lambda () (list (scan nil source) (scan (node_query_context "previous-hop") source) (quote (scan nil literal))))`)
+	binding := Read(t.Name(), `(node_query_context "current-hop")`)
+	bound := SerializeToString(bindProcedureScanContext(input, binding), nil)
+	if strings.Count(bound, "current-hop") != 2 || strings.Contains(bound, "previous-hop") || !strings.Contains(bound, "(scan nil literal)") {
+		t.Fatalf("nested scope rebinding changed quoted data or retained its parent: %s", bound)
+	}
+}

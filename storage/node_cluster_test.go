@@ -15,6 +15,7 @@ import "context"
 import "testing"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage/mosi"
 
 func TestClusterShardRAMUsesMeasuredLedgerAndFraction(t *testing.T) {
 	var cache CacheManager
@@ -165,5 +166,64 @@ func TestClusterRebuildUUIDAliasesShareAuthority(t *testing.T) {
 	r.updateRecord(old, func(record *replicaRecord) bool { record.Generation = next.uuid.String(); return true })
 	if len(r.directory.Records) != 1 || r.directory.Records[current.key()].Epoch != 7 || r.recordKey(old) != current.key() {
 		t.Fatal("UUID forwarding lost canonical authority")
+	}
+}
+
+func TestClusterQueuedRequestForwardsAfterOwnerHandover(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}}
+	cluster.initializeManager()
+	owner := "memcp://" + uuid.NewString()
+	requester := "memcp://" + uuid.NewString()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
+	resource := mosiResource{Database: "forward_db"}
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch, record.State = owner, 4, "IO"
+		return true
+	})
+	request := mosiPacket{Kind: "write", Resource: resource, ID: uuid.NewString(), Sequence: 8}
+	if err := cluster.manager.coordinate(context.Background(), requester, request); err != nil {
+		t.Fatal(err)
+	}
+	message := <-peer.outgoing
+	if message.Packet == nil || message.Packet.Kind != "write" || message.Packet.From != requester || message.Packet.To != owner || message.Packet.ID != request.ID {
+		t.Fatal("old owner recalled its successor instead of forwarding the original request")
+	}
+	if cluster.manager.directory.Records[resource.key()].Epoch != 4 {
+		t.Fatal("forwarding manufactured a new ownership epoch")
+	}
+}
+
+func TestClusterCancelledReaderRetainsSharedRequestFlight(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
+	cluster.initializeManager()
+	owner := "memcp://" + uuid.NewString()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
+	resource := mosiResource{Database: "cancel_db"}
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch = owner, 1
+		return true
+	})
+	cell := cluster.manager.resourceCell(resource)
+	request, _ := cell.ownstate.Request(mosi.S)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	func() {
+		defer func() {
+			if failure := recover(); failure != context.Canceled {
+				t.Fatalf("wrong cancelled waiter failure: %v", failure)
+			}
+		}()
+		cluster.obtain(ctx, resource, mosi.S)
+	}()
+	if cell.ownstate.Phase() != mosi.SR || request.Flight().Err() != nil || len(peer.outgoing) != 0 {
+		t.Fatal("one reader cancellation aborted or duplicated the common flight")
+	}
+	if _, err := cell.ownstate.Grant(request.Flight().ID(), mosi.S, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if cluster.obtain(context.Background(), resource, mosi.S) != cell {
+		t.Fatal("remaining readers could not use the received grant")
 	}
 }

@@ -25,6 +25,17 @@ type clusterShardHint struct {
 	Warm bool `json:"warm"`
 }
 
+// scanQueryContext is used only when scheduling/acquiring a cold shard. The
+// already-authorized read path must not consult SessionState's context mutex.
+func scanQueryContext(tx *TxContext, fallback context.Context) context.Context {
+	if ss := SessionStateFromTx(tx); ss != nil {
+		if ctx := ss.QueryContext(querySeqFromTx(tx)); ctx != nil {
+			return ctx
+		}
+	}
+	return fallback
+}
+
 func clusterScanSupported(tx *TxContext) bool {
 	if tx == nil {
 		return true
@@ -47,7 +58,7 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.uuid.String()}, Generation: shard.uuid}
 	// Residency is only a hint. Permission acquisition remains at GetRead;
 	// no backend bytes are read to decide whether execution should move.
-	acquireClusterRead(expected.Resource)
+	acquireClusterRead(scanQueryContext(tx, cluster.ctx), expected.Resource)
 	links := cluster.view.Load().links
 	// A warm local generation stays local. For a cold generation, ask existing
 	// peers for residency metadata only; never fetch the shard just to decide
@@ -66,7 +77,7 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 	}
 
 }
-func clusterSnapshotShard(expected remoteScanShard) (*storageShard, error) {
+func clusterSnapshotShard(ctx context.Context, expected remoteScanShard) (*storageShard, error) {
 	if !expected.Resource.valid() || expected.Resource.Shard == "" || expected.Generation == uuid.Nil || expected.Schema == 0 {
 		return nil, fmt.Errorf("invalid cluster shard identity")
 	}
@@ -77,6 +88,7 @@ func clusterSnapshotShard(expected remoteScanShard) (*storageShard, error) {
 	if db == nil {
 		return nil, fmt.Errorf("unknown shared database")
 	}
+	acquireClusterRead(ctx, mosiResource{Database: db.Name})
 	access := db.GetRead(nil)
 	defer access.Release()
 	table := db.GetTable(expected.Resource.Table)
@@ -96,7 +108,7 @@ func (cluster *nodeCluster) compute(session *scanRPCSession, ctx context.Context
 		if err := json.Unmarshal(data, &expected); err != nil {
 			return nil, err
 		}
-		shard, err := clusterSnapshotShard(expected)
+		shard, err := clusterSnapshotShard(ctx, expected)
 		if err != nil {
 			return nil, err
 		}
@@ -109,11 +121,11 @@ func (cluster *nodeCluster) compute(session *scanRPCSession, ctx context.Context
 	if task.ResultKind != "scalar" {
 		return nil, fmt.Errorf("automatic cluster placement currently supports scalar reductions")
 	}
-	shard, err := clusterSnapshotShard(task.Shard)
+	shard, err := clusterSnapshotShard(ctx, task.Shard)
 	if err != nil {
 		return nil, err
 	}
-	acquireClusterRead(task.Shard.Resource)
+	acquireClusterRead(ctx, task.Shard.Resource)
 	var access ReadAccess
 	rejected := false
 	func() {

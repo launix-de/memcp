@@ -1112,7 +1112,7 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 func (db *database) GetState() SharedState { return db.srState }
 func (db *database) GetRead(tx *TxContext) ReadAccess {
 	if r := activeReplication(db); r != nil && validReplicaDatabase(db.Name) {
-		r.obtain(mosiResource{Database: db.Name}, mosi.S, replicationUser(tx))
+		r.obtain(mosiResource{Database: db.Name}, mosi.S, replicationUser(tx), tx)
 	}
 	db.ensureLoaded()
 	return ReadAccess{}
@@ -2400,7 +2400,7 @@ func RenameTable(schema, oldname, newname string) {
 		if target := db.tables.Get(oldname); target != nil {
 			for _, shard := range target.ActiveShards() {
 				if shard != nil {
-					r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "")
+					r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", nil)
 				}
 			}
 		}

@@ -39,7 +39,7 @@ func TestReplicationRightsNeverWritePersistence(t *testing.T) {
 	t.Cleanup(func() { Basepath = old })
 	r := replicaRecoveryFixture()
 	resource := mosiResource{Database: "tenant"}
-	cell := r.obtain(resource, mosi.M, "")
+	cell := r.obtain(resource, mosi.M, "", nil)
 	if cell.ownstate.Phase() != mosi.M {
 		t.Fatal("local permission was not published")
 	}
@@ -92,7 +92,7 @@ func TestReplicationRecoveryNeedsLiveAuthority(t *testing.T) {
 	// Losing the modifier never makes the master's backend authoritative.
 	failure := func() (failure any) {
 		defer func() { failure = recover() }()
-		r.obtain(resource, mosi.S, "")
+		r.obtain(resource, mosi.S, "", nil)
 		return nil
 	}()
 	if failure != mosi.NetworkError {
@@ -155,7 +155,7 @@ func TestReplicationGrantedReadsIgnoreDirectoryLocks(t *testing.T) {
 	go func() {
 		defer workers.Done()
 		for i := 0; i < 10000; i++ {
-			r.obtain(resource, mosi.S, "")
+			r.obtain(resource, mosi.S, "", nil)
 		}
 		close(done)
 	}()
@@ -884,7 +884,7 @@ func TestReplicationOwnReadsIgnoreOutwardHandover(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		for range 10000 {
-			r.obtain(resource, mosi.S, "")
+			r.obtain(resource, mosi.S, "", nil)
 		}
 		close(done)
 	}()

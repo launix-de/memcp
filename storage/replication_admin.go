@@ -74,7 +74,7 @@ func (r *replicationManager) reclaimDatabase(name string) bool {
 	if r.master || !validReplicaDatabase(name) {
 		panic("database reclaim requires a replication slave and a user database")
 	}
-	schema := r.obtain(mosiResource{Database: name}, mosi.M, "")
+	schema := r.obtain(mosiResource{Database: name}, mosi.M, "", nil)
 	db := databases.Get(name)
 	if db == nil {
 		panic("missing reclaimed database")
@@ -87,7 +87,7 @@ func (r *replicationManager) reclaimDatabase(name string) bool {
 		}
 		for _, shard := range table.ActiveShards() {
 			if shard != nil {
-				r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "")
+				r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", nil)
 			}
 		}
 	}
