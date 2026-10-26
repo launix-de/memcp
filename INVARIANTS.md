@@ -25,6 +25,62 @@ These invariants apply especially to the `lib/queryplan-*.scm` modules loaded
 by `lib/queryplan.scm`, `lib/sql-parser.scm`, `lib/psql-parser.scm`, and physical
 scan/storage lowering code.
 
+## Cluster execution
+
+These rules describe the target architecture, not the implementation status.
+
+- All cluster nodes are equal peers. The initial contact node has no permanent
+  master role or special authority.
+- The cluster's purpose is to enable computations whose data exceed the RAM of
+  one machine. Its primary benefit is aggregate memory capacity, rather than
+  lower latency than local computation or reliance on swapping.
+- Shards of one table may reside on different nodes. Existing `scan*` operations
+  and INSERT route through the cluster when the required shard is not local.
+  Placement is transparent to Scheme programs: `scan_order`, for example,
+  returns the same result with its existing ordering and visibility semantics.
+  Every scan variant retains its contract; a separate special-purpose API alone
+  is not a complete cluster integration.
+- Filters and MapReducers, including their captured bindings, are transmitted
+  using the existing Scheme serializer and executed on the worker that reads
+  the shard. Workers return scalar or grouped partial results for combination.
+  Distributed execution uses the existing planner and storage operators.
+- Every shard access must be protected by `GetRead` or `GetWrite`. The optimistic
+  already-authorized path neither locks nor blocks. These access boundaries
+  determine whether the shard can be loaded locally for reading or mutation,
+  primarily according to available RAM. When local RAM is insufficient, the
+  acquisition raises an out-of-RAM panic; the caller catches it and decides
+  whether the operation can be delegated to another node with capacity.
+- Schema resources are identified by database name; shard resources by shard
+  UUID. A rebuild creates a new shard with a different UUID. Writes are forwarded
+  between the original shard and its rebuild successor while both remain live;
+  existing operations retain valid shard identities and visibility throughout.
+- Cluster nodes share the same persistent storage. Replication maintains a
+  replica in separate storage. Both features use the same MOSI infrastructure
+  and node protocol and can be combined on a node, including for different
+  databases. Cluster peers trust one another; replication slaves are clients
+  that must authenticate and whose access rights must be checked.
+- The existing transaction system supplies atomicity and read visibility across
+  nodes, including its distinct transaction publication modes. Remote execution
+  preserves the scan's `maxRecId` bound to exclude later inserts and retains
+  the required deletion and transaction-visibility checks. Mutations and later
+  computations, including cached aggregates, observe the same coherence rules
+  as local execution.
+- Only the peer holding O tracks the other peers holding S for that shard.
+  Nonlocal shards are represented by stubs, which may retain the URI of the
+  O/M owner. A peer need not track tables
+  it has not loaded; it may discover owners by broadcast when loading them.
+- Nodes may join and leave a running cluster. An orderly shutdown, including
+  that of the initial node, releases all held read and write rights and hands
+  over ownership responsibilities so the remaining cluster continues running.
+  Clients can reconnect to another node before shutdown, enabling uninterrupted
+  migration.
+- Failure of a worker holding no schema or shard ownership or permissions does
+  not prevent the remaining cluster from operating. If a failed worker holds
+  ownership or permissions needed for progress, the system waits for its return
+  or an explicit administrative decision to kick it; a timeout never grants
+  those rights to another node. A kicked node must discard its inconsistent
+  state before rejoining, even if its process was still alive.
+
 ## Parallel execution and publication
 
 MemCP must execute independent work in parallel, using as few locks as possible.
@@ -34,13 +90,13 @@ violations; fixing a race by adding locks to an inner hot path is not sufficient
 Existing protection must not be removed before its replacement provides the
 same ownership, visibility, lifetime, and durability guarantees.
 
-### Replication authority and backend generations
+### Replication authority and backend shards
 
 - `storage/mosi` owns the shared permission state machine independently of
   routing, SQL, storage and backend policy. Its immutable publications are read
   through accessors; request completion publishes errors before waking waiters.
   Engine adapters supply durable installation and directory coordination.
-- Database schema.json and each logical data shard have independent MOSI pairs.
+- Database schema.json and each data shard have independent MOSI pairs.
   `clusterstate` represents the node/domain's outward authority, including
   delegated descendants; `ownstate` alone authorizes local queries, loading,
   writes, rebuild and eviction. Outward M plus local IO is a valid delegation,
@@ -50,10 +106,10 @@ same ownership, visibility, lifetime, and durability guarantees.
   leaf slaves have matching stable rights, with ownstate carrying request and
   local active/closing writer substates. No second slot check, lock, CAS, or
   reader registration is added to granted local reads.
-  IS identifies a current backend-only generation; IO requires acquisition from
-  its remote owner. A backend-only authoritative generation must never be stale.
+  IS identifies a current backend-only shard; IO requires acquisition from
+  its remote owner. A backend-only authoritative shard must never be stale.
   A retained safety backup cannot establish IS or satisfy an IO access.
-  Repeated transfers of a completed immutable generation never reopen its
+  Repeated transfers of a completed shard backup never reopen its
   existing column objects for writing. An aborted resend must preserve the last
   complete backup. Retirement waits for inline import publication to stop before
   restoring that backup as authoritative.
@@ -71,8 +127,8 @@ same ownership, visibility, lifetime, and durability guarantees.
   A request sequence identifies one flight; completion suppresses re-execution,
   including replay after ownership changed. A completed read can still upgrade
   to M using that flight. ACKs and solicited transfer headers must match the
-  operation's peer, resource, epoch and (when known) generation. Inbound control
-  publication uses the existing resource acquisition mutex, outside local
+  operation's peer, resource, epoch and (when known) source shard UUID. Inbound
+  control publication uses the existing resource acquisition mutex, outside local
   read/write admission and without holding it during network sends. Old
   invalidations cannot revoke newer grants; old grants/imports cannot publish
   over newer authority. Import epochs are checked both before staging and at
@@ -81,8 +137,9 @@ same ownership, visibility, lifetime, and durability guarantees.
   handover establishes their data custodian. Offline owners are never reclaimed
   on a timer. Failed acquisition raises `Cluster network error`.
 - `system.replication_config` is an ordinary SAFE table. It stores only the
-  offline authentication cache, explicit retirement decisions and completed backup placement (resource plus physical generation
-  or schema content digest). It stores no permissions or slave registration.
+  offline authentication cache, explicit retirement decisions and completed
+  backup placement (shard UUID or schema content digest). It stores no permissions
+  or slave registration.
   Native persistence/WAL and backend semantics own these data and configuration
   changes. Entries are scoped by local installation UUID so shared database
   backends cannot merge different nodes' caches. UUID/secret stays in ordinary
@@ -90,9 +147,8 @@ same ownership, visibility, lifetime, and durability guarantees.
   A promoted safety copy becomes ordinary current data only after complete
   installation and foreign permission removal; placement metadata is then retired.
   An interrupted handover reported by its surviving source may recover the
-  master's complete ordinary generation and WAL. A peer schema transfer keeps
-  local physical UUID bindings for existing logical shards; schema generations
-  compare declarations/topology independently of those local bindings and
+  master's complete ordinary shard data and WAL. A peer schema transfer keeps
+  replica-local shard UUID bindings; schema snapshots compare declarations/topology independently of those local bindings and
   advisory statistics.
 - MR/OR/SR grant no access and coalesce requests in the state machine. A read
   request can upgrade to MR; an older read grant cannot release its write waiters.
@@ -112,14 +168,15 @@ same ownership, visibility, lifetime, and durability guarantees.
   transaction registry alongside this state machine. Native mutable containers,
   WAL, UNIQUE checks and visibility forwarding retain their existing separate
   synchronization responsibilities; they do not implement another MOSI admission.
-  Handover drains the engine's native modified-transaction generations, including
-  retained historical shards, and permits those transactions to finish their
+  Handover drains native transactions modifying the affected shards, including
+  retained original shards, and permits those transactions to finish their
   already admitted work. Read-only and idle transactions retain no MOSI gate.
   M active/closing remains readable under existing snapshots and TX visibility.
   Payload eviction uses a nonblocking claim of this same admission state; it
-  cannot detach a generation between a writer's permission check and payload use.
+  cannot detach a shard's payload between a writer's permission check and
+  payload use.
   IS restoration preserves a still-active eviction/handover closure.
-- A transfer captures its exact physical generation and immutable declarations
+- A transfer captures its exact source shard and immutable declarations
   before releasing source write admission. Streaming never reloads current shard
   topology or schema, and never holds a writer/DDL/lifecycle lock over network I/O.
   Outgoing snapshots register with GC under the persistence lifecycle until send
@@ -132,12 +189,12 @@ same ownership, visibility, lifetime, and durability guarantees.
   locks, registration, counters or per-row synchronization writes.
 - Ordered scan results retain their existing payload capability through merge
   and projection, not merely through candidate selection. Historical physical
-  IDs acquire a snapshot capability without rebinding to a current generation.
+  IDs acquire a snapshot capability without rebinding to a different shard.
   Ordered mutations acquire M before selecting rows and retain the write lease
-  through callback completion. If acquiring M replaces a generation whose IDs
+  through callback completion. If acquiring M replaces a shard whose IDs
   were already selected, abort for statement retry rather than reinterpret IDs.
 - Appending an INSERT writer lane changes the database shard directory and
-  requires schema M before native maintenance locks. Its private generation is
+  requires schema M before native maintenance locks. Its private new shard is
   protected by the existing import-publication mutex until durable topology
   publication; ordinary inserts into existing lanes retain shard-only ownership.
   Database reclamation uses normal MOSI acquisitions for schema and every active
@@ -151,10 +208,10 @@ nil repair after schema reload. Completion is published once under the existing
 table creation barrier; warm probes read atomics. The persisted `oninit` field
 retains its existing representation and contains no synchronization state.
 
-- A shard's main column storages contain fixed, read-only values for one
-  generation. Updates must not overwrite these values. Delta storage contains
+- A shard's main column storages contain fixed, read-only values. Updates must
+  not overwrite these values. Delta storage contains
   the insert list and deletion masks; transaction-local deletion/visibility
-  overlays remain separate from the shared main generation.
+  overlays remain separate from the shared main storage.
 - Delta writes must be thread-safe and lock-free. Reserve and initialize insert
   storage without exposing incomplete rows to readers; publication must make
   complete row contents available safely under concurrent writers. Delete-mask
@@ -168,11 +225,10 @@ retains its existing representation and contains no synchronization state.
   directory, lazy-load state, or decoded-value cache immutable. Protect those
   auxiliary structures through their own publication/ownership protocol.
   Reading an ordinary Go map concurrently with mutation remains forbidden.
-- Readers retain a valid main generation through use and access deltas and
+- Readers retain valid main storage through use and access deltas and
   deletion overlays according to transaction visibility. Column readers, indexes,
-  physical row IDs, and delta coordinates must belong to compatible
-  generations. An atomic pointer load alone is not a lifetime or consistency
-  proof. Retirement must wait for all relevant owners without making active
+  physical row IDs, and delta coordinates must refer to the same shard. An atomic
+  pointer load alone is not a lifetime or consistency proof. Retirement must wait for all relevant owners without making active
   queries wait for reclamation.
 - Operators that require a fixed input extent may capture the highest published
   record ID once and ignore later inserts. Reserved but unpublished insert slots
@@ -182,24 +238,24 @@ retains its existing representation and contains no synchronization state.
 ### Readers and rebuilds must not wait for writers
 
 - Readers must not be blocked by writers. They must be able to consume a valid
-  published generation with the visibility required by their transaction while
+  published shard with the visibility required by their transaction while
   writes proceed. This requirement does not weaken SQL isolation or permit
   uncommitted values to become visible.
 - Rebuilds must block neither reads nor writes. Compression, index construction,
-  persistence I/O, and other generation-building work run on privately owned
+  persistence I/O, and other shard-building work run on privately owned
   state, outside locks needed by active readers or writers. Publication must not
   turn this work into a stop-the-world phase.
-- During a rebuild, writes must be forwarded to both generations while both
-  remain live. The handover protocol must cover inserts, updates, deletes, and
+- During a rebuild, writes must be forwarded to the original and new shards
+  while both remain live. The handover protocol must cover inserts, updates, deletes, and
   commit/rollback visibility changes, including mutations concurrent with the
   capture of the rebuild input and final publication. Buffered forwarding during
   private construction is valid only if writes continue and the successor cannot
   be consumed until all required mutations have been incorporated. No mutation may
   be lost, applied twice logically, or resurrect a deleted row.
 - Reads remain valid throughout the handover. Publish a complete successor;
-  never expose partially initialized columns or mix generations to construct a
-  row. An aborted rebuild leaves the original generation usable. Retaining old
-  generations must also preserve the existing WAL and durable schema-publication
+  never expose partially initialized columns or mix shards to construct a
+  row. An aborted rebuild leaves the original shard usable. Retaining old
+  shards must also preserve the existing WAL and durable schema-publication
   contract; reclamation is not permission to delete committed data.
 - A bounded mutex critical section is not automatically nonblocking. If readers
   or writers wait for a rebuild's catch-up/publication lock, that remains a gap
@@ -331,7 +387,7 @@ define the current dispatch assignments and legacy exceptions.
   Performance work must not silently weaken the selected engine's guarantee.
 - Rebuild, publication, log replay and retirement must preserve committed data
   through restart and failure according to that contract. An incomplete
-  successor must not replace the last recoverable generation. Aborting a private
+  successor must not replace the last recoverable shard. Aborting a private
   file writer must not delete the published file.
 - Eviction releases resident representations, never persistent user data.
   Memory-engine data and unflushed deltas must not be evicted in a way that loses
@@ -733,7 +789,7 @@ selective prewarming, and lazy repair may change when work happens, never the
 query-visible result.
 
 `ShardMapReducer` distinguishes stored-row mutation from `$set:` compute-cache
-publication. A cache fill retains the selected physical generation and record
+publication. A cache fill retains the selected shard and record
 ID, including a record hidden after selection; it must not forward the cache
 slot to another row version or change row visibility. Its source readers retain
 their ordinary lifetime/access ownership, and `StorageComputeProxy.SetValue`
@@ -1161,7 +1217,7 @@ for their pre-residual candidate work. These are costing observations, not
 membership proofs. Count candidates at existing batch boundaries, independently
 of accepted output rows. Unknown shards retain full-input work. Restricted
 RecSets, LIMIT probes and other incomplete scans cannot train this table-wide
-quantity. Physical work is generation-local and is not restored from persisted
+quantity. Physical work is shard-local and is not restored from persisted
 result hints. Its latest observation replaces the previous work value: an
 autoindex becoming effective must not wait for the output-selectivity EMA.
 The central metadata reader returns both quantities without shard access;
@@ -1209,10 +1265,10 @@ The histogram is a weak workload-derived prior, not proof that a new word occurs
 It cannot cross columns, collations, or prefix/suffix/substring pattern classes.
 
 Publication uses immutable metadata records. Reads do not acquire an RWMutex or write
-LRU/access counters. A changed statistics generation retains compatible table
+LRU/access counters. A changed shard statistics snapshot retains compatible table
 aggregates as `historical_scan_feedback` with confidence 0.35. A static column
 semantics fingerprint rejects hints from incompatible schemas. Shard EMA state
-still belongs to one runtime generation; no retired shards are retained.
+still belongs to one shard; no retired shards are retained.
 
 The existing schema checkpoint optionally stores a versioned `filter_feedback`
 object with at most 64 table aggregates. Reads and scans never request schema
@@ -1225,7 +1281,7 @@ No learned state changes row visibility, shard binary formats, or query results.
 new optional feedback metadata is ordinary serializable Scheme data.
 
 Execution plans guard concrete structural table statistics separately from
-learned filter estimates. Neither generations nor statistics fingerprints may
+learned filter estimates. Neither shard replacements nor statistics fingerprints may
 invalidate a cached plan. Concrete table-input guards must be accompanied by
 guards for the bound filter metadata actually consumed by costing. Learning an unrelated predicate must not invalidate these plans.
 Session bindings must be passed explicitly through reorder and lowering; a
@@ -1251,7 +1307,7 @@ warmup, repetitions and A/B timing gate as SQL, with explicit result validation.
 
 ### Rebuild-collected numeric key frequencies
 
-Ordinary, noncomputed columns with at least 4096 main-generation rows may retain
+Ordinary, noncomputed columns with at least 4096 main-storage rows may retain
 at most 32 numeric heavy keys. A rebuild-local Misra-Gries collector has at most
 64 counters; its cancellation count bounds approximation error. Counters no
 larger than that error are excluded from the heavy keys, so unique late arrivals
@@ -1275,7 +1331,7 @@ and table metadata records. Retained summaries and their name arrays are
 charged to table metadata memory once. Reads neither lock nor access shards. Optional
 `key_frequencies` version 1 schema hints restore before database publication,
 without loading columns. Invalid versions/entries are ignored; memory/cache and
-hidden tables omit durable hints. No runtime generation, shard pointer, session
+hidden tables omit durable hints. No runtime shard identity, shard pointer, session
 binding, or executable code is serialized.
 
 Logical choices consume the existing bound-metadata guards: the bound rate and
@@ -1427,8 +1483,8 @@ durability or materialize arbitrary SELECT input to obtain a block size.
 
 ### Storage is opaque to Scheme cache and plan policy
 
-Table handles identify logical relations. Shard identities, topology generations,
-cache eviction generations, readiness probes and usage touches are not planner
+Table handles identify logical relations. Shard identities, topology changes,
+cache eviction events, readiness probes and usage touches are not planner
 inputs. Physical topology is visible through explicit `show` diagnostics only.
 `shardcolumn` / `partitiontable` remain declarative range-partitioning hints.
 Ordered plan selection must not depend on the current physical partition layout.
