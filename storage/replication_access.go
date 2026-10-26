@@ -154,7 +154,11 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 					defer cancel()
 					if err := r.coordinate(ctx, r.id, packet); err != nil {
 						fmt.Println("replication acquisition failed:", packet.Kind, packet.Resource.key(), err)
-						c.rights.Fail(packet.ID, err)
+						requested := mosi.S
+						if packet.Kind == "write" {
+							requested = mosi.M
+						}
+						c.rights.Fail(packet.ID, err, requested)
 					}
 				}()
 			} else {
@@ -169,7 +173,7 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 				}
 			}
 			if err != nil {
-				c.rights.Fail(publication.Flight().ID(), err)
+				c.rights.Fail(publication.Flight().ID(), err, mosi.IO)
 			}
 		}
 		var disconnected <-chan struct{}
@@ -177,7 +181,7 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 			if peer := r.peer(""); peer != nil {
 				disconnected = peer.done
 			} else {
-				c.rights.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError))
+				c.rights.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError), mosi.IO)
 			}
 		}
 		select {
@@ -186,10 +190,10 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 				panic(mosi.NetworkError)
 			}
 		case <-disconnected:
-			c.rights.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError))
+			c.rights.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError), mosi.IO)
 			panic(mosi.NetworkError)
 		case <-r.done:
-			c.rights.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError))
+			c.rights.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError), mosi.IO)
 			panic(mosi.NetworkError)
 		}
 	}

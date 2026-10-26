@@ -261,10 +261,16 @@ func (state *State) Grant(id string, phase Phase, install func() error) (bool, e
 	}
 }
 
-func (state *State) Fail(id string, err error) {
+// Fail completes one failed request. IO denotes connection/cancellation failure
+// for the whole flight. A read failure cannot cancel a stronger in-flight M;
+// the check participates in the same CAS as request completion and upgrades.
+func (state *State) Fail(id string, err error, requested Phase) {
 	for {
 		current := state.Snapshot()
 		if !current.phase.Requested() || current.flight.id != id || current.installing {
+			return
+		}
+		if requested != IO && requested != M && current.phase == MR {
 			return
 		}
 		restore := IO

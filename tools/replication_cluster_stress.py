@@ -400,6 +400,43 @@ def run_regressions(args, artifacts, journal):
             expect(waiting.result(timeout=args.timeout), 18, "handover after transaction commit")
         expect(s.number("SELECT value FROM items WHERE id=1000", "value"), 999, "late handover")
         s.sql("DELETE FROM items WHERE id IN (1000,1001)")
+        # Interrupt an actual ownership handover while its modifier still has
+        # an open transaction. Losing the requester must reopen admission;
+        # that transaction must finish locally, with both commit and rollback
+        # surviving reconstruction at the restarted master.
+        for outcome in ("COMMIT", "ROLLBACK"):
+            slave.reclaim()
+            session = uuid.uuid4().hex
+            s.sql("START ACID TRANSACTION", session=session)
+            s.sql("INSERT INTO items VALUES(1002,997)", session=session)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as threads:
+                waiting = threads.submit(m.number, "SELECT COUNT(*) AS n FROM items")
+                try:
+                    waiting.result(timeout=0.1)
+                except concurrent.futures.TimeoutError:
+                    pass
+                else:
+                    raise DrillFailure("interrupted handover crossed uncommitted rows")
+                master.kill()
+                try:
+                    waiting.result(timeout=args.timeout)
+                except (DrillFailure, OSError):
+                    pass
+                else:
+                    raise DrillFailure("killed requester unexpectedly completed its query")
+                s.sql("INSERT INTO items VALUES(1003,996)", session=session)
+                s.sql(outcome, session=session)
+            expected = 18 if outcome == "COMMIT" else 16
+            expect(s.number("SELECT COUNT(*) AS n FROM items"), expected,
+                   f"offline {outcome} after cancelled handover")
+            m = master.start()
+            eventually(master.connected, "interrupted handover did not reconnect")
+            expect(m.number("SELECT COUNT(*) AS n FROM items"), expected,
+                   f"reconstructed {outcome} after cancelled handover")
+            expect(m.number("SELECT COUNT(*) AS n FROM items WHERE id IN (1002,1003)"),
+                   2 if outcome == "COMMIT" else 0, f"{outcome} transaction visibility")
+            slave.reclaim()
+            s.sql("DELETE FROM items WHERE id IN (1002,1003)")
         Client(slave.port, args.timeout, password="wrong-password").reject("SELECT 1", status=401)
         expect(master.statuses()[0]["id"], identity, "dashboard identity")
         s.sql("SHUTDOWN")

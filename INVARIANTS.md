@@ -61,6 +61,15 @@ same ownership, visibility, lifetime, and durability guarantees.
   master reconstructs delegated resources from authenticated live reports.
   A new process incarnation resets its request-number domain; reconnecting the
   same incarnation does not discard suppression/upgrade marks.
+  A request sequence identifies one flight; completion suppresses re-execution,
+  including replay after ownership changed. A completed read can still upgrade
+  to M using that flight. ACKs and solicited transfer headers must match the
+  operation's peer, resource, epoch and (when known) generation. Inbound control
+  publication uses the existing resource acquisition mutex, outside local
+  read/write admission and without holding it during network sends. Old
+  invalidations cannot revoke newer grants; old grants/imports cannot publish
+  over newer authority. Import epochs are checked both before staging and at
+  final publication. These checks add no row/batch counters or persisted state.
   Unknown safety copies remain IO until live authority or a validated interrupted
   handover establishes their data custodian. Offline owners are never reclaimed
   on a timer. Failed acquisition raises `Cluster network error`.

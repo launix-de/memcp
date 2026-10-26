@@ -71,14 +71,20 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 			}()
 			if requestErr != nil {
 				fmt.Println("replication request failed:", copy.Kind, copy.Resource.key(), requestErr)
-				_ = peer.post(mosiPacket{Kind: "failure", ID: copy.ID, Resource: copy.Resource, Error: requestErr.Error()})
+				state := copy.State
+				if copy.Kind == "read" {
+					state = "S"
+				} else if copy.Kind == "write" {
+					state = "M"
+				}
+				_ = peer.post(mosiPacket{Kind: "failure", ID: copy.ID, Resource: copy.Resource, Epoch: copy.Epoch, Generation: copy.Generation, State: state, Error: requestErr.Error()})
 			}
 		}()
 		return nil
 	case "failure", "ack":
 		if value, exists := r.steps.Load(packet.ID); exists {
 			step := value.(*replicaStep)
-			if step.peer != source || step.resource != packet.Resource {
+			if !step.matches(source, *packet) {
 				return fmt.Errorf("unexpected acknowledgement")
 			}
 			var failure error
@@ -87,7 +93,14 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 			}
 			step.finish(failure)
 		} else if packet.Kind == "failure" {
-			r.resourceCell(packet.Resource).rights.Fail(packet.ID, fmt.Errorf(mosi.NetworkError))
+			rights := &r.resourceCell(packet.Resource).rights
+			// Read and write-upgrade workers share a flight. A late read failure
+			// cannot cancel the stronger request already sent for that flight.
+			requested := mosi.IO
+			if packet.State == "S" {
+				requested = mosi.S
+			}
+			rights.Fail(packet.ID, fmt.Errorf(mosi.NetworkError), requested)
 		}
 		return nil
 	case "grant":
@@ -99,7 +112,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 		if r.master {
 			if value, expected := r.steps.Load(packet.ID); expected {
 				step := value.(*replicaStep)
-				if step.peer != source || step.resource != packet.Resource {
+				if !step.matches(source, *packet) {
 					return fmt.Errorf("unexpected transfer source")
 				}
 			} else {
@@ -113,8 +126,16 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 					return err
 				}
 			}
-		} else if source != "" {
-			return fmt.Errorf("transfer from non-master")
+		} else {
+			if source != "" {
+				return fmt.Errorf("transfer from non-master")
+			}
+			r.mu.Lock()
+			epoch := r.directory.Records[packet.Resource.key()].Epoch
+			r.mu.Unlock()
+			if packet.Epoch < epoch {
+				return fmt.Errorf("stale transfer epoch")
+			}
 		}
 		key := source + "/" + packet.ID
 		if _, exists := r.imports.Load(key); exists {
@@ -157,10 +178,25 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 				return fmt.Errorf("stale transfer epoch")
 			}
 		}
-		if err := r.finishImport(source, transfer); err != nil {
-			return err
-		}
-		if err := r.saveBackup(packet.Resource, packet.Generation); err != nil {
+		if err := func() error {
+			if !r.master {
+				// The reader owns staged bytes; acquire serializes only their final
+				// publication with grant/revocation workers, never ordinary query reads.
+				cell := r.resourceCell(packet.Resource)
+				cell.acquire.Lock()
+				defer cell.acquire.Unlock()
+				r.mu.Lock()
+				epoch := r.directory.Records[packet.Resource.key()].Epoch
+				r.mu.Unlock()
+				if packet.Epoch < epoch {
+					return fmt.Errorf("stale transfer epoch")
+				}
+			}
+			if err := r.finishImport(source, transfer); err != nil {
+				return err
+			}
+			return r.saveBackup(packet.Resource, packet.Generation)
+		}(); err != nil {
 			return err
 		}
 		if r.master {
@@ -170,7 +206,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 			})
 		}
 		if !r.master {
-			return peer.post(mosiPacket{Kind: "ack", ID: packet.ID, Resource: packet.Resource})
+			return peer.post(mosiPacket{Kind: "ack", ID: packet.ID, Resource: packet.Resource, Epoch: packet.Epoch, Generation: packet.Generation})
 		}
 		if value, expected := r.steps.Load(packet.ID); expected {
 			value.(*replicaStep).finish(nil)
