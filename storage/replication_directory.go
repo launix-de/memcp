@@ -22,7 +22,7 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 	defer c.acquire.Unlock()
 	_, err := c.ownstate.Grant(packet.ID, mosi.ParsePhase(packet.State), func() error {
 		r.mu.Lock()
-		current := r.directory.Records[packet.Resource.key()]
+		current := r.directory.Records[r.recordKey(packet.Resource)]
 		r.mu.Unlock()
 		if packet.Epoch < current.Epoch {
 			return fmt.Errorf("stale grant epoch")
@@ -60,7 +60,7 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 		c.acquire.Lock()
 		defer c.acquire.Unlock()
 		r.mu.Lock()
-		epoch := r.directory.Records[packet.Resource.key()].Epoch
+		epoch := r.directory.Records[r.recordKey(packet.Resource)].Epoch
 		r.mu.Unlock()
 		if packet.Epoch > epoch {
 			return fmt.Errorf("future invalidation epoch")
@@ -124,7 +124,7 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 		}
 	}()
 	r.mu.Lock()
-	record := r.directory.Records[packet.Resource.key()]
+	record := r.directory.Records[r.recordKey(packet.Resource)]
 	r.mu.Unlock()
 	if record.Epoch != packet.Epoch {
 		return fmt.Errorf("stale recall")
@@ -177,6 +177,10 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 }
 
 func (r *replicationManager) coordinate(ctx context.Context, requester string, packet mosiPacket) error {
+	if r.cluster == nil && sharedClusterDatabase(packet.Resource.Database) {
+		return fmt.Errorf("replication of a cluster-owned database requires an enclosing domain handover")
+	}
+
 	if !r.master {
 		return fmt.Errorf("resource request to non-master")
 	}
@@ -205,11 +209,6 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		localShard = r.findShard(packet.Resource)
 	}
 	write := packet.Kind == "write" || packet.Kind == "begin"
-	if r.cluster != nil {
-		if err := r.cluster.recoverDirectory(ctx, packet.Resource); err != nil {
-			return err
-		}
-	}
 	stale := false
 	record := r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
 		if record.Owner == "" {
@@ -289,7 +288,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				return err
 			}
 			r.mu.Lock()
-			record.Generation = r.directory.Records[packet.Resource.key()].Generation
+			record.Generation = r.directory.Records[r.recordKey(packet.Resource)].Generation
 			r.mu.Unlock()
 		}
 	}
@@ -327,6 +326,9 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		if err := r.transmitResource(ctx, requester, mosiPacket{ID: uuid.NewString(), Resource: packet.Resource, Epoch: record.Epoch, Generation: record.Generation}); err != nil {
 			return err
 		}
+	}
+	if r.cluster != nil && record.Owner != r.id {
+		record.Readers = nil
 	}
 	record.State = "IO"
 	if record.Owner == r.id {
@@ -377,5 +379,10 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		return fmt.Errorf(mosi.NetworkError)
 	}
 	r.publishLocal(packet.Resource, mosi.ParsePhase(record.State))
-	return peer.post(mosiPacket{Kind: "grant", ID: packet.ID, Resource: packet.Resource, Epoch: record.Epoch, State: grantState, Generation: record.Generation, Owner: record.Owner, Readers: record.Readers})
+	return peer.post(mosiPacket{Kind: "grant", ID: packet.ID, Resource: packet.Resource, Epoch: record.Epoch, State: grantState, Generation: record.Generation, Owner: record.Owner, Readers: func() map[string]bool {
+		if r.cluster != nil {
+			return nil
+		}
+		return record.Readers
+	}()})
 }

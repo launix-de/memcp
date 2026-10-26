@@ -1011,13 +1011,25 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		PShards            []*storageShard
 		PDimensions        []shardDimension
 	}
+	triggers := t.Triggers
+	if t.schema != nil && sharedClusterDatabase(t.schema.Name) {
+		// Generated computation edges bind a node's private cache objects. The
+		// declarative columns/queries reconstruct them locally; another node must
+		// never replace its source table because these runtime edges differ.
+		triggers = nil
+		for _, trigger := range t.Triggers {
+			if trigger.cacheTarget == nil && trigger.Acquire == nil && !trigger.needsRegeneration {
+				triggers = append(triggers, trigger)
+			}
+		}
+	}
 	return json.Marshal(&persistedTable{
 		Name:               t.Name,
 		Columns:            columns,
 		DroppedColumns:     t.DroppedColumns,
 		Unique:             t.Unique,
 		Foreign:            t.Foreign,
-		Triggers:           t.Triggers,
+		Triggers:           triggers,
 		PersistencyMode:    t.PersistencyMode,
 		OnInit:             t.OnInit.Load(),
 		AutoIncrement:      autoIncrement,

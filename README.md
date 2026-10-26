@@ -449,12 +449,11 @@ the shared coherence core from the current master/slave topology; mutable
 multi-master coordination remains future work.
 
 
-### Shared snapshot cluster and automatic placement
+### Shared backend cluster and automatic placement
 
-The first cluster execution milestone supports unordered scalar reductions on
-**immutable, fully rebuilt numeric shards** in a shared backend. Give each node
-its own data/settings/system namespace, configure the same shared database
-backend, and use the same secret file (at least 32 random bytes):
+Cluster nodes share database backends while retaining separate local settings,
+system databases and node identities. Configure the same secret file (at least
+32 random bytes) and shared database names on every node:
 
 ```sh
 ./memcp --no-repl --api-port=4321 \
@@ -464,34 +463,53 @@ backend, and use the same secret file (at least 32 random bytes):
 ```
 
 Other nodes add `--cluster-join=http://node-a:4321/cluster` and advertise their
-own reachable address. The contact is only a seed: every participant retains
-the full peer roster and connects directly to discovered peers. The secret is
-read in Go, never sent in the challenge proof or included as a CLI value.
-Use HTTPS/WSS when the network needs transport integrity/confidentiality;
-challenge authentication does not encrypt plain WebSocket traffic.
+own reachable address. The contact is only a seed. The current full mesh supports
+up to ten nodes, identified by persisted `memcp://UUID` URIs; advertised transport
+addresses may change independently. Larger clusters will need neighbour sampling
+and URI routing through intermediate nodes. Authentication proves possession of
+the secret without transmitting it. Use HTTPS/WSS for encrypted transport.
 
-Ordinary SQL `SUM` now uses the existing shard-local scan pipeline. Before
-loading a shard, placement checks warm peers and the executing node's RAM
-budget; a typed acquisition panic delegates the reduction when appropriate.
-The worker returns one scalar, never rows/shard dumps. `cluster_status` exposes
-membership, executed/delegated counts and the tracked cache/admission budget.
-`MaxRamBytes` bounds tracked cache plus numeric operator reservations; it is
-not an RSS limit for the Go runtime, frontends or arbitrary user code.
+A fresh unjoined installation initializes ownership of its existing resources.
+For an existing installation, `--cluster-bootstrap` explicitly performs that
+initialization. Use it only for the first initialization, never to recover rights
+held by other nodes. Restart does not acquire rights from backend files or timeouts.
 
-The initial adapter mounts the named shared databases with S-only permissions.
-Durable writes/DDL, rebuild and GC on those mounts are disabled/deferred until
-cluster M handover is connected. Other namespaces retain normal behavior.
-Automatic placement currently supports stored integer/float/sequence formats,
-unfiltered scalar unordered CS-autocommit reductions; explicit transactions, grouped
-results, query-local/physical sources and unsupported encodings fail explicitly.
-This does not yet implement mutable multi-master databases or nested clusters.
+Each database schema and each shard has independent RAM-only MOSI permission.
+The O/M owner coordinates requests; only O tracks shared readers. Rebuilt shards
+receive new UUIDs while existing native snapshots keep their forwarding semantics.
+Shared-backend handovers exchange references through the same resource protocol
+used for replication. Local writes and DDL acquire M; subsequent reads invalidate
+and rebuild ordinary query caches as ownership changes. Shared historical-file GC
+is deferred until cluster-wide reference retirement is implemented.
 
-The Python process runner has a focused `--cluster-only` scenario, run by the
-**Cluster Stress test** CI job with normal and race-instrumented servers. Eight
-shards exceed each worker's 8 MiB tracked budget; a 1 MiB coordinator
-cannot load a shard locally. Three nodes calculate the exact SQL sum, exercise RAM and residency delegation, reject a wrong secret, release
-all reservations and continue after losing the seed. Shared generation/schema
-hashes must stay unchanged.
+Ordinary unordered SQL scalar reductions use the existing shard scan pipeline.
+Warm shards compute locally. Cold acquisitions either load locally or raise the
+existing typed delegation boundary, without reading a column header to estimate
+size. `ShardRamPercent` (settings and dashboard, default 50) limits cold admission
+using the cache manager's measured shard/index ledger. Warm pins and native delta
+writes retain their lifetime rules; this threshold is not a hard process RSS cap.
+It reserves the remaining tracked budget for computation and query caches.
+
+Tasks and control messages are fire-and-forget; the receiver routes results and
+serialized panics to the reducer's UUID return channel. Cancellation propagates to
+nested scans and remote descendants at shard scheduling boundaries, without checks
+inside item loops. `cluster_status` reports peer membership, placement counters
+and measured shard admission usage.
+
+Automatic remote execution currently supports scalar unordered CS-autocommit
+reductions. Remote mutation participants, all ordered/grouped/source-set scan
+contracts, graceful owner drain and same-database nested replication handovers
+remain unfinished. Unsupported remote operations fail explicitly. A node may
+serve ordinary replication slaves for separate databases. Needed rights held by
+an unreachable peer fail with `Cluster network error`; they are never reclaimed
+by timeout.
+
+The **Cluster Stress test** CI job runs the Python process runner's
+`--cluster-only` scenario with normal and race-instrumented servers. It uses 64
+shards exceeding one worker's full RAM budget, four nodes including a coordinator
+unable to load cold shards, alternating mutations with cached/uncached sums, cross-node DDL, unrelated
+replica tenants and a private database. It also checks authentication isolation
+and retained reads after owner loss, while unavailable write rights must fail.
 
 ### Remote shard reductions
 
@@ -539,8 +557,8 @@ retried after an error or ambiguous completion. Task/attempt identities are
 checked and replayed/expired task numbers are rejected per connection.
 
 Explicit `scan_remote` remains available independently of membership. Shared
-snapshot mounts use the automatic, budgeted path described above; mutable
-distributed writes and general query placement remain subsequent features.
+cluster databases use the automatic placement and MOSI path described above.
+Remote mutation participants and general query placement remain subsequent work.
 
 ### Storage failure notifications
 

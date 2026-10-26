@@ -246,7 +246,7 @@ func (r *replicationManager) firstDatabase(name string, session scm.Scmer) {
 		return
 	}
 	r.mu.Lock()
-	claimed := r.directory.Records[resource.key()].InitialClaimed
+	claimed := r.directory.Records[r.recordKey(resource)].InitialClaimed
 	r.mu.Unlock()
 	wanted := mosi.M
 	if claimed {
@@ -315,7 +315,7 @@ func (r *replicationManager) readShard(shard *storageShard, tx *TxContext) *stor
 		wanted := mosi.S
 		if !r.master && !r.resourceCell(mosiResource{Database: resource.Database}).initialized.Load() {
 			r.mu.Lock()
-			claimed := r.directory.Records[resource.key()].InitialClaimed
+			claimed := r.directory.Records[r.recordKey(resource)].InitialClaimed
 			r.mu.Unlock()
 			// A query may beat its bootstrap worker to this shard. Its first
 			// acquisition still belongs to initialization and must request M;
@@ -411,6 +411,7 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext)
 		continuation := c.ownstate.ClosingWrites() && c.transactionContinues(tx)
 		writer, wait := c.ownstate.TryWrite(owner, continuation)
 		if writer != nil {
+
 			return c, writer.Release
 		}
 		if wait != nil {
@@ -496,7 +497,7 @@ func (r *replicationManager) backupDatabase(name, user string) {
 			}
 			r.localRecord(resource, mosi.M, generation)
 			r.mu.Lock()
-			epoch := r.directory.Records[resource.key()].Epoch
+			epoch := r.directory.Records[r.recordKey(resource)].Epoch
 			r.mu.Unlock()
 			transfer, err := r.captureResource(resource, generation)
 			if err != nil {

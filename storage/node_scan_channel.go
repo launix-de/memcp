@@ -29,6 +29,7 @@ type scanDispatch struct {
 	Task    remoteScanTask `json:"task"`
 }
 type scanCompletion struct {
+	Data     json.RawMessage   `json:"data,omitempty"`
 	Return   string            `json:"return"`
 	Result   *remoteScanResult `json:"result,omitempty"`
 	Rejected bool              `json:"rejected,omitempty"`
@@ -164,6 +165,43 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 		}
 		s.tasks.cancelTask(id)
 		return nil, nil
+	case "node.control":
+		var request struct {
+			Return string          `json:"return"`
+			Method string          `json:"method"`
+			Data   json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(data, &request); err != nil {
+			return nil, err
+		}
+		if _, err := uuid.Parse(request.Return); err != nil {
+			return nil, err
+		}
+		completion := scanCompletion{Return: request.Return}
+		func() {
+			defer func() {
+				if failure := recover(); failure != nil {
+					completion.Panic = freezeScanPanic(failure)
+				}
+			}()
+			scope, err := s.tasks.begin(ctx, request.Return)
+			if err != nil {
+				panic(err)
+			}
+			defer s.tasks.finish(request.Return)
+			if request.Method == "node.control" || request.Method == "scan.task" || request.Method == "scan.result" || request.Method == "scan.cancel" {
+				panic("invalid nested control envelope")
+			}
+			value, err := s.handle(scope.ctx, request.Method, request.Data)
+			if err != nil {
+				panic(err)
+			}
+			completion.Data, err = json.Marshal(value)
+			if err != nil {
+				panic(err)
+			}
+		}()
+		return nil, postScanMessage(s.peer, "scan.result", completion)
 	case "scan.task":
 		var request scanDispatch
 		if err := json.Unmarshal(data, &request); err != nil {
@@ -184,13 +222,10 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 				panic(err)
 			}
 			defer s.tasks.finish(request.Return)
-			select {
-			case s.workers <- struct{}{}:
-				defer func() { <-s.workers }()
-			default:
-				completion.Rejected = true
-				return
-			}
+			// The bounded active-channel registry limits in-flight tasks. Do not
+			// retain a second per-peer compute semaphore across user callbacks:
+			// nested scans may need this peer to complete their parent shard.
+			// Native shard scheduling and cold RAM admission remain authoritative.
 			var value any
 			if request.Cluster {
 				if s.service.cluster == nil {
@@ -266,5 +301,39 @@ func (executor *peerScanExecutor) dispatch(task remoteScanTask) remoteScanResult
 			panic("missing scan result")
 		}
 		return *result.Result
+	}
+}
+
+// Control requests use the same fire-and-forget transport and UUID delivery
+// registry. Waiting belongs to the control operation's collector, never a held
+// send handle, native shard lock or long-lived per-call connection.
+func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, method string, input, output any) error {
+	id := uuid.NewString()
+	channel := &scanReturnChannel{peer, make(chan scanCompletion, 1)}
+	service.returns.Store(id, channel)
+	defer service.returns.Delete(id)
+	request := struct {
+		Return string          `json:"return"`
+		Method string          `json:"method"`
+		Data   json.RawMessage `json:"data"`
+	}{id, method, mustScanJSON(input)}
+	if err := postScanMessage(peer, "node.control", request); err != nil {
+		return err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = postScanMessage(peer, "scan.cancel", id) })
+	defer stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-peer.done:
+		return fmt.Errorf("Cluster network error")
+	case result := <-channel.result:
+		if result.Panic != nil {
+			return fmt.Errorf("%s", result.Panic.Message)
+		}
+		if output != nil {
+			return json.Unmarshal(result.Data, output)
+		}
+		return nil
 	}
 }

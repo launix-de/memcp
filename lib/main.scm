@@ -75,7 +75,8 @@ Other (serve ...) calls do not inherit this endpoint. */
 	(node_cluster_start node_cluster_secret_file
 		(arg "cluster-address" (concat "http://127.0.0.1:" (arg "api-port" "4321") "/cluster"))
 		(arg "cluster-join" "")
-		(arg "cluster-databases" ""))
+		(arg "cluster-databases" "")
+		(arg "cluster-bootstrap" false))
 	(if (not (equal? node_cluster_secret "")) (node_scan_start node_cluster_secret)))
 (define node_handler (node_protocol))
 (if (number? (simplify node_replication_address))

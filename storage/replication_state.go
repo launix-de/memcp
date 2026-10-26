@@ -46,12 +46,21 @@ type replicaDirectory struct {
 func (r *replicationManager) updateRecord(resource mosiResource, update func(*replicaRecord) bool) replicaRecord {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.cluster != nil {
+		if value, ok := r.cluster.states.Load(resource.key()); ok {
+			if current := value.(*replicaCell).resource.Load(); current != nil {
+				resource = *current
+			}
+		}
+	}
+
 	record := r.directory.Records[resource.key()]
 	if record.State == "" {
 		record.Resource, record.State = resource, "IO"
 	}
 	record.Readers, record.Requests = maps.Clone(record.Readers), maps.Clone(record.Requests)
 	if update(&record) {
+		record.Resource = resource
 		r.directory.Records[resource.key()] = record
 	}
 	return record
@@ -107,4 +116,22 @@ func (r *replicationManager) cell(name string) *replicaCell {
 		r.cellSnapshot.Store(&snapshot)
 	}
 	return c
+}
+
+func (r *replicationManager) recordKey(resource mosiResource) string {
+	if r.cluster != nil {
+		if value, ok := r.cluster.states.Load(resource.key()); ok {
+			if current := value.(*replicaCell).resource.Load(); current != nil {
+				return current.key()
+			}
+		}
+	}
+	return resource.key()
+}
+func (r *replicationManager) shardResource(shard *storageShard) mosiResource {
+	id := shard.logicalID().String()
+	if r.cluster != nil {
+		id = shard.uuid.String()
+	}
+	return mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: id}
 }

@@ -34,7 +34,7 @@ type shardScanTarget struct {
 type shardReadDelegation struct{ target *shardScanTarget }
 
 func (d shardReadDelegation) Error() string {
-	return "remote shard requires delegated scan execution"
+	return "shard requires delegated execution before payload acquisition"
 }
 
 // shardScanInvocation is borrowed query-local input, NOT a wire representation.
@@ -74,16 +74,18 @@ func (invocation shardScanInvocation) delegate(shard *storageShard, failure shar
 	}()
 	target := failure.target
 	validGeneration := target != nil && target.generation == shard.uuid
+	validResource := target != nil && target.resource.Shard == shard.logicalID().String()
 	if target != nil && target.origin == shard {
 		if cell := shard.coherence.Load(); cell != nil {
 			if current := cell.current.Load(); current != nil {
 				validGeneration = current.uuid == target.generation
+				validResource = current.uuid.String() == target.resource.Shard
 			}
 		}
 	}
 	if target == nil || (shard.scanTarget.Load() != target && target.origin != shard) || target.executor == nil || shard.t == nil ||
 		target.resource.Database != shard.t.schema.Name || target.resource.Table != shard.t.Name ||
-		target.resource.Shard != shard.logicalID().String() || !validGeneration || !target.resource.valid() {
+		!validResource || !validGeneration || !target.resource.valid() {
 		panic("invalid remote shard scan target")
 	}
 	if invocation.source != nil || invocation.stride != 0 || len(invocation.batchdata) != 0 {

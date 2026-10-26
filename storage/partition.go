@@ -447,7 +447,7 @@ func (s *storageShard) acquireReadForScan(currentTx *TxContext, mutation ...bool
 	}
 	if sharedClusterSource(s.t) && len(mutation) > 0 && mutation[0] {
 		write := s.GetWrite(currentTx)
-		return ReadAccess{shard: write.shard, releaseWrite: write.release, writer: true}
+		return ReadAccess{shard: write.shard, mutation: &write}
 	}
 	if sharedClusterSource(s.t) && s.scanTarget.Load() == nil {
 		cluster := activeNodeCluster()

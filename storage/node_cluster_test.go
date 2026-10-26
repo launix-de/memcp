@@ -51,13 +51,13 @@ func TestClusterRosterRequiresBoundIdentityAndRetainsSnapshot(t *testing.T) {
 	cluster := &nodeCluster{self: self, members: map[string]clusterMember{self.ID: self}, links: make(map[string]*clusterLink)}
 	cluster.publishLocked()
 	before := cluster.view.Load()
-	if err := cluster.remember("unproved-identity", clusterHello{1, remote, nil}); err == nil {
+	if err := cluster.remember("unproved-identity", clusterHello{scanWireVersion, remote, nil}); err == nil {
 		t.Fatal("RPC assertion replaced authenticated identity")
 	}
 	if cluster.view.Load() != before {
 		t.Fatal("rejected roster changed published view")
 	}
-	if err := cluster.remember(remote.ID, clusterHello{1, remote, []clusterMember{self}}); err != nil {
+	if err := cluster.remember(remote.ID, clusterHello{scanWireVersion, remote, []clusterMember{self}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(cluster.view.Load().members) != 2 || len(before.members) != 1 {
@@ -123,5 +123,47 @@ func TestClusterMountDoesNotSubscribeThroughReplication(t *testing.T) {
 	request := replicaRequest{Boot: uuid.NewString(), Resources: []replicaRecord{{Resource: mosiResource{Database: table.schema.Name}, State: "M", Owner: "slave", Epoch: 1}}}
 	if _, err := manager.recoverPeer(context.Background(), "slave", request, replicaAuth{Admin: true}); err == nil {
 		t.Fatal("replication recovery claimed a shared snapshot namespace")
+	}
+}
+
+func TestClusterControlDoesNotConsumeComputeSlots(t *testing.T) {
+	session := newScanRPCSession()
+	session.service = &nodeScanService{cluster: &nodeCluster{}}
+	for i := 0; i < cap(session.workers); i++ {
+		session.workers <- struct{}{}
+	}
+	// Invalid input must reach the control handler even while every compute
+	// slot is occupied. A busy reducer cannot prevent owner discovery.
+	_, err := session.handle(context.Background(), "cluster.report", []byte(`{"database":"unmounted"}`))
+	if err == nil || err.Error() != "invalid cluster report" {
+		t.Fatalf("control message was blocked by compute admission: %v", err)
+	}
+	if len(session.workers) != cap(session.workers) {
+		t.Fatal("control path borrowed a compute slot")
+	}
+}
+
+func TestClusterRebuildUUIDAliasesShareAuthority(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}}
+	cluster.initializeManager()
+	r := cluster.manager
+	old := mosiResource{Database: "alias_db", Table: "items", Shard: uuid.NewString()}
+	cell := r.resourceCell(old)
+	r.updateRecord(old, func(record *replicaRecord) bool {
+		record.Owner, record.State, record.Epoch = r.id, "M", 7
+		return true
+	})
+	next := &storageShard{uuid: uuid.New()}
+	cluster.aliasShard(old, next)
+	current := mosiResource{Database: old.Database, Table: old.Table, Shard: next.uuid.String()}
+	if r.resourceCell(current) != cell || r.resourceCell(old) != cell {
+		t.Fatal("rebuild created independently writable permission cells")
+	}
+	// Repeated publication can happen while translating an old native handle.
+	// It must not erase the canonical owner record or create another directory.
+	cluster.aliasShard(old, next)
+	r.updateRecord(old, func(record *replicaRecord) bool { record.Generation = next.uuid.String(); return true })
+	if len(r.directory.Records) != 1 || r.directory.Records[current.key()].Epoch != 7 || r.recordKey(old) != current.key() {
+		t.Fatal("UUID forwarding lost canonical authority")
 	}
 }

@@ -265,6 +265,9 @@ func (p *mosiPeer) read() {
 				}
 			}()
 			if m.ID == 0 {
+				if reply.Error != "" {
+					p.close()
+				}
 				return
 			} // fire-and-forget messages complete via their registered channel
 			if err := p.send(reply); err != nil {

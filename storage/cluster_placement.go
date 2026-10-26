@@ -16,15 +16,10 @@ import "context"
 import "encoding/json"
 import "github.com/google/uuid"
 
-type clusterCapacityRejection struct {
-	Version   uint64
-	Permanent bool
-}
+type clusterCapacityRejection struct{}
 type clusterReduceReply struct {
-	Version   uint64            `json:"version"`
-	Permanent bool              `json:"permanent"`
-	Rejected  bool              `json:"rejected"`
-	Result    *remoteScanResult `json:"result,omitempty"`
+	Rejected bool              `json:"rejected"`
+	Result   *remoteScanResult `json:"result,omitempty"`
 }
 type clusterShardHint struct {
 	Warm bool `json:"warm"`
@@ -40,22 +35,19 @@ func clusterScanSupported(tx *TxContext) bool {
 	return tx.Mode == TxCursorStability && tx.autoCommit
 }
 func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext, origins ...*storageShard) {
-	if !clusterScanSupported(tx) {
-		panic("cluster scans require cursor-stability autocommit")
-	}
-	// Already resident means compute here. Do not query peers, read storage
-	// headers, or write any shared accounting for this decision.
-	if shard.state() != COLD {
+	// Existing local snapshots retain all native transaction modes. Only a
+	// genuinely remote task needs a supported remote visibility contract.
+	if shard.state() != COLD || !clusterScanSupported(tx) {
 		return
 	}
 	origin := shard
 	if len(origins) > 0 {
 		origin = origins[0]
 	}
-	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.logicalID().String()}, Generation: shard.uuid}
-	// Permission precedes even bounded backend-header I/O. The shared mount
-	// supplies S only; residency and membership never fabricate a stronger grant.
-	acquireClusterSnapshot(expected.Resource)
+	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.uuid.String()}, Generation: shard.uuid}
+	// Residency is only a hint. Permission acquisition remains at GetRead;
+	// no backend bytes are read to decide whether execution should move.
+	acquireClusterRead(expected.Resource)
 	links := cluster.view.Load().links
 	// A warm local generation stays local. For a cold generation, ask existing
 	// peers for residency metadata only; never fetch the shard just to decide
@@ -64,7 +56,7 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 		for _, link := range links {
 			ctx, cancel := context.WithTimeout(cluster.ctx, 2*time.Second)
 			var hint clusterShardHint
-			err := link.peer.call(ctx, "cluster.hint", expected, &hint)
+			err := cluster.service.control(ctx, link.peer, "cluster.hint", expected, &hint)
 			cancel()
 			if err == nil && hint.Warm {
 				cluster.locality.Add(1)
@@ -72,11 +64,7 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 			}
 		}
 	}
-	if GlobalCache.canLoadClusterShard() {
-		return
-	}
-	cluster.capacity.Add(1)
-	panic(shardReadDelegation{&shardScanTarget{resource: expected.Resource, generation: shard.uuid, executor: &clusterScanExecutor{cluster: cluster, expected: expected}, origin: origin}})
+
 }
 func clusterSnapshotShard(expected remoteScanShard) (*storageShard, error) {
 	if !expected.Resource.valid() || expected.Resource.Shard == "" || expected.Generation == uuid.Nil || expected.Schema == 0 {
@@ -96,7 +84,7 @@ func clusterSnapshotShard(expected remoteScanShard) (*storageShard, error) {
 		return nil, fmt.Errorf("cluster schema changed")
 	}
 	for _, shard := range table.activeTopology().shards {
-		if shard != nil && shard.logicalID().String() == expected.Resource.Shard && shard.uuid == expected.Generation {
+		if shard != nil && shard.uuid.String() == expected.Resource.Shard && shard.uuid == expected.Generation {
 			return shard, nil
 		}
 	}
@@ -125,11 +113,24 @@ func (cluster *nodeCluster) compute(session *scanRPCSession, ctx context.Context
 	if err != nil {
 		return nil, err
 	}
-	acquireClusterSnapshot(task.Shard.Resource)
-	if shard.state() == COLD && !GlobalCache.canLoadClusterShard() {
+	acquireClusterRead(task.Shard.Resource)
+	var access ReadAccess
+	rejected := false
+	func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				if _, ok := failure.(shardReadDelegation); ok {
+					rejected = true
+				} else {
+					panic(failure)
+				}
+			}
+		}()
+		access = shard.GetRead(nil)
+	}()
+	if rejected {
 		return clusterReduceReply{Rejected: true}, nil
 	}
-	access := shard.GetRead(nil)
 	defer access.Release()
 	shard = access.shard
 	// Pin the native generation, then borrow its existing published extent.
@@ -202,4 +203,12 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, gen
 		}
 	}
 	panic("cluster has insufficient shard RAM capacity")
+}
+
+// The native acquisition boundary raises the same typed panic before loading.
+// Only an outer operator/reducer may translate it into a delegated task.
+func (cluster *nodeCluster) shardRAMUnavailable(shard, origin *storageShard) shardReadDelegation {
+	cluster.capacity.Add(1)
+	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.uuid.String()}, Generation: shard.uuid}
+	return shardReadDelegation{&shardScanTarget{resource: expected.Resource, generation: shard.uuid, origin: origin, executor: &clusterScanExecutor{cluster: cluster, expected: expected}}}
 }

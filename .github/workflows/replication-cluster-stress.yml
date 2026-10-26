@@ -105,7 +105,7 @@ jobs:
         run: >-
           go test -race -tags=nophp ./storage ./scm
           -run '^Test(Cluster|RemoteScan|ScanDelegation|ProcedureWire)' -count=1
-      - name: Run three-node SQL sum above one node RAM budget
+      - name: Check four-node placement, mutable MOSI and tenant isolation
         run: >-
           python3 -u tools/replication_cluster_stress.py
           --binary "$RUNNER_TEMP/memcp-cluster"

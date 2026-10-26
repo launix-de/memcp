@@ -987,6 +987,7 @@ func (s *storageShard) GetRead(currentTx *TxContext) ReadAccess {
 // Physical query-local IDs retain their original immutable generation. Rights
 // acquisition may install a successor, but must never reinterpret those IDs.
 func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
+	origin := s
 	if target := s.scanTarget.Load(); target != nil {
 		panic(shardReadDelegation{target})
 	}
@@ -1002,6 +1003,9 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 			s.releaseCacheRead()
 		}
 	}()
+	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard() {
+		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
+	}
 	s.ensureLoaded()
 	// Ensure main_count is initialized by loading at least one column
 	s.ensureMainCount(false, currentTx)
@@ -1013,6 +1017,7 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 	return ReadAccess{shard: s}
 }
 func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
+	origin := s
 	if s.scanTarget.Load() != nil {
 		panic("remote shard writes require a transaction participant protocol")
 	}
@@ -1031,6 +1036,9 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 				s = current
 			}
 		}
+	}
+	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard() {
+		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
 	}
 	s.ensureLoaded()
 	s.setState(WRITE)

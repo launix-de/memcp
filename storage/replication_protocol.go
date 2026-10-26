@@ -117,7 +117,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 				}
 			} else {
 				r.mu.Lock()
-				record := r.directory.Records[packet.Resource.key()]
+				record := r.directory.Records[r.recordKey(packet.Resource)]
 				r.mu.Unlock()
 				if record.Owner != source || record.Epoch != packet.Epoch {
 					return fmt.Errorf("backup from non-owner")
@@ -131,7 +131,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 				return fmt.Errorf("transfer from non-master")
 			}
 			r.mu.Lock()
-			epoch := r.directory.Records[packet.Resource.key()].Epoch
+			epoch := r.directory.Records[r.recordKey(packet.Resource)].Epoch
 			r.mu.Unlock()
 			if packet.Epoch < epoch {
 				return fmt.Errorf("stale transfer epoch")
@@ -172,7 +172,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 		defer transfer.abort()
 		if r.master {
 			r.mu.Lock()
-			record := r.directory.Records[packet.Resource.key()]
+			record := r.directory.Records[r.recordKey(packet.Resource)]
 			r.mu.Unlock()
 			if record.Owner != source || record.Epoch != packet.Epoch {
 				return fmt.Errorf("stale transfer epoch")
@@ -186,7 +186,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 				cell.acquire.Lock()
 				defer cell.acquire.Unlock()
 				r.mu.Lock()
-				epoch := r.directory.Records[packet.Resource.key()].Epoch
+				epoch := r.directory.Records[r.recordKey(packet.Resource)].Epoch
 				r.mu.Unlock()
 				if packet.Epoch < epoch {
 					return fmt.Errorf("stale transfer epoch")

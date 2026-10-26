@@ -484,8 +484,15 @@ func (cm *CacheManager) runEvictionChecks(additionalSize int64) {
 		return
 	}
 	// Tier 1: persisted budget (shards + indexes only)
-	if cm.persistedBudget > 0 {
-		cm.evict(cm.persistedMemory(), cm.persistedBudget, additionalSize, isPersistedType)
+	persistedBudget := cm.persistedBudget
+	if sharedClusterMounts.Load() != nil {
+		limit := cm.memoryBudget * int64(cm.shardPercent) / 100
+		if persistedBudget <= 0 || limit < persistedBudget {
+			persistedBudget = limit
+		}
+	}
+	if persistedBudget > 0 {
+		cm.evict(cm.persistedMemory(), persistedBudget, additionalSize, isPersistedType)
 	}
 
 	// Tier 2+3: total budget merged with system-pressure budget — single evict pass.

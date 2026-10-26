@@ -15,11 +15,9 @@ import "strings"
 import "sync/atomic"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// The first cluster execution milestone mounts explicitly named immutable
-// generations on shared storage. Every participant has S; none can grant M.
-// This is not a substitute directory/lock protocol for live cluster writers.
-// Write handover and mutable schema/GC publication will use the same MOSI core
-// once connected; until then fail before modifying a shared namespace.
+// Explicit cluster databases share their backend namespace. MOSI owns their
+// schema/shard access; these names select the topology, not read-only mounts.
+// The map is startup-owned and immutable after atomic publication.
 var sharedClusterMounts atomic.Pointer[map[string]bool]
 
 func PrepareNodeCluster(args []string) error {
@@ -68,7 +66,7 @@ func sharedClusterSource(table *table) bool {
 
 // Every schema/shard now acquires actual network MOSI permission. The
 // immutable mount adapter has no authority to fabricate S from a backend file.
-func acquireClusterSnapshot(resource mosiResource) *replicaCell {
+func acquireClusterRead(resource mosiResource) *replicaCell {
 	cluster := activeNodeCluster()
 	if cluster == nil || !cluster.databases[resource.Database] {
 		panic(mosi.NetworkError)

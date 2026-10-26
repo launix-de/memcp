@@ -20,7 +20,7 @@ import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
-const scanWireVersion = 1
+const scanWireVersion = 2
 
 type shardScanHorizon struct {
 	Main  uint32 `json:"main"`
@@ -97,13 +97,14 @@ func (s *scanRPCSession) handle(ctx context.Context, method string, data json.Ra
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	// Membership control must not be rejected just because all compute slots
-	// are busy; overload is not evidence that an authenticated node disappeared.
-	if method == "scan.task" || method == "scan.result" || method == "scan.cancel" {
+	// Control traffic (membership, owner discovery and residency hints) must
+	// not consume compute slots. Saturated shard execution is neither evidence
+	// of a dead owner nor a reason to reject the protocol needed to finish it.
+	if method == "node.control" || method == "scan.task" || method == "scan.result" || method == "scan.cancel" {
 		<-s.peerReady
 		return s.channelMessage(ctx, method, data)
 	}
-	if method == "cluster.hello" {
+	if strings.HasPrefix(method, "cluster.") && method != "cluster.reduce" {
 		if s.service == nil || s.service.cluster == nil {
 			return nil, fmt.Errorf("cluster membership is not enabled")
 		}
@@ -267,6 +268,10 @@ func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScan
 // are rejected before execution. Local functional reducers and explicit errors
 // are allowed; this does not claim to sandbox mutually trusted cluster code.
 func validateRemoteScanReadOnly(value scm.Scmer) error {
+	if remoteMutationColumn(value) {
+		return fmt.Errorf("remote callback contains a mutation column")
+	}
+
 	value = value.WithoutSourceInfo()
 	if value.IsProc() {
 		return validateRemoteScanReadOnly(value.Proc().Body)
@@ -285,7 +290,7 @@ func validateRemoteScanReadOnly(value scm.Scmer) error {
 		if declaration.Name == "quote" {
 			return nil
 		}
-		if declaration.Type.HasSideEffects && declaration.Name != "error" {
+		if declaration.Type.HasSideEffects && declaration.Name != "error" && declaration.Name != "scan" && declaration.Name != "scan_exists" && declaration.Name != "scan_order" && declaration.Name != "scan_remote" {
 			return fmt.Errorf("remote scan callback has side effects: %s", declaration.Name)
 		}
 		if declaration.Name == "eval" || declaration.Name == "scheme" {
@@ -332,7 +337,7 @@ func withRemoteScanShard(expected remoteScanShard, execute func(*storageShard) e
 		topology := tbl.activeTopology()
 		var selected *storageShard
 		for _, shard := range topology.shards {
-			if shard != nil && shard.logicalID().String() == expected.Resource.Shard {
+			if shard != nil && (shard.logicalID().String() == expected.Resource.Shard || sharedClusterDatabase(expected.Resource.Database) && shard.uuid.String() == expected.Resource.Shard) {
 				selected = shard
 				break
 			}
@@ -355,7 +360,7 @@ func withRemoteScanShard(expected remoteScanShard, execute func(*storageShard) e
 			lease := selected.GetRead(nil)
 			defer lease.Release()
 			shard := lease.shard
-			if shard.uuid != expected.Generation || shard.logicalID().String() != expected.Resource.Shard {
+			if shard.uuid != expected.Generation || shard.logicalID().String() != expected.Resource.Shard && !(sharedClusterDatabase(expected.Resource.Database) && shard.uuid.String() == expected.Resource.Shard) {
 				return fmt.Errorf("remote scan generation changed")
 			}
 			horizon := shard.captureScanHorizon()
@@ -506,7 +511,7 @@ func remoteScan(a ...scm.Scmer) scm.Scmer {
 	}
 	defer service.forget(peer)
 	var shards []remoteScanShard
-	if err := peer.call(ctx, "scan.describe", remoteScanDescribe{scanWireVersion, a[2].String(), a[3].String()}, &shards); err != nil {
+	if err := service.control(ctx, peer, "scan.describe", remoteScanDescribe{scanWireVersion, a[2].String(), a[3].String()}, &shards); err != nil {
 		panic(err)
 	}
 	kind := "scalar"
@@ -554,4 +559,19 @@ func remoteScan(a ...scm.Scmer) scm.Scmer {
 		}
 	}
 	return acc
+}
+
+func remoteMutationColumn(value scm.Scmer) bool {
+	value = value.WithoutSourceInfo()
+	if value.IsString() {
+		return value.String() == "$update" || strings.HasPrefix(value.String(), "$increment:")
+	}
+	if value.IsSlice() {
+		for _, item := range value.Slice() {
+			if remoteMutationColumn(item) {
+				return true
+			}
+		}
+	}
+	return false
 }

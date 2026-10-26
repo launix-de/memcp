@@ -26,6 +26,7 @@ import "strings"
 import "reflect"
 import "sync/atomic"
 import "encoding/json"
+import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -134,6 +135,17 @@ func (db *database) transactionLogKey() string {
 func (db *database) initializeTransactionLog() {
 	db.transactionOnce.Do(func() {
 		committed := make(map[string]uint64)
+		if sharedClusterDatabase(db.Name) {
+			// A standalone database may enter the cluster with a valid native
+			// WAL. Preserve its existing commit authority without rewriting it.
+			_, legacy, handle := db.persistence.ReplayLog(transactionLogName)
+			for entry := range legacy {
+				if commit, ok := entry.(LogEntryCommit); ok && commit.txID != "" {
+					committed[commit.txID] = 0
+				}
+			}
+			handle.Close()
+		}
 		_, entries, logfile := db.persistence.ReplayLog(db.transactionLogKey())
 		for entry := range entries {
 			commit, ok := entry.(LogEntryCommit)
@@ -195,6 +207,13 @@ func (db *database) transactionCompactionSnapshot() (uint64, bool) {
 }
 
 func (db *database) compactTransactionLog(cutoff uint64) {
+	// A shared generation may still replay this installation's committed WAL
+	// on another node. Retain native commit authority until distributed WAL
+	// retirement proves that no historical generation needs these entries.
+	if sharedClusterDatabase(db.Name) {
+		return
+	}
+
 	db.initializeTransactionLog()
 	db.transactionMu.Lock()
 	defer db.transactionMu.Unlock()
@@ -1281,6 +1300,18 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 			}()
 			if t.isEphemeralQueryTable() && !includeEphemeral {
 				return
+			}
+			if sharedClusterSource(t) {
+				// Background maintenance must not collect distributed data or
+				// rewrite a table only partly held here. Explicit MOSI handover
+				// still rebuilds its individual target through prepareResource.
+				r := activeReplication(db)
+				for _, shard := range t.activeTopology().shards {
+					if shard != nil && r.shardCell(shard).ownstate.Phase() != mosi.M {
+						incomplete.Store(true)
+						return
+					}
+				}
 			}
 			if !t.maintenanceMu.TryLock() {
 				incomplete.Store(true)
@@ -2524,4 +2555,34 @@ func (t *table) evictShardChildren(freedByType *[numEvictableTypes]int64) bool {
 		}
 	}
 	return true
+}
+
+func (db *database) importClusterCommits(owner string) error {
+	if !strings.HasPrefix(owner, "memcp://") {
+		return fmt.Errorf("invalid commit owner URI")
+	}
+	id := strings.TrimPrefix(owner, "memcp://")
+	if _, err := uuid.Parse(id); err != nil {
+		return err
+	}
+	_, entries, handle := db.persistence.ReplayLog(transactionLogName + "." + id)
+	commits := make([]string, 0)
+	for entry := range entries {
+		commit, ok := entry.(LogEntryCommit)
+		if !ok || commit.txID == "" {
+			handle.Close()
+			return fmt.Errorf("invalid native commit log")
+		}
+		commits = append(commits, commit.txID)
+	}
+	handle.Close()
+	db.initializeTransactionLog()
+	db.transactionMu.Lock()
+	for _, txID := range commits {
+		if _, exists := db.committedTx[txID]; !exists {
+			db.committedTx[txID] = db.transactionGen
+		}
+	}
+	db.transactionMu.Unlock()
+	return nil
 }

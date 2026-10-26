@@ -12,104 +12,15 @@ package storage
 
 import "fmt"
 import "time"
-import "hash/fnv"
 import "context"
 import "encoding/json"
-import "github.com/google/uuid"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// A database's directory location is pinned in RAM after agreement with every
-// known participant. It is a routing choice, not database-X: schema and every
-// logical shard retain independent MOSI cells/requests. New peers discover an
-// existing home; joining never rehashes live rights. A missing witness/home
-// fails closed rather than authorizing a second directory on a timeout.
-// This small-mesh agreement will later travel over URI-addressed neighbour hops.
-type clusterHomeRequest struct{ Database, Home string }
-
-func (cluster *nodeCluster) home(ctx context.Context, name string) (string, error) {
-	if value, ok := cluster.homes.Load(name); ok {
-		return value.(string), nil
-	}
-	c := cluster.manager.resourceCell(mosiResource{Database: name})
-	c.bootstrap.Lock()
-	defer c.bootstrap.Unlock()
-	if value, ok := cluster.homes.Load(name); ok {
-		return value.(string), nil
-	}
-	view := cluster.view.Load()
-	if cluster.seed != "" && len(view.members) == 1 {
-		return "", fmt.Errorf(mosi.NetworkError)
-	}
-	if len(view.links) != len(view.members)-1 {
-		return "", fmt.Errorf(mosi.NetworkError)
-	}
-	candidate := ""
-	for _, link := range view.links {
-		var answer string
-		if err := link.peer.call(ctx, "cluster.home", clusterHomeRequest{Database: name}, &answer); err != nil {
-			return "", err
-		}
-		if answer != "" {
-			if candidate != "" && candidate != answer {
-				return "", fmt.Errorf("conflicting cluster directory witnesses")
-			}
-			candidate = answer
-		}
-	}
-	if candidate == "" {
-		// Rendezvous placement distributes independent database directories. It is
-		// consulted only for a previously unseen DB, never to revoke an offline owner.
-		var best uint64
-		for _, member := range view.members {
-			hash := fnv.New64a()
-			_, _ = hash.Write([]byte(name + "\x00" + member.ID))
-			score := hash.Sum64()
-			if candidate == "" || score > best {
-				candidate, best = member.ID, score
-			}
-		}
-	}
-	for _, link := range view.links {
-		var answer string
-		if err := link.peer.call(ctx, "cluster.home", clusterHomeRequest{name, candidate}, &answer); err != nil {
-			return "", err
-		}
-		if answer != candidate {
-			return "", fmt.Errorf("conflicting cluster directory witnesses")
-		}
-	}
-	actual, loaded := cluster.homes.LoadOrStore(name, candidate)
-	if loaded && actual.(string) != candidate {
-		return "", fmt.Errorf("conflicting cluster directory witnesses")
-	}
-	return candidate, nil
-}
-func (cluster *nodeCluster) homeMessage(request clusterHomeRequest) (string, error) {
-	if !cluster.databases[request.Database] {
-		return "", fmt.Errorf("unknown cluster database")
-	}
-	if request.Home == "" {
-		if value, ok := cluster.homes.Load(request.Database); ok {
-			return value.(string), nil
-		}
-		return "", nil
-	}
-	if validateClusterURI(request.Home) != nil {
-		return "", fmt.Errorf("invalid directory URI")
-	}
-	known := false
-	for _, member := range cluster.view.Load().members {
-		if member.ID == request.Home {
-			known = true
-			break
-		}
-	}
-	if !known {
-		return "", fmt.Errorf("unknown directory URI")
-	}
-	actual, _ := cluster.homes.LoadOrStore(request.Database, request.Home)
-	return actual.(string), nil
-}
+// Owner routing, not a permanent database directory: only an O/M holder
+// coordinates its shard and keeps the S-reader set. Other nodes retain a URI
+// hint only for resources they actually touched. A stale hint forwards a request
+// to the new owner; discovery broadcasts only when no hint exists. Small meshes
+// route directly; From/To URIs preserve the contract for future neighbour hops.
 func (cluster *nodeCluster) peer(id string) *mosiPeer {
 	for _, link := range cluster.view.Load().links {
 		if link.member.ID == id {
@@ -117,6 +28,104 @@ func (cluster *nodeCluster) peer(id string) *mosiPeer {
 		}
 	}
 	return nil
+}
+func (cluster *nodeCluster) bootstrapCell(resource mosiResource) {
+	if _, ok := cluster.bootstrapResources[resource.key()]; !ok {
+		return
+	}
+	c := cluster.manager.resourceCell(resource)
+	if c.ownstate.Initialized() {
+		return
+	}
+	c.acquire.Lock()
+	defer c.acquire.Unlock()
+	if c.ownstate.Initialized() {
+		return
+	}
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Resource, record.Owner, record.State, record.Epoch = resource, cluster.self.ID, "M", 1
+		record.Readers = map[string]bool{}
+		return true
+	})
+	c.clusterstate.Establish(mosi.M)
+	c.ownstate.Establish(mosi.M)
+}
+func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (string, error) {
+	r := cluster.manager
+	cluster.bootstrapCell(resource)
+	own := cluster.report(resource)
+	phase := mosi.ParsePhase(own.State)
+	if phase == mosi.M || phase == mosi.O {
+		return r.id, nil
+	}
+	if own.Owner != "" && own.Owner != r.id {
+		return own.Owner, nil
+	}
+	view := cluster.view.Load()
+	if cluster.seed != "" && len(view.members) == 1 {
+		return "", fmt.Errorf(mosi.NetworkError)
+	}
+	owner := ""
+	var epoch uint64
+	authoritative := false
+	reports := map[string]replicaRecord{r.id: own}
+	for _, link := range view.links {
+		var answer replicaRecord
+		if err := cluster.service.control(ctx, link.peer, "cluster.report", resource, &answer); err != nil {
+			return "", err
+		}
+		reports[link.member.ID] = answer
+		actual := answer.State == "M" || answer.State == "O"
+		if actual {
+			if authoritative && owner != link.member.ID {
+				return "", fmt.Errorf("conflicting cluster owners")
+			}
+			owner, epoch, authoritative = link.member.ID, answer.Epoch, true
+		} else if !authoritative && answer.Owner != "" && answer.Epoch >= epoch {
+			owner, epoch = answer.Owner, answer.Epoch
+		}
+	}
+	if owner == "" {
+		return "", fmt.Errorf(mosi.NetworkError)
+	}
+	if owner == r.id && !authoritative {
+		// Recover a restarted owner only from a complete live roster. An unreachable
+		// permission holder never disappears because of a timeout or membership hint.
+		if len(view.links) != len(view.members)-1 {
+			return "", fmt.Errorf(mosi.NetworkError)
+		}
+		readers := map[string]bool{}
+		for id, record := range reports {
+			if record.Handoff != "" {
+				return "", fmt.Errorf("interrupted owner handover")
+			}
+			if record.Epoch > epoch && record.Owner != "" && record.Owner != r.id {
+				return "", fmt.Errorf("newer foreign ownership")
+			}
+			if record.State == "S" {
+				readers[id] = true
+			}
+		}
+		state := mosi.M
+		if len(readers) > 0 {
+			state = mosi.O
+		}
+		r.updateRecord(resource, func(record *replicaRecord) bool {
+			record.Resource, record.Owner, record.State, record.Epoch = resource, r.id, state.String(), max(epoch, 1)
+			record.Readers = readers
+			return true
+		})
+		c := r.resourceCell(resource)
+		c.clusterstate.Establish(state)
+		c.ownstate.Establish(state)
+	} else {
+		r.updateRecord(resource, func(record *replicaRecord) bool {
+			record.Resource, record.Owner, record.Epoch = resource, owner, epoch
+			record.Readers = nil
+			return true
+		})
+	}
+	return owner, nil
 }
 func (cluster *nodeCluster) obtain(resource mosiResource, wanted mosi.Phase) *replicaCell {
 	r := cluster.manager
@@ -126,8 +135,9 @@ func (cluster *nodeCluster) obtain(resource mosiResource, wanted mosi.Phase) *re
 	}
 	ctx, cancel := context.WithTimeout(cluster.ctx, 30*time.Minute)
 	defer cancel()
-	home, err := cluster.home(ctx, resource.Database)
+	owner, err := cluster.locate(ctx, resource)
 	if err != nil {
+		fmt.Println("cluster owner lookup failed:", resource.key(), err)
 		panic(mosi.NetworkError)
 	}
 	for {
@@ -136,18 +146,18 @@ func (cluster *nodeCluster) obtain(resource mosiResource, wanted mosi.Phase) *re
 			return c
 		}
 		if action == mosi.Send || action == mosi.Upgrade {
-			packet := mosiPacket{Kind: "read", Resource: resource, ID: publication.Flight().ID(), Sequence: r.requestSequence(publication.Flight())}
+			packet := mosiPacket{Kind: "read", Resource: resource, From: r.id, To: owner, ID: publication.Flight().ID(), Sequence: r.requestSequence(publication.Flight())}
 			if publication.Phase() == mosi.MR {
 				packet.Kind = "write"
 			}
-			if home == r.id {
+			if owner == r.id {
 				go func() {
 					if failure := r.coordinate(ctx, r.id, packet); failure != nil {
 						c.ownstate.Fail(packet.ID, failure, wanted)
 					}
 				}()
 			} else {
-				peer := cluster.peer(home)
+				peer := cluster.peer(owner)
 				if peer == nil {
 					err = fmt.Errorf(mosi.NetworkError)
 				} else {
@@ -159,8 +169,8 @@ func (cluster *nodeCluster) obtain(resource mosiResource, wanted mosi.Phase) *re
 			}
 		}
 		var disconnected <-chan struct{}
-		if home != r.id {
-			if peer := cluster.peer(home); peer != nil {
+		if owner != r.id {
+			if peer := cluster.peer(owner); peer != nil {
 				disconnected = peer.done
 			} else {
 				c.ownstate.Fail(publication.Flight().ID(), fmt.Errorf(mosi.NetworkError), wanted)
@@ -169,6 +179,7 @@ func (cluster *nodeCluster) obtain(resource mosiResource, wanted mosi.Phase) *re
 		select {
 		case <-publication.Flight().Done():
 			if publication.Flight().Err() != nil {
+				fmt.Println("cluster acquisition failed:", resource.key(), publication.Flight().Err())
 				panic(mosi.NetworkError)
 			}
 		case <-ctx.Done():
@@ -181,14 +192,14 @@ func (cluster *nodeCluster) obtain(resource mosiResource, wanted mosi.Phase) *re
 	}
 }
 
-// Directory recovery asks live participants for their published/retained rights.
-// It neither restores MOSI from files nor promotes an unavailable owner. A
-// partial handover is deliberately refused until its surviving participants
-// can complete recovery; current backend bytes alone prove no permission.
 func (cluster *nodeCluster) report(resource mosiResource) replicaRecord {
+	cluster.bootstrapCell(resource)
+	if _, known := cluster.states.Load(resource.key()); !known {
+		return replicaRecord{Resource: resource, State: "IO"}
+	}
 	r := cluster.manager
 	r.mu.Lock()
-	record := r.directory.Records[resource.key()]
+	record := r.directory.Records[r.recordKey(resource)]
 	r.mu.Unlock()
 	c := r.resourceCell(resource)
 	publication := c.ownstate.Snapshot()
@@ -203,137 +214,82 @@ func (cluster *nodeCluster) report(resource mosiResource) replicaRecord {
 	record.Resource = resource
 	return record
 }
-func (cluster *nodeCluster) recoverDirectory(ctx context.Context, resource mosiResource) error {
-	r := cluster.manager
-	r.mu.Lock()
-	known := r.directory.Records[resource.key()].Owner != ""
-	r.mu.Unlock()
-	if known {
-		return nil
-	}
-	owner := ""
-	generation := ""
-	var epoch uint64
-	readers := map[string]bool{}
-	reports := map[string]replicaRecord{r.id: cluster.report(resource)}
-	view := cluster.view.Load()
-	if len(view.links) != len(view.members)-1 {
-		return fmt.Errorf(mosi.NetworkError)
-	}
-	for _, link := range view.links {
-		var record replicaRecord
-		if err := link.peer.call(ctx, "cluster.report", resource, &record); err != nil {
-			return err
-		}
-		reports[link.member.ID] = record
-	}
-	for id, record := range reports {
-		if record.Handoff != "" {
-			return fmt.Errorf("cluster handover recovery is incomplete")
-		}
-		if record.State == "M" || record.State == "O" {
-			if owner != "" && owner != id {
-				return fmt.Errorf("conflicting cluster owners")
-			}
-			owner, generation = id, record.Generation
-		}
-		if record.State == "S" {
-			readers[id] = true
-		}
-		epoch = max(epoch, record.Epoch)
-	}
-	if owner == "" {
-		// A remembered remote custodian must not disappear merely because its link
-		// is down or its current publication is IO during an interrupted transfer.
-		for _, record := range reports {
-			if record.Owner != "" {
-				return fmt.Errorf("cluster owner cannot yet be recovered")
-			}
-		}
-		owner = r.id
-	}
-	r.updateRecord(resource, func(record *replicaRecord) bool {
-		record.Resource, record.Owner, record.Epoch, record.Generation = resource, owner, max(epoch, 1), generation
-		record.Readers = readers
-		record.State = "IO"
-		if owner == r.id {
-			record.State = "M"
-		} else if readers[r.id] {
-			record.State = "S"
-		}
-		return true
-	})
-	return nil
-}
-func (cluster *nodeCluster) receive(source string, packet *mosiPacket) error {
-	r := cluster.manager
+
+func (cluster *nodeCluster) receive(source string, packet *mosiPacket, connection *mosiPeer) error {
 	if !cluster.databases[packet.Resource.Database] {
 		return fmt.Errorf("resource outside cluster domain")
 	}
-	home, ok := cluster.homes.Load(packet.Resource.Database)
-	if !ok {
-		return fmt.Errorf("unknown cluster directory")
+	if packet.From != "" {
+		source = packet.From
 	}
+	if packet.To != "" && packet.To != cluster.self.ID {
+		peer := cluster.peer(packet.To)
+		if peer == nil {
+			return fmt.Errorf(mosi.NetworkError)
+		}
+		return peer.post(*packet)
+	}
+	r := cluster.manager
 	switch packet.Kind {
 	case "reference":
 		return cluster.installReference(source, *packet)
-	case "declare":
-		if home.(string) != r.id {
-			return fmt.Errorf("declaration at wrong directory")
-		}
-		c := r.resourceCell(packet.Resource)
-		c.directory.Lock()
-		defer c.directory.Unlock()
-		r.mu.Lock()
-		schema := r.directory.Records[mosiResource{Database: packet.Resource.Database}.key()]
-		r.mu.Unlock()
-		if schema.Owner != source || len(schema.Readers) != 0 {
-			return fmt.Errorf("new shard requires schema M")
-		}
-		if _, err := uuid.Parse(packet.Generation); err != nil {
-			return err
-		}
-		r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
-			if record.Owner != "" {
-				return false
-			}
-			record.Resource, record.Owner, record.State, record.Epoch, record.Generation = packet.Resource, source, "IO", 1, packet.Generation
-			record.Readers = map[string]bool{}
-			return true
-		})
-		c.clusterstate.Establish(mosi.M)
-		return r.peer(source).post(mosiPacket{Kind: "ack", Resource: packet.Resource, ID: packet.ID, Generation: packet.Generation})
 	case "read", "write":
-		if home.(string) != r.id {
-			return fmt.Errorf("request at wrong directory")
-		}
-	case "recall", "invalidate", "grant":
-		if source != home.(string) {
-			return fmt.Errorf("authority message from wrong directory")
-		}
+		copy := *packet
+		connection.workers.Add(1)
+		go func() {
+			defer connection.workers.Done()
+			ctx, cancel := mosiPacketContext(connection)
+			defer cancel()
+			var err error
+			func() {
+				defer func() {
+					if failure := recover(); failure != nil {
+						err = fmt.Errorf("%v", failure)
+					}
+				}()
+				owner, lookupErr := cluster.locate(ctx, copy.Resource)
+				if lookupErr != nil {
+					err = lookupErr
+					return
+				}
+				if owner == r.id {
+					err = r.coordinate(ctx, source, copy)
+					return
+				}
+				peer := cluster.peer(owner)
+				if peer == nil {
+					err = fmt.Errorf(mosi.NetworkError)
+					return
+				}
+				copy.From, copy.To = source, owner
+				err = peer.post(copy)
+			}()
+			if err != nil {
+				fmt.Println("cluster request failed:", copy.Kind, copy.Resource.key(), err)
+				state := "S"
+				if copy.Kind == "write" {
+					state = "M"
+				}
+				if peer := cluster.peer(source); peer != nil {
+					_ = peer.post(mosiPacket{Kind: "failure", ID: copy.ID, Resource: copy.Resource, State: state, Error: err.Error()})
+				}
+			}
+		}()
+		return nil
 	}
 	return r.receivePacket(source, packet)
 }
 func (cluster *nodeCluster) declareShard(shard *storageShard, local bool) *replicaCell {
 	r := cluster.manager
-	resource := mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.logicalID().String()}
+	resource := mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.uuid.String()}
 	c := r.resourceCell(resource)
 	c.current.CompareAndSwap(nil, shard)
 	shard.coherence.CompareAndSwap(nil, c)
 	if !local || c.ownstate.Initialized() {
 		return c
 	}
-	ctx, cancel := context.WithTimeout(cluster.ctx, 30*time.Second)
-	defer cancel()
-	home, err := cluster.home(ctx, resource.Database)
-	if err != nil {
-		panic(err)
-	}
-	if home != r.id {
-		if err := r.step(ctx, home, mosiPacket{Kind: "declare", ID: uuid.NewString(), Resource: resource, Generation: shard.uuid.String()}); err != nil {
-			panic(err)
-		}
-	}
+	// New shards are created under schema M, and immediately belong to their
+	// creator. There is no registration at a permanent seed/directory server.
 	r.updateRecord(resource, func(record *replicaRecord) bool {
 		record.Resource, record.Owner, record.State, record.Epoch, record.Generation = resource, r.id, "M", 1, shard.uuid.String()
 		record.Readers = map[string]bool{}
@@ -345,14 +301,19 @@ func (cluster *nodeCluster) declareShard(shard *storageShard, local bool) *repli
 }
 func (cluster *nodeCluster) installReference(source string, packet mosiPacket) error {
 	r := cluster.manager
-	home, _ := cluster.homes.Load(packet.Resource.Database)
-	if source != home && r.id != home {
-		return fmt.Errorf("reference outside directory handover")
+	c := r.resourceCell(packet.Resource)
+	if packet.Epoch < cluster.report(packet.Resource).Epoch {
+		return fmt.Errorf("stale shared reference")
 	}
-	if r.id == home && source != r.id {
-		value, exists := r.steps.Load(packet.ID)
-		if !exists || !value.(*replicaStep).matches(source, packet) {
-			return fmt.Errorf("unsolicited owner reference")
+	if !c.ownstate.Phase().Requested() {
+		// An O holder may publish a rebuilt generation to its known S readers
+		// without a new read request. Keep their existing permission and install
+		// only an update from the recorded owner at this exact authority epoch.
+		r.mu.Lock()
+		record := r.directory.Records[r.recordKey(packet.Resource)]
+		r.mu.Unlock()
+		if c.ownstate.Phase() != mosi.S || record.Owner != source || record.Epoch != packet.Epoch {
+			return fmt.Errorf("unsolicited shared reference for %s in %s", packet.Resource.key(), c.ownstate.Phase())
 		}
 	}
 	db := GetDatabase(packet.Resource.Database)
@@ -363,25 +324,63 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 		data := db.persistence.ReadSchema()
 		generation, err := replicaSchemaGeneration(data)
 		if err != nil || generation != packet.Generation {
-			return fmt.Errorf("shared schema generation changed")
+			return fmt.Errorf("shared schema changed")
 		}
 		if err := r.installSchema(source, db.Name, db.persistence, data); err != nil {
 			return err
 		}
 	} else {
+		if err := db.importClusterCommits(source); err != nil {
+			return err
+		}
 		if err := r.finishImport(source, &replicaImport{header: packet, engine: db.persistence}); err != nil {
 			return err
 		}
 	}
 	r.updateRecord(packet.Resource, func(record *replicaRecord) bool { record.Generation = packet.Generation; return true })
-	if value, exists := r.steps.Load(packet.ID); exists {
-		value.(*replicaStep).finish(nil)
-	}
 	peer := r.peer(source)
 	if peer == nil {
 		return fmt.Errorf(mosi.NetworkError)
 	}
 	return peer.post(mosiPacket{Kind: "ack", ID: packet.ID, Resource: packet.Resource, Epoch: packet.Epoch, Generation: packet.Generation})
+}
+
+// Bootstrap is explicit initialization of a fresh unjoined installation, never
+// recovery of a restarted node. Snapshot only the resources present at startup;
+// new shards created later by another owner cannot be fabricated from filenames.
+func (cluster *nodeCluster) prepareBootstrap(fresh bool) error {
+	cluster.bootstrapResources = make(map[string]mosiResource)
+	if !fresh || cluster.seed != "" {
+		return nil
+	}
+	for name := range cluster.databases {
+		db := GetDatabase(name)
+		if db == nil {
+			continue
+		}
+		schema := mosiResource{Database: name}
+		cluster.bootstrapResources[schema.key()] = schema
+		var snapshot database
+		data := db.persistence.ReadSchema()
+		if len(data) == 0 {
+			continue
+		}
+		if err := json.Unmarshal(data, &snapshot); err != nil {
+			return err
+		}
+		for _, table := range snapshot.tables.GetAll() {
+			if table.isEphemeralQueryTable() {
+				continue
+			}
+			for _, shard := range table.ActiveShards() {
+				if shard != nil {
+					resource := mosiResource{Database: name, Table: table.Name, Shard: shard.uuid.String()}
+					cluster.bootstrapResources[resource.key()] = resource
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // Shared schema construction consumes exactly the publisher's captured JSON.
@@ -399,8 +398,30 @@ func (cluster *nodeCluster) initializeManager() {
 	cluster.manager = r
 }
 
-func decodeClusterHome(data json.RawMessage) (clusterHomeRequest, error) {
-	var request clusterHomeRequest
-	err := json.Unmarshal(data, &request)
-	return request, err
+// A rebuild publishes a new shard UUID. Both native shard objects retain the
+// same local permission cell while mutation forwarding is live; old UUIDs are
+// routing aliases for in-flight operations, never independent writer grants.
+func (cluster *nodeCluster) aliasShard(resource mosiResource, shard *storageShard) {
+	r := cluster.manager
+	c := r.resourceCell(resource)
+	next := mosiResource{Database: resource.Database, Table: resource.Table, Shard: shard.uuid.String()}
+	if current := c.resource.Load(); current != nil && current.Shard == next.Shard {
+		cluster.states.Store(next.key(), c)
+		return
+	}
+	if next.Shard == resource.Shard {
+		return
+	}
+	oldKey := r.recordKey(resource)
+	r.mu.Lock()
+	record := r.directory.Records[oldKey]
+	record.Resource = next
+	r.directory.Records[next.key()] = record
+	delete(r.directory.Records, oldKey)
+	// Canonical identity and its directory entry publish under the existing
+	// directory owner. A concurrent old-handle update must resolve the new key
+	// after acquiring mu, rather than resurrecting a stale directory entry.
+	cluster.states.Store(next.key(), c)
+	c.resource.Store(&next)
+	r.mu.Unlock()
 }
