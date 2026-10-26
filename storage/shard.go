@@ -1074,7 +1074,7 @@ func (s *storageShard) ensureLoaded() {
 // Queries acquire no additional reader registration for this coordination.
 func (s *storageShard) claimEviction() (*mosi.Handover, bool) {
 	if cell := s.coherence.Load(); cell != nil && cell.current.Load() == s {
-		handover := cell.rights.TryHandover(cell.writesDrained)
+		handover := cell.ownstate.TryHandover(cell.writesDrained)
 		return handover, handover != nil
 	}
 	return nil, true
@@ -1123,7 +1123,7 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	}
 	s.setState(COLD)
 	if cell := s.coherence.Load(); cell != nil && s.t != nil && s.t.PersistencyMode != Cache && cell.current.Load() == s {
-		cell.rights.BackendOnly()
+		cell.ownstate.BackendOnly()
 	}
 	s.mu.Unlock()
 	return true

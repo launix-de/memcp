@@ -31,7 +31,10 @@ import "github.com/launix-de/memcp/storage/mosi"
 // nil for ordinary instances. Directory updates are serialized per resource;
 // complete data installation precedes ownership publication. Only write transactions
 // use MOSI local writer admission; reads use ordinary snapshots. Each database schema and
-// each data shard have independent MOSI slots; storage backends are unchanged.
+// each data shard have independent outward/local MOSI pairs; storage backends
+// are unchanged. The current master flag selects the root/leaf replication
+// adapter, not query permission. Cluster membership/routing will supply outer
+// authority separately; engine admission must continue to use only ownstate.
 var replication atomic.Pointer[replicationManager]
 var replicationStarting atomic.Bool
 

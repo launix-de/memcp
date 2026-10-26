@@ -54,6 +54,16 @@ def eventually(check, context: str, timeout: float = 15):
         time.sleep(0.05)
 
 
+def assert_authority(node, table, outer, own):
+    # Sample the runtime slots through diagnostics, never infer permissions
+    # from data files. The root's outer M must survive delegation to its slave.
+    resource = node.record(table)["resource"]
+    key = resource["database"] + "/" + resource["shard"]
+    state = node.snapshot()["authority"][key]
+    expect((state["clusterstate"], state["ownstate"]), (outer, own),
+           f"{node.name}: outward/local authority for {table}")
+
+
 class Client(HttpClient):
     def __init__(self, port: int, timeout: float, user="root", password=PASSWORD, database=DATABASE):
         super().__init__(port, timeout)
@@ -289,6 +299,8 @@ def run_regressions(args, artifacts, journal):
         expect(eventually(first_mysql_login, "first MySQL login/transfer did not become ready"),
                "1", "first MySQL login/transfer")
         expect(s.number("SELECT COUNT(*) AS n FROM items"), 1, "initial HTTP transfer")
+        assert_authority(master, "items", "M", "IO")
+        assert_authority(slave, "items", "M", "M")
         identity = slave.snapshot()["id"]
         if not identity:
             raise DrillFailure("slave identity was not persisted")
@@ -361,6 +373,8 @@ def run_regressions(args, artifacts, journal):
         s.sql("UPDATE items SET value=value WHERE id=1")
         m.sql("SELECT COUNT(*) AS n FROM items")
         expect((master.record("items")["state"], slave.record("items")["state"]), ("S", "O"), "shared read")
+        assert_authority(master, "items", "M", "S")
+        assert_authority(slave, "items", "O", "O")
         epoch = master.record("items")["epoch"]
         m.sql("EXPLAIN SELECT COUNT(*) AS n FROM items")
         master.kill()
@@ -380,6 +394,8 @@ def run_regressions(args, artifacts, journal):
         for _ in range(2):
             m.sql("UPDATE items SET value=value+1 WHERE id=1")
             expect((master.record("items")["state"], slave.record("items")["state"]), ("M", "IO"), "write invalidation")
+            assert_authority(master, "items", "M", "M")
+            assert_authority(slave, "items", "IO", "IO")
             s.sql("SELECT COUNT(*) AS n FROM items")
             expect((master.record("items")["state"], slave.record("items")["state"]), ("O", "S"), "reverse sharing")
         s.sql("UPDATE items SET value=value-2 WHERE id=1")
@@ -407,6 +423,8 @@ def run_regressions(args, artifacts, journal):
         # surviving reconstruction at the restarted master.
         for outcome in ("COMMIT", "ROLLBACK"):
             slave.reclaim()
+            assert_authority(master, "items", "M", "IO")
+            assert_authority(slave, "items", "M", "M")
             session = uuid.uuid4().hex
             s.sql("START ACID TRANSACTION", session=session)
             s.sql("INSERT INTO items VALUES(1002,997)", session=session)

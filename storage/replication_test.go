@@ -113,9 +113,9 @@ func TestReplicationOrderedMutationRequiresWritePermission(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "torderedrights", 3)
 			r := &replicationManager{cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
-			r.resourceCell(mosiResource{Database: tbl.schema.Name}).rights.Initialize(mosi.M)
+			r.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
 			shard := tbl.ActiveShards()[0]
-			r.shardCell(shard).rights.Initialize(mosi.S)
+			r.shardCell(shard).ownstate.Initialize(mosi.S)
 			previous := replication.Swap(r)
 			defer replication.Store(previous)
 			called := false
@@ -158,10 +158,10 @@ func TestReplicationOrderedMutationDrainsNativeTransactionBeforeHandover(t *test
 		t.Run(fmt.Sprint(mode), func(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "torderedtxrights", 3)
 			r := &replicationManager{cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
-			r.resourceCell(mosiResource{Database: tbl.schema.Name}).rights.Initialize(mosi.M)
+			r.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
 			shard := tbl.ActiveShards()[0]
 			cell := r.shardCell(shard)
-			cell.rights.Initialize(mosi.M)
+			cell.ownstate.Initialize(mosi.M)
 			previous := replication.Swap(r)
 			defer replication.Store(previous)
 			tx := NewTxContext(mode)
@@ -171,7 +171,7 @@ func TestReplicationOrderedMutationDrainsNativeTransactionBeforeHandover(t *test
 			tbl.scan_order(tx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueCondition(),
 				[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 1,
 				[]string{"$update"}, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-					if handover := cell.rights.TryHandover(cell.writesDrained); handover != nil {
+					if handover := cell.ownstate.TryHandover(cell.writesDrained); handover != nil {
 						handover.Release()
 						t.Error("ownership handover was admitted during the mutation callback")
 					}
@@ -181,7 +181,7 @@ func TestReplicationOrderedMutationDrainsNativeTransactionBeforeHandover(t *test
 			if tx.IsVisible(shard, 0) {
 				t.Fatal("transaction did not delete the first row")
 			}
-			if handover := cell.rights.TryHandover(cell.writesDrained); handover != nil {
+			if handover := cell.ownstate.TryHandover(cell.writesDrained); handover != nil {
 				handover.Release()
 				t.Fatal("native transaction did not defer ownership handover")
 			}
@@ -190,7 +190,7 @@ func TestReplicationOrderedMutationDrainsNativeTransactionBeforeHandover(t *test
 			if shard.deletions.Count() != 0 {
 				t.Fatal("rollback did not restore the ordered deletion")
 			}
-			handover := cell.rights.TryHandover(cell.writesDrained)
+			handover := cell.ownstate.TryHandover(cell.writesDrained)
 			if handover == nil {
 				t.Fatal("completed transaction retained write admission")
 			}
@@ -212,7 +212,7 @@ func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 		t.Fatal("fixture did not produce a successor")
 	}
 	cell.current.Store(replacement)
-	cell.rights.Initialize(mosi.IO)
+	cell.ownstate.Initialize(mosi.IO)
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
 	_, order := integerOrder(false)
@@ -220,14 +220,14 @@ func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 		[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 3,
 		[]string{"id"}, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return scm.NewInt(args[0].Int() + args[1].Int()) }),
 		scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil())
-	if got.Int() != 6 || cell.rights.Phase() != mosi.IO {
-		t.Fatalf("historical sum = %v, current rights = %v", got, cell.rights.Phase())
+	if got.Int() != 6 || cell.ownstate.Phase() != mosi.IO {
+		t.Fatalf("historical sum = %v, current rights = %v", got, cell.ownstate.Phase())
 	}
 	if original.cacheReaders.Load() != 0 {
 		t.Fatal("historical ordered scan leaked its read capability")
 	}
 	// Acquiring current M must never reinterpret these historical physical IDs.
-	cell.rights.Initialize(mosi.M)
+	cell.ownstate.Initialize(mosi.M)
 	called := false
 	var failure any
 	func() {
@@ -243,7 +243,7 @@ func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 	if called || !strings.Contains(fmt.Sprint(failure), "generation changed; retry statement") {
 		t.Fatalf("historical mutation called = %v, failure = %v", called, failure)
 	}
-	handover := cell.rights.TryHandover(cell.writesDrained)
+	handover := cell.ownstate.TryHandover(cell.writesDrained)
 	if handover == nil {
 		t.Fatal("generation mismatch leaked its write capability")
 	}
@@ -414,11 +414,11 @@ func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {
 	empty.CreateColumn("id", "INT", nil, nil)
 	r := &replicationManager{id: "slave", cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 	schema := mosiResource{Database: table.schema.Name}
-	r.resourceCell(schema).rights.Initialize(mosi.M)
+	r.resourceCell(schema).ownstate.Initialize(mosi.M)
 	r.schemaShards(table.schema, r.id, true)
 	for _, item := range table.schema.tables.GetAll() {
 		for _, shard := range item.ActiveShards() {
-			r.shardCell(shard).rights.RestoreBackend(mosi.M)
+			r.shardCell(shard).ownstate.RestoreBackend(mosi.M)
 		}
 	}
 	if !r.reclaimDatabase(table.schema.Name) {
@@ -426,7 +426,7 @@ func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {
 	}
 	for _, item := range table.schema.tables.GetAll() {
 		for _, shard := range item.ActiveShards() {
-			if r.shardCell(shard).rights.Phase() != mosi.M {
+			if r.shardCell(shard).ownstate.Phase() != mosi.M {
 				t.Fatalf("%s: active shard was not acquired", item.Name)
 			}
 		}
@@ -439,11 +439,11 @@ func TestReplicationPeriodicReclaimContinuesAfterOfflineTenant(t *testing.T) {
 		Records:     make(map[string]replicaRecord),
 		Initialized: map[string]bool{"a_offline_tenant": true, table.schema.Name: true, "pending_tenant": false, "system": true},
 	}}
-	r.resourceCell(mosiResource{Database: "a_offline_tenant"}).rights.Initialize(mosi.S)
-	r.resourceCell(mosiResource{Database: table.schema.Name}).rights.Initialize(mosi.M)
+	r.resourceCell(mosiResource{Database: "a_offline_tenant"}).ownstate.Initialize(mosi.S)
+	r.resourceCell(mosiResource{Database: table.schema.Name}).ownstate.Initialize(mosi.M)
 	r.schemaShards(table.schema, r.id, true)
 	for _, shard := range table.ActiveShards() {
-		r.shardCell(shard).rights.RestoreBackend(mosi.M)
+		r.shardCell(shard).ownstate.RestoreBackend(mosi.M)
 	}
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
@@ -452,11 +452,11 @@ func TestReplicationPeriodicReclaimContinuesAfterOfflineTenant(t *testing.T) {
 		t.Fatalf("expected the offline tenant failure only, got %v", failures)
 	}
 	for _, shard := range table.ActiveShards() {
-		if r.shardCell(shard).rights.Phase() != mosi.M {
+		if r.shardCell(shard).ownstate.Phase() != mosi.M {
 			t.Fatal("later tenant was not reclaimed after the offline failure")
 		}
 	}
-	if r.resourceCell(mosiResource{Database: "a_offline_tenant"}).rights.Phase() == mosi.M {
+	if r.resourceCell(mosiResource{Database: "a_offline_tenant"}).ownstate.Phase() == mosi.M {
 		t.Fatal("offline tenant was promoted without upstream permission")
 	}
 	for _, name := range []string{"system", "pending_tenant"} {
@@ -483,7 +483,7 @@ func TestReplicationPeriodicReclaimUsesOrdinaryMosiGrant(t *testing.T) {
 		Initialized: map[string]bool{table.schema.Name: true},
 	}}
 	schema := mosiResource{Database: table.schema.Name}
-	r.resourceCell(schema).rights.Initialize(mosi.S)
+	r.resourceCell(schema).ownstate.Initialize(mosi.S)
 	r.schemaShards(table.schema, r.id, true)
 	peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
 	r.upstream = peer
@@ -509,7 +509,7 @@ func TestReplicationPeriodicReclaimUsesOrdinaryMosiGrant(t *testing.T) {
 		if packet == nil || packet.Kind != "write" || packet.Resource != schema || packet.User != "tenant" || packet.Hash != "cached-proof" || packet.Sequence == 0 {
 			t.Fatalf("unexpected periodic ownership request: %+v", packet)
 		}
-		if r.resourceCell(schema).rights.Phase() != mosi.MR {
+		if r.resourceCell(schema).ownstate.Phase() != mosi.MR {
 			t.Fatal("request granted rights before the upstream grant")
 		}
 		if err := r.acceptGrant(mosiPacket{ID: packet.ID, Resource: schema, State: "M", Epoch: 2, Owner: r.id}); err != nil {
@@ -526,7 +526,7 @@ func TestReplicationPeriodicReclaimUsesOrdinaryMosiGrant(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("periodic reclaim did not finish after grant")
 	}
-	if r.resourceCell(schema).rights.Phase() != mosi.M || r.directory.Records[schema.key()].Epoch != 2 {
+	if r.resourceCell(schema).ownstate.Phase() != mosi.M || r.directory.Records[schema.key()].Epoch != 2 {
 		t.Fatal("periodic reclaim did not retain the durable upstream grant")
 	}
 }
@@ -549,13 +549,13 @@ func TestReplicationParallelReadsIgnoreControlLocks(t *testing.T) {
 	defer replication.Store(old)
 	for _, state := range []string{"M", "O", "S"} {
 		r, c, session := replicaAdmissionFixture("parallel_analytics")
-		c.rights.Initialize(mosi.ParsePhase(state))
+		c.ownstate.Initialize(mosi.ParsePhase(state))
 		c.initialized.Store(true)
 		replication.Store(r)
 		// Hold every control-plane lock, including closed writer admission.
 		// Already-authorized reads must still complete on their own snapshots.
 		r.mu.Lock()
-		handover := c.rights.TryHandover(c.writesDrained)
+		handover := c.ownstate.TryHandover(c.writesDrained)
 		if handover == nil {
 			t.Fatal("unexpected active write")
 		}
@@ -598,7 +598,7 @@ func TestReplicationParallelReadsIgnoreControlLocks(t *testing.T) {
 		if timedOut {
 			t.Fatalf("%s reads waited for shared control locks", state)
 		}
-		if c.rights.Phase().String() != state {
+		if c.ownstate.Phase().String() != state {
 			t.Fatalf("%s read wrote the shared flags", state)
 		}
 	}
@@ -609,7 +609,7 @@ func BenchmarkReplicationReadAdmission(b *testing.B) {
 	defer replication.Store(old)
 	r, c, session := replicaAdmissionFixture("parallel_analytics")
 	state := "S"
-	c.rights.Initialize(mosi.ParsePhase(state))
+	c.ownstate.Initialize(mosi.ParsePhase(state))
 	c.initialized.Store(true)
 	replication.Store(r)
 	b.ReportAllocs()
@@ -788,7 +788,7 @@ func TestReplicationSnapshotKeepsGenerationAndFiles(t *testing.T) {
 	}
 	cell := r.resourceCell(resource)
 	original := cell.current.Load()
-	cell.rights.Initialize(mosi.S)
+	cell.ownstate.Initialize(mosi.S)
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
 	replacement := original.rebuild(true)
@@ -808,7 +808,7 @@ func TestReplicationSnapshotKeepsGenerationAndFiles(t *testing.T) {
 	// These query-local IDs already own the historical generation. Losing
 	// permission to the current shard must not cause projection to fetch or
 	// reinterpret newer rows, even when that owner is now offline.
-	cell.rights.Publish(mosi.IO)
+	cell.ownstate.Publish(mosi.IO)
 	access = original.acquireSnapshotRead(nil)
 	if access.shard != original {
 		access.Release()
@@ -849,7 +849,7 @@ func TestReplicationCleanupRetainsCompletedBackup(t *testing.T) {
 	table.mu.Unlock()
 	cell := r.shardCell(pending)
 	cell.current.Store(pending)
-	cell.rights.Initialize(mosi.IO)
+	cell.ownstate.Initialize(mosi.IO)
 	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, Owner: "slave", State: "IO", Epoch: 1, Generation: backup.uuid.String()}
 	r.backups = map[string]replicaBackup{resource.key(): {Resource: resource, Generation: backup.uuid.String()}}
 	orphan := uuid.NewString()
@@ -870,7 +870,7 @@ func TestReplicationCleanupRetainsCompletedBackup(t *testing.T) {
 	if err := r.restoreBackup(r.directory.Records[resource.key()]); err != nil {
 		t.Fatal(err)
 	}
-	cell.rights.Publish(mosi.M)
+	cell.ownstate.Publish(mosi.M)
 	access := cell.current.Load().GetRead(nil)
 	defer access.Release()
 	value := access.shard.getColumnStorageOrPanic("payload", false, nil).GetValue(0)
@@ -1091,11 +1091,11 @@ func TestReplicationBackupBackpressureDoesNotHoldActiveWriter(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("backup did not reach the transport")
 	}
-	writer, wait := cell.rights.TryWrite(nil, false)
+	writer, wait := cell.ownstate.TryWrite(nil, false)
 	if writer == nil || wait != nil {
 		t.Fatal("network backpressure retained local writer admission")
 	}
-	if !cell.rights.Phase().Readable() {
+	if !cell.ownstate.Phase().Readable() {
 		t.Fatal("active backup writer excluded readers")
 	}
 	writer.Release()
@@ -1169,7 +1169,7 @@ func TestReplicationNativeWriterContinuesWhileForeignDDLHasSchema(t *testing.T) 
 	r := replicaRecoveryFixture()
 	r.master = false
 	r.schemaShards(table.schema, r.id, true)
-	r.resourceCell(mosiResource{Database: table.schema.Name}).rights.Initialize(mosi.M)
+	r.resourceCell(mosiResource{Database: table.schema.Name}).ownstate.Initialize(mosi.M)
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
 	tx := NewTxContext(TxACID)
@@ -1179,10 +1179,10 @@ func TestReplicationNativeWriterContinuesWhileForeignDDLHasSchema(t *testing.T) 
 	if cell.writesDrained() {
 		t.Fatal("native transaction was not registered")
 	}
-	r.resourceCell(mosiResource{Database: table.schema.Name}).rights.Publish(mosi.IO)
+	r.resourceCell(mosiResource{Database: table.schema.Name}).ownstate.Publish(mosi.IO)
 	_, release := r.writeResource(*cell.resource.Load(), tx)
 	release()
-	if !cell.rights.Phase().Readable() {
+	if !cell.ownstate.Phase().Readable() {
 		t.Fatal("DDL wait revoked the existing data transaction")
 	}
 }

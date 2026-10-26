@@ -1286,14 +1286,14 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 					if s != nil {
 						if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) && !t.isEphemeralQueryTable() {
 							cell := r.shardCell(s)
-							handover := cell.rights.TryHandover(cell.writesDrained)
+							handover := cell.ownstate.TryHandover(cell.writesDrained)
 							if handover == nil {
 								newShardList[i] = s
 								incomplete.Store(true)
 								return
 							}
 							defer handover.Release()
-							phase := cell.rights.Phase()
+							phase := cell.ownstate.Phase()
 							if phase != mosi.M && phase != mosi.O {
 								newShardList[i] = s
 								incomplete.Store(true)

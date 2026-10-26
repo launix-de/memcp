@@ -42,7 +42,18 @@ same ownership, visibility, lifetime, and durability guarantees.
   Engine adapters supply durable installation and directory coordination.
   Replication and future cluster domains must reuse this state machine, with
   distinct resource instances rather than separate implementations.
-- Database schema.json and each logical data shard have independent MOSI slots.
+- Database schema.json and each logical data shard have independent MOSI pairs.
+  `clusterstate` represents the node/domain's outward authority, including
+  delegated descendants; `ownstate` alone authorizes local queries, loading,
+  writes, rebuild and eviction. Outward M plus local IO is a valid delegation,
+  never permission to read a stale local backup. Establish stronger outward
+  rights before local admission; drain/revoke inward holders before reducing
+  outward rights. Current root masters retain outward M for known resources;
+  leaf slaves have matching stable rights, with ownstate carrying request and
+  local active/closing writer substates. No second slot check, lock, CAS, or
+  reader registration is added to granted local reads. Each future nested
+  domain repeats this boundary and has separate routing/directory ownership;
+  root bootstrap is not a cluster acquisition or automatic failover policy.
   IS identifies a current backend-only generation; IO requires acquisition from
   its remote owner. A backend-only authoritative generation must never be stale.
   A retained safety backup cannot establish IS or satisfy an IO access.
