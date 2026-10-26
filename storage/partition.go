@@ -445,7 +445,7 @@ func (s *storageShard) acquireReadForScan(currentTx *TxContext) ReadAccess {
 	if s.hasWriteOwnerForTx(currentTx) {
 		return ReadAccess{}
 	}
-	if sharedClusterDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() && s.scanTarget.Load() == nil {
+	if sharedClusterSource(s.t) && s.scanTarget.Load() == nil {
 		cluster := activeNodeCluster()
 		if cluster == nil {
 			panic("cluster is not initialized")

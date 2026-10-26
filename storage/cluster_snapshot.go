@@ -59,6 +59,13 @@ func sharedClusterDatabase(name string) bool {
 	}
 	return false
 }
+
+// Synthetic/unpublished table descriptors may not have a database. The
+// optional cluster adapter must leave these native engine paths untouched.
+func sharedClusterSource(table *table) bool {
+	return table != nil && table.schema != nil && !table.isEphemeralQueryTable() && sharedClusterDatabase(table.schema.Name)
+}
+
 func (cluster *nodeCluster) sharedRead(resource mosiResource) *replicaCell {
 	if value, exists := cluster.states.Load(resource.key()); exists {
 		return value.(*replicaCell)

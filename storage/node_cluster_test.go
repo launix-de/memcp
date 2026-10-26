@@ -14,6 +14,7 @@ import "time"
 import "context"
 import "testing"
 import "github.com/google/uuid"
+import "github.com/launix-de/memcp/scm"
 
 func TestClusterQueryBudgetCreditsResidentGenerationOnce(t *testing.T) {
 	const mib = int64(1 << 20)
@@ -133,5 +134,33 @@ func TestClusterMountCannotBypassAdmissionThroughExplicitScanRPC(t *testing.T) {
 	err = peer.call(context.Background(), "scan.execute", task, &reply)
 	if err == nil {
 		t.Fatal("explicit scan RPC bypassed mandatory cluster admission")
+	}
+}
+
+func TestClusterMountDoesNotSubscribeThroughReplication(t *testing.T) {
+	oldMounts := sharedClusterMounts.Swap(nil)
+	defer sharedClusterMounts.Store(oldMounts)
+	table, _ := createDurabilityTestTable(t, "t_cluster_domain_boundary", 1)
+	if err := prepareSharedClusterMounts(table.schema.Name); err != nil {
+		t.Fatal(err)
+	}
+	manager := replicaRecoveryFixture()
+	oldManager := replication.Swap(manager)
+	defer replication.Store(oldManager)
+	if activeReplication(table.schema) != nil {
+		t.Fatal("shared snapshot entered the replication adapter")
+	}
+	if activeReplication(&database{Name: "separate_replica_tenant"}) != manager {
+		t.Fatal("unrelated replication namespace was disabled")
+	}
+	tx := &TxContext{}
+	session := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewString(table.schema.Name) })
+	replicationEnter(tx, session)
+	if tx.replicationActive || len(manager.directory.Records) != 0 {
+		t.Fatal("opening a shared snapshot subscribed it to a replication parent")
+	}
+	request := replicaRequest{Boot: uuid.NewString(), Resources: []replicaRecord{{Resource: mosiResource{Database: table.schema.Name}, State: "M", Owner: "slave", Epoch: 1}}}
+	if _, err := manager.recoverPeer(context.Background(), "slave", request, replicaAuth{Admin: true}); err == nil {
+		t.Fatal("replication recovery claimed a shared snapshot namespace")
 	}
 }

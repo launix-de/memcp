@@ -44,7 +44,7 @@ func (r *replicationManager) resourceKnown(resource mosiResource) bool {
 }
 
 func (r *replicationManager) recoveryInventory(auth replicaAuth) []replicaRecord {
-	allowed := func(name string) bool { return auth.Admin || auth.Databases[name] }
+	allowed := func(name string) bool { return !sharedClusterDatabase(name) && (auth.Admin || auth.Databases[name]) }
 	resources := make(map[string]replicaRecord)
 	// Catalogs describe existing local data only. Loading them establishes no
 	// coherence permission, even when the backend contains a complete generation.
@@ -262,7 +262,7 @@ func (r *replicationManager) recoverPeer(ctx context.Context, id string, req rep
 		return reply, fmt.Errorf("invalid slave incarnation")
 	}
 	for _, reported := range req.Resources {
-		if !reported.Resource.valid() || (!auth.Admin && !auth.Databases[reported.Resource.Database]) {
+		if !reported.Resource.valid() || sharedClusterDatabase(reported.Resource.Database) || (!auth.Admin && !auth.Databases[reported.Resource.Database]) {
 			return reply, fmt.Errorf("unauthorized recovery resource")
 		}
 		switch reported.State {

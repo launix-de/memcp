@@ -990,7 +990,7 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 	if target := s.scanTarget.Load(); target != nil {
 		panic(shardReadDelegation{target})
 	}
-	if !snapshot && s.t != nil && sharedClusterDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
+	if !snapshot && sharedClusterSource(s.t) {
 		cell := acquireClusterSnapshot(mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: s.logicalID().String()})
 		if cell.current.Load() == nil {
 			cell.current.CompareAndSwap(nil, s)
@@ -1021,7 +1021,7 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 	return ReadAccess{shard: s}
 }
 func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
-	if s.t != nil && !s.t.isEphemeralQueryTable() {
+	if sharedClusterSource(s.t) {
 		rejectClusterSnapshotWrite(s.t.schema.Name)
 	}
 	if s.scanTarget.Load() != nil {
@@ -1057,7 +1057,7 @@ func (s *storageShard) ensureLoaded() {
 	// A mounted immutable generation already reserved its bounded header-based
 	// payload/scratch estimate. Do not apply the unrelated ShardSize heuristic a
 	// second time, or it would evict useful warm peers despite valid admission.
-	if sharedClusterDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
+	if sharedClusterSource(s.t) {
 		if !GlobalCache.queryPayloadCovered(s) {
 			panic("shared cluster cold loads require operator RAM admission")
 		}

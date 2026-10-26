@@ -312,7 +312,7 @@ func (r *replicationManager) peer(id string) *mosiPeer {
 // Engine access fails closed while configured replication has not published
 // its manager. Frontend bootstrap may still use the excluded system catalog.
 func activeReplication(db *database) *replicationManager {
-	if db == nil {
+	if db == nil || sharedClusterDatabase(db.Name) {
 		return nil
 	}
 	r := replication.Load()
@@ -331,7 +331,7 @@ func validReplicaDatabase(name string) bool {
 // complete rebuild again; an unavailable master never revokes local M.
 func replicationCheckpoint(name, user string) {
 	r := replication.Load()
-	if r != nil && !r.master && validReplicaDatabase(name) {
+	if r != nil && !r.master && validReplicaDatabase(name) && !sharedClusterDatabase(name) {
 		r.backupDatabase(name, user)
 	}
 }

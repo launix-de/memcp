@@ -482,7 +482,7 @@ The initial adapter mounts the named shared databases with S-only permissions.
 Durable writes/DDL, rebuild and GC on those mounts are disabled/deferred until
 cluster M handover is connected. Other namespaces retain normal behavior.
 Automatic placement currently supports stored integer/float/sequence formats,
-scalar unordered CS-autocommit reductions; explicit transactions, grouped
+unfiltered scalar unordered CS-autocommit reductions; explicit transactions, grouped
 results, query-local/physical sources and unsupported encodings fail explicitly.
 This does not yet implement mutable multi-master databases or nested clusters.
 

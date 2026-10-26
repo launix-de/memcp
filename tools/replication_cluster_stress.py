@@ -110,6 +110,7 @@ class Node(OwnedServer):
         self.password = local_password
         self.cluster_secret = "replication-runner-shared-scan-secret"
         self.node_args = []
+        self.process_env = {}
         self.executor = shlex.split(args.executor)
         self.startup_timeout = args.startup_timeout
         self.client = Client(self.port, self.timeout, database=self.database)
@@ -132,6 +133,7 @@ class Node(OwnedServer):
         self.process = subprocess.Popen(
             command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=self.log_handle,
             stderr=subprocess.STDOUT, start_new_session=True,
+            env={**os.environ, **self.process_env},
         )
         print(f"  {self.name}: start pid={self.process.pid}, generation={self.generation}", flush=True)
         self.client = Client(self.port, self.timeout, database=self.database)
@@ -1119,6 +1121,10 @@ def run_cluster_placement(args, artifacts, journal):
         nodes = [Node(args, directory, f"node-{i}", "") for i in range(3)]
         wrong = Node(args, directory, "wrong-secret", "")
         for node in nodes + [wrong]:
+            # Exercise eight concurrent shard operators even on two-CPU CI
+            # runners. A serial scan can evict/reload every shard locally and
+            # would never test simultaneous RAM admission or remote overflow.
+            node.process_env["GOMAXPROCS"] = "16"
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
             (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))

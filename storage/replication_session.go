@@ -37,7 +37,9 @@ func replicationEnterMode(tx *TxContext, session scm.Scmer, write bool) {
 		return
 	}
 	name := session.Func()(replicationSchemaArgument...).String()
-	if !validReplicaDatabase(name) {
+	// Shared snapshots have their own S-only domain. Opening a local query
+	// must not subscribe/claim the same namespace through the replication parent.
+	if !validReplicaDatabase(name) || sharedClusterDatabase(name) {
 		return
 	}
 	r.firstDatabase(name, session)
@@ -114,7 +116,7 @@ func (c *replicaCell) retainGeneration(shard *storageShard) {
 }
 
 func replicationOpenDatabase(user, database string) (err error) {
-	if replication.Load() == nil || !validReplicaDatabase(database) {
+	if replication.Load() == nil || !validReplicaDatabase(database) || sharedClusterDatabase(database) {
 		return nil
 	}
 	tx := &TxContext{}
