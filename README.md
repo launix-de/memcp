@@ -443,11 +443,55 @@ The coherence state machine lives in `storage/mosi`, independently of storage,
 SQL, transport and backend policy. Its public API exposes immutable permission
 snapshots and request completion. Engine framing and connections are in
 `storage/mosi_wire.go` and `storage/mosi_transport.go`; replication directory
-coordination, generation transfer, authentication, journal, session integration
+coordination, generation transfer, authentication, configuration, session integration
 and startup use the corresponding `storage/replication_*.go` files. This separates
 the shared coherence core from the current master/slave topology; multi-master
-membership and distributed execution remain future work.
+mutable multi-master coordination remains future work.
 
+
+### Shared snapshot cluster and automatic placement
+
+The first cluster execution milestone supports unordered scalar reductions on
+**immutable, fully rebuilt numeric shards** in a shared backend. Give each node
+its own data/settings/system namespace, configure the same shared database
+backend, and use the same secret file (at least 32 random bytes):
+
+```sh
+./memcp --no-repl --api-port=4321 \
+  --cluster-secret-file=/run/memcp/cluster.secret \
+  --cluster-databases=analytics \
+  --cluster-address=http://node-a:4321/cluster lib/main.scm
+```
+
+Other nodes add `--cluster-join=http://node-a:4321/cluster` and advertise their
+own reachable address. The contact is only a seed: every participant retains
+the full peer roster and connects directly to discovered peers. The secret is
+read in Go, never sent in the challenge proof or included as a CLI value.
+Use HTTPS/WSS when the network needs transport integrity/confidentiality;
+challenge authentication does not encrypt plain WebSocket traffic.
+
+Ordinary SQL `SUM` now uses the existing shard-local scan pipeline. Before
+loading a shard, placement checks warm peers and the executing node's RAM
+budget; a typed acquisition panic delegates the reduction when appropriate.
+The worker returns one scalar, never rows/shard dumps. `cluster_status` exposes
+membership, executed/delegated counts and the tracked cache/admission budget.
+`MaxRamBytes` bounds tracked cache plus numeric operator reservations; it is
+not an RSS limit for the Go runtime, frontends or arbitrary user code.
+
+The initial adapter mounts the named shared databases with S-only permissions.
+Durable writes/DDL, rebuild and GC on those mounts are disabled/deferred until
+cluster M handover is connected. Other namespaces retain normal behavior.
+Automatic placement currently supports stored integer/float/sequence formats,
+scalar unordered CS-autocommit reductions; explicit transactions, grouped
+results, query-local/physical sources and unsupported encodings fail explicitly.
+This does not yet implement mutable multi-master databases or nested clusters.
+
+The Python process runner has a focused `--cluster-only` scenario, run by the
+**Cluster Stress test** CI job with normal and race-instrumented servers. Eight
+shards exceed one node's 8 MiB tracked budget; three nodes calculate the exact
+SQL sum, exercise RAM and residency delegation, reject a wrong secret, release
+all reservations and continue after losing the seed. Shared generation/schema
+hashes must stay unchanged.
 
 ### Remote shard reductions
 
@@ -494,8 +538,9 @@ side-effecting callbacks and query-local handles are rejected. No task is
 retried after an error or ambiguous completion. Task/attempt identities are
 checked and replayed/expired task numbers are rejected per connection.
 
-Automatic SQL placement and distributed writes are subsequent features; this
-operator performs real remote reductions directly today.
+Explicit `scan_remote` remains available independently of membership. Shared
+snapshot mounts use the automatic, budgeted path described above; mutable
+distributed writes and general query placement remain subsequent features.
 
 ### Storage failure notifications
 

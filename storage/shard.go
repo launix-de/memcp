@@ -990,7 +990,15 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 	if target := s.scanTarget.Load(); target != nil {
 		panic(shardReadDelegation{target})
 	}
-	if !snapshot && s.t != nil {
+	if !snapshot && s.t != nil && sharedClusterDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
+		cell := acquireClusterSnapshot(mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: s.logicalID().String()})
+		if cell.current.Load() == nil {
+			cell.current.CompareAndSwap(nil, s)
+		}
+		if s.coherence.Load() == nil {
+			s.coherence.CompareAndSwap(nil, cell)
+		}
+	} else if !snapshot && s.t != nil {
 		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
 			s = r.readShard(s, currentTx)
 		}
@@ -1013,6 +1021,9 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 	return ReadAccess{shard: s}
 }
 func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
+	if s.t != nil && !s.t.isEphemeralQueryTable() {
+		rejectClusterSnapshotWrite(s.t.schema.Name)
+	}
 	if s.scanTarget.Load() != nil {
 		panic("remote shard writes require a transaction participant protocol")
 	}
@@ -1043,8 +1054,16 @@ func (s *storageShard) ensureLoaded() {
 	if s.state() != COLD {
 		return
 	}
-	// pre-free memory before loading shard from disk
-	GlobalCache.CheckPressure(int64(len(s.t.columnDeclarations())) * int64(Settings.ShardSize) * 16)
+	// A mounted immutable generation already reserved its bounded header-based
+	// payload/scratch estimate. Do not apply the unrelated ShardSize heuristic a
+	// second time, or it would evict useful warm peers despite valid admission.
+	if sharedClusterDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
+		if !GlobalCache.queryPayloadCovered(s) {
+			panic("shared cluster cold loads require operator RAM admission")
+		}
+	} else {
+		GlobalCache.CheckPressure(int64(len(s.t.columnDeclarations())) * int64(Settings.ShardSize) * 16)
+	}
 	// double-check under lock to prevent concurrent map writes in load()
 	s.mu.Lock()
 	if s.state() != COLD {

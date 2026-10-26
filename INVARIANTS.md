@@ -148,6 +148,35 @@ same ownership, visibility, lifetime, and durability guarantees.
   non-ephemeral shard. Its final permission check is a point-in-time observation,
   never an exemption from later remote requests or owner-unavailability errors.
 
+### Initial shared snapshot cluster
+
+- Cluster membership reuses the authenticated node scan service, full peer
+  rosters and the shared binary WebSocket route. Joining through one contact
+  does not give it a leader/monitor role; discovered peers authenticate directly.
+  UUID, process incarnation and the independent shared secret have distinct
+  meanings. Reconnect/liveness changes placement hints, never MOSI permissions.
+- Explicit shared database mounts currently admit S only for immutable rebuilt
+  schema/shard generations. An authenticated peer cannot obtain M through this
+  adapter. Persistent writes and destructive maintenance remain disabled until
+  the existing MOSI handover machinery is connected between cluster masters.
+  Do not bypass this boundary through replication or old unbudgeted scan RPCs.
+- Numeric header estimates, RAM admission and placement happen before payload
+  acquisition, under the resource's S permission and outside generated loops.
+  Already warm payload is credited once; private operator scratch is charged
+  per concurrent invocation against the same CacheManager total budget.
+  Missing formats fail explicitly, not by guessing from compressed object size.
+- A typed delegation target for a real source generation remains query-local.
+  Residency can prefer a peer; capacity can reject before computation. Only
+  these explicit pre-execution rejections may reroute/wait. Worker execution,
+  transport ambiguity and callback failures are propagated without task retry.
+  The existing executor checks schema/generation, captures a delta-free horizon
+  and returns exactly one scalar; it never sends source rows or physical IDs.
+- Versioned budget notifications prevent lost wakeups between admission failure
+  and waiting. Waiting does not hold source payload, writer admission or a
+  compute slot required by another task to finish. Unknown/permanent capacity
+  failures return controlled errors. This initial numeric scalar contract is
+  not admission for arbitrary closures, grouped cardinality or live mutations.
+
 ### Remote shard scans
 
 - `scan_remote` constructs query-local remote-only stubs. Their atomic immutable

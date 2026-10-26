@@ -1562,7 +1562,7 @@ func (t *table) CountEstimate() uint {
 func (t *table) initializeLegacyPlannerRowEstimate() {
 	// Replicated schema publication must leave all data shards on I. Missing
 	// advisory statistics never authorize a data fetch while decoding schema.
-	if replication.Load() != nil && validReplicaDatabase(t.schema.Name) {
+	if sharedClusterDatabase(t.schema.Name) || replication.Load() != nil && validReplicaDatabase(t.schema.Name) {
 		return
 	}
 	if t.PlannerRowEstimate.present.Load() && t.PlannerRowEstimate.value.Load() > 0 {

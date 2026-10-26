@@ -557,7 +557,9 @@ func LoadDatabases() {
 			db.Name = entry.Name()
 			db.persistence = instrumentPersistence(entry.Name(), &FileStorage{path: Basepath + "/" + entry.Name() + "/"})
 			db.srState = COLD
-			db.recoverAbandonedBlobWrites()
+			if !sharedClusterDatabase(db.Name) {
+				db.recoverAbandonedBlobWrites()
+			}
 			databases.Set(db.Name, db)
 		} else if strings.HasSuffix(entry.Name(), ".json") && entry.Name() != "settings.json" {
 			// Backend configuration file (e.g., Ceph, S3)
@@ -578,7 +580,9 @@ func LoadDatabases() {
 			db.Name = dbName
 			db.persistence = persistence
 			db.srState = COLD
-			db.recoverAbandonedBlobWrites()
+			if !sharedClusterDatabase(db.Name) {
+				db.recoverAbandonedBlobWrites()
+			}
 			databases.Set(db.Name, db)
 		}
 	}
@@ -665,6 +669,9 @@ func (db *database) commitSchemaSnapshot(jsonbytes []byte, durable bool, release
 }
 
 func (db *database) save() {
+	if sharedClusterDatabase(db.Name) {
+		return
+	} // advisory runtime metadata is private to this reader
 	if db.srState == COLD {
 		// Do not serialize a cold database; keep existing schema.json intact
 		return
@@ -690,6 +697,10 @@ func (db *database) save() {
 // schemalock. Buffered temp metadata is immediately visible in memory; a later
 // synchronous schema save or rebuild includes it in its complete snapshot.
 func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
+	if sharedClusterDatabase(db.Name) {
+		db.schemalock.Unlock()
+		return
+	}
 	if db.srState == COLD {
 		db.schemalock.Unlock()
 		return
@@ -1050,6 +1061,11 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 // SharedResource impl for database
 func (db *database) GetState() SharedState { return db.srState }
 func (db *database) GetRead(tx *TxContext) ReadAccess {
+	if sharedClusterDatabase(db.Name) {
+		acquireClusterSnapshot(mosiResource{Database: db.Name})
+		db.ensureLoaded()
+		return ReadAccess{}
+	}
 	if r := activeReplication(db); r != nil && validReplicaDatabase(db.Name) {
 		r.obtain(mosiResource{Database: db.Name}, mosi.S, replicationUser(tx))
 	}
@@ -1057,6 +1073,7 @@ func (db *database) GetRead(tx *TxContext) ReadAccess {
 	return ReadAccess{}
 }
 func (db *database) GetWrite(tx *TxContext) WriteAccess {
+	rejectClusterSnapshotWrite(db.Name)
 	var release func()
 	ready := false
 	defer func() {
@@ -1135,6 +1152,10 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 // public rebuild paths retain it through schema publication, so cleanup cannot
 // observe generation-private files in the build→publish interval.
 func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphemeral bool, only ...*table) rebuildDatabaseResult {
+	if sharedClusterDatabase(db.Name) {
+		return rebuildDatabaseResult{}
+	}
+
 	if replication.Load() != nil && GetDatabase(db.Name) != db {
 		return rebuildDatabaseResult{}
 	}
@@ -2105,6 +2126,7 @@ func DatabaseBackendName(schema string) string {
 }
 
 func DropDatabase(schema string, ifexists bool) bool {
+	rejectClusterSnapshotWrite(schema)
 	db := databases.Get(schema)
 	if db == nil {
 		if ifexists {

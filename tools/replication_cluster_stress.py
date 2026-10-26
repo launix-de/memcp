@@ -16,6 +16,7 @@ import base64
 import concurrent.futures
 import contextlib
 import http.client
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -108,6 +109,7 @@ class Node(OwnedServer):
         self.replication = replication
         self.password = local_password
         self.cluster_secret = "replication-runner-shared-scan-secret"
+        self.node_args = []
         self.executor = shlex.split(args.executor)
         self.startup_timeout = args.startup_timeout
         self.client = Client(self.port, self.timeout, database=self.database)
@@ -122,7 +124,10 @@ class Node(OwnedServer):
             str(self.binary), "-data", str(self.data_dir),
             f"--api-port={self.port}", f"--mysql-port={self.mysql_port}",
             "--mysql-socket=", "--no-repl", f"--root-password={self.password}",
-            f"--replication={self.replication}", f"--cluster-secret={self.cluster_secret}", str(self.app),
+            f"--replication={self.replication}",
+            *([] if any(arg.startswith("--cluster-secret-file=") for arg in self.node_args)
+              else [f"--cluster-secret={self.cluster_secret}"]),
+            *self.node_args, str(self.app),
         ]
         self.process = subprocess.Popen(
             command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=self.log_handle,
@@ -1056,6 +1061,127 @@ def run_remote_scans(args, artifacts, journal):
                         "shards": 2, "fresh_sums": [180, 190, 200], "group_sums": [60, 140]})
 
 
+def run_cluster_placement(args, artifacts, journal):
+    print("SCENARIO: authenticated peer roster and automatic SUM above one node's RAM budget", flush=True)
+    directory = artifacts / "cluster-placement"
+    directory.mkdir()
+    budget = 8 * 1024 * 1024
+    rows_per_shard, shards, columns = 40000, 8, 8
+    secret = uuid.uuid4().hex + uuid.uuid4().hex
+    secret_file = directory / "cluster.secret"
+    secret_file.write_text(secret + "\n")
+    secret_file.chmod(0o600)
+    wrong_file = directory / "wrong.secret"
+    wrong_file.write_text("another-cluster-secret-file-must-not-join-2026\n")
+    wrong_file.chmod(0o600)
+    with contextlib.ExitStack() as cleanup:
+        cleanup.callback(lambda: secret_file.unlink(missing_ok=True))
+        cleanup.callback(lambda: wrong_file.unlink(missing_ok=True))
+        # The immutable fixture is prepared outside the cluster. Race runs can
+        # reuse the same-commit normal builder while instrumenting every live
+        # cluster node, avoiding minutes of unrelated bulk-load instrumentation.
+        builder_args = SimpleNamespace(**{**vars(args), "binary": args.fixture_binary or args.binary})
+        builder = Node(builder_args, directory, "builder", "")
+        cleanup.callback(lambda: builder.kill() if builder.process is not None else None)
+        source = builder.start()
+        source.sql(f"CREATE DATABASE {DATABASE}", "system")
+        source.scm('(settings "ShardSize" 1000000)')
+        definitions = ','.join(["id INT"] + [f"v{i} INT" for i in range(columns)])
+        source.sql(f"CREATE TABLE big_items({definitions}) ENGINE=SAFE")
+        rng = random.Random(20261026)
+        expected = 0
+        for start in range(0, rows_per_shard * shards, 1000):
+            values = []
+            for row_id in range(start, start + 1000):
+                row = [rng.getrandbits(32) for _ in range(columns)]
+                expected += sum(row)
+                values.append('(' + ','.join(map(str, [row_id] + row)) + ')')
+            source.sql("INSERT INTO big_items VALUES" + ','.join(values), timeout=120)
+        pivots = ' '.join(str(rows_per_shard * i) for i in range(1, shards))
+        source.scm(f'(partitiontable (table "{DATABASE}" false "big_items" false) (list (list "id" (list {pivots}))))', timeout=120)
+        source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)', timeout=120)
+        query = "SELECT SUM(" + '+'.join(f"v{i}" for i in range(columns)) + ") AS total FROM big_items"
+        expect(source.number(query, "total"), expected, "standalone reference sum")
+        builder.kill()
+        shared = builder.data_dir / DATABASE
+        schema = json.loads((shared / "schema.json").read_text())["tables"]["big_items"]
+        parts = schema.get("PShards") or schema.get("Shards")
+        expect(len([part for part in parts if part]), shards, "fixture shard count")
+        generations = {part["uuid"] if isinstance(part, dict) else part for part in parts if part}
+        files = [path for path in shared.iterdir() if any(path.name.startswith(generation + '-') for generation in generations)]
+        payload_bytes = sum(path.stat().st_size for path in files)
+        immutable_paths = files + [shared / "schema.json"]
+        original_bytes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in immutable_paths}
+        if payload_bytes <= budget:
+            raise DrillFailure(f"fixture fits one node: {payload_bytes} <= {budget}")
+        # All participants resolve exactly the same immutable generation files;
+        # neither per-node copies nor replication dumps are used in this test.
+        nodes = [Node(args, directory, f"node-{i}", "") for i in range(3)]
+        wrong = Node(args, directory, "wrong-secret", "")
+        for node in nodes + [wrong]:
+            cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
+            (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
+            (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
+            (node.data_dir / "settings.json").write_text(json.dumps({
+                "MaxRamBytes": budget, "MaxPersistBytes": budget, "MinRamBytes": 0,
+                "MetricsTracing": False,
+            }))
+            seed = "" if node is nodes[0] else f"http://127.0.0.1:{nodes[1 if node is nodes[2] else 0].port}/cluster"
+            node.node_args = [f"--cluster-secret-file={wrong_file if node is wrong else secret_file}",
+                              f"--cluster-address=http://127.0.0.1:{node.port}/cluster",
+                              f"--cluster-join={seed}", f"--cluster-databases={DATABASE}"]
+        def status(node):
+            value = node.client.scm("(cluster_status)").strip()
+            if value.startswith('"'):
+                value = json.loads(value)
+            return json.loads(value)
+        for node in nodes:
+            node.start()
+        eventually(lambda: all(len(status(node)["state"]["members"]) == 3 and status(node)["state"]["connected"] == 2
+                               for node in nodes), "full peer roster did not converge", 30)
+        wrong.start()
+        # Prove that a wrong-secret process can answer SQL locally yet receives
+        # no cluster membership; the trusted nodes retain exactly their roster.
+        time.sleep(1)
+        expect(len(status(wrong)["state"]["members"]), 1, "wrong-secret isolation")
+        expect(status(wrong)["state"]["connected"], 0, "wrong-secret connections")
+        for node in nodes:
+            expect(len(status(node)["state"]["members"]), 3, "authenticated roster")
+        for round_index in range(2):
+            expect(nodes[0].client.number(query, "total"), expected, f"automatic distributed sum {round_index}")
+        # Exercise the same normal engine scan without reusing SQL's local
+        # aggregate cache. Peers warmed by the first SUM should attract work.
+        params = ' '.join(f"x{i}" for i in range(columns))
+        names = ' '.join(json.dumps(f"v{i}") for i in range(columns))
+        expression = f'(scan nil (table "{DATABASE}" false "big_items" false) (list) (list) (list) (lambda () true) (list {names}) (lambda (acc {params}) (+ acc {params})) 0 +)'
+        expect(int(nodes[1].client.scm(expression).strip()), expected, "warm-holder automatic placement")
+        states = [status(node) for node in nodes]
+        if states[0]["state"]["delegated"] == 0 or sum(item["state"]["received"] for item in states[1:]) == 0:
+            raise DrillFailure("ordinary SUM did not execute on another node")
+        if states[0]["state"]["capacity"] == 0:
+            raise DrillFailure("tight-RAM query did not exercise admission rejection/delegation")
+        if sum(item["state"]["locality"] for item in states) == 0:
+            raise DrillFailure("warm-holder query did not exercise locality delegation")
+        nodes[0].client.reject("INSERT INTO big_items VALUES(0," + ','.join('0' for _ in range(columns)) + ')',
+                               contains="read-only")
+        for node, item in zip(nodes, states):
+            expect(item["budget"]["MemoryBudget"], budget, "effective node RAM budget")
+            expect(item["budget"]["QueryReserved"], 0, "released operator reservations")
+            if item["budget"]["QueryPeak"] > budget:
+                raise DrillFailure(f"{node.name}: admission exceeded RAM budget")
+        # The seed is not a permanent monitor or compute relay. Surviving peers
+        # know one another and can continue the immutable aggregate without it.
+        nodes[0].kill()
+        eventually(lambda: all(status(node)["state"]["connected"] == 1 for node in nodes[1:]),
+                   "surviving peers did not observe contact-node loss")
+        expect(nodes[1].client.number(query, "total"), expected, "sum after contact-node loss")
+        expect({path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in immutable_paths},
+               original_bytes, "shared S-only schema/generations remained unchanged")
+        journal.append({"scenario": "cluster-placement", "rows": rows_per_shard * shards,
+                        "shards": shards, "payload_bytes": payload_bytes, "node_budget": budget,
+                        "expected_sum": expected, "states": states, "fixture_binary": str(builder_args.binary)})
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=ROOT / "memcp")
@@ -1070,12 +1196,18 @@ def main():
     parser.add_argument("--dedicated-replication-port", action="store_true",
                         help="exercise the optional dedicated listener instead of the normal HTTP /cluster route")
     parser.add_argument("--remote-scans-only", action="store_true", help="run only the focused two-process remote scan scenario")
+    parser.add_argument("--cluster-only", action="store_true", help="run focused shared-storage cluster placement scenario")
+    parser.add_argument("--fixture-binary", type=Path, help="optional same-commit builder for immutable cluster fixture")
     args = parser.parse_args()
     if min(args.rounds, args.workers, args.operations, args.timeout, args.startup_timeout) <= 0:
         parser.error("rounds, workers, operations and timeouts must be positive")
     args.binary = args.binary.expanduser().resolve()
     if not args.binary.is_file() or not os.access(args.binary, os.X_OK):
         parser.error(f"build the MemCP binary first: {args.binary}")
+    if args.fixture_binary:
+        args.fixture_binary = args.fixture_binary.expanduser().resolve()
+        if not args.fixture_binary.is_file() or not os.access(args.fixture_binary, os.X_OK):
+            parser.error(f"invalid fixture builder: {args.fixture_binary}")
     if not shutil.which("mysql"):
         parser.error("mysql client required (mariadb-client)")
     artifacts = make_artifact_dir(args.artifacts)
@@ -1085,8 +1217,11 @@ def main():
                 "dedicated_replication_port": args.dedicated_replication_port}]
     print(f"Replication cluster stress artifacts: {artifacts}\nSeed: {args.seed}", flush=True)
     try:
-        run_remote_scans(args, artifacts, journal)
-        if not args.remote_scans_only:
+        if args.cluster_only:
+            run_cluster_placement(args, artifacts, journal)
+        else:
+            run_remote_scans(args, artifacts, journal)
+        if not args.remote_scans_only and not args.cluster_only:
             run_regressions(args, artifacts, journal)
             run_partitions(args, artifacts, journal)
             run_stress(args, artifacts, journal)
@@ -1110,6 +1245,10 @@ def main():
                   "--startup-timeout", str(args.startup_timeout), "--executor", args.executor]
         if args.remote_scans_only:
             replay.append("--remote-scans-only")
+        if args.cluster_only:
+            replay.append("--cluster-only")
+        if args.fixture_binary:
+            replay.extend(["--fixture-binary", str(args.fixture_binary)])
         if args.dedicated_replication_port:
             replay.append("--dedicated-replication-port")
         print(f"FAIL: {error}\nReproduce: {shlex.join(replay)}\nArtifacts: {artifacts}", file=sys.stderr, flush=True)

@@ -70,8 +70,13 @@ Other (serve ...) calls do not inherit this endpoint. */
 (if (not (equal? node_replication_address ""))
 	(replication_start node_replication_address (lambda () (shutdown))))
 (define node_cluster_secret (arg "cluster-secret" ""))
-(if (not (equal? node_cluster_secret ""))
-	(node_scan_start node_cluster_secret))
+(define node_cluster_secret_file (arg "cluster-secret-file" ""))
+(if (not (equal? node_cluster_secret_file ""))
+	(node_cluster_start node_cluster_secret_file
+		(arg "cluster-address" (concat "http://127.0.0.1:" (arg "api-port" "4321") "/cluster"))
+		(arg "cluster-join" "")
+		(arg "cluster-databases" ""))
+	(if (not (equal? node_cluster_secret "")) (node_scan_start node_cluster_secret)))
 (define node_handler (node_protocol))
 (if (number? (simplify node_replication_address))
 	(serve (simplify node_replication_address)
@@ -82,7 +87,7 @@ Other (serve ...) calls do not inherit this endpoint. */
 /* read ports from command line arguments or environment */
 (if (not (arg "disable-api" false)) (begin
 	(set port (arg "api-port" (env "PORT" "4321")))
-	(serve port (if (and (equal? node_replication_address "") (equal? node_cluster_secret ""))
+	(serve port (if (and (equal? node_replication_address "") (equal? node_cluster_secret "") (equal? node_cluster_secret_file ""))
 		(lambda (req res) (http_handler req res))
 		(http_route "/cluster" node_handler (lambda (req res) (http_handler req res)))))
 	(service_registry "HTTP Server" (list port "/" "HTTP"))

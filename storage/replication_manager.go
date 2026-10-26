@@ -115,23 +115,10 @@ func StartReplication(address string, shutdown func()) error {
 		return fmt.Errorf("replication requires the SQL authentication frontend")
 	}
 	PrepareReplication()
-	settingsMu.Lock()
-	createdIdentity := Settings.ReplicationUUID == ""
-	if createdIdentity {
-		Settings.ReplicationUUID = uuid.NewString()
-	}
-	r.id = Settings.ReplicationUUID
-	settingsMu.Unlock()
-	if _, err := uuid.Parse(r.id); err != nil {
-		return fmt.Errorf("invalid saved replication identity")
-	}
-	if createdIdentity {
-		if err := saveSettings(); err != nil {
-			settingsMu.Lock()
-			Settings.ReplicationUUID = ""
-			settingsMu.Unlock()
-			return err
-		}
+	var identityErr error
+	r.id, identityErr = localNodeIdentity()
+	if identityErr != nil {
+		return identityErr
 	}
 	r.boot = uuid.NewString()
 	r.backups = make(map[string]replicaBackup)
@@ -347,4 +334,28 @@ func replicationCheckpoint(name, user string) {
 	if r != nil && !r.master && validReplicaDatabase(name) {
 		r.backupDatabase(name, user)
 	}
+}
+
+// The installation UUID identifies a node across reconnects. Cluster membership
+// requires the independent shared-secret proof; knowing this ID grants no role.
+func localNodeIdentity() (string, error) {
+	settingsMu.Lock()
+	createdIdentity := Settings.ReplicationUUID == ""
+	if createdIdentity {
+		Settings.ReplicationUUID = uuid.NewString()
+	}
+	id := Settings.ReplicationUUID
+	settingsMu.Unlock()
+	if _, err := uuid.Parse(id); err != nil {
+		return "", fmt.Errorf("invalid saved replication identity")
+	}
+	if createdIdentity {
+		if err := saveSettings(); err != nil {
+			settingsMu.Lock()
+			Settings.ReplicationUUID = ""
+			settingsMu.Unlock()
+			return "", err
+		}
+	}
+	return id, nil
 }

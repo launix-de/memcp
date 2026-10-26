@@ -127,6 +127,35 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - Database is auto-created on first use.
 - Tests use database name `memcp-tests` on port 4321 (or custom port).
 
+## Shared snapshot cluster execution
+
+- `nodeCluster` is startup-owned by `nodeScanService`. Its secret is read from
+  a local file and never enters RPC metadata, replication login policy or CLI
+  values. The existing mutual nonce/HMAC proof authenticates the connection's
+  installation ID; `Boot` identifies its current process. Membership is a full
+  immutable roster published under the cold cluster mutex, read through `view`.
+  Discovery/liveness cannot grant M or promote an offline owner. Connections
+  carry their own monotonic task sequence and are joined before storage stops.
+- Explicit `--cluster-databases` mounts are currently immutable, rebuilt shared
+  generations with S-only schema/shard slots. They do not overlap a replication
+  namespace. Durable DML/DDL, rebuild and GC are blocked/deferred for these
+  mounts until distributed write handover is connected. Private system and
+  planner Cache tables retain their native lifecycle. Backend implementations
+  are unchanged; bounded numeric headers are read only after S admission.
+- Automatic placement raises the existing typed acquisition panic for a cold
+  shard with a warm peer or rejected local RAM admission. Its `origin` target
+  is invocation-owned; it is never installed on a live/historical shard. Only
+  unbatched scalar reductions over supported numeric formats and CS autocommit
+  are currently admitted. Workers use the same checked scan executor as
+  `scan_remote`, capture an immutable delta-free horizon and return one scalar.
+- `CacheManager.queryGenerations`, `queryPeak`, `queryVersion` and `queryChanged`
+  are owned by its existing actor. Operator reservations share the node cache
+  budget, credit a resident generation once and count private scratch per task.
+  Loading converts expected payload into cache bytes; reservations release once
+  on success/panic/error. Capacity rejection precedes task claim/execution and
+  may wait on versioned actor notifications. Ambiguous/started tasks are never
+  retried. No admission, roster update or synchronization occurs in row loops.
+
 ## Coding Style & Naming
 - in every source file: include license header
 - Go: format with `go fmt ./...` after each patch; keep idiomatic Go (short, cohesive funcs). Tabs and gofmt defaults are expected.
