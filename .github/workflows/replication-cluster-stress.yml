@@ -47,7 +47,7 @@ jobs:
       - name: Check process runner and write oracle
         run: python3 tools/test_reliability_drill.py
 
-      - name: Run crash, reclaim and three-database isolation scenarios
+      - name: Run remote reductions, crash, reclaim and isolation scenarios
         run: >-
           python3 -u tools/replication_cluster_stress.py
           --binary "$RUNNER_TEMP/memcp-replication"
@@ -59,8 +59,8 @@ jobs:
 
       - name: Check MOSI state-machine and publication units for races
         run: >-
-          go test -race -tags=nophp ./storage/mosi ./storage
-          -run 'TestReplication|TestMosi|TestCreateTableRefreshesInvalidatedPlannerCacheOnInit'
+          go test -race -tags=nophp ./storage/mosi ./storage ./scm
+          -run 'TestReplication|TestMosi|TestRemoteScan|TestScanDelegation|TestProcedureWire|TestCreateTableRefreshesInvalidatedPlannerCacheOnInit'
           -count=1
 
       - name: Check dedicated-listener scenarios with the Go race detector

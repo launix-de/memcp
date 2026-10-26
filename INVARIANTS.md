@@ -148,6 +148,47 @@ same ownership, visibility, lifetime, and durability guarantees.
   non-ephemeral shard. Its final permission check is a point-in-time observation,
   never an exemption from later remote requests or owner-unavailability errors.
 
+### Remote shard scans
+
+- `scan_remote` constructs query-local remote-only stubs. Their atomic immutable
+  `scanTarget` is routing metadata, never MOSI authority. Schema name/logical
+  shard UUID identify the resource; the physical generation fences execution.
+  Targets and executors belong to that query and never survive it, enter the
+  persistent catalog, or propagate to rebuild/historical generations.
+- `GetRead` signals delegation before payload acquisition. Only an acquisition
+  boundary consumes that typed signal. Callback panics, ordinary network errors
+  and ambiguous completion never trigger a retry. Invocations borrow query-local
+  callbacks/access/transaction bindings and are not wire DTOs.
+- `nodeScanService` publishes its immutable secret/incarnation once from Scheme
+  startup. The `/cluster` scan role mutually authenticates fresh nonces through
+  direction/protocol-bound HMAC proofs. Secrets never enter replication policy
+  or wire messages. Mutexes own the peer directory; connection lifetime joins
+  include handshakes, RPC workers and outbound calls before storage finalization.
+- `scanRPCSession` owns a bounded monotonic task replay window and worker slots
+  per authenticated connection. Old/duplicate numbers fail, never become newly
+  executable after pruning. Request/reply task, attempt, generation, horizon and
+  result-kind identities must agree. No task state is persisted.
+- A targeted source description acquires native schema/shard reads and captures
+  the column-semantics fingerprint, physical generation and main/delta horizon.
+  No payload or rights lease spans description/execute packets. Execution
+  reacquires MOSI access and existing topology/scanner/cache lifetimes, rejects
+  changed identities, runs the native filter/mapreducer, and checks schema
+  publication again before returning. It never establishes authority from files.
+- `scanAccessRuntime.horizon` is immutable invocation-owned input set before
+  preparation. The ordinary visible-upper and delta-bound paths exclude future
+  inserts. No reader registration or synchronization is added in row loops.
+  Cursor-stability standalone/autocommit reads are supported; ACID and explicit
+  transactions fail rather than acquiring an independent remote snapshot.
+- Both callbacks use `scm.MarshalProcedure`: CloseProcedure then the existing
+  Scheme Serialize implementation. The bounded versioned envelope contains
+  Scheme source. Decoding validates a single lambda, restores numbered syntax
+  through ordinary optimization, and creates the procedure without invoking it.
+  Unresolved captures, process-local handles, raw-row replies and known mutating
+  callbacks fail explicitly. Code is authenticated cluster code, not sandboxed.
+- Only scalar reductions or grouped FastDict states return to the coordinator.
+  It combines partial results; no row stream, physical IDs or per-row callback
+  RPC crosses the transport. Replies obey the existing bounded frame contract.
+
 ### Immutable main storage and mutable deltas
 
 Planner-cache initializer definitions are immutable atomic publications, including

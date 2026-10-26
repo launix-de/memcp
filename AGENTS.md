@@ -150,6 +150,18 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 
 ### Concurrency Rules (Storage Engine)
 
+- `storageShard.scanTarget` is immutable atomic query-local stub routing.
+  It grants no MOSI rights and is neither persisted nor inherited by generations.
+  GetRead signals delegation before payload acquisition. Only scan acquisition
+  boundaries consume it; callback panics and ambiguous replies never cause retries.
+  `nodeScanService` publishes immutable secret/incarnation at Scheme startup;
+  its mutex owns connection membership and its wait group joins handshakes and
+  peers before shutdown. `scanRPCSession` owns connection-local replay/worker
+  bounds. `scanAccessRuntime.horizon` is immutable operator input, checked against
+  the acquired generation/schema before local worker execution. Query bindings,
+  stubs and executors never survive their query. Worker row loops use existing
+  visibility and introduce no shared synchronization writes.
+
 - `storageShard.Indexes` permits append-only lazy declarations under
   `indexMutex` with shared shard ownership. Accounting, diagnostics and
   registration borrow a directory snapshot under that mutex while retaining
