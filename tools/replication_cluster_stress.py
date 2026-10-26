@@ -1068,6 +1068,7 @@ def run_cluster_placement(args, artifacts, journal):
     directory = artifacts / "cluster-placement"
     directory.mkdir()
     budget = 8 * 1024 * 1024
+    coordinator_budget = 1024 * 1024
     rows_per_shard, shards, columns = 40000, 8, 8
     secret = uuid.uuid4().hex + uuid.uuid4().hex
     secret_file = directory / "cluster.secret"
@@ -1116,6 +1117,11 @@ def run_cluster_placement(args, artifacts, journal):
         original_bytes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in immutable_paths}
         if payload_bytes <= budget:
             raise DrillFailure(f"fixture fits one node: {payload_bytes} <= {budget}")
+        for generation in generations:
+            generation_bytes = sum(path.stat().st_size for path in files
+                                   if path.name.startswith(generation + '-'))
+            if not coordinator_budget < generation_bytes < budget:
+                raise DrillFailure(f"shard does not exercise asymmetric admission: {generation_bytes}")
         # All participants resolve exactly the same immutable generation files;
         # neither per-node copies nor replication dumps are used in this test.
         nodes = [Node(args, directory, f"node-{i}", "") for i in range(3)]
@@ -1128,8 +1134,12 @@ def run_cluster_placement(args, artifacts, journal):
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
             (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
+            # The coordinator cannot fit one shard; either worker can fit it,
+            # while the full table exceeds even a worker's budget. This forces
+            # actual delegation without depending on OS scheduling overlap.
+            node_budget = coordinator_budget if node is nodes[0] else budget
             (node.data_dir / "settings.json").write_text(json.dumps({
-                "MaxRamBytes": budget, "MaxPersistBytes": budget, "MinRamBytes": 0,
+                "MaxRamBytes": node_budget, "MaxPersistBytes": node_budget, "MinRamBytes": 0,
                 "MetricsTracing": False,
             }))
             seed = "" if node is nodes[0] else f"http://127.0.0.1:{nodes[1 if node is nodes[2] else 0].port}/cluster"
@@ -1160,7 +1170,9 @@ def run_cluster_placement(args, artifacts, journal):
         params = ' '.join(f"x{i}" for i in range(columns))
         names = ' '.join(json.dumps(f"v{i}") for i in range(columns))
         expression = f'(scan nil (table "{DATABASE}" false "big_items" false) (list) (list) (list) (lambda () true) (list {names}) (lambda (acc {params}) (+ acc {params})) 0 +)'
-        expect(int(nodes[1].client.scm(expression).strip()), expected, "warm-holder automatic placement")
+        before = [status(node) for node in nodes]
+        cold_worker = min(range(1, len(nodes)), key=lambda i: before[i]["state"]["received"])
+        expect(int(nodes[cold_worker].client.scm(expression).strip()), expected, "warm-holder automatic placement")
         states = [status(node) for node in nodes]
         if states[0]["state"]["delegated"] == 0 or sum(item["state"]["received"] for item in states[1:]) == 0:
             raise DrillFailure("ordinary SUM did not execute on another node")
@@ -1171,9 +1183,10 @@ def run_cluster_placement(args, artifacts, journal):
         nodes[0].client.reject("INSERT INTO big_items VALUES(0," + ','.join('0' for _ in range(columns)) + ')',
                                contains="read-only")
         for node, item in zip(nodes, states):
-            expect(item["budget"]["MemoryBudget"], budget, "effective node RAM budget")
+            node_budget = coordinator_budget if node is nodes[0] else budget
+            expect(item["budget"]["MemoryBudget"], node_budget, "effective node RAM budget")
             expect(item["budget"]["QueryReserved"], 0, "released operator reservations")
-            if item["budget"]["QueryPeak"] > budget:
+            if item["budget"]["QueryPeak"] > node_budget:
                 raise DrillFailure(f"{node.name}: admission exceeded RAM budget")
         # The seed is not a permanent monitor or compute relay. Surviving peers
         # know one another and can continue the immutable aggregate without it.
@@ -1185,6 +1198,7 @@ def run_cluster_placement(args, artifacts, journal):
                original_bytes, "shared S-only schema/generations remained unchanged")
         journal.append({"scenario": "cluster-placement", "rows": rows_per_shard * shards,
                         "shards": shards, "payload_bytes": payload_bytes, "node_budget": budget,
+                        "coordinator_budget": coordinator_budget,
                         "expected_sum": expected, "states": states, "fixture_binary": str(builder_args.binary)})
 
 

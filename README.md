@@ -445,8 +445,8 @@ snapshots and request completion. Engine framing and connections are in
 `storage/mosi_wire.go` and `storage/mosi_transport.go`; replication directory
 coordination, generation transfer, authentication, configuration, session integration
 and startup use the corresponding `storage/replication_*.go` files. This separates
-the shared coherence core from the current master/slave topology; multi-master
-mutable multi-master coordination remains future work.
+the shared coherence core from the current master/slave topology; mutable
+multi-master coordination remains future work.
 
 
 ### Shared snapshot cluster and automatic placement
@@ -488,8 +488,8 @@ This does not yet implement mutable multi-master databases or nested clusters.
 
 The Python process runner has a focused `--cluster-only` scenario, run by the
 **Cluster Stress test** CI job with normal and race-instrumented servers. Eight
-shards exceed one node's 8 MiB tracked budget; three nodes calculate the exact
-SQL sum, exercise RAM and residency delegation, reject a wrong secret, release
+shards exceed each worker's 8 MiB tracked budget; a 1 MiB coordinator
+cannot load a shard locally. Three nodes calculate the exact SQL sum, exercise RAM and residency delegation, reject a wrong secret, release
 all reservations and continue after losing the seed. Shared generation/schema
 hashes must stay unchanged.
 
