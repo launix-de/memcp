@@ -262,3 +262,74 @@ func TestRemoteScanCancellationBeforeDispatchAndAfterCompletion(t *testing.T) {
 		t.Fatalf("unbounded cancellation state: %d/%d", len(registry.active), len(registry.terminal))
 	}
 }
+
+func TestRemoteScanNativePartialValuesKeepTupleKeysAndNULL(t *testing.T) {
+	key := scm.NewSlice([]scm.Scmer{scm.NewNil(), scm.NewInt(7)})
+	dict := scm.NewFastDictValue(1)
+	dict.Set(key, scm.NewSlice([]scm.Scmer{scm.NewInt(42), scm.NewNil()}), nil)
+	data, err := encodeScanResult(scm.NewFastDict(dict), "value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := decodeScanValue(data, "value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsFastDict() || !scm.Equal(scm.NewSlice(result.FastDict().ToList()), scm.NewSlice(dict.ToList())) {
+		t.Fatal("native grouped partial lost its domain/payload", result)
+	}
+	if _, err := encodeScanResult(scm.NewAny(new(int)), "value"); err == nil {
+		t.Fatal("runtime pointer entered the partial-result codec")
+	}
+}
+
+func TestRemoteScanAccessKeepsBoundedNULLAndMandatoryConstraints(t *testing.T) {
+	// An unbounded endpoint and a bound SQL NULL must remain distinguishable.
+	// Losing mandatory/null-safe flags could otherwise widen the remote scan.
+	schema := []scm.Scmer{
+		newScanAccessHeader(1, "value", 0, -1),
+		newScanBoundarySpec("id", EqualMatcher, 0, -1, true, false, "", true, -1, nil, nil, "", true),
+	}
+	access := exactScanAccess(schema, []scm.Scmer{scm.NewNil()})
+	access.plannerFilterCovered = true
+	frozen, err := freezeScanAccess(access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var received remoteScanAccess
+	if err := json.Unmarshal(data, &received); err != nil {
+		t.Fatal(err)
+	}
+	bound, err := received.bind()
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary, _ := bound.boundaryParts(0)
+	if bound.len() != 1 || boundary.ColumnName() != "id" || !boundary.Mandatory() || !boundary.NullSafe() || boundary.UpperSlot() != -1 || !bound.boundValue(0, false).IsNil() || !bound.runtime.filterCovered {
+		t.Fatal("remote access lost its native constraints", string(data))
+	}
+	received.Boundaries[0] = newScanBoundarySpec("id", EqualMatcher, 4, -1, true, false, "", true, -1, nil, nil, "", true)
+	if _, err := received.bind(); err == nil {
+		t.Fatal("accepted boundary outside its operand frame")
+	}
+}
+
+func TestRemoteScanPartialStripsParserLocationsBeforeChoosingCodec(t *testing.T) {
+	parsed := scm.Read(t.Name(), `(42 (7))`)
+	data, err := encodeScanResult(parsed, "value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := decodeScanValue(data, "value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := scm.NewSlice([]scm.Scmer{scm.NewInt(42), scm.NewSlice([]scm.Scmer{scm.NewInt(7)})})
+	if !scm.Equal(value, want) {
+		t.Fatal("parser metadata changed the reduction value", value)
+	}
+}

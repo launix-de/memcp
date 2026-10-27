@@ -20,7 +20,7 @@ import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
-const scanWireVersion = 2
+const scanWireVersion = 3
 
 type shardScanHorizon struct {
 	Main  uint32 `json:"main"`
@@ -37,18 +37,30 @@ type remoteScanDescribe struct {
 	Database string `json:"database"`
 	Table    string `json:"table"`
 }
+
+// remoteTransactionRead identifies the caller's logical transaction while
+// borrowing native visibility on an unmodified remote input generation. Modified
+// generations stay with their native participant and active transaction pins.
+// This read contract does not implement a distributed write/commit coordinator.
+type remoteTransactionRead struct {
+	URI        string `json:"uri"`
+	Mode       TxMode `json:"mode"`
+	AutoCommit bool   `json:"autocommit"`
+}
 type remoteScanTask struct {
-	Version       int             `json:"version"`
-	Task          uint64          `json:"task"`
-	Attempt       string          `json:"attempt"`
-	Visibility    string          `json:"visibility"`
-	Shard         remoteScanShard `json:"shard"`
-	FilterColumns []string        `json:"filter_columns"`
-	Filter        json.RawMessage `json:"filter"`
-	MapColumns    []string        `json:"map_columns"`
-	MapReducer    json.RawMessage `json:"mapreducer"`
-	Neutral       json.RawMessage `json:"neutral"`
-	ResultKind    string          `json:"result_kind"`
+	Transaction   *remoteTransactionRead `json:"transaction,omitempty"`
+	Access        remoteScanAccess       `json:"access"`
+	Version       int                    `json:"version"`
+	Task          uint64                 `json:"task"`
+	Attempt       string                 `json:"attempt"`
+	Visibility    string                 `json:"visibility"`
+	Shard         remoteScanShard        `json:"shard"`
+	FilterColumns []string               `json:"filter_columns"`
+	Filter        json.RawMessage        `json:"filter"`
+	MapColumns    []string               `json:"map_columns"`
+	MapReducer    json.RawMessage        `json:"mapreducer"`
+	Neutral       json.RawMessage        `json:"neutral"`
+	ResultKind    string                 `json:"result_kind"`
 }
 type remoteScanResult struct {
 	Version        int             `json:"version"`
@@ -193,7 +205,7 @@ func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScan
 	if _, err := uuid.Parse(request.Attempt); err != nil {
 		return nil, fmt.Errorf("invalid scan attempt")
 	}
-	if request.ResultKind != "scalar" && request.ResultKind != "group_sums" {
+	if request.ResultKind != "scalar" && request.ResultKind != "group_sums" && request.ResultKind != "value" {
 		return nil, fmt.Errorf("unsupported remote result kind")
 	}
 	if err := s.claim(request.Task); err != nil {
@@ -216,8 +228,18 @@ func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScan
 	ss := &scm.SessionState{}
 	seq := ss.BeginQuery("Cluster", "remote shard reduction")
 	ss.SetQueryContext(seq, ctx)
-	tx := NewTxContext(TxCursorStability)
-	tx.autoCommit = true
+	mode := TxCursorStability
+	if request.Transaction != nil {
+		if request.Transaction.URI == "" || (request.Transaction.Mode != TxCursorStability && request.Transaction.Mode != TxACID) {
+			return nil, fmt.Errorf("invalid remote transaction view")
+		}
+		mode = request.Transaction.Mode
+	}
+	tx := NewTxContext(mode)
+	tx.autoCommit = request.Transaction == nil || request.Transaction.AutoCommit
+	if request.Transaction != nil {
+		tx.remoteTransaction = request.Transaction.URI
+	}
 	tx.beginQuery(ss, seq, "remote shard reduction")
 	defer tx.endQuery(seq)
 	stop := context.AfterFunc(ctx, func() { ss.KillQuery(seq) })
@@ -239,7 +261,7 @@ func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScan
 	if err := validateRemoteScanReadOnly(reducer); err != nil {
 		return nil, err
 	}
-	neutral, err := decodeScanData(request.Neutral, false)
+	neutral, err := decodeScanValue(request.Neutral, request.ResultKind)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +270,10 @@ func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScan
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		access := runtimeScanAccess(nil)
+		access, err := request.Access.bind()
+		if err != nil {
+			return err
+		}
 		access.ensureRuntime().horizon = &request.Shard.Horizon
 		value, count, candidates := shard.scan(access, request.FilterColumns, filter, request.MapColumns, reducer, neutral, 0, nil, tx, ss)
 		encoded, err := encodeScanResult(value, request.ResultKind)
@@ -379,10 +404,19 @@ func withRemoteScanShard(expected remoteScanShard, execute func(*storageShard) e
 	}
 }
 func checkScanData(value scm.Scmer, depth int) error {
+	value = value.WithoutSourceInfo()
 	if depth > 64 {
 		return fmt.Errorf("remote aggregate nesting limit")
 	}
 	if value.IsNil() || value.IsBool() || value.IsInt() || value.IsFloat() || value.IsString() {
+		return nil
+	}
+	if value.IsFastDict() {
+		for _, item := range value.FastDict().ToList() {
+			if err := checkScanData(item, depth+1); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	if value.IsSlice() {
@@ -393,7 +427,7 @@ func checkScanData(value scm.Scmer, depth int) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("remote scan cannot transport runtime values")
+	return fmt.Errorf("remote scan cannot transport runtime values (tag %d, %T)", value.GetTag(), value.Any())
 }
 func decodeScanData(data json.RawMessage, groups bool) (scm.Scmer, error) {
 	var value scm.Scmer
@@ -416,7 +450,24 @@ func decodeScanData(data json.RawMessage, groups bool) (scm.Scmer, error) {
 	}
 	return value, nil
 }
+func decodeScanValue(data json.RawMessage, kind string) (scm.Scmer, error) {
+	if kind != "value" {
+		return decodeScanData(data, kind == "group_sums")
+	}
+	var value scanWireValue
+	if err := json.Unmarshal(data, &value); err != nil {
+		return scm.NewNil(), err
+	}
+	return value.thaw(0)
+}
 func encodeScanResult(value scm.Scmer, kind string) (json.RawMessage, error) {
+	if kind == "value" {
+		frozen, err := freezeScanValue(value, 0)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(frozen)
+	}
 	if kind == "group_sums" {
 		if value.IsFastDict() {
 			value = scm.NewSlice(value.FastDict().ToList())
@@ -443,29 +494,52 @@ type peerScanExecutor struct {
 }
 
 func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, _ uuid.UUID, invocation shardScanInvocation) scanResult {
-	if invocation.access.len() != 0 {
-		panic("remote scan requires explicit serialized filter without physical access constraints")
-	}
 	condition := invocation.condition
 	if condition.IsNil() {
 		condition = scm.Eval(scm.Read("remote unconditional filter", "(lambda args true)"), &scm.Globalenv)
 	}
-	filter, err := scm.MarshalProcedure(condition)
+	bindings := new(scm.ProcedureBindings)
+	if tx := invocation.tx; tx != nil {
+		if existing := tx.remoteBindings.Load(); existing != nil {
+			bindings = existing
+		} else if !tx.remoteBindings.CompareAndSwap(nil, bindings) {
+			bindings = tx.remoteBindings.Load()
+		}
+	}
+	filter, err := scm.MarshalProcedure(condition, bindings)
 	if err != nil {
 		panic(err)
 	}
-	reducer, err := scm.MarshalProcedure(invocation.mapReduce)
+	reducer, err := scm.MarshalProcedure(invocation.mapReduce, bindings)
 	if err != nil {
 		panic(err)
 	}
-	if err := checkScanData(invocation.neutral, 0); err != nil {
-		panic(err)
-	}
-	neutral, err := json.Marshal(invocation.neutral)
+	neutral, err := encodeScanResult(invocation.neutral, executor.kind)
 	if err != nil {
 		panic(err)
 	}
 	task := remoteScanTask{Version: scanWireVersion, Task: executor.next.Add(1), Attempt: uuid.NewString(), Visibility: "cursor-stability/captured-horizon", Shard: executor.prepared, FilterColumns: invocation.conditionCols, Filter: filter, MapColumns: invocation.callbackCols, MapReducer: reducer, Neutral: neutral, ResultKind: executor.kind}
+	task.Access, err = freezeScanAccess(invocation.access)
+	if err != nil {
+		panic(err)
+	}
+	if executor.cluster && invocation.tx != nil {
+		// Export only unmodified remote inputs. A modified generation is kept
+		// resident by native TX pins and must execute at its participant; a cold
+		// path must not silently drop its private delete/undelete overlay.
+		if db := GetDatabase(resource.Database); db != nil {
+			if r := activeReplication(db); r != nil {
+				if shard := r.findShard(resource); shard != nil && invocation.tx.getShardTx(shard) != nil {
+					panic("remote modified input requires its transaction participant")
+				}
+			}
+		}
+		uri := invocation.tx.remoteTransaction
+		if uri == "" {
+			uri = executor.peer.scanService.authNodeID() + "/tx/" + walBootID + "/" + fmt.Sprint(invocation.tx.ID)
+		}
+		task.Transaction = &remoteTransactionRead{uri, invocation.tx.Mode, invocation.tx.autoCommit}
+	}
 	if resource != task.Shard.Resource {
 		panic("remote scan resource mismatch")
 	}
@@ -476,7 +550,7 @@ func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, _ uuid
 	if response.Version != scanWireVersion || response.Task != task.Task || response.Attempt != task.Attempt || response.Shard != task.Shard || response.Kind != task.ResultKind {
 		panic("mismatched remote scan response")
 	}
-	value, err := decodeScanData(response.Value, response.Kind == "group_sums")
+	value, err := decodeScanValue(response.Value, response.Kind)
 	if err != nil {
 		panic(err)
 	}

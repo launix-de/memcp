@@ -20,11 +20,13 @@ const maxProcedureWireBytes = 256 * 1024
 
 // MarshalProcedure snapshots explicit captures before using the existing Scheme
 // Serialize function. It does not serialize Env, native/JIT code, sessions or Go pointers.
+// Optional statement bindings freeze demanded constant-key session reads into
+// data before validation; dynamic reads/mutations still require an owner contract.
 // Both nodes must provide the same declared global builtin contract; other
 // globals require explicit captures. Unsupported values
 // and unresolved lexical captures fail instead of silently becoming "?" or a
 // different receiver-side global. This is a conservative first transport subset.
-func MarshalProcedure(value Scmer) (data []byte, err error) {
+func MarshalProcedure(value Scmer, bindings ...*ProcedureBindings) (data []byte, err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			err = fmt.Errorf("procedure encoding: %v", failure)
@@ -39,6 +41,11 @@ func MarshalProcedure(value Scmer) (data []byte, err error) {
 		value = Eval(NewSlice([]Scmer{NewSymbol("lambda"), NewSymbol("args"), NewSlice([]Scmer{NewSymbol("apply"), NewSymbol(declaration.Name), NewSymbol("args")})}), &Globalenv)
 	}
 	closed := CloseProcedure(value)
+	if len(bindings) > 0 && bindings[0] != nil {
+		proc := closed.Proc().snapshot()
+		proc.Body = bindings[0].freeze(proc.Body, value.Proc().En, procedureWireBindings(proc.Params, proc.Body, nil))
+		closed = NewProcStruct(proc)
+	}
 	proc := closed.Proc()
 	bound := procedureWireBindings(proc.Params, proc.Body, nil)
 	if err := validateProcedureWire(proc.Body, bound, value.Proc().En, false, 0); err != nil {

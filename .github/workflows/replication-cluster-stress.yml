@@ -100,6 +100,7 @@ jobs:
         with:
           packages: mariadb-client
       - name: Build servers
+        id: build_cluster
         run: go build -tags=nophp -o "$RUNNER_TEMP/memcp-cluster" .
       - name: Check authenticated placement and shared-budget units
         run: >-
@@ -111,14 +112,32 @@ jobs:
           --binary "$RUNNER_TEMP/memcp-cluster"
           --artifacts "$RUNNER_TEMP/cluster-placement" --cluster-only --seed 20261026
       - name: Build race-instrumented servers
+        id: build_cluster_race
+        if: ${{ !cancelled() && steps.build_cluster.outcome == 'success' }}
         run: go build -race -tags=nophp -o "$RUNNER_TEMP/memcp-cluster-race" .
       - name: Check cluster processes with race detector
+        if: ${{ !cancelled() && steps.build_cluster_race.outcome == 'success' }}
         env:
           GORACE: halt_on_error=1 exitcode=66
         run: >-
           python3 -u tools/replication_cluster_stress.py
           --binary "$RUNNER_TEMP/memcp-cluster-race"
           --artifacts "$RUNNER_TEMP/cluster-placement-race" --cluster-only --seed 20261026
+          --fixture-binary "$RUNNER_TEMP/memcp-cluster"
+      - name: Check SQL session and transaction contexts
+        if: ${{ !cancelled() && steps.build_cluster.outcome == 'success' }}
+        run: >-
+          python3 -u tools/replication_cluster_stress.py
+          --binary "$RUNNER_TEMP/memcp-cluster"
+          --artifacts "$RUNNER_TEMP/cluster-contexts" --cluster-context-only --seed 20261027
+      - name: Check SQL runtime contexts with race detector
+        if: ${{ !cancelled() && steps.build_cluster_race.outcome == 'success' }}
+        env:
+          GORACE: halt_on_error=1 exitcode=66
+        run: >-
+          python3 -u tools/replication_cluster_stress.py
+          --binary "$RUNNER_TEMP/memcp-cluster-race"
+          --artifacts "$RUNNER_TEMP/cluster-contexts-race" --cluster-context-only --seed 20261027
           --fixture-binary "$RUNNER_TEMP/memcp-cluster"
       - name: Upload cluster logs, budgets and result oracle
         if: always()
@@ -128,3 +147,5 @@ jobs:
           path: |
             ${{ runner.temp }}/cluster-placement
             ${{ runner.temp }}/cluster-placement-race
+            ${{ runner.temp }}/cluster-contexts
+            ${{ runner.temp }}/cluster-contexts-race

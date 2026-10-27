@@ -167,3 +167,33 @@ func TestProcedureWireNestedScanContextRebindSkipsQuotedData(t *testing.T) {
 		t.Fatalf("nested scope rebinding changed quoted data or retained its parent: %s", bound)
 	}
 }
+
+func TestProcedureWireStatementSessionBindingsAreFrozen(t *testing.T) {
+	session := NewSession()
+	session.Func()(NewString("a"), NewInt(7))
+	session.Func()(NewString("b"), NewInt(8))
+	env := &Env{Vars: Vars{Symbol("session"): session}, Outer: &Globalenv}
+	bindings := new(ProcedureBindings)
+	run := func(key string, bindings *ProcedureBindings) Scmer {
+		proc := Eval(Read(t.Name(), `(lambda (x) (+ x (session "`+key+`")))`), env)
+		data, err := MarshalProcedure(proc, bindings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restored, err := UnmarshalProcedure(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Apply(restored, NewInt(1))
+	}
+	if got := run("a", bindings); got.Int() != 8 {
+		t.Fatal(got)
+	}
+	session.Func()(NewString("b"), NewInt(99))
+	if got := run("b", bindings); got.Int() != 9 {
+		t.Fatal("one statement observed two session revisions", got)
+	}
+	if got := run("b", new(ProcedureBindings)); got.Int() != 100 {
+		t.Fatal("new statement retained the old session revision", got)
+	}
+}

@@ -137,7 +137,11 @@ type TxContext struct {
 	queryMu             sync.Mutex         // serializes statements which reuse this transaction object
 	queryColumns        map[*column]*table // statement cache leases, protected by mu
 	queryReaderReleases []func()           // decoded dictionary leases, protected by mu
-	walTxID             atomic.Pointer[string]
+	// remoteBindings freezes session inputs once per statement, only on cold
+	// remote dispatch. endStatement drops it after all shard workers finish.
+	remoteBindings    atomic.Pointer[scm.ProcedureBindings]
+	remoteTransaction string // immutable origin identity of a remote read participant
+	walTxID           atomic.Pointer[string]
 	// fanoutLimit/fanoutInUse bound only additional multi-shard workers. A
 	// single relevant shard never reads or writes this cache line.
 	fanoutLimit atomic.Int32
@@ -179,6 +183,8 @@ func (tx *TxContext) reset(mode TxMode) {
 	tx.fanoutLimit.Store(int32(runtime.GOMAXPROCS(0)))
 	tx.fanoutInUse.Store(0)
 	tx.walTxID.Store(nil)
+	tx.remoteBindings.Store(nil)
+	tx.remoteTransaction = ""
 	tx.shards = nil
 	tx.touchedShards = sync.Map{}
 	tx.autoCommit = false
@@ -303,6 +309,7 @@ func (tx *TxContext) retainQueryReader(release func()) bool {
 // endStatement releases only physical query-local ownership. Request
 // cancellation and process-list identity survive until endQuery below.
 func (tx *TxContext) endStatement() {
+	tx.remoteBindings.Store(nil)
 	tx.mu.Lock()
 	tx.queryActive.Store(false)
 	tx.statementGeneration.Store(0)
@@ -735,9 +742,20 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 
 // Commit finalizes the transaction.
 func (tx *TxContext) Commit() error {
-	for _, table := range tx.contributionMutationTables() {
+	tables := tx.contributionMutationTables()
+	for _, table := range tables {
 		defer table.endContributionMutation()
 	}
+	// An observer can rebuild an old committed cache while ACID rows are
+	// staged. Re-publish dependency invalidation after visibility changes and
+	// before returning COMMIT, once per touched table, never inside row loops.
+	defer func() {
+		if tx.Mode == TxACID && tx.State == TxCommitted {
+			for _, table := range tables {
+				invalidateDependentCaches(table)
+			}
+		}
+	}()
 	switch tx.Mode {
 	case TxCursorStability:
 		tx.mu.Lock()
