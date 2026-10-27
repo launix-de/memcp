@@ -280,3 +280,7 @@ func (cell *replicaCell) HandleClusterRequest(ctx context.Context, request scm.C
 	}
 	return nil, cell.engine.applyResourcePacket(invocation.source, invocation.packet)
 }
+
+func (*replicaCell) Serialize(*scm.SerializationContext) (scm.Scmer, error) {
+	return scm.NewNil(), fmt.Errorf("replicaCell is a routing endpoint, not a serializable runtime value")
+}

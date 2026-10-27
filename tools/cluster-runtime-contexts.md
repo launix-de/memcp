@@ -61,9 +61,18 @@ receiver resolves these calls before Optimize/Eval, preserving repeated capture
 identity. `scm.ClusterObject.HandleClusterRequest` is the shared endpoint contract
 for sessions, cachemaps, transactions, transaction-shard visibility views,
 physical generations and catalog objects. Serialization does not switch on their
-representation or replace session calls with constants.
+representation or replace session calls with constants. The interface requires
+`Serialize(*scm.SerializationContext) (scm.Scmer, error)`: the object chooses its
+reconstruction expression. The printer and runtime wire codec use that contract,
+including standalone values without URI registration. Reference-backed objects
+explicitly select the context's `ReferenceExpression`; routing-only endpoints
+reject value serialization. Runtime expressions reconstruct once at import.
 
-`ClusterBindings` captures one owner-defined view per statement. An optional
+Storage's scan-context binding lives in `storage`, supplied through the generic
+`ProcedureDecode.Prepare` callback before compilation. The SCM procedure codec has no storage import, storage-operator binding rules
+or dependency on a running storage engine.
+
+`SerializationContext` captures one owner-defined view per statement. An optional
 object-owned projection restricts it to demanded keys. Imported session/cachemap
 prepared reads use immutable local views without a lock, CAS, network request
 or shared RAM write per row. A cachemap miss uses its owner stub and publishes
@@ -102,19 +111,31 @@ operation collects replies using registered UUID channels. Panics, including SQL
 errors and their originating stack, cross this same channel. Cancellation fences
 shard tasks and propagates through nested invocations, without row-loop probes.
 
-The owner registry holds the native object strongly while remote tokens exist.
-Every export gets an independent token bound to the authenticated peer's process
-incarnation. Offers become acquired handles before reconstruction; failed or
-abandoned messages discard only unacquired offers. Repeated imports of one token
-share a weakly cached Go lease, preventing one alias from releasing another.
-The imported value retains that lease. `runtime.AddCleanup` enqueues a small
-release when it becomes unreachable, including callable cycles; a worker delivers
-and confirms the release through the existing channel. The GC callback performs
-no network I/O. Last peer release deregisters the owner object. An in-flight
-local handler still retains its ordinary Go pointer. Weak retirement metadata
-keeps its files and blob manifests protected until that pointer is also gone.
+The owner registry pins native objects from serialization through a pending
+transfer reservation. Import joins a shared peer lease before dropping that
+reservation. The peer's weak directory deduplicates endpoints by owner,
+incarnation and URI. Concurrent subscans retain that shared Go object; their
+immutable session views and native TX participants stay query-local. There is no
+per-use distributed reference count. Each new Go lifetime has a fresh lease ID,
+so a delayed old GC release cannot revoke its replacement. Repeated imports of
+one offer preserve value identity through a second weak directory.
 
-A disconnected peer's acquired references remain registered. A reconnect of the
+`Serialize` constructors carry envelope-local capture IDs. `UnmarshalProcedure`
+MUST construct those captures exactly once on the receiving peer, restore the
+enclosed scope and then build the callable. This happens even for an empty shard
+or a callback that is never invoked. Otherwise the owner's reservation could
+outlive any real peer object and its missing GC callback would leak it. Ordinary
+row code stays inert; row execution never reconstructs handles. Engine tests
+force two overlapping empty subscans: after the first is collected the common
+lease stays registered, and only the last GC release deregisters the owner.
+
+`runtime.AddCleanup` only queues endpoint release, including callable cycles;
+a worker confirms it through the existing channel. Last lease/offer removal
+allows owner GC. An in-flight local handler retains its ordinary Go pointer;
+weak retirement metadata protects its files and blob manifests until that
+pointer is gone too. No GC callback performs network I/O.
+
+A disconnected peer's established leases remain registered. A reconnect of the
 same authenticated process can continue or deliver releases. This protocol does
 not infer death from a timeout, steal M rights, or implement global tracing of
 cycles spanning owners. Explicit failed-peer retirement and uncertain transaction

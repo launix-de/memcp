@@ -27,7 +27,7 @@ type scanWireValue struct {
 	Items     []scanWireValue       `json:"items,omitempty"`
 }
 
-func freezeScanValue(value scm.Scmer, depth int, bindings ...*scm.ClusterBindings) (scanWireValue, error) {
+func freezeScanValue(value scm.Scmer, depth int, bindings ...*scm.SerializationContext) (scanWireValue, error) {
 	// Parser locations are diagnostic wrappers, not runtime object identities.
 	// Unwrap before choosing the recursive container codec as well as validation.
 	value = value.WithoutSourceInfo()
@@ -35,9 +35,13 @@ func freezeScanValue(value scm.Scmer, depth int, bindings ...*scm.ClusterBinding
 		return scanWireValue{}, fmt.Errorf("remote aggregate nesting limit")
 	}
 	if len(bindings) > 0 && bindings[0] != nil {
-		if object, ok := scm.ClusterObjectOf(value); ok {
-			ref, err := bindings[0].Reference(object)
-			return scanWireValue{Kind: "object", Reference: &ref}, err
+		if _, ok := scm.ClusterObjectOf(value); ok {
+			// Use the same mandatory Serialize contract as captured objects.
+			// The thunk reconstructs once during import, never in a row loop;
+			// objects may choose portable values instead of owner references.
+			thunk := scm.Eval(scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(nil), value}), &scm.Globalenv)
+			data, err := scm.MarshalProcedure(thunk, bindings[0])
+			return scanWireValue{Kind: "expression", Procedure: data}, err
 		}
 		if value.IsProc() {
 			data, err := scm.MarshalProcedure(value, bindings[0])
@@ -74,7 +78,7 @@ func (value scanWireValue) thaw(depth int, decode ...scm.ProcedureDecode) (scm.S
 	if depth > 64 {
 		return scm.NewNil(), fmt.Errorf("remote aggregate nesting limit")
 	}
-	if value.Reference != nil && value.Kind != "object" || len(value.Procedure) != 0 && value.Kind != "procedure" {
+	if value.Reference != nil && value.Kind != "object" || len(value.Procedure) != 0 && value.Kind != "procedure" && value.Kind != "expression" {
 		return scm.NewNil(), fmt.Errorf("mixed runtime value encoding")
 	}
 	if value.Kind == "object" {
@@ -83,11 +87,18 @@ func (value scanWireValue) thaw(depth int, decode ...scm.ProcedureDecode) (scm.S
 		}
 		return decode[0].Resolve(*value.Reference)
 	}
-	if value.Kind == "procedure" {
+	if value.Kind == "procedure" || value.Kind == "expression" {
 		if len(value.Items) != 0 || len(value.Scalar) != 0 || len(decode) == 0 {
 			return scm.NewNil(), fmt.Errorf("procedure requires a reconstruction context")
 		}
-		return scm.UnmarshalProcedure(value.Procedure, decode[0])
+		proc, err := scm.UnmarshalProcedure(value.Procedure, decode[0])
+		if err != nil {
+			return scm.NewNil(), err
+		}
+		if value.Kind == "expression" {
+			return scm.Apply(proc), nil
+		}
+		return proc, nil
 	}
 	if value.Kind == "scalar" {
 		if len(value.Items) != 0 {

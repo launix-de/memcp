@@ -243,11 +243,11 @@ func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScan
 	s.service.executions.Store(id, tx)
 	defer s.service.executions.Delete(id)
 	binding := scm.NewSlice([]scm.Scmer{scm.NewSymbol("node_query_context"), scm.NewString(id)})
-	filter, err := scm.UnmarshalProcedure(request.Filter, scm.ProcedureDecode{QueryContext: binding, Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
+	filter, err := scm.UnmarshalProcedure(request.Filter, scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
 	if err != nil {
 		return nil, err
 	}
-	reducer, err := scm.UnmarshalProcedure(request.MapReducer, scm.ProcedureDecode{QueryContext: binding, Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
+	reducer, err := scm.UnmarshalProcedure(request.MapReducer, scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
 	if err != nil {
 		return nil, err
 	}
@@ -512,7 +512,7 @@ func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, invoca
 	if condition.IsNil() {
 		condition = scm.Eval(scm.Read("remote unconditional filter", "(lambda args true)"), &scm.Globalenv)
 	}
-	bindings := new(scm.ClusterBindings)
+	bindings := new(scm.SerializationContext)
 	if tx := invocation.tx; tx != nil {
 		if existing := tx.remoteBindings.Load(); existing != nil {
 			bindings = existing
@@ -647,6 +647,13 @@ func remoteScan(a ...scm.Scmer) scm.Scmer {
 				panic(err)
 			}
 			remote.inputLease = value
+			object, ok := value.Any().(*remoteShardObject)
+			if !ok {
+				panic("remote source is not a shard handle")
+			}
+			// Descriptions carry a transfer offer. Execution MUST address the
+			// imported peer lease, after that offer has been consumed atomically.
+			remote.input = &object.handle.Reference
 		}
 		target := &shardScanTarget{resource: part.Resource, executor: remote}
 		stub.scanTarget.Store(target)
@@ -718,4 +725,47 @@ func findScanShard(table *table, resource mosiResource) *storageShard {
 		}
 	}
 	return nil
+
+}
+
+// bindProcedureScanContext is storage policy, not a Scheme language rule. It
+// rebinds only storage scan invocations to the current worker's cancellation/TX
+// scope before compilation. A standalone SCM function named scan is untouched.
+func bindProcedureScanContext(value, queryContext scm.Scmer) scm.Scmer {
+	plain := value.WithoutSourceInfo()
+	if !plain.IsSlice() {
+		return value
+	}
+	items := plain.Slice()
+	if len(items) == 0 {
+		return value
+	}
+	if storageProcedureSymbol(items[0], "quote") {
+		return value
+	}
+	result := make([]scm.Scmer, len(items))
+	for i, item := range items {
+		result[i] = bindProcedureScanContext(item, queryContext)
+	}
+	if len(items) > 1 {
+		switch {
+		case storageProcedureSymbol(items[0], "scan"), storageProcedureSymbol(items[0], "scan_exists"), storageProcedureSymbol(items[0], "scan_order"), storageProcedureSymbol(items[0], "scan_remote"):
+			arg := items[1].WithoutSourceInfo()
+			rebound := arg.IsSlice() && len(arg.Slice()) > 0 && storageProcedureSymbol(arg.Slice()[0], "node_query_context")
+			if arg.IsNil() || storageProcedureSymbol(arg, "nil") || rebound {
+				result[1] = queryContext
+			}
+		}
+	}
+	return scm.NewSlice(result)
+}
+
+func storageProcedureSymbol(value scm.Scmer, name string) bool {
+	value = value.WithoutSourceInfo()
+	return value.IsSymbol() && value.String() == name
+}
+func prepareScanProcedure(binding scm.Scmer) func(scm.Scmer) (scm.Scmer, error) {
+	return func(expression scm.Scmer) (scm.Scmer, error) {
+		return bindProcedureScanContext(expression, binding), nil
+	}
 }

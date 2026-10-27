@@ -18,15 +18,12 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 
 package scm
 
-import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
-	"reflect"
-	"strconv"
-	"strings"
-)
+import "io"
+import "fmt"
+import "bytes"
+import "reflect"
+import "strconv"
+import "strings"
 
 var schemeStringEscaper = strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "\\r", "\n", "\\n")
 
@@ -40,8 +37,8 @@ const (
 // Avoiding io.Writer/hash.Hash dispatch matters for the many tiny AST tokens.
 type schemeTextWriter struct {
 	buffer     *bytes.Buffer
-	objects    *ClusterBindings
-	references map[ClusterObject]ClusterReference
+	objects    *SerializationContext
+	references map[ClusterObject]Scmer
 	hash       uint64
 }
 
@@ -272,7 +269,7 @@ func SerializeToString(v Scmer, glob *Env) string {
 	return b.String()
 }
 
-func Serialize(b *bytes.Buffer, v Scmer, glob *Env, objects ...*ClusterBindings) {
+func Serialize(b *bytes.Buffer, v Scmer, glob *Env, objects ...*SerializationContext) {
 	writer := bufferTextWriter(b)
 	if len(objects) > 0 {
 		writer.objects = objects[0]
@@ -302,27 +299,28 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteString(")")
 		return
 	}
-	if b.objects != nil {
+	// Ordinary scalar serialization performs no registry lookup. Object-backed
+	// callables, opaque values and embedding-owned tags use the same interface,
+	// including standalone objects which provide context-free reconstruction.
+	if v.GetTag() == tagFunc || v.GetTag() == tagAny || v.GetTag() >= 100 {
 		if object, ok := ClusterObjectOf(v); ok {
-			reference, exists := b.references[object]
+			expression, exists := b.references[object]
 			if !exists {
 				var err error
-				reference, err = b.objects.Reference(object)
+				expression, err = object.Serialize(b.objects)
 				if err != nil {
 					panic(err)
 				}
 				if b.references == nil {
-					b.references = make(map[ClusterObject]ClusterReference)
+					b.references = make(map[ClusterObject]Scmer)
 				}
-				b.references[object] = reference
+				// Mark object reconstruction explicitly. The decoder MUST construct
+				// this capture once before compiling any row callback, even for an
+				// empty shard. The envelope-local ID also preserves capture aliases.
+				expression = NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(int64(len(b.references) + 1)), expression})
+				b.references[object] = expression
 			}
-			data, err := json.Marshal(reference)
-			if err != nil {
-				panic(err)
-			}
-			b.WriteString("(cluster_object ")
-			serializeEx(b, NewString(string(data)), glob, glob, nil)
-			b.WriteByte(')')
+			serializeEx(b, expression, glob, glob, nil)
 			return
 		}
 	}
@@ -380,7 +378,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 	case tagSlice:
 		slice := lambdaSyntaxOperands(v.Slice())
-		if b.objects != nil && len(slice) == 2 && scmerIsSymbol(slice[0], "quote") && containsClusterObject(slice[1]) {
+		if len(slice) == 2 && scmerIsSymbol(slice[0], "quote") && containsClusterObject(slice[1]) {
 			serializeClusterLiteral(b, slice[1], glob)
 			return
 		}

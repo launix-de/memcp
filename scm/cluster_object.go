@@ -14,6 +14,9 @@ import "encoding/json"
 // choose their read view and mutation policy; transport never inspects their Go
 // representation. All requests execute outside generated row loops.
 type ClusterObject interface {
+	// Serialize returns reconstruction code, not an encoded Go representation.
+	// Each object owns its choice of a registered reference or portable value.
+	Serialize(*SerializationContext) (Scmer, error)
 	ClusterObjectType() string
 	HandleClusterRequest(context.Context, ClusterRequest) (any, error)
 }
@@ -24,9 +27,10 @@ type ClusterRequest struct {
 	Payload   any `json:"-"` // private decoded protocol payload, never runtime serialization
 }
 
-// ClusterReference names a process-incarnation-bound owner registration. Each
-// export has its own token: releasing an old handle cannot revoke a newer one.
-// View is an immutable, demanded read view prepared by the object owner.
+// ClusterReference names an incarnation-bound owner endpoint. On the wire Token
+// is a pending-transfer reservation; import replaces it with the peer's shared
+// lease generation. A late old GC message cannot revoke a newer Go lifetime.
+// View is an immutable invocation view, not the shared endpoint's mutable state.
 type ClusterReference struct {
 	URI         string          `json:"uri"`
 	Owner       string          `json:"owner"`
@@ -97,12 +101,12 @@ func ClusterObjectOf(value Scmer) (ClusterObject, bool) {
 	return nil, false
 }
 
-// ClusterBindings belongs to one statement. Demands are collected from native
+// SerializationContext belongs to one statement. Demands are collected from native
 // callback captures, for every object type alike. Objects produce their own
 // immutable view once; each target peer gets a distinct registered handle.
-type ClusterBindings struct {
+type SerializationContext struct {
 	Export  func(ClusterObject, Scmer) (ClusterReference, error)
-	root    *ClusterBindings
+	root    *SerializationContext
 	mu      sync.Mutex
 	views   map[ClusterObject]*clusterViewCapture
 	demands map[ClusterObject]map[Scmer]struct{}
@@ -114,7 +118,7 @@ type clusterViewCapture struct {
 	err  error
 }
 
-func (bindings *ClusterBindings) Reference(object ClusterObject) (ClusterReference, error) {
+func (bindings *SerializationContext) Reference(object ClusterObject) (ClusterReference, error) {
 	if bindings == nil || bindings.Export == nil {
 		return ClusterReference{}, fmt.Errorf("cluster object requires an export context")
 	}
@@ -167,11 +171,30 @@ func (bindings *ClusterBindings) Reference(object ClusterObject) (ClusterReferen
 	return export(object, view)
 }
 
+// ReferenceExpression is the common reference representation, chosen explicitly
+// by reference-backed implementations of Serialize. The object contract permits
+// other reconstruction expressions without adding a type switch to the printer.
+// Registration, peer ownership and demanded views stay in the supplied context;
+// no storage transport is imported or initialized by standalone SCM.
+func (bindings *SerializationContext) ReferenceExpression(object ClusterObject) (Scmer, error) {
+	ref, err := bindings.Reference(object)
+	if err != nil {
+		return NewNil(), err
+	}
+	data, err := json.Marshal(ref)
+	if err != nil {
+		return NewNil(), err
+	}
+	return NewSlice([]Scmer{NewSymbol("cluster_object"), NewString(string(data))}), nil
+}
+
 // ProcedureDecode is invocation-owned. Reconstruction is completed before
 // Optimize/Eval builds the callback, never lazily during its row execution.
 type ProcedureDecode struct {
-	QueryContext Scmer
-	Resolve      func(ClusterReference) (Scmer, error)
+	// Prepare is an optional embedding-owned transformation of the validated
+	// lambda. SCM knows neither the host's operators nor its execution context.
+	Prepare func(Scmer) (Scmer, error)
+	Resolve func(ClusterReference) (Scmer, error)
 }
 
 // ClusterReadProjection lets the object restrict its prepared read view to
@@ -180,14 +203,14 @@ type ClusterReadProjection interface {
 	ProjectClusterView(Scmer, []Scmer) (Scmer, error)
 }
 
-func (bindings *ClusterBindings) WithExport(export func(ClusterObject, Scmer) (ClusterReference, error)) *ClusterBindings {
+func (bindings *SerializationContext) WithExport(export func(ClusterObject, Scmer) (ClusterReference, error)) *SerializationContext {
 	if bindings.root != nil {
 		bindings = bindings.root
 	}
-	return &ClusterBindings{Export: export, root: bindings}
+	return &SerializationContext{Export: export, root: bindings}
 }
 
-func (bindings *ClusterBindings) prepare(value Scmer) {
+func (bindings *SerializationContext) prepare(value Scmer) {
 	if bindings.root != nil {
 		bindings = bindings.root
 	}
@@ -225,7 +248,7 @@ func (bindings *ClusterBindings) prepare(value Scmer) {
 
 func resolveProcedureObjects(value Scmer, resolve func(ClusterReference) (Scmer, error)) (Scmer, error) {
 	values := make(map[string]Scmer)
-	return resolveProcedureObjectTree(value, func(ref ClusterReference) (Scmer, error) {
+	return resolveProcedureObjectTree(value, make(map[int64]*serializedCapture), func(ref ClusterReference) (Scmer, error) {
 		key := ref.URI + "/" + ref.Token
 		if value, exists := values[key]; exists {
 			return value, nil
@@ -240,12 +263,50 @@ func resolveProcedureObjects(value Scmer, resolve func(ClusterReference) (Scmer,
 		return value, err
 	})
 }
-func resolveProcedureObjectTree(value Scmer, resolve func(ClusterReference) (Scmer, error)) (Scmer, error) {
+
+// A lambda arriving over the network MUST restore its enclosed runtime values
+// exactly once BEFORE compilation/execution. Deferring this to the first mapped
+// row leaks owner reservations on empty shards and constructs multiple leases
+// for repeated rows. The decoded Go value owns the peer's GC cleanup lease.
+type serializedCapture struct {
+	value Scmer
+	ready bool
+}
+
+func serializedValueLiteral(value Scmer) Scmer {
+	plain := value.WithoutSourceInfo()
+	if plain.IsSlice() || plain.IsFastDict() || plain.IsSymbol() {
+		return NewSlice([]Scmer{NewSymbol("quote"), value})
+	}
+	return value
+}
+func resolveProcedureObjectTree(value Scmer, captures map[int64]*serializedCapture, resolve func(ClusterReference) (Scmer, error)) (Scmer, error) {
 	plain := value.WithoutSourceInfo()
 	if !plain.IsSlice() {
 		return value, nil
 	}
 	items := plain.Slice()
+	if len(items) == 3 && scmerIsSymbol(items[0], "serialized_value") {
+		id := items[1].WithoutSourceInfo()
+		if !id.IsInt() || id.Int() <= 0 {
+			return NewNil(), fmt.Errorf("invalid serialized capture ID")
+		}
+		if capture := captures[id.Int()]; capture != nil {
+			if !capture.ready {
+				return NewNil(), fmt.Errorf("cyclic serialized capture")
+			}
+			return serializedValueLiteral(capture.value), nil
+		}
+		capture := &serializedCapture{}
+		captures[id.Int()] = capture
+		expression, err := resolveProcedureObjectTree(items[2], captures, resolve)
+		if err != nil {
+			return NewNil(), err
+		}
+		capture.value = Eval(expression, &Globalenv)
+		capture.ready = true
+		return serializedValueLiteral(capture.value), nil
+	}
 	if len(items) == 2 && scmerIsSymbol(items[0], "cluster_object") {
 		if resolve == nil {
 			return NewNil(), fmt.Errorf("cluster object requires a reconstruction context")
@@ -265,7 +326,7 @@ func resolveProcedureObjectTree(value Scmer, resolve func(ClusterReference) (Scm
 	result := make([]Scmer, len(items))
 	for i, item := range items {
 		var err error
-		result[i], err = resolveProcedureObjectTree(item, resolve)
+		result[i], err = resolveProcedureObjectTree(item, captures, resolve)
 		if err != nil {
 			return NewNil(), err
 		}
@@ -274,6 +335,11 @@ func resolveProcedureObjectTree(value Scmer, resolve func(ClusterReference) (Scm
 }
 
 func initClusterObjects() {
+	// Outside wire decoding ordinary Scheme evaluation already constructs the
+	// argument before this identity call. Wire import consumes the marker first,
+	// restoring one capture per ID before building the executable lambda.
+	Declare(&Globalenv, &Declaration{Name: "serialized_value", Fn: func(a ...Scmer) Scmer { return a[1] },
+		Type: &TypeDescriptor{Kind: "func", HasSideEffects: true, Params: []*TypeDescriptor{{Kind: "int", Label: "id"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any"}}})
 	Declare(&Globalenv, &Declaration{Name: "cluster_object", Fn: func(a ...Scmer) Scmer {
 		if ClusterObjectResolver == nil {
 			panic("cluster object resolver is unavailable")

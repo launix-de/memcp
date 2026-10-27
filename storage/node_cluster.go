@@ -380,3 +380,7 @@ func (cluster *nodeCluster) HandleClusterRequest(ctx context.Context, request sc
 	}
 	return cluster.handle(session, ctx, session.remoteID, request.Method, data)
 }
+
+func (*nodeCluster) Serialize(*scm.SerializationContext) (scm.Scmer, error) {
+	return scm.NewNil(), fmt.Errorf("nodeCluster is a routing endpoint, not a serializable runtime value")
+}

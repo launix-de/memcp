@@ -53,13 +53,8 @@ func (service *nodeScanService) objectStatus() scm.Scmer {
 	defer r.mu.Unlock()
 	rows := make([]scm.Scmer, 0, len(r.entries))
 	for uri, entry := range r.entries {
-		active := 0
-		for _, acquired := range entry.acquired {
-			if acquired {
-				active++
-			}
-		}
-		rows = append(rows, scm.NewSlice([]scm.Scmer{scm.NewString("uri"), scm.NewString(uri), scm.NewString("type"), scm.NewString(entry.object.ClusterObjectType()), scm.NewString("references"), scm.NewInt(int64(active)), scm.NewString("offers"), scm.NewInt(int64(len(entry.tokens) - active))}))
+		active := len(entry.leases)
+		rows = append(rows, scm.NewSlice([]scm.Scmer{scm.NewString("uri"), scm.NewString(uri), scm.NewString("type"), scm.NewString(entry.object.ClusterObjectType()), scm.NewString("references"), scm.NewInt(int64(active)), scm.NewString("offers"), scm.NewInt(int64(len(entry.tokens)))}))
 	}
 	return scm.NewSlice(rows)
 }

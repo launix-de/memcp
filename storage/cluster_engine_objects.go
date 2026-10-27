@@ -179,3 +179,19 @@ func (origin *TxContext) BindClusterInvocation(value scm.Scmer) (scm.Scmer, erro
 	target.remoteObject = origin.remoteObject
 	return scm.NewAny(target), nil
 }
+
+func (tx *TxContext) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
+	return ctx.ReferenceExpression(tx)
+}
+
+func (s *storageShard) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
+	return ctx.ReferenceExpression(s)
+}
+
+func (s *remoteShardObject) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
+	return ctx.ReferenceExpression(s)
+}
+
+func (st *storageShardTransaction) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
+	return ctx.ReferenceExpression(st)
+}

@@ -357,3 +357,7 @@ func init() {
 		return scm.NewClusterAssoc(handle, cacheMapCallableTypeID, true)
 	})
 }
+
+func (cm *cacheMap) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
+	return ctx.ReferenceExpression(cm)
+}

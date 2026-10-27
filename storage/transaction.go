@@ -147,7 +147,7 @@ type TxContext struct {
 	queryReaderReleases []func()           // reader and cache-carrier leases, protected by mu
 	// remoteBindings freezes session inputs once per statement, only on cold
 	// remote dispatch. endStatement drops it after all shard workers finish.
-	remoteBindings atomic.Pointer[scm.ClusterBindings]
+	remoteBindings atomic.Pointer[scm.SerializationContext]
 	remoteObject   *scm.ClusterHandle // invocation-owned registered coordinator reference
 	walTxID        atomic.Pointer[string]
 	// fanoutLimit/fanoutInUse bound only additional multi-shard workers. A

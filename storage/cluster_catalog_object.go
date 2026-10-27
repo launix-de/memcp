@@ -77,3 +77,7 @@ func (t *table) clusterPublishedName() string {
 	}
 	return t.Name
 }
+
+func (t *table) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
+	return ctx.ReferenceExpression(t)
+}

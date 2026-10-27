@@ -93,3 +93,7 @@ func (database *database) HandleClusterRequest(ctx context.Context, call scm.Clu
 	}
 	return nil, fmt.Errorf("unsupported database message")
 }
+
+func (*database) Serialize(*scm.SerializationContext) (scm.Scmer, error) {
+	return scm.NewNil(), fmt.Errorf("database is a routing endpoint, not a serializable runtime value")
+}

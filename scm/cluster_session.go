@@ -136,3 +136,11 @@ func (s *clusterSession) HandleClusterRequest(ctx context.Context, r ClusterRequ
 func (*clusterSession) ProjectClusterView(view Scmer, keys []Scmer) (Scmer, error) {
 	return ProjectClusterAssoc(view, keys)
 }
+
+func (s *session) Serialize(ctx *SerializationContext) (Scmer, error) {
+	return ctx.ReferenceExpression(s)
+}
+
+func (s *clusterSession) Serialize(ctx *SerializationContext) (Scmer, error) {
+	return ctx.ReferenceExpression(s)
+}

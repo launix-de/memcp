@@ -71,6 +71,19 @@ func TestClusterObjectIndependentHandlesAndIncarnation(t *testing.T) {
 	if first.URI != second.URI || first.Token == second.Token {
 		t.Fatal("exports did not share owner identity with independent handles")
 	}
+	// Two successive Go lifetimes of one peer may overlap while old GC delivery
+	// is pending. They need generation IDs, not a boolean peer membership.
+	sessionRPC := &scanRPCSession{service: owner, peer: peer}
+	acquire := func(ref scm.ClusterReference) scm.ClusterReference {
+		lease := uuid.NewString()
+		data, _ := json.Marshal(clusterObjectAcquisition{ref, lease})
+		if _, err := sessionRPC.handleObject(context.Background(), "object.acquire", data); err != nil {
+			t.Fatal(err)
+		}
+		ref.Token = lease
+		return ref
+	}
+	first, second = acquire(first), acquire(second)
 	if err := owner.releaseObject(peer, first); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +179,7 @@ func TestClusterObjectSerializedSessionUsesOwnerEndpoint(t *testing.T) {
 	session.Func()(scm.NewString("x"), scm.NewInt(17))
 	environment := &scm.Env{Vars: scm.Vars{scm.Symbol("session"): session}, Outer: &scm.Globalenv}
 	proc := scm.Eval(scm.Read(t.Name(), `(lambda () (session "x"))`), environment)
-	bindings := (&scm.ClusterBindings{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
 		return owner.exportObject(source, object, view)
 	})
 	data, err := scm.MarshalProcedure(proc, bindings)
@@ -362,7 +375,7 @@ func TestClusterObjectOfferCancellationCannotDropAcquiredReader(t *testing.T) {
 	}
 	r := owner.objectRegistry()
 	r.mu.Lock()
-	tokens := len(r.entries[live.URI].tokens)
+	tokens := len(r.entries[live.URI].leases)
 	r.mu.Unlock()
 	if tokens != 1 {
 		t.Fatal("unacquired offer was retained", tokens)
@@ -540,9 +553,7 @@ func TestClusterObjectRegisteredGenerationProtectsFilesAndBlobs(t *testing.T) {
 	if !found {
 		t.Fatal("registered generation lost its column files")
 	}
-	if err := owner.releaseObject(peer, ref); err != nil {
-		t.Fatal(err)
-	}
+	owner.cancelObjectOffers(peer, []scm.ClusterReference{ref})
 	waitObjectGC(t, func() bool { return !historicalObjectAlive(old) })
 	blobs, files, complete := CleanDatabase(tbl.schema)
 	if !complete || blobs == 0 || files == 0 {
@@ -665,5 +676,131 @@ func TestClusterObjectScopedSessionForwardsInvocationCancellation(t *testing.T) 
 	case <-time.After(time.Second):
 		peer.close()
 		t.Fatal("nested owner callback outlived originating cancellation")
+	}
+}
+
+// The wire codec must honor object serialization too. This portable value has
+// no URI type registration and deliberately cannot use a reference exporter.
+type portableClusterTestValue struct{}
+
+func (*portableClusterTestValue) ClusterObjectType() string { return "portable-wire-test" }
+func (*portableClusterTestValue) Serialize(*scm.SerializationContext) (scm.Scmer, error) {
+	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{scm.NewString("portable"), scm.NewInt(42)})}), nil
+}
+func (*portableClusterTestValue) HandleClusterRequest(context.Context, scm.ClusterRequest) (any, error) {
+	return nil, fmt.Errorf("portable value has no remote owner")
+}
+func TestClusterObjectWireUsesMandatorySerializer(t *testing.T) {
+	encoded, err := freezeScanValue(scm.NewAny(&portableClusterTestValue{}), 0, &scm.SerializationContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := encoded.thaw(0, scm.ProcedureDecode{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !scm.Equal(decoded, scm.NewSlice([]scm.Scmer{scm.NewString("portable"), scm.NewInt(42)})) {
+		t.Fatal("wire replaced object-owned serialization with a reference", decoded)
+	}
+}
+
+//go:noinline
+func importNeverCalledSubscan(t *testing.T, owner, client *nodeScanService, source, peer *mosiPeer, session scm.Scmer) scm.Scmer {
+	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		return owner.exportObject(source, object, view)
+	})
+	body := scm.NewSlice([]scm.Scmer{scm.NewSymbol("if"), scm.NewSymbol("take"), session, scm.NewNil()})
+	proc := scm.Eval(scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("take")}), body}), &scm.Globalenv)
+	data, err := scm.MarshalProcedure(proc, bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	received, err := scm.UnmarshalProcedure(data, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+		return client.importObject(context.Background(), peer, ref)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return received
+}
+func TestClusterObjectDeduplicatesOverlappingEmptySubscansAndGC(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	session := scm.NewSession()
+	first := importNeverCalledSubscan(t, owner, client, source, peer, session)
+	second := importNeverCalledSubscan(t, owner, client, source, peer, session)
+	check := func() {
+		t.Helper()
+		r := owner.objectRegistry()
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if len(r.entries) != 1 {
+			t.Fatal("expected one owner registration", len(r.entries))
+		}
+		for _, entry := range r.entries {
+			if len(entry.leases) != 1 || len(entry.tokens) != 0 {
+				t.Fatal("subscans did not join one materialized peer lease", len(entry.leases), len(entry.tokens))
+			}
+		}
+	}
+	// No callback has run: import MUST already own a real Go peer handle.
+	check()
+	runtime.KeepAlive(first)
+	first = scm.NewNil()
+	for range 3 {
+		runtime.GC()
+	}
+	check()
+	runtime.KeepAlive(second)
+	second = scm.NewNil()
+	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
+}
+
+func TestClusterObjectPendingTransferSurvivesPriorLeaseRelease(t *testing.T) {
+	owner := &nodeScanService{id: uuid.NewString()}
+	defer owner.stopObjects()
+	peer := &mosiPeer{objectPeer: clusterObjectPeer{uuid.NewString(), uuid.NewString()}}
+	object, _ := scm.ClusterObjectOf(scm.NewSession())
+	view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
+	first, err := owner.exportObject(peer, object, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &scanRPCSession{service: owner, peer: peer}
+	firstLease := uuid.NewString()
+	data, _ := json.Marshal(clusterObjectAcquisition{first, firstLease})
+	if _, err := s.handleObject(context.Background(), "object.acquire", data); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := owner.exportObject(peer, object, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := first
+	old.Token = firstLease
+	if err := owner.releaseObject(peer, old); err != nil {
+		t.Fatal(err)
+	}
+	if objectEntryCount(owner) != 1 {
+		t.Fatal("old GC release dropped the in-flight serialization reservation")
+	}
+	secondLease := uuid.NewString()
+	data, _ = json.Marshal(clusterObjectAcquisition{pending, secondLease})
+	if _, err := s.handleObject(context.Background(), "object.acquire", data); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.releaseObject(peer, old); err != nil {
+		t.Fatal(err)
+	}
+	if objectEntryCount(owner) != 1 {
+		t.Fatal("late old release revoked the new peer lifetime")
+	}
+	pending.Token = secondLease
+	if err := owner.releaseObject(peer, pending); err != nil {
+		t.Fatal(err)
+	}
+	if objectEntryCount(owner) != 0 {
+		t.Fatal("last lease remained registered")
 	}
 }
