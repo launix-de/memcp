@@ -89,8 +89,10 @@ func NewClusterAssoc(handle ClusterHandle, callableType CallableTypeID, ownerOnM
 			}
 		}
 		ctx := context.Background()
-		if ownerOnMiss && len(args) == 3 {
+		if ownerOnMiss && len(args) == 3 || !ownerOnMiss && len(args) == 4 {
 			ctx = executionContextFrom(args[1])
+		} else if !ownerOnMiss && len(args) == 5 {
+			ctx = executionContextFrom(args[3])
 		}
 		value, err := s.handle.Call(ctx, ClusterRequest{Method: "call", Arguments: args})
 		if err != nil {

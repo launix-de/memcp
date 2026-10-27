@@ -600,3 +600,70 @@ func TestClusterDiscoveryRefreshesRoutingAfterConcurrentHandover(t *testing.T) {
 		t.Fatal("live handover became a recovery failure or regained rights", reply, cell.ownstate.Phase())
 	}
 }
+
+func TestClusterObjectScopedSessionForwardsInvocationCancellation(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	session := scm.NewSession()
+	object, _ := scm.ClusterObjectOf(session)
+	view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
+	ref, err := owner.exportObject(source, object, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := client.importObject(context.Background(), peer, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	ownerFinished := make(chan struct{})
+	const callback = "test_cluster_scoped_cancel"
+	// This native fixture stands at the nested scan boundary: its supplied
+	// participant must carry the originating invocation's cancellation signal.
+	scm.Declare(&scm.Globalenv, &scm.Declaration{Name: callback, Fn: func(args ...scm.Scmer) scm.Scmer {
+		ctx := scanQueryContext(scmerToTxContext(args[0]), context.Background())
+		close(entered)
+		defer close(ownerFinished)
+		<-ctx.Done()
+		panic(ctx.Err())
+	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Params: []*scm.TypeDescriptor{{Kind: "any"}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
+	producer := scm.Eval(scm.Read(t.Name(), "(lambda (tx) ("+callback+" tx))"), &scm.Globalenv)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ss := &scm.SessionState{}
+	seq := ss.BeginQuery("Cluster", "scoped cancellation source")
+	ss.SetQueryContext(seq, ctx)
+	tx := NewTxContext(TxCursorStability)
+	tx.beginQuery(ss, seq, "scoped cancellation source")
+	defer tx.endQuery(seq)
+	finished := make(chan any, 1)
+	go func() {
+		defer func() { finished <- recover() }()
+		scm.Apply(remote, scm.NewString("get_or_compute_scoped"), scm.NewAny(tx), scm.NewString("nested"), scm.NewAny(tx), producer)
+	}()
+	select {
+	case <-entered:
+	case failure := <-finished:
+		t.Fatalf("callback did not start: %v", failure)
+	case <-time.After(time.Second):
+		peer.close()
+		t.Fatal("callback did not start")
+	}
+	cancel()
+	select {
+	case failure := <-finished:
+		if failure == nil || !strings.Contains(fmt.Sprint(failure), "context canceled") {
+			t.Fatal("scoped callback lost caller cancellation", failure)
+		}
+	case <-time.After(time.Second):
+		peer.close()
+		t.Fatal("caller did not unwind cancellation")
+	}
+	select {
+	case <-ownerFinished:
+	case <-time.After(time.Second):
+		peer.close()
+		t.Fatal("nested owner callback outlived originating cancellation")
+	}
+}
