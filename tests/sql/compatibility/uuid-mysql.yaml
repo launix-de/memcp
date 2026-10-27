@@ -78,5 +78,35 @@ test_cases:
     rows: 1
     data:
     - ms: 1645557742000
+- name: ALTER preserves a dynamic UUID generator
+  sql: ALTER TABLE uuid_mysql ALTER COLUMN id SET DEFAULT UUIDV4()
+- name: Changed UUID default is evaluated for each row
+  sql: INSERT INTO uuid_mysql(payload) VALUES (301),(302)
+- name: Changed default produces v4 values
+  sql: SELECT UUID_EXTRACT_VERSION(id) AS version FROM uuid_mysql WHERE payload>=301
+    ORDER BY payload
+  expect:
+    rows: 2
+    data:
+    - version: 4
+    - version: 4
+- name: RFC timestamp extraction retains milliseconds
+  sql: SELECT UUID_EXTRACT_TIMESTAMP('017f22e2-79b0-7cc3-98c4-dc0c0c07398f') AS stamp
+  expect:
+    rows: 1
+    data:
+    - stamp: '2022-02-22 19:22:22.000+00:00'
+- name: Non-RFC variant has no extracted version
+  sql: SELECT UUID_EXTRACT_VERSION('00000000-0000-0000-0000-000000000000') AS version
+  expect:
+    rows: 1
+    data:
+    - version: null
+- name: Volatile UUID generator remains per row in query execution
+  sql: SELECT COUNT(DISTINCT UUID_V7()) AS n FROM uuid_mysql
+  expect:
+    rows: 1
+    data:
+    - n: 10
 cleanup:
 - sql: DROP TABLE IF EXISTS uuid_mysql

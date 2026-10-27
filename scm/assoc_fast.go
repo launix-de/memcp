@@ -93,6 +93,12 @@ func HashKey(k Scmer) uint64 {
 			h.WriteString(v.String())
 		case tagCString, tagBString:
 			h.WriteByte(4)
+			if v.IsUUID() {
+				var text [36]byte
+				writeUUIDText(text[:], v)
+				h.Write(text[:])
+				break
+			}
 			view, ok := makeOperatorView(v)
 			if !ok {
 				h.WriteString(v.String())

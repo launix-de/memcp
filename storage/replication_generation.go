@@ -953,38 +953,43 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 // identity. Receiving a metadata checkpoint must not replace an unchanged live
 // table and detach its transaction, cache or content owners.
 func (r *replicationManager) sameReplicaDeclaration(previous, incoming *table) bool {
-	declaration := func(table *table) []byte {
-		encoded, _ := json.Marshal(table)
-		var fields map[string]json.RawMessage
-		if json.Unmarshal(encoded, &fields) != nil {
-			return encoded
-		}
-		for _, key := range []string{"Auto_increment", "planner_row_estimate", "key_frequencies", "filter_feedback", "shard_forwards"} {
-			delete(fields, key)
-		}
-		for _, key := range []string{"Shards", "PShards"} {
-			var shards []*storageShard
-			if json.Unmarshal(fields[key], &shards) == nil {
-				identities := make([]string, len(shards))
-				for i, shard := range shards {
-					if shard != nil {
-						identities[i] = r.canonicalResource(mosiResource{Database: table.schema.Name, Table: table.Name, Shard: shard.uuid.String()}).Shard
-					}
-				}
-				fields[key], _ = json.Marshal(identities)
-			}
-		}
-		var columns []map[string]json.RawMessage
-		if json.Unmarshal(fields["Columns"], &columns) == nil {
-			for _, column := range columns {
-				delete(column, "PartitioningScore")
-			}
-			fields["Columns"], _ = json.Marshal(columns)
-		}
-		result, _ := json.Marshal(fields)
-		return result
+	return bytes.Equal(r.replicaDeclaration(previous, true), r.replicaDeclaration(incoming, true))
+}
+
+func (r *replicationManager) replicaDeclaration(table *table, includeTopology bool) []byte {
+	encoded, _ := json.Marshal(table)
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(encoded, &fields) != nil {
+		return encoded
 	}
-	return bytes.Equal(declaration(previous), declaration(incoming))
+	for _, key := range []string{"Auto_increment", "planner_row_estimate", "key_frequencies", "filter_feedback", "shard_forwards"} {
+		delete(fields, key)
+	}
+	for _, key := range []string{"Shards", "PShards"} {
+		if !includeTopology {
+			delete(fields, key)
+			continue
+		}
+		var shards []*storageShard
+		if json.Unmarshal(fields[key], &shards) == nil {
+			identities := make([]string, len(shards))
+			for i, shard := range shards {
+				if shard != nil {
+					identities[i] = r.canonicalResource(mosiResource{Database: table.schema.Name, Table: table.Name, Shard: shard.uuid.String()}).Shard
+				}
+			}
+			fields[key], _ = json.Marshal(identities)
+		}
+	}
+	var columns []map[string]json.RawMessage
+	if json.Unmarshal(fields["Columns"], &columns) == nil {
+		for _, column := range columns {
+			delete(column, "PartitioningScore")
+		}
+		fields["Columns"], _ = json.Marshal(columns)
+	}
+	result, _ := json.Marshal(fields)
+	return result
 }
 
 func (r *replicationManager) step(ctx context.Context, peerID string, packet mosiPacket) error {

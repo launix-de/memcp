@@ -1407,27 +1407,76 @@ def run_cluster_inserts(args, artifacts, journal):
             return all(len(status(node)["state"]["members"]) == len(nodes)
                        and status(node)["state"]["connected"] == len(nodes)-1 for node in nodes)
         eventually(joined, "INSERT cluster did not form", args.startup_timeout)
-        def insert(node_index, table):
+        def insert(node_index, table, barrier):
             client = nodes[node_index].client
+            barrier.wait(timeout=args.timeout)
             for batch in range(4):
                 values = ','.join(f"({node_index},{batch * 8 + row})" for row in range(8))
                 client.sql(f"INSERT INTO {table}(writer,value) VALUES {values}")
         for table in ("uuid_items", "integer_items"):
             started = time.monotonic()
+            barrier = threading.Barrier(len(nodes))
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(nodes)) as threads:
-                futures = [threads.submit(insert, index, table) for index in range(len(nodes))]
+                futures = [threads.submit(insert, index, table, barrier) for index in range(len(nodes))]
                 for future in futures:
                     future.result()
             expected = len(nodes) * 32 + (table == "integer_items")
             for node in nodes:
                 result = node.client.sql(f"SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids FROM {table}")
                 expect(result, [{"n": expected, "ids": expected}], f"complete unique {table} on {node.name}")
+            expected_payloads = [[writer, value] for writer in range(len(nodes)) for value in range(32)]
+            for node in nodes:
+                # Compare the complete multiset through a reduction: remote
+                # ordered row projection is a separate existing cluster gap.
+                payloads = node.client.sql(f"SELECT GROUP_CONCAT(CONCAT(writer,':',value)) AS payloads FROM {table} WHERE writer>=0")
+                if len(payloads) != 1 or not isinstance(payloads[0].get("payloads"), str):
+                    raise DrillFailure("missing complete INSERT payload result")
+                actual_payloads = [[int(part) for part in pair.split(':')] for pair in payloads[0]["payloads"].split(',')]
+                expect(sorted(actual_payloads), expected_payloads, f"complete INSERT payloads on {node.name}")
+            schema = json.loads((shared / "schema.json").read_text())["tables"][table]
+            if len(schema["Shards"]) > 1 + 2 * len(nodes):
+                raise DrillFailure("parallel INSERTs created unbounded writer lanes")
             if table == "integer_items":
                 for node in nodes:
                     expect(node.client.number("SELECT COUNT(*) AS n FROM integer_items WHERE writer>=0 AND id<=10000"), 0,
                            "explicit integer high-water mark retained across peers")
             journal.append({"scenario": "cluster-inserts", "table": table,
                             "rows": expected, "seconds": time.monotonic() - started})
+        # All peers race for one explicit key. Exactly one physical INSERT
+        # succeeds; retries and arbitrary network errors cannot satisfy this.
+        for table, key in (("uuid_items", "'550e8400-e29b-41d4-a716-446655440000'"),
+                           ("integer_items", "50000")):
+            barrier = threading.Barrier(len(nodes))
+            def duplicate(index):
+                barrier.wait(timeout=args.timeout)
+                try:
+                    nodes[index].client.sql(f"INSERT INTO {table}(id,writer,value) VALUES({key},{index},777)")
+                    return True
+                except DrillFailure as error:
+                    if "Duplicate entry" not in str(error):
+                        raise
+                    return False
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(nodes)) as threads:
+                outcomes = list(threads.map(duplicate, range(len(nodes))))
+            expect(sum(outcomes), 1, f"one winner for concurrent {table} primary key")
+            for node in nodes:
+                expect(node.client.number(f"SELECT COUNT(*) AS n FROM {table} WHERE id={key}"), 1,
+                       "duplicate race stored one row")
+            # A node-local native transaction still uses the shared allocator.
+            session = "uuid-insert-rollback-" + table
+            nodes[0].client.sql("START ACID TRANSACTION", session=session)
+            try:
+                nodes[0].client.sql(f"INSERT INTO {table}(writer,value) VALUES(0,-99)", session=session)
+            finally:
+                nodes[0].client.sql("ROLLBACK", session=session)
+            for node in nodes:
+                expect(node.client.number(f"SELECT COUNT(*) AS n FROM {table} WHERE value=-99"), 0,
+                       "rolled-back generated keys are not visible")
+        nodes[2].client.sql("INSERT INTO integer_items(writer,value) VALUES(2,888)")
+        for node in nodes:
+            row = node.client.sql("SELECT MIN(id) AS id,COUNT(*) AS n FROM integer_items WHERE value=888")
+            if len(row) != 1 or row[0]["n"] != 1 or row[0]["id"] <= 50000:
+                raise DrillFailure("explicit integer key did not advance the shared allocator")
         # Preserve acknowledged keys across an owner process restart, then
         # reserve another block on a surviving peer without reusing any ID.
         nodes[1].kill()
@@ -1435,7 +1484,7 @@ def run_cluster_inserts(args, artifacts, journal):
         eventually(joined, "INSERT peer did not rejoin after restart", args.startup_timeout)
         nodes[2].client.sql("INSERT INTO integer_items(writer,value) VALUES(2,999)")
         for node in nodes:
-            expect(node.client.number("SELECT COUNT(DISTINCT id) AS n FROM integer_items"), 98,
+            expect(node.client.number("SELECT COUNT(DISTINCT id) AS n FROM integer_items"), 100,
                    "integer keys survive restart and another reservation")
 
 
@@ -1737,8 +1786,6 @@ def main():
     parser.add_argument("--remote-scans-only", action="store_true", help="run only the focused two-process remote scan scenario")
     parser.add_argument("--cluster-context-only", action="store_true",
                         help="run SQL session/transaction contracts against standalone and clustered processes")
-
-
     parser.add_argument("--cluster-inserts-only", action="store_true", help="run focused concurrent shared-storage INSERT scenario")
     parser.add_argument("--cluster-only", action="store_true", help="run focused shared-storage cluster placement scenario")
     parser.add_argument("--fixture-binary", type=Path, help="optional same-commit builder for immutable cluster fixture")

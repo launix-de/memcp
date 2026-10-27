@@ -1019,7 +1019,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				/* Type and default changes */
 				(parser '((atom "TYPE" true) (define type psql_identifier) (define dimensions (or (parser '("(" (define a psql_int) "," (define b psql_int) ")") '((quote list) a b)) (parser '("(" (define a psql_int) ")") '((quote list) a)) (parser empty '((quote list))))) ) (lambda (col) (lambda (id) '('!begin '((quote altercolumn) '('table schema false id false) col "type" type) '((quote altercolumn) '('table schema false id false) col "dimensions" dimensions)))))
 				(parser '((atom "SET" true) (atom "DEFAULT" true) (define def sql_uuid_default)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false) col "default_expression" def))))
-			(parser '((atom "SET" true) (atom "DEFAULT" true) (define def psql_expression)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false) col "default" def))))
+				(parser '((atom "SET" true) (atom "DEFAULT" true) (define def psql_expression)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false) col "default" def))))
 				(parser '((atom "DROP" true) (atom "DEFAULT" true)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false) col "default" nil))))
 				(parser '((atom "COLLATE" true) (define coll psql_identifier)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false) col "collation" coll))))
 			))) (body col))

@@ -1515,12 +1515,41 @@ reservation succeeds. SQL type bounds and assignment semantics belong to the
 frontend. Feeding reserved IDs to native INSERT as explicit values neither
 reserves a second block nor moves the counter backwards.
 
-Reservation adds no locks, per-row checks, separate allocator, persistent sequence
-or session state. Unused blocks are not independently WAL-logged: restart can
-reuse them unless an existing schema checkpoint persisted the counter. Persisted
-inserted values retain the existing engine durability contract and advance the
-same counter during replay. SQL frontends must not claim stronger reservation
-durability or materialize arbitrary SELECT input to obtain a block size.
+Local reservation adds no locks, per-row checks, separate allocator, persistent
+sequence or session state. Unused local blocks are not independently WAL-logged:
+restart can reuse them unless an existing schema checkpoint persisted the counter.
+Persisted inserted values retain the existing engine durability contract and
+advance the same counter during replay. SQL frontends must not materialize
+arbitrary SELECT input to obtain a block size.
+
+Cluster ID allocation and INSERT constraint checks must not acquire schema write
+ownership. A remote reservation must survive allocator restart before it can be
+acknowledged, since another node can commit its IDs independently. Allocation
+RPCs own no data writer or shard lock. Ambiguous completion leaves a gap, never
+an automatic retry or duplicated range. Persistent data is never permission.
+
+UUID generation is independent of the numeric counter. Volatile UUID defaults
+are evaluated once per omitted input row before routing, key checks and WAL
+construction. Explicit NULL is not an omitted UUID default. Values retain the
+existing immutable 16-byte CString ownership and historical format assignments.
+
+Free-shard cluster INSERTs prefer locally owned writer lanes and publish a new
+lane when their capacity is insufficient. A newer foreign shard is not a reason
+to transfer its writer. Global INSERT key validation must preserve uniqueness
+without schema write admission. No new reader-side lock, registration or row
+counter may be introduced. General distributed DML/transaction coordination
+remains distinct.
+
+Rebuild chooses range or hash independently for each candidate column. Access
+demand is sampled at operator setup, never per row; the point/range mix is
+runtime-only advisory feedback. An unobserved existing method survives restart.
+Hash dimension metadata is immutable and persists with ordinary schema topology.
+The empty method retains historical range semantics. Versioned hash identifiers
+permanently define normalization and hashing; changing either requires a new
+identifier and repartition. Equality prunes only a proven compatible domain.
+Hash placement provides no interval or ordering proof. Mixed dimensions retain
+their independent range proofs. Generated integer IDs needed for hash routing
+are reserved before choosing a shard, with one first-ID callback per statement.
 
 ### Storage is opaque to Scheme cache and plan policy
 

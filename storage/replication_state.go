@@ -30,6 +30,7 @@ type replicaRecord struct {
 }
 
 type replicaRequestMark struct {
+	Boot      string `json:"boot,omitempty"` // RAM-only request-number domain; owned by the immutable directory entry
 	Sequence  uint64 `json:"sequence"`
 	Write     bool   `json:"write"`
 	ID        string `json:"id,omitempty"`

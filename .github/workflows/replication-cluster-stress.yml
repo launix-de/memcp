@@ -139,6 +139,20 @@ jobs:
           --binary "$RUNNER_TEMP/memcp-cluster-race"
           --artifacts "$RUNNER_TEMP/cluster-contexts-race" --cluster-context-only --seed 20261027
           --fixture-binary "$RUNNER_TEMP/memcp-cluster"
+      - name: Check concurrent UUID and integer inserts across peers
+        if: ${{ !cancelled() && steps.build_cluster.outcome == 'success' }}
+        run: >-
+          python3 -u tools/replication_cluster_stress.py
+          --binary "$RUNNER_TEMP/memcp-cluster"
+          --artifacts "$RUNNER_TEMP/cluster-inserts" --cluster-inserts-only --seed 20261027
+      - name: Check concurrent inserts with race detector
+        if: ${{ !cancelled() && steps.build_cluster_race.outcome == 'success' }}
+        env:
+          GORACE: halt_on_error=1 exitcode=66
+        run: >-
+          python3 -u tools/replication_cluster_stress.py
+          --binary "$RUNNER_TEMP/memcp-cluster-race"
+          --artifacts "$RUNNER_TEMP/cluster-inserts-race" --cluster-inserts-only --seed 20261028
       - name: Upload cluster logs, budgets and result oracle
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -147,5 +161,7 @@ jobs:
           path: |
             ${{ runner.temp }}/cluster-placement
             ${{ runner.temp }}/cluster-placement-race
+            ${{ runner.temp }}/cluster-inserts
+            ${{ runner.temp }}/cluster-inserts-race
             ${{ runner.temp }}/cluster-contexts
             ${{ runner.temp }}/cluster-contexts-race

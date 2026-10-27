@@ -6,7 +6,20 @@ package scm
 
 import "sync"
 import "testing"
+import "bytes"
 import "encoding/json"
+
+func TestUUIDGeneratorSerializationHasStableVersion(t *testing.T) {
+	for _, name := range []string{"uuid_v1", "uuid_v4", "uuid_v7"} {
+		for range 100 {
+			var out bytes.Buffer
+			Serialize(&out, Globalenv.Vars[Symbol(name)], &Globalenv)
+			if got := out.String(); got != name {
+				t.Fatalf("serialized %s as %s", name, got)
+			}
+		}
+	}
+}
 
 func TestUUIDPackedOperations(t *testing.T) {
 	text := "550e8400-e29b-41d4-a716-446655440000"
@@ -96,5 +109,17 @@ func TestUUIDRejectsInvalidInputs(t *testing.T) {
 		if err != nil || int(id.Version()) != version {
 			t.Fatalf("generator %d", version)
 		}
+	}
+}
+
+func TestUUIDPackedOperationsDoNotAllocate(t *testing.T) {
+	a := GenerateUUID(7)
+	b := GenerateUUID(7)
+	if allocations := testing.AllocsPerRun(1000, func() { Equal(a, b); Less(a, b); HashKey(a) }); allocations != 0 {
+		t.Fatalf("packed comparison/hash allocated %v", allocations)
+	}
+	stamp := Globalenv.Vars["uuid_timestamp"].Func()(ParseUUID(NewString("017f22e2-79b0-7cc3-98c4-dc0c0c07398f")))
+	if stamp.String() != "2022-02-22 19:22:22.000+00:00" {
+		t.Fatal(stamp.String())
 	}
 }

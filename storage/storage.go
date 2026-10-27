@@ -3111,7 +3111,7 @@ func Init(en scm.Env) {
 				// check if that paritition dimension already exists
 				if t.ShardMode == ShardModePartition {
 					for _, sd := range t.PDimensions {
-						if sd.Column == scm.String(a[1]) {
+						if sd.Column == scm.String(a[1]) && sd.Method == "" {
 							return scm.NewSlice(sd.Pivots) // found the column in partition schema: return exactly the same pivots as we found already
 						}
 					}
@@ -5594,6 +5594,7 @@ func showBuildMeta(db *database, t *table) scm.Scmer {
 		for _, sd := range t.PDimensions {
 			partitions = append(partitions, scm.NewSlice([]scm.Scmer{
 				scm.NewString("Column"), scm.NewString(sd.Column),
+				scm.NewString("Method"), scm.NewString(sd.Method),
 				scm.NewString("NumPartitions"), scm.NewInt(int64(sd.NumPartitions)),
 				scm.NewString("Pivots"), scm.NewSlice(sd.Pivots),
 			}))

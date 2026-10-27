@@ -71,5 +71,11 @@ test_cases:
     data:
     - n: 9
       distinct_ids: 9
+- name: Volatile UUID generator remains per row in query execution
+  sql: SELECT COUNT(DISTINCT NEWID()) AS n FROM uuid_tsql
+  expect:
+    rows: 1
+    data:
+    - n: 9
 cleanup:
 - sql: DROP TABLE IF EXISTS uuid_tsql

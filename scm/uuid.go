@@ -62,6 +62,22 @@ func GenerateUUID(version int) Scmer {
 	return NewUUID(id)
 }
 
+// writeUUIDText formats one packed value into caller-owned scratch. Storage,
+// hashing and output all keep the immutable binary source alive through its Scmer.
+func writeUUIDText(dst []byte, value Scmer) {
+	alphabet := "0123456789abcdef"
+	if auxVal(value.aux)>>CStringFormatShift == 7 {
+		alphabet = "0123456789ABCDEF"
+	}
+	source := unsafe.Slice(value.ptr, 16)
+	dst[8], dst[13], dst[18], dst[23] = '-', '-', '-', '-'
+	positions := [16]uint8{0, 2, 4, 6, 9, 11, 14, 16, 19, 21, 24, 26, 28, 30, 32, 34}
+	for i, pos := range positions {
+		b := source[i]
+		dst[pos], dst[pos+1] = alphabet[b>>4], alphabet[b&15]
+	}
+}
+
 // UUIDTimestampMillis exposes the embedded RFC timestamp, not commit time.
 func UUIDTimestampMillis(value Scmer) Scmer {
 	if value.IsNil() {
@@ -108,9 +124,12 @@ func init_uuid() {
 	}
 	value := []*TypeDescriptor{{Kind: "any", Label: "value"}}
 	binaryParams := []*TypeDescriptor{{Kind: "any", Label: "value"}, {Kind: "int", Label: "swap", Optional: true}}
-	for _, version := range []int{1, 4, 7} {
-		declare(fmt.Sprintf("uuid_v%d", version), func(a ...Scmer) Scmer { return GenerateUUID(version) }, nil, "string", false)
-	}
+	// Native serialization identifies builtins by entry point. Capturing the
+	// version in one loop closure would give all three generators the same
+	// entry point and make persisted expressions/hashes select arbitrary names.
+	declare("uuid_v1", func(a ...Scmer) Scmer { return GenerateUUID(1) }, nil, "string", false)
+	declare("uuid_v4", func(a ...Scmer) Scmer { return GenerateUUID(4) }, nil, "string", false)
+	declare("uuid_v7", func(a ...Scmer) Scmer { return GenerateUUID(7) }, nil, "string", false)
 	declare("uuid_parse", func(a ...Scmer) Scmer { return ParseUUID(a[0]) }, value, "string", true)
 	declare("uuid_valid", func(a ...Scmer) Scmer {
 		if a[0].IsNil() {

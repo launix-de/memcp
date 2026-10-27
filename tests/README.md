@@ -379,3 +379,12 @@ and JIT CI, including alongside other suites in the scan-diagnostics cluster.
 The runner contract tests additionally require concurrent cluster workers and
 verify setting restoration on success and exceptions. Performance suites keep
 their existing fixture, restart and measurement scheduling.
+
+## UUID and cluster INSERT regressions
+
+`sql/compatibility/uuid-{mysql,postgresql,tsql}.yaml` covers UUID generation,
+canonical assignments, conversions and per-row defaults in each frontend.
+`sql/ddl/auto-increment.yaml` retains the traditional integer allocation contract.
+The three-peer shared-storage INSERT/restart oracle is selected with
+`python3 tools/replication_cluster_stress.py --cluster-inserts-only --seed 20261027`.
+The cluster workflow runs it with ordinary and race-instrumented processes.

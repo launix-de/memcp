@@ -288,11 +288,15 @@ func (t *table) prepareInsertDefaults(columns []string, values [][]scm.Scmer) ([
 	return cols, rows
 }
 
-// Cluster reservations run before shard ownership and native shard locks. The
-// subsequent shard sink sees explicit IDs and must not contact the allocator.
-func (t *table) prepareClusterInsertIDs(columns []string, values [][]scm.Scmer, notify func(int64)) ([]string, [][]scm.Scmer) {
-	if !sharedClusterSource(t) {
-		return columns, values
+// Reserve before shard ownership when clustering or hash routing requires the
+// generated values. The shard sink then receives explicit IDs.
+func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify func(int64), dimensions []shardDimension) ([]string, [][]scm.Scmer, bool) {
+	needed := sharedClusterSource(t)
+	for _, d := range dimensions {
+		needed = needed || d.Method != ""
+	}
+	if !needed {
+		return columns, values, false
 	}
 	for _, c := range t.columnDeclarations() {
 		if !c.AutoIncrement {
@@ -334,7 +338,7 @@ func (t *table) prepareClusterInsertIDs(columns []string, values [][]scm.Scmer, 
 				rows[i][position] = scm.NewInt(int64(base))
 			}
 		}
-		return cols, rows
+		return cols, rows, true
 	}
-	return columns, values
+	return columns, values, false
 }

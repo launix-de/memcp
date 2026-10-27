@@ -23,6 +23,7 @@ import "time"
 import "runtime"
 import "strings"
 import "sync/atomic"
+import "encoding/json"
 import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
@@ -135,23 +136,52 @@ func balancePartitionHints(dimensions []shardDimension, rows uint) []shardDimens
 		if n <= 1 {
 			continue
 		}
+		if dimension.Method != "" {
+			dimension.NumPartitions = n
+			balanced = append(balanced, dimension)
+			continue
+		}
 		pivots := make([]scm.Scmer, n-1)
 		for i := 1; i < n; i++ {
 			pivots[i-1] = dimension.Pivots[i*dimension.NumPartitions/n-1]
 		}
-		balanced = append(balanced, shardDimension{dimension.Column, n, pivots})
+		balanced = append(balanced, shardDimension{Column: dimension.Column, NumPartitions: n, Pivots: pivots, Method: dimension.Method})
 	}
 	return balanced
 }
 
+// Method is persisted with the immutable dimension. Empty means the historical
+// range layout. Hash method IDs permanently identify both normalization and
+// hashing; changing their algorithm requires a new ID and repartitioning.
 type shardDimension struct {
+	Method        string `json:",omitempty"`
 	Column        string
 	NumPartitions int
 	Pivots        []scm.Scmer // pivot semantics: a pivot is between two shards. shard[0] contains all values less than or equal pivot[0]; pivots are ordered from lowest to highest
 }
 
+func (d *shardDimension) UnmarshalJSON(data []byte) error {
+	type declaration shardDimension
+	var next declaration
+	if err := json.Unmarshal(data, &next); err != nil {
+		return err
+	}
+	if next.NumPartitions < 1 || !validPartitionDimension(shardDimension(next)) {
+		return fmt.Errorf("invalid partition dimension %q: method %q, count %d", next.Column, next.Method, next.NumPartitions)
+	}
+	*d = shardDimension(next)
+	return nil
+}
+
 // computes the index of a datapoint in PShards -> if item == pivot, sort left
 func computeShardDimensionIndex(sd shardDimension, value scm.Scmer) int {
+	if sd.Method != "" {
+		hash, ok := partitionHash(sd.Method, value)
+		if !ok {
+			panic("value outside hash partition domain: " + sd.Column)
+		}
+		return int(hash % uint64(sd.NumPartitions))
+	}
 	min := 0                    // greater equal min
 	max := sd.NumPartitions - 1 // smaller than max
 	for min < max {
@@ -333,19 +363,11 @@ func countRelevantShards(schema []shardDimension, access scanAccess, shards []*s
 		if access.boundaryColumn(boundaryIndex) != schema[0].Column {
 			continue
 		}
-		lower := access.boundValue(boundaryIndex, false)
-		upper := access.boundValue(boundaryIndex, true)
-		minimum := 0
-		if !lower.IsNil() {
-			minimum = partitionForValue(schema[0], lower)
-			if !access.boundaryLowerInclusive(boundaryIndex) && valueEqualsPivot(schema[0], minimum, lower) {
-				minimum++
-			}
+		minimum, maximum, usable := partitionAccessInterval(schema[0], access, boundaryIndex)
+		if !usable {
+			continue
 		}
-		maximum := schema[0].NumPartitions - 1
-		if !upper.IsNil() {
-			maximum = partitionForValue(schema[0], upper)
-		}
+
 		for partition := minimum; partition <= maximum; partition++ {
 			countRelevantShards(schema[1:], access, shards[partition*blockdim:(partition+1)*blockdim], first, count)
 		}
@@ -507,20 +529,9 @@ func collectRelevantShardsIndex(schema []shardDimension, access scanAccess, shar
 			continue
 		}
 		if access.boundaryColumn(boundaryIndex) == schema[0].Column {
-			lower := access.boundValue(boundaryIndex, false)
-			upper := access.boundValue(boundaryIndex, true)
-			// iterate this axis over boundaries
-			min := 0
-			if !lower.IsNil() {
-				min = partitionForValue(schema[0], lower)
-				if !access.boundaryLowerInclusive(boundaryIndex) && valueEqualsPivot(schema[0], min, lower) {
-					min++
-				}
-			}
-
-			max := schema[0].NumPartitions - 1 // smaller than max
-			if !upper.IsNil() {
-				max = partitionForValue(schema[0], upper)
+			min, max, usable := partitionAccessInterval(schema[0], access, boundaryIndex)
+			if !usable {
+				continue
 			}
 
 			for i := min; i <= max; i++ {
@@ -604,6 +615,119 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 	result.NumPartitions = len(result.Pivots) + 1
 
 	return
+}
+
+// partitionHash is deterministic across processes, rebuilds and representations.
+// UUIDs hash the 16 RFC bytes; signed integers hash their fixed little-endian
+// two's-complement bytes. NULL has one bucket. There is no process-random seed.
+func partitionHash(method string, value scm.Scmer) (uint64, bool) {
+	if value.IsNil() {
+		return 0, true
+	}
+	hash := uint64(14695981039346656037)
+	switch method {
+	case "hash-uuid-v1":
+		id, err := scm.UUIDValue(value)
+		if err != nil {
+			return 0, false
+		}
+		for _, b := range id {
+			hash = (hash ^ uint64(b)) * 1099511628211
+		}
+	case "hash-int-v1":
+		if !value.IsInt() {
+			return 0, false
+		}
+		n := uint64(value.Int())
+		for range 8 {
+			hash = (hash ^ uint64(byte(n))) * 1099511628211
+			n >>= 8
+		}
+	default:
+		return 0, false
+	}
+	// Avalanche fixed-width keys before selecting low modulo bits.
+	hash ^= hash >> 30
+	hash *= 0xbf58476d1ce4e5b9
+	hash ^= hash >> 27
+	hash *= 0x94d049bb133111eb
+	return hash ^ (hash >> 31), true
+}
+
+func validPartitionDimension(d shardDimension) bool {
+	if d.Method == "" {
+		return len(d.Pivots) == d.NumPartitions-1
+	}
+	return (d.Method == "hash-uuid-v1" || d.Method == "hash-int-v1") && len(d.Pivots) == 0
+}
+
+func partitionAccessInterval(d shardDimension, access scanAccess, i int) (minimum, maximum int, usable bool) {
+	lower, upper := access.boundValue(i, false), access.boundValue(i, true)
+	if d.Method != "" {
+		// A hash bucket says nothing about ranges or ordering. Numeric coercion
+		// outside the immutable domain also scans all buckets conservatively.
+		if access.boundaryAnalyzer(i) != EqualMatcher &&
+			(lower.IsNil() || upper.IsNil() || !access.boundaryLowerInclusive(i) || !access.boundaryUpperInclusive(i) || !boundaryValueEqual(lower, upper)) {
+			return 0, 0, false
+		}
+		hash, ok := partitionHash(d.Method, lower)
+		if !ok {
+			return 0, 0, false
+		}
+		bucket := int(hash % uint64(d.NumPartitions))
+		return bucket, bucket, true
+	}
+	maximum = d.NumPartitions - 1
+	if !lower.IsNil() {
+		minimum = partitionForValue(d, lower)
+		if !access.boundaryLowerInclusive(i) && valueEqualsPivot(d, minimum, lower) {
+			minimum++
+		}
+	}
+	if !upper.IsNil() {
+		maximum = partitionForValue(d, upper)
+	}
+	return minimum, maximum, true
+}
+
+// Rebuild chooses a method independently for every weighted column. Equality
+// probes and UNIQUE batches contribute point demand; ordered/range access adds
+// range demand. Hashing is considered only for exact, stable value domains.
+// Existing range hints returned by shardcolumn never change interpretation.
+func (t *table) preferredShardDimension(name string, n int) shardDimension {
+	for _, c := range t.columnDeclarations() {
+		if c.Name != name {
+			continue
+		}
+		method := ""
+		switch strings.ToUpper(c.Typ) {
+		case "UUID", "UNIQUEIDENTIFIER":
+			method = "hash-uuid-v1"
+		case "INT", "INTEGER", "BIGINT", "SMALLINT", "MEDIUMINT", "TINYINT":
+			method = "hash-int-v1"
+		}
+		ranges := c.partitioningRangeTraffic.Load()
+		points := max(int64(0), c.partitioningTraffic.Load()-ranges)
+		// A restart/checkpoint supplies weights but no fresh access mix. Keep
+		// the published method until observations justify changing it.
+		if n > 1 && points == 0 && ranges == 0 {
+			for _, old := range t.activeTopology().dimensions {
+				if old.Column == name && old.Method != "" && old.Method == method {
+					return shardDimension{Column: name, NumPartitions: n, Method: method}
+				}
+			}
+		}
+		// Range demand pays for every hash bucket; equality on generated keys
+		// benefits from spreading the writers rather than one append frontier.
+		writers := int64(max(2, min(runtime.GOMAXPROCS(0), n)))
+		rangeWork := float64(ranges) + float64(points)*float64(writers)
+		hashWork := float64(ranges)*float64(n) + float64(points)
+		if method != "" && n > 1 && points > 0 && hashWork < rangeWork {
+			return shardDimension{Column: name, NumPartitions: n, Method: method}
+		}
+		break
+	}
+	return t.NewShardDimension(name, n)
 }
 
 type uintrange struct {
@@ -699,7 +823,7 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 	// reevaluate partitioning schema
 	for _, c := range t.Columns {
 		if score := c.PartitioningScore + int(c.partitioningTraffic.Load()); score > 0 {
-			shardCandidates = append(shardCandidates, shardDimension{c.Name, score, nil})
+			shardCandidates = append(shardCandidates, shardDimension{Column: c.Name, NumPartitions: score})
 		}
 	}
 	if len(shardCandidates) == 0 || Settings.PartitionMaxDimensions <= 0 {
@@ -717,7 +841,7 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 	// algorithm from the paper
 	bestSf := repartitionScale(shardCandidates, repartitionShardTarget(maincount, false))
 	for i, sc := range shardCandidates {
-		shardCandidates[i] = t.NewShardDimension(sc.Column, scaledRepartitionCount(sc.NumPartitions, bestSf))
+		shardCandidates[i] = t.preferredShardDimension(sc.Column, scaledRepartitionCount(sc.NumPartitions, bestSf))
 	}
 	// remove empty dimensions
 	for len(shardCandidates) > 0 && shardCandidates[len(shardCandidates)-1].NumPartitions <= 1 {
@@ -737,7 +861,7 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 			shouldChange = true
 		}
 		for i, sc := range shardCandidates {
-			if sc.Column != t.PDimensions[i].Column {
+			if sc.Column != t.PDimensions[i].Column || sc.Method != t.PDimensions[i].Method {
 				shouldChange = true
 			}
 		}
@@ -811,7 +935,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 
 	totalShards, valid := checkedRepartitionShardCount(shardCandidates, maxRepartitionShards)
 	for _, sc := range shardCandidates {
-		valid = valid && len(sc.Pivots) == sc.NumPartitions-1
+		valid = valid && validPartitionDimension(sc)
 	}
 	if !valid {
 		// Reject before loading columns, allocating shard arrays or enabling

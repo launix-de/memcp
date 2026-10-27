@@ -103,28 +103,10 @@ func mergeClusterInsertTopology(previous, incoming *table) bool {
 			return false
 		}
 	}
-	declaration := func(t *table) []byte {
-		encoded, _ := json.Marshal(t)
-		var fields map[string]json.RawMessage
-		if json.Unmarshal(encoded, &fields) != nil {
-			return nil
-		}
-		for _, key := range []string{"Shards", "PShards", "Auto_increment", "planner_row_estimate", "key_frequencies", "filter_feedback"} {
-			delete(fields, key)
-		}
-		var columns []map[string]json.RawMessage
-		if json.Unmarshal(fields["Columns"], &columns) == nil {
-			for _, c := range columns {
-				delete(c, "PartitioningScore")
-			}
-			fields["Columns"], _ = json.Marshal(columns)
-		}
-		out, _ := json.Marshal(fields)
-		return out
-	}
-	if !bytes.Equal(declaration(previous), declaration(incoming)) {
+	if !bytes.Equal(replicaDeclaration(previous, false), replicaDeclaration(incoming, false)) {
 		return false
 	}
+
 	for i, old := range before.shards {
 		next := after.shards[i]
 		if old.uuid == next.uuid {

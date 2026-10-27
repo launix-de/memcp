@@ -194,7 +194,7 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 			return c
 		}
 		if action == mosi.Send || action == mosi.Upgrade {
-			packet := mosiPacket{Kind: "read", Resource: resource, From: r.id, To: owner, ID: publication.Flight().ID(), Sequence: r.requestSequence(publication.Flight())}
+			packet := mosiPacket{Kind: "read", Resource: resource, From: r.id, To: owner, ID: publication.Flight().ID(), Sequence: r.requestSequence(publication.Flight()), Boot: cluster.self.Boot}
 			if publication.Phase() == mosi.MR {
 				packet.Kind = "write"
 			}
@@ -297,6 +297,9 @@ func (cluster *nodeCluster) receive(source string, packet *mosiPacket, connectio
 	case "reference":
 		return cluster.installReference(source, *packet)
 	case "read", "write":
+		if packet.Boot == "" || !cluster.requestIncarnation(source, packet.Boot) {
+			return fmt.Errorf("stale cluster request incarnation")
+		}
 		copy := *packet
 		connection.workers.Add(1)
 		go func() {
@@ -453,7 +456,15 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 			return err
 		}
 	}
-	r.updateRecord(packet.Resource, func(record *replicaRecord) bool { record.Content = packet.Content; return true })
+	r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
+		record.Content = packet.Content
+		// Installation registers the reader before ACK, including an S flight
+		// already upgraded to MR. Its later S grant must retain this epoch.
+		if packet.Epoch > record.Epoch {
+			record.Epoch = packet.Epoch
+		}
+		return true
+	})
 	c.acquire.Unlock()
 	locked = false
 	if expected != nil {
@@ -526,6 +537,20 @@ func (cluster *nodeCluster) peerAvailable(id string) bool {
 		case <-peer.done:
 		default:
 			return true
+		}
+	}
+	return false
+}
+
+func (cluster *nodeCluster) requestIncarnation(requester, boot string) bool {
+	if requester == cluster.self.ID {
+		return boot == cluster.self.Boot
+	}
+	if view := cluster.view.Load(); view != nil {
+		for _, member := range view.members {
+			if member.ID == requester {
+				return member.Boot == boot
+			}
 		}
 	}
 	return false

@@ -112,14 +112,15 @@ type column struct {
 	// filter cols are persisted because they are part of the canonical helper
 	// definition; the filter expression itself is runtime-only like Computor.
 	// ComputorDependencies contains logical schema/table pairs, never topology IDs.
-	ComputorDependencies []string     `json:",omitempty"`
-	ComputorFilterCols   []string     `json:",omitempty"`
-	ComputorFilter       scm.Scmer    `json:"-"`
-	partitioningTraffic  atomic.Int64 // runtime query/UNIQUE routing hints; never persisted
-	PartitioningScore    int          // count this up to increase the chance of partitioning for this column
-	AutoIncrement        bool
-	Default              scm.Scmer
-	DefaultExpression    string
+	ComputorDependencies     []string     `json:",omitempty"`
+	ComputorFilterCols       []string     `json:",omitempty"`
+	ComputorFilter           scm.Scmer    `json:"-"`
+	partitioningRangeTraffic atomic.Int64 // advisory ordered/range demand, sampled once per operator setup
+	partitioningTraffic      atomic.Int64 // runtime query/UNIQUE routing hints; never persisted
+	PartitioningScore        int          // count this up to increase the chance of partitioning for this column
+	AutoIncrement            bool
+	Default                  scm.Scmer
+	DefaultExpression        string
 	// Optional declaration label; owned and published with the existing default.
 	DefaultName   string                         `json:"default_name,omitempty"`
 	InitialValue  scm.Scmer                      `json:"initial_value,omitempty"`
@@ -1870,11 +1871,14 @@ func (t *table) metadataMemory() uint {
 }
 
 // increases PartitioningScore for a set of columns
-func (t *table) AddPartitioningScore(cols []string) {
+func (t *table) AddPartitioningScore(cols []string, rangeAccess bool) {
 	for _, c := range t.columnDeclarations() {
 		for _, col := range cols {
 			if col == c.Name {
 				c.partitioningTraffic.Add(1)
+				if rangeAccess {
+					c.partitioningRangeTraffic.Add(1)
+				}
 			}
 		}
 	}
@@ -3256,6 +3260,7 @@ func cloneStoredColumnDeclaration(current *column) *column {
 		sanitizer: current.sanitizer,
 	}
 	replacement.partitioningTraffic.Store(current.partitioningTraffic.Load())
+	replacement.partitioningRangeTraffic.Store(current.partitioningRangeTraffic.Load())
 	atomic.StoreUint64(&replacement.DistinctEstimate, atomic.LoadUint64(&current.DistinctEstimate))
 	atomic.StoreUint64(&replacement.RowEstimate, atomic.LoadUint64(&current.RowEstimate))
 	replacement.PlannerStats.Store(current.PlannerStats.Load())
@@ -3697,8 +3702,9 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		return 0
 	}
 
-	columns, values = t.prepareClusterInsertIDs(columns, values, onFirstInsertId)
-	if sharedClusterSource(t) {
+	var idsPrepared bool
+	columns, values, idsPrepared = t.prepareInsertIDs(columns, values, onFirstInsertId, t.activeTopology().dimensions)
+	if idsPrepared {
 		onFirstInsertId = nil
 	}
 
@@ -3814,6 +3820,14 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		// partitions
 		// TODO: check which shards are involved; a sharding dimension column must be present in ALL unique keys, otherwise we cannot prune
 		dims := topology.dimensions
+		// Free routing may have switched to a newly published hash topology.
+		// Bind generated routing values to that retained publication as well.
+		if !idsPrepared {
+			columns, values, idsPrepared = t.prepareInsertIDs(columns, values, onFirstInsertId, dims)
+			if idsPrepared {
+				onFirstInsertId = nil
+			}
+		}
 		partitionShards := topology.shards
 		translatable := make([]int, len(dims))
 		omittedPartitions := make([]int, len(dims))
@@ -4230,7 +4244,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 	uniq := t.Unique[idx]
 	compareNulls := mergeNull || uniq.NullsNotDistinct
 	accessSchema := newExactScanAccessSchema(uniq.Cols)
-	t.AddPartitioningScore(uniq.Cols) // increases partitioning score, so partitioning is improved
+	t.AddPartitioningScore(uniq.Cols, false) // increases partitioning score, so partitioning is improved
 	{
 		key := make([]scm.Scmer, len(uniq.Cols))
 		keyIdx := make([]int, len(uniq.Cols))

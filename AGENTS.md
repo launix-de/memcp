@@ -1109,3 +1109,30 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   Commit invalidates dependency targets once per touched table after publication;
   proxy preparation synchronizes stale payloads. No new row-loop or shard-read
   synchronization is introduced.
+
+### UUID and cluster INSERT ownership
+
+- UUID values reuse the immutable 16-byte CString carrier. Its GC-visible pointer
+  retains the payload; no session, generator or dictionary lease is stored in a
+  value. UUID declarations canonicalize assignments. `DefaultExpression` retains
+  a generator name, evaluated once per omitted input row before routing and
+  constraint checks; WAL/forwarding consume the resulting explicit value.
+- Cluster free-shard routing selects local M/O writer lanes, including lanes
+  preceding newer foreign appends. Overflow must not claim a foreign lane merely
+  because maintenance is busy. Schema imports of append-only writer topology
+  preserve live table/shard owners and merge the ordinary integer high-water
+  counter. Shard alias migration resolves the current directory key under `mu`.
+- INSERT must not acquire schema write ownership for ID allocation or UNIQUE
+  checks. Allocation runs once per batch/block before data ownership; no shard
+  lock spans an allocation RPC. UUID generation remains node-local. Local
+  non-cluster integer allocation stays atomic.
+- Rebuild chooses range versus hash independently per column using advisory
+  point/range demand outside row loops. Persisted hash method identifiers define
+  permanent byte normalization and hashing. Hash placement proves no range or
+  ordering; non-point/coercing predicates must conservatively scan all buckets.
+
+- `mosiPacket.Boot` and `replicaRequestMark.Boot` are immutable originating
+  process identities for cluster request ordering. Marks remain RAM-only under
+  the existing directory mutex. A newer authenticated incarnation has an
+  independent sequence domain; queued old-incarnation packets cannot execute
+  after a roster update. Neither field grants storage permission.

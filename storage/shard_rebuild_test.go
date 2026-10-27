@@ -2987,7 +2987,7 @@ func TestGroupPartitionHintsShareWeightedRowBudget(t *testing.T) {
 				for j := range pivots {
 					pivots[j] = scm.NewInt(int64(j))
 				}
-				dims[i] = shardDimension{fmt.Sprint(i), n, pivots}
+				dims[i] = shardDimension{Column: fmt.Sprint(i), NumPartitions: n, Pivots: pivots}
 			}
 			balanced := balancePartitionHints(dims, tc.rows)
 			count, valid := checkedRepartitionShardCount(balanced, maxRepartitionShards)

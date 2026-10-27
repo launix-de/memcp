@@ -300,7 +300,7 @@ func TestInsertPartitioningTrafficSchemaCheckpoint(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tinserttrafficschema")
 	tbl.Columns[0].PartitioningScore = 2
 	for i := 0; i < 3; i++ {
-		tbl.AddPartitioningScore([]string{"id"})
+		tbl.AddPartitioningScore([]string{"id"}, false)
 	}
 	data, err := json.Marshal(tbl)
 	if err != nil {

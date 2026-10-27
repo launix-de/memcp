@@ -78,7 +78,16 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 		epoch := r.directory.Records[r.resourceKey(packet.Resource)].Epoch
 		r.mu.Unlock()
 		if packet.Epoch > epoch {
-			return fmt.Errorf("future invalidation epoch")
+			if r.cluster == nil || c.ownstate.Phase() != mosi.IO {
+				return fmt.Errorf("future invalidation epoch %d > %d in %s", packet.Epoch, epoch, c.ownstate.Phase())
+			}
+			// A restarted peer has no saved permissions. Revoking its already
+			// invalid resource is safe and lets the live owner's reader directory
+			// drain without inventing rights from the shared backend.
+			r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
+				record.Epoch, record.Owner = packet.Epoch, source
+				return true
+			})
 		}
 		if packet.Epoch < epoch {
 			return nil
@@ -225,6 +234,9 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		return ctx.Err()
 	}
 	if r.cluster != nil {
+		if packet.Boot != "" && !r.cluster.requestIncarnation(requester, packet.Boot) {
+			return fmt.Errorf("stale cluster request incarnation")
+		}
 		// Discovery may race an earlier handover while this request waits for
 		// directory ownership. The old owner forwards to the successor; it must
 		// never become a permanent coordinator recalling the actual owner.
@@ -265,14 +277,14 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		sameSequence := packet.Sequence == mark.Sequence
 		differentFlight := mark.ID != "" && mark.ID != packet.ID
 		completed := mark.Completed && mark.Write == write
-		if packet.Sequence < mark.Sequence || sameSequence && (differentFlight || mark.Write && !write || completed) {
+		if mark.Boot == packet.Boot && (packet.Sequence < mark.Sequence || sameSequence && (differentFlight || mark.Write && !write || completed)) {
 			stale = true
 			return false
 		}
 		if record.Requests == nil {
 			record.Requests = make(map[string]replicaRequestMark)
 		}
-		record.Requests[requester] = replicaRequestMark{Sequence: packet.Sequence, Write: write, ID: packet.ID}
+		record.Requests[requester] = replicaRequestMark{Sequence: packet.Sequence, Write: write, ID: packet.ID, Boot: packet.Boot}
 		return true
 	})
 	if stale {
@@ -423,7 +435,12 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		}
 	}
 	if requester == r.id {
-		_, err := c.ownstate.Grant(packet.ID, mosi.ParsePhase(grantState), func() error { return nil })
+		_, err := c.ownstate.Grant(packet.ID, mosi.ParsePhase(grantState), func() error {
+			if r.cluster != nil {
+				c.clusterstate.Publish(mosi.ParsePhase(grantState))
+			}
+			return nil
+		})
 		return err
 	}
 	peer := r.peer(requester)
