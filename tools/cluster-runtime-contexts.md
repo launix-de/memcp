@@ -103,10 +103,11 @@ protocol; no timeout may take M from an offline replica.
 The required old-generation test is: a peer retains the old shard for an active
 scan, the owner publishes a rebuilt UUID, and the peer finishes using the old
 generation before releasing it. Only that old registration is retired; neither
-new-generation rights nor the old scan's visibility may change. UUID forwarding
-is being developed separately and is not a prerequisite for the SQL contracts
-above. This patch neither imports that unpublished implementation nor claims
-that the object registry and its GC protocol are implemented.
+successor rights nor the old scan's visibility may change. Native UUID forwarding
+now shares one authority between rebuild predecessors and successors for both
+cluster and replication. Historical scans retain their original shard and record
+horizon; routing metadata does not acquire permissions or rebind those row IDs.
+The general object registry and its GC protocol remain follow-up work.
 
 Distributed writes additionally need native participant prepare/commit/abort
 and durable outcome recovery. Do not serialize the entire mutable TxContext as

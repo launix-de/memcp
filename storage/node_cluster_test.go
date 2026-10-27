@@ -10,6 +10,7 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 */
 package storage
 
+import "fmt"
 import "time"
 import "context"
 import "testing"
@@ -351,5 +352,152 @@ func TestClusterDiscoveryIgnoresUnavailableNonOwner(t *testing.T) {
 				t.Fatal("discovery reclaimed rights or retired the unavailable participant")
 			}
 		})
+	}
+}
+
+func TestClusterRejectedReferenceDoesNotPublishForwarding(t *testing.T) {
+	for _, reason := range []string{"stale", "sender", "flight"} {
+		t.Run(reason, func(t *testing.T) {
+			cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}}
+			cluster.initializeManager()
+			r := cluster.manager
+			resource := mosiResource{Database: "reference_db", Table: "items", Shard: uuid.NewString()}
+			successor := resource
+			successor.Shard = uuid.NewString()
+			owner := "memcp://" + uuid.NewString()
+			cell := r.resourceCell(resource)
+			cell.ownstate.Initialize(mosi.S)
+			r.updateRecord(resource, func(record *replicaRecord) bool {
+				record.Owner, record.State, record.Epoch = owner, "S", 5
+				return true
+			})
+			packet := mosiPacket{Resource: resource, ID: uuid.NewString(), Epoch: 5, Content: successor.Shard, Forwards: []shardForward{{resource, successor}}}
+			source := owner
+			switch reason {
+			case "stale":
+				packet.Epoch = 4
+			case "sender":
+				source = "memcp://" + uuid.NewString()
+			case "flight":
+				cell.ownstate.Publish(mosi.IO)
+				cell.ownstate.Request(mosi.S)
+			}
+			failure := map[string]string{"stale": "stale shared reference", "sender": "unsolicited shared reference", "flight": "unexpected shared reference request"}[reason]
+			if err := cluster.installReference(source, packet); err == nil || !strings.Contains(err.Error(), failure) {
+				t.Fatal("reference was not rejected for its invalid header", err)
+			}
+			if r.canonicalResource(resource) != resource || r.lookupCell(successor) != nil || *cell.resource.Load() != resource {
+				t.Fatal("rejected reference changed UUID routing")
+			}
+			if record := r.directory.Records[resource.key()]; record.Owner != owner || record.Epoch != 5 {
+				t.Fatal("rejected reference changed ownership", record)
+			}
+		})
+	}
+}
+
+func TestClusterAccessCancellationKeepsCommonFlight(t *testing.T) {
+	for _, write := range []bool{false, true} {
+		t.Run(fmt.Sprint("write=", write), func(t *testing.T) {
+			nodeCtx, stopNode := context.WithCancel(context.Background())
+			defer stopNode()
+			cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: nodeCtx}
+			cluster.initializeManager()
+			owner := "memcp://" + uuid.NewString()
+			peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 2)}
+			cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
+			tbl := &table{schema: &database{Name: "cancel_access_db"}, Name: "items"}
+			shard := &storageShard{t: tbl, uuid: uuid.New()}
+			r := cluster.manager
+			resource := r.shardResource(shard)
+			cell := r.shardCell(shard)
+			cell.ownstate.Initialize(mosi.IO)
+			r.resourceCell(mosiResource{Database: resource.Database}).ownstate.Initialize(mosi.S)
+			r.updateRecord(resource, func(record *replicaRecord) bool {
+				record.Owner, record.Epoch = owner, 1
+				return true
+			})
+			wanted := mosi.S
+			if write {
+				wanted = mosi.M
+			}
+			request, _ := cell.ownstate.Request(wanted)
+			ctx, cancel := context.WithCancel(context.Background())
+			ss := &scm.SessionState{}
+			seq := ss.BeginQuery("Query", "cancel admission")
+			ss.SetQueryContext(seq, ctx)
+			tx := NewTxContext(TxCursorStability)
+			tx.beginQuery(ss, seq, "cancel admission")
+			defer tx.endQuery(seq)
+			cancel()
+			done := make(chan any, 1)
+			go func() {
+				defer func() { done <- recover() }()
+				if write {
+					_, release := r.writeResource(resource, tx)
+					release()
+				} else {
+					r.readShard(shard, tx)
+				}
+			}()
+			select {
+			case failure := <-done:
+				if failure != context.Canceled {
+					t.Fatal("wrong cancelled access result", failure)
+				}
+			case <-time.After(time.Second):
+				stopNode()
+				<-done
+				t.Fatal("access ignored query cancellation")
+			}
+			if request.Flight().Err() != nil || len(peer.outgoing) != 0 {
+				t.Fatal("cancelled access changed the common request")
+			}
+			if _, err := cell.ownstate.Grant(request.Flight().ID(), wanted, func() error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if r.obtain(resource, wanted, "", nil) != cell {
+				t.Fatal("remaining waiter lost the completed grant")
+			}
+		})
+	}
+}
+
+func TestClusterReferenceKeepsAcquisitionID(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "cluster_reference_request", 0)
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}}
+	cluster.initializeManager()
+	r := cluster.manager
+	requester := "memcp://" + uuid.NewString()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 4)}
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: requester}, peer: peer}}})
+	resource := mosiResource{Database: tbl.schema.Name}
+	cell := r.resourceCell(resource)
+	cell.ownstate.Establish(mosi.M)
+	cell.clusterstate.Establish(mosi.M)
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.State, record.Epoch = r.id, "M", 1
+		return true
+	})
+	request := mosiPacket{Kind: "read", ID: uuid.NewString(), Resource: resource, Sequence: 1}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.coordinate(ctx, requester, request) }()
+	select {
+	case message := <-peer.outgoing:
+		if message.Packet == nil || message.Packet.Kind != "reference" || message.Packet.ID != request.ID {
+			t.Fatal("reference lost the pending acquisition identity", message.Packet)
+		}
+		step, ok := r.steps.Load(request.ID)
+		if !ok {
+			t.Fatal("reference has no matching installation acknowledgement")
+		}
+		step.(*replicaStep).finish(nil)
+	case <-ctx.Done():
+		t.Fatal("missing reference", ctx.Err())
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

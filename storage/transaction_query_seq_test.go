@@ -353,3 +353,27 @@ func TestQueryRequestRecoveryCapabilityAndGlobalStatementScopes(t *testing.T) {
 		}()
 	}
 }
+
+func TestStatementRetainsCacheCarrierBeforeColumnInitialization(t *testing.T) {
+	tbl := &table{Name: ".grp:statement_carrier", PersistencyMode: Cache}
+	tx := NewTxContext(TxCursorStability)
+	tx.beginQuery(nil, 1, "cache initialization")
+	if !tx.retainQueryTable(tbl) {
+		t.Fatal("could not retain unpublished cache carrier")
+	}
+	if tbl.beginCacheEviction() {
+		t.Fatal("evicted carrier before its column initialization")
+	}
+	tx.endStatement()
+	if !tbl.beginCacheEviction() {
+		t.Fatal("statement did not release cache carrier")
+	}
+	if tx.retainQueryTable(tbl) != true {
+		t.Fatal("inactive statement unexpectedly acquired a pin")
+	}
+	tx.beginQuery(nil, 2, "retired carrier")
+	if tx.retainQueryTable(tbl) {
+		t.Fatal("retired cache carrier was reused")
+	}
+	tx.endStatement()
+}

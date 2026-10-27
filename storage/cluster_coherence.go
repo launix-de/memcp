@@ -344,11 +344,36 @@ func (cluster *nodeCluster) declareShard(shard *storageShard, local bool) *repli
 }
 func (cluster *nodeCluster) installReference(source string, packet mosiPacket) error {
 	r := cluster.manager
-	if err := r.acceptForwards(source, packet); err != nil {
+	if !packet.Resource.valid() || packet.ID == "" {
+		return fmt.Errorf("invalid shared reference")
+	}
+	if err := r.validateForwards(source, packet); err != nil {
 		return err
 	}
-	c := r.resourceCell(packet.Resource)
-	if packet.Epoch < cluster.report(packet.Resource).Epoch {
+	// Find the already known authority without publishing the advertised edge.
+	// A reference may name a successor which is not in our lookup directory yet.
+	c := r.lookupCell(packet.Resource)
+	if c == nil {
+		for _, route := range packet.Forwards {
+			if c = r.lookupCell(route.From); c != nil {
+				break
+			}
+		}
+	}
+	if c == nil {
+		return fmt.Errorf("unknown shared reference")
+	}
+	c.acquire.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			c.acquire.Unlock()
+		}
+	}()
+	r.mu.Lock()
+	record := r.directory.Records[r.resourceKey(*c.resource.Load())]
+	r.mu.Unlock()
+	if packet.Epoch < record.Epoch {
 		return fmt.Errorf("stale shared reference")
 	}
 	var expected *replicaStep
@@ -358,39 +383,59 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 			return fmt.Errorf("unexpected shared reference source")
 		}
 	}
-	if expected == nil && !c.ownstate.Phase().Requested() {
-		// An O holder may publish a rebuilt content to its known S readers
-		// without a new read request. Keep their existing permission and install
-		// only an update from the recorded owner at this exact authority epoch.
-		r.mu.Lock()
-		record := r.directory.Records[r.resourceKey(packet.Resource)]
-		r.mu.Unlock()
-		if c.ownstate.Phase() != mosi.S || record.Owner != source || record.Epoch != packet.Epoch {
-			return fmt.Errorf("unsolicited shared reference for %s in %s", packet.Resource.key(), c.ownstate.Phase())
+	publication := c.ownstate.Snapshot()
+	if expected == nil {
+		if publication.Phase().Requested() {
+			if publication.Flight().ID() != packet.ID || record.Owner != source && packet.Epoch <= record.Epoch {
+				return fmt.Errorf("unexpected shared reference request")
+			}
+		} else if publication.Phase() != mosi.S || record.Owner != source || record.Epoch != packet.Epoch {
+			// Unsolicited O updates may refresh existing S readers only at the
+			// exact recorded authority epoch. They never create a new grant.
+			return fmt.Errorf("unsolicited shared reference for %s in %s", packet.Resource.key(), publication.Phase())
 		}
+	}
+	if cluster.peer(source) == nil {
+		return fmt.Errorf(mosi.NetworkError)
 	}
 	db := GetDatabase(packet.Resource.Database)
 	if db == nil {
 		return fmt.Errorf("missing shared database")
 	}
+	var data []byte
 	if packet.Resource.Shard == "" {
-		data := db.persistence.ReadSchema()
+		data = db.persistence.ReadSchema()
 		content, err := r.schemaDigest(data)
 		if err != nil || content != packet.Content {
 			return fmt.Errorf("shared schema changed")
 		}
+	} else {
+		actual := packet.Resource
+		actual.Shard = packet.Content
+		if !actual.valid() || db.tables.Get(packet.Resource.Table) == nil {
+			return fmt.Errorf("invalid shared shard reference")
+		}
+		if err := db.importClusterCommits(source); err != nil {
+			return err
+		}
+	}
+	// Epoch, authenticated sender, flight and content have all been checked.
+	// Rejected references above leave both lookup and active UUID unchanged.
+	for _, route := range packet.Forwards {
+		r.forwardResource(route.From, route.To)
+	}
+	if packet.Resource.Shard == "" {
 		if err := r.installSchema(source, db.Name, db.persistence, data); err != nil {
 			return err
 		}
 	} else {
-		if err := db.importClusterCommits(source); err != nil {
-			return err
-		}
 		if err := r.finishImport(source, &replicaImport{header: packet, engine: db.persistence}); err != nil {
 			return err
 		}
 	}
 	r.updateRecord(packet.Resource, func(record *replicaRecord) bool { record.Content = packet.Content; return true })
+	c.acquire.Unlock()
+	locked = false
 	if expected != nil {
 		expected.finish(nil)
 		return nil

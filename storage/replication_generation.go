@@ -386,6 +386,13 @@ func (r *replicationManager) captureResource(resource mosiResource, content stri
 		if content != "" && actual != content {
 			return nil, fmt.Errorf("schema content changed before transfer")
 		}
+		// A durable checkpoint can precede native active-topology publication
+		// (overflow rebuild). Publish its exact UUID edges before a peer can
+		// acquire one of the successor UUIDs advertised in this schema.
+		if err := r.restoreSchemaRoutes(transfer.schema); err != nil {
+			return nil, err
+		}
+		transfer.routes = r.shardRoutes(resource)
 		transfer.content = actual
 		complete = true
 		return transfer, nil
@@ -864,6 +871,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 			}
 		}
 		for _, table := range replacement.tables.GetAll() {
+			r.restoreTableRoutes(table)
 			previous := db.tables.Get(table.Name)
 			if previous != nil && r.sameReplicaDeclaration(previous, table) {
 				if r.cluster != nil {
@@ -884,6 +892,12 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 						resource := r.shardResource(old)
 						cell := r.shardCell(old)
 						if old != nil && old.uuid != incoming.uuid {
+							if r.canonicalResource(r.shardResource(incoming)).Shard != incoming.uuid.String() {
+								// A schema reference captured before the rebuild may
+								// still name its predecessor. It cannot replace the
+								// successor already installed through data coherence.
+								continue
+							}
 							if cell.ownstate.Phase() == mosi.M {
 								return fmt.Errorf("shared schema conflicts with a local modifier")
 							}
@@ -993,9 +1007,6 @@ func (r *replicationManager) transmitResource(ctx context.Context, peerID string
 		header.Kind = "reference"
 		if header.Resource.Shard != "" {
 			header.Forwards = r.shardRoutes(header.Resource)
-		}
-		if current := r.resourceCell(header.Resource).current.Load(); current != nil && header.Resource.Shard != "" {
-
 		}
 		return r.step(ctx, peerID, header)
 	}
@@ -1282,4 +1293,25 @@ func (r *replicationManager) completeLocalShard(resource mosiResource) (string, 
 		}
 	}
 	return content, nil
+}
+
+// A source may checkpoint successor UUIDs before swapping its active topology.
+// Apply only the routing metadata from that completed native checkpoint; no
+// backend contents or former MOSI permission are proof of current authority.
+func (r *replicationManager) restoreSchemaRoutes(data []byte) error {
+	var schema struct {
+		Name   string
+		Tables map[string]struct {
+			Forwards map[string]string `json:"shard_forwards"`
+		}
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		return err
+	}
+	for name, table := range schema.Tables {
+		for from, to := range table.Forwards {
+			r.forwardResource(mosiResource{Database: schema.Name, Table: name, Shard: from}, mosiResource{Database: schema.Name, Table: name, Shard: to})
+		}
+	}
+	return nil
 }

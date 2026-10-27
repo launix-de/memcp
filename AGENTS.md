@@ -186,7 +186,11 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   Diagnostics sample both slots on demand and are never an admission snapshot.
   Its existing `acquire` mutex serializes inbound grant, recall, invalidation
   and final slave import publication against epoch changes; local granted
-  reads and write batches never acquire it. Release it before transport sends.
+  reads and write batches never acquire it. Shared references validate epoch,
+  sender, pending request and captured content before publishing UUID edges;
+  their installation acknowledgement retains the original acquisition ID.
+  Release acquire before transport sends. Query-owned acquisition waits retain
+  the query context; cancellation releases only that waiter, never the shared flight.
   `replicaRequestMark.ID` and `Completed` belong to the immutable RAM directory
   entry under existing resource-directory serialization. Completed requests
   cannot execute twice; a same-flight read-to-write upgrade remains valid.
@@ -300,7 +304,9 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   these edges before interpreting peer reports. It restores no permissions and
   participates in no already-authorized read. Ordinary local tables create no
   forwarding history. Cluster and replication use the same cell lookup and UUID
-  routing; no separate cluster alias/state directory is retained.
+  routing; no separate cluster alias/state directory is retained. Replica
+  acquisition requests carry native UUID edges; only their authenticated current
+  owner can introduce an unknown successor, without granting local permission.
   Maintenance preserves historical files while snapshots retain those shards;
   readers neither register nor touch retirement metadata.
   Incoming payloads use bounded independently compressed chunks and private
@@ -1017,8 +1023,11 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   Completion, early LIMIT and panic/cancellation cleanup join producers and
   release queued readers exactly once, including queues removed from the heap.
   `TxContext.queryReaderReleases` is protected by its mutex and drained by
-  panic-safe `endQuery`; non-statement consumers release their prepared reader
-  explicitly. Usage timestamps change only during preparation. None of this
+  panic-safe `endStatement`/`endQuery`. Planner cache creation retains its
+  carrier through this existing release list before cache registration and
+  before returning an existing carrier, covering subsequent column initialization;
+  native cache-use pins prevent eviction until statement completion.
+  Non-statement consumers release their prepared reader explicitly. Usage timestamps change only during preparation. None of this
   process-local cache or lease state is persisted.
 
 - `TxContext.remoteBindings` lazily publishes one statement-owned

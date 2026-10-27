@@ -266,7 +266,7 @@ func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScan
 		return nil, err
 	}
 	var output remoteScanResult
-	err = withRemoteScanShard(request.Shard, func(shard *storageShard) error {
+	err = withRemoteScanShard(request.Shard, tx, func(shard *storageShard) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -343,7 +343,7 @@ func boundedScanReply(value any) (any, error) {
 
 // Acquire through the same schema/shard MOSI and generation lifetime boundaries
 // as a local scan. A changed physical generation aborts rather than rebinding IDs.
-func withRemoteScanShard(expected remoteScanShard, execute func(*storageShard) error) error {
+func withRemoteScanShard(expected remoteScanShard, tx *TxContext, execute func(*storageShard) error) error {
 	db := GetDatabase(expected.Resource.Database)
 	if db == nil {
 		return fmt.Errorf("remote schema disappeared")
@@ -380,7 +380,7 @@ func withRemoteScanShard(expected remoteScanShard, execute func(*storageShard) e
 			// physical IDs and captured extent through native snapshot access.
 			if r := activeReplication(tbl.schema); r != nil {
 				cell := r.shardCell(selected)
-				r.obtain(*cell.resource.Load(), mosi.S, "", nil)
+				r.obtain(*cell.resource.Load(), mosi.S, "", tx)
 			}
 			lease := selected.getRead(nil, true)
 			defer lease.Release()

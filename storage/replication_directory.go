@@ -195,6 +195,11 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			return err
 		}
 	}
+	if r.cluster == nil && requester != r.id && packet.Resource.Shard != "" {
+		if err := r.acceptRequestRoutes(requester, packet); err != nil {
+			return err
+		}
+	}
 	if !r.resourceKnown(packet.Resource) {
 		return fmt.Errorf(mosi.NetworkError)
 	}
@@ -355,7 +360,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 	// directory commits its new owner. A crash during transfer leaves ownership
 	// at the old modifier, never at an incomplete destination copy.
 	if requester != r.id && requester != originalOwner {
-		if err := r.transmitResource(ctx, requester, mosiPacket{ID: uuid.NewString(), Resource: packet.Resource, Epoch: record.Epoch, Content: record.Content}); err != nil {
+		if err := r.transmitResource(ctx, requester, mosiPacket{ID: packet.ID, Resource: packet.Resource, Epoch: record.Epoch, Content: record.Content}); err != nil {
 			return err
 		}
 	}
@@ -417,4 +422,48 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		}
 		return record.Readers
 	}()})
+}
+
+// An owner can rebuild while retaining M. Its next request can name the native
+// successor before the coordinator has recalled its data. Learn that edge from
+// the authenticated current owner, never invent local authority for an unknown
+// UUID. Reader hints alone cannot redirect another participant's resource.
+func (r *replicationManager) acceptRequestRoutes(source string, packet mosiPacket) error {
+	if len(packet.Forwards) == 0 {
+		return nil
+	}
+	for _, route := range packet.Forwards {
+		if !route.From.valid() || route.From.Shard == "" || route.From.Database != packet.Resource.Database || route.From.Table != packet.Resource.Table || route.To != packet.Resource {
+			return fmt.Errorf("invalid request forwarding")
+		}
+	}
+	r.mu.Lock()
+	target := r.canonicalResource(packet.Resource)
+	known := r.directory.Records[target.key()].Owner != ""
+	var authority *replicaCell
+	if !known {
+		for _, route := range packet.Forwards {
+			from := r.canonicalResource(route.From)
+			if record := r.directory.Records[from.key()]; record.Owner == source {
+				authority = r.lookupCell(from)
+				break
+			}
+		}
+	}
+	r.mu.Unlock()
+	if known {
+		return nil // an old request cannot reverse an already learned successor
+	}
+	if authority == nil {
+		return fmt.Errorf("request forwarding from non-owner")
+	}
+	for _, route := range packet.Forwards {
+		if cell := r.lookupCell(route.From); cell != nil && cell != authority {
+			return fmt.Errorf("request forwarding crosses shard authorities")
+		}
+	}
+	for _, route := range packet.Forwards {
+		r.forwardResource(route.From, route.To)
+	}
+	return nil
 }

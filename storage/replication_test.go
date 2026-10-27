@@ -1357,3 +1357,94 @@ func TestReplicationSchemaDeclarationDoesNotUndoForwarding(t *testing.T) {
 		t.Fatal("schema loading reverted an existing UUID route")
 	}
 }
+
+func TestReplicationCheckpointRoutesBeforeActivePublication(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "replica_checkpoint_routes", 3)
+	r := replicaRecoveryFixture()
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	source := tbl.ActiveShards()[0]
+	cell := r.declareShard(source, r.id, true)
+	resource := r.shardResource(source)
+	successor := source.rebuild(true)
+	// Match overflow rebuild: checkpoint the completed successor first, while
+	// ordinary readers still retain the old active topology.
+	tbl.mu.Lock()
+	tbl.Shards = []*storageShard{successor}
+	tbl.publishSchemaTopology(ShardModeFree, tbl.Shards, tbl.PDimensions)
+	tbl.mu.Unlock()
+	tbl.schema.save()
+	if r.lookupCell(r.shardResource(successor)) != nil {
+		t.Fatal("fixture already published runtime forwarding")
+	}
+	transfer, err := r.captureResource(mosiResource{Database: tbl.schema.Name}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transfer.release()
+	if r.lookupCell(r.shardResource(successor)) != cell || r.resourceKey(resource) != r.shardResource(successor).key() {
+		t.Fatal("advertised successor UUID lost its existing authority")
+	}
+	if len(transfer.routes) == 0 || cell.ownstate.Phase() != mosi.M {
+		t.Fatal("schema capture omitted UUID routing or changed permission")
+	}
+}
+
+func TestReplicationRequestLearnsOnlyOwnerForwarding(t *testing.T) {
+	for _, owner := range []string{"source", "other"} {
+		t.Run(owner, func(t *testing.T) {
+			r := replicaRecoveryFixture()
+			from := mosiResource{Database: "example", Table: "items", Shard: uuid.NewString()}
+			to := from
+			to.Shard = uuid.NewString()
+			cell := r.resourceCell(from)
+			cell.ownstate.Initialize(mosi.IO)
+			r.updateRecord(from, func(record *replicaRecord) bool {
+				record.Owner, record.State, record.Epoch = owner, "IO", 4
+				return true
+			})
+			err := r.acceptRequestRoutes("source", mosiPacket{Resource: to, Forwards: []shardForward{{from, to}}})
+			if owner == "other" {
+				if err == nil || r.lookupCell(to) != nil {
+					t.Fatal("non-owner redirected another shard", err)
+				}
+				return
+			}
+			if err != nil || r.lookupCell(to) != cell || cell.ownstate.Phase() != mosi.IO {
+				t.Fatal("owner forwarding lost its cell or fabricated permission", err)
+			}
+			record := r.directory.Records[to.key()]
+			if record.Owner != owner || record.Epoch != 4 {
+				t.Fatal("forwarding changed ownership", record)
+			}
+		})
+	}
+}
+
+func TestReplicationSharedSchemaKeepsNewerShard(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "replica_shared_schema_successor", 3)
+	RebuildTable(tbl, true, false)
+	older := append([]byte(nil), engine.ReadSchema()...)
+	r := replicaRecoveryFixture()
+	r.cluster = &nodeCluster{manager: r, self: clusterMember{ID: r.id}}
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	source := tbl.ActiveShards()[0]
+	cell := r.declareShard(source, r.id, true)
+	resource := r.shardResource(source)
+	successor := source.rebuild(true)
+	if err := r.replaceShard(resource, source, successor); err != nil {
+		t.Fatal(err)
+	}
+	cell.current.Store(successor)
+	cell.ownstate.Publish(mosi.O)
+	if err := r.installSchema("peer", tbl.schema.Name, engine, older); err != nil {
+		t.Fatal(err)
+	}
+	if current := tbl.schema.tables.Get(tbl.Name).ActiveShards()[0]; current != successor || cell.current.Load() != successor {
+		t.Fatal("old schema reference replaced the installed successor")
+	}
+	if r.canonicalResource(resource).Shard != successor.uuid.String() || cell.ownstate.Phase() != mosi.O {
+		t.Fatal("old schema reference changed routing or permission")
+	}
+}

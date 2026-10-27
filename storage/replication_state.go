@@ -249,7 +249,7 @@ func (r *replicationManager) shardRoutes(resource mosiResource) []shardForward {
 // Incoming transfers may introduce a rebuild successor before its column bytes.
 // Only the authenticated current modifier may redirect a known resource. The
 // wire request keeps its original UUID so in-flight ACK matching stays exact.
-func (r *replicationManager) acceptForwards(source string, packet mosiPacket) error {
+func (r *replicationManager) validateForwards(source string, packet mosiPacket) error {
 	if len(packet.Forwards) == 0 {
 		return nil
 	}
@@ -286,9 +286,6 @@ func (r *replicationManager) acceptForwards(source string, packet mosiPacket) er
 		}
 	} else if r.cluster == nil && source != "" {
 		return fmt.Errorf("forwarding from non-master")
-	}
-	for _, route := range packet.Forwards {
-		r.forwardResource(route.From, route.To)
 	}
 	return nil
 }

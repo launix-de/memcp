@@ -109,7 +109,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 		}
 		return r.acceptGrant(*packet)
 	case "begin":
-		if err := r.acceptForwards(source, *packet); err != nil {
+		if err := r.validateForwards(source, *packet); err != nil {
 			return err
 		}
 		if r.master {
@@ -147,6 +147,9 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 		transfer, err := r.startImport(*packet)
 		if err != nil {
 			return err
+		}
+		for _, route := range packet.Forwards {
+			r.forwardResource(route.From, route.To)
 		}
 		publication := r.resourceCell(mosiResource{Database: packet.Resource.Database})
 		publication.importPublication.Lock()

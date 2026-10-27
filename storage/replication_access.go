@@ -220,6 +220,9 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 			serial := r.requestSequence(publication.Flight())
 			var err error
 			packet := mosiPacket{Kind: "read", ID: publication.Flight().ID(), Resource: resource, Sequence: serial}
+			if !r.master && resource.Shard != "" {
+				packet.Forwards = r.shardRoutes(resource)
+			}
 			if publication.Phase() == mosi.MR {
 				packet.Kind = "write"
 			}
@@ -382,7 +385,7 @@ func (r *replicationManager) readShard(shard *storageShard, tx *TxContext) *stor
 				wanted = mosi.M
 			}
 		}
-		c = r.obtain(resource, wanted, replicationUser(tx), nil)
+		c = r.obtain(resource, wanted, replicationUser(tx), tx)
 	}
 	if current := c.current.Load(); current != nil {
 		return current
@@ -467,7 +470,7 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext)
 	for {
 		c = c.resolved()
 		resource = *c.resource.Load()
-		c = r.obtain(resource, mosi.M, replicationUser(tx), nil)
+		c = r.obtain(resource, mosi.M, replicationUser(tx), tx)
 		continuation := c.ownstate.ClosingWrites() && c.transactionContinues(tx)
 		writer, wait := c.ownstate.TryWrite(owner, continuation)
 		if writer != nil {
