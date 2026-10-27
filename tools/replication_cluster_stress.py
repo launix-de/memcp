@@ -181,7 +181,7 @@ class Node(OwnedServer):
     def records(self, table):
         schema = json.loads((self.data_dir / self.database / "schema.json").read_text())["tables"][table]
         shards = schema.get("PShards" if schema["ShardMode"] == "partition" else "Shards") or []
-        active = {shard.get("mosi", shard["uuid"]) if isinstance(shard, dict) else shard
+        active = {shard["uuid"] if isinstance(shard, dict) else shard
                   for shard in shards if shard is not None}
         records = [record for record in self.snapshot()["records"].values()
                    if record["resource"].get("shard") in active]
@@ -248,7 +248,7 @@ def database_records(name, schema, journal):
         for shard in shards:
             if shard is None:
                 continue
-            identity = shard.get("mosi", shard["uuid"]) if isinstance(shard, dict) else shard
+            identity = shard["uuid"] if isinstance(shard, dict) else shard
             expected[f"{name}/{identity}"] = {"database": name, "table": table_name, "shard": identity}
     result = {}
     for key, resource in expected.items():
@@ -340,8 +340,8 @@ def run_regressions(args, artifacts, journal):
             master.start()
             eventually(master.connected, "slave did not reconnect to restarted master")
             def schema_backed_up():
-                source = slave.snapshot()["records"].get(DATABASE, {}).get("generation")
-                target = master.snapshot()["records"].get(DATABASE, {}).get("generation")
+                source = slave.snapshot()["records"].get(DATABASE, {}).get("content")
+                target = master.snapshot()["records"].get(DATABASE, {}).get("content")
                 return source and source == target
             eventually(schema_backed_up, "backup schema generation did not catch up")
             slave.kill()
@@ -475,7 +475,7 @@ def run_regressions(args, artifacts, journal):
             for key, source in slave.snapshot()["records"].items():
                 if (source["resource"]["database"] == DATABASE and source["resource"].get("shard")
                         and source["state"] == "M"):
-                    if not destination.get(key, {}).get("generation") or destination[key]["generation"] != source.get("generation"):
+                    if not destination.get(key, {}).get("content") or destination[key]["content"] != source.get("content"):
                         return False
             return True
         eventually(backed_up, "reconnected slave did not publish completed backups")
@@ -1502,15 +1502,27 @@ def run_cluster_placement(args, artifacts, journal):
             futures.extend([threads.submit(private_work), threads.submit(cluster_reads)])
             for future in futures:
                 future.result()
+        # Leave one reader with an invalidated hint for the contact while its
+        # data ownership moves to a survivor. Looking up that live owner after
+        # contact loss must work without retiring the unavailable participant.
+        nodes[0].client.sql("CREATE TABLE contact_route_probe(id INT PRIMARY KEY,n INT) ENGINE=SAFE")
+        nodes[0].client.sql("INSERT INTO contact_route_probe VALUES(1,7),(2,11)")
+        expect(nodes[2].client.number("SELECT SUM(n) AS total FROM contact_route_probe", "total"), 18,
+               "reader acquired the contact's original ownership hint")
+        nodes[1].client.sql("UPDATE contact_route_probe SET n=n+1 WHERE id=1")
         # Move schema ownership away from the contact before it is killed. The
         # contact's already-granted S rights remain usable by the survivors.
-        nodes[1].client.sql("CREATE TABLE after_contact(id INT)")
         for node in nodes:
             expect(node.client.number(query, "total"), expected, "sum before contact loss")
+        # Publish this last: the contact must hold no schema S right when it
+        # disappears, otherwise subsequent schema M acquisition must fail.
+        nodes[1].client.sql("CREATE TABLE after_contact(id INT)")
         nodes[0].kill()
         eventually(lambda: all(status(node)["state"]["connected"] == len(nodes) - 2 for node in nodes[1:]),
                    "surviving peers did not observe contact-node loss")
         expect(nodes[1].client.number(query, "total"), expected, "sum after contact-node loss")
+        expect(nodes[2].client.number("SELECT SUM(n) AS total FROM contact_route_probe", "total"), 19,
+               "stale hint discovers the live owner after contact loss")
         # This untouched partition still belongs to the missing contact. An M
         # request must fail immediately and retain the surviving S permissions.
         started = time.monotonic()

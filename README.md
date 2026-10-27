@@ -355,11 +355,11 @@ and independent backend namespace, including separate buckets/prefixes for
 remote storage. The existing persistence backends are used without modification.
 `schema.json` remains the schema format. `SHUTDOWN` affects the addressed instance.
 
-Both listeners negotiate `memcp.mosi.v1` and exchange bounded binary WebSocket
+Both listeners negotiate `memcp.mosi.v2` and exchange bounded binary WebSocket
 messages. Each message contains a versioned envelope, JSON control metadata and
 raw compressed transfer bytes, without base64 expansion of shard chunks. Text
-messages, unsupported versions and oversized messages are rejected. Older JSON
-replication peers must be upgraded together. SQL requests on the same HTTP port
+messages, unsupported versions and oversized messages are rejected. Peers using
+older protocol versions must be upgraded together. SQL requests on the same HTTP port
 continue to use their ordinary authentication; `/cluster` owns its existing
 replication authentication and per-message authorization.
 The shared route dispatches the explicit `X-MemCP-Role` to its enabled adapter;

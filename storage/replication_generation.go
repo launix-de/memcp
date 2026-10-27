@@ -33,21 +33,23 @@ type replicaImport struct {
 	engine PersistenceEngine
 	// Set at unpublished construction from completed local data placement.
 	// Duplicate immutable columns are consumed without reopening their files.
-	knownGeneration bool
-	writer          io.WriteCloser
-	schema          bytes.Buffer
-	objectKind      string
-	objectName      string
+	knownContent bool
+	superseded   bool
+	writer       io.WriteCloser
+	schema       bytes.Buffer
+	routes       bytes.Buffer
+	objectKind   string
+	objectName   string
 }
 
 type replicaStep struct {
-	peer       string
-	resource   mosiResource
-	epoch      uint64
-	generation string
-	done       chan struct{}
-	once       sync.Once
-	err        error
+	peer     string
+	resource mosiResource
+	epoch    uint64
+	content  string
+	done     chan struct{}
+	once     sync.Once
+	err      error
 }
 
 // Source preparation follows native lifecycle -> MOSI handover ownership.
@@ -72,9 +74,9 @@ func replicaPersistenceRead(resource mosiResource) (func(), error) {
 }
 
 // A request ID names one operation, not just a peer/resource pair. An old
-// epoch or a different installed generation cannot complete its acknowledgement.
+// epoch or a different installed content cannot complete its acknowledgement.
 func (step *replicaStep) matches(source string, packet mosiPacket) bool {
-	return step.peer == source && step.resource == packet.Resource && step.epoch == packet.Epoch && (step.generation == "" || step.generation == packet.Generation)
+	return step.peer == source && step.resource == packet.Resource && step.epoch == packet.Epoch && (step.content == "" || step.content == packet.Content)
 }
 
 func (step *replicaStep) finish(err error) { step.once.Do(func() { step.err = err; close(step.done) }) }
@@ -104,11 +106,11 @@ func (r *replicationManager) publishLocal(resource mosiResource, phase mosi.Phas
 	c.ownstate.Publish(phase)
 }
 
-func (r *replicationManager) localRecord(resource mosiResource, phase mosi.Phase, generation string) {
+func (r *replicationManager) localRecord(resource mosiResource, phase mosi.Phase, content string) {
 	r.updateRecord(resource, func(record *replicaRecord) bool {
 		record.Resource, record.State = resource, phase.String()
-		if generation != "" {
-			record.Generation = generation
+		if content != "" {
+			record.Content = content
 		}
 		return true
 	})
@@ -137,6 +139,7 @@ func (r *replicationManager) establishAuthority(c *replicaCell, record replicaRe
 }
 
 func (r *replicationManager) declareShard(shard *storageShard, owner string, local bool) *replicaCell {
+	r.restoreTableRoutes(shard.t)
 	if r.cluster != nil {
 		return r.cluster.declareShard(shard, local)
 	}
@@ -146,6 +149,11 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 	shard.coherence.CompareAndSwap(nil, c)
 	initialized := false
 	record := r.updateRecord(resource, func(record *replicaRecord) bool {
+		// Schema loading may retain predecessor files while data is in flight.
+		// Update its table name without reverting an already forwarded UUID.
+		publication := *c.resource.Load()
+		publication.Table = resource.Table
+		c.resource.Store(&publication)
 		if record.Owner != "" {
 			changed := record.Resource != resource
 			record.Resource = resource
@@ -153,14 +161,14 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 				if r.confirmed == nil {
 					r.confirmed = make(map[string]string)
 				}
-				r.confirmed[resource.key()] = record.Owner
+				r.confirmed[r.resourceKey(resource)] = record.Owner
 			}
 			return changed
 		}
 		record.Resource, record.Owner, record.Epoch = resource, owner, 1
 		record.State = "IO"
 		if local {
-			record.State, record.Generation = "M", shard.uuid.String()
+			record.State, record.Content = "M", shard.uuid.String()
 		}
 		if r.master {
 			schemaKey := mosiResource{Database: resource.Database}.key()
@@ -171,14 +179,12 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 				if r.confirmed == nil {
 					r.confirmed = make(map[string]string)
 				}
-				r.confirmed[resource.key()] = record.Owner
+				r.confirmed[r.resourceKey(resource)] = record.Owner
 			}
 		}
 		initialized = true
 		return true
 	})
-	publication := resource
-	c.resource.Store(&publication)
 	if initialized {
 		r.establishAuthority(c, record)
 	}
@@ -209,7 +215,7 @@ func (r *replicationManager) findShard(resource mosiResource) *storageShard {
 		return nil
 	}
 	for _, shard := range table.ActiveShards() {
-		if shard != nil && (shard.logicalID().String() == resource.Shard || r.cluster != nil && shard.uuid.String() == resource.Shard) {
+		if shard != nil && r.resourceKey(mosiResource{Database: resource.Database, Table: resource.Table, Shard: shard.uuid.String()}) == r.resourceKey(resource) {
 			return shard
 		}
 	}
@@ -218,9 +224,10 @@ func (r *replicationManager) findShard(resource mosiResource) *storageShard {
 
 func (r *replicationManager) shardCell(shard *storageShard) *replicaCell {
 	if c := shard.coherence.Load(); c != nil {
-		return c
+		return c.resolved()
 	}
-	resource := r.shardResource(shard)
+	r.restoreTableRoutes(shard.t)
+	resource := mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.uuid.String()}
 	c := r.resourceCell(resource)
 	c.current.CompareAndSwap(nil, shard)
 	shard.coherence.CompareAndSwap(nil, c)
@@ -230,7 +237,7 @@ func (r *replicationManager) shardCell(shard *storageShard) *replicaCell {
 // prepareResource rebuilds exactly one logical shard, never its siblings. Its
 // sealed MOSI handover is already owned and native transactions have drained. The
 // existing rebuild forwards mutations and retains old reader generations.
-func (r *replicationManager) prepareResource(resource mosiResource) (generation string, err error) {
+func (r *replicationManager) prepareResource(resource mosiResource) (content string, err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			err = fmt.Errorf("replication prepare: %v", failure)
@@ -246,7 +253,7 @@ func (r *replicationManager) prepareResource(resource mosiResource) (generation 
 			r.schemaShards(db, r.id, true)
 		}
 		db.save()
-		return replicaSchemaGeneration(db.persistence.ReadSchema())
+		return r.schemaDigest(db.persistence.ReadSchema())
 	}
 	c := r.resourceCell(resource)
 	shard := c.current.Load()
@@ -305,7 +312,7 @@ func (r *replicationManager) prepareResource(resource mosiResource) (generation 
 
 // replaceShard publishes a point update to one table's immutable topology.
 // Old pointers and files remain owned by their existing snapshots; replication
-// does not mutate payload or introduce a second lock for that old generation.
+// does not mutate payload or introduce a second lock for that old content.
 func (r *replicationManager) replaceShard(resource mosiResource, previous, replacement *storageShard) error {
 	db := databases.Get(resource.Database)
 	if db == nil {
@@ -316,17 +323,17 @@ func (r *replicationManager) replaceShard(resource mosiResource, previous, repla
 		return fmt.Errorf("missing table for shard patch")
 	}
 	cell := r.resourceCell(resource)
-	if r.cluster != nil {
-		r.cluster.aliasShard(resource, replacement)
-	}
 	if previous != replacement {
-		cell.retainGeneration(previous)
+		cell.retainShard(previous)
+		r.forwardResource(resource, mosiResource{Database: resource.Database, Table: resource.Table, Shard: replacement.uuid.String()})
+		cell = cell.resolved()
+		replacement.coherence.Store(cell)
 	}
 	table.mu.Lock()
 	replace := func(shards []*storageShard) []*storageShard {
 		result := append([]*storageShard(nil), shards...)
 		for i, shard := range result {
-			if shard == previous || (shard != nil && shard.logicalID().String() == resource.Shard) {
+			if shard == previous || (shard != nil && r.resourceCell(mosiResource{Database: resource.Database, Table: resource.Table, Shard: shard.uuid.String()}) == cell) {
 				result[i] = replacement
 			}
 		}
@@ -339,30 +346,31 @@ func (r *replicationManager) replaceShard(resource mosiResource, previous, repla
 	return nil
 }
 
-// replicaTransfer binds one immutable generation before releasing source write
+// replicaTransfer binds one immutable content before releasing source write
 // ownership. The active outgoing registry protects its backend objects from
 // reclamation; no writer lock is retained by the network.
 type replicaTransfer struct {
-	engine     PersistenceEngine
-	schema     []byte
-	shard      *storageShard
-	columns    []*column
-	generation string
-	volatile   bool
-	blobTable  bool
-	payload    ReadAccess // existing eviction lease, only for volatile streamed RAM
-	manager    *replicationManager
-	database   string
-	released   bool // exclusively owned by the sending caller
+	routes    []shardForward
+	engine    PersistenceEngine
+	schema    []byte
+	shard     *storageShard
+	columns   []*column
+	content   string
+	volatile  bool
+	blobTable bool
+	payload   ReadAccess // existing eviction lease, only for volatile streamed RAM
+	manager   *replicationManager
+	database  string
+	released  bool // exclusively owned by the sending caller
 }
 
-// Caller owns the database persistence lifecycle while binding the generation.
-func (r *replicationManager) captureResource(resource mosiResource, generation string) (*replicaTransfer, error) {
+// Caller owns the database persistence lifecycle while binding the content.
+func (r *replicationManager) captureResource(resource mosiResource, content string) (*replicaTransfer, error) {
 	db := databases.Get(resource.Database)
 	if db == nil {
 		return nil, fmt.Errorf("missing database")
 	}
-	transfer := &replicaTransfer{engine: db.persistence, generation: generation}
+	transfer := &replicaTransfer{engine: db.persistence, content: content, routes: r.shardRoutes(resource)}
 	complete := false
 	defer func() {
 		if !complete {
@@ -371,14 +379,14 @@ func (r *replicationManager) captureResource(resource mosiResource, generation s
 	}()
 	if resource.Shard == "" {
 		transfer.schema = append([]byte(nil), db.persistence.ReadSchema()...)
-		actual, err := replicaSchemaGeneration(transfer.schema)
+		actual, err := r.schemaDigest(transfer.schema)
 		if err != nil {
 			return nil, err
 		}
-		if generation != "" && actual != generation {
-			return nil, fmt.Errorf("schema generation changed before transfer")
+		if content != "" && actual != content {
+			return nil, fmt.Errorf("schema content changed before transfer")
 		}
-		transfer.generation = actual
+		transfer.content = actual
 		complete = true
 		return transfer, nil
 	}
@@ -386,11 +394,11 @@ func (r *replicationManager) captureResource(resource mosiResource, generation s
 	r.transfers.Store(transfer, resource.Database)
 	cell := r.resourceCell(resource)
 	shard := cell.current.Load()
-	if shard != nil && generation != "" && shard.uuid.String() != generation {
+	if shard != nil && content != "" && shard.uuid.String() != content {
 		shard = nil
 		if history := cell.retiredShards.Load(); history != nil {
 			for _, entry := range *history {
-				if previous := entry.Value(); previous != nil && previous.uuid.String() == generation {
+				if previous := entry.Value(); previous != nil && previous.uuid.String() == content {
 					shard = previous
 					break
 				}
@@ -398,9 +406,9 @@ func (r *replicationManager) captureResource(resource mosiResource, generation s
 		}
 	}
 	if shard == nil {
-		return nil, fmt.Errorf("missing transfer generation")
+		return nil, fmt.Errorf("missing transfer content")
 	}
-	transfer.shard, transfer.generation = shard, shard.uuid.String()
+	transfer.shard, transfer.content = shard, shard.uuid.String()
 	transfer.columns = shard.t.columnDeclarations()
 	transfer.volatile = shard.t.PersistencyMode == Memory || shard.t.PersistencyMode == Cache
 	transfer.blobTable = shard.t.Name == ".blobs"
@@ -439,12 +447,25 @@ func (r *replicationManager) sendResource(peer *mosiPeer, header mosiPacket, tra
 			err = fmt.Errorf("replication transfer: %v", failure)
 		}
 	}()
-	header.Generation = transfer.generation
+	header.Content = transfer.content
+	if header.Resource.Shard != "" {
+		header.Forwards = transfer.routes
+	}
 	header.Kind = "begin"
 	if err := peer.post(header); err != nil {
 		return err
 	}
+	header.Forwards = nil // routes are introduced once, before streaming payload
 	if header.Resource.Shard == "" {
+		if len(transfer.routes) != 0 {
+			routes, err := json.Marshal(transfer.routes)
+			if err != nil {
+				return err
+			}
+			if err := peer.sendObject(header, "routes", "", io.NopCloser(bytes.NewReader(routes))); err != nil {
+				return err
+			}
+		}
 		if err := peer.sendObject(header, "schema", "", io.NopCloser(bytes.NewReader(transfer.schema))); err != nil {
 			return err
 		}
@@ -457,14 +478,14 @@ func (r *replicationManager) sendResource(peer *mosiPeer, header mosiPacket, tra
 				if volatile {
 					reader = replicaColumnStream(shard.getColumnStorageOrPanic(column.Name, false, nil))
 				} else {
-					reader = transfer.engine.ReadColumn(header.Generation, column.Name)
+					reader = transfer.engine.ReadColumn(header.Content, column.Name)
 				}
 				if err := peer.sendObject(header, "column", column.Name, reader); err != nil {
 					return err
 				}
 			}
 		}
-		manifest := transfer.engine.ReadColumn(header.Generation, blobManifestColumn)
+		manifest := transfer.engine.ReadColumn(header.Content, blobManifestColumn)
 		if missing, ok := manifest.(interface{ Missing() bool }); !ok || !missing.Missing() {
 			if err := peer.sendObject(header, "column", blobManifestColumn, manifest); err != nil {
 				return err
@@ -481,7 +502,7 @@ func (r *replicationManager) sendResource(peer *mosiPeer, header mosiPacket, tra
 			}
 		} else if !transfer.blobTable {
 			var valid bool
-			references, valid = readBlobManifest(transfer.engine.ReadColumn(header.Generation, blobManifestColumn))
+			references, valid = readBlobManifest(transfer.engine.ReadColumn(header.Content, blobManifestColumn))
 			if !valid {
 				return fmt.Errorf("invalid shard blob manifest")
 			}
@@ -497,7 +518,7 @@ func (r *replicationManager) sendResource(peer *mosiPeer, header mosiPacket, tra
 }
 
 // Volatile table modes have no committed column file. Serialize an immutable
-// rebuilt generation through a pipe, retaining the same bounded packet path.
+// rebuilt content through a pipe, retaining the same bounded packet path.
 func replicaColumnStream(column ColumnStorage) io.ReadCloser {
 	reader, writer := io.Pipe()
 	go func() {
@@ -531,9 +552,22 @@ func (r *replicationManager) startImport(packet mosiPacket) (*replicaImport, err
 		return nil, fmt.Errorf("invalid local backend")
 	}
 	r.mu.Lock()
-	known := packet.Resource.Shard != "" && packet.Generation != "" && (r.directory.Records[r.recordKey(packet.Resource)].Generation == packet.Generation || r.backups[packet.Resource.key()].Generation == packet.Generation)
+	known := packet.Resource.Shard != "" && packet.Content != "" && (r.directory.Records[r.resourceKey(packet.Resource)].Content == packet.Content || r.backups[r.resourceKey(packet.Resource)].Content == packet.Content)
 	r.mu.Unlock()
-	return &replicaImport{header: packet, engine: engine, knownGeneration: known}, nil
+	if snapshot := r.cellSnapshot.Load(); !known && packet.Resource.Shard != "" && snapshot != nil {
+		cell := (*snapshot)[packet.Resource.key()]
+		if cell != nil {
+			if history := cell.resolved().retiredShards.Load(); history != nil {
+				for _, entry := range *history {
+					if shard := entry.Value(); shard != nil && shard.uuid.String() == packet.Content {
+						known = true
+						break
+					}
+				}
+			}
+		}
+	}
+	return &replicaImport{header: packet, engine: engine, knownContent: known}, nil
 }
 
 func (transfer *replicaImport) abort() {
@@ -544,7 +578,7 @@ func (transfer *replicaImport) abort() {
 }
 
 func (transfer *replicaImport) packet(packet mosiPacket) error {
-	if packet.Resource != transfer.header.Resource || packet.Epoch != transfer.header.Epoch || packet.Generation != transfer.header.Generation {
+	if packet.Resource != transfer.header.Resource || packet.Epoch != transfer.header.Epoch || packet.Content != transfer.header.Content {
 		return fmt.Errorf("transfer header changed")
 	}
 	switch packet.Kind {
@@ -554,7 +588,7 @@ func (transfer *replicaImport) packet(packet mosiPacket) error {
 		}
 		transfer.objectKind, transfer.objectName = packet.ObjectKind, packet.Object
 		switch packet.ObjectKind {
-		case "schema":
+		case "schema", "routes":
 			if packet.Resource.Shard != "" {
 				return fmt.Errorf("schema in shard transfer")
 			}
@@ -583,17 +617,17 @@ func (transfer *replicaImport) packet(packet mosiPacket) error {
 					return fmt.Errorf("unknown transferred column")
 				}
 			}
-			if _, err := uuid.Parse(packet.Generation); err != nil {
+			if _, err := uuid.Parse(packet.Content); err != nil {
 				return err
 			}
-			if transfer.knownGeneration {
+			if transfer.knownContent {
 				// WriteColumn may truncate immediately: backends expect a private
-				// new generation. Reconnect backups can resend an already completed
+				// new content. Reconnect backups can resend an already completed
 				// UUID, whose immutable payload must survive even an aborted resend.
-				// A volatile generation may have no local column files yet; those
+				// A volatile content may have no local column files yet; those
 				// still need their first installation through the normal writer.
 				exists, err := func() (bool, error) {
-					existing := transfer.engine.ReadColumn(packet.Generation, packet.Object)
+					existing := transfer.engine.ReadColumn(packet.Content, packet.Object)
 					defer existing.Close()
 					if missing, ok := existing.(interface{ Missing() bool }); ok && missing.Missing() {
 						return false, nil
@@ -612,7 +646,7 @@ func (transfer *replicaImport) packet(packet mosiPacket) error {
 					return nil
 				}
 			}
-			transfer.writer = transfer.engine.WriteColumn(packet.Generation, packet.Object)
+			transfer.writer = transfer.engine.WriteColumn(packet.Content, packet.Object)
 		case "blob":
 			if !validBlobHash(packet.Object) {
 				return fmt.Errorf("invalid blob hash")
@@ -629,11 +663,13 @@ func (transfer *replicaImport) packet(packet mosiPacket) error {
 		if err != nil {
 			return err
 		}
-		if transfer.objectKind == "schema" {
+		if transfer.objectKind == "routes" {
+			_, err = transfer.routes.Write(data)
+		} else if transfer.objectKind == "schema" {
 			_, err = transfer.schema.Write(data)
 		} else if transfer.writer != nil {
 			_, err = transfer.writer.Write(data)
-		} else if !transfer.knownGeneration || transfer.objectKind != "column" {
+		} else if !transfer.knownContent || transfer.objectKind != "column" {
 			return fmt.Errorf("chunk outside object")
 		}
 		return err
@@ -675,7 +711,27 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 	}
 	resource := transfer.header.Resource
 	if resource.Shard == "" {
+		var routes []shardForward
+		if transfer.routes.Len() != 0 {
+			if err := json.Unmarshal(transfer.routes.Bytes(), &routes); err != nil {
+				return err
+			}
+		}
+		for _, route := range routes {
+			if route.From.Database != resource.Database || route.To.Database != resource.Database {
+				return fmt.Errorf("foreign schema forwarding")
+			}
+			r.forwardResource(route.From, route.To)
+		}
 		return r.installSchema(source, resource.Database, transfer.engine, transfer.schema.Bytes())
+	}
+	actual := resource
+	actual.Shard = transfer.header.Content
+	if source != r.id && r.canonicalResource(actual).Shard != actual.Shard {
+		// A newer successor was already published while these bytes were in
+		// flight. ACK the captured transfer without reverting current data.
+		transfer.superseded = true
+		return nil
 	}
 	db := databases.Get(resource.Database)
 	if db == nil {
@@ -689,14 +745,7 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 		return fmt.Errorf("unknown shard table")
 	}
 	shard := new(storageShard)
-	lineage := resource.Shard
-	if r.cluster != nil && transfer.header.Lineage != "" {
-		lineage = transfer.header.Lineage
-	}
-	encoded, _ := json.Marshal(struct {
-		UUID    string `json:"uuid"`
-		Lineage string `json:"mosi"`
-	}{transfer.header.Generation, lineage})
+	encoded, _ := json.Marshal(transfer.header.Content)
 	if err := json.Unmarshal(encoded, shard); err != nil {
 		return err
 	}
@@ -709,7 +758,7 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 	}
 	if table.PersistencyMode == Memory || table.PersistencyMode == Cache {
 		// Ordinary volatile loaders deliberately start empty. A received
-		// generation instead instantiates its staged column streams privately,
+		// content instead instantiates its staged column streams privately,
 		// before publication, without changing backend or table-mode semantics.
 		for _, column := range table.columnDeclarations() {
 			if !column.Computor.IsNil() {
@@ -760,7 +809,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 	}
 	// Construct metadata privately through the existing loader; no data shards
 	// are read at this boundary. Existing unchanged tables stay in their live
-	// database, preserving ongoing DML and runtime generation ownership.
+	// database, preserving ongoing DML and runtime content ownership.
 	db := databases.Get(name)
 	if db != nil {
 		db.ensureLoaded()
@@ -778,7 +827,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 	}
 	if db != nil && r.cluster == nil {
 		var err error
-		data, err = replicaSchemaForLocalData(db, data)
+		data, err = r.replicaSchemaForLocalData(db, data)
 		if err != nil {
 			return err
 		}
@@ -808,18 +857,15 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 						continue
 					}
 					cell := r.shardCell(shard)
-					cell.retainGeneration(shard)
+					cell.retainShard(shard)
 					cell.current.CompareAndSwap(shard, nil)
 				}
 				db.tables.Remove(table.Name)
 			}
 		}
 		for _, table := range replacement.tables.GetAll() {
-			if r.cluster != nil && table.isEphemeralQueryTable() {
-				continue
-			}
 			previous := db.tables.Get(table.Name)
-			if previous != nil && sameReplicaDeclaration(previous, table) {
+			if previous != nil && r.sameReplicaDeclaration(previous, table) {
 				if r.cluster != nil {
 					for _, incoming := range table.ActiveShards() {
 						if incoming == nil {
@@ -827,7 +873,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 						}
 						var old *storageShard
 						for _, candidate := range previous.ActiveShards() {
-							if candidate != nil && candidate.logicalID() == incoming.logicalID() {
+							if candidate != nil && r.resourceKey(r.shardResource(candidate)) == r.resourceKey(r.shardResource(incoming)) {
 								old = candidate
 								break
 							}
@@ -860,7 +906,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 				}
 				cell := r.shardCell(shard)
 				if old := cell.current.Load(); old != shard {
-					cell.retainGeneration(old)
+					cell.retainShard(old)
 					cell.current.Store(shard)
 				}
 			}
@@ -885,15 +931,15 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 
 // Runtime feedback and physical rebuild UUIDs are independent of declaration
 // identity. Receiving a metadata checkpoint must not replace an unchanged live
-// table and detach its transaction, cache or generation owners.
-func sameReplicaDeclaration(previous, incoming *table) bool {
+// table and detach its transaction, cache or content owners.
+func (r *replicationManager) sameReplicaDeclaration(previous, incoming *table) bool {
 	declaration := func(table *table) []byte {
 		encoded, _ := json.Marshal(table)
 		var fields map[string]json.RawMessage
 		if json.Unmarshal(encoded, &fields) != nil {
 			return encoded
 		}
-		for _, key := range []string{"Auto_increment", "planner_row_estimate", "key_frequencies", "filter_feedback"} {
+		for _, key := range []string{"Auto_increment", "planner_row_estimate", "key_frequencies", "filter_feedback", "shard_forwards"} {
 			delete(fields, key)
 		}
 		for _, key := range []string{"Shards", "PShards"} {
@@ -902,7 +948,7 @@ func sameReplicaDeclaration(previous, incoming *table) bool {
 				identities := make([]string, len(shards))
 				for i, shard := range shards {
 					if shard != nil {
-						identities[i] = shard.logicalID().String()
+						identities[i] = r.canonicalResource(mosiResource{Database: table.schema.Name, Table: table.Name, Shard: shard.uuid.String()}).Shard
 					}
 				}
 				fields[key], _ = json.Marshal(identities)
@@ -926,7 +972,7 @@ func (r *replicationManager) step(ctx context.Context, peerID string, packet mos
 	if peer == nil {
 		return fmt.Errorf(mosi.NetworkError)
 	}
-	step := &replicaStep{peer: peerID, resource: packet.Resource, epoch: packet.Epoch, generation: packet.Generation, done: make(chan struct{})}
+	step := &replicaStep{peer: peerID, resource: packet.Resource, epoch: packet.Epoch, content: packet.Content, done: make(chan struct{})}
 	r.steps.Store(packet.ID, step)
 	defer r.steps.Delete(packet.ID)
 	if err := peer.post(packet); err != nil {
@@ -945,8 +991,11 @@ func (r *replicationManager) step(ctx context.Context, peerID string, packet mos
 func (r *replicationManager) transmitResource(ctx context.Context, peerID string, header mosiPacket) error {
 	if r.cluster != nil {
 		header.Kind = "reference"
+		if header.Resource.Shard != "" {
+			header.Forwards = r.shardRoutes(header.Resource)
+		}
 		if current := r.resourceCell(header.Resource).current.Load(); current != nil && header.Resource.Shard != "" {
-			header.Lineage = current.logicalID().String()
+
 		}
 		return r.step(ctx, peerID, header)
 	}
@@ -958,15 +1007,15 @@ func (r *replicationManager) transmitResource(ctx context.Context, peerID string
 	if err != nil {
 		return err
 	}
-	transfer, err := r.captureResource(header.Resource, header.Generation)
+	transfer, err := r.captureResource(header.Resource, header.Content)
 	release()
 	if err != nil {
 		return err
 	}
-	// Bind the ACK to the captured generation even when the caller asked for
+	// Bind the ACK to the captured content even when the caller asked for
 	// the current resource without already knowing its physical UUID/hash.
-	header.Generation = transfer.generation
-	step := &replicaStep{peer: peerID, resource: header.Resource, epoch: header.Epoch, generation: header.Generation, done: make(chan struct{})}
+	header.Content = transfer.content
+	step := &replicaStep{peer: peerID, resource: header.Resource, epoch: header.Epoch, content: header.Content, done: make(chan struct{})}
 	r.steps.Store(header.ID, step)
 	defer r.steps.Delete(header.ID)
 	if err := r.sendResource(peer, header, transfer); err != nil {
@@ -990,7 +1039,7 @@ func (r *replicationManager) distributeRebuild(resource mosiResource) {
 	cell.directory.Lock()
 	defer cell.directory.Unlock()
 	r.mu.Lock()
-	record := r.directory.Records[r.recordKey(resource)]
+	record := r.directory.Records[r.resourceKey(resource)]
 	readers := make([]string, 0, len(record.Readers))
 	for id := range record.Readers {
 		if id != r.id && id != record.Owner {
@@ -1004,7 +1053,7 @@ func (r *replicationManager) distributeRebuild(resource mosiResource) {
 			continue
 		}
 		ctx, cancel := mosiPacketContext(peer)
-		_ = r.transmitResource(ctx, id, mosiPacket{ID: uuid.NewString(), Resource: resource, Epoch: record.Epoch, Generation: record.Generation})
+		_ = r.transmitResource(ctx, id, mosiPacket{ID: uuid.NewString(), Resource: resource, Epoch: record.Epoch, Content: record.Content})
 		cancel()
 	}
 }
@@ -1032,7 +1081,7 @@ func replicationBackupRecords(db *database) []replicaRecord {
 	for _, backup := range r.backups {
 		if backup.Resource.Database == db.Name {
 			if table := db.tables.Get(backup.Resource.Table); table != nil && table.PersistencyMode != Memory && table.PersistencyMode != Cache {
-				records = append(records, replicaRecord{Resource: backup.Resource, Generation: backup.Generation})
+				records = append(records, replicaRecord{Resource: backup.Resource, Content: backup.Content})
 			}
 		}
 	}
@@ -1051,22 +1100,22 @@ func (r *replicationManager) restoreBackup(record replicaRecord) error {
 	if table == nil {
 		return nil
 	} // resource was dropped through its schema
-	if record.Generation == "" {
+	if record.Content == "" {
 		return fmt.Errorf("slave has no completed shard backup")
 	}
-	transfer := &replicaImport{header: mosiPacket{Resource: record.Resource, Generation: record.Generation}, engine: db.persistence}
+	transfer := &replicaImport{header: mosiPacket{Resource: record.Resource, Content: record.Content}, engine: db.persistence}
 	return r.finishImport(r.id, transfer)
 }
 
 // A schema transfer publishes declarations and logical topology. Physical UUIDs
 // still name this backend's own data: a peer's schema must not redirect a local
-// modifier away from its current generation and WAL before data arrives.
-func replicaSchemaForLocalData(db *database, data []byte) ([]byte, error) {
+// modifier away from its current content and WAL before data arrives.
+func (r *replicationManager) replicaSchemaForLocalData(db *database, data []byte) ([]byte, error) {
 	local := make(map[string]string)
 	for _, table := range db.tables.GetAll() {
 		for _, shard := range table.ActiveShards() {
 			if shard != nil {
-				local[shard.logicalID().String()] = shard.uuid.String()
+				local[r.resourceKey(mosiResource{Database: db.Name, Table: table.Name, Shard: shard.uuid.String()})] = shard.uuid.String()
 			}
 		}
 	}
@@ -1099,11 +1148,8 @@ func replicaSchemaForLocalData(db *database, data []byte) ([]byte, error) {
 				if err := json.Unmarshal(raw, &identity); err != nil {
 					return nil, err
 				}
-				if generation, exists := local[identity.logicalID().String()]; exists {
-					replacement, err := json.Marshal(struct {
-						UUID    string `json:"uuid"`
-						Lineage string `json:"mosi"`
-					}{generation, identity.logicalID().String()})
+				if content, exists := local[r.resourceKey(mosiResource{Database: db.Name, Table: name, Shard: identity.uuid.String()})]; exists {
+					replacement, err := json.Marshal(content)
 					if err != nil {
 						return nil, err
 					}
@@ -1118,10 +1164,10 @@ func replicaSchemaForLocalData(db *database, data []byte) ([]byte, error) {
 	return json.Marshal(document)
 }
 
-// Schema coherence covers declarations/logical topology, not node-local data
-// locations or advisory statistics. Equivalent local UUID mappings have the
-// same generation digest after an ordinary schema transfer.
-func replicaSchemaGeneration(data []byte) (string, error) {
+// Schema coherence covers declarations, partitioning and writer-lane shape.
+// Rebuild UUID forwarding is data-resource topology, not a schema mutation.
+// Digest only the captured schema bytes; never consult a mutable routing view.
+func (r *replicationManager) schemaDigest(data []byte) (string, error) {
 	var document map[string]json.RawMessage
 	if err := json.Unmarshal(data, &document); err != nil {
 		return "", err
@@ -1135,7 +1181,7 @@ func replicaSchemaGeneration(data []byte) (string, error) {
 		if err := json.Unmarshal(encoded, &fields); err != nil {
 			return "", err
 		}
-		for _, key := range []string{"Auto_increment", "planner_row_estimate", "key_frequencies", "filter_feedback"} {
+		for _, key := range []string{"Auto_increment", "planner_row_estimate", "key_frequencies", "filter_feedback", "shard_forwards"} {
 			delete(fields, key)
 		}
 		for _, key := range []string{"Shards", "PShards"} {
@@ -1146,10 +1192,10 @@ func replicaSchemaGeneration(data []byte) (string, error) {
 			if err := json.Unmarshal(fields[key], &shards); err != nil {
 				return "", err
 			}
-			ids := make([]string, len(shards))
+			ids := make([]bool, len(shards))
 			for i, shard := range shards {
 				if shard != nil {
-					ids[i] = shard.logicalID().String()
+					ids[i] = true
 				}
 			}
 			fields[key], _ = json.Marshal(ids)
@@ -1174,8 +1220,8 @@ func replicaSchemaGeneration(data []byte) (string, error) {
 
 // Complete local ordinary data can retain writes committed by the restarting
 // master after a modifier surrendered ownership. Never choose an old slave copy
-// over this generation/WAL merely because the master's RAM directory was lost.
-func (r *replicationManager) completeLocalGeneration(resource mosiResource) (string, error) {
+// over this content/WAL merely because the master's RAM directory was lost.
+func (r *replicationManager) completeLocalShard(resource mosiResource) (string, error) {
 	db := databases.Get(resource.Database)
 	if db == nil {
 		return "", nil
@@ -1184,7 +1230,7 @@ func (r *replicationManager) completeLocalGeneration(resource mosiResource) (str
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	if resource.Shard == "" {
-		return replicaSchemaGeneration(db.persistence.ReadSchema())
+		return r.schemaDigest(db.persistence.ReadSchema())
 	}
 	table := db.tables.Get(resource.Table)
 	if table == nil || table.PersistencyMode == Memory || table.PersistencyMode == Cache {
@@ -1192,7 +1238,7 @@ func (r *replicationManager) completeLocalGeneration(resource mosiResource) (str
 	}
 	var current *storageShard
 	for _, shard := range table.ActiveShards() {
-		if shard != nil && shard.logicalID().String() == resource.Shard {
+		if shard != nil && shard.uuid.String() == resource.Shard {
 			current = shard
 			break
 		}
@@ -1200,12 +1246,12 @@ func (r *replicationManager) completeLocalGeneration(resource mosiResource) (str
 	if current == nil {
 		return "", nil
 	}
-	generation := current.uuid.String()
+	content := current.uuid.String()
 	for _, column := range table.columnDeclarations() {
 		if !column.Computor.IsNil() {
 			continue
 		}
-		reader := db.persistence.ReadColumn(generation, column.Name)
+		reader := db.persistence.ReadColumn(content, column.Name)
 		var marker [1]byte
 		n, err := reader.Read(marker[:])
 		reader.Close()
@@ -1217,7 +1263,7 @@ func (r *replicationManager) completeLocalGeneration(resource mosiResource) (str
 		}
 	}
 	if resource.Table != ".blobs" {
-		references, valid := readBlobManifest(db.persistence.ReadColumn(generation, blobManifestColumn))
+		references, valid := readBlobManifest(db.persistence.ReadColumn(content, blobManifestColumn))
 		if !valid {
 			return "", nil
 		}
@@ -1235,5 +1281,5 @@ func (r *replicationManager) completeLocalGeneration(resource mosiResource) (str
 			}
 		}
 	}
-	return generation, nil
+	return content, nil
 }

@@ -14,6 +14,7 @@ import "time"
 import "context"
 import "testing"
 import "strings"
+import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -88,7 +89,7 @@ func TestClusterMountCannotBypassAdmissionThroughExplicitScanRPC(t *testing.T) {
 	if err == nil {
 		t.Fatal("unbudgeted describe opened a mounted snapshot")
 	}
-	task := remoteScanTask{Shard: remoteScanShard{Resource: mosiResource{Database: "mounted_snapshot", Table: "items", Shard: uuid.NewString()}, Generation: uuid.New()}}
+	task := remoteScanTask{Shard: remoteScanShard{Resource: mosiResource{Database: "mounted_snapshot", Table: "items", Shard: uuid.NewString()}}}
 	err = peer.call(context.Background(), "scan.execute", task, &reply)
 	if err == nil {
 		t.Fatal("explicit scan RPC bypassed mandatory cluster admission")
@@ -156,16 +157,16 @@ func TestClusterRebuildUUIDAliasesShareAuthority(t *testing.T) {
 		return true
 	})
 	next := &storageShard{uuid: uuid.New()}
-	cluster.aliasShard(old, next)
+	r.forwardResource(old, mosiResource{Database: old.Database, Table: old.Table, Shard: next.uuid.String()})
 	current := mosiResource{Database: old.Database, Table: old.Table, Shard: next.uuid.String()}
 	if r.resourceCell(current) != cell || r.resourceCell(old) != cell {
 		t.Fatal("rebuild created independently writable permission cells")
 	}
 	// Repeated publication can happen while translating an old native handle.
 	// It must not erase the canonical owner record or create another directory.
-	cluster.aliasShard(old, next)
-	r.updateRecord(old, func(record *replicaRecord) bool { record.Generation = next.uuid.String(); return true })
-	if len(r.directory.Records) != 1 || r.directory.Records[current.key()].Epoch != 7 || r.recordKey(old) != current.key() {
+	r.forwardResource(old, mosiResource{Database: old.Database, Table: old.Table, Shard: next.uuid.String()})
+	r.updateRecord(old, func(record *replicaRecord) bool { record.Content = next.uuid.String(); return true })
+	if len(r.directory.Records) != 1 || r.directory.Records[current.key()].Epoch != 7 || r.resourceKey(old) != current.key() {
 		t.Fatal("UUID forwarding lost canonical authority")
 	}
 }
@@ -289,4 +290,66 @@ func TestClusterGrantedSchemaReadDoesNotConsultSession(t *testing.T) {
 	defer nodeScans.Store(oldService)
 	tx := &TxContext{Session: scm.NewFunc(func(...scm.Scmer) scm.Scmer { panic("granted schema read consulted user session") })}
 	tbl.schema.GetRead(tx).Release()
+}
+
+func TestClusterDiscoveryIgnoresUnavailableNonOwner(t *testing.T) {
+	for _, scenario := range []string{"live-owner", "dead-owner", "restart-with-missing-peer"} {
+		t.Run(scenario, func(t *testing.T) {
+			cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, service: &nodeScanService{}}
+			cluster.initializeManager()
+			dead := clusterMember{ID: "memcp://" + uuid.NewString()}
+			live := clusterMember{ID: "memcp://" + uuid.NewString()}
+			unavailable := &mosiPeer{done: make(chan struct{})}
+			close(unavailable.done)
+			available := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+			cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, dead, live}, links: []*clusterLink{{member: dead, peer: unavailable}, {member: live, peer: available}}})
+			resource := mosiResource{Database: "discovery_db"}
+			cell := cluster.manager.resourceCell(resource)
+			if scenario != "restart-with-missing-peer" {
+				cell.ownstate.Establish(mosi.IO)
+			}
+			cluster.manager.updateRecord(resource, func(record *replicaRecord) bool { record.Owner, record.Epoch = dead.ID, 6; return true })
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			go func() {
+				select {
+				case message := <-available.outgoing:
+					var request struct {
+						Return string `json:"return"`
+					}
+					if json.Unmarshal(message.Data, &request) != nil {
+						return
+					}
+					answer := replicaRecord{Resource: resource, State: "S", Owner: dead.ID, Epoch: 7}
+					if scenario == "live-owner" {
+						answer.State, answer.Owner = "M", live.ID
+					}
+					if scenario == "restart-with-missing-peer" {
+						answer.Owner = cluster.self.ID
+					}
+					if value, ok := cluster.service.returns.Load(request.Return); ok {
+						value.(*scanReturnChannel).result <- scanCompletion{Data: mustScanJSON(answer)}
+					}
+				case <-ctx.Done():
+				}
+			}()
+			owner, err := cluster.locate(ctx, resource)
+			want := dead.ID
+			if scenario == "live-owner" {
+				want = live.ID
+			}
+			if scenario == "restart-with-missing-peer" {
+				if err == nil || cell.ownstate.Initialized() {
+					t.Fatal("incomplete discovery recovered owner permission")
+				}
+				return
+			}
+			if err != nil || owner != want {
+				t.Fatalf("owner lookup = %s, %v; want %s", owner, err, want)
+			}
+			if cell.ownstate.Phase() != mosi.IO || cluster.manager.directory.Retired[dead.ID] || len(cluster.view.Load().members) != 3 {
+				t.Fatal("discovery reclaimed rights or retired the unavailable participant")
+			}
+		})
+	}
 }

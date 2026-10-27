@@ -65,7 +65,7 @@ func replicationCheckWriteTable(t *table, tx *TxContext) {
 	}
 }
 
-// Weak retirement metadata is updated only at generation publication. A query
+// Weak retirement metadata is updated only at content publication. A query
 // retaining a historical shard keeps its files alive without registering reads.
 func replicationRetainsCatalogs(name string) bool {
 	if sharedClusterDatabase(name) {
@@ -94,7 +94,7 @@ func replicationRetainsCatalogs(name string) bool {
 	return false
 }
 
-func (c *replicaCell) retainGeneration(shard *storageShard) {
+func (c *replicaCell) retainShard(shard *storageShard) {
 	if shard == nil {
 		return
 	}

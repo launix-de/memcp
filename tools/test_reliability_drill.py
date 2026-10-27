@@ -180,13 +180,13 @@ class ReplicationOracleTests(unittest.TestCase):
 class ReplicationCatalogTests(unittest.TestCase):
 	def fixture(self):
 		schema = {"tables": {
-			"empty": {"PersistencyMode": "safe", "ShardMode": "free", "Shards": [{"uuid": "empty-generation", "mosi": "empty-lineage"}]},
+			"empty": {"PersistencyMode": "safe", "ShardMode": "free", "Shards": [{"uuid": "empty-shard", "mosi": "ignored-legacy-id"}]},
 			"partitioned": {"PersistencyMode": "safe", "ShardMode": "partition", "PShards": [None, "part-a", "part-b"]},
 			".blobs": {"PersistencyMode": "safe", "ShardMode": "free", "Shards": ["blobs"]},
 			".temporary": {"PersistencyMode": "cache", "ShardMode": "free", "Shards": ["excluded"]},
 		}}
 		records = {"db": {"resource": {"database": "db"}}}
-		for table, shards in (("empty", ["empty-lineage"]), ("partitioned", ["part-a", "part-b"]), (".blobs", ["blobs"])):
+		for table, shards in (("empty", ["empty-shard"]), ("partitioned", ["part-a", "part-b"]), (".blobs", ["blobs"])):
 			for shard in shards:
 				records[f"db/{shard}"] = {"resource": {"database": "db", "table": table, "shard": shard}}
 		records["db/retired"] = {"resource": {"database": "db", "table": "empty", "shard": "retired"}}
@@ -195,11 +195,11 @@ class ReplicationCatalogTests(unittest.TestCase):
 	def test_reclaim_checks_schema_empty_partitioned_and_internal_shards(self):
 		schema, journal = self.fixture()
 		self.assertEqual(set(replication.database_records("db", schema, journal)),
-			{"db", "db/empty-lineage", "db/part-a", "db/part-b", "db/blobs"})
+			{"db", "db/empty-shard", "db/part-a", "db/part-b", "db/blobs"})
 
 	def test_missing_empty_shard_cannot_be_declared_offline_ready(self):
 		schema, journal = self.fixture()
-		del journal["records"]["db/empty-lineage"]
+		del journal["records"]["db/empty-shard"]
 		with self.assertRaises(replication.DrillFailure):
 			replication.database_records("db", schema, journal)
 

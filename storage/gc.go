@@ -192,7 +192,7 @@ func activeBlobReferences(db *database, persistManifests bool) (map[string]struc
 		if record.Resource.Table == ".blobs" {
 			continue
 		}
-		manifest, valid := readBlobManifest(db.persistence.ReadColumn(record.Generation, blobManifestColumn))
+		manifest, valid := readBlobManifest(db.persistence.ReadColumn(record.Content, blobManifestColumn))
 		if !valid {
 			return nil, false
 		}
@@ -369,7 +369,7 @@ func cleanShards(db *database) int {
 		}
 	}
 	for _, record := range replicationBackupRecords(db) {
-		activeUUIDs[record.Generation] = true
+		activeUUIDs[record.Content] = true
 	}
 	db.schemalock.RUnlock()
 

@@ -30,6 +30,7 @@ func (cluster *nodeCluster) peer(id string) *mosiPeer {
 	return nil
 }
 func (cluster *nodeCluster) bootstrapCell(resource mosiResource) {
+	resource = cluster.manager.canonicalResource(resource)
 	if _, ok := cluster.bootstrapResources[resource.key()]; !ok {
 		return
 	}
@@ -52,6 +53,8 @@ func (cluster *nodeCluster) bootstrapCell(resource mosiResource) {
 }
 func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (string, error) {
 	r := cluster.manager
+	r.restoreResourceRoutes(resource)
+	resource = r.canonicalResource(resource)
 	cluster.bootstrapCell(resource)
 	own := cluster.report(resource)
 	phase := mosi.ParsePhase(own.State)
@@ -61,7 +64,7 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 	if own.Handoff != "" {
 		return own.Handoff, nil
 	}
-	if own.Owner != "" && own.Owner != r.id {
+	if own.Owner != "" && own.Owner != r.id && cluster.peerAvailable(own.Owner) {
 		return own.Owner, nil
 	}
 	view := cluster.view.Load()
@@ -72,10 +75,18 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 	var epoch uint64
 	authoritative := false
 	reports := map[string]replicaRecord{r.id: own}
+	complete := len(view.links) == len(view.members)-1
 	for _, link := range view.links {
 		var answer replicaRecord
-		if err := cluster.service.control(ctx, link.peer, "cluster.report", resource, &answer); err != nil {
-			return "", err
+		probe, cancel := context.WithTimeout(ctx, 2*time.Second)
+		err := cluster.service.control(probe, link.peer, "cluster.report", resource, &answer)
+		cancel()
+		if err != nil {
+			complete = false
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			continue // discovery failure neither retires a peer nor grants rights
 		}
 		reports[link.member.ID] = answer
 		actual := answer.State == "M" || answer.State == "O"
@@ -100,7 +111,7 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 		}
 		// Recover a restarted owner only from a complete live roster. An unreachable
 		// permission holder never disappears because of a timeout or membership hint.
-		if len(view.links) != len(view.members)-1 {
+		if !complete {
 			return "", fmt.Errorf(mosi.NetworkError)
 		}
 		readers := map[string]bool{}
@@ -151,12 +162,14 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 		panic(mosi.NetworkError)
 	}
 	for {
+		c = c.resolved()
+		resource = *c.resource.Load()
 		publication, action := c.ownstate.Request(wanted)
 		if action == mosi.Ready {
 			if restoreCommits && resource.Shard != "" {
 				// Restart recovery may establish local authority without a new
 				// reference packet. Restore native WAL commit proofs here too,
-				// before any backend generation can be materialized.
+				// before any backend content can be materialized.
 				db := GetDatabase(resource.Database)
 				if db == nil || db.importClusterCommits(owner) != nil {
 					panic(mosi.NetworkError)
@@ -170,6 +183,7 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 				packet.Kind = "write"
 			}
 			if owner == r.id {
+				c := c
 				go func() {
 					// The shared MR/SR flight belongs to the protocol. One waiter
 					// cancelling cannot revoke every other reader's acquisition.
@@ -200,7 +214,12 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 			}
 		}
 		select {
+		case <-c.forwardingDone():
+			continue
 		case <-publication.Flight().Done():
+			if c.forward.Load() != nil {
+				continue
+			}
 			if publication.Flight().Err() != nil {
 				fmt.Println("cluster acquisition failed:", resource.key(), publication.Flight().Err())
 				panic(mosi.NetworkError)
@@ -218,12 +237,12 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 
 func (cluster *nodeCluster) report(resource mosiResource) replicaRecord {
 	cluster.bootstrapCell(resource)
-	if _, known := cluster.states.Load(resource.key()); !known {
+	if cluster.manager.lookupCell(resource) == nil {
 		return replicaRecord{Resource: resource, State: "IO"}
 	}
 	r := cluster.manager
 	r.mu.Lock()
-	record := r.directory.Records[r.recordKey(resource)]
+	record := r.directory.Records[r.resourceKey(resource)]
 	r.mu.Unlock()
 	c := r.resourceCell(resource)
 	publication := c.ownstate.Snapshot()
@@ -315,7 +334,7 @@ func (cluster *nodeCluster) declareShard(shard *storageShard, local bool) *repli
 	// New shards are created under schema M, and immediately belong to their
 	// creator. There is no registration at a permanent seed/directory server.
 	r.updateRecord(resource, func(record *replicaRecord) bool {
-		record.Resource, record.Owner, record.State, record.Epoch, record.Generation = resource, r.id, "M", 1, shard.uuid.String()
+		record.Resource, record.Owner, record.State, record.Epoch, record.Content = resource, r.id, "M", 1, shard.uuid.String()
 		record.Readers = map[string]bool{}
 		return true
 	})
@@ -325,6 +344,9 @@ func (cluster *nodeCluster) declareShard(shard *storageShard, local bool) *repli
 }
 func (cluster *nodeCluster) installReference(source string, packet mosiPacket) error {
 	r := cluster.manager
+	if err := r.acceptForwards(source, packet); err != nil {
+		return err
+	}
 	c := r.resourceCell(packet.Resource)
 	if packet.Epoch < cluster.report(packet.Resource).Epoch {
 		return fmt.Errorf("stale shared reference")
@@ -337,11 +359,11 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 		}
 	}
 	if expected == nil && !c.ownstate.Phase().Requested() {
-		// An O holder may publish a rebuilt generation to its known S readers
+		// An O holder may publish a rebuilt content to its known S readers
 		// without a new read request. Keep their existing permission and install
 		// only an update from the recorded owner at this exact authority epoch.
 		r.mu.Lock()
-		record := r.directory.Records[r.recordKey(packet.Resource)]
+		record := r.directory.Records[r.resourceKey(packet.Resource)]
 		r.mu.Unlock()
 		if c.ownstate.Phase() != mosi.S || record.Owner != source || record.Epoch != packet.Epoch {
 			return fmt.Errorf("unsolicited shared reference for %s in %s", packet.Resource.key(), c.ownstate.Phase())
@@ -353,8 +375,8 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 	}
 	if packet.Resource.Shard == "" {
 		data := db.persistence.ReadSchema()
-		generation, err := replicaSchemaGeneration(data)
-		if err != nil || generation != packet.Generation {
+		content, err := r.schemaDigest(data)
+		if err != nil || content != packet.Content {
 			return fmt.Errorf("shared schema changed")
 		}
 		if err := r.installSchema(source, db.Name, db.persistence, data); err != nil {
@@ -368,7 +390,7 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 			return err
 		}
 	}
-	r.updateRecord(packet.Resource, func(record *replicaRecord) bool { record.Generation = packet.Generation; return true })
+	r.updateRecord(packet.Resource, func(record *replicaRecord) bool { record.Content = packet.Content; return true })
 	if expected != nil {
 		expected.finish(nil)
 		return nil
@@ -377,7 +399,7 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 	if peer == nil {
 		return fmt.Errorf(mosi.NetworkError)
 	}
-	return peer.post(mosiPacket{Kind: "ack", ID: packet.ID, Resource: packet.Resource, Epoch: packet.Epoch, Generation: packet.Generation})
+	return peer.post(mosiPacket{Kind: "ack", ID: packet.ID, Resource: packet.Resource, Epoch: packet.Epoch, Content: packet.Content})
 }
 
 // Bootstrap is explicit initialization of a fresh unjoined installation, never
@@ -433,32 +455,13 @@ func (cluster *nodeCluster) initializeManager() {
 	cluster.manager = r
 }
 
-// A rebuild publishes a new shard UUID. Both native shard objects retain the
-// same local permission cell while mutation forwarding is live; old UUIDs are
-// routing aliases for in-flight operations, never independent writer grants.
-// Retirement needs a distributed proof that no old UUID request is in flight;
-// aliases are deliberately retained with deferred historical-generation GC.
-func (cluster *nodeCluster) aliasShard(resource mosiResource, shard *storageShard) {
-	r := cluster.manager
-	c := r.resourceCell(resource)
-	next := mosiResource{Database: resource.Database, Table: resource.Table, Shard: shard.uuid.String()}
-	if current := c.resource.Load(); current != nil && current.Shard == next.Shard {
-		cluster.states.Store(next.key(), c)
-		return
+func (cluster *nodeCluster) peerAvailable(id string) bool {
+	if peer := cluster.peer(id); peer != nil {
+		select {
+		case <-peer.done:
+		default:
+			return true
+		}
 	}
-	if next.Shard == resource.Shard {
-		return
-	}
-	oldKey := r.recordKey(resource)
-	r.mu.Lock()
-	record := r.directory.Records[oldKey]
-	record.Resource = next
-	r.directory.Records[next.key()] = record
-	delete(r.directory.Records, oldKey)
-	// Canonical identity and its directory entry publish under the existing
-	// directory owner. A concurrent old-handle update must resolve the new key
-	// after acquiring mu, rather than resurrecting a stale directory entry.
-	cluster.states.Store(next.key(), c)
-	c.resource.Store(&next)
-	r.mu.Unlock()
+	return false
 }

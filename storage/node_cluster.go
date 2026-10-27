@@ -60,22 +60,22 @@ type clusterView struct {
 type nodeCluster struct {
 	manager            *replicationManager     // shared MOSI engine adapter; no second state machine
 	bootstrapResources map[string]mosiResource // immutable initialization only
-	states             sync.Map                // resource UUID/retired alias -> existing MOSI permission cell
-	databases          map[string]bool         // immutable startup selection of shared-backend databases
-	service            *nodeScanService
-	self               clusterMember
-	seed               string
-	ctx                context.Context
-	cancel             context.CancelFunc
-	workers            sync.WaitGroup
-	mu                 sync.Mutex // cold roster publication only; local readers load view
-	members            map[string]clusterMember
-	links              map[string]*clusterLink
-	view               atomic.Pointer[clusterView]
-	received           atomic.Uint64
-	delegated          atomic.Uint64
-	locality           atomic.Uint64
-	capacity           atomic.Uint64
+
+	databases map[string]bool // immutable startup selection of shared-backend databases
+	service   *nodeScanService
+	self      clusterMember
+	seed      string
+	ctx       context.Context
+	cancel    context.CancelFunc
+	workers   sync.WaitGroup
+	mu        sync.Mutex // cold roster publication only; local readers load view
+	members   map[string]clusterMember
+	links     map[string]*clusterLink
+	view      atomic.Pointer[clusterView]
+	received  atomic.Uint64
+	delegated atomic.Uint64
+	locality  atomic.Uint64
+	capacity  atomic.Uint64
 }
 
 func activeNodeCluster() *nodeCluster {

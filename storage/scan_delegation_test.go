@@ -16,16 +16,16 @@ import "sync/atomic"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
-type testShardScanExecutor func(mosiResource, uuid.UUID, shardScanInvocation) scanResult
+type testShardScanExecutor func(mosiResource, shardScanInvocation) scanResult
 
-func (execute testShardScanExecutor) ExecuteShardScan(resource mosiResource, generation uuid.UUID, invocation shardScanInvocation) scanResult {
-	return execute(resource, generation, invocation)
+func (execute testShardScanExecutor) ExecuteShardScan(resource mosiResource, invocation shardScanInvocation) scanResult {
+	return execute(resource, invocation)
 }
 
 func setTestScanTarget(shard *storageShard, execute testShardScanExecutor) {
 	shard.scanTarget.Store(&shardScanTarget{
-		resource:   mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.logicalID().String()},
-		generation: shard.uuid, executor: execute,
+		resource: mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.uuid.String()},
+		executor: execute,
 	})
 }
 
@@ -69,9 +69,9 @@ func TestScanDelegationColdSingleAndMixedShards(t *testing.T) {
 			}
 			var calls atomic.Int32
 			tx := NewTxContext(TxACID)
-			setTestScanTarget(remote, func(resource mosiResource, generation uuid.UUID, invocation shardScanInvocation) scanResult {
+			setTestScanTarget(remote, func(resource mosiResource, invocation shardScanInvocation) scanResult {
 				calls.Add(1)
-				if generation != remote.uuid || resource.Shard != remote.logicalID().String() || invocation.tx != tx {
+				if resource.Shard != remote.uuid.String() || invocation.tx != tx {
 					t.Error("delegation lost resource, generation or invocation binding")
 				}
 				return scanResult{res: scm.NewInt(sum), outCount: count, inputCount: count, candidateCount: count}
@@ -99,7 +99,7 @@ func TestScanDelegationDoesNotRetryExecutorFailure(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tscandelegationfailure")
 	shard := tbl.ActiveShards()[0]
 	calls := 0
-	setTestScanTarget(shard, func(mosiResource, uuid.UUID, shardScanInvocation) scanResult {
+	setTestScanTarget(shard, func(mosiResource, shardScanInvocation) scanResult {
 		calls++
 		panic("ambiguous remote completion")
 	})
@@ -119,7 +119,7 @@ func TestScanDelegationDoesNotRetryExecutorFailure(t *testing.T) {
 func TestScanDelegationOnlyConsumesAcquisitionPanic(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tscandelegationcallback", 1)
 	calls := 0
-	target := &shardScanTarget{executor: testShardScanExecutor(func(mosiResource, uuid.UUID, shardScanInvocation) scanResult {
+	target := &shardScanTarget{executor: testShardScanExecutor(func(mosiResource, shardScanInvocation) scanResult {
 		calls++
 		return scanResult{}
 	})}
@@ -138,7 +138,7 @@ func TestScanDelegationRejectsUnsupportedAndStaleTasks(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tscandelegationunsupported")
 	shard := tbl.ActiveShards()[0]
 	calls := 0
-	setTestScanTarget(shard, func(mosiResource, uuid.UUID, shardScanInvocation) scanResult {
+	setTestScanTarget(shard, func(mosiResource, shardScanInvocation) scanResult {
 		calls++
 		return scanResult{}
 	})
@@ -161,7 +161,7 @@ func TestScanDelegationRejectsUnsupportedAndStaleTasks(t *testing.T) {
 		}
 	}
 	stale := *shard.scanTarget.Load()
-	stale.generation = uuid.New()
+	stale.resource.Shard = uuid.NewString()
 	shard.scanTarget.Store(&stale)
 	var staleFailure any
 	func() {

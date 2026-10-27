@@ -21,8 +21,9 @@ import "github.com/launix-de/memcp/scm"
 // Only configuration and completed data-placement metadata cross persistence.
 // No MOSI phase, owner, reader set, request, epoch or sequence appears here.
 type replicaBackup struct {
-	Resource   mosiResource `json:"resource"`
-	Generation string       `json:"generation"`
+	Forwards []shardForward `json:"forwards,omitempty"`
+	Resource mosiResource   `json:"resource"`
+	Content  string         `json:"content"`
 }
 
 type replicaConfigEntry struct {
@@ -33,20 +34,57 @@ type replicaConfigEntry struct {
 	Value  bool           `json:"value,omitempty"`
 }
 
-func (r *replicationManager) writeConfig(entry replicaConfigEntry) (err error) {
+// Multiple placement updates use one native transaction so replacement cannot
+// leave two competing completed-copy records after a crash.
+func (r *replicationManager) writeConfig(entries ...replicaConfigEntry) (err error) {
+	var tx *TxContext
+	if len(entries) > 1 {
+		tx = NewTxContext(TxACID)
+		defer tx.Rollback()
+	}
 	defer func() {
 		if failure := recover(); failure != nil {
 			err = fmt.Errorf("replication configuration: %v", failure)
 		}
 	}()
-	data, err := json.Marshal(entry)
-	if err != nil {
+	for _, entry := range entries {
+		data, failure := json.Marshal(entry)
+		if failure != nil {
+			return failure
+		}
+		update := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			return scm.Apply(a[0], scm.NewSlice([]scm.Scmer{scm.NewString("value"), scm.NewString(string(data))}))
+		})
+		r.config.Insert([]string{"node", "key", "value"}, [][]scm.Scmer{{scm.NewString(r.id), scm.NewString(entry.Kind + "/" + entry.Name), scm.NewString(string(data))}}, []string{"$update"}, update, false, nil, tx)
+	}
+	if tx != nil {
+		return tx.Commit()
+	}
+	return nil
+}
+
+// Old completed-copy records may contain the removed logical resource ID.
+// Only their actual file UUID and explicit forwarding survive the upgrade;
+// none of these metadata establish a permission.
+func (backup *replicaBackup) UnmarshalJSON(data []byte) error {
+	type fields replicaBackup
+	var entry struct {
+		*fields
+		Legacy string `json:"generation"`
+	}
+	entry.fields = (*fields)(backup)
+	if err := json.Unmarshal(data, &entry); err != nil {
 		return err
 	}
-	update := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		return scm.Apply(a[0], scm.NewSlice([]scm.Scmer{scm.NewString("value"), scm.NewString(string(data))}))
-	})
-	r.config.Insert([]string{"node", "key", "value"}, [][]scm.Scmer{{scm.NewString(r.id), scm.NewString(entry.Kind + "/" + entry.Name), scm.NewString(string(data))}}, []string{"$update"}, update, false, nil)
+	if backup.Content == "" {
+		backup.Content = entry.Legacy
+	}
+	if backup.Resource.Shard != "" && backup.Resource.Shard != backup.Content {
+		actual := backup.Resource
+		actual.Shard = backup.Content
+		backup.Forwards = append(backup.Forwards, shardForward{backup.Resource, actual})
+		backup.Resource = actual
+	}
 	return nil
 }
 
@@ -82,6 +120,7 @@ func (r *replicationManager) loadConfig(t *table) error {
 		return scm.NewSlice(append(append([]scm.Scmer(nil), a[0].Slice()...), a[1].Slice()...))
 	})
 	rows := t.scan(nil, scm.NewSlice([]scm.Scmer{newScanAccessHeader(1, scanAccessConsumerScan, 0, -1), newScanBoundarySpec("node", EqualMatcher, 0, 0, true, true, "", false, -1, nil, nil, "", false)}), []scm.Scmer{scm.NewString(r.id)}, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }), []string{"value"}, collect, scm.NewSlice(nil), combine, false)
+	var placements []replicaBackup
 	for _, row := range rows.Slice() {
 		var entry replicaConfigEntry
 		if err := json.Unmarshal([]byte(row.String()), &entry); err != nil {
@@ -100,27 +139,53 @@ func (r *replicationManager) loadConfig(t *table) error {
 				delete(r.backups, entry.Name)
 				continue
 			}
-			if !entry.Backup.Resource.valid() || entry.Backup.Resource.key() != entry.Name {
+			if !entry.Backup.Resource.valid() {
 				return fmt.Errorf("invalid backup placement")
 			}
-			if _, err := uuid.Parse(entry.Backup.Generation); entry.Backup.Resource.Shard != "" && err != nil {
+			if _, err := uuid.Parse(entry.Backup.Content); entry.Backup.Resource.Shard != "" && err != nil {
 				return err
 			}
-			r.backups[entry.Name] = *entry.Backup
+			placements = append(placements, *entry.Backup)
 		default:
 			return fmt.Errorf("unknown replication configuration kind %q", entry.Kind)
 		}
 	}
 
+	for _, backup := range placements {
+		for _, route := range backup.Forwards {
+			r.forwardResource(route.From, route.To)
+		}
+	}
+	for _, backup := range placements {
+		r.backups[r.resourceKey(backup.Resource)] = backup
+	}
+
 	return nil
 }
 
-// saveBackup records a completed immutable data generation through ordinary
-// storage. It conveys no permission; only reconnect reports can restore rights.
-func (r *replicationManager) saveBackup(resource mosiResource, generation string) error {
-	backup := replicaBackup{Resource: resource, Generation: generation}
+// saveBackup records a completed copy by its actual shard UUID (or a schema
+// digest). Routing metadata describes old-to-new UUIDs, never MOSI permissions.
+func (r *replicationManager) saveBackup(resource mosiResource, content string) error {
+	actual := resource
+	if resource.Shard != "" {
+		if _, err := uuid.Parse(content); err != nil {
+			return err
+		}
+		actual.Shard = content
+		if r.canonicalResource(resource) != r.canonicalResource(actual) {
+			r.forwardResource(resource, actual)
+		}
+	}
+	backup := replicaBackup{Resource: actual, Content: content, Forwards: r.shardRoutes(resource)}
+	r.mu.Lock()
+	previous, exists := r.backups[r.resourceKey(resource)]
+	r.mu.Unlock()
 	if r.config != nil {
-		if err := r.writeConfig(replicaConfigEntry{Kind: "backup", Name: resource.key(), Backup: &backup}); err != nil {
+		entries := []replicaConfigEntry{{Kind: "backup", Name: actual.key(), Backup: &backup}}
+		if exists && previous.Resource.key() != actual.key() {
+			entries = append(entries, replicaConfigEntry{Kind: "backup", Name: previous.Resource.key()})
+		}
+		if err := r.writeConfig(entries...); err != nil {
 			return err
 		}
 	}
@@ -128,7 +193,7 @@ func (r *replicationManager) saveBackup(resource mosiResource, generation string
 	if r.backups == nil {
 		r.backups = make(map[string]replicaBackup)
 	}
-	r.backups[resource.key()] = backup
+	r.backups[r.resourceKey(resource)] = backup
 	r.mu.Unlock()
 	return nil
 }
@@ -137,18 +202,18 @@ func (r *replicationManager) saveBackup(resource mosiResource, generation string
 // points at the installed data and every foreign read/write permission is gone.
 func (r *replicationManager) clearBackup(resource mosiResource) error {
 	r.mu.Lock()
-	_, exists := r.backups[resource.key()]
+	backup, exists := r.backups[r.resourceKey(resource)]
 	r.mu.Unlock()
 	if !exists {
 		return nil
 	}
 	if r.config != nil {
-		if err := r.writeConfig(replicaConfigEntry{Kind: "backup", Name: resource.key()}); err != nil {
+		if err := r.writeConfig(replicaConfigEntry{Kind: "backup", Name: backup.Resource.key()}); err != nil {
 			return err
 		}
 	}
 	r.mu.Lock()
-	delete(r.backups, resource.key())
+	delete(r.backups, r.resourceKey(resource))
 	r.mu.Unlock()
 	return nil
 }

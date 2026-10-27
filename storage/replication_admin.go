@@ -32,7 +32,7 @@ type replicaStatus struct {
 
 // ReclaimReplicationDatabases is the slave's periodic maintenance entry point.
 // Call it before taking rebuild/persistence locks: ordinary MOSI handovers can
-// need those same locks while the upstream supplies the current generation.
+// need those same locks while the upstream supplies the current content.
 // The cron owns serialization; failures affect only the current database.
 func ReclaimReplicationDatabases() []string {
 	r := replication.Load()
@@ -205,7 +205,7 @@ func (r *replicationManager) retire(id string) error {
 				record.Epoch++
 				record.Owner, record.State = r.id, "M"
 			}
-			r.confirmed[record.Resource.key()] = record.Owner
+			r.confirmed[r.resourceKey(record.Resource)] = record.Owner
 			return true
 		})
 		err = nil

@@ -18,6 +18,7 @@ package storage
 
 import "fmt"
 import "math"
+import "maps"
 import "sort"
 import "sync"
 import "time"
@@ -32,6 +33,7 @@ import "math/bits"
 import "sync/atomic"
 import "unicode/utf8"
 import "encoding/json"
+import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
@@ -326,6 +328,7 @@ type tableShardTopology struct {
 // rebuild must publish the successor UUIDs to disk before making that
 // generation authoritative for live readers and writers.
 type tableSchemaTopology struct {
+	forwards   map[string]string // immutable UUID successor topology; no permissions
 	mode       ShardMode
 	shards     []*storageShard
 	dimensions []shardDimension
@@ -755,6 +758,8 @@ type table struct {
 	// Cold decode state, consumed before publication; keep out of hot field groups.
 	RestoredKeyFrequencies *persistedKeyFrequencies `json:"key_frequencies,omitempty"`
 	RestoredFilterFeedback *persistedFilterFeedback `json:"filter_feedback,omitempty"`
+	RestoredShardForwards  map[string]string        `json:"shard_forwards,omitempty"`
+	replicaRoutes          sync.Once                // cold restoration of persisted UUID edges, never granted reads
 }
 
 var nextPlannerStatsToken atomic.Uint64
@@ -909,9 +914,13 @@ func (t *table) publishTopologyLocked() *tableShardTopology {
 		if shard != nil {
 			shard.generation.Store(topology)
 			if cell := shard.coherence.Load(); cell != nil {
+				cell = cell.resolved()
 				previous := cell.current.Load()
 				if previous != nil && previous != shard && previous.loadNext() == shard {
-					cell.retainGeneration(previous)
+					cell.retainShard(previous)
+					if r := activeReplication(t.schema); r != nil && validReplicaDatabase(t.schema.Name) {
+						r.forwardResource(*cell.resource.Load(), mosiResource{Database: t.schema.Name, Table: t.Name, Shard: shard.uuid.String()})
+					}
 					cell.current.CompareAndSwap(previous, shard)
 				}
 			}
@@ -926,7 +935,55 @@ func (t *table) publishTopologyLocked() *tableShardTopology {
 }
 
 func (t *table) publishSchemaTopology(mode ShardMode, shards []*storageShard, dimensions []shardDimension) *tableSchemaTopology {
+	var forwards map[string]string
+	if previous := t.schemaTopology.Load(); previous != nil {
+		forwards = maps.Clone(previous.forwards)
+	} else {
+		forwards = maps.Clone(t.RestoredShardForwards)
+		t.RestoredShardForwards = nil
+	}
+	add := func(from, to string) {
+		if from != to {
+			if forwards == nil {
+				forwards = make(map[string]string)
+			}
+			forwards[from] = to
+		}
+	}
+	// Persist the exact native edge before publishing distributed topology.
+	// Ordinary local tables need no routing history; retained distributed
+	// metadata remains valid if the database is later opened without networking.
+	var manager *replicationManager
+	if t.schema != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable() {
+		manager = activeReplication(t.schema)
+	}
+	if previous := t.topology.Load(); previous != nil && (manager != nil || len(forwards) != 0) {
+		targets := make(map[*storageShard]bool, len(shards))
+		for _, shard := range shards {
+			targets[shard] = true
+		}
+		for _, source := range previous.shards {
+			for current := source; current != nil && !targets[current]; {
+				next := current.loadNext()
+				if next == nil || !current.nextReady.Load() {
+					break
+				}
+				if next.uuid != uuid.Nil {
+					add(current.uuid.String(), next.uuid.String())
+				}
+				current = next
+			}
+		}
+	}
+	if manager != nil {
+		for _, route := range manager.shardRoutes(mosiResource{Database: t.schema.Name}) {
+			if route.To.Table == t.Name {
+				add(route.From.Shard, route.To.Shard)
+			}
+		}
+	}
 	next := &tableSchemaTopology{
+		forwards:   forwards,
 		mode:       mode,
 		shards:     append([]*storageShard(nil), shards...),
 		dimensions: append([]shardDimension(nil), dimensions...),
@@ -991,6 +1048,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		}
 	}
 	type persistedTable struct {
+		ShardForwards      map[string]string `json:"shard_forwards,omitempty"`
 		Name               string
 		Columns            []persistedColumn
 		DroppedColumns     map[string]bool `json:"dropped_columns"`
@@ -1024,6 +1082,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		}
 	}
 	return json.Marshal(&persistedTable{
+		ShardForwards:      topology.forwards,
 		Name:               t.Name,
 		Columns:            columns,
 		DroppedColumns:     t.DroppedColumns,

@@ -19,6 +19,7 @@ import "sync/atomic"
 import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage/mosi"
 
 const scanWireVersion = 3
 
@@ -27,10 +28,9 @@ type shardScanHorizon struct {
 	Delta uint32 `json:"delta"`
 }
 type remoteScanShard struct {
-	Schema     uint64           `json:"schema"`
-	Resource   mosiResource     `json:"resource"`
-	Generation uuid.UUID        `json:"generation"`
-	Horizon    shardScanHorizon `json:"horizon"`
+	Schema   uint64           `json:"schema"`
+	Resource mosiResource     `json:"resource"`
+	Horizon  shardScanHorizon `json:"horizon"`
 }
 type remoteScanDescribe struct {
 	Version  int    `json:"version"`
@@ -170,7 +170,7 @@ func (s *scanRPCSession) handle(ctx context.Context, method string, data json.Ra
 				mu.Unlock()
 				return
 			}
-			part := remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: mosiResource{Database: db.Name, Table: tbl.Name, Shard: shard.logicalID().String()}, Generation: shard.uuid, Horizon: shard.captureScanHorizon()}
+			part := remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: mosiResource{Database: db.Name, Table: tbl.Name, Shard: shard.uuid.String()}, Horizon: shard.captureScanHorizon()}
 			mu.Lock()
 			result = append(result, part)
 			mu.Unlock()
@@ -199,7 +199,7 @@ func (s *scanRPCSession) handle(ctx context.Context, method string, data json.Ra
 // same checked executor. Admission is owned by the caller; replay, procedure,
 // generation, visibility and result validation are not duplicated by adapters.
 func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScanTask) (any, error) {
-	if request.Version != scanWireVersion || request.Visibility != "cursor-stability/captured-horizon" || !request.Shard.Resource.valid() || request.Shard.Resource.Shard == "" || request.Shard.Generation == uuid.Nil {
+	if request.Version != scanWireVersion || request.Visibility != "cursor-stability/captured-horizon" || !request.Shard.Resource.valid() || request.Shard.Resource.Shard == "" {
 		return nil, fmt.Errorf("invalid remote scan contract")
 	}
 	if _, err := uuid.Parse(request.Attempt); err != nil {
@@ -360,13 +360,7 @@ func withRemoteScanShard(expected remoteScanShard, execute func(*storageShard) e
 	declarations := tbl.columnNamesSnapshot.Load()
 	for {
 		topology := tbl.activeTopology()
-		var selected *storageShard
-		for _, shard := range topology.shards {
-			if shard != nil && (shard.logicalID().String() == expected.Resource.Shard || sharedClusterDatabase(expected.Resource.Database) && shard.uuid.String() == expected.Resource.Shard) {
-				selected = shard
-				break
-			}
-		}
+		selected := findScanShard(tbl, expected.Resource)
 		if selected == nil {
 			return fmt.Errorf("remote shard disappeared")
 		}
@@ -382,11 +376,17 @@ func withRemoteScanShard(expected remoteScanShard, execute func(*storageShard) e
 		return func() error {
 			defer topology.releaseOperation()
 			defer selected.activeScanners.Add(-1)
-			lease := selected.GetRead(nil)
+			// Acquire current coherence rights, but retain the requested shard's
+			// physical IDs and captured extent through native snapshot access.
+			if r := activeReplication(tbl.schema); r != nil {
+				cell := r.shardCell(selected)
+				r.obtain(*cell.resource.Load(), mosi.S, "", nil)
+			}
+			lease := selected.getRead(nil, true)
 			defer lease.Release()
 			shard := lease.shard
-			if shard.uuid != expected.Generation || shard.logicalID().String() != expected.Resource.Shard && !(sharedClusterDatabase(expected.Resource.Database) && shard.uuid.String() == expected.Resource.Shard) {
-				return fmt.Errorf("remote scan generation changed")
+			if shard.uuid.String() != expected.Resource.Shard {
+				return fmt.Errorf("remote scan shard changed")
 			}
 			horizon := shard.captureScanHorizon()
 			valid := horizon.Main == expected.Horizon.Main && horizon.Delta >= expected.Horizon.Delta
@@ -493,7 +493,7 @@ type peerScanExecutor struct {
 	next     *atomic.Uint64
 }
 
-func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, _ uuid.UUID, invocation shardScanInvocation) scanResult {
+func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocation shardScanInvocation) scanResult {
 	condition := invocation.condition
 	if condition.IsNil() {
 		condition = scm.Eval(scm.Read("remote unconditional filter", "(lambda args true)"), &scm.Globalenv)
@@ -611,8 +611,8 @@ func remoteScan(a ...scm.Scmer) scm.Scmer {
 		if err != nil {
 			panic(err)
 		}
-		stub := &storageShard{t: stubTable, uuid: part.Generation, lineage: identity}
-		target := &shardScanTarget{resource: part.Resource, generation: part.Generation, executor: &peerScanExecutor{peer: peer, ctx: ctx, prepared: part, kind: kind, next: &sequence}}
+		stub := &storageShard{t: stubTable, uuid: identity}
+		target := &shardScanTarget{resource: part.Resource, executor: &peerScanExecutor{peer: peer, ctx: ctx, prepared: part, kind: kind, next: &sequence}}
 		stub.scanTarget.Store(target)
 		var result scanResult
 		runAcquiredShardScan(tx, stub, true, false, func(shard *storageShard, _ bool, failure any) {
@@ -648,4 +648,38 @@ func remoteMutationColumn(value scm.Scmer) bool {
 		}
 	}
 	return false
+}
+
+// Old UUIDs remain usable while a query/transfer retains that exact shard.
+// The weak directory is populated at native rebuild publication, never by rows.
+func findScanShard(table *table, resource mosiResource) *storageShard {
+	for _, shard := range table.activeTopology().shards {
+		if shard != nil && shard.uuid.String() == resource.Shard {
+			return shard
+		}
+	}
+	var cell *replicaCell
+	if r := replication.Load(); r != nil {
+		if snapshot := r.cellSnapshot.Load(); snapshot != nil {
+			cell = (*snapshot)[resource.key()]
+		}
+	}
+	if cell == nil {
+		if cluster := activeNodeCluster(); cluster != nil {
+			cell = cluster.manager.lookupCell(resource)
+		}
+	}
+	if cell != nil {
+		if current := cell.current.Load(); current != nil && current.t == table && current.uuid.String() == resource.Shard {
+			return current
+		}
+		if retired := cell.retiredShards.Load(); retired != nil {
+			for _, entry := range *retired {
+				if shard := entry.Value(); shard != nil && shard.t == table && shard.uuid.String() == resource.Shard {
+					return shard
+				}
+			}
+		}
+	}
+	return nil
 }
