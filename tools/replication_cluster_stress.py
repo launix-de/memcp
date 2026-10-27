@@ -1062,6 +1062,205 @@ def run_remote_scans(args, artifacts, journal):
                         "shards": 2, "fresh_sums": [180, 190, 200], "group_sums": [60, 140]})
 
 
+def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None):
+    """SQL contracts, shared by the standalone oracle and real cluster processes.
+
+    Collect every case failure before failing CI. Unsupported remote semantics
+    are failures, never expected-error/xfail results. Only fixture setup and
+    placement diagnostics use Scheme; all workloads and visibility checks are SQL.
+    """
+    coordinator, writer = nodes[0], nodes[min(1, len(nodes) - 1)]
+    phase = "cluster" if status else "standalone"
+    results = []
+    missing = object()
+    current = None
+
+    def sql(node, statement, session=None, expected=missing):
+        step = {"node": node.name, "sql": statement, "session": session}
+        current["steps"].append(step)
+        try:
+            rows = node.client.sql(statement, session=session)
+        except Exception as error:
+            step["error"] = str(error)
+            raise
+        step["rows"] = rows
+        if expected is not missing:
+            step["expected"] = expected
+            expect(rows, expected, f"{phase}: {current['name']}: {statement}")
+        return rows
+
+    def scalar(node, statement, value, session=None, remote=False):
+        before = status(node)["state"]["delegated"] if status and remote else None
+        sql(node, statement, session, [{"total": value}])
+        if before is not None:
+            after = status(node)["state"]["delegated"]
+            current["steps"][-1]["remote_shards"] = after - before
+            if after <= before:
+                raise DrillFailure("SQL succeeded without executing a remote shard")
+
+    def case(name, action):
+        nonlocal current
+        current = {"scenario": "cluster-sql-context", "phase": phase, "name": name, "steps": []}
+        try:
+            action()
+            current["status"] = "passed"
+        except Exception as error:
+            current["status"] = "failed"
+            current["error"] = str(error)
+        results.append(current)
+        journal.append(current)
+        report_path.write_text(json.dumps(results, indent=2) + "\n")
+        print(f"  {phase}: {name}: {current['status']}" +
+              (f" ({current['error']})" if current["status"] == "failed" else ""), flush=True)
+
+    total, count = reference["v0_sum"], reference["rows"]
+    statement = "SELECT SUM(@somevalue + v0) AS total FROM big_items"
+
+    def session_sum():
+        session = "cluster-scalar-session"
+        # Deliberately conflicting worker-local values detect resolution against
+        # a worker's session instead of the caller's captured invocation.
+        for index, node in enumerate(nodes[1:]):
+            sql(node, f"SET @somevalue={1000 + index}", session)
+        sql(coordinator, "SET @somevalue=7", session)
+        scalar(coordinator, "SELECT @somevalue AS total", 7, session)
+        sql(coordinator, "EXPLAIN " + statement, session)
+        scalar(coordinator, statement, total + 7 * count, session)
+
+    def rebound_session():
+        session = "cluster-rebound-session"
+        for value in (19, -3, 11, 19):
+            sql(coordinator, f"SET @somevalue={value}", session)
+            scalar(coordinator, statement, total + value * count, session)
+
+    def concurrent_sessions():
+        # The coordinator's plan cache sees identical SQL with disjoint sessions.
+        # Never share a mutable test-step recorder between worker threads.
+        sessions = [("cluster-parallel-a", 23), ("cluster-parallel-b", 31)]
+        for session, value in sessions:
+            sql(coordinator, f"SET @somevalue={value}", session)
+        before = status(coordinator)["state"]["delegated"] if status else None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as threads:
+            futures = [threads.submit(coordinator.client.sql, statement, session=session)
+                       for session, _ in sessions]
+            for (session, value), future in zip(sessions, futures):
+                step = {"node": coordinator.name, "session": session, "sql": statement}
+                current["steps"].append(step)
+                rows = future.result()
+                step["rows"] = rows
+                expect(rows, [{"total": total + value * count}], "parallel SQL session isolation")
+        if before is not None:
+            current["remote_shards"] = status(coordinator)["state"]["delegated"] - before
+
+    def nullable_session():
+        session = "cluster-nullable-session"
+        for value in (37, None, 37):
+            sql(coordinator, f"SET @somevalue={'NULL' if value is None else value}", session)
+            scalar(coordinator, statement, None if value is None else total + value * count, session)
+
+    def session_filter():
+        session = "cluster-filter-session"
+        sql(coordinator, f"SET @cutoff={reference['partition_rows']}", session)
+        scalar(coordinator, "SELECT SUM(v0) AS total FROM big_items WHERE id >= @cutoff",
+               total - reference["first_partition_sum"], session)
+
+    def nonlinear_session():
+        session = "cluster-nonlinear-session"
+        sql(coordinator, "SET @somevalue=43", session)
+        query = "SELECT SUM((@somevalue + v0) % 97) AS total FROM big_items"
+        sql(coordinator, "EXPLAIN " + query, session)
+        scalar(coordinator, query, reference["nonlinear_sum"], session, remote=True)
+
+    def explicit_read(begin):
+        session = "cluster-explicit-read-" + begin.replace(" ", "-")
+        sql(coordinator, begin, session)
+        try:
+            scalar(coordinator, "SELECT SUM(v0) AS total FROM big_items", total, session, remote=True)
+        finally:
+            sql(coordinator, "ROLLBACK", session)
+
+    def overlay(begin, outcome, distributed=False):
+        session = "cluster-overlay-" + begin.replace(" ", "-") + outcome + str(distributed)
+        # Writers have enough room for two target shards, but not the whole
+        # 64-shard relation. This is a runtime setting, never an admission bypass.
+        host = coordinator if distributed else writer
+        previous = host.client.scm('(settings "ShardRamPercent")').strip()
+        previous_ram = host.client.scm('(settings "MaxRamBytes")').strip()
+        if distributed:
+            host.client.scm('(settings "MaxRamBytes" 8388608)')
+        host.client.scm('(settings "ShardRamPercent" 100)')
+        table = "big_items" if distributed else "context_items"
+        base = total if distributed else 360
+        removed = reference["first_value"] if distributed else 30
+        target = reference["partition_rows"] if distributed else 0
+        delete_id = 0 if distributed else 2
+        completed = False
+        try:
+            sql(host, begin, session)
+            sql(host, f"UPDATE {table} SET {'v0' if distributed else 'n'}="
+                f"{'v0' if distributed else 'n'}+5 WHERE id={target}", session)
+            sql(host, f"DELETE FROM {table} WHERE id={delete_id}", session)
+            if not distributed:
+                sql(host, "INSERT INTO context_items VALUES(8,90)", session)
+            expected = base + 5 - removed + (0 if distributed else 90)
+            if distributed:
+                # First prove the existing native overlays on the two locally
+                # held shards; then demand the same visibility over remote ones.
+                bound = 2 * reference["partition_rows"]
+                scalar(host, f"SELECT SUM(v0) AS total FROM big_items WHERE id < {bound}",
+                       reference["first_two_partition_sum"] + 5 - removed, session)
+            if distributed:
+                # Only our two modified shards can be resident here. Restore
+                # the coordinator's refusal threshold before the full scan.
+                host.client.scm(f'(settings "MaxRamBytes" {previous_ram})')
+                host.client.scm('(settings "ShardRamPercent" 1)')
+            scalar(host, f"SELECT SUM({'v0' if distributed else 'n'}) AS total FROM {table}",
+                   expected, session, remote=distributed)
+            if "ACID" in begin and not distributed:
+                scalar(host, "SELECT SUM(n) AS total FROM context_items", base,
+                       session="cluster-overlay-observer")
+            sql(host, outcome, session)
+            completed = True
+            if outcome == "COMMIT" and not distributed:
+                # Point/row truth distinguishes commit loss from a stale SUM
+                # cache; the original aggregate must still return the new sum.
+                sql(host, "SELECT id,n FROM context_items ORDER BY id", session,
+                    [{"id": i, "n": n} for i, n in ((0,15),(1,20),(3,40),(4,50),(5,60),(6,70),(7,80),(8,90))])
+                scalar(host, "SELECT SUM(n) AS total FROM context_items", expected, session)
+        finally:
+            # A failed delegated query must not leave native M/overlay holders
+            # behind and turn later cases into unrelated ownership timeouts.
+            try:
+                sql(host, "ROLLBACK", session)
+            finally:
+                host.client.scm(f'(settings "ShardRamPercent" {previous})')
+                if distributed:
+                    host.client.scm(f'(settings "MaxRamBytes" {previous_ram})')
+            # Also verify rollback when the tested distributed read failed.
+            # Unsupported execution must not leak staged inserts/delete masks.
+            final = expected if completed and outcome == "COMMIT" else base
+            scalar(coordinator, f"SELECT SUM({'v0' if distributed else 'n'}) AS total FROM {table}", final)
+
+    case("literal-capture", lambda: scalar(coordinator,
+         "SELECT SUM(41 + v0) AS total FROM big_items", total + 41 * count, remote=True))
+    case("named-session-plain-sum", lambda: scalar(coordinator,
+         "SELECT SUM(v0) AS total FROM big_items", total, "cluster-named-control"))
+    case("sql-session-sum", session_sum)
+    case("sql-session-nonlinear-sum", nonlinear_session)
+    case("session-cache-rebinding", rebound_session)
+    case("parallel-session-isolation", concurrent_sessions)
+    case("session-null-rebinding", nullable_session)
+    case("session-partition-filter", session_filter)
+    case("explicit-cs-read", lambda: explicit_read("START TRANSACTION"))
+    case("explicit-acid-read", lambda: explicit_read("START ACID TRANSACTION"))
+    case("local-multishard-cs-rollback", lambda: overlay("START TRANSACTION", "ROLLBACK"))
+    case("local-multishard-acid-rollback", lambda: overlay("START ACID TRANSACTION", "ROLLBACK"))
+    case("distributed-acid-delete-overlay", lambda: overlay("START ACID TRANSACTION", "ROLLBACK", True))
+    # Last: this intentionally commits a different oracle into context_items.
+    case("acid-commit-cache-coherence", lambda: overlay("START ACID TRANSACTION", "COMMIT"))
+    return results
+
+
 def run_cluster_placement(args, artifacts, journal):
     print("SCENARIO: authenticated peer roster and automatic SUM above one node's RAM budget", flush=True)
     directory = artifacts / "cluster-placement"
@@ -1092,11 +1291,22 @@ def run_cluster_placement(args, artifacts, journal):
         source.sql(f"CREATE TABLE big_items({definitions}) ENGINE=SAFE")
         rng = random.Random(20261026)
         expected = 0
+        reference = {"rows": rows_per_shard * shards, "partition_rows": rows_per_shard,
+                     "v0_sum": 0, "first_partition_sum": 0, "first_two_partition_sum": 0,
+                     "nonlinear_sum": 0}
         for start in range(0, rows_per_shard * shards, 1000):
             values = []
             for row_id in range(start, start + 1000):
                 row = [rng.getrandbits(32) for _ in range(columns)]
                 expected += sum(row)
+                reference["v0_sum"] += row[0]
+                reference["nonlinear_sum"] += (43 + row[0]) % 97
+                if row_id == 0:
+                    reference["first_value"] = row[0]
+                if row_id < rows_per_shard:
+                    reference["first_partition_sum"] += row[0]
+                if row_id < 2 * rows_per_shard:
+                    reference["first_two_partition_sum"] += row[0]
                 values.append('(' + ','.join(map(str, [row_id] + row)) + ')')
             source.sql("INSERT INTO big_items VALUES" + ','.join(values), timeout=120)
         pivots = ' '.join(str(rows_per_shard * i) for i in range(1, shards))
@@ -1104,9 +1314,27 @@ def run_cluster_placement(args, artifacts, journal):
         source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)', timeout=120)
         query = "SELECT SUM(" + '+'.join(f"v{i}" for i in range(columns)) + ") AS total FROM big_items"
         expect(source.number(query, "total"), expected, "standalone reference sum")
+        standalone_contexts = []
+        if args.cluster_context_only:
+            source.sql("CREATE TABLE context_items(id INT PRIMARY KEY,n INT) ENGINE=SAFE")
+            source.sql("INSERT INTO context_items VALUES(0,10),(1,20),(2,30),(3,40),(4,50),(5,60),(6,70),(7,80)")
+            source.scm(f'(partitiontable (table "{DATABASE}" false "context_items" false) (list (list "id" (list 2 4 6))))')
+            standalone_contexts = run_cluster_sql_contexts(
+                [builder], reference, journal, directory / "standalone-contexts.json")
+            # Restore the committed control fixture through normal SQL, then
+            # seal its generations before sharing the backend with other nodes.
+            source.sql("DELETE FROM context_items")
+            source.sql("INSERT INTO context_items VALUES(0,10),(1,20),(2,30),(3,40),(4,50),(5,60),(6,70),(7,80)")
+            source.scm(f'(rebuild (table "{DATABASE}" false "context_items" false) true false)')
+            source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)')
         builder.kill()
         shared = builder.data_dir / DATABASE
-        schema = json.loads((shared / "schema.json").read_text())["tables"]["big_items"]
+        catalog = json.loads((shared / "schema.json").read_text())["tables"]
+        if args.cluster_context_only:
+            context_schema = catalog["context_items"]
+            expect(len([part for part in context_schema["PShards"] if part]), 4,
+                   "SQL context overlay fixture uses four shards")
+        schema = catalog["big_items"]
         parts = schema.get("PShards") or schema.get("Shards")
         expect(len([part for part in parts if part]), shards, "fixture shard count")
         generations = {part["uuid"] if isinstance(part, dict) else part for part in parts if part}
@@ -1187,6 +1415,14 @@ def run_cluster_placement(args, artifacts, journal):
             raise DrillFailure("tight-RAM query did not exercise admission rejection/delegation")
         if sum(item["state"]["locality"] for item in states) == 0:
             raise DrillFailure("warm-holder query did not exercise locality delegation")
+        if args.cluster_context_only:
+            contexts = run_cluster_sql_contexts(nodes, reference, journal,
+                                                directory / "cluster-contexts.json", status)
+            failed = [f"{case['phase']}/{case['name']}" for case in standalone_contexts + contexts
+                      if case["status"] != "passed"]
+            if failed:
+                raise DrillFailure("SQL context contracts failed: " + ", ".join(failed))
+            return
         # Repeated M transfers must invalidate warm SQL/query caches. Change
         # alternating partitions from different nodes, then read the same cached
         # aggregate everywhere. Uncached native scans provide another oracle.
@@ -1309,9 +1545,13 @@ def main():
     parser.add_argument("--dedicated-replication-port", action="store_true",
                         help="exercise the optional dedicated listener instead of the normal HTTP /cluster route")
     parser.add_argument("--remote-scans-only", action="store_true", help="run only the focused two-process remote scan scenario")
+    parser.add_argument("--cluster-context-only", action="store_true",
+                        help="run SQL session/transaction contracts against standalone and clustered processes")
     parser.add_argument("--cluster-only", action="store_true", help="run focused shared-storage cluster placement scenario")
     parser.add_argument("--fixture-binary", type=Path, help="optional same-commit builder for immutable cluster fixture")
     args = parser.parse_args()
+    if args.cluster_context_only:
+        args.cluster_only = True
     if min(args.rounds, args.workers, args.operations, args.timeout, args.startup_timeout) <= 0:
         parser.error("rounds, workers, operations and timeouts must be positive")
     args.binary = args.binary.expanduser().resolve()
@@ -1358,7 +1598,9 @@ def main():
                   "--startup-timeout", str(args.startup_timeout), "--executor", args.executor]
         if args.remote_scans_only:
             replay.append("--remote-scans-only")
-        if args.cluster_only:
+        if args.cluster_context_only:
+            replay.append("--cluster-context-only")
+        elif args.cluster_only:
             replay.append("--cluster-only")
         if args.fixture_binary:
             replay.extend(["--fixture-binary", str(args.fixture_binary)])

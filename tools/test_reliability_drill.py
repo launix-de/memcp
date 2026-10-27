@@ -209,6 +209,43 @@ class ReplicationCatalogTests(unittest.TestCase):
 		with self.assertRaises(replication.DrillFailure):
 			replication.database_records("db", schema, journal)
 
+class ClusterSQLContextRunnerTests(unittest.TestCase):
+	def test_sql_failures_are_collected_instead_of_short_circuiting_or_xfail(self):
+		client = mock.Mock()
+		client.sql.side_effect = replication.DrillFailure("SQL contract failed")
+		client.scm.return_value = "50"
+		node = mock.Mock(name="standalone")
+		node.name, node.client = "standalone", client
+		reference = {"v0_sum": 10, "rows": 1, "partition_rows": 1, "first_value": 10,
+			"first_partition_sum": 10, "first_two_partition_sum": 10, "nonlinear_sum": 53}
+		journal = []
+		with tempfile.TemporaryDirectory() as directory:
+			report = Path(directory) / "contexts.json"
+			with mock.patch("builtins.print"):
+				cases = replication.run_cluster_sql_contexts([node], reference, journal, report)
+			self.assertEqual(len(cases), 14)
+			self.assertEqual(journal, cases)
+			self.assertTrue(all(case["status"] == "failed" for case in cases))
+			self.assertIn('"status": "failed"', report.read_text())
+			self.assertTrue(all(step["sql"].split()[0] in {"SELECT", "SET", "START", "ROLLBACK"}
+				for case in cases for step in case["steps"]))
+
+	def test_correct_local_result_cannot_pass_a_forced_remote_contract(self):
+		client = mock.Mock()
+		client.sql.return_value = [{"total": 51}]
+		client.scm.return_value = "50"
+		node = mock.Mock()
+		node.name, node.client = "coordinator", client
+		reference = {"v0_sum": 10, "rows": 1, "partition_rows": 1, "first_value": 10,
+			"first_partition_sum": 10, "first_two_partition_sum": 10, "nonlinear_sum": 53}
+		with tempfile.TemporaryDirectory() as directory:
+			with mock.patch("builtins.print"):
+				cases = replication.run_cluster_sql_contexts([node], reference, [],
+					Path(directory) / "contexts.json", lambda _: {"state": {"delegated": 0}})
+		self.assertEqual(cases[0]["name"], "literal-capture")
+		self.assertEqual(cases[0]["status"], "failed")
+		self.assertIn("without executing a remote shard", cases[0]["error"])
+
 
 if __name__ == "__main__":
 	unittest.main()

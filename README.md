@@ -513,6 +513,12 @@ unable to load cold shards, alternating mutations with cached/uncached sums, cro
 replica tenants and a private database. It also checks authentication isolation
 and retained reads after owner loss, while unavailable write rights must fail.
 
+The SQL context runner (`--cluster-context-only`) additionally checks session
+bindings and transaction overlays against both standalone and clustered servers.
+Its current gaps and proposed runtime-reference architecture are documented in
+[Cluster SQL runtime contexts](tools/cluster-runtime-contexts.md). These are strict
+CI contracts; unsupported behavior fails instead of being marked expected.
+
 ### Remote shard reductions
 
 Start both participants with `--cluster-secret=<shared-secret>` (at least 16
