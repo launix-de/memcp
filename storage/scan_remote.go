@@ -230,10 +230,15 @@ func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScan
 		if err != nil {
 			return nil, err
 		}
-		var ok bool
-		tx, ok = value.Any().(*TxContext)
-		if !ok || (tx.Mode != TxCursorStability && tx.Mode != TxACID) {
+		origin, ok := value.Any().(*TxContext)
+		if !ok || (origin.Mode != TxCursorStability && origin.Mode != TxACID) {
 			return nil, fmt.Errorf("invalid transaction object")
+		}
+		// The peer endpoint is shared, never its mutable executor. Even if two
+		// subscans import the same serialized capture, beginQuery/endQuery must
+		// belong to distinct native participants with independent cancellation.
+		if _, err := origin.BindClusterInvocation(scm.NewAny(tx)); err != nil {
+			return nil, err
 		}
 	}
 	tx.beginQuery(ss, seq, "remote shard reduction")

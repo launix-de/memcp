@@ -294,10 +294,14 @@ func (executor *peerScanExecutor) dispatch(task remoteScanTask) remoteScanResult
 	if err := postScanMessage(executor.peer, "scan.task", scanDispatch{id, executor.cluster, task}); err != nil {
 		panic(err)
 	}
-	stop := context.AfterFunc(executor.ctx, func() { _ = postScanMessage(executor.peer, "scan.cancel", id) })
+	cancelRemote := sync.OnceFunc(func() { _ = postScanMessage(executor.peer, "scan.cancel", id) })
+	stop := context.AfterFunc(executor.ctx, cancelRemote)
 	defer stop()
 	select {
 	case <-executor.ctx.Done():
+		// Done may close before AfterFunc's child is scheduled. Queue the
+		// cancellation here too, before deferred stop can remove that hook.
+		cancelRemote()
 		panic(executor.ctx.Err())
 	case <-executor.peer.done:
 		panic("Cluster network error")
@@ -343,10 +347,14 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 	if err := postScanMessage(peer, "node.control", request); err != nil {
 		return err
 	}
-	stop := context.AfterFunc(ctx, func() { _ = postScanMessage(peer, "scan.cancel", id) })
+	cancelRemote := sync.OnceFunc(func() { _ = postScanMessage(peer, "scan.cancel", id) })
+	stop := context.AfterFunc(ctx, cancelRemote)
 	defer stop()
 	select {
 	case <-ctx.Done():
+		// Same race as shard dispatch: returning must not suppress the very
+		// cancellation which lets the remote nested scan release its scope.
+		cancelRemote()
 		return ctx.Err()
 	case <-peer.done:
 		return fmt.Errorf("Cluster network error")

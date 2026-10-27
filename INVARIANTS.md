@@ -40,6 +40,16 @@ These rules describe the target architecture, not the implementation status.
   returns the same result with its existing ordering and visibility semantics.
   Every scan variant retains its contract; a separate special-purpose API alone
   is not a complete cluster integration.
+- Feature extensions, including new SQL frontend capabilities and planner
+  operators, MUST remain cluster-capable and support distributed execution.
+  Prefer local execution when its data, authority and runtime state are local.
+  Otherwise synchronize the required state and effects through the cluster
+  protocol and delegate work as needed. Session state, transaction visibility,
+  captured helpers, cancellation and side effects must preserve their native
+  semantics across nodes. A local-only fallback, forced serialization or an
+  uncoordinated copy of mutable state must not silently replace that contract.
+  Tests for new capabilities must cover the distributed path as well as local
+  execution; unsupported distributed semantics must be explicit, never hidden.
 - Filters and MapReducers, including their captured bindings, are transmitted
   using the existing Scheme serializer and executed on the worker that reads
   the shard. Workers return scalar or grouped partial results for combination.

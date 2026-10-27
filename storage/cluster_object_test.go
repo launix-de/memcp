@@ -804,3 +804,70 @@ func TestClusterObjectPendingTransferSurvivesPriorLeaseRelease(t *testing.T) {
 		t.Fatal("last lease remained registered")
 	}
 }
+
+// Model the valid cancellation window in which Done is closed but an AfterFunc
+// callback has not started yet. Stopping the hook must not lose remote cancel.
+type delayedClusterCancelContext struct {
+	context.Context
+	done       chan struct{}
+	registered chan struct{}
+}
+
+func (c *delayedClusterCancelContext) Done() <-chan struct{} { return c.done }
+func (c *delayedClusterCancelContext) Err() error {
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+func (c *delayedClusterCancelContext) AfterFunc(func()) func() bool {
+	close(c.registered)
+	return func() bool { return true } // scheduler has not started the hook
+}
+func TestClusterCancellationQueuesMessageBeforeStoppingDeferredHook(t *testing.T) {
+	for _, control := range []bool{true, false} {
+		t.Run(fmt.Sprint("control=", control), func(t *testing.T) {
+			ctx := &delayedClusterCancelContext{context.Background(), make(chan struct{}), make(chan struct{})}
+			service := &nodeScanService{}
+			peer := &mosiPeer{scanService: service, done: make(chan struct{}), outgoing: make(chan mosiMessage, 4)}
+			finished := make(chan any, 1)
+			go func() {
+				if control {
+					finished <- service.control(ctx, peer, "fixture", nil, nil)
+					return
+				}
+				defer func() { finished <- recover() }()
+				executor := &peerScanExecutor{peer: peer, ctx: ctx}
+				executor.dispatch(remoteScanTask{})
+			}()
+			request := <-peer.outgoing
+			var envelope struct {
+				Return string `json:"return"`
+			}
+			if err := json.Unmarshal(request.Data, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			<-ctx.registered
+			close(ctx.done)
+			select {
+			case result := <-finished:
+				if result != context.Canceled {
+					t.Fatal("wrong cancellation result", result)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("operation did not unwind")
+			}
+			select {
+			case message := <-peer.outgoing:
+				var id string
+				if message.Method != "scan.cancel" || json.Unmarshal(message.Data, &id) != nil || id != envelope.Return {
+					t.Fatal("wrong remote cancellation", message)
+				}
+			default:
+				t.Fatal("Done won select and deferred stop suppressed the remote cancellation")
+			}
+		})
+	}
+}
