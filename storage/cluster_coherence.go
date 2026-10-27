@@ -102,6 +102,20 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 	if owner == "" {
 		return "", fmt.Errorf(mosi.NetworkError)
 	}
+	// Discovery spans replies from several live nodes. Ownership may have
+	// advanced since our initial report. Re-sample routing only: this must never
+	// establish a permission from IO or turn an in-flight handover into recovery.
+	latest := cluster.report(resource)
+	latestPhase := mosi.ParsePhase(latest.State)
+	if latestPhase == mosi.M || latestPhase == mosi.O {
+		return r.id, nil
+	}
+	if latest.Handoff != "" {
+		return latest.Handoff, nil
+	}
+	if latest.Owner != "" && latest.Owner != r.id {
+		return latest.Owner, nil
+	}
 	if owner == r.id && !authoritative {
 		// A live IO publication is a revocation, not a restarted owner. The
 		// directory may still name us while a handover awaits installation ACK;
@@ -241,11 +255,15 @@ func (cluster *nodeCluster) report(resource mosiResource) replicaRecord {
 		return replicaRecord{Resource: resource, State: "IO"}
 	}
 	r := cluster.manager
+	c := r.resourceCell(resource)
 	r.mu.Lock()
 	record := r.directory.Records[r.resourceKey(resource)]
-	r.mu.Unlock()
-	c := r.resourceCell(resource)
+	// Sample permission while the existing directory owner still protects the
+	// routing hint. Copying an old record, unlocking, then observing new IO could
+	// omit the successor published before that revocation and falsely report an
+	// interrupted handover. This cold report adds no query admission lock.
 	publication := c.ownstate.Snapshot()
+	r.mu.Unlock()
 	phase := publication.Phase()
 	if phase == mosi.IS {
 		phase = publication.Backend()

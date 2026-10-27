@@ -16,8 +16,9 @@ import "github.com/launix-de/memcp/scm"
 
 // scanWireValue represents native reducer data, not a second SQL aggregation
 // model. Dictionary keys may themselves be tuples (including NULL domains).
-// Physical query-local handles and runtime objects require explicit contracts
-// and cannot enter this codec. Encoding happens only at shard task boundaries.
+// Runtime objects/procedures enter only with explicit export/decode contexts;
+// aggregate-only callers remain data-only. Encoding happens at task boundaries,
+// never per row. Physical query-local containers without a contract fail.
 type scanWireValue struct {
 	Reference *scm.ClusterReference `json:"reference,omitempty"`
 	Procedure json.RawMessage       `json:"procedure,omitempty"`

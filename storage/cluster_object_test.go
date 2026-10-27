@@ -15,6 +15,7 @@ import "testing"
 import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage/mosi"
 
 func objectOwnerPeer(t *testing.T, owner, client *nodeScanService) *mosiPeer {
 	t.Helper()
@@ -539,5 +540,56 @@ func TestClusterObjectRegisteredGenerationProtectsFilesAndBlobs(t *testing.T) {
 	blobs, files, complete := CleanDatabase(tbl.schema)
 	if !complete || blobs == 0 || files == 0 {
 		t.Fatal("released generation remained on disk", blobs, files, complete)
+	}
+}
+
+func TestClusterDiscoveryRefreshesRoutingAfterConcurrentHandover(t *testing.T) {
+	self := clusterMember{ID: "memcp://" + uuid.NewString()}
+	remote := clusterMember{ID: "memcp://" + uuid.NewString()}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	service := &nodeScanService{}
+	cluster := &nodeCluster{self: self, service: service}
+	cluster.initializeManager()
+	cluster.view.Store(&clusterView{members: []clusterMember{self, remote}, links: []*clusterLink{{member: remote, peer: peer}}})
+	resource := mosiResource{Database: "concurrent_handover"}
+	cell := cluster.manager.resourceCell(resource)
+	cell.ownstate.Establish(mosi.IO)
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch, record.State = self.ID, 9, "IO"
+		return true
+	})
+	type result struct {
+		owner string
+		err   error
+	}
+	finished := make(chan result, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go func() {
+		owner, err := cluster.locate(ctx, resource)
+		finished <- result{owner, err}
+	}()
+	// Discovery has sampled local IO and is awaiting another live peer. Publish
+	// the successor now; the peer's already captured answer still names us.
+	message := <-peer.outgoing
+	var request struct {
+		Return string `json:"return"`
+	}
+	if err := json.Unmarshal(message.Data, &request); err != nil {
+		t.Fatal(err)
+	}
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Handoff = remote.ID
+		return true
+	})
+	data, _ := json.Marshal(replicaRecord{Resource: resource, Owner: self.ID, Epoch: 9, State: "IO"})
+	entry, ok := service.returns.Load(request.Return)
+	if !ok {
+		t.Fatal("missing discovery return collector")
+	}
+	entry.(*scanReturnChannel).result <- scanCompletion{Return: request.Return, Data: data}
+	reply := <-finished
+	if reply.err != nil || reply.owner != remote.ID || cell.ownstate.Phase() != mosi.IO {
+		t.Fatal("live handover became a recovery failure or regained rights", reply, cell.ownstate.Phase())
 	}
 }

@@ -111,7 +111,7 @@ func initClusterObjectAPI(en *scm.Env) {
 		}
 		service := nodeScans.Load()
 		if service == nil {
-			return scm.NewSlice(nil)
+			return scm.NewString("[]")
 		}
 		data, err := json.Marshal(service.objectStatus())
 		if err != nil {
