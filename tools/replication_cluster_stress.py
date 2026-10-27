@@ -16,7 +16,6 @@ import base64
 import concurrent.futures
 import contextlib
 import http.client
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -1068,8 +1067,8 @@ def run_cluster_placement(args, artifacts, journal):
     directory = artifacts / "cluster-placement"
     directory.mkdir()
     budget = 8 * 1024 * 1024
-    coordinator_budget = 1024 * 1024
-    rows_per_shard, shards, columns = 40000, 8, 8
+    coordinator_budget = 128 * 1024
+    rows_per_shard, shards, columns = 5000, 64, 8
     secret = uuid.uuid4().hex + uuid.uuid4().hex
     secret_file = directory / "cluster.secret"
     secret_file.write_text(secret + "\n")
@@ -1113,8 +1112,6 @@ def run_cluster_placement(args, artifacts, journal):
         generations = {part["uuid"] if isinstance(part, dict) else part for part in parts if part}
         files = [path for path in shared.iterdir() if any(path.name.startswith(generation + '-') for generation in generations)]
         payload_bytes = sum(path.stat().st_size for path in files)
-        immutable_paths = files + [shared / "schema.json"]
-        original_bytes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in immutable_paths}
         if payload_bytes <= budget:
             raise DrillFailure(f"fixture fits one node: {payload_bytes} <= {budget}")
         for generation in generations:
@@ -1122,9 +1119,9 @@ def run_cluster_placement(args, artifacts, journal):
                                    if path.name.startswith(generation + '-'))
             if not coordinator_budget < generation_bytes < budget:
                 raise DrillFailure(f"shard does not exercise asymmetric admission: {generation_bytes}")
-        # All participants resolve exactly the same immutable generation files;
+        # All participants resolve the same shared backend generation files;
         # neither per-node copies nor replication dumps are used in this test.
-        nodes = [Node(args, directory, f"node-{i}", "") for i in range(3)]
+        nodes = [Node(args, directory, f"node-{i}", "listen") for i in range(4)]
         wrong = Node(args, directory, "wrong-secret", "")
         for node in nodes + [wrong]:
             # Exercise eight concurrent shard operators even on two-CPU CI
@@ -1134,9 +1131,9 @@ def run_cluster_placement(args, artifacts, journal):
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
             (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
-            # The coordinator cannot fit one shard; either worker can fit it,
-            # while the full table exceeds even a worker's budget. This forces
-            # actual delegation without depending on OS scheduling overlap.
+            # The coordinator uses a deliberately tiny shard share below its
+            # native system-data baseline; workers retain the default 50%.
+            # No payload/header estimate or overlap timing forces delegation.
             node_budget = coordinator_budget if node is nodes[0] else budget
             (node.data_dir / "settings.json").write_text(json.dumps({
                 "MaxRamBytes": node_budget, "MaxPersistBytes": node_budget, "MinRamBytes": 0,
@@ -1146,6 +1143,8 @@ def run_cluster_placement(args, artifacts, journal):
             node.node_args = [f"--cluster-secret-file={wrong_file if node is wrong else secret_file}",
                               f"--cluster-address=http://127.0.0.1:{node.port}/cluster",
                               f"--cluster-join={seed}", f"--cluster-databases={DATABASE}"]
+            if node is nodes[0]:
+                node.node_args.append("--cluster-bootstrap")
         def status(node):
             value = node.client.scm("(cluster_status)").strip()
             if value.startswith('"'):
@@ -1153,7 +1152,7 @@ def run_cluster_placement(args, artifacts, journal):
             return json.loads(value)
         for node in nodes:
             node.start()
-        eventually(lambda: all(len(status(node)["state"]["members"]) == 3 and status(node)["state"]["connected"] == 2
+        eventually(lambda: all(len(status(node)["state"]["members"]) == len(nodes) and status(node)["state"]["connected"] == len(nodes) - 1
                                for node in nodes), "full peer roster did not converge", 30)
         wrong.start()
         # Prove that a wrong-secret process can answer SQL locally yet receives
@@ -1162,7 +1161,15 @@ def run_cluster_placement(args, artifacts, journal):
         expect(len(status(wrong)["state"]["members"]), 1, "wrong-secret isolation")
         expect(status(wrong)["state"]["connected"], 0, "wrong-secret connections")
         for node in nodes:
-            expect(len(status(node)["state"]["members"]), 3, "authenticated roster")
+            expect(len(status(node)["state"]["members"]), len(nodes), "authenticated roster")
+        for node in nodes:
+            expect(int(node.client.scm('(settings "ShardRamPercent")')), 50, "default shard fraction")
+            if not status(node)["state"]["self"]["id"].startswith("memcp://"):
+                raise DrillFailure("peer identity is not a URI")
+        nodes[0].client.scm('(settings "ShardRamPercent" 1)')
+        boundary = status(nodes[0])["budget"]
+        if boundary["ShardMemory"] < boundary["ShardBudget"]:
+            raise DrillFailure("coordinator fixture did not force cold-shard refusal")
         for round_index in range(2):
             expect(nodes[0].client.number(query, "total"), expected, f"automatic distributed sum {round_index}")
         # Exercise the same normal engine scan without reusing SQL's local
@@ -1180,25 +1187,111 @@ def run_cluster_placement(args, artifacts, journal):
             raise DrillFailure("tight-RAM query did not exercise admission rejection/delegation")
         if sum(item["state"]["locality"] for item in states) == 0:
             raise DrillFailure("warm-holder query did not exercise locality delegation")
-        nodes[0].client.reject("INSERT INTO big_items VALUES(0," + ','.join('0' for _ in range(columns)) + ')',
-                               contains="read-only")
-        for node, item in zip(nodes, states):
-            node_budget = coordinator_budget if node is nodes[0] else budget
-            expect(item["budget"]["MemoryBudget"], node_budget, "effective node RAM budget")
-            expect(item["budget"]["QueryReserved"], 0, "released operator reservations")
-            if item["budget"]["QueryPeak"] > node_budget:
-                raise DrillFailure(f"{node.name}: admission exceeded RAM budget")
-        # The seed is not a permanent monitor or compute relay. Surviving peers
-        # know one another and can continue the immutable aggregate without it.
+        # Repeated M transfers must invalidate warm SQL/query caches. Change
+        # alternating partitions from different nodes, then read the same cached
+        # aggregate everywhere. Uncached native scans provide another oracle.
+        for revision in range(4):
+            writer = nodes[1 + revision % 2]
+            row_id = rows_per_shard * (revision % 2)
+            writer.client.sql(f"UPDATE big_items SET v0=v0+1 WHERE id={row_id}")
+            expected += 1
+            for node in nodes:
+                expect(node.client.number(query, "total"), expected,
+                       f"cache coherence after M handover {revision} on {node.name}")
+            expect(int(nodes[cold_worker].client.scm(expression).strip()), expected,
+                   f"uncached result after write {revision}")
+        nodes[1].client.sql("CREATE TABLE cluster_ddl(id INT PRIMARY KEY,n INT) ENGINE=SAFE")
+        try:
+            nodes[2].client.sql("INSERT INTO cluster_ddl VALUES(1,7),(2,11)")
+        except Exception:
+            # Preserve the original failure while recording live catalog data;
+            # parser-level metadata fallback can otherwise mask its root cause.
+            for node in nodes:
+                try:
+                    print(node.name, "DDL diagnostic", node.client.scm(
+                        f'(list (show "{DATABASE}" "cluster_ddl") (get_schema "{DATABASE}" "cluster_ddl"))'), flush=True)
+                except Exception as diagnostic:
+                    print(node.name, "DDL diagnostic failed", diagnostic, flush=True)
+            raise
+        for node in nodes:
+            expect(node.client.number("SELECT SUM(n) AS total FROM cluster_ddl", "total"), 18,
+                   "DDL and inserted data visible across nodes")
+        nodes[1].client.sql("ALTER TABLE cluster_ddl ADD COLUMN extra INT DEFAULT 3")
+        for node in nodes:
+            expect(node.client.number("SELECT SUM(extra) AS total FROM cluster_ddl", "total"), 6,
+                   "ALTER visible across nodes")
+
+        # The same processes also master independent tenant replicas. Cluster
+        # secret/URI rights never enter those user-login replication domains.
+        edge_nodes = []
+        for index in range(2):
+            database = f"cluster_edge_{index}"
+            upstream = nodes[index + 1]
+            upstream.client.sql(f"CREATE DATABASE {database}", "system")
+            upstream.client.sql("CREATE TABLE edge_items(id INT PRIMARY KEY,n INT) ENGINE=SAFE", database)
+            edge = Node(args, directory, f"edge-{index}", f"http://127.0.0.1:{upstream.port}/cluster", database=database)
+            cleanup.callback(lambda edge=edge: edge.kill() if edge.process is not None else None)
+            edge.start()
+            edge_nodes.append(edge)
+
+        def edge_work(index):
+            edge = edge_nodes[index]
+            for row_id in range(6):
+                edge.client.sql(f"INSERT INTO edge_items VALUES({row_id},{row_id + 1})")
+            expect(edge.client.number("SELECT SUM(n) AS total FROM edge_items", "total"), 21,
+                   "edge workload during cluster operation")
+            expect(nodes[index + 1].client.number("SELECT SUM(n) AS total FROM edge_items", "total",
+                                                 database=edge.database), 21,
+                   "replication master reads tenant updates")
+
+        def private_work():
+            master = nodes[0].client
+            master.sql("CREATE DATABASE cluster_private", "system")
+            master.sql("CREATE TABLE private_items(id INT)", "cluster_private")
+            master.sql("INSERT INTO private_items VALUES(13)", "cluster_private")
+            master.sql("ALTER TABLE private_items ADD COLUMN extra INT DEFAULT 7", "cluster_private")
+            expect(master.number("SELECT SUM(id) AS total FROM private_items", "total", database="cluster_private"), 13,
+                   "master-only namespace remains writable")
+            expect(master.number("SELECT SUM(extra) AS total FROM private_items", "total", database="cluster_private"), 7,
+                   "master-only ALTER remains independent of replica ownership")
+
+        def cluster_reads():
+            for node in nodes:
+                expect(node.client.number(query, "total"), expected, "cluster sum during independent edge workloads")
+
+        # Separate tenant replicas, private DDL and shared analytic reads must
+        # progress concurrently. Each future propagates its assertions/errors.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as threads:
+            futures = [threads.submit(edge_work, index) for index in range(2)]
+            futures.extend([threads.submit(private_work), threads.submit(cluster_reads)])
+            for future in futures:
+                future.result()
+        # Move schema ownership away from the contact before it is killed. The
+        # contact's already-granted S rights remain usable by the survivors.
+        nodes[1].client.sql("CREATE TABLE after_contact(id INT)")
+        for node in nodes:
+            expect(node.client.number(query, "total"), expected, "sum before contact loss")
         nodes[0].kill()
-        eventually(lambda: all(status(node)["state"]["connected"] == 1 for node in nodes[1:]),
+        eventually(lambda: all(status(node)["state"]["connected"] == len(nodes) - 2 for node in nodes[1:]),
                    "surviving peers did not observe contact-node loss")
         expect(nodes[1].client.number(query, "total"), expected, "sum after contact-node loss")
-        expect({path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in immutable_paths},
-               original_bytes, "shared S-only schema/generations remained unchanged")
+        # This untouched partition still belongs to the missing contact. An M
+        # request must fail immediately and retain the surviving S permissions.
+        started = time.monotonic()
+        nodes[1].client.reject(f"UPDATE big_items SET v0=v0+1 WHERE id={rows_per_shard * 5}", contains=NETWORK_ERROR)
+        if time.monotonic() - started >= args.timeout:
+            raise DrillFailure("unreachable owner waited for a request timeout")
+        expect(nodes[1].client.number(query, "total"), expected, "failed acquisition did not change data")
+        for edge in edge_nodes:
+            edge.client.sql("INSERT INTO edge_items VALUES(99,9)")
+            expect(edge.client.number("SELECT SUM(n) AS total FROM edge_items", "total"), 30,
+                   "unrelated edge database survives cluster-owner loss")
+        states = [status(node) for node in nodes[1:]]
+        for item in states:
+            expect(item["budget"]["ShardBudget"], budget // 2, "worker default 50% shard threshold")
         journal.append({"scenario": "cluster-placement", "rows": rows_per_shard * shards,
                         "shards": shards, "payload_bytes": payload_bytes, "node_budget": budget,
-                        "coordinator_budget": coordinator_budget,
+                        "coordinator_budget": coordinator_budget, "shard_ram_percent": 50,
                         "expected_sum": expected, "states": states, "fixture_binary": str(builder_args.binary)})
 
 

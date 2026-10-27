@@ -22,7 +22,7 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 	defer c.acquire.Unlock()
 	_, err := c.ownstate.Grant(packet.ID, mosi.ParsePhase(packet.State), func() error {
 		r.mu.Lock()
-		current := r.directory.Records[packet.Resource.key()]
+		current := r.directory.Records[r.recordKey(packet.Resource)]
 		r.mu.Unlock()
 		if packet.Epoch < current.Epoch {
 			return fmt.Errorf("stale grant epoch")
@@ -50,7 +50,7 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 }
 
 func (r *replicationManager) invalidateResource(ctx context.Context, source string, packet mosiPacket) error {
-	if r.master || source != "" {
+	if r.cluster == nil && (r.master || source != "") {
 		return fmt.Errorf("invalidation from non-master")
 	}
 	c := r.resourceCell(packet.Resource)
@@ -60,7 +60,7 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 		c.acquire.Lock()
 		defer c.acquire.Unlock()
 		r.mu.Lock()
-		epoch := r.directory.Records[packet.Resource.key()].Epoch
+		epoch := r.directory.Records[r.recordKey(packet.Resource)].Epoch
 		r.mu.Unlock()
 		if packet.Epoch > epoch {
 			return fmt.Errorf("future invalidation epoch")
@@ -90,12 +90,15 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 }
 
 func (r *replicationManager) offerResource(ctx context.Context, source string, packet mosiPacket) error {
-	if r.master || source != "" {
+	if r.cluster == nil && (r.master || source != "") {
 		return fmt.Errorf("recall from non-master")
 	}
 	c := r.resourceCell(packet.Resource)
 	// Older safety-copy packets must be enqueued before this ownership offer.
 	// Waiting for a sender never closes local write admission.
+	if r.cluster != nil && packet.Resource.Shard != "" {
+		r.obtain(mosiResource{Database: packet.Resource.Database}, mosi.M, "", nil)
+	}
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	releasePersistence, err := replicaPersistenceRead(packet.Resource)
@@ -121,7 +124,7 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 		}
 	}()
 	r.mu.Lock()
-	record := r.directory.Records[packet.Resource.key()]
+	record := r.directory.Records[r.recordKey(packet.Resource)]
 	r.mu.Unlock()
 	if record.Epoch != packet.Epoch {
 		return fmt.Errorf("stale recall")
@@ -148,6 +151,22 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 	// The root master does not take this path when delegating to its slave.
 	c.clusterstate.Publish(phase)
 	packet.Generation = generation
+	if r.cluster != nil {
+		handover.Release()
+		locked = false
+		c.acquire.Unlock()
+		authorityLocked = false
+		releasePersistence()
+		packet.Kind, packet.From, packet.To = "reference", r.id, source
+		if current := c.current.Load(); current != nil && packet.Resource.Shard != "" {
+			packet.Lineage = current.logicalID().String()
+		}
+		peer := r.peer(source)
+		if peer == nil {
+			return fmt.Errorf(mosi.NetworkError)
+		}
+		return peer.post(packet)
+	}
 	transfer, err := r.captureResource(packet.Resource, generation)
 	if err != nil {
 		return err
@@ -161,13 +180,14 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 }
 
 func (r *replicationManager) coordinate(ctx context.Context, requester string, packet mosiPacket) error {
-	if sharedClusterDatabase(packet.Resource.Database) {
-		return fmt.Errorf("shared cluster snapshots do not yet delegate replication rights")
+	if r.cluster == nil && sharedClusterDatabase(packet.Resource.Database) {
+		return fmt.Errorf("replication of a cluster-owned database requires an enclosing domain handover")
 	}
+
 	if !r.master {
 		return fmt.Errorf("resource request to non-master")
 	}
-	if requester != r.id {
+	if r.cluster == nil && requester != r.id {
 		if err := r.authorizePacket(packet); err != nil {
 			return err
 		}
@@ -181,11 +201,28 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	// There are no outer cluster peers in this adapter yet. A known resource
-	// belongs to this root domain even when its local executor has IO. Keep the
-	// root claim separate from the ownstate grant below. Cluster routing will
-	// replace this bootstrap with acquisition from the enclosing directory.
-	c.clusterstate.Establish(mosi.M)
+	if r.cluster != nil {
+		// Discovery may race an earlier handover while this request waits for
+		// directory ownership. The old owner forwards to the successor; it must
+		// never become a permanent coordinator recalling the actual owner.
+		r.mu.Lock()
+		owner := r.directory.Records[r.recordKey(packet.Resource)].Owner
+		r.mu.Unlock()
+		if owner != "" && owner != r.id {
+			peer := r.peer(owner)
+			if peer == nil {
+				return fmt.Errorf(mosi.NetworkError)
+			}
+			packet.From, packet.To = requester, owner
+			return peer.post(packet)
+		}
+	}
+	if r.cluster == nil {
+		// A star master retains its outward root claim while delegating inward
+		// to a slave. Cluster peers instead receive authority through owner
+		// discovery and grants; merely coordinating cannot establish outer M.
+		c.clusterstate.Establish(mosi.M)
+	}
 	// Catalog loading may itself declare shards and acquire r.mu.
 	localShard := c.current.Load()
 	if localShard == nil && packet.Resource.Shard != "" {
@@ -231,6 +268,9 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			oldState = "O"
 		}
 		if record.Owner == r.id {
+			if r.cluster != nil && packet.Resource.Shard != "" {
+				r.obtain(mosiResource{Database: packet.Resource.Database}, mosi.M, "", nil)
+			}
 			releasePersistence, err := replicaPersistenceRead(packet.Resource)
 			if err != nil {
 				return err
@@ -241,13 +281,22 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				return err
 			}
 			generation, err := r.prepareResource(packet.Resource)
-			if err == nil && requester != r.id {
+			if err == nil && requester != r.id && r.cluster == nil {
 				err = r.saveBackup(packet.Resource, generation)
 			}
 			if err == nil {
 				r.localRecord(packet.Resource, mosi.ParsePhase(oldState), generation)
 			}
 			if err == nil {
+				if r.cluster != nil && write {
+					// Route concurrent lookups toward the successor while its
+					// installation ACK is pending. This is not a grant; local IO
+					// remains revoked and the successor still waits for its M grant.
+					r.updateRecord(packet.Resource, func(current *replicaRecord) bool {
+						current.Handoff = requester
+						return true
+					})
+				}
 				r.publishLocal(packet.Resource, mosi.ParsePhase(oldState))
 				record.Generation = generation
 			}
@@ -268,7 +317,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				return err
 			}
 			r.mu.Lock()
-			record.Generation = r.directory.Records[packet.Resource.key()].Generation
+			record.Generation = r.directory.Records[r.recordKey(packet.Resource)].Generation
 			r.mu.Unlock()
 		}
 	}
@@ -306,6 +355,9 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		if err := r.transmitResource(ctx, requester, mosiPacket{ID: uuid.NewString(), Resource: packet.Resource, Epoch: record.Epoch, Generation: record.Generation}); err != nil {
 			return err
 		}
+	}
+	if r.cluster != nil && record.Owner != r.id {
+		record.Readers = nil
 	}
 	record.State = "IO"
 	if record.Owner == r.id {
@@ -356,5 +408,10 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		return fmt.Errorf(mosi.NetworkError)
 	}
 	r.publishLocal(packet.Resource, mosi.ParsePhase(record.State))
-	return peer.post(mosiPacket{Kind: "grant", ID: packet.ID, Resource: packet.Resource, Epoch: record.Epoch, State: grantState, Generation: record.Generation, Owner: record.Owner, Readers: record.Readers})
+	return peer.post(mosiPacket{Kind: "grant", ID: packet.ID, Resource: packet.Resource, Epoch: record.Epoch, State: grantState, Generation: record.Generation, Owner: record.Owner, Readers: func() map[string]bool {
+		if r.cluster != nil {
+			return nil
+		}
+		return record.Readers
+	}()})
 }

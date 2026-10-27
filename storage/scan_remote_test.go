@@ -10,6 +10,7 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 */
 package storage
 
+import "fmt"
 import "context"
 import "strings"
 import "testing"
@@ -159,7 +160,7 @@ func TestClusterAuthenticationRejectsReplayedProof(t *testing.T) {
 	if err := readScanAuth(first, "scan.challenge", &original); err != nil {
 		t.Fatal(err)
 	}
-	client := scanChallenge{Node: uuid.NewString(), Nonce: uuid.NewString()}
+	client := scanChallenge{Version: scanWireVersion, Node: uuid.NewString(), Nonce: uuid.NewString()}
 	client.Proof = scanAuthProof([]byte(testScanSecret), "client", original, client)
 	first.Close()
 	second := dial()
@@ -175,5 +176,89 @@ func TestClusterAuthenticationRejectsReplayedProof(t *testing.T) {
 	}
 	if _, _, err := second.ReadMessage(); err == nil {
 		t.Fatal("a proof for an older challenge authenticated a fresh connection")
+	}
+}
+
+func TestRemoteScanMessagesHaveNoRPCHandle(t *testing.T) {
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	id := uuid.NewString()
+	if err := postScanMessage(peer, "scan.cancel", id); err != nil {
+		t.Fatal(err)
+	}
+	message := <-peer.outgoing
+	if message.ID != 0 || message.Method != "scan.cancel" || len(peer.pending) != 0 {
+		t.Fatal("fire-and-forget message allocated an RPC handle")
+	}
+	var decoded string
+	if err := json.Unmarshal(message.Data, &decoded); err != nil || decoded != id {
+		t.Fatal("return channel identity changed")
+	}
+}
+
+func TestRemoteScanReturnChannelDeliversResultsAndPanics(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_scan_return_channel", 4)
+	peer, service, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts); err != nil {
+		t.Fatal(err)
+	}
+	executor := &peerScanExecutor{peer: peer, ctx: context.Background()}
+	result := executor.dispatch(makeRemoteScanTask(t, parts[0]))
+	value, err := decodeScanData(result.Value, false)
+	if err != nil || value.Int() != 9 {
+		t.Fatalf("wrong return channel result: %v, %v", value, err)
+	}
+	task := makeRemoteScanTask(t, parts[0])
+	task.Task++
+	task.MapReducer, err = scm.MarshalProcedure(scm.Eval(scm.Read(t.Name(), `(lambda (acc id) (error "worker panic"))`), &scm.Globalenv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	func() {
+		defer func() {
+			failure := recover()
+			if failure == nil || !strings.Contains(fmt.Sprint(failure), "worker panic") {
+				t.Fatalf("worker panic not forwarded: %v", failure)
+			}
+		}()
+		executor.dispatch(task)
+	}()
+	service.returns.Range(func(key, value any) bool {
+		t.Errorf("completed return channel retained: %v", key)
+		return true
+	})
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+	if len(peer.pending) != 0 {
+		t.Fatal("remote computation retained an RPC handle")
+	}
+}
+
+func TestRemoteScanCancellationBeforeDispatchAndAfterCompletion(t *testing.T) {
+	var registry scanTaskRegistry
+	id := uuid.NewString()
+	registry.cancelTask(id)
+	if _, err := registry.begin(context.Background(), id); err == nil {
+		t.Fatal("cancel-before-dispatch admitted work")
+	}
+	id = uuid.NewString()
+	scope, err := registry.begin(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.cancelTask(id)
+	if scope.ctx.Err() != context.Canceled {
+		t.Fatal("active scope did not forward cancellation")
+	}
+	registry.finish(id)
+	registry.cancelTask(id)
+	if _, err := registry.begin(context.Background(), id); err == nil {
+		t.Fatal("late cancellation permitted replay")
+	}
+	for i := 0; i < 2048; i++ {
+		registry.cancelTask(uuid.NewString())
+	}
+	if len(registry.active) != 0 || len(registry.terminal) != 1024 {
+		t.Fatalf("unbounded cancellation state: %d/%d", len(registry.active), len(registry.terminal))
 	}
 }

@@ -30,8 +30,8 @@ import "encoding/binary"
 import "github.com/google/uuid"
 import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
-import "github.com/launix-de/memcp/storage/mosi"
 import "github.com/launix-de/NonLockingReadMap"
+import "github.com/launix-de/memcp/storage/mosi"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
 type storageShard struct {
@@ -525,7 +525,7 @@ func (s shardStatsSnapshot) rowCount() int64 {
 }
 
 func (u *storageShard) MarshalJSON() ([]byte, error) {
-	if replication.Load() != nil && u.t != nil && validReplicaDatabase(u.t.schema.Name) {
+	if u.t != nil && u.t.schema != nil && (sharedClusterDatabase(u.t.schema.Name) || replication.Load() != nil) && validReplicaDatabase(u.t.schema.Name) {
 		return json.Marshal(struct {
 			UUID    string `json:"uuid"`
 			Lineage string `json:"mosi"`
@@ -987,18 +987,11 @@ func (s *storageShard) GetRead(currentTx *TxContext) ReadAccess {
 // Physical query-local IDs retain their original immutable generation. Rights
 // acquisition may install a successor, but must never reinterpret those IDs.
 func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
+	origin := s
 	if target := s.scanTarget.Load(); target != nil {
 		panic(shardReadDelegation{target})
 	}
-	if !snapshot && sharedClusterSource(s.t) {
-		cell := acquireClusterSnapshot(mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: s.logicalID().String()})
-		if cell.current.Load() == nil {
-			cell.current.CompareAndSwap(nil, s)
-		}
-		if s.coherence.Load() == nil {
-			s.coherence.CompareAndSwap(nil, cell)
-		}
-	} else if !snapshot && s.t != nil {
+	if !snapshot && s.t != nil {
 		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
 			s = r.readShard(s, currentTx)
 		}
@@ -1010,6 +1003,9 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 			s.releaseCacheRead()
 		}
 	}()
+	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard() {
+		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
+	}
 	s.ensureLoaded()
 	// Ensure main_count is initialized by loading at least one column
 	s.ensureMainCount(false, currentTx)
@@ -1021,9 +1017,7 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 	return ReadAccess{shard: s}
 }
 func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
-	if sharedClusterSource(s.t) {
-		rejectClusterSnapshotWrite(s.t.schema.Name)
-	}
+	origin := s
 	if s.scanTarget.Load() != nil {
 		panic("remote shard writes require a transaction participant protocol")
 	}
@@ -1043,6 +1037,9 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 			}
 		}
 	}
+	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard() {
+		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
+	}
 	s.ensureLoaded()
 	s.setState(WRITE)
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
@@ -1054,14 +1051,9 @@ func (s *storageShard) ensureLoaded() {
 	if s.state() != COLD {
 		return
 	}
-	// A mounted immutable generation already reserved its bounded header-based
-	// payload/scratch estimate. Do not apply the unrelated ShardSize heuristic a
-	// second time, or it would evict useful warm peers despite valid admission.
-	if sharedClusterSource(s.t) {
-		if !GlobalCache.queryPayloadCovered(s) {
-			panic("shared cluster cold loads require operator RAM admission")
-		}
-	} else {
+	// Cluster placement checks the O(1) cache ledger before reaching this load.
+	// No column-header reads or guessed payload/scratch reservations belong here.
+	if !sharedClusterSource(s.t) {
 		GlobalCache.CheckPressure(int64(len(s.t.columnDeclarations())) * int64(Settings.ShardSize) * 16)
 	}
 	// double-check under lock to prevent concurrent map writes in load()
@@ -1316,7 +1308,7 @@ func NewShard(t *table) *storageShard {
 	}
 	// Newly created shards are live/writable, not cold
 	result.setState(WRITE)
-	if r := replication.Load(); r != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable() {
+	if r := activeReplication(t.schema); r != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable() {
 		r.declareShard(result, r.id, true)
 	}
 	return result
@@ -3855,7 +3847,7 @@ func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
 }
 
 func (t *storageShard) RemoveFromDisk() {
-	if replication.Load() != nil && t.t.schema != nil && replicationRetainsCatalogs(t.t.schema.Name) {
+	if t.t.schema != nil && replicationRetainsCatalogs(t.t.schema.Name) {
 		return
 	}
 	t.cleanupOnce.Do(func() {
@@ -4489,4 +4481,11 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		GlobalCache.AddItem(result, int64(result.exclusiveSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 	}
 	return result
+}
+
+// captureScanHorizon borrows the pinned generation's immutable main extent and
+// its existing batch-published delta count. No RLock, new counter or row-loop
+// cancellation probe is required. Caller must retain the native GetRead lease.
+func (s *storageShard) captureScanHorizon() shardScanHorizon {
+	return shardScanHorizon{s.main_count, uint32(s.plannerDeltaRows.Load())}
 }

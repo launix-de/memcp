@@ -18,11 +18,11 @@ package storage
 
 import "fmt"
 import "time"
-import "runtime/debug"
 import "sort"
-import "strings"
 import "sync"
+import "strings"
 import "sync/atomic"
+import "runtime/debug"
 import "github.com/launix-de/memcp/scm"
 
 type scanError struct {
@@ -1551,7 +1551,7 @@ func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology
 			}
 		}
 	}()
-	release := shard.acquireReadForScan(currentTx)
+	release := shard.acquireReadForScan(currentTx, access.runtime != nil && access.runtime.mutation)
 	acquiring = false
 	defer release.Release()
 	if release.shard != nil {
@@ -1631,6 +1631,9 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 		}
 	}
 	executionAccess := access
+	if hasMutationCallback && sharedClusterDatabase(t.schema.Name) {
+		executionAccess.ensureRuntime().mutation = true
+	}
 	if Settings.ScanDebugging {
 		dbg := fmt.Sprintf("[SCAN] %s.%s", t.schema.Name, t.Name)
 		for i := 0; i < executionAccess.len(); i++ {

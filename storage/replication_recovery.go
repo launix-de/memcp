@@ -33,7 +33,7 @@ func (r *replicationManager) resourceKnown(resource mosiResource) bool {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	record, exists := r.directory.Records[resource.key()]
+	record, exists := r.directory.Records[r.recordKey(resource)]
 	if exists && record.Owner == "" {
 		return false
 	}
@@ -378,7 +378,7 @@ func (r *replicationManager) mergeRecoveryReport(id string, reported replicaReco
 	resource := reported.Resource
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	record, exists := r.directory.Records[resource.key()]
+	record, exists := r.directory.Records[r.recordKey(resource)]
 	if r.recoveryReports == nil {
 		r.recoveryReports = make(map[string]map[string]replicaRecord)
 	}
@@ -475,7 +475,7 @@ func (r *replicationManager) mergeRecoveryReport(id string, reported replicaReco
 		}
 	}
 	if exists {
-		r.directory.Records[resource.key()] = record
+		r.directory.Records[r.recordKey(resource)] = record
 	}
 	return record, exists, claimed, nil
 }

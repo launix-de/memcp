@@ -11,15 +11,14 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
+import "context"
 import "strings"
 import "sync/atomic"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// The first cluster execution milestone mounts explicitly named immutable
-// generations on shared storage. Every participant has S; none can grant M.
-// This is not a substitute directory/lock protocol for live cluster writers.
-// Write handover and mutable schema/GC publication will use the same MOSI core
-// once connected; until then fail before modifying a shared namespace.
+// Explicit cluster databases share their backend namespace. MOSI owns their
+// schema/shard access; these names select the topology, not read-only mounts.
+// The map is startup-owned and immutable after atomic publication.
 var sharedClusterMounts atomic.Pointer[map[string]bool]
 
 func PrepareNodeCluster(args []string) error {
@@ -66,35 +65,12 @@ func sharedClusterSource(table *table) bool {
 	return table != nil && table.schema != nil && !table.isEphemeralQueryTable() && sharedClusterDatabase(table.schema.Name)
 }
 
-func (cluster *nodeCluster) sharedRead(resource mosiResource) *replicaCell {
-	if value, exists := cluster.states.Load(resource.key()); exists {
-		return value.(*replicaCell)
-	}
-	cluster.mu.Lock()
-	defer cluster.mu.Unlock()
-	if value, exists := cluster.states.Load(resource.key()); exists {
-		return value.(*replicaCell)
-	}
-	cell := &replicaCell{}
-	cell.resource.Store(&resource)
-	cell.clusterstate.Establish(mosi.S)
-	cell.ownstate.Establish(mosi.S)
-	cluster.states.Store(resource.key(), cell)
-	return cell
-}
-func acquireClusterSnapshot(resource mosiResource) *replicaCell {
+// Every schema/shard now acquires actual network MOSI permission. The
+// immutable mount adapter has no authority to fabricate S from a backend file.
+func acquireClusterRead(ctx context.Context, resource mosiResource) *replicaCell {
 	cluster := activeNodeCluster()
 	if cluster == nil || !cluster.databases[resource.Database] {
 		panic(mosi.NetworkError)
 	}
-	cell := cluster.sharedRead(resource)
-	if _, action := cell.ownstate.Request(mosi.S); action != mosi.Ready {
-		panic(mosi.NetworkError)
-	}
-	return cell
-}
-func rejectClusterSnapshotWrite(name string) {
-	if sharedClusterDatabase(name) {
-		panic("cluster shared snapshots are read-only until distributed MOSI write handover is connected")
-	}
+	return cluster.obtain(ctx, resource, mosi.S)
 }

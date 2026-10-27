@@ -108,6 +108,9 @@ func (resource mosiResource) valid() bool {
 // grant/failure/ack complete a state transition. A chunk is independently gzip
 // compressed and bounded, so queues never retain a whole shard or column.
 type mosiPacket struct {
+	Lineage    string          `json:"lineage,omitempty"` // native rebuild forwarding identity; never a cluster permission key
+	From       string          `json:"from,omitempty"`    // logical source URI, preserved across neighbour hops
+	To         string          `json:"to,omitempty"`      // logical destination URI, independent of a connection
 	Kind       string          `json:"kind"`
 	ID         string          `json:"id"`
 	Resource   mosiResource    `json:"resource"`
@@ -126,6 +129,12 @@ type mosiPacket struct {
 }
 
 func (peer *mosiPeer) post(packet mosiPacket) error {
+	if peer.scanService != nil && peer.scanService.cluster != nil {
+		if packet.From == "" {
+			packet.From = peer.scanService.cluster.self.ID
+		}
+	}
+
 	return peer.send(mosiMessage{Packet: &packet})
 }
 

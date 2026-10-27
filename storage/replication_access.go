@@ -60,30 +60,55 @@ func (table *table) schemaWrite() (*table, WriteAccess) {
 	if table.isEphemeralQueryTable() {
 		return table, WriteAccess{}
 	}
-	access := table.schema.GetWrite(nil)
-	complete := false
-	defer func() {
-		if !complete {
-			access.Release()
-		}
-	}()
-	if r := replication.Load(); r != nil && validReplicaDatabase(table.schema.Name) {
-		current := table.schema.tables.Get(table.Name)
-		if current == nil {
-			panic("replication schema changed; retry statement")
-		}
-		table = current
-		// Schema M revokes foreign schema readers. Acquire the table's current
-		// generations before changing declarations, so a schema import cannot
-		// replace a remote modifier's untransferred deltas with an old backup.
-		for _, shard := range table.ActiveShards() {
-			if shard != nil {
-				r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "")
+	for {
+		r := activeReplication(table.schema)
+		if r != nil && r.cluster != nil {
+			// Source handover may rebuild a shard and publish its new UUID under
+			// schema M. Claim data before closing schema ownership, otherwise DDL
+			// waits for a source which itself waits for our schema writer.
+			for _, shard := range table.ActiveShards() {
+				if shard != nil {
+					r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", nil)
+				}
 			}
 		}
+		access := table.schema.GetWrite(nil)
+		complete, retry := false, false
+		func() {
+			defer func() {
+				if !complete {
+					access.Release()
+				}
+			}()
+			if r != nil && validReplicaDatabase(table.schema.Name) {
+				current := table.schema.tables.Get(table.Name)
+				if current == nil {
+					panic("replication schema changed; retry statement")
+				}
+				table = current
+				for _, shard := range table.ActiveShards() {
+					if shard == nil {
+						continue
+					}
+					cell := r.shardCell(shard)
+					if r.cluster != nil {
+						// Another schema owner could publish a new topology before
+						// we acquired M. Release and claim the missing data first.
+						if cell.ownstate.Phase() != mosi.M {
+							retry = true
+							return
+						}
+					} else {
+						r.obtain(*cell.resource.Load(), mosi.M, "", nil)
+					}
+				}
+			}
+			complete = true
+		}()
+		if !retry {
+			return table, access
+		}
 	}
-	complete = true
-	return table, access
 }
 
 func (r *replicationManager) requestSequence(flight *mosi.Flight) uint64 {
@@ -125,7 +150,14 @@ func (r *replicationManager) proof(user, database string) (string, replicaAuth, 
 	return "", replicaAuth{}, fmt.Errorf("no authenticated user for database")
 }
 
-func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, user string) *replicaCell {
+func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, user string, tx *TxContext) *replicaCell {
+	if r.cluster != nil {
+		cell := r.resourceCell(resource)
+		if phase := cell.ownstate.Phase(); phase == mosi.M || wanted != mosi.M && phase.Readable() {
+			return cell
+		}
+		return r.cluster.obtain(scanQueryContext(tx, r.cluster.ctx), resource, wanted)
+	}
 	if r.retired.Load() {
 		panic("replica retired by administrator")
 	}
@@ -231,7 +263,7 @@ func (r *replicationManager) firstDatabase(name string, session scm.Scmer) {
 	c := r.resourceCell(resource)
 	if r.master || c.initialized.Load() {
 		if !c.ownstate.Phase().Readable() {
-			r.obtain(resource, mosi.S, session.Func()(replicationUsernameArgument...).String())
+			r.obtain(resource, mosi.S, session.Func()(replicationUsernameArgument...).String(), nil)
 		}
 		return
 	}
@@ -239,17 +271,17 @@ func (r *replicationManager) firstDatabase(name string, session scm.Scmer) {
 	c.bootstrap.Lock()
 	defer c.bootstrap.Unlock()
 	if c.initialized.Load() || c.bootstrapStarted {
-		r.obtain(resource, mosi.S, user)
+		r.obtain(resource, mosi.S, user, nil)
 		return
 	}
 	r.mu.Lock()
-	claimed := r.directory.Records[resource.key()].InitialClaimed
+	claimed := r.directory.Records[r.recordKey(resource)].InitialClaimed
 	r.mu.Unlock()
 	wanted := mosi.M
 	if claimed {
 		wanted = mosi.S
 	}
-	r.obtain(resource, wanted, user)
+	r.obtain(resource, wanted, user, nil)
 	db := databases.Get(name)
 	if db == nil {
 		panic("missing initial schema")
@@ -285,7 +317,7 @@ func (r *replicationManager) firstDatabase(name string, session scm.Scmer) {
 						failed.Store(true)
 					}
 				}()
-				r.obtain(item, mosi.M, user)
+				r.obtain(item, mosi.M, user, nil)
 			}(item)
 		}
 		pending.Wait()
@@ -312,7 +344,7 @@ func (r *replicationManager) readShard(shard *storageShard, tx *TxContext) *stor
 		wanted := mosi.S
 		if !r.master && !r.resourceCell(mosiResource{Database: resource.Database}).initialized.Load() {
 			r.mu.Lock()
-			claimed := r.directory.Records[resource.key()].InitialClaimed
+			claimed := r.directory.Records[r.recordKey(resource)].InitialClaimed
 			r.mu.Unlock()
 			// A query may beat its bootstrap worker to this shard. Its first
 			// acquisition still belongs to initialization and must request M;
@@ -321,7 +353,7 @@ func (r *replicationManager) readShard(shard *storageShard, tx *TxContext) *stor
 				wanted = mosi.M
 			}
 		}
-		r.obtain(resource, wanted, replicationUser(tx))
+		r.obtain(resource, wanted, replicationUser(tx), tx)
 	}
 	if current := c.current.Load(); current != nil {
 		return current
@@ -396,7 +428,7 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext)
 		// native data transaction. Its continuation retains its old declarations
 		// and must finish before that DDL, rather than deadlock reacquiring S.
 		if !r.resourceCell(schema).ownstate.Phase().Readable() && !c.transactionContinues(tx) {
-			r.obtain(schema, mosi.S, replicationUser(tx))
+			r.obtain(schema, mosi.S, replicationUser(tx), tx)
 		}
 	}
 	var owner any
@@ -404,10 +436,11 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext)
 		owner = tx
 	}
 	for {
-		r.obtain(resource, mosi.M, replicationUser(tx))
+		r.obtain(resource, mosi.M, replicationUser(tx), tx)
 		continuation := c.ownstate.ClosingWrites() && c.transactionContinues(tx)
 		writer, wait := c.ownstate.TryWrite(owner, continuation)
 		if writer != nil {
+
 			return c, writer.Release
 		}
 		if wait != nil {
@@ -481,7 +514,7 @@ func (r *replicationManager) backupDatabase(name, user string) {
 				}
 			}()
 			if cell.ownstate.Phase() == mosi.IS {
-				r.obtain(resource, mosi.M, user)
+				r.obtain(resource, mosi.M, user, nil)
 			}
 			if cell.ownstate.Phase() != mosi.M {
 				return false
@@ -493,7 +526,7 @@ func (r *replicationManager) backupDatabase(name, user string) {
 			}
 			r.localRecord(resource, mosi.M, generation)
 			r.mu.Lock()
-			epoch := r.directory.Records[resource.key()].Epoch
+			epoch := r.directory.Records[r.recordKey(resource)].Epoch
 			r.mu.Unlock()
 			transfer, err := r.captureResource(resource, generation)
 			if err != nil {

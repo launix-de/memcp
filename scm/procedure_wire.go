@@ -11,8 +11,8 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package scm
 
 import "fmt"
-import "bytes"
 import "maps"
+import "bytes"
 import "encoding/json"
 
 const procedureWireVersion = 2
@@ -32,7 +32,11 @@ func MarshalProcedure(value Scmer) (data []byte, err error) {
 		}
 	}()
 	if !value.IsProc() {
-		return nil, fmt.Errorf("procedure encoding requires a Scheme procedure")
+		declaration := DeclarationForValue(value)
+		if declaration == nil || value.IsSymbol() {
+			return nil, fmt.Errorf("procedure encoding requires a Scheme procedure or declared builtin (tag %d)", value.GetTag())
+		}
+		value = Eval(NewSlice([]Scmer{NewSymbol("lambda"), NewSymbol("args"), NewSlice([]Scmer{NewSymbol("apply"), NewSymbol(declaration.Name), NewSymbol("args")})}), &Globalenv)
 	}
 	closed := CloseProcedure(value)
 	proc := closed.Proc()
@@ -55,7 +59,7 @@ func MarshalProcedure(value Scmer) (data []byte, err error) {
 // UnmarshalProcedure reconstructs an uncompiled procedure without evaluating
 // its body. Only an authenticated task handler may later execute it. The codec
 // is not a sandbox or an authorization boundary.
-func UnmarshalProcedure(data []byte) (value Scmer, err error) {
+func UnmarshalProcedure(data []byte, queryContext ...Scmer) (value Scmer, err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			value = NewNil()
@@ -100,6 +104,12 @@ func UnmarshalProcedure(data []byte) (value Scmer, err error) {
 	}
 	if err := validateProcedureWire(items[2], procedureWireBindings(params, items[2], nil), &Globalenv, false, 0); err != nil {
 		return NewNil(), err
+	}
+	// A trusted worker may bind its request capability into nested scan calls.
+	// The capability is an ordinary declared call with a UUID argument, never a
+	// serialized TxContext. A further remote hop rebinds it to that hop's scope.
+	if len(queryContext) > 0 && !queryContext[0].IsNil() {
+		expression = bindProcedureScanContext(expression, queryContext[0])
 	}
 	// Only the validated lambda form is evaluated. Its body stays inert until
 	// the authorized worker calls the reconstructed procedure.
@@ -189,4 +199,33 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 	default:
 		return fmt.Errorf("procedure contains unsupported runtime value (tag %d, %T)", value.GetTag(), value.Any())
 	}
+}
+
+func bindProcedureScanContext(value, queryContext Scmer) Scmer {
+	plain := value.WithoutSourceInfo()
+	if !plain.IsSlice() {
+		return value
+	}
+	items := plain.Slice()
+	if len(items) == 0 {
+		return value
+	}
+	if scmerIsSymbol(items[0], "quote") {
+		return value
+	}
+	result := make([]Scmer, len(items))
+	for i, item := range items {
+		result[i] = bindProcedureScanContext(item, queryContext)
+	}
+	if len(items) > 1 {
+		switch {
+		case scmerIsSymbol(items[0], "scan"), scmerIsSymbol(items[0], "scan_exists"), scmerIsSymbol(items[0], "scan_order"), scmerIsSymbol(items[0], "scan_remote"):
+			arg := items[1].WithoutSourceInfo()
+			rebound := arg.IsSlice() && len(arg.Slice()) > 0 && scmerIsSymbol(arg.Slice()[0], "node_query_context")
+			if arg.IsNil() || scmerIsSymbol(arg, "nil") || rebound {
+				result[1] = queryContext
+			}
+		}
+	}
+	return NewSlice(result)
 }

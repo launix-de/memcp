@@ -16,22 +16,22 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
-import "context"
-import "fmt"
 import "io"
-import "math/rand"
+import "fmt"
 import "sort"
+import "sync"
+import "time"
 import "slices"
 import "unsafe"
-import "github.com/carli2/hybridsort"
-import "sync"
-import "sync/atomic"
-import "time"
+import "context"
 import "strconv"
 import "reflect"
 import "strings"
-import "encoding/json"
+import "math/rand"
+import "sync/atomic"
 import "unicode/utf8"
+import "encoding/json"
+import "github.com/carli2/hybridsort"
 import units "github.com/docker/go-units"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/go-mysqlstack/sqldb"
@@ -2509,15 +2509,6 @@ func Init(en scm.Env) {
 					// invocation so its current closed callback can repair the table.
 				}
 			}
-			db.persistenceLifecycle.RLock()
-			persistenceLifecycleLocked := true
-			unlockPersistenceLifecycle := func() {
-				if persistenceLifecycleLocked {
-					persistenceLifecycleLocked = false
-					db.persistenceLifecycle.RUnlock()
-				}
-			}
-			defer unlockPersistenceLifecycle()
 			// parse options only after the fast existing-table probe
 			options := mustScmerSlice(a[3], "options")
 			var autoIncrement uint64
@@ -2553,6 +2544,23 @@ func Init(en scm.Env) {
 				}
 			}
 			pm := parsePersistencyMode(engine)
+			// Acquire schema ownership before native lifecycle locks or opening
+			// unpublished shard logs. A remote schema grant may need to install
+			// metadata through that same lifecycle boundary.
+			var schemaAccess WriteAccess
+			if !(pm == Cache && strings.HasPrefix(tblName, ".")) {
+				schemaAccess = db.GetWrite(nil)
+				defer func() { schemaAccess.Release() }()
+			}
+			db.persistenceLifecycle.RLock()
+			persistenceLifecycleLocked := true
+			unlockPersistenceLifecycle := func() {
+				if persistenceLifecycleLocked {
+					persistenceLifecycleLocked = false
+					db.persistenceLifecycle.RUnlock()
+				}
+			}
+			defer unlockPersistenceLifecycle()
 
 			newTable := new(table)
 			newTable.schema = db
@@ -2625,11 +2633,6 @@ func Init(en scm.Env) {
 			validateUniqueConstraintNames(newTable.Unique)
 			newTable.publishShowColumnsSnapshot(true)
 
-			var schemaAccess WriteAccess
-			if !newTable.isEphemeralQueryTable() {
-				schemaAccess = db.GetWrite(nil)
-				defer func() { schemaAccess.Release() }()
-			}
 			existing := func() *table {
 				db.schemalock.Lock()
 				resolved := false

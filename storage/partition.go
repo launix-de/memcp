@@ -17,15 +17,15 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
-import "github.com/carli2/hybridsort"
 import "sort"
 import "sync"
-import "sync/atomic"
 import "time"
 import "runtime"
 import "strings"
-import "github.com/launix-de/NonLockingReadMap"
+import "sync/atomic"
+import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/NonLockingReadMap"
 
 const repartitionDrainTimeout = 30 * time.Second
 
@@ -238,12 +238,12 @@ func traceShardScanCallback(callback func(*storageShard, bool, any), shard *stor
 // Acquisition failures belong to the query's result/error collector, just like
 // scan failures. In particular, a cancelled load wait must never escape a
 // fanout worker before the callback has installed its recovery handler.
-func runAcquiredShardScan(currentTx *TxContext, shard *storageShard, solo bool, callback func(*storageShard, bool, any)) {
+func runAcquiredShardScan(currentTx *TxContext, shard *storageShard, solo bool, write bool, callback func(*storageShard, bool, any)) {
 	var release ReadAccess
 	var acquisitionFailure any
 	func() {
 		defer func() { acquisitionFailure = recover() }()
-		release = shard.acquireReadForScan(currentTx)
+		release = shard.acquireReadForScan(currentTx, write)
 		if release.shard != nil {
 			shard = release.shard
 		}
@@ -259,10 +259,10 @@ func runAcquiredShardScan(currentTx *TxContext, shard *storageShard, solo bool, 
 // runSingleShardScan keeps panic-safe resource release outside the topology
 // retry loop. Defers inside that loop cannot be open-coded by Go and used to
 // allocate a separate closure for every ordinary one-shard scan.
-func runSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, callback func(*storageShard, bool, any)) {
+func runSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, write bool, callback func(*storageShard, bool, any)) {
 	defer topology.releaseOperation()
 	defer shard.activeScanners.Add(-1)
-	runAcquiredShardScan(currentTx, shard, true, callback)
+	runAcquiredShardScan(currentTx, shard, true, write, callback)
 }
 
 // pinSingleShardForScan returns a registered authoritative shard only when the
@@ -356,12 +356,12 @@ func countRelevantShards(schema []shardDimension, access scanAccess, shards []*s
 	}
 }
 
-func runParallelShardScans(currentTx *TxContext, shards []*storageShard, topology *tableShardTopology, callback func(*storageShard, bool, any)) <-chan struct{} {
+func runParallelShardScans(currentTx *TxContext, shards []*storageShard, topology *tableShardTopology, write bool, callback func(*storageShard, bool, any)) <-chan struct{} {
 	return runFanoutTasks(currentTx, len(shards), func(i int, _ bool) {
 		shard := shards[i]
 		defer topology.releaseOperation()
 		defer shard.activeScanners.Add(-1)
-		runAcquiredShardScan(currentTx, shard, false, callback)
+		runAcquiredShardScan(currentTx, shard, false, write, callback)
 	})
 }
 
@@ -431,42 +431,33 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, p
 		}
 
 		if len(relevant) == 1 {
-			runSingleShardScan(currentTx, topology, relevant[0], callback)
+			runSingleShardScan(currentTx, topology, relevant[0], access.runtime != nil && access.runtime.mutation, callback)
 			return nil
 		}
-		return runParallelShardScans(currentTx, relevant, topology, callback)
+		return runParallelShardScans(currentTx, relevant, topology, access.runtime != nil && access.runtime.mutation, callback)
 	}
 }
 
 // acquireReadForScan obtains shard access unless this worker already owns the
 // stronger write lock. Re-entering GetRead while holding shard.mu for a
 // mutation would make its lazy-load checks deadlock on their own RLock.
-func (s *storageShard) acquireReadForScan(currentTx *TxContext) ReadAccess {
+func (s *storageShard) acquireReadForScan(currentTx *TxContext, mutation ...bool) ReadAccess {
 	if s.hasWriteOwnerForTx(currentTx) {
 		return ReadAccess{}
+	}
+	if sharedClusterSource(s.t) && len(mutation) > 0 && mutation[0] {
+		write := s.GetWrite(currentTx)
+		return ReadAccess{shard: write.shard, mutation: &write}
 	}
 	if sharedClusterSource(s.t) && s.scanTarget.Load() == nil {
 		cluster := activeNodeCluster()
 		if cluster == nil {
 			panic("cluster is not initialized")
 		}
-		lease := cluster.prepareLocalScan(s, currentTx)
-		ready := false
-		defer func() {
-			if !ready {
-				lease.Release()
-			}
-		}()
+		origin := s
+		s = cluster.manager.readShard(s, currentTx)
+		cluster.prepareLocalScan(s, currentTx, origin)
 		access := s.GetRead(currentTx)
-		// This mount admits S only and the native lease prevents eviction. Do
-		// not add a read lock just to inspect the immutable generation's extent.
-		clean := len(access.shard.inserts) == 0 && access.shard.deletions.Count() == 0
-		if !clean {
-			access.Release()
-			panic("shared cluster generations must be rebuilt before mounting")
-		}
-		access.scanRAM = lease
-		ready = true
 		return access
 	}
 	return s.GetRead(currentTx)

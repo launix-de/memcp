@@ -10,110 +10,55 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 */
 package storage
 
-import "io"
 import "fmt"
 import "time"
 import "context"
 import "encoding/json"
-import "encoding/binary"
 import "github.com/google/uuid"
 
-type clusterCapacityRejection struct {
-	Version   uint64
-	Permanent bool
-}
+type clusterCapacityRejection struct{}
 type clusterReduceReply struct {
-	Version   uint64            `json:"version"`
-	Permanent bool              `json:"permanent"`
-	Rejected  bool              `json:"rejected"`
-	Result    *remoteScanResult `json:"result,omitempty"`
+	Rejected bool              `json:"rejected"`
+	Result   *remoteScanResult `json:"result,omitempty"`
 }
 type clusterShardHint struct {
 	Warm bool `json:"warm"`
 }
 
-// Numeric immutable generations are the initial automatic-placement contract.
-// Read bounded format headers, not the payload, to estimate loading before it
-// happens. Unknown encodings fail explicitly instead of guessing from compressed
-// object size or silently risking OOM. No on-disk/backend format is changed.
-func estimateClusterShard(shard *storageShard) (int64, int64, error) {
-	var payload, rows int64
-	columns := shard.t.columnDeclarations()
-	for _, column := range columns {
-		if !column.Computor.IsNil() || column.IsTemp {
-			return 0, 0, fmt.Errorf("automatic cluster scans require stored numeric columns")
+// scanQueryContext is used only when scheduling/acquiring a cold shard. The
+// already-authorized read path must not consult SessionState's context mutex.
+func scanQueryContext(tx *TxContext, fallback context.Context) context.Context {
+	if ss := SessionStateFromTx(tx); ss != nil {
+		if ctx := ss.QueryContext(querySeqFromTx(tx)); ctx != nil {
+			return ctx
 		}
-		reader := shard.t.schema.persistence.ReadColumn(shard.uuid.String(), column.Name)
-		var header [24]byte
-		_, err := io.ReadFull(reader, header[:1])
-		if err == nil {
-			size := 24
-			if header[0] == 12 {
-				size = 16
-			}
-			_, err = io.ReadFull(reader, header[1:size])
-		}
-		reader.Close()
-		if err != nil {
-			return 0, 0, fmt.Errorf("reading cluster column header: %w", err)
-		}
-		count, bytes := uint64(0), uint64(0)
-		switch header[0] {
-		case 10:
-			if header[3] != 0 {
-				return 0, 0, fmt.Errorf("unsupported cluster integer version")
-			}
-			chunks := binary.LittleEndian.Uint64(header[8:16])
-			if chunks > 1<<35 {
-				return 0, 0, fmt.Errorf("cluster integer payload exceeds supported extent")
-			}
-			bytes = chunks * 8
-			count = binary.LittleEndian.Uint64(header[16:24])
-		case 12:
-			if header[1] != 0 && header[1] != '1' {
-				return 0, 0, fmt.Errorf("unsupported cluster float version")
-			}
-			count = binary.LittleEndian.Uint64(header[8:16])
-			bytes = count * 8
-		case 11:
-			if header[1] != 0 && header[1] != '1' {
-				return 0, 0, fmt.Errorf("unsupported cluster sequence version")
-			}
-			count = binary.LittleEndian.Uint64(header[8:16])
-			sequences := binary.LittleEndian.Uint64(header[16:24])
-			if sequences > count {
-				return 0, 0, fmt.Errorf("invalid cluster sequence extent")
-			}
-			bytes = sequences*24 + 512
-		default:
-			return 0, 0, fmt.Errorf("automatic cluster scans currently support numeric generations only (encoding %d)", header[0])
-		}
-		if count > uint64(^uint32(0)) || bytes > uint64(1<<40) {
-			return 0, 0, fmt.Errorf("cluster column estimate exceeds supported extent")
-		}
-		rows = max(rows, int64(count))
-		payload = saturatingAdd(payload, int64(bytes)+256)
 	}
-	payload = saturatingAdd(payload, rows*2+4096) // generation maps/visibility buffers
-	scratch := int64(512<<10) + int64(len(columns))*defaultScanBufferSize*32
-	return payload, scratch, nil
+	return fallback
 }
+
 func clusterScanSupported(tx *TxContext) bool {
 	if tx == nil {
 		return true
 	}
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-	return tx.Mode == TxCursorStability && tx.autoCommit && len(tx.shards) == 0
+	// Mode and autocommit are statement-owned immutable admission metadata.
+	// A locally modified shard retains M and resident payload, so its own TX
+	// overlays cannot be delegated by the cold-shard placement path.
+	return tx.Mode == TxCursorStability && tx.autoCommit
 }
-func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext) *queryRAMLease {
-	if !clusterScanSupported(tx) {
-		panic("cluster scans require cursor-stability autocommit")
+func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext, origins ...*storageShard) {
+	// Existing local snapshots retain all native transaction modes. Only a
+	// genuinely remote task needs a supported remote visibility contract.
+	if shard.state() != COLD || !clusterScanSupported(tx) {
+		return
 	}
-	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.logicalID().String()}, Generation: shard.uuid}
-	// Permission precedes even bounded backend-header I/O. The shared mount
-	// supplies S only; residency and membership never fabricate a stronger grant.
-	acquireClusterSnapshot(expected.Resource)
+	origin := shard
+	if len(origins) > 0 {
+		origin = origins[0]
+	}
+	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.uuid.String()}, Generation: shard.uuid}
+	// Residency is only a hint. Permission acquisition remains at GetRead;
+	// no backend bytes are read to decide whether execution should move.
+	acquireClusterRead(scanQueryContext(tx, cluster.ctx), expected.Resource)
 	links := cluster.view.Load().links
 	// A warm local generation stays local. For a cold generation, ask existing
 	// peers for residency metadata only; never fetch the shard just to decide
@@ -122,25 +67,17 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext)
 		for _, link := range links {
 			ctx, cancel := context.WithTimeout(cluster.ctx, 2*time.Second)
 			var hint clusterShardHint
-			err := link.peer.call(ctx, "cluster.hint", expected, &hint)
+			err := cluster.service.control(ctx, link.peer, "cluster.hint", expected, &hint)
 			cancel()
 			if err == nil && hint.Warm {
 				cluster.locality.Add(1)
-				panic(shardReadDelegation{&shardScanTarget{resource: expected.Resource, generation: shard.uuid, executor: &clusterScanExecutor{cluster: cluster, expected: expected, preferred: link}, origin: shard}})
+				panic(shardReadDelegation{&shardScanTarget{resource: expected.Resource, generation: shard.uuid, executor: &clusterScanExecutor{cluster: cluster, expected: expected, preferred: link}, origin: origin}})
 			}
 		}
 	}
-	payload, scratch, err := estimateClusterShard(shard)
-	if err != nil {
-		panic(err)
-	}
-	if lease, _ := GlobalCache.tryQueryRAM(shard, payload, scratch); lease != nil {
-		return lease
-	}
-	cluster.capacity.Add(1)
-	panic(shardReadDelegation{&shardScanTarget{resource: expected.Resource, generation: shard.uuid, executor: &clusterScanExecutor{cluster: cluster, expected: expected}, origin: shard}})
+
 }
-func clusterSnapshotShard(expected remoteScanShard) (*storageShard, error) {
+func clusterSnapshotShard(ctx context.Context, expected remoteScanShard) (*storageShard, error) {
 	if !expected.Resource.valid() || expected.Resource.Shard == "" || expected.Generation == uuid.Nil || expected.Schema == 0 {
 		return nil, fmt.Errorf("invalid cluster shard identity")
 	}
@@ -151,6 +88,7 @@ func clusterSnapshotShard(expected remoteScanShard) (*storageShard, error) {
 	if db == nil {
 		return nil, fmt.Errorf("unknown shared database")
 	}
+	acquireClusterRead(ctx, mosiResource{Database: db.Name})
 	access := db.GetRead(nil)
 	defer access.Release()
 	table := db.GetTable(expected.Resource.Table)
@@ -158,7 +96,7 @@ func clusterSnapshotShard(expected remoteScanShard) (*storageShard, error) {
 		return nil, fmt.Errorf("cluster schema changed")
 	}
 	for _, shard := range table.activeTopology().shards {
-		if shard != nil && shard.logicalID().String() == expected.Resource.Shard && shard.uuid == expected.Generation {
+		if shard != nil && shard.uuid.String() == expected.Resource.Shard && shard.uuid == expected.Generation {
 			return shard, nil
 		}
 	}
@@ -170,7 +108,7 @@ func (cluster *nodeCluster) compute(session *scanRPCSession, ctx context.Context
 		if err := json.Unmarshal(data, &expected); err != nil {
 			return nil, err
 		}
-		shard, err := clusterSnapshotShard(expected)
+		shard, err := clusterSnapshotShard(ctx, expected)
 		if err != nil {
 			return nil, err
 		}
@@ -183,34 +121,33 @@ func (cluster *nodeCluster) compute(session *scanRPCSession, ctx context.Context
 	if task.ResultKind != "scalar" {
 		return nil, fmt.Errorf("automatic cluster placement currently supports scalar reductions")
 	}
-	shard, err := clusterSnapshotShard(task.Shard)
+	shard, err := clusterSnapshotShard(ctx, task.Shard)
 	if err != nil {
 		return nil, err
 	}
-	acquireClusterSnapshot(task.Shard.Resource)
-	payload, scratch, err := estimateClusterShard(shard)
-	if err != nil {
-		return nil, err
+	acquireClusterRead(ctx, task.Shard.Resource)
+	var access ReadAccess
+	rejected := false
+	func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				if _, ok := failure.(shardReadDelegation); ok {
+					rejected = true
+				} else {
+					panic(failure)
+				}
+			}
+		}()
+		access = shard.GetRead(nil)
+	}()
+	if rejected {
+		return clusterReduceReply{Rejected: true}, nil
 	}
-	lease, decision := GlobalCache.tryQueryRAM(shard, payload, scratch)
-	if lease == nil {
-		return clusterReduceReply{Rejected: true, Version: decision.Version, Permanent: decision.Capacity <= 0 || payload+scratch > decision.Capacity}, nil
-	}
-	defer lease.Release()
-	access := shard.GetRead(nil)
 	defer access.Release()
 	shard = access.shard
-	// Immutable shared mounts have no concurrent modifier. Capture the actual
-	// extent on the executor under its normal storage ownership, before running
-	// the existing fenced RPC. No payload or physical row IDs leave this node.
-	// The S-only immutable mount excludes writers/rebuild, and access pins the
-	// loaded generation against eviction. These scalar/slice-header reads need
-	// no additional RWMutex reader write on the cache line.
-	clean := len(shard.inserts) == 0 && shard.deletions.Count() == 0
-	task.Shard.Horizon = shardScanHorizon{shard.main_count, 0}
-	if !clean {
-		return nil, fmt.Errorf("shared cluster generations must be rebuilt before mounting")
-	}
+	// Pin the native generation, then borrow its existing published extent.
+	// Cancellation is checked at task/shard boundaries, never in item loops.
+	task.Shard.Horizon = shard.captureScanHorizon()
 	result, err := session.executeScanTask(ctx, task)
 	if err != nil {
 		return nil, err
@@ -251,50 +188,39 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, gen
 			candidates = append(candidates, link)
 		}
 	}
-	for {
-		var waitLink *clusterLink
-		var waitVersion uint64
-		for _, link := range candidates {
-			// A connection already known closed cannot have accepted this task. Skip
-			// that stale placement hint; never retry a call after enqueue/ambiguity.
-			select {
-			case <-link.peer.done:
-				continue
-			default:
-			}
-			rejected := false
-			var result scanResult
-			func() {
-				defer func() {
-					if failure := recover(); failure != nil {
-						if decision, ok := failure.(clusterCapacityRejection); ok {
-							rejected = true
-							if !decision.Permanent && waitLink == nil {
-								waitLink = link
-								waitVersion = decision.Version
-							}
-						} else {
-							panic(failure)
-						}
+	for _, link := range candidates {
+		select {
+		case <-link.peer.done:
+			continue
+		default:
+		}
+		rejected := false
+		var result scanResult
+		func() {
+			defer func() {
+				if failure := recover(); failure != nil {
+					if _, ok := failure.(clusterCapacityRejection); ok {
+						rejected = true
+					} else {
+						panic(failure)
 					}
-				}()
-				remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected, kind: "scalar", next: &link.sequence, cluster: true}
-				result = remote.ExecuteShardScan(resource, generation, invocation)
+				}
 			}()
-			if !rejected {
-				executor.cluster.delegated.Add(1)
-				return result
-			}
-		}
-		// A temporary admission rejection has executed no callback. Wait on the
-		// existing budget actor's release version before trying placement again.
-		// Computation failures and ambiguous network completion never reach here.
-		if waitLink == nil {
-			panic("cluster has insufficient RAM capacity for this shard reduction")
-		}
-		if err := waitLink.peer.call(ctx, "cluster.wait_capacity", waitVersion, nil); err != nil {
-			panic(err)
+			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected, kind: "scalar", next: &link.sequence, cluster: true}
+			result = remote.ExecuteShardScan(resource, generation, invocation)
+		}()
+		if !rejected {
+			executor.cluster.delegated.Add(1)
+			return result
 		}
 	}
+	panic("cluster has insufficient shard RAM capacity")
+}
 
+// The native acquisition boundary raises the same typed panic before loading.
+// Only an outer operator/reducer may translate it into a delegated task.
+func (cluster *nodeCluster) shardRAMUnavailable(shard, origin *storageShard) shardReadDelegation {
+	cluster.capacity.Add(1)
+	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.uuid.String()}, Generation: shard.uuid}
+	return shardReadDelegation{&shardScanTarget{resource: expected.Resource, generation: shard.uuid, origin: origin, executor: &clusterScanExecutor{cluster: cluster, expected: expected}}}
 }

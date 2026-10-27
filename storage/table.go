@@ -16,19 +16,19 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
-import "context"
 import "fmt"
 import "math"
 import "sort"
-import "math/bits"
 import "sync"
 import "time"
 import "errors"
 import "slices"
 import "unsafe"
+import "context"
 import "strconv"
 import "strings"
 import "unicode"
+import "math/bits"
 import "sync/atomic"
 import "unicode/utf8"
 import "encoding/json"
@@ -1011,13 +1011,25 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		PShards            []*storageShard
 		PDimensions        []shardDimension
 	}
+	triggers := t.Triggers
+	if t.schema != nil && sharedClusterDatabase(t.schema.Name) {
+		// Generated computation edges bind a node's private cache objects. The
+		// declarative columns/queries reconstruct them locally; another node must
+		// never replace its source table because these runtime edges differ.
+		triggers = nil
+		for _, trigger := range t.Triggers {
+			if trigger.cacheTarget == nil && trigger.Acquire == nil && !trigger.needsRegeneration {
+				triggers = append(triggers, trigger)
+			}
+		}
+	}
 	return json.Marshal(&persistedTable{
 		Name:               t.Name,
 		Columns:            columns,
 		DroppedColumns:     t.DroppedColumns,
 		Unique:             t.Unique,
 		Foreign:            t.Foreign,
-		Triggers:           t.Triggers,
+		Triggers:           triggers,
 		PersistencyMode:    t.PersistencyMode,
 		OnInit:             t.OnInit.Load(),
 		AutoIncrement:      autoIncrement,
@@ -3399,7 +3411,7 @@ func (t *table) DropColumnIfExists(name string) bool {
 }
 
 func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *storageShard, incoming uint, balance bool) (*tableShardTopology, *storageShard) {
-	if r := replication.Load(); r != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable() {
+	if r := activeReplication(t.schema); r != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable() {
 		// Adding a lane changes the database's shard directory. Invalidate
 		// shared schema copies before publication, without affecting ordinary
 		// INSERTs which can use an existing lane.

@@ -13,13 +13,13 @@ package storage
 
 import "io"
 import "fmt"
-import "crypto/sha256"
 import "sync"
 import "bytes"
 import "strings"
 import "reflect"
 import "runtime"
 import "context"
+import "crypto/sha256"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/google/uuid"
@@ -164,7 +164,10 @@ func (r *replicationManager) establishAuthority(c *replicaCell, record replicaRe
 }
 
 func (r *replicationManager) declareShard(shard *storageShard, owner string, local bool) *replicaCell {
-	resource := mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.logicalID().String()}
+	if r.cluster != nil {
+		return r.cluster.declareShard(shard, local)
+	}
+	resource := r.shardResource(shard)
 	c := r.resourceCell(resource)
 	c.current.CompareAndSwap(nil, shard)
 	shard.coherence.CompareAndSwap(nil, c)
@@ -233,7 +236,7 @@ func (r *replicationManager) findShard(resource mosiResource) *storageShard {
 		return nil
 	}
 	for _, shard := range table.ActiveShards() {
-		if shard != nil && shard.logicalID().String() == resource.Shard {
+		if shard != nil && (shard.logicalID().String() == resource.Shard || r.cluster != nil && shard.uuid.String() == resource.Shard) {
 			return shard
 		}
 	}
@@ -244,7 +247,7 @@ func (r *replicationManager) shardCell(shard *storageShard) *replicaCell {
 	if c := shard.coherence.Load(); c != nil {
 		return c
 	}
-	resource := mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.logicalID().String()}
+	resource := r.shardResource(shard)
 	c := r.resourceCell(resource)
 	c.current.CompareAndSwap(nil, shard)
 	shard.coherence.CompareAndSwap(nil, c)
@@ -266,7 +269,9 @@ func (r *replicationManager) prepareResource(resource mosiResource) (generation 
 	}
 	db.ensureLoaded()
 	if resource.Shard == "" {
-		r.schemaShards(db, r.id, true)
+		if r.cluster == nil {
+			r.schemaShards(db, r.id, true)
+		}
 		db.save()
 		return replicaSchemaGeneration(db.persistence.ReadSchema())
 	}
@@ -279,6 +284,19 @@ func (r *replicationManager) prepareResource(resource mosiResource) (generation 
 		return "", fmt.Errorf("shard does not exist")
 	}
 	table := shard.t
+	if r.cluster != nil {
+		c.current.CompareAndSwap(nil, shard)
+		shard.coherence.CompareAndSwap(nil, c)
+	}
+	if r.cluster != nil && shard.state() == COLD {
+		// Backend-only authority is current by invariant. There are no local
+		// deltas to rebuild: transfer its reference and native commit authority.
+		// In particular, a coordinator must not load a shard it is delegating.
+		if table.PersistencyMode == Memory || table.PersistencyMode == Cache {
+			return "", fmt.Errorf("volatile data needs a separate replication store")
+		}
+		return shard.uuid.String(), nil
+	}
 	lease := GlobalMaintenanceRAMBudget.Acquire(estimateTableMaintenanceBytes(table))
 	defer lease.Release()
 	table.maintenanceMu.Lock()
@@ -325,6 +343,9 @@ func (r *replicationManager) replaceShard(resource mosiResource, previous, repla
 		return fmt.Errorf("missing table for shard patch")
 	}
 	cell := r.resourceCell(resource)
+	if r.cluster != nil {
+		r.cluster.aliasShard(resource, replacement)
+	}
 	if previous != replacement {
 		cell.retainGeneration(previous)
 	}
@@ -537,7 +558,7 @@ func (r *replicationManager) startImport(packet mosiPacket) (*replicaImport, err
 		return nil, fmt.Errorf("invalid local backend")
 	}
 	r.mu.Lock()
-	known := packet.Resource.Shard != "" && packet.Generation != "" && (r.directory.Records[packet.Resource.key()].Generation == packet.Generation || r.backups[packet.Resource.key()].Generation == packet.Generation)
+	known := packet.Resource.Shard != "" && packet.Generation != "" && (r.directory.Records[r.recordKey(packet.Resource)].Generation == packet.Generation || r.backups[packet.Resource.key()].Generation == packet.Generation)
 	r.mu.Unlock()
 	return &replicaImport{header: packet, engine: engine, knownGeneration: known}, nil
 }
@@ -695,16 +716,22 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 		return fmt.Errorf("unknown shard table")
 	}
 	shard := new(storageShard)
+	lineage := resource.Shard
+	if r.cluster != nil && transfer.header.Lineage != "" {
+		lineage = transfer.header.Lineage
+	}
 	encoded, _ := json.Marshal(struct {
 		UUID    string `json:"uuid"`
 		Lineage string `json:"mosi"`
-	}{transfer.header.Generation, resource.Shard})
+	}{transfer.header.Generation, lineage})
 	if err := json.Unmarshal(encoded, shard); err != nil {
 		return err
 	}
 	shard.t = table
 	c := r.resourceCell(resource)
-	if current := c.current.Load(); current != nil && current.uuid == shard.uuid && current.t == table && c.ownstate.Phase().Readable() {
+	publication := c.ownstate.Snapshot()
+	readable := publication.Phase().Readable() || publication.Phase().Requested() && publication.Retained().Readable() || publication.Phase() == mosi.IS && publication.Backend().Readable()
+	if current := c.current.Load(); current != nil && current.uuid == shard.uuid && current.t == table && readable {
 		return nil
 	}
 	if table.PersistencyMode == Memory || table.PersistencyMode == Cache {
@@ -776,23 +803,32 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 		}
 		db.saveMu.Unlock()
 	}
-	if db != nil {
+	if db != nil && r.cluster == nil {
 		var err error
 		data, err = replicaSchemaForLocalData(db, data)
 		if err != nil {
 			return err
 		}
 	}
-	engine.WriteSchema(data)
+	if r.cluster == nil {
+		engine.WriteSchema(data)
+	}
 	replacement = newDatabase()
 	replacement.Name, replacement.persistence, replacement.srState = name, engine, COLD
+	if r.cluster != nil {
+		replacement.persistence = clusterSchemaView{engine, data}
+	}
 	replacement.ensureLoaded()
+	replacement.persistence = engine
 	if db == nil {
 		databases.Set(name, replacement)
 		db = replacement
 	} else {
 		defer replacement.closeTransactionLog()
 		for _, table := range db.tables.GetAll() {
+			if r.cluster != nil && table.isEphemeralQueryTable() {
+				continue
+			}
 			if replacement.tables.Get(table.Name) == nil {
 				for _, shard := range table.ActiveShards() {
 					if shard == nil {
@@ -806,10 +842,44 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 			}
 		}
 		for _, table := range replacement.tables.GetAll() {
-			previous := db.tables.Get(table.Name)
-			if previous != nil && sameReplicaDeclaration(previous, table) {
+			if r.cluster != nil && table.isEphemeralQueryTable() {
 				continue
 			}
+			previous := db.tables.Get(table.Name)
+			if previous != nil && sameReplicaDeclaration(previous, table) {
+				if r.cluster != nil {
+					for _, incoming := range table.ActiveShards() {
+						if incoming == nil {
+							continue
+						}
+						var old *storageShard
+						for _, candidate := range previous.ActiveShards() {
+							if candidate != nil && candidate.logicalID() == incoming.logicalID() {
+								old = candidate
+								break
+							}
+						}
+						if old == nil {
+							continue
+						}
+						resource := r.shardResource(old)
+						cell := r.shardCell(old)
+						if old != nil && old.uuid != incoming.uuid {
+							if cell.ownstate.Phase() == mosi.M {
+								return fmt.Errorf("shared schema conflicts with a local modifier")
+							}
+							incoming.t = previous
+							incoming.coherence.Store(cell)
+							if err := r.replaceShard(resource, old, incoming); err != nil {
+								return err
+							}
+							cell.current.Store(incoming)
+						}
+					}
+				}
+				continue
+			}
+
 			table.schema = db
 			for _, shard := range table.ActiveShards() {
 				if shard == nil {
@@ -900,6 +970,13 @@ func (r *replicationManager) step(ctx context.Context, peerID string, packet mos
 }
 
 func (r *replicationManager) transmitResource(ctx context.Context, peerID string, header mosiPacket) error {
+	if r.cluster != nil {
+		header.Kind = "reference"
+		if current := r.resourceCell(header.Resource).current.Load(); current != nil && header.Resource.Shard != "" {
+			header.Lineage = current.logicalID().String()
+		}
+		return r.step(ctx, peerID, header)
+	}
 	peer := r.peer(peerID)
 	if peer == nil {
 		return fmt.Errorf(mosi.NetworkError)
@@ -940,7 +1017,7 @@ func (r *replicationManager) distributeRebuild(resource mosiResource) {
 	cell.directory.Lock()
 	defer cell.directory.Unlock()
 	r.mu.Lock()
-	record := r.directory.Records[resource.key()]
+	record := r.directory.Records[r.recordKey(resource)]
 	readers := make([]string, 0, len(record.Readers))
 	for id := range record.Readers {
 		if id != r.id && id != record.Owner {
