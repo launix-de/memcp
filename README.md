@@ -498,10 +498,12 @@ nested scans and remote descendants at shard scheduling boundaries, without chec
 inside item loops. `cluster_status` reports peer membership, placement counters
 and measured shard admission usage.
 
-Automatic remote execution currently supports scalar unordered CS-autocommit
-reductions. Remote mutation participants, all ordered/grouped/source-set scan
-contracts, graceful owner drain and same-database nested replication handovers
-remain unfinished. Unsupported remote operations fail explicitly. A node may
+Automatic remote execution supports unordered native CS/ACID read reductions,
+including session-bound dictionary/tuple partials. Modified transaction shards
+keep their native local overlays; unmodified inputs may execute remotely. Remote
+mutation participants, general ordered/source-set scans, unbounded grouped-result
+streaming, runtime-object references, graceful owner drain and same-database
+nested replication handovers remain unfinished. Unsupported remote operations fail explicitly. A node may
 serve ordinary replication slaves for separate databases. Needed rights held by
 an unreachable peer fail with `Cluster network error`; they are never reclaimed
 by timeout.
@@ -515,7 +517,7 @@ and retained reads after owner loss, while unavailable write rights must fail.
 
 The SQL context runner (`--cluster-context-only`) additionally checks session
 bindings and transaction overlays against both standalone and clustered servers.
-Its current gaps and proposed runtime-reference architecture are documented in
+Its execution contracts and remaining runtime-object work are documented in
 [Cluster SQL runtime contexts](tools/cluster-runtime-contexts.md). These are strict
 CI contracts; unsupported behavior fails instead of being marked expected.
 

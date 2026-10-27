@@ -260,3 +260,30 @@ func (t *table) discardCacheValue(currentTx *TxContext, keys []string, values []
 	return t.scan(currentTx, scm.NewSlice(newExactScanAccessSchema(keys)), values,
 		keys, condition, mapCols, forget, scm.NewInt(0), combine, false)
 }
+
+// Mark runtime dependency targets without acquiring their shard/proxy locks or
+// executing SQL triggers. A cache query can itself be waiting for network data;
+// the reader must acknowledge revocation without waiting for that query.
+func invalidateDependentCaches(source *table) {
+	queue := []*table{source}
+	seen := make(map[*table]bool)
+	for len(queue) > 0 {
+		target := queue[0]
+		queue = queue[1:]
+		if seen[target] {
+			continue
+		}
+		seen[target] = true
+		target.visibilityCacheEpoch.Add(1)
+		target.cacheGeneration.Add(1)
+		target.beginContributionMutation()
+		target.endContributionMutation()
+		target.mu.Lock()
+		for _, trigger := range target.Triggers {
+			if trigger.cacheTarget != nil {
+				queue = append(queue, trigger.cacheTarget)
+			}
+		}
+		target.mu.Unlock()
+	}
+}

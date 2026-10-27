@@ -98,37 +98,10 @@ func (r *replicationManager) publishLocal(resource mosiResource, phase mosi.Phas
 		// writer changes this source. This is publication work, not a scan/read
 		// counter, and causes ordinary cache initialization to acquire GetRead.
 		if shard := c.current.Load(); shard != nil {
-			invalidateReplicaCaches(shard.t)
+			invalidateDependentCaches(shard.t)
 		}
 	}
 	c.ownstate.Publish(phase)
-}
-
-// Mark runtime dependency targets without acquiring their shard/proxy locks or
-// executing SQL triggers. A cache query can itself be waiting for network data;
-// the reader must acknowledge revocation without waiting for that query.
-func invalidateReplicaCaches(source *table) {
-	queue := []*table{source}
-	seen := make(map[*table]bool)
-	for len(queue) > 0 {
-		target := queue[0]
-		queue = queue[1:]
-		if seen[target] {
-			continue
-		}
-		seen[target] = true
-		target.replicationCacheEpoch.Add(1)
-		target.cacheGeneration.Add(1)
-		target.beginContributionMutation()
-		target.endContributionMutation()
-		target.mu.Lock()
-		for _, trigger := range target.Triggers {
-			if trigger.cacheTarget != nil {
-				queue = append(queue, trigger.cacheTarget)
-			}
-		}
-		target.mu.Unlock()
-	}
 }
 
 func (r *replicationManager) localRecord(resource mosiResource, phase mosi.Phase, generation string) {

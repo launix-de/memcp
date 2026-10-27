@@ -701,9 +701,9 @@ type table struct {
 	// emptied. Range-cache preparation markers include it so an evicted domain
 	// partition can never be mistaken for a still-populated one.
 	cacheGeneration atomic.Uint64
-	// Remote source invalidation advances this only at a coherence transition.
+	// Committed visibility and remote revocation advance this at publication.
 	// Computed readers consume it during preparation, never per row.
-	replicationCacheEpoch atomic.Uint64
+	visibilityCacheEpoch atomic.Uint64
 	// plannerRowEstimate is deliberately approximate. Rebuild/statistics
 	// publication replaces it atomically; query compilation must never load a
 	// cold shard or take a shard read lock merely to obtain a row estimate.

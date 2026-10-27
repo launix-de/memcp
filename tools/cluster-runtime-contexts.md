@@ -1,150 +1,115 @@
 <!-- Copyright (C) 2026 Carl-Philip Hänsch -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-# Cluster SQL contexts: investigation and proposed architecture
+# Cluster SQL contexts
 
-This is an investigation of master `68ca280c9` (#1191), not an implemented
-runtime-object protocol. This patch changes tests and documentation only.
-
-## Run and evidence
+## SQL process contracts
 
 ```sh
 python3 tools/replication_cluster_stress.py --binary ./memcp \
   --cluster-context-only --artifacts /tmp/cluster-contexts --seed 20261027
 ```
 
-The process runner executes the same 14 SQL cases first standalone, then on
-four authenticated cluster processes sharing a backend. Workloads are SQL;
-existing Scheme infrastructure only configures fixtures, RAM and diagnostics.
-The large table has 64 shards / 320,000 rows. An eight-row overlay fixture has
-four shards. Cold literal/nonlinear controls require actual remote execution;
-valid cache reuse is permitted for repeated session queries. For distributed
-TX overlays the coordinator admits its two modified shards, then restores the
-small RAM threshold before the full scan. Warm local inputs must remain usable.
+The runner executes the same 14 SQL cases standalone and on four authenticated
+cluster processes sharing a backend. Workloads are SQL; Scheme infrastructure
+only configures fixtures, RAM and diagnostics. The large table has 64 shards /
+320,000 rows. An eight-row overlay fixture has four shards. Cold literal and
+nonlinear controls require actual remote execution; repeated queries may reuse
+valid caches. For transaction overlays the coordinator admits its two modified
+shards, then restores the small RAM threshold before the distributed scan.
 
-Per-case JSON records SQL, sessions, returned/expected rows, errors and placement
-evidence. Failure does not suppress later cases. Cleanup rolls back transactions
-and checks post-rollback visibility even if the distributed query failed. Normal
-and race CI context steps upload these reports and fail for unsupported behavior;
-there are no expected failures or continue-on-error gates.
+The cases cover literal and session-dependent SUM, nonlinear expressions,
+rebinding the same SQL, simultaneous independent sessions, NULL rebinding,
+session-dependent partition filters, explicit CS/ACID reads, CS/ACID rollback,
+local ACID update/delete overlays combined with remote reads, and COMMIT cache
+coherence. The COMMIT case deliberately fills an aggregate cache from another
+session while staged changes are hidden, then checks both rows and aggregates.
 
-Normal/race runs on the tested master agree:
+Per-case JSON records SQL, sessions, returned/expected rows, errors, EXPLAIN and
+placement evidence. A failure does not suppress later cases. Cleanup rolls back
+and checks visibility even if a distributed query failed. Normal and race CI
+steps upload these reports and fail on unsupported behavior. No expected failures
+or continue-on-error gates are used.
 
-| Contract | Standalone | Cluster |
-| --- | --- | --- |
-| Literal expression in SUM | Pass | Pass; remote work observed |
-| Plain SUM with named HTTP session | Pass | Pass |
-| `SUM(@somevalue + v0)` | Pass | Rejected |
-| Nonlinear `SUM((@somevalue + v0) % 97)` | Pass | Rejected |
-| Rebinding identical cached SQL in one session | Pass | Rejected |
-| Two concurrent sessions with different values | Pass | Rejected |
-| NULL/value rebinding | Pass | Rejected |
-| Partition filter using a session variable | Pass | Rejected |
-| Explicit CS / ACID large-table reads (two cases) | Pass | Rejected |
-| Four-shard CS / ACID rollback (two cases) | Pass | Pass on one worker |
-| ACID delete/update overlays + distributed scan | Pass | Rejected |
-| ACID COMMIT + cached SUM / ordered row read | Stale SUM | Stale SUM |
+Before the implementation, master `68ca280c9` passed 13/14 standalone cases and
+4/14 cluster cases. Its post-COMMIT SUM was stale even standalone; session-bound
+reductions and explicit distributed transaction reads were rejected. The
+implementation passes all 14 cases standalone and in the cluster in both normal
+and race-instrumented process runs. The existing five-round replication crash /
+multi-slave regression also passes. Detailed artifacts belong in the PR
+validation record.
 
-A locally successful overlay is not evidence of distributed transaction support.
-The COMMIT case fills a shared SUM cache from another session while ACID writes
-are hidden. After COMMIT, ordered rows correctly total 425, but SUM remains 360.
-This is an independent cache-publication defect, not demonstrated loss of rows.
-Investigate/fix it separately before trusting post-commit cached aggregates as a
-cluster-coherence oracle. The patch preserves the failing assertion.
+## Implemented execution contracts
 
-## Actual implementation boundaries
+**Keep native planning and reduction.** Session-dependent scalar SQL aggregates
+can have dictionary/tuple-valued physical accumulators. The version-3 scan wire
+codec preserves native dictionaries, tuple keys, NULLs and nested aggregate
+payloads. Parser source locations are diagnostic wrappers, not runtime objects.
+The receiver applies the existing reducer; there is no alternate SQL planner,
+cache bypass or serial scan fallback. Frames retain the existing bounded size;
+unbounded grouped-result streaming is not implemented by this patch.
 
-`clusterScanSupported` accepts CS autocommit only. `clusterScanExecutor` also
-rejects slice/dictionary neutral values. EXPLAIN shows that session-dependent
-SUM uses the normal group/cache pipeline, keyed by the session-value domain,
-with grouped intermediate accumulators. A scalar SQL result does not imply
-scalar physical intermediates. The observed rejection therefore happens before
-the procedure codec can determine whether its session capture is transportable.
+**Preserve filter constraints.** Delegation uses the existing native boundary
+codec and materializes its bound operands. NULL versus an unbounded endpoint,
+mandatory constraints, collation and coverage survive transport. Computed
+mappers, physical RecSets and specialized invocation-owned merge state fail
+explicitly until they have a portable execution/lifetime contract.
 
-`remoteScanTask` carries a captured row horizon and a visibility-contract string,
-not the caller's transaction/shard-overlay identity. Workers create fresh
-CS-autocommit transactions. The procedure codec rejects process-local callables,
-including an unexported `newsession`. Fixing only the serializer cannot remove
-these independent restrictions.
+**Freeze demanded session reads.** Physical procedure capture preparation shares
+one lazy statement-owned session snapshot across dispatched shard callbacks.
+Constant-key reads close over immutable data before wire validation. Only demanded
+values enter the wire; internal session maps, TX objects, credentials and native
+closures are not serialized. Session identity remains recognizable through HTTP
+and MySQL frontends without changing the native callable ABI or Scmer size.
+Snapshot work and synchronization happen at dispatch, never per row. Persistent
+plans retain neither the session snapshot nor a previous invocation's bindings.
+Dynamic keys, session mutations and arbitrary runtime objects still require an
+explicit owner contract; they are not converted into per-row network calls.
 
-`SnapshotEpoch` and `GlobalCommitEpoch` are process-local. Current `IsVisible`
-applies native deletion and transaction overlay masks; copying the counter would
-not implement a global historical snapshot. Define the intended isolation
-contract explicitly rather than introducing a stronger accidental promise.
+**Borrow native transaction visibility.** Read tasks carry their logical origin
+identity, CS/ACID mode and autocommit status. Remote execution creates an
+invocation-owned native read participant. Modified input generations remain
+resident with their existing active-TX pins and native overlays; exporting such
+an input without its participant is rejected. Untouched generations can execute
+remotely. This supports a transaction with local update/delete overlays plus
+remote reads; it does not implement writes on multiple nodes or distributed
+commit/recovery. Process-local commit epochs do not become a global historical
+snapshot by copying a counter.
 
-## Proposed architecture, for review
+**Publish committed cache invalidation.** Another session can reconstruct a
+pre-COMMIT cache while ACID changes are staged. Successful ACID COMMIT therefore
+invalidates dependent computed caches after visibility publication and before
+returning. It uses the existing cache generations, contribution guards and
+preparation-time coherence checks also used by MOSI revocation. It adds no
+row-loop synchronization or new shard read locks.
 
-1. **Typed runtime reconstruction calls.** Adopt the proposed
-   `(getsession "https://owner:port/cluster/<uuid>")` model, with corresponding
-   typed transaction/overlay references. The URI identifies creator/home, object
-   and lifetime/incarnation. Separate stable peer/object identity from the
-   advertised network address. A restarted process must reject old objects,
-   never silently instantiate an empty replacement. Exporting references retains
-   the existing cluster authentication / replica user authorization boundaries.
+## Runtime object interfaces and lifetime: follow-up
 
-   Integrate this at capture preparation, wire validation and reconstruction,
-   not just the printer. Resolve each exported capture once into a receiver-owned
-   invocation frame before scanning. A resolver call retained in every row's AST
-   is still wrong even if its RPC response is cached. Persistent plans retain
-   reconstruction instructions, never a previous invocation's session or TX.
-   Multiplex object traffic on the existing bidirectional node channel with
-   UUID result channels; no connection or RPC sender handle per object.
+General reconstruction calls can use typed object URIs such as
+`https://owner:port/cluster/<uuid>`. A common `HandleClusterRequest` interface
+should dispatch through the existing authenticated bidirectional node channel;
+no sender/connection handle should be retained per object. Catalog names can be
+resolved dynamically. Sessions, transactions and physical shard generations need
+explicit identity and incarnation. Resolve invocation bindings before row loops.
 
-2. **SQL session inputs become immutable statement bindings.** Capture the
-   required user-visible values once per statement and close physical callbacks
-   over them. Preserve NULL, frontend semantics, cache domain keys and rebinding.
-   Do not copy internal TX/password/query fields with the whole native session.
-   For general sessions the resolver can provide an S read view and an owner
-   mutation stub. Initially keep mutation authority at the creator; do not
-   implicitly move M between analytic workers. Unknown dynamic keys or effects
-   need bulk preparation / owner co-location, not per-row network requests.
+The agreed lifetime direction is a strong owner registry with peer-reference
+tokens. A peer keeps its handle while native readers still reference the object;
+GC/finalization queues release of that handle to the owner. Last peer release
+allows deregistration. Distinct tokens prevent a late old release from clearing
+a newer handle from the same peer. Finalizers must enqueue, not block on network
+I/O. Reconnect, failed peers and uncertain transaction decisions need an explicit
+protocol; no timeout may take M from an offline replica.
 
-3. **Keep the existing planner and reduction pipeline.** Extend the common
-   partial-result codec for native grouped accumulators and merge semantics.
-   Preserve the logical/physical phase boundary, group domains and caches.
-   Do not rewrite SQL into a separate remote planner, disable caching or serialize
-   shard execution to make these tests pass. Larger grouped results need bounded
-   streaming; RecSets/RecMaps remain query-local physical objects.
+The required old-generation test is: a peer retains the old shard for an active
+scan, the owner publishes a rebuilt UUID, and the peer finishes using the old
+generation before releasing it. Only that old registration is retired; neither
+new-generation rights nor the old scan's visibility may change. UUID forwarding
+is being developed separately and is not a prerequisite for the SQL contracts
+above. This patch neither imports that unpublished implementation nor claims
+that the object registry and its GC protocol are implemented.
 
-4. **One TX coordinator, independent native shard participants.** The creator
-   owns transaction control/terminal decisions. Send logical TX identity, mode,
-   statement/cancellation identity and visibility bindings explicitly. Reuse
-   native participant contexts and WAL instead of unrelated worker autocommit.
-   Do not make the entire mutable `TxContext` one globally writable MOSI object:
-   that would serialize independent shards. Native TX allocations are reused;
-   the URI must distinguish logical lifetimes after COMMIT/ROLLBACK, not merely
-   pointer identity. Process-local statement counters alone are not network-wide
-   cache or cancellation identities.
-
-5. **One overlay resource per TX and physical shard generation.** Key it by
-   transaction URI, shard UUID and revision/generation. Its creator owns mutation
-   and publication; prepare an immutable native read view per shard invocation.
-   Row visibility remains local bitmap/handle reads. Mutations, savepoints and
-   terminal decisions use participant messages, never per-row RPCs. Retain native
-   active-TX pins, max record bounds, undo data and rebuild forwarding; changing
-   shard UUID must also translate overlay row identities. A copied bitmap without
-   its physical generation, or a serialized Go pointer, is insufficient.
-
-6. **Specify cross-node commit/recovery before remote writes.** Use native
-   durable prepare/commit/abort records, not a MOSI journal or backend bypass.
-   Cancellation before prepare differs from failure after durable prepare;
-   an unanswered request cannot be treated as abort. Query-owned read exports
-   may expire on completion; prepared write participants need explicit recovery.
-   No timeout promotes M or discards an uncertain decision.
-
-## Decisions still needed
-
-- Freeze SQL session reads at statement start? Recommended: yes. Which mutations
-  and dynamic-key cases need owner stubs or co-location?
-- Allow session M to migrate? Recommended initially: creator-owned mutations and
-  S read snapshots only; generic object types can choose another policy later.
-- First TX scope? Recommended: preserve native CS/ACID visibility, introduce
-  read-only TX binding, then native shard participants and a defined commit
-  protocol. Full historical distributed snapshot isolation is a separate choice.
-- Which runtime references survive reconnect? Recommended: explicit scoped
-  leases and incarnation fencing; ordinary query exports die with their owner,
-  prepared TX state follows its durable recovery contract.
-
-Fix the independent local COMMIT/cache defect in its own patch. Then implement
-grouped partial results and statement session bindings before distributed write
-participants. Keep these SQL contracts active throughout that work.
+Distributed writes additionally need native participant prepare/commit/abort
+and durable outcome recovery. Do not serialize the entire mutable TxContext as
+one globally writable MOSI object: independent shards must stay independent.
+Transaction overlay identities must include the physical generation, and rebuild
+forwarding must translate row identities rather than merely copy deletion masks.

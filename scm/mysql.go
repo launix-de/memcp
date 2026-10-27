@@ -153,11 +153,11 @@ type MySQLWrapper struct {
 
 func mysqlScmSession(session *driver.Session) Scmer {
 	if scmSessionAny, ok := mysqlsessions.Load(session); ok {
-		return NewFunc(scmSessionAny.(func(...Scmer) Scmer))
+		return scmSessionAny.(Scmer)
 	}
-	newSession := NewSession().Func()
+	newSession := NewSession()
 	mysqlsessions.Store(session, newSession)
-	return NewFunc(newSession)
+	return newSession
 }
 
 func withMySQLScmSession(session *driver.Session, fn func()) {
@@ -192,7 +192,7 @@ func (m *MySQLWrapper) SetServerVersion() {
 }
 func (m *MySQLWrapper) NewSession(session *driver.Session) {
 	m.log.Info("%s", "New Session from "+session.Addr())
-	mysqlsessions.Store(session, NewSession().Func())
+	mysqlsessions.Store(session, NewSession())
 	ss := RegisterSession(session.User(), session.Addr(), session.Schema())
 	mysqlStates.Store(session, ss)
 	refreshMySQLSessionProcesslistMeta(session)
@@ -474,8 +474,8 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	// load scm session object
 	scmSessionAny, _ := mysqlsessions.Load(session)
 	// result from scheme
-	sessionFunc := scmSessionAny.(func(...Scmer) Scmer)
-	scmSessionScmer := NewFunc(sessionFunc)
+	scmSessionScmer := scmSessionAny.(Scmer)
+	sessionFunc := scmSessionScmer.Func()
 	sessionFunc(NewString("username"), NewString(session.User()))
 	sessionFunc(NewString("schema"), NewString(session.Schema()))
 	// Populate bind variables (v1, v2, ...) from prepared-statement params into session

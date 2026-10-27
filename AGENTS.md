@@ -1001,3 +1001,22 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   panic-safe `endQuery`; non-statement consumers release their prepared reader
   explicitly. Usage timestamps change only during preparation. None of this
   process-local cache or lease state is persisted.
+
+- `TxContext.remoteBindings` lazily publishes one statement-owned
+  `scm.ProcedureBindings` snapshot at cold remote dispatch and is cleared after
+  joined shard work by `endStatement` and at transaction reset. Its mutex and
+  session snapshot construction run outside row loops. Only demanded immutable
+  session values enter serialized physical callbacks; stored plans retain no
+  session or transaction instance. `sessionCallable` keeps the native function
+  in its first field and a GC-visible session pointer; frontends preserve the
+  original Scmer identity. Dynamic session effects require an owner contract.
+- `TxContext.remoteTransaction` is immutable origin identity for an invocation's
+  remote read participant, initialized before execution and cleared on reset.
+  Remote native CS/ACID reads may borrow unmodified inputs; modified generations
+  retain their native active-TX pins and overlays locally. This is not a
+  distributed write/commit protocol.
+- `table.visibilityCacheEpoch` and the matching compute-proxy epoch extend the
+  existing preparation-time MOSI cache invalidation to committed ACID visibility.
+  Commit invalidates dependency targets once per touched table after publication;
+  proxy preparation synchronizes stale payloads. No new row-loop or shard-read
+  synchronization is introduced.

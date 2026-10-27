@@ -43,7 +43,7 @@ func clusterScanSupported(tx *TxContext) bool {
 	// Mode and autocommit are statement-owned immutable admission metadata.
 	// A locally modified shard retains M and resident payload, so its own TX
 	// overlays cannot be delegated by the cold-shard placement path.
-	return tx.Mode == TxCursorStability && tx.autoCommit
+	return tx.Mode == TxCursorStability || tx.Mode == TxACID
 }
 func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext, origins ...*storageShard) {
 	// Existing local snapshots retain all native transaction modes. Only a
@@ -118,8 +118,8 @@ func (cluster *nodeCluster) compute(session *scanRPCSession, ctx context.Context
 	if err := json.Unmarshal(data, &task); err != nil {
 		return nil, err
 	}
-	if task.ResultKind != "scalar" {
-		return nil, fmt.Errorf("automatic cluster placement currently supports scalar reductions")
+	if task.ResultKind != "scalar" && task.ResultKind != "value" {
+		return nil, fmt.Errorf("unsupported automatic cluster reduction encoding")
 	}
 	shard, err := clusterSnapshotShard(ctx, task.Shard)
 	if err != nil {
@@ -167,8 +167,8 @@ type clusterScanExecutor struct {
 }
 
 func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, generation uuid.UUID, invocation shardScanInvocation) scanResult {
-	if !clusterScanSupported(invocation.tx) || invocation.neutral.IsSlice() || invocation.neutral.IsFastDict() {
-		panic("automatic cluster placement requires a read-only scalar reduction")
+	if !clusterScanSupported(invocation.tx) {
+		panic("automatic cluster placement requires native CS or ACID read visibility")
 	}
 	ctx := executor.cluster.ctx
 	if ss := SessionStateFromTx(invocation.tx); ss != nil {
@@ -206,7 +206,7 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, gen
 					}
 				}
 			}()
-			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected, kind: "scalar", next: &link.sequence, cluster: true}
+			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected, kind: "value", next: &link.sequence, cluster: true}
 			result = remote.ExecuteShardScan(resource, generation, invocation)
 		}()
 		if !rejected {

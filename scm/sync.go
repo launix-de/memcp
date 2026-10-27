@@ -304,7 +304,7 @@ func sessionGetOrComputeScoped(sess *session, scope Scmer, key string, tx Scmer,
 func NewSession(a ...Scmer) Scmer {
 	sess := new(session)
 	sess.Map = make(map[string]Scmer)
-	return NewFunc(func(a ...Scmer) (result Scmer) {
+	call := func(a ...Scmer) (result Scmer) {
 		switch len(a) {
 		case 2:
 			// No panic path between lock and unlock, so an explicit unlock avoids
@@ -365,8 +365,20 @@ func NewSession(a ...Scmer) Scmer {
 		default:
 			panic("wrong number of parameters provided to session: 0, 1, 2, 4, or 5 required")
 		}
-	})
+	}
+	cell := &sessionCallable{call: call, state: sess}
+	return Scmer{(*byte)(unsafe.Pointer(cell)), makeAux(tagFunc, uint64(sessionCallableID))}
 }
+
+// Only session callables use this representation. Its first field preserves
+// the ordinary native-function ABI; Scmer remains 16 bytes. The state pointer
+// is GC-visible and is accessed only by statement capture preparation.
+type sessionCallable struct {
+	call  func(...Scmer) Scmer
+	state *session
+}
+
+var sessionCallableID = RegisterCallableType(sessionCallableType)
 
 var sessionCallableType = &TypeDescriptor{Kind: "func", Label: "session", Description: "session accessor accepting exactly zero, one, two, four, or five arguments", HasSideEffects: true,
 	Params: []*TypeDescriptor{
