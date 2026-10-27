@@ -120,7 +120,7 @@ type clusterViewCapture struct {
 
 func (bindings *SerializationContext) Reference(object ClusterObject) (ClusterReference, error) {
 	if bindings == nil || bindings.Export == nil {
-		return ClusterReference{}, fmt.Errorf("cluster object requires an export context")
+		return ClusterReference{}, fmt.Errorf("cluster object %s requires an export context", object.ClusterObjectType())
 	}
 	export := bindings.Export
 	if bindings.root != nil {

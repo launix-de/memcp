@@ -871,3 +871,15 @@ func TestClusterCancellationQueuesMessageBeforeStoppingDeferredHook(t *testing.T
 		})
 	}
 }
+
+func TestClusterObjectCatalogSerializationNeedsNoExportContext(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_catalog_serialization", 1)
+	source := scm.SerializeToString(NewTableScmer(tbl), &scm.Globalenv)
+	if strings.Contains(source, "cluster_object") {
+		t.Fatal("catalog name unnecessarily registered a remote handle", source)
+	}
+	value := scm.Eval(scm.Read(t.Name(), source), &scm.Globalenv)
+	if TableFromScmer(value) != tbl {
+		t.Fatal("portable catalog constructor changed table identity", source)
+	}
+}
