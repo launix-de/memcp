@@ -1368,6 +1368,77 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
     return results
 
 
+def run_cluster_inserts(args, artifacts, journal):
+    print("SCENARIO: concurrent peer-local INSERT lanes and shared integer ID allocation", flush=True)
+    directory = artifacts / "cluster-inserts"
+    directory.mkdir()
+    secret_file = directory / "cluster.secret"
+    secret_file.write_text(uuid.uuid4().hex + uuid.uuid4().hex + "\n")
+    secret_file.chmod(0o600)
+    with contextlib.ExitStack() as cleanup:
+        cleanup.callback(lambda: secret_file.unlink(missing_ok=True))
+        builder = Node(args, directory, "builder", "")
+        cleanup.callback(lambda: builder.kill() if builder.process is not None else None)
+        source = builder.start()
+        source.sql(f"CREATE DATABASE {DATABASE}", "system")
+        source.sql("CREATE TABLE uuid_items(id UUID DEFAULT UUID_V7() PRIMARY KEY, writer INT, value INT) ENGINE=SAFE")
+        source.sql("CREATE TABLE integer_items(id BIGINT AUTO_INCREMENT PRIMARY KEY, writer INT, value INT) ENGINE=SAFE")
+        source.sql("INSERT INTO integer_items VALUES(10000,-1,-1)")
+        source.scm(f'(rebuild (table "{DATABASE}" false "integer_items" false) true false)')
+        builder.kill()
+        shared = builder.data_dir / DATABASE
+        nodes = [Node(args, directory, f"node-{i}", "listen") for i in range(3)]
+        for index, node in enumerate(nodes):
+            cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
+            (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
+            (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
+            node.process_env["GOMAXPROCS"] = "2"
+            seed = "" if index == 0 else f"http://127.0.0.1:{nodes[0].port}/cluster"
+            node.node_args = [f"--cluster-secret-file={secret_file}",
+                              f"--cluster-address=http://127.0.0.1:{node.port}/cluster",
+                              f"--cluster-join={seed}", f"--cluster-databases={DATABASE}"]
+            if index == 0:
+                node.node_args.append("--cluster-bootstrap")
+            node.start()
+        def status(node):
+            value = json.loads(node.client.scm("(cluster_status)"))
+            return json.loads(value) if isinstance(value, str) else value
+        def joined():
+            return all(len(status(node)["state"]["members"]) == len(nodes)
+                       and status(node)["state"]["connected"] == len(nodes)-1 for node in nodes)
+        eventually(joined, "INSERT cluster did not form", args.startup_timeout)
+        def insert(node_index, table):
+            client = nodes[node_index].client
+            for batch in range(4):
+                values = ','.join(f"({node_index},{batch * 8 + row})" for row in range(8))
+                client.sql(f"INSERT INTO {table}(writer,value) VALUES {values}")
+        for table in ("uuid_items", "integer_items"):
+            started = time.monotonic()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(nodes)) as threads:
+                futures = [threads.submit(insert, index, table) for index in range(len(nodes))]
+                for future in futures:
+                    future.result()
+            expected = len(nodes) * 32 + (table == "integer_items")
+            for node in nodes:
+                result = node.client.sql(f"SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids FROM {table}")
+                expect(result, [{"n": expected, "ids": expected}], f"complete unique {table} on {node.name}")
+            if table == "integer_items":
+                for node in nodes:
+                    expect(node.client.number("SELECT COUNT(*) AS n FROM integer_items WHERE writer>=0 AND id<=10000"), 0,
+                           "explicit integer high-water mark retained across peers")
+            journal.append({"scenario": "cluster-inserts", "table": table,
+                            "rows": expected, "seconds": time.monotonic() - started})
+        # Preserve acknowledged keys across an owner process restart, then
+        # reserve another block on a surviving peer without reusing any ID.
+        nodes[1].kill()
+        nodes[1].start()
+        eventually(joined, "INSERT peer did not rejoin after restart", args.startup_timeout)
+        nodes[2].client.sql("INSERT INTO integer_items(writer,value) VALUES(2,999)")
+        for node in nodes:
+            expect(node.client.number("SELECT COUNT(DISTINCT id) AS n FROM integer_items"), 98,
+                   "integer keys survive restart and another reservation")
+
+
 def run_cluster_placement(args, artifacts, journal):
     print("SCENARIO: authenticated peer roster and automatic SUM above one node's RAM budget", flush=True)
     directory = artifacts / "cluster-placement"
@@ -1666,6 +1737,9 @@ def main():
     parser.add_argument("--remote-scans-only", action="store_true", help="run only the focused two-process remote scan scenario")
     parser.add_argument("--cluster-context-only", action="store_true",
                         help="run SQL session/transaction contracts against standalone and clustered processes")
+
+
+    parser.add_argument("--cluster-inserts-only", action="store_true", help="run focused concurrent shared-storage INSERT scenario")
     parser.add_argument("--cluster-only", action="store_true", help="run focused shared-storage cluster placement scenario")
     parser.add_argument("--fixture-binary", type=Path, help="optional same-commit builder for immutable cluster fixture")
     args = parser.parse_args()
@@ -1689,11 +1763,13 @@ def main():
                 "dedicated_replication_port": args.dedicated_replication_port}]
     print(f"Replication cluster stress artifacts: {artifacts}\nSeed: {args.seed}", flush=True)
     try:
-        if args.cluster_only:
+        if args.cluster_inserts_only:
+            run_cluster_inserts(args, artifacts, journal)
+        elif args.cluster_only:
             run_cluster_placement(args, artifacts, journal)
         else:
             run_remote_scans(args, artifacts, journal)
-        if not args.remote_scans_only and not args.cluster_only:
+        if not args.remote_scans_only and not args.cluster_only and not args.cluster_inserts_only:
             run_regressions(args, artifacts, journal)
             run_partitions(args, artifacts, journal)
             run_stress(args, artifacts, journal)
@@ -1717,6 +1793,8 @@ def main():
                   "--startup-timeout", str(args.startup_timeout), "--executor", args.executor]
         if args.remote_scans_only:
             replay.append("--remote-scans-only")
+        if args.cluster_inserts_only:
+            replay.append("--cluster-inserts-only")
         if args.cluster_context_only:
             replay.append("--cluster-context-only")
         elif args.cluster_only:

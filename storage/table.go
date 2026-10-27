@@ -190,6 +190,14 @@ func (c *column) defaultValue() scm.Scmer {
 	if strings.EqualFold(c.DefaultExpression, "CURRENT_TIMESTAMP") {
 		return scm.NewDate(time.Now().Unix())
 	}
+	switch strings.ToUpper(c.DefaultExpression) {
+	case "UUID", "UUID_V1":
+		return scm.GenerateUUID(1)
+	case "UUID_V4", "UUIDV4", "GEN_RANDOM_UUID", "UUID_GENERATE_V4", "NEWID":
+		return scm.GenerateUUID(4)
+	case "UUID_V7", "UUIDV7":
+		return scm.GenerateUUID(7)
+	}
 	if c.DefaultExpression != "" {
 		panic("unsupported default expression: " + c.DefaultExpression)
 	}
@@ -2601,6 +2609,11 @@ func (c *column) UpdateSanitizer() {
 			}
 			return scm.NewFloat(f)
 		}
+	case "UUID", "UNIQUEIDENTIFIER":
+		if c.AutoIncrement {
+			panic("UUID auto-generation requires a UUID DEFAULT, not integer AUTO_INCREMENT")
+		}
+		inner = scm.ParseUUID
 	case "JSON", "JSONB":
 		inner = func(v scm.Scmer) scm.Scmer {
 			result, err := scm.NewBSONFromScmer(v)
@@ -3626,6 +3639,13 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 // Reserve one generated-ID range per batch without taking the topology mutex
 // from inside a shard writer. Explicit IDs advance the same monotonic counter.
 func (t *table) reserveAutoIncrement(explicit, generated uint64) uint64 {
+	if sharedClusterSource(t) {
+		return activeNodeCluster().reserveInsertIDs(t, explicit, generated)
+	}
+	return t.reserveLocalAutoIncrement(explicit, generated)
+}
+
+func (t *table) reserveLocalAutoIncrement(explicit, generated uint64) uint64 {
 	for {
 		previous := atomic.LoadUint64(&t.Auto_increment)
 		base := max(previous, explicit)
@@ -3670,10 +3690,16 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	t.beginContributionMutation()
 	defer t.endContributionMutation()
 
+	columns, values = t.prepareInsertDefaults(columns, values)
 	// sanitize values (per-row recovery for INSERT IGNORE)
 	values = t.sanitizeInsertRows(columns, values, isIgnore)
 	if len(values) == 0 {
 		return 0
+	}
+
+	columns, values = t.prepareClusterInsertIDs(columns, values, onFirstInsertId)
+	if sharedClusterSource(t) {
+		onFirstInsertId = nil
 	}
 
 	topology := t.pinActiveTopology()
@@ -3734,16 +3760,20 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			}
 			func() {
 				defer releaseReservation()
-				writeAccess := shard.GetWrite(currentTx)
-				defer writeAccess.Release()
-				shard = writeAccess.shard
+				constraintAccess := t.clusterInsertConstraints(currentTx)
+				defer constraintAccess.Release()
+				insertRows := func(rows [][]scm.Scmer) {
+					writeAccess := shard.GetWrite(currentTx)
+					defer writeAccess.Release()
+					writeAccess.shard.Insert(columns, rows, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
+					result += len(rows)
+					inserted += len(rows)
+				}
 
 				// check unique constraints in a thread safe manner
 				if len(t.Unique) > 0 {
 					t.ProcessUniqueCollision(columns, chunk, mergeNull, func(chunk [][]scm.Scmer) {
-						shard.Insert(columns, chunk, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
-						result += len(chunk)
-						inserted += len(chunk)
+						insertRows(chunk)
 					}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
 						if !onCollision.IsNil() {
 							// Evaluate onCollision and add to affected rows per MySQL semantics
@@ -3771,9 +3801,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 					}, 0, currentTx)
 				} else {
 					// physically insert (no unique constraints)
-					shard.Insert(columns, chunk, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
-					result += len(chunk)
-					inserted += len(chunk)
+					insertRows(chunk)
 				}
 			}()
 		}
@@ -4297,7 +4325,11 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 		}()
 		for i, shard := range shardlist {
 			if needed[i] {
-				readAccesses[i] = shard.acquireReadForScan(currentTx)
+				if sharedClusterSource(t) {
+					readAccesses[i] = shard.GetRead(currentTx)
+				} else {
+					readAccesses[i] = shard.acquireReadForScan(currentTx)
+				}
 			}
 		}
 

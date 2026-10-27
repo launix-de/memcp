@@ -3393,7 +3393,13 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 				maxExplicitID = uint64(explicitID)
 			}
 		}
-		Auto_increment = t.t.reserveAutoIncrement(maxExplicitID, uint64(generatedIDs))
+		if sharedClusterSource(t.t) {
+			if generatedIDs != 0 {
+				panic("cluster INSERT requires reserved explicit IDs before shard mutation")
+			}
+		} else {
+			Auto_increment = t.t.reserveAutoIncrement(maxExplicitID, uint64(generatedIDs))
+		}
 	}
 	// if requested, notify the first assigned id once per statement
 	if generatedIDs > 0 && onFirstInsertId != nil {
@@ -3402,6 +3408,18 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 		onFirstInsertId = nil
 	}
 
+	defaultInputs := make(map[string]int)
+	for _, c := range declarations {
+		if c.DefaultExpression == "" {
+			continue
+		}
+		for i, name := range columns {
+			if name == c.Name {
+				defaultInputs[c.Name] = i
+				break
+			}
+		}
+	}
 	var insertedBytes int64
 	indexDeltaBytes := make(map[*StorageIndex]int64)
 	for _, row := range values {
@@ -3416,6 +3434,9 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 					newrow[cidx] = scm.NewInt(int64(Auto_increment))
 				}
 			} else if c.hasDefault() {
+				if input, provided := defaultInputs[c.Name]; provided && input < len(row) {
+					continue
+				}
 				// fill col with default
 				cidx := t.deltaColumns[c.Name]
 				newrow[cidx] = c.defaultValue()

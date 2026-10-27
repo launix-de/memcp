@@ -148,6 +148,8 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 		return nil, err
 	}
 	switch method {
+	case "cluster.reserve_ids":
+		return cluster.handleIDReservation(ctx, data)
 	case "cluster.report":
 		var resource mosiResource
 		if err := json.Unmarshal(data, &resource); err != nil {

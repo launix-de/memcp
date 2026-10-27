@@ -20,6 +20,21 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 	c := r.resourceCell(packet.Resource)
 	c.acquire.Lock()
 	defer c.acquire.Unlock()
+	publication := c.ownstate.Snapshot()
+	if r.cluster != nil && packet.State == "S" && publication.Phase() == mosi.MR && publication.Flight().ID() == packet.ID {
+		// A read grant superseded by this flight's write upgrade still proves
+		// the reader epoch registered by its owner. Keep that control metadata
+		// so a subsequent invalidation can revoke the registered reader; never
+		// grant S or wake the MR waiters from this weaker response.
+		r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
+			if packet.Epoch < record.Epoch {
+				return false
+			}
+			record.Resource, record.Owner, record.Epoch = packet.Resource, packet.Owner, packet.Epoch
+			return true
+		})
+		return nil
+	}
 	_, err := c.ownstate.Grant(packet.ID, mosi.ParsePhase(packet.State), func() error {
 		r.mu.Lock()
 		current := r.directory.Records[r.resourceKey(packet.Resource)]

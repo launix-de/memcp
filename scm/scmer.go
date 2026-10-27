@@ -854,6 +854,12 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 		dst = strconv.AppendFloat(dst, math.Float64frombits(s.aux), 'g', -1, 64)
 		return unsafe.String(&dst[start], len(dst)-start), dst
 	case tagCString:
+		if view, ok := makeStringView(s); ok && s.IsUUID() {
+			start := len(dst)
+			dst = append(dst, make([]byte, 36)...)
+			view.decodeInto(dst[start:], 0, false)
+			return unsafe.String(&dst[start], 36), dst
+		}
 		if CStringDecompress != nil {
 			return CStringDecompress(s.ptr, auxVal(s.aux)), dst
 		}

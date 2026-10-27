@@ -376,7 +376,7 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 (define scalar_access_probe_expr_volatile? (lambda (expr)
 	(match expr
 		(cons head tail) (or (contains?
-			(list (symbol "sql_rand") (symbol "randomBytes") (symbol "uuid")) head)
+			(list (symbol "sql_rand") (symbol "randomBytes") (symbol "uuid") (symbol "uuid_v1") (symbol "uuid_v4") (symbol "uuid_v7")) head)
 			(reduce tail (lambda (found item)
 				(or found (scalar_access_probe_expr_volatile? item))) false))
 		_ false)))

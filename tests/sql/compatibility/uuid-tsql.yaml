@@ -1,0 +1,75 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: UUID types, generation, conversions and per-row defaults through tsql
+  syntax: tsql
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS uuid_tsql
+test_cases:
+- name: Create UUID primary key with per-row v7 default
+  sql: CREATE TABLE uuid_tsql (id UNIQUEIDENTIFIER NOT NULL DEFAULT UUIDV7() PRIMARY
+    KEY, payload INT)
+- name: Generate one key for each VALUES row
+  sql: INSERT INTO uuid_tsql (payload) VALUES (10),(20),(30)
+- name: Every generated key is distinct
+  sql: SELECT COUNT(*) AS n, COUNT(DISTINCT id) AS distinct_ids FROM uuid_tsql
+  expect:
+    rows: 1
+    data:
+    - n: 3
+      distinct_ids: 3
+- name: Normalize explicit UUID input
+  sql: INSERT INTO uuid_tsql (id,payload) VALUES ('550E8400-E29B-41D4-A716-446655440000',40)
+- name: Read canonical UUID
+  sql: SELECT id FROM uuid_tsql WHERE payload=40
+  expect:
+    rows: 1
+    data:
+    - id: 550e8400-e29b-41d4-a716-446655440000
+- name: Reject duplicate UUID regardless of input case
+  sql: INSERT INTO uuid_tsql (id,payload) VALUES ('550e8400-e29b-41d4-a716-446655440000',50)
+  expect:
+    error: true
+- name: Reject malformed UUID
+  sql: INSERT INTO uuid_tsql (id,payload) VALUES ('bad-uuid',60)
+  expect:
+    error: true
+- name: Explicit NULL does not request an automatic UUID
+  sql: INSERT INTO uuid_tsql (id,payload) VALUES (NULL,70)
+  expect:
+    error: true
+- name: INSERT SELECT evaluates the default per source row
+  sql: INSERT INTO uuid_tsql (payload) SELECT payload+100 FROM uuid_tsql
+- name: Source and copy have unique UUID keys
+  sql: SELECT COUNT(*) AS n, COUNT(DISTINCT id) AS distinct_ids FROM uuid_tsql
+  expect:
+    rows: 1
+    data:
+    - n: 8
+      distinct_ids: 8
+- name: NEWID returns a UUID
+  sql: SELECT LEN(CONVERT(VARCHAR(36),NEWID())) AS length
+  expect:
+    rows: 1
+    data:
+    - length: 36
+- name: Explicit UUID conversion
+  sql: SELECT CAST('550E8400-E29B-41D4-A716-446655440000' AS UNIQUEIDENTIFIER) AS
+    id
+  expect:
+    rows: 1
+    data:
+    - id: 550e8400-e29b-41d4-a716-446655440000
+- name: Explicit DEFAULT generates UUID
+  sql: INSERT INTO uuid_tsql (id,payload) VALUES (DEFAULT,200)
+- name: DEFAULT generated another row
+  sql: SELECT COUNT(*) AS n, COUNT(DISTINCT id) AS distinct_ids FROM uuid_tsql
+  expect:
+    rows: 1
+    data:
+    - n: 9
+      distinct_ids: 9
+cleanup:
+- sql: DROP TABLE IF EXISTS uuid_tsql
