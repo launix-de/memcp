@@ -136,7 +136,7 @@ type TxContext struct {
 	queryActive         atomic.Bool
 	queryMu             sync.Mutex         // serializes statements which reuse this transaction object
 	queryColumns        map[*column]*table // statement cache leases, protected by mu
-	queryReaderReleases []func()           // decoded dictionary leases, protected by mu
+	queryReaderReleases []func()           // reader and cache-carrier leases, protected by mu
 	// remoteBindings freezes session inputs once per statement, only on cold
 	// remote dispatch. endStatement drops it after all shard workers finish.
 	remoteBindings    atomic.Pointer[scm.ProcedureBindings]
@@ -293,6 +293,25 @@ func (tx *TxContext) retainQueryColumn(t *table, c *column) bool {
 		tx.queryColumns = make(map[*column]*table)
 	}
 	tx.queryColumns[c] = t
+	return true
+}
+
+// A planner cache carrier must survive the gap between CREATE IF NOT EXISTS
+// and its subsequent column/dependency initialization. Reuse the statement's
+// existing release ownership rather than retaining a cache by an idle-time hint.
+func (tx *TxContext) retainQueryTable(t *table) bool {
+	if tx == nil || !t.isEphemeralQueryTable() {
+		return true
+	}
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if !tx.queryActive.Load() {
+		return true
+	}
+	if !t.acquireCacheUse() {
+		return false
+	}
+	tx.queryReaderReleases = append(tx.queryReaderReleases, t.releaseCacheUse)
 	return true
 }
 

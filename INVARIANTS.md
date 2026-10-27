@@ -96,7 +96,16 @@ same ownership, visibility, lifetime, and durability guarantees.
   routing, SQL, storage and backend policy. Its immutable publications are read
   through accessors; request completion publishes errors before waking waiters.
   Engine adapters supply durable installation and directory coordination.
-- Database schema.json and each data shard have independent MOSI pairs.
+- Schema resources use database names; shard resources use their actual UUIDs.
+  A rebuild creates a different shard with a new UUID. Native write forwarding
+  and MOSI/cluster routing follow the same successor edge. Old readers retain
+  their original shards; old UUIDs route new rights requests to the successor.
+  Forwarding shares one active authority and wakes pending acquisitions to retry;
+  it never creates independent copies of M/O or its reader directory. Native
+  schema checkpoints retain the UUID successor edges with their shard topology
+  so a restart cannot reverse a completed rebuild from an older peer hint.
+  Loading these edges restores routing only, never permissions.
+  Database schema.json and each coherent shard chain use MOSI authority pairs.
   `clusterstate` represents the node/domain's outward authority, including
   delegated descendants; `ownstate` alone authorizes local queries, loading,
   writes, rebuild and eviction. Outward M plus local IO is a valid delegation,
@@ -138,8 +147,10 @@ same ownership, visibility, lifetime, and durability guarantees.
   on a timer. Failed acquisition raises `Cluster network error`.
 - `system.replication_config` is an ordinary SAFE table. It stores only the
   offline authentication cache, explicit retirement decisions and completed
-  backup placement (shard UUID or schema content digest). It stores no permissions
-  or slave registration.
+  backup placement by actual shard UUID or schema digest. Completed placement
+  may retain UUID forwarding metadata; it stores no permissions or slave
+  registration. Replacing a completed copy retires the previous placement in
+  the same native transaction.
   Native persistence/WAL and backend semantics own these data and configuration
   changes. Entries are scoped by local installation UUID so shared database
   backends cannot merge different nodes' caches. UUID/secret stays in ordinary
@@ -147,9 +158,10 @@ same ownership, visibility, lifetime, and durability guarantees.
   A promoted safety copy becomes ordinary current data only after complete
   installation and foreign permission removal; placement metadata is then retired.
   An interrupted handover reported by its surviving source may recover the
-  master's complete ordinary shard data and WAL. A peer schema transfer keeps
-  replica-local shard UUID bindings; schema snapshots compare declarations/topology independently of those local bindings and
-  advisory statistics.
+  master's complete ordinary shard data and WAL. A peer schema transfer follows
+  known UUID forwarding while preserving local files until new data arrives.
+  Schema digests compare captured declarations, partitions and writer-lane shape,
+  excluding rebuild UUIDs and advisory statistics, without consulting routing.
 - MR/OR/SR grant no access and coalesce requests in the state machine. A read
   request can upgrade to MR; an older read grant cannot release its write waiters.
   Complete data installation precedes publication of the RAM permission and

@@ -77,7 +77,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 				} else if copy.Kind == "write" {
 					state = "M"
 				}
-				_ = peer.post(mosiPacket{Kind: "failure", ID: copy.ID, Resource: copy.Resource, Epoch: copy.Epoch, Generation: copy.Generation, State: state, Error: requestErr.Error()})
+				_ = peer.post(mosiPacket{Kind: "failure", ID: copy.ID, Resource: copy.Resource, Epoch: copy.Epoch, Content: copy.Content, State: state, Error: requestErr.Error()})
 			}
 		}()
 		return nil
@@ -109,6 +109,9 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 		}
 		return r.acceptGrant(*packet)
 	case "begin":
+		if err := r.validateForwards(source, *packet); err != nil {
+			return err
+		}
 		if r.master {
 			if value, expected := r.steps.Load(packet.ID); expected {
 				step := value.(*replicaStep)
@@ -117,7 +120,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 				}
 			} else {
 				r.mu.Lock()
-				record := r.directory.Records[r.recordKey(packet.Resource)]
+				record := r.directory.Records[r.resourceKey(packet.Resource)]
 				r.mu.Unlock()
 				if record.Owner != source || record.Epoch != packet.Epoch {
 					return fmt.Errorf("backup from non-owner")
@@ -131,7 +134,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 				return fmt.Errorf("transfer from non-master")
 			}
 			r.mu.Lock()
-			epoch := r.directory.Records[r.recordKey(packet.Resource)].Epoch
+			epoch := r.directory.Records[r.resourceKey(packet.Resource)].Epoch
 			r.mu.Unlock()
 			if packet.Epoch < epoch {
 				return fmt.Errorf("stale transfer epoch")
@@ -145,6 +148,9 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 		if err != nil {
 			return err
 		}
+		for _, route := range packet.Forwards {
+			r.forwardResource(route.From, route.To)
+		}
 		publication := r.resourceCell(mosiResource{Database: packet.Resource.Database})
 		publication.importPublication.Lock()
 		r.imports.Store(key, transfer)
@@ -157,7 +163,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 			return fmt.Errorf("packet without transfer")
 		}
 		transfer := value.(*replicaImport)
-		if packet.Resource != transfer.header.Resource || packet.Epoch != transfer.header.Epoch || packet.Generation != transfer.header.Generation {
+		if packet.Resource != transfer.header.Resource || packet.Epoch != transfer.header.Epoch || packet.Content != transfer.header.Content {
 			return fmt.Errorf("transfer header changed")
 		}
 		if packet.Kind != "end" {
@@ -172,7 +178,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 		defer transfer.abort()
 		if r.master {
 			r.mu.Lock()
-			record := r.directory.Records[r.recordKey(packet.Resource)]
+			record := r.directory.Records[r.resourceKey(packet.Resource)]
 			r.mu.Unlock()
 			if record.Owner != source || record.Epoch != packet.Epoch {
 				return fmt.Errorf("stale transfer epoch")
@@ -186,7 +192,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 				cell.acquire.Lock()
 				defer cell.acquire.Unlock()
 				r.mu.Lock()
-				epoch := r.directory.Records[r.recordKey(packet.Resource)].Epoch
+				epoch := r.directory.Records[r.resourceKey(packet.Resource)].Epoch
 				r.mu.Unlock()
 				if packet.Epoch < epoch {
 					return fmt.Errorf("stale transfer epoch")
@@ -195,18 +201,21 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 			if err := r.finishImport(source, transfer); err != nil {
 				return err
 			}
-			return r.saveBackup(packet.Resource, packet.Generation)
+			if !transfer.superseded {
+				return r.saveBackup(packet.Resource, packet.Content)
+			}
+			return nil
 		}(); err != nil {
 			return err
 		}
-		if r.master {
+		if r.master && !transfer.superseded {
 			r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
-				record.Generation = packet.Generation
+				record.Content = packet.Content
 				return true
 			})
 		}
 		if !r.master {
-			return peer.post(mosiPacket{Kind: "ack", ID: packet.ID, Resource: packet.Resource, Epoch: packet.Epoch, Generation: packet.Generation})
+			return peer.post(mosiPacket{Kind: "ack", ID: packet.ID, Resource: packet.Resource, Epoch: packet.Epoch, Content: packet.Content})
 		}
 		if value, expected := r.steps.Load(packet.ID); expected {
 			value.(*replicaStep).finish(nil)

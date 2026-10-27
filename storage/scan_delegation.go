@@ -14,7 +14,6 @@ package storage
 import "fmt"
 import "strings"
 import "runtime/debug"
-import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
 // shardScanTarget is immutable routing metadata for a remote-only stub. The
@@ -22,10 +21,9 @@ import "github.com/launix-de/memcp/scm"
 // and must never be attached to a retained historical generation. The executor
 // borrows that query and must not enter the persistent catalog.
 type shardScanTarget struct {
-	origin     *storageShard // optional query-local route for a real shared generation; never published on it
-	resource   mosiResource
-	generation uuid.UUID
-	executor   shardScanExecutor
+	origin   *storageShard // optional query-local route for a real shared generation; never published on it
+	resource mosiResource
+	executor shardScanExecutor
 }
 
 // shardReadDelegation is raised only before GetRead touches local payload.
@@ -61,7 +59,7 @@ type shardScanInvocation struct {
 // The result uses the existing shard-local reduction and coordinator combine
 // contract. A future wire adapter must validate/encode its scalar/group result.
 type shardScanExecutor interface {
-	ExecuteShardScan(mosiResource, uuid.UUID, shardScanInvocation) scanResult
+	ExecuteShardScan(mosiResource, shardScanInvocation) scanResult
 }
 
 func (invocation shardScanInvocation) delegate(shard *storageShard, failure shardReadDelegation) (result scanResult) {
@@ -73,19 +71,17 @@ func (invocation shardScanInvocation) delegate(shard *storageShard, failure shar
 		}
 	}()
 	target := failure.target
-	validGeneration := target != nil && target.generation == shard.uuid
-	validResource := target != nil && target.resource.Shard == shard.logicalID().String()
+	validResource := target != nil && target.resource.Shard == shard.uuid.String()
 	if target != nil && target.origin == shard {
 		if cell := shard.coherence.Load(); cell != nil {
 			if current := cell.current.Load(); current != nil {
-				validGeneration = current.uuid == target.generation
 				validResource = current.uuid.String() == target.resource.Shard
 			}
 		}
 	}
 	if target == nil || (shard.scanTarget.Load() != target && target.origin != shard) || target.executor == nil || shard.t == nil ||
 		target.resource.Database != shard.t.schema.Name || target.resource.Table != shard.t.Name ||
-		!validResource || !validGeneration || !target.resource.valid() {
+		!validResource || !target.resource.valid() {
 		panic("invalid remote shard scan target")
 	}
 	if invocation.source != nil || invocation.stride != 0 || len(invocation.batchdata) != 0 {
@@ -99,7 +95,7 @@ func (invocation shardScanInvocation) delegate(shard *storageShard, failure shar
 	if ss := SessionStateFromTx(invocation.tx); ss != nil && ss.IsKilledSeq(querySeqFromTx(invocation.tx)) {
 		panic("query killed")
 	}
-	result = target.executor.ExecuteShardScan(target.resource, target.generation, invocation)
+	result = target.executor.ExecuteShardScan(target.resource, invocation)
 	if result.err.r == nil && (result.outCount < 0 || result.inputCount < 0 || result.candidateCount < 0) {
 		panic(fmt.Errorf("invalid remote shard scan counts"))
 	}

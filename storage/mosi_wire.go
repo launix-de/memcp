@@ -22,10 +22,10 @@ import "github.com/google/uuid"
 const mosiPacketBytes = 64 * 1024
 
 const mosiHTTPPath = "/cluster"
-const mosiSubprotocol = "memcp.mosi.v1"
+const mosiSubprotocol = "memcp.mosi.v2"
 const mosiMaxMessageBytes = 256 * 1024
 
-// One binary WebSocket message contains MOSI + version 1 + a uint32 metadata
+// One binary WebSocket message contains MOSI + version 2 + a uint32 metadata
 // length, followed by JSON control metadata and raw compressed chunk bytes.
 // Packet payloads are never base64-expanded. This envelope is shared by both
 // dedicated replication listeners and the normal HTTP node-protocol route.
@@ -47,7 +47,7 @@ func encodeMosiMessage(message mosiMessage) ([]byte, error) {
 		return nil, fmt.Errorf("oversized MOSI message")
 	}
 	frame := make([]byte, 9+len(metadata)+len(payload))
-	copy(frame, "MOSI\x01")
+	copy(frame, "MOSI\x02")
 	binary.BigEndian.PutUint32(frame[5:9], uint32(len(metadata)))
 	copy(frame[9:], metadata)
 	copy(frame[9+len(metadata):], payload)
@@ -56,7 +56,7 @@ func encodeMosiMessage(message mosiMessage) ([]byte, error) {
 
 func decodeMosiMessage(frame []byte) (mosiMessage, error) {
 	var message mosiMessage
-	if len(frame) < 9 || len(frame) > mosiMaxMessageBytes || string(frame[:5]) != "MOSI\x01" {
+	if len(frame) < 9 || len(frame) > mosiMaxMessageBytes || string(frame[:5]) != "MOSI\x02" {
 		return message, fmt.Errorf("invalid MOSI message version or size")
 	}
 	length := uint64(binary.BigEndian.Uint32(frame[5:9]))
@@ -108,15 +108,15 @@ func (resource mosiResource) valid() bool {
 // grant/failure/ack complete a state transition. A chunk is independently gzip
 // compressed and bounded, so queues never retain a whole shard or column.
 type mosiPacket struct {
-	Lineage    string          `json:"lineage,omitempty"` // native rebuild forwarding identity; never a cluster permission key
-	From       string          `json:"from,omitempty"`    // logical source URI, preserved across neighbour hops
-	To         string          `json:"to,omitempty"`      // logical destination URI, independent of a connection
+	From       string          `json:"from,omitempty"` // logical source URI, preserved across neighbour hops
+	To         string          `json:"to,omitempty"`   // logical destination URI, independent of a connection
+	Forwards   []shardForward  `json:"forwards,omitempty"`
 	Kind       string          `json:"kind"`
 	ID         string          `json:"id"`
 	Resource   mosiResource    `json:"resource"`
 	Epoch      uint64          `json:"epoch,omitempty"`
 	State      string          `json:"state,omitempty"`
-	Generation string          `json:"generation,omitempty"`
+	Content    string          `json:"content,omitempty"`
 	Object     string          `json:"object,omitempty"`
 	ObjectKind string          `json:"object_kind,omitempty"`
 	User       string          `json:"user,omitempty"`

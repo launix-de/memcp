@@ -22,7 +22,7 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 	defer c.acquire.Unlock()
 	_, err := c.ownstate.Grant(packet.ID, mosi.ParsePhase(packet.State), func() error {
 		r.mu.Lock()
-		current := r.directory.Records[r.recordKey(packet.Resource)]
+		current := r.directory.Records[r.resourceKey(packet.Resource)]
 		r.mu.Unlock()
 		if packet.Epoch < current.Epoch {
 			return fmt.Errorf("stale grant epoch")
@@ -34,12 +34,12 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 			if packet.State == "M" {
 				record.InitialClaimed = true
 			}
-			if packet.Generation != "" {
-				record.Generation = packet.Generation
+			if packet.Content != "" {
+				record.Content = packet.Content
 			}
 			return true
 		})
-		// The generation is installed and the directory accepted this grant.
+		// The content is installed and the directory accepted this grant.
 		// Publish outward permission before Grant wakes local query/write waiters.
 		// A future delegating slave must grant its own descendants through their
 		// directory; it must never treat this outer M as unconditional local M.
@@ -60,7 +60,7 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 		c.acquire.Lock()
 		defer c.acquire.Unlock()
 		r.mu.Lock()
-		epoch := r.directory.Records[r.recordKey(packet.Resource)].Epoch
+		epoch := r.directory.Records[r.resourceKey(packet.Resource)].Epoch
 		r.mu.Unlock()
 		if packet.Epoch > epoch {
 			return fmt.Errorf("future invalidation epoch")
@@ -124,12 +124,12 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 		}
 	}()
 	r.mu.Lock()
-	record := r.directory.Records[r.recordKey(packet.Resource)]
+	record := r.directory.Records[r.resourceKey(packet.Resource)]
 	r.mu.Unlock()
 	if record.Epoch != packet.Epoch {
 		return fmt.Errorf("stale recall")
 	}
-	generation, err := r.prepareResource(packet.Resource)
+	content, err := r.prepareResource(packet.Resource)
 	if err != nil {
 		return err
 	}
@@ -137,7 +137,7 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 		return ctx.Err()
 	}
 	phase := mosi.ParsePhase(packet.State)
-	r.localRecord(packet.Resource, phase, generation)
+	r.localRecord(packet.Resource, phase, content)
 	r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
 		record.Readers = packet.Readers
 		record.Handoff = ""
@@ -150,7 +150,7 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 	// Local writes have drained before the enclosing permission is reduced.
 	// The root master does not take this path when delegating to its slave.
 	c.clusterstate.Publish(phase)
-	packet.Generation = generation
+	packet.Content = content
 	if r.cluster != nil {
 		handover.Release()
 		locked = false
@@ -158,8 +158,11 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 		authorityLocked = false
 		releasePersistence()
 		packet.Kind, packet.From, packet.To = "reference", r.id, source
+		if packet.Resource.Shard != "" {
+			packet.Forwards = r.shardRoutes(packet.Resource)
+		}
 		if current := c.current.Load(); current != nil && packet.Resource.Shard != "" {
-			packet.Lineage = current.logicalID().String()
+
 		}
 		peer := r.peer(source)
 		if peer == nil {
@@ -167,7 +170,7 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 		}
 		return peer.post(packet)
 	}
-	transfer, err := r.captureResource(packet.Resource, generation)
+	transfer, err := r.captureResource(packet.Resource, content)
 	if err != nil {
 		return err
 	}
@@ -192,6 +195,11 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			return err
 		}
 	}
+	if r.cluster == nil && requester != r.id && packet.Resource.Shard != "" {
+		if err := r.acceptRequestRoutes(requester, packet); err != nil {
+			return err
+		}
+	}
 	if !r.resourceKnown(packet.Resource) {
 		return fmt.Errorf(mosi.NetworkError)
 	}
@@ -206,7 +214,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		// directory ownership. The old owner forwards to the successor; it must
 		// never become a permanent coordinator recalling the actual owner.
 		r.mu.Lock()
-		owner := r.directory.Records[r.recordKey(packet.Resource)].Owner
+		owner := r.directory.Records[r.resourceKey(packet.Resource)].Owner
 		r.mu.Unlock()
 		if owner != "" && owner != r.id {
 			peer := r.peer(owner)
@@ -234,7 +242,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		if record.Owner == "" {
 			record.Resource, record.Owner, record.State, record.Epoch = packet.Resource, r.id, "M", 1
 			if localShard != nil && packet.Resource.Shard != "" {
-				record.Generation = localShard.uuid.String()
+				record.Content = localShard.uuid.String()
 				c.current.Store(localShard)
 			}
 		}
@@ -280,12 +288,12 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			if err != nil {
 				return err
 			}
-			generation, err := r.prepareResource(packet.Resource)
+			content, err := r.prepareResource(packet.Resource)
 			if err == nil && requester != r.id && r.cluster == nil {
-				err = r.saveBackup(packet.Resource, generation)
+				err = r.saveBackup(packet.Resource, content)
 			}
 			if err == nil {
-				r.localRecord(packet.Resource, mosi.ParsePhase(oldState), generation)
+				r.localRecord(packet.Resource, mosi.ParsePhase(oldState), content)
 			}
 			if err == nil {
 				if r.cluster != nil && write {
@@ -298,7 +306,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 					})
 				}
 				r.publishLocal(packet.Resource, mosi.ParsePhase(oldState))
-				record.Generation = generation
+				record.Content = content
 			}
 			handover.Release()
 			releasePersistence()
@@ -317,7 +325,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				return err
 			}
 			r.mu.Lock()
-			record.Generation = r.directory.Records[r.recordKey(packet.Resource)].Generation
+			record.Content = r.directory.Records[r.resourceKey(packet.Resource)].Content
 			r.mu.Unlock()
 		}
 	}
@@ -348,11 +356,11 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 	} else if requester == record.Owner {
 		grantState = "O"
 	}
-	// The destination durably installs the complete generation before the
+	// The destination durably installs the complete content before the
 	// directory commits its new owner. A crash during transfer leaves ownership
 	// at the old modifier, never at an incomplete destination copy.
 	if requester != r.id && requester != originalOwner {
-		if err := r.transmitResource(ctx, requester, mosiPacket{ID: uuid.NewString(), Resource: packet.Resource, Epoch: record.Epoch, Generation: record.Generation}); err != nil {
+		if err := r.transmitResource(ctx, requester, mosiPacket{ID: packet.ID, Resource: packet.Resource, Epoch: record.Epoch, Content: record.Content}); err != nil {
 			return err
 		}
 	}
@@ -381,7 +389,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			if r.confirmed == nil {
 				r.confirmed = make(map[string]string)
 			}
-			r.confirmed[packet.Resource.key()] = record.Owner
+			r.confirmed[r.resourceKey(packet.Resource)] = record.Owner
 			if write && requester != r.id {
 				if r.initialClaims == nil {
 					r.initialClaims = make(map[string]map[string]bool)
@@ -408,10 +416,54 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		return fmt.Errorf(mosi.NetworkError)
 	}
 	r.publishLocal(packet.Resource, mosi.ParsePhase(record.State))
-	return peer.post(mosiPacket{Kind: "grant", ID: packet.ID, Resource: packet.Resource, Epoch: record.Epoch, State: grantState, Generation: record.Generation, Owner: record.Owner, Readers: func() map[string]bool {
+	return peer.post(mosiPacket{Kind: "grant", ID: packet.ID, Resource: packet.Resource, Epoch: record.Epoch, State: grantState, Content: record.Content, Owner: record.Owner, Readers: func() map[string]bool {
 		if r.cluster != nil {
 			return nil
 		}
 		return record.Readers
 	}()})
+}
+
+// An owner can rebuild while retaining M. Its next request can name the native
+// successor before the coordinator has recalled its data. Learn that edge from
+// the authenticated current owner, never invent local authority for an unknown
+// UUID. Reader hints alone cannot redirect another participant's resource.
+func (r *replicationManager) acceptRequestRoutes(source string, packet mosiPacket) error {
+	if len(packet.Forwards) == 0 {
+		return nil
+	}
+	for _, route := range packet.Forwards {
+		if !route.From.valid() || route.From.Shard == "" || route.From.Database != packet.Resource.Database || route.From.Table != packet.Resource.Table || route.To != packet.Resource {
+			return fmt.Errorf("invalid request forwarding")
+		}
+	}
+	r.mu.Lock()
+	target := r.canonicalResource(packet.Resource)
+	known := r.directory.Records[target.key()].Owner != ""
+	var authority *replicaCell
+	if !known {
+		for _, route := range packet.Forwards {
+			from := r.canonicalResource(route.From)
+			if record := r.directory.Records[from.key()]; record.Owner == source {
+				authority = r.lookupCell(from)
+				break
+			}
+		}
+	}
+	r.mu.Unlock()
+	if known {
+		return nil // an old request cannot reverse an already learned successor
+	}
+	if authority == nil {
+		return fmt.Errorf("request forwarding from non-owner")
+	}
+	for _, route := range packet.Forwards {
+		if cell := r.lookupCell(route.From); cell != nil && cell != authority {
+			return fmt.Errorf("request forwarding crosses shard authorities")
+		}
+	}
+	for _, route := range packet.Forwards {
+		r.forwardResource(route.From, route.To)
+	}
+	return nil
 }

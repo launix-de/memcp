@@ -33,36 +33,37 @@ func (r *replicationManager) resourceKnown(resource mosiResource) bool {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	record, exists := r.directory.Records[r.recordKey(resource)]
+	record, exists := r.directory.Records[r.resourceKey(resource)]
 	if exists && record.Owner == "" {
 		return false
 	}
-	if _, backup := r.backups[resource.key()]; !backup {
+	if _, backup := r.backups[r.resourceKey(resource)]; !backup {
 		return true
 	}
-	return record.Owner != "" && r.confirmed[resource.key()] == record.Owner
+	return record.Owner != "" && r.confirmed[r.resourceKey(resource)] == record.Owner
 }
 
 func (r *replicationManager) recoveryInventory(auth replicaAuth) []replicaRecord {
 	allowed := func(name string) bool { return !sharedClusterDatabase(name) && (auth.Admin || auth.Databases[name]) }
 	resources := make(map[string]replicaRecord)
 	// Catalogs describe existing local data only. Loading them establishes no
-	// coherence permission, even when the backend contains a complete generation.
+	// coherence permission, even when the backend contains a complete content.
 	for _, db := range databases.GetAll() {
 		if !validReplicaDatabase(db.Name) || !allowed(db.Name) {
 			continue
 		}
 		db.ensureLoaded()
 		schema := mosiResource{Database: db.Name}
-		generation, err := replicaSchemaGeneration(db.persistence.ReadSchema())
+		content, err := r.schemaDigest(db.persistence.ReadSchema())
 		if err != nil {
 			panic(err)
 		}
-		resources[schema.key()] = replicaRecord{Resource: schema, Generation: generation}
+		resources[schema.key()] = replicaRecord{Resource: schema, Content: content}
 		for _, table := range db.tables.GetAll() {
 			if table.isEphemeralQueryTable() {
 				continue
 			}
+			r.restoreTableRoutes(table)
 			for _, shard := range table.ActiveShards() {
 				if shard == nil {
 					continue
@@ -73,8 +74,8 @@ func (r *replicationManager) recoveryInventory(auth replicaAuth) []replicaRecord
 				} else {
 					name = table.Name
 				}
-				resource := mosiResource{Database: db.Name, Table: name, Shard: shard.logicalID().String()}
-				resources[resource.key()] = replicaRecord{Resource: resource, Generation: shard.uuid.String()}
+				resource := r.canonicalResource(mosiResource{Database: db.Name, Table: name, Shard: shard.uuid.String()})
+				resources[resource.key()] = replicaRecord{Resource: resource, Content: shard.uuid.String()}
 			}
 		}
 	}
@@ -88,7 +89,7 @@ func (r *replicationManager) recoveryInventory(auth replicaAuth) []replicaRecord
 			continue
 		}
 		record.Resource = inventory.Resource
-		generation := inventory.Generation
+		content := inventory.Content
 		cell := r.cells[key]
 		if cell == nil {
 			continue
@@ -112,11 +113,14 @@ func (r *replicationManager) recoveryInventory(auth replicaAuth) []replicaRecord
 		record.State = phase.String()
 		record.Readers = maps.Clone(record.Readers)
 		record.Requests = nil
-		if current := cell.current.Load(); current != nil {
-			generation = current.uuid.String()
+		if record.Resource.Shard != "" {
+			record.Forwards = r.shardRoutes(record.Resource)
 		}
-		if generation != "" {
-			record.Generation = generation
+		if current := cell.current.Load(); current != nil {
+			content = current.uuid.String()
+		}
+		if content != "" {
+			record.Content = content
 		}
 		resources[key] = record
 	}
@@ -203,10 +207,13 @@ func (r *replicationManager) recoverConnection(peer *mosiPeer, user string, auth
 		if !record.Resource.valid() {
 			return fmt.Errorf("invalid recovery resource")
 		}
+		for _, route := range record.Forwards {
+			r.forwardResource(route.From, route.To)
+		}
 		cell := r.resourceCell(record.Resource)
 		r.mu.Lock()
-		if _, exists := r.directory.Records[record.Resource.key()]; !exists {
-			r.directory.Records[record.Resource.key()] = record
+		if _, exists := r.directory.Records[r.resourceKey(record.Resource)]; !exists {
+			r.directory.Records[r.resourceKey(record.Resource)] = record
 		}
 		r.mu.Unlock()
 		// Recover outer permission before local admission. Establish is one-shot:
@@ -303,7 +310,15 @@ func (r *replicationManager) recoverPeer(ctx context.Context, id string, req rep
 }
 
 func (r *replicationManager) recoverResource(ctx context.Context, id string, reported replicaRecord) (replicaRecord, bool, error) {
-	resource := reported.Resource
+	r.restoreResourceRoutes(reported.Resource)
+	for _, route := range reported.Forwards {
+		if route.From.Database != reported.Resource.Database || route.To != reported.Resource {
+			return replicaRecord{}, false, fmt.Errorf("invalid recovery forwarding")
+		}
+		r.forwardResource(route.From, route.To)
+	}
+	resource := r.canonicalResource(reported.Resource)
+	reported.Resource = resource
 	cell := r.resourceCell(resource)
 	cell.directory.Lock()
 	defer cell.directory.Unlock()
@@ -315,11 +330,11 @@ func (r *replicationManager) recoverResource(ctx context.Context, id string, rep
 	localGeneration := ""
 	if reported.State == "IO" && reported.Handoff == r.id {
 		r.mu.Lock()
-		_, backup := r.backups[resource.key()]
+		_, backup := r.backups[r.resourceKey(resource)]
 		r.mu.Unlock()
 		if !backup {
 			var err error
-			localGeneration, err = r.completeLocalGeneration(resource)
+			localGeneration, err = r.completeLocalShard(resource)
 			if err != nil {
 				return replicaRecord{}, false, err
 			}
@@ -345,8 +360,8 @@ func (r *replicationManager) recoverResource(ctx context.Context, id string, rep
 	if !cell.ownstate.Initialized() {
 		// A remote schema can advertise a UUID whose data never finished arriving.
 		// Bind a readable recovered slot to its completed local copy before publishing
-		// authority; ordinary COLD loading then uses the correct native generation.
-		if local.Readable() && resource.Shard != "" && record.Generation != "" {
+		// authority; ordinary COLD loading then uses the correct native content.
+		if local.Readable() && resource.Shard != "" && record.Content != "" {
 			if db := databases.Get(resource.Database); db != nil {
 				db.ensureLoaded()
 			}
@@ -367,8 +382,11 @@ func (r *replicationManager) recoverResource(ctx context.Context, id string, rep
 	}
 	record.State = state
 	record.InitialClaimed = claimed
-	record.Generation = reported.Generation
+	record.Content = reported.Content
 	record.Requests = nil
+	if resource.Shard != "" {
+		record.Forwards = r.shardRoutes(resource)
+	}
 	return record, true, nil
 }
 
@@ -378,7 +396,7 @@ func (r *replicationManager) mergeRecoveryReport(id string, reported replicaReco
 	resource := reported.Resource
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	record, exists := r.directory.Records[r.recordKey(resource)]
+	record, exists := r.directory.Records[r.resourceKey(resource)]
 	if r.recoveryReports == nil {
 		r.recoveryReports = make(map[string]map[string]replicaRecord)
 	}
@@ -407,7 +425,7 @@ func (r *replicationManager) mergeRecoveryReport(id string, reported replicaReco
 			}
 			owner = id
 		}
-		if record.Epoch == reported.Epoch && r.confirmed[resource.key()] != "" && owner != "" && record.Owner != owner {
+		if record.Epoch == reported.Epoch && r.confirmed[r.resourceKey(resource)] != "" && owner != "" && record.Owner != owner {
 			return replicaRecord{}, false, false, fmt.Errorf("conflicting recovery authority")
 		}
 		if owner != "" {
@@ -426,11 +444,11 @@ func (r *replicationManager) mergeRecoveryReport(id string, reported replicaReco
 				record.Readers[id] = true
 			}
 			if owns || owner == r.id {
-				r.confirmed[resource.key()] = owner
+				r.confirmed[r.resourceKey(resource)] = owner
 			}
 			record.InitialClaimed = reported.InitialClaimed
-			if backup, ok := r.backups[resource.key()]; ok {
-				record.Generation = backup.Generation
+			if backup, ok := r.backups[r.resourceKey(resource)]; ok {
+				record.Content = backup.Content
 			}
 			if owner == r.id {
 				record.State = "M"
@@ -453,12 +471,12 @@ func (r *replicationManager) mergeRecoveryReport(id string, reported replicaReco
 				continue
 			}
 			owner := source
-			if proof.Handoff == r.id && (r.backups[resource.key()].Generation == proof.Generation || localGeneration != "") {
+			if proof.Handoff == r.id && (r.backups[r.resourceKey(resource)].Content == proof.Content || localGeneration != "") {
 				owner = r.id
 			}
-			record = replicaRecord{Resource: resource, Owner: owner, Epoch: proof.Epoch, State: "IO", Readers: maps.Clone(proof.Readers), Generation: r.backups[resource.key()].Generation, InitialClaimed: proof.InitialClaimed}
+			record = replicaRecord{Resource: resource, Owner: owner, Epoch: proof.Epoch, State: "IO", Readers: maps.Clone(proof.Readers), Content: r.backups[r.resourceKey(resource)].Content, InitialClaimed: proof.InitialClaimed}
 			if owner == r.id && localGeneration != "" {
-				record.Generation = localGeneration
+				record.Content = localGeneration
 			}
 			delete(record.Readers, owner)
 			delete(record.Readers, proof.Handoff)
@@ -468,14 +486,14 @@ func (r *replicationManager) mergeRecoveryReport(id string, reported replicaReco
 					record.State = "O"
 				}
 			}
-			r.confirmed[resource.key()] = owner
+			r.confirmed[r.resourceKey(resource)] = owner
 			proof.Handoff = ""
 			r.recoveryReports[resource.key()][source] = proof
 			exists = true
 		}
 	}
 	if exists {
-		r.directory.Records[r.recordKey(resource)] = record
+		r.directory.Records[r.resourceKey(resource)] = record
 	}
 	return record, exists, claimed, nil
 }

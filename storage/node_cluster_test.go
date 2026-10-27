@@ -10,10 +10,12 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 */
 package storage
 
+import "fmt"
 import "time"
 import "context"
 import "testing"
 import "strings"
+import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -88,7 +90,7 @@ func TestClusterMountCannotBypassAdmissionThroughExplicitScanRPC(t *testing.T) {
 	if err == nil {
 		t.Fatal("unbudgeted describe opened a mounted snapshot")
 	}
-	task := remoteScanTask{Shard: remoteScanShard{Resource: mosiResource{Database: "mounted_snapshot", Table: "items", Shard: uuid.NewString()}, Generation: uuid.New()}}
+	task := remoteScanTask{Shard: remoteScanShard{Resource: mosiResource{Database: "mounted_snapshot", Table: "items", Shard: uuid.NewString()}}}
 	err = peer.call(context.Background(), "scan.execute", task, &reply)
 	if err == nil {
 		t.Fatal("explicit scan RPC bypassed mandatory cluster admission")
@@ -156,16 +158,16 @@ func TestClusterRebuildUUIDAliasesShareAuthority(t *testing.T) {
 		return true
 	})
 	next := &storageShard{uuid: uuid.New()}
-	cluster.aliasShard(old, next)
+	r.forwardResource(old, mosiResource{Database: old.Database, Table: old.Table, Shard: next.uuid.String()})
 	current := mosiResource{Database: old.Database, Table: old.Table, Shard: next.uuid.String()}
 	if r.resourceCell(current) != cell || r.resourceCell(old) != cell {
 		t.Fatal("rebuild created independently writable permission cells")
 	}
 	// Repeated publication can happen while translating an old native handle.
 	// It must not erase the canonical owner record or create another directory.
-	cluster.aliasShard(old, next)
-	r.updateRecord(old, func(record *replicaRecord) bool { record.Generation = next.uuid.String(); return true })
-	if len(r.directory.Records) != 1 || r.directory.Records[current.key()].Epoch != 7 || r.recordKey(old) != current.key() {
+	r.forwardResource(old, mosiResource{Database: old.Database, Table: old.Table, Shard: next.uuid.String()})
+	r.updateRecord(old, func(record *replicaRecord) bool { record.Content = next.uuid.String(); return true })
+	if len(r.directory.Records) != 1 || r.directory.Records[current.key()].Epoch != 7 || r.resourceKey(old) != current.key() {
 		t.Fatal("UUID forwarding lost canonical authority")
 	}
 }
@@ -289,4 +291,215 @@ func TestClusterGrantedSchemaReadDoesNotConsultSession(t *testing.T) {
 	defer nodeScans.Store(oldService)
 	tx := &TxContext{Session: scm.NewFunc(func(...scm.Scmer) scm.Scmer { panic("granted schema read consulted user session") })}
 	tbl.schema.GetRead(tx).Release()
+}
+
+func TestClusterDiscoveryIgnoresUnavailableNonOwner(t *testing.T) {
+	for _, scenario := range []string{"live-owner", "dead-owner", "restart-with-missing-peer"} {
+		t.Run(scenario, func(t *testing.T) {
+			cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, service: &nodeScanService{}}
+			cluster.initializeManager()
+			dead := clusterMember{ID: "memcp://" + uuid.NewString()}
+			live := clusterMember{ID: "memcp://" + uuid.NewString()}
+			unavailable := &mosiPeer{done: make(chan struct{})}
+			close(unavailable.done)
+			available := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+			cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, dead, live}, links: []*clusterLink{{member: dead, peer: unavailable}, {member: live, peer: available}}})
+			resource := mosiResource{Database: "discovery_db"}
+			cell := cluster.manager.resourceCell(resource)
+			if scenario != "restart-with-missing-peer" {
+				cell.ownstate.Establish(mosi.IO)
+			}
+			cluster.manager.updateRecord(resource, func(record *replicaRecord) bool { record.Owner, record.Epoch = dead.ID, 6; return true })
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			go func() {
+				select {
+				case message := <-available.outgoing:
+					var request struct {
+						Return string `json:"return"`
+					}
+					if json.Unmarshal(message.Data, &request) != nil {
+						return
+					}
+					answer := replicaRecord{Resource: resource, State: "S", Owner: dead.ID, Epoch: 7}
+					if scenario == "live-owner" {
+						answer.State, answer.Owner = "M", live.ID
+					}
+					if scenario == "restart-with-missing-peer" {
+						answer.Owner = cluster.self.ID
+					}
+					if value, ok := cluster.service.returns.Load(request.Return); ok {
+						value.(*scanReturnChannel).result <- scanCompletion{Data: mustScanJSON(answer)}
+					}
+				case <-ctx.Done():
+				}
+			}()
+			owner, err := cluster.locate(ctx, resource)
+			want := dead.ID
+			if scenario == "live-owner" {
+				want = live.ID
+			}
+			if scenario == "restart-with-missing-peer" {
+				if err == nil || cell.ownstate.Initialized() {
+					t.Fatal("incomplete discovery recovered owner permission")
+				}
+				return
+			}
+			if err != nil || owner != want {
+				t.Fatalf("owner lookup = %s, %v; want %s", owner, err, want)
+			}
+			if cell.ownstate.Phase() != mosi.IO || cluster.manager.directory.Retired[dead.ID] || len(cluster.view.Load().members) != 3 {
+				t.Fatal("discovery reclaimed rights or retired the unavailable participant")
+			}
+		})
+	}
+}
+
+func TestClusterRejectedReferenceDoesNotPublishForwarding(t *testing.T) {
+	for _, reason := range []string{"stale", "sender", "flight", "cross-table"} {
+		t.Run(reason, func(t *testing.T) {
+			cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}}
+			cluster.initializeManager()
+			r := cluster.manager
+			resource := mosiResource{Database: "reference_db", Table: "items", Shard: uuid.NewString()}
+			successor := resource
+			successor.Shard = uuid.NewString()
+			owner := "memcp://" + uuid.NewString()
+			cell := r.resourceCell(resource)
+			cell.ownstate.Initialize(mosi.S)
+			r.updateRecord(resource, func(record *replicaRecord) bool {
+				record.Owner, record.State, record.Epoch = owner, "S", 5
+				return true
+			})
+			packet := mosiPacket{Resource: resource, ID: uuid.NewString(), Epoch: 5, Content: successor.Shard, Forwards: []shardForward{{resource, successor}}}
+			source := owner
+			switch reason {
+			case "stale":
+				packet.Epoch = 4
+			case "sender":
+				source = "memcp://" + uuid.NewString()
+			case "cross-table":
+				packet.Forwards[0].From.Table = "other"
+			case "flight":
+				cell.ownstate.Publish(mosi.IO)
+				cell.ownstate.Request(mosi.S)
+			}
+			failure := map[string]string{"stale": "stale shared reference", "sender": "unsolicited shared reference", "flight": "unexpected shared reference request", "cross-table": "invalid transfer forwarding"}[reason]
+			if err := cluster.installReference(source, packet); err == nil || !strings.Contains(err.Error(), failure) {
+				t.Fatal("reference was not rejected for its invalid header", err)
+			}
+			if r.canonicalResource(resource) != resource || r.lookupCell(successor) != nil || *cell.resource.Load() != resource {
+				t.Fatal("rejected reference changed UUID routing")
+			}
+			if record := r.directory.Records[resource.key()]; record.Owner != owner || record.Epoch != 5 {
+				t.Fatal("rejected reference changed ownership", record)
+			}
+		})
+	}
+}
+
+func TestClusterAccessCancellationKeepsCommonFlight(t *testing.T) {
+	for _, write := range []bool{false, true} {
+		t.Run(fmt.Sprint("write=", write), func(t *testing.T) {
+			nodeCtx, stopNode := context.WithCancel(context.Background())
+			defer stopNode()
+			cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: nodeCtx}
+			cluster.initializeManager()
+			owner := "memcp://" + uuid.NewString()
+			peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 2)}
+			cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
+			tbl := &table{schema: &database{Name: "cancel_access_db"}, Name: "items"}
+			shard := &storageShard{t: tbl, uuid: uuid.New()}
+			r := cluster.manager
+			resource := r.shardResource(shard)
+			cell := r.shardCell(shard)
+			cell.ownstate.Initialize(mosi.IO)
+			r.resourceCell(mosiResource{Database: resource.Database}).ownstate.Initialize(mosi.S)
+			r.updateRecord(resource, func(record *replicaRecord) bool {
+				record.Owner, record.Epoch = owner, 1
+				return true
+			})
+			wanted := mosi.S
+			if write {
+				wanted = mosi.M
+			}
+			request, _ := cell.ownstate.Request(wanted)
+			ctx, cancel := context.WithCancel(context.Background())
+			ss := &scm.SessionState{}
+			seq := ss.BeginQuery("Query", "cancel admission")
+			ss.SetQueryContext(seq, ctx)
+			tx := NewTxContext(TxCursorStability)
+			tx.beginQuery(ss, seq, "cancel admission")
+			defer tx.endQuery(seq)
+			cancel()
+			done := make(chan any, 1)
+			go func() {
+				defer func() { done <- recover() }()
+				if write {
+					_, release := r.writeResource(resource, tx)
+					release()
+				} else {
+					r.readShard(shard, tx)
+				}
+			}()
+			select {
+			case failure := <-done:
+				if failure != context.Canceled {
+					t.Fatal("wrong cancelled access result", failure)
+				}
+			case <-time.After(time.Second):
+				stopNode()
+				<-done
+				t.Fatal("access ignored query cancellation")
+			}
+			if request.Flight().Err() != nil || len(peer.outgoing) != 0 {
+				t.Fatal("cancelled access changed the common request")
+			}
+			if _, err := cell.ownstate.Grant(request.Flight().ID(), wanted, func() error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if r.obtain(resource, wanted, "", nil) != cell {
+				t.Fatal("remaining waiter lost the completed grant")
+			}
+		})
+	}
+}
+
+func TestClusterReferenceKeepsAcquisitionID(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "cluster_reference_request", 0)
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}}
+	cluster.initializeManager()
+	r := cluster.manager
+	requester := "memcp://" + uuid.NewString()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 4)}
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: requester}, peer: peer}}})
+	resource := mosiResource{Database: tbl.schema.Name}
+	cell := r.resourceCell(resource)
+	cell.ownstate.Establish(mosi.M)
+	cell.clusterstate.Establish(mosi.M)
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.State, record.Epoch = r.id, "M", 1
+		return true
+	})
+	request := mosiPacket{Kind: "read", ID: uuid.NewString(), Resource: resource, Sequence: 1}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.coordinate(ctx, requester, request) }()
+	select {
+	case message := <-peer.outgoing:
+		if message.Packet == nil || message.Packet.Kind != "reference" || message.Packet.ID != request.ID {
+			t.Fatal("reference lost the pending acquisition identity", message.Packet)
+		}
+		step, ok := r.steps.Load(request.ID)
+		if !ok {
+			t.Fatal("reference has no matching installation acknowledgement")
+		}
+		step.(*replicaStep).finish(nil)
+	case <-ctx.Done():
+		t.Fatal("missing reference", ctx.Err())
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 }

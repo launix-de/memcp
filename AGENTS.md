@@ -170,7 +170,8 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   initial claims and request ordering are RAM-only and owned by `mu`. Published
   record maps are immutable; mutations copy their reader/request directories.
   A coordinator's pending reader directory remains private until final publication.
-  Each database schema and logical data shard has its own `replicaCell`.
+  Each database schema and shard UUID resolves to its `replicaCell`; rebuild
+  predecessors forward to the successor authority.
   `replicaCell.clusterstate` is RAM-only outward domain authority, including
   delegated descendants; `ownstate` alone admits local schema/shard execution
   and owns the existing active/closing writer. Publish outward permission before
@@ -182,14 +183,19 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   remain private when a future grouped slave reports to its enclosing domain.
   Reuse this pair per hierarchy boundary; it is not a global two-flag topology.
   Local reads never inspect the outer slot, register or synchronize with it.
-  Diagnostics sample both slots on demand and are never an admission snapshot.
+  Diagnostics sample both slots and each alias's canonical resource on demand;
+  they expose no additional grant and are never an admission snapshot.
   Its existing `acquire` mutex serializes inbound grant, recall, invalidation
   and final slave import publication against epoch changes; local granted
-  reads and write batches never acquire it. Release it before transport sends.
+  reads and write batches never acquire it. Shared references validate epoch,
+  sender, pending request and captured content before publishing UUID edges;
+  their installation acknowledgement retains the original acquisition ID.
+  Release acquire before transport sends. Query-owned acquisition waits retain
+  the query context; cancellation releases only that waiter, never the shared flight.
   `replicaRequestMark.ID` and `Completed` belong to the immutable RAM directory
   entry under existing resource-directory serialization. Completed requests
   cannot execute twice; a same-flight read-to-write upgrade remains valid.
-  `replicaStep.epoch` and `generation` are immutable operation identity, set
+  `replicaStep.epoch` and `content` are immutable operation identity, set
   before registration and checked before replies can finish that operation.
   Authenticated reconnect reports recover rights from live participants. `boot`
   identifies a process incarnation; `peersBoot`, `peerReady`, `initialClaims`, `confirmed` and
@@ -200,7 +206,10 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   None of this recovery/control ownership participates in authorized read loops.
   `config` is a startup-initialized ordinary SAFE table; its native APIs persist
   cached login proofs, explicit retirement and completed copy placement, keyed by
-  the local node UUID even when the backend is shared.
+  the local node UUID even when the backend is shared. Completed copies name actual
+  shard UUIDs (or schema digests) and may retain UUID forwarding metadata, never
+  permissions. Replacing a placement and retiring its old entry use one native
+  transaction; old backup record encodings are read without restoring authority.
   `backups` is a `mu`-guarded RAM cache of that placement, never permission.
   No private journal or persisted slave registration exists. `replicationStarting`
   is published before catalog discovery; startup GC cannot delete unexamined
@@ -245,7 +254,7 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   under the manager mutex within one process incarnation, before enqueueing.
   `mosi_transport.go` and `mosi_wire.go` contain shared engine transport/framing;
   the normal HTTP `/cluster` route and optional dedicated replication listener use
-  the same `memcp.mosi.v1` binary WebSocket envelope. JSON control metadata and
+  the same `memcp.mosi.v2` binary WebSocket envelope. JSON control metadata and
   raw compressed chunk bytes are bounded together before dispatch. Unsupported
   protocols and text frames are rejected, never silently downgraded.
   Scheme startup initializes replication and explicitly composes `http_route`
@@ -276,14 +285,34 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   with no deltas, and cannot promote IO or a pending request. Restart requires
   live peer authority before any former delegated local generation is usable.
   Interrupted handover recovery uses the surviving source's RAM report and the
-  master's complete native generation/WAL. Incoming schemas preserve local
-  physical UUIDs for existing logical shards; canonical schema digests exclude
-  physical placement and advisory statistics.
+  master's complete native generation/WAL. Incoming schemas preserve
+  local shard files through known UUID forwarding until replacement data arrives.
+  Schema digests use captured declaration/partition/writer-lane shape, excluding
+  rebuild UUIDs and advisory statistics; they never consult mutable routing.
   `resource`, `current` and the immutable cell lookup directory are atomically
-  published; additions use the manager mutex. `storageShard.lineage` is immutable
-  and inherited by rebuild successors; physical UUIDs identify generations.
-  `storageShard.coherence` attaches its stable resource cell through atomic CAS.
-  `retiredShards` is an immutable weak directory updated at generation publication.
+  published; additions and UUID forwarding use the manager mutex. Each shard has
+  only its own UUID; native `next` publication also forwards MOSI/cluster routing.
+  Old UUID lookup entries are routing aliases, never additional identities or
+  independent write rights. `replicaCell.forward` joins placeholders with existing
+  authority; its lazily initialized `forwardDone` wakes only cold acquisition
+  waiters to retry on that authority. Granted reads only load these atomics.
+  `storageShard.coherence` attaches authority through atomic CAS; rebuild successors
+  borrow it. The native atomic topology swap alone selects the active payload;
+  `current` advances afterwards as a hint. New read/write admission and
+  transaction drain/source preparation resolve the native topology if that hint
+  lags or points at a prospective input; already acquired historical leases
+  retain their original shard. No new publication
+  flag, identity or row-loop bookkeeping is added. `retiredShards` is an immutable weak directory updated at shard
+  publication; routing aliases retain no historical payload by themselves.
+  `tableSchemaTopology.forwards` is immutable native UUID successor metadata,
+  published with the exact durable shard list. Unpublished loading consumes
+  `table.RestoredShardForwards`; the cold `replicaRoutes` once-barrier restores
+  these edges before interpreting peer reports. It restores no permissions and
+  participates in no already-authorized read. Ordinary local tables create no
+  forwarding history. Cluster and replication use the same cell lookup and UUID
+  routing; no separate cluster alias/state directory is retained. Replica
+  acquisition requests carry native UUID edges; only their authenticated current
+  owner can introduce an unknown successor, without granting local permission.
   Maintenance preserves historical files while snapshots retain those shards;
   readers neither register nor touch retirement metadata.
   Incoming payloads use bounded independently compressed chunks and private
@@ -294,9 +323,11 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   and runtime GC retains completed backup files and blob manifests independently
   of advertised remote topology. Explicit retirement restores only that completed
   generation before publishing M; it never promotes an incomplete transfer.
-  `replicaImport.knownGeneration` is immutable receiver-owned import metadata,
-  initialized from completed native data placement before publication. A resend
-  consumes existing immutable columns without opening another backend writer;
+  `replicaImport.knownContent` is immutable receiver-owned import metadata,
+  initialized from completed native data placement or retained completed shards
+  before publication. `superseded` is receiver-owned final-publication metadata:
+  a late transfer is acknowledged without replacing an already known successor.
+  A resend consumes existing immutable columns without opening another backend writer;
   interrupted resends must never truncate a completed backup. Retirement joins
   the peer reader before promoting a backup, so an earlier import cannot publish
   over the promoted owner. RPC workers retain their existing lifecycle ownership.
@@ -998,8 +1029,11 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   Completion, early LIMIT and panic/cancellation cleanup join producers and
   release queued readers exactly once, including queues removed from the heap.
   `TxContext.queryReaderReleases` is protected by its mutex and drained by
-  panic-safe `endQuery`; non-statement consumers release their prepared reader
-  explicitly. Usage timestamps change only during preparation. None of this
+  panic-safe `endStatement`/`endQuery`. Planner cache creation retains its
+  carrier through this existing release list before cache registration and
+  before returning an existing carrier, covering subsequent column initialization;
+  native cache-use pins prevent eviction until statement completion.
+  Non-statement consumers release their prepared reader explicitly. Usage timestamps change only during preparation. None of this
   process-local cache or lease state is persisted.
 
 - `TxContext.remoteBindings` lazily publishes one statement-owned

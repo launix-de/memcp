@@ -14,7 +14,6 @@ import "fmt"
 import "time"
 import "context"
 import "encoding/json"
-import "github.com/google/uuid"
 
 type clusterCapacityRejection struct{}
 type clusterReduceReply struct {
@@ -55,7 +54,7 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 	if len(origins) > 0 {
 		origin = origins[0]
 	}
-	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.uuid.String()}, Generation: shard.uuid}
+	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.uuid.String()}}
 	// Residency is only a hint. Permission acquisition remains at GetRead;
 	// no backend bytes are read to decide whether execution should move.
 	acquireClusterRead(scanQueryContext(tx, cluster.ctx), expected.Resource)
@@ -71,14 +70,14 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 			cancel()
 			if err == nil && hint.Warm {
 				cluster.locality.Add(1)
-				panic(shardReadDelegation{&shardScanTarget{resource: expected.Resource, generation: shard.uuid, executor: &clusterScanExecutor{cluster: cluster, expected: expected, preferred: link}, origin: origin}})
+				panic(shardReadDelegation{&shardScanTarget{resource: expected.Resource, executor: &clusterScanExecutor{cluster: cluster, expected: expected, preferred: link}, origin: origin}})
 			}
 		}
 	}
 
 }
 func clusterSnapshotShard(ctx context.Context, expected remoteScanShard) (*storageShard, error) {
-	if !expected.Resource.valid() || expected.Resource.Shard == "" || expected.Generation == uuid.Nil || expected.Schema == 0 {
+	if !expected.Resource.valid() || expected.Resource.Shard == "" || expected.Schema == 0 {
 		return nil, fmt.Errorf("invalid cluster shard identity")
 	}
 	if !sharedClusterDatabase(expected.Resource.Database) {
@@ -96,7 +95,7 @@ func clusterSnapshotShard(ctx context.Context, expected remoteScanShard) (*stora
 		return nil, fmt.Errorf("cluster schema changed")
 	}
 	for _, shard := range table.activeTopology().shards {
-		if shard != nil && shard.uuid.String() == expected.Resource.Shard && shard.uuid == expected.Generation {
+		if shard != nil && shard.uuid.String() == expected.Resource.Shard {
 			return shard, nil
 		}
 	}
@@ -166,7 +165,7 @@ type clusterScanExecutor struct {
 	preferred *clusterLink
 }
 
-func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, generation uuid.UUID, invocation shardScanInvocation) scanResult {
+func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, invocation shardScanInvocation) scanResult {
 	if !clusterScanSupported(invocation.tx) {
 		panic("automatic cluster placement requires native CS or ACID read visibility")
 	}
@@ -207,7 +206,7 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, gen
 				}
 			}()
 			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected, kind: "value", next: &link.sequence, cluster: true}
-			result = remote.ExecuteShardScan(resource, generation, invocation)
+			result = remote.ExecuteShardScan(resource, invocation)
 		}()
 		if !rejected {
 			executor.cluster.delegated.Add(1)
@@ -221,6 +220,6 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, gen
 // Only an outer operator/reducer may translate it into a delegated task.
 func (cluster *nodeCluster) shardRAMUnavailable(shard, origin *storageShard) shardReadDelegation {
 	cluster.capacity.Add(1)
-	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.uuid.String()}, Generation: shard.uuid}
-	return shardReadDelegation{&shardScanTarget{resource: expected.Resource, generation: shard.uuid, origin: origin, executor: &clusterScanExecutor{cluster: cluster, expected: expected}}}
+	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.uuid.String()}}
+	return shardReadDelegation{&shardScanTarget{resource: expected.Resource, origin: origin, executor: &clusterScanExecutor{cluster: cluster, expected: expected}}}
 }

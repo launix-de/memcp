@@ -81,8 +81,8 @@ func TestRemoteScanRPCExecutesReductionWithCapturedHorizon(t *testing.T) {
 	}
 	task.Task++
 	task.Attempt = uuid.NewString()
-	task.Shard.Generation = uuid.New()
-	if err := peer.call(context.Background(), "scan.execute", task, &response); err == nil || !strings.Contains(err.Error(), "generation changed") {
+	task.Shard.Resource.Shard = uuid.NewString()
+	if err := peer.call(context.Background(), "scan.execute", task, &response); err == nil || !strings.Contains(err.Error(), "shard disappeared") {
 		t.Fatalf("stale generation: %v", err)
 	}
 	for _, shard := range tbl.ActiveShards() {
@@ -331,5 +331,43 @@ func TestRemoteScanPartialStripsParserLocationsBeforeChoosingCodec(t *testing.T)
 	want := scm.NewSlice([]scm.Scmer{scm.NewInt(42), scm.NewSlice([]scm.Scmer{scm.NewInt(7)})})
 	if !scm.Equal(value, want) {
 		t.Fatal("parser metadata changed the reduction value", value)
+	}
+}
+
+func TestRemoteScanRetainsUUIDAcrossRebuild(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "t_remote_uuid_rebuild", 4)
+	RebuildTable(table, true, false)
+	r := replicaRecoveryFixture()
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	held := table.ActiveShards()[0]
+	r.declareShard(held, r.id, true)
+	access := held.GetRead(nil)
+	defer access.Release()
+	peer, _, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := peer.call(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, table.schema.Name, table.Name}, &parts); err != nil {
+		t.Fatal(err)
+	}
+	table.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1000), scm.NewString("after-horizon")}}, nil, scm.NewNil(), false, nil)
+	RebuildTable(table, true, false)
+	current := table.ActiveShards()[0]
+	if held.uuid == current.uuid {
+		t.Fatal("fixture did not rebuild")
+	}
+	var freed [numEvictableTypes]int64
+	if !shardCleanup(current, &freed) || current.state() != COLD {
+		t.Fatal("successor did not become cold")
+	}
+	var result remoteScanResult
+	if err := peer.call(context.Background(), "scan.execute", makeRemoteScanTask(t, parts[0]), &result); err != nil {
+		t.Fatal(err)
+	}
+	value, err := decodeScanData(result.Value, false)
+	if err != nil || value.Int() != 9 || result.OutCount != 3 || result.Shard.Resource.Shard != held.uuid.String() {
+		t.Fatalf("remote scan lost its old shard/horizon: %+v, %v", result, err)
+	}
+	if current.state() != COLD {
+		t.Fatal("historical scan loaded an unrelated successor payload")
 	}
 }

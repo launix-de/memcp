@@ -32,7 +32,7 @@ type replicaStatus struct {
 
 // ReclaimReplicationDatabases is the slave's periodic maintenance entry point.
 // Call it before taking rebuild/persistence locks: ordinary MOSI handovers can
-// need those same locks while the upstream supplies the current generation.
+// need those same locks while the upstream supplies the current content.
 // The cron owns serialization; failures affect only the current database.
 func ReclaimReplicationDatabases() []string {
 	r := replication.Load()
@@ -205,7 +205,7 @@ func (r *replicationManager) retire(id string) error {
 				record.Epoch++
 				record.Owner, record.State = r.id, "M"
 			}
-			r.confirmed[record.Resource.key()] = record.Owner
+			r.confirmed[r.resourceKey(record.Resource)] = record.Owner
 			return true
 		})
 		err = nil
@@ -352,12 +352,14 @@ func (r *replicationManager) statusSnapshot() ([]byte, error) {
 	// never a query-admission cache. Keep the legacy directory state for clients
 	// while exposing the outward/local distinction to tests and reviewers.
 	type authorityView struct {
-		Clusterstate string `json:"clusterstate"`
-		Ownstate     string `json:"ownstate"`
+		Resource     *mosiResource `json:"resource,omitempty"`
+		Clusterstate string        `json:"clusterstate"`
+		Ownstate     string        `json:"ownstate"`
 	}
 	authority := make(map[string]authorityView, len(r.cells))
 	for key, cell := range r.cells {
-		authority[key] = authorityView{cell.clusterstate.Phase().String(), cell.ownstate.Phase().String()}
+		cell = cell.resolved()
+		authority[key] = authorityView{Resource: cell.resource.Load(), Clusterstate: cell.clusterstate.Phase().String(), Ownstate: cell.ownstate.Phase().String()}
 	}
 	r.mu.Unlock()
 	return json.Marshal(struct {

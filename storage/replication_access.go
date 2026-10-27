@@ -23,6 +23,13 @@ import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
 type replicaCell struct {
+	// A learned UUID route may join an unpublished placeholder to an existing
+	// authority. Cold request waiters retry through this edge; granted reads
+	// resolve one atomic pointer and never register with it.
+	forward     atomic.Pointer[replicaCell]
+	forwardOnce sync.Once
+	forwardDone chan struct{}
+
 	// Each schema/logical shard has two independent authority slots. Both use
 	// the same MOSI implementation; neither state is a persisted directory.
 	//
@@ -50,10 +57,48 @@ type replicaCell struct {
 	bootstrapStarted  bool
 	directory         sync.Mutex
 	checkpoint        sync.Mutex // database backup order; never acquired by local readers/writers
-	sendMu            sync.Mutex // source generation streams for this resource only
+	sendMu            sync.Mutex // source content streams for this resource only
 	importPublication sync.Mutex // schema cell: import registration/publication versus GC
 	acquire           sync.Mutex
 	retiredShards     atomic.Pointer[[]weak.Pointer[storageShard]]
+}
+
+func (c *replicaCell) resolved() *replicaCell {
+	for {
+		next := c.forward.Load()
+		if next == nil {
+			return c
+		}
+		c = next
+	}
+}
+
+// The native topology selects the active payload, including after rights have
+// just been acquired from another peer. The common case uses atomic reads only;
+// the cold publication window resolves the existing topology by coherence cell.
+// Already acquired ReadAccess/snapshot leases retain their original shard.
+func (c *replicaCell) publishedShard() *storageShard {
+	c = c.resolved()
+	current := c.current.Load()
+	if current == nil || current.t == nil {
+		return current
+	}
+	topology := current.t.topology.Load()
+	if topology != nil && current.generation.Load() != topology {
+		for _, shard := range topology.shards {
+			if shard != nil {
+				if cell := shard.coherence.Load(); cell != nil && cell.resolved() == c {
+					return shard
+				}
+			}
+		}
+	}
+	return current
+}
+
+func (c *replicaCell) forwardingDone() <-chan struct{} {
+	c.forwardOnce.Do(func() { c.forwardDone = make(chan struct{}) })
+	return c.forwardDone
 }
 
 func (table *table) schemaWrite() (*table, WriteAccess) {
@@ -189,6 +234,8 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 		c.acquire.Unlock()
 	}
 	for {
+		c = c.resolved()
+		resource = *c.resource.Load()
 		publication, action := c.ownstate.Request(wanted)
 		if action == mosi.Ready {
 			return c
@@ -197,10 +244,14 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 			serial := r.requestSequence(publication.Flight())
 			var err error
 			packet := mosiPacket{Kind: "read", ID: publication.Flight().ID(), Resource: resource, Sequence: serial}
+			if !r.master && resource.Shard != "" {
+				packet.Forwards = r.shardRoutes(resource)
+			}
 			if publication.Phase() == mosi.MR {
 				packet.Kind = "write"
 			}
 			if r.master {
+				c := c
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 					defer cancel()
@@ -237,7 +288,12 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 			}
 		}
 		select {
+		case <-c.forwardingDone():
+			continue
 		case <-publication.Flight().Done():
+			if c.forward.Load() != nil {
+				continue
+			}
 			if publication.Flight().Err() != nil {
 				panic(mosi.NetworkError)
 			}
@@ -275,7 +331,7 @@ func (r *replicationManager) firstDatabase(name string, session scm.Scmer) {
 		return
 	}
 	r.mu.Lock()
-	claimed := r.directory.Records[r.recordKey(resource)].InitialClaimed
+	claimed := r.directory.Records[r.resourceKey(resource)].InitialClaimed
 	r.mu.Unlock()
 	wanted := mosi.M
 	if claimed {
@@ -295,9 +351,9 @@ func (r *replicationManager) firstDatabase(name string, session scm.Scmer) {
 			if shard == nil {
 				continue
 			}
-			item := mosiResource{Database: name, Table: table.Name, Shard: shard.logicalID().String()}
+			item := mosiResource{Database: name, Table: table.Name, Shard: shard.uuid.String()}
 			r.mu.Lock()
-			claimed := r.directory.Records[item.key()].InitialClaimed
+			claimed := r.directory.Records[r.resourceKey(item)].InitialClaimed
 			r.mu.Unlock()
 			if !claimed {
 				resources = append(resources, item)
@@ -344,7 +400,7 @@ func (r *replicationManager) readShard(shard *storageShard, tx *TxContext) *stor
 		wanted := mosi.S
 		if !r.master && !r.resourceCell(mosiResource{Database: resource.Database}).initialized.Load() {
 			r.mu.Lock()
-			claimed := r.directory.Records[r.recordKey(resource)].InitialClaimed
+			claimed := r.directory.Records[r.resourceKey(resource)].InitialClaimed
 			r.mu.Unlock()
 			// A query may beat its bootstrap worker to this shard. Its first
 			// acquisition still belongs to initialization and must request M;
@@ -353,19 +409,19 @@ func (r *replicationManager) readShard(shard *storageShard, tx *TxContext) *stor
 				wanted = mosi.M
 			}
 		}
-		r.obtain(resource, wanted, replicationUser(tx), tx)
+		c = r.obtain(resource, wanted, replicationUser(tx), tx)
 	}
-	if current := c.current.Load(); current != nil {
+	if current := c.publishedShard(); current != nil {
 		return current
 	}
 	return shard
 }
 
-// Native transaction ownership already tracks every modified generation.
+// Native transaction ownership already tracks every modified content.
 // Reuse that proof for handover; no transaction-wide replication lock, counter
 // or duplicate per-transaction resource directory is maintained.
 func (c *replicaCell) writesDrained() bool {
-	if shard := c.current.Load(); shard != nil && shard.activeTransactions.Load() != 0 {
+	if shard := c.publishedShard(); shard != nil && shard.activeTransactions.Load() != 0 {
 		return false
 	}
 	if previous := c.retiredShards.Load(); previous != nil {
@@ -388,7 +444,7 @@ func (c *replicaCell) drainWrites(ctx context.Context) error {
 			groups[shard.t] = append(groups[shard.t], shard)
 		}
 	}
-	add(c.current.Load())
+	add(c.publishedShard())
 	if history := c.retiredShards.Load(); history != nil {
 		for _, entry := range *history {
 			add(entry.Value())
@@ -409,7 +465,7 @@ func (c *replicaCell) transactionContinues(tx *TxContext) bool {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	for shard := range tx.shards {
-		if shard.coherence.Load() == c {
+		if shardCell := shard.coherence.Load(); shardCell != nil && shardCell.resolved() == c {
 			return true
 		}
 	}
@@ -436,7 +492,9 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext)
 		owner = tx
 	}
 	for {
-		r.obtain(resource, mosi.M, replicationUser(tx), tx)
+		c = c.resolved()
+		resource = *c.resource.Load()
+		c = r.obtain(resource, mosi.M, replicationUser(tx), tx)
 		continuation := c.ownstate.ClosingWrites() && c.transactionContinues(tx)
 		writer, wait := c.ownstate.TryWrite(owner, continuation)
 		if writer != nil {
@@ -519,16 +577,16 @@ func (r *replicationManager) backupDatabase(name, user string) {
 			if cell.ownstate.Phase() != mosi.M {
 				return false
 			}
-			generation, err := r.prepareResource(resource)
+			content, err := r.prepareResource(resource)
 			if err != nil {
 				scm.PrintError(err)
 				return false
 			}
-			r.localRecord(resource, mosi.M, generation)
+			r.localRecord(resource, mosi.M, content)
 			r.mu.Lock()
-			epoch := r.directory.Records[r.recordKey(resource)].Epoch
+			epoch := r.directory.Records[r.resourceKey(resource)].Epoch
 			r.mu.Unlock()
-			transfer, err := r.captureResource(resource, generation)
+			transfer, err := r.captureResource(resource, content)
 			if err != nil {
 				scm.PrintError(err)
 				return false
@@ -536,7 +594,7 @@ func (r *replicationManager) backupDatabase(name, user string) {
 			handover.Release()
 			locked = false
 			releasePersistence()
-			if err := r.sendResource(peer, mosiPacket{ID: uuid.NewString(), Resource: resource, Epoch: epoch, Generation: generation, User: user, Hash: auth.Hash}, transfer); err != nil {
+			if err := r.sendResource(peer, mosiPacket{ID: uuid.NewString(), Resource: resource, Epoch: epoch, Content: content, User: user, Hash: auth.Hash}, transfer); err != nil {
 				scm.PrintError(err)
 				return false
 			}

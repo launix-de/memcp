@@ -39,9 +39,7 @@ type storageShard struct {
 	filterFeedback filterFeedbackCache
 	t              *table
 	uuid           uuid.UUID // uuid.String()
-	// lineage identifies one logical shard across immutable rebuild generations.
-	// Constructors/load own initialization; rebuild successors inherit it.
-	lineage   uuid.UUID
+	// MOSI authority is forwarded together with rebuild successors.
 	coherence atomic.Pointer[replicaCell]
 	// Immutable query-local remote-stub routing, initialized before use.
 	// Runtime-only; never copied to rebuild successors or historical generations.
@@ -525,56 +523,35 @@ func (s shardStatsSnapshot) rowCount() int64 {
 }
 
 func (u *storageShard) MarshalJSON() ([]byte, error) {
-	if u.t != nil && u.t.schema != nil && (sharedClusterDatabase(u.t.schema.Name) || replication.Load() != nil) && validReplicaDatabase(u.t.schema.Name) {
-		return json.Marshal(struct {
-			UUID    string `json:"uuid"`
-			Lineage string `json:"mosi"`
-		}{u.uuid.String(), u.logicalID().String()})
-	}
 	return json.Marshal(u.uuid.String())
 }
 func (u *storageShard) UnmarshalJSON(data []byte) error {
-	var generation string
+	var identity string
 	if len(data) > 0 && data[0] == '{' {
-		var identity struct {
-			UUID    string `json:"uuid"`
-			Lineage string `json:"mosi"`
+		// Read the shard UUID from old catalogs; the former mosi identity is
+		// deliberately not restored. Permissions are reconstructed from peers.
+		var legacy struct {
+			UUID string `json:"uuid"`
 		}
-		if err := json.Unmarshal(data, &identity); err != nil {
+		if err := json.Unmarshal(data, &legacy); err != nil {
 			return err
 		}
-		generation = identity.UUID
-		var err error
-		u.lineage, err = uuid.Parse(identity.Lineage)
-		if err != nil {
-			return err
-		}
-	} else if err := json.Unmarshal(data, &generation); err != nil {
+		identity = legacy.UUID
+	} else if err := json.Unmarshal(data, &identity); err != nil {
 		return err
 	}
 	var err error
-	u.uuid, err = uuid.Parse(generation)
+	u.uuid, err = uuid.Parse(identity)
 	if err != nil {
 		return err
 	}
-	if u.lineage == uuid.Nil {
-		u.lineage = u.uuid
-	}
-	// do not load heavy fields here; delay until first access
 	u.columns = make(map[string]ColumnStorage)
 	u.deltaColumns = make(map[string]int)
 	u.deletions.Reset()
 	u.setState(COLD)
-	// the rest of the unmarshalling is done in the caller because u.t is nil in the moment
 	return nil
 }
 
-func (u *storageShard) logicalID() uuid.UUID {
-	if u.lineage != uuid.Nil {
-		return u.lineage
-	}
-	return u.uuid
-}
 func (u *storageShard) load() {
 	// The table identity is initialized before publication. Cold loading must
 	// not rewrite it while schema checkpoints serialize this generation.
@@ -1032,7 +1009,7 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
 			cell := r.shardCell(s)
 			cell, release = r.writeResource(*cell.resource.Load(), currentTx)
-			if current := cell.current.Load(); current != nil {
+			if current := cell.publishedShard(); current != nil {
 				s = current
 			}
 		}
@@ -1289,7 +1266,6 @@ func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 func NewShard(t *table) *storageShard {
 	result := new(storageShard)
 	result.uuid, _ = uuid.NewRandom()
-	result.lineage = result.uuid
 	result.t = t
 	result.columns = make(map[string]ColumnStorage)
 	result.deltaColumns = make(map[string]int)
@@ -4122,7 +4098,6 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	}()
 	result := new(storageShard)
 	result.t = t.t
-	result.lineage = t.logicalID()
 	result.coherence.Store(t.coherence.Load())
 	result.setState(WRITE) // mark as live so ensureLoaded() won't reset columns
 	result.mu.Lock()       // interlock so no one will rebuild the shard twice

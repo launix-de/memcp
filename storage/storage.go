@@ -2498,7 +2498,7 @@ func Init(en scm.Env) {
 			// result stays race-free under concurrent creators.
 			if ifnotexists {
 				if existing := db.tables.Get(tblName); existing != nil {
-					if existing.OnInit.Load() != nil || existing.onInitComplete.Load() {
+					if (existing.OnInit.Load() != nil || existing.onInitComplete.Load()) && scmerToTxContext(currentTx).retainQueryTable(existing) {
 						// This also reruns persisted oninit for data-empty MEMORY/CACHE
 						// tables after restart. The local barrier affects no other table.
 						existing.awaitCreationInitialization(currentTx)
@@ -2651,6 +2651,10 @@ func Init(en scm.Env) {
 				return existing
 			}()
 			if existing != nil {
+				if !scmerToTxContext(currentTx).retainQueryTable(existing) {
+					db.schemalock.Unlock()
+					panic("cache table retired during creation")
+				}
 				// Keep the hot ifnotexists path free of schema saves. Planner-created
 				// helper tables deliberately re-issue createtable on every query; if
 				// the table already exists, "created=false" is the only signal the
@@ -2681,6 +2685,9 @@ func Init(en scm.Env) {
 					panic("declaration name already exists: " + c.DefaultName)
 				}
 			}
+			// Retain the unpublished carrier before cache registration can offer
+			// it for eviction. The caller still has initialization work to do.
+			scmerToTxContext(currentTx).retainQueryTable(newTable)
 			newTable.creationMu.Lock()
 			if prev := db.tables.Set(tblName, newTable); prev != nil {
 				newTable.creationMu.Unlock()
