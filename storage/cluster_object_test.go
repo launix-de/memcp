@@ -259,6 +259,13 @@ func TestClusterObjectOwnerCacheMapFactoryAndNestedRuntimeCapture(t *testing.T) 
 	if value.Int() != 10 || scm.Apply(cache, scm.NewString("key")).Int() != 10 {
 		t.Fatal("factory did not execute at cache owner", value)
 	}
+	if scm.Apply(remote, scm.NewString("key")).Int() != 10 {
+		t.Fatal("factory result was not published in the imported view")
+	}
+	scm.Apply(cache, scm.NewString("owner-only"), scm.NewInt(17))
+	if scm.Apply(remote, scm.NewString("owner-only")).Int() != 17 {
+		t.Fatal("unprepared cache miss silently became nil instead of using owner")
+	}
 	// The owner mutation must round-trip. Subsequent reads of this prepared
 	// accessor stay local, including a cached SQL NULL.
 	scm.Apply(remote, scm.NewString("key"), scm.NewNil())

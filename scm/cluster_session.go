@@ -55,11 +55,15 @@ type clusterSession struct {
 	values atomic.Pointer[map[string]Scmer] // immutable S-view, lock-free local reads
 }
 
-func newClusterSession(handle ClusterHandle) Scmer { return NewClusterAssoc(handle, sessionCallableID) }
+func newClusterSession(handle ClusterHandle) Scmer {
+	return NewClusterAssoc(handle, sessionCallableID, false)
+}
 
-// NewClusterAssoc prepares an immutable local S-view; only owner mutations call
-// the network. Session/cachemap owners supply their own captured view semantics.
-func NewClusterAssoc(handle ClusterHandle, callableType CallableTypeID) Scmer {
+// NewClusterAssoc prepares an immutable local read view. Session absence is nil;
+// a cachemap miss must consult its owner (which may run a factory), never silently
+// become nil. Prepared/warm reads remain atomic-load/map-only. Explicit factories
+// forward their supplied execution scope; no per-row cancellation probe is added.
+func NewClusterAssoc(handle ClusterHandle, callableType CallableTypeID, ownerOnMiss bool) Scmer {
 	values := make(map[string]Scmer)
 	pairs := handle.View.Slice()
 	if len(pairs)%2 != 0 {
@@ -79,33 +83,42 @@ func NewClusterAssoc(handle ClusterHandle, callableType CallableTypeID) Scmer {
 			return NewSlice(keys)
 		}
 		if len(args) == 1 {
-			return (*s.values.Load())[args[0].String()]
-		}
-		if len(args) == 2 {
-			value, err := s.handle.Call(context.Background(), ClusterRequest{Method: "call", Arguments: args})
-			if err != nil {
-				panic(err)
+			value, found := (*s.values.Load())[args[0].String()]
+			if found || !ownerOnMiss {
+				return value
 			}
-			for {
-				old := s.values.Load()
-				next := make(map[string]Scmer, len(*old)+1)
-				for k, v := range *old {
-					next[k] = v
-				}
-				next[args[0].String()] = value
-				if s.values.CompareAndSwap(old, &next) {
-					break
-				}
-			}
-			return value
 		}
-		value, err := s.handle.Call(context.Background(), ClusterRequest{Method: "call", Arguments: args})
+		ctx := context.Background()
+		if ownerOnMiss && len(args) == 3 {
+			ctx = executionContextFrom(args[1])
+		}
+		value, err := s.handle.Call(ctx, ClusterRequest{Method: "call", Arguments: args})
 		if err != nil {
 			panic(err)
+		}
+		// An ordinary key update or cachemap factory/miss publishes a private
+		// successor view. Session's scoped 4/5-argument calls are not plain keys.
+		if len(args) == 2 || ownerOnMiss && (len(args) == 1 || len(args) == 3) {
+			s.publishValue(args[0].String(), value)
 		}
 		return value
 	}
 	return NewClusterFunc(call, s, callableType)
+}
+
+// Publication belongs to mutations/misses, never a prepared local read.
+func (s *clusterSession) publishValue(key string, value Scmer) {
+	for {
+		old := s.values.Load()
+		next := make(map[string]Scmer, len(*old)+1)
+		for k, v := range *old {
+			next[k] = v
+		}
+		next[key] = value
+		if s.values.CompareAndSwap(old, &next) {
+			return
+		}
+	}
 }
 func (s *clusterSession) ClusterObjectType() string { return s.handle.Reference.Type }
 func (s *clusterSession) HandleClusterRequest(ctx context.Context, r ClusterRequest) (any, error) {

@@ -65,8 +65,9 @@ representation or replace session calls with constants.
 
 `ClusterBindings` captures one owner-defined view per statement. An optional
 object-owned projection restricts it to demanded keys. Imported session/cachemap
-reads use immutable local views without a lock, CAS, network request or shared
-RAM write per row. Explicit mutations go to the owner. This is an invocation
+prepared reads use immutable local views without a lock, CAS, network request
+or shared RAM write per row. A cachemap miss uses its owner stub and publishes
+the result privately; explicit mutations and factories go to the owner. This is an invocation
 snapshot, not a promise of continuously refreshed shared session state. The
 callable ABI and 16-byte Scmer representation remain unchanged. Plans retain no
 invocation instance. Nested captures and quoted captured containers use the same

@@ -353,5 +353,7 @@ func (cm *cacheMap) ProjectClusterView(view scm.Scmer, keys []scm.Scmer) (scm.Sc
 	return scm.ProjectClusterAssoc(scm.NewSlice(prepared), keys)
 }
 func init() {
-	scm.RegisterClusterObjectType("cachemap", func(handle scm.ClusterHandle) scm.Scmer { return scm.NewClusterAssoc(handle, cacheMapCallableTypeID) })
+	scm.RegisterClusterObjectType("cachemap", func(handle scm.ClusterHandle) scm.Scmer {
+		return scm.NewClusterAssoc(handle, cacheMapCallableTypeID, true)
+	})
 }
