@@ -16,20 +16,37 @@ import "github.com/launix-de/memcp/scm"
 
 // scanWireValue represents native reducer data, not a second SQL aggregation
 // model. Dictionary keys may themselves be tuples (including NULL domains).
-// Physical query-local handles and runtime objects require explicit contracts
-// and cannot enter this codec. Encoding happens only at shard task boundaries.
+// Runtime objects/procedures enter only with explicit export/decode contexts;
+// aggregate-only callers remain data-only. Encoding happens at task boundaries,
+// never per row. Physical query-local containers without a contract fail.
 type scanWireValue struct {
-	Kind   string          `json:"kind"`
-	Scalar json.RawMessage `json:"scalar,omitempty"`
-	Items  []scanWireValue `json:"items,omitempty"`
+	Reference *scm.ClusterReference `json:"reference,omitempty"`
+	Procedure json.RawMessage       `json:"procedure,omitempty"`
+	Kind      string                `json:"kind"`
+	Scalar    json.RawMessage       `json:"scalar,omitempty"`
+	Items     []scanWireValue       `json:"items,omitempty"`
 }
 
-func freezeScanValue(value scm.Scmer, depth int) (scanWireValue, error) {
+func freezeScanValue(value scm.Scmer, depth int, bindings ...*scm.SerializationContext) (scanWireValue, error) {
 	// Parser locations are diagnostic wrappers, not runtime object identities.
 	// Unwrap before choosing the recursive container codec as well as validation.
 	value = value.WithoutSourceInfo()
 	if depth > 64 {
 		return scanWireValue{}, fmt.Errorf("remote aggregate nesting limit")
+	}
+	if len(bindings) > 0 && bindings[0] != nil {
+		if _, ok := scm.ClusterObjectOf(value); ok {
+			// Use the same mandatory Serialize contract as captured objects.
+			// The thunk reconstructs once during import, never in a row loop;
+			// objects may choose portable values instead of owner references.
+			thunk := scm.Eval(scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(nil), value}), &scm.Globalenv)
+			data, err := scm.MarshalProcedure(thunk, bindings[0])
+			return scanWireValue{Kind: "expression", Procedure: data}, err
+		}
+		if value.IsProc() {
+			data, err := scm.MarshalProcedure(value, bindings[0])
+			return scanWireValue{Kind: "procedure", Procedure: data}, err
+		}
 	}
 	out := scanWireValue{Kind: "scalar"}
 	var items []scm.Scmer
@@ -50,16 +67,38 @@ func freezeScanValue(value scm.Scmer, depth int) (scanWireValue, error) {
 	out.Items = make([]scanWireValue, len(items))
 	for i, item := range items {
 		var err error
-		out.Items[i], err = freezeScanValue(item, depth+1)
+		out.Items[i], err = freezeScanValue(item, depth+1, bindings...)
 		if err != nil {
 			return out, err
 		}
 	}
 	return out, nil
 }
-func (value scanWireValue) thaw(depth int) (scm.Scmer, error) {
+func (value scanWireValue) thaw(depth int, decode ...scm.ProcedureDecode) (scm.Scmer, error) {
 	if depth > 64 {
 		return scm.NewNil(), fmt.Errorf("remote aggregate nesting limit")
+	}
+	if value.Reference != nil && value.Kind != "object" || len(value.Procedure) != 0 && value.Kind != "procedure" && value.Kind != "expression" {
+		return scm.NewNil(), fmt.Errorf("mixed runtime value encoding")
+	}
+	if value.Kind == "object" {
+		if len(value.Items) != 0 || len(value.Scalar) != 0 || value.Reference == nil || len(decode) == 0 || decode[0].Resolve == nil {
+			return scm.NewNil(), fmt.Errorf("runtime object requires a reconstruction context")
+		}
+		return decode[0].Resolve(*value.Reference)
+	}
+	if value.Kind == "procedure" || value.Kind == "expression" {
+		if len(value.Items) != 0 || len(value.Scalar) != 0 || len(decode) == 0 {
+			return scm.NewNil(), fmt.Errorf("procedure requires a reconstruction context")
+		}
+		proc, err := scm.UnmarshalProcedure(value.Procedure, decode[0])
+		if err != nil {
+			return scm.NewNil(), err
+		}
+		if value.Kind == "expression" {
+			return scm.Apply(proc), nil
+		}
+		return proc, nil
 	}
 	if value.Kind == "scalar" {
 		if len(value.Items) != 0 {
@@ -73,7 +112,7 @@ func (value scanWireValue) thaw(depth int) (scm.Scmer, error) {
 	items := make([]scm.Scmer, len(value.Items))
 	for i, item := range value.Items {
 		var err error
-		items[i], err = item.thaw(depth + 1)
+		items[i], err = item.thaw(depth+1, decode...)
 		if err != nil {
 			return scm.NewNil(), err
 		}
@@ -154,4 +193,40 @@ func (access remoteScanAccess) bind() (scanAccess, error) {
 		}
 	}
 	return scanAccess{runtime: &scanAccessRuntime{suffix: scanAccessSegment{items: access.Boundaries, values: access.Values}, filterCovered: access.Covered}}, nil
+}
+
+// A cancelled or rejected completion must retire offers its receiver never
+// acquired, including references nested in callback captures and object views.
+func scanWireReferences(value scanWireValue) []scm.ClusterReference {
+	var result []scm.ClusterReference
+	seen := make(map[string]bool)
+	var walk func(scanWireValue, int)
+	var reference func(scm.ClusterReference, int)
+	reference = func(ref scm.ClusterReference, depth int) {
+		if depth > 64 || ref.Token == "" || seen[ref.URI+"/"+ref.Token] {
+			return
+		}
+		seen[ref.URI+"/"+ref.Token] = true
+		result = append(result, ref)
+		var view scanWireValue
+		if json.Unmarshal(ref.View, &view) == nil {
+			walk(view, depth+1)
+		}
+	}
+	walk = func(value scanWireValue, depth int) {
+		if depth > 64 {
+			return
+		}
+		if value.Reference != nil {
+			reference(*value.Reference, depth+1)
+		}
+		for _, ref := range scm.ProcedureClusterReferences(value.Procedure) {
+			reference(ref, depth+1)
+		}
+		for _, item := range value.Items {
+			walk(item, depth+1)
+		}
+	}
+	walk(value, 0)
+	return result
 }

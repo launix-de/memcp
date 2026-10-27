@@ -10,16 +10,13 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 */
 package storage
 
-import "fmt"
 import "time"
 import "context"
-import "encoding/json"
 
 type clusterCapacityRejection struct{}
-type clusterReduceReply struct {
-	Rejected bool              `json:"rejected"`
-	Result   *remoteScanResult `json:"result,omitempty"`
-}
+
+func (clusterCapacityRejection) Error() string { return "cluster shard RAM capacity unavailable" }
+
 type clusterShardHint struct {
 	Warm bool `json:"warm"`
 }
@@ -76,88 +73,6 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 	}
 
 }
-func clusterSnapshotShard(ctx context.Context, expected remoteScanShard) (*storageShard, error) {
-	if !expected.Resource.valid() || expected.Resource.Shard == "" || expected.Schema == 0 {
-		return nil, fmt.Errorf("invalid cluster shard identity")
-	}
-	if !sharedClusterDatabase(expected.Resource.Database) {
-		return nil, fmt.Errorf("database is not mounted for cluster scans")
-	}
-	db := GetDatabase(expected.Resource.Database)
-	if db == nil {
-		return nil, fmt.Errorf("unknown shared database")
-	}
-	acquireClusterRead(ctx, mosiResource{Database: db.Name})
-	access := db.GetRead(nil)
-	defer access.Release()
-	table := db.GetTable(expected.Resource.Table)
-	if table == nil || table.filterSchemaFingerprint() != expected.Schema {
-		return nil, fmt.Errorf("cluster schema changed")
-	}
-	for _, shard := range table.activeTopology().shards {
-		if shard != nil && shard.uuid.String() == expected.Resource.Shard {
-			return shard, nil
-		}
-	}
-	return nil, fmt.Errorf("cluster generation changed")
-}
-func (cluster *nodeCluster) compute(session *scanRPCSession, ctx context.Context, method string, data json.RawMessage) (any, error) {
-	if method == "cluster.hint" {
-		var expected remoteScanShard
-		if err := json.Unmarshal(data, &expected); err != nil {
-			return nil, err
-		}
-		shard, err := clusterSnapshotShard(ctx, expected)
-		if err != nil {
-			return nil, err
-		}
-		return clusterShardHint{shard.state() != COLD}, nil
-	}
-	var task remoteScanTask
-	if err := json.Unmarshal(data, &task); err != nil {
-		return nil, err
-	}
-	if task.ResultKind != "scalar" && task.ResultKind != "value" {
-		return nil, fmt.Errorf("unsupported automatic cluster reduction encoding")
-	}
-	shard, err := clusterSnapshotShard(ctx, task.Shard)
-	if err != nil {
-		return nil, err
-	}
-	acquireClusterRead(ctx, task.Shard.Resource)
-	var access ReadAccess
-	rejected := false
-	func() {
-		defer func() {
-			if failure := recover(); failure != nil {
-				if _, ok := failure.(shardReadDelegation); ok {
-					rejected = true
-				} else {
-					panic(failure)
-				}
-			}
-		}()
-		access = shard.GetRead(nil)
-	}()
-	if rejected {
-		return clusterReduceReply{Rejected: true}, nil
-	}
-	defer access.Release()
-	shard = access.shard
-	// Pin the native generation, then borrow its existing published extent.
-	// Cancellation is checked at task/shard boundaries, never in item loops.
-	task.Shard.Horizon = shard.captureScanHorizon()
-	result, err := session.executeScanTask(ctx, task)
-	if err != nil {
-		return nil, err
-	}
-	value, ok := result.(remoteScanResult)
-	if !ok {
-		return nil, fmt.Errorf("invalid cluster reduction result")
-	}
-	cluster.received.Add(1)
-	return clusterReduceReply{Result: &value}, nil
-}
 
 type clusterScanExecutor struct {
 	cluster   *nodeCluster
@@ -205,7 +120,7 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, inv
 					}
 				}
 			}()
-			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected, kind: "value", next: &link.sequence, cluster: true}
+			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected, kind: "value", next: &link.sequence}
 			result = remote.ExecuteShardScan(resource, invocation)
 		}()
 		if !rejected {

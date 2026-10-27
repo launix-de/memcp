@@ -11,9 +11,11 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package scm
 
 import "fmt"
+import "context"
 import "bytes"
 import "strings"
 import "testing"
+import "encoding/json"
 
 func TestProcedureWireSnapshotsCapturesAndRunsWithoutSourceEnvironment(t *testing.T) {
 	for _, optimize := range []bool{false, true} {
@@ -159,28 +161,27 @@ func TestProcedureWireUsesSchemeSerializeAndDoesNotEvaluateBody(t *testing.T) {
 	}
 }
 
-func TestProcedureWireNestedScanContextRebindSkipsQuotedData(t *testing.T) {
-	input := Read(t.Name(), `(lambda () (list (scan nil source) (scan (node_query_context "previous-hop") source) (quote (scan nil literal))))`)
-	binding := Read(t.Name(), `(node_query_context "current-hop")`)
-	bound := SerializeToString(bindProcedureScanContext(input, binding), nil)
-	if strings.Count(bound, "current-hop") != 2 || strings.Contains(bound, "previous-hop") || !strings.Contains(bound, "(scan nil literal)") {
-		t.Fatalf("nested scope rebinding changed quoted data or retained its parent: %s", bound)
-	}
-}
-
 func TestProcedureWireStatementSessionBindingsAreFrozen(t *testing.T) {
 	session := NewSession()
 	session.Func()(NewString("a"), NewInt(7))
 	session.Func()(NewString("b"), NewInt(8))
 	env := &Env{Vars: Vars{Symbol("session"): session}, Outer: &Globalenv}
-	bindings := new(ProcedureBindings)
-	run := func(key string, bindings *ProcedureBindings) Scmer {
+	export := func(object ClusterObject, view Scmer) (ClusterReference, error) {
+		data, _ := json.Marshal(view)
+		return ClusterReference{URI: "http://owner/cluster/test", Owner: "owner", Incarnation: "boot", Token: "handle", Type: object.ClusterObjectType(), View: data}, nil
+	}
+	bindings := &SerializationContext{Export: export}
+	run := func(key string, bindings *SerializationContext) Scmer {
 		proc := Eval(Read(t.Name(), `(lambda (x) (+ x (session "`+key+`")))`), env)
 		data, err := MarshalProcedure(proc, bindings)
 		if err != nil {
 			t.Fatal(err)
 		}
-		restored, err := UnmarshalProcedure(data)
+		restored, err := UnmarshalProcedure(data, ProcedureDecode{Resolve: func(ref ClusterReference) (Scmer, error) {
+			var view Scmer
+			_ = json.Unmarshal(ref.View, &view)
+			return ReconstructClusterObject(ClusterHandle{Reference: ref, View: view})
+		}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -193,7 +194,165 @@ func TestProcedureWireStatementSessionBindingsAreFrozen(t *testing.T) {
 	if got := run("b", bindings); got.Int() != 9 {
 		t.Fatal("one statement observed two session revisions", got)
 	}
-	if got := run("b", new(ProcedureBindings)); got.Int() != 100 {
+	if got := run("b", &SerializationContext{Export: export}); got.Int() != 100 {
 		t.Fatal("new statement retained the old session revision", got)
+	}
+}
+
+func TestProcedureWireRuntimeReferencesInsideQuotedCapturesKeepIdentity(t *testing.T) {
+	session := NewSession()
+	Apply(session, NewString("x"), NewInt(3))
+	object, _ := ClusterObjectOf(session)
+	bindings := &SerializationContext{Export: func(object ClusterObject, view Scmer) (ClusterReference, error) {
+		data, _ := json.Marshal(view)
+		return ClusterReference{URI: "http://owner/cluster/session", Token: "one", Type: object.ClusterObjectType(), View: data}, nil
+	}}
+	env := &Env{Vars: Vars{Symbol("captured"): NewSlice([]Scmer{NewSymbol("label"), session, session})}, Outer: &Globalenv}
+	data, err := MarshalProcedure(Eval(Read(t.Name(), `(lambda () captured)`), env), bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := UnmarshalProcedure(data, ProcedureDecode{Resolve: func(ref ClusterReference) (Scmer, error) {
+		var view Scmer
+		if err := json.Unmarshal(ref.View, &view); err != nil {
+			return NewNil(), err
+		}
+		return ReconstructClusterObject(ClusterHandle{Reference: ref, View: view, Call: func(ctx context.Context, r ClusterRequest) (Scmer, error) { return ClusterObjectValue(object, ctx, r) }})
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := Apply(restored).Slice()
+	if !values[0].IsSymbol() || values[0].String() != "label" || values[1] != values[2] {
+		t.Fatal("quoted runtime captures lost data or object identity")
+	}
+	Apply(values[1], NewString("x"), NewInt(41))
+	if Apply(values[2], NewString("x")).Int() != 41 || Apply(session, NewString("x")).Int() != 41 {
+		t.Fatal("shared accessor did not route mutation to its owner")
+	}
+}
+
+// A standalone embedding can serialize its own value without a storage import,
+// registered URI resolver, export callback or cluster listener.
+type standaloneSerializableValue struct {
+	calls int
+	fail  bool
+}
+
+func (*standaloneSerializableValue) ClusterObjectType() string { return "standalone-test-value" }
+func (v *standaloneSerializableValue) Serialize(*SerializationContext) (Scmer, error) {
+	v.calls++
+	if v.fail {
+		return NewNil(), fmt.Errorf("standalone serialization rejected")
+	}
+	return NewSlice([]Scmer{NewSymbol("quote"), NewSlice([]Scmer{NewString("portable"), NewInt(42)})}), nil
+}
+func (*standaloneSerializableValue) HandleClusterRequest(context.Context, ClusterRequest) (any, error) {
+	return nil, fmt.Errorf("standalone value needs no cluster requests")
+}
+
+func TestProcedureWireStandaloneObjectOwnsSerialization(t *testing.T) {
+	object := &standaloneSerializableValue{}
+	var source bytes.Buffer
+	Serialize(&source, NewAny(object), &Globalenv)
+	value := Eval(Read(t.Name(), source.String()), &Globalenv)
+	if !Equal(value, NewSlice([]Scmer{NewString("portable"), NewInt(42)})) || object.calls != 1 {
+		t.Fatal("standalone serializer did not dispatch to its object's representation", source.String(), object.calls)
+	}
+	proc := Eval(NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(nil), NewAny(object)}), &Globalenv)
+	data, err := MarshalProcedure(proc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := UnmarshalProcedure(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := Apply(restored); !Equal(got, NewSlice([]Scmer{NewString("portable"), NewInt(42)})) {
+		t.Fatal("procedure did not use object-owned reconstruction", got)
+	}
+	object.fail = true
+	if _, err := MarshalProcedure(proc); err == nil || !strings.Contains(err.Error(), "standalone serialization rejected") {
+		t.Fatal("object's serialization error was bypassed", err)
+	}
+}
+
+func TestProcedureWireEmbeddingPreparesBeforeCompilation(t *testing.T) {
+	proc := Eval(Read(t.Name(), `(lambda (x) (+ x 1))`), &Globalenv)
+	data, err := MarshalProcedure(proc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	restored, err := UnmarshalProcedure(data, ProcedureDecode{Prepare: func(expression Scmer) (Scmer, error) {
+		calls++
+		items := append([]Scmer(nil), expression.WithoutSourceInfo().Slice()...)
+		items[2] = NewSlice([]Scmer{NewSymbol("list"), items[2], NewInt(9)})
+		return NewSlice(items), nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := Apply(restored, NewInt(6))
+	if calls != 1 || !Equal(got, NewSlice([]Scmer{NewInt(7), NewInt(9)})) {
+		t.Fatal("embedding preparation was not applied before compilation", calls, got)
+	}
+	if _, err := UnmarshalProcedure(data, ProcedureDecode{Prepare: func(Scmer) (Scmer, error) { return NewNil(), fmt.Errorf("embedding refused") }}); err == nil {
+		t.Fatal("embedding preparation error was ignored")
+	}
+}
+
+type eagerWireTestValue struct{}
+
+func (*eagerWireTestValue) ClusterObjectType() string { return "eager-test-value" }
+func (*eagerWireTestValue) Serialize(*SerializationContext) (Scmer, error) {
+	return NewSlice([]Scmer{NewSymbol("wire_test_construct_capture_once")}), nil
+}
+func (*eagerWireTestValue) HandleClusterRequest(context.Context, ClusterRequest) (any, error) {
+	return nil, fmt.Errorf("constructor fixture has no remote requests")
+}
+func TestProcedureWireMaterializesCapturesBeforeAnyInvocation(t *testing.T) {
+	constructions := 0
+	Declare(&Globalenv, &Declaration{Name: "wire_test_construct_capture_once", Fn: func(...Scmer) Scmer {
+		constructions++
+		return NewSession()
+	}, Type: &TypeDescriptor{Kind: "func", HasSideEffects: true, Return: &TypeDescriptor{Kind: "any"}}})
+	object := NewAny(&eagerWireTestValue{})
+	body := NewSlice([]Scmer{NewSymbol("if"), NewSymbol("take"), object, NewNil()})
+	proc := Eval(NewSlice([]Scmer{NewSymbol("lambda"), NewSlice([]Scmer{NewSymbol("take")}), body}), &Globalenv)
+	data, err := MarshalProcedure(proc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if constructions != 0 {
+		t.Fatal("constructor executed on sending node")
+	}
+	received, err := UnmarshalProcedure(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This is the empty-shard case: the callback has not run even once.
+	if constructions != 1 {
+		t.Fatal("capture was not materialized on import", constructions)
+	}
+	for range 10 {
+		Apply(received, NewBool(false))
+	}
+	first := Apply(received, NewBool(true))
+	if first != Apply(received, NewBool(true)) || constructions != 1 {
+		t.Fatal("row execution constructed another peer object", constructions)
+	}
+}
+
+func TestProcedureWireLocalSessionTextDoesNotRequireNetworkExport(t *testing.T) {
+	session := NewSession()
+	var source bytes.Buffer
+	Serialize(&source, session, &Globalenv)
+	if strings.Contains(source.String(), "serialized_value") || strings.Contains(source.String(), "cluster_object") {
+		t.Fatal("network markers changed local callable identity", source.String())
+	}
+	proc := Eval(NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(nil), session}), &Globalenv)
+	if _, err := MarshalProcedure(proc); err == nil || !strings.Contains(err.Error(), "export context") {
+		t.Fatal("local text printing silently permitted an unbound network session", err)
 	}
 }

@@ -72,22 +72,26 @@ func registerMosiRole(role string, handler http.Handler) (func(), error) {
 // Neither RPC handlers nor storage I/O run under its mutex.
 // A disconnected peer fails every outstanding call; no write is retried here.
 type mosiPeer struct {
-	scanService *nodeScanService // immutable before an outbound scan is dispatched
-	conn        *websocket.Conn
-	writeMu     sync.Mutex
-	outgoing    chan mosiMessage
-	writeDone   chan struct{}
-	mu          sync.Mutex
-	pending     map[uint64]chan mosiMessage
-	next        atomic.Uint64
-	done        chan struct{}
-	once        sync.Once
-	handle      func(context.Context, string, json.RawMessage) (any, error)
-	packet      func(*mosiPacket) error
-	ctx         context.Context
-	cancel      context.CancelFunc
-	readDone    chan struct{}
-	workers     sync.WaitGroup
+	objectEndpoint string            // immutable outbound URL, initialized before reader start
+	objectPeer     clusterObjectPeer // immutable authenticated identity/incarnation, independent of connection
+	scanService    *nodeScanService  // immutable before an outbound scan is dispatched
+	conn           *websocket.Conn
+	writeMu        sync.Mutex
+	outgoing       chan mosiMessage
+	writeDone      chan struct{}
+	mu             sync.Mutex
+	pending        map[uint64]chan mosiMessage
+	packetOrder    map[string]chan struct{} // wire publication order per resource; payload and grant IDs may differ
+	packetBytes    atomic.Int64             // bounded queued packet bytes, never shard admission state
+	next           atomic.Uint64
+	done           chan struct{}
+	once           sync.Once
+	handle         func(context.Context, string, json.RawMessage) (any, error)
+	packet         func(*mosiPacket) error
+	ctx            context.Context
+	cancel         context.CancelFunc
+	readDone       chan struct{}
+	workers        sync.WaitGroup
 }
 
 type mosiMessage struct {
@@ -102,13 +106,17 @@ type mosiRemoteError string
 
 func (e mosiRemoteError) Error() string { return string(e) }
 
-func newMosiPeer(conn *websocket.Conn, handle func(context.Context, string, json.RawMessage) (any, error), packet func(*mosiPacket) error) *mosiPeer {
+func newMosiPeer(conn *websocket.Conn, handle func(context.Context, string, json.RawMessage) (any, error), packet func(*mosiPacket) error, initialize ...func(*mosiPeer)) *mosiPeer {
 	p := &mosiPeer{conn: conn, pending: make(map[uint64]chan mosiMessage), done: make(chan struct{}), handle: handle, packet: packet, outgoing: make(chan mosiMessage, 8), writeDone: make(chan struct{})}
 	p.readDone = make(chan struct{})
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	conn.SetReadLimit(mosiMaxMessageBytes)
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(15 * time.Second)) })
+	// Publish immutable role/identity bindings before either network goroutine.
+	for _, initialize := range initialize {
+		initialize(p)
+	}
 	go p.read()
 	go p.write()
 	go func() {
@@ -226,8 +234,7 @@ func (p *mosiPeer) read() {
 			if p.packet == nil {
 				return
 			}
-			if err := p.packet(m.Packet); err != nil {
-				fmt.Println("replication packet rejected:", err)
+			if !p.dispatchPacket(m.Packet, len(frame)) {
 				return
 			}
 			continue
@@ -275,4 +282,73 @@ func (p *mosiPeer) read() {
 			}
 		}(m)
 	}
+}
+
+// dispatchPacket never executes an object's storage work in the network reader.
+// Different resources run independently. Packets of the SAME resource retain
+// socket order, including a grant AFTER a transfer end whose ID differs. Merely
+// starting a goroutine per packet could publish rights before data installation.
+// The byte ceiling bounds private queues under a stalled backend without
+// retaining an unbounded shard dump.
+func (p *mosiPeer) dispatchPacket(packet *mosiPacket, size int) bool {
+	const maxQueuedPacketBytes = 32 << 20
+	if p.packetBytes.Add(int64(size)) > maxQueuedPacketBytes {
+		p.packetBytes.Add(-int64(size))
+		return false
+	}
+	key := packet.ID
+	if packet.Resource.valid() {
+		key = packet.Resource.key()
+	}
+	done := make(chan struct{})
+	p.mu.Lock()
+	if p.packetOrder == nil {
+		p.packetOrder = make(map[string]chan struct{})
+	}
+	previous := p.packetOrder[key]
+	var namespaceReady <-chan struct{}
+	if packet.Resource.Shard != "" {
+		namespaceReady = p.packetOrder[packet.Resource.Database]
+	}
+	p.packetOrder[key] = done
+	p.mu.Unlock()
+	p.workers.Add(1)
+	go func() {
+		defer p.workers.Done()
+		defer p.packetBytes.Add(-int64(size))
+		defer func() {
+			p.mu.Lock()
+			if p.packetOrder[key] == done {
+				delete(p.packetOrder, key)
+			}
+			close(done)
+			p.mu.Unlock()
+		}()
+		if previous != nil {
+			select {
+			case <-previous:
+			case <-p.done:
+				return
+			}
+		}
+		// A preceding schema publication introduces this data object's identity.
+		// Independent shard queues must not overtake that namespace barrier.
+		if namespaceReady != nil {
+			select {
+			case <-namespaceReady:
+			case <-p.done:
+				return
+			}
+		}
+		select {
+		case <-p.done:
+			return
+		default:
+		}
+		if err := p.packet(packet); err != nil {
+			fmt.Println("replication packet rejected:", err)
+			p.close()
+		}
+	}()
+	return true
 }

@@ -18,15 +18,14 @@ import "encoding/json"
 const procedureWireVersion = 2
 const maxProcedureWireBytes = 256 * 1024
 
-// MarshalProcedure snapshots explicit captures before using the existing Scheme
-// Serialize function. It does not serialize Env, native/JIT code, sessions or Go pointers.
-// Optional statement bindings freeze demanded constant-key session reads into
-// data before validation; dynamic reads/mutations still require an owner contract.
-// Both nodes must provide the same declared global builtin contract; other
-// globals require explicit captures. Unsupported values
-// and unresolved lexical captures fail instead of silently becoming "?" or a
-// different receiver-side global. This is a conservative first transport subset.
-func MarshalProcedure(value Scmer, bindings ...*ProcedureBindings) (data []byte, err error) {
+// MarshalProcedure closes explicit captures through the existing serializer.
+// SerializationContext exports supported runtime values as typed owner references;
+// invocation views are prepared before validation and reconstruction happens
+// before execution. Environments, native/JIT code and Go pointers never enter
+// the wire. Both nodes must provide the same declared builtin contract. Unknown
+// runtime values and unresolved captures fail explicitly instead of silently
+// binding a different receiver-side global.
+func MarshalProcedure(value Scmer, bindings ...*SerializationContext) (data []byte, err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			err = fmt.Errorf("procedure encoding: %v", failure)
@@ -40,19 +39,18 @@ func MarshalProcedure(value Scmer, bindings ...*ProcedureBindings) (data []byte,
 		}
 		value = Eval(NewSlice([]Scmer{NewSymbol("lambda"), NewSymbol("args"), NewSlice([]Scmer{NewSymbol("apply"), NewSymbol(declaration.Name), NewSymbol("args")})}), &Globalenv)
 	}
-	closed := CloseProcedure(value)
-	if len(bindings) > 0 && bindings[0] != nil {
-		proc := closed.Proc().snapshot()
-		proc.Body = bindings[0].freeze(proc.Body, value.Proc().En, procedureWireBindings(proc.Params, proc.Body, nil))
-		closed = NewProcStruct(proc)
+	if len(bindings) == 0 || bindings[0] == nil {
+		bindings = []*SerializationContext{new(SerializationContext)}
 	}
+	closed := CloseProcedure(value)
+	bindings[0].prepare(closed)
 	proc := closed.Proc()
 	bound := procedureWireBindings(proc.Params, proc.Body, nil)
-	if err := validateProcedureWire(proc.Body, bound, value.Proc().En, false, 0); err != nil {
+	if err := validateProcedureWire(proc.Body, bound, value.Proc().En, false, 0, bindings...); err != nil {
 		return nil, err
 	}
 	var source bytes.Buffer
-	Serialize(&source, closed, &Globalenv)
+	Serialize(&source, closed, &Globalenv, bindings...)
 	data, err = json.Marshal(struct {
 		Version int    `json:"version"`
 		Source  string `json:"source"`
@@ -63,10 +61,13 @@ func MarshalProcedure(value Scmer, bindings ...*ProcedureBindings) (data []byte,
 	return data, err
 }
 
-// UnmarshalProcedure reconstructs an uncompiled procedure without evaluating
-// its body. Only an authenticated task handler may later execute it. The codec
-// is not a sandbox or an authorization boundary.
-func UnmarshalProcedure(data []byte, queryContext ...Scmer) (value Scmer, err error) {
+// UnmarshalProcedure MUST evaluate serialized capture constructors once on the
+// receiving peer and restore their enclosed scope before returning the lambda.
+// Ordinary row/query code stays inert until its authorized invocation. Imported
+// objects must already exist in Go RAM even when that invocation has zero rows;
+// otherwise no GC cleanup can release the sender's registration. The codec is
+// for authenticated peers, not a sandbox or an authorization boundary.
+func UnmarshalProcedure(data []byte, options ...ProcedureDecode) (value Scmer, err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			value = NewNil()
@@ -112,14 +113,26 @@ func UnmarshalProcedure(data []byte, queryContext ...Scmer) (value Scmer, err er
 	if err := validateProcedureWire(items[2], procedureWireBindings(params, items[2], nil), &Globalenv, false, 0); err != nil {
 		return NewNil(), err
 	}
-	// A trusted worker may bind its request capability into nested scan calls.
-	// The capability is an ordinary declared call with a UUID argument, never a
-	// serialized TxContext. A further remote hop rebinds it to that hop's scope.
-	if len(queryContext) > 0 && !queryContext[0].IsNil() {
-		expression = bindProcedureScanContext(expression, queryContext[0])
+	if len(options) > 0 && options[0].Prepare != nil {
+		expression, err = options[0].Prepare(expression)
+		if err != nil {
+			return NewNil(), err
+		}
 	}
-	// Only the validated lambda form is evaluated. Its body stays inert until
-	// the authorized worker calls the reconstructed procedure.
+	// MUST import captures now, not on first row execution. Empty shards and
+	// never-called callbacks still need real peer handles so GC can release the
+	// owner's reservations. One invocation owns the reconstructed lambda/scope;
+	// row loops neither resolve URIs nor register/deregister references.
+	var resolve func(ClusterReference) (Scmer, error)
+	if len(options) > 0 {
+		resolve = options[0].Resolve
+	}
+	expression, err = resolveProcedureObjects(expression, resolve)
+	if err != nil {
+		return NewNil(), err
+	}
+	// Capture constructors have run exactly once; now build the callable and
+	// enclosed scope. Ordinary query code remains inert until invocation.
 	return Eval(Optimize(expression, &Globalenv, nil), &Globalenv), nil
 }
 
@@ -143,11 +156,14 @@ func procedureWireBindings(params, body Scmer, parent map[Symbol]struct{}) map[S
 	return bound
 }
 
-func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, literal bool, depth int) error {
+func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, literal bool, depth int, bindings ...*SerializationContext) error {
 	if depth > 128 {
 		return fmt.Errorf("procedure exceeds wire nesting limit")
 	}
 	value = value.WithoutSourceInfo()
+	if _, ok := ClusterObjectOf(value); ok {
+		return nil
+	}
 	switch value.GetTag() {
 	case tagNil, tagBool, tagInt, tagFloat, tagString, tagCString, tagBString, tagLZ4, tagNthLocalVar:
 		return nil
@@ -172,6 +188,10 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 			}
 		}
 		return nil
+	case tagProc:
+		closed := CloseProcedure(value)
+		proc := closed.Proc()
+		return validateProcedureWire(proc.Body, procedureWireBindings(proc.Params, proc.Body, nil), value.Proc().En, false, depth+1, bindings...)
 	case tagFunc, tagSpecialForm:
 		if literal || DeclarationForValue(value) == nil {
 			return fmt.Errorf("procedure contains a process-local callable")
@@ -189,16 +209,16 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 				if len(items) != 2 {
 					return fmt.Errorf("invalid quoted procedure value")
 				}
-				return validateProcedureWire(items[1], bound, origin, true, depth+1)
+				return validateProcedureWire(items[1], bound, origin, true, depth+1, bindings...)
 			case "lambda":
 				if len(items) != 3 && len(items) != 4 {
 					return fmt.Errorf("invalid nested procedure")
 				}
-				return validateProcedureWire(items[2], procedureWireBindings(items[1], items[2], bound), origin, false, depth+1)
+				return validateProcedureWire(items[2], procedureWireBindings(items[1], items[2], bound), origin, false, depth+1, bindings...)
 			}
 		}
 		for _, item := range items {
-			if err := validateProcedureWire(item, bound, origin, literal, depth+1); err != nil {
+			if err := validateProcedureWire(item, bound, origin, literal, depth+1, bindings...); err != nil {
 				return err
 			}
 		}
@@ -206,33 +226,4 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 	default:
 		return fmt.Errorf("procedure contains unsupported runtime value (tag %d, %T)", value.GetTag(), value.Any())
 	}
-}
-
-func bindProcedureScanContext(value, queryContext Scmer) Scmer {
-	plain := value.WithoutSourceInfo()
-	if !plain.IsSlice() {
-		return value
-	}
-	items := plain.Slice()
-	if len(items) == 0 {
-		return value
-	}
-	if scmerIsSymbol(items[0], "quote") {
-		return value
-	}
-	result := make([]Scmer, len(items))
-	for i, item := range items {
-		result[i] = bindProcedureScanContext(item, queryContext)
-	}
-	if len(items) > 1 {
-		switch {
-		case scmerIsSymbol(items[0], "scan"), scmerIsSymbol(items[0], "scan_exists"), scmerIsSymbol(items[0], "scan_order"), scmerIsSymbol(items[0], "scan_remote"):
-			arg := items[1].WithoutSourceInfo()
-			rebound := arg.IsSlice() && len(arg.Slice()) > 0 && scmerIsSymbol(arg.Slice()[0], "node_query_context")
-			if arg.IsNil() || scmerIsSymbol(arg, "nil") || rebound {
-				result[1] = queryContext
-			}
-		}
-	}
-	return NewSlice(result)
 }

@@ -95,7 +95,7 @@ func (r *replicationManager) cell(name string) *replicaCell {
 	defer r.mu.Unlock()
 	c := r.cells[name]
 	if c == nil {
-		c = &replicaCell{}
+		c = &replicaCell{engine: r}
 		r.cells[name] = c
 		snapshot := make(map[string]*replicaCell, len(r.cells))
 		for name, cell := range r.cells {

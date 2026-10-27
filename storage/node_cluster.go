@@ -157,20 +157,27 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 			return nil, fmt.Errorf("invalid cluster report")
 		}
 		return cluster.report(resource), nil
-	case "cluster.hint", "cluster.reduce":
-		known := false
-		if view := cluster.view.Load(); view != nil {
-			for _, member := range view.members {
-				if member.ID == source {
-					known = true
-					break
+	case "cluster.hint":
+		if err := cluster.requireMember(source); err != nil {
+			return nil, err
+		}
+		var expected remoteScanShard
+		if err := json.Unmarshal(data, &expected); err != nil {
+			return nil, err
+		}
+		if !expected.Resource.valid() || expected.Resource.Shard == "" || !cluster.databases[expected.Resource.Database] {
+			return nil, fmt.Errorf("invalid cluster shard hint")
+		}
+		// Residency is advisory. Read only the published directory; never acquire
+		// MOSI rights or load schema/payload merely to answer a placement probe.
+		if db := GetDatabase(expected.Resource.Database); db != nil {
+			if table := db.tables.Get(expected.Resource.Table); table != nil {
+				if shard := findScanShard(table, expected.Resource); shard != nil {
+					return clusterShardHint{Warm: shard.state() != COLD}, nil
 				}
 			}
 		}
-		if !known {
-			return nil, fmt.Errorf("authenticated cluster hello required before computation")
-		}
-		return cluster.compute(session, ctx, method, data)
+		return clusterShardHint{}, nil
 	case "cluster.hello":
 		var hello clusterHello
 		if err := json.Unmarshal(data, &hello); err != nil {
@@ -368,4 +375,26 @@ func validateClusterURI(id string) error {
 	}
 	_, err := uuid.Parse(strings.TrimPrefix(id, "memcp://"))
 	return err
+}
+
+// Membership/admission policy belongs to the node object, not the socket reader.
+func (cluster *nodeCluster) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
+	session, _ := ctx.Value(clusterObjectSessionKey{}).(*scanRPCSession)
+	data, ok := request.Payload.(json.RawMessage)
+	if session == nil || !ok {
+		return nil, fmt.Errorf("invalid native node request")
+	}
+	return cluster.handle(session, ctx, session.remoteID, request.Method, data)
+}
+
+// requireMember is computation admission, independent of residency and MOSI.
+func (cluster *nodeCluster) requireMember(source string) error {
+	if view := cluster.view.Load(); view != nil {
+		for _, member := range view.members {
+			if member.ID == source {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("authenticated cluster hello required before computation")
 }

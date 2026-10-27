@@ -1036,19 +1036,60 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   Non-statement consumers release their prepared reader explicitly. Usage timestamps change only during preparation. None of this
   process-local cache or lease state is persisted.
 
-- `TxContext.remoteBindings` lazily publishes one statement-owned
-  `scm.ProcedureBindings` snapshot at cold remote dispatch and is cleared after
-  joined shard work by `endStatement` and at transaction reset. Its mutex and
-  session snapshot construction run outside row loops. Only demanded immutable
-  session values enter serialized physical callbacks; stored plans retain no
-  session or transaction instance. `sessionCallable` keeps the native function
-  in its first field and a GC-visible session pointer; frontends preserve the
-  original Scmer identity. Dynamic session effects require an owner contract.
-- `TxContext.remoteTransaction` is immutable origin identity for an invocation's
-  remote read participant, initialized before execution and cleared on reset.
-  Remote native CS/ACID reads may borrow unmodified inputs; modified generations
-  retain their native active-TX pins and overlays locally. This is not a
-  distributed write/commit protocol.
+- `TxContext.remoteBindings` lazily owns one statement's `scm.SerializationContext`.
+  Object views are captured once outside its publication mutex; immutable capture
+  completion joins concurrent dispatch. Demands/projections and reconstruction
+  happen before native row execution. Stored plans retain no invocation object.
+  `clusterCallable` keeps the original native first-field ABI and a GC-visible
+  object pointer. Local execution performs no cluster registry lookup.
+- `scm.ClusterObject.HandleClusterRequest` is the common native object endpoint.
+  Its mandatory `Serialize(*scm.SerializationContext)` returns reconstruction
+  code selected by the object. The printer and wire codec honor that method;
+  reference-backed objects explicitly choose `ReferenceExpression`. Routing-only
+  endpoints reject runtime serialization. Runtime factories and custom Scmer
+  extractors are registered at package startup. `scm.ProcedureDecode.Prepare` is
+  an embedding-supplied callback; storage's scan/context binding lives in storage.
+  SCM imports no storage package; its codec recognizes no storage operators.
+  Transport resolves identity and delegates; object implementations own schema,
+  visibility and mutation policy. `ClusterRequest.Payload` is private native
+  decoded protocol data and never enters runtime serialization. Generic imported
+  values and nested procedure captures use the same explicit wire codec.
+- `nodeScanService.objects` owns strong exported objects under its cold mutex.
+  Each serialization reserves an offer until import/cancel. Owner registrations
+  then track peer lease generations, without per-use reference counting. The peer
+  `remoteObjects` weak directory deduplicates owner/incarnation/URI endpoints;
+  query-local immutable views and TX participants retain that shared Go lease.
+  `imported` weakly joins repeated imports of one offer. Neither directory roots
+  imported values. Only the last Go reference triggers `runtime.AddCleanup`,
+  which queues a release; a worker delivers it. Late old releases remove only
+  their lease generation and cannot revoke a recreated endpoint. Pending offers
+  pin the owner while GC/re-import races. Disconnect cancels only pending offers,
+  never acquired leases. Last lease/offer removal drops the strong owner entry;
+  weak retired shards preserve files for remaining native in-flight pointers.
+  Registry activity never participates in native authorized reads or row loops.
+  Name-resolved catalog paths require no temporary registration. A lease is
+  lifetime, never authority to acquire M or reclaim an offline owner's rights.
+- Serialized object constructors are marked with envelope-local capture IDs.
+  `UnmarshalProcedure` MUST materialize them once on the receiver and restore
+  the lambda's enclosed scope before compilation, even if its shard is empty or
+  the callback is never called. Aliased captures share the constructed value.
+  Ordinary query code/quoted program data remain inert. Deferring construction
+  to row execution leaks owner reservations and breaks the peer GC protocol.
+- `mosiPeer.packetOrder` belongs to its existing mutex and sequences cold inbound
+  packets per resource. Shard workers also wait for a preceding schema queue tail.
+  The reader only dispatches; independent resources run in parallel. Queued bytes
+  are bounded by `packetBytes`. No send or native data work runs under this mutex.
+  `objectPeer`, `objectEndpoint` and `scanService` initialize before reader startup;
+  the authenticated v4 handshake binds process incarnation. `scanReturnChannel.mu`
+  owns delivery versus collector-close and drains abandoned offers, never rows.
+- `TxContext.remoteObject` retains its immutable coordinator handle during an
+  invocation. Binding borrows the receiving executor's existing cancellation and
+  cleanup ownership. Native CS/ACID modified generations keep existing TX pins;
+  untouched generations may execute remotely. `storageShardTransaction` captures
+  immutable `clusterShard`, `clusterTxID` and physical `shardUUID` at allocation.
+  Export snapshots masks under its existing mutex, reconstruction is private,
+  and `remoteObject` retains that visibility view. It grants no commit authority
+  or distributed write protocol and adds no new row synchronization.
 - `table.visibilityCacheEpoch` and the matching compute-proxy epoch extend the
   existing preparation-time MOSI cache invalidation to committed ACID visibility.
   Commit invalidates dependency targets once per touched table after publication;

@@ -517,7 +517,7 @@ and retained reads after owner loss, while unavailable write rights must fail.
 
 The SQL context runner (`--cluster-context-only`) additionally checks session
 bindings and transaction overlays against both standalone and clustered servers.
-Its execution contracts and remaining runtime-object work are documented in
+Its execution contracts, object endpoints and GC lifetime are documented in
 [Cluster SQL runtime contexts](tools/cluster-runtime-contexts.md). These are strict
 CI contracts; unsupported behavior fails instead of being marked expected.
 

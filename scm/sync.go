@@ -176,6 +176,7 @@ func ApplyPromise(p Scmer, args []Scmer) Scmer {
 /* threadsafe session storage */
 
 type session struct {
+	call           func(...Scmer) Scmer // immutable native accessor, initialized before publication
 	Mu             sync.RWMutex
 	Map            map[string]Scmer
 	Handles        map[Scmer]Scmer
@@ -366,16 +367,8 @@ func NewSession(a ...Scmer) Scmer {
 			panic("wrong number of parameters provided to session: 0, 1, 2, 4, or 5 required")
 		}
 	}
-	cell := &sessionCallable{call: call, state: sess}
-	return Scmer{(*byte)(unsafe.Pointer(cell)), makeAux(tagFunc, uint64(sessionCallableID))}
-}
-
-// Only session callables use this representation. Its first field preserves
-// the ordinary native-function ABI; Scmer remains 16 bytes. The state pointer
-// is GC-visible and is accessed only by statement capture preparation.
-type sessionCallable struct {
-	call  func(...Scmer) Scmer
-	state *session
+	sess.call = call
+	return NewClusterFunc(call, sess, sessionCallableID)
 }
 
 var sessionCallableID = RegisterCallableType(sessionCallableType)
@@ -649,6 +642,7 @@ func scanOrderMerge(a ...Scmer) Scmer {
 }
 
 func init_sync() {
+	initClusterObjects()
 	Declare(&Globalenv, &Declaration{
 		Name: "scan_order_merge", Fn: scanOrderMerge,
 		Type: &TypeDescriptor{Kind: "func", Description: "Bounded merge of ordered complete-row producers", HasSideEffects: true,

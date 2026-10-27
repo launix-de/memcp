@@ -30,6 +30,7 @@ type replicaCell struct {
 	forwardOnce sync.Once
 	forwardDone chan struct{}
 
+	engine *replicationManager // immutable domain owner, initialized before cell publication
 	// Each schema/logical shard has two independent authority slots. Both use
 	// the same MOSI implementation; neither state is a persisted directory.
 	//

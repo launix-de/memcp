@@ -40,6 +40,16 @@ These rules describe the target architecture, not the implementation status.
   returns the same result with its existing ordering and visibility semantics.
   Every scan variant retains its contract; a separate special-purpose API alone
   is not a complete cluster integration.
+- Feature extensions, including new SQL frontend capabilities and planner
+  operators, MUST remain cluster-capable and support distributed execution.
+  Prefer local execution when its data, authority and runtime state are local.
+  Otherwise synchronize the required state and effects through the cluster
+  protocol and delegate work as needed. Session state, transaction visibility,
+  captured helpers, cancellation and side effects must preserve their native
+  semantics across nodes. A local-only fallback, forced serialization or an
+  uncoordinated copy of mutable state must not silently replace that contract.
+  Tests for new capabilities must cover the distributed path as well as local
+  execution; unsupported distributed semantics must be explicit, never hidden.
 - Filters and MapReducers, including their captured bindings, are transmitted
   using the existing Scheme serializer and executed on the worker that reads
   the shard. Workers return scalar or grouped partial results for combination.
@@ -80,6 +90,25 @@ These rules describe the target architecture, not the implementation status.
   or an explicit administrative decision to kick it; a timeout never grants
   those rights to another node. A kicked node must discard its inconsistent
   state before rejoining, even if its process was still alive.
+
+- Owner endpoints share `ClusterRequestHandler.HandleClusterRequest`; runtime
+  closure values additionally implement `ClusterObject.Serialize`. Routing-only
+  nodes, databases and coherence cells need no value serialization. Ownership
+  policy stays with the native object, not a transport type switch.
+  Scan requests use the same UUID collector as other calls. The database handler
+  prepares one invocation and acquires one generation; the shard handler executes
+  it. Retained historical inputs enter this same path without a second codec.
+  The reader dispatches independent work concurrently; resource FIFO and preceding schema publication
+  fence dependent imports outside the reader. Reply UUID collectors retain no
+  sending handle. No cancellation check is added to shard item loops.
+- Strong owner registrations retain physical generations while independent
+  peer tokens exist. Imported values own GC-cleaned leases; duplicate imports of
+  one token share one lifetime. GC only queues release, and a worker delivers it.
+  A last release removes only that registration, never current partition rights.
+  Disconnect does not revoke acquired handles or establish deletion proof.
+  Captured session/cachemap views resolve before execution and provide local
+  immutable reads; mutations use their owner endpoint. No extra shard read lock,
+  row-level registration, counter or CAS may be added for these references.
 
 ## Parallel execution and publication
 

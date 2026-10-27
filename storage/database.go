@@ -2106,6 +2106,9 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 	defer db.GetWrite(nil).Release()
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
+	if len(registeredClusterShards(schema)) != 0 {
+		panic("database has active cluster object references")
+	}
 	if r := replication.Load(); r != nil && r.hasTransfers(schema) {
 		panic("database has active replication transfers; retry ALTER DATABASE storage")
 	}
@@ -2200,6 +2203,9 @@ func DropDatabase(schema string, ifexists bool) bool {
 	}
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
+	if len(registeredClusterShards(schema)) != 0 {
+		panic("database has active cluster object references")
+	}
 	if r := replication.Load(); r != nil && r.hasTransfers(schema) {
 		panic("database has active replication transfers; retry DROP DATABASE")
 	}

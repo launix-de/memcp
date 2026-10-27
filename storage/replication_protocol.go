@@ -21,10 +21,11 @@ func mosiPacketContext(peer *mosiPeer) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(peer.ctx, 30*time.Minute)
 }
 
-// receivePacket runs in the connection reader. Payload installation and grant
-// publication complete here. Requests which may wait for another node execute
-// in workers, so the reader remains available for their replies.
-func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (err error) {
+// applyResourcePacket runs in the resource's ordered packet worker, never the
+// network reader. Installation completes before a following grant is admitted.
+// Operations awaiting remote replies start their own control workers: their
+// acknowledgements must remain dispatchable on this same resource queue.
+func (r *replicationManager) applyResourcePacket(source string, packet *mosiPacket) (err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			err = fmt.Errorf("replication packet: %v", failure)
@@ -123,7 +124,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 				record := r.directory.Records[r.resourceKey(packet.Resource)]
 				r.mu.Unlock()
 				if record.Owner != source || record.Epoch != packet.Epoch {
-					return fmt.Errorf("backup from non-owner")
+					return fmt.Errorf("backup from non-owner: %s epoch %d, directory epoch %d, owner matches %t", packet.Resource.key(), packet.Epoch, record.Epoch, record.Owner == source)
 				}
 				if err := r.authorizePacket(*packet); err != nil {
 					return err
@@ -169,50 +170,64 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) (e
 		if packet.Kind != "end" {
 			return transfer.packet(*packet)
 		}
-		if packet.Resource.Shard != "" {
-			publication := r.resourceCell(mosiResource{Database: packet.Resource.Database})
-			publication.importPublication.Lock()
-			defer publication.importPublication.Unlock()
-		}
-		defer r.imports.Delete(key)
-		defer transfer.abort()
-		if r.master {
-			r.mu.Lock()
-			record := r.directory.Records[r.resourceKey(packet.Resource)]
-			r.mu.Unlock()
-			if record.Owner != source || record.Epoch != packet.Epoch {
-				return fmt.Errorf("stale transfer epoch")
-			}
-		}
 		if err := func() error {
-			if !r.master {
-				// The reader owns staged bytes; acquire serializes only their final
-				// publication with grant/revocation workers, never ordinary query reads.
-				cell := r.resourceCell(packet.Resource)
-				cell.acquire.Lock()
-				defer cell.acquire.Unlock()
+			if packet.Resource.Shard != "" {
+				// All bytes are received. Final data publication shares existing cold
+				// lifecycle ownership with schema installation; no lease spans a stream
+				// or a network wait, and granted query reads never acquire this lease.
+				db := databases.Get(packet.Resource.Database)
+				if db == nil {
+					return fmt.Errorf("missing import database")
+				}
+				db.persistenceLifecycle.RLock()
+				defer db.persistenceLifecycle.RUnlock()
+				publication := r.resourceCell(mosiResource{Database: packet.Resource.Database})
+				publication.importPublication.Lock()
+				defer publication.importPublication.Unlock()
+			}
+			defer r.imports.Delete(key)
+			defer transfer.abort()
+			if r.master {
 				r.mu.Lock()
-				epoch := r.directory.Records[r.resourceKey(packet.Resource)].Epoch
+				record := r.directory.Records[r.resourceKey(packet.Resource)]
 				r.mu.Unlock()
-				if packet.Epoch < epoch {
+				if record.Owner != source || record.Epoch != packet.Epoch {
 					return fmt.Errorf("stale transfer epoch")
 				}
 			}
-			if err := r.finishImport(source, transfer); err != nil {
+			if err := func() error {
+				if !r.master {
+					// The reader owns staged bytes; acquire serializes only their final
+					// publication with grant/revocation workers, never ordinary query reads.
+					cell := r.resourceCell(packet.Resource)
+					cell.acquire.Lock()
+					defer cell.acquire.Unlock()
+					r.mu.Lock()
+					epoch := r.directory.Records[r.resourceKey(packet.Resource)].Epoch
+					r.mu.Unlock()
+					if packet.Epoch < epoch {
+						return fmt.Errorf("stale transfer epoch")
+					}
+				}
+				if err := r.finishImport(source, transfer); err != nil {
+					return err
+				}
+				if !transfer.superseded {
+					return r.saveBackup(packet.Resource, packet.Content)
+				}
+				return nil
+			}(); err != nil {
 				return err
 			}
-			if !transfer.superseded {
-				return r.saveBackup(packet.Resource, packet.Content)
+			if r.master && !transfer.superseded {
+				r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
+					record.Content = packet.Content
+					return true
+				})
 			}
 			return nil
 		}(); err != nil {
 			return err
-		}
-		if r.master && !transfer.superseded {
-			r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
-				record.Content = packet.Content
-				return true
-			})
 		}
 		if !r.master {
 			return peer.post(mosiPacket{Kind: "ack", ID: packet.ID, Resource: packet.Resource, Epoch: packet.Epoch, Content: packet.Content})
@@ -244,4 +259,29 @@ func (r *replicationManager) authorizePacket(packet mosiPacket) error {
 		}
 	}
 	return nil
+}
+
+// The protocol entry resolves its domain object and delegates. Storage/auth,
+// import publication and MOSI transitions remain in the object's engine adapter;
+// the network reader neither executes them nor knows shard/schema policy.
+func (r *replicationManager) receivePacket(source string, packet *mosiPacket) error {
+	if !packet.Resource.valid() || packet.ID == "" {
+		return fmt.Errorf("invalid resource packet")
+	}
+	object := r.resourceCell(packet.Resource)
+	_, err := object.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "packet", Payload: replicaPacketInvocation{source, packet}})
+	return err
+}
+
+type replicaPacketInvocation struct {
+	source string
+	packet *mosiPacket
+}
+
+func (cell *replicaCell) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
+	invocation, ok := request.Payload.(replicaPacketInvocation)
+	if request.Method != "packet" || !ok || cell.engine == nil {
+		return nil, fmt.Errorf("invalid native coherence request")
+	}
+	return nil, cell.engine.applyResourcePacket(invocation.source, invocation.packet)
 }

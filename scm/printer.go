@@ -18,14 +18,12 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 
 package scm
 
-import (
-	"bytes"
-	"fmt"
-	"io"
-	"reflect"
-	"strconv"
-	"strings"
-)
+import "io"
+import "fmt"
+import "bytes"
+import "reflect"
+import "strconv"
+import "strings"
 
 var schemeStringEscaper = strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "\\r", "\n", "\\n")
 
@@ -38,8 +36,10 @@ const (
 // forwards to the caller's bytes.Buffer or consumes bytes directly into FNV-1a.
 // Avoiding io.Writer/hash.Hash dispatch matters for the many tiny AST tokens.
 type schemeTextWriter struct {
-	buffer *bytes.Buffer
-	hash   uint64
+	buffer     *bytes.Buffer
+	objects    *SerializationContext
+	references map[ClusterObject]Scmer
+	hash       uint64
 }
 
 func bufferTextWriter(buffer *bytes.Buffer) *schemeTextWriter {
@@ -269,8 +269,12 @@ func SerializeToString(v Scmer, glob *Env) string {
 	return b.String()
 }
 
-func Serialize(b *bytes.Buffer, v Scmer, glob *Env) {
-	serializeEx(bufferTextWriter(b), v, glob, glob, nil)
+func Serialize(b *bytes.Buffer, v Scmer, glob *Env, objects ...*SerializationContext) {
+	writer := bufferTextWriter(b)
+	if len(objects) > 0 {
+		writer.objects = objects[0]
+	}
+	serializeEx(writer, v, glob, glob, nil)
 }
 
 func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
@@ -295,6 +299,36 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteString(")")
 		return
 	}
+	// Ordinary scalar serialization performs no registry lookup. Object-backed
+	// callables, opaque values and embedding-owned tags use the same interface,
+	// including standalone opaque objects with context-free reconstruction.
+	// Local diagnostic/cache text keeps native callable/custom-tag spelling.
+	// Network reconstruction markers must never change local plan identities.
+	if (b.objects != nil && (v.GetTag() == tagFunc || v.GetTag() >= 100)) || v.GetTag() == tagAny {
+		if object, ok := ClusterObjectOf(v); ok {
+			expression, exists := b.references[object]
+			if !exists {
+				var err error
+				expression, err = object.Serialize(b.objects)
+				if err != nil {
+					panic(err)
+				}
+				if b.references == nil {
+					b.references = make(map[ClusterObject]Scmer)
+				}
+				// Mark object reconstruction explicitly. The decoder MUST construct
+				// this capture once before compiling any row callback, even for an
+				// empty shard. The envelope-local ID also preserves capture aliases.
+				if b.objects != nil {
+					expression = NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(int64(len(b.references) + 1)), expression})
+				}
+				b.references[object] = expression
+			}
+			serializeEx(b, expression, glob, glob, nil)
+			return
+		}
+	}
+
 	switch v.GetTag() {
 	case tagNil:
 		b.WriteString("nil")
@@ -348,6 +382,10 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 	case tagSlice:
 		slice := lambdaSyntaxOperands(v.Slice())
+		if b.objects != nil && len(slice) == 2 && scmerIsSymbol(slice[0], "quote") && containsClusterObject(slice[1]) {
+			serializeClusterLiteral(b, slice[1], glob)
+			return
+		}
 		if (len(slice) == 3 || len(slice) == 4) && scmerIsSymbol(slice[0], "lambda") {
 			// Numbered locals in a nested lambda belong to its own parameter
 			// frame. Using the enclosing Proc renames slot 0 to the wrong name.
@@ -401,6 +439,9 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 	case tagProc:
 		// Serialize compiled procedures as (lambda ...) expressions, but
 		// avoid walking the captured environment here to prevent cycles.
+		if b.objects != nil {
+			v = CloseProcedure(v)
+		}
 		serializeProcShallow(b, v.Proc().snapshot(), glob)
 	case tagFastDict:
 		fd := v.FastDict()
@@ -623,4 +664,38 @@ func prettyLines(v Scmer, glob *Env, width int, indent int) []string {
 		lines = append(lines, indentStr+")")
 	}
 	return lines
+}
+
+// Quoted data containing runtime references is reconstructed as data constructors.
+// Ordinary quoted source remains inert, including literal cluster_object forms.
+func containsClusterObject(value Scmer) bool {
+	if _, ok := ClusterObjectOf(value); ok {
+		return true
+	}
+	if value.IsSlice() {
+		for _, item := range value.Slice() {
+			if containsClusterObject(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+func serializeClusterLiteral(b *schemeTextWriter, value Scmer, glob *Env) {
+	if value.IsSlice() {
+		b.WriteString("(list")
+		for _, item := range value.Slice() {
+			b.WriteByte(' ')
+			serializeClusterLiteral(b, item, glob)
+		}
+		b.WriteByte(')')
+		return
+	}
+	if value.IsSymbol() {
+		b.WriteString("(quote ")
+		serializeEx(b, value, glob, glob, nil)
+		b.WriteByte(')')
+		return
+	}
+	serializeEx(b, value, glob, glob, nil)
 }
