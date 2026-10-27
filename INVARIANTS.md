@@ -1522,6 +1522,10 @@ Persisted inserted values retain the existing engine durability contract and
 advance the same counter during replay. SQL frontends must not materialize
 arbitrary SELECT input to obtain a block size.
 
+WAL replay only raises the local atomic high-water snapshot from already
+allocated rows. It never reserves another block or contacts a remote allocator
+while holding a shard loader/mutation lock, including in shared-storage clusters.
+
 Cluster ID allocation and INSERT constraint checks must not acquire schema write
 ownership. A remote reservation must survive allocator restart before it can be
 acknowledged, since another node can commit its IDs independently. Allocation

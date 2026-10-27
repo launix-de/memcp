@@ -90,51 +90,48 @@ func (cluster *nodeCluster) handleIDReservation(ctx context.Context, data json.R
 // Schema imports that only append writer lanes must preserve the existing live
 // table and shard objects: they may own concurrent local deltas/transactions.
 // The incoming schema owner serialized the complete durable topology already.
-func mergeClusterInsertTopology(previous, incoming *table) bool {
+func (r *replicationManager) mergeClusterInsertTopology(previous, incoming *table) (bool, error) {
 	if previous.ShardMode != ShardModeFree || incoming.ShardMode != ShardModeFree {
-		return false
+		return false, nil
 	}
 	before, after := previous.activeTopology(), incoming.activeTopology()
-	if len(after.shards) < len(before.shards) {
-		return false
+	if len(after.shards) <= len(before.shards) {
+		return false, nil
 	}
 	for i, shard := range before.shards {
-		if shard.logicalID() != after.shards[i].logicalID() {
-			return false
+		if r.resourceKey(r.shardResource(shard)) != r.resourceKey(r.shardResource(after.shards[i])) {
+			return false, nil
 		}
 	}
-	if !bytes.Equal(replicaDeclaration(previous, false), replicaDeclaration(incoming, false)) {
-		return false
+	if !bytes.Equal(r.replicaDeclaration(previous, false), r.replicaDeclaration(incoming, false)) {
+		return false, nil
 	}
-
+	// Validate the complete append before replacing any generation. A stale
+	// predecessor reference follows native UUID forwarding and keeps local data.
 	for i, old := range before.shards {
 		next := after.shards[i]
-		if old.uuid == next.uuid {
+		if old.uuid == next.uuid || r.canonicalResource(r.shardResource(next)).Shard != next.uuid.String() {
 			continue
 		}
-		if len(after.shards) == len(before.shards) {
-			return false
-		} // ordinary generation import owns this case
-		cluster := activeNodeCluster()
-		if cluster == nil {
-			return false
-		}
-		r := cluster.manager
 		cell := r.shardCell(old)
 		if phase := cell.ownstate.Phase(); phase == mosi.M || phase == mosi.O {
-			return false
+			return false, fmt.Errorf("shared schema conflicts with a local modifier")
 		}
+	}
+	for i, old := range before.shards {
+		next := after.shards[i]
+		if old.uuid == next.uuid || r.canonicalResource(r.shardResource(next)).Shard != next.uuid.String() {
+			continue
+		}
+		cell := r.shardCell(old)
 		next.t = previous
 		next.coherence.Store(cell)
 		if err := r.replaceShard(r.shardResource(old), old, next); err != nil {
-			panic(err)
+			return false, err
 		}
 		cell.current.Store(next)
 	}
 	previous.reserveLocalAutoIncrement(atomic.LoadUint64(&incoming.Auto_increment), 0)
-	if len(after.shards) == len(before.shards) {
-		return true
-	}
 	previous.mu.Lock()
 	defer previous.mu.Unlock()
 	for _, shard := range after.shards[len(before.shards):] {
@@ -143,7 +140,7 @@ func mergeClusterInsertTopology(previous, incoming *table) bool {
 	}
 	previous.publishSchemaTopology(ShardModeFree, previous.Shards, previous.PDimensions)
 	previous.publishTopologyLocked()
-	return true
+	return true, nil
 }
 
 // Global INSERT constraints currently serialize through existing schema write

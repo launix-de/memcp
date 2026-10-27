@@ -1121,7 +1121,11 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   preceding newer foreign appends. Overflow must not claim a foreign lane merely
   because maintenance is busy. Schema imports of append-only writer topology
   preserve live table/shard owners and merge the ordinary integer high-water
-  counter. Shard alias migration resolves the current directory key under `mu`.
+  counter. Native UUID forwarding preserves current-incarnation request marks
+  under `mu`; request numbers from different incarnations are never compared.
+- Integer WAL replay only raises the local atomic high-water snapshot from
+  existing rows. It must not call the cluster allocator while holding a shard
+  lock; these IDs were reserved before their original native INSERT.
 - INSERT must not acquire schema write ownership for ID allocation or UNIQUE
   checks. Allocation runs once per batch/block before data ownership; no shard
   lock spans an allocation RPC. UUID generation remains node-local. Local

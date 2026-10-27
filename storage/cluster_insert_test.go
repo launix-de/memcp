@@ -13,6 +13,53 @@ import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
+func TestClusterWALReplayRecoversIntegerCounterWithoutAllocator(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tclusterwalcounter", 0)
+	c := tbl.Columns[0]
+	c.AutoIncrement = true
+	c.UpdateSanitizer()
+	tbl.publishShowColumnsSnapshot(true)
+	tbl.schema.save()
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
+		{scm.NewInt(10000), scm.NewString("explicit")},
+		{scm.NewInt(10001), scm.NewString("explicit")},
+		{scm.NewNil(), scm.NewString("generated")},
+	}, nil, scm.NewNil(), false, nil)
+	atomic.StoreUint64(&tbl.Auto_increment, 0)
+	// Materialization replays already allocated IDs under shard ownership.
+	// No live cluster/allocator is available here, as in a cold handover.
+	oldMounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(oldMounts)
+	oldService := nodeScans.Swap(nil)
+	defer nodeScans.Store(oldService)
+	rows := 0
+	for _, source := range tbl.ActiveShards() {
+		// A fresh unpublished loader avoids the database loader's eager
+		// AUTO_INCREMENT recovery replaying this same fixture a second time.
+		encoded, err := json.Marshal(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		shard := new(storageShard)
+		if err := json.Unmarshal(encoded, shard); err != nil {
+			t.Fatal(err)
+		}
+		shard.t = tbl
+		func() {
+			shard.mu.Lock()
+			defer shard.mu.Unlock()
+			shard.load()
+			rows += len(shard.inserts)
+		}()
+		if shard.logfile != nil {
+			shard.logfile.Close()
+		}
+	}
+	if rows != 3 || atomic.LoadUint64(&tbl.Auto_increment) != 10002 {
+		t.Fatalf("local WAL recovery: rows=%d counter=%d", rows, atomic.LoadUint64(&tbl.Auto_increment))
+	}
+}
+
 func TestClusterInsertKeepsLocalLaneBeforeForeignNewest(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tclusterinsertlane")
 	local := tbl.ActiveShards()[0]
@@ -55,11 +102,15 @@ func TestClusterAppendImportRetainsLiveShardAndCounter(t *testing.T) {
 		t.Fatal(err)
 	}
 	incoming.schema = tbl.schema
+	for _, shard := range incoming.Shards {
+		shard.t = &incoming
+	}
 	incoming.Shards = append(incoming.Shards, NewShard(&incoming))
 	incoming.publishTopologyLocked()
 	atomic.StoreUint64(&incoming.Auto_increment, 100)
-	if !mergeClusterInsertTopology(tbl, &incoming) {
-		t.Fatal("append rejected")
+	r := &replicationManager{}
+	if merged, err := r.mergeClusterInsertTopology(tbl, &incoming); !merged || err != nil {
+		t.Fatalf("append rejected: %v", err)
 	}
 	if tbl.ActiveShards()[0] != original || len(original.inserts) != 1 || len(tbl.ActiveShards()) != 2 {
 		t.Fatal("live generation replaced or lost")
@@ -67,9 +118,36 @@ func TestClusterAppendImportRetainsLiveShardAndCounter(t *testing.T) {
 	if atomic.LoadUint64(&tbl.Auto_increment) != 100 {
 		t.Fatal("counter update discarded with unchanged declaration")
 	}
+	incoming.Shards = append(incoming.Shards, NewShard(&incoming))
+	incoming.publishTopologyLocked()
 	incoming.Columns[0].Typ = "TEXT"
-	if mergeClusterInsertTopology(tbl, &incoming) {
+	if merged, _ := r.mergeClusterInsertTopology(tbl, &incoming); merged {
 		t.Fatal("semantic DDL mistaken for writer append")
+	}
+}
+
+func TestClusterForwardKeepsCurrentIncarnationReplayMark(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "local", Boot: "current"}}
+	cluster.initializeManager()
+	r := cluster.manager
+	from := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	to := from
+	to.Shard = uuid.NewString()
+	r.resourceCell(from).ownstate.Initialize(mosi.M)
+	r.resourceCell(to)
+	r.updateRecord(from, func(record *replicaRecord) bool {
+		record.State, record.Owner = "M", "local"
+		record.Requests = map[string]replicaRequestMark{"local": {Boot: "current", Sequence: 1, ID: "completed", Completed: true}}
+		return true
+	})
+	r.updateRecord(to, func(record *replicaRecord) bool {
+		record.Requests = map[string]replicaRequestMark{"local": {Boot: "predecessor", Sequence: 99}}
+		return true
+	})
+	r.forwardResource(from, to)
+	mark := r.directory.Records[r.resourceKey(to)].Requests["local"]
+	if mark.Boot != "current" || mark.Sequence != 1 || !mark.Completed || mark.ID != "completed" {
+		t.Fatalf("forwarding discarded completed current-process request: %+v", mark)
 	}
 }
 
@@ -94,6 +172,54 @@ func TestClusterReadUpgradeRetainsRegisteredEpoch(t *testing.T) {
 	}
 }
 
+func TestClusterAppendImportFollowsNativeUUIDForwarding(t *testing.T) {
+	for _, stale := range []bool{true, false} {
+		name := "stale-reference"
+		if !stale {
+			name = "local-modifier"
+		}
+		t.Run(name, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tclusterappendforward")
+			original := tbl.ActiveShards()[0]
+			cluster := &nodeCluster{self: clusterMember{ID: "local"}}
+			cluster.initializeManager()
+			r := cluster.manager
+			cell := cluster.declareShard(original, true)
+			encoded, err := json.Marshal(tbl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var incoming table
+			if err := json.Unmarshal(encoded, &incoming); err != nil {
+				t.Fatal(err)
+			}
+			incoming.schema = tbl.schema
+			for _, shard := range incoming.Shards {
+				shard.t = &incoming
+			}
+			successor := NewShard(tbl)
+			r.forwardResource(r.shardResource(original), r.shardResource(successor))
+			if stale {
+				tbl.Shards[0] = successor
+				tbl.publishTopologyLocked()
+				cell.current.Store(successor)
+			} else {
+				incoming.Shards[0] = successor
+			}
+			incoming.Shards = append(incoming.Shards, NewShard(&incoming))
+			incoming.publishTopologyLocked()
+			merged, err := r.mergeClusterInsertTopology(tbl, &incoming)
+			if stale {
+				if !merged || err != nil || tbl.ActiveShards()[0] != successor || len(tbl.ActiveShards()) != 2 {
+					t.Fatalf("stale append replaced successor or lost lane: merged=%v error=%v", merged, err)
+				}
+			} else if merged || err == nil || tbl.ActiveShards()[0] != original || len(tbl.ActiveShards()) != 1 {
+				t.Fatal("append replaced a local modifier or partially published its topology")
+			}
+		})
+	}
+}
+
 func TestClusterRestartedInvalidPeerAcknowledgesRevocation(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
 	cluster.initializeManager()
@@ -113,7 +239,7 @@ func TestClusterRestartedInvalidPeerAcknowledgesRevocation(t *testing.T) {
 	}
 }
 
-func TestClusterConcurrentAliasesPreserveAuthorityEpoch(t *testing.T) {
+func TestClusterConcurrentForwardsPreserveAuthorityEpoch(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
 	cluster.initializeManager()
 	tbl := setupScanParallelTestTable(t, "tclusteraliaspublication")
@@ -124,8 +250,11 @@ func TestClusterConcurrentAliasesPreserveAuthorityEpoch(t *testing.T) {
 	var pending sync.WaitGroup
 	for range 64 {
 		pending.Add(1)
-		next := &storageShard{t: tbl, uuid: uuid.New(), lineage: original.logicalID()}
-		go func() { defer pending.Done(); cluster.aliasShard(resource, next) }()
+		next := &storageShard{t: tbl, uuid: uuid.New()}
+		go func() {
+			defer pending.Done()
+			cluster.manager.forwardResource(resource, cluster.manager.shardResource(next))
+		}()
 	}
 	pending.Wait()
 	current := *cell.resource.Load()

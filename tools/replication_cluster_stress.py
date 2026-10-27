@@ -24,6 +24,7 @@ import queue
 import random
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -1418,8 +1419,22 @@ def run_cluster_inserts(args, artifacts, journal):
             barrier = threading.Barrier(len(nodes))
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(nodes)) as threads:
                 futures = [threads.submit(insert, index, table, barrier) for index in range(len(nodes))]
-                for future in futures:
-                    future.result()
+                try:
+                    for future in futures:
+                        future.result()
+                except BaseException:
+                    # Preserve blocked ownership stacks before normal cleanup
+                    # kills these disposable children. Never retry an INSERT.
+                    for node in nodes:
+                        if node.process is not None and node.process.poll() is None:
+                            node.process.send_signal(signal.SIGQUIT)
+                    for node in nodes:
+                        if node.process is not None:
+                            try:
+                                node.process.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                pass
+                    raise
             expected = len(nodes) * 32 + (table == "integer_items")
             for node in nodes:
                 result = node.client.sql(f"SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids FROM {table}")

@@ -875,8 +875,14 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 		for _, table := range replacement.tables.GetAll() {
 			r.restoreTableRoutes(table)
 			previous := db.tables.Get(table.Name)
-			if previous != nil && r.cluster != nil && mergeClusterInsertTopology(previous, table) {
-				continue
+			if previous != nil && r.cluster != nil {
+				merged, err := r.mergeClusterInsertTopology(previous, table)
+				if err != nil {
+					return err
+				}
+				if merged {
+					continue
+				}
 			}
 			if previous != nil && r.sameReplicaDeclaration(previous, table) {
 				previous.reserveLocalAutoIncrement(atomic.LoadUint64(&table.Auto_increment), 0)

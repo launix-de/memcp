@@ -637,7 +637,10 @@ func (u *storageShard) load() {
 					}
 				}
 			}
-			t.reserveAutoIncrement(maxVal, 0)
+			// WAL rows already contain allocated IDs. Recovery runs under the
+			// shard lock and must never contact the distributed allocator: its
+			// ownership handover can need this very shard to finish loading.
+			t.reserveLocalAutoIncrement(maxVal, 0)
 			break // only one AUTO_INCREMENT column per table
 		}
 	}

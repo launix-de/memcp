@@ -183,7 +183,12 @@ func (r *replicationManager) forwardResource(from, to mosiResource) {
 				requests = make(map[string]replicaRequestMark)
 			}
 			for peer, request := range record.Requests {
-				if previous, exists := requests[peer]; !exists || previous.Sequence < request.Sequence {
+				previous, exists := requests[peer]
+				// Request numbers are ordered only within one process incarnation.
+				// A forwarded stale mark must not erase the live process's replay
+				// suppression merely because its predecessor had a larger number.
+				if !exists || previous.Boot == request.Boot && previous.Sequence < request.Sequence ||
+					previous.Boot != request.Boot && r.cluster != nil && r.cluster.requestIncarnation(peer, request.Boot) {
 					requests[peer] = request
 				}
 			}
