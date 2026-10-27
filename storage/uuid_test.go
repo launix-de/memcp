@@ -5,7 +5,53 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "testing"
+import "strings"
 import "github.com/launix-de/memcp/scm"
+
+func TestUUIDBinaryDefaultSurvivesWALAndRebuild(t *testing.T) {
+	for _, rebuilt := range []bool{false, true} {
+		name := "wal"
+		if rebuilt {
+			name = "rebuilt"
+		}
+		t.Run(name, func(t *testing.T) {
+			tbl, persistence := createDurabilityTestTable(t, "tuuidbinary"+name, 0)
+			c := tbl.Columns[0]
+			c.Typ = "BINARY"
+			c.Typdimensions = []int{16}
+			c.DefaultExpression = "UUID_TO_BIN(UUID(),0)"
+			c.UpdateSanitizer()
+			tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+			tbl.publishShowColumnsSnapshot(true)
+			tbl.schema.save()
+			cols, rows := tbl.prepareInsertDefaults([]string{"payload"}, [][]scm.Scmer{{scm.NewString("one")}, {scm.NewString("two")}, {scm.NewString("three")}})
+			for _, row := range rows {
+				if len(row[1].String()) != 16 {
+					t.Fatal("binary default not sixteen bytes")
+				}
+			}
+			tbl.Insert(cols, rows, nil, scm.NewNil(), false, nil)
+			if rebuilt {
+				if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+					t.Fatal(result)
+				}
+			}
+			restored := reloadTableFromPersistence(t, "tuuidbinary"+name, persistence)
+			if restored.Columns[0].DefaultExpression != c.DefaultExpression {
+				t.Fatal("lost binary default recipe")
+			}
+			accepted, collisions := 0, 0
+			restored.ProcessUniqueCollision(cols, rows, false, func(rows [][]scm.Scmer) { accepted += len(rows) }, nil, func(string, []scm.Scmer) { collisions++ }, 0, nil)
+			if accepted != 0 || collisions != 3 {
+				t.Fatalf("binary keys changed across reload: accepted=%d collisions=%d", accepted, collisions)
+			}
+			restored.Insert([]string{"payload"}, [][]scm.Scmer{{scm.NewString("after restart")}}, nil, scm.NewNil(), false, nil)
+			if restored.Count() != 4 {
+				t.Fatal("default failed after restart")
+			}
+		})
+	}
+}
 
 func TestUUIDDefaultsArePerRowAndExplicitBeforeInsert(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tuuiddefaults")

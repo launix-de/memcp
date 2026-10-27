@@ -60,6 +60,29 @@ INSERT INTO events(payload) VALUES ('first'), ('second');
 T-SQL uses `UNIQUEIDENTIFIER` and a suitable payload declaration, for example
 `NVARCHAR(100)`. MySQL also accepts `DEFAULT (UUID_V7())`.
 
+The SQL regression suites also execute the conventional server syntax directly:
+
+```sql
+-- MySQL: 16 binary bytes, version-one UUID generator
+CREATE TABLE uuid_mysql_official (
+    id BINARY(16) DEFAULT (UUID_TO_BIN(UUID())) PRIMARY KEY,
+    payload TEXT
+);
+-- PostgreSQL: native UUID type, version-four generator
+CREATE TABLE uuid_postgresql_official (
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+    payload text
+);
+```
+
+These cases check single-row INSERT, multi-row INSERT and INSERT SELECT,
+including exact distinct-key counts and binary length/UUID version. The MySQL
+expression follows the [documented expression-default example](https://dev.mysql.com/doc/refman/8.4/en/data-type-defaults.html);
+PostgreSQL's generator is [documented here](https://www.postgresql.org/docs/18/functions-uuid.html).
+Binary UUID defaults retain a closed generator/conversion recipe with swap flag
+in native declaration metadata, evaluated per row. WAL/rebuild reload tests
+verify the binary key bytes, duplicate detection and further generated inserts.
+
 Omitted UUID defaults are evaluated once per input row before routing, UNIQUE
 checks and WAL construction, including `INSERT ... SELECT`. Explicit IDs remain;
 explicit NULL follows nullability. Integer AUTO_INCREMENT/IDENTITY stays numeric;

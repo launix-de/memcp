@@ -7,7 +7,31 @@ metadata:
   isolated: true
 setup:
 - sql: DROP TABLE IF EXISTS uuid_postgresql
+- sql: DROP TABLE IF EXISTS uuid_postgresql_official
 test_cases:
+- name: Official PostgreSQL random UUID primary key declaration
+  sql: CREATE TABLE uuid_postgresql_official (id uuid DEFAULT gen_random_uuid() PRIMARY KEY, payload text)
+- name: Official PostgreSQL default generates a key for a single row
+  sql: INSERT INTO uuid_postgresql_official(payload) VALUES ('Hallo')
+- name: Official PostgreSQL default generates different keys in one batch
+  sql: INSERT INTO uuid_postgresql_official(payload) VALUES ('second'),('third')
+- name: Official PostgreSQL keys are distinct version-four UUIDs
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids,MIN(UUID_EXTRACT_VERSION(id)) AS version FROM uuid_postgresql_official
+  expect:
+    rows: 1
+    data:
+    - n: 3
+      ids: 3
+      version: 4
+- name: Official PostgreSQL default is per row for INSERT SELECT
+  sql: INSERT INTO uuid_postgresql_official(payload) SELECT payload FROM uuid_postgresql_official
+- name: Official PostgreSQL copied rows retain distinct generated keys
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids FROM uuid_postgresql_official
+  expect:
+    rows: 1
+    data:
+    - n: 6
+      ids: 6
 - name: Create UUID primary key with per-row v7 default
   sql: CREATE TABLE uuid_postgresql (id UUID NOT NULL DEFAULT UUIDV7() PRIMARY KEY,
     payload INT)
@@ -101,3 +125,4 @@ test_cases:
     - n: 10
 cleanup:
 - sql: DROP TABLE IF EXISTS uuid_postgresql
+- sql: DROP TABLE IF EXISTS uuid_postgresql_official

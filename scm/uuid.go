@@ -108,6 +108,20 @@ func uuidSwap(id uuid.UUID, inverse bool) uuid.UUID {
 	return uuid.UUID{id[6], id[7], id[4], id[5], id[0], id[1], id[2], id[3], id[8], id[9], id[10], id[11], id[12], id[13], id[14], id[15]}
 }
 
+func UUIDToBinary(value Scmer, swap bool) Scmer {
+	if value.IsNil() {
+		return value
+	}
+	id, err := UUIDValue(value)
+	if err != nil {
+		panic(err)
+	}
+	if swap {
+		id = uuidSwap(id, false)
+	}
+	return NewString(string(id[:]))
+}
+
 func uuidSwapFlag(a []Scmer) bool {
 	if len(a) < 2 {
 		return false
@@ -189,14 +203,7 @@ func init_uuid() {
 		if a[0].IsNil() || len(a) > 1 && a[1].IsNil() {
 			return NewNil()
 		}
-		id, err := UUIDValue(a[0])
-		if err != nil {
-			panic(err)
-		}
-		if uuidSwapFlag(a) {
-			id = uuidSwap(id, false)
-		}
-		return NewString(string(id[:]))
+		return UUIDToBinary(a[0], uuidSwapFlag(a))
 	}, binaryParams, "string", true)
 	declare("uuid_from_bin", func(a ...Scmer) Scmer {
 		if a[0].IsNil() || len(a) > 1 && a[1].IsNil() {

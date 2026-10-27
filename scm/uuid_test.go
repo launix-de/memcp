@@ -36,6 +36,14 @@ func TestUUIDPackedOperations(t *testing.T) {
 		if len(binary.String()) != 16 {
 			t.Fatal("not 16 bytes")
 		}
+		encoded, err := json.Marshal(binary)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var restored Scmer
+		if err := json.Unmarshal(encoded, &restored); err != nil || !Equal(binary, restored) {
+			t.Fatalf("binary UUID wire roundtrip: %s %v", encoded, err)
+		}
 		roundtrip := Globalenv.Vars["uuid_from_bin"].Func()(binary, NewInt(swap))
 		if !Equal(v, roundtrip) {
 			t.Fatal("binary roundtrip")

@@ -7,7 +7,32 @@ metadata:
   isolated: true
 setup:
 - sql: DROP TABLE IF EXISTS uuid_mysql
+- sql: DROP TABLE IF EXISTS uuid_mysql_official
 test_cases:
+- name: Official MySQL binary UUID primary key declaration
+  sql: CREATE TABLE uuid_mysql_official (id BINARY(16) DEFAULT (UUID_TO_BIN(UUID())) PRIMARY KEY, payload TEXT)
+- name: Official MySQL default generates a key for a single row
+  sql: INSERT INTO uuid_mysql_official(payload) VALUES ('Hallo')
+- name: Official MySQL default generates different keys in one batch
+  sql: INSERT INTO uuid_mysql_official(payload) VALUES ('second'),('third')
+- name: Official MySQL binary keys are distinct sixteen-byte version-one UUIDs
+  sql: SELECT COUNT(*) AS n, COUNT(DISTINCT id) AS ids, MIN(LENGTH(id)) AS bytes, MIN(UUID_EXTRACT_VERSION(BIN_TO_UUID(id))) AS version FROM uuid_mysql_official
+  expect:
+    rows: 1
+    data:
+    - n: 3
+      ids: 3
+      bytes: 16
+      version: 1
+- name: Official MySQL default is per row for INSERT SELECT
+  sql: INSERT INTO uuid_mysql_official(payload) SELECT payload FROM uuid_mysql_official
+- name: Official MySQL copied rows retain distinct generated keys
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids FROM uuid_mysql_official
+  expect:
+    rows: 1
+    data:
+    - n: 6
+      ids: 6
 - name: Create UUID primary key with per-row v7 default
   sql: CREATE TABLE uuid_mysql (id UUID NOT NULL DEFAULT UUID_V7() PRIMARY KEY, payload
     INT)
@@ -110,3 +135,4 @@ test_cases:
     - n: 10
 cleanup:
 - sql: DROP TABLE IF EXISTS uuid_mysql
+- sql: DROP TABLE IF EXISTS uuid_mysql_official

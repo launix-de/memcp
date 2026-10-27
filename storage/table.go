@@ -191,13 +191,31 @@ func (c *column) defaultValue() scm.Scmer {
 	if strings.EqualFold(c.DefaultExpression, "CURRENT_TIMESTAMP") {
 		return scm.NewDate(time.Now().Unix())
 	}
-	switch strings.ToUpper(c.DefaultExpression) {
+	expression := strings.ToUpper(c.DefaultExpression)
+	binary, swap := false, false
+	if parameters, ok := strings.CutPrefix(expression, "UUID_TO_BIN("); ok {
+		parameters, closed := strings.CutSuffix(parameters, ")")
+		generator, flag, separated := strings.Cut(parameters, "(),")
+		if !closed || !separated || flag != "0" && flag != "1" {
+			panic("unsupported default expression: " + c.DefaultExpression)
+		}
+		expression, binary, swap = generator, true, flag == "1"
+	}
+	version := 0
+	switch expression {
 	case "UUID", "UUID_V1":
-		return scm.GenerateUUID(1)
+		version = 1
 	case "UUID_V4", "UUIDV4", "GEN_RANDOM_UUID", "UUID_GENERATE_V4", "NEWID":
-		return scm.GenerateUUID(4)
+		version = 4
 	case "UUID_V7", "UUIDV7":
-		return scm.GenerateUUID(7)
+		version = 7
+	}
+	if version != 0 {
+		value := scm.GenerateUUID(version)
+		if binary {
+			return scm.UUIDToBinary(value, swap)
+		}
+		return value
 	}
 	if c.DefaultExpression != "" {
 		panic("unsupported default expression: " + c.DefaultExpression)
@@ -2686,6 +2704,10 @@ func (c *column) UpdateSanitizer() {
 			}
 			return inner(v)
 		}
+	} else {
+		// A declaration replacement may change a formerly coerced type to an
+		// opaque/binary one. Do not retain the previous type's conversion.
+		c.sanitizer = nil
 	}
 }
 

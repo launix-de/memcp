@@ -38,6 +38,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* Persist only a generator name, never a sampled UUID or request closure. */
 (define sql_uuid_default (parser (or
 	(parser '("(" (define name sql_uuid_default) ")") name)
+	(parser '((atom "UUID_TO_BIN" true) "(" (define name sql_uuid_default)
+		(define swap (or (parser '("," (define flag (or (atom "0") (atom "1")))) flag)
+			(parser empty "0"))) ")") (concat "UUID_TO_BIN(" name "()," swap ")"))
 	(parser '((define name (or (atom "UUID" true) (atom "UUID_V4" true)
 		(atom "UUID_V7" true) (atom "UUIDV4" true) (atom "UUIDV7" true)
 		(atom "GEN_RANDOM_UUID" true) (atom "UUID_GENERATE_V4" true)
