@@ -20963,13 +20963,13 @@ func init_strings() {
 					ctx.FreeDesc(&d13)
 					ctx.EnsureDesc(&d11)
 					if d11.Loc == LocImm {
-						fieldAddr := uintptr(d11.Imm.Int()) + 8
+						fieldAddr := uintptr(d11.Imm.Int()) + 24
 						r1 := ctx.AllocReg()
 						ctx.EmitMovRegMem64(r1, fieldAddr)
 						d14 = JITValueDesc{Loc: LocReg, Reg: r1}
 						ctx.BindReg(r1, &d14)
 					} else {
-						off := int32(8)
+						off := int32(24)
 						baseReg := d11.Reg
 						r2 := ctx.AllocRegExcept(baseReg)
 						ctx.EmitMovRegMem(r2, baseReg, off)
@@ -22129,13 +22129,13 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d7)
 					ctx.EnsureDesc(&d7)
 					if d7.Loc == LocImm {
-						fieldAddr := uintptr(d7.Imm.Int()) + 8
+						fieldAddr := uintptr(d7.Imm.Int()) + 24
 						r3 := ctx.AllocReg()
 						ctx.EmitMovRegMem64(r3, fieldAddr)
 						d40 = JITValueDesc{Loc: LocReg, Reg: r3}
 						ctx.BindReg(r3, &d40)
 					} else {
-						off := int32(8)
+						off := int32(24)
 						baseReg := d7.Reg
 						r4 := ctx.AllocRegExcept(baseReg)
 						ctx.EmitMovRegMem(r4, baseReg, off)
