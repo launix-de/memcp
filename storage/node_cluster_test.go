@@ -356,7 +356,7 @@ func TestClusterDiscoveryIgnoresUnavailableNonOwner(t *testing.T) {
 }
 
 func TestClusterRejectedReferenceDoesNotPublishForwarding(t *testing.T) {
-	for _, reason := range []string{"stale", "sender", "flight"} {
+	for _, reason := range []string{"stale", "sender", "flight", "cross-table"} {
 		t.Run(reason, func(t *testing.T) {
 			cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}}
 			cluster.initializeManager()
@@ -378,11 +378,13 @@ func TestClusterRejectedReferenceDoesNotPublishForwarding(t *testing.T) {
 				packet.Epoch = 4
 			case "sender":
 				source = "memcp://" + uuid.NewString()
+			case "cross-table":
+				packet.Forwards[0].From.Table = "other"
 			case "flight":
 				cell.ownstate.Publish(mosi.IO)
 				cell.ownstate.Request(mosi.S)
 			}
-			failure := map[string]string{"stale": "stale shared reference", "sender": "unsolicited shared reference", "flight": "unexpected shared reference request"}[reason]
+			failure := map[string]string{"stale": "stale shared reference", "sender": "unsolicited shared reference", "flight": "unexpected shared reference request", "cross-table": "invalid transfer forwarding"}[reason]
 			if err := cluster.installReference(source, packet); err == nil || !strings.Contains(err.Error(), failure) {
 				t.Fatal("reference was not rejected for its invalid header", err)
 			}
