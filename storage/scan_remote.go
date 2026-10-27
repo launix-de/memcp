@@ -274,7 +274,7 @@ func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScan
 			if shard.uuid.String() != request.Shard.Resource.Shard || shard.t.filterSchemaFingerprint() != request.Shard.Schema || shard.t.schema.Name != request.Shard.Resource.Database || shard.t.Name != request.Shard.Resource.Table {
 				return fmt.Errorf("retained input generation/schema mismatch")
 			}
-			lease := shard.getRead(nil, true)
+			lease := shard.getRead(tx, true)
 			defer lease.Release()
 			horizon := shard.captureScanHorizon()
 			if horizon.Main != request.Shard.Horizon.Main || horizon.Delta < request.Shard.Horizon.Delta {
@@ -730,7 +730,6 @@ func findScanShard(table *table, resource mosiResource) *storageShard {
 		}
 	}
 	return nil
-
 }
 
 // bindProcedureScanContext is storage policy, not a Scheme language rule. It

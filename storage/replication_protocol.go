@@ -78,7 +78,7 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 				} else if copy.Kind == "write" {
 					state = "M"
 				}
-				_ = peer.post(mosiPacket{Kind: "failure", ID: copy.ID, Resource: copy.Resource, Epoch: copy.Epoch, Generation: copy.Content, State: state, Error: requestErr.Error()})
+				_ = peer.post(mosiPacket{Kind: "failure", ID: copy.ID, Resource: copy.Resource, Epoch: copy.Epoch, Content: copy.Content, State: state, Error: requestErr.Error()})
 			}
 		}()
 		return nil
@@ -110,7 +110,9 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 		}
 		return r.acceptGrant(*packet)
 	case "begin":
-		if err := r.validateForwards(source, *packet); err != nil { return err }
+		if err := r.validateForwards(source, *packet); err != nil {
+			return err
+		}
 		if r.master {
 			if value, expected := r.steps.Load(packet.ID); expected {
 				step := value.(*replicaStep)
@@ -147,7 +149,9 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 		if err != nil {
 			return err
 		}
-		for _, route := range packet.Forwards { r.forwardResource(route.From, route.To) }
+		for _, route := range packet.Forwards {
+			r.forwardResource(route.From, route.To)
+		}
 		publication := r.resourceCell(mosiResource{Database: packet.Resource.Database})
 		publication.importPublication.Lock()
 		r.imports.Store(key, transfer)
@@ -208,7 +212,9 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 				if err := r.finishImport(source, transfer); err != nil {
 					return err
 				}
-				if !transfer.superseded { return r.saveBackup(packet.Resource, packet.Content) }
+				if !transfer.superseded {
+					return r.saveBackup(packet.Resource, packet.Content)
+				}
 				return nil
 			}(); err != nil {
 				return err
@@ -224,7 +230,7 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 			return err
 		}
 		if !r.master {
-			return peer.post(mosiPacket{Kind: "ack", ID: packet.ID, Resource: packet.Resource, Epoch: packet.Epoch, Generation: packet.Content})
+			return peer.post(mosiPacket{Kind: "ack", ID: packet.ID, Resource: packet.Resource, Epoch: packet.Epoch, Content: packet.Content})
 		}
 		if value, expected := r.steps.Load(packet.ID); expected {
 			value.(*replicaStep).finish(nil)

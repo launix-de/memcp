@@ -116,7 +116,7 @@ func prepareHistoricalObject(t *testing.T, owner *nodeScanService, peer *mosiPee
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := makeRemoteScanTask(t, remoteScanShard{Schema: table.filterSchemaFingerprint(), Resource: mosiResource{Database: table.schema.Name, Table: table.Name, Shard: old.uuid.String()}, Generation: old.uuid, Horizon: old.captureScanHorizon()})
+	task := makeRemoteScanTask(t, remoteScanShard{Schema: table.filterSchemaFingerprint(), Resource: mosiResource{Database: table.schema.Name, Table: table.Name, Shard: old.uuid.String()}, Horizon: old.captureScanHorizon()})
 	return ref, weak.Make(old), task
 }
 
@@ -138,7 +138,7 @@ func TestClusterObjectHistoricalScanRebuildAndPeerGC(t *testing.T) {
 		t.Fatal(err)
 	}
 	RebuildTable(table, true, false)
-	if table.ActiveShards()[0].uuid == task.Shard.Generation {
+	if table.ActiveShards()[0].uuid.String() == task.Shard.Resource.Shard {
 		t.Fatal("fixture did not replace the shard")
 	}
 	runtime.GC()
@@ -163,7 +163,7 @@ func TestClusterObjectHistoricalScanRebuildAndPeerGC(t *testing.T) {
 	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
 	waitObjectGC(t, func() bool { return !historicalObjectAlive(old) })
 	// Retiring the old object never changes the newly published partition.
-	if table.ActiveShards()[0].uuid == task.Shard.Generation {
+	if table.ActiveShards()[0].uuid.String() == task.Shard.Resource.Shard {
 		t.Fatal("release restored old topology")
 	}
 }

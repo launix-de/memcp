@@ -157,8 +157,10 @@ transaction visibility views and parallel dispatch/publication ordering.
 
 Native UUID forwarding from PR #1193 is integrated. Physical endpoint identity
 is the actual generation UUID; a logical resource cell is not substituted for
-that historical pointer. This interface can be implemented by the forwarding
-code without introducing a second registry or changing native snapshot lifetimes.
+that historical pointer. Native successor routing and object registration serve
+distinct purposes: routing follows current authority, while the object registry
+retains an exact historical generation until the last peer releases its handle.
+Neither introduces a second shard identity or changes native snapshot lifetimes.
 
 Distributed writes additionally need native participant prepare/commit/abort
 and durable outcome recovery. Do not serialize the entire mutable TxContext as

@@ -105,6 +105,8 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 	// Discovery spans replies from several live nodes. Ownership may have
 	// advanced since our initial report. Re-sample routing only: this must never
 	// establish a permission from IO or turn an in-flight handover into recovery.
+	// An unchanged directory hint must not override a newer live peer report,
+	// especially when the hinted owner is unavailable.
 	latest := cluster.report(resource)
 	latestPhase := mosi.ParsePhase(latest.State)
 	if latestPhase == mosi.M || latestPhase == mosi.O {
@@ -113,7 +115,7 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 	if latest.Handoff != "" {
 		return latest.Handoff, nil
 	}
-	if latest.Owner != "" && latest.Owner != r.id {
+	if latest.Owner != "" && latest.Owner != r.id && (latest.Owner != own.Owner || latest.Epoch > own.Epoch) {
 		return latest.Owner, nil
 	}
 	if owner == r.id && !authoritative {
