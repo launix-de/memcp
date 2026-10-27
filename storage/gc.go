@@ -200,6 +200,18 @@ func activeBlobReferences(db *database, persistManifests bool) (map[string]struc
 			references[hash] = struct{}{}
 		}
 	}
+	for _, shard := range registeredClusterShards(db.Name) {
+		if shard.t.Name == ".blobs" || shard.t.PersistencyMode == Memory || shard.t.PersistencyMode == Cache {
+			continue
+		}
+		manifest, valid := readBlobManifest(db.persistence.ReadColumn(shard.uuid.String(), blobManifestColumn))
+		if !valid {
+			return nil, false
+		}
+		for hash := range manifest {
+			references[hash] = struct{}{}
+		}
+	}
 	return references, true
 }
 
@@ -370,6 +382,9 @@ func cleanShards(db *database) int {
 	}
 	for _, record := range replicationBackupRecords(db) {
 		activeUUIDs[record.Content] = true
+	}
+	for _, shard := range registeredClusterShards(db.Name) {
+		activeUUIDs[shard.uuid.String()] = true
 	}
 	db.schemalock.RUnlock()
 

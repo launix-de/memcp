@@ -3823,6 +3823,9 @@ func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
 }
 
 func (t *storageShard) RemoveFromDisk() {
+	if t.t.schema != nil && clusterRetainsShard(t) {
+		return
+	}
 	if t.t.schema != nil && replicationRetainsCatalogs(t.t.schema.Name) {
 		return
 	}

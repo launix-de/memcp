@@ -1,0 +1,543 @@
+/*
+Copyright (C) 2026 Carl-Philip Hänsch
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+package storage
+
+import "fmt"
+import "weak"
+import "time"
+import "sync"
+import "context"
+import "strings"
+import "runtime"
+import "testing"
+import "encoding/json"
+import "github.com/google/uuid"
+import "github.com/launix-de/memcp/scm"
+
+func objectOwnerPeer(t *testing.T, owner, client *nodeScanService) *mosiPeer {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		owner.mu.Lock()
+		for peer := range owner.peers {
+			if peer.objectPeer.ID == client.authNodeID() {
+				owner.mu.Unlock()
+				return peer
+			}
+		}
+		owner.mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("missing authenticated object peer")
+	return nil
+}
+func objectEntryCount(s *nodeScanService) int {
+	r := s.objectRegistry()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.entries)
+}
+func waitObjectGC(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime.GC()
+		if condition() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("GC/reference publication did not finish")
+}
+
+func TestClusterObjectIndependentHandlesAndIncarnation(t *testing.T) {
+	owner := &nodeScanService{id: uuid.NewString()}
+	defer owner.stopObjects()
+	peer := &mosiPeer{objectPeer: clusterObjectPeer{uuid.NewString(), uuid.NewString()}}
+	value := scm.NewSession()
+	object, _ := scm.ClusterObjectOf(value)
+	view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
+	first, err := owner.exportObject(peer, object, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := owner.exportObject(peer, object, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.URI != second.URI || first.Token == second.Token {
+		t.Fatal("exports did not share owner identity with independent handles")
+	}
+	if err := owner.releaseObject(peer, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.releaseObject(peer, first); err != nil {
+		t.Fatal(err)
+	}
+	if objectEntryCount(owner) != 1 {
+		t.Fatal("late old release revoked the newer reference")
+	}
+	foreign := &mosiPeer{objectPeer: clusterObjectPeer{peer.objectPeer.ID, uuid.NewString()}}
+	if err := owner.releaseObject(foreign, second); err == nil {
+		t.Fatal("another process incarnation released a live handle")
+	}
+	if err := owner.releaseObject(peer, second); err != nil {
+		t.Fatal(err)
+	}
+	if objectEntryCount(owner) != 0 {
+		t.Fatal("last reference did not deregister owner object")
+	}
+}
+
+//go:noinline
+func prepareHistoricalObject(t *testing.T, owner *nodeScanService, peer *mosiPeer, table *table) (scm.ClusterReference, weak.Pointer[storageShard], remoteScanTask) {
+	old := table.ActiveShards()[0]
+	view, err := scm.ClusterObjectValue(old, context.Background(), scm.ClusterRequest{Method: "view"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := owner.exportObject(peer, old, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := makeRemoteScanTask(t, remoteScanShard{Schema: table.filterSchemaFingerprint(), Resource: mosiResource{Database: table.schema.Name, Table: table.Name, Shard: old.uuid.String()}, Generation: old.uuid, Horizon: old.captureScanHorizon()})
+	return ref, weak.Make(old), task
+}
+
+//go:noinline
+func historicalObjectAlive(ptr weak.Pointer[storageShard]) bool { return ptr.Value() != nil }
+
+func TestClusterObjectHistoricalScanRebuildAndPeerGC(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "t_cluster_object_gc", 4)
+	RebuildTable(table, true, false)
+	peer, client, _ := setupRemoteScanConnection(t)
+	defer client.stopObjects()
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	ref, old, task := prepareHistoricalObject(t, owner, source, table)
+	// The peer's query retains only its imported object. The owner's registry
+	// must keep the exact old Go shard alive after topology points elsewhere.
+	remote, err := client.importObject(context.Background(), peer, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	RebuildTable(table, true, false)
+	if table.ActiveShards()[0].uuid == task.Shard.Generation {
+		t.Fatal("fixture did not replace the shard")
+	}
+	runtime.GC()
+	if !historicalObjectAlive(old) || objectEntryCount(owner) != 1 {
+		t.Fatal("owner lost generation still retained by remote query")
+	}
+	encoded, _ := json.Marshal(task)
+	result, err := scm.ClusterObjectValue(remote.Any().(*remoteShardObject), context.Background(), scm.ClusterRequest{Method: "scan", Arguments: []scm.Scmer{scm.NewString(string(encoded))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reduced remoteScanResult
+	if err := json.Unmarshal([]byte(result.String()), &reduced); err != nil {
+		t.Fatal(err)
+	}
+	value, err := decodeScanData(reduced.Value, false)
+	if err != nil || value.Int() != 9 {
+		t.Fatal("old-generation statistics changed", value, err)
+	}
+	runtime.KeepAlive(remote)
+	remote = scm.NewNil()
+	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
+	waitObjectGC(t, func() bool { return !historicalObjectAlive(old) })
+	// Retiring the old object never changes the newly published partition.
+	if table.ActiveShards()[0].uuid == task.Shard.Generation {
+		t.Fatal("release restored old topology")
+	}
+}
+
+func TestClusterObjectSerializedSessionUsesOwnerEndpoint(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "t_cluster_session_wire", 1)
+	_ = table
+	peer, client, _ := setupRemoteScanConnection(t)
+	defer client.stopObjects()
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	session := scm.NewSession()
+	session.Func()(scm.NewString("x"), scm.NewInt(17))
+	environment := &scm.Env{Vars: scm.Vars{scm.Symbol("session"): session}, Outer: &scm.Globalenv}
+	proc := scm.Eval(scm.Read(t.Name(), `(lambda () (session "x"))`), environment)
+	bindings := (&scm.ClusterBindings{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		return owner.exportObject(source, object, view)
+	})
+	data, err := scm.MarshalProcedure(proc, bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := scm.UnmarshalProcedure(data, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+		return client.importObject(context.Background(), peer, ref)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.Func()(scm.NewString("x"), scm.NewInt(91))
+	if result := scm.Apply(restored); result.Int() != 17 {
+		t.Fatal("prepared session view changed during statement", result)
+	}
+	if objectEntryCount(owner) != 1 {
+		t.Fatal("serializer bypassed object registration")
+	}
+	runtime.KeepAlive(restored)
+}
+
+func TestClusterPacketDispatchDoesNotBlockReaderAndKeepsTransferOrder(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+	entered := make(chan struct{})
+	resume := make(chan struct{})
+	independent := make(chan struct{})
+	p := &mosiPeer{done: make(chan struct{}), packet: func(packet *mosiPacket) error {
+		if packet.Kind == "begin" {
+			close(entered)
+			<-resume
+		}
+		mu.Lock()
+		order = append(order, packet.Kind)
+		mu.Unlock()
+		if packet.ID == "other" {
+			close(independent)
+		}
+		return nil
+	}}
+	if !p.dispatchPacket(&mosiPacket{ID: "stream", Kind: "begin"}, 1) {
+		t.Fatal("dispatch rejected")
+	}
+	<-entered
+	if !p.dispatchPacket(&mosiPacket{ID: "stream", Kind: "end"}, 1) || !p.dispatchPacket(&mosiPacket{ID: "other", Kind: "grant"}, 1) {
+		t.Fatal("dispatch rejected")
+	}
+	select {
+	case <-independent:
+	case <-time.After(time.Second):
+		t.Fatal("blocked transfer prevented unrelated message execution")
+	}
+	close(resume)
+	p.workers.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if fmt.Sprint(order) != "[grant begin end]" {
+		t.Fatal("transfer packets reordered", order)
+	}
+	if p.packetBytes.Load() != 0 || len(p.packetOrder) != 0 {
+		t.Fatal("completed packet workers leaked queue state")
+	}
+}
+
+func TestClusterObjectOwnerCacheMapFactoryAndNestedRuntimeCapture(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	defer client.stopObjects()
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	cache := NewCacheMap()
+	object, _ := scm.ClusterObjectOf(cache)
+	view, err := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := owner.exportObject(source, object, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := client.importObject(context.Background(), peer, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := scm.NewSession()
+	session.Func()(scm.NewString("x"), scm.NewInt(7))
+	env := &scm.Env{Vars: scm.Vars{scm.Symbol("session"): session}, Outer: &scm.Globalenv}
+	factory := scm.Eval(scm.Read(t.Name(), `(lambda () (+ (session "x") 3))`), env)
+	value := scm.Apply(remote, scm.NewString("key"), scm.NewNil(), factory)
+	if value.Int() != 10 || scm.Apply(cache, scm.NewString("key")).Int() != 10 {
+		t.Fatal("factory did not execute at cache owner", value)
+	}
+	// The owner mutation must round-trip. Subsequent reads of this prepared
+	// accessor stay local, including a cached SQL NULL.
+	scm.Apply(remote, scm.NewString("key"), scm.NewNil())
+	if !scm.Apply(remote, scm.NewString("key")).IsNil() || !scm.Apply(cache, scm.NewString("key")).IsNil() {
+		t.Fatal("owner cache mutation lost NULL")
+	}
+	runtime.KeepAlive(remote)
+}
+
+func TestClusterObjectNativeOverlayReferenceKeepsPhysicalIdentity(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "t_cluster_overlay_ref", 4)
+	peer, client, _ := setupRemoteScanConnection(t)
+	defer client.stopObjects()
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	shard := table.ActiveShards()[0]
+	tx := NewTxContext(TxACID)
+	tx.mu.Lock()
+	overlay := tx.getOrCreateShardTxLocked(shard)
+	tx.mu.Unlock()
+	defer tx.Rollback()
+	overlay.mu.Lock()
+	overlay.DeleteMask.Set(1, true)
+	overlay.DeleteRecids = append(overlay.DeleteRecids, 1)
+	overlay.mu.Unlock()
+	view, err := scm.ClusterObjectValue(overlay, context.Background(), scm.ClusterRequest{Method: "view"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := owner.exportObject(source, overlay, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := client.importObject(context.Background(), peer, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imported := value.Any().(*storageShardTransaction)
+	if imported.shardUUID != shard.uuid || !imported.DeleteMask.Get(1) || imported.DeleteMask.Get(2) {
+		t.Fatal("overlay did not preserve native UUID/visibility")
+	}
+	if _, err := scm.ClusterObjectValue(imported, context.Background(), scm.ClusterRequest{Method: "commit"}); err == nil {
+		t.Fatal("read overlay acquired coordinator mutation rights")
+	}
+	runtime.KeepAlive(value)
+}
+
+func TestClusterObjectCatalogNamesNeedNoRegistration(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "t_cluster_catalog_ref", 1)
+	peer, client, _ := setupRemoteScanConnection(t)
+	defer client.stopObjects()
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	view, err := scm.ClusterObjectValue(table, context.Background(), scm.ClusterRequest{Method: "view"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := owner.exportObject(source, table, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := client.importObject(context.Background(), peer, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if TableFromScmer(value) != table || ref.Token != "" || objectEntryCount(owner) != 0 {
+		t.Fatal("catalog resolution allocated a temporary registration")
+	}
+}
+
+func TestClusterObjectOfferCancellationCannotDropAcquiredReader(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	defer client.stopObjects()
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	session := scm.NewSession()
+	object, _ := scm.ClusterObjectOf(session)
+	view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
+	pending, err := owner.exportObject(source, object, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := owner.exportObject(source, object, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := client.importObject(context.Background(), peer, live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner.cancelObjectOffers(source, []scm.ClusterReference{pending, live})
+	if objectEntryCount(owner) != 1 {
+		t.Fatal("cancelled offer erased an acquired reader")
+	}
+	r := owner.objectRegistry()
+	r.mu.Lock()
+	tokens := len(r.entries[live.URI].tokens)
+	r.mu.Unlock()
+	if tokens != 1 {
+		t.Fatal("unacquired offer was retained", tokens)
+	}
+	runtime.KeepAlive(value)
+}
+
+func TestClusterObjectRepeatedImportSharesOneGCLifetime(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	session := scm.NewSession()
+	object, _ := scm.ClusterObjectOf(session)
+	view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
+	ref, err := owner.exportObject(source, object, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := client.importObject(context.Background(), peer, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.importObject(context.Background(), peer, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := scm.ClusterObjectOf(first)
+	b, _ := scm.ClusterObjectOf(second)
+	if a != b {
+		t.Fatal("one token reconstructed two independent GC leases")
+	}
+	first = scm.NewNil()
+	a = nil
+	for range 3 {
+		runtime.GC()
+	}
+	if objectEntryCount(owner) != 1 {
+		t.Fatal("first alias released a still live imported handle")
+	}
+	runtime.KeepAlive(second)
+	runtime.KeepAlive(b)
+	second = scm.NewNil()
+	b = nil
+	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
+}
+
+func TestClusterPacketSchemaPublicationPrecedesDependentShard(t *testing.T) {
+	entered := make(chan struct{})
+	resume := make(chan struct{})
+	data := make(chan struct{})
+	other := make(chan struct{})
+	p := &mosiPeer{done: make(chan struct{}), packet: func(packet *mosiPacket) error {
+		switch packet.ID {
+		case "schema":
+			close(entered)
+			<-resume
+		case "data":
+			select {
+			case <-resume:
+			default:
+				t.Error("shard import overtook the schema introducing its identity")
+			}
+			close(data)
+		case "independent":
+			close(other)
+		}
+		return nil
+	}}
+	if !p.dispatchPacket(&mosiPacket{ID: "schema", Resource: mosiResource{Database: "dependent"}}, 1) {
+		t.Fatal("schema dispatch failed")
+	}
+	<-entered
+	if !p.dispatchPacket(&mosiPacket{ID: "data", Resource: mosiResource{Database: "dependent", Table: "t", Shard: uuid.NewString()}}, 1) ||
+		!p.dispatchPacket(&mosiPacket{ID: "independent", Resource: mosiResource{Database: "independent"}}, 1) {
+		t.Fatal("data dispatch failed")
+	}
+	select {
+	case <-other:
+	case <-time.After(time.Second):
+		t.Fatal("schema work serialized an unrelated database")
+	}
+	select {
+	case <-data:
+		t.Fatal("dependent shard executed before schema publication")
+	default:
+	}
+	close(resume)
+	p.workers.Wait()
+	select {
+	case <-data:
+	default:
+		t.Fatal("dependent shard did not resume")
+	}
+}
+
+func TestClusterObjectAbandonedCompletionDiscardsOffers(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	value := scm.NewSession()
+	object, _ := scm.ClusterObjectOf(value)
+	view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
+	ref, err := owner.exportObject(source, object, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.NewString()
+	channel := &scanReturnChannel{peer: peer, result: make(chan scanCompletion, 1)}
+	client.returns.Store(id, channel)
+	defer client.returns.Delete(id)
+	completion, _ := json.Marshal(scanCompletion{Return: id, Offers: []scm.ClusterReference{ref}})
+	s := &scanRPCSession{service: client, peer: peer}
+	if _, err := s.channelMessage(context.Background(), "scan.result", completion); err != nil {
+		t.Fatal(err)
+	}
+	// Cancellation after delivery but before collection must release the offer.
+	channel.close(client)
+	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
+	// A late duplicate is harmless and cannot repopulate a closed collector.
+	if _, err := s.channelMessage(context.Background(), "scan.result", completion); err != nil {
+		t.Fatal(err)
+	}
+	if len(channel.result) != 0 {
+		t.Fatal("late completion was delivered to a closed collector")
+	}
+}
+
+//go:noinline
+func prepareRegisteredDiskGeneration(t *testing.T, owner *nodeScanService, peer *mosiPeer, tbl *table) (scm.ClusterReference, weak.Pointer[storageShard]) {
+	old := tbl.ActiveShards()[0]
+	view, err := scm.ClusterObjectValue(old, context.Background(), scm.ClusterRequest{Method: "view"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := owner.exportObject(peer, old, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Drop one current row so the successor no longer owns its blob. The old
+	// physical generation's column and manifest still need that blob on disk.
+	old.UpdateFunction(0, false, false, nil)()
+	RebuildTable(tbl, true, false)
+	if tbl.ActiveShards()[0].uuid == old.uuid {
+		t.Fatal("rebuild kept old UUID")
+	}
+	old.RemoveFromDisk()
+	return ref, weak.Make(old)
+}
+
+func TestClusterObjectRegisteredGenerationProtectsFilesAndBlobs(t *testing.T) {
+	defer setupGCTest(t)()
+	CreateDatabase("gcdb", false)
+	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("content", "TEXT", nil, nil)
+	insertLongRows(t, tbl, []string{
+		strings.Repeat("A", maxInlineBlobBytes+800),
+		strings.Repeat("B", maxInlineBlobBytes+800),
+		strings.Repeat("C", maxInlineBlobBytes+800),
+	})
+	_, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	peer := objectOwnerPeer(t, owner, client)
+	ref, old := prepareRegisteredDiskGeneration(t, owner, peer, tbl)
+	blobs, _, complete := CleanDatabase(tbl.schema)
+	if !complete || blobs != 0 {
+		t.Fatal("registered historical blob was removed", blobs, complete)
+	}
+	found := false
+	for _, name := range shardFilesOnDisk(t, "gcdb") {
+		if strings.HasPrefix(name, ref.URI[strings.LastIndex(ref.URI, "/")+1:]+"-") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("registered generation lost its column files")
+	}
+	if err := owner.releaseObject(peer, ref); err != nil {
+		t.Fatal(err)
+	}
+	waitObjectGC(t, func() bool { return !historicalObjectAlive(old) })
+	blobs, files, complete := CleanDatabase(tbl.schema)
+	if !complete || blobs == 0 || files == 0 {
+		t.Fatal("released generation remained on disk", blobs, files, complete)
+	}
+}

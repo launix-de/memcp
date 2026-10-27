@@ -47,7 +47,7 @@ jobs:
       - name: Check process runner and write oracle
         run: python3 tools/test_reliability_drill.py
 
-      - name: Run remote reductions, crash, reclaim and isolation scenarios
+      - name: Run remote reductions, generation GC, crash, reclaim and isolation scenarios
         run: >-
           python3 -u tools/replication_cluster_stress.py
           --binary "$RUNNER_TEMP/memcp-replication"
@@ -63,7 +63,7 @@ jobs:
           -run 'TestReplication|TestMosi|TestRemoteScan|TestScanDelegation|TestProcedureWire|TestCreateTableRefreshesInvalidatedPlannerCacheOnInit'
           -count=1
 
-      - name: Check dedicated-listener scenarios with the Go race detector
+      - name: Check generation GC and dedicated-listener scenarios with the Go race detector
         env:
           GORACE: halt_on_error=1 exitcode=66
         run: >-

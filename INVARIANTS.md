@@ -81,6 +81,20 @@ These rules describe the target architecture, not the implementation status.
   those rights to another node. A kicked node must discard its inconsistent
   state before rejoining, even if its process was still alive.
 
+- Runtime object endpoints share `HandleClusterRequest`; ownership policy stays
+  with the native object, not a transport type switch. The reader dispatches
+  independent work concurrently; resource FIFO and preceding schema publication
+  fence dependent imports outside the reader. Reply UUID collectors retain no
+  sending handle. No cancellation check is added to shard item loops.
+- Strong owner registrations retain physical generations while independent
+  peer tokens exist. Imported values own GC-cleaned leases; duplicate imports of
+  one token share one lifetime. GC only queues release, and a worker delivers it.
+  A last release removes only that registration, never current partition rights.
+  Disconnect does not revoke acquired handles or establish deletion proof.
+  Captured session/cachemap views resolve before execution and provide local
+  immutable reads; mutations use their owner endpoint. No extra shard read lock,
+  row-level registration, counter or CAS may be added for these references.
+
 ## Parallel execution and publication
 
 MemCP must execute independent work in parallel, using as few locks as possible.

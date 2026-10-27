@@ -369,3 +369,14 @@ func validateClusterURI(id string) error {
 	_, err := uuid.Parse(strings.TrimPrefix(id, "memcp://"))
 	return err
 }
+
+// Membership/admission policy belongs to the node object, not the socket reader.
+func (*nodeCluster) ClusterObjectType() string { return "node" }
+func (cluster *nodeCluster) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
+	session, _ := ctx.Value(clusterObjectSessionKey{}).(*scanRPCSession)
+	data, ok := request.Payload.(json.RawMessage)
+	if session == nil || !ok {
+		return nil, fmt.Errorf("invalid native node request")
+	}
+	return cluster.handle(session, ctx, session.remoteID, request.Method, data)
+}

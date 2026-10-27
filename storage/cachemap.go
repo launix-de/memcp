@@ -18,6 +18,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +38,7 @@ type cacheMapEntry struct {
 }
 
 type cacheMap struct {
+	call func(...scm.Scmer) scm.Scmer // immutable owner accessor, initialized before publication
 	// residentBytes is published at entry replacement/eviction boundaries.
 	// Owning tables can include memo entries without taking the cache mutex.
 	residentBytes atomic.Int64
@@ -86,7 +88,7 @@ func NewCacheMap(a ...scm.Scmer) scm.Scmer {
 		entries: make(map[string]*cacheMapEntry),
 		flights: make(map[string]*cacheMapFlight),
 	}
-	return scm.NewTypedFunc(func(a ...scm.Scmer) scm.Scmer {
+	cm.call = func(a ...scm.Scmer) scm.Scmer {
 		switch len(a) {
 		case 0:
 			// list all keys
@@ -125,7 +127,8 @@ func NewCacheMap(a ...scm.Scmer) scm.Scmer {
 		default:
 			panic("cachemap: expected 0, 1, 2, or 3 arguments")
 		}
-	}, cacheMapCallableTypeID)
+	}
+	return scm.NewClusterFunc(cm.call, cm, cacheMapCallableTypeID)
 }
 
 func newCacheMapEntry(cm *cacheMap, key string, value scm.Scmer) *cacheMapEntry {
@@ -241,6 +244,9 @@ func (cm *cacheMap) cancelWaiter(key string, flight *cacheMapFlight) {
 }
 
 func (cm *cacheMap) runProducer(ctx context.Context, key string, producer scm.Scmer, flight *cacheMapFlight) {
+	// A finished owner call includes native cache registration. Waking waiters
+	// earlier let a following lifecycle reset race the still-running producer.
+	defer close(flight.done)
 	value, panicValue, failed := runCacheMapProducer(ctx, producer)
 
 	var entry *cacheMapEntry
@@ -251,7 +257,6 @@ func (cm *cacheMap) runProducer(ctx context.Context, key string, producer scm.Sc
 	cm.mu.Lock()
 	if cm.flights[key] != flight {
 		cm.mu.Unlock()
-		close(flight.done)
 		return
 	}
 	delete(cm.flights, key)
@@ -268,7 +273,6 @@ func (cm *cacheMap) runProducer(ctx context.Context, key string, producer scm.Sc
 		}
 		cm.residentBytes.Add(delta)
 	}
-	close(flight.done)
 	cm.mu.Unlock()
 
 	if old != nil {
@@ -307,4 +311,47 @@ func cacheMapCleanup(pointer any, freedByType *[numEvictableTypes]int64) bool {
 func cacheMapGetLastUsed(pointer any) time.Time {
 	entry := pointer.(*cacheMapEntry)
 	return time.Unix(0, entry.lastUsed.Load())
+}
+
+func (*cacheMap) ClusterObjectType() string { return "cachemap" }
+func (cm *cacheMap) HandleClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return scm.NewNil(), err
+	}
+	switch r.Method {
+	case "view":
+		cm.mu.RLock()
+		defer cm.mu.RUnlock()
+		pairs := make([]scm.Scmer, 0, len(cm.entries)*2)
+		for key, entry := range cm.entries {
+			pairs = append(pairs, scm.NewString(key), entry.value)
+		}
+		return scm.NewSlice(pairs), nil
+	case "call":
+		return cm.call(r.Arguments...), nil
+	}
+	return scm.NewNil(), fmt.Errorf("unsupported cachemap request %q", r.Method)
+}
+func (cm *cacheMap) ProjectClusterView(view scm.Scmer, keys []scm.Scmer) (scm.Scmer, error) {
+	pairs := view.Slice()
+	prepared := append([]scm.Scmer(nil), pairs...)
+	for _, key := range keys {
+		if key.IsNil() {
+			continue
+		}
+		found := false
+		for i := 0; i < len(pairs); i += 2 {
+			if pairs[i].String() == key.String() {
+				found = true
+				break
+			}
+		}
+		if !found {
+			prepared = append(prepared, key, cm.call(key))
+		}
+	}
+	return scm.ProjectClusterAssoc(scm.NewSlice(prepared), keys)
+}
+func init() {
+	scm.RegisterClusterObjectType("cachemap", func(handle scm.ClusterHandle) scm.Scmer { return scm.NewClusterAssoc(handle, cacheMapCallableTypeID) })
 }

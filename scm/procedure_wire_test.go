@@ -11,9 +11,11 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package scm
 
 import "fmt"
+import "context"
 import "bytes"
 import "strings"
 import "testing"
+import "encoding/json"
 
 func TestProcedureWireSnapshotsCapturesAndRunsWithoutSourceEnvironment(t *testing.T) {
 	for _, optimize := range []bool{false, true} {
@@ -173,14 +175,22 @@ func TestProcedureWireStatementSessionBindingsAreFrozen(t *testing.T) {
 	session.Func()(NewString("a"), NewInt(7))
 	session.Func()(NewString("b"), NewInt(8))
 	env := &Env{Vars: Vars{Symbol("session"): session}, Outer: &Globalenv}
-	bindings := new(ProcedureBindings)
-	run := func(key string, bindings *ProcedureBindings) Scmer {
+	export := func(object ClusterObject, view Scmer) (ClusterReference, error) {
+		data, _ := json.Marshal(view)
+		return ClusterReference{URI: "http://owner/cluster/test", Owner: "owner", Incarnation: "boot", Token: "handle", Type: object.ClusterObjectType(), View: data}, nil
+	}
+	bindings := &ClusterBindings{Export: export}
+	run := func(key string, bindings *ClusterBindings) Scmer {
 		proc := Eval(Read(t.Name(), `(lambda (x) (+ x (session "`+key+`")))`), env)
 		data, err := MarshalProcedure(proc, bindings)
 		if err != nil {
 			t.Fatal(err)
 		}
-		restored, err := UnmarshalProcedure(data)
+		restored, err := UnmarshalProcedure(data, ProcedureDecode{Resolve: func(ref ClusterReference) (Scmer, error) {
+			var view Scmer
+			_ = json.Unmarshal(ref.View, &view)
+			return ReconstructClusterObject(ClusterHandle{Reference: ref, View: view})
+		}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -193,7 +203,40 @@ func TestProcedureWireStatementSessionBindingsAreFrozen(t *testing.T) {
 	if got := run("b", bindings); got.Int() != 9 {
 		t.Fatal("one statement observed two session revisions", got)
 	}
-	if got := run("b", new(ProcedureBindings)); got.Int() != 100 {
+	if got := run("b", &ClusterBindings{Export: export}); got.Int() != 100 {
 		t.Fatal("new statement retained the old session revision", got)
+	}
+}
+
+func TestProcedureWireRuntimeReferencesInsideQuotedCapturesKeepIdentity(t *testing.T) {
+	session := NewSession()
+	Apply(session, NewString("x"), NewInt(3))
+	object, _ := ClusterObjectOf(session)
+	bindings := &ClusterBindings{Export: func(object ClusterObject, view Scmer) (ClusterReference, error) {
+		data, _ := json.Marshal(view)
+		return ClusterReference{URI: "http://owner/cluster/session", Token: "one", Type: object.ClusterObjectType(), View: data}, nil
+	}}
+	env := &Env{Vars: Vars{Symbol("captured"): NewSlice([]Scmer{NewSymbol("label"), session, session})}, Outer: &Globalenv}
+	data, err := MarshalProcedure(Eval(Read(t.Name(), `(lambda () captured)`), env), bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := UnmarshalProcedure(data, ProcedureDecode{Resolve: func(ref ClusterReference) (Scmer, error) {
+		var view Scmer
+		if err := json.Unmarshal(ref.View, &view); err != nil {
+			return NewNil(), err
+		}
+		return ReconstructClusterObject(ClusterHandle{Reference: ref, View: view, Call: func(ctx context.Context, r ClusterRequest) (Scmer, error) { return ClusterObjectValue(object, ctx, r) }})
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := Apply(restored).Slice()
+	if !values[0].IsSymbol() || values[0].String() != "label" || values[1] != values[2] {
+		t.Fatal("quoted runtime captures lost data or object identity")
+	}
+	Apply(values[1], NewString("x"), NewInt(41))
+	if Apply(values[2], NewString("x")).Int() != 41 || Apply(session, NewString("x")).Int() != 41 {
+		t.Fatal("shared accessor did not route mutation to its owner")
 	}
 }

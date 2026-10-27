@@ -18,15 +18,14 @@ import "encoding/json"
 const procedureWireVersion = 2
 const maxProcedureWireBytes = 256 * 1024
 
-// MarshalProcedure snapshots explicit captures before using the existing Scheme
-// Serialize function. It does not serialize Env, native/JIT code, sessions or Go pointers.
-// Optional statement bindings freeze demanded constant-key session reads into
-// data before validation; dynamic reads/mutations still require an owner contract.
-// Both nodes must provide the same declared global builtin contract; other
-// globals require explicit captures. Unsupported values
-// and unresolved lexical captures fail instead of silently becoming "?" or a
-// different receiver-side global. This is a conservative first transport subset.
-func MarshalProcedure(value Scmer, bindings ...*ProcedureBindings) (data []byte, err error) {
+// MarshalProcedure closes explicit captures through the existing serializer.
+// ClusterBindings exports supported runtime values as typed owner references;
+// invocation views are prepared before validation and reconstruction happens
+// before execution. Environments, native/JIT code and Go pointers never enter
+// the wire. Both nodes must provide the same declared builtin contract. Unknown
+// runtime values and unresolved captures fail explicitly instead of silently
+// binding a different receiver-side global.
+func MarshalProcedure(value Scmer, bindings ...*ClusterBindings) (data []byte, err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			err = fmt.Errorf("procedure encoding: %v", failure)
@@ -42,17 +41,15 @@ func MarshalProcedure(value Scmer, bindings ...*ProcedureBindings) (data []byte,
 	}
 	closed := CloseProcedure(value)
 	if len(bindings) > 0 && bindings[0] != nil {
-		proc := closed.Proc().snapshot()
-		proc.Body = bindings[0].freeze(proc.Body, value.Proc().En, procedureWireBindings(proc.Params, proc.Body, nil))
-		closed = NewProcStruct(proc)
+		bindings[0].prepare(closed)
 	}
 	proc := closed.Proc()
 	bound := procedureWireBindings(proc.Params, proc.Body, nil)
-	if err := validateProcedureWire(proc.Body, bound, value.Proc().En, false, 0); err != nil {
+	if err := validateProcedureWire(proc.Body, bound, value.Proc().En, false, 0, bindings...); err != nil {
 		return nil, err
 	}
 	var source bytes.Buffer
-	Serialize(&source, closed, &Globalenv)
+	Serialize(&source, closed, &Globalenv, bindings...)
 	data, err = json.Marshal(struct {
 		Version int    `json:"version"`
 		Source  string `json:"source"`
@@ -66,7 +63,7 @@ func MarshalProcedure(value Scmer, bindings ...*ProcedureBindings) (data []byte,
 // UnmarshalProcedure reconstructs an uncompiled procedure without evaluating
 // its body. Only an authenticated task handler may later execute it. The codec
 // is not a sandbox or an authorization boundary.
-func UnmarshalProcedure(data []byte, queryContext ...Scmer) (value Scmer, err error) {
+func UnmarshalProcedure(data []byte, options ...ProcedureDecode) (value Scmer, err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			value = NewNil()
@@ -115,8 +112,14 @@ func UnmarshalProcedure(data []byte, queryContext ...Scmer) (value Scmer, err er
 	// A trusted worker may bind its request capability into nested scan calls.
 	// The capability is an ordinary declared call with a UUID argument, never a
 	// serialized TxContext. A further remote hop rebinds it to that hop's scope.
-	if len(queryContext) > 0 && !queryContext[0].IsNil() {
-		expression = bindProcedureScanContext(expression, queryContext[0])
+	if len(options) > 0 && !options[0].QueryContext.IsNil() {
+		expression = bindProcedureScanContext(expression, options[0].QueryContext)
+	}
+	if len(options) > 0 {
+		expression, err = resolveProcedureObjects(expression, options[0].Resolve)
+		if err != nil {
+			return NewNil(), err
+		}
 	}
 	// Only the validated lambda form is evaluated. Its body stays inert until
 	// the authorized worker calls the reconstructed procedure.
@@ -143,11 +146,14 @@ func procedureWireBindings(params, body Scmer, parent map[Symbol]struct{}) map[S
 	return bound
 }
 
-func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, literal bool, depth int) error {
+func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, literal bool, depth int, bindings ...*ClusterBindings) error {
 	if depth > 128 {
 		return fmt.Errorf("procedure exceeds wire nesting limit")
 	}
 	value = value.WithoutSourceInfo()
+	if _, ok := ClusterObjectOf(value); ok && len(bindings) > 0 && bindings[0] != nil {
+		return nil
+	}
 	switch value.GetTag() {
 	case tagNil, tagBool, tagInt, tagFloat, tagString, tagCString, tagBString, tagLZ4, tagNthLocalVar:
 		return nil
@@ -172,6 +178,10 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 			}
 		}
 		return nil
+	case tagProc:
+		closed := CloseProcedure(value)
+		proc := closed.Proc()
+		return validateProcedureWire(proc.Body, procedureWireBindings(proc.Params, proc.Body, nil), value.Proc().En, false, depth+1, bindings...)
 	case tagFunc, tagSpecialForm:
 		if literal || DeclarationForValue(value) == nil {
 			return fmt.Errorf("procedure contains a process-local callable")
@@ -189,16 +199,16 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 				if len(items) != 2 {
 					return fmt.Errorf("invalid quoted procedure value")
 				}
-				return validateProcedureWire(items[1], bound, origin, true, depth+1)
+				return validateProcedureWire(items[1], bound, origin, true, depth+1, bindings...)
 			case "lambda":
 				if len(items) != 3 && len(items) != 4 {
 					return fmt.Errorf("invalid nested procedure")
 				}
-				return validateProcedureWire(items[2], procedureWireBindings(items[1], items[2], bound), origin, false, depth+1)
+				return validateProcedureWire(items[2], procedureWireBindings(items[1], items[2], bound), origin, false, depth+1, bindings...)
 			}
 		}
 		for _, item := range items {
-			if err := validateProcedureWire(item, bound, origin, literal, depth+1); err != nil {
+			if err := validateProcedureWire(item, bound, origin, literal, depth+1, bindings...); err != nil {
 				return err
 			}
 		}

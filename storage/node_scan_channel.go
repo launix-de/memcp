@@ -29,11 +29,12 @@ type scanDispatch struct {
 	Task    remoteScanTask `json:"task"`
 }
 type scanCompletion struct {
-	Data     json.RawMessage   `json:"data,omitempty"`
-	Return   string            `json:"return"`
-	Result   *remoteScanResult `json:"result,omitempty"`
-	Rejected bool              `json:"rejected,omitempty"`
-	Panic    *scanPanic        `json:"panic,omitempty"`
+	Offers   []scm.ClusterReference `json:"offers,omitempty"`
+	Data     json.RawMessage        `json:"data,omitempty"`
+	Return   string                 `json:"return"`
+	Result   *remoteScanResult      `json:"result,omitempty"`
+	Rejected bool                   `json:"rejected,omitempty"`
+	Panic    *scanPanic             `json:"panic,omitempty"`
 }
 type scanPanic struct {
 	SQL     *sqldb.SQLError `json:"sql,omitempty"`
@@ -47,6 +48,12 @@ func (p scanPanic) OriginalStack() string { return p.Stack }
 func freezeScanPanic(value any) *scanPanic {
 	result := &scanPanic{Message: fmt.Sprint(value), Stack: string(debug.Stack())}
 	switch v := value.(type) {
+	case scanPanic:
+		copy := v
+		return &copy
+	case *scanPanic:
+		copy := *v
+		return &copy
 	case scanError:
 		result = freezeScanPanic(v.r)
 		result.Stack = v.stack
@@ -62,6 +69,8 @@ func freezeScanPanic(value any) *scanPanic {
 }
 
 type scanReturnChannel struct {
+	mu     sync.Mutex // delivery/collector-close, outside scan loops
+	closed bool
 	peer   *mosiPeer
 	result chan scanCompletion
 }
@@ -149,10 +158,21 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 			if channel.peer != s.peer {
 				return nil, fmt.Errorf("scan completion from wrong peer")
 			}
-			select {
-			case channel.result <- result:
-			default:
+			channel.mu.Lock()
+			delivered := false
+			if !channel.closed {
+				select {
+				case channel.result <- result:
+					delivered = true
+				default:
+				}
 			}
+			channel.mu.Unlock()
+			if !delivered {
+				s.service.discardObjectOffers(s.peer, result.Offers)
+			}
+		} else {
+			s.service.discardObjectOffers(s.peer, result.Offers)
 		}
 		return nil, nil
 	case "scan.cancel":
@@ -195,6 +215,9 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 			value, err := s.handle(scope.ctx, request.Method, request.Data)
 			if err != nil {
 				panic(err)
+			}
+			if exported, ok := value.(interface{ ClusterObjectOffers() []scm.ClusterReference }); ok {
+				completion.Offers = exported.ClusterObjectOffers()
 			}
 			completion.Data, err = json.Marshal(value)
 			if err != nil {
@@ -265,9 +288,9 @@ func (executor *peerScanExecutor) dispatch(task remoteScanTask) remoteScanResult
 		panic("missing scan return-channel service")
 	}
 	id := uuid.NewString()
-	channel := &scanReturnChannel{executor.peer, make(chan scanCompletion, 1)}
+	channel := &scanReturnChannel{peer: executor.peer, result: make(chan scanCompletion, 1)}
 	service.returns.Store(id, channel)
-	defer service.returns.Delete(id)
+	defer func() { channel.close(service); service.returns.Delete(id) }()
 	if err := postScanMessage(executor.peer, "scan.task", scanDispatch{id, executor.cluster, task}); err != nil {
 		panic(err)
 	}
@@ -309,9 +332,9 @@ func (executor *peerScanExecutor) dispatch(task remoteScanTask) remoteScanResult
 // send handle, native shard lock or long-lived per-call connection.
 func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, method string, input, output any) error {
 	id := uuid.NewString()
-	channel := &scanReturnChannel{peer, make(chan scanCompletion, 1)}
+	channel := &scanReturnChannel{peer: peer, result: make(chan scanCompletion, 1)}
 	service.returns.Store(id, channel)
-	defer service.returns.Delete(id)
+	defer func() { channel.close(service); service.returns.Delete(id) }()
 	request := struct {
 		Return string          `json:"return"`
 		Method string          `json:"method"`
@@ -329,11 +352,30 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 		return fmt.Errorf("Cluster network error")
 	case result := <-channel.result:
 		if result.Panic != nil {
-			return fmt.Errorf("%s", result.Panic.Message)
+			service.discardObjectOffers(peer, result.Offers)
+			return result.Panic
 		}
 		if output != nil {
-			return json.Unmarshal(result.Data, output)
+			if err := json.Unmarshal(result.Data, output); err != nil {
+				service.discardObjectOffers(peer, result.Offers)
+				return err
+			}
+		} else {
+			service.discardObjectOffers(peer, result.Offers)
 		}
 		return nil
 	}
+}
+
+func (channel *scanReturnChannel) close(service *nodeScanService) {
+	channel.mu.Lock()
+	channel.closed = true
+	var abandoned []scm.ClusterReference
+	select {
+	case result := <-channel.result:
+		abandoned = result.Offers
+	default:
+	}
+	channel.mu.Unlock()
+	service.discardObjectOffers(channel.peer, abandoned)
 }

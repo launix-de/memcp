@@ -37,7 +37,13 @@ func setupRemoteScanConnection(t *testing.T) (*mosiPeer, *nodeScanService, strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { client.forget(peer); StopNodeScans(); nodeScans.Store(old); server.Close() })
+	t.Cleanup(func() {
+		client.forget(peer)
+		client.stopObjects()
+		StopNodeScans()
+		nodeScans.Store(old)
+		server.Close()
+	})
 	return peer, client, server.URL + "/cluster"
 }
 func makeRemoteScanTask(t *testing.T, shard remoteScanShard) remoteScanTask {

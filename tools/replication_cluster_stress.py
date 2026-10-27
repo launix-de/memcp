@@ -16,6 +16,7 @@ import base64
 import concurrent.futures
 import contextlib
 import http.client
+import http.server
 import json
 import os
 from pathlib import Path
@@ -1071,7 +1072,94 @@ def run_remote_scans(args, artifacts, journal):
         expect(w.scm(reverse).strip(), "110", "reverse remote execution")
         journal.append({"scenario": "remote-scans", "worker": worker_id, "coordinator": coordinator_id,
                         "shards": 2, "fresh_sums": [180, 190, 200], "group_sums": [60, 140]})
+        run_retained_generation(master, worker, args, journal)
 
+
+
+def run_retained_generation(master, worker, args, journal):
+    """Keep real peer handles across owner rebuild; use native kernels for the
+    physical-generation assertion. The surrounding data/visibility oracle is SQL.
+    No Go test binary owns these processes and no timing sleep orders the scan.
+    """
+    ready, resume = threading.Event(), threading.Event()
+    payloads = []
+
+    class Gate(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            payloads.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            ready.set()
+            if not resume.wait(args.timeout):
+                self.send_error(504, "owner did not release the generation barrier")
+                return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ready")
+
+        def log_message(self, *_):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Gate)
+    gate_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    gate_thread.start()
+    endpoint = json.dumps(f"http://127.0.0.1:{worker.port}/cluster")
+    gate = json.dumps(f"http://127.0.0.1:{server.server_port}/")
+    expression = f"""((lambda (sources) (begin
+        (http_request "POST" {gate} (list)
+            (json_encode (map sources (lambda (source) (cluster_object_call nil source "view")))))
+        (reduce sources (lambda (sum source)
+            (+ sum (cluster_object_call nil source "reduce"
+                (list) (lambda () true) '("value")
+                (lambda (subtotal value) (+ subtotal value)) 0))) 0)))
+        (cluster_objects nil {endpoint} "{DATABASE}" "remote_items"))"""
+    m, w = master.client, worker.client
+    expected = w.number("SELECT SUM(value) AS n FROM remote_items")
+
+    def object_status(node, collect=False):
+        return json.loads(json.loads(node.client.scm(f"(cluster_object_status {'true' if collect else 'false'})")))
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(m.scm, expression, args.timeout * 2)
+            try:
+                if not ready.wait(args.timeout):
+                    if future.done():
+                        future.result()
+                    raise DrillFailure("peer did not acquire old-generation handles")
+                old_ids = {view[2] for view in payloads[0]}
+                expect(len(old_ids), 2, "two physical old-generation handles")
+                # Collect while the peer is paused outside its element loop.
+                object_status(master, True)
+                w.scm(f'(rebuild (table "{DATABASE}" false "remote_items" false) true false)')
+                schema = json.loads((worker.data_dir / DATABASE / "schema.json").read_text())["tables"]["remote_items"]
+                active = [part for part in (schema.get("Shards") or []) + (schema.get("PShards") or []) if part]
+                active_ids = {part["uuid"] if isinstance(part, dict) else part for part in active}
+                if old_ids & active_ids:
+                    raise DrillFailure("owner rebuild kept an old physical UUID")
+                retained = object_status(worker, True)
+                for identity in old_ids:
+                    if not any(row[1].endswith("/" + identity) and row[5] > 0 for row in retained):
+                        raise DrillFailure(f"old generation {identity} lost its peer reference")
+            finally:
+                resume.set()
+            expect(int(future.result(timeout=args.timeout)), expected, "statistics over retained old generations")
+        expect(w.number("SELECT SUM(value) AS n FROM remote_items"), expected, "new generation SQL sum")
+
+        def released():
+            object_status(master, True)
+            return not any(row[1].rsplit("/", 1)[-1] in old_ids for row in object_status(worker, True))
+
+        eventually(released, "peer GC did not deregister old owner generations", timeout=args.timeout)
+        w.sql("UPDATE remote_items SET value=value+1 WHERE id=1")
+        expect(m.number("SELECT SUM(value) AS n FROM remote_items"), expected + 1,
+               "new generation remained coherent after old-reference release")
+        journal.append({"scenario": "retained-generation", "old_uuids": sorted(old_ids),
+                        "new_uuids": sorted(active_ids), "old_sum": expected,
+                        "post_release_sum": expected + 1, "gc_released": True})
+    finally:
+        resume.set()
+        server.shutdown()
+        server.server_close()
+        gate_thread.join(timeout=5)
 
 def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None):
     """SQL contracts, shared by the standalone oracle and real cluster processes.

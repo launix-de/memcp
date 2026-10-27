@@ -63,6 +63,14 @@ const (
 //	ACID             DeleteMask  / DeleteRecids  — rows to delete at commit
 //	                 UndeleteMask/ UndeleteRecids — staged rows visible to this tx
 type storageShardTransaction struct {
+	// Cluster endpoint identity belongs to this native TX/shard participant,
+	// initialized with the existing overlay allocation under tx.mu. It retains
+	// the physical generation, never a second write lock or row-loop counter.
+	clusterShard *storageShard // immutable physical lifetime owner, including after native commit
+	clusterTxID  uint64
+	shardUUID    uuid.UUID
+	remoteObject *scm.ClusterHandle
+
 	// cursor-stability undo bitmaps
 	InsertMask  NonLockingReadMap.NonBlockingBitMap
 	DeletedMask NonLockingReadMap.NonBlockingBitMap
@@ -139,9 +147,9 @@ type TxContext struct {
 	queryReaderReleases []func()           // reader and cache-carrier leases, protected by mu
 	// remoteBindings freezes session inputs once per statement, only on cold
 	// remote dispatch. endStatement drops it after all shard workers finish.
-	remoteBindings    atomic.Pointer[scm.ProcedureBindings]
-	remoteTransaction string // immutable origin identity of a remote read participant
-	walTxID           atomic.Pointer[string]
+	remoteBindings atomic.Pointer[scm.ClusterBindings]
+	remoteObject   *scm.ClusterHandle // invocation-owned registered coordinator reference
+	walTxID        atomic.Pointer[string]
 	// fanoutLimit/fanoutInUse bound only additional multi-shard workers. A
 	// single relevant shard never reads or writes this cache line.
 	fanoutLimit atomic.Int32
@@ -184,7 +192,7 @@ func (tx *TxContext) reset(mode TxMode) {
 	tx.fanoutInUse.Store(0)
 	tx.walTxID.Store(nil)
 	tx.remoteBindings.Store(nil)
-	tx.remoteTransaction = ""
+	tx.remoteObject = nil
 	tx.shards = nil
 	tx.touchedShards = sync.Map{}
 	tx.autoCommit = false
@@ -381,6 +389,9 @@ func (tx *TxContext) getOrCreateShardTxLocked(shard *storageShard) *storageShard
 	st := tx.shards[shard]
 	if st == nil {
 		st = new(storageShardTransaction)
+		st.clusterShard = shard
+		st.clusterTxID = tx.ID
+		st.shardUUID = shard.uuid
 		st.generation = shard.generation.Load()
 		if st.generation != nil {
 			st.generation.pinTransaction()
