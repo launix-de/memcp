@@ -921,13 +921,25 @@ func (t *table) publishTopologyLocked() *tableShardTopology {
 					if r := activeReplication(t.schema); r != nil && validReplicaDatabase(t.schema.Name) {
 						r.forwardResource(*cell.resource.Load(), mosiResource{Database: t.schema.Name, Table: t.Name, Shard: shard.uuid.String()})
 					}
-					cell.current.CompareAndSwap(previous, shard)
 				}
 			}
 		}
 	}
 	t.publishSchemaTopology(topology.mode, topology.shards, topology.dimensions)
 	previous := t.topology.Swap(topology)
+	// The native swap selects the new input. Only then may the coherence
+	// payload hint advance; accessors retain their published input during this
+	// handoff rather than use a shard from an unpublished/retired topology.
+	for _, shard := range topology.shards {
+		if shard != nil {
+			if cell := shard.coherence.Load(); cell != nil {
+				cell = cell.resolved()
+				if source := cell.current.Load(); source != nil && source != shard && source.loadNext() == shard {
+					cell.current.CompareAndSwap(source, shard)
+				}
+			}
+		}
+	}
 	if previous != nil {
 		previous.retire()
 	}

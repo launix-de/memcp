@@ -1009,7 +1009,7 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
 			cell := r.shardCell(s)
 			cell, release = r.writeResource(*cell.resource.Load(), currentTx)
-			if current := cell.current.Load(); current != nil {
+			if current := cell.publishedShard(); current != nil {
 				s = current
 			}
 		}

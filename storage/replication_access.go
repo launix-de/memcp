@@ -72,6 +72,30 @@ func (c *replicaCell) resolved() *replicaCell {
 		c = next
 	}
 }
+
+// The native topology selects the active payload, including after rights have
+// just been acquired from another peer. The common case uses atomic reads only;
+// the cold publication window resolves the existing topology by coherence cell.
+// Already acquired ReadAccess/snapshot leases retain their original shard.
+func (c *replicaCell) publishedShard() *storageShard {
+	c = c.resolved()
+	current := c.current.Load()
+	if current == nil || current.t == nil {
+		return current
+	}
+	topology := current.t.topology.Load()
+	if topology != nil && current.generation.Load() != topology {
+		for _, shard := range topology.shards {
+			if shard != nil {
+				if cell := shard.coherence.Load(); cell != nil && cell.resolved() == c {
+					return shard
+				}
+			}
+		}
+	}
+	return current
+}
+
 func (c *replicaCell) forwardingDone() <-chan struct{} {
 	c.forwardOnce.Do(func() { c.forwardDone = make(chan struct{}) })
 	return c.forwardDone
@@ -387,7 +411,7 @@ func (r *replicationManager) readShard(shard *storageShard, tx *TxContext) *stor
 		}
 		c = r.obtain(resource, wanted, replicationUser(tx), tx)
 	}
-	if current := c.current.Load(); current != nil {
+	if current := c.publishedShard(); current != nil {
 		return current
 	}
 	return shard
@@ -397,7 +421,7 @@ func (r *replicationManager) readShard(shard *storageShard, tx *TxContext) *stor
 // Reuse that proof for handover; no transaction-wide replication lock, counter
 // or duplicate per-transaction resource directory is maintained.
 func (c *replicaCell) writesDrained() bool {
-	if shard := c.current.Load(); shard != nil && shard.activeTransactions.Load() != 0 {
+	if shard := c.publishedShard(); shard != nil && shard.activeTransactions.Load() != 0 {
 		return false
 	}
 	if previous := c.retiredShards.Load(); previous != nil {
@@ -420,7 +444,7 @@ func (c *replicaCell) drainWrites(ctx context.Context) error {
 			groups[shard.t] = append(groups[shard.t], shard)
 		}
 	}
-	add(c.current.Load())
+	add(c.publishedShard())
 	if history := c.retiredShards.Load(); history != nil {
 		for _, entry := range *history {
 			add(entry.Value())

@@ -211,7 +211,11 @@ func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 	if replacement == original {
 		t.Fatal("fixture did not produce a successor")
 	}
-	cell.current.Store(replacement)
+	// A payload hint alone is not publication. Replace the native topology
+	// before checking mutations against the retained historical physical IDs.
+	if err := r.replaceShard(r.shardResource(original), original, replacement); err != nil {
+		t.Fatal(err)
+	}
 	cell.ownstate.Initialize(mosi.IO)
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
@@ -1446,5 +1450,97 @@ func TestReplicationSharedSchemaKeepsNewerShard(t *testing.T) {
 	}
 	if r.canonicalResource(resource).Shard != successor.uuid.String() || cell.ownstate.Phase() != mosi.O {
 		t.Fatal("old schema reference changed routing or permission")
+	}
+}
+
+func TestReplicationStatusResolvesCatalogUUIDToOneAuthority(t *testing.T) {
+	r := replicaRecoveryFixture()
+	old := mosiResource{Database: "status_routes", Table: "items", Shard: uuid.NewString()}
+	current := old
+	current.Shard = uuid.NewString()
+	cell := r.resourceCell(old)
+	cell.ownstate.Establish(mosi.M)
+	r.updateRecord(old, func(record *replicaRecord) bool {
+		record.Owner, record.State = r.id, "M"
+		return true
+	})
+	r.forwardResource(old, current)
+	data, err := r.statusSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot struct {
+		Authority map[string]struct{ Resource mosiResource }
+		Records   map[string]replicaRecord
+	}
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Authority[old.key()].Resource != current || snapshot.Authority[current.key()].Resource != current {
+		t.Fatal("diagnostics lost the canonical UUID")
+	}
+	if len(snapshot.Records) != 1 || snapshot.Records[current.key()].Owner != r.id {
+		t.Fatal("diagnostics duplicated or changed ownership")
+	}
+}
+
+func TestReplicationAccessRetainsPublishedShardUntilNativeSwap(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "replica_native_swap", 3)
+	r := replicaRecoveryFixture()
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	source := tbl.ActiveShards()[0]
+	cell := r.declareShard(source, r.id, true)
+	oldReader := source.GetRead(nil)
+	defer oldReader.Release()
+	successor := source.rebuild(true)
+	r.forwardResource(r.shardResource(source), r.shardResource(successor))
+	// Model the handoff window: the successor has a prospective native
+	// topology, while the table still atomically publishes the source.
+	successor.generation.Store(&tableShardTopology{})
+	cell.current.Store(successor)
+	if got := r.readShard(source, nil); got != source {
+		t.Fatal("read selected successor before the native topology swap")
+	}
+	write := source.GetWrite(nil)
+	if write.shard != source {
+		write.Release()
+		t.Fatal("write skipped the active source before the native swap")
+	}
+	write.Release()
+	// The source remains the write target; native mutation forwarding keeps
+	// both physical shards current while readers retain their original input.
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("after rebuild")}}, nil, scm.NewNil(), false, nil, nil)
+	if source.Count() != 4 || successor.Count() != 4 {
+		t.Fatal("source write was not forwarded to the successor")
+	}
+	tbl.mu.Lock()
+	tbl.Shards = []*storageShard{successor}
+	tbl.publishTopologyLocked()
+	tbl.mu.Unlock()
+	if r.readShard(source, nil) != successor || oldReader.shard != source {
+		t.Fatal("native swap lost current selection or the held historical reader")
+	}
+	// Model the other side of the swap: the active topology is new while the
+	// payload hint is still old. A handover must see transactions on the new
+	// input and must not transfer its rights before those transactions finish.
+	cell.current.Store(source)
+	if r.readShard(source, nil) != successor {
+		t.Fatal("fresh read reused an old input after the native swap")
+	}
+	freshWrite := source.GetWrite(nil)
+	if freshWrite.shard != successor {
+		freshWrite.Release()
+		t.Fatal("fresh write reused an old input after the native swap")
+	}
+	freshWrite.Release()
+	successor.beginTransactionUse()
+	if cell.publishedShard() != successor || cell.writesDrained() {
+		successor.endTransactionUse()
+		t.Fatal("handover ignored the native published successor")
+	}
+	successor.endTransactionUse()
+	if !cell.writesDrained() || oldReader.shard != source {
+		t.Fatal("drained transaction or retained old reader was lost")
 	}
 }

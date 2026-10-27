@@ -256,7 +256,7 @@ func (r *replicationManager) prepareResource(resource mosiResource) (content str
 		return r.schemaDigest(db.persistence.ReadSchema())
 	}
 	c := r.resourceCell(resource)
-	shard := c.current.Load()
+	shard := c.publishedShard()
 	if shard == nil {
 		shard = r.findShard(resource)
 	}

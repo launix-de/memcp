@@ -209,6 +209,51 @@ class ReplicationCatalogTests(unittest.TestCase):
 		with self.assertRaises(replication.DrillFailure):
 			replication.database_records("db", schema, journal)
 
+	def test_reclaim_resolves_catalog_predecessor_through_live_authority(self):
+		schema, snapshot = self.fixture()
+		previous = snapshot["records"].pop("db/empty-shard")
+		current = {**previous["resource"], "shard": "rebuilt"}
+		snapshot["records"]["db/rebuilt"] = {"resource": current}
+		snapshot["authority"] = {"db/empty-shard": {"resource": current}}
+		self.assertEqual(set(replication.database_records("db", schema, snapshot)),
+			{"db", "db/rebuilt", "db/part-a", "db/part-b", "db/blobs"})
+
+	def test_forwarded_reclaim_still_requires_exact_current_resource(self):
+		for invalid in ["missing-record", "wrong-table", "wrong-database"]:
+			with self.subTest(invalid=invalid):
+				schema, snapshot = self.fixture()
+				del snapshot["records"]["db/empty-shard"]
+				current = {"database": "db", "table": "empty", "shard": "rebuilt"}
+				if invalid == "wrong-table":
+					current["table"] = "partitioned"
+				elif invalid == "wrong-database":
+					current["database"] = "another"
+				snapshot["authority"] = {"db/empty-shard": {"resource": current}}
+				with self.assertRaises(replication.DrillFailure):
+					replication.database_records("db", schema, snapshot)
+
+	def test_two_active_catalog_slots_cannot_share_one_forwarded_resource(self):
+		schema, snapshot = self.fixture()
+		current = snapshot["records"]["db/part-a"]["resource"]
+		snapshot["authority"] = {"db/part-b": {"resource": current}}
+		with self.assertRaises(replication.DrillFailure):
+			replication.database_records("db", schema, snapshot)
+
+	def test_named_table_records_use_canonical_authority(self):
+		schema, snapshot = self.fixture()
+		record = snapshot["records"].pop("db/empty-shard")
+		current = {**record["resource"], "shard": "rebuilt"}
+		snapshot["records"]["db/rebuilt"] = {"resource": current}
+		snapshot["authority"] = {"db/empty-shard": {"resource": current}}
+		with tempfile.TemporaryDirectory() as directory:
+			node = mock.Mock(spec=replication.Node)
+			node.data_dir, node.database, node.name = Path(directory), "db", "named"
+			node.snapshot.return_value = snapshot
+			path = node.data_dir / "db"
+			path.mkdir()
+			(path / "schema.json").write_text(replication.json.dumps(schema))
+			self.assertEqual(replication.Node.records(node, "empty"), [{"resource": current}])
+
 class ClusterSQLContextRunnerTests(unittest.TestCase):
 	def test_sql_failures_are_collected_instead_of_short_circuiting_or_xfail(self):
 		client = mock.Mock()

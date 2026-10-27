@@ -181,11 +181,11 @@ class Node(OwnedServer):
     def records(self, table):
         schema = json.loads((self.data_dir / self.database / "schema.json").read_text())["tables"][table]
         shards = schema.get("PShards" if schema["ShardMode"] == "partition" else "Shards") or []
-        active = {shard["uuid"] if isinstance(shard, dict) else shard
-                  for shard in shards if shard is not None}
-        records = [record for record in self.snapshot()["records"].values()
-                   if record["resource"].get("shard") in active]
-        expect(len(records), len(active), f"{self.name}: MOSI records for every active {table} shard")
+        snapshot = self.snapshot()
+        resources = database_records(self.database, {"tables": {table: schema}}, snapshot)
+        records = [record for record in resources.values() if record["resource"].get("shard")]
+        expect(len(records), len([shard for shard in shards if shard is not None]),
+               f"{self.name}: MOSI records for every active {table} shard")
         return records
 
     def record(self, table):
@@ -249,7 +249,18 @@ def database_records(name, schema, journal):
             if shard is None:
                 continue
             identity = shard["uuid"] if isinstance(shard, dict) else shard
-            expected[f"{name}/{identity}"] = {"database": name, "table": table_name, "shard": identity}
+            key = f"{name}/{identity}"
+            resource = journal.get("authority", {}).get(key, {}).get("resource")
+            if resource is not None:
+                expect((resource.get("database"), resource.get("table")), (name, table_name),
+                       f"catalog/forwarded MOSI domain {key}")
+                identity = resource.get("shard")
+                if not identity:
+                    raise DrillFailure(f"missing forwarded shard identity: {key}")
+            key = f"{name}/{identity}"
+            if key in expected:
+                raise DrillFailure(f"duplicate active MOSI resource: {key}")
+            expected[key] = {"database": name, "table": table_name, "shard": identity}
     result = {}
     for key, resource in expected.items():
         if key not in journal["records"]:

@@ -183,7 +183,8 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   remain private when a future grouped slave reports to its enclosing domain.
   Reuse this pair per hierarchy boundary; it is not a global two-flag topology.
   Local reads never inspect the outer slot, register or synchronize with it.
-  Diagnostics sample both slots on demand and are never an admission snapshot.
+  Diagnostics sample both slots and each alias's canonical resource on demand;
+  they expose no additional grant and are never an admission snapshot.
   Its existing `acquire` mutex serializes inbound grant, recall, invalidation
   and final slave import publication against epoch changes; local granted
   reads and write batches never acquire it. Shared references validate epoch,
@@ -296,7 +297,12 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   authority; its lazily initialized `forwardDone` wakes only cold acquisition
   waiters to retry on that authority. Granted reads only load these atomics.
   `storageShard.coherence` attaches authority through atomic CAS; rebuild successors
-  borrow it. `retiredShards` is an immutable weak directory updated at shard
+  borrow it. The native atomic topology swap alone selects the active payload;
+  `current` advances afterwards as a hint. New read/write admission and
+  transaction drain/source preparation resolve the native topology if that hint
+  lags or points at a prospective input; already acquired historical leases
+  retain their original shard. No new publication
+  flag, identity or row-loop bookkeeping is added. `retiredShards` is an immutable weak directory updated at shard
   publication; routing aliases retain no historical payload by themselves.
   `tableSchemaTopology.forwards` is immutable native UUID successor metadata,
   published with the exact durable shard list. Unpublished loading consumes

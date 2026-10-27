@@ -352,12 +352,14 @@ func (r *replicationManager) statusSnapshot() ([]byte, error) {
 	// never a query-admission cache. Keep the legacy directory state for clients
 	// while exposing the outward/local distinction to tests and reviewers.
 	type authorityView struct {
-		Clusterstate string `json:"clusterstate"`
-		Ownstate     string `json:"ownstate"`
+		Resource     *mosiResource `json:"resource,omitempty"`
+		Clusterstate string        `json:"clusterstate"`
+		Ownstate     string        `json:"ownstate"`
 	}
 	authority := make(map[string]authorityView, len(r.cells))
 	for key, cell := range r.cells {
-		authority[key] = authorityView{cell.clusterstate.Phase().String(), cell.ownstate.Phase().String()}
+		cell = cell.resolved()
+		authority[key] = authorityView{Resource: cell.resource.Load(), Clusterstate: cell.clusterstate.Phase().String(), Ownstate: cell.ownstate.Phase().String()}
 	}
 	r.mu.Unlock()
 	return json.Marshal(struct {
