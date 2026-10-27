@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/launix-de/memcp/scm"
+	"github.com/launix-de/memcp/storage/mosi"
 )
 
 func setupComputeConcurrencyTest(t *testing.T) func() {
@@ -309,6 +310,141 @@ func TestInsertSanitizationDoesNotMutateCallerRows(t *testing.T) {
 	}
 	if len(values) != 1 || len(values[0]) != 1 || !values[0][0].IsString() {
 		t.Fatalf("insert rewrote caller-owned values slice: %v", values)
+	}
+}
+
+func TestComputeColumnRejectsColdRemoteShardBeforeMaterialization(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tcomputeremote", 4)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
+	var freed [numEvictableTypes]int64
+	if !shardCleanup(shard, &freed) || shard.state() != COLD {
+		t.Fatal("fixture did not become cold")
+	}
+	setTestScanTarget(shard, func(mosiResource, shardScanInvocation) scanResult {
+		t.Fatal("computed-column preparation unexpectedly dispatched a scan")
+		return scanResult{}
+	})
+	var calls int
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		shard.ComputeColumn("cached", []string{"id"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			calls++
+			return a[0]
+		}), nil, scm.NewNil())
+	}()
+	delegation, ok := failure.(shardReadDelegation)
+	if !ok || delegation.target != shard.scanTarget.Load() {
+		t.Fatalf("preparation bypassed acquisition: panic = %v", failure)
+	}
+	if calls != 0 || shard.state() != COLD || shard.cacheReaders.Load() != 0 {
+		t.Fatalf("rejected preparation touched payload: calls=%d state=%v readers=%d", calls, shard.state(), shard.cacheReaders.Load())
+	}
+}
+
+func TestComputeColumnRetainsPayloadThroughCallbackAndPanic(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tcomputeread", 4)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
+	r := &replicationManager{cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
+	cell := r.shardCell(shard)
+	cell.ownstate.Initialize(mosi.S)
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	for _, fail := range []bool{false, true} {
+		name := fmt.Sprintf("cached_%v", fail)
+		calls := 0
+		var failure any
+		func() {
+			defer func() { failure = recover() }()
+			shard.ComputeColumn(name, []string{"id"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+				calls++
+				if shard.cacheReaders.Load() == 0 {
+					t.Error("computed callback has no acquired payload capability")
+				}
+				if cell.ownstate.Phase() != mosi.S {
+					t.Error("derived cache fill changed native read permission")
+				}
+				if fail {
+					panic("compute callback failed")
+				}
+				return scm.NewInt(a[0].Int() * 2)
+			}), nil, scm.NewNil())
+		}()
+		if fail && failure != "compute callback failed" || !fail && failure != nil {
+			t.Fatalf("callback failure changed: %v", failure)
+		}
+		if calls == 0 || shard.cacheReaders.Load() != 0 {
+			t.Fatalf("preparation calls=%d leaked readers=%d", calls, shard.cacheReaders.Load())
+		}
+		if !fail {
+			reader := shard.ColumnReaderTx(nil, name, false, ReadAuto)
+			if got := reader.GetValue(0).Int(); got != 2 {
+				t.Errorf("computed value = %d, want 2", got)
+			}
+			ReleaseColumnReader(reader)
+		}
+	}
+}
+
+func TestComputeColumnWaitsForStartedShardsAfterFailure(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tcomputedrain", 4)
+	tbl.CreateColumn("cached", "INT", nil, nil)
+	RebuildTable(tbl, true, false)
+	if !tbl.beginManualRepartition() {
+		t.Fatal("manual repartition was not claimed")
+	}
+	tbl.repartition([]shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(2)}}})
+	if len(tbl.ActiveShards()) != 2 {
+		t.Fatal("fixture did not produce two shards")
+	}
+	slowStarted := make(chan struct{})
+	failed := make(chan struct{})
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	start := sync.OnceFunc(func() { close(slowStarted) })
+	fail := sync.OnceFunc(func() { close(failed) })
+	finished := make(chan any, 1)
+	go func() {
+		defer func() { finished <- recover() }()
+		tbl.ComputeColumn("cached", []string{"id"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			if a[0].Int() <= 2 {
+				<-slowStarted
+				fail()
+				panic("compute shard failed")
+			}
+			start()
+			<-release
+			return a[0]
+		}), nil, scm.NewNil())
+	}()
+	select {
+	case <-failed:
+	case failure := <-finished:
+		t.Fatalf("preparation stopped before shard jobs synchronized: %v", failure)
+	case <-time.After(5 * time.Second):
+		t.Fatal("shard jobs did not start")
+	}
+	var failure any
+	returned := false
+	select {
+	case failure = <-finished:
+		returned = true
+		t.Error("preparation returned while another shard callback was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	unblock()
+	if !returned {
+		select {
+		case failure = <-finished:
+		case <-time.After(5 * time.Second):
+			t.Fatal("preparation did not finish after remaining shard completed")
+		}
+	}
+	if err, ok := failure.(scanError); !ok || err.r != "compute shard failed" {
+		t.Fatalf("lost original shard failure: %v", failure)
 	}
 }
 
