@@ -66,7 +66,7 @@ representation or replace session calls with constants. The interface requires
 reconstruction expression. The printer and runtime wire codec use that contract,
 including standalone values without URI registration. Reference-backed objects
 explicitly select the context's `ReferenceExpression`; routing-only endpoints
-reject value serialization. Runtime expressions reconstruct once at import.
+implement only `ClusterRequestHandler`. Runtime expressions reconstruct once at import.
 
 Storage's scan-context binding lives in `storage`, supplied through the generic
 `ProcedureDecode.Prepare` callback before compilation. The SCM procedure codec has no storage import, storage-operator binding rules
@@ -169,3 +169,19 @@ Rebuild forwarding must translate physical row identities rather than merely
 copy deletion masks. Unbounded grouped-result streaming and specialized physical
 RecSet/merge-state transport are not implemented by this change and continue to
 fail explicitly.
+
+The message channel has one UUID collector protocol for calls and scan tasks.
+There is no separate scan-task envelope or cluster execution switch: the
+recipient resolves the database handler, which checks membership for shared
+sources, reconstructs the request once and acquires its generation once. The
+shard handler executes the prepared native invocation. A retained input supplies
+an authenticated physical endpoint to this same path, without JSON embedded in
+a Scheme string. Capacity refusals occur only before callback execution.
+
+`ClusterRequestHandler` is the small routing contract. Serializable closure
+values implement `ClusterObject`, which additionally requires object-owned
+`Serialize`; routing-only databases, nodes and coherence cells do not.
+Local text/hash serialization preserves native spellings. Network capture
+markers belong only to explicit procedure serialization, never local plan keys.
+Failed GC releases schedule their own bounded-rate retry; they do not rely on a
+later GC or reconnect event to release a historical generation.

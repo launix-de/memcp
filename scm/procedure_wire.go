@@ -39,10 +39,11 @@ func MarshalProcedure(value Scmer, bindings ...*SerializationContext) (data []by
 		}
 		value = Eval(NewSlice([]Scmer{NewSymbol("lambda"), NewSymbol("args"), NewSlice([]Scmer{NewSymbol("apply"), NewSymbol(declaration.Name), NewSymbol("args")})}), &Globalenv)
 	}
-	closed := CloseProcedure(value)
-	if len(bindings) > 0 && bindings[0] != nil {
-		bindings[0].prepare(closed)
+	if len(bindings) == 0 || bindings[0] == nil {
+		bindings = []*SerializationContext{new(SerializationContext)}
 	}
+	closed := CloseProcedure(value)
+	bindings[0].prepare(closed)
 	proc := closed.Proc()
 	bound := procedureWireBindings(proc.Params, proc.Body, nil)
 	if err := validateProcedureWire(proc.Body, bound, value.Proc().En, false, 0, bindings...); err != nil {

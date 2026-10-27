@@ -1103,14 +1103,22 @@ def run_retained_generation(master, worker, args, journal):
     gate_thread.start()
     endpoint = json.dumps(f"http://127.0.0.1:{worker.port}/cluster")
     gate = json.dumps(f"http://127.0.0.1:{server.server_port}/")
-    expression = f"""((lambda (sources) (begin
-        (http_request "POST" {gate} (list)
-            (json_encode (map sources (lambda (source) (cluster_object_call nil source "view")))))
-        (reduce sources (lambda (sum source)
-            (+ sum (cluster_object_call nil source "reduce"
-                (list) (lambda () true) '("value")
-                (lambda (subtotal value) (+ subtotal value)) 0))) 0)))
-        (cluster_objects nil {endpoint} "{DATABASE}" "remote_items"))"""
+    # Exercise the ordinary scan path, retaining source handles in the outer
+    # scope and pausing a real remote operator while its owner rebuilds. Only
+    # inert UUID metadata is captured by the callback, never a second reduce API.
+    # Construct the barrier outside the source scope: its owner factory must
+    # not retain unrelated peer handles through its lexical environment.
+    expression = f"""((lambda (barrier_state)
+        ((lambda (barrier)
+            ((lambda (sources) (begin
+                (barrier_state "held" (json_encode (map sources (lambda (source) (cluster_object_call nil source "view")))))
+                (scan_remote nil {endpoint} "{DATABASE}" "remote_items" '("id")
+                    (lambda (id) (if (equal? id 1) (barrier "ready") true))
+                    '("value") (lambda (subtotal value) (+ subtotal value)) 0 +)))
+                (cluster_objects nil {endpoint} "{DATABASE}" "remote_items")))
+            (newcachemap (lambda (key) (begin
+                (http_request "POST" {gate} (list) (barrier_state "held")) true)))))
+        (newsession))"""
     m, w = master.client, worker.client
     expected = w.number("SELECT SUM(value) AS n FROM remote_items")
 

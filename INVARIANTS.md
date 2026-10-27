@@ -91,9 +91,14 @@ These rules describe the target architecture, not the implementation status.
   those rights to another node. A kicked node must discard its inconsistent
   state before rejoining, even if its process was still alive.
 
-- Runtime object endpoints share `HandleClusterRequest`; ownership policy stays
-  with the native object, not a transport type switch. The reader dispatches
-  independent work concurrently; resource FIFO and preceding schema publication
+- Owner endpoints share `ClusterRequestHandler.HandleClusterRequest`; runtime
+  closure values additionally implement `ClusterObject.Serialize`. Routing-only
+  nodes, databases and coherence cells need no value serialization. Ownership
+  policy stays with the native object, not a transport type switch.
+  Scan requests use the same UUID collector as other calls. The database handler
+  prepares one invocation and acquires one generation; the shard handler executes
+  it. Retained historical inputs enter this same path without a second codec.
+  The reader dispatches independent work concurrently; resource FIFO and preceding schema publication
   fence dependent imports outside the reader. Reply UUID collectors retain no
   sending handle. No cancellation check is added to shard item loops.
 - Strong owner registrations retain physical generations while independent

@@ -10,15 +10,22 @@ import "context"
 import "unsafe"
 import "encoding/json"
 
-// ClusterObject is the common owner endpoint for runtime objects. Implementations
-// choose their read view and mutation policy; transport never inspects their Go
-// representation. All requests execute outside generated row loops.
+// ClusterRequestHandler is the routing contract for native owner endpoints.
+// Implementations own request policy; transport only resolves and dispatches.
+// All requests execute outside generated row loops.
+type ClusterRequestHandler interface {
+	HandleClusterRequest(context.Context, ClusterRequest) (any, error)
+}
+
+// ClusterObject adds the serialization contract only for runtime values which
+// may be captured by a closure. Nodes/databases are routing targets and require
+// only ClusterRequestHandler; they never implement deliberately failing serializers.
 type ClusterObject interface {
+	ClusterRequestHandler
 	// Serialize returns reconstruction code, not an encoded Go representation.
 	// Each object owns its choice of a registered reference or portable value.
 	Serialize(*SerializationContext) (Scmer, error)
 	ClusterObjectType() string
-	HandleClusterRequest(context.Context, ClusterRequest) (any, error)
 }
 
 type ClusterRequest struct {

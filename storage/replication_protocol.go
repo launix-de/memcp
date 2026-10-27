@@ -278,15 +278,10 @@ type replicaPacketInvocation struct {
 	packet *mosiPacket
 }
 
-func (*replicaCell) ClusterObjectType() string { return "coherence" }
 func (cell *replicaCell) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
 	invocation, ok := request.Payload.(replicaPacketInvocation)
 	if request.Method != "packet" || !ok || cell.engine == nil {
 		return nil, fmt.Errorf("invalid native coherence request")
 	}
 	return nil, cell.engine.applyResourcePacket(invocation.source, invocation.packet)
-}
-
-func (*replicaCell) Serialize(*scm.SerializationContext) (scm.Scmer, error) {
-	return scm.NewNil(), fmt.Errorf("replicaCell is a routing endpoint, not a serializable runtime value")
 }

@@ -6,7 +6,6 @@ package storage
 
 import "fmt"
 import "context"
-import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
@@ -34,49 +33,24 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 	if r.Method == "view" {
 		return scm.NewSlice([]scm.Scmer{scm.NewString(s.t.schema.Name), scm.NewString(s.t.Name), scm.NewString(s.uuid.String())}), nil
 	}
-	if r.Method == "reduce" {
-		if len(r.Arguments) != 5 {
-			return scm.NewNil(), fmt.Errorf("retained reduction needs filter/map columns, callbacks and neutral")
-		}
-		tx, _ := ctx.Value(clusterObjectQueryKey{}).(*TxContext)
-		if tx == nil {
-			return scm.NewNil(), fmt.Errorf("missing native object query context")
-		}
-		columns := func(value scm.Scmer) []string {
-			result := make([]string, len(value.Slice()))
-			for i, item := range value.Slice() {
-				result[i] = item.String()
-			}
-			return result
-		}
-		lease := s.getRead(tx, true)
-		defer lease.Release()
-		access := runtimeScanAccess(nil)
-		horizon := s.captureScanHorizon()
-		access.ensureRuntime().horizon = &horizon
-		for _, callback := range []scm.Scmer{r.Arguments[1], r.Arguments[3]} {
-			if err := validateRemoteScanReadOnly(callback); err != nil {
-				return scm.NewNil(), err
-			}
-		}
-		value, _, _ := s.scan(access, columns(r.Arguments[0]), r.Arguments[1], columns(r.Arguments[2]), r.Arguments[3], r.Arguments[4], 0, nil, tx, SessionStateFromTx(tx))
-		return value, nil
-	}
 	if r.Method == "scan" {
-		session, _ := ctx.Value(clusterObjectSessionKey{}).(*scanRPCSession)
-		if session == nil || len(r.Arguments) != 1 {
-			return scm.NewNil(), fmt.Errorf("missing cluster scan invocation")
+		switch input := r.Payload.(type) {
+		case remoteScanTask:
+			session, _ := ctx.Value(clusterObjectSessionKey{}).(*scanRPCSession)
+			if session == nil {
+				return nil, fmt.Errorf("missing cluster scan invocation")
+			}
+			return s.t.schema.executeScanTask(ctx, session, input, s)
+		case shardScanInvocation:
+			// This is the sole native reduction entry. Preparation already owns
+			// the generation and TX scope; no second GetRead or decoder lives here.
+			if input.tx == nil {
+				return nil, fmt.Errorf("missing prepared scan transaction")
+			}
+			value, count, candidates := s.scan(input.access, input.conditionCols, input.condition, input.callbackCols, input.mapReduce, input.neutral, 0, nil, input.tx, SessionStateFromTx(input.tx))
+			return scanResult{res: value, outCount: count, candidateCount: candidates}, nil
 		}
-		var task remoteScanTask
-		if err := json.Unmarshal([]byte(r.Arguments[0].String()), &task); err != nil {
-			return scm.NewNil(), err
-		}
-		result, err := session.executeScanTask(ctx, task, s)
-		if err != nil {
-			return scm.NewNil(), err
-		}
-		data, err := json.Marshal(result)
-		return scm.NewString(string(data)), err
+		return nil, fmt.Errorf("missing typed scan invocation")
 	}
 	return scm.NewNil(), fmt.Errorf("unsupported shard request %q", r.Method)
 }

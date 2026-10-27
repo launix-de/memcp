@@ -133,17 +133,11 @@ func TestClusterMountDoesNotSubscribeThroughReplication(t *testing.T) {
 func TestClusterControlDoesNotConsumeComputeSlots(t *testing.T) {
 	session := newScanRPCSession()
 	session.service = &nodeScanService{cluster: &nodeCluster{}}
-	for i := 0; i < cap(session.workers); i++ {
-		session.workers <- struct{}{}
-	}
-	// Invalid input must reach the control handler even while every compute
-	// slot is occupied. A busy reducer cannot prevent owner discovery.
+	// Control discovery has no compute semaphore. Its domain handler must be
+	// reachable independently of the UUID scopes of concurrently running scans.
 	_, err := session.handle(context.Background(), "cluster.report", []byte(`{"database":"unmounted"}`))
 	if err == nil || err.Error() != "invalid cluster report" {
 		t.Fatalf("control message was blocked by compute admission: %v", err)
-	}
-	if len(session.workers) != cap(session.workers) {
-		t.Fatal("control path borrowed a compute slot")
 	}
 }
 

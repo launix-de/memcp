@@ -145,19 +145,16 @@ func TestClusterObjectHistoricalScanRebuildAndPeerGC(t *testing.T) {
 	if !historicalObjectAlive(old) || objectEntryCount(owner) != 1 {
 		t.Fatal("owner lost generation still retained by remote query")
 	}
-	encoded, _ := json.Marshal(task)
-	result, err := scm.ClusterObjectValue(remote.Any().(*remoteShardObject), context.Background(), scm.ClusterRequest{Method: "scan", Arguments: []scm.Scmer{scm.NewString(string(encoded))}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	task.Input = &remote.Any().(*remoteShardObject).handle.Reference
 	var reduced remoteScanResult
-	if err := json.Unmarshal([]byte(result.String()), &reduced); err != nil {
+	if err := client.control(context.Background(), peer, "scan.execute", task, &reduced); err != nil {
 		t.Fatal(err)
 	}
 	value, err := decodeScanData(reduced.Value, false)
 	if err != nil || value.Int() != 9 {
 		t.Fatal("old-generation statistics changed", value, err)
 	}
+	task.Input = nil // the task borrowed a pointer into the imported handle
 	runtime.KeepAlive(remote)
 	remote = scm.NewNil()
 	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
@@ -875,11 +872,46 @@ func TestClusterCancellationQueuesMessageBeforeStoppingDeferredHook(t *testing.T
 func TestClusterObjectCatalogSerializationNeedsNoExportContext(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_catalog_serialization", 1)
 	source := scm.SerializeToString(NewTableScmer(tbl), &scm.Globalenv)
-	if strings.Contains(source, "cluster_object") {
-		t.Fatal("catalog name unnecessarily registered a remote handle", source)
+	if source != tbl.String() {
+		t.Fatal("network reconstruction changed local catalog text/plan identity", source, tbl.String())
 	}
 	value := scm.Eval(scm.Read(t.Name(), source), &scm.Globalenv)
 	if TableFromScmer(value) != tbl {
 		t.Fatal("portable catalog constructor changed table identity", source)
+	}
+}
+
+func TestClusterObjectReleaseRetriesWithoutAnotherGCOrReconnect(t *testing.T) {
+	identity := clusterObjectPeer{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
+	peer := &mosiPeer{objectPeer: identity, done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	service := &nodeScanService{peers: map[*mosiPeer]bool{peer: true}}
+	registry := service.objectRegistry()
+	defer service.stopObjects()
+	registry.mu.Lock()
+	registry.releases = append(registry.releases, clusterObjectRelease{peer: identity, reference: scm.ClusterReference{URI: "http://owner/cluster/" + uuid.NewString()}})
+	registry.mu.Unlock()
+	registry.wake <- struct{}{}
+	for attempt := range 2 {
+		select {
+		case message := <-peer.outgoing:
+			var request struct {
+				Return string `json:"return"`
+				Method string `json:"method"`
+			}
+			if err := json.Unmarshal(message.Data, &request); err != nil || request.Method != "object.release" {
+				t.Fatalf("unexpected release request: %+v, %v", request, err)
+			}
+			entry, ok := service.returns.Load(request.Return)
+			if !ok {
+				t.Fatal("release has no completion collector")
+			}
+			completion := scanCompletion{}
+			if attempt == 0 {
+				completion.Panic = &scanPanic{Message: "temporary connection failure"}
+			}
+			entry.(*scanReturnChannel).result <- completion
+		case <-time.After(3 * time.Second):
+			t.Fatal("release was not retried without another GC or reconnect", attempt)
+		}
 	}
 }

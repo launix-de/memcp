@@ -9,8 +9,6 @@ import "sync"
 import "context"
 import "github.com/launix-de/memcp/scm"
 
-func (*database) ClusterObjectType() string { return "database" }
-
 // Database names resolve dynamically. This object owns source/schema policy;
 // transport only decodes the envelope and selects its target database.
 func (database *database) HandleClusterRequest(ctx context.Context, call scm.ClusterRequest) (any, error) {
@@ -86,14 +84,22 @@ func (database *database) HandleClusterRequest(ctx context.Context, call scm.Clu
 		if call.Method != "scan.execute" || request.Shard.Resource.Database != database.Name {
 			return nil, fmt.Errorf("mismatched database request")
 		}
-		if sharedClusterDatabase(request.Shard.Resource.Database) {
-			return nil, fmt.Errorf("shared cluster tasks require RAM admission through cluster.reduce")
+		if sharedClusterDatabase(database.Name) {
+			if s.service.cluster == nil {
+				return nil, fmt.Errorf("cluster membership is disabled")
+			}
+			if err := s.service.cluster.requireMember(s.remoteID); err != nil {
+				return nil, err
+			}
 		}
-		return s.executeScanTask(ctx, request)
+		if request.Input != nil {
+			object, err := s.resolveObject(*request.Input)
+			if err != nil {
+				return nil, err
+			}
+			return object.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "scan", Payload: request})
+		}
+		return database.executeScanTask(ctx, s, request, nil)
 	}
 	return nil, fmt.Errorf("unsupported database message")
-}
-
-func (*database) Serialize(*scm.SerializationContext) (scm.Scmer, error) {
-	return scm.NewNil(), fmt.Errorf("database is a routing endpoint, not a serializable runtime value")
 }

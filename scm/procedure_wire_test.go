@@ -343,3 +343,16 @@ func TestProcedureWireMaterializesCapturesBeforeAnyInvocation(t *testing.T) {
 		t.Fatal("row execution constructed another peer object", constructions)
 	}
 }
+
+func TestProcedureWireLocalSessionTextDoesNotRequireNetworkExport(t *testing.T) {
+	session := NewSession()
+	var source bytes.Buffer
+	Serialize(&source, session, &Globalenv)
+	if strings.Contains(source.String(), "serialized_value") || strings.Contains(source.String(), "cluster_object") {
+		t.Fatal("network markers changed local callable identity", source.String())
+	}
+	proc := Eval(NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(nil), session}), &Globalenv)
+	if _, err := MarshalProcedure(proc); err == nil || !strings.Contains(err.Error(), "export context") {
+		t.Fatal("local text printing silently permitted an unbound network session", err)
+	}
+}

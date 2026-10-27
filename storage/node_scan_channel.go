@@ -23,18 +23,11 @@ import "github.com/launix-de/go-mysqlstack/sqldb"
 // channel before enqueueing a task; the node reader delivers a completion (or
 // the original panic) by that UUID. Cancelling never interrupts a shard's item
 // loop: it fences new shard tasks and is inherited by nested scan invocations.
-type scanDispatch struct {
-	Return  string         `json:"return"`
-	Cluster bool           `json:"cluster"`
-	Task    remoteScanTask `json:"task"`
-}
 type scanCompletion struct {
-	Offers   []scm.ClusterReference `json:"offers,omitempty"`
-	Data     json.RawMessage        `json:"data,omitempty"`
-	Return   string                 `json:"return"`
-	Result   *remoteScanResult      `json:"result,omitempty"`
-	Rejected bool                   `json:"rejected,omitempty"`
-	Panic    *scanPanic             `json:"panic,omitempty"`
+	Offers []scm.ClusterReference `json:"offers,omitempty"`
+	Data   json.RawMessage        `json:"data,omitempty"`
+	Return string                 `json:"return"`
+	Panic  *scanPanic             `json:"panic,omitempty"`
 }
 type scanPanic struct {
 	SQL     *sqldb.SQLError `json:"sql,omitempty"`
@@ -209,7 +202,7 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 				panic(err)
 			}
 			defer s.tasks.finish(request.Return)
-			if request.Method == "node.control" || request.Method == "scan.task" || request.Method == "scan.result" || request.Method == "scan.cancel" {
+			if request.Method == "node.control" || request.Method == "scan.result" || request.Method == "scan.cancel" {
 				panic("invalid nested control envelope")
 			}
 			value, err := s.handle(scope.ctx, request.Method, request.Data)
@@ -225,52 +218,7 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 			}
 		}()
 		return nil, postScanMessage(s.peer, "scan.result", completion)
-	case "scan.task":
-		var request scanDispatch
-		if err := json.Unmarshal(data, &request); err != nil {
-			return nil, err
-		}
-		if _, err := uuid.Parse(request.Return); err != nil {
-			return nil, err
-		}
-		completion := scanCompletion{Return: request.Return}
-		func() {
-			defer func() {
-				if failure := recover(); failure != nil {
-					completion.Panic = freezeScanPanic(failure)
-				}
-			}()
-			scope, err := s.tasks.begin(ctx, request.Return)
-			if err != nil {
-				panic(err)
-			}
-			defer s.tasks.finish(request.Return)
-			// The bounded active-channel registry limits in-flight tasks. Do not
-			// retain a second per-peer compute semaphore across user callbacks:
-			// nested scans may need this peer to complete their parent shard.
-			// Native shard scheduling and cold RAM admission remain authoritative.
-			var value any
-			if request.Cluster {
-				if s.service.cluster == nil {
-					panic("cluster membership is disabled")
-				}
-				value, err = s.service.cluster.compute(s, scope.ctx, "cluster.reduce", mustScanJSON(request.Task))
-			} else {
-				value, err = s.executeScanTask(scope.ctx, request.Task)
-			}
-			if err != nil {
-				panic(err)
-			}
-			switch reply := value.(type) {
-			case clusterReduceReply:
-				completion.Result, completion.Rejected = reply.Result, reply.Rejected
-			case remoteScanResult:
-				completion.Result = &reply
-			default:
-				panic("invalid scan completion")
-			}
-		}()
-		return nil, postScanMessage(s.peer, "scan.result", completion)
+
 	}
 	return nil, fmt.Errorf("unknown scan channel message")
 }
@@ -287,48 +235,31 @@ func (executor *peerScanExecutor) dispatch(task remoteScanTask) remoteScanResult
 	if service == nil {
 		panic("missing scan return-channel service")
 	}
-	id := uuid.NewString()
-	channel := &scanReturnChannel{peer: executor.peer, result: make(chan scanCompletion, 1)}
-	service.returns.Store(id, channel)
-	defer func() { channel.close(service); service.returns.Delete(id) }()
-	if err := postScanMessage(executor.peer, "scan.task", scanDispatch{id, executor.cluster, task}); err != nil {
-		panic(err)
-	}
-	cancelRemote := sync.OnceFunc(func() { _ = postScanMessage(executor.peer, "scan.cancel", id) })
-	stop := context.AfterFunc(executor.ctx, cancelRemote)
-	defer stop()
-	select {
-	case <-executor.ctx.Done():
-		// Done may close before AfterFunc's child is scheduled. Queue the
-		// cancellation here too, before deferred stop can remove that hook.
-		cancelRemote()
-		panic(executor.ctx.Err())
-	case <-executor.peer.done:
-		panic("Cluster network error")
-	case result := <-channel.result:
-		if result.Panic != nil {
-			if result.Panic.SQL != nil {
-				panic(scanError{result.Panic.SQL, result.Panic.Stack})
+	var result remoteScanResult
+	if err := service.control(executor.ctx, executor.peer, "scan.execute", task, &result); err != nil {
+		// Preserve the original SQL error/value and remote stack through the same
+		// collector used by every object request. No scan-specific send handle.
+		if failure, ok := err.(*scanPanic); ok {
+			if failure.SQL != nil {
+				panic(scanError{failure.SQL, failure.Stack})
 			}
-			if len(result.Panic.Value) > 0 {
+			if len(failure.Value) > 0 {
 				var value scm.Scmer
-				if json.Unmarshal(result.Panic.Value, &value) == nil {
+				if json.Unmarshal(failure.Value, &value) == nil {
 					if value.IsString() {
-						panic(scanError{value.String(), result.Panic.Stack})
+						panic(scanError{value.String(), failure.Stack})
 					}
-					panic(scanError{value, result.Panic.Stack})
+					panic(scanError{value, failure.Stack})
 				}
 			}
-			panic(*result.Panic)
+			panic(*failure)
 		}
-		if result.Rejected {
-			panic(clusterCapacityRejection{})
-		}
-		if result.Result == nil {
-			panic("missing scan result")
-		}
-		return *result.Result
+		panic(err)
 	}
+	if result.Rejected {
+		panic(clusterCapacityRejection{})
+	}
+	return result
 }
 
 // Control requests use the same fire-and-forget transport and UUID delivery

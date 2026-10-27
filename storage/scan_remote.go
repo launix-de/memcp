@@ -21,7 +21,7 @@ import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-const scanWireVersion = 4
+const scanWireVersion = 5
 
 type shardScanHorizon struct {
 	Main  uint32 `json:"main"`
@@ -72,6 +72,7 @@ type remoteScanTask struct {
 	ResultKind    string                `json:"result_kind"`
 }
 type remoteScanResult struct {
+	Rejected       bool            `json:"rejected,omitempty"` // capacity refusal before executing scan callbacks
 	Version        int             `json:"version"`
 	Task           uint64          `json:"task"`
 	Attempt        string          `json:"attempt"`
@@ -94,11 +95,10 @@ type scanRPCSession struct {
 	mu        sync.Mutex
 	high      uint64
 	seen      [1024]uint64
-	workers   chan struct{}
 }
 
 func newScanRPCSession() *scanRPCSession {
-	return &scanRPCSession{workers: make(chan struct{}, 8), peerReady: make(chan struct{})}
+	return &scanRPCSession{peerReady: make(chan struct{})}
 }
 func (s *scanRPCSession) bindPeer(peer *mosiPeer) { s.peer = peer; close(s.peerReady) }
 func (s *scanRPCSession) claim(task uint64) error {
@@ -121,27 +121,12 @@ func (s *scanRPCSession) handle(ctx context.Context, method string, data json.Ra
 	// Control traffic (membership, owner discovery and residency hints) must
 	// not consume compute slots. Saturated shard execution is neither evidence
 	// of a dead owner nor a reason to reject the protocol needed to finish it.
-	if method == "node.control" || method == "scan.task" || method == "scan.result" || method == "scan.cancel" {
+	if method == "node.control" || method == "scan.result" || method == "scan.cancel" {
 		<-s.peerReady
 		return s.channelMessage(ctx, method, data)
 	}
 	if strings.HasPrefix(method, "object.") {
 		return s.handleObject(ctx, method, data)
-	}
-	if strings.HasPrefix(method, "cluster.") && method != "cluster.reduce" {
-		if s.service == nil || s.service.cluster == nil {
-			return nil, fmt.Errorf("cluster membership is not enabled")
-		}
-		return s.service.cluster.HandleClusterRequest(context.WithValue(ctx, clusterObjectSessionKey{}, s), scm.ClusterRequest{Method: method, Payload: data})
-	}
-	select {
-	case s.workers <- struct{}{}:
-		defer func() { <-s.workers }()
-	default:
-		if method == "cluster.reduce" {
-			return clusterReduceReply{Rejected: true}, nil
-		}
-		return nil, fmt.Errorf("remote scan worker limit")
 	}
 	if strings.HasPrefix(method, "cluster.") {
 		if s.service == nil || s.service.cluster == nil {
@@ -175,10 +160,12 @@ func (s *scanRPCSession) handle(ctx context.Context, method string, data json.Ra
 	return nil, fmt.Errorf("unknown remote scan method")
 }
 
-// Both explicitly addressed and automatically placed reductions enter this
-// same checked executor. Admission is owned by the caller; replay, procedure,
-// generation, visibility and result validation are not duplicated by adapters.
-func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScanTask, input ...*storageShard) (any, error) {
+// The database handler owns the sole scan preparation path, including shared-
+// backend tasks and optionally retained historical inputs. It reconstructs TX
+// and captures once, acquires one native read generation, then delegates the
+// prepared invocation to that shard's HandleClusterRequest. No transport adapter
+// prepares, reacquires or directly executes a scan.
+func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession, request remoteScanTask, input *storageShard) (any, error) {
 	if request.Version != scanWireVersion || request.Visibility != "cursor-stability/captured-horizon" || !request.Shard.Resource.valid() || request.Shard.Resource.Shard == "" {
 		return nil, fmt.Errorf("invalid remote scan contract")
 	}
@@ -187,21 +174,6 @@ func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScan
 	}
 	if request.ResultKind != "scalar" && request.ResultKind != "group_sums" && request.ResultKind != "value" {
 		return nil, fmt.Errorf("unsupported remote result kind")
-	}
-	if request.Input != nil && len(input) == 0 {
-		data, err := json.Marshal(request)
-		if err != nil {
-			return nil, err
-		}
-		value, err := s.requestObject(ctx, clusterObjectCall{Reference: *request.Input, Method: "scan", Arguments: []scanWireValue{{Kind: "scalar", Scalar: mustScanJSON(scm.NewString(string(data)))}}})
-		if err != nil {
-			return nil, err
-		}
-		var result remoteScanResult
-		if err := json.Unmarshal([]byte(value.String()), &result); err != nil {
-			return nil, err
-		}
-		return result, nil
 	}
 	if err := s.claim(request.Task); err != nil {
 		return nil, err
@@ -267,10 +239,10 @@ func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScan
 		return nil, err
 	}
 	var output remoteScanResult
-	withInput := func(execute func(*storageShard) error) error { return withRemoteScanShard(request.Shard, tx, execute) }
-	if len(input) > 0 {
+	withInput := func(execute func(*storageShard) error) error { return withRemoteScanShard(&request.Shard, tx, execute) }
+	if input != nil {
 		withInput = func(execute func(*storageShard) error) error {
-			shard := input[0]
+			shard := input
 			if shard.uuid.String() != request.Shard.Resource.Shard || shard.t.filterSchemaFingerprint() != request.Shard.Schema || shard.t.schema.Name != request.Shard.Resource.Database || shard.t.Name != request.Shard.Resource.Table {
 				return fmt.Errorf("retained input generation/schema mismatch")
 			}
@@ -292,18 +264,31 @@ func (s *scanRPCSession) executeScanTask(ctx context.Context, request remoteScan
 			return err
 		}
 		access.ensureRuntime().horizon = &request.Shard.Horizon
-		value, count, candidates := shard.scan(access, request.FilterColumns, filter, request.MapColumns, reducer, neutral, 0, nil, tx, ss)
-		encoded, err := encodeScanResult(value, request.ResultKind)
+		// Only the native shard handler executes the operator. The database owns
+		// resolution/acquisition; the transport knows neither placement nor scans.
+		value, err := shard.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "scan", Payload: shardScanInvocation{tx: tx, access: access, conditionCols: request.FilterColumns, condition: filter, callbackCols: request.MapColumns, mapReduce: reducer, neutral: neutral}})
 		if err != nil {
 			return err
 		}
-		output = remoteScanResult{Version: scanWireVersion, Task: request.Task, Attempt: request.Attempt, Shard: request.Shard, Kind: request.ResultKind, Value: encoded, OutCount: count, InputCount: int64(request.Shard.Horizon.Main) + int64(request.Shard.Horizon.Delta), CandidateCount: candidates}
+		result := value.(scanResult)
+		encoded, err := encodeScanResult(result.res, request.ResultKind)
+		if err != nil {
+			return err
+		}
+		output = remoteScanResult{Version: scanWireVersion, Task: request.Task, Attempt: request.Attempt, Shard: request.Shard, Kind: request.ResultKind, Value: encoded, OutCount: result.outCount, InputCount: int64(request.Shard.Horizon.Main) + int64(request.Shard.Horizon.Delta), CandidateCount: result.candidateCount}
 		return nil
 	})
+	if _, capacity := err.(clusterCapacityRejection); capacity {
+		return remoteScanResult{Rejected: true}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	return boundedScanReply(output)
+	reply, err := boundedScanReply(output)
+	if err == nil && sharedClusterDatabase(database.Name) {
+		s.service.cluster.received.Add(1) // completed remote task, outside all row loops
+	}
+	return reply, err
 }
 
 // Mutating storage/native callbacks need a remote transaction participant and
@@ -360,7 +345,14 @@ func boundedScanReply(value any) (any, error) {
 
 // Acquire through the same schema/shard MOSI and generation lifetime boundaries
 // as a local scan. A changed physical generation aborts rather than rebinding IDs.
-func withRemoteScanShard(expected remoteScanShard, tx *TxContext, execute func(*storageShard) error) error {
+func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, execute func(*storageShard) error) (err error) {
+	// A shared-backend worker either admits this generation once or refuses
+	// before scan callbacks. Capacity refusal alone permits choosing another peer.
+	shared := sharedClusterDatabase(expected.Resource.Database)
+	ctx := scanQueryContext(tx, context.Background())
+	if shared {
+		acquireClusterRead(ctx, mosiResource{Database: expected.Resource.Database})
+	}
 	db := GetDatabase(expected.Resource.Database)
 	if db == nil {
 		return fmt.Errorf("remote schema disappeared")
@@ -397,15 +389,38 @@ func withRemoteScanShard(expected remoteScanShard, tx *TxContext, execute func(*
 			// physical IDs and captured extent through native snapshot access.
 			if r := activeReplication(tbl.schema); r != nil {
 				cell := r.shardCell(selected)
-				r.obtain(*cell.resource.Load(), mosi.S, "", tx)
+				if shared {
+					acquireClusterRead(ctx, *cell.resource.Load())
+				} else {
+					r.obtain(*cell.resource.Load(), mosi.S, "", tx)
+				}
 			}
-			lease := selected.getRead(nil, true)
+			var lease ReadAccess
+			var capacity bool
+			func() {
+				defer func() {
+					if failure := recover(); failure != nil {
+						if _, delegated := failure.(shardReadDelegation); shared && delegated {
+							capacity = true
+						} else {
+							panic(failure)
+						}
+					}
+				}()
+				lease = selected.getRead(tx, true)
+			}()
+			if capacity {
+				return clusterCapacityRejection{}
+			}
 			defer lease.Release()
 			shard := lease.shard
 			if shard.uuid.String() != expected.Resource.Shard {
 				return fmt.Errorf("remote scan shard changed")
 			}
 			horizon := shard.captureScanHorizon()
+			if shared {
+				expected.Horizon = horizon
+			}
 			valid := horizon.Main == expected.Horizon.Main && horizon.Delta >= expected.Horizon.Delta
 			if !valid {
 				return fmt.Errorf("remote scan horizon changed")
@@ -504,7 +519,6 @@ func encodeScanResult(value scm.Scmer, kind string) (json.RawMessage, error) {
 type peerScanExecutor struct {
 	input      *scm.ClusterReference
 	inputLease scm.Scmer // keeps the imported old-generation handle until its query is unreachable
-	cluster    bool      // immutable shared-generation placement captures extent at executor
 	peer       *mosiPeer
 	ctx        context.Context
 	prepared   remoteScanShard
@@ -551,7 +565,7 @@ func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, invoca
 	if err != nil {
 		panic(err)
 	}
-	if executor.cluster && invocation.tx != nil {
+	if invocation.tx != nil {
 		// Export only unmodified remote inputs. A modified generation is kept
 		// resident by native TX pins and must execute at its participant; a cold
 		// path must not silently drop its private delete/undelete overlay.
@@ -577,7 +591,7 @@ func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, invoca
 		panic("remote scan resource mismatch")
 	}
 	response := executor.dispatch(task)
-	if executor.cluster {
+	if sharedClusterDatabase(resource.Database) {
 		task.Shard.Horizon = response.Shard.Horizon
 	}
 	if response.Version != scanWireVersion || response.Task != task.Task || response.Attempt != task.Attempt || response.Shard != task.Shard || response.Kind != task.ResultKind {

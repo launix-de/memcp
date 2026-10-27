@@ -67,24 +67,39 @@ func (service *nodeScanService) objectRegistry() *clusterObjectRegistry {
 		r.wake = make(chan struct{}, 1)
 		r.stop = make(chan struct{})
 		go func() {
+			// Failed releases need their own retry source. A quiet peer can have
+			// no later GC/reconnect event to wake us; never pin its old shard forever.
+			retry := time.NewTimer(time.Hour)
+			retry.Stop()
+			defer retry.Stop()
+			var retryC <-chan time.Time
 			for {
 				select {
 				case <-r.wake:
-					r.mu.Lock()
-					batch := r.releases
-					r.releases = nil
-					r.mu.Unlock()
-					for _, release := range batch {
-						if !service.deliverObjectRelease(release) {
-							r.mu.Lock()
-							if !r.stopped {
-								r.releases = append(r.releases, release)
-							}
-							r.mu.Unlock()
-						}
-					}
+				case <-retryC:
 				case <-r.stop:
 					return
+				}
+				retryC = nil
+				r.mu.Lock()
+				batch := r.releases
+				r.releases = nil
+				r.mu.Unlock()
+				for _, release := range batch {
+					if !service.deliverObjectRelease(release) {
+						r.mu.Lock()
+						if !r.stopped {
+							r.releases = append(r.releases, release)
+						}
+						r.mu.Unlock()
+					}
+				}
+				r.mu.Lock()
+				pending := len(r.releases) > 0
+				r.mu.Unlock()
+				if pending {
+					retry.Reset(time.Second)
+					retryC = retry.C
 				}
 			}
 		}()

@@ -301,8 +301,10 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 	}
 	// Ordinary scalar serialization performs no registry lookup. Object-backed
 	// callables, opaque values and embedding-owned tags use the same interface,
-	// including standalone objects which provide context-free reconstruction.
-	if v.GetTag() == tagFunc || v.GetTag() == tagAny || v.GetTag() >= 100 {
+	// including standalone opaque objects with context-free reconstruction.
+	// Local diagnostic/cache text keeps native callable/custom-tag spelling.
+	// Network reconstruction markers must never change local plan identities.
+	if (b.objects != nil && (v.GetTag() == tagFunc || v.GetTag() >= 100)) || v.GetTag() == tagAny {
 		if object, ok := ClusterObjectOf(v); ok {
 			expression, exists := b.references[object]
 			if !exists {
@@ -317,7 +319,9 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 				// Mark object reconstruction explicitly. The decoder MUST construct
 				// this capture once before compiling any row callback, even for an
 				// empty shard. The envelope-local ID also preserves capture aliases.
-				expression = NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(int64(len(b.references) + 1)), expression})
+				if b.objects != nil {
+					expression = NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(int64(len(b.references) + 1)), expression})
+				}
 				b.references[object] = expression
 			}
 			serializeEx(b, expression, glob, glob, nil)
@@ -378,7 +382,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 	case tagSlice:
 		slice := lambdaSyntaxOperands(v.Slice())
-		if len(slice) == 2 && scmerIsSymbol(slice[0], "quote") && containsClusterObject(slice[1]) {
+		if b.objects != nil && len(slice) == 2 && scmerIsSymbol(slice[0], "quote") && containsClusterObject(slice[1]) {
 			serializeClusterLiteral(b, slice[1], glob)
 			return
 		}
