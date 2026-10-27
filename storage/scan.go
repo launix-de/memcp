@@ -1428,6 +1428,22 @@ func (t *table) hasUniqueColumns(columns []string) bool {
 	return false
 }
 
+// scanDeltaExtent freezes the same physical input range for every read kernel.
+// Remote scopes already own a generation and captured horizon; this preparation
+// must not admit later inserts just because EXISTS, lookup or batch uses a more
+// specialized loop. It adds no lock, counter or row-loop check.
+func (t *storageShard) scanDeltaExtent(access scanAccess) int {
+	count := len(t.inserts)
+	if access.runtime != nil && access.runtime.horizon != nil {
+		horizon := access.runtime.horizon
+		if t.main_count != horizon.Main || uint64(count) < uint64(horizon.Delta) {
+			panic("remote scan horizon changed")
+		}
+		return int(horizon.Delta)
+	}
+	return count
+}
+
 func (t *table) scanExists(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer) bool {
 	return t.scanExistsFrom(currentTx, nil, accessSchema, accessValues, conditionCols, condition)
 }
@@ -1469,6 +1485,11 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchem
 			}
 		}()
 		if acquisitionFailure != nil {
+			if delegation, ok := acquisitionFailure.(shardReadDelegation); ok {
+				invocation := shardScanInvocation{operator: shardExists, tx: currentTx, access: executionAccess, conditionCols: conditionCols, condition: condition, source: source}
+				values.send(solo, invocation.delegate(s, delegation))
+				return
+			}
 			panic(acquisitionFailure)
 		}
 		// Cancellation contract: check only at the scheduling boundary, before entering
@@ -1506,12 +1527,20 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchem
 func runDirectSingleShardExists(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, access scanAccess, conditionCols []string, condition scm.Scmer, ss *scm.SessionState, querySeq uint64) (found bool, scanErr scanError) {
 	defer topology.releaseOperation()
 	defer shard.activeScanners.Add(-1)
+	acquiring := true
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			if delegation, ok := recovered.(shardReadDelegation); acquiring && ok {
+				invocation := shardScanInvocation{operator: shardExists, tx: currentTx, access: access, conditionCols: conditionCols, condition: condition}
+				result := invocation.delegate(shard, delegation)
+				found, scanErr = scm.ToBool(result.res), result.err
+				return
+			}
 			scanErr = scanError{recovered, string(debug.Stack())}
 		}
 	}()
 	release := shard.acquireReadForScan(currentTx, nil)
+	acquiring = false
 	defer release.Release()
 	if release.shard != nil {
 		shard = release.shard
@@ -1544,7 +1573,7 @@ func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			if delegation, ok := recovered.(shardReadDelegation); acquiring && ok {
-				invocation := shardScanInvocation{currentTx, access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, source}
+				invocation := shardScanInvocation{tx: currentTx, access: access, conditionCols: conditionCols, condition: condition, callbackCols: callbackCols, mapReduce: mapReduce, neutral: neutral, stride: stride, batchdata: batchdata, source: source}
 				result = invocation.delegate(shard, delegation)
 			} else {
 				result = scanResult{err: scanError{recovered, string(debug.Stack())}}
@@ -1683,7 +1712,7 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 				}
 			}()
 			if delegation, ok := acquisitionFailure.(shardReadDelegation); ok {
-				invocation := shardScanInvocation{currentTx, executionAccess, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, source}
+				invocation := shardScanInvocation{tx: currentTx, access: executionAccess, conditionCols: conditionCols, condition: condition, callbackCols: callbackCols, mapReduce: mapReduce, neutral: neutral, stride: stride, batchdata: batchdata, source: source}
 				values.send(solo, invocation.delegate(s, delegation))
 				return
 			}
@@ -2090,7 +2119,7 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
-	maxInsertIndex := len(t.inserts)
+	maxInsertIndex := t.scanDeltaExtent(access)
 	visibleUpper := mainCount + uint32(maxInsertIndex)
 	found := false
 	var foundID uint32
@@ -2397,14 +2426,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 			t.mu.RUnlock()
 		}
 	}()
-	maxInsertIndex := len(t.inserts)
-	if access.runtime != nil && access.runtime.horizon != nil {
-		horizon := access.runtime.horizon
-		if t.main_count != horizon.Main || uint64(maxInsertIndex) < uint64(horizon.Delta) {
-			panic("remote scan horizon changed")
-		}
-		maxInsertIndex = int(horizon.Delta)
-	}
+	maxInsertIndex := t.scanDeltaExtent(access)
 	feedbackPopulation := int64(t.main_count) + int64(maxInsertIndex) - int64(t.deletions.Count())
 	var feedbackCandidates int64
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
@@ -2712,7 +2734,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 			t.mu.RUnlock()
 		}
 	}()
-	maxInsertIndex := len(t.inserts)
+	maxInsertIndex := t.scanDeltaExtent(access)
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
 	var pendingRecids []uint32
 	var pendingBatchids []uint32

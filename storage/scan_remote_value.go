@@ -132,12 +132,12 @@ func (value scanWireValue) thaw(depth int, decode ...scm.ProcedureDecode) (scm.S
 // the existing scan engine; no residual predicate or mandatory constraint is
 // discarded by delegation. Runtime physical source sets remain nonportable.
 type remoteScanAccess struct {
-	Boundaries []scm.Scmer `json:"boundaries,omitempty"`
-	Values     []scm.Scmer `json:"values,omitempty"`
-	Covered    bool        `json:"covered,omitempty"`
+	Boundaries []scm.Scmer     `json:"boundaries,omitempty"`
+	Values     []scanWireValue `json:"values,omitempty"`
+	Covered    bool            `json:"covered,omitempty"`
 }
 
-func freezeScanAccess(access scanAccess) (remoteScanAccess, error) {
+func freezeScanAccess(access scanAccess, bindings ...*scm.SerializationContext) (remoteScanAccess, error) {
 	// These carry physical invocation state beyond scalar filter operands.
 	// Reject rather than silently omit their execution/lifetime semantics.
 	if access.runtime != nil && (access.runtime.mutation || access.runtime.prefixMerge != nil) {
@@ -145,54 +145,75 @@ func freezeScanAccess(access scanAccess) (remoteScanAccess, error) {
 	}
 	out := remoteScanAccess{Covered: access.plannerFilterCovered || access.runtime != nil && access.runtime.filterCovered}
 	for i := 0; i < access.len(); i++ {
-		original, _ := access.boundaryParts(i)
+		original, operands := access.boundaryParts(i)
 		box := *original
+		appendValue := func(value scm.Scmer) (int, error) {
+			frozen, err := freezeScanValue(value, 0, bindings...)
+			if err != nil {
+				return 0, err
+			}
+			slot := len(out.Values)
+			out.Values = append(out.Values, frozen)
+			return slot, nil
+		}
 		if box.mapperSlot >= 0 {
-			return out, fmt.Errorf("remote computed boundary requires a serialized mapper")
+			var err error
+			box.mapperSlot, err = appendValue(operands[original.mapperSlot])
+			if err != nil {
+				return out, err
+			}
 		}
 		if box.analyzer == RecSetMatcher {
 			return out, fmt.Errorf("physical RecSet cannot leave its query node")
 		}
-		box.lowerSlot = -1
-		box.upperSlot = -1
-		if original.lowerSlot != -1 {
-			box.lowerSlot = len(out.Values)
-			out.Values = append(out.Values, access.boundValue(i, false))
-		}
-		if original.upperSlot != -1 {
-			box.upperSlot = len(out.Values)
-			out.Values = append(out.Values, access.boundValue(i, true))
+		// Negative batch slots name fields in the serialized input batch. Do not
+		// collapse them into a nil scalar before scanBatch binds each input row.
+		for _, upper := range []bool{false, true} {
+			slot := original.lowerSlot
+			if upper {
+				slot = original.upperSlot
+			}
+			if slot >= 0 {
+				var err error
+				slot, err = appendValue(access.boundValue(i, upper))
+				if err != nil {
+					return out, err
+				}
+			}
+			if upper {
+				box.upperSlot = slot
+			} else {
+				box.lowerSlot = slot
+			}
 		}
 		out.Boundaries = append(out.Boundaries, NewScanBoundaryScmer(&box))
 	}
-	for _, value := range out.Values {
-		if err := checkScanData(value, 0); err != nil {
-			return out, err
-		}
-	}
 	return out, nil
 }
-func (access remoteScanAccess) bind() (scanAccess, error) {
+func (access remoteScanAccess) bind(decode ...scm.ProcedureDecode) (scanAccess, error) {
 	for _, item := range access.Boundaries {
 		if !item.IsCustom(TagScanBoundary) {
 			return scanAccess{}, fmt.Errorf("invalid remote boundary")
 		}
 		box := ScanBoundaryFromScmer(item)
-		if box.MapperSlot() != -1 || box.Analyzer() == RecSetMatcher {
+		if box.MapperSlot() < -1 || box.MapperSlot() >= len(access.Values) || box.Analyzer() == RecSetMatcher {
 			return scanAccess{}, fmt.Errorf("unsupported remote physical input")
 		}
 		for _, slot := range []int{box.LowerSlot(), box.UpperSlot()} {
-			if slot < -1 || slot >= len(access.Values) {
+			if slot >= len(access.Values) {
 				return scanAccess{}, fmt.Errorf("invalid remote boundary slot")
 			}
 		}
 	}
-	for _, value := range access.Values {
-		if err := checkScanData(value, 0); err != nil {
+	values := make([]scm.Scmer, len(access.Values))
+	for i, value := range access.Values {
+		var err error
+		values[i], err = value.thaw(0, decode...)
+		if err != nil {
 			return scanAccess{}, err
 		}
 	}
-	return scanAccess{runtime: &scanAccessRuntime{suffix: scanAccessSegment{items: access.Boundaries, values: access.Values}, filterCovered: access.Covered}}, nil
+	return scanAccess{runtime: &scanAccessRuntime{suffix: scanAccessSegment{items: access.Boundaries, values: values}, filterCovered: access.Covered}}, nil
 }
 
 // A cancelled or rejected completion must retire offers its receiver never

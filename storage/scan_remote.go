@@ -57,6 +57,9 @@ type remoteScanDescribe struct {
 }
 
 type remoteScanTask struct {
+	Operator      shardScanOperator     `json:"operator"`
+	Stride        int                   `json:"stride,omitempty"`
+	Batch         []scanWireValue       `json:"batch,omitempty"`
 	Input         *scm.ClusterReference `json:"input,omitempty"`
 	Transaction   *scm.ClusterReference `json:"transaction,omitempty"`
 	Access        remoteScanAccess      `json:"access"`
@@ -173,6 +176,9 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	if _, err := uuid.Parse(request.Attempt); err != nil {
 		return nil, fmt.Errorf("invalid scan attempt")
 	}
+	if request.Operator > shardLookupMapMany || request.Stride < 0 || (request.Operator != shardReduce && request.Stride != 0) || (request.Stride == 0 && len(request.Batch) != 0) || (request.Stride > 0 && len(request.Batch)%request.Stride != 0) {
+		return nil, fmt.Errorf("invalid remote scan invocation")
+	}
 	if request.ResultKind != "scalar" && request.ResultKind != "group_sums" && request.ResultKind != "value" {
 		return nil, fmt.Errorf("unsupported remote result kind")
 	}
@@ -181,6 +187,9 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	}
 	for _, cols := range [][]string{request.FilterColumns, request.MapColumns} {
 		for _, col := range cols {
+			if slot, batch := parseBatchPseudoColName(col); batch && slot >= request.Stride {
+				return nil, fmt.Errorf("batch column outside its input row")
+			}
 			if strings.HasPrefix(col, "$") {
 				return nil, fmt.Errorf("remote scan rejects query-local or mutation columns")
 			}
@@ -235,6 +244,14 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	if err := validateRemoteScanReadOnly(reducer); err != nil {
 		return nil, err
 	}
+	batch := make([]scm.Scmer, len(request.Batch))
+	for i, item := range request.Batch {
+		var err error
+		batch[i], err = item.thaw(0, scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
+		if err != nil {
+			return nil, err
+		}
+	}
 	neutral, err := decodeScanValue(request.Neutral, request.ResultKind)
 	if err != nil {
 		return nil, err
@@ -260,14 +277,22 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		access, err := request.Access.bind()
+		access, err := request.Access.bind(scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
 		if err != nil {
 			return err
+		}
+		for _, item := range request.Access.Boundaries {
+			boundary := ScanBoundaryFromScmer(item)
+			for _, slot := range []int{boundary.LowerSlot(), boundary.UpperSlot()} {
+				if slot <= -2 && -slot-2 >= request.Stride {
+					return fmt.Errorf("batch boundary outside its input row")
+				}
+			}
 		}
 		access.ensureRuntime().horizon = &request.Shard.Horizon
 		// Only the native shard handler executes the operator. The database owns
 		// resolution/acquisition; the transport knows neither placement nor scans.
-		value, err := shard.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "scan", Payload: shardScanInvocation{tx: tx, access: access, conditionCols: request.FilterColumns, condition: filter, callbackCols: request.MapColumns, mapReduce: reducer, neutral: neutral}})
+		value, err := shard.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "scan", Payload: shardScanInvocation{operator: request.Operator, stride: request.Stride, batchdata: batch, tx: tx, access: access, conditionCols: request.FilterColumns, condition: filter, callbackCols: request.MapColumns, mapReduce: reducer, neutral: neutral}})
 		if err != nil {
 			return err
 		}
@@ -553,7 +578,11 @@ func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, invoca
 	if err != nil {
 		panic(err)
 	}
-	reducer, err := scm.MarshalProcedure(invocation.mapReduce, bindings)
+	mapReduce := invocation.mapReduce
+	if invocation.operator != shardReduce {
+		mapReduce = scm.Eval(scm.Read("remote exists", "(lambda args false)"), &scm.Globalenv)
+	}
+	reducer, err := scm.MarshalProcedure(mapReduce, bindings)
 	if err != nil {
 		panic(err)
 	}
@@ -561,8 +590,15 @@ func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, invoca
 	if err != nil {
 		panic(err)
 	}
-	task := remoteScanTask{Input: executor.input, Version: scanWireVersion, Task: executor.next.Add(1), Attempt: uuid.NewString(), Visibility: "cursor-stability/captured-horizon", Shard: executor.prepared, FilterColumns: invocation.conditionCols, Filter: filter, MapColumns: invocation.callbackCols, MapReducer: reducer, Neutral: neutral, ResultKind: executor.kind}
-	task.Access, err = freezeScanAccess(invocation.access)
+	task := remoteScanTask{Operator: invocation.operator, Stride: invocation.stride, Input: executor.input, Version: scanWireVersion, Task: executor.next.Add(1), Attempt: uuid.NewString(), Visibility: "cursor-stability/captured-horizon", Shard: executor.prepared, FilterColumns: invocation.conditionCols, Filter: filter, MapColumns: invocation.callbackCols, MapReducer: reducer, Neutral: neutral, ResultKind: executor.kind}
+	for _, item := range invocation.batchdata {
+		value, err := freezeScanValue(item, 0, bindings)
+		if err != nil {
+			panic(err)
+		}
+		task.Batch = append(task.Batch, value)
+	}
+	task.Access, err = freezeScanAccess(invocation.access, bindings)
 	if err != nil {
 		panic(err)
 	}

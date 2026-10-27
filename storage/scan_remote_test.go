@@ -387,3 +387,144 @@ func TestProcedureWireNestedScanContextRebindSkipsQuotedData(t *testing.T) {
 		t.Fatalf("nested scope rebinding changed quoted data or retained its parent: %s", bound)
 	}
 }
+
+func TestRemoteScanNativeExistsAndBatch(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "t_remote_operator_contract", 4)
+	RebuildTable(table, true, false)
+	peer, _, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := peer.call(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, table.schema.Name, table.Name}, &parts); err != nil {
+		t.Fatal(err)
+	}
+	// A specialized kernel must retain the described extent as strictly as
+	// ordinary reduction, even when a matching row is inserted before dispatch.
+	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(500), scm.NewString("outside-horizon")}}, false, nil, nil, false, nil)
+	procedure := func(source string) json.RawMessage {
+		result, err := scm.MarshalProcedure(scm.Eval(scm.Read(t.Name(), source), &scm.Globalenv))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	for sequence, match := range []bool{true, false} {
+		task := makeRemoteScanTask(t, parts[0])
+		task.Task = uint64(sequence + 1)
+		task.Operator = shardExists
+		if !match {
+			task.Filter = procedure(`(lambda (id) (> id 100))`)
+		}
+		var result remoteScanResult
+		if err := peer.call(context.Background(), "scan.execute", task, &result); err != nil {
+			t.Fatal(err)
+		}
+		value, err := decodeScanValue(result.Value, result.Kind)
+		if err != nil || scm.ToBool(value) != match {
+			t.Fatal("remote EXISTS lost native match/miss semantics", result, err)
+		}
+	}
+	task := makeRemoteScanTask(t, parts[0])
+	task.Task = 3
+	task.Stride = 2
+	for _, value := range []int64{2, 10, 4, 20} {
+		frozen, err := freezeScanValue(scm.NewInt(value), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		task.Batch = append(task.Batch, frozen)
+	}
+	task.FilterColumns = []string{"id", "#0"}
+	task.Filter = procedure(`(lambda (id key) (equal? id key))`)
+	task.MapColumns = []string{"id", "#1"}
+	task.MapReducer = procedure(`(lambda (acc id delta) (+ acc id delta))`)
+	task.Access.Boundaries = []scm.Scmer{newScanBoundarySpec("id", EqualMatcher, -2, -2, true, true, "", false, -1, nil, nil, "", true)}
+	var result remoteScanResult
+	if err := peer.call(context.Background(), "scan.execute", task, &result); err != nil {
+		t.Fatal(err)
+	}
+	value, err := decodeScanValue(result.Value, result.Kind)
+	if err != nil || value.Int() != 36 {
+		t.Fatal("remote batch lost row bindings", value, result, err)
+	}
+}
+
+func TestRemoteScanComputedAndBatchBoundaryRoundTrip(t *testing.T) {
+	mapper := scm.Eval(scm.Read(t.Name(), `(lambda (id) (mod id 7))`), &scm.Globalenv)
+	descriptor := scm.NewSlice([]scm.Scmer{scm.NewString("id-mod-7"), mapper})
+	access := scanAccess{runtime: &scanAccessRuntime{suffix: scanAccessSegment{
+		items:  []scm.Scmer{newScanBoundarySpec("", EqualMatcher, -2, -2, true, true, "", false, 0, []string{"id"}, nil, "", true)},
+		values: []scm.Scmer{descriptor},
+	}}}
+	frozen, err := freezeScanAccess(access, new(scm.SerializationContext))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var received remoteScanAccess
+	if err := json.Unmarshal(data, &received); err != nil {
+		t.Fatal(err)
+	}
+	bound, err := received.bind(scm.ProcedureDecode{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns, restored := bound.boundaryMap(0)
+	boundary, _ := bound.boundaryParts(0)
+	if boundary.LowerSlot() != -2 || boundary.UpperSlot() != -2 || bound.boundaryColumn(0) != "id-mod-7" || len(columns) != 1 || columns[0] != "id" || scm.Apply(restored, scm.NewInt(16)).Int() != 2 {
+		t.Fatal("computed boundary/batch key lost its native contract", string(data))
+	}
+}
+
+func TestRemoteScanNativeLookupKinds(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "t_remote_lookup_contract", 4)
+	RebuildTable(table, true, false)
+	peer, _, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := peer.call(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, table.schema.Name, table.Name}, &parts); err != nil {
+		t.Fatal(err)
+	}
+	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("outside-horizon")}}, false, nil, nil, false, nil)
+	var sequence uint64
+	for _, operator := range []shardScanOperator{shardLookupOne, shardLookupMany, shardLookupMapOne, shardLookupMapMany} {
+		for _, key := range []int64{2, 99} {
+			sequence++
+			task := makeRemoteScanTask(t, parts[0])
+			task.Task, task.Operator = sequence, operator
+			task.MapColumns = []string{"id"}
+			var err error
+			task.Access, err = freezeScanAccess(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(key)}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if operator >= shardLookupMapOne {
+				task.ResultKind = "value"
+				task.Neutral, err = encodeScanResult(scm.NewNil(), "value")
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var result remoteScanResult
+			if err := peer.call(context.Background(), "scan.execute", task, &result); err != nil {
+				t.Fatal(err)
+			}
+			value, err := decodeScanValue(result.Value, result.Kind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if key == 99 {
+				if result.OutCount != 0 {
+					t.Fatal("lookup miss lost native cardinality", result)
+				}
+			} else {
+				if operator >= shardLookupMapOne {
+					value = value.Slice()[0]
+				}
+				if result.OutCount != 1 || value.Int() != key {
+					t.Fatal("lookup changed projected value/cardinality", value, result)
+				}
+			}
+		}
+	}
+}

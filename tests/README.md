@@ -55,6 +55,21 @@ Replication process/crash scenarios run outside the Go test harness. Build
 python3 tools/replication_cluster_stress.py --seed 20261023 --rounds 5 --workers 4 --operations 25
 ```
 
+The separate **Cluster SQL operator contracts** CI job compares ordered scans,
+Top-N/OFFSET, computed and NULL sort keys, EXISTS, scalar lookups, joins and
+membership scans against a standalone SQL oracle. Run it with:
+
+```sh
+python3 tools/replication_cluster_stress.py --cluster-operators-only
+```
+
+Each cluster query must increase the coordinator's remote-execution counter;
+correct local results alone do not pass. Reports retain the SQL, EXPLAIN, oracle
+rows, remote shard count and every failure. Unsupported operators fail CI;
+there are no expected-failure exemptions. Native batch/lookup wire tests cover
+physical operator contracts separately, since a SQL join may lower to another
+operator such as `scan_join_order`.
+
 The **Replication Cluster Stress test** workflow executes this runner directly.
 The default run connects through `/cluster` on the normal HTTP API listener; the
 race-instrumented process run uses `--dedicated-replication-port` to cover the

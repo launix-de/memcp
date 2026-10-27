@@ -185,3 +185,27 @@ Local text/hash serialization preserves native spellings. Network capture
 markers belong only to explicit procedure serialization, never local plan keys.
 Failed GC releases schedule their own bounded-rate retry; they do not rely on a
 later GC or reconnect event to release a historical generation.
+
+
+## Scan-family extension in progress
+
+`--cluster-operators-only` compares twelve SQL contracts with standalone results
+and requires actual remote execution for every cluster case. The initial master
+baseline passed twelve standalone cases and only two distributed cases; an
+ordinary SUM is not evidence of ordered/batch/lookup coverage. CI runs the same
+process scenario normally and with race-instrumented nodes.
+
+The native request carries an explicit operator kind and invocation data through
+the existing database/shard handlers. EXISTS uses its native short-circuit kernel;
+lookup replies retain native match counts and cardinality checks. Batch strides,
+row fields and negative boundary slots retain their binding semantics. Computed
+boundary mappers use the same procedure serializer and import context as other
+captures. These additions add no row-loop synchronization or new reader gates.
+
+Ordered scans remain unfinished. They need generation-retaining remote sorted
+runs with bounded pages, integrated into the existing coordinator merge, including
+partition limits, post-order acceptance, early LIMIT and nested cancellation.
+Sending all sorted rows in one response or falling back to local shard loading
+would defeat the memory contract. Physical RecSet/join inputs likewise need a
+portable generation-bound contract; rebinding old IDs to a successor is forbidden.
+The regression suite keeps these missing paths visible rather than bypassing them.

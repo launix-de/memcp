@@ -39,9 +39,21 @@ func (d shardReadDelegation) Error() string {
 // A transport adapter must freeze the callbacks and access bindings and bind
 // visibility/transactions explicitly before sending. TxContext, scanAccess,
 // runtime closures, RecSets and RecMaps must never be serialized as Go objects.
-// This first boundary supports ordinary unbatched scans only; physical source
-// sets and mutations fail explicitly until their remote contracts exist.
+// Operators retain their native execution kind. Batch inputs are invocation data;
+// physical source sets require generation-bound row visibility, never new IDs.
+type shardScanOperator uint8
+
+const (
+	shardReduce shardScanOperator = iota
+	shardExists
+	shardLookupOne
+	shardLookupMany
+	shardLookupMapOne
+	shardLookupMapMany
+)
+
 type shardScanInvocation struct {
+	operator      shardScanOperator
 	tx            *TxContext
 	access        scanAccess
 	conditionCols []string
@@ -84,8 +96,8 @@ func (invocation shardScanInvocation) delegate(shard *storageShard, failure shar
 		!validResource || !target.resource.valid() {
 		panic("invalid remote shard scan target")
 	}
-	if invocation.source != nil || invocation.stride != 0 || len(invocation.batchdata) != 0 {
-		panic("remote shard scan does not support physical source sets or batches")
+	if invocation.source != nil {
+		panic("remote shard scan requires a portable physical source set")
 	}
 	for _, name := range invocation.callbackCols {
 		if name == "$update" || strings.HasPrefix(name, "$increment:") {
@@ -100,4 +112,21 @@ func (invocation shardScanInvocation) delegate(shard *storageShard, failure shar
 		panic(fmt.Errorf("invalid remote shard scan counts"))
 	}
 	return result
+}
+
+// Only acquisition failures enter this adapter. Local lookup kernels and their
+// scalar-cardinality/visibility rules remain unchanged; a remote worker invokes
+// those same kernels and returns projected values plus the native match count.
+func delegateShardLookup(tx *TxContext, shard *storageShard, access scanAccess, columns []string, operator shardScanOperator, failure any) (scm.Scmer, int) {
+	delegation, ok := failure.(shardReadDelegation)
+	if !ok {
+		panic(failure)
+	}
+	invocation := shardScanInvocation{operator: operator, tx: tx, access: access, callbackCols: columns,
+		condition: scm.Eval(scm.Read("remote lookup", "(lambda () true)"), &scm.Globalenv)}
+	result := invocation.delegate(shard, delegation)
+	if result.err.r != nil {
+		panic(result.err)
+	}
+	return result.res, int(result.outCount)
 }
