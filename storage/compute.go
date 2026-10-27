@@ -131,7 +131,7 @@ func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked boo
 	return reader
 }
 
-func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, dependencies []string) {
+func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, dependencies []string) {
 	requireStatelessComputedCallback("computed-column function", computor)
 	requireStatelessComputedCallback("computed-column preparation filter", filter)
 	// Ordinary computed-column DDL installs one complete logical column.
@@ -197,7 +197,7 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 							done <- scanError{r, string(debug.Stack())}
 						}
 					}()
-					s.ComputeColumn(name, inputCols, computor, filterCols, filter)
+					s.ComputeColumn(tx, name, inputCols, computor, filterCols, filter)
 					done <- nil
 				}(s)
 			}
@@ -271,17 +271,17 @@ func (t *table) updateTempColumnMemory(col *column, shards []*storageShard) {
 	}
 }
 
-func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
+func (t *table) ComputeColumn(tx *TxContext, name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
-	t.computeColumnDDLLocked(name, inputCols, computor, filterCols, filter, nil)
+	t.computeColumnDDLLocked(tx, name, inputCols, computor, filterCols, filter, nil)
 }
 
-func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
+func (s *storageShard) ComputeColumn(tx *TxContext, name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
 	// Cache materialization reads native inputs. Reuse ordinary MOSI/RAM
 	// admission and retain the acquired payload through all callbacks. Filling
 	// a derived cache does not require a data-write permission upgrade.
-	access := s.GetRead(nil)
+	access := s.GetRead(tx)
 	defer access.Release()
 	s = access.shard
 	// We are going to mutate this shard's columns: mark shard as WRITE (not COLD)

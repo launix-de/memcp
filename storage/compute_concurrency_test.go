@@ -17,6 +17,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"runtime"
@@ -25,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/launix-de/memcp/scm"
 	"github.com/launix-de/memcp/storage/mosi"
 )
@@ -97,7 +99,7 @@ func TestComputeColumnRejectsRequestContextBeforePublishing(t *testing.T) {
 	var failure any
 	func() {
 		defer func() { failure = recover() }()
-		tbl.ComputeColumn("derived", []string{"base"}, computor, nil, scm.NewNil())
+		tbl.ComputeColumn(nil, "derived", []string{"base"}, computor, nil, scm.NewNil())
 	}()
 	if failure == nil {
 		t.Fatal("computed column accepted an implicit session dependency")
@@ -134,7 +136,7 @@ func BenchmarkComputedColumnRepair(b *testing.B) {
 		}),
 		En: &scm.Globalenv,
 	})
-	tbl.ComputeColumn("derived", []string{"base"}, computor, nil, scm.NewNil())
+	tbl.ComputeColumn(nil, "derived", []string{"base"}, computor, nil, scm.NewNil())
 	proxy := tbl.Shards[0].columns["derived"].(*StorageComputeProxy)
 
 	b.ReportAllocs()
@@ -217,7 +219,7 @@ func TestGlobalAggregateComputeAndInsertDoNotDeadlock(t *testing.T) {
 	keytable.Insert([]string{"1"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 
 	computor := countCollapsedComputor()
-	keytable.ComputeColumn("counted", []string{"1"}, computor, nil, scm.NewNil())
+	keytable.ComputeColumn(nil, "counted", []string{"1"}, computor, nil, scm.NewNil())
 
 	row := []scm.Scmer{
 		scm.NewNil(),
@@ -247,7 +249,7 @@ func TestGlobalAggregateComputeAndInsertDoNotDeadlock(t *testing.T) {
 				}()
 				<-start
 				for iter := 0; iter < iterations; iter++ {
-					keytable.ComputeColumn("counted", []string{"1"}, computor, nil, scm.NewNil())
+					keytable.ComputeColumn(nil, "counted", []string{"1"}, computor, nil, scm.NewNil())
 				}
 			}
 		}(worker)()
@@ -329,7 +331,7 @@ func TestComputeColumnRejectsColdRemoteShardBeforeMaterialization(t *testing.T) 
 	var failure any
 	func() {
 		defer func() { failure = recover() }()
-		shard.ComputeColumn("cached", []string{"id"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		shard.ComputeColumn(nil, "cached", []string{"id"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 			calls++
 			return a[0]
 		}), nil, scm.NewNil())
@@ -358,7 +360,7 @@ func TestComputeColumnRetainsPayloadThroughCallbackAndPanic(t *testing.T) {
 		var failure any
 		func() {
 			defer func() { failure = recover() }()
-			shard.ComputeColumn(name, []string{"id"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			shard.ComputeColumn(nil, name, []string{"id"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 				calls++
 				if shard.cacheReaders.Load() == 0 {
 					t.Error("computed callback has no acquired payload capability")
@@ -388,6 +390,59 @@ func TestComputeColumnRetainsPayloadThroughCallbackAndPanic(t *testing.T) {
 	}
 }
 
+func TestComputeColumnCancellationKeepsSharedAcquisition(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tcomputecancel", 1)
+	tbl.CreateColumn("cached", "INT", nil, nil)
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
+	cluster.initializeManager()
+	owner := "memcp://" + uuid.NewString()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
+	shard := tbl.ActiveShards()[0]
+	resource := mosiResource{Database: tbl.schema.Name, Table: tbl.Name, Shard: shard.uuid.String()}
+	cell := cluster.manager.shardCell(shard)
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch = owner, 1
+		return true
+	})
+	request, _ := cell.ownstate.Request(mosi.S)
+	previous := replication.Swap(cluster.manager)
+	defer replication.Store(previous)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ss := &scm.SessionState{}
+	seq := ss.BeginQuery("Test", "computed-column acquisition")
+	ss.SetQueryContext(seq, ctx)
+	tx := NewTxContext(TxCursorStability)
+	tx.beginQuery(ss, seq, "computed-column acquisition")
+	defer tx.endQuery(seq)
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		tbl.ComputeColumn(tx, "cached", []string{"id"}, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+			t.Error("cancelled preparation ran a computed callback")
+			return scm.NewNil()
+		}), nil, scm.NewNil())
+	}()
+	if err, ok := failure.(scanError); !ok || err.r != context.Canceled {
+		t.Fatalf("preparation lost query cancellation: %v", failure)
+	}
+	if cell.ownstate.Phase() != mosi.SR || len(peer.outgoing) != 0 || shard.cacheReaders.Load() != 0 {
+		t.Fatal("cancelled preparation changed the shared flight or retained payload")
+	}
+	select {
+	case <-request.Flight().Done():
+		t.Fatal("one cancelled preparation completed the shared acquisition")
+	default:
+	}
+	if _, err := cell.ownstate.Grant(request.Flight().ID(), mosi.S, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if cluster.manager.readShard(shard, nil) != shard {
+		t.Fatal("remaining readers could not use the completed shared acquisition")
+	}
+}
+
 func TestComputeColumnWaitsForStartedShardsAfterFailure(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tcomputedrain", 4)
 	tbl.CreateColumn("cached", "INT", nil, nil)
@@ -409,7 +464,7 @@ func TestComputeColumnWaitsForStartedShardsAfterFailure(t *testing.T) {
 	finished := make(chan any, 1)
 	go func() {
 		defer func() { finished <- recover() }()
-		tbl.ComputeColumn("cached", []string{"id"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		tbl.ComputeColumn(nil, "cached", []string{"id"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 			if a[0].Int() <= 2 {
 				<-slowStarted
 				fail()
@@ -489,7 +544,7 @@ func TestFilteredComputeColumnConservativelyRecomputesRepeatedFilter(t *testing.
 		NumVars: 1,
 	})
 
-	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT2)
+	tbl.ComputeColumn(nil, "cached", []string{"val"}, computor, []string{"val"}, filterGT2)
 	if got := computeCalls.Load(); got != 2 {
 		t.Fatalf("first filtered compute invoked computor %d times, want 2", got)
 	}
@@ -498,7 +553,7 @@ func TestFilteredComputeColumnConservativelyRecomputesRepeatedFilter(t *testing.
 	canonicalProxy := shard.columns["cached"]
 	shard.mu.RUnlock()
 
-	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT2)
+	tbl.ComputeColumn(nil, "cached", []string{"val"}, computor, []string{"val"}, filterGT2)
 	if got := computeCalls.Load(); got != 4 {
 		t.Fatalf("repeated filtered compute invoked computor %d times, want 4 total", got)
 	}
@@ -509,7 +564,7 @@ func TestFilteredComputeColumnConservativelyRecomputesRepeatedFilter(t *testing.
 		t.Fatal("repeated filtered compute replaced the canonical compute proxy")
 	}
 
-	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT1)
+	tbl.ComputeColumn(nil, "cached", []string{"val"}, computor, []string{"val"}, filterGT1)
 	if got := computeCalls.Load(); got != 7 {
 		t.Fatalf("changing filtered materialization invoked computor %d times, want 7 total", got)
 	}
@@ -541,7 +596,7 @@ func TestUnfilteredComputeColumnReusesCompletePreparationUntilMutation(t *testin
 		return scm.NewInt(a[0].Int() * 2)
 	})
 
-	tbl.ComputeColumn("cached", []string{"val"}, computor, nil, scm.NewNil())
+	tbl.ComputeColumn(nil, "cached", []string{"val"}, computor, nil, scm.NewNil())
 	if got := computeCalls.Load(); got != 3 {
 		t.Fatalf("first unfiltered compute invoked computor %d times, want 3", got)
 	}
@@ -549,7 +604,7 @@ func TestUnfilteredComputeColumnReusesCompletePreparationUntilMutation(t *testin
 	// Planner-generated cache plans issue the same createcolumn on every use.
 	// A complete generation is an O(1) no-op; proving that fact must not walk
 	// every delta record or invoke the computor again.
-	tbl.ComputeColumn("cached", []string{"val"}, computor, nil, scm.NewNil())
+	tbl.ComputeColumn(nil, "cached", []string{"val"}, computor, nil, scm.NewNil())
 	if got := computeCalls.Load(); got != 3 {
 		t.Fatalf("repeated unfiltered compute invoked computor %d times, want 3 total", got)
 	}
@@ -557,7 +612,7 @@ func TestUnfilteredComputeColumnReusesCompletePreparationUntilMutation(t *testin
 	tbl.Insert([]string{"id", "val"}, [][]scm.Scmer{
 		{scm.NewInt(4), scm.NewInt(40)},
 	}, nil, scm.NewNil(), false, nil)
-	tbl.ComputeColumn("cached", []string{"val"}, computor, nil, scm.NewNil())
+	tbl.ComputeColumn(nil, "cached", []string{"val"}, computor, nil, scm.NewNil())
 	if got := computeCalls.Load(); got != 4 {
 		t.Fatalf("post-insert repair invoked computor %d times, want 4 total", got)
 	}
