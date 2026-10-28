@@ -1021,6 +1021,11 @@ func (r *replicationManager) step(ctx context.Context, peerID string, packet mos
 
 func (r *replicationManager) transmitResource(ctx context.Context, peerID string, header mosiPacket) error {
 	if r.cluster != nil {
+		if header.Resource.Shard == "" {
+			if err := r.cluster.transferSchemaLocations(ctx, peerID, header); err != nil {
+				return err
+			}
+		}
 		header.Kind = "reference"
 		if header.Resource.Shard != "" {
 			header.Forwards = r.shardRoutes(header.Resource)

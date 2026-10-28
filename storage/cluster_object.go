@@ -135,7 +135,7 @@ func (service *nodeScanService) exportObject(peer *mosiPeer, object ClusterObjec
 		}
 		return ref, err
 	})
-	encoded, err := freezeScanValue(view, 0, bindings)
+	encoded, err := freezeScanValue(view, bindings)
 	if err != nil {
 		return scm.ClusterReference{}, err
 	}
@@ -354,7 +354,7 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 	if err := json.Unmarshal(reference.View, &frozen); err != nil {
 		return scm.NewNil(), err
 	}
-	decodedView, err := frozen.thaw(0, scm.ProcedureDecode{Resolve: func(child scm.ClusterReference) (scm.Scmer, error) { return service.importObject(ctx, peer, child) }})
+	decodedView, err := frozen.reconstruct(scm.ProcedureDecode{Resolve: func(child scm.ClusterReference) (scm.Scmer, error) { return service.importObject(ctx, peer, child) }})
 	if err != nil {
 		return scm.NewNil(), err
 	}
@@ -388,7 +388,7 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 		defer func() { service.cancelObjectOffers(target, offered) }()
 		for i, arg := range request.Arguments {
 			var err error
-			args[i], err = freezeScanValue(arg, 0, bindings)
+			args[i], err = freezeScanValue(arg, bindings)
 			if err != nil {
 				return scm.NewNil(), err
 			}
@@ -398,7 +398,7 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 			return scm.NewNil(), err
 		}
 		defer service.discardObjectOffers(target, result.Offers)
-		return result.Value.thaw(0, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return service.importObject(callCtx, target, ref) }})
+		return result.Value.reconstruct(scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return service.importObject(callCtx, target, ref) }})
 	}}
 	value, failure := scm.ReconstructClusterObject(handle)
 	if failure == nil {
@@ -478,8 +478,8 @@ func (s *scanRPCSession) handleObject(ctx context.Context, method string, data [
 		}
 		return ref, err
 	})
-	frozen, err := freezeScanValue(value, 0, bindings)
-	refs := scanWireReferences(frozen)
+	frozen, err := freezeScanValue(value, bindings)
+	refs := serializedReferences(frozen)
 	if err != nil {
 		s.service.cancelObjectOffers(s.peer, offered)
 	}
@@ -504,6 +504,8 @@ func (s *scanRPCSession) requestObject(ctx context.Context, call clusterObjectCa
 	tx.autoCommit = true
 	tx.beginQuery(ss, seq, "object request")
 	defer tx.endQuery(seq)
+	stop := context.AfterFunc(ctx, func() { ss.KillQuery(seq) })
+	defer stop()
 	s.service.executions.Store(id, tx)
 	defer s.service.executions.Delete(id)
 	ctx = context.WithValue(ctx, clusterObjectQueryKey{}, tx)
@@ -518,7 +520,7 @@ func (s *scanRPCSession) requestObject(ctx context.Context, call clusterObjectCa
 	}}
 	for i, arg := range call.Arguments {
 		var err error
-		args[i], err = arg.thaw(0, decode)
+		args[i], err = arg.reconstruct(decode)
 		if err != nil {
 			return scm.NewNil(), err
 		}

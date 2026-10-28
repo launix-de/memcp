@@ -274,6 +274,9 @@ func Serialize(b *bytes.Buffer, v Scmer, glob *Env, objects ...*SerializationCon
 	writer := bufferTextWriter(b)
 	if len(objects) > 0 {
 		writer.objects = objects[0]
+		if writer.objects != nil {
+			writer.objects.prepare(v, true)
+		}
 	}
 	serializeEx(writer, v, glob, glob, nil)
 }
@@ -615,6 +618,9 @@ func serializeNativeFunc(b *schemeTextWriter, fn any, en *Env) {
 			}
 		}
 		en2 = en2.Outer
+	}
+	if b.objects != nil {
+		panic("native callable has no serialization contract")
 	}
 	b.WriteString("[unserializable native func]")
 }

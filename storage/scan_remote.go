@@ -219,12 +219,12 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	batch := make([]scm.Scmer, len(request.Batch))
 	for i, item := range request.Batch {
 		var err error
-		batch[i], err = item.thaw(0, scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
+		batch[i], err = item.reconstruct(scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
 		if err != nil {
 			return nil, err
 		}
 	}
-	neutral, err := schemeValue(request.Neutral).thaw(0, decode)
+	neutral, err := schemeValue(request.Neutral).reconstruct(decode)
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +272,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 			}
 			return ref, err
 		})
-		encoded, err := freezeScanValue(result.res, 0, bindings)
+		encoded, err := freezeScanValue(result.res, bindings)
 		if err != nil {
 			s.service.cancelObjectOffers(s.peer, offered)
 			return err
@@ -454,7 +454,7 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 	if err != nil {
 		panic(err)
 	}
-	neutral, err := freezeScanValue(invocation.neutral, 0, bindings)
+	neutral, err := freezeScanValue(invocation.neutral, bindings)
 	if err != nil {
 		panic(err)
 	}
@@ -466,7 +466,7 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 		}
 	}
 	for _, item := range invocation.batchdata {
-		value, err := freezeScanValue(item, 0, bindings)
+		value, err := freezeScanValue(item, bindings)
 		if err != nil {
 			panic(err)
 		}
@@ -509,7 +509,7 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 		panic("mismatched remote scan response")
 	}
 	defer executor.peer.scanService.discardObjectOffers(executor.peer, response.ClusterObjectOffers())
-	value, err := schemeValue(response.Value).thaw(0, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	value, err := schemeValue(response.Value).reconstruct(scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		return executor.peer.scanService.importObject(executor.ctx, executor.peer, ref)
 	}})
 	if err != nil {

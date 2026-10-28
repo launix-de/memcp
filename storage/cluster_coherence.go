@@ -67,6 +67,9 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 	if own.Owner != "" && own.Owner != r.id && cluster.peerAvailable(own.Owner) {
 		return own.Owner, nil
 	}
+	if resource.Shard != "" {
+		return cluster.locateViaSchema(ctx, resource)
+	}
 	view := cluster.view.Load()
 	if cluster.seed != "" && len(view.members) == 1 {
 		return "", fmt.Errorf(mosi.NetworkError)
@@ -227,7 +230,7 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 					// cancelling cannot revoke every other reader's acquisition.
 					operation, finish := context.WithTimeout(cluster.ctx, 30*time.Minute)
 					defer finish()
-					if failure := r.coordinate(operation, r.id, packet); failure != nil {
+					if failure := cluster.coordinate(operation, r.id, packet); failure != nil {
 						c.ownstate.Fail(packet.ID, failure, wanted)
 					}
 				}()
@@ -349,7 +352,7 @@ func (cluster *nodeCluster) receive(source string, packet *mosiPacket, connectio
 					return
 				}
 				if owner == r.id {
-					err = r.coordinate(ctx, source, copy)
+					err = cluster.coordinate(ctx, source, copy)
 					if err != nil {
 						err = fmt.Errorf("cluster coordinate: %w", err)
 					}

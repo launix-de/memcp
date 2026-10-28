@@ -104,12 +104,12 @@ func TestClusterRosterRequiresBoundIdentityAndRetainsSnapshot(t *testing.T) {
 	}
 }
 
-func TestClusterHintCannotAccessUnMountedDatabase(t *testing.T) {
+func TestClusterRetiredResidencyProbeIsRejected(t *testing.T) {
 	old := sharedClusterMounts.Swap(nil)
 	defer sharedClusterMounts.Store(old)
 	cluster := &nodeCluster{}
 	if _, err := cluster.handle(newScanRPCSession(), context.Background(), "peer", "cluster.hint", []byte(`{"resource":{"database":"system","table":"user"}}`)); err == nil {
-		t.Fatal("cluster hint bypassed mount boundary")
+		t.Fatal("retired residency probe is still supported")
 	}
 }
 
@@ -530,5 +530,134 @@ func TestClusterReferenceKeepsAcquisitionID(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestClusterSchemaLocationsAreRoutingNotPermissions(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}, databases: map[string]bool{"tenant": true}}
+	cluster.initializeManager()
+	schema := cluster.manager.resourceCell(mosiResource{Database: "tenant"})
+	cluster.manager.updateRecord(mosiResource{Database: "tenant"}, func(record *replicaRecord) bool { record.Owner = "schema-owner"; return true })
+	pending, _ := schema.ownstate.Request(mosi.S)
+	resource := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	entry := replicaRecord{Resource: resource, Owner: "shard-owner", Epoch: 9, Content: resource.Shard}
+	request := clusterSchemaLocations{"tenant", pending.Flight().ID(), []replicaRecord{entry}}
+	if err := cluster.installSchemaLocations("foreign", request); err == nil {
+		t.Fatal("foreign schema source accepted")
+	}
+	if err := cluster.installSchemaLocations("schema-owner", request); err != nil {
+		t.Fatal(err)
+	}
+	cell := cluster.manager.resourceCell(resource)
+	if cell.ownstate.Phase() != mosi.IO || cell.clusterstate.Phase() != mosi.IO || cell.ownstate.Initialized() {
+		t.Fatal("location established authority")
+	}
+	record := cluster.manager.directory.Records[resource.key()]
+	if record.Owner != entry.Owner || record.Epoch != entry.Epoch {
+		t.Fatal("location omitted", record)
+	}
+	cell.ownstate.Initialize(mosi.S)
+	entry.Owner, entry.Epoch = "late-owner", 10
+	cluster.installLocationHint(entry)
+	if cluster.manager.directory.Records[resource.key()].Owner != "shard-owner" {
+		t.Fatal("routing overwrote an admitted native reader")
+	}
+	request.Acquisition = "old-flight"
+	if err := cluster.installSchemaLocations("schema-owner", request); err == nil {
+		t.Fatal("late schema routing accepted")
+	}
+}
+
+func TestClusterShardLocationQueriesOnlySchemaOwner(t *testing.T) {
+	service := &nodeScanService{}
+	schemaPeer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 2)}
+	unrelated := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 2)}
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}, service: service}
+	cluster.initializeManager()
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "schema-owner"}, peer: schemaPeer}, {member: clusterMember{ID: "unrelated"}, peer: unrelated}}})
+	schemaResource := mosiResource{Database: "tenant"}
+	schema := cluster.manager.resourceCell(schemaResource)
+	schema.ownstate.Initialize(mosi.S)
+	cluster.manager.updateRecord(schemaResource, func(record *replicaRecord) bool { record.Owner = "schema-owner"; return true })
+	resource := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	finished := make(chan string, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go func() {
+		owner, err := cluster.locate(ctx, resource)
+		if err != nil {
+			finished <- err.Error()
+		} else {
+			finished <- owner
+		}
+	}()
+	message := <-schemaPeer.outgoing
+	var request struct {
+		Return, Method string
+		Data           json.RawMessage
+	}
+	if err := json.Unmarshal(message.Data, &request); err != nil || request.Method != "cluster.location" {
+		t.Fatal("per-shard discovery did not use schema owner", request, err)
+	}
+	route, _ := service.returns.Load(request.Return)
+	deliverTestCompletion(t, route, scanCompletion{Data: mustScanJSON(replicaRecord{Resource: resource, Owner: "schema-owner", Epoch: 3})})
+	if owner := <-finished; owner != "schema-owner" {
+		t.Fatal(owner)
+	}
+	if len(unrelated.outgoing) != 0 {
+		t.Fatal("queried unrelated peer for shard placement")
+	}
+	owner, err := cluster.locate(ctx, resource)
+	if err != nil || owner != "schema-owner" || len(schemaPeer.outgoing) != 0 {
+		t.Fatal("known route performed another probe", owner, err)
+	}
+}
+
+func TestClusterSchemaLocationTransferUsesBoundedBatches(t *testing.T) {
+	service := &nodeScanService{}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}, service: service}
+	cluster.initializeManager()
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "target"}, peer: peer}}})
+	for i := 0; i < 131; i++ {
+		resource := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+		cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+			record.Owner, record.Epoch = "owner", 3
+			record.Readers = map[string]bool{"reader": true}
+			return true
+		})
+	}
+	counts := make(chan []int, 1)
+	go func() {
+		var batches []int
+		for i := 0; i < 3; i++ {
+			message := <-peer.outgoing
+			var request struct {
+				Return string
+				Data   clusterSchemaLocations
+			}
+			if err := json.Unmarshal(message.Data, &request); err != nil {
+				t.Error(err)
+				return
+			}
+			batches = append(batches, len(request.Data.Entries))
+			for _, entry := range request.Data.Entries {
+				if len(entry.Readers) != 0 || len(entry.Requests) != 0 {
+					t.Error("schema directory copied shard reader/operation ownership")
+				}
+			}
+			route, _ := service.returns.Load(request.Return)
+			deliverTestCompletion(t, route, scanCompletion{})
+		}
+		counts <- batches
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := cluster.transferSchemaLocations(ctx, "target", mosiPacket{Resource: mosiResource{Database: "tenant"}, ID: "schema-flight"}); err != nil {
+		t.Fatal(err)
+	}
+	batches := <-counts
+	if len(batches) != 3 || batches[0] != 64 || batches[1] != 64 || batches[2] != 3 {
+		t.Fatal("unbounded or incomplete location transfer", batches)
 	}
 }

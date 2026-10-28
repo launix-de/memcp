@@ -55,10 +55,10 @@ func freezeScanPanic(value any) *scanPanic {
 		copy := *v
 		result.SQL = &copy
 	case scm.Scmer:
-		encoded, _ := freezeScanValue(v, 0)
+		encoded, _ := freezeScanValue(v)
 		result.Value = json.RawMessage(encoded)
 	case string:
-		encoded, _ := freezeScanValue(scm.NewString(v), 0)
+		encoded, _ := freezeScanValue(scm.NewString(v))
 		result.Value = json.RawMessage(encoded)
 	}
 	return result
@@ -177,18 +177,18 @@ type scanTaskRegistry struct {
 	// Bounded completion/cancellation history handles control messages racing
 	// task dispatch, without retaining transaction or procedure objects.
 	floor    string // retired UUIDv7 watermark: old operations can never execute again
-	terminal map[string]bool
+	terminal map[string]struct{}
 	order    []string
 }
 
-func (r *scanTaskRegistry) remember(id string, cancelled bool) {
+func (r *scanTaskRegistry) remember(id string) {
 	if r.terminal == nil {
-		r.terminal = make(map[string]bool)
+		r.terminal = make(map[string]struct{})
 	}
 	if _, exists := r.terminal[id]; !exists {
 		r.order = append(r.order, id)
 	}
-	r.terminal[id] = cancelled
+	r.terminal[id] = struct{}{}
 	if len(r.order) > 1024 {
 		r.floor = max(r.floor, r.order[0])
 		delete(r.terminal, r.order[0])
@@ -219,7 +219,7 @@ func (r *scanTaskRegistry) finish(id string) {
 		scope.cancel()
 		delete(r.active, id)
 	}
-	r.remember(id, false)
+	r.remember(id)
 }
 func (r *scanTaskRegistry) cancelTask(id string) {
 	r.Lock()
@@ -228,7 +228,7 @@ func (r *scanTaskRegistry) cancelTask(id string) {
 		scope.cancel()
 	} else {
 		if _, done := r.terminal[id]; !done {
-			r.remember(id, true)
+			r.remember(id)
 		}
 	}
 }
@@ -264,8 +264,8 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 		if err := json.Unmarshal(data, &id); err != nil {
 			return nil, err
 		}
-		if _, err := uuid.Parse(id); err != nil {
-			return nil, err
+		if operation, err := uuid.Parse(id); err != nil || operation.Version() != 7 {
+			return nil, fmt.Errorf("invalid operation identity")
 		}
 		s.tasks.cancelTask(id)
 		return nil, nil
@@ -335,7 +335,7 @@ func (executor *peerScanExecutor) dispatch(task remoteScanTask) remoteScanResult
 				panic(scanError{failure.SQL, failure.Stack})
 			}
 			if len(failure.Value) > 0 {
-				value, err := schemeValue(failure.Value).thaw(0)
+				value, err := schemeValue(failure.Value).reconstruct()
 				if err == nil {
 					if value.IsString() {
 						panic(scanError{value.String(), failure.Stack})
@@ -412,20 +412,15 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 	}
 }
 
-// Imported receivers use the same object-call serializer and offer/lease
-// protocol as every other runtime object; they add no channel lifetime.
-type remoteReceiver struct{ handle scm.ClusterHandle }
-
-func (*remoteReceiver) ClusterObjectType() string { return "receiver" }
-func (receiver *remoteReceiver) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
-	return ctx.ReferenceExpression(receiver)
-}
-func (receiver *remoteReceiver) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
-	if request.Method == "view" {
-		return receiver.handle.View, nil
-	}
-	return receiver.handle.Call(ctx, request)
-}
+// Imported receivers are the same object type. Their callback forwards through
+// the existing owner handle; its Go lifetime retains the ordinary peer lease.
 func init() {
-	scm.RegisterClusterObjectType("receiver", func(handle scm.ClusterHandle) scm.Scmer { return scm.NewAny(&remoteReceiver{handle}) })
+	scm.RegisterClusterObjectType("receiver", func(handle scm.ClusterHandle) scm.Scmer {
+		receiver := newClusterReceiver(-1, func(ctx context.Context, value scm.Scmer) error {
+			_, err := handle.Call(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{value}})
+			return err
+		})
+		receiver.Seal()
+		return scm.NewAny(receiver)
+	})
 }

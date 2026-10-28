@@ -217,39 +217,58 @@ func (bindings *SerializationContext) WithExport(export func(ClusterObject, Scme
 	return &SerializationContext{Export: export, root: bindings}
 }
 
-func (bindings *SerializationContext) prepare(value Scmer) {
+// Collect demands before Serialize exports the first object. Runtime lists and
+// dictionaries contain values; their symbols are never interpreted as calls.
+func (bindings *SerializationContext) prepare(value Scmer, literal bool) {
 	if bindings.root != nil {
 		bindings = bindings.root
 	}
 	value = value.WithoutSourceInfo()
 	if value.IsProc() {
-		bindings.prepare(value.Proc().Body)
+		bindings.prepare(CloseProcedure(value).Proc().Body, false)
 		return
 	}
-	if !value.IsSlice() {
+	if value.IsFastDict() {
+		for _, item := range value.FastDict().Pairs {
+			bindings.prepare(item, true)
+		}
 		return
 	}
-	items := value.Slice()
-	if len(items) == 0 || scmerIsSymbol(items[0], "quote") {
-		return
-	}
-	if object, ok := ClusterObjectOf(items[0]); ok {
+	demand := func(object ClusterObject, key Scmer) {
 		bindings.mu.Lock()
+		defer bindings.mu.Unlock()
 		if bindings.demands == nil {
 			bindings.demands = make(map[ClusterObject]map[Scmer]struct{})
 		}
 		if bindings.demands[object] == nil {
 			bindings.demands[object] = make(map[Scmer]struct{})
 		}
-		key := NewNil()
-		if len(items) == 2 && items[1].WithoutSourceInfo().IsString() {
-			key = items[1].WithoutSourceInfo()
-		}
 		bindings.demands[object][key] = struct{}{}
-		bindings.mu.Unlock()
+	}
+	if object, ok := ClusterObjectOf(value); ok {
+		demand(object, NewNil())
+		return
+	}
+	if !value.IsSlice() {
+		return
+	}
+	items := value.Slice()
+	if !literal && len(items) == 2 && scmerIsSymbol(items[0], "quote") {
+		bindings.prepare(items[1], true)
+		return
+	}
+	if !literal && len(items) > 0 {
+		if object, ok := ClusterObjectOf(items[0]); ok {
+			key := NewNil()
+			if len(items) == 2 && items[1].WithoutSourceInfo().IsString() {
+				key = items[1].WithoutSourceInfo()
+			}
+			demand(object, key)
+			items = items[1:]
+		}
 	}
 	for _, item := range items {
-		bindings.prepare(item)
+		bindings.prepare(item, literal)
 	}
 }
 
@@ -366,9 +385,9 @@ func initClusterObjects() {
 
 func init() { RegisterClusterObjectType("session", newClusterSession) }
 
-// ProcedureClusterReferences inspects the serializer's inert source envelope.
+// SerializedClusterReferences inspects the serializer's inert source envelope.
 // It never evaluates source and ignores ordinary quoted program data.
-func ProcedureClusterReferences(data []byte) []ClusterReference {
+func SerializedClusterReferences(data []byte) []ClusterReference {
 	var envelope struct {
 		Source string `json:"source"`
 	}

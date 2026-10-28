@@ -471,17 +471,7 @@ func (s *storageShard) acquireReadForScan(currentTx *TxContext, policy *scanAcce
 		write := s.GetWrite(currentTx)
 		return ReadAccess{shard: write.shard, mutation: &write}
 	}
-	if sharedClusterSource(s.t) && s.scanTarget.Load() == nil {
-		cluster := activeNodeCluster()
-		if cluster == nil {
-			panic("cluster is not initialized")
-		}
-		origin := s
-		s = cluster.manager.readShard(s, currentTx)
-		cluster.prepareLocalScan(s, currentTx, origin)
-		access := s.GetRead(currentTx)
-		return access
-	}
+
 	return s.GetRead(currentTx)
 }
 

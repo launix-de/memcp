@@ -976,6 +976,13 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 			s = r.readShard(s, currentTx)
 		}
 	}
+	if !snapshot && sharedClusterSource(s.t) && s.state() == COLD {
+		cluster := activeNodeCluster()
+		if cluster == nil {
+			panic("cluster is not initialized")
+		}
+		cluster.prepareLocalScan(s, currentTx, origin)
+	}
 	s.retainCacheRead()
 	ready := false
 	defer func() {

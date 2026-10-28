@@ -42,8 +42,8 @@ type clusterHello struct {
 	Members []clusterMember `json:"members"`
 }
 
-// A link belongs to one authenticated process connection. Task numbering is
-// shared by all queries on it, never restarted per SQL invocation.
+// A link belongs to one authenticated process connection. Each operation uses
+// the common envelope identity for replies, cancellation and duplicate checks.
 type clusterLink struct {
 	member clusterMember
 	peer   *mosiPeer
@@ -148,6 +148,8 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 		return nil, err
 	}
 	switch method {
+	case "cluster.location", "cluster.location_update", "cluster.schema_locations":
+		return cluster.handleLocations(ctx, source, method, data)
 	case "cluster.reserve_ids":
 		return cluster.handleIDReservation(ctx, data)
 	case "cluster.report":

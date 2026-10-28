@@ -158,3 +158,35 @@ func TestClusterReceiverRemoteUnlimitedUsesObjectLifetime(t *testing.T) {
 		t.Fatal("late remote callback ran")
 	}
 }
+
+func TestClusterReceiverEachParallelValueIsProcessedOnce(t *testing.T) {
+	seen := make([]bool, 64)
+	receiver := newClusterReceiver(64, func(_ context.Context, value scm.Scmer) error {
+		index := int(value.Int())
+		if seen[index] {
+			t.Errorf("duplicate callback for %d", index)
+		}
+		seen[index] = true
+		return nil
+	})
+	receiver.Seal()
+	defer receiver.Close()
+	var workers sync.WaitGroup
+	for i := range seen {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			_, err := receiver.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewInt(int64(i))}})
+			if err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	workers.Wait()
+	<-receiver.done
+	for i, processed := range seen {
+		if !processed {
+			t.Error("missing callback", i)
+		}
+	}
+}

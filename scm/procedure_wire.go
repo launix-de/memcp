@@ -50,7 +50,7 @@ func MarshalProcedure(value Scmer, bindings ...*SerializationContext) (data []by
 		bindings = []*SerializationContext{new(SerializationContext)}
 	}
 	closed := CloseProcedure(value)
-	bindings[0].prepare(closed)
+	bindings[0].prepare(closed, false)
 	proc := closed.Proc()
 	bound := procedureWireBindings(proc.Params, proc.Body, nil)
 	if err := validateProcedureWire(proc.Body, bound, value.Proc().En, false, 0, bindings...); err != nil {

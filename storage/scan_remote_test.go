@@ -77,7 +77,7 @@ func TestRemoteScanRPCExecutesReductionWithNativeExtent(t *testing.T) {
 	if err := peer.scanService.control(context.Background(), peer, "scan.execute", task, &response); err != nil {
 		t.Fatal(err)
 	}
-	value, err := schemeValue(response.Value).thaw(0)
+	value, err := schemeValue(response.Value).reconstruct()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestRemoteScanTransportsListsAndRejectsWrongSecret(t *testing.T) {
 	if err := peer.scanService.control(context.Background(), peer, "scan.execute", task, &response); err != nil {
 		t.Fatal(err)
 	}
-	list, err := schemeValue(response.Value).thaw(0)
+	list, err := schemeValue(response.Value).reconstruct()
 	if err != nil || len(list.Slice()) != 1 || list.Slice()[0].Slice()[0].Int() != 2 {
 		t.Fatal("list result changed", list, err)
 	}
@@ -242,7 +242,7 @@ func TestRemoteScanReturnChannelDeliversResultsAndPanics(t *testing.T) {
 	}
 	executor := &peerScanExecutor{peer: peer, ctx: context.Background()}
 	result := executor.dispatch(makeRemoteScanTask(t, parts[0]))
-	value, err := schemeValue(result.Value).thaw(0)
+	value, err := schemeValue(result.Value).reconstruct()
 	if err != nil || value.Int() != 9 {
 		t.Fatalf("wrong return channel result: %v, %v", value, err)
 	}
@@ -305,18 +305,18 @@ func TestRemoteScanNativePartialValuesKeepTupleKeysAndNULL(t *testing.T) {
 	key := scm.NewSlice([]scm.Scmer{scm.NewNil(), scm.NewInt(7)})
 	dict := scm.NewFastDictValue(1)
 	dict.Set(key, scm.NewSlice([]scm.Scmer{scm.NewInt(42), scm.NewNil()}), nil)
-	data, err := freezeScanValue(scm.NewFastDict(dict), 0)
+	data, err := freezeScanValue(scm.NewFastDict(dict))
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := schemeValue(data).thaw(0)
+	result, err := schemeValue(data).reconstruct()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !scm.Equal(scm.Apply(scm.Globalenv.Vars[scm.Symbol("get_assoc")], result, key), scm.NewSlice([]scm.Scmer{scm.NewInt(42), scm.NewNil()})) {
 		t.Fatal("native grouped partial lost its domain/payload", result)
 	}
-	if _, err := freezeScanValue(scm.NewAny(new(int)), 0); err == nil {
+	if _, err := freezeScanValue(scm.NewAny(new(int))); err == nil {
 		t.Fatal("runtime pointer entered the partial-result codec")
 	}
 }
@@ -358,11 +358,11 @@ func TestRemoteScanAccessKeepsBoundedNULLAndMandatoryConstraints(t *testing.T) {
 
 func TestRemoteScanPartialStripsParserLocationsBeforeChoosingCodec(t *testing.T) {
 	parsed := scm.Read(t.Name(), `(42 (7))`)
-	data, err := freezeScanValue(parsed, 0)
+	data, err := freezeScanValue(parsed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	value, err := schemeValue(data).thaw(0)
+	value, err := schemeValue(data).reconstruct()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +401,7 @@ func TestRemoteScanRetainsUUIDAcrossRebuild(t *testing.T) {
 	if err := peer.scanService.control(context.Background(), peer, "scan.execute", makeRemoteScanTask(t, parts[0]), &result); err != nil {
 		t.Fatal(err)
 	}
-	value, err := schemeValue(result.Value).thaw(0)
+	value, err := schemeValue(result.Value).reconstruct()
 	if err != nil || value.Int() != 1009 || result.OutCount != 4 || result.Shard.Resource.Shard != held.uuid.String() {
 		t.Fatalf("remote scan lost its retained generation or forwarded inserts: %+v, %v", result, err)
 	}
@@ -454,7 +454,7 @@ func TestRemoteScanNativeExistsAndBatch(t *testing.T) {
 		if err := peer.scanService.control(context.Background(), peer, "scan.execute", task, &result); err != nil {
 			t.Fatal(err)
 		}
-		value, err := schemeValue(result.Value).thaw(0)
+		value, err := schemeValue(result.Value).reconstruct()
 		if err != nil || scm.ToBool(value) != test.match {
 			t.Fatal("remote EXISTS lost native match/miss semantics", result, err)
 		}
@@ -463,7 +463,7 @@ func TestRemoteScanNativeExistsAndBatch(t *testing.T) {
 
 	task.Stride = 2
 	for _, value := range []int64{2, 10, 4, 20} {
-		frozen, err := freezeScanValue(scm.NewInt(value), 0)
+		frozen, err := freezeScanValue(scm.NewInt(value))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -478,7 +478,7 @@ func TestRemoteScanNativeExistsAndBatch(t *testing.T) {
 	if err := peer.scanService.control(context.Background(), peer, "scan.execute", task, &result); err != nil {
 		t.Fatal(err)
 	}
-	value, err := schemeValue(result.Value).thaw(0)
+	value, err := schemeValue(result.Value).reconstruct()
 	if err != nil || value.Int() != 36 {
 		t.Fatal("remote batch lost row bindings", value, result, err)
 	}
@@ -535,7 +535,7 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 			}
 			if operator >= shardLookupMapOne {
 
-				neutral, failure := freezeScanValue(scm.NewNil(), 0)
+				neutral, failure := freezeScanValue(scm.NewNil())
 				task.Neutral, err = json.RawMessage(neutral), failure
 				if err != nil {
 					t.Fatal(err)
@@ -545,7 +545,7 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 			if err := peer.scanService.control(context.Background(), peer, "scan.execute", task, &result); err != nil {
 				t.Fatal(err)
 			}
-			value, err := schemeValue(result.Value).thaw(0)
+			value, err := schemeValue(result.Value).reconstruct()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -775,14 +775,14 @@ func TestRemoteScanLargeDictionaryUsesBulkSerialize(t *testing.T) {
 	for i := 0; i < 256; i++ {
 		dict.Set(scm.NewSlice([]scm.Scmer{scm.NewNil(), scm.NewInt(int64(i))}), scm.NewSlice([]scm.Scmer{scm.NewInt(int64(i)), scm.NewNil()}), nil)
 	}
-	encoded, err := freezeScanValue(scm.NewFastDict(dict), 0)
+	encoded, err := freezeScanValue(scm.NewFastDict(dict))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Count(string(encoded), "set_assoc") != 1 {
 		t.Fatal("dictionary was not serialized as one bulk construction")
 	}
-	value, err := encoded.thaw(0)
+	value, err := encoded.reconstruct()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -795,5 +795,30 @@ func TestRemoteScanLargeDictionaryUsesBulkSerialize(t *testing.T) {
 		if !ok || got.Slice()[0].Int() != int64(i) || !got.Slice()[1].IsNil() {
 			t.Fatal("tuple/NULL semantics changed", i, got)
 		}
+	}
+}
+
+func TestRemoteOperationCannotReplayAfterHistoryEviction(t *testing.T) {
+	var registry scanTaskRegistry
+	first, err := uuid.NewV7()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.begin(context.Background(), first.String()); err != nil {
+		t.Fatal(err)
+	}
+	registry.finish(first.String())
+	for i := 0; i < 2048; i++ {
+		id, err := uuid.NewV7()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := registry.begin(context.Background(), id.String()); err != nil {
+			t.Fatal(err)
+		}
+		registry.finish(id.String())
+	}
+	if _, err := registry.begin(context.Background(), first.String()); err == nil {
+		t.Fatal("evicted operation became executable again")
 	}
 }

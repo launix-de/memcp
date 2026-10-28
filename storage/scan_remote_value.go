@@ -29,7 +29,7 @@ func (v *schemeValue) UnmarshalJSON(data []byte) error { *v = append((*v)[:0], d
 
 // The transport calls the ordinary serializer directly. Quoted lists remain
 // data; Serialize emits constructors only where reconstruction requires them.
-func freezeScanValue(value scm.Scmer, _ int, bindings ...*scm.SerializationContext) (data schemeValue, err error) {
+func freezeScanValue(value scm.Scmer, bindings ...*scm.SerializationContext) (data schemeValue, err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			data = nil
@@ -48,7 +48,7 @@ func freezeScanValue(value scm.Scmer, _ int, bindings ...*scm.SerializationConte
 	encoded, err := json.Marshal(source.String())
 	return schemeValue(encoded), err
 }
-func (value schemeValue) thaw(_ int, decode ...scm.ProcedureDecode) (result scm.Scmer, err error) {
+func (value schemeValue) reconstruct(decode ...scm.ProcedureDecode) (result scm.Scmer, err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			result = scm.NewNil()
@@ -99,7 +99,7 @@ func freezeScanAccess(access scanAccess, bindings ...*scm.SerializationContext) 
 		original, operands := access.boundaryParts(i)
 		box := *original
 		appendValue := func(value scm.Scmer) (int, error) {
-			frozen, err := freezeScanValue(value, 0, bindings...)
+			frozen, err := freezeScanValue(value, bindings...)
 			if err != nil {
 				return 0, err
 			}
@@ -197,7 +197,7 @@ func (access remoteScanAccess) bind(decode ...scm.ProcedureDecode) (scanAccess, 
 	values := make([]scm.Scmer, len(access.Values))
 	for i, value := range access.Values {
 		var err error
-		values[i], err = value.thaw(0, decode...)
+		values[i], err = value.reconstruct(decode...)
 		if err != nil {
 			return scanAccess{}, err
 		}
@@ -207,13 +207,13 @@ func (access remoteScanAccess) bind(decode ...scm.ProcedureDecode) (scanAccess, 
 
 // A cancelled or rejected completion must retire offers its receiver never
 // acquired, including references nested in callback captures and object views.
-func scanWireReferences(value schemeValue) []scm.ClusterReference {
-	return scm.ProcedureClusterReferences(value)
+func serializedReferences(value schemeValue) []scm.ClusterReference {
+	return scm.SerializedClusterReferences(value)
 }
 
 func referenceOffers(ref scm.ClusterReference) []scm.ClusterReference {
 	result := []scm.ClusterReference{ref}
-	for _, child := range scm.ProcedureClusterReferences(ref.View) {
+	for _, child := range scm.SerializedClusterReferences(ref.View) {
 		result = append(result, referenceOffers(child)...)
 	}
 	return result

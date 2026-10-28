@@ -22,12 +22,21 @@ func BenchmarkClusterCompletionEncoding(b *testing.B) {
 	for i := range rows {
 		rows[i] = scm.NewSlice([]scm.Scmer{scm.NewInt(int64(i)), scm.NewString("ordered page")})
 	}
+	// The size check receives a response whose Scheme payload is already
+	// serialized. Measure that actual boundary, not a second Scmer traversal.
+	result := func(value scm.Scmer) remoteScanResult {
+		source, err := freezeScanValue(value)
+		if err != nil {
+			b.Fatal(err)
+		}
+		return remoteScanResult{Version: scanWireVersion, Shard: remoteScanShard{Schema: 7, Resource: mosiResource{Database: "bench", Table: "items", Shard: "00000000-0000-0000-0000-000000000001"}}, Value: json.RawMessage(source), OutCount: 1}
+	}
 	for name, value := range map[string]any{
-		"scalar":       scm.NewInt(42),
-		"list":         scm.NewSlice(rows[:8]),
-		"dictionary":   scm.NewFastDict(dict),
-		"reference":    scm.ClusterReference{URI: "http://node/cluster/object", Owner: "owner", Incarnation: "boot", Token: "offer", Type: "shard", View: json.RawMessage(`[]`)},
-		"ordered-page": scm.NewSlice(rows),
+		"scalar":       result(scm.NewInt(42)),
+		"list":         result(scm.NewSlice(rows[:8])),
+		"dictionary":   result(scm.NewFastDict(dict)),
+		"reference":    remoteScanResult{Version: scanWireVersion, Value: json.RawMessage(`"(cluster_object \"reference\")"`)},
+		"ordered-page": result(scm.NewSlice(rows)),
 	} {
 		b.Run(name, func(b *testing.B) {
 			for _, mode := range []string{"existing", "reuse", "buffer"} {
