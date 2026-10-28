@@ -191,35 +191,36 @@ func (cluster *nodeCluster) locateViaSchema(ctx context.Context, resource mosiRe
 	if err != nil {
 		return "", err
 	}
+	var record replicaRecord
 	if schemaOwner == cluster.self.ID {
-		entry, err := cluster.shardLocation(resource)
+		record, err = cluster.shardLocation(resource)
 		if err != nil {
 			return "", err
 		}
-		if entry.Owner == cluster.self.ID {
-			cell := cluster.manager.resourceCell(entry.Resource)
-			phase := cell.ownstate.Phase()
-			if phase == mosi.IO {
-				if cell.ownstate.Initialized() {
-					return "", fmt.Errorf("local invalid state has no backend authority")
-				}
-				return cluster.locate(ctx, entry.Resource) // explicit live-peer recovery
-			}
+	} else {
+		peer := cluster.peer(schemaOwner)
+		if peer == nil {
+			return "", fmt.Errorf(mosi.NetworkError)
 		}
-		return entry.Owner, nil
+		if err := cluster.service.control(ctx, peer, "cluster.location", resource, &record); err != nil {
+			return "", err
+		}
+		if !record.Resource.valid() || record.Resource.Database != resource.Database || record.Resource.Table != resource.Table || record.Owner == "" {
+			return "", fmt.Errorf("invalid schema owner location")
+		}
+		cluster.installLocationHint(record)
 	}
-	peer := cluster.peer(schemaOwner)
-	if peer == nil {
-		return "", fmt.Errorf(mosi.NetworkError)
+	if record.Owner == cluster.self.ID {
+		cell := cluster.manager.resourceCell(record.Resource)
+		if cell.ownstate.Phase() == mosi.IO {
+			if cell.ownstate.Initialized() {
+				return "", fmt.Errorf("local invalid state has no backend authority")
+			}
+			// A schema hint naming this restarted node is not a grant. Recover
+			// its native owner and reader set before coordinating any write.
+			return cluster.locate(ctx, record.Resource)
+		}
 	}
-	var record replicaRecord
-	if err := cluster.service.control(ctx, peer, "cluster.location", resource, &record); err != nil {
-		return "", err
-	}
-	if !record.Resource.valid() || record.Resource.Database != resource.Database || record.Resource.Table != resource.Table || record.Owner == "" {
-		return "", fmt.Errorf("invalid schema owner location")
-	}
-	cluster.installLocationHint(record)
 	return record.Owner, nil
 }
 

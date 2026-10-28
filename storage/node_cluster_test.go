@@ -873,35 +873,54 @@ func TestClusterSchemaLocationCannotPromoteRevokedSelf(t *testing.T) {
 }
 
 func TestClusterShardRestartRecoveryUsesLiveReports(t *testing.T) {
-	service := &nodeScanService{}
-	remote := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
-	cluster := &nodeCluster{self: clusterMember{ID: "local"}, service: service}
-	cluster.initializeManager()
-	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, {ID: "reader"}}, links: []*clusterLink{{member: clusterMember{ID: "reader"}, peer: remote}}})
-	resource := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
-	cell := cluster.manager.resourceCell(resource)
-	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool { record.Owner = "local"; record.Epoch = 3; return true })
-	finished := make(chan error, 1)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	go func() {
-		owner, err := cluster.locate(ctx, resource)
-		if err == nil && owner != "local" {
-			err = fmt.Errorf("wrong recovered owner %s", owner)
-		}
-		finished <- err
-	}()
-	message := <-remote.outgoing
-	var request struct{ Return, Method string }
-	if err := json.Unmarshal(message.Data, &request); err != nil || request.Method != "cluster.report" {
-		t.Fatal("restart omitted authenticated live recovery", request, err)
-	}
-	route, _ := service.returns.Load(request.Return)
-	deliverTestCompletion(t, route, scanCompletion{Data: mustScanJSON(replicaRecord{Resource: resource, Owner: "local", State: "S", Epoch: 3})})
-	if err := <-finished; err != nil {
-		t.Fatal(err)
-	}
-	if cell.ownstate.Phase() != mosi.O || !cluster.manager.directory.Records[resource.key()].Readers["reader"] {
-		t.Fatal("live read proof did not restore its owner directory")
+	for _, learnedFromSchema := range []bool{false, true} {
+		t.Run(fmt.Sprint("schema-hint=", learnedFromSchema), func(t *testing.T) {
+			service := &nodeScanService{}
+			remote := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+			cluster := &nodeCluster{self: clusterMember{ID: "local"}, service: service}
+			cluster.initializeManager()
+			cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, {ID: "reader"}}, links: []*clusterLink{{member: clusterMember{ID: "reader"}, peer: remote}}})
+			resource := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+			cell := cluster.manager.resourceCell(resource)
+			if learnedFromSchema {
+				schema := mosiResource{Database: "tenant"}
+				cluster.manager.resourceCell(schema).ownstate.Initialize(mosi.S)
+				cluster.manager.updateRecord(schema, func(record *replicaRecord) bool { record.Owner, record.Epoch = "reader", 1; return true })
+			} else {
+				cluster.manager.updateRecord(resource, func(record *replicaRecord) bool { record.Owner = "local"; record.Epoch = 3; return true })
+			}
+			finished := make(chan error, 1)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			go func() {
+				owner, err := cluster.locate(ctx, resource)
+				if err == nil && owner != "local" {
+					err = fmt.Errorf("wrong recovered owner %s", owner)
+				}
+				finished <- err
+			}()
+			methods := []string{"cluster.report"}
+			if learnedFromSchema {
+				methods = append([]string{"cluster.location"}, methods...)
+			}
+			for _, method := range methods {
+				message := <-remote.outgoing
+				var request struct{ Return, Method string }
+				if err := json.Unmarshal(message.Data, &request); err != nil || request.Method != method {
+					t.Fatal("restart omitted native recovery", request, err)
+				}
+				if cell.ownstate.Initialized() {
+					t.Fatal("schema hint granted authority before live recovery")
+				}
+				route, _ := service.returns.Load(request.Return)
+				deliverTestCompletion(t, route, scanCompletion{Data: mustScanJSON(replicaRecord{Resource: resource, Owner: "local", State: "S", Epoch: 3})})
+			}
+			if err := <-finished; err != nil {
+				t.Fatal(err)
+			}
+			if cell.ownstate.Phase() != mosi.O || !cluster.manager.directory.Records[resource.key()].Readers["reader"] {
+				t.Fatal("live read proof did not restore its owner directory")
+			}
+		})
 	}
 }
