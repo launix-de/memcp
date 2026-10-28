@@ -493,6 +493,61 @@ func createDurabilityTestTable(t *testing.T, databaseName string, rows int) (*ta
 	return tbl, tbl.schema.persistence
 }
 
+func TestDeltaBatchPublicationAllowsLockFreeReaders(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "memcp-tests", 1)
+	shard := tbl.ActiveShards()[0]
+	original := shard.deltaRows()
+	const batches, batchSize = 64, 16
+	start := make(chan struct{})
+	done := make(chan struct{})
+	var readers sync.WaitGroup
+	for worker := 0; worker < 4; worker++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			<-start
+			for {
+				rows := shard.deltaRows()
+				if (len(rows)-1)%batchSize != 0 {
+					t.Errorf("partially published batch: %d rows", len(rows))
+					return
+				}
+				for i := range rows {
+					if len(rows[i]) != 2 || shard.getDelta(i, "id").Int() != int64(i+1) {
+						t.Errorf("incomplete or replaced delta row %d", i)
+						return
+					}
+				}
+				select {
+				case <-done:
+					return
+				default:
+					runtime.Gosched()
+				}
+			}
+		}()
+	}
+	close(start)
+	for batch := 0; batch < batches; batch++ {
+		values := make([][]scm.Scmer, batchSize)
+		for i := range values {
+			id := int64(2 + batch*batchSize + i)
+			values[i] = []scm.Scmer{scm.NewInt(id), scm.NewString("initialized")}
+		}
+		shard.mu.Lock()
+		shard.insertDataset([]string{"id", "payload"}, values, nil, nil, nil)
+		shard.mu.Unlock()
+	}
+	close(done)
+	readers.Wait()
+	if len(original) != 1 || &original[0][0] != &shard.deltaRows()[0][0] {
+		t.Fatal("capacity growth replaced a published row or snapshot extent")
+	}
+	if len(shard.deltaRows()) != 1+batches*batchSize {
+		t.Fatal("lost appended rows")
+	}
+}
+
 func TestForcedDatabaseRebuildCompactsTransactionLog(t *testing.T) {
 	tbl, engine := createDurabilityTestTable(t, "ttxlogrebuild", 4)
 	db := tbl.schema
@@ -1124,7 +1179,7 @@ func TestManualRepartitionInsertDeleteUsesTranslationMap(t *testing.T) {
 
 	oldShard := tbl.Shards[len(tbl.Shards)-1]
 	oldShard.mu.RLock()
-	oldRecid := oldShard.main_count + uint32(len(oldShard.inserts))
+	oldRecid := oldShard.main_count + uint32(len(oldShard.deltaRows()))
 	oldShard.mu.RUnlock()
 
 	oldShard.Insert([]string{"id", "payload"}, [][]scm.Scmer{{
@@ -2951,7 +3006,7 @@ func TestNewShardRetainsComputedColumnDefinition(t *testing.T) {
 			shard := NewShard(tbl)
 			// Construction remains private until the reader acquires its rights.
 			shard.deltaColumns["input"] = 0
-			shard.inserts = [][]scm.Scmer{{scm.NewInt(7)}, {scm.NewInt(11)}}
+			shard.publishDeltaRows([][]scm.Scmer{{scm.NewInt(7)}, {scm.NewInt(11)}})
 			release := shard.GetRead(nil)
 			defer release.Release()
 			reader := shard.ColumnReaderTx(nil, "computed", false, ReadAuto).GetValue

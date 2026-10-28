@@ -59,7 +59,7 @@ func TestNullSafePointIndexDoesNotScanNonNullRows(t *testing.T) {
 	defer release.Release()
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
-	shard.iterateIndexForce(nil, access, len(shard.inserts), buf[:], false, func(batch []uint32) bool {
+	shard.iterateIndexForce(nil, access, len(shard.deltaRows()), buf[:], false, func(batch []uint32) bool {
 		candidates = append(candidates, batch...)
 		return true
 	})

@@ -754,7 +754,7 @@ func (s *storageShard) snapshotPartitionState(schema []shardDimension) shardPart
 	}
 	s.mu.RLock()
 	snap.deletions = s.deletions.Copy()
-	snap.inserts = append([][]scm.Scmer(nil), s.inserts...)
+	snap.inserts = append([][]scm.Scmer(nil), s.deltaRows()...)
 	snap.mainCount = s.main_count
 	for i, sd := range schema {
 		snap.mainCols[i], _ = s.columns[sd.Column]
@@ -1264,7 +1264,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 		// Install main_count — from this point, new inserts get correct recids
 		s.main_count = uint32(mainN)
 		s.plannerMainRows.Store(uint32(mainN))
-		deltaLen := len(s.inserts)
+		deltaLen := len(s.deltaRows())
 		if deltaLen > 0 {
 			// Shift deletion bitmap: bits in [0, deltaLen) move to [mainN, mainN+deltaLen).
 			// Translation-mapped DELETE dual-writes may have set bits in [0, mainN)
@@ -1312,10 +1312,10 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 			}
 			t.schema.persistence.RemoveLog(s.uuid.String())
 			s.logfile = t.schema.persistence.OpenLog(s.uuid.String())
-			if len(s.inserts) > 0 {
+			if len(s.deltaRows()) > 0 {
 				columns, values := s.materializedInsertedRowsLocked(0)
 				s.logfile.Write(LogEntryInsert{cols: columns, values: values})
-				for i := range s.inserts {
+				for i := range s.deltaRows() {
 					recid := s.main_count + uint32(i)
 					if s.deletions.Get(uint(recid)) {
 						s.logfile.Write(LogEntryDelete{idx: recid})
@@ -1611,7 +1611,7 @@ func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint
 	for i, sd := range schema {
 		deltacols[i], _ = s.deltaColumns[sd.Column]
 	}
-	for idx, dataset := range s.inserts {
+	for idx, dataset := range s.deltaRows() {
 		if s.deletions.Get(uint(s.main_count + uint32(idx))) {
 			continue
 		}

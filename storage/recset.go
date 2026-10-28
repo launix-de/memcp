@@ -628,7 +628,7 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 		}
 	}()
 
-	maxInsertIndex := len(t.inserts)
+	maxInsertIndex := len(t.deltaRows())
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	completeTraversal := access.len() == 0
@@ -1014,7 +1014,7 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
-	visibleUpper := mainCount + uint32(len(t.inserts))
+	visibleUpper := mainCount + uint32(len(t.deltaRows()))
 	write := 0
 	colBufs := make([][]scm.Scmer, len(sourceKeyCols))
 	t.forEachVisibleRun(part, visibleUpper, acidMode, currentTx, func(base, count uint32) bool {
@@ -1219,7 +1219,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 		}
 	}()
 
-	maxInsertIndex := len(t.inserts)
+	maxInsertIndex := len(t.deltaRows())
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
 	numericDense := numeric && len(targetCols) == 1 && projectJoinNumericColumn(targetCols[0])
 	dense := projectJoinDensePreferred(keys.count(), int(visibleUpper), numericDense,
@@ -1381,7 +1381,7 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
-	visibleUpper := mainCount + uint32(len(t.inserts))
+	visibleUpper := mainCount + uint32(len(t.deltaRows()))
 	found := false
 	part.forEachID(func(idx uint32) bool {
 		if stop != nil && stop.Load() {
@@ -1480,7 +1480,7 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
-	visibleUpper := mainCount + uint32(len(t.inserts))
+	visibleUpper := mainCount + uint32(len(t.deltaRows()))
 	akkumulator := neutral
 	var outCount int64
 	var buf [1024]uint32
@@ -1646,7 +1646,7 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
-	visibleUpper := mainCount + uint32(len(t.inserts))
+	visibleUpper := mainCount + uint32(len(t.deltaRows()))
 	builder := newRecSetShardBuilder(t, visibleUpper, false, mainCount)
 	evaluateOne := func(idx uint32) {
 		if idx >= visibleUpper {
@@ -1695,7 +1695,7 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 	// residual has already been removed by the planner.
 	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
 	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
-	t.iterateIndexMatchAware(currentTx, access, len(t.inserts), buf, true, nil, evaluateBatch)
+	t.iterateIndexMatchAware(currentTx, access, len(t.deltaRows()), buf, true, nil, evaluateBatch)
 	return builder.finish()
 }
 

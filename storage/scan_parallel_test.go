@@ -950,7 +950,7 @@ func BenchmarkTableStatisticsOnDemandShardScan(b *testing.B) {
 		stats := tableStatisticsSnapshot{}
 		for _, shard := range tbl.Shards {
 			shard.mu.RLock()
-			stats.rowCount += int64(shard.main_count) + int64(len(shard.inserts)) - int64(shard.deletions.Count())
+			stats.rowCount += int64(shard.main_count) + int64(len(shard.deltaRows())) - int64(shard.deletions.Count())
 			stats.sizeBytes += int64(shard.ComputeSize())
 			shard.mu.RUnlock()
 		}

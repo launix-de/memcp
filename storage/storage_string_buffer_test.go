@@ -1196,7 +1196,7 @@ func TestMaterializedComputedReaderPreparesOutputOnly(t *testing.T) {
 	}
 	shard.mu.Lock()
 	shard.deltaColumns["label"] = 0
-	shard.inserts = [][]scm.Scmer{{scm.NewString("appended label")}}
+	shard.publishDeltaRows([][]scm.Scmer{{scm.NewString("appended label")}})
 	shard.mu.Unlock()
 	if reader.GetValue(2).String() != "appended label" || input.dictCache.Load() != nil {
 		t.Fatal("materialized reader lost existing appended-row repair or prepared unused input")
@@ -1270,7 +1270,7 @@ func TestMaterializedReaderRepairPreservesExistingShardRead(t *testing.T) {
 		computor: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })}
 	shard.mu.Lock()
 	shard.deltaColumns["label"] = 0
-	shard.inserts = [][]scm.Scmer{{scm.NewString("appended")}}
+	shard.publishDeltaRows([][]scm.Scmer{{scm.NewString("appended")}})
 	shard.mu.Unlock()
 	tx := &TxContext{}
 	tx.querySeq.Store(19)

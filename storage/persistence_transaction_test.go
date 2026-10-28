@@ -249,7 +249,7 @@ func TestNativeACIDUpdatesSurviveRestart(t *testing.T) {
 				sh.ensureLoaded()
 				found := 0
 				read := sh.ColumnReaderTx(nil, "payload", false, ReadAuto)
-				for id := uint32(0); id < sh.main_count+uint32(len(sh.inserts)); id++ {
+				for id := uint32(0); id < sh.main_count+uint32(len(sh.deltaRows())); id++ {
 					if !sh.deletions.Get(uint(id)) {
 						found++
 						if got := read.GetValue(id); got.String() != "committed" {

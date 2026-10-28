@@ -337,8 +337,8 @@ func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext, alreadyLocked boo
 
 func (p *StorageComputeProxy) visibleDeltaRecids() []uint32 {
 	p.shard.mu.RLock()
-	recids := make([]uint32, 0, len(p.shard.inserts))
-	for recid := p.shard.main_count; recid < p.shard.main_count+uint32(len(p.shard.inserts)); recid++ {
+	recids := make([]uint32, 0, len(p.shard.deltaRows()))
+	for recid := p.shard.main_count; recid < p.shard.main_count+uint32(len(p.shard.deltaRows())); recid++ {
 		if !p.shard.deletions.Get(uint(recid)) {
 			recids = append(recids, recid)
 		}
@@ -589,8 +589,8 @@ func (p *StorageComputeProxy) getValueRLocked(_ *TxContext, idx uint32) scm.Scme
 			continue
 		}
 		deltaIndex := int(idx - p.shard.main_count)
-		if columnIndex, ok := p.shard.deltaColumns[col]; ok && deltaIndex < len(p.shard.inserts) && columnIndex < len(p.shard.inserts[deltaIndex]) {
-			values[i] = p.shard.inserts[deltaIndex][columnIndex]
+		if columnIndex, ok := p.shard.deltaColumns[col]; ok && deltaIndex < len(p.shard.deltaRows()) && columnIndex < len(p.shard.deltaRows()[deltaIndex]) {
+			values[i] = p.shard.deltaRows()[deltaIndex][columnIndex]
 		} else {
 			values[i] = scm.NewNil()
 		}

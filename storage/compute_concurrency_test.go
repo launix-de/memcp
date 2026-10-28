@@ -624,7 +624,7 @@ func TestUnfilteredComputeColumnReusesCompletePreparationUntilMutation(t *testin
 }
 
 // TestOrderedComputeInvalidationReadsDeltaUnderShardLock races ordinary
-// concurrent INSERTs (which grow shard.inserts/deltaColumns under s.mu.Lock,
+// concurrent INSERTs (which grow shard.deltaRows()/deltaColumns under s.mu.Lock,
 // each also firing its own AFTER-INSERT invalidateorc trigger) against an
 // explicit, concurrent invalidateORCFromSortKey call — the same entry point
 // the invalidateorc SQL builtin uses, and thus something two overlapping
@@ -672,7 +672,7 @@ func TestOrderedComputeInvalidationReadsDeltaUnderShardLock(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Writer: keeps extending shard.inserts/deltaColumns, exactly like an
+	// Writer: keeps extending shard.deltaRows()/deltaColumns, exactly like an
 	// ordinary concurrent session issuing INSERTs on the same shard.
 	go func() {
 		defer wg.Done()
@@ -686,7 +686,7 @@ func TestOrderedComputeInvalidationReadsDeltaUnderShardLock(t *testing.T) {
 	// Reader: repeatedly drives invalidateORCFromSortKey directly (the same
 	// entry point the invalidateorc SQL builtin uses from an AFTER-INSERT
 	// trigger), so the exact getDelta call fixed in compute.go runs
-	// concurrently with the writer's mutation of shard.inserts/deltaColumns
+	// concurrently with the writer's mutation of shard.deltaRows()/deltaColumns
 	// above, and concurrently with the writer's own trigger-fired calls to
 	// the same function.
 	go func() {
@@ -722,7 +722,8 @@ func TestComputeSetDoesNotUpgradeShardReadOwnership(t *testing.T) {
 		for _, batch := range []bool{false, true} {
 			t.Run(fmt.Sprintf("main=%t/batch=%t", main, batch), func(t *testing.T) {
 				shard := &storageShard{t: &table{PersistencyMode: Memory}, main_count: 1,
-					columns: make(map[string]ColumnStorage), inserts: [][]scm.Scmer{{}}}
+					columns: make(map[string]ColumnStorage)}
+				shard.publishDeltaRows([][]scm.Scmer{{}})
 				shard.setState(WRITE)
 				proxy := &StorageComputeProxy{shard: shard, colName: "cached", isOrdered: true,
 					count: 1, delta: make(map[uint32]scm.Scmer)}

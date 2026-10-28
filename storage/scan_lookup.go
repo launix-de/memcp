@@ -360,7 +360,7 @@ func (t *storageShard) scanLookupMapOne(access scanAccess, mapCols []string, cur
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, access, len(t.inserts), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, access, len(t.deltaRows()), ids[:], true, func(batch []uint32) bool {
 		for _, recid := range batch {
 			var actual scm.Scmer
 			if recid < mainCount {
@@ -520,7 +520,7 @@ func (t *storageShard) scanLookupOne(access scanAccess, resultCol string, return
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, access, len(t.inserts), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, access, len(t.deltaRows()), ids[:], true, func(batch []uint32) bool {
 		for _, recid := range batch {
 			var actual scm.Scmer
 			if recid < mainCount {
@@ -685,7 +685,7 @@ func (t *storageShard) scanLookupMany(access scanAccess, resultCol string, retur
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, access, len(t.inserts), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, access, len(t.deltaRows()), ids[:], true, func(batch []uint32) bool {
 		if stop.Load() {
 			return false
 		}
@@ -827,7 +827,7 @@ func (t *storageShard) scanLookupMapMany(access scanAccess, mapCols []string, cu
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, access, len(t.inserts), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, access, len(t.deltaRows()), ids[:], true, func(batch []uint32) bool {
 		if stop.Load() {
 			return false
 		}

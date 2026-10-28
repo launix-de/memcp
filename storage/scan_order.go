@@ -2112,7 +2112,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 			}
 		}()
 		// remember current insert status (so don't scan things that are inserted during map)
-		maxInsertIndex = len(t.inserts)
+		maxInsertIndex = len(t.deltaRows())
 		visibleUpper = t.main_count + uint32(maxInsertIndex)
 		result.universe = visibleUpper
 

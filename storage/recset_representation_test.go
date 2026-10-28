@@ -721,8 +721,8 @@ func buildForEachVisibleRunShard(mainCount uint32, deltaCount int, deleted map[u
 		columns:      map[string]ColumnStorage{},
 		deltaColumns: make(map[string]int),
 		main_count:   mainCount,
-		inserts:      make([][]scm.Scmer, deltaCount),
 	}
+	shard.publishDeltaRows(make([][]scm.Scmer, deltaCount))
 	shard.deletions.Reset()
 	for idx := range deleted {
 		shard.deletions.Set(uint(idx), true)

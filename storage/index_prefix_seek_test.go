@@ -37,7 +37,7 @@ func deltaPrefixSeek(shard *storageShard, parent int64, inclusive bool) []uint32
 	})
 	var buf [8]uint32
 	var rows []uint32
-	shard.iterateIndexForce(nil, bounds, len(shard.inserts), buf[:], false, func(batch []uint32) bool { rows = append(rows, batch...); return true })
+	shard.iterateIndexForce(nil, bounds, len(shard.deltaRows()), buf[:], false, func(batch []uint32) bool { rows = append(rows, batch...); return true })
 	return rows
 }
 

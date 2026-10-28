@@ -86,7 +86,7 @@ func TestEstimateFilteredRowsRecognizesCompleteCappedIndexRange(t *testing.T) {
 	var buf [16]uint32
 	for range 2 {
 		shard.mu.RLock()
-		shard.iterateIndex(nil, runtimeScanAccess(bounds), len(shard.inserts), buf[:], 1, nil,
+		shard.iterateIndex(nil, runtimeScanAccess(bounds), len(shard.deltaRows()), buf[:], 1, nil,
 			func([]uint32) bool { return true })
 		shard.mu.RUnlock()
 	}
@@ -127,7 +127,7 @@ func TestScanSelectivityEstimateScalesIndexCandidatesByShardPopulation(t *testin
 		bounds := extractBoundaries([]string{"tenant"}, condition)
 		var buf [128]uint32
 		shard.mu.RLock()
-		shard.iterateIndex(nil, runtimeScanAccess(bounds), len(shard.inserts), buf[:], 100, nil,
+		shard.iterateIndex(nil, runtimeScanAccess(bounds), len(shard.deltaRows()), buf[:], 100, nil,
 			func([]uint32) bool { return true })
 		shard.mu.RUnlock()
 	}
@@ -711,7 +711,7 @@ func TestTypedFilterMixedMainDelta(t *testing.T) {
 	shard := benchmarkMapReduceFusionShard(4)
 	shard.mu.Lock()
 	shard.deltaColumns["amount"] = 0
-	shard.inserts = [][]scm.Scmer{{scm.NewFloat(3.5)}, {scm.NewNil()}}
+	shard.publishDeltaRows([][]scm.Scmer{{scm.NewFloat(3.5)}, {scm.NewNil()}})
 	shard.mu.Unlock()
 	column := shard.getColumnStorageOrPanic("amount", false, nil)
 	readers := []ColumnReader{newCachedColumnReaderTx(column, nil, false, ReadAuto)}

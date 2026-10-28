@@ -322,7 +322,7 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	shard.mu.RLock()
 	var buildBuf [8]uint32
-	shard.iterateIndexForce(nil, runtimeScanAccess(bounds), len(shard.inserts), buildBuf[:], false,
+	shard.iterateIndexForce(nil, runtimeScanAccess(bounds), len(shard.deltaRows()), buildBuf[:], false,
 		func([]uint32) bool { return false })
 	shard.mu.RUnlock()
 	run := func(acceptCols []string, accept scm.Scmer) *shardqueue {

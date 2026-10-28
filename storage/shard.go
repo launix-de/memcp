@@ -21,6 +21,7 @@ import "math"
 import "sync"
 import "time"
 import "unsafe"
+import "slices"
 import "strings"
 import "reflect"
 import "runtime"
@@ -47,12 +48,11 @@ type storageShard struct {
 	// main storage
 	main_count uint32 // size of main storage
 	// plannerMainRows and plannerDeltaRows publish only row counts. They may be
-	// read without mu by the compiler; shard containers themselves remain
-	// strictly lock-protected. Writers update these counters while holding mu.
+	// read without mu by the compiler. Writers update these counters under mu.
 	plannerMainRows   atomic.Uint32
 	plannerDeltaRows  atomic.Uint64
 	pendingInsertRows atomic.Int64 // free-routing reservations, one charge/release per batch
-	// columns, deltaColumns, inserts, deletions and Indexes are shard-local
+	// columns, deltaColumns and Indexes are shard-local
 	// internals guarded by mu. Code outside this file
 	// must treat s.mu as the only authority for shard-local state and must not
 	// read Go maps here lock-free.
@@ -62,7 +62,7 @@ type storageShard struct {
 	tempColumnBytes map[*column]int64
 	// delta storage
 	deltaColumns map[string]int
-	inserts      [][]scm.Scmer                       // items added to storage
+	insertRows   atomic.Pointer[[][]scm.Scmer]       // immutable published slice header; append-only rows
 	deletions    NonLockingReadMap.NonBlockingBitMap // items removed from main or inserts (based on main_count + i)
 	// rollbackProtected keeps transaction-owned tombstones in a rebuild so a
 	// later rollback or ACID commit can still change successor visibility.
@@ -72,7 +72,7 @@ type storageShard struct {
 	writeOwnMu        sync.Mutex         // guards writeOwners
 	logfile           PersistenceLogfile // only in safe mode
 	// mu protects shard-local topology/runtime state:
-	//   - columns / deltaColumns / inserts / deletions
+	//   - columns / deltaColumns and delta publication by writers
 	//   - Indexes
 	//   - lazy-load attach state and next-shard dual-write publication helpers
 	// Reads take RLock snapshots; mutations, log replay, rebuild publish and
@@ -255,7 +255,7 @@ func (s *storageShard) catchUpRebuildLocked(next *storageShard, snapshotInsertCo
 		}
 	}
 
-	if snapshotInsertCount < len(s.inserts) {
+	if snapshotInsertCount < len(s.deltaRows()) {
 		columns, rows := s.materializedInsertedRowsLocked(snapshotInsertCount)
 		oldStart := s.main_count + uint32(snapshotInsertCount)
 		newStart := next.insertReplica(columns, rows, true, nil)
@@ -332,11 +332,11 @@ func (s *storageShard) exclusiveSizeLocked() uint {
 			}
 		}
 		result += s.deletions.ComputeSize()
-		result += scm.ComputeSize(scm.NewAny(s.inserts))
+		result += scm.ComputeSize(scm.NewAny(s.deltaRows()))
 		return result
 	}
 	result += s.deletions.ComputeSize()
-	result += scm.ComputeSize(scm.NewAny(s.inserts))
+	result += scm.ComputeSize(scm.NewAny(s.deltaRows()))
 	return result
 }
 
@@ -504,7 +504,7 @@ type shardStatsSnapshot struct {
 func (s *storageShard) statsSnapshotRLocked() shardStatsSnapshot {
 	return shardStatsSnapshot{
 		mainCount: s.main_count,
-		delta:     len(s.inserts),
+		delta:     len(s.deltaRows()),
 		deletions: s.deletions.Count(),
 		state:     s.state(),
 		size:      s.exclusiveSizeLocked(),
@@ -592,7 +592,7 @@ func (u *storageShard) load() {
 				// boundary only when replay actually contains inserts: eager loading
 				// here would defeat cold-column loading for every empty WAL.
 				u.ensureMainCount(true, nil)
-				firstRecid := u.main_count + uint32(len(u.inserts))
+				firstRecid := u.main_count + uint32(len(u.deltaRows()))
 				u.insertDatasetFromLog(l.cols, l.values)
 				if !isCommitted(l.txID) {
 					for i := range l.values {
@@ -604,7 +604,7 @@ func (u *storageShard) load() {
 				// the persisted boundary they would tombstone committed main rows and
 				// expose uncommitted delta rows after a crash.
 				u.ensureMainCount(true, nil)
-				firstRecid := u.main_count + uint32(len(u.inserts))
+				firstRecid := u.main_count + uint32(len(u.deltaRows()))
 				u.insertDatasetFromLog(l.cols, l.values)
 				for i := range l.values {
 					u.deletions.Set(uint(firstRecid+uint32(i)), true)
@@ -629,7 +629,7 @@ func (u *storageShard) load() {
 				break
 			}
 			var maxVal uint64
-			for _, row := range u.inserts {
+			for _, row := range u.deltaRows() {
 				if colIdx < len(row) && !row[colIdx].IsNil() {
 					// Match live INSERT: only positive explicit IDs advance the counter.
 					if v := scm.ToInt(row[colIdx]); v > 0 && uint64(v) > maxVal {
@@ -1095,7 +1095,7 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	}
 	// Sloppy/Logged shards with pending deltas must be flushed to disk before eviction.
 	// If there are deltas, we can't evict now — a rebuild is needed first.
-	if len(s.inserts) > 0 || s.deletions.Count() > 0 {
+	if len(s.deltaRows()) > 0 || s.deletions.Count() > 0 {
 		s.mu.Unlock()
 		return false // has unflushed deltas, skip eviction (rebuild will flush them)
 	}
@@ -1132,7 +1132,7 @@ func (s *storageShard) evictionOffer(currentSize int64) evictionOffer {
 		return evictionOffer{}
 	}
 	if s.t != nil && (s.t.PersistencyMode == Memory ||
-		(s.t.PersistencyMode != Cache && (len(s.inserts) > 0 || s.deletions.Count() > 0))) {
+		(s.t.PersistencyMode != Cache && (len(s.deltaRows()) > 0 || s.deletions.Count() > 0))) {
 		return evictionOffer{}
 	}
 	if !s.indexMutex.TryLock() {
@@ -1251,7 +1251,7 @@ func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	}
 	// clear in-memory data (no disk backing to flush to)
 	s.releaseTempColumnBytesLocked(freedByType)
-	s.inserts = nil
+	s.publishDeltaRows(nil)
 	s.plannerDeltaRows.Store(0)
 	s.deletions.Reset()
 	s.main_count = 0
@@ -1294,7 +1294,7 @@ func NewShard(t *table) *storageShard {
 }
 
 func (t *storageShard) Count() uint32 {
-	return t.main_count + uint32(len(t.inserts)) - uint32(t.deletions.Count())
+	return t.main_count + uint32(len(t.deltaRows())) - uint32(t.deletions.Count())
 }
 
 // SetShardWriteLocked updates the mapper's lock state after an external lock release.
@@ -1357,7 +1357,7 @@ func (t *storageShard) resolveVisiblePrimaryRecidLocked(staleRecid uint32) (uint
 		key[i] = t.rowValueByRecidLocked(staleRecid, col)
 	}
 
-	limit := t.main_count + uint32(len(t.inserts))
+	limit := t.main_count + uint32(len(t.deltaRows()))
 	for recid := limit; recid > 0; recid-- {
 		candidate := recid - 1
 		if candidate == staleRecid || t.deletions.Get(uint(candidate)) {
@@ -1641,7 +1641,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				}
 
 				payloadCols, payloadRow := buildPayload()
-				newRecid = t.main_count + uint32(len(t.inserts))
+				newRecid = t.main_count + uint32(len(t.deltaRows()))
 				t.insertDataset(payloadCols, [][]scm.Scmer{payloadRow}, nil, nil, currentTx)
 				if !acidMode && !uniqueCheckNeeded {
 					// Atomic visibility switch under shard write lock:
@@ -1668,7 +1668,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 								pkVals[i] = scm.NewNil()
 							}
 						}
-						limit := t.main_count + uint32(len(t.inserts))
+						limit := t.main_count + uint32(len(t.deltaRows()))
 						for recid := uint32(0); recid < limit; recid++ {
 							if recid == newRecid || t.deletions.Get(uint(recid)) {
 								continue
@@ -3213,7 +3213,7 @@ func (t *storageShard) insertReplica(columns []string, values [][]scm.Scmer, alr
 	if !alreadyLocked {
 		t.mu.Lock()
 	}
-	firstNewInsertIdx := len(t.inserts)
+	firstNewInsertIdx := len(t.deltaRows())
 	firstNewRecid := t.insertPreparedLocked(columns, values, nil, false, false, nil, currentTx)
 	if next := t.nextForMaintenanceLocked(nil); next != nil {
 		// A writer may still hold an older immutable table-topology snapshot
@@ -3237,7 +3237,7 @@ func (t *storageShard) materializedInsertedRowsLocked(firstNewInsertIdx int) ([]
 			idx2col[idx] = name
 		}
 	}
-	newRows := t.inserts[firstNewInsertIdx:]
+	newRows := t.deltaRows()[firstNewInsertIdx:]
 	logVals := make([][]scm.Scmer, len(newRows))
 	for i, row := range newRows {
 		rowCopy := make([]scm.Scmer, len(idx2col))
@@ -3249,13 +3249,13 @@ func (t *storageShard) materializedInsertedRowsLocked(firstNewInsertIdx int) ([]
 
 func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), fireTriggers bool, propagateMaintenance bool, validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext) uint32 {
 	// capture starting row index for undo logging
-	firstNewRecid := t.main_count + uint32(len(t.inserts))
-	firstNewInsertIdx := len(t.inserts) // for capturing actual rows after insertDataset fills auto-increment
+	firstNewRecid := t.main_count + uint32(len(t.deltaRows()))
+	firstNewInsertIdx := len(t.deltaRows()) // for capturing actual rows after insertDataset fills auto-increment
 	var triggerInsertRows []dataset
 	t.insertDataset(columns, values, onFirstInsertId, validatedSchema, currentTx)
 	if fireTriggers && len(t.t.Triggers) > 0 {
 		declarations := t.t.columnDeclarations()
-		newRows := t.inserts[firstNewInsertIdx:]
+		newRows := t.deltaRows()[firstNewInsertIdx:]
 		triggerInsertRows = make([]dataset, len(newRows))
 		for i, deltaRow := range newRows {
 			row := make(dataset, len(declarations))
@@ -3338,6 +3338,8 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 
 // contract: must only be called inside full write mutex mu.Lock()
 func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext) {
+	rows := slices.Grow(t.deltaRows(), len(values))
+	firstNew := len(rows)
 	snapshot := t.t.columnNamesSnapshot.Load()
 	var declarations []*column
 	if snapshot != nil {
@@ -3448,7 +3450,6 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 				newrow[cidx] = c.defaultValue()
 			}
 		}
-		recid := uint32(len(t.inserts)) + t.main_count
 		for j, colidx := range colidx {
 			if j < len(row) {
 				if colidx == aiColIdx && row[j].IsNil() {
@@ -3457,9 +3458,13 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 				newrow[colidx] = row[j]
 			}
 		}
-		t.inserts = append(t.inserts, newrow)
+		rows = append(rows, newrow)
 		insertedBytes += int64(scm.ComputeSize(scm.NewAny(newrow)))
 
+	}
+	t.publishDeltaRows(rows)
+	for i, newrow := range rows[firstNew:] {
+		recid := t.main_count + uint32(firstNew+i)
 		// also notify indices
 		for _, index := range t.Indexes {
 			// add to delta indexes
@@ -3474,7 +3479,7 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			index.mu.Unlock()
 		}
 	}
-	t.plannerDeltaRows.Store(uint64(len(t.inserts)))
+	t.plannerDeltaRows.Store(uint64(len(rows)))
 	// Charge only the new allocation to each disjoint CacheManager owner. A
 	// rebuild later replaces these deltas with each owner's absolute measured
 	// size; insert must not traverse an ever-growing shard or index here.
@@ -3508,6 +3513,8 @@ func (s *storageShard) initialColumnValues() map[string]columnRecoveryValue {
 // insertDatasetFromLog appends delta rows from a persisted log without applying
 // defaults or auto-increment logic. Must only be called while holding t.mu.
 func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scmer) {
+	rows := slices.Grow(t.deltaRows(), len(values))
+	firstNew := len(rows)
 	initial := t.initialColumnValues()
 	// map provided column names to delta positions, extending deltaColumns if needed
 	colidx := make([]int, len(columns))
@@ -3527,19 +3534,22 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 	}
 	for _, row := range values {
 		newrow := make([]scm.Scmer, len(t.deltaColumns))
-		recid := uint32(len(t.inserts)) + t.main_count
 		for j, pos := range colidx {
 			if j < len(row) {
 				newrow[pos] = row[j]
 			}
 		}
 		for col, captured := range initial {
-			if uint64(len(t.inserts)) < uint64(captured.DeltaRows) {
+			if uint64(len(rows)) < uint64(captured.DeltaRows) {
 				newrow[t.deltaColumns[col]] = captured.Value
 			}
 		}
-		t.inserts = append(t.inserts, newrow)
+		rows = append(rows, newrow)
 
+	}
+	t.publishDeltaRows(rows)
+	for i, newrow := range rows[firstNew:] {
+		recid := t.main_count + uint32(firstNew+i)
 		// update delta indexes
 		for _, index := range t.Indexes {
 			index.mu.Lock()
@@ -3550,7 +3560,7 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 			index.mu.Unlock()
 		}
 	}
-	t.plannerDeltaRows.Store(uint64(len(t.inserts)))
+	t.plannerDeltaRows.Store(uint64(len(rows)))
 }
 
 const uniqueLookupInlineColumns = 8
@@ -3625,7 +3635,7 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 
 	// Use iterateIndex for O(log n) lookup (builds index lazily if needed)
 	// Small buffer for existence check: stop early after first match
-	t.iterateIndex(currentTx, access, len(t.inserts), scratch.ids[:], 1, nil, func(batch []uint32) bool {
+	t.iterateIndex(currentTx, access, len(t.deltaRows()), scratch.ids[:], 1, nil, func(batch []uint32) bool {
 		for _, idx := range batch {
 			// Verify all columns match (iterateIndex may return superset for range boundaries)
 			matched := true
@@ -3723,7 +3733,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
-	visibleUniverse := int64(mainCount) + int64(len(t.inserts)) - int64(t.deletions.Count())
+	visibleUniverse := int64(mainCount) + int64(len(t.deltaRows())) - int64(t.deletions.Count())
 	count := int64(0)
 	sampled := int64(0)
 	capped := false
@@ -3736,15 +3746,15 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	var buf [256]uint32
 	access := bounds
 	indexBounds := newScanIndexBounds(access)
-	t.iterateIndexEstimate(currentTx, access, len(t.inserts), buf[:], &candidateSpan, func(index *StorageIndex, active bool) {
+	t.iterateIndexEstimate(currentTx, access, len(t.deltaRows()), buf[:], &candidateSpan, func(index *StorageIndex, active bool) {
 		// Cold-index fallback now enforces the same exact sorted prefix before
 		// invoking the sampling callback, so its candidates have the same
 		// population semantics as an active index range.
 		indexRestricted = indexBounds.len() > 0
 		if active {
 			if candidates, universe, ok := index.estimateHookCandidates(currentTx, access); ok {
-				hookCandidates = int64(candidates) + int64(len(t.inserts))
-				hookUniverse = int64(universe) + int64(len(t.inserts))
+				hookCandidates = int64(candidates) + int64(len(t.deltaRows()))
+				hookUniverse = int64(universe) + int64(len(t.deltaRows()))
 			}
 		}
 	}, func(batch []uint32) bool {
@@ -3830,8 +3840,27 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	}
 }
 
+// deltaRows borrows a published immutable slice header. Writers append only beyond
+// its visible extent; existing rows remain immutable across capacity growth.
+func (t *storageShard) deltaRows() [][]scm.Scmer {
+	if rows := t.insertRows.Load(); rows != nil {
+		return *rows
+	}
+	return nil
+}
+
+// publishDeltaRows runs under the existing mutation/initialization ownership.
+// One publication per batch makes fully initialized rows visible to lock-free
+// readers without copying the existing delta or allocating a header per row.
+func (t *storageShard) publishDeltaRows(rows [][]scm.Scmer) {
+	previous := t.insertRows.Load()
+	if !t.insertRows.CompareAndSwap(previous, &rows) {
+		panic("concurrent delta publication without mutation ownership")
+	}
+}
+
 func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
-	item := t.inserts[idx]
+	item := t.deltaRows()[idx]
 	colidx, ok := t.deltaColumns[col]
 	if ok {
 		if colidx < len(item) {
@@ -4069,7 +4098,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				return next // already rebuilding (happens on parallel inserts)
 			}
 
-			maxInsertIndex = len(t.inserts)
+			maxInsertIndex = len(t.deltaRows())
 			deletions = t.deletions.Copy()
 			rollbackProtected = t.rollbackProtected.Copy()
 			if !all && maxInsertIndex == 0 && deletions.Count() == 0 {
@@ -4105,7 +4134,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				for col, index := range t.deltaColumns {
 					deltaColumnsSnapshot[col] = index
 				}
-				insertsSnapshot = append([][]scm.Scmer(nil), t.inserts[:maxInsertIndex]...)
+				insertsSnapshot = append([][]scm.Scmer(nil), t.deltaRows()[:maxInsertIndex]...)
 				mainCount = t.main_count
 			}
 			break
