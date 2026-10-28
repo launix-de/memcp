@@ -254,6 +254,14 @@ func (response remoteScanResult) ClusterObjectOffers() []scm.ClusterReference {
 // until the serial callback or record visitor consumes them, even if fetching the
 // next comparison page preceded that flush. No shared row-loop map is mutated.
 type remoteOrderQueue struct {
+	// One serial worker owns these prepared callbacks and borrowed frames. A
+	// shard switch may flush one row; it must not prepare a new program/frame.
+	callback          scm.SerialProc
+	post              scm.SerialProc
+	args              []scm.Scmer
+	postArgs          []scm.Scmer
+	mapSlots          []int
+	postSlots         []int
 	generation        uuid.UUID // actual owner input, independent of the local routing stub
 	run               *remoteOrderedRun
 	ctx               context.Context
@@ -313,20 +321,25 @@ func (remote *remoteOrderQueue) consume(queue *shardqueue, consumed []uint32, di
 	}
 }
 
-func (remote *remoteOrderQueue) project(id uint32, columns []string) []scm.Scmer {
+func (remote *remoteOrderQueue) loadProjection(dst []scm.Scmer, id uint32, slots []int) {
 	row := remote.rows[id]
 	if row == nil {
 		panic("ordered projection lost physical row")
 	}
-	values := make([]scm.Scmer, len(columns))
+	for i, slot := range slots {
+		dst[i] = row[slot]
+	}
+}
+func (remote *remoteOrderQueue) projectionSlots(columns []string) []int {
+	result := make([]int, len(columns))
 	for i, name := range columns {
 		position, ok := remote.columns[name]
 		if !ok {
 			panic("ordered projection missing column " + name)
 		}
-		values[i] = row[1+remote.keys+position]
+		result[i] = 1 + remote.keys + position
 	}
-	return values
+	return result
 }
 
 func delegateOrderedQueue(tx *TxContext, shard *storageShard, access scanAccess, spec *scanOrderTableSpec, dirs []func(...scm.Scmer) scm.Scmer, part, offset, limit int, failure any) *shardqueue {
@@ -366,6 +379,16 @@ func delegateOrderedQueue(tx *TxContext, shard *storageShard, access scanAccess,
 	for i, name := range view[3].Slice() {
 		remote.columns[name.String()] = i
 	}
+	if spec.recordVisitor == nil {
+		remote.callback = scm.PrepareSerialProc(spec.callback)
+		remote.args = make([]scm.Scmer, 1+len(spec.callbackCols))
+		remote.mapSlots = remote.projectionSlots(spec.callbackCols)
+	}
+	if !spec.postOrderFilter.IsNil() {
+		remote.post = scm.PrepareSerialProc(spec.postOrderFilter)
+		remote.postArgs = make([]scm.Scmer, len(spec.postOrderCols))
+		remote.postSlots = remote.projectionSlots(spec.postOrderCols)
+	}
 	queue := &shardqueue{shard: shard, remote: remote, universe: uint32(view[2].Int()), candidateCount: result.candidateCount, sortdirs: dirs}
 	for i := 0; i < remote.keys; i++ {
 		k := i
@@ -381,7 +404,9 @@ func (queue *shardqueue) acceptOrderedPostFilter(spec *scanOrderTableSpec, id ui
 		if spec.postOrderFilter.IsNil() {
 			return true
 		}
-		return scm.ToBool(scm.Apply(spec.postOrderFilter, queue.remote.project(id, spec.postOrderCols)...))
+		remote := queue.remote
+		remote.loadProjection(remote.postArgs, id, remote.postSlots)
+		return scm.ToBool(remote.post.Call(remote.postArgs))
 	}
 	return queue.postOrderMapper == nil || scm.ToBool(queue.postOrderMapper.MapOne(id))
 }
@@ -404,10 +429,10 @@ func (remote *remoteOrderQueue) stream(spec *scanOrderTableSpec, queue *shardque
 		spec.recordVisitor(queue, ids)
 		return acc, false
 	}
-	program := scm.PrepareSerialProc(spec.callback)
 	for _, id := range ids {
-		args := append([]scm.Scmer{acc}, remote.project(id, spec.callbackCols)...)
-		acc = program.Call(args)
+		remote.args[0] = acc
+		remote.loadProjection(remote.args[1:], id, remote.mapSlots)
+		acc = remote.callback.Call(remote.args)
 	}
 	return acc, false
 }
