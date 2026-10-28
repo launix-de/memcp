@@ -960,13 +960,16 @@ func (s *storageShard) retainCacheRead() {
 
 func (s *storageShard) releaseCacheRead() { s.cacheReaders.Add(-1) }
 
-func (s *storageShard) GetRead(currentTx *TxContext) ReadAccess {
-	return s.getRead(currentTx, false)
+// mayDelegate describes the caller's ability to consume a shard-local result.
+// Native catalog/uniqueness/maintenance readers need local payload; physical
+// operator consumers can catch delegation and ship their complete invocation.
+func (s *storageShard) GetRead(currentTx *TxContext, mayDelegate bool) ReadAccess {
+	return s.getRead(currentTx, false, mayDelegate)
 }
 
 // Physical query-local IDs retain their original immutable generation. Rights
 // acquisition may install a successor, but must never reinterpret those IDs.
-func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
+func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool) ReadAccess {
 	origin := s
 	if target := s.scanTarget.Load(); target != nil {
 		panic(shardReadDelegation{target})
@@ -976,7 +979,7 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 			s = r.readShard(s, currentTx)
 		}
 	}
-	if !snapshot && sharedClusterSource(s.t) && s.state() == COLD {
+	if mayDelegate && !snapshot && sharedClusterSource(s.t) && s.state() == COLD {
 		cluster := activeNodeCluster()
 		if cluster == nil {
 			panic("cluster is not initialized")

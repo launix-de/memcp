@@ -472,14 +472,14 @@ func (s *storageShard) acquireReadForScan(currentTx *TxContext, policy *scanAcce
 		return ReadAccess{shard: write.shard, mutation: &write}
 	}
 
-	return s.GetRead(currentTx)
+	return s.GetRead(currentTx, true)
 }
 
 func (s *storageShard) acquireSnapshotRead(currentTx *TxContext) ReadAccess {
 	if s.hasWriteOwnerForTx(currentTx) {
 		return ReadAccess{}
 	}
-	return s.getRead(currentTx, true)
+	return s.getRead(currentTx, true, false)
 }
 
 func collectRelevantShards(schema []shardDimension, access scanAccess, shards []*storageShard) []*storageShard {
@@ -1500,7 +1500,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 	}
 	for _, shard := range newshards {
 		indexes := func() []*StorageIndex {
-			release := shard.GetRead(nil)
+			release := shard.GetRead(nil, false)
 			shard = release.shard
 			defer release.Release()
 			shard.mu.RLock()

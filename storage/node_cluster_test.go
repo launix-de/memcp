@@ -661,3 +661,46 @@ func TestClusterSchemaLocationTransferUsesBoundedBatches(t *testing.T) {
 		t.Fatal("unbounded or incomplete location transfer", batches)
 	}
 }
+
+func TestClusterGetReadDelegationIsAnExplicitCallerCapability(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "treadcapability", 4)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
+	var freed [numEvictableTypes]int64
+	if !shardCleanup(shard, &freed) {
+		t.Fatal("fixture did not become cold")
+	}
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}, ctx: context.Background(), databases: map[string]bool{tbl.schema.Name: true}}
+	cluster.initializeManager()
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "owner"}, peer: &mosiPeer{done: make(chan struct{})}}}})
+	cell := cluster.declareShard(shard, false)
+	cell.ownstate.Initialize(mosi.S)
+	cell.clusterstate.Initialize(mosi.S)
+	cluster.manager.updateRecord(*cell.resource.Load(), func(record *replicaRecord) bool { record.Owner, record.Epoch = "owner", 3; return true })
+	oldMounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(oldMounts)
+	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(oldService)
+	delegated := false
+	func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				if _, ok := failure.(shardReadDelegation); ok {
+					delegated = true
+				} else {
+					panic(failure)
+				}
+			}
+		}()
+		access := shard.GetRead(nil, true)
+		access.Release()
+	}()
+	if !delegated || shard.state() != COLD || shard.cacheReaders.Load() != 0 {
+		t.Fatal("operator read did not delegate before local payload acquisition")
+	}
+	access := shard.GetRead(nil, false)
+	defer access.Release()
+	if access.shard != shard || shard.state() == COLD || shard.main_count != 4 {
+		t.Fatal("native payload reader was incorrectly delegated")
+	}
+}

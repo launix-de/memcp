@@ -273,7 +273,7 @@ func TestInsertConcurrentAutoIncrementReservations(t *testing.T) {
 	}
 	seen := make(map[int64]bool)
 	for _, shard := range tbl.ActiveShards() {
-		release := shard.GetRead(nil)
+		release := shard.GetRead(nil, false)
 		shard.mu.RLock()
 		for i := range shard.deltaRows() {
 			id := shard.getDelta(i, "id").Int()

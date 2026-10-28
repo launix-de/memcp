@@ -380,7 +380,7 @@ func TestRemoteScanRetainsUUIDAcrossRebuild(t *testing.T) {
 	defer replication.Store(previous)
 	held := table.ActiveShards()[0]
 	r.declareShard(held, r.id, true)
-	access := held.GetRead(nil)
+	access := held.GetRead(nil, false)
 	defer access.Release()
 	peer, _, _ := setupRemoteScanConnection(t)
 	var parts []remoteScanShard

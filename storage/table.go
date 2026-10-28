@@ -531,7 +531,7 @@ func (t *table) hasDuplicateUniqueValues(cols []string, nullsNotDistinct bool, c
 			continue
 		}
 		// The later key-probe loop consumes the same prepared generations.
-		readAccesses[i] = shard.GetRead(currentTx)
+		readAccesses[i] = shard.GetRead(currentTx, false)
 		shard = readAccesses[i].shard
 		shards[i] = shard
 		func() {
@@ -1312,7 +1312,7 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 			continue
 		}
 		func() {
-			done := shard.GetRead(nil)
+			done := shard.GetRead(nil, false)
 			shard = done.shard
 			defer done.Release()
 			shard.mu.RLock()
@@ -1716,7 +1716,7 @@ func (t *table) initializeLegacyPlannerRowEstimate() {
 			continue
 		}
 		func() {
-			release := shard.GetRead(nil)
+			release := shard.GetRead(nil, false)
 			shard = release.shard
 			defer release.Release()
 			rows += shard.statsSnapshot().rowCount()
@@ -1785,7 +1785,7 @@ func (t *table) CountExact() (result uint) {
 			continue
 		}
 		func() {
-			unlock := shard.GetRead(nil)
+			unlock := shard.GetRead(nil, false)
 			shard = unlock.shard
 			defer unlock.Release()
 			shard.mu.RLock()
@@ -4527,7 +4527,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 		for i, shard := range shardlist {
 			if needed[i] {
 				if sharedClusterSource(t) {
-					readAccesses[i] = shard.GetRead(currentTx)
+					readAccesses[i] = shard.GetRead(currentTx, false)
 				} else {
 					readAccesses[i] = shard.acquireReadForScan(currentTx, nil)
 				}

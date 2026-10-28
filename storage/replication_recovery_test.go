@@ -332,7 +332,7 @@ func TestReplicationStartupRejectsUserDataBeforeManagerPublication(t *testing.T)
 	calls := []func(){
 		func() { table.schema.GetRead(nil).Release() },
 		func() { table.schema.GetWrite(nil).Release() },
-		func() { table.ActiveShards()[0].GetRead(nil).Release() },
+		func() { table.ActiveShards()[0].GetRead(nil, false).Release() },
 		func() { table.ActiveShards()[0].GetWrite(nil).Release() },
 	}
 	for _, call := range calls {
@@ -375,7 +375,7 @@ func TestReplicationRecoveredSharedBindsCompletedGeneration(t *testing.T) {
 	}
 	old := replication.Swap(r)
 	defer replication.Store(old)
-	access := placeholder.GetRead(nil)
+	access := placeholder.GetRead(nil, false)
 	defer access.Release()
 	if access.shard.main_count != 3 {
 		t.Fatalf("recovered backup lost rows: %d", access.shard.main_count)
@@ -440,7 +440,7 @@ func TestReplicationRecoveryKeepsMasterWALAfterSurrender(t *testing.T) {
 	}
 	old := replication.Swap(r)
 	defer replication.Store(old)
-	access := table.ActiveShards()[0].GetRead(nil)
+	access := table.ActiveShards()[0].GetRead(nil, false)
 	defer access.Release()
 	if access.shard.Count() != 4 {
 		t.Fatalf("master WAL was lost during recovery: rows=%d", access.shard.Count())
@@ -881,7 +881,7 @@ func TestReplicationOuterAuthorityCannotAdmitDelegatedQueries(t *testing.T) {
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
 	for _, access := range []func(){
-		func() { shard.GetRead(nil).Release() }, func() { shard.GetWrite(nil).Release() },
+		func() { shard.GetRead(nil, false).Release() }, func() { shard.GetWrite(nil).Release() },
 		func() { table.schema.GetRead(nil).Release() }, func() { table.schema.GetWrite(nil).Release() },
 	} {
 		failure := func() (failure any) { defer func() { failure = recover() }(); access(); return nil }()

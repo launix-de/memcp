@@ -422,7 +422,7 @@ func (r *replicationManager) captureResource(resource mosiResource, content stri
 	transfer.volatile = shard.t.PersistencyMode == Memory || shard.t.PersistencyMode == Cache
 	transfer.blobTable = shard.t.Name == ".blobs"
 	if transfer.volatile {
-		transfer.payload = shard.getRead(nil, true)
+		transfer.payload = shard.getRead(nil, true, false)
 	}
 	complete = true
 	return transfer, nil
