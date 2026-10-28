@@ -143,6 +143,9 @@ func (s *storageShard) prepareOrderedRun(input shardScanInvocation) *orderedScan
 	queue := s.scan_order(input.access, input.conditionCols, input.condition, order.acceptCols, order.accept, order.columns, order.directions, order.partitionCols, order.offset, order.limit, nil, input.tx, SessionStateFromTx(input.tx))
 	defer queue.closeReaders()
 	run := &orderedScanRun{shard: s, columns: order.projected, keys: len(queue.scols), universe: queue.universe, candidates: queue.candidateCount, rows: make([]scm.Scmer, len(queue.items))}
+	if len(queue.items) == 0 {
+		return run
+	} // an eliminated shard need not load projection columns
 	identity := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return scm.NewSlice(append([]scm.Scmer(nil), values...)) })
 	mapper := s.OpenMapper(order.projected, identity, false, input.tx)
 	defer mapper.Close()

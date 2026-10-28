@@ -221,7 +221,14 @@ operator contract before serialization; it is not a retry after an arbitrary
 callback/serializer failure. Reducible scans still compute native worker partials.
 
 Join records retain immutable projected values and the imported run handle, so
-late projection does not reload a shard locally or rebind old row IDs. Rebuilds
+late projection does not reload a shard locally or rebind old row IDs. Small outer
+key sets become bounded worker-side semijoin filters before inner projection:
+a four-key SUM must not transfer the full inner relation just to discard it at
+the coordinator. These hints leave native shard fanout, runner combinations,
+residuals, duplicate multiplicity and combine callbacks unchanged. Published O(1)
+cardinality estimates avoid preparing hints for comparable-sized inputs; actual
+encoded key bytes bound construction. An unavailable/oversized hint never
+truncates keys or changes the authoritative join. Rebuilds
 may publish a new UUID while the old physical input remains registered. The
 existing weak peer handle/GC release protocol owns its retirement. Immutable
 join/membership predicates serialize portable constructors: each worker builds its

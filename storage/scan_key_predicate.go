@@ -75,15 +75,17 @@ func scanJoinKeyLess(values ...scm.Scmer) scm.Scmer {
 	return scm.NewBool(scm.Less(values[0], values[1]))
 }
 func scanTrue(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }
+func scanCollectRow(values ...scm.Scmer) scm.Scmer {
+	row := scm.NewSlice(append([]scm.Scmer(nil), values[1:]...))
+	return scm.NewSlice(append(values[0].Slice(), row))
+}
+func scanAppendRows(values ...scm.Scmer) scm.Scmer {
+	return scm.NewSlice(append(values[0].Slice(), values[1].Slice()...))
+}
 func declareScanKeyPredicate(en *scm.Env) {
 	scm.Declare(en, &scm.Declaration{Name: "scan_true", Fn: scanTrue, Type: &scm.TypeDescriptor{Kind: "func", Const: true, Params: []*scm.TypeDescriptor{{Kind: "any", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
-	scm.Declare(en, &scm.Declaration{Name: "scan_collect_row", Fn: func(values ...scm.Scmer) scm.Scmer {
-		row := scm.NewSlice(append([]scm.Scmer(nil), values[1:]...))
-		return scm.NewSlice(append(values[0].Slice(), row))
-	}, Type: &scm.TypeDescriptor{Kind: "func", Params: []*scm.TypeDescriptor{{Kind: "list"}, {Kind: "any", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "list"}}})
-	scm.Declare(en, &scm.Declaration{Name: "scan_append_rows", Fn: func(values ...scm.Scmer) scm.Scmer {
-		return scm.NewSlice(append(values[0].Slice(), values[1].Slice()...))
-	}, Type: &scm.TypeDescriptor{Kind: "func", Params: []*scm.TypeDescriptor{{Kind: "list"}, {Kind: "list"}}, Return: &scm.TypeDescriptor{Kind: "list"}}})
+	scm.Declare(en, &scm.Declaration{Name: "scan_collect_row", Fn: scanCollectRow, Type: &scm.TypeDescriptor{Kind: "func", Params: []*scm.TypeDescriptor{{Kind: "list"}, {Kind: "any", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "list"}}})
+	scm.Declare(en, &scm.Declaration{Name: "scan_append_rows", Fn: scanAppendRows, Type: &scm.TypeDescriptor{Kind: "func", Params: []*scm.TypeDescriptor{{Kind: "list"}, {Kind: "list"}}, Return: &scm.TypeDescriptor{Kind: "list"}}})
 	scm.Declare(en, &scm.Declaration{Name: "scan_key_less", Fn: scanJoinKeyLess, Type: &scm.TypeDescriptor{Kind: "func", Const: true, Params: []*scm.TypeDescriptor{{Kind: "any"}, {Kind: "any"}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
 	scm.Declare(en, &scm.Declaration{Name: "scan_key_predicate", Fn: func(args ...scm.Scmer) scm.Scmer {
 		var constraints []scanJoinOrderDriverConstraint

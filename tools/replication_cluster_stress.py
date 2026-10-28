@@ -1597,6 +1597,7 @@ def run_cluster_operator_contracts(node, journal, report_path, status=None, refe
     results = []
     for name, statement in cases:
         item = {"name": name, "sql": statement, "phase": "cluster" if status else "standalone"}
+        started = time.monotonic()
         try:
             item["explain"] = node.client.sql("EXPLAIN " + statement)
             code = json.dumps(item["explain"])
@@ -1620,6 +1621,7 @@ def run_cluster_operator_contracts(node, journal, report_path, status=None, refe
             item["status"] = "passed"
         except Exception as error:
             item.update(status="failed", error=str(error))
+        item["duration_seconds"] = time.monotonic() - started
         results.append(item)
         journal.append({"scenario": "cluster-sql-operator", **item})
         print(f"  {item['phase']}: {name}: {item['status']}", flush=True)

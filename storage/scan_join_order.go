@@ -21,6 +21,7 @@ import "sync"
 import "sort"
 import "runtime"
 import "container/heap"
+import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
 func optimizeScanJoinOrder(v []scm.Scmer, oc *scm.OptimizerContext, _ bool) (scm.Scmer, *scm.TypeDescriptor) {
@@ -121,9 +122,12 @@ type scanJoinOrderColumn struct {
 // is the ORDER BY driver. Every later input joins targetKeyCols against values
 // taken from the already assembled tuple through sourceKeyCols.
 type scanJoinOrderInput struct {
-	table         *table
-	filterCols    []string
-	filter        scm.Scmer
+	table      *table
+	filterCols []string
+	filter     scm.Scmer
+	// Optional immutable semijoin filter; the complete join still runs below.
+	candidateCols []string
+	candidate     scm.Scmer
 	accessSchema  scm.Scmer
 	accessValues  []scm.Scmer
 	sourceKeyCols []scanJoinOrderColumn
@@ -926,8 +930,8 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 	for keyIndex := 0; keyIndex < keyWidth; keyIndex++ {
 		callbackCols = append(callbackCols, fmt.Sprintf("#%d", keyIndex))
 	}
-	mapReduce := scm.Globalenv.Vars[scm.Symbol("scan_collect_row")]
-	combine := scm.Globalenv.Vars[scm.Symbol("scan_append_rows")]
+	mapReduce := scm.NewFunc(scanCollectRow)
+	combine := scm.NewFunc(scanAppendRows)
 
 	// A unique probe dominates the choice of seek, not the other predicates.
 	// Access compilation may already have removed exact bounds from condition,
@@ -1208,6 +1212,60 @@ func scanJoinOrderRangesOverlap(left scanJoinOrderShardRange, right scanJoinOrde
 	return true
 }
 
+// Use the already materialized outer keys as a worker-side semijoin filter.
+// Otherwise a four-key analytic join would transport every inner row merely to
+// reject almost all of them at the coordinator. This prunes rows before result
+// projection/paging and leaves shard fanout, runner combinations and combine
+// callbacks unchanged. For composite keys from different earlier inputs, the
+// independent column sets are a conservative superset; the real join remains
+// authoritative for tuple correlations, residuals and duplicate multiplicity.
+func scanJoinOrderCandidateInput(spec *scanJoinOrderSpec, index int, streams [][]*scanJoinOrderShardStream) ([]string, scm.Scmer) {
+	if index == 0 {
+		return nil, scm.NewNil()
+	}
+	input := &spec.inputs[index]
+	var constraints []scanJoinOrderDriverConstraint
+	remaining := 32 * 1024 // actual encoded key bytes; bounds wire construction, not a RAM estimate
+	for keyIndex, source := range input.sourceKeyCols {
+		// Cheap published cardinality avoids preparing a new key filter for small
+		// local joins where it is unlikely to eliminate enough projection work.
+		var sourceRows uint64
+		for _, stream := range streams[source.table] {
+			sourceRows += uint64(len(stream.records))
+		}
+		if targetRows := uint64(input.table.CountEstimate()); targetRows > 0 && sourceRows >= targetRows/4 {
+			continue
+		}
+		var keys [][]scm.Scmer
+		for _, stream := range streams[source.table] {
+			for _, record := range stream.records {
+				value := scanJoinOrderRecordValue(&spec.inputs[source.table], record, source.column)
+				if value.IsNil() {
+					continue
+				}
+				encoded, err := json.Marshal(value)
+				if err != nil || len(encoded)+4 > remaining {
+					return nil, scm.NewNil()
+				}
+				remaining -= len(encoded) + 4
+				keys = append(keys, []scm.Scmer{value})
+			}
+		}
+		sort.Slice(keys, func(i, j int) bool { return compareProjectKey(keys[i], keys[j]) < 0 })
+		unique := keys[:0]
+		for _, key := range keys {
+			if len(unique) == 0 || compareProjectKey(unique[len(unique)-1], key) != 0 {
+				unique = append(unique, key)
+			}
+		}
+		constraints = append(constraints, scanJoinOrderDriverConstraint{positions: []int{keyIndex}, keys: unique})
+	}
+	if len(constraints) == 0 {
+		return nil, scm.NewNil()
+	}
+	return input.targetKeyCols, newScanKeyPredicate(constraints, scm.NewNil(), 0)
+}
+
 func collectScanJoinOrderShardStreams(currentTx *TxContext, input *scanJoinOrderInput, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) []*scanJoinOrderShardStream {
 	scratch := acquireScanAnalyzeScratch()
 	defer releaseScanAnalyzeScratch(scratch)
@@ -1238,10 +1296,10 @@ func collectScanJoinOrderShardStreams(currentTx *TxContext, input *scanJoinOrder
 		}()
 		var queue *shardqueue
 		if acquisitionFailure != nil {
-			spec := scanOrderTableSpec{table: input.table, conditionCols: input.filterCols, condition: input.filter, sortcols: sortcols, projectionCols: append(append([]string(nil), input.readCols...), input.lateMapCols...)}
+			spec := scanOrderTableSpec{table: input.table, conditionCols: input.filterCols, condition: input.filter, acceptCols: input.candidateCols, accept: input.candidate, sortcols: sortcols, projectionCols: append(append([]string(nil), input.readCols...), input.lateMapCols...)}
 			queue = delegateOrderedQueue(currentTx, shard, bounds, &spec, sortdirs, 0, 0, -1, acquisitionFailure)
 		} else {
-			queue = shard.scan_order(bounds, input.filterCols, input.filter, nil, scm.NewNil(), sortcols, sortdirs, 0, 0, -1, input.readCols, currentTx, ss)
+			queue = shard.scan_order(bounds, input.filterCols, input.filter, input.candidateCols, input.candidate, sortcols, sortdirs, 0, 0, -1, input.readCols, currentTx, ss)
 		}
 		defer queue.closeReaders()
 		refs := make([]orderedBatchRecord, 0, len(queue.items))
@@ -1564,6 +1622,7 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 				sortdirs[i] = scanJoinKeyLess
 			}
 		}
+		input.candidateCols, input.candidate = scanJoinOrderCandidateInput(&spec, inputIndex, streams)
 		streams[inputIndex] = collectScanJoinOrderShardStreams(currentTx, input, sortcols, sortdirs)
 		if len(streams[inputIndex]) == 0 {
 			return spec.notFoundValue
