@@ -2292,8 +2292,9 @@ exercised by planner tests, not an execution-time validation or fallback. */
 		(physical_join_plan_for_sources sources))))
 
 /* CONTRACT: a membership stage owns its measured cardinalities and complete
-logical domain. The consuming block may supply workload estimates for this
-physical use; absence of a block estimate preserves the stage's own fact.
+logical domain. The stage owns the number of rows examined before its predicate.
+A consuming LIMIT counts accepted output rows and cannot replace that work
+with the page size. The block supplies only facts absent from this stage.
 Only the explicit cost interface is copied, never request sessions, transaction
 handles, join trees or another block's stage catalog. Operator defaults belong
 to the cost model, not to an adapter that overwrites unknown values. */
@@ -2301,7 +2302,9 @@ to the cost model, not to an adapter that overwrites unknown values. */
 	(group_stage_with_facts stage
 		(merge (list
 			(list (list (quote physical_membership_requirement)
-				(not (nil? (qassoc_get facts (quote membership_stage_id) nil)))))
+				(not (nil? (qassoc_get facts (quote membership_stage_id)
+					(qassoc_get (gs_facts stage) (quote membership_stage_id) nil))))))
+			(gs_facts stage)
 			(filter facts (lambda (fact)
 				(contains? '("membership_stage_id"
 					"membership_consumer" "membership_candidate_input_rows" "membership_candidate_estimated_rows" "membership_candidate_matching_rows"
@@ -2313,8 +2316,7 @@ to the cost model, not to an adapter that overwrites unknown values. */
 					"membership_driver_filter_columns" "membership_driver_map_columns" "membership_driver_expression_operations" "membership_driver_expression_depth"
 					"membership_selectivity_class" "membership_driver_alternative" "membership_order_limit_driver" "membership_order_limit"
 					"membership_order_offset" "reuse"
-				) (string (car fact)))))
-			(gs_facts stage))))))
+				) (string (car fact))))))))))
 
 (define physicalize_membership_requirement_expr_using (lambda (expr facts)
 	(match expr
@@ -2816,7 +2818,7 @@ Both searches already register the same bounded statistics/parameter guards. */
 				(qb_limit block)
 				(qb_offset block)
 				(qb_hidden block)
-				(map (qb_stages block) (lambda (stage) (join_reorder_stage_using stage_catalog stage planning_session tx)))
+				(qb_stages block)
 				(qb_facts block)))
 		(begin
 			(define provenance_graph (extract_join_hypergraph block))
@@ -2836,7 +2838,7 @@ Both searches already register the same bounded statistics/parameter guards. */
 					(qb_limit normalized)
 					(qb_offset normalized)
 					(qb_hidden normalized)
-					(map (qb_stages normalized) (lambda (stage) (join_reorder_stage_using stage_catalog stage planning_session tx)))
+					(qb_stages normalized)
 					(qb_facts normalized))
 				(merge (list
 					(query_block_reorder_telemetry normalized planning_session)
@@ -4644,7 +4646,7 @@ ordered batch is executable and what its actual driver workload is. */
 			(or found (and (not (source_outer? src))
 				(and (stage_output_relation? (source_relation src))
 					(equal? (stage_output_relation_id (source_relation src)) (gs_id stage)))))) false))
-		(and (not joined_inner) (source_is_base_table? input)
+		(and (not joined_inner) (or (source_is_base_table? input) (union_block? input))
 			(or (and (single_source? base_sources)
 				(empty_list? (group_stage_session_domain_keys stage)))
 				(and (not (empty_list? base_sources))
@@ -4680,7 +4682,9 @@ ordered batch is executable and what its actual driver workload is. */
 						/* Cost facts travel with the abstract marker; carrier selection
 						remains deferred to its physical consumer. */
 						(define costed_stage (group_stage_with_facts stage
-							(membership_truth_cost_facts block stage planning_session tx)))
+							(if (union_block? (gs_input stage))
+								(merge (list (candidate_reorder_telemetry stage (qb_sources block) block planning_session tx) (gs_facts stage)))
+								(membership_truth_cost_facts block stage planning_session tx))))
 						/* A membership branch below OR is not implied by the complete
 						predicate. Preserve that semantic placement fact for unknown-cost
 						fallbacks; it is not a physical carrier decision. */
@@ -5329,7 +5333,7 @@ the logical lookup still carries an alias which no longer exists. */
 					(qb_limit block)
 					(qb_offset block)
 					(qb_hidden block)
-					(map (qb_stages block) (lambda (stage) (join_reorder_stage_using stage_catalog stage planning_session tx)))
+					(qb_stages block)
 					(qb_facts block))
 				(begin
 					(define candidate (first_candidate_source (qb_stages block) sources))
@@ -5360,11 +5364,10 @@ the logical lookup still carries an alias which no longer exists. */
 									(qb_offset block)
 									(qb_hidden block)
 									(map (qb_stages block) (lambda (current_stage)
-										(join_reorder_stage_using stage_catalog
-											(if (equal? (gs_id current_stage) (gs_id stage))
-												(group_stage_with_facts current_stage
-													(merge (list candidate_telemetry (gs_facts current_stage))))
-												current_stage) planning_session tx)))
+										(if (equal? (gs_id current_stage) (gs_id stage))
+											(group_stage_with_facts current_stage
+												(merge (list candidate_telemetry (gs_facts current_stage))))
+											current_stage)))
 									(qb_facts block))
 								facts)))))))))
 
@@ -5617,6 +5620,16 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 (define join_reorder_node_using (lambda (stage_catalog node planning_session tx)
 	(if (query_block? node)
 		(begin
+			/* CONTRACT: stage inputs are planned bottom-up exactly once. A parent
+			membership requirement embeds the completed logical stage, including its
+			join tree; it must never capture an earlier, unplanned catalog entry. */
+			(define node (make_query_block
+				(qb_schema node) (qb_sources node) (qb_fields node) (qb_where node)
+				(qb_group node) (qb_having node) (qb_order node) (qb_limit node)
+				(qb_offset node) (qb_hidden node)
+				(map (qb_stages node) (lambda (stage)
+					(join_reorder_stage_using stage_catalog stage planning_session tx)))
+				(qb_facts node)))
 			(define node (normalize_logical_membership node planning_session tx))
 			(define exposed (expose_null_rejected_join_edges node true))
 			(define has_composite_presence (reduce (qb_sources node) (lambda (found src)

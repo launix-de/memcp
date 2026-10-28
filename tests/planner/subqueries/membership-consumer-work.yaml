@@ -23,7 +23,13 @@ test_cases:
             (list 'physical_planning_session (newsession))
             (list 'join_plan '(join-leaf "unrelated")))))
         (define facts (gs_facts prepared))
-        (if (and (equal? (gs_domain prepared) domain)
+        (define own_work (gs_facts (physical_membership_requirement_stage
+          (group_stage_with_facts stage
+            (list (list 'membership_driver_rows 80000) (list 'membership_consumer 'filter)))
+          (gs_facts prepared))))
+        (if (and (equal? (qassoc_get own_work 'membership_driver_rows nil) 80000)
+              (equal? (qassoc_get own_work 'membership_consumer nil) 'filter)
+              (equal? (gs_domain prepared) domain)
               (equal? (gs_keys prepared) domain)
               (equal? (qassoc_get facts 'membership_candidate_estimated_rows nil) 4)
               (equal? (qassoc_get facts 'membership_candidate_input_rows nil) 100000)
