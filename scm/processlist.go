@@ -647,6 +647,7 @@ func init_processlist() {
 					d3 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(32)}
 					ctx.ReclaimUntrackedRegs()
 					d4 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					_ = d4
 					ctx.EnsureDesc(&d4)
 					if d4.Loc == LocImm {
 						d5 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d4.Imm.Int() > 0)}
@@ -793,6 +794,7 @@ func init_processlist() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d26
 					ctx.EnsureDesc(&d26)
 					ctx.EnsureDesc(&d26)
 					ctx.ReclaimUntrackedRegs()
@@ -819,6 +821,7 @@ func init_processlist() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d29
 					ctx.StabilizeDescForControlFlow(&d29)
 					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(-1)}, int32(bbs[3].PhiBase)+int32(0))
 					return bbs[3].Render()
@@ -1485,6 +1488,8 @@ func init_processlist() {
 					d129 = callResults128[0]
 					ctx.EnsureDesc(&d30)
 					ctx.SyncDesc(&d129)
+					ctx.SyncDesc(&d28)
+					ctx.SyncDesc(&d30)
 					d130 = d28
 					d130.ID = 0
 					d131 = d30
@@ -1551,6 +1556,7 @@ func init_processlist() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d133
 					ctx.EnsureDesc(&d133)
 					if d133.Loc == LocImm {
 						d134 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d133.Imm.Int() > 100)}
@@ -2010,6 +2016,7 @@ func init_processlist() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					d0 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					_ = d0
 					ctx.EnsureDesc(&d0)
 					if d0.Loc == LocImm {
 						d1 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d0.Imm.Int() > 0)}

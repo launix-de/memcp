@@ -290,6 +290,7 @@ func init_timezone() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					d0 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					_ = d0
 					ctx.EnsureDesc(&d0)
 					if d0.Loc == LocImm {
 						d1 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d0.Imm.Int() == 0)}
@@ -2776,6 +2777,7 @@ func init_timezone() {
 					ctx.StabilizeDescForControlFlow(&d16)
 					ctx.FreeDesc(&d15)
 					d17 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					_ = d17
 					ctx.EnsureDesc(&d17)
 					if d17.Loc == LocImm {
 						d18 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d17.Imm.Int() > 2)}
@@ -3201,6 +3203,7 @@ func init_timezone() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d2)
 					d104 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					_ = d104
 					ctx.EnsureDesc(&d104)
 					if d104.Loc == LocImm {
 						d105 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d104.Imm.Int() > 1)}

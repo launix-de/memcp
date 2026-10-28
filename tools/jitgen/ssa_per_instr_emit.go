@@ -23,8 +23,11 @@ import "golang.org/x/tools/go/ssa"
 // to the existing legacy lowering body.
 func (g *codeGen) emitInstr(instr ssa.Instruction) {
 	if value, ok := instr.(ssa.Value); ok && g.reachability != nil {
-		if c := g.reachability.constant(value); c != nil {
-			g.vals[value.Name()] = g.resolveValue(c)
+		if replacement := g.reachability.replacement(value); replacement != value {
+			g.vals[value.Name()] = g.resolveValue(replacement)
+			if _, constant := replacement.(*ssa.Const); !constant {
+				g.ssaAliases[value.Name()] = replacement.Name()
+			}
 			return
 		}
 	}

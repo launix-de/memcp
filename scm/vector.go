@@ -468,6 +468,7 @@ func init_vector() {
 					ctx.StabilizeDescForControlFlow(&d19)
 					ctx.FreeDesc(&d18)
 					d20 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					_ = d20
 					ctx.EnsureDesc(&d20)
 					if d20.Loc == LocImm {
 						d21 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d20.Imm.Int() > 2)}
@@ -1100,6 +1101,7 @@ func init_vector() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d92
 					ctx.EnsureDesc(&d13)
 					ctx.EnsureDesc(&d92)
 					ctx.EnsureDescsTogether(&d13, &d92)
@@ -1580,6 +1582,7 @@ func init_vector() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d148
 					ctx.EnsureDesc(&d13)
 					ctx.EnsureDesc(&d148)
 					ctx.EnsureDescsTogether(&d13, &d148)
@@ -1811,6 +1814,7 @@ func init_vector() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d207
 					ctx.EnsureDesc(&d15)
 					ctx.EnsureDesc(&d207)
 					ctx.EnsureDescsTogether(&d15, &d207)
@@ -2663,6 +2667,7 @@ func init_vector() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d446
 					ctx.EnsureDesc(&d15)
 					ctx.EnsureDesc(&d446)
 					ctx.EnsureDescsTogether(&d15, &d446)

@@ -94,6 +94,11 @@ func analyzeSSAReachability(fn *ssa.Function, bindings map[ssa.Value]*ssa.Const)
 			r.facts[p] = ssaConstantFact{dynamic: true}
 		}
 	}
+	for value, c := range bindings {
+		if c != nil {
+			r.facts[value] = ssaConstantFact{value: c}
+		}
+	}
 	r.blocks[fn.Blocks[0]] = true
 	changed := true
 	for changed {
@@ -113,6 +118,9 @@ func analyzeSSAReachability(fn *ssa.Function, bindings map[ssa.Value]*ssa.Const)
 			}
 			for _, instr := range b.Instrs {
 				if value, ok := instr.(ssa.Value); ok {
+					if bindings[value] != nil {
+						continue
+					}
 					previous := r.facts[value]
 					next := joinSSAConstant(previous, r.evaluate(value))
 					if next.dynamic != previous.dynamic || next.value != previous.value {
@@ -272,6 +280,47 @@ func canonicalSSAInteger(value constant.Value, typ types.Type) constant.Value {
 	}
 	if signed && constant.Compare(value, token.GEQ, constant.Shift(constant.MakeInt64(1), token.SHL, uint(bits-1))) {
 		value = constant.BinaryOp(value, token.SUB, modulus)
+	}
+	return value
+}
+
+// replacement removes identity phis after executable-edge pruning, including
+// slices and other compiler-only values which cannot be represented as scalar
+// constants. Loop-carried differing values retain their ordinary phi home.
+// replacement preserves identities as well as constants. In particular, an
+// untaken optional slice trim must not turn a virtual argument directory into
+// a materialized phi. Loop-carried changes remain distinct incoming values.
+func (r *ssaReachability) replacement(value ssa.Value) ssa.Value {
+	if c := r.constant(value); c != nil {
+		return c
+	}
+	if _, phi := value.(*ssa.Phi); !phi {
+		return value
+	}
+	seen := make(map[ssa.Value]bool)
+	for !seen[value] {
+		seen[value] = true
+		if c := r.constant(value); c != nil {
+			return c
+		}
+		phi, ok := value.(*ssa.Phi)
+		if !ok {
+			return value
+		}
+		var only ssa.Value
+		for i, edge := range phi.Edges {
+			if !r.incoming(phi.Block(), i) || edge == phi {
+				continue
+			}
+			if only != nil && only != edge {
+				return value
+			}
+			only = edge
+		}
+		if only == nil {
+			return value
+		}
+		value = only
 	}
 	return value
 }
