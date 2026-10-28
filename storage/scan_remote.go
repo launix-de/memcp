@@ -21,9 +21,9 @@ import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// Version 8 carries value-or-factory initializers through the native closure
-// codec, in addition to operator tasks and installation/permission reference ACKs.
-const scanWireVersion = 8
+// Version 9 adds adaptive ordered windows and half-batch ACKs to the native
+// closure codec's value-or-factory initializers and permission reference ACKs.
+const scanWireVersion = 9
 
 type shardScanHorizon struct {
 	Main  uint32 `json:"main"`
@@ -313,7 +313,10 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 			if !ok {
 				return fmt.Errorf("missing native ordered run")
 			}
-			view, _ := run.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+			view, failure := run.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+			if failure != nil {
+				return failure
+			}
 			ref, failure := s.service.exportObject(s.peer, run, view.(scm.Scmer))
 			if failure != nil {
 				return failure

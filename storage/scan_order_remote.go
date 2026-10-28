@@ -5,11 +5,30 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
+import "sync"
+import "time"
 import "context"
 import "strings"
 import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
+
+const (
+	minOrderedBatch   = 16
+	maxOrderedBatch   = 4096
+	orderedQueueItems = 16 * 1024
+)
+
+// Divide one coordinator's target window across its shard jobs. The floor
+// amortizes network messages for large fanouts; the wire byte ceiling can still
+// shorten a batch of unusually wide rows. LIMIT bounds useful speculative work.
+func orderedScanBatchSize(shards, limit int) int {
+	size := min(maxOrderedBatch, max(minOrderedBatch, orderedQueueItems/max(1, shards)))
+	if limit >= 0 {
+		size = min(size, max(minOrderedBatch, limit))
+	}
+	return size
+}
 
 // Ordered delegation keeps the native shard sort and coordinator merge. The
 // worker freezes a projected run, not a shard dump: only comparison keys and
@@ -23,6 +42,7 @@ import "github.com/launix-de/memcp/scm"
 // the physical generation until every imported peer handle becomes unreachable.
 // Pages are bounded; neither an unbounded RPC reply nor per-row RPC is allowed.
 type shardOrderInvocation struct {
+	batchSize     int
 	columns       []scm.Scmer
 	directions    []func(...scm.Scmer) scm.Scmer
 	acceptCols    []string
@@ -34,6 +54,7 @@ type shardOrderInvocation struct {
 }
 
 type remoteScanOrder struct {
+	BatchSize        int               `json:"batch_size"`
 	Columns          []scanWireValue   `json:"columns"`
 	Directions       []json.RawMessage `json:"directions"`
 	AcceptColumns    []string          `json:"accept_columns,omitempty"`
@@ -45,7 +66,7 @@ type remoteScanOrder struct {
 }
 
 func freezeScanOrder(input *shardOrderInvocation, bindings *scm.SerializationContext) (*remoteScanOrder, error) {
-	result := &remoteScanOrder{AcceptColumns: input.acceptCols, Projected: input.projected, PartitionColumns: input.partitionCols, Offset: input.offset, Limit: input.limit}
+	result := &remoteScanOrder{BatchSize: input.batchSize, AcceptColumns: input.acceptCols, Projected: input.projected, PartitionColumns: input.partitionCols, Offset: input.offset, Limit: input.limit}
 	for _, column := range input.columns {
 		frozen, err := freezeScanValue(column, 0, bindings)
 		if err != nil {
@@ -88,10 +109,10 @@ func freezeScanDirection(direction func(...scm.Scmer) scm.Scmer, bindings *scm.S
 }
 
 func (wire *remoteScanOrder) bind(decode scm.ProcedureDecode) (*shardOrderInvocation, error) {
-	if len(wire.Columns) != len(wire.Directions) || wire.PartitionColumns < 0 || wire.PartitionColumns > len(wire.Columns) || wire.Offset < 0 || wire.Limit < -1 {
+	if wire.BatchSize < minOrderedBatch || wire.BatchSize > maxOrderedBatch || len(wire.Columns) != len(wire.Directions) || wire.PartitionColumns < 0 || wire.PartitionColumns > len(wire.Columns) || wire.Offset < 0 || wire.Limit < -1 {
 		return nil, fmt.Errorf("invalid ordered scan contract")
 	}
-	result := &shardOrderInvocation{acceptCols: wire.AcceptColumns, projected: wire.Projected, partitionCols: wire.PartitionColumns, offset: wire.Offset, limit: wire.Limit}
+	result := &shardOrderInvocation{batchSize: wire.BatchSize, acceptCols: wire.AcceptColumns, projected: wire.Projected, partitionCols: wire.PartitionColumns, offset: wire.Offset, limit: wire.Limit}
 	for _, column := range wire.Columns {
 		value, err := column.thaw(0, decode)
 		if err != nil {
@@ -130,6 +151,11 @@ func (wire *remoteScanOrder) bind(decode scm.ProcedureDecode) (*shardOrderInvoca
 }
 
 type orderedScanRun struct {
+	mu         sync.Mutex // batch ACK/finish only; no row-loop synchronization
+	batchSize  int
+	sent       int
+	lastStart  int
+	closed     bool
 	shard      *storageShard
 	columns    []string
 	keys       int
@@ -142,7 +168,10 @@ func (s *storageShard) prepareOrderedRun(input shardScanInvocation) *orderedScan
 	order := input.order
 	queue := s.scan_order(input.access, input.conditionCols, input.condition, order.acceptCols, order.accept, order.columns, order.directions, order.partitionCols, order.offset, order.limit, nil, input.tx, SessionStateFromTx(input.tx))
 	defer queue.closeReaders()
-	run := &orderedScanRun{shard: s, columns: order.projected, keys: len(queue.scols), universe: queue.universe, candidates: queue.candidateCount, rows: make([]scm.Scmer, len(queue.items))}
+	run := &orderedScanRun{batchSize: order.batchSize, shard: s, columns: order.projected, keys: len(queue.scols), universe: queue.universe, candidates: queue.candidateCount, rows: make([]scm.Scmer, len(queue.items))}
+	if run.batchSize == 0 {
+		run.batchSize = orderedScanBatchSize(1, order.limit)
+	}
 	if len(queue.items) == 0 {
 		return run
 	} // an eliminated shard need not load projection columns
@@ -169,6 +198,16 @@ func (run *orderedScanRun) HandleClusterRequest(ctx context.Context, request scm
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if request.Method == "finish" {
+		run.closed = true
+		run.rows = nil
+		return scm.NewNil(), nil
+	}
+	if run.closed {
+		return nil, fmt.Errorf("ordered shard job is finished")
+	}
 	switch request.Method {
 	case "view":
 		columns := make([]scm.Scmer, len(run.columns))
@@ -177,21 +216,28 @@ func (run *orderedScanRun) HandleClusterRequest(ctx context.Context, request scm
 		}
 		// Small Top-N runs normally fit here. Piggyback the first bounded page so
 		// those scans need no separate projection roundtrip after handle import.
-		first, err := run.page(0, 256, 32*1024)
+		first, err := run.page(0, run.batchSize, 32*1024)
 		if err != nil {
 			return nil, err
 		}
-		return scm.NewSlice([]scm.Scmer{scm.NewInt(int64(len(run.rows))), scm.NewInt(int64(run.keys)), scm.NewInt(int64(run.universe)), scm.NewSlice(columns), first, scm.NewString(run.shard.uuid.String())}), nil
+		if run.sent == 0 {
+			run.sent = len(first.Slice())
+		}
+		return scm.NewSlice([]scm.Scmer{scm.NewInt(int64(len(run.rows))), scm.NewInt(int64(run.keys)), scm.NewInt(int64(run.universe)), scm.NewSlice(columns), first, scm.NewString(run.shard.uuid.String()), scm.NewInt(int64(run.batchSize))}), nil
 
-	case "page":
+	case "ack":
 		if len(request.Arguments) != 2 {
-			return nil, fmt.Errorf("ordered page requires offset and count")
+			return nil, fmt.Errorf("ordered ACK requires consumed count and next offset")
 		}
-		start, count := int(request.Arguments[0].Int()), int(request.Arguments[1].Int())
-		if start < 0 || start > len(run.rows) || count <= 0 || count > 256 {
-			return nil, fmt.Errorf("invalid ordered page range")
+		consumed, start := int(request.Arguments[0].Int()), int(request.Arguments[1].Int())
+		if start != run.sent || start >= len(run.rows) || consumed < run.lastStart+(run.sent-run.lastStart+1)/2 || consumed > start {
+			return nil, fmt.Errorf("invalid ordered batch ACK")
 		}
-		return run.page(start, count, 96*1024)
+		page, err := run.page(start, run.batchSize, 96*1024)
+		if err == nil {
+			run.lastStart, run.sent = start, start+len(page.Slice())
+		}
+		return page, err
 	}
 
 	return nil, fmt.Errorf("unsupported ordered-run request %q", request.Method)
@@ -265,9 +311,58 @@ type remoteOrderQueue struct {
 	generation        uuid.UUID // actual owner input, independent of the local routing stub
 	run               *remoteOrderedRun
 	ctx               context.Context
+	cancel            context.CancelFunc
+	pending           chan orderedBatchResult // at most one successor batch
+	batchSize         int
+	pageSize          int
+	consumed          int
 	total, next, keys int
 	columns           map[string]int
 	rows              map[uint32][]scm.Scmer
+}
+
+type orderedBatchResult struct {
+	page       scm.Scmer
+	err        error
+	panicValue any
+}
+
+// The half-window ACK grants exactly one more batch to this shard job. The
+// goroutine owns only the reply, never the consumer's row directory or cursor.
+func (remote *remoteOrderQueue) prefetch() {
+	if remote.pending != nil || remote.next == remote.total {
+		return
+	}
+	reply := make(chan orderedBatchResult, 1)
+	remote.pending = reply
+	consumed, next := remote.consumed, remote.next
+	go func() {
+		result := orderedBatchResult{}
+		defer func() {
+			result.panicValue = recover()
+			reply <- result
+		}()
+		result.page, result.err = remote.run.handle.Call(remote.ctx, scm.ClusterRequest{Method: "ack", Arguments: []scm.Scmer{scm.NewInt(int64(consumed)), scm.NewInt(int64(next))}})
+	}()
+}
+
+// LIMIT, errors and cancellation all cancel and join a speculative receive
+// before releasing the job. Finishing drops its buffered answers immediately;
+// the existing GC lease continues to protect any retained physical identities.
+func (remote *remoteOrderQueue) close() {
+	if remote.cancel == nil {
+		return
+	}
+	remote.cancel()
+	if remote.pending != nil {
+		<-remote.pending
+		remote.pending = nil
+	}
+	remote.cancel = nil
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(remote.ctx), 5*time.Second)
+	defer cancel()
+	_, _ = remote.run.handle.Call(ctx, scm.ClusterRequest{Method: "finish"})
+	remote.rows = nil
 }
 
 func (remote *remoteOrderQueue) fetch(queue *shardqueue) {
@@ -279,13 +374,18 @@ func (remote *remoteOrderQueue) fetch(queue *shardqueue) {
 		rows = remote.run.handle.View.Slice()[4].Slice()
 	}
 	if len(rows) == 0 {
-		page, err := remote.run.handle.Call(remote.ctx, scm.ClusterRequest{Method: "page", Arguments: []scm.Scmer{scm.NewInt(int64(remote.next)), scm.NewInt(256)}})
-		if err != nil {
-			panic(err)
+		remote.prefetch()
+		result := <-remote.pending
+		remote.pending = nil
+		if result.panicValue != nil {
+			panic(result.panicValue)
 		}
-		rows = page.Slice()
+		if result.err != nil {
+			panic(result.err)
+		}
+		rows = result.page.Slice()
 	}
-	if len(rows) == 0 || len(rows) > 256 || len(rows) > remote.total-remote.next {
+	if len(rows) == 0 || len(rows) > remote.batchSize || len(rows) > remote.total-remote.next {
 		panic("invalid ordered page length")
 	}
 	queue.items = make([]uint32, len(rows))
@@ -299,6 +399,7 @@ func (remote *remoteOrderQueue) fetch(queue *shardqueue) {
 		remote.rows[id] = row
 	}
 	remote.next += len(rows)
+	remote.pageSize = len(rows)
 }
 
 // Keep the native merge advance inlinable: its only extra work is a pointer
@@ -311,10 +412,14 @@ func (queue *shardqueue) consumeOrdered(n int, discard bool) {
 	}
 }
 func (remote *remoteOrderQueue) consume(queue *shardqueue, consumed []uint32, discard bool) {
+	remote.consumed += len(consumed)
 	if discard {
 		for _, id := range consumed {
 			delete(remote.rows, id)
 		}
+	}
+	if len(queue.items) <= remote.pageSize/2 {
+		remote.prefetch()
 	}
 	if len(queue.items) == 0 {
 		remote.fetch(queue)
@@ -358,7 +463,11 @@ func delegateOrderedQueue(tx *TxContext, shard *storageShard, access scanAccess,
 		}
 	}
 
-	order := &shardOrderInvocation{columns: spec.sortcols, directions: dirs, acceptCols: spec.acceptCols, accept: spec.accept, projected: columns, partitionCols: part, offset: offset, limit: limit}
+	batchSize := spec.remoteBatchSize
+	if batchSize == 0 {
+		batchSize = orderedScanBatchSize(1, limit)
+	}
+	order := &shardOrderInvocation{batchSize: batchSize, columns: spec.sortcols, directions: dirs, acceptCols: spec.acceptCols, accept: spec.accept, projected: columns, partitionCols: part, offset: offset, limit: limit}
 	result := (shardScanInvocation{operator: shardOrdered, order: order, tx: tx, access: access, conditionCols: spec.conditionCols, condition: spec.condition}).delegate(shard, delegation)
 	if result.err.r != nil {
 		panic(result.err)
@@ -368,14 +477,21 @@ func delegateOrderedQueue(tx *TxContext, shard *storageShard, access scanAccess,
 		panic("missing imported ordered run")
 	}
 	view := run.handle.View.Slice()
-	if len(view) != 6 || !view[0].IsInt() || view[0].Int() < 0 || !view[1].IsInt() || view[1].Int() < 0 || view[1].Int() > int64(len(dirs)) || !view[2].IsInt() || view[2].Int() < 0 || view[2].Int() > int64(^uint32(0)) {
+	if len(view) != 7 || !view[0].IsInt() || view[0].Int() < 0 || !view[1].IsInt() || view[1].Int() < 0 || view[1].Int() > int64(len(dirs)) || !view[2].IsInt() || view[2].Int() < 0 || view[2].Int() > int64(^uint32(0)) || !view[6].IsInt() || int(view[6].Int()) != batchSize {
 		panic("invalid ordered run view")
 	}
 	generation, err := uuid.Parse(view[5].String())
 	if err != nil {
 		panic("invalid ordered input generation")
 	}
-	remote := &remoteOrderQueue{generation: generation, run: run, ctx: scanQueryContext(tx, context.Background()), total: int(view[0].Int()), keys: int(view[1].Int()), columns: make(map[string]int), rows: make(map[uint32][]scm.Scmer)}
+	ctx, cancel := context.WithCancel(scanQueryContext(tx, context.Background()))
+	remote := &remoteOrderQueue{generation: generation, run: run, ctx: ctx, cancel: cancel, batchSize: batchSize, total: int(view[0].Int()), keys: int(view[1].Int()), columns: make(map[string]int), rows: make(map[uint32][]scm.Scmer)}
+	complete := false
+	defer func() {
+		if !complete {
+			remote.close()
+		}
+	}()
 	for i, name := range view[3].Slice() {
 		remote.columns[name.String()] = i
 	}
@@ -396,6 +512,7 @@ func delegateOrderedQueue(tx *TxContext, shard *storageShard, access scanAccess,
 		queue.sortless = append(queue.sortless, scm.OrderRelationLess(dirs[i]))
 	}
 	remote.fetch(queue)
+	complete = true
 	return queue
 }
 
