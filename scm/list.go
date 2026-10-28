@@ -24689,68 +24689,14 @@ func init_list() {
 		Name: "set_assoc",
 
 		Fn: func(a ...Scmer) Scmer {
-			if len(a) > 4 {
-				return setAssocPairs(a[0], a[1:], false)
-			}
-			var mergeFn func(Scmer, Scmer) Scmer
-			if len(a) > 3 {
-				// An association update calls its merger at most once. Preparing a
-				// serial callback tree here cannot amortize its construction.
-				merge := a[3]
-				mergeFn = func(oldV, newV Scmer) Scmer {
-					if merge.GetTag() == tagFunc || (merge.IsProc() && merge.Proc().compiled() != nil) {
-						// Keep native argument ownership and authoritative
-						// compiled entry dispatch unchanged.
-						prepared := PrepareSerialProc(merge)
-						return prepared.Call([]Scmer{oldV, newV})
-					}
-					if merge.IsProc() {
-						return Apply(merge, oldV, newV)
-					}
-					// Keep the serial adapter's constant-result compatibility.
-					if merge.GetTag() == tagAny {
-						if fn, ok := merge.Any().(func(...Scmer) Scmer); ok {
-							return fn(oldV, newV)
-						}
-					}
-					return merge
-				}
-			}
-			slice, fd := asAssoc(a[0], "set_assoc")
-			if fd == nil {
-				// defensive copy — set_assoc must not mutate the original
-				list := append([]Scmer{}, slice...)
-				for i := 0; i < len(list); i += 2 {
-					if Equal(list[i], a[1]) {
-						if mergeFn != nil {
-							list[i+1] = mergeFn(list[i+1], a[2])
-						} else {
-							list[i+1] = a[2]
-						}
-						return NewSlice(list)
-					}
-				}
-				list = append(list, a[1], a[2])
-				if len(list) >= 10 {
-					fd := NewFastDictValue(len(list)/2 + 4)
-					for i := 0; i < len(list); i += 2 {
-						fd.Set(list[i], list[i+1], nil)
-					}
-					return NewFastDict(fd)
-				}
-				return NewSlice(list)
-			} else {
-				fd = fd.Copy()
-				fd.Set(a[1], a[2], mergeFn)
-				return NewFastDict(fd)
-			}
+			return setAssocPairs(a[0], a[1:], false)
 		},
-		Type: &TypeDescriptor{Kind: "func", Description: "returns a new dictionary with one or more key/value pairs updated.\nThe original dictionary is not modified. A single pair accepts an optional merger; multiple pairs use last-value-wins semantics.",
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a new dictionary with one or more key/value pairs updated.\nThe original dictionary is not modified. An optional final merger combines existing values for every pair; otherwise the last value wins.",
 			Params: []*TypeDescriptor{
 				{Kind: "list", Label: "dict", Description: "input dictionary"},
 				{Kind: "string", Label: "key", Description: "key that has to be set"},
 				{Kind: "any", Label: "value", Description: "new value to set"},
-				{Kind: "any", Label: "merge_or_pairs", Description: "optional merger for one pair, or additional key/value pairs", Optional: true, Variadic: true},
+				{Kind: "any", Label: "merge_or_pairs", Description: "additional key/value pairs, optionally followed by a merge function", Optional: true, Variadic: true},
 			},
 			Return: FreshAlloc,
 			Const:  true,
@@ -59206,70 +59152,14 @@ func init_list() {
 		Name: "set_assoc_mut",
 
 		Fn: func(a ...Scmer) Scmer {
-			if len(a) > 4 {
-				return setAssocPairs(a[0], a[1:], true)
-			}
-			var mergeFn func(Scmer, Scmer) Scmer
-			if len(a) > 3 {
-				// An association update calls its merger at most once. Preparing a
-				// serial callback tree here cannot amortize its construction.
-				merge := a[3]
-				mergeFn = func(oldV, newV Scmer) Scmer {
-					if merge.GetTag() == tagFunc || (merge.IsProc() && merge.Proc().compiled() != nil) {
-						// Keep native argument ownership and authoritative
-						// compiled entry dispatch unchanged.
-						prepared := PrepareSerialProc(merge)
-						return prepared.Call([]Scmer{oldV, newV})
-					}
-					if merge.IsProc() {
-						return Apply(merge, oldV, newV)
-					}
-					// Keep the serial adapter's constant-result compatibility.
-					if merge.GetTag() == tagAny {
-						if fn, ok := merge.Any().(func(...Scmer) Scmer); ok {
-							return fn(oldV, newV)
-						}
-					}
-					return merge
-				}
-			}
-			slice, fd := asAssoc(a[0], "set_assoc_mut")
-			if fd == nil {
-				// Small associations are slice-backed and may originate from a
-				// reducer neutral shared by parallel shards. Copy the bounded
-				// representation before changing or extending it; once promoted
-				// to a FastDict, ownership is exclusive and updates stay in place.
-				list := append([]Scmer(nil), slice...)
-				for i := 0; i < len(list); i += 2 {
-					if Equal(list[i], a[1]) {
-						if mergeFn != nil {
-							list[i+1] = mergeFn(list[i+1], a[2])
-						} else {
-							list[i+1] = a[2]
-						}
-						return NewSlice(list)
-					}
-				}
-				list = append(list, a[1], a[2])
-				if len(list) >= 10 {
-					fd := NewFastDictValue(len(list)/2 + 4)
-					for i := 0; i < len(list); i += 2 {
-						fd.Set(list[i], list[i+1], nil)
-					}
-					return NewFastDict(fd)
-				}
-				return NewSlice(list)
-			} else {
-				fd.Set(a[1], a[2], mergeFn)
-				return NewFastDict(fd)
-			}
+			return setAssocPairs(a[0], a[1:], true)
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "in-place set_assoc for one or more key/value pairs (optimizer-only, mutates owned FastDict inputs directly)",
 			Params: []*TypeDescriptor{
 				{Kind: "list", Label: "dict", Description: "owned dictionary to mutate"},
 				{Kind: "string", Label: "key", Description: "key to set"},
 				{Kind: "any", Label: "value", Description: "new value"},
-				{Kind: "any", Label: "merge_or_pairs", Description: "optional merger for one pair, or additional key/value pairs", Optional: true, Variadic: true},
+				{Kind: "any", Label: "merge_or_pairs", Description: "additional key/value pairs, optionally followed by a merge function", Optional: true, Variadic: true},
 			},
 			Return:    FreshAlloc,
 			Const:     true,

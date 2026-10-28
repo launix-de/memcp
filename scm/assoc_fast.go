@@ -773,20 +773,41 @@ func (d *FastDict) Copy() *FastDict {
 
 func (d *FastDict) ToList() []Scmer { return d.Pairs }
 
-// setAssocPairs builds a multi-pair association with one ownership decision.
-// Repeated immutable set_assoc calls copy a growing index and are quadratic;
-// this bulk form copies once and promotes to the existing hash representation.
-// Four total builtin arguments retain the historical single-pair merger form.
+// setAssocPairs is the common implementation of both association builtins.
+// An odd argument tail ends in a merger; the rest is key/value pairs. Preserve
+// the single-pair callback contract, including constant-result mergers. Nothing
+// prepares or invokes a merger unless an existing key actually needs it.
 func setAssocPairs(input Scmer, updates []Scmer, mutable bool) Scmer {
+	var mergeFn func(Scmer, Scmer) Scmer
 	if len(updates)%2 != 0 {
-		panic("set_assoc expects complete key/value pairs")
+		merge := updates[len(updates)-1]
+		updates = updates[:len(updates)-1]
+		mergeFn = func(oldV, newV Scmer) Scmer {
+			if merge.GetTag() == tagFunc || (merge.IsProc() && merge.Proc().compiled() != nil) {
+				prepared := PrepareSerialProc(merge)
+				return prepared.Call([]Scmer{oldV, newV})
+			}
+			if merge.IsProc() {
+				return Apply(merge, oldV, newV)
+			}
+			if merge.GetTag() == tagAny {
+				if fn, ok := merge.Any().(func(...Scmer) Scmer); ok {
+					return fn(oldV, newV)
+				}
+			}
+			return merge
+		}
+	}
+	if len(updates) == 0 {
+		panic("set_assoc requires at least one key/value pair")
 	}
 	pairs, dict := asAssoc(input, "set_assoc")
 	if dict != nil {
 		if !mutable {
 			dict = dict.Copy()
 		}
-	} else if len(pairs)+len(updates) >= 10 {
+	} else if len(pairs) >= 10 || len(updates) >= 10 {
+		// Large inputs/constructions never do a linear search per supplied key.
 		dict = NewFastDictValue((len(pairs) + len(updates)) / 2)
 		for i := 0; i < len(pairs); i += 2 {
 			dict.Set(pairs[i], pairs[i+1], nil)
@@ -794,24 +815,37 @@ func setAssocPairs(input Scmer, updates []Scmer, mutable bool) Scmer {
 	}
 	if dict != nil {
 		for i := 0; i < len(updates); i += 2 {
-			dict.Set(updates[i], updates[i+1], nil)
+			dict.Set(updates[i], updates[i+1], mergeFn)
 		}
 		return NewFastDict(dict)
 	}
-	// This representation remains bounded to fewer than five pairs.
+	// Borrowed small inputs are copied once, also in the mutable variant:
+	// reducer neutrals may be shared. Reserve all appends in this allocation.
 	out := make([]Scmer, len(pairs), len(pairs)+len(updates))
 	copy(out, pairs)
 	for i := 0; i < len(updates); i += 2 {
 		found := false
 		for j := 0; j < len(out); j += 2 {
 			if Equal(out[j], updates[i]) {
-				out[j+1], found = updates[i+1], true
+				if mergeFn != nil {
+					out[j+1] = mergeFn(out[j+1], updates[i+1])
+				} else {
+					out[j+1] = updates[i+1]
+				}
+				found = true
 				break
 			}
 		}
 		if !found {
 			out = append(out, updates[i], updates[i+1])
 		}
+	}
+	if len(out) >= 10 {
+		dict = NewFastDictValue(len(out) / 2)
+		for i := 0; i < len(out); i += 2 {
+			dict.Set(out[i], out[i+1], nil)
+		}
+		return NewFastDict(dict)
 	}
 	return NewSlice(out)
 }

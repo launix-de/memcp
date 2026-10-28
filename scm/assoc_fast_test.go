@@ -408,13 +408,13 @@ func TestSetAssocBulk(t *testing.T) {
 				}
 			}
 		})
-		t.Run(name+"/incomplete-pair", func(t *testing.T) {
+		t.Run(name+"/missing-pair", func(t *testing.T) {
 			defer func() {
 				if recover() == nil {
-					t.Fatal("incomplete bulk pair was accepted")
+					t.Fatal("missing key/value pair was accepted")
 				}
 			}()
-			Apply(Globalenv.Vars[Symbol(name)], NewSlice(nil), NewString("a"), NewInt(1), NewString("b"), NewInt(2), NewString("c"))
+			Apply(Globalenv.Vars[Symbol(name)], NewSlice(nil), Globalenv.Vars["+"])
 		})
 	}
 }
@@ -466,6 +466,62 @@ func BenchmarkSetAssocBulk(b *testing.B) {
 					assocBenchmarkSink = call[0]
 				}
 			})
+		}
+	}
+}
+
+func TestSetAssocBulkMerge(t *testing.T) {
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		for _, hashed := range []bool{false, true} {
+			for _, size := range []int{3, 6} {
+				t.Run(fmt.Sprintf("%s/hashed=%v/pairs=%d", name, hashed, size), func(t *testing.T) {
+					input := NewSlice([]Scmer{NewString("a"), NewInt(1)})
+					if hashed {
+						dict := NewFastDictValue(1)
+						dict.Set(NewString("a"), NewInt(1), nil)
+						input = NewFastDict(dict)
+					}
+					pairs := []Scmer{NewString("a"), NewInt(2), NewString("b"), NewInt(9), NewString("a"), NewInt(3), NewString("c"), NewInt(7), NewString("b"), NewInt(1), NewString("d"), NewInt(5)}
+					var calls [][]Scmer
+					merge := NewFunc(func(a ...Scmer) Scmer {
+						calls = append(calls, a) // Retained call frames must remain independent.
+						return NewInt(a[0].Int()*10 + a[1].Int())
+					})
+					args := append([]Scmer{input}, pairs[:size*2]...)
+					args = append(args, merge)
+					result := Apply(Globalenv.Vars[Symbol(name)], args...)
+					if Apply(result, NewString("a")).Int() != 123 {
+						t.Fatal("merger did not observe earlier pairs in order")
+					}
+					wantCalls, wantB := 2, int64(9)
+					if size == 6 {
+						wantCalls, wantB = 3, 91
+					}
+					if len(calls) != wantCalls || calls[0][0].Int() != 1 || calls[0][1].Int() != 2 || calls[1][0].Int() != 12 || calls[1][1].Int() != 3 || Apply(result, NewString("b")).Int() != wantB {
+						t.Fatalf("wrong merge calls/results: %v, %s", calls, result.String())
+					}
+					if !(name == "set_assoc_mut" && hashed) && Apply(input, NewString("a")).Int() != 1 {
+						t.Fatal("merger changed borrowed input")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSetAssocBulkMergeOptimizedAndJIT(t *testing.T) {
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		proc := preparedTestProc(t, fmt.Sprintf(`(lambda (input) (%s input "a" 2 "b" 9 "a" 3 "c" 4 "b" 1 "d" 5 (lambda (old new) (+ (* old 10) new))))`, name))
+		if jitEnabled {
+			proc = jitCompile(proc)
+			if proc.Proc().compiled() == nil {
+				t.Fatal("bulk merge callback did not compile")
+			}
+		}
+		input := NewSlice([]Scmer{NewString("a"), NewInt(1)})
+		result := Apply(proc, input)
+		if Apply(result, NewString("a")).Int() != 123 || Apply(result, NewString("b")).Int() != 91 {
+			t.Fatalf("%s changed bulk merge semantics: %s", name, result.String())
 		}
 	}
 }
