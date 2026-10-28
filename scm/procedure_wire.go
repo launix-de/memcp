@@ -32,6 +32,13 @@ func MarshalProcedure(value Scmer, bindings ...*SerializationContext) (data []by
 			data = nil
 		}
 	}()
+	if !value.IsProc() && value.IsNativeFunc() {
+		if _, ok := ClusterObjectOf(value); ok {
+			// Runtime callables keep their native local ABI. The normal serializer
+			// reconstructs their portable value/peer handle once, before invocation.
+			value = Eval(NewSlice([]Scmer{NewSymbol("lambda"), NewSymbol("args"), NewSlice([]Scmer{NewSymbol("apply"), value, NewSymbol("args")})}), &Globalenv)
+		}
+	}
 	if !value.IsProc() {
 		declaration := DeclarationForValue(value)
 		if declaration == nil || value.IsSymbol() {

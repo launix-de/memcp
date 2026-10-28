@@ -17,6 +17,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -215,4 +216,52 @@ func TestDatabaseTransactionLogSwapFailureKeepsOldAuthority(t *testing.T) {
 		t.Fatal("failed swap changed the durable transaction authority")
 	}
 	reloaded.closeTransactionLog()
+}
+
+// A native UPDATE callback can run without any scan mapper or INSERT success
+// path. The commit itself owns durability for every changed generation.
+func TestNativeACIDUpdatesSurviveRestart(t *testing.T) {
+	for _, count := range []int{1, 2} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			first, engine := createDurabilityTestTable(t, "tnative_update_commit", 1)
+			tables := []*table{first}
+			if count == 2 {
+				second, _ := CreateTable(first.schema.Name, "second", Safe, false)
+				second.CreateColumn("id", "INT", nil, nil)
+				second.CreateColumn("payload", "TEXT", nil, nil)
+				second.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("old")}}, nil, scm.NewNil(), false, nil)
+				tables = append(tables, second)
+			}
+			tx := NewTxContext(TxACID)
+			defer tx.Rollback()
+			for _, table := range tables {
+				table.ActiveShards()[0].UpdateFunction(0, false, false, tx)(scm.NewSlice([]scm.Scmer{scm.NewString("payload"), scm.NewString("committed")}))
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			reopened := newDatabase()
+			reopened.Name, reopened.persistence, reopened.srState = first.schema.Name, engine, COLD
+			reopened.ensureLoaded()
+			defer reopened.closeTransactionLog()
+			for _, original := range tables {
+				sh := reopened.tables.Get(original.Name).ActiveShards()[0]
+				sh.ensureLoaded()
+				found := 0
+				read := sh.ColumnReaderTx(nil, "payload", false, ReadAuto)
+				for id := uint32(0); id < sh.main_count+uint32(len(sh.inserts)); id++ {
+					if !sh.deletions.Get(uint(id)) {
+						found++
+						if got := read.GetValue(id); got.String() != "committed" {
+							t.Errorf("%s after restart: %v", original.Name, got)
+						}
+					}
+				}
+				releaseColumnReaders([]ColumnReader{read})
+				if found != 1 {
+					t.Errorf("%s visible rows=%d", original.Name, found)
+				}
+			}
+		})
+	}
 }

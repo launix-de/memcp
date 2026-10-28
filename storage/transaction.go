@@ -877,6 +877,14 @@ func (tx *TxContext) commitACID() error {
 	}
 
 	applyErr := persistenceCall(func() {
+		// Native mutation callbacks (including INSERT's duplicate-key UPDATE)
+		// need not construct a ShardMapReducer. Its Close is therefore not a
+		// commit dependency: every ACID overlay participating in this commit
+		// must join the WAL barrier, including update-only predecessor shards.
+		// Register once per commit/shard, never in the mutation's row loop.
+		for _, shard := range shards {
+			tx.RegisterTouchedShard(shard)
+		}
 		// Apply DeleteMask → set global deletions + write log.
 		for _, shard := range shards {
 			st := tx.shards[shard]

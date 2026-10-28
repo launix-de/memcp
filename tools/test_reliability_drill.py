@@ -27,6 +27,14 @@ SPEC.loader.exec_module(drill)
 
 
 class ReliabilityDrillTests(unittest.TestCase):
+	def test_ports_remain_distinct_before_nodes_start_listening(self) -> None:
+		with mock.patch.object(drill, "_allocated_ports", set()), mock.patch.object(drill.socket, "socket") as factory:
+			probe = factory.return_value.__enter__.return_value
+			probe.getsockname.side_effect = [("127.0.0.1", 44603), ("127.0.0.1", 44603), ("127.0.0.1", 60783)]
+			self.assertEqual(drill.free_port(), 44603)
+			self.assertEqual(drill.free_port(), 60783)
+			self.assertEqual(probe.bind.call_count, 3)
+
 	def test_remote_database_options_are_emitted_as_sql_literals(self) -> None:
 		class RecordingClient:
 			def __init__(self) -> None:

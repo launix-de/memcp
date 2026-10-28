@@ -17,6 +17,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import "testing"
+import "strings"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 
@@ -443,5 +444,45 @@ func TestScanJoinOrderUsesSerialCountPipeline(t *testing.T) {
 	})
 	if result.Int() != 3 {
 		t.Fatalf("serial COUNT pipeline result = %v, want 3", result)
+	}
+}
+
+func TestScanJoinOrderCandidateInputPrunesBeforeProjection(t *testing.T) {
+	const database = "tjoin_candidate_projection"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	left := setupScanJoinOrderTable(t, database, "left_rows", []string{"id"}, [][]scm.Scmer{{scm.NewInt(5)}, {scm.NewInt(7)}})
+	rows := make([][]scm.Scmer, 100)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i * 2))}
+	}
+	right := setupScanJoinOrderTable(t, database, "right_rows", []string{"id", "amount"}, rows)
+	spec := scanJoinOrderSpec{inputs: []scanJoinOrderInput{
+		{table: left, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1)},
+		{table: right, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1), sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "id"}}, targetKeyCols: []string{"id"}},
+	}, limit: -1, mapCols: []scanJoinOrderColumn{{table: 1, column: "amount"}}}
+	prepareScanJoinOrderSpec(&spec)
+	streams := make([][]*scanJoinOrderShardStream, 2)
+	streams[0] = collectScanJoinOrderShardStreams(nil, &spec.inputs[0], nil, nil)
+	input := &spec.inputs[1]
+	input.candidateCols, input.candidate = scanJoinOrderCandidateInput(&spec, 1, streams)
+	if input.candidate.IsNil() {
+		t.Fatal("small outer key set did not become a projection filter")
+	}
+	streams[1] = collectScanJoinOrderShardStreams(nil, input, nil, nil)
+	count := 0
+	for _, stream := range streams[1] {
+		count += len(stream.records)
+	}
+	if count != 2 {
+		t.Fatalf("transport/projection retained %d inner rows, want two matched keys", count)
+	}
+	// A large source must not build an unbounded transport helper. Skipping a
+	// hint leaves the full native join authoritative rather than truncating keys.
+	wide := strings.Repeat("x", 33*1024)
+	streams[0][0].records[0].values[0] = scm.NewString(wide)
+	if _, candidate := scanJoinOrderCandidateInput(&spec, 1, streams); !candidate.IsNil() {
+		t.Fatal("oversized hint exceeded its construction budget")
 	}
 }

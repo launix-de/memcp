@@ -185,3 +185,57 @@ Local text/hash serialization preserves native spellings. Network capture
 markers belong only to explicit procedure serialization, never local plan keys.
 Failed GC releases schedule their own bounded-rate retry; they do not rely on a
 later GC or reconnect event to release a historical generation.
+
+
+## Scan-family extension in progress
+
+`--cluster-operators-only` compares fourteen SQL contracts with standalone results
+and requires actual remote execution for every cluster case. It includes native
+Top-N/OFFSET, computed/NULL ordering, an unlimited result spanning multiple pages,
+LIMIT 1 without ORDER BY, EXISTS, scalar lookups, joins and ordered membership.
+CI runs the same real-process scenario normally and with race-instrumented nodes.
+
+The native request carries an explicit operator kind and invocation data through
+the existing database/shard handlers. EXISTS uses its native short-circuit kernel;
+lookup replies retain native match counts and cardinality checks. Batch strides,
+row fields and negative boundary slots retain their binding semantics. Computed
+boundary mappers use the same procedure serializer and import context as other
+captures. Declared non-collation boundary relations use explicit wire constructors;
+the persistent boundary codec still refuses process-local relations.
+
+Ordered execution uses the native shard sort and the same coordinator merge for
+local and remote queues. Workers freeze only comparison keys and requested column
+values into an immutable result run, releasing native payload readers before
+replying. These runs are query workspace, not another resident shard copy. The
+run is a registered object with the physical generation's lifetime. Its initial
+reply includes a bounded first page; further pages contain at most 256 rows and
+96 KiB of the actual generic value encoding. The coordinator buffers comparison
+windows, not an unbounded shard dump. Changing shards during merge never sends
+one request per row. Serial callbacks run only for globally selected rows, after
+partition/global offsets, limits and post-order acceptance.
+
+Without a combine function, ordinary scan callbacks retain their effects at the
+coordinator. Remote workers perform the filter/projection and the same bounded
+run mechanism supplies values to that callback. This decision follows the native
+operator contract before serialization; it is not a retry after an arbitrary
+callback/serializer failure. Reducible scans still compute native worker partials.
+
+Join records retain immutable projected values and the imported run handle, so
+late projection does not reload a shard locally or rebind old row IDs. Small outer
+key sets become bounded worker-side semijoin filters before inner projection:
+a four-key SUM must not transfer the full inner relation just to discard it at
+the coordinator. These hints leave native shard fanout, runner combinations,
+residuals, duplicate multiplicity and combine callbacks unchanged. Published O(1)
+cardinality estimates avoid preparing hints for comparable-sized inputs; actual
+encoded key bytes bound construction. An unavailable/oversized hint never
+truncates keys or changes the authoritative join. Rebuilds
+may publish a new UUID while the old physical input remains registered. The
+existing weak peer handle/GC release protocol owns its retirement. Immutable
+join/membership predicates serialize portable constructors: each worker builds its
+lookup once, without process-local Go closures or per-row owner calls. Unportable
+physical source RecSets/RecMaps still fail explicitly; these SQL cases do not
+claim a general wire contract for those runtime containers.
+
+None of these paths adds reader registration, row-loop cancellation probes,
+shared-memory admission writes or another reader/writer gate. INVARIANTS.md is
+unchanged.

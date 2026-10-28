@@ -409,7 +409,7 @@ func skipPartition(q *globalqueue, qx *shardqueue, pk []scm.Scmer, n int) {
 		}
 		return false
 	})
-	qx.items = qx.items[idx:]
+	qx.consumeOrdered(idx, true)
 	if len(qx.items) > 0 {
 		heap.Fix(q, 0)
 	} else {
@@ -418,6 +418,7 @@ func skipPartition(q *globalqueue, qx *shardqueue, pk []scm.Scmer, n int) {
 }
 
 type shardqueue struct {
+	remote          *remoteOrderQueue
 	shard           *storageShard
 	readAccess      ReadAccess  // queue owns the selected generation through merge/projection
 	writeAccess     WriteAccess // mutation queues retain M through their callbacks
@@ -570,9 +571,10 @@ func (s *globalqueue) Less(i, j int) bool {
 	if s.q[i].tableIdx != s.q[j].tableIdx {
 		return s.q[i].tableIdx < s.q[j].tableIdx
 	}
-	for k := range s.q[i].shard.uuid {
-		if s.q[i].shard.uuid[k] != s.q[j].shard.uuid[k] {
-			return s.q[i].shard.uuid[k] < s.q[j].shard.uuid[k]
+	left, right := s.q[i].orderedInputUUID(), s.q[j].orderedInputUUID()
+	for k := range left {
+		if left[k] != right[k] {
+			return left[k] < right[k]
 		}
 	}
 	return s.q[i].items[0] < s.q[j].items[0]
@@ -624,6 +626,7 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 
 // scanOrderTableSpec holds per-table parameters for scanOrderMulti.
 type scanOrderTableSpec struct {
+	projectionCols  []string // record visitors request portable values for their retained physical IDs
 	prefixMerge     *orderedPrefixAccess
 	table           *table
 	recset          *recSet
@@ -652,6 +655,9 @@ type scanOrderTableSpec struct {
 }
 
 func streamScanOrderItems(spec *scanOrderTableSpec, queue *shardqueue, acc scm.Scmer, recids []uint32) (scm.Scmer, bool) {
+	if queue.remote != nil {
+		return queue.remote.stream(spec, queue, acc, recids)
+	}
 	if spec.recordVisitor != nil {
 		spec.recordVisitor(queue, recids)
 		return acc, false
@@ -1078,7 +1084,6 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		bounds = bounds.useScratch(scratch)
 		bounds, _ = extendScanAccessWithSortCols(bounds, spec.sortcols, sortdirs)
 		runtime := bounds.ensureRuntime()
-		runtime.localRead = true
 		runtime.extra = scanAccessSegmentFromAnalyzed(appendRecSetBoundary(nil, spec.recset))
 		if spec.prefixMerge != nil {
 			bounds = orderedPrefixBounds(bounds, spec.prefixMerge)
@@ -1193,20 +1198,27 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 						q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 					}
 				}()
-				if acquisitionFailure != nil {
-					panic(acquisitionFailure)
-				}
 				// Cancellation contract: check only at the scheduling boundary, before entering
 				// the shard. Row execution runs atomically without cancellation checks.
 				if ss != nil && ss.IsKilledSeq(querySeq) {
 					panic("query killed")
 				}
-				res := s.scan_order(tableBounds, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+				var res *shardqueue
+				if acquisitionFailure != nil {
+					res = delegateOrderedQueue(currentTx, s, tableBounds, &tables[tableIdx], sortdirs, limitPartitionCols, offset, shardLimit, acquisitionFailure)
+				} else {
+					res = s.scan_order(tableBounds, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+				}
 				res.callbackCols = callbackCols
 				res.callback = callback
 				res.tableIdx = tableIdx
 				inputCount := int64(s.main_count) + int64(s.plannerDeltaRows.Load())
-				q_ <- scanOrderResult{res: res, inputCount: inputCount, candidateCount: res.candidateCount, outputCount: int64(len(res.items))}
+				outputCount := int64(len(res.items))
+				if res.remote != nil {
+					inputCount = int64(res.universe)
+					outputCount = int64(res.remote.total)
+				}
+				q_ <- scanOrderResult{res: res, inputCount: inputCount, candidateCount: res.candidateCount, outputCount: outputCount}
 			})
 			if done != nil {
 				doneChannels = append(doneChannels, done)
@@ -1256,12 +1268,23 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		panic(scanErr)
 	}
 
+	result, _ := mergeScanOrderQueues(currentTx, tables, q, limitPartitionCols, offset, limit, neutral, isOuter, notFoundValue, stats)
+	logScanOrderStats(execStart, tables, stats)
+	return result
+}
+
+// Local and remote sorted runs share this one coordinator ordering, partition,
+// post-order acceptance and serial accumulator contract.
+func mergeScanOrderQueues(currentTx *TxContext, tables []scanOrderTableSpec, q globalqueue, limitPartitionCols, offset, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, stats []scanOrderStats) (scm.Scmer, bool) {
 	// Merge-collect phase: merge sorted shardqueues from all tables
 	akkumulator := neutral
 	hadValue := false
 	// initialize MapReducers per shard (each shard uses its table's callbackCols/callback)
 	for _, sq := range q.q {
 		spec := &tables[sq.tableIdx]
+		if sq.remote != nil {
+			continue
+		}
 		if spec.recordVisitor == nil {
 			sq.mapper = sq.shard.OpenMapReducer(sq.callbackCols, sq.callback, false, 0, nil, currentTx)
 		}
@@ -1332,8 +1355,8 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		// This predicate intentionally runs after ordering, but before offsets and
 		// limits are counted. It supports expensive nested lookup acceptance without
 		// turning callback-controlled panics into an execution-control mechanism.
-		if qx.postOrderMapper != nil && !scm.ToBool(qx.postOrderMapper.MapOne(peekItem)) {
-			qx.items = qx.items[1:]
+		if !qx.acceptOrderedPostFilter(&tables[ti], peekItem) {
+			qx.consumeOrdered(1, true)
 			if len(qx.items) > 0 {
 				heap.Fix(&q, 0)
 			} else {
@@ -1341,7 +1364,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			}
 			continue
 		}
-		if qx.postOrderMapper != nil {
+		if !tables[ti].postOrderFilter.IsNil() {
 			stats[ti].outputCount++
 		}
 
@@ -1352,7 +1375,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		}
 		if ti < len(tablePartOffset) && tablePartOffset[ti] > 0 {
 			tablePartOffset[ti]--
-			qx.items = qx.items[1:]
+			qx.consumeOrdered(1, true)
 			if len(qx.items) > 0 {
 				heap.Fix(&q, 0)
 			} else {
@@ -1363,7 +1386,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		// Per-partition offset skip
 		if partOffset > 0 {
 			partOffset--
-			qx.items = qx.items[1:]
+			qx.consumeOrdered(1, true)
 			if len(qx.items) > 0 {
 				heap.Fix(&q, 0)
 			} else {
@@ -1388,7 +1411,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 
 		// Pop one item from the global merge
 		item := qx.items[0]
-		qx.items = qx.items[1:]
+		qx.consumeOrdered(1, false)
 
 		// If shard changed, flush the buffer to the previous shard's mapper
 		if bufShard != nil && bufShard != qx {
@@ -1438,8 +1461,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	if !hadValue && !isOuter {
 		akkumulator = notFoundValue
 	}
-	logScanOrderStats(execStart, tables, stats)
-	return akkumulator
+	return akkumulator, hadValue
 }
 
 func logScanOrderStats(execStart time.Time, tables []scanOrderTableSpec, stats []scanOrderStats) {
@@ -1509,6 +1531,11 @@ func flushDirectScanOrder(mapper *ShardMapReducer, accumulator scm.Scmer, stream
 
 func consumeDirectScanOrder(queue *shardqueue, spec *scanOrderTableSpec, currentTx *TxContext, limitPartitionCols, offset, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) (scm.Scmer, bool, int64) {
 	defer queue.closeReaders()
+	if queue.remote != nil {
+		queue.callbackCols, queue.callback = spec.callbackCols, spec.callback
+		result, hadValue := mergeScanOrderQueues(currentTx, []scanOrderTableSpec{*spec}, globalqueue{q: []*shardqueue{queue}}, limitPartitionCols, offset, limit, neutral, isOuter, notFoundValue, make([]scanOrderStats, 1))
+		return result, hadValue, int64(queue.remote.total)
+	}
 	if len(queue.items) == 0 {
 		return directScanOrderNullResult(spec.callbackCols, spec.callback, neutral, isOuter, notFoundValue), false, 0
 	}
@@ -1653,6 +1680,7 @@ func consumeDirectScanOrder(queue *shardqueue, spec *scanOrderTableSpec, current
 
 func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, bounds scanAccess, spec *scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols, offset, limit, shardLimit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, ss *scm.SessionState, querySeq uint64) (value scm.Scmer, hadValue bool, inputCount, candidateCount, outputCount int64, scanErr scanError) {
 	pinned := true
+	acquiring := true
 	defer func() {
 		if pinned {
 			shard.activeScanners.Add(-1)
@@ -1661,6 +1689,13 @@ func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopolog
 	}()
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			if _, ok := recovered.(shardReadDelegation); acquiring && ok {
+				queue := delegateOrderedQueue(currentTx, shard, bounds, spec, sortdirs, limitPartitionCols, offset, shardLimit, recovered)
+				value, hadValue, outputCount = consumeDirectScanOrder(queue, spec, currentTx, limitPartitionCols, offset, limit, neutral, isOuter, notFoundValue)
+				candidateCount = queue.candidateCount
+				inputCount = int64(queue.universe)
+				return
+			}
 			scanErr = scanError{recovered, string(debug.Stack())}
 		}
 	}()
@@ -1669,7 +1704,8 @@ func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopolog
 	}
 	var queue *shardqueue
 	func() {
-		release := shard.GetRead(currentTx)
+		release := shard.acquireReadForScan(currentTx, bounds.runtime)
+		acquiring = false
 		defer release.Release()
 		if scm.Trace == nil {
 			scanShard := shard
@@ -1795,6 +1831,12 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 
 	var mu sync.Mutex
 	var foundShard *storageShard
+	var foundQueue *shardqueue
+	defer func() {
+		if foundQueue != nil {
+			foundQueue.closeReaders()
+		}
+	}()
 	var foundAccess ReadAccess
 	defer func() { foundAccess.Release() }()
 	var foundID uint32
@@ -1809,17 +1851,26 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 				mu.Unlock()
 			}
 		}()
-		if acquisitionFailure != nil {
-			panic(acquisitionFailure)
-		}
 		mu.Lock()
-		finished := foundShard != nil || firstErr.r != nil
+		finished := foundShard != nil || foundQueue != nil || firstErr.r != nil
 		mu.Unlock()
 		if finished {
 			return
 		}
 		if ss != nil && ss.IsKilledSeq(querySeq) {
 			panic("query killed")
+		}
+		if acquisitionFailure != nil {
+			spec := scanOrderTableSpec{table: t, conditionCols: conditionCols, condition: condition, callbackCols: callbackCols, callback: mapReduce}
+			queue := delegateOrderedQueue(currentTx, shard, bounds, &spec, nil, 0, 0, 1, acquisitionFailure)
+			if len(queue.items) > 0 {
+				mu.Lock()
+				if foundShard == nil && foundQueue == nil {
+					foundQueue = queue
+				}
+				mu.Unlock()
+			}
+			return
 		}
 		recid, present := shard.scanFirstRecord(bounds, conditionCols, condition, currentTx, ss, nil)
 		if !present {
@@ -1829,7 +1880,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 		// acquisition. Reacquiring current MOSI rights could rebind foundID.
 		candidateAccess := shard.acquireSnapshotRead(currentTx)
 		mu.Lock()
-		if foundShard == nil {
+		if foundShard == nil && foundQueue == nil {
 			foundAccess = candidateAccess
 			candidateAccess = ReadAccess{}
 			foundShard = shard
@@ -1843,6 +1894,11 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 	}
 	if firstErr.r != nil {
 		panic(firstErr)
+	}
+	if foundQueue != nil {
+		spec := scanOrderTableSpec{callbackCols: callbackCols, callback: mapReduce}
+		result, _ := foundQueue.remote.stream(&spec, foundQueue, neutral, foundQueue.items[:1])
+		return result
 	}
 	if foundShard == nil {
 		return notFoundValue
