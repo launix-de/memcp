@@ -31,6 +31,7 @@ import "strings"
 import "unicode"
 import "math/bits"
 import "sync/atomic"
+import "math/rand/v2"
 import "unicode/utf8"
 import "encoding/json"
 import "github.com/google/uuid"
@@ -332,7 +333,10 @@ const (
 
 // tableShardTopology is immutable after publication. Readers load one pointer
 // and can inspect the complete authoritative topology without taking t.mu.
+type tablePartitionRouting struct{ _ byte }
+
 type tableShardTopology struct {
+	routing    *tablePartitionRouting
 	mode       ShardMode
 	shards     []*storageShard
 	dimensions []shardDimension
@@ -950,6 +954,29 @@ func (t *table) publishTopologyLocked() *tableShardTopology {
 					}
 				}
 			}
+		}
+	}
+	topology.routing = new(tablePartitionRouting)
+	if old := t.topology.Load(); old != nil && old.mode == topology.mode && len(old.shards) == len(topology.shards) && slices.EqualFunc(old.dimensions, topology.dimensions, func(a, b shardDimension) bool {
+		return a.Column == b.Column && a.Method == b.Method && a.NumPartitions == b.NumPartitions && slices.Equal(a.Pivots, b.Pivots)
+	}) {
+		same := true
+		for i, shard := range topology.shards {
+			if shard == old.shards[i] {
+				continue
+			}
+			if shard == nil || old.shards[i] == nil {
+				same = false
+				break
+			}
+			a, b := shard.coherence.Load(), old.shards[i].coherence.Load()
+			if a == nil || b == nil || a.resolved() != b.resolved() {
+				same = false
+				break
+			}
+		}
+		if same {
+			topology.routing = old.routing
 		}
 	}
 	t.publishSchemaTopology(topology.mode, topology.shards, topology.dimensions)
@@ -3788,11 +3815,12 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			}
 			func() {
 				defer releaseReservation()
-				constraintAccess := t.clusterInsertConstraints(currentTx)
-				defer constraintAccess.Release()
-				insertRows := func(rows [][]scm.Scmer) {
+				insertRows := func(rows [][]scm.Scmer, validate func() bool) {
 					writeAccess := shard.GetWrite(currentTx)
 					defer writeAccess.Release()
+					if validate != nil && !validate() {
+						panic(uniqueReadRetry{})
+					}
 					writeAccess.shard.Insert(columns, rows, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
 					result += len(rows)
 					inserted += len(rows)
@@ -3800,8 +3828,8 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 
 				// check unique constraints in a thread safe manner
 				if len(t.Unique) > 0 {
-					t.ProcessUniqueCollision(columns, chunk, mergeNull, func(chunk [][]scm.Scmer) {
-						insertRows(chunk)
+					t.ProcessUniqueCollision(columns, chunk, mergeNull, func(chunk [][]scm.Scmer, validate func() bool) {
+						insertRows(chunk, validate)
 					}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
 						if !onCollision.IsNil() {
 							// Evaluate onCollision and add to affected rows per MySQL semantics
@@ -3829,7 +3857,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 					}, 0, currentTx)
 				} else {
 					// physically insert (no unique constraints)
-					insertRows(chunk)
+					insertRows(chunk, nil)
 				}
 			}()
 		}
@@ -3880,6 +3908,94 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			}
 		}
 
+		partitionForRow := func(row []scm.Scmer) int {
+			shardnum := 0
+			for j, dim := range dims {
+				partition := omittedPartitions[j]
+				if colidx := translatable[j]; colidx >= 0 && colidx < len(row) {
+					partition = computeShardDimensionIndex(dim, row[colidx])
+				}
+				shardnum = shardnum*dim.NumPartitions + partition
+			}
+			return shardnum
+		}
+		if sharedClusterSource(t) {
+			// Native transactions retain modified generations until commit.
+			// Stable partition order prevents two multi-bucket INSERT batches
+			// from each retaining a higher bucket needed by the other batch.
+			values = append([][]scm.Scmer(nil), values...)
+			slices.SortStableFunc(values, func(a, b []scm.Scmer) int { return partitionForRow(a) - partitionForRow(b) })
+		}
+
+		if sharedClusterSource(t) {
+			// Check every logical key before taking a data writer. A constraint
+			// may span all buckets even when the primary key routes to one.
+			// After checking, obtain the actual targets in partition order and
+			// validate the retained read generations before publishing any row.
+			needed := make([]bool, len(partitionShards))
+			for _, row := range values {
+				needed[partitionForRow(row)] = true
+			}
+			var writes []WriteAccess
+			releaseWrites := func() {
+				for i := len(writes) - 1; i >= 0; i-- {
+					writes[i].Release()
+				}
+				writes = nil
+			}
+			defer releaseWrites()
+			insertRows := func(rows [][]scm.Scmer, validate func() bool) {
+				if writes == nil {
+					writes = make([]WriteAccess, len(partitionShards))
+					for i, need := range needed {
+						if need {
+							writes[i] = partitionShards[i].GetWrite(currentTx)
+						}
+					}
+				}
+				if validate != nil && !validate() {
+					releaseWrites()
+					panic(uniqueReadRetry{})
+				}
+				for start := 0; start < len(rows); {
+					bucket := partitionForRow(rows[start])
+					end := start + 1
+					for end < len(rows) && partitionForRow(rows[end]) == bucket {
+						end++
+					}
+					writes[bucket].shard.Insert(columns, rows[start:end], false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
+					result += end - start
+					inserted += end - start
+					start = end
+				}
+			}
+			if len(t.Unique) > 0 {
+				t.ProcessUniqueCollision(columns, values, mergeNull, insertRows, onCollisionCols, func(errmsg string, data []scm.Scmer) {
+					if onCollision.IsNil() {
+						panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
+					}
+					ret := scm.Apply(onCollision, data...)
+					switch {
+					case ret.IsBool():
+						if ret.Bool() {
+							result += 2
+						} else {
+							result++
+						}
+					case ret.IsInt():
+						result += int(ret.Int())
+					case ret.IsFloat():
+						result += int(ret.Float())
+					default:
+						result++
+					}
+				}, 0, currentTx)
+			} else {
+				insertRows(values, nil)
+			}
+			goto insertDone
+		}
+
 		checkUniqueForShard := func(s *storageShard, values [][]scm.Scmer) {
 			// ensure shard is loaded and writable for inserts
 			writeAccess := s.GetWrite(currentTx)
@@ -3889,7 +4005,10 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			// check unique constraints in a thread safe manner
 			if len(t.Unique) > 0 {
 				// this function will do the locking for us
-				t.ProcessUniqueCollision(columns, values, mergeNull, func(values [][]scm.Scmer) {
+				t.ProcessUniqueCollision(columns, values, mergeNull, func(values [][]scm.Scmer, validate func() bool) {
+					if !validate() {
+						panic(uniqueReadRetry{})
+					}
 					// physically insert
 					s.Insert(columns, values, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
 					result += len(values)
@@ -3927,17 +4046,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		last_i := 0
 		var last_shard *storageShard = nil
 		for i := 0; i < len(values); i++ {
-			shardnum := 0
-			for j, dim := range dims {
-				partition := 0
-				colidx := translatable[j]
-				if colidx >= 0 && colidx < len(values[i]) {
-					partition = computeShardDimensionIndex(dim, values[i][colidx])
-				} else {
-					partition = omittedPartitions[j]
-				}
-				shardnum = shardnum*dim.NumPartitions + partition
-			}
+			shardnum := partitionForRow(values[i])
 			shard := partitionShards[shardnum]
 			if i > 0 && shard != last_shard {
 				checkUniqueForShard(last_shard, values[last_i:i]) // shard has changed: bulk insert all items that belong to this shard
@@ -4246,21 +4355,63 @@ func (p *uniquePendingKeys) remember(rowIndex int, key []scm.Scmer) bool {
 	return false
 }
 
-func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext) {
+func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, func() bool), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext) {
 	guard := t.guardUniqueWrites(columns, values, mergeNull, idx)
 	guard.lock()
 	defer guard.unlock()
-	t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, &guard)
+	var retries uint
+	for {
+		guard.readProofs = nil
+		retry := false
+		func() {
+			defer func() {
+				if value := recover(); value != nil {
+					if _, invalid := value.(uniqueReadRetry); invalid {
+						wrote := guard.wrote
+						if currentTx != nil {
+							currentTx.touchedShards.Range(func(_, _ any) bool { wrote = true; return false })
+						}
+						if wrote {
+							panic(sqldb.NewSQLError1(1213, "40001", "UNIQUE read generation changed after a transaction write"))
+						}
+						retry = true
+						return
+					}
+					panic(value)
+				}
+			}()
+			t.processUniqueCollision(columns, values, mergeNull, func(rows [][]scm.Scmer, validate func() bool) {
+				success(rows, validate)
+				guard.wrote = guard.wrote || len(rows) != 0
+			}, onCollisionCols, failure, idx, currentTx, &guard)
+		}()
+		if !retry {
+			return
+		}
+		ctx := scanQueryContext(currentTx, context.Background())
+		// Only unmodified preflight work is retried. Jitter prevents peers
+		// upgrading the same key from repeatedly invalidating each other's
+		// read proof in lockstep. No normal batch or reader waits here.
+		limit := min(time.Millisecond, (10*time.Microsecond)<<min(retries, 7))
+		retries++
+		timer := time.NewTimer(time.Duration(rand.Int64N(int64(limit))) + time.Microsecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			panic(ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
-func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, guard *uniqueWriteGuard) {
+func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, func() bool), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, guard *uniqueWriteGuard) {
 	// An omitted generated key skips only its own constraint. Keep the outer
 	// invocation's lock ownership when the first checked key is a later UNIQUE.
 	checkedVersion := guard.version
 	idx = t.nextUniqueConstraint(columns, idx)
 	// check for duplicates
 	if idx >= len(t.Unique) {
-		success(values) // we finally made it, these values have passed all unique checks
+		success(values, guard.validReads) // we finally made it, these values have passed all unique checks
 		return
 	}
 	uniq := t.Unique[idx]
@@ -4380,6 +4531,15 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 			}
 		}
 
+		if sharedClusterSource(t) {
+			guard.readProofs = append(guard.readProofs, uniqueReadProof{table: t, topology: topology})
+			for _, access := range readAccesses {
+				if access.shard != nil {
+					guard.readProofs = append(guard.readProofs, uniqueReadProof{shard: access.shard})
+				}
+			}
+		}
+
 		pending := newUniquePendingKeys(values, keyIdx, compareNulls)
 		last_j := 0
 		for j, row := range values {
@@ -4453,6 +4613,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 							params[i] = s.ColumnReaderTx(currentTx, p, false, ReadAuto).GetValue(uid)
 						}
 					}
+					guard.wrote = true       // a collision callback may publish effects; never replay it
 					failure(uniq.Id, params) // notify about failure while unlocked
 					guard.lock()
 					goto nextrow

@@ -4,15 +4,15 @@ SPDX-License-Identifier: GPL-3.0-or-later
 */
 package storage
 
-import "testing"
 import "sync"
 import "time"
+import "testing"
 import "runtime"
-import "runtime/debug"
 import "context"
-import "github.com/google/uuid"
-import "encoding/json"
 import "sync/atomic"
+import "runtime/debug"
+import "encoding/json"
+import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
@@ -82,7 +82,7 @@ func TestClusterUniqueProbeUsesAcquiredSuccessor(t *testing.T) {
 			done <- result
 		}()
 		tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false,
-			func(rows [][]scm.Scmer) { result.accepted += len(rows) }, nil,
+			func(rows [][]scm.Scmer, _ func() bool) { result.accepted += len(rows) }, nil,
 			func(string, []scm.Scmer) { result.collisions++ }, 0, nil)
 	}()
 	deadline := time.Now().Add(time.Second)
@@ -94,13 +94,16 @@ func TestClusterUniqueProbeUsesAcquiredSuccessor(t *testing.T) {
 	}
 	// Complete the cold acquisition with a replacement containing the key.
 	// The probe still owns the original topology, but GetRead returns successor.
+	// Attach the existing authority before publishing the successor, as native
+	// rebuild does. Otherwise the waiter may declare an unrelated IO cell in
+	// the test-only gap between publication and coherence attachment.
+	successor.coherence.Store(cell)
+	r.forwardResource(resource, r.shardResource(successor))
 	tbl.mu.Lock()
 	tbl.Shards = []*storageShard{successor}
 	tbl.publishTopologyLocked()
 	tbl.mu.Unlock()
-	successor.coherence.Store(cell)
 	cell.current.Store(successor)
-	r.forwardResource(resource, r.shardResource(successor))
 	if _, err := cell.ownstate.Grant(request.Flight().ID(), mosi.S, func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -432,38 +435,141 @@ func TestClusterInvalidationFollowsRebuiltOwnerUUID(t *testing.T) {
 	}
 }
 
-func TestClusterInvalidationRejectsDelayedReadGrant(t *testing.T) {
+func TestClusterReferenceAcknowledgesInstalledGrant(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tclustergrantack", 4)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
 	cluster.initializeManager()
 	peer := &mosiPeer{outgoing: make(chan mosiMessage, 4), done: make(chan struct{})}
-	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "owner"}, peer: peer}}})
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "memcp://11111111-1111-4111-8111-111111111111"}, peer: peer}}})
 	r := cluster.manager
-	resource := mosiResource{Database: "tenant"}
-	cell := r.resourceCell(resource)
+	resource := r.shardResource(shard)
+	cell := cluster.declareShard(shard, false)
 	pending, _ := cell.ownstate.Request(mosi.S)
 	r.updateRecord(resource, func(record *replicaRecord) bool {
-		record.Owner, record.Epoch = "owner", 7
+		record.Owner, record.Epoch = "memcp://11111111-1111-4111-8111-111111111111", 7
 		return true
 	})
-	if err := r.invalidateResource(context.Background(), "owner", mosiPacket{Resource: resource, ID: "revoke", Epoch: 7}); err != nil {
+	packet := mosiPacket{Kind: "reference", Resource: resource, ID: pending.Flight().ID(), Epoch: 7, Content: shard.uuid.String(), State: "S", Owner: "memcp://11111111-1111-4111-8111-111111111111"}
+	if err := cluster.installReference("memcp://11111111-1111-4111-8111-111111111111", packet); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.acceptGrant(mosiPacket{Resource: resource, ID: pending.Flight().ID(), State: "S", Epoch: 7, Owner: "owner"}); err != nil {
-		t.Fatal(err)
-	}
-	if cell.ownstate.Phase() != mosi.IO {
-		t.Fatal("late S grant resurrected invalidated content")
+	ack := <-peer.outgoing
+	if ack.Packet == nil || ack.Packet.Kind != "ack" || cell.ownstate.Phase() != mosi.S || cell.clusterstate.Phase() != mosi.S {
+		t.Fatal("reference acknowledged before publishing its installed grant")
 	}
 	select {
 	case <-pending.Flight().Done():
 		if pending.Flight().Err() != nil {
-			t.Fatal("revoked acquisition must retry without failing SQL")
+			t.Fatal(pending.Flight().Err())
 		}
 	default:
-		t.Fatal("revoked read acquisition did not wake its waiters")
+		t.Fatal("reference ACK left the acquired flight pending")
 	}
-	next, action := cell.ownstate.Request(mosi.S)
-	if action != mosi.Send || next.Flight().ID() == pending.Flight().ID() {
-		t.Fatal("next acquisition reused revoked flight")
+	if err := r.invalidateResource(context.Background(), "memcp://11111111-1111-4111-8111-111111111111", mosiPacket{Resource: resource, ID: "revoke", Epoch: 7}); err != nil {
+		t.Fatal(err)
+	}
+	packet.Kind = "grant"
+	if err := r.acceptGrant(packet); err != nil {
+		t.Fatal(err)
+	}
+	if cell.ownstate.Phase() != mosi.IO {
+		t.Fatal("completed grant replay resurrected the invalidated reader")
+	}
+}
+
+func TestClusterCounterReservationKeepsSharedSchemaOwner(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "tclustercounterowner", 0)
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}, ctx: context.Background(), databases: map[string]bool{tbl.schema.Name: true}}
+	cluster.initializeManager()
+	r := cluster.manager
+	resource := mosiResource{Database: tbl.schema.Name}
+	cell := r.resourceCell(resource)
+	cell.ownstate.Initialize(mosi.O)
+	cell.clusterstate.Initialize(mosi.O)
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch, record.State = "local", 11, "O"
+		record.Readers = map[string]bool{"reader": true}
+		return true
+	})
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	reply, err := cluster.reserveIDs(context.Background(), clusterIDRequest{Database: tbl.schema.Name, Table: tbl.Name, Count: 8})
+	if err != nil || reply.Base != 0 {
+		t.Fatalf("reserve: %+v %v", reply, err)
+	}
+	if cell.ownstate.Phase() != mosi.O || r.directory.Records[resource.key()].Epoch != 11 || !r.directory.Records[resource.key()].Readers["reader"] {
+		t.Fatal("reservation upgraded schema ownership or revoked its reader")
+	}
+	var saved struct {
+		Tables map[string]struct {
+			Counter uint64 `json:"Auto_increment"`
+		} `json:"tables"`
+	}
+	if err := json.Unmarshal(engine.ReadSchema(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Tables[tbl.Name].Counter != 8 {
+		t.Fatal("acknowledged range was not in the ordinary durable schema checkpoint")
+	}
+}
+
+func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tclusterhandovernewgrant", 4)
+	RebuildTable(tbl, true, false)
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}, ctx: context.Background()}
+	cluster.initializeManager()
+	r := cluster.manager
+	shard := tbl.ActiveShards()[0]
+	cell := cluster.declareShard(shard, true)
+	resource := r.shardResource(shard)
+	peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "remote"}, peer: peer}}})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- r.coordinate(ctx, "remote", mosiPacket{Kind: "write", ID: "outgoing", Resource: resource, Sequence: 1})
+	}()
+	var header mosiPacket
+	select {
+	case message := <-peer.outgoing:
+		header = *message.Packet
+		if header.Kind != "reference" || header.State != "M" {
+			t.Fatalf("unexpected handover: %+v", header)
+		}
+	case err := <-done:
+		t.Fatalf("handover ended before reference: %v", err)
+	case <-ctx.Done():
+		t.Fatal("handover did not send reference")
+	}
+	// The new owner has installed M and can answer a fresh read request before
+	// this old source's outgoing ACK worker resumes. No wall-clock sleep orders it.
+	pending, _ := cell.resolved().ownstate.Request(mosi.S)
+	if err := r.acceptGrant(mosiPacket{Resource: header.Resource, ID: pending.Flight().ID(), State: "S", Owner: "remote", Epoch: header.Epoch, Content: header.Content}); err != nil {
+		t.Fatal(err)
+	}
+	ack := header
+	ack.Kind = "ack"
+	if err := r.receivePacket("remote", &ack); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("handover did not finish after ACK")
+	}
+	record := r.directory.Records[r.resourceKey(resource)]
+	if cell.resolved().ownstate.Phase() != mosi.S || record.State != "S" || record.Owner != "remote" || record.Epoch != header.Epoch {
+		t.Fatalf("outgoing ACK overwrote newer grant: phase=%s record=%+v", cell.resolved().ownstate.Phase(), record)
+	}
+	if !record.Requests["remote"].Completed {
+		t.Fatal("outgoing request completion was lost")
 	}
 }

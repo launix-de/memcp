@@ -139,13 +139,13 @@ jobs:
           --binary "$RUNNER_TEMP/memcp-cluster-race"
           --artifacts "$RUNNER_TEMP/cluster-contexts-race" --cluster-context-only --seed 20261027
           --fixture-binary "$RUNNER_TEMP/memcp-cluster"
-      - name: Check concurrent UUID and integer inserts across peers
+      - name: Check concurrent free/hash UUID and integer inserts across peers
         if: ${{ !cancelled() && steps.build_cluster.outcome == 'success' }}
         run: >-
           python3 -u tools/replication_cluster_stress.py
           --binary "$RUNNER_TEMP/memcp-cluster"
           --artifacts "$RUNNER_TEMP/cluster-inserts" --cluster-inserts-only --seed 20261027
-      - name: Check concurrent inserts with race detector
+      - name: Check concurrent free/hash inserts with race detector
         if: ${{ !cancelled() && steps.build_cluster_race.outcome == 'success' }}
         env:
           GORACE: halt_on_error=1 exitcode=66

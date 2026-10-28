@@ -5,10 +5,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
-import "context"
-import "encoding/json"
-import "sync/atomic"
 import "bytes"
+import "context"
+import "sync/atomic"
+import "encoding/json"
 import "github.com/launix-de/memcp/storage/mosi"
 
 // The current schema owner reserves the existing native table counter. There
@@ -65,8 +65,18 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 	if db == nil {
 		return reply, fmt.Errorf("ID reservation database disappeared")
 	}
-	access := db.GetWrite(nil)
-	defer access.Release()
+	// Reservation changes the atomic runtime counter, not the logical schema.
+	// Reuse the owner's existing directory transition boundary so a handover
+	// cannot copy the old counter between reservation and its durable checkpoint.
+	// This never upgrades an O owner to schema M or invalidates its readers.
+	cell := cluster.manager.resourceCell(mosiResource{Database: request.Database})
+	cell.directory.Lock()
+	phase := cell.ownstate.Phase()
+	if phase != mosi.M && phase != mosi.O {
+		cell.directory.Unlock()
+		return cluster.reserveIDs(ctx, request) // routing changed; nothing was reserved
+	}
+	defer cell.directory.Unlock()
 	t := db.tables.Get(request.Table)
 	if t == nil {
 		return reply, fmt.Errorf("ID reservation table disappeared")
@@ -75,7 +85,7 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 	// Persist reservations before acknowledging: other nodes can commit their
 	// allocated IDs without returning the allocator's shard WAL to this node.
 	// An interrupted request may leave a gap and must never be blindly replayed.
-	db.save()
+	db.save(cell)
 	return reply, nil
 }
 
@@ -141,33 +151,4 @@ func (r *replicationManager) mergeClusterInsertTopology(previous, incoming *tabl
 	previous.publishSchemaTopology(ShardModeFree, previous.Shards, previous.PDimensions)
 	previous.publishTopologyLocked()
 	return true, nil
-}
-
-// Global INSERT constraints currently serialize through existing schema write
-// admission. Acquire all read generations first: a foreign cold source may need
-// schema M to checkpoint its handover. Never hold a data writer while probing a
-// second writer's UNIQUE keys. No read-side registration or new lock is added.
-func (t *table) clusterInsertConstraints(tx *TxContext) WriteAccess {
-	if !sharedClusterSource(t) || len(t.Unique) == 0 {
-		return WriteAccess{}
-	}
-	cluster := activeNodeCluster()
-	for {
-		for _, shard := range t.ActiveShards() {
-			access := shard.GetRead(tx)
-			access.Release()
-		}
-		access := t.schema.GetWrite(nil)
-		ready := true
-		for _, shard := range t.ActiveShards() {
-			if !cluster.manager.shardCell(shard).ownstate.Phase().Readable() {
-				ready = false
-				break
-			}
-		}
-		if ready {
-			return access
-		}
-		access.Release()
-	}
 }

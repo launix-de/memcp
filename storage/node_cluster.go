@@ -16,6 +16,7 @@ import "sort"
 import "sync"
 import "time"
 import "bytes"
+import "errors"
 import "context"
 import "strings"
 import "sync/atomic"
@@ -232,7 +233,8 @@ func (cluster *nodeCluster) loop() {
 				cluster.publishLocked()
 				cluster.mu.Unlock()
 			default:
-				if err := cluster.exchange(link); err != nil {
+				if err := cluster.exchange(link); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+					fmt.Println("cluster roster exchange failed:", link.member.ID, err)
 					link.peer.close()
 				}
 			}

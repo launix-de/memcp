@@ -20,9 +20,9 @@ import "math"
 import "sync"
 import "unsafe"
 import "runtime"
-import "github.com/launix-de/memcp/storage/mosi"
 import "math/bits"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage/mosi"
 
 // UNIQUE guards belong to the logical table, independently of physical shard
 // generations. Equal keys use the same stripe across rebuild/repartition; an
@@ -31,10 +31,43 @@ import "github.com/launix-de/memcp/scm"
 type uniqueWriteLocks [64]sync.Mutex
 
 type uniqueWriteGuard struct {
-	locks   *uniqueWriteLocks
-	mask    uint64
-	held    bool
-	version uint64 // advances when a collision callback temporarily releases guards
+	locks      *uniqueWriteLocks
+	mask       uint64
+	held       bool
+	readProofs []uniqueReadProof
+	wrote      bool
+	version    uint64 // advances when a collision callback temporarily releases guards
+}
+
+// Read validation adds no reader registration. The existing generation and MOSI
+// publication prove that another node has not invalidated a UNIQUE input. The
+// success callback validates only after acquiring its native destination writer.
+type uniqueReadProof struct {
+	table    *table
+	topology *tableShardTopology
+	shard    *storageShard
+}
+
+type uniqueReadRetry struct{}
+
+func (g *uniqueWriteGuard) validReads() bool {
+	for _, proof := range g.readProofs {
+		if proof.table != nil {
+			if proof.table.topology.Load().routing != proof.topology.routing || !activeNodeCluster().manager.resourceCell(mosiResource{Database: proof.table.schema.Name}).ownstate.Phase().Readable() {
+				return false
+			}
+		} else {
+			cell := proof.shard.coherence.Load()
+			if cell == nil {
+				return false
+			}
+			cell = cell.resolved()
+			if !cell.ownstate.Phase().Readable() || cell.publishedShard() != proof.shard {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (g *uniqueWriteGuard) lock() {

@@ -97,14 +97,14 @@ func TestInsertUniqueChecksAllowIndependentKeys(t *testing.T) {
 	entered, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
-		tbl.ProcessUniqueCollision([]string{"id"}, first, false, func([][]scm.Scmer) { close(entered); <-resume }, nil, nil, 0, nil)
+		tbl.ProcessUniqueCollision([]string{"id"}, first, false, func(_ [][]scm.Scmer, _ func() bool) { close(entered); <-resume }, nil, nil, 0, nil)
 	}()
 	<-entered
 	defer func() { close(resume); <-done }()
 	secondDone := make(chan struct{})
 	go func() {
 		defer close(secondDone)
-		tbl.ProcessUniqueCollision([]string{"id"}, second, false, func([][]scm.Scmer) {}, nil, nil, 0, nil)
+		tbl.ProcessUniqueCollision([]string{"id"}, second, false, func(_ [][]scm.Scmer, _ func() bool) {}, nil, nil, 0, nil)
 	}()
 	select {
 	case <-secondDone:
@@ -166,7 +166,7 @@ func TestInsertCollisionCallbackRechecksEarlierKeys(t *testing.T) {
 	tbl.Insert(columns, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("taken")}}, nil, scm.NewNil(), false, nil)
 	var collisions []string
 	tbl.ProcessUniqueCollision(columns, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("taken")}, {scm.NewInt(3), scm.NewString("free")}}, false,
-		func(rows [][]scm.Scmer) { t.Fatal("accepted key added by collision callback") }, nil,
+		func(rows [][]scm.Scmer, _ func() bool) { t.Fatal("accepted key added by collision callback") }, nil,
 		func(key string, _ []scm.Scmer) {
 			collisions = append(collisions, key)
 			if key == "name" {

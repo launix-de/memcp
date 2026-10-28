@@ -1619,7 +1619,10 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					wasDeletedBefore := t.deletions.Get(uint(targetIdx))
 					t.deletions.Set(uint(targetIdx), true) // mark as deleted temporarily for unique check
 					t.mu.Unlock()                          // release write lock, so the scan can be performed
-					t.t.ProcessUniqueCollision(payloadCols, [][]scm.Scmer{payloadRow}, false, func(values [][]scm.Scmer) {
+					t.t.ProcessUniqueCollision(payloadCols, [][]scm.Scmer{payloadRow}, false, func(values [][]scm.Scmer, validate func() bool) {
+						if !validate() {
+							panic(uniqueReadRetry{})
+						}
 						t.mu.Lock() // start write lock
 					}, nil, func(errmsg string, data []scm.Scmer) {
 						t.mu.Lock() // start write lock

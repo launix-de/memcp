@@ -1001,7 +1001,7 @@ func (r *replicationManager) replicaDeclaration(table *table, includeTopology bo
 func (r *replicationManager) step(ctx context.Context, peerID string, packet mosiPacket) error {
 	peer := r.peer(peerID)
 	if peer == nil {
-		return fmt.Errorf(mosi.NetworkError)
+		return fmt.Errorf("%s: %s step to %s for %s", mosi.NetworkError, packet.Kind, peerID, packet.Resource.key())
 	}
 	step := &replicaStep{peer: peerID, resource: packet.Resource, epoch: packet.Epoch, content: packet.Content, done: make(chan struct{})}
 	r.steps.Store(packet.ID, step)
@@ -1013,7 +1013,7 @@ func (r *replicationManager) step(ctx context.Context, peerID string, packet mos
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-peer.done:
-		return fmt.Errorf(mosi.NetworkError)
+		return fmt.Errorf("%s: %s step to %s for %s", mosi.NetworkError, packet.Kind, peerID, packet.Resource.key())
 	case <-step.done:
 		return step.err
 	}

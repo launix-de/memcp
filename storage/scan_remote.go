@@ -21,7 +21,8 @@ import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-const scanWireVersion = 5
+// Version 6 confirms both installation and cluster permission in a reference ACK.
+const scanWireVersion = 6
 
 type shardScanHorizon struct {
 	Main  uint32 `json:"main"`

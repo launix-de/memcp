@@ -247,7 +247,7 @@ func TestUniqueBatchCoercingAndNullKeys(t *testing.T) {
 			cols := []string{"id", "value"}
 			rows := [][]scm.Scmer{{scm.NewInt(1), tc.first}, {scm.NewInt(2), tc.second}}
 			accepted, rejected := 0, 0
-			tbl.ProcessUniqueCollision(cols, rows, false, func(rows [][]scm.Scmer) {
+			tbl.ProcessUniqueCollision(cols, rows, false, func(rows [][]scm.Scmer, _ func() bool) {
 				tbl.ActiveShards()[0].Insert(cols, rows, false, nil, nil, false, nil)
 				accepted += len(rows)
 			}, nil, func(string, []scm.Scmer) { rejected++ }, 0, nil)
@@ -279,7 +279,7 @@ func TestGeneratedUniqueKeySkipReleasesOuterLockOnPanic(t *testing.T) {
 			func() {
 				defer func() { caught = recover() }()
 				tbl.ProcessUniqueCollision([]string{"name"}, [][]scm.Scmer{{scm.NewString("new")}}, false,
-					func([][]scm.Scmer) { panic("insert callback failed") }, nil, nil, 0, nil)
+					func(_ [][]scm.Scmer, _ func() bool) { panic("insert callback failed") }, nil, nil, 0, nil)
 			}()
 			if caught != "insert callback failed" {
 				t.Fatalf("expected callback panic, got %v", caught)
@@ -301,7 +301,7 @@ func TestMultipleUniqueKeysReleaseOuterLockOnCallbackPanic(t *testing.T) {
 		defer func() { caught = recover() }()
 		tbl.ProcessUniqueCollision([]string{"id", "name"},
 			[][]scm.Scmer{{scm.NewInt(1), scm.NewString("new")}}, false,
-			func([][]scm.Scmer) { panic("insert callback failed") }, nil, nil, 0, nil)
+			func(_ [][]scm.Scmer, _ func() bool) { panic("insert callback failed") }, nil, nil, 0, nil)
 	}()
 	if caught != "insert callback failed" {
 		t.Fatalf("expected callback panic, got %v", caught)
@@ -327,7 +327,7 @@ func TestMultipleUniqueKeysReleaseOuterLockOnCollisionPanic(t *testing.T) {
 		defer func() { caught = recover() }()
 		tbl.ProcessUniqueCollision([]string{"id", "name"},
 			[][]scm.Scmer{{scm.NewInt(2), scm.NewString("taken")}}, false,
-			func([][]scm.Scmer) { t.Fatal("duplicate row reached success callback") }, nil,
+			func(_ [][]scm.Scmer, _ func() bool) { t.Fatal("duplicate row reached success callback") }, nil,
 			func(string, []scm.Scmer) { panic("collision callback failed") }, 0, nil)
 	}()
 	if caught != "collision callback failed" {
@@ -981,7 +981,7 @@ func TestUniqueChecksWithMorePartitionDimensionsThanKeyColumns(t *testing.T) {
 	tbl.mu.Unlock()
 	accepted := 0
 	tbl.ProcessUniqueCollision([]string{"id", "name"}, [][]scm.Scmer{{scm.NewInt(15), scm.NewString("new")}}, false,
-		func(rows [][]scm.Scmer) { accepted += len(rows) }, nil,
+		func(rows [][]scm.Scmer, _ func() bool) { accepted += len(rows) }, nil,
 		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision on %s", key) }, 0, nil)
 	if accepted != 1 {
 		t.Fatalf("accepted %d rows, want 1", accepted)
@@ -1013,7 +1013,7 @@ func TestUniqueChecksRejectCollisionsOutsideInsertPartition(t *testing.T) {
 		t.Run(tc.key, func(t *testing.T) {
 			collision := ""
 			tbl.ProcessUniqueCollision(columns, [][]scm.Scmer{tc.row}, false,
-				func([][]scm.Scmer) { t.Error("accepted a duplicate from another partition") }, nil,
+				func(_ [][]scm.Scmer, _ func() bool) { t.Error("accepted a duplicate from another partition") }, nil,
 				func(key string, _ []scm.Scmer) { collision = key }, 0, nil)
 			if collision != tc.key {
 				t.Fatalf("collision = %q, want %q", collision, tc.key)

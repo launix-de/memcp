@@ -54,7 +54,7 @@ type scanChallenge struct {
 
 func scanAuthProof(secret []byte, role string, server, client scanChallenge) string {
 	mac := hmac.New(sha256.New, secret)
-	for _, item := range []string{mosiSubprotocol + "/objects.channels.v5", role, server.Node, server.Boot, server.Nonce, client.Node, client.Boot, client.Nonce} {
+	for _, item := range []string{mosiSubprotocol + "/objects.channels.v6", role, server.Node, server.Boot, server.Nonce, client.Node, client.Boot, client.Nonce} {
 		mac.Write([]byte(item))
 		mac.Write([]byte{0})
 	}

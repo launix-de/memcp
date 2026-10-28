@@ -487,6 +487,11 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 		}
 		return true
 	})
+	if expected == nil && packet.State != "" {
+		if err := r.grantAcquired(c.resolved(), packet); err != nil {
+			return err
+		}
+	}
 	c.acquire.Unlock()
 	locked = false
 	if expected != nil {
