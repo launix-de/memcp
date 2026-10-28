@@ -18,10 +18,6 @@ type clusterCapacityRejection struct{}
 
 func (clusterCapacityRejection) Error() string { return "cluster shard RAM capacity unavailable" }
 
-type clusterShardHint struct {
-	Warm bool `json:"warm"`
-}
-
 // scanQueryContext is used only when scheduling/acquiring a cold shard. The
 // already-authorized read path must not consult SessionState's context mutex.
 func scanQueryContext(tx *TxContext, fallback context.Context) context.Context {
@@ -53,20 +49,16 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 		origin = origins[0]
 	}
 	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.uuid.String()}}
-	// Residency is only a hint. Permission acquisition remains at GetRead;
-	// no backend bytes are read to decide whether execution should move.
-	acquireClusterRead(scanQueryContext(tx, cluster.ctx), expected.Resource)
-	links := cluster.view.Load().links
-	// A warm local generation stays local. For a cold generation, ask existing
-	// peers for residency metadata only; never fetch the shard just to decide
-	// where to compute. All routing/IPC is outside row and filter-batch loops.
-	if shard.state() == COLD {
-		for _, link := range links {
-			ctx, cancel := context.WithTimeout(cluster.ctx, 2*time.Second)
-			var hint clusterShardHint
-			err := cluster.service.control(ctx, link.peer, "cluster.hint", expected, &hint)
-			cancel()
-			if err == nil && hint.Warm {
+	// Use the existing MOSI directory after acquisition. Only the owner knows
+	// its S readers; a local I/IO or backup filename cannot select a custodian.
+	cell := acquireClusterRead(scanQueryContext(tx, cluster.ctx), expected.Resource)
+	resource := *cell.resolved().resource.Load()
+	cluster.manager.mu.Lock()
+	record := cluster.manager.directory.Records[cluster.manager.resourceKey(resource)]
+	cluster.manager.mu.Unlock()
+	if record.Owner != "" && record.Owner != cluster.self.ID {
+		for _, link := range cluster.view.Load().links {
+			if link.member.ID == record.Owner {
 				cluster.locality.Add(1)
 				panic(shardReadDelegation{&shardScanTarget{resource: expected.Resource, executor: &clusterScanExecutor{cluster: cluster, expected: expected, preferred: link}, origin: origin}})
 			}
@@ -137,7 +129,7 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, inv
 					}
 				}
 			}()
-			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected, kind: "value", next: &link.sequence}
+			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected}
 			result = remote.ExecuteShardScan(resource, invocation)
 		}()
 		if !rejected {

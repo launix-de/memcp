@@ -358,7 +358,7 @@ func TestClusterDiscoveryIgnoresUnavailableNonOwner(t *testing.T) {
 						answer.Owner = cluster.self.ID
 					}
 					if value, ok := cluster.service.returns.Load(request.Return); ok {
-						value.(*scanReturnChannel).result <- scanCompletion{Data: mustScanJSON(answer)}
+						deliverTestCompletion(t, value, scanCompletion{Data: mustScanJSON(answer)})
 					}
 				case <-ctx.Done():
 				}

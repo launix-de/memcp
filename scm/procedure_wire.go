@@ -134,7 +134,7 @@ func UnmarshalProcedure(data []byte, options ...ProcedureDecode) (value Scmer, e
 	if len(options) > 0 {
 		resolve = options[0].Resolve
 	}
-	expression, err = resolveProcedureObjects(expression, resolve)
+	expression, err = ResolveSerializedObjects(expression, resolve)
 	if err != nil {
 		return NewNil(), err
 	}
@@ -202,6 +202,13 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 	case tagFunc, tagSpecialForm:
 		if literal || DeclarationForValue(value) == nil {
 			return fmt.Errorf("procedure contains a process-local callable")
+		}
+		return nil
+	case tagFastDict:
+		for _, item := range value.FastDict().Pairs {
+			if err := validateProcedureWire(item, bound, origin, true, depth+1, bindings...); err != nil {
+				return err
+			}
 		}
 		return nil
 	case tagSlice:

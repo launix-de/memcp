@@ -150,7 +150,7 @@ func TestClusterObjectHistoricalScanRebuildAndPeerGC(t *testing.T) {
 	if err := client.control(context.Background(), peer, "scan.execute", task, &reduced); err != nil {
 		t.Fatal(err)
 	}
-	value, err := decodeScanData(reduced.Value, false)
+	value, err := schemeValue(reduced.Value).thaw(0)
 	if err != nil || value.Int() != 9 {
 		t.Fatal("old-generation statistics changed", value, err)
 	}
@@ -480,8 +480,10 @@ func TestClusterObjectAbandonedCompletionDiscardsOffers(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := uuid.NewString()
-	channel := &scanReturnChannel{peer: peer, result: make(chan scanCompletion, 1)}
-	client.returns.Store(id, channel)
+	results := make(chan scanCompletion, 1)
+	receiver := newClusterReceiver(1, func(_ context.Context, v scm.Scmer) error { results <- v.Any().(scanCompletion); return nil })
+	receiver.Seal()
+	client.returns.Store(id, &receiverRoute{peer, receiver})
 	defer client.returns.Delete(id)
 	completion, _ := json.Marshal(scanCompletion{Return: id, Offers: []scm.ClusterReference{ref}})
 	s := &scanRPCSession{service: client, peer: peer}
@@ -489,13 +491,15 @@ func TestClusterObjectAbandonedCompletionDiscardsOffers(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Cancellation after delivery but before collection must release the offer.
-	channel.close(client)
+	receiver.Close()
+	abandoned := <-results
+	client.discardObjectOffers(peer, abandoned.Offers)
 	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
 	// A late duplicate is harmless and cannot repopulate a closed collector.
 	if _, err := s.channelMessage(context.Background(), "scan.result", completion); err != nil {
 		t.Fatal(err)
 	}
-	if len(channel.result) != 0 {
+	if len(results) != 0 {
 		t.Fatal("late completion was delivered to a closed collector")
 	}
 }
@@ -602,7 +606,7 @@ func TestClusterDiscoveryRefreshesRoutingAfterConcurrentHandover(t *testing.T) {
 	if !ok {
 		t.Fatal("missing discovery return collector")
 	}
-	entry.(*scanReturnChannel).result <- scanCompletion{Return: request.Return, Data: data}
+	deliverTestCompletion(t, entry, scanCompletion{Return: request.Return, Data: data})
 	reply := <-finished
 	if reply.err != nil || reply.owner != remote.ID || cell.ownstate.Phase() != mosi.IO {
 		t.Fatal("live handover became a recovery failure or regained rights", reply, cell.ownstate.Phase())
@@ -909,7 +913,7 @@ func TestClusterObjectReleaseRetriesWithoutAnotherGCOrReconnect(t *testing.T) {
 			if attempt == 0 {
 				completion.Panic = &scanPanic{Message: "temporary connection failure"}
 			}
-			entry.(*scanReturnChannel).result <- completion
+			deliverTestCompletion(t, entry, completion)
 		case <-time.After(3 * time.Second):
 			t.Fatal("release was not retried without another GC or reconnect", attempt)
 		}

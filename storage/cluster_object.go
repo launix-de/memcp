@@ -350,7 +350,7 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 	if err := service.control(ctx, peer, "object.acquire", clusterObjectAcquisition{reference, lease.reference.Token}, nil); err != nil {
 		return scm.NewNil(), err
 	}
-	var frozen scanWireValue
+	var frozen schemeValue
 	if err := json.Unmarshal(reference.View, &frozen); err != nil {
 		return scm.NewNil(), err
 	}
@@ -384,7 +384,7 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 			}
 			return ref, err
 		})
-		args := make([]scanWireValue, len(request.Arguments))
+		args := make([]schemeValue, len(request.Arguments))
 		defer func() { service.cancelObjectOffers(target, offered) }()
 		for i, arg := range request.Arguments {
 			var err error
@@ -400,7 +400,13 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 		defer service.discardObjectOffers(target, result.Offers)
 		return result.Value.thaw(0, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return service.importObject(callCtx, target, ref) }})
 	}}
-	return scm.ReconstructClusterObject(handle)
+	value, failure := scm.ReconstructClusterObject(handle)
+	if failure == nil {
+		if source, ok := value.Any().(*remoteShardObject); ok {
+			failure = source.prepareSource(ctx, peer)
+		}
+	}
+	return value, failure
 }
 
 type clusterObjectAcquisition struct {
@@ -411,7 +417,7 @@ type clusterObjectAcquisition struct {
 type clusterObjectCall struct {
 	Reference scm.ClusterReference `json:"reference"`
 	Method    string               `json:"method"`
-	Arguments []scanWireValue      `json:"arguments,omitempty"`
+	Arguments []schemeValue        `json:"arguments,omitempty"`
 }
 
 func (s *scanRPCSession) handleObject(ctx context.Context, method string, data []byte) (any, error) {
@@ -487,7 +493,10 @@ func (s *scanRPCSession) requestObject(ctx context.Context, call clusterObjectCa
 	}
 	// Native query ownership is established once for callable/helper requests.
 	// Decoded nested scans borrow this cancellation/transaction context.
-	id := uuid.NewString()
+	id, _ := ctx.Value(remoteScanContextKey{}).(string)
+	if id == "" {
+		return scm.NewNil(), fmt.Errorf("object execution requires an operation envelope")
+	}
 	ss := &scm.SessionState{}
 	seq := ss.BeginQuery("Cluster", "object request")
 	ss.SetQueryContext(seq, ctx)
@@ -643,7 +652,7 @@ func (s *scanRPCSession) resolveObject(ref scm.ClusterReference) (ClusterObject,
 func (service *nodeScanService) cancelObjectOffers(peer *mosiPeer, references []scm.ClusterReference) {
 	var expanded []scm.ClusterReference
 	for _, ref := range references {
-		expanded = append(expanded, scanWireReferences(scanWireValue{Kind: "object", Reference: &ref})...)
+		expanded = append(expanded, referenceOffers(ref)...)
 	}
 	references = expanded
 	for _, ref := range references {
@@ -676,7 +685,7 @@ func (service *nodeScanService) cancelPeerObjectOffers(peer *mosiPeer) {
 }
 
 type clusterObjectReply struct {
-	Value  scanWireValue          `json:"value"`
+	Value  schemeValue            `json:"value"`
 	Offers []scm.ClusterReference `json:"offers,omitempty"`
 }
 
@@ -689,7 +698,7 @@ func (service *nodeScanService) discardObjectOffers(peer *mosiPeer, refs []scm.C
 
 // GC runs no network operations. Its queue worker uses the existing message
 // collector to confirm release, retrying through the same process's reconnected
-// peer. A temporary connection is needed only for explicit scan_remote callers
+// peer. A temporary connection is needed for object callers
 // whose original query connection has already closed.
 func (service *nodeScanService) deliverObjectRelease(release clusterObjectRelease) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

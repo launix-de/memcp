@@ -39,6 +39,7 @@ type schemeTextWriter struct {
 	buffer     *bytes.Buffer
 	objects    *SerializationContext
 	references map[ClusterObject]Scmer
+	literals   map[Scmer]int64 // envelope-local constructor IDs; same capture namespace as objects
 	hash       uint64
 }
 
@@ -320,7 +321,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 				// this capture once before compiling any row callback, even for an
 				// empty shard. The envelope-local ID also preserves capture aliases.
 				if b.objects != nil {
-					expression = NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(int64(len(b.references) + 1)), expression})
+					expression = NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(int64(len(b.references) + len(b.literals) + 1)), expression})
 				}
 				b.references[object] = expression
 			}
@@ -382,7 +383,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 	case tagSlice:
 		slice := lambdaSyntaxOperands(v.Slice())
-		if b.objects != nil && len(slice) == 2 && scmerIsSymbol(slice[0], "quote") && containsClusterObject(slice[1]) {
+		if b.objects != nil && len(slice) == 2 && scmerIsSymbol(slice[0], "quote") {
 			serializeClusterLiteral(b, slice[1], glob)
 			return
 		}
@@ -444,17 +445,30 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 		serializeProcShallow(b, v.Proc().snapshot(), glob)
 	case tagFastDict:
-		fd := v.FastDict()
-		b.WriteByte('(')
-		if fd != nil {
-			for i, x := range fd.Pairs {
-				if i != 0 {
-					b.WriteByte(' ')
-				}
-				serializeEx(b, x, en, glob, p)
+		if b.objects != nil {
+			if b.literals == nil {
+				b.literals = make(map[Scmer]int64)
+			}
+			id, exists := b.literals[v]
+			if !exists {
+				id = int64(len(b.references) + len(b.literals) + 1)
+				b.literals[v] = id
+			}
+			b.WriteString("(serialized_value ")
+			b.WriteString(strconv.FormatInt(id, 10))
+			b.WriteByte(' ')
+		}
+		b.WriteString("(set_assoc '()")
+		if fd := v.FastDict(); fd != nil {
+			for _, item := range fd.Pairs {
+				b.WriteByte(' ')
+				serializeClusterLiteral(b, item, glob)
 			}
 		}
 		b.WriteByte(')')
+		if b.objects != nil {
+			b.WriteByte(')')
+		}
 	case tagSourceInfo:
 		serializeEx(b, v.SourceInfo().value, en, glob, p)
 	case tagRegex:
@@ -516,6 +530,9 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 			b.WriteString(schemeStringEscaper.Replace(s))
 			b.WriteByte('"')
 			return
+		}
+		if b.objects != nil {
+			panic("runtime value has no serialization contract")
 		}
 		b.WriteString(fmt.Sprint(v.Any()))
 	case tagParser:
@@ -668,20 +685,8 @@ func prettyLines(v Scmer, glob *Env, width int, indent int) []string {
 
 // Quoted data containing runtime references is reconstructed as data constructors.
 // Ordinary quoted source remains inert, including literal cluster_object forms.
-func containsClusterObject(value Scmer) bool {
-	if _, ok := ClusterObjectOf(value); ok {
-		return true
-	}
-	if value.IsSlice() {
-		for _, item := range value.Slice() {
-			if containsClusterObject(item) {
-				return true
-			}
-		}
-	}
-	return false
-}
 func serializeClusterLiteral(b *schemeTextWriter, value Scmer, glob *Env) {
+	value = value.WithoutSourceInfo()
 	if value.IsSlice() {
 		b.WriteString("(list")
 		for _, item := range value.Slice() {

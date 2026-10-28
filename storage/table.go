@@ -48,6 +48,11 @@ func NewTableScmer(t *table) scm.Scmer {
 
 // TableFromScmer extracts a *table from a TagTable Scmer.
 func TableFromScmer(s scm.Scmer) *table {
+	if !s.IsCustom(TagTable) {
+		if source, ok := s.Any().(*remoteShardObject); ok && source.source != nil {
+			return source.source
+		}
+	}
 	if s.IsNil() {
 		panic("table does not exist")
 	}

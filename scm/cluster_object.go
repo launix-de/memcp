@@ -253,7 +253,7 @@ func (bindings *SerializationContext) prepare(value Scmer) {
 	}
 }
 
-func resolveProcedureObjects(value Scmer, resolve func(ClusterReference) (Scmer, error)) (Scmer, error) {
+func ResolveSerializedObjects(value Scmer, resolve func(ClusterReference) (Scmer, error)) (Scmer, error) {
 	values := make(map[string]Scmer)
 	return resolveProcedureObjectTree(value, make(map[int64]*serializedCapture), func(ref ClusterReference) (Scmer, error) {
 		key := ref.URI + "/" + ref.Token
@@ -373,7 +373,9 @@ func ProcedureClusterReferences(data []byte) []ClusterReference {
 		Source string `json:"source"`
 	}
 	if json.Unmarshal(data, &envelope) != nil {
-		return nil
+		if json.Unmarshal(data, &envelope.Source) != nil {
+			return nil
+		}
 	}
 	var result []ClusterReference
 	var walk func(Scmer)

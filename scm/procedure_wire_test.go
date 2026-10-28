@@ -356,3 +356,28 @@ func TestProcedureWireLocalSessionTextDoesNotRequireNetworkExport(t *testing.T) 
 		t.Fatal("local text printing silently permitted an unbound network session", err)
 	}
 }
+
+func TestProcedureWireDictionaryConstructorMaterializesBeforeInvocation(t *testing.T) {
+	dict := NewFastDictValue(128)
+	for i := 0; i < 128; i++ {
+		dict.Set(NewInt(int64(i)), NewInt(int64(i+1)), nil)
+	}
+	env := &Env{Vars: Vars{Symbol("captured"): NewFastDict(dict)}, Outer: &Globalenv}
+	original := Eval(Read(t.Name(), `(lambda () captured)`), env)
+	data, err := MarshalProcedure(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := UnmarshalProcedure(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := Apply(restored)
+	second := Apply(restored)
+	if !first.IsFastDict() || first.FastDict() != second.FastDict() {
+		t.Fatal("dictionary reconstructed by callback execution")
+	}
+	if strings.Contains(SerializeToString(restored.Proc().Body, &Globalenv), "serialized_value") {
+		t.Fatal("unmaterialized capture retained")
+	}
+}

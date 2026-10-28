@@ -32,7 +32,7 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 		return scm.NewNil(), err
 	}
 	if r.Method == "view" {
-		return scm.NewSlice([]scm.Scmer{scm.NewString(s.t.schema.Name), scm.NewString(s.t.Name), scm.NewString(s.uuid.String())}), nil
+		return scm.NewSlice([]scm.Scmer{scm.NewString(s.t.schema.Name), scm.NewString(s.t.Name), scm.NewString(s.uuid.String()), scm.NewInt(int64(s.t.filterSchemaFingerprint()))}), nil
 	}
 	if r.Method == "scan" {
 		switch input := r.Payload.(type) {
@@ -94,7 +94,35 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 
 type clusterObjectSessionKey struct{}
 
-type remoteShardObject struct{ handle scm.ClusterHandle }
+// The imported generation is a regular native scan source. Its one-shard
+// topology contains only a routing stub; GetRead delegates before payload use.
+// The peer handle retained by the executor owns the historical generation.
+type remoteShardObject struct {
+	handle scm.ClusterHandle
+	source *table
+}
+
+func (object *remoteShardObject) prepareSource(ctx context.Context, peer *mosiPeer) error {
+	view := object.handle.View.Slice()
+	if len(view) != 4 {
+		return fmt.Errorf("invalid shard source view")
+	}
+	id, err := uuid.Parse(view[2].String())
+	if err != nil {
+		return err
+	}
+	resource := mosiResource{view[0].String(), view[1].String(), id.String()}
+	tbl := &table{Name: resource.Table, schema: &database{Name: resource.Database}}
+	shard := &storageShard{t: tbl, uuid: id}
+	ref := object.handle.Reference
+	executor := &peerScanExecutor{input: &ref, inputLease: scm.NewAny(object), peer: peer, ctx: context.Background(), prepared: remoteScanShard{Schema: uint64(view[3].Int()), Resource: resource}}
+	shard.scanTarget.Store(&shardScanTarget{resource: resource, executor: executor})
+	tbl.Shards = []*storageShard{shard}
+	tbl.publishColumnNamesSnapshot()
+	tbl.publishTopologyLocked()
+	object.source = tbl
+	return nil
+}
 
 func (*remoteShardObject) ClusterObjectType() string { return "shard" }
 func (s *remoteShardObject) HandleClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
@@ -168,7 +196,7 @@ func init() {
 		tx.remoteObject = &handle
 		return scm.NewAny(tx)
 	})
-	scm.RegisterClusterObjectType("shard", func(handle scm.ClusterHandle) scm.Scmer { return scm.NewAny(&remoteShardObject{handle}) })
+	scm.RegisterClusterObjectType("shard", func(handle scm.ClusterHandle) scm.Scmer { return scm.NewAny(&remoteShardObject{handle: handle}) })
 }
 
 func (origin *TxContext) BindClusterInvocation(value scm.Scmer) (scm.Scmer, error) {

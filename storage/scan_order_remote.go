@@ -55,7 +55,7 @@ type shardOrderInvocation struct {
 
 type remoteScanOrder struct {
 	BatchSize        int               `json:"batch_size"`
-	Columns          []scanWireValue   `json:"columns"`
+	Columns          []schemeValue     `json:"columns"`
 	Directions       []json.RawMessage `json:"directions"`
 	AcceptColumns    []string          `json:"accept_columns,omitempty"`
 	Accept           json.RawMessage   `json:"accept,omitempty"`
@@ -126,18 +126,12 @@ func (wire *remoteScanOrder) bind(decode scm.ProcedureDecode) (*shardOrderInvoca
 		if err != nil {
 			return nil, err
 		}
-		if err := validateRemoteScanReadOnly(value); err != nil {
-			return nil, err
-		}
 		directions = append(directions, scm.Apply(value))
 	}
 	result.directions = scanSortDirections(directions)
 	if len(wire.Accept) > 0 {
 		value, err := scm.UnmarshalProcedure(wire.Accept, decode)
 		if err != nil {
-			return nil, err
-		}
-		if err := validateRemoteScanReadOnly(value); err != nil {
 			return nil, err
 		}
 		result.accept = value
@@ -290,10 +284,7 @@ func init() {
 }
 
 func (response remoteScanResult) ClusterObjectOffers() []scm.ClusterReference {
-	if response.Object == nil {
-		return nil
-	}
-	return []scm.ClusterReference{*response.Object}
+	return scm.ProcedureClusterReferences(response.Value)
 }
 
 // One queue owns its bounded receive window. Buffered selected IDs remain valid

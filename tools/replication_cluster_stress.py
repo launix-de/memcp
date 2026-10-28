@@ -1290,18 +1290,18 @@ def run_remote_scans(args, artifacts, journal):
         bindings = f'(define cutoff 1) (define factor 2) (define expected_node {json.dumps(worker_id)})'
         condition = '(lambda (id) (and (> id cutoff) (equal? (node_id) expected_node)))'
         reducer = '(lambda (acc value) (if (equal? (node_id) expected_node) (+ acc (* factor value)) (error "mapreducer ran on coordinator")))'
-        scalar = f"""(scan_remote nil {endpoint} "{DATABASE}" "remote_items" '("id") {condition} '("value") {reducer} 0 +)"""
+        scalar = f"""(reduce (cluster_objects nil {endpoint} "{DATABASE}" "remote_items") (lambda (total source) (+ total (scan nil source '() '() '("id") {condition} '("value") {reducer} 0 +))) 0)"""
         expression = f'(begin {bindings} {scalar})'
         for expected in (180, 190, 200):
             expect(m.scm(expression).strip(), str(expected), "filter/mapreduce placement and fresh remote sum")
             if expected != 200:
                 w.sql("UPDATE remote_items SET value=value+5 WHERE id=2")
-        grouped = f"""(scan_remote nil {endpoint} "{DATABASE}" "remote_items" '("id") {condition} '("bucket" "value") (lambda (acc bucket value) (set_assoc acc bucket (* factor value) +)) '() (lambda (left right) (merge_assoc left right +)) "group_sums")"""
+        grouped = f"""(reduce (cluster_objects nil {endpoint} "{DATABASE}" "remote_items") (lambda (total source) (merge_assoc total (scan nil source '() '() '("id") {condition} '("bucket" "value") (lambda (acc bucket value) (set_assoc acc bucket (* factor value) +)) '() (lambda (left right) (merge_assoc left right +))) +)) '())"""
         result = m.scm(f'(begin {bindings} (define result {grouped}) (list (result "a") (result "b")))').strip()
         expect(json.loads(result), [60, 140], "grouped partial reductions and coordinator combine")
         # The same transport works in the reverse direction; the contact node
         # has no permanent execution/master role in the scan protocol.
-        reverse = f"""(scan_remote nil "http://127.0.0.1:{master.port}/cluster" "{DATABASE}" "remote_items" '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +)"""
+        reverse = f"""(reduce (cluster_objects nil "http://127.0.0.1:{master.port}/cluster" "{DATABASE}" "remote_items") (lambda (total source) (+ total (scan nil source '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))) 0)"""
         expect(w.scm(reverse).strip(), "110", "reverse remote execution")
         journal.append({"scenario": "remote-scans", "worker": worker_id, "coordinator": coordinator_id,
                         "shards": 2, "fresh_sums": [180, 190, 200], "group_sums": [60, 140]})
@@ -1345,9 +1345,10 @@ def run_retained_generation(master, worker, args, journal):
         ((lambda (barrier)
             ((lambda (sources) (begin
                 (barrier_state "held" (json_encode (map sources (lambda (source) (cluster_object_call nil source "view")))))
-                (scan_remote nil {endpoint} "{DATABASE}" "remote_items" '("id")
-                    (lambda (id) (if (equal? id 1) (barrier "ready") true))
-                    '("value") (lambda (subtotal value) (+ subtotal value)) 0 +)))
+                (reduce sources (lambda (total source) (+ total
+                    (scan nil source '() '() '("id")
+                        (lambda (id) (if (equal? id 1) (barrier "ready") true))
+                        '("value") (lambda (subtotal value) (+ subtotal value)) 0 +))) 0)))
                 (cluster_objects nil {endpoint} "{DATABASE}" "remote_items")))
             (newcachemap (lambda (key) (begin
                 (http_request "POST" {gate} (list) (barrier_state "held")) true)))))
