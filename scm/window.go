@@ -66,7 +66,7 @@ func streamWindowTopK(a []Scmer, offset, limit int) Scmer {
 	if offset > int(^uint(0)>>1)-limit {
 		panic("stream_window_reduce: ordered window overflows")
 	}
-	result := a[3]
+	result := ApplyOnce(a[3], nil)
 	if limit == 0 {
 		return result
 	}
@@ -312,7 +312,7 @@ func init_window() {
 			if len(a) == 6 && !a[5].IsNil() {
 				return streamWindowTopK(a, offset, limit)
 			}
-			result = a[3]
+			result = ApplyOnce(a[3], nil)
 			if limit == 0 {
 				return result
 			}
@@ -356,7 +356,7 @@ func init_window() {
 				{Kind: "number", Label: "offset", Description: "number of complete producer values to skip"},
 				{Kind: "number", Label: "limit", Description: "maximum values to reduce, or -1 for no limit"},
 				{Kind: "func", Label: "reduce", Description: "serial accumulator over complete values", Params: []*TypeDescriptor{{Kind: "any", Label: "acc"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "any", Label: "neutral", Description: "initial accumulator"},
+				{Kind: "any", Label: "neutral", Description: "initial accumulator or zero-argument factory"},
 				{Kind: "func", Label: "producer", Description: "nested streaming plan called with a one-value emit callback", Params: []*TypeDescriptor{{Kind: "func", Label: "emit", Description: "emits one complete value", Params: []*TypeDescriptor{{Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any", Label: "result"}}}, Return: &TypeDescriptor{Kind: "any"}},
 				{Kind: "func", Label: "less", Description: "optional strict ordering for an unordered producer; retains only offset+limit values and requires a finite limit", Optional: true, Params: []*TypeDescriptor{{Kind: "any", Label: "left"}, {Kind: "any", Label: "right"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},

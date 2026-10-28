@@ -1257,3 +1257,18 @@ func TestGoCallLargeSingleAggregateKeepsPointerWrapper(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyOnceInitializerPreservesInlineReducer(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func ApplyOnce(source Scmer, args []Scmer) Scmer
+func initializer(args ...Scmer) Scmer { return ApplyOnce(args[0], nil) }
+`, "initializer")
+	code, errMsg := generateClosure("initializer", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	if !strings.Contains(code, "jitEmitReducerInitializer(ctx,") {
+		t.Fatalf("initializer lost native lowering:\n%s", code)
+	}
+}

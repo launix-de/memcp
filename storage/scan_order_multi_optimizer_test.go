@@ -138,7 +138,7 @@ func optimizeNestedScanJoinOrderTestSource(t *testing.T, suffix string) string {
 		(list) nil (list) (list)
 		0 0 10 (list (list 0 "key"))
 		(lambda (acc key) (set_assoc acc key 1))
-		(list)` + suffix + `)`
+		(lambda () (list))` + suffix + `)`
 	optimized := scm.Optimize(scm.Read(t.Name(), `(set_assoc `+scan+` "outer" true)`), &scm.Globalenv, nil)
 	return scm.SerializeToString(optimized, &scm.Globalenv)
 }

@@ -63,7 +63,7 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 	neutralType := unknownScanType()
 	if len(v) > 16 {
 		v[16], neutralType = oc.OptimizeSub(v[16], true)
-		neutralType = normalizeScanType(neutralType)
+		neutralType = scm.ReducerInitializerType(v[16], neutralType, false)
 	}
 	oc.Ome.IncrLoopDepth()
 	var resultType *scm.TypeDescriptor
@@ -156,7 +156,7 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	neutralType := unknownScanType()
 	if len(v) > neutralIdx {
 		v[neutralIdx], neutralType = oc.OptimizeSub(v[neutralIdx], true)
-		neutralType = normalizeScanType(neutralType)
+		neutralType = scm.ReducerInitializerType(v[neutralIdx], neutralType, false)
 	}
 	oc.Ome.IncrLoopDepth()
 	columnTypes := []*scm.TypeDescriptor(nil)
@@ -1277,7 +1277,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 // post-order acceptance and serial accumulator contract.
 func mergeScanOrderQueues(currentTx *TxContext, tables []scanOrderTableSpec, q globalqueue, limitPartitionCols, offset, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, stats []scanOrderStats) (scm.Scmer, bool) {
 	// Merge-collect phase: merge sorted shardqueues from all tables
-	akkumulator := neutral
+	akkumulator := scm.ApplyOnce(neutral, nil)
 	hadValue := false
 	// initialize MapReducers per shard (each shard uses its table's callbackCols/callback)
 	for _, sq := range q.q {
@@ -1459,7 +1459,7 @@ func mergeScanOrderQueues(currentTx *TxContext, tables []scanOrderTableSpec, q g
 		akkumulator = mapReduceProgram.Call(nullArgs)
 	}
 	if !hadValue && !isOuter {
-		akkumulator = notFoundValue
+		akkumulator = scm.ApplyOnce(notFoundValue, nil)
 	}
 	return akkumulator, hadValue
 }
@@ -1507,7 +1507,7 @@ func logScanOrderStats(execStart time.Time, tables []scanOrderTableSpec, stats [
 
 func directScanOrderNullResult(callbackCols []string, callback, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) scm.Scmer {
 	if !isOuter {
-		return notFoundValue
+		return scm.ApplyOnce(notFoundValue, nil)
 	}
 	var local [directScanOrderColumns + 1]scm.Scmer
 	var args []scm.Scmer
@@ -1516,7 +1516,7 @@ func directScanOrderNullResult(callbackCols []string, callback, neutral scm.Scme
 	} else {
 		args = local[:len(callbackCols)+1]
 	}
-	args[0] = neutral
+	args[0] = scm.ApplyOnce(neutral, nil)
 	callbackProgram := scm.PrepareSerialProc(callback)
 	return callbackProgram.Call(args)
 }
@@ -1567,7 +1567,7 @@ func consumeDirectScanOrder(queue *shardqueue, spec *scanOrderTableSpec, current
 		if limit >= 0 && limit < end-start {
 			end = start + limit
 		}
-		accumulator := neutral
+		accumulator := scm.ApplyOnce(neutral, nil)
 		hadValue := false
 		for start < end {
 			batchEnd := start + defaultScanBufferSize
@@ -1591,7 +1591,7 @@ func consumeDirectScanOrder(queue *shardqueue, spec *scanOrderTableSpec, current
 
 	var streamStorage [defaultScanBufferSize]uint32
 	stream := streamStorage[:0]
-	accumulator := neutral
+	accumulator := scm.ApplyOnce(neutral, nil)
 	hadValue := false
 	breakCaught := false
 	partOffset := offset
@@ -1826,7 +1826,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 		panic("scan_order received an invalid compiled access schema")
 	}
 	if bounds.impossible() {
-		return notFoundValue
+		return scm.ApplyOnce(notFoundValue, nil)
 	}
 
 	var mu sync.Mutex
@@ -1897,11 +1897,11 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 	}
 	if foundQueue != nil {
 		spec := scanOrderTableSpec{callbackCols: callbackCols, callback: mapReduce}
-		result, _ := foundQueue.remote.stream(&spec, foundQueue, neutral, foundQueue.items[:1])
+		result, _ := foundQueue.remote.stream(&spec, foundQueue, scm.ApplyOnce(neutral, nil), foundQueue.items[:1])
 		return result
 	}
 	if foundShard == nil {
-		return notFoundValue
+		return scm.ApplyOnce(notFoundValue, nil)
 	}
 	mapperAlreadyLocked := false
 	var mapperStorage ShardMapReducer
@@ -1915,7 +1915,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 		mapper = foundShard.OpenMapReducer(callbackCols, mapReduce, mapperAlreadyLocked, 0, nil, currentTx)
 	}
 	defer mapper.Close()
-	result := mapper.Stream(neutral, []uint32{foundID}, nil)
+	result := mapper.Stream(scm.ApplyOnce(neutral, nil), []uint32{foundID}, nil)
 	mapper.FlushSideEffects()
 	return result
 }

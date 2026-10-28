@@ -420,8 +420,8 @@ func TestSetAssocBulk(t *testing.T) {
 				if value := Apply(got, NewNil()); value.Int() != 7 {
 					t.Fatalf("NULL key was lost: %s", value.String())
 				}
-				if name == "set_assoc_mut" && hashed {
-					if got.FastDict() != original.FastDict() {
+				if name == "set_assoc_mut" {
+					if hashed && got.FastDict() != original.FastDict() {
 						t.Fatal("mutable bulk update copied its owned FastDict")
 					}
 				} else {
@@ -527,7 +527,7 @@ func TestSetAssocBulkMerge(t *testing.T) {
 					if len(calls) != wantCalls || calls[0][0].Int() != 1 || calls[0][1].Int() != 2 || calls[1][0].Int() != 12 || calls[1][1].Int() != 3 || Apply(result, NewString("b")).Int() != wantB {
 						t.Fatalf("wrong merge calls/results: %v, %s", calls, result.String())
 					}
-					if !(name == "set_assoc_mut" && hashed) && Apply(input, NewString("a")).Int() != 1 {
+					if name != "set_assoc_mut" && Apply(input, NewString("a")).Int() != 1 {
 						t.Fatal("merger changed borrowed input")
 					}
 				})
@@ -550,5 +550,19 @@ func TestSetAssocBulkMergeOptimizedAndJIT(t *testing.T) {
 		if Apply(result, NewString("a")).Int() != 123 || Apply(result, NewString("b")).Int() != 91 {
 			t.Fatalf("%s changed bulk merge semantics: %s", name, result.String())
 		}
+	}
+}
+
+func TestSetAssocMutableReusesListCapacity(t *testing.T) {
+	pairs := make([]Scmer, 2, 8)
+	pairs[0], pairs[1] = NewString("a"), NewInt(1)
+	args := []Scmer{NewSlice(pairs), NewString("a"), NewInt(2), NewString("b"), NewInt(3)}
+	setter := Globalenv.Vars["set_assoc_mut"].Func()
+	result := setter(args...)
+	if !result.IsSlice() || &result.Slice()[0] != &pairs[0] || pairs[1].Int() != 2 || len(result.Slice()) != 4 {
+		t.Fatal("mutable update did not reuse owned list capacity")
+	}
+	if allocations := testing.AllocsPerRun(100, func() { assocBenchmarkSink = setter(args...) }); allocations != 0 {
+		t.Fatalf("owned list update with spare capacity allocated %.1f objects", allocations)
 	}
 }

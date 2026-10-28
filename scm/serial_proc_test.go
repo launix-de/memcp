@@ -490,3 +490,133 @@ func BenchmarkSerialProcArgumentFrames(b *testing.B) {
 		}
 	})
 }
+
+func TestPrepareSerialProcCallBoundPreservesCaptures(t *testing.T) {
+	source := preparedTestProc(t, "(lambda (value) (lambda () value))")
+	for _, bound := range []int{1, 8} {
+		prepared := PrepareSerialProc(source, bound)
+		args := []Scmer{NewInt(1)}
+		first := prepared.Call(args)
+		args[0] = NewInt(2)
+		second := prepared.Call(args)
+		if Apply(first).Int() != 1 || Apply(second).Int() != 2 {
+			t.Fatalf("call bound %d changed invocation capture ownership", bound)
+		}
+	}
+}
+
+func TestPrepareSerialProcSingleUseSetupCost(t *testing.T) {
+	source := preparedTestProc(t, "(lambda (old new) (+ (* old 2) (* new 3) (* old new) (if (< old new) old new)))")
+	args := []Scmer{NewInt(2), NewInt(3)}
+	measure := func(bound int) float64 {
+		return testing.AllocsPerRun(100, func() {
+			prepared := PrepareSerialProc(source, bound)
+			singletonListBenchmarkSink = prepared.Call(args)
+		})
+	}
+	one, repeated := measure(1), measure(8)
+	if one >= repeated {
+		t.Fatalf("single-use setup allocates %.1f objects, reusable setup %.1f", one, repeated)
+	}
+}
+
+// The initializer slot has one contract across public/fused reducers: values
+// are borrowed, procedures are factories, invoked even for an empty input.
+func TestReducerInitializerFactories(t *testing.T) {
+	input := NewSlice([]Scmer{NewInt(1), NewInt(2)})
+	identity := NewFunc(func(a ...Scmer) Scmer { return a[0] })
+	predicate := NewFunc(func(a ...Scmer) Scmer { return NewBool(true) })
+	reducer := NewFunc(func(a ...Scmer) Scmer {
+		return setAssocPairs(a[0], []Scmer{NewString("total"), NewInt(1), Globalenv.Vars["+"]}, true)
+	})
+	for _, name := range []string{"reduce", "reduce_assoc", "reduce_segments", "reduce_range", "reduce_map", "reduce_filter", "reduce_merge2", "reduce_map_filter", "reduce_filter_map"} {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			factory := NewFunc(func(a ...Scmer) Scmer {
+				calls++
+				return NewSlice([]Scmer{NewString("total"), NewInt(0)})
+			})
+			args := []Scmer{input, reducer, factory}
+			switch name {
+			case "reduce_assoc":
+				args[0] = NewSlice([]Scmer{NewString("first"), NewInt(1), NewString("second"), NewInt(2)})
+			case "reduce_segments":
+				args[0] = NewSlice([]Scmer{input})
+			case "reduce_range":
+				args[0] = NewInt(2)
+			case "reduce_map":
+				args = []Scmer{input, identity, reducer, factory}
+			case "reduce_filter":
+				args = []Scmer{input, predicate, reducer, factory}
+			case "reduce_merge2":
+				args = []Scmer{input, NewSlice(nil), reducer, factory}
+			case "reduce_map_filter":
+				args = []Scmer{input, identity, predicate, reducer, factory}
+			case "reduce_filter_map":
+				args = []Scmer{input, predicate, identity, reducer, factory}
+			}
+			var first Scmer
+			for iteration := 0; iteration < 2; iteration++ {
+				got := declarations[name].Fn(args...)
+				if total := Apply(got, NewString("total")); total.Int() != 2 {
+					t.Fatalf("result = %s", String(got))
+				}
+				if iteration == 0 {
+					first = got
+				}
+			}
+			if calls != 2 || Apply(first, NewString("total")).Int() != 2 {
+				t.Fatalf("initializer calls = %d; retained first = %s", calls, String(first))
+			}
+		})
+	}
+}
+
+func TestGroupAssocInitializerFactoryOwnsEachBucket(t *testing.T) {
+	calls := 0
+	factory := NewFunc(func(a ...Scmer) Scmer {
+		calls++
+		return NewSlice([]Scmer{NewString("count"), NewInt(0)})
+	})
+	key := NewFunc(func(a ...Scmer) Scmer { return a[0] })
+	reducer := NewFunc(func(a ...Scmer) Scmer {
+		return setAssocPairs(a[0], []Scmer{NewString("count"), NewInt(1), Globalenv.Vars["+"]}, true)
+	})
+	input := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(1)})
+	got := declarations["group_assoc"].Fn(input, key, reducer, factory)
+	if calls != 2 || Apply(Apply(got, NewInt(1)), NewString("count")).Int() != 2 || Apply(Apply(got, NewInt(2)), NewString("count")).Int() != 1 {
+		t.Fatalf("calls=%d result=%s", calls, String(got))
+	}
+}
+
+func TestReducerInitializerOptimizedAndJIT(t *testing.T) {
+	for _, test := range []struct {
+		source      string
+		want, empty int64
+	}{
+		{`(lambda (items seed) (reduce items (lambda (acc item) (set_assoc acc "total" item +)) (lambda () (list "total" seed))))`, 13, 10},
+		{`(lambda (items seed) (reduce (map items (lambda (item) (+ item 1))) (lambda (acc item) (set_assoc acc "total" item +)) (lambda () (list "total" seed))))`, 15, 10},
+		{`(lambda (items seed) (reduce items (lambda (acc item) (set_assoc acc "total" item +)) (lambda () (list "total" 0))))`, 3, 0},
+	} {
+		proc := preparedTestProc(t, test.source)
+		if jitEnabled {
+			proc = jitCompile(proc)
+			if proc.Proc().compiled() == nil {
+				t.Fatal("factory reducer did not compile")
+			}
+		}
+		input := NewSlice([]Scmer{NewInt(1), NewInt(2)})
+		first := Apply(proc, input, NewInt(10))
+		want := test.want
+		for i := 0; i < 3; i++ {
+			got := Apply(proc, input, NewInt(10))
+			if Apply(got, NewString("total")).Int() != want || Apply(first, NewString("total")).Int() != want {
+				t.Fatalf("reducer reused factory state: first=%s next=%s", String(first), String(got))
+			}
+		}
+		empty := Apply(proc, NewSlice(nil), NewInt(10))
+		if Apply(empty, NewString("total")).Int() != test.empty {
+			t.Fatalf("unexpected accumulator %s; first=%s", String(empty), String(first))
+		}
+	}
+}

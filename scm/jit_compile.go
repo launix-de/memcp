@@ -597,6 +597,31 @@ func jitApplyCallableSlice(callable Scmer, env *Env, args []Scmer) Scmer {
 	return ApplyEx(callable, args, env)
 }
 
+// jitEmitReducerInitializer implements ApplyOnce(value, nil) at the same
+// reducer-creation boundary as the interpreter. Known values need no machine
+// instructions; factory lambdas retain normal closure/ownership compilation.
+func jitEmitReducerInitializer(ctx *JITContext, value JITValueDesc) JITValueDesc {
+	if value.Loc == LocLambdaTemplate && value.Lambda != nil {
+		offset := ctx.AllocStack(16)
+		ctx.PrepareScmerStackTarget(int32(offset))
+		target := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(offset)}
+		ctx.ReclaimUntrackedRegs()
+		preserved := ctx.PreserveOuterRegs()
+		result := JITEmitProcInlineWithOuter(ctx, &value.Lambda.Proc, value.Lambda.Outer, nil, ctx.SliceBase, target)
+		ctx.RestoreOuterRegs(preserved)
+		ctx.ReclaimUntrackedRegs()
+		return result
+	}
+	if value.Type != JITTypeUnknown && value.Type != tagProc && value.Type != tagFunc {
+		return value
+	}
+	// Dynamic initializers cross only this setup ABI, never the row loop.
+	// Delegate classification to ApplyOnce, which also returns borrowed values.
+	return ctx.EmitGoCallScalar(GoFuncAddr(func(source Scmer) Scmer {
+		return ApplyOnce(source, nil)
+	}), []JITValueDesc{jitCopyScmerToPair(ctx, value)}, 2)
+}
+
 func jitInvokeCallbackSlice(callback Scmer, args []Scmer) Scmer {
 	return Apply(callback, args...)
 }

@@ -362,11 +362,24 @@ that will read the executing request later. */
 						(list (quote quote) (scan_plan_columns residual_columns))) column_lists)
 					(cons residual callbacks)))))))
 
+/* Mutable initial states are constructed at the reducer boundary, once per
+shard/combiner, rather than shared by the enclosing scan invocation. Scalar
+literals keep their existing direct representation (including additive plans). */
+(define scan_plan_initializer (lambda (expr)
+	(if (and (list? expr) (not (equal? expr '())) (not (equal? (car expr) (quote lambda))))
+		(list (quote lambda) '() expr)
+		expr)))
+
 (define compile_scan_plan (lambda arguments
 	(if (< (count arguments) 5) (error "compile_scan_plan expects an operator, transaction, source, filter columns, and filter callback")
 		(match arguments (merge '(operator tx source columns filter) rest)
 			(begin
 				(define static (scan_plan_list columns))
+				(define initializer_index (match operator
+					(quote scan) 2 (quote scan_order) 7
+					(quote scan_order_multi) 9 (quote scan_join_order) 10 _ -1))
+				(define rest (mapIndex rest (lambda (i expr)
+					(if (equal? i initializer_index) (scan_plan_initializer expr) expr))))
 				(if (scan_access_schema? static)
 					(cons operator (merge (list tx source
 						(list (quote quote) (scan_access_cover static (and (> (count rest) 1) (scan_plan_covered (cadr rest))))) filter) rest))

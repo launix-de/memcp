@@ -56,7 +56,7 @@ func makeRemoteScanTask(t *testing.T, shard remoteScanShard) remoteScanTask {
 		}
 		return data
 	}
-	return remoteScanTask{Version: scanWireVersion, Task: 1, Attempt: uuid.NewString(), Visibility: "cursor-stability/captured-horizon", Shard: shard, FilterColumns: []string{"id"}, Filter: encode(`(lambda (id) (> id 1))`), MapColumns: []string{"id"}, MapReducer: encode(`(lambda (acc id) (+ acc id))`), Neutral: json.RawMessage(`0`), ResultKind: "scalar"}
+	return remoteScanTask{Version: scanWireVersion, Task: 1, Attempt: uuid.NewString(), Visibility: "cursor-stability/captured-horizon", Shard: shard, FilterColumns: []string{"id"}, Filter: encode(`(lambda (id) (> id 1))`), MapColumns: []string{"id"}, MapReducer: encode(`(lambda (acc id) (+ acc id))`), Neutral: scanWireValue{Kind: "scalar", Scalar: json.RawMessage(`0`)}, ResultKind: "scalar"}
 }
 func TestRemoteScanRPCExecutesReductionWithNativeExtent(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremotescanrpc", 4)
@@ -102,6 +102,37 @@ func TestRemoteScanRPCExecutesReductionWithNativeExtent(t *testing.T) {
 		t.Fatal("RPC leaked topology registration")
 	}
 }
+
+// A factory is a normal serialized closure in the existing initializer slot.
+// Each remote invocation constructs its own state; captures are materialized
+// through the same decoder as the filter and reducer before execution begins.
+func TestRemoteScanInitializerFactory(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tremotescaninitializer", 4)
+	peer, _, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := peer.call(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts); err != nil {
+		t.Fatal(err)
+	}
+	factory := scm.Eval(scm.Read(t.Name(), `(begin (define initial 10) (lambda () initial))`), &scm.Globalenv)
+	for i := 0; i < 2; i++ {
+		task := makeRemoteScanTask(t, parts[0])
+		task.Task += uint64(i)
+		var err error
+		task.Neutral, err = freezeScanValue(factory, 0, new(scm.SerializationContext))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var response remoteScanResult
+		if err := peer.call(context.Background(), "scan.execute", task, &response); err != nil {
+			t.Fatal(err)
+		}
+		value, err := decodeScanData(response.Value, false)
+		if err != nil || value.Int() != 19 {
+			t.Fatalf("result=%s err=%v", scm.String(value), err)
+		}
+	}
+}
+
 func TestRemoteScanRejectsRawRowsAndWrongSecret(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremotescanreject", 2)
 	peer, _, endpoint := setupRemoteScanConnection(t)
@@ -110,7 +141,7 @@ func TestRemoteScanRejectsRawRowsAndWrongSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	task := makeRemoteScanTask(t, parts[0])
-	task.Neutral = json.RawMessage(`[]`)
+	task.Neutral = scanWireValue{Kind: "list"}
 	data, err := scm.MarshalProcedure(scm.Eval(scm.Read(t.Name(), `(lambda (acc id) (append acc (list id)))`), &scm.Globalenv))
 	if err != nil {
 		t.Fatal(err)
@@ -507,7 +538,7 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 			}
 			if operator >= shardLookupMapOne {
 				task.ResultKind = "value"
-				task.Neutral, err = encodeScanResult(scm.NewNil(), "value")
+				task.Neutral, err = freezeScanValue(scm.NewNil(), 0)
 				if err != nil {
 					t.Fatal(err)
 				}

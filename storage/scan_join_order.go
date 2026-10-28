@@ -61,7 +61,7 @@ func optimizeScanJoinOrder(v []scm.Scmer, oc *scm.OptimizerContext, _ bool) (scm
 	neutralType := unknownScanType()
 	if len(v) > neutralIdx {
 		v[neutralIdx], neutralType = oc.OptimizeSub(v[neutralIdx], true)
-		neutralType = normalizeScanType(neutralType)
+		neutralType = scm.ReducerInitializerType(v[neutralIdx], neutralType, true)
 	}
 	oc.Ome.IncrLoopDepth()
 	columnTypes := []*scm.TypeDescriptor(nil)
@@ -74,7 +74,7 @@ func optimizeScanJoinOrder(v []scm.Scmer, oc *scm.OptimizerContext, _ bool) (scm
 	optimizedMapReduce, resultType := oc.OptimizeReducerCallback(rawMapReduce, neutralType, columnTypes...)
 	v[mapReduceIdx] = optimizedMapReduce
 	if !rawCombine.IsNil() {
-		v[combineIdx], resultType = oc.OptimizeReducerCallback(rawCombine, resultType, resultType)
+		v[combineIdx], resultType = oc.OptimizeReducerCallback(rawCombine, neutralType, resultType)
 	}
 	if len(v) > outerIdx {
 		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
@@ -84,6 +84,7 @@ func optimizeScanJoinOrder(v []scm.Scmer, oc *scm.OptimizerContext, _ bool) (scm
 	}
 	oc.Ome.DecrLoopDepth()
 	if reuseNeutralForNotFound {
+		resultType, _ = scm.MergeTypes(neutralType, resultType)
 		return scm.NewSlice(v), resultType
 	}
 	return scm.NewSlice(v), nil
@@ -805,7 +806,7 @@ func reduceScanJoinOrderTuples(currentTx *TxContext, spec *scanJoinOrderSpec, tu
 		localMapReduce := scm.PrepareSerialProc(spec.mapReduceFn)
 		readers := newScanJoinOrderMapReaders(currentTx, spec)
 		defer readers.close()
-		partial := spec.neutral
+		partial := scm.ApplyOnce(spec.neutral, nil)
 		start := task * chunkSize
 		end := start + chunkSize
 		if end > len(tuples) {
@@ -987,7 +988,7 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 func scanJoinOrderBatchedProbe(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 	prepareScanJoinOrderSpec(&spec)
 	if spec.limit == 0 {
-		return spec.notFoundValue
+		return scm.ApplyOnce(spec.notFoundValue, nil)
 	}
 	// Probe hits have no stable record handle after the batched scan returns.
 	// Read the narrow final projection with the hit and keep the later mapper
@@ -1004,7 +1005,7 @@ func scanJoinOrderBatchedProbe(currentTx *TxContext, spec scanJoinOrderSpec) scm
 	for index, ref := range spec.orderCols {
 		driverSortCols[index] = scm.NewString(ref.column)
 	}
-	result := spec.neutral
+	result := scm.ApplyOnce(spec.neutral, nil)
 	driverOffset := 0
 	accepted := 0
 	emitted := 0
@@ -1064,7 +1065,7 @@ func scanJoinOrderBatchedProbe(currentTx *TxContext, spec scanJoinOrderSpec) scm
 		return scanJoinOrderOuterResult(&spec, result)
 	}
 	if !hadValue {
-		return spec.notFoundValue
+		return scm.ApplyOnce(spec.notFoundValue, nil)
 	}
 	return result
 }
@@ -1072,7 +1073,7 @@ func scanJoinOrderBatchedProbe(currentTx *TxContext, spec scanJoinOrderSpec) scm
 func scanJoinOrderMaterialized(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 	prepareScanJoinOrderSpec(&spec)
 	if spec.limit == 0 {
-		return spec.notFoundValue
+		return scm.ApplyOnce(spec.notFoundValue, nil)
 	}
 
 	innerRecords := make([][]*scanJoinOrderRecord, len(spec.inputs))
@@ -1101,7 +1102,7 @@ func scanJoinOrderMaterialized(currentTx *TxContext, spec scanJoinOrderSpec) scm
 			driverSortCols = append(driverSortCols, scm.NewString(ref.column))
 		}
 	}
-	result := spec.neutral
+	result := scm.ApplyOnce(spec.neutral, nil)
 	driverOffset := 0
 	accepted := 0
 	emitted := 0
@@ -1153,7 +1154,7 @@ func scanJoinOrderMaterialized(currentTx *TxContext, spec scanJoinOrderSpec) scm
 		return scanJoinOrderOuterResult(&spec, result)
 	}
 	if !hadValue {
-		return spec.notFoundValue
+		return scm.ApplyOnce(spec.notFoundValue, nil)
 	}
 	return result
 }
@@ -1437,7 +1438,7 @@ func runScanJoinOrderShardCombination(currentTx *TxContext, spec *scanJoinOrderS
 }
 
 func reduceScanJoinOrderShardCombination(currentTx *TxContext, spec *scanJoinOrderSpec, combination []*scanJoinOrderShardStream) (scm.Scmer, int) {
-	result := spec.neutral
+	result := scm.ApplyOnce(spec.neutral, nil)
 	count := 0
 	mapReduceProgram := scm.PrepareSerialProc(spec.mapReduceFn)
 	readers := newScanJoinOrderMapReaders(currentTx, spec)
@@ -1593,7 +1594,7 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 	}
 	prepareScanJoinOrderSpec(&spec)
 	if spec.limit == 0 {
-		return spec.notFoundValue
+		return scm.ApplyOnce(spec.notFoundValue, nil)
 	}
 	keep := -1
 	if spec.limitPartitionCols == 0 && spec.limit >= 0 {
@@ -1625,7 +1626,7 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 		input.candidateCols, input.candidate = scanJoinOrderCandidateInput(&spec, inputIndex, streams)
 		streams[inputIndex] = collectScanJoinOrderShardStreams(currentTx, input, sortcols, sortdirs)
 		if len(streams[inputIndex]) == 0 {
-			return spec.notFoundValue
+			return scm.ApplyOnce(spec.notFoundValue, nil)
 		}
 	}
 
@@ -1641,7 +1642,7 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 		}
 		combineProgram := scm.PrepareSerialProc(spec.combineFn)
 		var combineArgs [2]scm.Scmer
-		result := spec.neutral
+		result := scm.ApplyOnce(spec.neutral, nil)
 		total := 0
 		for runner, partial := range partials {
 			if counts[runner] == 0 {
@@ -1655,9 +1656,9 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 			return result
 		}
 		if spec.isOuter {
-			return scanJoinOrderOuterResult(&spec, spec.neutral)
+			return scanJoinOrderOuterResult(&spec, scm.ApplyOnce(spec.neutral, nil))
 		}
-		return spec.notFoundValue
+		return scm.ApplyOnce(spec.notFoundValue, nil)
 	}
 	runnerResults := make([][]*scanJoinOrderTuple, len(combinations))
 	done := runFanoutTasks(currentTx, len(combinations), func(runner int, _ bool) {
@@ -1681,12 +1682,12 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 	}
 	if len(joined) == 0 {
 		if spec.isOuter {
-			return scanJoinOrderOuterResult(&spec, spec.neutral)
+			return scanJoinOrderOuterResult(&spec, scm.ApplyOnce(spec.neutral, nil))
 		}
-		return spec.notFoundValue
+		return scm.ApplyOnce(spec.notFoundValue, nil)
 	}
 	emitted := 0
-	result, _ := reduceScanJoinOrderTuples(currentTx, &spec, joined, spec.neutral, &emitted)
+	result, _ := reduceScanJoinOrderTuples(currentTx, &spec, joined, scm.ApplyOnce(spec.neutral, nil), &emitted)
 	return result
 }
 

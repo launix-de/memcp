@@ -2956,6 +2956,29 @@ func (oc *OptimizerContext) AnalyzeCallback(callback Scmer, params []*TypeDescri
 	return result
 }
 
+// ReducerInitializerType describes the state produced at reducer creation.
+// Factories may transfer a fresh container on every call. A plain initializer
+// is borrowed when shared with parallel shards/groups, even if its construction
+// transferred ownership to the enclosing operator. A serial ordered reducer
+// can retain that transfer because its initializer has only one consumer.
+func ReducerInitializerType(expression Scmer, initializer *TypeDescriptor, shared bool) *TypeDescriptor {
+	initializer = normalizeOptimizerType(initializer)
+	// OptimizeSub on a lambda intentionally returns its body's descriptor,
+	// matching the callback optimizer contract; it is not a func descriptor.
+	if _, _, lambda := optimizerLambdaParts(expression.WithoutSourceInfo()); lambda {
+		return initializer
+	}
+	if initializer.Kind == "func" {
+		return normalizeOptimizerType(initializer.Return)
+	}
+	if shared {
+		borrowed := *initializer
+		borrowed.Transfer = false
+		return &borrowed
+	}
+	return initializer
+}
+
 // OptimizeReducerCallback derives accumulator ownership from the neutral value
 // and the reducer's actual return flow. The descriptor join is monotonic: facts
 // are retained only while they hold for the initial value and every iteration.
@@ -2990,7 +3013,7 @@ func (oc *OptimizerContext) OptimizeReducerCallback(callback Scmer, accumulator 
 	for iteration := 0; iteration < 16; iteration++ {
 		params[0] = loopType
 		result := normalizeOptimizerType(oc.AnalyzeCallback(callback, params))
-		next, changed := mergeOptimizerTypes(loopType, result)
+		next, changed := MergeTypes(loopType, result)
 		if !changed {
 			params[0] = next
 			oc.SetCallbackParamTypes(params)
@@ -3036,7 +3059,7 @@ func (oc *OptimizerContext) OptimizeReducerCallbacks(callbacks []Scmer, accumula
 			}
 			result := normalizeOptimizerType(oc.AnalyzeCallback(callback, params))
 			var callbackChanged bool
-			next, callbackChanged = mergeOptimizerTypes(next, result)
+			next, callbackChanged = MergeTypes(next, result)
 			changed = changed || callbackChanged
 		}
 		loopType = next
@@ -3064,7 +3087,9 @@ func normalizeOptimizerType(td *TypeDescriptor) *TypeDescriptor {
 	return td
 }
 
-func mergeOptimizerTypes(current, result *TypeDescriptor) (*TypeDescriptor, bool) {
+// MergeTypes retains only type and ownership facts valid for both possible
+// values. Reducers include the initializer because an empty input returns it.
+func MergeTypes(current, result *TypeDescriptor) (*TypeDescriptor, bool) {
 	current = normalizeOptimizerType(current)
 	result = normalizeOptimizerType(result)
 	merged := &TypeDescriptor{
@@ -3088,7 +3113,7 @@ func mergeOptimizerTypes(current, result *TypeDescriptor) (*TypeDescriptor, bool
 		for key, currentKey := range current.Keys {
 			if resultKey := result.Keys[key]; resultKey != nil {
 				var keyChanged bool
-				merged.Keys[key], keyChanged = mergeOptimizerTypes(currentKey, resultKey)
+				merged.Keys[key], keyChanged = MergeTypes(currentKey, resultKey)
 				changed = changed || keyChanged
 			}
 		}
@@ -3098,7 +3123,7 @@ func mergeOptimizerTypes(current, result *TypeDescriptor) (*TypeDescriptor, bool
 	}
 	if current.Element != nil && result.Element != nil {
 		var elementChanged bool
-		merged.Element, elementChanged = mergeOptimizerTypes(current.Element, result.Element)
+		merged.Element, elementChanged = MergeTypes(current.Element, result.Element)
 		changed = changed || elementChanged
 	} else if current.Element != nil {
 		changed = true
@@ -3154,7 +3179,7 @@ func optimizeCoalesce(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *
 		}
 	}
 	for i := 2; i < len(call.argumentTypes); i++ {
-		merged, _ = mergeOptimizerTypes(merged, branchType(call.argumentTypes[i]))
+		merged, _ = MergeTypes(merged, branchType(call.argumentTypes[i]))
 	}
 	// The lazy selector remains executable code even when all branches happen
 	// to be constant. Const means the returned AST is already self-evaluating.
@@ -3562,7 +3587,7 @@ func optimizeIf(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDe
 			resultType = td
 			return
 		}
-		resultType, _ = mergeOptimizerTypes(resultType, td)
+		resultType, _ = MergeTypes(resultType, td)
 	}
 	i := 1
 	for i+1 < len(v) {

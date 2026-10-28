@@ -704,9 +704,10 @@ func (d *FastDict) Set(key, value Scmer, merge func(oldV, newV Scmer) Scmer) {
 }
 
 // ReduceValue updates one bucket from its current value and an input item. A
-// missing bucket starts at neutral. The reducer must treat both arguments as
-// borrowed; only its returned value becomes owned by the dictionary.
-func (d *FastDict) ReduceValue(key, item, neutral Scmer, reduce *SerialProc, args []Scmer) {
+// missing bucket invokes its prepared initializer once. A factory returns a
+// private accumulator for that bucket; a value remains borrowed. Existing bucket
+// state belongs to the dictionary. No initialization runs for an existing key.
+func (d *FastDict) ReduceValue(key, item Scmer, initializer, reduce *SerialProc, args []Scmer) {
 	if d.index == nil {
 		d.index = make(map[uint64]int)
 	}
@@ -716,7 +717,7 @@ func (d *FastDict) ReduceValue(key, item, neutral Scmer, reduce *SerialProc, arg
 		d.Pairs[pos+1] = reduce.Call(args)
 		return
 	}
-	args[0], args[1] = neutral, item
+	args[0], args[1] = initializer.Call(nil), item
 	value := reduce.Call(args)
 	d.insertHashed(key, value, h)
 }
@@ -781,7 +782,7 @@ func (d *FastDict) ToList() []Scmer { return d.Pairs }
 func setAssocPairs(input Scmer, updates []Scmer, mutable bool) Scmer {
 	var mergeFn func(Scmer, Scmer) Scmer
 	if len(updates)%2 != 0 {
-		merge := PrepareSerialProc(updates[len(updates)-1])
+		merge := PrepareSerialProc(updates[len(updates)-1], len(updates)/2)
 		updates = updates[:len(updates)-1]
 		var args [2]Scmer
 		mergeFn = func(oldV, newV Scmer) Scmer {
@@ -810,10 +811,13 @@ func setAssocPairs(input Scmer, updates []Scmer, mutable bool) Scmer {
 		}
 		return NewFastDict(dict)
 	}
-	// Borrowed small inputs are copied once, also in the mutable variant:
-	// reducer neutrals may be shared. Reserve all appends in this allocation.
-	out := make([]Scmer, len(pairs), len(pairs)+len(updates))
-	copy(out, pairs)
+	// The mutable builtin receives exclusively owned storage and can reuse
+	// its backing array, including spare append capacity. Immutable calls copy
+	// live entries before modification; replacements need no growth reserve.
+	out := pairs
+	if !mutable {
+		out = append([]Scmer(nil), pairs...)
+	}
 	for i := 0; i < len(updates); i += 2 {
 		found := false
 		for j := 0; j < len(out); j += 2 {
