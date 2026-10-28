@@ -814,7 +814,8 @@ def start_ram_monitor():
         return t
 
 class SQLTestRunner:
-    def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests", log_times=False, fail_fast=False, performance_calibration=None):
+    def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests", log_times=False, fail_fast=False, performance_calibration=None, cluster_mode=False):
+        self.cluster_mode = cluster_mode
         self.base_url = base_url
         self.username = username
         self.password = password
@@ -1285,6 +1286,7 @@ class SQLTestRunner:
         cleanup_ok = True
         try:
             result = self._execute_test_case(test_case, database)
+            self.after_case_operation(test_case, database)
         finally:
             cleanup_steps = self._test_context.cleanup_steps
             self._test_context.cleanup_steps = None
@@ -1293,6 +1295,12 @@ class SQLTestRunner:
                     cleanup_steps, database, session_id=test_case.get("session_id"),
                 )
         return bool(result) and cleanup_ok
+
+    def before_case_operation(self, test_case: Dict, database: str) -> None:
+        """Environment observers run after setup, outside query timing."""
+
+    def after_case_operation(self, test_case: Dict, database: str) -> None:
+        """Finish environment observations before per-case cleanup."""
 
     def _execute_test_case(self, test_case: Dict, database: str) -> bool:
         name = test_case.get("name", f"Test {self.test_count + 1}")
@@ -1615,6 +1623,7 @@ class SQLTestRunner:
         # SCM performance cases must use the same measured repetitions and A/B
         # gate as SQL. The correctness-only shortcut below has no timing gate.
         if scm_code and not is_perf_test:
+            self.before_case_operation(test_case, database)
             expect = test_case.get("expect", {})
             expect_error = expect.get("error", False)
             scm_timeout = int(test_case.get(
@@ -1656,6 +1665,7 @@ class SQLTestRunner:
 
         mysql_probe = test_case.get("mysql")
         if mysql_probe:
+            self.before_case_operation(test_case, database)
             ok, output = self.execute_mysql_probe(database, mysql_probe)
             if ok:
                 self._record_success(name, is_noncritical)
@@ -1664,6 +1674,7 @@ class SQLTestRunner:
 
         tds_probe = test_case.get("tds")
         if tds_probe:
+            self.before_case_operation(test_case, database)
             ok, output = self.execute_tds_probe(database, tds_probe)
             if ok:
                 self._record_success(name, is_noncritical)
@@ -1674,6 +1685,7 @@ class SQLTestRunner:
         # Multi-step test case: steps list with per-step session_id + optional background
         steps = test_case.get("steps")
         if steps:
+            self.before_case_operation(test_case, database)
             bg_results: list = []  # [(step_dict, response_or_exception)]
             bg_threads: list = []
 
@@ -1858,6 +1870,7 @@ class SQLTestRunner:
         response: Optional[requests.Response]
         cpu_pct = None  # CPU load percentage, measured during query execution
         if query and query.strip().upper() == "SHUTDOWN":
+            self.before_case_operation(test_case, database)
             supervisor_generation = shared_supervisor_generation()
             # Issue shutdown
             # A graceful shutdown may close this request before a response reaches
@@ -2034,6 +2047,7 @@ class SQLTestRunner:
                     query, None, None, is_noncritical,
                 )
             gate = performance_server_gate(exclusive=True) if is_perf_test else PerformanceGate()
+            self.before_case_operation(test_case, database)
             with gate:
                 for _ in range(warmup_runs):
                     warm_response = execute_sample()
@@ -2473,6 +2487,9 @@ class SQLTestRunner:
         with open(spec_file, 'r') as f:
             spec = yaml.safe_load(f) or {}
         metadata = spec.get('metadata', {}) or {}
+        if suite_requires_cluster(metadata) and not self.cluster_mode:
+            print(f"⏭️  Cluster suite: {spec_file} (use tools/replication_cluster_stress.py)")
+            return True
         self.current_spec_file = spec_file
         self._table_abi_sources = table_abi_fixture_sources(spec_file, spec)
         self.suite_metadata = metadata
@@ -2490,6 +2507,9 @@ class SQLTestRunner:
         self.current_spec_file = spec_file
         self._table_abi_sources = table_abi_fixture_sources(spec_file, spec)
         metadata = spec.get('metadata', {})
+        if suite_requires_cluster(metadata) and not self.cluster_mode:
+            print(f"⏭️  Cluster suite: {spec_file} (use tools/replication_cluster_stress.py)")
+            return True
         self.suite_metadata = metadata or {}
         self.suite_syntax = self._normalize_syntax(self.suite_metadata.get("syntax"))
         self.current_suite_setup = spec.get('setup') or []
@@ -2910,6 +2930,16 @@ def load_suite_metadata(spec_file: str) -> Dict[str, Any]:
         spec = yaml.safe_load(f) or {}
     metadata = spec.get('metadata', {}) if isinstance(spec, dict) else {}
     return metadata if isinstance(metadata, dict) else {}
+
+
+def suite_requires_cluster(metadata: Dict[str, Any]) -> bool:
+    """Only the execution environment differs; cases keep the ordinary schema."""
+    value = metadata.get("cluster")
+    if value is None or value is False:
+        return False
+    if value is True or isinstance(value, dict):
+        return True
+    raise ValueError("metadata.cluster must be a boolean or mapping")
 
 
 def suite_scan_debugging(spec_file: str) -> bool:
@@ -3887,11 +3917,6 @@ def main():
             raise ValueError("--perf-ab requires base and candidate worktrees")
         sys.exit(0 if run_performance_ab(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4:]) else 1)
 
-    # Calibrate before a candidate MemCP process exists.  Publishing the
-    # validated result makes all later suite workers use exactly this factor.
-    performance_calibration = load_performance_scale()
-    publish_performance_scale(performance_calibration)
-
     spec_files, port, connect_only, log_times, jobs, fail_fast, perf_ci = parse_cli_args(sys.argv[1:])
 
     if perf_ci:
@@ -3915,6 +3940,20 @@ def main():
     if not spec_files:
         print_usage()
         sys.exit(1)
+
+    ordinary_specs = []
+    for path in spec_files:
+        if suite_requires_cluster(load_suite_metadata(path)):
+            print(f"⏭️  Cluster suite: {path} (use tools/replication_cluster_stress.py)")
+        else:
+            ordinary_specs.append(path)
+    spec_files = ordinary_specs
+    if not spec_files:
+        return
+
+    # Cluster-only selections finish before calibration or server allocation.
+    performance_calibration = load_performance_scale()
+    publish_performance_scale(performance_calibration)
 
     if PERF_AB_MODE == "record" and not connect_only:
         initialize_performance_recording()

@@ -1,0 +1,132 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  version: '1.0'
+  description: SQL operator contracts on authenticated shared-storage cluster peers
+  cluster:
+    fixture: shared_analytics
+    rows_per_shard: 5000
+    shards: 64
+    columns: 8
+    fixture_seed: 20261026
+    nodes: 4
+    ram_limit_bytes: 8388608
+    coordinator_ram_limit_bytes: 131072
+    shard_ram_percent: 50
+    coordinator_shard_ram_percent: 1
+    gomaxprocs: 16
+test_cases:
+- name: order-top-n-offset
+  sql: SELECT id,v0 FROM big_items ORDER BY v0 DESC,id ASC LIMIT 9 OFFSET 5
+  expect:
+    cluster:
+      min_remote_shards: 1
+      plan_contains:
+      - scan_order
+- name: order-computed-ties
+  sql: SELECT id,v0 FROM big_items ORDER BY v0%7 ASC,id DESC LIMIT 11 OFFSET 3
+  expect:
+    cluster:
+      min_remote_shards: 1
+      plan_contains:
+      - scan_order
+- name: order-null-keys
+  sql: SELECT id,v0 FROM big_items ORDER BY CASE WHEN id%17=0 THEN NULL ELSE v0 END
+    DESC,id ASC LIMIT 7
+  expect:
+    cluster:
+      min_remote_shards: 1
+      plan_contains:
+      - scan_order
+- name: order-first
+  sql: SELECT id FROM big_items WHERE id>=5000 ORDER BY id DESC LIMIT 1
+  expect:
+    cluster:
+      min_remote_shards: 1
+      plan_contains:
+      - scan_order
+- name: order-unbounded-pages
+  sql: SELECT id,v0 FROM big_items WHERE id<900 ORDER BY v0 DESC,id ASC
+  expect:
+    cluster:
+      min_remote_shards: 1
+      plan_contains:
+      - scan_order
+- name: first-unordered-unique
+  sql: SELECT id FROM big_items WHERE id=245000 LIMIT 1
+  expect:
+    cluster:
+      min_remote_shards: 1
+- name: exists-match
+  sql: SELECT EXISTS(SELECT 1 FROM big_items WHERE v0%97=43) AS hit
+  expect:
+    cluster:
+      min_remote_shards: 1
+      plan_contains:
+      - scan_exists
+- name: exists-no-match
+  sql: SELECT EXISTS(SELECT 1 FROM big_items WHERE v0%97=-1) AS hit
+  expect:
+    cluster:
+      min_remote_shards: 1
+      plan_contains:
+      - scan_exists
+- name: scalar-lookup-hit
+  sql: SELECT (SELECT v0 FROM big_items WHERE id=245000) AS value
+  expect:
+    cluster:
+      min_remote_shards: 1
+- name: scalar-lookup-miss
+  sql: SELECT (SELECT v0 FROM big_items WHERE id=245000 AND v0%97=-1) AS value
+  expect:
+    cluster:
+      min_remote_shards: 1
+- name: join-sum
+  sql: SELECT SUM(b.v0+k.id) AS total FROM operator_keys k JOIN big_items b ON b.id=k.id
+  expect:
+    cluster:
+      min_remote_shards: 1
+      plan_contains:
+      - scan_join_order
+- name: join-rows
+  sql: SELECT k.id,b.v0 FROM operator_keys k JOIN big_items b ON b.id=k.id ORDER BY
+    k.id
+  expect:
+    cluster:
+      min_remote_shards: 1
+- name: membership-source
+  sql: SELECT SUM(v0) AS total FROM big_items WHERE id IN (SELECT id FROM operator_keys)
+  expect:
+    cluster:
+      min_remote_shards: 1
+- name: ordered-membership
+  sql: SELECT id,v0 FROM big_items WHERE id IN (SELECT id FROM operator_keys) ORDER
+    BY v0 DESC,id ASC LIMIT 3
+  expect:
+    cluster:
+      min_remote_shards: 1
+      plan_contains:
+      - scan_order
+- name: order-ack-multiple-windows
+  sql: SELECT id FROM big_items WHERE id<8192 ORDER BY id ASC LIMIT 4097 OFFSET 257
+  expect:
+    rows: 4097
+    data:
+    - id: 257
+    - id: 258
+    - id: 259
+    cluster:
+      min_remote_shards: 1
+      plan_contains:
+      - scan_order
+- name: order-many-streams-small-limit
+  sql: SELECT id,v0 FROM big_items ORDER BY v0 DESC,id ASC LIMIT 17 OFFSET 9
+  expect:
+    rows: 17
+    cluster:
+      min_remote_shards: 2
+      min_remote_nodes: 2
+      data_exceeds_node_ram: true
+      plan_contains:
+      - scan_order

@@ -39,7 +39,7 @@ jobs:
       - name: Install SQL client
         uses: ./.github/actions/setup-apt
         with:
-          packages: mariadb-client
+          packages: mariadb-client python3-requests python3-yaml
 
       - name: Build MemCP
         run: go build -tags=nophp -o "$RUNNER_TEMP/memcp-replication" .
@@ -101,7 +101,7 @@ jobs:
       - name: Install SQL client
         uses: ./.github/actions/setup-apt
         with:
-          packages: mariadb-client
+          packages: mariadb-client python3-requests python3-yaml
       - name: Build servers
         id: build_cluster
         run: go build -tags=nophp -o "$RUNNER_TEMP/memcp-cluster" .
@@ -185,14 +185,14 @@ jobs:
       - name: Install SQL client
         uses: ./.github/actions/setup-apt
         with:
-          packages: mariadb-client
+          packages: mariadb-client python3-requests python3-yaml
       - name: Build standalone fixture builder and servers
         run: go build -tags=nophp -o "$RUNNER_TEMP/memcp-cluster-operators" .
       - name: Compare SQL operator results with mandatory remote execution
         run: >-
           python3 -u tools/replication_cluster_stress.py
           --binary "$RUNNER_TEMP/memcp-cluster-operators"
-          --cluster-operators-only --seed 20261028
+          --cluster-suites --seed 20261028
           --artifacts "$RUNNER_TEMP/cluster-operators"
       - name: Build race-instrumented servers
         if: ${{ !cancelled() }}
@@ -205,7 +205,7 @@ jobs:
           python3 -u tools/replication_cluster_stress.py
           --binary "$RUNNER_TEMP/memcp-cluster-operators-race"
           --fixture-binary "$RUNNER_TEMP/memcp-cluster-operators"
-          --cluster-operators-only --seed 20261028
+          --cluster-suites --seed 20261028
           --artifacts "$RUNNER_TEMP/cluster-operators-race"
       - name: Upload plans, SQL results and node logs
         if: always()

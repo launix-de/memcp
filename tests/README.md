@@ -20,6 +20,78 @@ opt out only with `metadata.ci: false`, which is reserved for manual benchmarks
 that do not assert a stable CI budget. Every suite must provide
 `metadata.description`.
 
+`metadata.cluster: true` selects the cluster process runner instead of the normal
+SQL runner. Changing that one parameter is sufficient to move an ordinary suite:
+`setup`, `test_cases`, SQL/SCM, sessions, repeats, expectations and `cleanup` retain
+their normal format and executor. The normal runner reports an explicit skip
+before opening a connection or starting a server. This is an execution profile,
+not `ci: false`: cluster CI discovers and runs these suites separately.
+
+The marker may also be a mapping, for example:
+
+```yaml
+metadata:
+  description: Distributed ordered scan
+  cluster:
+    nodes: 4
+    ram_limit_bytes: 8388608
+    coordinator_ram_limit_bytes: 131072
+    shard_ram_percent: 50
+    coordinator_shard_ram_percent: 1
+    gomaxprocs: 16
+test_cases:
+  - name: Ordered result requires remote shard execution
+    sql: SELECT id FROM items ORDER BY id LIMIT 100
+    expect:
+      rows: 100
+      cluster:
+        min_remote_shards: 1
+        min_remote_nodes: 2
+        data_exceeds_node_ram: true
+        plan_contains: [scan_order]
+```
+
+These are the defaults for `cluster: true`; nodes may range from 2 to 10. RAM
+limits are native `MaxRamBytes`/`MaxPersistBytes` cache budgets in bytes, not OS
+process-RSS limits. Fractions are 1–100 percent, and concurrency is node-local
+GOMAXPROCS. Unknown properties and assertions fail instead of being ignored.
+`compare_standalone` defaults to true and runs the same YAML on an independent
+standalone oracle first, comparing complete case results as well as ordinary
+expectations. Disable that comparison for fixtures with intentionally different
+valid results across independent runs. Remote execution remains mandatory.
+
+Every cluster suite must demonstrate at least one delegated shard and one remote
+worker through changes in native execution counters. Membership alone, a correct
+SQL response or merely configuring several nodes does not pass. Individual cases
+may require more shards or distinct workers with `expect.cluster`. Counters are
+sampled around the testcase operation, excluding setup, cleanup and EXPLAIN.
+Missing measurements, reset counters
+and repeated node identities fail. Per-case counters cannot attribute overlapping
+parallel-group requests: explicit per-case cluster assertions there fail clearly;
+ordinary parallel groups retain their concurrency. Their overlapping node counters
+do not constitute per-query evidence, so a parallel-only suite without an
+attributable remote operation fails rather than borrowing another case's work.
+Restart and atomic-schema observation actions need a dedicated recovery scenario;
+they fail explicitly instead of being treated as a single-server restart.
+
+`data_exceeds_node_ram` compares measured active persistent generation file bytes
+with the largest *actual* node RAM budget. WAL, schema and retired files do not
+inflate that proof. Setup must persist the fixture when requesting it. This is
+evidence of a dataset larger than one node's budget; it is not a measurement of
+the query's resident working set or proof that streaming on one node is impossible.
+Use the execution assertions independently to require real distribution.
+
+Cluster setup normally runs against an initially empty shared `memcp-tests`
+database. The optional `fixture: shared_analytics` preset retains the existing
+large analytic fixture; its `rows_per_shard`, `shards`, `columns` and `fixture_seed`
+are declared in the operator suite. Its generation algorithm and process/crash
+orchestration remain in `tools/`; SQL operator case definitions live under `tests/`.
+
+```sh
+python3 tools/replication_cluster_stress.py --cluster-suites
+python3 tools/replication_cluster_stress.py tests/execution/operators/cluster-operator-contracts.yaml
+```
+
 A case with `noncritical: true` still runs and reports failures, but its failures
 do not block CI. The T-SQL compatibility suites retain the complete behavior
 inventory, including currently unsupported features. Remove the flag after the
@@ -57,8 +129,9 @@ python3 tools/replication_cluster_stress.py --seed 20261023 --rounds 5 --workers
 
 The separate **Cluster SQL operator contracts** CI job compares ordered scans,
 Top-N/OFFSET, computed and NULL sort keys, EXISTS, scalar lookups, joins and
-membership scans against a standalone SQL oracle. Fourteen SQL cases include
-an unlimited ordered result spanning multiple pages and LIMIT 1 without ORDER BY.
+membership scans against a standalone SQL oracle. The YAML operator suite includes
+an unlimited ordered result spanning multiple pages, a long OFFSET/LIMIT window
+crossing multiple ACKs, many streams with a small LIMIT and LIMIT 1 without ORDER BY.
 Run it with:
 
 ```sh

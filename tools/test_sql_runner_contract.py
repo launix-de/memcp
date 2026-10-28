@@ -3268,5 +3268,43 @@ class PerformanceDiagnosticEligibilityContractTest(unittest.TestCase):
                     self.assertEqual(marker.exists(), expected)
 
 
+class ClusterSuiteSelectionContractTest(unittest.TestCase):
+    def test_cluster_suite_skips_before_setup_or_connection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            suite = Path(temp) / "cluster.yaml"
+            suite.write_text("metadata:\n  description: cluster\n  cluster: true\n"
+                             "setup:\n  - sql: CREATE TABLE must_not_execute(id INT)\n"
+                             "test_cases:\n  - name: probe\n    sql: SELECT 1\n")
+            runner = SQLTestRunner("http://localhost:1")
+            with mock.patch.object(runner, "ensure_database") as database, \
+                    mock.patch.object(runner, "run_setup") as setup:
+                self.assertTrue(runner.prepare_test_spec(str(suite)))
+                self.assertTrue(runner.run_test_spec(str(suite)))
+                database.assert_not_called()
+                setup.assert_not_called()
+
+    def test_cluster_only_cli_allocates_no_server_or_calibration(self):
+        from run_sql_tests import main
+        with tempfile.TemporaryDirectory() as temp:
+            suite = Path(temp) / "cluster.yaml"
+            suite.write_text("metadata:\n  description: cluster\n  cluster: {}\n")
+            with mock.patch.object(sys, "argv", ["run_sql_tests.py", str(suite)]), \
+                    mock.patch("run_sql_tests.start_memcp_process") as start, \
+                    mock.patch("run_sql_tests.find_free_port") as port, \
+                    mock.patch("run_sql_tests.load_performance_scale") as calibration:
+                main()
+                start.assert_not_called()
+                port.assert_not_called()
+                calibration.assert_not_called()
+
+    def test_invalid_cluster_marker_cannot_fall_through_to_local_execution(self):
+        from run_sql_tests import suite_requires_cluster
+        self.assertFalse(suite_requires_cluster({"cluster": False}))
+        self.assertTrue(suite_requires_cluster({"cluster": True}))
+        self.assertTrue(suite_requires_cluster({"cluster": {"nodes": 3}}))
+        with self.assertRaises(ValueError):
+            suite_requires_cluster({"cluster": "yes"})
+
+
 if __name__ == "__main__":
     unittest.main()

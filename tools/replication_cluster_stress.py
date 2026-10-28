@@ -32,7 +32,12 @@ import threading
 import time
 import traceback
 import uuid
+from collections import defaultdict, deque
 from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from run_sql_tests import SQLTestRunner, suite_requires_cluster
+import yaml
 
 from reliability_drill import (
     ROOT, DrillFailure, HttpClient, OwnedServer, expect, free_port,
@@ -43,6 +48,233 @@ from reliability_drill import (
 DATABASE = "replica_test"
 PASSWORD = "replication-test-password"
 NETWORK_ERROR = "Cluster network error"
+OPERATOR_SUITE = ROOT / "tests/execution/operators/cluster-operator-contracts.yaml"
+
+
+def cluster_suite_config(path):
+    spec = yaml.safe_load(Path(path).read_text())
+    if not isinstance(spec, dict) or not suite_requires_cluster(spec.get("metadata", {})):
+        raise DrillFailure(f"{path}: metadata.cluster is required")
+    value = spec["metadata"]["cluster"]
+    values = {} if value is True else value
+    defaults = {"nodes": 4, "ram_limit_bytes": 8388608,
+                "coordinator_ram_limit_bytes": 131072, "shard_ram_percent": 50,
+                "coordinator_shard_ram_percent": 1, "gomaxprocs": 16,
+                "fixture": None, "compare_standalone": True,
+                "rows_per_shard": 5000, "shards": 64, "columns": 8, "fixture_seed": 20261026}
+    unknown = set(values) - defaults.keys()
+    if unknown:
+        raise DrillFailure(f"{path}: unknown cluster properties: {sorted(unknown)}")
+    config = {**defaults, **values}
+    for key in ("nodes", "ram_limit_bytes", "coordinator_ram_limit_bytes",
+                "shard_ram_percent", "coordinator_shard_ram_percent", "gomaxprocs",
+                "rows_per_shard", "shards", "columns"):
+        if type(config[key]) is not int or config[key] <= 0:
+            raise DrillFailure(f"{path}: cluster.{key} must be a positive integer")
+    if not 2 <= config["nodes"] <= 10:
+        raise DrillFailure(f"{path}: this cluster implementation supports 2–10 nodes")
+    if max(config["shard_ram_percent"], config["coordinator_shard_ram_percent"]) > 100:
+        raise DrillFailure(f"{path}: shard RAM percentages must be at most 100")
+    if type(config["compare_standalone"]) is not bool or config["fixture"] not in (None, "shared_analytics"):
+        raise DrillFailure(f"{path}: invalid standalone comparison or fixture")
+    if type(config["fixture_seed"]) is not int:
+        raise DrillFailure(f"{path}: fixture_seed must be an integer")
+    if config["fixture"] == "shared_analytics" and not config["compare_standalone"]:
+        raise DrillFailure(f"{path}: shared_analytics requires its complete standalone oracle")
+    return config
+
+
+def cluster_status(node):
+    value = node.client.scm("(cluster_status)").strip()
+    decoded = json.loads(value)
+    return json.loads(decoded) if isinstance(decoded, str) else decoded
+
+
+def cluster_evidence(before, after, data_bytes=0):
+    """Execution counters, never membership alone, prove distributed work."""
+    if len(before) != len(after) or len(after) < 2:
+        raise DrillFailure("cluster execution requires multiple measured nodes")
+    identities = [item["state"]["self"]["id"] for item in after]
+    if len(set(identities)) != len(identities):
+        raise DrillFailure("duplicate measured cluster node identity")
+    received = []
+    for previous, current in zip(before, after):
+        if previous["state"]["self"]["id"] != current["state"]["self"]["id"]:
+            raise DrillFailure("cluster node identity changed during a test")
+        received.append(current["state"]["received"] - previous["state"]["received"])
+    delegated = after[0]["state"]["delegated"] - before[0]["state"]["delegated"]
+    if delegated < 0 or min(received) < 0:
+        raise DrillFailure("cluster execution counters reset during a test")
+    return {"remote_shards": delegated, "remote_nodes": sum(delta > 0 for delta in received[1:]),
+            "remote_node_ids": [identity for identity, delta in zip(identities[1:], received[1:]) if delta > 0],
+            "received": dict(zip(identities, received)), "data_bytes": data_bytes,
+            "largest_node_ram": max(item["budget"]["MemoryBudget"] for item in after)}
+
+
+def assert_cluster_evidence(checks, evidence, plan=None):
+    if not isinstance(checks, dict):
+        raise DrillFailure("expect.cluster must be a mapping")
+    unknown = set(checks) - {"min_remote_shards", "min_remote_nodes", "data_exceeds_node_ram", "plan_contains"}
+    if unknown:
+        raise DrillFailure(f"unknown cluster assertions: {sorted(unknown)}")
+    for key, metric in (("min_remote_shards", "remote_shards"), ("min_remote_nodes", "remote_nodes")):
+        if key in checks:
+            minimum = checks[key]
+            if type(minimum) is not int or minimum < 0:
+                raise DrillFailure(f"{key} must be a nonnegative integer")
+            if evidence[metric] < minimum:
+                raise DrillFailure(f"{metric}={evidence[metric]}, expected at least {minimum}")
+    if "data_exceeds_node_ram" in checks:
+        if type(checks["data_exceeds_node_ram"]) is not bool:
+            raise DrillFailure("data_exceeds_node_ram must be boolean")
+        if checks["data_exceeds_node_ram"] and not 0 < evidence["largest_node_ram"] < evidence["data_bytes"]:
+            raise DrillFailure("measured persistent data does not exceed every individual node's RAM limit")
+    if "plan_contains" in checks:
+        needles = checks["plan_contains"]
+        if not isinstance(needles, list) or not all(isinstance(needle, str) for needle in needles):
+            raise DrillFailure("plan_contains must be a string list")
+        if plan is None or any(needle not in json.dumps(plan) for needle in needles):
+            raise DrillFailure(f"EXPLAIN does not contain {needles}")
+
+
+def cluster_data_bytes(shared):
+    """Measure active native generation files; schema/WAL/history are not payload."""
+    schema = shared / "schema.json"
+    if not schema.exists():
+        return 0
+    catalog = json.loads(schema.read_text()).get("tables", {})
+    generations = set()
+    for table in catalog.values():
+        for shard in table.get("PShards") or table.get("Shards") or []:
+            if shard:
+                generations.add(shard["uuid"] if isinstance(shard, dict) else shard)
+    return sum(path.stat().st_size for path in shared.iterdir()
+               if path.is_file() and path.name[:36] in generations and path.name[36:37] == "-")
+
+
+class ClusterSQLTestRunner(SQLTestRunner):
+    """Use the ordinary case executor and assertions, adding measured evidence."""
+    def __init__(self, node, nodes, shared, journal, report_path, status=None, reference=None):
+        super().__init__(f"http://127.0.0.1:{node.port}", password=node.password,
+                         default_database=node.database, cluster_mode=True)
+        self.node, self.nodes, self.shared = node, nodes, shared
+        self.journal, self.report_path, self.status = journal, report_path, status
+        self.reference = defaultdict(deque)
+        for item in reference or []:
+            self.reference[(item["name"], item.get("sql"), item.get("scm"))].append(item)
+        self.compare_reference = reference is not None
+        self.results = []
+        self.report_lock = threading.Lock()
+        self.parallel_group = False
+        self.observations = []
+
+    def before_case_operation(self, case, database):
+        current = self._test_context.cluster_case
+        checks = case.get("expect", {}).get("cluster", {})
+        if checks.get("plan_contains"):
+            if not case.get("sql"):
+                raise DrillFailure("plan_contains requires a SQL case")
+            user = case.get("username") or self.suite_metadata.get("username") or self.username
+            password = case.get("password") or self.suite_metadata.get("password") or self.password
+            headers = {"Authorization": "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()}
+            headers.update(case.get("headers") or {})
+            response = self.execute_sql(database, "EXPLAIN " + case["sql"], headers,
+                                        syntax=case.get("syntax", self.suite_syntax),
+                                        session_id=case.get("session_id"), params=case.get("params"),
+                                        timeout=case.get("timeout", 10))
+            if response is None or response.status_code != 200 or "Error" in response.text:
+                raise DrillFailure("cluster EXPLAIN failed")
+            current["explain"] = self.parse_jsonl_response(response)
+        if self.status and not self.parallel_group:
+            current["_before"] = [self.status(node) for node in self.nodes]
+
+    def after_case_operation(self, case, database):
+        current = self._test_context.cluster_case
+        before = current.pop("_before", None)
+        if before is not None:
+            current["cluster"] = cluster_evidence(before, [self.status(node) for node in self.nodes], cluster_data_bytes(self.shared))
+            with self.report_lock:
+                self.observations.append(current["cluster"])
+
+    def _run_parallel_group(self, tests, database):
+        # Node counters cannot attribute overlapping queries individually.
+        # Preserve the ordinary concurrency semantics and require evidence at
+        # group/suite scope instead of accepting another case's remote work.
+        self.parallel_group = True
+        try:
+            return super()._run_parallel_group(tests, database)
+        finally:
+            self.parallel_group = False
+
+    def validate_expectation(self, case, response, results):
+        current = getattr(self._test_context, "cluster_case", None)
+        if current is not None:
+            current["rows"] = results
+        return super().validate_expectation(case, response, results)
+
+    def run_test_case(self, case, database):
+        current = {"name": case.get("name"), "sql": case.get("sql"), "scm": case.get("scm"),
+                   "phase": "cluster" if self.status else "standalone"}
+        previous = getattr(self._test_context, "cluster_case", None)
+        self._test_context.cluster_case = current
+        try:
+            checks = case.get("expect", {}).get("cluster", {})
+            if not isinstance(checks, dict):
+                raise DrillFailure("expect.cluster must be a mapping")
+            if self.status and self.parallel_group and checks:
+                raise DrillFailure("per-case cluster evidence cannot attribute parallel-group work")
+            if self.status and (case.get("action") in ("restart", "observe_atomic_schema") or
+                                case.get("sql", "").strip().upper() == "SHUTDOWN"):
+                raise DrillFailure("cluster restart/atomic-schema actions require a dedicated recovery scenario")
+            ok = super().run_test_case(case, database)
+            if not ok:
+                raise DrillFailure("ordinary testcase assertions failed")
+            if self.status and not self.parallel_group:
+                if "cluster" in current:
+                    assert_cluster_evidence(checks, current["cluster"], current.get("explain"))
+                elif checks:
+                    raise DrillFailure("cluster assertions have no measured testcase operation")
+            elif checks.get("plan_contains"):
+                assert_cluster_evidence({"plan_contains": checks["plan_contains"]}, {}, current.get("explain"))
+            if self.compare_reference:
+                key = (current["name"], current["sql"], current["scm"])
+                with self.report_lock:
+                    expected = self.reference[key].popleft() if self.reference[key] else None
+                if expected is None or expected["status"] != "passed":
+                    raise DrillFailure("missing successful standalone oracle case")
+                expect(current.get("rows"), expected.get("rows"), "standalone result comparison")
+            current["status"] = "passed"
+            return True
+        except Exception as error:
+            current.update(status="failed", error=str(error))
+            # Keep suite failure accounting in the ordinary runner, including
+            # cluster evidence failures after a successful SQL result.
+            if not self.failed_tests or self.failed_tests[-1][0] != case.get("name"):
+                if locals().get("ok"):
+                    self.test_passed -= 1
+                self._record_fail(case.get("name"), str(error), case.get("sql") or case.get("scm"), None, case.get("expect"))
+            return False
+        finally:
+            current.pop("_before", None)
+            self._test_context.cluster_case = previous
+            with self.report_lock:
+                self.results.append(current)
+                self.journal.append({"scenario": "cluster-yaml-case", **current})
+                self.report_path.write_text(json.dumps(self.results, indent=2) + "\n")
+
+
+def run_cluster_yaml_cases(path, node, nodes, shared, journal, report, status=None, reference=None, setup_done=False):
+    runner = ClusterSQLTestRunner(node, nodes, shared, journal, report, status, reference)
+    success = runner.run_test_spec(str(path), setup_done=setup_done)
+    if status:
+        proof = {"remote_shards": sum(proof["remote_shards"] for proof in runner.observations),
+                 "remote_nodes": len({identity for proof in runner.observations for identity in proof["remote_node_ids"]})}
+        assert_cluster_evidence({"min_remote_shards": 1, "min_remote_nodes": 1}, proof)
+    if not success or runner.failed_tests:
+        raise DrillFailure(f"cluster YAML suite failed: {path}")
+    if any(runner.reference.values()):
+        raise DrillFailure("standalone oracle cases were not all executed")
+    return runner.results
 
 
 def eventually(check, context: str, timeout: float = 15):
@@ -127,7 +359,7 @@ class Node(OwnedServer):
             f"--api-port={self.port}", f"--mysql-port={self.mysql_port}",
             "--mysql-socket=", "--no-repl", f"--root-password={self.password}",
             f"--replication={self.replication}",
-            *([] if any(arg.startswith("--cluster-secret-file=") for arg in self.node_args)
+            *([] if self.cluster_secret is None or any(arg.startswith("--cluster-secret-file=") for arg in self.node_args)
               else [f"--cluster-secret={self.cluster_secret}"]),
             *self.node_args, str(self.app),
         ]
@@ -1571,71 +1803,15 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
                    "integer keys survive restart and another reservation")
 
 
-def run_cluster_operator_contracts(node, journal, report_path, status=None, reference=None):
-    """The same SQL on the standalone oracle and a RAM-limited coordinator.
-
-    Each distributed case MUST actually delegate; a local result is insufficient.
-    Record EXPLAIN and retain all failures so CI exposes the entire operator gap.
-    This is deliberately not an expected-error or fallback suite.
-    """
-    cases = [
-        ("order-top-n-offset", "SELECT id,v0 FROM big_items ORDER BY v0 DESC,id ASC LIMIT 9 OFFSET 5"),
-        ("order-computed-ties", "SELECT id,v0 FROM big_items ORDER BY v0%7 ASC,id DESC LIMIT 11 OFFSET 3"),
-        ("order-null-keys", "SELECT id,v0 FROM big_items ORDER BY CASE WHEN id%17=0 THEN NULL ELSE v0 END DESC,id ASC LIMIT 7"),
-        ("order-first", "SELECT id FROM big_items WHERE id>=5000 ORDER BY id DESC LIMIT 1"),
-        ("order-unbounded-pages", "SELECT id,v0 FROM big_items WHERE id<900 ORDER BY v0 DESC,id ASC"),
-        ("first-unordered-unique", "SELECT id FROM big_items WHERE id=245000 LIMIT 1"),
-        ("exists-match", "SELECT EXISTS(SELECT 1 FROM big_items WHERE v0%97=43) AS hit"),
-        ("exists-no-match", "SELECT EXISTS(SELECT 1 FROM big_items WHERE v0%97=-1) AS hit"),
-        ("scalar-lookup-hit", "SELECT (SELECT v0 FROM big_items WHERE id=245000) AS value"),
-        ("scalar-lookup-miss", "SELECT (SELECT v0 FROM big_items WHERE id=245000 AND v0%97=-1) AS value"),
-        ("join-sum", "SELECT SUM(b.v0+k.id) AS total FROM operator_keys k JOIN big_items b ON b.id=k.id"),
-        ("join-rows", "SELECT k.id,b.v0 FROM operator_keys k JOIN big_items b ON b.id=k.id ORDER BY k.id"),
-        ("membership-source", "SELECT SUM(v0) AS total FROM big_items WHERE id IN (SELECT id FROM operator_keys)"),
-        ("ordered-membership", "SELECT id,v0 FROM big_items WHERE id IN (SELECT id FROM operator_keys) ORDER BY v0 DESC,id ASC LIMIT 3"),
-    ]
-    results = []
-    for name, statement in cases:
-        item = {"name": name, "sql": statement, "phase": "cluster" if status else "standalone"}
-        started = time.monotonic()
-        try:
-            item["explain"] = node.client.sql("EXPLAIN " + statement)
-            code = json.dumps(item["explain"])
-            item["operators"] = [operator for operator in
-                                 ("scan_order", "scan_exists", "scan_lookup", "scan_batch", "scan_join_order")
-                                 if operator in code]
-            required = "scan_order" if name.startswith("order") else "scan_exists" if name.startswith("exists") else "scan_join_order" if name == "join-sum" else None
-            if required and required not in item["operators"]:
-                raise DrillFailure("SQL did not exercise its required physical operator: " + required)
-            before = status(node)["state"]["delegated"] if status else None
-            item["rows"] = node.client.sql(statement)
-            if reference is not None:
-                expected = next(row for row in reference if row["name"] == name)
-                if expected["status"] != "passed":
-                    raise DrillFailure("standalone oracle failed: " + name)
-                expect(item["rows"], expected["rows"], "distributed SQL: " + name)
-            if before is not None:
-                item["remote_shards"] = status(node)["state"]["delegated"] - before
-                if item["remote_shards"] <= 0:
-                    raise DrillFailure("query did not execute a remote shard: " + name)
-            item["status"] = "passed"
-        except Exception as error:
-            item.update(status="failed", error=str(error))
-        item["duration_seconds"] = time.monotonic() - started
-        results.append(item)
-        journal.append({"scenario": "cluster-sql-operator", **item})
-        print(f"  {item['phase']}: {name}: {item['status']}", flush=True)
-        report_path.write_text(json.dumps(results, indent=2) + "\n")
-    return results
-
-
 def run_cluster_placement(args, artifacts, journal):
     print("SCENARIO: authenticated peer roster and automatic SUM above one node's RAM budget", flush=True)
     directory = artifacts / "cluster-placement"
     directory.mkdir()
-    budget = 8 * 1024 * 1024
-    coordinator_budget = 128 * 1024
-    rows_per_shard, shards, columns = 5000, 64, 8
+    suite = getattr(args, "cluster_suite", None)
+    config = cluster_suite_config(suite) if suite else cluster_suite_config(OPERATOR_SUITE)
+    budget = config["ram_limit_bytes"]
+    coordinator_budget = config["coordinator_ram_limit_bytes"]
+    rows_per_shard, shards, columns = config["rows_per_shard"], config["shards"], config["columns"]
     secret = uuid.uuid4().hex + uuid.uuid4().hex
     secret_file = directory / "cluster.secret"
     secret_file.write_text(secret + "\n")
@@ -1657,14 +1833,14 @@ def run_cluster_placement(args, artifacts, journal):
         source.scm('(settings "ShardSize" 1000000)')
         definitions = ','.join(["id INT PRIMARY KEY" if args.cluster_operators_only else "id INT"] + [f"v{i} INT" for i in range(columns)])
         source.sql(f"CREATE TABLE big_items({definitions}) ENGINE=SAFE")
-        rng = random.Random(20261026)
+        rng = random.Random(config["fixture_seed"])
         expected = 0
         reference = {"rows": rows_per_shard * shards, "partition_rows": rows_per_shard,
                      "v0_sum": 0, "first_partition_sum": 0, "first_two_partition_sum": 0,
                      "nonlinear_sum": 0}
         for start in range(0, rows_per_shard * shards, 1000):
             values = []
-            for row_id in range(start, start + 1000):
+            for row_id in range(start, min(start + 1000, rows_per_shard * shards)):
                 row = [rng.getrandbits(32) for _ in range(columns)]
                 expected += sum(row)
                 reference["v0_sum"] += row[0]
@@ -1699,8 +1875,9 @@ def run_cluster_placement(args, artifacts, journal):
         if args.cluster_operators_only:
             source.sql("CREATE TABLE operator_keys(id INT PRIMARY KEY) ENGINE=SAFE")
             source.sql("INSERT INTO operator_keys VALUES(42000),(90000),(175000),(245000)")
-            standalone_operators = run_cluster_operator_contracts(
-                builder, journal, directory / "standalone-operators.json")
+            standalone_operators = run_cluster_yaml_cases(
+                suite or OPERATOR_SUITE, builder, [builder], builder.data_dir / DATABASE,
+                journal, directory / "standalone-operators.json")
             source.scm(f'(rebuild (table "{DATABASE}" false "operator_keys" false) true false)')
         builder.kill()
         shared = builder.data_dir / DATABASE
@@ -1724,13 +1901,13 @@ def run_cluster_placement(args, artifacts, journal):
                 raise DrillFailure(f"shard does not exercise asymmetric admission: {generation_bytes}")
         # All participants resolve the same shared backend generation files;
         # neither per-node copies nor replication dumps are used in this test.
-        nodes = [Node(args, directory, f"node-{i}", "listen") for i in range(4)]
+        nodes = [Node(args, directory, f"node-{i}", "listen") for i in range(config["nodes"])]
         wrong = Node(args, directory, "wrong-secret", "")
         for node in nodes + [wrong]:
             # Exercise eight concurrent shard operators even on two-CPU CI
             # runners. A serial scan can evict/reload every shard locally and
             # would never test simultaneous RAM admission or remote overflow.
-            node.process_env["GOMAXPROCS"] = "16"
+            node.process_env["GOMAXPROCS"] = str(config["gomaxprocs"])
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
             (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
@@ -1740,9 +1917,9 @@ def run_cluster_placement(args, artifacts, journal):
             node_budget = coordinator_budget if node is nodes[0] else budget
             (node.data_dir / "settings.json").write_text(json.dumps({
                 "MaxRamBytes": node_budget, "MaxPersistBytes": node_budget, "MinRamBytes": 0,
-                "MetricsTracing": False,
+                "MetricsTracing": False, "ShardRamPercent": config["shard_ram_percent"],
             }))
-            seed = "" if node is nodes[0] else f"http://127.0.0.1:{nodes[1 if node is nodes[2] else 0].port}/cluster"
+            seed = "" if node is nodes[0] else f"http://127.0.0.1:{nodes[1 if len(nodes) > 2 and node is nodes[2] else 0].port}/cluster"
             node.node_args = [f"--cluster-secret-file={wrong_file if node is wrong else secret_file}",
                               f"--cluster-address=http://127.0.0.1:{node.port}/cluster",
                               f"--cluster-join={seed}", f"--cluster-databases={DATABASE}"]
@@ -1766,10 +1943,10 @@ def run_cluster_placement(args, artifacts, journal):
         for node in nodes:
             expect(len(status(node)["state"]["members"]), len(nodes), "authenticated roster")
         for node in nodes:
-            expect(int(node.client.scm('(settings "ShardRamPercent")')), 50, "default shard fraction")
+            expect(int(node.client.scm('(settings "ShardRamPercent")')), config["shard_ram_percent"], "configured shard fraction")
             if not status(node)["state"]["self"]["id"].startswith("memcp://"):
                 raise DrillFailure("peer identity is not a URI")
-        nodes[0].client.scm('(settings "ShardRamPercent" 1)')
+        nodes[0].client.scm(f'(settings "ShardRamPercent" {config["coordinator_shard_ram_percent"]})')
         boundary = status(nodes[0])["budget"]
         if boundary["ShardMemory"] < boundary["ShardBudget"]:
             raise DrillFailure("coordinator fixture did not force cold-shard refusal")
@@ -1791,8 +1968,9 @@ def run_cluster_placement(args, artifacts, journal):
         if sum(item["state"]["locality"] for item in states) == 0:
             raise DrillFailure("warm-holder query did not exercise locality delegation")
         if args.cluster_operators_only:
-            operators = run_cluster_operator_contracts(
-                nodes[0], journal, directory / "cluster-operators.json", status, standalone_operators)
+            operators = run_cluster_yaml_cases(
+                suite or OPERATOR_SUITE, nodes[0], nodes, shared, journal,
+                directory / "cluster-operators.json", status, standalone_operators)
             failed = [f"{row['phase']}/{row['name']}" for row in standalone_operators + operators
                       if row["status"] != "passed"]
             if failed:
@@ -1926,8 +2104,79 @@ def run_cluster_placement(args, artifacts, journal):
                         "expected_sum": expected, "states": states, "fixture_binary": str(builder_args.binary)})
 
 
+def run_cluster_suite(args, path, artifacts, journal):
+    """The environment changes; setup/cases/cleanup use SQLTestRunner unchanged."""
+    path = path.resolve()
+    config = cluster_suite_config(path)
+    directory = artifacts / path.stem
+    directory.mkdir()
+    journal.append({"scenario": "cluster-suite", "path": str(path), "config": config})
+    if config["fixture"] == "shared_analytics":
+        selected = SimpleNamespace(**{**vars(args), "cluster_suite": path,
+                                      "cluster_operators_only": True,
+                                      "cluster_context_only": False})
+        run_cluster_placement(selected, directory, journal)
+        return
+
+    database = "memcp-tests"
+    with contextlib.ExitStack() as cleanup:
+        reference = None
+        if config["compare_standalone"]:
+            oracle = Node(args, directory, "standalone", "", database=database)
+            cleanup.callback(lambda: oracle.kill() if oracle.process is not None else None)
+            oracle.start()
+            reference = run_cluster_yaml_cases(path, oracle, [oracle], oracle.data_dir / database,
+                                               journal, directory / "standalone.json")
+            oracle.kill()
+
+        # Initialize an empty native shared backend. The suite's ordinary setup
+        # runs on the live cluster, including DDL, sessions and SCM operations.
+        catalog = Node(args, directory, "catalog", "", database=database)
+        cleanup.callback(lambda: catalog.kill() if catalog.process is not None else None)
+        catalog.start().sql(f"CREATE DATABASE `{database}`", "system")
+        catalog.kill()
+        shared = catalog.data_dir / database
+        secret = directory / "cluster.secret"
+        secret.write_text(uuid.uuid4().hex + uuid.uuid4().hex + "\n")
+        secret.chmod(0o600)
+        cleanup.callback(lambda: secret.unlink(missing_ok=True))
+        nodes = [Node(args, directory, f"node-{index}", "", database=database)
+                 for index in range(config["nodes"])]
+        protocol_ports = [free_port() for _ in nodes]
+        for index, node in enumerate(nodes):
+            cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
+            (node.data_dir / database).symlink_to(shared, target_is_directory=True)
+            (node.data_dir / f"{database}.json").write_text(json.dumps({"backend": "filesystem"}))
+            ram = config["coordinator_ram_limit_bytes"] if index == 0 else config["ram_limit_bytes"]
+            fraction = config["coordinator_shard_ram_percent"] if index == 0 else config["shard_ram_percent"]
+            (node.data_dir / "settings.json").write_text(json.dumps({
+                "MaxRamBytes": ram, "MaxPersistBytes": ram, "MinRamBytes": 0,
+                "ShardRamPercent": fraction, "MetricsTracing": False,
+            }))
+            node.process_env["GOMAXPROCS"] = str(config["gomaxprocs"])
+            # The normal frontend's startup unit tests also use memcp-tests.
+            # Initialize this initially empty domain through its public startup
+            # API only after all frontends are ready, before suite setup begins.
+            node.cluster_secret = None
+            node.start()
+        for index, node in enumerate(nodes):
+            seed = "" if index == 0 else f"http://127.0.0.1:{protocol_ports[0]}/cluster"
+            node.client.scm(f'(begin (node_cluster_start {json.dumps(str(secret))} '
+                            f'"http://127.0.0.1:{protocol_ports[index]}/cluster" '
+                            f'{json.dumps(seed)} "{database}" {"true" if index == 0 else "false"}) '
+                            f'(serve {protocol_ports[index]} (http_route "/cluster" (node_protocol) '
+                            '(lambda (req res) (http_handler req res)))) true)')
+        eventually(lambda: all(len(cluster_status(node)["state"]["members"]) == len(nodes)
+                               and cluster_status(node)["state"]["connected"] == len(nodes)-1
+                               for node in nodes), "cluster suite roster did not converge", 30)
+        run_cluster_yaml_cases(path, nodes[0], nodes, shared, journal,
+                               directory / "cluster.json", cluster_status, reference)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("suites", nargs="*", type=Path, help="ordinary YAML suites with metadata.cluster")
+    parser.add_argument("--cluster-suites", action="store_true", help="discover every cluster YAML suite under tests/")
     parser.add_argument("--binary", type=Path, default=ROOT / "memcp")
     parser.add_argument("--artifacts", type=Path)
     parser.add_argument("--rounds", type=int, default=5)
@@ -1951,6 +2200,20 @@ def main():
     parser.add_argument("--cluster-only", action="store_true", help="run focused shared-storage cluster placement scenario")
     parser.add_argument("--fixture-binary", type=Path, help="optional same-commit builder for immutable cluster fixture")
     args = parser.parse_args()
+    if args.cluster_suites:
+        if args.suites:
+            parser.error("--cluster-suites discovers its suites; do not pass paths")
+        args.suites = [path for path in sorted((ROOT / "tests").rglob("*.yaml"))
+                       if suite_requires_cluster((yaml.safe_load(path.read_text()) or {}).get("metadata", {}))]
+        if not args.suites:
+            parser.error("no cluster suites found")
+    for path in args.suites:
+        cluster_suite_config(path)
+    if args.suites and any((args.cluster_only, args.remote_scans_only, args.cluster_inserts_only,
+                           args.cluster_context_only, args.cluster_operators_only)):
+        parser.error("select YAML suites or a legacy process scenario, not both")
+    if args.cluster_operators_only:
+        args.cluster_suite = OPERATOR_SUITE
     if args.cluster_context_only or args.cluster_operators_only:
         args.cluster_only = True
     if min(args.rounds, args.workers, args.operations, args.timeout, args.startup_timeout) <= 0:
@@ -1971,7 +2234,10 @@ def main():
                 "dedicated_replication_port": args.dedicated_replication_port}]
     print(f"Replication cluster stress artifacts: {artifacts}\nSeed: {args.seed}", flush=True)
     try:
-        if args.cluster_inserts_only:
+        if args.suites:
+            for suite in args.suites:
+                run_cluster_suite(args, suite, artifacts, journal)
+        elif args.cluster_inserts_only:
             if args.cluster_inserts_layout != "hash":
                 run_cluster_inserts(args, artifacts, journal)
             if args.cluster_inserts_layout != "free":
@@ -1980,7 +2246,7 @@ def main():
             run_cluster_placement(args, artifacts, journal)
         else:
             run_remote_scans(args, artifacts, journal)
-        if not args.remote_scans_only and not args.cluster_only and not args.cluster_inserts_only:
+        if not args.suites and not args.remote_scans_only and not args.cluster_only and not args.cluster_inserts_only:
             run_regressions(args, artifacts, journal)
             run_partitions(args, artifacts, journal)
             run_stress(args, artifacts, journal)
@@ -2002,6 +2268,7 @@ def main():
                   "--seed", str(args.seed), "--rounds", str(args.rounds), "--workers", str(args.workers),
                   "--operations", str(args.operations), "--timeout", str(args.timeout),
                   "--startup-timeout", str(args.startup_timeout), "--executor", args.executor]
+        replay.extend(str(path) for path in args.suites)
         if args.remote_scans_only:
             replay.append("--remote-scans-only")
         if args.cluster_inserts_only:
