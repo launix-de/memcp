@@ -1347,6 +1347,7 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		idxInt = idx
 	}
 	d0 := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(1)}
+	_ = d0
 	r0 := ctx.AllocReg()
 	if thisptr.Loc == scm.LocImm {
 		ctx.EmitMovRegImm64(r0, uint64(uintptr(thisptr.Imm.Int())+unsafe.Offsetof((*StorageString)(nil).readCount)))

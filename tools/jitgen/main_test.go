@@ -357,7 +357,7 @@ func rolling(limit uint64) uint64 {
 return sum
 }
 `, "rolling")
-	plan := planLoopPhiRegisters(fn, false)
+	plan := planLoopPhiRegisters(fn, false, analyzeSSAReachability(fn, nil))
 	if len(plan.colorByValue) != 2 {
 		t.Fatalf("loop register candidates = %v, want index and sum phis", plan.colorByValue)
 	}
@@ -381,13 +381,13 @@ func rolling(values []float64) float64 {
 	return result
 }
 `, "rolling")
-	generic := planLoopPhiRegisters(fn, false)
+	generic := planLoopPhiRegisters(fn, false, analyzeSSAReachability(fn, nil))
 	for name, class := range generic.classByValue {
 		if class != "JITRegisterClassGPR" {
 			t.Fatalf("generic phi %s unexpectedly uses %s", name, class)
 		}
 	}
-	native := planLoopPhiRegisters(fn, true)
+	native := planLoopPhiRegisters(fn, true, analyzeSSAReachability(fn, nil))
 	foundFloat := false
 	for _, class := range native.classByValue {
 		foundFloat = foundFloat || class == "JITRegisterClassFP"
@@ -428,7 +428,7 @@ func mappedSum(values []int, callback func(int) int) int {
 	return total
 }
 `, "mappedSum")
-	if inlineRegisterPlanSafe(fn) {
+	if inlineRegisterPlanSafe(fn, analyzeSSAReachability(fn, nil)) {
 		t.Fatal("dynamic callback was treated as part of the standalone interference graph")
 	}
 }
@@ -493,7 +493,7 @@ func last(values []Scmer) Scmer {
 	return result
 }
 `, "last")
-	plan := planLoopPhiRegisters(fn, false)
+	plan := planLoopPhiRegisters(fn, false, analyzeSSAReachability(fn, nil))
 	for name, width := range plan.widthByValue {
 		if width == 2 {
 			t.Fatalf("Scmer %s was incorrectly planned as an indivisible pair: %#v", name, plan)
@@ -515,7 +515,7 @@ func lastTwice(left, right []string) int {
 	return leftLength + len(rightResult)
 }
 `, "lastTwice")
-	plan := planLoopPhiRegisters(fn, false)
+	plan := planLoopPhiRegisters(fn, false, analyzeSSAReachability(fn, nil))
 	for name, width := range plan.widthByValue {
 		if width == 2 {
 			t.Fatalf("string %s was incorrectly planned as an indivisible pair: %#v", name, plan)
@@ -538,7 +538,7 @@ func nested(rows, columns int) int {
 	return outer + inner
 }
 `, "nested")
-	plan := planLoopPhiRegisters(fn, false)
+	plan := planLoopPhiRegisters(fn, false, analyzeSSAReachability(fn, nil))
 	if len(plan.slots) < 2 {
 		t.Fatalf("nested loop plan = %#v, want multiple weighted slots", plan)
 	}
@@ -570,7 +570,7 @@ func rolling(limit int) int {
 					continue
 				}
 				foundCrossBlockPhi = true
-				plan := planLoopPhiRegisters(fn, false)
+				plan := planLoopPhiRegisters(fn, false, analyzeSSAReachability(fn, nil))
 				if _, planned := plan.colorByValue[phi.Name()]; !planned {
 					t.Fatalf("branch-updated cursor phi %s was left on the stack: %#v", phi.Name(), plan)
 				}
@@ -728,7 +728,7 @@ func caller() bool {
 	return matched && handled
 }
 `, "caller")
-	if !functionCallsMultipleResults(fn) {
+	if !functionCallsMultipleResults(fn, analyzeSSAReachability(fn, nil)) {
 		t.Fatal("call returning a tuple was not detected")
 	}
 }

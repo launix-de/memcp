@@ -22,6 +22,12 @@ import "golang.org/x/tools/go/ssa"
 // Phase 1 keeps lowering behavior stable by delegating each typed emitter
 // to the existing legacy lowering body.
 func (g *codeGen) emitInstr(instr ssa.Instruction) {
+	if value, ok := instr.(ssa.Value); ok && g.reachability != nil {
+		if c := g.reachability.constant(value); c != nil {
+			g.vals[value.Name()] = g.resolveValue(c)
+			return
+		}
+	}
 	previous := g.currentInstr
 	g.currentInstr = instr
 	defer func() { g.currentInstr = previous }()

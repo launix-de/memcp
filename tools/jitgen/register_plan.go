@@ -59,7 +59,7 @@ type registerPlanNode struct {
 
 const exactRegisterColoringLimit = 20
 
-func planLoopPhiRegisters(fn *ssa.Function, nativeFP bool) staticRegisterPlan {
+func planLoopPhiRegisters(fn *ssa.Function, nativeFP bool, reachability *ssaReachability) staticRegisterPlan {
 	plan := staticRegisterPlan{
 		colorByValue: map[string]int{},
 		widthByValue: map[string]int{},
@@ -71,6 +71,9 @@ func planLoopPhiRegisters(fn *ssa.Function, nativeFP bool) staticRegisterPlan {
 
 	var nodes []registerPlanNode
 	for _, block := range fn.Blocks {
+		if !reachability.blocks[block] {
+			continue
+		}
 		if !registerPlanLoopHeader(block) {
 			continue
 		}
@@ -78,6 +81,9 @@ func planLoopPhiRegisters(fn *ssa.Function, nativeFP bool) staticRegisterPlan {
 			phi, ok := instruction.(*ssa.Phi)
 			if !ok {
 				break
+			}
+			if reachability.constant(phi) != nil {
+				continue
 			}
 			// A Scmer consists of independently-live tag and payload words. Treating
 			// it as one indivisible two-register color both invents interference and

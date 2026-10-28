@@ -1870,12 +1870,14 @@ func init() {
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				d38 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
+				_ = d38
 				ctx.EnsureDesc(&d9)
 				ctx.EnsureDesc(&d38)
 				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value uintptr) { base.JITCode = value }), []JITValueDesc{d9, d38})
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				d39 := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+				_ = d39
 				ctx.EnsureDesc(&d9)
 				ctx.EnsureDesc(&d39)
 				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value *JITEntryPoint) { base.Compiled = value }), []JITValueDesc{d9, d39})
@@ -2142,6 +2144,7 @@ func init() {
 					panic("jit: generic call arg expects 3-word Go slice (closeJITProcedureCaptures arg2)")
 				}
 				d58 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
+				_ = d58
 				if d58.Loc == LocRegPair || d58.Loc == LocStackPair || d58.Loc == LocRegTriple || d58.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
@@ -2475,6 +2478,7 @@ func init() {
 				ctx.EnsureDesc(&d26)
 				ctx.EnsureDesc(&d71)
 				d78 := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+				_ = d78
 				ctx.EmitGoCallVoid(GoFuncAddr(func(m map[Symbol]struct{}, key Symbol, value struct{}) { m[key] = value }), []JITValueDesc{d26, d71, d78})
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl15)
@@ -2687,12 +2691,14 @@ func init() {
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				d89 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
+				_ = d89
 				ctx.EnsureDesc(&d9)
 				ctx.EnsureDesc(&d89)
 				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value uintptr) { base.JITCode = value }), []JITValueDesc{d9, d89})
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				d90 := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+				_ = d90
 				ctx.EnsureDesc(&d9)
 				ctx.EnsureDesc(&d90)
 				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value *JITEntryPoint) { base.Compiled = value }), []JITValueDesc{d9, d90})
@@ -2928,6 +2934,7 @@ func init() {
 				ctx.EnsureDesc(&d26)
 				ctx.EnsureDesc(&d102)
 				d109 := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+				_ = d109
 				ctx.EmitGoCallVoid(GoFuncAddr(func(m map[Symbol]struct{}, key Symbol, value struct{}) { m[key] = value }), []JITValueDesc{d26, d102, d109})
 				ctx.ReclaimUntrackedRegs()
 				ctx.SyncDesc(&d66)

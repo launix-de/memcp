@@ -17204,10 +17204,12 @@ func init_strings() {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				d10 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+				_ = d10
 				if d10.Loc == LocRegPair || d10.Loc == LocStackPair || d10.Loc == LocRegTriple || d10.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				d11 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+				_ = d11
 				if d11.Loc == LocRegPair || d11.Loc == LocStackPair || d11.Loc == LocRegTriple || d11.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}

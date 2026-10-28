@@ -8791,6 +8791,7 @@ func init_alu() {
 				d0 = JITPrepareScmerGoArg(ctx, d0)
 				d1 = JITPrepareScmerGoArg(ctx, d1)
 				d2 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+				_ = d2
 				if d2.Loc == LocRegPair || d2.Loc == LocStackPair || d2.Loc == LocRegTriple || d2.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
@@ -8873,6 +8874,7 @@ func init_alu() {
 				d0 = JITPrepareScmerGoArg(ctx, d0)
 				d1 = JITPrepareScmerGoArg(ctx, d1)
 				d2 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
+				_ = d2
 				if d2.Loc == LocRegPair || d2.Loc == LocStackPair || d2.Loc == LocRegTriple || d2.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
