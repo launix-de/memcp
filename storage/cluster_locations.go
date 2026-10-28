@@ -61,19 +61,17 @@ func (cluster *nodeCluster) installSchemaLocations(source string, request cluste
 	}
 	schema := cluster.manager.resourceCell(mosiResource{Database: request.Database})
 	schema.acquire.Lock()
+	defer schema.acquire.Unlock()
 	pending := schema.ownstate.Snapshot()
 	if !pending.Phase().Requested() || pending.Flight().ID() != request.Acquisition {
-		schema.acquire.Unlock()
 		return fmt.Errorf("schema locations require the active acquisition")
 	}
 	cluster.manager.mu.Lock()
 	owner := cluster.manager.directory.Records[request.Database].Owner
 	cluster.manager.mu.Unlock()
 	if owner != source {
-		schema.acquire.Unlock()
 		return fmt.Errorf("schema locations from foreign owner")
 	}
-	schema.acquire.Unlock()
 	for _, entry := range request.Entries {
 		if !entry.Resource.valid() || entry.Resource.Shard == "" || entry.Resource.Database != request.Database || entry.Owner == "" || entry.Epoch == 0 {
 			return fmt.Errorf("invalid shard location")
@@ -102,15 +100,56 @@ func (cluster *nodeCluster) installLocationHint(entry replicaRecord) {
 	})
 }
 
+// A rebuild changes physical UUIDs without moving the shard owner. A cold
+// directory miss may consume the existing schema checkpoint's forwarding edges;
+// this changes identity routing only, never MOSI permission or backend freshness.
+func (cluster *nodeCluster) shardLocation(resource mosiResource) (replicaRecord, error) {
+	r := cluster.manager
+	lookup := func() replicaRecord {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.directory.Records[r.resourceKey(resource)]
+	}
+	entry := lookup()
+	if entry.Owner == "" {
+		db := GetDatabase(resource.Database)
+		if db == nil {
+			return entry, fmt.Errorf("unknown location schema")
+		}
+		access := db.GetRead(nil)
+		defer access.Release()
+		if err := r.restoreSchemaRoutes(db.persistence.ReadSchema()); err != nil {
+			return entry, err
+		}
+		entry = lookup()
+	}
+	if entry.Owner == "" {
+		return entry, fmt.Errorf("schema owner has no shard location")
+	}
+	return locationRecord(entry), nil
+}
+
 func (cluster *nodeCluster) locateViaSchema(ctx context.Context, resource mosiResource) (string, error) {
 	schemaOwner, err := cluster.locate(ctx, mosiResource{Database: resource.Database})
 	if err != nil {
 		return "", err
 	}
 	if schemaOwner == cluster.self.ID {
-		// Schema ownership must already carry every shard's route. Missing routing
-		// is an error, never permission to infer backend freshness from local I.
-		return "", fmt.Errorf("schema owner has no location for %s", resource.key())
+		entry, err := cluster.shardLocation(resource)
+		if err != nil {
+			return "", err
+		}
+		if entry.Owner == cluster.self.ID {
+			cell := cluster.manager.resourceCell(entry.Resource)
+			phase := cell.ownstate.Phase()
+			if phase == mosi.IO {
+				if cell.ownstate.Initialized() {
+					return "", fmt.Errorf("local invalid state has no backend authority")
+				}
+				return cluster.locate(ctx, entry.Resource) // explicit live-peer recovery
+			}
+		}
+		return entry.Owner, nil
 	}
 	peer := cluster.peer(schemaOwner)
 	if peer == nil {
@@ -120,7 +159,7 @@ func (cluster *nodeCluster) locateViaSchema(ctx context.Context, resource mosiRe
 	if err := cluster.service.control(ctx, peer, "cluster.location", resource, &record); err != nil {
 		return "", err
 	}
-	if record.Resource != resource || record.Owner == "" {
+	if !record.Resource.valid() || record.Resource.Database != resource.Database || record.Resource.Table != resource.Table || record.Owner == "" {
 		return "", fmt.Errorf("invalid schema owner location")
 	}
 	cluster.installLocationHint(record)
@@ -213,13 +252,7 @@ func (cluster *nodeCluster) handleLocations(ctx context.Context, source, method 
 			return entry, err
 		}
 		cluster.bootstrapCell(resource)
-		cluster.manager.mu.Lock()
-		entry := cluster.manager.directory.Records[cluster.manager.resourceKey(resource)]
-		cluster.manager.mu.Unlock()
-		if entry.Owner == "" {
-			return nil, fmt.Errorf("schema owner has no shard location")
-		}
-		return locationRecord(entry), nil
+		return cluster.shardLocation(resource)
 	}
 	return nil, fmt.Errorf("unknown location method")
 }

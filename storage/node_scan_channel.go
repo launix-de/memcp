@@ -12,6 +12,7 @@ package storage
 
 import "fmt"
 import "sync"
+import "strings"
 import "sync/atomic"
 import "context"
 import "encoding/json"
@@ -239,6 +240,25 @@ func postScanMessage(peer *mosiPeer, method string, value any) error {
 	}
 	return peer.send(mosiMessage{Method: method, Data: data})
 }
+
+// Old frames cannot become executable after reconnect, even after the old
+// connection's bounded history has gone away. This uses its existing nonce
+// binding, not a persistent query registry or a second task/attempt identity.
+func (s *scanRPCSession) validOperation(id string) bool {
+	if s.peer == nil {
+		return false
+	}
+	if s.peer.operationPrefix != "" {
+		prefix, operation, ok := strings.Cut(id, "/")
+		if !ok || prefix != s.peer.operationPrefix {
+			return false
+		}
+		id = operation
+	}
+	operation, err := uuid.Parse(id)
+	return err == nil && operation.Version() == 7
+}
+
 func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data json.RawMessage) (any, error) {
 	switch method {
 	case "scan.result":
@@ -264,7 +284,7 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 		if err := json.Unmarshal(data, &id); err != nil {
 			return nil, err
 		}
-		if operation, err := uuid.Parse(id); err != nil || operation.Version() != 7 {
+		if !s.validOperation(id) {
 			return nil, fmt.Errorf("invalid operation identity")
 		}
 		s.tasks.cancelTask(id)
@@ -278,7 +298,7 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 		if err := json.Unmarshal(data, &request); err != nil {
 			return nil, err
 		}
-		if operation, err := uuid.Parse(request.Return); err != nil || operation.Version() != 7 {
+		if !s.validOperation(request.Return) {
 			return nil, fmt.Errorf("invalid operation identity")
 		}
 		completion := scanCompletion{Return: request.Return}
@@ -302,6 +322,13 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 			}
 			if exported, ok := value.(interface{ ClusterObjectOffers() []scm.ClusterReference }); ok {
 				completion.Offers = exported.ClusterObjectOffers()
+			}
+			// boundedScanReply already encoded and checked this response. Keep
+			// those immutable bytes through the collector; do not marshal even
+			// a RawMessage wrapper here (which scans and copies it again).
+			if encoded, ok := value.(encodedReply); ok {
+				completion.Data = encoded.data
+				return
 			}
 			completion.Data, err = json.Marshal(value)
 			if err != nil {
@@ -362,6 +389,9 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 		return err
 	}
 	id := operation.String()
+	if peer.operationPrefix != "" {
+		id = peer.operationPrefix + "/" + id
+	}
 	results := make(chan scanCompletion, 1)
 	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) error { results <- value.Any().(scanCompletion); return nil })
 	receiver.Seal()

@@ -43,6 +43,9 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 			}
 			return s.t.schema.executeScanTask(ctx, session, input, s)
 		case shardScanInvocation:
+			// Advisory accounting follows the native generation, not a second
+			// wire snapshot. Each kernel owns its actual fixed input boundary.
+			inputCount := int64(s.main_count) + int64(s.plannerDeltaRows.Load())
 			// This is the sole native reduction entry. Preparation already owns
 			// the generation and TX scope; no second GetRead or decoder lives here.
 			if input.tx == nil {
@@ -50,7 +53,7 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 			}
 			if input.operator == shardOrdered {
 				run := s.prepareOrderedRun(input)
-				return scanResult{res: scm.NewAny(run), outCount: int64(len(run.rows)), candidateCount: run.candidates}, nil
+				return scanResult{res: scm.NewAny(run), outCount: int64(len(run.rows)), inputCount: int64(run.universe), candidateCount: run.candidates}, nil
 			}
 			if input.operator == shardExists {
 				found := s.scanExists(input.access, input.conditionCols, input.condition, input.tx, SessionStateFromTx(input.tx), nil)
@@ -58,7 +61,7 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 				if found {
 					count = 1
 				}
-				return scanResult{res: scm.NewBool(found), outCount: count}, nil
+				return scanResult{res: scm.NewBool(found), outCount: count, inputCount: inputCount}, nil
 			}
 			if input.operator >= shardLookupOne {
 				var value scm.Scmer
@@ -82,10 +85,10 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 					values, count = s.scanLookupMapMany(input.access, input.callbackCols, input.tx, &stopped)
 					value = scm.NewSlice(values)
 				}
-				return scanResult{res: value, outCount: int64(count)}, nil
+				return scanResult{res: value, outCount: int64(count), inputCount: inputCount}, nil
 			}
 			value, count, candidates := s.scan(input.access, input.conditionCols, input.condition, input.callbackCols, input.mapReduce, input.neutral, input.stride, input.batchdata, input.tx, SessionStateFromTx(input.tx))
-			return scanResult{res: value, outCount: count, candidateCount: candidates}, nil
+			return scanResult{res: value, outCount: count, inputCount: inputCount, candidateCount: candidates}, nil
 		}
 		return nil, fmt.Errorf("missing typed scan invocation")
 	}

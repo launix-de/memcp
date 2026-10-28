@@ -72,26 +72,27 @@ func registerMosiRole(role string, handler http.Handler) (func(), error) {
 // Neither RPC handlers nor storage I/O run under its mutex.
 // A disconnected peer fails every outstanding call; no write is retried here.
 type mosiPeer struct {
-	objectEndpoint string            // immutable outbound URL, initialized before reader start
-	objectPeer     clusterObjectPeer // immutable authenticated identity/incarnation, independent of connection
-	scanService    *nodeScanService  // immutable before an outbound scan is dispatched
-	conn           *websocket.Conn
-	writeMu        sync.Mutex
-	outgoing       chan mosiMessage
-	writeDone      chan struct{}
-	mu             sync.Mutex
-	pending        map[uint64]chan mosiMessage
-	packetOrder    map[string]chan struct{} // wire publication order per resource; payload and grant IDs may differ
-	packetBytes    atomic.Int64             // bounded queued packet bytes, never shard admission state
-	next           atomic.Uint64
-	done           chan struct{}
-	once           sync.Once
-	handle         func(context.Context, string, json.RawMessage) (any, error)
-	packet         func(*mosiPacket) error
-	ctx            context.Context
-	cancel         context.CancelFunc
-	readDone       chan struct{}
-	workers        sync.WaitGroup
+	operationPrefix string            // immutable authenticated connection binding for query operations
+	objectEndpoint  string            // immutable outbound URL, initialized before reader start
+	objectPeer      clusterObjectPeer // immutable authenticated identity/incarnation, independent of connection
+	scanService     *nodeScanService  // immutable before an outbound scan is dispatched
+	conn            *websocket.Conn
+	writeMu         sync.Mutex
+	outgoing        chan mosiMessage
+	writeDone       chan struct{}
+	mu              sync.Mutex
+	pending         map[uint64]chan mosiMessage
+	packetOrder     map[string]chan struct{} // wire publication order per resource; payload and grant IDs may differ
+	packetBytes     atomic.Int64             // bounded queued packet bytes, never shard admission state
+	next            atomic.Uint64
+	done            chan struct{}
+	once            sync.Once
+	handle          func(context.Context, string, json.RawMessage) (any, error)
+	packet          func(*mosiPacket) error
+	ctx             context.Context
+	cancel          context.CancelFunc
+	readDone        chan struct{}
+	workers         sync.WaitGroup
 }
 
 type mosiMessage struct {

@@ -6,7 +6,9 @@ package storage
 
 import "bytes"
 import "testing"
+import "strings"
 import "encoding/json"
+import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
 var clusterEncodingSink []byte
@@ -31,14 +33,27 @@ func BenchmarkClusterCompletionEncoding(b *testing.B) {
 		}
 		return remoteScanResult{Version: scanWireVersion, Shard: remoteScanShard{Schema: 7, Resource: mosiResource{Database: "bench", Table: "items", Shard: "00000000-0000-0000-0000-000000000001"}}, Value: json.RawMessage(source), OutCount: 1}
 	}
+	input := &storageShard{uuid: uuid.MustParse("00000000-0000-4000-8000-000000000001"), t: &table{Name: "items", schema: &database{Name: "bench"}}}
+	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		encoded, err := freezeScanValue(view)
+		return scm.ClusterReference{URI: "http://node/cluster/00000000-0000-4000-8000-000000000001", Owner: "00000000-0000-4000-8000-000000000002", Incarnation: "00000000-0000-4000-8000-000000000003", Token: "00000000-0000-4000-8000-000000000004", Type: object.ClusterObjectType(), View: json.RawMessage(encoded)}, err
+	})
+	encodedReference, err := freezeScanValue(scm.NewAny(input), bindings)
+	if err != nil {
+		b.Fatal(err)
+	}
+	reference := result(scm.NewNil())
+	reference.Value = json.RawMessage(encodedReference)
+	operationID := strings.Repeat("0", 64) + "/00000000-0000-7000-8000-000000000001"
 	for name, value := range map[string]any{
 		"scalar":       result(scm.NewInt(42)),
 		"list":         result(scm.NewSlice(rows[:8])),
 		"dictionary":   result(scm.NewFastDict(dict)),
-		"reference":    remoteScanResult{Version: scanWireVersion, Value: json.RawMessage(`"(cluster_object \"reference\")"`)},
+		"reference":    reference,
 		"ordered-page": result(scm.NewSlice(rows)),
 	} {
 		b.Run(name, func(b *testing.B) {
+			offers := value.(remoteScanResult).ClusterObjectOffers()
 			for _, mode := range []string{"existing", "reuse", "buffer"} {
 				b.Run(mode, func(b *testing.B) {
 					b.ReportAllocs()
@@ -64,7 +79,7 @@ func BenchmarkClusterCompletionEncoding(b *testing.B) {
 								b.Fatal(err)
 							}
 						}
-						completion := scanCompletion{Return: "operation", Data: data}
+						completion := scanCompletion{Return: operationID, Data: data, Offers: offers}
 						envelope, err := json.Marshal(completion)
 						if err != nil {
 							b.Fatal(err)

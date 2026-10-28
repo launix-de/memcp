@@ -116,7 +116,7 @@ func prepareHistoricalObject(t *testing.T, owner *nodeScanService, peer *mosiPee
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := makeRemoteScanTask(t, remoteScanShard{Schema: table.filterSchemaFingerprint(), Resource: mosiResource{Database: table.schema.Name, Table: table.Name, Shard: old.uuid.String()}, Horizon: old.captureScanHorizon()})
+	task := makeRemoteScanTask(t, remoteScanShard{Schema: table.filterSchemaFingerprint(), Resource: mosiResource{Database: table.schema.Name, Table: table.Name, Shard: old.uuid.String()}})
 	return ref, weak.Make(old), task
 }
 

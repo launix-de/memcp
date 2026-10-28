@@ -68,7 +68,12 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 		return own.Owner, nil
 	}
 	if resource.Shard != "" {
-		return cluster.locateViaSchema(ctx, resource)
+		// Restart recovery of our own former authority still needs authenticated
+		// live reports. Ordinary cold placement consults only the schema owner.
+		cell := r.resourceCell(resource)
+		if own.Owner != r.id || cell.ownstate.Initialized() {
+			return cluster.locateViaSchema(ctx, resource)
+		}
 	}
 	view := cluster.view.Load()
 	if cluster.seed != "" && len(view.members) == 1 {

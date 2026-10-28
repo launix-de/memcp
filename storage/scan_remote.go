@@ -18,17 +18,12 @@ import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// Version 10 combines Scheme operation values with adaptive ordered windows.
+// Version 10 combines authenticated Scheme operations with adaptive ordered windows.
 const scanWireVersion = 10
 
-type shardScanHorizon struct {
-	Main  uint32 `json:"main"`
-	Delta uint32 `json:"delta"`
-}
 type remoteScanShard struct {
-	Schema   uint64           `json:"schema"`
-	Resource mosiResource     `json:"resource"`
-	Horizon  shardScanHorizon `json:"horizon"`
+	Schema   uint64       `json:"schema"`
+	Resource mosiResource `json:"resource"`
 }
 type remoteScanDescriptor struct {
 	remoteScanShard
@@ -277,7 +272,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 			s.service.cancelObjectOffers(s.peer, offered)
 			return err
 		}
-		output = remoteScanResult{Version: scanWireVersion, Shard: request.Shard, Value: json.RawMessage(encoded), OutCount: result.outCount, InputCount: int64(request.Shard.Horizon.Main) + int64(request.Shard.Horizon.Delta), CandidateCount: result.candidateCount}
+		output = remoteScanResult{Version: scanWireVersion, Shard: request.Shard, Value: json.RawMessage(encoded), OutCount: result.outCount, InputCount: result.inputCount, CandidateCount: result.candidateCount}
 		return nil
 	})
 	if _, capacity := err.(clusterCapacityRejection); capacity {
@@ -394,10 +389,6 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, execute func(
 			if shard.uuid.String() != expected.Resource.Shard {
 				return fmt.Errorf("remote scan shard changed")
 			}
-			horizon := shard.captureScanHorizon()
-			if shared {
-				expected.Horizon = horizon
-			}
 			if err := execute(shard); err != nil {
 				return err
 			}
@@ -502,9 +493,6 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 		panic("remote scan resource mismatch")
 	}
 	response := executor.dispatch(task)
-	if sharedClusterDatabase(resource.Database) {
-		task.Shard.Horizon = response.Shard.Horizon
-	}
 	if response.Version != scanWireVersion || response.Shard != task.Shard {
 		panic("mismatched remote scan response")
 	}

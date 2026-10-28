@@ -4526,10 +4526,3 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	}
 	return result
 }
-
-// captureScanHorizon borrows the pinned generation's immutable main extent and
-// its existing batch-published delta count. No RLock, new counter or row-loop
-// cancellation probe is required. Caller must retain the native GetRead lease.
-func (s *storageShard) captureScanHorizon() shardScanHorizon {
-	return shardScanHorizon{s.main_count, uint32(s.plannerDeltaRows.Load())}
-}

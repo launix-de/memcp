@@ -823,3 +823,33 @@ func TestRemoteOperationCannotReplayAfterHistoryEviction(t *testing.T) {
 		t.Fatal("evicted operation became executable again")
 	}
 }
+
+func TestRemoteScanReconnectRejectsOldOperationIdentity(t *testing.T) {
+	first, client, endpoint := setupRemoteScanConnection(t)
+	if first.operationPrefix == "" {
+		t.Fatal("query connection lacks its authenticated binding")
+	}
+	operation, err := uuid.NewV7()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldID := first.operationPrefix + "/" + operation.String()
+	first.close()
+	first.wait()
+	next, _, err := client.connect(context.Background(), endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.forget(next)
+	if next.objectPeer != first.objectPeer || next.operationPrefix == first.operationPrefix {
+		t.Fatal("reconnect lost incarnation identity or reused an old operation domain")
+	}
+	var output any
+	request := struct {
+		Return, Method string
+		Data           json.RawMessage
+	}{oldID, "object.release", json.RawMessage(`{}`)}
+	if err := next.call(context.Background(), "node.control", request, &output); err == nil || !strings.Contains(err.Error(), "invalid operation identity") {
+		t.Fatal("old operation entered the new connection", err)
+	}
+}

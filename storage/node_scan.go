@@ -45,16 +45,17 @@ type nodeScanService struct {
 }
 
 type scanChallenge struct {
-	Boot    string `json:"boot"`
-	Version int    `json:"version"`
-	Node    string `json:"node"`
-	Nonce   string `json:"nonce"`
-	Proof   string `json:"proof,omitempty"`
+	OperationPrefix string `json:"-"` // derived from the existing authenticated nonce pair
+	Boot            string `json:"boot"`
+	Version         int    `json:"version"`
+	Node            string `json:"node"`
+	Nonce           string `json:"nonce"`
+	Proof           string `json:"proof,omitempty"`
 }
 
 func scanAuthProof(secret []byte, role string, server, client scanChallenge) string {
 	mac := hmac.New(sha256.New, secret)
-	for _, item := range []string{mosiSubprotocol + "/objects.channels.v8", role, server.Node, server.Boot, server.Nonce, client.Node, client.Boot, client.Nonce} {
+	for _, item := range []string{mosiSubprotocol + "/objects.channels.v9", role, server.Node, server.Boot, server.Nonce, client.Node, client.Boot, client.Nonce} {
 		mac.Write([]byte(item))
 		mac.Write([]byte{0})
 	}
@@ -117,6 +118,7 @@ func (service *nodeScanService) authenticate(conn *websocket.Conn, incoming bool
 		if err := scanAuthMessage(conn, "scan.accept", scanChallenge{Version: scanWireVersion, Proof: scanAuthProof(service.secret, "server", local, remote)}); err != nil {
 			return scanChallenge{}, err
 		}
+		remote.OperationPrefix = scanAuthProof(service.secret, "operation", local, remote)
 		return remote, nil
 	}
 	if err := readScanAuth(conn, "scan.challenge", &remote); err != nil {
@@ -136,6 +138,7 @@ func (service *nodeScanService) authenticate(conn *websocket.Conn, incoming bool
 	if accepted.Version != scanWireVersion || !hmac.Equal([]byte(accepted.Proof), []byte(scanAuthProof(service.secret, "server", remote, local))) {
 		return scanChallenge{}, fmt.Errorf("node authentication failed")
 	}
+	remote.OperationPrefix = scanAuthProof(service.secret, "operation", remote, local)
 	return remote, nil
 }
 
@@ -231,6 +234,7 @@ func (service *nodeScanService) accept(w http.ResponseWriter, req *http.Request)
 	}
 	peer := newMosiPeer(conn, session.handle, packets, func(peer *mosiPeer) {
 		peer.scanService = service
+		peer.operationPrefix = remote.OperationPrefix
 		peer.objectPeer = clusterObjectPeer{remote.Node, remote.Boot}
 		session.bindPeer(peer)
 	})
@@ -286,6 +290,7 @@ func (service *nodeScanService) connect(ctx context.Context, address string) (*m
 	peer := newMosiPeer(conn, session.handle, packets, func(peer *mosiPeer) {
 		peer.objectEndpoint = endpoint
 		peer.scanService = service
+		peer.operationPrefix = remote.OperationPrefix
 		peer.objectPeer = clusterObjectPeer{remote.Node, remote.Boot}
 		session.bindPeer(peer)
 	})
