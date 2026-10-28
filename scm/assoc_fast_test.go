@@ -356,3 +356,116 @@ func TestAssocMergeKeepsCompiledEntryAuthoritative(t *testing.T) {
 		}
 	}
 }
+
+// Bulk construction must preserve the ordinary association contract while
+// promoting large serialized dictionaries once, rather than copying per pair.
+func TestSetAssocBulk(t *testing.T) {
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		for _, size := range []int{2, 3, 4, 5, 6, 64} {
+			t.Run(fmt.Sprintf("%s/%d", name, size), func(t *testing.T) {
+				args := append([]Scmer{NewSlice(nil)}, benchmarkAssocPairs(size)...)
+				got := Apply(Globalenv.Vars[Symbol(name)], args...)
+				if size >= 5 && !got.IsFastDict() {
+					t.Fatalf("%d pairs were not promoted to a FastDict", size)
+				}
+				for i := 0; i < size; i++ {
+					key := NewString(fmt.Sprintf("key-%d", i))
+					if value := Apply(got, key); value.Int() != int64(i) {
+						t.Fatalf("%s = %s, want %d", key.String(), value.String(), i)
+					}
+				}
+			})
+		}
+		t.Run(name+"/ownership", func(t *testing.T) {
+			for _, hashed := range []bool{false, true} {
+				original := NewSlice([]Scmer{NewString("key"), NewInt(1)})
+				if hashed {
+					original = benchmarkFastDict(8)
+				}
+				key := NewString("key")
+				if hashed {
+					key = NewString("key-0")
+				}
+				got := Apply(Globalenv.Vars[Symbol(name)], original, key, NewInt(2), NewNil(), NewInt(7), key, NewInt(3))
+				if value := Apply(got, key); value.Int() != 3 {
+					t.Fatalf("last duplicate pair did not win: %s", value.String())
+				}
+				if value := Apply(got, NewNil()); value.Int() != 7 {
+					t.Fatalf("NULL key was lost: %s", value.String())
+				}
+				if name == "set_assoc_mut" && hashed {
+					if got.FastDict() != original.FastDict() {
+						t.Fatal("mutable bulk update copied its owned FastDict")
+					}
+				} else {
+					want := int64(1)
+					if hashed {
+						want = 0
+					}
+					if Apply(original, key).Int() != want || !Apply(original, NewNil()).IsNil() {
+						t.Fatal("bulk update changed its borrowed input")
+					}
+				}
+			}
+		})
+		t.Run(name+"/incomplete-pair", func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("incomplete bulk pair was accepted")
+				}
+			}()
+			Apply(Globalenv.Vars[Symbol(name)], NewSlice(nil), NewString("a"), NewInt(1), NewString("b"), NewInt(2), NewString("c"))
+		})
+	}
+}
+
+func TestSetAssocBulkOptimizedAndJIT(t *testing.T) {
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		for _, size := range []int{2, 4, 6} {
+			var body strings.Builder
+			fmt.Fprintf(&body, "(lambda (input) (%s input", name)
+			for i := 0; i < size; i++ {
+				fmt.Fprintf(&body, " \"key-%d\" %d", i, i)
+			}
+			body.WriteString("))")
+			proc := preparedTestProc(t, body.String())
+			if jitEnabled {
+				proc = jitCompile(proc)
+				if proc.Proc().compiled() == nil {
+					t.Fatal("bulk association callback did not compile")
+				}
+			}
+			result := Apply(proc, NewSlice(nil))
+			if got := Apply(result, NewString(fmt.Sprintf("key-%d", size-1))); got.Int() != int64(size-1) {
+				t.Fatalf("%s/%d: wrong optimized result %s", name, size, got.String())
+			}
+		}
+	}
+}
+
+func BenchmarkSetAssocBulk(b *testing.B) {
+	for _, size := range []int{2, 4, 8, 64, 256} {
+		for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+			fn := Globalenv.Vars[Symbol(name)].Func()
+			args := append([]Scmer{NewSlice(nil)}, benchmarkAssocPairs(size)...)
+			b.Run(fmt.Sprintf("%s/bulk/%d", name, size), func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					assocBenchmarkSink = fn(args...)
+				}
+			})
+			b.Run(fmt.Sprintf("%s/repeated/%d", name, size), func(b *testing.B) {
+				b.ReportAllocs()
+				var call [3]Scmer
+				for i := 0; i < b.N; i++ {
+					call[0] = args[0]
+					for j := 1; j < len(args); j += 2 {
+						call[1], call[2] = args[j], args[j+1]
+						call[0] = fn(call[:]...)
+					}
+					assocBenchmarkSink = call[0]
+				}
+			})
+		}
+	}
+}

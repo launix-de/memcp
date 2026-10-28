@@ -772,3 +772,46 @@ func (d *FastDict) Copy() *FastDict {
 }
 
 func (d *FastDict) ToList() []Scmer { return d.Pairs }
+
+// setAssocPairs builds a multi-pair association with one ownership decision.
+// Repeated immutable set_assoc calls copy a growing index and are quadratic;
+// this bulk form copies once and promotes to the existing hash representation.
+// Four total builtin arguments retain the historical single-pair merger form.
+func setAssocPairs(input Scmer, updates []Scmer, mutable bool) Scmer {
+	if len(updates)%2 != 0 {
+		panic("set_assoc expects complete key/value pairs")
+	}
+	pairs, dict := asAssoc(input, "set_assoc")
+	if dict != nil {
+		if !mutable {
+			dict = dict.Copy()
+		}
+	} else if len(pairs)+len(updates) >= 10 {
+		dict = NewFastDictValue((len(pairs) + len(updates)) / 2)
+		for i := 0; i < len(pairs); i += 2 {
+			dict.Set(pairs[i], pairs[i+1], nil)
+		}
+	}
+	if dict != nil {
+		for i := 0; i < len(updates); i += 2 {
+			dict.Set(updates[i], updates[i+1], nil)
+		}
+		return NewFastDict(dict)
+	}
+	// This representation remains bounded to fewer than five pairs.
+	out := make([]Scmer, len(pairs), len(pairs)+len(updates))
+	copy(out, pairs)
+	for i := 0; i < len(updates); i += 2 {
+		found := false
+		for j := 0; j < len(out); j += 2 {
+			if Equal(out[j], updates[i]) {
+				out[j+1], found = updates[i+1], true
+				break
+			}
+		}
+		if !found {
+			out = append(out, updates[i], updates[i+1])
+		}
+	}
+	return NewSlice(out)
+}

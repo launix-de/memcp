@@ -24689,6 +24689,9 @@ func init_list() {
 		Name: "set_assoc",
 
 		Fn: func(a ...Scmer) Scmer {
+			if len(a) > 4 {
+				return setAssocPairs(a[0], a[1:], false)
+			}
 			var mergeFn func(Scmer, Scmer) Scmer
 			if len(a) > 3 {
 				// An association update calls its merger at most once. Preparing a
@@ -24742,12 +24745,12 @@ func init_list() {
 				return NewFastDict(fd)
 			}
 		},
-		Type: &TypeDescriptor{Kind: "func", Description: "returns a new dictionary where a single value has been changed.\nThe original dictionary is not modified.",
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a new dictionary with one or more key/value pairs updated.\nThe original dictionary is not modified. A single pair accepts an optional merger; multiple pairs use last-value-wins semantics.",
 			Params: []*TypeDescriptor{
 				{Kind: "list", Label: "dict", Description: "input dictionary"},
 				{Kind: "string", Label: "key", Description: "key that has to be set"},
 				{Kind: "any", Label: "value", Description: "new value to set"},
-				{Kind: "func", Label: "merge", Description: "combines values when an existing entry is overwritten", Optional: true, Params: []*TypeDescriptor{{Kind: "any", Label: "old", Description: "existing value"}, {Kind: "any", Label: "new", Description: "replacement value"}}, Return: &TypeDescriptor{Kind: "any", Label: "merged", Description: "value stored in the new dictionary"}},
+				{Kind: "any", Label: "merge_or_pairs", Description: "optional merger for one pair, or additional key/value pairs", Optional: true, Variadic: true},
 			},
 			Return: FreshAlloc,
 			Const:  true,
@@ -59203,6 +59206,9 @@ func init_list() {
 		Name: "set_assoc_mut",
 
 		Fn: func(a ...Scmer) Scmer {
+			if len(a) > 4 {
+				return setAssocPairs(a[0], a[1:], true)
+			}
 			var mergeFn func(Scmer, Scmer) Scmer
 			if len(a) > 3 {
 				// An association update calls its merger at most once. Preparing a
@@ -59258,12 +59264,12 @@ func init_list() {
 				return NewFastDict(fd)
 			}
 		},
-		Type: &TypeDescriptor{Kind: "func", Description: "in-place set_assoc (optimizer-only, mutates input directly)",
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place set_assoc for one or more key/value pairs (optimizer-only, mutates owned FastDict inputs directly)",
 			Params: []*TypeDescriptor{
 				{Kind: "list", Label: "dict", Description: "owned dictionary to mutate"},
 				{Kind: "string", Label: "key", Description: "key to set"},
 				{Kind: "any", Label: "value", Description: "new value"},
-				{Kind: "func", Label: "merge", Description: "(optional) merge function", Optional: true, Params: []*TypeDescriptor{{Kind: "any", Label: "old"}, {Kind: "any", Label: "new"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", Label: "merge_or_pairs", Description: "optional merger for one pair, or additional key/value pairs", Optional: true, Variadic: true},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
