@@ -1571,6 +1571,64 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
                    "integer keys survive restart and another reservation")
 
 
+def run_cluster_operator_contracts(node, journal, report_path, status=None, reference=None):
+    """The same SQL on the standalone oracle and a RAM-limited coordinator.
+
+    Each distributed case MUST actually delegate; a local result is insufficient.
+    Record EXPLAIN and retain all failures so CI exposes the entire operator gap.
+    This is deliberately not an expected-error or fallback suite.
+    """
+    cases = [
+        ("order-top-n-offset", "SELECT id,v0 FROM big_items ORDER BY v0 DESC,id ASC LIMIT 9 OFFSET 5"),
+        ("order-computed-ties", "SELECT id,v0 FROM big_items ORDER BY v0%7 ASC,id DESC LIMIT 11 OFFSET 3"),
+        ("order-null-keys", "SELECT id,v0 FROM big_items ORDER BY CASE WHEN id%17=0 THEN NULL ELSE v0 END DESC,id ASC LIMIT 7"),
+        ("order-first", "SELECT id FROM big_items WHERE id>=5000 ORDER BY id DESC LIMIT 1"),
+        ("order-unbounded-pages", "SELECT id,v0 FROM big_items WHERE id<900 ORDER BY v0 DESC,id ASC"),
+        ("first-unordered-unique", "SELECT id FROM big_items WHERE id=245000 LIMIT 1"),
+        ("exists-match", "SELECT EXISTS(SELECT 1 FROM big_items WHERE v0%97=43) AS hit"),
+        ("exists-no-match", "SELECT EXISTS(SELECT 1 FROM big_items WHERE v0%97=-1) AS hit"),
+        ("scalar-lookup-hit", "SELECT (SELECT v0 FROM big_items WHERE id=245000) AS value"),
+        ("scalar-lookup-miss", "SELECT (SELECT v0 FROM big_items WHERE id=245000 AND v0%97=-1) AS value"),
+        ("join-sum", "SELECT SUM(b.v0+k.id) AS total FROM operator_keys k JOIN big_items b ON b.id=k.id"),
+        ("join-rows", "SELECT k.id,b.v0 FROM operator_keys k JOIN big_items b ON b.id=k.id ORDER BY k.id"),
+        ("membership-source", "SELECT SUM(v0) AS total FROM big_items WHERE id IN (SELECT id FROM operator_keys)"),
+        ("ordered-membership", "SELECT id,v0 FROM big_items WHERE id IN (SELECT id FROM operator_keys) ORDER BY v0 DESC,id ASC LIMIT 3"),
+    ]
+    results = []
+    for name, statement in cases:
+        item = {"name": name, "sql": statement, "phase": "cluster" if status else "standalone"}
+        started = time.monotonic()
+        try:
+            item["explain"] = node.client.sql("EXPLAIN " + statement)
+            code = json.dumps(item["explain"])
+            item["operators"] = [operator for operator in
+                                 ("scan_order", "scan_exists", "scan_lookup", "scan_batch", "scan_join_order")
+                                 if operator in code]
+            required = "scan_order" if name.startswith("order") else "scan_exists" if name.startswith("exists") else "scan_join_order" if name == "join-sum" else None
+            if required and required not in item["operators"]:
+                raise DrillFailure("SQL did not exercise its required physical operator: " + required)
+            before = status(node)["state"]["delegated"] if status else None
+            item["rows"] = node.client.sql(statement)
+            if reference is not None:
+                expected = next(row for row in reference if row["name"] == name)
+                if expected["status"] != "passed":
+                    raise DrillFailure("standalone oracle failed: " + name)
+                expect(item["rows"], expected["rows"], "distributed SQL: " + name)
+            if before is not None:
+                item["remote_shards"] = status(node)["state"]["delegated"] - before
+                if item["remote_shards"] <= 0:
+                    raise DrillFailure("query did not execute a remote shard: " + name)
+            item["status"] = "passed"
+        except Exception as error:
+            item.update(status="failed", error=str(error))
+        item["duration_seconds"] = time.monotonic() - started
+        results.append(item)
+        journal.append({"scenario": "cluster-sql-operator", **item})
+        print(f"  {item['phase']}: {name}: {item['status']}", flush=True)
+        report_path.write_text(json.dumps(results, indent=2) + "\n")
+    return results
+
+
 def run_cluster_placement(args, artifacts, journal):
     print("SCENARIO: authenticated peer roster and automatic SUM above one node's RAM budget", flush=True)
     directory = artifacts / "cluster-placement"
@@ -1597,7 +1655,7 @@ def run_cluster_placement(args, artifacts, journal):
         source = builder.start()
         source.sql(f"CREATE DATABASE {DATABASE}", "system")
         source.scm('(settings "ShardSize" 1000000)')
-        definitions = ','.join(["id INT"] + [f"v{i} INT" for i in range(columns)])
+        definitions = ','.join(["id INT PRIMARY KEY" if args.cluster_operators_only else "id INT"] + [f"v{i} INT" for i in range(columns)])
         source.sql(f"CREATE TABLE big_items({definitions}) ENGINE=SAFE")
         rng = random.Random(20261026)
         expected = 0
@@ -1637,6 +1695,13 @@ def run_cluster_placement(args, artifacts, journal):
             source.sql("INSERT INTO context_items VALUES(0,10),(1,20),(2,30),(3,40),(4,50),(5,60),(6,70),(7,80)")
             source.scm(f'(rebuild (table "{DATABASE}" false "context_items" false) true false)')
             source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)')
+        standalone_operators = []
+        if args.cluster_operators_only:
+            source.sql("CREATE TABLE operator_keys(id INT PRIMARY KEY) ENGINE=SAFE")
+            source.sql("INSERT INTO operator_keys VALUES(42000),(90000),(175000),(245000)")
+            standalone_operators = run_cluster_operator_contracts(
+                builder, journal, directory / "standalone-operators.json")
+            source.scm(f'(rebuild (table "{DATABASE}" false "operator_keys" false) true false)')
         builder.kill()
         shared = builder.data_dir / DATABASE
         catalog = json.loads((shared / "schema.json").read_text())["tables"]
@@ -1725,6 +1790,14 @@ def run_cluster_placement(args, artifacts, journal):
             raise DrillFailure("tight-RAM query did not exercise admission rejection/delegation")
         if sum(item["state"]["locality"] for item in states) == 0:
             raise DrillFailure("warm-holder query did not exercise locality delegation")
+        if args.cluster_operators_only:
+            operators = run_cluster_operator_contracts(
+                nodes[0], journal, directory / "cluster-operators.json", status, standalone_operators)
+            failed = [f"{row['phase']}/{row['name']}" for row in standalone_operators + operators
+                      if row["status"] != "passed"]
+            if failed:
+                raise DrillFailure("SQL operator contracts failed: " + ", ".join(failed))
+            return
         if args.cluster_context_only:
             contexts = run_cluster_sql_contexts(nodes, reference, journal,
                                                 directory / "cluster-contexts.json", status)
@@ -1871,10 +1944,14 @@ def main():
                         help="run SQL session/transaction contracts against standalone and clustered processes")
     parser.add_argument("--cluster-inserts-only", action="store_true", help="run focused concurrent shared-storage INSERT scenario")
     parser.add_argument("--cluster-inserts-layout", choices=("free", "hash", "both"), default="both", help="select INSERT fixture layout (default: both)")
+
+
+    parser.add_argument("--cluster-operators-only", action="store_true",
+                        help="compare SQL scan families standalone and under mandatory cluster delegation")
     parser.add_argument("--cluster-only", action="store_true", help="run focused shared-storage cluster placement scenario")
     parser.add_argument("--fixture-binary", type=Path, help="optional same-commit builder for immutable cluster fixture")
     args = parser.parse_args()
-    if args.cluster_context_only:
+    if args.cluster_context_only or args.cluster_operators_only:
         args.cluster_only = True
     if min(args.rounds, args.workers, args.operations, args.timeout, args.startup_timeout) <= 0:
         parser.error("rounds, workers, operations and timeouts must be positive")
@@ -1933,6 +2010,8 @@ def main():
             replay.append("--cluster-context-only")
         elif args.cluster_only:
             replay.append("--cluster-only")
+        if args.cluster_operators_only:
+            replay.append("--cluster-operators-only")
         if args.fixture_binary:
             replay.extend(["--fixture-binary", str(args.fixture_binary)])
         if args.dedicated_replication_port:

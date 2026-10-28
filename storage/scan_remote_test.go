@@ -15,6 +15,7 @@ import "context"
 import "strings"
 import "testing"
 import "net/http"
+import "sync/atomic"
 import "encoding/json"
 import "net/http/httptest"
 import "github.com/google/uuid"
@@ -57,7 +58,7 @@ func makeRemoteScanTask(t *testing.T, shard remoteScanShard) remoteScanTask {
 	}
 	return remoteScanTask{Version: scanWireVersion, Task: 1, Attempt: uuid.NewString(), Visibility: "cursor-stability/captured-horizon", Shard: shard, FilterColumns: []string{"id"}, Filter: encode(`(lambda (id) (> id 1))`), MapColumns: []string{"id"}, MapReducer: encode(`(lambda (acc id) (+ acc id))`), Neutral: json.RawMessage(`0`), ResultKind: "scalar"}
 }
-func TestRemoteScanRPCExecutesReductionWithCapturedHorizon(t *testing.T) {
+func TestRemoteScanRPCExecutesReductionWithNativeExtent(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremotescanrpc", 4)
 	RebuildTable(tbl, true, false)
 	peer, _, _ := setupRemoteScanConnection(t)
@@ -68,7 +69,8 @@ func TestRemoteScanRPCExecutesReductionWithCapturedHorizon(t *testing.T) {
 	if len(parts) != 1 {
 		t.Fatal("expected one shard")
 	}
-	// A future insert after the described scan extent must not enter this task.
+	// Describing a generation does not freeze its append-only delta. The native
+	// operator captures its input extent when execution starts.
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1000), scm.NewString("future")}}, nil, scm.NewNil(), false, nil)
 	task := makeRemoteScanTask(t, parts[0])
 	var response remoteScanResult
@@ -79,7 +81,7 @@ func TestRemoteScanRPCExecutesReductionWithCapturedHorizon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value.Int() != 9 || response.OutCount != 3 || response.Shard != parts[0] || response.Attempt != task.Attempt {
+	if value.Int() != 1009 || response.OutCount != 4 || response.Shard != parts[0] || response.Attempt != task.Attempt {
 		t.Fatalf("wrong reduction or task identity: %+v", response)
 	}
 	if err := peer.call(context.Background(), "scan.execute", task, &response); err == nil || !strings.Contains(err.Error(), "replayed") {
@@ -370,8 +372,8 @@ func TestRemoteScanRetainsUUIDAcrossRebuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	value, err := decodeScanData(result.Value, false)
-	if err != nil || value.Int() != 9 || result.OutCount != 3 || result.Shard.Resource.Shard != held.uuid.String() {
-		t.Fatalf("remote scan lost its old shard/horizon: %+v, %v", result, err)
+	if err != nil || value.Int() != 1009 || result.OutCount != 4 || result.Shard.Resource.Shard != held.uuid.String() {
+		t.Fatalf("remote scan lost its retained generation or forwarded inserts: %+v, %v", result, err)
 	}
 	if current.state() != COLD {
 		t.Fatal("historical scan loaded an unrelated successor payload")
@@ -385,5 +387,232 @@ func TestProcedureWireNestedScanContextRebindSkipsQuotedData(t *testing.T) {
 	bound := scm.SerializeToString(bindProcedureScanContext(input, binding), nil)
 	if strings.Count(bound, "current-hop") != 2 || strings.Contains(bound, "previous-hop") || !strings.Contains(bound, "(scan nil literal)") {
 		t.Fatalf("nested scope rebinding changed quoted data or retained its parent: %s", bound)
+	}
+}
+
+func TestRemoteScanNativeExistsAndBatch(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "t_remote_operator_contract", 4)
+	RebuildTable(table, true, false)
+	peer, _, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := peer.call(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, table.schema.Name, table.Name}, &parts); err != nil {
+		t.Fatal(err)
+	}
+	// Specialized kernels capture their extent at execution, just like native
+	// reduction; inserts before dispatch belong to that same generation.
+	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(500), scm.NewString("before-dispatch")}}, false, nil, nil, false, nil)
+	procedure := func(source string) json.RawMessage {
+		result, err := scm.MarshalProcedure(scm.Eval(scm.Read(t.Name(), source), &scm.Globalenv))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	for sequence, test := range []struct {
+		filter string
+		match  bool
+	}{
+		{`(lambda (id) (> id 1))`, true},
+		{`(lambda (id) (> id 100))`, true}, // newly appended delta row
+		{`(lambda (id) (> id 500))`, false},
+	} {
+		task := makeRemoteScanTask(t, parts[0])
+		task.Task = uint64(sequence + 1)
+		task.Operator = shardExists
+		task.Filter = procedure(test.filter)
+		var result remoteScanResult
+		if err := peer.call(context.Background(), "scan.execute", task, &result); err != nil {
+			t.Fatal(err)
+		}
+		value, err := decodeScanValue(result.Value, result.Kind)
+		if err != nil || scm.ToBool(value) != test.match {
+			t.Fatal("remote EXISTS lost native match/miss semantics", result, err)
+		}
+	}
+	task := makeRemoteScanTask(t, parts[0])
+	task.Task = 4
+	task.Stride = 2
+	for _, value := range []int64{2, 10, 4, 20} {
+		frozen, err := freezeScanValue(scm.NewInt(value), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		task.Batch = append(task.Batch, frozen)
+	}
+	task.FilterColumns = []string{"id", "#0"}
+	task.Filter = procedure(`(lambda (id key) (equal? id key))`)
+	task.MapColumns = []string{"id", "#1"}
+	task.MapReducer = procedure(`(lambda (acc id delta) (+ acc id delta))`)
+	task.Access.Boundaries = []scm.Scmer{newScanBoundarySpec("id", EqualMatcher, -2, -2, true, true, "", false, -1, nil, nil, "", true)}
+	var result remoteScanResult
+	if err := peer.call(context.Background(), "scan.execute", task, &result); err != nil {
+		t.Fatal(err)
+	}
+	value, err := decodeScanValue(result.Value, result.Kind)
+	if err != nil || value.Int() != 36 {
+		t.Fatal("remote batch lost row bindings", value, result, err)
+	}
+}
+
+func TestRemoteScanComputedAndBatchBoundaryRoundTrip(t *testing.T) {
+	mapper := scm.Eval(scm.Read(t.Name(), `(lambda (id) (mod id 7))`), &scm.Globalenv)
+	descriptor := scm.NewSlice([]scm.Scmer{scm.NewString("id-mod-7"), mapper})
+	access := scanAccess{runtime: &scanAccessRuntime{suffix: scanAccessSegment{
+		items:  []scm.Scmer{newScanBoundarySpec("", EqualMatcher, -2, -2, true, true, "", false, 0, []string{"id"}, nil, "", true)},
+		values: []scm.Scmer{descriptor},
+	}}}
+	frozen, err := freezeScanAccess(access, new(scm.SerializationContext))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var received remoteScanAccess
+	if err := json.Unmarshal(data, &received); err != nil {
+		t.Fatal(err)
+	}
+	bound, err := received.bind(scm.ProcedureDecode{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns, restored := bound.boundaryMap(0)
+	boundary, _ := bound.boundaryParts(0)
+	if boundary.LowerSlot() != -2 || boundary.UpperSlot() != -2 || bound.boundaryColumn(0) != "id-mod-7" || len(columns) != 1 || columns[0] != "id" || scm.Apply(restored, scm.NewInt(16)).Int() != 2 {
+		t.Fatal("computed boundary/batch key lost its native contract", string(data))
+	}
+}
+
+func TestRemoteScanNativeLookupKinds(t *testing.T) {
+	table, _ := createDurabilityTestTable(t, "t_remote_lookup_contract", 4)
+	RebuildTable(table, true, false)
+	peer, _, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := peer.call(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, table.schema.Name, table.Name}, &parts); err != nil {
+		t.Fatal(err)
+	}
+	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("before-dispatch")}}, false, nil, nil, false, nil)
+	var sequence uint64
+	for _, operator := range []shardScanOperator{shardLookupOne, shardLookupMany, shardLookupMapOne, shardLookupMapMany} {
+		for _, key := range []int64{2, 99, 100} {
+			sequence++
+			task := makeRemoteScanTask(t, parts[0])
+			task.Task, task.Operator = sequence, operator
+			task.MapColumns = []string{"id"}
+			var err error
+			task.Access, err = freezeScanAccess(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(key)}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if operator >= shardLookupMapOne {
+				task.ResultKind = "value"
+				task.Neutral, err = encodeScanResult(scm.NewNil(), "value")
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var result remoteScanResult
+			if err := peer.call(context.Background(), "scan.execute", task, &result); err != nil {
+				t.Fatal(err)
+			}
+			value, err := decodeScanValue(result.Value, result.Kind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if key == 100 {
+				if result.OutCount != 0 {
+					t.Fatal("lookup miss lost native cardinality", result)
+				}
+			} else {
+				if operator >= shardLookupMapOne {
+					value = value.Slice()[0]
+				}
+				if result.OutCount != 1 || value.Int() != key {
+					t.Fatal("lookup changed projected value/cardinality", value, result)
+				}
+			}
+		}
+	}
+}
+
+// A remote ordered run uses the native sort, retains its captured physical IDs,
+// and feeds bounded pages into the same coordinator merge. Projection callbacks
+// execute only on selected rows; the worker releases its payload before paging.
+func TestRemoteScanOrderedRunPagesAndNativeExtent(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tremoteorderedrun", 700)
+	RebuildTable(tbl, true, false)
+	source := tbl.ActiveShards()[0]
+	peer, _, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := peer.call(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts); err != nil {
+		t.Fatal(err)
+	}
+	source.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(9999), scm.NewString("future")}}, false, nil, nil, false, nil)
+	executor := &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0], kind: "value", next: new(atomic.Uint64)}
+	stub := &storageShard{uuid: source.uuid, t: tbl}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: executor}
+	stub.scanTarget.Store(target)
+	_, direction := persistableTestOrder(true)
+	calls := 0
+	callback := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { calls++; return scm.NewInt(args[0].Int() + args[1].Int()) })
+	spec := scanOrderTableSpec{table: tbl, condition: scm.Eval(scm.Read(t.Name(), "(lambda () true)"), &scm.Globalenv), sortcols: []scm.Scmer{scm.NewString("id")}, callbackCols: []string{"id"}, callback: callback, perTableOffset: -1, perTableLimit: -1}
+	queue := delegateOrderedQueue(nil, stub, scanAccess{}, &spec, []func(...scm.Scmer) scm.Scmer{direction}, 0, 5, 605, shardReadDelegation{target})
+	if source.cacheReaders.Load() != 0 {
+		t.Fatal("remote run retained native payload after preparation")
+	}
+	// A current routing stub is not the identity of these retained physical IDs.
+	captured := queue.orderedInputUUID()
+	queue.shard = &storageShard{uuid: uuid.New(), t: tbl}
+	if queue.orderedInputUUID() != captured {
+		t.Fatal("routing metadata rebound the captured generation")
+	}
+	pageCalls := 0 // the first page arrived with the run reference
+	original := queue.remote.run.handle.Call
+	queue.remote.run.handle.Call = func(ctx context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
+		if request.Method == "page" {
+			pageCalls++
+		}
+		return original(ctx, request)
+	}
+	value, _, _ := consumeDirectScanOrder(queue, &spec, nil, 0, 5, 600, scm.NewInt(0), false, scm.NewNil())
+	if pageCalls != 2 {
+		t.Fatalf("paging made %d roundtrips, want two requests after the piggybacked page", pageCalls)
+	}
+	// Descending 9999,700..1: skip five, consume 696..97. The insert before
+	// execution participates in the native ordered input.
+	if calls != 600 || value.Int() != int64((696+97)*600/2) {
+		t.Fatalf("calls=%d sum=%v", calls, value)
+	}
+	if queue.remote.next <= 256 {
+		t.Fatal("ordered scan did not consume multiple bounded pages")
+	}
+}
+
+func TestRemoteScanPortableKeyPredicate(t *testing.T) {
+	Init(scm.Globalenv)
+	filter := scm.Eval(scm.Read(t.Name(), "(lambda (value) (> value 10))"), &scm.Globalenv)
+	predicate := newScanKeyPredicate([]scanJoinOrderDriverConstraint{{positions: []int{0}, keys: [][]scm.Scmer{{scm.NewInt(2)}, {scm.NewInt(4)}}}}, filter, 1)
+	encoded, err := scm.MarshalProcedure(predicate)
+	if err != nil {
+		t.Fatalf("%v; wire=%s", err, encoded)
+	}
+	if !strings.Contains(string(encoded), "scan_key_predicate") {
+		t.Fatal("key predicate lost portable constructor")
+	}
+	restored, err := scm.UnmarshalProcedure(encoded, scm.ProcedureDecode{})
+	if err != nil {
+		t.Fatalf("%v; wire=%s", err, encoded)
+	}
+	for _, sample := range []struct {
+		key, extra int64
+		want       bool
+	}{{2, 11, true}, {2, 9, false}, {3, 11, false}, {4, 12, true}} {
+		if got := scm.ToBool(scm.Apply(restored, scm.NewInt(sample.key), scm.NewInt(sample.extra))); got != sample.want {
+			t.Errorf("%+v = %v", sample, got)
+		}
+	}
+	if scm.ToBool(scm.Apply(restored, scm.NewNil(), scm.NewInt(11))) {
+		t.Fatal("NULL matched a join key")
 	}
 }

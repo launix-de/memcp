@@ -933,3 +933,44 @@ func TestClusterObjectRegistryConcurrentInitializationAndWake(t *testing.T) {
 		t.Fatal("registry publication is incomplete")
 	}
 }
+
+// A paged result is a consumer of the physical input too. Rebuild forwarding
+// must not make maintenance delete that old generation while the peer still
+// owns the registered run; after release, ordinary Go GC retires it.
+func prepareRegisteredOrderedRun(t *testing.T, owner *nodeScanService, peer *mosiPeer, tbl *table) (scm.ClusterReference, weak.Pointer[storageShard]) {
+	t.Helper()
+	old := tbl.ActiveShards()[0]
+	_, direction := persistableTestOrder(false)
+	run := old.prepareOrderedRun(shardScanInvocation{condition: scanJoinTrue(), order: &shardOrderInvocation{columns: []scm.Scmer{scm.NewString("id")}, directions: []func(...scm.Scmer) scm.Scmer{direction}, projected: []string{"id"}, limit: -1}})
+	view, err := scm.ClusterObjectValue(run, context.Background(), scm.ClusterRequest{Method: "view"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := owner.exportObject(peer, run, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	RebuildTable(tbl, true, false)
+	if tbl.ActiveShards()[0].uuid == old.uuid {
+		t.Fatal("rebuild retained UUID")
+	}
+	old.RemoveFromDisk()
+	return ref, weak.Make(old)
+}
+func TestClusterObjectOrderedRunRetainsHistoricalGeneration(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tordered_run_gc", 4)
+	RebuildTable(tbl, true, false)
+	_, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	peer := objectOwnerPeer(t, owner, client)
+	ref, old := prepareRegisteredOrderedRun(t, owner, peer, tbl)
+	runtime.GC()
+	if !historicalObjectAlive(old) {
+		t.Fatal("registered ordered run lost its physical input")
+	}
+	if len(registeredClusterShards(tbl.schema.Name)) == 0 {
+		t.Fatal("ordered input absent from maintenance snapshot")
+	}
+	owner.cancelObjectOffers(peer, []scm.ClusterReference{ref})
+	waitObjectGC(t, func() bool { return !historicalObjectAlive(old) })
+}

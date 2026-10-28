@@ -147,7 +147,6 @@ func TestScanDelegationRejectsUnsupportedAndStaleTasks(t *testing.T) {
 		columns []string
 		want    string
 	}{
-		{stride: 1, want: "remote shard scan does not support physical source sets or batches"},
 		{columns: []string{"$update"}, want: "remote shard scan mutations require a transaction participant protocol"},
 		{columns: []string{"$increment:id"}, want: "remote shard scan mutations require a transaction participant protocol"},
 	} {
@@ -181,5 +180,48 @@ func TestScanDelegationRejectsUnsupportedAndStaleTasks(t *testing.T) {
 	}()
 	if failure == nil || shard.cacheReaders.Load() != 0 {
 		t.Fatal("stub admitted a local write")
+	}
+}
+
+func TestScanDelegationPreservesNativeExistsAndBatchInvocation(t *testing.T) {
+	for _, exists := range []bool{true, false} {
+		t.Run(fmt.Sprint("exists=", exists), func(t *testing.T) {
+			table, _ := createDurabilityTestTable(t, "t_scan_family_delegate", 4)
+			RebuildTable(table, true, false)
+			shard := table.ActiveShards()[0]
+			var freed [numEvictableTypes]int64
+			if !shardCleanup(shard, &freed) {
+				t.Fatal("fixture remained resident")
+			}
+			calls := 0
+			batch := []scm.Scmer{scm.NewInt(2), scm.NewInt(10), scm.NewInt(4), scm.NewInt(20)}
+			setTestScanTarget(shard, func(_ mosiResource, invocation shardScanInvocation) scanResult {
+				calls++
+				if exists {
+					if invocation.operator != shardExists {
+						t.Fatal("EXISTS was lowered to a full reduction")
+					}
+					return scanResult{res: scm.NewBool(true), outCount: 1}
+				}
+				if invocation.operator != shardReduce || invocation.stride != 2 || !scm.Equal(scm.NewSlice(invocation.batchdata), scm.NewSlice(batch)) {
+					t.Fatal("delegation discarded its batch bindings", invocation)
+				}
+				return scanResult{res: scm.NewInt(36), outCount: 2}
+			})
+			condition := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+			if exists {
+				if !table.scanExists(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, condition) {
+					t.Fatal("remote EXISTS result was lost")
+				}
+			} else {
+				value := table.scanWithBatch(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, condition, nil, scm.Globalenv.Vars[scm.Symbol("+")], scm.NewInt(0), scm.Globalenv.Vars[scm.Symbol("+")], false, 2, batch)
+				if value.Int() != 36 {
+					t.Fatal("remote batch result was lost", value)
+				}
+			}
+			if calls != 1 || shard.state() != COLD || shard.cacheReaders.Load() != 0 || shard.activeScanners.Load() != 0 || table.activeTopology().operations.Load() != 0 {
+				t.Fatal("delegation loaded its source or leaked native ownership", calls, shard.state())
+			}
+		})
 	}
 }

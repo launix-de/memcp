@@ -78,6 +78,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: replication-cluster-stress
+          # Native commit authority lives in .transactions.log; keep it with
+          # the disposable fixture, otherwise WAL replay evidence is incomplete.
+          include-hidden-files: true
           path: |
             ${{ runner.temp }}/replication-stress
             ${{ runner.temp }}/replication-stress-race
@@ -165,3 +168,50 @@ jobs:
             ${{ runner.temp }}/cluster-inserts-race
             ${{ runner.temp }}/cluster-contexts
             ${{ runner.temp }}/cluster-contexts-race
+
+  cluster-operators:
+    name: Cluster SQL operator contracts
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out MemCP
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Install SQL client
+        uses: ./.github/actions/setup-apt
+        with:
+          packages: mariadb-client
+      - name: Build standalone fixture builder and servers
+        run: go build -tags=nophp -o "$RUNNER_TEMP/memcp-cluster-operators" .
+      - name: Compare SQL operator results with mandatory remote execution
+        run: >-
+          python3 -u tools/replication_cluster_stress.py
+          --binary "$RUNNER_TEMP/memcp-cluster-operators"
+          --cluster-operators-only --seed 20261028
+          --artifacts "$RUNNER_TEMP/cluster-operators"
+      - name: Build race-instrumented servers
+        if: ${{ !cancelled() }}
+        run: go build -race -tags=nophp -o "$RUNNER_TEMP/memcp-cluster-operators-race" .
+      - name: Compare SQL operator results with the race detector
+        if: ${{ !cancelled() }}
+        env:
+          GORACE: halt_on_error=1 exitcode=66
+        run: >-
+          python3 -u tools/replication_cluster_stress.py
+          --binary "$RUNNER_TEMP/memcp-cluster-operators-race"
+          --fixture-binary "$RUNNER_TEMP/memcp-cluster-operators"
+          --cluster-operators-only --seed 20261028
+          --artifacts "$RUNNER_TEMP/cluster-operators-race"
+      - name: Upload plans, SQL results and node logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cluster-sql-operator-contracts
+          path: |
+            ${{ runner.temp }}/cluster-operators
+            ${{ runner.temp }}/cluster-operators-race

@@ -303,13 +303,17 @@ func (t *table) scanLookupMapOne(currentTx *TxContext, access scanAccess, mapCol
 				mu.Unlock()
 			}
 		}()
-		if acquisitionFailure != nil {
-			panic(acquisitionFailure)
-		}
 		if ss := SessionStateFromTx(currentTx); ss != nil && ss.IsKilledSeq(querySeqFromTx(currentTx)) {
 			panic("query killed")
 		}
-		localValues, count := shard.scanLookupMapOne(access, mapCols, currentTx)
+		var localValues []scm.Scmer
+		var count int
+		if acquisitionFailure != nil {
+			remote, matches := delegateShardLookup(currentTx, shard, access, mapCols, shardLookupMapOne, acquisitionFailure)
+			localValues, count = remote.Slice(), matches
+		} else {
+			localValues, count = shard.scanLookupMapOne(access, mapCols, currentTx)
+		}
 		if count == 0 {
 			return
 		}
@@ -443,13 +447,23 @@ func (t *table) scanLookupOne(currentTx *TxContext, access scanAccess, resultCol
 				state.mu.Unlock()
 			}
 		}()
-		if acquisitionFailure != nil {
-			panic(acquisitionFailure)
-		}
 		if ss := SessionStateFromTx(currentTx); ss != nil && ss.IsKilledSeq(querySeqFromTx(currentTx)) {
 			panic("query killed")
 		}
-		value, count := shard.scanLookupOne(access, resultCol, returnValue, currentTx)
+		var value scm.Scmer
+		var count int
+		if acquisitionFailure != nil {
+			// Keep the native projection directory stack-owned on local reads.
+			// Only remote acquisition may retain its own transport arguments.
+			var remoteColumns []string
+			if returnValue {
+				remoteColumns = []string{resultCol}
+			}
+			remote, matches := delegateShardLookup(currentTx, shard, access, remoteColumns, shardLookupOne, acquisitionFailure)
+			value, count = remote, matches
+		} else {
+			value, count = shard.scanLookupOne(access, resultCol, returnValue, currentTx)
+		}
 		if count == 0 {
 			return
 		}
@@ -590,13 +604,23 @@ func (t *table) scanLookupMany(currentTx *TxContext, access scanAccess, resultCo
 				state.stop.Store(true)
 			}
 		}()
-		if acquisitionFailure != nil {
-			panic(acquisitionFailure)
-		}
 		if ss := SessionStateFromTx(currentTx); ss != nil && ss.IsKilledSeq(querySeqFromTx(currentTx)) {
 			panic("query killed")
 		}
-		value, count := shard.scanLookupMany(access, resultCol, returnValue, currentTx, &state.stop)
+		var value scm.Scmer
+		var count int
+		if acquisitionFailure != nil {
+			// Keep the native projection directory stack-owned on local reads.
+			// Only remote acquisition may retain its own transport arguments.
+			var remoteColumns []string
+			if returnValue {
+				remoteColumns = []string{resultCol}
+			}
+			remote, matches := delegateShardLookup(currentTx, shard, access, remoteColumns, shardLookupMany, acquisitionFailure)
+			value, count = remote, matches
+		} else {
+			value, count = shard.scanLookupMany(access, resultCol, returnValue, currentTx, &state.stop)
+		}
 		if count == 0 {
 			return
 		}
@@ -737,13 +761,17 @@ func (t *table) scanLookupMapMany(currentTx *TxContext, access scanAccess, mapCo
 				state.stop.Store(true)
 			}
 		}()
-		if acquisitionFailure != nil {
-			panic(acquisitionFailure)
-		}
 		if ss := SessionStateFromTx(currentTx); ss != nil && ss.IsKilledSeq(querySeqFromTx(currentTx)) {
 			panic("query killed")
 		}
-		localValues, count := shard.scanLookupMapMany(access, mapCols, currentTx, &state.stop)
+		var localValues []scm.Scmer
+		var count int
+		if acquisitionFailure != nil {
+			remote, matches := delegateShardLookup(currentTx, shard, access, mapCols, shardLookupMapMany, acquisitionFailure)
+			localValues, count = remote.Slice(), matches
+		} else {
+			localValues, count = shard.scanLookupMapMany(access, mapCols, currentTx, &state.stop)
+		}
 		if count == 0 {
 			return
 		}

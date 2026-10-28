@@ -6,6 +6,7 @@ package storage
 
 import "fmt"
 import "context"
+import "sync/atomic"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
@@ -47,7 +48,43 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 			if input.tx == nil {
 				return nil, fmt.Errorf("missing prepared scan transaction")
 			}
-			value, count, candidates := s.scan(input.access, input.conditionCols, input.condition, input.callbackCols, input.mapReduce, input.neutral, 0, nil, input.tx, SessionStateFromTx(input.tx))
+			if input.operator == shardOrdered {
+				run := s.prepareOrderedRun(input)
+				return scanResult{res: scm.NewAny(run), outCount: int64(len(run.rows)), candidateCount: run.candidates}, nil
+			}
+			if input.operator == shardExists {
+				found := s.scanExists(input.access, input.conditionCols, input.condition, input.tx, SessionStateFromTx(input.tx), nil)
+				var count int64
+				if found {
+					count = 1
+				}
+				return scanResult{res: scm.NewBool(found), outCount: count}, nil
+			}
+			if input.operator >= shardLookupOne {
+				var value scm.Scmer
+				var count int
+				var stopped atomic.Bool
+				column, hasValue := "", len(input.callbackCols) > 0
+				if hasValue {
+					column = input.callbackCols[0]
+				}
+				switch input.operator {
+				case shardLookupOne:
+					value, count = s.scanLookupOne(input.access, column, hasValue, input.tx)
+				case shardLookupMany:
+					value, count = s.scanLookupMany(input.access, column, hasValue, input.tx, &stopped)
+				case shardLookupMapOne:
+					var values []scm.Scmer
+					values, count = s.scanLookupMapOne(input.access, input.callbackCols, input.tx)
+					value = scm.NewSlice(values)
+				case shardLookupMapMany:
+					var values []scm.Scmer
+					values, count = s.scanLookupMapMany(input.access, input.callbackCols, input.tx, &stopped)
+					value = scm.NewSlice(values)
+				}
+				return scanResult{res: value, outCount: int64(count)}, nil
+			}
+			value, count, candidates := s.scan(input.access, input.conditionCols, input.condition, input.callbackCols, input.mapReduce, input.neutral, input.stride, input.batchdata, input.tx, SessionStateFromTx(input.tx))
 			return scanResult{res: value, outCount: count, candidateCount: candidates}, nil
 		}
 		return nil, fmt.Errorf("missing typed scan invocation")

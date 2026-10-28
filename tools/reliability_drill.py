@@ -42,10 +42,25 @@ class DrillFailure(RuntimeError):
 	pass
 
 
+# Nodes choose addresses before their child processes start listening. Closing
+# a probe socket makes its port available again, so the kernel can immediately
+# choose the same one for another node (or its MySQL listener). Keep allocations
+# unique for this runner's lifetime, including across crash/restart scenarios.
+# This is not a reservation against unrelated processes on the host.
+_allocated_ports: set[int] = set()
+_allocated_ports_lock = threading.Lock()
+
+
 def free_port() -> int:
-	with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-		sock.bind(("127.0.0.1", 0))
-		return int(sock.getsockname()[1])
+	with _allocated_ports_lock:
+		for _ in range(100):
+			with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+				sock.bind(("127.0.0.1", 0))
+				port = int(sock.getsockname()[1])
+				if port not in _allocated_ports:
+					_allocated_ports.add(port)
+					return port
+		raise DrillFailure("could not allocate a distinct port for an owned server")
 
 
 def make_artifact_dir(requested: Path | None) -> Path:

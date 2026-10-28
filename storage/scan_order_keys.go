@@ -119,12 +119,12 @@ func declareScanOrderKeys(en *scm.Env, ordinary *scm.Declaration) {
 		prefix := &orderedPrefixAccess{column: targetKeys[0], keys: keys, order: order, dirs: scanSortDirections(mustScmerSlice(a[7], "sort directions"))}
 		filterCols := scmerSliceToStrings(mustScmerSlice(a[4], "filter columns"))
 		filter := a[5]
-		membership := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
-			if !keys.contains(values[:1]) {
-				return scm.NewBool(false)
-			}
-			return scm.Apply(filter, values[1:]...)
-		})
+		members := make([][]scm.Scmer, keys.count())
+		for i := range members {
+			members[i] = keys.tuple(i)
+		}
+		membership := newScanKeyPredicate([]scanJoinOrderDriverConstraint{{positions: []int{0}, keys: members}}, filter, 1)
+
 		window := float64(scm.ToInt(a[9]) + scm.ToInt(a[10]))
 		if scm.ToInt(a[10]) < 0 {
 			window = rows
