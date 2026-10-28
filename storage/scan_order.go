@@ -1078,6 +1078,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		bounds = bounds.useScratch(scratch)
 		bounds, _ = extendScanAccessWithSortCols(bounds, spec.sortcols, sortdirs)
 		runtime := bounds.ensureRuntime()
+		runtime.localRead = true
 		runtime.extra = scanAccessSegmentFromAnalyzed(appendRecSetBoundary(nil, spec.recset))
 		if spec.prefixMerge != nil {
 			bounds = orderedPrefixBounds(bounds, spec.prefixMerge)
@@ -1094,7 +1095,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		}
 
 		for i := 0; i < bounds.len(); i++ {
-			t.AddPartitioningScore([]string{bounds.boundaryColumn(i)})
+			t.AddPartitioningScore([]string{bounds.boundaryColumn(i)}, bounds.boundaryAnalyzer(i) != EqualMatcher)
 		}
 		analyzeNs := time.Since(analyzeStart).Nanoseconds()
 		stats[ti].access = bounds
@@ -1668,7 +1669,7 @@ func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopolog
 	}
 	var queue *shardqueue
 	func() {
-		release := shard.acquireReadForScan(currentTx)
+		release := shard.GetRead(currentTx)
 		defer release.Release()
 		if scm.Trace == nil {
 			scanShard := shard
@@ -1720,7 +1721,7 @@ func (t *table) scanOrderSingle(currentTx *TxContext, spec scanOrderTableSpec, s
 	bounds = bounds.useScratch(scratch)
 	bounds, _ = extendScanAccessWithSortCols(bounds, spec.sortcols, sortdirs)
 	for i := 0; i < bounds.len(); i++ {
-		t.AddPartitioningScore([]string{bounds.boundaryColumn(i)})
+		t.AddPartitioningScore([]string{bounds.boundaryColumn(i)}, bounds.boundaryAnalyzer(i) != EqualMatcher)
 	}
 	stats[0].access = bounds
 	stats[0].analyzeNs = time.Since(analyzeStart).Nanoseconds()

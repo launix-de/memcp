@@ -91,6 +91,25 @@ func HashKey(k Scmer) uint64 {
 		case tagString:
 			h.WriteByte(4)
 			h.WriteString(v.String())
+		case tagCString, tagBString:
+			h.WriteByte(4)
+			if v.IsUUID() {
+				var text [36]byte
+				writeUUIDText(text[:], v)
+				h.Write(text[:])
+				break
+			}
+			view, ok := makeOperatorView(v)
+			if !ok {
+				h.WriteString(v.String())
+				break
+			}
+			var scratch [256]byte
+			for start := 0; start < view.n; start += len(scratch) {
+				n := min(len(scratch), view.n-start)
+				view.decodeInto(scratch[:n], start, false)
+				h.Write(scratch[:n])
+			}
 		case tagLZ4:
 			h.WriteByte(4)
 			hashBufferMap(&h, v)

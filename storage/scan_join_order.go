@@ -311,9 +311,9 @@ func prepareScanJoinOrderSpec(spec *scanJoinOrderSpec) {
 	allRefs = append(allRefs, spec.joinFilterCols...)
 	for i := 1; i < len(spec.inputs); i++ {
 		allRefs = append(allRefs, spec.inputs[i].sourceKeyCols...)
-		spec.inputs[i].table.AddPartitioningScore(spec.inputs[i].targetKeyCols)
+		spec.inputs[i].table.AddPartitioningScore(spec.inputs[i].targetKeyCols, false)
 		for _, ref := range spec.inputs[i].sourceKeyCols {
-			spec.inputs[ref.table].table.AddPartitioningScore([]string{ref.column})
+			spec.inputs[ref.table].table.AddPartitioningScore([]string{ref.column}, false)
 		}
 	}
 	for _, ref := range allRefs {
@@ -656,7 +656,7 @@ func scanJoinOrderShardPartitions(input *scanJoinOrderInput, inner []*scanJoinOr
 	topology := input.table.activeTopology()
 	if topology.mode != ShardModePartition || len(topology.dimensions) == 0 ||
 		topology.dimensions[0].Column != input.targetKeyCols[0] ||
-		topology.dimensions[0].NumPartitions < 2 {
+		topology.dimensions[0].NumPartitions < 2 || topology.dimensions[0].Method != "" {
 		return nil, false
 	}
 	result := make([]scanJoinOrderPartition, 0, topology.dimensions[0].NumPartitions)
@@ -1190,6 +1190,9 @@ func scanJoinOrderStreamRanges(input *scanJoinOrderInput, shard *storageShard) m
 	stride := len(topology.shards)
 	for _, dimension := range topology.dimensions {
 		stride /= dimension.NumPartitions
+		if dimension.Method != "" {
+			continue
+		} // hash placement proves no ordered interval
 		partition := (shardIndex / stride) % dimension.NumPartitions
 		valueRange := scanJoinOrderShardRange{}
 		if partition > 0 {
@@ -1235,7 +1238,7 @@ func collectScanJoinOrderShardStreams(currentTx *TxContext, input *scanJoinOrder
 	}
 	bounds, _ = extendScanAccessWithSortCols(bounds, sortcols, sortdirs)
 	for i := 0; i < bounds.len(); i++ {
-		input.table.AddPartitioningScore([]string{bounds.boundaryColumn(i)})
+		input.table.AddPartitioningScore([]string{bounds.boundaryColumn(i)}, bounds.boundaryAnalyzer(i) != EqualMatcher)
 	}
 
 	var values chan *scanJoinOrderShardStream

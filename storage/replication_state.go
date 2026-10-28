@@ -30,6 +30,7 @@ type replicaRecord struct {
 }
 
 type replicaRequestMark struct {
+	Boot      string `json:"boot,omitempty"` // RAM-only request-number domain; owned by the immutable directory entry
 	Sequence  uint64 `json:"sequence"`
 	Write     bool   `json:"write"`
 	ID        string `json:"id,omitempty"`
@@ -150,10 +151,14 @@ func (r *replicationManager) forwardResource(from, to mosiResource) {
 	}
 	if existing := r.cells[to.key()]; existing != nil && existing.resolved() != cell {
 		existing = existing.resolved()
-		// Prefer already granted authority to a placeholder/request. Otherwise
-		// retain the destination flight and wake source waiters to retry there.
+		// A newer revocation wins over an older granted reader. Comparing only
+		// permission strength can resurrect S after an invalidation reached a
+		// successor placeholder before its native UUID edge was learned.
 		primary, other := cell, existing
-		if authorityRank(existing.ownstate.Phase()) > authorityRank(cell.ownstate.Phase()) || existing.ownstate.Phase().Requested() && cell.ownstate.Phase().Requested() {
+		sourceEpoch := r.directory.Records[current.key()].Epoch
+		targetEpoch := r.directory.Records[to.key()].Epoch
+		if targetEpoch > sourceEpoch || targetEpoch == sourceEpoch &&
+			(authorityRank(existing.ownstate.Phase()) > authorityRank(cell.ownstate.Phase()) || existing.ownstate.Phase().Requested() && cell.ownstate.Phase().Requested()) {
 			primary, other = existing, cell
 		}
 		if other.ownstate.Phase() == mosi.M && primary.ownstate.Phase() == mosi.M {
@@ -182,7 +187,12 @@ func (r *replicationManager) forwardResource(from, to mosiResource) {
 				requests = make(map[string]replicaRequestMark)
 			}
 			for peer, request := range record.Requests {
-				if previous, exists := requests[peer]; !exists || previous.Sequence < request.Sequence {
+				previous, exists := requests[peer]
+				// Request numbers are ordered only within one process incarnation.
+				// A forwarded stale mark must not erase the live process's replay
+				// suppression merely because its predecessor had a larger number.
+				if !exists || previous.Boot == request.Boot && previous.Sequence < request.Sequence ||
+					previous.Boot != request.Boot && r.cluster != nil && r.cluster.requestIncarnation(peer, request.Boot) {
 					requests[peer] = request
 				}
 			}

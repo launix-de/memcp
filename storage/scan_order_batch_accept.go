@@ -155,7 +155,7 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 				shard.activeScanners.Add(1)
 				queue := func() *shardqueue {
 					defer shard.activeScanners.Add(-1)
-					release := shard.acquireReadForScan(currentTx)
+					release := shard.GetRead(currentTx)
 					defer release.Release()
 					scanShard := shard
 					if release.shard != nil {

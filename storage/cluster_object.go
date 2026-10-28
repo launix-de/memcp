@@ -62,6 +62,10 @@ type clusterObjectRegistry struct {
 func (service *nodeScanService) objectRegistry() *clusterObjectRegistry {
 	r := &service.objects
 	r.once.Do(func() {
+		// Wake/stop and cold diagnostics may run before the first export. Once
+		// publishes to registry callers; these other observers use this mutex.
+		r.mu.Lock()
+		defer r.mu.Unlock()
 		r.entries = make(map[string]*clusterObjectEntry)
 		r.identities = make(map[ClusterObject]string)
 		r.wake = make(chan struct{}, 1)

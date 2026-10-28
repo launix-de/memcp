@@ -1,0 +1,93 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: UUID primary key defaults and binary keys survive WAL replay and compressed restart
+  syntax: mysql
+  isolated: true
+test_cases:
+- name: Create official MySQL binary UUID default
+  sql: CREATE TABLE uuid_binary_recovery (id BINARY(16) DEFAULT (UUID_TO_BIN(UUID())) PRIMARY KEY, payload INT) ENGINE=SAFE
+- name: Create PostgreSQL UUID default
+  syntax: postgresql
+  sql: CREATE TABLE uuid_native_recovery (id uuid DEFAULT gen_random_uuid() PRIMARY KEY, payload INT)
+- name: Insert binary UUID keys into WAL
+  sql: INSERT INTO uuid_binary_recovery(payload) VALUES (1),(2),(3)
+- name: Insert native UUID keys into WAL
+  syntax: postgresql
+  sql: INSERT INTO uuid_native_recovery(payload) VALUES (1),(2),(3)
+- name: Crash before explicit rebuild
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart through the normal test runner
+  action: restart
+- name: Recovered binary UUID keys retain bytes and version
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids,MIN(LENGTH(id)) AS bytes,MIN(UUID_EXTRACT_VERSION(BIN_TO_UUID(id))) AS version FROM uuid_binary_recovery
+  expect:
+    data: [{n: 3, ids: 3, bytes: 16, version: 1}]
+- name: Recovered native UUID keys retain version
+  syntax: postgresql
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids,MIN(uuid_extract_version(id)) AS version FROM uuid_native_recovery
+  expect:
+    data: [{n: 3, ids: 3, version: 4}]
+- name: Binary default remains dynamic after WAL replay
+  sql: INSERT INTO uuid_binary_recovery(payload) VALUES (4),(5)
+- name: Native default remains dynamic after WAL replay
+  syntax: postgresql
+  sql: INSERT INTO uuid_native_recovery(payload) VALUES (4),(5)
+- name: Recovered binary key still rejects duplicates
+  sql: INSERT INTO uuid_binary_recovery(id,payload) SELECT id,99 FROM uuid_binary_recovery WHERE payload=1
+  expect:
+    error: true
+- name: Recovered native key still rejects duplicates
+  sql: INSERT INTO uuid_native_recovery(id,payload) SELECT id,99 FROM uuid_native_recovery WHERE payload=1
+  expect:
+    error: true
+- name: Compress both UUID representations
+  scm: (begin (rebuild (table "memcp-tests" false "uuid_binary_recovery" false) true false) (rebuild (table "memcp-tests" false "uuid_native_recovery" false) true false))
+- name: Persist compressed columns and restart
+  sql: SHUTDOWN
+- name: Binary default remains dynamic after compressed restart
+  sql: INSERT INTO uuid_binary_recovery(payload) SELECT payload+10 FROM uuid_binary_recovery
+- name: Native default remains dynamic after compressed restart
+  syntax: postgresql
+  sql: INSERT INTO uuid_native_recovery(payload) SELECT payload+10 FROM uuid_native_recovery
+- name: Binary keys remain distinct with the complete payload after both restarts
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids,MIN(LENGTH(id)) AS bytes,SUM(payload) AS total FROM uuid_binary_recovery
+  expect:
+    data: [{n: 10, ids: 10, bytes: 16, total: 80}]
+- name: Native keys remain distinct with the complete payload after both restarts
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids,SUM(payload) AS total FROM uuid_native_recovery
+  expect:
+    data: [{n: 10, ids: 10, total: 80}]
+- name: Seed UUID keys for an update-only collision transaction
+  steps:
+  - sql: CREATE TABLE uuid_collision_recovery (id UUID PRIMARY KEY, payload INT) ENGINE=SAFE
+  - sql: INSERT INTO uuid_collision_recovery VALUES ('00000000-0000-4000-8000-000000000001',1),('00000000-0000-4000-8000-000000000002',2)
+- name: Commit only native UUID collision updates
+  steps:
+  - session_id: uuid_collision_writer
+    sql: START ACID TRANSACTION
+  - session_id: uuid_collision_writer
+    sql: INSERT INTO uuid_collision_recovery VALUES ('00000000-0000-4000-8000-000000000001',10),('00000000-0000-4000-8000-000000000002',20) ON DUPLICATE KEY UPDATE payload=VALUES(payload)
+  - session_id: uuid_collision_writer
+    sql: COMMIT
+- name: Committed UUID collision values are visible before crash
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids,SUM(payload) AS total FROM uuid_collision_recovery
+  expect:
+    data: [{n: 2, ids: 2, total: 30}]
+- name: Crash after the update-only native commit
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart the committed collision transaction through the test runner
+  action: restart
+- name: Committed UUID collision updates survive WAL replay
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids,SUM(payload) AS total FROM uuid_collision_recovery
+  expect:
+    data: [{n: 2, ids: 2, total: 30}]
+cleanup:
+- sql: DROP TABLE IF EXISTS uuid_binary_recovery
+- sql: DROP TABLE IF EXISTS uuid_native_recovery
+- sql: DROP TABLE IF EXISTS uuid_collision_recovery

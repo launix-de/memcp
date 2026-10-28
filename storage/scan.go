@@ -1446,7 +1446,7 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchem
 	}
 	executionAccess := access
 	for i := 0; i < executionAccess.len(); i++ {
-		t.AddPartitioningScore([]string{executionAccess.boundaryColumn(i)})
+		t.AddPartitioningScore([]string{executionAccess.boundaryColumn(i)}, executionAccess.boundaryAnalyzer(i) != EqualMatcher)
 	}
 	if topology, shard, single := t.pinSingleShardForScan(executionAccess); single {
 		found, scanErr := runDirectSingleShardExists(currentTx, topology, shard, executionAccess, conditionCols, condition, ss, querySeq)
@@ -1511,7 +1511,7 @@ func runDirectSingleShardExists(currentTx *TxContext, topology *tableShardTopolo
 			scanErr = scanError{recovered, string(debug.Stack())}
 		}
 	}()
-	release := shard.acquireReadForScan(currentTx)
+	release := shard.acquireReadForScan(currentTx, nil)
 	defer release.Release()
 	if release.shard != nil {
 		shard = release.shard
@@ -1551,7 +1551,7 @@ func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology
 			}
 		}
 	}()
-	release := shard.acquireReadForScan(currentTx, access.runtime != nil && access.runtime.mutation)
+	release := shard.acquireReadForScan(currentTx, access.runtime)
 	acquiring = false
 	defer release.Release()
 	if release.shard != nil {
@@ -1646,7 +1646,7 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	}
 	// give sharding hints
 	for i := 0; i < executionAccess.len(); i++ {
-		t.AddPartitioningScore([]string{executionAccess.boundaryColumn(i)})
+		t.AddPartitioningScore([]string{executionAccess.boundaryColumn(i)}, executionAccess.boundaryAnalyzer(i) != EqualMatcher)
 	}
 
 	analyzeNs := time.Since(analyzeStart).Nanoseconds()

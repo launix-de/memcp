@@ -1062,6 +1062,21 @@ func (s *StorageString) bulkDecoder() (outLen func(lensVal uint64) int, decode b
 func (s *StorageString) decodeBulk(rawStarts, rawLens []uint64, isNil []bool, target []scm.Scmer, stride int) {
 	n := len(rawStarts)
 	idx := 0
+	if s.format == FormatUUIDLower || s.format == FormatUUIDUpper {
+		// Keep UUID batches packed too. Each handle owns its immutable dictionary
+		// bytes through a GC-visible pointer, independently of decoded-cache eviction.
+		dict := s.ensureDict()
+		base := unsafe.Pointer(unsafe.StringData(dict))
+		for i := range rawStarts {
+			if isNil[i] {
+				target[i*stride] = scm.NewNil()
+				continue
+			}
+			start := int64(rawStarts[i]) + s.starts.offset
+			target[i*stride] = scm.NewCString((*byte)(unsafe.Add(base, start)), uint8(s.format), 0, 36)
+		}
+		return
+	}
 	outLen, decode, unknownFormat := s.bulkDecoder()
 	if unknownFormat {
 		for i := 0; i < n; i++ {

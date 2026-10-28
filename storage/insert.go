@@ -22,6 +22,7 @@ import "unsafe"
 import "runtime"
 import "math/bits"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage/mosi"
 
 // UNIQUE guards belong to the logical table, independently of physical shard
 // generations. Equal keys use the same stripe across rebuild/repartition; an
@@ -30,10 +31,43 @@ import "github.com/launix-de/memcp/scm"
 type uniqueWriteLocks [64]sync.Mutex
 
 type uniqueWriteGuard struct {
-	locks   *uniqueWriteLocks
-	mask    uint64
-	held    bool
-	version uint64 // advances when a collision callback temporarily releases guards
+	locks      *uniqueWriteLocks
+	mask       uint64
+	held       bool
+	readProofs []uniqueReadProof
+	wrote      bool
+	version    uint64 // advances when a collision callback temporarily releases guards
+}
+
+// Read validation adds no reader registration. The existing generation and MOSI
+// publication prove that another node has not invalidated a UNIQUE input. The
+// success callback validates only after acquiring its native destination writer.
+type uniqueReadProof struct {
+	table    *table
+	topology *tableShardTopology
+	shard    *storageShard
+}
+
+type uniqueReadRetry struct{}
+
+func (g *uniqueWriteGuard) validReads() bool {
+	for _, proof := range g.readProofs {
+		if proof.table != nil {
+			if proof.table.topology.Load().routing != proof.topology.routing || !activeNodeCluster().manager.resourceCell(mosiResource{Database: proof.table.schema.Name}).ownstate.Phase().Readable() {
+				return false
+			}
+		} else {
+			cell := proof.shard.coherence.Load()
+			if cell == nil {
+				return false
+			}
+			cell = cell.resolved()
+			if !cell.ownstate.Phase().Readable() || cell.publishedShard() != proof.shard {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (g *uniqueWriteGuard) lock() {
@@ -173,14 +207,28 @@ func (t *table) routeFreeInsert(topology *tableShardTopology, rows int64) (*stor
 	// Inspect only the recent writer window; old full shards never turn routing
 	// into a table-sized traversal. Concurrency is bounded by the Go CPU budget.
 	budget := min(runtime.GOMAXPROCS(0), maxRepartitionShards)
-	window := min(len(topology.shards), budget)
-	start := len(topology.shards) - window
+	writers := topology.shards
+	if sharedClusterSource(t) {
+		// Foreign appends must not push this node's still-open writer lanes out
+		// of the recent window. Collect at most the local CPU budget.
+		writers = make([]*storageShard, 0, budget)
+		for i := len(topology.shards) - 1; i >= 0 && len(writers) < budget; i-- {
+			if t.localInsertShard(topology.shards[i]) {
+				writers = append(writers, topology.shards[i])
+			}
+		}
+	}
+	window := min(len(writers), budget)
+	start := len(writers) - window
 	ticket := t.insertRoute.Add(1)
 	var candidate *storageShard
 	var leastPending int64
 	writable := 0
 	for i := 0; i < window; i++ {
-		shard := topology.shards[start+(int(ticket%uint64(window))+i)%window]
+		shard := writers[start+(int(ticket%uint64(window))+i)%window]
+		if !t.localInsertShard(shard) {
+			continue
+		}
 		pending := shard.pendingInsertRows.Load()
 		physical := uint64(shard.plannerMainRows.Load()) + shard.plannerDeltaRows.Load()
 		if physical+uint64(pending)+uint64(rows) > uint64(Settings.ShardSize) {
@@ -201,13 +249,129 @@ func (t *table) routeFreeInsert(topology *tableShardTopology, rows int64) (*stor
 	// already running, keep writing to the live generation instead of waiting
 	// behind its compression/schema I/O. Existing forwarding preserves handover.
 	source := topology.shards[len(topology.shards)-1]
-	next, _ := t.appendFreeShardDurably(topology, source, uint(rows), candidate != nil)
+	next, _ := t.appendFreeShardDurably(topology, source, uint(rows), candidate != nil || !t.localInsertShard(source))
 	if next != nil && next != topology {
 		return nil, nil, next
 	}
 	if candidate == nil {
+		if !t.localInsertShard(source) {
+			// Maintenance must never make the overflow fallback steal a foreign
+			// writer. Retry allocation after its existing owner releases it.
+			runtime.Gosched()
+			return nil, nil, nil
+		}
 		candidate = source
 	}
 	release, _ := reserveInsertRows(candidate, rows, Settings.ShardSize, true, -1)
 	return candidate, release, topology
+}
+
+// O is still local ownership: upgrading it invalidates readers, rather than
+// transferring a foreign writer's shard. IS retains its explicit backend proof.
+func (t *table) localInsertShard(shard *storageShard) bool {
+	if !sharedClusterSource(t) {
+		return true
+	}
+	cluster := activeNodeCluster()
+	if cluster == nil {
+		panic(mosi.NetworkError)
+	}
+	publication := cluster.manager.shardCell(shard).ownstate.Snapshot()
+	phase := publication.Phase()
+	if phase == mosi.IS {
+		phase = publication.Backend()
+	}
+	return phase == mosi.M || phase == mosi.O
+}
+
+// Expand volatile defaults before partition routing and UNIQUE checks. The
+// generated value becomes explicit invocation data, reused by WAL and forwarding.
+func (t *table) prepareInsertDefaults(columns []string, values [][]scm.Scmer) ([]string, [][]scm.Scmer) {
+	var missing []*column
+	for _, c := range t.columnDeclarations() {
+		if c.DefaultExpression == "" {
+			continue
+		}
+		found := false
+		for _, name := range columns {
+			if name == c.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, c)
+		}
+	}
+	if len(missing) == 0 {
+		return columns, values
+	}
+	cols := append([]string(nil), columns...)
+	for _, c := range missing {
+		cols = append(cols, c.Name)
+	}
+	rows := make([][]scm.Scmer, len(values))
+	for i, row := range values {
+		rows[i] = make([]scm.Scmer, len(cols))
+		copy(rows[i], row)
+		for j, c := range missing {
+			rows[i][len(columns)+j] = c.defaultValue()
+		}
+	}
+	return cols, rows
+}
+
+// Reserve before shard ownership when clustering or hash routing requires the
+// generated values. The shard sink then receives explicit IDs.
+func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify func(int64), dimensions []shardDimension) ([]string, [][]scm.Scmer, bool) {
+	needed := sharedClusterSource(t)
+	for _, d := range dimensions {
+		needed = needed || d.Method != ""
+	}
+	if !needed {
+		return columns, values, false
+	}
+	for _, c := range t.columnDeclarations() {
+		if !c.AutoIncrement {
+			continue
+		}
+		position := -1
+		for i, name := range columns {
+			if name == c.Name {
+				position = i
+				break
+			}
+		}
+		generated := uint64(0)
+		explicit := uint64(0)
+		for _, row := range values {
+			if position < 0 || position >= len(row) || row[position].IsNil() {
+				generated++
+				continue
+			}
+			if id := scm.ToInt(row[position]); id > 0 {
+				explicit = max(explicit, uint64(id))
+			}
+		}
+		base := t.reserveAutoIncrement(explicit, generated)
+		if generated > 0 && notify != nil {
+			notify(int64(base + 1))
+		}
+		cols := append([]string(nil), columns...)
+		if position < 0 {
+			position = len(cols)
+			cols = append(cols, c.Name)
+		}
+		rows := make([][]scm.Scmer, len(values))
+		for i, row := range values {
+			rows[i] = make([]scm.Scmer, len(cols))
+			copy(rows[i], row)
+			if rows[i][position].IsNil() {
+				base++
+				rows[i][position] = scm.NewInt(int64(base))
+			}
+		}
+		return cols, rows, true
+	}
+	return columns, values, false
 }

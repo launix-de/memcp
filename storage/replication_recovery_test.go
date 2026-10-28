@@ -1007,3 +1007,63 @@ func TestReplicationRestartRestoresUUIDEdgesWithoutRights(t *testing.T) {
 		t.Fatal("persistent topology restored MOSI permission")
 	}
 }
+
+func TestReplicationPromotionClearsAllNativePlacementAliases(t *testing.T) {
+	source, engine := createDurabilityTestTable(t, "treplicationclearplacementaliases", 0)
+	config, _ := CreateTable(source.schema.Name, "config", Safe, false)
+	for _, name := range []string{"node", "key", "value"} {
+		config.CreateColumn(name, "text", nil, nil)
+	}
+	createTableKey(config, uniqueKey{Id: "PRIMARY", Cols: []string{"node", "key"}}, nil)
+	r := replicaRecoveryFixture()
+	r.config = config
+	old := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	current := old
+	current.Shard = uuid.NewString()
+	unrelated := old
+	unrelated.Shard = uuid.NewString()
+	for _, resource := range []mosiResource{old, current, unrelated} {
+		if err := r.saveBackup(resource, resource.Shard); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := replicaRecoveryFixture()
+	other.config = config
+	if err := other.saveBackup(old, old.Shard); err != nil {
+		t.Fatal(err)
+	}
+	// Independently completed placements predate learning their native UUID edge.
+	// Coherence merges their runtime entry, while both native rows still exist.
+	r.forwardResource(old, current)
+	if err := r.clearBackup(current); err != nil {
+		t.Fatal(err)
+	}
+	live := replicaRecoveryFixture()
+	live.id = r.id
+	if err := live.loadConfig(config); err != nil {
+		t.Fatal(err)
+	}
+	if len(live.backups) != 1 {
+		t.Fatalf("runtime promotion cleanup failed: %+v", live.backups)
+	}
+	db := newDatabase()
+	db.Name, db.persistence, db.srState = source.schema.Name, engine, COLD
+	db.ensureLoaded()
+	defer db.closeTransactionLog()
+	restarted := replicaRecoveryFixture()
+	restarted.id = r.id
+	if err := restarted.loadConfig(db.tables.Get("config")); err != nil {
+		t.Fatal(err)
+	}
+	if len(restarted.backups) != 1 || restarted.backups[unrelated.key()].Content != unrelated.Shard {
+		t.Fatalf("promotion left old recovery placement or removed another resource: %+v", restarted.backups)
+	}
+	foreign := replicaRecoveryFixture()
+	foreign.id = other.id
+	if err := foreign.loadConfig(db.tables.Get("config")); err != nil {
+		t.Fatal(err)
+	}
+	if len(foreign.backups) != 1 || foreign.backups[old.key()].Content != old.Shard {
+		t.Fatal("promotion removed another node's completed copy")
+	}
+}

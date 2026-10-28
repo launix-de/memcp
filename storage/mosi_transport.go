@@ -273,6 +273,7 @@ func (p *mosiPeer) read() {
 			}()
 			if m.ID == 0 {
 				if reply.Error != "" {
+					fmt.Println("node message rejected:", m.Method, reply.Error)
 					p.close()
 				}
 				return
