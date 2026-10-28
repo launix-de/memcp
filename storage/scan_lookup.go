@@ -453,7 +453,13 @@ func (t *table) scanLookupOne(currentTx *TxContext, access scanAccess, resultCol
 		var value scm.Scmer
 		var count int
 		if acquisitionFailure != nil {
-			remote, matches := delegateShardLookup(currentTx, shard, access, resultCols, shardLookupOne, acquisitionFailure)
+			// Keep the native projection directory stack-owned on local reads.
+			// Only remote acquisition may retain its own transport arguments.
+			var remoteColumns []string
+			if returnValue {
+				remoteColumns = []string{resultCol}
+			}
+			remote, matches := delegateShardLookup(currentTx, shard, access, remoteColumns, shardLookupOne, acquisitionFailure)
 			value, count = remote, matches
 		} else {
 			value, count = shard.scanLookupOne(access, resultCol, returnValue, currentTx)
@@ -604,7 +610,13 @@ func (t *table) scanLookupMany(currentTx *TxContext, access scanAccess, resultCo
 		var value scm.Scmer
 		var count int
 		if acquisitionFailure != nil {
-			remote, matches := delegateShardLookup(currentTx, shard, access, resultCols, shardLookupMany, acquisitionFailure)
+			// Keep the native projection directory stack-owned on local reads.
+			// Only remote acquisition may retain its own transport arguments.
+			var remoteColumns []string
+			if returnValue {
+				remoteColumns = []string{resultCol}
+			}
+			remote, matches := delegateShardLookup(currentTx, shard, access, remoteColumns, shardLookupMany, acquisitionFailure)
 			value, count = remote, matches
 		} else {
 			value, count = shard.scanLookupMany(access, resultCol, returnValue, currentTx, &state.stop)
