@@ -152,6 +152,30 @@ the complete payload multiset on each peer, concurrent duplicate keys, rollback
 and restart. It never retries failed INSERTs or infers rights from backend files.
 CI runs normal and race builds.
 
+## Integration with current master
+
+This branch incorporates master #1193, #1194 and #1197. Native UUID successor
+routing replaces the old lineage/alias assumptions. #1194 supplies the owner
+handler/serialization/lifetime foundation; #1197 closes computed preparation's
+native read-admission gap, passes the query transaction through acquisition and
+drains all started materializations before propagating failure. Those mechanisms
+are reused rather than replaced by additional reader locks or copied sessions.
+
+The three-peer SQL INSERT oracle exposed complementary correctness gaps: UNIQUE
+probes must use the generation returned by acquisition; invalidation must reach
+readers which still know the predecessor UUID; and an installed reader's delayed
+grant must not resurrect it after revocation. A separate RAM-only revoked-grant
+floor preserves the actual observed owner epoch and unrelated pending flights.
+Restart invalidation acknowledges missing permissions without recovering rights
+from shared files. These are protocol corrections, not a completed replacement
+for the remaining schema-M allocator and UNIQUE gate.
+
+The integrated normal and race three-peer INSERT/restart runs pass with unchanged
+oracles and deadlines. Six focused YAML suites cover 229 cases, including 18
+crash/WAL/rebuild/restart checks in `tests/storage/persistence/uuid-defaults.yaml`.
+The process oracle still exercises free lanes; hash-partitioned distributed
+INSERTs and general remote sync effects remain separate required coverage.
+
 ## SCM execution boundaries still to complete
 
 SQL `EXPLAIN` on the UUID fixture exposes these actual physical operations:

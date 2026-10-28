@@ -23,9 +23,9 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 	publication := c.ownstate.Snapshot()
 	if publication.Phase().Requested() && publication.Flight().ID() == packet.ID {
 		r.mu.Lock()
-		epoch := r.directory.Records[r.resourceKey(packet.Resource)].Epoch
+		revoked := r.directory.Records[r.resourceKey(packet.Resource)].RevokedEpoch
 		r.mu.Unlock()
-		if packet.Epoch < epoch {
+		if revoked != 0 && packet.Epoch <= revoked {
 			// Only retire the response's own flight. An invalidation may cross
 			// a newer request which still has an independently queued reference.
 			if publication.Phase() != mosi.MR || packet.State == "M" {
@@ -119,7 +119,7 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 		// installed reference. Preserve unrelated pending requests, but require
 		// their eventual grant to prove a generation after this revocation.
 		r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
-			record.Epoch = packet.Epoch + 1
+			record.RevokedEpoch = max(record.RevokedEpoch, packet.Epoch)
 			return true
 		})
 		// No inward holder may retain stronger rights after an outward ACK.
@@ -550,7 +550,10 @@ func (r *replicationManager) acceptRevocationRoutes(source string, packet mosiPa
 	}
 	if r.cluster != nil {
 		if authority == nil {
-			return fmt.Errorf("revocation of unknown predecessor")
+			// A restarted process has no predecessor permission to revoke.
+			// Do not fabricate UUID edges or rights from an owner's hint; the
+			// ordinary invalidation can acknowledge its already-invalid target.
+			return nil
 		}
 		r.mu.Lock()
 		record := r.directory.Records[r.resourceKey(*authority.resource.Load())]

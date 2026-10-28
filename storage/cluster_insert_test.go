@@ -328,14 +328,23 @@ func TestClusterRestartedInvalidPeerAcknowledgesRevocation(t *testing.T) {
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "owner"}, peer: peer}}})
 	resource := mosiResource{Database: "tenant"}
 	r := cluster.manager
+	predecessor := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	target := predecessor
+	target.Shard = uuid.NewString()
+	if err := r.invalidateResource(context.Background(), "owner", mosiPacket{Resource: target, ID: "unknown-revoke", Epoch: 42, Forwards: []shardForward{{predecessor, target}}}); err != nil {
+		t.Fatal(err)
+	}
+	if r.lookupCell(predecessor) != nil || r.resourceCell(target).ownstate.Phase() != mosi.IO {
+		t.Fatal("restart revocation fabricated predecessor authority")
+	}
 	if err := r.invalidateResource(context.Background(), "owner", mosiPacket{Resource: resource, ID: "revoke", Epoch: 42}); err != nil {
 		t.Fatal(err)
 	}
-	if r.resourceCell(resource).ownstate.Phase() != mosi.IO || r.directory.Records[resource.key()].Epoch != 43 {
+	if r.resourceCell(resource).ownstate.Phase() != mosi.IO || r.directory.Records[resource.key()].Epoch != 42 {
 		t.Fatal("revocation fabricated access or lost recovery epoch")
 	}
 	r.resourceCell(resource).ownstate.Publish(mosi.S)
-	if err := r.invalidateResource(context.Background(), "owner", mosiPacket{Resource: resource, ID: "future", Epoch: 44}); err == nil {
+	if err := r.invalidateResource(context.Background(), "owner", mosiPacket{Resource: resource, ID: "future", Epoch: 43}); err == nil {
 		t.Fatal("future revocation replaced an active read proof")
 	}
 }

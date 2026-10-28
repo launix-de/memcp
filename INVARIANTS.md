@@ -170,7 +170,15 @@ same ownership, visibility, lifetime, and durability guarantees.
   read/write admission and without holding it during network sends. Old
   invalidations cannot revoke newer grants; old grants/imports cannot publish
   over newer authority. Import epochs are checked both before staging and at
-  final publication. These checks add no row/batch counters or persisted state.
+  final publication. A RAM-only `replicaRecord.RevokedEpoch` remembers the
+  highest revoked grant epoch under the existing manager mutex. It never
+  advances the observed owner epoch or grants authority. A delayed grant for
+  that revoked epoch retires only its matching flight without a query error,
+  so waiters reacquire; a superseded S response cannot retire an MR upgrade.
+  Shard invalidations carry authenticated native UUID successor edges so a
+  reader of the predecessor loses the same permission. A restarted peer with
+  no such proof acknowledges IO without inventing predecessor rights.
+  These checks add no row/batch counters or persisted state.
   Unknown safety copies remain IO until live authority or a validated interrupted
   handover establishes their data custodian. Offline owners are never reclaimed
   on a timer. Failed acquisition raises `Cluster network error`.

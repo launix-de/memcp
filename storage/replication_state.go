@@ -21,6 +21,7 @@ type replicaRecord struct {
 	Handoff        string                        `json:"handoff,omitempty"`
 	InitialClaimed bool                          `json:"initial_claimed,omitempty"`
 	Epoch          uint64                        `json:"epoch"`
+	RevokedEpoch   uint64                        `json:"revoked_epoch,omitempty"` // RAM-only grant floor; never owner authority
 	State          string                        `json:"state"`
 	Owner          string                        `json:"owner,omitempty"`
 	Readers        map[string]bool               `json:"readers,omitempty"`
@@ -196,9 +197,11 @@ func (r *replicationManager) forwardResource(from, to mosiResource) {
 					requests[peer] = request
 				}
 			}
+			revoked := max(record.RevokedEpoch, target.RevokedEpoch)
 			if target.Epoch > record.Epoch {
 				record = target
 			}
+			record.RevokedEpoch = revoked
 			record.Requests = requests
 		}
 		r.directory.Records[to.key()] = record
