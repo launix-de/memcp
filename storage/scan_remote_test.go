@@ -98,6 +98,7 @@ func TestRemoteScanRPCExecutesReductionWithNativeExtent(t *testing.T) {
 		t.Fatal("RPC leaked topology registration")
 	}
 }
+
 // A factory is a normal serialized closure in the existing initializer slot.
 // Each remote invocation constructs its own state; captures are materialized
 // through the same decoder as the filter and reducer before execution begins.
