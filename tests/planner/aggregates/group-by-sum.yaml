@@ -24,8 +24,59 @@ setup:
   - sql: "CREATE TABLE group_dimension (id INT PRIMARY KEY, label INT)"
   - sql: "INSERT INTO group_fact VALUES (1, 1, 10, 100), (2, 1, 20, 200), (3, 2, 30, 300), (4, 2, 99, 400)"
   - sql: "INSERT INTO group_dimension VALUES (10, 10), (20, 20), (30, 30)"
+  - sql: "DROP TABLE IF EXISTS group_key_contract"
+  - sql: "CREATE TABLE group_key_contract (a INT, b INT, value INT)"
+  - sql: "INSERT INTO group_key_contract VALUES (1,NULL,10),(1,NULL,20),(NULL,2,30),(NULL,2,NULL),(2,1,40)"
 
 test_cases:
+  - name: "Canonical group tuple retains NULL components and aggregate values"
+    sql: "SELECT a,b,SUM(value) AS total FROM group_key_contract GROUP BY a,b ORDER BY a,b"
+    expect:
+      rows: 3
+      data: [{a: null, b: 2, total: 30}, {a: 1, b: null, total: 30}, {a: 2, b: 1, total: 40}]
+
+  - name: "Permuted group tuple and projection retain key meaning with another aggregate"
+    sql: "SELECT b,a,COUNT(*) AS n,SUM(value) AS total FROM group_key_contract GROUP BY b,a HAVING SUM(value)>=30 ORDER BY a,b"
+    expect:
+      rows: 3
+      data: [{b: 2, a: null, n: 2, total: 30}, {b: null, a: 1, n: 2, total: 30}, {b: 1, a: 2, n: 1, total: 40}]
+
+  - name: "Permuted derived group tuple exports the same logical columns"
+    sql: "SELECT a,b,total FROM (SELECT b,a,SUM(value) AS total FROM group_key_contract GROUP BY b,a) grouped_rows ORDER BY a,b"
+    expect:
+      rows: 3
+      data: [{a: null, b: 2, total: 30}, {a: 1, b: null, total: 30}, {a: 2, b: 1, total: 40}]
+
+  - name: "Equivalent grouped queries share the actual cache relation across aliases and aggregates"
+    scm: |
+      (begin
+        (define helpers (lambda (query)
+          (filter (extract_assoc (physical_string_set
+            (parse_sql "memcp-tests" query nil nil nil) '()) (lambda (name _) name))
+            (lambda (name) (and (strlike name ".grp:group_key_contract:%")
+              (not (strlike name "%.agg_%")))))))
+        (define first (helpers "SELECT a,b,SUM(value) AS total FROM group_key_contract GROUP BY a,b ORDER BY a,b"))
+        (define second (helpers "SELECT g.b,g.a,MAX(g.value) AS highest FROM group_key_contract g GROUP BY g.b,g.a ORDER BY g.a,g.b"))
+        (define repeated (helpers "SELECT a,b,SUM(value) AS total FROM group_key_contract GROUP BY b,a,a ORDER BY a,b"))
+        (if (and (equal? (count first) 1) (equal? first second) (equal? first repeated)) true
+          (error "equivalent grouping allocated different cache carriers")))
+
+  - name: "Repeated group keys do not widen the canonical tuple"
+    sql: "SELECT a,b,SUM(value) AS total FROM group_key_contract GROUP BY b,a,a ORDER BY a,b"
+    expect:
+      rows: 3
+      data: [{a: null, b: 2, total: 30}, {a: 1, b: null, total: 30}, {a: 2, b: 1, total: 40}]
+
+  - name: "Mutate an input after permuted queries have shared the carrier"
+    sql: "UPDATE group_key_contract SET value=25 WHERE a=2"
+    expect: {affected_rows: 1}
+
+  - name: "Shared carrier repairs values with canonical key positions"
+    sql: "SELECT b,a,SUM(value) AS total FROM group_key_contract GROUP BY b,a ORDER BY a,b"
+    expect:
+      rows: 3
+      data: [{b: 2, a: null, total: 30}, {b: null, a: 1, total: 30}, {b: 1, a: 2, total: 25}]
+
   - name: "Group sum by a (exact query)"
     sql: "SELECT a, SUM(b) FROM tbl GROUP BY a"
     expect:
@@ -292,6 +343,7 @@ test_cases:
     expect: {error: true}
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS group_key_contract"
   - sql: "DROP TABLE IF EXISTS tbl"
   - sql: "DROP TABLE IF EXISTS tbl_mix"
   - sql: "DROP TABLE IF EXISTS aggregate_identity"

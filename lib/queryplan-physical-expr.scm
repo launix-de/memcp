@@ -7054,86 +7054,67 @@ NULL is UNKNOWN. Keep SQL collation for non-NULL values. */
 		(quoted_runtime_list '())
 		(list (quote cons) (car exprs) (runtime_cons_list_expr (cdr exprs))))))
 
-(define make_group_stage_for_block (lambda (block src)
+/* CONTRACT: a SELECT group stage owns one canonical key tuple and all of its
+visible, HAVING and ORDER aggregates. Key order is determined by source-aware
+expression recipes, never GROUP BY spelling, projection order or aliases.
+Every kN writer and reader uses gs_keys from this producer; consumers neither
+sort keys nor reinterpret their positions. Session/domain bindings remain
+explicit, including NULL, and SQL output/order expressions keep their order.
+
+Canonical ordering inspects query syntax only. The temporary recipe strings
+are built once per key during compilation, never from scanned rows or inside
+an execution guard. Trivial key tuples need no sort or recipe allocation. */
+(define canonical_group_key_order (lambda (input keys)
+	(if (or (empty_list? keys) (single_source? keys)) keys
+		(map (sort (map keys (lambda (key)
+			(list (serialize (canonical_helper_expr_using input key)) key)))
+			(lambda (a b) (< (car a) (car b)))) cadr))))
+
+(define make_group_stage_for_block (lambda (block input)
 	(begin
+		(define query_input (query_block? input))
+		(define src (if query_input (car (qb_sources input)) input))
 		(define alias (source_alias src))
 		(define session_keys (query_expr_session_reads block))
 		(define explicit_keys (map (coalesceNil (qb_group block) '()) (lambda (expr)
 			(canonical_column_expr_for_alias alias expr))))
-		(define keys (merge (list explicit_keys (filter session_keys (lambda (expr)
-			(not (contains? explicit_keys expr)))))))
+		(define passthrough_keys (if query_input
+			(merge (list
+				(field_passthrough_keys_for_alias alias (qb_fields block))
+				(external_column_refs_for_alias alias (coalesceNil (qb_having block) true)))) '()))
+		(define keys (canonical_group_key_order input
+			(merge_unique (list explicit_keys passthrough_keys session_keys))))
 		(define group_order (group_order_items_for_alias alias keys (qb_order block)))
-		(define visible_ags (stage_aggregates_for_fields (qb_fields block)))
-		(define having_ags (extract_aggregates (coalesceNil (qb_having block) true)))
-		(define order_ags (merge (map group_order (lambda (item) (match item
-			'(expr _dir) (extract_aggregates expr)
-			_ '())))))
-		(define ags (dedupe_aggregates_by_col (if (empty_list? (qb_group block))
-			(merge (list visible_ags having_ags order_ags))
-			(merge (list visible_ags having_ags order_ags (list aggregate_count_descriptor))))))
+		(define ags (dedupe_aggregates_by_col (merge (list
+			(stage_aggregates_for_fields (qb_fields block))
+			(extract_aggregates (coalesceNil (qb_having block) true))
+			(merge (map group_order (lambda (item) (extract_aggregates (car item)))))
+			(if (empty_list? (qb_group block)) '() (list aggregate_count_descriptor))))))
 		(make_group_stage
-			(concat "group:" (source_relation src) ":" (stable_structural_hash (list keys ags) false))
-			src
-			session_keys
-			keys
-			ags
-			(qb_having block)
-			(qb_fields block)
-			group_order
-			(qb_limit block)
-			(qb_offset block)
-			(list
-				(list (quote condition) (coalesceNil (qb_where block) true))
-				(list (quote preserve_empty_domain) (empty_list? (qb_group block)))
-				(list (quote domain) session_keys)
-				(list (quote lookup-keys) session_keys)
-				(list (quote physical_planning_session) (planner_context_session (qb_facts block)))
-				(list (quote physical_planning_tx) (planner_context_tx (qb_facts block))))))))
+			(if query_input
+				(concat "group:query:" (stable_structural_hash (list
+					(qb_sources block) (qb_where block) keys ags) true))
+				(concat "group:" (source_relation src) ":" (stable_structural_hash (list keys ags) false)))
+			input session_keys keys ags (qb_having block) (qb_fields block)
+			group_order (qb_limit block) (qb_offset block)
+			(merge (list
+				(list
+					(list (quote condition) (if query_input true (coalesceNil (qb_where block) true)))
+					(list (quote preserve_empty_domain) (empty_list? (qb_group block)))
+					(list (quote domain) session_keys)
+					(list (quote lookup-keys) session_keys))
+				(if query_input
+					(list (list (quote stage_catalog) (query_block_stage_catalog block)))
+					(list
+						(list (quote physical_planning_session) (planner_context_session (qb_facts block)))
+						(list (quote physical_planning_tx) (planner_context_tx (qb_facts block)))))))))))
 
+/* Preserve the relational input boundary for joined/derived groups. Key and
+aggregate semantics are shared with the base-source builder above. */
 (define make_group_stage_for_query_block (lambda (block)
-	(begin
-		(define alias (source_alias (car (qb_sources block))))
-		(define group_keys (map (coalesceNil (qb_group block) '()) (lambda (expr) (canonical_column_expr_for_alias alias expr))))
-		(define field_passthrough_keys (field_passthrough_keys_for_alias alias (qb_fields block)))
-		(define passthrough_keys (external_column_refs_for_alias alias (coalesceNil (qb_having block) true)))
-		(define session_keys (query_expr_session_reads block))
-		(define keys (merge_unique (list group_keys field_passthrough_keys passthrough_keys session_keys)))
-		(define group_order (group_order_items_for_alias alias keys (qb_order block)))
-		(define visible_ags (stage_aggregates_for_fields (qb_fields block)))
-		(define having_ags (extract_aggregates (coalesceNil (qb_having block) true)))
-		(define order_ags (merge (map group_order (lambda (item) (match item
-			'(expr _dir) (extract_aggregates expr)
-			_ '())))))
-		(define ags (dedupe_aggregates_by_col (if (empty_list? (qb_group block))
-			(merge (list visible_ags having_ags order_ags))
-			(merge (list visible_ags having_ags order_ags (list aggregate_count_descriptor))))))
-		(define input (make_query_block
-			(qb_schema block)
-			(qb_sources block)
-			'()
-			(qb_where block)
-			'() nil '() nil nil
-			'()
-			(qb_stages block)
-			(qb_facts block)))
-		(make_group_stage
-			(concat "group:query:" (stable_structural_hash (list
-				(qb_sources block) (qb_where block) keys ags) true))
-			input
-			session_keys
-			keys
-			ags
-			(qb_having block)
-			(qb_fields block)
-			group_order
-			(qb_limit block)
-			(qb_offset block)
-			(list
-				(list (quote condition) true)
-				(list (quote preserve_empty_domain) (empty_list? (qb_group block)))
-				(list (quote domain) session_keys)
-				(list (quote lookup-keys) session_keys)
-				(list (quote stage_catalog) (query_block_stage_catalog block)))))))
+	(make_group_stage_for_block block
+		(make_query_block (qb_schema block) (qb_sources block) '() (qb_where block)
+			'() nil '() nil nil '() (qb_stages block) (qb_facts block)))))
 
 /* Group rewriters walk original and canonical trees in lockstep. Prehash every
 canonical root once so descendant lookup does not rescan keys or recanonicalize

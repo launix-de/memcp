@@ -640,6 +640,30 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(group_stage_cache_relation canonical_group_sum_stage)
 		(group_stage_cache_relation canonical_group_count_stage))
 		true "group keytable identity excludes aggregate columns")
+	(define canonical_group_pair (append canonical_group_keys
+		(list (quote get_column) "g" false "category_id" false)))
+	(define canonical_group_block (lambda (keys)
+		(make_query_block "memcp-tests" (list canonical_group_source)
+			(list "total" (cons (quote aggregate) canonical_group_sum))
+			true keys nil '() nil nil '() '() '())))
+	(define canonical_group_forward
+		(make_group_stage_for_block (canonical_group_block canonical_group_pair) canonical_group_source))
+	(define canonical_group_backward
+		(make_group_stage_for_block (canonical_group_block (reverse canonical_group_pair)) canonical_group_source))
+	(assert (equal? (gs_keys canonical_group_forward) (gs_keys canonical_group_backward)) true
+		"SELECT group producer canonicalizes key tuple positions independently of GROUP BY order")
+	(assert (equal? (group_stage_cache_relation canonical_group_forward)
+		(group_stage_cache_relation canonical_group_backward)) true
+		"reordered SELECT group keys share one physical carrier with the same key positions")
+	(define canonical_group_query_forward
+		(make_group_stage_for_query_block (canonical_group_block canonical_group_pair)))
+	(define canonical_group_query_backward
+		(make_group_stage_for_query_block (canonical_group_block (reverse canonical_group_pair))))
+	(assert (equal? (gs_keys canonical_group_query_forward) (gs_keys canonical_group_query_backward)) true
+		"query-input group producer uses the same canonical key tuple contract")
+	(assert (equal? (group_stage_cache_relation canonical_group_query_forward)
+		(group_stage_cache_relation canonical_group_query_backward)) true
+		"query-input grouping reuses its carrier across key permutations")
 	(define rebind_child_ag (list 1 (quote +) 0))
 	(define rebind_child_stage (make_group_stage
 		"rebind-child"
