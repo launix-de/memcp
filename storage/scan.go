@@ -172,7 +172,7 @@ func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapReduceIdx, n
 	neutralType := unknownScanType()
 	if len(v) > neutralIdx {
 		v[neutralIdx], neutralType = oc.OptimizeSub(v[neutralIdx], true)
-		neutralType = normalizeScanType(neutralType)
+		neutralType = scm.ReducerInitializerType(v[neutralIdx], neutralType, true)
 	}
 	oc.Ome.IncrLoopDepth()
 	columnTypes := []*scm.TypeDescriptor(nil)
@@ -185,12 +185,13 @@ func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapReduceIdx, n
 	optimizedMapReduce, reduceType := oc.OptimizeReducerCallback(rawMapReduce, neutralType, columnTypes...)
 	v[mapReduceIdx] = optimizedMapReduce
 	if !rawCombine.IsNil() {
-		v[combineIdx], reduceType = oc.OptimizeReducerCallback(rawCombine, reduceType, reduceType)
+		v[combineIdx], reduceType = oc.OptimizeReducerCallback(rawCombine, neutralType, reduceType)
 	}
 	if len(v) > outerIdx {
 		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
 	}
 	oc.Ome.DecrLoopDepth()
+	reduceType, _ = scm.MergeTypes(neutralType, reduceType)
 	return scm.NewSlice(v), reduceType
 }
 
@@ -1627,10 +1628,10 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	}
 	if access.impossible() {
 		if !isOuter {
-			return neutral
+			return scm.ApplyOnce(neutral, nil)
 		}
 		nullArgs := make([]scm.Scmer, len(callbackCols)+1)
-		nullArgs[0] = neutral
+		nullArgs[0] = scm.ApplyOnce(neutral, nil)
 		return scm.Apply(mapReduce, nullArgs...)
 	}
 	// Unique point probes already have a hard one-row bound. Learning their
@@ -1668,7 +1669,10 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	var outCount int64
 	var inputCount int64
 	var candidateCount int64
-	akkumulator := neutral
+	// The initializer is a value or factory. Construct private state here,
+	// outside row execution; a worker must never share a mutable neutral with
+	// the coordinator or a sibling shard.
+	akkumulator := scm.ApplyOnce(neutral, nil)
 	hadValue := false
 	var scanErr scanError
 	if topology, shard, single := t.pinSingleShardForScan(executionAccess); single {
@@ -2212,7 +2216,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	if stride > 0 {
 		return t.scanBatch(access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
 	}
-	akkumulator := neutral
+	akkumulator := scm.ApplyOnce(neutral, nil)
 	var outCount int64
 	var candidateCount int64
 	if ss == nil {
@@ -2610,7 +2614,7 @@ func (t *storageShard) hasOrderedScanProxy(cols []string, currentTx *TxContext) 
 }
 
 func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
-	akkumulator := neutral
+	akkumulator := scm.ApplyOnce(neutral, nil)
 	var outCount int64
 	var candidateCount int64
 	if ss == nil {

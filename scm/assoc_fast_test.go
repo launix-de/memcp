@@ -306,19 +306,46 @@ func TestAssocMergeOneShotCallbacks(t *testing.T) {
 	}
 }
 
-func TestAssocMissingKeyDoesNotPrepareUnusedMerger(t *testing.T) {
-	merger := preparedTestProc(t, "(lambda (old new) (+ (* old 2) (* new 3) (* old new) (if (< old new) old new)))")
+func TestAssocMissingKeyDoesNotInvokeMerger(t *testing.T) {
+	merger := preparedTestProc(t, `(lambda (old new) (error "merger invoked for missing key"))`)
 	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
-		t.Run(name, func(t *testing.T) {
-			setter := Globalenv.Vars[Symbol(name)]
-			args := []Scmer{NewSlice(nil), NewString("missing"), NewInt(7), merger}
-			allocations := testing.AllocsPerRun(100, func() {
-				assocBenchmarkSink = Apply(setter, args...)
+		result := Apply(Globalenv.Vars[Symbol(name)], NewSlice(nil), NewString("missing"), NewInt(7), merger)
+		if value := Apply(result, NewString("missing")); value.Int() != 7 {
+			t.Fatalf("%s changed the missing-key value: %s", name, value.String())
+		}
+	}
+}
+
+// Preparation may allocate once per invocation. Increasing the number of
+// non-retaining merge calls must not allocate another adapter or argument frame.
+func TestSetAssocMergeAllocationsArePerInvocation(t *testing.T) {
+	general := preparedTestProc(t, "(lambda (old new) (+ (mod old 97) new))")
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		for _, callback := range []struct {
+			name  string
+			value Scmer
+		}{{"native", Globalenv.Vars["+"]}, {"general", general}} {
+			t.Run(name+"/"+callback.name, func(t *testing.T) {
+				dict := NewFastDictValue(1)
+				key := NewString("key")
+				dict.Set(key, NewInt(0), nil)
+				measure := func(count int) float64 {
+					args := make([]Scmer, 2+2*count)
+					args[0] = NewFastDict(dict)
+					for i := 0; i < count; i++ {
+						args[1+2*i], args[2+2*i] = key, NewInt(1)
+					}
+					args[len(args)-1] = callback.value
+					return testing.AllocsPerRun(100, func() {
+						assocBenchmarkSink = Apply(Globalenv.Vars[Symbol(name)], args...)
+					})
+				}
+				small, large := measure(8), measure(256)
+				if large > small {
+					t.Fatalf("merge count grew allocations: 8 calls %.1f, 256 calls %.1f", small, large)
+				}
 			})
-			if allocations > 8 {
-				t.Fatalf("missing-key update allocated %.1f objects without invoking its merger", allocations)
-			}
-		})
+		}
 	}
 }
 
@@ -354,5 +381,188 @@ func TestAssocMergeKeepsCompiledEntryAuthoritative(t *testing.T) {
 		if got := Apply(result, NewString("key")); !Equal(got, NewInt(99)) {
 			t.Fatalf("%s compiled merger result = %s, want 99", name, String(got))
 		}
+	}
+}
+
+// Bulk construction must preserve the ordinary association contract while
+// promoting large serialized dictionaries once, rather than copying per pair.
+func TestSetAssocBulk(t *testing.T) {
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		for _, size := range []int{2, 3, 4, 5, 6, 64} {
+			t.Run(fmt.Sprintf("%s/%d", name, size), func(t *testing.T) {
+				args := append([]Scmer{NewSlice(nil)}, benchmarkAssocPairs(size)...)
+				got := Apply(Globalenv.Vars[Symbol(name)], args...)
+				if size >= 5 && !got.IsFastDict() {
+					t.Fatalf("%d pairs were not promoted to a FastDict", size)
+				}
+				for i := 0; i < size; i++ {
+					key := NewString(fmt.Sprintf("key-%d", i))
+					if value := Apply(got, key); value.Int() != int64(i) {
+						t.Fatalf("%s = %s, want %d", key.String(), value.String(), i)
+					}
+				}
+			})
+		}
+		t.Run(name+"/ownership", func(t *testing.T) {
+			for _, hashed := range []bool{false, true} {
+				original := NewSlice([]Scmer{NewString("key"), NewInt(1)})
+				if hashed {
+					original = benchmarkFastDict(8)
+				}
+				key := NewString("key")
+				if hashed {
+					key = NewString("key-0")
+				}
+				got := Apply(Globalenv.Vars[Symbol(name)], original, key, NewInt(2), NewNil(), NewInt(7), key, NewInt(3))
+				if value := Apply(got, key); value.Int() != 3 {
+					t.Fatalf("last duplicate pair did not win: %s", value.String())
+				}
+				if value := Apply(got, NewNil()); value.Int() != 7 {
+					t.Fatalf("NULL key was lost: %s", value.String())
+				}
+				if name == "set_assoc_mut" {
+					if hashed && got.FastDict() != original.FastDict() {
+						t.Fatal("mutable bulk update copied its owned FastDict")
+					}
+				} else {
+					want := int64(1)
+					if hashed {
+						want = 0
+					}
+					if Apply(original, key).Int() != want || !Apply(original, NewNil()).IsNil() {
+						t.Fatal("bulk update changed its borrowed input")
+					}
+				}
+			}
+		})
+		t.Run(name+"/missing-pair", func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("missing key/value pair was accepted")
+				}
+			}()
+			Apply(Globalenv.Vars[Symbol(name)], NewSlice(nil), Globalenv.Vars["+"])
+		})
+	}
+}
+
+func TestSetAssocBulkOptimizedAndJIT(t *testing.T) {
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		for _, size := range []int{2, 4, 6} {
+			var body strings.Builder
+			fmt.Fprintf(&body, "(lambda (input) (%s input", name)
+			for i := 0; i < size; i++ {
+				fmt.Fprintf(&body, " \"key-%d\" %d", i, i)
+			}
+			body.WriteString("))")
+			proc := preparedTestProc(t, body.String())
+			if jitEnabled {
+				proc = jitCompile(proc)
+				if proc.Proc().compiled() == nil {
+					t.Fatal("bulk association callback did not compile")
+				}
+			}
+			result := Apply(proc, NewSlice(nil))
+			if got := Apply(result, NewString(fmt.Sprintf("key-%d", size-1))); got.Int() != int64(size-1) {
+				t.Fatalf("%s/%d: wrong optimized result %s", name, size, got.String())
+			}
+		}
+	}
+}
+
+func BenchmarkSetAssocBulk(b *testing.B) {
+	for _, size := range []int{2, 4, 8, 64, 256} {
+		for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+			fn := Globalenv.Vars[Symbol(name)].Func()
+			args := append([]Scmer{NewSlice(nil)}, benchmarkAssocPairs(size)...)
+			b.Run(fmt.Sprintf("%s/bulk/%d", name, size), func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					assocBenchmarkSink = fn(args...)
+				}
+			})
+			b.Run(fmt.Sprintf("%s/repeated/%d", name, size), func(b *testing.B) {
+				b.ReportAllocs()
+				var call [3]Scmer
+				for i := 0; i < b.N; i++ {
+					call[0] = args[0]
+					for j := 1; j < len(args); j += 2 {
+						call[1], call[2] = args[j], args[j+1]
+						call[0] = fn(call[:]...)
+					}
+					assocBenchmarkSink = call[0]
+				}
+			})
+		}
+	}
+}
+
+func TestSetAssocBulkMerge(t *testing.T) {
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		for _, hashed := range []bool{false, true} {
+			for _, size := range []int{3, 6} {
+				t.Run(fmt.Sprintf("%s/hashed=%v/pairs=%d", name, hashed, size), func(t *testing.T) {
+					input := NewSlice([]Scmer{NewString("a"), NewInt(1)})
+					if hashed {
+						dict := NewFastDictValue(1)
+						dict.Set(NewString("a"), NewInt(1), nil)
+						input = NewFastDict(dict)
+					}
+					pairs := []Scmer{NewString("a"), NewInt(2), NewString("b"), NewInt(9), NewString("a"), NewInt(3), NewString("c"), NewInt(7), NewString("b"), NewInt(1), NewString("d"), NewInt(5)}
+					var calls [][]Scmer
+					merge := NewFunc(func(a ...Scmer) Scmer {
+						calls = append(calls, a) // Retained call frames must remain independent.
+						return NewInt(a[0].Int()*10 + a[1].Int())
+					})
+					args := append([]Scmer{input}, pairs[:size*2]...)
+					args = append(args, merge)
+					result := Apply(Globalenv.Vars[Symbol(name)], args...)
+					if Apply(result, NewString("a")).Int() != 123 {
+						t.Fatal("merger did not observe earlier pairs in order")
+					}
+					wantCalls, wantB := 2, int64(9)
+					if size == 6 {
+						wantCalls, wantB = 3, 91
+					}
+					if len(calls) != wantCalls || calls[0][0].Int() != 1 || calls[0][1].Int() != 2 || calls[1][0].Int() != 12 || calls[1][1].Int() != 3 || Apply(result, NewString("b")).Int() != wantB {
+						t.Fatalf("wrong merge calls/results: %v, %s", calls, result.String())
+					}
+					if name != "set_assoc_mut" && Apply(input, NewString("a")).Int() != 1 {
+						t.Fatal("merger changed borrowed input")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSetAssocBulkMergeOptimizedAndJIT(t *testing.T) {
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		proc := preparedTestProc(t, fmt.Sprintf(`(lambda (input) (%s input "a" 2 "b" 9 "a" 3 "c" 4 "b" 1 "d" 5 (lambda (old new) (+ (* old 10) new))))`, name))
+		if jitEnabled {
+			proc = jitCompile(proc)
+			if proc.Proc().compiled() == nil {
+				t.Fatal("bulk merge callback did not compile")
+			}
+		}
+		input := NewSlice([]Scmer{NewString("a"), NewInt(1)})
+		result := Apply(proc, input)
+		if Apply(result, NewString("a")).Int() != 123 || Apply(result, NewString("b")).Int() != 91 {
+			t.Fatalf("%s changed bulk merge semantics: %s", name, result.String())
+		}
+	}
+}
+
+func TestSetAssocMutableReusesListCapacity(t *testing.T) {
+	pairs := make([]Scmer, 2, 8)
+	pairs[0], pairs[1] = NewString("a"), NewInt(1)
+	args := []Scmer{NewSlice(pairs), NewString("a"), NewInt(2), NewString("b"), NewInt(3)}
+	setter := Globalenv.Vars["set_assoc_mut"].Func()
+	result := setter(args...)
+	if !result.IsSlice() || &result.Slice()[0] != &pairs[0] || pairs[1].Int() != 2 || len(result.Slice()) != 4 {
+		t.Fatal("mutable update did not reuse owned list capacity")
+	}
+	if allocations := testing.AllocsPerRun(100, func() { assocBenchmarkSink = setter(args...) }); allocations != 0 {
+		t.Fatalf("owned list update with spare capacity allocated %.1f objects", allocations)
 	}
 }

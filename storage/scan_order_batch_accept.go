@@ -248,7 +248,7 @@ func optimizeScanOrderBatchAccept(v []scm.Scmer, oc *scm.OptimizerContext, useRe
 	neutralType := unknownScanType()
 	if len(v) > neutralIdx {
 		v[neutralIdx], neutralType = oc.OptimizeSub(v[neutralIdx], true)
-		neutralType = normalizeScanType(neutralType)
+		neutralType = scm.ReducerInitializerType(v[neutralIdx], neutralType, false)
 	}
 	oc.Ome.IncrLoopDepth()
 	columnTypes := []*scm.TypeDescriptor(nil)
@@ -295,7 +295,7 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 		panic("scan_order_batch_accept: offset plus limit overflows")
 	}
 
-	result := neutral
+	result := scm.ApplyOnce(neutral, nil)
 	hadValue := false
 	if limit == 0 {
 		if isOuter {
@@ -304,7 +304,7 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 			mapReduceProgram := scm.PrepareSerialProc(mapReduce)
 			return mapReduceProgram.Call(nullArgs)
 		}
-		return notFoundValue
+		return scm.ApplyOnce(notFoundValue, nil)
 	}
 
 	filterProgram := scm.PrepareSerialProc(batchFilter)
@@ -426,7 +426,7 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 		hadValue = true
 	}
 	if !hadValue && !isOuter {
-		return notFoundValue
+		return scm.ApplyOnce(notFoundValue, nil)
 	}
 	return result
 }

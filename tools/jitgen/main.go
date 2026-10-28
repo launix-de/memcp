@@ -7290,7 +7290,17 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// Singleton map/reduce paths invoke their callback without preparing
 			// a SerialProc. They still need the same lambda/stack-argument lowering;
 			// compiler-only lambda templates are not Scmer Go-call arguments.
-			g.emitSerialCallableCall(name, v, g.resolveCallValue(v.Call.Args[0]), g.resolveCallValue(v.Call.Args[1]))
+			if args, ok := v.Call.Args[1].(*ssa.Const); ok && args.Value == nil {
+				// A reducer initializer is a value or a zero-argument factory.
+				// Keep lambda templates compiler-owned and preserve scalar/list
+				// literals rather than turning the entire reducer into a Go call.
+				value := g.resolveCallValue(v.Call.Args[0])
+				dv := g.allocDesc()
+				g.emit("%s := jitEmitReducerInitializer(ctx, %s)", dv, value.goVar)
+				g.vals[name] = genVal{goVar: dv, isDesc: true}
+			} else {
+				g.emitSerialCallableCall(name, v, g.resolveCallValue(v.Call.Args[0]), g.resolveCallValue(v.Call.Args[1]))
+			}
 			break
 		}
 		if isSerialProcCall(callee) {

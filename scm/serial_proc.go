@@ -324,10 +324,22 @@ func serialProcNativeArgConstant(proc *Proc, body Scmer) (native Scmer, argument
 // PrepareSerialProc classifies the dominant constant, argument-projection and
 // exact native-forwarding callback shapes. Compiled procedures dispatch to the
 // JIT; other bodies use the serial interpreter with explicit frame ownership.
-func PrepareSerialProc(source Scmer) SerialProc {
+// Prepare once during serial worker/operator setup, outside callback closures
+// and execution loops. Reuse Call and a borrowed argument frame; preparing per
+// call repeats interpreter/frame allocation. Never share an active adapter
+// between concurrent workers. An optional call bound lets one-use operators
+// avoid building an interpreter tree which they cannot reuse. It is a setup
+// cost hint, not a different callback contract.
+func PrepareSerialProc(source Scmer, maxCalls ...int) SerialProc {
 	prepared := classifySerialProc(source)
 	if prepared.Kind == SerialProcGeneral {
-		prepared.borrowed = prepareSerialInterpreter(source)
+		if len(maxCalls) != 0 && maxCalls[0] <= 1 {
+			// A known single use cannot amortize compiling a residual evaluator.
+			// Keep the same argument/capture semantics through ordinary Apply.
+			prepared.borrowed = func(args []Scmer) Scmer { return Apply(source, args...) }
+		} else {
+			prepared.borrowed = prepareSerialInterpreter(source)
+		}
 	}
 	return prepared
 }
@@ -335,7 +347,9 @@ func PrepareSerialProc(source Scmer) SerialProc {
 // ApplyOnce preserves the specialized and compiled callback dispatch,
 // but does not compile a general interpreted AST for one invocation. Apply
 // gives escaping closures their own lexical frame. Native callbacks keep the
-// same argument ownership as SerialProc.Call.
+// same argument ownership as SerialProc.Call. With nil arguments this is the
+// reducer initializer contract: invoke a factory once, or retain a plain value.
+// Factories, rather than container copies, provide per-reducer mutable state.
 func ApplyOnce(source Scmer, args []Scmer) Scmer {
 	prepared := classifySerialProc(source)
 	if prepared.Kind == SerialProcGeneral {

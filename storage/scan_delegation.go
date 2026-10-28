@@ -117,7 +117,7 @@ func (invocation shardScanInvocation) delegate(shard *storageShard, failure shar
 		spec := scanOrderTableSpec{conditionCols: invocation.conditionCols, condition: invocation.condition, callbackCols: invocation.callbackCols, callback: invocation.mapReduce}
 		queue := delegateOrderedQueue(invocation.tx, shard, invocation.access, &spec, nil, 0, 0, -1, failure)
 		defer queue.closeReaders()
-		value := invocation.neutral
+		value := scm.ApplyOnce(invocation.neutral, nil)
 		for len(queue.items) > 0 {
 			var broke bool
 			value, broke = queue.remote.stream(&spec, queue, value, queue.items)

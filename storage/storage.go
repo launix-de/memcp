@@ -1748,7 +1748,7 @@ func Init(en scm.Env) {
 				if len(a) > layout.neutralIdx {
 					neutral = a[layout.neutralIdx]
 				}
-				result := neutral
+				result := scm.ApplyOnce(neutral, nil)
 				filterfn := scm.PrepareSerialProc(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
 				mapReduceFn := scm.PrepareSerialProc(a[layout.mapReduceIdx])
@@ -1779,10 +1779,7 @@ func Init(en scm.Env) {
 				}
 				if len(a) > layout.combineIdx && !a[layout.combineIdx].IsNil() {
 					combineFn := scm.PrepareSerialProc(a[layout.combineIdx])
-					base := neutral
-					if len(a) > layout.neutralIdx {
-						base = a[layout.neutralIdx]
-					}
+					base := scm.ApplyOnce(neutral, nil)
 					result = combineFn.Call([]scm.Scmer{base, result})
 				}
 				return result
@@ -1854,7 +1851,7 @@ func Init(en scm.Env) {
 				if len(a) > layout.neutralIdx+sbShift {
 					neutral = a[layout.neutralIdx+sbShift]
 				}
-				result := neutral
+				result := scm.ApplyOnce(neutral, nil)
 				filterfn := scm.PrepareSerialProc(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
 				mapReduceFn := scm.PrepareSerialProc(a[layout.mapReduceIdx])
@@ -1899,10 +1896,7 @@ func Init(en scm.Env) {
 				}
 				if len(a) > layout.combineIdx+sbShift && !a[layout.combineIdx+sbShift].IsNil() {
 					combineFn := scm.PrepareSerialProc(a[layout.combineIdx+sbShift])
-					base := neutral
-					if len(a) > layout.neutralIdx+sbShift {
-						base = a[layout.neutralIdx+sbShift]
-					}
+					base := scm.ApplyOnce(neutral, nil)
 					result = combineFn.Call([]scm.Scmer{base, result})
 				}
 				return result
@@ -2098,7 +2092,7 @@ func Init(en scm.Env) {
 			// metadata/RDF callers use physical scan sources. Query plans must never
 			// materialize cardinality-dependent rows into SCM lists.
 			if list, ok := scmerSlice(tableArg); ok {
-				result := neutral
+				result := scm.ApplyOnce(neutral, nil)
 				filterfn := scm.PrepareSerialProc(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
 				mapReduceFn := scm.PrepareSerialProc(a[layout.limitIdx+2])
@@ -2197,7 +2191,7 @@ func Init(en scm.Env) {
 					result = mapReduceFn.Call(mapReduceParams)
 				}
 				if !hadValue && !isOuter {
-					result = notFoundValue
+					result = scm.ApplyOnce(notFoundValue, nil)
 				}
 				return result
 			}

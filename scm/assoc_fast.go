@@ -704,9 +704,10 @@ func (d *FastDict) Set(key, value Scmer, merge func(oldV, newV Scmer) Scmer) {
 }
 
 // ReduceValue updates one bucket from its current value and an input item. A
-// missing bucket starts at neutral. The reducer must treat both arguments as
-// borrowed; only its returned value becomes owned by the dictionary.
-func (d *FastDict) ReduceValue(key, item, neutral Scmer, reduce *SerialProc, args []Scmer) {
+// missing bucket invokes its prepared initializer once. A factory returns a
+// private accumulator for that bucket; a value remains borrowed. Existing bucket
+// state belongs to the dictionary. No initialization runs for an existing key.
+func (d *FastDict) ReduceValue(key, item Scmer, initializer, reduce *SerialProc, args []Scmer) {
 	if d.index == nil {
 		d.index = make(map[uint64]int)
 	}
@@ -716,7 +717,7 @@ func (d *FastDict) ReduceValue(key, item, neutral Scmer, reduce *SerialProc, arg
 		d.Pairs[pos+1] = reduce.Call(args)
 		return
 	}
-	args[0], args[1] = neutral, item
+	args[0], args[1] = initializer.Call(nil), item
 	value := reduce.Call(args)
 	d.insertHashed(key, value, h)
 }
@@ -772,3 +773,74 @@ func (d *FastDict) Copy() *FastDict {
 }
 
 func (d *FastDict) ToList() []Scmer { return d.Pairs }
+
+// setAssocPairs is the common implementation of both association builtins.
+// An odd argument tail ends in a merger; the rest is key/value pairs. Prepare
+// its serial adapter and borrowed argument frame once per invocation, outside
+// the closure/loops. SerialProc owns native, interpreted, JIT and constant-result
+// dispatch; retaining callbacks receive independent frames through Call.
+func setAssocPairs(input Scmer, updates []Scmer, mutable bool) Scmer {
+	var mergeFn func(Scmer, Scmer) Scmer
+	if len(updates)%2 != 0 {
+		merge := PrepareSerialProc(updates[len(updates)-1], len(updates)/2)
+		updates = updates[:len(updates)-1]
+		var args [2]Scmer
+		mergeFn = func(oldV, newV Scmer) Scmer {
+			args[0], args[1] = oldV, newV
+			return merge.Call(args[:])
+		}
+	}
+	if len(updates) == 0 {
+		panic("set_assoc requires at least one key/value pair")
+	}
+	pairs, dict := asAssoc(input, "set_assoc")
+	if dict != nil {
+		if !mutable {
+			dict = dict.Copy()
+		}
+	} else if len(pairs) >= 10 || len(updates) >= 10 {
+		// Large inputs/constructions never do a linear search per supplied key.
+		dict = NewFastDictValue((len(pairs) + len(updates)) / 2)
+		for i := 0; i < len(pairs); i += 2 {
+			dict.Set(pairs[i], pairs[i+1], nil)
+		}
+	}
+	if dict != nil {
+		for i := 0; i < len(updates); i += 2 {
+			dict.Set(updates[i], updates[i+1], mergeFn)
+		}
+		return NewFastDict(dict)
+	}
+	// The mutable builtin receives exclusively owned storage and can reuse
+	// its backing array, including spare append capacity. Immutable calls copy
+	// live entries before modification; replacements need no growth reserve.
+	out := pairs
+	if !mutable {
+		out = append([]Scmer(nil), pairs...)
+	}
+	for i := 0; i < len(updates); i += 2 {
+		found := false
+		for j := 0; j < len(out); j += 2 {
+			if Equal(out[j], updates[i]) {
+				if mergeFn != nil {
+					out[j+1] = mergeFn(out[j+1], updates[i+1])
+				} else {
+					out[j+1] = updates[i+1]
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, updates[i], updates[i+1])
+		}
+	}
+	if len(out) >= 10 {
+		dict = NewFastDictValue(len(out) / 2)
+		for i := 0; i < len(out); i += 2 {
+			dict.Set(out[i], out[i+1], nil)
+		}
+		return NewFastDict(dict)
+	}
+	return NewSlice(out)
+}

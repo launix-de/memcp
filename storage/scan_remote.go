@@ -21,8 +21,9 @@ import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// Version 7 includes operator tasks and installation/permission reference ACKs.
-const scanWireVersion = 7
+// Version 8 carries value-or-factory initializers through the native closure
+// codec, in addition to operator tasks and installation/permission reference ACKs.
+const scanWireVersion = 8
 
 type shardScanHorizon struct {
 	Main  uint32 `json:"main"`
@@ -73,7 +74,7 @@ type remoteScanTask struct {
 	Filter        json.RawMessage       `json:"filter"`
 	MapColumns    []string              `json:"map_columns"`
 	MapReducer    json.RawMessage       `json:"mapreducer"`
-	Neutral       json.RawMessage       `json:"neutral"`
+	Neutral       scanWireValue         `json:"neutral"`
 	ResultKind    string                `json:"result_kind"`
 }
 type remoteScanResult struct {
@@ -265,7 +266,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 			return nil, err
 		}
 	}
-	neutral, err := decodeScanValue(request.Neutral, request.ResultKind)
+	neutral, err := request.Neutral.thaw(0, decode)
 	if err != nil {
 		return nil, err
 	}
@@ -608,7 +609,7 @@ func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, invoca
 	if err != nil {
 		panic(err)
 	}
-	neutral, err := encodeScanResult(invocation.neutral, executor.kind)
+	neutral, err := freezeScanValue(invocation.neutral, 0, bindings)
 	if err != nil {
 		panic(err)
 	}

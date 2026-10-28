@@ -10511,7 +10511,7 @@ key lists as well as the optional-access workload that selects its producer. */
 												(source_column_order_collation src col)))))))
 									0 (coalesceNil offset_value 0) (coalesceNil limit_value -1)
 									(cons (quote list) mapcols) mapreduce_expr
-									(join_scan_neutral_expr result_mode)
+									(scan_plan_initializer (join_scan_neutral_expr result_mode))
 									(or outer_scan (source_outer? src))))
 							(if (and (empty_list? current_order_items)
 								(and (not (query_limit_active? offset_value limit_value))
@@ -10539,7 +10539,7 @@ key lists as well as the optional-access workload that selects its producer. */
 									(coalesceNil limit_value -1)
 									(cons (quote list) mapcols)
 									mapreduce_expr
-									(join_scan_neutral_expr result_mode)
+									(scan_plan_initializer (join_scan_neutral_expr result_mode))
 									(or outer_scan (source_outer? src)))))))
 				(define membership_bound_scan (if membership_filter
 					(list
