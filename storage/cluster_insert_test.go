@@ -573,3 +573,56 @@ func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 		t.Fatal("outgoing request completion was lost")
 	}
 }
+
+func TestClusterReferenceGrantSurvivesInvalidSuccessor(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tclusterreferencependinguuid", 4)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
+	remote := "memcp://11111111-1111-4111-8111-111111111111"
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
+	cluster.initializeManager()
+	peer := &mosiPeer{outgoing: make(chan mosiMessage, 4), done: make(chan struct{})}
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: remote}, peer: peer}}})
+	r := cluster.manager
+	target := r.shardResource(shard)
+	predecessor := target
+	predecessor.Shard = uuid.NewString()
+	old := r.resourceCell(predecessor)
+	old.current.Store(shard)
+	shard.coherence.Store(old)
+	old.ownstate.Initialize(mosi.S)
+	old.clusterstate.Initialize(mosi.S)
+	r.updateRecord(predecessor, func(record *replicaRecord) bool {
+		record.Owner, record.State, record.Epoch = remote, "S", 3
+		return true
+	})
+	pending, _ := old.ownstate.Request(mosi.M)
+	invalid := r.resourceCell(target)
+	invalid.ownstate.Initialize(mosi.IO)
+	invalid.clusterstate.Initialize(mosi.IO)
+	r.updateRecord(target, func(record *replicaRecord) bool {
+		record.Owner, record.State, record.Epoch = remote, "IO", 4
+		return true
+	})
+	packet := mosiPacket{Kind: "reference", ID: pending.Flight().ID(), Resource: predecessor, Epoch: 5, State: "M", Owner: r.id, Content: target.Shard, Forwards: []shardForward{{From: predecessor, To: target}}}
+	if err := cluster.installReference(remote, packet); err != nil {
+		t.Fatal(err)
+	}
+	ack := <-peer.outgoing
+	current := r.resourceCell(target)
+	if ack.Packet == nil || ack.Packet.Kind != "ack" || current.ownstate.Phase() != mosi.M || current.clusterstate.Phase() != mosi.M {
+		t.Fatalf("reference ACK lost the pending writer: phase=%s", current.ownstate.Phase())
+	}
+	select {
+	case <-pending.Flight().Done():
+		if pending.Flight().Err() != nil {
+			t.Fatal(pending.Flight().Err())
+		}
+	default:
+		t.Fatal("reference ACK left original flight pending")
+	}
+	record := r.directory.Records[r.resourceKey(target)]
+	if record.Owner != r.id || record.Epoch != 5 {
+		t.Fatalf("incoming owner grant was lost: %+v", record)
+	}
+}

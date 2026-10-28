@@ -100,7 +100,7 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 		}
 	}
 	if owner == "" {
-		return "", fmt.Errorf(mosi.NetworkError)
+		return "", fmt.Errorf("%s: no live owner for %s", mosi.NetworkError, resource.key())
 	}
 	// Discovery spans replies from several live nodes. Ownership may have
 	// advanced since our initial report. Re-sample routing only: this must never
@@ -337,11 +337,14 @@ func (cluster *nodeCluster) receive(source string, packet *mosiPacket, connectio
 				}()
 				owner, lookupErr := cluster.locate(ctx, copy.Resource)
 				if lookupErr != nil {
-					err = lookupErr
+					err = fmt.Errorf("cluster owner lookup: %w", lookupErr)
 					return
 				}
 				if owner == r.id {
 					err = r.coordinate(ctx, source, copy)
+					if err != nil {
+						err = fmt.Errorf("cluster coordinate: %w", err)
+					}
 					return
 				}
 				peer := cluster.peer(owner)
@@ -465,6 +468,18 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 		}
 	}
 	// Epoch, authenticated sender, flight and content have all been checked.
+	// Publish the observed owner version before merging native UUID cells. A
+	// successor may already contain an older invalidation, while this exact
+	// predecessor flight is receiving a newer grant. Merging first would discard
+	// the pending flight and then ACK a grant that could never install. An older
+	// retained read proof does not survive advancement to this owner version.
+	if packet.Epoch > record.Epoch {
+		c.ownstate.Publish(mosi.IO)
+		r.updateRecord(packet.Resource, func(current *replicaRecord) bool {
+			current.Epoch = packet.Epoch
+			return true
+		})
+	}
 	// Rejected references above leave both lookup and active UUID unchanged.
 	for _, route := range packet.Forwards {
 		r.forwardResource(route.From, route.To)

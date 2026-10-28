@@ -1007,7 +1007,7 @@ func (r *replicationManager) step(ctx context.Context, peerID string, packet mos
 	r.steps.Store(packet.ID, step)
 	defer r.steps.Delete(packet.ID)
 	if err := peer.post(packet); err != nil {
-		return err
+		return fmt.Errorf("%s step to %s for %s: %w", packet.Kind, peerID, packet.Resource.key(), err)
 	}
 	select {
 	case <-ctx.Done():
