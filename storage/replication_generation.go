@@ -11,6 +11,8 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 
 package storage
 
+import "sync/atomic"
+
 import "io"
 import "fmt"
 import "sync"
@@ -873,7 +875,17 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 		for _, table := range replacement.tables.GetAll() {
 			r.restoreTableRoutes(table)
 			previous := db.tables.Get(table.Name)
+			if previous != nil && r.cluster != nil {
+				merged, err := r.mergeClusterInsertTopology(previous, table)
+				if err != nil {
+					return err
+				}
+				if merged {
+					continue
+				}
+			}
 			if previous != nil && r.sameReplicaDeclaration(previous, table) {
+				previous.reserveLocalAutoIncrement(atomic.LoadUint64(&table.Auto_increment), 0)
 				if r.cluster != nil {
 					for _, incoming := range table.ActiveShards() {
 						if incoming == nil {
@@ -947,56 +959,61 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 // identity. Receiving a metadata checkpoint must not replace an unchanged live
 // table and detach its transaction, cache or content owners.
 func (r *replicationManager) sameReplicaDeclaration(previous, incoming *table) bool {
-	declaration := func(table *table) []byte {
-		encoded, _ := json.Marshal(table)
-		var fields map[string]json.RawMessage
-		if json.Unmarshal(encoded, &fields) != nil {
-			return encoded
-		}
-		for _, key := range []string{"Auto_increment", "planner_row_estimate", "key_frequencies", "filter_feedback", "shard_forwards"} {
-			delete(fields, key)
-		}
-		for _, key := range []string{"Shards", "PShards"} {
-			var shards []*storageShard
-			if json.Unmarshal(fields[key], &shards) == nil {
-				identities := make([]string, len(shards))
-				for i, shard := range shards {
-					if shard != nil {
-						identities[i] = r.canonicalResource(mosiResource{Database: table.schema.Name, Table: table.Name, Shard: shard.uuid.String()}).Shard
-					}
-				}
-				fields[key], _ = json.Marshal(identities)
-			}
-		}
-		var columns []map[string]json.RawMessage
-		if json.Unmarshal(fields["Columns"], &columns) == nil {
-			for _, column := range columns {
-				delete(column, "PartitioningScore")
-			}
-			fields["Columns"], _ = json.Marshal(columns)
-		}
-		result, _ := json.Marshal(fields)
-		return result
+	return bytes.Equal(r.replicaDeclaration(previous, true), r.replicaDeclaration(incoming, true))
+}
+
+func (r *replicationManager) replicaDeclaration(table *table, includeTopology bool) []byte {
+	encoded, _ := json.Marshal(table)
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(encoded, &fields) != nil {
+		return encoded
 	}
-	return bytes.Equal(declaration(previous), declaration(incoming))
+	for _, key := range []string{"Auto_increment", "planner_row_estimate", "key_frequencies", "filter_feedback", "shard_forwards"} {
+		delete(fields, key)
+	}
+	for _, key := range []string{"Shards", "PShards"} {
+		if !includeTopology {
+			delete(fields, key)
+			continue
+		}
+		var shards []*storageShard
+		if json.Unmarshal(fields[key], &shards) == nil {
+			identities := make([]string, len(shards))
+			for i, shard := range shards {
+				if shard != nil {
+					identities[i] = r.canonicalResource(mosiResource{Database: table.schema.Name, Table: table.Name, Shard: shard.uuid.String()}).Shard
+				}
+			}
+			fields[key], _ = json.Marshal(identities)
+		}
+	}
+	var columns []map[string]json.RawMessage
+	if json.Unmarshal(fields["Columns"], &columns) == nil {
+		for _, column := range columns {
+			delete(column, "PartitioningScore")
+		}
+		fields["Columns"], _ = json.Marshal(columns)
+	}
+	result, _ := json.Marshal(fields)
+	return result
 }
 
 func (r *replicationManager) step(ctx context.Context, peerID string, packet mosiPacket) error {
 	peer := r.peer(peerID)
 	if peer == nil {
-		return fmt.Errorf(mosi.NetworkError)
+		return fmt.Errorf("%s: %s step to %s for %s", mosi.NetworkError, packet.Kind, peerID, packet.Resource.key())
 	}
 	step := &replicaStep{peer: peerID, resource: packet.Resource, epoch: packet.Epoch, content: packet.Content, done: make(chan struct{})}
 	r.steps.Store(packet.ID, step)
 	defer r.steps.Delete(packet.ID)
 	if err := peer.post(packet); err != nil {
-		return err
+		return fmt.Errorf("%s step to %s for %s: %w", packet.Kind, peerID, packet.Resource.key(), err)
 	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-peer.done:
-		return fmt.Errorf(mosi.NetworkError)
+		return fmt.Errorf("%s: %s step to %s for %s", mosi.NetworkError, packet.Kind, peerID, packet.Resource.key())
 	case <-step.done:
 		return step.err
 	}

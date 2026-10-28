@@ -515,6 +515,7 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		"MONEY" (tsql_cast_money_expr value false)
 		"SMALLMONEY" (tsql_cast_money_expr value true)
 		"BIT" (list (quote tsql_cast_bit) value)
+		"UNIQUEIDENTIFIER" (list (quote tsql_uuid) value)
 		"DECIMAL" (tsql_cast_decimal_expr value name dimensions)
 		"NUMERIC" (tsql_cast_decimal_expr value name dimensions)
 		"BINARY" (tsql_cast_binary_expr value dimensions true 0)
@@ -591,7 +592,7 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 		(tsql_cast_expr value type '())
 		/* Minute rounding belongs to the declared assignment contract, before
 		the existing sink receives the native calendar value. */
-		(has? '("NVARCHAR" "NCHAR" "SMALLDATETIME") type)
+		(has? '("NVARCHAR" "NCHAR" "SMALLDATETIME" "UNIQUEIDENTIFIER") type)
 		(tsql_cast_expr value type (declaration "Dimensions"))
 		(has? '("MONEY" "SMALLMONEY") type) (tsql_cast_expr value type '())
 		(has? '("DECIMAL" "NUMERIC") type) (begin
@@ -606,7 +607,11 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 translation between explicit INSERT cells and UPDATE assignments; omitted
 INSERT columns continue through the native default mechanism unchanged. */
 (define tsql_default_assignment_expr (lambda (declaration)
-	(if (equal?? (declaration "DefaultExpression") "CURRENT_TIMESTAMP")
+	(if (has? '("NEWID" "UUIDV7" "UUID_V7" "UUID_V4") (toUpper (declaration "DefaultExpression")))
+		(list (quote sql_type_expr)
+			(list (if (has? '("NEWID" "UUID_V4") (toUpper (declaration "DefaultExpression"))) (quote uuid_v4) (quote uuid_v7)))
+			"UNIQUEIDENTIFIER" nil)
+		(equal?? (declaration "DefaultExpression") "CURRENT_TIMESTAMP")
 		(list (quote sql_type_expr) (list (quote now)) "DATETIME" nil)
 		(and (nil? (declaration "Default")) (not (declaration "Null")))
 		(error "nonnullable column has no usable DEFAULT: " (declaration "Field"))
@@ -2279,7 +2284,10 @@ No character list, decoder, relation or runtime SQL type is constructed here. */
 	(sql_info (list helper (sql_info_formula converted)) output (sql_info_collation input)))))
 
 (define tsql_builtin_compiler (lambda (name) (lambda (infos)
-	(if (equal? name "ROUND") (tsql_compile_round infos)
+	(if (has? '("NEWID" "UUIDV7") name) (begin
+		(if (empty_list? infos) true (error name " takes no arguments"))
+		(sql_info (list (if (equal? name "NEWID") (quote uuid_v4) (quote uuid_v7))) "UNIQUEIDENTIFIER" nil))
+		(equal? name "ROUND") (tsql_compile_round infos)
 		(has? '("ABS" "FLOOR" "CEILING") name) (tsql_compile_numeric_scalar name infos)
 		(has? '("SQUARE" "SQRT") name) (tsql_compile_floating_scalar name infos)
 		(has? '("LEFT" "RIGHT" "SUBSTRING") name) (tsql_compile_slicing name infos)
@@ -2296,6 +2304,8 @@ No character list, decoder, relation or runtime SQL type is constructed here. */
 (define tsql_builtins (lambda (name) (match name
 	/* First-class callers retain lazy fallback; SQL calls use the declared
 	ISNULL compiler contract rather than this scalar operator alias. */
+	"NEWID" uuid_v4
+	"UUIDV7" uuid_v7
 	"ISNULL" coalesceNil
 	"LEFT" tsql_left
 	"RIGHT" tsql_right
@@ -3547,6 +3557,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 	time. The existing native clock marker remains the explicit dynamic default. */
 	(define tsql_default_value (parser (or
 		(parser tsql_clock_default '("default_expression" "CURRENT_TIMESTAMP"))
+		(parser (define generator sql_uuid_default) (list "default_expression" generator))
 		(parser (define expression tsql_expression) (begin
 			(define info (sql_expr_info '() expression))
 			/* Keep the parsed source contract until the column's destination is

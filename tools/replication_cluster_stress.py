@@ -24,6 +24,7 @@ import queue
 import random
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -1368,6 +1369,208 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
     return results
 
 
+def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
+    layout = "hash" if hash_partitioned else "free"
+    print(f"SCENARIO: concurrent {layout} UUID/integer INSERTs, uniqueness, rollback and restart", flush=True)
+    directory = artifacts / ("cluster-inserts-hash" if hash_partitioned else "cluster-inserts")
+    directory.mkdir()
+    secret_file = directory / "cluster.secret"
+    secret_file.write_text(uuid.uuid4().hex + uuid.uuid4().hex + "\n")
+    secret_file.chmod(0o600)
+    with contextlib.ExitStack() as cleanup:
+        cleanup.callback(lambda: secret_file.unlink(missing_ok=True))
+        builder = Node(args, directory, "builder", "")
+        if hash_partitioned:
+            (builder.data_dir / "settings.json").write_text(json.dumps({"ShardSize": 16}))
+        cleanup.callback(lambda: builder.kill() if builder.process is not None else None)
+        source = builder.start()
+        source.sql(f"CREATE DATABASE {DATABASE}", "system")
+        source.sql("CREATE TABLE uuid_items(id UUID DEFAULT UUID_V7() PRIMARY KEY, writer INT, value INT) ENGINE=SAFE")
+        source.sql("CREATE TABLE integer_items(id BIGINT AUTO_INCREMENT PRIMARY KEY, writer INT, value INT) ENGINE=SAFE")
+        source.sql("INSERT INTO integer_items VALUES(10000,-1,-1)")
+        source.scm(f'(rebuild (table "{DATABASE}" false "integer_items" false) true false)')
+        if hash_partitioned:
+            for table, method in (("uuid_items", "hash-uuid-v1"), ("integer_items", "hash-int-v1")):
+                # Independent point inserts provide real per-column demand.
+                for i in range(64):
+                    key = "UUID_V7()" if table == "uuid_items" else str(10001+i)
+                    source.sql(f"INSERT INTO {table}(id,writer,value) VALUES({key},-2,{i})")
+                def hash_ready():
+                    source.scm(f'(rebuild (table "{DATABASE}" false "{table}" false) true true)')
+                    saved = json.loads((builder.data_dir / DATABASE / "schema.json").read_text())["tables"][table]
+                    dims = saved.get("PDimensions") or []
+                    return saved["ShardMode"] == "partition" and len(dims) == 1 and dims[0]["Column"] == "id" and dims[0].get("Method") == method and dims[0]["NumPartitions"] >= 2
+                eventually(hash_ready, f"{table}: automatic maintenance did not settle into hash topology", args.timeout)
+                schema = json.loads((builder.data_dir / DATABASE / "schema.json").read_text())["tables"][table]
+                expect(schema["ShardMode"], "partition", f"{table}: actual partition topology")
+                dimensions = schema.get("PDimensions") or []
+                if len(dimensions) != 1 or dimensions[0]["Column"] != "id" or dimensions[0].get("Method") != method or dimensions[0]["NumPartitions"] < 2:
+                    raise DrillFailure(f"{table}: rebuild did not choose the required hash layout: {dimensions!r}")
+                source.sql(f"DELETE FROM {table} WHERE writer=-2")
+        source.sql("CREATE UNIQUE INDEX writer_value ON uuid_items (writer,value)")
+        source.sql("CREATE UNIQUE INDEX writer_value ON integer_items (writer,value)")
+        builder.kill()
+        shared = builder.data_dir / DATABASE
+        nodes = [Node(args, directory, f"node-{i}", "listen") for i in range(3)]
+        for index, node in enumerate(nodes):
+            cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
+            (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
+            (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
+            node.process_env["GOMAXPROCS"] = "2"
+            seed = "" if index == 0 else f"http://127.0.0.1:{nodes[0].port}/cluster"
+            node.node_args = [f"--cluster-secret-file={secret_file}",
+                              f"--cluster-address=http://127.0.0.1:{node.port}/cluster",
+                              f"--cluster-join={seed}", f"--cluster-databases={DATABASE}"]
+            if index == 0:
+                node.node_args.append("--cluster-bootstrap")
+            node.start()
+        def status(node):
+            value = json.loads(node.client.scm("(cluster_status)"))
+            return json.loads(value) if isinstance(value, str) else value
+        def joined():
+            return all(len(status(node)["state"]["members"]) == len(nodes)
+                       and status(node)["state"]["connected"] == len(nodes)-1 for node in nodes)
+        eventually(joined, "INSERT cluster did not form", args.startup_timeout)
+        def insert(node_index, table, barrier):
+            client = nodes[node_index].client
+            barrier.wait(timeout=args.timeout)
+            for batch in range(4):
+                values = ','.join(f"({node_index},{batch * 8 + row})" for row in range(8))
+                client.sql(f"INSERT INTO {table}(writer,value) VALUES {values}")
+        for table in ("uuid_items", "integer_items"):
+            started = time.monotonic()
+            barrier = threading.Barrier(len(nodes))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(nodes)) as threads:
+                futures = [threads.submit(insert, index, table, barrier) for index in range(len(nodes))]
+                try:
+                    for future in futures:
+                        future.result()
+                except BaseException:
+                    # Preserve blocked ownership stacks before normal cleanup
+                    # kills these disposable children. Never retry an INSERT.
+                    for node in nodes:
+                        if node.process is not None and node.process.poll() is None:
+                            node.process.send_signal(signal.SIGQUIT)
+                    for node in nodes:
+                        if node.process is not None:
+                            try:
+                                node.process.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                pass
+                    raise
+            expected = len(nodes) * 32 + (table == "integer_items")
+            for node in nodes:
+                result = node.client.sql(f"SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids FROM {table}")
+                if result != [{"n": expected, "ids": expected}]:
+                    # Keep the original result as the oracle. Additional SQL
+                    # only diagnoses cache visibility versus durable row loss;
+                    # a later successful read never repairs this failed check.
+                    diagnostic = {"table": table, "node": node.name, "result": result}
+                    try:
+                        diagnostic["cluster"] = [json.loads(peer.client.scm("(cluster_status true)")) for peer in nodes]
+                        diagnostic["groups"] = node.client.sql(f"SELECT writer,COUNT(*) AS n,MIN(value) AS first_value,MAX(value) AS last_value FROM {table} GROUP BY writer")
+                        session = "uuid-insert-failure-diagnostic"
+                        node.client.sql("START TRANSACTION", session=session)
+                        try:
+                            diagnostic["transaction_count"] = node.client.sql(f"SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids FROM {table}", session=session)
+                        finally:
+                            node.client.sql("ROLLBACK", session=session)
+                    except Exception as error:
+                        diagnostic["diagnostic_error"] = str(error)
+                    (directory / "failed-read.json").write_text(json.dumps(diagnostic, indent=2) + "\n")
+                expect(result, [{"n": expected, "ids": expected}], f"complete unique {table} on {node.name}")
+            expected_payloads = [[writer, value] for writer in range(len(nodes)) for value in range(32)]
+            for node in nodes:
+                # Compare the complete multiset through a reduction: remote
+                # ordered row projection is a separate existing cluster gap.
+                payloads = node.client.sql(f"SELECT GROUP_CONCAT(CONCAT(writer,':',value)) AS payloads FROM {table} WHERE writer>=0")
+                if len(payloads) != 1 or not isinstance(payloads[0].get("payloads"), str):
+                    raise DrillFailure("missing complete INSERT payload result")
+                actual_payloads = [[int(part) for part in pair.split(':')] for pair in payloads[0]["payloads"].split(',')]
+                expect(sorted(actual_payloads), expected_payloads, f"complete INSERT payloads on {node.name}")
+            schema = json.loads((shared / "schema.json").read_text())["tables"][table]
+            if not hash_partitioned and len(schema["Shards"]) > 1 + 2 * len(nodes):
+                raise DrillFailure("parallel INSERTs created unbounded writer lanes")
+            if table == "integer_items":
+                for node in nodes:
+                    expect(node.client.number("SELECT COUNT(*) AS n FROM integer_items WHERE writer>=0 AND id<=10000"), 0,
+                           "explicit integer high-water mark retained across peers")
+            journal.append({"scenario": "cluster-inserts", "layout": layout, "table": table,
+                            "rows": expected, "seconds": time.monotonic() - started})
+        # All peers race for one explicit key. Exactly one physical INSERT
+        # succeeds; retries and arbitrary network errors cannot satisfy this.
+        for table, key in (("uuid_items", "'550e8400-e29b-41d4-a716-446655440000'"),
+                           ("integer_items", "50000")):
+            barrier = threading.Barrier(len(nodes))
+            def duplicate(index):
+                barrier.wait(timeout=args.timeout)
+                try:
+                    nodes[index].client.sql(f"INSERT INTO {table}(id,writer,value) VALUES({key},{index},777)")
+                    return True
+                except DrillFailure as error:
+                    if "Duplicate entry" not in str(error):
+                        raise
+                    return False
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(nodes)) as threads:
+                outcomes = list(threads.map(duplicate, range(len(nodes))))
+            expect(sum(outcomes), 1, f"one winner for concurrent {table} primary key")
+            for node in nodes:
+                expect(node.client.number(f"SELECT COUNT(*) AS n FROM {table} WHERE id={key}"), 1,
+                       "duplicate race stored one row")
+            # Distinct generated primary keys race for a secondary key which
+            # does not contain the hash dimension. No per-bucket shortcut may
+            # admit two winners, even when the primary keys route differently.
+            secondary_barrier = threading.Barrier(len(nodes))
+            def secondary_duplicate(index):
+                secondary_barrier.wait(timeout=args.timeout)
+                try:
+                    nodes[index].client.sql(f"INSERT INTO {table}(writer,value) VALUES(50,7777)")
+                    return True
+                except DrillFailure as error:
+                    if "Duplicate entry" not in str(error):
+                        raise
+                    return False
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(nodes)) as threads:
+                secondary_outcomes = list(threads.map(secondary_duplicate, range(len(nodes))))
+            expect(sum(secondary_outcomes), 1, f"one winner for global secondary key in {table}")
+            for node in nodes:
+                expect(node.client.number(f"SELECT COUNT(*) AS n FROM {table} WHERE writer=50 AND value=7777"), 1,
+                       "secondary race stored one row across primary-key buckets")
+            # A node-local native transaction still uses the shared allocator.
+            session = "uuid-insert-rollback-" + table
+            def schema_epoch():
+                snapshots = []
+                for peer in nodes:
+                    value = json.loads(peer.client.scm("(cluster_status true)"))
+                    snapshot = json.loads(value) if isinstance(value, str) else value
+                    snapshots.append(snapshot["resources"]["records"][DATABASE]["epoch"])
+                return max(snapshots)
+            before_epoch = schema_epoch()
+            nodes[0].client.sql("START ACID TRANSACTION", session=session)
+            try:
+                nodes[0].client.sql(f"INSERT INTO {table}(writer,value) VALUES(0,-99)", session=session)
+            finally:
+                nodes[0].client.sql("ROLLBACK", session=session)
+            expect(schema_epoch(), before_epoch, f"{layout} {table}: ordinary INSERT/rollback must not claim schema M")
+            for node in nodes:
+                expect(node.client.number(f"SELECT COUNT(*) AS n FROM {table} WHERE value=-99"), 0,
+                       "rolled-back generated keys are not visible")
+        nodes[2].client.sql("INSERT INTO integer_items(writer,value) VALUES(2,888)")
+        for node in nodes:
+            row = node.client.sql("SELECT MIN(id) AS id,COUNT(*) AS n FROM integer_items WHERE value=888")
+            if len(row) != 1 or row[0]["n"] != 1 or row[0]["id"] <= 50000:
+                raise DrillFailure("explicit integer key did not advance the shared allocator")
+        # Preserve acknowledged keys across an owner process restart, then
+        # reserve another block on a surviving peer without reusing any ID.
+        nodes[1].kill()
+        nodes[1].start()
+        eventually(joined, "INSERT peer did not rejoin after restart", args.startup_timeout)
+        nodes[2].client.sql("INSERT INTO integer_items(writer,value) VALUES(2,999)")
+        for node in nodes:
+            expect(node.client.number("SELECT COUNT(DISTINCT id) AS n FROM integer_items"), 101,
+                   "integer keys survive restart and another reservation")
+
+
 def run_cluster_placement(args, artifacts, journal):
     print("SCENARIO: authenticated peer roster and automatic SUM above one node's RAM budget", flush=True)
     directory = artifacts / "cluster-placement"
@@ -1666,6 +1869,8 @@ def main():
     parser.add_argument("--remote-scans-only", action="store_true", help="run only the focused two-process remote scan scenario")
     parser.add_argument("--cluster-context-only", action="store_true",
                         help="run SQL session/transaction contracts against standalone and clustered processes")
+    parser.add_argument("--cluster-inserts-only", action="store_true", help="run focused concurrent shared-storage INSERT scenario")
+    parser.add_argument("--cluster-inserts-layout", choices=("free", "hash", "both"), default="both", help="select INSERT fixture layout (default: both)")
     parser.add_argument("--cluster-only", action="store_true", help="run focused shared-storage cluster placement scenario")
     parser.add_argument("--fixture-binary", type=Path, help="optional same-commit builder for immutable cluster fixture")
     args = parser.parse_args()
@@ -1689,11 +1894,16 @@ def main():
                 "dedicated_replication_port": args.dedicated_replication_port}]
     print(f"Replication cluster stress artifacts: {artifacts}\nSeed: {args.seed}", flush=True)
     try:
-        if args.cluster_only:
+        if args.cluster_inserts_only:
+            if args.cluster_inserts_layout != "hash":
+                run_cluster_inserts(args, artifacts, journal)
+            if args.cluster_inserts_layout != "free":
+                run_cluster_inserts(args, artifacts, journal, hash_partitioned=True)
+        elif args.cluster_only:
             run_cluster_placement(args, artifacts, journal)
         else:
             run_remote_scans(args, artifacts, journal)
-        if not args.remote_scans_only and not args.cluster_only:
+        if not args.remote_scans_only and not args.cluster_only and not args.cluster_inserts_only:
             run_regressions(args, artifacts, journal)
             run_partitions(args, artifacts, journal)
             run_stress(args, artifacts, journal)
@@ -1717,6 +1927,8 @@ def main():
                   "--startup-timeout", str(args.startup_timeout), "--executor", args.executor]
         if args.remote_scans_only:
             replay.append("--remote-scans-only")
+        if args.cluster_inserts_only:
+            replay.extend(("--cluster-inserts-only", "--cluster-inserts-layout", args.cluster_inserts_layout))
         if args.cluster_context_only:
             replay.append("--cluster-context-only")
         elif args.cluster_only:

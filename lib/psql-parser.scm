@@ -78,6 +78,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(parser (atom "AUTO_INCREMENT" true) '("auto_increment" true))
 	(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 	(parser (atom "NULL" true) '("null" true))
+	(parser '((atom "DEFAULT" true) (define generator sql_uuid_default)) '("default_expression" generator))
 	(parser '((atom "DEFAULT" true) (define default psql_expression)) '("default" default))
 	(parser '((atom "ON" true) (atom "UPDATE" true) (define default psql_expression)) '("update" default))
 	(parser '((atom "COMMENT" true) (define comment psql_expression)) '("comment" comment))
@@ -426,6 +427,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "UNSIGNED" true) ")") '('simplify p))
 		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "SIGNED" true) ")") '('simplify p))
 		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "INTEGER" true) ")") '('simplify p))
+		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "UUID" true) ")") '('uuid_parse p))
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "UNSIGNED" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "INTEGER" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "VARCHAR" true) "(" psql_int ")" ")") '('concat p))
@@ -474,6 +476,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 
 	/* Postgres cast syntax: expr::type (postfix operator; avoid left recursion) */
 	(define psql_expression6 (parser (or
+		(parser '((define a psql_expression7) "::" (atom "uuid" true)) '('uuid_parse a))
 		(parser '((define a psql_expression7) "::" (atom "text" true)) '('concat a))
 		(parser '((define a psql_expression7) "::" (atom "varchar" true)) '('concat a))
 		(parser '((define a psql_expression7) "::" (atom "integer" true)) '('simplify a))
@@ -947,6 +950,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					(parser (atom "AUTO_INCREMENT" true) '("auto_increment" true))
 					(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 					(parser (atom "NULL" true) '("null" true))
+					(parser '((atom "DEFAULT" true) (define generator sql_uuid_default)) '("default_expression" generator))
 					(parser '((atom "DEFAULT" true) (define default psql_expression)) '("default" default))
 					(parser '((atom "COMMENT" true) (define comment psql_expression)) '("comment" comment))
 					(parser '((atom "COLLATE" true) (define comment psql_identifier)) '("collate" comment))
@@ -1014,6 +1018,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col psql_identifier) (define body (or /* ALTER COLUMN */
 				/* Type and default changes */
 				(parser '((atom "TYPE" true) (define type psql_identifier) (define dimensions (or (parser '("(" (define a psql_int) "," (define b psql_int) ")") '((quote list) a b)) (parser '("(" (define a psql_int) ")") '((quote list) a)) (parser empty '((quote list))))) ) (lambda (col) (lambda (id) '('!begin '((quote altercolumn) '('table schema false id false) col "type" type) '((quote altercolumn) '('table schema false id false) col "dimensions" dimensions)))))
+				(parser '((atom "SET" true) (atom "DEFAULT" true) (define def sql_uuid_default)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false) col "default_expression" def))))
 				(parser '((atom "SET" true) (atom "DEFAULT" true) (define def psql_expression)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false) col "default" def))))
 				(parser '((atom "DROP" true) (atom "DEFAULT" true)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false) col "default" nil))))
 				(parser '((atom "COLLATE" true) (define coll psql_identifier)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false) col "collation" coll))))

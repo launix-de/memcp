@@ -751,6 +751,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser (atom "AUTO_INCREMENT" true) '("auto_increment" true))
 		(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 		(parser (atom "NULL" true) '("null" true))
+		(parser '((atom "DEFAULT" true) (define generator sql_uuid_default)) '("default_expression" generator))
 		(parser '((atom "DEFAULT" true) (define default sql_literal)) '("default" default))
 		(parser '((atom "DEFAULT" true) (atom "CURRENT_TIMESTAMP" true) (? "(" ")")) '("default_expression" "CURRENT_TIMESTAMP"))
 		(parser '((atom "ON" true) (atom "UPDATE" true) (atom "CURRENT_TIMESTAMP" true) (? "(" ")")) '("update" "CURRENT_TIMESTAMP"))
@@ -1872,6 +1873,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) '((quote table) schema false id false) "collation" collation)))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) '((quote table) schema false id false) "auto_increment" ai)))
 			/* ALTER COLUMN operations for defaults */
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "SET" true) (atom "DEFAULT" true) (define def sql_uuid_default)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false) col "default_expression" def)))
 			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "SET" true) (atom "DEFAULT" true) (define def sql_expression)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false) col "default" def)))
 			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "DROP" true) (atom "DEFAULT" true)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false) col "default" nil)))
 			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "COLLATE" true) (define coll sql_identifier)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false) col "collation" coll)))

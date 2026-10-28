@@ -16,6 +16,7 @@ import "sort"
 import "sync"
 import "time"
 import "bytes"
+import "errors"
 import "context"
 import "strings"
 import "sync/atomic"
@@ -148,6 +149,8 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 		return nil, err
 	}
 	switch method {
+	case "cluster.reserve_ids":
+		return cluster.handleIDReservation(ctx, data)
 	case "cluster.report":
 		var resource mosiResource
 		if err := json.Unmarshal(data, &resource); err != nil {
@@ -230,7 +233,8 @@ func (cluster *nodeCluster) loop() {
 				cluster.publishLocked()
 				cluster.mu.Unlock()
 			default:
-				if err := cluster.exchange(link); err != nil {
+				if err := cluster.exchange(link); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+					fmt.Println("cluster roster exchange failed:", link.member.ID, err)
 					link.peer.close()
 				}
 			}
@@ -343,7 +347,7 @@ func initNodeCluster(en *scm.Env) {
 		}
 		return scm.NewBool(true)
 	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Params: []*scm.TypeDescriptor{{Kind: "string", Label: "secret_file"}, {Kind: "string", Label: "advertise_url"}, {Kind: "string", Label: "join_url"}, {Kind: "string", Label: "databases"}, {Kind: "bool", Label: "bootstrap"}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
-	scm.Declare(en, &scm.Declaration{Name: "cluster_status", Fn: func(...scm.Scmer) scm.Scmer {
+	scm.Declare(en, &scm.Declaration{Name: "cluster_status", Fn: func(a ...scm.Scmer) scm.Scmer {
 		cluster := activeNodeCluster()
 		if cluster == nil {
 			return scm.NewNil()
@@ -358,15 +362,24 @@ func initNodeCluster(en *scm.Env) {
 			Locality  uint64          `json:"locality"`
 			Capacity  uint64          `json:"capacity"`
 		}{cluster.self, view.members, len(view.links), cluster.received.Load(), cluster.delegated.Load(), cluster.locality.Load(), cluster.capacity.Load()}
+		var resources json.RawMessage
+		if len(a) > 0 && scm.ToBool(a[0]) {
+			var err error
+			resources, err = cluster.manager.statusSnapshot()
+			if err != nil {
+				panic(err)
+			}
+		}
 		data, err := json.Marshal(struct {
-			State  any       `json:"state"`
-			Budget CacheStat `json:"budget"`
-		}{output, GlobalCache.Stat()})
+			State     any             `json:"state"`
+			Budget    CacheStat       `json:"budget"`
+			Resources json.RawMessage `json:"resources,omitempty"`
+		}{output, GlobalCache.Stat(), resources})
 		if err != nil {
 			panic(err)
 		}
 		return scm.NewString(string(data))
-	}, Type: &scm.TypeDescriptor{Kind: "func", Return: &scm.TypeDescriptor{Kind: "string"}}})
+	}, Type: &scm.TypeDescriptor{Kind: "func", Params: []*scm.TypeDescriptor{{Kind: "bool", Label: "resources", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "string"}}})
 }
 
 func validateClusterURI(id string) error {

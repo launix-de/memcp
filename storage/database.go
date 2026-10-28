@@ -712,10 +712,26 @@ func (db *database) commitSchemaSnapshot(jsonbytes []byte, durable bool, release
 	}
 }
 
-func (db *database) save() {
+func (db *database) save(counterOwner ...*replicaCell) {
+	if len(counterOwner) > 1 {
+		panic("invalid counter checkpoint ownership")
+	}
 	if sharedClusterDatabase(db.Name) {
 		cluster := activeNodeCluster()
-		if cluster == nil || cluster.manager.resourceCell(mosiResource{Database: db.Name}).ownstate.Phase() != mosi.M {
+		if cluster == nil {
+			return
+		}
+		cell := cluster.manager.resourceCell(mosiResource{Database: db.Name})
+		phase := cell.ownstate.Phase()
+		if len(counterOwner) != 0 {
+			// The allocator holds this existing directory mutex through the
+			// checkpoint. O owns the unchanged declarations and may persist its
+			// runtime counter without recalling every S reader. Ordinary saves
+			// still require M; callers cannot use this for semantic DDL.
+			if counterOwner[0] != cell || phase != mosi.M && phase != mosi.O {
+				panic("counter checkpoint lost its owner")
+			}
+		} else if phase != mosi.M {
 			return
 		}
 	}

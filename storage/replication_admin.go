@@ -355,11 +355,18 @@ func (r *replicationManager) statusSnapshot() ([]byte, error) {
 		Resource     *mosiResource `json:"resource,omitempty"`
 		Clusterstate string        `json:"clusterstate"`
 		Ownstate     string        `json:"ownstate"`
+		Current      string        `json:"current,omitempty"`
+		MainRows     int64         `json:"main_rows,omitempty"`
+		DeltaRows    int64         `json:"delta_rows,omitempty"`
 	}
 	authority := make(map[string]authorityView, len(r.cells))
 	for key, cell := range r.cells {
 		cell = cell.resolved()
-		authority[key] = authorityView{Resource: cell.resource.Load(), Clusterstate: cell.clusterstate.Phase().String(), Ownstate: cell.ownstate.Phase().String()}
+		view := authorityView{Resource: cell.resource.Load(), Clusterstate: cell.clusterstate.Phase().String(), Ownstate: cell.ownstate.Phase().String()}
+		if shard := cell.publishedShard(); shard != nil {
+			view.Current, view.MainRows, view.DeltaRows = shard.uuid.String(), int64(shard.plannerMainRows.Load()), int64(shard.plannerDeltaRows.Load())
+		}
+		authority[key] = view
 	}
 	r.mu.Unlock()
 	return json.Marshal(struct {

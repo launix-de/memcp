@@ -915,3 +915,21 @@ func TestClusterObjectReleaseRetriesWithoutAnotherGCOrReconnect(t *testing.T) {
 		}
 	}
 }
+
+func TestClusterObjectRegistryConcurrentInitializationAndWake(t *testing.T) {
+	service := &nodeScanService{}
+	defer service.stopObjects()
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	workers.Add(9)
+	go func() { defer workers.Done(); <-start; service.objectRegistry() }()
+	for i := 0; i < 8; i++ {
+		go func() { defer workers.Done(); <-start; service.wakeObjectReleases() }()
+	}
+	close(start)
+	workers.Wait()
+	registry := service.objectRegistry()
+	if registry.wake == nil || registry.stop == nil || registry.entries == nil || registry.identities == nil {
+		t.Fatal("registry publication is incomplete")
+	}
+}

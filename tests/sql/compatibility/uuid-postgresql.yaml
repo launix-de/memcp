@@ -1,0 +1,128 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: UUID types, generation, conversions and per-row defaults through postgresql
+  syntax: postgresql
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS uuid_postgresql
+- sql: DROP TABLE IF EXISTS uuid_postgresql_official
+test_cases:
+- name: Official PostgreSQL random UUID primary key declaration
+  sql: CREATE TABLE uuid_postgresql_official (id uuid DEFAULT gen_random_uuid() PRIMARY KEY, payload text)
+- name: Official PostgreSQL default generates a key for a single row
+  sql: INSERT INTO uuid_postgresql_official(payload) VALUES ('Hallo')
+- name: Official PostgreSQL default generates different keys in one batch
+  sql: INSERT INTO uuid_postgresql_official(payload) VALUES ('second'),('third')
+- name: Official PostgreSQL keys are distinct version-four UUIDs
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids,MIN(UUID_EXTRACT_VERSION(id)) AS version FROM uuid_postgresql_official
+  expect:
+    rows: 1
+    data:
+    - n: 3
+      ids: 3
+      version: 4
+- name: Official PostgreSQL default is per row for INSERT SELECT
+  sql: INSERT INTO uuid_postgresql_official(payload) SELECT payload FROM uuid_postgresql_official
+- name: Official PostgreSQL copied rows retain distinct generated keys
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids FROM uuid_postgresql_official
+  expect:
+    rows: 1
+    data:
+    - n: 6
+      ids: 6
+- name: Create UUID primary key with per-row v7 default
+  sql: CREATE TABLE uuid_postgresql (id UUID NOT NULL DEFAULT UUIDV7() PRIMARY KEY,
+    payload INT)
+- name: Generate one key for each VALUES row
+  sql: INSERT INTO uuid_postgresql (payload) VALUES (10),(20),(30)
+- name: Every generated key is distinct
+  sql: SELECT COUNT(*) AS n, COUNT(DISTINCT id) AS distinct_ids FROM uuid_postgresql
+  expect:
+    rows: 1
+    data:
+    - n: 3
+      distinct_ids: 3
+- name: Normalize explicit UUID input
+  sql: INSERT INTO uuid_postgresql (id,payload) VALUES ('550E8400-E29B-41D4-A716-446655440000',40)
+- name: Read canonical UUID
+  sql: SELECT id FROM uuid_postgresql WHERE payload=40
+  expect:
+    rows: 1
+    data:
+    - id: 550e8400-e29b-41d4-a716-446655440000
+- name: Reject duplicate UUID regardless of input case
+  sql: INSERT INTO uuid_postgresql (id,payload) VALUES ('550e8400-e29b-41d4-a716-446655440000',50)
+  expect:
+    error: true
+- name: Reject malformed UUID
+  sql: INSERT INTO uuid_postgresql (id,payload) VALUES ('bad-uuid',60)
+  expect:
+    error: true
+- name: Explicit NULL does not request an automatic UUID
+  sql: INSERT INTO uuid_postgresql (id,payload) VALUES (NULL,70)
+  expect:
+    error: true
+- name: INSERT SELECT evaluates the default per source row
+  sql: INSERT INTO uuid_postgresql (payload) SELECT payload+100 FROM uuid_postgresql
+- name: Source and copy have unique UUID keys
+  sql: SELECT COUNT(*) AS n, COUNT(DISTINCT id) AS distinct_ids FROM uuid_postgresql
+  expect:
+    rows: 1
+    data:
+    - n: 8
+      distinct_ids: 8
+- name: UUID postfix cast canonicalizes
+  sql: SELECT '550E8400-E29B-41D4-A716-446655440000'::uuid AS id
+  expect:
+    rows: 1
+    data:
+    - id: 550e8400-e29b-41d4-a716-446655440000
+- name: UUID standard cast canonicalizes
+  sql: SELECT CAST('550E8400-E29B-41D4-A716-446655440000' AS uuid) AS id
+  expect:
+    rows: 1
+    data:
+    - id: 550e8400-e29b-41d4-a716-446655440000
+- name: PostgreSQL generators report their versions
+  sql: SELECT UUID_EXTRACT_VERSION(gen_random_uuid()) AS v4, UUID_EXTRACT_VERSION(uuidv7())
+    AS v7
+  expect:
+    rows: 1
+    data:
+    - v4: 4
+      v7: 7
+- name: ALTER preserves a dynamic UUID generator
+  sql: ALTER TABLE uuid_postgresql ALTER COLUMN id SET DEFAULT UUIDV4()
+- name: Changed UUID default is evaluated for each row
+  sql: INSERT INTO uuid_postgresql(payload) VALUES (301),(302)
+- name: Changed default produces v4 values
+  sql: SELECT UUID_EXTRACT_VERSION(id) AS version FROM uuid_postgresql WHERE payload>=301
+    ORDER BY payload
+  expect:
+    rows: 2
+    data:
+    - version: 4
+    - version: 4
+- name: RFC timestamp extraction retains milliseconds
+  sql: SELECT UUID_EXTRACT_TIMESTAMP('017f22e2-79b0-7cc3-98c4-dc0c0c07398f') AS stamp
+  expect:
+    rows: 1
+    data:
+    - stamp: '2022-02-22 19:22:22.000+00:00'
+- name: Non-RFC variant has no extracted version
+  sql: SELECT UUID_EXTRACT_VERSION('00000000-0000-0000-0000-000000000000') AS version
+  expect:
+    rows: 1
+    data:
+    - version: null
+- name: Volatile UUID generator remains per row in query execution
+  sql: SELECT COUNT(DISTINCT uuidv7()) AS n FROM uuid_postgresql
+  expect:
+    rows: 1
+    data:
+    - n: 10
+cleanup:
+- sql: DROP TABLE IF EXISTS uuid_postgresql
+- sql: DROP TABLE IF EXISTS uuid_postgresql_official

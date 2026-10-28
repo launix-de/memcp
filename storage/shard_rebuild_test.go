@@ -2987,7 +2987,7 @@ func TestGroupPartitionHintsShareWeightedRowBudget(t *testing.T) {
 				for j := range pivots {
 					pivots[j] = scm.NewInt(int64(j))
 				}
-				dims[i] = shardDimension{fmt.Sprint(i), n, pivots}
+				dims[i] = shardDimension{Column: fmt.Sprint(i), NumPartitions: n, Pivots: pivots}
 			}
 			balanced := balancePartitionHints(dims, tc.rows)
 			count, valid := checkedRepartitionShardCount(balanced, maxRepartitionShards)
@@ -3028,7 +3028,7 @@ func TestNullDistinctUniqueSkipsColdShard(t *testing.T) {
 	}
 	accepted := 0
 	tbl.ProcessUniqueCollision([]string{"payload"}, [][]scm.Scmer{{scm.NewNil()}}, false,
-		func(rows [][]scm.Scmer) { accepted += len(rows) }, nil,
+		func(rows [][]scm.Scmer, _ func() bool) { accepted += len(rows) }, nil,
 		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision %s", key) }, 0, nil)
 	if accepted != 1 {
 		t.Fatalf("accepted=%d", accepted)
@@ -3065,7 +3065,7 @@ func TestPartitionUniqueKeepsUnrelatedShardsCold(t *testing.T) {
 	target := computeShardIndex(tbl.PDimensions, []scm.Scmer{id})
 	accepted := 0
 	tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{id}}, false,
-		func(rows [][]scm.Scmer) { accepted += len(rows) }, nil,
+		func(rows [][]scm.Scmer, _ func() bool) { accepted += len(rows) }, nil,
 		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision %s", key) }, 0, nil)
 	if accepted != 1 || shards[target].state() == COLD {
 		t.Fatal("partition-local unique probe did not inspect its target")

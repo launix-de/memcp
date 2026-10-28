@@ -1,0 +1,138 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: UUID types, generation, conversions and per-row defaults through mysql
+  syntax: mysql
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS uuid_mysql
+- sql: DROP TABLE IF EXISTS uuid_mysql_official
+test_cases:
+- name: Official MySQL binary UUID primary key declaration
+  sql: CREATE TABLE uuid_mysql_official (id BINARY(16) DEFAULT (UUID_TO_BIN(UUID())) PRIMARY KEY, payload TEXT)
+- name: Official MySQL default generates a key for a single row
+  sql: INSERT INTO uuid_mysql_official(payload) VALUES ('Hallo')
+- name: Official MySQL default generates different keys in one batch
+  sql: INSERT INTO uuid_mysql_official(payload) VALUES ('second'),('third')
+- name: Official MySQL binary keys are distinct sixteen-byte version-one UUIDs
+  sql: SELECT COUNT(*) AS n, COUNT(DISTINCT id) AS ids, MIN(LENGTH(id)) AS bytes, MIN(UUID_EXTRACT_VERSION(BIN_TO_UUID(id))) AS version FROM uuid_mysql_official
+  expect:
+    rows: 1
+    data:
+    - n: 3
+      ids: 3
+      bytes: 16
+      version: 1
+- name: Official MySQL default is per row for INSERT SELECT
+  sql: INSERT INTO uuid_mysql_official(payload) SELECT payload FROM uuid_mysql_official
+- name: Official MySQL copied rows retain distinct generated keys
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids FROM uuid_mysql_official
+  expect:
+    rows: 1
+    data:
+    - n: 6
+      ids: 6
+- name: Create UUID primary key with per-row v7 default
+  sql: CREATE TABLE uuid_mysql (id UUID NOT NULL DEFAULT UUID_V7() PRIMARY KEY, payload
+    INT)
+- name: Generate one key for each VALUES row
+  sql: INSERT INTO uuid_mysql (payload) VALUES (10),(20),(30)
+- name: Every generated key is distinct
+  sql: SELECT COUNT(*) AS n, COUNT(DISTINCT id) AS distinct_ids FROM uuid_mysql
+  expect:
+    rows: 1
+    data:
+    - n: 3
+      distinct_ids: 3
+- name: Normalize explicit UUID input
+  sql: INSERT INTO uuid_mysql (id,payload) VALUES ('550E8400-E29B-41D4-A716-446655440000',40)
+- name: Read canonical UUID
+  sql: SELECT id FROM uuid_mysql WHERE payload=40
+  expect:
+    rows: 1
+    data:
+    - id: 550e8400-e29b-41d4-a716-446655440000
+- name: Reject duplicate UUID regardless of input case
+  sql: INSERT INTO uuid_mysql (id,payload) VALUES ('550e8400-e29b-41d4-a716-446655440000',50)
+  expect:
+    error: true
+- name: Reject malformed UUID
+  sql: INSERT INTO uuid_mysql (id,payload) VALUES ('bad-uuid',60)
+  expect:
+    error: true
+- name: Explicit NULL does not request an automatic UUID
+  sql: INSERT INTO uuid_mysql (id,payload) VALUES (NULL,70)
+  expect:
+    error: true
+- name: INSERT SELECT evaluates the default per source row
+  sql: INSERT INTO uuid_mysql (payload) SELECT payload+100 FROM uuid_mysql
+- name: Source and copy have unique UUID keys
+  sql: SELECT COUNT(*) AS n, COUNT(DISTINCT id) AS distinct_ids FROM uuid_mysql
+  expect:
+    rows: 1
+    data:
+    - n: 8
+      distinct_ids: 8
+- name: MySQL UUID uses version one
+  sql: SELECT UUID_EXTRACT_VERSION(UUID()) AS version
+  expect:
+    rows: 1
+    data:
+    - version: 1
+- name: Validate text and NULL
+  sql: SELECT IS_UUID('550e8400-e29b-41d4-a716-446655440000') AS valid, IS_UUID('bad')
+    AS invalid, IS_UUID(NULL) AS missing
+  expect:
+    rows: 1
+    data:
+    - valid: true
+      invalid: false
+      missing: null
+- name: Binary conversion and swap roundtrip
+  sql: SELECT LENGTH(UUID_TO_BIN('550e8400-e29b-41d4-a716-446655440000')) AS bytes,
+    BIN_TO_UUID(UUID_TO_BIN('550e8400-e29b-41d4-a716-446655440000',1),1) AS id
+  expect:
+    rows: 1
+    data:
+    - bytes: 16
+      id: 550e8400-e29b-41d4-a716-446655440000
+- name: Extract v7 milliseconds
+  sql: SELECT UUID_TIMESTAMP_MS('017f22e2-79b0-7cc3-98c4-dc0c0c07398f') AS ms
+  expect:
+    rows: 1
+    data:
+    - ms: 1645557742000
+- name: ALTER preserves a dynamic UUID generator
+  sql: ALTER TABLE uuid_mysql ALTER COLUMN id SET DEFAULT UUIDV4()
+- name: Changed UUID default is evaluated for each row
+  sql: INSERT INTO uuid_mysql(payload) VALUES (301),(302)
+- name: Changed default produces v4 values
+  sql: SELECT UUID_EXTRACT_VERSION(id) AS version FROM uuid_mysql WHERE payload>=301
+    ORDER BY payload
+  expect:
+    rows: 2
+    data:
+    - version: 4
+    - version: 4
+- name: RFC timestamp extraction retains milliseconds
+  sql: SELECT UUID_EXTRACT_TIMESTAMP('017f22e2-79b0-7cc3-98c4-dc0c0c07398f') AS stamp
+  expect:
+    rows: 1
+    data:
+    - stamp: '2022-02-22 19:22:22.000+00:00'
+- name: Non-RFC variant has no extracted version
+  sql: SELECT UUID_EXTRACT_VERSION('00000000-0000-0000-0000-000000000000') AS version
+  expect:
+    rows: 1
+    data:
+    - version: null
+- name: Volatile UUID generator remains per row in query execution
+  sql: SELECT COUNT(DISTINCT UUID_V7()) AS n FROM uuid_mysql
+  expect:
+    rows: 1
+    data:
+    - n: 10
+cleanup:
+- sql: DROP TABLE IF EXISTS uuid_mysql
+- sql: DROP TABLE IF EXISTS uuid_mysql_official

@@ -20,6 +20,27 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 	c := r.resourceCell(packet.Resource)
 	c.acquire.Lock()
 	defer c.acquire.Unlock()
+	return r.grantAcquired(c, packet)
+}
+
+// The caller owns this cell's inbound publication boundary. Cluster references
+// install data and publish the matching grant before acknowledging the owner.
+func (r *replicationManager) grantAcquired(c *replicaCell, packet mosiPacket) error {
+	publication := c.ownstate.Snapshot()
+	if r.cluster != nil && packet.State == "S" && publication.Phase() == mosi.MR && publication.Flight().ID() == packet.ID {
+		// A read grant superseded by this flight's write upgrade still proves
+		// the reader epoch registered by its owner. Keep that control metadata
+		// so a subsequent invalidation can revoke the registered reader; never
+		// grant S or wake the MR waiters from this weaker response.
+		r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
+			if packet.Epoch < record.Epoch {
+				return false
+			}
+			record.Resource, record.Owner, record.Epoch = packet.Resource, packet.Owner, packet.Epoch
+			return true
+		})
+		return nil
+	}
 	_, err := c.ownstate.Grant(packet.ID, mosi.ParsePhase(packet.State), func() error {
 		r.mu.Lock()
 		current := r.directory.Records[r.resourceKey(packet.Resource)]
@@ -50,6 +71,9 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 }
 
 func (r *replicationManager) invalidateResource(ctx context.Context, source string, packet mosiPacket) error {
+	if err := r.acceptRevocationRoutes(source, packet); err != nil {
+		return err
+	}
 	if r.cluster == nil && (r.master || source != "") {
 		return fmt.Errorf("invalidation from non-master")
 	}
@@ -63,7 +87,16 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 		epoch := r.directory.Records[r.resourceKey(packet.Resource)].Epoch
 		r.mu.Unlock()
 		if packet.Epoch > epoch {
-			return fmt.Errorf("future invalidation epoch")
+			if r.cluster == nil || c.ownstate.Phase() != mosi.IO {
+				return fmt.Errorf("future invalidation epoch %d > %d in %s", packet.Epoch, epoch, c.ownstate.Phase())
+			}
+			// A restarted peer has no saved permissions. Revoking its already
+			// invalid resource is safe and lets the live owner's reader directory
+			// drain without inventing rights from the shared backend.
+			r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
+				record.Epoch, record.Owner = packet.Epoch, source
+				return true
+			})
 		}
 		if packet.Epoch < epoch {
 			return nil
@@ -96,9 +129,6 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 	c := r.resourceCell(packet.Resource)
 	// Older safety-copy packets must be enqueued before this ownership offer.
 	// Waiting for a sender never closes local write admission.
-	if r.cluster != nil && packet.Resource.Shard != "" {
-		r.obtain(mosiResource{Database: packet.Resource.Database}, mosi.M, "", nil)
-	}
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	releasePersistence, err := replicaPersistenceRead(packet.Resource)
@@ -201,7 +231,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		}
 	}
 	if !r.resourceKnown(packet.Resource) {
-		return fmt.Errorf(mosi.NetworkError)
+		return fmt.Errorf("%s: unknown authority for %s", mosi.NetworkError, packet.Resource.key())
 	}
 	c := r.resourceCell(packet.Resource)
 	c.directory.Lock()
@@ -210,6 +240,9 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		return ctx.Err()
 	}
 	if r.cluster != nil {
+		if packet.Boot != "" && !r.cluster.requestIncarnation(requester, packet.Boot) {
+			return fmt.Errorf("stale cluster request incarnation")
+		}
 		// Discovery may race an earlier handover while this request waits for
 		// directory ownership. The old owner forwards to the successor; it must
 		// never become a permanent coordinator recalling the actual owner.
@@ -219,7 +252,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		if owner != "" && owner != r.id {
 			peer := r.peer(owner)
 			if peer == nil {
-				return fmt.Errorf(mosi.NetworkError)
+				return fmt.Errorf("%s: missing routed owner %s for %s", mosi.NetworkError, owner, packet.Resource.key())
 			}
 			packet.From, packet.To = requester, owner
 			return peer.post(packet)
@@ -250,20 +283,20 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		sameSequence := packet.Sequence == mark.Sequence
 		differentFlight := mark.ID != "" && mark.ID != packet.ID
 		completed := mark.Completed && mark.Write == write
-		if packet.Sequence < mark.Sequence || sameSequence && (differentFlight || mark.Write && !write || completed) {
+		if mark.Boot == packet.Boot && (packet.Sequence < mark.Sequence || sameSequence && (differentFlight || mark.Write && !write || completed)) {
 			stale = true
 			return false
 		}
 		if record.Requests == nil {
 			record.Requests = make(map[string]replicaRequestMark)
 		}
-		record.Requests[requester] = replicaRequestMark{Sequence: packet.Sequence, Write: write, ID: packet.ID}
+		record.Requests[requester] = replicaRequestMark{Sequence: packet.Sequence, Write: write, ID: packet.ID, Boot: packet.Boot}
 		return true
 	})
 	if stale {
 		return nil
 	}
-	originalOwner := record.Owner
+	originalOwner, originalEpoch := record.Owner, record.Epoch
 	// The successor remains private while network handover runs.
 	readers := make(map[string]bool, len(record.Readers))
 	for id, present := range record.Readers {
@@ -276,9 +309,6 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			oldState = "O"
 		}
 		if record.Owner == r.id {
-			if r.cluster != nil && packet.Resource.Shard != "" {
-				r.obtain(mosiResource{Database: packet.Resource.Database}, mosi.M, "", nil)
-			}
 			releasePersistence, err := replicaPersistenceRead(packet.Resource)
 			if err != nil {
 				return err
@@ -341,8 +371,14 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				}
 				r.publishLocal(packet.Resource, mosi.IO)
 				handover.Release()
-			} else if err := r.step(ctx, reader, mosiPacket{Kind: "invalidate", ID: uuid.NewString(), Resource: packet.Resource, Epoch: record.Epoch}); err != nil {
-				return err
+			} else {
+				var routes []shardForward
+				if packet.Resource.Shard != "" {
+					routes = r.shardRoutes(packet.Resource)
+				}
+				if err := r.step(ctx, reader, mosiPacket{Kind: "invalidate", ID: uuid.NewString(), Resource: r.canonicalResource(packet.Resource), Epoch: record.Epoch, Forwards: routes}); err != nil {
+					return err
+				}
 			}
 		}
 		record.Readers = make(map[string]bool)
@@ -360,7 +396,11 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 	// directory commits its new owner. A crash during transfer leaves ownership
 	// at the old modifier, never at an incomplete destination copy.
 	if requester != r.id && requester != originalOwner {
-		if err := r.transmitResource(ctx, requester, mosiPacket{ID: packet.ID, Resource: packet.Resource, Epoch: record.Epoch, Content: record.Content}); err != nil {
+		header := mosiPacket{ID: packet.ID, Resource: packet.Resource, Epoch: record.Epoch, Content: record.Content}
+		if r.cluster != nil {
+			header.State, header.Owner = grantState, record.Owner
+		}
+		if err := r.transmitResource(ctx, requester, header); err != nil {
 			return err
 		}
 	}
@@ -376,13 +416,19 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 	} else if record.Readers[r.id] {
 		record.State = "S"
 	}
-	r.updateRecord(packet.Resource, func(current *replicaRecord) bool {
+	record = r.updateRecord(packet.Resource, func(current *replicaRecord) bool {
 		// updateRecord cloned the latest published request directory. Complete
 		// only that private successor; the earlier pending record may be retained
 		// by diagnostics or recovery while this handover was awaiting an ACK.
 		mark := current.Requests[requester]
 		mark.Completed = true
 		current.Requests[requester] = mark
+		if r.cluster != nil && current.Epoch > originalEpoch {
+			// The reference has already woken its new owner. It may have
+			// granted this node fresh rights before our ACK worker resumed.
+			// Complete replay suppression without overwriting that authority.
+			return true
+		}
 		record.Requests = current.Requests
 		*current = record
 		if r.master {
@@ -408,12 +454,22 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		}
 	}
 	if requester == r.id {
-		_, err := c.ownstate.Grant(packet.ID, mosi.ParsePhase(grantState), func() error { return nil })
+		_, err := c.ownstate.Grant(packet.ID, mosi.ParsePhase(grantState), func() error {
+			if r.cluster != nil {
+				c.clusterstate.Publish(mosi.ParsePhase(grantState))
+			}
+			return nil
+		})
 		return err
 	}
 	peer := r.peer(requester)
 	if peer == nil {
 		return fmt.Errorf(mosi.NetworkError)
+	}
+	if r.cluster != nil && requester != originalOwner {
+		// Source admission was reduced before sending the reference. Never
+		// republish that old downgrade after a possible newer inbound grant.
+		return nil // The reference ACK already confirms publication of this grant.
 	}
 	r.publishLocal(packet.Resource, mosi.ParsePhase(record.State))
 	return peer.post(mosiPacket{Kind: "grant", ID: packet.ID, Resource: packet.Resource, Epoch: record.Epoch, State: grantState, Content: record.Content, Owner: record.Owner, Readers: func() map[string]bool {
@@ -461,6 +517,47 @@ func (r *replicationManager) acceptRequestRoutes(source string, packet mosiPacke
 		if cell := r.lookupCell(route.From); cell != nil && cell != authority {
 			return fmt.Errorf("request forwarding crosses shard authorities")
 		}
+	}
+	for _, route := range packet.Forwards {
+		r.forwardResource(route.From, route.To)
+	}
+	return nil
+}
+
+// Revocation must follow the same native UUID edges as data installation. A
+// reader may still hold a predecessor when its owner rebuilds before the next
+// write. Only its recorded owner at that epoch may connect those identities.
+func (r *replicationManager) acceptRevocationRoutes(source string, packet mosiPacket) error {
+	if len(packet.Forwards) == 0 {
+		return nil
+	}
+	var authority *replicaCell
+	for _, route := range packet.Forwards {
+		if !route.From.valid() || route.From.Shard == "" || route.From.Database != packet.Resource.Database || route.From.Table != packet.Resource.Table || route.To != packet.Resource {
+			return fmt.Errorf("invalid revocation forwarding")
+		}
+		if cell := r.lookupCell(route.From); cell != nil {
+			if authority != nil && authority != cell {
+				return fmt.Errorf("revocation crosses shard authorities")
+			}
+			authority = cell
+		}
+	}
+	if r.cluster != nil {
+		if authority == nil || authority.ownstate.Phase() == mosi.IO {
+			// A restarted process has no predecessor permission to revoke.
+			// Do not fabricate UUID edges or rights from an owner's hint; the
+			// ordinary invalidation can acknowledge its already-invalid target.
+			return nil
+		}
+		r.mu.Lock()
+		record := r.directory.Records[r.resourceKey(*authority.resource.Load())]
+		r.mu.Unlock()
+		if record.Owner != source || packet.Epoch != record.Epoch {
+			return fmt.Errorf("revocation forwarding from non-owner")
+		}
+	} else if r.master || source != "" {
+		return fmt.Errorf("revocation forwarding from non-master")
 	}
 	for _, route := range packet.Forwards {
 		r.forwardResource(route.From, route.To)

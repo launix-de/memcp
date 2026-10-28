@@ -100,7 +100,7 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 		}
 	}
 	if owner == "" {
-		return "", fmt.Errorf(mosi.NetworkError)
+		return "", fmt.Errorf("%s: no live owner for %s", mosi.NetworkError, resource.key())
 	}
 	// Discovery spans replies from several live nodes. Ownership may have
 	// advanced since our initial report. Re-sample routing only: this must never
@@ -155,9 +155,31 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 		c.clusterstate.Establish(state)
 		c.ownstate.Establish(state)
 	} else {
+		cell := r.resourceCell(resource)
 		r.updateRecord(resource, func(record *replicaRecord) bool {
+			// Discovery is advisory and spans network waits. A grant/handover
+			// may have advanced after the final report too. Never overwrite its
+			// owner or reader directory with that older observation.
+			phase := cell.resolved().ownstate.Snapshot()
+			permission := phase.Phase()
+			if permission.Requested() {
+				permission = phase.Retained()
+			}
+			if permission == mosi.M || permission == mosi.O {
+				owner = r.id
+				return false
+			}
+			if record.Handoff != "" {
+				owner = record.Handoff
+				return false
+			}
+			if record.Owner != own.Owner || record.Epoch != own.Epoch {
+				if record.Owner != "" {
+					owner = record.Owner
+				}
+				return false
+			}
 			record.Resource, record.Owner, record.Epoch = resource, owner, epoch
-			record.Readers = nil
 			return true
 		})
 	}
@@ -194,7 +216,7 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 			return c
 		}
 		if action == mosi.Send || action == mosi.Upgrade {
-			packet := mosiPacket{Kind: "read", Resource: resource, From: r.id, To: owner, ID: publication.Flight().ID(), Sequence: r.requestSequence(publication.Flight())}
+			packet := mosiPacket{Kind: "read", Resource: resource, From: r.id, To: owner, ID: publication.Flight().ID(), Sequence: r.requestSequence(publication.Flight()), Boot: cluster.self.Boot}
 			if publication.Phase() == mosi.MR {
 				packet.Kind = "write"
 			}
@@ -297,6 +319,9 @@ func (cluster *nodeCluster) receive(source string, packet *mosiPacket, connectio
 	case "reference":
 		return cluster.installReference(source, *packet)
 	case "read", "write":
+		if packet.Boot == "" || !cluster.requestIncarnation(source, packet.Boot) {
+			return fmt.Errorf("stale cluster request incarnation")
+		}
 		copy := *packet
 		connection.workers.Add(1)
 		go func() {
@@ -312,11 +337,14 @@ func (cluster *nodeCluster) receive(source string, packet *mosiPacket, connectio
 				}()
 				owner, lookupErr := cluster.locate(ctx, copy.Resource)
 				if lookupErr != nil {
-					err = lookupErr
+					err = fmt.Errorf("cluster owner lookup: %w", lookupErr)
 					return
 				}
 				if owner == r.id {
 					err = r.coordinate(ctx, source, copy)
+					if err != nil {
+						err = fmt.Errorf("cluster coordinate: %w", err)
+					}
 					return
 				}
 				peer := cluster.peer(owner)
@@ -407,7 +435,7 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 	if expected == nil {
 		if publication.Phase().Requested() {
 			if publication.Flight().ID() != packet.ID || record.Owner != source && packet.Epoch <= record.Epoch {
-				return fmt.Errorf("unexpected shared reference request")
+				return fmt.Errorf("unexpected shared reference request: resource=%s incoming=%s epoch=%d pending=%s epoch=%d owner=%s source=%s", packet.Resource.key(), packet.ID, packet.Epoch, publication.Flight().ID(), record.Epoch, record.Owner, source)
 			}
 		} else if publication.Phase() != mosi.S || record.Owner != source || record.Epoch != packet.Epoch {
 			// Unsolicited O updates may refresh existing S readers only at the
@@ -440,6 +468,18 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 		}
 	}
 	// Epoch, authenticated sender, flight and content have all been checked.
+	// Publish the observed owner version before merging native UUID cells. A
+	// successor may already contain an older invalidation, while this exact
+	// predecessor flight is receiving a newer grant. Merging first would discard
+	// the pending flight and then ACK a grant that could never install. An older
+	// retained read proof does not survive advancement to this owner version.
+	if packet.Epoch > record.Epoch {
+		c.ownstate.Publish(mosi.IO)
+		r.updateRecord(packet.Resource, func(current *replicaRecord) bool {
+			current.Epoch = packet.Epoch
+			return true
+		})
+	}
 	// Rejected references above leave both lookup and active UUID unchanged.
 	for _, route := range packet.Forwards {
 		r.forwardResource(route.From, route.To)
@@ -453,7 +493,20 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 			return err
 		}
 	}
-	r.updateRecord(packet.Resource, func(record *replicaRecord) bool { record.Content = packet.Content; return true })
+	r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
+		record.Content = packet.Content
+		// Installation registers the reader before ACK, including an S flight
+		// already upgraded to MR. Its later S grant must retain this epoch.
+		if packet.Epoch > record.Epoch {
+			record.Epoch = packet.Epoch
+		}
+		return true
+	})
+	if expected == nil && packet.State != "" {
+		if err := r.grantAcquired(c.resolved(), packet); err != nil {
+			return err
+		}
+	}
 	c.acquire.Unlock()
 	locked = false
 	if expected != nil {
@@ -526,6 +579,20 @@ func (cluster *nodeCluster) peerAvailable(id string) bool {
 		case <-peer.done:
 		default:
 			return true
+		}
+	}
+	return false
+}
+
+func (cluster *nodeCluster) requestIncarnation(requester, boot string) bool {
+	if requester == cluster.self.ID {
+		return boot == cluster.self.Boot
+	}
+	if view := cluster.view.Load(); view != nil {
+		for _, member := range view.members {
+			if member.ID == requester {
+				return member.Boot == boot
+			}
 		}
 	}
 	return false

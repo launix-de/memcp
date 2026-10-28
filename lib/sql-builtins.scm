@@ -20,6 +20,33 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* all upper case */
 /*(sql_builtins "HELLO" (lambda () "Hello world"))*/
 
+/* UUID generators remain volatile, including when used in stored defaults. */
+(sql_builtins "UUID" uuid_v1)
+(sql_builtins "UUID_V4" uuid_v4)
+(sql_builtins "UUID_V7" uuid_v7)
+(sql_builtins "UUIDV4" uuid_v4)
+(sql_builtins "UUIDV7" uuid_v7)
+(sql_builtins "GEN_RANDOM_UUID" uuid_v4)
+(sql_builtins "UUID_GENERATE_V4" uuid_v4)
+(sql_builtins "IS_UUID" uuid_valid)
+(sql_builtins "UUID_TO_BIN" uuid_to_bin)
+(sql_builtins "BIN_TO_UUID" uuid_from_bin)
+(sql_builtins "UUID_EXTRACT_VERSION" uuid_extract_version)
+(sql_builtins "UUID_EXTRACT_TIMESTAMP" uuid_timestamp)
+(sql_builtins "UUID_TIMESTAMP_MS" uuid_timestamp_ms)
+
+/* Persist only a generator name, never a sampled UUID or request closure. */
+(define sql_uuid_default (parser (or
+	(parser '("(" (define name sql_uuid_default) ")") name)
+	(parser '((atom "UUID_TO_BIN" true) "(" (define name sql_uuid_default)
+		(define swap (or (parser '("," (define flag (or (atom "0") (atom "1")))) flag)
+			(parser empty "0"))) ")") (concat "UUID_TO_BIN(" name "()," swap ")"))
+	(parser '((define name (or (atom "UUID" true) (atom "UUID_V4" true)
+		(atom "UUID_V7" true) (atom "UUIDV4" true) (atom "UUIDV7" true)
+		(atom "GEN_RANDOM_UUID" true) (atom "UUID_GENERATE_V4" true)
+		(atom "NEWID" true))) "(" ")") (toUpper name))
+)))
+
 /* time */
 (sql_builtins "UNIX_TIMESTAMP" unix_timestamp)
 (sql_builtins "CURRENT_TIMESTAMP" now)
