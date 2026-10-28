@@ -1583,6 +1583,8 @@ def run_cluster_operator_contracts(node, journal, report_path, status=None, refe
         ("order-computed-ties", "SELECT id,v0 FROM big_items ORDER BY v0%7 ASC,id DESC LIMIT 11 OFFSET 3"),
         ("order-null-keys", "SELECT id,v0 FROM big_items ORDER BY CASE WHEN id%17=0 THEN NULL ELSE v0 END DESC,id ASC LIMIT 7"),
         ("order-first", "SELECT id FROM big_items WHERE id>=5000 ORDER BY id DESC LIMIT 1"),
+        ("order-unbounded-pages", "SELECT id,v0 FROM big_items WHERE id<900 ORDER BY v0 DESC,id ASC"),
+        ("first-unordered-unique", "SELECT id FROM big_items WHERE id=245000 LIMIT 1"),
         ("exists-match", "SELECT EXISTS(SELECT 1 FROM big_items WHERE v0%97=43) AS hit"),
         ("exists-no-match", "SELECT EXISTS(SELECT 1 FROM big_items WHERE v0%97=-1) AS hit"),
         ("scalar-lookup-hit", "SELECT (SELECT v0 FROM big_items WHERE id=245000) AS value"),

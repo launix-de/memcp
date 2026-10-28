@@ -2244,6 +2244,7 @@ func Init(en scm.Env) {
 		Optimize: optimizeScanOrder,
 	}
 	scm.Declare(&en, scanOrderDeclaration)
+	declareScanKeyPredicate(&en)
 	declareScanOrderKeys(&en, scanOrderDeclaration)
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_order_multi",

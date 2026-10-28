@@ -48,6 +48,10 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 			if input.tx == nil {
 				return nil, fmt.Errorf("missing prepared scan transaction")
 			}
+			if input.operator == shardOrdered {
+				run := s.prepareOrderedRun(input)
+				return scanResult{res: scm.NewAny(run), outCount: int64(len(run.rows)), candidateCount: run.candidates}, nil
+			}
 			if input.operator == shardExists {
 				found := s.scanExists(input.access, input.conditionCols, input.condition, input.tx, SessionStateFromTx(input.tx), nil)
 				var count int64

@@ -565,12 +565,15 @@ func (service *nodeScanService) wakeObjectReleases() {
 	}
 }
 
+// Objects retaining physical input generations participate in the existing file
+// maintenance directory, independently of their request methods or wire kind.
+// GC of a registered run must not race deletion of its historical shard files.
+func (shard *storageShard) clusterInputShard() *storageShard         { return shard }
+func (tx *storageShardTransaction) clusterInputShard() *storageShard { return tx.clusterShard }
+func (run *orderedScanRun) clusterInputShard() *storageShard         { return run.shard }
 func clusterObjectShard(object ClusterObject) *storageShard {
-	switch object := object.(type) {
-	case *storageShard:
-		return object
-	case *storageShardTransaction:
-		return object.clusterShard
+	if owner, ok := object.(interface{ clusterInputShard() *storageShard }); ok {
+		return owner.clusterInputShard()
 	}
 	return nil
 }

@@ -132,9 +132,10 @@ func (value scanWireValue) thaw(depth int, decode ...scm.ProcedureDecode) (scm.S
 // the existing scan engine; no residual predicate or mandatory constraint is
 // discarded by delegation. Runtime physical source sets remain nonportable.
 type remoteScanAccess struct {
-	Boundaries []scm.Scmer     `json:"boundaries,omitempty"`
-	Values     []scanWireValue `json:"values,omitempty"`
-	Covered    bool            `json:"covered,omitempty"`
+	Orders     []json.RawMessage `json:"orders,omitempty"`
+	Boundaries []scm.Scmer       `json:"boundaries,omitempty"`
+	Values     []scanWireValue   `json:"values,omitempty"`
+	Covered    bool              `json:"covered,omitempty"`
 }
 
 func freezeScanAccess(access scanAccess, bindings ...*scm.SerializationContext) (remoteScanAccess, error) {
@@ -186,12 +187,53 @@ func freezeScanAccess(access scanAccess, bindings ...*scm.SerializationContext) 
 				box.lowerSlot = slot
 			}
 		}
+		var order json.RawMessage
+		if box.order != nil {
+			if _, _, collation := scm.LookupCollate(box.order); !collation {
+				var err error
+				var binding *scm.SerializationContext
+				if len(bindings) > 0 {
+					binding = bindings[0]
+				}
+				order, err = freezeScanDirection(box.order, binding)
+				if err != nil {
+					return out, err
+				}
+				box.order, box.orderMetadata = nil, ""
+			}
+		}
+		out.Orders = append(out.Orders, order)
 		out.Boundaries = append(out.Boundaries, NewScanBoundaryScmer(&box))
 	}
 	return out, nil
 }
 func (access remoteScanAccess) bind(decode ...scm.ProcedureDecode) (scanAccess, error) {
-	for _, item := range access.Boundaries {
+	if len(access.Orders) != 0 && len(access.Orders) != len(access.Boundaries) {
+		return scanAccess{}, fmt.Errorf("invalid boundary order directory")
+	}
+	access.Boundaries = append([]scm.Scmer(nil), access.Boundaries...)
+	for i, item := range access.Boundaries {
+		if len(access.Orders) > 0 && len(access.Orders[i]) > 0 && string(access.Orders[i]) != "null" {
+			options := scm.ProcedureDecode{}
+			if len(decode) > 0 {
+				options = decode[0]
+			}
+			constructor, err := scm.UnmarshalProcedure(access.Orders[i], options)
+			if err != nil {
+				return scanAccess{}, err
+			}
+			if err := validateRemoteScanReadOnly(constructor); err != nil {
+				return scanAccess{}, err
+			}
+			direction := scanSortDirections([]scm.Scmer{scm.Apply(constructor)})[0]
+			if !item.IsCustom(TagScanBoundary) {
+				return scanAccess{}, fmt.Errorf("invalid ordered boundary")
+			}
+			box := *ScanBoundaryFromScmer(item).(*scanBoundaryBox)
+			box.order, box.orderMetadata = direction, orderRelationMeta(direction)
+			item = NewScanBoundaryScmer(&box)
+			access.Boundaries[i] = item
+		}
 		if !item.IsCustom(TagScanBoundary) {
 			return scanAccess{}, fmt.Errorf("invalid remote boundary")
 		}

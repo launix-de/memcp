@@ -15,6 +15,7 @@ import "context"
 import "strings"
 import "testing"
 import "net/http"
+import "sync/atomic"
 import "encoding/json"
 import "net/http/httptest"
 import "github.com/google/uuid"
@@ -526,5 +527,85 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A remote ordered run uses the native sort, retains its captured physical IDs,
+// and feeds bounded pages into the same coordinator merge. Projection callbacks
+// execute only on selected rows; the worker releases its payload before paging.
+func TestRemoteScanOrderedRunPagesAndHorizon(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tremoteorderedrun", 700)
+	RebuildTable(tbl, true, false)
+	source := tbl.ActiveShards()[0]
+	peer, _, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := peer.call(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts); err != nil {
+		t.Fatal(err)
+	}
+	source.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(9999), scm.NewString("future")}}, false, nil, nil, false, nil)
+	executor := &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0], kind: "value", next: new(atomic.Uint64)}
+	stub := &storageShard{uuid: source.uuid, t: tbl}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: executor}
+	stub.scanTarget.Store(target)
+	_, direction := persistableTestOrder(true)
+	calls := 0
+	callback := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { calls++; return scm.NewInt(args[0].Int() + args[1].Int()) })
+	spec := scanOrderTableSpec{table: tbl, condition: scm.Eval(scm.Read(t.Name(), "(lambda () true)"), &scm.Globalenv), sortcols: []scm.Scmer{scm.NewString("id")}, callbackCols: []string{"id"}, callback: callback, perTableOffset: -1, perTableLimit: -1}
+	queue := delegateOrderedQueue(nil, stub, scanAccess{}, &spec, []func(...scm.Scmer) scm.Scmer{direction}, 0, 5, 605, shardReadDelegation{target})
+	if source.cacheReaders.Load() != 0 {
+		t.Fatal("remote run retained native payload after preparation")
+	}
+	// A current routing stub is not the identity of these retained physical IDs.
+	captured := queue.orderedInputUUID()
+	queue.shard = &storageShard{uuid: uuid.New(), t: tbl}
+	if queue.orderedInputUUID() != captured {
+		t.Fatal("routing metadata rebound the captured generation")
+	}
+	pageCalls := 0 // the first page arrived with the run reference
+	original := queue.remote.run.handle.Call
+	queue.remote.run.handle.Call = func(ctx context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
+		if request.Method == "page" {
+			pageCalls++
+		}
+		return original(ctx, request)
+	}
+	value, _, _ := consumeDirectScanOrder(queue, &spec, nil, 0, 5, 600, scm.NewInt(0), false, scm.NewNil())
+	if pageCalls != 2 {
+		t.Fatalf("paging made %d roundtrips, want two requests after the piggybacked page", pageCalls)
+	}
+	// Descending 700..1, skip five, consume 695..96. Future id 9999 excluded.
+	if calls != 600 || value.Int() != int64((695+96)*600/2) {
+		t.Fatalf("calls=%d sum=%v", calls, value)
+	}
+	if queue.remote.next <= 256 {
+		t.Fatal("ordered scan did not consume multiple bounded pages")
+	}
+}
+
+func TestRemoteScanPortableKeyPredicate(t *testing.T) {
+	Init(scm.Globalenv)
+	filter := scm.Eval(scm.Read(t.Name(), "(lambda (value) (> value 10))"), &scm.Globalenv)
+	predicate := newScanKeyPredicate([]scanJoinOrderDriverConstraint{{positions: []int{0}, keys: [][]scm.Scmer{{scm.NewInt(2)}, {scm.NewInt(4)}}}}, filter, 1)
+	encoded, err := scm.MarshalProcedure(predicate)
+	if err != nil {
+		t.Fatalf("%v; wire=%s", err, encoded)
+	}
+	if !strings.Contains(string(encoded), "scan_key_predicate") {
+		t.Fatal("key predicate lost portable constructor")
+	}
+	restored, err := scm.UnmarshalProcedure(encoded, scm.ProcedureDecode{})
+	if err != nil {
+		t.Fatalf("%v; wire=%s", err, encoded)
+	}
+	for _, sample := range []struct {
+		key, extra int64
+		want       bool
+	}{{2, 11, true}, {2, 9, false}, {3, 11, false}, {4, 12, true}} {
+		if got := scm.ToBool(scm.Apply(restored, scm.NewInt(sample.key), scm.NewInt(sample.extra))); got != sample.want {
+			t.Errorf("%+v = %v", sample, got)
+		}
+	}
+	if scm.ToBool(scm.Apply(restored, scm.NewNil(), scm.NewInt(11))) {
+		t.Fatal("NULL matched a join key")
 	}
 }

@@ -22,8 +22,9 @@ import "strings"
 import "github.com/launix-de/memcp/scm"
 
 type orderedBatchRecord struct {
-	shard *storageShard
-	recid uint32
+	remote *orderedRecordValues
+	shard  *storageShard
+	recid  uint32
 }
 
 type orderedBatchPart struct {
@@ -46,7 +47,7 @@ func collectOrderedCandidateBatch(currentTx *TxContext, source scanOrderTableSpe
 	partOrder := make([]*orderedBatchPart, 0)
 	records := make([]orderedBatchRecord, 0, limit)
 	source.conditionCols = nil
-	source.condition = scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	source.condition = scanJoinTrue()
 	source.sortcols = sortcols
 	source.callbackCols = nil
 	source.callback = scm.NewNil()
@@ -142,7 +143,7 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 			partOrder = make([]*orderedBatchPart, 0)
 			remainingOffset := offset
 			bounds, _ := extendBoundariesWithSortCols(nil, sortcols, sortdirs)
-			condition := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+			condition := scanJoinTrue()
 			sessionState := SessionStateFromTx(currentTx)
 			querySeq := querySeqFromTx(currentTx)
 			visit := func(shard *storageShard) {

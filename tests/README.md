@@ -57,7 +57,9 @@ python3 tools/replication_cluster_stress.py --seed 20261023 --rounds 5 --workers
 
 The separate **Cluster SQL operator contracts** CI job compares ordered scans,
 Top-N/OFFSET, computed and NULL sort keys, EXISTS, scalar lookups, joins and
-membership scans against a standalone SQL oracle. Run it with:
+membership scans against a standalone SQL oracle. Fourteen SQL cases include
+an unlimited ordered result spanning multiple pages and LIMIT 1 without ORDER BY.
+Run it with:
 
 ```sh
 python3 tools/replication_cluster_stress.py --cluster-operators-only
