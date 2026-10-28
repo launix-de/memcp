@@ -541,7 +541,7 @@ func TestClusterSchemaLocationsAreRoutingNotPermissions(t *testing.T) {
 	pending, _ := schema.ownstate.Request(mosi.S)
 	resource := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
 	entry := replicaRecord{Resource: resource, Owner: "shard-owner", Epoch: 9, Content: resource.Shard}
-	request := clusterSchemaLocations{"tenant", pending.Flight().ID(), []replicaRecord{entry}}
+	request := clusterSchemaLocations{Header: mosiPacket{Resource: mosiResource{Database: "tenant"}, ID: pending.Flight().ID()}, Entries: []replicaRecord{entry}}
 	if err := cluster.installSchemaLocations("foreign", request); err == nil {
 		t.Fatal("foreign schema source accepted")
 	}
@@ -562,9 +562,43 @@ func TestClusterSchemaLocationsAreRoutingNotPermissions(t *testing.T) {
 	if cluster.manager.directory.Records[resource.key()].Owner != "shard-owner" {
 		t.Fatal("routing overwrote an admitted native reader")
 	}
-	request.Acquisition = "old-flight"
+	request.Header.ID = "old-flight"
 	if err := cluster.installSchemaLocations("schema-owner", request); err == nil {
 		t.Fatal("late schema routing accepted")
+	}
+}
+
+// A request can be forwarded after its recorded schema owner handed over M.
+// Location batches and the native reference must accept the same new epoch,
+// without granting permission from the location metadata itself.
+func TestClusterSchemaLocationsFollowForwardedAcquisition(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}, databases: map[string]bool{"tenant": true}}
+	cluster.initializeManager()
+	resource := mosiResource{Database: "tenant"}
+	schema := cluster.manager.resourceCell(resource)
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch = "previous-owner", 5
+		return true
+	})
+	pending, _ := schema.ownstate.Request(mosi.M)
+	shard := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	request := clusterSchemaLocations{
+		Header:  mosiPacket{Resource: resource, ID: pending.Flight().ID(), Epoch: 5},
+		Entries: []replicaRecord{{Resource: shard, Owner: "shard-owner", Epoch: 3}},
+	}
+	if err := cluster.installSchemaLocations("successor-owner", request); err == nil {
+		t.Fatal("foreign same-epoch location transfer accepted")
+	}
+	request.Header.Epoch = 6
+	if err := cluster.installSchemaLocations("successor-owner", request); err != nil {
+		t.Fatal("forwarded native acquisition rejected", err)
+	}
+	if schema.ownstate.Phase() != mosi.MR || cluster.manager.resourceCell(shard).ownstate.Initialized() {
+		t.Fatal("location batch published native permission")
+	}
+	request.Header.ID = "another-flight"
+	if err := cluster.installSchemaLocations("successor-owner", request); err == nil {
+		t.Fatal("foreign acquisition accepted")
 	}
 }
 
@@ -659,6 +693,68 @@ func TestClusterSchemaLocationTransferUsesBoundedBatches(t *testing.T) {
 	batches := <-counts
 	if len(batches) != 3 || batches[0] != 64 || batches[1] != 64 || batches[2] != 3 {
 		t.Fatal("unbounded or incomplete location transfer", batches)
+	}
+}
+
+func TestClusterSchemaRecoveryRestoresBoundedRoutesWithoutPermissions(t *testing.T) {
+	service := &nodeScanService{}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	local := &nodeCluster{self: clusterMember{ID: "local"}, service: service}
+	local.initializeManager()
+	owner := &nodeCluster{self: clusterMember{ID: "live"}, databases: map[string]bool{"tenant": true}}
+	owner.initializeManager()
+	owner.view.Store(&clusterView{members: []clusterMember{owner.self, local.self}})
+	resources := make([]mosiResource, 131)
+	for i := range resources {
+		resources[i] = mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+		owner.manager.updateRecord(resources[i], func(record *replicaRecord) bool {
+			record.Owner, record.Epoch = "modifier", 7
+			record.Readers = map[string]bool{"reader": true}
+			return true
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- local.recoverSchemaLocations(ctx, "tenant", []*clusterLink{{member: owner.self, peer: peer}})
+	}()
+	for _, count := range []int{64, 64, 3} {
+		select {
+		case message := <-peer.outgoing:
+			var request struct {
+				Return string
+				Data   json.RawMessage
+			}
+			if err := json.Unmarshal(message.Data, &request); err != nil {
+				t.Fatal(err)
+			}
+			value, err := owner.handleLocations(ctx, local.self.ID, "cluster.schema_locations", request.Data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			page := value.(clusterSchemaLocations)
+			if len(page.Entries) != count {
+				t.Fatal("unbounded recovery batch", len(page.Entries))
+			}
+			route, _ := service.returns.Load(request.Return)
+			deliverTestCompletion(t, route, scanCompletion{Data: mustScanJSON(page)})
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	for _, resource := range resources {
+		cell := local.manager.resourceCell(resource)
+		if cell.ownstate.Initialized() || cell.clusterstate.Initialized() {
+			t.Fatal("recovery hint granted authority")
+		}
+		record := local.manager.directory.Records[resource.key()]
+		if record.Owner != "modifier" || record.Epoch != 7 || len(record.Readers) != 0 {
+			t.Fatal("recovery lost or copied ownership", record)
+		}
 	}
 }
 

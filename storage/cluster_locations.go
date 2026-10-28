@@ -14,9 +14,9 @@ import "github.com/launix-de/memcp/storage/mosi"
 // never a grant, a proof that backup files are current, or a second directory.
 // Schema transfers carry bounded batches before installing their reference.
 type clusterSchemaLocations struct {
-	Database    string          `json:"database"`
-	Acquisition string          `json:"acquisition"`
-	Entries     []replicaRecord `json:"entries"`
+	Header  mosiPacket      `json:"header"`
+	Entries []replicaRecord `json:"entries"`
+	After   string          `json:"after,omitempty"`
 }
 
 func locationRecord(record replicaRecord) replicaRecord {
@@ -47,7 +47,7 @@ func (cluster *nodeCluster) transferSchemaLocations(ctx context.Context, target 
 	}
 	for start := 0; start < len(entries); start += 64 {
 		end := min(start+64, len(entries))
-		request := clusterSchemaLocations{header.Resource.Database, header.ID, entries[start:end]}
+		request := clusterSchemaLocations{Header: header, Entries: entries[start:end]}
 		if err := cluster.service.control(ctx, peer, "cluster.schema_locations", request, nil); err != nil {
 			return err
 		}
@@ -55,25 +55,51 @@ func (cluster *nodeCluster) transferSchemaLocations(ctx context.Context, target 
 	return nil
 }
 
+// A restarted schema owner recovers its RAM directory from the same live
+// participants which prove its native authority. This is schema discovery,
+// once per recovery, never a broadcast for each cold shard. Entries restore
+// routes only; even a reported owner cannot grant backend permission here.
+func (cluster *nodeCluster) recoverSchemaLocations(ctx context.Context, database string, links []*clusterLink) error {
+	for _, link := range links {
+		request := clusterSchemaLocations{Header: mosiPacket{Resource: mosiResource{Database: database}}}
+		for {
+			var page clusterSchemaLocations
+			if err := cluster.service.control(ctx, link.peer, "cluster.schema_locations", request, &page); err != nil {
+				return err
+			}
+			if page.Header.Resource != request.Header.Resource || len(page.Entries) > 64 {
+				return fmt.Errorf("invalid schema location recovery")
+			}
+			for _, entry := range page.Entries {
+				if !entry.Resource.valid() || entry.Resource.Database != database || entry.Resource.Shard == "" || entry.Resource.key() <= request.After || entry.Owner == "" || entry.Epoch == 0 {
+					return fmt.Errorf("invalid recovered shard location")
+				}
+				cluster.installLocationHint(entry)
+			}
+			if len(page.Entries) < 64 {
+				break
+			}
+			request.After = page.Entries[len(page.Entries)-1].Resource.key()
+		}
+	}
+	return nil
+}
+
 func (cluster *nodeCluster) installSchemaLocations(source string, request clusterSchemaLocations) error {
-	if !cluster.databases[request.Database] || len(request.Entries) > 64 {
+	if !request.Header.Resource.valid() || request.Header.Resource.Shard != "" || !cluster.databases[request.Header.Resource.Database] || len(request.Entries) > 64 {
 		return fmt.Errorf("invalid schema locations")
 	}
-	schema := cluster.manager.resourceCell(mosiResource{Database: request.Database})
+	schema := cluster.manager.resourceCell(request.Header.Resource)
 	schema.acquire.Lock()
 	defer schema.acquire.Unlock()
-	pending := schema.ownstate.Snapshot()
-	if !pending.Phase().Requested() || pending.Flight().ID() != request.Acquisition {
-		return fmt.Errorf("schema locations require the active acquisition")
-	}
 	cluster.manager.mu.Lock()
-	owner := cluster.manager.directory.Records[request.Database].Owner
+	record := cluster.manager.directory.Records[request.Header.Resource.Database]
 	cluster.manager.mu.Unlock()
-	if owner != source {
-		return fmt.Errorf("schema locations from foreign owner")
+	if _, err := cluster.referenceSource(source, request.Header, schema, record); err != nil {
+		return err
 	}
 	for _, entry := range request.Entries {
-		if !entry.Resource.valid() || entry.Resource.Shard == "" || entry.Resource.Database != request.Database || entry.Owner == "" || entry.Epoch == 0 {
+		if !entry.Resource.valid() || entry.Resource.Shard == "" || entry.Resource.Database != request.Header.Resource.Database || entry.Owner == "" || entry.Epoch == 0 {
 			return fmt.Errorf("invalid shard location")
 		}
 	}
@@ -217,6 +243,23 @@ func (cluster *nodeCluster) handleLocations(ctx context.Context, source, method 
 		var request clusterSchemaLocations
 		if err := json.Unmarshal(data, &request); err != nil {
 			return nil, err
+		}
+		if request.Header.ID == "" {
+			resource := request.Header.Resource
+			if !resource.valid() || resource.Shard != "" || !cluster.databases[resource.Database] {
+				return nil, fmt.Errorf("invalid schema location inventory")
+			}
+			r := cluster.manager
+			r.mu.Lock()
+			var entries []replicaRecord
+			for _, record := range r.directory.Records {
+				if record.Resource.Database == resource.Database && record.Resource.Shard != "" && record.Resource.key() > request.After && record.Owner != "" {
+					entries = append(entries, locationRecord(record))
+				}
+			}
+			r.mu.Unlock()
+			sort.Slice(entries, func(i, j int) bool { return entries[i].Resource.key() < entries[j].Resource.key() })
+			return clusterSchemaLocations{Header: request.Header, Entries: entries[:min(len(entries), 64)]}, nil
 		}
 		return nil, cluster.installSchemaLocations(source, request)
 	case "cluster.location_update":
