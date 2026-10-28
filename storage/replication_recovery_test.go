@@ -227,6 +227,41 @@ func TestReplicationConfigUsesNativePersistenceWithoutRights(t *testing.T) {
 	}
 }
 
+// Native config updates use INSERT ... ON DUPLICATE UPDATE without a scan
+// mapper. Update-only tombstones must survive an actual native WAL reload.
+func TestReplicationConfigPromotionSurvivesRestart(t *testing.T) {
+	source, engine := createDurabilityTestTable(t, "treplication_placement_restart", 0)
+	config, _ := CreateTable(source.schema.Name, "config", Safe, false)
+	for _, col := range []string{"node", "key", "value"} {
+		config.CreateColumn(col, "text", nil, nil)
+	}
+	createTableKey(config, uniqueKey{Id: "PRIMARY", Cols: []string{"node", "key"}}, nil)
+	r := replicaRecoveryFixture()
+	r.config = config
+	first := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	second := mosiResource{Database: "tenant", Table: "other", Shard: uuid.NewString()}
+	for _, resource := range []mosiResource{first, second} {
+		if err := r.saveBackup(resource, resource.Shard); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.writeConfig(replicaConfigEntry{Kind: "backup", Name: first.key()}, replicaConfigEntry{Kind: "backup", Name: second.key()}); err != nil {
+		t.Fatal(err)
+	}
+	reopened := newDatabase()
+	reopened.Name, reopened.persistence, reopened.srState = source.schema.Name, engine, COLD
+	reopened.ensureLoaded()
+	defer reopened.closeTransactionLog()
+	restarted := replicaRecoveryFixture()
+	restarted.id = r.id
+	if err := restarted.loadConfig(reopened.tables.Get("config")); err != nil {
+		t.Fatal(err)
+	}
+	if len(restarted.backups) != 0 {
+		t.Fatalf("removed placements returned after native WAL replay: %+v", restarted.backups)
+	}
+}
+
 func TestReplicationRecoveryInterruptedHandover(t *testing.T) {
 	for _, complete := range []bool{false, true} {
 		t.Run(map[bool]string{false: "incomplete-data", true: "complete-data"}[complete], func(t *testing.T) {

@@ -78,6 +78,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: replication-cluster-stress
+          # Native commit authority lives in .transactions.log; keep it with
+          # the disposable fixture, otherwise WAL replay evidence is incomplete.
+          include-hidden-files: true
           path: |
             ${{ runner.temp }}/replication-stress
             ${{ runner.temp }}/replication-stress-race
