@@ -4359,12 +4359,23 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 				access.Release()
 			}
 		}()
+		resolvedShards := false
 		for i, shard := range shardlist {
 			if needed[i] {
 				if sharedClusterSource(t) {
 					readAccesses[i] = shard.GetRead(currentTx)
 				} else {
 					readAccesses[i] = shard.acquireReadForScan(currentTx)
+				}
+				if current := readAccesses[i].shard; current != nil && current != shard {
+					// Acquisition may install a native successor while this check
+					// retains the preceding topology. Probe the generation actually
+					// acquired, rather than an old source missing newer keys.
+					if !resolvedShards {
+						shardlist = append([]*storageShard(nil), shardlist...)
+						resolvedShards = true
+					}
+					shardlist[i] = current
 				}
 			}
 		}

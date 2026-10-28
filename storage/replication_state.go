@@ -151,10 +151,14 @@ func (r *replicationManager) forwardResource(from, to mosiResource) {
 	}
 	if existing := r.cells[to.key()]; existing != nil && existing.resolved() != cell {
 		existing = existing.resolved()
-		// Prefer already granted authority to a placeholder/request. Otherwise
-		// retain the destination flight and wake source waiters to retry there.
+		// A newer revocation wins over an older granted reader. Comparing only
+		// permission strength can resurrect S after an invalidation reached a
+		// successor placeholder before its native UUID edge was learned.
 		primary, other := cell, existing
-		if authorityRank(existing.ownstate.Phase()) > authorityRank(cell.ownstate.Phase()) || existing.ownstate.Phase().Requested() && cell.ownstate.Phase().Requested() {
+		sourceEpoch := r.directory.Records[current.key()].Epoch
+		targetEpoch := r.directory.Records[to.key()].Epoch
+		if targetEpoch > sourceEpoch || targetEpoch == sourceEpoch &&
+			(authorityRank(existing.ownstate.Phase()) > authorityRank(cell.ownstate.Phase()) || existing.ownstate.Phase().Requested() && cell.ownstate.Phase().Requested()) {
 			primary, other = existing, cell
 		}
 		if other.ownstate.Phase() == mosi.M && primary.ownstate.Phase() == mosi.M {

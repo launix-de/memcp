@@ -1438,6 +1438,23 @@ def run_cluster_inserts(args, artifacts, journal):
             expected = len(nodes) * 32 + (table == "integer_items")
             for node in nodes:
                 result = node.client.sql(f"SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids FROM {table}")
+                if result != [{"n": expected, "ids": expected}]:
+                    # Keep the original result as the oracle. Additional SQL
+                    # only diagnoses cache visibility versus durable row loss;
+                    # a later successful read never repairs this failed check.
+                    diagnostic = {"table": table, "node": node.name, "result": result}
+                    try:
+                        diagnostic["cluster"] = [json.loads(peer.client.scm("(cluster_status true)")) for peer in nodes]
+                        diagnostic["groups"] = node.client.sql(f"SELECT writer,COUNT(*) AS n,MIN(value) AS first_value,MAX(value) AS last_value FROM {table} GROUP BY writer")
+                        session = "uuid-insert-failure-diagnostic"
+                        node.client.sql("START TRANSACTION", session=session)
+                        try:
+                            diagnostic["transaction_count"] = node.client.sql(f"SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids FROM {table}", session=session)
+                        finally:
+                            node.client.sql("ROLLBACK", session=session)
+                    except Exception as error:
+                        diagnostic["diagnostic_error"] = str(error)
+                    (directory / "failed-read.json").write_text(json.dumps(diagnostic, indent=2) + "\n")
                 expect(result, [{"n": expected, "ids": expected}], f"complete unique {table} on {node.name}")
             expected_payloads = [[writer, value] for writer in range(len(nodes)) for value in range(32)]
             for node in nodes:

@@ -21,6 +21,19 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 	c.acquire.Lock()
 	defer c.acquire.Unlock()
 	publication := c.ownstate.Snapshot()
+	if publication.Phase().Requested() && publication.Flight().ID() == packet.ID {
+		r.mu.Lock()
+		epoch := r.directory.Records[r.resourceKey(packet.Resource)].Epoch
+		r.mu.Unlock()
+		if packet.Epoch < epoch {
+			// Only retire the response's own flight. An invalidation may cross
+			// a newer request which still has an independently queued reference.
+			if publication.Phase() != mosi.MR || packet.State == "M" {
+				c.ownstate.Fail(packet.ID, nil, mosi.IO)
+			}
+			return nil
+		}
+	}
 	if r.cluster != nil && packet.State == "S" && publication.Phase() == mosi.MR && publication.Flight().ID() == packet.ID {
 		// A read grant superseded by this flight's write upgrade still proves
 		// the reader epoch registered by its owner. Keep that control metadata
@@ -65,6 +78,9 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 }
 
 func (r *replicationManager) invalidateResource(ctx context.Context, source string, packet mosiPacket) error {
+	if err := r.acceptRevocationRoutes(source, packet); err != nil {
+		return err
+	}
 	if r.cluster == nil && (r.master || source != "") {
 		return fmt.Errorf("invalidation from non-master")
 	}
@@ -99,6 +115,13 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 		defer handover.Release()
 		r.localRecord(packet.Resource, mosi.IO, "")
 		r.publishLocal(packet.Resource, mosi.IO)
+		// Grants at the revoked epoch can still be queued behind their
+		// installed reference. Preserve unrelated pending requests, but require
+		// their eventual grant to prove a generation after this revocation.
+		r.updateRecord(packet.Resource, func(record *replicaRecord) bool {
+			record.Epoch = packet.Epoch + 1
+			return true
+		})
 		// No inward holder may retain stronger rights after an outward ACK.
 		// Current slaves are leaves; a grouped slave must first recall its children.
 		c.clusterstate.Publish(mosi.IO)
@@ -368,8 +391,14 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				}
 				r.publishLocal(packet.Resource, mosi.IO)
 				handover.Release()
-			} else if err := r.step(ctx, reader, mosiPacket{Kind: "invalidate", ID: uuid.NewString(), Resource: packet.Resource, Epoch: record.Epoch}); err != nil {
-				return err
+			} else {
+				var routes []shardForward
+				if packet.Resource.Shard != "" {
+					routes = r.shardRoutes(packet.Resource)
+				}
+				if err := r.step(ctx, reader, mosiPacket{Kind: "invalidate", ID: uuid.NewString(), Resource: r.canonicalResource(packet.Resource), Epoch: record.Epoch, Forwards: routes}); err != nil {
+					return err
+				}
 			}
 		}
 		record.Readers = make(map[string]bool)
@@ -493,6 +522,44 @@ func (r *replicationManager) acceptRequestRoutes(source string, packet mosiPacke
 		if cell := r.lookupCell(route.From); cell != nil && cell != authority {
 			return fmt.Errorf("request forwarding crosses shard authorities")
 		}
+	}
+	for _, route := range packet.Forwards {
+		r.forwardResource(route.From, route.To)
+	}
+	return nil
+}
+
+// Revocation must follow the same native UUID edges as data installation. A
+// reader may still hold a predecessor when its owner rebuilds before the next
+// write. Only its recorded owner at that epoch may connect those identities.
+func (r *replicationManager) acceptRevocationRoutes(source string, packet mosiPacket) error {
+	if len(packet.Forwards) == 0 {
+		return nil
+	}
+	var authority *replicaCell
+	for _, route := range packet.Forwards {
+		if !route.From.valid() || route.From.Shard == "" || route.From.Database != packet.Resource.Database || route.From.Table != packet.Resource.Table || route.To != packet.Resource {
+			return fmt.Errorf("invalid revocation forwarding")
+		}
+		if cell := r.lookupCell(route.From); cell != nil {
+			if authority != nil && authority != cell {
+				return fmt.Errorf("revocation crosses shard authorities")
+			}
+			authority = cell
+		}
+	}
+	if r.cluster != nil {
+		if authority == nil {
+			return fmt.Errorf("revocation of unknown predecessor")
+		}
+		r.mu.Lock()
+		record := r.directory.Records[r.resourceKey(*authority.resource.Load())]
+		r.mu.Unlock()
+		if record.Owner != source || packet.Epoch != record.Epoch {
+			return fmt.Errorf("revocation forwarding from non-owner")
+		}
+	} else if r.master || source != "" {
+		return fmt.Errorf("revocation forwarding from non-master")
 	}
 	for _, route := range packet.Forwards {
 		r.forwardResource(route.From, route.To)

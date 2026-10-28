@@ -169,10 +169,11 @@ Plain ordered remote projection remains unsupported by the current delegation
 boundary. The INSERT oracle verifies the full payload multiset through an
 unordered string reduction; it does not claim ordered projection coverage.
 
-Captured sessions and sync callables (`once`, promises, mutexes) need explicit
-owner and invocation-lifetime contracts before crossing nodes. Copying their
-closures would create independent synchronization objects. Constant session reads
-already use statement snapshots; mutations cannot use that read-only mechanism.
-The remote read-only validator must continue rejecting unimplemented mutation
-callbacks. Shared effects need batch-level execution, cancellation and ambiguous
-completion handling; a network call for every row is not an acceptable substitute.
+Master #1194 supplies `ClusterObject` owner handlers, serialization contexts,
+peer-scoped lifetimes and session/cachemap views. This PR inherits those mechanisms;
+constant captured reads use their invocation view, and cache misses retain the
+owner boundary. That does not establish remote mutation contracts for every sync
+callable (`once`, promises, mutexes). The remote validator must continue rejecting
+unimplemented effects. Shared effects still need batch-level execution,
+cancellation and ambiguous completion handling; a network call for every row is
+not an acceptable substitute.

@@ -155,9 +155,31 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 		c.clusterstate.Establish(state)
 		c.ownstate.Establish(state)
 	} else {
+		cell := r.resourceCell(resource)
 		r.updateRecord(resource, func(record *replicaRecord) bool {
+			// Discovery is advisory and spans network waits. A grant/handover
+			// may have advanced after the final report too. Never overwrite its
+			// owner or reader directory with that older observation.
+			phase := cell.resolved().ownstate.Snapshot()
+			permission := phase.Phase()
+			if permission.Requested() {
+				permission = phase.Retained()
+			}
+			if permission == mosi.M || permission == mosi.O {
+				owner = r.id
+				return false
+			}
+			if record.Handoff != "" {
+				owner = record.Handoff
+				return false
+			}
+			if record.Owner != own.Owner || record.Epoch != own.Epoch {
+				if record.Owner != "" {
+					owner = record.Owner
+				}
+				return false
+			}
 			record.Resource, record.Owner, record.Epoch = resource, owner, epoch
-			record.Readers = nil
 			return true
 		})
 	}
@@ -410,7 +432,7 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 	if expected == nil {
 		if publication.Phase().Requested() {
 			if publication.Flight().ID() != packet.ID || record.Owner != source && packet.Epoch <= record.Epoch {
-				return fmt.Errorf("unexpected shared reference request")
+				return fmt.Errorf("unexpected shared reference request: resource=%s incoming=%s epoch=%d pending=%s epoch=%d owner=%s source=%s", packet.Resource.key(), packet.ID, packet.Epoch, publication.Flight().ID(), record.Epoch, record.Owner, source)
 			}
 		} else if publication.Phase() != mosi.S || record.Owner != source || record.Epoch != packet.Epoch {
 			// Unsolicited O updates may refresh existing S readers only at the
