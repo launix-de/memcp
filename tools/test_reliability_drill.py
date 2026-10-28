@@ -300,5 +300,90 @@ class ClusterSQLContextRunnerTests(unittest.TestCase):
 		self.assertIn("without executing a remote shard", cases[0]["error"])
 
 
+class ClusterSuiteTests(unittest.TestCase):
+	def snapshot(self, index, received=0, delegated=0, ram=100):
+		return {"state": {"self": {"id": f"node-{index}"}, "received": received,
+			"delegated": delegated}, "budget": {"MemoryBudget": ram}}
+
+	def test_membership_and_correct_rows_are_not_execution_proof(self):
+		snapshots = [self.snapshot(i) for i in range(4)]
+		proof = replication.cluster_evidence(snapshots, snapshots, 1000)
+		with self.assertRaisesRegex(replication.DrillFailure, "remote_shards=0"):
+			replication.assert_cluster_evidence({"min_remote_shards": 1}, proof)
+
+	def test_one_worker_cannot_satisfy_a_two_worker_assertion(self):
+		before = [self.snapshot(i) for i in range(4)]
+		after = [self.snapshot(0, delegated=10), self.snapshot(1, received=10),
+			self.snapshot(2), self.snapshot(3)]
+		proof = replication.cluster_evidence(before, after, 1000)
+		with self.assertRaisesRegex(replication.DrillFailure, "remote_nodes=1"):
+			replication.assert_cluster_evidence({"min_remote_nodes": 2}, proof)
+		after[2] = self.snapshot(2, received=1)
+		proof = replication.cluster_evidence(before, after, 1000)
+		replication.assert_cluster_evidence({"min_remote_shards": 10, "min_remote_nodes": 2,
+			"data_exceeds_node_ram": True}, proof)
+
+	def test_ram_proof_uses_largest_actual_node_budget(self):
+		before = [self.snapshot(0), self.snapshot(1, ram=2000)]
+		after = [self.snapshot(0, delegated=1), self.snapshot(1, received=1, ram=2000)]
+		proof = replication.cluster_evidence(before, after, 1000)
+		with self.assertRaisesRegex(replication.DrillFailure, "does not exceed"):
+			replication.assert_cluster_evidence({"data_exceeds_node_ram": True}, proof)
+		with self.assertRaises(replication.DrillFailure):
+			replication.assert_cluster_evidence({"min_remtoe_shards": 1}, proof)
+
+	def test_payload_measurement_excludes_logs_and_retired_generations(self):
+		import json
+		import uuid
+		with tempfile.TemporaryDirectory() as temp:
+			shared = Path(temp)
+			active, retired = str(uuid.uuid4()), str(uuid.uuid4())
+			(shared / "schema.json").write_text(json.dumps({"tables": {
+				"items": {"Shards": [{"uuid": active}]}}}))
+			(shared / (active + "-id")).write_bytes(b"abcd")
+			(shared / (retired + "-id")).write_bytes(b"x" * 1000)
+			(shared / ".transactions.log").write_bytes(b"x" * 1000)
+			self.assertEqual(replication.cluster_data_bytes(shared), 4)
+
+	def test_config_only_extends_the_ordinary_suite_schema(self):
+		with tempfile.TemporaryDirectory() as temp:
+			path = Path(temp) / "suite.yaml"
+			path.write_text("metadata:\n  description: conversion\n  cluster: true\n"
+				"setup:\n  - sql: CREATE TABLE items(id INT)\n"
+				"test_cases:\n  - name: normal\n    sql: SELECT 1\n    expect: {rows: 1}\n")
+			self.assertEqual(replication.cluster_suite_config(path)["nodes"], 4)
+			path.write_text("metadata:\n  cluster:\n    nodes: 1\n")
+			with self.assertRaisesRegex(replication.DrillFailure, "2–10"):
+				replication.cluster_suite_config(path)
+
+	def test_correct_sql_cannot_borrow_setup_explain_or_cleanup_remote_work(self):
+		from types import SimpleNamespace
+		for remote_body in (False, True):
+			with self.subTest(remote_body=remote_body), tempfile.TemporaryDirectory() as temp:
+				nodes = [SimpleNamespace(index=i, port=1, password="admin", database="memcp-tests")
+					for i in range(2)]
+				counter = [0]
+				calls = []
+				def status(node):
+					return self.snapshot(node.index, received=counter[0] if node.index else 0,
+						delegated=counter[0] if node.index == 0 else 0)
+				runner = replication.ClusterSQLTestRunner(nodes[0], nodes, Path(temp), [],
+					Path(temp) / "report.json", status)
+				def execute(database, sql, *args, **kwargs):
+					calls.append(sql)
+					if sql != "SELECT 1 AS n" or remote_body:
+						counter[0] += 1
+					return SimpleNamespace(status_code=200, text='{"n":1}', headers={})
+				case = {"name": "same correct result", "setup": [{"sql": "fixture"}],
+					"sql": "SELECT 1 AS n", "cleanup": [{"sql": "cleanup"}],
+					"expect": {"rows": 1, "data": [{"n": 1}], "cluster": {"min_remote_shards": 1}}}
+				with mock.patch.object(runner, "ensure_database"), \
+						mock.patch.object(runner, "execute_sql", side_effect=execute), \
+						mock.patch("builtins.print"):
+					self.assertEqual(runner.run_test_case(case, "memcp-tests"), remote_body, calls)
+				self.assertEqual(runner.results[-1]["cluster"]["remote_shards"], int(remote_body), calls)
+				self.assertEqual(counter[0], 3 + int(remote_body))
+
+
 if __name__ == "__main__":
 	unittest.main()

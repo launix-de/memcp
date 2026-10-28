@@ -135,7 +135,7 @@ $resolved"
 }
 
 # Discover every CI suite recursively. Directory taxonomy and metadata replace
-# the old numeric filename convention; metadata.ci=false is the only opt-out.
+# the old numeric filename convention. Cluster suites belong to the process runner.
 if [ "$#" -gt 0 ]; then
     if ! test_files="$(resolve_test_selection "$@")"; then
         exit 1
@@ -147,6 +147,7 @@ import sys
 from pathlib import Path
 
 import yaml
+from run_sql_tests import suite_requires_cluster
 
 root = Path("tests")
 taxonomy = {
@@ -183,7 +184,9 @@ for path in sorted(root.rglob("*.yaml")):
     if not isinstance(metadata, dict) or not metadata.get("description"):
         errors.append(f"{path}: metadata.description is required")
         continue
-    if metadata.get("ci", True) is not False:
+    if suite_requires_cluster(metadata):
+        print(f"Cluster suite: {path} (process-runner CI)", file=sys.stderr)
+    elif metadata.get("ci", True) is not False:
         selected.append(str(path))
 
 if errors:
