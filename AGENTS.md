@@ -138,7 +138,10 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 ```
 - Auth: HTTP Basic `root:admin` (default password for fresh data dirs).
 - API endpoint: `/sql/<database-name>` (NOT `/schema` or bare root).
-- Database is auto-created on first use.
+- User databases require explicit `CREATE DATABASE`; HTTP SQL requests do not
+  create them. For manual testing, first POST `CREATE DATABASE my_test` to
+  `/sql/system`, then use `/sql/my_test`. The SQL test runner creates its test
+  databases explicitly with `CREATE DATABASE IF NOT EXISTS`.
 - Tests use database name `memcp-tests` on port 4321 (or custom port).
 
 ## Coding Style & Naming
