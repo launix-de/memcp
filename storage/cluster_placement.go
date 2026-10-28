@@ -12,6 +12,7 @@ package storage
 
 import "time"
 import "context"
+import "hash/fnv"
 
 type clusterCapacityRejection struct{}
 
@@ -80,6 +81,32 @@ type clusterScanExecutor struct {
 	preferred *clusterLink
 }
 
+// Equal-cost cold candidates follow shard affinity rather than roster order.
+// Always trying the first peer funnels every capacity-delegated task through
+// one worker even when other nodes have unused RAM. A stable rotation spreads
+// different shards while keeping repeat accesses local to their chosen peer.
+// Warm residency remains the cheaper candidate and takes precedence.
+func (executor *clusterScanExecutor) candidates() []*clusterLink {
+	links := executor.cluster.view.Load().links
+	candidates := make([]*clusterLink, 0, len(links))
+	if executor.preferred != nil {
+		candidates = append(candidates, executor.preferred)
+	}
+	if len(links) == 0 {
+		return candidates
+	}
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(executor.expected.Resource.Shard))
+	first := int(hash.Sum64() % uint64(len(links)))
+	for i := range links {
+		link := links[(first+i)%len(links)]
+		if link != executor.preferred {
+			candidates = append(candidates, link)
+		}
+	}
+	return candidates
+}
+
 func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, invocation shardScanInvocation) scanResult {
 	if !clusterScanSupported(invocation.tx) {
 		panic("automatic cluster placement requires native CS or ACID read visibility")
@@ -92,17 +119,7 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, inv
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	links := executor.cluster.view.Load().links
-	candidates := make([]*clusterLink, 0, len(links))
-	if executor.preferred != nil {
-		candidates = append(candidates, executor.preferred)
-	}
-	for _, link := range links {
-		if link != executor.preferred {
-			candidates = append(candidates, link)
-		}
-	}
-	for _, link := range candidates {
+	for _, link := range executor.candidates() {
 		select {
 		case <-link.peer.done:
 			continue

@@ -49,6 +49,41 @@ func TestClusterWarmScanDoesNotReadBackendOrReserveRAM(t *testing.T) {
 	(&nodeCluster{}).prepareLocalScan(shard, nil)
 }
 
+func TestClusterColdPlacementUsesAllPeersAndKeepsWarmPreference(t *testing.T) {
+	links := []*clusterLink{{}, {}, {}}
+	cluster := &nodeCluster{}
+	cluster.view.Store(&clusterView{links: links})
+	executor := &clusterScanExecutor{cluster: cluster}
+	used := make(map[*clusterLink]bool)
+	for i := 0; i < 64; i++ {
+		executor.expected.Resource.Shard = fmt.Sprintf("shard-%d", i)
+		candidates := executor.candidates()
+		used[candidates[0]] = true
+		if executor.candidates()[0] != candidates[0] {
+			t.Fatal("repeat access lost shard affinity")
+		}
+		seen := make(map[*clusterLink]bool)
+		for _, candidate := range candidates {
+			seen[candidate] = true
+		}
+		if len(candidates) != len(links) || len(seen) != len(links) {
+			t.Fatal("capacity fallback omitted or duplicated a peer")
+		}
+	}
+	if len(used) != len(links) {
+		t.Fatalf("equal-cost placement used %d of %d peers", len(used), len(links))
+	}
+	executor.preferred = links[1]
+	if candidates := executor.candidates(); candidates[0] != links[1] || len(candidates) != len(links) {
+		t.Fatal("shard affinity overrode warm residency")
+	}
+	cluster.view.Store(&clusterView{})
+	executor.preferred = nil
+	if len(executor.candidates()) != 0 {
+		t.Fatal("empty roster produced candidates")
+	}
+}
+
 func TestClusterRosterRequiresBoundIdentityAndRetainsSnapshot(t *testing.T) {
 	self := clusterMember{"memcp://" + uuid.NewString(), uuid.NewString(), "ws://127.0.0.1:4001/cluster"}
 	remote := clusterMember{"memcp://" + uuid.NewString(), uuid.NewString(), "ws://127.0.0.1:4002/cluster"}
