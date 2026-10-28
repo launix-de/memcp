@@ -25,6 +25,14 @@ These invariants apply especially to the `lib/queryplan-*.scm` modules loaded
 by `lib/queryplan.scm`, `lib/sql-parser.scm`, `lib/psql-parser.scm`, and physical
 scan/storage lowering code.
 
+Each invariant is both a software contract and a guarantee for its usage.
+Every implementer MUST fulfill the invariant, e.g. if an invariant says that main_count is constant, no one is allowed to change the value after the shard is published. On the other side, everyone can trust the invariant to be fulfilled. So in this example, no code must ever check if main_count has changed.
+This keeps code short and correct but also expects discipline from implementers: they must fulfill the invariant.
+
+If existing code violates an invariant, notify the user and fix the violation at its owning abstraction. Do not compensate by adding defensive checks, synchronization or fallback paths to its consumers.
+
+Another strategy to keep code compact and correct is to not view a problem as a set of hundrets of corner cases but instead design common interfaces and management structures that centralize code at one point. An example is the cluster handle interface which can be used for any network-addressable object that can receive messages. This is also the reason why we introduced scm as a helper scripting languages instead of implementing hundrets of specialized operators.
+
 ## Common Taxonomy
  - SCM - the Scheme language with a specific dialect optimized for serializable network-sharable lambda routines, focus on parallelization, outer scopes are not mutable from inner scopes. Data transfer between layers happen through storage engine operations or network-capable sync primitives like session (a threadsafe map) and so on.
  - Storage Engine: the implementation of tables, shards and clustering in storage/ (implemented in go)
@@ -113,6 +121,10 @@ These rules describe the target architecture, never implement mechanisms that wo
   Nonlocal objects are represented by stubs, which may retain the URI of the
   O/M owner so commands can be forwarded to the peer. A peer need not track tables
   it has not loaded; it may discover owners by broadcast when loading them.
+- The owner or modifier (MOSI) of a schema (database) must know the peer location
+  of each of the table's shards. If he has an I(invalid) for a shard, it is known
+  fact that no one has the shard and any peer can load it from the backend.
+
 - Nodes may join and leave a running cluster. An orderly shutdown, including
   that of the initial node, releases all held read and write rights and hands
   over ownership responsibilities (Invalid preferred so other nodes can reload
@@ -154,11 +166,6 @@ e.g. Table Statistics and other boilerplate structures must be atomically publis
 
 ### Immutable main storage and mutable deltas
 
-Planner-cache initializer definitions are immutable atomic publications, including
-nil repair after schema reload. Completion is published once under the existing
-table creation barrier; warm probes read atomics. The persisted `oninit` field
-retains its existing representation and contains no synchronization state.
-
 - A shard's main column storages contain fixed, read-only values. Updates must
   not overwrite these values. Delta storage contains
   the insert list and deletion masks; transaction-local deletion/visibility
@@ -167,7 +174,7 @@ retains its existing representation and contains no synchronization state.
   the inserts array must be CAS-swapped; readers hold maxRecId to avoid
   eternal loops in bulk-UPDATE commands (so they don't read the updated rows, too)
   the deletions mask is already covered by the CAS-based non-locking bitmap structure
-  Reserve and initialize insert
+  Reserve and initialize insert capacity to avoid one allocation per insert.
 - delete masks can be overshadowed by the transaction's shard-local overlays
   to implement ACID visibility
   readers must respect the delete masks, indices must cover all items (even if
@@ -220,6 +227,10 @@ retains its existing representation and contains no synchronization state.
   while holding locks needed by other operations. Define one lock order for
   remaining mutation/publication paths, avoid lock upgrades, and release locks
   and ownership rights on cancellation, errors, and panics.
+
+### Bounded Work and Resource Lifetimes
+
+Parallel work must respect node-local concurrency budgets, and streaming buffers must remain bounded. Every background task and retained resource must have an explicit owner and a completion or release protocol covering success, early termination, cancellation, errors and panics. Invocation-owned work must finish or be cancelled and joined before its state is released.
 
 ### Planner schema and statistics reads
 
@@ -376,10 +387,6 @@ deduplicate their runtime values, preserving NULL versus zero. Substituting a
 constant column still requires guards for every parameter used in that proof.
 The descriptor does not authorize dropping domain keys, nullable partitions,
 hidden columns, or ORDER/LIMIT barriers.
-If combining several parameter domains fails the complete contribution proof,
-the planner may try individual root domains, largest first. A failed combined
-candidate must not discard a separately proven domain. Every alternative still
-passes the same whole-query proof gate before costing or recording guards.
 
 This coarse model is intentional. MemCP should not split the logical layer into
 many textbook operators such as separate scan/select/project/join/order nodes.
@@ -428,6 +435,8 @@ output and is not a physical RecSet or scan. Canonicalization may flatten
 `CASE`, projection, or another value-producing context; those retain the full
 match/RHS-NULL representation required for three-valued logic.
 
+Rewrites must preserve every predicate and update every consumer of a replaced source, including hidden expressions. Terms that cannot move remain as residual predicates at a semantically valid boundary. Predicate placement must preserve multiplicity and outer-join null extension, including the distinction between ON and WHERE. IN and NOT IN retain SQL three-valued logic; presence-only rewrites require proof of equivalence in their enclosing context.
+
 ## Join Order Has A Single Owner
 
 Join ordering is a logical optimization. Once `join_reorder` has selected the
@@ -458,125 +467,50 @@ must not change the logical join tree's leaf order.
 
 ## Guarded Query-Plan Specialization
 
-The Scheme query-plan cache may hold several lazily compiled physical plans for
-one normalized SELECT shape. DDL, DML, and transaction control retain exact
-query keys because their formulas may intentionally operate on the request
-session. An exact DML entry may use the same variant dispatcher to validate
-immutable declaration contracts before invoking a cached plan; it must not
-normalize away its request/session semantics. This is a polymorphic cache entry,
-not a second planner and not a storage-engine query cache.
+The plan cache may specialize for cost-model decisions or runtime values. Every specialization must guard the assumptions required for correct reuse. Value specialization must provide a concrete execution benefit; differing parameter values alone do not justify separate plans. Variant count and retained plan memory must remain bounded, with a reusable parameterized path for values not covered by retained specializations.
 
-Only SELECT shapes which reach a parameter- or statistics-dependent planner
-decision use normalized polymorphic entries. An exact plan with no declaration
-guards or preparations retains its direct callable fast path. Joined mutation
-proofs must capture the actual immutable key/nullability declarations they
-consume and invalidate when those declarations change. A separately loaded
-revision token cannot establish that it describes the captured metadata.
-Key guards retain only the consumed primary-key role, column lists and
-NULL-uniqueness policy as ordinary serializable values. They must not depend on
-snapshot identity, unrelated constraint labels or foreign-key metadata.
-Column-declaration guards compare only
-consumed type, dimensions, nullability and collation through published point
-metadata. Statistics publication must not invalidate a declaration contract.
-Wildcard expansion additionally consumes the ordered public column-name
-directory of each matching base source, including through derived relations and
-UNION branches. Exact SELECT entries use the same declaration-guard dispatcher;
-guard-free entries retain their direct callable. Wildcard guards compare that
-directory, never a catalog revision, shard topology or unrelated database DDL.
-Direct DML recipes use the same compile-local guard protocol for mutation
-semantics only; a cost/statistics change must not become a schema-contract error.
-Comparison proofs retain frontend operand triples before binding removes
-Boolean callback annotations. Executable constants must never reconstruct a
-SQL type after that boundary.
+The queryplan cache may contain multiple lazily compiled plans for the same query
+encoded by an if cascade. The condition must check if the tipping points of e.g.
+table statistics are exceeded that would lead the planner to produce a different
+operator selection. The value for each condition is the specialized query plan itself.
+The last parameter of if (fallback value) is a call to the query planner itself to replan
+the query.
 
-Every parameter- or statistics-dependent cost-model tipping decision must
-record the executable condition under which its chosen alternative remains
-valid. During one compilation these conditions are accumulated in a dedicated
-`newsession`; this compile-local state substitutes for threading a writer monad
-through the functional planner. It must not escape as logical or physical IR.
-The compile session must not capture request-local execution state such as
-`__memcp_tx`; cached scans resolve that state from the executing session.
+The condition is one of the hot paths, especially for small query, hence we must keep the
+condition as compact and as low-cost as possible. If a query is specialized to e.g. session parameters
+these checks are mandatory. Only O(1) lookups are allowed (e.g. fetching table statistics),
+no scans or such (except for some rare cases where some recset-probes or similar values
+are dominant for all query plans, so they can be computed before the if and the guard
+looks up their count. To keep the hot path guard evaluation fast, only the most dominant
+tipping points of this planner session are to put into the guard.
+They can be budgeted either by a constant number (not more than 5) or depending on the estimated
+query runtime (only 1 planner guard for queries estimated at <1us if that runtime is exceeded).
+Dominance in this context means: changing this planner decision has the highest difference in
+cost estimation comparison. (e.g. the tipping point with 400% faster code is more dominant
+than a decision with only 30% speedup compared to the second-best plan).
 
-The conjunction of the recorded conditions guards the specialized plan. A
-guard miss compiles exactly one plan for the current bindings and statistics,
-then prepends its condition/plan pair to the variadic Scheme `if` cache entry.
-New variants go first because the newest statistics regime is normally the
-most likely one. Existing immutable plan tails remain valid for in-flight
-queries.
+We must not add false assertions (like comparing the hash of a table statistic content
+or asserting the equality of a specific table count) to the guard, instead it must be the
+real cost model formula tipping point,
+e.g. `constant1+constant2*table1.count < constant3+constant4*table2.count`,
+so it must remodel the real planner decision for instance including cardinalities and
+selectivity statistics if the planner relied on that.
 
-Guards repeat cost decisions, not query planning. They must be side-effect-free
-and must not scan relations, build indexes or group caches, acquire locks
-for schema/statistics reads, or materialize data. Repeated catalog inputs must
-be bound once per guard evaluation. If a useful generalized inequality is
-unavailable, an exact parameter/statistics-input guard is the conservative fallback; an old
-specialized plan must never be selected after an unguarded cost input changes.
-
-Coverage of session inputs is transitive through shared guard bindings. A
-surviving cost formula which consumes a bound statistic also covers the runtime
-inputs used to obtain that statistic; do not additionally guard their raw values
-for equality. Otherwise cost-equivalent users or clock ticks churn plan variants.
-Retain the complete producer dependency closure and evaluate it in lexical
-dependency order, once per validation. Discarded costing work provides no
-coverage. Quoted data is not executable: helpers interpreting an opaque metadata
-argument must explicitly declare the session inputs that argument represents.
-
-When an unknown cardinality interval crosses a costly operator boundary, the
-cache formula may execute one query-local observation *before* guard dispatch.
-That preparation is not part of the guard: it produces a physical value such
-as an exact RecSet plus a scalar metric, and every alternative in the request
-must reuse the same value, deletion overlays, and any captured record-ID bound.
-Only the scalar metric may enter the isolated compile session after a guard miss;
-opaque native values and
-the request transaction must remain in the executing session. Preparations
-must be deduplicated by physical decision, must not persist beyond the query,
-and are justified only when the cost model says their value of information can
-change an otherwise expensive choice. Cheap plans still need ordinary growth
-and statistics guards, but must not pay for exact relational observations.
-
-The cache value must keep the complete Scheme guard/plan formula visible to the
-existing cachemap size accounting and eviction mechanism. A `newsession` may
-hold the entry's compile lock and metadata, but it must not hide the plan tree
-as the cachemap's sole value.
+Newer plans and their conditions must be pushed to the front of the if cascade.
 
 ## Relational Results Stay In The Storage Engine
 
-A **scan source** is a storage-engine representation that `scan`, `scan_order`,
-or another physical scan operator can consume. Base tables, RecSets, group
-keytables, and query-local temporary tables are scan sources. An
-**intermediate relation** is a relational result materialized in such a scan
-source between physical plan stages. A **group cache** is a reusable
-intermediate relation for grouped keys and aggregates; its default physical
-representation is a **group keytable**. Use these specific terms rather than
-an ambiguous umbrella term.
-
-Base and intermediate relational data already lives in the in-memory storage
-engine. Execution must consume it through `scan`, `scan_order`,
-`scan_order_multi`, RecSets, ORC columns, group keytables, or another explicitly
-selected storage-engine scan source. It must not copy a relational result into a
-Scheme list, association list, FastDict, or query-local memo merely to join,
-order, limit, or probe it.
-
-Small planner metadata, scalar runtime values, and aggregate state may use
-Scheme data structures. A physical scan source must remain the single relational
-representation of its result: choosing a direct/grouped subscan must not also
-build the complete keytable, and choosing a keytable must not duplicate it into
-a Scheme-side relation. A requested subset of an existing source keytable may
-be evaluated through computed-column filters instead of constructing another
-intermediate relation.
-
-List-backed relations do not provide indexes, statistics, range braking,
-late materialization, bounded memory, spill, incremental maintenance, or the
-storage engine's batch and concurrency behavior. They therefore cannot be a
-cost-based alternative, even when they benchmark faster for small inputs.
-
-Use the existing scalable physical representations instead:
-
-- fused `scan` / `scan_order` pipelines for streamable work
-- `scan_order_multi` for ordered UNION inputs
-- RecSets for query-local membership
-- canonical keytables for groups and aggregate domains
-- ORC/temp columns for reusable ordered computation
-- canonically named query-local temp tables for unavoidable relational barriers
+You must not materialize or copy relational results into lists for sorting, limiting,
+filtering or other operations like UNION variants. This bypasses our storage engine and hence
+disables scalability on large table sizes. Always prefer a non-materialized direct-scan path
+or if materialization is necessary, use reusable regular temporary tables with canonical names
+which provide full index and partition support.
+The only exception to use lists for intermediate relational materialization is when you gain
+a speedup >50% e.g. on a smaller dataset and additionally add a guard to the
+queryplanner cache as soon as the tipping point of that speedup is gone.
+Example: WHERE ... IN (SELECT small item set FROM table2) may be materialized into a sorted
+scm list to use a faster operator in favor of an exist-subscan until the
+amount of X items in table2 is reached.
 
 Lists remain valid for bounded scalar tuples, operator arguments, parser data,
 and final API row values. Their size must be independent of relation cardinality.
@@ -606,37 +540,6 @@ the changed inputs. Planner setup, DDL, rebuild, persistence, and session-local
 variants must preserve this definition/cache distinction. Eager preparation,
 selective prewarming, and lazy repair may change when work happens, never the
 query-visible result.
-
-`ShardMapReducer` distinguishes stored-row mutation from `$set:` compute-cache
-publication. A cache fill retains the selected shard and record
-ID, including a record hidden after selection; it must not forward the cache
-slot to another row version or change row visibility. Its source readers retain
-their ordinary lifetime/access ownership, and `StorageComputeProxy.SetValue`
-owns cache synchronization. A cache-only mapper must not acquire a shard write
-lock per row or upgrade an enclosing index/scan read lock. `$update` and
-`$increment:` retain their existing mutation protocol. This distinction does
-not remove the remaining legacy scan/read locks.
-
-## LIMIT Belongs In Storage Operators
-
-SQL OFFSET/LIMIT must be implemented by storage operators, with or without an
-explicit ORDER BY. `scan_order` and `scan_order_multi` are existing examples,
-not an exclusive list of permitted implementations. Use the chosen operator's
-limit/braking facilities while preserving the logical ordering and limit scope.
-Never copy a relation into a Scmer slice, Scheme list, or association structure
-and then apply list sorting/slicing to implement relational OFFSET/LIMIT.
-That bypasses storage batching, parallel execution, indexes, and range braking;
-a small-input speedup does not justify the loss of scalability.
-
-`scan_order` may also be used when row order is semantically irrelevant. In
-that mode it still owns OFFSET/LIMIT and may use top-k pruning: it need not
-filter or materialize every qualifying row before selecting the required
-number of rows.
-
-Decorrelated helpers remain nested scans or independently prepared intermediate
-relations. They must not replace the limited root scan with a complete lookup
-table. Projection-only helpers belong in the limited scan's map callback so
-rows rejected by filtering, ordering, offset, or limit never invoke them.
 
 ## Functional Plans, Optimizer-Owned Mutation
 
@@ -724,36 +627,25 @@ every semantic binding and source dependencies remain valid. Cache rows retain
 values, never session or transaction objects. This is separate from the
 query-local lifetime of physical RecSets and RecMaps.
 
+Shared cache computation, publication and reuse must preserve source consistency and transaction visibility. Concurrent source changes must not allow stale results to be published or reused as current. Reusable cache entries retain logical keys and values, never request-local sessions, transactions, closures or physical row identities. Session-values (like SQL @userid oder @refrenced_time) can either be bound into the Domain (especially for small sets for domain keys, large spans in ranged domain dimensions) or you can compile the plan in a way that the innermost caches avoid using such external references at all.
+
 The internal transaction session `__memcp_tx` identifies execution state, not
 SQL input, and must not become a semantic domain key. All other session reads
 that can change a helper result are external dependencies, including values
 used below grouped or derived query blocks.
 
+A scalar subquery returns NULL for zero rows, the selected value for one row, and an error for multiple rows. An explicit SQL row limit retains its own semantics; optimization must never silently introduce LIMIT 1. Rather carry cardinality and overflow semantics explicitly through logical rewrites. Correlated ORDER BY, OFFSET and LIMIT apply separately to each domain binding.
+
 ## Groups and HAVING
 
-Groups are hard logical stage boundaries.
+Grouping is a logical stage boundary. Aggregates and HAVING belong to the group-stage; consumers access its stage outputs.
 
-Aggregate markers are collected into `group-stage` definitions. The outer query
-reads aggregate, presence, scalar, and HAVING-filtered results through
-`stage-output` relations.
-
-HAVING is post-group semantics. It belongs to the `group-stage`, not to the
-input-row WHERE. It must not filter input rows before aggregation unless a rule
-proves that key-only post-group pruning is semantically identical.
-
-An aggregate without grouping keys produces one row for each domain binding
-even when its input is empty, before HAVING is applied:
-
-- COUNT returns 0
-- SUM/MIN/MAX/AVG and most other aggregates return SQL `NULL` where applicable
-- adding domain keys during unnesting must not lose this empty-input row
-
-Use an outer join or groupjoin with the appropriate aggregate semantics, not a
-synthetic input row counted by `COUNT(*)`. HAVING may remove the aggregate row.
 An explicit nonempty GROUP BY produces no groups for empty input; a scalar
 lookup of that missing result yields NULL. Grouping sets containing the empty
 set preserve its aggregate row too (BTW2025 Section 3.3). Preserve unmatched
 outer bindings according to the enclosing join's contract.
+
+Physical: When using wider carriers for the group cache
 
 ## Derived Tables and Materialization
 
@@ -775,13 +667,6 @@ Materialize only when a real semantic or physical barrier exists:
 
 Logical UNION stays as `union-block`.
 
-Physical lowering preferences:
-
-- unordered `UNION ALL`: successive branch emits
-- unordered `UNION`: dedup barrier
-- ordered `UNION ALL`: `scan_order_multi` when branches are streamable
-- non-streamable ordered union: narrow materialization only when necessary
-
 Do not collapse UNION branches into opaque helpers that hide unnesting,
 membership, dedup, or NULL semantics from later planner phases.
 
@@ -795,13 +680,6 @@ the window result is shared, or the value must survive as a computed column.
 
 Correlated window functions must include the outer domain keys in their
 partitioning. Otherwise different outer bindings mix into the same window.
-
-Window partition identities use NULLS NOT DISTINCT, including every component
-of a composite partition. Their logical group-stage records this with the
-`nulls_not_distinct` fact; physical aggregate probes must consume the same
-contract as the stage rejoin. This does not change SQL equality in correlated
-subqueries, EXISTS or IN. Keep this semantic choice in planning, without runtime
-SQL type checks or changes to native storage operators.
 
 ## Cost Model and Physical Lowering
 

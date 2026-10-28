@@ -172,7 +172,12 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - Column-name lists: functions like `insert` expecting column names take quoted string lists, e.g. `'("col1" "col2")`.
 
 ### Functional Semantics
-- This Scheme dialect is purely functional; procedures have no side effects and are fully parallelizable.
+- This Scheme dialect is designed purely functional:
+  most functions with the exception of io, sync and storage engine
+  have no side effects and are fully parallelizable and their result only relies on their given input.
+  This is especially true for list operations. They are designed to operate on immutable data and return immutable data.
+- The optimizer can rewrite these immutable operations to their faster _mut variants if the transformation is sane.
+  You are not allowed to create code using _mut functions.
 - `(set symbol value)` is scope-local and works like (define ). there is no real set
 - To communicate outside scope, use sessions via `(newsession)` which are threadsafe.
 - the queryplan builder is basically a code generator. code is represented as data in scheme. to create the expression (+ 4 5) you have to quote everything whose computation should be delayed: '('+ 4 5) will evaluate 4 and 5 immediately and delay the addition
@@ -246,7 +251,7 @@ policies. See also `docs/engine-semantics.md` for the user-facing reference.
 
 Before merging any PR that touches storage, persistence, DDL, or cleanup code:
 - [ ] No new code path calls `removePersistence()` or `RemoveFromDisk()` outside
-      the approved call sites above.
+      the designated DROP operators or the switch to memory engine.
 - [ ] No eviction or background cleanup path can reach disk-deletion code.
 - [ ] Any new binary format bump follows the magic/version byte rules.
 - [ ] ENGINE semantics table above remains accurate (update if behaviour changes).
@@ -264,7 +269,7 @@ To optimize memcp for a query you must consider the following steps:
  - review the planner+lowerer aswell as tools/costgen code
  - refactor those code parts to a generic algorithm such that your handcrafted optimal plan is within the search space and will be estimated as the cheapest plan
  - once the existing operators do not yield any more speedup but you think, there is more potential, you are allowed to dig into operator's internas: optimizing corner cases, reducing allocations, introducing new operators or intermediate result buffers like recset
- - for operators, regard the following hints: Avoid further branches inside loops. Try to keep setup and loops allocation-free (e.g. using stack buffers), parallelize big workloads into big-enough chunks (often at shard boundaries), cap the number of parallel goroutines of one operator by the session/transaction's boundaries.
+ - for operators, regard the following hints: Avoid further branches inside loops. Try to keep setup and loops allocation-free (e.g. using stack buffers), parallelize big workloads into big-enough chunks (often at shard boundaries), cap the number of parallel goroutines of one operator by the session/transaction's boundaries. Those boundaries count only for ONE node. Other nodes may track their own local limits. You may possibly track operator-specific memory boundaries so nested scans don't get automatically delegated to another cluster node.
  - make sure you do not produce performance regressions -> there is a CI runner with A/B benchmarks master vs PR - it does not allow to decrease query performance more than 20% for any of the test cases.
  - when a performance change trades cold-start time against warm execution, compare the total of one cold query plus a fixed `n` further executions. Configure `timing_aggregation: total`, `warmup: 0`, and `timing_samples: n + 1`; existing separate cold/warm cases can share a `timing_group`. Choose `n` before measuring and keep it identical for A and B. Gate the complete workload at at most 20% regression, retaining phase timings for diagnosis; do not independently reject a phase trade-off or discard startup through median sampling. See `tests/README.md`.
  - Short performance and compile-time probes must measure enough repetitions on the same fixture that an isolated GC or scheduling pause cannot dominate the result. Include the first execution; retain all samples and result checks. Freeze repetition counts before A/B measurement and use identical counts on both sides. Do not force GC or relax budgets to stabilize a measurement.
