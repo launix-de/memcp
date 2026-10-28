@@ -2882,7 +2882,7 @@ func Init(en scm.Env) {
 						}
 					}
 				}
-				t.computeColumnDDLLocked(colname, paramNames, a[6], filterCols, filter, dependencies)
+				t.computeColumnDDLLocked(queryTx, colname, paramNames, a[6], filterCols, filter, dependencies)
 				return scm.NewBool(true)
 			}
 

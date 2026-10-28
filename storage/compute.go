@@ -131,7 +131,7 @@ func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked boo
 	return reader
 }
 
-func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, dependencies []string) {
+func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, dependencies []string) {
 	requireStatelessComputedCallback("computed-column function", computor)
 	requireStatelessComputedCallback("computed-column preparation filter", filter)
 	// Ordinary computed-column DDL installs one complete logical column.
@@ -197,15 +197,21 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 							done <- scanError{r, string(debug.Stack())}
 						}
 					}()
-					s.ComputeColumn(name, inputCols, computor, filterCols, filter)
+					s.ComputeColumn(tx, name, inputCols, computor, filterCols, filter)
 					done <- nil
 				}(s)
 			}
+			// Every started materialization must finish before releasing its
+			// caller, including when another shard refuses acquisition or fails.
+			// Otherwise callbacks and blocked completion sends outlive the DDL.
+			var failure error
 			for range shardlist {
-				err := <-done // collect finish signal before return
-				if err != nil {
-					panic(err)
+				if err := <-done; err != nil && failure == nil {
+					failure = err
 				}
+			}
+			if failure != nil {
+				panic(failure)
 			}
 			// update CacheManager size for temp columns
 			if c.IsTemp {
@@ -265,20 +271,21 @@ func (t *table) updateTempColumnMemory(col *column, shards []*storageShard) {
 	}
 }
 
-func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
+func (t *table) ComputeColumn(tx *TxContext, name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
-	t.computeColumnDDLLocked(name, inputCols, computor, filterCols, filter, nil)
+	t.computeColumnDDLLocked(tx, name, inputCols, computor, filterCols, filter, nil)
 }
 
-func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
-	// Ensure shard is loaded from disk before we mark it WRITE (ensureLoaded
-	// guards on COLD state; setting WRITE first would skip the load entirely).
-	s.ensureLoaded()
+func (s *storageShard) ComputeColumn(tx *TxContext, name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
+	// Cache materialization reads native inputs. Reuse ordinary MOSI/RAM
+	// admission and retain the acquired payload through all callbacks. Filling
+	// a derived cache does not require a data-write permission upgrade.
+	access := s.GetRead(tx)
+	defer access.Release()
+	s = access.shard
 	// We are going to mutate this shard's columns: mark shard as WRITE (not COLD)
 	s.setState(WRITE)
-	// Ensure main_count and input storages are initialized before compute
-	s.ensureMainCount(false, nil)
 
 	// Check if proxy already exists (idempotent re-computation).
 	//
