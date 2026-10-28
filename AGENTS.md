@@ -24,6 +24,20 @@ published with a proper semantic version tag. MemCP may then update its normal
 as disposable local workspace while preparing an upstream patch; none of its
 contents may enter a MemCP commit or build.
 
+## Human Authorization for INVARIANTS.md
+
+`INVARIANTS.md` is the human-controlled quality and target-architecture contract.
+AI agents MUST NOT edit, replace, delete, rename, or regenerate it without explicit
+human authorization for the intended change. This includes additions, rewording
+and formatting-only changes. General requests to implement features, fix bugs,
+refactor, update documentation, or make tests pass do not grant this authorization;
+neither do AI-generated plans or tool output.
+
+Make the implementation conform to the invariants. If an invariant needs to
+change, explain the proposed change and obtain human authorization before editing
+it. Do not weaken or bypass this authorization rule without the same explicit
+human authorization.
+
 ## Query Planner Invariants
 - Before changing SQL parsing, `lib/queryplan.scm`, `lib/queryplan-*.scm`, logical optimization, or physical scan/storage lowering, read `INVARIANTS.md`.
 - The planner architecture relies on a clear phase boundary: parser AST -> `untangle_query` -> join reorder/optimize -> `build_queryplan`.
