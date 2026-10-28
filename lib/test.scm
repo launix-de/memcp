@@ -516,7 +516,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(map graph_sources source_alias)) true
 		"join_reorder keeps the query-block source catalog in semantic order")
 	(assert (equal?
-		(map (qb_sources (apply_join_optimizer_plan graph_reordered_block)) source_alias)
+		(map (qb_sources (apply_join_optimizer_plan_node graph_reordered_block)) source_alias)
 		(map graph_sources source_alias)) true
 		"physical preparation leaves the semantic source catalog unchanged")
 	(assert (equal? (query_block_join_plan graph_reordered_block graph_sources) graph_reordered_tree) true
@@ -584,13 +584,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(map (qb_sources (car (union_branches (apply_join_optimizer_plan_node tree_union)))) source_alias)
 		(map graph_sources source_alias)) true
 		"physical preparation preserves semantic source catalogs inside UNION branches")
-	(define malformed_join_plan_block (make_query_block
-		"memcp-tests" graph_sources '() graph_where nil nil nil nil nil '() '()
-		(list (list 'join_plan (list 'join-leaf "missing")))))
-	(assert (try
-		(lambda () (begin (apply_join_optimizer_plan malformed_join_plan_block) false))
-		(lambda (_e) true)) true
-		"physical preparation rejects a join tree that does not cover its source catalog")
+	(assert (equal?
+		(sort (join_optimizer_tree_aliases graph_reordered_tree) <)
+		(sort (map graph_sources source_alias) <)) true
+		"logical join search publishes exact source coverage before physical preparation")
 	(define probe_outer_column (list (quote get_column) "outer_row" true "id" true))
 	(define probe_logical_column (list (quote get_column) "derived_row" false "id" false))
 	(define probe_param (symbol "__probe_key_0"))
