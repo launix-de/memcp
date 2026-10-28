@@ -324,6 +324,10 @@ func serialProcNativeArgConstant(proc *Proc, body Scmer) (native Scmer, argument
 // PrepareSerialProc classifies the dominant constant, argument-projection and
 // exact native-forwarding callback shapes. Compiled procedures dispatch to the
 // JIT; other bodies use the serial interpreter with explicit frame ownership.
+// Prepare once during serial worker/operator setup, outside callback closures
+// and execution loops. Reuse Call and a borrowed argument frame; preparing per
+// call repeats interpreter/frame allocation. Never share an active adapter
+// between concurrent workers.
 func PrepareSerialProc(source Scmer) SerialProc {
 	prepared := classifySerialProc(source)
 	if prepared.Kind == SerialProcGeneral {

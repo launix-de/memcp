@@ -460,3 +460,33 @@ func TestPreparedCapturingUnknownCallStillFails(t *testing.T) {
 	}()
 	prepared.Call([]Scmer{NewInt(11)})
 }
+
+// Variadic syntax can reuse a borrowed frame with args..., exactly like a
+// slice parameter. Passing individual values instead creates a new frame;
+// whether it escapes depends on the callback dispatch, not on the spelling.
+func BenchmarkSerialProcArgumentFrames(b *testing.B) {
+	prepared := PrepareSerialProc(Globalenv.Vars["+"])
+	variadic := serialTestCallable(Globalenv.Vars["+"])
+	b.Run("slice_reused", func(b *testing.B) {
+		args := []Scmer{NewInt(1), NewInt(2)}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			singletonListBenchmarkSink = prepared.Call(args)
+		}
+	})
+	b.Run("variadic_reused", func(b *testing.B) {
+		args := []Scmer{NewInt(1), NewInt(2)}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			singletonListBenchmarkSink = variadic(args...)
+		}
+	})
+	b.Run("variadic_values", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			singletonListBenchmarkSink = variadic(NewInt(1), NewInt(2))
+		}
+	})
+}

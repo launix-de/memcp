@@ -306,19 +306,46 @@ func TestAssocMergeOneShotCallbacks(t *testing.T) {
 	}
 }
 
-func TestAssocMissingKeyDoesNotPrepareUnusedMerger(t *testing.T) {
-	merger := preparedTestProc(t, "(lambda (old new) (+ (* old 2) (* new 3) (* old new) (if (< old new) old new)))")
+func TestAssocMissingKeyDoesNotInvokeMerger(t *testing.T) {
+	merger := preparedTestProc(t, `(lambda (old new) (error "merger invoked for missing key"))`)
 	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
-		t.Run(name, func(t *testing.T) {
-			setter := Globalenv.Vars[Symbol(name)]
-			args := []Scmer{NewSlice(nil), NewString("missing"), NewInt(7), merger}
-			allocations := testing.AllocsPerRun(100, func() {
-				assocBenchmarkSink = Apply(setter, args...)
+		result := Apply(Globalenv.Vars[Symbol(name)], NewSlice(nil), NewString("missing"), NewInt(7), merger)
+		if value := Apply(result, NewString("missing")); value.Int() != 7 {
+			t.Fatalf("%s changed the missing-key value: %s", name, value.String())
+		}
+	}
+}
+
+// Preparation may allocate once per invocation. Increasing the number of
+// non-retaining merge calls must not allocate another adapter or argument frame.
+func TestSetAssocMergeAllocationsArePerInvocation(t *testing.T) {
+	general := preparedTestProc(t, "(lambda (old new) (+ (mod old 97) new))")
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		for _, callback := range []struct {
+			name  string
+			value Scmer
+		}{{"native", Globalenv.Vars["+"]}, {"general", general}} {
+			t.Run(name+"/"+callback.name, func(t *testing.T) {
+				dict := NewFastDictValue(1)
+				key := NewString("key")
+				dict.Set(key, NewInt(0), nil)
+				measure := func(count int) float64 {
+					args := make([]Scmer, 2+2*count)
+					args[0] = NewFastDict(dict)
+					for i := 0; i < count; i++ {
+						args[1+2*i], args[2+2*i] = key, NewInt(1)
+					}
+					args[len(args)-1] = callback.value
+					return testing.AllocsPerRun(100, func() {
+						assocBenchmarkSink = Apply(Globalenv.Vars[Symbol(name)], args...)
+					})
+				}
+				small, large := measure(8), measure(256)
+				if large > small {
+					t.Fatalf("merge count grew allocations: 8 calls %.1f, 256 calls %.1f", small, large)
+				}
 			})
-			if allocations > 8 {
-				t.Fatalf("missing-key update allocated %.1f objects without invoking its merger", allocations)
-			}
-		})
+		}
 	}
 }
 

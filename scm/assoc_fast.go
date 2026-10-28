@@ -774,28 +774,19 @@ func (d *FastDict) Copy() *FastDict {
 func (d *FastDict) ToList() []Scmer { return d.Pairs }
 
 // setAssocPairs is the common implementation of both association builtins.
-// An odd argument tail ends in a merger; the rest is key/value pairs. Preserve
-// the single-pair callback contract, including constant-result mergers. Nothing
-// prepares or invokes a merger unless an existing key actually needs it.
+// An odd argument tail ends in a merger; the rest is key/value pairs. Prepare
+// its serial adapter and borrowed argument frame once per invocation, outside
+// the closure/loops. SerialProc owns native, interpreted, JIT and constant-result
+// dispatch; retaining callbacks receive independent frames through Call.
 func setAssocPairs(input Scmer, updates []Scmer, mutable bool) Scmer {
 	var mergeFn func(Scmer, Scmer) Scmer
 	if len(updates)%2 != 0 {
-		merge := updates[len(updates)-1]
+		merge := PrepareSerialProc(updates[len(updates)-1])
 		updates = updates[:len(updates)-1]
+		var args [2]Scmer
 		mergeFn = func(oldV, newV Scmer) Scmer {
-			if merge.GetTag() == tagFunc || (merge.IsProc() && merge.Proc().compiled() != nil) {
-				prepared := PrepareSerialProc(merge)
-				return prepared.Call([]Scmer{oldV, newV})
-			}
-			if merge.IsProc() {
-				return Apply(merge, oldV, newV)
-			}
-			if merge.GetTag() == tagAny {
-				if fn, ok := merge.Any().(func(...Scmer) Scmer); ok {
-					return fn(oldV, newV)
-				}
-			}
-			return merge
+			args[0], args[1] = oldV, newV
+			return merge.Call(args[:])
 		}
 	}
 	if len(updates) == 0 {
