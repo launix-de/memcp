@@ -181,8 +181,6 @@ type scanAccessSegment struct {
 type scanAccessRuntime struct {
 	mutation  bool // invocation-owned: acquire M before selecting cluster mutation rows
 	localRead bool // invocation-owned: this operator retains local ordered payload
-	// Immutable remote invocation extent; supplied before operator preparation.
-	horizon *shardScanHorizon
 	// prefixMerge is immutable invocation-owned state, borrowed under the scan
 	// shard rights and lock. It retains no index or mutable shard container.
 	prefixMerge *orderedPrefixAccess

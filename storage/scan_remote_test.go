@@ -58,7 +58,7 @@ func makeRemoteScanTask(t *testing.T, shard remoteScanShard) remoteScanTask {
 	}
 	return remoteScanTask{Version: scanWireVersion, Task: 1, Attempt: uuid.NewString(), Visibility: "cursor-stability/captured-horizon", Shard: shard, FilterColumns: []string{"id"}, Filter: encode(`(lambda (id) (> id 1))`), MapColumns: []string{"id"}, MapReducer: encode(`(lambda (acc id) (+ acc id))`), Neutral: json.RawMessage(`0`), ResultKind: "scalar"}
 }
-func TestRemoteScanRPCExecutesReductionWithCapturedHorizon(t *testing.T) {
+func TestRemoteScanRPCExecutesReductionWithNativeExtent(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremotescanrpc", 4)
 	RebuildTable(tbl, true, false)
 	peer, _, _ := setupRemoteScanConnection(t)
@@ -69,7 +69,8 @@ func TestRemoteScanRPCExecutesReductionWithCapturedHorizon(t *testing.T) {
 	if len(parts) != 1 {
 		t.Fatal("expected one shard")
 	}
-	// A future insert after the described scan extent must not enter this task.
+	// Describing a generation does not freeze its append-only delta. The native
+	// operator captures its input extent when execution starts.
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1000), scm.NewString("future")}}, nil, scm.NewNil(), false, nil)
 	task := makeRemoteScanTask(t, parts[0])
 	var response remoteScanResult
@@ -80,7 +81,7 @@ func TestRemoteScanRPCExecutesReductionWithCapturedHorizon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value.Int() != 9 || response.OutCount != 3 || response.Shard != parts[0] || response.Attempt != task.Attempt {
+	if value.Int() != 1009 || response.OutCount != 4 || response.Shard != parts[0] || response.Attempt != task.Attempt {
 		t.Fatalf("wrong reduction or task identity: %+v", response)
 	}
 	if err := peer.call(context.Background(), "scan.execute", task, &response); err == nil || !strings.Contains(err.Error(), "replayed") {
@@ -371,8 +372,8 @@ func TestRemoteScanRetainsUUIDAcrossRebuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	value, err := decodeScanData(result.Value, false)
-	if err != nil || value.Int() != 9 || result.OutCount != 3 || result.Shard.Resource.Shard != held.uuid.String() {
-		t.Fatalf("remote scan lost its old shard/horizon: %+v, %v", result, err)
+	if err != nil || value.Int() != 1009 || result.OutCount != 4 || result.Shard.Resource.Shard != held.uuid.String() {
+		t.Fatalf("remote scan lost its retained generation or forwarded inserts: %+v, %v", result, err)
 	}
 	if current.state() != COLD {
 		t.Fatal("historical scan loaded an unrelated successor payload")
@@ -397,9 +398,9 @@ func TestRemoteScanNativeExistsAndBatch(t *testing.T) {
 	if err := peer.call(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, table.schema.Name, table.Name}, &parts); err != nil {
 		t.Fatal(err)
 	}
-	// A specialized kernel must retain the described extent as strictly as
-	// ordinary reduction, even when a matching row is inserted before dispatch.
-	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(500), scm.NewString("outside-horizon")}}, false, nil, nil, false, nil)
+	// Specialized kernels capture their extent at execution, just like native
+	// reduction; inserts before dispatch belong to that same generation.
+	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(500), scm.NewString("before-dispatch")}}, false, nil, nil, false, nil)
 	procedure := func(source string) json.RawMessage {
 		result, err := scm.MarshalProcedure(scm.Eval(scm.Read(t.Name(), source), &scm.Globalenv))
 		if err != nil {
@@ -407,24 +408,29 @@ func TestRemoteScanNativeExistsAndBatch(t *testing.T) {
 		}
 		return result
 	}
-	for sequence, match := range []bool{true, false} {
+	for sequence, test := range []struct {
+		filter string
+		match  bool
+	}{
+		{`(lambda (id) (> id 1))`, true},
+		{`(lambda (id) (> id 100))`, true}, // newly appended delta row
+		{`(lambda (id) (> id 500))`, false},
+	} {
 		task := makeRemoteScanTask(t, parts[0])
 		task.Task = uint64(sequence + 1)
 		task.Operator = shardExists
-		if !match {
-			task.Filter = procedure(`(lambda (id) (> id 100))`)
-		}
+		task.Filter = procedure(test.filter)
 		var result remoteScanResult
 		if err := peer.call(context.Background(), "scan.execute", task, &result); err != nil {
 			t.Fatal(err)
 		}
 		value, err := decodeScanValue(result.Value, result.Kind)
-		if err != nil || scm.ToBool(value) != match {
+		if err != nil || scm.ToBool(value) != test.match {
 			t.Fatal("remote EXISTS lost native match/miss semantics", result, err)
 		}
 	}
 	task := makeRemoteScanTask(t, parts[0])
-	task.Task = 3
+	task.Task = 4
 	task.Stride = 2
 	for _, value := range []int64{2, 10, 4, 20} {
 		frozen, err := freezeScanValue(scm.NewInt(value), 0)
@@ -486,10 +492,10 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 	if err := peer.call(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, table.schema.Name, table.Name}, &parts); err != nil {
 		t.Fatal(err)
 	}
-	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("outside-horizon")}}, false, nil, nil, false, nil)
+	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("before-dispatch")}}, false, nil, nil, false, nil)
 	var sequence uint64
 	for _, operator := range []shardScanOperator{shardLookupOne, shardLookupMany, shardLookupMapOne, shardLookupMapMany} {
-		for _, key := range []int64{2, 99} {
+		for _, key := range []int64{2, 99, 100} {
 			sequence++
 			task := makeRemoteScanTask(t, parts[0])
 			task.Task, task.Operator = sequence, operator
@@ -514,7 +520,7 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if key == 99 {
+			if key == 100 {
 				if result.OutCount != 0 {
 					t.Fatal("lookup miss lost native cardinality", result)
 				}
@@ -533,7 +539,7 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 // A remote ordered run uses the native sort, retains its captured physical IDs,
 // and feeds bounded pages into the same coordinator merge. Projection callbacks
 // execute only on selected rows; the worker releases its payload before paging.
-func TestRemoteScanOrderedRunPagesAndHorizon(t *testing.T) {
+func TestRemoteScanOrderedRunPagesAndNativeExtent(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremoteorderedrun", 700)
 	RebuildTable(tbl, true, false)
 	source := tbl.ActiveShards()[0]
@@ -573,8 +579,9 @@ func TestRemoteScanOrderedRunPagesAndHorizon(t *testing.T) {
 	if pageCalls != 2 {
 		t.Fatalf("paging made %d roundtrips, want two requests after the piggybacked page", pageCalls)
 	}
-	// Descending 700..1, skip five, consume 695..96. Future id 9999 excluded.
-	if calls != 600 || value.Int() != int64((695+96)*600/2) {
+	// Descending 9999,700..1: skip five, consume 696..97. The insert before
+	// execution participates in the native ordered input.
+	if calls != 600 || value.Int() != int64((696+97)*600/2) {
 		t.Fatalf("calls=%d sum=%v", calls, value)
 	}
 	if queue.remote.next <= 256 {

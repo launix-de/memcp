@@ -1428,22 +1428,6 @@ func (t *table) hasUniqueColumns(columns []string) bool {
 	return false
 }
 
-// scanDeltaExtent freezes the same physical input range for every read kernel.
-// Remote scopes already own a generation and captured horizon; this preparation
-// must not admit later inserts just because EXISTS, lookup or batch uses a more
-// specialized loop. It adds no lock, counter or row-loop check.
-func (t *storageShard) scanDeltaExtent(access scanAccess) int {
-	count := len(t.inserts)
-	if access.runtime != nil && access.runtime.horizon != nil {
-		horizon := access.runtime.horizon
-		if t.main_count != horizon.Main || uint64(count) < uint64(horizon.Delta) {
-			panic("remote scan horizon changed")
-		}
-		return int(horizon.Delta)
-	}
-	return count
-}
-
 func (t *table) scanExists(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer) bool {
 	return t.scanExistsFrom(currentTx, nil, accessSchema, accessValues, conditionCols, condition)
 }
@@ -2119,7 +2103,7 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
-	maxInsertIndex := t.scanDeltaExtent(access)
+	maxInsertIndex := len(t.inserts)
 	visibleUpper := mainCount + uint32(maxInsertIndex)
 	found := false
 	var foundID uint32
@@ -2426,7 +2410,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 			t.mu.RUnlock()
 		}
 	}()
-	maxInsertIndex := t.scanDeltaExtent(access)
+	maxInsertIndex := len(t.inserts)
 	feedbackPopulation := int64(t.main_count) + int64(maxInsertIndex) - int64(t.deletions.Count())
 	var feedbackCandidates int64
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
@@ -2734,7 +2718,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 			t.mu.RUnlock()
 		}
 	}()
-	maxInsertIndex := t.scanDeltaExtent(access)
+	maxInsertIndex := len(t.inserts)
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
 	var pendingRecids []uint32
 	var pendingBatchids []uint32

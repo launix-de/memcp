@@ -1705,7 +1705,7 @@ func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopolog
 	}
 	var queue *shardqueue
 	func() {
-		release := shard.acquireReadForScan(currentTx, access.runtime)
+		release := shard.acquireReadForScan(currentTx, bounds.runtime)
 		acquiring = false
 		defer release.Release()
 		if scm.Trace == nil {
@@ -2091,7 +2091,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 			}
 		}()
 		// remember current insert status (so don't scan things that are inserted during map)
-		maxInsertIndex = t.scanDeltaExtent(access)
+		maxInsertIndex = len(t.inserts)
 		visibleUpper = t.main_count + uint32(maxInsertIndex)
 		result.universe = visibleUpper
 

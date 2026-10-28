@@ -279,10 +279,6 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 			}
 			lease := shard.getRead(tx, true)
 			defer lease.Release()
-			horizon := shard.captureScanHorizon()
-			if horizon.Main != request.Shard.Horizon.Main || horizon.Delta < request.Shard.Horizon.Delta {
-				return fmt.Errorf("retained input horizon mismatch")
-			}
 			return execute(shard)
 		}
 	}
@@ -302,7 +298,6 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 				}
 			}
 		}
-		access.ensureRuntime().horizon = &request.Shard.Horizon
 		// Only the native shard handler executes the operator. The database owns
 		// resolution/acquisition; the transport knows neither placement nor scans.
 		value, err := shard.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "scan", Payload: shardScanInvocation{order: order, operator: request.Operator, stride: request.Stride, batchdata: batch, tx: tx, access: access, conditionCols: request.FilterColumns, condition: filter, callbackCols: request.MapColumns, mapReduce: reducer, neutral: neutral}})
@@ -477,10 +472,6 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, execute func(
 			horizon := shard.captureScanHorizon()
 			if shared {
 				expected.Horizon = horizon
-			}
-			valid := horizon.Main == expected.Horizon.Main && horizon.Delta >= expected.Horizon.Delta
-			if !valid {
-				return fmt.Errorf("remote scan horizon changed")
 			}
 			if err := execute(shard); err != nil {
 				return err
