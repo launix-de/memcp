@@ -4367,12 +4367,10 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			defer func() {
 				if value := recover(); value != nil {
 					if _, invalid := value.(uniqueReadRetry); invalid {
-						wrote := guard.wrote
-						if currentTx != nil {
-							currentTx.touchedShards.Range(func(_, _ any) bool { wrote = true; return false })
-						}
-						if wrote {
-							panic(sqldb.NewSQLError1(1213, "40001", "UNIQUE read generation changed after a transaction write"))
+						// Earlier statements/chunks remain applied exactly once. Only
+						// effects from this invocation forbid replaying its preflight.
+						if guard.wrote {
+							panic(sqldb.NewSQLError1(1213, "40001", "UNIQUE read generation changed after a batch write"))
 						}
 						retry = true
 						return
@@ -4516,7 +4514,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 				if sharedClusterSource(t) {
 					readAccesses[i] = shard.GetRead(currentTx)
 				} else {
-					readAccesses[i] = shard.acquireReadForScan(currentTx)
+					readAccesses[i] = shard.acquireReadForScan(currentTx, nil)
 				}
 				if current := readAccesses[i].shard; current != nil && current != shard {
 					// Acquisition may install a native successor while this check

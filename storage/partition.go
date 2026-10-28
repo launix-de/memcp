@@ -268,12 +268,12 @@ func traceShardScanCallback(callback func(*storageShard, bool, any), shard *stor
 // Acquisition failures belong to the query's result/error collector, just like
 // scan failures. In particular, a cancelled load wait must never escape a
 // fanout worker before the callback has installed its recovery handler.
-func runAcquiredShardScan(currentTx *TxContext, shard *storageShard, solo bool, write bool, callback func(*storageShard, bool, any)) {
+func runAcquiredShardScan(currentTx *TxContext, shard *storageShard, solo bool, policy *scanAccessRuntime, callback func(*storageShard, bool, any)) {
 	var release ReadAccess
 	var acquisitionFailure any
 	func() {
 		defer func() { acquisitionFailure = recover() }()
-		release = shard.acquireReadForScan(currentTx, write)
+		release = shard.acquireReadForScan(currentTx, policy)
 		if release.shard != nil {
 			shard = release.shard
 		}
@@ -289,10 +289,10 @@ func runAcquiredShardScan(currentTx *TxContext, shard *storageShard, solo bool, 
 // runSingleShardScan keeps panic-safe resource release outside the topology
 // retry loop. Defers inside that loop cannot be open-coded by Go and used to
 // allocate a separate closure for every ordinary one-shard scan.
-func runSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, write bool, callback func(*storageShard, bool, any)) {
+func runSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, policy *scanAccessRuntime, callback func(*storageShard, bool, any)) {
 	defer topology.releaseOperation()
 	defer shard.activeScanners.Add(-1)
-	runAcquiredShardScan(currentTx, shard, true, write, callback)
+	runAcquiredShardScan(currentTx, shard, true, policy, callback)
 }
 
 // pinSingleShardForScan returns a registered authoritative shard only when the
@@ -378,12 +378,12 @@ func countRelevantShards(schema []shardDimension, access scanAccess, shards []*s
 	}
 }
 
-func runParallelShardScans(currentTx *TxContext, shards []*storageShard, topology *tableShardTopology, write bool, callback func(*storageShard, bool, any)) <-chan struct{} {
+func runParallelShardScans(currentTx *TxContext, shards []*storageShard, topology *tableShardTopology, policy *scanAccessRuntime, callback func(*storageShard, bool, any)) <-chan struct{} {
 	return runFanoutTasks(currentTx, len(shards), func(i int, _ bool) {
 		shard := shards[i]
 		defer topology.releaseOperation()
 		defer shard.activeScanners.Add(-1)
-		runAcquiredShardScan(currentTx, shard, false, write, callback)
+		runAcquiredShardScan(currentTx, shard, false, policy, callback)
 	})
 }
 
@@ -453,25 +453,25 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, p
 		}
 
 		if len(relevant) == 1 {
-			runSingleShardScan(currentTx, topology, relevant[0], access.runtime != nil && access.runtime.mutation, callback)
+			runSingleShardScan(currentTx, topology, relevant[0], access.runtime, callback)
 			return nil
 		}
-		return runParallelShardScans(currentTx, relevant, topology, access.runtime != nil && access.runtime.mutation, callback)
+		return runParallelShardScans(currentTx, relevant, topology, access.runtime, callback)
 	}
 }
 
 // acquireReadForScan obtains shard access unless this worker already owns the
 // stronger write lock. Re-entering GetRead while holding shard.mu for a
 // mutation would make its lazy-load checks deadlock on their own RLock.
-func (s *storageShard) acquireReadForScan(currentTx *TxContext, mutation ...bool) ReadAccess {
+func (s *storageShard) acquireReadForScan(currentTx *TxContext, policy *scanAccessRuntime) ReadAccess {
 	if s.hasWriteOwnerForTx(currentTx) {
 		return ReadAccess{}
 	}
-	if sharedClusterSource(s.t) && len(mutation) > 0 && mutation[0] {
+	if sharedClusterSource(s.t) && policy != nil && policy.mutation {
 		write := s.GetWrite(currentTx)
 		return ReadAccess{shard: write.shard, mutation: &write}
 	}
-	if sharedClusterSource(s.t) && s.scanTarget.Load() == nil {
+	if sharedClusterSource(s.t) && s.scanTarget.Load() == nil && (policy == nil || !policy.localRead) {
 		cluster := activeNodeCluster()
 		if cluster == nil {
 			panic("cluster is not initialized")

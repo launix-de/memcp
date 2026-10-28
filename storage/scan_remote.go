@@ -678,7 +678,7 @@ func remoteScan(a ...scm.Scmer) scm.Scmer {
 		target := &shardScanTarget{resource: part.Resource, executor: remote}
 		stub.scanTarget.Store(target)
 		var result scanResult
-		runAcquiredShardScan(tx, stub, true, false, func(shard *storageShard, _ bool, failure any) {
+		runAcquiredShardScan(tx, stub, true, nil, func(shard *storageShard, _ bool, failure any) {
 			delegation, ok := failure.(shardReadDelegation)
 			if !ok {
 				if failure != nil {

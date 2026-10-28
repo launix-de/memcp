@@ -1511,7 +1511,7 @@ func runDirectSingleShardExists(currentTx *TxContext, topology *tableShardTopolo
 			scanErr = scanError{recovered, string(debug.Stack())}
 		}
 	}()
-	release := shard.acquireReadForScan(currentTx)
+	release := shard.acquireReadForScan(currentTx, nil)
 	defer release.Release()
 	if release.shard != nil {
 		shard = release.shard
@@ -1551,7 +1551,7 @@ func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology
 			}
 		}
 	}()
-	release := shard.acquireReadForScan(currentTx, access.runtime != nil && access.runtime.mutation)
+	release := shard.acquireReadForScan(currentTx, access.runtime)
 	acquiring = false
 	defer release.Release()
 	if release.shard != nil {

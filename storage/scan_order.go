@@ -1078,6 +1078,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		bounds = bounds.useScratch(scratch)
 		bounds, _ = extendScanAccessWithSortCols(bounds, spec.sortcols, sortdirs)
 		runtime := bounds.ensureRuntime()
+		runtime.localRead = true
 		runtime.extra = scanAccessSegmentFromAnalyzed(appendRecSetBoundary(nil, spec.recset))
 		if spec.prefixMerge != nil {
 			bounds = orderedPrefixBounds(bounds, spec.prefixMerge)
@@ -1668,7 +1669,7 @@ func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopolog
 	}
 	var queue *shardqueue
 	func() {
-		release := shard.acquireReadForScan(currentTx)
+		release := shard.GetRead(currentTx)
 		defer release.Release()
 		if scm.Trace == nil {
 			scanShard := shard
