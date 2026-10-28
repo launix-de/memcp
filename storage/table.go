@@ -4359,6 +4359,16 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 	guard := t.guardUniqueWrites(columns, values, mergeNull, idx)
 	guard.lock()
 	defer guard.unlock()
+	if !sharedClusterSource(t) {
+		t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, &guard)
+		return
+	}
+	t.processClusterUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, &guard)
+}
+
+// Retry state belongs only to shared-cluster batches. Keep ordinary native
+// INSERT/UPSERT on its direct constraint path without retry closures or recovery.
+func (t *table) processClusterUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, func() bool), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, guard *uniqueWriteGuard) {
 	var retries uint
 	for {
 		guard.readProofs = nil
@@ -4381,7 +4391,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			t.processUniqueCollision(columns, values, mergeNull, func(rows [][]scm.Scmer, validate func() bool) {
 				success(rows, validate)
 				guard.wrote = guard.wrote || len(rows) != 0
-			}, onCollisionCols, failure, idx, currentTx, &guard)
+			}, onCollisionCols, failure, idx, currentTx, guard)
 		}()
 		if !retry {
 			return
