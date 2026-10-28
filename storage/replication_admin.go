@@ -164,12 +164,6 @@ func (r *replicationManager) retire(id string) error {
 	}
 	r.mu.Lock()
 	p := r.peers[id]
-	names := make([]string, 0)
-	for name, record := range r.directory.Records {
-		if record.Owner == id || record.Readers[id] {
-			names = append(names, name)
-		}
-	}
 	r.mu.Unlock()
 	if p != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -181,6 +175,24 @@ func (r *replicationManager) retire(id string) error {
 		// can run inside one of them. The connection owner cleans up imports.
 		<-p.readDone
 	}
+	// Take the directory after the last inline import has completed. A completed
+	// copy can also outlive reclamation of local M/O, so include already-exclusive
+	// placements even when this peer is no longer present in their reader set.
+	// Leaving such a marker behind makes restart demand an already-retired peer.
+	r.mu.Lock()
+	names := make([]string, 0)
+	for name, record := range r.directory.Records {
+		exclusiveBackup := record.Owner == r.id && (record.State == "M" || record.State == "O") && r.backups[name].Content != ""
+		for reader := range record.Readers {
+			if reader != r.id && reader != id {
+				exclusiveBackup = false
+			}
+		}
+		if record.Owner == id || record.Readers[id] || exclusiveBackup {
+			names = append(names, name)
+		}
+	}
+	r.mu.Unlock()
 	for _, name := range names {
 		c := r.cell(name)
 		c.directory.Lock()
