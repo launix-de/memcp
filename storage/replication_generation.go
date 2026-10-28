@@ -1025,6 +1025,16 @@ func (r *replicationManager) transmitResource(ctx context.Context, peerID string
 			if err := r.cluster.transferSchemaLocations(ctx, peerID, header); err != nil {
 				return err
 			}
+		} else {
+			// Preparation may have published a new physical UUID. Make its
+			// current owner routable before the reference wakes the requester;
+			// the final post-handover update alone leaves an observable gap.
+			r.mu.Lock()
+			entry := r.directory.Records[r.resourceKey(header.Resource)]
+			r.mu.Unlock()
+			if err := r.cluster.registerLocation(ctx, entry); err != nil {
+				return err
+			}
 		}
 		header.Kind = "reference"
 		if header.Resource.Shard != "" {

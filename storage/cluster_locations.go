@@ -6,6 +6,7 @@ package storage
 
 import "fmt"
 import "sort"
+import "strings"
 import "context"
 import "encoding/json"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -23,6 +24,45 @@ func locationRecord(record replicaRecord) replicaRecord {
 	return replicaRecord{Resource: record.Resource, Owner: record.Owner, Epoch: record.Epoch, Content: record.Content}
 }
 
+// Native UUID aliases can outlive the schema checkpoint which first named
+// them. Carry their current routing owner too, without creating another grant
+// or copying the cell's permission/readers. Historical requests still resolve
+// their exact generation at the real shard owner.
+func (cluster *nodeCluster) schemaLocations(database, after string) []replicaRecord {
+	r := cluster.manager
+	r.mu.Lock()
+	entries := make(map[string]replicaRecord)
+	for key, record := range r.directory.Records {
+		if record.Resource.Database == database && record.Resource.Shard != "" && record.Owner != "" && key > after {
+			entries[key] = locationRecord(record)
+		}
+	}
+	if snapshot := r.cellSnapshot.Load(); snapshot != nil {
+		for key, cell := range *snapshot {
+			if !strings.HasPrefix(key, database+"/") || key <= after {
+				continue
+			}
+			resource := cell.resolved().resource.Load()
+			if resource == nil {
+				continue
+			}
+			record := r.directory.Records[resource.key()]
+			if record.Owner != "" {
+				record = locationRecord(record)
+				record.Resource.Shard = strings.TrimPrefix(key, database+"/")
+				entries[key] = record
+			}
+		}
+	}
+	r.mu.Unlock()
+	result := make([]replicaRecord, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, entry)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Resource.key() < result[j].Resource.key() })
+	return result
+}
+
 // The schema handover's directory ownership serializes this snapshot with
 // incoming location updates. Resource rights remain with their native cells.
 func (cluster *nodeCluster) transferSchemaLocations(ctx context.Context, target string, header mosiPacket) error {
@@ -31,16 +71,7 @@ func (cluster *nodeCluster) transferSchemaLocations(ctx context.Context, target 
 			cluster.bootstrapCell(resource)
 		}
 	}
-	r := cluster.manager
-	r.mu.Lock()
-	entries := make([]replicaRecord, 0)
-	for _, record := range r.directory.Records {
-		if record.Resource.Database == header.Resource.Database && record.Resource.Shard != "" && record.Owner != "" {
-			entries = append(entries, locationRecord(record))
-		}
-	}
-	r.mu.Unlock()
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Resource.key() < entries[j].Resource.key() })
+	entries := cluster.schemaLocations(header.Resource.Database, "")
 	peer := cluster.peer(target)
 	if peer == nil {
 		return fmt.Errorf(mosi.NetworkError)
@@ -249,16 +280,7 @@ func (cluster *nodeCluster) handleLocations(ctx context.Context, source, method 
 			if !resource.valid() || resource.Shard != "" || !cluster.databases[resource.Database] {
 				return nil, fmt.Errorf("invalid schema location inventory")
 			}
-			r := cluster.manager
-			r.mu.Lock()
-			var entries []replicaRecord
-			for _, record := range r.directory.Records {
-				if record.Resource.Database == resource.Database && record.Resource.Shard != "" && record.Resource.key() > request.After && record.Owner != "" {
-					entries = append(entries, locationRecord(record))
-				}
-			}
-			r.mu.Unlock()
-			sort.Slice(entries, func(i, j int) bool { return entries[i].Resource.key() < entries[j].Resource.key() })
+			entries := cluster.schemaLocations(resource.Database, request.After)
 			return clusterSchemaLocations{Header: request.Header, Entries: entries[:min(len(entries), 64)]}, nil
 		}
 		return nil, cluster.installSchemaLocations(source, request)

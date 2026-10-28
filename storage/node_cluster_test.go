@@ -696,6 +696,33 @@ func TestClusterSchemaLocationTransferUsesBoundedBatches(t *testing.T) {
 	}
 }
 
+func TestClusterSchemaLocationsRetainNativeUUIDAliases(t *testing.T) {
+	cluster := &nodeCluster{}
+	cluster.initializeManager()
+	old := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	current := old
+	current.Shard = uuid.NewString()
+	cluster.manager.updateRecord(old, func(record *replicaRecord) bool { record.Owner, record.Epoch = "owner", 9; return true })
+	cluster.manager.forwardResource(old, current)
+	entries := cluster.schemaLocations("tenant", "")
+	if len(entries) != 2 {
+		t.Fatal("native UUID route disappeared during schema transfer", entries)
+	}
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		seen[entry.Resource.Shard] = true
+		if entry.Owner != "owner" || entry.Epoch != 9 {
+			t.Fatal("UUID route lost current ownership", entry)
+		}
+	}
+	if !seen[old.Shard] || !seen[current.Shard] {
+		t.Fatal("missing predecessor or successor", entries)
+	}
+	if cluster.manager.resourceCell(old).ownstate.Initialized() {
+		t.Fatal("inventory established rights")
+	}
+}
+
 func TestClusterSchemaRecoveryRestoresBoundedRoutesWithoutPermissions(t *testing.T) {
 	service := &nodeScanService{}
 	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}

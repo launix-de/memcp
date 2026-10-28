@@ -106,23 +106,23 @@ func TestRemoteScanInitializerFactory(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremotescaninitializer", 4)
 	peer, _, _ := setupRemoteScanConnection(t)
 	var parts []remoteScanShard
-	if err := peer.scanService.control(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts); err != nil {
+	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts); err != nil {
 		t.Fatal(err)
 	}
 	factory := scm.Eval(scm.Read(t.Name(), `(begin (define initial 10) (lambda () initial))`), &scm.Globalenv)
 	for i := 0; i < 2; i++ {
 		task := makeRemoteScanTask(t, parts[0])
 		var err error
-		encoded, failure := freezeScanValue(factory, 0, new(scm.SerializationContext))
+		encoded, failure := freezeScanValue(factory, new(scm.SerializationContext))
 		task.Neutral, err = json.RawMessage(encoded), failure
 		if err != nil {
 			t.Fatal(err)
 		}
 		var response remoteScanResult
-		if err := peer.scanService.control(context.Background(), "scan.execute", task, &response); err != nil {
+		if err := peer.scanService.control(context.Background(), peer, "scan.execute", task, &response); err != nil {
 			t.Fatal(err)
 		}
-		value, err := schemeValue(response.Value).thaw(0)
+		value, err := schemeValue(response.Value).reconstruct()
 		if err != nil || value.Int() != 19 {
 			t.Fatalf("result=%s err=%v", scm.String(value), err)
 		}
@@ -323,6 +323,7 @@ func TestRemoteScanNativePartialValuesKeepTupleKeysAndNULL(t *testing.T) {
 }
 
 func TestRemoteScanAccessKeepsBoundedNULLAndMandatoryConstraints(t *testing.T) {
+	registerScanBoundaryFormats()
 	// An unbounded endpoint and a bound SQL NULL must remain distinguishable.
 	// Losing mandatory/null-safe flags could otherwise widen the remote scan.
 	schema := []scm.Scmer{

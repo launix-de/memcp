@@ -520,20 +520,47 @@ func TestClusterCounterReservationKeepsSharedSchemaOwner(t *testing.T) {
 func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tclusterhandovernewgrant", 4)
 	RebuildTable(tbl, true, false)
-	cluster := &nodeCluster{self: clusterMember{ID: "local"}, ctx: context.Background()}
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}, ctx: context.Background(), service: &nodeScanService{}}
 	cluster.initializeManager()
 	r := cluster.manager
 	shard := tbl.ActiveShards()[0]
 	cell := cluster.declareShard(shard, true)
 	resource := r.shardResource(shard)
 	peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
-	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "remote"}, peer: peer}}})
+	schemaPeer := &mosiPeer{outgoing: make(chan mosiMessage, 1), done: make(chan struct{})}
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "remote"}, peer: peer}, {member: clusterMember{ID: "schema-owner"}, peer: schemaPeer}}})
+	schema := mosiResource{Database: tbl.schema.Name}
+	r.resourceCell(schema).ownstate.Establish(mosi.S)
+	r.updateRecord(schema, func(record *replicaRecord) bool { record.Owner, record.Epoch = "schema-owner", 3; return true })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
 		done <- r.coordinate(ctx, "remote", mosiPacket{Kind: "write", ID: "outgoing", Resource: resource, Sequence: 1})
 	}()
+	// A generation route must be acknowledged before its reference can wake
+	// the next writer. It still names the source until the handover completes.
+	select {
+	case message := <-schemaPeer.outgoing:
+		var update struct {
+			Return string
+			Method string
+			Data   replicaRecord
+		}
+		if err := json.Unmarshal(message.Data, &update); err != nil {
+			t.Fatal(err)
+		}
+		if update.Method != "cluster.location_update" || update.Data.Resource != r.canonicalResource(resource) || update.Data.Owner != "local" {
+			t.Fatal("missing pre-reference generation route", update)
+		}
+		if len(peer.outgoing) != 0 {
+			t.Fatal("reference preceded schema location acknowledgement")
+		}
+		route, _ := cluster.service.returns.Load(update.Return)
+		deliverTestCompletion(t, route, scanCompletion{})
+	case <-ctx.Done():
+		t.Fatal("generation route missing", ctx.Err())
+	}
 	var header mosiPacket
 	select {
 	case message := <-peer.outgoing:

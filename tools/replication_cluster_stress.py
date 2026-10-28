@@ -1800,8 +1800,16 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
         eventually(joined, "INSERT peer did not rejoin after restart", args.startup_timeout)
         nodes[2].client.sql("INSERT INTO integer_items(writer,value) VALUES(2,999)")
         for node in nodes:
-            expect(node.client.number("SELECT COUNT(DISTINCT id) AS n FROM integer_items"), 101,
-                   "integer keys survive restart and another reservation")
+            count = node.client.number("SELECT COUNT(DISTINCT id) AS n FROM integer_items")
+            if count != 101:
+                diagnostic = {"node": node.name, "count": count}
+                try:
+                    diagnostic["cluster"] = [json.loads(peer.client.scm("(cluster_status true)")) for peer in nodes]
+                    diagnostic["rows"] = {peer.name: peer.client.sql("SELECT id,writer,value FROM integer_items ORDER BY id") for peer in nodes}
+                except Exception as error:
+                    diagnostic["diagnostic_error"] = str(error)
+                (directory / "failed-restart-read.json").write_text(json.dumps(diagnostic, indent=2) + "\n")
+            expect(count, 101, f"integer keys survive restart and another reservation on {node.name}")
 
 
 def run_cluster_placement(args, artifacts, journal):
