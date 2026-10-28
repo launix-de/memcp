@@ -11,8 +11,9 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 
 package storage
 
-import "fmt"
 import "os"
+import "fmt"
+import "sort"
 import "path/filepath"
 import "encoding/json"
 import "github.com/google/uuid"
@@ -208,7 +209,26 @@ func (r *replicationManager) clearBackup(resource mosiResource) error {
 		return nil
 	}
 	if r.config != nil {
-		if err := r.writeConfig(replicaConfigEntry{Kind: "backup", Name: backup.Resource.key()}); err != nil {
+		// Native UUID merging can coalesce independently completed copies into
+		// one runtime cache entry. Promotion must retire all persisted placements
+		// of that same chain, otherwise an older copy requests recovery again
+		// after restart. Keep unrelated resources and node identities intact.
+		keys := map[string]bool{backup.Resource.key(): true, r.canonicalResource(resource).key(): true}
+		if resource.Shard != "" {
+			for _, route := range r.shardRoutes(resource) {
+				keys[route.From.key()] = true
+			}
+		}
+		names := make([]string, 0, len(keys))
+		for name := range keys {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		entries := make([]replicaConfigEntry, len(names))
+		for i, name := range names {
+			entries[i] = replicaConfigEntry{Kind: "backup", Name: name}
+		}
+		if err := r.writeConfig(entries...); err != nil {
 			return err
 		}
 	}

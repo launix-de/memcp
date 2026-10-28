@@ -61,6 +61,33 @@ test_cases:
   sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids,SUM(payload) AS total FROM uuid_native_recovery
   expect:
     data: [{n: 10, ids: 10, total: 80}]
+- name: Seed UUID keys for an update-only collision transaction
+  steps:
+  - sql: CREATE TABLE uuid_collision_recovery (id UUID PRIMARY KEY, payload INT) ENGINE=SAFE
+  - sql: INSERT INTO uuid_collision_recovery VALUES ('00000000-0000-4000-8000-000000000001',1),('00000000-0000-4000-8000-000000000002',2)
+- name: Commit only native UUID collision updates
+  steps:
+  - session_id: uuid_collision_writer
+    sql: START ACID TRANSACTION
+  - session_id: uuid_collision_writer
+    sql: INSERT INTO uuid_collision_recovery VALUES ('00000000-0000-4000-8000-000000000001',10),('00000000-0000-4000-8000-000000000002',20) ON DUPLICATE KEY UPDATE payload=VALUES(payload)
+  - session_id: uuid_collision_writer
+    sql: COMMIT
+- name: Committed UUID collision values are visible before crash
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids,SUM(payload) AS total FROM uuid_collision_recovery
+  expect:
+    data: [{n: 2, ids: 2, total: 30}]
+- name: Crash after the update-only native commit
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart the committed collision transaction through the test runner
+  action: restart
+- name: Committed UUID collision updates survive WAL replay
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids,SUM(payload) AS total FROM uuid_collision_recovery
+  expect:
+    data: [{n: 2, ids: 2, total: 30}]
 cleanup:
 - sql: DROP TABLE IF EXISTS uuid_binary_recovery
 - sql: DROP TABLE IF EXISTS uuid_native_recovery
+- sql: DROP TABLE IF EXISTS uuid_collision_recovery

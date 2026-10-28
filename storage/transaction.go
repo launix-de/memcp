@@ -16,15 +16,15 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
-import "context"
 import "fmt"
+import "context"
 
-import "github.com/carli2/hybridsort"
+import "sync"
 import "runtime"
 import "strconv"
 import "strings"
-import "sync"
 import "sync/atomic"
+import "github.com/carli2/hybridsort"
 
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -880,6 +880,13 @@ func (tx *TxContext) commitACID() error {
 		// Apply DeleteMask → set global deletions + write log.
 		for _, shard := range shards {
 			st := tx.shards[shard]
+			// Direct native collision callbacks can stage UPDATEs without a
+			// scan reducer's Close or a physical INSERT batch. The commit owner
+			// already has their complete shard directory; register WAL durability
+			// once per changed shard before publishing visibility records.
+			if len(st.DeleteRecids) != 0 || len(st.UndeleteRecids) != 0 {
+				tx.RegisterTouchedShard(shard)
+			}
 			for _, recid := range st.DeleteRecids {
 				if !st.DeleteMask.Get(uint(recid)) {
 					continue
