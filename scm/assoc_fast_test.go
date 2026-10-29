@@ -566,3 +566,78 @@ func TestSetAssocMutableReusesListCapacity(t *testing.T) {
 		t.Fatalf("owned list update with spare capacity allocated %.1f objects", allocations)
 	}
 }
+
+func TestMergeAssocBulkCallbackFrames(t *testing.T) {
+	for _, name := range []string{"merge_assoc", "merge_assoc_mut"} {
+		for _, hashed := range []bool{false, true} {
+			left, right := benchmarkFastDict(16), benchmarkFastDict(16)
+			if !hashed {
+				right = NewSlice(append([]Scmer(nil), right.FastDict().Pairs...))
+			}
+			before := SerializeToString(right, &Globalenv)
+			// The merger retains each argument frame in the resulting payload.
+			merger := NewFunc(func(args ...Scmer) Scmer { return NewSlice(args) })
+			got := Apply(Globalenv.Vars[Symbol(name)], left, right, merger)
+			for i := 0; i < 16; i++ {
+				payload := Apply(got, NewString(fmt.Sprintf("key-%d", i)))
+				if !Equal(payload, NewSlice([]Scmer{NewInt(int64(i)), NewInt(int64(i))})) {
+					t.Fatalf("%s key %d retained a reused argument frame: %s", name, i, String(payload))
+				}
+			}
+			if SerializeToString(right, &Globalenv) != before {
+				t.Fatal("merge changed borrowed source pairs")
+			}
+			if name == "merge_assoc_mut" && got.FastDict() != left.FastDict() {
+				t.Fatal("mutable merge copied its owned destination")
+			}
+		}
+		t.Run(name+"/malformed-source", func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("odd source was accepted as a merger")
+				}
+			}()
+			Apply(Globalenv.Vars[Symbol(name)], NewSlice(nil), NewSlice([]Scmer{NewString("missing-value")}))
+		})
+	}
+}
+
+func BenchmarkMergeAssocPreparedMerger(b *testing.B) {
+	for _, name := range []string{"merge_assoc", "merge_assoc_mut"} {
+		for _, count := range []int{64, 1024} {
+			b.Run(fmt.Sprintf("%s/%d", name, count), func(b *testing.B) {
+				left, right := benchmarkFastDict(count), benchmarkFastDict(count)
+				call := PrepareSerialProc(Globalenv.Vars[Symbol(name)])
+				args := []Scmer{left, right, Globalenv.Vars["+"]}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					assocBenchmarkSink = call.Call(args)
+				}
+				b.StopTimer()
+				for i := 0; i < count; i++ {
+					want := int64(2 * i)
+					if name == "merge_assoc_mut" {
+						want = int64(i) * int64(b.N+1)
+					}
+					if got := Apply(assocBenchmarkSink, NewString(fmt.Sprintf("key-%d", i))); got.Int() != want {
+						b.Fatalf("%s/%d key %d: got %s, want %d", name, count, i, String(got), want)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestMergeAssocMergerAllocationsDoNotScaleWithKeys(t *testing.T) {
+	measure := func(count int) float64 {
+		left, right := benchmarkFastDict(count), benchmarkFastDict(count)
+		merge := PrepareSerialProc(Globalenv.Vars["merge_assoc_mut"])
+		args := []Scmer{left, right, Globalenv.Vars["+"]}
+		return testing.AllocsPerRun(100, func() { assocBenchmarkSink = merge.Call(args) })
+	}
+	small, large := measure(64), measure(1024)
+	if large > small {
+		t.Fatalf("merger setup grew with key count: 64 keys %.1f allocations, 1024 keys %.1f", small, large)
+	}
+}

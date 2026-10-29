@@ -774,16 +774,44 @@ func (d *FastDict) Copy() *FastDict {
 
 func (d *FastDict) ToList() []Scmer { return d.Pairs }
 
+// mergeAssoc passes borrowed source pairs directly to the common setter. The
+// optional merger stays separate, so merging never needs to copy/repackage the
+// source or prepare the same callback again for each key.
+func mergeAssoc(input, source Scmer, merger []Scmer, mutable bool) Scmer {
+	pairs, dict := asAssoc(source, "merge_assoc")
+	if dict != nil {
+		pairs = dict.Pairs
+	}
+	if len(pairs)%2 != 0 {
+		panic("merge_assoc source requires key/value pairs")
+	}
+	if len(pairs) == 0 {
+		return input
+	}
+	return setAssocPairs(input, pairs, merger, mutable)
+}
+
+// setAssoc decodes the public variadic convention once. Internally, pairs and
+// the optional merger are separate borrowed views; neither input is copied.
+func setAssoc(args []Scmer, mutable bool) Scmer {
+	updates := args[1:]
+	var merger []Scmer
+	if len(updates)%2 != 0 {
+		merger = updates[len(updates)-1:]
+		updates = updates[:len(updates)-1]
+	}
+	return setAssocPairs(args[0], updates, merger, mutable)
+}
+
 // setAssocPairs is the common implementation of both association builtins.
-// An odd argument tail ends in a merger; the rest is key/value pairs. Prepare
+// Pairs and the optional merger are already decoded by the caller. Prepare
 // its serial adapter and borrowed argument frame once per invocation, outside
 // the closure/loops. SerialProc owns native, interpreted, JIT and constant-result
 // dispatch; retaining callbacks receive independent frames through Call.
-func setAssocPairs(input Scmer, updates []Scmer, mutable bool) Scmer {
+func setAssocPairs(input Scmer, updates, merger []Scmer, mutable bool) Scmer {
 	var mergeFn func(Scmer, Scmer) Scmer
-	if len(updates)%2 != 0 {
-		merge := PrepareSerialProc(updates[len(updates)-1], len(updates)/2)
-		updates = updates[:len(updates)-1]
+	if len(merger) != 0 {
+		merge := PrepareSerialProc(merger[0], len(updates)/2)
 		var args [2]Scmer
 		mergeFn = func(oldV, newV Scmer) Scmer {
 			args[0], args[1] = oldV, newV
