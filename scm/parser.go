@@ -328,7 +328,11 @@ func tokenize(source, s string) []Scmer {
 			col++
 		}
 
-		if state == 1 && (ch == '.' || ch >= '0' && ch <= '9') {
+		exponent := (ch == 'e' || ch == 'E') && i+1 < len(s) &&
+			(s[i+1] >= '0' && s[i+1] <= '9' ||
+				(s[i+1] == '+' || s[i+1] == '-') && i+2 < len(s) && s[i+2] >= '0' && s[i+2] <= '9')
+		exponentSign := (ch == '+' || ch == '-') && i > startToken && (s[i-1] == 'e' || s[i-1] == 'E')
+		if state == 1 && (ch == '.' || ch >= '0' && ch <= '9' || exponent || exponentSign) {
 			// another character added to Number
 		} else if state == 2 && ch == '*' && s[startToken:i] == "/" {
 			// begin of comment

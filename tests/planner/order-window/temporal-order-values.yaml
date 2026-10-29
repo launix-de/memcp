@@ -132,6 +132,25 @@ test_cases:
   expect: {error: true}
   cleanup:
   - sql: DROP TABLE IF EXISTS mixed_output_values
+- name: CASE consumes the temporal operand contract before output formatting
+  sql: SELECT CASE WHEN id=3 THEN stamp ELSE NULL END AS chosen FROM temporal_order_value WHERE id=3
+  expect:
+    data:
+    - {chosen: '2024-10-27 00:59:59'}
+- name: DATE arithmetic consumes the merged CASE datatype
+  sql: SELECT DATE_ADD(CASE WHEN id=3 THEN day_value ELSE NULL END,INTERVAL 1 HOUR) AS chosen FROM temporal_order_types WHERE id=3
+  expect:
+    data:
+    - {chosen: '2024-10-27 01:00:00'}
+- name: CAST dimensions survive CASE and the output descriptor
+  sql: SELECT CASE WHEN id=3 THEN CAST('1.239' AS DECIMAL(6,2)) ELSE NULL END AS chosen FROM temporal_order_types WHERE id=3
+  expect:
+    data:
+    - {chosen: 1.24}
+- name: CAST rejects an invalid declared decimal scale
+  sql: SELECT CAST('1' AS DECIMAL(2,3)) AS value
+  expect: {error: true}
+
 cleanup:
 - sql: DROP TABLE IF EXISTS temporal_order_value
 - sql: DROP TABLE IF EXISTS temporal_order_types

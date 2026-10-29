@@ -95,7 +95,10 @@ Keep the 40 MiB packet advertisement used by PDO on the MySQL frontend. */
 
 /* Execution shadows session_globalvar with its request-local reader. */
 (define session_globalvar (lambda (key) (globalvars key)))
-(define session_globalvar_explicit (lambda (session key) (coalesceNil (session key) (globalvars key))))
+/* Explicit lexical capture keeps this helper portable with a delegated plan.
+The native session owner supplies the invocation's immutable read view. */
+(define session_globalvar_explicit ((lambda (globals)
+	(lambda (session key) (coalesceNil (session key) (globals key)))) globalvars))
 
 /* Build row expressions so mutable values are read when a cached SHOW runs. */
 (define sql_system_variable_rows (lambda ()

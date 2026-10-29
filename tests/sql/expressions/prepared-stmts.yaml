@@ -671,7 +671,7 @@ test_cases:
           (equal? (sql_queryplan_bind_tx_calls nullable_length) nullable_length)
           (equal?
             (sql_queryplan_bind_execution_session (list session_globalvar "time_zone"))
-            (list (quote session_globalvar_explicit) (quote session) "time_zone"))
+            (list session_globalvar_explicit (quote session) "time_zone"))
           (equal?
             (sql_queryplan_bind_tx_calls (list connection_id))
             (list (quote tx_connection_id) (quote tx)))))

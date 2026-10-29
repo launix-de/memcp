@@ -11,8 +11,9 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package scm
 
 import "fmt"
-import "context"
+import "math"
 import "bytes"
+import "context"
 import "strings"
 import "testing"
 import "encoding/json"
@@ -50,6 +51,48 @@ func TestProcedureWireSnapshotsCapturesAndRunsWithoutSourceEnvironment(t *testin
 			if got.Int() != 10 {
 				t.Fatalf("optimize=%v source=%s: got %v, wire=%s", optimize, source, got, data)
 			}
+		}
+	}
+}
+
+func TestProcedureWirePreservesNativeDateCaptures(t *testing.T) {
+	for _, captured := range []Scmer{NewDate(1729987200), NewDateWithZone(-12345, 2047)} {
+		env := &Env{Vars: Vars{Symbol("captured"): captured}, Outer: &Globalenv}
+		original := Eval(Read(t.Name(), `(lambda () captured)`), env)
+		data, err := MarshalProcedure(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restored, err := UnmarshalProcedure(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := Apply(restored)
+		if got.GetTag() != tagDate || got.aux != captured.aux {
+			t.Fatalf("native date changed: got %#v, want %#v", got, captured)
+		}
+	}
+}
+
+func TestProcedureWirePreservesFloatingCaptures(t *testing.T) {
+	for _, number := range []float64{1, -1, 0, math.Copysign(0, -1), 6.87951631854206e14, 1e-20, math.Inf(1), math.Inf(-1), math.NaN()} {
+		env := &Env{Vars: Vars{Symbol("captured"): NewFloat(number)}, Outer: &Globalenv}
+		original := Eval(Read(t.Name(), `(lambda () (list captured 37))`), env)
+		data, err := MarshalProcedure(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restored, err := UnmarshalProcedure(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		values := Apply(restored).Slice()
+		if len(values) != 2 || values[1].Int() != 37 || values[0].GetTag() != tagFloat {
+			t.Fatalf("floating capture changed tuple structure: %v, wire=%s", values, data)
+		}
+		got := values[0].Float()
+		if !math.IsNaN(number) && math.Float64bits(got) != math.Float64bits(number) || math.IsNaN(number) && !math.IsNaN(got) {
+			t.Fatalf("floating capture changed: got %v, want %v, wire=%s", got, number, data)
 		}
 	}
 }

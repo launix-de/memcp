@@ -142,14 +142,14 @@ functional planner return value. */
 			(map tail sql_queryplan_bind_execution_session))
 		(cons (quote session) tail) (cons (quote session)
 			(map tail sql_queryplan_bind_execution_session))
-		(cons (symbol session_globalvar) tail) (cons (quote session_globalvar_explicit)
+		(cons (symbol session_globalvar) tail) (cons session_globalvar_explicit
 			(cons (quote session) (map tail sql_queryplan_bind_execution_session)))
-		(cons (quote session_globalvar) tail) (cons (quote session_globalvar_explicit)
+		(cons (quote session_globalvar) tail) (cons session_globalvar_explicit
 			(cons (quote session) (map tail sql_queryplan_bind_execution_session)))
 		(cons (symbol connection_id) _tail) (list (quote tx_connection_id) (quote tx))
 		(cons (quote connection_id) _tail) (list (quote tx_connection_id) (quote tx))
 		(cons head tail) (if (equal? head session_globalvar)
-			(cons (quote session_globalvar_explicit)
+			(cons session_globalvar_explicit
 				(cons (quote session) (map tail sql_queryplan_bind_execution_session)))
 			(if (equal? head connection_id)
 				(list (quote tx_connection_id) (quote tx))

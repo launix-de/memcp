@@ -361,6 +361,10 @@ func resolveProcedureObjectTree(value Scmer, captures map[int64]*serializedCaptu
 }
 
 func initClusterObjects() {
+	Declare(&Globalenv, &Declaration{Name: "serialized_date", Fn: func(a ...Scmer) Scmer {
+		return NewDateWithZone(a[0].Int(), int(a[1].Int()))
+	}, Type: &TypeDescriptor{Kind: "func", Const: true,
+		Params: []*TypeDescriptor{{Kind: "number"}, {Kind: "number"}}, Return: &TypeDescriptor{Kind: "date"}}})
 	// Outside wire decoding ordinary Scheme evaluation already constructs the
 	// argument before this identity call. Wire import consumes the marker first,
 	// restoring one capture per ID before building the executable lambda.

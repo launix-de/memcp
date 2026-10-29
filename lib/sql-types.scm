@@ -436,6 +436,9 @@ conversion is emitted as plain code; the target descriptor stays at compile time
 	(begin
 		(define input (car infos))
 		(define value (sql_info_formula input))
+		(if (and (equal? type "DECIMAL") (not (empty_list? dimensions))
+			(or (<= (car dimensions) 0) (< (cadr dimensions) 0) (> (cadr dimensions) (car dimensions))))
+			(error "invalid DECIMAL precision/scale") true)
 		(define numeric (list (quote simplify) value))
 		(define formula (if (sql_text_type? type) (list (quote concat) value)
 			(equal? type "BIGINT") (list (quote intdiv) numeric 1)
