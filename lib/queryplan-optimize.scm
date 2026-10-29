@@ -5765,9 +5765,8 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 				(union_facts block))
 			(merge_unique (map branch_results (lambda (item) (nth item 1))))))))
 
-/* Aggregate column names are derived from their expressions. A decorrelation
-rewrite may therefore rename a single-column stage output after a consumer was
-created. Canonicalize that unambiguous interface before physical lowering. */
+/* Index stage producers by ID. Logical consumers use exact producer bindings;
+physical cache-column adapters share this index after logical planning. */
 (define stage_output_stage_index (lambda (stages)
 	(reduce (coalesceNil stages '()) (lambda (index stage)
 		(if (group_stage? stage) (set_assoc index (gs_id stage) stage) index)) '())))
@@ -5787,60 +5786,6 @@ created. Canonicalize that unambiguous interface before physical lowering. */
 
 (define aggregate_column_name? (lambda (col)
 	(and (string? col) (and (>= (strlen col) 4) (equal? (substr col 0 4) "agg_")))))
-
-(define canonicalize_stage_output_stage (lambda (stage_index stage)
-	(if (not (group_stage? stage))
-		stage
-		(begin
-			(define input (gs_input stage))
-			(define sources (if (query_block? input) (qb_sources input) (list input)))
-			(rewrite_stage_graph_stage
-				(stage_output_single_aggregate_columns stage_index sources)
-				'() false stage)))))
-
-(define canonicalize_stage_output_stages_acc (lambda (remaining rewritten stage_index)
-	(match (coalesceNil remaining '())
-		(cons stage rest) (begin
-			(define canonical (canonicalize_stage_output_stage stage_index stage))
-			(canonicalize_stage_output_stages_acc rest
-				(merge rewritten (list canonical))
-				(if (group_stage? canonical)
-					(set_assoc stage_index (gs_id canonical) canonical)
-					stage_index)))
-		_ (list rewritten stage_index))))
-
-(define canonicalize_stage_output_stages (lambda (stages)
-	(nth (canonicalize_stage_output_stages_acc
-		stages '() (stage_output_stage_index stages)) 0)))
-
-(define canonicalize_stage_output_interfaces (lambda (ir)
-	(begin
-		(define root (ir_root ir))
-		(if (not (query_block? root))
-			(if (union_block? root)
-				(begin
-					(define branches (map (union_branches root) (lambda (branch)
-						(ir_root (canonicalize_stage_output_interfaces (make_ir (ir_kind ir) branch
-							(join_reorder_node_stage_catalog branch)
-							(ir_context_of ir) (ir_return ir)))))))
-					(make_ir (ir_kind ir)
-						(make_union_block (union_mode root) branches (union_order root)
-							(union_limit root) (union_offset root) (union_facts root))
-						(unique_stages_by_id (merge (map branches join_reorder_node_stage_catalog)))
-						(ir_context_of ir) (ir_return ir)))
-				ir)
-			(begin
-				(define canonical (canonicalize_stage_output_stages_acc
-					(qb_stages root) '() (stage_output_stage_index (qb_stages root))))
-				(define stages (nth canonical 0))
-				(define block_with_stages (make_query_block
-					(qb_schema root) (qb_sources root) (qb_fields root) (qb_where root)
-					(qb_group root) (qb_having root) (qb_order root) (qb_limit root)
-					(qb_offset root) (qb_hidden root) stages (qb_facts root)))
-				(define block (rewrite_stage_graph_expr
-					(stage_output_single_aggregate_columns (nth canonical 1) (qb_sources root))
-					'() block_with_stages))
-				(make_ir (ir_kind ir) block stages (ir_context_of ir) (ir_return ir)))))))
 
 /* ------------------------------------------------------------------------- */
 /* Boolean constant-folding on the normalized IR (todos/boolean-tautology-folding.md).
@@ -6258,18 +6203,27 @@ no scan, RecSet, keytable, or other physical artifact. */
 						(make_ir (ir_kind ir) kept_root kept_stages
 							(ir_context_of ir) (ir_return ir))))))))))
 
+/* CONTRACT: each logical rewrite owns its complete stage-output interface.
+If input/aggregate rewriting changes a column identity, the rewrite publishes
+an exact (source alias, old column, new column) map and updates every consumer,
+including nested stages, hidden fields, HAVING, order and source conditions.
+Derived rebinding, stage merging, boolean folding and demand pruning retain
+this obligation. normalize_stage_dependencies consumes their completed output;
+it must not guess that any agg_* reference means a stage's sole aggregate.
+Aggregate descriptors and source bindings still determine physical cache names.
+Dependency normalization has no later repair sweep. Physical cache-column
+adapters remain owned by physical lowering. */
 (define normalize_stage_dependencies (lambda (ir)
 	(begin
 		(define root_result (normalize_stage_dependencies_node (ir_root ir)))
 		(prune_unreferenced_single_row_stage_outputs_ir
-			(canonicalize_stage_output_interfaces
-				(fold_boolean_tautologies_ir
-					(merge_compatible_stage_output_left_joins_ir (make_ir
-						(ir_kind ir)
-						(nth root_result 0)
-						(if (query_block? (nth root_result 0)) (qb_stages (nth root_result 0)) (nth root_result 1))
-						(ir_context_of ir)
-						(ir_return ir)))))))))
+			(fold_boolean_tautologies_ir
+				(merge_compatible_stage_output_left_joins_ir (make_ir
+					(ir_kind ir)
+					(nth root_result 0)
+					(if (query_block? (nth root_result 0)) (qb_stages (nth root_result 0)) (nth root_result 1))
+					(ir_context_of ir)
+					(ir_return ir))))))))
 
 /* Scalar stages are merged after decorrelation. Build their signatures bottom-up
 so generated aliases and dependency IDs do not hide equivalent stage graphs. */
@@ -6826,12 +6780,13 @@ Nested query blocks otherwise retain a removed helper alias after stage merging.
 						(stage_output_left_join_removed_dependency_ids dependency_id_map))))
 					(define untouched_stages (filter (qb_stages block) (lambda (stage)
 						(stage_not_in_id_list? candidate_ids stage))))
-					(define merged_stages (map entries (lambda (entry)
-						(rewrite_stage_graph_stage alias_map id_map false
-							(stage_output_left_join_stage_with_aggregates
-								(stage_output_left_join_entry_stage entry)
-								(stage_output_left_join_entry_ags entry))))))
-					(make_query_block
+					(define combined_stages (map entries (lambda (entry)
+						(stage_output_left_join_stage_with_aggregates
+							(stage_output_left_join_entry_stage entry)
+							(stage_output_left_join_entry_ags entry)))))
+					(define merged_stages (map combined_stages (lambda (stage)
+						(rewrite_stage_graph_stage alias_map id_map false stage))))
+					(define rewritten (make_query_block
 						(qb_schema block)
 						(merge_unique (list (map (qb_sources block) (lambda (src)
 							(rewrite_stage_graph_source alias_map id_map
@@ -6847,7 +6802,13 @@ Nested query blocks otherwise retain a removed helper alias after stage merging.
 						(merge_unique (list
 							(map untouched_stages (lambda (stage) (rewrite_stage_graph_stage '() id_map false stage)))
 							merged_stages))
-						(rewrite_stage_graph_expr alias_map id_map (qb_facts block)))))))))
+						(rewrite_stage_graph_expr alias_map id_map (qb_facts block))))
+					/* CONTRACT: merging dependency IDs can rename an aggregate even
+					in a surviving, untouched stage. Publish those exact column mappings
+					through its consumers before returning the merged block. */
+					(nth (propagate_stage_output_aggregate_columns rewritten
+						(merge (list untouched_stages combined_stages))
+						(qb_stages rewritten)) 0)))))))
 
 (define merge_compatible_stage_output_left_joins_node (lambda (node)
 	(if (query_block? node)
@@ -6868,7 +6829,7 @@ Nested query blocks otherwise retain a removed helper alias after stage merging.
 		(make_ir
 			(ir_kind ir)
 			root
-			(if (query_block? root) (qb_stages root) (ir_stages ir))
+			(if (query_block? root) (qb_stages root) (join_reorder_node_stage_catalog root))
 			(ir_context_of ir)
 			(ir_return ir)))))
 

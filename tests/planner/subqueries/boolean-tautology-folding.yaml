@@ -262,6 +262,47 @@ test_cases:
           true
           (error (concat "boolean_fold_expr rule mismatch: " (string checks)))))
 
+  - name: Folded aggregate keeps its output beside the implicit cardinality slot
+    sql: |
+      SELECT SUM(CASE WHEN
+        EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id=p.ID)
+        OR NOT EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id=p.ID)
+        THEN p.val ELSE 0 END) AS total, COUNT(*) AS n
+      FROM taut_parent p
+    expect:
+      data: [{total: 25, n: 3}]
+
+  - name: Nested derived groups retain both folded aggregate output identities
+    sql: |
+      SELECT SUM(d.total) AS total, MAX(d.n) AS largest_group FROM (
+        SELECT p.ID,
+          SUM(CASE WHEN
+            EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id=p.ID)
+            OR NOT EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id=p.ID)
+            THEN p.val ELSE 0 END) AS total,
+          COUNT(*) AS n
+        FROM taut_parent p GROUP BY p.ID
+      ) d
+    expect:
+      data: [{total: 25, largest_group: 1}]
+
+  - name: Nested folded aggregate retains output bindings across UNION branches
+    sql: |
+      SELECT SUM(d.total) AS total FROM (
+        SELECT SUM(CASE WHEN
+          EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id=p.ID)
+          OR NOT EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id=p.ID)
+          THEN p.val ELSE 0 END) AS total
+        FROM taut_parent p
+        UNION ALL SELECT 7 AS total
+      ) d
+    expect:
+      data: [{total: 32}]
+
+  - name: An aggregate-looking unresolved derived column remains an error
+    sql: SELECT d.agg_unbound FROM (SELECT SUM(val) AS total FROM taut_parent) d
+    expect: {error: true}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS taut_child"
   - sql: "DROP TABLE IF EXISTS taut_parent"
