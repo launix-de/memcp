@@ -88,7 +88,7 @@ test_cases:
         (define counter (globalvars "__retention_perf_cursor"))
         (define board (coalesceNil (counter "board") 0))
         (counter "board" (+ board 1))
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-perf-snapshot"
+        (define cache (make_group_cache "memcp-tests" ".grp:retention-perf-snapshot"
           (list (list 'snapshot 'time))))
         (define total (reduce (produceN 64) (lambda (total i)
           (+ total (snapshot_group_cache cache "total" (lambda () '()) nil (+ (* board 64) i) 4000
@@ -235,7 +235,7 @@ test_cases:
     scm: |
       (begin
         (define name (concat "snapshot-work-choice:" (nanotime)))
-        (define cache (make_group_cache 'group-keytable "memcp-tests" (concat ".grp:" name) (list (list 'snapshot 0))))
+        (define cache (make_group_cache "memcp-tests" (concat ".grp:" name) (list (list 'snapshot 0))))
         (group_cache_ensure_cells cache "agg_sum" nil '())
         (define observed (newsession))
         (define keys (map (produceN 10) (lambda (i) (+ i 1))))
