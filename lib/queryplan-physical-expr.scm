@@ -6411,45 +6411,6 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(define scale (decimal_expr_scale sources (nth aggregate_descriptor 0)))
 			(if (nil? scale) best (if (nil? best) scale (max best scale))))) nil)))
 
-(define sanitize_decimal_aggregate_fields (lambda (sources fields)
-	(map_assoc (coalesceNil fields '()) (lambda (_title expr)
-		(begin
-			(define scale (coalesceNil (decimal_aggregate_output_scale sources expr)
-				(match expr
-					((symbol get_column) _tbl _ignorecase _col _col_ignorecase) (decimal_expr_scale sources expr)
-					((quote get_column) _tbl _ignorecase _col _col_ignorecase) (decimal_expr_scale sources expr)
-					_ nil)))
-			(if (nil? scale) expr (list (quote sql_decimal_output) expr scale)))))))
-
-(define sanitize_decimal_aggregate_outputs (lambda (query)
-	(begin
-		(define normalized (normalize_query_ast query))
-		(if (query_block? normalized)
-			(make_query_block
-				(qb_schema normalized)
-				/* Derived/view fields are relational values, not output. Rounding
-				there changes predicates and aggregates in their consumers. */
-				(qb_sources normalized)
-				(sanitize_decimal_aggregate_fields (qb_sources normalized) (qb_fields normalized))
-				(qb_where normalized)
-				(qb_group normalized)
-				(qb_having normalized)
-				(qb_order normalized)
-				(qb_limit normalized)
-				(qb_offset normalized)
-				(qb_hidden normalized)
-				(qb_stages normalized)
-				(qb_facts normalized))
-			(if (union_block? normalized)
-				(make_union_block
-					(union_mode normalized)
-					(map (union_branches normalized) sanitize_decimal_aggregate_outputs)
-					(union_order normalized)
-					(union_limit normalized)
-					(union_offset normalized)
-					(union_facts normalized))
-				normalized)))))
-
 /* Scmer and the storage engine intentionally keep temporal values generic.
 The SQL compiler retains the declared DATE/DATETIME/TIMESTAMP provenance and
 formats only visible result fields, after all relational operations have kept
@@ -6539,21 +6500,37 @@ working on the original values. */
 		((quote sql_temporal_output) _value sql_type) sql_type
 		_ nil)))
 
-(define sanitize_temporal_output_fields (lambda (sources fields)
+/* SQL output contract: normalize_sql_syntax calls this producer once, before
+binding/decorrelation can lose declared-column provenance. Each visible field
+receives decimal rounding followed by temporal formatting in one field walk.
+UNION branches are output scopes; sources (including derived/view fields),
+predicates, grouping, ordering and hidden fields remain relational values.
+Consumers preserve these scalar annotations and need no output repair pass.
+Type/scale discovery stays in the SQL frontend; SCM/storage see ordinary code. */
+(define annotate_sql_output_fields (lambda (sources fields)
 	(map_assoc (coalesceNil fields '()) (lambda (_title expr)
 		(begin
-			(define sql_type (temporal_expr_type sources expr))
-			(if (nil? sql_type) expr (list (quote sql_temporal_output) expr sql_type
+			(define scale (coalesceNil (decimal_aggregate_output_scale sources expr)
+				(match expr
+					((symbol get_column) _tbl _ignorecase _col _col_ignorecase) (decimal_expr_scale sources expr)
+					((quote get_column) _tbl _ignorecase _col _col_ignorecase) (decimal_expr_scale sources expr)
+					_ nil)))
+			(define decimal_expr (if (nil? scale) expr (list (quote sql_decimal_output) expr scale)))
+			(define sql_type (temporal_expr_type sources decimal_expr))
+			(if (nil? sql_type) decimal_expr (list (quote sql_temporal_output) decimal_expr sql_type
 				(list (quote session_globalvar) "time_zone"))))))))
 
-(define sanitize_temporal_outputs (lambda (query)
+/* Own the output-scope traversal for both annotations: reconstruct each block
+and UNION once. Do not descend into sources: formatting an intermediate value
+would change downstream predicates, arithmetic and aggregate results. */
+(define annotate_sql_outputs (lambda (query)
 	(begin
 		(define normalized (normalize_query_ast query))
 		(if (query_block? normalized)
 			(make_query_block
 				(qb_schema normalized)
 				(qb_sources normalized)
-				(sanitize_temporal_output_fields (qb_sources normalized) (qb_fields normalized))
+				(annotate_sql_output_fields (qb_sources normalized) (qb_fields normalized))
 				(qb_where normalized)
 				(qb_group normalized)
 				(qb_having normalized)
@@ -6566,7 +6543,7 @@ working on the original values. */
 			(if (union_block? normalized)
 				(make_union_block
 					(union_mode normalized)
-					(map (union_branches normalized) sanitize_temporal_outputs)
+					(map (union_branches normalized) annotate_sql_outputs)
 					(union_order normalized)
 					(union_limit normalized)
 					(union_offset normalized)

@@ -94,6 +94,44 @@ test_cases:
     data:
     - {id: 3, displayed: '2024-10-27 02:00:00'}
     - {id: 2, displayed: '2024-10-27 02:59:59'}
+- name: Mixed decimal and temporal UNION outputs share one normalization boundary
+  setup: &mixed_output_setup
+  - sql: DROP TABLE IF EXISTS mixed_output_values
+  - sql: CREATE TABLE mixed_output_values (amount DECIMAL(10,2), factor DECIMAL(10,2), stamp DATETIME) ENGINE=memory
+  - sql: INSERT INTO mixed_output_values VALUES (0.10,1.03,'2024-10-26 00:00:00'),(0.20,1.03,'2024-10-27 00:00:00')
+  sql: |
+    SELECT SUM(amount * factor) AS total, MIN(stamp) AS first_stamp FROM mixed_output_values
+    UNION ALL
+    SELECT SUM(amount * factor), MIN(stamp) FROM mixed_output_values
+    UNION ALL
+    SELECT SUM(amount * factor), MIN(stamp) FROM mixed_output_values
+    UNION ALL
+    SELECT SUM(amount * factor), MIN(stamp) FROM mixed_output_values
+  expect:
+    rows: 4
+    data:
+    - {total: 0.31, first_stamp: '2024-10-26 00:00:00'}
+    - {total: 0.31, first_stamp: '2024-10-26 00:00:00'}
+    - {total: 0.31, first_stamp: '2024-10-26 00:00:00'}
+    - {total: 0.31, first_stamp: '2024-10-26 00:00:00'}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS mixed_output_values
+- name: Mixed derived outputs retain unrounded relational intermediate values
+  setup: *mixed_output_setup
+  sql: |
+    SELECT SUM(value * 10) AS total, MAX(stamp) AS last_stamp
+    FROM (SELECT amount * factor AS value, stamp FROM mixed_output_values) d
+  expect:
+    data:
+    - {total: 3.09, last_stamp: '2024-10-27 00:00:00'}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS mixed_output_values
+- name: Output normalization retains unresolved column errors
+  setup: *mixed_output_setup
+  sql: SELECT SUM(missing_amount) AS total, MIN(stamp) AS first_stamp FROM mixed_output_values
+  expect: {error: true}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS mixed_output_values
 cleanup:
 - sql: DROP TABLE IF EXISTS temporal_order_value
 - sql: DROP TABLE IF EXISTS temporal_order_types
