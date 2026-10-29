@@ -128,7 +128,7 @@ func (r *replicationManager) statuses() []replicaStatus {
 	delete(known, "")
 	result := make([]replicaStatus, 0, len(known))
 	for id := range known {
-		status := replicaStatus{ID: id, Ready: r.peerReady[id], Retired: r.directory.Retired[id], Databases: []string{}}
+		status := replicaStatus{ID: id, Ready: r.peers[id].recovered(), Retired: r.directory.Retired[id], Databases: []string{}}
 		if p := r.peers[id]; p != nil {
 			select {
 			case <-p.done:
@@ -170,12 +170,12 @@ func (r *replicationManager) retire(id string) error {
 		_ = p.call(ctx, "retire", struct{}{}, nil)
 		cancel()
 		p.close()
-		// An inline import which passed its retirement check must finish before
-		// backup promotion. RPC workers are not joined here: retirement itself
-		// can run inside one of them. The connection owner cleans up imports.
-		<-p.readDone
+		// Join the reader and resource workers before backup promotion. An
+		// executing packet can still save placement after its reader stops.
+		// Retirement may itself own an RPC worker, which must not be joined.
+		p.waitPackets()
 	}
-	// Take the directory after the last inline import has completed. A completed
+	// Take the directory after all resource workers have completed. A completed
 	// copy can also outlive reclamation of local M/O, so include already-exclusive
 	// placements even when this peer is no longer present in their reader set.
 	// Leaving such a marker behind makes restart demand an already-retired peer.

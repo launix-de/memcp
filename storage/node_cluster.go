@@ -42,12 +42,11 @@ type clusterHello struct {
 	Members []clusterMember `json:"members"`
 }
 
-// A link belongs to one authenticated process connection. Task numbering is
-// shared by all queries on it, never restarted per SQL invocation.
+// A link belongs to one authenticated process connection. Each operation uses
+// the common envelope identity for replies, cancellation and duplicate checks.
 type clusterLink struct {
-	member   clusterMember
-	peer     *mosiPeer
-	sequence atomic.Uint64
+	member clusterMember
+	peer   *mosiPeer
 }
 type clusterView struct {
 	members []clusterMember
@@ -149,6 +148,8 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 		return nil, err
 	}
 	switch method {
+	case "cluster.location", "cluster.location_update", "cluster.schema_locations":
+		return cluster.handleLocations(ctx, source, method, data)
 	case "cluster.reserve_ids":
 		return cluster.handleIDReservation(ctx, data)
 	case "cluster.report":
@@ -160,27 +161,6 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 			return nil, fmt.Errorf("invalid cluster report")
 		}
 		return cluster.report(resource), nil
-	case "cluster.hint":
-		if err := cluster.requireMember(source); err != nil {
-			return nil, err
-		}
-		var expected remoteScanShard
-		if err := json.Unmarshal(data, &expected); err != nil {
-			return nil, err
-		}
-		if !expected.Resource.valid() || expected.Resource.Shard == "" || !cluster.databases[expected.Resource.Database] {
-			return nil, fmt.Errorf("invalid cluster shard hint")
-		}
-		// Residency is advisory. Read only the published directory; never acquire
-		// MOSI rights or load schema/payload merely to answer a placement probe.
-		if db := GetDatabase(expected.Resource.Database); db != nil {
-			if table := db.tables.Get(expected.Resource.Table); table != nil {
-				if shard := findScanShard(table, expected.Resource); shard != nil {
-					return clusterShardHint{Warm: shard.state() != COLD}, nil
-				}
-			}
-		}
-		return clusterShardHint{}, nil
 	case "cluster.hello":
 		var hello clusterHello
 		if err := json.Unmarshal(data, &hello); err != nil {

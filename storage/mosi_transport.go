@@ -72,26 +72,44 @@ func registerMosiRole(role string, handler http.Handler) (func(), error) {
 // Neither RPC handlers nor storage I/O run under its mutex.
 // A disconnected peer fails every outstanding call; no write is retried here.
 type mosiPeer struct {
-	objectEndpoint string            // immutable outbound URL, initialized before reader start
-	objectPeer     clusterObjectPeer // immutable authenticated identity/incarnation, independent of connection
-	scanService    *nodeScanService  // immutable before an outbound scan is dispatched
-	conn           *websocket.Conn
-	writeMu        sync.Mutex
-	outgoing       chan mosiMessage
-	writeDone      chan struct{}
-	mu             sync.Mutex
-	pending        map[uint64]chan mosiMessage
-	packetOrder    map[string]chan struct{} // wire publication order per resource; payload and grant IDs may differ
-	packetBytes    atomic.Int64             // bounded queued packet bytes, never shard admission state
-	next           atomic.Uint64
-	done           chan struct{}
-	once           sync.Once
-	handle         func(context.Context, string, json.RawMessage) (any, error)
-	packet         func(*mosiPacket) error
-	ctx            context.Context
-	cancel         context.CancelFunc
-	readDone       chan struct{}
-	workers        sync.WaitGroup
+	operationPrefix string            // immutable authenticated connection binding for query operations
+	recoveryDone    chan struct{}     // replication hello installed; nil for roles without recovery
+	objectEndpoint  string            // immutable outbound URL, initialized before reader start
+	objectPeer      clusterObjectPeer // immutable authenticated identity/incarnation, independent of connection
+	scanService     *nodeScanService  // immutable before an outbound scan is dispatched
+	conn            *websocket.Conn
+	writeMu         sync.Mutex
+	outgoing        chan mosiMessage
+	writeDone       chan struct{}
+	mu              sync.Mutex
+	pending         map[uint64]chan mosiMessage
+	packetOrder     map[string]chan struct{} // wire publication order per resource; payload and grant IDs may differ
+	packetBytes     atomic.Int64             // bounded queued packet bytes, never shard admission state
+	next            atomic.Uint64
+	done            chan struct{}
+	once            sync.Once
+	handle          func(context.Context, string, json.RawMessage) (any, error)
+	packet          func(*mosiPacket) error
+	ctx             context.Context
+	cancel          context.CancelFunc
+	readDone        chan struct{}
+	workers         sync.WaitGroup
+	packets         sync.WaitGroup // ordered resource workers; may outlive a closed queue tail
+}
+
+func (p *mosiPeer) recovered() bool {
+	if p == nil {
+		return false
+	}
+	if p.recoveryDone == nil {
+		return true
+	}
+	select {
+	case <-p.recoveryDone:
+		return true
+	default:
+		return false
+	}
 }
 
 type mosiMessage struct {
@@ -141,10 +159,29 @@ func (p *mosiPeer) close() {
 	p.once.Do(func() { close(p.done); p.cancel(); p.conn.Close() })
 }
 
-func (p *mosiPeer) wait() { <-p.readDone; <-p.writeDone; p.workers.Wait() }
+func (p *mosiPeer) wait() {
+	<-p.readDone
+	<-p.writeDone
+	p.packets.Wait()
+	p.workers.Wait()
+}
 
-func (p *mosiPeer) send(m mosiMessage) error {
+// Retirement can run inside an RPC worker on this peer. Join the reader and
+// resource workers without waiting on that RPC itself. A cancelled queue tail
+// can finish before an already executing predecessor, so packetOrder alone
+// cannot join publication.
+func (p *mosiPeer) waitPackets() {
+	<-p.readDone
+	p.packets.Wait()
+}
+
+func (p *mosiPeer) send(ctx context.Context, m mosiMessage) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-p.done:
 		return fmt.Errorf(mosi.NetworkError)
 	case p.outgoing <- m:
@@ -198,8 +235,10 @@ func (p *mosiPeer) call(ctx context.Context, method string, input, output any) e
 	p.pending[id] = ch
 	p.mu.Unlock()
 	defer func() { p.mu.Lock(); delete(p.pending, id); p.mu.Unlock() }()
-	if err := p.send(mosiMessage{ID: id, Method: method, Data: data}); err != nil {
-		p.close()
+	if err := p.send(ctx, mosiMessage{ID: id, Method: method, Data: data}); err != nil {
+		if ctx.Err() == nil {
+			p.close()
+		}
 		return err
 	}
 	select {
@@ -278,7 +317,7 @@ func (p *mosiPeer) read() {
 				}
 				return
 			} // fire-and-forget messages complete via their registered channel
-			if err := p.send(reply); err != nil {
+			if err := p.send(p.ctx, reply); err != nil {
 				p.close()
 			}
 		}(m)
@@ -313,9 +352,9 @@ func (p *mosiPeer) dispatchPacket(packet *mosiPacket, size int) bool {
 	}
 	p.packetOrder[key] = done
 	p.mu.Unlock()
-	p.workers.Add(1)
+	p.packets.Add(1)
 	go func() {
-		defer p.workers.Done()
+		defer p.packets.Done()
 		defer p.packetBytes.Add(-int64(size))
 		defer func() {
 			p.mu.Lock()

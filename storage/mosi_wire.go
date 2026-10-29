@@ -14,6 +14,7 @@ package storage
 import "io"
 import "fmt"
 import "bytes"
+import "context"
 import "compress/gzip"
 import "encoding/json"
 import "encoding/binary"
@@ -136,7 +137,7 @@ func (peer *mosiPeer) post(packet mosiPacket) error {
 		}
 	}
 
-	return peer.send(mosiMessage{Packet: &packet})
+	return peer.send(context.Background(), mosiMessage{Packet: &packet})
 }
 
 func (peer *mosiPeer) sendObject(header mosiPacket, kind, name string, reader io.ReadCloser) error {

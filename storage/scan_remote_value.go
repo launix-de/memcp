@@ -11,120 +11,70 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
+import "bytes"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
-// scanWireValue represents native reducer data, not a second SQL aggregation
-// model. Dictionary keys may themselves be tuples (including NULL domains).
-// Runtime objects/procedures enter only with explicit export/decode contexts;
-// aggregate-only callers remain data-only. Encoding happens at task boundaries,
-// never per row. Physical query-local containers without a contract fail.
-type scanWireValue struct {
-	Reference *scm.ClusterReference `json:"reference,omitempty"`
-	Procedure json.RawMessage       `json:"procedure,omitempty"`
-	Kind      string                `json:"kind"`
-	Scalar    json.RawMessage       `json:"scalar,omitempty"`
-	Items     []scanWireValue       `json:"items,omitempty"`
-}
+// schemeValue contains only existing Scheme reconstruction source; transport
+// has no runtime type switch or aggregation semantics.
+type schemeValue json.RawMessage
 
-func freezeScanValue(value scm.Scmer, depth int, bindings ...*scm.SerializationContext) (scanWireValue, error) {
-	// Parser locations are diagnostic wrappers, not runtime object identities.
-	// Unwrap before choosing the recursive container codec as well as validation.
-	value = value.WithoutSourceInfo()
-	if depth > 64 {
-		return scanWireValue{}, fmt.Errorf("remote aggregate nesting limit")
+func (v schemeValue) MarshalJSON() ([]byte, error) {
+	if len(v) == 0 {
+		return []byte("null"), nil
 	}
-	if len(bindings) > 0 && bindings[0] != nil {
-		if _, ok := scm.ClusterObjectOf(value); ok {
-			// Use the same mandatory Serialize contract as captured objects.
-			// The thunk reconstructs once during import, never in a row loop;
-			// objects may choose portable values instead of owner references.
-			thunk := scm.Eval(scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(nil), value}), &scm.Globalenv)
-			data, err := scm.MarshalProcedure(thunk, bindings[0])
-			return scanWireValue{Kind: "expression", Procedure: data}, err
-		}
-		if value.IsProc() {
-			data, err := scm.MarshalProcedure(value, bindings[0])
-			return scanWireValue{Kind: "procedure", Procedure: data}, err
-		}
-	}
-	out := scanWireValue{Kind: "scalar"}
-	var items []scm.Scmer
-	if value.IsFastDict() {
-		out.Kind = "dict"
-		items = value.FastDict().ToList()
-	} else if value.IsSlice() {
-		out.Kind = "list"
-		items = value.Slice()
-	} else {
-		if err := checkScanData(value, depth); err != nil {
-			return out, err
-		}
-		data, err := json.Marshal(value)
-		out.Scalar = data
-		return out, err
-	}
-	out.Items = make([]scanWireValue, len(items))
-	for i, item := range items {
-		var err error
-		out.Items[i], err = freezeScanValue(item, depth+1, bindings...)
-		if err != nil {
-			return out, err
-		}
-	}
-	return out, nil
+	return v, nil
 }
-func (value scanWireValue) thaw(depth int, decode ...scm.ProcedureDecode) (scm.Scmer, error) {
-	if depth > 64 {
-		return scm.NewNil(), fmt.Errorf("remote aggregate nesting limit")
-	}
-	if value.Reference != nil && value.Kind != "object" || len(value.Procedure) != 0 && value.Kind != "procedure" && value.Kind != "expression" {
-		return scm.NewNil(), fmt.Errorf("mixed runtime value encoding")
-	}
-	if value.Kind == "object" {
-		if len(value.Items) != 0 || len(value.Scalar) != 0 || value.Reference == nil || len(decode) == 0 || decode[0].Resolve == nil {
-			return scm.NewNil(), fmt.Errorf("runtime object requires a reconstruction context")
+func (v *schemeValue) UnmarshalJSON(data []byte) error { *v = append((*v)[:0], data...); return nil }
+
+// The transport calls the ordinary serializer directly. Quoted lists remain
+// data; Serialize emits constructors only where reconstruction requires them.
+func freezeScanValue(value scm.Scmer, bindings ...*scm.SerializationContext) (data schemeValue, err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			data = nil
+			err = fmt.Errorf("value serialization: %v", failure)
 		}
-		return decode[0].Resolve(*value.Reference)
+	}()
+	if len(bindings) == 0 || bindings[0] == nil {
+		bindings = []*scm.SerializationContext{new(scm.SerializationContext)}
 	}
-	if value.Kind == "procedure" || value.Kind == "expression" {
-		if len(value.Items) != 0 || len(value.Scalar) != 0 || len(decode) == 0 {
-			return scm.NewNil(), fmt.Errorf("procedure requires a reconstruction context")
+	value = value.WithoutSourceInfo()
+	if value.IsSlice() || value.IsSymbol() {
+		value = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), value})
+	}
+	var source bytes.Buffer
+	scm.Serialize(&source, value, &scm.Globalenv, bindings...)
+	encoded, err := json.Marshal(source.String())
+	return schemeValue(encoded), err
+}
+func (value schemeValue) reconstruct(decode ...scm.ProcedureDecode) (result scm.Scmer, err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			result = scm.NewNil()
+			err = fmt.Errorf("value reconstruction: %v", failure)
 		}
-		proc, err := scm.UnmarshalProcedure(value.Procedure, decode[0])
+	}()
+	var source string
+	if err = json.Unmarshal(value, &source); err != nil {
+		return scm.NewNil(), err
+	}
+	expression := scm.Read("cluster value", source)
+	var option scm.ProcedureDecode
+	if len(decode) > 0 {
+		option = decode[0]
+	}
+	if option.Prepare != nil {
+		expression, err = option.Prepare(expression)
 		if err != nil {
 			return scm.NewNil(), err
 		}
-		if value.Kind == "expression" {
-			return scm.Apply(proc), nil
-		}
-		return proc, nil
 	}
-	if value.Kind == "scalar" {
-		if len(value.Items) != 0 {
-			return scm.NewNil(), fmt.Errorf("invalid scalar aggregate")
-		}
-		return decodeScanData(value.Scalar, false)
+	expression, err = scm.ResolveSerializedObjects(expression, option.Resolve)
+	if err != nil {
+		return scm.NewNil(), err
 	}
-	if (value.Kind != "list" && value.Kind != "dict") || len(value.Scalar) != 0 || value.Kind == "dict" && len(value.Items)%2 != 0 {
-		return scm.NewNil(), fmt.Errorf("invalid aggregate container")
-	}
-	items := make([]scm.Scmer, len(value.Items))
-	for i, item := range value.Items {
-		var err error
-		items[i], err = item.thaw(depth+1, decode...)
-		if err != nil {
-			return scm.NewNil(), err
-		}
-	}
-	if value.Kind == "dict" {
-		dict := scm.NewFastDictValue(len(items) / 2)
-		for i := 0; i < len(items); i += 2 {
-			dict.Set(items[i], items[i+1], nil)
-		}
-		return scm.NewFastDict(dict), nil
-	}
-	return scm.NewSlice(items), nil
+	return scm.Eval(scm.Optimize(expression, &scm.Globalenv, nil), &scm.Globalenv).WithoutSourceInfo(), nil
 }
 
 // remoteScanAccess reuses the native persisted boundary representation and
@@ -134,7 +84,7 @@ func (value scanWireValue) thaw(depth int, decode ...scm.ProcedureDecode) (scm.S
 type remoteScanAccess struct {
 	Orders     []json.RawMessage `json:"orders,omitempty"`
 	Boundaries []scm.Scmer       `json:"boundaries,omitempty"`
-	Values     []scanWireValue   `json:"values,omitempty"`
+	Values     []schemeValue     `json:"values,omitempty"`
 	Covered    bool              `json:"covered,omitempty"`
 }
 
@@ -149,7 +99,7 @@ func freezeScanAccess(access scanAccess, bindings ...*scm.SerializationContext) 
 		original, operands := access.boundaryParts(i)
 		box := *original
 		appendValue := func(value scm.Scmer) (int, error) {
-			frozen, err := freezeScanValue(value, 0, bindings...)
+			frozen, err := freezeScanValue(value, bindings...)
 			if err != nil {
 				return 0, err
 			}
@@ -222,9 +172,6 @@ func (access remoteScanAccess) bind(decode ...scm.ProcedureDecode) (scanAccess, 
 			if err != nil {
 				return scanAccess{}, err
 			}
-			if err := validateRemoteScanReadOnly(constructor); err != nil {
-				return scanAccess{}, err
-			}
 			direction := scanSortDirections([]scm.Scmer{scm.Apply(constructor)})[0]
 			if !item.IsCustom(TagScanBoundary) {
 				return scanAccess{}, fmt.Errorf("invalid ordered boundary")
@@ -250,7 +197,7 @@ func (access remoteScanAccess) bind(decode ...scm.ProcedureDecode) (scanAccess, 
 	values := make([]scm.Scmer, len(access.Values))
 	for i, value := range access.Values {
 		var err error
-		values[i], err = value.thaw(0, decode...)
+		values[i], err = value.reconstruct(decode...)
 		if err != nil {
 			return scanAccess{}, err
 		}
@@ -260,36 +207,14 @@ func (access remoteScanAccess) bind(decode ...scm.ProcedureDecode) (scanAccess, 
 
 // A cancelled or rejected completion must retire offers its receiver never
 // acquired, including references nested in callback captures and object views.
-func scanWireReferences(value scanWireValue) []scm.ClusterReference {
-	var result []scm.ClusterReference
-	seen := make(map[string]bool)
-	var walk func(scanWireValue, int)
-	var reference func(scm.ClusterReference, int)
-	reference = func(ref scm.ClusterReference, depth int) {
-		if depth > 64 || ref.Token == "" || seen[ref.URI+"/"+ref.Token] {
-			return
-		}
-		seen[ref.URI+"/"+ref.Token] = true
-		result = append(result, ref)
-		var view scanWireValue
-		if json.Unmarshal(ref.View, &view) == nil {
-			walk(view, depth+1)
-		}
+func serializedReferences(value schemeValue) []scm.ClusterReference {
+	return scm.SerializedClusterReferences(value)
+}
+
+func referenceOffers(ref scm.ClusterReference) []scm.ClusterReference {
+	result := []scm.ClusterReference{ref}
+	for _, child := range scm.SerializedClusterReferences(ref.View) {
+		result = append(result, referenceOffers(child)...)
 	}
-	walk = func(value scanWireValue, depth int) {
-		if depth > 64 {
-			return
-		}
-		if value.Reference != nil {
-			reference(*value.Reference, depth+1)
-		}
-		for _, ref := range scm.ProcedureClusterReferences(value.Procedure) {
-			reference(ref, depth+1)
-		}
-		for _, item := range value.Items {
-			walk(item, depth+1)
-		}
-	}
-	walk(value, 0)
 	return result
 }

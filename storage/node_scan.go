@@ -32,9 +32,9 @@ var nodeScans atomic.Pointer[nodeScanService]
 type nodeScanService struct {
 	objects     clusterObjectRegistry
 	executions  sync.Map // invocation UUID -> worker TxContext, never persisted or serialized
-	returns     sync.Map // reducer-owned UUID -> *scanReturnChannel, removed on completion/error
+	returns     sync.Map // consumer-owned operation UUID -> *receiverRoute, removed on completion/error
 	id          string
-	cluster     *nodeCluster // immutable startup-owned adapter; nil for explicit scan_remote
+	cluster     *nodeCluster // immutable startup-owned adapter; nil for standalone object endpoints
 	secret      []byte
 	release     func()
 	mu          sync.Mutex
@@ -45,16 +45,17 @@ type nodeScanService struct {
 }
 
 type scanChallenge struct {
-	Boot    string `json:"boot"`
-	Version int    `json:"version"`
-	Node    string `json:"node"`
-	Nonce   string `json:"nonce"`
-	Proof   string `json:"proof,omitempty"`
+	OperationPrefix string `json:"-"` // derived from the existing authenticated nonce pair
+	Boot            string `json:"boot"`
+	Version         int    `json:"version"`
+	Node            string `json:"node"`
+	Nonce           string `json:"nonce"`
+	Proof           string `json:"proof,omitempty"`
 }
 
 func scanAuthProof(secret []byte, role string, server, client scanChallenge) string {
 	mac := hmac.New(sha256.New, secret)
-	for _, item := range []string{mosiSubprotocol + "/operators.channels.v7", role, server.Node, server.Boot, server.Nonce, client.Node, client.Boot, client.Nonce} {
+	for _, item := range []string{mosiSubprotocol + "/objects.channels.v9", role, server.Node, server.Boot, server.Nonce, client.Node, client.Boot, client.Nonce} {
 		mac.Write([]byte(item))
 		mac.Write([]byte{0})
 	}
@@ -117,6 +118,7 @@ func (service *nodeScanService) authenticate(conn *websocket.Conn, incoming bool
 		if err := scanAuthMessage(conn, "scan.accept", scanChallenge{Version: scanWireVersion, Proof: scanAuthProof(service.secret, "server", local, remote)}); err != nil {
 			return scanChallenge{}, err
 		}
+		remote.OperationPrefix = scanAuthProof(service.secret, "operation", local, remote)
 		return remote, nil
 	}
 	if err := readScanAuth(conn, "scan.challenge", &remote); err != nil {
@@ -136,6 +138,7 @@ func (service *nodeScanService) authenticate(conn *websocket.Conn, incoming bool
 	if accepted.Version != scanWireVersion || !hmac.Equal([]byte(accepted.Proof), []byte(scanAuthProof(service.secret, "server", remote, local))) {
 		return scanChallenge{}, fmt.Errorf("node authentication failed")
 	}
+	remote.OperationPrefix = scanAuthProof(service.secret, "operation", remote, local)
 	return remote, nil
 }
 
@@ -231,6 +234,7 @@ func (service *nodeScanService) accept(w http.ResponseWriter, req *http.Request)
 	}
 	peer := newMosiPeer(conn, session.handle, packets, func(peer *mosiPeer) {
 		peer.scanService = service
+		peer.operationPrefix = remote.OperationPrefix
 		peer.objectPeer = clusterObjectPeer{remote.Node, remote.Boot}
 		session.bindPeer(peer)
 	})
@@ -286,6 +290,7 @@ func (service *nodeScanService) connect(ctx context.Context, address string) (*m
 	peer := newMosiPeer(conn, session.handle, packets, func(peer *mosiPeer) {
 		peer.objectEndpoint = endpoint
 		peer.scanService = service
+		peer.operationPrefix = remote.OperationPrefix
 		peer.objectPeer = clusterObjectPeer{remote.Node, remote.Boot}
 		session.bindPeer(peer)
 	})
@@ -299,7 +304,7 @@ func (service *nodeScanService) connect(ctx context.Context, address string) (*m
 }
 
 // Construct before publication so the optional cluster adapter is immutable to
-// readers. Explicit scan_remote and cluster membership share this service,
+// readers. Object endpoints and cluster membership share this service,
 // route, mutual challenge proof and bounded binary transport.
 func newNodeScanService(secret string) (*nodeScanService, error) {
 	if len(secret) < 16 {
@@ -384,5 +389,4 @@ func initNodeScans(en *scm.Env) {
 		}
 		return scm.NewNil()
 	}, Type: &scm.TypeDescriptor{Kind: "func", Return: &scm.TypeDescriptor{Kind: "string"}}})
-	scm.Declare(en, &scm.Declaration{Name: "scan_remote", Fn: remoteScan, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Params: []*scm.TypeDescriptor{{Kind: "any", Label: "transaction"}, {Kind: "string", Label: "url"}, {Kind: "string", Label: "database"}, {Kind: "string", Label: "table"}, {Kind: "list", Label: "filter_columns"}, {Kind: "func", Label: "filter"}, {Kind: "list", Label: "map_columns"}, {Kind: "func", Label: "mapreducer"}, {Kind: "any", Label: "neutral"}, {Kind: "func", Label: "combine"}, {Kind: "string", Label: "result_kind", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
 }

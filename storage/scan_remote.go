@@ -11,28 +11,19 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
-import "sync"
-import "time"
+import "runtime"
 import "context"
 import "strings"
-import "sync/atomic"
 import "encoding/json"
-import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// Version 9 adds adaptive ordered windows and half-batch ACKs to the native
-// closure codec's value-or-factory initializers and permission reference ACKs.
-const scanWireVersion = 9
+// Version 10 combines authenticated Scheme operations with adaptive ordered windows.
+const scanWireVersion = 10
 
-type shardScanHorizon struct {
-	Main  uint32 `json:"main"`
-	Delta uint32 `json:"delta"`
-}
 type remoteScanShard struct {
-	Schema   uint64           `json:"schema"`
-	Resource mosiResource     `json:"resource"`
-	Horizon  shardScanHorizon `json:"horizon"`
+	Schema   uint64       `json:"schema"`
+	Resource mosiResource `json:"resource"`
 }
 type remoteScanDescriptor struct {
 	remoteScanShard
@@ -45,7 +36,7 @@ func (description remoteScanDescription) ClusterObjectOffers() []scm.ClusterRefe
 	var result []scm.ClusterReference
 	for _, part := range description {
 		if part.Object != nil {
-			result = append(result, scanWireReferences(scanWireValue{Kind: "object", Reference: part.Object})...)
+			result = append(result, referenceOffers(*part.Object)...)
 		}
 	}
 	return result
@@ -61,65 +52,42 @@ type remoteScanTask struct {
 	Order         *remoteScanOrder      `json:"order,omitempty"`
 	Operator      shardScanOperator     `json:"operator"`
 	Stride        int                   `json:"stride,omitempty"`
-	Batch         []scanWireValue       `json:"batch,omitempty"`
+	Batch         []schemeValue         `json:"batch,omitempty"`
 	Input         *scm.ClusterReference `json:"input,omitempty"`
 	Transaction   *scm.ClusterReference `json:"transaction,omitempty"`
 	Access        remoteScanAccess      `json:"access"`
 	Version       int                   `json:"version"`
-	Task          uint64                `json:"task"`
-	Attempt       string                `json:"attempt"`
-	Visibility    string                `json:"visibility"`
 	Shard         remoteScanShard       `json:"shard"`
 	FilterColumns []string              `json:"filter_columns"`
 	Filter        json.RawMessage       `json:"filter"`
 	MapColumns    []string              `json:"map_columns"`
 	MapReducer    json.RawMessage       `json:"mapreducer"`
-	Neutral       scanWireValue         `json:"neutral"`
-	ResultKind    string                `json:"result_kind"`
+	Neutral       json.RawMessage       `json:"neutral"`
 }
 type remoteScanResult struct {
-	Object         *scm.ClusterReference `json:"object,omitempty"`
-	Rejected       bool                  `json:"rejected,omitempty"` // capacity refusal before executing scan callbacks
-	Version        int                   `json:"version"`
-	Task           uint64                `json:"task"`
-	Attempt        string                `json:"attempt"`
-	Shard          remoteScanShard       `json:"shard"`
-	Kind           string                `json:"kind"`
-	Value          json.RawMessage       `json:"value"`
-	OutCount       int64                 `json:"out_count"`
-	InputCount     int64                 `json:"input_count"`
-	CandidateCount int64                 `json:"candidate_count"`
+	Rejected       bool            `json:"rejected,omitempty"` // capacity refusal before executing scan callbacks
+	Version        int             `json:"version"`
+	Shard          remoteScanShard `json:"shard"`
+	Value          json.RawMessage `json:"value"`
+	OutCount       int64           `json:"out_count"`
+	InputCount     int64           `json:"input_count"`
+	CandidateCount int64           `json:"candidate_count"`
 }
 
-// A connection owns a bounded replay window. Old task numbers are rejected,
-// never forgotten into an executable state. No rights or task state is persisted.
+// The authenticated connection owns operation cancellation and duplicate suppression.
+// All execution uses the identity in the outer control envelope.
 type scanRPCSession struct {
 	peer      *mosiPeer
 	peerReady chan struct{}
 	tasks     scanTaskRegistry
 	service   *nodeScanService // immutable connection-owned role adapter
 	remoteID  string           // authenticated identity, never taken from an RPC assertion
-	mu        sync.Mutex
-	high      uint64
-	seen      [1024]uint64
 }
 
 func newScanRPCSession() *scanRPCSession {
 	return &scanRPCSession{peerReady: make(chan struct{})}
 }
 func (s *scanRPCSession) bindPeer(peer *mosiPeer) { s.peer = peer; close(s.peerReady) }
-func (s *scanRPCSession) claim(task uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if task == 0 || task <= s.high && s.high-task >= uint64(len(s.seen)) || s.seen[task%uint64(len(s.seen))] == task {
-		return fmt.Errorf("replayed or expired scan task")
-	}
-	if task > s.high {
-		s.high = task
-	}
-	s.seen[task%uint64(len(s.seen))] = task
-	return nil
-}
 func (s *scanRPCSession) handle(ctx context.Context, method string, data json.RawMessage) (any, error) {
 
 	if err := ctx.Err(); err != nil {
@@ -173,23 +141,14 @@ func (s *scanRPCSession) handle(ctx context.Context, method string, data json.Ra
 // prepared invocation to that shard's HandleClusterRequest. No transport adapter
 // prepares, reacquires or directly executes a scan.
 func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession, request remoteScanTask, input *storageShard) (any, error) {
-	if request.Version != scanWireVersion || request.Visibility != "cursor-stability/captured-horizon" || !request.Shard.Resource.valid() || request.Shard.Resource.Shard == "" {
+	if request.Version != scanWireVersion || !request.Shard.Resource.valid() || request.Shard.Resource.Shard == "" {
 		return nil, fmt.Errorf("invalid remote scan contract")
-	}
-	if _, err := uuid.Parse(request.Attempt); err != nil {
-		return nil, fmt.Errorf("invalid scan attempt")
 	}
 	if request.Operator > shardOrdered || request.Stride < 0 || (request.Operator != shardReduce && request.Stride != 0) || (request.Stride == 0 && len(request.Batch) != 0) || (request.Stride > 0 && len(request.Batch)%request.Stride != 0) {
 		return nil, fmt.Errorf("invalid remote scan invocation")
 	}
 	if (request.Operator == shardOrdered) != (request.Order != nil) {
 		return nil, fmt.Errorf("missing or unexpected ordered scan contract")
-	}
-	if request.ResultKind != "scalar" && request.ResultKind != "group_sums" && request.ResultKind != "value" {
-		return nil, fmt.Errorf("unsupported remote result kind")
-	}
-	if err := s.claim(request.Task); err != nil {
-		return nil, err
 	}
 	for _, cols := range [][]string{request.FilterColumns, request.MapColumns} {
 		for _, col := range cols {
@@ -206,7 +165,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	// context and forward cancellation to their own remote return channels.
 	id, _ := ctx.Value(remoteScanContextKey{}).(string)
 	if id == "" {
-		id = uuid.NewString()
+		return nil, fmt.Errorf("remote execution requires an operation envelope")
 	}
 	ss := &scm.SessionState{}
 	seq := ss.BeginQuery("Cluster", "remote shard reduction")
@@ -244,12 +203,6 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	if err != nil {
 		return nil, err
 	}
-	if err := validateRemoteScanReadOnly(filter); err != nil {
-		return nil, err
-	}
-	if err := validateRemoteScanReadOnly(reducer); err != nil {
-		return nil, err
-	}
 	decode := scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }}
 	var order *shardOrderInvocation
 	if request.Order != nil {
@@ -261,12 +214,12 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	batch := make([]scm.Scmer, len(request.Batch))
 	for i, item := range request.Batch {
 		var err error
-		batch[i], err = item.thaw(0, scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
+		batch[i], err = item.reconstruct(scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
 		if err != nil {
 			return nil, err
 		}
 	}
-	neutral, err := request.Neutral.thaw(0, decode)
+	neutral, err := schemeValue(request.Neutral).reconstruct(decode)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +231,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 			if shard.uuid.String() != request.Shard.Resource.Shard || shard.t.filterSchemaFingerprint() != request.Shard.Schema || shard.t.schema.Name != request.Shard.Resource.Database || shard.t.Name != request.Shard.Resource.Table {
 				return fmt.Errorf("retained input generation/schema mismatch")
 			}
-			lease := shard.getRead(tx, true)
+			lease := shard.getRead(tx, true, false)
 			defer lease.Release()
 			return execute(shard)
 		}
@@ -306,29 +259,20 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 			return err
 		}
 		result := value.(scanResult)
-		var encoded json.RawMessage
-		var object *scm.ClusterReference
-		if request.Operator == shardOrdered {
-			run, ok := result.res.Any().(*orderedScanRun)
-			if !ok {
-				return fmt.Errorf("missing native ordered run")
+		var offered []scm.ClusterReference
+		bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+			ref, err := s.service.exportObject(s.peer, object, view)
+			if err == nil {
+				offered = append(offered, ref)
 			}
-			view, failure := run.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
-			if failure != nil {
-				return failure
-			}
-			ref, failure := s.service.exportObject(s.peer, run, view.(scm.Scmer))
-			if failure != nil {
-				return failure
-			}
-			object = &ref
-		} else {
-			encoded, err = encodeScanResult(result.res, request.ResultKind)
-		}
+			return ref, err
+		})
+		encoded, err := freezeScanValue(result.res, bindings)
 		if err != nil {
+			s.service.cancelObjectOffers(s.peer, offered)
 			return err
 		}
-		output = remoteScanResult{Object: object, Version: scanWireVersion, Task: request.Task, Attempt: request.Attempt, Shard: request.Shard, Kind: request.ResultKind, Value: encoded, OutCount: result.outCount, InputCount: int64(request.Shard.Horizon.Main) + int64(request.Shard.Horizon.Delta), CandidateCount: result.candidateCount}
+		output = remoteScanResult{Version: scanWireVersion, Shard: request.Shard, Value: json.RawMessage(encoded), OutCount: result.outCount, InputCount: result.inputCount, CandidateCount: result.candidateCount}
 		return nil
 	})
 	if _, capacity := err.(clusterCapacityRejection); capacity {
@@ -347,56 +291,28 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	return reply, err
 }
 
-// Mutating storage/native callbacks need a remote transaction participant and
-// are rejected before execution. Local functional reducers and explicit errors
-// are allowed; this does not claim to sandbox mutually trusted cluster code.
-func validateRemoteScanReadOnly(value scm.Scmer) error {
-	if remoteMutationColumn(value) {
-		return fmt.Errorf("remote callback contains a mutation column")
-	}
-
-	value = value.WithoutSourceInfo()
-	if value.IsProc() {
-		return validateRemoteScanReadOnly(value.Proc().Body)
-	}
-	if !value.IsSlice() {
-		return nil
-	}
-	items := value.Slice()
-	if len(items) == 0 {
-		return nil
-	}
-	if head := items[0].WithoutSourceInfo(); head.IsSymbol() && head.String() == "quote" {
-		return nil
-	}
-	if declaration := scm.DeclarationForValue(items[0]); declaration != nil && declaration.Type != nil {
-		if declaration.Name == "quote" {
-			return nil
-		}
-		if declaration.Type.HasSideEffects && declaration.Name != "error" && declaration.Name != "scan" && declaration.Name != "scan_exists" && declaration.Name != "scan_order" && declaration.Name != "scan_remote" {
-			return fmt.Errorf("remote scan callback has side effects: %s", declaration.Name)
-		}
-		if declaration.Name == "eval" || declaration.Name == "scheme" {
-			return fmt.Errorf("remote scan callback cannot evaluate dynamic code")
-		}
-	}
-	for _, item := range items {
-		if err := validateRemoteScanReadOnly(item); err != nil {
-			return err
-		}
-	}
-	return nil
+// The measured faster path retains the first encoding. The frame encoder
+// still bounds the actual outer message, including headers, at send time.
+type encodedReply struct {
+	data   json.RawMessage
+	offers []scm.ClusterReference
 }
 
+func (reply encodedReply) MarshalJSON() ([]byte, error)                { return reply.data, nil }
+func (reply encodedReply) ClusterObjectOffers() []scm.ClusterReference { return reply.offers }
 func boundedScanReply(value any) (any, error) {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
 	}
 	if len(data) > 192*1024 {
-		return nil, fmt.Errorf("remote aggregate exceeds node frame limit")
+		return nil, fmt.Errorf("result exceeds node frame limit")
 	}
-	return value, nil
+	var offers []scm.ClusterReference
+	if source, ok := value.(interface{ ClusterObjectOffers() []scm.ClusterReference }); ok {
+		offers = source.ClusterObjectOffers()
+	}
+	return encodedReply{data, offers}, nil
 }
 
 // Acquire through the same schema/shard MOSI and generation lifetime boundaries
@@ -463,7 +379,7 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, execute func(
 						}
 					}
 				}()
-				lease = selected.getRead(tx, true)
+				lease = selected.getRead(tx, true, false)
 			}()
 			if capacity {
 				return clusterCapacityRejection{}
@@ -472,10 +388,6 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, execute func(
 			shard := lease.shard
 			if shard.uuid.String() != expected.Resource.Shard {
 				return fmt.Errorf("remote scan shard changed")
-			}
-			horizon := shard.captureScanHorizon()
-			if shared {
-				expected.Horizon = horizon
 			}
 			if err := execute(shard); err != nil {
 				return err
@@ -487,86 +399,6 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, execute func(
 		}()
 	}
 }
-func checkScanData(value scm.Scmer, depth int) error {
-	value = value.WithoutSourceInfo()
-	if depth > 64 {
-		return fmt.Errorf("remote aggregate nesting limit")
-	}
-	if value.IsNil() || value.IsBool() || value.IsInt() || value.IsFloat() || value.IsString() {
-		return nil
-	}
-	if value.IsFastDict() {
-		for _, item := range value.FastDict().ToList() {
-			if err := checkScanData(item, depth+1); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if value.IsSlice() {
-		for _, item := range value.Slice() {
-			if err := checkScanData(item, depth+1); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	return fmt.Errorf("remote scan cannot transport runtime values (tag %d, %T)", value.GetTag(), value.Any())
-}
-func decodeScanData(data json.RawMessage, groups bool) (scm.Scmer, error) {
-	var value scm.Scmer
-	if err := json.Unmarshal(data, &value); err != nil {
-		return scm.NewNil(), err
-	}
-	if err := checkScanData(value, 0); err != nil {
-		return scm.NewNil(), err
-	}
-	if groups {
-		if !value.IsSlice() || len(value.Slice())%2 != 0 {
-			return scm.NewNil(), fmt.Errorf("invalid remote grouped reduction")
-		}
-		pairs := value.Slice()
-		dict := scm.NewFastDictValue(len(pairs) / 2)
-		for i := 0; i < len(pairs); i += 2 {
-			dict.Set(pairs[i], pairs[i+1], nil)
-		}
-		value = scm.NewFastDict(dict)
-	}
-	return value, nil
-}
-func decodeScanValue(data json.RawMessage, kind string) (scm.Scmer, error) {
-	if kind != "value" {
-		return decodeScanData(data, kind == "group_sums")
-	}
-	var value scanWireValue
-	if err := json.Unmarshal(data, &value); err != nil {
-		return scm.NewNil(), err
-	}
-	return value.thaw(0)
-}
-func encodeScanResult(value scm.Scmer, kind string) (json.RawMessage, error) {
-	if kind == "value" {
-		frozen, err := freezeScanValue(value, 0)
-		if err != nil {
-			return nil, err
-		}
-		return json.Marshal(frozen)
-	}
-	if kind == "group_sums" {
-		if value.IsFastDict() {
-			value = scm.NewSlice(value.FastDict().ToList())
-		}
-		if !value.IsSlice() || len(value.Slice())%2 != 0 {
-			return nil, fmt.Errorf("grouped remote scan must return an association")
-		}
-	} else if value.IsSlice() || value.IsFastDict() {
-		return nil, fmt.Errorf("scalar remote scan cannot return rows or associations")
-	}
-	if err := checkScanData(value, 0); err != nil {
-		return nil, err
-	}
-	return json.Marshal(value)
-}
 
 type peerScanExecutor struct {
 	input      *scm.ClusterReference
@@ -574,11 +406,12 @@ type peerScanExecutor struct {
 	peer       *mosiPeer
 	ctx        context.Context
 	prepared   remoteScanShard
-	kind       string
-	next       *atomic.Uint64
 }
 
-func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocation shardScanInvocation) scanResult {
+func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocation shardScanInvocation) scanResult {
+	executor := *origin
+	executor.ctx = scanQueryContext(invocation.tx, origin.ctx)
+	defer runtime.KeepAlive(executor.inputLease)
 	condition := invocation.condition
 	if condition.IsNil() {
 		condition = scm.Eval(scm.Read("remote unconditional filter", "(lambda args true)"), &scm.Globalenv)
@@ -612,11 +445,11 @@ func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, invoca
 	if err != nil {
 		panic(err)
 	}
-	neutral, err := freezeScanValue(invocation.neutral, 0, bindings)
+	neutral, err := freezeScanValue(invocation.neutral, bindings)
 	if err != nil {
 		panic(err)
 	}
-	task := remoteScanTask{Operator: invocation.operator, Stride: invocation.stride, Input: executor.input, Version: scanWireVersion, Task: executor.next.Add(1), Attempt: uuid.NewString(), Visibility: "cursor-stability/captured-horizon", Shard: executor.prepared, FilterColumns: invocation.conditionCols, Filter: filter, MapColumns: invocation.callbackCols, MapReducer: reducer, Neutral: neutral, ResultKind: executor.kind}
+	task := remoteScanTask{Operator: invocation.operator, Stride: invocation.stride, Input: executor.input, Version: scanWireVersion, Shard: executor.prepared, FilterColumns: invocation.conditionCols, Filter: filter, MapColumns: invocation.callbackCols, MapReducer: reducer, Neutral: json.RawMessage(neutral)}
 	if invocation.order != nil {
 		task.Order, err = freezeScanOrder(invocation.order, bindings)
 		if err != nil {
@@ -624,7 +457,7 @@ func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, invoca
 		}
 	}
 	for _, item := range invocation.batchdata {
-		value, err := freezeScanValue(item, 0, bindings)
+		value, err := freezeScanValue(item, bindings)
 		if err != nil {
 			panic(err)
 		}
@@ -660,136 +493,17 @@ func (executor *peerScanExecutor) ExecuteShardScan(resource mosiResource, invoca
 		panic("remote scan resource mismatch")
 	}
 	response := executor.dispatch(task)
-	if sharedClusterDatabase(resource.Database) {
-		task.Shard.Horizon = response.Shard.Horizon
-	}
-	if response.Version != scanWireVersion || response.Task != task.Task || response.Attempt != task.Attempt || response.Shard != task.Shard || response.Kind != task.ResultKind {
+	if response.Version != scanWireVersion || response.Shard != task.Shard {
 		panic("mismatched remote scan response")
 	}
-	if invocation.operator == shardOrdered {
-		if response.Object == nil {
-			panic("missing remote ordered run")
-		}
-		defer executor.peer.scanService.discardObjectOffers(executor.peer, []scm.ClusterReference{*response.Object})
-		object, failure := executor.peer.scanService.importObject(executor.ctx, executor.peer, *response.Object)
-		if failure != nil {
-			panic(failure)
-		}
-		return scanResult{res: object, outCount: response.OutCount, inputCount: response.InputCount, candidateCount: response.CandidateCount}
-	}
-	value, err := decodeScanValue(response.Value, response.Kind)
+	defer executor.peer.scanService.discardObjectOffers(executor.peer, response.ClusterObjectOffers())
+	value, err := schemeValue(response.Value).reconstruct(scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+		return executor.peer.scanService.importObject(executor.ctx, executor.peer, ref)
+	}})
 	if err != nil {
 		panic(err)
 	}
 	return scanResult{res: value, outCount: response.OutCount, inputCount: response.InputCount, candidateCount: response.CandidateCount}
-}
-
-func remoteScan(a ...scm.Scmer) scm.Scmer {
-	service := nodeScans.Load()
-	if service == nil {
-		panic("scan_remote requires --cluster-secret")
-	}
-	tx := scmerToTxContext(a[0])
-	if tx != nil {
-		tx.mu.Lock()
-		supported := tx.Mode == TxCursorStability && tx.autoCommit && len(tx.shards) == 0
-		tx.mu.Unlock()
-		if !supported {
-			panic("remote scans require a cursor-stability autocommit statement")
-		}
-	}
-	ctx := context.Background()
-	if ss := SessionStateFromTx(tx); ss != nil {
-		if queryContext := ss.QueryContext(querySeqFromTx(tx)); queryContext != nil {
-			ctx = queryContext
-		}
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-	defer cancel()
-	peer, _, err := service.connect(ctx, a[1].String())
-	if err != nil {
-		panic(err)
-	}
-	defer service.forget(peer)
-	var shards []remoteScanDescriptor
-	if err := service.control(ctx, peer, "scan.describe", remoteScanDescribe{scanWireVersion, a[2].String(), a[3].String()}, &shards); err != nil {
-		panic(err)
-	}
-	kind := "scalar"
-	if len(a) > 10 {
-		kind = a[10].String()
-	}
-	columns := func(value scm.Scmer) []string {
-		result := make([]string, len(value.Slice()))
-		for i, col := range value.Slice() {
-			result[i] = col.String()
-		}
-		return result
-	}
-	invocation := shardScanInvocation{tx: tx, conditionCols: columns(a[4]), condition: a[5], callbackCols: columns(a[6]), mapReduce: a[7], neutral: a[8]}
-	acc := a[8]
-	var sequence atomic.Uint64
-	for _, part := range shards {
-		if part.Resource.Database != a[2].String() || part.Resource.Table != a[3].String() || !part.Resource.valid() {
-			panic("invalid remote scan directory response")
-		}
-		stubTable := &table{Name: part.Resource.Table, schema: &database{Name: part.Resource.Database}}
-		identity, err := uuid.Parse(part.Resource.Shard)
-		if err != nil {
-			panic(err)
-		}
-		stub := &storageShard{t: stubTable, uuid: identity}
-		remote := &peerScanExecutor{peer: peer, ctx: ctx, prepared: part.remoteScanShard, input: part.Object, kind: kind, next: &sequence}
-		if part.Object != nil {
-			value, err := service.importObject(ctx, peer, *part.Object)
-			if err != nil {
-				panic(err)
-			}
-			remote.inputLease = value
-			object, ok := value.Any().(*remoteShardObject)
-			if !ok {
-				panic("remote source is not a shard handle")
-			}
-			// Descriptions carry a transfer offer. Execution MUST address the
-			// imported peer lease, after that offer has been consumed atomically.
-			remote.input = &object.handle.Reference
-		}
-		target := &shardScanTarget{resource: part.Resource, executor: remote}
-		stub.scanTarget.Store(target)
-		var result scanResult
-		runAcquiredShardScan(tx, stub, true, nil, func(shard *storageShard, _ bool, failure any) {
-			delegation, ok := failure.(shardReadDelegation)
-			if !ok {
-				if failure != nil {
-					panic(failure)
-				}
-				panic("remote stub acquired local payload")
-			}
-			result = invocation.delegate(shard, delegation)
-		})
-		if result.err.r != nil {
-			panic(result.err)
-		}
-		if result.outCount > 0 {
-			acc = scm.Apply(a[9], acc, result.res)
-		}
-	}
-	return acc
-}
-
-func remoteMutationColumn(value scm.Scmer) bool {
-	value = value.WithoutSourceInfo()
-	if value.IsString() {
-		return value.String() == "$update" || strings.HasPrefix(value.String(), "$increment:")
-	}
-	if value.IsSlice() {
-		for _, item := range value.Slice() {
-			if remoteMutationColumn(item) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // Old UUIDs remain usable while a query/transfer retains that exact shard.
@@ -844,12 +558,17 @@ func bindProcedureScanContext(value, queryContext scm.Scmer) scm.Scmer {
 		result[i] = bindProcedureScanContext(item, queryContext)
 	}
 	if len(items) > 1 {
-		switch {
-		case storageProcedureSymbol(items[0], "scan"), storageProcedureSymbol(items[0], "scan_exists"), storageProcedureSymbol(items[0], "scan_order"), storageProcedureSymbol(items[0], "scan_remote"):
-			arg := items[1].WithoutSourceInfo()
-			rebound := arg.IsSlice() && len(arg.Slice()) > 0 && storageProcedureSymbol(arg.Slice()[0], "node_query_context")
-			if arg.IsNil() || storageProcedureSymbol(arg, "nil") || rebound {
-				result[1] = queryContext
+		// Native declarations own execution-argument metadata. Rebinding does
+		// not enumerate operators or inspect which functions a lambda may call.
+		declaration := scm.DeclarationForValue(items[0])
+		if declaration != nil && declaration.Type != nil && len(declaration.Type.Params) > 0 {
+			label := declaration.Type.Params[0].Label
+			if label == "tx" || label == "transaction" {
+				arg := items[1].WithoutSourceInfo()
+				rebound := arg.IsSlice() && len(arg.Slice()) > 0 && storageProcedureSymbol(arg.Slice()[0], "node_query_context")
+				if arg.IsNil() || storageProcedureSymbol(arg, "nil") || rebound {
+					result[1] = queryContext
+				}
 			}
 		}
 	}

@@ -42,9 +42,10 @@ validation record.
 ## Implemented execution contracts
 
 **Keep native planning and reduction.** Session-dependent scalar SQL aggregates
-can have dictionary/tuple-valued physical accumulators. The version-4 scan wire
-codec preserves native dictionaries, tuple keys, NULLs and nested aggregate
-payloads. Parser source locations are diagnostic wrappers, not runtime objects.
+can have dictionary/tuple-valued physical accumulators. Callbacks, captures and
+results use `scm.Serialize`. Dictionaries serialize as one bulk `set_assoc`
+construction; capture constructors run before callback execution. Tuple keys,
+NULLs and nested values retain their ordinary Scheme semantics.
 The receiver applies the existing reducer; there is no alternate SQL planner,
 cache bypass or serial scan fallback. Frames retain the existing bounded size;
 unbounded grouped-result streaming is not implemented by this patch.
@@ -63,7 +64,7 @@ for sessions, cachemaps, transactions, transaction-shard visibility views,
 physical generations and catalog objects. Serialization does not switch on their
 representation or replace session calls with constants. The interface requires
 `Serialize(*scm.SerializationContext) (scm.Scmer, error)`: the object chooses its
-reconstruction expression. The printer and runtime wire codec use that contract,
+reconstruction expression. The printer and network value transport use that contract,
 including standalone values without URI registration. Reference-backed objects
 explicitly select the context's `ReferenceExpression`; routing-only endpoints
 implement only `ClusterRequestHandler`. Runtime expressions reconstruct once at import.

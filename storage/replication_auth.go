@@ -87,7 +87,7 @@ func (r *replicationManager) authenticate(user, hash string, salt, scramble []by
 	return auth, nil
 }
 
-func (r *replicationManager) handleMaster(ctx context.Context, id, method string, data json.RawMessage) (any, error) {
+func (r *replicationManager) handleMaster(ctx context.Context, id string, peer *mosiPeer, method string, data json.RawMessage) (any, error) {
 	select {
 	case <-r.done:
 		return nil, fmt.Errorf(mosi.NetworkError)
@@ -110,10 +110,12 @@ func (r *replicationManager) handleMaster(ctx context.Context, id, method string
 	if method == "hello_done" {
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		if r.peersBoot[id] != req.Boot {
+		if r.peers[id] != peer || r.peersBoot[id] != req.Boot {
 			return nil, fmt.Errorf("stale slave incarnation")
 		}
-		r.peerReady[id] = true
+		if !peer.recovered() {
+			close(peer.recoveryDone)
+		}
 		return true, nil
 	}
 	if method == "hello" {

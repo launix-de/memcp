@@ -355,7 +355,7 @@ func TestMosiHTTPRolesKeepIndependentAuthenticationBoundaries(t *testing.T) {
 }
 
 func TestReplicationWebSocketUsesNormalHTTPRoute(t *testing.T) {
-	r := &replicationManager{id: uuid.NewString(), peers: make(map[string]*mosiPeer), peerReady: make(map[string]bool)}
+	r := &replicationManager{id: uuid.NewString(), peers: make(map[string]*mosiPeer)}
 	finished := make(chan struct{})
 	unregister, err := registerMosiRole("replication", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		defer close(finished)
@@ -803,7 +803,7 @@ func TestReplicationSnapshotKeepsGenerationAndFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	cell.current.Store(replacement)
-	access := original.GetRead(nil)
+	access := original.GetRead(nil, false)
 	if access.shard != replacement {
 		access.Release()
 		t.Fatal("ordinary read did not resolve the current content")
@@ -876,7 +876,7 @@ func TestReplicationCleanupRetainsCompletedBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	cell.ownstate.Publish(mosi.M)
-	access := cell.current.Load().GetRead(nil)
+	access := cell.current.Load().GetRead(nil, false)
 	defer access.Release()
 	value := access.shard.getColumnStorageOrPanic("payload", false, nil).GetValue(0)
 	if value.String() != "row-00000001" {
@@ -1214,7 +1214,7 @@ func TestReplicationActiveWriterPreventsPayloadEviction(t *testing.T) {
 	if shardCleanup(shard, &freed) {
 		t.Fatal("eviction detached an admitted writer's payload")
 	}
-	read := shard.GetRead(nil)
+	read := shard.GetRead(nil, false)
 	if read.shard.Count() != 3 {
 		t.Fatal("active writer blocked its ordinary snapshot reader")
 	}
@@ -1234,7 +1234,7 @@ func TestReplicationRebuildForwardsUUIDAndRights(t *testing.T) {
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
 	cell := r.declareShard(original, r.id, true)
-	access := original.GetRead(nil)
+	access := original.GetRead(nil, false)
 	defer access.Release()
 	resource := *cell.resource.Load()
 	for i := 0; i < 3; i++ {
@@ -1505,7 +1505,7 @@ func TestReplicationAccessRetainsPublishedShardUntilNativeSwap(t *testing.T) {
 	defer replication.Store(previous)
 	source := tbl.ActiveShards()[0]
 	cell := r.declareShard(source, r.id, true)
-	oldReader := source.GetRead(nil)
+	oldReader := source.GetRead(nil, false)
 	defer oldReader.Release()
 	successor := source.rebuild(true)
 	r.forwardResource(r.shardResource(source), r.shardResource(successor))

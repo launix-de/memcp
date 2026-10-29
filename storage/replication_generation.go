@@ -167,7 +167,7 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 		}
 		if r.master {
 			schemaKey := mosiResource{Database: resource.Database}.key()
-			known := !r.restoring[resource.Database] || r.confirmed[schemaKey] != "" && (owner == r.id || r.peerReady[owner]) && len(r.recoveryReports[resource.key()]) == 0
+			known := !r.restoring[resource.Database] || r.confirmed[schemaKey] != "" && (owner == r.id || r.peers[owner].recovered()) && len(r.recoveryReports[resource.key()]) == 0
 			if !known {
 				record.Owner, record.State = "", "IO"
 			} else {
@@ -415,7 +415,7 @@ func (r *replicationManager) captureResource(resource mosiResource, content stri
 	transfer.volatile = shard.t.PersistencyMode == Memory || shard.t.PersistencyMode == Cache
 	transfer.blobTable = shard.t.Name == ".blobs"
 	if transfer.volatile {
-		transfer.payload = shard.getRead(nil, true)
+		transfer.payload = shard.getRead(nil, true, false)
 	}
 	complete = true
 	return transfer, nil
@@ -990,7 +990,9 @@ func (r *replicationManager) replicaDeclaration(table *table, includeTopology bo
 
 func (r *replicationManager) step(ctx context.Context, peerID string, packet mosiPacket) error {
 	peer := r.peer(peerID)
-	if peer == nil {
+	// Directory recovery may replace a connection after coordination captured
+	// its epoch. Never send that operation on an unrecovered replacement.
+	if peer == nil || !peer.recovered() {
 		return fmt.Errorf("%s: %s step to %s for %s", mosi.NetworkError, packet.Kind, peerID, packet.Resource.key())
 	}
 	step := &replicaStep{peer: peerID, resource: packet.Resource, epoch: packet.Epoch, content: packet.Content, done: make(chan struct{})}
@@ -1011,6 +1013,21 @@ func (r *replicationManager) step(ctx context.Context, peerID string, packet mos
 
 func (r *replicationManager) transmitResource(ctx context.Context, peerID string, header mosiPacket) error {
 	if r.cluster != nil {
+		if header.Resource.Shard == "" {
+			if err := r.cluster.transferSchemaLocations(ctx, peerID, header); err != nil {
+				return err
+			}
+		} else {
+			// Preparation may have published a new physical UUID. Make its
+			// current owner routable before the reference wakes the requester;
+			// the final post-handover update alone leaves an observable gap.
+			r.mu.Lock()
+			entry := r.directory.Records[r.resourceKey(header.Resource)]
+			r.mu.Unlock()
+			if err := r.cluster.registerLocation(ctx, entry); err != nil {
+				return err
+			}
+		}
 		header.Kind = "reference"
 		if header.Resource.Shard != "" {
 			header.Forwards = r.shardRoutes(header.Resource)

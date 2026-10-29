@@ -67,6 +67,14 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 	if own.Owner != "" && own.Owner != r.id && cluster.peerAvailable(own.Owner) {
 		return own.Owner, nil
 	}
+	if resource.Shard != "" {
+		// Restart recovery of our own former authority still needs authenticated
+		// live reports. Ordinary cold placement consults only the schema owner.
+		cell := r.resourceCell(resource)
+		if own.Owner != r.id || cell.ownstate.Initialized() {
+			return cluster.locateViaSchema(ctx, resource)
+		}
+	}
 	view := cluster.view.Load()
 	if cluster.seed != "" && len(view.members) == 1 {
 		return "", fmt.Errorf(mosi.NetworkError)
@@ -145,6 +153,11 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 		state := mosi.M
 		if len(readers) > 0 {
 			state = mosi.O
+		}
+		if resource.Shard == "" {
+			if err := cluster.recoverSchemaLocations(ctx, resource.Database, view.links); err != nil {
+				return "", err
+			}
 		}
 		r.updateRecord(resource, func(record *replicaRecord) bool {
 			record.Resource, record.Owner, record.State, record.Epoch = resource, r.id, state.String(), max(epoch, 1)
@@ -227,7 +240,7 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 					// cancelling cannot revoke every other reader's acquisition.
 					operation, finish := context.WithTimeout(cluster.ctx, 30*time.Minute)
 					defer finish()
-					if failure := r.coordinate(operation, r.id, packet); failure != nil {
+					if failure := cluster.coordinate(operation, r.id, packet); failure != nil {
 						c.ownstate.Fail(packet.ID, failure, wanted)
 					}
 				}()
@@ -347,7 +360,7 @@ func (cluster *nodeCluster) receive(source string, packet *mosiPacket, connectio
 					return
 				}
 				if owner == r.id {
-					err = r.coordinate(ctx, source, copy)
+					err = cluster.coordinate(ctx, source, copy)
 					if err != nil {
 						err = fmt.Errorf("cluster coordinate: %w", err)
 					}
@@ -396,6 +409,37 @@ func (cluster *nodeCluster) declareShard(shard *storageShard, local bool) *repli
 	c.ownstate.Establish(mosi.M)
 	return c
 }
+
+// Called under the existing resource acquisition lock for both reference data
+// and its schema location batches. Forwarded acquisitions may arrive from a
+// newer owner than the requester's hint, at the newer native authority epoch.
+func (cluster *nodeCluster) referenceSource(source string, packet mosiPacket, c *replicaCell, record replicaRecord) (*replicaStep, error) {
+	r := cluster.manager
+	if packet.Epoch < record.Epoch {
+		return nil, fmt.Errorf("stale shared reference")
+	}
+	var expected *replicaStep
+	if value, exists := r.steps.Load(packet.ID); exists {
+		expected = value.(*replicaStep)
+		if !expected.matches(source, packet) {
+			return nil, fmt.Errorf("unexpected shared reference source")
+		}
+	}
+	publication := c.ownstate.Snapshot()
+	if expected == nil {
+		if publication.Phase().Requested() {
+			if publication.Flight().ID() != packet.ID || record.Owner != source && packet.Epoch <= record.Epoch {
+				return nil, fmt.Errorf("unexpected shared reference request: resource=%s incoming=%s epoch=%d pending=%s epoch=%d owner=%s source=%s", packet.Resource.key(), packet.ID, packet.Epoch, publication.Flight().ID(), record.Epoch, record.Owner, source)
+			}
+		} else if publication.Phase() != mosi.S || record.Owner != source || record.Epoch != packet.Epoch {
+			// Unsolicited O updates may refresh existing S readers only at the
+			// exact recorded authority epoch. They never create a new grant.
+			return nil, fmt.Errorf("unsolicited shared reference for %s in %s", packet.Resource.key(), publication.Phase())
+		}
+	}
+	return expected, nil
+}
+
 func (cluster *nodeCluster) installReference(source string, packet mosiPacket) error {
 	r := cluster.manager
 	if !packet.Resource.valid() || packet.ID == "" {
@@ -427,27 +471,9 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 	r.mu.Lock()
 	record := r.directory.Records[r.resourceKey(*c.resource.Load())]
 	r.mu.Unlock()
-	if packet.Epoch < record.Epoch {
-		return fmt.Errorf("stale shared reference")
-	}
-	var expected *replicaStep
-	if value, exists := r.steps.Load(packet.ID); exists {
-		expected = value.(*replicaStep)
-		if !expected.matches(source, packet) {
-			return fmt.Errorf("unexpected shared reference source")
-		}
-	}
-	publication := c.ownstate.Snapshot()
-	if expected == nil {
-		if publication.Phase().Requested() {
-			if publication.Flight().ID() != packet.ID || record.Owner != source && packet.Epoch <= record.Epoch {
-				return fmt.Errorf("unexpected shared reference request: resource=%s incoming=%s epoch=%d pending=%s epoch=%d owner=%s source=%s", packet.Resource.key(), packet.ID, packet.Epoch, publication.Flight().ID(), record.Epoch, record.Owner, source)
-			}
-		} else if publication.Phase() != mosi.S || record.Owner != source || record.Epoch != packet.Epoch {
-			// Unsolicited O updates may refresh existing S readers only at the
-			// exact recorded authority epoch. They never create a new grant.
-			return fmt.Errorf("unsolicited shared reference for %s in %s", packet.Resource.key(), publication.Phase())
-		}
+	expected, err := cluster.referenceSource(source, packet, c, record)
+	if err != nil {
+		return err
 	}
 	if cluster.peer(source) == nil {
 		return fmt.Errorf(mosi.NetworkError)

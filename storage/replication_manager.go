@@ -64,7 +64,6 @@ type replicationManager struct {
 	boot            string
 	ready           atomic.Bool
 	peersBoot       map[string]string
-	peerReady       map[string]bool
 	recoveryMu      sync.Mutex
 	recoveredUsers  map[string]*mosiPeer
 	restoring       map[string]bool
@@ -128,7 +127,6 @@ func StartReplication(address string, shutdown func()) error {
 	r.initialClaims = make(map[string]map[string]bool)
 	r.recoveryReports = make(map[string]map[string]replicaRecord)
 	r.peersBoot = make(map[string]string)
-	r.peerReady = make(map[string]bool)
 	r.directory = replicaDirectory{Records: make(map[string]replicaRecord), Users: make(map[string]replicaAuth), Retired: make(map[string]bool), Initialized: make(map[string]bool)}
 	if err := r.openConfig(); err != nil {
 		return err
@@ -235,11 +233,14 @@ func (r *replicationManager) accept(w http.ResponseWriter, req *http.Request) {
 		conn.Close()
 		return
 	}
+	var connection *mosiPeer
 	p := newMosiPeer(conn, func(ctx context.Context, method string, data json.RawMessage) (any, error) {
-		return r.handleMaster(ctx, id, method, data)
-	}, func(packet *mosiPacket) error { return r.receivePacket(id, packet) })
+		return r.handleMaster(ctx, id, connection, method, data)
+	}, func(packet *mosiPacket) error { return r.receivePacket(id, packet) }, func(peer *mosiPeer) {
+		connection = peer
+		peer.recoveryDone = make(chan struct{})
+	})
 	r.peers[id] = p
-	r.peerReady[id] = false
 	r.mu.Unlock()
 	<-p.done
 	p.wait()

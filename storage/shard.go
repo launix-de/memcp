@@ -960,13 +960,16 @@ func (s *storageShard) retainCacheRead() {
 
 func (s *storageShard) releaseCacheRead() { s.cacheReaders.Add(-1) }
 
-func (s *storageShard) GetRead(currentTx *TxContext) ReadAccess {
-	return s.getRead(currentTx, false)
+// mayDelegate describes the caller's ability to consume a shard-local result.
+// Native catalog/uniqueness/maintenance readers need local payload; physical
+// operator consumers can catch delegation and ship their complete invocation.
+func (s *storageShard) GetRead(currentTx *TxContext, mayDelegate bool) ReadAccess {
+	return s.getRead(currentTx, false, mayDelegate)
 }
 
 // Physical query-local IDs retain their original immutable generation. Rights
 // acquisition may install a successor, but must never reinterpret those IDs.
-func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
+func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool) ReadAccess {
 	origin := s
 	if target := s.scanTarget.Load(); target != nil {
 		panic(shardReadDelegation{target})
@@ -975,6 +978,13 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot bool) ReadAccess {
 		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
 			s = r.readShard(s, currentTx)
 		}
+	}
+	if mayDelegate && !snapshot && sharedClusterSource(s.t) && s.state() == COLD {
+		cluster := activeNodeCluster()
+		if cluster == nil {
+			panic("cluster is not initialized")
+		}
+		cluster.prepareLocalScan(s, currentTx, origin)
 	}
 	s.retainCacheRead()
 	ready := false
@@ -4515,11 +4525,4 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		GlobalCache.AddItem(result, int64(result.exclusiveSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 	}
 	return result
-}
-
-// captureScanHorizon borrows the pinned generation's immutable main extent and
-// its existing batch-published delta count. No RLock, new counter or row-loop
-// cancellation probe is required. Caller must retain the native GetRead lease.
-func (s *storageShard) captureScanHorizon() shardScanHorizon {
-	return shardScanHorizon{s.main_count, uint32(s.plannerDeltaRows.Load())}
 }
