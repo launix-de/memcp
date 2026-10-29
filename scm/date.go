@@ -1828,7 +1828,6 @@ func init_date() {
 					d115.NoHeapPointer = false
 					ctx.BindReg(d115.Reg, &d115)
 					ctx.BindReg(d115.Reg2, &d115)
-					ctx.FreeDesc(&d54)
 					ctx.SyncDesc(&d115)
 					if d115.Loc == LocRegPair || d115.Loc == LocStackPair || d115.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d115, &result)
@@ -2774,7 +2773,6 @@ func init_date() {
 					ctx.BindReg(d132.Reg, &d132)
 					ctx.BindReg(d132.Reg2, &d132)
 					ctx.BindReg(d132.Reg3, &d132)
-					ctx.FreeDesc(&d17)
 					ctx.FreeDesc(&d2)
 					d133 = args[1]
 					d133.ID = 0
@@ -3981,7 +3979,6 @@ func init_date() {
 					ctx.BindReg(d132.Reg2, &d132)
 					ctx.BindReg(d132.Reg3, &d132)
 					ctx.StabilizeDescForControlFlow(&d132)
-					ctx.FreeDesc(&d17)
 					ctx.FreeDesc(&d2)
 					d133 = args[1]
 					d133.ID = 0
@@ -4173,7 +4170,6 @@ func init_date() {
 					d178 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Year), []JITValueDesc{d132}, 1)
 					d178.NoHeapPointer = true
 					ctx.BindReg(d178.Reg, &d178)
-					ctx.FreeDesc(&d132)
 					ctx.EnsureDesc(&d178)
 					ctx.EnsureDesc(&d178)
 					ctx.EnsureDesc(&d178)
@@ -4213,7 +4209,6 @@ func init_date() {
 					d181 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Month), []JITValueDesc{d132}, 1)
 					d181.NoHeapPointer = true
 					ctx.BindReg(d181.Reg, &d181)
-					ctx.FreeDesc(&d132)
 					ctx.EnsureDesc(&d181)
 					ctx.EnsureDesc(&d181)
 					ctx.EnsureDesc(&d181)
@@ -4404,7 +4399,6 @@ func init_date() {
 					d235 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d132}, 1)
 					d235.NoHeapPointer = true
 					ctx.BindReg(d235.Reg, &d235)
-					ctx.FreeDesc(&d132)
 					ctx.EnsureDesc(&d235)
 					ctx.EnsureDesc(&d235)
 					ctx.EnsureDesc(&d235)
@@ -4609,7 +4603,6 @@ func init_date() {
 					d296 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Hour), []JITValueDesc{d132}, 1)
 					d296.NoHeapPointer = true
 					ctx.BindReg(d296.Reg, &d296)
-					ctx.FreeDesc(&d132)
 					ctx.EnsureDesc(&d296)
 					ctx.EnsureDesc(&d296)
 					ctx.EnsureDesc(&d296)
@@ -4828,7 +4821,6 @@ func init_date() {
 					d364 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Minute), []JITValueDesc{d132}, 1)
 					d364.NoHeapPointer = true
 					ctx.BindReg(d364.Reg, &d364)
-					ctx.FreeDesc(&d132)
 					ctx.EnsureDesc(&d364)
 					ctx.EnsureDesc(&d364)
 					ctx.EnsureDesc(&d364)
@@ -5061,7 +5053,6 @@ func init_date() {
 					d439 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Second), []JITValueDesc{d132}, 1)
 					d439.NoHeapPointer = true
 					ctx.BindReg(d439.Reg, &d439)
-					ctx.FreeDesc(&d132)
 					ctx.EnsureDesc(&d439)
 					ctx.EnsureDesc(&d439)
 					ctx.EnsureDesc(&d439)
@@ -5308,7 +5299,6 @@ func init_date() {
 					d521 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Month), []JITValueDesc{d132}, 1)
 					d521.NoHeapPointer = true
 					ctx.BindReg(d521.Reg, &d521)
-					ctx.FreeDesc(&d132)
 					ctx.EnsureDesc(&d521)
 					ctx.FreeDesc(&d521)
 					ctx.EnsureDesc(&d521)
@@ -5624,7 +5614,6 @@ func init_date() {
 					_ = d617
 					d618 = callResults616[1]
 					_ = d618
-					ctx.FreeDesc(&d132)
 					ctx.EnsureDesc(&d618)
 					ctx.EnsureDesc(&d618)
 					ctx.EnsureDesc(&d618)
@@ -5907,7 +5896,6 @@ func init_date() {
 					d718 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Weekday), []JITValueDesc{d132}, 1)
 					d718.NoHeapPointer = true
 					ctx.BindReg(d718.Reg, &d718)
-					ctx.FreeDesc(&d132)
 					ctx.EnsureDesc(&d718)
 					ctx.EnsureDesc(&d718)
 					ctx.EnsureDesc(&d718)
@@ -6233,7 +6221,6 @@ func init_date() {
 					d828 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Weekday), []JITValueDesc{d132}, 1)
 					d828.NoHeapPointer = true
 					ctx.BindReg(d828.Reg, &d828)
-					ctx.FreeDesc(&d132)
 					ctx.EnsureDesc(&d828)
 					ctx.EnsureDesc(&d828)
 					if d828.Loc == LocImm {
@@ -7588,7 +7575,6 @@ func init_date() {
 					ctx.BindReg(d118.Reg2, &d118)
 					ctx.BindReg(d118.Reg3, &d118)
 					ctx.StabilizeDescForControlFlow(&d118)
-					ctx.FreeDesc(&d15)
 					ctx.FreeDesc(&d117)
 					ctx.SyncDesc(&d118)
 					if d118.Loc == LocReg || d118.Loc == LocFPReg {
@@ -7667,7 +7653,6 @@ func init_date() {
 					ctx.BindReg(d122.Reg2, &d122)
 					ctx.BindReg(d122.Reg3, &d122)
 					ctx.StabilizeDescForControlFlow(&d122)
-					ctx.FreeDesc(&d15)
 					ctx.FreeDesc(&d121)
 					ctx.SyncDesc(&d122)
 					if d122.Loc == LocReg || d122.Loc == LocFPReg {
@@ -7892,7 +7877,6 @@ func init_date() {
 					ctx.BindReg(d175.Reg2, &d175)
 					ctx.BindReg(d175.Reg3, &d175)
 					ctx.StabilizeDescForControlFlow(&d175)
-					ctx.FreeDesc(&d15)
 					ctx.FreeDesc(&d174)
 					ctx.SyncDesc(&d175)
 					if d175.Loc == LocReg || d175.Loc == LocFPReg {
@@ -8128,7 +8112,6 @@ func init_date() {
 					ctx.FreeDesc(&d234)
 					ctx.FreeDesc(&d235)
 					ctx.StabilizeDescForControlFlow(&d236)
-					ctx.FreeDesc(&d15)
 					ctx.SyncDesc(&d236)
 					if d236.Loc == LocReg || d236.Loc == LocFPReg {
 						ctx.ProtectReg(d236.Reg)
@@ -8394,7 +8377,6 @@ func init_date() {
 					ctx.FreeDesc(&d304)
 					ctx.FreeDesc(&d305)
 					ctx.StabilizeDescForControlFlow(&d306)
-					ctx.FreeDesc(&d15)
 					ctx.FreeDesc(&d303)
 					ctx.SyncDesc(&d306)
 					if d306.Loc == LocReg || d306.Loc == LocFPReg {
@@ -8664,7 +8646,6 @@ func init_date() {
 					ctx.FreeDesc(&d382)
 					ctx.FreeDesc(&d383)
 					ctx.StabilizeDescForControlFlow(&d384)
-					ctx.FreeDesc(&d15)
 					ctx.SyncDesc(&d384)
 					if d384.Loc == LocReg || d384.Loc == LocFPReg {
 						ctx.ProtectReg(d384.Reg)
@@ -8949,7 +8930,6 @@ func init_date() {
 					ctx.FreeDesc(&d468)
 					ctx.FreeDesc(&d469)
 					ctx.StabilizeDescForControlFlow(&d470)
-					ctx.FreeDesc(&d15)
 					ctx.FreeDesc(&d73)
 					ctx.SyncDesc(&d470)
 					if d470.Loc == LocReg || d470.Loc == LocFPReg {
@@ -10278,7 +10258,6 @@ func init_date() {
 					ctx.BindReg(d119.Reg2, &d119)
 					ctx.BindReg(d119.Reg3, &d119)
 					ctx.StabilizeDescForControlFlow(&d119)
-					ctx.FreeDesc(&d15)
 					ctx.FreeDesc(&d118)
 					ctx.SyncDesc(&d119)
 					if d119.Loc == LocReg || d119.Loc == LocFPReg {
@@ -10378,7 +10357,6 @@ func init_date() {
 					ctx.BindReg(d124.Reg2, &d124)
 					ctx.BindReg(d124.Reg3, &d124)
 					ctx.StabilizeDescForControlFlow(&d124)
-					ctx.FreeDesc(&d15)
 					ctx.FreeDesc(&d123)
 					ctx.SyncDesc(&d124)
 					if d124.Loc == LocReg || d124.Loc == LocFPReg {
@@ -10628,7 +10606,6 @@ func init_date() {
 					ctx.BindReg(d180.Reg2, &d180)
 					ctx.BindReg(d180.Reg3, &d180)
 					ctx.StabilizeDescForControlFlow(&d180)
-					ctx.FreeDesc(&d15)
 					ctx.FreeDesc(&d179)
 					ctx.SyncDesc(&d180)
 					if d180.Loc == LocReg || d180.Loc == LocFPReg {
@@ -10892,7 +10869,6 @@ func init_date() {
 					ctx.FreeDesc(&d243)
 					ctx.FreeDesc(&d244)
 					ctx.StabilizeDescForControlFlow(&d245)
-					ctx.FreeDesc(&d15)
 					ctx.FreeDesc(&d242)
 					ctx.SyncDesc(&d245)
 					if d245.Loc == LocReg || d245.Loc == LocFPReg {
@@ -11188,7 +11164,6 @@ func init_date() {
 					ctx.FreeDesc(&d318)
 					ctx.FreeDesc(&d319)
 					ctx.StabilizeDescForControlFlow(&d320)
-					ctx.FreeDesc(&d15)
 					ctx.FreeDesc(&d317)
 					ctx.SyncDesc(&d320)
 					if d320.Loc == LocReg || d320.Loc == LocFPReg {
@@ -11490,7 +11465,6 @@ func init_date() {
 					ctx.FreeDesc(&d402)
 					ctx.FreeDesc(&d403)
 					ctx.StabilizeDescForControlFlow(&d404)
-					ctx.FreeDesc(&d15)
 					ctx.FreeDesc(&d401)
 					ctx.SyncDesc(&d404)
 					if d404.Loc == LocReg || d404.Loc == LocFPReg {
@@ -11811,7 +11785,6 @@ func init_date() {
 					ctx.FreeDesc(&d495)
 					ctx.FreeDesc(&d496)
 					ctx.StabilizeDescForControlFlow(&d497)
-					ctx.FreeDesc(&d15)
 					ctx.FreeDesc(&d494)
 					ctx.SyncDesc(&d497)
 					if d497.Loc == LocReg || d497.Loc == LocFPReg {
@@ -12478,7 +12451,6 @@ func init_date() {
 					d28 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d12}, 1)
 					d28.NoHeapPointer = true
 					ctx.BindReg(d28.Reg, &d28)
-					ctx.FreeDesc(&d12)
 					d29 = ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.UTC }), nil, 1)
 					if d26.Loc == LocRegPair || d26.Loc == LocStackPair || d26.Loc == LocRegTriple || d26.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
@@ -13793,7 +13765,6 @@ func init_date() {
 						return bbs[5].Render()
 					}
 					return result
-					ctx.FreeDesc(&d24)
 					return result
 				}
 				bbs[7].Render = func() JITValueDesc {
@@ -13823,8 +13794,6 @@ func init_date() {
 					d135 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Sub), []JITValueDesc{d23, d19}, 1)
 					d135.NoHeapPointer = true
 					ctx.BindReg(d135.Reg, &d135)
-					ctx.FreeDesc(&d23)
-					ctx.FreeDesc(&d19)
 					if d135.Loc == LocRegPair || d135.Loc == LocStackPair || d135.Loc == LocRegTriple || d135.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -13876,8 +13845,6 @@ func init_date() {
 					d138 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Sub), []JITValueDesc{d23, d19}, 1)
 					d138.NoHeapPointer = true
 					ctx.BindReg(d138.Reg, &d138)
-					ctx.FreeDesc(&d23)
-					ctx.FreeDesc(&d19)
 					if d138.Loc == LocRegPair || d138.Loc == LocStackPair || d138.Loc == LocRegTriple || d138.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -14080,8 +14047,6 @@ func init_date() {
 					d187 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Sub), []JITValueDesc{d23, d19}, 1)
 					d187.NoHeapPointer = true
 					ctx.BindReg(d187.Reg, &d187)
-					ctx.FreeDesc(&d23)
-					ctx.FreeDesc(&d19)
 					if d187.Loc == LocRegPair || d187.Loc == LocStackPair || d187.Loc == LocRegTriple || d187.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -14300,8 +14265,6 @@ func init_date() {
 					d244 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Sub), []JITValueDesc{d23, d19}, 1)
 					d244.NoHeapPointer = true
 					ctx.BindReg(d244.Reg, &d244)
-					ctx.FreeDesc(&d23)
-					ctx.FreeDesc(&d19)
 					if d244.Loc == LocRegPair || d244.Loc == LocStackPair || d244.Loc == LocRegTriple || d244.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -14547,7 +14510,6 @@ func init_date() {
 					d311 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d19}, 1)
 					d311.NoHeapPointer = true
 					ctx.BindReg(d311.Reg, &d311)
-					ctx.FreeDesc(&d19)
 					d312 = ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.UTC }), nil, 1)
 					if d309.Loc == LocRegPair || d309.Loc == LocStackPair || d309.Loc == LocRegTriple || d309.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
@@ -14622,7 +14584,6 @@ func init_date() {
 					d320 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d23}, 1)
 					d320.NoHeapPointer = true
 					ctx.BindReg(d320.Reg, &d320)
-					ctx.FreeDesc(&d23)
 					d321 = ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.UTC }), nil, 1)
 					if d318.Loc == LocRegPair || d318.Loc == LocStackPair || d318.Loc == LocRegTriple || d318.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
@@ -15001,7 +14962,6 @@ func init_date() {
 					d422 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d19}, 1)
 					d422.NoHeapPointer = true
 					ctx.BindReg(d422.Reg, &d422)
-					ctx.FreeDesc(&d19)
 					d423 = ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.UTC }), nil, 1)
 					if d420.Loc == LocRegPair || d420.Loc == LocStackPair || d420.Loc == LocRegTriple || d420.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
@@ -15076,7 +15036,6 @@ func init_date() {
 					d431 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d23}, 1)
 					d431.NoHeapPointer = true
 					ctx.BindReg(d431.Reg, &d431)
-					ctx.FreeDesc(&d23)
 					d432 = ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.UTC }), nil, 1)
 					if d429.Loc == LocRegPair || d429.Loc == LocStackPair || d429.Loc == LocRegTriple || d429.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
@@ -15687,7 +15646,6 @@ func init_date() {
 					d570 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d23}, 1)
 					d570.NoHeapPointer = true
 					ctx.BindReg(d570.Reg, &d570)
-					ctx.FreeDesc(&d23)
 					d19 = JITPrepareGoSliceArg(ctx, d19)
 					if d19.Loc != LocRegTriple && d19.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
@@ -15696,7 +15654,6 @@ func init_date() {
 					d571 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d19}, 1)
 					d571.NoHeapPointer = true
 					ctx.BindReg(d571.Reg, &d571)
-					ctx.FreeDesc(&d19)
 					ctx.EnsureDesc(&d570)
 					ctx.EnsureDesc(&d571)
 					ctx.EnsureDescsTogether(&d570, &d571)
@@ -16822,7 +16779,6 @@ func init_date() {
 					d977 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d23}, 1)
 					d977.NoHeapPointer = true
 					ctx.BindReg(d977.Reg, &d977)
-					ctx.FreeDesc(&d23)
 					d19 = JITPrepareGoSliceArg(ctx, d19)
 					if d19.Loc != LocRegTriple && d19.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
@@ -16831,7 +16787,6 @@ func init_date() {
 					d978 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d19}, 1)
 					d978.NoHeapPointer = true
 					ctx.BindReg(d978.Reg, &d978)
-					ctx.FreeDesc(&d19)
 					ctx.EnsureDesc(&d977)
 					ctx.EnsureDesc(&d978)
 					ctx.EnsureDescsTogether(&d977, &d978)
@@ -19817,7 +19772,6 @@ func init_date() {
 					d2141 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d23}, 1)
 					d2141.NoHeapPointer = true
 					ctx.BindReg(d2141.Reg, &d2141)
-					ctx.FreeDesc(&d23)
 					d19 = JITPrepareGoSliceArg(ctx, d19)
 					if d19.Loc != LocRegTriple && d19.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
@@ -19826,7 +19780,6 @@ func init_date() {
 					d2142 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d19}, 1)
 					d2142.NoHeapPointer = true
 					ctx.BindReg(d2142.Reg, &d2142)
-					ctx.FreeDesc(&d19)
 					ctx.EnsureDesc(&d2141)
 					ctx.EnsureDesc(&d2142)
 					ctx.EnsureDescsTogether(&d2141, &d2142)
@@ -21171,7 +21124,6 @@ func init_date() {
 					d56 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d12}, 1)
 					d56.NoHeapPointer = true
 					ctx.BindReg(d56.Reg, &d56)
-					ctx.FreeDesc(&d12)
 					d57 = ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.UTC }), nil, 1)
 					if d54.Loc == LocRegPair || d54.Loc == LocStackPair || d54.Loc == LocRegTriple || d54.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
@@ -21246,7 +21198,6 @@ func init_date() {
 					d65 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d16}, 1)
 					d65.NoHeapPointer = true
 					ctx.BindReg(d65.Reg, &d65)
-					ctx.FreeDesc(&d16)
 					d66 = ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.UTC }), nil, 1)
 					if d63.Loc == LocRegPair || d63.Loc == LocStackPair || d63.Loc == LocRegTriple || d63.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
@@ -21480,7 +21431,6 @@ func init_date() {
 						return bbs[5].Render()
 					}
 					return result
-					ctx.FreeDesc(&d17)
 					return result
 				}
 				returned := bbs[0].Render()
@@ -21944,7 +21894,6 @@ func init_date() {
 					d39 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d18}, 1)
 					d39.NoHeapPointer = true
 					ctx.BindReg(d39.Reg, &d39)
-					ctx.FreeDesc(&d18)
 					if d39.Loc == LocRegPair || d39.Loc == LocStackPair || d39.Loc == LocRegTriple || d39.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}

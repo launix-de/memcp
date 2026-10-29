@@ -1452,7 +1452,6 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d101 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r6, Condition: CondEqual}
 			ctx.BindReg(r6, &d101)
 		}
-		ctx.FreeDesc(&d3)
 		d102 = d101
 		ctx.SyncDesc(&d102)
 		if d102.Loc != LocImm && d102.Loc != LocFlags {
@@ -1787,7 +1786,6 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d186.Type = tagInt
 			ctx.BindReg(d186.Reg, &d186)
 		}
-		ctx.FreeDesc(&args[0])
 		ctx.EnsureDesc(&d186)
 		ctx.EnsureDesc(&d186)
 		if d186.Loc == LocImm {
@@ -1802,7 +1800,6 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		}
 		ctx.FreeDesc(&d186)
 		d188 = ctx.EmitFloatDesc(args[1])
-		ctx.FreeDesc(&args[1])
 		ctx.EnsureDesc(&d187)
 		resultTarget189 := false
 		_ = resultTarget189
@@ -1880,7 +1877,6 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d191 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r12, Condition: CondEqual}
 			ctx.BindReg(r12, &d191)
 		}
-		ctx.FreeDesc(&d3)
 		d192 = d191
 		ctx.SyncDesc(&d192)
 		if d192.Loc != LocImm && d192.Loc != LocFlags {
@@ -2002,7 +1998,6 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d228.Type = tagInt
 			ctx.BindReg(d228.Reg, &d228)
 		}
-		ctx.FreeDesc(&args[0])
 		ctx.EnsureDesc(&d228)
 		resultTarget229 := false
 		_ = resultTarget229
@@ -2033,7 +2028,6 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(r15, &d230)
 		}
 		ctx.FreeDesc(&d228)
-		ctx.FreeDesc(&d154)
 		ctx.SyncDesc(&d230)
 		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d230) {
 			return d230
@@ -2056,9 +2050,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		ctx.ResolveFixups()
 		ctx.ReclaimUntrackedRegs()
 		d231 = ctx.EmitFloatDesc(args[0])
-		ctx.FreeDesc(&args[0])
 		d232 = ctx.EmitFloatDesc(args[1])
-		ctx.FreeDesc(&args[1])
 		ctx.EnsureDesc(&d231)
 		resultTarget233 := false
 		_ = resultTarget233
@@ -2271,7 +2263,6 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d279.Type = tagInt
 			ctx.BindReg(d279.Reg, &d279)
 		}
-		ctx.FreeDesc(&args[0])
 		if args[1].Loc == LocImm {
 			d280 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[1].Imm.Int())}
 		} else if args[1].Type == tagInt && args[1].Loc == LocRegPair {
@@ -2286,7 +2277,6 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d280.Type = tagInt
 			ctx.BindReg(d280.Reg, &d280)
 		}
-		ctx.FreeDesc(&args[1])
 		ctx.EnsureDesc(&d279)
 		resultTarget281 := false
 		_ = resultTarget281
@@ -2353,7 +2343,6 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d283.Type = tagInt
 			ctx.BindReg(d283.Reg, &d283)
 		}
-		ctx.FreeDesc(&args[0])
 		ctx.EnsureDesc(&d283)
 		ctx.EnsureDesc(&d283)
 		if d283.Loc == LocImm {
@@ -2368,7 +2357,6 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		}
 		ctx.FreeDesc(&d283)
 		d285 = ctx.EmitFloatDesc(args[1])
-		ctx.FreeDesc(&args[1])
 		ctx.EnsureDesc(&d284)
 		resultTarget286 := false
 		_ = resultTarget286
@@ -2451,7 +2439,6 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d288.Type = tagInt
 			ctx.BindReg(d288.Reg, &d288)
 		}
-		ctx.FreeDesc(&args[0])
 		if args[1].Loc == LocImm {
 			d289 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[1].Imm.Int())}
 		} else if args[1].Type == tagInt && args[1].Loc == LocRegPair {
@@ -2466,7 +2453,6 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d289.Type = tagInt
 			ctx.BindReg(d289.Reg, &d289)
 		}
-		ctx.FreeDesc(&args[1])
 		ctx.EnsureDesc(&d288)
 		resultTarget290 := false
 		_ = resultTarget290
@@ -2692,8 +2678,6 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		ctx.BindReg(d348.Reg, &d348)
 		ctx.FreeDesc(&args[0])
 		ctx.FreeDesc(&args[1])
-		ctx.FreeDesc(&d1)
-		ctx.FreeDesc(&d3)
 		ctx.SyncDesc(&d348)
 		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d348) {
 			return d348

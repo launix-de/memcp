@@ -875,7 +875,6 @@ func init_strings() {
 					ctx.BindReg(d23.Reg3, &d23)
 					ctx.FreeDesc(&d22)
 					ctx.StabilizeDescForControlFlow(&d23)
-					ctx.FreeDesc(&d6)
 					if d23.SliceSizeKnown {
 						d24 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d23.KnownSliceLen))}
 					} else if d23.Loc == LocImm {
@@ -981,7 +980,6 @@ func init_strings() {
 						d29 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r3, Condition: CondSignedLess}
 						ctx.BindReg(r3, &d29)
 					}
-					ctx.FreeDesc(&d27)
 					d30 = d29
 					ctx.SyncDesc(&d30)
 					if d30.Loc != LocImm && d30.Loc != LocFlags {
@@ -1942,7 +1940,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d18)
 					inlineHome19 := d18
 					inlineHome19.ID = 0
-					ctx.FreeDesc(&d12)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl12)
 					ctx.MarkLabel(lbl9)
@@ -2467,7 +2464,6 @@ func init_strings() {
 					ctx.BindReg(d139.Reg, &d139)
 					ctx.BindReg(d139.Reg2, &d139)
 					ctx.FreeDesc(&d138)
-					ctx.FreeDesc(&d4)
 					ctx.FreeDesc(&d1)
 					ctx.SyncDesc(&d139)
 					if d139.Loc == LocRegPair || d139.Loc == LocStackPair || d139.Loc == LocInputPair {
@@ -2642,7 +2638,6 @@ func init_strings() {
 					ctx.BindReg(r13, &d148)
 					ctx.BindReg(r12, &d148)
 					ctx.BindReg(r13, &d148)
-					ctx.FreeDesc(&d4)
 					ctx.FreeDesc(&d144)
 					ctx.EnsureDesc(&d148)
 					d149 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d148}, 2)
@@ -2724,7 +2719,6 @@ func init_strings() {
 					ctx.BindReg(r17, &d154)
 					ctx.BindReg(r16, &d154)
 					ctx.BindReg(r17, &d154)
-					ctx.FreeDesc(&d4)
 					ctx.EnsureDesc(&d154)
 					d155 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d154}, 2)
 					ctx.EmitMovPairToResult(&d155, &result)
@@ -3413,7 +3407,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d31)
 					inlineHome32 := d31
 					inlineHome32.ID = 0
-					ctx.FreeDesc(&d25)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl24)
 					ctx.MarkLabel(lbl21)
@@ -4852,7 +4845,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d370)
 					inlineHome371 := d370
 					inlineHome371.ID = 0
-					ctx.FreeDesc(&d364)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl37)
 					ctx.MarkLabel(lbl34)
@@ -5080,7 +5072,6 @@ func init_strings() {
 					ctx.EnsureDesc(&d442)
 					ctx.EmitStoreToStack(d442, int32(bbs[13].PhiBase)+int32(0))
 					ctx.StabilizeDescForControlFlow(&d442)
-					ctx.FreeDesc(&d2)
 					return bbs[13].Render()
 					return result
 				}
@@ -5478,7 +5469,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d530)
 					inlineHome531 := d530
 					inlineHome531.ID = 0
-					ctx.FreeDesc(&d524)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl46)
 					ctx.MarkLabel(lbl43)
@@ -5743,7 +5733,6 @@ func init_strings() {
 						ctx.TransferReg(d3.Reg)
 						d3.Loc = LocNone
 					}
-					ctx.FreeDesc(&d4)
 					d619 = JITPrepareScmerGoArg(ctx, d619)
 					if d3.Loc == LocRegPair || d3.Loc == LocStackPair || d3.Loc == LocRegTriple || d3.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
@@ -5759,7 +5748,6 @@ func init_strings() {
 					ctx.BindReg(d621.Reg, &d621)
 					ctx.BindReg(d621.Reg2, &d621)
 					ctx.FreeDesc(&d619)
-					ctx.FreeDesc(&d3)
 					ctx.FreeDesc(&d620)
 					ctx.SyncDesc(&d621)
 					if d621.Loc == LocRegPair || d621.Loc == LocStackPair || d621.Loc == LocInputPair {
@@ -5846,7 +5834,6 @@ func init_strings() {
 						ctx.TransferReg(d3.Reg)
 						d3.Loc = LocNone
 					}
-					ctx.FreeDesc(&d4)
 					ctx.EnsureDesc(&d3)
 					ctx.EnsureDesc(&d622)
 					ctx.EnsureDesc(&d1)
@@ -5901,8 +5888,6 @@ func init_strings() {
 					ctx.BindReg(r32, &d626)
 					ctx.BindReg(r31, &d626)
 					ctx.BindReg(r32, &d626)
-					ctx.FreeDesc(&d1)
-					ctx.FreeDesc(&d3)
 					ctx.FreeDesc(&d622)
 					ctx.EnsureDesc(&d626)
 					d627 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d626}, 2)
@@ -5944,8 +5929,6 @@ func init_strings() {
 					ctx.BindReg(d629.Reg, &d629)
 					ctx.BindReg(d629.Reg2, &d629)
 					ctx.FreeDesc(&d628)
-					ctx.FreeDesc(&d3)
-					ctx.FreeDesc(&d2)
 					ctx.SyncDesc(&d629)
 					if d629.Loc == LocRegPair || d629.Loc == LocStackPair || d629.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d629, &result)
@@ -6048,8 +6031,6 @@ func init_strings() {
 					ctx.BindReg(r36, &d634)
 					ctx.BindReg(r35, &d634)
 					ctx.BindReg(r36, &d634)
-					ctx.FreeDesc(&d1)
-					ctx.FreeDesc(&d3)
 					ctx.EnsureDesc(&d634)
 					d635 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d634}, 2)
 					ctx.EmitMovPairToResult(&d635, &result)
@@ -7604,7 +7585,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d83)
 					inlineHome84 := d83
 					inlineHome84.ID = 0
-					ctx.FreeDesc(&d77)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl14)
 					ctx.MarkLabel(lbl11)
@@ -8004,7 +7984,6 @@ func init_strings() {
 					ctx.EmitAndRegImm32(d167.Reg, 1)
 					d167.Type = tagBool
 					ctx.BindReg(d167.Reg, &d167)
-					ctx.FreeDesc(&d1)
 					ctx.SyncDesc(&d167)
 					if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d167) {
 						return d167
@@ -8516,7 +8495,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d25)
 					inlineHome26 := d25
 					inlineHome26.ID = 0
-					ctx.FreeDesc(&d19)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl11)
 					ctx.MarkLabel(lbl8)
@@ -9286,7 +9264,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d12)
 					inlineHome13 := d12
 					inlineHome13.ID = 0
-					ctx.FreeDesc(&d6)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl7)
 					ctx.MarkLabel(lbl4)
@@ -9765,7 +9742,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d12)
 					inlineHome13 := d12
 					inlineHome13.ID = 0
-					ctx.FreeDesc(&d6)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl7)
 					ctx.MarkLabel(lbl4)
@@ -10755,7 +10731,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d12)
 					inlineHome13 := d12
 					inlineHome13.ID = 0
-					ctx.FreeDesc(&d6)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl7)
 					ctx.MarkLabel(lbl4)
@@ -11236,7 +11211,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d12)
 					inlineHome13 := d12
 					inlineHome13.ID = 0
-					ctx.FreeDesc(&d6)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl7)
 					ctx.MarkLabel(lbl4)
@@ -11746,7 +11720,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d12)
 					inlineHome13 := d12
 					inlineHome13.ID = 0
-					ctx.FreeDesc(&d6)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl7)
 					ctx.MarkLabel(lbl4)
@@ -12369,7 +12342,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d22)
 					inlineHome23 := d22
 					inlineHome23.ID = 0
-					ctx.FreeDesc(&d16)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl9)
 					ctx.MarkLabel(lbl6)
@@ -12974,7 +12946,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d22)
 					inlineHome23 := d22
 					inlineHome23.ID = 0
-					ctx.FreeDesc(&d16)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl9)
 					ctx.MarkLabel(lbl6)
@@ -13608,7 +13579,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d22)
 					inlineHome23 := d22
 					inlineHome23.ID = 0
-					ctx.FreeDesc(&d16)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl9)
 					ctx.MarkLabel(lbl6)
@@ -14324,7 +14294,6 @@ func init_strings() {
 						d31 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r3, Condition: CondSignedLess}
 						ctx.BindReg(r3, &d31)
 					}
-					ctx.FreeDesc(&d29)
 					d32 = d31
 					ctx.SyncDesc(&d32)
 					if d32.Loc != LocImm && d32.Loc != LocFlags {
@@ -14908,7 +14877,6 @@ func init_strings() {
 					d33.NoHeapPointer = false
 					ctx.BindReg(d33.Reg, &d33)
 					ctx.BindReg(d33.Reg2, &d33)
-					ctx.FreeDesc(&d12)
 					ctx.EnsureDesc(&d33)
 					d34 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d33}, 2)
 					ctx.EmitMovPairToResult(&d34, &result)
@@ -17398,7 +17366,6 @@ func init_strings() {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
 				d8 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d9}, 2)
-				ctx.FreeDesc(&d1)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d8)
 				var d10 JITValueDesc
@@ -17484,7 +17451,6 @@ func init_strings() {
 				d16.NoHeapPointer = false
 				ctx.BindReg(d16.Reg, &d16)
 				ctx.BindReg(d16.Reg2, &d16)
-				ctx.FreeDesc(&d1)
 				ctx.ReclaimUntrackedRegs()
 				d17 := JITValueDesc{Loc: LocRegPair, Reg: r1, Reg2: r2}
 				ctx.BindReg(r1, &d17)
@@ -18665,7 +18631,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d14)
 					inlineHome15 := d14
 					inlineHome15.ID = 0
-					ctx.FreeDesc(&d8)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl10)
 					ctx.MarkLabel(lbl7)
@@ -19636,7 +19601,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d14)
 					inlineHome15 := d14
 					inlineHome15.ID = 0
-					ctx.FreeDesc(&d8)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl10)
 					ctx.MarkLabel(lbl7)
@@ -20732,7 +20696,6 @@ func init_strings() {
 						d15 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r1, Condition: CondSignedGreater}
 						ctx.BindReg(r1, &d15)
 					}
-					ctx.FreeDesc(&d2)
 					d16 = d15
 					ctx.SyncDesc(&d16)
 					if d16.Loc != LocImm && d16.Loc != LocFlags {
@@ -21459,7 +21422,6 @@ func init_strings() {
 					d32.NoHeapPointer = false
 					ctx.BindReg(d32.Reg, &d32)
 					ctx.BindReg(d32.Reg2, &d32)
-					ctx.FreeDesc(&d25)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d32)
 					ctx.EmitCopyDescWords(&d28, &d32, 2)
@@ -21744,7 +21706,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d54)
 					inlineHome55 := d54
 					inlineHome55.ID = 0
-					ctx.FreeDesc(&d48)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl18)
 					ctx.MarkLabel(lbl15)
@@ -23189,7 +23150,6 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d39)
 					inlineHome40 := d39
 					inlineHome40.ID = 0
-					ctx.FreeDesc(&d33)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl10)
 					ctx.MarkLabel(lbl7)
@@ -23933,7 +23893,6 @@ func init_strings() {
 					ctx.EmitAndRegImm32(d55.Reg, 1)
 					d55.Type = tagBool
 					ctx.BindReg(d55.Reg, &d55)
-					ctx.FreeDesc(&d14)
 					ctx.SyncDesc(&d55)
 					if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d55) {
 						return d55

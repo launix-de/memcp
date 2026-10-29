@@ -2237,8 +2237,6 @@ func init_sync() {
 				ctx.SyncDesc(&d12)
 				ctx.SyncDesc(&d17)
 				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d8, d10, d12, d17})
-				ctx.FreeDesc(&d8)
-				ctx.FreeDesc(&d17)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl0)
 				bbpos_1_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -2312,7 +2310,6 @@ func init_sync() {
 					ctx.BindReg(r10, &d26)
 					ctx.BindReg(r11, &d26)
 				}
-				ctx.FreeDesc(&d8)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d20)
 				ctx.EnsureDesc(&d20)
@@ -2330,7 +2327,6 @@ func init_sync() {
 					ctx.TransferReg(d20.Reg)
 					d20.Loc = LocNone
 				}
-				ctx.FreeDesc(&d20)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d27)
 				ctx.ReclaimUntrackedRegs()
@@ -2595,8 +2591,6 @@ func init_sync() {
 				ctx.SyncDesc(&d38)
 				ctx.SyncDesc(&d43)
 				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d34, d36, d38, d43})
-				ctx.FreeDesc(&d34)
-				ctx.FreeDesc(&d43)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl12)
 				bbpos_2_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -2670,7 +2664,6 @@ func init_sync() {
 					ctx.BindReg(r22, &d52)
 					ctx.BindReg(r23, &d52)
 				}
-				ctx.FreeDesc(&d34)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d46)
 				ctx.EnsureDesc(&d46)
@@ -2688,7 +2681,6 @@ func init_sync() {
 					ctx.TransferReg(d46.Reg)
 					d46.Loc = LocNone
 				}
-				ctx.FreeDesc(&d46)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d53)
 				ctx.ReclaimUntrackedRegs()
@@ -2953,8 +2945,6 @@ func init_sync() {
 				ctx.SyncDesc(&d64)
 				ctx.SyncDesc(&d69)
 				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d60, d62, d64, d69})
-				ctx.FreeDesc(&d60)
-				ctx.FreeDesc(&d69)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl24)
 				bbpos_3_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -3028,7 +3018,6 @@ func init_sync() {
 					ctx.BindReg(r34, &d78)
 					ctx.BindReg(r35, &d78)
 				}
-				ctx.FreeDesc(&d60)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d72)
 				ctx.EnsureDesc(&d72)
@@ -3046,7 +3035,6 @@ func init_sync() {
 					ctx.TransferReg(d72.Reg)
 					d72.Loc = LocNone
 				}
-				ctx.FreeDesc(&d72)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d79)
 				ctx.ReclaimUntrackedRegs()
@@ -3311,8 +3299,6 @@ func init_sync() {
 				ctx.SyncDesc(&d90)
 				ctx.SyncDesc(&d95)
 				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d86, d88, d90, d95})
-				ctx.FreeDesc(&d86)
-				ctx.FreeDesc(&d95)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl36)
 				bbpos_4_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -3386,7 +3372,6 @@ func init_sync() {
 					ctx.BindReg(r46, &d104)
 					ctx.BindReg(r47, &d104)
 				}
-				ctx.FreeDesc(&d86)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d98)
 				ctx.EnsureDesc(&d98)
@@ -3404,7 +3389,6 @@ func init_sync() {
 					ctx.TransferReg(d98.Reg)
 					d98.Loc = LocNone
 				}
-				ctx.FreeDesc(&d98)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d105)
 				ctx.ReclaimUntrackedRegs()
@@ -3669,8 +3653,6 @@ func init_sync() {
 				ctx.SyncDesc(&d116)
 				ctx.SyncDesc(&d121)
 				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d112, d114, d116, d121})
-				ctx.FreeDesc(&d112)
-				ctx.FreeDesc(&d121)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl48)
 				bbpos_5_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -3744,7 +3726,6 @@ func init_sync() {
 					ctx.BindReg(r58, &d130)
 					ctx.BindReg(r59, &d130)
 				}
-				ctx.FreeDesc(&d112)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d124)
 				ctx.EnsureDesc(&d124)
@@ -3762,7 +3743,6 @@ func init_sync() {
 					ctx.TransferReg(d124.Reg)
 					d124.Loc = LocNone
 				}
-				ctx.FreeDesc(&d124)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d131)
 				ctx.ReclaimUntrackedRegs()

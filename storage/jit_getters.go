@@ -2196,6 +2196,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			d178 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r24, Condition: scm.CondUnsignedBelow}
 			ctx.BindReg(r24, &d178)
 		}
+		ctx.FreeDesc(&count)
 		d179 = d178
 		ctx.SyncDesc(&d179)
 		if d179.Loc != scm.LocImm && d179.Loc != scm.LocFlags {
@@ -2368,6 +2369,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			ctx.TransferReg(recid.Reg)
 			recid.Loc = scm.LocNone
 		}
+		ctx.FreeDesc(&recid)
 		ctx.EnsureDesc(&d214)
 		ctx.EnsureDesc(&d214)
 		ctx.EnsureDesc(&d214)
@@ -2640,7 +2642,6 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			return bbs[16].Render()
 		}
 		return result
-		ctx.FreeDesc(&d50)
 		return result
 	}
 	bbs[12].Render = func() scm.JITValueDesc {
@@ -2836,7 +2837,6 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			ctx.TransferReg(d7.Reg)
 			d7.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d6)
 		ctx.EnsureDesc(&d8)
 		ctx.EnsureDesc(&d8)
 		if d8.Loc == scm.LocImm {
@@ -2995,7 +2995,6 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			d277.Loc = scm.LocNone
 		}
 		ctx.FreeDesc(&d277)
-		ctx.FreeDesc(&d52)
 		ctx.EnsureDesc(&d278)
 		ctx.EnsureDesc(&d7)
 		ctx.SyncDesc(&d278)
@@ -3078,7 +3077,6 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			d281 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r43, Condition: scm.CondEqual}
 			ctx.BindReg(r43, &d281)
 		}
-		ctx.FreeDesc(&d51)
 		d282 = d281
 		ctx.SyncDesc(&d282)
 		if d282.Loc != scm.LocImm && d282.Loc != scm.LocFlags {
@@ -3671,7 +3669,6 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			return bbs[23].Render()
 		}
 		return result
-		ctx.FreeDesc(&d50)
 		return result
 	}
 	bbs[18].Render = func() scm.JITValueDesc {
@@ -3782,7 +3779,6 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			d427 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r61, Condition: scm.CondUnsignedBelow}
 			ctx.BindReg(r61, &d427)
 		}
-		ctx.FreeDesc(&d80)
 		d428 = d427
 		ctx.SyncDesc(&d428)
 		if d428.Loc != scm.LocImm && d428.Loc != scm.LocFlags {
@@ -4111,7 +4107,6 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			ctx.TransferReg(d10.Reg)
 			d10.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d6)
 		ctx.EnsureDesc(&d9)
 		ctx.EnsureDesc(&d49)
 		ctx.EnsureDescsTogether(&d9, &d49)
@@ -4312,7 +4307,6 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			d510.Loc = scm.LocNone
 		}
 		ctx.FreeDesc(&d510)
-		ctx.FreeDesc(&d52)
 		ctx.EnsureDesc(&d511)
 		ctx.EnsureDesc(&d10)
 		ctx.SyncDesc(&d511)
@@ -4395,7 +4389,6 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			d514 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r71, Condition: scm.CondEqual}
 			ctx.BindReg(r71, &d514)
 		}
-		ctx.FreeDesc(&d51)
 		d515 = d514
 		ctx.SyncDesc(&d515)
 		if d515.Loc != scm.LocImm && d515.Loc != scm.LocFlags {
@@ -6032,7 +6025,6 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			d165 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r20, Condition: scm.CondSignedLess}
 			ctx.BindReg(r20, &d165)
 		}
-		ctx.FreeDesc(&d79)
 		d166 = d165
 		ctx.SyncDesc(&d166)
 		if d166.Loc != scm.LocImm && d166.Loc != scm.LocFlags {
@@ -6424,7 +6416,6 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			return bbs[16].Render()
 		}
 		return result
-		ctx.FreeDesc(&d52)
 		return result
 	}
 	bbs[12].Render = func() scm.JITValueDesc {
@@ -6617,7 +6608,6 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			ctx.TransferReg(d7.Reg)
 			d7.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d6)
 		ctx.SyncDesc(&d164)
 		if d164.Loc == scm.LocReg || d164.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d164.Reg)
@@ -6755,7 +6745,6 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			d257.Loc = scm.LocNone
 		}
 		ctx.FreeDesc(&d257)
-		ctx.FreeDesc(&d54)
 		ctx.EnsureDesc(&d258)
 		ctx.EnsureDesc(&d7)
 		ctx.SyncDesc(&d258)
@@ -6837,7 +6826,6 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			d261 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r37, Condition: scm.CondEqual}
 			ctx.BindReg(r37, &d261)
 		}
-		ctx.FreeDesc(&d53)
 		d262 = d261
 		ctx.SyncDesc(&d262)
 		if d262.Loc != scm.LocImm && d262.Loc != scm.LocFlags {
@@ -7689,7 +7677,6 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			return bbs[23].Render()
 		}
 		return result
-		ctx.FreeDesc(&d52)
 		return result
 	}
 	bbs[19].Render = func() scm.JITValueDesc {
@@ -7882,7 +7869,6 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			ctx.TransferReg(d9.Reg)
 			d9.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d6)
 		ctx.EnsureDesc(&d10)
 		ctx.EnsureDesc(&d10)
 		if d10.Loc == scm.LocImm {
@@ -8040,7 +8026,6 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			d475.Loc = scm.LocNone
 		}
 		ctx.FreeDesc(&d475)
-		ctx.FreeDesc(&d54)
 		ctx.EnsureDesc(&d476)
 		ctx.EnsureDesc(&d9)
 		ctx.SyncDesc(&d476)
@@ -8122,7 +8107,6 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			d479 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r64, Condition: scm.CondEqual}
 			ctx.BindReg(r64, &d479)
 		}
-		ctx.FreeDesc(&d53)
 		d480 = d479
 		ctx.SyncDesc(&d480)
 		if d480.Loc != scm.LocImm && d480.Loc != scm.LocFlags {
@@ -9089,7 +9073,6 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 			ctx.TransferReg(d5.Reg)
 			d5.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d4)
 		ctx.EnsureDesc(&d6)
 		ctx.EnsureDesc(&d6)
 		if d6.Loc == scm.LocImm {
@@ -9941,7 +9924,6 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 			ctx.TransferReg(d5.Reg)
 			d5.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d4)
 		ctx.EnsureDesc(&d6)
 		ctx.EnsureDesc(&d6)
 		if d6.Loc == scm.LocImm {
@@ -10773,6 +10755,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			d58 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r9, Condition: scm.CondUnsignedBelow}
 			ctx.BindReg(r9, &d58)
 		}
+		ctx.FreeDesc(&count)
 		d59 = d58
 		ctx.SyncDesc(&d59)
 		if d59.Loc != scm.LocImm && d59.Loc != scm.LocFlags {
@@ -10908,7 +10891,6 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			d79.Loc = scm.LocNone
 		}
 		ctx.FreeDesc(&d79)
-		ctx.FreeDesc(&d4)
 		ctx.EnsureDesc(&recid)
 		ctx.EnsureDesc(&d5)
 		ctx.EnsureDescsTogether(&recid, &d5)
@@ -10951,7 +10933,6 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			ctx.TransferReg(recid.Reg)
 			recid.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&recid)
 		if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}
@@ -11130,7 +11111,6 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			d88 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r16, Condition: scm.CondSignedLess}
 			ctx.BindReg(r16, &d88)
 		}
-		ctx.FreeDesc(&d57)
 		d89 = d88
 		ctx.SyncDesc(&d89)
 		if d89.Loc != scm.LocImm && d89.Loc != scm.LocFlags {
@@ -11480,7 +11460,6 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		ctx.SyncDesc(&d128)
 		ctx.EmitGoCallVoid(scm.GoFuncAddr((*StorageString).decodeBulk), []scm.JITValueDesc{thisptr, d134, d135, d136, d127, d128})
 		ctx.ReclaimUntrackedRegs()
-		ctx.FreeDesc(&d4)
 		ctx.EmitJmp(lbl0)
 		return result
 	}
@@ -12196,7 +12175,6 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		ctx.SyncDesc(&d56)
 		ctx.EmitGoCallVoid(scm.GoFuncAddr((*StorageString).decodeBulk), []scm.JITValueDesc{thisptr, d62, d63, d64, d55, d56})
 		ctx.ReclaimUntrackedRegs()
-		ctx.FreeDesc(&d3)
 		ctx.EmitJmp(lbl0)
 		return result
 	}
@@ -12267,7 +12245,6 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			d66 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r11, Condition: scm.CondSignedLess}
 			ctx.BindReg(r11, &d66)
 		}
-		ctx.FreeDesc(&d53)
 		d67 = d66
 		ctx.SyncDesc(&d67)
 		if d67.Loc != scm.LocImm && d67.Loc != scm.LocFlags {
@@ -12408,7 +12385,6 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			ctx.TransferReg(d65.Reg)
 			d65.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d3)
 		if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}
@@ -13074,7 +13050,6 @@ func (s *StorageEnum) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 			ctx.TransferReg(d5.Reg)
 			d5.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d4)
 		ctx.EnsureDesc(&d6)
 		ctx.EnsureDesc(&d6)
 		if d6.Loc == scm.LocImm {
@@ -13575,7 +13550,6 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 			d29 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r5, Condition: scm.CondSignedLess}
 			ctx.BindReg(r5, &d29)
 		}
-		ctx.FreeDesc(&d27)
 		d30 = d29
 		ctx.SyncDesc(&d30)
 		if d30.Loc != scm.LocImm && d30.Loc != scm.LocFlags {
@@ -13751,7 +13725,6 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 			ctx.TransferReg(d5.Reg)
 			d5.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d4)
 		ctx.SyncDesc(&d28)
 		if d28.Loc == scm.LocReg || d28.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d28.Reg)
@@ -15867,7 +15840,6 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			d250 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r19, Condition: scm.CondUnsignedAboveOrEqual}
 			ctx.BindReg(r19, &d250)
 		}
-		ctx.FreeDesc(&d85)
 		d251 = d250
 		ctx.SyncDesc(&d251)
 		if d251.Loc != scm.LocImm && d251.Loc != scm.LocFlags {
@@ -17496,7 +17468,6 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			ctx.TransferReg(d14.Reg)
 			d14.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d10)
 		ctx.EnsureDesc(&d15)
 		ctx.EnsureDesc(&d15)
 		if d15.Loc == scm.LocImm {
@@ -19326,7 +19297,6 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			d105 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r15, Condition: scm.CondSignedLess}
 			ctx.BindReg(r15, &d105)
 		}
-		ctx.FreeDesc(&d77)
 		d106 = d105
 		ctx.SyncDesc(&d106)
 		if d106.Loc != scm.LocImm && d106.Loc != scm.LocFlags {
@@ -20462,7 +20432,6 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			d244 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r23, Condition: scm.CondSignedLess}
 			ctx.BindReg(r23, &d244)
 		}
-		ctx.FreeDesc(&d234)
 		d245 = d244
 		ctx.SyncDesc(&d245)
 		if d245.Loc != scm.LocImm && d245.Loc != scm.LocFlags {
@@ -20754,7 +20723,6 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			ctx.TransferReg(d16.Reg)
 			d16.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d13)
 		ctx.SyncDesc(&d243)
 		if d243.Loc == scm.LocReg || d243.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d243.Reg)
@@ -21016,7 +20984,6 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			d302 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r28, Condition: scm.CondSignedLess}
 			ctx.BindReg(r28, &d302)
 		}
-		ctx.FreeDesc(&d240)
 		d303 = d302
 		ctx.SyncDesc(&d303)
 		if d303.Loc != scm.LocImm && d303.Loc != scm.LocFlags {
@@ -22228,7 +22195,6 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			d587 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r31, Condition: scm.CondUnsignedAboveOrEqual}
 			ctx.BindReg(r31, &d587)
 		}
-		ctx.FreeDesc(&d236)
 		d588 = d587
 		ctx.SyncDesc(&d588)
 		if d588.Loc != scm.LocImm && d588.Loc != scm.LocFlags {
@@ -24180,7 +24146,6 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			ctx.TransferReg(d21.Reg)
 			d21.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d13)
 		ctx.SyncDesc(&d23)
 		if d23.Loc == scm.LocReg || d23.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d23.Reg)
@@ -25322,7 +25287,6 @@ func (s *StorageConst) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 			ctx.TransferReg(d5.Reg)
 			d5.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d4)
 		ctx.EnsureDesc(&d6)
 		ctx.EnsureDesc(&d6)
 		if d6.Loc == scm.LocImm {
@@ -25811,7 +25775,6 @@ func (s *StorageConst) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 			d28 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r5, Condition: scm.CondSignedLess}
 			ctx.BindReg(r5, &d28)
 		}
-		ctx.FreeDesc(&d26)
 		d29 = d28
 		ctx.SyncDesc(&d29)
 		if d29.Loc != scm.LocImm && d29.Loc != scm.LocFlags {
@@ -25981,7 +25944,6 @@ func (s *StorageConst) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 			ctx.TransferReg(d5.Reg)
 			d5.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d4)
 		ctx.SyncDesc(&d27)
 		if d27.Loc == scm.LocReg || d27.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d27.Reg)
@@ -26606,7 +26568,6 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 			ctx.TransferReg(recid.Reg)
 			recid.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&count)
 		ctx.EnsureDesc(&recid)
 		ctx.EnsureDesc(&d44)
 		ctx.EnsureDesc(&d43)
@@ -26664,7 +26625,6 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		ctx.BindReg(r16, &d48)
 		ctx.BindReg(r17, &d48)
 		ctx.BindReg(r18, &d48)
-		ctx.FreeDesc(&recid)
 		ctx.FreeDesc(&d44)
 		ctx.EnsureDesc(&d42)
 		ctx.EnsureDesc(&d48)
@@ -26932,7 +26892,6 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 			d59 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r31, Condition: scm.CondSignedLess}
 			ctx.BindReg(r31, &d59)
 		}
-		ctx.FreeDesc(&d57)
 		d60 = d59
 		ctx.SyncDesc(&d60)
 		if d60.Loc != scm.LocImm && d60.Loc != scm.LocFlags {
@@ -27136,7 +27095,6 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 			ctx.TransferReg(d5.Reg)
 			d5.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d4)
 		ctx.SyncDesc(&d58)
 		if d58.Loc == scm.LocReg || d58.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d58.Reg)
@@ -27639,7 +27597,6 @@ func (s *StorageSCMER) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 			d29 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r8, Condition: scm.CondSignedLess}
 			ctx.BindReg(r8, &d29)
 		}
-		ctx.FreeDesc(&d27)
 		d30 = d29
 		ctx.SyncDesc(&d30)
 		if d30.Loc != scm.LocImm && d30.Loc != scm.LocFlags {
@@ -27807,7 +27764,6 @@ func (s *StorageSCMER) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 			ctx.TransferReg(d5.Reg)
 			d5.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d4)
 		ctx.SyncDesc(&d28)
 		if d28.Loc == scm.LocReg || d28.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d28.Reg)
@@ -29885,6 +29841,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			recid.Loc = scm.LocNone
 		}
 		ctx.StabilizeDescForControlFlow(&d147)
+		ctx.FreeDesc(&recid)
 		ctx.FreeDesc(&d146)
 		ctx.EnsureDesc(&d147)
 		ctx.EnsureDesc(&d13)
@@ -31142,7 +31099,6 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			ctx.TransferReg(d15.Reg)
 			d15.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d9)
 		ctx.EnsureDesc(&d16)
 		ctx.EnsureDesc(&d16)
 		if d16.Loc == scm.LocImm {
@@ -34338,7 +34294,6 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			d272 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r27, Condition: scm.CondSignedLess}
 			ctx.BindReg(r27, &d272)
 		}
-		ctx.FreeDesc(&d89)
 		d273 = d272
 		ctx.SyncDesc(&d273)
 		if d273.Loc != scm.LocImm && d273.Loc != scm.LocFlags {
@@ -36017,7 +35972,6 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			ctx.TransferReg(d22.Reg)
 			d22.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d19)
 		ctx.EnsureDesc(&d29)
 		ctx.EnsureDesc(&d29)
 		if d29.Loc == scm.LocImm {
@@ -36601,7 +36555,6 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			d526 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r40, Condition: scm.CondSignedLess}
 			ctx.BindReg(r40, &d526)
 		}
-		ctx.FreeDesc(&d89)
 		d527 = d526
 		ctx.SyncDesc(&d527)
 		if d527.Loc != scm.LocImm && d527.Loc != scm.LocFlags {
@@ -37589,7 +37542,6 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			ctx.TransferReg(d36.Reg)
 			d36.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d19)
 		ctx.EnsureDesc(&d37)
 		ctx.EnsureDesc(&d37)
 		if d37.Loc == scm.LocImm {
@@ -37800,7 +37752,6 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			ctx.TransferReg(d627.Reg)
 			d627.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d630)
 		ctx.EnsureDesc(&d749)
 		ctx.EnsureDesc(&d633)
 		ctx.EnsureDescsTogether(&d749, &d633)
@@ -37834,7 +37785,6 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			d749.Loc = scm.LocNone
 		}
 		ctx.FreeDesc(&d749)
-		ctx.FreeDesc(&d633)
 		ctx.EnsureDesc(&d632)
 		ctx.EnsureDesc(&d750)
 		ctx.EnsureDescsTogether(&d632, &d750)
@@ -37877,7 +37827,6 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			ctx.TransferReg(d632.Reg)
 			d632.Loc = scm.LocNone
 		}
-		ctx.FreeDesc(&d632)
 		ctx.FreeDesc(&d750)
 		ctx.EnsureDesc(&d751)
 		ctx.EnsureDesc(&d36)

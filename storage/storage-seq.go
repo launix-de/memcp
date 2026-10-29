@@ -4344,7 +4344,6 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 			d703 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r99}
 			ctx.BindReg(r99, &d703)
 		}
-		ctx.FreeDesc(&d105)
 		if thisptr.Loc == scm.LocImm {
 			fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageSeq)(nil).start) + 56
 			val := *(*int64)(unsafe.Pointer(fieldAddr))
@@ -5213,7 +5212,6 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 		ctx.FreeDesc(&d745)
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&d746)
-		ctx.FreeDesc(&d8)
 		ctx.EnsureDesc(&d746)
 		ctx.EnsureDesc(&d746)
 		if d746.Loc == scm.LocImm {
@@ -5320,6 +5318,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 			ctx.TransferReg(idxInt.Reg)
 			idxInt.Loc = scm.LocNone
 		}
+		ctx.FreeDesc(&idxInt)
 		ctx.FreeDesc(&d749)
 		ctx.EnsureDesc(&d751)
 		ctx.EnsureDesc(&d727)

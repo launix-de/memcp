@@ -2242,7 +2242,6 @@ func init() {
 					ctx.MarkLabel(lbl44)
 					ctx.EmitJmp(lbl12)
 				}
-				ctx.FreeDesc(&d18)
 				bbpos_1_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				ctx.MarkLabel(lbl12)
 				ctx.ResolveFixups()
@@ -2387,7 +2386,6 @@ func init() {
 					d75 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r46, Condition: CondSignedLess}
 					ctx.BindReg(r46, &d75)
 				}
-				ctx.FreeDesc(&d70)
 				ctx.ReclaimUntrackedRegs()
 				d76 := d75
 				ctx.SyncDesc(&d76)
@@ -2540,7 +2538,6 @@ func init() {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
 				d86 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d87}, 2)
-				ctx.FreeDesc(&d78)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d86)
 				ctx.ReclaimUntrackedRegs()
@@ -3049,7 +3046,6 @@ func init() {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
 				d121 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d122}, 2)
-				ctx.FreeDesc(&d113)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d121)
 				ctx.ReclaimUntrackedRegs()
@@ -3949,7 +3945,6 @@ func init() {
 						d13 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r3, Condition: CondSignedLess}
 						ctx.BindReg(r3, &d13)
 					}
-					ctx.FreeDesc(&d11)
 					d14 = d13
 					ctx.SyncDesc(&d14)
 					if d14.Loc != LocImm && d14.Loc != LocFlags {
@@ -4647,7 +4642,6 @@ func init() {
 					ctx.BindReg(r8, &d21)
 					ctx.BindReg(r9, &d21)
 				}
-				ctx.FreeDesc(&d12)
 				ctx.ReclaimUntrackedRegs()
 				d22 := jitKnownSliceHeader(ctx, &d21)
 				ctx.StabilizeDescForControlFlow(&d22)
@@ -4774,7 +4768,6 @@ func init() {
 					d33 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r12, Condition: CondSignedLess}
 					ctx.BindReg(r12, &d33)
 				}
-				ctx.FreeDesc(&d28)
 				ctx.ReclaimUntrackedRegs()
 				d34 := d33
 				ctx.SyncDesc(&d34)
@@ -4847,7 +4840,6 @@ func init() {
 				ctx.BindReg(d38.Reg2, &d38)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d38)
-				ctx.FreeDesc(&d3)
 				ctx.ReclaimUntrackedRegs()
 				r13 := ctx.AllocReg()
 				r14 := ctx.AllocRegExcept(r13)
@@ -24573,7 +24565,6 @@ Patterns can be any of:
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d944 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d945}, 2)
-					ctx.FreeDesc(&d823)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d944)
 					d946 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -24643,7 +24634,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d829)
 					ctx.EnsureDesc(&d920)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d829, d920})
-					ctx.FreeDesc(&d920)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d829)
@@ -25382,7 +25372,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d829)
 					ctx.EnsureDesc(&d997)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d829, d997})
-					ctx.FreeDesc(&d997)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d829)
@@ -26223,7 +26212,6 @@ Patterns can be any of:
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d1068 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1069}, 2)
-					ctx.FreeDesc(&d757)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1068)
 					d1070 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -26293,7 +26281,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d763)
 					ctx.EnsureDesc(&d1044)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d763, d1044})
-					ctx.FreeDesc(&d1044)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d763)
@@ -27032,7 +27019,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d763)
 					ctx.EnsureDesc(&d1121)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d763, d1121})
-					ctx.FreeDesc(&d1121)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d763)
@@ -27873,7 +27859,6 @@ Patterns can be any of:
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d1192 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1193}, 2)
-					ctx.FreeDesc(&d691)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1192)
 					d1194 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -27943,7 +27928,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d697)
 					ctx.EnsureDesc(&d1168)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d697, d1168})
-					ctx.FreeDesc(&d1168)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d697)
@@ -28682,7 +28666,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d697)
 					ctx.EnsureDesc(&d1245)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d697, d1245})
-					ctx.FreeDesc(&d1245)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d697)
@@ -29523,7 +29506,6 @@ Patterns can be any of:
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d1316 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1317}, 2)
-					ctx.FreeDesc(&d625)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1316)
 					d1318 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -29593,7 +29575,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d631)
 					ctx.EnsureDesc(&d1292)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d631, d1292})
-					ctx.FreeDesc(&d1292)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d631)
@@ -30332,7 +30313,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d631)
 					ctx.EnsureDesc(&d1369)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d631, d1369})
-					ctx.FreeDesc(&d1369)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d631)
@@ -31173,7 +31153,6 @@ Patterns can be any of:
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d1440 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1441}, 2)
-					ctx.FreeDesc(&d559)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1440)
 					d1442 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -31243,7 +31222,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d565)
 					ctx.EnsureDesc(&d1416)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d565, d1416})
-					ctx.FreeDesc(&d1416)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d565)
@@ -31982,7 +31960,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d565)
 					ctx.EnsureDesc(&d1493)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d565, d1493})
-					ctx.FreeDesc(&d1493)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d565)
@@ -32823,7 +32800,6 @@ Patterns can be any of:
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d1564 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1565}, 2)
-					ctx.FreeDesc(&d493)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1564)
 					d1566 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -32893,7 +32869,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d499)
 					ctx.EnsureDesc(&d1540)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d499, d1540})
-					ctx.FreeDesc(&d1540)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d499)
@@ -33632,7 +33607,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d499)
 					ctx.EnsureDesc(&d1617)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d499, d1617})
-					ctx.FreeDesc(&d1617)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d499)
@@ -34473,7 +34447,6 @@ Patterns can be any of:
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d1688 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1689}, 2)
-					ctx.FreeDesc(&d427)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1688)
 					d1690 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -34543,7 +34516,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d433)
 					ctx.EnsureDesc(&d1664)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d433, d1664})
-					ctx.FreeDesc(&d1664)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d433)
@@ -35282,7 +35254,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d433)
 					ctx.EnsureDesc(&d1741)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d433, d1741})
-					ctx.FreeDesc(&d1741)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d433)
@@ -36123,7 +36094,6 @@ Patterns can be any of:
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d1812 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1813}, 2)
-					ctx.FreeDesc(&d361)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1812)
 					d1814 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -36193,7 +36163,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d367)
 					ctx.EnsureDesc(&d1788)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d367, d1788})
-					ctx.FreeDesc(&d1788)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d367)
@@ -36932,7 +36901,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d367)
 					ctx.EnsureDesc(&d1865)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d367, d1865})
-					ctx.FreeDesc(&d1865)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d367)
@@ -37773,7 +37741,6 @@ Patterns can be any of:
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d1936 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1937}, 2)
-					ctx.FreeDesc(&d295)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1936)
 					d1938 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -37843,7 +37810,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d301)
 					ctx.EnsureDesc(&d1912)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d301, d1912})
-					ctx.FreeDesc(&d1912)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d301)
@@ -38582,7 +38548,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d301)
 					ctx.EnsureDesc(&d1989)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d301, d1989})
-					ctx.FreeDesc(&d1989)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d301)
@@ -39423,7 +39388,6 @@ Patterns can be any of:
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d2060 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2061}, 2)
-					ctx.FreeDesc(&d229)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2060)
 					d2062 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -39493,7 +39457,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d235)
 					ctx.EnsureDesc(&d2036)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d235, d2036})
-					ctx.FreeDesc(&d2036)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d235)
@@ -40232,7 +40195,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d235)
 					ctx.EnsureDesc(&d2113)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d235, d2113})
-					ctx.FreeDesc(&d2113)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d235)
@@ -41073,7 +41035,6 @@ Patterns can be any of:
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d2184 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2185}, 2)
-					ctx.FreeDesc(&d163)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2184)
 					d2186 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -41143,7 +41104,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d169)
 					ctx.EnsureDesc(&d2160)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d169, d2160})
-					ctx.FreeDesc(&d2160)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d169)
@@ -41882,7 +41842,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d169)
 					ctx.EnsureDesc(&d2237)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d169, d2237})
-					ctx.FreeDesc(&d2237)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d169)
@@ -42723,7 +42682,6 @@ Patterns can be any of:
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d2308 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2309}, 2)
-					ctx.FreeDesc(&d97)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2308)
 					d2310 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -42793,7 +42751,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d103)
 					ctx.EnsureDesc(&d2284)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d103, d2284})
-					ctx.FreeDesc(&d2284)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d103)
@@ -43532,7 +43489,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d103)
 					ctx.EnsureDesc(&d2361)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d103, d2361})
-					ctx.FreeDesc(&d2361)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d103)
@@ -44373,7 +44329,6 @@ Patterns can be any of:
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d2432 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2433}, 2)
-					ctx.FreeDesc(&d31)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2432)
 					d2434 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -44443,7 +44398,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d37)
 					ctx.EnsureDesc(&d2408)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d37, d2408})
-					ctx.FreeDesc(&d2408)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d37)
@@ -45182,7 +45136,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d37)
 					ctx.EnsureDesc(&d2485)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d37, d2485})
-					ctx.FreeDesc(&d2485)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d37)

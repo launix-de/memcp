@@ -6833,7 +6833,6 @@ func init_jit() {
 						return bbs[7].Render()
 					}
 					return result
-					ctx.FreeDesc(&d1)
 					return result
 				}
 				bbs[9].Render = func() JITValueDesc {

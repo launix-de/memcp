@@ -885,7 +885,6 @@ func init_processlist() {
 						d31 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r3, Condition: CondSignedLess}
 						ctx.BindReg(r3, &d31)
 					}
-					ctx.FreeDesc(&d29)
 					d32 = d31
 					ctx.SyncDesc(&d32)
 					if d32.Loc != LocImm && d32.Loc != LocFlags {
@@ -1147,7 +1146,6 @@ func init_processlist() {
 						return bbs[8].Render()
 					}
 					return result
-					ctx.FreeDesc(&d1)
 					return result
 				}
 				bbs[5].Render = func() JITValueDesc {
@@ -2222,7 +2220,6 @@ func init_processlist() {
 						d26 = JITValueDesc{Loc: LocReg, Reg: r3}
 						ctx.BindReg(r3, &d26)
 					}
-					ctx.FreeDesc(&d9)
 					ctx.EnsureDesc(&d26)
 					ctx.EnsureDesc(&d26)
 					if d26.Loc == LocImm {

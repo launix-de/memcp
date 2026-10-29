@@ -4392,7 +4392,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d21)
 					ctx.EmitStoreToStack(d21, int32(bbs[2].PhiBase)+int32(0))
 					ctx.StabilizeDescForControlFlow(&d21)
-					ctx.FreeDesc(&d4)
 					return bbs[2].Render()
 					return result
 				}
@@ -6900,7 +6899,6 @@ func init_alu() {
 						d10 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r2, Condition: CondSignedLess}
 						ctx.BindReg(r2, &d10)
 					}
-					ctx.FreeDesc(&d8)
 					d11 = d10
 					ctx.SyncDesc(&d11)
 					if d11.Loc != LocImm && d11.Loc != LocFlags {
@@ -9123,10 +9121,8 @@ func init_alu() {
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				d34 := ctx.EmitFloatDesc(d3)
-				ctx.FreeDesc(&d3)
 				ctx.ReclaimUntrackedRegs()
 				d35 := ctx.EmitFloatDesc(d5)
-				ctx.FreeDesc(&d5)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d34)
 				ctx.EnsureDesc(&d35)
@@ -9241,7 +9237,6 @@ func init_alu() {
 					ctx.MarkLabel(lbl23)
 					ctx.EmitJmp(lbl10)
 				}
-				ctx.FreeDesc(&d30)
 				bbpos_1_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				ctx.MarkLabel(lbl2)
 				ctx.ResolveFixups()
@@ -9427,7 +9422,6 @@ func init_alu() {
 				d49 := ctx.EmitGoCallScalar(GoFuncAddr((*big.Rat).Add), []JITValueDesc{d19, d19, d29}, 1)
 				d49.NoHeapPointer = false
 				ctx.BindReg(d49.Reg, &d49)
-				ctx.FreeDesc(&d29)
 				ctx.ReclaimUntrackedRegs()
 				bbpos_1_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				ctx.MarkLabel(lbl14)
@@ -9450,7 +9444,6 @@ func init_alu() {
 				_ = d51
 				d52 := callResults50[1]
 				_ = d52
-				ctx.FreeDesc(&d19)
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
@@ -9731,8 +9724,6 @@ func init_alu() {
 					ctx.TransferReg(d41.Reg)
 					d41.Loc = LocNone
 				}
-				ctx.FreeDesc(&d41)
-				ctx.FreeDesc(&d43)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d61)
 				ctx.ReclaimUntrackedRegs()
@@ -10133,10 +10124,8 @@ func init_alu() {
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				d34 := ctx.EmitFloatDesc(d3)
-				ctx.FreeDesc(&d3)
 				ctx.ReclaimUntrackedRegs()
 				d35 := ctx.EmitFloatDesc(d5)
-				ctx.FreeDesc(&d5)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d34)
 				ctx.EnsureDesc(&d35)
@@ -10251,7 +10240,6 @@ func init_alu() {
 					ctx.MarkLabel(lbl23)
 					ctx.EmitJmp(lbl10)
 				}
-				ctx.FreeDesc(&d30)
 				bbpos_1_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				ctx.MarkLabel(lbl2)
 				ctx.ResolveFixups()
@@ -10437,7 +10425,6 @@ func init_alu() {
 				d49 := ctx.EmitGoCallScalar(GoFuncAddr((*big.Rat).Sub), []JITValueDesc{d19, d19, d29}, 1)
 				d49.NoHeapPointer = false
 				ctx.BindReg(d49.Reg, &d49)
-				ctx.FreeDesc(&d29)
 				ctx.ReclaimUntrackedRegs()
 				bbpos_1_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				ctx.MarkLabel(lbl15)
@@ -10460,7 +10447,6 @@ func init_alu() {
 				_ = d51
 				d52 := callResults50[1]
 				_ = d52
-				ctx.FreeDesc(&d19)
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
@@ -10745,8 +10731,6 @@ func init_alu() {
 					ctx.TransferReg(d41.Reg)
 					d41.Loc = LocNone
 				}
-				ctx.FreeDesc(&d41)
-				ctx.FreeDesc(&d43)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d61)
 				ctx.ReclaimUntrackedRegs()
@@ -11310,7 +11294,6 @@ func init_alu() {
 						d11 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r2, Condition: CondSignedLess}
 						ctx.BindReg(r2, &d11)
 					}
-					ctx.FreeDesc(&d9)
 					d12 = d11
 					ctx.SyncDesc(&d12)
 					if d12.Loc != LocImm && d12.Loc != LocFlags {
@@ -12407,7 +12390,6 @@ func init_alu() {
 						d254 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r8, Condition: CondEqual}
 						ctx.BindReg(r8, &d254)
 					}
-					ctx.FreeDesc(&d5)
 					ctx.FreeDesc(&d253)
 					d255 = d254
 					ctx.SyncDesc(&d255)
@@ -12921,7 +12903,6 @@ func init_alu() {
 						return bbs[22].Render()
 					}
 					return result
-					ctx.FreeDesc(&d1)
 					return result
 				}
 				bbs[15].Render = func() JITValueDesc {
@@ -14679,7 +14660,6 @@ func init_alu() {
 						d934 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r27, Condition: CondSignedLess}
 						ctx.BindReg(r27, &d934)
 					}
-					ctx.FreeDesc(&d932)
 					d935 = d934
 					ctx.SyncDesc(&d935)
 					if d935.Loc != LocImm && d935.Loc != LocFlags {
@@ -15180,7 +15160,6 @@ func init_alu() {
 						return bbs[33].Render()
 					}
 					return result
-					ctx.FreeDesc(&d2)
 					return result
 				}
 				bbs[30].Render = func() JITValueDesc {
@@ -15212,7 +15191,6 @@ func init_alu() {
 						d1103 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r29}
 						ctx.BindReg(r29, &d1103)
 					}
-					ctx.FreeDesc(&d7)
 					ctx.EnsureDesc(&d1103)
 					if d1103.Loc == LocImm {
 						ctx.EmitMakeInt(result, d1103)
@@ -15992,7 +15970,6 @@ func init_alu() {
 						d6 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r2, Condition: CondSignedLess}
 						ctx.BindReg(r2, &d6)
 					}
-					ctx.FreeDesc(&d4)
 					d7 = d6
 					ctx.SyncDesc(&d7)
 					if d7.Loc != LocImm && d7.Loc != LocFlags {
@@ -16349,7 +16326,6 @@ func init_alu() {
 						d56 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r5, Condition: CondSignedLess}
 						ctx.BindReg(r5, &d56)
 					}
-					ctx.FreeDesc(&d52)
 					d57 = d56
 					ctx.SyncDesc(&d57)
 					if d57.Loc != LocImm && d57.Loc != LocFlags {
@@ -16939,7 +16915,6 @@ func init_alu() {
 						d6 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r2, Condition: CondSignedLess}
 						ctx.BindReg(r2, &d6)
 					}
-					ctx.FreeDesc(&d4)
 					d7 = d6
 					ctx.SyncDesc(&d7)
 					if d7.Loc != LocImm && d7.Loc != LocFlags {
@@ -17296,7 +17271,6 @@ func init_alu() {
 						d56 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r5, Condition: CondSignedLess}
 						ctx.BindReg(r5, &d56)
 					}
-					ctx.FreeDesc(&d52)
 					d57 = d56
 					ctx.SyncDesc(&d57)
 					if d57.Loc != LocImm && d57.Loc != LocFlags {
@@ -18506,7 +18480,6 @@ func init_alu() {
 						d122.Loc = LocNone
 					}
 					ctx.FreeDesc(&d122)
-					ctx.FreeDesc(&d43)
 					ctx.EnsureDesc(&d124)
 					if d124.Loc == LocImm {
 						ctx.EmitMakeInt(result, d124)
@@ -18862,7 +18835,6 @@ func init_alu() {
 						d206.Loc = LocNone
 					}
 					ctx.FreeDesc(&d206)
-					ctx.FreeDesc(&d65)
 					ctx.EnsureDesc(&d207)
 					if d207.Loc == LocImm {
 						d208 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(math.Trunc(d207.Imm.Float()))}
@@ -19072,7 +19044,6 @@ func init_alu() {
 						d257 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
 						ctx.BindReg(r5, &d257)
 					}
-					ctx.FreeDesc(&d208)
 					ctx.EnsureDesc(&d257)
 					if d257.Loc == LocImm {
 						ctx.EmitMakeInt(result, d257)
@@ -20193,7 +20164,6 @@ func init_alu() {
 						d122.Loc = LocNone
 					}
 					ctx.FreeDesc(&d122)
-					ctx.FreeDesc(&d43)
 					ctx.EnsureDesc(&d124)
 					if d124.Loc == LocImm {
 						ctx.EmitMakeInt(result, d124)
@@ -20285,7 +20255,6 @@ func init_alu() {
 						d130 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
 						ctx.BindReg(r3, &d130)
 					}
-					ctx.FreeDesc(&d65)
 					ctx.EnsureDesc(&d129)
 					ctx.EnsureDesc(&d130)
 					ctx.EnsureDescsTogether(&d129, &d130)
@@ -23404,7 +23373,6 @@ func init_alu() {
 						d147 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r2, Condition: CondEqual}
 						ctx.BindReg(r2, &d147)
 					}
-					ctx.FreeDesc(&d16)
 					d148 = d147
 					ctx.SyncDesc(&d148)
 					if d148.Loc != LocImm && d148.Loc != LocFlags {
@@ -23527,7 +23495,6 @@ func init_alu() {
 						d187 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r3, Condition: CondEqual}
 						ctx.BindReg(r3, &d187)
 					}
-					ctx.FreeDesc(&d19)
 					d188 = d187
 					ctx.SyncDesc(&d188)
 					if d188.Loc != LocImm && d188.Loc != LocFlags {
@@ -24032,7 +23999,6 @@ func init_alu() {
 					d26 = d9
 					d26.ID = 0
 					d25 = ctx.EmitBoolDesc(&d26, JITValueDesc{Loc: LocAny})
-					ctx.FreeDesc(&d9)
 					ctx.SyncDesc(&d25)
 					if d25.Loc == LocImm {
 						d27 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(!d25.Imm.Bool())}
@@ -24543,7 +24509,6 @@ func init_alu() {
 						d5 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r2, Condition: CondSignedLess}
 						ctx.BindReg(r2, &d5)
 					}
-					ctx.FreeDesc(&d3)
 					d6 = d5
 					ctx.SyncDesc(&d6)
 					if d6.Loc != LocImm && d6.Loc != LocFlags {
@@ -25425,7 +25390,6 @@ func init_alu() {
 						d5 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r2, Condition: CondSignedLess}
 						ctx.BindReg(r2, &d5)
 					}
-					ctx.FreeDesc(&d3)
 					d6 = d5
 					ctx.SyncDesc(&d6)
 					if d6.Loc != LocImm && d6.Loc != LocFlags {
@@ -27591,7 +27555,6 @@ func init_alu() {
 						d115.Loc = LocNone
 					}
 					ctx.FreeDesc(&d115)
-					ctx.FreeDesc(&d79)
 					ctx.ReclaimUntrackedRegs()
 					r11 := ctx.AllocReg()
 					ctx.EnsureDesc(&d116)
@@ -27656,8 +27619,6 @@ func init_alu() {
 					d118 = JITValueDesc{Loc: LocReg, Reg: r11}
 					ctx.BindReg(r11, &d118)
 					ctx.BindReg(r11, &d118)
-					ctx.FreeDesc(&d30)
-					ctx.FreeDesc(&d12)
 					ctx.EnsureDesc(&d118)
 					if d118.Loc == LocImm {
 						ctx.EmitMakeFloat(result, d118)
@@ -28496,7 +28457,6 @@ func init_alu() {
 						d75 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r7}
 						ctx.BindReg(r7, &d75)
 					}
-					ctx.FreeDesc(&d1)
 					ctx.EnsureDesc(&d75)
 					if d75.Loc == LocImm {
 						ctx.EmitMakeInt(result, d75)
@@ -29022,7 +28982,6 @@ func init_alu() {
 						d25.Type = tagFloat
 						ctx.BindReg(d25.Reg, &d25)
 					}
-					ctx.FreeDesc(&d11)
 					ctx.EnsureDesc(&d25)
 					if d25.Loc == LocImm {
 						ctx.EmitMakeFloat(result, d25)

@@ -1493,8 +1493,6 @@ func init_vector() {
 					ctx.EnsureDesc(&d11)
 					ctx.EnsureDesc(&d12)
 					d144 = ctx.EmitFloatBinary(&d11, &d12, JITFloatMul)
-					ctx.FreeDesc(&d11)
-					ctx.FreeDesc(&d12)
 					ctx.EnsureDesc(&d144)
 					if d144.Loc == LocImm {
 						d145 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(math.Sqrt(d144.Imm.Float()))}
@@ -1521,7 +1519,6 @@ func init_vector() {
 					ctx.EnsureDesc(&d147)
 					ctx.EmitStoreToStack(d147, int32(bbs[4].PhiBase)+int32(0))
 					ctx.StabilizeDescForControlFlow(&d147)
-					ctx.FreeDesc(&d10)
 					ctx.FreeDesc(&d145)
 					return bbs[4].Render()
 					return result
@@ -2232,7 +2229,6 @@ func init_vector() {
 					ctx.EmitAndRegImm32(d285.Reg, 1)
 					d285.Type = tagBool
 					ctx.BindReg(d285.Reg, &d285)
-					ctx.FreeDesc(&d8)
 					d286 = d285
 					ctx.EnsureDesc(&d286)
 					if d286.Loc != LocImm && d286.Loc != LocReg {

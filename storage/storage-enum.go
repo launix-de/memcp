@@ -1541,7 +1541,6 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d102.Loc = scm.LocNone
 		}
 		ctx.FreeDesc(&d102)
-		ctx.FreeDesc(&d26)
 		ctx.EnsureDesc(&d103)
 		d104 = ctx.EmitLoadScalarSliceElement(&d100, &d103, 8, scm.TagInt)
 		ctx.FreeDesc(&d103)
@@ -1585,6 +1584,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			idxInt.Loc = scm.LocNone
 		}
 		ctx.StabilizeDescForControlFlow(&d105)
+		ctx.FreeDesc(&idxInt)
 		ctx.FreeDesc(&d4)
 		ctx.SyncDesc(&d104)
 		if d104.Loc == scm.LocReg || d104.Loc == scm.LocFPReg {
@@ -1677,7 +1677,6 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d107 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r22, Condition: scm.CondSignedLessOrEqual}
 			ctx.BindReg(r22, &d107)
 		}
-		ctx.FreeDesc(&d105)
 		d108 = d107
 		ctx.SyncDesc(&d108)
 		if d108.Loc != scm.LocImm && d108.Loc != scm.LocFlags {
