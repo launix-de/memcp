@@ -128,7 +128,7 @@ func (r *replicationManager) statuses() []replicaStatus {
 	delete(known, "")
 	result := make([]replicaStatus, 0, len(known))
 	for id := range known {
-		status := replicaStatus{ID: id, Ready: r.peerReady[id], Retired: r.directory.Retired[id], Databases: []string{}}
+		status := replicaStatus{ID: id, Ready: r.peers[id].recovered(), Retired: r.directory.Retired[id], Databases: []string{}}
 		if p := r.peers[id]; p != nil {
 			select {
 			case <-p.done:

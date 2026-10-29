@@ -241,14 +241,26 @@ func (r *replicationManager) recoverConnection(peer *mosiPeer, user string, auth
 			r.resourceCell(mosiResource{Database: name}).initialized.Store(true)
 		}
 	}
-	if err := peer.call(ctx, "hello_done", replicaRequest{Boot: r.boot, User: user, Hash: auth.Hash}, nil); err != nil {
-		return err
-	}
-	r.ready.Store(true)
 	if r.recoveredUsers == nil {
 		r.recoveredUsers = make(map[string]*mosiPeer)
 	}
 	r.recoveredUsers[user] = peer
+	r.mu.Lock()
+	completeConnection := true
+	for cachedUser := range r.directory.Users {
+		if r.recoveredUsers[cachedUser] != peer {
+			completeConnection = false
+			break
+		}
+	}
+	r.mu.Unlock()
+	if completeConnection {
+		if err := peer.call(ctx, "hello_done", replicaRequest{Boot: r.boot, User: user, Hash: auth.Hash}, nil); err != nil {
+			delete(r.recoveredUsers, user)
+			return err
+		}
+	}
+	r.ready.Store(true)
 	go func() {
 		names := make(map[string]bool)
 		for _, record := range reply.Resources {

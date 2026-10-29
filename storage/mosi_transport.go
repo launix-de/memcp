@@ -73,6 +73,7 @@ func registerMosiRole(role string, handler http.Handler) (func(), error) {
 // A disconnected peer fails every outstanding call; no write is retried here.
 type mosiPeer struct {
 	operationPrefix string            // immutable authenticated connection binding for query operations
+	recoveryDone    chan struct{}     // replication hello installed; nil for roles without recovery
 	objectEndpoint  string            // immutable outbound URL, initialized before reader start
 	objectPeer      clusterObjectPeer // immutable authenticated identity/incarnation, independent of connection
 	scanService     *nodeScanService  // immutable before an outbound scan is dispatched
@@ -94,6 +95,21 @@ type mosiPeer struct {
 	readDone        chan struct{}
 	workers         sync.WaitGroup
 	packets         sync.WaitGroup // ordered resource workers; may outlive a closed queue tail
+}
+
+func (p *mosiPeer) recovered() bool {
+	if p == nil {
+		return false
+	}
+	if p.recoveryDone == nil {
+		return true
+	}
+	select {
+	case <-p.recoveryDone:
+		return true
+	default:
+		return false
+	}
 }
 
 type mosiMessage struct {

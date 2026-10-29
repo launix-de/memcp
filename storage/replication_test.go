@@ -355,7 +355,7 @@ func TestMosiHTTPRolesKeepIndependentAuthenticationBoundaries(t *testing.T) {
 }
 
 func TestReplicationWebSocketUsesNormalHTTPRoute(t *testing.T) {
-	r := &replicationManager{id: uuid.NewString(), peers: make(map[string]*mosiPeer), peerReady: make(map[string]bool)}
+	r := &replicationManager{id: uuid.NewString(), peers: make(map[string]*mosiPeer)}
 	finished := make(chan struct{})
 	unregister, err := registerMosiRole("replication", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		defer close(finished)

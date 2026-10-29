@@ -12,12 +12,14 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "os"
+import "fmt"
 import "sync"
 import "time"
 import "testing"
 import "context"
 import "encoding/json"
 import "path/filepath"
+import "encoding/base64"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -1224,5 +1226,192 @@ func TestReplicationRetirementJoinsLateSchemaPlacement(t *testing.T) {
 	}
 	if len(restarted.backups) != 0 {
 		t.Fatal("retirement left schema recovery metadata after restart", restarted.backups)
+	}
+}
+
+func TestReplicationRecallWaitsForConnectionRecovery(t *testing.T) {
+	for _, outcome := range []string{"recovered", "cancelled", "disconnected"} {
+		t.Run(outcome, func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "t_recovery_before_recall", 0)
+			r := replicaRecoveryFixture()
+			resource := mosiResource{Database: tbl.schema.Name}
+			peerID := uuid.NewString()
+			peer := &mosiPeer{recoveryDone: make(chan struct{}), done: make(chan struct{}), outgoing: make(chan mosiMessage, 4)}
+			r.peers = map[string]*mosiPeer{peerID: peer}
+			r.restoring[resource.Database] = true
+			r.updateRecord(resource, func(record *replicaRecord) bool {
+				record.Owner, record.Epoch = peerID, 3
+				return true
+			})
+			cell := r.resourceCell(resource)
+			cell.ownstate.Initialize(mosi.IO)
+			request, _ := cell.ownstate.Request(mosi.S)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			finished := make(chan error, 1)
+			go func() {
+				finished <- r.coordinate(ctx, r.id, mosiPacket{Kind: "read", Resource: resource, ID: request.Flight().ID(), Sequence: 1})
+			}()
+			select {
+			case message := <-peer.outgoing:
+				cancel()
+				<-finished
+				t.Fatal("recall preceded installation of recovery reply", message.Packet)
+			case err := <-finished:
+				t.Fatal("coordinator did not wait for recovery", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+			if outcome != "recovered" {
+				if outcome == "cancelled" {
+					cancel()
+				} else {
+					close(peer.done)
+				}
+				select {
+				case err := <-finished:
+					if err == nil || outcome == "cancelled" && err != context.Canceled {
+						t.Fatal("wrong abandoned recovery result", err)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("abandoned recovery did not finish")
+				}
+				if len(peer.outgoing) != 0 {
+					t.Fatal("abandoned recovery sent a recall")
+				}
+				return
+			}
+			// Native recovery needs the same directory lock. It must complete while
+			// the coordinator waits, and its newer epoch must reach the recall.
+			recovery := make(chan error, 1)
+			go func() {
+				_, exists, err := r.recoverResource(ctx, peerID, replicaRecord{Resource: resource, Owner: peerID, State: "M", Epoch: 9})
+				if err == nil && !exists {
+					err = fmt.Errorf("missing recovered owner")
+				}
+				recovery <- err
+			}()
+			select {
+			case err := <-recovery:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				t.Fatal("coordinator blocked native recovery")
+			}
+			close(peer.recoveryDone)
+			select {
+			case message := <-peer.outgoing:
+				if message.Packet == nil || message.Packet.Kind != "recall" || message.Packet.Epoch != 9 {
+					t.Fatal("recall captured an obsolete epoch", message.Packet)
+				}
+				step, exists := r.steps.Load(message.Packet.ID)
+				if !exists {
+					t.Fatal("recall has no native operation")
+				}
+				step.(*replicaStep).finish(context.Canceled)
+			case <-ctx.Done():
+				t.Fatal("recovered owner was not recalled")
+			}
+			if err := <-finished; err != context.Canceled {
+				t.Fatal("wrong recall result", err)
+			}
+		})
+	}
+}
+
+func TestReplicationRecoveryReadyBelongsToConnection(t *testing.T) {
+	r := replicaRecoveryFixture()
+	r.done = make(chan struct{})
+	r.password = scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewString("test-password") })
+	policy := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	r.policy = scm.NewFunc(func(...scm.Scmer) scm.Scmer { return policy })
+	id, boot := uuid.NewString(), uuid.NewString()
+	old := &mosiPeer{recoveryDone: make(chan struct{})}
+	current := &mosiPeer{recoveryDone: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	r.peers, r.peersBoot = map[string]*mosiPeer{id: current}, map[string]string{id: boot}
+	if err := r.step(context.Background(), id, mosiPacket{Kind: "recall", ID: uuid.NewString()}); err == nil || len(current.outgoing) != 0 {
+		t.Fatal("operation reached an unrecovered replacement connection", err)
+	}
+	request := replicaRequest{Boot: boot, User: "root", Hash: base64.StdEncoding.EncodeToString([]byte("test-password"))}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.handleMaster(context.Background(), id, old, "hello_done", encoded); err == nil {
+		t.Fatal("old connection completed the new connection's recovery")
+	}
+	if current.recovered() {
+		t.Fatal("stale hello published readiness")
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := r.handleMaster(context.Background(), id, current, "hello_done", encoded); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !current.recovered() || len(r.directory.Records) != 0 {
+		t.Fatal("readiness missing or manufactured resource rights")
+	}
+}
+
+func TestReplicationConnectionReadyAfterAllCachedBindings(t *testing.T) {
+	r := replicaRecoveryFixture()
+	r.master = false
+	r.directory.Users = map[string]replicaAuth{"a": {}, "b": {}}
+	masterBoot := uuid.NewString()
+	for incarnation := 0; incarnation < 2; incarnation++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: make(chan mosiMessage, 4), pending: make(map[uint64]chan mosiMessage)}
+		finished := make(chan error, 1)
+		reply := func(method, user string) {
+			t.Helper()
+			select {
+			case message := <-peer.outgoing:
+				var request replicaRequest
+				if err := json.Unmarshal(message.Data, &request); err != nil {
+					t.Fatal(err)
+				}
+				if message.Method != method || request.User != user {
+					t.Fatal("unexpected recovery order", message.Method, request.User)
+				}
+				data, err := json.Marshal(replicaRecovery{Boot: masterBoot})
+				if method == "hello_done" {
+					data, err = json.Marshal(true)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				peer.mu.Lock()
+				response := peer.pending[message.ID]
+				peer.mu.Unlock()
+				response <- mosiMessage{ID: message.ID, Data: data}
+			case <-ctx.Done():
+				t.Fatal("recovery message missing", method)
+			}
+		}
+		go func() { finished <- r.recoverConnection(peer, "a", replicaAuth{}) }()
+		reply("hello", "a")
+		select {
+		case err := <-finished:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case message := <-peer.outgoing:
+			t.Fatal("connection became ready before binding b", message.Method)
+		case <-ctx.Done():
+			t.Fatal("first binding did not complete")
+		}
+		go func() { finished <- r.recoverConnection(peer, "b", replicaAuth{}) }()
+		reply("hello", "b")
+		reply("hello_done", "b")
+		if err := <-finished; err != nil {
+			t.Fatal(err)
+		}
+		if err := r.recoverConnection(peer, "a", replicaAuth{}); err != nil {
+			t.Fatal(err)
+		}
+		if len(peer.outgoing) != 0 {
+			t.Fatal("completed binding was sent again")
+		}
 	}
 }

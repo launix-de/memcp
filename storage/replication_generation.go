@@ -174,7 +174,7 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 		}
 		if r.master {
 			schemaKey := mosiResource{Database: resource.Database}.key()
-			known := !r.restoring[resource.Database] || r.confirmed[schemaKey] != "" && (owner == r.id || r.peerReady[owner]) && len(r.recoveryReports[resource.key()]) == 0
+			known := !r.restoring[resource.Database] || r.confirmed[schemaKey] != "" && (owner == r.id || r.peers[owner].recovered()) && len(r.recoveryReports[resource.key()]) == 0
 			if !known {
 				record.Owner, record.State = "", "IO"
 			} else {
@@ -1000,7 +1000,9 @@ func (r *replicationManager) replicaDeclaration(table *table, includeTopology bo
 
 func (r *replicationManager) step(ctx context.Context, peerID string, packet mosiPacket) error {
 	peer := r.peer(peerID)
-	if peer == nil {
+	// Directory recovery may replace a connection after coordination captured
+	// its epoch. Never send that operation on an unrecovered replacement.
+	if peer == nil || !peer.recovered() {
 		return fmt.Errorf("%s: %s step to %s for %s", mosi.NetworkError, packet.Kind, peerID, packet.Resource.key())
 	}
 	step := &replicaStep{peer: peerID, resource: packet.Resource, epoch: packet.Epoch, content: packet.Content, done: make(chan struct{})}
