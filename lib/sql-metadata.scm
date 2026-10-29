@@ -58,6 +58,10 @@ before emitting DDL. Clock defaults use the storage's statement-stable marker. *
 	(match attributes
 		(cons key (cons value rest)) (begin
 			(define tail (sql_add_column_attributes rest))
+			/* CAST shares the frontend expression compiler. Validate its emitted
+			constant formula with the same whitelist as literal arithmetic. */
+			(define value (if (equal? key "default")
+				(sql_info_formula (sql_expr_info '() value)) value))
 			(if (equal? key "default")
 				(if (equal? value (list (quote now)))
 					(merge '("default_expression" "CURRENT_TIMESTAMP") tail)

@@ -14263,7 +14263,7 @@ It is as stable as its symbolic form; other procedures remain unproven. */
 		((symbol get_column) alias ci col cci) true
 		(cons head tail)
 		(and (or (equal? head list)
-			(contains? '("list" "and" "or" "equal??" "sql_not" "sql_in" "<" ">" "<=" ">=" "simplify") (string head)))
+			(contains? '("list" "and" "or" "equal??" "sql_not" "sql_in" "<" ">" "<=" ">=" "simplify" "intdiv") (string head)))
 			(reduce tail (lambda (ok item) (and ok (semijoin_stable_expr? item))) true))
 		_ (or (nil? expr) (or (number? expr) (or (string? expr) (or (equal? expr true) (equal? expr false))))))))
 

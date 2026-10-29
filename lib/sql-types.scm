@@ -18,7 +18,7 @@ type-related survives into the executable plan.
 
 A descriptor is (FORMULA TYPE COLLATION):
 - TYPE: uppercase SQL type name, or (NAME DIMENSIONS) for a declared sized
-  datatype. "any" means the SQL frontend has no stronger contract.
+datatype. "any" means the SQL frontend has no stronger contract.
 - COLLATION: nil, or a (NAME COERCIBILITY) pair. Lower coercibility wins:
 0 = explicit COLLATE, 2 = column, 4 = literal, 5 = numeric/ignorable. */
 
@@ -777,7 +777,10 @@ fields and ordering retain their executable formulas and declared contracts. */
 
 (define annotate_sql_outputs (lambda (query)
 	(begin
-		(define block (normalize_query_ast query))
+		(define raw_block (normalize_query_ast query))
+		/* Preserve primary-key functional dependencies before expanding stars
+		into the external typed projection. */
+		(define block (if (query_block? raw_block) (expand_grouped_query_block raw_block) raw_block))
 		(if (query_block? block) (begin
 			(define infos (map_assoc (expand_query_block_fields (qb_sources block) (qb_fields block))
 				(lambda (_title expr) (sql_expr_info (qb_sources block) expr))))

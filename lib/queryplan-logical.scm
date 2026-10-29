@@ -7048,7 +7048,8 @@ output slots; the UNION order belongs to that projection, not the old source. */
 	(map (coalesceNil (qb_order block) '()) (lambda (item) (match item
 		'(expr direction) (begin
 			(define title (find (extract_assoc (qb_fields block) (lambda (title projected)
-				(if (equal? expr projected) title nil))) (lambda (title) (not (nil? title))) nil))
+				(if (expression_equal? (sql_type_lower_annotations expr)
+					(sql_type_lower_annotations projected)) title nil))) (lambda (title) (not (nil? title))) nil))
 			(list (if (nil? title) expr (list (quote get_column) nil false title false)) direction))
 		_ item)))))
 

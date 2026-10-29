@@ -199,12 +199,12 @@ func scanAccessIndexCols(access scanAccess) string {
 }
 
 // touchTempColumns updates lastAccessed on all temp columns of the table (lock-free).
-// Touching every temp column (not just the ones in the scan's column lists) prevents
-// a concurrent eviction from modifying t.Columns while the scan is in progress.
+// Read the published immutable declaration directory: eviction can replace the
+// schema owner's mutable Columns slice while this scan updates access times.
 func touchTempColumns(t *table, colSets ...[]string) {
 	now := time.Now().UnixNano()
 	atomic.StoreUint64(&t.lastAccessed, uint64(now))
-	for _, c := range t.Columns {
+	for _, c := range t.columnDeclarations() {
 		if c.IsTemp {
 			atomic.StoreInt64(&c.lastAccessed, now)
 		}
