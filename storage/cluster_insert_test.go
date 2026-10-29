@@ -626,3 +626,54 @@ func TestClusterReferenceGrantSurvivesInvalidSuccessor(t *testing.T) {
 		t.Fatalf("incoming owner grant was lost: %+v", record)
 	}
 }
+
+// A successor name can be learned from the cell before the immutable lookup
+// directory is published. Reports must sample the serialized directory, rather
+// than treating the lagging fast lookup as proof of unknown authority.
+func TestClusterReportFollowsSuccessorBeforeLookupPublication(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
+	cluster.initializeManager()
+	r := cluster.manager
+	from := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	to := from
+	to.Shard = uuid.NewString()
+	cell := r.resourceCell(from)
+	r.updateRecord(from, func(record *replicaRecord) bool {
+		record.Owner, record.State, record.Epoch = "remote", "S", 7
+		return true
+	})
+	cell.ownstate.Initialize(mosi.S)
+	// Preserve the predecessor lookup view while constructing the successor
+	// directory state seen by a report carrying that new name. This isolates
+	// the forwarding publication window without relying on scheduler timing.
+	r.mu.Lock()
+	r.cells[to.key()] = cell
+	record := r.directory.Records[from.key()]
+	record.Resource = to
+	r.directory.Records[to.key()] = record
+	delete(r.directory.Records, from.key())
+	cell.resource.Store(&to)
+	r.mu.Unlock()
+	if r.lookupCell(to) != nil {
+		t.Fatal("fixture published the successor lookup too early")
+	}
+	for _, resource := range []mosiResource{from, to} {
+		report := cluster.report(resource)
+		if report.Resource != to || report.Owner != "remote" || report.State != "S" || report.Epoch != 7 {
+			t.Fatalf("forwarded authority lost: %+v", report)
+		}
+	}
+}
+
+func TestClusterReportDuringCellInitialization(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
+	cluster.initializeManager()
+	resource := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	// cell() registers the directory slot before resourceCell initializes its
+	// resource pointer. A concurrent report must preserve unknown authority.
+	cluster.manager.cell(resource.key())
+	report := cluster.report(resource)
+	if report.Resource != resource || report.State != "IO" || report.Owner != "" {
+		t.Fatalf("uninitialized cell acquired authority: %+v", report)
+	}
+}
