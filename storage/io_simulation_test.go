@@ -7,6 +7,7 @@ or later, WITHOUT ANY WARRANTY. See <https://www.gnu.org/licenses/>.
 package storage
 
 import "io"
+import "fmt"
 import "math"
 import "sync"
 import "time"
@@ -195,5 +196,66 @@ func TestFakeRemoteDurabilityStreamingAndAbort(t *testing.T) {
 	configured.WriteSchema([]byte(`{"tables":{}}`))
 	if !bytes.Equal(configured.ReadSchema(), []byte(`{"tables":{}}`)) {
 		t.Fatal("configured backend persistence failed")
+	}
+}
+
+// Default-sized columns exceed the backend reader's buffer. Deserializers
+// must consume each payload completely even when a Read returns a short chunk.
+func TestFakeRemoteColumnRoundTrip(t *testing.T) {
+	const count = 60000
+	for _, fixture := range []struct {
+		name   string
+		column ColumnStorage
+		fresh  func() ColumnStorage
+		value  func(uint32) scm.Scmer
+	}{
+		{"int", new(StorageInt), func() ColumnStorage { return new(StorageInt) }, func(i uint32) scm.Scmer { return scm.NewInt(int64(i * 2654435761)) }},
+		{"float", new(StorageFloat), func() ColumnStorage { return new(StorageFloat) }, func(i uint32) scm.Scmer { return scm.NewFloat(float64(i)*1.25 + 0.125) }},
+		{"string", new(StorageString), func() ColumnStorage { return new(StorageString) }, func(i uint32) scm.Scmer {
+			return scm.NewString(fmt.Sprintf("row/%08x/value/%08x", i*2654435761, i*2246822519))
+		}},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			profile, _ := newIOSimulation(0, 0, new(ioCounters))
+			engine := &FakeRemote{FileStorage: &FileStorage{path: t.TempDir() + "/"}, simulation: profile}
+			column := fixture.column
+			column.prepare()
+			for i := uint32(0); i < count; i++ {
+				column.scan(i, fixture.value(i))
+			}
+			column.init(count)
+			for i := uint32(0); i < count; i++ {
+				column.build(i, fixture.value(i))
+			}
+			column.finish()
+			writer := engine.WriteColumn("shard", fixture.name)
+			column.Serialize(writer)
+			finishColumnWrite(writer, true)
+			reader := engine.ReadColumn("shard", fixture.name)
+			defer reader.Close()
+			var magic [1]byte
+			if _, err := io.ReadFull(reader, magic[:]); err != nil {
+				t.Fatal(err)
+			}
+			loaded := fixture.fresh()
+			if n := loaded.Deserialize(reader); n != count {
+				t.Fatalf("count=%d", n)
+			}
+			for i := uint32(0); i < count; i++ {
+				if !scm.Equal(loaded.GetValue(i), column.GetValue(i)) {
+					t.Fatalf("row %d: got %v, want %v", i, loaded.GetValue(i), column.GetValue(i))
+				}
+			}
+			t.Run("truncated", func(t *testing.T) {
+				var encoded bytes.Buffer
+				column.Serialize(&encoded)
+				defer func() {
+					if failure := recover(); failure != io.ErrUnexpectedEOF && failure != io.EOF {
+						t.Fatalf("truncated column must fail with EOF, got %v", failure)
+					}
+				}()
+				fixture.fresh().Deserialize(bytes.NewReader(encoded.Bytes()[1 : encoded.Len()-1]))
+			})
+		})
 	}
 }

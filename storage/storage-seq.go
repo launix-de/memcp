@@ -5923,7 +5923,7 @@ func (s *StorageSeq) Deserialize(f io.Reader) uint {
 	var version uint8
 	binary.Read(f, binary.LittleEndian, &version)
 	var pad [6]byte
-	f.Read(pad[:])
+	readStorageBytes(f, pad[:])
 	switch version {
 	case 0, '1': // '1'=49: legacy pre-versioning dummy byte; treat as v0
 		return s.deserializeSeqV0(f)

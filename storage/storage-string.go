@@ -716,7 +716,7 @@ func (s *StorageString) deserializeString(f io.Reader) uint {
 	// Recognize the actual historical sentinel, preserving IDs above 10.
 	if formatByte == '1' {
 		var legacyPad [5]byte
-		f.Read(legacyPad[:])
+		readStorageBytes(f, legacyPad[:])
 		s.format = FormatRaw
 		return s.deserializeStringBody(f)
 	}
@@ -727,7 +727,7 @@ func (s *StorageString) deserializeString(f io.Reader) uint {
 	var version uint8
 	binary.Read(f, binary.LittleEndian, &version) // pad[0] repurposed as version byte
 	var pad [4]byte
-	f.Read(pad[:])
+	readStorageBytes(f, pad[:])
 	if formatByte >= 11 && version < 2 {
 		panic("StorageString: ordered format requires version 2")
 	}
@@ -762,7 +762,7 @@ func (s *StorageString) deserializeStringBody(f io.Reader) uint {
 	binary.Read(f, binary.LittleEndian, &dictionarylength)
 	if dictionarylength > 0 {
 		rawdata := make([]byte, dictionarylength)
-		f.Read(rawdata)
+		readStorageBytes(f, rawdata)
 		s.dictionary = unsafe.String(&rawdata[0], dictionarylength)
 	}
 	return uint(l)
@@ -782,7 +782,7 @@ func (s *StorageString) deserializeStringV1(f io.Reader) uint {
 	binary.Read(f, binary.LittleEndian, &dictLen)
 	if dictLen > 0 {
 		rawdata := make([]byte, dictLen)
-		f.Read(rawdata)
+		readStorageBytes(f, rawdata)
 		if compFlag == 1 {
 			s.compressedDict = rawdata
 			s.compressed = true

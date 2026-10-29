@@ -288,7 +288,7 @@ func (s *StorageFloat) Deserialize(f io.Reader) uint {
 	var version uint8
 	binary.Read(f, binary.LittleEndian, &version)
 	var pad [6]byte
-	f.Read(pad[:])
+	readStorageBytes(f, pad[:])
 	switch version {
 	case 0, '1': // '1'=49: legacy pre-versioning dummy byte; treat as v0
 		return s.deserializeFloatV0(f)
@@ -304,7 +304,7 @@ func (s *StorageFloat) deserializeFloatV0(f io.Reader) uint {
 	rawdata := mmap.Map(f, RDWR, 0)
 	*/
 	rawdata := make([]byte, 8*l)
-	f.Read(rawdata)
+	readStorageBytes(f, rawdata)
 	s.values = unsafe.Slice((*float64)(unsafe.Pointer(&rawdata[0])), l)
 	s.hasNull = false
 	for _, value := range s.values {

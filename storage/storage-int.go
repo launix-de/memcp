@@ -1502,7 +1502,7 @@ func (s *StorageInt) deserializeIntV0(f io.Reader) uint {
 	binary.Read(f, binary.LittleEndian, &s.null)
 	if chunkcount > 0 {
 		rawdata := make([]byte, chunkcount*8)
-		f.Read(rawdata)
+		readStorageBytes(f, rawdata)
 		s.chunk = unsafe.Slice((*uint64)(unsafe.Pointer(&rawdata[0])), chunkcount)
 	}
 	return uint(s.count)
