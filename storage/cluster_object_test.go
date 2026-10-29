@@ -231,7 +231,7 @@ func TestClusterPacketDispatchDoesNotBlockReaderAndKeepsTransferOrder(t *testing
 		t.Fatal("blocked transfer prevented unrelated message execution")
 	}
 	close(resume)
-	p.workers.Wait()
+	p.packets.Wait()
 	mu.Lock()
 	defer mu.Unlock()
 	if fmt.Sprint(order) != "[grant begin end]" {
@@ -460,7 +460,7 @@ func TestClusterPacketSchemaPublicationPrecedesDependentShard(t *testing.T) {
 	default:
 	}
 	close(resume)
-	p.workers.Wait()
+	p.packets.Wait()
 	select {
 	case <-data:
 	default:

@@ -93,6 +93,7 @@ type mosiPeer struct {
 	cancel          context.CancelFunc
 	readDone        chan struct{}
 	workers         sync.WaitGroup
+	packets         sync.WaitGroup // ordered resource workers; may outlive a closed queue tail
 }
 
 type mosiMessage struct {
@@ -142,7 +143,21 @@ func (p *mosiPeer) close() {
 	p.once.Do(func() { close(p.done); p.cancel(); p.conn.Close() })
 }
 
-func (p *mosiPeer) wait() { <-p.readDone; <-p.writeDone; p.workers.Wait() }
+func (p *mosiPeer) wait() {
+	<-p.readDone
+	<-p.writeDone
+	p.packets.Wait()
+	p.workers.Wait()
+}
+
+// Retirement can run inside an RPC worker on this peer. Join the reader and
+// resource workers without waiting on that RPC itself. A cancelled queue tail
+// can finish before an already executing predecessor, so packetOrder alone
+// cannot join publication.
+func (p *mosiPeer) waitPackets() {
+	<-p.readDone
+	p.packets.Wait()
+}
 
 func (p *mosiPeer) send(m mosiMessage) error {
 	select {
@@ -314,9 +329,9 @@ func (p *mosiPeer) dispatchPacket(packet *mosiPacket, size int) bool {
 	}
 	p.packetOrder[key] = done
 	p.mu.Unlock()
-	p.workers.Add(1)
+	p.packets.Add(1)
 	go func() {
-		defer p.workers.Done()
+		defer p.packets.Done()
 		defer p.packetBytes.Add(-int64(size))
 		defer func() {
 			p.mu.Lock()

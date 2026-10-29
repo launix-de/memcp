@@ -1160,3 +1160,69 @@ func TestReplicationPromotionClearsAllNativePlacementAliases(t *testing.T) {
 		t.Fatal("promotion removed another node's completed copy")
 	}
 }
+
+func TestReplicationRetirementJoinsLateSchemaPlacement(t *testing.T) {
+	source, _ := createDurabilityTestTable(t, "t_retire_late_schema", 0)
+	config, _ := CreateTable(source.schema.Name, "config", Safe, false)
+	for _, name := range []string{"node", "key", "value"} {
+		config.CreateColumn(name, "text", nil, nil)
+	}
+	createTableKey(config, uniqueKey{Id: "PRIMARY", Cols: []string{"node", "key"}}, nil)
+	r := replicaRecoveryFixture()
+	r.config = config
+	resource := mosiResource{Database: source.schema.Name}
+	content, err := r.schemaDigest(source.schema.persistence.ReadSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerID := uuid.NewString()
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch, record.Content = peerID, 7, content
+		return true
+	})
+	cell := r.resourceCell(resource)
+	cell.ownstate.Initialize(mosi.IO)
+	peer := &mosiPeer{done: make(chan struct{}), readDone: make(chan struct{}), pending: make(map[uint64]chan mosiMessage)}
+	peer.once.Do(func() { close(peer.done) })
+	close(peer.readDone)
+	// The administrator may itself run in this RPC worker. Joining all workers
+	// would deadlock; only the outstanding packet publication must be joined.
+	peer.packets.Add(1) // active predecessor remains after a cancelled queue tail
+	peer.workers.Add(1)
+	defer peer.workers.Done()
+	r.peers = map[string]*mosiPeer{peerID: peer}
+	finished := make(chan error, 1)
+	go func() { finished <- r.retire(peerID) }()
+	select {
+	case err := <-finished:
+		peer.packets.Done()
+		t.Fatal("retirement overtook pending schema publication", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	// An already executing schema-end packet records its completed copy after
+	// the network reader stopped. Retirement must clear this placement too.
+	err = r.saveBackup(resource, content)
+	peer.packets.Done()
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("retirement waited on its own RPC worker")
+	}
+	if cell.ownstate.Phase() != mosi.M || len(r.backups) != 0 {
+		t.Fatal("late placement survived fenced promotion", r.backups)
+	}
+	restarted := replicaRecoveryFixture()
+	restarted.id = r.id
+	if err := restarted.loadConfig(config); err != nil {
+		t.Fatal(err)
+	}
+	if len(restarted.backups) != 0 {
+		t.Fatal("retirement left schema recovery metadata after restart", restarted.backups)
+	}
+}
