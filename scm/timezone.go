@@ -290,6 +290,7 @@ func init_timezone() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					d0 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					_ = d0
 					ctx.EnsureDesc(&d0)
 					if d0.Loc == LocImm {
 						d1 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d0.Imm.Int() == 0)}
@@ -2776,6 +2777,7 @@ func init_timezone() {
 					ctx.StabilizeDescForControlFlow(&d16)
 					ctx.FreeDesc(&d15)
 					d17 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					_ = d17
 					ctx.EnsureDesc(&d17)
 					if d17.Loc == LocImm {
 						d18 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d17.Imm.Int() > 2)}
@@ -3201,6 +3203,7 @@ func init_timezone() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d2)
 					d104 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					_ = d104
 					ctx.EnsureDesc(&d104)
 					if d104.Loc == LocImm {
 						d105 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d104.Imm.Int() > 1)}
@@ -3765,18 +3768,22 @@ func init_timezone() {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				d6 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
+				_ = d6
 				if d6.Loc == LocRegPair || d6.Loc == LocStackPair || d6.Loc == LocRegTriple || d6.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				d7 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
+				_ = d7
 				if d7.Loc == LocRegPair || d7.Loc == LocStackPair || d7.Loc == LocRegTriple || d7.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				d8 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
+				_ = d8
 				if d8.Loc == LocRegPair || d8.Loc == LocStackPair || d8.Loc == LocRegTriple || d8.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				d9 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
+				_ = d9
 				if d9.Loc == LocRegPair || d9.Loc == LocStackPair || d9.Loc == LocRegTriple || d9.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}

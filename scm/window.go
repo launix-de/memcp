@@ -702,6 +702,7 @@ func init_window() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d7
 					ctx.EnsureDesc(&d7)
 					if d7.Loc == LocImm {
 						d8 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d7.Imm.Int() < 3)}
@@ -1150,6 +1151,7 @@ func init_window() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d83
 					ctx.EnsureDesc(&d83)
 					ctx.EnsureDesc(&d33)
 					ctx.SyncDesc(&d83)
@@ -1271,6 +1273,7 @@ func init_window() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d90
 					ctx.StabilizeDescForControlFlow(&d90)
 					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(-1)}, int32(bbs[7].PhiBase)+int32(0))
 					return bbs[7].Render()
@@ -1304,6 +1307,7 @@ func init_window() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d91
 					ctx.EnsureDesc(&d91)
 					ctx.EnsureDesc(&d33)
 					ctx.EnsureDescsTogether(&d91, &d33)
@@ -1484,6 +1488,7 @@ func init_window() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d146
 					ctx.EnsureDesc(&d146)
 					if d146.Loc == LocImm {
 						d147 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d146.Imm.Int() == 0)}
@@ -1852,6 +1857,7 @@ func init_window() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d263
 					ctx.EnsureDesc(&d203)
 					ctx.EnsureDesc(&d263)
 					ctx.EnsureDescsTogether(&d203, &d263)
@@ -2059,6 +2065,8 @@ func init_window() {
 					ctx.EnsureDesc(&d326)
 					d328 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.SyncDesc(&d326)
+					ctx.SyncDesc(&d3)
+					ctx.SyncDesc(&d328)
 					d329 = d3
 					d329.ID = 0
 					d330 = d328
@@ -2259,6 +2267,8 @@ func init_window() {
 					ctx.BindReg(r31, &d400)
 					ctx.EnsureDesc(&d203)
 					ctx.SyncDesc(&d400)
+					ctx.SyncDesc(&d89)
+					ctx.SyncDesc(&d203)
 					d402 = d89
 					d402.ID = 0
 					d403 = d203
@@ -2308,6 +2318,8 @@ func init_window() {
 					d405 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
 					ctx.EnsureDesc(&d203)
 					ctx.SyncDesc(&d405)
+					ctx.SyncDesc(&d89)
+					ctx.SyncDesc(&d203)
 					d406 = d89
 					d406.ID = 0
 					d407 = d203
@@ -2375,6 +2387,8 @@ func init_window() {
 					ctx.EnsureDesc(&d409)
 					d411 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.SyncDesc(&d409)
+					ctx.SyncDesc(&d3)
+					ctx.SyncDesc(&d411)
 					d412 = d3
 					d412.ID = 0
 					d413 = d411
@@ -2797,6 +2811,7 @@ func init_window() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d9
 					ctx.EnsureDesc(&d9)
 					if d9.Loc == LocImm {
 						d10 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d9.Imm.Int() < 3)}
@@ -3128,6 +3143,7 @@ func init_window() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d62
 					ctx.EnsureDesc(&d62)
 					ctx.EnsureDesc(&d27)
 					ctx.EnsureDescsTogether(&d62, &d27)
@@ -3264,6 +3280,7 @@ func init_window() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d95
 					ctx.EnsureDesc(&d95)
 					if d95.Loc == LocImm {
 						d96 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d95.Imm.Int() == 0)}
@@ -3597,6 +3614,7 @@ func init_window() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d173
 					ctx.EnsureDesc(&d173)
 					ctx.EnsureDesc(&d27)
 					ctx.SyncDesc(&d173)
@@ -3715,6 +3733,7 @@ func init_window() {
 							panic("len on unsupported descriptor location")
 						}
 					}
+					_ = d176
 					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d176)
 					ctx.EnsureDescsTogether(&d2, &d176)
@@ -3877,6 +3896,8 @@ func init_window() {
 					d225 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
 					ctx.EnsureDesc(&d2)
 					ctx.SyncDesc(&d225)
+					ctx.SyncDesc(&d34)
+					ctx.SyncDesc(&d2)
 					d226 = d34
 					d226.ID = 0
 					d227 = d2
@@ -3968,6 +3989,8 @@ func init_window() {
 					ctx.EnsureDesc(&d233)
 					d234 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.SyncDesc(&d233)
+					ctx.SyncDesc(&d4)
+					ctx.SyncDesc(&d234)
 					d235 = d4
 					d235.ID = 0
 					d236 = d234

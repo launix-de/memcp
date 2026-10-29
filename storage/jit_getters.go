@@ -542,6 +542,7 @@ func (s *StoragePrefix) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d18
 		ctx.EnsureDesc(&d18)
 		ctx.EnsureDesc(&d18)
 		ctx.ReclaimUntrackedRegs()
@@ -590,6 +591,7 @@ func (s *StoragePrefix) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d23
 		ctx.EnsureDesc(&d23)
 		ctx.EnsureDesc(&d23)
 		if d23.Loc == scm.LocImm {
@@ -2720,6 +2722,8 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		d270 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		ctx.EnsureDesc(&d7)
 		ctx.SyncDesc(&d270)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d7)
 		d271 = target
 		d271.ID = 0
 		d272 = d7
@@ -2994,6 +2998,8 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		ctx.EnsureDesc(&d278)
 		ctx.EnsureDesc(&d7)
 		ctx.SyncDesc(&d278)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d7)
 		d279 = target
 		d279.ID = 0
 		d280 = d7
@@ -3986,6 +3992,8 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		d503 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		ctx.EnsureDesc(&d10)
 		ctx.SyncDesc(&d503)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d10)
 		d504 = target
 		d504.ID = 0
 		d505 = d10
@@ -4302,6 +4310,8 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		ctx.EnsureDesc(&d511)
 		ctx.EnsureDesc(&d10)
 		ctx.SyncDesc(&d511)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d10)
 		d512 = target
 		d512.ID = 0
 		d513 = d10
@@ -5153,6 +5163,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d34
 		ctx.EnsureDesc(&d34)
 		if d34.Loc == scm.LocImm {
 			d35 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewBool(d34.Imm.Int() == 0)}
@@ -5500,6 +5511,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d79
 		ctx.StabilizeDescForControlFlow(&d79)
 		if phiHomeOK2 {
 			ctx.EmitMovToReg(r0, scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(0)})
@@ -6482,6 +6494,8 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		d251 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		ctx.EnsureDesc(&d7)
 		ctx.SyncDesc(&d251)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d7)
 		d252 = target
 		d252.ID = 0
 		d253 = d7
@@ -6734,6 +6748,8 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		ctx.EnsureDesc(&d258)
 		ctx.EnsureDesc(&d7)
 		ctx.SyncDesc(&d258)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d7)
 		d259 = target
 		d259.ID = 0
 		d260 = d7
@@ -7001,6 +7017,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d317
 		ctx.EnsureDesc(&d10)
 		ctx.EnsureDesc(&d317)
 		ctx.EnsureDescsTogether(&d10, &d317)
@@ -7738,6 +7755,8 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		d468 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		ctx.EnsureDesc(&d9)
 		ctx.SyncDesc(&d468)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d9)
 		d469 = target
 		d469.ID = 0
 		d470 = d9
@@ -8010,6 +8029,8 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		ctx.EnsureDesc(&d476)
 		ctx.EnsureDesc(&d9)
 		ctx.SyncDesc(&d476)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d9)
 		d477 = target
 		d477.ID = 0
 		d478 = d9
@@ -8947,6 +8968,8 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		d59 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		ctx.EnsureDesc(&d5)
 		ctx.SyncDesc(&d59)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d5)
 		d60 = target
 		d60.ID = 0
 		d61 = d5
@@ -9148,6 +9171,8 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		ctx.EnsureDesc(&d40)
 		ctx.EnsureDesc(&d5)
 		ctx.SyncDesc(&d40)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d5)
 		d66 = target
 		d66.ID = 0
 		d67 = d5
@@ -9537,6 +9562,7 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d26
 		ctx.EnsureDesc(&d6)
 		ctx.EnsureDesc(&d26)
 		ctx.EnsureDescsTogether(&d6, &d26)
@@ -9794,6 +9820,8 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 		d62 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		ctx.EnsureDesc(&d5)
 		ctx.SyncDesc(&d62)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d5)
 		d63 = target
 		d63.ID = 0
 		d64 = d5
@@ -9993,6 +10021,8 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 		ctx.EnsureDesc(&d42)
 		ctx.EnsureDesc(&d5)
 		ctx.SyncDesc(&d42)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d5)
 		d69 = target
 		d69.ID = 0
 		d70 = d5
@@ -10659,6 +10689,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d57
 		ctx.StabilizeDescForControlFlow(&d57)
 		if phiHomeOK3 {
 			ctx.EmitMovToReg(r1, scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(-1)})
@@ -10917,6 +10948,8 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		ctx.FreeDesc(&d81)
 		ctx.EnsureDesc(&d80)
 		ctx.SyncDesc(&d82)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d80)
 		d83 = target
 		d83.ID = 0
 		d84 = d80
@@ -11249,6 +11282,8 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		ctx.FreeDesc(&d120)
 		ctx.EnsureDesc(&d87)
 		ctx.SyncDesc(&d121)
+		ctx.SyncDesc(&d56)
+		ctx.SyncDesc(&d87)
 		d122 = d56
 		d122.ID = 0
 		d123 = d87
@@ -11347,6 +11382,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d129
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&d129)
 		ctx.EnsureDesc(&d129)
@@ -11755,6 +11791,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d22
 		ctx.EnsureDesc(&d22)
 		if d22.Loc == scm.LocImm {
 			d23 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewBool(d22.Imm.Int() == 0)}
@@ -11953,6 +11990,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d49
 		ctx.EnsureDesc(&d49)
 		ctx.EnsureDesc(&d49)
 		if d49.Loc == scm.LocImm {
@@ -11993,6 +12031,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d53
 		ctx.StabilizeDescForControlFlow(&d53)
 		if phiHomeOK2 {
 			ctx.EmitMovToReg(r0, scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(-1)})
@@ -12058,6 +12097,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d57
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&d57)
 		ctx.EnsureDesc(&d57)
@@ -12360,6 +12400,8 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		ctx.FreeDesc(&d98)
 		ctx.EnsureDesc(&d99)
 		ctx.SyncDesc(&d100)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d99)
 		d101 = target
 		d101.ID = 0
 		d102 = d99
@@ -12932,6 +12974,8 @@ func (s *StorageEnum) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 		ctx.FreeDesc(&d40)
 		ctx.EnsureDesc(&d5)
 		ctx.SyncDesc(&d41)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d5)
 		d42 = target
 		d42.ID = 0
 		d43 = d5
@@ -13416,6 +13460,7 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d27
 		ctx.StabilizeDescForControlFlow(&d27)
 		if phiHomeOK2 {
 			ctx.EmitMovToReg(r0, scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(0)})
@@ -13604,6 +13649,8 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 		ctx.FreeDesc(&d44)
 		ctx.EnsureDesc(&d5)
 		ctx.SyncDesc(&d45)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d5)
 		d46 = target
 		d46.ID = 0
 		d47 = d5
@@ -17282,6 +17329,8 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		ctx.BindReg(r53, &d500)
 		ctx.EnsureDesc(&d14)
 		ctx.SyncDesc(&d500)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d14)
 		d502 = target
 		d502.ID = 0
 		d503 = d14
@@ -17634,6 +17683,8 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		d513 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		ctx.EnsureDesc(&d14)
 		ctx.SyncDesc(&d513)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d14)
 		d514 = target
 		d514.ID = 0
 		d515 = d14
@@ -18893,6 +18944,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d77
 		ctx.StabilizeDescForControlFlow(&d77)
 		ctx.EnsureDesc(&d77)
 		if d77.Loc == scm.LocImm {
@@ -20054,6 +20106,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d234
 		ctx.StabilizeDescForControlFlow(&d234)
 		if phiHomeOK3 {
 			ctx.EmitMovToReg(r1, scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(0)})
@@ -20199,6 +20252,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d240
 		ctx.StabilizeDescForControlFlow(&d240)
 		ctx.SyncDesc(&d239)
 		if d239.Loc == scm.LocReg || d239.Loc == scm.LocFPReg {
@@ -20593,6 +20647,8 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		ctx.FreeDesc(&d293)
 		ctx.EnsureDesc(&d16)
 		ctx.SyncDesc(&d295)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d16)
 		d296 = target
 		d296.ID = 0
 		d297 = d16
@@ -23936,6 +23992,8 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		ctx.BindReg(r65, &d961)
 		ctx.EnsureDesc(&d21)
 		ctx.SyncDesc(&d961)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d21)
 		d963 = target
 		d963.ID = 0
 		d964 = d21
@@ -24298,6 +24356,8 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		d973 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		ctx.EnsureDesc(&d21)
 		ctx.SyncDesc(&d973)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d21)
 		d974 = target
 		d974.ID = 0
 		d975 = d21
@@ -25152,6 +25212,8 @@ func (s *StorageConst) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		}
 		ctx.EnsureDesc(&d5)
 		ctx.SyncDesc(&d38)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d5)
 		d39 = target
 		d39.ID = 0
 		d40 = d5
@@ -25624,6 +25686,7 @@ func (s *StorageConst) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d26
 		ctx.StabilizeDescForControlFlow(&d26)
 		if phiHomeOK2 {
 			ctx.EmitMovToReg(r0, scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(0)})
@@ -25806,6 +25869,8 @@ func (s *StorageConst) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 		}
 		ctx.EnsureDesc(&d5)
 		ctx.SyncDesc(&d42)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d5)
 		d43 = target
 		d43.ID = 0
 		d44 = d5
@@ -26736,6 +26801,7 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d57
 		ctx.StabilizeDescForControlFlow(&d57)
 		if phiHomeOK2 {
 			ctx.EmitMovToReg(r0, scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(0)})
@@ -26953,6 +27019,8 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		ctx.BindReg(r32, &d93)
 		ctx.EnsureDesc(&d5)
 		ctx.SyncDesc(&d93)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d5)
 		d95 = target
 		d95.ID = 0
 		d96 = d5
@@ -27439,6 +27507,7 @@ func (s *StorageSCMER) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d27
 		ctx.StabilizeDescForControlFlow(&d27)
 		if phiHomeOK2 {
 			ctx.EmitMovToReg(r0, scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(0)})
@@ -27619,6 +27688,8 @@ func (s *StorageSCMER) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 		ctx.FreeDesc(&d44)
 		ctx.EnsureDesc(&d5)
 		ctx.SyncDesc(&d45)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d5)
 		d47 = target
 		d47.ID = 0
 		d48 = d5
@@ -28251,6 +28322,7 @@ func (s *StorageDecimal) JITEmitGetValueMulti(ctx *scm.JITContext, recids, targe
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d18
 		ctx.EnsureDesc(&d18)
 		ctx.EnsureDesc(&d18)
 		if d18.Loc == scm.LocImm {
@@ -30871,6 +30943,8 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		d351 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		ctx.EnsureDesc(&d15)
 		ctx.SyncDesc(&d351)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d15)
 		d352 = target
 		d352.ID = 0
 		d353 = d15
@@ -31276,6 +31350,8 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		ctx.EnsureDesc(&d21)
 		ctx.EnsureDesc(&d15)
 		ctx.SyncDesc(&d21)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d15)
 		d365 = target
 		d365.ID = 0
 		d366 = d15
@@ -32372,6 +32448,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d89
 		ctx.StabilizeDescForControlFlow(&d89)
 		ctx.EnsureDesc(&d89)
 		if d89.Loc == scm.LocImm {
@@ -35715,6 +35792,8 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		d507 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		ctx.EnsureDesc(&d22)
 		ctx.SyncDesc(&d507)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d22)
 		d508 = target
 		d508.ID = 0
 		d509 = d22
@@ -36326,6 +36405,8 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		ctx.EnsureDesc(&d523)
 		ctx.EnsureDesc(&d22)
 		ctx.SyncDesc(&d523)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d22)
 		d524 = target
 		d524.ID = 0
 		d525 = d22
@@ -37281,6 +37362,8 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		d741 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		ctx.EnsureDesc(&d36)
 		ctx.SyncDesc(&d741)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d36)
 		d742 = target
 		d742.ID = 0
 		d743 = d36
@@ -37748,6 +37831,8 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		ctx.EnsureDesc(&d751)
 		ctx.EnsureDesc(&d36)
 		ctx.SyncDesc(&d751)
+		ctx.SyncDesc(&target)
+		ctx.SyncDesc(&d36)
 		d752 = target
 		d752.ID = 0
 		d753 = d36
@@ -38269,6 +38354,7 @@ func (s *OverlayBlob) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d18
 		if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}

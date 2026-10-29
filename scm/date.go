@@ -532,6 +532,7 @@ func init_date() {
 					d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(16)}
 					ctx.ReclaimUntrackedRegs()
 					d3 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					_ = d3
 					ctx.EnsureDesc(&d3)
 					if d3.Loc == LocImm {
 						d4 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d3.Imm.Int() > 0)}
@@ -2314,6 +2315,7 @@ func init_date() {
 					d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(16)}
 					ctx.ReclaimUntrackedRegs()
 					d33 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					_ = d33
 					ctx.EnsureDesc(&d33)
 					if d33.Loc == LocImm {
 						d34 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d33.Imm.Int() > 2)}
@@ -3520,6 +3522,7 @@ func init_date() {
 					d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(16)}
 					ctx.ReclaimUntrackedRegs()
 					d33 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					_ = d33
 					ctx.EnsureDesc(&d33)
 					if d33.Loc == LocImm {
 						d34 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d33.Imm.Int() > 2)}

@@ -1063,6 +1063,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d28
 		ctx.EnsureDesc(&d26)
 		ctx.EnsureDesc(&d28)
 		ctx.EnsureDescsTogether(&d26, &d28)
@@ -1484,6 +1485,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d101
 		ctx.EnsureDesc(&d101)
 		ctx.EnsureDesc(&d101)
 		if d101.Loc == scm.LocImm {

@@ -1039,6 +1039,7 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 				panic("len on unsupported descriptor location")
 			}
 		}
+		_ = d51
 		ctx.EnsureDesc(&d51)
 		ctx.EnsureDesc(&d51)
 		ctx.EnsureDesc(&d49)

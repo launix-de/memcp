@@ -1335,6 +1335,7 @@ func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc,
 		panic("jit: generic call arg expects 1-word value")
 	}
 	d0 := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
+	_ = d0
 	if d0.Loc == scm.LocRegPair || d0.Loc == scm.LocStackPair || d0.Loc == scm.LocRegTriple || d0.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
 	}
@@ -1342,10 +1343,12 @@ func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc,
 		panic("jit: generic call arg expects 1-word value")
 	}
 	d1 := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewBool(false)}
+	_ = d1
 	if d1.Loc == scm.LocRegPair || d1.Loc == scm.LocStackPair || d1.Loc == scm.LocRegTriple || d1.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
 	}
 	d2 := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(0)}
+	_ = d2
 	if d2.Loc == scm.LocRegPair || d2.Loc == scm.LocStackPair || d2.Loc == scm.LocRegTriple || d2.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
 	}
