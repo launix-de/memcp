@@ -738,14 +738,13 @@ func init_strings() {
 						}
 						r0 := ctx.AllocRegExcept(d7.Reg)
 						ctx.EmitCmpRegImm32(d7.Reg, 0)
-						ctx.EmitSetcc(r0, CondNotEqual)
-						d8 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+						d8 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondNotEqual}
 						ctx.BindReg(r0, &d8)
 					}
 					d9 = d8
-					ctx.EnsureDesc(&d9)
-					if d9.Loc != LocImm && d9.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d9)
+					if d9.Loc != LocImm && d9.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d9.Loc == LocImm {
 						if d9.Imm.Bool() {
@@ -753,11 +752,11 @@ func init_strings() {
 						}
 						return bbs[2].Render()
 					}
-					ctx.EmitCmpRegImm32(d9.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl2)
+					ctx.EmitJump(d9.Condition, lbl2)
 					if bbs[2].Rendered {
 						ctx.EmitJmp(lbl3)
 					}
+					ctx.FreeDesc(&d8)
 					ctx.FlushRegisterMoves()
 					if !bbs[2].Rendered {
 						snap10 := d1
@@ -784,7 +783,6 @@ func init_strings() {
 						return bbs[1].Render()
 					}
 					return result
-					ctx.FreeDesc(&d8)
 					return result
 				}
 				bbs[1].Render = func() JITValueDesc {
@@ -15550,14 +15548,13 @@ func init_strings() {
 						}
 						r0 := ctx.AllocRegExcept(d5.Reg)
 						ctx.EmitCmpRegImm32(d5.Reg, 0)
-						ctx.EmitSetcc(r0, CondNotEqual)
-						d6 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+						d6 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondNotEqual}
 						ctx.BindReg(r0, &d6)
 					}
 					d7 = d6
-					ctx.EnsureDesc(&d7)
-					if d7.Loc != LocImm && d7.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d7)
+					if d7.Loc != LocImm && d7.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d7.Loc == LocImm {
 						if d7.Imm.Bool() {
@@ -15565,11 +15562,11 @@ func init_strings() {
 						}
 						return bbs[2].Render()
 					}
-					ctx.EmitCmpRegImm32(d7.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl2)
+					ctx.EmitJump(d7.Condition, lbl2)
 					if bbs[2].Rendered {
 						ctx.EmitJmp(lbl3)
 					}
+					ctx.FreeDesc(&d6)
 					ctx.FlushRegisterMoves()
 					if !bbs[2].Rendered {
 						snap8 := d0
@@ -15594,7 +15591,6 @@ func init_strings() {
 						return bbs[1].Render()
 					}
 					return result
-					ctx.FreeDesc(&d6)
 					return result
 				}
 				bbs[1].Render = func() JITValueDesc {
@@ -15798,14 +15794,13 @@ func init_strings() {
 						}
 						r0 := ctx.AllocRegExcept(d4.Reg)
 						ctx.EmitCmpRegImm32(d4.Reg, 0)
-						ctx.EmitSetcc(r0, CondNotEqual)
-						d5 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+						d5 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondNotEqual}
 						ctx.BindReg(r0, &d5)
 					}
 					d6 = d5
-					ctx.EnsureDesc(&d6)
-					if d6.Loc != LocImm && d6.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d6)
+					if d6.Loc != LocImm && d6.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d6.Loc == LocImm {
 						if d6.Imm.Bool() {
@@ -15813,11 +15808,11 @@ func init_strings() {
 						}
 						return bbs[2].Render()
 					}
-					ctx.EmitCmpRegImm32(d6.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl2)
+					ctx.EmitJump(d6.Condition, lbl2)
 					if bbs[2].Rendered {
 						ctx.EmitJmp(lbl3)
 					}
+					ctx.FreeDesc(&d5)
 					ctx.FlushRegisterMoves()
 					if !bbs[2].Rendered {
 						snap7 := d0
@@ -15840,7 +15835,6 @@ func init_strings() {
 						return bbs[1].Render()
 					}
 					return result
-					ctx.FreeDesc(&d5)
 					return result
 				}
 				bbs[1].Render = func() JITValueDesc {
@@ -16265,14 +16259,13 @@ func init_strings() {
 						}
 						r0 := ctx.AllocRegExcept(d18.Reg)
 						ctx.EmitCmpRegImm32(d18.Reg, 0)
-						ctx.EmitSetcc(r0, CondNotEqual)
-						d19 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+						d19 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondNotEqual}
 						ctx.BindReg(r0, &d19)
 					}
 					d20 = d19
-					ctx.EnsureDesc(&d20)
-					if d20.Loc != LocImm && d20.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d20)
+					if d20.Loc != LocImm && d20.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d20.Loc == LocImm {
 						if d20.Imm.Bool() {
@@ -16280,11 +16273,11 @@ func init_strings() {
 						}
 						return bbs[5].Render()
 					}
-					ctx.EmitCmpRegImm32(d20.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl5)
+					ctx.EmitJump(d20.Condition, lbl5)
 					if bbs[5].Rendered {
 						ctx.EmitJmp(lbl6)
 					}
+					ctx.FreeDesc(&d19)
 					ctx.FlushRegisterMoves()
 					if !bbs[5].Rendered {
 						snap21 := d0
@@ -16327,7 +16320,6 @@ func init_strings() {
 						return bbs[4].Render()
 					}
 					return result
-					ctx.FreeDesc(&d19)
 					return result
 				}
 				bbs[3].Render = func() JITValueDesc {
@@ -16773,14 +16765,13 @@ func init_strings() {
 						}
 						r0 := ctx.AllocRegExcept(d7.Reg)
 						ctx.EmitCmpRegImm32(d7.Reg, 0)
-						ctx.EmitSetcc(r0, CondNotEqual)
-						d8 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+						d8 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondNotEqual}
 						ctx.BindReg(r0, &d8)
 					}
 					d9 = d8
-					ctx.EnsureDesc(&d9)
-					if d9.Loc != LocImm && d9.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d9)
+					if d9.Loc != LocImm && d9.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d9.Loc == LocImm {
 						if d9.Imm.Bool() {
@@ -16788,11 +16779,11 @@ func init_strings() {
 						}
 						return bbs[2].Render()
 					}
-					ctx.EmitCmpRegImm32(d9.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl2)
+					ctx.EmitJump(d9.Condition, lbl2)
 					if bbs[2].Rendered {
 						ctx.EmitJmp(lbl3)
 					}
+					ctx.FreeDesc(&d8)
 					ctx.FlushRegisterMoves()
 					if !bbs[2].Rendered {
 						snap10 := d0
@@ -16821,7 +16812,6 @@ func init_strings() {
 						return bbs[1].Render()
 					}
 					return result
-					ctx.FreeDesc(&d8)
 					return result
 				}
 				bbs[1].Render = func() JITValueDesc {
@@ -17125,14 +17115,13 @@ func init_strings() {
 						}
 						r2 := ctx.AllocRegExcept(d7.Reg)
 						ctx.EmitCmpRegImm32(d7.Reg, 0)
-						ctx.EmitSetcc(r2, CondNotEqual)
-						d8 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r2}
+						d8 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r2, Condition: CondNotEqual}
 						ctx.BindReg(r2, &d8)
 					}
 					d9 = d8
-					ctx.EnsureDesc(&d9)
-					if d9.Loc != LocImm && d9.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d9)
+					if d9.Loc != LocImm && d9.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d9.Loc == LocImm {
 						if d9.Imm.Bool() {
@@ -17140,11 +17129,11 @@ func init_strings() {
 						}
 						return bbs[2].Render()
 					}
-					ctx.EmitCmpRegImm32(d9.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl2)
+					ctx.EmitJump(d9.Condition, lbl2)
 					if bbs[2].Rendered {
 						ctx.EmitJmp(lbl3)
 					}
+					ctx.FreeDesc(&d8)
 					ctx.FlushRegisterMoves()
 					if !bbs[2].Rendered {
 						snap10 := d0
@@ -17173,7 +17162,6 @@ func init_strings() {
 						return bbs[1].Render()
 					}
 					return result
-					ctx.FreeDesc(&d8)
 					return result
 				}
 				bbs[1].Render = func() JITValueDesc {
@@ -17988,14 +17976,13 @@ func init_strings() {
 						}
 						r1 := ctx.AllocRegExcept(d38.Reg)
 						ctx.EmitCmpRegImm32(d38.Reg, 0)
-						ctx.EmitSetcc(r1, CondNotEqual)
-						d39 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r1}
+						d39 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r1, Condition: CondNotEqual}
 						ctx.BindReg(r1, &d39)
 					}
 					d40 = d39
-					ctx.EnsureDesc(&d40)
-					if d40.Loc != LocImm && d40.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d40)
+					if d40.Loc != LocImm && d40.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d40.Loc == LocImm {
 						if d40.Imm.Bool() {
@@ -18003,11 +17990,11 @@ func init_strings() {
 						}
 						return bbs[7].Render()
 					}
-					ctx.EmitCmpRegImm32(d40.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl7)
+					ctx.EmitJump(d40.Condition, lbl7)
 					if bbs[7].Rendered {
 						ctx.EmitJmp(lbl8)
 					}
+					ctx.FreeDesc(&d39)
 					ctx.FlushRegisterMoves()
 					if !bbs[7].Rendered {
 						snap41 := d0
@@ -18060,7 +18047,6 @@ func init_strings() {
 						return bbs[6].Render()
 					}
 					return result
-					ctx.FreeDesc(&d39)
 					return result
 				}
 				bbs[5].Render = func() JITValueDesc {
@@ -20333,14 +20319,13 @@ func init_strings() {
 						}
 						r0 := ctx.AllocRegExcept(d3.Reg)
 						ctx.EmitCmpRegImm32(d3.Reg, 0)
-						ctx.EmitSetcc(r0, CondNotEqual)
-						d4 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+						d4 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondNotEqual}
 						ctx.BindReg(r0, &d4)
 					}
 					d5 = d4
-					ctx.EnsureDesc(&d5)
-					if d5.Loc != LocImm && d5.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d5)
+					if d5.Loc != LocImm && d5.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d5.Loc == LocImm {
 						if d5.Imm.Bool() {
@@ -20348,11 +20333,11 @@ func init_strings() {
 						}
 						return bbs[2].Render()
 					}
-					ctx.EmitCmpRegImm32(d5.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl2)
+					ctx.EmitJump(d5.Condition, lbl2)
 					if bbs[2].Rendered {
 						ctx.EmitJmp(lbl3)
 					}
+					ctx.FreeDesc(&d4)
 					ctx.FlushRegisterMoves()
 					if !bbs[2].Rendered {
 						snap6 := d0
@@ -20373,7 +20358,6 @@ func init_strings() {
 						return bbs[1].Render()
 					}
 					return result
-					ctx.FreeDesc(&d4)
 					return result
 				}
 				bbs[1].Render = func() JITValueDesc {
@@ -20791,14 +20775,13 @@ func init_strings() {
 						}
 						r2 := ctx.AllocRegExcept(d29.Reg)
 						ctx.EmitCmpRegImm32(d29.Reg, 0)
-						ctx.EmitSetcc(r2, CondNotEqual)
-						d30 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r2}
+						d30 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r2, Condition: CondNotEqual}
 						ctx.BindReg(r2, &d30)
 					}
 					d31 = d30
-					ctx.EnsureDesc(&d31)
-					if d31.Loc != LocImm && d31.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d31)
+					if d31.Loc != LocImm && d31.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d31.Loc == LocImm {
 						if d31.Imm.Bool() {
@@ -20806,11 +20789,11 @@ func init_strings() {
 						}
 						return bbs[4].Render()
 					}
-					ctx.EmitCmpRegImm32(d31.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl6)
+					ctx.EmitJump(d31.Condition, lbl6)
 					if bbs[4].Rendered {
 						ctx.EmitJmp(lbl5)
 					}
+					ctx.FreeDesc(&d30)
 					ctx.FlushRegisterMoves()
 					if !bbs[4].Rendered {
 						snap32 := d0
@@ -20847,7 +20830,6 @@ func init_strings() {
 						return bbs[5].Render()
 					}
 					return result
-					ctx.FreeDesc(&d30)
 					return result
 				}
 				bbs[4].Render = func() JITValueDesc {
@@ -23697,14 +23679,13 @@ func init_strings() {
 						}
 						r0 := ctx.AllocRegExcept(d15.Reg)
 						ctx.EmitCmpRegImm32(d15.Reg, 0)
-						ctx.EmitSetcc(r0, CondNotEqual)
-						d16 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+						d16 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondNotEqual}
 						ctx.BindReg(r0, &d16)
 					}
 					d17 = d16
-					ctx.EnsureDesc(&d17)
-					if d17.Loc != LocImm && d17.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d17)
+					if d17.Loc != LocImm && d17.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d17.Loc == LocImm {
 						if d17.Imm.Bool() {
@@ -23712,11 +23693,11 @@ func init_strings() {
 						}
 						return bbs[5].Render()
 					}
-					ctx.EmitCmpRegImm32(d17.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl5)
+					ctx.EmitJump(d17.Condition, lbl5)
 					if bbs[5].Rendered {
 						ctx.EmitJmp(lbl6)
 					}
+					ctx.FreeDesc(&d16)
 					ctx.FlushRegisterMoves()
 					if !bbs[5].Rendered {
 						snap18 := d0
@@ -23751,7 +23732,6 @@ func init_strings() {
 						return bbs[4].Render()
 					}
 					return result
-					ctx.FreeDesc(&d16)
 					return result
 				}
 				bbs[3].Render = func() JITValueDesc {

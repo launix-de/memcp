@@ -1518,18 +1518,17 @@ func init() {
 					if d20.Loc != LocReg && d20.Loc != LocRegPair && d20.Loc != LocRegTriple {
 						panic("jit: nil comparison requires a register value")
 					}
-					r4 := ctx.AllocRegExcept(d20.Reg)
+					r4 := ctx.AllocReg()
 					ctx.EmitCmpRegImm32(d20.Reg, 0)
-					ctx.EmitSetcc(r4, CondEqual)
-					d21 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r4}
+					d21 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r4, Condition: CondEqual}
 					ctx.BindReg(r4, &d21)
 				}
 				ctx.FreeDesc(&d20)
 				ctx.ReclaimUntrackedRegs()
 				d22 := d21
-				ctx.EnsureDesc(&d22)
-				if d22.Loc != LocImm && d22.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
+				ctx.SyncDesc(&d22)
+				if d22.Loc != LocImm && d22.Loc != LocFlags {
+					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
 				lbl30 := ctx.ReserveLabel()
 				lbl31 := ctx.ReserveLabel()
@@ -1542,15 +1541,14 @@ func init() {
 						ctx.EmitJmp(lbl11)
 					}
 				} else {
-					ctx.EmitCmpRegImm32(d22.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl30)
+					ctx.EmitJump(d22.Condition, lbl30)
 					ctx.EmitJmp(lbl31)
+					ctx.FreeDesc(&d21)
 					ctx.MarkLabel(lbl30)
 					ctx.EmitJmp(lbl9)
 					ctx.MarkLabel(lbl31)
 					ctx.EmitJmp(lbl11)
 				}
-				ctx.FreeDesc(&d21)
 				bbpos_1_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				ctx.MarkLabel(lbl11)
 				ctx.ResolveFixups()
@@ -1938,18 +1936,17 @@ func init() {
 					if d45.Loc != LocReg && d45.Loc != LocRegPair && d45.Loc != LocRegTriple {
 						panic("jit: nil comparison requires a register value")
 					}
-					r30 := ctx.AllocRegExcept(d45.Reg)
+					r30 := ctx.AllocReg()
 					ctx.EmitCmpRegImm32(d45.Reg, 0)
-					ctx.EmitSetcc(r30, CondNotEqual)
-					d46 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r30}
+					d46 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r30, Condition: CondNotEqual}
 					ctx.BindReg(r30, &d46)
 				}
 				ctx.FreeDesc(&d45)
 				ctx.ReclaimUntrackedRegs()
 				d47 := d46
-				ctx.EnsureDesc(&d47)
-				if d47.Loc != LocImm && d47.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
+				ctx.SyncDesc(&d47)
+				if d47.Loc != LocImm && d47.Loc != LocFlags {
+					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
 				lbl38 := ctx.ReserveLabel()
 				lbl39 := ctx.ReserveLabel()
@@ -1962,15 +1959,14 @@ func init() {
 						ctx.EmitJmp(lbl22)
 					}
 				} else {
-					ctx.EmitCmpRegImm32(d47.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl38)
+					ctx.EmitJump(d47.Condition, lbl38)
 					ctx.EmitJmp(lbl39)
+					ctx.FreeDesc(&d46)
 					ctx.MarkLabel(lbl38)
 					ctx.EmitJmp(lbl21)
 					ctx.MarkLabel(lbl39)
 					ctx.EmitJmp(lbl22)
 				}
-				ctx.FreeDesc(&d46)
 				bbpos_1_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				ctx.MarkLabel(lbl22)
 				ctx.ResolveFixups()
@@ -2063,18 +2059,17 @@ func init() {
 					if d53.Loc != LocReg && d53.Loc != LocRegPair && d53.Loc != LocRegTriple {
 						panic("jit: nil comparison requires a register value")
 					}
-					r33 := ctx.AllocRegExcept(d53.Reg)
+					r33 := ctx.AllocReg()
 					ctx.EmitCmpRegImm32(d53.Reg, 0)
-					ctx.EmitSetcc(r33, CondNotEqual)
-					d54 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r33}
+					d54 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r33, Condition: CondNotEqual}
 					ctx.BindReg(r33, &d54)
 				}
 				ctx.FreeDesc(&d53)
 				ctx.ReclaimUntrackedRegs()
 				d55 := d54
-				ctx.EnsureDesc(&d55)
-				if d55.Loc != LocImm && d55.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
+				ctx.SyncDesc(&d55)
+				if d55.Loc != LocImm && d55.Loc != LocFlags {
+					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
 				lbl41 := ctx.ReserveLabel()
 				lbl42 := ctx.ReserveLabel()
@@ -2088,16 +2083,15 @@ func init() {
 						ctx.EmitJmp(lbl5)
 					}
 				} else {
-					ctx.EmitCmpRegImm32(d55.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl41)
+					ctx.EmitJump(d55.Condition, lbl41)
 					ctx.EmitJmp(lbl42)
+					ctx.FreeDesc(&d54)
 					ctx.MarkLabel(lbl41)
 					ctx.EmitJmp(lbl4)
 					ctx.MarkLabel(lbl42)
 					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(0)}, int32(phiBase3)+int32(0))
 					ctx.EmitJmp(lbl5)
 				}
-				ctx.FreeDesc(&d54)
 				bbpos_1_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				ctx.MarkLabel(lbl7)
 				ctx.ResolveFixups()
@@ -4492,15 +4486,14 @@ func init() {
 					}
 					r0 := ctx.AllocRegExcept(d12.Reg)
 					ctx.EmitCmpRegImm32(d12.Reg, 0)
-					ctx.EmitSetcc(r0, CondEqual)
-					d14 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+					d14 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondEqual}
 					ctx.BindReg(r0, &d14)
 				}
 				ctx.ReclaimUntrackedRegs()
 				d15 := d14
-				ctx.EnsureDesc(&d15)
-				if d15.Loc != LocImm && d15.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
+				ctx.SyncDesc(&d15)
+				if d15.Loc != LocImm && d15.Loc != LocFlags {
+					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
 				lbl17 := ctx.ReserveLabel()
 				lbl18 := ctx.ReserveLabel()
@@ -4513,15 +4506,14 @@ func init() {
 						ctx.EmitJmp(lbl5)
 					}
 				} else {
-					ctx.EmitCmpRegImm32(d15.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl17)
+					ctx.EmitJump(d15.Condition, lbl17)
 					ctx.EmitJmp(lbl18)
+					ctx.FreeDesc(&d14)
 					ctx.MarkLabel(lbl17)
 					ctx.EmitJmp(lbl4)
 					ctx.MarkLabel(lbl18)
 					ctx.EmitJmp(lbl5)
 				}
-				ctx.FreeDesc(&d14)
 				bbpos_1_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				ctx.MarkLabel(lbl5)
 				ctx.ResolveFixups()

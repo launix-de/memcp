@@ -716,17 +716,16 @@ func init_date() {
 						if d24.Loc != LocReg && d24.Loc != LocRegPair && d24.Loc != LocRegTriple {
 							panic("jit: nil comparison requires a register value")
 						}
-						r1 := ctx.AllocRegExcept(d24.Reg)
+						r1 := ctx.AllocReg()
 						ctx.EmitCmpRegImm32(d24.Reg, 0)
-						ctx.EmitSetcc(r1, CondNotEqual)
-						d25 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r1}
+						d25 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r1, Condition: CondNotEqual}
 						ctx.BindReg(r1, &d25)
 					}
 					ctx.FreeDesc(&d24)
 					d26 = d25
-					ctx.EnsureDesc(&d26)
-					if d26.Loc != LocImm && d26.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d26)
+					if d26.Loc != LocImm && d26.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d26.Loc == LocImm {
 						if d26.Imm.Bool() {
@@ -754,9 +753,9 @@ func init_date() {
 						return bbs[4].Render()
 					}
 					lbl7 := ctx.ReserveLabel()
-					ctx.EmitCmpRegImm32(d26.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl4)
+					ctx.EmitJump(d26.Condition, lbl4)
 					ctx.EmitJmp(lbl7)
+					ctx.FreeDesc(&d25)
 					snap28 := d1
 					snap29 := d2
 					snap30 := d3
@@ -847,7 +846,6 @@ func init_date() {
 						return bbs[3].Render()
 					}
 					return result
-					ctx.FreeDesc(&d25)
 					return result
 				}
 				bbs[3].Render = func() JITValueDesc {
@@ -2539,17 +2537,16 @@ func init_date() {
 						if d74.Loc != LocReg && d74.Loc != LocRegPair && d74.Loc != LocRegTriple {
 							panic("jit: nil comparison requires a register value")
 						}
-						r1 := ctx.AllocRegExcept(d74.Reg)
+						r1 := ctx.AllocReg()
 						ctx.EmitCmpRegImm32(d74.Reg, 0)
-						ctx.EmitSetcc(r1, CondNotEqual)
-						d75 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r1}
+						d75 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r1, Condition: CondNotEqual}
 						ctx.BindReg(r1, &d75)
 					}
 					ctx.FreeDesc(&d74)
 					d76 = d75
-					ctx.EnsureDesc(&d76)
-					if d76.Loc != LocImm && d76.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d76)
+					if d76.Loc != LocImm && d76.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d76.Loc == LocImm {
 						if d76.Imm.Bool() {
@@ -2577,9 +2574,9 @@ func init_date() {
 						return bbs[8].Render()
 					}
 					lbl11 := ctx.ReserveLabel()
-					ctx.EmitCmpRegImm32(d76.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl8)
+					ctx.EmitJump(d76.Condition, lbl8)
 					ctx.EmitJmp(lbl11)
+					ctx.FreeDesc(&d75)
 					snap78 := d1
 					snap79 := d2
 					snap80 := d3
@@ -2710,7 +2707,6 @@ func init_date() {
 						return bbs[7].Render()
 					}
 					return result
-					ctx.FreeDesc(&d75)
 					return result
 				}
 				bbs[7].Render = func() JITValueDesc {
@@ -3746,17 +3742,16 @@ func init_date() {
 						if d74.Loc != LocReg && d74.Loc != LocRegPair && d74.Loc != LocRegTriple {
 							panic("jit: nil comparison requires a register value")
 						}
-						r1 := ctx.AllocRegExcept(d74.Reg)
+						r1 := ctx.AllocReg()
 						ctx.EmitCmpRegImm32(d74.Reg, 0)
-						ctx.EmitSetcc(r1, CondNotEqual)
-						d75 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r1}
+						d75 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r1, Condition: CondNotEqual}
 						ctx.BindReg(r1, &d75)
 					}
 					ctx.FreeDesc(&d74)
 					d76 = d75
-					ctx.EnsureDesc(&d76)
-					if d76.Loc != LocImm && d76.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d76)
+					if d76.Loc != LocImm && d76.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d76.Loc == LocImm {
 						if d76.Imm.Bool() {
@@ -3784,9 +3779,9 @@ func init_date() {
 						return bbs[8].Render()
 					}
 					lbl31 := ctx.ReserveLabel()
-					ctx.EmitCmpRegImm32(d76.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl8)
+					ctx.EmitJump(d76.Condition, lbl8)
 					ctx.EmitJmp(lbl31)
+					ctx.FreeDesc(&d75)
 					snap78 := d1
 					snap79 := d2
 					snap80 := d3
@@ -3917,7 +3912,6 @@ func init_date() {
 						return bbs[7].Render()
 					}
 					return result
-					ctx.FreeDesc(&d75)
 					return result
 				}
 				bbs[7].Render = func() JITValueDesc {
@@ -21815,17 +21809,16 @@ func init_date() {
 						if d19.Loc != LocReg && d19.Loc != LocRegPair && d19.Loc != LocRegTriple {
 							panic("jit: nil comparison requires a register value")
 						}
-						r0 := ctx.AllocRegExcept(d19.Reg)
+						r0 := ctx.AllocReg()
 						ctx.EmitCmpRegImm32(d19.Reg, 0)
-						ctx.EmitSetcc(r0, CondEqual)
-						d20 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+						d20 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondEqual}
 						ctx.BindReg(r0, &d20)
 					}
 					ctx.FreeDesc(&d19)
 					d21 = d20
-					ctx.EnsureDesc(&d21)
-					if d21.Loc != LocImm && d21.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d21)
+					if d21.Loc != LocImm && d21.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d21.Loc == LocImm {
 						if d21.Imm.Bool() {
@@ -21833,11 +21826,11 @@ func init_date() {
 						}
 						return bbs[4].Render()
 					}
-					ctx.EmitCmpRegImm32(d21.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl4)
+					ctx.EmitJump(d21.Condition, lbl4)
 					if bbs[4].Rendered {
 						ctx.EmitJmp(lbl5)
 					}
+					ctx.FreeDesc(&d20)
 					ctx.FlushRegisterMoves()
 					if !bbs[4].Rendered {
 						snap22 := d0
@@ -21880,7 +21873,6 @@ func init_date() {
 						return bbs[3].Render()
 					}
 					return result
-					ctx.FreeDesc(&d20)
 					return result
 				}
 				bbs[3].Render = func() JITValueDesc {

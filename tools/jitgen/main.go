@@ -8388,12 +8388,29 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tctx.EnsureDesc(&%s)", xVal.goVar)
 					g.emit("\tif %s.Loc != LocReg && %s.Loc != LocRegPair && %s.Loc != LocRegTriple { panic(\"jit: nil comparison requires a register value\") }", xVal.goVar, xVal.goVar, xVal.goVar)
 					rv := g.allocReg()
-					g.emitAllocBooleanResultReg(rv, resultTargetVar, "\t", directResultMarker, xVal.goVar+".Reg")
+					if flagsOnly {
+						g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
+					} else {
+						g.emitAllocBooleanResultReg(rv, resultTargetVar, "\t", directResultMarker, xVal.goVar+".Reg")
+					}
 					g.emit("\tctx.EmitCmpRegImm32(%s.Reg, 0)", xVal.goVar)
-					g.emit("\tctx.EmitSetcc(%s, %s)", rv, cc)
-					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+					if flagsOnly {
+						if lazyReturn {
+							g.emit("\t%s = ctx.DeferBooleanFlags(%s, %s)", dv, rv, cc)
+						} else {
+							g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, rv, cc)
+						}
+						g.emit("\tctx.BindReg(%s, &%s)", rv, dv)
+					} else {
+						g.emit("\tctx.EmitSetcc(%s, %s)", rv, cc)
+						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+					}
 					g.emit("}")
-					g.vals[name] = genVal{goVar: dv, isDesc: true, resultTargetVar: resultTargetVar}
+					marker := ""
+					if flagsOnly {
+						marker = "_flags"
+					}
+					g.vals[name] = genVal{goVar: dv, isDesc: true, marker: marker, resultTargetVar: resultTargetVar}
 					break
 				}
 			}
