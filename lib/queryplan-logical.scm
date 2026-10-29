@@ -3831,6 +3831,30 @@ from SELECT/GROUP BY syntax. */
 (define logical_select_group (lambda (block)
 	(begin
 		(define block (expand_grouped_query_block block))
+		/* Decorrelation can introduce local stage-output columns after frontend
+		representative normalization. Those values must cross the group through
+		its aggregate interface too; a row-source alias is not bound by a group
+		consumer. True outer dependencies remain outside this local source set. */
+		(define stage_sources (filter (qb_sources block) source_is_stage_output?))
+		(define block (if (empty_list? stage_sources) block (begin
+			(define alias (source_alias (car (qb_sources block))))
+			(define canonical (lambda (expr) (canonical_column_expr_for_alias alias expr)))
+			(define expressions (merge (list
+				(extract_assoc (qb_fields block) (lambda (_title expr) expr))
+				(extract_assoc (qb_hidden block) (lambda (_title expr) expr))
+				(list (qb_having block)))))
+			(define roots (zip expressions (map expressions canonical)))
+			(define key_index (make_group_key_index (map (qb_group block) canonical)
+				(map roots cadr)))
+			(define rewrite (lambda (expr)
+				(group_representative_expr stage_sources alias key_index expr
+					(cadr (find roots (lambda (entry) (equal? (car entry) expr)) nil)))))
+			(make_query_block (qb_schema block) (qb_sources block)
+				(map_assoc (qb_fields block) (lambda (_title expr) (rewrite expr)))
+				(qb_where block) (qb_group block) (rewrite (qb_having block))
+				(qb_order block) (qb_limit block) (qb_offset block)
+				(map_assoc (qb_hidden block) (lambda (_title expr) (rewrite expr)))
+				(qb_stages block) (qb_facts block)))))
 		(define template (make_select_group_stage block (select_group_input block)))
 		(define stage (group_stage_with_facts template
 			(qassoc_set (gs_facts template) (quote purpose) (quote select_group))))

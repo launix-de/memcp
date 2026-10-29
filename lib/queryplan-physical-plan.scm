@@ -8062,6 +8062,22 @@ until the caller has selected this physical alternative. */
 		tuples; carrying the complete scan recipe defeats late materialization. */
 		(define map_width (count (scan_join_order_refs_for_exprs
 			sources default_alias consumer_exprs)))
+		/* The materialized operator reads input tuples before the join reduces
+		them. Charge each source's actual key/filter/value width at its input
+		cardinality, separately from the final mapper's output-row work. */
+		(define input_refs (scan_join_order_refs_for_exprs sources default_alias
+			(merge (list consumer_exprs terms (order_exprs order_items)))))
+		(define input_cells (if known_rows
+			(reduce (produceN (count sources)) (lambda (total index)
+				(+ total (* (nth source_rows index)
+					(count (filter input_refs (lambda (ref) (equal? (car ref) index))))))) 0)
+			nil))
+		/* A shared catalog describes available producers, not work required by
+		this operator. Only actual probe expressions require another lowerer. */
+		(define consumed_exprs (merge (list consumer_exprs (list final_condition)
+			(order_exprs order_items))))
+		(define closed_inputs (and (empty_list? (expr_probe_stages consumed_exprs))
+			(not (expr_contains_driver_membership? consumed_exprs))))
 		(define window_supported (and ordered_window
 			(and (number? limit_partition_columns)
 				(and (>= limit_partition_columns 0)
@@ -8070,7 +8086,7 @@ until the caller has selected this physical alternative. */
 			(and (equal? offset 0) (and (equal? limit -1) (empty_list? order_items)))))
 		(define supported (and (scan_join_order_tree_compatible? plan)
 			(and (>= (count sources) 2)
-				(and (empty_list? stages)
+				(and closed_inputs
 					(and (number? input_rows)
 						(and (number? joined_rows)
 							(and (number? probe_rows)
@@ -8105,9 +8121,12 @@ until the caller has selected this physical alternative. */
 				(list (quote offset) offset)
 				(list (quote limit) limit)
 				(list (quote limit_partition_columns) limit_partition_columns)
-				(list (quote cost) (planner_scan_join_order_cost
-					input_rows probe_rows joined_rows (count sources)
-					output_rows map_width))
+				(list (quote cost) (planner_cost_add
+					(planner_scan_join_order_cost input_rows probe_rows joined_rows
+						(count sources) output_rows map_width)
+					(planner_cost 0 (* input_cells planner_membership_map_column_row_ns)
+						0 0 0 0 (* input_cells 8) 0 output_rows 0.65)
+					output_rows 0.65))
 				(list (quote batched_probe_cost) (if (number? driver_rows)
 					(planner_scan_join_order_batched_probe_cost driver_rows
 						(count sources) (+ offset limit) map_width) nil)))))))
@@ -12828,11 +12847,28 @@ in source recipes retain their semantic shape and identity. */
 					(qb_limit input) (qb_offset input) (qb_hidden input)
 					(map (qassoc_get (qb_facts input) (quote input_stage_keys) '())
 						(lambda (key) (stage_index key))) (qb_facts input))))
+			(define prepared_input (physical_node_with_planning_context declared_input planning_session tx stage_index))
+			/* Bind a closed single base producer before deriving physical cache
+			identities. Its filter belongs to the group fill; the logical stage
+			keeps its declared key and reducer inventory. Later rebinding would
+			leave query-input column recipes attached to a base-table carrier. */
+			(define base_input (and (query_block? prepared_input)
+				(single_source? (qb_sources prepared_input))
+				(source_is_base_table? (car (qb_sources prepared_input)))
+				(not (source_outer? (car (qb_sources prepared_input))))
+				(empty_list? (qb_stages prepared_input))
+				(empty_list? (qb_group prepared_input)) (nil? (qb_having prepared_input))
+				(empty_list? (qb_order prepared_input))
+				(nil? (qb_limit prepared_input)) (nil? (qb_offset prepared_input))))
 			(make_group_stage (gs_id stage)
-				(physical_node_with_planning_context declared_input planning_session tx stage_index)
+				(if base_input (car (qb_sources prepared_input)) prepared_input)
 				(gs_domain stage) (gs_keys stage) (gs_aggregates stage) (gs_having stage)
 				(gs_output stage) (gs_order stage) (gs_limit stage) (gs_offset stage)
-				(qassoc_set (gs_facts stage) (quote physical_planning_session) planning_session))))))
+				(qassoc_set (if base_input
+					(qassoc_set (gs_facts stage) (quote condition)
+						(combine_where (qb_where prepared_input)
+							(source_join_expr (car (qb_sources prepared_input)))))
+					(gs_facts stage)) (quote physical_planning_session) planning_session))))))
 
 (define physical_node_with_planning_context (lambda (node planning_session tx stage_index)
 	(if (query_block? node)
