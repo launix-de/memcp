@@ -102,7 +102,8 @@ type TypeDescriptor struct {
 	Const          bool                       // value is a compile-time constant; for func: safe to constant-fold
 	Length         int                        // exact positive list/assoc length; -1 = unknown
 	Optional       bool                       // for func params: parameter is optional
-	Variadic       bool                       // for func params: last param accepts 0+ values
+	Variadic       bool                       // parameter accepts repeated values before optional trailing parameters
+	VariadicStep   int                        // repeated group width; 0 means 1 (e.g. 2 for key/value pairs)
 	Forbidden      bool                       // for func: optimizer-only, hidden from help
 	HasSideEffects bool                       // for func: true = call has side effects, cannot be eliminated even if result unused
 	Label          string                     // human-readable label at any nesting level
@@ -119,9 +120,10 @@ type TypeDescriptor struct {
 	// data. Numbered parameters stay in their existing stack slots and constants
 	// stay immediate until an operation actually needs to materialize them.
 	JITVirtualArgs bool
-	// JITInlineCallbacks records that jitgen emitted the builtin's dynamic SSA
-	// calls as recursive lambda emitters. It is capability metadata, not a
-	// runtime permission gate.
+	// JITInlineCallbacks records that the generated loop supports known
+	// callbacks. Fixed-arity frames can recursively inline lambda templates;
+	// dynamic-arity frames need materialized callables, enforced by admission.
+	// This is capability metadata, not a runtime permission gate.
 	JITInlineCallbacks bool
 	// JITNativeFP opts this generated emitter into the typed floating-point
 	// register contract. The default deliberately preserves the generic Scmer
@@ -133,6 +135,31 @@ type TypeDescriptor struct {
 	// helpers. Zero denotes a handwritten emitter without generated cost data;
 	// the maximum value denotes a generated native-call boundary.
 	JITInlineCost uint16
+}
+
+// Parameter resolves a call's physical argument positions from its signature.
+// A repeated group may be followed by optional parameters: the group's remainder
+// selects that suffix. For example, pairs with step 2 have a final merger only
+// at odd tail arities. Function-valued keys/values remain ordinary data; neither
+// optimizer nor JIT guesses callback positions from the supplied runtime value.
+func (td *TypeDescriptor) Parameter(index, arity int) *TypeDescriptor {
+	if td == nil || index < 0 || index >= arity {
+		return nil
+	}
+	for i, parameter := range td.Params {
+		if parameter != nil && parameter.Variadic {
+			step := max(1, parameter.VariadicStep)
+			suffix := (arity - i) % step
+			if index >= arity-suffix {
+				return td.Params[i+1+index-(arity-suffix)]
+			}
+			return parameter
+		}
+		if index == i {
+			return parameter
+		}
+	}
+	return nil
 }
 
 // OptimizerContext is an exported wrapper so packages like storage can use
@@ -783,15 +810,8 @@ func Validate(val Scmer, require string) string {
 					subrequired := "any"
 					isReturntype := false
 					if def != nil && def.Type != nil {
-						j := i - 1
-						if j >= len(def.Type.Params) {
-							j = len(def.Type.Params) - 1
-						}
-						if j >= 0 && j < len(def.Type.Params) && def.Type.Params[j] != nil {
-							subrequired = def.Type.Params[j].Kind
-							if subrequired == "" {
-								subrequired = "any"
-							}
+						if parameter := def.Type.Parameter(i-1, len(slice)-1); parameter != nil && parameter.Kind != "" {
+							subrequired = parameter.Kind
 						}
 						if subrequired == "returntype" {
 							subrequired = require
@@ -805,12 +825,7 @@ func Validate(val Scmer, require string) string {
 					// Deep callback signature validation: if param expects func with Params,
 					// and the argument is a lambda literal, validate arity and return type.
 					if hasTypeKind(subrequired, "func") && def != nil && def.Type != nil {
-						j := i - 1
-						if j >= len(def.Type.Params) {
-							j = len(def.Type.Params) - 1
-						}
-						if j >= 0 && j < len(def.Type.Params) && def.Type.Params[j] != nil {
-							paramTD := def.Type.Params[j]
+						if paramTD := def.Type.Parameter(i-1, len(slice)-1); paramTD != nil {
 							if hasTypeKind(paramTD.Kind, "func") && len(paramTD.Params) > 0 {
 								argVal := slice[i]
 								if argVal.IsSourceInfo() {

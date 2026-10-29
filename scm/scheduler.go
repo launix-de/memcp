@@ -436,6 +436,9 @@ func init_scheduler() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
+					if d8.Loc != LocImm {
+						ctx.EnsureDesc(&d8)
+					}
 					if d8.Loc == LocImm {
 						d9 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d8.Imm.Int())}
 					} else if d8.Type == tagInt && d8.Loc == LocRegPair {
@@ -448,7 +451,8 @@ func init_scheduler() {
 						ctx.BindReg(d8.Reg, &d9)
 						ctx.BindReg(d8.Reg, &d9)
 					} else {
-						d9 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d8}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d8)
+						d9 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d9.Type = tagInt
 						ctx.BindReg(d9.Reg, &d9)
 					}

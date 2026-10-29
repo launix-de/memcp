@@ -517,7 +517,9 @@ func jitValueWordIsPointer(value JITValueDesc, word int32) bool {
 }
 
 type JITLambdaTemplate struct {
-	Proc  Proc
+	// Keep the concrete allocation: ProcJIT captures follow the Proc header
+	// in memory and are lost if that header is copied into a template.
+	Proc  *Proc
 	Outer *JITEnv
 }
 
@@ -5063,7 +5065,7 @@ func init_jit() {
 				if d0.Loc == LocRegPair || d0.Loc == LocStackPair || d0.Loc == LocRegTriple || d0.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
-				d1 := jitMaterializeVirtualGoSlice(ctx, args[0:])
+				d1 := jitMaterializeVirtualGoSlice(ctx, args)
 				d1 = JITPrepareGoSliceArg(ctx, d1)
 				if d1.Loc != LocRegTriple && d1.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (jitCompileMode arg1)")
@@ -6925,6 +6927,7 @@ func init_jit() {
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[1]any, index int, value any) { dst[index] = value }), []JITValueDesc{d230, d231, d232})
 					sliceResults233 := JITEmitGoCallResults(ctx, GoFuncAddr(func(value *[1]any) []any { return value[0:1:1] }), []JITValueDesc{d230}, []uint8{3}, []uint8{1})
 					d234 = sliceResults233[0]
+					_ = d234
 					d235 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("warning: JIT fallback: %s\n")}
 					ctx.EnsureDesc(&d235)
 					if d235.Loc == LocImm {

@@ -2289,6 +2289,9 @@ func init_processlist() {
 				}
 				d0 := args[0]
 				d0.ID = 0
+				if d0.Loc != LocImm {
+					ctx.EnsureDesc(&d0)
+				}
 				var d1 JITValueDesc
 				if d0.Loc == LocImm {
 					d1 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d0.Imm.Int())}
@@ -2302,7 +2305,8 @@ func init_processlist() {
 					ctx.BindReg(d0.Reg, &d1)
 					ctx.BindReg(d0.Reg, &d1)
 				} else {
-					d1 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d0}, 1)
+					boxed := JITPrepareScmerGoArg(ctx, d0)
+					d1 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 					d1.Type = tagInt
 					ctx.BindReg(d1.Reg, &d1)
 				}

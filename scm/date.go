@@ -1514,6 +1514,9 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					d47 = args[0]
 					d47.ID = 0
+					if d47.Loc != LocImm {
+						ctx.EnsureDesc(&d47)
+					}
 					if d47.Loc == LocImm {
 						d48 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d47.Imm.Int())}
 					} else if d47.Type == tagInt && d47.Loc == LocRegPair {
@@ -1526,7 +1529,8 @@ func init_date() {
 						ctx.BindReg(d47.Reg, &d48)
 						ctx.BindReg(d47.Reg, &d48)
 					} else {
-						d48 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d47}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d47)
+						d48 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d48.Type = tagInt
 						ctx.BindReg(d48.Reg, &d48)
 					}
@@ -7299,6 +7303,9 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					d72 = args[1]
 					d72.ID = 0
+					if d72.Loc != LocImm {
+						ctx.EnsureDesc(&d72)
+					}
 					if d72.Loc == LocImm {
 						d73 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d72.Imm.Int())}
 					} else if d72.Type == tagInt && d72.Loc == LocRegPair {
@@ -7311,7 +7318,8 @@ func init_date() {
 						ctx.BindReg(d72.Reg, &d73)
 						ctx.BindReg(d72.Reg, &d73)
 					} else {
-						d73 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d72}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d72)
+						d73 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d73.Type = tagInt
 						ctx.BindReg(d73.Reg, &d73)
 					}
@@ -9959,6 +9967,9 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					d72 = args[1]
 					d72.ID = 0
+					if d72.Loc != LocImm {
+						ctx.EnsureDesc(&d72)
+					}
 					if d72.Loc == LocImm {
 						d73 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d72.Imm.Int())}
 					} else if d72.Type == tagInt && d72.Loc == LocRegPair {
@@ -9971,7 +9982,8 @@ func init_date() {
 						ctx.BindReg(d72.Reg, &d73)
 						ctx.BindReg(d72.Reg, &d73)
 					} else {
-						d73 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d72}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d72)
+						d73 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d73.Type = tagInt
 						ctx.BindReg(d73.Reg, &d73)
 					}

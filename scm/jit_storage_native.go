@@ -307,22 +307,6 @@ func emitJITFilterBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8, reader
 // lexical frame. Compiled closures keep captured numbered locals in their
 // ProcJIT tail; treating those slots as fresh nil locals changes SQL filters.
 func jitEmitStorageProc(ctx *JITContext, proc *Proc, args []JITValueDesc, condition *jitConditionTargets) JITValueDesc {
-	base, captures := proc.JITCapturedLocals()
-	if len(captures) != 0 {
-		if base < len(args) {
-			panic("jit: storage callback captures overlap arguments")
-		}
-		locals := make([]JITValueDesc, base+len(captures))
-		copy(locals, args)
-		for index := len(args); index < base; index++ {
-			locals[index] = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-		}
-		for index, value := range captures {
-			ctx.TrackImm(value)
-			locals[base+index] = JITValueDesc{Loc: LocImm, Type: value.GetTag(), Imm: value}
-		}
-		args = locals
-	}
 	runtimeEnv := proc.En
 	if runtimeEnv == nil {
 		runtimeEnv = &Globalenv

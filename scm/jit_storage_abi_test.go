@@ -181,8 +181,11 @@ func TestJITBufferLoopsPreserveClosureCaptures(t *testing.T) {
 	producer := CompileJIT(NewProcStruct(*calibrationProcedure("(lambda (factor) (lambda (acc a) (+ acc (* a factor))))")), true)
 	callback := Apply(producer, NewInt(2))
 	reduce := CompileJITMapReduceBuffer(callback.Proc(), []uint8{tagInt})
-	if reduce == nil || !Equal(reduce(NewInt(0), values, 2), NewInt(30)) {
-		t.Fatal("reducer lost captured multiplier")
+	if reduce == nil {
+		t.Fatal("captured reducer did not compile")
+	}
+	if got := reduce(NewInt(0), values, 2); !Equal(got, NewInt(30)) {
+		t.Fatalf("reducer lost captured multiplier: got %s, want 30", String(got))
 	}
 }
 
@@ -1145,6 +1148,101 @@ func TestJITGeneralShiftOperations(t *testing.T) {
 					}
 				}
 			})
+		}
+	}
+}
+
+func TestJITMapReduceBufferRows(t *testing.T) {
+	for _, source := range []string{
+		`(lambda (acc value) value)`,
+		`(lambda (acc value) (+ acc value))`,
+		`(lambda (acc value) (+ acc (* value 2)))`,
+	} {
+		proc := calibrationProcedure(source)
+		kernel := CompileJITMapReduceBuffer(proc, []uint8{tagInt})
+		if kernel == nil {
+			t.Fatalf("compile failed: %s", source)
+		}
+		for _, rows := range []int{0, 1, 2, 3} {
+			values := []Scmer{NewInt(6), NewInt(9), NewInt(12)}
+			want := NewInt(0)
+			call := PrepareSerialProc(NewProcStruct(*proc))
+			for i := 0; i < rows; i++ {
+				want = call.Call([]Scmer{want, values[i]})
+			}
+			got := kernel(NewInt(0), values, rows)
+			if !Equal(got, want) {
+				t.Fatalf("%s rows=%d got=%s want=%s", source, rows, String(got), String(want))
+			}
+		}
+	}
+}
+
+func BenchmarkMapReduceBufferRows(b *testing.B) {
+	for _, shape := range []struct {
+		name, source string
+		width        int
+	}{
+		{"Sum", `(lambda (acc a) (+ acc a))`, 1},
+		{"Expression", `(lambda (acc a b c) (+ acc (+ a (* b c))))`, 3},
+	} {
+		b.Run(shape.name, func(b *testing.B) {
+			const rows = 1024
+			values := make([]Scmer, rows*shape.width)
+			types := make([]uint8, shape.width)
+			for i := range types {
+				types[i] = tagInt
+			}
+			for i := range values {
+				values[i] = NewInt(int64(i%17 + 1))
+			}
+			want := int64(0)
+			for i := 0; i < rows; i++ {
+				want += values[i*shape.width].Int()
+				if shape.width == 3 {
+					want += values[i*shape.width+1].Int() * values[i*shape.width+2].Int()
+				}
+			}
+			kernel := CompileJITMapReduceBuffer(calibrationProcedure(shape.source), types)
+			if kernel == nil {
+				b.Fatal("buffer program did not compile")
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				assocBenchmarkSink = kernel(NewInt(0), values, rows)
+			}
+			b.StopTimer()
+			if !Equal(assocBenchmarkSink, NewInt(want)) {
+				b.Fatalf("got %s, want %d", String(assocBenchmarkSink), want)
+			}
+		})
+	}
+}
+
+func TestJITKnownCallbackDoesNotExpandUnboundedCaller(t *testing.T) {
+	for _, cost := range []uint16{32, 256, 257, 1025} {
+		decl := &Declaration{Type: &TypeDescriptor{JITInlineCallbacks: true, JITInlineCost: cost,
+			Params: []*TypeDescriptor{{Kind: "func", Params: []*TypeDescriptor{{Kind: "any"}}}}}}
+		args := []JITValueDesc{{Loc: LocLambdaTemplate, Type: tagProc, Lambda: &JITLambdaTemplate{Proc: &Proc{}}}}
+		if got := jitGeneratedEmitterInline(&JITContext{}, decl, args); got != (cost <= jitCallbackInlineCost) {
+			t.Fatalf("callback caller cost=%d: inline=%v", cost, got)
+		}
+	}
+}
+
+func TestJITVariadicCallbackLoopMaterializesCapturedLambdas(t *testing.T) {
+	proc := jitCompile(preparedTestProc(t, `(lambda (n)
+		(for (list 0 0) (lambda (i sum) (< i n))
+			(lambda (i sum) (list (+ i 1) (+ sum i)))))`))
+	if proc.Proc().compiled() == nil {
+		t.Fatal("loop did not compile")
+	}
+	for _, n := range []int64{0, 1, 10, 50} {
+		got := Apply(proc, NewInt(n))
+		want := NewSlice([]Scmer{NewInt(n), NewInt(n * (n - 1) / 2)})
+		if !Equal(got, want) {
+			t.Fatalf("n=%d got %s want %s", n, String(got), String(want))
 		}
 	}
 }

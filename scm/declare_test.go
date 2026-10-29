@@ -481,3 +481,28 @@ func TestNullableCallbackSignatureValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestPairVariadicCallbackSlots(t *testing.T) {
+	for _, name := range []string{"set_assoc", "set_assoc_mut"} {
+		td := declarations[name].Type
+		for arity := 3; arity <= 12; arity++ {
+			for index := 0; index < arity; index++ {
+				parameter := td.Parameter(index, arity)
+				wantCallback := arity%2 == 0 && index == arity-1
+				if parameter == nil || hasTypeKind(parameter.Kind, "func") != wantCallback {
+					t.Fatalf("%s arity=%d index=%d: wrong callback slot: %+v", name, arity, index, parameter)
+				}
+			}
+		}
+	}
+	// Callable values in data slots and constant-result mergers retain the
+	// ordinary Scheme contract; arity, rather than the value's tag, selects it.
+	for _, source := range []string{
+		`(set_assoc (list) "key" (lambda (x) x))`,
+		`(set_assoc (list) "key" 1 true)`,
+		`(set_assoc (list) "key" 1 "other" (lambda (x) x))`,
+		`(set_assoc (list) "key" 1 "other" 2 (lambda (old new) (+ old new)))`,
+	} {
+		Validate(Read(t.Name(), source), "any")
+	}
+}

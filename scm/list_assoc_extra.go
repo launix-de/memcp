@@ -164,6 +164,9 @@ func init_list_assoc_extra() {
 				ctx.ResolveFixups()
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
+				if d3.Loc != LocImm {
+					ctx.EnsureDesc(&d3)
+				}
 				var d4 JITValueDesc
 				if d3.Loc == LocImm {
 					d4 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d3.Imm.Int())}
@@ -177,7 +180,8 @@ func init_list_assoc_extra() {
 					ctx.BindReg(d3.Reg, &d4)
 					ctx.BindReg(d3.Reg, &d4)
 				} else {
-					d4 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d3}, 1)
+					boxed := JITPrepareScmerGoArg(ctx, d3)
+					d4 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 					d4.Type = tagInt
 					ctx.BindReg(d4.Reg, &d4)
 				}
@@ -2449,6 +2453,9 @@ func init_list_assoc_extra() {
 				ctx.ResolveFixups()
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
+				if d3.Loc != LocImm {
+					ctx.EnsureDesc(&d3)
+				}
 				var d4 JITValueDesc
 				if d3.Loc == LocImm {
 					d4 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d3.Imm.Int())}
@@ -2462,7 +2469,8 @@ func init_list_assoc_extra() {
 					ctx.BindReg(d3.Reg, &d4)
 					ctx.BindReg(d3.Reg, &d4)
 				} else {
-					d4 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d3}, 1)
+					boxed := JITPrepareScmerGoArg(ctx, d3)
+					d4 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 					d4.Type = tagInt
 					ctx.BindReg(d4.Reg, &d4)
 				}
@@ -5117,7 +5125,7 @@ func init_list_assoc_extra() {
 						stableCallbackArgs54 := ctx.StabilizeCallbackArgs(callbackArgs52)
 						ctx.ReclaimUntrackedRegs()
 						outerRegs55 := ctx.PreserveOuterRegs()
-						d51 = JITEmitProcInlineWithOuter(ctx, &d5.Lambda.Proc, d5.Lambda.Outer, stableCallbackArgs54, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff53), ID: 0})
+						d51 = JITEmitProcInlineWithOuter(ctx, d5.Lambda.Proc, d5.Lambda.Outer, stableCallbackArgs54, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff53), ID: 0})
 						ctx.RestoreOuterRegs(outerRegs55)
 						ctx.ReclaimUntrackedRegs()
 					} else {
@@ -5764,7 +5772,7 @@ func init_list_assoc_extra() {
 						stableCallbackArgs50 := ctx.StabilizeCallbackArgs(callbackArgs48)
 						ctx.ReclaimUntrackedRegs()
 						outerRegs51 := ctx.PreserveOuterRegs()
-						d47 = JITEmitProcInlineWithOuter(ctx, &d5.Lambda.Proc, d5.Lambda.Outer, stableCallbackArgs50, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff49), ID: 0})
+						d47 = JITEmitProcInlineWithOuter(ctx, d5.Lambda.Proc, d5.Lambda.Outer, stableCallbackArgs50, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff49), ID: 0})
 						ctx.RestoreOuterRegs(outerRegs51)
 						ctx.ReclaimUntrackedRegs()
 					} else {
@@ -5791,7 +5799,7 @@ func init_list_assoc_extra() {
 						stableCallbackArgs59 := ctx.StabilizeCallbackArgs(callbackArgs57)
 						ctx.ReclaimUntrackedRegs()
 						outerRegs60 := ctx.PreserveOuterRegs()
-						d56 = JITEmitProcInlineWithOuter(ctx, &d8.Lambda.Proc, d8.Lambda.Outer, stableCallbackArgs59, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff58), ID: 0})
+						d56 = JITEmitProcInlineWithOuter(ctx, d8.Lambda.Proc, d8.Lambda.Outer, stableCallbackArgs59, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff58), ID: 0})
 						ctx.RestoreOuterRegs(outerRegs60)
 						ctx.ReclaimUntrackedRegs()
 					} else {
@@ -6428,7 +6436,7 @@ func init_list_assoc_extra() {
 						stableCallbackArgs51 := ctx.StabilizeCallbackArgs(callbackArgs49)
 						ctx.ReclaimUntrackedRegs()
 						outerRegs52 := ctx.PreserveOuterRegs()
-						d48 = JITEmitProcInlineWithOuter(ctx, &d5.Lambda.Proc, d5.Lambda.Outer, stableCallbackArgs51, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff50), ID: 0})
+						d48 = JITEmitProcInlineWithOuter(ctx, d5.Lambda.Proc, d5.Lambda.Outer, stableCallbackArgs51, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff50), ID: 0})
 						ctx.RestoreOuterRegs(outerRegs52)
 						ctx.ReclaimUntrackedRegs()
 					} else {
@@ -6455,7 +6463,7 @@ func init_list_assoc_extra() {
 						stableCallbackArgs60 := ctx.StabilizeCallbackArgs(callbackArgs58)
 						ctx.ReclaimUntrackedRegs()
 						outerRegs61 := ctx.PreserveOuterRegs()
-						d57 = JITEmitProcInlineWithOuter(ctx, &d8.Lambda.Proc, d8.Lambda.Outer, stableCallbackArgs60, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff59), ID: 0})
+						d57 = JITEmitProcInlineWithOuter(ctx, d8.Lambda.Proc, d8.Lambda.Outer, stableCallbackArgs60, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff59), ID: 0})
 						ctx.RestoreOuterRegs(outerRegs61)
 						ctx.ReclaimUntrackedRegs()
 					} else {
@@ -7111,7 +7119,7 @@ func init_list_assoc_extra() {
 						stableCallbackArgs43 := ctx.StabilizeCallbackArgs(callbackArgs41)
 						ctx.ReclaimUntrackedRegs()
 						outerRegs44 := ctx.PreserveOuterRegs()
-						d40 = JITEmitProcInlineWithOuter(ctx, &d5.Lambda.Proc, d5.Lambda.Outer, stableCallbackArgs43, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff42), ID: 0})
+						d40 = JITEmitProcInlineWithOuter(ctx, d5.Lambda.Proc, d5.Lambda.Outer, stableCallbackArgs43, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff42), ID: 0})
 						ctx.RestoreOuterRegs(outerRegs44)
 						ctx.ReclaimUntrackedRegs()
 					} else {
@@ -7695,7 +7703,7 @@ func init_list_assoc_extra() {
 						stableCallbackArgs44 := ctx.StabilizeCallbackArgs(callbackArgs42)
 						ctx.ReclaimUntrackedRegs()
 						outerRegs45 := ctx.PreserveOuterRegs()
-						d41 = JITEmitProcInlineWithOuter(ctx, &d5.Lambda.Proc, d5.Lambda.Outer, stableCallbackArgs44, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff43), ID: 0})
+						d41 = JITEmitProcInlineWithOuter(ctx, d5.Lambda.Proc, d5.Lambda.Outer, stableCallbackArgs44, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff43), ID: 0})
 						ctx.RestoreOuterRegs(outerRegs45)
 						ctx.ReclaimUntrackedRegs()
 					} else {
