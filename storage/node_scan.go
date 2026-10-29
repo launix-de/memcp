@@ -75,12 +75,22 @@ func scanAuthMessage(conn *websocket.Conn, method string, input any) error {
 }
 
 func readScanAuth(conn *websocket.Conn, method string, output any) error {
+	started := time.Now()
 	kind, frame, err := conn.ReadMessage()
 	if err != nil {
 		return err
 	}
 	if kind != websocket.BinaryMessage {
 		return fmt.Errorf("binary node authentication required")
+	}
+	if profile := newClusterReceiveIO(); profile != nil {
+		profile.stats.operations.Add(1)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ready := time.Now().Add(profile.latency)
+		if !profile.transfer(ctx, len(frame), started) || !profile.wait(ctx, ready) {
+			return fmt.Errorf("node authentication throttle deadline")
+		}
 	}
 	message, err := decodeMosiMessage(frame)
 	if err != nil || message.Method != method || message.Packet != nil || message.ID != 0 {

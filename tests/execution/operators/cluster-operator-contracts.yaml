@@ -16,6 +16,12 @@ metadata:
     shard_ram_percent: 50
     coordinator_shard_ram_percent: 1
     gomaxprocs: 16
+    # Conservative synthetic in-rack profile; CLI values can override it.
+    cluster_bandwidth_mbps: 1000
+    cluster_latency_ms: 0.1
+    storage_backend: FakeRemote
+    storage_bandwidth_mbps: 1000
+    storage_latency_ms: 5
 test_cases:
 - name: order-top-n-offset
   sql: SELECT id,v0 FROM big_items ORDER BY v0 DESC,id ASC LIMIT 9 OFFSET 5

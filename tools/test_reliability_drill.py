@@ -356,6 +356,45 @@ class ClusterSuiteTests(unittest.TestCase):
 			with self.assertRaisesRegex(replication.DrillFailure, "2–10"):
 				replication.cluster_suite_config(path)
 
+	def test_io_profiles_default_to_fullspeed_and_cli_zero_overrides_yaml(self):
+		from types import SimpleNamespace
+		with tempfile.TemporaryDirectory() as temp:
+			path = Path(temp) / "suite.yaml"
+			path.write_text("metadata: {cluster: true}\n")
+			config = replication.effective_cluster_config(SimpleNamespace(), path)
+			self.assertEqual(config["cluster_bandwidth_mbps"], 0)
+			self.assertEqual(config["cluster_latency_ms"], 0)
+			self.assertEqual(config["storage_backend"], "filesystem")
+			path.write_text("metadata:\n  cluster:\n    cluster_bandwidth_mbps: 1000\n    cluster_latency_ms: 0.1\n    storage_backend: FakeRemote\n    storage_latency_ms: 5\n")
+			config = replication.effective_cluster_config(SimpleNamespace(cluster_bandwidth_mbps=0, cluster_latency_ms=0), path)
+			self.assertEqual(config["cluster_bandwidth_mbps"], 0)
+			self.assertEqual(config["cluster_latency_ms"], 0)
+			self.assertEqual(config["storage_backend"], "FakeRemote")
+			for value in (-1, float("nan"), float("inf"), True):
+				with self.assertRaises(replication.DrillFailure):
+					replication.effective_cluster_config(SimpleNamespace(cluster_latency_ms=value), path)
+
+	def test_io_profile_configures_only_the_native_cluster_transport_and_backend(self):
+		import json
+		from types import SimpleNamespace
+		with tempfile.TemporaryDirectory() as temp:
+			shared = Path(temp) / "shared"
+			shared.mkdir()
+			node = SimpleNamespace(node_args=[], data_dir=Path(temp), database="memcp-tests")
+			replication.configure_cluster_io(node, dict(cluster_bandwidth_mbps=1000, cluster_latency_ms=0.1,
+				storage_backend="FakeRemote", storage_bandwidth_mbps=1000, storage_latency_ms=5), shared)
+			self.assertEqual(node.node_args, ["--cluster-bandwidth-mbps=1000", "--cluster-latency-ms=0.1"])
+			config = json.loads((node.data_dir / "memcp-tests.json").read_text())
+			self.assertEqual(config["prefix"], str(shared.resolve()))
+			self.assertEqual(config["backend"], "FakeRemote")
+			self.assertEqual(config["latency_ms"], 5)
+
+	def test_io_diagnostics_keep_per_case_counter_differences(self):
+		before = {"cluster_receive": {"operations": 2, "bytes": 100, "wait_ns": 500}}
+		current = {"cluster_receive": {"operations": 4, "bytes": 300, "wait_ns": 800}}
+		self.assertEqual(replication.io_difference(before, current),
+			{"cluster_receive": {"operations": 2, "bytes": 200, "wait_ns": 300}})
+
 	def test_correct_sql_cannot_borrow_setup_explain_or_cleanup_remote_work(self):
 		from types import SimpleNamespace
 		for remote_body in (False, True):
@@ -377,7 +416,8 @@ class ClusterSuiteTests(unittest.TestCase):
 				case = {"name": "same correct result", "setup": [{"sql": "fixture"}],
 					"sql": "SELECT 1 AS n", "cleanup": [{"sql": "cleanup"}],
 					"expect": {"rows": 1, "data": [{"n": 1}], "cluster": {"min_remote_shards": 1}}}
-				with mock.patch.object(runner, "ensure_database"), \
+				with mock.patch.object(replication, "io_stats", return_value={"cluster_receive": {"operations": 0, "bytes": 0, "wait_ns": 0}, "fake_remote": {"operations": 0, "bytes": 0, "wait_ns": 0}}), \
+						mock.patch.object(runner, "ensure_database"), \
 						mock.patch.object(runner, "execute_sql", side_effect=execute), \
 						mock.patch("builtins.print"):
 					self.assertEqual(runner.run_test_case(case, "memcp-tests"), remote_body, calls)

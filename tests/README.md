@@ -478,3 +478,96 @@ canonical assignments, conversions and per-row defaults in each frontend.
 The three-peer shared-storage INSERT/restart oracle is selected with
 `python3 tools/replication_cluster_stress.py --cluster-inserts-only --seed 20261027`.
 The cluster workflow runs it with ordinary and race-instrumented processes.
+
+## Cluster transport and backend simulation
+
+New suites (`metadata.cluster: true`) and the process-runner CLI default to
+fullspeed: zero added latency and unlimited bandwidth. The permanent operator
+suite explicitly selects the following conservative synthetic profile:
+
+```yaml
+metadata:
+  cluster:
+    cluster_bandwidth_mbps: 1000
+    cluster_latency_ms: 0.1
+    storage_backend: FakeRemote
+    storage_bandwidth_mbps: 1000
+    storage_latency_ms: 5
+```
+
+Bandwidth uses decimal Mbit/s (1000 means 125 MB/s). Cluster latency is one-way;
+a request/reply crosses two receiving endpoints. These values are reproducible
+scenario assumptions, not claims about every Ethernet, Ceph or S3 installation.
+For an S3-like high-latency scenario, use e.g. 50 ms backend request latency;
+[Amazon's guidance](https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance-design-patterns.html)
+describes small-object latencies in the tens of milliseconds and emphasizes
+concurrency and request sizes.
+
+CLI values override YAML, including explicit zero. Omitted values retain the
+suite's declaration; suites without a declaration remain fullspeed. For example:
+
+```sh
+python3 tools/replication_cluster_stress.py --cluster-suites \
+  --cluster-bandwidth-mbps 1000 --cluster-latency-ms 0.1 \
+  --storage-backend FakeRemote --storage-latency-ms 50 --storage-bandwidth-mbps 1000
+
+# Disable artificial network/backend delays on the same suite:
+python3 tools/replication_cluster_stress.py --cluster-suites \
+  --cluster-bandwidth-mbps 0 --cluster-latency-ms 0 \
+  --storage-backend filesystem --storage-latency-ms 0 --storage-bandwidth-mbps 0
+```
+
+The server also accepts `--cluster-bandwidth-mbps` and `--cluster-latency-ms`
+directly, with zero defaults. Only the receiving side of the native `/cluster`
+WebSocket protocol is instrumented, including authentication frames. SQL/SCM
+HTTP, local scans and sending are not delayed. Every application frame is
+charged for its actual encoded MOSI envelope and payload bytes. Before reading
+the next message header, the receiver sleeps only for the transmission time
+not already covered by receiving, decoding and dispatch work. Each connection
+has its own bandwidth budget; this is not an aggregate node-NIC or packet-loss
+simulator. WebSocket/TCP/TLS overhead and keepalive control frames are not counted.
+
+Propagation latency is waited in dispatch workers, so independent messages can
+remain in flight concurrently. Resource/schema ordering remains intact. Pending
+messages are bounded by the existing 32-MiB receive-work budget; disconnect
+cancels and joins outstanding delay timers. Existing application deadlines still
+apply under extremely slow profiles. Go timer granularity can exceed a requested
+sub-millisecond delay; diagnostics record actual wait, not the requested duration.
+
+`FakeRemote` is a filesystem-backed persistence backend using the ordinary
+backend declaration, independently of table ENGINE durability:
+
+```sql
+CREATE DATABASE `memcp-tests` SET backend='FakeRemote',
+  latency_ms='50', bandwidth_mbps='1000';
+```
+
+Its `prefix` selects the physical database directory (relative to `-data`, or an
+absolute path); the default is the database name. Cluster fixtures point every
+participant at the same existing shared directory. JSON configuration accepts
+numbers or SQL-style numeric strings. `latency_ms` and `bandwidth_mbps` default
+to zero. Each backend instance shares one aggregate transfer budget across its
+read/write streams. Each object/list/open/flush operation pays request latency;
+64-KiB buffering avoids adding a timer for every serialized scalar. WAL writes
+retain native encoding and are charged at flush; replay pays for the existing
+WAL object before native bounded decoding. Aborts discard private buffered bytes.
+Filesystem formats, atomic schema publication, fsync and SAFE/LOGGED/SLOPPY/MEMORY
+semantics are retained. The backend models delay/throughput, not S3 consistency,
+Ceph quorum behavior, retries or failure distributions.
+
+Every YAML testcase report records `operation_wall_ns` and per-node `io` counter
+deltas sampled around the body, outside setup, EXPLAIN and cleanup. `(io_stats)`
+returns process-local `cluster_receive` and `fake_remote` counters: `operations`,
+`bytes`, and actual injected `wait_ns`. Fullspeed transport still records bytes
+and messages, without artificial sleeps. Reports and CLI reproduction commands
+retain the selected profile. Concurrent background activity can contribute to
+these diagnostic counters; they are not transaction accounting.
+
+Summed wait across connections/nodes can exceed elapsed wall time because waits
+and CPU work overlap. Do not call `sum(wait_ns)/operation_wall_ns` a synchronization
+overhead percentage. These diagnostics prepare controlled local/remote and
+fullspeed/throttled comparisons; they do not introduce a new performance gate
+or change shard sizing. Larger shards amortize fixed per-job costs, while
+batching amortizes per-message costs; per-byte transfer/serialization costs do
+not disappear with larger shards. Later comparisons should keep fixture,
+shard count, concurrency and repetitions fixed and retain cold and warm phases.

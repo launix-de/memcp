@@ -218,11 +218,11 @@ func TestClusterPacketDispatchDoesNotBlockReaderAndKeepsTransferOrder(t *testing
 		}
 		return nil
 	}}
-	if !p.dispatchPacket(&mosiPacket{ID: "stream", Kind: "begin"}, 1) {
+	if !p.dispatchPacket(&mosiPacket{ID: "stream", Kind: "begin"}, 1, time.Time{}) {
 		t.Fatal("dispatch rejected")
 	}
 	<-entered
-	if !p.dispatchPacket(&mosiPacket{ID: "stream", Kind: "end"}, 1) || !p.dispatchPacket(&mosiPacket{ID: "other", Kind: "grant"}, 1) {
+	if !p.dispatchPacket(&mosiPacket{ID: "stream", Kind: "end"}, 1, time.Time{}) || !p.dispatchPacket(&mosiPacket{ID: "other", Kind: "grant"}, 1, time.Time{}) {
 		t.Fatal("dispatch rejected")
 	}
 	select {
@@ -441,12 +441,12 @@ func TestClusterPacketSchemaPublicationPrecedesDependentShard(t *testing.T) {
 		}
 		return nil
 	}}
-	if !p.dispatchPacket(&mosiPacket{ID: "schema", Resource: mosiResource{Database: "dependent"}}, 1) {
+	if !p.dispatchPacket(&mosiPacket{ID: "schema", Resource: mosiResource{Database: "dependent"}}, 1, time.Time{}) {
 		t.Fatal("schema dispatch failed")
 	}
 	<-entered
-	if !p.dispatchPacket(&mosiPacket{ID: "data", Resource: mosiResource{Database: "dependent", Table: "t", Shard: uuid.NewString()}}, 1) ||
-		!p.dispatchPacket(&mosiPacket{ID: "independent", Resource: mosiResource{Database: "independent"}}, 1) {
+	if !p.dispatchPacket(&mosiPacket{ID: "data", Resource: mosiResource{Database: "dependent", Table: "t", Shard: uuid.NewString()}}, 1, time.Time{}) ||
+		!p.dispatchPacket(&mosiPacket{ID: "independent", Resource: mosiResource{Database: "independent"}}, 1, time.Time{}) {
 		t.Fatal("data dispatch failed")
 	}
 	select {

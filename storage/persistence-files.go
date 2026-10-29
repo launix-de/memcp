@@ -686,7 +686,10 @@ type FileLogfile struct {
 }
 
 func (w FileLogfile) Write(logentry interface{}) {
-	frame := encodeFileLogEntry(logentry)
+	w.writeFrame(encodeFileLogEntry(logentry))
+}
+
+func (w FileLogfile) writeFrame(frame []byte) {
 	if len(frame) == 0 {
 		return
 	}
