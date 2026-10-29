@@ -1514,7 +1514,9 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					d47 = args[0]
 					d47.ID = 0
-					ctx.EnsureDesc(&d47)
+					if d47.Loc != LocImm {
+						ctx.EnsureDesc(&d47)
+					}
 					if d47.Loc == LocImm {
 						d48 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d47.Imm.Int())}
 					} else if d47.Type == tagInt && d47.Loc == LocRegPair {
@@ -7301,7 +7303,9 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					d72 = args[1]
 					d72.ID = 0
-					ctx.EnsureDesc(&d72)
+					if d72.Loc != LocImm {
+						ctx.EnsureDesc(&d72)
+					}
 					if d72.Loc == LocImm {
 						d73 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d72.Imm.Int())}
 					} else if d72.Type == tagInt && d72.Loc == LocRegPair {
@@ -9963,7 +9967,9 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					d72 = args[1]
 					d72.ID = 0
-					ctx.EnsureDesc(&d72)
+					if d72.Loc != LocImm {
+						ctx.EnsureDesc(&d72)
+					}
 					if d72.Loc == LocImm {
 						d73 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d72.Imm.Int())}
 					} else if d72.Type == tagInt && d72.Loc == LocRegPair {

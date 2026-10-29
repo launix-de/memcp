@@ -3166,6 +3166,11 @@ func jitCompileDynamicHigherOrderCall(ctx *JITContext, callableExpr Scmer, opera
 
 const jitTrivialVirtualInlineCost = 2
 
+// Knowing a callback does not bound the size of its caller. Keep higher-order
+// expansion within the helper budget so a small merger cannot pull thousands
+// of instructions into every parser/planner closure that invokes a dictionary.
+const jitCallbackInlineCost = 256
+
 // jitEmitGeneratedCallBoundary materializes compiler-only lambda templates
 // only when a generated builtin emitter chooses its native call boundary.
 // Other arguments were already evaluated into descriptors and must not be
@@ -3246,7 +3251,7 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 	}
 	cost := int(declaration.Type.JITInlineCost)
 	if !inline && hasCallback {
-		inline = declaration.Type.JITInlineCallbacks && knownCallback
+		inline = declaration.Type.JITInlineCallbacks && knownCallback && cost <= jitCallbackInlineCost
 	} else if !inline {
 		switch {
 		case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilderPrefersInlining(len(args)) || len(args) > 8):

@@ -796,7 +796,9 @@ func init_window() {
 					d21 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d22.Reg, Reg2: r1}
 					ctx.BindReg(d22.Reg, &d21)
 					ctx.BindReg(r1, &d21)
-					ctx.EnsureDesc(&d21)
+					if d21.Loc != LocImm {
+						ctx.EnsureDesc(&d21)
+					}
 					if d21.Loc == LocImm {
 						d23 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d21.Imm.Int())}
 					} else if d21.Type == tagInt && d21.Loc == LocRegPair {
@@ -827,7 +829,9 @@ func init_window() {
 					d26 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d27.Reg, Reg2: r2}
 					ctx.BindReg(d27.Reg, &d26)
 					ctx.BindReg(r2, &d26)
-					ctx.EnsureDesc(&d26)
+					if d26.Loc != LocImm {
+						ctx.EnsureDesc(&d26)
+					}
 					if d26.Loc == LocImm {
 						d28 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d26.Imm.Int())}
 					} else if d26.Type == tagInt && d26.Loc == LocRegPair {
@@ -858,7 +862,9 @@ func init_window() {
 					d31 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d32.Reg, Reg2: r3}
 					ctx.BindReg(d32.Reg, &d31)
 					ctx.BindReg(r3, &d31)
-					ctx.EnsureDesc(&d31)
+					if d31.Loc != LocImm {
+						ctx.EnsureDesc(&d31)
+					}
 					if d31.Loc == LocImm {
 						d33 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d31.Imm.Int())}
 					} else if d31.Type == tagInt && d31.Loc == LocRegPair {
@@ -2781,7 +2787,9 @@ func init_window() {
 					ctx.StabilizeDescForControlFlow(&d5)
 					d6 = args[2]
 					d6.ID = 0
-					ctx.EnsureDesc(&d6)
+					if d6.Loc != LocImm {
+						ctx.EnsureDesc(&d6)
+					}
 					if d6.Loc == LocImm {
 						d7 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d6.Imm.Int())}
 					} else if d6.Type == tagInt && d6.Loc == LocRegPair {
@@ -2919,7 +2927,9 @@ func init_window() {
 					d25 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d26.Reg, Reg2: r1}
 					ctx.BindReg(d26.Reg, &d25)
 					ctx.BindReg(r1, &d25)
-					ctx.EnsureDesc(&d25)
+					if d25.Loc != LocImm {
+						ctx.EnsureDesc(&d25)
+					}
 					if d25.Loc == LocImm {
 						d27 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d25.Imm.Int())}
 					} else if d25.Type == tagInt && d25.Loc == LocRegPair {
@@ -3963,7 +3973,9 @@ func init_window() {
 					d230 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d231.Reg, Reg2: r23}
 					ctx.BindReg(d231.Reg, &d230)
 					ctx.BindReg(r23, &d230)
-					ctx.EnsureDesc(&d230)
+					if d230.Loc != LocImm {
+						ctx.EnsureDesc(&d230)
+					}
 					if d230.Loc == LocImm {
 						d232 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d230.Imm.Int())}
 					} else if d230.Type == tagInt && d230.Loc == LocRegPair {

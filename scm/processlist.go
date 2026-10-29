@@ -2289,7 +2289,9 @@ func init_processlist() {
 				}
 				d0 := args[0]
 				d0.ID = 0
-				ctx.EnsureDesc(&d0)
+				if d0.Loc != LocImm {
+					ctx.EnsureDesc(&d0)
+				}
 				var d1 JITValueDesc
 				if d0.Loc == LocImm {
 					d1 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d0.Imm.Int())}

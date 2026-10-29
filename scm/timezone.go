@@ -1926,7 +1926,9 @@ func init_timezone() {
 					ctx.ReclaimUntrackedRegs()
 					d176 = args[0]
 					d176.ID = 0
-					ctx.EnsureDesc(&d176)
+					if d176.Loc != LocImm {
+						ctx.EnsureDesc(&d176)
+					}
 					if d176.Loc == LocImm {
 						d177 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d176.Imm.Int())}
 					} else if d176.Type == tagInt && d176.Loc == LocRegPair {
@@ -2756,7 +2758,9 @@ func init_timezone() {
 					ctx.ReclaimUntrackedRegs()
 					d15 = args[0]
 					d15.ID = 0
-					ctx.EnsureDesc(&d15)
+					if d15.Loc != LocImm {
+						ctx.EnsureDesc(&d15)
+					}
 					if d15.Loc == LocImm {
 						d16 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d15.Imm.Int())}
 					} else if d15.Type == tagInt && d15.Loc == LocRegPair {
@@ -5347,7 +5351,9 @@ func init_timezone() {
 					ctx.ReclaimUntrackedRegs()
 					d159 = args[0]
 					d159.ID = 0
-					ctx.EnsureDesc(&d159)
+					if d159.Loc != LocImm {
+						ctx.EnsureDesc(&d159)
+					}
 					if d159.Loc == LocImm {
 						d160 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d159.Imm.Int())}
 					} else if d159.Type == tagInt && d159.Loc == LocRegPair {

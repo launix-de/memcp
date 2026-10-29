@@ -436,7 +436,9 @@ func init_scheduler() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d8)
+					if d8.Loc != LocImm {
+						ctx.EnsureDesc(&d8)
+					}
 					if d8.Loc == LocImm {
 						d9 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d8.Imm.Int())}
 					} else if d8.Type == tagInt && d8.Loc == LocRegPair {

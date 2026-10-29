@@ -473,7 +473,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d42 = args[0]
 					d42.ID = 0
-					ctx.EnsureDesc(&d42)
+					if d42.Loc != LocImm {
+						ctx.EnsureDesc(&d42)
+					}
 					if d42.Loc == LocImm {
 						d43 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d42.Imm.Int())}
 					} else if d42.Type == tagInt && d42.Loc == LocRegPair {
@@ -494,7 +496,9 @@ func init_alu() {
 					ctx.FreeDesc(&d42)
 					d44 = args[1]
 					d44.ID = 0
-					ctx.EnsureDesc(&d44)
+					if d44.Loc != LocImm {
+						ctx.EnsureDesc(&d44)
+					}
 					if d44.Loc == LocImm {
 						d45 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d44.Imm.Int())}
 					} else if d44.Type == tagInt && d44.Loc == LocRegPair {
@@ -1061,7 +1065,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d42 = args[0]
 					d42.ID = 0
-					ctx.EnsureDesc(&d42)
+					if d42.Loc != LocImm {
+						ctx.EnsureDesc(&d42)
+					}
 					if d42.Loc == LocImm {
 						d43 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d42.Imm.Int())}
 					} else if d42.Type == tagInt && d42.Loc == LocRegPair {
@@ -1082,7 +1088,9 @@ func init_alu() {
 					ctx.FreeDesc(&d42)
 					d44 = args[1]
 					d44.ID = 0
-					ctx.EnsureDesc(&d44)
+					if d44.Loc != LocImm {
+						ctx.EnsureDesc(&d44)
+					}
 					if d44.Loc == LocImm {
 						d45 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d44.Imm.Int())}
 					} else if d44.Type == tagInt && d44.Loc == LocRegPair {
@@ -1657,7 +1665,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d42 = args[0]
 					d42.ID = 0
-					ctx.EnsureDesc(&d42)
+					if d42.Loc != LocImm {
+						ctx.EnsureDesc(&d42)
+					}
 					if d42.Loc == LocImm {
 						d43 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d42.Imm.Int())}
 					} else if d42.Type == tagInt && d42.Loc == LocRegPair {
@@ -1678,7 +1688,9 @@ func init_alu() {
 					ctx.FreeDesc(&d42)
 					d44 = args[1]
 					d44.ID = 0
-					ctx.EnsureDesc(&d44)
+					if d44.Loc != LocImm {
+						ctx.EnsureDesc(&d44)
+					}
 					if d44.Loc == LocImm {
 						d45 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d44.Imm.Int())}
 					} else if d44.Type == tagInt && d44.Loc == LocRegPair {
@@ -2133,7 +2145,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d24 = args[0]
 					d24.ID = 0
-					ctx.EnsureDesc(&d24)
+					if d24.Loc != LocImm {
+						ctx.EnsureDesc(&d24)
+					}
 					if d24.Loc == LocImm {
 						d25 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d24.Imm.Int())}
 					} else if d24.Type == tagInt && d24.Loc == LocRegPair {
@@ -2667,7 +2681,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d42 = args[1]
 					d42.ID = 0
-					ctx.EnsureDesc(&d42)
+					if d42.Loc != LocImm {
+						ctx.EnsureDesc(&d42)
+					}
 					if d42.Loc == LocImm {
 						d43 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d42.Imm.Int())}
 					} else if d42.Type == tagInt && d42.Loc == LocRegPair {
@@ -2874,7 +2890,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d90 = args[0]
 					d90.ID = 0
-					ctx.EnsureDesc(&d90)
+					if d90.Loc != LocImm {
+						ctx.EnsureDesc(&d90)
+					}
 					if d90.Loc == LocImm {
 						d91 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d90.Imm.Int())}
 					} else if d90.Type == tagInt && d90.Loc == LocRegPair {
@@ -2906,7 +2924,9 @@ func init_alu() {
 					ctx.FreeDesc(&d91)
 					d93 = args[1]
 					d93.ID = 0
-					ctx.EnsureDesc(&d93)
+					if d93.Loc != LocImm {
+						ctx.EnsureDesc(&d93)
+					}
 					if d93.Loc == LocImm {
 						d94 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d93.Imm.Int())}
 					} else if d93.Type == tagInt && d93.Loc == LocRegPair {
@@ -3414,7 +3434,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d42 = args[1]
 					d42.ID = 0
-					ctx.EnsureDesc(&d42)
+					if d42.Loc != LocImm {
+						ctx.EnsureDesc(&d42)
+					}
 					if d42.Loc == LocImm {
 						d43 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d42.Imm.Int())}
 					} else if d42.Type == tagInt && d42.Loc == LocRegPair {
@@ -3621,7 +3643,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d90 = args[0]
 					d90.ID = 0
-					ctx.EnsureDesc(&d90)
+					if d90.Loc != LocImm {
+						ctx.EnsureDesc(&d90)
+					}
 					if d90.Loc == LocImm {
 						d91 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d90.Imm.Int())}
 					} else if d90.Type == tagInt && d90.Loc == LocRegPair {
@@ -3653,7 +3677,9 @@ func init_alu() {
 					ctx.FreeDesc(&d91)
 					d93 = args[1]
 					d93.ID = 0
-					ctx.EnsureDesc(&d93)
+					if d93.Loc != LocImm {
+						ctx.EnsureDesc(&d93)
+					}
 					if d93.Loc == LocImm {
 						d94 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d93.Imm.Int())}
 					} else if d93.Type == tagInt && d93.Loc == LocRegPair {
@@ -5157,7 +5183,9 @@ func init_alu() {
 					d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d5)
-					ctx.EnsureDesc(&d5)
+					if d5.Loc != LocImm {
+						ctx.EnsureDesc(&d5)
+					}
 					if d5.Loc == LocImm {
 						d53 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d5.Imm.Int())}
 					} else if d5.Type == tagInt && d5.Loc == LocRegPair {
@@ -6212,7 +6240,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d44 = args[0]
 					d44.ID = 0
-					ctx.EnsureDesc(&d44)
+					if d44.Loc != LocImm {
+						ctx.EnsureDesc(&d44)
+					}
 					if d44.Loc == LocImm {
 						d45 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d44.Imm.Int())}
 					} else if d44.Type == tagInt && d44.Loc == LocRegPair {
@@ -6233,7 +6263,9 @@ func init_alu() {
 					ctx.FreeDesc(&d44)
 					d46 = args[1]
 					d46.ID = 0
-					ctx.EnsureDesc(&d46)
+					if d46.Loc != LocImm {
+						ctx.EnsureDesc(&d46)
+					}
 					if d46.Loc == LocImm {
 						d47 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d46.Imm.Int())}
 					} else if d46.Type == tagInt && d46.Loc == LocRegPair {
@@ -7330,7 +7362,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d93 = args[0]
 					d93.ID = 0
-					ctx.EnsureDesc(&d93)
+					if d93.Loc != LocImm {
+						ctx.EnsureDesc(&d93)
+					}
 					if d93.Loc == LocImm {
 						d94 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d93.Imm.Int())}
 					} else if d93.Type == tagInt && d93.Loc == LocRegPair {
@@ -7469,7 +7503,9 @@ func init_alu() {
 						ctx.UnprotectReg(d3.Reg)
 						d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff100), Rooted: true}
 					}
-					ctx.EnsureDesc(&d99)
+					if d99.Loc != LocImm {
+						ctx.EnsureDesc(&d99)
+					}
 					if d99.Loc == LocImm {
 						d101 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d99.Imm.Int())}
 					} else if d99.Type == tagInt && d99.Loc == LocRegPair {
@@ -9283,7 +9319,9 @@ func init_alu() {
 				d30 = inlineHome32
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d3)
+				if d3.Loc != LocImm {
+					ctx.EnsureDesc(&d3)
+				}
 				var d41 JITValueDesc
 				if d3.Loc == LocImm {
 					d41 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d3.Imm.Int())}
@@ -9306,7 +9344,9 @@ func init_alu() {
 				inlineHome42 := d41
 				inlineHome42.ID = 0
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d5)
+				if d5.Loc != LocImm {
+					ctx.EnsureDesc(&d5)
+				}
 				var d43 JITValueDesc
 				if d5.Loc == LocImm {
 					d43 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d5.Imm.Int())}
@@ -10290,7 +10330,9 @@ func init_alu() {
 				d30 = inlineHome32
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d3)
+				if d3.Loc != LocImm {
+					ctx.EnsureDesc(&d3)
+				}
 				var d41 JITValueDesc
 				if d3.Loc == LocImm {
 					d41 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d3.Imm.Int())}
@@ -10313,7 +10355,9 @@ func init_alu() {
 				inlineHome42 := d41
 				inlineHome42.ID = 0
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d5)
+				if d5.Loc != LocImm {
+					ctx.EnsureDesc(&d5)
+				}
 				var d43 JITValueDesc
 				if d5.Loc == LocImm {
 					d43 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d5.Imm.Int())}
@@ -12732,7 +12776,9 @@ func init_alu() {
 					d8 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d208)
-					ctx.EnsureDesc(&d208)
+					if d208.Loc != LocImm {
+						ctx.EnsureDesc(&d208)
+					}
 					if d208.Loc == LocImm {
 						d346 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d208.Imm.Int())}
 					} else if d208.Type == tagInt && d208.Loc == LocRegPair {
@@ -18166,7 +18212,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d42 = args[1]
 					d42.ID = 0
-					ctx.EnsureDesc(&d42)
+					if d42.Loc != LocImm {
+						ctx.EnsureDesc(&d42)
+					}
 					if d42.Loc == LocImm {
 						d43 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d42.Imm.Int())}
 					} else if d42.Type == tagInt && d42.Loc == LocRegPair {
@@ -18502,7 +18550,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d121 = args[0]
 					d121.ID = 0
-					ctx.EnsureDesc(&d121)
+					if d121.Loc != LocImm {
+						ctx.EnsureDesc(&d121)
+					}
 					if d121.Loc == LocImm {
 						d122 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d121.Imm.Int())}
 					} else if d121.Type == tagInt && d121.Loc == LocRegPair {
@@ -18565,7 +18615,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d126 = args[0]
 					d126.ID = 0
-					ctx.EnsureDesc(&d126)
+					if d126.Loc != LocImm {
+						ctx.EnsureDesc(&d126)
+					}
 					if d126.Loc == LocImm {
 						d127 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d126.Imm.Int())}
 					} else if d126.Type == tagInt && d126.Loc == LocRegPair {
@@ -19856,7 +19908,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d42 = args[1]
 					d42.ID = 0
-					ctx.EnsureDesc(&d42)
+					if d42.Loc != LocImm {
+						ctx.EnsureDesc(&d42)
+					}
 					if d42.Loc == LocImm {
 						d43 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d42.Imm.Int())}
 					} else if d42.Type == tagInt && d42.Loc == LocRegPair {
@@ -20192,7 +20246,9 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					d121 = args[0]
 					d121.ID = 0
-					ctx.EnsureDesc(&d121)
+					if d121.Loc != LocImm {
+						ctx.EnsureDesc(&d121)
+					}
 					if d121.Loc == LocImm {
 						d122 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d121.Imm.Int())}
 					} else if d121.Type == tagInt && d121.Loc == LocRegPair {
@@ -24131,7 +24187,7 @@ func init_alu() {
 				return result
 			},
 			JITVirtualArgs:     true,
-			JITInlineCallbacks: false,
+			JITInlineCallbacks: true,
 			JITInlineCost:      26,
 		},
 	})
@@ -26644,7 +26700,9 @@ func init_alu() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d11)
+					if d11.Loc != LocImm {
+						ctx.EnsureDesc(&d11)
+					}
 					if d11.Loc == LocImm {
 						d12 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d11.Imm.Int())}
 					} else if d11.Type == tagInt && d11.Loc == LocRegPair {
@@ -28368,7 +28426,9 @@ func init_alu() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d47)
+					if d47.Loc != LocImm {
+						ctx.EnsureDesc(&d47)
+					}
 					if d47.Loc == LocImm {
 						d48 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d47.Imm.Int())}
 					} else if d47.Type == tagInt && d47.Loc == LocRegPair {

@@ -553,7 +553,7 @@ func init_strings() {
 			Return:             &TypeDescriptor{Kind: "list"},
 			Const:              true,
 			JITInlineCost:      32,
-			JITInlineCallbacks: false,
+			JITInlineCallbacks: true,
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				declaration := declarations["regexp_matches"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
@@ -1530,7 +1530,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs:     true,
-			JITInlineCallbacks: false,
+			JITInlineCallbacks: true,
 			JITInlineCost:      6,
 		},
 	})
@@ -1754,7 +1754,9 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d3)
+					if d3.Loc != LocImm {
+						ctx.EnsureDesc(&d3)
+					}
 					if d3.Loc == LocImm {
 						d4 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d3.Imm.Int())}
 					} else if d3.Type == tagInt && d3.Loc == LocRegPair {
@@ -2365,7 +2367,9 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d134)
+					if d134.Loc != LocImm {
+						ctx.EnsureDesc(&d134)
+					}
 					if d134.Loc == LocImm {
 						d135 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d134.Imm.Int())}
 					} else if d134.Type == tagInt && d134.Loc == LocRegPair {
@@ -2522,7 +2526,9 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d141)
+					if d141.Loc != LocImm {
+						ctx.EnsureDesc(&d141)
+					}
 					if d141.Loc == LocImm {
 						d142 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d141.Imm.Int())}
 					} else if d141.Type == tagInt && d141.Loc == LocRegPair {
@@ -3569,7 +3575,9 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d61)
+					if d61.Loc != LocImm {
+						ctx.EnsureDesc(&d61)
+					}
 					if d61.Loc == LocImm {
 						d62 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d61.Imm.Int())}
 					} else if d61.Type == tagInt && d61.Loc == LocRegPair {
@@ -4295,7 +4303,9 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d239)
+					if d239.Loc != LocImm {
+						ctx.EnsureDesc(&d239)
+					}
 					if d239.Loc == LocImm {
 						d240 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d239.Imm.Int())}
 					} else if d239.Type == tagInt && d239.Loc == LocRegPair {
@@ -14721,7 +14731,9 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d11)
+					if d11.Loc != LocImm {
+						ctx.EnsureDesc(&d11)
+					}
 					if d11.Loc == LocImm {
 						d12 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d11.Imm.Int())}
 					} else if d11.Type == tagInt && d11.Loc == LocRegPair {
@@ -20592,7 +20604,9 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1)
+					if d1.Loc != LocImm {
+						ctx.EnsureDesc(&d1)
+					}
 					if d1.Loc == LocImm {
 						d2 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d1.Imm.Int())}
 					} else if d1.Type == tagInt && d1.Loc == LocRegPair {
@@ -23946,7 +23960,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs:     true,
-			JITInlineCallbacks: false,
+			JITInlineCallbacks: true,
 			JITInlineCost:      28,
 		},
 		Optimize: optimizeRegexpTest,
@@ -24611,7 +24625,9 @@ func init_strings() {
 					ctx.ReclaimUntrackedRegs()
 					d42 = args[1]
 					d42.ID = 0
-					ctx.EnsureDesc(&d42)
+					if d42.Loc != LocImm {
+						ctx.EnsureDesc(&d42)
+					}
 					if d42.Loc == LocImm {
 						d43 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d42.Imm.Int())}
 					} else if d42.Type == tagInt && d42.Loc == LocRegPair {
@@ -24753,7 +24769,9 @@ func init_strings() {
 					ctx.FreeDesc(&d66)
 					d69 = args[1]
 					d69.ID = 0
-					ctx.EnsureDesc(&d69)
+					if d69.Loc != LocImm {
+						ctx.EnsureDesc(&d69)
+					}
 					if d69.Loc == LocImm {
 						d70 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d69.Imm.Int())}
 					} else if d69.Type == tagInt && d69.Loc == LocRegPair {

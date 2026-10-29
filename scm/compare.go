@@ -1772,7 +1772,9 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		ctx.MarkLabel(lbl13)
 		ctx.ResolveFixups()
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&args[0])
+		if args[0].Loc != LocImm {
+			ctx.EnsureDesc(&args[0])
+		}
 		if args[0].Loc == LocImm {
 			d186 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
 		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
@@ -1986,7 +1988,9 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		ctx.MarkLabel(lbl15)
 		ctx.ResolveFixups()
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&args[0])
+		if args[0].Loc != LocImm {
+			ctx.EnsureDesc(&args[0])
+		}
 		if args[0].Loc == LocImm {
 			d228 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
 		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
@@ -2253,7 +2257,9 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		ctx.MarkLabel(lbl18)
 		ctx.ResolveFixups()
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&args[0])
+		if args[0].Loc != LocImm {
+			ctx.EnsureDesc(&args[0])
+		}
 		if args[0].Loc == LocImm {
 			d279 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
 		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
@@ -2269,7 +2275,9 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d279.Type = tagInt
 			ctx.BindReg(d279.Reg, &d279)
 		}
-		ctx.EnsureDesc(&args[1])
+		if args[1].Loc != LocImm {
+			ctx.EnsureDesc(&args[1])
+		}
 		if args[1].Loc == LocImm {
 			d280 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[1].Imm.Int())}
 		} else if args[1].Type == tagInt && args[1].Loc == LocRegPair {
@@ -2337,7 +2345,9 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		ctx.MarkLabel(lbl19)
 		ctx.ResolveFixups()
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&args[0])
+		if args[0].Loc != LocImm {
+			ctx.EnsureDesc(&args[0])
+		}
 		if args[0].Loc == LocImm {
 			d283 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
 		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
@@ -2435,7 +2445,9 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		ctx.MarkLabel(lbl20)
 		ctx.ResolveFixups()
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&args[0])
+		if args[0].Loc != LocImm {
+			ctx.EnsureDesc(&args[0])
+		}
 		if args[0].Loc == LocImm {
 			d288 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
 		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
@@ -2451,7 +2463,9 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d288.Type = tagInt
 			ctx.BindReg(d288.Reg, &d288)
 		}
-		ctx.EnsureDesc(&args[1])
+		if args[1].Loc != LocImm {
+			ctx.EnsureDesc(&args[1])
+		}
 		if args[1].Loc == LocImm {
 			d289 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[1].Imm.Int())}
 		} else if args[1].Type == tagInt && args[1].Loc == LocRegPair {

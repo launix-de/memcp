@@ -5912,7 +5912,7 @@ func init() {
 				return result
 			},
 			JITVirtualArgs:     true,
-			JITInlineCallbacks: false,
+			JITInlineCallbacks: true,
 			JITInlineCost:      36,
 		},
 		Optimize:                 FirstParameterMutable("for_mut"),
@@ -6487,7 +6487,7 @@ func init() {
 				return result
 			},
 			JITVirtualArgs:     true,
-			JITInlineCallbacks: false,
+			JITInlineCallbacks: true,
 			JITInlineCost:      30,
 		},
 	})
@@ -6684,7 +6684,9 @@ Patterns can be any of:
 				ctx.ResolveFixups()
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d5)
+				if d5.Loc != LocImm {
+					ctx.EnsureDesc(&d5)
+				}
 				var d6 JITValueDesc
 				if d5.Loc == LocImm {
 					d6 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d5.Imm.Int())}
@@ -6723,7 +6725,9 @@ Patterns can be any of:
 				ctx.ResolveFixups()
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d9)
+				if d9.Loc != LocImm {
+					ctx.EnsureDesc(&d9)
+				}
 				var d10 JITValueDesc
 				if d9.Loc == LocImm {
 					d10 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d9.Imm.Int())}
@@ -45448,7 +45452,9 @@ Patterns can be any of:
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d16)
+					if d16.Loc != LocImm {
+						ctx.EnsureDesc(&d16)
+					}
 					if d16.Loc == LocImm {
 						d17 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d16.Imm.Int())}
 					} else if d16.Type == tagInt && d16.Loc == LocRegPair {

@@ -120,9 +120,10 @@ type TypeDescriptor struct {
 	// data. Numbered parameters stay in their existing stack slots and constants
 	// stay immediate until an operation actually needs to materialize them.
 	JITVirtualArgs bool
-	// JITInlineCallbacks records that jitgen emitted the builtin's dynamic SSA
-	// calls as recursive lambda emitters. It is capability metadata, not a
-	// runtime permission gate.
+	// JITInlineCallbacks records that the generated loop supports known
+	// callbacks. Fixed-arity frames can recursively inline lambda templates;
+	// dynamic-arity frames need materialized callables, enforced by admission.
+	// This is capability metadata, not a runtime permission gate.
 	JITInlineCallbacks bool
 	// JITNativeFP opts this generated emitter into the typed floating-point
 	// register contract. The default deliberately preserves the generic Scmer
@@ -147,9 +148,6 @@ func (td *TypeDescriptor) Parameter(index, arity int) *TypeDescriptor {
 	}
 	for i, parameter := range td.Params {
 		if parameter != nil && parameter.Variadic {
-			if index < i {
-				return td.Params[index]
-			}
 			step := max(1, parameter.VariadicStep)
 			suffix := (arity - i) % step
 			if index >= arity-suffix {
@@ -157,9 +155,9 @@ func (td *TypeDescriptor) Parameter(index, arity int) *TypeDescriptor {
 			}
 			return parameter
 		}
-	}
-	if index < len(td.Params) {
-		return td.Params[index]
+		if index == i {
+			return parameter
+		}
 	}
 	return nil
 }

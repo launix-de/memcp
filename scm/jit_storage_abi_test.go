@@ -1219,3 +1219,30 @@ func BenchmarkMapReduceBufferRows(b *testing.B) {
 		})
 	}
 }
+
+func TestJITKnownCallbackDoesNotExpandUnboundedCaller(t *testing.T) {
+	for _, cost := range []uint16{32, 256, 257, 1025} {
+		decl := &Declaration{Type: &TypeDescriptor{JITInlineCallbacks: true, JITInlineCost: cost,
+			Params: []*TypeDescriptor{{Kind: "func", Params: []*TypeDescriptor{{Kind: "any"}}}}}}
+		args := []JITValueDesc{{Loc: LocLambdaTemplate, Type: tagProc, Lambda: &JITLambdaTemplate{Proc: &Proc{}}}}
+		if got := jitGeneratedEmitterInline(&JITContext{}, decl, args); got != (cost <= jitCallbackInlineCost) {
+			t.Fatalf("callback caller cost=%d: inline=%v", cost, got)
+		}
+	}
+}
+
+func TestJITVariadicCallbackLoopMaterializesCapturedLambdas(t *testing.T) {
+	proc := jitCompile(preparedTestProc(t, `(lambda (n)
+		(for (list 0 0) (lambda (i sum) (< i n))
+			(lambda (i sum) (list (+ i 1) (+ sum i)))))`))
+	if proc.Proc().compiled() == nil {
+		t.Fatal("loop did not compile")
+	}
+	for _, n := range []int64{0, 1, 10, 50} {
+		got := Apply(proc, NewInt(n))
+		want := NewSlice([]Scmer{NewInt(n), NewInt(n * (n - 1) / 2)})
+		if !Equal(got, want) {
+			t.Fatalf("n=%d got %s want %s", n, String(got), String(want))
+		}
+	}
+}
