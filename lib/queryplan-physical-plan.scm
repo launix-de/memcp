@@ -5628,7 +5628,55 @@ probes, window columns and physical carrier choices survive the reduction. */
 		(cons (quote !begin) (merge (list (nth prepared 0)
 			(list (lower_prepared_group_stage_join_input rebound)) (nth prepared 2)))))))
 
+/* A selected predicate-RecSet is already the exact input relation consumed by
+the count scan. Building a one-row query group on top cannot reduce any work;
+it only materializes the same rows again. This capability check deliberately
+uses the common access-path enumerator and cost comparator, so new descriptor
+kinds inherit the global aggregate consumer without expression-specific code. */
+(define global_row_count_access_path_selected? (lambda (block)
+	(begin
+		(define sources (qb_sources block))
+		(define plan (if (empty_list? sources) nil
+			(query_block_join_plan block sources)))
+		(define driver (if (nil? plan) nil
+			(join_optimizer_source_by_alias sources
+				(join_optimizer_tree_first_alias plan))))
+		(if (or (nil? driver)
+			(or (not (source_is_base_table? driver))
+				(source_unique_point_condition? driver (qb_where block))))
+			false
+			(begin
+				(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
+					(source_alias driver)))
+				(define candidates (scan_access_path_candidates
+					driver sources default_alias (qb_where block) nil
+					(planner_context_session (qb_facts block))
+					(planner_context_tx (qb_facts block))))
+				(not (nil? (scan_access_path_preferred_candidate driver candidates))))))))
+
+
+/* The semijoin consumes the completed group interface. It never infers
+aggregate inventory or grouping from a row query's SELECT syntax. */
 (define lower_prepared_group_stage_join_input (lambda (stage)
+	(begin
+		(define input (gs_input stage))
+		(define carrier (choose_semijoin_carrier input (semijoin_carrier_spec input stage)))
+		(if (nil? carrier) (lower_general_group_stage_join_input stage)
+			(lower_semijoin_carrier input carrier)))))
+
+(define choose_semijoin_carrier (lambda (block candidate)
+	(if (nil? candidate) nil
+		(begin
+			(define cache_name (if (and (nth candidate 5)
+				(not (equal? (prejoin_source_table_key (car candidate)) (prejoin_source_table_key (cadr candidate)))))
+				(car (semijoin_cached_predicate candidate)) nil))
+			(define selected (semijoin_root_preferred? candidate cache_name))
+			(planner_record_guard_condition
+				(list (quote equal?) (list (quote semijoin_root_preferred?) (quoted_runtime_list candidate) cache_name) selected)
+				(planner_context_session (qb_facts block)))
+			(if selected candidate nil)))))
+
+(define lower_general_group_stage_join_input (lambda (stage)
 	(begin
 		(define input (gs_input stage))
 		(define direct (and (empty_list? (gs_order stage))
@@ -5638,11 +5686,33 @@ probes, window columns and physical carrier choices survive the reduction. */
 			(not (reduce (gs_aggregates stage) (lambda (unsupported ag)
 				(or unsupported (count_distinct_descriptor? ag))) false))
 			(physical_prejoin_supported? projected)))
+		(define row_count (and (qassoc_get (gs_facts stage) (quote preserve_empty_domain) false)
+			(nil? (gs_having stage)) (empty_list? (gs_order stage))
+			(not (empty_list? (gs_aggregates stage)))
+			(reduce (gs_aggregates stage) (lambda (valid ag)
+				(and valid (aggregate_counts_every_input_row? ag))) true)
+			(reduce (gs_keys stage) (lambda (valid key)
+				(and valid (not (expr_contains_column_ref? key)))) true)))
+		(define exact_count (and row_count
+			(or (expr_contains_driver_membership? (qb_where input))
+				(global_row_count_access_path_selected? input))))
+		(if exact_count
+			(begin
+				(planner_record_physical_decision (list
+					(list "decision" "global_membership_row_count")
+					(list "chosen" "fused_reduce") (list "selection" "dominance")
+					(list "reason" "exact_membership_already_owns_reusable_carriers")
+					(list "alternatives" (list
+						(list (list "plan" "fused_reduce") (list "status" "chosen"))
+						(list (list "plan" "query_group_cache") (list "status" "rejected")
+							(list "reason" "redundant_single_group_materialization")))))
+					(planner_context_session (qb_facts input)))
+				(lower_direct_query_row_count_stage stage (gs_output stage) (gs_offset stage) (gs_limit stage)))
 		(if (and direct prejoin) (lower_group_stage_join_alternatives stage projected)
 			prejoin (lower_group_stage_prejoin stage projected)
 			direct
 			(lower_direct_query_group_stage stage (gs_output stage) (gs_order stage) (gs_offset stage) (gs_limit stage))
-			(lower_group_stage stage)))))
+				(lower_group_stage stage))))))
 
 /* Physical choices consume the completed logical group interface. None of
 these alternatives discovers aggregate descriptors or changes the key tuple. */
@@ -10194,9 +10264,20 @@ key lists as well as the optional-access workload that selects its producer. */
 				(define remaining_condition (nth condition_parts 2))
 				(define owned_condition (join_optimizer_node_condition
 					(join_optimizer_leaf_predicates leaf)))
-				(define condition (combine_where
+				(define raw_condition (combine_where
 					(source_join_expr src)
 					(combine_where owned_condition local_condition)))
+				/* A complete single-source reduction can consume the same exact
+				complement/difference carriers as a base group fill. Retain nullable
+				membership and every unconsumed term as residual predicates. */
+				(define group_membership_parts (if (and allow_membership_recset
+					(join_scan_reduce? result_mode) (single_source? all_sources)
+					(not (query_limit_active? offset_value limit_value))
+					(reduce (driver_membership_formula_terms_for_source src raw_condition)
+						(lambda (found term) (or found (nth term 4))) false))
+					(base_group_membership_parts src raw_condition facts)
+					(list nil raw_condition)))
+				(define condition (cadr group_membership_parts))
 				(define ordered_sources (cons src future_sources))
 				(define order_parts (split_order_items_for_join_driver
 					ordered_sources default_alias src order_items stages final_condition '()))
@@ -10285,12 +10366,12 @@ key lists as well as the optional-access workload that selects its producer. */
 						(gs_id (car (physical_scalar_truth_plan_probe effective_scalar_plan)))))))
 				(define carrier_condition
 					(rewrite_physical_scalar_truth_plan effective_scalar_plan condition))
-				(define membership_table_expr (if (and
+				(define membership_table_expr (coalesceNil (car group_membership_parts) (if (and
 					(not (nil? membership_plan))
 					(or (equal? membership_strategy "candidate_keyset")
 						(equal? membership_strategy "prefiltered_candidate_keyset")))
 					(cadr membership_plan)
-					nil))
+					nil)))
 				/* Join-tree leaves consume the same ordered RHS key-index alternative as
 				the top-level ordered lowerer. The index is bound outside the scan callback
 				and is therefore built once per query, irrespective of tree depth. */
@@ -13278,17 +13359,8 @@ prepare bindings; no key enumeration or storage artifact enters logical IR. */
 
 (define emit_physical_queryplan (lambda (ir)
 	(begin
-		(define candidate (if (equal? (ir_return ir) (quote rows)) (semijoin_carrier_spec (ir_root ir)) nil))
-		(define carrier (if (nil? candidate) nil
-			(begin
-				(define cache_name (if (and (nth candidate 5)
-					(not (equal? (prejoin_source_table_key (car candidate)) (prejoin_source_table_key (cadr candidate)))))
-					(car (semijoin_cached_predicate candidate)) nil))
-				(define selected (semijoin_root_preferred? candidate cache_name))
-				(planner_record_guard_condition
-					(list (quote equal?) (list (quote semijoin_root_preferred?) (quoted_runtime_list candidate) cache_name) selected)
-					(planner_context_session (qb_facts (ir_root ir))))
-				(if selected candidate nil))))
+		(define candidate (if (equal? (ir_return ir) (quote rows)) (semijoin_carrier_spec (ir_root ir) nil) nil))
+		(define carrier (choose_semijoin_carrier (ir_root ir) candidate))
 		(define plan (if (not (nil? carrier))
 			(lower_semijoin_carrier (ir_root ir) carrier)
 			(match (ir_return ir)
@@ -14241,20 +14313,33 @@ It is as stable as its symbolic form; other procedures remain unproven. */
 			(reduce tail (lambda (ok item) (and ok (semijoin_stable_expr? item))) true))
 		_ (or (nil? expr) (or (number? expr) (or (string? expr) (or (equal? expr true) (equal? expr false))))))))
 
-(define semijoin_carrier_spec (lambda (block)
+(define semijoin_carrier_spec (lambda (block group)
 	(if (or (not (query_block? block))
 		(or (not (equal? (count (qb_sources block)) 2))
 			(or (not (empty_list? (qb_stages block)))
-				(or (not (nil? (qb_having block))) (not (empty_list? (qb_hidden block)))))))
+				(or (not (nil? (if (nil? group) (qb_having block) (gs_having group)))) (not (empty_list? (qb_hidden block)))))))
 		nil
 		(begin
 			(define sources (qb_sources block))
+			(define grouping (if (nil? group) (qb_group block) (gs_keys group)))
+			(define raw_order (if (nil? group) (qb_order block) (gs_order group)))
 			(define tree (query_block_join_plan block sources))
 			(define aliases (join_optimizer_tree_aliases tree))
-			(define grouped_sources (filter sources (lambda (src) (source_primary_key_grouped? block src))))
+			(define grouped_sources (filter sources (lambda (src) (source_primary_key_grouped? sources grouping src))))
 			(define driver (if (single_source? grouped_sources) (car grouped_sources)
 				(join_optimizer_source_by_alias sources (car aliases))))
 			(define lookup (car (filter sources (lambda (src) (not (equal? (source_alias src) (source_alias driver)))))))
+			/* A first-value ORDER aggregate over a fully grouped primary key is
+			functionally the driver's value. Consume that declared reducer rather
+			than rebuilding GROUP BY from the row input. */
+			(define order (map raw_order (lambda (item)
+				(match (car item)
+					((symbol aggregate) expr reducer neutral)
+					(if (and (source_primary_key_grouped? sources grouping driver)
+						(equal? reducer (scalar_once_reduce_first)) (nil? neutral)
+						(not (nil? (direct_column_name_for_alias driver expr))))
+						(list expr (cadr item)) item)
+					_ item))))
 			(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
 			(define terms (merge_unique (list
 				(map (join_optimizer_tree_predicates tree) join_order_pred_expr)
@@ -14266,13 +14351,14 @@ It is as stable as its symbolic form; other procedures remain unproven. */
 			(define driver_terms (filter local (lambda (term)
 				(not (expr_refs_sources? default_alias (list lookup) term)))))
 			(define lookup_terms (filter local (lambda (term) (not (contains? driver_terms term)))))
-			(define fields (expand_query_block_fields sources (qb_fields block)))
+			(define fields (if (nil? group) (expand_query_block_fields sources (qb_fields block)) (gs_output group)))
 			(define count_mode (and (equal? (count fields) 2)
 				(and (semijoin_count_field? (cadr fields))
-					(and (empty_list? (qb_group block)) (empty_list? (qb_order block))))))
-			(define grouped_mode (and (not (query_block_has_aggregates? block))
-				(and (source_primary_key_grouped? block driver)
-					(not (reduce (merge (list (qb_group block) (order_exprs (qb_order block))
+					(and (if (nil? group) (empty_list? grouping)
+						(qassoc_get (gs_facts group) (quote preserve_empty_domain) false)) (empty_list? order)))))
+			(define grouped_mode (and (empty_list? (stage_aggregates_for_fields fields))
+				(and (source_primary_key_grouped? sources grouping driver)
+					(not (reduce (merge (list grouping (order_exprs order)
 						(extract_assoc fields (lambda (_name expr) expr))))
 						(lambda (used expr) (or used (expr_refs_sources? default_alias (list lookup) expr))) false)))))
 			(define keys (map edges (lambda (term) (union_semijoin_equal_parts driver lookup term))))
@@ -14289,13 +14375,16 @@ It is as stable as its symbolic form; other procedures remain unproven. */
 				(reduce terms (lambda (ok term) (and ok (semijoin_stable_expr? term))) true)
 				(or (and count_mode lookup_unique)
 					(and grouped_mode
-						(reduce (qb_group block) (lambda (ok expr) (and ok (semijoin_stable_expr? expr))) true)
-						(reduce (order_exprs (qb_order block)) (lambda (ok expr)
+						(reduce grouping (lambda (ok expr) (and ok (semijoin_stable_expr? expr))) true)
+						(reduce (order_exprs order) (lambda (ok expr)
 							(and ok (not (nil? (direct_column_name_for_alias driver expr))))) true)
 						(reduce (extract_assoc fields (lambda (_title expr) expr)) (lambda (ok expr)
 							(and ok (semijoin_stable_expr? expr))) true))))
 				(list driver lookup keys (combine_where_terms driver_terms true)
-					(combine_where_terms lookup_terms true) count_mode fields)
+					(combine_where_terms lookup_terms true) count_mode fields
+					(list order (if (nil? group) (qb_offset block) (gs_offset group))
+						(if (nil? group) (qb_limit block) (gs_limit group))
+						(qassoc_get (qb_facts block) (quote sql_calc_found_rows) false)))
 				nil)))))
 
 /* Indexable local comparisons precede computed residuals when their estimated
@@ -14347,26 +14436,26 @@ existing scan and expression primitives. No predicate is discarded. */
 					(quoted_runtime_list '()) (quote scan_count) 0 (quote +) false))
 			(candidate_recset_filter_source driver projected (nth spec 3))))))
 
-(define semijoin_output_plan (lambda (block spec accepted)
+(define semijoin_output_plan (lambda (spec accepted)
 	(begin
 		(define driver (car spec))
 		(define fields (nth spec 6))
 		(if (nth spec 5)
-			(semijoin_count_output block fields (list (quote recset_count) accepted))
+			(semijoin_count_output spec (list (quote recset_count) accepted))
 			(begin
-				(define order (coalesceNil (qb_order block) '()))
+				(define order (coalesceNil (nth (nth spec 7) 0) '()))
 
 				(define mapcols (merge_unique (map (extract_assoc fields (lambda (_title expr) expr))
 					(lambda (expr) (extract_columns_for_alias driver expr)))))
 				(list (quote !begin)
-					(if (qassoc_get (qb_facts block) (quote sql_calc_found_rows) false)
+					(if (nth (nth spec 7) 3)
 						(list (quote session) "found_rows" (list (quote recset_count) accepted)) nil)
 					(compile_scan_plan (quote scan_order) (physical_query_tx_symbol) accepted
 						(quoted_runtime_list '()) (list (quote lambda) '() true)
 						(quoted_runtime_list (map order (lambda (item) (direct_column_name_for_alias driver (car item)))))
 						(cons (quote list) (map order (lambda (item)
 							(canonical_order_relation (cadr item) (source_column_order_collation driver (direct_column_name_for_alias driver (car item))))))) 0
-						(coalesceNil (qb_offset block) 0) (coalesceNil (qb_limit block) -1)
+						(coalesceNil (nth (nth spec 7) 1) 0) (coalesceNil (nth (nth spec 7) 2) -1)
 						(quoted_runtime_list mapcols)
 						(list (quote lambda) (cons (quote _acc) (map mapcols (lambda (col) (scan_callback_symbol_for_alias (source_alias driver) col))))
 							(list (quote !begin)
@@ -14476,8 +14565,8 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 			(semijoin_prejoin_plan block spec)))
 		(define direct (semijoin_direct_recset spec))
 		(define accepted (quote __semijoin_accepted))
-		(define output (if count_mode (semijoin_count_output block (nth spec 6) accepted)
-			(semijoin_output_plan block spec accepted)))
+		(define output (if count_mode (semijoin_count_output spec accepted)
+			(semijoin_output_plan spec accepted)))
 		(define direct_plan (list (quote !begin) (list (quote define) accepted direct) output))
 		(if (nil? cached) direct_plan
 			(begin
@@ -14487,7 +14576,7 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 					(list (quote table) (qb_schema block) false name false)))
 				(define warm_plan (list (quote !begin) (nth cached 1)
 					(list (quote define) accepted (nth cached 2))
-					(if count_mode (semijoin_count_output block (nth spec 6) accepted) output)))
+					(if count_mode (semijoin_count_output spec accepted) output)))
 				(define planning_session (planner_context_session (qb_facts block)))
 				(define decision_id (concat "semijoin_carrier:" (stable_structural_hash
 					(list (source_schema driver) (source_relation driver) (source_schema lookup) (source_relation lookup)
@@ -14545,11 +14634,11 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 									(if count_mode (source_table_expr driver) ready) count_mode))
 							warm_plan cold_plan))))))))
 
-(define semijoin_count_output (lambda (block fields value)
+(define semijoin_count_output (lambda (spec value)
 	(list (quote if)
-		(list (quote and) (list (quote <=) (coalesceNil (qb_offset block) 0) 0)
-			(list (quote not) (list (quote equal?) (coalesceNil (qb_limit block) -1) 0)))
-		(list (quote resultrow) (list (quote list) (car fields) value)) nil)))
+		(list (quote and) (list (quote <=) (coalesceNil (nth (nth spec 7) 1) 0) 0)
+			(list (quote not) (list (quote equal?) (coalesceNil (nth (nth spec 7) 2) -1) 0)))
+		(list (quote resultrow) (list (quote list) (car (nth spec 6)) value)) nil)))
 
 (define semijoin_split_filter_wins? (lambda (src indexed residual_width execution_session)
 	(begin

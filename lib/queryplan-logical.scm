@@ -3707,11 +3707,11 @@ columns cannot change group cardinality because the primary key is unique. */
 				false
 				(star_expr_matches_source? title_or_expr src)))) false)))
 
-(define source_primary_key_grouped? (lambda (block src)
+(define source_primary_key_grouped? (lambda (sources keys src)
 	(begin
 		(define primary_key (source_primary_key_columns src))
-		(define default_alias (source_alias (car (qb_sources block))))
-		(define grouped (map (coalesceNil (qb_group block) '()) (lambda (expr)
+		(define default_alias (source_alias (car sources)))
+		(define grouped (map (coalesceNil keys '()) (lambda (expr)
 			(canonical_column_expr_for_alias default_alias expr))))
 		(and (not (empty_list? primary_key))
 			(reduce primary_key (lambda (complete col)
@@ -3722,7 +3722,7 @@ columns cannot change group cardinality because the primary key is unique. */
 (define functional_dependency_star_group_keys (lambda (block)
 	(merge (map (qb_sources block) (lambda (src)
 		(if (and (fields_request_star_for_source? (qb_fields block) src)
-			(source_primary_key_grouped? block src))
+			(source_primary_key_grouped? (qb_sources block) (qb_group block) src))
 			(map (binding_source_columns src) (lambda (col)
 				(list (quote get_column) (source_alias src) false col false)))
 			'()))))))
