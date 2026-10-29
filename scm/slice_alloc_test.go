@@ -102,6 +102,76 @@ func TestOptimizeDoubleBangListAllocatesSlots(t *testing.T) {
 	}
 }
 
+// Exercise the shared optimizer hook in both ordinary and JIT builds.
+func TestOptimizeConsListConstructors(t *testing.T) {
+	for _, source := range []string{
+		`(lambda (head) (cons head '()))`,
+		`(lambda (head) (cons head (quote ())))`,
+		`(lambda (head) (cons head (list)))`,
+		`(lambda (head) (cons head (list 2 3)))`,
+	} {
+		t.Run(source, func(t *testing.T) {
+			expr := Read(t.Name(), source)
+			optimized := Optimize(expr, &Globalenv, nil)
+			if code := serializeSliceAllocTestExpr(t, optimized); strings.Contains(code, "cons") {
+				t.Fatalf("known list constructor kept cons: %s", code)
+			}
+			proc := Eval(optimized, &Globalenv)
+			if jitEnabled {
+				proc = jitCompile(proc)
+			}
+			want := Apply(Eval(ExpressionSyntax(Read(t.Name(), source)), &Globalenv), NewInt(7))
+			first := Apply(proc, NewInt(7))
+			if !Equal(first, want) {
+				t.Fatalf("got %s, want %s", String(first), String(want))
+			}
+			second := Apply(proc, NewInt(8))
+			if first.Slice()[0].Int() != 7 || second.Slice()[0].Int() != 8 {
+				t.Fatal("list constructor reused a retained result's backing array")
+			}
+		})
+	}
+}
+
+func TestOptimizeConsPreservesTailEvaluation(t *testing.T) {
+	for _, source := range []string{
+		`(lambda (head) (cons head (error "tail evaluated")))`,
+		`(lambda (head) (cons head (begin (error "tail evaluated") '())))`,
+	} {
+		optimized := Optimize(Read(t.Name(), source), &Globalenv, nil)
+		proc := Eval(optimized, &Globalenv)
+		if jitEnabled {
+			proc = jitCompile(proc)
+		}
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("cons discarded an effectful tail")
+				}
+			}()
+			Apply(proc, NewInt(7))
+		}()
+	}
+}
+
+func BenchmarkConsEmptyTail(b *testing.B) {
+	proc := Eval(Optimize(ExpressionSyntax(Read(b.Name(), `(lambda (head) (cons head (quote ())))`)), &Globalenv, nil), &Globalenv)
+	if jitEnabled {
+		proc = jitCompile(proc)
+	}
+	call := serialTestCallable(proc)
+	args := []Scmer{NewInt(7)}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		assocBenchmarkSink = call(args...)
+	}
+	b.StopTimer()
+	if !Equal(assocBenchmarkSink, NewSlice([]Scmer{args[0]})) {
+		b.Fatalf("wrong singleton: %s", String(assocBenchmarkSink))
+	}
+}
+
 func TestOptimizeGeneratedConsChainToList(t *testing.T) {
 	expr := Read("generated cons chain", `(lambda (a b c) (cons a (cons b (cons c '()))))`)
 	optimized := Optimize(expr, &Globalenv, nil)

@@ -213,7 +213,7 @@ test_cases:
         - "scan_group_into"
         - "assoc_keys_as_dataset_rows"
         - "assoc_keys_values_as_dataset_rows"
-        - "resultrow (cons"
+        - "(cons"
 
   - name: "ungrouped SUM uses its reducer as scalar accumulator"
     sql: "EXPLAIN SELECT SUM(id) AS total FROM lookup_group_items"
