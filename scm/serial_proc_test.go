@@ -527,7 +527,7 @@ func TestReducerInitializerFactories(t *testing.T) {
 	identity := NewFunc(func(a ...Scmer) Scmer { return a[0] })
 	predicate := NewFunc(func(a ...Scmer) Scmer { return NewBool(true) })
 	reducer := NewFunc(func(a ...Scmer) Scmer {
-		return setAssocPairs(a[0], []Scmer{NewString("total"), NewInt(1), Globalenv.Vars["+"]}, true)
+		return setAssocPairs(a[0], []Scmer{NewString("total"), NewInt(1)}, []Scmer{Globalenv.Vars["+"]}, true)
 	})
 	for _, name := range []string{"reduce", "reduce_assoc", "reduce_segments", "reduce_range", "reduce_map", "reduce_filter", "reduce_merge2", "reduce_map_filter", "reduce_filter_map"} {
 		t.Run(name, func(t *testing.T) {
@@ -580,7 +580,7 @@ func TestGroupAssocInitializerFactoryOwnsEachBucket(t *testing.T) {
 	})
 	key := NewFunc(func(a ...Scmer) Scmer { return a[0] })
 	reducer := NewFunc(func(a ...Scmer) Scmer {
-		return setAssocPairs(a[0], []Scmer{NewString("count"), NewInt(1), Globalenv.Vars["+"]}, true)
+		return setAssocPairs(a[0], []Scmer{NewString("count"), NewInt(1)}, []Scmer{Globalenv.Vars["+"]}, true)
 	})
 	input := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(1)})
 	got := declarations["group_assoc"].Fn(input, key, reducer, factory)
