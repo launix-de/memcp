@@ -181,6 +181,9 @@ func (r *ssaReachability) evaluate(value ssa.Value) ssaConstantFact {
 		}
 		return result
 	case *ssa.BinOp:
+		if r.zeroRemainder(v) {
+			return ssaConstantFact{value: ssa.NewConst(constant.MakeInt64(0), v.Type())}
+		}
 		a, b := r.fact(v.X), r.fact(v.Y)
 		if a.dynamic || b.dynamic {
 			return ssaConstantFact{dynamic: true}

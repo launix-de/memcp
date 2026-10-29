@@ -1271,6 +1271,7 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		d96 = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: d97.Reg, Reg2: r40}
 		ctx.BindReg(d97.Reg, &d96)
 		ctx.BindReg(r40, &d96)
+		ctx.FreeDesc(&d49)
 		d99 = d1
 		ctx.SyncDesc(&d99)
 		if d99.Loc == scm.LocMem {
@@ -1287,6 +1288,7 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 			panic("jit: scm.Scmer.String receiver not materialized as pair")
 		}
 		d98 = ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.Scmer.String), []scm.JITValueDesc{d99}, 2)
+		ctx.FreeDesc(&d1)
 		ctx.EnsureDesc(&d96)
 		ctx.EnsureDesc(&d98)
 		d100 = ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.ConcatStrings), []scm.JITValueDesc{d96, d98}, 2)

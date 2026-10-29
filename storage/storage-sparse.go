@@ -1083,6 +1083,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		d83 = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: d84.Reg, Reg2: r40}
 		ctx.BindReg(d84.Reg, &d83)
 		ctx.BindReg(r40, &d83)
+		ctx.FreeDesc(&d19)
 		d85 = result
 		ctx.EnsureDesc(&d83)
 		if d83.Loc == scm.LocRegPair {
@@ -1146,7 +1147,6 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 			d87 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r43, Condition: scm.CondUnsignedBelow}
 			ctx.BindReg(r43, &d87)
 		}
-		ctx.FreeDesc(&idxInt)
 		d88 = d87
 		ctx.SyncDesc(&d88)
 		if d88.Loc != scm.LocImm && d88.Loc != scm.LocFlags {

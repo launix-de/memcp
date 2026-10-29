@@ -1259,10 +1259,10 @@ type codeGen struct {
 
 	// Reference counting for SSA values (remaining uses)
 	refCounts map[string]int
-	// Values consumed in another basic block have a stable stack home. Their
-	// descriptor must remain nameable while sibling renderers are generated;
-	// global emission-order reference counting cannot free them path-locally.
-	crossBlockValues map[string]bool
+	// Cross-block definitions retain canonical homes. A separate SSA path proof
+	// can release a dead register view; global emission-order use counts alone
+	// cannot distinguish a future use from an unexecuted sibling's use.
+	crossBlockValues map[string]ssa.Value
 
 	// Scalar values consumed by the constructor returned from the same block.
 	// Arithmetic may produce these directly in result.Reg2.
@@ -2294,7 +2294,7 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 	}
 	retType := results.At(0).Type()
 	dv := g.allocDesc()
-	if g.crossBlockValues[name] && retWords == 2 && isScmerType(retType) {
+	if g.crossBlockValues[name] != nil && retWords == 2 && isScmerType(retType) {
 		helper := "JITEmitGoCallScmerToFrame"
 		if g.storageMode {
 			helper = "scm." + helper
@@ -2314,7 +2314,7 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 	// Bind and protect GoCall result registers. The nil-ownership from
 	// EmitGoCallScalar prevents spilling, but BindReg makes it trackable.
 	// We protect until freeDeadOperands releases this value.
-	if g.crossBlockValues[name] && retWords == 2 && isScmerType(retType) {
+	if g.crossBlockValues[name] != nil && retWords == 2 && isScmerType(retType) {
 		// The result already owns a rooted RBP-relative home.
 	} else if retWords == 1 {
 		g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
@@ -4829,15 +4829,28 @@ func (g *codeGen) emitRecursiveBBRenderers() {
 
 // generateClosure tries to generate a JIT emitter closure for the given SSA function.
 // Returns (closureCode, "") on success, or ("", errorDescription) on failure.
-func computeCrossBlockValues(fn *ssa.Function, reachability *ssaReachability) map[string]bool {
-	result := make(map[string]bool)
+func computeCrossBlockValues(fn *ssa.Function, reachability *ssaReachability) map[string]ssa.Value {
+	result := make(map[string]ssa.Value)
+	// Parameters are invocation-wide SSA definitions. Their references in a
+	// different branch must not keep dead block-local register reloads alive.
+	for _, parameter := range fn.Params {
+		var first *ssa.BasicBlock
+		for _, reference := range *parameter.Referrers() {
+			if first == nil {
+				first = reference.Block()
+			} else if reference.Block() != first {
+				result[parameter.Name()] = parameter
+				break
+			}
+		}
+	}
 	for _, block := range fn.Blocks {
 		if !reachability.blocks[block] {
 			continue
 		}
 		for _, instruction := range block.Instrs {
 			if value, ok := instruction.(ssa.Value); ok && ssaValueCrossesControlFlow(value) {
-				result[value.Name()] = true
+				result[value.Name()] = value
 			}
 		}
 	}
@@ -5582,18 +5595,45 @@ func (g *codeGen) useOperand(name string) {
 	if alias, ok := g.ssaAliases[name]; ok {
 		name = alias
 	}
-	if g.crossBlockValues[name] {
-		return
+	if value := g.crossBlockValues[name]; value != nil {
+		// This proof runs in jitgen on SSA, not in the one-pass runtime
+		// emitter. Global use counts include sibling blocks which will not
+		// execute after this instruction. Release their register views here;
+		// the existing canonical homes and branch snapshots retain edge state.
+		if ssaValueNeededAfterInstruction(g.currentInstr, value) {
+			return
+		}
+		// Representation aliases share the canonical descriptor and have their
+		// own remaining uses. Their established use-count protocol owns release.
+		for _, target := range g.ssaAliases {
+			if target == name {
+				return
+			}
+		}
+		// Deferred constructors borrow their scalar/string descriptor until
+		// actual boxing, beyond the source's last Go-SSA use. Retain the
+		// existing keepAliveForMarker ownership for those representations.
+		if source, ok := g.vals[name]; ok {
+			for _, alias := range g.vals {
+				if alias.goVar == source.goVar && strings.HasPrefix(alias.marker, "_new") {
+					return
+				}
+			}
+		}
 	}
 	count, ok := g.refCounts[name]
 	if !ok {
 		return
 	}
-	count--
-	g.refCounts[name] = count
-	if count > 0 {
-		return
+	if g.crossBlockValues[name] == nil {
+		count--
+		g.refCounts[name] = count
+		if count > 0 {
+			return
+		}
 	}
+	// A path-local release must not consume a sibling renderer's use counts.
+	// Those counts also choose destructive ALU operations while generating it.
 	gv, ok := g.vals[name]
 	if !ok || !gv.isDesc || gv.goVar == "" {
 		return
@@ -5630,6 +5670,9 @@ func (g *codeGen) keepAliveForMarker(arg ssa.Value) {
 // freeDeadOperands decrements refcounts for all operands of an instruction
 // and emits FreeDesc for any that reached zero.
 func (g *codeGen) freeDeadOperands(instr ssa.Instruction) {
+	previous := g.currentInstr
+	g.currentInstr = instr
+	defer func() { g.currentInstr = previous }()
 	if value, ok := instr.(ssa.Value); ok && g.reachability.replacement(value) != value {
 		return
 	}
@@ -8388,12 +8431,29 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tctx.EnsureDesc(&%s)", xVal.goVar)
 					g.emit("\tif %s.Loc != LocReg && %s.Loc != LocRegPair && %s.Loc != LocRegTriple { panic(\"jit: nil comparison requires a register value\") }", xVal.goVar, xVal.goVar, xVal.goVar)
 					rv := g.allocReg()
-					g.emitAllocBooleanResultReg(rv, resultTargetVar, "\t", directResultMarker, xVal.goVar+".Reg")
+					if flagsOnly {
+						g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
+					} else {
+						g.emitAllocBooleanResultReg(rv, resultTargetVar, "\t", directResultMarker, xVal.goVar+".Reg")
+					}
 					g.emit("\tctx.EmitCmpRegImm32(%s.Reg, 0)", xVal.goVar)
-					g.emit("\tctx.EmitSetcc(%s, %s)", rv, cc)
-					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+					if flagsOnly {
+						if lazyReturn {
+							g.emit("\t%s = ctx.DeferBooleanFlags(%s, %s)", dv, rv, cc)
+						} else {
+							g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, rv, cc)
+						}
+						g.emit("\tctx.BindReg(%s, &%s)", rv, dv)
+					} else {
+						g.emit("\tctx.EmitSetcc(%s, %s)", rv, cc)
+						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+					}
 					g.emit("}")
-					g.vals[name] = genVal{goVar: dv, isDesc: true, resultTargetVar: resultTargetVar}
+					marker := ""
+					if flagsOnly {
+						marker = "_flags"
+					}
+					g.vals[name] = genVal{goVar: dv, isDesc: true, marker: marker, resultTargetVar: resultTargetVar}
 					break
 				}
 			}
@@ -9435,7 +9495,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// CVTSI2SD reads the integer before replacing the selected GPR with
 			// IEEE-754 bits. A last-use source can therefore transfer its register
 			// directly; only values live after this SSA instruction need a copy.
-			reuseSource := g.ssaValueUsesRemaining(v.X.Name()) == 1 && !g.crossBlockValues[v.X.Name()] && !g.usedByOutgoingPhi(v.X.Name())
+			reuseSource := g.ssaValueUsesRemaining(v.X.Name()) == 1 && g.crossBlockValues[v.X.Name()] == nil && !g.usedByOutgoingPhi(v.X.Name())
 			g.emit("var %s JITValueDesc", dv)
 			g.emit("if %s.Loc == LocImm {", src.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(float64(%s.Imm.Int()))}", dv, src.goVar)

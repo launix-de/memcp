@@ -1997,6 +1997,7 @@ func init_list_assoc_extra() {
 					d135 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r37, Condition: CondSignedLess}
 					ctx.BindReg(r37, &d135)
 				}
+				ctx.FreeDesc(&d130)
 				ctx.ReclaimUntrackedRegs()
 				d136 := d135
 				ctx.SyncDesc(&d136)
@@ -4286,6 +4287,7 @@ func init_list_assoc_extra() {
 					d130 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r34, Condition: CondSignedLess}
 					ctx.BindReg(r34, &d130)
 				}
+				ctx.FreeDesc(&d125)
 				ctx.ReclaimUntrackedRegs()
 				d131 := d130
 				ctx.SyncDesc(&d131)
@@ -4468,6 +4470,7 @@ func init_list_assoc_extra() {
 				ctx.EmitAndRegImm32(d137.Reg, 1)
 				d137.Type = tagBool
 				ctx.BindReg(d137.Reg, &d137)
+				ctx.FreeDesc(&d124)
 				ctx.FreeDesc(&d135)
 				ctx.ReclaimUntrackedRegs()
 				d138 := d137
@@ -5010,6 +5013,7 @@ func init_list_assoc_extra() {
 						d25 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r4, Condition: CondSignedLess}
 						ctx.BindReg(r4, &d25)
 					}
+					ctx.FreeDesc(&d23)
 					d26 = d25
 					ctx.SyncDesc(&d26)
 					if d26.Loc != LocImm && d26.Loc != LocFlags {
@@ -5204,6 +5208,7 @@ func init_list_assoc_extra() {
 						ctx.BindReg(r6, &d61)
 						d22.Loc = LocNone
 					}
+					ctx.FreeDesc(&d22)
 					ctx.SyncDesc(&d61)
 					if d61.Loc == LocRegPair || d61.Loc == LocStackPair || d61.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d61, &result)
@@ -5655,6 +5660,7 @@ func init_list_assoc_extra() {
 						d22 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r4, Condition: CondSignedLess}
 						ctx.BindReg(r4, &d22)
 					}
+					ctx.FreeDesc(&d20)
 					d23 = d22
 					ctx.SyncDesc(&d23)
 					if d23.Loc != LocImm && d23.Loc != LocFlags {
@@ -5863,6 +5869,7 @@ func init_list_assoc_extra() {
 						ctx.BindReg(r6, &d65)
 						d19.Loc = LocNone
 					}
+					ctx.FreeDesc(&d19)
 					ctx.SyncDesc(&d65)
 					if d65.Loc == LocRegPair || d65.Loc == LocStackPair || d65.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d65, &result)
@@ -6314,6 +6321,7 @@ func init_list_assoc_extra() {
 						d22 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r4, Condition: CondSignedLess}
 						ctx.BindReg(r4, &d22)
 					}
+					ctx.FreeDesc(&d20)
 					d23 = d22
 					ctx.SyncDesc(&d23)
 					if d23.Loc != LocImm && d23.Loc != LocFlags {
@@ -6527,6 +6535,7 @@ func init_list_assoc_extra() {
 						ctx.BindReg(r6, &d66)
 						d19.Loc = LocNone
 					}
+					ctx.FreeDesc(&d19)
 					ctx.SyncDesc(&d66)
 					if d66.Loc == LocRegPair || d66.Loc == LocStackPair || d66.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d66, &result)
@@ -7013,6 +7022,7 @@ func init_list_assoc_extra() {
 						d18 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r4, Condition: CondSignedLess}
 						ctx.BindReg(r4, &d18)
 					}
+					ctx.FreeDesc(&d16)
 					d19 = d18
 					ctx.SyncDesc(&d19)
 					if d19.Loc != LocImm && d19.Loc != LocFlags {
@@ -7180,6 +7190,7 @@ func init_list_assoc_extra() {
 						ctx.BindReg(r6, &d49)
 						d15.Loc = LocNone
 					}
+					ctx.FreeDesc(&d15)
 					ctx.SyncDesc(&d49)
 					if d49.Loc == LocRegPair || d49.Loc == LocStackPair || d49.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d49, &result)
@@ -7592,6 +7603,7 @@ func init_list_assoc_extra() {
 						d18 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r4, Condition: CondSignedLess}
 						ctx.BindReg(r4, &d18)
 					}
+					ctx.FreeDesc(&d16)
 					d19 = d18
 					ctx.SyncDesc(&d19)
 					if d19.Loc != LocImm && d19.Loc != LocFlags {
@@ -7764,6 +7776,7 @@ func init_list_assoc_extra() {
 						ctx.BindReg(r6, &d50)
 						d15.Loc = LocNone
 					}
+					ctx.FreeDesc(&d15)
 					ctx.SyncDesc(&d50)
 					if d50.Loc == LocRegPair || d50.Loc == LocStackPair || d50.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d50, &result)

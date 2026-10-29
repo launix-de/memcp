@@ -874,6 +874,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 			d45 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r22}
 			ctx.BindReg(r22, &d45)
 		}
+		ctx.FreeDesc(&d18)
 		if thisptr.Loc == scm.LocImm {
 			fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageDecimal)(nil).inner) + 56
 			val := *(*int64)(unsafe.Pointer(fieldAddr))
@@ -1274,6 +1275,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		if resultTarget119 && d120.Loc == scm.LocReg {
 			ctx.BindReg(result.Reg2, &result)
 		}
+		ctx.FreeDesc(&d47)
 		ctx.FreeDesc(&d118)
 		ctx.EnsureDesc(&d120)
 		d121 = result
@@ -1308,6 +1310,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 			d122 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagFloat, Reg: r37}
 			ctx.BindReg(r37, &d122)
 		}
+		ctx.FreeDesc(&d47)
 		if thisptr.Loc == scm.LocImm {
 			fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageDecimal)(nil).scaleExp)
 			val := *(*int8)(unsafe.Pointer(fieldAddr))

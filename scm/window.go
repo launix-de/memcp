@@ -1689,6 +1689,7 @@ func init_window() {
 						d204 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r26, Condition: CondSignedLess}
 						ctx.BindReg(r26, &d204)
 					}
+					ctx.FreeDesc(&d90)
 					d205 = d204
 					ctx.SyncDesc(&d205)
 					if d205.Loc != LocImm && d205.Loc != LocFlags {
@@ -2471,6 +2472,7 @@ func init_window() {
 					ctx.BindReg(d418.Reg2, &d418)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d418)
+					ctx.FreeDesc(&d4)
 					d419 = args[0]
 					d419.ID = 0
 					ctx.SyncDesc(&d419)
@@ -4033,6 +4035,7 @@ func init_window() {
 					ctx.BindReg(d240.Reg2, &d240)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d240)
+					ctx.FreeDesc(&d5)
 					ctx.EnsureDesc(&d1)
 					ctx.EnsureDesc(&d1)
 					if d1.Loc == LocImm {

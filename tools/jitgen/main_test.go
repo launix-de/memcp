@@ -1272,3 +1272,34 @@ func initializer(args ...Scmer) Scmer { return ApplyOnce(args[0], nil) }
 		t.Fatalf("initializer lost native lowering:\n%s", code)
 	}
 }
+
+func TestPathLocalReleasePreservesSiblingUseCounts(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+ type Scmer struct {ptr,aux uint64}
+ func left(Scmer) Scmer
+ func right(Scmer) Scmer
+ func sample(value Scmer,flag bool) Scmer {
+  if flag {return left(value)};return right(value)
+ }`, "sample")
+	g := newCodeGen(fn, nil)
+	name := fn.Params[0].Name()
+	g.vals[name] = genVal{goVar: "input", isDesc: true}
+	before := g.refCounts[name]
+	if before != 2 {
+		t.Fatalf("fixture uses=%d", before)
+	}
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			if call, ok := instruction.(*ssa.Call); ok {
+				g.currentInstr = call
+				g.useOperand(name)
+				if g.refCounts[name] != before {
+					t.Fatal("path release consumed sibling ALU use counts")
+				}
+			}
+		}
+	}
+	if strings.Count(g.w.String(), "ctx.FreeDesc(&input)") != 2 {
+		t.Fatal("dead block-local views were retained")
+	}
+}

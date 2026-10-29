@@ -620,6 +620,7 @@ func init_timezone() {
 					d48 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d28}, 1)
 					d48.NoHeapPointer = true
 					ctx.BindReg(d48.Reg, &d48)
+					ctx.FreeDesc(&d28)
 					ctx.EnsureDesc(&d48)
 					if d48.Loc == LocImm {
 						ctx.EmitMakeInt(result, d48)
@@ -1144,17 +1145,16 @@ func init_timezone() {
 						if d18.Loc != LocReg && d18.Loc != LocRegPair && d18.Loc != LocRegTriple {
 							panic("jit: nil comparison requires a register value")
 						}
-						r0 := ctx.AllocRegExcept(d18.Reg)
+						r0 := ctx.AllocReg()
 						ctx.EmitCmpRegImm32(d18.Reg, 0)
-						ctx.EmitSetcc(r0, CondNotEqual)
-						d19 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+						d19 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondNotEqual}
 						ctx.BindReg(r0, &d19)
 					}
 					ctx.FreeDesc(&d18)
 					d20 = d19
-					ctx.EnsureDesc(&d20)
-					if d20.Loc != LocImm && d20.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d20)
+					if d20.Loc != LocImm && d20.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d20.Loc == LocImm {
 						if d20.Imm.Bool() {
@@ -1162,11 +1162,11 @@ func init_timezone() {
 						}
 						return bbs[6].Render()
 					}
-					ctx.EmitCmpRegImm32(d20.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl6)
+					ctx.EmitJump(d20.Condition, lbl6)
 					if bbs[6].Rendered {
 						ctx.EmitJmp(lbl7)
 					}
+					ctx.FreeDesc(&d19)
 					ctx.FlushRegisterMoves()
 					if !bbs[6].Rendered {
 						snap21 := d1
@@ -1203,7 +1203,6 @@ func init_timezone() {
 						return bbs[5].Render()
 					}
 					return result
-					ctx.FreeDesc(&d19)
 					return result
 				}
 				bbs[3].Render = func() JITValueDesc {
@@ -1488,17 +1487,16 @@ func init_timezone() {
 						if d89.Loc != LocReg && d89.Loc != LocRegPair && d89.Loc != LocRegTriple {
 							panic("jit: nil comparison requires a register value")
 						}
-						r1 := ctx.AllocRegExcept(d89.Reg)
+						r1 := ctx.AllocReg()
 						ctx.EmitCmpRegImm32(d89.Reg, 0)
-						ctx.EmitSetcc(r1, CondNotEqual)
-						d90 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r1}
+						d90 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r1, Condition: CondNotEqual}
 						ctx.BindReg(r1, &d90)
 					}
 					ctx.FreeDesc(&d89)
 					d91 = d90
-					ctx.EnsureDesc(&d91)
-					if d91.Loc != LocImm && d91.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d91)
+					if d91.Loc != LocImm && d91.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d91.Loc == LocImm {
 						if d91.Imm.Bool() {
@@ -1506,11 +1504,11 @@ func init_timezone() {
 						}
 						return bbs[8].Render()
 					}
-					ctx.EmitCmpRegImm32(d91.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl8)
+					ctx.EmitJump(d91.Condition, lbl8)
 					if bbs[8].Rendered {
 						ctx.EmitJmp(lbl9)
 					}
+					ctx.FreeDesc(&d90)
 					ctx.FlushRegisterMoves()
 					if !bbs[8].Rendered {
 						snap92 := d1
@@ -1579,7 +1577,6 @@ func init_timezone() {
 						return bbs[7].Render()
 					}
 					return result
-					ctx.FreeDesc(&d90)
 					return result
 				}
 				bbs[7].Render = func() JITValueDesc {
@@ -1775,6 +1772,7 @@ func init_timezone() {
 					ctx.BindReg(d164.Reg2, &d164)
 					ctx.BindReg(d164.Reg3, &d164)
 					ctx.FreeDesc(&d1)
+					ctx.FreeDesc(&d88)
 					d164 = JITPrepareGoSliceArg(ctx, d164)
 					if d164.Loc != LocRegTriple && d164.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
@@ -2069,6 +2067,7 @@ func init_timezone() {
 					ctx.FreeDesc(&d184)
 					ctx.FreeDesc(&d185)
 					ctx.FreeDesc(&d186)
+					ctx.FreeDesc(&d17)
 					ctx.SyncDesc(&d188)
 					if d188.Loc == LocReg || d188.Loc == LocFPReg {
 						ctx.ProtectReg(d188.Reg)
@@ -2169,6 +2168,7 @@ func init_timezone() {
 					_ = d194
 					d195 = callResults193[1]
 					_ = d195
+					ctx.FreeDesc(&d17)
 					ctx.StabilizeDescForControlFlow(&d194)
 					d196 = d195
 					ctx.EnsureDesc(&d196)
@@ -2401,6 +2401,7 @@ func init_timezone() {
 					ctx.BindReg(d267.Reg3, &d267)
 					ctx.FreeDesc(&d266)
 					ctx.StabilizeDescForControlFlow(&d267)
+					ctx.FreeDesc(&d194)
 					ctx.SyncDesc(&d267)
 					if d267.Loc == LocReg || d267.Loc == LocFPReg {
 						ctx.ProtectReg(d267.Reg)
@@ -2989,17 +2990,16 @@ func init_timezone() {
 						if d52.Loc != LocReg && d52.Loc != LocRegPair && d52.Loc != LocRegTriple {
 							panic("jit: nil comparison requires a register value")
 						}
-						r1 := ctx.AllocRegExcept(d52.Reg)
+						r1 := ctx.AllocReg()
 						ctx.EmitCmpRegImm32(d52.Reg, 0)
-						ctx.EmitSetcc(r1, CondNotEqual)
-						d53 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r1}
+						d53 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r1, Condition: CondNotEqual}
 						ctx.BindReg(r1, &d53)
 					}
 					ctx.FreeDesc(&d52)
 					d54 = d53
-					ctx.EnsureDesc(&d54)
-					if d54.Loc != LocImm && d54.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d54)
+					if d54.Loc != LocImm && d54.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d54.Loc == LocImm {
 						if d54.Imm.Bool() {
@@ -3027,9 +3027,9 @@ func init_timezone() {
 						return bbs[6].Render()
 					}
 					lbl12 := ctx.ReserveLabel()
-					ctx.EmitCmpRegImm32(d54.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl6)
+					ctx.EmitJump(d54.Condition, lbl6)
 					ctx.EmitJmp(lbl12)
+					ctx.FreeDesc(&d53)
 					snap56 := d1
 					snap57 := d2
 					snap58 := d3
@@ -3148,7 +3148,6 @@ func init_timezone() {
 						return bbs[5].Render()
 					}
 					return result
-					ctx.FreeDesc(&d53)
 					return result
 				}
 				bbs[5].Render = func() JITValueDesc {
@@ -3324,6 +3323,7 @@ func init_timezone() {
 					ctx.BindReg(d136.Reg2, &d136)
 					ctx.BindReg(d136.Reg3, &d136)
 					ctx.FreeDesc(&d135)
+					ctx.FreeDesc(&d16)
 					d136 = JITPrepareGoSliceArg(ctx, d136)
 					if d136.Loc != LocRegTriple && d136.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).In arg0)")
@@ -3339,6 +3339,7 @@ func init_timezone() {
 					ctx.BindReg(d137.Reg2, &d137)
 					ctx.BindReg(d137.Reg3, &d137)
 					ctx.FreeDesc(&d136)
+					ctx.FreeDesc(&d2)
 					d138 = args[1]
 					d138.ID = 0
 					d140 = d138
@@ -3424,6 +3425,7 @@ func init_timezone() {
 					d143.NoHeapPointer = false
 					ctx.BindReg(d143.Reg, &d143)
 					ctx.BindReg(d143.Reg2, &d143)
+					ctx.FreeDesc(&d16)
 					ctx.SyncDesc(&d143)
 					if d143.Loc == LocRegPair || d143.Loc == LocStackPair || d143.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d143, &result)
@@ -4631,17 +4633,16 @@ func init_timezone() {
 						if d20.Loc != LocReg && d20.Loc != LocRegPair && d20.Loc != LocRegTriple {
 							panic("jit: nil comparison requires a register value")
 						}
-						r0 := ctx.AllocRegExcept(d20.Reg)
+						r0 := ctx.AllocReg()
 						ctx.EmitCmpRegImm32(d20.Reg, 0)
-						ctx.EmitSetcc(r0, CondNotEqual)
-						d21 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+						d21 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondNotEqual}
 						ctx.BindReg(r0, &d21)
 					}
 					ctx.FreeDesc(&d20)
 					d22 = d21
-					ctx.EnsureDesc(&d22)
-					if d22.Loc != LocImm && d22.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
+					ctx.SyncDesc(&d22)
+					if d22.Loc != LocImm && d22.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
 					if d22.Loc == LocImm {
 						if d22.Imm.Bool() {
@@ -4649,11 +4650,11 @@ func init_timezone() {
 						}
 						return bbs[5].Render()
 					}
-					ctx.EmitCmpRegImm32(d22.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl5)
+					ctx.EmitJump(d22.Condition, lbl5)
 					if bbs[5].Rendered {
 						ctx.EmitJmp(lbl6)
 					}
+					ctx.FreeDesc(&d21)
 					ctx.FlushRegisterMoves()
 					if !bbs[5].Rendered {
 						snap23 := d1
@@ -4692,7 +4693,6 @@ func init_timezone() {
 						return bbs[4].Render()
 					}
 					return result
-					ctx.FreeDesc(&d21)
 					return result
 				}
 				bbs[3].Render = func() JITValueDesc {
@@ -5420,6 +5420,7 @@ func init_timezone() {
 					ctx.BindReg(d163.Reg2, &d163)
 					ctx.BindReg(d163.Reg3, &d163)
 					ctx.FreeDesc(&d162)
+					ctx.FreeDesc(&d1)
 					d163 = JITPrepareGoSliceArg(ctx, d163)
 					if d163.Loc != LocRegTriple && d163.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).UTC arg0)")
@@ -5525,6 +5526,7 @@ func init_timezone() {
 					ctx.FreeDesc(&d168)
 					ctx.FreeDesc(&d169)
 					ctx.FreeDesc(&d170)
+					ctx.FreeDesc(&d19)
 					d172 = JITPrepareGoSliceArg(ctx, d172)
 					if d172.Loc != LocRegTriple && d172.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).UTC arg0)")
@@ -5609,6 +5611,7 @@ func init_timezone() {
 					ctx.BindReg(d177.Reg2, &d177)
 					ctx.BindReg(d177.Reg3, &d177)
 					ctx.FreeDesc(&d176)
+					ctx.FreeDesc(&d1)
 					d177 = JITPrepareGoSliceArg(ctx, d177)
 					if d177.Loc != LocRegTriple && d177.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).In arg0)")
@@ -5624,6 +5627,7 @@ func init_timezone() {
 					ctx.BindReg(d178.Reg2, &d178)
 					ctx.BindReg(d178.Reg3, &d178)
 					ctx.FreeDesc(&d177)
+					ctx.FreeDesc(&d19)
 					d178 = JITPrepareGoSliceArg(ctx, d178)
 					if d178.Loc != LocRegTriple && d178.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
@@ -6689,6 +6693,7 @@ func init_timezone() {
 						return bbs[5].Render()
 					}
 					return result
+					ctx.FreeDesc(&d17)
 					return result
 				}
 				bbs[7].Render = func() JITValueDesc {
@@ -6709,6 +6714,7 @@ func init_timezone() {
 					d119 = ctx.EmitGoCallScalar(GoFuncAddr((time.Duration).Seconds), []JITValueDesc{d58}, 1)
 					d119.NoHeapPointer = true
 					ctx.BindReg(d119.Reg, &d119)
+					ctx.FreeDesc(&d58)
 					ctx.EnsureDesc(&d119)
 					ctx.EnsureDesc(&d119)
 					if d119.Loc == LocImm {
@@ -6754,6 +6760,7 @@ func init_timezone() {
 					d122 = ctx.EmitGoCallScalar(GoFuncAddr((time.Duration).Minutes), []JITValueDesc{d58}, 1)
 					d122.NoHeapPointer = true
 					ctx.BindReg(d122.Reg, &d122)
+					ctx.FreeDesc(&d58)
 					ctx.EnsureDesc(&d122)
 					ctx.EnsureDesc(&d122)
 					if d122.Loc == LocImm {
@@ -6930,6 +6937,7 @@ func init_timezone() {
 					d167 = ctx.EmitGoCallScalar(GoFuncAddr((time.Duration).Hours), []JITValueDesc{d58}, 1)
 					d167.NoHeapPointer = true
 					ctx.BindReg(d167.Reg, &d167)
+					ctx.FreeDesc(&d58)
 					ctx.EnsureDesc(&d167)
 					ctx.EnsureDesc(&d167)
 					if d167.Loc == LocImm {
@@ -7120,6 +7128,7 @@ func init_timezone() {
 					d219 = ctx.EmitGoCallScalar(GoFuncAddr((time.Duration).Hours), []JITValueDesc{d58}, 1)
 					d219.NoHeapPointer = true
 					ctx.BindReg(d219.Reg, &d219)
+					ctx.FreeDesc(&d58)
 					ctx.EnsureDesc(&d219)
 					if d219.Loc == LocImm {
 						d220 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d219.Imm.Float() / 24)}
@@ -7340,6 +7349,7 @@ func init_timezone() {
 					d280 = ctx.EmitGoCallScalar(GoFuncAddr((time.Duration).Hours), []JITValueDesc{d58}, 1)
 					d280.NoHeapPointer = true
 					ctx.BindReg(d280.Reg, &d280)
+					ctx.FreeDesc(&d58)
 					ctx.EnsureDesc(&d280)
 					if d280.Loc == LocImm {
 						d281 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d280.Imm.Float() / 168)}
@@ -7581,6 +7591,7 @@ func init_timezone() {
 					_ = d351
 					d352 = callResults349[2]
 					_ = d352
+					ctx.FreeDesc(&d12)
 					d16 = JITPrepareGoSliceArg(ctx, d16)
 					if d16.Loc != LocRegTriple && d16.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Date arg0)")
@@ -7593,6 +7604,7 @@ func init_timezone() {
 					_ = d355
 					d356 = callResults353[2]
 					_ = d356
+					ctx.FreeDesc(&d16)
 					ctx.EnsureDesc(&d354)
 					ctx.EnsureDesc(&d350)
 					ctx.SyncDesc(&d354)
@@ -7986,6 +7998,7 @@ func init_timezone() {
 					_ = d446
 					d447 = callResults444[2]
 					_ = d447
+					ctx.FreeDesc(&d12)
 					d16 = JITPrepareGoSliceArg(ctx, d16)
 					if d16.Loc != LocRegTriple && d16.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Date arg0)")
@@ -7998,6 +8011,7 @@ func init_timezone() {
 					_ = d450
 					d451 = callResults448[2]
 					_ = d451
+					ctx.FreeDesc(&d16)
 					ctx.EnsureDesc(&d449)
 					ctx.EnsureDesc(&d445)
 					ctx.SyncDesc(&d449)

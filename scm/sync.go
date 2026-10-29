@@ -2120,18 +2120,17 @@ func init_sync() {
 					if d14.Loc != LocReg && d14.Loc != LocRegPair && d14.Loc != LocRegTriple {
 						panic("jit: nil comparison requires a register value")
 					}
-					r5 := ctx.AllocRegExcept(d14.Reg)
+					r5 := ctx.AllocReg()
 					ctx.EmitCmpRegImm32(d14.Reg, 0)
-					ctx.EmitSetcc(r5, CondEqual)
-					d15 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r5}
+					d15 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r5, Condition: CondEqual}
 					ctx.BindReg(r5, &d15)
 				}
 				ctx.FreeDesc(&d14)
 				ctx.ReclaimUntrackedRegs()
 				d16 := d15
-				ctx.EnsureDesc(&d16)
-				if d16.Loc != LocImm && d16.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
+				ctx.SyncDesc(&d16)
+				if d16.Loc != LocImm && d16.Loc != LocFlags {
+					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
 				lbl8 := ctx.ReserveLabel()
 				lbl9 := ctx.ReserveLabel()
@@ -2144,15 +2143,14 @@ func init_sync() {
 						ctx.EmitJmp(lbl3)
 					}
 				} else {
-					ctx.EmitCmpRegImm32(d16.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl8)
+					ctx.EmitJump(d16.Condition, lbl8)
 					ctx.EmitJmp(lbl9)
+					ctx.FreeDesc(&d15)
 					ctx.MarkLabel(lbl8)
 					ctx.EmitJmp(lbl2)
 					ctx.MarkLabel(lbl9)
 					ctx.EmitJmp(lbl3)
 				}
-				ctx.FreeDesc(&d15)
 				bbpos_1_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				ctx.MarkLabel(lbl3)
 				ctx.ResolveFixups()
@@ -2239,6 +2237,8 @@ func init_sync() {
 				ctx.SyncDesc(&d12)
 				ctx.SyncDesc(&d17)
 				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d8, d10, d12, d17})
+				ctx.FreeDesc(&d8)
+				ctx.FreeDesc(&d17)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl0)
 				bbpos_1_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -2312,6 +2312,7 @@ func init_sync() {
 					ctx.BindReg(r10, &d26)
 					ctx.BindReg(r11, &d26)
 				}
+				ctx.FreeDesc(&d8)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d20)
 				ctx.EnsureDesc(&d20)
@@ -2329,6 +2330,7 @@ func init_sync() {
 					ctx.TransferReg(d20.Reg)
 					d20.Loc = LocNone
 				}
+				ctx.FreeDesc(&d20)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d27)
 				ctx.ReclaimUntrackedRegs()
@@ -2476,18 +2478,17 @@ func init_sync() {
 					if d40.Loc != LocReg && d40.Loc != LocRegPair && d40.Loc != LocRegTriple {
 						panic("jit: nil comparison requires a register value")
 					}
-					r17 := ctx.AllocRegExcept(d40.Reg)
+					r17 := ctx.AllocReg()
 					ctx.EmitCmpRegImm32(d40.Reg, 0)
-					ctx.EmitSetcc(r17, CondEqual)
-					d41 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r17}
+					d41 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r17, Condition: CondEqual}
 					ctx.BindReg(r17, &d41)
 				}
 				ctx.FreeDesc(&d40)
 				ctx.ReclaimUntrackedRegs()
 				d42 := d41
-				ctx.EnsureDesc(&d42)
-				if d42.Loc != LocImm && d42.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
+				ctx.SyncDesc(&d42)
+				if d42.Loc != LocImm && d42.Loc != LocFlags {
+					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
 				lbl20 := ctx.ReserveLabel()
 				lbl21 := ctx.ReserveLabel()
@@ -2500,15 +2501,14 @@ func init_sync() {
 						ctx.EmitJmp(lbl15)
 					}
 				} else {
-					ctx.EmitCmpRegImm32(d42.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl20)
+					ctx.EmitJump(d42.Condition, lbl20)
 					ctx.EmitJmp(lbl21)
+					ctx.FreeDesc(&d41)
 					ctx.MarkLabel(lbl20)
 					ctx.EmitJmp(lbl14)
 					ctx.MarkLabel(lbl21)
 					ctx.EmitJmp(lbl15)
 				}
-				ctx.FreeDesc(&d41)
 				bbpos_2_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				ctx.MarkLabel(lbl15)
 				ctx.ResolveFixups()
@@ -2595,6 +2595,8 @@ func init_sync() {
 				ctx.SyncDesc(&d38)
 				ctx.SyncDesc(&d43)
 				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d34, d36, d38, d43})
+				ctx.FreeDesc(&d34)
+				ctx.FreeDesc(&d43)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl12)
 				bbpos_2_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -2668,6 +2670,7 @@ func init_sync() {
 					ctx.BindReg(r22, &d52)
 					ctx.BindReg(r23, &d52)
 				}
+				ctx.FreeDesc(&d34)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d46)
 				ctx.EnsureDesc(&d46)
@@ -2685,6 +2688,7 @@ func init_sync() {
 					ctx.TransferReg(d46.Reg)
 					d46.Loc = LocNone
 				}
+				ctx.FreeDesc(&d46)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d53)
 				ctx.ReclaimUntrackedRegs()
@@ -2832,18 +2836,17 @@ func init_sync() {
 					if d66.Loc != LocReg && d66.Loc != LocRegPair && d66.Loc != LocRegTriple {
 						panic("jit: nil comparison requires a register value")
 					}
-					r29 := ctx.AllocRegExcept(d66.Reg)
+					r29 := ctx.AllocReg()
 					ctx.EmitCmpRegImm32(d66.Reg, 0)
-					ctx.EmitSetcc(r29, CondEqual)
-					d67 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r29}
+					d67 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r29, Condition: CondEqual}
 					ctx.BindReg(r29, &d67)
 				}
 				ctx.FreeDesc(&d66)
 				ctx.ReclaimUntrackedRegs()
 				d68 := d67
-				ctx.EnsureDesc(&d68)
-				if d68.Loc != LocImm && d68.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
+				ctx.SyncDesc(&d68)
+				if d68.Loc != LocImm && d68.Loc != LocFlags {
+					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
 				lbl32 := ctx.ReserveLabel()
 				lbl33 := ctx.ReserveLabel()
@@ -2856,15 +2859,14 @@ func init_sync() {
 						ctx.EmitJmp(lbl27)
 					}
 				} else {
-					ctx.EmitCmpRegImm32(d68.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl32)
+					ctx.EmitJump(d68.Condition, lbl32)
 					ctx.EmitJmp(lbl33)
+					ctx.FreeDesc(&d67)
 					ctx.MarkLabel(lbl32)
 					ctx.EmitJmp(lbl26)
 					ctx.MarkLabel(lbl33)
 					ctx.EmitJmp(lbl27)
 				}
-				ctx.FreeDesc(&d67)
 				bbpos_3_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				ctx.MarkLabel(lbl27)
 				ctx.ResolveFixups()
@@ -2951,6 +2953,8 @@ func init_sync() {
 				ctx.SyncDesc(&d64)
 				ctx.SyncDesc(&d69)
 				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d60, d62, d64, d69})
+				ctx.FreeDesc(&d60)
+				ctx.FreeDesc(&d69)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl24)
 				bbpos_3_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -3024,6 +3028,7 @@ func init_sync() {
 					ctx.BindReg(r34, &d78)
 					ctx.BindReg(r35, &d78)
 				}
+				ctx.FreeDesc(&d60)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d72)
 				ctx.EnsureDesc(&d72)
@@ -3041,6 +3046,7 @@ func init_sync() {
 					ctx.TransferReg(d72.Reg)
 					d72.Loc = LocNone
 				}
+				ctx.FreeDesc(&d72)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d79)
 				ctx.ReclaimUntrackedRegs()
@@ -3188,18 +3194,17 @@ func init_sync() {
 					if d92.Loc != LocReg && d92.Loc != LocRegPair && d92.Loc != LocRegTriple {
 						panic("jit: nil comparison requires a register value")
 					}
-					r41 := ctx.AllocRegExcept(d92.Reg)
+					r41 := ctx.AllocReg()
 					ctx.EmitCmpRegImm32(d92.Reg, 0)
-					ctx.EmitSetcc(r41, CondEqual)
-					d93 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r41}
+					d93 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r41, Condition: CondEqual}
 					ctx.BindReg(r41, &d93)
 				}
 				ctx.FreeDesc(&d92)
 				ctx.ReclaimUntrackedRegs()
 				d94 := d93
-				ctx.EnsureDesc(&d94)
-				if d94.Loc != LocImm && d94.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
+				ctx.SyncDesc(&d94)
+				if d94.Loc != LocImm && d94.Loc != LocFlags {
+					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
 				lbl44 := ctx.ReserveLabel()
 				lbl45 := ctx.ReserveLabel()
@@ -3212,15 +3217,14 @@ func init_sync() {
 						ctx.EmitJmp(lbl39)
 					}
 				} else {
-					ctx.EmitCmpRegImm32(d94.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl44)
+					ctx.EmitJump(d94.Condition, lbl44)
 					ctx.EmitJmp(lbl45)
+					ctx.FreeDesc(&d93)
 					ctx.MarkLabel(lbl44)
 					ctx.EmitJmp(lbl38)
 					ctx.MarkLabel(lbl45)
 					ctx.EmitJmp(lbl39)
 				}
-				ctx.FreeDesc(&d93)
 				bbpos_4_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				ctx.MarkLabel(lbl39)
 				ctx.ResolveFixups()
@@ -3307,6 +3311,8 @@ func init_sync() {
 				ctx.SyncDesc(&d90)
 				ctx.SyncDesc(&d95)
 				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d86, d88, d90, d95})
+				ctx.FreeDesc(&d86)
+				ctx.FreeDesc(&d95)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl36)
 				bbpos_4_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -3380,6 +3386,7 @@ func init_sync() {
 					ctx.BindReg(r46, &d104)
 					ctx.BindReg(r47, &d104)
 				}
+				ctx.FreeDesc(&d86)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d98)
 				ctx.EnsureDesc(&d98)
@@ -3397,6 +3404,7 @@ func init_sync() {
 					ctx.TransferReg(d98.Reg)
 					d98.Loc = LocNone
 				}
+				ctx.FreeDesc(&d98)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d105)
 				ctx.ReclaimUntrackedRegs()
@@ -3544,18 +3552,17 @@ func init_sync() {
 					if d118.Loc != LocReg && d118.Loc != LocRegPair && d118.Loc != LocRegTriple {
 						panic("jit: nil comparison requires a register value")
 					}
-					r53 := ctx.AllocRegExcept(d118.Reg)
+					r53 := ctx.AllocReg()
 					ctx.EmitCmpRegImm32(d118.Reg, 0)
-					ctx.EmitSetcc(r53, CondEqual)
-					d119 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r53}
+					d119 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r53, Condition: CondEqual}
 					ctx.BindReg(r53, &d119)
 				}
 				ctx.FreeDesc(&d118)
 				ctx.ReclaimUntrackedRegs()
 				d120 := d119
-				ctx.EnsureDesc(&d120)
-				if d120.Loc != LocImm && d120.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
+				ctx.SyncDesc(&d120)
+				if d120.Loc != LocImm && d120.Loc != LocFlags {
+					panic("jit: fused If condition is neither LocImm nor LocFlags")
 				}
 				lbl56 := ctx.ReserveLabel()
 				lbl57 := ctx.ReserveLabel()
@@ -3568,15 +3575,14 @@ func init_sync() {
 						ctx.EmitJmp(lbl51)
 					}
 				} else {
-					ctx.EmitCmpRegImm32(d120.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl56)
+					ctx.EmitJump(d120.Condition, lbl56)
 					ctx.EmitJmp(lbl57)
+					ctx.FreeDesc(&d119)
 					ctx.MarkLabel(lbl56)
 					ctx.EmitJmp(lbl50)
 					ctx.MarkLabel(lbl57)
 					ctx.EmitJmp(lbl51)
 				}
-				ctx.FreeDesc(&d119)
 				bbpos_5_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				ctx.MarkLabel(lbl51)
 				ctx.ResolveFixups()
@@ -3663,6 +3669,8 @@ func init_sync() {
 				ctx.SyncDesc(&d116)
 				ctx.SyncDesc(&d121)
 				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d112, d114, d116, d121})
+				ctx.FreeDesc(&d112)
+				ctx.FreeDesc(&d121)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl48)
 				bbpos_5_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -3736,6 +3744,7 @@ func init_sync() {
 					ctx.BindReg(r58, &d130)
 					ctx.BindReg(r59, &d130)
 				}
+				ctx.FreeDesc(&d112)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d124)
 				ctx.EnsureDesc(&d124)
@@ -3753,6 +3762,7 @@ func init_sync() {
 					ctx.TransferReg(d124.Reg)
 					d124.Loc = LocNone
 				}
+				ctx.FreeDesc(&d124)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d131)
 				ctx.ReclaimUntrackedRegs()

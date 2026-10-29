@@ -101,3 +101,29 @@ func BenchmarkAssocGeneratedVsNativeBoundary(b *testing.B) {
 		})
 	}
 }
+
+// Measure compiler allocations separately from invocation cost. Parsing and
+// optimization are outside the timed region; each iteration gets a fresh Proc.
+func BenchmarkAssocCompilation(b *testing.B) {
+	if !jitEnabled {
+		b.Skip("requires native JIT")
+	}
+	for _, force := range []bool{false, true} {
+		b.Run(fmt.Sprint("emitter=", force), func(b *testing.B) {
+			declaration := declarations["set_assoc_mut"]
+			old := declaration.RetainsCallArgs
+			declaration.RetainsCallArgs = force
+			defer func() { declaration.RetainsCallArgs = old }()
+			expression := Optimize(Read("assoc compile", `(lambda (input value) (set_assoc_mut input "key-0" value))`), &Globalenv, nil)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				compiled := jitCompile(Eval(expression, &Globalenv))
+				if compiled.Proc().compiled() == nil {
+					b.Fatal("native compilation failed")
+				}
+				assocBenchmarkSink = compiled
+			}
+		})
+	}
+}
