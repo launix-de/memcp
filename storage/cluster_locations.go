@@ -38,11 +38,11 @@ func (cluster *nodeCluster) schemaLocations(database, after string) []replicaRec
 		}
 	}
 	if snapshot := r.cellSnapshot.Load(); snapshot != nil {
-		for key, cell := range *snapshot {
+		for key, binding := range *snapshot {
 			if !strings.HasPrefix(key, database+"/") || key <= after {
 				continue
 			}
-			resource := cell.resolved().resource.Load()
+			resource := binding.resource
 			if resource == nil {
 				continue
 			}
