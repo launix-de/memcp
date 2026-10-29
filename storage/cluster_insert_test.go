@@ -741,7 +741,8 @@ func TestClusterForwardRetainsCapturedRoutingIdentity(t *testing.T) {
 	}
 }
 
-// Forwarding must publish a complete successor before reports consume it.
+// Reporting consumes the native publication; both aliases must identify the
+// same successor authority without changing an already captured routing view.
 func TestClusterReportFollowsPublishedSuccessor(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
 	cluster.initializeManager()
@@ -755,9 +756,10 @@ func TestClusterReportFollowsPublishedSuccessor(t *testing.T) {
 		return true
 	})
 	cell.ownstate.Initialize(mosi.S)
+	captured := r.cellSnapshot.Load()
 	r.forwardResource(from, to)
-	if r.lookupCell(to) != cell {
-		t.Fatal("forwarding did not publish the successor lookup")
+	if target := (*captured)[from.key()].resource; target == nil || *target != from {
+		t.Fatal("forwarding rewrote the captured predecessor identity")
 	}
 	for _, resource := range []mosiResource{from, to} {
 		report := cluster.report(resource)
@@ -767,17 +769,28 @@ func TestClusterReportFollowsPublishedSuccessor(t *testing.T) {
 	}
 }
 
-func TestClusterReportAfterCellInitialization(t *testing.T) {
+func TestClusterReportBeforeAuthorityInitialization(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
 	cluster.initializeManager()
 	resource := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
-	// Construction publishes identity without granting authority.
-	cell := cluster.manager.resourceCell(resource)
-	if *cell.resource.Load() != resource {
-		t.Fatal("cell constructor published an incomplete routing identity")
+	check := func() {
+		t.Helper()
+		report := cluster.report(resource)
+		if report.Resource != resource || report.State != "IO" || report.Owner != "" {
+			t.Fatalf("uninitialized authority acquired rights: %+v", report)
+		}
 	}
-	report := cluster.report(resource)
-	if report.Resource != resource || report.State != "IO" || report.Owner != "" {
-		t.Fatalf("uninitialized cell acquired authority: %+v", report)
+	check()
+	if cluster.manager.lookupCell(resource) != nil {
+		t.Fatal("report registered an unknown resource")
+	}
+	// Construction publishes a complete identity, while MOSI remains unknown.
+	cell := cluster.manager.resourceCell(resource)
+	if target := cell.resource.Load(); target == nil || *target != resource {
+		t.Fatal("constructor published an incomplete identity")
+	}
+	check()
+	if cell.ownstate.Initialized() || cell.clusterstate.Initialized() {
+		t.Fatal("report established unknown authority")
 	}
 }

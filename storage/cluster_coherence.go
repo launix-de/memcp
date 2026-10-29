@@ -290,11 +290,9 @@ func (cluster *nodeCluster) report(resource mosiResource) replicaRecord {
 	cluster.bootstrapCell(resource)
 	r := cluster.manager
 	r.mu.Lock()
-	// Forwarding changes the cell's resource before publishing its immutable
-	// lookup snapshot. A caller may therefore already carry the successor UUID
-	// while lookupCell still misses it. Absence, routing and permission belong
-	// to this ONE directory snapshot under the existing report serialization;
-	// a warm lookup miss is not evidence that cluster authority is unknown.
+	// Routing publication owns identity changes. Sample existence, the current
+	// routing binding and its permission under that same directory ownership;
+	// separate lookup and permission reads can straddle an authority handover.
 	c := r.cells[resource.key()]
 	if c == nil {
 		r.mu.Unlock()
