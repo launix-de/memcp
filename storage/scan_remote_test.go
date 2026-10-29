@@ -11,6 +11,7 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
+import "time"
 import "context"
 import "strings"
 import "testing"
@@ -586,9 +587,15 @@ func TestRemoteScanOrderedRunPagesAndNativeExtent(t *testing.T) {
 	stub.scanTarget.Store(target)
 	_, direction := persistableTestOrder(true)
 	calls := 0
-	callback := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { calls++; return scm.NewInt(args[0].Int() + args[1].Int()) })
-	spec := scanOrderTableSpec{table: tbl, condition: scm.Eval(scm.Read(t.Name(), "(lambda () true)"), &scm.Globalenv), sortcols: []scm.Scmer{scm.NewString("id")}, callbackCols: []string{"id"}, callback: callback, perTableOffset: -1, perTableLimit: -1}
-	queue := delegateOrderedQueue(nil, stub, scanAccess{}, &spec, []func(...scm.Scmer) scm.Scmer{direction}, 0, 5, 605, shardReadDelegation{target})
+	maxBuffered := 0
+	var queue *shardqueue
+	callback := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		calls++
+		maxBuffered = max(maxBuffered, len(queue.remote.rows))
+		return scm.NewInt(args[0].Int() + args[1].Int())
+	})
+	spec := scanOrderTableSpec{remoteBatchSize: 256, table: tbl, condition: scm.Eval(scm.Read(t.Name(), "(lambda () true)"), &scm.Globalenv), sortcols: []scm.Scmer{scm.NewString("id")}, callbackCols: []string{"id"}, callback: callback, perTableOffset: -1, perTableLimit: -1}
+	queue = delegateOrderedQueue(nil, stub, scanAccess{}, &spec, []func(...scm.Scmer) scm.Scmer{direction}, 0, 5, 605, shardReadDelegation{target})
 	if source.cacheReaders.Load() != 0 {
 		t.Fatal("remote run retained native payload after preparation")
 	}
@@ -601,7 +608,7 @@ func TestRemoteScanOrderedRunPagesAndNativeExtent(t *testing.T) {
 	pageCalls := 0 // the first page arrived with the run reference
 	original := queue.remote.run.handle.Call
 	queue.remote.run.handle.Call = func(ctx context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
-		if request.Method == "page" {
+		if request.Method == "ack" {
 			pageCalls++
 		}
 		return original(ctx, request)
@@ -615,9 +622,127 @@ func TestRemoteScanOrderedRunPagesAndNativeExtent(t *testing.T) {
 	if calls != 600 || value.Int() != int64((696+97)*600/2) {
 		t.Fatalf("calls=%d sum=%v", calls, value)
 	}
+	if maxBuffered > 2*spec.remoteBatchSize {
+		t.Fatalf("coordinator accumulated %d projected rows beyond its two batch windows", maxBuffered)
+	}
 	if queue.remote.next <= 256 {
 		t.Fatal("ordered scan did not consume multiple bounded pages")
 	}
+	if queue.remote.pending != nil || queue.remote.cancel != nil || queue.remote.rows != nil {
+		t.Fatal("ordered scan did not finish and join its shard job")
+	}
+}
+
+func TestRemoteOrderedBatchFanoutAndCredit(t *testing.T) {
+	if orderedScanBatchSize(1, -1) != maxOrderedBatch || orderedScanBatchSize(1000, -1) != minOrderedBatch || orderedScanBatchSize(1, 3) != minOrderedBatch {
+		t.Fatal("ordered window did not adapt to fanout and LIMIT")
+	}
+	run := &orderedScanRun{shard: &storageShard{uuid: uuid.New()}, batchSize: 16, columns: []string{"id"}, universe: 64}
+	for id := 0; id < 64; id++ {
+		run.rows = append(run.rows, scm.NewSlice([]scm.Scmer{scm.NewInt(int64(id)), scm.NewInt(int64(id))}))
+	}
+	view, err := scm.ClusterObjectValue(run, context.Background(), scm.ClusterRequest{Method: "view"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack := func(consumed, start int) scm.ClusterRequest {
+		return scm.ClusterRequest{Method: "ack", Arguments: []scm.Scmer{scm.NewInt(int64(consumed)), scm.NewInt(int64(start))}}
+	}
+	if _, err := run.HandleClusterRequest(context.Background(), ack(7, 16)); err == nil {
+		t.Fatal("job accepted credit before half the batch was consumed")
+	}
+	started := make(chan scm.ClusterRequest, 1)
+	allow := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	remote := &remoteOrderQueue{ctx: ctx, cancel: cancel, batchSize: 16, total: 64, columns: map[string]int{"id": 0}, rows: make(map[uint32][]scm.Scmer)}
+	remote.run = &remoteOrderedRun{scm.ClusterHandle{View: view, Call: func(ctx context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
+		if request.Method == "ack" {
+			started <- request
+			select {
+			case <-allow:
+			case <-ctx.Done():
+				return scm.NewNil(), ctx.Err()
+			}
+		}
+		return scm.ClusterObjectValue(run, ctx, request)
+	}}}
+	defer remote.close()
+	queue := &shardqueue{remote: remote, universe: 64}
+	remote.fetch(queue)
+	for i := 0; i < 7; i++ {
+		queue.consumeOrdered(1, true)
+	}
+	if remote.pending != nil {
+		t.Fatal("coordinator requested a successor before the half-window")
+	}
+	queue.consumeOrdered(1, true)
+	select {
+	case request := <-started:
+		if request.Arguments[0].Int() != 8 || request.Arguments[1].Int() != 16 {
+			t.Fatal("ACK did not identify consumed credit and the next batch")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("half-window consumption did not prefetch")
+	}
+	// A delayed peer must not prevent consumption of the remaining current batch.
+	for i := 0; i < 7; i++ {
+		queue.consumeOrdered(1, true)
+	}
+	if len(queue.items) != 1 || len(remote.rows) != 1 {
+		t.Fatal("coordinator retained already discarded rows")
+	}
+	close(allow)
+	queue.consumeOrdered(1, true)
+	if len(queue.items) != 16 || queue.items[0] != 16 || remote.pending != nil {
+		t.Fatal("successor batch was not installed in order")
+	}
+	if _, err := run.HandleClusterRequest(ctx, ack(8, 16)); err == nil {
+		t.Fatal("job accepted a repeated ACK")
+	}
+}
+
+func TestRemoteOrderedLimitJoinsPendingBatch(t *testing.T) {
+	run := &orderedScanRun{shard: &storageShard{uuid: uuid.New()}, batchSize: 16, universe: 64}
+	for id := 0; id < 64; id++ {
+		run.rows = append(run.rows, scm.NewSlice([]scm.Scmer{scm.NewInt(int64(id))}))
+	}
+	view, err := scm.ClusterObjectValue(run, context.Background(), scm.ClusterRequest{Method: "view"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, joined := make(chan struct{}), make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	remote := &remoteOrderQueue{ctx: ctx, cancel: cancel, batchSize: 16, total: 64, columns: map[string]int{}, rows: make(map[uint32][]scm.Scmer)}
+	remote.run = &remoteOrderedRun{scm.ClusterHandle{View: view, Call: func(ctx context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
+		if request.Method == "ack" {
+			close(started)
+			<-ctx.Done()
+			close(joined)
+			return scm.NewNil(), ctx.Err()
+		}
+		return scm.ClusterObjectValue(run, ctx, request)
+	}}}
+	queue := &shardqueue{remote: remote, universe: 64}
+	remote.fetch(queue)
+	queue.consumeOrdered(8, true)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("successor receive did not start")
+	}
+	queue.closeReaders() // the same cleanup used for LIMIT, errors and cancellation
+	select {
+	case <-joined:
+	default:
+		t.Fatal("LIMIT released the queue before joining its pending receive")
+	}
+	if !run.closed || run.rows != nil || remote.pending != nil || remote.rows != nil {
+		t.Fatal("finished job retained buffered answers")
+	}
+	if _, err := run.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "view"}); err == nil {
+		t.Fatal("finished shard job was reopened")
+	}
+	queue.closeReaders() // idempotent cleanup after nested error unwinding
 }
 
 func TestRemoteScanPortableKeyPredicate(t *testing.T) {

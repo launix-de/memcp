@@ -554,7 +554,7 @@ func TestBeforeUpdateForwardsTriggerValuesAfterRebuildCompletion(t *testing.T) {
 	rebuilt.mu.RLock()
 	defer rebuilt.mu.RUnlock()
 	var values []int
-	for id := uint32(0); id < rebuilt.main_count+uint32(len(rebuilt.inserts)); id++ {
+	for id := uint32(0); id < rebuilt.main_count+uint32(len(rebuilt.deltaRows())); id++ {
 		if !rebuilt.deletions.Get(uint(id)) {
 			values = append(values, scm.ToInt(rebuilt.rowValueByRecidLocked(id, "id")))
 		}

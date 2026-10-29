@@ -441,6 +441,9 @@ type shardqueue struct {
 // Shard construction releases them on panic; successful construction transfers
 // them to global/direct consumption, including early LIMIT and cancellation.
 func (s *shardqueue) closeReaders() {
+	if s.remote != nil {
+		s.remote.close()
+	}
 	readers := s.sortReaders
 	s.sortReaders = nil
 	releaseColumnReaders(readers)
@@ -626,6 +629,7 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 
 // scanOrderTableSpec holds per-table parameters for scanOrderMulti.
 type scanOrderTableSpec struct {
+	remoteBatchSize int      // shared coordinator window divided over shard jobs
 	projectionCols  []string // record visitors request portable values for their retained physical IDs
 	prefixMerge     *orderedPrefixAccess
 	table           *table
@@ -987,6 +991,17 @@ func recSetHooksCoverCondition(bounds scanAccess, backingTable *table, condition
 // Each table has its own filter, sort columns and fused map-reducer, while sort
 // directions, offset/limit and the neutral value are shared.
 func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) scm.Scmer {
+	shards := 0
+	for i := range tables {
+		if tables[i].recset != nil {
+			shards += len(tables[i].recset.shards)
+		} else {
+			shards += len(tables[i].backingTable().activeTopology().shards)
+		}
+	}
+	for i := range tables {
+		tables[i].remoteBatchSize = orderedScanBatchSize(shards, limit)
+	}
 	for i := range tables {
 		if contributionMutationColumns(tables[i].callbackCols) {
 			t := tables[i].backingTable()
@@ -1429,7 +1444,7 @@ func mergeScanOrderQueues(currentTx *TxContext, tables []scanOrderTableSpec, q g
 		bufN++
 
 		// Flush if buffer full
-		if bufN == len(buf) {
+		if bufN == len(buf) || qx.remote != nil && bufN >= max(1, qx.remote.pageSize/2) {
 			akkumulator, breakCaught = streamScanOrderItems(&tables[bufShard.tableIdx], bufShard, akkumulator, buf[:bufN])
 			hadValue = true
 			bufN = 0
@@ -1863,10 +1878,17 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 		if acquisitionFailure != nil {
 			spec := scanOrderTableSpec{table: t, conditionCols: conditionCols, condition: condition, callbackCols: callbackCols, callback: mapReduce}
 			queue := delegateOrderedQueue(currentTx, shard, bounds, &spec, nil, 0, 0, 1, acquisitionFailure)
+			adopted := false
+			defer func() {
+				if !adopted {
+					queue.closeReaders()
+				}
+			}()
 			if len(queue.items) > 0 {
 				mu.Lock()
 				if foundShard == nil && foundQueue == nil {
 					foundQueue = queue
+					adopted = true
 				}
 				mu.Unlock()
 			}
@@ -2090,7 +2112,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 			}
 		}()
 		// remember current insert status (so don't scan things that are inserted during map)
-		maxInsertIndex = len(t.inserts)
+		maxInsertIndex = len(t.deltaRows())
 		visibleUpper = t.main_count + uint32(maxInsertIndex)
 		result.universe = visibleUpper
 

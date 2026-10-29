@@ -70,11 +70,11 @@ func TestHashPartitionAutoIncrementRoutesGeneratedRows(t *testing.T) {
 	used := 0
 	for bucket, shard := range tbl.ActiveShards() {
 		shard.mu.RLock()
-		if len(shard.inserts) > 0 {
+		if len(shard.deltaRows()) > 0 {
 			used++
 		}
 		idx := shard.deltaColumns["id"]
-		for _, row := range shard.inserts {
+		for _, row := range shard.deltaRows() {
 			id := row[idx]
 			if id.Int() < 1 || id.Int() > 128 || seen[id.Int()] || computeShardDimensionIndex(d, id) != bucket {
 				t.Fatalf("invalid or misrouted ID %v in bucket %d", id, bucket)

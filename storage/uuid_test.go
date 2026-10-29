@@ -77,7 +77,7 @@ func TestUUIDDefaultsArePerRowAndExplicitBeforeInsert(t *testing.T) {
 		}
 	}
 	tbl.Insert(cols, rows, nil, scm.NewNil(), false, nil)
-	if got := len(tbl.ActiveShards()[0].inserts); got != 3 {
+	if got := len(tbl.ActiveShards()[0].deltaRows()); got != 3 {
 		t.Fatalf("inserted %d", got)
 	}
 	_, explicit := tbl.prepareInsertDefaults([]string{"id"}, [][]scm.Scmer{{scm.NewNil()}})

@@ -518,9 +518,8 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		partCols = col.OrcSortCols[:partCount]
 		partKeys = make([]scm.Scmer, partCount)
 		for i, pc := range partCols {
-			// getDelta reads requestShard.inserts, which is only safe under the
-			// shard lock; the lock must stay held for that branch too, not just
-			// for the requestShard.columns lookup above it.
+			// Retain the existing column-directory ownership for both main and
+			// delta evaluation; only the delta row directory is published atomically.
 			requestShard.mu.RLock()
 			cs := requestShard.columns[pc]
 			if cs != nil && requestIdx < requestShard.main_count {
@@ -561,7 +560,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		for _, s := range t.maintenanceShards() {
 			s.mu.RLock()
 			proxy, ok := s.columns[name].(*StorageComputeProxy)
-			limit := s.main_count + uint32(len(s.inserts))
+			limit := s.main_count + uint32(len(s.deltaRows()))
 			s.mu.RUnlock()
 			if !ok {
 				continue
@@ -796,13 +795,10 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			s.ensureMainCount(false, nil)
 			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
-			// iterateIndex, len(s.inserts), deletions.Get and getDelta all read
-			// shard-local state (inserts/deletions/deltaColumns) that is only
-			// safe to read while holding the shard lock; scan.go's equivalent
-			// batch loops hold t.mu.RLock() across the whole iterateIndex call
-			// for the same reason.
+			// Retain index and column-directory ownership during invalidation.
+			// Delta rows and deletion bits have independent atomic publication.
 			s.mu.RLock()
-			s.iterateIndex(nil, runtimeScanAccess(bounds), len(s.inserts), buf[:], 1, nil, func(batch []uint32) bool {
+			s.iterateIndex(nil, runtimeScanAccess(bounds), len(s.deltaRows()), buf[:], 1, nil, func(batch []uint32) bool {
 				for _, idx := range batch {
 					if s.deletions.Get(uint(idx)) {
 						continue

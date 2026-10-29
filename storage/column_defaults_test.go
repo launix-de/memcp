@@ -18,7 +18,7 @@ func assertInitializedColumn(t *testing.T, tbl *table, column string, value scm.
 		release := shard.GetRead(nil)
 		read := shard.ColumnReaderTx(nil, column, false, ReadAuto).GetValue
 		shard.mu.RLock()
-		for i := uint32(0); i < shard.main_count+uint32(len(shard.inserts)); i++ {
+		for i := uint32(0); i < shard.main_count+uint32(len(shard.deltaRows())); i++ {
 			if !shard.deletions.Get(uint(i)) {
 				if actual := read(i); !scm.Equal(actual, value) {
 					shard.mu.RUnlock()
@@ -437,7 +437,7 @@ func TestAddedNullableFreshColumnKeepsExistingDeltaRows(t *testing.T) {
 		defer release.Release()
 		shard.mu.RLock()
 		defer shard.mu.RUnlock()
-		return &shard.inserts[0][0]
+		return &shard.deltaRows()[0][0]
 	}()
 	tbl.CreateColumn("fresh", "INT", nil, nil)
 	func() {
@@ -445,7 +445,7 @@ func TestAddedNullableFreshColumnKeepsExistingDeltaRows(t *testing.T) {
 		defer release.Release()
 		shard.mu.RLock()
 		defer shard.mu.RUnlock()
-		if &shard.inserts[0][0] != row {
+		if &shard.deltaRows()[0][0] != row {
 			t.Fatal("fresh nullable ADD copied existing delta rows")
 		}
 		if _, exists := shard.deltaColumns["fresh"]; exists {

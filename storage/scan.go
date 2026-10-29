@@ -2107,7 +2107,7 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
-	maxInsertIndex := len(t.inserts)
+	maxInsertIndex := len(t.deltaRows())
 	visibleUpper := mainCount + uint32(maxInsertIndex)
 	found := false
 	var foundID uint32
@@ -2257,7 +2257,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 			return
 		}
 		t.mu.RLock()
-		upper := t.main_count + uint32(len(t.inserts))
+		upper := t.main_count + uint32(len(t.deltaRows()))
 		recids := make([]uint32, 0, upper)
 		for id := uint32(0); id < upper; id++ {
 			if currentTx != nil && currentTx.Mode == TxACID {
@@ -2282,7 +2282,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		if len(orderedProxies) == 0 {
 			return true
 		}
-		upper := t.main_count + uint32(len(t.inserts))
+		upper := t.main_count + uint32(len(t.deltaRows()))
 		for id := uint32(0); id < upper; id++ {
 			if currentTx != nil && currentTx.Mode == TxACID {
 				if !currentTx.IsVisible(t, id) {
@@ -2414,7 +2414,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 			t.mu.RUnlock()
 		}
 	}()
-	maxInsertIndex := len(t.inserts)
+	maxInsertIndex := len(t.deltaRows())
 	feedbackPopulation := int64(t.main_count) + int64(maxInsertIndex) - int64(t.deletions.Count())
 	var feedbackCandidates int64
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
@@ -2722,7 +2722,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 			t.mu.RUnlock()
 		}
 	}()
-	maxInsertIndex := len(t.inserts)
+	maxInsertIndex := len(t.deltaRows())
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
 	var pendingRecids []uint32
 	var pendingBatchids []uint32

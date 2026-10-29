@@ -1589,7 +1589,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 		return a.itemid < b.itemid
 	})
 	// fill deltaBtree with global record IDs
-	for i, data := range s.t.inserts {
+	for i, data := range s.t.deltaRows() {
 		recid := s.t.main_count + uint32(i)
 		pair := s.prepareCollationKeys(state, indexPair{itemid: int(recid), data: data})
 		state.deltaBtree.ReplaceOrInsert(pair)
@@ -1745,7 +1745,7 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 			if recid < s.t.main_count {
 				return cols[col].get(recid)
 			}
-			return s.getDeltaColValueTx(tx, recid, s.t.inserts[recid-s.t.main_count], col)
+			return s.getDeltaColValueTx(tx, recid, s.t.deltaRows()[recid-s.t.main_count], col)
 		}
 		lessRecID := func(leftID, rightID uint32) bool {
 			for col := range s.Cols {
@@ -1808,7 +1808,7 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 			if recid < s.t.main_count {
 				return cols[col].get(recid)
 			}
-			return s.getDeltaColValueTx(tx, recid, s.t.inserts[recid-s.t.main_count], col)
+			return s.getDeltaColValueTx(tx, recid, s.t.deltaRows()[recid-s.t.main_count], col)
 		}
 		hybridsort.Slice(items, func(i, j int) bool {
 			for col := range s.Cols {
@@ -1936,7 +1936,7 @@ func (s *StorageIndex) bindColdRangeMatcher(tx *TxContext, bounds scanAccess, in
 				if recid < s.t.main_count {
 					return cols[col].get(recid)
 				}
-				return s.getDeltaColValueTx(tx, recid, s.t.inserts[recid-s.t.main_count], col)
+				return s.getDeltaColValueTx(tx, recid, s.t.deltaRows()[recid-s.t.main_count], col)
 			}
 			inRange, _ := s.rowWithinBounds(bounds, indexBounds, cmpCols, lastSorted, sortedMask, unboundedMask, lowerInclusive, upperInclusive, valueAt)
 			if inRange && !lowerInclusive {

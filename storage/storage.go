@@ -4247,7 +4247,7 @@ func Init(en scm.Env) {
 						indexRows = scm.NewSlice([]scm.Scmer{})
 					} else {
 						s.mu.RLock()
-						deltaCount := len(s.inserts)
+						deltaCount := len(s.deltaRows())
 						colSlice := make([]scm.Scmer, 0, len(t.Columns))
 						for _, col := range t.Columns {
 							cs := s.columns[col.Name]
@@ -4262,7 +4262,7 @@ func Init(en scm.Env) {
 							}
 							var deltaSize uint
 							if dIdx, ok := s.deltaColumns[col.Name]; ok {
-								for _, row := range s.inserts {
+								for _, row := range s.deltaRows() {
 									if dIdx < len(row) {
 										deltaSize += row[dIdx].ComputeSize()
 									}

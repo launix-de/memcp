@@ -1043,6 +1043,64 @@ func TestReplicationRestartRestoresUUIDEdgesWithoutRights(t *testing.T) {
 	}
 }
 
+func TestReplicationRetirementClearsAlreadyExclusiveSchemaBackup(t *testing.T) {
+	source, engine := createDurabilityTestTable(t, "treplicationretiredschemabackup", 0)
+	config, _ := CreateTable(source.schema.Name, "config", Safe, false)
+	for _, name := range []string{"node", "key", "value"} {
+		config.CreateColumn(name, "text", nil, nil)
+	}
+	createTableKey(config, uniqueKey{Id: "PRIMARY", Cols: []string{"node", "key"}}, nil)
+	r := replicaRecoveryFixture()
+	r.config = config
+	local := mosiResource{Database: "tenant"}
+	foreign := mosiResource{Database: "foreign"}
+	shared := mosiResource{Database: "shared"}
+	unknown := mosiResource{Database: "unknown"}
+	for _, resource := range []mosiResource{local, foreign, shared, unknown} {
+		if err := r.saveBackup(resource, "completed-schema"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record := r.updateRecord(local, func(record *replicaRecord) bool {
+		record.Owner, record.State = r.id, "M"
+		return true
+	})
+	r.establishAuthority(r.resourceCell(local), record)
+	r.updateRecord(foreign, func(record *replicaRecord) bool {
+		record.Owner, record.State = "live-peer", "IO"
+		return true
+	})
+	r.updateRecord(shared, func(record *replicaRecord) bool {
+		record.Owner, record.State = r.id, "O"
+		record.Readers = map[string]bool{"live-peer": true}
+		return true
+	})
+	// An import completed after local schema reclamation. The old peer is no
+	// longer in the schema's reader set, so retirement must also clear this
+	// already-exclusive placement before the next restart.
+	if err := r.retire("retired-peer"); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := r.backups[local.key()]; exists {
+		t.Fatal("exclusive schema retained a completed-copy recovery marker")
+	}
+	if r.resourceCell(local).ownstate.Phase() != mosi.M {
+		t.Fatal("placement cleanup changed local authority")
+	}
+	db := newDatabase()
+	db.Name, db.persistence, db.srState = source.schema.Name, engine, COLD
+	db.ensureLoaded()
+	defer db.closeTransactionLog()
+	restarted := replicaRecoveryFixture()
+	restarted.id = r.id
+	if err := restarted.loadConfig(db.tables.Get("config")); err != nil {
+		t.Fatal(err)
+	}
+	if len(restarted.backups) != 3 || restarted.backups[foreign.key()].Content == "" || restarted.backups[shared.key()].Content == "" || restarted.backups[unknown.key()].Content == "" {
+		t.Fatalf("retirement retained exclusive placement or removed foreign/shared/unknown copies: %+v", restarted.backups)
+	}
+}
+
 func TestReplicationPromotionClearsAllNativePlacementAliases(t *testing.T) {
 	source, engine := createDurabilityTestTable(t, "treplicationclearplacementaliases", 0)
 	config, _ := CreateTable(source.schema.Name, "config", Safe, false)

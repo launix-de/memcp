@@ -1431,7 +1431,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 				}
 				shard.mu.RLock()
 				cold := shard.state() == COLD
-				count := uint(shard.main_count) + uint(len(shard.inserts)) - uint(shard.deletions.Count())
+				count := uint(shard.main_count) + uint(len(shard.deltaRows())) - uint(shard.deletions.Count())
 				shard.mu.RUnlock()
 				maincount += count
 				if cold {

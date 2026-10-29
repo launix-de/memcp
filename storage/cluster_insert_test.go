@@ -153,7 +153,7 @@ func TestClusterWALReplayRecoversIntegerCounterWithoutAllocator(t *testing.T) {
 			shard.mu.Lock()
 			defer shard.mu.Unlock()
 			shard.load()
-			rows += len(shard.inserts)
+			rows += len(shard.deltaRows())
 		}()
 		if shard.logfile != nil {
 			shard.logfile.Close()
@@ -216,7 +216,7 @@ func TestClusterAppendImportRetainsLiveShardAndCounter(t *testing.T) {
 	if merged, err := r.mergeClusterInsertTopology(tbl, &incoming); !merged || err != nil {
 		t.Fatalf("append rejected: %v", err)
 	}
-	if tbl.ActiveShards()[0] != original || len(original.inserts) != 1 || len(tbl.ActiveShards()) != 2 {
+	if tbl.ActiveShards()[0] != original || len(original.deltaRows()) != 1 || len(tbl.ActiveShards()) != 2 {
 		t.Fatal("live generation replaced or lost")
 	}
 	if atomic.LoadUint64(&tbl.Auto_increment) != 100 {

@@ -532,7 +532,7 @@ func (t *table) hasDuplicateUniqueValues(cols []string, nullsNotDistinct bool, c
 		func() {
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
-			limit := shard.main_count + uint32(len(shard.inserts))
+			limit := shard.main_count + uint32(len(shard.deltaRows()))
 			for recid := uint32(0); recid < limit; recid++ {
 				visible := !shard.deletions.Get(uint(recid))
 				if currentTx != nil && currentTx.Mode == TxACID {
@@ -2925,7 +2925,7 @@ func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique, null
 	for _, shard := range shards {
 		shard.mu.Lock()
 		locked++
-		rows := uint64(shard.main_count) + uint64(len(shard.inserts))
+		rows := uint64(shard.main_count) + uint64(len(shard.deltaRows()))
 		if deleted := uint64(shard.deletions.Count()); authoritative[shard] && rows > deleted {
 			visibleRows += rows - deleted
 		}
@@ -2941,7 +2941,7 @@ func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique, null
 	rows := make([][][]scm.Scmer, len(shards))
 	initial := make(map[string]columnInitialExtent, len(shards))
 	for i, shard := range shards {
-		if shard.main_count == 0 && len(shard.inserts) == 0 {
+		if shard.main_count == 0 && len(shard.deltaRows()) == 0 {
 			positions[i] = -1
 			continue
 		}
@@ -2950,8 +2950,8 @@ func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique, null
 			position = len(shard.deltaColumns)
 		}
 		positions[i] = position
-		rows[i] = make([][]scm.Scmer, len(shard.inserts))
-		for j, old := range shard.inserts {
+		rows[i] = make([][]scm.Scmer, len(shard.deltaRows()))
+		for j, old := range shard.deltaRows() {
 			width := len(old)
 			if width <= position {
 				width = position + 1
@@ -2961,7 +2961,7 @@ func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique, null
 			row[position] = value
 			rows[i][j] = row
 		}
-		initial[shard.uuid.String()] = columnInitialExtent{shard.main_count, uint32(len(shard.inserts))}
+		initial[shard.uuid.String()] = columnInitialExtent{shard.main_count, uint32(len(shard.deltaRows()))}
 	}
 	if len(initial) != 0 {
 		c.InitialValue = value
@@ -2974,7 +2974,7 @@ func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique, null
 		}
 		shard.columns[c.Name] = &StorageConst{value: value, count: uint64(shard.main_count)}
 		shard.deltaColumns[c.Name] = positions[i]
-		shard.inserts = rows[i]
+		shard.publishDeltaRows(rows[i])
 	}
 	complete = true
 	return release

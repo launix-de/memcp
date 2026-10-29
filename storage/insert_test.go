@@ -275,7 +275,7 @@ func TestInsertConcurrentAutoIncrementReservations(t *testing.T) {
 	for _, shard := range tbl.ActiveShards() {
 		release := shard.GetRead(nil)
 		shard.mu.RLock()
-		for i := range shard.inserts {
+		for i := range shard.deltaRows() {
 			id := shard.getDelta(i, "id").Int()
 			if seen[id] {
 				t.Errorf("duplicate AUTO_INCREMENT id %d", id)

@@ -118,8 +118,8 @@ func TestDirectReadDeltaKeepsRuntimeScmerType(t *testing.T) {
 		main_count:   1,
 		columns:      map[string]ColumnStorage{"value": main},
 		deltaColumns: map[string]int{"value": 0},
-		inserts:      [][]scm.Scmer{{scm.NewString("delta")}},
 	}
+	shard.publishDeltaRows([][]scm.Scmer{{scm.NewString("delta")}})
 	mr := ShardMapReducer{
 		shard:       shard,
 		mainCount:   1,

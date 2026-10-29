@@ -208,11 +208,21 @@ local and remote queues. Workers freeze only comparison keys and requested colum
 values into an immutable result run, releasing native payload readers before
 replying. These runs are query workspace, not another resident shard copy. The
 run is a registered object with the physical generation's lifetime. Its initial
-reply includes a bounded first page; further pages contain at most 256 rows and
-96 KiB of the actual generic value encoding. The coordinator buffers comparison
-windows, not an unbounded shard dump. Changing shards during merge never sends
-one request per row. Serial callbacks run only for globally selected rows, after
-partition/global offsets, limits and post-order acceptance.
+reply includes a bounded first batch. The coordinator assigns each shard job a
+target of 16 to 4096 rows, dividing a 16384-row target window over the shard
+fanout and capping it for LIMIT. The existing wire byte ceilings may shorten a
+batch of wide rows. After consuming half the current batch, the coordinator
+ACKs that progress and asynchronously requests exactly one successor batch.
+Until then the peer retains its answers. The same serial merge consumes the
+current window while the successor is in flight; callbacks flush within the
+window instead of retaining projected rows across arbitrarily many batches.
+LIMIT, errors and cancellation cancel and join the pending receive, then finish
+the native shard job so it can release its answers before peer-handle GC.
+Physical-generation handles retain their existing independent lifetime. No
+per-row request or cancellation check is added. Serial callbacks run only for
+globally selected rows, after partition/global offsets, limits and post-order
+acceptance. This bounds the transport/merge windows; worker sort workspace and
+the separate materializing join algorithm are not covered by that bound.
 
 Without a combine function, ordinary scan callbacks retain their effects at the
 coordinator. Remote workers perform the filter/projection and the same bounded

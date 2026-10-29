@@ -876,7 +876,7 @@ func (r *recMap) orderRecSet(currentTx *TxContext, sortSides, sortColumns []stri
 		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 		release := shard.acquireSnapshotRead(currentTx)
 		shard.mu.RLock()
-		universe := shard.main_count + uint32(len(shard.inserts))
+		universe := shard.main_count + uint32(len(shard.deltaRows()))
 		shard.mu.RUnlock()
 		release.Release()
 		part := newRecSetShardFromSortedIDs(shard, universe, ids)
@@ -1210,7 +1210,7 @@ func (r *recSet) collectRecMapRows(currentTx *TxContext, sourceKeyCols []string,
 				defer shard.mu.RUnlock()
 			}
 			acidMode := currentTx != nil && currentTx.Mode == TxACID
-			visibleUpper := shard.main_count + uint32(len(shard.inserts))
+			visibleUpper := shard.main_count + uint32(len(shard.deltaRows()))
 			part.forEachID(func(recid uint32) bool {
 				if recid >= visibleUpper {
 					return true
@@ -1281,7 +1281,7 @@ func (r *recMap) image() *recSet {
 		ids = ids[:write]
 		release := shard.acquireSnapshotRead(nil)
 		shard.mu.RLock()
-		universe := shard.main_count + uint32(len(shard.inserts))
+		universe := shard.main_count + uint32(len(shard.deltaRows()))
 		shard.mu.RUnlock()
 		release.Release()
 		part := newRecSetShardFromSortedIDs(shard, universe, ids)

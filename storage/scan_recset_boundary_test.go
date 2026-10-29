@@ -84,7 +84,7 @@ func buildRankOrderIndex(t *testing.T, tbl *table) func(...scm.Scmer) scm.Scmer 
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	var buf [8]uint32
-	shard.iterateIndexForce(nil, runtimeScanAccess(bounds), len(shard.inserts), buf[:], false,
+	shard.iterateIndexForce(nil, runtimeScanAccess(bounds), len(shard.deltaRows()), buf[:], false,
 		func([]uint32) bool { return false })
 	return order
 }
@@ -329,7 +329,7 @@ func TestSparseOrderedRecSetAppliesNativeIndexRange(t *testing.T) {
 		shard.mu.RLock()
 		defer shard.mu.RUnlock()
 		var buffer [8]uint32
-		shard.iterateIndexForce(nil, access, len(shard.inserts), buffer[:], false, func([]uint32) bool { return false })
+		shard.iterateIndexForce(nil, access, len(shard.deltaRows()), buffer[:], false, func([]uint32) bool { return false })
 		for _, index := range shard.Indexes {
 			if len(index.Cols) == 1 && index.Cols[0] == "id" {
 				index.storeSavings(8)
