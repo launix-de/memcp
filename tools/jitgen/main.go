@@ -639,7 +639,11 @@ func operatorHasCustomJITEmit(op operatorInfo) bool {
 
 func dynamicSSACalls(fn *ssa.Function) []*ssa.Call {
 	var calls []*ssa.Call
+	reachability := analyzeSSAReachability(fn, nil)
 	for _, block := range fn.Blocks {
+		if !reachability.blocks[block] {
+			continue
+		}
 		for _, instr := range block.Instrs {
 			call, ok := instr.(*ssa.Call)
 			if !ok || call.Call.StaticCallee() != nil {
@@ -672,7 +676,11 @@ func interfaceAssertionBoundaryReason(fn *ssa.Function) string {
 			return false
 		}
 		seen[current] = true
+		reachability := analyzeSSAReachability(current, nil)
 		for _, block := range current.Blocks {
+			if !reachability.blocks[block] {
+				continue
+			}
 			for _, instr := range block.Instrs {
 				assertion, ok := instr.(*ssa.TypeAssert)
 				if !ok {
@@ -683,9 +691,16 @@ func interfaceAssertionBoundaryReason(fn *ssa.Function) string {
 				}
 			}
 		}
-		for _, nested := range current.AnonFuncs {
-			if inspect(nested) {
-				return true
+		for _, block := range current.Blocks {
+			if !reachability.blocks[block] {
+				continue
+			}
+			for _, instruction := range block.Instrs {
+				if closure, ok := instruction.(*ssa.MakeClosure); ok {
+					if nested, ok := closure.Fn.(*ssa.Function); ok && inspect(nested) {
+						return true
+					}
+				}
 			}
 		}
 		return false
@@ -718,7 +733,11 @@ func nativeCallBoundaryReason(fn *ssa.Function) string {
 			return ""
 		}
 		seen[current] = true
+		reachability := analyzeSSAReachability(current, nil)
 		for _, block := range current.Blocks {
+			if !reachability.blocks[block] {
+				continue
+			}
 			for _, instr := range block.Instrs {
 				switch value := instr.(type) {
 				case *ssa.MakeChan:
@@ -1127,6 +1146,8 @@ func dumpSSA(fn *ssa.Function) {
 //   - If Type is known (not JITTypeUnknown), tag information is compile-time known and must not consume
 //     an extra runtime register.
 type genVal struct {
+	constant *ssa.Const // SSA proof, preserved across helper argument binding
+
 	goVar            string
 	isDesc           bool   // true = JITValueDesc (Scmer ptr+aux pair or scalar payload descriptor), false = Reg (raw scalar)
 	argIdx           int    // >= 0: deferred arg reference from IndexAddr (constant index), not yet loaded
@@ -1180,6 +1201,9 @@ type closureBinding struct {
 type ssaValueRewriter func(in ssa.Value) ssa.Value
 
 type codeGen struct {
+	reachability *ssaReachability
+	inlineHomes  []descSnapshot // immutable compiler homes restored at inline CFG entries
+
 	w             strings.Builder
 	wDecl         strings.Builder
 	vals          map[string]genVal
@@ -1303,6 +1327,7 @@ func (g *codeGen) clone() *codeGen {
 	clone.wDecl = strings.Builder{}
 	clone.wDecl.WriteString(g.wDecl.String())
 	clone.vals = cloneMap(g.vals)
+	clone.inlineHomes = append([]descSnapshot(nil), g.inlineHomes...)
 	clone.bbLabels = cloneMap(g.bbLabels)
 	clone.bbPosVars = cloneMap(g.bbPosVars)
 	clone.bbDone = cloneMap(g.bbDone)
@@ -1347,7 +1372,13 @@ func (g *codeGen) overlayDescVar(fallback, ssaName string) string {
 }
 
 func (g *codeGen) rewriteSSAValue(v ssa.Value) ssa.Value {
-	if v == nil || g.valueRewriter == nil {
+	if v == nil {
+		return v
+	}
+	if g.reachability != nil {
+		v = g.reachability.replacement(v)
+	}
+	if g.valueRewriter == nil {
 		return v
 	}
 	if rv := g.valueRewriter(v); rv != nil {
@@ -2062,11 +2093,20 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 		_, globalArg := a.(*ssa.Global)
 		if !constantArgs[i] && !globalArg {
 			candidate, exists := g.vals[g.rewriteSSAValue(a).Name()]
-			if !exists || candidate.goVar == "" {
+			if !exists || (candidate.goVar == "" && candidate.marker != "_variadic_args") {
 				return false
 			}
 		}
 		resolved[i] = g.resolveCallValue(a)
+		if resolved[i].marker == "_variadic_args" {
+			end := ":"
+			if resolved[i].variadicLenKnown {
+				end = fmt.Sprintf(":%d", resolved[i].variadicOffset+resolved[i].variadicLen)
+			}
+			materialized := g.allocDesc()
+			g.emit("%s := jitMaterializeVirtualGoSlice(ctx, args[%d%s])", materialized, resolved[i].variadicOffset, end)
+			resolved[i] = genVal{goVar: materialized, isDesc: true, marker: "_slice"}
+		}
 		paramType := func() types.Type {
 			if i == 0 && argOffset == 1 {
 				return sig.Recv().Type()
@@ -2684,6 +2724,9 @@ func (g *codeGen) blockPhis(bbIdx int) []*ssa.Phi {
 		if !ok {
 			break
 		}
+		if g.reachability != nil && g.reachability.replacement(phi) != phi {
+			continue
+		}
 		out = append(out, phi)
 	}
 	return out
@@ -3071,11 +3114,7 @@ func (g *codeGen) phiEdgeSpecializationScore(targetBBIdx int, succPos int) int {
 		return 0
 	}
 	score := 0
-	for _, instr := range targetBlock.Instrs {
-		phi, ok := instr.(*ssa.Phi)
-		if !ok {
-			break
-		}
+	for _, phi := range g.blockPhis(targetBlock.Index) {
 		if edgeIdx < 0 || edgeIdx >= len(phi.Edges) {
 			continue
 		}
@@ -3180,13 +3219,8 @@ func (g *codeGen) emitPinDescVars(descVars []string) string {
 func (g *codeGen) emitIfClosure(v *ssa.If) {
 	thenBB := v.Block().Succs[0].Index
 	elseBB := v.Block().Succs[1].Index
-	if constantCond, ok := v.Cond.(*ssa.Const); ok && constantCond.Value != nil && constantCond.Value.Kind() == constant.Bool {
-		targetBB := elseBB
-		succPos := 1
-		if constant.BoolVal(constantCond.Value) {
-			targetBB = thenBB
-			succPos = 0
-		}
+	if succPos, known := g.reachability.successor(v); known {
+		targetBB := v.Block().Succs[succPos].Index
 		g.emitEdgePhiMoves(targetBB, succPos)
 		g.emit("return bbs[%d].Render()", targetBB)
 		return
@@ -3435,11 +3469,7 @@ func (g *codeGen) collectEdgePhiMoves(targetBBIdx int, succPos int) []phiEdgeMov
 	}
 	out := make([]phiEdgeMove, 0, len(targetBlock.Instrs))
 	phiIdx := 0
-	for _, instr := range targetBlock.Instrs {
-		phi, ok := instr.(*ssa.Phi)
-		if !ok {
-			break
-		}
+	for _, phi := range g.blockPhis(targetBlock.Index) {
 		if edgeIdx < 0 || edgeIdx >= len(phi.Edges) {
 			panic(fmt.Sprintf("phi edge index out of range for %s: edge=%d len=%d", phi.Name(), edgeIdx, len(phi.Edges)))
 		}
@@ -3563,7 +3593,7 @@ func (g *codeGen) emitPhiMov(phiName, phiOff string, v ssa.Value, phiType types.
 				g.emitScalarPhiMove(phiName, phiOff, fmt.Sprintf("JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(%d)}", value))
 			}
 		} else if c.Value.Kind() == constant.Int {
-			ival, _ := constant.Int64Val(c.Value)
+			ival := constWordValue(c.Value)
 			if signed, bits, ok := intTypeInfo(phiType); ok {
 				ival = normalizeIntConstForType(ival, signed, bits)
 			}
@@ -3700,7 +3730,7 @@ func (g *codeGen) emitPhiMovIndent(phiOff string, v ssa.Value, indent string) {
 			}
 			fmt.Fprintf(&g.w, "\t\t\t%sctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(%d)}, %s)\n", indent, ival, phiOff)
 		} else if c.Value.Kind() == constant.Int {
-			ival, _ := constant.Int64Val(c.Value)
+			ival := constWordValue(c.Value)
 			fmt.Fprintf(&g.w, "\t\t\t%sctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(%d)}, %s)\n", indent, ival, phiOff)
 		} else if c.Value.Kind() == constant.Float {
 			fval, _ := constant.Float64Val(c.Value)
@@ -3730,6 +3760,9 @@ func (g *codeGen) emitPhiMovIndent(phiOff string, v ssa.Value, indent string) {
 func (g *codeGen) allocPhiRegs() {
 	offset := 0
 	for _, block := range g.fn.Blocks {
+		if !g.reachability.blocks[block] {
+			continue
+		}
 		phis := g.blockPhis(block.Index)
 		if len(phis) == 0 {
 			continue
@@ -3911,11 +3944,11 @@ func (g *codeGen) initAllPhiDescs() {
 // inlineCall inlines a callee's SSA into the current code generation.
 // The callee's params are mapped to the caller's args, and the callee's
 // return value is captured. Returns the genVal representing the result.
-func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal {
-	return g.inlineCallCaptured(callee, callArgs, nil)
+func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value, proof *ssaReachability) genVal {
+	return g.inlineCallCaptured(callee, callArgs, nil, proof)
 }
 
-func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value, captures []closureBinding) genVal {
+func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value, captures []closureBinding, proof *ssaReachability) genVal {
 	callerInstruction := g.currentInstr
 	// Resolve caller's arguments BEFORE switching state
 	resolvedArgs := make([]genVal, len(callArgs))
@@ -3924,7 +3957,10 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	}
 
 	// Save caller state
+	savedInlineHomes := g.inlineHomes
+	g.inlineHomes = nil
 	savedFn := g.fn
+	savedReachability := g.reachability
 	savedBBQueue := g.bbQueue
 	savedBBDone := g.bbDone
 	savedBBQueued := g.bbQueued
@@ -3962,6 +3998,21 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 
 	// Set up callee state
 	g.fn = callee
+	bindings := make(map[ssa.Value]*ssa.Const)
+	for i, argument := range resolvedArgs {
+		if argument.constant != nil {
+			bindings[callee.Params[i]] = argument.constant
+		}
+	}
+	for i, capture := range captures {
+		if capture.value.constant != nil {
+			bindings[callee.FreeVars[i]] = capture.value.constant
+		}
+	}
+	g.reachability = proof
+	if g.reachability == nil {
+		g.reachability = analyzeSSAReachability(callee, bindings)
+	}
 	if recv := callee.Signature.Recv(); recv != nil {
 		switch rt := recv.Type().(type) {
 		case *types.Pointer:
@@ -3995,8 +4046,8 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.phiHomeRegs = map[string]string{}
 	g.phiHomeOK = map[string]string{}
 	g.vals = map[string]genVal{}
-	g.refCounts = computeRefCounts(callee)
-	g.crossBlockValues = computeCrossBlockValues(callee)
+	g.refCounts = computeRefCounts(callee, g.reachability)
+	g.crossBlockValues = computeCrossBlockValues(callee, g.reachability)
 	g.ssaAliases = map[string]string{}
 	// Do not share cached field loads across inline boundaries:
 	// the callee receiver may be a different sub-struct (e.g. multiple inlined
@@ -4010,7 +4061,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	// rewrites cannot mutate caller descriptor variables by alias.
 	for i, param := range callee.Params {
 		arg := resolvedArgs[i]
-		isReceiverParam := (callee.Signature.Recv() != nil && i == 0) || arg.goVar == "thisptr" || arg.marker == "_storage_recv"
+		isReceiverParam := arg.goVar == "thisptr" || arg.marker == "_storage_recv"
 		if arg.isDesc && !isReceiverParam && g.refCounts[param.Name()] > 0 {
 			pv := g.allocDesc()
 			g.emit("%s := %s", pv, arg.goVar)
@@ -4021,6 +4072,10 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 			// as StorageInt.GetValueUInt without adding a correctness property.
 			if calleeMultiBlock {
 				g.emit("ctx.StabilizeDescForControlFlow(&%s)", pv)
+				home := g.allocTemp("inlineHome")
+				g.emit("%s := %s", home, pv)
+				g.emit("%s.ID = 0", home)
+				g.inlineHomes = append(g.inlineHomes, descSnapshot{desc: pv, snap: home})
 			}
 			copied := arg
 			copied.goVar = pv
@@ -4044,7 +4099,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 		// generated function.  Turning that descriptor into a stack home here
 		// would discard the pinned register while nested field loads still use
 		// the receiver as their address base.
-		if callee.Signature.Recv() != nil && i == 0 {
+		if resolvedArgs[i].goVar == "thisptr" || resolvedArgs[i].marker == "_storage_recv" {
 			continue
 		}
 		if _, isConst := arg.(*ssa.Const); isConst {
@@ -4092,7 +4147,10 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 		g.inlineReturnReg2Var = ""
 		g.inlineReturnsScm = returnsScmer
 		g.inlineReturnTuple = nil
-		stackBackedSingleResult := results.Len() == 1 && !returnsScmer && goCallWordCount(results.At(0).Type()) > 1
+		// Nested multi-result calls share the register allocator. Their caller's
+		// Scmer return must own a stable join home, rather than untracked raw
+		// registers which sibling blocks or nested return values can reuse.
+		stackBackedSingleResult := results.Len() == 1 && goCallWordCount(results.At(0).Type()) > 1 && (!returnsScmer || functionCallsMultipleResults(callee, g.reachability))
 		if results.Len() > 1 || stackBackedSingleResult {
 			g.inlineReturnTuple = make([]genVal, results.Len())
 			for i := 0; i < results.Len(); i++ {
@@ -4134,7 +4192,10 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 
 	// Process callee blocks
 	var singleBlockResult genVal
-	for i := range callee.Blocks {
+	for i, block := range callee.Blocks {
+		if !g.reachability.blocks[block] {
+			continue
+		}
 		g.ensureBBPosVar(i)
 		// A branch may discover an edge to a block that has already been
 		// rendered in the generator's work-list order. Reserving every block
@@ -4165,11 +4226,18 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 			g.emit("ctx.MarkLabel(%s)", lbl)
 			g.emit("ctx.ResolveFixups()")
 		}
+		// Helper blocks are rendered in compiler order, not execution order.
+		// Restore immutable entry/producer homes before a sibling can reuse
+		// another block's register reload or its speculative spill location.
+		g.emitRestoreClosureDescState(g.inlineHomes)
 		g.resetAllPhiDescsToStack()
 		g.bindActivePhiRegisterHomes(bbIdx)
 		g.emit("ctx.ReclaimUntrackedRegs()")
 
 		block := callee.Blocks[bbIdx]
+		if !g.reachability.blocks[block] {
+			continue
+		}
 		if blockEndsInPanic(block) {
 			// Error-only blocks stay native but do not participate in register
 			// allocation for successful paths. Scheme treats unsupported inputs
@@ -4266,7 +4334,10 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	}
 
 	// Restore caller state
+	mutatesFields := functionWritesMemory(callee, g.reachability)
 	g.fn = savedFn
+	g.inlineHomes = savedInlineHomes
+	g.reachability = savedReachability
 	g.bbQueue = savedBBQueue
 	g.bbDone = savedBBDone
 	g.bbQueued = savedBBQueued
@@ -4297,7 +4368,11 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.refCounts = savedRefCounts
 	g.crossBlockValues = savedCrossBlockValues
 	g.ssaAliases = savedAliases
-	g.fieldCache = savedFieldCache
+	if mutatesFields {
+		g.fieldCache = map[string]genVal{}
+	} else {
+		g.fieldCache = savedFieldCache
+	}
 	g.phiProtectedRegVars = savedPhiProtected
 	g.typeName = savedTypeName
 	g.forceLegacyCFG = savedForceLegacyCFG
@@ -4319,9 +4394,12 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	return result
 }
 
-func inlineInstructionCount(fn *ssa.Function) int {
+func inlineInstructionCount(fn *ssa.Function, reachability *ssaReachability) int {
 	count := 0
 	for _, block := range fn.Blocks {
+		if !reachability.blocks[block] {
+			continue
+		}
 		count += len(block.Instrs)
 	}
 	return count
@@ -4331,8 +4409,11 @@ func inlineInstructionCount(fn *ssa.Function) int {
 // local aggregate and FieldAddr stores. Those stores need a descriptor owned
 // by the caller's register namespace; keeping the helper as a native Go call
 // is both smaller and safer than expanding its allocation graph inline.
-func functionBuildsScmerStruct(fn *ssa.Function) bool {
+func functionBuildsScmerStruct(fn *ssa.Function, reachability *ssaReachability) bool {
 	for _, block := range fn.Blocks {
+		if !reachability.blocks[block] {
+			continue
+		}
 		for _, instruction := range block.Instrs {
 			allocation, ok := instruction.(*ssa.Alloc)
 			if !ok {
@@ -4347,8 +4428,11 @@ func functionBuildsScmerStruct(fn *ssa.Function) bool {
 	return false
 }
 
-func functionWritesMemory(fn *ssa.Function) bool {
+func functionWritesMemory(fn *ssa.Function, reachability *ssaReachability) bool {
 	for _, block := range fn.Blocks {
+		if !reachability.blocks[block] {
+			continue
+		}
 		for _, instruction := range block.Instrs {
 			switch instruction.(type) {
 			case *ssa.Store, *ssa.MapUpdate, *ssa.Send, *ssa.Go, *ssa.Defer:
@@ -4359,8 +4443,11 @@ func functionWritesMemory(fn *ssa.Function) bool {
 	return false
 }
 
-func functionCallsMultipleResults(fn *ssa.Function) bool {
+func functionCallsMultipleResults(fn *ssa.Function, reachability *ssaReachability) bool {
 	for _, block := range fn.Blocks {
+		if !reachability.blocks[block] {
+			continue
+		}
 		for _, instruction := range block.Instrs {
 			call, ok := instruction.(*ssa.Call)
 			if !ok {
@@ -4413,7 +4500,22 @@ func blockEndsInPanic(block *ssa.BasicBlock) bool {
 // tryInlineCall prefers SSA visibility for small helpers, but treats an
 // unsupported instruction as a local boundary instead of rejecting the whole
 // builtin. The cloned generator makes this rollback exact.
-func (g *codeGen) tryInlineCall(callee *ssa.Function, callArgs []ssa.Value) (result genVal, ok bool) {
+func (g *codeGen) tryInlineCall(callee *ssa.Function, callArgs []ssa.Value, assumptions map[ssa.Value]*ssa.Const) (result genVal, ok bool) {
+	bindings := make(map[ssa.Value]*ssa.Const)
+	if callee != nil {
+		for i, argument := range callArgs {
+			if i >= len(callee.Params) {
+				break
+			}
+			if c, known := g.rewriteSSAValue(argument).(*ssa.Const); known {
+				bindings[callee.Params[i]] = c
+			}
+		}
+	}
+	for value, c := range assumptions {
+		bindings[value] = c
+	}
+	reachability := analyzeSSAReachability(callee, bindings)
 	if callee == nil || callee.Blocks == nil || callee.Signature.Results().Len() > 1 {
 		return genVal{}, false
 	}
@@ -4426,41 +4528,48 @@ func (g *codeGen) tryInlineCall(callee *ssa.Function, callArgs []ssa.Value) (res
 	// library machinery and crosses an implementation boundary which the emitter
 	// does not own. Tiny foreign helpers remain eligible when a native call cannot
 	// represent their receiver efficiently.
-	if callee.Pkg != nil && callee.Pkg.Pkg != nil && callee.Pkg.Pkg.Path() != g.topLevelPkgPath && inlineInstructionCount(callee) > 32 {
+	if callee.Pkg != nil && callee.Pkg.Pkg != nil && callee.Pkg.Pkg.Path() != g.topLevelPkgPath && inlineInstructionCount(callee, reachability) > 32 {
 		return genVal{}, false
 	}
-	// Pointer-receiver helpers are eligible only when they are small, read-only,
-	// and have a single block. This exposes compact getter arithmetic without
-	// expanding mutation or control-flow machinery into the caller.
+
+	// Expanding mutable receiver CFGs and tuple-producing call graphs is only
+	// worthwhile when specialization actually removes control flow. Otherwise
+	// keep their compact native implementation, as before; blindly expanding
+	// every local method duplicates library machinery throughout all emitters.
+	specialized := len(bindings) > 0 && len(reachability.blocks) < len(callee.Blocks)
 	if receiver := callee.Signature.Recv(); receiver != nil {
-		if _, pointerReceiver := receiver.Type().Underlying().(*types.Pointer); pointerReceiver {
-			if len(callee.Blocks) != 1 || functionWritesMemory(callee) {
-				return genVal{}, false
-			}
+		if _, pointer := receiver.Type().Underlying().(*types.Pointer); pointer && !specialized && (len(reachability.blocks) != 1 || functionWritesMemory(callee, reachability)) {
+			return genVal{}, false
 		}
 	}
+	if functionCallsMultipleResults(callee, reachability) && !specialized {
+		if branch, _ := g.callShapeCondition(callee, callArgs, reachability); len(bindings) == 0 || branch == nil {
+			return genVal{}, false
+		}
+	}
+
 	if callee.Signature.Results().Len() == 1 && goCallWordCount(callee.Signature.Results().At(0).Type()) == 0 {
 		return genVal{}, false
 	}
-	if functionBuildsScmerStruct(callee) {
+	if functionBuildsScmerStruct(callee, reachability) {
 		return genVal{}, false
 	}
-	// Keep tuple-producing calls inside their native helper until nested inline
-	// CFG returns have a stable, path-independent representation. Flattening
-	// such a helper into its caller can otherwise make a later return arm reuse
-	// an earlier arm's result register while the tuple call is being emitted.
-	if functionCallsMultipleResults(callee) {
-		return genVal{}, false
-	}
-	if cost := inlineInstructionCount(callee); cost > inlineInstructionBudget {
+
+	if cost := inlineInstructionCount(callee, reachability); cost > inlineInstructionBudget {
 		if verbose {
 			fmt.Fprintf(os.Stderr, "jitgen: not inlining %s: cost %d exceeds budget %d\n", callee, cost, inlineInstructionBudget)
 		}
 		return genVal{}, false
 	}
-	cost := inlineInstructionCount(callee)
+	cost := inlineInstructionCount(callee, reachability)
 	if g.inlineInstructions+cost > emitterInlineInstructionBudget {
+		if verbose {
+			fmt.Printf("jitgen: emitter budget skips %s cost=%d used=%d\n", callee, cost, g.inlineInstructions)
+		}
 		return genVal{}, false
+	}
+	if guarded, valid := g.tryShapeSpecialization(callee, callArgs, bindings, reachability); valid {
+		return guarded, true
 	}
 	trial := g.clone()
 	trial.inlineInstructions += cost
@@ -4473,7 +4582,7 @@ func (g *codeGen) tryInlineCall(callee *ssa.Function, callArgs []ssa.Value) (res
 			ok = false
 		}
 	}()
-	result = trial.inlineCall(callee, callArgs)
+	result = trial.inlineCall(callee, callArgs, reachability)
 	generated := trial.w.String()
 	declarations := trial.wDecl.String()
 	trial.w = strings.Builder{}
@@ -4547,10 +4656,27 @@ func (g *codeGen) tryEmitJITHelperCall(name string, callee *ssa.Function, callAr
 }
 
 func (g *codeGen) tryInlineClosure(closure genVal, callArgs []ssa.Value) (result genVal, ok bool) {
-	if closure.closureFn == nil || closure.closureFn.Signature.Results().Len() > 1 || inlineInstructionCount(closure.closureFn) > inlineInstructionBudget {
+	bindings := make(map[ssa.Value]*ssa.Const)
+	if closure.closureFn != nil {
+		for i, argument := range callArgs {
+			if i < len(closure.closureFn.Params) {
+				if c, known := g.rewriteSSAValue(argument).(*ssa.Const); known {
+					bindings[closure.closureFn.Params[i]] = c
+				}
+			}
+		}
+		for i, capture := range closure.closureBindings {
+			if capture.value.constant != nil {
+				bindings[closure.closureFn.FreeVars[i]] = capture.value.constant
+			}
+		}
+	}
+	reachability := analyzeSSAReachability(closure.closureFn, bindings)
+
+	if closure.closureFn == nil || closure.closureFn.Signature.Results().Len() > 1 || inlineInstructionCount(closure.closureFn, reachability) > inlineInstructionBudget {
 		return genVal{}, false
 	}
-	cost := inlineInstructionCount(closure.closureFn)
+	cost := inlineInstructionCount(closure.closureFn, reachability)
 	if g.inlineInstructions+cost > emitterInlineInstructionBudget {
 		return genVal{}, false
 	}
@@ -4565,7 +4691,7 @@ func (g *codeGen) tryInlineClosure(closure genVal, callArgs []ssa.Value) (result
 			ok = false
 		}
 	}()
-	result = trial.inlineCallCaptured(closure.closureFn, callArgs, closure.closureBindings)
+	result = trial.inlineCallCaptured(closure.closureFn, callArgs, closure.closureBindings, reachability)
 	generated := trial.w.String()
 	declarations := trial.wDecl.String()
 	trial.w = strings.Builder{}
@@ -4581,10 +4707,11 @@ func (g *codeGen) tryInlineClosure(closure genVal, callArgs []ssa.Value) (result
 // native boundary (locks, defers, maps, I/O), generation rolls back cleanly and
 // the caller emits one Go call for that helper instead.
 func (g *codeGen) tryInlineStorageMethod(callee *ssa.Function, callArgs []ssa.Value) (result genVal, ok bool) {
+	reachability := analyzeSSAReachability(callee, nil)
 	if callee == nil || callee.Blocks == nil || callee.Pkg != g.fn.Pkg || callee.Signature == nil || callee.Signature.Recv() == nil {
 		return genVal{}, false
 	}
-	if len(callee.Blocks) != 1 || functionWritesMemory(callee) {
+	if len(reachability.blocks) != 1 || functionWritesMemory(callee, reachability) {
 		return genVal{}, false
 	}
 	// Wide tuples use Go's native multi-result ABI. Keeping them behind one
@@ -4603,7 +4730,7 @@ func (g *codeGen) tryInlineStorageMethod(callee *ssa.Function, callArgs []ssa.Va
 			ok = false
 		}
 	}()
-	result = trial.inlineCall(callee, callArgs)
+	result = trial.inlineCall(callee, callArgs, reachability)
 	generated := trial.w.String()
 	declarations := trial.wDecl.String()
 	trial.w = strings.Builder{}
@@ -4629,12 +4756,18 @@ func (g *codeGen) emitRecursiveBBRenderers() {
 	g.bbClosureMode = true
 	defer func() { g.bbClosureMode = prevMode }()
 
-	for i := range g.fn.Blocks {
+	for i, block := range g.fn.Blocks {
+		if !g.reachability.blocks[block] {
+			continue
+		}
 		g.ensureBBPosVar(i)
 		g.ensureBBLabel(i)
 	}
 
 	for bbIdx, block := range g.fn.Blocks {
+		if !g.reachability.blocks[block] {
+			continue
+		}
 		bbID := g.scopedBBID(bbIdx)
 		lbl := g.bbLabels[bbID]
 		posVar := g.bbPosVars[bbID]
@@ -4696,9 +4829,12 @@ func (g *codeGen) emitRecursiveBBRenderers() {
 
 // generateClosure tries to generate a JIT emitter closure for the given SSA function.
 // Returns (closureCode, "") on success, or ("", errorDescription) on failure.
-func computeCrossBlockValues(fn *ssa.Function) map[string]bool {
+func computeCrossBlockValues(fn *ssa.Function, reachability *ssaReachability) map[string]bool {
 	result := make(map[string]bool)
 	for _, block := range fn.Blocks {
+		if !reachability.blocks[block] {
+			continue
+		}
 		for _, instruction := range block.Instrs {
 			if value, ok := instruction.(ssa.Value); ok && ssaValueCrossesControlFlow(value) {
 				result[value.Name()] = true
@@ -4719,7 +4855,9 @@ func newCodeGen(fn *ssa.Function, rewrite ssaValueRewriter, sourceAliases ...map
 			imports[imported.Path()] = imported.Name()
 		}
 	}
+	reachability := analyzeSSAReachability(fn, nil)
 	return &codeGen{
+		reachability:         reachability,
 		vals:                 map[string]genVal{},
 		fn:                   fn,
 		bbLabels:             map[uint64]string{},
@@ -4731,13 +4869,13 @@ func newCodeGen(fn *ssa.Function, rewrite ssaValueRewriter, sourceAliases ...map
 		phiPair:              map[string]bool{},
 		phiTriple:            map[string]bool{},
 		phiTypeTag:           map[string]string{},
-		registerPlan:         planLoopPhiRegisters(fn, false),
+		registerPlan:         planLoopPhiRegisters(fn, false, reachability),
 		phiHomeRegs:          map[string]string{},
 		phiHomeOK:            map[string]string{},
 		bbPhiBase:            map[int]int{},
 		fieldCache:           map[string]genVal{},
-		refCounts:            computeRefCounts(fn),
-		crossBlockValues:     computeCrossBlockValues(fn),
+		refCounts:            computeRefCounts(fn, reachability),
+		crossBlockValues:     computeCrossBlockValues(fn, reachability),
 		directResultPayloads: computeDirectResultPayloads(fn),
 		ssaAliases:           map[string]string{},
 		topLevelPkgPath:      fn.Pkg.Pkg.Path(),
@@ -4900,8 +5038,11 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter, 
 // absent from fn's standalone graph, so independently assigning phi homes
 // would violate caller/callee interference. Static callees are expanded by
 // inlineCallCaptured into this emitter and share its allocator state.
-func inlineRegisterPlanSafe(fn *ssa.Function) bool {
+func inlineRegisterPlanSafe(fn *ssa.Function, reachability *ssaReachability) bool {
 	for _, block := range fn.Blocks {
+		if !reachability.blocks[block] {
+			continue
+		}
 		for _, instruction := range block.Instrs {
 			call, ok := instruction.(*ssa.Call)
 			if ok && call.Common().StaticCallee() == nil {
@@ -4944,13 +5085,13 @@ func generateClosureCost(opName string, fn *ssa.Function, rewrite ssaValueRewrit
 	}
 	g := newCodeGen(fn, rewrite, aliases)
 	g.nativeFP = nativeFP
-	g.registerPlan = planLoopPhiRegisters(fn, nativeFP)
+	g.registerPlan = planLoopPhiRegisters(fn, nativeFP, g.reachability)
 	// Native-FP declarations keep their own typed loop homes across callbacks.
 	// The FP allocator protects those homes while recursively emitted callbacks
 	// use the same allocator, and Go-call boundaries spill every live FP owner.
 	// Generic GPR plans retain the stricter historical rule because callback
 	// aliases may still contain pointer-bearing multiword values.
-	if !inlineRegisterPlanSafe(fn) && !nativeFP {
+	if !inlineRegisterPlanSafe(fn, g.reachability) && !nativeFP {
 		g.registerPlan = staticRegisterPlan{colorByValue: map[string]int{}, widthByValue: map[string]int{}, classByValue: map[string]string{}}
 	}
 	g.opName = opName
@@ -4976,7 +5117,7 @@ func generateClosureCost(opName string, fn *ssa.Function, rewrite ssaValueRewrit
 	guard := generateEmitterGuard(opName)
 	result := fmt.Sprintf("func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s%s%s\t\t}",
 		guard, g.wDecl.String(), injectBindRegCalls(g.w.String()))
-	cost := inlineInstructionCount(fn) + g.inlineInstructions
+	cost := inlineInstructionCount(fn, g.reachability) + g.inlineInstructions
 	if cost >= math.MaxUint16 {
 		cost = math.MaxUint16 - 1
 	}
@@ -5245,18 +5386,24 @@ func isIdentCont(b byte) bool {
 
 // computeRefCounts counts how many times each SSA value is referenced as an
 // operand across all blocks of the function. Constants are excluded.
-func computeRefCounts(fn *ssa.Function) map[string]int {
+func computeRefCounts(fn *ssa.Function, reachability *ssaReachability) map[string]int {
 	counts := map[string]int{}
 	for _, block := range fn.Blocks {
+		if !reachability.blocks[block] {
+			continue
+		}
 		for _, instr := range block.Instrs {
-			for _, op := range instr.Operands(nil) {
-				if *op == nil {
+			if value, ok := instr.(ssa.Value); ok && reachability.replacement(value) != value {
+				continue
+			}
+			for index, op := range instr.Operands(nil) {
+				if *op == nil || reachability.constant(*op) != nil {
 					continue
 				}
-				if _, isConst := (*op).(*ssa.Const); isConst {
+				if phi, ok := instr.(*ssa.Phi); ok && !reachability.incoming(phi.Block(), index) {
 					continue
 				}
-				counts[(*op).Name()]++
+				counts[reachability.replacement(*op).Name()]++
 			}
 		}
 	}
@@ -5483,6 +5630,9 @@ func (g *codeGen) keepAliveForMarker(arg ssa.Value) {
 // freeDeadOperands decrements refcounts for all operands of an instruction
 // and emits FreeDesc for any that reached zero.
 func (g *codeGen) freeDeadOperands(instr ssa.Instruction) {
+	if value, ok := instr.(ssa.Value); ok && g.reachability.replacement(value) != value {
+		return
+	}
 	// Skip IndexAddr: it doesn't emit code (just creates a marker).
 	// The actual code is deferred to the UnOp handler; freeing here would
 	// release registers before the code that uses them is emitted.
@@ -5512,7 +5662,7 @@ func (g *codeGen) freeDeadOperands(instr ssa.Instruction) {
 		if _, isConst := (*op).(*ssa.Const); isConst {
 			continue
 		}
-		g.useOperand((*op).Name())
+		g.useOperand(g.rewriteSSAValue(*op).Name())
 	}
 }
 
@@ -5666,6 +5816,9 @@ func (g *codeGen) ssaValueUsesRemaining(name string) int {
 }
 
 func (g *codeGen) stabilizeCrossBlockValue(instr ssa.Instruction) {
+	if value, ok := instr.(ssa.Value); ok && g.reachability.replacement(value) != value {
+		return
+	}
 	value, ok := instr.(ssa.Value)
 	if !ok || value.Referrers() == nil || instr.Block() == nil {
 		return
@@ -5704,6 +5857,14 @@ func (g *codeGen) stabilizeCrossBlockValue(instr ssa.Instruction) {
 		panic(fmt.Sprintf("dynamic variadic element crosses a control-flow edge: %s", value))
 	}
 	g.emit("ctx.StabilizeDescForControlFlow(&%s)", generated.goVar)
+	if g.forceLegacyCFG {
+		if _, phi := value.(*ssa.Phi); !phi {
+			home := g.allocTemp("inlineHome")
+			g.emit("%s := %s", home, generated.goVar)
+			g.emit("%s.ID = 0", home)
+			g.inlineHomes = append(g.inlineHomes, descSnapshot{desc: generated.goVar, snap: home})
+		}
+	}
 }
 
 func crossBlockValueHasSinglePredecessorConsumer(value ssa.Value) bool {
@@ -5861,6 +6022,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				okDesc := g.allocDesc()
 				g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(func(m %s, k %s) (%s, bool) { value, ok := m[k]; return value, ok }), []JITValueDesc{%s, %s}, []uint8{%d, 1}, []uint8{%d, 0})", results, mapExpr, keyExpr, valueExpr, container.goVar, keyValue.goVar, valueWords, goCallPointerMask(mapType.Elem()))
 				g.emit("%s := %s[0]", valueDesc, results)
+				g.emit("_ = %s", valueDesc)
 				g.emit("%s := %s[1]", okDesc, results)
 				g.emit("ctx.EmitAndRegImm32(%s.Reg, 1)", okDesc)
 				g.emit("%s.Type = tagBool", okDesc)
@@ -7080,6 +7242,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					// len(args) — known at emit time
 					dv := g.allocDesc()
 					g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}", dv)
+					g.emit("_ = %s", dv)
 					g.vals[name] = genVal{goVar: dv, isDesc: true}
 				} else {
 					// len of a local descriptor-backed value (slice/string intermediates)
@@ -7091,6 +7254,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 						} else {
 							g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)-%d))}", dv, src.variadicOffset)
 						}
+						g.emit("_ = %s", dv)
 						g.vals[name] = genVal{goVar: dv, isDesc: true}
 					} else if src.marker == "_slice" || src.marker == "_gostring" || src.isDesc {
 						dv := g.allocDesc()
@@ -7121,6 +7285,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 						g.emit("\t\tpanic(\"len on unsupported descriptor location\")")
 						g.emit("\t}")
 						g.emit("}")
+						g.emit("_ = %s", dv)
 						g.vals[name] = genVal{goVar: dv, isDesc: true}
 						if src.hasSliceInput {
 							withProvenance := g.vals[name]
@@ -7726,15 +7891,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\t%s.Loc = LocNone", arg.goVar)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
-		case "Set":
-			// (*FastDict).Set(fd, key, value, mergeFn) — void Go call
-			recv := g.vals[v.Call.Args[0].Name()]     // *FastDict (1 word)
-			key := g.vals[v.Call.Args[1].Name()]      // Scmer (2 words)
-			val := g.vals[v.Call.Args[2].Name()]      // Scmer (2 words)
-			mergeFn := g.resolveValue(v.Call.Args[3]) // func (1 word)
-			g.emit("%s = JITPrepareScmerGoArg(ctx, %s)", key.goVar, key.goVar)
-			g.emit("%s = JITPrepareScmerGoArg(ctx, %s)", val.goVar, val.goVar)
-			g.emit("ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).Set), []JITValueDesc{%s, %s, %s, %s})", recv.goVar, key.goVar, val.goVar, mergeFn.goVar)
+
 		case "IsNaN":
 			if callee.Pkg == nil || callee.Pkg.Pkg == nil || callee.Pkg.Pkg.Path() != "math" {
 				panic(fmt.Sprintf("unsupported IsNaN function: %s", callee.String()))
@@ -7971,7 +8128,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				if g.tryEmitJITHelperCall(name, callee, v.Call.Args) {
 					break
 				}
-				if result, ok := g.tryInlineCall(callee, v.Call.Args); ok {
+				if result, ok := g.tryInlineCall(callee, v.Call.Args, nil); ok {
 					if name != "" {
 						g.vals[name] = result
 					}
@@ -7993,7 +8150,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				if callee.Blocks == nil {
 					panic(fmt.Sprintf("unsupported call: %s", v))
 				}
-				result := g.inlineCall(callee, v.Call.Args)
+				result := g.inlineCall(callee, v.Call.Args, nil)
 				if name != "" {
 					g.vals[name] = result
 				}
@@ -8002,7 +8159,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			if g.tryEmitJITHelperCall(name, callee, v.Call.Args) {
 				break
 			}
-			if result, ok := g.tryInlineCall(callee, v.Call.Args); ok {
+			if result, ok := g.tryInlineCall(callee, v.Call.Args, nil); ok {
 				if name != "" {
 					if _, signature := v.Type().Underlying().(*types.Signature); signature {
 						result.marker = "_gofunc_variadic"
@@ -9051,13 +9208,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		thenBB := v.Block().Succs[0].Index
 		elseBB := v.Block().Succs[1].Index
 		// SSA-constant condition: emit only taken edge and enqueue exactly one BB.
-		if c, ok := v.Cond.(*ssa.Const); ok && c.Value != nil && c.Value.Kind() == constant.Bool {
-			takenBB := elseBB
-			takenSuccPos := 1
-			if constant.BoolVal(c.Value) {
-				takenBB = thenBB
-				takenSuccPos = 0
-			}
+		if takenSuccPos, known := g.reachability.successor(v); known {
+			takenBB := v.Block().Succs[takenSuccPos].Index
 			g.emitEdgePhiMoves(takenBB, takenSuccPos)
 			// Phase 2 pruning: only render the reachable branch.
 			// If the target BB is not rendered yet, enqueue it next and fall through
@@ -9565,6 +9717,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// specialized value can be stored without a write barrier, the loop
 			// carrier remains in its register home. Only the uncommon Go-call
 			// path needs the durable spill required across a safepoint.
+			// Refresh allocator spill metadata before borrowing a descriptor with
+			// ID zero. Index arithmetic can evict the slice header after its load;
+			// dropping the ID first would turn that stale register into authority.
+			g.emit("ctx.SyncDesc(&%s)", sliceDescVar)
+			g.emit("ctx.SyncDesc(&%s)", idxDescVar)
 			sliceUse := g.allocDesc()
 			indexUse := g.allocDesc()
 			g.emit("%s := %s", sliceUse, sliceDescVar)
@@ -10429,7 +10586,23 @@ func (g *codeGen) emitInlineReturn(v *ssa.Return) {
 			if !res.isDesc {
 				panic(fmt.Sprintf("unsupported inline tuple result %s", returned))
 			}
-			g.emit("ctx.EmitCopyDescWords(&%s, &%s, %d)", g.inlineReturnTuple[i].goVar, res.goVar, words)
+			if isScmerType(returned.Type()) {
+				switch res.marker {
+				case "_newbool", "_newint", "_newfloat":
+					tag := "tag" + strings.ToUpper(res.marker[4:5]) + res.marker[5:]
+					g.emit("ctx.EmitStoreTypedScmerToStack(%s, %s, %s.StackOff)", res.goVar, tag, g.inlineReturnTuple[i].goVar)
+				case "_newnil":
+					g.emit("ctx.EmitZeroDescWords(&%s, 2)", g.inlineReturnTuple[i].goVar)
+				case "_newstring":
+					tmp := g.allocDesc()
+					g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{%s}, 2)", tmp, res.goVar)
+					g.emit("ctx.EmitCopyScmerToDesc(&%s, &%s)", g.inlineReturnTuple[i].goVar, tmp)
+				default:
+					g.emit("ctx.EmitCopyScmerToDesc(&%s, &%s)", g.inlineReturnTuple[i].goVar, res.goVar)
+				}
+			} else {
+				g.emit("ctx.EmitCopyDescWords(&%s, &%s, %d)", g.inlineReturnTuple[i].goVar, res.goVar, words)
+			}
 		}
 		g.emit("ctx.EmitJmp(%s)", g.inlineEndLabel)
 		return
@@ -10588,13 +10761,16 @@ func (g *codeGen) resolveValue(v ssa.Value) genVal {
 		if c.Value == nil {
 			if words := goCallWordCount(c.Type()); words > 0 {
 				g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}", dv)
-				return genVal{goVar: dv, isDesc: true, marker: fmt.Sprintf("_gozero:%d", words)}
+				if !g.bbClosureMode {
+					g.emit("_ = %s", dv)
+				}
+				return genVal{goVar: dv, isDesc: true, marker: fmt.Sprintf("_gozero:%d", words), constant: c}
 			}
 			g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}", dv)
 		} else {
 			switch c.Value.Kind() {
 			case constant.Int:
-				ival, _ := constant.Int64Val(c.Value)
+				ival := constWordValue(c.Value)
 				g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%d)}", dv, ival)
 			case constant.Float:
 				fval, _ := constant.Float64Val(c.Value)
@@ -10609,7 +10785,13 @@ func (g *codeGen) resolveValue(v ssa.Value) genVal {
 				panic(fmt.Sprintf("unsupported constant kind: %s", c.Value.Kind()))
 			}
 		}
-		return genVal{goVar: dv, isDesc: true}
+		// A callee can prove this argument unused after specialization.
+		// Keep the generated Go descriptor valid without materializing a
+		// machine register or retaining a dead helper path for its use.
+		if !g.bbClosureMode {
+			g.emit("_ = %s", dv)
+		}
+		return genVal{goVar: dv, isDesc: true, constant: c}
 	}
 	if existing, ok := g.vals[v.Name()]; ok && strings.HasPrefix(existing.marker, "_sliceaddr:") {
 		parts := strings.SplitN(existing.marker, ":", 3)
@@ -10667,6 +10849,19 @@ func constInt(v ssa.Value) int64 {
 		panic(fmt.Sprintf("constant not int64: %s", c))
 	}
 	return val
+}
+
+// constWordValue lowers the bits of a typed Go integer to one machine word.
+// Unsigned constants above MaxInt64 retain their upper bit; numeric index/range
+// checks continue using constInt64Value, which deliberately rejects that range.
+func constWordValue(value constant.Value) int64 {
+	if signed, exact := constInt64Value(value); exact {
+		return signed
+	}
+	if unsigned, exact := constant.Uint64Val(value); exact {
+		return int64(unsigned)
+	}
+	panic(fmt.Sprintf("constant does not fit a machine word: %s", value))
 }
 
 func constInt64Value(v constant.Value) (val int64, ok bool) {
