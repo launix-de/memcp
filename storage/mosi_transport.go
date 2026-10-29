@@ -175,8 +175,13 @@ func (p *mosiPeer) waitPackets() {
 	p.packets.Wait()
 }
 
-func (p *mosiPeer) send(m mosiMessage) error {
+func (p *mosiPeer) send(ctx context.Context, m mosiMessage) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-p.done:
 		return fmt.Errorf(mosi.NetworkError)
 	case p.outgoing <- m:
@@ -230,8 +235,10 @@ func (p *mosiPeer) call(ctx context.Context, method string, input, output any) e
 	p.pending[id] = ch
 	p.mu.Unlock()
 	defer func() { p.mu.Lock(); delete(p.pending, id); p.mu.Unlock() }()
-	if err := p.send(mosiMessage{ID: id, Method: method, Data: data}); err != nil {
-		p.close()
+	if err := p.send(ctx, mosiMessage{ID: id, Method: method, Data: data}); err != nil {
+		if ctx.Err() == nil {
+			p.close()
+		}
 		return err
 	}
 	select {
@@ -310,7 +317,7 @@ func (p *mosiPeer) read() {
 				}
 				return
 			} // fire-and-forget messages complete via their registered channel
-			if err := p.send(reply); err != nil {
+			if err := p.send(p.ctx, reply); err != nil {
 				p.close()
 			}
 		}(m)

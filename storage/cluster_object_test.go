@@ -806,31 +806,13 @@ func TestClusterObjectPendingTransferSurvivesPriorLeaseRelease(t *testing.T) {
 	}
 }
 
-// Model the valid cancellation window in which Done is closed but an AfterFunc
-// callback has not started yet. Stopping the hook must not lose remote cancel.
-type delayedClusterCancelContext struct {
-	context.Context
-	done       chan struct{}
-	registered chan struct{}
-}
-
-func (c *delayedClusterCancelContext) Done() <-chan struct{} { return c.done }
-func (c *delayedClusterCancelContext) Err() error {
-	select {
-	case <-c.done:
-		return context.Canceled
-	default:
-		return nil
-	}
-}
-func (c *delayedClusterCancelContext) AfterFunc(func()) func() bool {
-	close(c.registered)
-	return func() bool { return true } // scheduler has not started the hook
-}
-func TestClusterCancellationQueuesMessageBeforeStoppingDeferredHook(t *testing.T) {
+// Once dispatch is accepted, cancellation must be enqueued before the
+// collector returns, including when cancellation wins its first select.
+func TestClusterCancellationQueuesMessageBeforeCollectorReturns(t *testing.T) {
 	for _, control := range []bool{true, false} {
 		t.Run(fmt.Sprint("control=", control), func(t *testing.T) {
-			ctx := &delayedClusterCancelContext{context.Background(), make(chan struct{}), make(chan struct{})}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			service := &nodeScanService{}
 			peer := &mosiPeer{scanService: service, done: make(chan struct{}), outgoing: make(chan mosiMessage, 4)}
 			finished := make(chan any, 1)
@@ -850,8 +832,7 @@ func TestClusterCancellationQueuesMessageBeforeStoppingDeferredHook(t *testing.T
 			if err := json.Unmarshal(request.Data, &envelope); err != nil {
 				t.Fatal(err)
 			}
-			<-ctx.registered
-			close(ctx.done)
+			cancel()
 			select {
 			case result := <-finished:
 				if result != context.Canceled {
@@ -867,7 +848,7 @@ func TestClusterCancellationQueuesMessageBeforeStoppingDeferredHook(t *testing.T
 					t.Fatal("wrong remote cancellation", message)
 				}
 			default:
-				t.Fatal("Done won select and deferred stop suppressed the remote cancellation")
+				t.Fatal("collector returned before enqueueing remote cancellation")
 			}
 		})
 	}

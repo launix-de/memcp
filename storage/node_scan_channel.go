@@ -12,9 +12,10 @@ package storage
 
 import "fmt"
 import "sync"
+import "time"
+import "context"
 import "strings"
 import "sync/atomic"
-import "context"
 import "encoding/json"
 import "runtime/debug"
 import "github.com/google/uuid"
@@ -65,24 +66,40 @@ func freezeScanPanic(value any) *scanPanic {
 	return result
 }
 
-// clusterReceiver owns only acceptance and callbacks. Object offers/leases own
-// distributed lifetime independently, including receivers with an unlimited -1
+// clusterReceiver orders caller-owned deliveries by admission to its FIFO. The
+// mutex protects admission and completion only; callbacks never hold it.
+// Object offers/leases own distributed lifetime independently, including an unlimited -1
 // budget. The consumer must Close before releasing callback state. Close joins
-// accepted callbacks; a callback must not call Close on its own receiver.
+// accepted deliveries and cancels active callback contexts. Callbacks must honor
+// cancellation when blocking, and must not call Close on their own receiver.
 type clusterReceiver struct {
 	mu        sync.Mutex
 	remaining atomic.Int64
 	sealed    bool // production completed; zero during production is not completion
 	closed    bool
+	joined    bool
 	done      chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	head      *receiverDelivery
+	tail      *receiverDelivery
 	callback  func(context.Context, scm.Scmer) error
+}
+
+// A delivery lives in its invoking handler, including while queued. Cancelling
+// a waiter unlinks it without overtaking its active predecessor. No receiver
+// worker or detached forwarding task outlives that handler.
+type receiverDelivery struct {
+	previous, next *receiverDelivery
+	ready          chan struct{}
 }
 
 func newClusterReceiver(limit int64, callback func(context.Context, scm.Scmer) error) *clusterReceiver {
 	if limit < -1 {
 		panic("invalid receiver limit")
 	}
-	receiver := &clusterReceiver{done: make(chan struct{}), callback: callback}
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &clusterReceiver{done: make(chan struct{}), ctx: ctx, cancel: cancel, callback: callback}
 	receiver.remaining.Store(limit)
 	return receiver
 }
@@ -107,26 +124,53 @@ func (receiver *clusterReceiver) Expect(count int64) bool {
 		}
 	}
 }
-func (receiver *clusterReceiver) finishLocked() {
-	if receiver.sealed && receiver.remaining.Load() == 0 && !receiver.closed {
+func (receiver *clusterReceiver) finishLocked() bool {
+	if receiver.head == nil && !receiver.joined && (receiver.closed || receiver.sealed && receiver.remaining.Load() == 0) {
 		receiver.closed = true
+		receiver.joined = true
 		receiver.callback = nil
 		close(receiver.done)
+		return true
 	}
+	return false
 }
 func (receiver *clusterReceiver) Seal() {
 	receiver.mu.Lock()
-	defer receiver.mu.Unlock()
 	receiver.sealed = true
-	receiver.finishLocked()
+	finished := receiver.finishLocked()
+	receiver.mu.Unlock()
+	if finished {
+		receiver.cancel()
+	}
 }
 func (receiver *clusterReceiver) Close() {
 	receiver.mu.Lock()
-	defer receiver.mu.Unlock()
-	if !receiver.closed {
-		receiver.closed = true
-		receiver.callback = nil
-		close(receiver.done)
+	receiver.closed = true
+	receiver.finishLocked()
+	receiver.mu.Unlock()
+	receiver.cancel()
+	<-receiver.done
+}
+
+func (receiver *clusterReceiver) complete(delivery *receiverDelivery) {
+	receiver.mu.Lock()
+	if delivery.previous != nil {
+		delivery.previous.next = delivery.next
+	} else {
+		receiver.head = delivery.next
+		if receiver.head != nil {
+			close(receiver.head.ready)
+		}
+	}
+	if delivery.next != nil {
+		delivery.next.previous = delivery.previous
+	} else {
+		receiver.tail = delivery.previous
+	}
+	finished := receiver.finishLocked()
+	receiver.mu.Unlock()
+	if finished {
+		receiver.cancel()
 	}
 }
 func (*clusterReceiver) ClusterObjectType() string { return "receiver" }
@@ -141,24 +185,58 @@ func (receiver *clusterReceiver) HandleClusterRequest(ctx context.Context, reque
 		return nil, fmt.Errorf("invalid receiver request")
 	}
 	receiver.mu.Lock()
-	defer receiver.mu.Unlock()
 	if err := ctx.Err(); err != nil {
+		receiver.mu.Unlock()
 		return nil, err
 	}
 	if receiver.closed {
+		receiver.mu.Unlock()
 		return nil, fmt.Errorf("closed receiver")
 	}
 	for {
 		old := receiver.remaining.Load()
 		if old == 0 {
+			receiver.mu.Unlock()
 			return nil, fmt.Errorf("receiver limit exhausted")
 		}
 		if old == -1 || receiver.remaining.CompareAndSwap(old, old-1) {
 			break
 		}
 	}
-	defer receiver.finishLocked()
-	return scm.NewNil(), receiver.callback(ctx, request.Arguments[0])
+	delivery := receiverDelivery{previous: receiver.tail, ready: make(chan struct{})}
+	if receiver.tail == nil {
+		receiver.head = &delivery
+		close(delivery.ready)
+	} else {
+		receiver.tail.next = &delivery
+	}
+	receiver.tail = &delivery
+	receiver.mu.Unlock()
+	defer receiver.complete(&delivery)
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-receiver.ctx.Done():
+		return nil, receiver.ctx.Err()
+	case <-delivery.ready:
+	}
+	receiver.mu.Lock()
+	callback, closed := receiver.callback, receiver.closed
+	receiver.mu.Unlock()
+	if closed {
+		return nil, context.Canceled
+	}
+	callbackCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(receiver.ctx, cancel)
+	defer stop()
+	defer cancel()
+	if err := callbackCtx.Err(); err != nil {
+		return nil, err
+	}
+	if err := receiver.ctx.Err(); err != nil {
+		return nil, err
+	}
+	return scm.NewNil(), callback(callbackCtx, request.Arguments[0])
 }
 
 type receiverRoute struct {
@@ -233,12 +311,12 @@ func (r *scanTaskRegistry) cancelTask(id string) {
 		}
 	}
 }
-func postScanMessage(peer *mosiPeer, method string, value any) error {
+func postScanMessage(ctx context.Context, peer *mosiPeer, method string, value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	return peer.send(mosiMessage{Method: method, Data: data})
+	return peer.send(ctx, mosiMessage{Method: method, Data: data})
 }
 
 // Old frames cannot become executable after reconnect, even after the old
@@ -335,7 +413,7 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 				panic(err)
 			}
 		}()
-		return nil, postScanMessage(s.peer, "scan.result", completion)
+		return nil, postScanMessage(ctx, s.peer, "scan.result", completion)
 
 	}
 	return nil, fmt.Errorf("unknown scan channel message")
@@ -411,21 +489,30 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 		Method string          `json:"method"`
 		Data   json.RawMessage `json:"data"`
 	}{id, method, mustScanJSON(input)}
-	if err := postScanMessage(peer, "node.control", request); err != nil {
+	if err := postScanMessage(ctx, peer, "node.control", request); err != nil {
 		return err
 	}
-	cancelRemote := sync.OnceFunc(func() { _ = postScanMessage(peer, "scan.cancel", id) })
-	stop := context.AfterFunc(ctx, cancelRemote)
-	defer stop()
+	completed := false
+	defer func() {
+		if !completed {
+			// This invocation owns cancellation too; no detached AfterFunc may
+			// remain blocked sending after its collector has returned. A failed
+			// cancellation send closes the connection, whose context owns all
+			// remote scopes. Never retry an ambiguously executed operation.
+			cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := postScanMessage(cleanup, peer, "scan.cancel", id); err != nil {
+				peer.close()
+			}
+		}
+	}()
 	select {
 	case <-ctx.Done():
-		// Same race as shard dispatch: returning must not suppress the very
-		// cancellation which lets the remote nested scan release its scope.
-		cancelRemote()
 		return ctx.Err()
 	case <-peer.done:
 		return fmt.Errorf("Cluster network error")
 	case result := <-results:
+		completed = true
 		if result.Panic != nil {
 			service.discardObjectOffers(peer, result.Offers)
 			return result.Panic

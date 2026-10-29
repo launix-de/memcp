@@ -694,7 +694,7 @@ type clusterObjectReply struct {
 func (reply clusterObjectReply) ClusterObjectOffers() []scm.ClusterReference { return reply.Offers }
 func (service *nodeScanService) discardObjectOffers(peer *mosiPeer, refs []scm.ClusterReference) {
 	if len(refs) != 0 {
-		_ = postScanMessage(peer, "object.discard", refs)
+		_ = postScanMessage(context.Background(), peer, "object.discard", refs)
 	}
 }
 

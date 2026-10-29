@@ -221,7 +221,7 @@ func TestClusterAuthenticationRejectsReplayedProof(t *testing.T) {
 func TestRemoteScanMessagesHaveNoRPCHandle(t *testing.T) {
 	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
 	id := uuid.NewString()
-	if err := postScanMessage(peer, "scan.cancel", id); err != nil {
+	if err := postScanMessage(context.Background(), peer, "scan.cancel", id); err != nil {
 		t.Fatal(err)
 	}
 	message := <-peer.outgoing
