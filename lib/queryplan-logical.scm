@@ -2626,6 +2626,8 @@ row containing NULL must remain distinguishable for non-strict functions. */
 							(and (or
 								(not (empty_list? lookup_keys))
 								(and (empty_list? (gs_domain stage))
+									(reduce (gs_keys stage) (lambda (independent key)
+										(and independent (not (expr_contains_column_ref? key)))) true)
 									(not (stage_has_residual_outer_refs? stage))))
 								(and (equal? (coalesceNil (gs_having stage) true) true)
 									(or (source_is_base_table? (gs_input stage))
@@ -3802,8 +3804,7 @@ their established filtered-domain contract. */
 					(list (quote preserve_empty_domain) (empty_list? (qb_group block)))
 					(list (quote domain) session_keys)
 					(list (quote lookup-keys) session_keys))
-				(if query_input
-					(list (list (quote stage_catalog) (query_block_stage_catalog block))) '())))))))
+				'())))))))
 
 (define select_group_input (lambda (block)
 	(make_query_block (qb_schema block) (qb_sources block) '() (qb_where block)
@@ -3830,10 +3831,7 @@ from SELECT/GROUP BY syntax. */
 (define logical_select_group (lambda (block)
 	(begin
 		(define block (expand_grouped_query_block block))
-		(define sources (qb_sources block))
-		(define template (make_select_group_stage block
-			(if (and (single_source? sources) (source_is_base_table? (car sources))
-				(empty_list? (qb_stages block))) (car sources) (select_group_input block))))
+		(define template (make_select_group_stage block (select_group_input block)))
 		(define stage (group_stage_with_facts template
 			(qassoc_set (gs_facts template) (quote purpose) (quote select_group))))
 		(define alias (concat "__select_group:" (gs_id stage)))
@@ -7667,10 +7665,10 @@ Do not generalize this proof to joins, nullable UNIQUE keys or partial PKs. */
 				(list (quote compile-budget-ms) 1000)
 				(list (quote operator-model) (quote combined))))
 			(quote rows)))
-		/* Finish the combined operator model before publishing IR. Type contracts
-		must be resolved before aggregate descriptors are named; flatten the
-		completed stage graph once, after every SELECT owns its grouping. */
+		/* Resolve types and canonical dependency interfaces before introducing
+		the SELECT group boundary. Publish the completed graph with every group
+		owning its row input and explicit references to its input dependencies. */
 		(require_flat_stage_dependencies "untangle_query"
-			(normalize_select_groups (sql_type_annotate_ir ir))))))
+			(normalize_select_groups (normalize_stage_dependencies (sql_type_annotate_ir ir)))))))
 
 /* ------------------------------------------------------------------------- */

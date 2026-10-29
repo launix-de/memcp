@@ -5272,7 +5272,7 @@ the logical lookup still carries an alias which no longer exists. */
 		(define sources (qb_sources block))
 		(define default_alias (if (empty_list? sources) nil (source_alias (car sources))))
 		(define exists_src (first_exists_recset_source
-			(qb_stages block) block (qb_where block)))
+			stage_catalog block (qb_where block)))
 		(if (nil? exists_src)
 			nil
 			(begin
@@ -5282,7 +5282,7 @@ the logical lookup still carries an alias which no longer exists. */
 					(lowering_catalog_stages stage_catalog)))
 				(define probe_sources (list exists_src))
 				(define rewritten_sources (rewrite_scalar_first_probe_sources_using
-					(qb_stages block) sources probe_sources default_alias))
+					stage_catalog sources probe_sources default_alias))
 				(define driver_sources
 					(without_source_alias rewritten_sources (source_alias exists_src)))
 				(define candidate_telemetry
@@ -5292,7 +5292,7 @@ the logical lookup still carries an alias which no longer exists. */
 				(define probe (first_driver_lookup_key costed_stage driver_sources))
 				(define rewrite_consumer (lambda (expr)
 					(rewrite_scalar_first_probe_expr
-						(qb_stages block) probe_sources default_alias expr)))
+						stage_catalog probe_sources default_alias expr)))
 				(hybrid_reorder_query_block_using stage_catalog
 					(make_query_block
 						(qb_schema block)
@@ -5336,7 +5336,7 @@ the logical lookup still carries an alias which no longer exists. */
 					(qb_stages block)
 					(qb_facts block))
 				(begin
-					(define candidate (first_candidate_source (qb_stages block) sources))
+					(define candidate (first_candidate_source stage_catalog sources))
 					(if (nil? candidate)
 						(begin
 							(define exists_block
@@ -5678,6 +5678,8 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 		stage)))
 
 (define query_block_without_logical_stages (lambda (block)
+	/* The enclosing flat catalog owns each definition once. Retain the input's
+	dependency references so physical binding can restore its lexical producers. */
 	(make_query_block
 		(qb_schema block)
 		(qb_sources block)
@@ -5690,7 +5692,8 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 		(qb_offset block)
 		(qb_hidden block)
 		'()
-		(qb_facts block))))
+		(if (empty_list? (qb_stages block)) (qb_facts block)
+			(qassoc_set (qb_facts block) (quote input_stage_keys) (map (qb_stages block) logical_stage_key))))))
 
 (define normalize_stage_dependencies_node (lambda (node)
 	(if (query_block? node)
@@ -5729,7 +5732,7 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 		(cons stage rest) (begin
 			(define head (normalize_stage_dependencies_stage stage))
 			(define tail (normalize_stage_dependencies_stages rest))
-			(merge_unique (list (nth head 1) (list (nth head 0)) tail)))
+			(unique_stages_by_id (merge (list (nth head 1) (list (nth head 0)) tail))))
 		_ '())))
 
 (define normalize_stage_dependencies_query_block (lambda (block)
@@ -5750,7 +5753,8 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 				(qb_hidden block)
 				normalized_stages
 				(qb_facts block)))
-			(list normalized_block normalized_stages)))))
+			(define merged (merge_compatible_stage_output_left_joins_block normalized_block))
+			(list merged (qb_stages merged))))))
 
 (define normalize_stage_dependencies_union_block (lambda (block)
 	(begin
@@ -6682,6 +6686,10 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 Nested query blocks otherwise retain a removed helper alias after stage merging. */
 (define rewrite_stage_graph_expr (lambda (alias_map id_map expr)
 	(match expr
+		((symbol input_stage_keys) keys)
+		(list (quote input_stage_keys) (map keys (lambda (key)
+			(if (strlike key "group:%")
+				(concat "group:" (stage_merge_lookup id_map (substr key 6) (substr key 6))) key))))
 		((symbol query-block) schema sources fields condition group having order limit offset hidden stages facts)
 		(make_query_block schema
 			(merge_unique (list (map sources (lambda (src)

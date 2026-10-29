@@ -548,6 +548,20 @@ only partitioned FROM source would erase the block's row multiplicity
 
 (define expr_probe_stages (lambda (expr)
 	(match expr
+		/* Membership owns its internal preparation. Only its outer operands
+		belong to this expression's scalar-probe workload and dependency scope. */
+		((symbol driver_membership_probe) stage probe)
+		(merge (map (membership_probe_outer_exprs stage probe) expr_probe_stages))
+		((quote driver_membership_probe) stage probe)
+		(merge (map (membership_probe_outer_exprs stage probe) expr_probe_stages))
+		((symbol driver_membership_subscan_probe) stage probe)
+		(merge (map (membership_probe_outer_exprs stage probe) expr_probe_stages))
+		((quote driver_membership_subscan_probe) stage probe)
+		(merge (map (membership_probe_outer_exprs stage probe) expr_probe_stages))
+		((symbol membership_requirement_probe) stage probe)
+		(merge (map (membership_probe_outer_exprs stage probe) expr_probe_stages))
+		((quote membership_requirement_probe) stage probe)
+		(merge (map (membership_probe_outer_exprs stage probe) expr_probe_stages))
 		((symbol scalar_first_probe) stage _requested_col)
 		(list stage)
 		((quote scalar_first_probe) stage _requested_col)
@@ -5515,7 +5529,9 @@ through that same source map. */
 			(map (gs_aggregates stage) (lambda (ag) (cons (rewrite (car ag)) (cdr ag))))
 			(rewrite (gs_having stage))
 			(map_assoc (gs_output stage) (lambda (_title expr) (rewrite expr)))
-			(map (gs_order stage) (lambda (item) (list (rewrite (car item)) (cadr item))))
+			(map (gs_order stage) (lambda (item)
+				(list (rewrite (car item))
+					(canonical_order_relation (cadr item) (physical_expr_collation input (car item))))))
 			(gs_limit stage) (gs_offset stage)
 			(qassoc_set_without (gs_facts stage) (quote condition) (qb_where carrier) (quote group_cache))))
 		(list (nth prepared 0) rebound))))
@@ -5569,6 +5585,10 @@ The existing join-cost dependency owners cover these same source statistics. */
 			(list "cache_relation" (prejoin_table_name input
 				(qassoc_get (qb_facts input) (quote default_alias) (source_alias (car sources)))))
 			(list "normally_chosen" normal) (list "selection" (if (nil? forced) "cost" "forced"))
+			(list "inputs" (list
+				(list "driver_rows" (planner_source_row_count (join_optimizer_source_by_alias sources
+					(join_optimizer_tree_first_alias (query_block_join_plan input sources)))))
+				(list "filtered_rows" (qassoc_get (car costs) (quote expected_rows) nil))))
 			(list "alternatives" (list
 				(list (list "plan" "direct_join") (list "cost" (planner_cost_explain (car costs))))
 				(list (list "plan" "maintained_prejoin") (list "cost" (planner_cost_explain (cadr costs))))))) session)
@@ -5579,7 +5599,36 @@ The existing join-cost dependency owners cover these same source statistics. */
 /* Both physical producers consume the same declared scalar interface. Ordered
 output retains the maintained relation; unordered output may also use the
 native joined reduction according to the shared cost comparison above. */
+/* A group consumes the same prepared row producer as an ordinary SELECT.
+Bind its declared scalar input interface as a unit, so ON ownership, scalar
+probes, window columns and physical carrier choices survive the reduction. */
 (define lower_group_stage_join_input (lambda (stage)
+	(begin
+		(define projected (group_stage_input_projection stage))
+		(define prepared (prepare_simple_query_block_physical_core
+			(query_block_with_filtered_window_orcs projected)))
+		(define core (nth prepared 1))
+		(define bindings (zip (projection_exprs (qb_fields projected))
+			(projection_exprs (qb_fields core))))
+		(define rewrite (lambda (expr)
+			(begin
+				(define binding (find bindings (lambda (entry)
+					(expression_equal? (car entry) expr)) nil))
+				(if (not (nil? binding)) (cadr binding)
+					(match expr
+						(cons head tail) (cons head (map tail rewrite))
+						_ expr)))))
+		(define rebound (make_group_stage (gs_id stage) core (gs_domain stage)
+			(map (gs_keys stage) rewrite)
+			(map (gs_aggregates stage) (lambda (ag) (cons (rewrite (car ag)) (cdr ag))))
+			(rewrite (gs_having stage))
+			(map_assoc (gs_output stage) (lambda (_title expr) (rewrite expr)))
+			(map (gs_order stage) (lambda (item) (list (rewrite (car item)) (cadr item))))
+			(gs_limit stage) (gs_offset stage) (gs_facts stage)))
+		(cons (quote !begin) (merge (list (nth prepared 0)
+			(list (lower_prepared_group_stage_join_input rebound)) (nth prepared 2)))))))
+
+(define lower_prepared_group_stage_join_input (lambda (stage)
 	(begin
 		(define input (gs_input stage))
 		(define direct (and (empty_list? (gs_order stage))
@@ -5599,6 +5648,17 @@ native joined reduction according to the shared cost comparison above. */
 these alternatives discovers aggregate descriptors or changes the key tuple. */
 (define lower_select_group_stage (lambda (stage)
 	(begin
+		/* The input can refer to stages lifted into the owning catalog. Prepare
+		those physical relations in the input's consumer context, before choosing
+		its group operator, while retaining the declared key/aggregate interface. */
+		(define stage (if (not (query_block? (gs_input stage))) stage
+			(make_group_stage (gs_id stage)
+				(query_block_with_full_stage_catalog_using (gs_input stage)
+					(stage_catalog_entries (coalesceNil (group_stage_lowering_catalog stage)
+						(qassoc_get (gs_facts stage) (quote stage_catalog) '()))))
+				(gs_domain stage) (gs_keys stage) (gs_aggregates stage)
+				(gs_having stage) (gs_output stage) (gs_order stage)
+				(gs_limit stage) (gs_offset stage) (gs_facts stage))))
 		(define input (gs_input stage))
 		(define fields (gs_output stage))
 		(define window_count (lower_row_number_top_count_stage stage))
@@ -5618,7 +5678,10 @@ these alternatives discovers aggregate descriptors or changes the key tuple. */
 (define lower_query_block_with_cataloged_stages (lambda (block)
 	(begin
 		(define group (select_group_result_stage block))
-		(if (nil? group) (lower_row_query_block_with_cataloged_stages block)
+		/* A merge producer can request ordering above an unordered group.
+		Its consumer owns that order; the group's direct emitter cannot supply it. */
+		(if (or (nil? group) (and (not (empty_list? (qb_order block))) (empty_list? (gs_order group))))
+			(lower_row_query_block_with_cataloged_stages block)
 			(lower_select_group_stage group)))))
 
 (define lower_row_query_block_with_cataloged_stages (lambda (block)
@@ -6391,7 +6454,10 @@ RecSet; membership edges retain their own physical operators. */
 			(filter (split_and_terms (coalesceNil residual_condition true)) (lambda (term)
 				(not (expr_contains_driver_membership? term))))
 			true))
-		(if (equal? driver_condition true)
+		/* This carrier owns a source-local population. A bound join predicate
+		belongs to its continuation and cannot become this full-source prefilter. */
+		(if (or (equal? driver_condition true)
+			(not (expr_only_refs_alias? nil (source_alias src) driver_condition)))
 			nil
 			(begin
 				(define alias (source_alias src))
@@ -10025,7 +10091,7 @@ scan setup per shard and continuation setup per invocation, never per match. */
 key lists as well as the optional-access workload that selects its producer. */
 (define join_truth_projection_key (lambda (src lookup predicate lookup_keys driver_keys work)
 	(concat "join_truth_projection:" (stable_structural_hash
-		(list src lookup predicate lookup_keys driver_keys work) true))))
+		(list src lookup (canonical_aggregate_recipe predicate) lookup_keys driver_keys work) true))))
 
 (define join_truth_access_candidates (lambda (stages sources src future_sources default_alias condition bound_condition probe_work_rows planning_session)
 	(begin
@@ -11428,12 +11494,18 @@ physical decision and preserve its runtime recompile gate. */
 							(qassoc_get (qb_facts block) (quote limit_partition_columns) 0))
 						(define joined_limit_semantic
 							(qassoc_get (qb_facts block) (quote joined_limit_semantic) false))
+						/* Only the legacy tree consumes scalar_plan's carrier. Other
+						alternatives retain the complete predicate and value interface. */
+						(define native_value_builder (lambda (probe_work_rows _scalar_probe)
+							(cons row_mapper (map field_exprs (lambda (expr)
+								(lower_column_expr_for_join_in_context
+									scan_sources first_alias expr probe_work_rows))))))
 						(if (or joined_limit_semantic (> partition_columns 0))
 							(join_partitioned_order_reduce_plan
-								scan_sources scan_plan first_alias effective_field_exprs
-								effective_condition order_items (qb_offset block) (qb_limit block)
+								scan_sources scan_plan first_alias field_exprs
+								final_condition order_items (qb_offset block) (qb_limit block)
 								(query_block_stage_catalog block) (qb_facts block)
-								(lambda (_probe_work_rows _scalar_probe) row_expr)
+								native_value_builder
 								reduce_expr neutral_expr
 								(if (> partition_columns 0) nil (lambda () legacy_reduce_plan)))
 							(begin
@@ -11441,9 +11513,9 @@ physical decision and preserve its runtime recompile gate. */
 									(and (equal? (coalesceNil (qb_offset block) 0) 0)
 										(equal? (coalesceNil (qb_limit block) -1) -1)))
 									(join_unordered_reduce_plan
-										scan_sources scan_plan first_alias effective_field_exprs
-										effective_condition (query_block_stage_catalog block) (qb_facts block)
-										(lambda (_probe_work_rows _scalar_probe) row_expr)
+										scan_sources scan_plan first_alias field_exprs
+										final_condition (query_block_stage_catalog block) (qb_facts block)
+										native_value_builder
 										reduce_expr neutral_expr shard_reduce_expr legacy_reduce_plan)
 									legacy_reduce_plan))))
 					(if (qassoc_get (qb_facts block) (quote joined_limit_semantic) false)
@@ -12459,7 +12531,8 @@ once rather than walking position/relation lists on every comparison. */
 
 (define lower_union_all_ordered_materialized (lambda (block titles width order_positions)
 	(begin
-		(define id (concat "__union_materialized_" (fnv_hash (serialize block))))
+		(define id (concat "__union_materialized_"
+			(stable_structural_hash (stage_semantic_canonical_node '() '() block) true)))
 		(define rows (symbol (concat id "_rows")))
 		(define emit (symbol (concat id "_emit")))
 		(define collect_lock (symbol (concat id "_collect_lock")))
@@ -12661,36 +12734,39 @@ prepare ownership and missing-handle completion must see those stages too. */
 without emitting runtime operators. Keeping this boundary explicit makes
 analysis and emission independently measurable while preserving the normal
 build_queryplan contract. */
-/* Bind compile handles only at the physical consumer boundary. In particular,
-UNION/query relations embedded in source recipes retain their semantic shape;
-recursively annotating them would make native request state part of identity. */
-(define physical_group_with_planning_context (lambda (stage planning_session tx)
+/* Bind each declared input dependency from the authoritative flat catalog.
+Compile handles belong to these physical consumers; query relations embedded
+in source recipes retain their semantic shape and identity. */
+(define physical_group_with_planning_context (lambda (stage planning_session tx stage_index)
 	(if (not (group_stage? stage)) stage
 		(begin
 			(define input (gs_input stage))
+			(define declared_input (if (not (query_block? input)) input
+				(make_query_block (qb_schema input) (qb_sources input) (qb_fields input)
+					(qb_where input) (qb_group input) (qb_having input) (qb_order input)
+					(qb_limit input) (qb_offset input) (qb_hidden input)
+					(map (qassoc_get (qb_facts input) (quote input_stage_keys) '())
+						(lambda (key) (stage_index key))) (qb_facts input))))
 			(make_group_stage (gs_id stage)
-				(if (query_block? input)
-					(query_block_with_reorder_facts input (list
-						(list (quote physical_planning_session) planning_session)
-						(list (quote physical_planning_tx) tx))) input)
+				(physical_node_with_planning_context declared_input planning_session tx stage_index)
 				(gs_domain stage) (gs_keys stage) (gs_aggregates stage) (gs_having stage)
 				(gs_output stage) (gs_order stage) (gs_limit stage) (gs_offset stage)
 				(qassoc_set (gs_facts stage) (quote physical_planning_session) planning_session))))))
 
-(define physical_node_with_planning_context (lambda (node planning_session tx)
+(define physical_node_with_planning_context (lambda (node planning_session tx stage_index)
 	(if (query_block? node)
 		(make_query_block (qb_schema node) (qb_sources node) (qb_fields node)
 			(qb_where node) (qb_group node) (qb_having node) (qb_order node)
 			(qb_limit node) (qb_offset node) (qb_hidden node)
 			(map (qb_stages node) (lambda (stage)
-				(physical_group_with_planning_context stage planning_session tx)))
+				(physical_group_with_planning_context stage planning_session tx stage_index)))
 			(merge (list (list
 				(list (quote physical_planning_session) planning_session)
 				(list (quote physical_planning_tx) tx)) (qb_facts node))))
 		(union_block? node)
 		(make_union_block (union_mode node)
 			(map (union_branches node) (lambda (branch)
-				(physical_node_with_planning_context branch planning_session tx)))
+				(physical_node_with_planning_context branch planning_session tx stage_index)))
 			(union_order node) (union_limit node) (union_offset node) (union_facts node))
 		node)))
 
@@ -12699,8 +12775,10 @@ recursively annotating them would make native request state part of identity. */
 		(require_unnested_node "build_queryplan input" (ir_root ir))
 		/* This native handle exists only between physical preparation and emission.
 		It never enters the logical IR or the emitted/cached runtime plan. */
-		(define contextual_input (if (nil? planning_session) (ir_root ir)
-			(physical_node_with_planning_context (ir_root ir) planning_session tx)))
+		(define contextual_input
+			(physical_node_with_planning_context (ir_root ir) planning_session tx
+				(reduce (ir_stages ir) (lambda (index stage)
+					(set_assoc index (logical_stage_key stage) stage)) '())))
 		(define contextual_root (apply_join_optimizer_plan_node contextual_input))
 		(make_ir
 			(ir_kind ir)
