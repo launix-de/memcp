@@ -427,7 +427,11 @@ func (r *replicationManager) mergeRecoveryReport(id string, reported replicaReco
 	}
 	claimed := r.initialClaims[id][resource.key()]
 	restoring := r.restoring[resource.Database]
-	if restoring && reported.State != "" && reported.Epoch >= record.Epoch {
+	// A surrendered IO names the former owner. Resolve its Handoff below using
+	// the recipient's evidence, including when another authenticated scope has
+	// already reported this transfer. It is not a fresh claim by that old owner.
+	surrendered := reported.State == "IO" && reported.Handoff != ""
+	if restoring && !surrendered && reported.State != "" && reported.Epoch >= record.Epoch {
 		phase := mosi.ParsePhase(reported.State)
 		owner := reported.Owner
 		owns := phase == mosi.M || phase == mosi.O

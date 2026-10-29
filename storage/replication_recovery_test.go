@@ -293,6 +293,21 @@ func TestReplicationRecoveryInterruptedHandover(t *testing.T) {
 			if !complete && r.resourceCell(resource).ownstate.Phase() != mosi.IO {
 				t.Fatal("partial master data gained authority")
 			}
+			// Cached users can report the same surrendered resource on one
+			// connection. IO plus Handoff is transfer evidence, not an owner claim.
+			if _, err := r.recoverPeer(context.Background(), source, replicaRequest{Boot: r.peersBoot[source], Resources: []replicaRecord{proof}}, replicaAuth{Databases: map[string]bool{resource.Database: true}}); err != nil {
+				t.Fatal("second authenticated scope contradicted the same handover", err)
+			}
+			if current := r.directory.Records[r.resourceKey(resource)]; current.Owner != wantOwner || current.Epoch != record.Epoch || current.Content != record.Content {
+				t.Fatal("repeated surrender changed recovered authority or content", current)
+			}
+			if complete {
+				claim := proof
+				claim.State, claim.Handoff = "M", ""
+				if _, err := r.recoverPeer(context.Background(), source, replicaRequest{Boot: r.peersBoot[source], Resources: []replicaRecord{claim}}, replicaAuth{Admin: true}); err == nil {
+					t.Fatal("contradictory modifier claim was accepted")
+				}
+			}
 		})
 	}
 }
@@ -439,6 +454,9 @@ func TestReplicationRecoveryKeepsMasterWALAfterSurrender(t *testing.T) {
 	}
 	if r.directory.Records[r.resourceKey(resource)].Owner != r.id {
 		t.Fatal("old slave I copy replaced the master's newer committed data")
+	}
+	if _, err := r.recoverPeer(context.Background(), source, replicaRequest{Boot: r.peersBoot[source], Resources: []replicaRecord{report}}, replicaAuth{Databases: map[string]bool{resource.Database: true}}); err != nil {
+		t.Fatal("second user could not recover the master's committed generation", err)
 	}
 	old := replication.Swap(r)
 	defer replication.Store(old)
