@@ -84235,18 +84235,6 @@ func flattenConsList(v []Scmer) ([]Scmer, bool) {
 	if len(v) != 3 {
 		return nil, false
 	}
-	tail := v[2]
-	if tail.GetTag() != tagSlice && !tail.IsSourceInfo() {
-		return nil, false
-	}
-	if stripped, ok := scmerStripSourceInfo(tail); ok {
-		tail = stripped
-	}
-	tailExpr, ok := scmerSlice(tail)
-	if !ok || len(tailExpr) != 3 || !scmerIsSymbol(tailExpr[0], "cons") {
-		return nil, false
-	}
-
 	headCount := 0
 	tailCount := 0
 	current := v
@@ -84305,9 +84293,15 @@ func flattenConsList(v []Scmer) ([]Scmer, bool) {
 //
 //	(cons head (map list fn)) → (cons_map head list fn)
 //	(cons head (list a b c))  → (list head a b c)
+//	(cons head (quote ()))   → (list head)
+//
+// The same constructor path handles a single cons and longer chains before
+// child optimization can turn their list tails into stack-list expressions.
+// This is an SCM rewrite: interpreted execution and the existing list JIT
+// emitter both consume the result; dynamic or effectful tails stay evaluated.
 func optimizeCons(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	if flattened, ok := flattenConsList(v); ok {
-		return oc.ApplyDefaultOptimization(flattened, useResult)
+		return optimizeListCall(flattened, oc, useResult)
 	}
 	call := oc.applyDefaultOptimizationWithTypes(v, useResult, "")
 	result, td, argumentTypes := call.code, call.typeInfo, call.argumentTypes
