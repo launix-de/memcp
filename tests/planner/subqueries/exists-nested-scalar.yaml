@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # EXISTS subselect where the inner scalar subselect references a column
 # from the EXISTS table via (outer alias.col). The EXISTS scan must
 # include that column in its filtercols.
@@ -67,6 +69,31 @@ test_cases:
       data:
         - ID: 3
           title: "No Team"
+
+  - name: "Projected UNION EXISTS retains its branch scalar scope"
+    sql: |
+      SELECT i.ID, EXISTS (
+        SELECT t.ID FROM ens_team t WHERE t.list_id = i.team_id
+        UNION ALL
+        SELECT t2.ID FROM ens_team t2 WHERE t2.list_id = i.team_id
+          AND (SELECT u.ID FROM ens_users u WHERE u.ID = t2.member) = 1
+      ) AS allowed FROM ens_items i ORDER BY i.ID
+    expect:
+      rows: 3
+      data:
+        - {ID: 1, allowed: true}
+        - {ID: 2, allowed: true}
+        - {ID: 3, allowed: false}
+
+  - name: "Projected UNION EXISTS rejects an unknown scalar qualifier"
+    sql: |
+      SELECT EXISTS (
+        SELECT t.ID FROM ens_team t WHERE t.list_id = i.team_id
+        UNION ALL
+        SELECT t2.ID FROM ens_team t2 WHERE t2.list_id = i.team_id
+          AND (SELECT u.ID FROM ens_users u WHERE u.ID = missing.member) = 1
+      ) AS allowed FROM ens_items i
+    expect: {error: true}
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ens_items"

@@ -511,6 +511,12 @@ operand contract. Unknown registered reducers retain an explicit any contract. *
 
 (define sql_expr_info (lambda (sources expr)
 	(match expr
+		/* Relational predicates own a BOOLEAN result. Their query is a lexical
+		relation, not a scalar argument list in the enclosing source scope. */
+		((symbol inner_select_exists) _query) (sql_info expr "BOOLEAN" nil)
+		((quote inner_select_exists) _query) (sql_info expr "BOOLEAN" nil)
+		((symbol inner_select_in) _probe _query) (sql_info expr "BOOLEAN" nil)
+		((quote inner_select_in) _probe _query) (sql_info expr "BOOLEAN" nil)
 		((symbol inner_select) query) (begin
 			/* Only metadata is read here. The original scalar query stays in the
 			logical AST for the common decorrelator and its cardinality checks. */
