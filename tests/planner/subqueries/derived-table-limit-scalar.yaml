@@ -597,16 +597,17 @@ test_cases:
           "ok"
           (error "stage graph rewrite mixed root identity with reference rebinding")))
 
-  - name: "Single aggregate stage output uses its canonical column"
+  - name: "Single aggregate producer propagates its changed output identity"
     scm: |
       (begin
-        (define y66_interface_ag (list true (quote max) false))
+        (define y66_interface_ag (list (list (quote and) true false) (quote max) false))
         (define y66_interface_target (make_group_stage
           "interface-target"
           (list "target-row" "memcp-tests" "dtl_join_ref" false nil)
           '() '(1) (list y66_interface_ag) nil '() '() nil nil '()))
         (define y66_interface_consumer_ag (list
-          (list (quote get_column) "target-output" false "agg_stale" false)
+          (list (quote get_column) "target-output" false
+            (aggregate_col_name_using (gs_input y66_interface_target) y66_interface_ag) false)
           (quote max)
           false))
         (define y66_interface_consumer (make_group_stage
@@ -617,12 +618,16 @@ test_cases:
               (make_stage_output_relation "interface-target") true true))
             '() true nil nil nil nil nil '() '() '())
           '() '(1) (list y66_interface_consumer_ag) nil '() '() nil nil '()))
-        (define y66_interface_stages (canonicalize_stage_output_stages
-          (list y66_interface_target y66_interface_consumer)))
+        (define y66_interface_root (make_query_block "memcp-tests" '() '()
+          true nil nil nil nil nil '()
+          (list y66_interface_target y66_interface_consumer) '()))
+        (define y66_interface_stages (ir_stages (fold_boolean_tautologies_ir
+          (make_ir (quote select) y66_interface_root
+            (qb_stages y66_interface_root) nil (quote rows)))))
         (define y66_interface_ref (car (car (gs_aggregates
           (stage_by_id y66_interface_stages "interface-consumer")))))
         (if (equal? (nth y66_interface_ref 3)
-          (aggregate_col_name_using (gs_input y66_interface_target) y66_interface_ag))
+          (aggregate_col_name_using (gs_input y66_interface_target) (list false (quote max) false)))
           "ok"
           (error "single aggregate stage output kept a stale column")))
 
@@ -647,7 +652,7 @@ test_cases:
             (list (quote get_column) "target-output" false "agg_unknown" false)
             (quote max)
             false)) nil '() '() nil nil '()))
-        (define y66_ambiguous_stages (canonicalize_stage_output_stages
+        (define y66_ambiguous_stages (normalize_stage_dependencies_stages
           (list y66_ambiguous_target y66_ambiguous_consumer)))
         (define y66_ambiguous_ref (car (car (gs_aggregates
           (stage_by_id y66_ambiguous_stages "ambiguous-consumer")))))
