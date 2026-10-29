@@ -5927,7 +5927,7 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 			(define bound (bind_query_expr scopes expression path all_strings))
 			(define info (sql_compile_column_info (map (merge scopes) binding_entry_source) compiler bound))
 			(if (expression_equal? info (sql_expr_info (map (merge scopes) binding_entry_source) bound)) bound
-				(list (quote sql_type_expr) (sql_info_formula info) (sql_info_type info) (sql_info_collation info))))
+				(list (quote sql_type_expr) (sql_info_formula info) (sql_info_datatype info) (sql_info_collation info))))
 		(cons (symbol sql_compile_expr) (cons compiler arguments)) (begin
 			/* Freeze frontend contracts in their producing SQL scope before
 			derived/group rewrites move expressions to different source scopes.
@@ -5944,7 +5944,7 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 						'(_ "BOOLEAN" "fixed") true _ false)
 					_ false))
 				formula
-				(list (quote sql_type_expr) formula (sql_info_type info) (sql_info_collation info))))
+				(list (quote sql_type_expr) formula (sql_info_datatype info) (sql_info_collation info))))
 		((symbol inner_select) subquery)
 		(list (quote inner_select) (bind_query_names_at subquery scopes (binding_path path "subquery" 0) all_strings))
 		((quote inner_select) subquery)
@@ -5989,7 +5989,7 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 			(define bound (bind_group_expr scopes fields expression path all_strings))
 			(define info (sql_compile_column_info (map (merge scopes) binding_entry_source) compiler bound))
 			(if (expression_equal? info (sql_expr_info (map (merge scopes) binding_entry_source) bound)) bound
-				(list (quote sql_type_expr) (sql_info_formula info) (sql_info_type info) (sql_info_collation info))))
+				(list (quote sql_type_expr) (sql_info_formula info) (sql_info_datatype info) (sql_info_collation info))))
 		((symbol inner_select) _subquery) (bind_query_expr scopes expr path all_strings)
 		((quote inner_select) _subquery) (bind_query_expr scopes expr path all_strings)
 		((symbol inner_select_exists) _subquery) (bind_query_expr scopes expr path all_strings)
@@ -7369,7 +7369,7 @@ Do not generalize this proof to joins, nullable UNIQUE keys or partial PKs. */
 
 (define untangle_query_term (lambda (query ctx)
 	(begin
-		(define bound_query (bind_query_names query '()))
+		(define bound_query (annotate_sql_outputs (bind_query_names query '())))
 		(define guarded_query (fold_bound_query_truth_guards bound_query))
 		(define root (require_unnested_node "untangle_query" (untangle_query guarded_query ctx)))
 		(define ir (make_ir (if (union_block? root) (quote union) (quote select))

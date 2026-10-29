@@ -489,7 +489,7 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 			(error "message substitution requires a declared integer argument") true)
 		(define conversion_target (if (nil? target) nil (tsql_effective_parameter_contract target)))
 		(define expr (if (has? '("assignment" "message-text" "message-integer") mode)
-			(sql_type_formula '() (tsql_cast_expr (list (quote sql_type_expr) expr (sql_info_type info) (sql_info_collation info))
+			(sql_type_formula '() (tsql_cast_expr (list (quote sql_type_expr) expr (sql_info_datatype info) (sql_info_collation info))
 				(car conversion_target) (cdr conversion_target))) expr))
 		(sql_queryplan_compile_formula tx (sql_queryplan_bind_tx_calls
 			(sql_queryplan_bind_execution_session (sql_type_lower_annotations expr))))))))))
