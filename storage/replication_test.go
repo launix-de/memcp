@@ -537,7 +537,7 @@ func TestReplicationPeriodicReclaimUsesOrdinaryMosiGrant(t *testing.T) {
 
 func replicaAdmissionFixture(name string) (*replicationManager, *replicaCell, scm.Scmer) {
 	r := &replicationManager{cells: make(map[string]*replicaCell)}
-	c := r.cell(name)
+	c := r.resourceCell(mosiResource{Database: name})
 	database := scm.NewString(name)
 	session := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		if a[0].String() == "schema" {

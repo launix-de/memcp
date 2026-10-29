@@ -86,9 +86,36 @@ func (r *replicationManager) storeConfig(entry replicaConfigEntry) error {
 	return nil
 }
 
-func (r *replicationManager) cell(name string) *replicaCell {
+// CONTRACT: a routing snapshot owns immutable (cell, target) bindings. Every
+// exposed canonical target is registered in that same publication. Native cell
+// identity is initialized before first publication and may advance only after
+// the complete alias snapshot is visible. Discovery and transfer recipes
+// must never consult a later mutable identity
+// through an older map. Publication owns all copying, outside read/row paths.
+type replicaCellBinding struct {
+	cell     *replicaCell
+	resource *mosiResource
+}
+
+// publishCellsLocked runs under r.mu; target overrides only current.
+func (r *replicationManager) publishCellsLocked(current *replicaCell, target *mosiResource) {
+	snapshot := make(map[string]replicaCellBinding, len(r.cells))
+	for name, cell := range r.cells {
+		cell = cell.resolved()
+		resource := cell.resource.Load()
+		if cell == current {
+			resource = target
+		}
+		r.cells[name] = cell
+		snapshot[name] = replicaCellBinding{cell, resource}
+	}
+	r.cellSnapshot.Store(&snapshot)
+}
+
+func (r *replicationManager) resourceCell(resource mosiResource) *replicaCell {
+	name := resource.key()
 	if snapshot := r.cellSnapshot.Load(); snapshot != nil {
-		if c := (*snapshot)[name]; c != nil {
+		if c := (*snapshot)[name].cell; c != nil {
 			return c.resolved()
 		}
 	}
@@ -97,12 +124,9 @@ func (r *replicationManager) cell(name string) *replicaCell {
 	c := r.cells[name]
 	if c == nil {
 		c = &replicaCell{engine: r}
+		c.resource.Store(&resource)
 		r.cells[name] = c
-		snapshot := make(map[string]*replicaCell, len(r.cells))
-		for name, cell := range r.cells {
-			snapshot[name] = cell
-		}
-		r.cellSnapshot.Store(&snapshot)
+		r.publishCellsLocked(nil, nil)
 	}
 	return c
 }
@@ -112,10 +136,8 @@ func (r *replicationManager) cell(name string) *replicaCell {
 // references; old query owners alone retain old shard objects.
 func (r *replicationManager) canonicalResource(resource mosiResource) mosiResource {
 	if snapshot := r.cellSnapshot.Load(); snapshot != nil {
-		if cell := (*snapshot)[resource.key()]; cell != nil {
-			if current := cell.resolved().resource.Load(); current != nil {
-				return *current
-			}
+		if current := (*snapshot)[resource.key()].resource; current != nil {
+			return *current
 		}
 	}
 	return resource
@@ -222,13 +244,8 @@ func (r *replicationManager) forwardResource(from, to mosiResource) {
 		r.backups[to.key()] = backup
 		delete(r.backups, current.key())
 	}
+	r.publishCellsLocked(cell, &to)
 	cell.resource.Store(&to)
-	snapshot := make(map[string]*replicaCell, len(r.cells))
-	for key, value := range r.cells {
-		snapshot[key] = value.resolved()
-		r.cells[key] = snapshot[key]
-	}
-	r.cellSnapshot.Store(&snapshot)
 }
 
 // routes are captured with an outgoing transfer. They name actual old/new UUIDs
@@ -236,15 +253,14 @@ func (r *replicationManager) forwardResource(from, to mosiResource) {
 func (r *replicationManager) shardRoutes(resource mosiResource) []shardForward {
 	var routes []shardForward
 	if snapshot := r.cellSnapshot.Load(); snapshot != nil {
-		for key, cell := range *snapshot {
-			cell = cell.resolved()
-			to := cell.resource.Load()
-			if to == nil || to.Database != resource.Database || to.Shard == "" || key == to.key() {
+		for key, binding := range *snapshot {
+			to := binding.resource
+			if to.Database != resource.Database || to.Shard == "" || key == to.key() {
 				continue
 			}
 			if resource.Shard != "" {
-				bound := (*snapshot)[resource.key()]
-				if bound == nil || cell != bound.resolved() {
+				bound := (*snapshot)[resource.key()].cell
+				if bound == nil || binding.cell.resolved() != bound.resolved() {
 					continue
 				}
 			}
@@ -320,7 +336,7 @@ func (r *replicationManager) shardResource(shard *storageShard) mosiResource {
 }
 func (r *replicationManager) lookupCell(resource mosiResource) *replicaCell {
 	if snapshot := r.cellSnapshot.Load(); snapshot != nil {
-		if cell := (*snapshot)[resource.key()]; cell != nil {
+		if cell := (*snapshot)[resource.key()].cell; cell != nil {
 			return cell.resolved()
 		}
 	}

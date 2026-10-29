@@ -83,15 +83,6 @@ func (step *replicaStep) matches(source string, packet mosiPacket) bool {
 
 func (step *replicaStep) finish(err error) { step.once.Do(func() { step.err = err; close(step.done) }) }
 
-func (r *replicationManager) resourceCell(resource mosiResource) *replicaCell {
-	c := r.cell(resource.key())
-	if c.resource.Load() == nil {
-		publication := resource
-		c.resource.CompareAndSwap(nil, &publication)
-	}
-	return c
-}
-
 // publishLocal changes only execution permission. In particular, handing M to
 // an attached slave leaves the master's outward clusterstate unchanged. The
 // wire adapter must explicitly publish an outer revocation AFTER this call.
@@ -563,15 +554,12 @@ func (r *replicationManager) startImport(packet mosiPacket) (*replicaImport, err
 	r.mu.Lock()
 	known := packet.Resource.Shard != "" && packet.Content != "" && (r.directory.Records[r.resourceKey(packet.Resource)].Content == packet.Content || r.backups[r.resourceKey(packet.Resource)].Content == packet.Content)
 	r.mu.Unlock()
-	if snapshot := r.cellSnapshot.Load(); !known && packet.Resource.Shard != "" && snapshot != nil {
-		cell := (*snapshot)[packet.Resource.key()]
-		if cell != nil {
-			if history := cell.resolved().retiredShards.Load(); history != nil {
-				for _, entry := range *history {
-					if shard := entry.Value(); shard != nil && shard.uuid.String() == packet.Content {
-						known = true
-						break
-					}
+	if cell := r.lookupCell(packet.Resource); !known && packet.Resource.Shard != "" && cell != nil {
+		if history := cell.retiredShards.Load(); history != nil {
+			for _, entry := range *history {
+				if shard := entry.Value(); shard != nil && shard.uuid.String() == packet.Content {
+					known = true
+					break
 				}
 			}
 		}

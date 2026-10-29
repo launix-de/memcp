@@ -180,7 +180,7 @@ func (r *replicationManager) retire(id string) error {
 	// placements even when this peer is no longer present in their reader set.
 	// Leaving such a marker behind makes restart demand an already-retired peer.
 	r.mu.Lock()
-	names := make([]string, 0)
+	resources := make([]mosiResource, 0)
 	for name, record := range r.directory.Records {
 		exclusiveBackup := record.Owner == r.id && (record.State == "M" || record.State == "O") && r.backups[name].Content != ""
 		for reader := range record.Readers {
@@ -189,12 +189,12 @@ func (r *replicationManager) retire(id string) error {
 			}
 		}
 		if record.Owner == id || record.Readers[id] || exclusiveBackup {
-			names = append(names, name)
+			resources = append(resources, record.Resource)
 		}
 	}
 	r.mu.Unlock()
-	for _, name := range names {
-		c := r.cell(name)
+	for _, resource := range resources {
+		c := r.resourceCell(resource)
 		c.directory.Lock()
 		handover, err := c.ownstate.BeginHandover(context.Background(), c.drainWrites)
 		if err != nil {
@@ -202,7 +202,7 @@ func (r *replicationManager) retire(id string) error {
 			return err
 		}
 		r.mu.Lock()
-		record := r.directory.Records[name]
+		record := r.directory.Records[r.resourceKey(resource)]
 		r.mu.Unlock()
 		if record.Owner == id {
 			if err := r.restoreBackup(record); err != nil {
