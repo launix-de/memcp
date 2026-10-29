@@ -145,8 +145,10 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 		// Schema loading may retain predecessor files while data is in flight.
 		// Update its table name without reverting an already forwarded UUID.
 		publication := *c.resource.Load()
-		publication.Table = resource.Table
-		c.resource.Store(&publication)
+		if publication.Table != resource.Table {
+			publication.Table = resource.Table
+			r.publishCellsLocked(c, &publication)
+		}
 		if record.Owner != "" {
 			changed := record.Resource != resource
 			record.Resource = resource

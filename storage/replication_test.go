@@ -1360,6 +1360,20 @@ func TestReplicationSchemaDeclarationDoesNotUndoForwarding(t *testing.T) {
 	if *cell.resource.Load() != to || r.resourceCell(from) != r.resourceCell(to) {
 		t.Fatal("schema loading reverted an existing UUID route")
 	}
+	captured := r.cellSnapshot.Load()
+	previousName := table.Name
+	defer func() { table.Name = previousName }()
+	table.Name = "renamed_items"
+	r.declareShard(original, r.id, true)
+	renamed := to
+	renamed.Table = table.Name
+	if r.canonicalResource(from) != renamed || r.canonicalResource(to) != renamed ||
+		*cell.resource.Load() != renamed || r.directory.Records[to.key()].Resource != renamed {
+		t.Fatal("schema rename did not publish one canonical successor identity")
+	}
+	if *(*captured)[from.key()].resource != to {
+		t.Fatal("schema rename changed an already captured routing snapshot")
+	}
 }
 
 func TestReplicationCheckpointRoutesBeforeActivePublication(t *testing.T) {
