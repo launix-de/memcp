@@ -7078,7 +7078,7 @@ initialization and eviction ownership. Dimensions describe keys, never owners. *
 		The callback is stateless and retains no request or normalized bindings. */
 		(createcolumn (table (group_cache_schema cache) false (group_cache_relation cache) false)
 			payload "any" '() (list "temp" true "dependencies" sources
-				"filtercols" '() "filter" (lambda () false)) '() (lambda () nil))
+				"filtercols" '() "filter" (lambda () false)) '() (lambda () nil) tx)
 		true)))
 
 (define group_cache_cell_access (lambda (names)
@@ -7919,8 +7919,7 @@ every group row and its canonical identity stays independent of bound values. */
 				(list (quote lambda)
 					(map key_names (lambda (col) (symbol col)))
 					aggregate_value_expr))
-				(if (qassoc_get (gs_facts stage) (quote query_cache_lease) false)
-					(list (physical_query_tx_symbol)) '()))))))))
+				(list (physical_query_tx_symbol)))))))))
 
 (define direct_group_aggregate_read_expr (lambda (ag)
 	(begin
