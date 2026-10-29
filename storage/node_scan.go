@@ -83,7 +83,7 @@ func readScanAuth(conn *websocket.Conn, method string, output any) error {
 	if kind != websocket.BinaryMessage {
 		return fmt.Errorf("binary node authentication required")
 	}
-	if profile := newClusterReceiveIO(); profile != nil {
+	if profile := activeClusterReceiveIO(); profile != nil {
 		profile.stats.operations.Add(1)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

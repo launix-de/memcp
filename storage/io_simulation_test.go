@@ -58,6 +58,26 @@ func TestIOSimulationSharesBackendBandwidthAcrossStreams(t *testing.T) {
 	}
 }
 
+func TestClusterReceiveConnectionsShareNodeBandwidth(t *testing.T) {
+	profile, _ := newIOSimulation(8, 0, new(ioCounters))
+	previous := clusterReceiveProfile.Swap(profile)
+	defer clusterReceiveProfile.Store(previous)
+	first, second := activeClusterReceiveIO(), activeClusterReceiveIO()
+	start := time.Now()
+	var workers sync.WaitGroup
+	for _, connection := range []*ioSimulation{first, second} {
+		workers.Add(1)
+		go func(connection *ioSimulation) {
+			defer workers.Done()
+			connection.transfer(context.Background(), 60000, start)
+		}(connection)
+	}
+	workers.Wait()
+	if time.Since(start) < 115*time.Millisecond {
+		t.Fatal("adding a peer multiplied the simulated node's ingress bandwidth")
+	}
+}
+
 func TestClusterReceiveThrottlesMessagesAndJoinsCancellation(t *testing.T) {
 	profile, _ := newIOSimulation(1, 40, new(ioCounters))
 	previous := clusterReceiveProfile.Swap(profile)

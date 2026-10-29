@@ -2286,7 +2286,7 @@ def main():
     parser.add_argument("--cluster-only", action="store_true", help="run focused shared-storage cluster placement scenario")
     parser.add_argument("--fixture-binary", type=Path, help="optional same-commit builder for immutable cluster fixture")
     parser.add_argument("--cluster-bandwidth-mbps", type=float, default=None,
-                        help="receiver bandwidth per /cluster connection, decimal Mbit/s; unset: YAML value or fullspeed; 0: unlimited")
+                        help="aggregate /cluster receive bandwidth per node, decimal Mbit/s; unset: YAML value or fullspeed; 0: unlimited")
     parser.add_argument("--cluster-latency-ms", type=float, default=None,
                         help="one-way /cluster dispatch latency; unset: YAML value or zero")
     parser.add_argument("--storage-backend", choices=("filesystem", "FakeRemote"), default=None)

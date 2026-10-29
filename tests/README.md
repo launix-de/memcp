@@ -523,9 +523,8 @@ WebSocket protocol is instrumented, including authentication frames. SQL/SCM
 HTTP, local scans and sending are not delayed. Every application frame is
 charged for its actual encoded MOSI envelope and payload bytes. Before reading
 the next message header, the receiver sleeps only for the transmission time
-not already covered by receiving, decoding and dispatch work. Each connection
-has its own bandwidth budget; this is not an aggregate node-NIC or packet-loss
-simulator. WebSocket/TCP/TLS overhead and keepalive control frames are not counted.
+not already covered by receiving, decoding and dispatch work. All connections share the receiving node's bandwidth budget, so adding peers
+does not multiply its simulated NIC rate. This is not a packet-loss simulator. WebSocket/TCP/TLS overhead and keepalive control frames are not counted.
 
 Propagation latency is waited in dispatch workers, so independent messages can
 remain in flight concurrently. Resource/schema ordering remains intact. Pending

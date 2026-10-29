@@ -67,6 +67,10 @@ func (s *ioSimulation) wait(ctx context.Context, deadline time.Time) bool {
 // Actual filesystem/encoding time counts toward the reserved transmission time.
 func (s *ioSimulation) transfer(ctx context.Context, size int, started time.Time) bool {
 	s.stats.bytes.Add(uint64(size))
+	return s.pace(ctx, size, started)
+}
+
+func (s *ioSimulation) pace(ctx context.Context, size int, started time.Time) bool {
 	if size == 0 || s.bytesPerSecond == 0 {
 		return true
 	}
@@ -89,15 +93,12 @@ func (s *ioSimulation) request() {
 
 var clusterReceiveProfile atomic.Pointer[ioSimulation]
 
-func newClusterReceiveIO() *ioSimulation {
-	if profile := clusterReceiveProfile.Load(); profile != nil {
-		return &ioSimulation{latency: profile.latency, bytesPerSecond: profile.bytesPerSecond, stats: profile.stats}
-	}
-	return nil
+func activeClusterReceiveIO() *ioSimulation {
+	return clusterReceiveProfile.Load()
 }
 
-// ConfigureClusterIO is startup-only. Every connection borrows immutable limits,
-// but owns its own rate accounting. Zero limits leave transport at full speed.
+// ConfigureClusterIO is startup-only. Connections borrow immutable limits and
+// share this node's ingress budget. Zero limits leave transport at full speed.
 func ConfigureClusterIO(mbps, latencyMS float64) error {
 	profile, err := newIOSimulation(mbps, latencyMS, &clusterReceiveCounters)
 	if err == nil {

@@ -1349,7 +1349,7 @@ func main() {
 	replicationAddress := ""
 	flag.StringVar(&replicationAddress, "replication", "", "Replication listen on HTTP API, dedicated PORT, or upstream HTTP(S)/WS(S) URL or HOST:PORT")
 	var clusterBandwidthMbps, clusterLatencyMS float64
-	flag.Float64Var(&clusterBandwidthMbps, "cluster-bandwidth-mbps", 0, "Receive bandwidth per /cluster connection in decimal Mbit/s; 0 is unlimited")
+	flag.Float64Var(&clusterBandwidthMbps, "cluster-bandwidth-mbps", 0, "Aggregate /cluster receive bandwidth per node in decimal Mbit/s; 0 is unlimited")
 	flag.Float64Var(&clusterLatencyMS, "cluster-latency-ms", 0, "One-way /cluster message dispatch latency in milliseconds; 0 disables")
 
 	profile := ""

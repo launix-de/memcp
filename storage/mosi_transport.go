@@ -72,7 +72,7 @@ func registerMosiRole(role string, handler http.Handler) (func(), error) {
 // Neither RPC handlers nor storage I/O run under its mutex.
 // A disconnected peer fails every outstanding call; no write is retried here.
 type mosiPeer struct {
-	receiveIO *ioSimulation // receiver-only instrumentation
+	receiveIO *ioSimulation // shared node ingress budget; receiver-only instrumentation
 
 	operationPrefix string            // immutable authenticated connection binding for query operations
 	recoveryDone    chan struct{}     // replication hello installed; nil for roles without recovery
@@ -128,7 +128,7 @@ func (e mosiRemoteError) Error() string { return string(e) }
 
 func newMosiPeer(conn *websocket.Conn, handle func(context.Context, string, json.RawMessage) (any, error), packet func(*mosiPacket) error, initialize ...func(*mosiPeer)) *mosiPeer {
 	p := &mosiPeer{conn: conn, pending: make(map[uint64]chan mosiMessage), done: make(chan struct{}), handle: handle, packet: packet, outgoing: make(chan mosiMessage, 8), writeDone: make(chan struct{})}
-	p.receiveIO = newClusterReceiveIO()
+	p.receiveIO = activeClusterReceiveIO()
 	p.readDone = make(chan struct{})
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	conn.SetReadLimit(mosiMaxMessageBytes)
@@ -268,7 +268,7 @@ func (p *mosiPeer) read() {
 	for {
 		// Finish the prior message's byte budget before consuming the next header.
 		// Decode/dispatch time already elapsed is credited; idle time grants no burst.
-		if p.receiveIO != nil && !previousStart.IsZero() && !p.receiveIO.transfer(p.ctx, previousBytes, previousStart) {
+		if p.receiveIO != nil && !previousStart.IsZero() && !p.receiveIO.pace(p.ctx, previousBytes, previousStart) {
 			return
 		}
 		if p.receiveIO != nil {
@@ -282,6 +282,7 @@ func (p *mosiPeer) read() {
 		var readyAt time.Time
 		if p.receiveIO != nil {
 			p.receiveIO.stats.operations.Add(1)
+			p.receiveIO.stats.bytes.Add(uint64(len(frame)))
 			readyAt = time.Now().Add(p.receiveIO.latency)
 		}
 		m, err := decodeMosiMessage(frame)
