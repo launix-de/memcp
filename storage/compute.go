@@ -281,7 +281,7 @@ func (s *storageShard) ComputeColumn(tx *TxContext, name string, inputCols []str
 	// Cache materialization reads native inputs. Reuse ordinary MOSI/RAM
 	// admission and retain the acquired payload through all callbacks. Filling
 	// a derived cache does not require a data-write permission upgrade.
-	access := s.GetRead(tx)
+	access := s.GetRead(tx, false)
 	defer access.Release()
 	s = access.shard
 	// We are going to mutate this shard's columns: mark shard as WRITE (not COLD)

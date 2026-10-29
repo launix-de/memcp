@@ -15,7 +15,7 @@ func assertInitializedColumn(t *testing.T, tbl *table, column string, value scm.
 	t.Helper()
 	count := 0
 	for _, shard := range tbl.ActiveShards() {
-		release := shard.GetRead(nil)
+		release := shard.GetRead(nil, false)
 		read := shard.ColumnReaderTx(nil, column, false, ReadAuto).GetValue
 		shard.mu.RLock()
 		for i := uint32(0); i < shard.main_count+uint32(len(shard.deltaRows())); i++ {
@@ -433,7 +433,7 @@ func TestAddedNullableFreshColumnKeepsExistingDeltaRows(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "taddednullabledelta", 2)
 	shard := tbl.ActiveShards()[0]
 	row := func() *scm.Scmer {
-		release := shard.GetRead(nil)
+		release := shard.GetRead(nil, false)
 		defer release.Release()
 		shard.mu.RLock()
 		defer shard.mu.RUnlock()
@@ -441,7 +441,7 @@ func TestAddedNullableFreshColumnKeepsExistingDeltaRows(t *testing.T) {
 	}()
 	tbl.CreateColumn("fresh", "INT", nil, nil)
 	func() {
-		release := shard.GetRead(nil)
+		release := shard.GetRead(nil, false)
 		defer release.Release()
 		shard.mu.RLock()
 		defer shard.mu.RUnlock()
@@ -485,7 +485,7 @@ func TestAddedDefaultExpressionSurvivesNilConstantOption(t *testing.T) {
 		scm.NewString("default"), scm.NewNil(),
 	})
 	shard := tbl.ActiveShards()[0]
-	release := shard.GetRead(nil)
+	release := shard.GetRead(nil, false)
 	defer release.Release()
 	read := shard.ColumnReaderTx(nil, "created", false, ReadAuto).GetValue
 	value := func() scm.Scmer {

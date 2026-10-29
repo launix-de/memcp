@@ -55,7 +55,7 @@ type shardOrderInvocation struct {
 
 type remoteScanOrder struct {
 	BatchSize        int               `json:"batch_size"`
-	Columns          []scanWireValue   `json:"columns"`
+	Columns          []schemeValue     `json:"columns"`
 	Directions       []json.RawMessage `json:"directions"`
 	AcceptColumns    []string          `json:"accept_columns,omitempty"`
 	Accept           json.RawMessage   `json:"accept,omitempty"`
@@ -68,7 +68,7 @@ type remoteScanOrder struct {
 func freezeScanOrder(input *shardOrderInvocation, bindings *scm.SerializationContext) (*remoteScanOrder, error) {
 	result := &remoteScanOrder{BatchSize: input.batchSize, AcceptColumns: input.acceptCols, Projected: input.projected, PartitionColumns: input.partitionCols, Offset: input.offset, Limit: input.limit}
 	for _, column := range input.columns {
-		frozen, err := freezeScanValue(column, 0, bindings)
+		frozen, err := freezeScanValue(column, bindings)
 		if err != nil {
 			return nil, err
 		}
@@ -114,7 +114,7 @@ func (wire *remoteScanOrder) bind(decode scm.ProcedureDecode) (*shardOrderInvoca
 	}
 	result := &shardOrderInvocation{batchSize: wire.BatchSize, acceptCols: wire.AcceptColumns, projected: wire.Projected, partitionCols: wire.PartitionColumns, offset: wire.Offset, limit: wire.Limit}
 	for _, column := range wire.Columns {
-		value, err := column.thaw(0, decode)
+		value, err := column.reconstruct(decode)
 		if err != nil {
 			return nil, err
 		}
@@ -126,18 +126,12 @@ func (wire *remoteScanOrder) bind(decode scm.ProcedureDecode) (*shardOrderInvoca
 		if err != nil {
 			return nil, err
 		}
-		if err := validateRemoteScanReadOnly(value); err != nil {
-			return nil, err
-		}
 		directions = append(directions, scm.Apply(value))
 	}
 	result.directions = scanSortDirections(directions)
 	if len(wire.Accept) > 0 {
 		value, err := scm.UnmarshalProcedure(wire.Accept, decode)
 		if err != nil {
-			return nil, err
-		}
-		if err := validateRemoteScanReadOnly(value); err != nil {
 			return nil, err
 		}
 		result.accept = value
@@ -252,7 +246,7 @@ func (run *orderedScanRun) page(start, count, budget int) (scm.Scmer, error) {
 	}
 	for {
 		page := scm.NewSlice(run.rows[start:end])
-		frozen, err := freezeScanValue(page, 0)
+		frozen, err := freezeScanValue(page)
 		if err != nil {
 			return scm.NewNil(), err
 		}
@@ -290,10 +284,7 @@ func init() {
 }
 
 func (response remoteScanResult) ClusterObjectOffers() []scm.ClusterReference {
-	if response.Object == nil {
-		return nil
-	}
-	return []scm.ClusterReference{*response.Object}
+	return scm.SerializedClusterReferences(response.Value)
 }
 
 // One queue owns its bounded receive window. Buffered selected IDs remain valid

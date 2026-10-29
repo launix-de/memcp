@@ -55,7 +55,7 @@ func TestScanDelegationColdSingleAndMixedShards(t *testing.T) {
 			// executor returns only that reduction, never loads the remote stub.
 			var sum int64
 			var count int64
-			lease := remote.GetRead(nil)
+			lease := remote.GetRead(nil, false)
 			reader := remote.ColumnReaderTx(nil, "id", false, ReadAuto)
 			for id := uint32(0); id < remote.main_count; id++ {
 				sum += reader.GetValue(id).Int()

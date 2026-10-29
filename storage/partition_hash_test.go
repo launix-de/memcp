@@ -214,7 +214,7 @@ func TestHashRepartitionConcurrentDeleteSurvivesReload(t *testing.T) {
 	}
 	seen := make(map[int64]bool)
 	for bucket, shard := range reloaded.ActiveShards() {
-		access := shard.GetRead(nil)
+		access := shard.GetRead(nil, false)
 		reader := shard.getColumnStorageOrPanic("id", false, nil)
 		for row := uint32(0); row < shard.main_count; row++ {
 			if shard.deletions.Get(uint(row)) {

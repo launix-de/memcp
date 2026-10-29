@@ -241,14 +241,26 @@ func (r *replicationManager) recoverConnection(peer *mosiPeer, user string, auth
 			r.resourceCell(mosiResource{Database: name}).initialized.Store(true)
 		}
 	}
-	if err := peer.call(ctx, "hello_done", replicaRequest{Boot: r.boot, User: user, Hash: auth.Hash}, nil); err != nil {
-		return err
-	}
-	r.ready.Store(true)
 	if r.recoveredUsers == nil {
 		r.recoveredUsers = make(map[string]*mosiPeer)
 	}
 	r.recoveredUsers[user] = peer
+	r.mu.Lock()
+	completeConnection := true
+	for cachedUser := range r.directory.Users {
+		if r.recoveredUsers[cachedUser] != peer {
+			completeConnection = false
+			break
+		}
+	}
+	r.mu.Unlock()
+	if completeConnection {
+		if err := peer.call(ctx, "hello_done", replicaRequest{Boot: r.boot, User: user, Hash: auth.Hash}, nil); err != nil {
+			delete(r.recoveredUsers, user)
+			return err
+		}
+	}
+	r.ready.Store(true)
 	go func() {
 		names := make(map[string]bool)
 		for _, record := range reply.Resources {
@@ -415,7 +427,11 @@ func (r *replicationManager) mergeRecoveryReport(id string, reported replicaReco
 	}
 	claimed := r.initialClaims[id][resource.key()]
 	restoring := r.restoring[resource.Database]
-	if restoring && reported.State != "" && reported.Epoch >= record.Epoch {
+	// A surrendered IO names the former owner. Resolve its Handoff below using
+	// the recipient's evidence, including when another authenticated scope has
+	// already reported this transfer. It is not a fresh claim by that old owner.
+	surrendered := reported.State == "IO" && reported.Handoff != ""
+	if restoring && !surrendered && reported.State != "" && reported.Epoch >= record.Epoch {
 		phase := mosi.ParsePhase(reported.State)
 		owner := reported.Owner
 		owns := phase == mosi.M || phase == mosi.O

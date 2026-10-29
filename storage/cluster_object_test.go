@@ -116,7 +116,7 @@ func prepareHistoricalObject(t *testing.T, owner *nodeScanService, peer *mosiPee
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := makeRemoteScanTask(t, remoteScanShard{Schema: table.filterSchemaFingerprint(), Resource: mosiResource{Database: table.schema.Name, Table: table.Name, Shard: old.uuid.String()}, Horizon: old.captureScanHorizon()})
+	task := makeRemoteScanTask(t, remoteScanShard{Schema: table.filterSchemaFingerprint(), Resource: mosiResource{Database: table.schema.Name, Table: table.Name, Shard: old.uuid.String()}})
 	return ref, weak.Make(old), task
 }
 
@@ -150,7 +150,7 @@ func TestClusterObjectHistoricalScanRebuildAndPeerGC(t *testing.T) {
 	if err := client.control(context.Background(), peer, "scan.execute", task, &reduced); err != nil {
 		t.Fatal(err)
 	}
-	value, err := decodeScanData(reduced.Value, false)
+	value, err := schemeValue(reduced.Value).reconstruct()
 	if err != nil || value.Int() != 9 {
 		t.Fatal("old-generation statistics changed", value, err)
 	}
@@ -231,7 +231,7 @@ func TestClusterPacketDispatchDoesNotBlockReaderAndKeepsTransferOrder(t *testing
 		t.Fatal("blocked transfer prevented unrelated message execution")
 	}
 	close(resume)
-	p.workers.Wait()
+	p.packets.Wait()
 	mu.Lock()
 	defer mu.Unlock()
 	if fmt.Sprint(order) != "[grant begin end]" {
@@ -460,7 +460,7 @@ func TestClusterPacketSchemaPublicationPrecedesDependentShard(t *testing.T) {
 	default:
 	}
 	close(resume)
-	p.workers.Wait()
+	p.packets.Wait()
 	select {
 	case <-data:
 	default:
@@ -480,8 +480,10 @@ func TestClusterObjectAbandonedCompletionDiscardsOffers(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := uuid.NewString()
-	channel := &scanReturnChannel{peer: peer, result: make(chan scanCompletion, 1)}
-	client.returns.Store(id, channel)
+	results := make(chan scanCompletion, 1)
+	receiver := newClusterReceiver(1, func(_ context.Context, v scm.Scmer) error { results <- v.Any().(scanCompletion); return nil })
+	receiver.Seal()
+	client.returns.Store(id, &receiverRoute{peer, receiver})
 	defer client.returns.Delete(id)
 	completion, _ := json.Marshal(scanCompletion{Return: id, Offers: []scm.ClusterReference{ref}})
 	s := &scanRPCSession{service: client, peer: peer}
@@ -489,13 +491,15 @@ func TestClusterObjectAbandonedCompletionDiscardsOffers(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Cancellation after delivery but before collection must release the offer.
-	channel.close(client)
+	receiver.Close()
+	abandoned := <-results
+	client.discardObjectOffers(peer, abandoned.Offers)
 	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
 	// A late duplicate is harmless and cannot repopulate a closed collector.
 	if _, err := s.channelMessage(context.Background(), "scan.result", completion); err != nil {
 		t.Fatal(err)
 	}
-	if len(channel.result) != 0 {
+	if len(results) != 0 {
 		t.Fatal("late completion was delivered to a closed collector")
 	}
 }
@@ -602,7 +606,7 @@ func TestClusterDiscoveryRefreshesRoutingAfterConcurrentHandover(t *testing.T) {
 	if !ok {
 		t.Fatal("missing discovery return collector")
 	}
-	entry.(*scanReturnChannel).result <- scanCompletion{Return: request.Return, Data: data}
+	deliverTestCompletion(t, entry, scanCompletion{Return: request.Return, Data: data})
 	reply := <-finished
 	if reply.err != nil || reply.owner != remote.ID || cell.ownstate.Phase() != mosi.IO {
 		t.Fatal("live handover became a recovery failure or regained rights", reply, cell.ownstate.Phase())
@@ -688,11 +692,11 @@ func (*portableClusterTestValue) HandleClusterRequest(context.Context, scm.Clust
 	return nil, fmt.Errorf("portable value has no remote owner")
 }
 func TestClusterObjectWireUsesMandatorySerializer(t *testing.T) {
-	encoded, err := freezeScanValue(scm.NewAny(&portableClusterTestValue{}), 0, &scm.SerializationContext{})
+	encoded, err := freezeScanValue(scm.NewAny(&portableClusterTestValue{}), &scm.SerializationContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := encoded.thaw(0, scm.ProcedureDecode{})
+	decoded, err := encoded.reconstruct(scm.ProcedureDecode{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -802,31 +806,13 @@ func TestClusterObjectPendingTransferSurvivesPriorLeaseRelease(t *testing.T) {
 	}
 }
 
-// Model the valid cancellation window in which Done is closed but an AfterFunc
-// callback has not started yet. Stopping the hook must not lose remote cancel.
-type delayedClusterCancelContext struct {
-	context.Context
-	done       chan struct{}
-	registered chan struct{}
-}
-
-func (c *delayedClusterCancelContext) Done() <-chan struct{} { return c.done }
-func (c *delayedClusterCancelContext) Err() error {
-	select {
-	case <-c.done:
-		return context.Canceled
-	default:
-		return nil
-	}
-}
-func (c *delayedClusterCancelContext) AfterFunc(func()) func() bool {
-	close(c.registered)
-	return func() bool { return true } // scheduler has not started the hook
-}
-func TestClusterCancellationQueuesMessageBeforeStoppingDeferredHook(t *testing.T) {
+// Once dispatch is accepted, cancellation must be enqueued before the
+// collector returns, including when cancellation wins its first select.
+func TestClusterCancellationQueuesMessageBeforeCollectorReturns(t *testing.T) {
 	for _, control := range []bool{true, false} {
 		t.Run(fmt.Sprint("control=", control), func(t *testing.T) {
-			ctx := &delayedClusterCancelContext{context.Background(), make(chan struct{}), make(chan struct{})}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			service := &nodeScanService{}
 			peer := &mosiPeer{scanService: service, done: make(chan struct{}), outgoing: make(chan mosiMessage, 4)}
 			finished := make(chan any, 1)
@@ -846,8 +832,7 @@ func TestClusterCancellationQueuesMessageBeforeStoppingDeferredHook(t *testing.T
 			if err := json.Unmarshal(request.Data, &envelope); err != nil {
 				t.Fatal(err)
 			}
-			<-ctx.registered
-			close(ctx.done)
+			cancel()
 			select {
 			case result := <-finished:
 				if result != context.Canceled {
@@ -863,7 +848,7 @@ func TestClusterCancellationQueuesMessageBeforeStoppingDeferredHook(t *testing.T
 					t.Fatal("wrong remote cancellation", message)
 				}
 			default:
-				t.Fatal("Done won select and deferred stop suppressed the remote cancellation")
+				t.Fatal("collector returned before enqueueing remote cancellation")
 			}
 		})
 	}
@@ -909,7 +894,7 @@ func TestClusterObjectReleaseRetriesWithoutAnotherGCOrReconnect(t *testing.T) {
 			if attempt == 0 {
 				completion.Panic = &scanPanic{Message: "temporary connection failure"}
 			}
-			entry.(*scanReturnChannel).result <- completion
+			deliverTestCompletion(t, entry, completion)
 		case <-time.After(3 * time.Second):
 			t.Fatal("release was not retried without another GC or reconnect", attempt)
 		}
@@ -973,4 +958,49 @@ func TestClusterObjectOrderedRunRetainsHistoricalGeneration(t *testing.T) {
 	}
 	owner.cancelObjectOffers(peer, []scm.ClusterReference{ref})
 	waitObjectGC(t, func() bool { return !historicalObjectAlive(old) })
+}
+
+func TestClusterObjectDictionaryCallbacksPrepareCompleteSessionView(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	session := scm.NewSession()
+	scm.Apply(session, scm.NewString("a"), scm.NewInt(7))
+	scm.Apply(session, scm.NewString("b"), scm.NewInt(8))
+	env := &scm.Env{Vars: scm.Vars{scm.Symbol("session"): session}, Outer: &scm.Globalenv}
+	var offers []scm.ClusterReference
+	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		ref, err := owner.exportObject(source, object, view)
+		if err == nil {
+			offers = append(offers, ref)
+		}
+		return ref, err
+	})
+	defer func() { owner.cancelObjectOffers(source, offers) }()
+	// An earlier callback demanded only a; the data dictionary also contains an
+	// alias of the session and a callback demanding b, before any receiver row.
+	first := scm.Eval(scm.Read(t.Name(), `(lambda () (session "a"))`), env)
+	if _, err := scm.MarshalProcedure(first, bindings); err != nil {
+		t.Fatal(err)
+	}
+	dict := scm.NewFastDictValue(64)
+	dict.Set(scm.NewString("session"), session, nil)
+	dict.Set(scm.NewString("callback"), scm.Eval(scm.Read(t.Name(), `(lambda () (session "b"))`), env), nil)
+	for i := 0; i < 64; i++ {
+		dict.Set(scm.NewInt(int64(i)), scm.NewNil(), nil)
+	}
+	data, err := freezeScanValue(scm.NewFastDict(dict), bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := data.reconstruct(scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+		return client.importObject(context.Background(), peer, ref)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback, ok := restored.FastDict().Get(scm.NewString("callback"))
+	if !ok || scm.Apply(callback).Int() != 8 {
+		t.Fatal("nested callback lost its session binding", callback)
+	}
 }

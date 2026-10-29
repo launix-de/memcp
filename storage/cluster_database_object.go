@@ -44,7 +44,7 @@ func (database *database) HandleClusterRequest(ctx context.Context, call scm.Clu
 				mu.Unlock()
 				return
 			}
-			part := remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: mosiResource{Database: db.Name, Table: tbl.Name, Shard: shard.uuid.String()}, Horizon: shard.captureScanHorizon()}
+			part := remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: mosiResource{Database: db.Name, Table: tbl.Name, Shard: shard.uuid.String()}}
 			// Native GetRead is already complete. Register under cold persistence
 			// ownership only now; never hold it while acquiring remote MOSI rights.
 			db.persistenceLifecycle.RLock()

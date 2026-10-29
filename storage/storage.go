@@ -1231,7 +1231,7 @@ func Init(en scm.Env) {
 					continue
 				}
 				estimate := func() filteredRowEstimate {
-					release := shard.GetRead(currentTx)
+					release := shard.GetRead(currentTx, false)
 					shard = release.shard
 					defer release.Release()
 					return shard.EstimateFilteredRows(conditionCols, condition, limit, currentTx, accessSchema, accessValues)

@@ -409,7 +409,7 @@ func reloadTableFromPersistence(t *testing.T, name string, persistence Persisten
 		t.Fatalf("reloaded database %s has no items table", name)
 	}
 	for _, shard := range tbl.ActiveShards() {
-		release := shard.GetRead(nil)
+		release := shard.GetRead(nil, false)
 		release.Release()
 	}
 	return tbl
@@ -2189,7 +2189,7 @@ func TestRepartitionInheritsWeightedIndexesFromEverySource(t *testing.T) {
 	}
 	tbl.repartition([]shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(64)}}})
 	for _, shard := range tbl.ActiveShards() {
-		release := shard.GetRead(nil)
+		release := shard.GetRead(nil, false)
 		func() {
 			defer release.Release()
 			shard.mu.RLock()
@@ -2266,7 +2266,7 @@ func TestRepartitionIndexWarmBudgetAndThreshold(t *testing.T) {
 				definitions = append(definitions, index)
 			}
 			rebuildRepartitionIndexes(definitions, shard)
-			release := shard.GetRead(nil)
+			release := shard.GetRead(nil, false)
 			defer release.Release()
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
@@ -2892,11 +2892,11 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 				t.Fatal(result)
 			}
 			shard := tbl.ActiveShards()[0]
-			release := shard.GetRead(nil)
+			release := shard.GetRead(nil, false)
 			defer func() {
 				release.Release()
 			}()
-			secondRelease := shard.GetRead(nil)
+			secondRelease := shard.GetRead(nil, false)
 			secondRelease.Release()
 			access := runtimeScanAccess(analyzedBoundaries{{
 				col: "payload", matcher: EqualMatcher,
@@ -2929,7 +2929,7 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 				t.Fatal("last read release did not make the shard evictable")
 			}
 			if engine == Safe {
-				release = shard.GetRead(nil)
+				release = shard.GetRead(nil, false)
 				shard.ensureScanAccessColumns(access, false, nil)
 				if got := shard.ColumnReaderTx(nil, "payload", false, ReadAuto).GetValue(0).String(); got != "row-00000001" {
 					t.Fatalf("durable value after eviction/reload = %q", got)
@@ -2943,7 +2943,7 @@ func TestNestedShardReadLeaseDoesNotWaitBehindWriter(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
 	RebuildTable(tbl, true, false)
 	shard := tbl.ActiveShards()[0]
-	release := shard.GetRead(nil)
+	release := shard.GetRead(nil, false)
 	defer release.Release()
 	shard.mu.RLock()
 	writerDone := make(chan struct{})
@@ -2964,7 +2964,7 @@ func TestNestedShardReadLeaseDoesNotWaitBehindWriter(t *testing.T) {
 		runtime.Gosched()
 	}
 	nestedDone := make(chan ReadAccess, 1)
-	go func() { nestedDone <- shard.GetRead(nil) }()
+	go func() { nestedDone <- shard.GetRead(nil, false) }()
 	select {
 	case nestedRelease := <-nestedDone:
 		nestedRelease.Release()
@@ -3007,7 +3007,7 @@ func TestNewShardRetainsComputedColumnDefinition(t *testing.T) {
 			// Construction remains private until the reader acquires its rights.
 			shard.deltaColumns["input"] = 0
 			shard.publishDeltaRows([][]scm.Scmer{{scm.NewInt(7)}, {scm.NewInt(11)}})
-			release := shard.GetRead(nil)
+			release := shard.GetRead(nil, false)
 			defer release.Release()
 			reader := shard.ColumnReaderTx(nil, "computed", false, ReadAuto).GetValue
 			shard.mu.RLock()

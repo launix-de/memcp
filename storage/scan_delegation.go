@@ -72,7 +72,7 @@ type shardScanInvocation struct {
 // ExecuteShardScan runs at most once per selected shard in this invocation.
 // Errors and ambiguous network completion propagate; this boundary never retries.
 // The result uses the existing shard-local reduction and coordinator combine
-// contract. A future wire adapter must validate/encode its scalar/group result.
+// contract. The wire adapter serializes that ordinary Scmer result.
 type shardScanExecutor interface {
 	ExecuteShardScan(mosiResource, shardScanInvocation) scanResult
 }
