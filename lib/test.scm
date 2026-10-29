@@ -647,23 +647,42 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(list "total" (cons (quote aggregate) canonical_group_sum))
 			true keys nil '() nil nil '() '() '())))
 	(define canonical_group_forward
-		(make_group_stage_for_block (canonical_group_block canonical_group_pair) canonical_group_source))
+		(make_select_group_stage (canonical_group_block canonical_group_pair) canonical_group_source))
 	(define canonical_group_backward
-		(make_group_stage_for_block (canonical_group_block (reverse canonical_group_pair)) canonical_group_source))
+		(make_select_group_stage (canonical_group_block (reverse canonical_group_pair)) canonical_group_source))
 	(assert (equal? (gs_keys canonical_group_forward) (gs_keys canonical_group_backward)) true
 		"SELECT group producer canonicalizes key tuple positions independently of GROUP BY order")
 	(assert (equal? (group_stage_cache_relation canonical_group_forward)
 		(group_stage_cache_relation canonical_group_backward)) true
 		"reordered SELECT group keys share one physical carrier with the same key positions")
 	(define canonical_group_query_forward
-		(make_group_stage_for_query_block (canonical_group_block canonical_group_pair)))
+		(make_select_group_stage (canonical_group_block canonical_group_pair) (select_group_input (canonical_group_block canonical_group_pair))))
 	(define canonical_group_query_backward
-		(make_group_stage_for_query_block (canonical_group_block (reverse canonical_group_pair))))
+		(make_select_group_stage (canonical_group_block (reverse canonical_group_pair)) (select_group_input (canonical_group_block (reverse canonical_group_pair)))))
 	(assert (equal? (gs_keys canonical_group_query_forward) (gs_keys canonical_group_query_backward)) true
 		"query-input group producer uses the same canonical key tuple contract")
 	(assert (equal? (group_stage_cache_relation canonical_group_query_forward)
 		(group_stage_cache_relation canonical_group_query_backward)) true
 		"query-input grouping reuses its carrier across key permutations")
+	(define scalar_group_ir (untangle_query_term
+		(list "memcp-tests" '() (list "n" (list 'aggregate 1 '+ 0))
+			false nil nil (list (list (list 'aggregate 8 'sql_sum_reduce nil) '<)) nil nil) nil))
+	(define scalar_group_root (ir_root scalar_group_ir))
+	(define scalar_group_owner (select_group_result_stage scalar_group_root))
+	(assert (group_stage? scalar_group_owner) true
+		"untangle_query publishes a complete SELECT group before join optimization")
+	(assert (contains? (gs_aggregates scalar_group_owner) '(8 sql_sum_reduce nil)) true
+		"the logical group owns unprojected ORDER aggregates")
+	(assert (and (not (expr_has_local_aggregates? (qb_fields scalar_group_root)))
+		(not (expr_has_local_aggregates? (qb_order scalar_group_root)))
+		(empty_list? (qb_group scalar_group_root)) (nil? (qb_having scalar_group_root))) true
+		"group consumers use stage outputs rather than aggregate syntax")
+	(assert (and (empty_list? (qb_fields (gs_input scalar_group_owner)))
+		(empty_list? (qb_group (gs_input scalar_group_owner)))
+		(nil? (planner_context_session (gs_facts scalar_group_owner)))
+		(nil? (planner_context_tx (qb_facts (gs_input scalar_group_owner))))
+		(qassoc_get (gs_facts scalar_group_owner) 'preserve_empty_domain false)) true
+		"the group input is a logical row relation with explicit empty-domain semantics")
 	(define rebind_child_ag (list 1 (quote +) 0))
 	(define rebind_child_stage (make_group_stage
 		"rebind-child"

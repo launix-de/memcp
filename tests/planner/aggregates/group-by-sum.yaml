@@ -77,6 +77,84 @@ test_cases:
       rows: 3
       data: [{b: 2, a: null, total: 30}, {b: null, a: 1, total: 30}, {b: 1, a: 2, total: 25}]
 
+  - name: "An aggregate used only for ordering still owns one global group"
+    sql: "SELECT 7 AS marker FROM tbl ORDER BY SUM(b)"
+    expect: {rows: 1, data: [{marker: 7}]}
+
+  - name: "An unprojected order aggregate does not change group cardinality"
+    sql: "SELECT a FROM tbl GROUP BY a ORDER BY SUM(b) DESC"
+    expect: {rows: 3, data: [{a: 1}, {a: 3}, {a: 2}]}
+
+  - name: "AVG recipes agree between projection and HAVING after boolean folding"
+    sql: "SELECT grp,AVG(value) AS mean FROM aggregate_identity GROUP BY grp HAVING AVG(value)>5"
+    expect: {rows: 1, data: [{grp: 2, mean: 6}]}
+
+  - name: "A declared scalar group retains fused ordered window counting"
+    sql: "SELECT COUNT(*) AS n FROM (SELECT a,ROW_NUMBER() OVER (ORDER BY b) AS rn FROM tbl) numbered WHERE rn<=2"
+    expect: {rows: 1, data: [{n: 2}]}
+
+  - name: "A HAVING aggregate over a join belongs to the group stage"
+    sql: "SELECT 7 AS marker FROM group_fact f JOIN group_dimension d ON d.id=f.category HAVING SUM(f.value)>500"
+    expect: {rows: 1, data: [{marker: 7}]}
+
+  - name: "Join group input choices expose costs without physical readiness probes"
+    sql: "EXPLAIN PHYSICAL SELECT SUM(f.value) AS total,COUNT(*) AS n FROM group_fact f JOIN group_dimension d ON d.id=f.category"
+    expect:
+      result_contains: ["select_group_input", "direct_join", "maintained_prejoin", "driver_rows"]
+      result_not_contains: ["_missing_relation", "cache_ready"]
+
+  - name: "Forced group input alternatives preserve results and requested operators"
+    sql: "EXPLAIN PHYSICAL CALIBRATE SELECT SUM(f.value) AS total,COUNT(*) AS n FROM group_fact f JOIN group_dimension d ON d.id=f.category"
+    expect:
+      result_contains: ['"plan": "direct_join"', '"plan": "maintained_prejoin"', '"operator_consistent": true', '"result_equal": true']
+      result_not_contains: ['"operator_consistent": false', '"result_equal": false']
+
+  - name: "A constant explicit key creates no group over empty input"
+    sql: "SELECT 7 AS marker,COUNT(*) AS n FROM tbl WHERE a<0 GROUP BY (1+0)"
+    expect: {rows: 0, data: []}
+
+  - name: "A source-free scalar group counts its one input row"
+    sql: "SELECT COUNT(*) AS n"
+    expect: {rows: 1, data: [{n: 1}]}
+
+  - name: "A source-free scalar group preserves its empty-input result"
+    sql: "SELECT COUNT(*) AS n WHERE FALSE"
+    expect: {rows: 1, data: [{n: 0}]}
+
+  - name: "A NULL session coordinate preserves a source-free empty scalar group"
+    sql: "SELECT @unbound_group_phase AS tag,COUNT(*) AS n WHERE FALSE"
+    expect: {rows: 1, data: [{tag: null, n: 0}]}
+
+  - name: "Mixed source-free aggregates retain neutral values in a session domain"
+    sql: "SELECT @unbound_group_phase AS tag,SUM(8) AS total,COUNT(*) AS n WHERE FALSE"
+    expect: {rows: 1, data: [{tag: null, total: null, n: 0}]}
+
+  - name: "A source-free explicit constant group requires an input row"
+    sql: "SELECT 7 AS marker,COUNT(*) AS n WHERE FALSE GROUP BY (1+0)"
+    expect: {rows: 0, data: []}
+
+  - name: "EXPLAIN IR exposes the group boundary before optimization"
+    sql: "EXPLAIN IR SELECT a,SUM(b) AS total FROM tbl GROUP BY a HAVING SUM(b)>5 ORDER BY SUM(b)"
+    expect:
+      rows: 1
+      result_contains: ["group-stage", "stage-output", "select_group_result"]
+      result_not_contains: [".grp:", "physical_planning_session", "physical_planning_tx"]
+
+  - name: "Logical group normalization includes hidden aggregate consumers"
+    scm: |
+      (begin
+        (define source '("t" "memcp-tests" "tbl" false nil))
+        (define value '(get_column "t" false "b" false))
+        (define aggregate (list 'aggregate value '+ 0))
+        (define block (make_query_block "memcp-tests" (list source) '("marker" 7)
+          true nil nil nil nil nil (list "hidden_total" aggregate) nil nil))
+        (define normalized (normalize_select_group_node block))
+        (define stage (select_group_result_stage normalized))
+        (if (and (group_stage? stage) (contains? (gs_aggregates stage) (list value '+ 0))
+              (not (expr_has_local_aggregates? (qb_hidden normalized)))
+              (empty_list? (qb_group normalized)) (nil? (qb_having normalized)))
+          true (error "hidden aggregate did not cross the logical group interface")))
+
   - name: "Group sum by a (exact query)"
     sql: "SELECT a, SUM(b) FROM tbl GROUP BY a"
     expect:

@@ -23,7 +23,7 @@ queryplan.scm importers. */
 (import "queryplan-physical-scan.scm")
 (import "queryplan-physical-expr.scm")
 (import "queryplan-physical-plan.scm")
-/* sql-types.scm defines sql_type_annotate_ir, called by optimize_logical_query
+/* sql-types.scm defines sql_type_annotate_ir, called by untangle_query_term
 above. It is loaded last because its walk needs query-block/source helpers from
-every module above; optimize_logical_query resolves the call late. */
+every module above; untangle_query_term resolves the call late. */
 (import "sql-types.scm")

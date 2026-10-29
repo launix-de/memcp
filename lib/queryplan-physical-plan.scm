@@ -1344,10 +1344,7 @@ cache scan for every output row. */
 		/* A relational scalar-value stage already carries its own empty/cardinality
 		semantics. Its ordered aggregates must remain one combined point recipe; a
 		synthetic presence column would split that recipe into per-column scans. */
-		(define needs_count_filter (and
-			(not (qassoc_get (gs_facts stage) (quote preserve_empty_domain) false))
-			(not (scalar_value_stage? stage))
-			(and (not (equal? keys '(1))) (not (equal? condition true)))))
+		(define needs_count_filter (group_stage_requires_presence_filter? stage))
 		(define ags (if needs_count_filter
 			(dedupe_aggregates_by_col (merge (list (gs_aggregates stage) (list aggregate_count_descriptor))))
 			(gs_aggregates stage)))
@@ -1721,7 +1718,7 @@ outer joins. */
 				true)
 			(define cache (group_stage_cache stage))
 			(define schema (group_cache_schema cache))
-			(define tbl (group_stage_input_name stage))
+			(define tbl (if (source_is_base_table? src) (source_relation src) nil))
 			(define alias (group_stage_input_alias stage))
 			(define query_input (or (query_block? src) (union_block? src)))
 			/* Aggregate stages own their input query block. Apply the physical
@@ -1801,10 +1798,7 @@ outer joins. */
 						(rewrite_stage_graph_expr input_probe_column_map '()
 							(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))))
 				(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
-			(define needs_count_filter (and
-				(not (qassoc_get (gs_facts stage) (quote preserve_empty_domain) false))
-				(not (scalar_value_stage? stage))
-				(and (not (equal? keys '(1))) (not (equal? condition true)))))
+			(define needs_count_filter (group_stage_requires_presence_filter? stage))
 			(define ags (if needs_count_filter
 				(dedupe_aggregates_by_col (merge (list (gs_aggregates stage) (list aggregate_count_descriptor))))
 				(gs_aggregates stage)))
@@ -1935,7 +1929,7 @@ outer joins. */
 					(if (empty_list? aggregate_probe_bindings)
 						(non_scalar_order_aggregates ags)
 						'()) (gs_facts stage))))
-			(define cleanup_plan (if (query_block? src)
+			(define cleanup_plan (if query_input
 				nil
 				(build_group_keytable_cleanup schema tbl alias grouptbl keys key_names)))
 			(define agg_plans (if query_input
@@ -2235,12 +2229,6 @@ outer joins. */
 		(if (and (not (query_block? src)) (not (source_is_base_table? src)))
 			(neumann_fail "build_queryplan" "group-stage lowering expects a base table or query-block input")
 			true)
-		(define tbl (group_stage_input_name stage))
-		(define alias (group_stage_input_alias stage))
-		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
-		(define ags (gs_aggregates stage))
-		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-		(define key_names (group_key_cols keys))
 		(define stage_catalog (stage_catalog_with_nested
 			(merge (list
 				(nested_stage_catalog stage)
@@ -2735,157 +2723,30 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 						false))))
 		_ nil)))
 
-(define lower_row_number_top_count_block (lambda (block)
-	(match (qb_stages block)
-		'(stage) (if (not (window_stage? stage))
-			nil
-			(match stage
-				'(_ _id src col sortcols sortdirs _partitioncount mapcols _mapfn _reducefn _reduceinit _facts)
-				(match src '(alias schema relation _outer _join)
-					(begin
-						(define title (count_star_field_title (qb_fields block)))
-						(define filter (row_number_stage_filter_from_condition col (qb_where block)))
-						(if (or (nil? title) (or (nil? filter) (not (number? (cadr filter)))))
-							nil
-							(lower_row_number_count_scan title schema relation sortcols sortdirs mapcols filter)))
-					_ nil)
+/* Window/count fusion consumes the declared scalar group and its dependency
+catalog; it does not reconstruct SELECT grouping from the row query. */
+(define lower_row_number_top_count_stage (lambda (owner)
+	(if (and (query_block? (gs_input owner)) (empty_list? (gs_keys owner))
+		(empty_list? (gs_domain owner)) (nil? (gs_having owner))
+		(empty_list? (gs_order owner)) (nil? (gs_limit owner)) (nil? (gs_offset owner)))
+		(begin
+			(define block (gs_input owner))
+			(define dependencies (filter (nested_stage_catalog owner)
+				(lambda (stage) (not (and (group_stage? stage) (equal? (gs_id stage) (gs_id owner)))))))
+			(match dependencies
+				'(stage) (if (not (window_stage? stage)) nil
+					(match stage
+						'(_ _id src col sortcols sortdirs _partitioncount mapcols _mapfn _reducefn _reduceinit _facts)
+						(match src '(alias schema relation _outer _join)
+							(begin
+								(define title (count_star_field_title (gs_output owner)))
+								(define filter (row_number_stage_filter_from_condition col (qb_where block)))
+								(if (or (nil? title) (nil? filter) (not (number? (cadr filter)))) nil
+									(lower_row_number_count_scan title schema relation sortcols sortdirs mapcols filter)))
+							_ nil)
+						_ nil))
 				_ nil))
-		_ nil)))
-
-(define global_membership_row_count_block? (lambda (block)
-	(and (empty_list? (qb_group block))
-		(and (nil? (qb_having block))
-			(and (empty_list? (coalesceNil (qb_order block) '()))
-				(aggregate_pushdown_count_fields? (qb_fields block)))))))
-
-/* A selected predicate-RecSet is already the exact input relation consumed by
-the count scan. Building a one-row query group on top cannot reduce any work;
-it only materializes the same rows again. This capability check deliberately
-uses the common access-path enumerator and cost comparator, so new descriptor
-kinds inherit the global aggregate consumer without expression-specific code. */
-(define global_row_count_access_path_selected? (lambda (block)
-	(begin
-		(define sources (qb_sources block))
-		(define plan (if (empty_list? sources) nil
-			(query_block_join_plan block sources)))
-		(define driver (if (nil? plan) nil
-			(join_optimizer_source_by_alias sources
-				(join_optimizer_tree_first_alias plan))))
-		(if (or (nil? driver)
-			(or (not (source_is_base_table? driver))
-				(source_unique_point_condition? driver (qb_where block))))
-			false
-			(begin
-				(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
-					(source_alias driver)))
-				(define candidates (scan_access_path_candidates
-					driver sources default_alias (qb_where block) nil
-					(planner_context_session (qb_facts block))
-					(planner_context_tx (qb_facts block))))
-				(not (nil? (scan_access_path_preferred_candidate driver candidates))))))))
-
-(define lower_grouped_query_block_with_stages (lambda (block)
-	(begin
-		(define fused_top_count (lower_row_number_top_count_block block))
-		(if (not (nil? fused_top_count))
-			fused_top_count
-			(begin
-				(define stage_lookup (query_block_stage_lookup block))
-				(define rewritten (query_block_with_scalar_first_probes_using stage_lookup block))
-				(define probe_rewritten (if (expr_contains_session_dependency? (qb_where rewritten))
-					(query_block_with_prepared_sources_using stage_lookup rewritten)
-					rewritten))
-				(define direct_prepared (if (global_membership_row_count_block? probe_rewritten)
-					(prepare_simple_query_block_physical_core probe_rewritten) nil))
-				(define direct_core (if (nil? direct_prepared) nil (nth direct_prepared 1)))
-				(define direct_stage (if (nil? direct_core) nil
-					(make_group_stage_for_query_block direct_core)))
-				/* Physical membership preparation is shared with ordinary SELECT
-				lowering. Once it exposes an exact driver carrier, a global row count
-				has no reusable grouping dimension: the fused join reducer dominates a
-				predicate-specific one-row group table. Selectivity-dependent choices
-				remain inside the ordinary membership and join cost models. */
-				(define direct_row_count (and (not (nil? direct_stage))
-					(or (expr_contains_driver_membership? (qb_where direct_core))
-						(global_row_count_access_path_selected? direct_core))))
-				(if direct_row_count
-					(begin
-						(define direct_prelude (nth direct_prepared 0))
-						(define direct_postlude (nth direct_prepared 2))
-						(planner_record_physical_decision
-							(list
-								(list "decision" "global_membership_row_count")
-								(list "chosen" "fused_reduce")
-								(list "selection" "dominance")
-								(list "reason" "exact_membership_already_owns_reusable_carriers")
-								(list "alternatives" (list
-									(list (list "plan" "fused_reduce") (list "status" "chosen"))
-									(list (list "plan" "query_group_cache") (list "status" "rejected")
-										(list "reason" "redundant_single_group_materialization")))))
-							(planner_context_session (qb_facts direct_core)))
-						(cons (quote !begin) (merge (list
-							direct_prelude
-							(list (lower_direct_query_row_count_stage direct_stage
-								(expand_query_block_fields (qb_sources direct_core) (qb_fields direct_core))
-								(qb_offset direct_core) (qb_limit direct_core)))
-							direct_postlude
-							(if (empty_list? direct_postlude) '() (list nil))))))
-					(begin
-						(define sources (qb_sources probe_rewritten))
-						(define stage_catalog (query_block_stage_catalog rewritten))
-						(define dependency_graph (stage_dependency_graph stage_lookup))
-						(define outer_prepare_stages (filter (qb_stages rewritten) (lambda (stage)
-							(not (group_stage? stage)))))
-						(define physical_sources (physicalize_stage_output_sources stage_lookup sources))
-						(define driver_src (car physical_sources))
-						(if (not (source_is_base_table? driver_src))
-							(neumann_fail "build_queryplan" "group-stage source did not lower to a physical driver")
-							true)
-						(define stage_sources (cdr physical_sources))
-						(define direct_probe_group (and
-							(empty_list? stage_sources)
-							(empty_list? (qb_stages probe_rewritten))
-							(source_is_base_table? driver_src)
-							/* Session-dependent memberships are query-local domains. A base-table
-							group cache uses persistent computed columns and cannot represent that
-							domain as an immutable column recipe; keep the general query-group
-							carrier, whose grouped insert is evaluated inside the query session. */
-							(empty_list? (query_expr_session_reads probe_rewritten))
-							(expr_contains_driver_membership? (qb_where probe_rewritten))))
-						(define final_stage_sources (physicalize_stage_output_sources stage_lookup
-							(filter (cdr sources) (lambda (src)
-								(source_needed_after_group? (source_alias driver_src) (qb_group probe_rewritten)
-									(merge (list (projection_exprs (qb_fields probe_rewritten))
-										(projection_exprs (qb_hidden probe_rewritten))
-										(list (coalesceNil (qb_having probe_rewritten) true))
-										(order_item_exprs (qb_order probe_rewritten)))) src)))))
-						(define grouped_input_block (make_query_block
-							(qb_schema probe_rewritten)
-							(cons driver_src stage_sources)
-							(qb_fields probe_rewritten)
-							(qb_where probe_rewritten)
-							(qb_group probe_rewritten)
-							(qb_having probe_rewritten)
-							(qb_order probe_rewritten)
-							(qb_limit probe_rewritten)
-							(qb_offset probe_rewritten)
-							(qb_hidden probe_rewritten)
-							'()
-							(qb_facts probe_rewritten)))
-						(define main_stage (make_group_stage_for_query_block grouped_input_block))
-						(define main_stage_lookup (lowering_catalog_with_planning_session
-							(lowering_catalog_with_local_stages stage_lookup (list main_stage))
-							(planner_context_session (qb_facts block))))
-						(if direct_probe_group
-							(lower_query_block_core grouped_input_block)
-							(cons (quote !begin)
-								(merge (list
-									/* The main group prepare owns nested group stages used by its input.
-									Window and ORC stages still require their explicit materialization. */
-									(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup outer_prepare_stages)
-									(lower_stage_materialize_all outer_prepare_stages)
-									(list (lower_group_stage_prepare_using (cons main_stage stage_catalog) main_stage_lookup main_stage true nil))
-									(list (lower_query_block_core (group_stage_final_block main_stage final_stage_sources))))))))))))))))
+		nil)))
 
 (define query_block_without_stages (lambda (block)
 	(make_query_block
@@ -5625,12 +5486,146 @@ chooses the producer/driver implementation from canonical stage facts. */
 				postlude
 				(if (empty_list? postlude) '() (list nil)))))))))
 
+/* Binding a physical input changes column addresses, never the logical
+key tuple or aggregate inventory. Project the stage's complete scalar input
+interface through the ordinary prejoin operator, then bind every consumer
+through that same source map. */
+(define group_stage_input_projection (lambda (stage)
+	(begin
+		(define input (gs_input stage))
+		(define sources (qb_sources input))
+		(define consumers (merge (list (gs_keys stage) (map (gs_aggregates stage) car))))
+		(define projection (merge (mapIndex consumers (lambda (i expr)
+			(list (concat "__group_input_" i) expr)))))
+		(make_query_block (qb_schema input) sources projection (qb_where input)
+			'() nil '() nil nil '() (qb_stages input) (qb_facts input)))))
+
+(define group_stage_prejoin_plan (lambda (stage projected)
+	(begin
+		(define input (gs_input stage))
+		(define sources (qb_sources input))
+		(define default_alias (qassoc_get (qb_facts input) (quote default_alias) (source_alias (car sources))))
+		(define prepared (physical_prejoin_plan projected))
+		(define carrier (nth prepared 1))
+		(define source (car (qb_sources carrier)))
+		(define rewrite (lambda (expr)
+			(prejoin_rewrite_expr sources default_alias (source_alias source) expr)))
+		(define rebound (make_group_stage (gs_id stage) source (gs_domain stage)
+			(map (gs_keys stage) rewrite)
+			(map (gs_aggregates stage) (lambda (ag) (cons (rewrite (car ag)) (cdr ag))))
+			(rewrite (gs_having stage))
+			(map_assoc (gs_output stage) (lambda (_title expr) (rewrite expr)))
+			(map (gs_order stage) (lambda (item) (list (rewrite (car item)) (cadr item))))
+			(gs_limit stage) (gs_offset stage)
+			(qassoc_set_without (gs_facts stage) (quote condition) (qb_where carrier) (quote group_cache))))
+		(list (nth prepared 0) rebound))))
+
+(define lower_group_stage_prejoin (lambda (stage projected)
+	(begin
+		(define prepared (group_stage_prejoin_plan stage projected))
+		(list (quote !begin) (car prepared) (lower_select_group_stage (cadr prepared))))))
+
+/* Compare a direct joined row producer with a maintained scalar projection.
+Only logical cardinalities and generated work units enter this decision. Cache
+existence/topology never does: storage owns building and reusing the relation.
+The group reduction is common to both inputs and cancels from the comparison. */
+(define group_stage_join_input_costs (lambda (rows joins width)
+	(list
+		(planner_cost (* (+ joins 1) planner_membership_scan_invocation_ns)
+			(* rows planner_membership_scan_row_ns)
+			(* rows joins planner_membership_direct_probe_row_ns)
+			0 0 0 0 0 rows 0.5)
+		(planner_cost planner_membership_group_cache_startup_ns
+			(* rows planner_membership_scan_row_ns)
+			(* rows width planner_membership_map_column_row_ns)
+			0 0 0 (* rows width 16) 0 rows 0.5))))
+
+(define group_stage_prejoin_cost_preferred? (lambda (rows joins width)
+	(begin
+		(define costs (group_stage_join_input_costs rows joins width))
+		(planner_cost_better? (cadr costs) (car costs)))))
+
+(define lower_group_stage_join_alternatives (lambda (stage projected)
+	(begin
+		(define input (gs_input stage))
+		(define sources (qb_sources input))
+		(define driver (join_optimizer_source_by_alias sources
+			(join_optimizer_tree_first_alias (query_block_join_plan input sources))))
+		(define rows (planner_source_row_count driver))
+		(define joins (- (count sources) 1))
+		(define width (/ (count (qb_fields projected)) 2))
+		(define costs (group_stage_join_input_costs rows joins width))
+		(define session (direct_group_join_stage_planning_session stage))
+		(define id (concat "select_group_input:" (gs_id stage)))
+		(define normal (if (planner_cost_better? (cadr costs) (car costs)) "maintained_prejoin" "direct_join"))
+		(define forced (planner_physical_override id session))
+		(planner_record_physical_decision (list (list "decision_id" id)
+			(list "decision" "select_group_input") (list "chosen" (coalesceNil forced normal))
+			(list "cache_relation" (prejoin_table_name input
+				(qassoc_get (qb_facts input) (quote default_alias) (source_alias (car sources)))))
+			(list "normally_chosen" normal) (list "selection" (if (nil? forced) "runtime_cost" "forced"))
+			(list "inputs" (list (list "driver_rows" rows) (list "joins" joins) (list "projection_width" width)))
+			(list "alternatives" (list
+				(list (list "plan" "direct_join") (list "cost" (planner_cost_explain (car costs))))
+				(list (list "plan" "maintained_prejoin") (list "cost" (planner_cost_explain (cadr costs))))))) session)
+		(if (equal? forced "maintained_prejoin") (lower_group_stage_prejoin stage projected)
+			(equal? forced "direct_join")
+			(lower_direct_query_group_stage stage (gs_output stage) (gs_order stage) (gs_offset stage) (gs_limit stage))
+			(list (quote if)
+				(list (quote group_stage_prejoin_cost_preferred?)
+					(list (quote scan_estimate) (source_table_expr driver)) joins width)
+				(lower_group_stage_prejoin stage projected)
+				(lower_direct_query_group_stage stage (gs_output stage) (gs_order stage) (gs_offset stage) (gs_limit stage)))))))
+
+/* Both physical producers consume the same declared scalar interface. Ordered
+output retains the maintained relation; unordered output may also use the
+native joined reduction according to the shared cost comparison above. */
+(define lower_group_stage_join_input (lambda (stage)
+	(begin
+		(define input (gs_input stage))
+		(define direct (and (empty_list? (gs_order stage))
+			(or (empty_list? (qb_sources input)) (direct_join_group_supported? stage))))
+		(define projected (group_stage_input_projection stage))
+		(define prejoin (and
+			(not (reduce (gs_aggregates stage) (lambda (unsupported ag)
+				(or unsupported (count_distinct_descriptor? ag))) false))
+			(physical_prejoin_supported? projected)))
+		(if (and direct prejoin) (lower_group_stage_join_alternatives stage projected)
+			prejoin (lower_group_stage_prejoin stage projected)
+			direct
+			(lower_direct_query_group_stage stage (gs_output stage) (gs_order stage) (gs_offset stage) (gs_limit stage))
+			(lower_group_stage stage)))))
+
+/* Physical choices consume the completed logical group interface. None of
+these alternatives discovers aggregate descriptors or changes the key tuple. */
+(define lower_select_group_stage (lambda (stage)
+	(begin
+		(define input (gs_input stage))
+		(define fields (gs_output stage))
+		(define window_count (lower_row_number_top_count_stage stage))
+		(if (not (nil? window_count)) window_count
+			(source_is_base_table? input)
+			(if (direct_base_group_plan_preferred? stage)
+				(lower_direct_base_group_stage stage fields (gs_order stage) (gs_offset stage) (gs_limit stage))
+				(if (direct_base_group_plan_eligible? stage)
+					(list (quote if) (list (quote tx_requires_query_local_cache) (physical_query_tx_symbol))
+						(lower_query_local_base_group_stage stage fields (gs_order stage) (gs_offset stage) (gs_limit stage))
+						(lower_group_stage stage))
+					(lower_group_stage stage)))
+			(if (query_block? input)
+				(lower_group_stage_join_input stage)
+				(lower_group_stage stage))))))
+
 (define lower_query_block_with_cataloged_stages (lambda (block)
+	(begin
+		(define group (select_group_result_stage block))
+		(if (nil? group) (lower_row_query_block_with_cataloged_stages block)
+			(lower_select_group_stage group)))))
+
+(define lower_row_query_block_with_cataloged_stages (lambda (block)
 	(if (empty_list? (qb_stages block))
 		(lower_simple_query_block_with_cataloged_stages block)
-		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
-			(lower_grouped_query_block_with_stages block)
-			(begin
+		(begin
 				(define fused_window_offset (lower_fused_window_offset_block block))
 				(if (not (nil? fused_window_offset))
 					fused_window_offset
@@ -5639,7 +5634,7 @@ chooses the producer/driver implementation from canonical stage facts. */
 						(if (not (nil? fused_row_number))
 							fused_row_number
 							(lower_simple_query_block_with_cataloged_stages
-								(query_block_with_filtered_window_orcs block)))))))))))
+							(query_block_with_filtered_window_orcs block))))))))))
 
 (define lower_query_block_with_stages (lambda (block)
 	(lower_query_block_with_cataloged_stages (query_block_with_full_stage_catalog block))))
@@ -5728,60 +5723,6 @@ fix). */
 
 (define prepared_stage_bindings (lambda (stages)
 	(map (collect_stage_prepares stages) prepared_stage_binding)))
-
-(define query_block_has_aggregates? (lambda (block)
-	(not (empty_list? (stage_aggregates_for_fields (qb_fields block))))))
-
-/* SQL permits columns functionally dependent on a grouped primary key. Expand
-qualified stars before group lowering and carry the selected source columns as
-keys when that source's complete primary key is already grouped. Adding those
-columns cannot change group cardinality because the primary key is unique. */
-(define fields_request_star_for_source? (lambda (fields src)
-	(reduce (coalesceNil fields '()) (lambda (requested title_or_expr)
-		(if requested
-			true
-			(if (string? title_or_expr)
-				false
-				(star_expr_matches_source? title_or_expr src)))) false)))
-
-(define source_primary_key_grouped? (lambda (block src)
-	(begin
-		(define primary_key (source_primary_key_columns src))
-		(define default_alias (source_alias (car (qb_sources block))))
-		(define grouped (map (coalesceNil (qb_group block) '()) (lambda (expr)
-			(canonical_column_expr_for_alias default_alias expr))))
-		(and (not (empty_list? primary_key))
-			(reduce primary_key (lambda (complete col)
-				(and complete (contains? grouped
-					(canonical_column_expr_for_alias default_alias
-						(list (quote get_column) (source_alias src) false col false))))) true)))))
-
-(define functional_dependency_star_group_keys (lambda (block)
-	(merge (map (qb_sources block) (lambda (src)
-		(if (and (fields_request_star_for_source? (qb_fields block) src)
-			(source_primary_key_grouped? block src))
-			(map (binding_source_columns src) (lambda (col)
-				(list (quote get_column) (source_alias src) false col false)))
-			'()))))))
-
-(define expand_grouped_query_block (lambda (block)
-	(begin
-		(define dependency_keys (functional_dependency_star_group_keys block))
-		(if (empty_list? dependency_keys)
-			block
-			(make_query_block
-				(qb_schema block)
-				(qb_sources block)
-				(expand_query_block_fields (qb_sources block) (qb_fields block))
-				(qb_where block)
-				(merge_unique (list (qb_group block) dependency_keys))
-				(qb_having block)
-				(qb_order block)
-				(qb_limit block)
-				(qb_offset block)
-				(qb_hidden block)
-				(qb_stages block)
-				(qb_facts block))))))
 
 (define query_limit_active? (lambda (offset_value limit_value)
 	(or (and (not (nil? offset_value)) (not (equal? offset_value 0)))
@@ -6823,25 +6764,13 @@ scalar comparison work rather than an uncalibrated multiplier. */
 	(begin
 		(define src (car (qb_sources block)))
 		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
-		(define grouped_block (expand_grouped_query_block block))
 		(if (not (or (source_is_base_table? src) (row_domain_relation? (source_relation src))))
 			(neumann_fail "build_queryplan" "single-source query-block lowering only supports base tables")
 			true)
 		(if (not (empty_list? (qb_stages block)))
 			(neumann_fail "build_queryplan" "pre-existing stages are not implemented yet")
 			true)
-		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
-			(begin
-				(define group_stage (make_group_stage_for_block grouped_block src))
-				(if (direct_base_group_plan_preferred? group_stage)
-					(lower_direct_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))
-					(if (direct_base_group_plan_eligible? group_stage)
-						(list (quote if)
-							(list (quote tx_requires_query_local_cache) (physical_query_tx_symbol))
-							(lower_query_local_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))
-							(lower_group_stage group_stage))
-						(lower_group_stage group_stage))))
-			(begin
+		(begin
 				(define alias (source_alias src))
 				(define raw_condition (combine_where (qb_where block) (source_join_expr src)))
 				(define order_items (coalesceNil (qb_order block) '()))
@@ -7166,7 +7095,7 @@ scalar comparison work rather than an uncalibrated multiplier. */
 					(list
 						(list (quote lambda) (list scalar_membership_var) wrapped_scan_plan)
 						effective_scalar_carrier)
-					wrapped_scan_plan))))))
+				wrapped_scan_plan)))))
 
 (define lower_single_source_scan_plan (lambda (block)
 	(begin
@@ -11074,28 +11003,6 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 					(query_block_stage_catalog input) (qb_facts input) true))
 				(not (nil? spec)))))))
 
-/* A cold prejoin must execute the same join, write its intermediate keys and
-read them again for grouping. When fused joined reduction is supported it
-therefore dominates cold materialization structurally. An already prepared
-canonical prejoin remains the reusable warm-cache path. */
-(define lower_cold_dominant_direct_join_group (lambda (block stage)
-	(begin
-		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
-			(source_alias (car (qb_sources block)))))
-		(define prejoin_relation (prejoin_table_name block default_alias))
-		(define direct_plan (lower_direct_query_group_stage stage
-			(expand_query_block_fields (qb_sources block) (qb_fields block))
-			(qb_order block) (qb_offset block) (qb_limit block)))
-		(define prejoin_plan (lower_query_block_through_prejoin block))
-		(list (quote if)
-			(list (quote not)
-				(list (quote try)
-					(list (quote lambda) '()
-						(list (quote show) (qb_schema block) prejoin_relation "constraints"))
-					(list (quote lambda) (list (quote _missing_relation)) false)))
-			direct_plan
-			prejoin_plan))))
-
 (define membership_probe_work_rows (lambda (facts condition fallback)
 	(if (expr_contains_driver_membership? condition)
 		(coalesceNil (qassoc_get facts (quote membership_driver_rows) nil) fallback)
@@ -11650,23 +11557,7 @@ physical decision and preserve its runtime recompile gate. */
 (define lower_multi_source_query_block (lambda (block)
 	(begin
 		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
-		(define grouped_block (expand_grouped_query_block block))
-		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
-			(begin
-				(define group_stage (make_group_stage_for_query_block grouped_block))
-				(define direct_supported (and
-					(empty_list? (coalesceNil (qb_order grouped_block) '()))
-					(direct_join_group_supported? group_stage)))
-				(if direct_supported
-					(if (physical_prejoin_supported? grouped_block)
-						(lower_cold_dominant_direct_join_group grouped_block group_stage)
-						(lower_direct_query_group_stage group_stage
-							(expand_query_block_fields (qb_sources grouped_block) (qb_fields grouped_block))
-							(qb_order grouped_block) (qb_offset grouped_block) (qb_limit grouped_block)))
-					(if (physical_prejoin_supported? grouped_block)
-						(lower_query_block_through_prejoin grouped_block)
-						(lower_group_stage group_stage))))
-			(begin
+		(begin
 				(define sources (qb_sources block))
 				(define first_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
 				(define final_condition (coalesceNil (qb_where block) true))
@@ -11742,7 +11633,7 @@ physical decision and preserve its runtime recompile gate. */
 									(qb_schema block) scan_sources scan_plan first_alias needed_exprs
 									final_condition fields order_items (qb_offset block) (qb_limit block)
 									stage_catalog (qb_facts block)))))
-))))))
+)))))
 
 (define zero_source_shared_field_symbol (lambda (ordinal)
 	(symbol (concat "__zero_source_field_" ordinal))))
@@ -12287,23 +12178,14 @@ stars through the same catalog-aware path used by physical lowering. */
 									(nil? (qb_offset branch))))))))))))
 
 (define grouped_union_branch? (lambda (branch)
-	(and (query_block? branch)
-		(and (single_source? (qb_sources branch))
-			(and (empty_list? (qb_stages branch))
-				(and (empty_list? (qb_order branch))
-					(and (nil? (qb_limit branch))
-						(and (nil? (qb_offset branch))
-							(or (not (empty_list? (qb_group branch)))
-								(or (not (nil? (qb_having branch)))
-									(query_block_has_aggregates? branch)))))))))))
+	(and (query_block? branch) (not (nil? (select_group_result_stage branch)))
+		(empty_list? (qb_order branch)) (nil? (qb_limit branch)) (nil? (qb_offset branch)))))
 
 (define grouped_union_branch_stream_plan (lambda (branch)
 	(begin
-		(define src (car (qb_sources branch)))
-		(if (not (source_is_base_table? src))
-			nil
+		(define stage (select_group_result_stage branch))
+		(if (not (source_is_base_table? (gs_input stage))) nil
 			(begin
-				(define stage (make_group_stage_for_block branch src))
 				(define final_block (group_stage_final_block stage (group_stage_final_extra_sources stage)))
 				(if (union_ordered_branch_supported? final_block)
 					(list (list (lower_group_stage_prepare_using (list stage) (list stage) stage true nil)) final_block nil)
@@ -12780,17 +12662,38 @@ prepare ownership and missing-handle completion must see those stages too. */
 without emitting runtime operators. Keeping this boundary explicit makes
 analysis and emission independently measurable while preserving the normal
 build_queryplan contract. */
+/* Bind compile handles only at the physical consumer boundary. In particular,
+UNION/query relations embedded in source recipes retain their semantic shape;
+recursively annotating them would make native request state part of identity. */
+(define physical_group_with_planning_context (lambda (stage planning_session tx)
+	(if (not (group_stage? stage)) stage
+		(begin
+			(define input (gs_input stage))
+			(make_group_stage (gs_id stage)
+				(if (query_block? input)
+					(query_block_with_reorder_facts input (list
+						(list (quote physical_planning_session) planning_session)
+						(list (quote physical_planning_tx) tx))) input)
+				(gs_domain stage) (gs_keys stage) (gs_aggregates stage) (gs_having stage)
+				(gs_output stage) (gs_order stage) (gs_limit stage) (gs_offset stage)
+				(qassoc_set (gs_facts stage) (quote physical_planning_session) planning_session))))))
+
 (define physical_node_with_planning_context (lambda (node planning_session tx)
 	(if (query_block? node)
-		(query_block_with_reorder_facts node (list
-			(list (quote physical_planning_session) planning_session)
-			(list (quote physical_planning_tx) tx)))
-		(if (union_block? node)
-			(make_union_block (union_mode node)
-				(map (union_branches node) (lambda (branch)
-					(physical_node_with_planning_context branch planning_session tx)))
-				(union_order node) (union_limit node) (union_offset node) (union_facts node))
-			node))))
+		(make_query_block (qb_schema node) (qb_sources node) (qb_fields node)
+			(qb_where node) (qb_group node) (qb_having node) (qb_order node)
+			(qb_limit node) (qb_offset node) (qb_hidden node)
+			(map (qb_stages node) (lambda (stage)
+				(physical_group_with_planning_context stage planning_session tx)))
+			(merge (list (list
+				(list (quote physical_planning_session) planning_session)
+				(list (quote physical_planning_tx) tx)) (qb_facts node))))
+		(union_block? node)
+		(make_union_block (union_mode node)
+			(map (union_branches node) (lambda (branch)
+				(physical_node_with_planning_context branch planning_session tx)))
+			(union_order node) (union_limit node) (union_offset node) (union_facts node))
+		node)))
 
 (define prepare_physical_queryplan (lambda (ir planning_session tx)
 	(begin
@@ -13375,9 +13278,9 @@ The result is only a choice between equivalent logical trees; no scan or
 RecSet node is written into logical IR. */
 (define aggregate_pushdown_exact_access_dominates? (lambda (ir planning_session tx)
 	(begin
-		(define block (ir_root ir))
-		(if (or (not (query_block? block))
-			(not (aggregate_pushdown_root_shape? block)))
+		(define stage (aggregate_pushdown_root_stage ir))
+		(define block (if (nil? stage) nil (gs_input stage)))
+		(if (nil? stage)
 			false
 			(begin
 				(define driver (car (aggregate_pushdown_base_sources block)))
@@ -13389,25 +13292,15 @@ RecSet node is written into logical IR. */
 					(choose_scan_access_path driver candidates planning_session)))))))))
 
 (define optimize_logical_query (lambda (ir planning_session tx)
-	(begin
-		/* Central column resolution + type/collation annotation. Runs after
-		decorrelation has resolved get_column aliases and before logical join
-		reordering / physical lowering. Canonicalizes get_column names once here
-		instead of at every physical lowering site, records the result column
-		types/collations as a query-block fact, and resolves the collation of
-		computed text ORDER keys. */
-		(define typed_ir (sql_type_annotate_ir ir))
-		(annotate_contribution_domains (join_reorder
-			(if (aggregate_pushdown_exact_access_dominates? typed_ir planning_session tx)
-				typed_ir
-				(aggregate_pushdown_logical typed_ir planning_session tx))
-			planning_session tx)))))
+	(annotate_contribution_domains (join_reorder
+		(if (aggregate_pushdown_exact_access_dominates? ir planning_session tx)
+			ir (aggregate_pushdown_logical ir planning_session tx)) planning_session tx))))
 
 /* Keep the proof procedure compiled once. Constructing it inside every SQL
 compile repeats Scheme closure optimization even when no domain was changed. */
 (define parameter_domain_ir_eligible? (lambda (ir)
 	(begin
-		(define candidate (annotate_contribution_domains (sql_type_annotate_ir ir)))
+		(define candidate (annotate_contribution_domains ir))
 		(and (or (ir_has_contribution_domain? candidate) (ir_has_invariant_property_cover? candidate))
 			(not (ir_has_unproved_query_aggregate? candidate))))))
 
@@ -13699,7 +13592,10 @@ compile repeats Scheme closure optimization even when no domain was changed. */
 (define physical_operator_family_for_decision (lambda (plan decision)
 	(begin
 		(define kind (qassoc_get decision "decision" nil))
-		(if (equal? kind "nested_scalar_recmap")
+		(if (equal? kind "select_group_input")
+			(if (physical_group_cache_initialized? plan (qassoc_get decision "cache_relation" nil))
+				"maintained_prejoin" "direct_join")
+			(equal? kind "nested_scalar_recmap")
 			(if (physical_expr_has_head? plan (quote scan_recmap))
 				"query_recmap" "direct_scalar_chain")
 			(if (equal? kind "group_relation_input")
@@ -13882,7 +13778,8 @@ protocol callback receives only the calibration row. */
 	(begin
 		(define decision_id (qassoc_get decision "decision_id" "unknown"))
 		(define decision_kind (qassoc_get decision "decision" nil))
-		(define expected_family (if (or (equal? decision_kind "semijoin_carrier") (equal? decision_kind "membership_carrier")
+		(define expected_family (if (or (equal? decision_kind "select_group_input")
+			(equal? decision_kind "semijoin_carrier") (equal? decision_kind "membership_carrier")
 			(or (equal? decision_kind "scan_join_order")
 				(or (equal? decision_kind "direct_group_join")
 					(or (equal? decision_kind "group_relation_input")

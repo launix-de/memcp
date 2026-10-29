@@ -23,6 +23,23 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+- name: grouped-computed-keys-and-multiple-aggregates
+  sql: SELECT id%11 AS bucket,SUM(v0) AS total,COUNT(*) AS n FROM big_items GROUP BY id%11 ORDER BY id%11
+  expect:
+    cluster:
+      min_remote_shards: 1
+- name: group-order-only-aggregate
+  sql: SELECT 7 AS marker FROM big_items ORDER BY SUM(v0)
+  expect:
+    cluster:
+      min_remote_shards: 1
+- name: grouped-unprojected-order-aggregate
+  # A distinct key tuple requires a fresh distributed producer rather than
+  # reusing the first case's already populated group carrier.
+  sql: SELECT id%13 AS bucket FROM big_items GROUP BY id%13 ORDER BY SUM(v0),id%13
+  expect:
+    cluster:
+      min_remote_shards: 1
 - name: order-top-n-offset
   sql: SELECT id,v0 FROM big_items ORDER BY v0 DESC,id ASC LIMIT 9 OFFSET 5
   expect:

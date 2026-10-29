@@ -5985,7 +5985,10 @@ three-valued expressions whose NULL behavior remains observable. */
 			(gs_keys stage)
 			(map (gs_aggregates stage) (lambda (ag)
 				(fold_boolean_stage_aggregate graph stage ag)))
-			(boolean_fold_maybe_expr (gs_having stage))
+			/* HAVING contains aggregate recipes as well as predicates. Use the
+			same typed fold as their descriptors, preserving numeric CASE payloads
+			instead of turning their 0/1 results into boolean aggregate inputs. */
+			(boolean_fold_typed_expr graph stage (gs_having stage))
 			(gs_output stage)
 			(gs_order stage)
 			(gs_limit stage)
@@ -6954,25 +6957,30 @@ accept exactly the same aggregate descriptors. */
 					(equal? (count (gs_keys stage))
 						(count (qassoc_get (gs_facts stage) (quote lookup-keys) '())))))))))
 
-(define aggregate_pushdown_root_shape? (lambda (block)
+/* COUNT partitioning rewrites a complete group stage. Its row input has no
+aggregate projection to rediscover, and its consumers keep the stage boundary. */
+(define aggregate_pushdown_root_stage (lambda (ir)
 	(begin
-		(define base_sources (aggregate_pushdown_base_sources block))
-		(define stage_sources (aggregate_pushdown_stage_sources block))
-		(and (single_source? base_sources)
-			(and (equal? (count (qb_sources block)) (+ 1 (count stage_sources)))
-				(and (not (source_outer? (car base_sources)))
-					(and (or (nil? (source_join_expr (car base_sources)))
-						(equal? (source_join_expr (car base_sources)) true))
-						(and (aggregate_pushdown_count_fields? (qb_fields block))
-							(and (empty_list? (qb_group block))
-								(and (nil? (qb_having block))
-									(and (empty_list? (qb_order block))
-										(and (nil? (qb_limit block))
-											(and (nil? (qb_offset block))
-												(and (empty_list? (qb_hidden block))
-													(reduce stage_sources (lambda (safe src)
-														(and safe (aggregate_pushdown_stage_source_safe? (qb_stages block) src)))
-														true)))))))))))))))
+		(define root (ir_root ir))
+		(define stage (if (query_block? root) (select_group_result_stage root) nil))
+		(if (not (and (equal? (ir_return ir) (quote rows)) (group_stage? stage))) nil
+			(begin
+				(define block (gs_input stage))
+				(if (not (query_block? block)) nil
+					(begin
+						(define bases (aggregate_pushdown_base_sources block))
+						(define outputs (aggregate_pushdown_stage_sources block))
+						(if (and (single_source? bases)
+							(equal? (count (qb_sources block)) (+ 1 (count outputs)))
+							(not (source_outer? (car bases)))
+							(or (nil? (source_join_expr (car bases))) (equal? (source_join_expr (car bases)) true))
+							(aggregate_pushdown_count_fields? (gs_output stage))
+							(qassoc_get (gs_facts stage) (quote preserve_empty_domain) false)
+							(nil? (gs_having stage)) (empty_list? (gs_order stage))
+							(nil? (gs_limit stage)) (nil? (gs_offset stage)) (empty_list? (qb_hidden root))
+							(reduce outputs (lambda (safe src)
+								(and safe (aggregate_pushdown_stage_source_safe? (ir_stages ir) src))) true))
+							stage nil))))))))
 
 (define aggregate_pushdown_stage_filter_term? (lambda (stage_aliases term)
 	(expr_refs_one_of_aliases? term stage_aliases)))
@@ -7020,7 +7028,7 @@ remain ordinary residual predicates. */
 		(reduce filter_terms (lambda (filtered term)
 			(or filtered (expr_refs_alias? nil (source_alias src) term))) false)))))
 
-(define aggregate_pushdown_key_columns (lambda (block driver filter_terms)
+(define aggregate_pushdown_key_columns (lambda (stages block driver filter_terms)
 	(begin
 		/* Every stage source remains above the aggregate partition, even when its
 		boolean value is not an explicit WHERE term. Preserve all driver columns
@@ -7034,7 +7042,7 @@ remain ordinary residual predicates. */
 				(extract_columns_for_alias driver (source_join_expr src)))))
 			(merge (map stage_sources (lambda (src)
 				(extract_columns_for_alias driver
-					(stage_by_id (qb_stages block)
+					(stage_by_id stages
 						(stage_output_relation_id (source_relation src))))))))))))
 
 (define aggregate_pushdown_keys (lambda (driver columns)
@@ -7097,7 +7105,7 @@ remain ordinary residual predicates. */
 			(aggregate_pushdown_rewrite_count_fields rest partition_alias input aggregate)))
 		_ '())))
 
-(define aggregate_pushdown_build_rewrite (lambda (ir block driver movable_terms residual_terms probe_bindings columns driver_rows group_rows)
+(define aggregate_pushdown_build_rewrite (lambda (ir stage block driver movable_terms residual_terms probe_bindings columns driver_rows group_rows)
 	(begin
 		(define keys (aggregate_pushdown_keys driver columns))
 		(define residual (combine_where_terms residual_terms true))
@@ -7124,8 +7132,10 @@ remain ordinary residual predicates. */
 				(list (quote partition_by) keys)
 				(list (quote aggregate_probe_bindings) probe_bindings)
 				(list (quote result_max_rows_per_partition) 1))))
-		(define rewritten_stages (map (qb_stages block) (lambda (stage)
-			(aggregate_pushdown_rewrite_stage driver partition_alias columns stage))))
+		(define dependencies (filter (ir_stages ir) (lambda (dependency)
+			(not (equal? (gs_id dependency) (gs_id stage))))))
+		(define rewritten_stages (map dependencies (lambda (dependency)
+			(aggregate_pushdown_rewrite_stage driver partition_alias columns dependency))))
 		(define rewritten_stage_sources (map (aggregate_pushdown_stage_sources block) (lambda (src)
 			(aggregate_pushdown_rewrite_source driver partition_alias columns src))))
 		(define all_stages (merge (list (list partition_stage) rewritten_stages)))
@@ -7135,7 +7145,7 @@ remain ordinary residual predicates. */
 			(qb_schema block)
 			(cons partition_source rewritten_stage_sources)
 			(aggregate_pushdown_rewrite_count_fields
-				(qb_fields block) partition_alias driver aggregate_count_descriptor)
+				(gs_output stage) partition_alias driver aggregate_count_descriptor)
 			(aggregate_pushdown_rewrite_expr driver partition_alias columns movable)
 			'() nil '() nil nil '()
 			all_stages
@@ -7158,7 +7168,7 @@ remain ordinary residual predicates. */
 		(if (expr_refs_alias? (source_alias driver) (source_alias driver)
 			(list (qb_sources outer_block) (qb_fields outer_block) (qb_where outer_block) rewritten_stages))
 			ir
-			(make_ir (ir_kind ir) outer_block all_stages (ir_context_of ir) (ir_return ir))))))
+			(normalize_select_groups (make_ir (ir_kind ir) outer_block all_stages (ir_context_of ir) (ir_return ir)))))))
 
 /* Partitioning at most one input row, or a complete non-null unique key,
 cannot reduce the number of
@@ -7178,11 +7188,9 @@ sampling guard for a choice that no cardinality change can reverse. */
 
 (define aggregate_pushdown_logical (lambda (ir planning_session tx)
 	(begin
-		(define block (ir_root ir))
-		(if (or (not (equal? (ir_return ir) (quote rows)))
-			(or (not (query_block? block))
-				(or (qassoc_get (qb_facts block) (quote aggregate_pushdown) false)
-					(not (aggregate_pushdown_root_shape? block)))))
+		(define stage (aggregate_pushdown_root_stage ir))
+		(define block (if (nil? stage) nil (gs_input stage)))
+		(if (or (nil? stage) (qassoc_get (qb_facts block) (quote aggregate_pushdown) false))
 			ir
 			(begin
 				(define driver (car (aggregate_pushdown_base_sources block)))
@@ -7195,7 +7203,7 @@ sampling guard for a choice that no cardinality change can reverse. */
 				(define probe_bindings
 					(aggregate_pushdown_probe_bindings driver bound_terms))
 				(define columns
-					(aggregate_pushdown_key_columns block driver movable_terms))
+					(aggregate_pushdown_key_columns (ir_stages ir) block driver movable_terms))
 				(if (or (or (empty_list? movable_terms) (empty_list? columns))
 					(aggregate_pushdown_identity_partition? driver columns))
 					(begin
@@ -7224,7 +7232,7 @@ sampling guard for a choice that no cardinality change can reverse. */
 							(list (quote aggregate_pushdown_cost_preferred?)
 								driver_rows_expr group_rows_expr (planner_quoted_value probes))
 							planning_session)
-							(aggregate_pushdown_build_rewrite ir block driver movable_terms residual_terms
+							(aggregate_pushdown_build_rewrite ir stage block driver movable_terms residual_terms
 								probe_bindings columns driver_rows group_rows)
 							ir))))))))
 

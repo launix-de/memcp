@@ -494,8 +494,8 @@ test_cases:
           "EXPLAIN SELECT department.name, SUM(employee.salary) FROM sc_emp employee JOIN sc_dept department ON department.id = employee.dept_id GROUP BY department.name")))
         (define carrier_a (regexp_replace plan_a ".*(\\.grp:\\.prejoin:[0-9a-f]+:[0-9a-f]+).*" "$1"))
         (define carrier_b (regexp_replace plan_b ".*(\\.grp:\\.prejoin:[0-9a-f]+:[0-9a-f]+).*" "$1"))
-        (define aggregate_a (regexp_replace plan_a ".*(agg_[0-9a-f]+).*" "$1"))
-        (define aggregate_b (regexp_replace plan_b ".*(agg_[0-9a-f]+).*" "$1"))
+        (define aggregate_a (regexp_replace plan_a ".*(agg_[0-9a-f]{16}).*" "$1"))
+        (define aggregate_b (regexp_replace plan_b ".*(agg_[0-9a-f]{16}).*" "$1"))
         (if (and (equal? carrier_a carrier_b) (equal? aggregate_a aggregate_b))
           true
           (error (concat "equivalent joined GROUP plans did not reuse canonical helper names: "

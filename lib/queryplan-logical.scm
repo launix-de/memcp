@@ -3605,6 +3605,283 @@ without separately proving two-valued semantics. */
 					(list stage null_stage)
 					(list source null_source)))))))
 
+(define extract_aggregates (lambda (expr)
+	(if (or (query_block? expr) (group_stage? expr) (union_block? expr)) '()
+		(match expr
+			((symbol scalar_aggregate_probe) stage requested_col)
+			(if (qassoc_get (gs_facts stage) (quote direct_group_probe) false)
+				'()
+				(dedupe_aggregates_by_col (merge (map (list stage requested_col) extract_aggregates))))
+			((quote scalar_aggregate_probe) stage requested_col)
+			(if (qassoc_get (gs_facts stage) (quote direct_group_probe) false)
+				'()
+				(dedupe_aggregates_by_col (merge (map (list stage requested_col) extract_aggregates))))
+			((symbol count_distinct) agg_expr) (list (count_distinct_descriptor agg_expr))
+			((quote count_distinct) agg_expr) (list (count_distinct_descriptor agg_expr))
+			((symbol group_concat_distinct) agg_expr _separator) (list (count_distinct_descriptor agg_expr))
+			((quote group_concat_distinct) agg_expr _separator) (list (count_distinct_descriptor agg_expr))
+			((symbol aggregate) agg_expr agg_reduce agg_neutral) (list (list agg_expr agg_reduce agg_neutral))
+			((quote aggregate) agg_expr agg_reduce agg_neutral) (list (list agg_expr agg_reduce agg_neutral))
+			((symbol aggregate) agg_expr agg_reduce agg_neutral agg_finalize) (list (list agg_expr agg_reduce agg_neutral agg_finalize))
+			((quote aggregate) agg_expr agg_reduce agg_neutral agg_finalize) (list (list agg_expr agg_reduce agg_neutral agg_finalize))
+			(cons head tail) (dedupe_aggregates_by_col (merge (map tail extract_aggregates)))
+			_ '()))))
+
+(define dedupe_aggregates_by_col (lambda (ags)
+	(begin
+		/* Aggregate descriptors are immutable planner ASTs. Keep the exact
+		structural identity here instead of repeatedly serializing every prior
+		descriptor into its canonical column hash. */
+		(define seen (make_structural_catalog))
+		(reduce (coalesceNil ags '()) (lambda (acc ag)
+			(if (seen ag)
+				acc
+				(begin
+					(seen ag true)
+					(merge acc (list ag)))))
+			'()))))
+
+(define canonical_column_expr_for_alias (lambda (alias expr)
+	(match expr
+		((symbol get_column) tblvar _tbl_ignorecase col _col_ignorecase) (list (quote get_column) (resolve_column_alias tblvar alias) false col false)
+		((quote get_column) tblvar _tbl_ignorecase col _col_ignorecase) (list (quote get_column) (resolve_column_alias tblvar alias) false col false)
+		(cons head tail) (cons head (map tail (lambda (item) (canonical_column_expr_for_alias alias item))))
+		_ expr)))
+
+(define stage_aggregates_for_fields (lambda (fields)
+	(dedupe_aggregates_by_col
+		(merge (extract_assoc fields (lambda (_title expr) (extract_aggregates expr)))))))
+
+(define expr_has_aggregates? (lambda (expr)
+	(not (empty_list? (extract_aggregates expr)))))
+
+(define external_column_refs_for_alias (lambda (default_alias expr)
+	(match expr
+		((symbol count_distinct) _agg_expr) '()
+		((quote count_distinct) _agg_expr) '()
+		((symbol group_concat_distinct) _agg_expr _separator) '()
+		((quote group_concat_distinct) _agg_expr _separator) '()
+		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral) '()
+		((quote aggregate) _agg_expr _agg_reduce _agg_neutral) '()
+		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) '()
+		((quote aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) '()
+		((symbol get_column) tblvar ignorecase col col_ignorecase)
+		(if (or (nil? tblvar) (equal? (resolve_column_alias tblvar default_alias) default_alias))
+			'()
+			(list (list (quote get_column) tblvar ignorecase col col_ignorecase)))
+		((quote get_column) tblvar ignorecase col col_ignorecase)
+		(if (or (nil? tblvar) (equal? (resolve_column_alias tblvar default_alias) default_alias))
+			'()
+			(list (list (quote get_column) tblvar ignorecase col col_ignorecase)))
+		(cons _head tail) (merge_unique (map tail (lambda (item) (external_column_refs_for_alias default_alias item))))
+		_ '())))
+
+/* MySQL permits ORDER BY expressions which are neither projected aggregates
+nor GROUP BY keys. Preserve the grouping cardinality by selecting one value
+per group instead of silently widening the group key. */
+(define group_order_items_for_alias (lambda (default_alias keys order_items)
+	(map (coalesceNil order_items '()) (lambda (item) (match item
+		'(expr dir) (begin
+			(define resolved (canonical_column_expr_for_alias default_alias expr))
+			(if (or (contains? keys resolved) (expr_has_aggregates? expr))
+				(list expr dir)
+				(list
+					(list (quote aggregate) resolved (scalar_once_reduce_first) nil)
+					dir)))
+		_ item)))))
+
+(define query_block_has_aggregates? (lambda (block)
+	(not (empty_list? (stage_aggregates_for_fields (qb_fields block))))))
+
+/* SQL permits columns functionally dependent on a grouped primary key. Expand
+qualified stars before group lowering and carry the selected source columns as
+keys when that source's complete primary key is already grouped. Adding those
+columns cannot change group cardinality because the primary key is unique. */
+(define fields_request_star_for_source? (lambda (fields src)
+	(reduce (coalesceNil fields '()) (lambda (requested title_or_expr)
+		(if requested
+			true
+			(if (string? title_or_expr)
+				false
+				(star_expr_matches_source? title_or_expr src)))) false)))
+
+(define source_primary_key_grouped? (lambda (block src)
+	(begin
+		(define primary_key (source_primary_key_columns src))
+		(define default_alias (source_alias (car (qb_sources block))))
+		(define grouped (map (coalesceNil (qb_group block) '()) (lambda (expr)
+			(canonical_column_expr_for_alias default_alias expr))))
+		(and (not (empty_list? primary_key))
+			(reduce primary_key (lambda (complete col)
+				(and complete (contains? grouped
+					(canonical_column_expr_for_alias default_alias
+						(list (quote get_column) (source_alias src) false col false))))) true)))))
+
+(define functional_dependency_star_group_keys (lambda (block)
+	(merge (map (qb_sources block) (lambda (src)
+		(if (and (fields_request_star_for_source? (qb_fields block) src)
+			(source_primary_key_grouped? block src))
+			(map (binding_source_columns src) (lambda (col)
+				(list (quote get_column) (source_alias src) false col false)))
+			'()))))))
+
+(define expand_grouped_query_block (lambda (block)
+	(begin
+		(define dependency_keys (functional_dependency_star_group_keys block))
+		(if (empty_list? dependency_keys)
+			block
+			(make_query_block
+				(qb_schema block)
+				(qb_sources block)
+				(expand_query_block_fields (qb_sources block) (qb_fields block))
+				(qb_where block)
+				(merge_unique (list (qb_group block) dependency_keys))
+				(qb_having block)
+				(qb_order block)
+				(qb_limit block)
+				(qb_offset block)
+				(qb_hidden block)
+				(qb_stages block)
+				(qb_facts block))))))
+
+/* CONTRACT: a SELECT group stage owns one canonical key tuple and all of its
+visible, HAVING and ORDER aggregates. Key order is determined by source-aware
+expression recipes, never GROUP BY spelling, projection order or aliases.
+Every kN writer and reader uses gs_keys from this producer; consumers neither
+sort keys nor reinterpret their positions. Session/domain bindings remain
+explicit, including NULL, and SQL output/order expressions keep their order.
+
+Canonical ordering inspects query syntax only. The temporary recipe strings
+are built once per key during compilation, never from scanned rows or inside
+an execution guard. Trivial key tuples need no sort or recipe allocation. */
+(define canonical_group_key_order (lambda (input keys)
+	(if (or (empty_list? keys) (single_source? keys)) keys
+		(map (sort (map keys (lambda (key)
+			(list (serialize (canonical_helper_expr_using input key)) key)))
+			(lambda (a b) (< (car a) (car b)))) cadr))))
+
+/* An explicit SELECT group owns a row-count witness even when its only
+key is the literal 1. That key must not be confused with the synthetic key of
+an empty-preserving scalar group. Lookup helpers without a count witness keep
+their established filtered-domain contract. */
+(define group_stage_requires_presence_filter? (lambda (stage)
+	(and (not (qassoc_get (gs_facts stage) (quote preserve_empty_domain) false))
+		(not (scalar_value_stage? stage))
+		(or (contains? (gs_aggregates stage) aggregate_count_descriptor)
+			(and (not (equal? (gs_keys stage) '(1)))
+				(not (equal? (qassoc_get (gs_facts stage) (quote condition) true) true)))))))
+
+(define make_select_group_stage (lambda (block input)
+	(begin
+		(define query_input (query_block? input))
+		(define sources (if query_input (qb_sources input) (list input)))
+		(define src (if (empty_list? sources) nil (car sources)))
+		(define alias (if (nil? src) "__scalar_input" (source_alias src)))
+		(define session_keys (query_expr_session_reads block))
+		(define explicit_keys (map (coalesceNil (qb_group block) '()) (lambda (expr)
+			(canonical_column_expr_for_alias alias expr))))
+		(define keys (canonical_group_key_order input
+			(merge_unique (list explicit_keys session_keys))))
+		(define group_order (group_order_items_for_alias alias keys (qb_order block)))
+		(define ags (dedupe_aggregates_by_col (merge (list
+			(stage_aggregates_for_fields (qb_fields block))
+			(stage_aggregates_for_fields (qb_hidden block))
+			(extract_aggregates (coalesceNil (qb_having block) true))
+			(merge (map group_order (lambda (item) (extract_aggregates (car item)))))
+			(if (empty_list? (qb_group block)) '() (list aggregate_count_descriptor))))))
+		(make_group_stage
+			(if query_input
+				(concat "group:query:" (stable_structural_hash (list
+					(qb_sources block) (qb_where block) keys ags) true))
+				(concat "group:" (source_relation src) ":" (stable_structural_hash (list keys ags) false)))
+			input session_keys keys ags (qb_having block) (qb_fields block)
+			group_order (qb_limit block) (qb_offset block)
+			(merge (list
+				(list
+					(list (quote condition) (if query_input true (coalesceNil (qb_where block) true)))
+					(list (quote preserve_empty_domain) (empty_list? (qb_group block)))
+					(list (quote domain) session_keys)
+					(list (quote lookup-keys) session_keys))
+				(if query_input
+					(list (list (quote stage_catalog) (query_block_stage_catalog block))) '())))))))
+
+(define select_group_input (lambda (block)
+	(make_query_block (qb_schema block) (qb_sources block) '() (qb_where block)
+		'() nil '() nil nil '() (qb_stages block) (qb_facts block))))
+
+/* SELECT grouping has one logical owner. This pass completes decorrelation
+before logical aggregate rewrites or join search. A row query supplies input;
+the stage owns keys, aggregate recipes and HAVING. Its consumer refers only to
+stage output columns. Physical lowering must never reconstruct this boundary
+from SELECT/GROUP BY syntax. */
+(define select_group_block? (lambda (block)
+	(or (not (empty_list? (qb_group block)))
+		(not (nil? (qb_having block)))
+		(expr_has_local_aggregates? (qb_fields block))
+		(reduce (qb_order block) (lambda (found item)
+			(or found (expr_has_local_aggregates? (car item)))) false)
+		(expr_has_local_aggregates? (qb_hidden block)))))
+
+(define select_group_result_stage (lambda (block)
+	(begin
+		(define id (qassoc_get (qb_facts block) (quote select_group_result) nil))
+		(if (nil? id) nil (stage_by_id (qb_stages block) id)))))
+
+(define logical_select_group (lambda (block)
+	(begin
+		(define block (expand_grouped_query_block block))
+		(define sources (qb_sources block))
+		(define template (make_select_group_stage block
+			(if (and (single_source? sources) (source_is_base_table? (car sources))
+				(empty_list? (qb_stages block))) (car sources) (select_group_input block))))
+		(define stage (group_stage_with_facts template
+			(qassoc_set (gs_facts template) (quote purpose) (quote select_group))))
+		(define alias (concat "__select_group:" (gs_id stage)))
+		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
+		(define input (gs_input stage))
+		(define input_alias (group_stage_input_alias stage))
+		(define replace_expr (lambda (expr)
+			(replace_group_expr input input_alias alias keys (group_key_cols keys)
+				(gs_aggregates stage) expr)))
+		(define having (replace_expr (coalesceNil (gs_having stage) true)))
+		(define present (if (empty_list? (qb_group block)) true
+			(list (quote >) (list (quote get_column) alias false
+				(aggregate_col_name_using input aggregate_count_descriptor) false) 0)))
+		(make_query_block (qb_schema block)
+			(list (list alias (qb_schema block) (make_stage_output_relation (gs_id stage)) false nil))
+			(map_assoc (qb_fields block) (lambda (_title expr) (replace_expr expr)))
+			(combine_where having present) '() nil
+			(map (gs_order stage) (lambda (item)
+				(match item '(expr direction) (list (replace_expr expr) direction) _ item)))
+			(qb_limit block) (qb_offset block)
+			(map_assoc (qb_hidden block) (lambda (_title expr) (replace_expr expr)))
+			(cons stage (qb_stages block))
+			(qassoc_set (qb_facts block) (quote select_group_result) (gs_id stage))))))
+
+(define normalize_select_group_node (lambda (node)
+	(if (query_block? node)
+		(begin
+			(define block (make_query_block (qb_schema node) (qb_sources node)
+				(qb_fields node) (qb_where node) (qb_group node) (qb_having node)
+				(qb_order node) (qb_limit node) (qb_offset node) (qb_hidden node)
+				(map (qb_stages node) normalize_select_group_node) (qb_facts node)))
+			(if (select_group_block? block) (logical_select_group block) block))
+		(group_stage? node)
+		(make_group_stage (gs_id node) (normalize_select_group_node (gs_input node))
+			(gs_domain node) (gs_keys node) (gs_aggregates node) (gs_having node)
+			(gs_output node) (gs_order node) (gs_limit node) (gs_offset node) (gs_facts node))
+		(union_block? node)
+		(make_union_block (union_mode node) (map (union_branches node) normalize_select_group_node)
+			(union_order node) (union_limit node) (union_offset node) (union_facts node))
+		node)))
+
+(define normalize_select_groups (lambda (ir)
+	(begin
+		(define root (normalize_select_group_node (ir_root ir)))
+		(normalize_stage_dependencies (make_ir (ir_kind ir) root
+			(if (query_block? root) (qb_stages root) (ir_stages ir))
+			(ir_context_of ir) (ir_return ir))))))
+
 (define grouped_membership_inner_supported? (lambda (inner outer_sources)
 	(and (query_block? inner)
 		(and (not (empty_list? (qb_sources inner)))
@@ -3622,7 +3899,7 @@ without separately proving two-valued semantics. */
 		(if (not (equal? (count (qb_fields inner)) 2))
 			(neumann_fail "untangle_query" "IN subquery must expose exactly one column")
 			true)
-		(define stage (make_group_stage_for_query_block inner))
+		(define stage (make_select_group_stage inner (select_group_input inner)))
 		(define input_alias (group_stage_input_alias stage))
 		(define keys (gs_keys stage))
 		(define ags (gs_aggregates stage))
@@ -4000,7 +4277,7 @@ without separately proving two-valued semantics. */
 
 (define make_grouped_derived_stage_source (lambda (src alias inner)
 	(begin
-		(define stage (make_group_stage_for_query_block inner))
+		(define stage (make_select_group_stage inner (select_group_input inner)))
 		(define projection (grouped_derived_projection stage alias))
 		(define input_alias (group_stage_input_alias stage))
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
@@ -4762,7 +5039,11 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		Carry WHERE through logical decorrelation, including EXISTS/IN inputs;
 		filtering only the output scan would leave the window total unfiltered. */
 		(define condition (coalesceNil (uctx_get ctx (quote window-row-condition) true) true))
-		(define dependency_exprs (merge (list partition_exprs canonical_args (list condition))))
+		/* The dependency projection is a row relation. Its payload is already
+		owned by this window stage; copying aggregate constructors into hidden
+		input fields would incorrectly introduce another grouping boundary. */
+		(define ags (dedupe_aggregates_by_col (window_aggregate_descriptor fn canonical_args)))
+		(define dependency_exprs (merge (list partition_exprs (map ags car) (list condition))))
 		(define dependency_sources (window_stage_dependency_sources
 			outer_sources alias dependency_exprs))
 		(define dependency_hidden (merge (map (zip (produceN (count dependency_exprs)) dependency_exprs)
@@ -4775,7 +5056,6 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				'() condition '() nil '() nil nil dependency_hidden
 				(uctx_get ctx (quote window-row-stages) '())
 				(list (list (quote default_alias) alias))) ctx)))
-		(define ags (dedupe_aggregates_by_col (window_aggregate_descriptor fn canonical_args)))
 		(define keys (if (empty_list? partition_exprs)
 			'(1)
 			(map partition_exprs (lambda (expr) (canonical_column_expr_for_alias alias expr)))))
@@ -6874,26 +7154,27 @@ the base case. */
 		nil)))
 
 (define expr_has_local_aggregates? (lambda (expr)
-	(match expr
-		((symbol inner_select) _subquery) false
-		((quote inner_select) _subquery) false
-		((symbol inner_select_exists) _subquery) false
-		((quote inner_select_exists) _subquery) false
-		((symbol inner_select_in) _probe _subquery) false
-		((quote inner_select_in) _probe _subquery) false
-		((symbol dependent-subquery) _kind _probe _subquery _outer_sources) false
-		((quote dependent-subquery) _kind _probe _subquery _outer_sources) false
-		((symbol count_distinct) _agg_expr) true
-		((quote count_distinct) _agg_expr) true
-		((symbol group_concat_distinct) _agg_expr _separator) true
-		((quote group_concat_distinct) _agg_expr _separator) true
-		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral) true
-		((quote aggregate) _agg_expr _agg_reduce _agg_neutral) true
-		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) true
-		((quote aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) true
-		(cons _head tail) (reduce tail (lambda (found item)
-			(or found (expr_has_local_aggregates? item))) false)
-		_ false)))
+	(if (or (query_block? expr) (group_stage? expr) (union_block? expr)) false
+		(match expr
+			((symbol inner_select) _subquery) false
+			((quote inner_select) _subquery) false
+			((symbol inner_select_exists) _subquery) false
+			((quote inner_select_exists) _subquery) false
+			((symbol inner_select_in) _probe _subquery) false
+			((quote inner_select_in) _probe _subquery) false
+			((symbol dependent-subquery) _kind _probe _subquery _outer_sources) false
+			((quote dependent-subquery) _kind _probe _subquery _outer_sources) false
+			((symbol count_distinct) _agg_expr) true
+			((quote count_distinct) _agg_expr) true
+			((symbol group_concat_distinct) _agg_expr _separator) true
+			((quote group_concat_distinct) _agg_expr _separator) true
+			((symbol aggregate) _agg_expr _agg_reduce _agg_neutral) true
+			((quote aggregate) _agg_expr _agg_reduce _agg_neutral) true
+			((symbol aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) true
+			((quote aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) true
+			(cons _head tail) (reduce tail (lambda (found item)
+				(or found (expr_has_local_aggregates? item))) false)
+			_ false))))
 
 /* Aggregates owned by scalar subqueries do not aggregate their containing
 query block. Keeping this scope boundary explicit lets a derived UNION be
@@ -6946,7 +7227,7 @@ can be represented by the same reducer. */
 					(map (union_branches relation) (lambda (branch)
 						(wrap_embedded_union_branch_query input_wrapper src branch canonical_fields)))
 					'() nil nil (qassoc_set (union_facts relation) (quote alias) alias)) ctx))
-				(define template (make_group_stage_for_query_block block))
+				(define template (make_select_group_stage block (select_group_input block)))
 				(define stage (make_group_stage (gs_id template) input
 					(gs_domain template) (gs_keys template) (gs_aggregates template)
 					(gs_having template) (gs_output template) (gs_order template)
@@ -7386,6 +7667,10 @@ Do not generalize this proof to joins, nullable UNIQUE keys or partial PKs. */
 				(list (quote compile-budget-ms) 1000)
 				(list (quote operator-model) (quote combined))))
 			(quote rows)))
-		(require_flat_stage_dependencies "untangle_query" (normalize_stage_dependencies ir)))))
+		/* Finish the combined operator model before publishing IR. Type contracts
+		must be resolved before aggregate descriptors are named; flatten the
+		completed stage graph once, after every SELECT owns its grouping. */
+		(require_flat_stage_dependencies "untangle_query"
+			(normalize_select_groups (sql_type_annotate_ir ir))))))
 
 /* ------------------------------------------------------------------------- */
