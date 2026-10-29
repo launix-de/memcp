@@ -5525,37 +5525,42 @@ through that same source map. */
 		(define prepared (group_stage_prejoin_plan stage projected))
 		(list (quote !begin) (car prepared) (lower_select_group_stage (cadr prepared))))))
 
-/* Compare a direct joined row producer with a maintained scalar projection.
-Only logical cardinalities and generated work units enter this decision. Cache
-existence/topology never does: storage owns building and reusing the relation.
-The group reduction is common to both inputs and cancels from the comparison. */
-(define group_stage_join_input_costs (lambda (rows joins width)
-	(list
-		(planner_cost (* (+ joins 1) planner_membership_scan_invocation_ns)
-			(* rows planner_membership_scan_row_ns)
-			(* rows joins planner_membership_direct_probe_row_ns)
-			0 0 0 0 0 rows 0.5)
-		(planner_cost planner_membership_group_cache_startup_ns
-			(* rows planner_membership_scan_row_ns)
-			(* rows width planner_membership_map_column_row_ns)
-			0 0 0 (* rows width 16) 0 rows 0.5))))
-
-(define group_stage_prejoin_cost_preferred? (lambda (rows joins width)
+/* A maintained carrier must pay for its unfiltered join and publication.
+The direct alternative consumes the selected logical join cost, including
+selectivity and lookup keys. Cost the same selected tree without consumer
+filters for carrier construction; never replace it with raw driver cardinality.
+The existing join-cost dependency owners cover these same source statistics. */
+(define group_stage_join_input_costs (lambda (stage projected planning_session)
 	(begin
-		(define costs (group_stage_join_input_costs rows joins width))
-		(planner_cost_better? (cadr costs) (car costs)))))
+		(define input (gs_input stage))
+		(define sources (qb_sources input))
+		(define tree (query_block_join_plan input sources))
+		(define direct (qassoc_get (qb_facts input) (quote join_cost) nil))
+		(define unfiltered (make_query_block (qb_schema input)
+			(prejoin_sources_without_join_conditions sources) '()
+			(prejoin_join_condition input) '() nil '() nil nil '() '() '()))
+		(define build (join_optimizer_nested_scan_cost (qb_stages input) sources
+			(qassoc_get (qb_facts input) (quote default_alias) (source_alias (car sources)))
+			(extract_join_hypergraph unfiltered)
+			(list (list (quote tree) tree)) planning_session))
+		(define rows (qassoc_get build (quote expected_rows) 0))
+		(define output_rows (qassoc_get direct (quote expected_rows) rows))
+		(define width (/ (count (qb_fields projected)) 2))
+		(define reuse (max 1 (qassoc_get (gs_facts stage) (quote reuse) 1)))
+		(list direct
+			(planner_cost planner_membership_group_cache_startup_ns
+				(* output_rows planner_membership_scan_row_ns)
+				(* output_rows width planner_membership_map_column_row_ns)
+				0 0 (/ (+ (qassoc_get build (quote execution_ns) 0)
+					(* rows planner_group_relation_build_row_ns)) reuse)
+				(* rows width 16) 0 output_rows 0.5)))))
 
 (define lower_group_stage_join_alternatives (lambda (stage projected)
 	(begin
 		(define input (gs_input stage))
 		(define sources (qb_sources input))
-		(define driver (join_optimizer_source_by_alias sources
-			(join_optimizer_tree_first_alias (query_block_join_plan input sources))))
-		(define rows (planner_source_row_count driver))
-		(define joins (- (count sources) 1))
-		(define width (/ (count (qb_fields projected)) 2))
-		(define costs (group_stage_join_input_costs rows joins width))
 		(define session (direct_group_join_stage_planning_session stage))
+		(define costs (group_stage_join_input_costs stage projected session))
 		(define id (concat "select_group_input:" (gs_id stage)))
 		(define normal (if (planner_cost_better? (cadr costs) (car costs)) "maintained_prejoin" "direct_join"))
 		(define forced (planner_physical_override id session))
@@ -5563,19 +5568,13 @@ The group reduction is common to both inputs and cancels from the comparison. */
 			(list "decision" "select_group_input") (list "chosen" (coalesceNil forced normal))
 			(list "cache_relation" (prejoin_table_name input
 				(qassoc_get (qb_facts input) (quote default_alias) (source_alias (car sources)))))
-			(list "normally_chosen" normal) (list "selection" (if (nil? forced) "runtime_cost" "forced"))
-			(list "inputs" (list (list "driver_rows" rows) (list "joins" joins) (list "projection_width" width)))
+			(list "normally_chosen" normal) (list "selection" (if (nil? forced) "cost" "forced"))
 			(list "alternatives" (list
 				(list (list "plan" "direct_join") (list "cost" (planner_cost_explain (car costs))))
 				(list (list "plan" "maintained_prejoin") (list "cost" (planner_cost_explain (cadr costs))))))) session)
-		(if (equal? forced "maintained_prejoin") (lower_group_stage_prejoin stage projected)
-			(equal? forced "direct_join")
-			(lower_direct_query_group_stage stage (gs_output stage) (gs_order stage) (gs_offset stage) (gs_limit stage))
-			(list (quote if)
-				(list (quote group_stage_prejoin_cost_preferred?)
-					(list (quote scan_estimate) (source_table_expr driver)) joins width)
-				(lower_group_stage_prejoin stage projected)
-				(lower_direct_query_group_stage stage (gs_output stage) (gs_order stage) (gs_offset stage) (gs_limit stage)))))))
+		(if (equal? (coalesceNil forced normal) "maintained_prejoin")
+			(lower_group_stage_prejoin stage projected)
+			(lower_direct_query_group_stage stage (gs_output stage) (gs_order stage) (gs_offset stage) (gs_limit stage))))))
 
 /* Both physical producers consume the same declared scalar interface. Ordered
 output retains the maintained relation; unordered output may also use the
