@@ -1152,6 +1152,32 @@ test_cases:
           total: 199
 
 
+  - name: "UNION stage catalog follows branch-owned stage merging"
+    scm: |
+      (begin
+        (define ag (list 1 (quote +) 0))
+        (define facts (list (list (quote null_semantics) (quote scalar))))
+        (define input (list "r" "memcp-tests" "dtl_join_ref" false nil))
+        (define first (make_group_stage "catalog-first" input '() '(1)
+          (list ag) nil '() '() nil nil facts))
+        (define second (make_group_stage "catalog-second" input '() '(1)
+          (list ag) nil '() '() nil nil facts))
+        (define stages (list first second))
+        (define branch (make_query_block "memcp-tests"
+          (list
+            (list "a" "memcp-tests" (make_stage_output_relation "catalog-first") true true)
+            (list "b" "memcp-tests" (make_stage_output_relation "catalog-second") true true))
+          (list "value" (list (quote get_column) "b" false (aggregate_col_name ag) false))
+          true nil nil nil nil nil '() stages '()))
+        (define merged (merge_compatible_stage_output_left_joins_ir
+          (make_ir (quote union) (make_union_block "all" (list branch) nil nil nil '())
+            stages nil (quote rows))))
+        (define branch_stages (qb_stages (car (union_branches (ir_root merged)))))
+        (if (and (equal? (count branch_stages) 1)
+          (equal? (map (ir_stages merged) gs_id) (map branch_stages gs_id)))
+          "ok"
+          (error "UNION retained a stale pre-merge stage catalog")))
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS dtl_main"
   - sql: "DROP TABLE IF EXISTS dtl_hist"

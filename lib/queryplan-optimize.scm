@@ -5765,11 +5765,27 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 				(union_facts block))
 			(merge_unique (map branch_results (lambda (item) (nth item 1))))))))
 
-/* Index logical stage producers by ID; consumer references are rewritten by
-those producers, never inferred from a column-name prefix or stage width. */
+/* Index stage producers by ID. Logical consumers use exact producer bindings;
+physical cache-column adapters share this index after logical planning. */
 (define stage_output_stage_index (lambda (stages)
 	(reduce (coalesceNil stages '()) (lambda (index stage)
 		(if (group_stage? stage) (set_assoc index (gs_id stage) stage) index)) '())))
+
+(define stage_output_single_aggregate_columns (lambda (stage_index sources)
+	(filter (map (coalesceNil sources '()) (lambda (src)
+		(begin
+			(define relation (source_relation src))
+			(define stage (if (stage_output_relation? relation)
+				(get_assoc stage_index (stage_output_relation_id relation))
+				nil))
+			(if (and (group_stage? stage) (equal? (count (gs_aggregates stage)) 1))
+				(list (source_alias src) (quote aggregate-column)
+					(aggregate_col_name_using (gs_input stage) (car (gs_aggregates stage))))
+				nil))))
+		(lambda (entry) (not (nil? entry))))))
+
+(define aggregate_column_name? (lambda (col)
+	(and (string? col) (and (>= (strlen col) 4) (equal? (substr col 0 4) "agg_")))))
 
 /* ------------------------------------------------------------------------- */
 /* Boolean constant-folding on the normalized IR (todos/boolean-tautology-folding.md).
@@ -6195,7 +6211,8 @@ Derived rebinding, stage merging, boolean folding and demand pruning retain
 this obligation. normalize_stage_dependencies consumes their completed output;
 it must not guess that any agg_* reference means a stage's sole aggregate.
 Aggregate descriptors and source bindings still determine physical cache names.
-No later repair walk is needed or permitted to supply missing logical bindings. */
+Dependency normalization has no later repair sweep. Physical cache-column
+adapters remain owned by physical lowering. */
 (define normalize_stage_dependencies (lambda (ir)
 	(begin
 		(define root_result (normalize_stage_dependencies_node (ir_root ir)))
@@ -6635,6 +6652,10 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 				(if (not (nil? found))
 					found
 					(match entry
+						'(entry_alias (symbol aggregate-column) replacement)
+						(if (and (equal? entry_alias alias) (aggregate_column_name? col))
+							replacement
+							nil)
 						'(entry_alias entry_col replacement)
 						(if (and (equal? entry_alias alias) (equal? entry_col col))
 							replacement
@@ -6808,7 +6829,7 @@ Nested query blocks otherwise retain a removed helper alias after stage merging.
 		(make_ir
 			(ir_kind ir)
 			root
-			(if (query_block? root) (qb_stages root) (ir_stages ir))
+			(if (query_block? root) (qb_stages root) (join_reorder_node_stage_catalog root))
 			(ir_context_of ir)
 			(ir_return ir)))))
 
