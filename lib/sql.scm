@@ -282,8 +282,7 @@ adding a raw value equality would needlessly partition the cache per user. */
 			(map (produceN (coalesceNil (condition_accumulator "count") 0))
 				(lambda (idx) (condition_accumulator (concat "condition:" idx))))))
 		(define statistics_guard (sql_queryplan_statistics_guard_from_session planning_session))
-		(define raw_guard (sql_queryplan_conjoin_guards
-			(merge (list conditions (list statistics_guard)))))
+		(define raw_guard (sql_queryplan_conjoin_guards conditions))
 		(define binding_session (planning_session "__memcp_queryplan_guard_bindings"))
 		(define binding_catalog (planning_session "__memcp_queryplan_guard_binding_catalog"))
 		(define all_bindings (if (nil? binding_catalog)
@@ -303,13 +302,17 @@ adding a raw value equality would needlessly partition the cache per user. */
 		/* Bind producers in dependency order inside one lexical scope. A lambda
 		per binding duplicates the remaining guard through nested compilation;
 		sequential definitions preserve dependencies without that nesting. */
-		(sql_queryplan_runtime_guard_expr
+		(define cost_guard
 			(if (empty_list? bindings) complete_guard
 				(list (list (quote lambda) '()
 					(cons (quote !begin) (merge (list
 						(map bindings (lambda (binding)
 							(list (quote define) (car binding) (cadr binding))))
-						(list complete_guard)))))))
+						(list complete_guard))))))))
+		/* Source dependencies establish table lifetimes before any cost binding
+		reads predicate feedback from a dropped or replaced helper relation. */
+		(sql_queryplan_runtime_guard_expr
+			(sql_queryplan_conjoin_guards (list statistics_guard cost_guard))
 			(map (sql_queryplan_preparations_from_session planning_session)
 				(lambda (preparation) (planner_queryplan_observation_metric_key (car preparation))))))))
 
