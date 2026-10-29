@@ -275,13 +275,21 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 
 func (cluster *nodeCluster) report(resource mosiResource) replicaRecord {
 	cluster.bootstrapCell(resource)
-	if cluster.manager.lookupCell(resource) == nil {
+	r := cluster.manager
+	r.mu.Lock()
+	// Forwarding changes the cell's resource before publishing its immutable
+	// lookup snapshot. A caller may therefore already carry the successor UUID
+	// while lookupCell still misses it. Absence, routing and permission belong
+	// to this ONE directory snapshot under the existing report serialization;
+	// a warm lookup miss is not evidence that cluster authority is unknown.
+	c := r.cells[resource.key()]
+	if c == nil {
+		r.mu.Unlock()
 		return replicaRecord{Resource: resource, State: "IO"}
 	}
-	r := cluster.manager
-	c := r.resourceCell(resource)
-	r.mu.Lock()
-	record := r.directory.Records[r.resourceKey(resource)]
+	c = c.resolved()
+	resource = r.canonicalResource(resource)
+	record := r.directory.Records[resource.key()]
 	// Sample permission while the existing directory owner still protects the
 	// routing hint. Copying an old record, unlocking, then observing new IO could
 	// omit the successor published before that revocation and falsely report an
