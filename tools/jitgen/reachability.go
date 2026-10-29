@@ -180,6 +180,21 @@ func (r *ssaReachability) evaluate(value ssa.Value) ssaConstantFact {
 			}
 		}
 		return result
+	case *ssa.Call:
+		if builtin, ok := v.Call.Value.(*ssa.Builtin); ok && (builtin.Name() == "len" || builtin.Name() == "cap") {
+			argument := r.fact(v.Call.Args[0])
+			if argument.dynamic || argument.value == nil {
+				return argument
+			}
+			// A nil slice/map/channel has zero length (and, where legal,
+			// capacity). Prove this before visiting unreachable element loads.
+			if argument.value.Value == nil {
+				switch v.Call.Args[0].Type().Underlying().(type) {
+				case *types.Slice, *types.Map, *types.Chan:
+					return ssaConstantFact{value: ssa.NewConst(constant.MakeInt64(0), v.Type())}
+				}
+			}
+		}
 	case *ssa.BinOp:
 		if r.zeroRemainder(v) {
 			return ssaConstantFact{value: ssa.NewConst(constant.MakeInt64(0), v.Type())}

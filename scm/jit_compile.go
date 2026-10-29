@@ -607,7 +607,7 @@ func jitEmitReducerInitializer(ctx *JITContext, value JITValueDesc) JITValueDesc
 		target := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(offset)}
 		ctx.ReclaimUntrackedRegs()
 		preserved := ctx.PreserveOuterRegs()
-		result := JITEmitProcInlineWithOuter(ctx, &value.Lambda.Proc, value.Lambda.Outer, nil, ctx.SliceBase, target)
+		result := JITEmitProcInlineWithOuter(ctx, value.Lambda.Proc, value.Lambda.Outer, nil, ctx.SliceBase, target)
 		ctx.RestoreOuterRegs(preserved)
 		ctx.ReclaimUntrackedRegs()
 		return result
@@ -2529,7 +2529,7 @@ func jitEmitDeclaredGoVariadicCallFromExprs(ctx *JITContext, fn func(...Scmer) S
 		argsOff = ctx.AllocStack(int32(argc * 16))
 		for i := range argExprs {
 			expected := JITValueDesc{Loc: LocAny}
-			if param := jitDeclarationParam(decl, i); param != nil && param.Kind == "func" && param.NoEscape && param.SameGoroutine {
+			if param := jitDeclarationParam(decl, i, len(argExprs)); param != nil && hasTypeKind(param.Kind, "func") && param.NoEscape && param.SameGoroutine {
 				expected.StackFunc = true
 			}
 			jitCompileRootedCallValueAtResult(ctx, argExprs[i], sliceBase, argsOff+int32(i*16), expected)
@@ -2889,6 +2889,49 @@ func jitCompileStaticProcCall(ctx *JITContext, callable Scmer, proc *Proc, opera
 }
 
 func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer, decl *Declaration, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	// Higher-order SCM composition may bind a compiler-only lambda in a local
+	// slot. Keep it as code rather than materializing a Proc and crossing an ABI
+	// boundary merely because the call head is a local variable.
+	binding := callableExpr.WithoutSourceInfo()
+	bindingEnv := ctx.Env
+	for binding.IsSlice() {
+		parts := binding.Slice()
+		if len(parts) != 3 || jitSyntaxKind(parts[0]) != SyntaxOuter {
+			break
+		}
+		depth, valid := outerDepthLiteral(parts[1])
+		if !valid {
+			break
+		}
+		for ; depth > 0 && bindingEnv != nil; depth-- {
+			bindingEnv = bindingEnv.Outer
+		}
+		binding = parts[2].WithoutSourceInfo()
+	}
+	var known JITValueDesc
+	if bindingEnv != nil {
+		if binding.IsSymbol() {
+			known, _ = bindingEnv.Lookup(binding.Symbol())
+		} else if binding.IsNthLocalVar() && int(binding.NthLocalVar()) < len(bindingEnv.Numbered) {
+			known = bindingEnv.Numbered[binding.NthLocalVar()]
+		}
+	}
+	if known.Loc == LocLambdaTemplate && known.Lambda != nil {
+		arguments := make([]JITValueDesc, len(operands))
+		for index, operand := range operands {
+			arguments[index] = jitCompileRootedCallValue(ctx, operand, sliceBase)
+		}
+		stable := ctx.StabilizeCallbackArgs(arguments)
+		offset := ctx.AllocStack(16)
+		ctx.PrepareScmerStackTarget(offset)
+		target := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: offset, Rooted: true}
+		preserved := ctx.PreserveOuterRegs()
+		out := JITEmitProcInlineWithOuter(ctx, known.Lambda.Proc, known.Lambda.Outer, stable, sliceBase, target)
+		ctx.EmitStoreScmerToStack(out, offset)
+		ctx.RestoreOuterRegs(preserved)
+		ctx.Coverage.InlinedCalls++
+		return jitPlaceScmerIntoTarget(ctx, target, result)
+	}
 	if parser, ok := jitStaticParserForExpr(ctx, callableExpr); ok {
 		if len(operands) != 1 {
 			panic("jit: parser call expects one input")
@@ -2913,7 +2956,7 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 	operandValues := make([]JITValueDesc, len(operands))
 	for index, operand := range operands {
 		expected := JITValueDesc{Loc: LocAny}
-		if param := jitDeclarationParam(decl, index); param != nil && param.Kind == "func" && param.NoEscape && param.SameGoroutine {
+		if param := jitDeclarationParam(decl, index, len(operands)); param != nil && hasTypeKind(param.Kind, "func") && param.NoEscape && param.SameGoroutine {
 			expected.StackFunc = true
 		}
 		operandValues[index] = jitCompileRootedCallValueAtResult(ctx, operand, sliceBase, operandOff+int32(index*16), expected)
@@ -3137,7 +3180,7 @@ func jitEmitGeneratedCallBoundary(ctx *JITContext, declaration *Declaration, sou
 			panic("jit: generated callback has no source expression")
 		}
 		expected := JITValueDesc{Loc: LocAny}
-		if param := jitDeclarationParam(declaration, index); param != nil && param.Kind == "func" && param.NoEscape && param.SameGoroutine {
+		if param := jitDeclarationParam(declaration, index, len(args)); param != nil && hasTypeKind(param.Kind, "func") && param.NoEscape && param.SameGoroutine {
 			expected.StackFunc = true
 		}
 		args[index] = jitCompileExpr(ctx, sourceArgs[index], ctx.SliceBase, expected)
@@ -3158,7 +3201,7 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 	// at the declaration boundary instead of abandoning the enclosing JIT proc.
 	for index, arg := range args {
 		if arg.Loc == LocLambdaTemplate {
-			if param := jitDeclarationParam(declaration, index); param != nil && param.Kind == "func" {
+			if param := jitDeclarationParam(declaration, index, len(args)); param != nil && hasTypeKind(param.Kind, "func") {
 				for _, input := range param.Params {
 					if input != nil && input.Variadic {
 						return false
@@ -3183,8 +3226,8 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 		if arg.Type != JITTypeUnknown || hasKnownShape {
 			knownArgs++
 		}
-		parameter := jitDeclarationParam(declaration, index)
-		if parameter != nil && parameter.Kind == "func" {
+		parameter := jitDeclarationParam(declaration, index, len(args))
+		if parameter != nil && hasTypeKind(parameter.Kind, "func") {
 			hasCallback = true
 			if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
 				(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
@@ -3573,9 +3616,9 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			if decl.Type.JITVirtualArgs {
 				args := make([]JITValueDesc, len(list)-1)
 				for i := 1; i < len(list); i++ {
-					param := jitDeclarationParam(decl, i-1)
-					if param != nil && param.Kind == "func" {
-						args[i-1] = jitCompileCallArgument(ctx, decl, i-1, list[i], sliceBase)
+					param := jitDeclarationParam(decl, i-1, len(list)-1)
+					if param != nil && hasTypeKind(param.Kind, "func") {
+						args[i-1] = jitCompileCallArgument(ctx, decl, i-1, len(list)-1, list[i], sliceBase)
 						continue
 					}
 					argExpr := list[i]
@@ -3642,7 +3685,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 						break
 					}
 				}
-				args[i-1] = jitCompileCallArgument(ctx, decl, i-1, list[i], sliceBase)
+				args[i-1] = jitCompileCallArgument(ctx, decl, i-1, len(list)-1, list[i], sliceBase)
 				if args[i-1].Loc == LocRegPair && !args[i-1].NoHeapPointer {
 					args[i-1] = jitRootScmer(ctx, args[i-1])
 				}
@@ -3773,6 +3816,8 @@ func jitProcInlineEnv(ctx *JITContext, proc *Proc, outer *JITEnv, args []JITValu
 	if localCount < len(args) {
 		localCount = len(args)
 	}
+	captureBase, captures := proc.JITCapturedLocals()
+	localCount = max(localCount, captureBase+len(captures))
 	numbered := make([]JITValueDesc, localCount)
 	copy(numbered, args)
 	if firstAssignment >= 0 && firstAssignment < len(args) {
@@ -3785,10 +3830,17 @@ func jitProcInlineEnv(ctx *JITContext, proc *Proc, outer *JITEnv, args []JITValu
 		}
 	}
 	for index := len(args); index < len(numbered); index++ {
+		if index >= captureBase && index < captureBase+len(captures) {
+			continue // immutable captures bind directly below, without a nil store
+		}
 		off := ctx.AllocStack(16)
 		nilValue := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil(), NoHeapPointer: true}
 		ctx.EmitStoreScmerToStack(nilValue, off)
 		numbered[index] = JITValueDesc{Loc: LocStackPair, Type: tagNil, StackOff: off, NoHeapPointer: true, Rooted: true}
+	}
+	for index, value := range captures {
+		ctx.TrackImm(value)
+		numbered[captureBase+index] = JITValueDesc{Loc: LocImm, Type: value.GetTag(), Imm: value, Rooted: true}
 	}
 	var vars map[Symbol]JITValueDesc
 	bindParam := func(param Scmer, index int) {
@@ -3885,21 +3937,22 @@ func jitLambdaTemplate(expr Scmer, outer *JITEnv) (*JITLambdaTemplate, bool) {
 	if len(parts) > 3 {
 		numVars = int(ToInt(parts[3]))
 	}
-	return &JITLambdaTemplate{Proc: Proc{Params: params, Body: parts[2], NumVars: numVars, NumberedOnly: procCanUseNumberedOnly(params, parts[2], numVars)}, Outer: outer}, true
+	// Syntax templates own an ordinary header with no capture tail. Keep it
+	// and the template in one allocation; concrete ProcJIT templates instead
+	// point at their original variable-sized allocation.
+	owned := &struct {
+		JITLambdaTemplate
+		procedure Proc
+	}{procedure: Proc{Params: params, Body: parts[2], NumVars: numVars, NumberedOnly: procCanUseNumberedOnly(params, parts[2], numVars)}}
+	owned.Proc, owned.Outer = &owned.procedure, outer
+	return &owned.JITLambdaTemplate, true
 }
 
-func jitDeclarationParam(decl *Declaration, index int) *TypeDescriptor {
-	if decl == nil || decl.Type == nil || len(decl.Type.Params) == 0 {
+func jitDeclarationParam(decl *Declaration, index, arity int) *TypeDescriptor {
+	if decl == nil {
 		return nil
 	}
-	if index < len(decl.Type.Params) {
-		return decl.Type.Params[index]
-	}
-	last := decl.Type.Params[len(decl.Type.Params)-1]
-	if last.Variadic {
-		return last
-	}
-	return nil
+	return decl.Type.Parameter(index, arity)
 }
 
 func jitDeclarationHasCallback(decl *Declaration) bool {
@@ -3907,7 +3960,7 @@ func jitDeclarationHasCallback(decl *Declaration) bool {
 		return false
 	}
 	for _, param := range decl.Type.Params {
-		if param != nil && param.Kind == "func" {
+		if param != nil && hasTypeKind(param.Kind, "func") {
 			return true
 		}
 	}
@@ -3939,9 +3992,9 @@ func jitLambdaTemplateCapturesFrame(ctx *JITContext, lambda *JITLambdaTemplate) 
 	return len(outerCaptures) != 0 || len(namedOuterCaptures) != 0
 }
 
-func jitCompileCallArgument(ctx *JITContext, decl *Declaration, index int, expr Scmer, sliceBase Reg) JITValueDesc {
-	param := jitDeclarationParam(decl, index)
-	if param != nil && param.Kind == "func" {
+func jitCompileCallArgument(ctx *JITContext, decl *Declaration, index, arity int, expr Scmer, sliceBase Reg) JITValueDesc {
+	param := jitDeclarationParam(decl, index, arity)
+	if param != nil && hasTypeKind(param.Kind, "func") {
 		transfersInput := false
 		for _, callbackParam := range param.Params {
 			transfersInput = transfersInput || callbackParam != nil && callbackParam.Transfer
@@ -3957,14 +4010,7 @@ func jitCompileCallArgument(ctx *JITContext, decl *Declaration, index int, expr 
 			}
 		}
 	}
-	hasCallback := false
-	for _, candidate := range decl.Type.Params {
-		if candidate.Kind == "func" {
-			hasCallback = true
-			break
-		}
-	}
-	if hasCallback {
+	if jitDeclarationHasCallback(decl) {
 		for expr.GetTag() == tagSourceInfo {
 			expr = expr.SourceInfo().value
 		}

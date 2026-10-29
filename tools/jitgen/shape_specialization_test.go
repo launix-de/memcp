@@ -28,13 +28,13 @@ func TestStructuralSliceConditionSpecializesHelper(t *testing.T) {
 	if failure != "" {
 		t.Fatal(failure)
 	}
-	if !strings.Contains(code, "if (((len(args)-1)%2)!=0) {") {
+	if !strings.Contains(code, "if ((len(virtualArgs0)%2)!=0) {") {
 		t.Fatalf("argument shape was not staged in emitter:\n%s", code)
 	}
-	if strings.Count(code, "GoFuncAddr(pick)") != 1 {
-		t.Fatalf("only the unsupported arm should keep its native boundary:\n%s", code)
+	if strings.Contains(code, "GoFuncAddr(pick)") || strings.Count(code, "GoFuncAddr(unsupported)") != 1 {
+		t.Fatalf("the helper must inline both arms while retaining the unsupported leaf call:\n%s", code)
 	}
-	if !strings.Contains(code, "jitMaterializeVirtualGoSlice(ctx, args[1:])") {
+	if !strings.Contains(code, "jitMaterializeVirtualGoSlice(ctx, virtualArgs") {
 		t.Fatal("native arm lost the virtual slice boundary")
 	}
 }
@@ -78,5 +78,67 @@ func TestWritableMethodUsesOrdinaryNilSpecialization(t *testing.T) {
 		if strings.Contains(code, forbidden) {
 			t.Fatalf("method bypassed nil specialization (%s):\n%s", forbidden, code)
 		}
+	}
+}
+
+func TestVariadicTailViewsPreserveDescriptorDirectory(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+ type Scmer struct { ptr, aux uint64 }
+ func tail(values []Scmer) Scmer {
+  last := values[len(values)-1]
+  values = values[:len(values)-1]
+  if len(values) == 0 { return last }
+  return values[0]
+ }
+ func builtin(args ...Scmer) Scmer { return tail(args[1:]) }
+`, "builtin")
+	code, failure := generateClosure("builtin", fn, nil)
+	if failure != "" {
+		t.Fatal(failure)
+	}
+	if strings.Contains(code, "GoFuncAddr(tail)") || strings.Contains(code, "jitMaterializeVirtualGoSlice") {
+		t.Fatalf("arity-only views crossed a native slice boundary:\n%s", code)
+	}
+	if !strings.Contains(code, "variadic slice bound is not known during emission") || !strings.Contains(code, ".Imm.Int())]") {
+		t.Fatalf("tail bounds were not retained as compiler values:\n%s", code)
+	}
+}
+
+func TestKnownGoClosureNilComparison(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+ type Scmer struct { ptr, aux uint64 }
+ func call(value Scmer, fn func(Scmer) Scmer) Scmer {
+  if fn != nil { return fn(value) }
+  return value
+ }
+ func builtin(args ...Scmer) Scmer {
+  value := args[0]
+  return call(args[1], func(Scmer) Scmer { return value })
+ }
+`, "builtin")
+	code, failure := generateClosure("builtin", fn, nil)
+	if failure != "" {
+		t.Fatal(failure)
+	}
+	if strings.Contains(code, "if .Loc") || strings.Contains(code, "GoFuncAddr(call)") {
+		t.Fatalf("known Go closure was lost at helper boundary:\n%s", code)
+	}
+	if !strings.Contains(code, "Imm: NewBool(true)") {
+		t.Fatal("closure's non-nil proof was not folded")
+	}
+}
+
+func TestNewSliceUsesBorrowedSubview(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+ type Scmer struct { ptr, aux uint64 }
+ func NewSlice(values []Scmer) Scmer
+ func builtin(args ...Scmer) Scmer { return NewSlice(args[1:]) }
+`, "builtin")
+	code, failure := generateClosure("builtin", fn, nil)
+	if failure != "" {
+		t.Fatal(failure)
+	}
+	if !strings.Contains(code, "Virtual: append([]JITValueDesc(nil), virtualArgs0...)") {
+		t.Fatalf("constructor discarded its subview: %s", code)
 	}
 }

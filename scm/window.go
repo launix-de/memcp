@@ -796,6 +796,7 @@ func init_window() {
 					d21 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d22.Reg, Reg2: r1}
 					ctx.BindReg(d22.Reg, &d21)
 					ctx.BindReg(r1, &d21)
+					ctx.EnsureDesc(&d21)
 					if d21.Loc == LocImm {
 						d23 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d21.Imm.Int())}
 					} else if d21.Type == tagInt && d21.Loc == LocRegPair {
@@ -808,7 +809,8 @@ func init_window() {
 						ctx.BindReg(d21.Reg, &d23)
 						ctx.BindReg(d21.Reg, &d23)
 					} else {
-						d23 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d21}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d21)
+						d23 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d23.Type = tagInt
 						ctx.BindReg(d23.Reg, &d23)
 					}
@@ -825,6 +827,7 @@ func init_window() {
 					d26 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d27.Reg, Reg2: r2}
 					ctx.BindReg(d27.Reg, &d26)
 					ctx.BindReg(r2, &d26)
+					ctx.EnsureDesc(&d26)
 					if d26.Loc == LocImm {
 						d28 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d26.Imm.Int())}
 					} else if d26.Type == tagInt && d26.Loc == LocRegPair {
@@ -837,7 +840,8 @@ func init_window() {
 						ctx.BindReg(d26.Reg, &d28)
 						ctx.BindReg(d26.Reg, &d28)
 					} else {
-						d28 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d26}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d26)
+						d28 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d28.Type = tagInt
 						ctx.BindReg(d28.Reg, &d28)
 					}
@@ -854,6 +858,7 @@ func init_window() {
 					d31 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d32.Reg, Reg2: r3}
 					ctx.BindReg(d32.Reg, &d31)
 					ctx.BindReg(r3, &d31)
+					ctx.EnsureDesc(&d31)
 					if d31.Loc == LocImm {
 						d33 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d31.Imm.Int())}
 					} else if d31.Type == tagInt && d31.Loc == LocRegPair {
@@ -866,7 +871,8 @@ func init_window() {
 						ctx.BindReg(d31.Reg, &d33)
 						ctx.BindReg(d31.Reg, &d33)
 					} else {
-						d33 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d31}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d31)
+						d33 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d33.Type = tagInt
 						ctx.BindReg(d33.Reg, &d33)
 					}
@@ -2775,6 +2781,7 @@ func init_window() {
 					ctx.StabilizeDescForControlFlow(&d5)
 					d6 = args[2]
 					d6.ID = 0
+					ctx.EnsureDesc(&d6)
 					if d6.Loc == LocImm {
 						d7 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d6.Imm.Int())}
 					} else if d6.Type == tagInt && d6.Loc == LocRegPair {
@@ -2787,7 +2794,8 @@ func init_window() {
 						ctx.BindReg(d6.Reg, &d7)
 						ctx.BindReg(d6.Reg, &d7)
 					} else {
-						d7 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d6}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d6)
+						d7 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d7.Type = tagInt
 						ctx.BindReg(d7.Reg, &d7)
 					}
@@ -2911,6 +2919,7 @@ func init_window() {
 					d25 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d26.Reg, Reg2: r1}
 					ctx.BindReg(d26.Reg, &d25)
 					ctx.BindReg(r1, &d25)
+					ctx.EnsureDesc(&d25)
 					if d25.Loc == LocImm {
 						d27 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d25.Imm.Int())}
 					} else if d25.Type == tagInt && d25.Loc == LocRegPair {
@@ -2923,7 +2932,8 @@ func init_window() {
 						ctx.BindReg(d25.Reg, &d27)
 						ctx.BindReg(d25.Reg, &d27)
 					} else {
-						d27 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d25}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d25)
+						d27 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d27.Type = tagInt
 						ctx.BindReg(d27.Reg, &d27)
 					}
@@ -3953,6 +3963,7 @@ func init_window() {
 					d230 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d231.Reg, Reg2: r23}
 					ctx.BindReg(d231.Reg, &d230)
 					ctx.BindReg(r23, &d230)
+					ctx.EnsureDesc(&d230)
 					if d230.Loc == LocImm {
 						d232 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d230.Imm.Int())}
 					} else if d230.Type == tagInt && d230.Loc == LocRegPair {
@@ -3965,7 +3976,8 @@ func init_window() {
 						ctx.BindReg(d230.Reg, &d232)
 						ctx.BindReg(d230.Reg, &d232)
 					} else {
-						d232 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d230}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d230)
+						d232 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d232.Type = tagInt
 						ctx.BindReg(d232.Reg, &d232)
 					}

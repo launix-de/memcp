@@ -357,14 +357,7 @@ func callParameterDescriptor(call []Scmer, argIndex int) *TypeDescriptor {
 	if decl == nil || decl.Type == nil || len(decl.Type.Params) == 0 {
 		return nil
 	}
-	idx := argIndex
-	if idx >= len(decl.Type.Params) {
-		idx = len(decl.Type.Params) - 1
-	}
-	if idx < 0 {
-		return nil
-	}
-	return decl.Type.Params[idx]
+	return decl.Type.Parameter(argIndex, len(call)-1)
 }
 
 func analyzeTrackedEscapes(expr Scmer, symbol Symbol, resultEscapes bool, escaped map[string]bool) {
@@ -1862,16 +1855,6 @@ func optimizerCallType(call []Scmer, env *Env, ome *optimizerMetainfo) *TypeDesc
 	return nil
 }
 
-func optimizerCallParam(callType *TypeDescriptor, argIndex int) *TypeDescriptor {
-	if callType == nil || len(callType.Params) == 0 || argIndex < 0 {
-		return nil
-	}
-	if argIndex >= len(callType.Params) {
-		argIndex = len(callType.Params) - 1
-	}
-	return callType.Params[argIndex]
-}
-
 func optimizerIsLambda(expr Scmer) bool {
 	if stripped, ok := scmerStripSourceInfo(expr); ok {
 		expr = stripped
@@ -2356,7 +2339,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					visitNode(sub[0], depth+1, captured, captureOnce, false, region, blacklist)
 					callType := optimizerCallType(sub, env, ome)
 					for i := 1; i < len(sub); i++ {
-						param := optimizerCallParam(callType, i-1)
+						param := callType.Parameter(i-1, len(sub)-1)
 						argLambdaOnce := optimizerIsLambda(sub[i]) && param != nil && param.Kind == "func" && param.CallsOnce
 						visitNode(sub[i], depth+1, captured, captureOnce, argLambdaOnce, region, blacklist)
 					}
@@ -3242,17 +3225,9 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		}
 		ome.pendingCallbackReturn = nil
 		if i > 0 && callType != nil {
-			paramIdx := i - 1
-			if len(callType.Params) == 0 {
-				// no type info
-			} else if paramIdx >= len(callType.Params) {
-				paramIdx = len(callType.Params) - 1
-			}
-			if paramIdx >= 0 && paramIdx < len(callType.Params) {
-				if ti := callType.Params[paramIdx]; ti != nil && ti.Kind == "func" {
-					ome.pendingCallbackParams = ti.Params
-					ome.pendingCallbackReturn = ti.Return
-				}
+			if parameter := callType.Parameter(i-1, len(v)-1); parameter != nil && hasTypeKind(parameter.Kind, "func") {
+				ome.pendingCallbackParams = parameter.Params
+				ome.pendingCallbackReturn = parameter.Return
 			}
 		}
 		var ti TypeInfo
@@ -3340,14 +3315,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 				if i == 1 && firstArgTransferred {
 					continue
 				}
-				paramIdx := i - 1
-				if paramIdx >= len(decl.Type.Params) {
-					paramIdx = len(decl.Type.Params) - 1 // variadic: use last param
-				}
-				if paramIdx < 0 {
-					continue
-				}
-				ti := decl.Type.Params[paramIdx]
+				ti := decl.Type.Parameter(i-1, len(v)-1)
 				if ti == nil || !ti.NoEscape || ti.CrossGoroutine {
 					continue // unknown, escaping, or cross-goroutine parameter
 				}

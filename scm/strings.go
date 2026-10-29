@@ -553,7 +553,7 @@ func init_strings() {
 			Return:             &TypeDescriptor{Kind: "list"},
 			Const:              true,
 			JITInlineCost:      32,
-			JITInlineCallbacks: true,
+			JITInlineCallbacks: false,
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				declaration := declarations["regexp_matches"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
@@ -1492,7 +1492,7 @@ func init_strings() {
 				d2 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Func), []JITValueDesc{d1}, 1)
 				d2.NoHeapPointer = false
 				ctx.BindReg(d2.Reg, &d2)
-				d3 := jitMaterializeVirtualGoSlice(ctx, args[0:])
+				d3 := jitMaterializeVirtualGoSlice(ctx, args)
 				d4 := ctx.EmitGoCallScalar(GoFuncAddr(jitInvokeGoFunctionSlice), []JITValueDesc{d2, d3}, 2)
 				if d4.Loc == LocImm {
 					if result.Loc == LocAny {
@@ -1530,7 +1530,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs:     true,
-			JITInlineCallbacks: true,
+			JITInlineCallbacks: false,
 			JITInlineCost:      6,
 		},
 	})
@@ -1754,6 +1754,7 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
+					ctx.EnsureDesc(&d3)
 					if d3.Loc == LocImm {
 						d4 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d3.Imm.Int())}
 					} else if d3.Type == tagInt && d3.Loc == LocRegPair {
@@ -1766,7 +1767,8 @@ func init_strings() {
 						ctx.BindReg(d3.Reg, &d4)
 						ctx.BindReg(d3.Reg, &d4)
 					} else {
-						d4 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d3}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d3)
+						d4 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d4.Type = tagInt
 						ctx.BindReg(d4.Reg, &d4)
 					}
@@ -2363,6 +2365,7 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
+					ctx.EnsureDesc(&d134)
 					if d134.Loc == LocImm {
 						d135 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d134.Imm.Int())}
 					} else if d134.Type == tagInt && d134.Loc == LocRegPair {
@@ -2375,7 +2378,8 @@ func init_strings() {
 						ctx.BindReg(d134.Reg, &d135)
 						ctx.BindReg(d134.Reg, &d135)
 					} else {
-						d135 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d134}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d134)
+						d135 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d135.Type = tagInt
 						ctx.BindReg(d135.Reg, &d135)
 					}
@@ -2518,6 +2522,7 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
+					ctx.EnsureDesc(&d141)
 					if d141.Loc == LocImm {
 						d142 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d141.Imm.Int())}
 					} else if d141.Type == tagInt && d141.Loc == LocRegPair {
@@ -2530,7 +2535,8 @@ func init_strings() {
 						ctx.BindReg(d141.Reg, &d142)
 						ctx.BindReg(d141.Reg, &d142)
 					} else {
-						d142 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d141}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d141)
+						d142 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d142.Type = tagInt
 						ctx.BindReg(d142.Reg, &d142)
 					}
@@ -3563,6 +3569,7 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
+					ctx.EnsureDesc(&d61)
 					if d61.Loc == LocImm {
 						d62 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d61.Imm.Int())}
 					} else if d61.Type == tagInt && d61.Loc == LocRegPair {
@@ -3575,7 +3582,8 @@ func init_strings() {
 						ctx.BindReg(d61.Reg, &d62)
 						ctx.BindReg(d61.Reg, &d62)
 					} else {
-						d62 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d61}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d61)
+						d62 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d62.Type = tagInt
 						ctx.BindReg(d62.Reg, &d62)
 					}
@@ -4287,6 +4295,7 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
+					ctx.EnsureDesc(&d239)
 					if d239.Loc == LocImm {
 						d240 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d239.Imm.Int())}
 					} else if d239.Type == tagInt && d239.Loc == LocRegPair {
@@ -4299,7 +4308,8 @@ func init_strings() {
 						ctx.BindReg(d239.Reg, &d240)
 						ctx.BindReg(d239.Reg, &d240)
 					} else {
-						d240 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d239}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d239)
+						d240 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d240.Type = tagInt
 						ctx.BindReg(d240.Reg, &d240)
 					}
@@ -14711,6 +14721,7 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
+					ctx.EnsureDesc(&d11)
 					if d11.Loc == LocImm {
 						d12 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d11.Imm.Int())}
 					} else if d11.Type == tagInt && d11.Loc == LocRegPair {
@@ -14723,7 +14734,8 @@ func init_strings() {
 						ctx.BindReg(d11.Reg, &d12)
 						ctx.BindReg(d11.Reg, &d12)
 					} else {
-						d12 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d11}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d11)
+						d12 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d12.Type = tagInt
 						ctx.BindReg(d12.Reg, &d12)
 					}
@@ -20580,6 +20592,7 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
+					ctx.EnsureDesc(&d1)
 					if d1.Loc == LocImm {
 						d2 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d1.Imm.Int())}
 					} else if d1.Type == tagInt && d1.Loc == LocRegPair {
@@ -20592,7 +20605,8 @@ func init_strings() {
 						ctx.BindReg(d1.Reg, &d2)
 						ctx.BindReg(d1.Reg, &d2)
 					} else {
-						d2 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d1}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d1)
+						d2 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d2.Type = tagInt
 						ctx.BindReg(d2.Reg, &d2)
 					}
@@ -22959,6 +22973,7 @@ func init_strings() {
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst, src *[32]byte) { *dst = *src }), []JITValueDesc{d16, d22})
 					sliceResults23 := JITEmitGoCallResults(ctx, GoFuncAddr(func(value *[32]byte) []byte { return value[0:32:32] }), []JITValueDesc{d16}, []uint8{3}, []uint8{1})
 					d24 = sliceResults23[0]
+					_ = d24
 					d24 = JITPrepareGoSliceArg(ctx, d24)
 					if d24.Loc != LocRegTriple && d24.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (hex.EncodeToString arg0)")
@@ -23931,7 +23946,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs:     true,
-			JITInlineCallbacks: true,
+			JITInlineCallbacks: false,
 			JITInlineCost:      28,
 		},
 		Optimize: optimizeRegexpTest,
@@ -24596,6 +24611,7 @@ func init_strings() {
 					ctx.ReclaimUntrackedRegs()
 					d42 = args[1]
 					d42.ID = 0
+					ctx.EnsureDesc(&d42)
 					if d42.Loc == LocImm {
 						d43 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d42.Imm.Int())}
 					} else if d42.Type == tagInt && d42.Loc == LocRegPair {
@@ -24608,7 +24624,8 @@ func init_strings() {
 						ctx.BindReg(d42.Reg, &d43)
 						ctx.BindReg(d42.Reg, &d43)
 					} else {
-						d43 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d42}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d42)
+						d43 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d43.Type = tagInt
 						ctx.BindReg(d43.Reg, &d43)
 					}
@@ -24736,6 +24753,7 @@ func init_strings() {
 					ctx.FreeDesc(&d66)
 					d69 = args[1]
 					d69.ID = 0
+					ctx.EnsureDesc(&d69)
 					if d69.Loc == LocImm {
 						d70 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d69.Imm.Int())}
 					} else if d69.Type == tagInt && d69.Loc == LocRegPair {
@@ -24748,7 +24766,8 @@ func init_strings() {
 						ctx.BindReg(d69.Reg, &d70)
 						ctx.BindReg(d69.Reg, &d70)
 					} else {
-						d70 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d69}, 1)
+						boxed := JITPrepareScmerGoArg(ctx, d69)
+						d70 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 						d70.Type = tagInt
 						ctx.BindReg(d70.Reg, &d70)
 					}

@@ -33,10 +33,7 @@ func (g *codeGen) callShapeCondition(fn *ssa.Function, args []ssa.Value, proof *
 	for i, arg := range args {
 		value := g.vals[g.rewriteSSAValue(arg).Name()]
 		if value.marker == "_variadic_args" {
-			code := fmt.Sprintf("(len(args)-%d)", value.variadicOffset)
-			if value.variadicLenKnown {
-				code = fmt.Sprint(value.variadicLen)
-			}
+			code := fmt.Sprintf("len(%s)", variadicArgs(value))
 			lengths[fn.Params[i]] = code
 		}
 	}

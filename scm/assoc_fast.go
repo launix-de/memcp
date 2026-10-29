@@ -794,13 +794,10 @@ func mergeAssoc(input, source Scmer, merger []Scmer, mutable bool) Scmer {
 // setAssoc decodes the public variadic convention once. Internally, pairs and
 // the optional merger are separate borrowed views; neither input is copied.
 func setAssoc(args []Scmer, mutable bool) Scmer {
-	updates := args[1:]
-	var merger []Scmer
-	if len(updates)%2 != 0 {
-		merger = updates[len(updates)-1:]
-		updates = updates[:len(updates)-1]
+	if len(args)%2 == 0 {
+		return setAssocPairs(args[0], args[1:len(args)-1], args[len(args)-1:], mutable)
 	}
-	return setAssocPairs(args[0], updates, merger, mutable)
+	return setAssocPairs(args[0], args[1:], nil, mutable)
 }
 
 // setAssocPairs is the common implementation of both association builtins.

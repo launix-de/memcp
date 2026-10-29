@@ -196,3 +196,26 @@ func step(value uint64) uint64 { return value + 1 }
 		t.Fatal("folded unsigned high bit was lost")
 	}
 }
+
+func TestReachabilityNilSliceLengthPrunesElementAccess(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func pick(values []int) int { if len(values) != 0 { return values[0] }; return cap(values) }
+`, "pick")
+	proof := analyzeSSAReachability(fn, map[ssa.Value]*ssa.Const{fn.Params[0]: ssa.NewConst(nil, fn.Params[0].Type())})
+	for _, block := range fn.Blocks {
+		if !proof.blocks[block] {
+			continue
+		}
+		for _, instruction := range block.Instrs {
+			if _, access := instruction.(*ssa.IndexAddr); access {
+				t.Fatal("nil slice element access is still reachable")
+			}
+			if ret, ok := instruction.(*ssa.Return); ok {
+				value := proof.constant(ret.Results[0])
+				if value == nil || constant.Sign(value.Value) != 0 {
+					t.Fatal("nil slice capacity was not folded")
+				}
+			}
+		}
+	}
+}

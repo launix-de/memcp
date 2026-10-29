@@ -1772,6 +1772,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		ctx.MarkLabel(lbl13)
 		ctx.ResolveFixups()
 		ctx.ReclaimUntrackedRegs()
+		ctx.EnsureDesc(&args[0])
 		if args[0].Loc == LocImm {
 			d186 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
 		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
@@ -1782,7 +1783,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d186 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg}
 			ctx.BindReg(args[0].Reg, &d186)
 		} else {
-			d186 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{args[0]}, 1)
+			boxed := JITPrepareScmerGoArg(ctx, args[0])
+			d186 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 			d186.Type = tagInt
 			ctx.BindReg(d186.Reg, &d186)
 		}
@@ -1984,6 +1986,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		ctx.MarkLabel(lbl15)
 		ctx.ResolveFixups()
 		ctx.ReclaimUntrackedRegs()
+		ctx.EnsureDesc(&args[0])
 		if args[0].Loc == LocImm {
 			d228 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
 		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
@@ -1994,7 +1997,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d228 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg}
 			ctx.BindReg(args[0].Reg, &d228)
 		} else {
-			d228 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{args[0]}, 1)
+			boxed := JITPrepareScmerGoArg(ctx, args[0])
+			d228 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 			d228.Type = tagInt
 			ctx.BindReg(d228.Reg, &d228)
 		}
@@ -2249,6 +2253,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		ctx.MarkLabel(lbl18)
 		ctx.ResolveFixups()
 		ctx.ReclaimUntrackedRegs()
+		ctx.EnsureDesc(&args[0])
 		if args[0].Loc == LocImm {
 			d279 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
 		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
@@ -2259,10 +2264,12 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d279 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg}
 			ctx.BindReg(args[0].Reg, &d279)
 		} else {
-			d279 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{args[0]}, 1)
+			boxed := JITPrepareScmerGoArg(ctx, args[0])
+			d279 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 			d279.Type = tagInt
 			ctx.BindReg(d279.Reg, &d279)
 		}
+		ctx.EnsureDesc(&args[1])
 		if args[1].Loc == LocImm {
 			d280 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[1].Imm.Int())}
 		} else if args[1].Type == tagInt && args[1].Loc == LocRegPair {
@@ -2273,7 +2280,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d280 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[1].Reg}
 			ctx.BindReg(args[1].Reg, &d280)
 		} else {
-			d280 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{args[1]}, 1)
+			boxed := JITPrepareScmerGoArg(ctx, args[1])
+			d280 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 			d280.Type = tagInt
 			ctx.BindReg(d280.Reg, &d280)
 		}
@@ -2329,6 +2337,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		ctx.MarkLabel(lbl19)
 		ctx.ResolveFixups()
 		ctx.ReclaimUntrackedRegs()
+		ctx.EnsureDesc(&args[0])
 		if args[0].Loc == LocImm {
 			d283 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
 		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
@@ -2339,7 +2348,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d283 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg}
 			ctx.BindReg(args[0].Reg, &d283)
 		} else {
-			d283 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{args[0]}, 1)
+			boxed := JITPrepareScmerGoArg(ctx, args[0])
+			d283 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 			d283.Type = tagInt
 			ctx.BindReg(d283.Reg, &d283)
 		}
@@ -2425,6 +2435,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		ctx.MarkLabel(lbl20)
 		ctx.ResolveFixups()
 		ctx.ReclaimUntrackedRegs()
+		ctx.EnsureDesc(&args[0])
 		if args[0].Loc == LocImm {
 			d288 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
 		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
@@ -2435,10 +2446,12 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d288 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg}
 			ctx.BindReg(args[0].Reg, &d288)
 		} else {
-			d288 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{args[0]}, 1)
+			boxed := JITPrepareScmerGoArg(ctx, args[0])
+			d288 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 			d288.Type = tagInt
 			ctx.BindReg(d288.Reg, &d288)
 		}
+		ctx.EnsureDesc(&args[1])
 		if args[1].Loc == LocImm {
 			d289 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[1].Imm.Int())}
 		} else if args[1].Type == tagInt && args[1].Loc == LocRegPair {
@@ -2449,7 +2462,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			d289 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[1].Reg}
 			ctx.BindReg(args[1].Reg, &d289)
 		} else {
-			d289 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{args[1]}, 1)
+			boxed := JITPrepareScmerGoArg(ctx, args[1])
+			d289 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
 			d289.Type = tagInt
 			ctx.BindReg(d289.Reg, &d289)
 		}

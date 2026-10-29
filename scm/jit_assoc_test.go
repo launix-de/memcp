@@ -127,3 +127,61 @@ func BenchmarkAssocCompilation(b *testing.B) {
 		})
 	}
 }
+
+func groupedAssocTestProc(t testing.TB) Scmer {
+	t.Helper()
+	proc := preparedTestProc(t, `(lambda (rows)
+		(reduce rows (lambda (dict row)
+			(set_assoc dict (list (nth row 0)) (list (nth row 1) 1)
+				(lambda (old new) (list (+ (nth old 0) (nth new 0)) (+ (nth old 1) (nth new 1))))))
+			(lambda () (list))))`)
+	if jitEnabled {
+		proc = jitCompile(proc)
+		if proc.Proc().compiled() == nil {
+			t.Fatal("grouped reducer did not compile")
+		}
+	}
+	return proc
+}
+
+func groupedAssocTestRows() Scmer {
+	rows := make([]Scmer, 256)
+	for i := range rows {
+		rows[i] = NewSlice([]Scmer{NewInt(int64(i % 64)), NewInt(int64(i))})
+	}
+	return NewSlice(rows)
+}
+
+func checkGroupedAssocResult(t testing.TB, result Scmer) {
+	t.Helper()
+	for key := int64(0); key < 64; key++ {
+		got := Apply(result, NewSlice([]Scmer{NewInt(key)}))
+		want := NewSlice([]Scmer{NewInt(4*key + 384), NewInt(4)})
+		if !Equal(got, want) {
+			t.Fatalf("group %d: got %s, want %s", key, String(got), String(want))
+		}
+	}
+}
+
+func TestGroupedAssocReducerKnownMerger(t *testing.T) {
+	proc := groupedAssocTestProc(t)
+	rows := groupedAssocTestRows()
+	first := Apply(proc, rows)
+	checkGroupedAssocResult(t, first)
+	checkGroupedAssocResult(t, Apply(proc, rows))
+	runtime.GC()
+	checkGroupedAssocResult(t, first)
+}
+
+func BenchmarkGroupedAssocReducer(b *testing.B) {
+	proc := groupedAssocTestProc(b)
+	call := PrepareSerialProc(proc)
+	args := []Scmer{groupedAssocTestRows()}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		assocBenchmarkSink = call.Call(args)
+	}
+	b.StopTimer()
+	checkGroupedAssocResult(b, assocBenchmarkSink)
+}
