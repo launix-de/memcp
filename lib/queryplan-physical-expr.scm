@@ -6964,14 +6964,21 @@ input relation of another carrier, never in that carrier's own row domain. */
 		(list (source_schema src) (source_relation src))
 		payload) true))))
 
-/* Equality, additive-range and snapshot dimensions share the group-cache
-identity and table-ownership contract. Snapshot anchors are aggregate columns
-of the same dimensional cells, not a separate planner cache. */
-(define make_group_cache (lambda (kind schema relation dimensions)
-	(list kind schema relation dimensions)))
+/* CONTRACT: make_group_cache publishes the complete immutable physical
+cell layout: (schema relation coordinate-names equality-access). Every cache
+uses the native table carrier. Coordinates follow the declared dimension
+order; each dimension kind has its own axis numbering, including interleaved
+kinds. Names and access slots are derived together once, before publication.
+Consumers accept this descriptor directly; they never rebuild its layout or
+retain request state. This tuple is plan metadata, not a persisted format;
+physical relation and column names retain their existing identity. */
+(define make_group_cache (lambda (schema relation dimensions)
+	(begin
+		(define names (group_cache_coordinate_names dimensions))
+		(list schema relation names (group_cache_cell_access names)))))
 
-(define group_cache_dimensions (lambda (cache)
-	(if (list? cache) (coalesceNil (nth cache 3) '()) '())))
+(define group_cache_dimension_names (lambda (cache) (nth cache 2)))
+(define group_cache_access (lambda (cache) (nth cache 3)))
 
 /* Range cuts may leave the point domain only when their semantic uses are
 exactly the additive filter. A cut used in a payload or a scalar dependency
@@ -7033,7 +7040,7 @@ its original filter remains valid for both full builds and delta evaluation. */
 					(gs_having stage) (gs_output stage) (gs_order stage) (gs_limit stage) (gs_offset stage) (gs_facts stage)))))))
 
 (define group_stage_cell_cache (lambda (stage dimensions)
-	(make_group_cache (quote group-keytable) (group_stage_schema stage)
+	(make_group_cache (group_stage_schema stage)
 		(concat (group_stage_cache_relation stage) ":cells-v3:"
 			(stable_structural_hash (map dimensions car) true)) dimensions)))
 
@@ -7048,11 +7055,10 @@ initialization and eviction ownership. Dimensions describe keys, never owners. *
 (define group_cache_create (lambda (schema name columns options ifnotexists tx)
 	(createtable schema name columns options ifnotexists tx)))
 
-(define group_cache_dimension_names (lambda (cache)
-	(merge (map (produceN (count (group_cache_dimensions cache))) (lambda (i)
+(define group_cache_coordinate_names (lambda (dimensions)
+	(merge (mapIndex dimensions (lambda (i dimension)
 		(!begin
-			(define dimensions (group_cache_dimensions cache))
-			(define kind (car (nth dimensions i)))
+			(define kind (car dimension))
 			(define axis (count (filter (slice dimensions 0 i) (lambda (d) (equal? (car d) kind)))))
 			(match kind
 				(symbol point) (list (group_key_col_name axis))
@@ -7083,7 +7089,7 @@ initialization and eviction ownership. Dimensions describe keys, never owners. *
 	(!begin
 		(define carrier (table (group_cache_schema cache) false (group_cache_relation cache) false))
 		(if (or (nil? carrier) (nil? (resolve_column_name (group_cache_schema cache) (group_cache_relation cache) payload false))) nil
-			(scan tx carrier (group_cache_cell_access (group_cache_dimension_names cache))
+			(scan tx carrier (group_cache_access cache)
 				coordinates '() (lambda () true)
 				(list payload) (lambda (_ value) value) nil (lambda (a b) (coalesceNil a b)) false)))))
 
@@ -7092,7 +7098,7 @@ initialization and eviction ownership. Dimensions describe keys, never owners. *
 		(define carrier (table (group_cache_schema cache) false (group_cache_relation cache) false))
 		(insert carrier (group_cache_dimension_names cache) (list coordinates)
 			'() (lambda () true) false nil tx)
-		(scan tx carrier (group_cache_cell_access (group_cache_dimension_names cache))
+		(scan tx carrier (group_cache_access cache)
 			coordinates '() (lambda () true) (list (concat "$set:" payload))
 			(lambda (_ write) (write value)) nil nil false))))
 
@@ -7115,14 +7121,8 @@ cost. Building additional state (snapshot contributions) waits for a later call.
 					(if (retain result) (group_cache_candidate_delete tx (group_cache_relation cache)) false) false)
 				result)))))
 
-(define group_cache_kind (lambda (cache)
-	(if (list? cache) (nth cache 0) nil)))
-
-(define group_cache_schema (lambda (cache)
-	(if (list? cache) (nth cache 1) nil)))
-
-(define group_cache_relation (lambda (cache)
-	(if (list? cache) (nth cache 2) nil)))
+(define group_cache_schema (lambda (cache) (nth cache 0)))
+(define group_cache_relation (lambda (cache) (nth cache 1)))
 
 (define group_stage_schema (lambda (stage)
 	(begin
@@ -7163,7 +7163,7 @@ cost. Building additional state (snapshot contributions) waits for a later call.
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define input_identity (canonical_group_input_identity stage rewrite))
 		(define canonical_keys (rewrite keys))
-		(make_group_cache (quote group-keytable) schema (if (empty_list? range_domains)
+		(make_group_cache schema (if (empty_list? range_domains)
 			(group_table_name schema label input_identity canonical_keys
 				(rewrite condition))
 			(range_group_table_name schema label input_identity canonical_keys

@@ -103,10 +103,32 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS grc_events"
 
 test_cases:
+  - name: "Published cache coordinates keep independent axes in declared order"
+    scm: |
+      (begin
+        (define cache (make_group_cache "memcp-tests" ".grp:interleaved-coordinate-contract"
+          (list (list 'point 'tenant) (list 'range-domain 'amount) (list 'snapshot 'revision)
+            (list 'point 'region) (list 'snapshot 'generation) (list 'range-domain 'quantity))))
+        (group_cache_ensure_cells cache "value" nil '())
+        (group_cache_write_cell cache '(7 0 10 0 20 100 8 200 0 30 0 40) "value" '(41) nil)
+        (group_cache_write_cell cache '(7 0 10 0 20 100 9 200 0 30 0 40) "value" '(99) nil)
+        (and (equal? (group_cache_dimension_names cache)
+              '("k0" "range_from_kind" "range_from" "range_to_kind" "range_to"
+                "snapshot_0" "k1" "snapshot_1" "range_1_from_kind" "range_1_from" "range_1_to_kind" "range_1_to"))
+          (equal? (group_cache_read_cell cache '(7 0 10 0 20 100 8 200 0 30 0 40) "value" nil) '(41))
+          (equal? (group_cache_read_cell cache '(7 0 10 0 20 100 9 200 0 30 0 40) "value" nil) '(99))))
+    expect: {data: [true]}
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS `.grp:interleaved-coordinate-contract`"
+
+  - name: "Cache layout constructor rejects an unknown dimension kind"
+    scm: '(make_group_cache "memcp-tests" ".grp:invalid-coordinate-contract" (list (list (quote unknown) 0)))'
+    expect: {error: true}
+
   - name: "One group cache relation stores point range and snapshot coordinates"
     scm: |
       (begin
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:mixed-dimensions"
+        (define cache (make_group_cache "memcp-tests" ".grp:mixed-dimensions"
           (list (list 'point 'tenant) (list 'range-domain 'amount) (list 'snapshot 'revision))))
         (group_cache_ensure_cells cache "agg_total" nil '())
         (group_cache_write_cell cache '(7 0 10 0 20 100)  "agg_total" (list 100 (list) (list 30 2 30) 2 (list 1 10 2 20)) nil)
@@ -122,7 +144,7 @@ test_cases:
   - name: "Snapshot payloads are columns of the same multidimensional relation"
     scm: |
       (begin
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:mixed-dimensions"
+        (define cache (make_group_cache "memcp-tests" ".grp:mixed-dimensions"
           (list (list 'point 'tenant) (list 'range-domain 'amount) (list 'snapshot 'revision))))
         (group_cache_ensure_cells cache "agg_other" nil '())
         (group_cache_write_cell cache '(7 0 10 0 20 100)  "agg_other" (list 100 (list) (list 5 1 5) 1 (list 1 5)) nil)
@@ -135,7 +157,7 @@ test_cases:
   - name: "Group cache candidates defer the first materialization"
     scm: |
       (begin
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:admission-snapshot" (list (list 'snapshot 0))))
+        (define cache (make_group_cache "memcp-tests" ".grp:admission-snapshot" (list (list 'snapshot 0))))
         (define first (group_cache_execute cache 1 nil (lambda () 17) (lambda () (error "first use built a cache")) nil))
         (and (equal? first 17)
           (nil? (table "memcp-tests" false ".grp:admission-snapshot" false))
@@ -146,7 +168,7 @@ test_cases:
   - name: "Paid work materializes through the shared group cache path"
     scm: |
       (begin
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:admission-snapshot" (list (list 'snapshot 0))))
+        (define cache (make_group_cache "memcp-tests" ".grp:admission-snapshot" (list (list 'snapshot 0))))
         (define value (group_cache_execute cache 1 nil (lambda () (error "paid work was ignored"))
           (lambda () (begin
             (group_cache_ensure_cells cache "agg_sum" nil '())
@@ -161,7 +183,7 @@ test_cases:
   - name: "Paid scalar admission retains the direct result without evaluating it again"
     scm: |
       (begin
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:admission-point" (list (list 'point 'k))))
+        (define cache (make_group_cache "memcp-tests" ".grp:admission-point" (list (list 'point 'k))))
         (define calls (newsession))
         (calls "count" 0)
         (define value (group_cache_point cache "agg_value" 1 (lambda () '(7)) nil (lambda () '())
@@ -176,7 +198,7 @@ test_cases:
   - name: "Unpaid scalar work leaves only a group cache candidate"
     scm: |
       (begin
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:unpaid-point" (list (list 'point 'k))))
+        (define cache (make_group_cache "memcp-tests" ".grp:unpaid-point" (list (list 'point 'k))))
         (define value (group_cache_point cache "agg_value" 1000000000000 (lambda () '(7)) nil (lambda () '()) (lambda () 17)))
         (and (equal? value 17) (nil? (table "memcp-tests" false ".grp:unpaid-point" false))
           (group_cache_work_paid? nil ".grp:unpaid-point" 1)))
@@ -187,7 +209,7 @@ test_cases:
     scm: |
       (!begin
         (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-admission-dependencies" (list (list 'point 'k))))
+        (define cache (make_group_cache "memcp-tests" ".grp:grc-admission-dependencies" (list (list 'point 'k))))
         (define sources (lambda () (list (table "memcp-tests" false "grc_cache_dependency" false))))
         (define first (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 79)))
         (rebuild (table "memcp-tests" false "grc_cache_dependency" false))
@@ -1369,7 +1391,7 @@ test_cases:
         (define actual
           (!begin
             (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
-            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-snapshot-dml" (list (list 'snapshot 'axis))))
+            (define cache (make_group_cache "memcp-tests" ".grp:grc-snapshot-dml" (list (list 'snapshot 'axis))))
             (define sources (lambda () (list (table "memcp-tests" false "grc_cache_dependency" false))))
             (define changes (lambda (lo hi) (error "stale anchor survived DML")))
             (define values (lambda (keys) (error "stale delta after DML")))
@@ -1393,7 +1415,7 @@ test_cases:
       (begin
         (define __snapshot_test_actual
           (begin
-            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-snapshot-corrections" (list (list 'snapshot 'axis))))
+            (define cache (make_group_cache "memcp-tests" ".grp:grc-snapshot-corrections" (list (list 'snapshot 'axis))))
             (define snapshot (lambda (tx axis sources full changed evaluate fallback)
               (snapshot_group_cache cache "value" (lambda () '()) tx axis 4 sources full changed evaluate fallback)))
             (define view (lambda () '()))
@@ -1418,7 +1440,7 @@ test_cases:
         (define actual
           (!begin
             (define source (table "memcp-tests" false "grc_cache_dependency" false))
-            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-rejected-snapshot" (list (list 'snapshot 'axis))))
+            (define cache (make_group_cache "memcp-tests" ".grp:grc-rejected-snapshot" (list (list 'snapshot 'axis))))
             (define sources (lambda () (list source)))
             (define rejected (try (lambda ()
               (with_autocommit session (req "__session_state") (req "__query_seq") "snapshot source write" (lambda (tx)
@@ -1444,7 +1466,7 @@ test_cases:
       (begin
         (define __snapshot_test_actual
           (begin
-            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-unadmitted-snapshot" (list (list 'snapshot 'axis))))
+            (define cache (make_group_cache "memcp-tests" ".grp:grc-unadmitted-snapshot" (list (list 'snapshot 'axis))))
             (snapshot_group_cache cache "value" (lambda () '()) nil 1 contribution_snapshot_key_budget (lambda () '()) (lambda () (error "unadmitted full scan"))
               (lambda (a b) (list)) (lambda (keys) (list)) (lambda () 23)))
         )
@@ -1466,7 +1488,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 0 4 (lambda () '())
+          (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 0 4 (lambda () '())
             (lambda () '(1 4 2 nil 3 0 4 0)) (lambda (a b) (error "unexpected cover"))
             (lambda (keys) (error "unexpected delta")) (lambda () (error "unexpected fallback")))
         )
@@ -1480,7 +1502,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 0 4 (lambda () '())
+          (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 0 4 (lambda () '())
             (lambda () (error "repeated full scan")) (lambda (a b) (error "repeated cover"))
             (lambda (keys) (error "repeated delta")) (lambda () (error "unexpected fallback")))
         )
@@ -1494,7 +1516,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 1 4 (lambda () '())
+          (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 1 4 (lambda () '())
             (lambda () (error "unnecessary full scan")) (lambda (a b) '(1 2))
             (lambda (keys) '(1 nil 2 -3)) (lambda () (error "unexpected fallback")))
         )
@@ -1509,7 +1531,7 @@ test_cases:
       (begin
         (define __snapshot_test_actual
           (map '(1 0 1) (lambda (x)
-            (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil x 4 (lambda () '())
+            (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil x 4 (lambda () '())
               (lambda () (error "repeated full scan")) (lambda (a b) (error "repeated cover"))
               (lambda (keys) (error "repeated delta")) (lambda () (error "unexpected fallback")))))
         )
@@ -1525,7 +1547,7 @@ test_cases:
         (define actual
           (!begin
             (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
-            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-snapshot-dependencies" (list (list 'point 'k) (list 'snapshot 'axis))))
+            (define cache (make_group_cache "memcp-tests" ".grp:grc-snapshot-dependencies" (list (list 'point 'k) (list 'snapshot 'axis))))
             (define sources (lambda () (list (table "memcp-tests" false "grc_cache_dependency" false))))
             (define bad (lambda () (error "unexpected fallback")))
             (define changes (lambda (lo hi) (error "stale snapshot used for delta")))
@@ -1547,9 +1569,9 @@ test_cases:
       (begin
         (define __snapshot_test_actual
           (begin
-            (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-null-snapshot" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 0 4 (lambda () '())
+            (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-null-snapshot" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 0 4 (lambda () '())
               (lambda () '(1 nil)) (lambda (a b) '()) (lambda (keys) '()) (lambda () 99))
-            (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-null-snapshot" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 0 4 (lambda () '())
+            (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-null-snapshot" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 0 4 (lambda () '())
               (lambda () (error "NULL snapshot rebuilt")) (lambda (a b) (error "NULL snapshot rescanned"))
               (lambda (keys) (error "NULL snapshot reevaluated")) (lambda () 99)))
         )
@@ -1564,10 +1586,10 @@ test_cases:
       (begin
         (define __snapshot_test_actual
           (begin
-            (define next (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 2 4 (lambda () '())
+            (define next (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 2 4 (lambda () '())
               (lambda () (error "unexpected rebuild")) (lambda (a b) '(1))
               (lambda (keys) '(1 6)) (lambda () 99)))
-            (define final (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 3 4 (lambda () '())
+            (define final (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 3 4 (lambda () '())
               (lambda () (error "unexpected rebuild")) (lambda (a b) '(2))
               (lambda (keys) '(2 nil)) (lambda () 99)))
             (list next final))
@@ -1583,14 +1605,14 @@ test_cases:
       (begin
         (define __snapshot_test_actual
           (begin
-            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))))
+            (define cache (make_group_cache "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))))
             (define base (group_cache_read_cell cache '(1 0)  "agg_sum" nil))
             (group_cache_write_cell cache '(1 0)  "agg_sum"
               (list (car base) (cadr base) (nth base 2) (nth base 3) nil) nil)
-            (define old (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 3 4 (lambda () '())
+            (define old (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 3 4 (lambda () '())
               (lambda () (error "exact point lost with base")) (lambda (a b) (error "point rescanned"))
               (lambda (keys) (error "point reevaluated")) (lambda () 99)))
-            (define next (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 4 4 (lambda () '())
+            (define next (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 4 4 (lambda () '())
               (lambda () '(1 7)) (lambda (a b) (error "evicted base used"))
               (lambda (keys) (error "evicted base used")) (lambda () 99)))
             (list old next))
@@ -1609,14 +1631,14 @@ test_cases:
             (define results (parallelN 32 (lambda (i)
               (begin
                 (define coordinate (+ 1 (mod i 4)))
-                (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-concurrent-snapshot" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil coordinate 4 (lambda () '())
+                (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-concurrent-snapshot" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil coordinate 4 (lambda () '())
                   (lambda () (list 1 (* 2 coordinate)))
                   (lambda (lo hi) '(1))
                   (lambda (keys) (list 1 (* 2 coordinate)))
                   (lambda () (error "unexpected concurrent fallback")))))))
             (list
               (equal? results (map (produceN 32) (lambda (i) (* 2 (+ 1 (mod i 4))))))
-              (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-concurrent-snapshot" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 3 4 (lambda () '())
+              (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-concurrent-snapshot" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 3 4 (lambda () '())
                 (lambda () (error "concurrent point was lost"))
                 (lambda (lo hi) (error "concurrent point was lost"))
                 (lambda (keys) (error "concurrent point was lost"))
@@ -1632,7 +1654,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-over-budget" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 0 contribution_snapshot_key_budget (lambda () '())
+          (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-over-budget" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 0 contribution_snapshot_key_budget (lambda () '())
             (lambda () (error "unadmitted full scan")) (lambda (a b) (error "unadmitted cover"))
             (lambda (keys) (error "unadmitted delta")) (lambda () 29))
         )
@@ -1648,7 +1670,7 @@ test_cases:
         (define actual
           (!begin
             (define source (table "memcp-tests" false "grc_cache_dependency" false))
-            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-barrier-snapshot" (list (list 'snapshot 0))))
+            (define cache (make_group_cache "memcp-tests" ".grp:grc-barrier-snapshot" (list (list 'snapshot 0))))
             (define sources (lambda () (list source)))
             (define rejected (try (lambda ()
               (with_autocommit session (req "__session_state") (req "__query_seq") "cache source write" (lambda (tx)
@@ -1677,7 +1699,7 @@ test_cases:
             (begin
               (define session (newsession))
               (start session)
-              (define value (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1))
+              (define value (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1))
                 (session "__memcp_tx") 3 4 (lambda () '())
                 (lambda () (error "transaction published a shared anchor"))
                 (lambda (a b) (error "transaction used a shared cover"))
@@ -1695,7 +1717,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-cache" (list (list 'point 0) (list 'point 1))) "agg_value" (lambda () '(7 11)) nil (lambda () '()) (lambda () 43))
+          (group_cache_value (make_group_cache "memcp-tests" ".grp:grc-point-cache" (list (list 'point 0) (list 'point 1))) "agg_value" (lambda () '(7 11)) nil (lambda () '()) (lambda () 43))
         )
         (if (equal? (json_encode __snapshot_test_actual) (json_encode 43))
           __snapshot_test_actual
@@ -1707,7 +1729,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-cache" (list (list 'point 0) (list 'point 1))) "agg_value" (lambda () '(7 11)) nil (lambda () '())
+          (group_cache_value (make_group_cache "memcp-tests" ".grp:grc-point-cache" (list (list 'point 0) (list 'point 1))) "agg_value" (lambda () '(7 11)) nil (lambda () '())
             (lambda () (error "retained aggregate was recomputed")))
         )
         (if (equal? (json_encode __snapshot_test_actual) (json_encode 43))
@@ -1722,7 +1744,7 @@ test_cases:
         (define actual
           (!begin
             (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
-            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-null-dependencies" (list (list 'point 'k))))
+            (define cache (make_group_cache "memcp-tests" ".grp:grc-point-null-dependencies" (list (list 'point 'k))))
             (define sources (lambda () (list (table "memcp-tests" false "grc_cache_dependency" false))))
             (define a (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 43)))
             (define b (group_cache_value cache "value" (lambda () '(8)) nil sources (lambda () 47)))
@@ -1743,7 +1765,7 @@ test_cases:
         (define actual
           (!begin
             (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
-            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-dependencies" (list (list 'point 'k))))
+            (define cache (make_group_cache "memcp-tests" ".grp:grc-point-dependencies" (list (list 'point 'k))))
             (define sources (lambda () (list (table "memcp-tests" false "grc_cache_dependency" false))))
             (define first (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 79)))
             (rebuild (table "memcp-tests" false "grc_cache_dependency" false))
@@ -1764,7 +1786,7 @@ test_cases:
         (define actual
           (!begin
             (define source (table "memcp-tests" false "grc_cache_dependency" false))
-            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-barrier-point" (list (list 'point 0))))
+            (define cache (make_group_cache "memcp-tests" ".grp:grc-barrier-point" (list (list 'point 0))))
             (define sources (lambda () (list source)))
             (define rejected (try (lambda ()
               (with_autocommit session (req "__session_state") (req "__query_seq") "cache source write" (lambda (tx)
@@ -1792,7 +1814,7 @@ test_cases:
             (begin
               (define session (newsession))
               (start session)
-              (define point (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-cache" (list (list 'point 0) (list 'point 1))) "agg_value" (lambda () '(7 11)) (session "__memcp_tx")
+              (define point (group_cache_value (make_group_cache "memcp-tests" ".grp:grc-point-cache" (list (list 'point 0) (list 'point 1))) "agg_value" (lambda () '(7 11)) (session "__memcp_tx")
                 (lambda () '()) (lambda () 59)))
               (tx_rollback session)
               point)))
@@ -1809,10 +1831,10 @@ test_cases:
         (define __snapshot_test_actual
           (begin
             (define failed (try (lambda ()
-              (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-failed-build" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 5 4 (lambda () '())
+              (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-failed-build" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 5 4 (lambda () '())
                 (lambda () (error "stopped preparation")) (lambda (lo hi) '())
                 (lambda (keys) '()) (lambda () 99))) (lambda (err) "stopped")))
-            (define next (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-failed-build" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 5 4 (lambda () '())
+            (define next (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:grc-failed-build" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 5 4 (lambda () '())
               (lambda () '(1 97)) (lambda (lo hi) (error "partial anchor survived"))
               (lambda (keys) (error "partial anchor survived")) (lambda () 99)))
             (list failed next))
@@ -1829,9 +1851,9 @@ test_cases:
         (define __snapshot_test_actual
           (begin
             (define failed (try (lambda ()
-              (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-failed-point" (list (list 'point 0))) "agg_value" (lambda () '(1)) nil (lambda () '())
+              (group_cache_value (make_group_cache "memcp-tests" ".grp:grc-failed-point" (list (list 'point 0))) "agg_value" (lambda () '(1)) nil (lambda () '())
                 (lambda () (error "stopped preparation")))) (lambda (err) "stopped")))
-            (define next (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-failed-point" (list (list 'point 0))) "agg_value" (lambda () '(1)) nil
+            (define next (group_cache_value (make_group_cache "memcp-tests" ".grp:grc-failed-point" (list (list 'point 0))) "agg_value" (lambda () '(1)) nil
               (lambda () '()) (lambda () 103)))
             (list failed next))
         )
@@ -1908,9 +1930,9 @@ test_cases:
       (!begin
         (define source (table "memcp-tests" false "grc_topology_source" false))
         (define sources (lambda () (list source)))
-        (define snapshot (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-topology-snapshot"
+        (define snapshot (make_group_cache "memcp-tests" ".grp:grc-topology-snapshot"
           (list (list 'snapshot 0))))
-        (define point (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-topology-point"
+        (define point (make_group_cache "memcp-tests" ".grp:grc-topology-point"
           (list (list 'point 0))))
         (define count_rows (lambda () (scan nil source '() '() '() (lambda () true) '() scan_count 0 + false)))
         (define forbidden (lambda () (error "physical maintenance discarded a valid payload")))
@@ -2122,7 +2144,7 @@ test_cases:
       - sql: "DROP TABLE IF EXISTS `.grp:retention-snapshot`"
     scm: |
       (!begin
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-snapshot"
+        (define cache (make_group_cache "memcp-tests" ".grp:retention-snapshot"
           (list (list 'point 'tenant) (list 'snapshot 'time))))
         (define calls (newsession))
         (calls "full" 0)
@@ -2143,7 +2165,7 @@ test_cases:
   - name: "snapshot retirement preserves another payload at the same coordinate"
     scm: |
       (!begin
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-snapshot"
+        (define cache (make_group_cache "memcp-tests" ".grp:retention-snapshot"
           (list (list 'point 'tenant) (list 'snapshot 'time))))
         (group_cache_ensure_cells cache "other" nil '())
         (group_cache_write_cell cache '(1 63) "other" '(99) nil)
@@ -2161,7 +2183,7 @@ test_cases:
   - name: "retiring the last payload removes its cell but retains other coordinates"
     scm: |
       (!begin
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-snapshot"
+        (define cache (make_group_cache "memcp-tests" ".grp:retention-snapshot"
           (list (list 'point 'tenant) (list 'snapshot 'time))))
         (define retired (discard_cache_value nil (table "memcp-tests" false ".grp:retention-snapshot" false)
           (group_cache_dimension_names cache) '(1 63) "other" '(99)))
@@ -2176,7 +2198,7 @@ test_cases:
     setup:
       - scm: '(rebuild (table "memcp-tests" false ".grp:retention-snapshot" false))'
     scm: |
-      (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-snapshot"
+      (snapshot_group_cache (make_group_cache "memcp-tests" ".grp:retention-snapshot"
         (list (list 'point 'tenant) (list 'snapshot 'time))) "total" (lambda () '(1)) nil 64 4
         (lambda () '()) (lambda () (error "compaction discarded full state"))
         (lambda (lo hi) (error "compaction discarded exact point"))
@@ -2199,7 +2221,7 @@ test_cases:
     scm: |
       (!begin
         (define request (newsession))
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-active-board"
+        (define cache (make_group_cache "memcp-tests" ".grp:retention-active-board"
           (list (list 'snapshot 'time))))
         (with_autocommit request nil 0 "snapshot board" (lambda (tx)
           (reduce (produceN 8) (lambda (_ axis)
