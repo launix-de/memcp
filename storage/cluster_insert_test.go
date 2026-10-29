@@ -641,7 +641,7 @@ func TestClusterForwardAlwaysPublishesResolvableTarget(t *testing.T) {
 		r.resourceCell(mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()})
 	}
 	stop := make(chan struct{})
-	missing := make(chan mosiResource, 1)
+	violations := make(chan string, 1)
 	var readers sync.WaitGroup
 	for range 8 {
 		readers.Add(1)
@@ -656,10 +656,20 @@ func TestClusterForwardAlwaysPublishesResolvableTarget(t *testing.T) {
 				target := r.canonicalResource(from)
 				if r.lookupCell(target) == nil {
 					select {
-					case missing <- target:
+					case violations <- "unregistered target " + target.key():
 					default:
 					}
 					return
+				}
+				routes := r.shardRoutes(from)
+				for _, route := range routes {
+					if route.To != routes[0].To {
+						select {
+						case violations <- "mixed transfer targets in one captured snapshot":
+						default:
+						}
+						return
+					}
 				}
 			}
 		}()
@@ -670,8 +680,8 @@ func TestClusterForwardAlwaysPublishesResolvableTarget(t *testing.T) {
 	close(stop)
 	readers.Wait()
 	select {
-	case target := <-missing:
-		t.Fatalf("published canonical target %s without its owner lookup entry", target.key())
+	case reason := <-violations:
+		t.Fatal("incoherent routing publication:", reason)
 	default:
 	}
 }

@@ -253,14 +253,14 @@ func (r *replicationManager) forwardResource(from, to mosiResource) {
 func (r *replicationManager) shardRoutes(resource mosiResource) []shardForward {
 	var routes []shardForward
 	if snapshot := r.cellSnapshot.Load(); snapshot != nil {
+		bound := (*snapshot)[resource.key()].resource
 		for key, binding := range *snapshot {
 			to := binding.resource
 			if to.Database != resource.Database || to.Shard == "" || key == to.key() {
 				continue
 			}
 			if resource.Shard != "" {
-				bound := (*snapshot)[resource.key()].cell
-				if bound == nil || binding.cell.resolved() != bound.resolved() {
+				if bound == nil || *to != *bound {
 					continue
 				}
 			}
