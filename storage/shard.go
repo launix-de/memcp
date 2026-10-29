@@ -3475,18 +3475,10 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 	t.publishDeltaRows(rows)
 	for i, newrow := range rows[firstNew:] {
 		recid := t.main_count + uint32(firstNew+i)
-		// also notify indices
+		// The row payload belongs to the shard; only native index overhead
+		// is charged here. Computed-key indexes invalidate without callbacks.
 		for _, index := range t.Indexes {
-			// add to delta indexes
-			index.mu.Lock()
-			if index.baseState.deltaBtree != nil {
-				pair := index.prepareCollationKeys(&index.baseState, indexPair{itemid: int(recid), data: newrow})
-				index.baseState.deltaBtree.ReplaceOrInsert(pair)
-				// The row payload belongs to the shard. The index owns only its
-				// B-tree entry/node overhead until rebuild produces compact arrays.
-				indexDeltaBytes[index] += 32 + int64(indexPairCollationKeyBytes(pair))
-			}
-			index.mu.Unlock()
+			indexDeltaBytes[index] += index.insertDelta(recid, newrow)
 		}
 	}
 	t.plannerDeltaRows.Store(uint64(len(rows)))
@@ -3560,14 +3552,8 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 	t.publishDeltaRows(rows)
 	for i, newrow := range rows[firstNew:] {
 		recid := t.main_count + uint32(firstNew+i)
-		// update delta indexes
 		for _, index := range t.Indexes {
-			index.mu.Lock()
-			if index.baseState.deltaBtree != nil {
-				pair := index.prepareCollationKeys(&index.baseState, indexPair{itemid: int(recid), data: newrow})
-				index.baseState.deltaBtree.ReplaceOrInsert(pair)
-			}
-			index.mu.Unlock()
+			index.insertDelta(recid, newrow)
 		}
 	}
 	t.plannerDeltaRows.Store(uint64(len(rows)))
