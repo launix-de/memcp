@@ -872,6 +872,49 @@ func TestClusterSchemaLocationCannotPromoteRevokedSelf(t *testing.T) {
 	}
 }
 
+func TestClusterReportJoinsUUIDDirectoryPublication(t *testing.T) {
+	cluster := &nodeCluster{}
+	cluster.initializeManager()
+	r := cluster.manager
+	old := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	next := old
+	next.Shard = uuid.NewString()
+	cell := r.resourceCell(old)
+	cell.ownstate.Initialize(mosi.S)
+	r.updateRecord(old, func(record *replicaRecord) bool { record.Owner, record.Epoch = "owner", 7; return true })
+	r.mu.Lock()
+	// Match the interval in forwardResource between resource.Store and the
+	// lookup snapshot publication, while its existing directory lock is held.
+	record := r.directory.Records[old.key()]
+	record.Resource = next
+	r.directory.Records[next.key()] = record
+	delete(r.directory.Records, old.key())
+	r.cells[next.key()] = cell
+	cell.resource.Store(&next)
+	done := make(chan replicaRecord, 1)
+	go func() { done <- cluster.report(next) }()
+	var early *replicaRecord
+	select {
+	case report := <-done:
+		early = &report
+	case <-time.After(20 * time.Millisecond):
+	}
+	snapshot := map[string]*replicaCell{old.key(): cell, next.key(): cell}
+	r.cellSnapshot.Store(&snapshot)
+	r.mu.Unlock()
+	if early != nil {
+		t.Fatal("report bypassed unfinished UUID publication", *early)
+	}
+	select {
+	case report := <-done:
+		if report.Owner != "owner" || report.State != "S" || report.Resource != next {
+			t.Fatal("published owner disappeared", report)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("report did not join UUID publication")
+	}
+}
+
 func TestClusterShardRestartRecoveryUsesLiveReports(t *testing.T) {
 	for _, learnedFromSchema := range []bool{false, true} {
 		t.Run(fmt.Sprint("schema-hint=", learnedFromSchema), func(t *testing.T) {
