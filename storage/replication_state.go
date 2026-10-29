@@ -90,8 +90,9 @@ func (r *replicationManager) storeConfig(entry replicaConfigEntry) error {
 // exposed canonical target is registered in that same publication. Native cell
 // identity is initialized before first publication and may advance only after
 // the complete alias snapshot is visible. Discovery and transfer recipes
-// must never consult a later mutable identity
-// through an older map. Publication owns all copying, outside read/row paths.
+// must never consult a later mutable identity through an older map. Both UUID
+// forwarding and schema renames publish here before advancing native identity.
+// Publication owns all copying, outside read/row paths.
 type replicaCellBinding struct {
 	cell     *replicaCell
 	resource *mosiResource
@@ -110,6 +111,9 @@ func (r *replicationManager) publishCellsLocked(current *replicaCell, target *mo
 		snapshot[name] = replicaCellBinding{cell, resource}
 	}
 	r.cellSnapshot.Store(&snapshot)
+	if current != nil {
+		current.resource.Store(target)
+	}
 }
 
 func (r *replicationManager) resourceCell(resource mosiResource) *replicaCell {
@@ -245,7 +249,6 @@ func (r *replicationManager) forwardResource(from, to mosiResource) {
 		delete(r.backups, current.key())
 	}
 	r.publishCellsLocked(cell, &to)
-	cell.resource.Store(&to)
 }
 
 // routes are captured with an outgoing transfer. They name actual old/new UUIDs
