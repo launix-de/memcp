@@ -597,7 +597,7 @@ test_cases:
           "ok"
           (error "stage graph rewrite mixed root identity with reference rebinding")))
 
-  - name: "Single aggregate producer propagates its changed output identity"
+  - name: "Single aggregate stage output uses its canonical column"
     scm: |
       (begin
         (define y66_interface_ag (list (list (quote and) true false) (quote max) false))

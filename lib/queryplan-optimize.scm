@@ -6759,12 +6759,13 @@ Nested query blocks otherwise retain a removed helper alias after stage merging.
 						(stage_output_left_join_removed_dependency_ids dependency_id_map))))
 					(define untouched_stages (filter (qb_stages block) (lambda (stage)
 						(stage_not_in_id_list? candidate_ids stage))))
-					(define merged_stages (map entries (lambda (entry)
-						(rewrite_stage_graph_stage alias_map id_map false
-							(stage_output_left_join_stage_with_aggregates
-								(stage_output_left_join_entry_stage entry)
-								(stage_output_left_join_entry_ags entry))))))
-					(make_query_block
+					(define combined_stages (map entries (lambda (entry)
+						(stage_output_left_join_stage_with_aggregates
+							(stage_output_left_join_entry_stage entry)
+							(stage_output_left_join_entry_ags entry)))))
+					(define merged_stages (map combined_stages (lambda (stage)
+						(rewrite_stage_graph_stage alias_map id_map false stage))))
+					(define rewritten (make_query_block
 						(qb_schema block)
 						(merge_unique (list (map (qb_sources block) (lambda (src)
 							(rewrite_stage_graph_source alias_map id_map
@@ -6780,7 +6781,13 @@ Nested query blocks otherwise retain a removed helper alias after stage merging.
 						(merge_unique (list
 							(map untouched_stages (lambda (stage) (rewrite_stage_graph_stage '() id_map false stage)))
 							merged_stages))
-						(rewrite_stage_graph_expr alias_map id_map (qb_facts block)))))))))
+						(rewrite_stage_graph_expr alias_map id_map (qb_facts block))))
+					/* CONTRACT: merging dependency IDs can rename an aggregate even
+					in a surviving, untouched stage. Publish those exact column mappings
+					through its consumers before returning the merged block. */
+					(nth (propagate_stage_output_aggregate_columns rewritten
+						(merge (list untouched_stages combined_stages))
+						(qb_stages rewritten)) 0)))))))
 
 (define merge_compatible_stage_output_left_joins_node (lambda (node)
 	(if (query_block? node)
