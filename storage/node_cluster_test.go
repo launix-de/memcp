@@ -883,14 +883,13 @@ func TestClusterReportJoinsUUIDDirectoryPublication(t *testing.T) {
 	cell.ownstate.Initialize(mosi.S)
 	r.updateRecord(old, func(record *replicaRecord) bool { record.Owner, record.Epoch = "owner", 7; return true })
 	r.mu.Lock()
-	// Match the interval in forwardResource between resource.Store and the
-	// lookup snapshot publication, while its existing directory lock is held.
+	// Match the interval before the complete routing publication, while its
+	// existing directory lock is held. Native identity still names the old UUID.
 	record := r.directory.Records[old.key()]
 	record.Resource = next
 	r.directory.Records[next.key()] = record
 	delete(r.directory.Records, old.key())
 	r.cells[next.key()] = cell
-	cell.resource.Store(&next)
 	done := make(chan replicaRecord, 1)
 	go func() { done <- cluster.report(next) }()
 	var early *replicaRecord
@@ -899,8 +898,7 @@ func TestClusterReportJoinsUUIDDirectoryPublication(t *testing.T) {
 		early = &report
 	case <-time.After(20 * time.Millisecond):
 	}
-	snapshot := map[string]*replicaCell{old.key(): cell, next.key(): cell}
-	r.cellSnapshot.Store(&snapshot)
+	r.publishCellsLocked(cell, &next)
 	r.mu.Unlock()
 	if early != nil {
 		t.Fatal("report bypassed unfinished UUID publication", *early)

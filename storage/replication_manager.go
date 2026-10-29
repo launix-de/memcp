@@ -56,7 +56,7 @@ type replicationManager struct {
 	authMu          sync.Mutex
 	authInstalled   map[string]string
 	cells           map[string]*replicaCell
-	cellSnapshot    atomic.Pointer[map[string]*replicaCell]
+	cellSnapshot    atomic.Pointer[map[string]replicaCellBinding]
 	retired         atomic.Bool
 	directory       replicaDirectory
 	config          *table
@@ -138,7 +138,7 @@ func StartReplication(address string, shutdown func()) error {
 	if r.master {
 		r.ready.Store(true)
 	}
-	snapshot := make(map[string]*replicaCell)
+	snapshot := make(map[string]replicaCellBinding)
 	r.cellSnapshot.Store(&snapshot)
 	if r.master {
 		release, err := registerMosiRole("replication", http.HandlerFunc(r.accept))

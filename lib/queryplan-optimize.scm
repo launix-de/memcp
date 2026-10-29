@@ -2278,82 +2278,45 @@ source list remains the semantic catalog and is used only for alias resolution. 
 (define physical_join_plan_for_sources (lambda (sources)
 	(if (physical_join_tree? sources) sources (join_optimizer_left_deep_tree sources))))
 
+/* CONTRACT: join_plan is authoritative whenever present. Logical join search
+publishes a tree covering its source catalog exactly once, with all predicates
+placed and null-extension boundaries intact. A source-consuming transformation
+must update that tree at its owning boundary; a consumer never repairs it from
+catalog order. Blocks without a selected tree (trivial and synthetic physical
+blocks) retain their declared semantic order through a left-deep tree.
+
+Lookup does not traverse sources or tree. Coverage is a producer obligation
+exercised by planner tests, not an execution-time validation or fallback. */
 (define query_block_join_plan (lambda (block sources)
-	(begin
-		(define tree (qassoc_get (qb_facts block) (quote join_plan) nil))
-		(if (and (not (nil? tree))
-			(and (join_optimizer_alias_subset? (join_optimizer_tree_aliases tree) (map sources source_alias))
-				(join_optimizer_alias_subset? (map sources source_alias) (join_optimizer_tree_aliases tree))))
-			tree (physical_join_plan_for_sources sources)))))
+	(coalesceNil (qassoc_get (qb_facts block) (quote join_plan) nil)
+		(physical_join_plan_for_sources sources))))
 
-/* Physical preparation validates tree coverage but never rewrites the semantic
-source catalog. join_plan remains the single owner of physical join order. */
-(define apply_join_optimizer_plan (lambda (block)
-	(begin
-		(define tree (qassoc_get (qb_facts block) (quote join_plan) nil))
-		(if (nil? tree)
-			block
-			(begin
-				(define aliases (join_optimizer_tree_aliases tree))
-				(define source_alias_list (map (qb_sources block) source_alias))
-				(if (and
-					(equal? (count aliases) (count source_alias_list))
-					(and
-						(join_optimizer_alias_subset? aliases source_alias_list)
-						(join_optimizer_alias_subset? source_alias_list aliases)))
-					true
-					(neumann_fail "build_queryplan" (concat
-						"logical join plan does not cover the query-block sources exactly once: plan="
-						(serialize aliases) " sources=" (serialize source_alias_list))))
-				block)))))
-
+/* CONTRACT: a membership stage owns its measured cardinalities and complete
+logical domain. The stage owns the number of rows examined before its predicate.
+A consuming LIMIT counts accepted output rows and cannot replace that work
+with the page size. The block supplies only facts absent from this stage.
+Only the explicit cost interface is copied, never request sessions, transaction
+handles, join trees or another block's stage catalog. Operator defaults belong
+to the cost model, not to an adapter that overwrites unknown values. */
 (define physical_membership_requirement_stage (lambda (stage facts)
-	(if (not (group_stage? stage))
-		stage
-		(make_group_stage
-			(gs_id stage) (gs_input stage) (gs_domain stage) (gs_keys stage)
-			(gs_aggregates stage) (gs_having stage) (gs_output stage) (gs_order stage)
-			(gs_limit stage) (gs_offset stage)
-			(merge (list
-				(list
-					(list (quote membership_stage_id)
-						(qassoc_get facts (quote membership_stage_id) (gs_id stage)))
-					(list (quote physical_membership_requirement) true)
-					(list (quote membership_consumer) (qassoc_get facts (quote membership_consumer) (quote filter)))
-					(list (quote membership_candidate_input_rows) (qassoc_get facts (quote membership_candidate_input_rows) nil))
-					(list (quote membership_candidate_estimated_rows) (qassoc_get facts (quote membership_candidate_estimated_rows) nil))
-					(list (quote membership_candidate_matching_rows) (qassoc_get facts (quote membership_candidate_matching_rows) nil))
-					(list (quote membership_candidate_estimate_capped) (qassoc_get facts (quote membership_candidate_estimate_capped) false))
-					(list (quote membership_candidate_estimate_input) (qassoc_get facts (quote membership_candidate_estimate_input) nil))
-					(list (quote membership_candidate_estimate_sampled) (qassoc_get facts (quote membership_candidate_estimate_sampled) nil))
-					(list (quote membership_candidate_estimate_population) (qassoc_get facts (quote membership_candidate_estimate_population) (quote table_rows)))
-					(list (quote membership_candidate_estimate_coverage) (qassoc_get facts (quote membership_candidate_estimate_coverage) (quote sampled)))
-					(list (quote membership_candidate_scan_invocations) (qassoc_get facts (quote membership_candidate_scan_invocations) 1))
-					(list (quote membership_candidate_filter_columns) (qassoc_get facts (quote membership_candidate_filter_columns) 0))
-					(list (quote membership_candidate_map_columns) (qassoc_get facts (quote membership_candidate_map_columns) 1))
-					(list (quote membership_candidate_cache_map_columns) (qassoc_get facts (quote membership_candidate_cache_map_columns) 2))
-					(list (quote membership_candidate_cache_backed) (qassoc_get facts (quote membership_candidate_cache_backed) false))
-					(list (quote membership_candidate_expression_operations) (qassoc_get facts (quote membership_candidate_expression_operations) 0))
-					(list (quote membership_candidate_expression_depth) (qassoc_get facts (quote membership_candidate_expression_depth) 0))
-					(list (quote membership_candidate_index_filter_rows) (qassoc_get facts (quote membership_candidate_index_filter_rows) nil))
-					(list (quote membership_candidate_broad_text_match_rows) (qassoc_get facts (quote membership_candidate_broad_text_match_rows) 0))
-					(list (quote membership_candidate_broad_text_match_bytes) (qassoc_get facts (quote membership_candidate_broad_text_match_bytes) 0))
-					(list (quote membership_candidate_filter_value_rows) (qassoc_get facts (quote membership_candidate_filter_value_rows) nil))
-					(list (quote membership_candidate_expression_operation_rows) (qassoc_get facts (quote membership_candidate_expression_operation_rows) nil))
-					(list (quote membership_driver_rows) (qassoc_get facts (quote membership_driver_rows) nil))
-					(list (quote membership_driver_input_rows) (qassoc_get facts (quote membership_driver_input_rows) nil))
-					(list (quote membership_driver_scan_invocations) (qassoc_get facts (quote membership_driver_scan_invocations) 1))
-					(list (quote membership_driver_filter_columns) (qassoc_get facts (quote membership_driver_filter_columns) 0))
-					(list (quote membership_driver_map_columns) (qassoc_get facts (quote membership_driver_map_columns) 0))
-					(list (quote membership_driver_expression_operations) (qassoc_get facts (quote membership_driver_expression_operations) 0))
-					(list (quote membership_driver_expression_depth) (qassoc_get facts (quote membership_driver_expression_depth) 0))
-					(list (quote membership_selectivity_class) (qassoc_get facts (quote membership_selectivity_class) (quote unknown)))
-					(list (quote membership_driver_alternative) (qassoc_get facts (quote membership_driver_alternative) false))
-					(list (quote membership_order_limit_driver) (qassoc_get facts (quote membership_order_limit_driver) false))
-					(list (quote membership_order_limit) (qassoc_get facts (quote membership_order_limit) nil))
-					(list (quote membership_order_offset) (qassoc_get facts (quote membership_order_offset) 0))
-					(list (quote reuse) (qassoc_get facts (quote reuse) 1)))
-				(gs_facts stage)))))))
+	(group_stage_with_facts stage
+		(merge (list
+			(list (list (quote physical_membership_requirement)
+				(not (nil? (qassoc_get facts (quote membership_stage_id)
+					(qassoc_get (gs_facts stage) (quote membership_stage_id) nil))))))
+			(gs_facts stage)
+			(filter facts (lambda (fact)
+				(contains? '("membership_stage_id"
+					"membership_consumer" "membership_candidate_input_rows" "membership_candidate_estimated_rows" "membership_candidate_matching_rows"
+					"membership_candidate_estimate_capped" "membership_candidate_estimate_input" "membership_candidate_estimate_sampled" "membership_candidate_estimate_population"
+					"membership_candidate_estimate_coverage" "membership_candidate_scan_invocations" "membership_candidate_filter_columns" "membership_candidate_map_columns"
+					"membership_candidate_cache_map_columns" "membership_candidate_cache_backed" "membership_candidate_expression_operations" "membership_candidate_expression_depth"
+					"membership_candidate_index_filter_rows" "membership_candidate_broad_text_match_rows" "membership_candidate_broad_text_match_bytes" "membership_candidate_filter_value_rows"
+					"membership_candidate_expression_operation_rows" "membership_driver_rows" "membership_driver_input_rows" "membership_driver_scan_invocations"
+					"membership_driver_filter_columns" "membership_driver_map_columns" "membership_driver_expression_operations" "membership_driver_expression_depth"
+					"membership_selectivity_class" "membership_driver_alternative" "membership_order_limit_driver" "membership_order_limit"
+					"membership_order_offset" "reuse"
+				) (string (car fact))))))))))
 
 (define physicalize_membership_requirement_expr_using (lambda (expr facts)
 	(match expr
@@ -2379,8 +2342,7 @@ source catalog. join_plan remains the single owner of physical join order. */
 (define apply_join_optimizer_plan_node (lambda (node)
 	(if (query_block? node)
 		(begin
-			(define planned (apply_join_optimizer_plan node))
-			(define physical_planned (query_block_with_physical_requirement_facts planned))
+			(define physical_planned (query_block_with_physical_requirement_facts node))
 			(define physical_stages (map (qb_stages physical_planned) apply_join_optimizer_plan_stage))
 			(define requirement (qassoc_get (qb_facts physical_planned) (quote membership_requirement) nil))
 			/* Reorder attaches the requirement to the query block which owns every
@@ -2403,12 +2365,12 @@ source catalog. join_plan remains the single owner of physical join order. */
 							(quote filter))))
 					(define local_driver_rows (if (equal? physical_consumer (quote order_limit))
 						(probe_limit_work_rows (qb_limit physical_planned)
-							(planner_context_session (qb_facts physical_planned))) nil))
+							(planner_context_session (qb_facts physical_planned)))
+						(qassoc_get (qb_facts physical_planned) (quote membership_driver_rows) nil)))
 					(define physical_facts (merge (list
-						(list
-							(list (quote membership_consumer) physical_consumer)
-							(list (quote membership_driver_rows) (coalesceNil local_driver_rows
-								(qassoc_get (qb_facts physical_planned) (quote membership_driver_rows) nil))))
+						(list (list (quote membership_consumer) physical_consumer))
+						(if (nil? local_driver_rows) '()
+							(list (list (quote membership_driver_rows) local_driver_rows)))
 						(qb_facts physical_planned))))
 					(make_query_block
 						(qb_schema physical_planned)
@@ -2856,7 +2818,7 @@ Both searches already register the same bounded statistics/parameter guards. */
 				(qb_limit block)
 				(qb_offset block)
 				(qb_hidden block)
-				(map (qb_stages block) (lambda (stage) (join_reorder_stage_using stage_catalog stage planning_session tx)))
+				(qb_stages block)
 				(qb_facts block)))
 		(begin
 			(define provenance_graph (extract_join_hypergraph block))
@@ -2876,7 +2838,7 @@ Both searches already register the same bounded statistics/parameter guards. */
 					(qb_limit normalized)
 					(qb_offset normalized)
 					(qb_hidden normalized)
-					(map (qb_stages normalized) (lambda (stage) (join_reorder_stage_using stage_catalog stage planning_session tx)))
+					(qb_stages normalized)
 					(qb_facts normalized))
 				(merge (list
 					(query_block_reorder_telemetry normalized planning_session)
@@ -4628,10 +4590,8 @@ ordered batch is executable and what its actual driver workload is. */
 				(and supported (not (nil? (recset_project_join_branch_parts branch))))) true)
 			(not (nil? (membership_keyset_descriptor (list stage nil "__target" nil))))))))
 
-(define membership_truth_cost_facts (lambda (block stage)
+(define membership_truth_cost_facts (lambda (block stage planning_session tx)
 	(begin
-		(define planning_session (planner_context_session (qb_facts block)))
-		(define tx (planner_context_tx (qb_facts block)))
 		(define input (gs_input stage))
 		(define sources (filter (qb_sources block) source_is_base_table?))
 		(define driver (if (empty_list? sources) nil (car sources)))
@@ -4686,7 +4646,7 @@ ordered batch is executable and what its actual driver workload is. */
 			(or found (and (not (source_outer? src))
 				(and (stage_output_relation? (source_relation src))
 					(equal? (stage_output_relation_id (source_relation src)) (gs_id stage)))))) false))
-		(and (not joined_inner) (source_is_base_table? input)
+		(and (not joined_inner) (or (source_is_base_table? input) (union_block? input))
 			(or (and (single_source? base_sources)
 				(empty_list? (group_stage_session_domain_keys stage)))
 				(and (not (empty_list? base_sources))
@@ -4696,11 +4656,11 @@ ordered batch is executable and what its actual driver workload is. */
 							(qassoc_get (gs_facts stage) (quote lookup-keys) '())
 							(car base_sources) '() '() '()))))))))))
 
-(define choose_membership_truth_items (lambda (block items guarded_alternative)
+(define choose_membership_truth_items (lambda (block items guarded_alternative planning_session tx)
 	(match items
 		(cons item rest) (begin
-			(define chosen (choose_membership_truth_expr_using block item guarded_alternative))
-			(define tail (choose_membership_truth_items block rest guarded_alternative))
+			(define chosen (choose_membership_truth_expr_using block item guarded_alternative planning_session tx))
+			(define tail (choose_membership_truth_items block rest guarded_alternative planning_session tx))
 			(list
 				(cons (nth chosen 0) (nth tail 0))
 				(merge_unique (list (nth chosen 1) (nth tail 1)))))
@@ -4710,7 +4670,7 @@ ordered batch is executable and what its actual driver workload is. */
 	(reduce (coalesceNil items '()) (lambda (found item)
 		(or found (not (expr_contains_membership_truth? item)))) false)))
 
-(define choose_membership_truth_expr_using (lambda (block expr guarded_alternative)
+(define choose_membership_truth_expr_using (lambda (block expr guarded_alternative planning_session tx)
 	(begin
 		(define parts (membership_truth_parts expr))
 		(if (not (nil? parts))
@@ -4722,7 +4682,9 @@ ordered batch is executable and what its actual driver workload is. */
 						/* Cost facts travel with the abstract marker; carrier selection
 						remains deferred to its physical consumer. */
 						(define costed_stage (group_stage_with_facts stage
-							(membership_truth_cost_facts block stage)))
+							(if (union_block? (gs_input stage))
+								(merge (list (candidate_reorder_telemetry stage (qb_sources block) block planning_session tx) (gs_facts stage)))
+								(membership_truth_cost_facts block stage planning_session tx))))
 						/* A membership branch below OR is not implied by the complete
 						predicate. Preserve that semantic placement fact for unknown-cost
 						fallbacks; it is not a physical carrier decision. */
@@ -4735,7 +4697,7 @@ ordered batch is executable and what its actual driver workload is. */
 										(gs_facts costed_stage))
 									(quote membership_branch_not_implied) true))
 							costed_stage))
-						(list (driver_membership_probe_expr guarded_stage (nth parts 0)) (list (nth parts 1))))
+						(list (logical_membership_probe_expr guarded_stage (nth parts 0)) (list (nth parts 1))))
 					(list (expand_in_membership_truth_expr (nth parts 0) (nth parts 1) (nth parts 2)) '())))
 			(if (and (list? expr)
 				(or
@@ -4746,90 +4708,36 @@ ordered batch is executable and what its actual driver workload is. */
 						(or (equal? (car expr) (quote or)) (equal? (car expr) (symbol "or"))))
 					(define below_or (or guarded_alternative
 						(and is_or (membership_or_has_driver_alternative? (cdr expr)))))
-					(define chosen (choose_membership_truth_items block (cdr expr) below_or))
+					(define chosen (choose_membership_truth_items block (cdr expr) below_or planning_session tx))
 					(list (cons (car expr) (nth chosen 0)) (nth chosen 1)))
 				(list expr '()))))))
 
-(define choose_membership_truth_expr (lambda (block expr)
-	(choose_membership_truth_expr_using block expr false)))
+/* CONTRACT: logical membership normalization owns source elimination.
+Input: a decorrelated query-block, before join search and predicate placement.
+Output: positive WHERE membership is either an explicit stage-output join or
+a membership_requirement_probe carrying its complete logical stage and keys.
+Only redundant nullable lookup sources may be consumed; inner relation inputs
+remain visible to join search. OR placement, NULL rejection and every external
+domain binding are preserved. No physical carrier or scan is selected here.
 
-/* The join tree owns predicate placement, not a second semantic copy of WHERE.
-Whenever physical choice consumes a logical membership marker, rewrite the
-placed predicate expression at the same phase boundary. Keeping the stale
-marker here would make the leaf lowerer execute a logical operator even though
-qb_where already contains the selected physical alternative. */
-(define membership_choice_rewrite_join_predicate (lambda (block predicate)
-	(begin
-		(define sources (qb_sources block))
-		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
-			(if (empty_list? sources) nil (source_alias (car sources)))))
-		(define origin (join_order_pred_origin predicate))
-		(define owner (join_order_pred_owner predicate))
-		(define chosen_expr
-			(car (choose_membership_truth_expr block (join_order_pred_expr predicate))))
-		(define expr_aliases (join_hypergraph_expr_aliases
-			default_alias (source_aliases sources) chosen_expr))
-		(define aliases (if (and (not (equal? origin (quote where))) (not (nil? owner)))
-			(merge_unique (list expr_aliases (list owner)))
-			expr_aliases))
-		(define local_source (if (single_source? aliases)
-			(join_optimizer_source_by_alias sources (car aliases)) nil))
-		(define barrier_owner (if (and (equal? origin (quote where))
-			(and (not (nil? local_source)) (source_outer? local_source)))
-			(source_alias local_source) nil))
-		(list
-			aliases
-			(join_order_pred_selectivity predicate)
-			origin
-			owner
-			chosen_expr
-			barrier_owner
-			(join_order_pred_selectivity_expr predicate)))))
-
-(define membership_choice_rewrite_join_facts (lambda (block facts removed_aliases)
-	(begin
-		(define reduced (join_optimizer_facts_without_aliases facts removed_aliases))
-		(define tree (qassoc_get reduced (quote join_plan) nil))
-		(if (nil? tree)
-			reduced
-			(begin
-				(define predicates (map (join_optimizer_tree_predicates tree)
-					(lambda (predicate)
-						(membership_choice_rewrite_join_predicate block predicate))))
-				(qassoc_set reduced (quote join_plan)
-					(join_order_tree_with_predicates tree predicates)))))))
-
-(define query_block_with_physical_membership_choices (lambda (block)
-	(if (not (expr_contains_membership_truth? (qb_where block)))
-		/* Keep unrelated query blocks byte-for-byte unchanged. A canonical
-		membership marker itself is the capability signal; a preceding physical
-		choice may already have rewritten its stage catalog, so purpose metadata
-		must never gate the final marker-elimination walk. */
-		block
+The join optimizer builds its graph from this output once. Physical consumers
+may choose an implementation for the requirement, but must not repeat this
+normalization or repair already placed predicates after removing its sources.
+This is a producer guarantee, not a runtime validation pass. */
+(define normalize_logical_membership (lambda (block planning_session tx)
+	(if (not (expr_contains_membership_truth? (qb_where block))) block
 		(begin
-			(define chosen (choose_membership_truth_expr block (qb_where block)))
-			(define removed_aliases (nth chosen 1))
-			(define chosen_where (nth chosen 0))
-			/* This pass replaces logical membership truth with an abstract driver
-			marker and removes the redundant relational stage-output source. It must
-			not choose or delete the stage for a physical carrier: derived row-number,
-			join-leaf, and ordered consumers have different executable alternatives. */
-			(define strategy_facts (qassoc_set (qb_facts block)
-				(quote membership_plan_strategy) (quote projected_membership_alternatives)))
-			(define chosen_facts
-				(membership_choice_rewrite_join_facts block strategy_facts removed_aliases))
-			(if (empty_list? removed_aliases)
-				(make_query_block
-					(qb_schema block) (qb_sources block) (qb_fields block) chosen_where
-					(qb_group block) (qb_having block) (qb_order block) (qb_limit block)
-					(qb_offset block) (qb_hidden block) (qb_stages block) chosen_facts)
-				(make_query_block
-					(qb_schema block)
-					(filter (qb_sources block) (lambda (src) (not (contains? removed_aliases (source_alias src)))))
-					(qb_fields block) chosen_where (qb_group block) (qb_having block)
-					(qb_order block) (qb_limit block) (qb_offset block) (qb_hidden block)
-					(qb_stages block)
-					chosen_facts))))))
+			(define chosen (choose_membership_truth_expr_using block (qb_where block) false planning_session tx))
+			(make_query_block
+				(qb_schema block)
+				(filter (qb_sources block) (lambda (src)
+					(not (contains? (nth chosen 1) (source_alias src)))))
+				(qb_fields block) (nth chosen 0) (qb_group block) (qb_having block)
+				(qb_order block) (qb_limit block) (qb_offset block) (qb_hidden block)
+				(qb_stages block)
+				(if (empty_list? (nth chosen 1)) (qb_facts block)
+					(qassoc_set (qb_facts block) (quote membership_requirement)
+						(list (list (quote access) (quote membership))))))))))
 
 (define dml_preserve_driver_membership_probe (lambda (fallback_schema expr)
 	(match expr
@@ -5425,7 +5333,7 @@ the logical lookup still carries an alias which no longer exists. */
 					(qb_limit block)
 					(qb_offset block)
 					(qb_hidden block)
-					(map (qb_stages block) (lambda (stage) (join_reorder_stage_using stage_catalog stage planning_session tx)))
+					(qb_stages block)
 					(qb_facts block))
 				(begin
 					(define candidate (first_candidate_source (qb_stages block) sources))
@@ -5456,11 +5364,10 @@ the logical lookup still carries an alias which no longer exists. */
 									(qb_offset block)
 									(qb_hidden block)
 									(map (qb_stages block) (lambda (current_stage)
-										(join_reorder_stage_using stage_catalog
-											(if (equal? (gs_id current_stage) (gs_id stage))
-												(group_stage_with_facts current_stage
-													(merge (list candidate_telemetry (gs_facts current_stage))))
-												current_stage) planning_session tx)))
+										(if (equal? (gs_id current_stage) (gs_id stage))
+											(group_stage_with_facts current_stage
+												(merge (list candidate_telemetry (gs_facts current_stage))))
+											current_stage)))
 									(qb_facts block))
 								facts)))))))))
 
@@ -5713,6 +5620,17 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 (define join_reorder_node_using (lambda (stage_catalog node planning_session tx)
 	(if (query_block? node)
 		(begin
+			/* CONTRACT: stage inputs are planned bottom-up exactly once. A parent
+			membership requirement embeds the completed logical stage, including its
+			join tree; it must never capture an earlier, unplanned catalog entry. */
+			(define node (make_query_block
+				(qb_schema node) (qb_sources node) (qb_fields node) (qb_where node)
+				(qb_group node) (qb_having node) (qb_order node) (qb_limit node)
+				(qb_offset node) (qb_hidden node)
+				(map (qb_stages node) (lambda (stage)
+					(join_reorder_stage_using stage_catalog stage planning_session tx)))
+				(qb_facts node)))
+			(define node (normalize_logical_membership node planning_session tx))
 			(define exposed (expose_null_rejected_join_edges node true))
 			(define has_composite_presence (reduce (qb_sources node) (lambda (found src)
 				(or found (and (source_outer? src)

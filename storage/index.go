@@ -53,6 +53,7 @@ type storageIndexState struct {
 	maxVals             []scm.Scmer
 	indexHooks          []IndexHook
 	indexHookBytes      atomic.Int64
+	directDelta         bool // built keys depend only on stored delta values
 	precomputedDelta    bool
 	computedRevisions   []computedRevision
 	collationKeyFns     []scm.CollationKeyFunc
@@ -1334,6 +1335,11 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 		}
 	}
 	startRevisions := s.computedRevisionsRLocked()
+	state.directDelta = len(startRevisions) == 0
+	for _, col := range cols {
+		state.directDelta = state.directDelta && col.mapFn == nil
+	}
+
 	if !s.Native {
 		// main storage: build sort-order index
 		tmp := make([]uint32, s.t.main_count)
@@ -1599,6 +1605,29 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	state.computedRevisions = endRevisions
 	state.active = sameComputedRevisions(startRevisions, endRevisions)
 	complete = true
+}
+
+// CONTRACT: insertDelta maintains only keys derived from stored row values. The caller
+// owns the shard write lock; invoking a computed reader or comparator there
+// can recursively scan the shard and deadlock. Index construction publishes
+// directDelta once from its key dependencies. Other indexes become inactive
+// on the first appended row and rebuild through the ordinary read path.
+// Existing readers retain their native index snapshot and visibility bound.
+func (s *StorageIndex) insertDelta(recid uint32, row []scm.Scmer) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := &s.baseState
+	if state.deltaBtree == nil {
+		return 0
+	}
+	if !state.directDelta {
+		state.active = false
+		state.deltaBtree = nil
+		return 0
+	}
+	pair := s.prepareCollationKeys(state, indexPair{itemid: int(recid), data: row})
+	state.deltaBtree.ReplaceOrInsert(pair)
+	return 32 + int64(indexPairCollationKeyBytes(pair))
 }
 
 // buildMainIndexPositionsLocked lazily constructs the inverse of mainIndexes

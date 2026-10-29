@@ -654,10 +654,96 @@ func TestClusterReferenceGrantSurvivesInvalidSuccessor(t *testing.T) {
 	}
 }
 
-// A successor name can be learned from the cell before the immutable lookup
-// directory is published. Reports must sample the serialized directory, rather
-// than treating the lagging fast lookup as proof of unknown authority.
-func TestClusterReportFollowsSuccessorBeforeLookupPublication(t *testing.T) {
+func TestClusterForwardAlwaysPublishesResolvableTarget(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
+	cluster.initializeManager()
+	r := cluster.manager
+	from := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	r.resourceCell(from).ownstate.Establish(mosi.M)
+	r.updateRecord(from, func(record *replicaRecord) bool {
+		record.Resource, record.Owner, record.State = from, "local", "M"
+		return true
+	})
+	for range 256 {
+		r.resourceCell(mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()})
+	}
+	stop := make(chan struct{})
+	violations := make(chan string, 1)
+	var readers sync.WaitGroup
+	for range 8 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				target := r.canonicalResource(from)
+				if r.lookupCell(target) == nil {
+					select {
+					case violations <- "unregistered target " + target.key():
+					default:
+					}
+					return
+				}
+				routes := r.shardRoutes(from)
+				for _, route := range routes {
+					if route.To != routes[0].To {
+						select {
+						case violations <- "mixed transfer targets in one captured snapshot":
+						default:
+						}
+						return
+					}
+				}
+			}
+		}()
+	}
+	for range 64 {
+		r.forwardResource(from, mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()})
+	}
+	close(stop)
+	readers.Wait()
+	select {
+	case reason := <-violations:
+		t.Fatal("incoherent routing publication:", reason)
+	default:
+	}
+}
+
+func TestClusterForwardRetainsCapturedRoutingIdentity(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
+	cluster.initializeManager()
+	r := cluster.manager
+	from := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	middle, last := from, from
+	middle.Shard, last.Shard = uuid.NewString(), uuid.NewString()
+	cell := r.resourceCell(from)
+	initial := r.cellSnapshot.Load()
+	if target := (*initial)[from.key()].resource; target == nil || *target != from {
+		t.Fatal("cell constructor published an incomplete routing identity")
+	}
+	r.forwardResource(from, middle)
+	captured := r.cellSnapshot.Load()
+	r.forwardResource(from, last)
+	if target := (*captured)[from.key()].resource; target == nil || *target != middle {
+		t.Fatal("later forwarding rewrote a captured routing identity")
+	}
+	if (*captured)[middle.key()].cell != cell || r.lookupCell(last) != cell || r.canonicalResource(from) != last {
+		t.Fatal("forwarding lost an alias or cloned native authority")
+	}
+	for _, route := range r.shardRoutes(from) {
+		if route.To != last || route.From == last {
+			t.Fatal("transfer exposed a reversed or obsolete successor route", route)
+		}
+	}
+}
+
+// Reporting consumes the native publication; both aliases must identify the
+// same successor authority without changing an already captured routing view.
+func TestClusterReportFollowsPublishedSuccessor(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
 	cluster.initializeManager()
 	r := cluster.manager
@@ -670,19 +756,10 @@ func TestClusterReportFollowsSuccessorBeforeLookupPublication(t *testing.T) {
 		return true
 	})
 	cell.ownstate.Initialize(mosi.S)
-	// Preserve the predecessor lookup view while constructing the successor
-	// directory state seen by a report carrying that new name. This isolates
-	// the forwarding publication window without relying on scheduler timing.
-	r.mu.Lock()
-	r.cells[to.key()] = cell
-	record := r.directory.Records[from.key()]
-	record.Resource = to
-	r.directory.Records[to.key()] = record
-	delete(r.directory.Records, from.key())
-	cell.resource.Store(&to)
-	r.mu.Unlock()
-	if r.lookupCell(to) != nil {
-		t.Fatal("fixture published the successor lookup too early")
+	captured := r.cellSnapshot.Load()
+	r.forwardResource(from, to)
+	if target := (*captured)[from.key()].resource; target == nil || *target != from {
+		t.Fatal("forwarding rewrote the captured predecessor identity")
 	}
 	for _, resource := range []mosiResource{from, to} {
 		report := cluster.report(resource)
@@ -692,15 +769,28 @@ func TestClusterReportFollowsSuccessorBeforeLookupPublication(t *testing.T) {
 	}
 }
 
-func TestClusterReportDuringCellInitialization(t *testing.T) {
+func TestClusterReportBeforeAuthorityInitialization(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
 	cluster.initializeManager()
 	resource := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
-	// cell() registers the directory slot before resourceCell initializes its
-	// resource pointer. A concurrent report must preserve unknown authority.
-	cluster.manager.cell(resource.key())
-	report := cluster.report(resource)
-	if report.Resource != resource || report.State != "IO" || report.Owner != "" {
-		t.Fatalf("uninitialized cell acquired authority: %+v", report)
+	check := func() {
+		t.Helper()
+		report := cluster.report(resource)
+		if report.Resource != resource || report.State != "IO" || report.Owner != "" {
+			t.Fatalf("uninitialized authority acquired rights: %+v", report)
+		}
+	}
+	check()
+	if cluster.manager.lookupCell(resource) != nil {
+		t.Fatal("report registered an unknown resource")
+	}
+	// Construction publishes a complete identity, while MOSI remains unknown.
+	cell := cluster.manager.resourceCell(resource)
+	if target := cell.resource.Load(); target == nil || *target != resource {
+		t.Fatal("constructor published an incomplete identity")
+	}
+	check()
+	if cell.ownstate.Initialized() || cell.clusterstate.Initialized() {
+		t.Fatal("report established unknown authority")
 	}
 }

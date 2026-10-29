@@ -1093,11 +1093,7 @@ from silently overriding the physical planner. */
 		(define scalar_rewritten
 			(query_block_with_scalar_first_probes_using_graph stage_lookup dependency_graph block))
 		(define membership_rewritten
-			(query_block_with_physical_membership_choices
-				(query_block_with_physical_membership_using stage_lookup scalar_rewritten)))
-		(if (expr_contains_membership_truth? (qb_where membership_rewritten))
-			(neumann_fail "build_queryplan"
-				"logical membership marker survived physical choice") true)
+			(query_block_with_physical_membership_using stage_lookup scalar_rewritten))
 		(define sources (qb_sources membership_rewritten))
 		(define default_alias (qassoc_get (qb_facts membership_rewritten) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
 		(define presence_probe_sources (presence_probe_output_sources
@@ -1732,8 +1728,7 @@ outer joins. */
 			membership choice here too; otherwise the top-level preparation pass never
 			reaches this nested block and eagerly materializes the candidate cache. */
 			(define membership_src (if (query_block? src)
-				(query_block_with_physical_membership_choices
-					(query_block_with_physical_membership_using stage_lookup src))
+				(query_block_with_physical_membership_using stage_lookup src)
 				src))
 			/* A nested presence chain represented as correlated scalar probes copies
 			the complete remaining probe suffix into every parent prepare. Its stage
@@ -5613,9 +5608,8 @@ chooses the producer/driver implementation from canonical stage facts. */
 
 (define prepare_simple_query_block_physical_core (lambda (block)
 	(prepare_simple_query_block_physical_core_chosen
-		(query_block_with_physical_membership_choices
-			(query_block_with_physical_membership_using
-				(query_block_stage_lookup block) (query_block_with_presence_projection_choices block))))))
+		(query_block_with_physical_membership_using
+			(query_block_stage_lookup block) (query_block_with_presence_projection_choices block)))))
 
 (define lower_simple_query_block_with_cataloged_stages (lambda (block)
 	(begin

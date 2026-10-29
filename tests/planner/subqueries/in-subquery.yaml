@@ -71,6 +71,44 @@ setup:
         true)
 
 test_cases:
+  - name: "Membership normalization publishes the final source catalog before join search"
+    scm: |
+      (begin
+        (define driver '("d" "memcp-tests" "membership_item" false nil))
+        (define peer '("p" "memcp-tests" "membership_item" false nil))
+        (define input '("r" "memcp-tests" "membership_assignment" false nil))
+        (define probe (list 'get_column "d" false "ID" false))
+        (define key (list 'get_column "r" false "result" false))
+        (define stage (make_group_stage "membership-contract" input (list probe) (list key)
+          (list aggregate_count_descriptor) nil nil nil nil nil
+          (list (list 'purpose 'in_membership) (list 'condition true)
+            (list 'lookup-keys (list probe)))))
+        (define output (list "lookup" "memcp-tests" (make_stage_output_relation (gs_id stage)) true nil))
+        (define block (make_query_block "memcp-tests" (list driver peer output) (list "ID" probe)
+          (list 'or (list 'equal? probe 2) (list 'membership_truth probe "lookup" "count"))
+          nil nil nil nil nil nil (list stage) nil))
+        (define reordered (join_reorder_node_using (list stage) block nil nil))
+        (define tree (qassoc_get (qb_facts reordered) 'join_plan nil))
+        (define physical (apply_join_optimizer_plan_node reordered))
+        (if (and (equal? (qb_sources reordered) (list driver peer))
+              (not (expr_contains_membership_truth? (qb_where reordered)))
+              (strlike (serialize (qb_where reordered)) "%membership_requirement_probe%")
+              (not (strlike (serialize (qb_where reordered)) "%driver_membership_probe%"))
+              (equal? (qb_sources physical) (qb_sources reordered))
+              (equal? (sort (join_optimizer_tree_aliases tree) <) '("d" "p"))
+              (equal? (join_optimizer_tree_aliases (qassoc_get (qb_facts physical) 'join_plan nil))
+                (join_optimizer_tree_aliases tree)))
+          true (error "membership source elimination escaped logical planning")))
+
+  - name: "Normalized membership preserves a sibling OR and duplicate RHS keys"
+    sql: |
+      SELECT ID FROM membership_item
+      WHERE ID = 2 OR ID IN (SELECT result FROM membership_assignment)
+      ORDER BY ID
+    expect:
+      rows: 3
+      data: [{ID: 1}, {ID: 2}, {ID: 3}]
+
   - name: "Ordered disjunctive computed membership keeps probe closures distinct from RecSets"
     # Exercise the ordered probe alternative even when adaptive batch acceptance
     # is cheaper on this small fixture. The three RHS sources must stay separate.

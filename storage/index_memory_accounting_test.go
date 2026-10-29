@@ -147,3 +147,21 @@ func TestShardAccountingConcurrentIndexPublication(t *testing.T) {
 		t.Fatalf("inclusive shard bytes = %d, want parent plus all published indices %d", got, want)
 	}
 }
+
+// A delta insertion must not enter callbacks with the shard write lock held.
+// The comparator stands in for an ORC reader that scans its own source shard.
+func TestComputedIndexDeltaDoesNotInvokeComparator(t *testing.T) {
+	index := &StorageIndex{}
+	index.baseState.active = true
+	index.baseState.deltaBtree = btree.NewG[indexPair](8, func(a, b indexPair) bool {
+		t.Fatal("delta maintenance invoked a computed-key comparator")
+		return false
+	})
+	index.baseState.deltaBtree.ReplaceOrInsert(indexPair{itemid: 0})
+	if charged := index.insertDelta(1, []scm.Scmer{scm.NewInt(7)}); charged != 0 {
+		t.Fatalf("invalidated index charged delta allocation: %d", charged)
+	}
+	if index.baseState.active || index.baseState.deltaBtree != nil {
+		t.Fatal("computed index remained usable after its source delta changed")
+	}
+}

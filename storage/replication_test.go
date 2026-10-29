@@ -537,7 +537,7 @@ func TestReplicationPeriodicReclaimUsesOrdinaryMosiGrant(t *testing.T) {
 
 func replicaAdmissionFixture(name string) (*replicationManager, *replicaCell, scm.Scmer) {
 	r := &replicationManager{cells: make(map[string]*replicaCell)}
-	c := r.cell(name)
+	c := r.resourceCell(mosiResource{Database: name})
 	database := scm.NewString(name)
 	session := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		if a[0].String() == "schema" {
@@ -1359,6 +1359,20 @@ func TestReplicationSchemaDeclarationDoesNotUndoForwarding(t *testing.T) {
 	r.declareShard(original, r.id, true)
 	if *cell.resource.Load() != to || r.resourceCell(from) != r.resourceCell(to) {
 		t.Fatal("schema loading reverted an existing UUID route")
+	}
+	captured := r.cellSnapshot.Load()
+	previousName := table.Name
+	defer func() { table.Name = previousName }()
+	table.Name = "renamed_items"
+	r.declareShard(original, r.id, true)
+	renamed := to
+	renamed.Table = table.Name
+	if r.canonicalResource(from) != renamed || r.canonicalResource(to) != renamed ||
+		*cell.resource.Load() != renamed || r.directory.Records[to.key()].Resource != renamed {
+		t.Fatal("schema rename did not publish one canonical successor identity")
+	}
+	if *(*captured)[from.key()].resource != to {
+		t.Fatal("schema rename changed an already captured routing snapshot")
 	}
 }
 

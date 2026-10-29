@@ -10,6 +10,35 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS mcw_files"
   - sql: "DROP TABLE IF EXISTS mcw_acl"
 test_cases:
+  - name: "Physical membership workload preserves stage estimates without retaining request state"
+    scm: |
+      (begin
+        (define domain (list (list 'session "userid")))
+        (define stage (make_group_stage "stage-contract" nil domain domain nil nil nil nil nil nil
+          (list (list 'membership_candidate_estimated_rows 4)
+            (list 'membership_candidate_input_rows 100000))))
+        (define prepared (physical_membership_requirement_stage stage
+          (list (list 'membership_consumer 'order_limit)
+            (list 'membership_driver_rows 12)
+            (list 'physical_planning_session (newsession))
+            (list 'join_plan '(join-leaf "unrelated")))))
+        (define facts (gs_facts prepared))
+        (define own_work (gs_facts (physical_membership_requirement_stage
+          (group_stage_with_facts stage
+            (list (list 'membership_driver_rows 80000) (list 'membership_consumer 'filter)))
+          (gs_facts prepared))))
+        (if (and (equal? (qassoc_get own_work 'membership_driver_rows nil) 80000)
+              (equal? (qassoc_get own_work 'membership_consumer nil) 'filter)
+              (equal? (gs_domain prepared) domain)
+              (equal? (gs_keys prepared) domain)
+              (equal? (qassoc_get facts 'membership_candidate_estimated_rows nil) 4)
+              (equal? (qassoc_get facts 'membership_candidate_input_rows nil) 100000)
+              (equal? (qassoc_get facts 'membership_driver_rows nil) 12)
+              (equal? (qassoc_get facts 'membership_consumer nil) 'order_limit)
+              (nil? (qassoc_get facts 'physical_planning_session nil))
+              (nil? (qassoc_get facts 'join_plan nil)))
+          true (error "physical membership adapter violated its stage ownership contract: " (serialize prepared))))
+
   - name: "Late consumer fallback must not shadow measured stage work"
     scm: |
       (begin
@@ -20,7 +49,7 @@ test_cases:
             (list 'membership_candidate_index_filter_rows 4)
             (list 'membership_candidate_broad_text_match_bytes 128))))
         (define block (make_query_block "memcp-tests" nil nil true nil nil nil nil nil nil nil nil))
-        (define facts (membership_truth_cost_facts block stage))
+        (define facts (membership_truth_cost_facts block stage nil nil))
         (if (and (equal? (qassoc_get facts 'membership_candidate_estimated_rows nil) 4)
               (equal? (qassoc_get facts 'membership_candidate_broad_text_match_bytes nil) 128))
           true (error "late fallback shadowed authoritative membership statistics")))

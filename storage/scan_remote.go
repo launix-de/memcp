@@ -516,9 +516,7 @@ func findScanShard(table *table, resource mosiResource) *storageShard {
 	}
 	var cell *replicaCell
 	if r := replication.Load(); r != nil {
-		if snapshot := r.cellSnapshot.Load(); snapshot != nil {
-			cell = (*snapshot)[resource.key()]
-		}
+		cell = r.lookupCell(resource)
 	}
 	if cell == nil {
 		if cluster := activeNodeCluster(); cluster != nil {
