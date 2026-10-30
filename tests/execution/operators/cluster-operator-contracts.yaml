@@ -304,6 +304,11 @@ test_cases:
   sql: SELECT COUNT(*) AS n FROM big_items WHERE v7<0
   expect:
     data: [{n: 0}]
+- name: bulk-update-restored-full-signature
+  sql: SELECT COUNT(*) AS n,SUM(id) AS ids,SUM(v7) AS vals FROM big_items
+  expect:
+    data: [{n: 320000, ids: 51199840000, vals: 687845503431224}]
+
 - name: bulk-delete-begin
   session_id: cluster-bulk-delete
   sql: START ACID TRANSACTION
@@ -319,9 +324,9 @@ test_cases:
       data_exceeds_node_ram: true
 - name: bulk-delete-own-visibility
   session_id: cluster-bulk-delete
-  sql: SELECT COUNT(*) AS n FROM big_items
+  sql: SELECT COUNT(*) AS n,SUM(id) AS ids FROM big_items
   expect:
-    data: [{n: 288000}]
+    data: [{n: 288000, ids: 46151856000}]
 - name: bulk-delete-uncommitted-isolation
   sql: SELECT COUNT(*) AS n FROM big_items
   expect:
@@ -336,6 +341,11 @@ test_cases:
 
 # Autocommit must publish the same durable logical result as local DML.
 # The runner preserves an independent pre-oracle fixture for the cluster.
+- name: bulk-delete-restored-full-signature
+  sql: SELECT COUNT(*) AS n,SUM(id) AS ids,SUM(v7) AS vals FROM big_items
+  expect:
+    data: [{n: 320000, ids: 51199840000, vals: 687845503431224}]
+
 - name: bulk-update-autocommit
   sql: UPDATE big_items SET v7=-id-1 WHERE id%5000<500
   timeout: 60
