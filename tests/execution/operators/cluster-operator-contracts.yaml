@@ -147,8 +147,15 @@ test_cases:
       min_remote_shards: 1
 
 - name: prepare-first-remote-lookup
+  # The carrier is created by this coordinator. The immutable fixture's
+  # operator_keys may itself be placed remotely, where createcolumn and UPDATE
+  # are explicitly unsupported; the lookup's source remains remote big_items.
+  setup:
+  - sql: DROP TABLE IF EXISTS filtered_operator_keys
+  - sql: CREATE TABLE filtered_operator_keys(id INT PRIMARY KEY) ENGINE=memory
+  - sql: INSERT INTO filtered_operator_keys VALUES(42000),(90000),(175000),(245000)
   scm: |
-    (createcolumn (table "{database}" false "operator_keys" false)
+    (createcolumn (table "{database}" false "filtered_operator_keys" false)
       "prepared_v0" "BIGINT" '()
       (list "temp" true "filtercols" '("id") "filter" (lambda (id) (equal? id 42000)))
       '("id") (lambda (key)
@@ -162,7 +169,7 @@ test_cases:
 
 - name: repeat-valid-remote-lookup
   scm: |
-    (createcolumn (table "{database}" false "operator_keys" false)
+    (createcolumn (table "{database}" false "filtered_operator_keys" false)
       "prepared_v0" "BIGINT" '()
       (list "temp" true "filtercols" '("id") "filter" (lambda (id) (equal? id 42000)))
       '("id") (lambda (key)
@@ -173,7 +180,7 @@ test_cases:
 
 - name: prepare-second-remote-lookup
   scm: |
-    (createcolumn (table "{database}" false "operator_keys" false)
+    (createcolumn (table "{database}" false "filtered_operator_keys" false)
       "prepared_v0" "BIGINT" '()
       (list "temp" true "filtercols" '("id") "filter" (lambda (id) (equal? id 245000)))
       '("id") (lambda (key)
@@ -186,19 +193,19 @@ test_cases:
       min_remote_shards: 1
 
 - name: prepared-and-lazy-lookups-agree-with-remote-source
-  sql: SELECT k.id,k.prepared_v0 AS value FROM operator_keys k ORDER BY k.id
+  sql: SELECT k.id,k.prepared_v0 AS value FROM filtered_operator_keys k ORDER BY k.id
   expect:
     rows: 4
     cluster:
       min_remote_shards: 1
 - name: changed-local-key-repairs-remote-lookup
   setup:
-  - sql: UPDATE operator_keys SET id=42001 WHERE id=42000
-  sql: SELECT k.id,k.prepared_v0=b.v0 AS current_value FROM operator_keys k JOIN big_items b ON b.id=k.id WHERE k.id=42001
+  - sql: UPDATE filtered_operator_keys SET id=42001 WHERE id=42000
+  sql: SELECT k.id,k.prepared_v0=b.v0 AS current_value FROM filtered_operator_keys k JOIN big_items b ON b.id=k.id WHERE k.id=42001
   expect:
     rows: 1
     data: [{id: 42001, current_value: 1}]
     cluster:
       min_remote_shards: 1
   cleanup:
-  - sql: UPDATE operator_keys SET id=42000 WHERE id=42001
+  - sql: DROP TABLE filtered_operator_keys
