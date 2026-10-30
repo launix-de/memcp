@@ -329,10 +329,17 @@ This resolves metadata only; the logical planner still owns projection rewrite. 
 		/* Type consumers can precede the binder. Normalize only the shared
 		logical syntax node; no nested query is executed or planned here. */
 		(define relation (normalize_query_ast relation))
+		(define declared (if (query_block? relation)
+			(qassoc_get (qb_facts relation) (quote result-types) nil) nil))
+		(define contract (if col_ignorecase
+			(find (extract_assoc (coalesceNil declared '()) (lambda (title info)
+				(if (equal?? title col) info nil))) (lambda (info) (not (nil? info))) nil)
+			(qassoc_get (coalesceNil declared '()) col nil)))
+		(define info (if (not (nil? contract)) contract (begin
 		(define titles (queryplan_result_titles relation))
 		(define index (find (produceN (count titles)) (lambda (index)
 			(if col_ignorecase (equal?? (nth titles index) col) (equal? (nth titles index) col))) nil))
-		(define info (if (nil? index) (sql_info nil "any" nil) (sql_projection_info_at relation index outer_sources)))
+			(if (nil? index) (sql_info nil "any" nil) (sql_projection_info_at relation index outer_sources)))))
 		(sql_info original (sql_info_datatype info) (sql_info_collation info)))))
 
 /* Catalog type/collation for a base-table column, name canonicalized. Only a
@@ -532,10 +539,14 @@ operand contract. Unknown registered reducers retain an explicit any contract. *
 		/* Frontends attach the declared contract to their conversion formula.
 		Resolve the operand normally; only its executable formula survives. */
 		((symbol sql_type_expr) formula type collation)
+		(if (and (sql_text_type? (sql_datatype_name type)) (nil? collation))
 		(begin
 			(define info (sql_expr_info sources formula))
-			(sql_info (sql_info_formula info) type
-				(if (and (sql_text_type? (sql_datatype_name type)) (nil? collation)) (sql_info_collation info) collation)))
+				(sql_info (sql_info_formula info) type (sql_info_collation info)))
+			/* The producer already resolved this contract. Remove nested frontend
+			annotations without deriving every plain operand's type again. */
+			(sql_info (match (sql_type_annotation_replacement sources formula)
+				'(plain) plain _ formula) type collation))
 		/* Dialects compile type-directed operations from resolved argument triples.
 		The callback is a compiler, never an executable SQL operator. */
 		(cons (symbol sql_compile_expr) (cons compiler arguments))
@@ -734,15 +745,15 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 unchanged; a singleton holds the replacement, including a legitimate NULL.
 Retain annotation-free sources/stage graphs instead of cloning every node
 for frontends that have emitted no contracts. Quoted syntax stays opaque. */
-(define sql_type_annotation_replacement (lambda (node)
+(define sql_type_annotation_replacement (lambda (sources node)
 	(match node
-		((symbol sql_compile_column) _compiler _expression) (list (sql_type_formula '() node))
-		((symbol sql_type_expr) _formula _type _collation) (list (sql_type_formula '() node))
-		(cons (symbol sql_compile_expr) _arguments) (list (sql_type_formula '() node))
+		((symbol sql_compile_column) _compiler _expression) (list (sql_type_formula sources node))
+		((symbol sql_type_expr) _formula _type _collation) (list (sql_type_formula sources node))
+		(cons (symbol sql_compile_expr) _arguments) (list (sql_type_formula sources node))
 		((symbol quote) _datum) nil
 		(cons head tail) (begin
-			(define rewritten_head (sql_type_annotation_replacement head))
-			(define rewritten_tail (sql_type_annotation_replacement tail))
+			(define rewritten_head (sql_type_annotation_replacement sources head))
+			(define rewritten_tail (sql_type_annotation_replacement sources tail))
 			(if (and (nil? rewritten_head) (nil? rewritten_tail)) nil
 				(list (cons
 					(if (nil? rewritten_head) head (car rewritten_head))
@@ -750,7 +761,7 @@ for frontends that have emitted no contracts. Quoted syntax stays opaque. */
 		_ nil)))
 
 (define sql_type_lower_annotations (lambda (node)
-	(match (sql_type_annotation_replacement node)
+	(match (sql_type_annotation_replacement '() node)
 		'(formula) formula
 		_ node)))
 
@@ -775,23 +786,33 @@ fields and ordering retain their executable formulas and declared contracts. */
 			(list (quote sql_temporal_output) formula type (list (quote session_globalvar) "time_zone"))
 			formula))))
 
-(define annotate_sql_outputs (lambda (query)
+(define sql_annotate_query_outputs (lambda (query external_output)
 	(begin
 		(define raw_block (normalize_query_ast query))
 		/* Preserve primary-key functional dependencies before expanding stars
 		into the external typed projection. */
 		(define block (if (query_block? raw_block) (expand_grouped_query_block raw_block) raw_block))
 		(if (query_block? block) (begin
-			(define infos (map_assoc (expand_query_block_fields (qb_sources block) (qb_fields block))
-				(lambda (_title expr) (sql_expr_info (qb_sources block) expr))))
-			(make_query_block (qb_schema block) (qb_sources block)
+			/* Publish each derived producer's descriptor once before its parent
+			reads it. Presentation formatting belongs only to external outputs. */
+			(define sources (map (qb_sources block) (lambda (src)
+				(if (or (query_block? (source_relation src)) (union_block? (source_relation src)))
+					(source_with_relation src (sql_annotate_query_outputs (source_relation src) false)) src))))
+			(define infos (map_assoc (expand_query_block_fields sources (qb_fields block))
+				(lambda (_title expr) (sql_expr_info sources expr))))
+			(make_query_block (qb_schema block) sources
+				(if external_output
 				(map_assoc infos (lambda (_title info) (sql_output_formula info)))
+					(qb_fields block))
 				(qb_where block) (qb_group block) (qb_having block) (qb_order block)
 				(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block)
 				(qassoc_set (qb_facts block) (quote result-types)
 					(map_assoc infos (lambda (_title info)
 						(sql_info nil (sql_info_datatype info) (sql_info_collation info)))))))
 			(union_block? block)
-			(make_union_block (union_mode block) (map (union_branches block) annotate_sql_outputs)
+			(make_union_block (union_mode block) (map (union_branches block) (lambda (branch) (sql_annotate_query_outputs branch external_output)))
 				(union_order block) (union_limit block) (union_offset block) (union_facts block))
 			block))))
+
+(define annotate_sql_outputs (lambda (query)
+	(sql_annotate_query_outputs query true)))
