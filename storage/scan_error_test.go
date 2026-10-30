@@ -29,3 +29,33 @@ func TestScanErrorOmitsStackFromClientError(t *testing.T) {
 		t.Fatalf("scanError.Error() = %q, want %q", got, want)
 	}
 }
+
+// A scan may overlap the schema owner's eviction/publication work. Access-time
+// accounting must use the retained declaration generation, never Columns' mutable
+// slice header or backing array.
+func TestTouchTempColumnsDuringDeclarationPublication(t *testing.T) {
+	retained := &column{Name: "retained", IsTemp: true}
+	retired := &column{Name: "retired", IsTemp: true}
+	tbl := &table{Columns: []*column{retained, retired}}
+	tbl.columnNamesSnapshot.Store(&tableColumnNamesSnapshot{declarations: append([]*column(nil), tbl.Columns...)})
+	start, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		<-start
+		for i := 0; i < 10000; i++ {
+			tbl.Columns = tbl.Columns[:1]
+			if i%2 == 0 {
+				tbl.Columns = append(tbl.Columns, retired)
+			}
+			tbl.columnNamesSnapshot.Store(&tableColumnNamesSnapshot{declarations: append([]*column(nil), tbl.Columns...)})
+		}
+	}()
+	close(start)
+	for i := 0; i < 10000; i++ {
+		touchTempColumns(tbl)
+	}
+	<-done
+	if retained.lastAccessed == 0 {
+		t.Fatal("scan did not touch its retained temporary column")
+	}
+}

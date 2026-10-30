@@ -136,3 +136,9 @@ test_cases:
       data_exceeds_node_ram: true
       plan_contains:
       - scan_order
+
+- name: typed-output-contracts
+  sql: SELECT SUM(CAST(v0 AS DECIMAL(18,2))) AS total, MIN(CASE WHEN id%17=0 THEN DATE('2024-10-26') ELSE DATE('2024-10-27') END) AS first_day FROM big_items
+  expect:
+    cluster:
+      min_remote_shards: 1

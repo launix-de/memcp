@@ -1264,7 +1264,7 @@ runtime errors are never caught and classified by their message text. */
 	(define text_info (car infos))
 	(define piece_info (cadr infos))
 	(define piece (sql_type_formula '() (tsql_cast_expr
-		(list (quote sql_type_expr) (sql_info_formula piece_info) (sql_info_type piece_info) (sql_info_collation piece_info))
+		(list (quote sql_type_expr) (sql_info_formula piece_info) (sql_info_datatype piece_info) (sql_info_collation piece_info))
 		"INT" '())))
 	(sql_info (list (quote tsql_parsename) (tsql_identifier_text text_info) piece)
 		"NVARCHAR" (sql_info_collation text_info)))))
@@ -1745,7 +1745,7 @@ no runtime value tag determines a SQL type. A nested set keeps its boundary. */
 				(define info (nth (nth infos column) index))
 				(list (nth (nth fields index) (* column 2))
 					(list (quote sql_type_expr) (sql_info_formula info)
-						(sql_info_type info) (sql_info_collation info)))))))
+						(sql_info_datatype info) (sql_info_collation info)))))))
 			(qb_where branch) (qb_group branch) (qb_having branch) (qb_order branch)
 			(qb_limit branch) (qb_offset branch) (qb_hidden branch) (qb_stages branch) (qb_facts branch)))))))
 
@@ -1793,7 +1793,7 @@ there is no scan-bound operator to supply it for this conditional expression. */
 		(sql_info_formula first_value) (sql_info_formula (cadr values))
 		(collate collation false) "equal??"))
 	(sql_info (list (quote if) comparison nil (sql_info_formula first))
-		(sql_info_type first) (sql_info_collation first)))))
+		(sql_info_datatype first) (sql_info_collation first)))))
 (define tsql_nullif_expr (lambda (arguments)
 	(cons (quote sql_compile_expr) (cons (quote tsql_compile_nullif) arguments))))
 
@@ -2868,7 +2868,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(tsql_values_row_query schema aliases (map columns (lambda (column) (begin
 				(define info (nth column row_index))
 				(list (quote sql_type_expr) (sql_info_formula info)
-					(sql_info_type info) (sql_info_collation info)))))))))
+					(sql_info_datatype info) (sql_info_collation info)))))))))
 		(match branches (cons only '()) only
 			_ (list (quote union-block) (quote all) branches nil nil nil '())))))
 
@@ -3356,7 +3356,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(define info (sql_projection_info_at expanded i '()))
 					(sql_type_formula '() (tsql_assignment_expr
 						(list (quote sql_type_expr) '('nth 'item (+ (* i 2) 1))
-							(sql_info_type info) (sql_info_collation info))
+							(sql_info_datatype info) (sql_info_collation info))
 						(nth declarations i))))))))) 1 false))
 		(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
 			(error "INSERT column count does not match SELECT column count"))
@@ -3563,7 +3563,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 			/* Keep the parsed source contract until the column's destination is
 			known. tsql_prepare_column freezes the converted native default. */
 			(list "default" (list (quote sql_type_expr) (tryfold (sql_info_formula info))
-				(sql_info_type info) (sql_info_collation info))))))))
+				(sql_info_datatype info) (sql_info_collation info))))))))
 	(define column_attributes (tsql_column_attributes tsql_default_value))
 	(define column_definition (parser '(
 		(define name tsql_identifier) (define type tsql_schema_type)

@@ -20,6 +20,7 @@ package scm
 
 import "io"
 import "fmt"
+import "math"
 import "bytes"
 import "reflect"
 import "strconv"
@@ -346,10 +347,31 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		var buffer [32]byte
 		value := strconv.AppendInt(buffer[:0], v.Int(), 10)
 		_, _ = b.Write(value)
+	case tagDate:
+		if b.objects != nil {
+			// Network values preserve the native date scalar, including its zone.
+			// Local diagnostic/persistence text keeps its historical spelling.
+			b.WriteString("(serialized_date ")
+			b.WriteString(strconv.FormatInt(v.Int(), 10))
+			b.WriteByte(' ')
+			b.WriteString(strconv.Itoa(TagDateDecodeZone(auxVal(v.aux))))
+			b.WriteByte(')')
+		} else {
+			b.WriteString(strconv.FormatInt(v.Int(), 10))
+		}
 	case tagFloat:
+		if b.objects != nil && (math.IsInf(v.Float(), 0) || math.IsNaN(v.Float())) {
+			b.WriteString("(simplify \"")
+			b.WriteString(strconv.FormatFloat(v.Float(), 'g', -1, 64))
+			b.WriteString("\")")
+			return
+		}
 		var buffer [64]byte
 		value := strconv.AppendFloat(buffer[:0], v.Float(), 'g', -1, 64)
 		_, _ = b.Write(value)
+		if b.objects != nil && !bytes.ContainsAny(value, ".eE") {
+			b.WriteString(".0")
+		}
 	case tagString, tagCString, tagBString, tagLZ4:
 		b.WriteByte('"')
 		if v.IsBufferString() {

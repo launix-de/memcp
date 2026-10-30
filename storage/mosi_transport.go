@@ -11,6 +11,7 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 
 package storage
 
+import "io"
 import "fmt"
 import "sync"
 import "time"
@@ -271,11 +272,17 @@ func (p *mosiPeer) read() {
 		if p.receiveIO != nil && !previousStart.IsZero() && !p.receiveIO.pace(p.ctx, previousBytes, previousStart) {
 			return
 		}
+		kind, reader, err := p.conn.NextReader()
+		if err != nil || kind != websocket.BinaryMessage {
+			return
+		}
+		// Waiting for a new message is idle time, not transmission work.
+		// Start crediting elapsed work only after its header has arrived.
 		if p.receiveIO != nil {
 			previousStart = time.Now()
 		}
-		kind, frame, err := p.conn.ReadMessage()
-		if err != nil || kind != websocket.BinaryMessage {
+		frame, err := io.ReadAll(reader)
+		if err != nil {
 			return
 		}
 		previousBytes = len(frame)

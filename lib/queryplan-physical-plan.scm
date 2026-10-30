@@ -13352,11 +13352,12 @@ prepare bindings; no key enumeration or storage artifact enters logical IR. */
 
 /* Keep phase ownership explicit. normalize_query_ast inside untangle_query
 removes parser-specific spelling before dependent joins are identified; this
-wrapper owns the output-shape normalizers which must precede binding.
+wrapper owns neutral query syntax. The SQL binder resolves expression
+contracts before its output producer consumes their descriptors.
 Decorrelation owns D and all subquery elimination; only then may logical join
 ordering run. Storage artifacts begin in build_queryplan. */
 (define normalize_sql_syntax (lambda (ast)
-	(sanitize_temporal_outputs (sanitize_decimal_aggregate_outputs ast))))
+	(normalize_query_ast ast)))
 
 (define decorrelate_logical_query (lambda (ast)
 	(untangle_query_term (normalize_sql_syntax ast) nil)))
@@ -14262,7 +14263,7 @@ It is as stable as its symbolic form; other procedures remain unproven. */
 		((symbol get_column) alias ci col cci) true
 		(cons head tail)
 		(and (or (equal? head list)
-			(contains? '("list" "and" "or" "equal??" "sql_not" "sql_in" "<" ">" "<=" ">=" "simplify") (string head)))
+			(contains? '("list" "and" "or" "equal??" "sql_not" "sql_in" "<" ">" "<=" ">=" "simplify" "intdiv") (string head)))
 			(reduce tail (lambda (ok item) (and ok (semijoin_stable_expr? item))) true))
 		_ (or (nil? expr) (or (number? expr) (or (string? expr) (or (equal? expr true) (equal? expr false))))))))
 

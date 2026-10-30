@@ -9,8 +9,7 @@ assertions are derived only where an operation guarantees a result type
 (arithmetic on known numerics, CAST, comparisons, function contracts) or where a
 resolved column carries catalog metadata.
 
-Resolution runs as one bottom-up walk over the already-planned query (sources
-resolved), producing a (FORMULA TYPE COLLATION) descriptor per expression. The
+Resolution runs bottom-up in the SQL binding scope, producing a (FORMULA TYPE COLLATION) descriptor per expression. The
 FORMULA slot is always plain executable code: no sql_typed_value / sql_collation
 wrapper nodes are ever emitted. TYPE/COLLATION are consumed on the spot (collate
 callback selection for comparisons, ORDER BY, GROUP BY, DISTINCT) or recorded in
@@ -18,14 +17,37 @@ the query block's result-types fact for the wire/PDO result contract. Nothing
 type-related survives into the executable plan.
 
 A descriptor is (FORMULA TYPE COLLATION):
-- TYPE: uppercase SQL type name, or "any".
+- TYPE: uppercase SQL type name, or (NAME DIMENSIONS) for a declared sized
+datatype. "any" means the SQL frontend has no stronger contract.
 - COLLATION: nil, or a (NAME COERCIBILITY) pair. Lower coercibility wins:
 0 = explicit COLLATE, 2 = column, 4 = literal, 5 = numeric/ignorable. */
 
 (define sql_info (lambda (formula type collation) (list formula type collation)))
 (define sql_info_formula car)
-(define sql_info_type cadr)
+(define sql_info_datatype cadr)
+(define sql_datatype_name (lambda (type)
+	(match type '(name _dimensions) name _ type)))
+(define sql_info_type (lambda (info) (sql_datatype_name (sql_info_datatype info))))
+(define sql_info_dimensions (lambda (info)
+	(match (sql_info_datatype info) '(_name dimensions) dimensions _ '())))
 (define sql_info_collation (lambda (info) (nth info 2)))
+
+/* SQL declarations, including DECIMAL precision/scale, are compile-time data
+inside the TYPE slot. Operators consume and produce these same contracts;
+output formatting never re-reads declarations or guesses from runtime values. */
+(define sql_info_decimal_scale (lambda (info)
+	(if (and (has? '("DECIMAL" "NUMERIC") (sql_info_type info))
+		(> (count (sql_info_dimensions info)) 1))
+		(nth (sql_info_dimensions info) 1) nil)))
+(define sql_decimal_result_datatype (lambda (type infos)
+	(if (not (has? '("DECIMAL" "NUMERIC") type)) type
+		(begin
+			(define dimensions (map (filter infos (lambda (info)
+				(not (nil? (sql_info_decimal_scale info))))) sql_info_dimensions))
+			(if (empty_list? dimensions) type
+				(list type (list
+					(reduce dimensions (lambda (best dims) (max best (car dims))) 0)
+					(reduce dimensions (lambda (best dims) (max best (cadr dims))) 0))))))))
 
 /* ---- type predicates ---- */
 
@@ -70,9 +92,12 @@ unicode alias. Returns nil or a (NAME COERCIBILITY) pair. */
 								(if (and (sql_numeric_type? ta) (sql_numeric_type? tb)) "DECIMAL" "VARCHAR"))))))))))
 
 (define sql_merge_info (lambda (a b)
+	(begin
+		(define type (sql_merge_type (sql_info_type a) (sql_info_type b)))
 	(sql_info nil
-		(sql_merge_type (sql_info_type a) (sql_info_type b))
-		(sql_merge_collation (sql_info_collation a) (sql_info_collation b)))))
+			(if (has? '("DECIMAL" "NUMERIC") type)
+				(sql_decimal_result_datatype type (list a b)) type)
+			(sql_merge_collation (sql_info_collation a) (sql_info_collation b))))))
 (define sql_merge_infos (lambda (infos)
 	(reduce infos sql_merge_info (sql_info nil "NULL" nil))))
 
@@ -296,7 +321,7 @@ heterogeneous branches require a frontend-assigned contract or casts. */
 				(define types (filter (map infos sql_info_type) (lambda (type) (not (equal? type "NULL")))))
 				(define type (if (empty_list? types) "NULL" (car types)))
 				(if (reduce types (lambda (same current) (and same (equal? current type))) true)
-					(sql_info nil type (reduce infos (lambda (collation info)
+					(sql_info nil (sql_decimal_result_datatype type infos) (reduce infos (lambda (collation info)
 						(sql_merge_collation collation (sql_info_collation info))) nil))
 					(sql_info nil "any" nil)))
 			(sql_info nil "any" nil)))))
@@ -307,11 +332,21 @@ This resolves metadata only; the logical planner still owns projection rewrite. 
 		/* Type consumers can precede the binder. Normalize only the shared
 		logical syntax node; no nested query is executed or planned here. */
 		(define relation (normalize_query_ast relation))
+		(define declared (if (query_block? relation)
+			(qassoc_get (qb_facts relation) (quote result-types) nil) nil))
+		/* result-types is a flat output dictionary, unlike qb_facts' pair list.
+		Exact lookup consumes that declaration directly. Folded lookup stops at
+		the first matching title instead of allocating an entry for every output. */
+		(define contract (if col_ignorecase
+			(match (find_assoc (coalesceNil declared '()) (lambda (title _info) (equal?? title col)))
+				'(_title info) info _ nil)
+			(get_assoc (coalesceNil declared '()) col nil)))
+		(define info (if (not (nil? contract)) contract (begin
 		(define titles (queryplan_result_titles relation))
 		(define index (find (produceN (count titles)) (lambda (index)
 			(if col_ignorecase (equal?? (nth titles index) col) (equal? (nth titles index) col))) nil))
-		(define info (if (nil? index) (sql_info nil "any" nil) (sql_projection_info_at relation index outer_sources)))
-		(sql_info original (sql_info_type info) (sql_info_collation info)))))
+			(if (nil? index) (sql_info nil "any" nil) (sql_projection_info_at relation index outer_sources)))))
+		(sql_info original (sql_info_datatype info) (sql_info_collation info)))))
 
 /* Catalog type/collation for a base-table column, name canonicalized. Only a
 resolved base table is rewritten: derived-table / stage-output columns and any
@@ -332,7 +367,8 @@ keeps its existing (ignorecase-flagged) resolution for them. */
 					(define collname (if (nil? meta) nil (meta "Collation")))
 					(sql_info
 						(list (quote get_column) (source_alias src) false canonical false)
-						type
+						(if (and (has? '("DECIMAL" "NUMERIC") type) (not (nil? meta)))
+							(list type (coalesceNil (meta "Dimensions") '())) type)
 						(if (and (sql_text_type? type) (string? collname) (not (equal? collname "")))
 							(list collname 2) nil))))))))
 
@@ -407,14 +443,63 @@ the conditions are booleans and would otherwise pollute the merge. */
 constants. Resolution stays at compilation; existing callable slots self-evaluate. */
 (define sql_expression_compiler (lambda (compiler) (eval compiler)))
 
+/* CAST owns its declared SQL target and consumes the operand triple. Its
+conversion is emitted as plain code; the target descriptor stays at compile time. */
+(define sql_cast_compiler (lambda (type dimensions) (lambda (infos)
+	(begin
+		(define input (car infos))
+		(define value (sql_info_formula input))
+		(if (and (equal? type "DECIMAL") (not (empty_list? dimensions))
+			(or (<= (car dimensions) 0) (< (cadr dimensions) 0) (> (cadr dimensions) (car dimensions))))
+			(error "invalid DECIMAL precision/scale") true)
+		(define numeric (list (quote simplify) value))
+		(define formula (if (sql_text_type? type) (list (quote concat) value)
+			(equal? type "BIGINT") (list (quote intdiv) numeric 1)
+			(and (equal? type "DECIMAL") (> (count dimensions) 1))
+			(list (quote sql_decimal_output) numeric (cadr dimensions))
+			numeric))
+		(sql_info formula (if (empty_list? dimensions) type (list type dimensions))
+			(if (sql_text_type? type) (sql_info_collation input) nil))))))
+
+(define sql_cast_expr (lambda (value type dimensions)
+	(list (quote sql_compile_expr)
+		(list (quote sql_cast_compiler) type (list (quote quote) dimensions)) value)))
+
+/* The aggregate AST is a SQL operator contract. Native reducer representation
+does not supply a runtime SQL type; these declared SQL reducers preserve their
+operand contract. Unknown registered reducers retain an explicit any contract. */
+(define sql_aggregate_info (lambda (head infos)
+	(begin
+		(define input (car infos))
+		(define reducer (sql_info_formula (cadr infos)))
+		(define preserves (or (equal? reducer (quote min)) (equal? reducer min)
+			(equal? reducer (quote max)) (equal? reducer max)
+			(equal? reducer (quote sql_sum_reduce)) (equal? reducer sql_sum_reduce)
+			(equal? reducer (quote +)) (equal? reducer +)))
+		(sql_info (cons head (map infos sql_info_formula))
+			(if preserves (sql_info_datatype input) "any")
+			(if preserves (sql_info_collation input) nil)))))
+
+(define sql_temporal_arithmetic_info (lambda (head infos)
+	(begin
+		(define type (sql_info_type (car infos)))
+		(define unit (sql_info_formula (nth infos 2)))
+		(sql_info (cons head (map infos sql_info_formula))
+			(if (and (equal? type "DATE") (string? unit)
+				(has? '("hour" "minute" "second" "microsecond") (toLower unit)))
+				"DATETIME" type) nil))))
+
 /* Call contracts consume resolved SQL triples from their producing scope. */
 (define sql_call_info (lambda (head infos)
 	(begin
 		(define forms (map infos sql_info_formula))
-		(if (sql_arith_head? head)
+		(if (equal? head (quote aggregate)) (sql_aggregate_info head infos)
+			(has? '(date_add date_sub) head) (sql_temporal_arithmetic_info head infos)
+			(sql_arith_head? head)
 			(sql_info (cons head forms)
-				(reduce (cdr infos) (lambda (t i) (sql_type_fuse_arith (sql_arith_op_name head) t (sql_info_type i)))
-					(sql_info_type (car infos)))
+				(sql_decimal_result_datatype
+					(reduce (cdr infos) (lambda (t i) (sql_type_fuse_arith (sql_arith_op_name head) t (sql_info_type i)))
+						(sql_info_type (car infos))) infos)
 				nil)
 			(if (and (sql_comparison_head? head) (equal? (count infos) 2))
 				(sql_comparison_info head (car infos) (cadr infos))
@@ -423,7 +508,10 @@ constants. Resolution stays at compilation; existing callable slots self-evaluat
 					(define rtype (cadr rule))
 					(define mode (nth rule 2))
 					(define value_infos (if (equal? mode "case") (sql_case_value_infos infos) infos))
-					(define merged (sql_merge_infos value_infos))
+					/* Fixed results and first-operand contracts do not consume a
+					merged operand descriptor. Avoid allocating that unused merge. */
+					(define merged (if (has? '("merge" "case" "text") mode)
+						(sql_merge_infos value_infos) nil))
 					(define type (if (has? (list "merge" "case") mode) (sql_info_type merged) rtype))
 					/* fixed: the function owns its result, no operand collation inherited.
 					first: inherit from the first argument. text/merge/case: merge the
@@ -434,10 +522,17 @@ constants. Resolution stays at compilation; existing callable slots self-evaluat
 							(if (has? (list "text" "merge" "case") mode)
 								(sql_info_collation merged)
 								nil))))
-					(sql_info (cons head forms) type collation)))))))
+					(sql_info (cons head forms) (if (has? (list "merge" "case") mode) (sql_info_datatype merged)
+						(sql_decimal_result_datatype type infos)) collation)))))))
 
 (define sql_expr_info (lambda (sources expr)
 	(match expr
+		/* Relational predicates own a BOOLEAN result. Their query is a lexical
+		relation, not a scalar argument list in the enclosing source scope. */
+		((symbol inner_select_exists) _query) (sql_info expr "BOOLEAN" nil)
+		((quote inner_select_exists) _query) (sql_info expr "BOOLEAN" nil)
+		((symbol inner_select_in) _probe _query) (sql_info expr "BOOLEAN" nil)
+		((quote inner_select_in) _probe _query) (sql_info expr "BOOLEAN" nil)
 		((symbol inner_select) query) (begin
 			/* Only metadata is read here. The original scalar query stays in the
 			logical AST for the common decorrelator and its cardinality checks. */
@@ -445,7 +540,7 @@ constants. Resolution stays at compilation; existing callable slots self-evaluat
 			(define bound (bind_query_names query (list outer_scope)))
 			(define info (if (equal? (count (queryplan_result_titles bound)) 1)
 				(sql_projection_info_at bound 0 sources) (sql_info nil "any" nil)))
-			(sql_info expr (sql_info_type info) (sql_info_collation info)))
+			(sql_info expr (sql_info_datatype info) (sql_info_collation info)))
 		((quote inner_select) query) (sql_expr_info sources (list (quote inner_select) query))
 		((symbol get_column) tblvar tbl_ic col col_ic) (sql_get_column_info sources tblvar tbl_ic col col_ic)
 		((quote get_column) tblvar tbl_ic col col_ic) (sql_get_column_info sources tblvar tbl_ic col col_ic)
@@ -453,10 +548,14 @@ constants. Resolution stays at compilation; existing callable slots self-evaluat
 		/* Frontends attach the declared contract to their conversion formula.
 		Resolve the operand normally; only its executable formula survives. */
 		((symbol sql_type_expr) formula type collation)
+		(if (and (sql_text_type? (sql_datatype_name type)) (nil? collation))
 		(begin
 			(define info (sql_expr_info sources formula))
-			(sql_info (sql_info_formula info) type
-				(if (and (sql_text_type? type) (nil? collation)) (sql_info_collation info) collation)))
+				(sql_info (sql_info_formula info) type (sql_info_collation info)))
+			/* The producer already resolved this contract. Remove nested frontend
+			annotations without deriving every plain operand's type again. */
+			(sql_info (match (sql_type_annotation_replacement sources formula)
+				'(plain) plain _ formula) type collation))
 		/* Dialects compile type-directed operations from resolved argument triples.
 		The callback is a compiler, never an executable SQL operator. */
 		(cons (symbol sql_compile_expr) (cons compiler arguments))
@@ -504,7 +603,7 @@ Derived-table sources and unions are passed through unchanged for now
 (define sql_type_result_descriptor (lambda (sources expr)
 	(begin
 		(define info (sql_expr_info sources expr))
-		(sql_info nil (sql_info_type info) (sql_info_collation info)))))
+		(sql_info nil (sql_info_datatype info) (sql_info_collation info)))))
 
 /* Canonicalize a projected field, but leave a SELECT * / t.* entry as-is: the
 planner has its own star-expansion (and GROUP-BY-primary-key rules) downstream. */
@@ -563,7 +662,7 @@ Unannotated scalar terminals have no trustworthy integer syntax contract. */
 				arguments authorize only the equality it actually emitted. */
 				(if (and (not (nil? (equality_term_operands formula)))
 					(expression_equal? (equality_term_operands formula) (map infos sql_info_formula)))
-					(list (list formula (map infos (lambda (info) (sql_info nil (sql_info_type info) (sql_info_collation info))))
+					(list (list formula (map infos (lambda (info) (sql_info nil (sql_info_datatype info) (sql_info_collation info))))
 						(map operands sql_mutation_contract_trusted?))) '())) '()))
 			(merge (cons own (map args (lambda (arg) (sql_mutation_comparison_contracts sources arg))))))
 		_ '())))
@@ -634,8 +733,13 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 			(make_query_block
 				(qb_schema block)
 				sources
+				/* Published outputs already carry canonical formulas and a declared
+				contract. Subsequent logical rewrites only need their remaining
+				compiler annotations removed, not another projection type walk. */
+				(if (not (nil? (qassoc_get (qb_facts block) (quote result-types) nil)))
+					(sql_type_lower_annotations (qb_fields block))
 				(map_assoc (qb_fields block)
-					(lambda (field_title field_expr) (sql_type_field_formula all_sources field_expr)))
+						(lambda (field_title field_expr) (sql_type_field_formula all_sources field_expr))))
 				(sql_type_formula all_sources (qb_where block))
 				(map (coalesceNil (qb_group block) '())
 					(lambda (group_expr) (sql_type_formula all_sources group_expr)))
@@ -647,22 +751,23 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 				(sql_type_lower_annotations (qb_limit block)) (sql_type_lower_annotations (qb_offset block))
 				(sql_type_lower_annotations (qb_hidden block)) (sql_type_lower_annotations (qb_stages block))
 				(qassoc_set (qassoc_set (qassoc_set (qb_facts block) (quote comparison-declarations) declarations) (quote comparison-contracts) mutation_contracts) (quote result-types)
-					(map_assoc (expand_query_block_fields sources (qb_fields block))
-						(lambda (rt_title rt_expr) (sql_type_result_descriptor all_sources rt_expr)))))))))
+					(coalesceNil (qassoc_get (qb_facts block) (quote result-types) nil)
+						(map_assoc (expand_query_block_fields sources (qb_fields block))
+							(lambda (rt_title rt_expr) (sql_type_result_descriptor all_sources rt_expr))))))))))
 
 /* Rewrite only paths containing frontend expression contracts. nil means
 unchanged; a singleton holds the replacement, including a legitimate NULL.
 Retain annotation-free sources/stage graphs instead of cloning every node
 for frontends that have emitted no contracts. Quoted syntax stays opaque. */
-(define sql_type_annotation_replacement (lambda (node)
+(define sql_type_annotation_replacement (lambda (sources node)
 	(match node
-		((symbol sql_compile_column) _compiler _expression) (list (sql_type_formula '() node))
-		((symbol sql_type_expr) _formula _type _collation) (list (sql_type_formula '() node))
-		(cons (symbol sql_compile_expr) _arguments) (list (sql_type_formula '() node))
+		((symbol sql_compile_column) _compiler _expression) (list (sql_type_formula sources node))
+		((symbol sql_type_expr) _formula _type _collation) (list (sql_type_formula sources node))
+		(cons (symbol sql_compile_expr) _arguments) (list (sql_type_formula sources node))
 		((symbol quote) _datum) nil
 		(cons head tail) (begin
-			(define rewritten_head (sql_type_annotation_replacement head))
-			(define rewritten_tail (sql_type_annotation_replacement tail))
+			(define rewritten_head (sql_type_annotation_replacement sources head))
+			(define rewritten_tail (sql_type_annotation_replacement sources tail))
 			(if (and (nil? rewritten_head) (nil? rewritten_tail)) nil
 				(list (cons
 					(if (nil? rewritten_head) head (car rewritten_head))
@@ -670,7 +775,7 @@ for frontends that have emitted no contracts. Quoted syntax stays opaque. */
 		_ nil)))
 
 (define sql_type_lower_annotations (lambda (node)
-	(match (sql_type_annotation_replacement node)
+	(match (sql_type_annotation_replacement '() node)
 		'(formula) formula
 		_ node)))
 
@@ -681,3 +786,51 @@ from nested logical inputs without inventing storage or planner operations. */
 		(if (query_block? (ir_root ir))
 			(sql_type_query_block (ir_root ir) '()) (sql_type_lower_annotations (ir_root ir)))
 		(sql_type_lower_annotations (ir_stages ir)) (ir_context_of ir) (ir_return ir))))
+
+/* Output consumes the same expression triple as comparisons and operators.
+Only the external projection receives formatting; relational inputs, hidden
+fields and ordering retain their executable formulas and declared contracts. */
+(define sql_output_formula (lambda (info)
+	(begin
+		(define formula (sql_info_formula info))
+		(define type (sql_info_type info))
+		(define scale (sql_info_decimal_scale info))
+		(if (not (nil? scale)) (list (quote sql_decimal_output) formula scale)
+			(has? '("DATE" "DATETIME" "TIMESTAMP") type)
+			(list (quote sql_temporal_output) formula type (list (quote session_globalvar) "time_zone"))
+			formula))))
+
+(define sql_annotate_query_outputs (lambda (query external_output)
+	(begin
+		(define raw_block (normalize_query_ast query))
+		(if (and (not external_output) (query_block? raw_block)
+			(not (nil? (qassoc_get (qb_facts raw_block) (quote result-types) nil))))
+			raw_block
+			(begin
+		/* Preserve primary-key functional dependencies before expanding stars
+		into the external typed projection. */
+		(define block (if (query_block? raw_block) (expand_grouped_query_block raw_block) raw_block))
+		(if (query_block? block) (begin
+			/* Publish each derived producer's descriptor once before its parent
+			reads it. Presentation formatting belongs only to external outputs. */
+			(define sources (map (qb_sources block) (lambda (src)
+				(if (or (query_block? (source_relation src)) (union_block? (source_relation src)))
+					(source_with_relation src (sql_annotate_query_outputs (source_relation src) false)) src))))
+			(define infos (map_assoc (expand_query_block_fields sources (qb_fields block))
+				(lambda (_title expr) (sql_expr_info sources expr))))
+			(make_query_block (qb_schema block) sources
+				(if external_output
+				(map_assoc infos (lambda (_title info) (sql_output_formula info)))
+					(qb_fields block))
+				(qb_where block) (qb_group block) (qb_having block) (qb_order block)
+				(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block)
+				(qassoc_set (qb_facts block) (quote result-types)
+					(map_assoc infos (lambda (_title info)
+						(sql_info nil (sql_info_datatype info) (sql_info_collation info)))))))
+			(union_block? block)
+			(make_union_block (union_mode block) (map (union_branches block) (lambda (branch) (sql_annotate_query_outputs branch external_output)))
+				(union_order block) (union_limit block) (union_offset block) (union_facts block))
+					block))))))
+
+(define annotate_sql_outputs (lambda (query)
+	(sql_annotate_query_outputs query true)))

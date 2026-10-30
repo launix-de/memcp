@@ -58,6 +58,10 @@ before emitting DDL. Clock defaults use the storage's statement-stable marker. *
 	(match attributes
 		(cons key (cons value rest)) (begin
 			(define tail (sql_add_column_attributes rest))
+			/* CAST shares the frontend expression compiler. Validate its emitted
+			constant formula with the same whitelist as literal arithmetic. */
+			(define value (if (equal? key "default")
+				(sql_info_formula (sql_expr_info '() value)) value))
 			(if (equal? key "default")
 				(if (equal? value (list (quote now)))
 					(merge '("default_expression" "CURRENT_TIMESTAMP") tail)
@@ -95,7 +99,10 @@ Keep the 40 MiB packet advertisement used by PDO on the MySQL frontend. */
 
 /* Execution shadows session_globalvar with its request-local reader. */
 (define session_globalvar (lambda (key) (globalvars key)))
-(define session_globalvar_explicit (lambda (session key) (coalesceNil (session key) (globalvars key))))
+/* Explicit lexical capture keeps this helper portable with a delegated plan.
+The native session owner supplies the invocation's immutable read view. */
+(define session_globalvar_explicit ((lambda (globals)
+	(lambda (session key) (coalesceNil (session key) (globals key)))) globalvars))
 
 /* Build row expressions so mutable values are read when a cached SHOW runs. */
 (define sql_system_variable_rows (lambda ()

@@ -42,5 +42,32 @@ test_cases:
   timing_samples: 100
   threshold_ms: 10
   expect: {rows: 10}
+- name: Mixed decimal and temporal UNION outputs share one normalization boundary
+  setup: &mixed_output_setup
+  - sql: DROP TABLE IF EXISTS mixed_output_values
+  - sql: CREATE TABLE mixed_output_values (amount DECIMAL(10,2), factor DECIMAL(10,2), stamp DATETIME) ENGINE=memory
+  - sql: INSERT INTO mixed_output_values VALUES (0.10,1.03,'2024-10-26 00:00:00'),(0.20,1.03,'2024-10-27 00:00:00')
+  sql: |
+    SELECT SUM(amount * factor) AS total, MIN(stamp) AS first_stamp FROM mixed_output_values
+    UNION ALL
+    SELECT SUM(amount * factor), MIN(stamp) FROM mixed_output_values
+    UNION ALL
+    SELECT SUM(amount * factor), MIN(stamp) FROM mixed_output_values
+    UNION ALL
+    SELECT SUM(amount * factor), MIN(stamp) FROM mixed_output_values
+  warmup: 0
+  timing_samples: 31
+  performance_rows: 2
+  timing_aggregation: total
+  threshold_ms: 1500
+  expect:
+    rows: 4
+    data:
+    - {total: 0.31, first_stamp: '2024-10-26 00:00:00'}
+    - {total: 0.31, first_stamp: '2024-10-26 00:00:00'}
+    - {total: 0.31, first_stamp: '2024-10-26 00:00:00'}
+    - {total: 0.31, first_stamp: '2024-10-26 00:00:00'}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS mixed_output_values
 cleanup:
 - sql: DROP TABLE IF EXISTS temporal_order_page
