@@ -465,7 +465,7 @@ func (c *replicaCell) transactionContinues(tx *TxContext) bool {
 	}
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
-	for shard := range tx.shards {
+	for shard := range tx.shardTransactions() {
 		if shardCell := shard.coherence.Load(); shardCell != nil && shardCell.resolved() == c {
 			return true
 		}

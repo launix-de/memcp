@@ -22,5 +22,15 @@ test_cases:
   warmup: 10
   timing_samples: 3
   threshold_ms: 100
+- name: Computed delta keys retain prepared execution and seek their prefix
+  sql: SELECT COUNT(*) AS n,SUM(version) AS versions FROM prefix_history WHERE parent%97=7
+  performance_rows: 16384
+  warmup: 0
+  timing_samples: 11
+  timing_aggregation: total
+  threshold_ms: 1000
+  expect:
+    data: [{n: 172, versions: 258}]
+
 cleanup:
 - sql: DROP TABLE prefix_history

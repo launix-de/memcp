@@ -178,7 +178,7 @@ func (cluster *nodeCluster) exchange(link *clusterLink) error {
 	ctx, cancel := context.WithTimeout(cluster.ctx, 3*time.Second)
 	defer cancel()
 	var hello clusterHello
-	if err := cluster.service.control(ctx, link.peer, "cluster.hello", cluster.hello(), &hello); err != nil {
+	if err := cluster.service.control(ctx, link.peer, "cluster.hello", cluster.hello(), &hello, true); err != nil {
 		return err
 	}
 	return cluster.remember(link.member.ID, hello)

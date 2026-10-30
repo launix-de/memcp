@@ -190,6 +190,16 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	}
 	ss.ID = tx.sourceSessionID
 	tx.beginQuery(ss, seq, "remote shard reduction")
+	if request.Transaction == nil {
+		// A native scan without a supplied transaction still owns any worker
+		// mutations. Finalize them here rather than leaving anonymous overlays
+		// and generation pins after returning the RPC result.
+		defer func() {
+			if tx.State == TxActive {
+				tx.Rollback()
+			}
+		}()
+	}
 	defer tx.endQuery(seq)
 	stop := context.AfterFunc(ctx, func() { ss.KillQuery(seq) })
 	defer stop()
@@ -291,6 +301,13 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		return nil, err
 	}
 	reply, err := boundedScanReply(output)
+	if err == nil && request.Transaction == nil {
+		tx.endStatement()
+		err = ctx.Err()
+		if err == nil {
+			err = tx.Commit()
+		}
+	}
 	if err != nil {
 		s.service.cancelObjectOffers(s.peer, output.ClusterObjectOffers())
 	}
@@ -430,8 +447,14 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 	if condition.IsNil() {
 		condition = scm.Eval(scm.Read("remote unconditional filter", "(lambda args true)"), &scm.Globalenv)
 	}
-	bindings := new(scm.SerializationContext)
-	if tx := invocation.tx; tx != nil {
+	owner := invocation.tx
+	if owner == nil || !owner.queryActive.Load() {
+		owner = NewTxContext(TxCursorStability)
+		owner.beginQuery(nil, 0, "remote operator")
+		defer owner.endQuery(0)
+	}
+	bindings := &scm.SerializationContext{Invocation: scm.NewAny(owner)}
+	if tx := invocation.tx; tx != nil && tx.queryActive.Load() {
 		if existing := tx.remoteBindings.Load(); existing != nil {
 			bindings = existing
 		} else if !tx.remoteBindings.CompareAndSwap(nil, bindings) {

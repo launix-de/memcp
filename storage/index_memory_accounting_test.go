@@ -148,6 +148,42 @@ func TestShardAccountingConcurrentIndexPublication(t *testing.T) {
 	}
 }
 
+func TestComputedDeltaIndexPreparesEachKeyOnceAndRetainsDuplicates(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_delta_computed_keys")
+	rows := make([][]scm.Scmer, 256)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i))}
+	}
+	tbl.Insert([]string{"id"}, rows, nil, scm.NewNil(), false, nil)
+	shard := tbl.ActiveShards()[0]
+	calls := 0
+	index := &StorageIndex{t: shard, Cols: []string{".mapped"}, ColMapCols: [][]string{{"id"}}, ColMapFn: []scm.Scmer{
+		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { calls++; return scm.NewInt(values[0].Int() % 7) }),
+	}}
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	getters := index.buildGetters(nil, nil)
+	defer releaseIndexGetters(getters)
+	index.buildIndex(&index.baseState, getters, nil)
+	if calls != len(rows) || index.baseState.deltaBtree.Len() != len(rows) {
+		t.Fatalf("computed %d keys and retained %d rows; want %d of each", calls, index.baseState.deltaBtree.Len(), len(rows))
+	}
+	before := index.ComputeSize()
+	previousKey, previousID, count := int64(-1), -1, 0
+	index.baseState.deltaBtree.Ascend(func(pair indexPair) bool {
+		key := pair.data[0].Int()
+		if key < previousKey || key == previousKey && pair.itemid <= previousID {
+			t.Error("computed delta key ordering lost duplicate identity")
+		}
+		previousKey, previousID = key, pair.itemid
+		count++
+		return true
+	})
+	if count != len(rows) || calls != len(rows) || before <= uint(len(rows)*32) {
+		t.Fatal("delta traversal recalculated keys, lost rows or omitted owned key memory")
+	}
+}
+
 // A delta insertion must not enter callbacks with the shard write lock held.
 // The comparator stands in for an ORC reader that scans its own source shard.
 func TestComputedIndexDeltaDoesNotInvokeComparator(t *testing.T) {

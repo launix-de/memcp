@@ -437,7 +437,7 @@ func (executor *peerScanExecutor) dispatch(task remoteScanTask) remoteScanResult
 		panic("missing scan return-channel service")
 	}
 	var result remoteScanResult
-	if err := service.control(executor.ctx, executor.peer, "scan.execute", task, &result); err != nil {
+	if err := service.control(executor.ctx, executor.peer, "scan.execute", task, &result, true); err != nil {
 		// Preserve the original SQL error/value and remote stack through the same
 		// collector used by every object request. No scan-specific send handle.
 		if failure, ok := err.(*scanPanic); ok {
@@ -466,7 +466,7 @@ func (executor *peerScanExecutor) dispatch(task remoteScanTask) remoteScanResult
 // Control requests use the same fire-and-forget transport and UUID delivery
 // registry. Waiting belongs to the control operation's collector, never a held
 // send handle, native shard lock or long-lived per-call connection.
-func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, method string, input, output any) error {
+func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, method string, input, output any, joinOnCancel bool) error {
 	operation, err := uuid.NewV7()
 	if err != nil {
 		return err
@@ -522,10 +522,12 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 		if err != nil {
 			peer.close()
 		}
-		select {
-		case result := <-results:
-			service.discardObjectOffers(peer, result.Offers)
-		case <-peer.done:
+		if joinOnCancel {
+			select {
+			case result := <-results:
+				service.discardObjectOffers(peer, result.Offers)
+			case <-peer.done:
+			}
 		}
 		completed = true
 		return ctx.Err()
@@ -554,7 +556,7 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 func init() {
 	scm.RegisterClusterObjectType("receiver", func(handle scm.ClusterHandle) scm.Scmer {
 		receiver := newClusterReceiver(-1, func(ctx context.Context, value scm.Scmer) error {
-			_, err := handle.Call(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{value}})
+			_, err := handle.Call(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{value}, CancelWithoutJoin: true})
 			return err
 		})
 		receiver.Seal()

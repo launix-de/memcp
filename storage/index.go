@@ -76,11 +76,13 @@ type computedRevision struct {
 // For raw columns it reads directly from ColumnStorage; for computed columns
 // it evaluates the mapFn over the source column storages.
 type colGetter struct {
-	raw     ColumnReader    // non-nil for raw columns
-	source  ColumnStorage   // generation-owned source for operator-specific preparation
-	mapCols []ColumnReader  // non-nil for computed columns
-	mapFn   *scm.SerialProc // non-nil for computed columns; owned by this serial reader
-	mapArgs []scm.Scmer
+	raw        ColumnReader    // non-nil for raw columns
+	source     ColumnStorage   // generation-owned source for operator-specific preparation
+	mapCols    []ColumnReader  // non-nil for computed columns
+	mapFn      *scm.SerialProc // non-nil for computed columns; owned by this serial reader
+	mapArgs    []scm.Scmer
+	deltaSlots []int // raw delta offsets; -1 uses a computed reader, -2 is absent
+	deltaSlot  int
 }
 
 const inlineIndexGetters = 8
@@ -103,6 +105,42 @@ func (g colGetter) get(recid uint32) scm.Scmer {
 		return g.mapFn.Call(g.mapArgs)
 	}
 	return g.raw.GetValue(recid)
+}
+
+// deltaValue uses the same invocation-prepared scalar program and readers as
+// main keys. No function preparation or retained reader acquisition belongs in
+// a delta item loop or B-tree comparator.
+func (g colGetter) deltaValue(recid uint32, data []scm.Scmer) scm.Scmer {
+	if g.mapFn != nil {
+		for i, slot := range g.deltaSlots {
+			switch {
+			case slot == -1:
+				g.mapArgs[i] = g.mapCols[i].GetValue(recid)
+			case slot >= 0 && slot < len(data):
+				g.mapArgs[i] = data[slot]
+			default:
+				g.mapArgs[i] = scm.NewNil()
+			}
+		}
+		return g.mapFn.Call(g.mapArgs)
+	}
+	if g.deltaSlot == -1 {
+		return g.raw.GetValue(recid)
+	}
+	if g.deltaSlot >= 0 && g.deltaSlot < len(data) {
+		return data[g.deltaSlot]
+	}
+	return scm.NewNil()
+}
+
+func (s *StorageIndex) deltaReaderSlot(column string, storage ColumnStorage) int {
+	if _, computed := storage.(*StorageComputeProxy); computed {
+		return -1
+	}
+	if slot, found := s.t.deltaColumns[column]; found {
+		return slot
+	}
+	return -2
 }
 
 // Persistent index boundaries must not retain a view into an evictable decoded
@@ -350,25 +388,28 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 		if len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil() {
 			// computed column: read mapCols and apply mapFn
 			mapColReaders := make([]ColumnReader, len(s.ColMapCols[i]))
+			deltaSlots := make([]int, len(mapColReaders))
 			getters[i].mapCols = mapColReaders
 			for j, mc := range s.ColMapCols[i] {
 				if isScanPseudoColName(mc) {
+					deltaSlots[j] = -2
 					mapColReaders[j] = ColumnReaderFunc(func(uint32) scm.Scmer { return scm.NewNil() })
 					continue
 				}
 				cs := s.t.getColumnStorageRLocked(mc)
+				deltaSlots[j] = s.deltaReaderSlot(mc, cs)
 				mapColReaders[j] = newCachedColumnReaderTx(cs, tx, true, ReadAuto|readOperatorOwned)
 			}
 			mapFn := s.ColMapFn[i]
 			fn := scm.PrepareSerialProc(mapFn)
-			getters[i] = colGetter{mapCols: mapColReaders, mapFn: &fn, mapArgs: make([]scm.Scmer, len(mapColReaders))}
+			getters[i] = colGetter{mapCols: mapColReaders, mapFn: &fn, mapArgs: make([]scm.Scmer, len(mapColReaders)), deltaSlots: deltaSlots}
 		} else {
 			cs := s.t.getColumnStorageRLocked(col)
 			hints := ReadAuto
 			if !s.columnIsSorted(i) {
 				hints = ReadCompressed
 			}
-			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true, hints|readOperatorOwned), source: cs}
+			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true, hints|readOperatorOwned), source: cs, deltaSlot: s.deltaReaderSlot(col, cs)}
 		}
 	}
 	complete = true
@@ -513,8 +554,8 @@ func (idx *StorageIndex) computeDeltaBtreeSize(state *storageIndexState) uint {
 	}
 	// The B-tree owns nodes and indexPair values. For normal delta rows,
 	// indexPair.data points at shard inserts that are already counted by the
-	// shard; count only the slice header there. A future precomputed payload
-	// would have to be accounted separately.
+	// shard; count only the slice header there. Computed delta keys instead
+	// own their prepared tuples and are charged separately below.
 	var sz uint = 64 + uint(state.deltaBtree.Len())*64
 	state.deltaBtree.Ascend(func(item indexPair) bool {
 		if state.precomputedDelta {
@@ -561,44 +602,6 @@ func (s *StorageIndex) getDeltaValue(data []scm.Scmer, col string) scm.Scmer {
 		return data[colpos]
 	}
 	return scm.NewNil()
-}
-
-// getDeltaColValue returns the index-column value for a delta row at column index colIdx.
-// For computed columns it reads the source cols and applies the mapFn.
-func (s *StorageIndex) getDeltaColValue(recid uint32, data []scm.Scmer, colIdx int) scm.Scmer {
-	return s.getDeltaColValueTx(nil, recid, data, colIdx)
-}
-
-func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []scm.Scmer, colIdx int) scm.Scmer {
-	if len(s.ColMapFn) > colIdx && !s.ColMapFn[colIdx].IsNil() {
-		fn := scm.PrepareSerialProc(s.ColMapFn[colIdx])
-		vals := make([]scm.Scmer, len(s.ColMapCols[colIdx]))
-		for i, mc := range s.ColMapCols[colIdx] {
-			if isScanPseudoColName(mc) {
-				vals[i] = scm.NewNil()
-				continue
-			}
-			cs := s.t.getColumnStorageRLocked(mc)
-			if proxy, ok := cs.(*StorageComputeProxy); ok {
-				if !proxy.isOrdered {
-					vals[i] = proxy.getValueRLocked(tx, recid)
-				} else {
-					vals[i] = s.t.ColumnReaderTx(tx, mc, true, ReadAuto).GetValue(recid)
-				}
-			} else {
-				vals[i] = s.getDeltaValue(data, mc)
-			}
-		}
-		return fn.Call(vals)
-	}
-	cs := s.t.getColumnStorageRLocked(s.Cols[colIdx])
-	if proxy, ok := cs.(*StorageComputeProxy); ok {
-		if !proxy.isOrdered {
-			return proxy.getValueRLocked(tx, recid)
-		}
-		return s.t.ColumnReaderTx(tx, s.Cols[colIdx], true, ReadAuto).GetValue(recid)
-	}
-	return s.getDeltaValue(data, s.Cols[colIdx])
 }
 
 // rowWithinBounds checks sorted (equal/range) columns using lower/upper directly.
@@ -716,7 +719,7 @@ func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid u
 		if state.precomputedDelta {
 			deltaVal = delta.data[i]
 		} else {
-			deltaVal = s.getDeltaColValue(uint32(delta.itemid), delta.data, i)
+			deltaVal = s.getDeltaValue(delta.data, s.Cols[i])
 		}
 		if s.lessAt(i, mainVal, deltaVal) {
 			return -1
@@ -756,7 +759,11 @@ func (s *StorageIndex) prepareCollationKeys(state *storageIndexState, pair index
 		}
 		var value scm.Scmer
 		if pair.itemid >= 0 {
-			value = s.getDeltaColValue(uint32(pair.itemid), pair.data, colIdx)
+			if state.precomputedDelta {
+				value = pair.data[colIdx]
+			} else {
+				value = s.getDeltaValue(pair.data, s.Cols[colIdx])
+			}
 		} else if pair.reference == nil {
 			value = pair.data[colIdx]
 		} else {
@@ -1339,6 +1346,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	for _, col := range cols {
 		state.directDelta = state.directDelta && col.mapFn == nil
 	}
+	state.precomputedDelta = !state.directDelta
 
 	if !s.Native {
 		// main storage: build sort-order index
@@ -1529,8 +1537,8 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	// on each B-tree item so its O(log N) insertion comparisons do not recreate
 	// an allocating x/text collator frame for the same value. Seek probes receive
 	// keys from this same index state, so another collation can never be mixed in.
-	// Comparator uses getDeltaColValue so computed columns work; skip non-sorted
-	// matcher columns because they do not participate in sort order.
+	// Computed keys are prepared once per delta row; comparisons only read those
+	// immutable values. Unsorted matcher columns do not participate in ordering.
 	state.deltaBtree = btree.NewG[indexPair](8, func(a, b indexPair) bool {
 		compareCols := len(s.Cols)
 		if a.itemid == -1 && a.reference == nil && len(a.data) < compareCols {
@@ -1557,7 +1565,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			} else if state.precomputedDelta {
 				av = a.data[colIdx]
 			} else {
-				av = s.getDeltaColValue(uint32(a.itemid), a.data, colIdx)
+				av = s.getDeltaValue(a.data, s.Cols[colIdx])
 			}
 			if b.itemid == -1 {
 				if b.reference == nil {
@@ -1568,7 +1576,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			} else if state.precomputedDelta {
 				bv = b.data[colIdx]
 			} else {
-				bv = s.getDeltaColValue(uint32(b.itemid), b.data, colIdx)
+				bv = s.getDeltaValue(b.data, s.Cols[colIdx])
 			}
 			if colIdx < 64 && state.collationKeyFns[colIdx] != nil {
 				keyBit := uint64(1) << uint(colIdx)
@@ -1597,7 +1605,21 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	// fill deltaBtree with global record IDs
 	for i, data := range s.t.deltaRows() {
 		recid := s.t.main_count + uint32(i)
-		pair := s.prepareCollationKeys(state, indexPair{itemid: int(recid), data: data})
+		pair := indexPair{itemid: int(recid), data: data}
+		if state.precomputedDelta {
+			pair.data = make([]scm.Scmer, len(cols))
+			for col := range cols {
+				if !s.columnIsSorted(col) {
+					continue
+				}
+				value := cols[col].deltaValue(recid, data)
+				if value.IsString() {
+					value = scm.NewString(strings.Clone(value.String()))
+				}
+				pair.data[col] = value
+			}
+		}
+		pair = s.prepareCollationKeys(state, pair)
 		state.deltaBtree.ReplaceOrInsert(pair)
 	}
 
@@ -1774,7 +1796,7 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 			if recid < s.t.main_count {
 				return cols[col].get(recid)
 			}
-			return s.getDeltaColValueTx(tx, recid, s.t.deltaRows()[recid-s.t.main_count], col)
+			return cols[col].deltaValue(recid, s.t.deltaRows()[recid-s.t.main_count])
 		}
 		lessRecID := func(leftID, rightID uint32) bool {
 			for col := range s.Cols {
@@ -1837,7 +1859,7 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 			if recid < s.t.main_count {
 				return cols[col].get(recid)
 			}
-			return s.getDeltaColValueTx(tx, recid, s.t.deltaRows()[recid-s.t.main_count], col)
+			return cols[col].deltaValue(recid, s.t.deltaRows()[recid-s.t.main_count])
 		}
 		hybridsort.Slice(items, func(i, j int) bool {
 			for col := range s.Cols {
@@ -1965,7 +1987,7 @@ func (s *StorageIndex) bindColdRangeMatcher(tx *TxContext, bounds scanAccess, in
 				if recid < s.t.main_count {
 					return cols[col].get(recid)
 				}
-				return s.getDeltaColValueTx(tx, recid, s.t.deltaRows()[recid-s.t.main_count], col)
+				return cols[col].deltaValue(recid, s.t.deltaRows()[recid-s.t.main_count])
 			}
 			inRange, _ := s.rowWithinBounds(bounds, indexBounds, cmpCols, lastSorted, sortedMask, unboundedMask, lowerInclusive, upperInclusive, valueAt)
 			if inRange && !lowerInclusive {
@@ -2207,7 +2229,7 @@ start_scan:
 		if selected != nil {
 			selected(s, true)
 		}
-		s.iteratePrefixMerge(tx, bounds.runtime.prefixMerge, cols, snapMainIndexes, snapDeltaBtree, isNative, maxInsertIndex, buf, callback)
+		s.iteratePrefixMerge(state.precomputedDelta, bounds.runtime.prefixMerge, cols, snapMainIndexes, snapDeltaBtree, isNative, maxInsertIndex, buf, callback)
 		return
 	}
 	if selected != nil {
@@ -2532,7 +2554,7 @@ start_scan:
 				if state.precomputedDelta {
 					return p.data[i]
 				}
-				return s.getDeltaColValue(recid, p.data, i)
+				return s.getDeltaValue(p.data, s.Cols[i])
 			})
 			if !inRange {
 				return !beyond
@@ -2557,14 +2579,12 @@ start_scan:
 		// cannot participate in sort order. The reference comparator treats the
 		// omitted suffix as unbounded; rowWithinBounds still checks all bounds.
 		seekCols := 0
-		if !state.precomputedDelta {
-			for seekCols < cmpCols {
-				i := seekCols
-				if !scanAccessBoundaryHasLowerBound(bounds, i) || (len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (bounds.len() > i && !bounds.boundaryAnalyzer(i).IsSorted()) {
-					break
-				}
-				seekCols++
+		for seekCols < cmpCols {
+			i := seekCols
+			if !scanAccessBoundaryHasLowerBound(bounds, i) || (!state.precomputedDelta && len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (bounds.len() > i && !bounds.boundaryAnalyzer(i).IsSorted()) {
+				break
 			}
+			seekCols++
 		}
 		if seekCols == 0 {
 			snapDeltaBtree.Ascend(iterFn)

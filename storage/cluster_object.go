@@ -347,7 +347,7 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 	// MUST happen while the import holds its shared Go lease. The reservation
 	// becomes a lease atomically at the owner; even a never-called/empty-shard
 	// lambda then owns a materialized handle with a working GC callback.
-	if err := service.control(ctx, peer, "object.acquire", clusterObjectAcquisition{reference, lease.reference.Token}, nil); err != nil {
+	if err := service.control(ctx, peer, "object.acquire", clusterObjectAcquisition{reference, lease.reference.Token}, nil, true); err != nil {
 		return scm.NewNil(), err
 	}
 	var frozen schemeValue
@@ -393,7 +393,7 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 				return scm.NewNil(), err
 			}
 		}
-		err := service.control(operation, target, "object.call", clusterObjectCall{handleReference, request.Method, args}, &result)
+		err := service.control(operation, target, "object.call", clusterObjectCall{handleReference, request.Method, args}, &result, !request.CancelWithoutJoin)
 		if err != nil {
 			return scm.NewNil(), err
 		}
@@ -727,7 +727,7 @@ func (service *nodeScanService) deliverObjectRelease(release clusterObjectReleas
 		peer = connected
 		defer service.forget(peer)
 	}
-	return service.control(ctx, peer, "object.release", release.reference, nil) == nil
+	return service.control(ctx, peer, "object.release", release.reference, nil, true) == nil
 }
 
 type clusterObjectQueryKey struct{}
