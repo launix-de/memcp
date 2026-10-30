@@ -367,7 +367,7 @@ func init_window() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				// JITGen native call boundary: escaping or recursive Go closure.
+				// JITGen native call boundary: deferred call.
 				ctx.Coverage.NativeCalls++
 				declaration := declarations["stream_window_reduce"]
 				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
