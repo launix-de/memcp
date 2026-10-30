@@ -6522,12 +6522,13 @@ RecSet; membership edges retain their own physical operators. */
 		(define residual_condition (strip_driver_membership_for_source src condition membership))
 		(define driver_condition (combine_where_terms
 			(filter (split_and_terms (coalesceNil residual_condition true)) (lambda (term)
-				(not (expr_contains_driver_membership? term))))
+				(and (not (expr_contains_driver_membership? term))
+					(physical_expr_only_refs_aliases? nil (list (source_alias src)) term))))
 			true))
-		/* This carrier owns a source-local population. A bound join predicate
-		belongs to its continuation and cannot become this full-source prefilter. */
-		(if (or (equal? driver_condition true)
-			(not (expr_only_refs_alias? nil (source_alias src) driver_condition)))
+		/* Push only independent source-local conjuncts. The complete leaf
+		predicate still owns outer/future join bindings; an
+		unpushable conjunct must not hide the useful local subset. */
+		(if (equal? driver_condition true)
 			nil
 			(begin
 				(define alias (source_alias src))

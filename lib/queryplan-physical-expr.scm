@@ -109,6 +109,29 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 	(merge_unique (map (membership_probe_outer_exprs stage probe) (lambda (expr)
 		(extract_columns_for_alias src expr))))))
 
+/* A scalar probe owns its internal relations. Only its declared callback
+readset can constrain which outer scan evaluates it; walking the embedded
+stage catalog would mistake those internal aliases for future join bindings. */
+(define physical_expr_only_refs_aliases? (lambda (default_alias aliases expr)
+	(match expr
+		((symbol get_column) tblvar _ci _col _cci)
+		(contains? aliases (resolve_column_alias tblvar default_alias))
+		((quote get_column) tblvar _ci _col _cci)
+		(contains? aliases (resolve_column_alias tblvar default_alias))
+		(cons head (cons stage (cons _requested_col _rest)))
+		(if (and (group_stage? stage) (contains? (list (quote scalar_first_probe)
+			(quote scalar_aggregate_probe) (quote scalar_cardinality_probe)) head))
+			(begin
+				(define bound_aliases (merge_unique (list aliases
+					(source_aliases (stage_semantic_input_sources (gs_input stage))))))
+				(reduce (scalar_aggregate_probe_outer_exprs stage) (lambda (ok item)
+					(and ok (physical_expr_only_refs_aliases? default_alias bound_aliases item))) true))
+			(reduce (cdr expr) (lambda (ok item)
+				(and ok (physical_expr_only_refs_aliases? default_alias aliases item))) true))
+		(cons _head tail) (reduce tail (lambda (ok item)
+			(and ok (physical_expr_only_refs_aliases? default_alias aliases item))) true)
+		_ true)))
+
 (define extract_columns_for_alias (lambda (src expr)
 	(if (and (list? expr)
 		(and (not (empty_list? expr))

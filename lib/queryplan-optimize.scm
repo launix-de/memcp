@@ -5753,7 +5753,12 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 				(qb_hidden block)
 				normalized_stages
 				(qb_facts block)))
-			(define merged (merge_compatible_stage_output_left_joins_block normalized_block))
+			/* Normalizing a producer's input can merge its dependencies and
+			therefore rename aggregate slots. Publish that interface change to
+			this owner before lifting the rewritten stage graph. */
+			(define propagated (nth (propagate_stage_output_aggregate_columns
+				normalized_block (stage_catalog_with_nested (qb_stages block)) normalized_stages) 0))
+			(define merged (merge_compatible_stage_output_left_joins_block propagated))
 			(list merged (qb_stages merged))))))
 
 (define normalize_stage_dependencies_union_block (lambda (block)
