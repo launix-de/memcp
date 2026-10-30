@@ -186,7 +186,9 @@ func NewTxContext(mode TxMode) *TxContext {
 // newInvocation binds the same native transaction to a separate execution
 // scope. It does not copy visibility masks or create a new transaction ID.
 func (tx *TxContext) newInvocation() *TxContext {
-	return &TxContext{transactionState: tx.transactionState, Session: tx.Session, remoteObject: tx.remoteObject}
+	invocation := &TxContext{transactionState: tx.transactionState, Session: tx.Session, remoteObject: tx.remoteObject}
+	invocation.fanoutLimit.Store(int32(runtime.GOMAXPROCS(0)))
+	return invocation
 }
 
 // reset starts another transaction in the same allocation. Commit and

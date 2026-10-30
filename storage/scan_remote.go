@@ -170,8 +170,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	ss := &scm.SessionState{}
 	seq := ss.BeginQuery("Cluster", "remote shard reduction")
 	ss.SetQueryContext(seq, ctx)
-	tx := NewTxContext(TxCursorStability)
-	tx.autoCommit = true
+	var tx *TxContext
 	if request.Transaction != nil {
 		value, err := s.service.importObject(ctx, s.peer, *request.Transaction)
 		if err != nil {
@@ -184,10 +183,12 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		// The peer endpoint is shared, never its mutable executor. Even if two
 		// subscans import the same serialized capture, beginQuery/endQuery must
 		// belong to distinct native participants with independent cancellation.
-		if _, err := origin.BindClusterInvocation(scm.NewAny(tx)); err != nil {
-			return nil, err
-		}
+		tx = origin.newInvocation()
+	} else {
+		tx = NewTxContext(TxCursorStability)
+		tx.autoCommit = true
 	}
+	ss.ID = tx.sourceSessionID
 	tx.beginQuery(ss, seq, "remote shard reduction")
 	defer tx.endQuery(seq)
 	stop := context.AfterFunc(ctx, func() { ss.KillQuery(seq) })
