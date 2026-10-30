@@ -962,7 +962,11 @@ for that scan. The same prepared table is reused by every guarded variant. */
 			(stages_without_probe_sources_using_graph
 				dependency_graph stages (qb_stages block) probe_sources)
 			(join_optimizer_facts_without_aliases
-				(query_block_facts_with_stage_catalog block stage_list)
+				(qassoc_set (query_block_facts_with_stage_catalog block stage_list)
+					(quote consumed_probe_stage_ids)
+					(merge_unique (list
+						(qassoc_get (qb_facts block) (quote consumed_probe_stage_ids) '())
+						(stage_output_source_ids probe_sources))))
 				(map probe_sources source_alias))))))
 
 (define query_block_with_scalar_first_probes_using (lambda (stages block)

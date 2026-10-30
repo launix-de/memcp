@@ -267,11 +267,7 @@ and barrier ownership come from the pre-normalization query block. */
 		(begin
 			(define stats (planner_column_statistics (car column_ref) (cadr column_ref)))
 			(define distinct (qassoc_get stats (quote distinct) nil))
-			/* A row-count fallback bounds possible distinct values; it is not a
-			measured distinct count and cannot justify unique-like selectivity. */
-			(if (equal? (qassoc_get stats (quote distinct_source) nil) (quote fallback_row_count))
-				(planner_estimate nil 0 (quote fallback_row_count) false)
-				(or (nil? distinct) (<= distinct 0))
+			(if (or (nil? distinct) (<= distinct 0))
 				(planner_unknown_selectivity_estimate)
 				(planner_estimate (/ 1 (max 1 distinct))
 					(qassoc_get stats (quote distinct_confidence) 0)
