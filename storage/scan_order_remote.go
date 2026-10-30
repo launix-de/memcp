@@ -9,6 +9,7 @@ import "sync"
 import "time"
 import "context"
 import "strings"
+import "sync/atomic"
 import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -17,6 +18,8 @@ const (
 	minOrderedBatch   = 16
 	maxOrderedBatch   = 4096
 	orderedQueueItems = 16 * 1024
+	// An invocation owns this bounded I/O window, independently of CPU fanout.
+	orderedFinishWindow = 32
 )
 
 // Divide one coordinator's target window across its shard jobs. The floor
@@ -340,20 +343,105 @@ func (remote *remoteOrderQueue) prefetch() {
 // LIMIT, errors and cancellation all cancel and join a speculative receive
 // before releasing the job. Finishing drops its buffered answers immediately;
 // the existing GC lease continues to protect any retained physical identities.
-func (remote *remoteOrderQueue) close() {
+func (remote *remoteOrderQueue) close(finishCtx context.Context) {
 	if remote.cancel == nil {
 		return
 	}
+	defer func() { remote.rows = nil }()
 	remote.cancel()
 	if remote.pending != nil {
 		<-remote.pending
 		remote.pending = nil
 	}
 	remote.cancel = nil
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(remote.ctx), 5*time.Second)
+	if finishCtx == nil {
+		var cancel context.CancelFunc
+		finishCtx, cancel = context.WithTimeout(context.WithoutCancel(remote.ctx), 5*time.Second)
+		defer cancel()
+	}
+	_, _ = remote.run.handle.Call(finishCtx, scm.ClusterRequest{Method: "finish"})
+}
+
+// The queue remains owned until its remote job and all borrowed readers join.
+// Deferred release also covers a panic while decoding a finish response.
+func closeOrderedQueue(queue *shardqueue, finishCtx context.Context) {
+	if queue.postOrderMapper != nil {
+		defer queue.postOrderMapper.Close()
+	}
+	if queue.mapper != nil {
+		defer queue.mapper.Close()
+	}
+	if queue.remote == nil {
+		queue.closeReaders()
+		return
+	}
+	defer queue.closeReaders()
+	queue.remote.close(finishCtx)
+}
+
+// Cancel every speculative fetch before waiting on any finish reply. A bounded
+// set of collectors overlaps independent remote acknowledgements; it does not
+// retain CPU fanout slots or create one goroutine per shard. All collectors join
+// before returning, including when an individual queue's cleanup panics.
+func closeOrderedQueues(queues []*shardqueue) {
+	remoteCount := 0
+	var base context.Context
+	for _, queue := range queues {
+		if remote := queue.remote; remote != nil && remote.cancel != nil {
+			remote.cancel()
+			remoteCount++
+			base = remote.ctx
+		}
+	}
+	if remoteCount < 2 {
+		for _, queue := range queues {
+			closeOrderedQueue(queue, nil)
+		}
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(base), 5*time.Second)
 	defer cancel()
-	_, _ = remote.run.handle.Call(ctx, scm.ClusterRequest{Method: "finish"})
-	remote.rows = nil
+	for _, queue := range queues {
+		if queue.remote == nil || queue.remote.cancel == nil {
+			closeOrderedQueue(queue, nil)
+		}
+	}
+	var next atomic.Uint64
+	var joined sync.WaitGroup
+	failures := make(chan any, 1)
+	for range min(remoteCount, orderedFinishWindow) {
+		joined.Add(1)
+		go func() {
+			defer joined.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(queues) {
+					return
+				}
+				queue := queues[i]
+				if queue.remote == nil || queue.remote.cancel == nil {
+					continue
+				}
+				func() {
+					defer func() {
+						if failure := recover(); failure != nil {
+							select {
+							case failures <- failure:
+							default:
+							}
+						}
+					}()
+					closeOrderedQueue(queue, ctx)
+				}()
+			}
+		}()
+	}
+	joined.Wait()
+	select {
+	case failure := <-failures:
+		panic(failure)
+	default:
+	}
 }
 
 func (remote *remoteOrderQueue) fetch(queue *shardqueue) {
@@ -480,7 +568,7 @@ func delegateOrderedQueue(tx *TxContext, shard *storageShard, access scanAccess,
 	complete := false
 	defer func() {
 		if !complete {
-			remote.close()
+			remote.close(nil)
 		}
 	}()
 	for i, name := range view[3].Slice() {

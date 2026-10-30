@@ -128,6 +128,9 @@ test_cases:
       - scan_order
 - name: order-many-streams-small-limit
   sql: SELECT id,v0 FROM big_items ORDER BY v0 DESC,id ASC LIMIT 17 OFFSET 9
+  timing_samples: 11
+  timing_aggregation: total
+  warmup: 0
   expect:
     rows: 17
     cluster:
