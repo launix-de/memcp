@@ -236,7 +236,13 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 	c := r.resourceCell(packet.Resource)
 	for {
 		c = c.resolved()
-		c.directory.Lock()
+		if packet.TryRead {
+			if !c.directory.TryLock() {
+				return errClusterReadBusy
+			}
+		} else {
+			c.directory.Lock()
+		}
 		r.mu.Lock()
 		owner := r.directory.Records[r.resourceKey(packet.Resource)].Owner
 		peer := r.peers[owner]
@@ -271,6 +277,9 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		owner := r.directory.Records[r.resourceKey(packet.Resource)].Owner
 		r.mu.Unlock()
 		if owner != "" && owner != r.id {
+			if packet.TryRead {
+				return errClusterReadBusy
+			}
 			peer := r.peer(owner)
 			if peer == nil {
 				return fmt.Errorf("%s: missing routed owner %s for %s", mosi.NetworkError, owner, packet.Resource.key())
@@ -335,7 +344,23 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				return err
 			}
 			defer releasePersistence()
-			handover, err := c.ownstate.BeginHandover(ctx, c.drainWrites)
+			var handover *mosi.Handover
+			if packet.TryRead {
+				handover = c.ownstate.TryHandover(c.writesDrained)
+				if handover == nil {
+					return errClusterReadBusy
+				}
+				if shard := c.publishedShard(); shard != nil && shard.state() == WRITE {
+					// A cache proof alone does not justify compacting a modified
+					// payload and dropping its warm computed state. Keep the task
+					// at this owner; ordinary required acquisitions still prepare
+					// and transfer it through the path below.
+					handover.Release()
+					return errClusterReadBusy
+				}
+			} else {
+				handover, err = c.ownstate.BeginHandover(ctx, c.drainWrites)
+			}
 			if err != nil {
 				return err
 			}

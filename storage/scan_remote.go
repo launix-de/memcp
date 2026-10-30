@@ -18,8 +18,8 @@ import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// Version 11 preserves native transaction identity across worker invocations.
-const scanWireVersion = 11
+// Version 12 adds opportunistic MOSI read acquisition for shared cache scopes.
+const scanWireVersion = 12
 
 type remoteScanShard struct {
 	Schema   uint64       `json:"schema"`
@@ -342,7 +342,8 @@ func boundedScanReply(value any) (any, error) {
 }
 
 // Acquire through the same schema/shard MOSI and generation lifetime boundaries
-// as a local scan. A changed physical generation aborts rather than rebinding IDs.
+// as a local scan. Routing hints follow its current generation; physical input
+// IDs are retained only by the explicit native object path.
 func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool, execute func(*storageShard) error) (err error) {
 	// A shared-backend worker either admits this generation once or refuses
 	// before scan callbacks. Capacity refusal alone permits choosing another peer.
@@ -364,10 +365,26 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 	if expected.Schema == 0 || tbl.filterSchemaFingerprint() != expected.Schema {
 		return fmt.Errorf("remote scan schema changed")
 	}
+	// Resolve the logical resource before looking for a physical generation.
+	// A cold candidate may know only the old UUID; its ordinary MOSI acquisition
+	// installs the current content and forwarding route from the actual owner.
+	var sourceCell *replicaCell
+	if r := activeReplication(tbl.schema); r != nil && (shared || r.lookupCell(expected.Resource) != nil) {
+		wanted := mosi.S
+		if mutation {
+			wanted = mosi.M
+		}
+		sourceCell = r.obtain(expected.Resource, wanted, replicationUser(tx), tx)
+	}
 	declarations := tbl.columnNamesSnapshot.Load()
 	for {
 		topology := tbl.activeTopology()
-		selected := findScanShard(tbl, expected.Resource)
+		var selected *storageShard
+		if sourceCell != nil {
+			selected = sourceCell.publishedShard()
+		} else {
+			selected = findScanShard(tbl, expected.Resource)
+		}
 		if selected == nil {
 			return fmt.Errorf("remote shard disappeared")
 		}
@@ -383,16 +400,10 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 		return func() error {
 			defer topology.releaseOperation()
 			defer selected.activeScanners.Add(-1)
-			// Acquire current coherence rights, but retain the requested shard's
-			// physical IDs and captured extent through native snapshot access.
-			if r := activeReplication(tbl.schema); r != nil && !mutation {
-				cell := r.shardCell(selected)
-				if shared {
-					acquireClusterRead(ctx, *cell.resource.Load())
-				} else {
-					r.obtain(*cell.resource.Load(), mosi.S, "", tx)
-				}
-			}
+			// Ordinary tasks acquire the current native generation. Acquiring
+			// MOSI rights can install a replacement even for the same UUID; a
+			// snapshot read of selected would then consume its revoked payload.
+			// Only an explicit input object above retains historical physical IDs.
 			var lease ReadAccess
 			var capacity bool
 			func() {
@@ -409,7 +420,7 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 					write := selected.GetWrite(tx)
 					lease = ReadAccess{shard: write.shard, mutation: &write}
 				} else {
-					lease = selected.getRead(tx, true, false)
+					lease = selected.GetRead(tx, false)
 				}
 			}()
 			if capacity {
@@ -417,9 +428,6 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 			}
 			defer lease.Release()
 			shard := lease.shard
-			if shard.uuid.String() != expected.Resource.Shard {
-				return fmt.Errorf("remote scan shard changed")
-			}
 			if err := execute(shard); err != nil {
 				return err
 			}

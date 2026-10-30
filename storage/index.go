@@ -1539,6 +1539,11 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	// keys from this same index state, so another collation can never be mixed in.
 	// Computed keys are prepared once per delta row; comparisons only read those
 	// immutable values. Unsorted matcher columns do not participate in ordering.
+	// The tree outlives this published state when a reader owns its snapshot.
+	// Its comparator must retain encoding metadata instead of consulting the
+	// mutable owner slot, which eviction can clear before a later seek.
+	precomputedDelta := state.precomputedDelta
+	collationKeyFns, collationKeyReverse := state.collationKeyFns, state.collationKeyReverse
 	state.deltaBtree = btree.NewG[indexPair](8, func(a, b indexPair) bool {
 		compareCols := len(s.Cols)
 		if a.itemid == -1 && a.reference == nil && len(a.data) < compareCols {
@@ -1562,7 +1567,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 				} else {
 					av = a.reference.referenceLower(colIdx)
 				}
-			} else if state.precomputedDelta {
+			} else if precomputedDelta {
 				av = a.data[colIdx]
 			} else {
 				av = s.getDeltaValue(a.data, s.Cols[colIdx])
@@ -1573,17 +1578,17 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 				} else {
 					bv = b.reference.referenceLower(colIdx)
 				}
-			} else if state.precomputedDelta {
+			} else if precomputedDelta {
 				bv = b.data[colIdx]
 			} else {
 				bv = s.getDeltaValue(b.data, s.Cols[colIdx])
 			}
-			if colIdx < 64 && state.collationKeyFns[colIdx] != nil {
+			if colIdx < 64 && collationKeyFns[colIdx] != nil {
 				keyBit := uint64(1) << uint(colIdx)
 				if a.collationKeySet&keyBit != 0 && b.collationKeySet&keyBit != 0 && !av.IsNil() && !bv.IsNil() {
 					comparison := strings.Compare(a.collationKeys[colIdx], b.collationKeys[colIdx])
 					if comparison != 0 {
-						if state.collationKeyReverse[colIdx] {
+						if collationKeyReverse[colIdx] {
 							return comparison > 0
 						}
 						return comparison < 0
@@ -2206,6 +2211,12 @@ start_scan:
 		}
 		return
 	}
+	readState := storageIndexState{
+		precomputedDelta: state.precomputedDelta,
+		collationKeyFns:  state.collationKeyFns, collationKeyReverse: state.collationKeyReverse,
+		minVals: state.minVals, maxVals: state.maxVals,
+	}
+	snapMainIndexPositions := state.mainIndexPositions
 	snapMainIndexes := state.mainIndexes
 	// No clone needed: the shard's RLock (held by caller) prevents concurrent
 	// inserts from modifying deltaBtree. The index mutex protects against
@@ -2229,7 +2240,7 @@ start_scan:
 		if selected != nil {
 			selected(s, true)
 		}
-		s.iteratePrefixMerge(state.precomputedDelta, bounds.runtime.prefixMerge, cols, snapMainIndexes, snapDeltaBtree, isNative, maxInsertIndex, buf, callback)
+		s.iteratePrefixMerge(readState.precomputedDelta, bounds.runtime.prefixMerge, cols, snapMainIndexes, snapDeltaBtree, isNative, maxInsertIndex, buf, callback)
 		return
 	}
 	if selected != nil {
@@ -2289,9 +2300,9 @@ start_scan:
 				less = s.ColOrder[firstSorted]
 			}
 			var interpMin, interpMax scm.Scmer
-			if len(state.minVals) > firstSorted {
-				interpMin = state.minVals[firstSorted]
-				interpMax = state.maxVals[firstSorted]
+			if len(readState.minVals) > firstSorted {
+				interpMin = readState.minVals[firstSorted]
+				interpMax = readState.maxVals[firstSorted]
 			}
 			mainIdx = interpolationSearch(searchLo, searchN, indexBounds.lower(bounds, firstSorted), interpMin, interpMax,
 				func(idx int) scm.Scmer {
@@ -2444,14 +2455,16 @@ start_scan:
 	}
 	runRecSetKernel := func(start, end int, target func([]uint32) bool) {
 		var inverseBytes uint
-		s.mu.Lock()
-		if state.active && options != nil {
-			inverseBytes = s.buildMainIndexPositionsLocked(state)
-		}
 		sparseState := storageIndexState{
-			mainIndexes:        state.mainIndexes,
-			mainIndexPositions: state.mainIndexPositions,
-			indexHooks:         append([]IndexHook(nil), state.indexHooks...),
+			mainIndexes: snapMainIndexes, mainIndexPositions: snapMainIndexPositions,
+			indexHooks: snapIndexHooks,
+		}
+		s.mu.Lock()
+		// Only publish an inverse into the generation this invocation retained.
+		// An evicted/rebuilt owner may already hold a different permutation.
+		if state.active && state.deltaBtree == snapDeltaBtree && options != nil {
+			inverseBytes = s.buildMainIndexPositionsLocked(state)
+			sparseState.mainIndexPositions = state.mainIndexPositions
 		}
 		s.mu.Unlock()
 		if inverseBytes > 0 {
@@ -2551,7 +2564,7 @@ start_scan:
 				return true
 			}
 			inRange, beyond := s.rowWithinBounds(bounds, indexBounds, cmpCols, lastSorted, sortedMask, unboundedMask, lowerInclusive, upperInclusive, func(i int) scm.Scmer {
-				if state.precomputedDelta {
+				if readState.precomputedDelta {
 					return p.data[i]
 				}
 				return s.getDeltaValue(p.data, s.Cols[i])
@@ -2561,7 +2574,7 @@ start_scan:
 			}
 			// drain main items that sort before this delta item
 			for mainOk && !stopped {
-				cmp := s.compareMainAndDelta(state, mainRecid, cols, p)
+				cmp := s.compareMainAndDelta(&readState, mainRecid, cols, p)
 				if cmp > 0 {
 					break // delta item comes first
 				}
@@ -2581,7 +2594,7 @@ start_scan:
 		seekCols := 0
 		for seekCols < cmpCols {
 			i := seekCols
-			if !scanAccessBoundaryHasLowerBound(bounds, i) || (!state.precomputedDelta && len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (bounds.len() > i && !bounds.boundaryAnalyzer(i).IsSorted()) {
+			if !scanAccessBoundaryHasLowerBound(bounds, i) || (!readState.precomputedDelta && len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (bounds.len() > i && !bounds.boundaryAnalyzer(i).IsSorted()) {
 				break
 			}
 			seekCols++
@@ -2593,11 +2606,11 @@ start_scan:
 			// index-column order by the comparator, so lower is directly
 			// seekable without a per-probe reordered copy.
 			if bounds.exactAdjacent && seekCols == 1 {
-				probe := s.prepareCollationKeys(state, indexPair{itemid: -1, data: bounds.values[:1]})
+				probe := s.prepareCollationKeys(&readState, indexPair{itemid: -1, data: bounds.values[:1]})
 				snapDeltaBtree.AscendGreaterOrEqual(probe, iterFn)
 			} else {
 				getterScratch.indexBounds.compareCols = seekCols
-				probe := s.prepareCollationKeys(state, indexPair{itemid: -1, reference: &getterScratch.indexBounds})
+				probe := s.prepareCollationKeys(&readState, indexPair{itemid: -1, reference: &getterScratch.indexBounds})
 				snapDeltaBtree.AscendGreaterOrEqual(probe, iterFn)
 			}
 		}

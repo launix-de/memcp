@@ -355,7 +355,7 @@ func (cm *CacheManager) AddItem(
 	if cm.stopped.Load() {
 		return
 	}
-	item := newSoftItem(pointer, size, evictType, cleanup, getLastUsed, getScore, time.Second, 0)
+	item := newSoftItem(pointer, size, evictType, cleanup, getLastUsed, getScore, 0, 0)
 	done := make(chan struct{})
 	cm.opChan <- cacheOp{add: item, done: done}
 	<-done

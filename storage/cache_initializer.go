@@ -18,7 +18,44 @@ package storage
 
 import "time"
 import "strings"
+import "context"
 import "github.com/launix-de/memcp/scm"
+
+// Shared cache admission owns its source coherence proof. Delegating a producer
+// grants no local shard rights, and therefore cannot alone certify later hits.
+// S grants retain only ordinary MOSI metadata; source payloads may stay remote.
+func (t *table) acquireCacheSourceRights(tx *TxContext) bool {
+	if !sharedClusterSource(t) {
+		return true
+	}
+	cluster := activeNodeCluster()
+	if cluster == nil {
+		panic("cluster is not initialized")
+	}
+	ctx := scanQueryContext(tx, context.Background())
+	shards := t.ActiveShards()
+	granted := make([]bool, len(shards))
+	failures := make([]any, len(shards))
+	done := runFanoutTasks(tx, len(shards), func(i int, _ bool) {
+		defer func() { failures[i] = recover() }()
+		shard := shards[i]
+		granted[i] = shard == nil || cluster.tryRead(ctx, *cluster.manager.shardCell(shard).resource.Load())
+	})
+	if done != nil {
+		<-done
+	}
+	for _, failure := range failures {
+		if failure != nil {
+			panic(failure)
+		}
+	}
+	for _, allowed := range granted {
+		if !allowed {
+			return false
+		}
+	}
+	return true
+}
 
 type cacheInitializerRun struct {
 	done       chan struct{}

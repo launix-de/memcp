@@ -148,6 +148,8 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 		return nil, err
 	}
 	switch method {
+	case "cluster.try_read":
+		return cluster.handleTryRead(ctx, source, data)
 	case "cluster.location", "cluster.location_update", "cluster.schema_locations":
 		return cluster.handleLocations(ctx, source, method, data)
 	case "cluster.reserve_ids":

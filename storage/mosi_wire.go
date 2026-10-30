@@ -128,7 +128,8 @@ type mosiPacket struct {
 	Owner      string          `json:"owner,omitempty"`
 	Readers    map[string]bool `json:"readers,omitempty"`
 	Sequence   uint64          `json:"sequence,omitempty"`
-	Boot       string          `json:"boot,omitempty"` // immutable originating cluster incarnation
+	Boot       string          `json:"boot,omitempty"`     // immutable originating cluster incarnation
+	TryRead    bool            `json:"try_read,omitempty"` // decline read acquisition instead of draining an active writer
 }
 
 func (peer *mosiPeer) post(packet mosiPacket) error {
