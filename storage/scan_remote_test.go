@@ -176,6 +176,51 @@ func TestOrderedLocalCleanupDoesNotAllocate(t *testing.T) {
 	}
 }
 
+func TestRemoteScanWithoutCombinerExecutesCallbackAndSubscanOnWorker(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tremote_callback_worker", 4)
+	peer, service, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts); err != nil {
+		t.Fatal(err)
+	}
+	var calls, nestedSum, outputSum atomic.Int64
+	const callback = "test_remote_callback_subscan"
+	scm.Declare(&scm.Globalenv, &scm.Declaration{Name: callback, Fn: func(args ...scm.Scmer) scm.Scmer {
+		tx := scmerToTxContext(args[0])
+		if tx == nil || tx.queryInfo.Load() == nil || *tx.queryInfo.Load() != "remote shard reduction" {
+			panic("MapReducer returned to the coordinator")
+		}
+		// A nested ordinary scan starts with the worker's invocation context.
+		// Its result and side effect must occur exactly once per outer row.
+		condition := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+		add := scm.Globalenv.Vars[scm.Symbol("+")]
+		sum := tbl.scan(tx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, condition, []string{"id"}, add, scm.NewInt(0), add, false)
+		calls.Add(1)
+		nestedSum.Add(sum.Int())
+		return args[1]
+	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}, {Kind: "any"}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
+	output := scm.NewClusterCallback(context.Background(), func(args ...scm.Scmer) scm.Scmer {
+		outputSum.Add(args[0].Int())
+		return scm.NewBool(true)
+	})
+	env := &scm.Env{Vars: scm.Vars{scm.Symbol("output"): output}, Outer: &scm.Globalenv}
+	mapReduce := scm.Eval(scm.Read(t.Name(), `(lambda (acc id) (output (test_remote_callback_subscan nil id)))`), env)
+	stub := &storageShard{uuid: tbl.ActiveShards()[0].uuid, t: tbl}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0]}}
+	stub.scanTarget.Store(target)
+	invocation := shardScanInvocation{mapReduce: mapReduce, callbackCols: []string{"id"}, neutral: scm.NewInt(0)}
+	result := invocation.delegate(stub, shardReadDelegation{target})
+	if result.err.r != nil {
+		t.Fatal(result.err.r)
+	}
+	if result.outCount != 4 || calls.Load() != 4 || nestedSum.Load() != 40 || outputSum.Load() != 10 {
+		t.Fatalf("rows=%d callbacks=%d nested sum=%d output sum=%d", result.outCount, calls.Load(), nestedSum.Load(), outputSum.Load())
+	}
+	if tbl.ActiveShards()[0].cacheReaders.Load() != 0 || tbl.activeTopology().operations.Load() != 0 {
+		t.Fatal("worker callback or nested scan retained its input")
+	}
+}
+
 func setupRemoteScanConnection(t *testing.T) (*mosiPeer, *nodeScanService, string) {
 	t.Helper()
 	old := nodeScans.Swap(nil)

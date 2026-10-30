@@ -195,15 +195,21 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	s.service.executions.Store(id, tx)
 	defer s.service.executions.Delete(id)
 	binding := scm.NewSlice([]scm.Scmer{scm.NewSymbol("node_query_context"), scm.NewString(id)})
-	filter, err := scm.UnmarshalProcedure(request.Filter, scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
+	decode := scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+		value, err := s.service.importObject(ctx, s.peer, ref)
+		if err != nil {
+			return scm.NewNil(), err
+		}
+		return scm.BindClusterInvocation(value, scm.NewAny(tx))
+	}}
+	filter, err := scm.UnmarshalProcedure(request.Filter, decode)
 	if err != nil {
 		return nil, err
 	}
-	reducer, err := scm.UnmarshalProcedure(request.MapReducer, scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
+	reducer, err := scm.UnmarshalProcedure(request.MapReducer, decode)
 	if err != nil {
 		return nil, err
 	}
-	decode := scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }}
 	var order *shardOrderInvocation
 	if request.Order != nil {
 		order, err = request.Order.bind(decode)
@@ -214,7 +220,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	batch := make([]scm.Scmer, len(request.Batch))
 	for i, item := range request.Batch {
 		var err error
-		batch[i], err = item.reconstruct(scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
+		batch[i], err = item.reconstruct(decode)
 		if err != nil {
 			return nil, err
 		}
@@ -240,7 +246,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		access, err := request.Access.bind(scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
+		access, err := request.Access.bind(decode)
 		if err != nil {
 			return err
 		}
