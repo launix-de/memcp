@@ -1888,8 +1888,7 @@ outer joins. */
 					(available_stage_outputs_from_sources_using stage_lookup (qb_sources optimized_src))
 					(available_stage_outputs_from_sources_using stage_lookup (group_stage_final_extra_source_refs stage))
 					(group_cache_stages_from_sources stage_lookup (qb_sources optimized_src))
-					(group_cache_stages_from_sources stage_lookup (group_stage_final_extra_source_refs stage))
-					(query_block_probe_expr_stages optimized_src)))
+					(group_cache_stages_from_sources stage_lookup (group_stage_final_extra_source_refs stage))))
 				'()))
 			(define owner_handle (qassoc_get (gs_facts stage) (quote btw2025_handle) nil))
 			(define owner_ancestors (qassoc_get (gs_facts stage) (quote btw2025_ancestors) '()))
@@ -12326,6 +12325,17 @@ stars through the same catalog-aware path used by physical lowering. */
 			(if (not (equal? (count (qb_fields branch)) width))
 				(neumann_fail "build_queryplan" "UNION branch column count mismatch")
 				true)
+			/* Renaming a group result updates the canonical producer catalog too;
+			subsequent physical binding reads that catalog rather than local copies. */
+			(define align_group_stage (lambda (stage)
+				(if (equal? (gs_id stage)
+					(qassoc_get (qb_facts branch) (quote select_group_result) nil))
+					(make_group_stage (gs_id stage) (gs_input stage)
+						(gs_domain stage) (gs_keys stage) (gs_aggregates stage)
+						(gs_having stage)
+						(projection_with_titles titles (projection_exprs (gs_output stage)))
+						(gs_order stage) (gs_limit stage) (gs_offset stage) (gs_facts stage))
+					stage)))
 			(make_query_block
 				(qb_schema branch)
 				(qb_sources branch)
@@ -12337,8 +12347,9 @@ stars through the same catalog-aware path used by physical lowering. */
 				(qb_limit branch)
 				(qb_offset branch)
 				(qb_hidden branch)
-				(qb_stages branch)
-				(qb_facts branch)))
+				(map (qb_stages branch) align_group_stage)
+				(query_block_facts_with_stage_catalog branch
+					(map (query_block_stage_catalog branch) align_group_stage))))
 		_ (neumann_fail "build_queryplan" "UNION branch lowering expects query-block or union-block branches"))))
 
 (define projection_index_by_title (lambda (titles title)

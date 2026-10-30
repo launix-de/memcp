@@ -352,7 +352,7 @@ stage catalog would mistake those internal aliases for future join bindings. */
 				probe_catalog
 				(nested_stage_catalog stage)))))
 		(define direct_stages (unique_stages_by_id (merge (list
-			(qb_stages input)
+			(query_block_stages_to_prepare_using stage_lookup input)
 			(stage_outputs_from_sources_using stage_lookup (qb_sources input))))))
 		/* Direct probes own this subtree even when the consumer did not need an
 		explicit promotion marker. Keep the complete immutable catalog on every
