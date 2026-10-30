@@ -19,6 +19,7 @@ import "compress/gzip"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/google/uuid"
+import "github.com/launix-de/memcp/scm"
 
 const mosiPacketBytes = 64 * 1024
 
@@ -45,7 +46,7 @@ func encodeMosiMessage(message mosiMessage) ([]byte, error) {
 		return nil, err
 	}
 	if 9+len(metadata)+len(payload) > mosiMaxMessageBytes {
-		return nil, fmt.Errorf("oversized MOSI message")
+		return nil, scm.ErrClusterRequestTooLarge
 	}
 	frame := make([]byte, 9+len(metadata)+len(payload))
 	copy(frame, "MOSI\x02")

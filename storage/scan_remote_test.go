@@ -176,6 +176,52 @@ func TestOrderedLocalCleanupDoesNotAllocate(t *testing.T) {
 	}
 }
 
+func TestRemoteOutputBatchesSplitBeforeDispatch(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tremote_wide_output", 0)
+	values := make([][]scm.Scmer, 64)
+	want := make(map[string]int, len(values))
+	for i := range values {
+		payload := strings.Repeat("wide-output-", 3000) + fmt.Sprint(i)
+		values[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString(payload)}
+		want[payload]++
+	}
+	tbl.Insert([]string{"id", "payload"}, values, nil, scm.NewNil(), false, nil)
+	peer, service, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts); err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]int, len(values))
+	result := scm.NewBool(true)
+	output := scm.NewClusterCallback(context.Background(), func(args ...scm.Scmer) scm.Scmer {
+		got[args[0].String()]++
+		return result
+	}, &result)
+	env := &scm.Env{Vars: scm.Vars{scm.Symbol("output"): output}, Outer: &scm.Globalenv}
+	mapReduce := scm.Eval(scm.Read(t.Name(), `(lambda (acc payload) (output payload))`), env)
+	stub := &storageShard{uuid: tbl.ActiveShards()[0].uuid, t: tbl}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0]}}
+	stub.scanTarget.Store(target)
+	invocation := shardScanInvocation{mapReduce: mapReduce, callbackCols: []string{"payload"}, neutral: scm.NewInt(0)}
+	response := invocation.delegate(stub, shardReadDelegation{target})
+	if response.err.r != nil {
+		t.Fatal(response.err.r)
+	}
+	if response.outCount != 64 || len(got) != len(want) {
+		t.Fatal("wide output lost rows", response.outCount, len(got))
+	}
+	for value, count := range want {
+		if got[value] != count {
+			t.Fatal("split output changed multiplicity", got[value], count)
+		}
+	}
+	select {
+	case <-peer.done:
+		t.Fatal("unsent oversized batch closed the connection")
+	default:
+	}
+}
+
 func TestRemoteScanWithoutCombinerExecutesCallbackAndSubscanOnWorker(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremote_callback_worker", 4)
 	peer, service, _ := setupRemoteScanConnection(t)
@@ -202,7 +248,7 @@ func TestRemoteScanWithoutCombinerExecutesCallbackAndSubscanOnWorker(t *testing.
 	output := scm.NewClusterCallback(context.Background(), func(args ...scm.Scmer) scm.Scmer {
 		outputSum.Add(args[0].Int())
 		return scm.NewBool(true)
-	})
+	}, nil)
 	env := &scm.Env{Vars: scm.Vars{scm.Symbol("output"): output}, Outer: &scm.Globalenv}
 	mapReduce := scm.Eval(scm.Read(t.Name(), `(lambda (acc id) (output (test_remote_callback_subscan nil id)))`), env)
 	stub := &storageShard{uuid: tbl.ActiveShards()[0].uuid, t: tbl}
@@ -218,6 +264,82 @@ func TestRemoteScanWithoutCombinerExecutesCallbackAndSubscanOnWorker(t *testing.
 	}
 	if tbl.ActiveShards()[0].cacheReaders.Load() != 0 || tbl.activeTopology().operations.Load() != 0 {
 		t.Fatal("worker callback or nested scan retained its input")
+	}
+}
+
+// A cancelled delegated scan must join callbacks which already entered the
+// owner's native sink before query-owned output state can be released.
+func TestRemoteCallbackCancellationJoinsOwnerInvocation(t *testing.T) {
+	for _, buffered := range []bool{false, true} {
+		t.Run(fmt.Sprint("buffered=", buffered), func(t *testing.T) {
+			testRemoteCallbackCancellationJoinsOwnerInvocation(t, buffered)
+		})
+	}
+}
+
+func testRemoteCallbackCancellationJoinsOwnerInvocation(t *testing.T, buffered bool) {
+	tbl, _ := createDurabilityTestTable(t, "tremote_callback_join", 4)
+	peer, service, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entered, release, callbackDone := make(chan struct{}, 4), make(chan struct{}), make(chan struct{}, 4)
+	var batchResult *scm.Scmer
+	if buffered {
+		result := scm.NewBool(true)
+		batchResult = &result
+	}
+	output := scm.NewClusterCallback(ctx, func(args ...scm.Scmer) scm.Scmer {
+		entered <- struct{}{}
+		<-release
+		callbackDone <- struct{}{}
+		return scm.NewBool(true)
+	}, batchResult)
+	env := &scm.Env{Vars: scm.Vars{scm.Symbol("output"): output}, Outer: &scm.Globalenv}
+	reducer := scm.Eval(scm.Read(t.Name(), `(lambda (acc id) (output id))`), env)
+	stub := &storageShard{uuid: tbl.ActiveShards()[0].uuid, t: tbl}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: ctx, prepared: parts[0]}}
+	stub.scanTarget.Store(target)
+	invocation := shardScanInvocation{mapReduce: reducer, callbackCols: []string{"id"}, neutral: scm.NewInt(0)}
+	done := make(chan struct{})
+	ownerEntered := false
+	go func() {
+		defer close(done)
+		invocation.delegate(stub, shardReadDelegation{target})
+	}()
+	defer func() {
+		close(release)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("scan did not finish after releasing output")
+		}
+		if ownerEntered {
+			select {
+			case <-callbackDone:
+			case <-time.After(5 * time.Second):
+				t.Error("owner callback did not finish after releasing output")
+			}
+		}
+	}()
+	select {
+	case <-entered:
+		ownerEntered = true
+	case <-done:
+		t.Fatal("scan finished before entering its output callback")
+	case <-time.After(5 * time.Second):
+		t.Fatal("output callback did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+		t.Error("cancelled scan returned while owner callback was still running")
+	case <-time.After(100 * time.Millisecond):
+		// The invocation correctly waits for the native sink; release it in
+		// the deferred cleanup and require the scan to join there.
 	}
 }
 

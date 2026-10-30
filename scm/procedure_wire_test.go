@@ -24,7 +24,7 @@ func TestClusterCallbackOwnerCancellationAndInvocationBinding(t *testing.T) {
 	value := NewClusterCallback(ownerContext, func(args ...Scmer) Scmer {
 		calls++
 		return args[0]
-	})
+	}, nil)
 	object, ok := ClusterObjectOf(value)
 	if !ok || Apply(value, NewInt(7)).Int() != 7 {
 		t.Fatal("callback lost its native callable ABI")

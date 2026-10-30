@@ -6,9 +6,14 @@ package scm
 
 import "fmt"
 import "sync"
+import "errors"
 import "context"
 import "unsafe"
 import "encoding/json"
+
+// A local encoding failure before dispatch. It is safe to split an unsent
+// output batch; a remote error or ambiguous completion must never be replayed.
+var ErrClusterRequestTooLarge = errors.New("oversized MOSI message")
 
 // ClusterRequestHandler is the routing contract for native owner endpoints.
 // Implementations own request policy; transport only resolves and dispatches.

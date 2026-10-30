@@ -316,7 +316,12 @@ func postScanMessage(ctx context.Context, peer *mosiPeer, method string, value a
 	if err != nil {
 		return err
 	}
-	return peer.send(ctx, mosiMessage{Method: method, Data: data})
+	message := mosiMessage{Method: method, Data: data}
+	message.encoded, err = encodeMosiMessage(message)
+	if err != nil {
+		return err
+	}
+	return peer.send(ctx, message)
 }
 
 // Old frames cannot become executable after reconnect, even after the old
@@ -508,6 +513,21 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 	}()
 	select {
 	case <-ctx.Done():
+		// Cancellation ends admission, not the lifetime of already running
+		// callbacks. Keep the return channel until the worker has unwound its
+		// native invocation, including nested owner calls, and reports completion.
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := postScanMessage(cleanup, peer, "scan.cancel", id)
+		cancel()
+		if err != nil {
+			peer.close()
+		}
+		select {
+		case result := <-results:
+			service.discardObjectOffers(peer, result.Offers)
+		case <-peer.done:
+		}
+		completed = true
 		return ctx.Err()
 	case <-peer.done:
 		return fmt.Errorf("Cluster network error")

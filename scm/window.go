@@ -98,7 +98,7 @@ func streamWindowTopK(a []Scmer, offset, limit int) Scmer {
 			heap.Fix(&h, 0)
 		}
 		return NewNil()
-	})
+	}, nil)
 	producer := PrepareSerialProc(a[4])
 	producer.Call([]Scmer{emit})
 	sort.Slice(h.entries, func(i, j int) bool { return h.before(h.entries[i], h.entries[j]) })
@@ -350,7 +350,7 @@ func init_window() {
 				result = reduceProgram.Call(reduceArgs[:])
 				emitted++
 				return result
-			})
+			}, nil)
 			producerArgs[0] = emit
 			producerProgram.Call(producerArgs[:])
 			return result

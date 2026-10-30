@@ -834,21 +834,33 @@ func TestClusterCancellationQueuesMessageBeforeCollectorReturns(t *testing.T) {
 			}
 			cancel()
 			select {
-			case result := <-finished:
-				if result != context.Canceled {
-					t.Fatal("wrong cancellation result", result)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("operation did not unwind")
-			}
-			select {
 			case message := <-peer.outgoing:
 				var id string
 				if message.Method != "scan.cancel" || json.Unmarshal(message.Data, &id) != nil || id != envelope.Return {
 					t.Fatal("wrong remote cancellation", message)
 				}
+			case <-time.After(time.Second):
+				t.Fatal("collector did not send cancellation")
+			}
+			select {
+			case result := <-finished:
+				t.Fatal("collector returned before remote completion", result)
 			default:
-				t.Fatal("collector returned before enqueueing remote cancellation")
+			}
+			// The existing return channel is also the join acknowledgement. No
+			// cancelled invocation may release its captures before this delivery.
+			entry, ok := service.returns.Load(envelope.Return)
+			if !ok {
+				t.Fatal("cancelled invocation dropped its return channel")
+			}
+			deliverTestCompletion(t, entry, scanCompletion{Return: envelope.Return})
+			select {
+			case result := <-finished:
+				if result != context.Canceled {
+					t.Fatal("wrong cancellation result", result)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("operation did not unwind after remote completion")
 			}
 		})
 	}
