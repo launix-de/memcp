@@ -311,13 +311,13 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	var res_lock sync.Mutex
 	res_scm := []Scmer{
 		NewString("res"), NewAny(res),
-		NewString("header"), NewFunc(func(a ...Scmer) Scmer {
+		NewString("header"), NewClusterCallback(req.Context(), func(a ...Scmer) Scmer {
 			res_lock.Lock()
 			res.Header().Set(a[0].String(), a[1].String())
 			res_lock.Unlock()
 			return NewString("ok")
 		}),
-		NewString("status"), NewFunc(func(a ...Scmer) Scmer {
+		NewString("status"), NewClusterCallback(req.Context(), func(a ...Scmer) Scmer {
 			// status after header!
 			res_lock.Lock()
 			status, _ := strconv.Atoi(a[0].String())
@@ -325,7 +325,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			res_lock.Unlock()
 			return NewString("ok")
 		}),
-		NewString("print"), NewFunc(func(a ...Scmer) Scmer {
+		NewString("print"), NewClusterCallback(req.Context(), func(a ...Scmer) Scmer {
 			// naive output
 			res_lock.Lock()
 			for _, s := range a {
@@ -334,14 +334,14 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			res_lock.Unlock()
 			return NewString("ok")
 		}),
-		NewString("println"), NewFunc(func(a ...Scmer) Scmer {
+		NewString("println"), NewClusterCallback(req.Context(), func(a ...Scmer) Scmer {
 			// naive output
 			res_lock.Lock()
 			io.WriteString(res, a[0].String()+"\n")
 			res_lock.Unlock()
 			return NewString("ok")
 		}),
-		NewString("jsonl"), NewFunc(func(a ...Scmer) Scmer {
+		NewString("jsonl"), NewClusterCallback(req.Context(), func(a ...Scmer) Scmer {
 			// print json line (only assoc)
 			res_lock.Lock()
 			defer res_lock.Unlock()

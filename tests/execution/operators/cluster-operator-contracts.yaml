@@ -23,6 +23,13 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+- name: unordered-output
+  sql: SELECT id,v0 FROM big_items WHERE id<16
+  expect:
+    cluster:
+      min_remote_shards: 1
+      plan_contains:
+      - scan
 - name: order-top-n-offset
   sql: SELECT id,v0 FROM big_items ORDER BY v0 DESC,id ASC LIMIT 9 OFFSET 5
   expect:

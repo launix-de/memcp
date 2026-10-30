@@ -18,6 +18,51 @@ import "strings"
 import "testing"
 import "encoding/json"
 
+func TestClusterCallbackOwnerCancellationAndInvocationBinding(t *testing.T) {
+	ownerContext, cancelOwner := context.WithCancel(context.Background())
+	calls := 0
+	value := NewClusterCallback(ownerContext, func(args ...Scmer) Scmer {
+		calls++
+		return args[0]
+	})
+	object, ok := ClusterObjectOf(value)
+	if !ok || Apply(value, NewInt(7)).Int() != 7 {
+		t.Fatal("callback lost its native callable ABI")
+	}
+	if _, err := object.HandleClusterRequest(context.Background(), ClusterRequest{Method: "invalid"}); err == nil {
+		t.Fatal("invalid callback method accepted")
+	}
+	cancelOwner()
+	if _, err := object.HandleClusterRequest(context.Background(), ClusterRequest{Method: "call", Arguments: []Scmer{NewInt(9)}}); err != context.Canceled || calls != 1 {
+		t.Fatalf("expired owner admitted callback: err=%v calls=%d", err, calls)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ss := &SessionState{}
+	seq := ss.BeginQuery("Cluster", "callback binding")
+	ss.SetQueryContext(seq, ctx)
+	defer ss.FinishQueryExecution(seq)
+	remote := newRemoteClusterCallback(ClusterHandle{Call: func(got context.Context, request ClusterRequest) (Scmer, error) {
+		if got != ctx || request.Method != "call" {
+			t.Error("callback did not inherit its invocation context")
+		}
+		return NewInt(11), got.Err()
+	}}, context.Background())
+	bound, err := BindClusterInvocation(remote, NewAny(&mutexTestTransaction{ss: ss, seq: seq}))
+	if err != nil || Apply(bound, NewInt(1)).Int() != 11 {
+		t.Fatal("bound callback failed", err)
+	}
+	cancel()
+	func() {
+		defer func() {
+			if failure := recover(); failure != context.Canceled {
+				t.Errorf("cancelled callback returned: %v", failure)
+			}
+		}()
+		Apply(bound, NewInt(1))
+	}()
+}
+
 func TestProcedureWireSnapshotsCapturesAndRunsWithoutSourceEnvironment(t *testing.T) {
 	for _, optimize := range []bool{false, true} {
 		for _, source := range []string{
