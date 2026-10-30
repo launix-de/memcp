@@ -20,9 +20,57 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/launix-de/memcp/scm"
 )
+
+func TestTransactionVisibilityDoesNotWaitForDirectoryWriter(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_tx_visibility_directory", 4)
+	shard := tbl.ActiveShards()[0]
+	tx := NewTxContext(TxACID)
+	defer tx.Rollback()
+	tx.AddToDeleteMask(shard, 1)
+	tx.mu.Lock()
+	visible := make(chan bool, 1)
+	go func() { visible <- tx.IsVisible(shard, 1) }()
+	blocked := false
+	select {
+	case value := <-visible:
+		if value {
+			t.Error("transaction's own deletion became visible")
+		}
+	case <-time.After(time.Second):
+		blocked = true
+		t.Error("row visibility waited for the transaction directory writer")
+	}
+	tx.mu.Unlock()
+	if blocked {
+		<-visible
+	}
+}
+
+func TestQueryCleanupJoinsAllWorkBeforeReleasingReaders(t *testing.T) {
+	tx := NewTxContext(TxCursorStability)
+	tx.beginQuery(nil, 1, "cleanup ordering")
+	joined := 0
+	tx.retainQueryReader(func() {
+		if joined != 2 {
+			t.Error("physical reader released before all work joined")
+		}
+		joined++
+	})
+	tx.RetainQueryWork(func() { joined++; panic("output failed") })
+	tx.RetainQueryWork(func() { joined++ })
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		tx.endQuery(1)
+	}()
+	if fmt.Sprint(failure) != "output failed" || joined != 3 || tx.queryActive.Load() {
+		t.Fatalf("incomplete cleanup: failure=%v joined=%d active=%v", failure, joined, tx.queryActive.Load())
+	}
+}
 
 func TestQuerySeqFromTxUsesExplicitTransactionStatement(t *testing.T) {
 	const cachedSeq uint64 = 17
@@ -59,7 +107,7 @@ func TestTransactionInvocationsShareMutationsAndKeepIndependentCleanup(t *testin
 	second.beginQuery(secondSession, secondSeq, "second native invocation")
 	defer second.endQuery(secondSeq)
 	var cleaned bool
-	first.RetainQueryResource(func() { cleaned = true })
+	first.RetainQueryWork(func() { cleaned = true })
 	firstWrite := shard.UpdateFunction(0, false, false, first)
 	firstWrite(scm.NewSlice([]scm.Scmer{scm.NewString("payload"), scm.NewString("changed")}))
 	other := NewTxContext(TxACID)

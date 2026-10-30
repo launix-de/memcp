@@ -195,6 +195,25 @@ func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, r s
 			return scm.NewNil(), fmt.Errorf("transaction decision requires the enlisted participant capability")
 		}
 		tx := &TxContext{transactionState: st.transaction}
+		tx.decisionMu.Lock()
+		defer tx.decisionMu.Unlock()
+		if r.Method == "commit" || r.Method == "rollback" {
+			// A broken connection cancels the task, but its bounded shard loop
+			// may still be finishing. Stop admission and join that native work
+			// before publishing or undoing any of its transaction overlays.
+			tx.mu.Lock()
+			tx.remoteAdmissionClosed = true
+			idle := tx.remoteIdle
+			active := tx.remoteActive != 0
+			tx.mu.Unlock()
+			if active {
+				select {
+				case <-idle:
+				case <-ctx.Done():
+					return scm.NewNil(), ctx.Err()
+				}
+			}
+		}
 		switch r.Method {
 		case "savepoint":
 			sp := tx.CreateSavepoint()
@@ -221,7 +240,7 @@ func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, r s
 					tx.mu.Unlock()
 					return scm.NewNil(), fmt.Errorf("invalid native shard savepoint")
 				}
-				for shard := range tx.shards {
+				for shard := range tx.shardTransactions() {
 					if shard.uuid.String() == parts[0].String() {
 						sp.shardLens[shard] = shardSavepoint{int(parts[1].Int()), int(parts[2].Int()), int(parts[3].Int()), int(parts[4].Int())}
 						break
@@ -326,19 +345,20 @@ func (tx *TxContext) rollbackRemoteSavepoints(sp Savepoint) {
 // runs its existing transaction implementation, including all local overlays,
 // WAL barriers, rebuild forwarding and cleanup. No mutation is replayed here.
 func (tx *TxContext) finishRemoteParticipants(method string) error {
-	tx.mu.Lock()
-	participants := make([]*storageShardTransaction, 0, len(tx.participants))
-	for _, participant := range tx.participants {
+	owners := tx.remoteParticipantOwners()
+	participants := make([]*storageShardTransaction, 0, len(owners))
+	for _, participant := range owners {
 		participants = append(participants, participant)
 	}
-	tx.mu.Unlock()
 	if len(participants) == 0 {
 		return nil
 	}
 	if method == "commit" && tx.Mode == TxACID {
 		return fmt.Errorf("distributed ACID commit requires a shared prepare/publication decision")
 	}
-	sort.Slice(participants, func(i, j int) bool { return participants[i].shardUUID.String() < participants[j].shardUUID.String() })
+	sort.Slice(participants, func(i, j int) bool {
+		return participants[i].remoteObject.Reference.Owner < participants[j].remoteObject.Reference.Owner
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 	var failure error
@@ -383,13 +403,7 @@ func (st *storageShardTransaction) registerParticipant(ctx context.Context) erro
 		// handle. Ambiguous delivery can retain the object, never a write effect.
 		state := st.transaction
 		state.mu.Lock()
-		if state.shards[st.clusterShard] == st {
-			delete(state.shards, st.clusterShard)
-			st.clusterShard.endTransactionUse()
-			if st.generation != nil {
-				st.generation.releaseTransaction()
-			}
-		}
+		state.discardUnenlistedShardLocked(st.clusterShard, st)
 		state.mu.Unlock()
 	}
 	return st.enlistError

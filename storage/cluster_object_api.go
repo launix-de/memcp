@@ -70,7 +70,7 @@ func initClusterObjectAPI(en *scm.Env) {
 			panic(err)
 		}
 		var sources remoteScanDescription
-		if err := service.control(ctx, peer, "scan.describe", remoteScanDescribe{scanWireVersion, a[2].String(), a[3].String()}, &sources); err != nil {
+		if err := service.control(ctx, peer, "scan.describe", remoteScanDescribe{scanWireVersion, a[2].String(), a[3].String()}, &sources, true); err != nil {
 			panic(err)
 		}
 		defer service.discardObjectOffers(peer, sources.ClusterObjectOffers())

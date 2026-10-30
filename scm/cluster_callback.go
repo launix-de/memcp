@@ -5,6 +5,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package scm
 
 import "fmt"
+import "sync"
 import "errors"
 import "context"
 
@@ -12,6 +13,8 @@ import "context"
 // Scheme callers keep their normal local ABI; a captured callback addresses
 // that state through its native owner endpoint instead of moving Go pointers.
 type clusterCallback struct {
+	source      *clusterCallback
+	lifetime    *callbackLifetime
 	call        func(...Scmer) Scmer
 	ctx         context.Context
 	handle      *ClusterHandle
@@ -33,9 +36,52 @@ func NewClusterCallback(ctx context.Context, call func(...Scmer) Scmer, batchRes
 
 func (*clusterCallback) ClusterObjectType() string { return "callback" }
 func (callback *clusterCallback) Serialize(ctx *SerializationContext) (Scmer, error) {
-	return ctx.ReferenceExpression(callback)
+	object, err := ctx.BindInvocationObject(callback, func(scope Scmer) (ClusterObject, error) {
+		owner, ok := scope.Any().(interface{ RetainQueryWork(func()) bool })
+		if !ok {
+			return nil, fmt.Errorf("callback export requires a native invocation owner")
+		}
+		lifetime := new(callbackLifetime)
+		if !owner.RetainQueryWork(lifetime.close) {
+			return nil, fmt.Errorf("callback invocation has already finished")
+		}
+		return &clusterCallback{source: callback, lifetime: lifetime}, nil
+	})
+	if err != nil {
+		return NewNil(), err
+	}
+	return ctx.ReferenceExpression(object)
 }
+
+// Admission and joining belong to the native callback endpoint, independently
+// of the connection carrying its calls. Disconnect cannot release query state
+// while a locally running invocation still borrows it.
+type callbackLifetime struct {
+	mu     sync.Mutex
+	closed bool
+	calls  sync.WaitGroup
+}
+
+func (lifetime *callbackLifetime) close() {
+	lifetime.mu.Lock()
+	lifetime.closed = true
+	lifetime.mu.Unlock()
+	lifetime.calls.Wait()
+}
+
 func (callback *clusterCallback) HandleClusterRequest(ctx context.Context, request ClusterRequest) (any, error) {
+	if callback.lifetime != nil {
+		lifetime := callback.lifetime
+		lifetime.mu.Lock()
+		if lifetime.closed {
+			lifetime.mu.Unlock()
+			return NewNil(), context.Canceled
+		}
+		lifetime.calls.Add(1)
+		lifetime.mu.Unlock()
+		defer lifetime.calls.Done()
+		return callback.source.HandleClusterRequest(ctx, request)
+	}
 	if err := ctx.Err(); err != nil {
 		return NewNil(), err
 	}
@@ -75,7 +121,7 @@ func (callback *clusterCallback) BindClusterInvocation(scope Scmer) (Scmer, erro
 	}
 	ctx := executionContextFrom(scope)
 	if callback.handle.View.IsSlice() && len(callback.handle.View.Slice()) == 1 {
-		owner, ok := scope.Any().(interface{ RetainQueryResource(func()) bool })
+		owner, ok := scope.Any().(interface{ RetainQueryWork(func()) bool })
 		if !ok {
 			return NewNil(), fmt.Errorf("output batches require a native invocation owner")
 		}
@@ -87,7 +133,7 @@ func (callback *clusterCallback) BindClusterInvocation(scope Scmer) (Scmer, erro
 // One invocation owns a bounded output queue and its sender. Producers only
 // publish complete argument tuples; the sender owns batching and network I/O.
 // Query cleanup closes production and joins before releasing captured state.
-func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface{ RetainQueryResource(func()) bool }) (Scmer, error) {
+func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface{ RetainQueryWork(func()) bool }) (Scmer, error) {
 	const batchSize = 64
 	queue := make(chan Scmer, batchSize)
 	done := make(chan struct{})
@@ -142,7 +188,7 @@ func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface
 			panic(failure)
 		}
 	}
-	if !owner.RetainQueryResource(finish) {
+	if !owner.RetainQueryWork(finish) {
 		finish()
 		return NewNil(), fmt.Errorf("output invocation has already finished")
 	}

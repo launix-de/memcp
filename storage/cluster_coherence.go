@@ -87,7 +87,7 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 	for _, link := range view.links {
 		var answer replicaRecord
 		probe, cancel := context.WithTimeout(ctx, 2*time.Second)
-		err := cluster.service.control(probe, link.peer, "cluster.report", resource, &answer)
+		err := cluster.service.control(probe, link.peer, "cluster.report", resource, &answer, true)
 		cancel()
 		if err != nil {
 			complete = false
