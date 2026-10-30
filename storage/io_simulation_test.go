@@ -122,7 +122,9 @@ func TestClusterReceiveThrottlesMessagesAndJoinsCancellation(t *testing.T) {
 	if profile.stats.operations.Load() != 2 || profile.stats.waitNS.Load() == 0 {
 		t.Fatal("receiver diagnostics missing")
 	}
-	// Two large messages must pay the first frame before the next header.
+	// Idle readers must not build transmission credit. Two large messages
+	// must still pay the first frame before consuming the next header.
+	time.Sleep(250 * time.Millisecond)
 	started = time.Now()
 	payload := string(bytes.Repeat([]byte("x"), 24000))
 	if err := client.call(context.Background(), "echo", payload, nil); err != nil {

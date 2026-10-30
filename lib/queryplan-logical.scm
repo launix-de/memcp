@@ -6024,12 +6024,18 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 			/* Lateral inputs see preceding sources, never themselves or later
 			siblings. Ordinary derived relations retain their closed SQL scope. */
 			(define scopes (if (source_lateral? src) (cons visible_entries outer_scopes) '()))
-			(define bound_source (source_with_relation src
-				(if (or (query_block? relation) (union_block? relation))
+			(define bound_relation (if (or (query_block? relation) (union_block? relation))
 					(if (and (query_block? relation) (not (derived_block_needs_operator? relation)))
 						(bind_query_block_names relation scopes (binding_path path "derived" index) all_strings)
 						(bind_query_names_at relation scopes (binding_path path "derived" index) all_strings))
-					relation)))
+				relation))
+			/* A closed derived producer can publish its contract now, before
+			parent expression compilers repeatedly request the same column types.
+			Lateral inputs retain their explicit outer typing scope. */
+			(define bound_source (source_with_relation src
+				(if (and (empty_list? scopes)
+					(or (query_block? bound_relation) (union_block? bound_relation)))
+					(sql_annotate_query_outputs bound_relation false) bound_relation)))
 			(define bound_entry (list (binding_entry_name entry) bound_source
 				(binding_entry_columns entry) (binding_entry_catalog_known? entry)))
 			(cons

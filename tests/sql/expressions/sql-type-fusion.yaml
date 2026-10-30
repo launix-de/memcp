@@ -89,7 +89,7 @@ test_cases:
     scm: |
       (begin
         (define expression (list (quote +) (list (quote get_column) "d" false "weight" false) 1))
-        (if (and (nil? (sql_type_annotation_replacement expression))
+        (if (and (nil? (sql_type_annotation_replacement '() expression))
                  (expression_equal? (sql_type_lower_annotations expression) expression)) true
           (error "annotation-free expressions must retain their original structure")))
 
@@ -98,11 +98,11 @@ test_cases:
       (begin
         (define contract (list (quote sql_type_expr) nil "INT" nil))
         (define quoted (list (quote quote) contract))
-        (if (and (expression_equal? (sql_type_annotation_replacement contract) (list nil))
+        (if (and (expression_equal? (sql_type_annotation_replacement '() contract) (list nil))
                  (nil? (sql_type_lower_annotations contract))
                  (expression_equal? (sql_type_lower_annotations (list (quote coalesceNil) contract 42))
                    (list (quote coalesceNil) nil 42))
-                 (nil? (sql_type_annotation_replacement quoted))) true
+                 (nil? (sql_type_annotation_replacement '() quoted))) true
           (error "NULL replacement or quoted expression handling is incorrect")))
 
   - name: "literal typing"
@@ -468,8 +468,8 @@ test_cases:
         (define info (sql_expr_info (list) expression))
         (if (and (nil? (sql_info_formula info))
                  (equal? (sql_info_type info) "BIGINT")
-                 (expression_equal? (sql_type_annotation_replacement expression) (list nil))
-                 (nil? (sql_type_annotation_replacement (list (quote quote) expression)))) true
+                 (expression_equal? (sql_type_annotation_replacement '() expression) (list nil))
+                 (nil? (sql_type_annotation_replacement '() (list (quote quote) expression)))) true
           (error "typed NULL or quoted compiler handling is incorrect")))
 
   - name: "frontend compiler errors fail expression compilation"

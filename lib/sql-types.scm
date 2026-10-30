@@ -92,9 +92,12 @@ unicode alias. Returns nil or a (NAME COERCIBILITY) pair. */
 								(if (and (sql_numeric_type? ta) (sql_numeric_type? tb)) "DECIMAL" "VARCHAR"))))))))))
 
 (define sql_merge_info (lambda (a b)
+	(begin
+		(define type (sql_merge_type (sql_info_type a) (sql_info_type b)))
 	(sql_info nil
-		(sql_decimal_result_datatype (sql_merge_type (sql_info_type a) (sql_info_type b)) (list a b))
-		(sql_merge_collation (sql_info_collation a) (sql_info_collation b)))))
+			(if (has? '("DECIMAL" "NUMERIC") type)
+				(sql_decimal_result_datatype type (list a b)) type)
+			(sql_merge_collation (sql_info_collation a) (sql_info_collation b))))))
 (define sql_merge_infos (lambda (infos)
 	(reduce infos sql_merge_info (sql_info nil "NULL" nil))))
 
@@ -502,7 +505,10 @@ operand contract. Unknown registered reducers retain an explicit any contract. *
 					(define rtype (cadr rule))
 					(define mode (nth rule 2))
 					(define value_infos (if (equal? mode "case") (sql_case_value_infos infos) infos))
-					(define merged (sql_merge_infos value_infos))
+					/* Fixed results and first-operand contracts do not consume a
+					merged operand descriptor. Avoid allocating that unused merge. */
+					(define merged (if (has? '("merge" "case" "text") mode)
+						(sql_merge_infos value_infos) nil))
 					(define type (if (has? (list "merge" "case") mode) (sql_info_type merged) rtype))
 					/* fixed: the function owns its result, no operand collation inherited.
 					first: inherit from the first argument. text/merge/case: merge the
@@ -724,8 +730,13 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 			(make_query_block
 				(qb_schema block)
 				sources
+				/* Published outputs already carry canonical formulas and a declared
+				contract. Subsequent logical rewrites only need their remaining
+				compiler annotations removed, not another projection type walk. */
+				(if (not (nil? (qassoc_get (qb_facts block) (quote result-types) nil)))
+					(sql_type_lower_annotations (qb_fields block))
 				(map_assoc (qb_fields block)
-					(lambda (field_title field_expr) (sql_type_field_formula all_sources field_expr)))
+						(lambda (field_title field_expr) (sql_type_field_formula all_sources field_expr))))
 				(sql_type_formula all_sources (qb_where block))
 				(map (coalesceNil (qb_group block) '())
 					(lambda (group_expr) (sql_type_formula all_sources group_expr)))
@@ -789,6 +800,10 @@ fields and ordering retain their executable formulas and declared contracts. */
 (define sql_annotate_query_outputs (lambda (query external_output)
 	(begin
 		(define raw_block (normalize_query_ast query))
+		(if (and (not external_output) (query_block? raw_block)
+			(not (nil? (qassoc_get (qb_facts raw_block) (quote result-types) nil))))
+			raw_block
+			(begin
 		/* Preserve primary-key functional dependencies before expanding stars
 		into the external typed projection. */
 		(define block (if (query_block? raw_block) (expand_grouped_query_block raw_block) raw_block))
@@ -812,7 +827,7 @@ fields and ordering retain their executable formulas and declared contracts. */
 			(union_block? block)
 			(make_union_block (union_mode block) (map (union_branches block) (lambda (branch) (sql_annotate_query_outputs branch external_output)))
 				(union_order block) (union_limit block) (union_offset block) (union_facts block))
-			block))))
+					block))))))
 
 (define annotate_sql_outputs (lambda (query)
 	(sql_annotate_query_outputs query true)))
