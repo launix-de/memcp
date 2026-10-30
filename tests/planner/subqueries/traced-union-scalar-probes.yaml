@@ -841,8 +841,14 @@ test_cases:
         - "__query_invariant_probe_"
         - "__scalar_query_probe_"
       result_occurrences:
+        # Canonical producer references let boolean folding eliminate P OR NOT P.
+        # One binding and the remaining CASE reference share one actual probe.
         - text: "__query_invariant_probe_"
-          count: 4
+          count: 2
+        - text: '"__query_presence_probe_'
+          count: 1
+        - text: "createtable"
+          count: 0
 
   - name: "Query-invariant presence binding observes the next session value"
     session_id: "trace-invariant-probe"

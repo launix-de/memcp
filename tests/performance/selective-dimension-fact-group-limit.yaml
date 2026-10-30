@@ -16,6 +16,9 @@ test_cases:
   - name: "Selective dimensions feed fact grouping with limit"
     performance_rows: 125000
     warmup: 0
+    # Compare one cold execution plus ten reuses as one fixed workload.
+    timing_samples: 11
+    timing_aggregation: total
     timeout: 60
     threshold_ms: 180000
     setup:
