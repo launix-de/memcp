@@ -553,6 +553,21 @@ test_cases:
           (not ((cadr order) "a" "A"))))
     expect: {result: true}
 
+  - name: Published derived output contracts support exact and folded names
+    scm: |
+      (begin
+        (define formula (list (quote get_column) "derived" false "Amount" false))
+        (define relation (make_query_block "memcp-tests" (list)
+          (list "Amount" (list (quote opaque_declared_output))) true (list) nil (list) nil nil (list) (list)
+          (list (list (quote result-types) (list "Amount" (sql_info nil (list "DECIMAL" (list 20 5)) nil))))))
+        (define exact (sql_projection_column_info relation formula "Amount" false (list)))
+        (define folded (sql_projection_column_info relation formula "amount" true (list)))
+        (if (and (expression_equal? exact folded)
+                 (expression_equal? (sql_info_formula exact) formula)
+                 (expression_equal? (sql_info_datatype exact) (list "DECIMAL" (list 20 5)))) true
+          (error "published output contract was inferred again or lost")))
+    expect: {result: true}
+
 cleanup:
   - sql: DROP TABLE IF EXISTS stf_bin_compare
   - sql: DROP TABLE IF EXISTS stf_doc

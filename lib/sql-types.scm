@@ -334,10 +334,13 @@ This resolves metadata only; the logical planner still owns projection rewrite. 
 		(define relation (normalize_query_ast relation))
 		(define declared (if (query_block? relation)
 			(qassoc_get (qb_facts relation) (quote result-types) nil) nil))
+		/* result-types is a flat output dictionary, unlike qb_facts' pair list.
+		Exact lookup consumes that declaration directly. Folded lookup stops at
+		the first matching title instead of allocating an entry for every output. */
 		(define contract (if col_ignorecase
-			(find (extract_assoc (coalesceNil declared '()) (lambda (title info)
-				(if (equal?? title col) info nil))) (lambda (info) (not (nil? info))) nil)
-			(qassoc_get (coalesceNil declared '()) col nil)))
+			(match (find_assoc (coalesceNil declared '()) (lambda (title _info) (equal?? title col)))
+				'(_title info) info _ nil)
+			(get_assoc (coalesceNil declared '()) col nil)))
 		(define info (if (not (nil? contract)) contract (begin
 		(define titles (queryplan_result_titles relation))
 		(define index (find (produceN (count titles)) (lambda (index)
