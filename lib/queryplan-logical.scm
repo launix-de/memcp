@@ -3835,7 +3835,26 @@ from SELECT/GROUP BY syntax. */
 		representative normalization. Those values must cross the group through
 		its aggregate interface too; a row-source alias is not bound by a group
 		consumer. True outer dependencies remain outside this local source set. */
-		(define stage_sources (filter (qb_sources block) source_is_stage_output?))
+		(define group_alias (if (empty_list? (qb_sources block)) nil (source_alias (car (qb_sources block)))))
+		(define group_keys (map (qb_group block) (lambda (expr) (canonical_column_expr_for_alias group_alias expr))))
+		(define group_bound? (lambda (expr)
+			(if (not (nil? (find group_keys (lambda (key)
+				(expression_equal? key (canonical_column_expr_for_alias group_alias expr))) nil))) true
+				(match expr
+					((symbol get_column) _alias _alias_ic _column _column_ic) false
+					((symbol quote) _datum) true
+					(cons _head args) (reduce args (lambda (valid arg) (and valid (group_bound? arg))) true)
+					_ true))))
+		/* A scalar output may cross this boundary only when its lookup domain
+		is determined by the group keys. A loose row-correlated subquery must
+		retain the ordinary non-grouped-column error. */
+		(define stage_sources (filter (qb_sources block) (lambda (src)
+			(and (source_is_stage_output? src)
+				(begin
+					(define producer (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation src))))
+					(and (group_stage? producer)
+						(reduce (qassoc_get (gs_facts producer) (quote lookup-keys) (gs_domain producer))
+							(lambda (valid key) (and valid (group_bound? key))) true)))))))
 		(define block (if (empty_list? stage_sources) block (begin
 			(define alias (source_alias (car (qb_sources block))))
 			(define canonical (lambda (expr) (canonical_column_expr_for_alias alias expr)))

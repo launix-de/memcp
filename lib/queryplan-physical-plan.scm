@@ -650,16 +650,24 @@ only partitioned FROM source would erase the block's row multiplicity
 					(qassoc_set (gs_facts stage) (quote stage_catalog) catalog)))))))
 
 (define stages_with_canonical_group_caches (lambda (stages signatures)
-	/* A shared physical name does not authorize sharing the descriptor's
-	query-local dimension expressions. Bind each use in its own source scope. */
+	/* Every physical copy reads the same published descriptor. Restored input
+	dependencies remain lexical children, but must not fall back to provisional
+	stage-ID-based identities when lowered through a nested probe. */
 	(map stages (lambda (stage)
 		(if (not (group_stage? stage)) stage
-			(group_stage_with_facts stage
-				(qassoc_set (qassoc_set (gs_facts stage) (quote group_cache)
-					(get_assoc signatures (concat (gs_id stage) ":cache")))
-					/* Keep compile-only dictionaries behind a handle: probes are also
-					immutable expression keys and must not embed mutable FastDicts. */
-					(quote cache_identity_index) (lambda () signatures))))))))
+			(begin
+				(define input (gs_input stage))
+				(define canonical_input (if (query_block? input)
+					(make_query_block (qb_schema input) (qb_sources input) (qb_fields input)
+						(qb_where input) (qb_group input) (qb_having input) (qb_order input)
+						(qb_limit input) (qb_offset input) (qb_hidden input)
+						(stages_with_canonical_group_caches (qb_stages input) signatures) (qb_facts input)) input))
+				(make_group_stage (gs_id stage) canonical_input (gs_domain stage) (gs_keys stage)
+					(gs_aggregates stage) (gs_having stage) (gs_output stage) (gs_order stage)
+					(gs_limit stage) (gs_offset stage)
+					(qassoc_set (qassoc_set_without (gs_facts stage) (quote group_cache)
+						(get_assoc signatures (concat (gs_id stage) ":cache")) (quote stage_catalog))
+						(quote cache_identity_index) (lambda () signatures)))))))))
 
 (define stage_shared_prepare? (lambda (stage)
 	(and (group_stage? stage)
@@ -1782,8 +1790,11 @@ outer joins. */
 			otherwise removing a scalar source leaves its projected value unbound. */
 			(define retained_input_aliases (if (query_block? optimized_src)
 				(source_aliases (qb_sources optimized_src)) '()))
-			(define input_probe_sources (if (and (query_block? carrier_src) (query_block? optimized_src))
-				(filter (qb_sources carrier_src) (lambda (candidate)
+			/* Every physical input rewrite may consume a source, including the
+			membership and presence passes before scalar carrier selection. Group
+			keys and reducers still consume the original declared interface. */
+			(define input_probe_sources (if (and (query_block? src) (query_block? optimized_src))
+				(filter (qb_sources src) (lambda (candidate)
 					(not (contains? retained_input_aliases (source_alias candidate)))))
 				'()))
 			(define input_probe_column_map (if (empty_list? input_probe_sources) '()
@@ -2234,8 +2245,11 @@ outer joins. */
 		(merge (map (coalesceNil catalogs '()) lowering_catalog_stages)))))
 
 (define stage_catalog_with_nested (lambda (stages)
-	(unique_stages_by_id
-		(merge (map (stage_catalog_entries stages) nested_stage_catalog)))))
+	/* The supplied flat catalog owns its definitions. Nested lookup copies
+	may fill missing dependencies, never override a later authoritative entry. */
+	(begin
+		(define entries (stage_catalog_entries stages))
+		(unique_stages_by_id (merge (list entries (merge (map entries nested_stage_catalog))))))))
 
 (define lower_group_stage (lambda (stage)
 	(begin
@@ -3003,7 +3017,7 @@ must not pay for an unused group cache. */
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
 			(if (empty_list? sources) nil (source_alias (car sources)))))
-		(or
+		(or (empty_list? sources)
 			(probe_limit_bounded? (qb_limit block)
 				(planner_context_session (qb_facts block)))
 			(probe_context_unique_point? sources default_alias (qb_where block))))))
@@ -10871,7 +10885,10 @@ can publish upstream values before invalidating downstream caches. */
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
 		(prejoin_rewrite_expr sources default_alias prejoin_alias
 			(list (symbol "get_column") tblvar tbl_ignorecase col col_ignorecase))
-		(cons head tail) (cons head (map tail (lambda (item)
+		/* Probe descriptors contain lists of expressions as well as calls. Their
+		first lookup/domain expression is a data-list head and must be rebound
+		through the same source map as every later expression. */
+		(cons head tail) (cons (prejoin_rewrite_expr sources default_alias prejoin_alias head) (map tail (lambda (item)
 			(prejoin_rewrite_expr sources default_alias prejoin_alias item))))
 		_ expr)))
 
@@ -12842,13 +12859,18 @@ in source recipes retain their semantic shape and identity. */
 					(qb_where input) (qb_group input) (qb_having input) (qb_order input)
 					(qb_limit input) (qb_offset input) (qb_hidden input)
 					(map (qassoc_get (qb_facts input) (quote input_stage_keys) '())
-						(lambda (key) (stage_index key))) (qb_facts input))))
+						(lambda (key) (begin
+							(define producer (stage_index key))
+							(if (nil? producer)
+								(neumann_fail "build_queryplan" (concat "missing input producer " key " for " (gs_id stage)))
+								producer)))) (qb_facts input))))
 			(define prepared_input (physical_node_with_planning_context declared_input planning_session tx stage_index))
 			/* Bind a closed single base producer before deriving physical cache
 			identities. Its filter belongs to the group fill; the logical stage
 			keeps its declared key and reducer inventory. Later rebinding would
 			leave query-input column recipes attached to a base-table carrier. */
-			(define base_input (and (query_block? prepared_input)
+			(define base_input (and
+				(query_block? prepared_input)
 				(single_source? (qb_sources prepared_input))
 				(source_is_base_table? (car (qb_sources prepared_input)))
 				(not (source_outer? (car (qb_sources prepared_input))))
@@ -12862,20 +12884,26 @@ in source recipes retain their semantic shape and identity. */
 				(gs_output stage) (gs_order stage) (gs_limit stage) (gs_offset stage)
 				(qassoc_set (if base_input
 					(qassoc_set (gs_facts stage) (quote condition)
+						(combine_where (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
 						(combine_where (qb_where prepared_input)
-							(source_join_expr (car (qb_sources prepared_input)))))
+								(source_join_expr (car (qb_sources prepared_input))))))
 					(gs_facts stage)) (quote physical_planning_session) planning_session))))))
 
 (define physical_node_with_planning_context (lambda (node planning_session tx stage_index)
 	(if (query_block? node)
+		(begin
+			/* UNION branches own local producer catalogs. Extend the lexical
+			binding context before resolving their declared input references. */
+			(define local_index (reduce (qb_stages node) (lambda (index stage)
+				(set_assoc index (logical_stage_key stage) stage)) stage_index))
 		(make_query_block (qb_schema node) (qb_sources node) (qb_fields node)
 			(qb_where node) (qb_group node) (qb_having node) (qb_order node)
 			(qb_limit node) (qb_offset node) (qb_hidden node)
 			(map (qb_stages node) (lambda (stage)
-				(physical_group_with_planning_context stage planning_session tx stage_index)))
+					(physical_group_with_planning_context stage planning_session tx local_index)))
 			(merge (list (list
 				(list (quote physical_planning_session) planning_session)
-				(list (quote physical_planning_tx) tx)) (qb_facts node))))
+					(list (quote physical_planning_tx) tx)) (qb_facts node)))))
 		(union_block? node)
 		(make_union_block (union_mode node)
 			(map (union_branches node) (lambda (branch)
@@ -13082,7 +13110,7 @@ recipe in one zero-argument helper. */
 
 (define closed_group_prepare_stage? (lambda (dependency_graph stage)
 	(and (group_stage? stage)
-		(and (source_is_base_table? (gs_input stage))
+		(and (or (source_is_base_table? (gs_input stage)) (query_block? (gs_input stage)))
 			(and (not (stage_has_residual_outer_refs? stage))
 				(reduce (stage_dependency_closure_using_graph dependency_graph stage)
 					(lambda (closed dependency)
@@ -13100,11 +13128,17 @@ recipe in one zero-argument helper. */
 		(shared_prepare_owner_key stage)
 		(list (quote once)
 			(list (quote lambda) '()
-				(list (quote !begin)
-					(lower_stage_prepare_using
+				(cons (quote !begin) (merge (list
+					/* Closed query-input carriers consume the same dependency owners.
+					Invoke their published handles before filling this carrier, rather
+					than copying each dependency's complete initializer into this body. */
+					(map (get_assoc dependency_graph (logical_stage_key stage) '()) (lambda (dependency)
+						(list (quote apply)
+							(list (physical_query_session_symbol) (stage_prepare_key dependency))
+							(quoted_runtime_list '()))))
+					(list (lower_stage_prepare_using
 						(stage_dependency_closure_using_graph dependency_graph stage)
-						catalog stage true)
-					true))))))
+						catalog stage false) true)))))))))
 
 (define shared_prepare_alias_binding (lambda (stage)
 	(list

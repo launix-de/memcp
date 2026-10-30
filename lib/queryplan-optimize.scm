@@ -5661,21 +5661,29 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 			node))))
 
 (define join_reorder_stage_using (lambda (stage_catalog stage planning_session tx)
-	(if (group_stage? stage)
-		(group_stage_with_reorder_facts
-			(make_group_stage
-				(gs_id stage)
-				(join_reorder_node_using stage_catalog (gs_input stage) planning_session tx)
-				(gs_domain stage)
-				(gs_keys stage)
-				(gs_aggregates stage)
-				(gs_having stage)
-				(gs_output stage)
-				(gs_order stage)
-				(gs_limit stage)
-				(gs_offset stage)
-				(gs_facts stage)))
-		stage)))
+	(if (not (group_stage? stage)) stage
+		(begin
+			(define input (gs_input stage))
+			(define reordered (join_reorder_node_using stage_catalog input planning_session tx))
+			/* The input projection declares every key and reducer operand.
+			Join rewrites publish its complete scalar interface; bind the owning
+			group through that same interface before deriving output columns. */
+			(define bindings (if (and (query_block? input) (query_block? reordered))
+				(filter (zip (projection_exprs (qb_fields input)) (projection_exprs (qb_fields reordered)))
+					(lambda (entry) (not (expression_equal? (car entry) (cadr entry))))) '()))
+			(define rewrite (lambda (expr) (if (empty_list? bindings) expr (begin
+				(define binding (find bindings (lambda (entry) (expression_equal? (car entry) expr)) nil))
+				(if (not (nil? binding)) (cadr binding)
+					(match expr
+						((symbol quote) _datum) expr
+						(cons head tail) (cons (rewrite head) (map tail rewrite))
+						_ expr))))))
+			(group_stage_with_reorder_facts (make_group_stage (gs_id stage) reordered
+				(gs_domain stage) (map (gs_keys stage) rewrite)
+				(map (gs_aggregates stage) (lambda (ag) (cons (rewrite (car ag)) (cdr ag))))
+				(rewrite (gs_having stage)) (rewrite (gs_output stage))
+				(rewrite (gs_order stage)) (gs_limit stage) (gs_offset stage)
+				(rewrite (gs_facts stage))))))))
 
 (define query_block_without_logical_stages (lambda (block)
 	/* The enclosing flat catalog owns each definition once. Retain the input's
@@ -5693,37 +5701,52 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 		(qb_hidden block)
 		'()
 		(if (empty_list? (qb_stages block)) (qb_facts block)
-			(qassoc_set (qb_facts block) (quote input_stage_keys) (map (qb_stages block) logical_stage_key))))))
+			(qassoc_set (qb_facts block) (quote input_stage_keys)
+				(map (stage_dependencies_from_output_sources
+					(stage_dependency_id_index (qb_stages block)) (qb_sources block)) logical_stage_key))))))
 
-(define normalize_stage_dependencies_node (lambda (node)
+(define normalize_stage_dependencies_node (lambda (node consumers)
 	(if (query_block? node)
-		(normalize_stage_dependencies_query_block node)
+		(normalize_stage_dependencies_query_block node consumers)
 		(if (union_block? node)
-			(normalize_stage_dependencies_union_block node)
-			(list node '())))))
+			(append (normalize_stage_dependencies_union_block node) consumers)
+			(list node '() consumers)))))
 
 (define normalize_stage_dependencies_stage (lambda (stage)
 	(if (group_stage? stage)
 		(begin
-			(define input_result (normalize_stage_dependencies_node (gs_input stage)))
+			/* The group's expressions consume its input's source interface too.
+			Normalize them with that input so merged helper aliases cannot survive
+			in reducers, keys or output recipes after their declarations disappear. */
+			(define input_result (normalize_stage_dependencies_node (gs_input stage)
+				(list (gs_domain stage) (gs_keys stage) (gs_aggregates stage)
+					(gs_having stage) (gs_output stage) (gs_order stage) (gs_facts stage))))
+			(define consumers (nth input_result 2))
 			(define input_node (nth input_result 0))
 			(define nested_stages (nth input_result 1))
 			(define normalized_input (if (query_block? input_node)
-				(query_block_without_logical_stages input_node)
+				(begin
+					(define scalar_inputs (merge (list (nth consumers 1) (map (nth consumers 2) car))))
+					(define projected (make_query_block (qb_schema input_node) (qb_sources input_node)
+						(merge (mapIndex scalar_inputs (lambda (i expr) (list (concat "__group_input_" i) expr))))
+						(qb_where input_node) (qb_group input_node) (qb_having input_node) (qb_order input_node)
+						(qb_limit input_node) (qb_offset input_node) (qb_hidden input_node)
+						(qb_stages input_node) (qb_facts input_node)))
+					(query_block_without_logical_stages projected))
 				input_node))
 			(list
 				(make_group_stage
 					(gs_id stage)
 					normalized_input
-					(gs_domain stage)
-					(gs_keys stage)
-					(gs_aggregates stage)
-					(gs_having stage)
-					(gs_output stage)
-					(gs_order stage)
+					(nth consumers 0)
+					(nth consumers 1)
+					(nth consumers 2)
+					(nth consumers 3)
+					(nth consumers 4)
+					(nth consumers 5)
 					(gs_limit stage)
 					(gs_offset stage)
-					(physicalize_membership_requirement_expr (gs_facts stage)))
+					(physicalize_membership_requirement_expr (nth consumers 6)))
 				nested_stages))
 		(list stage '()))))
 
@@ -5735,9 +5758,9 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 			(unique_stages_by_id (merge (list (nth head 1) (list (nth head 0)) tail))))
 		_ '())))
 
-(define normalize_stage_dependencies_query_block (lambda (block)
+(define normalize_stage_dependencies_query_block (lambda (block consumers)
 	(if (empty_list? (qb_stages block))
-		(list block '())
+		(list block '() consumers)
 		(begin
 			(define normalized_stages (normalize_stage_dependencies_stages (qb_stages block)))
 			(define normalized_block (make_query_block
@@ -5756,14 +5779,14 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 			/* Normalizing a producer's input can merge its dependencies and
 			therefore rename aggregate slots. Publish that interface change to
 			this owner before lifting the rewritten stage graph. */
-			(define propagated (nth (propagate_stage_output_aggregate_columns
-				normalized_block (stage_catalog_with_nested (qb_stages block)) normalized_stages) 0))
-			(define merged (merge_compatible_stage_output_left_joins_block propagated))
-			(list merged (qb_stages merged))))))
+			(define propagated (propagate_stage_output_aggregate_columns
+				normalized_block (stage_catalog_with_nested (qb_stages block)) normalized_stages consumers))
+			(define merged (merge_compatible_stage_output_left_joins_block (nth propagated 0) (nth propagated 2)))
+			(list (car merged) (qb_stages (car merged)) (cadr merged))))))
 
 (define normalize_stage_dependencies_union_block (lambda (block)
 	(begin
-		(define branch_results (map (union_branches block) normalize_stage_dependencies_node))
+		(define branch_results (map (union_branches block) (lambda (branch) (normalize_stage_dependencies_node branch '()))))
 		(list
 			(make_union_block
 				(union_mode block)
@@ -5983,6 +6006,8 @@ three-valued expressions whose NULL behavior remains observable. */
 	(match ag
 		'(expr reduce_fn neutral)
 		(list (boolean_fold_typed_expr graph stage expr) reduce_fn neutral)
+		'(expr reduce_fn neutral finalize)
+		(list (boolean_fold_typed_expr graph stage expr) reduce_fn neutral finalize)
 		_ ag)))
 
 (define fold_boolean_tautologies_stage (lambda (graph stage)
@@ -5998,8 +6023,14 @@ three-valued expressions whose NULL behavior remains observable. */
 			same typed fold as their descriptors, preserving numeric CASE payloads
 			instead of turning their 0/1 results into boolean aggregate inputs. */
 			(boolean_fold_typed_expr graph stage (gs_having stage))
-			(gs_output stage)
-			(gs_order stage)
+			/* SELECT groups exist before this rewrite. Their output and ORDER
+			recipes must publish the same fold as the aggregate inventory; retaining
+			an old recipe both names a missing slot and keeps dead producers alive. */
+			(map_assoc (gs_output stage) (lambda (_title expr)
+				(boolean_fold_typed_expr graph stage expr)))
+			(map (gs_order stage) (lambda (item) (match item
+				'(expr direction) (list (boolean_fold_typed_expr graph stage expr) direction)
+				_ item)))
 			(gs_limit stage)
 			(gs_offset stage)
 			(fold_stage_facts_condition graph stage (gs_facts stage)))
@@ -6015,6 +6046,14 @@ three-valued expressions whose NULL behavior remains observable. */
 				(define original (get_assoc original_index stage_id))
 				(define folded (get_assoc folded_index stage_id))
 				(if (or (nil? original) (nil? folded))
+					'()
+					/* Aggregate names depend on the recipe and local source roles.
+					An unchanged contract cannot rename a slot. Avoid repeatedly
+					canonicalizing its embedded producer graph during DAG lifting. */
+					(and (expression_equal? (gs_aggregates original) (gs_aggregates folded))
+						(expression_equal?
+							(source_aliases (canonical_helper_sources (gs_input original)))
+							(source_aliases (canonical_helper_sources (gs_input folded)))))
 					'()
 					(filter (map (produceN (min (count (gs_aggregates original)) (count (gs_aggregates folded))))
 						(lambda (i)
@@ -6046,12 +6085,12 @@ which output was renamed. */
 /* Rewriting a dependency column can in turn rename an aggregate which reads
 that column. Propagate those positional interface renames through the stage DAG
 until both producers and all consumers agree. */
-(define propagate_stage_output_aggregate_columns (lambda (block original_stages rewritten_stages)
+(define propagate_stage_output_aggregate_columns (lambda (block original_stages rewritten_stages consumers)
 	(begin
 		(define aggregate_col_map (stage_output_aggregate_fold_map
 			block original_stages rewritten_stages))
 		(if (empty_list? aggregate_col_map)
-			(list block rewritten_stages)
+			(list block rewritten_stages consumers)
 			(begin
 				(define next_stages (rewrite_stage_graph_stages
 					aggregate_col_map '() rewritten_stages))
@@ -6063,7 +6102,8 @@ until both producers and all consumers agree. */
 				(define next_block (rewrite_stage_graph_expr
 					aggregate_col_map '() block_with_stages))
 				(propagate_stage_output_aggregate_columns
-					next_block rewritten_stages next_stages))))))
+					next_block rewritten_stages next_stages
+					(rewrite_stage_graph_expr aggregate_col_map '() consumers)))))))
 
 (define fold_boolean_tautologies_ir (lambda (ir)
 	(begin
@@ -6082,7 +6122,7 @@ until both producers and all consumers agree. */
 					(qb_order root) (qb_limit root) (qb_offset root) (qb_hidden root)
 					folded_stages (qb_facts root)))
 				(define propagated (propagate_stage_output_aggregate_columns
-					folded_block (qb_stages root) folded_stages))
+					folded_block (qb_stages root) folded_stages '()))
 				(make_ir (ir_kind ir) (nth propagated 0) (nth propagated 1)
 					(ir_context_of ir) (ir_return ir)))))))
 
@@ -6196,7 +6236,7 @@ no scan, RecSet, keytable, or other physical artifact. */
 						remaining aliases. Propagate the resulting aggregate-column rename through
 						the stage DAG before physical probe markers are introduced. */
 						(define propagated (propagate_stage_output_aggregate_columns
-							pruned_root original_stages pruned_stages))
+							pruned_root original_stages pruned_stages '()))
 						(define propagated_root (nth propagated 0))
 						(define propagated_stages (nth propagated 1))
 						(define graph (stage_dependency_graph propagated_stages))
@@ -6205,8 +6245,25 @@ no scan, RecSet, keytable, or other physical artifact. */
 								(stage_dependency_id_index propagated_stages) (qb_sources propagated_root))
 							(filter propagated_stages (lambda (stage) (not (group_stage? stage)))))))
 						(define reachable (reachable_stage_keys_visit graph roots '()))
-						(define kept_stages (filter propagated_stages (lambda (stage)
-							(has_assoc? reachable (logical_stage_key stage)))))
+						/* Pruning owns both the producer catalog and its declared input
+						dependency references. Physical binding must never restore a
+						producer which this rewrite has proved dead. */
+						(define kept_stages (map (filter propagated_stages (lambda (stage)
+							(has_assoc? reachable (logical_stage_key stage)))) (lambda (stage)
+								(begin
+									(define input (if (group_stage? stage) (gs_input stage) nil))
+									(if (and (query_block? input)
+										(not (empty_list? (qassoc_get (qb_facts input) (quote input_stage_keys) '()))))
+										(make_group_stage (gs_id stage)
+											(make_query_block (qb_schema input) (qb_sources input) (qb_fields input)
+												(qb_where input) (qb_group input) (qb_having input) (qb_order input)
+												(qb_limit input) (qb_offset input) (qb_hidden input) (qb_stages input)
+												(qassoc_set (qb_facts input) (quote input_stage_keys)
+													(filter (qassoc_get (qb_facts input) (quote input_stage_keys) '())
+														(lambda (key) (has_assoc? reachable key)))))
+											(gs_domain stage) (gs_keys stage) (gs_aggregates stage) (gs_having stage)
+											(gs_output stage) (gs_order stage) (gs_limit stage) (gs_offset stage) (gs_facts stage))
+										stage)))))
 						(define kept_root (make_query_block
 							(qb_schema propagated_root) (qb_sources propagated_root) (qb_fields propagated_root)
 							(qb_where propagated_root) (qb_group propagated_root) (qb_having propagated_root)
@@ -6227,7 +6284,7 @@ Dependency normalization has no later repair sweep. Physical cache-column
 adapters remain owned by physical lowering. */
 (define normalize_stage_dependencies (lambda (ir)
 	(begin
-		(define root_result (normalize_stage_dependencies_node (ir_root ir)))
+		(define root_result (normalize_stage_dependencies_node (ir_root ir) '()))
 		(prune_unreferenced_single_row_stage_outputs_ir
 			(fold_boolean_tautologies_ir
 				(merge_compatible_stage_output_left_joins_ir (make_ir
@@ -6773,15 +6830,15 @@ Nested query blocks otherwise retain a removed helper alias after stage merging.
 (define stage_not_in_id_list? (lambda (ids stage)
 	(not (and (group_stage? stage) (stage_id_in_list? ids (gs_id stage))))))
 
-(define merge_compatible_stage_output_left_joins_block (lambda (block)
+(define merge_compatible_stage_output_left_joins_block (lambda (block consumers)
 	(if (or (empty_list? (qb_stages block)) (empty_list? (qb_sources block)))
-		block
+		(list block consumers)
 		(begin
 			(define stage_lookup (make_lowering_catalog (qb_stages block)))
 			(define signature_index (stage_semantic_signature_index (qb_stages block)))
 			(define entries (stage_output_left_join_entries stage_lookup signature_index (qb_sources block)))
 			(if (not (stage_output_left_join_entries_have_duplicates? entries))
-				block
+				(list block consumers)
 				(begin
 					(define dependency_id_map (merge (map entries (lambda (entry)
 						(stage_output_left_join_dependency_id_maps_for_entry stage_lookup entry)))))
@@ -6822,13 +6879,16 @@ Nested query blocks otherwise retain a removed helper alias after stage merging.
 					/* CONTRACT: merging dependency IDs can rename an aggregate even
 					in a surviving, untouched stage. Publish those exact column mappings
 					through its consumers before returning the merged block. */
-					(nth (propagate_stage_output_aggregate_columns rewritten
+					(define propagated (propagate_stage_output_aggregate_columns rewritten
 						(merge (list untouched_stages combined_stages))
-						(qb_stages rewritten)) 0)))))))
+						(qb_stages rewritten)
+						(rewrite_stage_graph_expr alias_map id_map
+							(rewrite_stage_output_left_join_columns column_maps consumers))))
+					(list (nth propagated 0) (nth propagated 2))))))))
 
 (define merge_compatible_stage_output_left_joins_node (lambda (node)
 	(if (query_block? node)
-		(merge_compatible_stage_output_left_joins_block node)
+		(car (merge_compatible_stage_output_left_joins_block node '()))
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)
@@ -7268,8 +7328,12 @@ sampling guard for a choice that no cardinality change can reverse. */
 		(define stage_catalog (if (<= (count stages) 4)
 			stages
 			(make_indexed_lowering_catalog stages nil)))
-		(define reordered_root
-			(join_reorder_node_using stage_catalog (ir_root ir) planning_session tx))
+		(define reordered (join_reorder_node_using stage_catalog (ir_root ir) planning_session tx))
+		/* Reordering may change the local source roles used by aggregate
+		column recipes. Publish that exact interface change to every consumer. */
+		(define reordered_root (if (and (query_block? (ir_root ir)) (query_block? reordered))
+			(nth (propagate_stage_output_aggregate_columns reordered
+				(qb_stages (ir_root ir)) (qb_stages reordered) '()) 0) reordered))
 		(make_ir
 			(ir_kind ir)
 			reordered_root

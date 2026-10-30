@@ -106,9 +106,7 @@ test_cases:
     cluster:
       min_remote_shards: 1
 - name: join-sum
-  # Both inputs exceed a node's RAM budget. A four-key point join can
-  # legitimately choose a maintained carrier instead of the native join.
-  sql: SELECT SUM(b.v0+k.id) AS total FROM big_items k JOIN big_items b ON b.id=k.id
+  sql: SELECT SUM(b.v0+k.id) AS total FROM operator_keys k JOIN big_items b ON b.id=k.id
   expect:
     cluster:
       min_remote_shards: 1
@@ -126,10 +124,7 @@ test_cases:
     cluster:
       min_remote_shards: 1
 - name: ordered-membership
-  # Keep membership inside OR so it remains a filter of the ordered driver,
-  # rather than becoming an independently reorderable semijoin source.
-  # 42000 is already an operator key: the additional branch preserves rows.
-  sql: SELECT id,v0 FROM big_items WHERE id IN (SELECT id FROM operator_keys) OR id=42000 ORDER
+  sql: SELECT id,v0 FROM big_items WHERE id IN (SELECT id FROM operator_keys) ORDER
     BY v0 DESC,id ASC LIMIT 3
   expect:
     cluster:

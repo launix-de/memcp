@@ -360,7 +360,8 @@ stage catalog would mistake those internal aliases for future join bindings. */
 		sources before scanning their physical carriers. */
 		(map direct_stages (lambda (nested_stage)
 			(if (group_stage? nested_stage)
-				(group_stage_with_stage_catalog nested_stage stage_lookup)
+				(group_stage_with_stage_catalog
+					(coalesceNil (stage_by_id stage_lookup (gs_id nested_stage)) nested_stage) stage_lookup)
 				nested_stage))))))
 
 (define scalar_first_query_probe_nested_stages_using_index (lambda (direct_stages closure_index)
@@ -7170,11 +7171,13 @@ ever-larger subtrees. */
 				((quote aggregate) agg_expr agg_reduce agg_neutral agg_finalize)
 				(group_aggregate_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral agg_finalize))
 				((symbol get_column) _tblvar _ _col _)
-				(if (equal?? (resolve_column_alias _tblvar alias) alias)
+				(if (not (nil? (find (canonical_helper_sources input) (lambda (src)
+					(equal?? (resolve_column_alias _tblvar alias) (source_alias src))) nil)))
 					(neumann_fail "build_queryplan" (concat "non-aggregate output must be a GROUP BY key: " (serialize expr)))
 					expr)
 				((quote get_column) _tblvar _ _col _)
-				(if (equal?? (resolve_column_alias _tblvar alias) alias)
+				(if (not (nil? (find (canonical_helper_sources input) (lambda (src)
+					(equal?? (resolve_column_alias _tblvar alias) (source_alias src))) nil)))
 					(neumann_fail "build_queryplan" (concat "non-aggregate output must be a GROUP BY key: " (serialize expr)))
 					expr)
 				(cons head tail) (cons head
@@ -9090,7 +9093,11 @@ nested aggregate facts: those can participate in structural identities. */
 aggregate scan. Keep every ambiguous outer-join shape on the shared group cache. */
 (define direct_group_probe_input (lambda (stage)
 	(begin
-		(define input (if (group_stage? stage) (gs_input stage) nil))
+		(define raw_input (if (group_stage? stage) (gs_input stage) nil))
+		(define input (if (source_is_base_table? raw_input)
+			(make_query_block (source_schema raw_input) (list raw_input) '()
+				(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
+				'() nil '() nil nil '() '() '()) raw_input))
 		(if (and (query_block? input)
 			(and (single_source? (qb_sources input))
 				(and (source_is_base_table? (car (qb_sources input)))
@@ -9205,7 +9212,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 						(define input (direct_group_probe_input stage))
 						(define lookups (if (nil? input) nil (direct_group_probe_lookup_keys stage src)))
 						(if (reduce (list
-							(not (nil? (qassoc_get (gs_facts stage) (quote purpose) nil)))
+							(not (contains? (list nil (quote select_group))
+								(qassoc_get (gs_facts stage) (quote purpose) nil)))
 							(nil? input)
 							(nil? lookups)
 							(not (equal? (coalesceNil (gs_having stage) true) true))

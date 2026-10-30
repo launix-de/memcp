@@ -238,7 +238,9 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 /* Avoid degenerate generated `and` forms while retaining normal short-circuit
 semantics for multiple independent cache assumptions. */
 (define sql_queryplan_conjoin_guards (lambda (guards)
-	(match guards
+	/* Neutral literal guards must not turn a dependency-free formula into a
+	variant dispatcher. Identity avoids SQL truth coercion of symbols or data. */
+	(match (filter guards (lambda (guard) (not (identical? guard true))))
 		'() true
 		(cons guard '()) guard
 		_ (cons (quote and) guards))))
@@ -791,10 +793,10 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 					/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
 					before parse/build so session-sensitive planner rewrites see the right values. */
 					(extract_assoc (req "query") (lambda (k v) (session k v)))
-					(set resultrow_called false)
+					(define resultrow_state (newsession))
 					(set original_resultrow resultrow)
 					(define resultrow (lambda (row) (begin
-						(set resultrow_called true)
+						(resultrow_state "called" true)
 						(original_resultrow row))))
 					(set query_result (with_autocommit session session_state query_seq query
 						(lambda (tx) (begin
@@ -802,7 +804,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 								(list (quote sql-policy-for) (req "username")) (req "username") session true tx))
 							(sql_execute_formula session tx formula resultrow (lambda (_fields) true))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
-					(if (and (not resultrow_called) (number? query_result)) (begin
+					(if (and (not (resultrow_state "called")) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
 					))
 				) query)) (lambda(e) (begin
@@ -833,10 +835,10 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 					(define query_seq (req "__query_seq"))
 					(session "username" (req "username"))
 					(session "schema" schema)
-					(set resultrow_called false)
+					(define resultrow_state (newsession))
 					(set original_resultrow resultrow)
 					(define resultrow (lambda (row) (begin
-						(set resultrow_called true)
+						(resultrow_state "called" true)
 						(original_resultrow row))))
 					(define handled (match query
 						(regex "SELECT\\s+c\\.relname\\s+as\\s+tblname\\s+FROM\\s+pg_catalog\\.pg_class" _)
@@ -862,7 +864,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 								(list (quote sql-policy-for) (req "username")) (req "username") session false tx))
 							(sql_execute_formula session tx formula resultrow (lambda (_fields) true)))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
-					(if (and (not resultrow_called) (number? query_result)) (begin
+					(if (and (not (resultrow_state "called")) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
 					))
 				) query)) (lambda(e) (begin
