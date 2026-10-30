@@ -53,6 +53,11 @@ func TestJITPoolKeepsSealedArenaUntilLastLease(t *testing.T) {
 	if !first.unmapped {
 		t.Fatal("sealed arena remained mapped after its last lease")
 	}
+	for _, retired := range pool.arenas[len(pool.arenas):cap(pool.arenas)] {
+		if retired != nil {
+			t.Fatal("arena backing array retained a removed arena beyond its length")
+		}
+	}
 
 	pool.Free(second)
 	pool.shutdown()

@@ -55,6 +55,9 @@ jobs:
       - name: Run Go tests
         run: go test ./...
 
+      - name: Test sparse process-memory dump tooling
+        run: python3 -m unittest discover -s tools -p test_ramdump.py -v
+
   jit-go-test:
     name: jit-go-test
     needs: changes
