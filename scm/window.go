@@ -20,6 +20,7 @@ package scm
 import "sort"
 import "sync"
 import "unsafe"
+import "context"
 import "container/heap"
 
 // streamTopK holds only the best OFFSET+LIMIT complete values. The producer
@@ -74,7 +75,9 @@ func streamWindowTopK(a []Scmer, offset, limit int) Scmer {
 	h := streamTopK{compare: PrepareSerialProc(a[5])}
 	var mu sync.Mutex
 	var sequence uint64
-	emit := NewFunc(func(values ...Scmer) Scmer {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	emit := NewClusterCallback(ctx, func(values ...Scmer) Scmer {
 		mu.Lock()
 		defer mu.Unlock()
 		if len(values) != 1 {
@@ -328,7 +331,9 @@ func init_window() {
 			// stream boundary instead of forcing every producer to abandon parallel
 			// scans or making all prepared callbacks pay for synchronization.
 			var emitMu sync.Mutex
-			emit := NewFunc(func(values ...Scmer) Scmer {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			emit := NewClusterCallback(ctx, func(values ...Scmer) Scmer {
 				emitMu.Lock()
 				defer emitMu.Unlock()
 				if len(values) != 1 {
