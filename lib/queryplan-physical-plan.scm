@@ -8856,16 +8856,15 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 	(match tree
 		((symbol join-leaf) alias predicates) (begin
 			(define src (join_optimizer_source_by_alias sources alias))
-			/* A cold canonical cache has no count, or only its allocated empty
-			count. Prefer an observed populated cache; otherwise recover the stage
-			input estimate instead of poisoning downstream probe work with nil.
-			Zero alone cannot prove initialization has completed. */
+			/* A canonical cache can contain several session domains and can grow
+			while this request fills its own domain. Its total population is not
+			the row domain of this leaf. Cost the declared producer input on both
+			cold and populated paths, retaining its base-statistics dependencies. */
 			(define measured_rows (if (nil? src) nil (planner_source_row_count src)))
 			(define stage (if (nil? src) nil (stage_for_group_cache_source stages src)))
 			(define logical_src (if (nil? stage) src
 				(source_with_relation src (make_stage_output_relation (gs_id stage)))))
-			(define source_rows (if (or (nil? stage)
-				(and (number? measured_rows) (> measured_rows 0))) measured_rows
+			(define source_rows (if (nil? stage) measured_rows
 				(planner_estimate_planning_value
 					(planner_source_row_estimate_using_stages stages logical_src) nil)))
 			(define rows (if (number? source_rows)
@@ -8950,11 +8949,7 @@ Logical UNION inputs sum branch counts; query blocks read their own sources. */
 			(begin
 				(define stage (stage_for_group_cache_source stages src))
 				(if (nil? stage) nil
-					(begin
-						(define measured_rows (planner_source_row_count src))
-						(if (and (number? measured_rows) (> measured_rows 0))
-							(planner_record_source_row_count_guard src measured_rows planning_session)
-							(physical_probe_stage_input_statistics_guards (gs_input stage) planning_session)))))))
+					(physical_probe_stage_input_statistics_guards (gs_input stage) planning_session)))))
 		(define work (if (nil? tree) (list nil '())
 			(physical_join_tree_probe_work tree sources stages)))
 		(list
