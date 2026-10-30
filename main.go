@@ -1348,6 +1348,9 @@ func main() {
 	flag.StringVar(&basepath, "data", "data", "Data folder for persistence")
 	replicationAddress := ""
 	flag.StringVar(&replicationAddress, "replication", "", "Replication listen on HTTP API, dedicated PORT, or upstream HTTP(S)/WS(S) URL or HOST:PORT")
+	var clusterBandwidthMbps, clusterLatencyMS float64
+	flag.Float64Var(&clusterBandwidthMbps, "cluster-bandwidth-mbps", 0, "Aggregate /cluster receive bandwidth per node in decimal Mbit/s; 0 is unlimited")
+	flag.Float64Var(&clusterLatencyMS, "cluster-latency-ms", 0, "One-way /cluster message dispatch latency in milliseconds; 0 disables")
 
 	profile := ""
 	flag.StringVar(&profile, "profile", "", "Data folder for persistence")
@@ -1393,7 +1396,15 @@ func main() {
 			continue
 		}
 
-		if strings.HasPrefix(arg, "--replication=") || strings.HasPrefix(arg, "-replication=") {
+		if strings.HasPrefix(arg, "--cluster-bandwidth-mbps=") || strings.HasPrefix(arg, "--cluster-latency-ms=") {
+			knownArgs = append(knownArgs, arg)
+		} else if arg == "--cluster-bandwidth-mbps" || arg == "--cluster-latency-ms" {
+			knownArgs = append(knownArgs, arg)
+			if i+2 < len(os.Args) {
+				knownArgs = append(knownArgs, os.Args[i+2])
+				skipNext = true
+			}
+		} else if strings.HasPrefix(arg, "--replication=") || strings.HasPrefix(arg, "-replication=") {
 			knownArgs = append(knownArgs, arg)
 		} else if arg == "--replication" || arg == "-replication" {
 			knownArgs = append(knownArgs, "-replication")
@@ -1437,6 +1448,10 @@ func main() {
 	// Parse only known Go flags
 	os.Args = append([]string{os.Args[0]}, knownArgs...)
 	flag.Parse()
+	if err := storage.ConfigureClusterIO(clusterBandwidthMbps, clusterLatencyMS); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	imports := append(flag.Args(), importFiles...)
 
 	// Restore full args for Scheme

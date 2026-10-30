@@ -171,7 +171,7 @@ func (s *OverlayBlob) Deserialize(f io.Reader) uint {
 	var version uint8
 	binary.Read(f, binary.LittleEndian, &version)
 	var pad [6]byte
-	f.Read(pad[:])
+	readStorageBytes(f, pad[:])
 	switch version {
 	case 0, '1': // '1'=49: legacy pre-versioning dummy byte; treat as v0
 		s.legacy = true
@@ -199,17 +199,17 @@ func (s *OverlayBlob) deserializeBlobV0(f io.Reader) uint {
 		// LEGACY: read inline blobs (migration in SetPersistence)
 		for i := uint64(0); i < size; i++ {
 			var key [32]byte
-			f.Read(key[:])
+			readStorageBytes(f, key[:])
 			var l uint64
 			binary.Read(f, binary.LittleEndian, &l)
 			value := make([]byte, l)
-			f.Read(value)
+			readStorageBytes(f, value)
 			s.size += uint(l)
 			s.values[key] = string(value)
 		}
 	}
 	var basetype uint8
-	f.Read(unsafe.Slice(&basetype, 1))
+	readStorageBytes(f, unsafe.Slice(&basetype, 1))
 	s.Base = reflect.New(storages[basetype]).Interface().(ColumnStorage)
 	l := s.Base.Deserialize(f) // read base
 	return l

@@ -51,6 +51,60 @@ NETWORK_ERROR = "Cluster network error"
 OPERATOR_SUITE = ROOT / "tests/execution/operators/cluster-operator-contracts.yaml"
 
 
+IO_KEYS = ("cluster_bandwidth_mbps", "cluster_latency_ms", "storage_backend",
+           "storage_bandwidth_mbps", "storage_latency_ms")
+
+
+def validate_io_config(config):
+    import math
+    for key in IO_KEYS:
+        if key == "storage_backend":
+            if config[key] not in ("filesystem", "FakeRemote"):
+                raise DrillFailure("storage_backend must be filesystem or FakeRemote")
+        elif type(config[key]) not in (int, float) or not math.isfinite(config[key]) or config[key] < 0:
+            raise DrillFailure(f"{key} must be finite and nonnegative")
+    if config["storage_backend"] == "filesystem" and (config["storage_latency_ms"] or config["storage_bandwidth_mbps"]):
+        raise DrillFailure("storage limits require storage_backend: FakeRemote")
+
+
+def effective_io_config(args):
+    config = {key: ("filesystem" if key == "storage_backend" else 0) for key in IO_KEYS}
+    config.update({key: getattr(args, key) for key in IO_KEYS if getattr(args, key, None) is not None})
+    validate_io_config(config)
+    return config
+
+
+def effective_cluster_config(args, path):
+    config = cluster_suite_config(path)
+    for key in IO_KEYS:
+        value = getattr(args, key, None)
+        if value is not None:
+            config[key] = value
+    validate_io_config(config)
+    return config
+
+
+def configure_cluster_io(node, config, shared):
+    node.node_args += [f"--cluster-bandwidth-mbps={config['cluster_bandwidth_mbps']}",
+                       f"--cluster-latency-ms={config['cluster_latency_ms']}"]
+    backend = {"backend": config["storage_backend"]}
+    if config["storage_backend"] == "FakeRemote":
+        backend.update(prefix=str(shared.resolve()), latency_ms=config["storage_latency_ms"],
+                       bandwidth_mbps=config["storage_bandwidth_mbps"])
+    (node.data_dir / f"{node.database}.json").write_text(json.dumps(backend))
+
+
+def io_stats(node):
+    value = node.client.scm("(io_stats)").strip()
+    if value.startswith('"'):
+        value = json.loads(value)
+    return json.loads(value)
+
+
+def io_difference(before, after):
+    return {kind: {key: after[kind][key] - before[kind][key] for key in before[kind]} for kind in before}
+
+
 def cluster_suite_config(path):
     spec = yaml.safe_load(Path(path).read_text())
     if not isinstance(spec, dict) or not suite_requires_cluster(spec.get("metadata", {})):
@@ -61,7 +115,9 @@ def cluster_suite_config(path):
                 "coordinator_ram_limit_bytes": 131072, "shard_ram_percent": 50,
                 "coordinator_shard_ram_percent": 1, "gomaxprocs": 16,
                 "fixture": None, "compare_standalone": True,
-                "rows_per_shard": 5000, "shards": 64, "columns": 8, "fixture_seed": 20261026}
+                "rows_per_shard": 5000, "shards": 64, "columns": 8, "fixture_seed": 20261026,
+                "cluster_bandwidth_mbps": 0, "cluster_latency_ms": 0,
+                "storage_backend": "filesystem", "storage_bandwidth_mbps": 0, "storage_latency_ms": 0}
     unknown = set(values) - defaults.keys()
     if unknown:
         raise DrillFailure(f"{path}: unknown cluster properties: {sorted(unknown)}")
@@ -81,6 +137,7 @@ def cluster_suite_config(path):
         raise DrillFailure(f"{path}: fixture_seed must be an integer")
     if config["fixture"] == "shared_analytics" and not config["compare_standalone"]:
         raise DrillFailure(f"{path}: shared_analytics requires its complete standalone oracle")
+    validate_io_config(config)
     return config
 
 
@@ -188,8 +245,17 @@ class ClusterSQLTestRunner(SQLTestRunner):
         if self.status and not self.parallel_group:
             current["_before"] = [self.status(node) for node in self.nodes]
 
+        current["_io_before"] = [io_stats(node) for node in self.nodes]
+        current["_operation_start"] = time.perf_counter_ns()
+
     def after_case_operation(self, case, database):
         current = self._test_context.cluster_case
+        started = current.pop("_operation_start", None)
+        if started is None:
+            return
+        current["operation_wall_ns"] = time.perf_counter_ns() - started
+        current["io"] = [io_difference(before, io_stats(node))
+                         for node, before in zip(self.nodes, current.pop("_io_before"))]
         before = current.pop("_before", None)
         if before is not None:
             current["cluster"] = cluster_evidence(before, [self.status(node) for node in self.nodes], cluster_data_bytes(self.shared))
@@ -256,6 +322,8 @@ class ClusterSQLTestRunner(SQLTestRunner):
             return False
         finally:
             current.pop("_before", None)
+            current.pop("_io_before", None)
+            current.pop("_operation_start", None)
             self._test_context.cluster_case = previous
             with self.report_lock:
                 self.results.append(current)
@@ -343,6 +411,9 @@ class Node(OwnedServer):
         self.password = local_password
         self.cluster_secret = "replication-runner-shared-scan-secret"
         self.node_args = []
+        self.transport_args = [f"--{key.replace('_', '-')}={getattr(args, key)}"
+                               for key in ("cluster_bandwidth_mbps", "cluster_latency_ms")
+                               if getattr(args, key, None) is not None]
         self.process_env = {}
         self.executor = shlex.split(args.executor)
         self.startup_timeout = args.startup_timeout
@@ -361,7 +432,7 @@ class Node(OwnedServer):
             f"--replication={self.replication}",
             *([] if self.cluster_secret is None or any(arg.startswith("--cluster-secret-file=") for arg in self.node_args)
               else [f"--cluster-secret={self.cluster_secret}"]),
-            *self.node_args, str(self.app),
+            *self.transport_args, *self.node_args, str(self.app),
         ]
         self.process = subprocess.Popen(
             command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=self.log_handle,
@@ -1644,6 +1715,7 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
         source.sql("CREATE UNIQUE INDEX writer_value ON integer_items (writer,value)")
         builder.kill()
         shared = builder.data_dir / DATABASE
+        config = effective_io_config(args)
         nodes = [Node(args, directory, f"node-{i}", "listen") for i in range(3)]
         for index, node in enumerate(nodes):
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
@@ -1656,6 +1728,7 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
                               f"--cluster-join={seed}", f"--cluster-databases={DATABASE}"]
             if index == 0:
                 node.node_args.append("--cluster-bootstrap")
+            configure_cluster_io(node, config, shared)
             node.start()
         def status(node):
             value = json.loads(node.client.scm("(cluster_status)"))
@@ -1817,7 +1890,9 @@ def run_cluster_placement(args, artifacts, journal):
     directory = artifacts / "cluster-placement"
     directory.mkdir()
     suite = getattr(args, "cluster_suite", None)
-    config = cluster_suite_config(suite) if suite else cluster_suite_config(OPERATOR_SUITE)
+    config = effective_cluster_config(args, suite or OPERATOR_SUITE)
+    if suite is None:
+        config.update(effective_io_config(args))
     budget = config["ram_limit_bytes"]
     coordinator_budget = config["coordinator_ram_limit_bytes"]
     rows_per_shard, shards, columns = config["rows_per_shard"], config["shards"], config["columns"]
@@ -1934,6 +2009,7 @@ def run_cluster_placement(args, artifacts, journal):
                               f"--cluster-join={seed}", f"--cluster-databases={DATABASE}"]
             if node is nodes[0]:
                 node.node_args.append("--cluster-bootstrap")
+            configure_cluster_io(node, config, shared)
         def status(node):
             value = node.client.scm("(cluster_status)").strip()
             if value.startswith('"'):
@@ -2116,7 +2192,7 @@ def run_cluster_placement(args, artifacts, journal):
 def run_cluster_suite(args, path, artifacts, journal):
     """The environment changes; setup/cases/cleanup use SQLTestRunner unchanged."""
     path = path.resolve()
-    config = cluster_suite_config(path)
+    config = effective_cluster_config(args, path)
     directory = artifacts / path.stem
     directory.mkdir()
     journal.append({"scenario": "cluster-suite", "path": str(path), "config": config})
@@ -2167,6 +2243,7 @@ def run_cluster_suite(args, path, artifacts, journal):
             # Initialize this initially empty domain through its public startup
             # API only after all frontends are ready, before suite setup begins.
             node.cluster_secret = None
+            configure_cluster_io(node, config, shared)
             node.start()
         for index, node in enumerate(nodes):
             seed = "" if index == 0 else f"http://127.0.0.1:{protocol_ports[0]}/cluster"
@@ -2208,7 +2285,20 @@ def main():
                         help="compare SQL scan families standalone and under mandatory cluster delegation")
     parser.add_argument("--cluster-only", action="store_true", help="run focused shared-storage cluster placement scenario")
     parser.add_argument("--fixture-binary", type=Path, help="optional same-commit builder for immutable cluster fixture")
+    parser.add_argument("--cluster-bandwidth-mbps", type=float, default=None,
+                        help="aggregate /cluster receive bandwidth per node, decimal Mbit/s; unset: YAML value or fullspeed; 0: unlimited")
+    parser.add_argument("--cluster-latency-ms", type=float, default=None,
+                        help="one-way /cluster dispatch latency; unset: YAML value or zero")
+    parser.add_argument("--storage-backend", choices=("filesystem", "FakeRemote"), default=None)
+    parser.add_argument("--storage-latency-ms", type=float, default=None, help="FakeRemote request latency in milliseconds")
+    parser.add_argument("--storage-bandwidth-mbps", type=float, default=None, help="aggregate FakeRemote bandwidth per backend instance")
     args = parser.parse_args()
+    cli_io = {key: ("FakeRemote" if key == "storage_backend" else 0) for key in IO_KEYS}
+    cli_io.update({key: getattr(args, key) for key in IO_KEYS if getattr(args, key) is not None})
+    try:
+        validate_io_config(cli_io)
+    except DrillFailure as error:
+        parser.error(str(error))
     if args.cluster_suites:
         if args.suites:
             parser.error("--cluster-suites discovers its suites; do not pass paths")
@@ -2217,10 +2307,12 @@ def main():
         if not args.suites:
             parser.error("no cluster suites found")
     for path in args.suites:
-        cluster_suite_config(path)
+        effective_cluster_config(args, path)
     if args.suites and any((args.cluster_only, args.remote_scans_only, args.cluster_inserts_only,
                            args.cluster_context_only, args.cluster_operators_only)):
         parser.error("select YAML suites or a legacy process scenario, not both")
+    if any(getattr(args, key) is not None for key in IO_KEYS[2:]) and not (args.suites or args.cluster_only or args.cluster_operators_only or args.cluster_context_only or args.cluster_inserts_only):
+        parser.error("storage instrumentation requires a shared-storage cluster scenario or YAML suite")
     if args.cluster_operators_only:
         args.cluster_suite = OPERATOR_SUITE
     if args.cluster_context_only or args.cluster_operators_only:
@@ -2240,7 +2332,8 @@ def main():
     journal = [{"scenario": "configuration", "rounds": args.rounds, "workers": args.workers,
                 "operations": args.operations, "binary": str(args.binary), "executor": args.executor,
                 "timeout": args.timeout, "startup_timeout": args.startup_timeout,
-                "dedicated_replication_port": args.dedicated_replication_port}]
+                "dedicated_replication_port": args.dedicated_replication_port,
+                "io_overrides": {key: getattr(args, key) for key in IO_KEYS}}]
     print(f"Replication cluster stress artifacts: {artifacts}\nSeed: {args.seed}", flush=True)
     try:
         if args.suites:
@@ -2290,6 +2383,9 @@ def main():
             replay.append("--cluster-operators-only")
         if args.fixture_binary:
             replay.extend(["--fixture-binary", str(args.fixture_binary)])
+        for key in IO_KEYS:
+            if getattr(args, key, None) is not None:
+                replay.extend(["--"+key.replace("_","-"), str(getattr(args, key))])
         if args.dedicated_replication_port:
             replay.append("--dedicated-replication-port")
         print(f"FAIL: {error}\nReproduce: {shlex.join(replay)}\nArtifacts: {artifacts}", file=sys.stderr, flush=True)

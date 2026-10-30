@@ -72,6 +72,8 @@ func registerMosiRole(role string, handler http.Handler) (func(), error) {
 // Neither RPC handlers nor storage I/O run under its mutex.
 // A disconnected peer fails every outstanding call; no write is retried here.
 type mosiPeer struct {
+	receiveIO *ioSimulation // shared node ingress budget; receiver-only instrumentation
+
 	operationPrefix string            // immutable authenticated connection binding for query operations
 	recoveryDone    chan struct{}     // replication hello installed; nil for roles without recovery
 	objectEndpoint  string            // immutable outbound URL, initialized before reader start
@@ -126,6 +128,7 @@ func (e mosiRemoteError) Error() string { return string(e) }
 
 func newMosiPeer(conn *websocket.Conn, handle func(context.Context, string, json.RawMessage) (any, error), packet func(*mosiPacket) error, initialize ...func(*mosiPeer)) *mosiPeer {
 	p := &mosiPeer{conn: conn, pending: make(map[uint64]chan mosiMessage), done: make(chan struct{}), handle: handle, packet: packet, outgoing: make(chan mosiMessage, 8), writeDone: make(chan struct{})}
+	p.receiveIO = activeClusterReceiveIO()
 	p.readDone = make(chan struct{})
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	conn.SetReadLimit(mosiMaxMessageBytes)
@@ -260,10 +263,27 @@ func (p *mosiPeer) call(ctx context.Context, method string, input, output any) e
 func (p *mosiPeer) read() {
 	defer close(p.readDone)
 	defer p.close()
+	var previousStart time.Time
+	var previousBytes int
 	for {
+		// Finish the prior message's byte budget before consuming the next header.
+		// Decode/dispatch time already elapsed is credited; idle time grants no burst.
+		if p.receiveIO != nil && !previousStart.IsZero() && !p.receiveIO.pace(p.ctx, previousBytes, previousStart) {
+			return
+		}
+		if p.receiveIO != nil {
+			previousStart = time.Now()
+		}
 		kind, frame, err := p.conn.ReadMessage()
 		if err != nil || kind != websocket.BinaryMessage {
 			return
+		}
+		previousBytes = len(frame)
+		var readyAt time.Time
+		if p.receiveIO != nil {
+			p.receiveIO.stats.operations.Add(1)
+			p.receiveIO.stats.bytes.Add(uint64(len(frame)))
+			readyAt = time.Now().Add(p.receiveIO.latency)
 		}
 		m, err := decodeMosiMessage(frame)
 		if err != nil {
@@ -273,26 +293,30 @@ func (p *mosiPeer) read() {
 			if p.packet == nil {
 				return
 			}
-			if !p.dispatchPacket(m.Packet, len(frame)) {
+			if !p.dispatchPacket(m.Packet, len(frame), readyAt) {
 				return
 			}
 			continue
 		}
-		if m.Method == "" {
-			p.mu.Lock()
-			ch := p.pending[m.ID]
-			p.mu.Unlock()
-			if ch != nil {
-				select {
-				case ch <- m:
-				default:
-				}
-			}
+		if m.Method == "" && (p.receiveIO == nil || p.receiveIO.latency == 0) {
+			p.deliverReply(m)
 			continue
 		}
+		if p.packetBytes.Add(int64(len(frame))) > 32<<20 {
+			p.packetBytes.Add(-int64(len(frame)))
+			return
+		}
 		p.workers.Add(1)
-		go func(m mosiMessage) {
+		go func(m mosiMessage, size int, readyAt time.Time) {
 			defer p.workers.Done()
+			defer p.packetBytes.Add(-int64(size))
+			if !p.waitDispatch(readyAt) {
+				return
+			}
+			if m.Method == "" {
+				p.deliverReply(m)
+				return
+			}
 			reply := mosiMessage{ID: m.ID}
 			func() {
 				defer func() {
@@ -320,7 +344,28 @@ func (p *mosiPeer) read() {
 			if err := p.send(p.ctx, reply); err != nil {
 				p.close()
 			}
-		}(m)
+		}(m, len(frame), readyAt)
+	}
+}
+
+// Delay delivery outside the reader so propagation latency overlaps independent
+// messages and CPU work. Existing worker ownership joins timers on cancellation.
+func (p *mosiPeer) waitDispatch(readyAt time.Time) bool {
+	if p.receiveIO == nil || p.receiveIO.latency == 0 {
+		return true
+	}
+	return p.receiveIO.wait(p.ctx, readyAt)
+}
+
+func (p *mosiPeer) deliverReply(m mosiMessage) {
+	p.mu.Lock()
+	ch := p.pending[m.ID]
+	p.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- m:
+		default:
+		}
 	}
 }
 
@@ -330,7 +375,7 @@ func (p *mosiPeer) read() {
 // starting a goroutine per packet could publish rights before data installation.
 // The byte ceiling bounds private queues under a stalled backend without
 // retaining an unbounded shard dump.
-func (p *mosiPeer) dispatchPacket(packet *mosiPacket, size int) bool {
+func (p *mosiPeer) dispatchPacket(packet *mosiPacket, size int, readyAt time.Time) bool {
 	const maxQueuedPacketBytes = 32 << 20
 	if p.packetBytes.Add(int64(size)) > maxQueuedPacketBytes {
 		p.packetBytes.Add(-int64(size))
@@ -364,6 +409,9 @@ func (p *mosiPeer) dispatchPacket(packet *mosiPacket, size int) bool {
 			close(done)
 			p.mu.Unlock()
 		}()
+		if !p.waitDispatch(readyAt) {
+			return
+		}
 		if previous != nil {
 			select {
 			case <-previous:

@@ -108,7 +108,7 @@ jobs:
       - name: Check authenticated placement and shared-budget units
         run: >-
           go test -race -tags=nophp ./storage ./scm
-          -run '^Test(Cluster|RemoteScan|ScanDelegation|ProcedureWire)' -count=1
+          -run '^Test(Cluster|RemoteScan|ScanDelegation|ProcedureWire|IOSimulation|FakeRemote)' -count=1
       - name: Check four-node placement, mutable MOSI and tenant isolation
         run: >-
           python3 -u tools/replication_cluster_stress.py

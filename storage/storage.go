@@ -230,6 +230,14 @@ func normalizePartitionDataset(arg scm.Scmer) dataset {
 	return normalized
 }
 
+// Persisted fields have an exact length; buffered and remote readers may
+// return a short chunk without EOF. Never publish a zero-padded partial field.
+func readStorageBytes(reader io.Reader, data []byte) {
+	if _, err := io.ReadFull(reader, data); err != nil {
+		panic(err)
+	}
+}
+
 // THE basic storage pattern
 type ColumnStorage interface {
 	// info
@@ -770,6 +778,7 @@ func invalidateComputedRows(proxy *StorageComputeProxy, recids map[uint32]struct
 }
 
 func Init(en scm.Env) {
+	initIOInstrumentation(&en)
 	scm.HTTPAuthenticationHook = replicationHTTPAuthentication
 	scm.MySQLAuthenticationHook = replicationMySQLAuthentication
 	scm.MySQLDatabaseHook = replicationOpenDatabase
