@@ -281,16 +281,26 @@ and barrier ownership come from the pre-normalization query block. */
 			(begin
 				(define left_stats (planner_column_statistics (car left_ref) (cadr left_ref)))
 				(define right_stats (planner_column_statistics (car right_ref) (cadr right_ref)))
-				(define left_distinct (qassoc_get left_stats (quote distinct) nil))
-				(define right_distinct (qassoc_get right_stats (quote distinct) nil))
-				(if (or (nil? left_distinct) (nil? right_distinct)
-					(equal? (qassoc_get left_stats (quote distinct_source) nil) (quote fallback_row_count))
-					(equal? (qassoc_get right_stats (quote distinct_source) nil) (quote fallback_row_count)))
+				/* A single-column primary key proves an NDV equal to its live row
+				count. Use that semantic join bound even before statistics exist;
+				ordinary row-count placeholders remain unknown distinct counts. */
+				(define left_unique (equal? (source_primary_key_columns (car left_ref)) (list (cadr left_ref))))
+				(define right_unique (equal? (source_primary_key_columns (car right_ref)) (list (cadr right_ref))))
+				(define left_distinct (if left_unique (planner_source_row_count (car left_ref))
+					(equal? (qassoc_get left_stats (quote distinct_source) nil) (quote fallback_row_count)) nil
+					(qassoc_get left_stats (quote distinct) nil)))
+				(define right_distinct (if right_unique (planner_source_row_count (car right_ref))
+					(equal? (qassoc_get right_stats (quote distinct_source) nil) (quote fallback_row_count)) nil
+					(qassoc_get right_stats (quote distinct) nil)))
+				(if (or (and (nil? left_distinct) (nil? right_distinct))
+					(and (nil? left_distinct) (not right_unique))
+					(and (nil? right_distinct) (not left_unique)))
 					(planner_unknown_selectivity_estimate)
-					(planner_estimate (/ 1 (max 1 (max left_distinct right_distinct)))
-						(min (qassoc_get left_stats (quote distinct_confidence) 0)
-							(qassoc_get right_stats (quote distinct_confidence) 0))
-						(quote distinct_join) true)))
+					(planner_estimate (/ 1 (max 1 (max (coalesceNil left_distinct 0) (coalesceNil right_distinct 0))))
+						(if (or left_unique right_unique) 0.9
+							(min (qassoc_get left_stats (quote distinct_confidence) 0)
+								(qassoc_get right_stats (quote distinct_confidence) 0)))
+						(if (or left_unique right_unique) (quote unique_join_bound) (quote distinct_join)) true)))
 			(if (not (nil? left_ref))
 				(join_optimizer_column_selectivity_estimate left_ref)
 				(if (not (nil? right_ref))
@@ -5704,8 +5714,13 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 		'()
 		(if (empty_list? (qb_stages block)) (qb_facts block)
 			(qassoc_set (qb_facts block) (quote input_stage_keys)
-				(map (stage_dependencies_from_output_sources
-					(stage_dependency_id_index (qb_stages block)) (qb_sources block)) logical_stage_key))))))
+				(map (unique_stages_by_id (merge (list
+					(stage_dependencies_from_output_sources
+						(stage_dependency_id_index (qb_stages block)) (qb_sources block))
+					/* Computed window values are consumers of their declared producer
+					even though the row source itself remains the base relation. */
+					(filter (qb_stages block) (lambda (stage)
+						(or (window_stage? stage) (orc_stage? stage))))))) logical_stage_key))))))
 
 (define normalize_stage_dependencies_node (lambda (node consumers)
 	(if (query_block? node)
@@ -7842,7 +7857,9 @@ Only remove these exact identities from the cut proof, never from the IR. */
 							(define input (gs_input stage))
 							(and ok
 								(not (ordered_binding_occurs? axis (list (ordered_binding_semantic_keys axis stage) (gs_aggregates stage) (gs_having stage)
-									(if (query_block? input) (list (qb_fields input) (qb_group input) (qb_having input)
+									/* The input projection declares the keys and reducer operands checked
+									above. A copied session coordinate there is not another semantic use. */
+									(if (query_block? input) (list (qb_group input) (qb_having input)
 										(qb_order input) (qb_limit input) (qb_offset input) (qb_hidden input)
 										(map (qb_sources input) (lambda (source)
 											(ordered_binding_semantic_join axis dependencies source)))) '()))))

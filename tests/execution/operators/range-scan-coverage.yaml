@@ -89,6 +89,20 @@ test_cases:
           (equal? (qassoc_get estimate (quote source) nil) (quote unknown))))
     expect: {result: true}
 
+  - name: "Primary-key equality bounds join work before distinct statistics exist"
+    scm: |
+      (begin
+        (define sources (list (list "a" "memcp-tests" "rs_data" false nil)
+          (list "b" "memcp-tests" "rs_data" false nil)))
+        (define estimate (join_optimizer_equality_selectivity_estimate sources "a"
+          (list (quote get_column) "a" false "id" false)
+          (list (quote get_column) "b" false "val" false)))
+        (and (number? (qassoc_get estimate (quote value) nil))
+          (equal? (qassoc_get estimate (quote source) nil) (quote unique_join_bound))
+          (equal? (qassoc_get estimate (quote value) nil)
+            (/ 1 (planner_source_row_count (car sources))))))
+    expect: {result: true}
+
   - name: "EXPLAIN uses the explicit fallback distinct estimate before rebuild"
     sql: "EXPLAIN REORDER SELECT a.id FROM rs_data a JOIN rs_data b ON b.id = a.id WHERE a.val = 3"
     expect:

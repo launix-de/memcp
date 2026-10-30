@@ -989,8 +989,8 @@ test_cases:
             AND e.happened_at < w.range_to) AS event_count
       FROM grc_single_window w
     expect:
-      result_contains: ["grc_events"]
-      result_not_contains: ["range_group_cache", ".range-lookup:"]
+      result_contains: ["grc_events", "(chosen direct_range_aggregate)"]
+      result_not_contains: ["(chosen range_group_cache)", ".range-lookup:"]
     cleanup:
       - sql: "DROP TABLE IF EXISTS grc_single_window"
 

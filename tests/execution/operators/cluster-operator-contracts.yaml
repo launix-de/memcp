@@ -105,8 +105,16 @@ test_cases:
   expect:
     cluster:
       min_remote_shards: 1
-- name: join-sum
+- name: selective-join-sum
+  # Sparse unique lookups may prefer the maintained prejoin; remote execution
+  # and the original SUM result remain mandatory regardless of that choice.
   sql: SELECT SUM(b.v0+k.id) AS total FROM operator_keys k JOIN big_items b ON b.id=k.id
+  expect:
+    cluster:
+      min_remote_shards: 1
+- name: join-sum
+  # Exercise the native joined reducer with a full distributed working set.
+  sql: SELECT SUM(b.v0+k.id) AS total FROM big_items k JOIN big_items b ON b.id=k.id
   expect:
     cluster:
       min_remote_shards: 1
@@ -130,7 +138,7 @@ test_cases:
     cluster:
       min_remote_shards: 1
       plan_contains:
-      - scan_order
+      - scan_join_order
 - name: order-ack-multiple-windows
   sql: SELECT id FROM big_items WHERE id<8192 ORDER BY id ASC LIMIT 4097 OFFSET 257
   expect:

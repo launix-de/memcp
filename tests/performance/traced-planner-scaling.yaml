@@ -394,7 +394,9 @@ test_cases:
         - "createtable"
       result_occurrences:
         - text: "createtable"
-          count: 2
+          count: 1
+      result_not_contains:
+        - ".grp:tps_assignment:"
   - name: "Physical preparation keeps distinct nested filter formulas"
     sql: |
       EXPLAIN SELECT

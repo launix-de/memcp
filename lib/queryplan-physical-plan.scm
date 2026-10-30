@@ -5458,7 +5458,7 @@ stage requested-column. The recursive result is ordered driver -> final. */
 						(prepared_stage_bindings eager_stages)
 						(parallel_stage_prepare_exprs
 							(lower_unique_stage_prepares_with_graph eager_dependency_graph
-								(lowering_catalog_with_planning_session eager_stage_lookup
+								(lowering_catalog_with_planning_session stage_lookup
 									(planner_context_session (qb_facts block))) eager_stages))
 						(lower_stage_materialize_all eager_stages)))
 					core_block
@@ -5855,8 +5855,6 @@ fix). */
 (define lazy_stage_prepare_binding (lambda (dependency_graph stage stage_catalog)
 	(begin
 		(define dependencies (stage_dependency_closure_using_graph dependency_graph stage))
-		(define direct_dependencies
-			(coalesceNil (get_assoc dependency_graph (logical_stage_key stage)) '()))
 		(list
 			(physical_query_session_symbol)
 			(stage_prepare_key stage)
@@ -5864,15 +5862,13 @@ fix). */
 				(list (quote lambda)
 					'()
 					(list (quote !begin)
-						(cons (quote !begin) (map direct_dependencies stage_prepare_call_expr))
 						(lower_stage_prepare_using dependencies stage_catalog stage true)
 						true)))))))
 
 (define lazy_stage_prepare_bindings (lambda (stages selected)
 	(begin
 		(define dependency_graph (stage_dependency_graph stages))
-		(define lazy_stages (stage_dependency_closure_many_using_graph
-			dependency_graph (collect_stage_prepares selected)))
+		(define lazy_stages (collect_stage_prepares selected))
 		(map lazy_stages (lambda (stage)
 			(lazy_stage_prepare_binding dependency_graph stage stages))))))
 
@@ -13163,16 +13159,9 @@ recipe in one zero-argument helper. */
 		(list (quote once)
 			(list (quote lambda) '()
 				(cons (quote !begin) (merge (list
-					/* Closed query-input carriers consume the same dependency owners.
-					Invoke their published handles before filling this carrier, rather
-					than copying each dependency's complete initializer into this body. */
-					(map (get_assoc dependency_graph (logical_stage_key stage) '()) (lambda (dependency)
-						(list (quote apply)
-							(list (physical_query_session_symbol) (stage_prepare_key dependency))
-							(quoted_runtime_list '()))))
 					(list (lower_stage_prepare_using
 						(stage_dependency_closure_using_graph dependency_graph stage)
-						catalog stage false) true)))))))))
+						catalog stage true) true)))))))))
 
 (define shared_prepare_alias_binding (lambda (stage)
 	(list
