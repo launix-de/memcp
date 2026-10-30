@@ -11,10 +11,12 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
+import "sync"
 import "time"
 import "context"
 import "strings"
 import "testing"
+import "sync/atomic"
 import "net/http"
 import "encoding/json"
 import "net/http/httptest"
@@ -23,6 +25,156 @@ import "github.com/gorilla/websocket"
 import "github.com/launix-de/memcp/scm"
 
 const testScanSecret = "scan-test-secret-32-bytes-constant"
+
+func TestOrderedFinishWindowCancelsFetchesAndJoinsReplies(t *testing.T) {
+	count := orderedFinishWindow + 5
+	queues := make([]*shardqueue, count)
+	started := make(chan time.Time, count)
+	ackStarted := make(chan struct{}, count)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	var active, maximum, acknowledgements atomic.Int32
+	for i := range queues {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		remote := &remoteOrderQueue{ctx: ctx, cancel: cancel, next: 16, total: 32,
+			rows: map[uint32][]scm.Scmer{1: {scm.NewInt(1)}}}
+		remote.run = &remoteOrderedRun{handle: scm.ClusterHandle{Call: func(ctx context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
+			if request.Method == "ack" {
+				ackStarted <- struct{}{}
+				<-ctx.Done()
+				acknowledgements.Add(1)
+				return scm.NewNil(), ctx.Err()
+			}
+			if request.Method != "finish" {
+				t.Errorf("unexpected cleanup method %q", request.Method)
+			}
+			for _, queue := range queues {
+				if queue.remote.ctx.Err() == nil {
+					t.Error("finish preceded cancellation of another shard's fetch")
+				}
+			}
+			deadline, ok := ctx.Deadline()
+			if !ok || ctx.Err() != nil {
+				t.Error("finish did not receive an independent cleanup deadline")
+			}
+			n := active.Add(1)
+			defer active.Add(-1)
+			for old := maximum.Load(); n > old; old = maximum.Load() {
+				if maximum.CompareAndSwap(old, n) {
+					break
+				}
+			}
+			started <- deadline
+			select {
+			case <-release:
+				return scm.NewNil(), nil
+			case <-ctx.Done():
+				return scm.NewNil(), ctx.Err()
+			}
+		}}}
+		queues[i] = &shardqueue{remote: remote}
+		remote.prefetch()
+	}
+	for range count {
+		select {
+		case <-ackStarted:
+		case <-time.After(time.Second):
+			t.Fatal("speculative fetch did not start")
+		}
+	}
+	done := make(chan any, 1)
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
+		defer func() { done <- recover() }()
+		closeOrderedQueues(queues)
+	}()
+	defer func() {
+		releaseOnce.Do(func() { close(release) })
+		<-joined
+	}()
+	var deadline time.Time
+	for range orderedFinishWindow {
+		select {
+		case current := <-started:
+			if deadline.IsZero() {
+				deadline = current
+			} else if !deadline.Equal(current) {
+				t.Fatal("finish collectors have different cleanup deadlines")
+			}
+		case failure := <-done:
+			t.Fatal("cleanup returned before its finish replies", failure)
+		case <-time.After(time.Second):
+			t.Fatal("independent finish requests waited for an earlier reply")
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("cleanup exceeded its in-flight window")
+	case <-time.After(20 * time.Millisecond):
+	}
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case failure := <-done:
+		if failure != nil {
+			t.Fatal(failure)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not join its collectors")
+	}
+	for range count - orderedFinishWindow {
+		if current := <-started; !deadline.Equal(current) {
+			t.Fatal("a later finish batch received a new timeout")
+		}
+	}
+	if maximum.Load() != orderedFinishWindow || active.Load() != 0 || acknowledgements.Load() != int32(count) {
+		t.Fatal("cleanup left an active callback or missed fetch completion")
+	}
+	for _, queue := range queues {
+		if queue.remote.cancel != nil || queue.remote.pending != nil || queue.remote.rows != nil {
+			t.Fatal("cleanup retained invocation-owned state")
+		}
+	}
+}
+
+func TestOrderedFinishPanicStillJoinsOtherQueues(t *testing.T) {
+	queues := make([]*shardqueue, orderedFinishWindow+5)
+	var finished atomic.Int32
+	for i := range queues {
+		ctx, cancel := context.WithCancel(context.Background())
+		remote := &remoteOrderQueue{ctx: ctx, cancel: cancel, rows: map[uint32][]scm.Scmer{1: {scm.NewInt(1)}}}
+		remote.run = &remoteOrderedRun{handle: scm.ClusterHandle{Call: func(context.Context, scm.ClusterRequest) (scm.Scmer, error) {
+			finished.Add(1)
+			if i == 0 {
+				panic("finish response panic")
+			}
+			return scm.NewNil(), fmt.Errorf("finish rejected")
+		}}}
+		queues[i] = &shardqueue{remote: remote}
+	}
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		closeOrderedQueues(queues)
+	}()
+	if failure != "finish response panic" || finished.Load() != int32(len(queues)) {
+		t.Fatal("cleanup panic escaped before other shard jobs finished", failure, finished.Load())
+	}
+	for _, queue := range queues {
+		if queue.remote.cancel != nil || queue.remote.rows != nil {
+			t.Fatal("cleanup panic retained a shard job")
+		}
+	}
+}
+
+func TestOrderedLocalCleanupDoesNotAllocate(t *testing.T) {
+	queues := []*shardqueue{{}, {}}
+	if allocations := testing.AllocsPerRun(100, func() { closeOrderedQueues(queues) }); allocations != 0 {
+		t.Fatalf("local cleanup allocated %g objects", allocations)
+	}
+}
 
 func setupRemoteScanConnection(t *testing.T) (*mosiPeer, *nodeScanService, string) {
 	t.Helper()
@@ -665,7 +817,7 @@ func TestRemoteOrderedBatchFanoutAndCredit(t *testing.T) {
 		}
 		return scm.ClusterObjectValue(run, ctx, request)
 	}}}
-	defer remote.close()
+	defer remote.close(nil)
 	queue := &shardqueue{remote: remote, universe: 64}
 	remote.fetch(queue)
 	for i := 0; i < 7; i++ {

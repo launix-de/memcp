@@ -442,7 +442,7 @@ type shardqueue struct {
 // them to global/direct consumption, including early LIMIT and cancellation.
 func (s *shardqueue) closeReaders() {
 	if s.remote != nil {
-		s.remote.close()
+		s.remote.close(nil)
 	}
 	readers := s.sortReaders
 	s.sortReaders = nil
@@ -1036,22 +1036,14 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 						break drain
 					}
 					if message.res != nil {
-						message.res.closeReaders()
+						ownedQueues = append(ownedQueues, message.res)
 					}
 				default:
 					break drain
 				}
 			}
 		}
-		for _, queue := range ownedQueues {
-			queue.closeReaders()
-			if queue.mapper != nil {
-				queue.mapper.Close()
-			}
-			if queue.postOrderMapper != nil {
-				queue.postOrderMapper.Close()
-			}
-		}
+		closeOrderedQueues(ownedQueues)
 	}()
 	querySeq := querySeqFromTx(currentTx)
 	stats := make([]scanOrderStats, len(tables))
