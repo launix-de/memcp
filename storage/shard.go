@@ -25,6 +25,7 @@ import "slices"
 import "strings"
 import "reflect"
 import "runtime"
+import "context"
 import "sync/atomic"
 import "encoding/json"
 import "encoding/binary"
@@ -974,11 +975,6 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool)
 	if target := s.scanTarget.Load(); target != nil {
 		panic(shardReadDelegation{target})
 	}
-	if !snapshot && s.t != nil {
-		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
-			s = r.readShard(s, currentTx)
-		}
-	}
 	if mayDelegate && !snapshot && sharedClusterSource(s.t) && s.state() == COLD {
 		cluster := activeNodeCluster()
 		if cluster == nil {
@@ -986,6 +982,12 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool)
 		}
 		cluster.prepareLocalScan(s, currentTx, origin)
 	}
+	if !snapshot && s.t != nil {
+		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
+			s = r.readShard(s, currentTx)
+		}
+	}
+
 	s.retainCacheRead()
 	ready := false
 	defer func() {
@@ -1031,6 +1033,14 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
 	}
 	s.ensureLoaded()
+	if currentTx != nil && currentTx.coordinator != nil {
+		currentTx.mu.Lock()
+		participant := currentTx.getOrCreateShardTxLocked(s)
+		currentTx.mu.Unlock()
+		if err := participant.registerParticipant(scanQueryContext(currentTx, context.Background())); err != nil {
+			panic(err)
+		}
+	}
 	s.setState(WRITE)
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	ready = true
@@ -1421,7 +1431,6 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 		targetIdx := idx
 		var maintenanceNext *storageShard
 		var maintenanceUpdateChanges []scm.Scmer
-		var maintenanceExtraDeletes []uint32
 		if len(a) > 0 {
 			// update command
 			var triggerOldRow, triggerNewRow dataset // for AFTER UPDATE triggers
@@ -1659,46 +1668,9 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					t.deletions.Set(uint(newRecid), true)
 					t.deletions.Set(uint(targetIdx), true)
 					t.deletions.Set(uint(newRecid), false)
-					// Maintain the non-ACID invariant: at most one visible row per
-					// PRIMARY key. Under heavy concurrent UPDATE chains, stale targets
-					// can leave older versions visible; collapse them here.
-					var primaryCols []string
-					for _, uk := range t.t.Unique {
-						if uk.Id == "PRIMARY" {
-							primaryCols = uk.Cols
-							break
-						}
-					}
-					if len(primaryCols) > 0 {
-						pkVals := make([]scm.Scmer, len(primaryCols))
-						for i, col := range primaryCols {
-							if pos, ok := t.deltaColumns[col]; ok && pos < len(d2) {
-								pkVals[i] = d2[pos]
-							} else {
-								pkVals[i] = scm.NewNil()
-							}
-						}
-						limit := t.main_count + uint32(len(t.deltaRows()))
-						for recid := uint32(0); recid < limit; recid++ {
-							if recid == newRecid || t.deletions.Get(uint(recid)) {
-								continue
-							}
-							match := true
-							for i, col := range primaryCols {
-								if !scm.Equal(t.rowValueByRecidLocked(recid, col), pkVals[i]) {
-									match = false
-									break
-								}
-							}
-							if match {
-								t.deletions.Set(uint(recid), true)
-								if next := t.nextForMaintenanceLocked(&recid); next != nil {
-									maintenanceNext = next
-									maintenanceExtraDeletes = append(maintenanceExtraDeletes, recid)
-								}
-							}
-						}
-					}
+					// The shard write lock serializes replacement of the current
+					// visible version. Stale callbacks resolve their target above;
+					// this publication preserves PRIMARY-key uniqueness directly.
 				}
 				// Capture for dual-write forwarding (cols/d2 are closure-local).
 				// Use repartitionDualWriteActive (set after Phase B snapshot)
@@ -1901,9 +1873,6 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					t.propagateUpdateToNext(maintenanceNext, targetIdx, currentTx, scm.NewSlice(maintenanceUpdateChanges))
 				} else {
 					t.propagateDeleteToNext(maintenanceNext, idx, currentTx)
-				}
-				for _, deletedRecid := range maintenanceExtraDeletes {
-					t.propagateDeleteToNext(maintenanceNext, deletedRecid, nil)
 				}
 			}
 		}

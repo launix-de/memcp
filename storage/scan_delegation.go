@@ -76,6 +76,15 @@ type shardScanExecutor interface {
 	ExecuteShardScan(mosiResource, shardScanInvocation) scanResult
 }
 
+func scanMutates(columns []string) bool {
+	for _, name := range columns {
+		if name == "$update" || strings.HasPrefix(name, "$increment:") {
+			return true
+		}
+	}
+	return false
+}
+
 func (invocation shardScanInvocation) delegate(shard *storageShard, failure shardReadDelegation) (result scanResult) {
 	// A transport/executor failure must enter the ordinary result collector,
 	// including on the direct single-shard path's recovery stack.
@@ -101,11 +110,7 @@ func (invocation shardScanInvocation) delegate(shard *storageShard, failure shar
 	if invocation.source != nil {
 		panic("remote shard scan requires a portable physical source set")
 	}
-	for _, name := range invocation.callbackCols {
-		if name == "$update" || strings.HasPrefix(name, "$increment:") {
-			panic("remote shard scan mutations require a transaction participant protocol")
-		}
-	}
+
 	if ss := SessionStateFromTx(invocation.tx); ss != nil && ss.IsKilledSeq(querySeqFromTx(invocation.tx)) {
 		panic("query killed")
 	}

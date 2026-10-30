@@ -209,9 +209,9 @@ test_cases:
       min_remote_nodes: 2
       data_exceeds_node_ram: true
 
-# Roll back each bulk operation so the standalone oracle leaves the shared
-# fixture logically pristine for the cluster run. These require native remote
-# mutations; an unsupported-operation error must fail, never satisfy the test.
+# Oracle and cluster start with independent copies of the committed fixture.
+# These require native remote mutations; an unsupported-operation error must
+# fail, never satisfy the test.
 - name: bulk-update-begin
   session_id: cluster-bulk-update
   sql: START ACID TRANSACTION
@@ -227,7 +227,7 @@ test_cases:
       data_exceeds_node_ram: true
 - name: bulk-update-own-visibility
   session_id: cluster-bulk-update
-  sql: SELECT COUNT(*) AS n FROM big_items WHERE v7<0
+  sql: SELECT COUNT(*) AS n FROM big_items WHERE id%5000<500 AND v7=-id-1
   expect:
     data: [{n: 32000}]
 - name: bulk-update-uncommitted-isolation
@@ -283,7 +283,7 @@ test_cases:
       min_remote_nodes: 2
       data_exceeds_node_ram: true
 - name: bulk-update-committed-visibility
-  sql: SELECT COUNT(*) AS n FROM big_items WHERE v7<0
+  sql: SELECT COUNT(*) AS n FROM big_items WHERE id%5000<500 AND v7=-id-1
   expect:
     data: [{n: 32000}]
     cluster:
