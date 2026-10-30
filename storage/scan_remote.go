@@ -18,8 +18,8 @@ import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// Version 10 combines authenticated Scheme operations with adaptive ordered windows.
-const scanWireVersion = 10
+// Version 11 preserves native transaction identity across worker invocations.
+const scanWireVersion = 11
 
 type remoteScanShard struct {
 	Schema   uint64       `json:"schema"`
@@ -155,7 +155,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 			if slot, batch := parseBatchPseudoColName(col); batch && slot >= request.Stride {
 				return nil, fmt.Errorf("batch column outside its input row")
 			}
-			if strings.HasPrefix(col, "$") {
+			if strings.HasPrefix(col, "$") && !(request.Access.Mutation && (col == "$update" || strings.HasPrefix(col, "$increment:"))) {
 				return nil, fmt.Errorf("remote scan rejects query-local or mutation columns")
 			}
 		}
@@ -230,7 +230,9 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		return nil, err
 	}
 	var output remoteScanResult
-	withInput := func(execute func(*storageShard) error) error { return withRemoteScanShard(&request.Shard, tx, execute) }
+	withInput := func(execute func(*storageShard) error) error {
+		return withRemoteScanShard(&request.Shard, tx, request.Access.Mutation, execute)
+	}
 	if input != nil {
 		withInput = func(execute func(*storageShard) error) error {
 			shard := input
@@ -323,7 +325,7 @@ func boundedScanReply(value any) (any, error) {
 
 // Acquire through the same schema/shard MOSI and generation lifetime boundaries
 // as a local scan. A changed physical generation aborts rather than rebinding IDs.
-func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, execute func(*storageShard) error) (err error) {
+func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool, execute func(*storageShard) error) (err error) {
 	// A shared-backend worker either admits this generation once or refuses
 	// before scan callbacks. Capacity refusal alone permits choosing another peer.
 	shared := sharedClusterDatabase(expected.Resource.Database)
@@ -365,7 +367,7 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, execute func(
 			defer selected.activeScanners.Add(-1)
 			// Acquire current coherence rights, but retain the requested shard's
 			// physical IDs and captured extent through native snapshot access.
-			if r := activeReplication(tbl.schema); r != nil {
+			if r := activeReplication(tbl.schema); r != nil && !mutation {
 				cell := r.shardCell(selected)
 				if shared {
 					acquireClusterRead(ctx, *cell.resource.Load())
@@ -385,7 +387,12 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, execute func(
 						}
 					}
 				}()
-				lease = selected.getRead(tx, true, false)
+				if mutation {
+					write := selected.GetWrite(tx)
+					lease = ReadAccess{shard: write.shard, mutation: &write}
+				} else {
+					lease = selected.getRead(tx, true, false)
+				}
 			}()
 			if capacity {
 				return clusterCapacityRejection{}
@@ -473,6 +480,7 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 	if err != nil {
 		panic(err)
 	}
+	task.Access.Mutation = task.Access.Mutation || scanMutates(invocation.callbackCols)
 	if invocation.tx != nil {
 		// Export only unmodified remote inputs. A modified generation is kept
 		// resident by native TX pins and must execute at its participant; a cold
@@ -484,11 +492,11 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 				}
 			}
 		}
-		view, err := scm.ClusterObjectValue(invocation.tx, executor.ctx, scm.ClusterRequest{Method: "view"})
+		view, err := scm.ClusterObjectValue(invocation.tx.transactionState, executor.ctx, scm.ClusterRequest{Method: "view"})
 		if err != nil {
 			panic(err)
 		}
-		ref, err := executor.peer.scanService.exportObject(executor.peer, invocation.tx, view)
+		ref, err := executor.peer.scanService.exportObject(executor.peer, invocation.tx.transactionState, view)
 		if err != nil {
 			panic(err)
 		}

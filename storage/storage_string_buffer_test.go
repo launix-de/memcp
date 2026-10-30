@@ -1110,7 +1110,7 @@ func TestComputedComparisonReaderRetainsLeafOwnership(t *testing.T) {
 			delta: make(map[uint32]scm.Scmer), computor: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })}
 		var tx *TxContext
 		if active {
-			tx = &TxContext{}
+			tx = NewTxContext(TxCursorStability)
 			tx.querySeq.Store(7)
 			tx.queryActive.Store(true)
 		}
@@ -1272,7 +1272,7 @@ func TestMaterializedReaderRepairPreservesExistingShardRead(t *testing.T) {
 	shard.deltaColumns["label"] = 0
 	shard.publishDeltaRows([][]scm.Scmer{{scm.NewString("appended")}})
 	shard.mu.Unlock()
-	tx := &TxContext{}
+	tx := NewTxContext(TxCursorStability)
 	tx.querySeq.Store(19)
 	tx.queryActive.Store(true)
 	shard.mu.RLock()

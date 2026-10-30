@@ -490,7 +490,7 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext)
 	}
 	var owner any
 	if tx != nil {
-		owner = tx
+		owner = tx.transactionState
 	}
 	for {
 		c = c.resolved()

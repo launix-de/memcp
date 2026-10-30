@@ -46,6 +46,44 @@ func TestSessionStateFromTxUsesOnlyExplicitTransaction(t *testing.T) {
 	}
 }
 
+func TestTransactionInvocationsShareMutationsAndKeepIndependentCleanup(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tnative_invocation_state", 4)
+	shard := tbl.ActiveShards()[0]
+	tx := NewTxContext(TxACID)
+	defer tx.Rollback()
+	first, second := tx.newInvocation(), tx.newInvocation()
+	firstSession, secondSession := &scm.SessionState{}, &scm.SessionState{}
+	firstSeq := firstSession.BeginQuery("Cluster", "first native invocation")
+	secondSeq := secondSession.BeginQuery("Cluster", "second native invocation")
+	first.beginQuery(firstSession, firstSeq, "first native invocation")
+	second.beginQuery(secondSession, secondSeq, "second native invocation")
+	defer second.endQuery(secondSeq)
+	var cleaned bool
+	first.RetainQueryResource(func() { cleaned = true })
+	firstWrite := shard.UpdateFunction(0, false, false, first)
+	firstWrite(scm.NewSlice([]scm.Scmer{scm.NewString("payload"), scm.NewString("changed")}))
+	other := NewTxContext(TxACID)
+	if tx.IsVisible(shard, 0) || second.IsVisible(shard, 0) || !other.IsVisible(shard, 0) {
+		t.Fatal("native invocations lost their shared delete overlay or leaked it")
+	}
+	first.endQuery(firstSeq)
+	if !cleaned || !second.queryActive.Load() || second.queryInfo.Load() == nil || tx.State != TxActive {
+		t.Fatal("one invocation cleaned up another invocation or its transaction")
+	}
+	if first.ID != second.ID || first.durableID() != tx.durableID() {
+		t.Fatal("native invocation created a new transaction identity")
+	}
+	tx.Rollback()
+	if !other.IsVisible(shard, 0) || first.State != TxAborted || shard.activeTransactions.Load() != 0 {
+		t.Fatal("rollback did not cover the invocation's native mutation")
+	}
+	oldID := first.ID
+	tx.reset(TxCursorStability)
+	if first.ID != oldID || first.State != TxAborted || tx.ID == oldID {
+		t.Fatal("session reuse changed a previous invocation's transaction identity")
+	}
+}
+
 func TestWithAutocommitReusesParkedTransactionAndClearsQueryState(t *testing.T) {
 	session := scm.NewSession()
 	ss := &scm.SessionState{}

@@ -77,7 +77,7 @@ func TestColdShardLoadWaitObservesQueryCancellation(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			ss.SetQueryContext(seq, ctx)
-			tx := &TxContext{}
+			tx := NewTxContext(TxCursorStability)
 			tx.beginQuery(ss, seq, "cold scan waiting for disk load")
 			defer tx.endQuery(seq)
 			defer ss.EndQuery(seq, "Sleep", "")
@@ -258,7 +258,7 @@ func TestColdColumnLoadCancellationKeepsMutationAtomic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	ss.SetQueryContext(seq, ctx)
-	tx := &TxContext{}
+	tx := NewTxContext(TxCursorStability)
 	tx.beginQuery(ss, seq, "cancelled cold-column preflight")
 	defer tx.endQuery(seq)
 	defer ss.EndQuery(seq, "Sleep", "")

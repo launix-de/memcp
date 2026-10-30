@@ -125,7 +125,7 @@ func TestProcedureCatalogDDLCheckpointReloadAndReplace(t *testing.T) {
 		"missing-drop":     func() { DropProcedure(schema, "absent", false) },
 		"nonportable-parameters": func() {
 			CreateProcedure(schema, "invalid-data", "procedure-catalog-test", "source",
-				scm.NewSlice([]scm.Scmer{scm.NewAny(&TxContext{})}), false)
+				scm.NewSlice([]scm.Scmer{scm.NewAny(NewTxContext(TxCursorStability))}), false)
 		},
 		"nonfinite-parameters": func() {
 			CreateProcedure(schema, "invalid-number", "procedure-catalog-test", "source",
@@ -268,7 +268,7 @@ func TestProcedureParametersFreezePortableDataAndExactIntegers(t *testing.T) {
 		t.Fatalf("dictionary freeze lost integer: %d", got)
 	}
 	for _, invalid := range []scm.Scmer{scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewNil() }),
-		scm.NewAny(&TxContext{}), scm.NewFloat(math.NaN()), scm.NewFloat(math.Inf(1))} {
+		scm.NewAny(NewTxContext(TxCursorStability)), scm.NewFloat(math.NaN()), scm.NewFloat(math.Inf(1))} {
 		func() {
 			defer func() {
 				if recover() == nil {

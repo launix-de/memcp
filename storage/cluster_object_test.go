@@ -323,6 +323,70 @@ func TestClusterObjectNativeOverlayReferenceKeepsPhysicalIdentity(t *testing.T) 
 	runtime.KeepAlive(value)
 }
 
+func TestClusterFailedParticipantEnlistmentReleasesNativeGeneration(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_cluster_enlist_failure", 4)
+	shard := tbl.ActiveShards()[0]
+	tx := NewTxContext(TxACID)
+	defer tx.Rollback()
+	tx.coordinator = &scm.ClusterHandle{Call: func(context.Context, scm.ClusterRequest) (scm.Scmer, error) {
+		return scm.NewNil(), fmt.Errorf("enlistment cancelled before mutation")
+	}}
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		shard.GetWrite(tx).Release()
+	}()
+	if fmt.Sprint(failure) != "enlistment cancelled before mutation" {
+		t.Fatalf("unexpected enlistment failure: %v", failure)
+	}
+	if len(tx.shards) != 0 || shard.activeTransactions.Load() != 0 {
+		t.Fatal("failed participant retained native transaction authority")
+	}
+}
+
+// Savepoint recovery must address the peer's native state once, including shards
+// first touched after the savepoint, while preserving earlier statement effects.
+func TestClusterNativeParticipantSavepointPreservesEarlierMutations(t *testing.T) {
+	first, _ := createDurabilityTestTable(t, "t_cluster_sp_first", 4)
+	second, _ := createDurabilityTestTable(t, "t_cluster_sp_second", 4)
+	worker := NewTxContext(TxACID)
+	defer worker.Rollback()
+	coordinator := NewTxContext(TxACID)
+	defer coordinator.Rollback()
+	worker.AddToDeleteMask(first.ActiveShards()[0], 1)
+	worker.mu.Lock()
+	participant := worker.shards[first.ActiveShards()[0]]
+	participant.decisionToken = "test-native-participant"
+	worker.mu.Unlock()
+	imported := &storageShardTransaction{shardUUID: participant.shardUUID, decisionToken: participant.decisionToken}
+	imported.remoteObject = &scm.ClusterHandle{
+		Reference: scm.ClusterReference{Owner: "worker"},
+		Call: func(ctx context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
+			value, err := participant.HandleClusterRequest(ctx, request)
+			if err != nil {
+				return scm.NewNil(), err
+			}
+			return value.(scm.Scmer), nil
+		},
+	}
+	coordinator.participants = map[uuid.UUID]*storageShardTransaction{participant.shardUUID: imported}
+	sp := coordinator.CreateSavepoint()
+	worker.AddToDeleteMask(first.ActiveShards()[0], 2)
+	worker.AddToDeleteMask(second.ActiveShards()[0], 0)
+	coordinator.RollbackToSavepoint(sp)
+	if worker.IsVisible(first.ActiveShards()[0], 1) || !worker.IsVisible(first.ActiveShards()[0], 2) || !worker.IsVisible(second.ActiveShards()[0], 0) {
+		t.Fatal("remote savepoint lost earlier effects or retained later shard effects")
+	}
+	if worker.State != TxActive {
+		t.Fatal("savepoint rollback ended the native transaction")
+	}
+	// A newly enlisted owner rolls back to the empty native savepoint.
+	coordinator.RollbackToSavepoint(Savepoint{})
+	if !worker.IsVisible(first.ActiveShards()[0], 1) {
+		t.Fatal("new participant retained a mutation after savepoint recovery")
+	}
+}
+
 func TestClusterObjectCatalogNamesNeedNoRegistration(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "t_cluster_catalog_ref", 1)
 	peer, client, _ := setupRemoteScanConnection(t)

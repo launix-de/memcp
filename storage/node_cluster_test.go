@@ -153,7 +153,7 @@ func TestClusterMountDoesNotSubscribeThroughReplication(t *testing.T) {
 	if activeReplication(&database{Name: "separate_replica_tenant"}) != manager {
 		t.Fatal("unrelated replication namespace was disabled")
 	}
-	tx := &TxContext{}
+	tx := NewTxContext(TxCursorStability)
 	session := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewString(table.schema.Name) })
 	replicationEnter(tx, session)
 	if tx.replicationActive || len(manager.directory.Records) != 0 {
@@ -318,7 +318,8 @@ func TestClusterGrantedSchemaReadDoesNotConsultSession(t *testing.T) {
 	defer sharedClusterMounts.Store(oldMounts)
 	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
 	defer nodeScans.Store(oldService)
-	tx := &TxContext{Session: scm.NewFunc(func(...scm.Scmer) scm.Scmer { panic("granted schema read consulted user session") })}
+	tx := NewTxContext(TxCursorStability)
+	tx.Session = scm.NewFunc(func(...scm.Scmer) scm.Scmer { panic("granted schema read consulted user session") })
 	tbl.schema.GetRead(tx).Release()
 }
 

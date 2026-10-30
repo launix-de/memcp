@@ -1796,12 +1796,12 @@ func (t *storageShard) filterVisibleScanBatch(batch []uint32, visibleUpper uint3
 			continue
 		}
 		if hasMutationCallback && (currentTx == nil || currentTx.Mode != TxACID) {
+			// Candidate collection holds the shard mutation lock. A visible
+			// replacement has its own candidate ID; historical tombstones must
+			// not trigger a second search of the shard. The callback mapper still
+			// follows versions changed after collection (for example by a trigger).
 			if t.deletions.Get(uint(effectiveIdx)) {
-				if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(effectiveIdx); ok {
-					effectiveIdx = followIdx
-				} else {
-					continue
-				}
+				continue
 			}
 			if _, ok := mutationSeen[effectiveIdx]; ok {
 				continue
@@ -2014,12 +2014,12 @@ func (t *storageShard) filterVisibleBatchedScanBatch(batch []uint32, batchIDs []
 			continue
 		}
 		if hasMutationCallback && (currentTx == nil || currentTx.Mode != TxACID) {
+			// Candidate collection holds the shard mutation lock. A visible
+			// replacement has its own candidate ID; historical tombstones must
+			// not trigger a second search of the shard. The callback mapper still
+			// follows versions changed after collection (for example by a trigger).
 			if t.deletions.Get(uint(effectiveIdx)) {
-				if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(effectiveIdx); ok {
-					effectiveIdx = followIdx
-				} else {
-					continue
-				}
+				continue
 			}
 			key := uint64(batchID)<<32 | uint64(effectiveIdx)
 			if _, ok := mutationSeen[key]; ok {
@@ -2204,13 +2204,10 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 }
 
 func (t *storageShard) scan(access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
-	for _, name := range callbackCols {
-		if name == "$update" || strings.HasPrefix(name, "$increment:") {
-			writeAccess := t.GetWrite(currentTx)
-			defer writeAccess.Release()
-			t = writeAccess.shard
-			break
-		}
+	if scanMutates(callbackCols) {
+		writeAccess := t.GetWrite(currentTx)
+		defer writeAccess.Release()
+		t = writeAccess.shard
 	}
 
 	if stride > 0 {
