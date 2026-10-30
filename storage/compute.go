@@ -170,9 +170,6 @@ func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []s
 			if metadataChanged {
 				t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
 				t.Columns[i].ComputorInputCols = inputCols
-				// Preparation belongs to this invocation, never the shared recipe.
-				t.Columns[i].ComputorFilterCols = nil
-				t.Columns[i].ComputorFilter = scm.NewNil()
 				t.Columns[i].ComputorDependencies = append([]string(nil), dependencies...)
 				refs := extractScanJoinInfo(computor)
 				for i := 0; i+1 < len(dependencies); i += 2 {
@@ -2463,11 +2460,9 @@ func slicesEqual(a, b []string) bool {
 	return true
 }
 
-// Legacy preparation hints are cleared once; subsequent request filters do
-// not change the canonical value recipe or reinstall its dependency triggers.
+// Request preparation hints never change the canonical value recipe.
 func computeColumnSignatureEqual(c *column, inputCols []string, computor scm.Scmer) bool {
-	return slicesEqual(c.ComputorInputCols, inputCols) && scm.Equal(c.Computor, computor) &&
-		len(c.ComputorFilterCols) == 0 && c.ComputorFilter.IsNil()
+	return slicesEqual(c.ComputorInputCols, inputCols) && scm.Equal(c.Computor, computor)
 }
 
 func boolSlicesEqual(a, b []bool) bool {

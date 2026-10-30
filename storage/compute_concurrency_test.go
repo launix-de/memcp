@@ -574,11 +574,6 @@ func TestFilteredComputeColumnReusesValidValuesAcrossFilters(t *testing.T) {
 	if changedFilterProxy != canonicalProxy {
 		t.Fatal("changed filter replaced the canonical compute proxy")
 	}
-	for _, col := range tbl.Columns {
-		if col.Name == "cached" && (!col.ComputorFilter.IsNil() || len(col.ComputorFilterCols) != 0) {
-			t.Fatal("request preparation filter retained in the shared column definition")
-		}
-	}
 	reader := shard.ColumnReaderTx(nil, "cached", false, ReadAuto)
 	defer ReleaseColumnReader(reader)
 	for i := uint32(0); i < 4; i++ {

@@ -115,12 +115,9 @@ type column struct {
 	ComputorInputCols []string  `json:",omitempty"` // input cols for computor (persisted in schema)
 	// Ordinary computed-column identity consists of its value recipe and source
 	// dependencies. Preparation filters are invocation-local, not that identity.
-	// Keep legacy filter fields readable; ComputeColumn clears old hints when
-	// configuring the definition. Ordered columns retain their separate OrcFilter.
+	// Preparation hints are not stored. Ordered columns retain their separate OrcFilter.
 	// ComputorDependencies contains logical schema/table pairs, never topology IDs.
 	ComputorDependencies     []string     `json:",omitempty"`
-	ComputorFilterCols       []string     `json:",omitempty"`
-	ComputorFilter           scm.Scmer    `json:"-"`
 	partitioningRangeTraffic atomic.Int64 // advisory ordered/range demand, sampled once per operator setup
 	partitioningTraffic      atomic.Int64 // runtime query/UNIQUE routing hints; never persisted
 	PartitioningScore        int          // count this up to increase the chance of partitioning for this column
