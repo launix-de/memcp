@@ -9211,7 +9211,11 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 					(begin
 						(define input (direct_group_probe_input stage))
 						(define lookups (if (nil? input) nil (direct_group_probe_lookup_keys stage src)))
+						/* A grouped join consumes a declared output projection. Scalar
+						helpers expose aggregate slots instead and must retain their own
+						probe/cardinality contract even when their input is a base table. */
 						(if (reduce (list
+							(empty_list? (gs_output stage))
 							(not (contains? (list nil (quote select_group))
 								(qassoc_get (gs_facts stage) (quote purpose) nil)))
 							(nil? input)

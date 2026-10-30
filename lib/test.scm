@@ -677,7 +677,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(not (expr_has_local_aggregates? (qb_order scalar_group_root)))
 		(empty_list? (qb_group scalar_group_root)) (nil? (qb_having scalar_group_root))) true
 		"group consumers use stage outputs rather than aggregate syntax")
-	(assert (and (empty_list? (qb_fields (gs_input scalar_group_owner)))
+	(assert (and (equal? (projection_exprs (qb_fields (gs_input scalar_group_owner)))
+		(merge (list (gs_keys scalar_group_owner) (map (gs_aggregates scalar_group_owner) car))))
 		(empty_list? (qb_group (gs_input scalar_group_owner)))
 		(nil? (planner_context_session (gs_facts scalar_group_owner)))
 		(nil? (planner_context_tx (qb_facts (gs_input scalar_group_owner))))

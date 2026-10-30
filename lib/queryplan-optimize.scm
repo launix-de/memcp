@@ -267,7 +267,11 @@ and barrier ownership come from the pre-normalization query block. */
 		(begin
 			(define stats (planner_column_statistics (car column_ref) (cadr column_ref)))
 			(define distinct (qassoc_get stats (quote distinct) nil))
-			(if (or (nil? distinct) (<= distinct 0))
+			/* A row-count fallback bounds possible distinct values; it is not a
+			measured distinct count and cannot justify unique-like selectivity. */
+			(if (equal? (qassoc_get stats (quote distinct_source) nil) (quote fallback_row_count))
+				(planner_estimate nil 0 (quote fallback_row_count) false)
+				(or (nil? distinct) (<= distinct 0))
 				(planner_unknown_selectivity_estimate)
 				(planner_estimate (/ 1 (max 1 distinct))
 					(qassoc_get stats (quote distinct_confidence) 0)
@@ -283,7 +287,9 @@ and barrier ownership come from the pre-normalization query block. */
 				(define right_stats (planner_column_statistics (car right_ref) (cadr right_ref)))
 				(define left_distinct (qassoc_get left_stats (quote distinct) nil))
 				(define right_distinct (qassoc_get right_stats (quote distinct) nil))
-				(if (or (nil? left_distinct) (nil? right_distinct))
+				(if (or (nil? left_distinct) (nil? right_distinct)
+					(equal? (qassoc_get left_stats (quote distinct_source) nil) (quote fallback_row_count))
+					(equal? (qassoc_get right_stats (quote distinct_source) nil) (quote fallback_row_count)))
 					(planner_unknown_selectivity_estimate)
 					(planner_estimate (/ 1 (max 1 (max left_distinct right_distinct)))
 						(min (qassoc_get left_stats (quote distinct_confidence) 0)

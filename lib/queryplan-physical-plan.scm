@@ -5565,7 +5565,19 @@ The existing join-cost dependency owners cover these same source statistics. */
 		(define input (gs_input stage))
 		(define sources (qb_sources input))
 		(define tree (query_block_join_plan input sources))
-		(define direct (qassoc_get (qb_facts input) (quote join_cost) nil))
+		/* The direct row producer has both legacy and native joined-reduction
+		implementations. Compare its cheapest executable alternative, rather
+		than charging the logical nested-loop cost even when emission selects
+		the fused native operator. */
+		(define direct_spec (scan_join_order_spec sources tree
+			(qassoc_get (qb_facts input) (quote default_alias) (source_alias (car sources)))
+			(projection_exprs (qb_fields projected)) (qb_where input) '() 0 -1
+			(query_block_stage_catalog input) (qb_facts input) true))
+		(define direct_costs (if (nil? direct_spec) nil
+			(join_unordered_reduce_costs direct_spec tree sources (qb_facts input))))
+		(define direct (if (nil? direct_costs) (qassoc_get (qb_facts input) (quote join_cost) nil)
+			(if (planner_cost_better? (cadr direct_costs) (car direct_costs))
+				(cadr direct_costs) (car direct_costs))))
 		(define unfiltered (make_query_block (qb_schema input)
 			(prejoin_sources_without_join_conditions sources) '()
 			(prejoin_join_condition input) '() nil '() nil nil '() '() '()))
@@ -8595,6 +8607,26 @@ until the caller has selected this physical alternative. */
 reducers: the first combines shard-tuple results locally and the second merges
 those local states globally. The physical choice deliberately shares the
 ordered operator's Costgen-owned scan, map and expression coefficients. */
+(define join_unordered_reduce_costs (lambda (spec plan sources facts)
+	(begin
+		(define joined_rows (qassoc_get spec (quote joined_rows) 0))
+		(define estimated_legacy_cost (qassoc_get facts (quote join_cost) nil))
+		(define logical_legacy_cost (if (nil? estimated_legacy_cost)
+			(planner_cost_add
+				(planner_scan_cost (qassoc_get spec (quote input_rows) 0) 0.5)
+				(planner_join_work_cost joined_rows 0.5)
+				joined_rows 0.5)
+			estimated_legacy_cost))
+		(define legacy_scan_invocations
+			(physical_join_tree_scan_invocations plan sources 1))
+		(define legacy_cost (planner_cost_add logical_legacy_cost
+			(planner_cost
+				(* (max 0 (- (coalesceNil legacy_scan_invocations 1) 1))
+					planner_membership_scan_invocation_ns)
+				0 0 0 0 0 0 0 joined_rows 0.6)
+			joined_rows 0.6))
+		(list legacy_cost (qassoc_get spec (quote cost) nil)))))
+
 (define join_unordered_reduce_plan (lambda (all_sources plan default_alias consumer_exprs
 	final_condition stages facts value_builder reduce_expr neutral_expr shard_reduce_expr legacy_plan)
 	(begin
@@ -8605,21 +8637,8 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 			(begin
 				(define scan_cost (qassoc_get spec (quote cost) nil))
 				(define joined_rows (qassoc_get spec (quote joined_rows) 0))
-				(define estimated_legacy_cost (qassoc_get facts (quote join_cost) nil))
-				(define logical_legacy_cost (if (nil? estimated_legacy_cost)
-					(planner_cost_add
-						(planner_scan_cost (qassoc_get spec (quote input_rows) 0) 0.5)
-						(planner_join_work_cost joined_rows 0.5)
-						joined_rows 0.5)
-					estimated_legacy_cost))
-				(define legacy_scan_invocations
-					(physical_join_tree_scan_invocations plan all_sources 1))
-				(define legacy_cost (planner_cost_add logical_legacy_cost
-					(planner_cost
-						(* (max 0 (- (coalesceNil legacy_scan_invocations 1) 1))
-							planner_membership_scan_invocation_ns)
-						0 0 0 0 0 0 0 joined_rows 0.6)
-					joined_rows 0.6))
+				(define costs (join_unordered_reduce_costs spec plan all_sources facts))
+				(define legacy_cost (car costs))
 				(define normal_choice (if (planner_cost_better? scan_cost legacy_cost)
 					"scan_join_order" "legacy_join_tree"))
 				(define decision_id (concat "scan_join_order:reduce:"

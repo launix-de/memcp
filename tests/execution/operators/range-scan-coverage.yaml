@@ -76,14 +76,24 @@ test_cases:
         - "(known false)"
         - "planning_value"
 
-  - name: "EXPLAIN uses the explicit fallback distinct estimate before rebuild"
+  - name: "A row-count placeholder does not prove distinct selectivity"
+    scm: |
+      (begin
+        (define estimate (join_optimizer_column_selectivity_estimate
+          (list (list "a" "memcp-tests" "rs_data" false nil) "val")))
+        (and (nil? (qassoc_get estimate (quote value) nil))
+          (equal? (qassoc_get estimate (quote known) true) false)
+          (equal? (qassoc_get estimate (quote source) nil) (quote fallback_row_count))))
+    expect: {result: true}
+
+  - name: "EXPLAIN keeps fallback row counts separate from measured distinct selectivity"
     sql: "EXPLAIN REORDER SELECT a.id FROM rs_data a JOIN rs_data b ON b.id = a.id WHERE a.val = 3"
     expect:
       rows: 1
       result_contains:
         - "fallback_row_count"
         - "(confidence 0)"
-        - "(known true)"
+        - "(known false)"
         - "planning_value"
 
   - name: "Clear range scan statistics"
