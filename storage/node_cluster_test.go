@@ -966,3 +966,69 @@ func TestClusterShardRestartRecoveryUsesLiveReports(t *testing.T) {
 		})
 	}
 }
+
+func TestClusterCacheTryReadDeclinesActiveNativeTransaction(t *testing.T) {
+	for _, mode := range []TxMode{TxCursorStability, TxACID} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "t_cache_try_read", 3)
+			self := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
+			reader := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
+			cluster := &nodeCluster{self: self}
+			cluster.view.Store(&clusterView{members: []clusterMember{self, reader}})
+			cluster.initializeManager()
+			r := cluster.manager
+			shard := tbl.ActiveShards()[0]
+			cell := r.declareShard(shard, self.ID, true)
+			tx := NewTxContext(mode)
+			tx.mu.Lock()
+			tx.getOrCreateShardTxLocked(shard)
+			tx.mu.Unlock()
+			defer tx.Rollback()
+			packet := mosiPacket{Kind: "read", Resource: *cell.resource.Load(),
+				ID: uuid.NewString(), Sequence: 1, Boot: reader.Boot, TryRead: true}
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if err := r.coordinate(ctx, reader.ID, packet); err != errClusterReadBusy {
+				t.Fatalf("opportunistic read waited for the transaction or changed authority: %v", err)
+			}
+			if cell.ownstate.Phase() != mosi.M || cell.ownstate.ClosingWrites() || cell.writesDrained() {
+				t.Fatal("declined cache admission changed native transaction ownership")
+			}
+			tx.Rollback()
+			packet.Sequence++
+			if err := r.coordinate(ctx, reader.ID, packet); err != errClusterReadBusy {
+				t.Fatalf("cache admission compacted a modified payload instead of delegating its task: %v", err)
+			}
+			if cell.ownstate.Phase() != mosi.M || cell.ownstate.ClosingWrites() || !cell.writesDrained() {
+				t.Fatal("declined preparation changed the completed transaction's authority")
+			}
+			cell.directory.Lock()
+			err := r.coordinate(ctx, reader.ID, packet)
+			cell.directory.Unlock()
+			if err != errClusterReadBusy {
+				t.Fatalf("opportunistic read waited for directory ownership: %v", err)
+			}
+		})
+	}
+}
+
+func TestClusterCacheTryReadLeavesExistingAcquisitionAlone(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
+	cluster.initializeManager()
+	owner := "memcp://" + uuid.NewString()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
+	resource := mosiResource{Database: "cache_try_existing"}
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch = owner, 1
+		return true
+	})
+	cell := cluster.manager.resourceCell(resource)
+	request, _ := cell.ownstate.Request(mosi.S)
+	if cluster.tryRead(context.Background(), resource) {
+		t.Fatal("a pending acquisition certified cache reuse")
+	}
+	if cell.ownstate.Phase() != mosi.SR || request.Flight().Err() != nil || len(peer.outgoing) != 0 {
+		t.Fatal("cache admission cancelled or duplicated the existing acquisition")
+	}
+}

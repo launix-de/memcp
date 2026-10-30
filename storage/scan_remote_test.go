@@ -11,6 +11,7 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
+import "runtime"
 import "sync"
 import "time"
 import "context"
@@ -747,8 +748,8 @@ func TestRemoteScanRetainsUUIDAcrossRebuild(t *testing.T) {
 	r.declareShard(held, r.id, true)
 	access := held.GetRead(nil, false)
 	defer access.Release()
-	peer, _, _ := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	peer, client, _ := setupRemoteScanConnection(t)
+	var parts remoteScanDescription
 	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, table.schema.Name, table.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
@@ -763,7 +764,15 @@ func TestRemoteScanRetainsUUIDAcrossRebuild(t *testing.T) {
 		t.Fatal("successor did not become cold")
 	}
 	var result remoteScanResult
-	if err := peer.scanService.control(context.Background(), peer, "scan.execute", makeRemoteScanTask(t, parts[0]), &result, true); err != nil {
+	historicalTask := makeRemoteScanTask(t, parts[0].remoteScanShard)
+	retained, err := client.importObject(context.Background(), peer, *parts[0].Object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := retained.Any().(*remoteShardObject).handle.Reference
+	historicalTask.Input = &ref
+	defer runtime.KeepAlive(retained)
+	if err := peer.scanService.control(context.Background(), peer, "scan.execute", historicalTask, &result, true); err != nil {
 		t.Fatal(err)
 	}
 	value, err := schemeValue(result.Value).reconstruct()
@@ -773,6 +782,14 @@ func TestRemoteScanRetainsUUIDAcrossRebuild(t *testing.T) {
 	if current.state() != COLD {
 		t.Fatal("historical scan loaded an unrelated successor payload")
 
+	}
+	// A UUID routing hint without the retained input must instead follow
+	// native GetRead to the current owner generation after handover.
+	if err := peer.scanService.control(context.Background(), peer, "scan.execute", makeRemoteScanTask(t, parts[0].remoteScanShard), &result, true); err != nil {
+		t.Fatal(err)
+	}
+	if current.state() == COLD {
+		t.Fatal("ordinary scan consumed the historical payload instead of native GetRead's current generation")
 	}
 }
 
@@ -1215,5 +1232,32 @@ func TestRemoteScanReconnectRejectsOldOperationIdentity(t *testing.T) {
 	}{oldID, "object.release", json.RawMessage(`{}`)}
 	if err := next.call(context.Background(), "node.control", request, &output); err == nil || !strings.Contains(err.Error(), "invalid operation identity") {
 		t.Fatal("old operation entered the new connection", err)
+	}
+}
+
+func TestRemoteScanRoutesForwardedUUIDWithoutHistoricalPayload(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_remote_forwarded_uuid", 4)
+	RebuildTable(tbl, true, false)
+	r := replicaRecoveryFixture()
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	current := tbl.ActiveShards()[0]
+	r.declareShard(current, r.id, true)
+	resource := mosiResource{Database: tbl.schema.Name, Table: tbl.Name, Shard: current.uuid.String()}
+	alias := resource
+	alias.Shard = uuid.NewString()
+	r.forwardResource(alias, resource)
+	if findScanShard(tbl, alias) != nil {
+		t.Fatal("fixture unexpectedly retains a historical physical payload")
+	}
+	peer, _, _ := setupRemoteScanConnection(t)
+	task := makeRemoteScanTask(t, remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: alias})
+	var response remoteScanResult
+	if err := peer.scanService.control(context.Background(), peer, "scan.execute", task, &response, true); err != nil {
+		t.Fatal(err)
+	}
+	value, err := schemeValue(response.Value).reconstruct()
+	if err != nil || value.Int() != 9 || response.OutCount != 3 || response.Shard != task.Shard {
+		t.Fatalf("forwarded task lost native contents or request identity: %+v, %v", response, err)
 	}
 }

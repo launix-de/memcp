@@ -720,7 +720,7 @@ func TestStringReaderOperatorOwnership(t *testing.T) {
 		source.build(uint32(i), scm.NewString(value))
 	}
 	source.finish()
-	tx := new(TxContext)
+	tx := NewTxContext(TxCursorStability)
 	tx.beginQuery(nil, 1, "reader ownership")
 	reader := newCachedColumnReaderTx(&source, tx, false, ReadDecoded|readOperatorOwned)
 	tx.endQuery(1)
