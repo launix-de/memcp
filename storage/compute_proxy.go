@@ -90,7 +90,9 @@ func (r *orderedComputeProxyReader) GetValueMulti(recids []uint32, target []scm.
 //     consumed.
 //   - CompressFiltered only prewarms rows selected by its filter because the
 //     caller expects to consume those rows soon. The filter is a preparation
-//     hint, not part of the column definition or its value semantics.
+//     hint, not part of the column definition or its value semantics. Valid
+//     values survive repeated or overlapping requests; only holes need repair.
+//     Callback work is invocation-owned and published only for its source revision.
 //   - GetValue repairs an ordinary missing or invalidated value pointwise and
 //     caches it. A row omitted by prewarming is neither NULL nor an error.
 //   - An ordered reduction column cannot be repaired pointwise. Its GetValue
@@ -355,32 +357,53 @@ func (p *StorageComputeProxy) needsUnfilteredPreparation() bool {
 		p.preparedDeltaRows.Load() != p.shard.plannerDeltaRows.Load()
 }
 
-func (p *StorageComputeProxy) prewarmDeltaRows(_ *TxContext, filterCols []string, filter scm.Scmer, onlyMissing bool) {
-	filterReaders := make([]ColumnReader, len(filterCols))
-	for i, col := range filterCols {
-		filterReaders[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(nil, col, false, ReadAuto).GetValue)
+// prewarmRows owns its candidate/result buffers. Callbacks run outside the
+// proxy lock; one publication boundary rejects work invalidated while it ran.
+// Both partial preparation and the delta tail of a full compression use this
+// path, preserving valid NULLs and values supplied by concurrent readers.
+func (p *StorageComputeProxy) prewarmRows(filterCols []string, filter scm.Scmer, includeMain bool) {
+	startRevision := p.revision.Load()
+	p.mu.RLock()
+	count, main, compressed := p.count, p.main, p.compressed
+	cached := make(map[uint32]struct{}, len(p.delta))
+	for recid := range p.delta {
+		cached[recid] = struct{}{}
 	}
-	inputReaders := make([]ColumnReader, len(p.inputCols))
-	for i, col := range p.inputCols {
-		inputReaders[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(nil, col, false, ReadAuto).GetValue)
-	}
+	p.mu.RUnlock()
 
 	recids := p.visibleDeltaRecids()
-	if onlyMissing {
-		p.mu.RLock()
-		missing := recids[:0]
-		for _, recid := range recids {
-			if _, present := p.delta[recid]; !present {
-				missing = append(missing, recid)
+	if includeMain {
+		for recid := uint32(0); recid < count; recid++ {
+			if _, present := cached[recid]; !present &&
+				!(main != nil && (compressed || p.validMask.AtomicGet(uint(recid)))) {
+				recids = append(recids, recid)
 			}
 		}
-		p.mu.RUnlock()
-		recids = missing
+	}
+	missing := recids[:0]
+	for _, recid := range recids {
+		if _, present := cached[recid]; !present {
+			missing = append(missing, recid)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+
+	filterReaders := make([]ColumnReader, len(filterCols))
+	defer releaseColumnReaders(filterReaders)
+	for i, col := range filterCols {
+		filterReaders[i] = p.shard.ColumnReaderTx(nil, col, false, ReadCompressed)
+	}
+	inputReaders := make([]ColumnReader, len(p.inputCols))
+	defer releaseColumnReaders(inputReaders)
+	for i, col := range p.inputCols {
+		inputReaders[i] = p.shard.ColumnReaderTx(nil, col, false, ReadCompressed)
 	}
 	prepared := make(map[uint32]scm.Scmer)
 	filterValues := make([]scm.Scmer, len(filterReaders))
 	inputValues := make([]scm.Scmer, len(inputReaders))
-	for _, recid := range recids {
+	for _, recid := range missing {
 		if !filter.IsNil() {
 			for i, reader := range filterReaders {
 				filterValues[i] = reader.GetValue(recid)
@@ -395,16 +418,21 @@ func (p *StorageComputeProxy) prewarmDeltaRows(_ *TxContext, filterCols []string
 		prepared[recid] = scm.Apply(p.computor, inputValues...)
 	}
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.revision.Load() != startRevision {
+		return
+	}
 	for recid, value := range prepared {
-		if onlyMissing {
-			if _, present := p.delta[recid]; present {
-				continue
-			}
+		if _, present := p.delta[recid]; present {
+			continue
+		}
+		if recid < p.count && p.main != nil &&
+			(p.compressed || p.validMask.AtomicGet(uint(recid))) {
+			continue
 		}
 		p.setDeltaValueLocked(recid, value)
 		p.validMask.AtomicSet(uint(recid), true)
 	}
-	p.mu.Unlock()
 }
 
 // orcCol returns the column definition for this ORC proxy's column.
@@ -673,6 +701,7 @@ func (p *StorageComputeProxy) GetCachedReader(hints ColumnReadHints) ColumnReade
 
 // Compress materializes all values into a compressed main storage.
 func (p *StorageComputeProxy) Compress(_ *TxContext) {
+	p.synchronizeVisibilityCache()
 	compressStart := time.Now()
 	startRevision := p.revision.Load()
 	startDeltaRows := p.shard.plannerDeltaRows.Load()
@@ -688,7 +717,7 @@ func (p *StorageComputeProxy) Compress(_ *TxContext) {
 	p.mu.RLock()
 	if p.compressed {
 		p.mu.RUnlock()
-		p.prewarmDeltaRows(nil, nil, scm.NewNil(), true)
+		p.prewarmRows(nil, scm.NewNil(), false)
 		if p.revision.Load() == startRevision && p.shard.plannerDeltaRows.Load() == startDeltaRows {
 			p.preparedRevision.Store(startRevision)
 			p.preparedDeltaRows.Store(startDeltaRows)
@@ -709,7 +738,7 @@ func (p *StorageComputeProxy) Compress(_ *TxContext) {
 			p.compressed = true
 		}
 		p.mu.Unlock()
-		p.prewarmDeltaRows(nil, nil, scm.NewNil(), true)
+		p.prewarmRows(nil, scm.NewNil(), false)
 		if p.revision.Load() == startRevision && p.shard.plannerDeltaRows.Load() == startDeltaRows {
 			p.preparedRevision.Store(startRevision)
 			p.preparedDeltaRows.Store(startDeltaRows)
@@ -774,7 +803,7 @@ func (p *StorageComputeProxy) Compress(_ *TxContext) {
 		p.compressed = true
 	}
 	p.mu.Unlock()
-	p.prewarmDeltaRows(nil, nil, scm.NewNil(), true)
+	p.prewarmRows(nil, scm.NewNil(), false)
 	// Invalidation advances revision before publishing a hole. Store only the
 	// generation observed before materialization: a concurrent mutation then
 	// necessarily leaves the two generations unequal and the next ensure call
@@ -795,35 +824,9 @@ func (p *StorageComputeProxy) Compress(_ *TxContext) {
 // materializes each one pointwise on first read. Ordered reduction columns have
 // dependency-aware preparation and repair paths instead.
 func (p *StorageComputeProxy) CompressFiltered(_ *TxContext, filterCols []string, filter scm.Scmer) {
-	filterReaders := make([]ColumnReader, len(filterCols))
-	for i, col := range filterCols {
-		filterReaders[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col, false, nil), nil, false, ReadCompressed)
-	}
-	readers := make([]ColumnReader, len(p.inputCols))
-	for i, col := range p.inputCols {
-		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col, false, nil), nil, false, ReadCompressed)
-	}
-
-	func() {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		filterValues := make([]scm.Scmer, len(filterCols))
-		colvalues := make([]scm.Scmer, len(p.inputCols))
-		for i := uint32(0); i < p.count; i++ {
-			for j := range filterReaders {
-				filterValues[j] = filterReaders[j].GetValue(i)
-			}
-			if scm.ToBool(scm.Apply(filter, filterValues...)) {
-				for j := range readers {
-					colvalues[j] = readers[j].GetValue(i)
-				}
-				p.setDeltaValueLocked(i, scm.Apply(p.computor, colvalues...))
-				p.validMask.AtomicSet(uint(i), true)
-			}
-		}
-	}()
-	p.prewarmDeltaRows(nil, filterCols, filter, false)
-	// Don't set compressed=true → unmatched rows stay lazy for on-demand GetValue
+	p.synchronizeVisibilityCache()
+	p.prewarmRows(filterCols, filter, true)
+	// Unmatched rows retain their ordinary lazy value semantics.
 }
 
 // Invalidate marks a single row as needing recomputation.

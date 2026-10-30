@@ -166,12 +166,13 @@ func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []s
 			//   signature changes
 			// - shard-level ComputeColumn still runs afterwards so dirty proxies can
 			//   repair themselves even on the DDL no-op path
-			metadataChanged := !computeColumnSignatureEqual(c, inputCols, computor, filterCols, filter) || !slicesEqual(c.ComputorDependencies, dependencies)
+			metadataChanged := !computeColumnSignatureEqual(c, inputCols, computor) || !slicesEqual(c.ComputorDependencies, dependencies)
 			if metadataChanged {
 				t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
 				t.Columns[i].ComputorInputCols = inputCols
-				t.Columns[i].ComputorFilterCols = filterCols
-				t.Columns[i].ComputorFilter = filter
+				// Preparation belongs to this invocation, never the shared recipe.
+				t.Columns[i].ComputorFilterCols = nil
+				t.Columns[i].ComputorFilter = scm.NewNil()
 				t.Columns[i].ComputorDependencies = append([]string(nil), dependencies...)
 				refs := extractScanJoinInfo(computor)
 				for i := 0; i+1 < len(dependencies); i += 2 {
@@ -301,13 +302,9 @@ func (s *storageShard) ComputeColumn(tx *TxContext, name string, inputCols []str
 	if proxy, ok := existing.(*StorageComputeProxy); ok {
 		s.mu.Unlock()
 		// skip recompute if proxy is still valid (no invalidation since last compute)
+		proxy.synchronizeVisibilityCache()
 		if !proxy.needsUnfilteredPreparation() {
-			if filter.IsNil() {
-				return // fully prepared, nothing to do
-			}
-			// filter given: ensure filtered rows are valid (CompressFiltered is idempotent)
-			proxy.CompressFiltered(nil, filterCols, filter)
-			return
+			return // every value is valid, regardless of the requested subset
 		}
 		if !filter.IsNil() {
 			proxy.CompressFiltered(nil, filterCols, filter)
@@ -2466,11 +2463,11 @@ func slicesEqual(a, b []string) bool {
 	return true
 }
 
-func computeColumnSignatureEqual(c *column, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) bool {
-	return slicesEqual(c.ComputorInputCols, inputCols) &&
-		slicesEqual(c.ComputorFilterCols, filterCols) &&
-		scm.Equal(c.Computor, computor) &&
-		scm.Equal(c.ComputorFilter, filter)
+// Legacy preparation hints are cleared once; subsequent request filters do
+// not change the canonical value recipe or reinstall its dependency triggers.
+func computeColumnSignatureEqual(c *column, inputCols []string, computor scm.Scmer) bool {
+	return slicesEqual(c.ComputorInputCols, inputCols) && scm.Equal(c.Computor, computor) &&
+		len(c.ComputorFilterCols) == 0 && c.ComputorFilter.IsNil()
 }
 
 func boolSlicesEqual(a, b []bool) bool {

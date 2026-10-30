@@ -145,3 +145,60 @@ test_cases:
   expect:
     cluster:
       min_remote_shards: 1
+
+- name: prepare-first-remote-lookup
+  scm: |
+    (createcolumn (table "{database}" false "operator_keys" false)
+      "prepared_v0" "BIGINT" '()
+      (list "temp" true "filtercols" '("id") "filter" (lambda (id) (equal? id 42000)))
+      '("id") (lambda (key)
+        (scan nil (table "{database}" false "big_items" false)
+          (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list key)
+          '("id") (lambda (id) (equal? id (outer 1 key)))
+          '("v0") (lambda (acc value) value) nil (lambda (old value) value) false)))
+  expect:
+    cluster:
+      min_remote_shards: 1
+
+- name: repeat-valid-remote-lookup
+  scm: |
+    (createcolumn (table "{database}" false "operator_keys" false)
+      "prepared_v0" "BIGINT" '()
+      (list "temp" true "filtercols" '("id") "filter" (lambda (id) (equal? id 42000)))
+      '("id") (lambda (key)
+        (scan nil (table "{database}" false "big_items" false)
+          (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list key)
+          '("id") (lambda (id) (equal? id (outer 1 key)))
+          '("v0") (lambda (acc value) value) nil (lambda (old value) value) false)))
+
+- name: prepare-second-remote-lookup
+  scm: |
+    (createcolumn (table "{database}" false "operator_keys" false)
+      "prepared_v0" "BIGINT" '()
+      (list "temp" true "filtercols" '("id") "filter" (lambda (id) (equal? id 245000)))
+      '("id") (lambda (key)
+        (scan nil (table "{database}" false "big_items" false)
+          (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list key)
+          '("id") (lambda (id) (equal? id (outer 1 key)))
+          '("v0") (lambda (acc value) value) nil (lambda (old value) value) false)))
+  expect:
+    cluster:
+      min_remote_shards: 1
+
+- name: prepared-and-lazy-lookups-agree-with-remote-source
+  sql: SELECT k.id,k.prepared_v0 AS value FROM operator_keys k ORDER BY k.id
+  expect:
+    rows: 4
+    cluster:
+      min_remote_shards: 1
+- name: changed-local-key-repairs-remote-lookup
+  setup:
+  - sql: UPDATE operator_keys SET id=42001 WHERE id=42000
+  sql: SELECT k.id,k.prepared_v0=b.v0 AS current_value FROM operator_keys k JOIN big_items b ON b.id=k.id WHERE k.id=42001
+  expect:
+    rows: 1
+    data: [{id: 42001, current_value: 1}]
+    cluster:
+      min_remote_shards: 1
+  cleanup:
+  - sql: UPDATE operator_keys SET id=42000 WHERE id=42001

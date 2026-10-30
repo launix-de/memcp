@@ -113,10 +113,10 @@ type column struct {
 	Typdimensions     []int     // type dimensions for DECIMAL(10,3) and VARCHAR(5)
 	Computor          scm.Scmer `json:"-"`          // TODO: marshaljson -> serialize
 	ComputorInputCols []string  `json:",omitempty"` // input cols for computor (persisted in schema)
-	// Repeated planner-issued createcolumn calls must be able to detect that the
-	// canonical temp column signature is unchanged and skip schema/trigger work.
-	// filter cols are persisted because they are part of the canonical helper
-	// definition; the filter expression itself is runtime-only like Computor.
+	// Ordinary computed-column identity consists of its value recipe and source
+	// dependencies. Preparation filters are invocation-local, not that identity.
+	// Keep legacy filter fields readable; ComputeColumn clears old hints when
+	// configuring the definition. Ordered columns retain their separate OrcFilter.
 	// ComputorDependencies contains logical schema/table pairs, never topology IDs.
 	ComputorDependencies     []string     `json:",omitempty"`
 	ComputorFilterCols       []string     `json:",omitempty"`

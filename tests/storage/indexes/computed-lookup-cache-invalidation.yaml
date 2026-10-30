@@ -249,7 +249,45 @@ test_cases:
           stamp: 333
           pair_value: 350
 
+  - name: "Declare a complete column while preparing only selected rows"
+    setup:
+      - sql: "DROP TABLE IF EXISTS filtered_prepare_values"
+      - sql: "CREATE TABLE filtered_prepare_values(id INT PRIMARY KEY, value INT)"
+      - sql: "INSERT INTO filtered_prepare_values VALUES(1,10),(2,NULL),(3,30)"
+    scm: |
+      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false)
+        "prepared_value" "INT" '()
+        (list "temp" true "filtercols" '("id") "filter" (lambda (id) (>= id 2)))
+        '("value") (lambda (value) (* value 2)))
+
+  - name: "Unprepared rows remain readable and cached NULL is a value"
+    sql: "SELECT id,prepared_value FROM filtered_prepare_values ORDER BY id"
+    expect:
+      rows: 3
+      data: [{id: 1, prepared_value: 20}, {id: 2, prepared_value: null}, {id: 3, prepared_value: 60}]
+
+  - name: "Another preparation filter addresses the same complete column"
+    scm: |
+      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false)
+        "prepared_value" "INT" '()
+        (list "temp" true "filtercols" '("id") "filter" (lambda (id) (equal? id 1)))
+        '("value") (lambda (value) (* value 2)))
+
+  - name: "Prepared values observe source mutation"
+    setup:
+      - sql: "UPDATE filtered_prepare_values SET value=31 WHERE id=3"
+    sql: "SELECT id,prepared_value FROM filtered_prepare_values WHERE prepared_value>50"
+    expect: {rows: 1, data: [{id: 3, prepared_value: 62}]}
+
+  - name: "Filtered preparation still rejects implicit request state"
+    scm: |
+      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false)
+        "invalid_prepared_value" "INT" '() '("temp" true)
+        '("value") (lambda (value) (session "request-only")))
+    expect: {error: true}
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS filtered_prepare_values"
   - sql: "DROP TABLE IF EXISTS lookup_cache_document"
   - sql: "DROP TABLE IF EXISTS lookup_cache_file"
   - sql: "DROP TABLE IF EXISTS lookup_cache_folder"
