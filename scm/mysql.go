@@ -502,6 +502,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				}
 			}
 		}()
+		outputResult := NewBool(true)
 		callbackFn := NewClusterCallback(queryCtx, func(a ...Scmer) Scmer {
 			resultlock.Lock()
 			defer resultlock.Unlock()
@@ -535,7 +536,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				emitPreparedRow(rowValues)
 			}
 			return NewBool(true)
-		})
+		}, &outputResult)
 		fieldsFn := NewClusterCallback(queryCtx, func(a ...Scmer) Scmer {
 			resultlock.Lock()
 			defer resultlock.Unlock()
@@ -546,7 +547,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			schemaInitialized = true
 			resultSet = true
 			return NewBool(true)
-		})
+		}, nil)
 		return Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, fieldsFn,
 			scmSessionScmer, NewAny(ss), NewInt(int64(querySeq)))
 	}()

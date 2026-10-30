@@ -323,7 +323,8 @@ func (tx *TxContext) retainQueryTable(t *table) bool {
 	return true
 }
 
-func (tx *TxContext) retainQueryReader(release func()) bool {
+// RetainQueryResource registers invocation-owned cleanup, after all producers join.
+func (tx *TxContext) RetainQueryResource(release func()) bool {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	if !tx.queryActive.Load() {
@@ -333,8 +334,8 @@ func (tx *TxContext) retainQueryReader(release func()) bool {
 	return true
 }
 
-// endStatement releases only physical query-local ownership. Request
-// cancellation and process-list identity survive until endQuery below.
+// endStatement joins invocation-owned output and releases physical readers.
+// Request cancellation and process-list identity survive until endQuery below.
 func (tx *TxContext) endStatement() {
 	tx.remoteBindings.Store(nil)
 	tx.mu.Lock()
@@ -345,20 +346,34 @@ func (tx *TxContext) endStatement() {
 	readers := tx.queryReaderReleases
 	tx.queryReaderReleases = nil
 	tx.mu.Unlock()
-	for _, release := range readers {
+	var failure any
+	releaseOwned := func(release func()) {
+		defer func() {
+			if recovered := recover(); recovered != nil && failure == nil {
+				failure = recovered
+			}
+		}()
 		release()
+	}
+	for _, release := range readers {
+		releaseOwned(release)
 	}
 	for c, t := range columns {
 		t.releaseColumnCacheUse(c)
 	}
+	if failure != nil {
+		panic(failure)
+	}
 }
 func (tx *TxContext) endQuery(seq uint64) {
 	if tx.querySeq.CompareAndSwap(seq, 0) {
+		defer func() {
+			tx.queryInfo.Store(nil)
+			if tx.SessionState != nil {
+				tx.SessionState.FinishQueryExecution(seq)
+			}
+		}()
 		tx.endStatement()
-		tx.queryInfo.Store(nil)
-		if tx.SessionState != nil {
-			tx.SessionState.FinishQueryExecution(seq)
-		}
 	}
 }
 

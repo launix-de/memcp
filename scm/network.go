@@ -309,6 +309,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		}),
 	}
 	var res_lock sync.Mutex
+	outputResult := NewString("ok")
 	res_scm := []Scmer{
 		NewString("res"), NewAny(res),
 		NewString("header"), NewClusterCallback(req.Context(), func(a ...Scmer) Scmer {
@@ -316,7 +317,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			res.Header().Set(a[0].String(), a[1].String())
 			res_lock.Unlock()
 			return NewString("ok")
-		}),
+		}, nil),
 		NewString("status"), NewClusterCallback(req.Context(), func(a ...Scmer) Scmer {
 			// status after header!
 			res_lock.Lock()
@@ -324,7 +325,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			res.WriteHeader(status)
 			res_lock.Unlock()
 			return NewString("ok")
-		}),
+		}, nil),
 		NewString("print"), NewClusterCallback(req.Context(), func(a ...Scmer) Scmer {
 			// naive output
 			res_lock.Lock()
@@ -333,14 +334,14 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			}
 			res_lock.Unlock()
 			return NewString("ok")
-		}),
+		}, nil),
 		NewString("println"), NewClusterCallback(req.Context(), func(a ...Scmer) Scmer {
 			// naive output
 			res_lock.Lock()
 			io.WriteString(res, a[0].String()+"\n")
 			res_lock.Unlock()
 			return NewString("ok")
-		}),
+		}, nil),
 		NewString("jsonl"), NewClusterCallback(req.Context(), func(a ...Scmer) Scmer {
 			// print json line (only assoc)
 			res_lock.Lock()
@@ -370,7 +371,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			}
 			io.WriteString(res, "}\n")
 			return NewString("ok")
-		}),
+		}, &outputResult),
 		NewString("websocket"), NewFunc(func(a ...Scmer) Scmer {
 			// upgrade to a websocket, params: onMessage, onClose
 			onMessage := a[0]

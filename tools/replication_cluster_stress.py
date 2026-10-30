@@ -284,6 +284,8 @@ class ClusterSQLTestRunner(SQLTestRunner):
         previous = getattr(self._test_context, "cluster_case", None)
         self._test_context.cluster_case = current
         try:
+            if type(case.get("compare_reference_order", True)) is not bool:
+                raise DrillFailure("compare_reference_order must be boolean")
             checks = case.get("expect", {}).get("cluster", {})
             if not isinstance(checks, dict):
                 raise DrillFailure("expect.cluster must be a mapping")
@@ -308,7 +310,12 @@ class ClusterSQLTestRunner(SQLTestRunner):
                     expected = self.reference[key].popleft() if self.reference[key] else None
                 if expected is None or expected["status"] != "passed":
                     raise DrillFailure("missing successful standalone oracle case")
-                expect(current.get("rows"), expected.get("rows"), "standalone result comparison")
+                actual_rows, expected_rows = current.get("rows"), expected.get("rows")
+                if not case.get("compare_reference_order", True):
+                    row_key = lambda row: json.dumps(row, sort_keys=True)
+                    actual_rows = sorted(actual_rows, key=row_key)
+                    expected_rows = sorted(expected_rows, key=row_key)
+                expect(actual_rows, expected_rows, "standalone result comparison")
             current["status"] = "passed"
             return True
         except Exception as error:
@@ -1956,15 +1963,23 @@ def run_cluster_placement(args, artifacts, journal):
             source.scm(f'(rebuild (table "{DATABASE}" false "context_items" false) true false)')
             source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)')
         standalone_operators = []
+        operator_shared = None
         if args.cluster_operators_only:
             source.sql("CREATE TABLE operator_keys(id INT PRIMARY KEY) ENGINE=SAFE")
             source.sql("INSERT INTO operator_keys VALUES(42000),(90000),(175000),(245000)")
+            source.scm(f'(rebuild (table "{DATABASE}" false "operator_keys" false) true false)')
+            # Both executions must start from the same committed fixture.
+            # Rollback restores visibility, but not physical delta generations;
+            # copying after the oracle would also propagate committed changes.
+            builder.kill()
+            operator_shared = directory / "shared-operator-fixture"
+            shutil.copytree(builder.data_dir / DATABASE, operator_shared)
+            source = builder.start()
             standalone_operators = run_cluster_yaml_cases(
                 suite or OPERATOR_SUITE, builder, [builder], builder.data_dir / DATABASE,
                 journal, directory / "standalone-operators.json")
-            source.scm(f'(rebuild (table "{DATABASE}" false "operator_keys" false) true false)')
         builder.kill()
-        shared = builder.data_dir / DATABASE
+        shared = operator_shared or builder.data_dir / DATABASE
         catalog = json.loads((shared / "schema.json").read_text())["tables"]
         if args.cluster_context_only:
             context_schema = catalog["context_items"]
