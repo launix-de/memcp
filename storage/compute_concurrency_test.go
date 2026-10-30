@@ -850,6 +850,97 @@ func TestFilteredPreparationPreservesMainDeltaAndNullValues(t *testing.T) {
 	prepare(1, 6)
 }
 
+func TestComputeColumnWaitsForRequestedPublication(t *testing.T) {
+	for _, filtered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("filtered=%v", filtered), func(t *testing.T) {
+			defer setupComputeConcurrencyTest(t)()
+			CreateDatabase("compconc", false)
+			tbl, _ := CreateTable("compconc", "preparation_completion", Memory, false)
+			tbl.CreateColumn("id", "INT", nil, nil)
+			tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+			RebuildTable(tbl, true, false)
+			tbl.CreateColumn("cached", "INT", nil, nil)
+			var source, calls atomic.Int64
+			source.Store(1)
+			first, retry := make(chan struct{}), make(chan struct{})
+			releaseFirst, releaseRetry := make(chan struct{}), make(chan struct{})
+			unblockFirst := sync.OnceFunc(func() { close(releaseFirst) })
+			unblockRetry := sync.OnceFunc(func() { close(releaseRetry) })
+			defer unblockFirst()
+			defer unblockRetry()
+			computor := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+				value := source.Load()
+				switch calls.Add(1) {
+				case 1:
+					close(first)
+					<-releaseFirst
+				case 2:
+					close(retry)
+					<-releaseRetry
+				}
+				return scm.NewInt(value)
+			})
+			filter := scm.NewNil()
+			if filtered {
+				filter = scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+			}
+			finished := make(chan any, 1)
+			go func() {
+				defer func() { finished <- recover() }()
+				tbl.ComputeColumn(nil, "cached", []string{"id"}, computor, nil, filter)
+			}()
+			select {
+			case <-first:
+			case <-time.After(5 * time.Second):
+				t.Fatal("preparation did not start")
+			}
+			select {
+			case failure := <-finished:
+				t.Fatalf("createcolumn returned before its callback finished: %v", failure)
+			default:
+			}
+			shard := tbl.ActiveShards()[0]
+			shard.mu.RLock()
+			proxy := shard.columns["cached"].(*StorageComputeProxy)
+			shard.mu.RUnlock()
+			source.Store(2)
+			proxy.InvalidateAll()
+			unblockFirst()
+			select {
+			case <-retry:
+			case failure := <-finished:
+				t.Fatalf("createcolumn returned after discarding its requested batch: %v", failure)
+			case <-time.After(5 * time.Second):
+				t.Fatal("invalidated preparation was not retried")
+			}
+			select {
+			case failure := <-finished:
+				t.Fatalf("createcolumn returned before replacement values were ready: %v", failure)
+			default:
+			}
+			unblockRetry()
+			select {
+			case failure := <-finished:
+				if failure != nil {
+					t.Fatalf("preparation failed: %v", failure)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("createcolumn did not complete after publication")
+			}
+			// Inspect storage directly: a lazy read must not hide missing preparation.
+			proxy.mu.RLock()
+			value, published := proxy.delta[0]
+			if proxy.compressed && proxy.main != nil {
+				value, published = proxy.main.GetValue(0), true
+			}
+			proxy.mu.RUnlock()
+			if !published || value.Int() != 2 || calls.Load() != 2 {
+				t.Fatalf("completion did not publish current values: value=%v published=%v calls=%d", value, published, calls.Load())
+			}
+		})
+	}
+}
+
 func TestFilteredPreparationRejectsInvalidatedPublication(t *testing.T) {
 	defer setupComputeConcurrencyTest(t)()
 	CreateDatabase("compconc", false)

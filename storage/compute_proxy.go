@@ -361,7 +361,7 @@ func (p *StorageComputeProxy) needsUnfilteredPreparation() bool {
 // proxy lock; one publication boundary rejects work invalidated while it ran.
 // Both partial preparation and the delta tail of a full compression use this
 // path, preserving valid NULLs and values supplied by concurrent readers.
-func (p *StorageComputeProxy) prewarmRows(filterCols []string, filter scm.Scmer, includeMain bool) {
+func (p *StorageComputeProxy) prewarmRows(filterCols []string, filter scm.Scmer, includeMain bool) bool {
 	startRevision := p.revision.Load()
 	p.mu.RLock()
 	count, main, compressed := p.count, p.main, p.compressed
@@ -387,7 +387,7 @@ func (p *StorageComputeProxy) prewarmRows(filterCols []string, filter scm.Scmer,
 		}
 	}
 	if len(missing) == 0 {
-		return
+		return p.revision.Load() == startRevision
 	}
 
 	filterReaders := make([]ColumnReader, len(filterCols))
@@ -420,7 +420,7 @@ func (p *StorageComputeProxy) prewarmRows(filterCols []string, filter scm.Scmer,
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.revision.Load() != startRevision {
-		return
+		return false
 	}
 	for recid, value := range prepared {
 		if _, present := p.delta[recid]; present {
@@ -433,6 +433,7 @@ func (p *StorageComputeProxy) prewarmRows(filterCols []string, filter scm.Scmer,
 		p.setDeltaValueLocked(recid, value)
 		p.validMask.AtomicSet(uint(recid), true)
 	}
+	return true
 }
 
 // orcCol returns the column definition for this ORC proxy's column.
@@ -823,10 +824,12 @@ func (p *StorageComputeProxy) Compress(_ *TxContext) {
 // read-time predicate: unmatched rows remain valid lazy values and GetValue
 // materializes each one pointwise on first read. Ordered reduction columns have
 // dependency-aware preparation and repair paths instead.
-func (p *StorageComputeProxy) CompressFiltered(_ *TxContext, filterCols []string, filter scm.Scmer) {
+// The result reports publication, not merely callback completion. The owning
+// createcolumn request retries a batch invalidated during its computation.
+func (p *StorageComputeProxy) CompressFiltered(_ *TxContext, filterCols []string, filter scm.Scmer) bool {
 	p.synchronizeVisibilityCache()
-	p.prewarmRows(filterCols, filter, true)
 	// Unmatched rows retain their ordinary lazy value semantics.
+	return p.prewarmRows(filterCols, filter, true)
 }
 
 // Invalidate marks a single row as needing recomputation.
