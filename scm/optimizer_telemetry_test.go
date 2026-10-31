@@ -21,6 +21,23 @@ import (
 	"testing"
 )
 
+func TestTreeNodeCountPreservesOccurrenceMetrics(t *testing.T) {
+	shared := NewSlice([]Scmer{NewSymbol("leaf"), NewInt(7)})
+	root := NewSlice([]Scmer{shared, shared, NewSlice(nil), NewNil()})
+	count := Apply(Globalenv.Vars["tree_node_count"], root)
+	if count.Int() != 9 {
+		t.Fatalf("shared subtrees or empty/scalar leaves were discounted: %s", String(count))
+	}
+	legacy := Eval(Read("legacy tree metric", `(lambda (node)
+		(match node
+			(cons head tail) (+ 1 (tree_node_count head)
+				(reduce tail (lambda (total item) (+ total (tree_node_count item))) 0))
+			_ 1))`), &Globalenv)
+	if got := Apply(legacy, root); got.Int() != count.Int() {
+		t.Fatalf("native tree metric changed Scheme traversal semantics: %s != %s", String(count), String(got))
+	}
+}
+
 func TestOptimizeBuiltinHookFoldsQuotedCode(t *testing.T) {
 	expr := Read("optimize builtin hook", "(optimize '(+ 1 2))")
 	optimized := Optimize(expr, &Globalenv, nil)

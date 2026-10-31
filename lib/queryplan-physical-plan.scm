@@ -14144,13 +14144,10 @@ protocol callback receives only the calibration row. */
 					(reduce tail (lambda (total item)
 						(+ total (plan_count item target))) 0))
 				_ 0)))
-		(define tree_count (lambda (node)
-			(match node
-				(cons head tail) (+ 1
-					(tree_count head)
-					(reduce tail (lambda (total item)
-						(+ total (tree_count item))) 0))
-				_ 1)))
+		/* Count diagnostic trees with the runtime's existing structural walker.
+		These values remain exact, including repeated/shared subtrees, without
+		interpreting one Scheme callback per AST node after the timed phases. */
+		(define tree_count tree_node_count)
 		(define scan_access_head? (lambda (head)
 			(or (equal? head (quote scan))
 				(or (or (equal? head (quote scan_order)) (equal? head (quote scan_order_keys)))
