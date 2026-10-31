@@ -446,8 +446,29 @@ func TestFreshBaseColumnIsNotMarkedComputed(t *testing.T) {
 	if !ok {
 		t.Fatal("createColumnLocked rejected a fresh column")
 	}
-	if !column.Computor.IsNil() || !column.ComputorFilter.IsNil() {
+	if !column.Computor.IsNil() {
 		t.Fatal("fresh base column contains a non-nil computed expression")
+	}
+}
+
+func TestLegacyPreparationHintsAreNotPersisted(t *testing.T) {
+	var restored column
+	if err := json.Unmarshal([]byte(`{"Name":"cached","ComputorInputCols":["value"],"ComputorFilterCols":["id"]}`), &restored); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, retained := fields["ComputorFilterCols"]; retained {
+		t.Fatal("schema rewrite retained a legacy preparation hint")
+	}
+	if restored.Name != "cached" || len(restored.ComputorInputCols) != 1 || restored.ComputorInputCols[0] != "value" {
+		t.Fatal("discarding a legacy preparation hint changed the value definition")
 	}
 }
 

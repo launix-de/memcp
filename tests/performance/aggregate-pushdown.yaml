@@ -101,6 +101,68 @@ test_cases:
     threshold_ms: 15000
     expect: *ap_fk_count_expect
 
+  - name: "Perf: filtered grouped count cold preparation"
+    performance_rows: 500000
+    timing_group: filtered-fk-preparation
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 1
+    threshold_ms: 5000
+    setup:
+      - sql: "DROP TABLE IF EXISTS ap_filtered_fact"
+      - sql: "DROP TABLE IF EXISTS ap_filtered_access"
+      - sql: "CREATE TABLE ap_filtered_access(id INT PRIMARY KEY, allowed BOOL NOT NULL) ENGINE=memory"
+      - sql: "CREATE TABLE ap_filtered_fact(id INT PRIMARY KEY, access_id INT, FOREIGN KEY ap_filtered_fk(access_id) REFERENCES ap_filtered_access(id)) ENGINE=memory"
+      - scm: |
+          (begin
+            (insert (table "{database}" false "ap_filtered_access" false) '("id" "allowed")
+              (map (produceN 64) (lambda (i) (list (+ i 1) (equal? (mod i 4) 0)))))
+            (insert (table "{database}" false "ap_filtered_fact" false) '("id" "access_id")
+              (map (produceN {rows}) (lambda (i) (list (+ i 1) (+ 1 (mod i 64))))))
+            (rebuild) true)
+    sql: &ap_filtered_count_query |
+      SELECT COUNT(*) AS total FROM ap_filtered_fact fact
+      WHERE fact.access_id=1 AND MOD(fact.id,17)<>0
+        AND COALESCE((SELECT access.allowed FROM ap_filtered_access access
+          WHERE access.id=fact.access_id LIMIT 1),FALSE)
+    expect: &ap_filtered_count_expect {rows: 1, data: [{total: 7354}]}
+
+  - name: "Perf: identical filtered grouped count reuses prepared values"
+    performance_rows: 500000
+    timing_group: filtered-fk-preparation
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 100
+    threshold_ms: 5000
+    sql: *ap_filtered_count_query
+    expect: *ap_filtered_count_expect
+
+  - name: "Perf: another grouped count filter extends preparation"
+    performance_rows: 500000
+    timing_group: filtered-fk-preparation
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 1
+    threshold_ms: 5000
+    sql: |
+      SELECT COUNT(*) AS total FROM ap_filtered_fact fact
+      WHERE fact.access_id=5 AND MOD(fact.id,17)<>0
+        AND COALESCE((SELECT access.allowed FROM ap_filtered_access access
+          WHERE access.id=fact.access_id LIMIT 1),FALSE)
+    expect: *ap_filtered_count_expect
+
+  - name: "Perf: returning grouped count filter retains previous values"
+    performance_rows: 500000
+    timing_group: filtered-fk-preparation
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 99
+    threshold_ms: 5000
+    sql: *ap_filtered_count_query
+    expect: *ap_filtered_count_expect
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS ap_filtered_fact"
+  - sql: "DROP TABLE IF EXISTS ap_filtered_access"
   - sql: "DROP TABLE IF EXISTS ap_fact"
   - sql: "DROP TABLE IF EXISTS ap_access"

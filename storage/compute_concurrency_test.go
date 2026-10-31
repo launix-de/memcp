@@ -503,7 +503,7 @@ func TestComputeColumnWaitsForStartedShardsAfterFailure(t *testing.T) {
 	}
 }
 
-func TestFilteredComputeColumnConservativelyRecomputesRepeatedFilter(t *testing.T) {
+func TestFilteredComputeColumnReusesValidValuesAcrossFilters(t *testing.T) {
 	defer setupComputeConcurrencyTest(t)()
 
 	CreateDatabase("compconc", false)
@@ -554,8 +554,8 @@ func TestFilteredComputeColumnConservativelyRecomputesRepeatedFilter(t *testing.
 	shard.mu.RUnlock()
 
 	tbl.ComputeColumn(nil, "cached", []string{"val"}, computor, []string{"val"}, filterGT2)
-	if got := computeCalls.Load(); got != 4 {
-		t.Fatalf("repeated filtered compute invoked computor %d times, want 4 total", got)
+	if got := computeCalls.Load(); got != 2 {
+		t.Fatalf("repeated filtered compute invoked computor %d times, want 2 total", got)
 	}
 	shard.mu.RLock()
 	repeatedProxy := shard.columns["cached"]
@@ -565,14 +565,24 @@ func TestFilteredComputeColumnConservativelyRecomputesRepeatedFilter(t *testing.
 	}
 
 	tbl.ComputeColumn(nil, "cached", []string{"val"}, computor, []string{"val"}, filterGT1)
-	if got := computeCalls.Load(); got != 7 {
-		t.Fatalf("changing filtered materialization invoked computor %d times, want 7 total", got)
+	if got := computeCalls.Load(); got != 3 {
+		t.Fatalf("changing filtered materialization invoked computor %d times, want 3 total", got)
 	}
 	shard.mu.RLock()
 	changedFilterProxy := shard.columns["cached"]
 	shard.mu.RUnlock()
 	if changedFilterProxy != canonicalProxy {
 		t.Fatal("changed filter replaced the canonical compute proxy")
+	}
+	reader := shard.ColumnReaderTx(nil, "cached", false, ReadAuto)
+	defer ReleaseColumnReader(reader)
+	for i := uint32(0); i < 4; i++ {
+		if got := reader.GetValue(i).Int(); got != int64(i+1) {
+			t.Fatalf("cached[%d] = %d, want %d", i, got, i+1)
+		}
+	}
+	if got := computeCalls.Load(); got != 4 {
+		t.Fatalf("lazy read outside preparation computed %d values, want 4 total", got)
 	}
 }
 
@@ -784,5 +794,242 @@ func TestComputeSetDoesNotUpgradeShardReadOwnership(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestFilteredPreparationPreservesMainDeltaAndNullValues(t *testing.T) {
+	defer setupComputeConcurrencyTest(t)()
+	CreateDatabase("compconc", false)
+	tbl, _ := CreateTable("compconc", "filtered_main", Memory, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("val", "INT", nil, nil)
+	tbl.Insert([]string{"id", "val"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewInt(10)}, {scm.NewInt(2), scm.NewInt(20)},
+		{scm.NewInt(3), scm.NewNil()}, {scm.NewInt(4), scm.NewInt(40)},
+	}, nil, scm.NewNil(), false, nil)
+	if result := GetDatabase("compconc").rebuild(true, false, true); len(result.errors) > 0 {
+		t.Fatalf("rebuild: %v", result.errors)
+	}
+	tbl.Insert([]string{"id", "val"}, [][]scm.Scmer{
+		{scm.NewInt(5), scm.NewNil()},
+	}, nil, scm.NewNil(), false, nil)
+	tbl.CreateColumn("cached", "INT", nil, nil)
+	var calls atomic.Int64
+	computor := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		calls.Add(1)
+		return a[0]
+	})
+	filter := func(first int64) scm.Scmer {
+		return scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(a[0].Int() >= first) })
+	}
+	prepare := func(first int64, want int64) {
+		t.Helper()
+		tbl.ComputeColumn(nil, "cached", []string{"val"}, computor, []string{"id"}, filter(first))
+		if got := calls.Load(); got != want {
+			t.Fatalf("preparing id >= %d computed %d values, want %d total", first, got, want)
+		}
+	}
+	prepare(3, 3)
+	prepare(3, 3)
+	prepare(2, 4)
+	proxy := tbl.ActiveShards()[0].columns["cached"].(*StorageComputeProxy)
+	reader := proxy.GetCachedReader(ReadCompressed)
+	defer ReleaseColumnReader(reader)
+	want := []scm.Scmer{scm.NewInt(10), scm.NewInt(20), scm.NewNil(), scm.NewInt(40), scm.NewNil()}
+	for i, value := range want {
+		if got := reader.GetValue(uint32(i)); !scm.Equal(got, value) {
+			t.Fatalf("cached[%d] = %v, want %v", i, got, value)
+		}
+	}
+	if got := calls.Load(); got != 5 {
+		t.Fatalf("lazy outside-domain read computed %d values, want 5 total", got)
+	}
+	proxy.Invalidate(3)
+	prepare(3, 6)
+	proxy.Compress(nil)
+	prepare(1, 6)
+}
+
+func TestComputeColumnWaitsForRequestedPublication(t *testing.T) {
+	for _, filtered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("filtered=%v", filtered), func(t *testing.T) {
+			defer setupComputeConcurrencyTest(t)()
+			CreateDatabase("compconc", false)
+			tbl, _ := CreateTable("compconc", "preparation_completion", Memory, false)
+			tbl.CreateColumn("id", "INT", nil, nil)
+			tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+			RebuildTable(tbl, true, false)
+			tbl.CreateColumn("cached", "INT", nil, nil)
+			var source, calls atomic.Int64
+			source.Store(1)
+			first, retry := make(chan struct{}), make(chan struct{})
+			releaseFirst, releaseRetry := make(chan struct{}), make(chan struct{})
+			unblockFirst := sync.OnceFunc(func() { close(releaseFirst) })
+			unblockRetry := sync.OnceFunc(func() { close(releaseRetry) })
+			defer unblockFirst()
+			defer unblockRetry()
+			computor := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+				value := source.Load()
+				switch calls.Add(1) {
+				case 1:
+					close(first)
+					<-releaseFirst
+				case 2:
+					close(retry)
+					<-releaseRetry
+				}
+				return scm.NewInt(value)
+			})
+			filter := scm.NewNil()
+			if filtered {
+				filter = scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+			}
+			finished := make(chan any, 1)
+			go func() {
+				defer func() { finished <- recover() }()
+				tbl.ComputeColumn(nil, "cached", []string{"id"}, computor, nil, filter)
+			}()
+			select {
+			case <-first:
+			case <-time.After(5 * time.Second):
+				t.Fatal("preparation did not start")
+			}
+			select {
+			case failure := <-finished:
+				t.Fatalf("createcolumn returned before its callback finished: %v", failure)
+			default:
+			}
+			shard := tbl.ActiveShards()[0]
+			shard.mu.RLock()
+			proxy := shard.columns["cached"].(*StorageComputeProxy)
+			shard.mu.RUnlock()
+			source.Store(2)
+			proxy.InvalidateAll()
+			unblockFirst()
+			select {
+			case <-retry:
+			case failure := <-finished:
+				t.Fatalf("createcolumn returned after discarding its requested batch: %v", failure)
+			case <-time.After(5 * time.Second):
+				t.Fatal("invalidated preparation was not retried")
+			}
+			select {
+			case failure := <-finished:
+				t.Fatalf("createcolumn returned before replacement values were ready: %v", failure)
+			default:
+			}
+			unblockRetry()
+			select {
+			case failure := <-finished:
+				if failure != nil {
+					t.Fatalf("preparation failed: %v", failure)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("createcolumn did not complete after publication")
+			}
+			// Inspect storage directly: a lazy read must not hide missing preparation.
+			proxy.mu.RLock()
+			value, published := proxy.delta[0]
+			if proxy.compressed && proxy.main != nil {
+				value, published = proxy.main.GetValue(0), true
+			}
+			proxy.mu.RUnlock()
+			if !published || value.Int() != 2 || calls.Load() != 2 {
+				t.Fatalf("completion did not publish current values: value=%v published=%v calls=%d", value, published, calls.Load())
+			}
+		})
+	}
+}
+
+func TestFilteredPreparationRejectsInvalidatedPublication(t *testing.T) {
+	defer setupComputeConcurrencyTest(t)()
+	CreateDatabase("compconc", false)
+	tbl, _ := CreateTable("compconc", "filtered_publication", Memory, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+	if result := GetDatabase("compconc").rebuild(true, false, true); len(result.errors) > 0 {
+		t.Fatalf("rebuild: %v", result.errors)
+	}
+	tbl.CreateColumn("cached", "INT", nil, nil)
+	var source, calls atomic.Int64
+	source.Store(1)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	computor := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		value := source.Load()
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return scm.NewInt(value)
+	})
+	reject := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(false) })
+	tbl.ComputeColumn(nil, "cached", nil, computor, nil, reject)
+	proxy := tbl.ActiveShards()[0].columns["cached"].(*StorageComputeProxy)
+	finished := make(chan struct{})
+	go func() { proxy.CompressFiltered(nil, nil, scm.NewNil()); close(finished) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("preparation callback did not start")
+	}
+	invalidated := make(chan struct{})
+	go func() { source.Store(2); proxy.InvalidateAll(); close(invalidated) }()
+	select {
+	case <-invalidated:
+	case <-time.After(5 * time.Second):
+		releaseOnce.Do(func() { close(release) })
+		<-finished
+		<-invalidated
+		t.Fatal("preparation callback held the proxy lock needed by invalidation")
+	}
+	releaseOnce.Do(func() { close(release) })
+	<-finished
+	proxy.mu.RLock()
+	published := len(proxy.delta)
+	proxy.mu.RUnlock()
+	if published != 0 {
+		t.Fatal("preparation published a value from an invalidated source revision")
+	}
+	reader := proxy.GetCachedReader(ReadCompressed)
+	defer ReleaseColumnReader(reader)
+	if got := reader.GetValue(0).Int(); got != 2 {
+		t.Fatalf("read after rejected publication = %d, want 2", got)
+	}
+}
+
+func TestFilteredPreparationPanicLeavesValuesLazy(t *testing.T) {
+	defer setupComputeConcurrencyTest(t)()
+	CreateDatabase("compconc", false)
+	tbl, _ := CreateTable("compconc", "filtered_panic", Memory, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("cached", "INT", nil, nil)
+	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+	var fail atomic.Bool
+	fail.Store(true)
+	computor := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		if fail.Load() {
+			panic("preparation failure")
+		}
+		return a[0]
+	})
+	reject := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(false) })
+	tbl.ComputeColumn(nil, "cached", []string{"id"}, computor, nil, reject)
+	proxy := tbl.ActiveShards()[0].columns["cached"].(*StorageComputeProxy)
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		proxy.CompressFiltered(nil, nil, scm.NewNil())
+	}()
+	if failure != "preparation failure" {
+		t.Fatalf("preparation failure = %v", failure)
+	}
+	fail.Store(false)
+	proxy.CompressFiltered(nil, nil, scm.NewNil())
+	reader := proxy.GetCachedReader(ReadCompressed)
+	defer ReleaseColumnReader(reader)
+	if got := reader.GetValue(0).Int(); got != 1 {
+		t.Fatalf("read after failed preparation = %d, want 1", got)
 	}
 }
