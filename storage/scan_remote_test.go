@@ -1261,3 +1261,24 @@ func TestRemoteScanRoutesForwardedUUIDWithoutHistoricalPayload(t *testing.T) {
 		t.Fatalf("forwarded task lost native contents or request identity: %+v, %v", response, err)
 	}
 }
+
+func TestRemoteScanResolvesNativeShardBeforeFirstPayloadPublication(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_remote_native_publication", 4)
+	RebuildTable(tbl, true, false)
+	r := replicaRecoveryFixture()
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	current := tbl.ActiveShards()[0]
+	cell := r.declareShard(current, r.id, true)
+	cell.current.Store(nil)
+	peer, _, _ := setupRemoteScanConnection(t)
+	task := makeRemoteScanTask(t, remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: *cell.resource.Load()})
+	var response remoteScanResult
+	if err := peer.scanService.control(context.Background(), peer, "scan.execute", task, &response, true); err != nil {
+		t.Fatal(err)
+	}
+	value, err := schemeValue(response.Value).reconstruct()
+	if err != nil || value.Int() != 9 || response.OutCount != 3 {
+		t.Fatalf("native topology lost its unpublished payload binding: %+v, %v", response, err)
+	}
+}

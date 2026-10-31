@@ -2171,6 +2171,19 @@ def run_cluster_placement(args, artifacts, journal):
         expect(nodes[2].client.number("SELECT SUM(n) AS total FROM contact_route_probe", "total"), 18,
                "reader acquired the contact's original ownership hint")
         nodes[1].client.sql("UPDATE contact_route_probe SET n=n+1 WHERE id=1")
+        # DML can now delegate to the warm owner. Explicitly cross the native
+        # DDL write boundary to move this table's M rights to the survivor;
+        # re-declaring the existing column leaves its logical shape unchanged.
+        nodes[1].client.scm(
+            f'(createcolumn (table "{DATABASE}" false "contact_route_probe" false) "n" "INT" (list) (list))')
+        handover = json.loads(nodes[1].client.scm("(cluster_status true)"))
+        if isinstance(handover, str):
+            handover = json.loads(handover)
+        survivor = handover["state"]["self"]["id"]
+        expect(any(record.get("resource", {}).get("table") == "contact_route_probe"
+                   and record.get("owner") == survivor and record.get("state") in ("M", "O")
+                   for record in handover["resources"]["records"].values()), True,
+               "contact-route fixture transferred data ownership to the survivor")
         # Move schema ownership away from the contact before it is killed. The
         # contact's already-granted S rights remain usable by the survivors.
         for node in nodes:

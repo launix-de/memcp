@@ -1032,3 +1032,17 @@ func TestClusterCacheTryReadLeavesExistingAcquisitionAlone(t *testing.T) {
 		t.Fatal("cache admission cancelled or duplicated the existing acquisition")
 	}
 }
+
+func TestClusterCacheTryReadUsesGrantedBackendWithoutOwnerLookup(t *testing.T) {
+	cluster := &nodeCluster{}
+	cluster.initializeManager()
+	resource := mosiResource{Database: "cache_backend_read", Table: "items", Shard: uuid.NewString()}
+	cell := cluster.manager.resourceCell(resource)
+	cell.ownstate.Initialize(mosi.S)
+	cell.ownstate.BackendOnly()
+	// There is no network, roster or contact peer. Eviction retained a valid
+	// S grant; authorizing another read must consume that existing proof.
+	if !cluster.tryRead(context.Background(), resource) || cell.ownstate.Phase() != mosi.S {
+		t.Fatal("an existing backend read permission required owner discovery")
+	}
+}

@@ -7233,15 +7233,21 @@ ever-larger subtrees. */
 		(list (quote get_column) grouptbl false (aggregate_col_name_using input (count_distinct_descriptor agg_expr)) false)
 		separator)))
 
-(define direct_group_concat_distinct_read_expr (lambda (agg_expr separator)
+/* Query-local aggregate tuples use the same alias-normalized recipe identity
+as shared columns. The tuple has one logical input role; its SQL alias must not
+rename equivalent aggregate values in the two cache-source alternatives. */
+(define direct_aggregate_col_name (lambda (alias ag)
+	(aggregate_col_name_using (list alias nil nil false nil) ag)))
+
+(define direct_group_concat_distinct_read_expr (lambda (alias agg_expr separator)
 	(group_concat_distinct_value_expr
-		(list (quote get_assoc) (quote rowassoc) (aggregate_col_name (count_distinct_descriptor agg_expr)))
+		(list (quote get_assoc) (quote rowassoc) (direct_aggregate_col_name alias (count_distinct_descriptor agg_expr)))
 		separator)))
 
-(define direct_count_distinct_read_expr (lambda (agg_expr)
+(define direct_count_distinct_read_expr (lambda (alias agg_expr)
 	(begin
 		(define read_expr (list (quote get_assoc) (quote rowassoc)
-			(aggregate_col_name (count_distinct_descriptor agg_expr))))
+			(direct_aggregate_col_name alias (count_distinct_descriptor agg_expr))))
 		(list (quote if)
 			(list (quote list?) read_expr)
 			(list (quote count) read_expr)
@@ -7698,9 +7704,9 @@ every group row and its canonical identity stays independent of bound values. */
 					aggregate_value_expr))
 				(list (physical_query_tx_symbol)))))))))
 
-(define direct_group_aggregate_read_expr (lambda (ag)
+(define direct_group_aggregate_read_expr (lambda (alias ag)
 	(begin
-		(define read_expr (list (quote get_assoc) (quote rowassoc) (aggregate_col_name ag)))
+		(define read_expr (list (quote get_assoc) (quote rowassoc) (direct_aggregate_col_name alias ag)))
 		(if (aggregate_count_like? ag)
 			(list (quote coalesceNil) read_expr 0)
 			read_expr))))
@@ -7720,21 +7726,21 @@ every group row and its canonical identity stays independent of bound values. */
 			(list (quote get_assoc) (quote rowassoc) (nth key_names key_idx))
 			(match expr
 				((symbol count_distinct) agg_expr)
-				(direct_count_distinct_read_expr agg_expr)
+				(direct_count_distinct_read_expr alias agg_expr)
 				((quote count_distinct) agg_expr)
-				(direct_count_distinct_read_expr agg_expr)
+				(direct_count_distinct_read_expr alias agg_expr)
 				((symbol group_concat_distinct) agg_expr separator)
-				(direct_group_concat_distinct_read_expr agg_expr separator)
+				(direct_group_concat_distinct_read_expr alias agg_expr separator)
 				((quote group_concat_distinct) agg_expr separator)
-				(direct_group_concat_distinct_read_expr agg_expr separator)
+				(direct_group_concat_distinct_read_expr alias agg_expr separator)
 				((symbol aggregate) agg_expr agg_reduce agg_neutral)
-				(direct_group_aggregate_read_expr (list agg_expr agg_reduce agg_neutral))
+				(direct_group_aggregate_read_expr alias (list agg_expr agg_reduce agg_neutral))
 				((quote aggregate) agg_expr agg_reduce agg_neutral)
-				(direct_group_aggregate_read_expr (list agg_expr agg_reduce agg_neutral))
+				(direct_group_aggregate_read_expr alias (list agg_expr agg_reduce agg_neutral))
 				((symbol aggregate) agg_expr agg_reduce agg_neutral agg_finalize)
-				(direct_group_aggregate_read_expr (list agg_expr agg_reduce agg_neutral agg_finalize))
+				(direct_group_aggregate_read_expr alias (list agg_expr agg_reduce agg_neutral agg_finalize))
 				((quote aggregate) agg_expr agg_reduce agg_neutral agg_finalize)
-				(direct_group_aggregate_read_expr (list agg_expr agg_reduce agg_neutral agg_finalize))
+				(direct_group_aggregate_read_expr alias (list agg_expr agg_reduce agg_neutral agg_finalize))
 				((symbol get_column) _tblvar _ _col _)
 				(if (equal?? (resolve_column_alias _tblvar alias) alias)
 					(neumann_fail "build_queryplan" (concat "non-aggregate output must be a GROUP BY key: " (serialize expr)))
@@ -7801,7 +7807,7 @@ otherwise unnecessary one-entry associative group. */
 			(list (car key_names) 1)
 			(merge (map (produceN (count ags)) (lambda (i) (begin
 				(define ag (nth ags i))
-				(list (aggregate_col_name ag)
+				(list (direct_aggregate_col_name alias ag)
 					(aggregate_finalize_expr ag (if (equal? (count ags) 1)
 						aggregate_state (list (quote nth) aggregate_state i))))))))))))
 		(define having_expr (replace_direct_group_expr alias keys key_names ags
@@ -8051,12 +8057,12 @@ query transaction; DML-trigger replacement plans pass it through explicitly. */
 				(list (quote lambda) (list membership_var) plan)
 				membership_expr)))))
 
-(define direct_group_assoc_from_key_payload_expr (lambda (key_names ags)
+(define direct_group_assoc_from_key_payload_expr (lambda (alias key_names ags)
 	(begin
 		(define key_pairs (merge (map (produceN (count key_names)) (lambda (i)
 			(list (nth key_names i) (list (quote nth) (quote __group_key) i))))))
 		(define agg_pairs (merge (map (produceN (count ags)) (lambda (i)
-			(list (aggregate_col_name (nth ags i)) (list (quote nth) (quote __group_payload) i))))))
+			(list (direct_aggregate_col_name alias (nth ags i)) (list (quote nth) (quote __group_payload) i))))))
 		(runtime_cons_list_expr (merge (list key_pairs agg_pairs))))))
 
 (define lower_direct_base_group_stage (lambda (stage fields order_items offset_value limit_value)
@@ -8094,7 +8100,7 @@ query transaction; DML-trigger replacement plans pass it through explicitly. */
 			(source_table_expr src)
 			membership_var))
 		(define grouped_scan (build_base_group_scan_assoc_plan schema tbl alias table_expr keys effective_condition ags))
-		(define rowassoc_expr (direct_group_assoc_from_key_payload_expr key_names ags))
+		(define rowassoc_expr (direct_group_assoc_from_key_payload_expr alias key_names ags))
 		(define having_expr (replace_direct_group_expr alias keys key_names ags (coalesceNil (gs_having stage) true)))
 		(define emit_expr (list (quote resultrow)
 			(direct_group_result_assoc_expr alias keys key_names ags fields)))
@@ -8143,7 +8149,7 @@ join reducer aggregate shard-local states and merge them once at the root. */
 			(neumann_fail "build_queryplan" "direct joined GROUP BY requires unordered output")
 			true)
 		(define grouped_scan (build_query_grouped_assoc_plan input keys key_names ags true))
-		(define rowassoc_expr (direct_group_assoc_from_key_payload_expr key_names ags))
+		(define rowassoc_expr (direct_group_assoc_from_key_payload_expr alias key_names ags))
 		(define having_expr (replace_direct_group_expr alias keys key_names ags
 			(coalesceNil (gs_having stage) true)))
 		(define emit_expr (list (quote resultrow)
@@ -8184,7 +8190,7 @@ slot per syntactically repeated COUNT. */
 		(define rowassoc_expr (runtime_cons_list_expr (merge (list
 			(list (car key_names) 1)
 			(merge (map ags (lambda (ag)
-				(list (aggregate_col_name ag) aggregate_state))))))))
+				(list (direct_aggregate_col_name alias ag) aggregate_state))))))))
 		(define emit_expr (list (quote resultrow)
 			(direct_group_result_assoc_expr alias keys key_names ags fields)))
 		(define offset_expr (coalesceNil offset_value 0))
