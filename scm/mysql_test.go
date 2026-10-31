@@ -206,9 +206,13 @@ func TestMySQLConnectionCloseReleasesSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := driver.NewListenerFromNetListener(log, listener, probe)
-	// The driver's public accept loop sets GOMAXPROCS; restore the caller's
-	// setting once the listener and test connections have drained.
-	procs := runtime.GOMAXPROCS(0)
+	// Protocol listeners must preserve the embedding application's scheduler.
+	// Choose a limit different from NumCPU so the old driver bug is visible.
+	configuredProcs := 1
+	if runtime.NumCPU() == configuredProcs {
+		configuredProcs = 2
+	}
+	procs := runtime.GOMAXPROCS(configuredProcs)
 	stopped := make(chan struct{})
 	go func() { defer close(stopped); server.Accept() }()
 	t.Cleanup(func() { server.Close(); <-stopped; runtime.GOMAXPROCS(procs) })
@@ -242,6 +246,9 @@ func TestMySQLConnectionCloseReleasesSession(t *testing.T) {
 				t.Cleanup(session.Close)
 			case <-time.After(3 * time.Second):
 				t.Fatal("MySQL session was not registered")
+			}
+			if got := runtime.GOMAXPROCS(0); got != configuredProcs {
+				t.Fatalf("MySQL listener changed GOMAXPROCS to %d; want %d", got, configuredProcs)
 			}
 			var state *SessionState
 			unlocked := make(chan struct{}, 1)
