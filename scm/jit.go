@@ -4878,7 +4878,9 @@ func (p *jitPool) Free(a *jitArena) {
 		a.unmapped = true
 		for i, candidate := range p.arenas {
 			if candidate == a {
-				p.arenas = append(p.arenas[:i], p.arenas[i+1:]...)
+				copy(p.arenas[i:], p.arenas[i+1:])
+				p.arenas[len(p.arenas)-1] = nil
+				p.arenas = p.arenas[:len(p.arenas)-1]
 				break
 			}
 		}
@@ -7121,6 +7123,7 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena, reservation: reservation, compileScope: scope, lambdaTemplates: &lambdaTemplates}
 			codeLen, roots, dependencies, overflow, hiddenArgs, needsStableArgs, coverage := jitCompileProcToExec(proc, buf, recursiveLambdas)
 			if codeLen > 0 {
+				globalJITPool.Trim(arena, reservation, codeLen)
 				code := (*[1 << 30]byte)(ptr)[:codeLen:codeLen]
 				if JITLog {
 					fmt.Printf("%X\n", code)
