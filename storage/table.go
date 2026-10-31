@@ -125,17 +125,19 @@ type column struct {
 	Default                  scm.Scmer
 	DefaultExpression        string
 	// Optional declaration label; owned and published with the existing default.
-	DefaultName   string                         `json:"default_name,omitempty"`
-	InitialValue  scm.Scmer                      `json:"initial_value,omitempty"`
-	InitialValues map[string]columnInitialExtent `json:"initial_values,omitempty"`
-	OnUpdate      scm.Scmer
-	AllowNull     bool
-	IsTemp        bool // columns with IsTemp may be removed without consequences
-	Collation     string
-	Comment       string
-	sanitizer     func(scm.Scmer) scm.Scmer
-	lastAccessed  int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
-	cacheUsers    int64 // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
+	DefaultName       string                         `json:"default_name,omitempty"`
+	InitialValue      scm.Scmer                      `json:"initial_value,omitempty"`
+	InitialValues     map[string]columnInitialExtent `json:"initial_values,omitempty"`
+	OnUpdate          scm.Scmer
+	AllowNull         bool
+	IsTemp            bool // cache-owned storage; computed recipes remain table metadata
+	cacheOwner        *table
+	cachePayloadEmpty atomic.Bool
+	Collation         string
+	Comment           string
+	sanitizer         func(scm.Scmer) scm.Scmer
+	lastAccessed      int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
+	cacheUsers        int64 // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
 
 	// Statistics — updated at rebuild time, O(1) access for query planning.
 	// DistinctEstimate is the sum of per-shard DistinctCount() (upper bound).
@@ -3120,61 +3122,83 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 }
 
 func (t *table) registerTempColumn(cp *column) {
-	// register temp column with CacheManager AFTER releasing schemalock
-	// to avoid deadlock: AddItem → run() → evict → cleanup → TryLock(schemalock)
-	tbl := t
-	colName := cp.Name
-	GlobalCache.AddItem(cp, 0, TypeTempColumn, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
-		// We're inside the CacheManager goroutine. MUST NOT call GlobalCache.Remove.
-		// Use TryLock to avoid blocking the CacheManager if schema is locked.
-		if !tbl.schema.schemalock.TryLock() {
-			return false // busy, retry later
+	// Only payload is cache-owned for computed columns. The recipe belongs to
+	// the table until DROP; pressure must not change its logical schema.
+	cp.cacheOwner = t
+	GlobalCache.AddItem(cp, 0, TypeTempColumn, nil, tempColumnLastUsed, nil)
+}
+
+func (col *column) evictionOffer(currentSize int64) evictionOffer {
+	if col.cachePayloadEmpty.Load() {
+		return evictionOffer{}
+	}
+	return evictionOffer{partialBytes: currentSize, fullBytes: currentSize}
+}
+func (col *column) evict(_ evictionMode, currentSize int64, freedByType *[numEvictableTypes]int64) evictionResult {
+	if col.cachePayloadEmpty.Load() {
+		return evictionResult{}
+	}
+	tbl := col.cacheOwner
+	if !tbl.schema.schemalock.TryLock() {
+		return evictionResult{}
+	}
+	defer tbl.schema.schemalock.Unlock()
+	for i, current := range tbl.Columns {
+		if current != col {
+			continue
 		}
-		for i, col := range tbl.Columns {
-			if col.Name == colName {
-				// A trigger that already snapshotted this column pins it without a
-				// mutex. Retry eviction instead of deleting its target underneath it.
-				if !col.beginCacheEviction() {
-					tbl.schema.schemalock.Unlock()
-					return false
+		if !col.beginCacheEviction() {
+			return evictionResult{}
+		}
+		computed := isRuntimeComputedColumn(col) || !col.OrcMapReduceFn.IsNil()
+		retained := int64(0)
+		for _, shard := range tbl.ActiveShards() {
+			if !shard.mu.TryLock() {
+				atomic.StoreInt64(&col.cacheUsers, 0)
+				return evictionResult{}
+			}
+			storage := shard.columns[col.Name]
+			ok := evictColumnCaches(storage, freedByType)
+			if ok && computed {
+				// Detach the cached value object. Existing readers retain their
+				// proxy and its payload through ordinary Go references.
+				proxy := &StorageComputeProxy{delta: make(map[uint32]scm.Scmer),
+					computor: col.Computor, inputCols: col.ComputorInputCols,
+					shard: shard, colName: col.Name, count: shard.main_count,
+					isOrdered: !col.OrcMapReduceFn.IsNil() || len(col.OrcSortCols) > 0}
+				shard.columns[col.Name] = proxy
+				bytes := int64(ownedColumnMemory(proxy))
+				if shard.tempColumnBytes != nil {
+					shard.tempColumnBytes[col] = bytes
 				}
-				for _, shard := range tbl.ActiveShards() {
-					if !shard.mu.TryLock() {
-						atomic.StoreInt64(&col.cacheUsers, 0)
-						tbl.schema.schemalock.Unlock()
-						return false
-					}
-					ok := evictColumnCaches(shard.columns[colName], freedByType)
-					shard.mu.Unlock()
-					if !ok {
-						atomic.StoreInt64(&col.cacheUsers, 0)
-						tbl.schema.schemalock.Unlock()
-						return false
-					}
-				}
-				tbl.removeComputeTriggers(colName)
-				tbl.removeORCDependencyTriggers(colName)
-				tbl.Columns = append(tbl.Columns[:i], tbl.Columns[i+1:]...)
-				for _, s := range tbl.Shards {
-					s.mu.Lock()
-					delete(s.columns, colName)
-					delete(s.tempColumnBytes, col)
-					s.mu.Unlock()
-				}
-				for _, s := range tbl.PShards {
-					s.mu.Lock()
-					delete(s.columns, colName)
-					delete(s.tempColumnBytes, col)
-					s.mu.Unlock()
-				}
-				tbl.invalidateShowColumnsSnapshot()
-				tbl.schema.schemalock.Unlock()
-				return true
+				retained += bytes
+			}
+			shard.mu.Unlock()
+			if !ok {
+				atomic.StoreInt64(&col.cacheUsers, 0)
+				return evictionResult{}
 			}
 		}
-		tbl.schema.schemalock.Unlock()
-		return true
-	}, tempColumnLastUsed, nil)
+		if computed {
+			atomic.StoreInt64(&col.cacheUsers, 0)
+			col.cachePayloadEmpty.Store(true)
+			return evictionResult{freedBytes: max(int64(0), currentSize-retained), success: true}
+		}
+		// Non-computed temporary columns have no recipe and retain their
+		// existing whole-column lifecycle.
+		tbl.removeComputeTriggers(col.Name)
+		tbl.removeORCDependencyTriggers(col.Name)
+		tbl.Columns = append(tbl.Columns[:i], tbl.Columns[i+1:]...)
+		for _, shard := range tbl.ActiveShards() {
+			shard.mu.Lock()
+			delete(shard.columns, col.Name)
+			delete(shard.tempColumnBytes, col)
+			shard.mu.Unlock()
+		}
+		tbl.invalidateShowColumnsSnapshot()
+		return evictionResult{freedBytes: currentSize, fullyEvicted: true, success: true}
+	}
+	return evictionResult{freedBytes: currentSize, fullyEvicted: true, success: true}
 }
 
 func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []int, extrainfo []scm.Scmer, queryTx *TxContext) bool {

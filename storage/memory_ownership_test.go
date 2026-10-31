@@ -297,7 +297,7 @@ func TestShardFullOfferAndReleaseCountChildrenExactlyOnce(t *testing.T) {
 
 func TestChildCacheCleanupRetainsResidentTempColumnAccounting(t *testing.T) {
 	defer setupGCTest(t)()
-	col := &column{}
+	col := &column{cacheOwner: &table{schema: &database{}}}
 	shard := &storageShard{
 		columns:         make(map[string]ColumnStorage),
 		tempColumnBytes: map[*column]int64{col: 512},
