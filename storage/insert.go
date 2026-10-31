@@ -188,13 +188,6 @@ func reserveInsertRows(shard *storageShard, rows int64, size uint, overflow bool
 	// Routing reserves a physical writer before UNIQUE preflight acquires its
 	// write permission. Retain that generation's payload through the whole
 	// reservation, using the same native lease as other prepared operators.
-	shard.retainCacheRead()
-	reserved := false
-	defer func() {
-		if !reserved {
-			shard.releaseCacheRead()
-		}
-	}()
 	for {
 		pending := shard.pendingInsertRows.Load()
 		if expected >= 0 && pending != expected {
@@ -205,7 +198,10 @@ func reserveInsertRows(shard *storageShard, rows int64, size uint, overflow bool
 			return nil, false
 		}
 		if shard.pendingInsertRows.CompareAndSwap(pending, pending+rows) {
-			reserved = true
+			// Publish the routing reservation before waiting for the payload
+			// lease: other INSERTs can choose another lane while this writer
+			// waits for the current shard operation to release its row lock.
+			shard.retainCacheRead()
 			return func() {
 				shard.pendingInsertRows.Add(-rows)
 				shard.releaseCacheRead()
