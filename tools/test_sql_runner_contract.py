@@ -665,6 +665,18 @@ class HookDiagnosticsContractTest(unittest.TestCase):
 
 
 class UnicodeSCMTransportContractTest(unittest.TestCase):
+    def test_scm_case_uses_selected_fixture_database(self):
+        runner = SQLTestRunner("http://localhost:19991")
+        response = SimpleNamespace(status_code=200, text="true", json=lambda: True)
+        with mock.patch("run_sql_tests.requests.post", return_value=response) as post, \
+                redirect_stdout(io.StringIO()):
+            self.assertTrue(runner.run_test_case({
+                "scm": '(equal? "{database}" "memcp-tests")',
+                "expect": {"result": True},
+            }, "memcp-tests"))
+        self.assertEqual(post.call_args.kwargs["data"],
+                         b'(equal? "memcp-tests" "memcp-tests")')
+
     def test_all_scm_request_paths_send_complete_utf8_bodies(self):
         code = '(equal? "Grüße 🐘" "Grüße 🐘")'
         wanted = code.encode("utf-8")

@@ -166,12 +166,10 @@ func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []s
 			//   signature changes
 			// - shard-level ComputeColumn still runs afterwards so dirty proxies can
 			//   repair themselves even on the DDL no-op path
-			metadataChanged := !computeColumnSignatureEqual(c, inputCols, computor, filterCols, filter) || !slicesEqual(c.ComputorDependencies, dependencies)
+			metadataChanged := !computeColumnSignatureEqual(c, inputCols, computor) || !slicesEqual(c.ComputorDependencies, dependencies)
 			if metadataChanged {
 				t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
 				t.Columns[i].ComputorInputCols = inputCols
-				t.Columns[i].ComputorFilterCols = filterCols
-				t.Columns[i].ComputorFilter = filter
 				t.Columns[i].ComputorDependencies = append([]string(nil), dependencies...)
 				refs := extractScanJoinInfo(computor)
 				for i := 0; i+1 < len(dependencies); i += 2 {
@@ -297,46 +295,49 @@ func (s *storageShard) ComputeColumn(tx *TxContext, name string, inputCols []str
 	//   subset for that filter, but it must not silently swap to a different
 	//   throwaway computation path.
 	s.mu.Lock()
-	existing := s.columns[name]
-	if proxy, ok := existing.(*StorageComputeProxy); ok {
-		s.mu.Unlock()
-		// skip recompute if proxy is still valid (no invalidation since last compute)
-		if !proxy.needsUnfilteredPreparation() {
-			if filter.IsNil() {
-				return // fully prepared, nothing to do
-			}
-			// filter given: ensure filtered rows are valid (CompressFiltered is idempotent)
-			proxy.CompressFiltered(nil, filterCols, filter)
-			return
-		}
-		if !filter.IsNil() {
-			proxy.CompressFiltered(nil, filterCols, filter)
-		} else {
-			proxy.Compress(nil)
-		}
-		return
-	}
-
 	// Publish the definition before preparing values. Readers may immediately use
 	// the proxy: prewarmed rows hit its cache, while every other row is computed
 	// pointwise by GetValue and then cached.
-	proxy := &StorageComputeProxy{
-		delta:     make(map[uint32]scm.Scmer),
-		computor:  computor,
-		inputCols: inputCols,
-		shard:     s,
-		colName:   name,
-		count:     s.main_count,
+	proxy, existing := s.columns[name].(*StorageComputeProxy)
+	if !existing {
+		proxy = &StorageComputeProxy{
+			delta:     make(map[uint32]scm.Scmer),
+			computor:  computor,
+			inputCols: inputCols,
+			shard:     s,
+			colName:   name,
+			count:     s.main_count,
+		}
+		s.columns[name] = proxy
 	}
-	s.columns[name] = proxy
 	s.mu.Unlock()
 
 	// pre-free memory before allocating the compute result array
-	GlobalCache.CheckPressure(int64(s.main_count) * 16)
-	if !filter.IsNil() {
-		proxy.CompressFiltered(nil, filterCols, filter)
-	} else {
-		proxy.Compress(nil) // eagerly compute + compress all values (same behavior as before)
+	if !existing {
+		GlobalCache.CheckPressure(int64(s.main_count) * 16)
+	}
+	// Definition publication is not completion of the preparation order. A
+	// source change may reject a computed batch; retry at this owning boundary
+	// until the requested values have been published, or the request fails.
+	ss, seq := tx.QuerySessionState()
+	for {
+		if ss != nil {
+			if ctx := ss.QueryContext(seq); ctx != nil && ctx.Err() != nil {
+				panic(ctx.Err())
+			}
+			if ss.IsKilledSeq(seq) {
+				panic("query killed")
+			}
+		}
+		proxy.synchronizeVisibilityCache()
+		if !proxy.needsUnfilteredPreparation() {
+			return // every value is valid, regardless of the requested subset
+		}
+		if filter.IsNil() {
+			proxy.Compress(tx)
+		} else if proxy.CompressFiltered(tx, filterCols, filter) {
+			return
+		}
 	}
 }
 
@@ -2466,11 +2467,9 @@ func slicesEqual(a, b []string) bool {
 	return true
 }
 
-func computeColumnSignatureEqual(c *column, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) bool {
-	return slicesEqual(c.ComputorInputCols, inputCols) &&
-		slicesEqual(c.ComputorFilterCols, filterCols) &&
-		scm.Equal(c.Computor, computor) &&
-		scm.Equal(c.ComputorFilter, filter)
+// Request preparation hints never change the canonical value recipe.
+func computeColumnSignatureEqual(c *column, inputCols []string, computor scm.Scmer) bool {
+	return slicesEqual(c.ComputorInputCols, inputCols) && scm.Equal(c.Computor, computor)
 }
 
 func boolSlicesEqual(a, b []bool) bool {

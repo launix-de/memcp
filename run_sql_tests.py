@@ -1616,6 +1616,8 @@ class SQLTestRunner:
                 test_case, self.current_spec_file or "",
             )
             scm_code = self._table_abi_sources.get(scm_code, scm_code)
+            if scm_code:
+                scm_code = scm_code.replace("{database}", database)
         except (OSError, ValueError, yaml.YAMLError) as exc:
             return self._record_fail(
                 name, str(exc), None, None, None, is_noncritical,

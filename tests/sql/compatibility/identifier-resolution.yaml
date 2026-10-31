@@ -12,6 +12,28 @@ setup:
   - sql: CREATE TABLE NamePolicyMixed (id INT PRIMARY KEY)
   - sql: INSERT INTO NamePolicyMixed VALUES (1)
 test_cases:
+  - name: Reserved identifier alternatives retain case-insensitive rejection
+    scm: |
+      (reduce '("NOT" "IN" "BETWEEN" "AS" "ON" "WHERE" "GROUP" "BY" "VALUES"
+        "FROM" "LEFT" "RIGHT" "INNER" "OUTER" "CROSS" "JOIN" "SELECT" "UNION"
+        "ALL" "INSERT" "SET" "ORDER" "LIMIT" "DELIMITER" "TRIM" "LTRIM" "RTRIM"
+        "REGEXP" "RLIKE" "DIV" "sElEcT" "from")
+        (lambda (valid word)
+          (and valid (try (lambda () (begin (sql_identifier_unquoted word) false))
+            (lambda (err) true)))) true)
+    expect: {result: true}
+  - name: Reserved word prefixes remain ordinary identifiers
+    scm: |
+      (map '("notebook" "inner_value" "fromage" "in2" "grouping" "select_value")
+        (lambda (word) (sql_identifier_unquoted word)))
+    expect:
+      result: [notebook, inner_value, fromage, in2, grouping, select_value]
+  - name: Quoted reserved aliases retain their values and spelling
+    sql: SELECT 1 AS `select`, 2 AS `from`, 3 AS `GROUP`
+    expect: {rows: 1, data: [{select: 1, from: 2, GROUP: 3}]}
+  - name: Unquoted reserved aliases remain invalid
+    sql: SELECT 1 AS SeLeCt
+    expect: {error: true}
   - name: Exact database policy rejects another spelling
     scm: (nil? (table "MEMCP-TESTS" false "NamePolicyMixed" false))
     expect: {result: true}
