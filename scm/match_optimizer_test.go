@@ -139,3 +139,55 @@ func BenchmarkRecursiveMatchWalker(b *testing.B) {
 		}
 	}
 }
+
+func TestMatchWildcardDoesNotBind(t *testing.T) {
+	for _, tc := range []struct {
+		pattern string
+		value   Scmer
+	}{
+		{"_", NewInt(7)},
+		{"(list _ _)", NewSlice([]Scmer{NewInt(7), NewInt(9)})},
+		{"(cons _ _)", NewSlice([]Scmer{NewInt(7), NewInt(9)})},
+		{"(number? _)", NewInt(7)},
+		{"(string? _)", NewString("value")},
+		{"(list? _)", NewSlice(nil)},
+		{`(concat "prefix" _)`, NewString("prefixvalue")},
+		{`(regex "(.*)" _ _)`, NewString("value")},
+	} {
+		t.Run(tc.pattern, func(t *testing.T) {
+			env := &Env{Outer: &Globalenv}
+			if !match(tc.value, Read("wildcard pattern", tc.pattern), env, false) {
+				t.Fatal("wildcard rejected a matching value")
+			}
+			if env.Vars != nil {
+				t.Fatalf("wildcard created named bindings: %v", env.Vars)
+			}
+		})
+	}
+	env := &Env{Outer: &Globalenv}
+	if !match(NewInt(7), NewSymbol("_value"), env, false) || env.Vars["_value"].Int() != 7 {
+		t.Fatal("underscore-prefixed named capture stopped binding")
+	}
+}
+
+func TestMatchWildcardPreservesOuterBinding(t *testing.T) {
+	for _, optimized := range []bool{false, true} {
+		env := &Env{Vars: Vars{"_": NewInt(99)}, Outer: &Globalenv}
+		expr := Read("wildcard scope", `(match (list 7 9) (list _ _) _)`)
+		if optimized {
+			expr = Optimize(expr, env, nil)
+		}
+		if got := Eval(expr, env); got.Int() != 99 {
+			t.Fatalf("optimized=%v: wildcard shadowed its outer scope with %s", optimized, String(got))
+		}
+	}
+}
+
+func TestMatchConcatWildcardIgnoresOuterBinding(t *testing.T) {
+	outer := &Env{Vars: Vars{"_": NewString("outer")}, Outer: &Globalenv}
+	env := &Env{Outer: outer}
+	pattern := Read("concat wildcard scope", `(concat "prefix" _)`)
+	if !match(NewString("prefixvalue"), pattern, env, false) || env.Vars != nil {
+		t.Fatal("concat wildcard resolved or rebound its outer namesake")
+	}
+}

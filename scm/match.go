@@ -25,6 +25,10 @@ import (
 )
 
 func bindMatchVar(en *Env, sym Symbol, value Scmer) {
+	// A wildcard is never a named capture, including in concat patterns.
+	if sym == "_" {
+		return
+	}
 	if en.Vars == nil {
 		en.Vars = make(Vars)
 	}
@@ -91,6 +95,9 @@ func valueFromPattern(pattern Scmer, en *Env) Scmer {
 	}
 	if pattern.IsSymbol() {
 		sym := Symbol(pattern.String())
+		if sym == "_" {
+			return pattern
+		}
 		en = en.FindRead(sym)
 		if value, ok := en.Vars[sym]; ok {
 			return value
@@ -140,6 +147,8 @@ func match(val Scmer, pattern Scmer, en *Env, mutable bool) bool {
 		return Equal(val, pattern)
 	case tagSymbol:
 		switch pattern.String() {
+		case "_":
+			return true
 		case "nil":
 			return val.IsNil()
 		case "true":

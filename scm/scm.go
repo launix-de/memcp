@@ -212,7 +212,8 @@ restart:
 				}
 				return NewNil()
 			case specialFormBegin:
-				beginEnv := &Env{Vars: make(Vars), VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: false}
+				// define allocates named bindings on demand; numbered scopes need none.
+				beginEnv := &Env{VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: false}
 				for _, form := range operands[:len(operands)-1] {
 					Eval(form, beginEnv)
 				}
@@ -232,7 +233,7 @@ restart:
 					varsNumbered = make([]Scmer, len(en.VarsNumbered)+reserve)
 					copy(varsNumbered, en.VarsNumbered)
 				}
-				beginEnv := &Env{Vars: make(Vars), VarsNumbered: varsNumbered, Outer: en, Nodefine: false}
+				beginEnv := &Env{VarsNumbered: varsNumbered, Outer: en, Nodefine: false}
 				for _, form := range operands[1 : len(operands)-1] {
 					Eval(form, beginEnv)
 				}
