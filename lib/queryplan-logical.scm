@@ -901,9 +901,9 @@ parent stages are merged into a multi-output stage. */
 
 (define normalize_query_ast (lambda (query)
 	(match query
-		((symbol query-block) schema sources fields where group having order limit offset hidden stages facts)
+		((symbol query-block) _ _ _ _ _ _ _ _ _ _ _ _)
 		query
-		((symbol union-block) mode branches order limit offset facts)
+		((symbol union-block) _ _ _ _ _ _)
 		query
 		((symbol union_all) branches order limit offset)
 		(make_union_block (quote all) branches order limit offset '())
@@ -5907,7 +5907,7 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 
 (define binding_collect_string_catalog (lambda (value catalog)
 	(if (string? value)
-		(set_assoc catalog value true)
+		(if (has_assoc? catalog value) catalog (set_assoc catalog value true))
 		(match value
 			(cons head tail) (reduce tail (lambda (current item)
 				(binding_collect_string_catalog item current))
@@ -6025,9 +6025,9 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 			siblings. Ordinary derived relations retain their closed SQL scope. */
 			(define scopes (if (source_lateral? src) (cons visible_entries outer_scopes) '()))
 			(define bound_relation (if (or (query_block? relation) (union_block? relation))
-					(if (and (query_block? relation) (not (derived_block_needs_operator? relation)))
-						(bind_query_block_names relation scopes (binding_path path "derived" index) all_strings)
-						(bind_query_names_at relation scopes (binding_path path "derived" index) all_strings))
+				(if (and (query_block? relation) (not (derived_block_needs_operator? relation)))
+					(bind_query_block_names relation scopes (binding_path path "derived" index) all_strings)
+					(bind_query_names_at relation scopes (binding_path path "derived" index) all_strings))
 				relation))
 			/* A closed derived producer can publish its contract now, before
 			parent expression compilers repeatedly request the same column types.
